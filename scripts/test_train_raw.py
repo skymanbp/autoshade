@@ -46,6 +46,20 @@ class MeanSeekingLoss(unittest.TestCase):
         want = float(((2e-3) ** 2 / (6e-4 * level + 4e-6 + 0.375 * 6e-4 ** 2)).mean())
         self.assertAlmostEqual(one / want, 1.0, delta=0.01)
 
+    def test_the_clamp_never_touches_a_target(self):
+        """`loss_mean_seeking` floors z at `Z_FLOOR` before inverting the transform. A target
+        could only fall below it if `gat` could, and `gat` is smallest at x = 0."""
+        floor_at = lambda r: float(2.0 * np.sqrt(0.375 + r))
+        # `physical_model` admits b = 0 — the hardest case the measured half can produce.
+        self.assertAlmostEqual(floor_at(0.0), 1.2247, places=4)
+        # and the synthetic half never draws b/a^2 below 0.3 (`noise_synth.sample_params`).
+        self.assertAlmostEqual(floor_at(0.3), 1.6432, places=4)
+        # read off the transform the loss actually inverts, not retyped from it
+        for a, b in ((4.9e-4, 0.0), (5e-5, 5e-5 ** 2 * 0.3), (6e-3, 6e-3 ** 2 * 60.0)):
+            z0 = float(ns.gat(torch.zeros(1), torch.tensor(a), torch.tensor(b))[0])
+            self.assertAlmostEqual(z0, floor_at(b / (a * a)), places=5)
+            self.assertGreater(z0, tr.Z_FLOOR)
+
     def test_its_weight_never_reads_the_clean_side(self):
         # The minimiser of E[w (x_hat - x)^2 | y] is E[w x | y] / E[w | y]: the mean only if w is a function of y.
         noisy, clean, a, b = batch()

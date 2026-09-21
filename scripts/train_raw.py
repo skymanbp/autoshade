@@ -57,7 +57,7 @@ from this file's location: none of it knows the machine it was written on.
 Reproduce, in order:
 
     python scripts/fetch_rawnind.py --root RAWNIND
-    python scripts/prep_pairs.py    --root RAWNIND --out DATA
+    python scripts/prep_pairs.py    --root RAWNIND --out DATA/pairs
     python scripts/prep_clean.py    --library MY_RAWS --out DATA/clean_user
     python scripts/train_raw.py     --data DATA --out RUN
     python scripts/val_scales.py    --weights RUN/best_state.pth --data DATA
@@ -178,14 +178,24 @@ def make_batch(x_noisy, x_clean, a, b):
     return zn, tn, 1.0 / span, span
 
 
+# The floor the network's own answer is held to before the inverse transform.
+# `ns.gat` is 2*sqrt(x/a + 3/8 + b/a^2), smallest at x = 0, so a TARGET can never
+# come below 2*sqrt(3/8) = 1.2247: `denoise_raw.physical_model` returns a > 0 and
+# b >= 0 on every path, and the synthetic family draws b/a^2 in [0.3, 60], whose
+# own worst case is 2*sqrt(3/8 + 0.3) = 1.6432. This is therefore a guard on the
+# network's OUTPUT and never on the thing it is learning — which is what
+# `test_the_clamp_never_touches_a_target` holds it to.
+Z_FLOOR = 1.0
+
+
 def loss_mean_seeking(out, zn_span, x_noisy, x_clean, a, b):
     """The v2 loss (see the module docstring). out (2B,3,H,W) is the network's
     answer in normalised z; a, b (B,4)."""
     pick = lambda v: torch.cat([v[:, [0, 1, 3]], v[:, [0, 2, 3]]], 0)[:, :, None, None]
     a3, b3 = pick(a), pick(b)
     span = torch.cat([zn_span, zn_span]).view(-1, 1, 1, 1)
-    # z >= 1 is where I_A is monotone; every target lies above 1.2
-    x_hat = ns.igat((out * span).clamp_min(1.0), a3, b3)
+    # z >= 1 is where I_A is monotone, and every target lies above it (Z_FLOOR)
+    x_hat = ns.igat((out * span).clamp_min(Z_FLOOR), a3, b3)
     level = F.avg_pool2d(F.pad(to_triplets(x_noisy), (4, 4, 4, 4), mode="reflect"), 9, stride=1).clamp_min(0.0)
     variance = a3 * level + b3 + 0.375 * a3 * a3
     return ((x_hat - to_triplets(x_clean)) ** 2 / variance).mean()
