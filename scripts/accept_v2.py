@@ -32,6 +32,39 @@ import sys
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
+
+def candidate_from(run, out):
+    """The file to measure when only --run was given, as a plain state dict.
+
+    NOT `best_state.pth`. `train_raw.py` writes that one on held-out PSNR alone, against a
+    threshold seeded from the PRETRAINED model's own validation (train_raw.py:369, 444) —
+    so it appears only when a checkpoint beats the shipped weights at denoising. This
+    fine-tune deliberately spends a little PSNR to buy back star flux, and §3 below allows
+    0.15 dB of it, so a run doing exactly what it was asked can finish without ever writing
+    that file. Selecting on it would be selecting against the point of the exercise.
+
+    `last.pt` is a checkpoint (model, optimiser, schedule, iteration), not a state dict, so
+    the model is unpacked into its own file for the instrument, which loads with
+    `weights_only=True` and `strict=True` and should keep doing exactly that.
+    """
+    import torch
+
+    best = run / "best_state.pth"
+    last = run / "last.pt"
+    if last.exists():
+        blob = torch.load(last, map_location="cpu", weights_only=True)
+        if isinstance(blob, dict) and "model" in blob and "iter" in blob:
+            flat = out / f"candidate-it{blob['iter']}.pth"
+            torch.save(blob["model"], flat)
+            note = f"iteration {blob['iter']} (unpacked from {last.name})"
+            if best.exists():
+                note += "; best_state.pth also exists, PSNR-selected — not used, see docstring"
+            return flat, note
+        raise SystemExit(f"{last} is not a training checkpoint (no 'model'/'iter')")
+    if best.exists():
+        return best, f"{best.name} (no last.pt; this one is PSNR-selected)"
+    raise SystemExit(f"no candidate in {run}: neither last.pt nor best_state.pth")
+
 # Section 1, written 2026-09-21 before the run. "at least" unless the row says at most.
 # The v1 column is the shipped weights read by this same instrument on the same date.
 FLUX_LINES = [
@@ -66,12 +99,16 @@ def main():
     ap.add_argument("--reuse", action="store_true", help="read an existing flux-truth.json instead of measuring")
     args = ap.parse_args()
 
-    weights = pathlib.Path(args.weights) if args.weights else pathlib.Path(args.run) / "best_state.pth"
-    if not weights.exists():
-        raise SystemExit(f"no candidate at {weights}")
     out = pathlib.Path(args.out) if args.out else pathlib.Path(args.run) / "accept"
     out.mkdir(parents=True, exist_ok=True)
     report = out / "flux-truth.json"
+    if args.weights:
+        weights, chosen = pathlib.Path(args.weights), str(args.weights)
+        if not weights.exists():
+            raise SystemExit(f"no candidate at {weights}")
+    else:
+        weights, chosen = candidate_from(pathlib.Path(args.run), out)
+    print(f"candidate: {chosen}")
 
     if not args.reuse:
         cmd = [sys.executable, "-B", str(REPO / "scripts" / "denoise_flux_truth.py"),
