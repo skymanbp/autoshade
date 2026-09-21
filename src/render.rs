@@ -9218,25 +9218,64 @@ fn geometry_fill_scale(
     m
 }
 
-/// The base image `camera_base_knots` should be fed for a photo whose canvas
-/// starts from a stamped lens profile: the neutral develop with the profile
-/// VIGNETTE applied (the camera JPEG the estimator matches against already
-/// contains that correction — estimating on the uncorrected neutral bakes
-/// the corner lift into the global curve a second time). Pre-thumbnailed to
-/// the estimator's own working size, so the extra develop pass is a LUT walk
-/// over ≤1 MP, not the full frame. Geometry is skipped on purpose: it moves
-/// pixels, not their luma histogram.
-pub fn estimation_base(
+/// The camera-matched base look of one photo — the ONE entry of the three open
+/// paths (the GUI open worker, `pipeline::photo_base_knots*`, `serve`'s fresh
+/// open): the neutral develop paired with the camera's embedded rendition LIKE
+/// WITH LIKE ([`estimation_base`]), then CDF-matched ([`camera_base_knots`]).
+/// Until 2026-09-21 each path assembled the pair by hand, and they had drifted:
+/// only the pipeline's paired the frame the rendition shows (v1.2.2), so a GUI
+/// or web open of a body set to an in-camera aspect matched the whole sensor
+/// against a centred crop.
+pub fn camera_base_look(
     neutral: &DynamicImage,
     lens: &crate::recipe::LensProfile,
+    camera: &DynamicImage,
+) -> Option<Vec<[f32; 2]>> {
+    camera_base_knots(&estimation_base(neutral, lens, camera), camera)
+}
+
+/// The neutral develop the camera's rendition is a tone map OF — the picture
+/// the CDF match may be run against. Two things can stand between the two
+/// pictures besides tone, and both are settled here:
+///
+/// * the FRAME — a body set to an in-camera aspect writes a centred crop
+///   ([`camera_frame_of`]);
+/// * the CORNERS — a stamped lens profile lifts them on our canvas. Whether
+///   the camera's rendition shows that lift is MEASURED on the pair
+///   ([`corner_residual`]), and the lift is applied to the estimate's neutral
+///   only when the rendition shows it.
+///
+/// From 2026-08-03 the lift was applied unconditionally, on a review's
+/// statement that the camera JPEG already contains the correction. Measured
+/// 2026-09-21 on ten ILCE-7RM4A frames (five lenses' worth of corner gains,
+/// 1.33–1.98; the body's own switch, tag 0x7031, reads 257 on every one):
+/// NONE of the ten embedded previews shows it. A CDF match has no notion of
+/// place, so the lift the camera never made came out as TONE: on a star frame,
+/// whose whole sky sits in a band 0.13 wide, the estimate's slope ran 0.33–2.25
+/// inside that band where the camera's own response — the same two pictures
+/// paired in place, block by block — runs 0.99–1.32. Rendered with that
+/// estimate the ten frames sat 0.4–6.0 levels DARKER than the camera's
+/// rendition at the median block; with the estimate made here they sit within
+/// 0.05–1.7, nearer in rms on all ten (`probe_real_raw_base_look` prints both).
+///
+/// Pre-thumbnailed to the estimator's own working size, so the extra develop
+/// pass is a LUT walk over ≤1 MP, not the full frame. The lift runs on the
+/// WHOLE frame and the camera's crop is cut afterwards: the gain is a function
+/// of the sensor's radius, not the crop's. Geometry is skipped on purpose: it
+/// moves pixels, not their luma histogram.
+fn estimation_base(
+    neutral: &DynamicImage,
+    lens: &crate::recipe::LensProfile,
+    camera: &DynamicImage,
 ) -> DynamicImage {
     let small = if neutral.width().max(neutral.height()) > 1024 {
         neutral.thumbnail(1024, 1024)
     } else {
         neutral.clone()
     };
+    let plain = camera_frame_of(&small, camera);
     if !lens.vignette_active() {
-        return small;
+        return plain;
     }
     let vig_only = EditRecipe {
         lens_profile: crate::recipe::LensProfile {
@@ -9246,7 +9285,114 @@ pub fn estimation_base(
         },
         ..Default::default()
     };
-    develop_preview(&small, &vig_only)
+    let lifted = camera_frame_of(&develop_preview(&small, &vig_only), camera);
+    // The sensor's own picture is the null: the lift is a claim about what the
+    // camera did, and a pair that cannot say (a blown or tiny rendition) has
+    // not made it.
+    match (corner_residual(&plain, camera), corner_residual(&lifted, camera)) {
+        (Some(as_seen), Some(with_lift)) if with_lift.abs() < as_seen.abs() => lifted,
+        _ => plain,
+    }
+}
+
+/// Block-mean luma on a `cols × rows` grid cut on the image's OWN pixel grid:
+/// the two pictures of a pair are never resampled onto each other, so nothing
+/// finer than a block has to line up (an embedded preview may carry the
+/// camera's distortion correction and sits a few pixels off the sensor crop).
+/// `None` when the image is smaller than the grid.
+fn block_lumas(img: &DynamicImage, cols: usize, rows: usize) -> Option<Vec<f32>> {
+    let rgb = img.to_rgb8();
+    let (w, h) = (rgb.width() as usize, rgb.height() as usize);
+    if w < cols || h < rows {
+        return None;
+    }
+    let px = rgb.as_raw();
+    let mut out = Vec::with_capacity(cols * rows);
+    for r in 0..rows {
+        let (y0, y1) = (r * h / rows, (r + 1) * h / rows);
+        for c in 0..cols {
+            let (x0, x1) = (c * w / cols, (c + 1) * w / cols);
+            let mut sum = 0.0f64;
+            for y in y0..y1 {
+                for p in px[(y * w + x0) * 3..(y * w + x1) * 3].chunks_exact(3) {
+                    sum += 0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64;
+                }
+            }
+            out.push((sum / (((y1 - y0) * (x1 - x0)) as f64 * 255.0)) as f32);
+        }
+    }
+    Some(out)
+}
+
+/// Where a corner lift the pair disagrees about would show: the camera's tone
+/// map is read off the pair itself (medians of 32 equal-population groups of
+/// blocks), and what is left over is compared between the OUTER
+/// blocks (from 0.75 of the half diagonal) and the INNER ones (within 0.5) by
+/// their medians. A neutral the rendition is a tone map of reads near zero; one
+/// that carries a lift the camera never made reads negative (its corners
+/// predict more light than the camera drew), and one that lacks a lift the
+/// camera did make reads positive. A free tone map cannot absorb either:
+/// blocks of equal luma stand at different radii.
+///
+/// The ten frames above read −0.004…+0.004 as the sensor saw them and
+/// −0.009…−0.030 with the lift, the nearest pair 2.8 times apart. LibRaw's
+/// develop of the same ten — nothing of this engine in the reading — says the
+/// same (−0.005…+0.006 against −0.008…−0.025), and a synthetic rendition that
+/// DID carry the lift reads the other way round on all ten. `None` when the
+/// pair cannot say: an image smaller than the grid, fewer than 256 unclipped
+/// blocks, or fewer than 32 of them in either zone.
+fn corner_residual(neutral: &DynamicImage, camera: &DynamicImage) -> Option<f32> {
+    const COLS: usize = 64;
+    const GROUPS: usize = 32;
+    fn median(values: &mut [f32]) -> f32 {
+        values.sort_by(|a, b| a.total_cmp(b));
+        (values[(values.len() - 1) / 2] + values[values.len() / 2]) * 0.5
+    }
+    let aspect = neutral.height().max(1) as f32 / neutral.width().max(1) as f32;
+    let rows = ((COLS as f32 * aspect).round() as usize).max(1);
+    let n = block_lumas(neutral, COLS, rows)?;
+    let c = block_lumas(camera, COLS, rows)?;
+    // A clipped block says nothing about the map between the two pictures.
+    let open = |v: f32| v > 2.0 / 255.0 && v < 250.0 / 255.0;
+    let mut order: Vec<usize> = (0..n.len()).filter(|&i| open(n[i]) && open(c[i])).collect();
+    if order.len() < GROUPS * 8 {
+        return None;
+    }
+    order.sort_by(|&a, &b| n[a].total_cmp(&n[b]));
+    let (mut xs, mut ys) = (Vec::with_capacity(GROUPS), Vec::with_capacity(GROUPS));
+    for g in 0..GROUPS {
+        let group = &order[g * order.len() / GROUPS..(g + 1) * order.len() / GROUPS];
+        xs.push(median(&mut group.iter().map(|&i| n[i]).collect::<Vec<f32>>()));
+        ys.push(median(&mut group.iter().map(|&i| c[i]).collect::<Vec<f32>>()));
+    }
+    let tone = |x: f32| -> f32 {
+        let j = xs.partition_point(|&v| v < x);
+        if j == 0 {
+            return ys[0];
+        }
+        if j == xs.len() {
+            return ys[j - 1];
+        }
+        let (x0, x1) = (xs[j - 1], xs[j]);
+        if x1 <= x0 { ys[j] } else { ys[j - 1] + (ys[j] - ys[j - 1]) * (x - x0) / (x1 - x0) }
+    };
+    let corner = (0.25 + 0.25 * aspect * aspect).sqrt();
+    let (mut outer, mut inner) = (Vec::new(), Vec::new());
+    for &i in &order {
+        let dx = ((i % COLS) as f32 + 0.5) / COLS as f32 - 0.5;
+        let dy = (((i / COLS) as f32 + 0.5) / rows as f32 - 0.5) * aspect;
+        let r = (dx * dx + dy * dy).sqrt() / corner;
+        let residual = c[i] - tone(n[i]);
+        if r >= 0.75 {
+            outer.push(residual);
+        } else if r < 0.5 {
+            inner.push(residual);
+        }
+    }
+    if outer.len() < 32 || inner.len() < 32 {
+        return None;
+    }
+    Some(median(&mut outer) - median(&mut inner))
 }
 
 /// Bilinear sample of an RGBA8 buffer; out-of-frame reads are TRANSPARENT —
@@ -10999,6 +11145,177 @@ mod tests {
         assert_eq!((same.width(), same.height()), (300, 200), "a same-frame pair is untouched");
     }
 
+    /// A night-like frame for the corner question, 600×400: a sky graded left
+    /// to right over dark ground, as the SENSOR saw it through a lens whose
+    /// profile lifts the corners by 1.8; the same frame with that lift; and two
+    /// cameras with one tone (0.85 x), one that drew the sensor's picture and
+    /// one that drew the lifted one.
+    fn corner_question() -> (crate::recipe::LensProfile, [DynamicImage; 4]) {
+        let (w, h) = (600u32, 400u32);
+        let lens = crate::recipe::LensProfile {
+            vignette: (0..16).map(|i| 1.0 + 0.8 * i as f32 / 15.0).collect(),
+            vignette_on: true,
+            ..Default::default()
+        };
+        let scene = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            let v = if y >= h * 5 / 6 { 0.06 } else { 0.20 + 0.25 * x as f32 / (w - 1) as f32 };
+            image::Rgb([(v * 255.0).round() as u8; 3])
+        }));
+        let falloff = EditRecipe {
+            lens_profile: crate::recipe::LensProfile {
+                vignette: lens.vignette.iter().map(|g| 1.0 / g).collect(),
+                vignette_on: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let neutral = develop_preview(&scene, &falloff);
+        let lifted = develop_preview(
+            &neutral,
+            &EditRecipe { lens_profile: lens.clone(), ..Default::default() },
+        );
+        let tone = |img: &DynamicImage| {
+            let mut out = img.to_rgb8();
+            for c in out.iter_mut() {
+                *c = (0.85 * *c as f32).round() as u8;
+            }
+            DynamicImage::ImageRgb8(out)
+        };
+        let cameras = (tone(&neutral), tone(&lifted));
+        (lens, [neutral, lifted, cameras.0, cameras.1])
+    }
+
+    /// 2026-09-21: whether the camera's rendition shows the profile's corner
+    /// lift is measured on the pair. Both answers, and the reading behind each.
+    #[test]
+    fn the_estimation_base_is_the_picture_the_camera_drew() {
+        let (lens, [neutral, lifted, drew_the_sensor, drew_the_lift]) = corner_question();
+        let bytes = |img: &DynamicImage| img.to_rgb8().into_raw();
+        let read = |base: &DynamicImage, camera: &DynamicImage| {
+            corner_residual(base, camera).expect("600x400 with an open tone range is judgeable")
+        };
+        let (as_seen, with_lift) = (read(&neutral, &drew_the_sensor), read(&lifted, &drew_the_sensor));
+        assert!(
+            as_seen.abs() < 0.002 && with_lift < -0.004,
+            "a lift the camera never made predicts brighter corners than it drew: \
+             as seen {as_seen}, with the lift {with_lift}"
+        );
+        assert_eq!(
+            bytes(&estimation_base(&neutral, &lens, &drew_the_sensor)),
+            bytes(&neutral),
+            "the rendition is a tone map of the sensor's picture, so that is the base"
+        );
+        let (as_seen, with_lift) = (read(&neutral, &drew_the_lift), read(&lifted, &drew_the_lift));
+        assert!(
+            as_seen > 0.003 && with_lift.abs() < 0.002,
+            "a lift the camera did make leaves its corners above the sensor's picture: \
+             as seen {as_seen}, with the lift {with_lift}"
+        );
+        assert_eq!(
+            bytes(&estimation_base(&neutral, &lens, &drew_the_lift)),
+            bytes(&lifted),
+            "the rendition is a tone map of the lifted picture, so that is the base"
+        );
+        // No profile, no question.
+        assert_eq!(
+            bytes(&estimation_base(&neutral, &Default::default(), &drew_the_lift)),
+            bytes(&neutral)
+        );
+    }
+
+    /// What the measurement is FOR. The camera's tone here is 0.85 x and
+    /// nothing else. Matched against the sensor's picture the estimate says so;
+    /// matched against the lifted picture — what the estimator did from
+    /// 2026-08-03 to 2026-09-21 whatever the camera had drawn — the lift comes
+    /// out as tone, and the control stays in the test so the defect stays
+    /// visible.
+    #[test]
+    fn a_corner_lift_the_camera_never_made_does_not_become_tone() {
+        let (lens, [neutral, lifted, drew_the_sensor, _]) = corner_question();
+        let miss = |knots: &[[f32; 2]]| {
+            knots[1..knots.len() - 1]
+                .iter()
+                .map(|k| (k[1] - 0.85 * k[0]).abs())
+                .fold(0.0f32, f32::max)
+        };
+        let look = camera_base_look(&neutral, &lens, &drew_the_sensor).expect("judgeable");
+        assert!(look.len() > 2, "0.85 x is not the identity: {look:?}");
+        assert!(miss(&look) < 0.01, "the camera's tone, to a level or two: {look:?}");
+        let control = camera_base_knots(&lifted, &drew_the_sensor).expect("judgeable");
+        assert!(
+            miss(&control) > 0.03,
+            "premise: the unconditional lift misses the camera's tone by levels: {control:?}"
+        );
+    }
+
+    /// The profile's gain is a function of the SENSOR'S radius. A body set to
+    /// an in-camera aspect shows a centred crop, so the lift is made on the
+    /// whole frame and the camera's frame is cut afterwards — lifted after the
+    /// cut, the crop's own corners would be taken for the sensor's.
+    #[test]
+    fn the_lift_is_made_on_the_sensor_frame_and_cut_to_the_cameras_afterwards() {
+        let (lens, [neutral, lifted, ..]) = corner_question();
+        let shown = lifted.crop_imm(33, 0, 533, 400); // the centred 4:3 of 600x400
+        let mut camera = shown.to_rgb8();
+        for c in camera.iter_mut() {
+            *c = (0.85 * *c as f32).round() as u8;
+        }
+        let base = estimation_base(&neutral, &lens, &DynamicImage::ImageRgb8(camera));
+        assert_eq!((base.width(), base.height()), (533, 400), "paired on the camera's frame");
+        assert_eq!(
+            base.to_rgb8().into_raw(),
+            shown.to_rgb8().into_raw(),
+            "the whole frame's lift, cut to the camera's frame"
+        );
+    }
+
+    /// A pair that cannot say has not claimed the lift: the sensor's picture
+    /// stays the base.
+    #[test]
+    fn a_pair_that_cannot_say_keeps_the_picture_the_sensor_saw() {
+        let (lens, [neutral, ..]) = corner_question();
+        let blown = DynamicImage::ImageRgb8(RgbImage::from_pixel(600, 400, image::Rgb([255; 3])));
+        assert!(corner_residual(&neutral, &blown).is_none(), "every block clipped");
+        assert_eq!(
+            estimation_base(&neutral, &lens, &blown).to_rgb8().into_raw(),
+            neutral.to_rgb8().into_raw()
+        );
+        let tiny = neutral.thumbnail(48, 32);
+        assert!(corner_residual(&tiny, &tiny).is_none(), "smaller than the grid");
+    }
+
+    /// The three open paths enter through `camera_base_look` and nowhere else,
+    /// so the pairing cannot drift between them again (v1.2.2's frame pairing
+    /// reached one of the three), and the entry pairs the frame itself.
+    #[test]
+    fn the_three_open_paths_share_one_base_look_entry() {
+        for (name, text) in [
+            ("pipeline.rs", include_str!("pipeline.rs")),
+            ("serve.rs", include_str!("serve.rs")),
+            ("bin/gui/actions.rs", include_str!("bin/gui/actions.rs")),
+        ] {
+            assert!(text.contains("camera_base_look("), "{name} estimates through the one entry");
+            for by_hand in ["camera_base_knots(", "camera_frame_of(", "estimation_base("] {
+                assert!(!text.contains(by_hand), "{name} assembles the pair by hand: {by_hand}");
+            }
+        }
+        // The v1.2.2 construction, through the entry: a rendition that is the
+        // centred 4:3 crop of the neutral, pixel for pixel, is the identity.
+        let neutral = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(300, 200, |x, _| {
+            if !(16..283).contains(&x) {
+                image::Rgb([20, 20, 20])
+            } else {
+                let v = (x * 255 / 300) as u8;
+                image::Rgb([v, v, v])
+            }
+        }));
+        let camera = neutral.crop_imm(16, 0, 267, 200);
+        assert!(
+            camera_base_look(&neutral, &Default::default(), &camera).expect("judgeable").is_empty(),
+            "paired on the frame the camera shows, an identical crop is the identity"
+        );
+    }
+
     #[test]
     fn camera_base_knots_merges_same_bin_quantiles_with_a_mean() {
         // A posterised neutral (one constant tone) against a camera side whose
@@ -11044,6 +11361,52 @@ mod tests {
         );
         let knots = crate::pipeline::photo_base_knots(&raw);
         println!("knots: {knots:?}");
+        // The corner question on this photo, both readings and both answers.
+        if let Ok(Some(cam)) = &cam_probe {
+            let lens = crate::pipeline::fresh_lens_profile(&raw);
+            let working =
+                render_to_image(&raw, &EditRecipe::default(), None, Some(2048)).unwrap();
+            let small = working.thumbnail(1024, 1024);
+            let plain = camera_frame_of(&small, cam);
+            println!("profile corner gain: {:?}", lens.vignette.last());
+            println!("corner residual as the sensor saw it: {:?}", corner_residual(&plain, cam));
+            if lens.vignette_active() {
+                let lift = EditRecipe {
+                    lens_profile: crate::recipe::LensProfile {
+                        vignette: lens.vignette.clone(),
+                        vignette_on: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let lifted = camera_frame_of(&develop_preview(&small, &lift), cam);
+                println!("corner residual with the lift: {:?}", corner_residual(&lifted, cam));
+                println!("knots as the sensor saw it: {:?}", camera_base_knots(&plain, cam));
+                println!("knots with the lift: {:?}", camera_base_knots(&lifted, cam));
+                // How far each estimate's render of the SENSOR'S picture sits
+                // from the camera's, block by block, in 8-bit levels.
+                for (name, base) in [("as seen", &plain), ("with the lift", &lifted)] {
+                    let Some(knots) = camera_base_knots(base, cam) else { continue };
+                    let based = develop_preview(
+                        &plain,
+                        &EditRecipe { base_curve: knots, ..Default::default() },
+                    );
+                    let rows = (64.0 * plain.height() as f32 / plain.width() as f32).round() as usize;
+                    let (ours, theirs) = (
+                        block_lumas(&based, 64, rows).unwrap(),
+                        block_lumas(cam, 64, rows).unwrap(),
+                    );
+                    let mut err: Vec<f32> =
+                        ours.iter().zip(&theirs).map(|(a, b)| (a - b) * 255.0).collect();
+                    let rms = (err.iter().map(|e| e * e).sum::<f32>() / err.len() as f32).sqrt();
+                    err.sort_by(|a, b| a.total_cmp(b));
+                    println!(
+                        "render with the estimate made {name} vs camera: rms {rms:.2} levels, median {:+.2}",
+                        err[err.len() / 2]
+                    );
+                }
+            }
+        }
         assert!(!knots.is_empty(), "expected a base look on a camera RAW");
         let neutral =
             render_to_image(&raw, &EditRecipe::default(), None, None).unwrap().thumbnail(1536, 1536);

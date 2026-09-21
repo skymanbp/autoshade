@@ -500,18 +500,16 @@ impl AutoShadeApp {
                         // Kelvin for this photo.
                         let as_shot = autoshade::render::as_shot_wb(&path);
                         // Camera-matched base look: CDF-match the neutral
-                        // develop against the camera's own rendition — with
-                        // the profile VIGNETTE applied first: the camera JPEG
-                        // already contains that correction, and matching the
-                        // uncorrected neutral would bake the corner lift into
-                        // the global curve a second time. Geometry moves
-                        // pixels, not their histogram — skipped on purpose.
+                        // develop against the camera's own rendition, paired
+                        // like with like by the one entry all three open
+                        // paths share — the frame the rendition shows, and
+                        // the profile's corner lift only when the rendition
+                        // shows it (render::camera_base_look).
                         // A RAW with no embedded preview (or a decode hiccup)
                         // just opens without a base look — never a failure.
                         let knots = match autoshade::decode::embedded_preview(&path) {
                             Ok(Some(cam)) => {
-                                let est = autoshade::render::estimation_base(&full, &lens);
-                                match autoshade::render::camera_base_knots(&est, &cam) {
+                                match autoshade::render::camera_base_look(&full, &lens, &cam) {
                                     // The ANSWER primes the repair memo: the
                                     // open already paid this develop, and
                                     // discarding the result made every later

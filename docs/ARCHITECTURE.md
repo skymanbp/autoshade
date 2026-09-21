@@ -141,14 +141,15 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1668 library + 25 CLI + 215 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1653 pass + 15 `#[ignore]`d forensic probes and
+> 1673 library + 25 CLI + 215 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1658 pass + 15 `#[ignore]`d forensic probes and
 > the GUI result is 214 pass + one explicit scratch-recipe export probe ignored
 > in the ordinary battery. Counts refreshed 2026-09-21 after the RAW-denoise
 > lane merged into `main`, hot-site mapping moved to every develop and its rule
-> was rebuilt on what ordinary frames showed: +20 / −0
+> was rebuilt on what ordinary frames showed, and the base look's estimate was
+> paired like with like: +25 / −0
 > by name against the v1.5.1 tag
-> (`1a122c0`), listed by the test harness itself on both trees — nineteen library
+> (`1a122c0`), listed by the test harness itself on both trees — twenty-four library
 > names (the four laws of the luminance return: a full clean is bit-exact and
 > never develops the original, grey noise returns at the exact share while
 > pure chroma returns nothing, the return keeps chroma and obeys the luminance
@@ -163,7 +164,11 @@
 > tile is measured on the samples that can move, a site on clipped ground is
 > not judged, a bright structure in dark tiles is judged by its own
 > brightness, a witness at white cannot vouch and a lit diagonal speaks, a
-> witness is heard at its tile's sigma; the extra plane reserved
+> witness is heard at its tile's sigma; the five of the base look's pairing:
+> the estimation base is the picture the camera drew, a corner lift the camera
+> never made does not become tone, the lift is made on the sensor frame and cut
+> to the camera's afterwards, a pair that cannot say keeps the picture the
+> sensor saw, the three open paths share one base-look entry; the extra plane reserved
 > before the RAW ceiling; and the cleaner receiving the whole output with the
 > container's floor kept) and one GUI name (preference era one resets the raw
 > dials and keeps baked choices). At v1.5.1 (2026-09-20) the battery was 1649
@@ -795,6 +800,33 @@
 > Ordinary RAW admission stays 31 B/px; 0 < s < 1 reserves an extra 18 B/px
 > before decode (49 B/px conservative total, first refused size 87,652,394 px).
 > Batch rendering requests no AI denoise and keeps its existing budget.
+> The cleaner's acceptance standard is a star frame against the user's own
+> Lightroom Denoise 50 ON/OFF pair of the same capture
+> (`scripts/denoise_star_standard.py`), read since 2026-09-21 in TWO GROUPS.
+> The CLEANER group decides the exit status: lines 1 and 2 on a pair of renders
+> whose `base_curve` is emptied and nothing else changed (1c, 2c), faint-star
+> retention on the sites that pass a true-star test in the mosaic the cleaner
+> received (5c), per-CFA-plane aperture flux in the cleaner's own two mosaics
+> plus aperture colour against Lightroom (7c), and lines 3, 4, 6 and 8 as they
+> were. The FRONT-END group — lines 1 and 2 on the ordinary renders, base curve
+> kept — is reported and never decides: those two read the camera-matched
+> curve, not the cleaner. On the final build, with one real GPU capture
+> replayed into every render, the cleaner group reads 1c, 2c, 3, 4, 8 PASS and
+> 5c, 6, 7c FAIL: 5c by 0.40 of a point and 6 by 0.005, two lines that sit on
+> their limits and whose verdict turns with the star sites the input render's
+> curve selects (they passed by 0.08 and 0.007 on the curve estimated before
+> 2026-09-21, the cleaner and its mosaics byte-identical), and 7c on a
+> plane-flux spread of 0.045 against 0.02 that reads the same on both curves
+> (R +3.3 %, G +1.0 %, B −1.1 %) and is the cleaner's own: on a synthetic star
+> field with known fluxes the network keeps 10 % of a star whose G-plane peak
+> stands 4 sigma over the sky's noise, 73 % at 10 sigma and 97 % at 40, while
+> the transform pair with a perfect smoother in the network's place moves
+> star-free sky by +0.07…+0.22 DN against the network's −0.22…−1.87 — the
+> network was trained to remove isolated positive spikes and never shown a
+> point source. The front-end width
+> (2f) fell 0.096 → 0.039, limit 0.031, when the base look's estimate was
+> paired like with like (see **The base look is estimated against the
+> picture the camera drew**).
 > Why the mosaic: on the user's ILCE-7RM4A frames
 > the noise is white per CFA plane there and spatially correlated after demosaic,
 > where neither the blind SCUNet nor a non-blind sRGB-domain model separated it from
@@ -5461,6 +5493,50 @@ two-pass seed and its `scale_chroma` clamp-order gap (measured up to
 keeps its embedded-preview + post-stamp contract
 (`pipeline::stamp_fit_calibration`) — `preview_only` needs no demosaic,
 and that command's contract was validated on it.
+
+**The base look is estimated against the picture the camera drew**
+(2026-09-21). The three open paths — the GUI open worker,
+`pipeline::photo_base_knots*` and `serve`'s fresh open — enter through one
+function, `render::camera_base_look`, which pairs the neutral develop with the
+embedded rendition LIKE WITH LIKE before the CDF match: on the frame the
+rendition shows (until then only the pipeline's path did, so a GUI or web open
+of a body set to an in-camera aspect matched the whole sensor against the
+centred crop), and with the lens profile's corner lift only when the rendition
+shows it. That second question is MEASURED on the pair
+(`render::corner_residual`): block-mean luma on a 64-column grid cut on each
+picture's own pixels, the camera's tone map read off the pair as the medians of
+32 equal-population groups, and the median of what is left over
+compared between the outer blocks (from 0.75 of the half diagonal) and the
+inner ones (within 0.5). A neutral the rendition is a tone map of reads near
+zero; one that carries a lift the camera never made reads negative; a free
+tone map can absorb neither, because blocks of equal luma stand at different
+radii. The lift is made on the whole frame and the camera's frame is
+cut afterwards, because the gain is a function of the sensor's radius. A pair
+that cannot say keeps the sensor's picture: the lift is a claim about what the
+camera did.
+
+From 2026-08-03 the lift had been applied unconditionally, on a review's
+statement that the camera JPEG already contains the correction. On ten
+ILCE-7RM4A frames (corner gains 1.33–1.98, the body's own switch — tag 0x7031 —
+reading 257 on every one) NONE of the embedded previews shows it: the measure
+reads −0.004…+0.004 as the sensor saw them against −0.009…−0.030 with the lift,
+the nearest pair 2.8 times apart, and LibRaw's develop of the same ten (nothing
+of this engine in the reading) says the same, while a synthetic rendition that
+did carry the lift reads the other way round on all ten. A CDF match has no
+notion of place, so the lift the camera never made came out as TONE. On a star
+frame whose whole picture sits in a band 0.13 wide the estimate's knot slopes
+ran 0.33–2.25 where the camera's own response, read by pairing the two pictures
+in place, runs 0.99–1.32; and rendered with those estimates the ten frames sat
+0.4–6.0 levels darker than the camera's rendition at the median block. Made
+against the sensor's picture the estimates sit within 0.05–1.7 levels, nearer
+in rms on all ten, and the star frame's slopes run 0.40–1.73. A saved recipe
+keeps the curve it was saved with; the change reaches a photograph when its
+base look is next estimated. The reverse fit starts from this look, and the
+same fits run on both curves over the six calibration-corpus pairs moved both
+ways — one pair's fitted residual 0.105 → 0.055, the other five up by
+0.0007–0.0168 — so the two pinned two-temperature readings were re-measured
+(`fit::tests::the_fan_gate_costs_a_real_two_temperature_pair_nothing`; the
+question that test asks kept its answer).
 
 One deliberate asymmetry: the fit does **not** apply
 `render::limit_tone_sliders` to its proposal, even though the engine applies it

@@ -15976,6 +15976,23 @@ mod tests {
     /// different gate entirely (the pixel-aligned re-hue veto), so the fan
     /// gate is not what withheld it there either.
     ///
+    /// Re-measured 2026-09-21, when the calibration's base look began to be
+    /// estimated against the picture the camera drew
+    /// (`render::camera_base_look`: the lens profile's corner lift no longer
+    /// enters the CDF match on a body whose preview does not show it). The
+    /// question this test asks has the same answer: `p40` still reads 13.5°
+    /// and ships admitted, 0.0745 → 0.0342 at confidence 0.599; `p41` now
+    /// reads 13.0°, 2° under the line where it had 6°, and its cast is still
+    /// withheld by the re-hue veto, not by the fan gate. What did move is
+    /// `p41`'s fit itself, 0.0714 → 0.0581 at 0.370 where the old base gave
+    /// 0.0782 → 0.0413 at 0.437: on the brighter base the solve answers with
+    /// −0.3 EV, saturation +60 and a mixer that barely moves, where it had
+    /// answered with +0.8 EV, saturation +36 and Orange / Blue at the mixer's
+    /// ±18. The same fits run on both curves over the six corpus pairs moved
+    /// both ways (`p36` 0.1050 → 0.0550, the other five +0.0007 … +0.0168);
+    /// the figures of 2026-09-02 above stay as the record of what the gate was
+    /// shipped on.
+    ///
     /// Both pairs are OPTIONAL, like every other corpus pair: absent, the
     /// test says so and passes, and the synthetic two-temperature fixture
     /// carries the refusal side of the same question on its own.
@@ -15987,8 +16004,8 @@ mod tests {
         use crate::rationale::keys;
         let Some(root) = calibration_corpus() else { return };
         for (code, want_fan, want_before, want_after, want_conf) in [
-            ("p40", 13.5f32, 0.0788f32, 0.0335f32, 0.612f32),
-            ("p41", 9.0, 0.0782, 0.0413, 0.437),
+            ("p40", 13.5f32, 0.0745f32, 0.0342f32, 0.599f32),
+            ("p41", 13.0, 0.0714, 0.0581, 0.370),
         ] {
             let raw = root.join(format!("{code}.arw"));
             let target_path = root.join(format!("{code}-target.jpg"));
