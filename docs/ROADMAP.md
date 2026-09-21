@@ -153,6 +153,15 @@
 
 ## 未发布（已完成的车道改动，尚未发版）
 
+### 降噪 Part 8：保留基底的同参数比较、强孤立热点与细颗粒否定实验（2026-09-20）
+
+- **比较更正**：Linear 仅指用户点曲线，保留打开 RAW 时生成的 `base_curve`；Detail 仍为 40 / 1.0 / 25 / 0，禁用侧车明示关闭的镜头校正。Part 6 清掉基底的图版与旧的对比度／检出数不能用于评价应用的默认外观。色噪分量仍列出，判据改为共同线性 sRGB 中的色度向量幅度；绝对星点对比度用背景细粒 σ，检出数在一个由原图／LR OFF 拟合的单调色调映射后测量。
+- **热点实现**：`denoise/hot_pixels.rs` 在原片亮度捕获和侧车输入之前，对四个 CFA 相位分别以 64×64 样本的残差 MAD 估 σ；中心 >20σ 且四个异色相邻点各 ≤3σ 才替换为同相位八邻点中位数。三像素边框不动，所有判定读取替换前的图。仅支持 Bayer 的正强度 AI 路径进入；普通显影仍不处理热点，这是与 LR 的已知差异，待用户另行裁定。
+- **未通过项公开**：规定算法在 F1／F2／F3 映射 106／205／261 点，F4 为 0；模型普查 >40σ 的 31／126／102 点全部命中。20σ 两向一致率未达 90%：召回 41.01%／74.53%／89.86%，精确率 83.96%／77.07%／71.26%；逐点两种 σ 与邻点判据写入车道报告，不暗改阈值。CPU 桩中旧 48 点仍有 12 点在回填后 ≥5 个显影局部 σ，零残留线未达。**审阅结论（2026-09-21）：那条「48 点零残留」的线是审阅者自己定严了**——同一批 48 点在 Lightroom 成片里也有 10 个可见（LR OFF 9 个），剩下的 12 点在两种 σ 估计下都低于 20σ（局部 6.1–12.9、模型 8.0–14.3），不属于本规则的对象；模型普查 >20σ 的 209 点回填后可见 4 个，Lightroom 24 个。规则按现状保留，不为那 12 点降阈值。
+- **否定结果**：Gaussian 高通 σ=1.5／2／3／4／6 的完成态图像 CPU 重放，没有一档同时满足 clean 的中频水平、细粒变化 ≤0.01、星点不退步；F1 σ=1.5 的 mottle-Y 0.23376 对 clean 0.18151，暗星保留较全频回填低 1.07 个百分点，故不修改回填公式。残差双线性插值的自相关半宽比 PPG 更大，未采用。默认值仍为 0.71，绝对颗粒标尺的 s* 仅测量，未自动改默认值。
+- **证据与门**：完整配方、基底结点、Part 8 数字、图版、真实侧车确认及门的最终计数在车道 `target-lane-probe/report-fine-grain.md`，不入库。无实机 GUI 运行。
+
+
 ### 星空降噪标准 F1：按同一 Detail 设置复测（2026-09-20）
 
 - **同参数显影**：真实 CLI 的 `serve` / `api_download` 读取 XMP 配方，Sharpness 40、半径 1、Detail 25、Masking 0、亮度／颜色 NR 0、Linear、As Shot、Adobe Standard、无镜头校正；只在车道临时 RAW 副本旁写侧车，复用已验证的干净马赛克，GPU 新运行 0。回填在 Detail 之前。前轮未锐化图与 LR 的绝对星点目检不能作为同参数结论。
@@ -1088,10 +1097,10 @@
 5. When a release-sized batch accumulates, propose the next SemVer version appropriate to its compatibility boundary; never hard-code an already-released version here.
 
 6. **发版终门的降噪一半（F1 星空标准）**：从最后一个 tag 到候选树，只要
-   `python/denoise_raw.py`、`src/denoise.rs` 或 `src/render/denoise_grain.rs` 有改动，
+   `python/denoise_raw.py`、`src/denoise.rs`、`src/denoise/hot_pixels.rs` 或 `src/render/denoise_grain.rs` 有改动，
    就以 LR Denoise 50 的同一捕获 ON/OFF 为标准重跑；AutoShade 两张图必须先经真实
    渲染路径按相同 Detail 参数显影（40 / 1.0 / 25 / 0，颜色／亮度 NR 0，Linear，
-   As Shot，Adobe Standard，无镜头校正），回填在 Detail 前。执行
+   As Shot，Adobe Standard，无镜头校正），**保留打开时的相机基底曲线**，Linear 不清空 `base_curve`；回填在 Detail 前。色噪第 3／4／12 条以共同线性 sRGB 的色度向量幅度判断，仍列分量；第 10 条为色调匹配后的峰值／背景细粒 σ，第 11 条为同一固定色调映射后的检出数。执行
    `python scripts/denoise_star_standard.py --root <夹具根> --input <原图显影.tif> --ours <默认降噪显影.tif> --lr-off <LR-OFF.tif> --lr-on <LR-ON.tif> --json <报告.json> --mask-sheet <遮罩.png>`；
    根目录也可由 `AUTOSHADE_FIXTURES_ROOT` 指定，两者均无则明确退出 2，绝不猜家目录。
    工具无需 GPU，输出 1–8 的数值及 PASS/FAIL，9–12 的绝对星点差距逐项报告；

@@ -3,8 +3,10 @@
 
 Required AutoShade develop parity: Sharpness 40, SharpenRadius 1.0,
 SharpenDetail 25, SharpenEdgeMasking 0, ColorNoiseReduction 0,
-LuminanceSmoothing 0, linear tone curve, as-shot WB, Adobe Standard and no
-lens corrections. Grain return must precede Detail. Lightroom OFF has colour
+LuminanceSmoothing 0, linear USER point curve, as-shot WB, Adobe Standard and no
+lens corrections. KEEP the camera-matched base_curve built by the RAW open
+path: a Linear point curve does not disable either camera profile's base look.
+Grain return must precede Detail. Lightroom OFF has colour
 NR 25 while ON has 0; that remaining confound is reported, not corrected.
 
 --root or AUTOSHADE_FIXTURES_ROOT resolves relative input paths. Four explicit
@@ -21,9 +23,11 @@ Tiles retain >=70% of their pixels, then the lowest 30% by the Part 3
 (box3-box9) variance / fine-Haar MAD-sigma squared qualify. All filters use
 only unmasked samples; all four Haar samples must survive. Mottle is box5
 minus box33 after removing the tile's fitted plane. Within-image colourfulness
-uses Haar/band RMS, not MAD. Native linear-sRGB / Adobe-RGB Y and Cb/Cr axes
-are used for noise metrics. Star colour changes (7) and absolute colour (12)
-both use common linear sRGB; differences in two different RGB primaries are
+uses Haar/band RMS, not MAD. All noise and colour axes are common LINEAR sRGB
+(Adobe RGB is decoded and transformed first). Components remain printed,
+but colourfulness gates (3/4) use sqrt(Cb_RMS^2+Cr_RMS^2)/Y_RMS per tile.
+Star colour changes (7) and absolute colour (12) also use common linear sRGB;
+differences in two different RGB primaries are
 not comparable units, even when each is measured against its own input.
 
 Bright profiles use the input-only Part 3 radial affine-response screen:
@@ -33,7 +37,12 @@ radial response range (the Part 3 no-extrapolation condition).
 Absolute widths use the minor eigenvector of the positive, background-subtracted
 second-moment ellipse within radius 6, and bilinear half-height crossings at
 0.1 px spacing. Absolute counts use >=5 local sigma (no upper cut), with
-one-to-one nearest matches within 3 px. Faint colour outliers use input SNR
+one-to-one nearest matches within 3 px. Detection counts (11) use luminance
+after ONE monotone map fitted on the 64-pixel-blurred, star-masked INPUT and
+LR OFF; the same map serves every AutoShade candidate. Contrast (10) is
+peak excess / local background fine-Haar sigma in those matched units.
+The map never changes the input-relative metrics or the review plate.
+Faint colour outliers use input SNR
 [5,10). Lines 9--12 are reported, never used to select/tune the measurement.
 
 Exit: 0 NEW and mask-validation gates pass, 1 a gate fails, 2 invalid inputs.
@@ -124,7 +133,7 @@ def widths(p, bg):
 def fields(yplane, sites):
     """Fixed-site Part 3 measurements; coordinates are in this image."""
     x, y = sites[:, 0].astype(int), sites[:, 1].astype(int)
-    result = {k: [] for k in ('bg', 'excess', 'sigma', 'fwhm', 'radial')}
+    result = {k: [] for k in ('bg', 'excess', 'sigma', 'fine_sigma', 'fwhm', 'radial')}
     for start in range(0, len(x), 512):
         p = np.asarray(yplane[y[start:start+512, None, None]+DY,
                              x[start:start+512, None, None]+DX], np.float32)
@@ -132,6 +141,7 @@ def fields(yplane, sites):
         h = (p[:, :40:2, :40:2]-p[:, 1:40:2, :40:2]-p[:, :40:2, 1:40:2]+p[:, 1:40:2, 1:40:2])/2
         result['bg'].append(bg); result['excess'].append(p[:, 20, 20]-bg)
         result['sigma'].append(mad(p[:, BG], axis=1))
+        result['fine_sigma'].append(mad(h[:, HBG], axis=1))
         result['fwhm'].append(widths(p, bg))
         result['radial'].append(np.column_stack([*[p[:, m].mean(axis=1) for m in RADIAL], bg]))
     return {k: np.concatenate(v) for k, v in result.items()}
@@ -252,7 +262,7 @@ class Image:
         self.rgb = tifffile.memmap(path, mode='r')
         if self.rgb.dtype != np.uint16 or self.rgb.ndim != 3 or self.rgb.shape[2] != 3:
             raise ValueError(f'{path}: expected uint16 RGB TIFF')
-        self.w = (ADOBE if adobe else SRGB)[1].astype(np.float32)
+        self.w = SRGB[1].astype(np.float32)
         stat = path.stat()
         token = str(path.resolve())+str(stat.st_size)+str(stat.st_mtime_ns)
         self.key = hashlib.sha256(token.encode()).hexdigest()[:16]
@@ -260,30 +270,90 @@ class Image:
         if not yp.exists():
             dest = np.lib.format.open_memmap(yp, mode='w+', dtype=np.float32, shape=self.rgb.shape[:2])
             for top in range(0, len(self.rgb), 128):
-                dest[top:top+128] = decode(self.rgb[top:top+128], adobe) @ self.w
+                rgb = decode(self.rgb[top:top+128], adobe)
+                if adobe:
+                    rgb = rgb @ ADOBE_TO_SRGB.T
+                dest[top:top+128] = rgb @ self.w
             dest.flush(); del dest
         self.y = np.load(yp, mmap_mode='r')
 
     def patch(self, x, y, size, halo=0):
         x, y = int(x-self.offset[0]), int(y-self.offset[1])
-        return decode(self.rgb[y-halo:y+size+halo, x-halo:x+size+halo], self.adobe)
+        rgb = decode(self.rgb[y-halo:y+size+halo, x-halo:x+size+halo], self.adobe)
+        return rgb @ ADOBE_TO_SRGB.T if self.adobe else rgb
 
     def core(self, sites, common_space=False):
         xy = sites[:, :2].astype(int)-self.offset
         rgb = decode(self.rgb[xy[:, 1], xy[:, 0]], self.adobe)
         if common_space and self.adobe:
             rgb = rgb @ ADOBE_TO_SRGB.T
-        w = SRGB[1] if common_space else self.w
+        w = SRGB[1] if common_space or not self.adobe else ADOBE[1]
         y, cb, cr = components(rgb, w)
         return np.column_stack((rgb, y, cb, cr))
+
+
+def monotone_knots(x, y, weight):
+    """Weighted least-squares isotonic fit at strictly increasing x values."""
+    blocks = []
+    for i, (xx, yy, ww) in enumerate(zip(x, y, weight)):
+        blocks.append([i, i+1, float(ww), float(yy*ww)])
+        while len(blocks) > 1 and blocks[-2][3]/blocks[-2][2] > blocks[-1][3]/blocks[-1][2]:
+            a, b = blocks[-2:]; blocks[-2:] = [[a[0], b[1], a[2]+b[2], a[3]+b[3]]]
+    fitted = np.empty(len(x), np.float64)
+    for lo, hi, w, total in blocks:
+        fitted[lo:hi] = total/w
+    return fitted
+
+
+def apply_tone(values, fit, derivative=False):
+    """Piecewise-linear monotone map with linear tails, without a gamut clip."""
+    x, y = np.asarray(fit['x']), np.asarray(fit['y'])
+    slopes = np.diff(y)/np.diff(x)
+    indices = np.clip(np.searchsorted(x, values, side='right')-1, 0, len(slopes)-1)
+    return slopes[indices] if derivative else y[indices]+slopes[indices]*(values-x[indices])
+
+
+def fit_tone_map(ours, reference, mask, offset):
+    """Fit on paired 64-px masked means, sampled every 16 px over the overlap.
+
+    Equal-population bins keep the sky from being discarded by bright pixels.
+    The map is fixed by the two INPUTS; no candidate selects its own exposure.
+    """
+    dx, dy = offset; h = min(len(ours)-dy, len(reference)); w = min(ours.shape[1]-dx, reference.shape[1])
+    samples = []
+    for top in range(32, h-32, 256):
+        end = min(top+256, h-32)
+        valid = ~mask[top+dy-32:end+dy+32, dx:dx+w]
+        a, n = masked_box(np.asarray(ours[top+dy-32:end+dy+32, dx:dx+w]), valid, 64)
+        b, _ = masked_box(np.asarray(reference[top-32:end+32, :w]), valid, 64)
+        aa, bb, nn = a[32:-32:16, 32:-32:16], b[32:-32:16, 32:-32:16], n[32:-32:16, 32:-32:16]
+        keep = (nn >= .5) & np.isfinite(aa) & np.isfinite(bb)
+        samples.append(np.column_stack((aa[keep], bb[keep])))
+    sample = np.concatenate(samples); sample = sample[np.argsort(sample[:, 0])]
+    if len(sample) < 128:
+        raise ValueError('too few unmasked paired means for a tone map')
+    bins = [a for a in np.array_split(sample, 128) if len(a)]
+    x = np.array([np.median(a[:, 0]) for a in bins]); y = np.array([np.median(a[:, 1]) for a in bins])
+    weight = np.array([len(a) for a in bins]); keep = np.r_[True, np.diff(x) > 1e-12]
+    x, y, weight = x[keep], y[keep], weight[keep]
+    if len(x) < 2:
+        raise ValueError('constant input cannot define a tone-map slope')
+    y = monotone_knots(x, y, weight)
+    fit = {'x': x.tolist(), 'y': y.tolist(), 'samples': len(sample), 'blur_px': 64,
+           'sample_step_px': 16, 'bins': len(x), 'reference': 'input -> Lightroom OFF'}
+    errors = apply_tone(sample[:, 0], fit)-sample[:, 1]
+    fit['residual_rms'] = rms(errors); fit['residual_median_abs'] = float(np.median(np.abs(errors)))
+    fit['reference_p10_p90'] = np.percentile(sample[:, 1], [10, 90]).tolist()
+    fit['residual_p10_p90'] = np.percentile(errors, [10, 90]).tolist()
+    return fit
 
 
 def acceptance(noise, star, absolute, lrnoise, lrstar, banding):
     width = lambda row: row['fine_y_p10_p90'][1]-row['fine_y_p10_p90'][0]
     values = [abs(noise['fine_y']-lrnoise['fine_y']) <= .03,
               width(noise) <= width(lrnoise)+.02,
-              all(a <= b for a, b in zip(noise['fine_colourfulness'], lrnoise['fine_colourfulness'])),
-              all(a <= b for a, b in zip(noise['mottle_colourfulness'], lrnoise['mottle_colourfulness'])),
+              noise['fine_colourfulness_magnitude'] <= lrnoise['fine_colourfulness_magnitude'],
+              noise['mottle_colourfulness_magnitude'] <= lrnoise['mottle_colourfulness_magnitude'],
               star['faint_retention_percent'] >= lrstar['faint_retention_percent']-.5,
               star['peak_ratio'] >= lrstar['peak_ratio']-.01 and star['fwhm_change'] <= lrstar['fwhm_change'],
               all(a <= b+.01 for a, b in zip(star['core_colour_change'], lrstar['core_colour_change'])),
@@ -333,8 +403,16 @@ def run(args, work):
             radius = max(4, math.ceil(3*fw)) if np.isfinite(fw) else 12
             cv2.circle(mask, (int(x), int(y)), radius, 1, -1)
     mask = mask.astype(bool)
+    if args.fixed_sites:
+        fixed = resolve(args.fixed_sites)
+        mask = np.load(fixed/'star-mask.npy').astype(bool)
+        if mask.shape != images['input'].y.shape:
+            raise ValueError('fixed mask dimensions do not match the input')
+        sites = np.load(fixed/'flat-sites.npy')
+        eligibility = [[int(x), int(y), float(np.mean(~mask[y:y+256, x:x+256])), None] for x, y in sites]
+    else:
+        sites, eligibility = choose_tiles(images['input'].y, mask, roi)
     np.save(work/'star-mask.npy', mask)
-    sites, eligibility = choose_tiles(images['input'].y, mask, roi)
     np.save(work/'flat-sites.npy', sites)
     print('eligible', sum(r[2] >= .7 for r in eligibility), 'selected', len(sites), flush=True)
     raw_noise = {}
@@ -349,6 +427,8 @@ def run(args, work):
         n['fine_y_p10_p90'] = np.percentile(ratio[:, 0], [10, 90]).tolist()
         n['fine_colourfulness'] = np.median(data[:, 7:9]/data[:, 6, None], axis=0).tolist()
         n['mottle_colourfulness'] = np.median(data[:, 4:6]/data[:, 3, None], axis=0).tolist()
+        n['fine_colourfulness_magnitude'] = float(np.median(np.linalg.norm(data[:, 7:9], axis=1)/data[:, 6]))
+        n['mottle_colourfulness_magnitude'] = float(np.median(np.linalg.norm(data[:, 4:6], axis=1)/data[:, 3]))
         im = images[k]; base_im = images['LR-OFF' if k in ('Lightroom', 'LR-OFF') else 'input']
         x, y, w, h = GLOW
         first = im.patch(x, y, w, 32) @ im.w
@@ -400,13 +480,29 @@ def run(args, work):
                    'peak_ratio': float(np.mean(f['excess'][bright]/base['excess'][bright])),
                    'fwhm_change': float(np.mean(f['fwhm'][width_ok]-base['fwhm'][width_ok])),
                    'core_colour_change': np.median(np.abs(chroma[bright]-old_chroma[bright]), axis=0).tolist()}
-    # Absolute matched-star comparisons. No tone/exposure histogram matching.
+    # One input-defined tone map: never refit to a denoised candidate.
+    tone = fit_tone_map(images['input'].y, images['LR-OFF'].y, mask, (32, 20))
+    (work/'tone-map.json').write_text(json.dumps(tone, indent=2), encoding='utf-8')
+    matched_y = {}
+    absolute_detections = {}
+    for k, im in images.items():
+        if k in ('LR-OFF', 'Lightroom'):
+            matched_y[k] = im.y
+        else:
+            path = work/(im.key+'-tone-y.npy')
+            out = np.lib.format.open_memmap(path, mode='w+', dtype=np.float32, shape=im.y.shape)
+            for top in range(0, len(out), 128):
+                out[top:top+128] = apply_tone(im.y[top:top+128], tone)
+            out.flush(); matched_y[k] = out
+        x, y, w, h = roi; dx, dy = im.offset
+        det = detect(matched_y[k], (x-dx, y-dy, w, h), work/(im.key+'-tone-stars.npy')).copy()
+        det[:, :2] += im.offset; absolute_detections[k] = det
     absolute = {}
     for k in paths:
         if k in ('input', 'LR-OFF'):
             continue
         im, lr = images[k], images['Lightroom']
-        aa, bb = detections[k], detections['Lightroom']
+        aa, bb = absolute_detections[k], absolute_detections['Lightroom']
         matched = match_sites(aa, bb); sa, sb = aa[matched[:, 0]], bb[matched[:, 1]]
         fa, fb = fields(im.y, sa[:, :2]-im.offset), fields(lr.y, sb[:, :2]-lr.offset)
         widths_a = []; widths_b = []
@@ -425,7 +521,11 @@ def run(args, work):
         input_snr = fi['excess']/np.maximum(fi['sigma'], 1e-10)
         fm = (input_snr >= 5) & (input_snr < 10)
         colour_excess = np.linalg.norm(ch_a, axis=1)-np.linalg.norm(ch_b, axis=1)
-        contrast_ok = (fa['bg'] > 0) & (fb['bg'] > 0) & (fb['excess'] > 0)
+        ta = fields(matched_y[k], sa[:, :2]-im.offset)
+        tb = fields(matched_y['Lightroom'], sb[:, :2]-lr.offset)
+        contrast_ok = (ta['fine_sigma'] > 0) & (tb['fine_sigma'] > 0) & (tb['excess'] > 0)
+        snr_a = ta['excess']/np.maximum(ta['fine_sigma'], 1e-20)
+        snr_b = tb['excess']/np.maximum(tb['fine_sigma'], 1e-20)
         absolute[k] = {'matched': len(matched), 'ours_count': len(aa), 'lr_count': len(bb),
                        'count_ratio': len(aa)/max(len(bb), 1),
                        'lr_unmatched': len(bb)-len(matched), 'ours_unmatched': len(aa)-len(matched),
@@ -435,8 +535,11 @@ def run(args, work):
                        'minor_width_ratio': float(np.median(wa[usable]/wb[usable])),
                        'minor_width_ratio_of_medians': float(np.median(wa[usable])/np.median(wb[usable])),
                        'contrast_count': int(contrast_ok.sum()),
-                       'contrast_ratio': float(np.median((fa['excess'][contrast_ok]/fa['bg'][contrast_ok])/(fb['excess'][contrast_ok]/fb['bg'][contrast_ok]))),
+                       'contrast_ratio': float(np.median(snr_a[contrast_ok]/snr_b[contrast_ok])),
+                       'contrast_ours': float(np.median(snr_a[contrast_ok])),
+                       'contrast_lr': float(np.median(snr_b[contrast_ok])),
                        'core_chroma_median_abs_delta': np.median(np.abs(ch_a-ch_b), axis=0).tolist(),
+                       'core_chroma_median_delta_magnitude': float(np.median(np.linalg.norm(ch_a-ch_b, axis=1))),
                        'faint_colour_count': int(fm.sum()),
                        'faint_colour_excess_share': float(np.mean(colour_excess[fm] > .05))}
     gates = {k: acceptance(noise[k], star[k], absolute[k], noise['Lightroom'], star['Lightroom'], args.banding)
@@ -451,6 +554,7 @@ def run(args, work):
               'noise': noise, 'stars': star, 'absolute': absolute, 'gates': gates,
               'profile_qualification': {'input_affine_bright': input_linear_count,
                                         'common_unclipped_in_range_bright': int(bright.sum())},
+              'tone_map': tone, 'fixed_sites': args.fixed_sites,
               'banding_inspection': args.banding, 'work': str(work)}
     if args.mask_sheet:
         mask_sheet(images, mask, sites, Path(args.mask_sheet))
@@ -479,8 +583,6 @@ def mask_sheet(images, mask, tiles, path):
         crops = []
         for name in ('input', 'LR-OFF'):
             p = images[name].patch(x, y, 384)
-            if name == 'LR-OFF':
-                p = p @ ADOBE_TO_SRGB.T
             crops.append(encode(p*3))
         for col, (label, p, over) in enumerate((('input', crops[0], False), ('LR OFF', crops[1], False),
                                                 ('input + mask', crops[0], True), ('LR OFF + mask', crops[1], True))):
@@ -498,6 +600,7 @@ def main():
         ap.add_argument('--'+name)
     ap.add_argument('--candidate', action='append', default=[])
     ap.add_argument('--work'); ap.add_argument('--json'); ap.add_argument('--mask-sheet')
+    ap.add_argument('--fixed-sites', help='reuse an input-defined star-mask.npy and flat-sites.npy directory')
     ap.add_argument('--banding', choices=('clear', 'visible', 'unreviewed'), default='unreviewed')
     args = ap.parse_args()
     if not args.root:
@@ -520,8 +623,8 @@ def main():
         ln, ls = result['noise']['Lightroom'], result['stars']['Lightroom']
         width = lambda row: row['fine_y_p10_p90'][1]-row['fine_y_p10_p90'][0]
         pairs = [(n['fine_y'], ln['fine_y']), (width(n), width(ln)),
-                 (n['fine_colourfulness'], ln['fine_colourfulness']),
-                 (n['mottle_colourfulness'], ln['mottle_colourfulness']),
+                 ([n['fine_colourfulness_magnitude'], n['fine_colourfulness']], [ln['fine_colourfulness_magnitude'], ln['fine_colourfulness']]),
+                 ([n['mottle_colourfulness_magnitude'], n['mottle_colourfulness']], [ln['mottle_colourfulness_magnitude'], ln['mottle_colourfulness']]),
                  (st['faint_retention_percent'], ls['faint_retention_percent']),
                  ([st['peak_ratio'], st['fwhm_change']], [ls['peak_ratio'], ls['fwhm_change']]),
                  (st['core_colour_change'], ls['core_colour_change']),

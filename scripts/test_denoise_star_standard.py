@@ -77,7 +77,8 @@ class StarStandardTests(unittest.TestCase):
 
     def test_visual_review_is_required_and_numeric_misses_stay_red(self):
         noise = {'fine_y': .3, 'fine_y_p10_p90': [.29, .31], 'fine_colourfulness': [.1, .1],
-                 'mottle_colourfulness': [.1, .1], 'glow_correlation': 1.0}
+                 'mottle_colourfulness': [.1, .1], 'fine_colourfulness_magnitude': .1415,
+                 'mottle_colourfulness_magnitude': .1415, 'glow_correlation': 1.0}
         star = {'faint_retention_percent': 99., 'peak_ratio': .95, 'fwhm_change': .2,
                 'core_colour_change': [.01, .01]}
         gates = s.acceptance(noise, star, {}, noise, star, 'unreviewed')
@@ -86,6 +87,40 @@ class StarStandardTests(unittest.TestCase):
         candidate = dict(noise, fine_y=.331, fine_y_p10_p90=[.25, .35])
         gates = s.acceptance(candidate, star, {}, noise, star, 'clear')
         self.assertEqual((gates['1'], gates['2']), ('FAIL', 'FAIL'))
+
+    def test_colourfulness_gate_uses_vector_magnitude_not_separate_axes(self):
+        noise = {'fine_y': .3, 'fine_y_p10_p90': [.29, .31],
+                 'fine_colourfulness': [.2, 0], 'fine_colourfulness_magnitude': .2,
+                 'mottle_colourfulness': [.2, 0], 'mottle_colourfulness_magnitude': .2,
+                 'glow_correlation': 1.0}
+        star = {'faint_retention_percent': 99., 'peak_ratio': .95, 'fwhm_change': .2,
+                'core_colour_change': [.01, .01]}
+        rotated = dict(noise, fine_colourfulness=[0, .2], mottle_colourfulness=[0, .2])
+        gates = s.acceptance(rotated, star, {}, noise, star, 'clear')
+        self.assertEqual((gates['3'], gates['4']), ('PASS', 'PASS'))
+        larger = dict(rotated, fine_colourfulness_magnitude=.21, mottle_colourfulness_magnitude=.21)
+        gates = s.acceptance(larger, star, {}, noise, star, 'clear')
+        self.assertEqual((gates['3'], gates['4']), ('FAIL', 'FAIL'))
+
+    def test_tone_map_is_monotone_and_preserves_linear_slope_including_tails(self):
+        fit = {'x': [.1, .3, .7], 'y': [.21, .61, 1.41]}
+        x = np.array([-.1, .1, .2, .5, 1.0])
+        np.testing.assert_allclose(s.apply_tone(x, fit), 2*x+.01, atol=1e-12)
+        np.testing.assert_allclose(s.apply_tone(x, fit, derivative=True), 2, atol=1e-12)
+        y = s.monotone_knots(np.arange(4), np.array([1., 3., 2., 4.]), np.ones(4))
+        np.testing.assert_allclose(y, [1, 2.5, 2.5, 4])
+
+    def test_masked_bright_structure_cannot_change_the_tone_fit(self):
+        y, x = np.mgrid[:640, :640]
+        a = (.01+x*.0001+y*.00005).astype(np.float32)
+        b = 1.5*a+.002
+        mask = np.zeros(a.shape, bool); mask[200:320, 200:320] = True
+        reference = s.fit_tone_map(a, b, mask, (0, 0))
+        a[mask] = 100; b[mask] = -200
+        observed = s.fit_tone_map(a, b, mask, (0, 0))
+        np.testing.assert_allclose(observed['x'], reference['x'])
+        np.testing.assert_allclose(observed['y'], reference['y'])
+        np.testing.assert_allclose(s.apply_tone(np.array([.03, .07]), observed), [.047, .107], atol=1e-6)
 
 
 if __name__ == '__main__':
