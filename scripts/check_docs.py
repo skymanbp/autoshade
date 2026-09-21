@@ -771,6 +771,89 @@ def census_counts(_args: argparse.Namespace) -> Truth | Skip:
     return Truth(values, f"{root} (recursive *.xmp census, XML parser)")
 
 
+# ── The one file we publish ourselves ───────────────────────────────────────
+
+_OWN_PIN = re.compile(
+    r'"(?P<key>[^"]+)":\s*\{\s*'
+    r'"url":\s*f"\{_AUTOSHADE_RELEASE\}/(?P<file>[^"]+)",\s*'
+    r'"sha256":\s*"(?P<sha>[0-9a-f]{64})",\s*'
+    r'"bytes":\s*(?P<bytes>\d+),'
+)
+
+
+def _own_release_pins(src: str) -> list[re.Match[str]]:
+    """The `PINS` entries served from OUR release, not from an upstream host.
+
+    Split out so the self-check below can feed it a synthetic table: a scanner
+    only ever run against the file it already handles proves nothing.
+    """
+    return list(_OWN_PIN.finditer(src))
+
+
+# It must pick our own release and leave upstream pins alone — a scanner that
+# matched everything, or nothing, would make the claim below vacuous.
+_PIN_PROBE = (
+    '_AUTOSHADE_RELEASE = "https://example.invalid/releases/download/v9.8.7"\n'
+    "PINS = {\n"
+    '    "w.pth": {\n'
+    '        "url": f"{_AUTOSHADE_RELEASE}/w.pth",\n'
+    f'        "sha256": "{"a" * 64}",\n'
+    '        "bytes": 1234567,\n'
+    "    },\n"
+    '    "upstream.py": {\n'
+    '        "url": f"{_KAIR_RAW}/deadbeef/upstream.py",\n'
+    f'        "sha256": "{"b" * 64}",\n'
+    '        "bytes": 10,\n'
+    "    },\n"
+    "}\n"
+)
+assert [m.group("file") for m in _own_release_pins(_PIN_PROBE)] == ["w.pth"], (
+    "own-release pin self-check: the scanner no longer separates our release from upstream"
+)
+
+
+def weight_pin(_args: argparse.Namespace) -> Truth:
+    """The RAW denoiser weights: which release holds them, their size and hash.
+
+    Every other entry in `PINS` is somebody else's file at somebody else's
+    revision. This is the one we publish, and it is NOT a build product: no CI
+    job re-cuts it, a human uploads it by hand. v1.5.0 shipped with that upload
+    forgotten and every gate stayed green, because nothing compared README's
+    asset table against the pin the sidecar actually enforces — so a cold-cache
+    machine got a 404 where its denoiser should have been.
+
+    The filename is read FROM the pin rather than written here, so renaming the
+    weights (a v2 fine-tune would) moves the truth with them instead of leaving
+    this extractor hunting a file that no longer exists.
+    """
+    src = text("python/denoise_raw.py")
+    base = re.search(
+        r'_AUTOSHADE_RELEASE = "[^"]+/v(?P<version>\d+\.\d+\.\d+)"', src
+    )
+    if not base:
+        raise LookupError(
+            'python/denoise_raw.py: no `_AUTOSHADE_RELEASE = "…/vX.Y.Z"` — the '
+            "release the weights live in is no longer stated there"
+        )
+    own = _own_release_pins(src)
+    if len(own) != 1:
+        raise LookupError(
+            f"python/denoise_raw.py: {len(own)} pin(s) served from our own release; "
+            "this claim describes exactly one. Extend the row when a second lands "
+            "(a v1 kept beside a v2 would be the obvious case)."
+        )
+    m = own[0]
+    return Truth(
+        (base.group("version"), f"{int(m.group('bytes')):,}", m.group("sha")),
+        f"python/denoise_raw.py:{line_of(src, m.start())} (PINS[{m.group('key')!r}])",
+    )
+
+
+def release_version_only(v: tuple[str, ...]) -> tuple[str, ...]:
+    """The prose link names the release and nothing else; compare just that."""
+    return v[:1]
+
+
 # ── The CLAIMS registry ─────────────────────────────────────────────────────
 
 
@@ -988,6 +1071,25 @@ CLAIMS: list[Claim | SetClaim] = [
         r"(?P<mask_image>\d+)\s*///\s*Mask/Image; (?P<mask_paint>\d+) Mask/Paint; "
         r"(?P<mask_any>\d+) Mask/\*; (?P<gesture>\d+) crs:Gesture",
         census_counts,
+    ),
+    # The weights are the only asset a human uploads by hand, and until now the
+    # only published number no gate re-derived. v1.5.0 is the precedent: the
+    # upload was missed, AI denoise was broken on every cold cache, and the whole
+    # battery was green. These two rows read the pin the sidecar enforces.
+    Claim(
+        README,
+        "RAW denoiser weights — asset table (release, size, SHA-256)",
+        r"\| `[^`]+\.pth` \(RAW denoiser weights, fetched on demand from the "
+        r"v(?P<version>\d+\.\d+\.\d+) release\) \| (?P<size>[\d,]+) bytes \| "
+        r"`(?P<sha>[0-9a-f]{64})` \|",
+        weight_pin,
+    ),
+    Claim(
+        README,
+        "RAW denoiser weights — the release the prose sends you to",
+        r"releases/download/v(?P<version>\d+\.\d+\.\d+)/[^`)\s]+\.pth",
+        weight_pin,
+        release_version_only,
     ),
 ]
 
