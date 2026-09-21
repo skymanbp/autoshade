@@ -131,6 +131,26 @@ class TheNoiseModel(unittest.TestCase):
             self.assertLess(var_clamped, 0.9 * var_true,
                             f"{n}: the rectified fixture must read LOW — that is the defect")
 
+    def test_the_darkest_blocks_pin_the_floor(self):
+        """A night frame in miniature: a sky at one level over a foreground at
+        black. The floor b lives in the foreground, and until 2026-09-21 the
+        admission rule hid every block whose mean sat under 0.002 — a gate from
+        the days when samples below black were clamped. The sky alone is ONE
+        level, so its variance was split by `UNIDENTIFIABLE_SHOT_SHARE` and the
+        foreground was told 1.6× its noise (2.3× on the real frame's B plane)."""
+        rng = np.random.default_rng(16)
+        a, b = 6.5e-4, 2.0e-6
+        clean = np.full((1024, 1024), 0.012, np.float32)
+        clean[512:, :] = 0.0005
+        noisy = clean + rng.normal(0.0, 1.0, clean.shape) * np.sqrt(a * clean + b)
+        planes = {n: noisy.astype(np.float32) for n in denoise_raw.PLANES}
+        with redirect_stderr(io.StringIO()):
+            model = denoise_raw.noise_model(planes)
+        for n in denoise_raw.PLANES:
+            fa, fb = model[n]
+            self.assertAlmostEqual(fb / b, 1.0, delta=0.15, msg=f"{n}: the floor")
+            self.assertAlmostEqual((fa * 0.012 + fb) / (a * 0.012 + b), 1.0, delta=0.1, msg=f"{n}: the sky")
+
     def test_a_frame_with_no_flat_area_is_refused(self):
         # Structured texture everywhere (an 8-px stripe grid): its box-5
         # energy is far above its finest-scale Haar energy, so every block
@@ -188,6 +208,177 @@ class TheModelAffine(unittest.TestCase):
 
     def test_the_operating_point_is_a_named_constant(self):
         self.assertEqual(denoise_raw.SIGMA_SCALE, 1.0)
+
+
+def _unit_noise(rng, shape, level=40.0):
+    """A stabilised plane as step 3 promises it: a level, and unit white noise."""
+    return (level + rng.standard_normal(shape)).astype(np.float32)
+
+
+def _star_field(rng, shape, per_block):
+    """Point sources with N(>S) ~ 1/S from half a sigma up, `per_block` of them
+    above 5 sigma in every 32×32 block, FWHM 1.6 samples."""
+    h, w = shape
+    n = int(per_block * (h // 32) * (w // 32) * 10.0)
+    peak = np.minimum(0.5 / (1.0 - rng.random(n)), 4000.0)
+    img = np.zeros(shape, np.float32)
+    ys, xs = rng.random(n) * (h - 1), rng.random(n) * (w - 1)
+    sg, r = 1.6 / 2.3548, 4
+    for y, x, p in zip(ys, xs, peak):
+        iy, ix = int(round(y)), int(round(x))
+        y0, y1, x0, x1 = max(iy - r, 0), min(iy + r + 1, h), max(ix - r, 0), min(ix + r + 1, w)
+        gy = np.exp(-0.5 * ((np.arange(y0, y1) - y) / sg) ** 2)
+        gx = np.exp(-0.5 * ((np.arange(x0, x1) - x) / sg) ** 2)
+        img[y0:y1, x0:x1] += p * gy[:, None] * gx[None, :]
+    return img
+
+
+class TheNoiseField(unittest.TestCase):
+    """Step 3b. `var = a·x + b` knows the level, not the position, and the
+    network's residual follows the sigma it is told: on the star frame the
+    stabilised noise ran from 0.83 at the centre to 1.34 in the edge cells, and
+    the frame came back flattened in the middle and half-cleaned at its sides
+    (2026-09-20)."""
+
+    CELL = denoise_raw.FIELD_CELL * denoise_raw.BLOCK
+    SHAPE = (6 * 256, 9 * 256)
+
+    def _none_white(self):
+        return np.zeros(self.SHAPE, bool)
+
+    def test_noise_the_model_got_right_reads_one(self):
+        field, measured, cells = denoise_raw.noise_field(_unit_noise(np.random.default_rng(21), self.SHAPE), self._none_white())
+        self.assertEqual(measured, cells)
+        self.assertLess(float(np.abs(field - 1.0).max()), 0.03, "level-only noise must leave the planes as they were")
+
+    def test_a_gain_toward_the_corners_is_recovered_to_the_frames_edge(self):
+        rng = np.random.default_rng(22)
+        h, w = self.SHAPE
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        gain = 1.0 + 0.4 * (((xx - w / 2) / (w / 2)) ** 2 + ((yy - h / 2) / (h / 2)) ** 2) / 2.0
+        z = (40.0 + rng.standard_normal(self.SHAPE) * gain).astype(np.float32)
+        field, measured, cells = denoise_raw.noise_field(z, self._none_white())
+        self.assertEqual(measured, cells)
+        truth = np.sqrt((gain ** 2).reshape(6, self.CELL, 9, self.CELL).mean(axis=(1, 3)))
+        ratio = field / truth
+        self.assertLess(float(np.abs(ratio - 1.0).max()), 0.05, f"{ratio.min():.3f}..{ratio.max():.3f}")
+        # The border is where a weighted MEAN of the neighbours fails: its
+        # neighbourhood is one-sided and the inward cells are the quieter ones.
+        ring = np.ones((6, 9), bool)
+        ring[1:-1, 1:-1] = False
+        self.assertGreater(float(np.median(ratio[ring])), 0.985, "the outer ring reads low")
+
+    def test_the_choice_of_samples_does_not_bias_the_measure(self):
+        """The samples are chosen by LL, LH and HL and measured in HH, which
+        white noise leaves independent of those three. On a field of 6 stars
+        per block the level fit's own rule — box-5 variance against the block's
+        OWN Haar variance — admits nothing, and an unselected pooled MAD reads
+        +6 % (2026-09-21); what is left here is the stars under the mask's
+        threshold, which are signal."""
+        rng = np.random.default_rng(23)
+        z = _star_field(rng, self.SHAPE, 6.0) + _unit_noise(rng, self.SHAPE)
+        sigma, worth = denoise_raw.measured_cells(z, self._none_white())
+        self.assertTrue((worth >= denoise_raw.FIELD_MIN_BLOCKS).all(), "a crowded field must still be measurable")
+        self.assertAlmostEqual(float(np.median(sigma)), 1.0, delta=0.025)
+        self.assertLess(float(sigma.max()), 1.05)
+
+    def test_texture_is_not_read_as_noise_and_the_model_stands_there(self):
+        """A texture the point-source mask cannot see — it sums to zero over
+        every 2×2 quad — that puts energy in the measured band all the same: row
+        stripes (LH) carrying a weaker diagonal term (HH). Read as noise it
+        would say 1.4; the LH / HL spread gives it away."""
+        rng = np.random.default_rng(24)
+        h, w = self.SHAPE
+        z = (40.0 + 1.3 * rng.standard_normal(self.SHAPE)).astype(np.float32)
+        yy, xx = np.mgrid[0:h, 0:w]
+        per_quad = lambda: np.repeat(np.repeat(rng.choice([-1.0, 1.0], (h // 2, w // 2)), 2, 0), 2, 1)
+        texture = (1.0 * (-1.0) ** yy * per_quad() + 0.5 * (-1.0) ** (xx + yy) * per_quad()).astype(np.float32)
+        start = w // 2 + self.CELL
+        z[:, start:] += texture[:, start:]
+        sigma, worth = denoise_raw.measured_cells(z, self._none_white())
+        self.assertTrue((worth[:, 6:] < denoise_raw.FIELD_MIN_BLOCKS).all(), f"texture was admitted as noise: {sigma[:, 6:].max():.2f}")
+        field, _, _ = denoise_raw.noise_field(z, self._none_white())
+        self.assertTrue(np.isfinite(field).all())
+        self.assertLess(float(np.abs(field[:, :4] - 1.3).max()), 0.05)
+        self.assertLess(float(np.abs(field[:, 8] - 1.0).max()), 0.05, "far from any measurement the model stands")
+        # and at plane resolution nothing steps where a cell ends
+        full = denoise_raw.field_at(field, self.SHAPE)
+        self.assertLess(float(np.abs(np.diff(full, axis=1)).max()), 0.002)
+
+    def test_constant_and_clipped_data_are_not_a_noise_level(self):
+        rng = np.random.default_rng(25)
+        z = _unit_noise(rng, self.SHAPE)
+        z[:512, :512] = 40.0                                  # a dead corner: every coefficient identical
+        # A blown corner: the noise is cut off at the white level, so what is
+        # left of it measures 0.5 — and the caller says which samples those are.
+        z[-512:, -512:] = np.minimum(z[-512:, -512:] + 50.0, 90.0)
+        white = z >= 90.0
+        field, measured, cells = denoise_raw.noise_field(z, white)
+        self.assertLess(measured, cells)
+        self.assertGreater(float(field.min()), 0.95, "clipped or constant data was believed")
+        self.assertLess(float(field.max()), 1.05)
+
+    def test_it_is_held_at_the_end_of_its_range(self):
+        for told, held in ((0.2, denoise_raw.FIELD_CLAMP[0]), (3.0, denoise_raw.FIELD_CLAMP[1])):
+            z = (40.0 + told * np.random.default_rng(26).standard_normal(self.SHAPE)).astype(np.float32)
+            field, _, _ = denoise_raw.noise_field(z, self._none_white())
+            self.assertEqual(float(field.min()), held, told)
+            self.assertEqual(float(field.max()), held, told)
+
+
+class TheStabilisedPlanes(unittest.TestCase):
+    """What the network is handed, and the way back from it."""
+
+    A, B = 5.7e-4, 1.6e-6
+
+    def _planes(self, told):
+        """A flat frame whose real noise is `told` × what the model will say,
+        with one sample at the white level in every plane."""
+        rng = np.random.default_rng(31)
+        clean = np.full((1024, 1024), 0.02, np.float32)
+        noisy = clean + told * rng.normal(0.0, 1.0, clean.shape) * np.sqrt(self.A * clean + self.B)
+        noisy[500, 500] = 1.0
+        return {n: np.minimum(noisy, 1.0).astype(np.float32) for n in denoise_raw.PLANES}
+
+    def test_the_round_trip_is_the_identity(self):
+        planes = self._planes(1.0)
+        ab = {n: (self.A, self.B) for n in denoise_raw.PLANES}
+        with redirect_stderr(io.StringIO()):
+            zn, fields, lo, span = denoise_raw.stabilised(planes, ab)
+        back = denoise_raw.destabilised(zn, fields, ab, lo, span)
+        for n in denoise_raw.PLANES:
+            self.assertGreaterEqual(float(zn[n].min()), 0.0)
+            self.assertLessEqual(float(zn[n].max()), 1.0)
+            # `igat` on a noiseless value sits a/4 high, its documented bias;
+            # the GAT's floor (radicand at 0) is the other bound.
+            inside = planes[n] > -self.A * (3.0 / 8.0 + self.B / self.A ** 2)
+            self.assertLess(float(np.abs(back[n] - planes[n])[inside].max()), 0.3 * self.A + 1e-6, n)
+
+    def test_a_sample_at_white_survives_where_the_noise_is_below_the_model(self):
+        """`z / m` passes max gat(1) wherever m < 1. A span that did not widen
+        with the field would put a ceiling under the brightest samples — the
+        v1.4.0 defect `model_affine` exists to prevent, returning by the back
+        door."""
+        planes = self._planes(0.6)
+        ab = {n: (self.A, self.B) for n in denoise_raw.PLANES}
+        with redirect_stderr(io.StringIO()):
+            zn, fields, lo, span = denoise_raw.stabilised(planes, ab)
+        for n in denoise_raw.PLANES:
+            self.assertLess(float(fields[n].max()), 0.7, f"{n}: the fixture must read below the model")
+        back = denoise_raw.destabilised(zn, fields, ab, lo, span)
+        for n in denoise_raw.PLANES:
+            self.assertGreater(float(back[n][500, 500]), 0.999, f"{n}: white came back as {back[n][500, 500]:.4f}")
+
+    def test_one_z_unit_is_still_one_sigma(self):
+        """The field divides the noise to unit variance, so span × the spread
+        of the normalised plane is 1 — the sigma channel's meaning."""
+        planes = self._planes(1.35)
+        ab = {n: (self.A, self.B) for n in denoise_raw.PLANES}
+        with redirect_stderr(io.StringIO()):
+            zn, fields, lo, span = denoise_raw.stabilised(planes, ab)
+        for n in denoise_raw.PLANES:
+            hh = denoise_raw._haar_bands(zn[n][:480, :480] * span)[3]
+            self.assertAlmostEqual(float(np.median(np.abs(hh)) / 0.6745), 1.0, delta=0.03, msg=n)
 
 
 class TheStrength(unittest.TestCase):

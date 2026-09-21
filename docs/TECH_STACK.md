@@ -1797,7 +1797,13 @@ RAW memory without limit.
 
 AI denoise is a pair of optional local sidecars — a non-blind DRUNet on the
 RAW sensor mosaic, whose noise model the sidecar measures on the frame, and
-SCUNet on baked sources. RAW inference uses honest sigma; at the 71% RAW
+SCUNet on baked sources. RAW inference uses honest sigma, honest by position as
+well as by level: each stabilised plane is divided by a noise field the sidecar
+measures per 256-sample cell (finest Haar diagonal band, samples chosen by the
+three orthogonal bands so the choice cannot bias the measure, a local linear
+fit, 1.0 where nothing can be measured) and multiplied back after the network,
+whose weights are unchanged and which, being bias-free, is indifferent to the
+wider span that needs. At the 71% RAW
 default, Rust requests the whole clean mosaic, demosaics and calibrates both
 original and clean through the same path, and returns (1-s) of their linear
 luminance difference equally to R/G/B. Its Y weights come from the working

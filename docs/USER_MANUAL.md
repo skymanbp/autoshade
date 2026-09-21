@@ -220,7 +220,14 @@ SCUNet path, and 3.1–5.9 dB on the most detailed blocks
 (`scripts/denoise_bench.py`). Since v1.5.0 the network is **AutoShade's own**:
 the same architecture, trained for this pipeline on real noisy/clean pairs and
 synthetic sensor noise instead of the general-purpose weights it started from.
-The network now receives the honest measured noise level. The old 0.78 sigma
+The network now receives the honest measured noise level — measured across
+the frame, not only by brightness. Noise is not the same everywhere in a
+picture: on the wide-angle star frames measured it rose toward the corners,
+and a night frame's dark foreground held less than a brightness-only model
+predicts. Told one level for all of it, the denoiser
+smoothed the middle of a star frame flat and left its sides half-cleaned. It
+now measures how the noise varies over the picture and cleans every part by
+its own amount. The old 0.78 sigma
 scale left different amounts of grain at different ISOs; grain now comes back
 explicitly from this frame's removed residual. The map into the model's range
 still comes from the noise model, preserving the v1.4.1 highlight guards.

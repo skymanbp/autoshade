@@ -45,7 +45,8 @@ Method (every step measured in the 2026-09-15 probe, none assumed):
      per block the mean, the white-noise variance (finest-scale Haar diagonal
      detail, MAD / 0.6745, squared) and the box-5 high-pass variance; a block
      is textureless when box5 var <= 1.25 × 0.96 × Haar var (0.96 is the
-     box-5 residual of white noise) and its mean sits in (0.002, 0.9);
+     box-5 residual of white noise) and its mean sits below 0.9 — the darkest
+     blocks are IN, they are what pins b;
      least squares var = a·x + b on those blocks, then `physical_model` — a
      sensor has neither a negative read-noise floor nor a variance that falls
      as signal rises, and an a <= 0 is fatal to step 3's radicand.
@@ -55,6 +56,19 @@ Method (every step measured in the 2026-09-15 probe, none assumed):
      NOISE MODEL — 0, the GAT's own floor, to max gat(1), the largest z any
      plane can reach — never off percentiles of this frame's data, so no real
      sample can fall outside it. `SIGMA_SCALE` × its slope is the sigma.
+  3b. NOISE FIELD. The model knows the level, not the position, and the
+     network's residual follows the sigma it is told. Per 256-sample cell the
+     stabilised noise of four real frames ran 0.74–1.19 of the promised 1.0
+     (5th–95th percentile, the worst plane; 1.34 in a star frame's edge cells),
+     and that frame came back flattened at its centre and half-cleaned at its
+     sides. So each plane's white-noise sigma is measured per cell — in the
+     finest Haar diagonal band, its samples chosen by the three bands white
+     noise leaves independent of that one, so the choice cannot bias the
+     measure — fitted to a smooth field (local linear; 1.0 where nothing can be
+     measured) and divided out: 0.93–1.08 afterwards. The affine's span widens
+     by the field's smallest value, so step 3's bracket still holds (the network
+     is bias-free, hence homogeneous: the scale costs nothing), and the field is
+     multiplied back before step 5.
   4. DRUNet-colour (KAIR's architecture, non-blind: the sigma rides in as a
      4th channel) on two triplets, (R, G1, B) and (R, G2, B); R and B are the
      mean of their two estimates, G1 / G2 come from their own triplet. Since
@@ -274,7 +288,16 @@ def block_statistics(plane):
 
 
 def textureless(m, wv, bv):
-    return (bv <= TEXTURELESS_SLACK * WHITE_BOX5 * wv) & (m > 0.002) & (m < 0.9)
+    """Admission to the level fit. There is no LOWER bound on the mean. Until
+    2026-09-21 a block had to sit above 0.002 — a gate from the days when the
+    samples below black were clamped at 0 and the darkest blocks carried
+    rectified noise. Step 1 has kept those samples since 2026-09-17, and the
+    gate went on hiding the only blocks that pin the floor b: on a night frame
+    45 % of the B plane's flat blocks, whose fit then split one sky level's
+    variance arbitrarily (b = 5.5e-6 against its neighbours' 2.0–2.4e-6) and told
+    the network 2.3× the noise that frame's dark foreground holds. With them,
+    the four planes' floors agree (1.6–2.2e-6) — one sensor, one floor."""
+    return (bv <= TEXTURELESS_SLACK * WHITE_BOX5 * wv) & (m < 0.9)
 
 
 # Relative sampling spread of one block's white-noise variance estimate: a
@@ -402,6 +425,169 @@ def model_affine(ab):
     return lo, max(hi - lo, 1e-6)
 
 
+# ── Noise field (step 3b) ───────────────────────────────────────────────────
+#
+# `var = a·x + b` makes the noise a function of LEVEL alone, and step 3 promises
+# the network unit variance everywhere. Measured 2026-09-21 on four frames of
+# the camera under test, per 256-sample cell of the stabilised planes (5th–95th
+# percentile of the worst plane): 0.83–1.19 on a 20 s ISO-2500 star frame,
+# rising smoothly from its centre to 1.27–1.34 in its edge cells (the pattern a
+# digital shading gain toward the corners would leave — seen on the two
+# wide-open wide-angle frames, not on the 47 mm f/4 one; the cause is not
+# established and nothing below depends on it); 0.74–1.11 and
+# 0.85–1.01 on two more night frames; 0.74–1.04 on a daylight ISO-6400 one. The
+# network turns a sigma under-told by 15 % into a sky residual of 0.21× instead
+# of 0.03× (`SIGMA_SCALE`'s table), so the star frame came back flattened at
+# its centre (a median 0.02–0.04 of the input's white noise left per plane)
+# and half-cleaned at its sides (0.21–0.29 in the two outer columns of cells,
+# up to 0.42–0.51), and across three night frames the residual followed
+# the measured sigma (Spearman 0.85 / 0.72 / 0.62), not the level (−0.21 /
+# 0.51 / 0.69 — the sign is not even stable).
+#
+# So each stabilised plane is measured where it can be and divided by a smooth
+# field of that measurement. The noise is unit variance again at every position
+# and in every plane — 0.96–1.03, 0.94–1.04, 0.97–1.03 and 0.93–1.08 on those
+# four frames — so ONE sigma is again the truth, and nothing is assumed about
+# WHY it varied. Where nothing can be measured the model stands.
+FIELD_CELL = 8             # blocks per cell side: 8 × 32 = 256 plane samples (512 sensor px)
+FIELD_POINT_SIGMA = 3.0    # a quad whose sum stands this far over its block's median holds a point source
+FIELD_MIN_KEPT = 0.5       # share of a block's quads that must survive that mask for the block to speak
+FIELD_MIN_BLOCKS = 8       # blocks' worth of kept coefficients a cell needs: 2048 of them put its sigma within 2.6 %
+FIELD_SMOOTH_CELLS = 1.0   # sigma of the Gaussian that weighs a cell's neighbours in the local fit, in cells
+FIELD_PRIOR_BLOCKS = 0.5   # weight of the prior (sigma 1.0, no slope) that an unmeasured neighbourhood falls back to
+# What the field may say: half to twice the model. The cells of the four frames
+# span 0.70–1.40 (0.41–1.62 before the level fit took the darkest blocks). A
+# digital shading gain g leaves the noise between √g and g of what the model
+# expects at the gained level, so 2.0 is a corner one stop down, fully
+# compensated, in the read-limited shadows where that costs most. Past either
+# end the measurement is not believed; it is HELD at the end, so nothing jumps.
+FIELD_CLAMP = (0.5, 2.0)
+
+
+def _haar_bands(x):
+    """The four finest-scale Haar bands of `x`, orthonormal: (LL, LH, HL, HH),
+    one value per 2×2 quad. White Gaussian noise of std s has std s in each of
+    them and the four are INDEPENDENT of one another — which is what lets
+    `noise_field` choose its samples by three of them and measure the fourth."""
+    h, w = x.shape[0] // 2 * 2, x.shape[1] // 2 * 2
+    a, b, c, e = x[0:h:2, 0:w:2], x[0:h:2, 1:w:2], x[1:h:2, 0:w:2], x[1:h:2, 1:w:2]
+    return (a + b + c + e) / 2.0, (a + b - c - e) / 2.0, (a - b + c - e) / 2.0, (a - b - c + e) / 2.0
+
+
+def _cell_sigma(hh, use):
+    """Per cell: (MAD sigma of the coefficients `use` marks, how many those are)."""
+    q = FIELD_CELL * BLOCK // 2
+    cy, cx = -(-hh.shape[0] // q), -(-hh.shape[1] // q)
+    grid = np.full((cy * q, cx * q), np.nan, np.float32)
+    grid[: hh.shape[0], : hh.shape[1]] = np.where(use, hh, np.nan)
+    cells = grid.reshape(cy, q, cx, q).transpose(0, 2, 1, 3).reshape(cy, cx, -1)
+    count = np.isfinite(cells).sum(axis=2)
+    sigma = np.ones((cy, cx), np.float32)
+    some = count > 0
+    if some.any():
+        v = cells[some]
+        sigma[some] = np.nanmedian(np.abs(v - np.nanmedian(v, axis=1, keepdims=True)), axis=1) / 0.6745
+    return sigma, count
+
+
+def measured_cells(z, white):
+    """Per cell of `FIELD_CELL`² blocks of one stabilised plane: (the white-noise
+    sigma measured there, how many blocks' worth of coefficients it rests on).
+    `white` marks the samples at the white level, whose noise is clipped.
+
+    The samples are CHOSEN by the bands orthogonal to the one that is MEASURED.
+    Step 2's rule — box-5 variance against the block's own Haar variance —
+    admits a block because its Haar variance came out high as readily as
+    because the block is flat, and on a star field, where hardly a block is
+    free of stars, the blocks it admits are the ones that fluctuated upward:
+    measured 2026-09-21 on a scene with known noise, +2.8 % at the star frame's
+    centre and +5 % on a synthetic field of 3 stars per block, and at 6 per
+    block it admits nothing at all. A pooled MAD with no selection reads +6 %
+    and +13 % at 6 and 12 stars per block. Choosing by LL (point sources) and
+    by LH / HL (texture), which white noise leaves independent of HH, cannot
+    bias HH whatever share survives: within 0.7 % on every real scene tried,
+    +1.4 % and +3.1 % at 6 and 12 stars per block (the stars under the mask's
+    threshold, which are signal), and nothing measured — so the model stands —
+    at 24."""
+    import cv2
+
+    q = BLOCK // 2
+    ll, lh, hl, hh = (_blocks(band, q) for band in _haar_bands(z))
+    bh, bw = hh.shape[:2]
+    flat = lambda blocks: blocks.transpose(0, 2, 1, 3).reshape(bh * q, bw * q)
+    per_quad = lambda cells: np.repeat(np.repeat(cells, FIELD_CELL * q, 0), FIELD_CELL * q, 1)[: bh * q, : bw * q]
+    w = white[: bh * BLOCK, : bw * BLOCK]
+    clipped = w[0::2, 0::2] | w[0::2, 1::2] | w[1::2, 0::2] | w[1::2, 1::2]
+    hh_q = flat(hh)
+
+    # Point sources: a quad whose sum stands over its block's median. The
+    # yardstick is the cell's own sigma with nothing masked yet — a little high
+    # on a crowded field, which only makes the mask a little shy.
+    rough, _ = _cell_sigma(hh_q, ~clipped)
+    excess = flat(ll - np.median(ll, axis=(2, 3), keepdims=True))
+    lit = cv2.dilate((excess > FIELD_POINT_SIGMA * per_quad(rough)).astype(np.uint8), np.ones((3, 3), np.uint8))
+    keep = ~(lit.astype(bool) | clipped)
+
+    # Texture: a block whose LH / HL spread, over the quads that are left,
+    # exceeds what the cell's noise alone puts there. MAD against MAD: real
+    # sensor noise is heavy-tailed (on the star frame the classical variance of
+    # HH is 1.14–1.33× its MAD²), and a mean of squares held against a MAD calls
+    # that texture — it rejected most of a plain sky.
+    reference, _ = _cell_sigma(hh_q, keep)
+    kept_b = _blocks(keep, q)
+
+    def spread(band):
+        # A block with nothing kept cannot be admitted below; zeros keep its
+        # all-NaN slice away from `nanmedian`.
+        v = np.where(kept_b | ~kept_b.any(axis=(2, 3), keepdims=True), np.where(kept_b, band, 0.0), np.nan).reshape(bh, bw, -1)
+        return (np.nanmedian(np.abs(v - np.nanmedian(v, axis=2, keepdims=True)), axis=2) / 0.6745) ** 2
+
+    allowed = TEXTURELESS_SLACK * _blocks(per_quad(reference), q)[:, :, 0, 0] ** 2
+    admitted = (kept_b.sum(axis=(2, 3)) >= FIELD_MIN_KEPT * q * q) & ((spread(lh) + spread(hl)) / 2.0 <= allowed)
+
+    sigma, count = _cell_sigma(hh_q, keep & np.repeat(np.repeat(admitted, q, 0), q, 1))
+    return sigma, count.astype(np.float32) / float(q * q)
+
+
+def noise_field(z, white):
+    """`measured_cells` as a smooth field: 1.0 where the model is right or
+    nothing can be measured. Returns (field, measured cells, all cells).
+
+    A local LINEAR fit per cell, its neighbours weighted by a Gaussian and by
+    what they kept. A weighted MEAN (zeroth order) was measured first: at the
+    frame's border its neighbourhood is one-sided, the inward cells are the
+    quieter ones, and the star frame's outer ring came back 3–4 % under-told at
+    the median and 9–11 % at its 95th percentile — where the defect this field
+    exists for is largest. Under the linear fit that ring reads 1.001–1.005."""
+    sigma, blocks_worth = measured_cells(z, white)
+    # A MAD of exactly 0 says more than half the coefficients are identical:
+    # clipped or constant data, not a noise level.
+    measured = (blocks_worth >= FIELD_MIN_BLOCKS) & (sigma > 0.0)
+    cy, cx = sigma.shape
+    yy, xx = (g.ravel().astype(np.float64) for g in np.mgrid[0:cy, 0:cx])
+    dy, dx = yy[None, :] - yy[:, None], xx[None, :] - xx[:, None]          # (cell fitted, cell speaking)
+    k = (np.where(measured, blocks_worth, 0.0).ravel()[None, :]
+         * np.exp(-(dy ** 2 + dx ** 2) / (2.0 * FIELD_SMOOTH_CELLS ** 2)))
+    design = np.stack([np.ones_like(dy), dy, dx], axis=2)
+    # The prior is one more observation at the fitted cell itself: sigma 1.0 and
+    # no slope. Where cells speak it weighs nothing; where none do it is all.
+    lhs = np.einsum("ij,ijk,ijl->ikl", k, design, design) + FIELD_PRIOR_BLOCKS * np.eye(3)
+    rhs = np.einsum("ij,ijk,j->ik", k, design, np.where(measured, sigma, 1.0).ravel().astype(np.float64))
+    rhs[:, 0] += FIELD_PRIOR_BLOCKS
+    field = np.linalg.solve(lhs, rhs[:, :, None])[:, 0, 0].reshape(cy, cx)
+    return np.clip(field, *FIELD_CLAMP).astype(np.float32), int(measured.sum()), int(measured.size)
+
+
+def field_at(field, shape):
+    """`noise_field`'s cell grid at plane resolution (bilinear between cell
+    centres, held flat past the outermost ones)."""
+    import cv2
+
+    cell_px = FIELD_CELL * BLOCK
+    full = cv2.resize(field, (field.shape[1] * cell_px, field.shape[0] * cell_px), interpolation=cv2.INTER_LINEAR)
+    return full[: shape[0], : shape[1]]
+
+
 # ── Model ───────────────────────────────────────────────────────────────────
 
 def fetch_pinned(name, cache_dir):
@@ -506,8 +692,9 @@ class _nullctx:
         return False
 
 
-def denoise_planes(model, planes, ab, device, tile, overlap, fp16):
-    """Steps 3–5 on the four normalised planes → the four denoised planes."""
+def stabilised(planes, ab):
+    """Steps 3 and 3b on the four normalised planes → ({plane: the [0,1] plane
+    the network sees}, the noise fields, lo, span)."""
     z = {n: gat(p, *ab[n]) for n, p in planes.items()}
     # `model_affine` — from the noise model, never from this frame's data. The
     # 0.05 / 99.95 percentiles it replaced put a hard ceiling at igat(top): on a
@@ -515,24 +702,50 @@ def denoise_planes(model, planes, ab, device, tile, overlap, fp16):
     # plane, so every star came back as the same grey dot, keeping 9.7 % of its
     # excess over the sky against Lightroom's 100 % (measured 2026-09-17).
     lo, span = model_affine(ab)
+    # Step 3b: divide each plane by its measured noise field, so one sigma is
+    # true everywhere. `z / m` passes `max gat(1)` wherever m < 1, and a ceiling
+    # below the brightest sample is the v1.4.0 defect `model_affine` exists to
+    # prevent — so the span widens by the smallest m any plane holds. That is
+    # not a percentile of the frame coming back: `FIELD_CLAMP` bounds the field
+    # whatever the frame contains, and gat(1) / min(m) still brackets every
+    # sample a plane can hold. One z'-unit is still one sigma. And the wider
+    # span costs nothing: the network has no bias terms and only ReLUs
+    # (`load_model`), so it is positively homogeneous — planes and sigma channel
+    # scaled by one c come back scaled by c. Measured 2026-09-21 on a 768² crop
+    # of the star frame: c = 0.43 moves the output by under 0.003 z-units rms.
+    fields = {}
+    for n in PLANES:
+        fields[n], measured, cells = noise_field(z[n], planes[n] >= 1.0)
+        log(f"noise field {n}: {fields[n].min():.3f}..{np.median(fields[n]):.3f}..{fields[n].max():.3f} "
+            f"(min..median..max), {measured}/{cells} cells measured")
+    span /= min(float(f.min()) for f in fields.values())
+    zn = {n: np.clip((z[n] / field_at(fields[n], z[n].shape) - lo) / span, 0.0, 1.0).astype(np.float32)
+          for n in PLANES}
+    return zn, fields, lo, span
+
+
+def destabilised(zn, fields, ab, lo, span):
+    """The way back from the network's [0,1]: to z', times the field — it
+    scaled the noise, it is not part of the signal — then the exact inverse."""
+    return {n: np.clip(igat((zn[n] * span + lo) * field_at(fields[n], zn[n].shape), *ab[n]), 0.0, 1.0).astype(np.float32)
+            for n in PLANES}
+
+
+def denoise_planes(model, planes, ab, device, tile, overlap, fp16):
+    """Steps 3–5 on the four normalised planes → the four denoised planes."""
+    zn, fields, lo, span = stabilised(planes, ab)
     sigma = SIGMA_SCALE / span
     log(f"model sigma {sigma:.4f} ({sigma*255:.2f}/255) over z range {lo:.1f}..{lo+span:.1f} "
         f"at scale {SIGMA_SCALE:g}")
-
-    def norm(a):
-        return np.clip((a - lo) / span, 0.0, 1.0).astype(np.float32)
-
-    estimates = {}
-    for g in ("G1", "G2"):
-        rgb = np.stack([norm(z["R"]), norm(z[g]), norm(z["B"])], axis=2)
-        estimates[g] = run_tiled(model, rgb, sigma, device, tile, overlap, fp16) * span + lo
-    dz = {
+    estimates = {g: run_tiled(model, np.stack([zn["R"], zn[g], zn["B"]], axis=2), sigma, device, tile, overlap, fp16)
+                 for g in ("G1", "G2")}
+    cleaned = {
         "R": (estimates["G1"][:, :, 0] + estimates["G2"][:, :, 0]) / 2.0,
         "G1": estimates["G1"][:, :, 1],
         "G2": estimates["G2"][:, :, 1],
         "B": (estimates["G1"][:, :, 2] + estimates["G2"][:, :, 2]) / 2.0,
     }
-    return {n: np.clip(igat(dz[n], *ab[n]), 0.0, 1.0).astype(np.float32) for n in PLANES}
+    return destabilised(cleaned, fields, ab, lo, span)
 
 
 def blend_and_quantise(x_in, x_den, strength, black, white):

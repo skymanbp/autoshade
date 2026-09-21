@@ -86,7 +86,8 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
   (gpt-image-2), retouch, heal and AI denoise are the only paths that can
   invent or alter scene content, and are marked so; a denoise lands as its
   own card and never rewrites the original. RAW denoise uses honest measured
-  noise and returns the frame's own luminance grain at its 71% default, after
+  noise — measured across the frame, not only by brightness — and returns the
+  frame's own luminance grain at its 71% default, after
   demosaic in linear light, keeping clean chroma at every positive strength.
   Higher is cleaner; 100% is the complete network output, 0% the input.
   Era 2 resets RAW choices once; baked SCUNet choices are preserved separately.

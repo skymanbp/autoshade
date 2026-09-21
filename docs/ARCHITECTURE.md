@@ -610,7 +610,33 @@
 > per plane and every star came back as the same grey dot, keeping 9.7 % of
 > its excess over the sky against Lightroom's 100 % (2026-09-17). The sigma
 > handed to the model is now the affine's slope itself (sigma = 1.0 / span),
-> the condition AutoShade's fine-tuned weights were trained for. The historical
+> the condition AutoShade's fine-tuned weights were trained for. Since
+> 2026-09-21 that one sigma is true by POSITION as well as by level
+> (`denoise_raw.noise_field`, the sidecar's step 3b). `var = a·x + b` knows
+> nothing of where a sample sits, and per 256-sample cell the stabilised noise
+> of four real frames ran 0.74-1.19 of the promised 1.0 (1.34 in a star
+> frame's edge cells); the network's residual follows the sigma it is told, so
+> that frame came back flattened at its centre and half-cleaned at its sides
+> (a median 0.29 of the input's white noise left in its two outer columns of
+> cells, up to 0.51, against 0.04 inside).
+> Each stabilised plane is now measured per cell in the finest Haar diagonal
+> band — its samples CHOSEN by the three bands white noise leaves independent
+> of that one (LL for point sources, LH / HL for texture, MAD against MAD), so
+> the choice cannot bias the measure: step 2's own rule reads +5 % on a field
+> of 3 stars per block and admits nothing at 6 — fitted to a smooth field
+> (local LINEAR per cell, because a weighted mean under-tells a star frame's
+> outer ring by 3-4 %; 1.0 where nothing can be measured; held to 0.5-2.0),
+> divided out before the network and multiplied back before the inverse. The
+> affine's span widens by the field's smallest value, so `model_affine`'s
+> bracket still holds; the network is bias-free and ReLU-only, hence positively
+> homogeneous, so the wider span costs nothing (c = 0.43 moves its output by
+> under 0.003 z-units). Afterwards the same cells read 0.93-1.08 and that
+> frame's residual is at most 0.070 anywhere. The level fit itself lost a gate
+> the same day: `textureless` had kept out every block whose mean sat under
+> 0.002 — a rule from when samples below black were clamped — which hid the
+> only blocks that pin the floor `b` on a night frame (45 % of one B plane's
+> flat blocks; its `b` came out 2.5x its neighbours' and the dark foreground
+> was told 2.3x its noise). With them the four planes' floors agree. The historical
 > four-measurement scale table remains in python/denoise_raw.py; the old 0.78
 > operating point left 0.42 / 0.25 / 0.11 of the full-frame astro input grain
 > across ISO 2500 / 3200 / 8000. The renderer always requests the whole clean
