@@ -1535,7 +1535,7 @@ struct DevelopReq {
     #[serde(default)]
     denoise: bool,
     /// Absent = the default of the path the photo takes
-    /// (`denoise::default_strength_for`): 1.0 for a RAW, whose mosaic the
+    /// (`denoise::default_strength_for`): 0.71 for a RAW, whose mosaic the
     /// DRUNet path denoises, 0.5 for a baked source on the SCUNet path — the
     /// same answers the CLI gives.
     #[serde(default)]

@@ -62,6 +62,14 @@
 //! constant below is deliberately per-corpus and a single 150 MP file can
 //! exceed it on its own.
 //!
+//! Luminance-return follow-up (2026-09-20): the same 60.2 MP render probe,
+//! with a CPU stand-in publishing a captured clean mosaic, measured 1765 MiB
+//! / 5.131 s at denoise strength 1 and 1996 MiB / 10.247 s at 0.71, each in a
+//! fresh process. The extra Y plane raises commit by 231 MiB. These figures
+//! exclude the sidecar process. Batch render requests no AI denoise, so its
+//! ordinary 1800 MB budget still describes its path. The opt-in RAW return
+//! has its own conservative per-file ceiling allowance in decode.rs.
+//!
 //! What the same measurement REFUTES is accumulation. Over 11 consecutive
 //! photos the peak-commit high-water mark moved 1771.3 -> 1772.3 MB (+1.0 MB
 //! total) and the resident commit BETWEEN photos sat at 12.2-12.6 MB. A leak
@@ -809,11 +817,17 @@ mod tests {
                 ..Default::default()
             };
             let out = out_dir.join("autoshade-peak-probe.tif");
+            // Optional denoise uses the same probe and can point at a captured
+            // clean-mosaic stub: memory measurement does not require a GPU.
+            let denoise = crate::config::live_env("AUTOSHADE_PEAK_PROBE_DENOISE_STRENGTH")
+                .map(|s| s.parse::<f32>().expect("probe strength is a number in 0..1"))
+                .map(|s| crate::denoise::DenoiseOpts::from_config(&crate::config::Config::load(), None, s));
+            let started = std::time::Instant::now();
             let dims =
-                crate::render::render_to_file(&raw, &recipe, &out, None, None, crate::diag::stderr())
+                crate::render::render_to_file(&raw, &recipe, &out, denoise.as_ref(), None, crate::diag::stderr())
                     .expect("render");
             let _ = std::fs::remove_file(&out);
-            println!("  render  peak commit {:>6} MB (saved {dims:?})", peak_commit_mb());
+            println!("  render  peak commit {:>6} MB (saved {dims:?}), wall {:.3} s", peak_commit_mb(), started.elapsed().as_secs_f64());
         }
         let peak = peak_commit_mb();
         println!(

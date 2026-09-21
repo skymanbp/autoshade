@@ -210,8 +210,9 @@ enum Command {
         /// noise level measured on the frame); a baked source takes SCUNet.
         #[arg(long)]
         denoise: bool,
-        /// Denoise strength 0..1. RAW: a blend in the RAW domain, default 1.0
-        /// (`denoise::DEFAULT_STRENGTH_RAW`). Baked source: luminance blend,
+        /// Denoise strength 0..1. RAW: default 0.71; higher removes more luminance grain.
+        /// Every positive strength keeps clean colour; 0 leaves the input untouched.
+        /// Baked source: luminance blend,
         /// colour noise removed in full from 0.5 up, default 0.5.
         #[arg(long, requires = "denoise", value_parser = unit_interval)]
         denoise_strength: Option<f32>,
@@ -236,8 +237,9 @@ enum Command {
         /// Output path (default: ./out/<stem>.denoised.tif).
         #[arg(short, long)]
         out: Option<PathBuf>,
-        /// Strength 0..1. RAW: a blend in the RAW domain, default 1.0
-        /// (`denoise::DEFAULT_STRENGTH_RAW`). Baked image: luminance blend,
+        /// Strength 0..1. RAW: default 0.71; higher removes more luminance grain.
+        /// Every positive strength keeps clean colour; 0 leaves the input untouched.
+        /// Baked image: luminance blend,
         /// colour noise removed in full from 0.5 up, default 0.5.
         #[arg(long, value_parser = unit_interval)]
         strength: Option<f32>,
