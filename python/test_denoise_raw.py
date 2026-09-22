@@ -420,7 +420,7 @@ class ThePins(unittest.TestCase):
     def test_every_download_has_a_digest_a_byte_count_and_a_pinned_source(self):
         self.assertEqual(
             sorted(denoise_raw.PINS),
-            ["autoshade-raw-denoise-v1.pth", "basicblock.py", "network_unet.py"])
+            ["autoshade-raw-denoise-v2.pth", "basicblock.py", "network_unet.py"])
         for name, pin in denoise_raw.PINS.items():
             self.assertEqual(len(pin["sha256"]), 64, name)
             self.assertTrue(all(c in "0123456789abcdef" for c in pin["sha256"]), name)

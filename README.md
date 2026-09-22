@@ -523,11 +523,13 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 The v1.5.1 release is built by GitHub Actions from the tag: the Windows front
 ends, two macOS universal (arm64 + x86_64) archives and a Linux x64
 command-line archive; `checksums.txt` carries the SHA-256 of every asset.
-One file the app uses is not a build product and is not re-published with each
-release: `autoshade-raw-denoise-v1.pth`, the trained RAW denoiser, stays where
-v1.5.0 published it —
-[`releases/download/v1.5.0/autoshade-raw-denoise-v1.pth`](https://github.com/skymanbp/autoshade/releases/download/v1.5.0/autoshade-raw-denoise-v1.pth),
-the address the sidecar's pin names.
+One file the app uses is not a build product: `autoshade-raw-denoise-v2.pth`,
+the trained RAW denoiser, is uploaded by hand to the release the sidecar's pin
+names —
+[`releases/download/v1.5.2/autoshade-raw-denoise-v2.pth`](https://github.com/skymanbp/autoshade/releases/download/v1.5.2/autoshade-raw-denoise-v2.pth)
+— and a byte-exact copy of it on Hugging Face
+([`Azng0/autoshade-mirror-autoshade-raw-denoise`](https://huggingface.co/Azng0/autoshade-mirror-autoshade-raw-denoise))
+is tried first.
 The AI denoise sidecar fetches it on demand and refuses it unless its SHA-256
 and byte count match the values pinned in `python/denoise_raw.py`, so nothing is
 unpickled on trust.
@@ -541,7 +543,7 @@ unpickled on trust.
 | `AutoShade-1.5.1-macos-universal.zip` (macOS app bundle) | 41,347,903 bytes | `7a5e515515e1eccaf14f98e969d0e33da1ba16b325dc9156fcbf61607820528b` |
 | `AutoShade-1.5.1-linux-x64.zip` (Linux command line only) | 9,945,324 bytes | `86bdb2a660d7dade6ceafb8715ca5fd15bb6e6944f7189f636d701299493b298` |
 | `AutoShade-1.5.1-macos-cli.zip` (macOS command line only) | 17,976,235 bytes | `f095a5519facbde4c2fa5cdf97308345131692a409537a8861f9b7107bff7f21` |
-| `autoshade-raw-denoise-v1.pth` (RAW denoiser weights, fetched on demand from the v1.5.0 release) | 130,585,417 bytes | `6929ddd6b11b3f27baf3537d92a4552a6a5c39d53ff4167e4f7df26e80413a99` |
+| `autoshade-raw-denoise-v2.pth` (RAW denoiser weights, fetched on demand from the v1.5.2 release) | 130,590,559 bytes | `ffafa40a53f52092149db2fcf03636117ad6855e1068142d4f6b03b634e9f9c4` |
 
 Download from the
 [v1.5.1 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.5.1):
@@ -901,9 +903,10 @@ covered by the MIT license, omit EXIF and carry no watermark.
 
 The GUI bundles subset Noto faces under the SIL Open Font License (texts under
 `assets/fonts/`); model weights download separately and remain their authors'
-property. The one exception is `autoshade-raw-denoise-v1.pth`, this project's
+property. The one exception is `autoshade-raw-denoise-v2.pth`, this project's
 own fine-tune of DPIR's architecture, which ships as a release asset under this
-project's licence with its training sources credited below.
+project's licence with its training sources credited below (and, since v1.5.2,
+has a copy of ours on Hugging Face like every other pinned download).
 
 Every pinned model also has a **byte-exact copy of ours** on Hugging Face
 (`Azng0/autoshade-mirror-*`), which the sidecars try before the upstream host.
@@ -918,7 +921,7 @@ second source of truth. The table is [`python/_mirror.py`](python/_mirror.py).
 | Model | Purpose | License |
 |---|---|---|
 | SCUNet | AI denoise (baked sources) | Apache-2.0 |
-| DRUNet-colour architecture (DPIR); the weights are fine-tuned here and shipped as `autoshade-raw-denoise-v1.pth` | AI denoise (RAW sensor mosaic) | MIT (architecture and this project's weights); fine-tuning pairs from RawNIND, CC BY-SA 4.0 |
+| DRUNet-colour architecture (DPIR); the weights are fine-tuned here and shipped as `autoshade-raw-denoise-v2.pth` | AI denoise (RAW sensor mosaic) | MIT (architecture and this project's weights); fine-tuning pairs from RawNIND, CC BY-SA 4.0 |
 | BiRefNet | Subject segmentation | MIT |
 | U²-Net | Subject fallback | Apache-2.0 |
 | OneFormer ADE20K | Sky segmentation | MIT |

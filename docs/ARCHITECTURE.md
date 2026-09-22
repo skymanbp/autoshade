@@ -885,8 +885,9 @@
 > `_reclaim_stale_parts`, `_fetch_verified` — and the other five reach it
 > instead of reimplementing it, which is why their progress lines announce
 > themselves as `[denoise]`. `python/denoise_raw.py` (2026-09-15) fetches its
-> own DRUNet weights (`autoshade-raw-denoise-v1.pth`, a release asset since
-> v1.5.0) and the two KAIR network files through the same
+> own DRUNet weights (`autoshade-raw-denoise-v2.pth` since v1.5.2, a release
+> asset with a copy of ours on Hugging Face tried first; v1.5.0–v1.5.1 fetched
+> the v1 fine-tune) and the two KAIR network files through the same
 > `_fetch_verified`, each sha256- and byte-pinned, and builds the model from a
 > synthetic `models` package so the pinned files import as they do upstream.
 >
@@ -926,7 +927,7 @@
 > | sidecar | bridge | model(s) | licence | size |
 > |---|---|---|---|---|
 > | `denoise.py` | `denoise.rs` | SCUNet ×5 | Apache-2.0 (KAIR) | ~72 MB each |
-> | `denoise_raw.py` | `denoise.rs` (`denoise_mosaic`, the RAW path before demosaic) | **`autoshade-raw-denoise-v1.pth`** — DPIR's DRUNet-colour fine-tuned here, sha256-pinned with its two KAIR network files | MIT (this project's weights; KAIR code MIT); fine-tuned on RawNIND, CC BY-SA 4.0 | 130,585,417 B |
+> | `denoise_raw.py` | `denoise.rs` (`denoise_mosaic`, the RAW path before demosaic) | **`autoshade-raw-denoise-v2.pth`** — DPIR's DRUNet-colour fine-tuned here (v2: continued with point sources on the clean side), sha256-pinned with its two KAIR network files | MIT (this project's weights; KAIR code MIT); fine-tuned on RawNIND, CC BY-SA 4.0 | 130,590,559 B |
 > | `segment.py --target subject` | `segment.rs` | **BiRefNet** (general checkpoint), sha256-pinned | MIT | 444,473,596 B |
 > | `segment.py --target subject` (fallback) | `segment.rs` | U²-Net via a NAMED rembg session | Apache-2.0 | small |
 > | `segment.py --target sky` | `segment.rs` | **OneFormer ADE20K Swin-L**, sha256-pinned | MIT (weights) | 881,196,376 B |

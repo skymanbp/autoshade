@@ -20,7 +20,8 @@ Shards: pairs_{split}_{k}.npy (N, 8, P, P) float16 = noisy 4 planes then clean
 Split `val` = the dataset's own unknown_sensor + test_reserve scenes; `train`
 = everything else. Scene names never leave this process.
 Provenance — AutoShade v1.5.0. This is the pipeline that produced
-`autoshade-raw-denoise-v1.pth`, the weights `python/denoise_raw.py` ships:
+`autoshade-raw-denoise-v1.pth` and, continued from it with point sources in v1.5.2,
+the `autoshade-raw-denoise-v2.pth` that `python/denoise_raw.py` ships:
 DPIR's released `drunet_color` (KAIR, MIT) fine-tuned for that sidecar's own
 transform, so nothing is learned that inference cannot reproduce. The real
 training pairs are RawNIND (Brummer & De Vleeschouwer, UCLouvain Dataverse,

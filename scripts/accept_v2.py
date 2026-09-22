@@ -99,8 +99,8 @@ def judge(value, direction, line):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--run", help="a training output directory; its best_state.pth is the candidate")
-    ap.add_argument("--weights", help="the candidate state dict, if not --run/best_state.pth")
+    ap.add_argument("--run", help="a training output directory; its last.pt is the candidate (best_state.pth only when there is no last.pt)")
+    ap.add_argument("--weights", help="the candidate state dict, if not --run")
     ap.add_argument("--out", help="where flux-truth.json goes (default: <run>/accept)")
     ap.add_argument("--reuse", action="store_true", help="read an existing flux-truth.json instead of measuring")
     args = ap.parse_args()
