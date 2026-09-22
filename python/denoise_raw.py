@@ -78,7 +78,17 @@ Method (every step measured in the 2026-09-15 probe, none assumed):
      the stabilised z domain the model actually sees (`scripts/train_raw.py`).
      It is trained for THIS transform, so it beats the generic weights by
      1.98 dB on held-out pairs at the former 0.78 operating point and by 7.8 dB on
-     the noisiest bin at its own.
+     the noisiest bin at its own. Since v1.5.2 the weights are v2 of that
+     fine-tune: the v1 network had never seen a star and removed faint ones
+     as noise (`scripts/denoise_flux_truth.py`, a synthetic-truth probe, found
+     10 % of a 4σ star's flux and 42 % of a 6σ one surviving), so v2 continues
+     the training with point sources injected on the clean side
+     (`train_raw.py --stars 0.5 --loss l2x`, 60000 steps, the step-50000
+     checkpoint): 54 % and 84 % survive, the star-free sky stays within
+     0.17 DN of the input's, the bench's detail windows read 0.05–0.06 dB
+     under v1, and the star-frame standard loses no line v1 passes (bright
+     star peaks sit 13 % under the input's against v1's 7 %; both were
+     already outside that line).
   5. Exact unbiased inverse of the GAT (Mäkitalo & Foi 2013): with D the
      denormalised z, I_A(D) = ¼D² + ¼√(3/2)·D⁻¹ − 11/8·D⁻² + 5/8√(3/2)·D⁻³ − 1/8
      and x̂ = a·(I_A(D) − b/a²).
@@ -118,8 +128,9 @@ TAG = "denoise_raw"
 _KAIR_RELEASE = "https://github.com/cszn/KAIR/releases/download/v1.0"
 _KAIR_RAW = "https://raw.githubusercontent.com/cszn/KAIR"
 # The fine-tuned weights ride with the release that introduced them, so a
-# given AutoShade always fetches the network it was measured with.
-_AUTOSHADE_RELEASE = "https://github.com/skymanbp/autoshade/releases/download/v1.5.0"
+# given AutoShade always fetches the network it was measured with. Since
+# v1.5.2 a copy of ours on Hugging Face is tried first (`_mirror.py`).
+_AUTOSHADE_RELEASE = "https://github.com/skymanbp/autoshade/releases/download/v1.5.2"
 # PINNED to immutable commits (the last commit that touched each file, read
 # from the GitHub commits API on 2026-09-15) — `network_unet.py` is EXECUTED
 # and `basicblock.py` is imported by it, so a branch name here would mean
@@ -127,20 +138,24 @@ _AUTOSHADE_RELEASE = "https://github.com/skymanbp/autoshade/releases/download/v1
 NETWORK_COMMIT = "345c87f8364322c40eef52e575f98af893f04126"
 BASICBLOCK_COMMIT = "5d55a5fb88d20eb811dc7ccf6342b921039191cf"
 # sha256 + exact byte count of every file this sidecar downloads, verified
-# 2026-09-15 (the two architecture files) and 2026-09-17 (the weights) by
-# fetching each at its pinned commit / release asset and hashing the bytes.
+# 2026-09-15 (the two architecture files) by fetching each at its pinned
+# commit and hashing the bytes, and 2026-09-22 (the weights) by hashing the
+# file before it was handed to either host; each host's anonymous read-back
+# against this pin is on record in the v1.5.2 ledger (`docs/ROADMAP.md`).
 # The weights are a PICKLE handed to torch, so the CHANNEL is authenticated
 # here and the loader is flagged below (weights_only).
 #
 # `drunet_color.pth` (sha256 479abe3c…, 130,579,305 B) is no longer fetched:
 # it is what the fine-tune STARTED from, and every one of its 32,640,960
 # parameters moved, so the release below is self-contained and the sidecar
-# downloads 130 MB once instead of twice.
+# downloads 130 MB once instead of twice. v1's weights (sha256 6929ddd6…,
+# 130,585,417 B, the v1.5.0 asset) are the v2 fine-tune's starting point and
+# are not fetched either.
 PINS = {
-    "autoshade-raw-denoise-v1.pth": {
-        "url": f"{_AUTOSHADE_RELEASE}/autoshade-raw-denoise-v1.pth",
-        "sha256": "6929ddd6b11b3f27baf3537d92a4552a6a5c39d53ff4167e4f7df26e80413a99",
-        "bytes": 130585417,
+    "autoshade-raw-denoise-v2.pth": {
+        "url": f"{_AUTOSHADE_RELEASE}/autoshade-raw-denoise-v2.pth",
+        "sha256": "ffafa40a53f52092149db2fcf03636117ad6855e1068142d4f6b03b634e9f9c4",
+        "bytes": 130590559,
     },
     "network_unet.py": {
         "url": f"{_KAIR_RAW}/{NETWORK_COMMIT}/models/network_unet.py",
@@ -197,6 +212,8 @@ MIN_BLOCKS_POOLED = 20
 # astro noise levels, against Lightroom's 0.28–0.30. Honest sigma leaves
 # 0.07 / 0.02 / 0.01. The 1.00 row remains the held-out PSNR record: neither
 # the network nor its transform changed, and the shards are no longer local.
+# The v2 weights (v1.5.2) were accepted at this same 1.0: every measurement
+# the candidate had to pass ran this sidecar unchanged but for its tensors.
 # The cleaner now receives its training noise level. Rust always asks for
 # its whole output, demosaics and calibrates both frames identically, then
 # returns only the original's linear-light luminance residual along RGB grey.
@@ -616,7 +633,7 @@ def load_model(cache_dir, device):
     os.makedirs(cache_dir, exist_ok=True)
     basicblock = fetch_pinned("basicblock.py", cache_dir)
     network = fetch_pinned("network_unet.py", cache_dir)
-    weights = fetch_pinned("autoshade-raw-denoise-v1.pth", cache_dir)
+    weights = fetch_pinned("autoshade-raw-denoise-v2.pth", cache_dir)
     # `network_unet.py` says `import models.basicblock as B`: a synthetic
     # `models` package satisfies the import from the VERIFIED file, so the
     # upstream text is never rewritten and no other `models` package on the

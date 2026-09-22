@@ -208,7 +208,8 @@ assert len(IMPOSTOR) == len(PINNED)
 
 # A real pin, so the table is exercised the way the sidecar exercises it.
 UPSTREAM = "https://github.com/cszn/KAIR/releases/download/v1.0/scunet_color_15.pth"
-# One of ours with no upstream to fall back to: it IS our release asset.
+# A real address the table does not cover: v1's weights, published on the
+# v1.5.0 release and never mirrored (v1.5.2's v2 replaced them in the pin).
 UNMIRRORED = (
     "https://github.com/skymanbp/autoshade/releases/download/v1.5.0/"
     "autoshade-raw-denoise-v1.pth"
@@ -265,20 +266,28 @@ class MirrorTableTests(unittest.TestCase):
         import denoise_raw
 
         urls = list(denoise.WEIGHT_URLS.values()) + [denoise.NETWORK_URL]
-        urls += [pin["url"] for name, pin in denoise_raw.PINS.items()
-                 if name.endswith(".py")]
+        urls += [pin["url"] for pin in denoise_raw.PINS.values()]
         # Five SCUNet weight sets, SCUNet's network file, DRUNet's and its
-        # block library. The ninth pin, our own fine-tuned .pth, is ours
-        # already and deliberately has no mirror.
-        self.assertEqual(len(urls), 8)
+        # block library, and our own fine-tuned .pth — since v1.5.2 the one
+        # file we publish ourselves has a second host of ours as well.
+        self.assertEqual(len(urls), 9)
         for url in urls:
             ours = _mirror.mirror_of(url)
             self.assertIsNotNone(ours, f"no copy of ours for {url}")
             self.assertTrue(ours.endswith("/" + url.rsplit("/", 1)[-1]), ours)
 
-    def test_our_own_release_asset_has_no_mirror_and_keeps_its_re_try(self):
-        # Nothing upstream to be cut off from, so no entry — and the source
-        # list is then exactly the two attempts the fetch always made.
+    def test_our_own_release_asset_is_tried_from_our_copy_first(self):
+        import denoise_raw
+
+        url = denoise_raw.PINS["autoshade-raw-denoise-v2.pth"]["url"]
+        ours = _mirror.mirror_of(url)
+        self.assertTrue(ours.startswith(
+            f"https://huggingface.co/{_mirror.MIRROR_OWNER}/"), ours)
+        self.assertEqual(_mirror.sources(url), [ours, url, url])
+
+    def test_a_url_with_no_entry_keeps_its_re_try(self):
+        # No entry — and the source list is then exactly the two attempts
+        # the fetch always made.
         self.assertIsNone(_mirror.mirror_of(UNMIRRORED))
         self.assertEqual(_mirror.sources(UNMIRRORED), [UNMIRRORED, UNMIRRORED])
 

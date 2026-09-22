@@ -26,8 +26,17 @@ dPSNR leads SCUNet 1.0 by at least ``--margin`` dB in every window. The
 script exits 1 when it does not. Every path is a parameter: no photograph is
 named here.
 
+``--weights`` scores a candidate RAW-cleaner state dict in place of the
+shipped one, which is how a fine-tune is held to "denoising itself must not
+pay for it". It cannot be done by pointing ``--cache`` at another directory:
+``denoise_raw.load_model`` verifies that file against a pinned sha256 and a
+candidate has a different one. So the architecture and every executed file
+still come from the verified cache, exactly as in production, and only the
+tensor values are replaced — the same split ``denoise_flux_truth.py`` uses,
+loaded with ``weights_only=True`` because a ``.pth`` is a pickle.
+
     python scripts/denoise_bench.py --clean CLEAN.ARW --noisy NOISY.ARW \
-        --cache python/weights --out bench_out
+        --cache python/weights --out bench_out [--weights RUN/best_state.pth]
 """
 import argparse
 import os
@@ -213,6 +222,7 @@ def main():
                     help="'row,col;…' top-left corners of the windows, default two")
     ap.add_argument("--window-size", type=int, default=2048)
     ap.add_argument("--cache", default=os.path.join(PY, "weights"), help="the sidecars' weight cache")
+    ap.add_argument("--weights", help="a candidate RAW-cleaner state dict to score in place of the shipped one")
     ap.add_argument("--out", default="denoise_bench_out", help="where the PNG outputs go")
     ap.add_argument("--margin", type=float, default=1.5,
                     help="the RAW path must lead SCUNet 1.0 on dPSNR by this many dB in every window")
@@ -241,6 +251,12 @@ def main():
 
     device = "cpu" if args.cpu else dnraw.pick_device(False, "cuda:0")
     raw_model = dnraw.load_model(args.cache, device)
+    if args.weights:
+        import torch
+
+        raw_model.load_state_dict(torch.load(args.weights, map_location="cpu", weights_only=True), strict=True)
+        raw_model = raw_model.eval().to(device)
+        print(f"RAW cleaner: candidate {os.path.basename(args.weights)} in the shipped architecture")
     scu_model = scunet.load_model("color_real_psnr", args.cache, device)
     windows = [tuple(int(v) for v in w.split(",")) for w in args.windows.split(";")]
     size = args.window_size

@@ -2018,21 +2018,28 @@ mod tests {
     fn the_raw_sidecar_is_pinned_and_agrees_on_the_default() {
         for digest in [
             // the fine-tuned weights, released with the version that measured
-            // them (`autoshade-raw-denoise-v1.pth`)
-            "6929ddd6b11b3f27baf3537d92a4552a6a5c39d53ff4167e4f7df26e80413a99",
+            // them (`autoshade-raw-denoise-v2.pth`, v1.5.2)
+            "ffafa40a53f52092149db2fcf03636117ad6855e1068142d4f6b03b634e9f9c4",
             "8043b6350f1589d5f08892e3be0b4d12c5a502058014285107b7360696d12bf5",
             "48406db8867394ac5ae233ebeec7711ac10acfc3a6bbf0072c33aa77d659b6fd",
         ] {
             assert!(RAW_SIDECAR_SRC.contains(digest), "pin {digest} is gone");
         }
-        assert!(RAW_SIDECAR_SRC.contains("\"bytes\": 130585417"), "the weight's byte cap is gone");
+        assert!(RAW_SIDECAR_SRC.contains("\"bytes\": 130590559"), "the weight's byte cap is gone");
         // The weights are OURS and they ride with a RELEASE, not a branch: a
         // moving URL would hand a future network to a build measured on this
         // one, which is the same failure the two commit pins above prevent.
         assert!(
-            RAW_SIDECAR_SRC.contains("releases/download/v1.5.0\"")
-                && RAW_SIDECAR_SRC.contains("{_AUTOSHADE_RELEASE}/autoshade-raw-denoise-v1.pth"),
+            RAW_SIDECAR_SRC.contains("releases/download/v1.5.2\"")
+                && RAW_SIDECAR_SRC.contains("{_AUTOSHADE_RELEASE}/autoshade-raw-denoise-v2.pth"),
             "the fine-tuned weights must come from a pinned release asset"
+        );
+        // Our own copy of that asset is a second HOST, not a second pin: the
+        // mirror table must name the same release prefix, so the digest above
+        // is what admits bytes from either.
+        assert!(
+            MIRROR_SRC.contains("\"https://github.com/skymanbp/autoshade/releases/download/v1.5.2/\":"),
+            "the release asset has no copy of ours in python/_mirror.py"
         );
         // The operating point the four acceptance measurements chose
         // (`SIGMA_SCALE`'s own table): a network and its sigma scale are one

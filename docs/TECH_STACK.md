@@ -266,10 +266,13 @@ RAW's sensor mosaic is denoised before demosaic by AutoShade's OWN network —
 DPIR's DRUNet-colour architecture carrying weights fine-tuned for this exact
 transform on RawNIND pairs (Brummer & De Vleeschouwer, UCLouvain Dataverse,
 doi:10.14428/DVN/DEQCIM, CC BY-SA 4.0) and synthetic sensor noise, released as
-`autoshade-raw-denoise-v1.pth` with the whole training pipeline in `scripts/`
-(`fetch_rawnind.py` → `prep_pairs.py` / `prep_clean.py` → `train_raw.py`, with
-`val_scales.py`, `lr_realset.py` and `denoise_bench.py` for the acceptance
-measurements); a baked source goes through SCUNet at this point) comes the
+`autoshade-raw-denoise-v1.pth` in v1.5.0 and, continued from it with point
+sources injected on the clean side so faint stars are no longer removed as
+noise, as `autoshade-raw-denoise-v2.pth` in v1.5.2 — with the whole training
+pipeline in `scripts/` (`fetch_rawnind.py` → `prep_pairs.py` / `prep_clean.py`
+→ `train_raw.py`, with `val_scales.py`, `lr_realset.py`, `denoise_bench.py`,
+`denoise_flux_truth.py` and `accept_v2.py` for the acceptance measurements);
+a baked source goes through SCUNet at this point) comes the
 AUTO LATERAL-CA SOLVE when the sidecar asks for it — Lightroom's
 「Remove chromatic aberration」 is an instruction rather than a number, so
 `render::lens::solve_lateral_ca` least-squares `R − G` against the radial lever

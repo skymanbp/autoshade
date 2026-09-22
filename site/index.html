@@ -99,7 +99,7 @@
         </article>
         <article>
           <h3>A denoiser trained here</h3>
-          <p>The RAW denoiser uses weights trained for its own stabilised mosaic and the frame's honest measured noise. At the 71% RAW default it returns the frame's own luminance grain after demosaic in linear light; every positive strength keeps clean chroma; higher is cleaner, 100% is the complete network output. Baked files keep SCUNet and its separate 50% default.</p>
+          <p>The RAW denoiser uses weights trained for its own stabilised mosaic and the frame's honest measured noise; since v1.5.2 they are trained on star fields too, so faint stars survive the cleaning instead of leaving as noise. At the 71% RAW default it returns the frame's own luminance grain after demosaic in linear light; every positive strength keeps clean chroma; higher is cleaner, 100% is the complete network output. Baked files keep SCUNet and its separate 50% default.</p>
         </article>
       </div>
 
@@ -126,7 +126,7 @@
             <tr><td><code>AutoShade-1.5.1-macos-universal.zip</code></td><td class="asset-use">macOS app bundle</td><td class="asset-bytes">41,347,903</td></tr>
             <tr><td><code>AutoShade-1.5.1-linux-x64.zip</code></td><td class="asset-use">Linux command line only</td><td class="asset-bytes">9,945,324</td></tr>
             <tr><td><code>AutoShade-1.5.1-macos-cli.zip</code></td><td class="asset-use">macOS command line only</td><td class="asset-bytes">17,976,235</td></tr>
-            <tr><td><code>autoshade-raw-denoise-v1.pth</code></td><td class="asset-use">RAW denoiser weights, fetched on demand from the v1.5.0 release</td><td class="asset-bytes">130,585,417</td></tr>
+            <tr><td><code>autoshade-raw-denoise-v2.pth</code></td><td class="asset-use">RAW denoiser weights, fetched on demand from the v1.5.2 release</td><td class="asset-bytes">130,590,559</td></tr>
           </tbody>
         </table>
         <p><a class="button button-primary" href="https://github.com/skymanbp/autoshade/releases/tag/v1.5.1">Open the v1.5.1 release</a></p>
