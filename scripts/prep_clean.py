@@ -13,7 +13,7 @@ the G1 plane below 0.002) — a denoiser learns nothing from a black or blown
 square. No file name is written anywhere in the output: crops carry only a
 running index, and the list of sources stays in this process's memory.
 Provenance — AutoShade v1.5.0. This is the pipeline that produced
-`autoshade-raw-denoise-v1.pth` and, continued from it with point sources in v1.5.2,
+`autoshade-raw-denoise-v1.pth` and, continued from it with point sources in v1.6.0,
 the `autoshade-raw-denoise-v2.pth` that `python/denoise_raw.py` ships:
 DPIR's released `drunet_color` (KAIR, MIT) fine-tuned for that sidecar's own
 transform, so nothing is learned that inference cannot reproduce. The real

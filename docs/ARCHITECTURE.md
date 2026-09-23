@@ -1,6 +1,14 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.5.1 — every Lightroom control this app could
+> Status: **implemented** (v1.6.0 — the RAW denoiser is told the true noise,
+> place by place, gives back only luminance grain, keeps faint stars with v2 of
+> its fine-tune and maps hot pixels in every develop; the camera base look is
+> paired like with like and read on block means, and every saved photo gets it;
+> sharpening defaults to Lightroom's 40 on a RAW; the develop window sits on the
+> declared crop and every saved recipe moves with it; the reverse fit's boundary
+> ruler, its re-judgement of shrunk corrections and its colour field at the
+> default strength were reworked on the reference pair;
+> v1.5.1 — every Lightroom control this app could
 > already carry now moves pixels: sharpening and both noise reductions,
 > de-fringing and the lateral-CA instruction, Transform and Upright, the
 > camera profile, HDR edit mode and imported spot removal; `src/stack/`
@@ -141,15 +149,17 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1673 library + 25 CLI + 215 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1658 pass + 15 `#[ignore]`d forensic probes and
+> 1683 library + 25 CLI + 215 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1668 pass + 15 `#[ignore]`d forensic probes and
 > the GUI result is 214 pass + one explicit scratch-recipe export probe ignored
-> in the ordinary battery. Counts refreshed 2026-09-21 after the RAW-denoise
-> lane merged into `main`, hot-site mapping moved to every develop and its rule
-> was rebuilt on what ordinary frames showed, and the base look's estimate was
-> paired like with like: +25 / −0
+> in the ordinary battery. Counts refreshed 2026-09-23 for v1.6.0 (the RAW-denoise
+> lanes merged into `main` on 2026-09-21, hot-site mapping in every develop with
+> its rule rebuilt on what ordinary frames showed, v2 of the fine-tune, the
+> base look paired like with like and then read on block means with every saved
+> photo re-estimated, the sharpening default, coordinate era 2, R39–R41 and the
+> calibration-corpus re-judgement): +39 / −5
 > by name against the v1.5.1 tag
-> (`1a122c0`), listed by the test harness itself on both trees — twenty-four library
+> (`1a122c0`), listed by the test harness itself on both trees on release day — thirty-nine library
 > names (the four laws of the luminance return: a full clean is bit-exact and
 > never develops the original, grey noise returns at the exact share while
 > pure chroma returns nothing, the return keeps chroma and obeys the luminance
@@ -170,8 +180,28 @@
 > to the camera's afterwards, a pair that cannot say keeps the picture the
 > sensor saw, the three open paths share one base-look entry; the extra plane reserved
 > before the RAW ceiling; and the cleaner receiving the whole output with the
-> container's floor kept) and one GUI name (preference era one resets the raw
-> dials and keeps baked choices). At v1.5.1 (2026-09-20) the battery was 1649
+> container's floor kept; and, since that refresh, the fifteen of the closeout
+> lane: a curve saved under an earlier calibration era is re-estimated and an
+> empty one is not; the sharpening amount defaults to Lightroom's RAW forty and
+> to nothing on a baked raster, and an absent amount leaves the sidecar to
+> Lightroom while a real zero is stated; the seven of coordinate era 2 — an
+> era-zero recipe on a rotated RAW turns and translates in one pass, the era-two
+> migration translates geometry and rewrites rasters once, a raster shift reads
+> the picture where it came from, raster masks are left for their owner to
+> rewrite, a recipe shift moves every carrier and round-trips, `orient_vector` is
+> the linear part of `orient_point`, and the legacy window shift is the declared
+> origin only where rawler cut from the corner; R39's two — a shrunk correction
+> is held to do no harm, not to the arms, and the refusal of shrunk zones judges
+> each zone against the shipped set without it; R40's two — a scene gradient
+> under a hard raster buys no budget, and neither a collar nor a persistent ramp
+> funds a step at the contour; and R41's — the colour field ships from the
+> default strength and not below) and one GUI name (preference era one resets
+> the raw dials and keeps baked choices). Five library names left since v1.5.1,
+> each replaced by the test named beside it: R40's two (a ramp earning budget
+> only past the collar; a scene gradient earning its own slope budget), R41's
+> (the colour field shipping only past the default strength), era 3's (the
+> pre-era fingerprint separating washed from tuned) and era 2's (raster masks
+> reported, not turned). At v1.5.1 (2026-09-20) the battery was 1649
 > library + 25 CLI + 214 GUI + 2+2 contract tests, 1634 and 213 of them
 > passing beside the same ignored probes: +23 / −1 by
 > name against the v1.5.0 tag (`dfd9fa4`), listed by the test harness itself on
@@ -895,7 +925,7 @@
 > `_reclaim_stale_parts`, `_fetch_verified` — and the other five reach it
 > instead of reimplementing it, which is why their progress lines announce
 > themselves as `[denoise]`. `python/denoise_raw.py` (2026-09-15) fetches its
-> own DRUNet weights (`autoshade-raw-denoise-v2.pth` since v1.5.2, a release
+> own DRUNet weights (`autoshade-raw-denoise-v2.pth` since v1.6.0, a release
 > asset with a copy of ours on Hugging Face tried first; v1.5.0–v1.5.1 fetched
 > the v1 fine-tune) and the two KAIR network files through the same
 > `_fetch_verified`, each sha256- and byte-pinned, and builds the model from a
@@ -1449,7 +1479,7 @@ structure fingerprint therefore needs no re-archive pass, unlike v0.31.0's).
 `pipeline::rotate_recipe` is the one mover: geometry through
 `orient_recipe_coords` **by the delta, never the running total**, raster masks
 really turned (`image::rotate90` is lossless and these are our own PNGs; the
-`coord_era` migration could only disclose them until v1.5.2, and now re-writes
+`coord_era` migration could only disclose them until v1.6.0, and now re-writes
 them the same way under operation-derived names) into freshly claimed names with the originals left
 in place, and the turn count last; a raster that cannot be turned refuses the
 whole operation rather than leaving a half-turned develop. **Which rasters** is
@@ -1514,7 +1544,7 @@ The frame keeps its SIZE through all of this — only its origin moves — and
 crop and mask geometry is stored normalised to the frame (`recipe.rs:1634`),
 so **a recipe saved before this date keeps its numbers while the picture
 under them moves by (32, 20)**: 0.337 % of the width, 0.316 % of the height.
-**Era 2 of `coord_era` (v1.5.2) migrates that.** A recipe stamped era ≤ 1 was
+**Era 2 of `coord_era` (v1.6.0) migrates that.** A recipe stamped era ≤ 1 was
 drawn against the window every release up to v1.5.1 cut, and
 `decode::source_window` reports, from the same metadata read that answers the
 frame and its turn, how far this build's window sits from it
@@ -1535,7 +1565,7 @@ are told apart by the stamp the first era did not have to carry.
 Because the frame finally turns, **recipes saved before v0.30.0 hold their crop
 and mask coordinates in the SENSOR frame**. `EditRecipe.coord_era` records
 which frame a recipe's geometry is drawn in (0 = sensor, 1 = display, 2 =
-display measured from the declared crop origin — v1.5.2, above), and
+display measured from the declared crop origin — v1.6.0, above), and
 `pipeline::migrate_recipe_coord_frame` turns an era-0 recipe exactly once at
 load through `render::orient_point` — the coordinate twin of the pixel
 transform, a bijection per orientation state, so the migration is lossless and
@@ -1548,7 +1578,7 @@ second time. The migration hooks only the paths that read a recipe FILE (GUI
 open, the variant strip, version snapshots, batch export, `api_recipe`, CLI
 `apply`); recipes arriving from the browser or from the model are stamped
 current-frame at their boundary instead. Raster (`MaskGeometry::Bitmap`) masks
-are image files, not coordinates: until v1.5.2 they were left alone and the user
+are image files, not coordinates: until v1.6.0 they were left alone and the user
 was told so; the migration now re-writes them — turned for an era-0 recipe on a
 rotated RAW, translated for era 2, edge samples clamped, an integer move an
 exact copy — into a file named after the operation
@@ -4751,7 +4781,7 @@ Since v1.2.2 the step constant is a CEILING rather than a flat budget:
 0.012 was calibrated where neighbourhood contrast masks a discontinuity of
 that size, and a measured tile seam in clean sky sat exactly on it at 7.8
 sigma over a mask-free neutral control. Each crossing is therefore charged
-against its own per-crossing budget — since R40 (v1.5.2) the scene's own
+against its own per-crossing budget — since R40 (v1.6.0) the scene's own
 DISCONTINUITY at that crossing, clamped to `[BOUNDARY_STEP_FLOOR = 1/255,
 ceiling]` (`discontinuity_budget`) — and the gate compares the charged 90th
 percentile alongside the still-disclosed raw step. A crossing on a scene
@@ -4760,7 +4790,7 @@ textured borders are governed by exactly the number they were governed by
 before; a crossing in smooth sky must fit inside what its own
 neighbourhood can actually mask, and a smooth gradient masks nothing.
 
-**R40 (v1.5.2): the hard family reads discontinuities, not 3-px
+**R40 (v1.6.0): the hard family reads discontinuities, not 3-px
 differences.** Until R40 each crossing's reading was the plain `(inside −
 outside)` difference over 3-px feet, its budget the larger of the scene's
 own step over the same feet and `BOUNDARY_STEP_SHAPE = 3` times the
@@ -5181,9 +5211,9 @@ family the byte-identity refusal the semantic family has had since step 9: a
 bisection that lands on `k = 0` renders the reference back and is refused as
 `RANGE_BOUNDARY_INERT`, instead of shipping a mask with every dial at zero.
 
-**What ships is judged, not only what was admitted (R39, v1.5.2).** Every
+**What ships is judged, not only what was admitted (R39, v1.6.0).** Every
 route judges a candidate at `k = 1` (`attach_one_zone`) and the boundary gate
-then shrinks it; until v1.5.2 nothing judged the shrunk correction, and on the
+then shrinks it; until v1.6.0 nothing judged the shrunk correction, and on the
 reference pair spatial tile r1c0 shipped at `k = 0.134` with its own cell's
 colour-inclusive residual WORSE than the render without it (0.19166 ->
 0.20101), bought by a frame reading that moved 0.0003 the right way — a pale

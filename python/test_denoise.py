@@ -209,7 +209,7 @@ assert len(IMPOSTOR) == len(PINNED)
 # A real pin, so the table is exercised the way the sidecar exercises it.
 UPSTREAM = "https://github.com/cszn/KAIR/releases/download/v1.0/scunet_color_15.pth"
 # A real address the table does not cover: v1's weights, published on the
-# v1.5.0 release and never mirrored (v1.5.2's v2 replaced them in the pin).
+# v1.5.0 release and never mirrored (v1.6.0's v2 replaced them in the pin).
 UNMIRRORED = (
     "https://github.com/skymanbp/autoshade/releases/download/v1.5.0/"
     "autoshade-raw-denoise-v1.pth"
@@ -268,7 +268,7 @@ class MirrorTableTests(unittest.TestCase):
         urls = list(denoise.WEIGHT_URLS.values()) + [denoise.NETWORK_URL]
         urls += [pin["url"] for pin in denoise_raw.PINS.values()]
         # Five SCUNet weight sets, SCUNet's network file, DRUNet's and its
-        # block library, and our own fine-tuned .pth — since v1.5.2 the one
+        # block library, and our own fine-tuned .pth — since v1.6.0 the one
         # file we publish ourselves has a second host of ours as well.
         self.assertEqual(len(urls), 9)
         for url in urls:

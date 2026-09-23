@@ -30,7 +30,7 @@ What this does NOT change:
   straight to the source, rather than quietly fetching yesterday's tree.
 
 `autoshade-raw-denoise-v2.pth` — our own fine-tuned RAW denoiser — is in the
-table since v1.5.2. Its "upstream" is our own GitHub release, which cannot be
+table since v1.6.0. Its "upstream" is our own GitHub release, which cannot be
 renamed away the way somebody else's account can, but a second host costs
 nothing and this copy was verified exactly as the others were: hashed before
 upload, read back anonymously at the pinned commit, matched to the sidecar's
@@ -91,8 +91,8 @@ MIRRORS = {
     "https://raw.githubusercontent.com/cszn/KAIR/345c87f8364322c40eef52e575f98af893f04126/models/": _KAIR,
     "https://raw.githubusercontent.com/cszn/KAIR/5d55a5fb88d20eb811dc7ccf6342b921039191cf/models/": _KAIR,
     # denoise_raw.py PINS — our own fine-tuned weights, the one file we publish
-    # ourselves (v1.5.2); verified 2026-09-22 the same way as the seven repos above
-    "https://github.com/skymanbp/autoshade/releases/download/v1.5.2/":
+    # ourselves (v1.6.0); verified 2026-09-22 the same way as the seven repos above
+    "https://github.com/skymanbp/autoshade/releases/download/v1.6.0/":
         "https://huggingface.co/Azng0/autoshade-mirror-autoshade-raw-denoise/resolve/0361b7af8853a57aa5c4a5c18ee589233caf14a0/",
 }
 

@@ -101,7 +101,7 @@ clipped sample never measures noise and eight neighbours must vouch.
 
 **Training and acceptance.** `scripts/fetch_rawnind.py` → `prep_pairs.py` /
 `prep_clean.py` → `train_raw.py`. v1 (v1.5.0) trained on the pairs alone; v2
-(v1.5.2) continued from v1 with point sources injected on the clean side of
+(v1.6.0) continued from v1 with point sources injected on the clean side of
 half of every batch (`point_sources.py`, `--stars 0.5`) and a loss that seeks
 the mean in the units light adds in (`--loss l2x`), 60000 steps. Every
 candidate's acceptance lines are committed before the run
@@ -376,7 +376,7 @@ transform on RawNIND pairs (Brummer & De Vleeschouwer, UCLouvain Dataverse,
 doi:10.14428/DVN/DEQCIM, CC BY-SA 4.0) and synthetic sensor noise, released as
 `autoshade-raw-denoise-v1.pth` in v1.5.0 and, continued from it with point
 sources injected on the clean side so faint stars are no longer removed as
-noise, as `autoshade-raw-denoise-v2.pth` in v1.5.2 — with the whole training
+noise, as `autoshade-raw-denoise-v2.pth` in v1.6.0 — with the whole training
 pipeline in `scripts/` (`fetch_rawnind.py` → `prep_pairs.py` / `prep_clean.py`
 → `train_raw.py`, with `val_scales.py`, `lr_realset.py`, `denoise_bench.py`,
 `denoise_flux_truth.py` and `accept_v2.py` for the acceptance measurements);
@@ -1065,7 +1065,7 @@ reading.
   scene's own change across the band, BOUNDARY_STEP_SHAPE = 3 x the
   correction's own same-side slope off the frozen k=1 candidate, minimum
   over two consecutive baselines)` clamped to `[BOUNDARY_STEP_FLOOR = 1/255,
-  ZONE_BOUNDARY_RIM_MAX]`. Hard family (R40, v1.5.2): the scene's own
+  ZONE_BOUNDARY_RIM_MAX]`. Hard family (R40, v1.6.0): the scene's own
   discontinuity `|disc(reference)|` clamped to `[BOUNDARY_STEP_FLOOR,
   ZONE_BOUNDARY_STEP_MAX]` — no gradient context, no slope credit (a ramp
   reads ~0 under the de-trending and needs none). The luminance/colour
@@ -2034,10 +2034,10 @@ than the pre-call state; model weights remain outside the repository.
   1996 MiB / 10.247 s at 0.71: +231 MiB and +5.116 s for luminance return.
   This excludes the Python/model process. Batch rendering does not request
   AI denoise, so its ordinary 1800 MB planning constant is unchanged.
-- The current battery is **1673 library (1658 pass + 15 `#[ignore]`d forensic
-  probes) / 25 CLI / 215 GUI / 2+2 contract** tests (v1.5.1 shipped with 1649
-  library and 214 GUI; the twenty-four library names and one GUI name added since are
-  listed in ARCHITECTURE). Environment-gated real
+- The current battery is **1683 library (1668 pass + 15 `#[ignore]`d forensic
+  probes) / 25 CLI / 215 GUI / 2+2 contract** tests — the v1.6.0 battery; v1.5.1
+  shipped with 1649 library and 214 GUI, and the thirty-nine library names and
+  one GUI name(s) added since are listed in ARCHITECTURE. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.
 - Tests compile at opt-level 2 (`[profile.test]` in Cargo.toml) with debug

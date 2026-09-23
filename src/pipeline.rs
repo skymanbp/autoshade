@@ -2100,7 +2100,7 @@ pub struct CoordMigration {
     pub shift: (i32, i32),
     /// Raster mask files re-written into the corrected frame (turned and/or
     /// translated) under names derived from the operation, originals kept.
-    /// Until v1.5.2 a raster was the one thing this migration could only
+    /// Until v1.6.0 a raster was the one thing this migration could only
     /// disclose; it is re-written now, so nothing is left to apologise for.
     pub rasters: usize,
 }
@@ -2125,7 +2125,7 @@ impl CoordMigration {
 type SourceFrame = ((usize, usize), rawler::Orientation);
 
 /// The memo holds the WHOLE [`crate::decode::SourceWindow`] — the frame, the
-/// turn and, since v1.5.2, the legacy window shift the era-2 migration needs —
+/// turn and, since v1.6.0, the legacy window shift the era-2 migration needs —
 /// so its readers still cost one header walk per photo per process.
 fn orient_memo(
 ) -> &'static std::sync::Mutex<std::collections::HashMap<CurveMemoKey, crate::decode::SourceWindow>> {
@@ -2175,7 +2175,7 @@ pub(crate) fn source_window_memo(path: &Path) -> Option<crate::decode::SourceWin
 /// canvas. Now that `render::orient_f32` turns the frame for real, those
 /// coordinates land on the wrong axis unless they are turned with it.
 ///
-/// **Era 1 → 2 (v1.5.2): the translation.** On 2026-09-21 the develop window
+/// **Era 1 → 2 (v1.6.0): the translation.** On 2026-09-21 the develop window
 /// of a body that declares a crop but no active area moved from the sensor's
 /// corner onto the declared origin (`decode::align_default_crop`; the
 /// ILCE-7RM4A files: `(32, 20)`). The window kept its size and every stored
@@ -2553,7 +2553,7 @@ pub struct RotateOutcome {
 ///     `rotated_radial_mask_covers_the_rotated_pixels`.
 ///  2. **The raster masks** — really turned: these are our own PNGs and
 ///     `image`'s `rotate90` is lossless. (The `coord_era` migration could only
-///     disclose them until v1.5.2; it re-writes them the same way now, under
+///     disclose them until v1.6.0; it re-writes them the same way now, under
 ///     operation-derived names — [`migrate_raster_file`] says why the two
 ///     naming rules differ.) Turned copies land under FRESHLY CLAIMED names
 ///     (`store::claim_raster`) and the old files stay put — version snapshots

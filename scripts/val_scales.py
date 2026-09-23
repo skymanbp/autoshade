@@ -10,7 +10,7 @@ validate(), lifted out so a finished run can be re-measured without retraining.
 Usage: python val_scales.py --weights <state.pth|pretrained> --scales 0.5,0.7,0.85,1.0
 
 Provenance — AutoShade v1.5.0. This is the pipeline that produced
-`autoshade-raw-denoise-v1.pth` and, continued from it with point sources in v1.5.2,
+`autoshade-raw-denoise-v1.pth` and, continued from it with point sources in v1.6.0,
 the `autoshade-raw-denoise-v2.pth` that `python/denoise_raw.py` ships:
 DPIR's released `drunet_color` (KAIR, MIT) fine-tuned for that sidecar's own
 transform, so nothing is learned that inference cannot reproduce. The real

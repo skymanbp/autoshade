@@ -64,15 +64,15 @@ and the (a, b) the estimator would report for it.
 Augmentation keeps the CFA geometry: mosaic-aware flips and transposes (the
 one-sample crop that restores RGGB after a flip), exposure and white-balance
 gains on the clean side of synthetic samples only.
-Provenance — AutoShade v1.5.0 and v1.5.2. With `--stars 0 --loss l1z` and
+Provenance — AutoShade v1.5.0 and v1.6.0. With `--stars 0 --loss l1z` and
 DPIR's `drunet_color` as the start this is the pipeline that produced
 `autoshade-raw-denoise-v1.pth` (v1.5.0): DPIR's released network (KAIR, MIT)
 fine-tuned for the sidecar's own transform, so nothing is learned that
 inference cannot reproduce. Started from those weights with `--stars 0.5
 --loss l2x` for 60000 steps it produced `autoshade-raw-denoise-v2.pth`
-(v1.5.2): the step-50000 checkpoint, the one of the four that passed
+(v1.6.0): the step-50000 checkpoint, the one of the four that passed
 `accept_v2.py`'s pre-committed lines which also kept every star-frame-standard
-line v1 passes (`docs/RELEASE_NOTES_v1.5.2.md`). As it stands it starts from
+line v1 passes (`docs/RELEASE_NOTES_v1.6.0.md`). As it stands it starts from
 whatever `denoise_raw.load_model` loads (the shipped weights) and produces
 their successor. The real
 training pairs are RawNIND (Brummer & De Vleeschouwer, UCLouvain Dataverse,
@@ -95,7 +95,7 @@ Reproduce, in order:
 The last three are the acceptance measurements `SIGMA_SCALE`'s table in
 `python/denoise_raw.py` reports. `best_state.pth` is written on held-out PSNR
 alone; a v2 run, which trades PSNR for star flux, may never write it (the
-v1.5.2 run did not), which is why `accept_v2.py` reads `last.pt` and leaves
+v1.6.0 run did not), which is why `accept_v2.py` reads `last.pt` and leaves
 the state dict it judged in `RUN/accept/` for the other measurements.
 """
 import argparse

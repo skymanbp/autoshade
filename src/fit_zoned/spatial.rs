@@ -1924,7 +1924,7 @@ mod tests {
     const GRADIENT_K: f32 = 0.0126953125;
     const GRADIENT_RIM: f32 = 0.0034745336;
 
-    /// R40 (v1.5.2), reversing A22 (v1.2.4). A hard tile edge over a SMOOTH
+    /// R40 (v1.6.0), reversing A22 (v1.2.4). A hard tile edge over a SMOOTH
     /// sloping field buys no budget from the slope: a gradient is not a
     /// discontinuity, so the de-trended reading of the scene there is ~0,
     /// the budget is the floor, and the tile is shrunk until its own step
@@ -2183,7 +2183,7 @@ mod tests {
     /// of any value can produce these verdicts at once, which is what pins
     /// the mechanism rather than one number.
     ///
-    /// Since R40 (v1.5.2) the context is the scene's DISCONTINUITY at the
+    /// Since R40 (v1.6.0) the context is the scene's DISCONTINUITY at the
     /// crossing, not its 3-px change: arm B's texture is a 3-px checker
     /// (`contextual_fixture`), whose swing the de-trended reading sees whole,
     /// and the sawtooth it replaced — a ramp between wraps — would now earn
@@ -2417,7 +2417,7 @@ mod tests {
     const ARM_F_RIM: f32 = 0.0036284328;
 
     /// Acceptance (v1.2.2 seam batch, second finding of the same class),
-    /// re-pinned under R40 (v1.5.2). The v1.2.2 rule was that slope credit
+    /// re-pinned under R40 (v1.6.0). The v1.2.2 rule was that slope credit
     /// must PERSIST past the first baseline — measured on the real seam, the
     /// resample-and-refine collar spans exactly the first baseline out, so a
     /// hard tile edge in CLEAN sky read an inner |u1| slope of 0.005-0.008

@@ -1466,7 +1466,7 @@ pub(crate) fn legacy_window_shift(
 /// Metadata only: `dummy = true` on the RAW arm means no sensor
 /// decompression, and the baked arm decodes no pixel at all.
 ///
-/// Since v1.5.2 the answer also carries [`SourceWindow::legacy_shift`], read
+/// Since v1.6.0 the answer also carries [`SourceWindow::legacy_shift`], read
 /// off the same dummy decode: [`legacy_window_shift`] needs only the
 /// rectangles `align_default_crop` judges on the real one.
 pub fn source_window(path: &Path) -> Result<SourceWindow> {

@@ -495,7 +495,7 @@ target's own boundary asks …`).
 
 **A correction that shrank is judged again.** The boundary gate negotiates an
 over-budget correction down to a strength `k` rather than refusing it, and since
-R39 (v1.5.2) the correction that ships at that strength is held to one more
+R39 (v1.6.0) the correction that ships at that strength is held to one more
 test: it must leave its own zone no worse than the same render without it, and
 the frame within the drift its attachment was allowed. A correction admitted at
 full strength can fail this once shrunk and is then refused with its readings
@@ -507,7 +507,7 @@ sky tile that shipped at k = 0.134 — a pale block no gate had judged — passe
 the test above (what its acceptance read improves), and what let it through
 was the boundary ruler itself: it budgeted each crossing by the scene's own
 change over three pixels, so a smooth gradient bought a tile edge a step of
-its own size. Since R40 (v1.5.2) a hard-edged mask's crossings are read as
+its own size. Since R40 (v1.6.0) a hard-edged mask's crossings are read as
 discontinuities — the step less the sky's own trend on either side — and
 budgeted only by a discontinuity the scene already has there, so in smooth
 sky the budget is one code value at the crossing and the tile is shrunk to

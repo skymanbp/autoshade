@@ -452,7 +452,7 @@ after the three rulings' sentences; the consumer's cap is 512 KiB).
 - **Sharpening.** A recipe or sidecar that states an amount, 0 included,
   renders as before; a JPEG or TIFF renders as before; a RAW that states none
   renders at 40 (Lightroom's default) instead of 0.
-- **Downloads.** One new file, `autoshade-raw-denoise-v2.pth` (the v1.5.2
+- **Downloads.** One new file, `autoshade-raw-denoise-v2.pth` (the v1.6.0
   release asset, and the copy above). `autoshade-raw-denoise-v1.pth` is no
   longer fetched; a cache directory that holds it keeps it, unused.
 - **The reference pair.** The reverse-fit reference this project measures every
@@ -463,4 +463,48 @@ after the three rulings' sentences; the consumer's cap is 512 KiB).
 
 ## Gates
 
-FILLED-BEFORE-THE-TAG
+Measured before the tag on the release code (`fb1f1a9`; the version bump touches
+Cargo.toml, Cargo.lock, the documents, the sidecar's download pin and the
+release name in source comments and two source-text tests, re-run after it). The
+three-lane release battery
+(`scripts/release_battery.sh`, a frozen snapshot worktree, the p36–p41
+calibration corpus and the sidecar weights in reach): library **1668 passed /
+0 failed / 15 ignored** (1006.46 s, release profile, one process per module),
+CLI **25 / 0**, contract 2 + 2, doc-tests 0, GUI **214 / 0 / 1**, calibration
+lane **1668 / 0 / 15** (1308.41 s; one skip line, the mask-brush specimen test whose
+`AUTOSHADE_MB_SAMPLE_ROOT` specimen is not on this machine, named in every
+release since v1.3.2), `audit_i18n` and the font check exit 0 inside the
+battery; the Python suites 73 OK from `python/` and 44 OK from `scripts/` (CPU,
+the real weights, `-W error::RuntimeWarning`). By name against the v1.5.1 tag,
+listed by the harness on both trees: library 1649 → 1683 (+39 / −5: the
+sixteen hot-site, grain-return and cleaner-contract tests of the merged
+denoise lanes, the five of the base look's pairing, the era-3 re-estimate, the
+two sharpening defaults, the seven of coordinate era 2, R39's two, R40's two
+and R41's one; the five removed names were renamed or replaced under R40, R41,
+calibration era 3 and coordinate era 2, each beside its replacement in
+ARCHITECTURE); GUI 214 → 215 (+1 / −0, the preference-era reset). clippy 0
+warnings on both feature sets (`--all-targets -- -D warnings`).
+`check_docs.py --gates` on the transcript with the XMP census root supplied:
+**32 PASS / 0 FAIL / 0 SKIP** (after the bump; before it the same run fails
+exactly the count claims, which is what it is for). Photo-name, token-shape
+and user-path greps on the release diff: 0 / 0 / 0.
+
+Mutations recorded in the ledger for this release, each run by hand with the
+source restored byte for byte afterwards: the fourteen of the hot-pixel rule
+(each turned its module's tests red) and the eight of the base look's pairing
+(each turned its own test red).
+
+Final gate, reference pair, before the tag: the pre-bump release CLI re-fitted
+the reference pair at 0.65 / 0.85 / 1.0 (`match --zoned`) and rendered each at
+the target's size. At 0.85: sky ΔE 4.6 and whole-frame mean |diff| 0.0260
+against the target (the R41 lane read 4.6 / 0.0256); at 0.65: 7.0 / 0.0296
+(7.2 / 0.0296); at 1.0: 4.7 / 0.0263. This release moves the solver (R39–R41)
+and the front end (calibration era 3, the sharpening default), so a pixel
+comparison against the previous release's render is not the measure; the three
+side-by-sides went to the user, whose eyes are the gate.
+
+Not measured: no paid image call was made for this release; the GUI executable
+was not launched; the sharpening amount's scale against Lightroom's (above);
+the star standard's lines 6 and 7c stay red and are recorded above. The ship
+facts (the release run, the downloaded assets, the site, the local upgrade)
+are in the ROADMAP ledger entry.

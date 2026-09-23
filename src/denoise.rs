@@ -2018,7 +2018,7 @@ mod tests {
     fn the_raw_sidecar_is_pinned_and_agrees_on_the_default() {
         for digest in [
             // the fine-tuned weights, released with the version that measured
-            // them (`autoshade-raw-denoise-v2.pth`, v1.5.2)
+            // them (`autoshade-raw-denoise-v2.pth`, v1.6.0)
             "ffafa40a53f52092149db2fcf03636117ad6855e1068142d4f6b03b634e9f9c4",
             "8043b6350f1589d5f08892e3be0b4d12c5a502058014285107b7360696d12bf5",
             "48406db8867394ac5ae233ebeec7711ac10acfc3a6bbf0072c33aa77d659b6fd",
@@ -2030,7 +2030,7 @@ mod tests {
         // moving URL would hand a future network to a build measured on this
         // one, which is the same failure the two commit pins above prevent.
         assert!(
-            RAW_SIDECAR_SRC.contains("releases/download/v1.5.2\"")
+            RAW_SIDECAR_SRC.contains("releases/download/v1.6.0\"")
                 && RAW_SIDECAR_SRC.contains("{_AUTOSHADE_RELEASE}/autoshade-raw-denoise-v2.pth"),
             "the fine-tuned weights must come from a pinned release asset"
         );
@@ -2038,7 +2038,7 @@ mod tests {
         // mirror table must name the same release prefix, so the digest above
         // is what admits bytes from either.
         assert!(
-            MIRROR_SRC.contains("\"https://github.com/skymanbp/autoshade/releases/download/v1.5.2/\":"),
+            MIRROR_SRC.contains("\"https://github.com/skymanbp/autoshade/releases/download/v1.6.0/\":"),
             "the release asset has no copy of ours in python/_mirror.py"
         );
         // The operating point the four acceptance measurements chose

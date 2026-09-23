@@ -21,7 +21,7 @@ source ARW:
 No photograph is named in the output files: frames are numbered in the order
 they are listed (the mapping is printed to the log only).
 
-v1.5.2: the same instrument holds a fine-tune to ordinary frames. `--frames
+v1.6.0: the same instrument holds a fine-tune to ordinary frames. `--frames
 ARW[=DNG]` measures named frames instead of scanning a library (a frame without
 its Lightroom DNG is measured against its input only), `--weights` swaps a
 candidate state dict into the shipped architecture exactly as denoise_bench.py
@@ -31,7 +31,7 @@ to keep the compact cores of stars could start keeping in an ordinary frame.
 `accept_v3` in the fine-tune lane compares a candidate's realset.json with the
 shipped weights' on the same frames.
 Provenance — AutoShade v1.5.0. This is the pipeline that produced
-`autoshade-raw-denoise-v1.pth` and, continued from it with point sources in v1.5.2,
+`autoshade-raw-denoise-v1.pth` and, continued from it with point sources in v1.6.0,
 the `autoshade-raw-denoise-v2.pth` that `python/denoise_raw.py` ships:
 DPIR's released `drunet_color` (KAIR, MIT) fine-tuned for that sidecar's own
 transform, so nothing is learned that inference cannot reproduce. The real
@@ -142,7 +142,7 @@ def develop(planes_or_rgb, wbn, gain, is_planes):
 def spikes(p, level, a, b, block, flat):
     """Isolated outliers in the FLAT blocks: samples more than [`SPIKE_SIGMAS`] noise sigmas above their own
     5x5 median, sigma from the noise model at the block's input level. A cleaner taught to keep the compact
-    cores of stars (v1.5.2's fine-tune) could keep noise spikes in an ordinary frame the same way; this counts
+    cores of stars (v1.6.0's fine-tune) could keep noise spikes in an ordinary frame the same way; this counts
     them where nothing but noise and hot pixels stands out."""
     med = cv2.medianBlur(np.ascontiguousarray(p, np.float32), 5)
     sigma = np.sqrt(np.clip(a * level + b, 1e-12, None))

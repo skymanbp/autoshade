@@ -8453,7 +8453,7 @@ fn shift_brush_strokes(strokes: &mut [crate::recipe::BrushStroke], du: f32, dv: 
 /// **Not moved here: `MaskGeometry::Bitmap`.** A raster mask is a FILE of
 /// pixels sampled in normalised coordinates, not a coordinate. This function
 /// leaves its path alone; the callers that own the file re-write it —
-/// `pipeline::rotate_recipe` and, since v1.5.2, the `coord_era` migration
+/// `pipeline::rotate_recipe` and, since v1.6.0, the `coord_era` migration
 /// (`pipeline::migrate_raster_file`), which until then could only disclose it.
 ///
 /// **Migrated since R29 C1: `MaskGeometry::Brush`, by NUMERICALLY REWRITING its
@@ -8855,7 +8855,7 @@ pub fn shift_luma_raster(img: &image::GrayImage, dx: f32, dy: f32) -> image::Gra
 /// see [`orient_recipe_coords`].
 ///
 /// Retouch areas (v1.5.0 F9) and a renderable colour field (R33 §G) count
-/// since v1.5.2: both move under a turn and under a translation, and a recipe
+/// since v1.6.0: both move under a turn and under a translation, and a recipe
 /// carrying nothing else used to be migrated in silence.
 ///
 /// `straighten_deg` is deliberately NOT counted (R27 L-16c), even though the
@@ -21349,7 +21349,7 @@ mod tests {
     /// photographer's edit silently gone. So it is KEPT here and turned by
     /// `pipeline::rotate_recipe` phase 1 with the `Bitmap` rasters
     /// (`LocalAdjustment::turnable_raster_paths_mut`), and by the `coord_era`
-    /// migration since v1.5.2 (`pipeline::migrate_raster_file`).
+    /// migration since v1.6.0 (`pipeline::migrate_raster_file`).
     ///
     /// MUTATION: drop the `owned_alpha` guard in `orient_recipe_coords`' AiMask
     /// arm and the `raster` assertion fails.

@@ -78,7 +78,7 @@ Method (every step measured in the 2026-09-15 probe, none assumed):
      the stabilised z domain the model actually sees (`scripts/train_raw.py`).
      It is trained for THIS transform, so it beats the generic weights by
      1.98 dB on held-out pairs at the former 0.78 operating point and by 7.8 dB on
-     the noisiest bin at its own. Since v1.5.2 the weights are v2 of that
+     the noisiest bin at its own. Since v1.6.0 the weights are v2 of that
      fine-tune: the v1 network had never seen a star and removed faint ones
      as noise (`scripts/denoise_flux_truth.py`, a synthetic-truth probe, found
      10 % of a 4σ star's flux and 42 % of a 6σ one surviving), so v2 continues
@@ -129,8 +129,8 @@ _KAIR_RELEASE = "https://github.com/cszn/KAIR/releases/download/v1.0"
 _KAIR_RAW = "https://raw.githubusercontent.com/cszn/KAIR"
 # The fine-tuned weights ride with the release that introduced them, so a
 # given AutoShade always fetches the network it was measured with. Since
-# v1.5.2 a copy of ours on Hugging Face is tried first (`_mirror.py`).
-_AUTOSHADE_RELEASE = "https://github.com/skymanbp/autoshade/releases/download/v1.5.2"
+# v1.6.0 a copy of ours on Hugging Face is tried first (`_mirror.py`).
+_AUTOSHADE_RELEASE = "https://github.com/skymanbp/autoshade/releases/download/v1.6.0"
 # PINNED to immutable commits (the last commit that touched each file, read
 # from the GitHub commits API on 2026-09-15) — `network_unet.py` is EXECUTED
 # and `basicblock.py` is imported by it, so a branch name here would mean
@@ -141,7 +141,7 @@ BASICBLOCK_COMMIT = "5d55a5fb88d20eb811dc7ccf6342b921039191cf"
 # 2026-09-15 (the two architecture files) by fetching each at its pinned
 # commit and hashing the bytes, and 2026-09-22 (the weights) by hashing the
 # file before it was handed to either host; each host's anonymous read-back
-# against this pin is on record in the v1.5.2 ledger (`docs/ROADMAP.md`).
+# against this pin is on record in the v1.6.0 ledger (`docs/ROADMAP.md`).
 # The weights are a PICKLE handed to torch, so the CHANNEL is authenticated
 # here and the loader is flagged below (weights_only).
 #
@@ -212,7 +212,7 @@ MIN_BLOCKS_POOLED = 20
 # astro noise levels, against Lightroom's 0.28–0.30. Honest sigma leaves
 # 0.07 / 0.02 / 0.01. The 1.00 row remains the held-out PSNR record: neither
 # the network nor its transform changed, and the shards are no longer local.
-# The v2 weights (v1.5.2) were accepted at this same 1.0: every measurement
+# The v2 weights (v1.6.0) were accepted at this same 1.0: every measurement
 # the candidate had to pass ran this sidecar unchanged but for its tensors.
 # The cleaner now receives its training noise level. Rust always asks for
 # its whole output, demosaics and calibrates both frames identically, then

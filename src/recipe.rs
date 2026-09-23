@@ -836,7 +836,7 @@ pub const CALIB_ERA: u32 = 3;
 /// For a `Normal`-oriented photo the two frames are identical, so era 1
 /// only ever changes what a rotated/flipped RAW's saved geometry means.
 ///
-/// Era 2 (v1.5.2) = the same display frame, measured from the develop window
+/// Era 2 (v1.6.0) = the same display frame, measured from the develop window
 /// THIS build cuts — the RAW's declared crop origin. Up to v1.5.1 a body that
 /// declares a crop but no active area (the ILCE-7RM4A) was developed from the
 /// sensor's corner, so an era-≤1 recipe on such a file is drawn `(32, 20)` px
