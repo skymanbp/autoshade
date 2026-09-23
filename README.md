@@ -27,6 +27,10 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
   Lightroom; generative tools are separate, opt-in, labelled paths.
 - For anyone who wants an AI first pass on a card of RAWs and still wants to
   know *what* it changed, in numbers, before trusting it.
+- The one network this project ships its own weights for is a RAW denoiser:
+  fine-tuned here, on this project's own data, and judged release after
+  release against Lightroom's Denoise on a real star field, by acceptance
+  lines written before each training run.
 
 ## Contents
 
@@ -53,6 +57,16 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
   colour-range masks composed by Add/Subtract/Intersect. Linear, radial, brush
   and AI components export that composition in Lightroom's own grammar;
   Bitmap components retain a named loss.
+- **A RAW denoiser trained and judged here** — the sensor mosaic is cleaned
+  before demosaic by a network whose weights were fine-tuned on this
+  project's own data, told the noise measured tile by tile on the frame
+  itself, and held, release after release, to a same-frame comparison with
+  Lightroom's Denoise 50 on a real star field. It returns only luminance
+  grain (71 % default), keeps faint stars (98.70 % of 17,817 true faint
+  stars against Lightroom's 98.80 %) and maps hot pixels in every develop.
+  Four fine-tunes were trained: v1 and v2 shipped, v3 and v4 were refused by
+  acceptance lines written before their runs. [§11](#11-the-raw-denoiser-is-trained-here-and-judged-by-lines-written-before-the-run)
+  has the picture and the numbers.
 - **Local AI masks** — subject (BiRefNet, named U²-Net fallback), sky
   (OneFormer ADE20K) and point-prompted object (SAM 2.1), as local Python
   sidecars with pinned weights; no API key.
@@ -85,12 +99,10 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
 - **Generative and pixel tools, opt-in and labelled** — reimagine
   (gpt-image-2), retouch, heal and AI denoise are the only paths that can
   invent or alter scene content, and are marked so; a denoise lands as its
-  own card and never rewrites the original. RAW denoise uses honest measured
-  noise — measured across the frame, not only by brightness — and returns the
-  frame's own luminance grain at its 71% default, after
-  demosaic in linear light, keeping clean chroma at every positive strength.
-  Higher is cleaner; 100% is the complete network output, 0% the input.
-  Era 2 resets RAW choices once; baked SCUNet choices are preserved separately.
+  own card and never rewrites the original. RAW denoise is the trained
+  denoiser above: higher is cleaner, 100 % is the complete network output,
+  0 % the input; preference era 2 reset the RAW dials once, and baked SCUNet
+  choices are kept separately.
 - **Stacking and merging** — several frames of one scene into one, over a
   single alignment: HDR merge (exposures measured from the pixels, samples
   weighted by how trustworthy they are, the recovered stops handed to the SDR
@@ -446,6 +458,21 @@ v1.2.4 against Lightroom's own coverage rather than exported luma, on a
 Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
 
 ### 11. The RAW denoiser is trained here and judged by lines written before the run
+
+<img src="docs/images/showcase-denoise-star-field.jpg" alt="One 1:1 window of a 61 MP star field, four ways: Lightroom's develop with Denoise off and at 50, AutoShade's neutral develop with no denoise and with v2 of its own denoiser at the 71 % default" />
+
+<sub>The operator's ISO-2500 star field, one 796 × 462 px window at 1:1, shown
+one stop brighter than the develops (the same gain on all four panels). Top:
+Lightroom's own develop with Denoise off and at 50. Bottom: AutoShade's
+neutral develop with no denoise and with v2 of its denoiser at the 71 %
+default — clean chroma, the frame's own luminance grain, the faint stars
+still there. These are the four files the star-frame standard measures.</sub>
+
+Four fine-tunes were trained for this denoiser, on this project's own data;
+two shipped, two were refused by lines written before their runs, and one of
+them ran as five parallel jobs on a rented H200. Everything below is what the
+standard measured on the v1.6.0 build, against Lightroom's Denoise 50 on the
+same frame.
 
 - **The mosaic is cleaned before demosaic**, by AutoShade's own weights: DPIR's
   DRUNet-colour architecture fine-tuned for this exact transform on RawNIND
