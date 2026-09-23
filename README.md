@@ -31,9 +31,9 @@ on a real star field whenever it changes.
 - For anyone who wants an AI first pass on a card of RAWs and still wants to
   know *what* it changed, in numbers, before trusting it.
 - The one network this project ships its own weights for is a RAW denoiser:
-  fine-tuned here, on this project's own data, and judged release after
-  release against Lightroom's Denoise on a real star field, by acceptance
-  lines written before each training run.
+  trained here, on this project's own data, and judged release after release
+  against Lightroom's Denoise on a real star field, by pass marks written
+  down before each training run.
 
 ## Contents
 
@@ -61,14 +61,14 @@ on a real star field whenever it changes.
   and AI components export that composition in Lightroom's own grammar;
   Bitmap components retain a named loss.
 - **A RAW denoiser trained and judged here** — the sensor mosaic is cleaned
-  before demosaic by a network whose weights were fine-tuned on this
-  project's own data, told the noise measured tile by tile on the frame
-  itself, and held, release after release, to a same-frame comparison with
-  Lightroom's Denoise 50 on a real star field. It returns only luminance
-  grain (71 % default), keeps faint stars (98.70 % of 17,817 true faint
-  stars against Lightroom's 98.80 %) and maps hot pixels in every develop.
-  Four fine-tunes were trained: v1 and v2 shipped, v3 and v4 were refused by
-  acceptance lines written before their runs. [§11](#11-the-raw-denoiser-is-trained-here-and-judged-by-lines-written-before-the-run)
+  before demosaic by a network whose weights were trained on this project's
+  own data, told the noise measured tile by tile on the frame itself, and
+  held, release after release, to a same-frame comparison with Lightroom's
+  Denoise 50 on a real star field. It returns only luminance grain (71 %
+  default), keeps faint stars (98.70 % of 17,817 real faint stars against
+  Lightroom's 98.80 %) and maps hot pixels in every develop. Four training
+  runs were made: the first two shipped, the last two failed the pass marks
+  written down before they started and were refused. [§11](#11-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run)
   has the picture and the numbers.
 - **Local AI masks** — subject (BiRefNet, named U²-Net fallback), sky
   (OneFormer ADE20K) and point-prompted object (SAM 2.1), as local Python
@@ -104,8 +104,8 @@ on a real star field whenever it changes.
   invent or alter scene content, and are marked so; a denoise lands as its
   own card and never rewrites the original. RAW denoise is the trained
   denoiser above: higher is cleaner, 100 % is the complete network output,
-  0 % the input; preference era 2 reset the RAW dials once, and baked SCUNet
-  choices are kept separately.
+  0 % the input; the first launch after the RAW default changed reset old
+  RAW dials to it once, and baked SCUNet choices are kept separately.
 - **Stacking and merging** — several frames of one scene into one, over a
   single alignment: HDR merge (exposures measured from the pixels, samples
   weighted by how trustworthy they are, the recovered stops handed to the SDR
@@ -460,33 +460,34 @@ v1.2.4 against Lightroom's own coverage rather than exported luma, on a
 
 Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
 
-### 11. The RAW denoiser is trained here and judged by lines written before the run
+### 11. The RAW denoiser is trained here and judged by pass marks written before the run
 
-<img src="docs/images/showcase-denoise-star-field.jpg" alt="One 1:1 window of a 61 MP star field, four ways: Lightroom's develop with Denoise off and at 50, AutoShade's neutral develop with no denoise and with v2 of its own denoiser at the 71 % default" />
+<img src="docs/images/showcase-denoise-star-field.jpg" alt="One 1:1 window of a 61 MP star field, four ways: Lightroom's develop with Denoise off and at 50, AutoShade's neutral develop with no denoise and with its own denoiser at the 71 % default" />
 
-<sub>The operator's ISO-2500 star field, one 796 × 462 px window at 1:1, shown
-one stop brighter than the develops (the same gain on all four panels). Top:
-Lightroom's own develop with Denoise off and at 50. Bottom: AutoShade's
-neutral develop with no denoise and with v2 of its denoiser at the 71 %
-default — clean chroma, the frame's own luminance grain, the faint stars
-still there. These are the four files the star-frame standard measures.</sub>
+<sub>The author's own ISO 2500 star field, one 796 × 462 px window at 1:1,
+shown one stop brighter than the develops (the same gain on all four panels).
+Top: Lightroom's own develop with Denoise off and at 50. Bottom: AutoShade's
+neutral develop with no denoise and with its denoiser at the 71 % default —
+clean colour, the frame's own luminance grain, the faint stars still there.
+These are the four files the star-field test below measures.</sub>
 
-Four fine-tunes were trained for this denoiser, on this project's own data;
-two shipped, two were refused by lines written before their runs, and one of
-them ran as five parallel jobs on a rented H200. Everything below is what the
-standard measured on the v1.6.0 build, against Lightroom's Denoise 50 on the
-same frame.
+Four training runs were made for this denoiser, on this project's own data.
+The first two shipped; the last two were refused by pass marks written down
+before they started, and one of them ran as five parallel jobs on a rented
+cloud GPU. Everything below was measured on the v1.6.0 build, against
+Lightroom's Denoise 50 on the same frame.
 
 - **The mosaic is cleaned before demosaic**, by AutoShade's own weights: DPIR's
-  DRUNet-colour architecture fine-tuned for this exact transform on RawNIND
-  pairs and synthetic sensor noise over the operator's own low-ISO frames,
-  shipped as `autoshade-raw-denoise-v2.pth`. The network is promised unit
-  variance everywhere, so the noise is **measured where it stands**: per tile,
-  on the finest diagonal wavelet band, with the samples chosen by the three
-  orthogonal bands so the choice cannot bias the number; a local linear field
-  is divided out before the network and multiplied back after. On the star
-  frame the per-tile residual's maximum fell 0.508 → 0.070 and the tile-to-tile
-  width of the fine-luminance ratio 0.185 → 0.014 (Lightroom's own: 0.011).
+  DRUNet-colour architecture, fine-tuned for this exact transform on RawNIND
+  pairs and on synthetic sensor noise over the author's own low-ISO frames,
+  shipped as `autoshade-raw-denoise-v2.pth`. The network expects noise of one
+  known strength everywhere, so the noise is **measured where it stands**: per
+  tile, on the finest diagonal wavelet band, with the samples chosen by the
+  three other bands so the choice cannot bias the number; a smooth map of the
+  measured noise is divided out before the network and multiplied back after.
+  On the star frame the per-tile residual's maximum fell 0.508 → 0.070 and the
+  tile-to-tile spread of the fine-luminance ratio — how much fine grain the
+  finished develop keeps — 0.185 → 0.014 (Lightroom's own: 0.011).
 - **Only luminance grain comes back.** At any positive strength the full clean
   output is requested; the original and the clean frame go through the same
   demosaic and calibration, and in linear light `1 − strength` of the
@@ -501,23 +502,26 @@ same frame.
   20 / 77 sites inside the picture on three night frames, none on the fourth,
   0 / 0 / 0 / 6 / 0 / 4 on ordinary frames; a frame with no mappable site
   renders byte-identically.
-- **Faint stars survive.** The v1 weights had never seen a star and kept 10 %
-  of a 4σ star's flux, 42 % at 6σ, 73 % at 10σ. v2 continued from them with
-  point sources injected on the clean side of half of every batch and a loss
-  that seeks the mean in the units light adds in; the shipped checkpoint keeps
-  54 % at 4σ, 84 % at 6σ, 92 % at 10σ, chosen among its checkpoints by
-  acceptance lines committed before the run (`scripts/accept_v2.py`).
-- **The star-frame standard is a release gate.** Whenever the denoiser moves,
-  the operator's ISO-2500 star frame is compared line by line against
-  Lightroom's Denoise 50 on the same frame (`scripts/denoise_star_standard.py`):
-  eight cleaner lines decide, two front-end lines are reported. On the v1.6.0
-  build: 6 of 8 — 98.70 % of 17,817 true faint stars kept against Lightroom's
-  98.80 %; bright-star peaks 0.939 of the input against 0.953, and the four
-  colour planes' flux spread 0.0385 against a 0.02 limit, stay red; the front
-  end reads 0.2922 against Lightroom's 0.2701 (limit ±0.03) and 0.0139 (limit
-  0.0278). Two further fine-tunes — v3 with composite stars, v4 as five runs
-  on a rented GPU with a comet prior and a star-core-weighted loss — each had
-  their lines written first, failed them, and were refused.
+- **Faint stars survive.** The first training run had never seen a star and
+  kept 10 % of the light of a star four times the noise level (4σ), 42 % at
+  6σ, 73 % at 10σ. The second run continued from it with stars added to the
+  clean side of half of every batch and a loss that seeks the mean in the
+  units light adds in; the weights that ship keep 54 % at 4σ, 84 % at 6σ,
+  92 % at 10σ, and were chosen among that run's snapshots by pass marks
+  written down before the run (`scripts/accept_v2.py`).
+- **The star-field test is a release gate.** Whenever the denoiser changes,
+  the author's ISO 2500 star field is denoised by AutoShade and by Lightroom's
+  Denoise 50 and the two results are compared reading by reading
+  (`scripts/denoise_star_standard.py`): eight readings on the denoiser itself
+  decide, two on the finished develop are reported. On the v1.6.0 build: 6 of
+  8 — 98.70 % of 17,817 real faint stars kept against Lightroom's 98.80 %;
+  bright-star peaks 0.939 of the input against 0.953, and the four colour
+  planes' flux spread 0.0385 against a 0.02 limit, stay behind; the finished
+  develop reads 0.2922 against Lightroom's 0.2701 (limit ±0.03) and 0.0139
+  (limit 0.0278). Two later training runs — one on stars drawn as a core on a
+  streak, one as five runs on a rented cloud GPU with comet-shaped stars and
+  extra weight on star cores — each had their pass marks written first,
+  failed them, and were refused.
 
 Details: [docs/TECH_STACK.md#raw-denoise](docs/TECH_STACK.md#raw-denoise) and
 the release notes, [docs/RELEASE_NOTES_v1.6.0.md](docs/RELEASE_NOTES_v1.6.0.md).
@@ -544,25 +548,27 @@ were each measured:
   thirteen, and the develop sits 0.75 levels rms from the camera's rendition
   (median +0.19) against 4.24 (+2.56) before.
 - **Every photo gets it.** A recipe's version stamp says which estimator made
-  its curve (calibration era 3); one saved by an earlier version is
+  its curve (v1.6.0's is the third); one saved by an earlier version is
   re-estimated the first time it is opened — by the app, batch export, the web
   UI or `apply`, each of which says so. A recipe saved with no base look
   keeps none.
 
 The tone stage scales colour by the luminance ratio, so every wiggle of slope
-acted on grain; on the star-frame standard's two front-end lines this moved
-0.3075 → 0.2922 (Lightroom 0.2701, limit ±0.03) and 0.0387 (limit 0.0309) →
-0.0139 (limit 0.0278). Details:
+acted on grain; on the star-field test's two finished-develop readings (§11)
+this moved 0.3075 → 0.2922 (Lightroom 0.2701, limit ±0.03) and 0.0387 (limit
+0.0309) → 0.0139 (limit 0.0278). Details:
 [docs/TECH_STACK.md#camera-base-look](docs/TECH_STACK.md#camera-base-look).
 
 ### Designed, not yet shipped
 
-- **The star standard's lines 6 and 7c.** On the v1.6.0 build v2 keeps a
-  bright star's flux (the 5×5 aperture reads 1.00–1.03 of the input) but
-  spreads its core a little (single-sample peak 0.82 of the input for faint
-  true stars, 0.92 for bright ones), which is what the two lines read (§11).
-  v3 and v4 were designed against exactly this, trained, and refused by their
-  own pre-written lines; v2 ships with both lines recorded red.
+- **The two star-field readings still behind Lightroom.** On the v1.6.0 build
+  the denoiser keeps a bright star's light (a 5×5 aperture reads 1.00–1.03 of
+  the input) but spreads its core a little (the single brightest sample reads
+  0.82 of the input for faint stars, 0.92 for bright ones), which is what the
+  bright-star peak and the flux-spread readings measure (§11). The two later
+  training runs were designed against exactly this, trained, and refused by
+  their own pre-written pass marks; the denoiser ships with both readings
+  recorded as behind.
 - **The sharpening amount's scale against Lightroom's.** A RAW that carries no
   amount renders at Lightroom's own default of 40 since v1.6.0 (radius 1.0,
   detail 25, masking 0; a baked raster at 0; an absent amount is left to
@@ -635,11 +641,11 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 | Roundness (tilted 2:1 ellipse, feather 25/50/75) | Lightroom's R−100/0/+100 exports differ by max\|Δ\| = 0 DN over 26 Mpx; the engine draws one ellipse too | [Masks](#masks) |
 | Brush geometry | D1 error 874 px → 9.8 px after pixel-centre sampling and the pixel/aspect metric | [Masks](#masks) |
 | X-Trans demosaic (approximate) | X-S10 G/R ratio 1.5503 → 0.9476 | [RAW decode](#raw-decode-and-cfa) |
-| RAW denoise, measured noise field (star frame) | per-tile residual max 0.508 → 0.070; tile-to-tile width of the fine-luminance ratio 0.185 → 0.014 (Lightroom's own 0.011); ground-truth bench moved ≤ 0.01 dB | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-lines-written-before-the-run) |
-| Faint stars through the cleaner (synthetic-truth probe, G1 plane) | flux kept at 4σ / 6σ / 10σ: v1 0.105 / 0.420 / 0.726 → v2 0.541 / 0.835 / 0.918; lines fixed before the run | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-lines-written-before-the-run) |
-| Star-frame standard, v1.6.0 build, against Lightroom Denoise 50 on the same frame | cleaner group 6 of 8: 98.70 % of 17,817 true faint stars kept against 98.80 %; bright-star peak 0.939 against 0.953 (red); four-plane flux spread 0.0385 against 0.02 (red); front end 0.2922 against 0.2701 (±0.03) and 0.0139 against 0.0278 | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-lines-written-before-the-run) |
-| Hot-pixel map (ten 61 MP frames) | 86 / 20 / 77 sites inside the picture on three night frames, none on the fourth; 0 / 0 / 0 / 6 / 0 / 4 on ordinary frames; about 0.1 s a frame | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-lines-written-before-the-run) |
-| Camera base look, era 3 (star frame, 8-bit levels) | develop against the camera's rendition 0.75 rms (median +0.19), 4.24 (+2.56) before; 4 knots instead of 13; front-end lines 0.3075 → 0.2922 and 0.0387 → 0.0139 | [What is new §12](#12-the-cameras-own-look-is-read-from-the-picture-like-with-like) |
+| RAW denoise, measured noise field (star frame) | per-tile residual max 0.508 → 0.070; tile-to-tile width of the fine-luminance ratio 0.185 → 0.014 (Lightroom's own 0.011); ground-truth bench moved ≤ 0.01 dB | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
+| Faint stars through the denoiser (stars of known brightness added to one green plane of the star frame) | light kept at 4σ / 6σ / 10σ: first training run 0.105 / 0.420 / 0.726 → the run that ships 0.541 / 0.835 / 0.918; pass marks written before the run | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
+| Star-field test, v1.6.0 build, against Lightroom Denoise 50 on the same frame | denoiser readings 6 of 8 pass: 98.70 % of 17,817 real faint stars kept against 98.80 %; bright-star peak 0.939 against 0.953 (behind); four-plane flux spread 0.0385 against 0.02 (behind); finished develop 0.2922 against 0.2701 (±0.03) and 0.0139 against 0.0278 | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
+| Hot-pixel map (ten 61 MP frames) | 86 / 20 / 77 sites inside the picture on three night frames, none on the fourth; 0 / 0 / 0 / 6 / 0 / 4 on ordinary frames; about 0.1 s a frame | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
+| Camera base look, v1.6.0 estimator (star frame, 8-bit levels) | develop against the camera's rendition 0.75 rms (median +0.19), 4.24 (+2.56) before; 4 knots instead of 13; finished-develop readings 0.3075 → 0.2922 and 0.0387 → 0.0139 | [What is new §12](#12-the-cameras-own-look-is-read-from-the-picture-like-with-like) |
 | Reverse-fit, stone viaduct (full solve, Reverse-fit strength 100 %) | look error 0.161 → 0.023 at confidence 0.63 (a global solve with the cast curves projected to t = 0.485, the per-band mixer on Orange/Yellow/Aqua/Blue at the 45 ceiling, two semantic zones, two boundary-gated tiles and one field mask), D = 0.180; at the default 65 % the pair fits to 0.047 at confidence 0.25 with the mixer capped at 18, four tiles and two field masks, and v1.2.2's fit of it is where the seam fix was measured: sky tile 0.0278 → 0.0042 (k 0.121), delivered +3.15 → +0.92 codes | [What is new §2](#2-reverse-fit-inverse-rendering-from-any-finished-look) |
 | Reverse-fit, Cornwall islet (full solve, composed calibration) | look error 0.137 → 0.027 at confidence 0.66, D = 0.136 sized from the sensor frame (0.304 from the cropped preview); the global cast projected to t = 0.363, delivered sky hue spread 9.6° (v1.2.2 shipped 33.1°) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Reverse-fit, desert canyon at dusk (full solve, Reverse-fit strength 85 %; the v1.3.0/v1.3.1 reference pair) | look error 0.110 → 0.048 at confidence 0.25, D = 0.275 at pixel scale and 0.609 at layout scale (sky zone 0.617); on the 2048 px acceptance render, whole-frame mean \|diff\| against the target 0.0276 (v1.2.6: 0.0571), sky ΔE 18.2 → 4.9, land 7.0 → 6.9; a solved white balance, two Select Sky bands, four boundary-gated tiles and the 12×8×8 colour field; `match --zoned` 5 min 29 s | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
@@ -906,7 +912,7 @@ numbers](#measured-numbers) are not repeated.
   `A2=0.304888`) with a calibrated hyperbolic depth law.
 - `render::camera_base_look` estimates the per-photo base curve from the
   RAW's embedded preview on 64-column block means, paired like with like
-  (calibration era 3, §12); a RAW that carries no sharpening amount renders
+  (the v1.6.0 estimator, §12); a RAW that carries no sharpening amount renders
   at Lightroom's default of 40, a baked raster at 0.
 
 ### Masks

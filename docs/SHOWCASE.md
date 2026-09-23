@@ -184,24 +184,25 @@ than measured away. The full three-strength table is in
 
 ## Part C — The RAW denoiser: one star field, four ways
 
-<img src="images/showcase-denoise-star-field.jpg" alt="One 1:1 window of a 61 MP star field, four ways: Lightroom's develop with Denoise off and at 50, AutoShade's neutral develop with no denoise and with v2 of its own denoiser at the 71 % default" />
+<img src="images/showcase-denoise-star-field.jpg" alt="One 1:1 window of a 61 MP star field, four ways: Lightroom's develop with Denoise off and at 50, AutoShade's neutral develop with no denoise and with its own denoiser at the 71 % default" />
 
-The operator's ISO-2500 star field, one 796 × 462 px window at 1:1, shown one
-stop brighter than the develops (the same gain on all four panels). Top:
+The author's own ISO 2500 star field, one 796 × 462 px window at 1:1, shown
+one stop brighter than the develops (the same gain on all four panels). Top:
 Lightroom's own develop with Denoise off and at 50 — the two exports the
-star-frame standard reads. Bottom: AutoShade's neutral develop with no
-denoise and with v2 of its own denoiser at the 71 % default — the two
-product-path renders the standard read on the v1.6.0 build. The four files
-share one frame; nothing is resampled.
+star-field test reads. Bottom: AutoShade's neutral develop with no denoise
+and with its own denoiser at the 71 % default — the two renders the app
+itself made on the v1.6.0 build, which the test read. The four files share
+one frame; nothing is resampled.
 
-What the standard measured on these files: 98.70 % of 17,817 true faint stars
+What the test measured on these files: 98.70 % of 17,817 real faint stars
 kept against Lightroom's 98.80 %; the finished develop's fine-luminance ratio
-0.2922 against Lightroom's 0.2701 (limit ±0.03) and its tile-to-tile width
-0.0139 (limit 0.0278); bright-star peaks 0.939 of the input against
-Lightroom's 0.953 and the four colour planes' flux spread 0.0385 against a
-0.02 limit, the two lines that stay red. The denoiser's method, training and
-acceptance lines are in [TECH_STACK.md#raw-denoise](TECH_STACK.md#raw-denoise);
-the refused v3 and v4 in [RELEASE_NOTES_v1.6.0.md](RELEASE_NOTES_v1.6.0.md).
+(how much fine grain it keeps) 0.2922 against Lightroom's 0.2701 (limit
+±0.03) and its tile-to-tile spread 0.0139 (limit 0.0278); bright-star peaks
+0.939 of the input against Lightroom's 0.953 and the four colour planes' flux
+spread 0.0385 against a 0.02 limit, the two readings that stay behind. The
+denoiser's method, training and pass marks are in
+[TECH_STACK.md#raw-denoise](TECH_STACK.md#raw-denoise); the two refused
+training runs in [RELEASE_NOTES_v1.6.0.md](RELEASE_NOTES_v1.6.0.md).
 
 ## What the figures do not show
 

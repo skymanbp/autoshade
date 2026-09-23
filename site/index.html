@@ -103,8 +103,8 @@
           <p>The RAW denoiser cleans the sensor mosaic before demosaic with weights fine-tuned for this exact transform, told the noise measured tile by tile on the frame itself; since v1.6.0 they are trained on star fields too, so faint stars survive the cleaning instead of leaving as noise. At the 71% RAW default it returns the frame's own luminance grain after demosaic in linear light; every positive strength keeps clean chroma; 100% is the complete network output. Baked files keep SCUNet and its separate 50% default. <a href="#showcase-c">See the star field &rarr;</a></p>
         </article>
         <article>
-          <h3>Judged by lines written first</h3>
-          <p>Every fine-tune's acceptance is committed before the run: the flux a star must keep at 4σ, 6σ and 10σ, a sky that must not lift, two bench windows, and a same-frame comparison against Lightroom's Denoise 50 on a real star frame, read in ten lines. v2 passed and ships; v3 and v4, trained against the two lines still red, failed their own and were refused. The numbers are in the release notes.</p>
+          <h3>Pass marks written before training</h3>
+          <p>Every training run's pass marks are committed before it starts: the light a star must keep at 4σ, 6σ and 10σ, a sky that must not lift, two bench windows, and a same-frame comparison against Lightroom's Denoise 50 on a real star field, read in ten measurements. The second run passed and ships; two later runs, aimed at the two readings still behind Lightroom, failed their own marks and were refused. The numbers are in the release notes.</p>
         </article>
         <article>
           <h3>The camera's look, read like with like</h3>
@@ -212,25 +212,25 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
     <section class="section showcase part-b" id="showcase-c" aria-labelledby="showcase-c-title">
       <p class="section-kicker">Showcase · Part C</p>
       <h2 id="showcase-c-title">A RAW denoiser trained and judged here</h2>
-      <p class="section-lede">The one network this project ships its own weights for. Four fine-tunes were trained on this project's own data; v1 and v2 shipped, v3 and v4 were refused by acceptance lines written before their runs. Every number here is the star-frame standard's own, on the v1.6.0 build, against Lightroom's Denoise 50 on the same frame.</p>
+      <p class="section-lede">The one network this project ships its own weights for. Four training runs were made on this project's own data; the first two shipped, the last two were refused by pass marks written down before they started. Every number here was measured on the v1.6.0 build, against Lightroom's Denoise 50 on the same frame.</p>
 
       <figure class="wide-figure">
-        <img src="images/showcase-denoise-star-field.jpg?v=1.6.0" width="1600" height="1000" alt="One 1:1 window of a 61 MP star field, four ways: Lightroom's develop with Denoise off and at 50, AutoShade's neutral develop with no denoise and with v2 of its own denoiser at the 71 % default" loading="lazy">
-        <figcaption><strong><a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">One star field, four ways.</a></strong> The operator's ISO-2500 frame, one 796 × 462 px window at 1:1, shown one stop brighter than the develops (the same gain on all four panels). Top: Lightroom's own develop with Denoise off and at 50. Bottom: AutoShade's neutral develop with no denoise and with v2 at the 71 % default: clean chroma, the frame's own luminance grain, the faint stars still there. <strong>98.70 %</strong> of 17,817 true faint stars kept against Lightroom's 98.80 %; the finished develop's fine-luminance ratio reads <strong>0.2922</strong> against Lightroom's 0.2701 (limit ±0.03).</figcaption>
+        <img src="images/showcase-denoise-star-field.jpg?v=1.6.0" width="1600" height="1000" alt="One 1:1 window of a 61 MP star field, four ways: Lightroom's develop with Denoise off and at 50, AutoShade's neutral develop with no denoise and with its own denoiser at the 71 % default" loading="lazy">
+        <figcaption><strong><a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">One star field, four ways.</a></strong> The author's own ISO 2500 frame, one 796 × 462 px window at 1:1, shown one stop brighter than the develops (the same gain on all four panels). Top: Lightroom's own develop with Denoise off and at 50. Bottom: AutoShade's neutral develop with no denoise and with its denoiser at the 71 % default: clean colour, the frame's own luminance grain, the faint stars still there. <strong>98.70 %</strong> of 17,817 real faint stars kept against Lightroom's 98.80 %; the finished develop keeps fine grain at a ratio of <strong>0.2922</strong> against Lightroom's 0.2701 (limit ±0.03).</figcaption>
       </figure>
 
       <div class="feature-grid">
         <article>
           <h3>Noise measured where it stands</h3>
-          <p>The network is promised unit variance everywhere, so the residual noise is measured per tile on the finest diagonal wavelet band, with the samples chosen by the three orthogonal bands so the choice cannot bias the number; a local linear field is divided out before the network and multiplied back after. On this frame the per-tile residual's maximum fell <strong>0.508 → 0.070</strong>, and the tile-to-tile width of the fine-luminance ratio 0.185 → 0.014, beside Lightroom's own 0.011.</p>
+          <p>The network expects noise of one known strength everywhere, so the noise is measured per tile on the finest diagonal wavelet band, with the samples chosen by the three other bands so the choice cannot bias the number; a smooth map of the measured noise is divided out before the network and multiplied back after. On this frame the per-tile residual's maximum fell <strong>0.508 → 0.070</strong>, and the tile-to-tile spread of the fine-luminance ratio (how much fine grain the finished develop keeps) 0.185 → 0.014, beside Lightroom's own 0.011.</p>
         </article>
         <article>
           <h3>Only luminance grain returns</h3>
           <p>At any positive strength the full clean output is requested; the original and the clean mosaic go through the same demosaic and calibration, and in linear light <code>1 − strength</code> of the luminance difference returns along the grey axis. Colour noise cannot come back by construction. The default is 71 %; hot pixels are mapped before either reader sees the mosaic.</p>
         </article>
         <article>
-          <h3>Stars kept, lines written first</h3>
-          <p>v1 had never seen a star and kept 10 % of a 4σ star's flux. v2 was trained with stars on the clean side and a loss that seeks the mean, keeps <strong>54 %</strong>, and was chosen among its checkpoints by acceptance lines committed before the run. v3 and v4, five runs on a rented H200, failed their own lines and were refused. Two of the standard's ten lines stay red and are recorded in the release notes.</p>
+          <h3>Faint stars kept</h3>
+          <p>The first training run had never seen a star and kept 10 % of the light of a star four times the noise level. The second was trained with stars added to the clean side and a loss that seeks the mean; it keeps <strong>54 %</strong>, and the weights that ship were chosen among the run's snapshots by pass marks written before the run. Two later runs, five of them on a rented cloud GPU, failed their own marks and were refused. Two of the ten star-field readings stay behind Lightroom and are recorded in the release notes.</p>
         </article>
       </div>
     </section>
