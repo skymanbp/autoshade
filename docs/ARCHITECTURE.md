@@ -810,22 +810,32 @@
 > plus aperture colour against Lightroom (7c), and lines 3, 4, 6 and 8 as they
 > were. The FRONT-END group — lines 1 and 2 on the ordinary renders, base curve
 > kept — is reported and never decides: those two read the camera-matched
-> curve, not the cleaner. On the final build, with one real GPU capture
-> replayed into every render, the cleaner group reads 1c, 2c, 3, 4, 8 PASS and
-> 5c, 6, 7c FAIL: 5c by 0.40 of a point and 6 by 0.005, two lines that sit on
-> their limits and whose verdict turns with the star sites the input render's
-> curve selects (they passed by 0.08 and 0.007 on the curve estimated before
-> 2026-09-21, the cleaner and its mosaics byte-identical), and 7c on a
-> plane-flux spread of 0.045 against 0.02 that reads the same on both curves
-> (R +3.3 %, G +1.0 %, B −1.1 %) and is the cleaner's own: on a synthetic star
-> field with known fluxes the network keeps 10 % of a star whose G-plane peak
-> stands 4 sigma over the sky's noise, 73 % at 10 sigma and 97 % at 40, while
-> the transform pair with a perfect smoother in the network's place moves
-> star-free sky by +0.07…+0.22 DN against the network's −0.22…−1.87 — the
-> network was trained to remove isolated positive spikes and never shown a
-> point source. The front-end width
-> (2f) fell 0.096 → 0.039, limit 0.031, when the base look's estimate was
-> paired like with like (see **The base look is estimated against the
+> curve, not the cleaner. On the v1.5.1 build, with the v1 weights and one
+> real GPU capture replayed into every render, the cleaner group read 1c, 2c,
+> 3, 4, 8 PASS and 5c, 6, 7c FAIL: 5c by 0.40 of a point and 6 by 0.005, two
+> lines that sit on their limits and whose verdict turns with the star sites
+> the input render's curve selects (they passed by 0.08 and 0.007 on the curve
+> estimated before 2026-09-21, the cleaner and its mosaics byte-identical),
+> and 7c on a plane-flux spread of 0.045 against 0.02 that read the same on
+> both curves (R +3.3 %, G +1.0 %, B −1.1 %) and was the cleaner's own: on a
+> synthetic star field with known fluxes the v1 network kept 10 % of a star
+> whose G-plane peak stands 4 sigma over the sky's noise, 73 % at 10 sigma and
+> 97 % at 40, while the transform pair with a perfect smoother in the
+> network's place moves star-free sky by +0.07…+0.22 DN against the network's
+> −0.22…−1.87 — the network was trained to remove isolated positive spikes and
+> never shown a point source. The v2 weights (v1.6.0: point sources injected
+> on the clean side, a loss that seeks the mean in the units light adds in)
+> keep 54 % of that 4-sigma star; on the v1.6.0 release build they read 1c,
+> 2c, 3, 4, 5c, 8 PASS (5c 98.70 % against Lightroom's 98.80 %) and 6, 7c
+> FAIL (6: 0.939 against 0.953, limit Lightroom − 0.01; 7c: plane-flux spread
+> 0.0385 against 0.02) — the same effect, in the network: the single-sample
+> peak on the plane a star lands on reads 0.82–0.92 of the input's while the
+> 5×5 aperture reads 1.00–1.03; two further fine-tunes (v3; v4, ten
+> candidates on a rented H200) failed their pre-written lines and did not
+> ship. The front-end width (2f) fell 0.096 → 0.039, limit 0.031, when the
+> base look's estimate was paired like with like, and to 0.014 (1f 0.2922,
+> limit 0.3001) when it was read on block means — both lines inside on the
+> v1.6.0 release build (see **The base look is estimated against the
 > picture the camera drew**).
 > Why the mosaic: on the user's ILCE-7RM4A frames
 > the noise is white per CFA plane there and spatially correlated after demosaic,
@@ -1438,9 +1448,9 @@ lossless AND keeps an un-rotated recipe byte-identical to what v0.32 wrote (R21'
 structure fingerprint therefore needs no re-archive pass, unlike v0.31.0's).
 `pipeline::rotate_recipe` is the one mover: geometry through
 `orient_recipe_coords` **by the delta, never the running total**, raster masks
-really turned (`image::rotate90` is lossless and these are our own PNGs — the
-`coord_era` migration could only disclose them because those files predated a
-frame nobody could re-derive) into freshly claimed names with the originals left
+really turned (`image::rotate90` is lossless and these are our own PNGs; the
+`coord_era` migration could only disclose them until v1.5.2, and now re-writes
+them the same way under operation-derived names) into freshly claimed names with the originals left
 in place, and the turn count last; a raster that cannot be turned refuses the
 whole operation rather than leaving a half-turned develop. **Which rasters** is
 `LocalAdjustment::turnable_raster_paths_mut`, and the rule is ownership, not
@@ -1504,14 +1514,28 @@ The frame keeps its SIZE through all of this — only its origin moves — and
 crop and mask geometry is stored normalised to the frame (`recipe.rs:1634`),
 so **a recipe saved before this date keeps its numbers while the picture
 under them moves by (32, 20)**: 0.337 % of the width, 0.316 % of the height.
-Nothing migrates that. `coord_era` TURNS coordinates, it does not translate
-them, and no field in a recipe records which origin it was drawn against, so
-the old batch cannot be told from the new one without a further era. It is
-disclosed here rather than fixed.
+**Era 2 of `coord_era` (v1.5.2) migrates that.** A recipe stamped era ≤ 1 was
+drawn against the window every release up to v1.5.1 cut, and
+`decode::source_window` reports, from the same metadata read that answers the
+frame and its turn, how far this build's window sits from it
+(`SourceWindow::legacy_shift`: the declared origin on the shape rawler cut from
+the corner, zero on every other — the v0.32.0 shape has been developed from the
+declared origin since v0.32.0, so its era-1 recipes are already in this frame).
+`pipeline::migrate_recipe_coord_frame` translates every stored coordinate by
+that vector — turned into the display frame by `render::orient_vector`, the
+linear part of `orient_point` — through `render::shift_recipe_coords`: the crop
+(clamped to the frame: the strip the old window held past the declared crop is
+not in this frame to keep), every mask geometry, every brush and gesture dab
+token by token, the Range-Mask sample point, retouch centres and donors, and
+the colour field resampled at its cell centres. Raster masks are re-written as
+translated files (below), and the recipe is stamped era 2. One pass, once, per
+recipe file; a recipe this build writes is era 2 from birth, so the two batches
+are told apart by the stamp the first era did not have to carry.
 
 Because the frame finally turns, **recipes saved before v0.30.0 hold their crop
 and mask coordinates in the SENSOR frame**. `EditRecipe.coord_era` records
-which frame a recipe's geometry is drawn in (0 = sensor, 1 = display), and
+which frame a recipe's geometry is drawn in (0 = sensor, 1 = display, 2 =
+display measured from the declared crop origin — v1.5.2, above), and
 `pipeline::migrate_recipe_coord_frame` turns an era-0 recipe exactly once at
 load through `render::orient_point` — the coordinate twin of the pixel
 transform, a bijection per orientation state, so the migration is lossless and
@@ -1524,8 +1548,22 @@ second time. The migration hooks only the paths that read a recipe FILE (GUI
 open, the variant strip, version snapshots, batch export, `api_recipe`, CLI
 `apply`); recipes arriving from the browser or from the model are stamped
 current-frame at their boundary instead. Raster (`MaskGeometry::Bitmap`) masks
-are image files, not coordinates: they are left alone and the user is told so
-(`render::recipe_has_raster_masks`, whose one member they now are). Imported
+are image files, not coordinates: until v1.5.2 they were left alone and the user
+was told so; the migration now re-writes them — turned for an era-0 recipe on a
+rotated RAW, translated for era 2, edge samples clamped, an integer move an
+exact copy — into a file named after the operation
+(`<stem>-e2-o<orientation>[t]-<dx>x<dy>.png`, `pipeline::migrate_raster_file`),
+so every recipe that points at the same raster and every pass nothing re-saves
+(a CLI render, an `api_recipe` read, an export) lands on ONE file instead of
+claiming a fresh one per pass; the original is kept for the snapshots and saved
+recipes that still point at it. Under a turn the walk is
+`turnable_raster_paths_mut` (the AI caches are dropped and re-segmented, as for
+a rotate); under a translation alone it is `bitmap_paths_mut`, caches included,
+because a translated alpha is the alpha of the translated picture and keeping it
+is what leaves the mask working where no segmentation sidecar can re-derive it.
+A raster that cannot be read or written refuses the whole migration — nothing
+moves, nothing is stamped, the next reader retries — and the refusal is said
+(`LoadMigration::reframe_error`, its own sentence on every surface). Imported
 BRUSH groups used to join them on that side of the line for a different reason —
 their dab coordinates were carried verbatim so the sidecar round-tripped
 byte-faithfully — and R29 C1 moved them off it: the brush RENDERS since R29
@@ -1792,15 +1830,34 @@ cut the noise variance by k². Each constant is a named `Ramp` over its slider:
 first-principles values until the Lightroom kit's ladders (`SH-*`, `NR-*`,
 `CNR-*`) pin them.
 
-Ten controls have a non-zero Lightroom default — Radius 1.0, Sharpen Detail
-25, the three noise-reduction companions 50, and the grain and post-crop
-vignette companions (`recipe::LR_COMPANION_DEFAULTS`). A recipe has stored 0
-for "the sidecar said nothing" since R25, so `EditRecipe::resolved` reads a
-stored 0 as Lightroom's default and `explicit_zero` names the companions whose
-0 is a real value: written back as `"0"`, read from a sidecar that states
-`"0"`, carried through a refine, the era gate and the payload reconcile, and
-costing no byte until something is in it — `recipe.json` and
-`store::recipe_struct_hash` of every earlier recipe are unchanged.
+Eleven controls have a non-zero Lightroom default — the Sharpening amount
+(v1.6.0), Radius 1.0, Sharpen Detail 25, the three noise-reduction companions
+50, and the grain and post-crop vignette companions
+(`recipe::LR_COMPANION_DEFAULTS`). A recipe has stored 0 for "the sidecar said
+nothing" since R25, so `EditRecipe::resolved` reads a stored 0 as Lightroom's
+default and `explicit_zero` names the companions whose 0 is a real value:
+written back as `"0"`, read from a sidecar that states `"0"`, carried through
+a refine, the era gate and the payload reconcile, and costing no byte until
+something is in it — `recipe.json` and `store::recipe_struct_hash` of every
+earlier recipe are unchanged. The Sharpening amount is the one companion whose
+default is the SOURCE KIND's — Lightroom sharpens a RAW at 40 (radius 1.0,
+detail 25, masking 0) and a baked raster not at all — so it is read through
+`EditRecipe::capture_sharpening(raw_source)`: `resolved` on a RAW, the stored
+field on a baked raster. The kind is a parameter of the develop
+(`render::apply_develop_with_rasters` and every preview entry above it): the
+RAW export arm passes `true`, the baked arm `false`; the GUI canvas, its Range
+and Point Color references, the retouch models' picture of a card and
+`serve`'s preview pass `decode::is_raw` of the source
+(`AutoShadeApp::source_is_raw`); the analysis forms (`develop_preview`,
+`develop_preview_with` — the reverse fit and the judge) develop as baked, which
+is what they did before the default existed. The sidecar writer emits
+`crs:Sharpness` only when the amount states something, so an absent amount
+lets Lightroom apply its own default for the file, and the payload reconcile
+treats the 40 Lightroom materialises into a RAW's sidecar as a
+materialisation, not an edit. Before v1.6.0 the default was 0 on both kinds
+and the writer always wrote `Sharpness="0"`: a fresh RAW rendered
+unsharpened, 40 short of the Lightroom develop it was measured against, and
+its saved sidecar switched Lightroom's default off.
 
 **The parametric tone curve renders since v1.5.0** (`render::parametric_lut`).
 Lightroom's Tone Curve panel has a second mode beside the point curve — four
@@ -4166,10 +4223,15 @@ inferred from the sentences they print:
     baseline, because a per-pixel regression on its re-synthesised texture
     solved every control to neutral — becomes an attached +0.08 EV correction
     at 0.85 and at 1.0 (frame 0.045236 → 0.043859 at 0.85).
-  * the colour field exists above the default strength only: 81 of 88 measured
-    cells at a 0.61 gain bound on 0.85 (frame 0.043859 → 0.017267, against the
-    baseline's 0.045236 → 0.021079), 80 of 88 at 0.80 on Strength 1. At 0.65
-    there is no field at all, which is most of why that strength barely moves.
+  * the colour field: 81 of 88 measured cells at a 0.61 gain bound on 0.85
+    (frame 0.043859 → 0.017267, against the baseline's 0.045236 → 0.021079),
+    80 of 88 at 0.80 on Strength 1. Until R41 (2026-09-22) there was no field
+    at all at 0.65, which was most of why that strength barely moved: the
+    2026-09-22 re-fit under R40 read a sky mean ΔE of 26.7 against the target
+    at 0.65 and 4.6 at 0.85. R41 opens the stage at the default too, at the
+    ladder's 0.35 bound — the 0.65 re-fit then attaches 87 of 88 cells (frame
+    0.042208 → 0.025230) and the 1000 px render's sky reads ΔE 7.2, the whole
+    frame's mean |diff| 0.0296 against 0.0687 before and 0.0256 at 0.85.
   * the zone probes' admission arm shipped on NO site of this pair. Four
     regions past the pairing line (sky 0.617, two spatial tiles 0.352 and
     0.422, one free mask 0.391) asked their cells and were refused, the sky at
@@ -4689,18 +4751,45 @@ Since v1.2.2 the step constant is a CEILING rather than a flat budget:
 0.012 was calibrated where neighbourhood contrast masks a discontinuity of
 that size, and a measured tile seam in clean sky sat exactly on it at 7.8
 sigma over a mask-free neutral control. Each crossing is therefore charged
-against its own per-crossing budget — the larger of the scene's own step
-across the same feet and `BOUNDARY_STEP_SHAPE = 3` times the correction's
-own same-side slope read off the frozen k=1 candidate (the minimum over
-two consecutive baselines, so the resample-and-refine collar — the seam's
-own soft shoulder — earns nothing while a persisting ramp keeps full
-credit), clamped to
-`[BOUNDARY_STEP_FLOOR = 1/255, ceiling]` — and the gate compares the
-charged 90th percentile alongside the still-disclosed raw step. A crossing
-whose context reaches the ceiling is charged its raw step bit-for-bit, so
-textured borders and true ramps are governed by exactly the number they
-were governed by before; a crossing in smooth sky must fit inside what its
-own neighbourhood can actually mask.
+against its own per-crossing budget — since R40 (v1.5.2) the scene's own
+DISCONTINUITY at that crossing, clamped to `[BOUNDARY_STEP_FLOOR = 1/255,
+ceiling]` (`discontinuity_budget`) — and the gate compares the charged 90th
+percentile alongside the still-disclosed raw step. A crossing on a scene
+edge that reaches the ceiling is charged its raw step bit-for-bit, so
+textured borders are governed by exactly the number they were governed by
+before; a crossing in smooth sky must fit inside what its own
+neighbourhood can actually mask, and a smooth gradient masks nothing.
+
+**R40 (v1.5.2): the hard family reads discontinuities, not 3-px
+differences.** Until R40 each crossing's reading was the plain `(inside −
+outside)` difference over 3-px feet, its budget the larger of the scene's
+own step over the same feet and `BOUNDARY_STEP_SHAPE = 3` times the
+correction's own same-side slope, and the R37 allowance the target's own
+step there. All three call a smooth GRADIENT a discontinuity, and the
+reference pair's re-fit at 0.85 showed what that buys: a per-crossing dump
+of the accepted `r1c0` reading (2026-09-22) found the tile's sky-side
+crossings introducing +0.009 luma (2.3 codes) against a context of
+0.005–0.007 that was the sky's own 3-px gradient, an allowance of 0.0055
+that was the difference between the target's sky gradient and the source's,
+and a charged p90 of 0.0102 — under the 0.012 ceiling, so a visible pale
+block was accepted at `k = 0.134` with every gate green (R39 keeps it too:
+the residual its acceptance read improves under the shrunk tile). The ruler
+now reads every frame's crossing as `disc(F) = (inside − outside) − F's own
+trend`, the trend being the mean change per baseline over a flank
+`STEP_FLANK_BASELINES = 2` baselines (6 px) beyond each far foot on its own
+side of the contour (a missing flank contributes nothing; with neither, the
+plain step), so a gradient reads ~0 on every frame and a jump reads its
+height; the reading is `disc(rendered) − disc(reference)`, the budget
+`|disc(reference)|` clamped to the floor and ceiling, the R37 allowance the
+target's own discontinuity pooled per cell as before, and there is no slope
+term — a correction that ramps is not a discontinuity in the first place
+and reads ~0 under the same de-trending, so it needs no credit to stay
+whole. Six-pixel flanks rather than three because the de-trended reading's
+own rounding noise must stay under the one-code floor (per channel 6.5/12
+code² of variance, p90 ≈ 0.94 code; 3-px flanks would read 1.17) and
+because the first baseline out is the resample-and-refine collar the seam
+itself wears. `crossing_budget`, `crossing_slope`, `colour_slope_credit`
+and `BOUNDARY_STEP_SHAPE` remain the SOFT family's.
 
 **Both mask families now charge, against the same per-crossing budget, read
 off the same three frames.** Until this batch the soft rim ruler DECLINED,
@@ -4730,8 +4819,9 @@ width carries. The slope term is read from the CONTOUR outward, exactly where
 the hard ruler reads it, and that placement is what makes a wide alpha ramp
 earn credit (the probes stay inside its own ramp) while a two-pixel one earns
 none (they land on the settled plateaus). One contract for both families: no
-seam larger than the scene's own local variation, floor one code, ceiling
-0.012.
+seam larger than what the scene itself carries at that place — the band's
+own variation for the soft family, the scene's own discontinuity for the
+hard (R40) — floor one code, ceiling 0.012.
 
 **A step the target itself carries is not a seam (R37).** The ceiling was
 absolute: whatever a crossing's context earned, nothing could introduce more
@@ -4812,7 +4902,8 @@ ranking `max(charged luma, charged colour)` runs the shrink on until the
 COLOUR p90 reaches the ceiling: `k` 0.852 to 0.088, kept luma rim 0.012 to
 0.002, colour rim on 0.012.
 
-One instrument note rides with that. A single channel's `u1` is a difference
+One instrument note rides with that (soft family; the hard family stopped
+reading a slope at R40). A single channel's `u1` is a difference
 of two 8-BIT renders, so its slope over the 3-px baseline quantises to whole
 code values and the min-over-two-baselines rule reads 0 on a ramp that is
 plainly there; luma is the same measurement with three independent
@@ -4821,8 +4912,9 @@ The channel slope is therefore floored at the luma slope
 (`colour_slope_credit`) — a lower bound on the correction's own shape, never
 an invented credit. Without it the budget stops cancelling the channel ratio
 and a pure EXPOSURE dial over a warm field is charged as if it were a halo:
-measured on `shoulder_fixture(32.0, 0.37)`, the accepted shrink fell 0.24536
-to 0.14795 and the kept step from two code values to one.
+measured on `shoulder_fixture(32.0, 0.37)` under the pre-R40 hard ruler, the
+accepted shrink fell 0.24536 to 0.14795 and the kept step from two code
+values to one.
 
 **The range family still declines, and for a reason that is not an assumption
 about shape:** `range_transition_rim` admits only crossings whose REFERENCE is
@@ -5089,6 +5181,34 @@ family the byte-identity refusal the semantic family has had since step 9: a
 bisection that lands on `k = 0` renders the reference back and is refused as
 `RANGE_BOUNDARY_INERT`, instead of shipping a mask with every dial at zero.
 
+**What ships is judged, not only what was admitted (R39, v1.5.2).** Every
+route judges a candidate at `k = 1` (`attach_one_zone`) and the boundary gate
+then shrinks it; until v1.5.2 nothing judged the shrunk correction, and on the
+reference pair spatial tile r1c0 shipped at `k = 0.134` with its own cell's
+colour-inclusive residual WORSE than the render without it (0.19166 ->
+0.20101), bought by a frame reading that moved 0.0003 the right way — a pale
+block in the sky. (That tile is NOT what this predicate refuses: the residual
+its acceptance read is luma only, its colour arm having been withheld, and
+that one improves, so R39 keeps r1c0. The block is the boundary ruler's to
+stop, R40 above: under R40 the 2026-09-22 re-fit no longer attaches r1c0 at
+0.85 — its correction is dropped by the zone-residual test, 0.193 → 0.166 —
+and at 1.0 attaches it at `k = 0.119`, raw step 0.0090 luma, context-charged
+p90 0.0078, where the pre-R40 fit shipped `k = 0.161`, 0.0125 and 0.0104.)
+`AcceptedZone::still_accepted` holds the shipped correction to do-no-harm
+against a leave-one-out baseline: the residual its acceptance read, on the
+shipped render, may not exceed the same residual on the shipped set rendered
+WITHOUT that correction — the frame before the tile on the sequential tile and
+free-mask routes, a fresh analysis render minus the zone's own mask on the
+shared semantic and range routes (`refuse_shrunk_zones`) — and the frame must
+stay within the attachment's own drift tolerance. The `k = 1` arms are
+deliberately NOT re-run: they ask for a gain, which the shrink trades away on
+purpose; the first cut of this predicate re-ran them and refused the
+inverted-raster fixture's sky at `k = 0.088` for improving its zone 0.040 ->
+0.038. A refused zone leaves with `ZONE_SHRUNK_REFUSED` (its residual with and
+without it, the frame pair) and the survivors are gated again from their
+full-strength controls, not from a shrink negotiated for a set they are no
+longer part of.
+
 **The rim ruler follows each band's own coordinate.** `RangeSelector` gives a
 mask the reading its transitions are actually made of — signed luma difference
 for a luminance band, chromaticity distance for a colour one — so a colour
@@ -5194,8 +5314,9 @@ post-cast arbiter load-bearing). Repeated runs are SHA-identical. A 512 / 768 an
 measured and rejected: the same tiles, +4% / +25-50% wall time, and the
 384-calibrated ruler collapses at 768.
 
-**The colour field as a control (R33 §G, v1.3.0).** Past
-`GradeStrength::DEFAULT` and nowhere else, `run_local_sequencer` runs one last
+**The colour field as a control (R33 §G, v1.3.0; its gate moved by R41,
+2026-09-22).** At `GradeStrength::DEFAULT` and above, and below it nowhere,
+`run_local_sequencer` runs one last
 producer after the ranges, the tiles and the free masks: it RE-SOLVES the field
 on the current render (every earlier producer applied — the head-of-sequencer
 field measured a frame that no longer exists), renders it, and keeps it only if
@@ -5207,8 +5328,12 @@ may run here" cannot disagree) and `FIELD_REGRESSED`.
 
 The strength gate is the design, not a safety valve: the dial means "how far
 past Lightroom may this fit go", and this is the first control that leaves
-Lightroom entirely. At or below the default every result is byte-identical to
+Lightroom entirely. Below the default every result is byte-identical to
 v1.2.6, the stage does not narrate itself, and the recipe writes no key
+(until R41 that read "at or below": on the reference pair the default fit
+carried no field, and that was most of the distance the user saw between 0.65
+and 0.85, so the gate moved down one step — the calibration point, one click
+below, still ships nothing a sidecar cannot carry)
 (`skip_serializing_if`, the `quarter_turns` rule — an archived version's
 `store::recipe_struct_hash` still matches and no re-archive pass is needed).
 `SCHEMA_ERA` is deliberately NOT bumped: its one consumer,
@@ -5254,7 +5379,7 @@ every save and a field the user asked for says so out loud.
 was DISCLOSURE ONLY until R33 §G (v1.3.0): the field is an owned local of
 `fit_recipe_zoned_inner`, never a `FitReport` member, and a test greps
 `render.rs` and `recipe.rs` for any mention of the module. It now also SHIPS,
-as `EditRecipe.colour_field`, past the default Strength — see **The colour
+as `EditRecipe.colour_field`, from the default Strength up — see **The colour
 field as a control** below; the grep pin survives in the one direction that
 still matters (`the_engine_renders_the_field_from_the_recipe_and_never_calls_the_analyzer`),
 and schema era 1 is unchanged because the field owns no `crs:` key.
@@ -5551,14 +5676,50 @@ ran 0.33–2.25 where the camera's own response, read by pairing the two picture
 in place, runs 0.99–1.32; and rendered with those estimates the ten frames sat
 0.4–6.0 levels darker than the camera's rendition at the median block. Made
 against the sensor's picture the estimates sit within 0.05–1.7 levels, nearer
-in rms on all ten, and the star frame's slopes run 0.40–1.73. A saved recipe
-keeps the curve it was saved with; the change reaches a photograph when its
-base look is next estimated. The reverse fit starts from this look, and the
+in rms on all ten, and the star frame's slopes run 0.40–1.73. Until v1.6.0 a
+saved recipe kept the curve it was saved with (the next paragraph). The
+reverse fit starts from this look, and the
 same fits run on both curves over the six calibration-corpus pairs moved both
 ways — one pair's fitted residual 0.105 → 0.055, the other five up by
 0.0007–0.0168 — so the two pinned two-temperature readings were re-measured
 (`fit::tests::the_fan_gate_costs_a_real_two_temperature_pair_nothing`; the
 question that test asks kept its answer).
+
+**…and read on block means (calibration era 3, 2026-09-23).** Paired like
+with like, the estimate was still a pixel-level CDF match: eleven quantile
+knots, on a night frame crowded 0.004–0.01 apart at the scale of the 8-bit
+preview's own 1/255 quantisation, with the preview's in-camera sharpening,
+noise reduction and JPEG texture read as tone, so F1's slopes still ran
+0.85–1.72 across the sky band. The tone stage scales RGB by the luma ratio
+(`scale_chroma`), so each slope wiggle multiplied the input's chroma noise
+and the cleaner's output differently — which is what the star standard's
+front-end lines read (1f 0.3075 against Lightroom's 0.2701, limit ±0.03; 2f
+0.0387, limit 0.0309). `render::camera_base_knots` now matches the two
+pictures on the 64-column block-mean lumas `corner_residual` already cuts
+(`block_lumas`, both thumbnails ≤ 1024): both lists sorted, walked in groups
+spanning at least `MIN_SPAN` 0.06 of neutral luma with at least `MIN_BLOCKS`
+64 blocks each (a shorter tail merges into the group before it), one knot
+per group at its median block on each side, (0, 0) and (1, 1) pinned, an
+identity within 0.02 returning no curve, a grid that does not fit or fewer
+than 64 blocks returning `None`. The design was chosen on the real engine,
+not on the no-render simulator (which sat about +0.006 above it): pixel-level
+matching with merged knots failed 1f at 0.3234, in-place pairing produced
+plateaus (isotonic pooling) on p38, p39 and an Olympus body, every block-mean
+variant passed (d06 0.2914 / 0.0137). Measured against the camera's rendition
+(`probe_real_raw_base_look`, 8-bit levels): F1 rms 0.75, median +0.19,
+against 4.24 / +2.56 before, and four knots instead of thirteen; p37 11.92 /
+−2.05, p39 22.50 / −0.60, a Sony ILCE-7M3 2.85 / −1.69 (their with-lift
+estimates 12.93 / −5.21, 22.99 / −2.79, 7.02 / −6.30). On the product path
+(the release build's own fresh-open recipe, one GPU capture of the cleaner
+replayed): 1f 0.2922 and 2f 0.0139, both inside, with the cleaner group 6 of
+8 (5c passes on these sites, 6 and 7c do not). `recipe::CALIB_ERA` is 3 and
+`pipeline::base_curve_is_pre_era(version, curve)` is `version < CALIB_ERA &&
+curve.len() >= 3`: a recipe saved by an earlier version is re-estimated the
+first time it is opened, whatever its curve's shape (era 1's washed sampler,
+era 2's pixel CDF), and the app, the batch exporter, `serve` and `apply` say
+so; an empty curve is never re-estimated, because a develop tuned without a
+base look would change under one. Era 2 (v1.5.1 and before) had replaced
+only era 1's curves and only by their fingerprint.
 
 One deliberate asymmetry: the fit does **not** apply
 `render::limit_tone_sliders` to its proposal, even though the engine applies it

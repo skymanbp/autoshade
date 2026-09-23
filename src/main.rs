@@ -1511,8 +1511,10 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path, long_edge: Option<u32>)
     // HERE, where the file is read — `render_source_checked` below is the
     // shared render funnel and also serves recipes that arrived from a
     // browser (already display-frame), which must never be turned.
-    if let Some(c) = pipeline::migrate_recipe_coord_frame(raw, &mut recipe) {
-        println!("note: {}", pipeline::coord_migration_note(c));
+    match pipeline::migrate_recipe_coord_frame(raw, &mut recipe) {
+        Ok(Some(c)) => println!("note: {}", pipeline::coord_migration_note(c)),
+        Err(e) => println!("note: {}", pipeline::coord_migration_failure_note(&e.to_string())),
+        Ok(None) => {}
     }
     // Untrusted input, like any other recipe source: an enormous finite
     // exposure (hand-edited JSON) otherwise reaches powf unbounded.

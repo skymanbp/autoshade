@@ -847,7 +847,7 @@
             "a freshly estimated curve carries this build's era"
         );
         assert!(
-            !autoshade::pipeline::base_curve_looks_pre_era(legacy.version, &legacy.base_curve),
+            !autoshade::pipeline::base_curve_is_pre_era(legacy.version, &legacy.base_curve),
             "…so the pre-era repair declines it instead of announcing a re-estimate"
         );
         // A calibration that produced NO knots stamps no curve, so it makes no
@@ -2238,7 +2238,7 @@
         assert!(app.dirty, "the in-flight guard swallows a second dispatch (edit stays armed)");
 
         // A matching frame is accepted and bumps the counter + sets the texture.
-        let good = build_preview(base.clone(), app.recipe.clone(), false, None);
+        let good = build_preview(base.clone(), app.recipe.clone(), false, None, false);
         app.finish_redevelop(&ctx, Ok(good));
         assert_eq!(app.develop_count, 1, "matching frame accepted");
         assert!(app.after_tex.is_some(), "after texture set");
@@ -2249,7 +2249,7 @@
         // AND the pending edit re-armed. `dirty` is cleared first — it was
         // still true from the swallowed dispatch above, so the re-arm
         // assertion used to be vacuously satisfiable (L26).
-        let stale = build_preview(base, app.recipe.clone(), false, None);
+        let stale = build_preview(base, app.recipe.clone(), false, None, false);
         app.recipe.masks[0].exposure_ev = 1.9; // user kept dragging
         app.dirty = false;
         app.finish_redevelop(&ctx, Ok(stale));

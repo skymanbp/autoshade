@@ -699,7 +699,8 @@ pub const RECIPE_CONTROLS: [Control; 114] = [
         // derives this key like every other one — the hand-written scale
         // residue it used to need is gone.
         purpose: "capture sharpening amount, 1:1 with Lightroom's Detail > Sharpening Amount \
-                  slider and with `crs:Sharpness` (both 0..150)",
+                  slider and with `crs:Sharpness` (both 0..150); 0 = absent, which renders at \
+                  Lightroom's own default for the source (40 on a RAW, 0 on a baked raster)",
     },
     Control {
         name: "noise_reduction",

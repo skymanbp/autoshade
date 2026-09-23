@@ -1456,15 +1456,18 @@ pub(crate) fn build_preview(
     recipe: EditRecipe,
     show_clipping: bool,
     film_short_edge: Option<u32>,
+    raw_source: bool,
 ) -> PreviewDone {
     // The Detail panel's radii are FILM pixels (v1.5.0): developed against the
     // source's own short edge, the canvas shows what the export will look like
-    // downscaled to it (`AutoShadeApp::film_short_edge`).
+    // downscaled to it (`AutoShadeApp::film_short_edge`); `raw_source` picks
+    // the Sharpening default (v1.6.0).
     let mut after = autoshade::render::develop_preview_film(
         &base,
         &recipe,
         &autoshade::diag::pixels(),
         film_short_edge,
+        raw_source,
     );
     after = {
         // The COMPOSED profile (R25 B3): the manual CA pair folds onto the

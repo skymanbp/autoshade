@@ -18,6 +18,7 @@ fn developed_card_pixels(
         &autoshade::diag::pixels(),
         autoshade::render::MaskFrame::without_downstream(&recipe.lens_profile),
         autoshade::decode::film_short_edge(path),
+        raw,
     ))
 }
 

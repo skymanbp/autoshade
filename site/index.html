@@ -99,7 +99,19 @@
         </article>
         <article>
           <h3>A denoiser trained here</h3>
-          <p>The RAW denoiser uses weights trained for its own stabilised mosaic and the frame's honest measured noise; since v1.5.2 they are trained on star fields too, so faint stars survive the cleaning instead of leaving as noise. At the 71% RAW default it returns the frame's own luminance grain after demosaic in linear light; every positive strength keeps clean chroma; higher is cleaner, 100% is the complete network output. Baked files keep SCUNet and its separate 50% default.</p>
+          <p>The RAW denoiser cleans the sensor mosaic before demosaic with weights fine-tuned for this exact transform, told the noise measured tile by tile on the frame itself; since v1.5.2 they are trained on star fields too, so faint stars survive the cleaning instead of leaving as noise. At the 71% RAW default it returns the frame's own luminance grain after demosaic in linear light; every positive strength keeps clean chroma; 100% is the complete network output. Baked files keep SCUNet and its separate 50% default.</p>
+        </article>
+        <article>
+          <h3>Judged by lines written first</h3>
+          <p>Every fine-tune's acceptance is committed before the run: the flux a star must keep at 4σ, 6σ and 10σ, a sky that must not lift, two bench windows, and a same-frame comparison against Lightroom's Denoise 50 on a real star frame, read in ten lines. v2 passed and ships; v3 and v4, trained against the two lines still red, failed their own and were refused. The numbers are in the release notes.</p>
+        </article>
+        <article>
+          <h3>The camera's look, read like with like</h3>
+          <p>The tone curve that makes a neutral develop look like the camera's own JPEG is estimated from the embedded preview on block means, paired at the camera's framing, with the lens profile's corner lift counted only where the pair shows the camera made it. Older recipes are re-estimated once, the first time they are opened, and say so.</p>
+        </article>
+        <article>
+          <h3>Hot pixels mapped every develop</h3>
+          <p>Before the grain source and the cleaner read a Bayer mosaic, isolated sites 20 sigma above their own neighbourhood are mapped, with clipped samples never measuring noise and eight neighbours vouching. Ordinary frames map none or a handful; a frame with no mappable site renders byte-identically.</p>
         </article>
       </div>
 
@@ -363,7 +375,7 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
           <div class="tech-index" aria-hidden="true">01</div>
           <div>
             <h3><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#raw-decode-and-cfa">RAW decode and CFA</a></h3>
-            <p>rawler: <strong>24 RAW formats and 725 camera bodies</strong>. <strong>Approximate</strong> X-Trans fits colour planes over a 5×5 CFA neighbourhood; the measured X-S10 G/R ratio moved from 1.5503 to 0.9476. Lightroom sidecar <code>tiff:Orientation</code> chooses quarter turns.</p>
+            <p>rawler: <strong>24 RAW formats and 725 camera bodies</strong>. <strong>Approximate</strong> X-Trans fits colour planes over a 5×5 CFA neighbourhood; the measured X-S10 G/R ratio moved from 1.5503 to 0.9476. Lightroom sidecar <code>tiff:Orientation</code> chooses quarter turns. The RAW denoiser cleans the mosaic before demosaic with weights <a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#raw-denoise">trained and judged here</a>, against noise measured tile by tile.</p>
           </div>
         </article>
 
@@ -371,7 +383,7 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
           <div class="tech-index" aria-hidden="true">02</div>
           <div>
             <h3><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#develop-pipeline-and-tone-model">Develop pipeline and tone model</a></h3>
-            <p>Deterministic f32 rendering: linear-light vignette and dehaze, monotone Fritsch–Carlson tone LUT containing Highlights, then curves, HSL, clarity and local edits. Negative Texture: two measured low-pass arms, <code>A1=0.172443</code> and <code>A2=0.304888</code>.</p>
+            <p>Deterministic f32 rendering: linear-light vignette and dehaze, monotone Fritsch–Carlson tone LUT containing Highlights, then curves, HSL, clarity and local edits. Negative Texture: two measured low-pass arms, <code>A1=0.172443</code> and <code>A2=0.304888</code>. The camera's <a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#camera-base-look">base look</a> is read from the embedded preview on block means, like with like.</p>
           </div>
         </article>
 

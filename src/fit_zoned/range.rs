@@ -1699,49 +1699,71 @@ fn attach_band_stage(
     if accepted.is_empty() {
         return nothing;
     }
-    let initial_px = accepted.last().expect("accepted range exists").rendered.clone();
-    let accepted_ranges = accepted
-        .iter()
-        .filter_map(|zone| zone.range)
-        .collect::<Vec<_>>();
-    let shares = accepted
-        .iter()
-        .map(|zone| {
-            zone.source_weights.iter().sum::<f32>()
-                / zone.source_weights.len().max(1) as f32
-        })
-        .collect::<Vec<_>>();
-    let final_px = match enforce_range_boundary_gate(
-        s_img,
-        report,
-        reference_px,
-        &accepted_ranges,
-        &shares,
-        first_range,
-        initial_px,
-    ) {
-        BoundaryGateResult::Kept { pixels, .. } => pixels,
-        BoundaryGateResult::Dropped => return nothing,
-    };
-    let final_frame_err = final_range_frame_err(&final_px, tgt_px, &report.evidence);
-    if final_frame_err > entry_frame_err + RANGE_FRAME_REGRESSION_TOL {
+    // R39. The k=1 controls of every accepted band, so a band the SHRUNK set
+    // no longer justifies (`refuse_shrunk_zones`) is dropped and the rest are
+    // gated again from full strength — see `attach_zones`.
+    let mut originals = report.recipe.masks[first_range..].to_vec();
+    let mut initial_px = accepted.last().expect("accepted range exists").rendered.clone();
+    let (final_px, final_frame_err) = loop {
+        let accepted_ranges = accepted
+            .iter()
+            .filter_map(|zone| zone.range)
+            .collect::<Vec<_>>();
+        let shares = accepted
+            .iter()
+            .map(|zone| {
+                zone.source_weights.iter().sum::<f32>()
+                    / zone.source_weights.len().max(1) as f32
+            })
+            .collect::<Vec<_>>();
+        let (k, pixels) = match enforce_range_boundary_gate(
+            s_img,
+            report,
+            reference_px,
+            &accepted_ranges,
+            &shares,
+            first_range,
+            initial_px,
+        ) {
+            BoundaryGateResult::Kept { k, pixels, .. } => (k, pixels),
+            BoundaryGateResult::Dropped => return nothing,
+        };
+        let final_frame_err = final_range_frame_err(&pixels, tgt_px, &report.evidence);
+        if final_frame_err > entry_frame_err + RANGE_FRAME_REGRESSION_TOL {
+            report.recipe.masks.truncate(first_range);
+            crate::rationale::push_note(
+                &mut report.recipe.rationale,
+                &mut report.notes,
+                crate::rationale::Note::new(
+                    crate::rationale::keys::RANGE_FRAME_REFUSED,
+                    vec![
+                        ("n", accepted.len().to_string()),
+                        ("global", format!("{entry_frame_err:.3}")),
+                        ("after", format!("{final_frame_err:.3}")),
+                        ("tol", format!("{RANGE_FRAME_REGRESSION_TOL:+.3}")),
+                    ],
+                ),
+            );
+            report.err_after = entry_frame_err;
+            return nothing;
+        }
+        if !refuse_shrunk_zones(
+            s_img, report, &mut accepted, &mut originals, first_range, &pixels, tgt_px, k,
+            entry_frame_err, final_frame_err,
+        ) {
+            break (pixels, final_frame_err);
+        }
         report.recipe.masks.truncate(first_range);
-        crate::rationale::push_note(
-            &mut report.recipe.rationale,
-            &mut report.notes,
-            crate::rationale::Note::new(
-                crate::rationale::keys::RANGE_FRAME_REFUSED,
-                vec![
-                    ("n", accepted.len().to_string()),
-                    ("global", format!("{entry_frame_err:.3}")),
-                    ("after", format!("{final_frame_err:.3}")),
-                    ("tol", format!("{RANGE_FRAME_REGRESSION_TOL:+.3}")),
-                ],
-            ),
-        );
-        report.err_after = entry_frame_err;
-        return nothing;
-    }
+        if accepted.is_empty() {
+            report.err_after = entry_frame_err;
+            return nothing;
+        }
+        report.recipe.masks.extend(originals.iter().cloned());
+        for (j, zone) in accepted.iter_mut().enumerate() {
+            zone.mask_index = first_range + j;
+        }
+        initial_px = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
+    };
     for zone in &mut accepted {
         let after = zone_moments(&final_px, &zone.source_weights);
         let target = zone_moments(tgt_px, &zone.target_weights);

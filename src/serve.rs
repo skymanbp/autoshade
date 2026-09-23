@@ -2067,9 +2067,17 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // The Detail panel's radii are FILM pixels (v1.5.0): the source's own short
     // edge, from its header, so the web pane shows sharpening and noise
     // reduction the way the export looks downscaled to it — the GUI canvas's
-    // rule (`AutoShadeApp::film_short_edge`).
+    // rule (`AutoShadeApp::film_short_edge`). And the source's KIND (v1.6.0):
+    // an absent Sharpening amount renders at Lightroom's default for it
+    // (`EditRecipe::capture_sharpening`), as the canvas and the export do.
     let film = decode::film_short_edge(&src);
-    let mut after = render::develop_preview_film(&preview, &req.recipe, &crate::diag::pixels(), film);
+    let mut after = render::develop_preview_film(
+        &preview,
+        &req.recipe,
+        &crate::diag::pixels(),
+        film,
+        decode::is_raw(&src),
+    );
     // The engine's own tail, mirroring the GUI preview chain (lens geometry →
     // straighten → the post-crop vignette and grain; the frame stays uncropped
     // for whole-frame slider feedback, same policy). The web pane previously

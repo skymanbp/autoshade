@@ -16,10 +16,15 @@ import point_sources as ps  # noqa: E402  why: importable only after the sys.pat
 S = ps.FWHM_TO_SIGMA
 
 
-def one_star(y, x, fwhm=3.0, ratio=1.0, angle=0.0, r_shift=(0.0, 0.0), b_shift=(0.0, 0.0), r_g=0.5, b_g=0.6):
-    return {"sample": np.zeros(1, np.int64), "y": np.array([y]), "x": np.array([x]), "snr": np.array([1.0]),
+def one_star(y, x, fwhm=3.0, ratio=1.0, angle=0.0, r_shift=(0.0, 0.0), b_shift=(0.0, 0.0), r_g=0.5, b_g=0.6,
+             extended=None):
+    star = {"sample": np.zeros(1, np.int64), "y": np.array([y]), "x": np.array([x]), "snr": np.array([1.0]),
             "r_g": np.array([r_g]), "b_g": np.array([b_g]), "size": np.array([1.0]),
             "optics": np.array([[fwhm * S, fwhm / ratio * S, angle, 1.0, 1.0, *r_shift, *b_shift]], np.float32)}
+    if extended is not None:
+        minor, major, angle, share, offset = extended
+        star["extended"] = np.array([[1.0, minor * S, major * S, angle, share, offset]], np.float32)
+    return star
 
 
 def centroid(plane, offset):
@@ -124,6 +129,92 @@ class PointSources(unittest.TestCase):
         a, b = ps.draw(np.random.default_rng(21), 16, 48, 48), ps.draw(np.random.default_rng(21), 16, 48, 48)
         for key in a:
             self.assertTrue(np.array_equal(a[key], b[key]), key)
+
+    # ---- the composite prior (v3) ----
+
+    def test_composite_zero_draws_v2s_sky_and_no_extended_component(self):
+        """`composite=0` must not touch the random stream: the sky v2 trained on is drawn unchanged."""
+        a, b = ps.draw(np.random.default_rng(21), 64, 48, 48), ps.draw(np.random.default_rng(21), 64, 48, 48, composite=0.0)
+        for key in a:
+            self.assertTrue(np.array_equal(a[key], b[key]), key)
+        self.assertEqual(float(np.abs(a["extended"]).max()), 0.0)
+
+    def test_composite_one_gives_every_crop_an_extended_component_of_both_kinds(self):
+        stars = ps.draw(np.random.default_rng(11), 200, 48, 48, composite=1.0)
+        ext = stars["extended"]
+        self.assertTrue(np.all(ext[:, 0] == 1.0))
+        trails = ext[:, 5] > 0.0
+        self.assertGreater(trails.sum(), 60)
+        self.assertGreater((~trails).sum(), 60)
+        self.assertTrue(np.all((ext[:, 4] >= 0.2) & (ext[:, 4] <= 0.7)), "the component carries 20-70 % of the peak")
+        self.assertTrue(np.all(ext[:, 2] >= ext[:, 1]), "major at least minor")
+        self.assertTrue(np.all(ext[:, 1] >= stars["optics"][:, 0]), "never narrower than its core")
+        self.assertLessEqual(float(ext[:, 2].max()), ps.LONGEST_EXTENDED_FWHM * S + 1e-6)
+        halos = ~trails
+        self.assertTrue(np.all(ext[halos, 1] == ext[halos, 2]), "a halo is round")
+
+    def test_a_composite_star_splits_its_peak_between_core_and_component(self):
+        """At the core's own G1 sample a centred composite reads the full peak: (1 - share) from the core plus
+        share from the component; the component alone carries the far wings."""
+        y, x = 60.0, 61.0   # a G1 photosite: row even, col odd
+        plain = ps.render(one_star(y, x, 1.8), torch.tensor([1.0]), 64, 64, "cpu")[0, 1].numpy()
+        both = ps.render(one_star(y, x, 1.8, extended=(6.0, 6.0, 0.0, 0.4, 0.0)), torch.tensor([1.0]), 64, 64, "cpu")[0, 1].numpy()
+        i, j = 30, 30
+        self.assertAlmostEqual(float(both[i, j]), float(plain[i, j]), delta=0.02)
+        # six samples (12 px) out along x the 1.8 px core is nothing; the 6 px halo at 40 % still shows
+        self.assertLess(float(plain[i, j + 6]), 1e-6)
+        self.assertGreater(float(both[i, j + 6]), 0.4 * math.exp(-0.5 * (12.0 / (6.0 * S)) ** 2) * 0.8)
+        self.assertGreater(both.sum(), 2.0 * plain.sum(), "the component carries most of the flux")
+
+    def test_a_trailed_composite_is_long_along_its_angle_with_the_core_off_centre(self):
+        light = ps.render(one_star(60.0, 61.0, 1.8, extended=(3.0, 12.0, 0.0, 0.6, 3.0)), torch.tensor([1.0]), 64, 64, "cpu")[0, 1].numpy()
+        h, w = light.shape
+        i, j = np.meshgrid(np.arange(h), np.arange(w), indexing="ij")
+        cy, cx = centroid(light, ps.CFA_OFFSETS[1])
+        var_y = (((2 * i + 0 - cy) ** 2) * light).sum() / light.sum()
+        var_x = (((2 * j + 1 - cx) ** 2) * light).sum() / light.sum()
+        self.assertGreater(math.sqrt(var_x / var_y), 2.5, "long along x, its angle")
+        # the trail's centre sits 3 px back along +x from the core at x = 61, so the light's centroid is left of it
+        self.assertLess(cx, 61.0 - 1.0)
+        self.assertGreater(cx, 61.0 - 3.0 - 0.5)
+
+    # ---- the comet prior (v4) ----
+
+    def test_comet_zero_draws_v2s_sky(self):
+        a, b = ps.draw(np.random.default_rng(21), 64, 48, 48), ps.draw(np.random.default_rng(21), 64, 48, 48, comet=0.0)
+        for key in a:
+            self.assertTrue(np.array_equal(a[key], b[key]), key)
+
+    def test_a_comet_is_a_narrow_round_core_at_the_head_of_a_flare(self):
+        stars = ps.draw(np.random.default_rng(13), 200, 48, 48, comet=1.0)
+        opt, ext = stars["optics"], stars["extended"]
+        self.assertTrue(np.all(ext[:, 0] == 1.0))
+        core = opt[:, 0] / S
+        self.assertTrue(np.all((core >= 1.0) & (core <= 2.5)), "the core is 1.0-2.5 px FWHM")
+        self.assertTrue(np.all(opt[:, 0] == opt[:, 1]), "and round")
+        self.assertLess(float(np.median(core)), 1.8, "log-uniform: half of them under 1.6 px")
+        minor, major = ext[:, 1] / S, ext[:, 2] / S
+        self.assertTrue(np.all((minor >= 4.0) & (minor <= 9.0)))
+        self.assertTrue(np.all((major >= minor - 1e-4) & (major <= ps.LONGEST_EXTENDED_FWHM + 1e-4)))
+        self.assertGreater(int((major > 1.5 * minor).sum()), 40, "many flares are long")
+        self.assertTrue(np.all(ext[:, 3] == opt[:, 2]), "the flare lies along the optics angle")
+        self.assertTrue(np.all((ext[:, 4] >= 0.15) & (ext[:, 4] <= 0.6)))
+        self.assertTrue(np.all((ext[:, 5] >= 0.0) & (ext[:, 5] <= 0.6 * major + 1e-4)),
+                        "the core rides within 60 % of the flare's length ahead of its centre")
+        self.assertGreater(int((ext[:, 5] > 0.3 * major).sum()), 60)
+
+    def test_a_rendered_comet_peaks_at_its_core_with_the_flare_behind(self):
+        """Core 1.4 px on a G1 photosite, flare 5 x 12 px along x with the core 6 px ahead of its centre:
+        the plane's brightest sample is the core's and stands well over its 3x3 mean (the frame's own
+        worst-kept stars read 2.5-4.2 there), and the light's centroid sits behind the core along -x."""
+        y, x = 60.0, 61.0
+        light = ps.render(one_star(y, x, 1.4, extended=(5.0, 12.0, 0.0, 0.4, 6.0)), torch.tensor([1.0]), 64, 64, "cpu")[0, 1].numpy()
+        i, j = np.unravel_index(int(np.argmax(light)), light.shape)
+        self.assertEqual((int(i), int(j)), (30, 30))
+        self.assertGreater(float(light[30, 30] / light[29:32, 29:32].mean()), 2.5)
+        cy, cx = centroid(light, ps.CFA_OFFSETS[1])
+        self.assertLess(cx, x - 2.0)
+        self.assertAlmostEqual(cy, y, delta=0.3)
 
 
 if __name__ == "__main__":

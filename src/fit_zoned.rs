@@ -218,14 +218,16 @@ pub(super) const ZONE_BOUNDARY_RIM_MAX: f32 = 0.012;
 /// so any downward move re-shrinks real tiles and must be argued on the step
 /// ruler's own evidence. Carried over at the rim's calibrated +0.012 — but
 /// as a CEILING, not a flat budget: each crossing is charged against its own
-/// per-crossing budget (`max(scene's own step, [`BOUNDARY_STEP_SHAPE`] x the
-/// correction's own same-side slope)`, clamped to `[BOUNDARY_STEP_FLOOR,
-/// this constant]`), and the gate compares the charged 90th percentile. A
-/// crossing whose neighbourhood can mask the whole ceiling is charged its
-/// raw step — bit-identical to the scalar rule, which is how the island's
-/// accepted tiles keep their numbers — while one in smooth sky is charged
-/// at the exchange rate its own context earns, which is what stops a tile
-/// seam from hiding inside a budget calibrated on texture.
+/// per-crossing budget — since R40 the scene's own DISCONTINUITY at that
+/// crossing ([`discontinuity_budget`]), clamped to `[BOUNDARY_STEP_FLOOR,
+/// this constant]` — and the gate compares the charged 90th percentile. A
+/// crossing on a scene edge that can mask the whole ceiling is charged its
+/// raw step — bit-identical to the scalar rule — while one in smooth sky,
+/// gradient or not, is charged at the one-code floor's exchange rate, which
+/// is what stops a tile seam from hiding inside a budget calibrated on
+/// texture. (The island numbers above are the pre-R40 ruler's: it also
+/// credited the scene's gradient and the correction's slope, which R40
+/// removed — the R40 note on [`discontinuity_budget`] says why.)
 pub(super) const ZONE_BOUNDARY_STEP_MAX: f32 = 0.012;
 /// Per-crossing floor of the contextual step budget: ONE code value of the
 /// 8-bit analysis render. Three derivations agree. (1) Instrument:
@@ -236,9 +238,16 @@ pub(super) const ZONE_BOUNDARY_STEP_MAX: f32 = 0.012;
 /// a flat patch, which is why 8-bit banding is visible at all. (3) Ruler
 /// noise: each sample is a difference of two differences of ROUNDED values
 /// — four quantisations — whose p90 on a gently graded patch is ~0.95
-/// code; a floor below that would gate quantisation noise.
+/// code; a floor below that would gate quantisation noise. (R40: the hard
+/// family's de-trended reading adds the two flank samples at quarter weight
+/// on each of its two frames — per channel 6.5/12 code² of rounding variance
+/// against the plain step's 4/12, a p90 of ~0.94 code against ~0.74, still
+/// under this floor; three-pixel flanks would put it at ~1.17 code, over it,
+/// which is why [`STEP_FLANK_BASELINES`] is two.)
 pub(super) const BOUNDARY_STEP_FLOOR: f32 = 1.0 / 255.0;
-/// Exchange rate of the slope term: a correction whose own same-side
+/// Exchange rate of the SOFT family's slope term (the hard family stopped
+/// reading a slope at R40: a ramp is not a discontinuity and needs no credit
+/// to stay whole): a correction whose own same-side
 /// variation over the 3-px baseline is `s` earns a budget of `3 * s`
 /// before the clamp, so a genuine ramp saturates the ceiling and stays
 /// whole. The slope is the MINIMUM over two consecutive same-side
@@ -668,6 +677,16 @@ const ZONE_BOUNDARY_INTERIOR_MIN: usize = 4;
 /// a resampled 0/255 raster edge, while still reading each side's own plateau
 /// rather than its neighbourhood.
 const ZONE_STEP_OFFSET: usize = 2;
+/// R40. How far past each far foot the hard family reads a crossing's TREND,
+/// in multiples of the feet's own baseline (3 px): the flank sample sits
+/// `STEP_FLANK_BASELINES * 3` px beyond the foot, on the foot's own side of
+/// the contour, and the change from foot to flank divided by this number is
+/// that side's change per baseline. Two, not one: at one the flank sits on
+/// the resample-and-refine collar a hard raster wears (the first baseline
+/// out, [`crossing_slope`] measured it at 0.005-0.008 luma in clean sky) and
+/// the trend would carry the seam's own shoulder; and at one the reading's
+/// rounding noise clears the one-code floor ([`BOUNDARY_STEP_FLOOR`]).
+const STEP_FLANK_BASELINES: usize = 2;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct BoundaryReading {
@@ -680,8 +699,10 @@ pub(super) struct BoundaryReading {
     /// step, `charged >= rim` at every rank: the charged predicate subsumes
     /// the raw one, and nothing a gate refuses today can become acceptable.
     ///
-    /// BOTH mask families charge, and since this batch they charge the SAME
-    /// quantity read off the SAME three frames. The soft family used to
+    /// BOTH mask families charge, each the quantity its own ruler reads off
+    /// the SAME three frames (since R40 the hard family reads a de-trended
+    /// discontinuity and budgets it against the scene's own,
+    /// [`discontinuity_budget`]). The soft family used to
     /// decline, on the argument that a feathered band is "a ramp by
     /// construction"; a desert-dusk pair falsified it. The OneFormer sky
     /// raster is the model's own soft class probability, so its transition
@@ -766,7 +787,8 @@ struct CrossingSample {
     /// The same step on the FROZEN k=1 candidate — the correction's own
     /// shape, which the target's allowance is expressed as a share of.
     luma_frozen: f32,
-    /// Its per-crossing context budget ([`crossing_budget`]).
+    /// Its per-crossing context budget ([`crossing_budget`] for the soft
+    /// family, [`discontinuity_budget`] for the hard).
     luma_budget: f32,
     /// The signed introduced step on `channel`, the channel that moved most.
     colour: f32,
@@ -824,7 +846,8 @@ impl ScanLine {
     }
 }
 
-/// ONE crossing's contextual budget, shared by BOTH mask families: a
+/// ONE crossing's contextual budget for the SOFT family (the hard family's
+/// is [`discontinuity_budget`] since R40): a
 /// correction may introduce a discontinuity no larger than the largest
 /// smooth variation the neighbourhood already carries — the scene's own
 /// change across the crossing (`context`, read off the frame rendered
@@ -833,6 +856,28 @@ impl ScanLine {
 /// family's `ceiling`, never less than one code value.
 fn crossing_budget(context: f32, slope: f32, ceiling: f32) -> f32 {
     context.abs().max(BOUNDARY_STEP_SHAPE * slope).clamp(BOUNDARY_STEP_FLOOR, ceiling)
+}
+
+/// R40. ONE crossing's budget for the HARD family. A hard 0/255 raster can
+/// only introduce a DISCONTINUITY at its contour, so the only thing that can
+/// mask one is a discontinuity the scene already has there — a roof line the
+/// mask follows, a horizon a tile edge grazes — read off the frame rendered
+/// WITHOUT the correction as the same de-trended jump the crossing itself is
+/// read as ([`boundary_line_steps`]). A smooth gradient is not one and buys
+/// nothing. The reference pair's sky (2026-09-22, per-crossing dump of the
+/// accepted r1c0 reading at 0.85) is why: the context term read the sky's
+/// own 3-px gradient as an edge, 0.005-0.007 luma; the R37 allowance read
+/// the target's gradient DIFFERENCE as a step to reproduce, 0.0055; and the
+/// slope credit added its share — enough for a 2.3-code tile step to pass
+/// at k=0.134 in featureless sky, a visible pale block. Three ways of
+/// calling a gradient a discontinuity, one reading that stops all three:
+/// de-trended, the sky's context is ~0, the target asks ~0, and the tile
+/// step is charged at the floor's rate. No slope credit either — a
+/// correction that ramps is not a discontinuity in the first place and
+/// reads ~0 under the same de-trending, so it needs no budget to stay whole.
+/// Never less than one code, never more than the family's `ceiling`.
+fn discontinuity_budget(context: f32, ceiling: f32) -> f32 {
+    context.abs().clamp(BOUNDARY_STEP_FLOOR, ceiling)
 }
 
 /// A BRANCH, not a multiply by a ratio that happens to be one: at or above
@@ -1038,7 +1083,8 @@ fn magnitude_rank(values: &mut [f32]) -> f32 {
 /// channel's slope, never an invented credit.
 ///
 /// Without this floor the colour ruler charges a seam that is not a colour
-/// seam. Measured on `shoulder_fixture(32.0, 0.37)` — a pure EXPOSURE dial
+/// seam. Measured, before R40 took the slope term off the hard family, on
+/// `shoulder_fixture(32.0, 0.37)` — a pure EXPOSURE dial
 /// over a warm field, where every channel moves together and the budget is
 /// supposed to cancel the channel ratio exactly — the R channel's slope
 /// quantised to zero, its budget fell to the one-code floor, and the accepted
@@ -1049,7 +1095,8 @@ fn colour_slope_credit(channel_slope: f32, luma_slope: f32) -> f32 {
 }
 
 /// The correction's OWN same-side slope beside one crossing, in `channel`
-/// (`None` reads luma), shared by both families.
+/// (`None` reads luma), read by the soft family (the hard family stopped
+/// consulting it at R40).
 ///
 /// `feet` are the two far feet the crossing was measured on, as positions
 /// along the line; each side's slope walks further out in its own direction
@@ -1499,22 +1546,29 @@ fn reading_of(samples: &[CrossingSample], cells: &[CellSums], ceiling: f32) -> B
 /// was reporting a budget it had never been able to test.
 ///
 /// A crossing is a neighbouring pair straddling [`ZONE_BOUNDARY_MID`]. Each
-/// contributes ONE difference in differences:
+/// contributes ONE difference of DISCONTINUITIES (R40):
 ///
 /// ```text
-///     (inside - outside) on `rendered` - (inside - outside) on `reference`
+///     disc(F) = (inside - outside) on F  -  F's own trend over the flanks
+///     reading = disc(rendered) - disc(reference)
 /// ```
 ///
-/// `reference` is this same frame rendered WITHOUT the correction under test.
-/// A luma step the subject already had at that border — a roof line the mask
-/// follows, a horizon a tile edge grazes — appears in both terms and cancels,
-/// so scene content cannot false-positive. What survives is only the
-/// discontinuity the correction introduced, which is the seam itself. The
-/// identical difference is taken PER CHANNEL, and the crossing reports the
-/// largest of the three magnitudes: a gain set that reproduces a target's
-/// mean colour can leave luma601 nearly still while moving one channel
-/// several codes across the contour, and a luma-only ruler reads that halo
-/// as 0.
+/// where the trend is the mean change per 3-px baseline read from each far
+/// foot to a flank [`STEP_FLANK_BASELINES`] baselines further out on the
+/// same side (a flank the line cannot offer contributes nothing; with
+/// neither, the plain step). A gradient, however steep, reads ~0 on every
+/// frame; a jump reads its height. `reference` is this same frame rendered
+/// WITHOUT the correction under test. A luma step the subject already had
+/// at that border — a roof line the mask follows, a horizon a tile edge
+/// grazes — appears in both terms and cancels, so scene content cannot
+/// false-positive; and because the trend is taken on every frame the same
+/// way, the correction's own smooth variation cancels with it, exactly as
+/// the plain steps' did. What survives is only the discontinuity the
+/// correction introduced, which is the seam itself. The identical reading is
+/// taken PER CHANNEL, and the crossing reports the largest of the three
+/// magnitudes: a gain set that reproduces a target's mean colour can leave
+/// luma601 nearly still while moving one channel several codes across the
+/// contour, and a luma-only ruler reads that halo as 0.
 ///
 /// "Inside" is the `>= mid` side, decided by the mask and never by the
 /// direction of the scan, so the left and right edges of one brightened tile
@@ -1522,9 +1576,11 @@ fn reading_of(samples: &[CrossingSample], cells: &[CellSums], ceiling: f32) -> B
 /// their own side of the contour, which drops a pair straddling a sliver
 /// thinner than the stand-off rather than reading a plateau that is not there.
 ///
-/// Each crossing is charged against its own per-crossing budget
-/// ([`crossing_budget`]), whose slope term is read off `frozen`, the k=1
-/// candidate held constant through the shrink bisection ([`crossing_slope`]).
+/// Each crossing is charged against its own per-crossing budget: the scene's
+/// own discontinuity there, `disc(reference)`, clamped between one code and
+/// the family's ceiling ([`discontinuity_budget`]). No slope term: `frozen`
+/// is still read, but only for the correction's own discontinuity, which the
+/// R37 allowance is a share of.
 fn boundary_line_steps(
     frames: StepFrames<'_>,
     geometry: &[f32],
@@ -1568,51 +1624,70 @@ fn boundary_line_steps(
         if !inside(i_in) || inside(i_out) {
             continue;
         }
-        let rendered_step = luma(&rendered[i_in]) - luma(&rendered[i_out]);
-        let reference_step = luma(&reference[i_in]) - luma(&reference[i_out]);
-        let introduced = rendered_step - reference_step;
-        let line = (start, step, len);
-        let slope = crossing_slope(frames, geometry, line, (far_in, far_out), forward, None);
-        let budget = crossing_budget(reference_step, slope, ZONE_BOUNDARY_STEP_MAX);
+        // R40. The reading is a DISCONTINUITY: the step across the two feet
+        // less the frame's own trend there, the trend being the mean change
+        // per baseline over the flanks beyond each far foot
+        // ([`STEP_FLANK_BASELINES`] baselines out, each flank still on its own
+        // side of the contour; a flank the line cannot offer contributes
+        // nothing, and with neither the reading is the plain step). Taken on
+        // every frame the same way, so the scene's trend and the correction's
+        // cancel in the difference exactly as the plain steps did.
+        let flank_len = far_in.abs_diff(far_out) * STEP_FLANK_BASELINES;
+        let flank = |foot: usize, inward: bool| -> Option<usize> {
+            let p = if forward == inward { foot.checked_add(flank_len) } else { foot.checked_sub(flank_len) }?;
+            if p >= len {
+                return None;
+            }
+            let i = index(p)?;
+            (inside(i) == inward).then_some(i)
+        };
+        let flanks = (flank(far_in, true), flank(far_out, false));
+        let disc = |frame: &[[f32; 3]], read: &dyn Fn(&[f32; 3]) -> f32| -> f32 {
+            let step = read(&frame[i_in]) - read(&frame[i_out]);
+            let trends = [
+                flanks.0.map(|e| (read(&frame[e]) - read(&frame[i_in])) / STEP_FLANK_BASELINES as f32),
+                flanks.1.map(|e| (read(&frame[i_out]) - read(&frame[e])) / STEP_FLANK_BASELINES as f32),
+            ];
+            let (sum, n) = trends.iter().flatten().fold((0.0f32, 0usize), |(s, n), t| (s + t, n + 1));
+            if n == 0 { step } else { step - sum / n as f32 }
+        };
+        let channel = |c: usize| move |p: &[f32; 3]| p[c];
+        let reference_disc = disc(reference, &luma);
+        let introduced = disc(rendered, &luma) - reference_disc;
+        let budget = discontinuity_budget(reference_disc, ZONE_BOUNDARY_STEP_MAX);
         // The same crossing in colour: the channel that moved most decides
         // the reading, and is charged against ITS OWN context.
+        let reference_channels: [f32; 3] = std::array::from_fn(|c| disc(reference, &channel(c)));
         let mut worst = (0.0f32, 0usize);
-        for c in 0..3 {
-            let step_c = (rendered[i_in][c] - rendered[i_out][c])
-                - (reference[i_in][c] - reference[i_out][c]);
+        for (c, reference_c) in reference_channels.iter().enumerate() {
+            let step_c = disc(rendered, &channel(c)) - reference_c;
             if step_c.abs() > worst.0.abs() {
                 worst = (step_c, c);
             }
         }
-        let (colour_introduced, channel) = worst;
-        let colour_context = reference[i_in][channel] - reference[i_out][channel];
-        let colour_slope = colour_slope_credit(
-            crossing_slope(frames, geometry, line, (far_in, far_out), forward, Some(channel)),
-            slope,
-        );
-        let colour_budget =
-            crossing_budget(colour_context, colour_slope, ZONE_BOUNDARY_STEP_MAX);
-        // Each frame's own step across the same two feet, less the scene's
-        // (R37): the difference in differences that frame carries. The
-        // target's is what the cell's share is read from.
+        let (colour_introduced, colour_channel) = worst;
+        let colour_budget = discontinuity_budget(reference_channels[colour_channel], ZONE_BOUNDARY_STEP_MAX);
+        // Each frame's own discontinuity across the same feet, less the
+        // scene's (R37): what that frame carries. The target's is what the
+        // cell's share is read from.
         let across = |frame: &[[f32; 3]]| -> [f32; 4] {
             [
-                (luma(&frame[i_in]) - luma(&frame[i_out])) - reference_step,
-                (frame[i_in][0] - frame[i_out][0]) - (reference[i_in][0] - reference[i_out][0]),
-                (frame[i_in][1] - frame[i_out][1]) - (reference[i_in][1] - reference[i_out][1]),
-                (frame[i_in][2] - frame[i_out][2]) - (reference[i_in][2] - reference[i_out][2]),
+                disc(frame, &luma) - reference_disc,
+                disc(frame, &channel(0)) - reference_channels[0],
+                disc(frame, &channel(1)) - reference_channels[1],
+                disc(frame, &channel(2)) - reference_channels[2],
             ]
         };
         let own = across(frozen);
         let (luma_frozen, colour_frozen) = (own[0], [own[1], own[2], own[3]]);
-        let (r_in, r_out) = (lab(&rendered[i_in]), lab(&rendered[i_out]));
-        let (s_in, s_out) = (lab(&reference[i_in]), lab(&reference[i_out]));
+        let lab_a = |p: &[f32; 3]| lab(p)[1];
+        let lab_b = |p: &[f32; 3]| lab(p)[2];
         let cell = cell_of(i_in, grid);
         cells[cell].add(
             across(rendered),
             own,
             target.map(across),
-            [(r_in[1] - r_out[1]) - (s_in[1] - s_out[1]), (r_in[2] - r_out[2]) - (s_in[2] - s_out[2])],
+            [disc(rendered, &lab_a) - disc(reference, &lab_a), disc(rendered, &lab_b) - disc(reference, &lab_b)],
         );
         cells[cell].crossings += 1;
         out.push(CrossingSample {
@@ -1620,7 +1695,7 @@ fn boundary_line_steps(
             luma_frozen,
             luma_budget: budget,
             colour: colour_introduced,
-            channel,
+            channel: colour_channel,
             colour_budget,
             colour_frozen,
             cell,
@@ -2638,8 +2713,9 @@ fn run_local_sequencer(
         if stage.ran { field::push_realized(report, local, "free masks"); }
     }
     // R33 §G: the TERMINAL producer, and the only one that is not a mask. It
-    // runs above the shipped default strength and nowhere else, so every
-    // result at or below it is byte-identical to the build before this one.
+    // runs at the shipped default strength and above (R41 moved the gate down
+    // from "above the default"); every result below the default is
+    // byte-identical to the build before R33 §G.
     if let Some((local, _)) = field {
         field::attach_colour_field(
             src,
@@ -3667,34 +3743,61 @@ fn attach_zones_with_divergence(
         return;
     }
     let first_zone = report.recipe.masks.len() - accepted.len();
-    let initial_px = accepted.last().expect("at least one accepted zone").rendered.clone();
-    let correction_shares = accepted
-        .iter()
-        .map(|zone| {
-            zone.source_weights.iter().sum::<f32>()
-                / zone.source_weights.len().max(1) as f32
-        })
-        .collect::<Vec<_>>();
     debug_assert_eq!(
         first_zone, reference_masks,
         "the bound reference is the k=0 baseline only while no other mask joined"
     );
-    let final_px = match enforce_boundary_gate_toward(
-        Some(&tgt_px[..]),
-        &s_img,
-        report,
-        &sw,
-        &correction_shares,
-        first_zone,
-        &reference_px,
-        initial_px,
-    ) {
-        BoundaryGateResult::Kept { k, before, after, pixels } => {
-            debug_assert!((0.0..=1.0).contains(&k));
-            debug_assert!(before.rim.is_finite() && after.rim.is_finite());
-            pixels
+    // R39. The k=1 controls of every accepted zone, kept so that when the
+    // SHRUNK set no longer satisfies a zone's own acceptance
+    // (`refuse_shrunk_zones`) that zone is dropped and the survivors are
+    // gated again from their full-strength controls, not from a shrink that
+    // was negotiated for a set they are no longer part of.
+    let mut originals = report.recipe.masks[first_zone..].to_vec();
+    let entry_frame = fit::look_err_with_evidence(&reference_px, &tgt_px, &report.evidence);
+    let mut initial_px = accepted.last().expect("at least one accepted zone").rendered.clone();
+    let final_px = loop {
+        let correction_shares = accepted
+            .iter()
+            .map(|zone| {
+                zone.source_weights.iter().sum::<f32>()
+                    / zone.source_weights.len().max(1) as f32
+            })
+            .collect::<Vec<_>>();
+        let (k, pixels) = match enforce_boundary_gate_toward(
+            Some(&tgt_px[..]),
+            &s_img,
+            report,
+            &sw,
+            &correction_shares,
+            first_zone,
+            &reference_px,
+            initial_px,
+        ) {
+            BoundaryGateResult::Kept { k, before, after, pixels } => {
+                debug_assert!((0.0..=1.0).contains(&k));
+                debug_assert!(before.rim.is_finite() && after.rim.is_finite());
+                (k, pixels)
+            }
+            BoundaryGateResult::Dropped => {
+                mask_path.remove();
+                let finished = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
+                fit::append_finished_disclosure(
+                    report,
+                    &finished,
+                    &tgt_px,
+                );
+                return;
+            }
+        };
+        let frame_after = fit::look_err_with_evidence(&pixels, &tgt_px, &report.evidence);
+        if !refuse_shrunk_zones(
+            &s_img, report, &mut accepted, &mut originals, first_zone, &pixels, &tgt_px, k,
+            entry_frame, frame_after,
+        ) {
+            break pixels;
         }
-        BoundaryGateResult::Dropped => {
+        report.recipe.masks.truncate(first_zone);
+        if accepted.is_empty() {
             mask_path.remove();
             let finished = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
             fit::append_finished_disclosure(
@@ -3704,6 +3807,11 @@ fn attach_zones_with_divergence(
             );
             return;
         }
+        report.recipe.masks.extend(originals.iter().cloned());
+        for (j, zone) in accepted.iter_mut().enumerate() {
+            zone.mask_index = first_zone + j;
+        }
+        initial_px = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
     };
     // The boundary shrink changes the actual zone landings, so the attached
     // notes and confidence are measured again from the kept render rather
@@ -3771,6 +3879,147 @@ struct AcceptedZone {
     /// The candidate render, retained so the boundary gate reuses the final
     /// analysis render instead of buying another full candidate render.
     rendered: Vec<[f32; 3]>,
+    /// R39. What the acceptance judged, so the correction that SHIPS can be
+    /// held to do-no-harm after a boundary gate has shrunk it: the residual
+    /// [`attach_one_zone`] read on the frame this zone was attached to
+    /// (luma-only where colour was withheld and tone kept, else the
+    /// whole-zone one — `luma_only` says which), and the frame drift its
+    /// attachment was allowed. On the sequential routes (tiles, free masks)
+    /// that frame is exactly the shipped set without this correction, so
+    /// `judged_before` is the leave-one-out baseline there; the shared
+    /// routes render their own (`refuse_shrunk_zones`).
+    judged_before: f32,
+    luma_only: bool,
+    frame_regression_tol: f32,
+}
+
+impl AcceptedZone {
+    /// The residual this zone's acceptance judges, on `pixels`.
+    pub(super) fn judged(&self, pixels: &[[f32; 3]], tgt_px: &[[f32; 3]]) -> f32 {
+        let after = zone_moments(pixels, &self.source_weights);
+        let target = zone_moments(tgt_px, &self.target_weights);
+        if self.luma_only {
+            zone_luma_err(&after, &target)
+        } else {
+            zone_err(&after, &target)
+        }
+    }
+
+    /// R39. Does the correction that SHIPS still do what it was admitted
+    /// for? Every boundary gate shrinks a correction AFTER
+    /// [`attach_one_zone`] has judged it at k=1, and a shrunk correction is
+    /// a different correction: on the reference pair, spatial tile r1c0 was
+    /// admitted at full strength and shipped at k=0.134 with its own
+    /// colour-inclusive residual WORSE than the render without it (0.19166
+    /// -> 0.20101), bought by a frame reading that moved 0.0003 the right
+    /// way — a pale block in the sky that no gate had judged. (That tile
+    /// passes THIS predicate: what its acceptance read is luma only, the
+    /// colour arm withheld, and that improves; the block is the boundary
+    /// ruler's to refuse — R40, [`discontinuity_budget`].)
+    ///
+    /// The predicate is do-no-harm, not the k=1 arms. The arms
+    /// ([`zone_accepts`]) ask for a real GAIN, which was established at full
+    /// strength and is what the shrink trades away on purpose: a sky
+    /// correction negotiated down to k=0.088 that still takes its zone from
+    /// 0.040 to 0.038 (the inverted-raster fixture) is the boundary gate
+    /// doing its job, not a correction to refuse — the first cut of this
+    /// predicate re-ran the arms and refused it. What a shrunk correction
+    /// may not do is leave its zone worse than the render WITHOUT it
+    /// (`without`, the caller's leave-one-out baseline) or carry the frame
+    /// past the drift its attachment was allowed.
+    pub(super) fn still_accepted(
+        &self,
+        pixels: &[[f32; 3]],
+        tgt_px: &[[f32; 3]],
+        without: f32,
+        frame_before: f32,
+        frame_after: f32,
+    ) -> bool {
+        frame_after <= frame_before + self.frame_regression_tol
+            && self.judged(pixels, tgt_px) <= without
+    }
+
+    /// The refusal note a caller pushes when [`Self::still_accepted`] says
+    /// no: which correction, at what shrink, its residual with and without
+    /// it, and the frame pair.
+    pub(super) fn shrunk_refusal_note(
+        &self,
+        pixels: &[[f32; 3]],
+        tgt_px: &[[f32; 3]],
+        without: f32,
+        k: f32,
+        frame_before: f32,
+        frame_after: f32,
+    ) -> crate::rationale::Note {
+        crate::rationale::Note::new(
+            crate::rationale::keys::ZONE_SHRUNK_REFUSED,
+            vec![
+                ("label", self.label.clone()),
+                ("k", format!("{k:.3}")),
+                ("before", format!("{without:.3}")),
+                ("after", format!("{:.3}", self.judged(pixels, tgt_px))),
+                ("frame_before", format!("{frame_before:.5}")),
+                ("frame_after", format!("{frame_after:.5}")),
+            ],
+        )
+    }
+}
+
+/// R39. After a SHARED boundary shrink (the semantic and range routes shrink
+/// a whole set of zones by one k), every zone in `accepted` is held to
+/// [`AcceptedZone::still_accepted`] on `pixels`, the render that would ship,
+/// against the same shipped set rendered WITHOUT that zone: `report.recipe`
+/// carries the shrunk masks at `first_zone..` at this point, so a copy with
+/// the zone's own mask left out, rendered at analysis size, is the
+/// leave-one-out baseline. The stale alternative — the residual each zone
+/// was judged against at k=1, read with the EARLIER zones at full strength
+/// — refused the calibration land zone at k=0.244 for reading 0.030 against
+/// a 0.017 that no longer described the frame it shipped in. A zone that no
+/// longer passes is refused — its note pushed, and it and its k=1 controls
+/// dropped from `accepted` and `originals` in step — so the caller can
+/// restore the survivors' k=1 controls and run the gate again on them
+/// alone. Returns whether anything was refused.
+#[allow(clippy::too_many_arguments)]
+fn refuse_shrunk_zones(
+    s_img: &DynamicImage,
+    report: &mut FitReport,
+    accepted: &mut Vec<AcceptedZone>,
+    originals: &mut Vec<LocalAdjustment>,
+    first_zone: usize,
+    pixels: &[[f32; 3]],
+    tgt_px: &[[f32; 3]],
+    k: f32,
+    frame_before: f32,
+    frame_after: f32,
+) -> bool {
+    debug_assert_eq!(accepted.len(), originals.len(), "one k=1 control set per accepted zone");
+    debug_assert_eq!(
+        report.recipe.masks.len(),
+        first_zone + accepted.len(),
+        "the shrunk set is what the recipe carries when it is judged"
+    );
+    let without = (0..accepted.len())
+        .map(|i| {
+            let mut recipe = report.recipe.clone();
+            recipe.masks.remove(first_zone + i);
+            let px = fit::pixels_of(&render::develop_preview(s_img, &recipe));
+            accepted[i].judged(&px, tgt_px)
+        })
+        .collect::<Vec<_>>();
+    let mut refused = false;
+    let mut i = 0;
+    for baseline in without {
+        if accepted[i].still_accepted(pixels, tgt_px, baseline, frame_before, frame_after) {
+            i += 1;
+            continue;
+        }
+        let note = accepted[i].shrunk_refusal_note(pixels, tgt_px, baseline, k, frame_before, frame_after);
+        crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes, note);
+        accepted.remove(i);
+        originals.remove(i);
+        refused = true;
+    }
+    refused
 }
 
 enum BoundaryGateResult {
@@ -4976,6 +5225,9 @@ fn attach_one_zone(
             before: zone_before,
             after: zone_after,
             rendered: zoned_px,
+            judged_before: accepted_before,
+            luma_only: colour_withheld && !tone_withheld,
+            frame_regression_tol: attachment.frame_regression_tol,
         })
     } else {
         report.recipe.masks.pop();
@@ -6139,19 +6391,19 @@ mod tests {
         range_path.remove();
     }
 
-    /// R33 §G. The colour field SHIPS above the shipped default Strength and
-    /// nowhere else.
+    /// R33 §G, its gate moved by R41. The colour field SHIPS at the shipped
+    /// default Strength and above, and below the default nowhere.
     ///
     /// Both halves are the point. The dial means "how far past Lightroom may
     /// this fit go", and this is the first control that leaves Lightroom
     /// entirely — classic XMP has no coordinate system for a smooth local
-    /// field — so at or below the default the recipe must be BYTE-IDENTICAL to
-    /// the build before this one, which is what the first assertion says. Past
-    /// the default the field attaches, names itself, and is kept only if the
-    /// frame it renders is measurably closer to the target than the frame
-    /// without it.
+    /// field — so below the default (the calibration point, one click back)
+    /// the recipe must be BYTE-IDENTICAL to the build before R33 §G, which is
+    /// what the first assertions say. From the default up the field attaches,
+    /// names itself, and is kept only if the frame it renders is measurably
+    /// closer to the target than the frame without it.
     #[test]
-    fn the_colour_field_ships_only_past_the_default_strength() {
+    fn the_colour_field_ships_from_the_default_strength_and_not_below() {
         let (source, target, sky) = zoned_pair();
         let seg = SegmentOpts {
             python_bin: "unused-colour-field".into(),
@@ -6178,64 +6430,74 @@ mod tests {
                 SHIPPED_LAYERS,
             )
         };
-
-        let default = solve(crate::recipe::GradeStrength::DEFAULT, "colour-field-default");
-        assert!(
-            default.recipe.colour_field.is_none(),
-            "at the shipped default the field stays an instrument: {}",
-            default.recipe.rationale
-        );
-        assert!(
-            !serde_json::to_string(&default.recipe).unwrap().contains("colour_field"),
-            "…and writes no key, so an archived recipe's fingerprint is unchanged"
-        );
-        for key in [
+        let verdict_keys = [
             crate::rationale::keys::FIELD_ATTACHED,
             crate::rationale::keys::FIELD_WITHHELD,
             crate::rationale::keys::FIELD_REGRESSED,
-        ] {
+        ];
+
+        let below = solve(crate::recipe::GradeStrength::CALIBRATED, "colour-field-below");
+        assert!(
+            below.recipe.colour_field.is_none(),
+            "below the default the field stays an instrument: {}",
+            below.recipe.rationale
+        );
+        assert!(
+            !serde_json::to_string(&below.recipe).unwrap().contains("colour_field"),
+            "…and writes no key, so an archived recipe's fingerprint is unchanged"
+        );
+        for key in verdict_keys {
             assert!(
-                !default.notes.iter().any(|n| n.key == key),
+                !below.notes.iter().any(|n| n.key == key),
                 "a stage that cannot run must not narrate itself either"
             );
         }
 
-        let full = solve(1.0, "colour-field-full");
-        // Above the default the stage RUNS, and says which way it went. Which
-        // of the three it says depends on the fixture's own headroom, and that
-        // is the honest shape of this assertion: the pin is that the stage is
-        // reached and accounts for itself, never that this fixture must have
+        // At the default and above the stage RUNS, and says which way it went.
+        // Which of the three it says depends on the fixture's own headroom, and
+        // that is the honest shape of this assertion: the pin is that the stage
+        // is reached and accounts for itself, never that this fixture must have
         // something left over.
-        let verdict = [
-            crate::rationale::keys::FIELD_ATTACHED,
-            crate::rationale::keys::FIELD_WITHHELD,
-            crate::rationale::keys::FIELD_REGRESSED,
-        ]
-        .into_iter()
-        .find(|key| full.notes.iter().any(|n| n.key == *key));
-        assert!(
-            verdict.is_some(),
-            "past the default the field stage must reach a verdict and disclose it: {}",
-            full.recipe.rationale
-        );
-        if verdict == Some(crate::rationale::keys::FIELD_ATTACHED) {
-            let field = full.recipe.colour_field.as_ref().expect("attached means carried");
-            assert!(field.renderable(), "an attached field must be one the engine can render");
-            assert_eq!(field.amount, 1.0, "it attaches at full amount; the user dials it down");
-            assert_eq!(
-                field.grid.len(),
-                field.x * field.y * field.b,
-                "the grid holds exactly the vertices its shape declares"
-            );
-            assert!(
-                full.err_after <= default.err_after + 1e-6,
-                "a kept field is a field that moved the frame toward the target"
-            );
-        } else {
-            assert!(
-                full.recipe.colour_field.is_none(),
-                "a withheld or regressed field is not carried"
-            );
+        for (strength, tag) in [
+            (crate::recipe::GradeStrength::DEFAULT, "colour-field-default"),
+            (1.0, "colour-field-full"),
+        ] {
+            let ran = solve(strength, tag);
+            let verdict = ran.notes.iter().find(|n| verdict_keys.contains(&n.key));
+            let Some(verdict) = verdict else {
+                panic!(
+                    "at strength {strength} the field stage must reach a verdict and disclose it: {}",
+                    ran.recipe.rationale
+                );
+            };
+            if verdict.key == crate::rationale::keys::FIELD_ATTACHED {
+                let field = ran.recipe.colour_field.as_ref().expect("attached means carried");
+                assert!(field.renderable(), "an attached field must be one the engine can render");
+                assert_eq!(field.amount, 1.0, "it attaches at full amount; the user dials it down");
+                assert_eq!(
+                    field.grid.len(),
+                    field.x * field.y * field.b,
+                    "the grid holds exactly the vertices its shape declares"
+                );
+                let arg = |name: &str| {
+                    verdict
+                        .args
+                        .iter()
+                        .find(|(key, _)| *key == name)
+                        .and_then(|(_, value)| value.parse::<f32>().ok())
+                        .unwrap_or_else(|| panic!("the attach note carries `{name}`"))
+                };
+                assert!(
+                    arg("after") < arg("before"),
+                    "a kept field is a field that moved the frame toward the target: {}",
+                    ran.recipe.rationale
+                );
+            } else {
+                assert!(
+                    ran.recipe.colour_field.is_none(),
+                    "a withheld or regressed field is not carried"
+                );
+            }
         }
     }
 
@@ -8437,6 +8699,137 @@ mod tests {
                 .any(|n| n.key == crate::rationale::keys::ZONE_STRICTLY_BETTER),
             "a refused zone must not claim the arm"
         );
+    }
+
+    /// R39. A SHRUNK correction is held to do-no-harm against the render
+    /// without it, not to the k=1 arms. Pinned on the two verdicts that
+    /// separate the predicates: a hairline move toward the target — every arm
+    /// refuses it, the gain being under `ZONE_MIN_ABS_GAIN` and nowhere near
+    /// a halving — is KEPT, and the same-sized move away is REFUSED. The
+    /// frame condition is the attachment's own tolerance, read at its edge.
+    #[test]
+    fn a_shrunk_correction_is_held_to_do_no_harm_not_to_the_arms() {
+        let n = 64;
+        let grey = |v: f32| vec![[v, v, v]; n];
+        let zone = AcceptedZone {
+            label: "sky".to_string(),
+            range: None,
+            mask_index: 0,
+            source_weights: vec![1.0; n],
+            target_weights: vec![1.0; n],
+            before: 0.0,
+            after: 0.0,
+            rendered: Vec::new(),
+            judged_before: 0.0,
+            luma_only: false,
+            frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
+        };
+        let target = grey(0.50);
+        let without = zone.judged(&grey(0.40), &target);
+        let (toward, away) = (grey(0.403), grey(0.397));
+        let judged_toward = zone.judged(&toward, &target);
+        assert!(
+            judged_toward < without && zone.judged(&away, &target) > without,
+            "premise: 0.403 sits nearer the 0.50 target than 0.40 and 0.397 farther"
+        );
+        let fb = 0.100f32;
+        assert!(zone.still_accepted(&toward, &target, without, fb, fb), "a hairline gain does no harm");
+        assert!(!zone.still_accepted(&away, &target, without, fb, fb), "a move away from the target is harm");
+        // The k=1 arms refuse the very correction the predicate keeps — with
+        // the true EV gap of that render, not a convenient one — which is
+        // what separates "still accepted" from "accepted again".
+        let ev = {
+            let t = zone_moments(&target, &zone.target_weights);
+            let a = zone_moments(&toward, &zone.source_weights);
+            (t.luma_lin.max(1e-6) / a.luma_lin.max(1e-6)).log2().abs()
+        };
+        assert!(
+            zone_accepts(without, judged_toward, ev, fb, fb).is_none(),
+            "premise: every k=1 arm refuses a hairline gain ({without} -> {judged_toward}, ev {ev})"
+        );
+        // The frame may drift by the attachment's tolerance and no further.
+        assert!(zone.still_accepted(&toward, &target, without, fb, fb + ZONE_GLOBAL_REGRESSION_TOL));
+        assert!(!zone.still_accepted(&toward, &target, without, fb, fb + ZONE_GLOBAL_REGRESSION_TOL + 1e-3));
+    }
+
+    /// R39. On the shared routes each zone's baseline is the shipped set
+    /// WITHOUT that zone, rendered — not the residual its acceptance read
+    /// with the earlier zones at full strength. Two hard halves of a flat
+    /// frame: the target lifts the left half only; the shrunk set lifts the
+    /// left (helps) and darkens the right (harms: the target never asked).
+    /// The right correction must go, the left must stay, `originals` must
+    /// follow `accepted` in step and the refusal must be a typed note.
+    #[test]
+    fn refuse_shrunk_zones_judges_each_zone_against_the_shipped_set_without_it() {
+        let edge = 64u32;
+        let source = DynamicImage::ImageRgb8(image::RgbImage::from_fn(edge, edge, |_, _| {
+            image::Rgb([120, 110, 100])
+        }));
+        let paths = [fixture_mask_path("shrunk-left"), fixture_mask_path("shrunk-right")];
+        let masks = [0u32, 32u32]
+            .iter()
+            .zip(&paths)
+            .map(|(&x0, path)| {
+                let mask = GrayImage::from_fn(edge, edge, |x, _| {
+                    image::Luma([if x >= x0 && x < x0 + 32 { 255 } else { 0 }])
+                });
+                mask.save(path.path()).unwrap();
+                mask
+            })
+            .collect::<Vec<_>>();
+        let adjustment = |path: &crate::store::OwnedRaster, ev: f32| LocalAdjustment {
+            mask: MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() },
+            name: "half".to_string(),
+            role: MaskRole::Custom,
+            amount: 1.0,
+            exposure_ev: ev,
+            ..Default::default()
+        };
+        let mut wanted = crate::recipe::EditRecipe::default();
+        wanted.masks.push(adjustment(&paths[0], 0.30));
+        let target_img = render::develop_preview(&source, &wanted);
+        let tgt_px = fit::pixels_of(&target_img);
+        let mut report = neutral_report(&source, &target_img);
+        // The shipped (shrunk) set, as the boundary gate leaves it on the recipe.
+        report.recipe.masks.push(adjustment(&paths[0], 0.10));
+        report.recipe.masks.push(adjustment(&paths[1], -0.10));
+        let mut originals = vec![adjustment(&paths[0], 0.40), adjustment(&paths[1], -0.40)];
+        let pixels = fit::pixels_of(&render::develop_preview(&source, &report.recipe));
+        let zone = |i: usize, label: &str| AcceptedZone {
+            label: label.to_string(),
+            range: None,
+            mask_index: i,
+            source_weights: mask_weights(&masks[i], edge, edge),
+            target_weights: mask_weights(&masks[i], edge, edge),
+            before: 0.0,
+            after: 0.0,
+            rendered: Vec::new(),
+            judged_before: 0.0,
+            luma_only: false,
+            frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
+        };
+        let mut accepted = vec![zone(0, "left"), zone(1, "right")];
+        let frame = fit::look_err_with_evidence(&pixels, &tgt_px, &report.evidence);
+        let refused = refuse_shrunk_zones(
+            &source, &mut report, &mut accepted, &mut originals, 0, &pixels, &tgt_px, 0.25, frame, frame,
+        );
+        for path in &paths {
+            path.remove();
+        }
+        assert!(refused, "the darkened right half must be refused");
+        assert_eq!(
+            accepted.iter().map(|z| z.label.as_str()).collect::<Vec<_>>(),
+            vec!["left"],
+            "the lifted left half still helps its zone and stays"
+        );
+        assert_eq!(originals.len(), 1, "the k=1 controls follow the survivors in step");
+        assert!((originals[0].exposure_ev - 0.40).abs() < 1e-6, "and they are the LEFT zone's");
+        let note = report
+            .notes
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::ZONE_SHRUNK_REFUSED)
+            .expect("the refusal is a typed note");
+        assert!(note.args.iter().any(|(k, v)| *k == "label" && v == "right"), "{note:?}");
     }
 
     /// R18: the acceptance predicate's two RATIO regimes, pinned on the live

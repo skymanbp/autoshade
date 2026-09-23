@@ -83,6 +83,32 @@ impl AutoShadeApp {
         changed
     }
 
+    /// The Sharpening amount's slider (v1.6.0): a COMPANION whose default is
+    /// Lightroom's own FOR THE KIND of source — 40 on a RAW negative, none on
+    /// a baked raster — so `raw_source` (`AutoShadeApp::source_is_raw`) picks
+    /// the default it shows, resets to and returns to absent on. The value
+    /// shown is the one the engine renders (`EditRecipe::capture_sharpening`);
+    /// a drag to 0 on a RAW is a real 0, stated in the sidecar.
+    pub(crate) fn sharpening_slider(
+        ui: &mut egui::Ui,
+        lang: Lang,
+        label: &str,
+        recipe: &mut EditRecipe,
+        raw_source: bool,
+    ) -> bool {
+        let default = if raw_source { autoshade::recipe::LR_RAW_SHARPENING } else { 0.0 };
+        let mut shown = recipe.capture_sharpening(raw_source);
+        let changed = Self::slider_impl(ui, lang, label, &mut shown, 0.0, 150.0, default, SliderFeel::Int, "");
+        if changed {
+            if shown == default {
+                recipe.clear_resolved("sharpening");
+            } else {
+                recipe.set_resolved("sharpening", shown);
+            }
+        }
+        changed
+    }
+
     /// A 0..=1-stored fraction shown on Lightroom's 0..100 track (Amount,
     /// feathers, range tolerance): the panel used to mix "Amount 0.65" with
     /// "Shadows 40" in one column, which read as two unit systems. Storage
@@ -1353,12 +1379,15 @@ impl AutoShadeApp {
                 {
                     // All eleven controls render since v1.5.0
                     // (`render/detail.rs`), so none carries the "not rendered
-                    // here" line any more. The five COMPANIONS (radius and the
-                    // three Details, Smoothness) show the value the engine
-                    // renders — Lightroom's default while the recipe holds
-                    // none — and reset to it (`companion_slider`).
+                    // here" line any more. The six COMPANIONS (the amount since
+                    // v1.6.0 — Lightroom's 40 on a RAW, none on a baked raster —
+                    // radius, the three Details, Smoothness) show the value the
+                    // engine renders — Lightroom's default while the recipe
+                    // holds none — and reset to it (`companion_slider`,
+                    // `sharpening_slider`).
+                    let raw_source = self.source_is_raw();
                     let r = &mut self.recipe;
-                    changed |= Self::slider(ui, lang, tr(lang, "Sharpening"), &mut r.sharpening, 0.0, 150.0, 0.0);
+                    changed |= Self::sharpening_slider(ui, lang, tr(lang, "Sharpening"), r, raw_source);
                     // Lightroom's radius band, 0.5..3.0. `Fine` (0.1 snap, one
                     // shown decimal), NOT the width rule's `Frac`: the sidecar
                     // key is written to ONE decimal (`+1.0`), so a 0.01 track

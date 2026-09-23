@@ -945,7 +945,7 @@ pub(super) fn attach_tiles(
                     reference: &current,
                 },
                 target_boundary: Some(&tgt_px[..]),
-                initial_px: accepted.rendered,
+                initial_px: std::mem::take(&mut accepted.rendered),
                 frame_before,
             },
         );
@@ -1081,6 +1081,28 @@ pub(super) fn attach_tiles(
         );
         let frame_after =
             fit::look_err_with_evidence(&boundary.pixels, &tgt_px, &report.evidence);
+        // R39. The tile that ships is the SHRUNK one, and it must still leave
+        // its cell no worse than the frame it was attached to
+        // (`AcceptedZone::still_accepted`; `judged_before` IS that frame's
+        // reading here, the tiles being sequential): a correction the
+        // boundary gate has negotiated down to a fraction of itself can fail
+        // to help its own cell while the frame reading drifts a hair the
+        // right way.
+        if !accepted.still_accepted(
+            &boundary.pixels, &tgt_px, accepted.judged_before, frame_before, frame_after,
+        ) {
+            crate::rationale::push_note(
+                &mut report.recipe.rationale,
+                &mut report.notes,
+                accepted.shrunk_refusal_note(
+                    &boundary.pixels, &tgt_px, accepted.judged_before, boundary.k, frame_before, frame_after,
+                ),
+            );
+            report.recipe.masks.truncate(first_tile);
+            owned.remove();
+            refused.insert(reading.id);
+            continue;
+        }
         report.err_after = frame_after;
         crate::rationale::push_note(
             &mut report.recipe.rationale,
@@ -1101,8 +1123,10 @@ pub(super) fn attach_tiles(
         // The SHRUNK alpha, not the raw raster. What this vector withholds from
         // the free-mask producer is the correction a tile actually delivers, and
         // the boundary gate may have negotiated that correction down to a
-        // fraction `k` of itself (the calibration island's accepted tiles keep
-        // k = 0.114 / 0.168 / 0.187). A tile shrunk to a ninth of its fitted
+        // fraction `k` of itself (the calibration island's accepted tiles kept
+        // k = 0.114 / 0.168 / 0.187 under the pre-R40 ruler; R40 charges each
+        // crossing by its discontinuity, so the shrink it finds is its own). A
+        // tile shrunk to a ninth of its fitted
         // strength leaves most of its residual on the frame, so blocking the
         // next producer with the full alpha hid work nobody had done.
         for (dst, alpha) in excluded.iter_mut().zip(accepted_coverage) {
@@ -1147,8 +1171,11 @@ mod tests {
     /// shipped fit carried a 27-code seam the gate had read as 5 codes. The
     /// contour must be the preview's own ([`render::preview_mask_coverage`]).
     /// This scene — bright only in a band around the displaced edge, black
-    /// elsewhere — is that misread made deterministic: the stored-frame
-    /// ruler passes a 31-code seam, the preview-frame ruler reads it.
+    /// elsewhere — is that misread made deterministic: the preview-frame
+    /// ruler reads the whole 31-code seam. Before R40 the stored-frame ruler
+    /// passed it outright; since R40 its flanks (six pixels past each far
+    /// foot) reach the painted edge and it reads a fraction of the seam,
+    /// 7.7 codes — still under half of what the preview frame reads.
     #[test]
     fn the_native_trial_gate_reads_the_edge_the_preview_paints() {
         use crate::recipe::{EditRecipe, LensProfile, LocalAdjustment};
@@ -1192,12 +1219,13 @@ mod tests {
             crate::fit_zoned::boundary_step_toward(None, &reference, &rendered, &rendered, &weights, w, h).rim
         };
         let (on_stored, on_preview) = (read(&stored), read(&preview));
-        assert!(
-            on_stored < crate::fit_zoned::ZONE_BOUNDARY_STEP_MAX,
-            "the misread this pins: the stored-frame ruler passes the seam ({:.1} codes)",
-            on_stored * 255.0
-        );
         assert!(on_preview > 0.1, "the preview-frame ruler reads the seam ({:.1} codes)", on_preview * 255.0);
+        assert!(
+            on_stored < 0.5 * on_preview,
+            "the misread this pins: the stored-frame ruler reads under half the seam ({:.1} of {:.1} codes)",
+            on_stored * 255.0,
+            on_preview * 255.0
+        );
     }
 
     /// The cache is a per-traversal accelerator, never a behaviour: every
@@ -1725,11 +1753,18 @@ mod tests {
         contextual_fixture(80, exposure_ev, target_ev, name)
     }
 
-    /// `texture` is the sawtooth amplitude in 8-bit code values; 0 is a
-    /// flat field. The DIAL is identical across the arms of a contextual
-    /// test, so the arms differ ONLY in what the neighbourhood does —
-    /// which is the whole claim: a contextual budget cannot be falsified
-    /// with one neighbourhood.
+    /// `texture` is the peak-to-peak swing, in 8-bit code values, of a
+    /// checkerboard of 3-px cells laid over the field; 0 is a flat field.
+    /// Three-pixel cells because that is the hard ruler's own baseline (R40):
+    /// the two feet of every crossing sit in cells of opposite phase and the
+    /// flanks six pixels out in cells of the same phase as their foot, so the
+    /// scene's DISCONTINUITY there is the whole swing at every crossing, on
+    /// every row and every column. (A sawtooth, which this fixture was until
+    /// R40, is a ramp between its wraps — the plain 3-px step read it as
+    /// texture, the de-trended reading rightly does not.) The DIAL is
+    /// identical across the arms of a contextual test, so the arms differ
+    /// ONLY in what the neighbourhood does — which is the whole claim: a
+    /// contextual budget cannot be falsified with one neighbourhood.
     fn contextual_fixture(
         texture: u8,
         exposure_ev: f32,
@@ -1737,8 +1772,13 @@ mod tests {
         name: &str,
     ) -> BoundaryFixture {
         let source = DynamicImage::ImageRgb8(RgbImage::from_fn(64, 64, |x, y| {
-            let base =
-                if texture == 0 { 80 } else { 80 + ((x * 3 + y * 5) % texture as u32) as u8 };
+            let base = if texture == 0 {
+                80
+            } else if (x / 3 + y / 3) % 2 == 0 {
+                80 + texture / 2
+            } else {
+                80 - texture / 2
+            };
             Rgb([base, base, base])
         }));
         let mask = GrayImage::from_fn(64, 64, |x, y| {
@@ -1879,49 +1919,45 @@ mod tests {
         (source, target_pixels, report, path, geometry, reference, candidate)
     }
 
-    /// Captured from a run of `gradient_fixture` at +1.5 EV (the test below
-    /// says what moving them means).
-    const GRADIENT_K: f32 = 0.030517578;
-    const GRADIENT_RIM: f32 = 0.007396072;
+    /// Captured from a run of `gradient_fixture` at +1.5 EV under R40 (the
+    /// test below says what moving them means).
+    const GRADIENT_K: f32 = 0.0126953125;
+    const GRADIENT_RIM: f32 = 0.0034745336;
 
-    /// A22 (v1.2.4). The slope term is read on a correction whose gradient is
-    /// the SCENE's, and it is read off the FROZEN k = 1 candidate.
+    /// R40 (v1.5.2), reversing A22 (v1.2.4). A hard tile edge over a SMOOTH
+    /// sloping field buys no budget from the slope: a gradient is not a
+    /// discontinuity, so the de-trended reading of the scene there is ~0,
+    /// the budget is the floor, and the tile is shrunk until its own step
+    /// is under one code — however steep the sky falls off behind it.
     ///
-    /// The dose is chosen so the earned budget clears TWO code values while
-    /// the scene's own step across the same baseline clears only one: the
-    /// kept step then lands on a different 8-bit code depending on whether
-    /// the slope was consulted, which is the only way an 8-bit reading can
-    /// tell the two apart.
+    /// A22 read the opposite: the scene's 3-px change across the feet was
+    /// the context, and the correction's own same-side slope off the frozen
+    /// k = 1 candidate bought three times itself on top, so this fixture
+    /// shipped a 1.89-code step at k = 0.0305. That is the arithmetic that
+    /// let the reference pair's r1c0 keep a 2.3-code step in featureless sky
+    /// (`discontinuity_budget`): the sky's own gradient was the seam's alibi.
     ///
-    /// MUTATIONS, both run on 2026-09-02. Zero the term (`let slope_in =
-    /// 0.0f32; let slope_out = 0.0f32;` in `boundary_line_steps`): this test
-    /// fails on the charge comparison, and so do
-    /// `a_ramp_earns_budget_only_where_it_persists_past_the_collar` and
-    /// `tile_boundary_shrink_preserves_direction_and_budget` — 3 of 149.
-    /// Read it off the render under bisection instead of the frozen candidate
-    /// (`boundary_step(reference, rendered, rendered, ...)` in
-    /// `enforce_bitmap_boundary`): the budget chases `k` down, and the pinned
-    /// pair lands on (0.029785156, 0.005094141) — a kept step of 1.30 code
-    /// where the frozen reading keeps 1.89.
+    /// Two things are pinned. The frozen candidate no longer reaches the
+    /// budget at all — handing the ruler the reference in its place changes
+    /// no bit of the reading — and the accepted pair lands on these exact
+    /// bits, with the kept step at or under the floor.
     #[test]
-    fn a_scene_gradient_under_a_hard_raster_earns_its_own_slope_budget() {
+    fn a_scene_gradient_under_a_hard_raster_buys_no_budget() {
         const EV: f32 = 1.5;
         let (source, target, mut report, path, geometry, reference, candidate) =
             gradient_fixture(EV, "ctx-budget-gradient");
-        let with_slope = boundary_step(&reference, &candidate, &candidate, &geometry, 64, 64);
-        // The SAME crossings with the slope term switched off and nothing
-        // else changed: handing the ruler the reference as its own frozen
-        // candidate makes `u1` identically zero on both sides, so each
-        // crossing earns the scene's own step alone.
-        let no_slope = boundary_step(&reference, &candidate, &reference, &geometry, 64, 64);
+        let with_frozen = boundary_step(&reference, &candidate, &candidate, &geometry, 64, 64);
+        // The SAME crossings with the reference as the frozen candidate: the
+        // budget reads no slope, so nothing in the reading can move.
+        let no_frozen = boundary_step(&reference, &candidate, &reference, &geometry, 64, 64);
         assert_eq!(
-            (with_slope.rim.to_bits(), with_slope.transitions),
-            (no_slope.rim.to_bits(), no_slope.transitions),
-            "the raw step is the same reading either way: {with_slope:?} vs {no_slope:?}",
+            (with_frozen.rim.to_bits(), with_frozen.charged.to_bits(), with_frozen.transitions),
+            (no_frozen.rim.to_bits(), no_frozen.charged.to_bits(), no_frozen.transitions),
+            "the frozen candidate buys nothing: {with_frozen:?} vs {no_frozen:?}",
         );
         assert!(
-            with_slope.charged < no_slope.charged,
-            "the scene's own gradient must buy budget: {with_slope:?} vs {no_slope:?}",
+            with_frozen.charged > ZONE_BOUNDARY_STEP_MAX,
+            "a smooth gradient is no context: the step is charged at the floor's rate: {with_frozen:?}",
         );
         let frame_before = fit::look_err_with_evidence(&reference, &target, &report.evidence);
         let accepted = enforce_bitmap_boundary(
@@ -1944,13 +1980,12 @@ mod tests {
         assert_eq!(
             (accepted.k, accepted.reading.rim),
             (GRADIENT_K, GRADIENT_RIM),
-            "the slope-earned budget must land on these exact bits: {:?} from \n             {with_slope:?} against {no_slope:?}",
+            "the floor-budgeted shrink must land on these exact bits: {:?} from {with_frozen:?}",
             accepted.reading,
         );
         assert!(
-            accepted.reading.rim > BOUNDARY_STEP_FLOOR
-                && accepted.reading.rim < ZONE_BOUNDARY_STEP_MAX,
-            "the earned budget sits strictly between floor and ceiling: {:?}",
+            accepted.k < 1.0 && accepted.reading.rim <= BOUNDARY_STEP_FLOOR + 1e-6,
+            "with no context the budget is the floor, so the kept step is at most one code: {:?}",
             accepted.reading,
         );
     }
@@ -2110,16 +2145,18 @@ mod tests {
             paired.rim <= ZONE_BOUNDARY_STEP_MAX,
             "a continuous ramp is not a cross-boundary step: {paired:?} vs {one_sided}"
         );
-        // The MECHANISM, not just the outcome: the ramp's own same-side
-        // slope saturates its per-crossing budget at the ceiling (3 x
-        // ~0.0089 luma clamps to 0.012), so the charge branch returns the
-        // raw step bit for bit. A future edit that keeps the ramp green for
-        // any other reason moves these bits.
-        assert_eq!(
-            paired.charged.to_bits(),
-            paired.rim.to_bits(),
-            "a saturated ramp must charge nothing: {paired:?}"
+        // The MECHANISM, not just the outcome (R40): the ramp is de-trended
+        // out of the reading, so what is left is the 8-bit render's rounding
+        // — under one code — and the field behind it is flat, so every
+        // crossing is charged at the FLOOR's rate (ceiling / floor) and still
+        // clears the ceiling. Before R40 the ramp bought its own budget (3 x
+        // its slope, clamped to the ceiling); now it needs none.
+        assert!(paired.rim <= BOUNDARY_STEP_FLOOR, "a ramp reads as no discontinuity: {paired:?}");
+        assert!(
+            (paired.charged - paired.rim * (ZONE_BOUNDARY_STEP_MAX / BOUNDARY_STEP_FLOOR)).abs() <= 1e-6,
+            "on a flat field the ramp earns nothing and is charged at the floor's rate: {paired:?}"
         );
+        assert!(paired.charged <= ZONE_BOUNDARY_STEP_MAX, "and still clears the ceiling: {paired:?}");
         let accepted = enforce_bitmap_boundary(
             &source,
             &target,
@@ -2146,26 +2183,23 @@ mod tests {
     /// of any value can produce these verdicts at once, which is what pins
     /// the mechanism rather than one number.
     ///
-    /// Neither arm here can see the frozen-candidate rule: both budgets are
-    /// decided by the neighbourhood (a flat field earns the floor, texture at
-    /// 2.94x the ceiling clamps), so the slope term is 0 or irrelevant and a
-    /// mutation reading it off the render under bisection changes nothing on
-    /// this fixture. Two other tests hold that rule, both measured under that
-    /// exact mutation on 2026-09-02:
-    /// `a_ramp_earns_budget_only_where_it_persists_past_the_collar` arm F
-    /// moves from (k 0.24536133, rim 0.007843137) to (0.14794922,
-    /// 0.0039215684), and
-    /// `a_scene_gradient_under_a_hard_raster_earns_its_own_slope_budget`
-    /// from (0.030517578, 0.007396072) to (0.029785156, 0.005094141). The
-    /// second is the smooth in-zone gradient this note used to say no fixture
-    /// built.
+    /// Since R40 (v1.5.2) the context is the scene's DISCONTINUITY at the
+    /// crossing, not its 3-px change: arm B's texture is a 3-px checker
+    /// (`contextual_fixture`), whose swing the de-trended reading sees whole,
+    /// and the sawtooth it replaced — a ramp between wraps — would now earn
+    /// the floor like the sky it resembles. The frozen candidate reaches no
+    /// budget any more; the two tests that pinned the slope credit,
+    /// `neither_a_collar_nor_a_persistent_ramp_funds_a_step_at_the_contour`
+    /// and `a_scene_gradient_under_a_hard_raster_buys_no_budget`, now pin
+    /// its absence.
     #[test]
     fn contextual_budget_charges_smooth_borders_and_leaves_textured_ones_alone() {
         const ARM_EV: f32 = 0.09;
-        // Captured from a run of the scalar-rule path (charged == rim on a
-        // fully textured border makes the new gate walk it bit-for-bit).
-        const ARM_B_SHIPPED_K: f32 = 0.80249023;
-        const ARM_B_SHIPPED_RIM: f32 = 0.011764735;
+        // Captured from a run on the checker fixture: charged == rim on a
+        // fully textured border, so the gate walks the un-charged path
+        // bit-for-bit and lands where a scalar ceiling would.
+        const ARM_B_SHIPPED_K: f32 = 0.8642578;
+        const ARM_B_SHIPPED_RIM: f32 = 0.011764705;
         let gate = |source: &DynamicImage,
                     target: &[[f32; 3]],
                     report: &mut FitReport,
@@ -2219,27 +2253,32 @@ mod tests {
         );
 
         // Arm B — the SAME dial over texture: bit-identity with the scalar
-        // rule. The sawtooth's minimum scene step across any crossing is 9
-        // code = 0.0353 luma, 2.94x the ceiling, so every budget clamps to
-        // the ceiling and the charge branch returns the raw step verbatim.
+        // rule. The checker's discontinuity at every crossing is its whole
+        // 120-code swing = 0.471 luma, 39x the ceiling, so every budget clamps
+        // to the ceiling and the charge branch returns the raw step verbatim.
+        // 120 rather than less so the dial's own lift on the bright cells (4.0
+        // codes at +0.09 EV on a value of 140) is over the ceiling: the gate
+        // then has to walk the bisection here too, and the pin below is a
+        // path, not a pass at k = 1 (at a 48- or 64-code swing the lift
+        // quantised to 3.0 codes on the grey render and the tile passed whole).
         let (source, target, mut report, path, geometry, reference, candidate) =
-            contextual_fixture(80, ARM_EV, Some(ARM_EV * 0.5), "ctx-budget-textured");
+            contextual_fixture(120, ARM_EV, Some(ARM_EV * 0.5), "ctx-budget-textured");
         let measured = boundary_step(&reference, &candidate, &candidate, &geometry, 64, 64);
         assert_eq!(
             measured.charged.to_bits(),
             measured.rim.to_bits(),
-            "texture at 2.94x the ceiling charges nothing: {measured:?}"
+            "texture at 39x the ceiling charges nothing: {measured:?}"
         );
         let accepted =
             gate(&source, &target, &mut report, &geometry, &reference, candidate)
                 .expect("the textured arm was never in question");
         path.remove();
-        // Bit-identity with the SHIPPED scalar rule, pinned as literals: on
-        // this arm `charged == rim` at every bisection step by construction
-        // (the branch returns the raw step verbatim), so the gate walks the
-        // exact path v1.2.1 walked and lands on the exact bits. A `<= budget`
-        // assertion here would be worthless — any tightening satisfies it,
-        // which is precisely how the original defect shipped.
+        // Bit-identity with a scalar ceiling, pinned as literals: on this
+        // arm `charged == rim` at every bisection step by construction (the
+        // branch returns the raw step verbatim), so the gate walks the exact
+        // path an un-charged ceiling walks and lands on the exact bits. A
+        // `<= budget` assertion here would be worthless — any tightening
+        // satisfies it, which is precisely how the original defect shipped.
         assert_eq!(
             accepted.reading.charged.to_bits(),
             accepted.reading.rim.to_bits(),
@@ -2249,7 +2288,7 @@ mod tests {
         assert_eq!(
             (accepted.k, accepted.reading.rim),
             (ARM_B_SHIPPED_K, ARM_B_SHIPPED_RIM),
-            "the textured arm must land on the shipped rule's exact bits"
+            "the textured arm must land on the un-charged ceiling's exact bits"
         );
 
         // Arm C — texture earns AT MOST the ceiling, never more: the same
@@ -2258,7 +2297,7 @@ mod tests {
         // constant`) as surely as A+B kill every scalar: the exchange is a
         // clamped ratio, not an offset.
         let (source, target, mut report, path, geometry, reference, candidate) =
-            contextual_fixture(80, ARM_EV * 3.0, Some(ARM_EV * 1.5), "ctx-budget-3x");
+            contextual_fixture(120, ARM_EV * 3.0, Some(ARM_EV * 1.5), "ctx-budget-3x");
         let measured = boundary_step(&reference, &candidate, &candidate, &geometry, 64, 64);
         assert!(
             measured.rim > ZONE_BOUNDARY_STEP_MAX,
@@ -2372,20 +2411,24 @@ mod tests {
         path.remove();
     }
 
-    /// Captured from a run of the persistence rule on `shoulder_fixture`
+    /// Captured from a run of `shoulder_fixture(32.0, 0.37, …)` under R40
     /// (arm F below says what moving them means).
-    const ARM_F_K: f32 = 0.24536133;
-    const ARM_F_RIM: f32 = 0.007843137;
+    const ARM_F_K: f32 = 0.14794922;
+    const ARM_F_RIM: f32 = 0.0036284328;
 
-    /// Acceptance (v1.2.2 seam batch, second finding of the same class):
-    /// slope credit must PERSIST past the first baseline. Measured on the
-    /// real seam: the resample-and-refine collar spans exactly the first
-    /// baseline out, so a hard tile edge in CLEAN sky read an inner |u1|
-    /// slope of 0.005-0.008 luma, and three times that bought the whole
-    /// ceiling back for a 43-crossing sky band. The soft shoulder a seam
-    /// wears must never fund the seam.
+    /// Acceptance (v1.2.2 seam batch, second finding of the same class),
+    /// re-pinned under R40 (v1.5.2). The v1.2.2 rule was that slope credit
+    /// must PERSIST past the first baseline — measured on the real seam, the
+    /// resample-and-refine collar spans exactly the first baseline out, so a
+    /// hard tile edge in CLEAN sky read an inner |u1| slope of 0.005-0.008
+    /// luma, and three times that bought the whole ceiling back for a
+    /// 43-crossing sky band. R40 removes the credit altogether: a jump at
+    /// the contour is a seam whatever ramp it carries, because the ramp is
+    /// de-trended out of the reading and the jump is what is left. Arm E
+    /// still says the collar funds nothing; arm F now says a persistent ramp
+    /// funds nothing either.
     #[test]
-    fn a_ramp_earns_budget_only_where_it_persists_past_the_collar() {
+    fn neither_a_collar_nor_a_persistent_ramp_funds_a_step_at_the_contour() {
         let gate = |source: &DynamicImage,
                     target: &[[f32; 3]],
                     report: &mut FitReport,
@@ -2439,19 +2482,13 @@ mod tests {
         );
 
         // Arm F: the same 0.55 step carrying a ramp that PERSISTS (to 1.0
-        // over 32 px), at a dial whose earned budget clears two code values
-        // so the 8-bit kept step can land strictly between floor and ceiling
-        // and stays under three, so every mutation lands on a DIFFERENT
-        // code (at 0.30 EV the budget fell between one and two codes and the
-        // quantised step could only land on the floor; at 0.45 EV it cleared
-        // three codes and a saturated SHAPE would land on the same step).
-        // Consecutive
-        // baselines agree, so the correction earns
-        // three times its own slope and NO MORE. `k` and the kept reading
-        // are pinned bit-for-bit: a mutation that reads the slope off the
-        // render under bisection (the budget would chase k), deletes the
-        // term, or saturates it (SHAPE = infinity) each lands on different
-        // bits.
+        // over 32 px). Under the v1.2.2 rule the ramp earned three times its
+        // own slope and this arm landed at (k 0.24536133, rim 0.007843137),
+        // a two-code step kept in a flat field. Under R40 the ramp reads as
+        // no discontinuity and buys none: the budget is the floor, the jump
+        // is shrunk to under a code, and the pair lands on these bits. A
+        // slope credit of any size, or a context read from the 3-px step
+        // rather than the discontinuity, moves them.
         let (source, target, mut report, path, geometry, reference, candidate) =
             shoulder_fixture(32.0, 0.37, 0.185, "persistent-ramp");
         let measured = boundary_step(&reference, &candidate, &candidate, &geometry, 64, 64);
@@ -2461,16 +2498,17 @@ mod tests {
         );
         let accepted =
             gate(&source, &target, &mut report, &geometry, &reference, candidate)
-                .expect("a persistent ramp earns its slope budget and shrinks to it");
+                .expect("a persistent ramp is negotiated down to the floor, not dropped");
         path.remove();
         assert_eq!(
             (accepted.k, accepted.reading.rim),
             (ARM_F_K, ARM_F_RIM),
-            "the slope-earned budget must land on these exact bits"
+            "the floor-budgeted shrink must land on these exact bits: {:?}",
+            accepted.reading
         );
         assert!(
-            accepted.reading.rim > BOUNDARY_STEP_FLOOR && accepted.reading.rim < ZONE_BOUNDARY_STEP_MAX,
-            "the earned budget sits strictly between floor and ceiling: {:?}",
+            accepted.reading.rim <= BOUNDARY_STEP_FLOOR + 1e-6,
+            "a persistent ramp funds nothing: the kept jump is at most one code: {:?}",
             accepted.reading
         );
     }

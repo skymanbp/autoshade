@@ -312,12 +312,17 @@ pub(super) fn push_realized(report: &mut FitReport, field: &LocalField, producer
 /// sequencer — after ranges, tiles and free masks, because it exists to carry
 /// the residual none of them could reach.
 ///
-/// Two gates, and the first is the strength dial. At or below
+/// Two gates, and the first is the strength dial. Below
 /// [`GradeStrength::DEFAULT`] the field stays exactly what it has always been,
 /// an analysis instrument, and this function returns without touching the
 /// recipe: the dial means "how far past Lightroom may this fit go", and the
 /// colour field is the first control that leaves Lightroom entirely — a
-/// sidecar cannot carry a coordinate system it has no keys for. The second is
+/// sidecar cannot carry a coordinate system it has no keys for. R41
+/// (2026-09-22) moved the gate down from "above the default" to "at the
+/// default and above": on the reference pair the default fit carried no
+/// field at all, and that was most of the distance between 0.65 and 0.85 the
+/// user saw; the calibration point one click below the default still stays
+/// inside what a sidecar can carry. The second is
 /// the field's own ceiling: it may only run when there is measurably more than
 /// [`LOCAL_STOP_MARGIN`] still on the table, which is the same verdict
 /// [`stop_verdict`] uses to END the sequencer, read the other way round.
@@ -337,7 +342,7 @@ pub(super) fn attach_colour_field(
     strength: crate::recipe::GradeStrength,
     entry: &LocalField,
 ) {
-    if strength.get() <= crate::recipe::GradeStrength::DEFAULT {
+    if strength.get() < crate::recipe::GradeStrength::DEFAULT {
         return;
     }
     if !stop_verdict_has_headroom(entry, report.err_after) {

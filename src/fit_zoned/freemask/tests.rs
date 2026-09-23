@@ -241,9 +241,10 @@ fn free_masks_eat_only_what_tiles_left() {
     assert!(report.recipe.masks.len() >= 2, "fixture did not accept a tile: {}", report.recipe.rationale);
     // A35 (v1.2.4): what a tile hands the free-mask producer is the alpha the
     // boundary gate LEFT it — its raster times the accepted `k` — and not the
-    // raster it asked for. The gate negotiated this tile down to k = 0.159, so
-    // it reserves a sixth of its footprint and the region stays open to a
-    // producer that can correct what the tile was forbidden to.
+    // raster it asked for. The gate negotiated this tile down to k = 0.111
+    // (0.159 before R40, when the field's sawtooth ramps still counted as
+    // context), so it reserves a ninth of its footprint and the region stays
+    // open to a producer that can correct what the tile was forbidden to.
     // `a_tile_reserves_only_the_alpha_the_boundary_gate_left_it` pins the rule
     // itself; this is the end-to-end reading that shows `attach_tiles` emits it.
     let max_excluded = excluded.iter().cloned().fold(0.0f32, f32::max);
@@ -268,7 +269,7 @@ fn free_masks_eat_only_what_tiles_left() {
 /// The alpha `attach_tiles` leaves on the fixture in
 /// `free_masks_eat_only_what_tiles_left`: that tile's raster times the `k`
 /// its boundary gate accepted.
-const TILE_EXCLUSION_ALPHA: f32 = 0.1586914;
+const TILE_EXCLUSION_ALPHA: f32 = 0.110839844;
 
 /// A35 (v1.2.4). A tile reserves the strength it KEPT, not the footprint it
 /// asked for, and what the reservation removes is disclosed by name.
@@ -607,10 +608,33 @@ fn assert_every_proposal_has_an_outcome(report: &fit::FitReport) {
         .expect("free-mask stage did not publish its structured outcome");
     assert_eq!(stage.components, stage.disclosed,
         "every component must have a typed verdict");
-    assert!(report.recipe.rationale.len() < 16 * 1024,
+    // p36 read 17 091 bytes after R39–R41 (2026-09-23: the boundary ruler's
+    // sentences and the colour field's two at the default strength); the cap
+    // is hygiene against runaway narration, not a consumer's limit
+    // (`recipe::MAX_RATIONALE` is 512 KiB).
+    assert!(report.recipe.rationale.len() < 24 * 1024,
         "rationale grew to {} bytes", report.recipe.rationale.len());
     assert!(!report.recipe.rationale.to_ascii_lowercase().contains("truncat"),
         "pinned live rationale must not contain a truncation warning");
+}
+
+/// The `LOCAL_REALIZED` frame reading the free-mask stage published and the
+/// one the producer before it published: what the stage itself did to the
+/// frame. Since R41 the colour field runs after the free masks at the default
+/// strength, so the final frame no longer says that.
+fn realized_around_free_masks(report: &fit::FitReport) -> (f32, f32) {
+    let readings = report.notes.iter()
+        .filter(|note| note.key == crate::rationale::keys::LOCAL_REALIZED)
+        .map(|note| {
+            let arg = |key: &str| note.args.iter()
+                .find(|(name, _)| *name == key).map(|(_, value)| value.clone());
+            (arg("producer").unwrap(), arg("err_after").unwrap().parse::<f32>().unwrap())
+        })
+        .collect::<Vec<_>>();
+    let at = readings.iter().position(|(producer, _)| producer == "free masks")
+        .unwrap_or_else(|| panic!("no realized reading after the free masks: {readings:?}"));
+    assert!(at > 0, "no realized reading before the free masks: {readings:?}");
+    (readings[at - 1].1, readings[at].1)
 }
 
 fn cleanup_corpus_run(report: &fit::FitReport, home: &crate::store::OwnedRaster) {
@@ -628,21 +652,21 @@ fn calibration_free_masks_disclose_every_component() {
     let source = image::open(root.join("neutral.jpg")).unwrap();
     let target = image::open(root.join("target.jpg")).unwrap();
     let segment = corpus_segment_off();
-    let head_home = super::super::tests::fixture_mask_path("free-mask-corpus-head");
     let live_home = super::super::tests::fixture_mask_path("free-mask-corpus-live");
-    let head = super::super::fit_recipe_zoned_inner(
-        &source, &target, &segment, &head_home, &crate::recipe::EditRecipe::default(), None,
-        corpus_layers(false),
-    );
     let report = super::super::fit_recipe_zoned_inner(
         &source, &target, &segment, &live_home, &crate::recipe::EditRecipe::default(), None,
         corpus_layers(true),
     );
     assert_every_proposal_has_an_outcome(&report);
-    assert!(report.err_after <= head.err_after + 1e-6,
-        "free masks regressed the frame: {} -> {}\n{}", head.err_after, report.err_after,
-        report.recipe.rationale);
-    cleanup_corpus_run(&head, &head_home);
+    // The stage's own realized reading against the one before it, not the
+    // final frame against a run without the layer: since R41 the colour field
+    // runs after the free masks at the default strength, and its bounded
+    // per-cell solve landed 1.5e-5 apart from two starting frames 0.003 apart
+    // (0.052257 without the masks, 0.052272 with; 2026-09-23) — the field's
+    // arithmetic, not a regression by the masks (0.083255 -> 0.080259 here).
+    let (before, after) = realized_around_free_masks(&report);
+    assert!(after <= before + 1e-6,
+        "free masks regressed the frame: {before} -> {after}\n{}", report.recipe.rationale);
     cleanup_corpus_run(&report, &live_home);
 }
 
@@ -655,12 +679,7 @@ fn p36_remainder_is_realised_or_honestly_refused() {
     let source = crate::decode::preview_only(&raw).unwrap();
     let target = image::open(target_path).unwrap();
     let segment = corpus_segment_off();
-    let head_home = super::super::tests::fixture_mask_path("free-mask-p36-head");
     let live_home = super::super::tests::fixture_mask_path("free-mask-p36-live");
-    let head = super::super::fit_recipe_zoned_inner(
-        &source, &target, &segment, &head_home, &crate::recipe::EditRecipe::default(), None,
-        corpus_layers(false),
-    );
     let report = super::super::fit_recipe_zoned_inner(
         &source, &target, &segment, &live_home, &crate::recipe::EditRecipe::default(), None,
         corpus_layers(true),
@@ -674,9 +693,10 @@ fn p36_remainder_is_realised_or_honestly_refused() {
                 || report.recipe.rationale.contains("No field mask qualified:"),
             "the p36 remainder had no honest verdict: {}", report.recipe.rationale);
     } else {
-        assert!(report.err_after < head.err_after,
-            "an attached p36 mask did not improve HEAD: {} -> {}", head.err_after,
-            report.err_after);
+        // the stage's own reading, for the reason
+        // `calibration_free_masks_disclose_every_component` gives
+        let (before, after) = realized_around_free_masks(&report);
+        assert!(after < before, "an attached p36 mask did not improve the frame: {before} -> {after}");
         for note in attached {
             let value = |key: &str| note.args.iter()
                 .find(|(name, _)| *name == key)
@@ -687,7 +707,6 @@ fn p36_remainder_is_realised_or_honestly_refused() {
             assert!(step <= ZONE_BOUNDARY_STEP_MAX, "step {step} exceeded the free mask's own step budget");
         }
     }
-    cleanup_corpus_run(&head, &head_home);
     cleanup_corpus_run(&report, &live_home);
 }
 

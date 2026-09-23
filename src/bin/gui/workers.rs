@@ -279,10 +279,11 @@ impl AutoShadeApp {
         let recipe = self.recipe.clone();
         let show_clipping = self.show_clipping;
         let film = self.film_short_edge();
+        let raw_source = self.source_is_raw();
         self.develop_inflight = true;
         self.dirty = false;
         self.spawn_worker(
-            move || Msg::Developed(Box::new(Ok(build_preview(base, recipe, show_clipping, film)))),
+            move || Msg::Developed(Box::new(Ok(build_preview(base, recipe, show_clipping, film, raw_source)))),
             |e| Msg::Developed(Box::new(Err(e))),
         );
     }
@@ -309,6 +310,16 @@ impl AutoShadeApp {
         let edge = autoshade::decode::film_short_edge(&path);
         self.film_edge = Some((path, modified, edge));
         edge
+    }
+
+    /// Does the active card develop a RAW negative (`decode::is_raw` on the
+    /// same path `film_short_edge` reads)? The Sharpening default is
+    /// Lightroom's own for the kind — 40 on a RAW, none on a baked raster
+    /// (`EditRecipe::capture_sharpening`, v1.6.0) — so every surface that
+    /// develops the canvas's pixels passes this beside the film edge. No
+    /// photo is a baked raster: nothing to sharpen by default.
+    pub(crate) fn source_is_raw(&self) -> bool {
+        self.active_source_path().is_some_and(|p| autoshade::decode::is_raw(&p))
     }
 
     /// Accept one worker-built frame if it still describes the active base +
@@ -444,7 +455,7 @@ impl AutoShadeApp {
                                     "{p} — {}",
                                     tr(
                                         lang,
-                                        "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                                        "camera base look re-estimated — this photo was saved by an earlier version, whose estimate of the camera's tone this version replaces",
                                     )
                                 );
                             }
@@ -479,7 +490,7 @@ impl AutoShadeApp {
                             } else {
                                 trf(
                                     lang,
-                                    " · {n} base look(s) re-estimated (a pre-era save rendered too dark)",
+                                    " · {n} base look(s) re-estimated (saved by an earlier version)",
                                     &[("n", &relooked.to_string())],
                                 )
                             };
@@ -1233,7 +1244,7 @@ impl AutoShadeApp {
                                     if relooked {
                                         let w = tr(
                                             lang,
-                                            "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                                            "camera base look re-estimated — this photo was saved by an earlier version, whose estimate of the camera's tone this version replaces",
                                         )
                                         .to_string();
                                         open_note = merge_note(open_note, w);

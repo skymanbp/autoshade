@@ -181,7 +181,7 @@ pub(in crate::fit_zoned) fn attach_free_masks(
         let frame_before = fit::look_err_with_evidence(&before_px, &target_px, &report.evidence);
         let mut frame_err = frame_before;
         let first_mask = report.recipe.masks.len();
-        let Some(accepted) = attach_one_zone(
+        let Some(mut accepted) = attach_one_zone(
             &s_img, &target_px, report, &mut frame_err, &attachment,
             // A proposal only exists once the structural gate has READ its
             // component, so this reading is present by construction.
@@ -203,7 +203,7 @@ pub(in crate::fit_zoned) fn attach_free_masks(
                     reference: &before_px,
                 },
                 target_boundary: Some(&target_px[..]),
-                initial_px: accepted.rendered,
+                initial_px: std::mem::take(&mut accepted.rendered),
                 frame_before,
             },
         );
@@ -226,6 +226,26 @@ pub(in crate::fit_zoned) fn attach_free_masks(
             }
         };
         let frame_after = fit::look_err_with_evidence(&boundary.pixels, &target_px, &report.evidence);
+        // R39. The SHRUNK mask must still leave its footprint no worse than
+        // the frame it was attached to (`AcceptedZone::still_accepted`;
+        // `judged_before` is that frame's reading, the masks being
+        // sequential), exactly as a spatial tile is held; the numbers go in
+        // their own note, the refusal in this producer's ledger.
+        if !accepted.still_accepted(
+            &boundary.pixels, &target_px, accepted.judged_before, frame_before, frame_after,
+        ) {
+            let note = accepted.shrunk_refusal_note(
+                &boundary.pixels, &target_px, accepted.judged_before, boundary.k, frame_before, frame_after,
+            );
+            owned.remove();
+            report.recipe.rationale.truncate(rationale_before_attach);
+            report.notes.truncate(notes_before_attach);
+            report.recipe.masks.truncate(first_mask);
+            crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes, note);
+            push_refusal(report, &[FreeMaskRefusal { n: number, why: FreeMaskWhy::Shrunk }]);
+            disclosed += 1;
+            continue;
+        }
         report.err_after = frame_after;
         crate::rationale::push_note(
             &mut report.recipe.rationale, &mut report.notes,

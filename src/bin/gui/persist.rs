@@ -547,7 +547,7 @@ pub(crate) fn resolve_saved_develop(
                 open_note = Some(
                     tr(
                         lang,
-                        "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                        "camera base look re-estimated — this photo was saved by an earlier version, whose estimate of the camera's tone this version replaces",
                     )
                     .into(),
                 );
@@ -584,10 +584,15 @@ pub(crate) fn resolve_saved_develop(
     //     Lightroom sidecar (whose coordinates ARE display-frame, because
     //     Lightroom reads tag 0x0112 itself) is a no-op here by construction;
     //   * the `Unreadable` fallback arm carries a real restored recipe too.
-    if let Some(c) =
-        src.and_then(|p| autoshade::pipeline::migrate_recipe_coord_frame(p, &mut recipe))
-    {
-        open_note = merge_note(open_note, coord_migration_sentence(lang, c));
+    match src.map(|p| autoshade::pipeline::migrate_recipe_coord_frame(p, &mut recipe)) {
+        Some(Ok(Some(c))) => open_note = merge_note(open_note, coord_migration_sentence(lang, c)),
+        // A raster that could not be re-written: nothing moved, and the photo
+        // opens with its saved geometry off the picture — said in the same
+        // note, so the photographer knows what they are looking at.
+        Some(Err(e)) => {
+            open_note = merge_note(open_note, coord_migration_failure_sentence(lang, &e.to_string()))
+        }
+        _ => {}
     }
     ResolvedSaved { recipe, restored, stamp, open_note, unresolved }
 }
@@ -629,28 +634,51 @@ fn noop_only_note(lang: Lang, src: Option<&std::path::Path>) -> Option<String> {
     Some(tr(lang, "a saved develop exists but holds no effective edits").into())
 }
 
-/// The GUI's OWN localized sentence for a coordinate-frame migration — the
+/// The GUI's OWN localized sentences for a coordinate-frame migration — the
 /// engine's [`autoshade::pipeline::coord_migration_note`] is for the CLI/HTTP
-/// surfaces, exactly like the base-curve pair. Two sentences, not one with a
-/// conditional clause: the raster half is a DIFFERENT fact (work the migration
-/// could not do) and must not be buried inside the success line.
+/// surfaces, exactly like the base-curve pair. One sentence per fact, never
+/// one with conditional clauses: the turn, the translation and the raster
+/// rewrite are three different things that happened.
 pub(crate) fn coord_migration_sentence(
     lang: Lang,
     c: autoshade::pipeline::CoordMigration,
 ) -> String {
-    let mut s: String = tr(
-        lang,
-        "this photo's saved crop and masks were rotated to match the RAW's EXIF orientation — earlier versions displayed rotated RAWs sideways, so their coordinates were stored against the sideways frame",
-    )
-    .into();
-    if c.rasters_left {
-        s.push_str(" · ");
-        s.push_str(tr(
+    let mut parts: Vec<String> = Vec::new();
+    if c.turned() {
+        parts.push(
+            tr(
+                lang,
+                "this photo's saved crop and masks were rotated to match the RAW's EXIF orientation — earlier versions displayed rotated RAWs sideways, so their coordinates were stored against the sideways frame",
+            )
+            .into(),
+        );
+    }
+    if c.shift != (0, 0) {
+        parts.push(trf(
             lang,
-            "its raster masks are image files, not coordinates, and could NOT be rotated — check them and re-generate if they no longer fit",
+            "this photo's saved crop, masks and retouches were moved by ({dx}, {dy}) px — earlier versions developed this camera's RAWs from the sensor's corner instead of the crop the camera declares, so everything drawn on them sat that far off the picture",
+            &[("dx", &c.shift.0.to_string()), ("dy", &c.shift.1.to_string())],
         ));
     }
-    s
+    if c.rasters > 0 {
+        parts.push(trf(
+            lang,
+            "{n} raster mask file(s) were re-written into the corrected frame; the originals are kept",
+            &[("n", &c.rasters.to_string())],
+        ));
+    }
+    parts.join(" · ")
+}
+
+/// The GUI's sentence for a coordinate-frame migration that could NOT run —
+/// a raster mask unreadable or unwritable. Nothing moved, and the photo is
+/// showing its saved geometry off the picture until the cause is fixed.
+pub(crate) fn coord_migration_failure_sentence(lang: Lang, err: &str) -> String {
+    trf(
+        lang,
+        "this photo's saved geometry could NOT be brought into the corrected frame ({err}) — it is left as saved and will be tried again on the next open",
+        &[("err", err)],
+    )
 }
 
 /// Stamp the photo's camera-matched calibration onto the canvas recipe:

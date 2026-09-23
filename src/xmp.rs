@@ -3239,8 +3239,14 @@ fn owned_attrs(r: &EditRecipe, frame: Option<FrameAspect>) -> String {
     // 1:1 with the Detail > Sharpening "Amount" slider, whose UI maximum IS
     // 150 — see the reader for the evidence that retired the old ×⅔ rescale.
     // Round + clamp to the same band the recipe row states, no scale change.
-    let sharp = (r.sharpening.round() as i64).clamp(0, 150);
-    attr(&mut a, "Sharpness", &sharp.to_string());
+    // A COMPANION since v1.6.0: an absent amount leaves the key out, and
+    // Lightroom applies its own default for the kind of file — 40 on a RAW,
+    // 0 on a JPEG — which is what the engine renders
+    // (`EditRecipe::capture_sharpening`); a real 0 is stated like any other.
+    if states("sharpening", r.sharpening) {
+        let sharp = (r.sharpening.round() as i64).clamp(0, 150);
+        attr(&mut a, "Sharpness", &sharp.to_string());
+    }
     // SharpenRadius is the one DECIMAL key in the detail block, and the one
     // Lightroom writes with an explicit `+`: `crs:SharpenRadius="+1.0"` in all
     // seven of the user's sidecars (the integer neighbours are bare —
@@ -9145,8 +9151,10 @@ fn xmp_to_recipe_clamped_impl(
         }
     }
     // A COMPANION key present at 0 (`recipe::LR_COMPANION_DEFAULTS`) is a
-    // VALUE the document states — none of those controls defaults to 0, so
-    // Lightroom writes `SharpenDetail="0"` only for a Detail set to 0 — while
+    // VALUE the document states — none of those controls defaults to 0 on a
+    // RAW (Sharpness does on a JPEG, where the stated 0 and the default
+    // agree), so Lightroom writes `SharpenDetail="0"` only for a Detail set
+    // to 0 — while
     // `f` above folds a missing key into the same number. Keep the difference
     // (`EditRecipe::explicit_zero`): the engine renders the absent one at
     // Lightroom's default and the stated one at zero, as Lightroom does. Each
@@ -10296,6 +10304,36 @@ mod tests {
         // and it is the engine's zero, never Lightroom's stale 25.
         assert_eq!(cleared.matches("crs:ColorNoiseReduction=").count(), 1, "one answer: {cleared}");
         assert!(cleared.contains(r#"crs:ColorNoiseReduction="0""#), "ours: {cleared}");
+    }
+
+    /// v1.6.0: the Sharpening amount is a companion — absent from the sidecar
+    /// while the recipe holds no value, so Lightroom applies its own default
+    /// for the kind of file (40 on a RAW, 0 on a JPEG), which is what the
+    /// engine renders (`EditRecipe::capture_sharpening`); a real 0 is stated.
+    ///
+    /// MUTATIONS THIS CATCHES: the writer emitting `Sharpness="0"` for an
+    /// absent amount again (Lightroom then renders a RAW unsharpened that the
+    /// app shows at 40); the reader folding a stated `Sharpness="0"` into
+    /// "absent" (Lightroom's own 0 imports as 40 on a RAW).
+    #[test]
+    fn an_absent_sharpening_amount_leaves_the_sidecar_to_lightroom_and_a_real_zero_is_stated() {
+        let absent = recipe_to_xmp(&EditRecipe::default());
+        assert!(!absent.contains("crs:Sharpness="), "no amount, no key: {absent}");
+        let fresh = xmp_to_recipe(&absent);
+        assert!(!fresh.explicit_zero.iter().any(|n| n == "sharpening"), "{:?}", fresh.explicit_zero);
+        assert_eq!((fresh.capture_sharpening(true), fresh.capture_sharpening(false)), (40.0, 0.0));
+
+        let mut zero = EditRecipe::default();
+        zero.set_resolved("sharpening", 0.0);
+        let stated = recipe_to_xmp(&zero);
+        assert!(stated.contains(r#"crs:Sharpness="0""#), "{stated}");
+        let back = xmp_to_recipe(&stated);
+        assert_eq!(back.explicit_zero, vec!["sharpening".to_string()]);
+        assert_eq!((back.capture_sharpening(true), back.capture_sharpening(false)), (0.0, 0.0));
+
+        // A stated amount is itself on both kinds, as before.
+        let forty = xmp_to_recipe(&recipe_to_xmp(&EditRecipe { sharpening: 40.0, ..Default::default() }));
+        assert_eq!((forty.capture_sharpening(true), forty.capture_sharpening(false)), (40.0, 40.0));
     }
 
     /// v1.5.0: a COMPANION key Lightroom states AT 0 is a value, an absent one

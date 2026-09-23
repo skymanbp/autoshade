@@ -2,6 +2,7 @@
 """Self-test of what v2 added to `train_raw`: the mean-seeking loss and the flux validation.
 
 Run directly: python scripts/test_train_raw.py (CPU, a few seconds; no data, no weights)."""
+import math
 import pathlib
 import sys
 import unittest
@@ -81,6 +82,58 @@ class MeanSeekingLoss(unittest.TestCase):
         self.assertAlmostEqual(second, float((w * (x_hat - tr.to_triplets(other)) ** 2).mean()), delta=second * 1e-4)
         self.assertGreater(second, first)
         self.assertGreater(float(ratio), 1.0)
+
+    def test_v4s_core_weight_is_finite_on_a_black_pixel_of_a_pair_without_read_noise(self):
+        # 166 of 400 sampled real pairs carry b = 0 in a channel and half the crops hold clean pixels at 0
+        # (2026-09-23): the sigma of a x + b alone is 0 there, and 0 / 0 froze four cloud runs
+        noisy, clean, a, b = batch()
+        b[0] = 0.0
+        clean[0, :, :4, :] = 0.0
+        light = torch.zeros_like(clean)
+        w = tr.core_weight(light, clean, a, b, 6.0)
+        self.assertTrue(bool(torch.isfinite(w).all()))
+        self.assertEqual(float(w[0, :, :4, :].min()), 1.0)
+        self.assertEqual(float(w[0, :, :4, :].max()), 1.0)
+        # a star on such a pixel is measured against the transform's own floor, sqrt(3/8) a
+        light[0, 1, 2, 2] = 10.0 * math.sqrt(0.375) * 6e-4
+        w = tr.core_weight(light, clean, a, b, 6.0)
+        self.assertAlmostEqual(float(w[0, 1, 2, 2]), 6.0, places=5)
+        _, tn, _, span = tr.make_batch(noisy, clean, a, b)
+        loss = tr.loss_mean_seeking(tr.to_triplets(tn) * 1.01, span, noisy, clean, a, b, w)
+        self.assertTrue(bool(torch.isfinite(loss)))
+
+    def test_v4s_core_weight_is_one_without_light_and_k_on_a_star(self):
+        noisy, clean, a, b = batch()
+        self.assertIsNone(tr.core_weight(torch.zeros_like(clean), clean, a, b, 1.0))
+        light = torch.zeros_like(clean)
+        floor = 0.375 * 6e-4 ** 2                 # the transform's own term, as in the loss's variance
+        sigma = math.sqrt(6e-4 * float(clean[0, 1, 5, 5]) + 4e-6 + floor)
+        light[0, 1, 5, 5] = 10.0 * sigma          # a 10-sigma core: the whole weight
+        sigma6 = math.sqrt(6e-4 * float(clean[0, 1, 5, 6]) + 4e-6 + floor)
+        light[0, 1, 5, 6] = 3.5 * sigma6          # half way up the ramp from 2 to 5 sigma
+        sigma7 = math.sqrt(6e-4 * float(clean[0, 1, 5, 7]) + 4e-6 + floor)
+        light[0, 1, 5, 7] = 2.0 * sigma7          # where the flux-truth lines call a star noise: no weight
+        w = tr.core_weight(light, clean, a, b, 6.0)
+        self.assertAlmostEqual(float(w[0, 1, 5, 5]), 6.0, places=5)
+        self.assertAlmostEqual(float(w[0, 1, 5, 6]), 3.5, places=4)
+        self.assertAlmostEqual(float(w[0, 1, 5, 7]), 1.0, places=5)
+        self.assertEqual(float(w[1:].max()), 1.0)
+        self.assertEqual(float(w[0, 0].max()), 1.0)
+        # the loss with a flat weight is v2's; with this one it is the weighted mean of the same costs
+        _, tn, _, span = tr.make_batch(noisy, clean, a, b)
+        out = tr.to_triplets(tn) * 1.01
+        plain = float(tr.loss_mean_seeking(out, span, noisy, clean, a, b))
+        flat = float(tr.loss_mean_seeking(out, span, noisy, clean, a, b, torch.ones_like(clean)))
+        self.assertAlmostEqual(flat, plain, delta=plain * 1e-5)
+        weighted = float(tr.loss_mean_seeking(out, span, noisy, clean, a, b, w))
+        wt = tr.to_triplets(w)
+        level = torch.nn.functional.avg_pool2d(torch.nn.functional.pad(tr.to_triplets(noisy), (4, 4, 4, 4), mode="reflect"),
+                                               9, stride=1).clamp_min(0.0)
+        x_hat = ns.igat((out * torch.cat([span, span]).view(-1, 1, 1, 1)).clamp_min(1.0),
+                        torch.cat([a[:, [0, 1, 3]], a[:, [0, 2, 3]]], 0)[:, :, None, None],
+                        torch.cat([b[:, [0, 1, 3]], b[:, [0, 2, 3]]], 0)[:, :, None, None])
+        per_pixel = (x_hat - tr.to_triplets(clean)) ** 2 / (6e-4 * level + 4e-6 + 0.375 * 6e-4 ** 2)
+        self.assertAlmostEqual(weighted, float((per_pixel * wt).sum() / wt.sum()), delta=weighted * 1e-4)
 
 
 class FluxValidation(unittest.TestCase):

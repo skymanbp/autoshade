@@ -16033,6 +16033,16 @@ mod tests {
     /// the ledger's Part 13 carries the table. The figures of 2026-09-02 stay
     /// as the record of what the gate was shipped on.
     ///
+    /// Re-measured 2026-09-23 for the third calibration era: the base look
+    /// is now matched on 64-column block means of the two pictures
+    /// (`render::camera_base_knots`), not on their pixel distributions, so
+    /// the neutral frame this solve starts from carries a different curve on
+    /// both pairs. The question keeps its answer on both. `p40` is admitted
+    /// at 12.1° (11.9° before), its fit 0.0676 → 0.0319 (0.0742 → 0.0338)
+    /// at confidence 0.605 (0.601); `p41` is admitted at 10.3° (9.0°), its
+    /// fit 0.0802 → 0.0253 (0.0745 → 0.0188) at 0.496 (0.498). Both fans
+    /// stay under the 15° line by the margin the mutation below measures.
+    ///
     /// Both pairs are OPTIONAL, like every other corpus pair: absent, the
     /// test says so and passes, and the synthetic two-temperature fixture
     /// carries the refusal side of the same question on its own.
@@ -16044,8 +16054,8 @@ mod tests {
         use crate::rationale::keys;
         let Some(root) = calibration_corpus() else { return };
         for (code, want_fan, want_before, want_after, want_conf) in [
-            ("p40", 11.9f32, 0.0742f32, 0.0338f32, 0.601f32),
-            ("p41", 9.0, 0.0745, 0.0188, 0.498),
+            ("p40", 12.1f32, 0.0676f32, 0.0319f32, 0.605f32),
+            ("p41", 10.3, 0.0802, 0.0253, 0.496),
         ] {
             let raw = root.join(format!("{code}.arw"));
             let target_path = root.join(format!("{code}-target.jpg"));

@@ -142,9 +142,13 @@ pub(crate) struct SharpenParams {
 }
 
 impl SharpenParams {
-    /// The global stage, or `None` at Amount 0.
-    pub(crate) fn global(r: &EditRecipe) -> Option<Self> {
-        (r.sharpening > 0.0).then(|| Self::at_amount(r, r.sharpening))
+    /// The global stage, or `None` at Amount 0. `raw_source` says which
+    /// default an absent amount renders at — Lightroom's 40 on a RAW
+    /// negative, nothing on a baked raster (`EditRecipe::capture_sharpening`,
+    /// v1.6.0).
+    pub(crate) fn global(r: &EditRecipe, raw_source: bool) -> Option<Self> {
+        let amount = r.capture_sharpening(raw_source);
+        (amount > 0.0).then(|| Self::at_amount(r, amount))
     }
 
     /// The recipe's Radius / Detail / Masking at a caller's own amount (the

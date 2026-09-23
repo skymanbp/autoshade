@@ -703,6 +703,9 @@ fn choose(
 /// Lightroom writes.
 fn lightroom_materialised(key: &str) -> Option<f64> {
     match key {
+        // Lightroom's RAW default (v1.6.0). Into a JPEG's it materialises 0,
+        // which is the number a payload that stored nothing already holds.
+        "sharpening" => Some(40.0),
         "sharpen_radius" => Some(1.0),
         "sharpen_detail" => Some(25.0),
         "nr_detail" | "color_nr_detail" | "color_nr_smooth" => Some(50.0),

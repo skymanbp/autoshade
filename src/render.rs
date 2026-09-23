@@ -502,7 +502,9 @@ pub fn render_to_image_in(
     // geometry follows, or transports its two handles once when none follows.
     let geom = geometry_profile(recipe);
     let frame = MaskFrame::downstream(&geom, recipe.lens_distortion);
-    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film);
+    // A RAW negative: an absent Sharpening amount renders at Lightroom's own
+    // RAW default (`EditRecipe::capture_sharpening`, v1.6.0).
+    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, true);
 
     // --- pack to 16-bit (highest precision; JPEG downconverts at encode) ------
     let mut buf: Vec<u16> = vec![0u16; w * h * 3];
@@ -1060,7 +1062,9 @@ pub fn render_baked_to_image(
     let geom = geometry_profile(recipe);
     let frame = MaskFrame::downstream(&geom, recipe.lens_distortion);
     let film = FilmScale::of(film_short, w, h);
-    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film);
+    // A baked raster: Lightroom gives a JPEG / TIFF no sharpening by default,
+    // so an absent amount renders none (`EditRecipe::capture_sharpening`).
+    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, false);
 
     let mut buf: Vec<u16> = vec![0u16; w * h * 3];
     buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
@@ -2027,15 +2031,17 @@ pub fn develop_preview(preview: &DynamicImage, recipe: &EditRecipe) -> DynamicIm
 /// the canvas shows (the GUI's Range-mask references and Point Color samples,
 /// the fill's picture of a card) passes the source's own edge so its pixels
 /// are the canvas's pixels;
-/// `None` treats the preview itself as the film.
+/// `None` treats the preview itself as the film. `raw_source` is
+/// [`develop_preview_film`]'s too: the kind of source these pixels came from.
 pub fn develop_preview_framed(
     preview: &DynamicImage,
     recipe: &EditRecipe,
     diag: &crate::diag::Diag<'_>,
     frame: MaskFrame<'_>,
     film_short_edge: Option<u32>,
+    raw_source: bool,
 ) -> DynamicImage {
-    develop_preview_inner(preview, recipe, diag, Some(frame), film_short_edge)
+    develop_preview_inner(preview, recipe, diag, Some(frame), film_short_edge, raw_source)
 }
 
 /// [`develop_preview_with`] for a VIEWING surface that knows how large the
@@ -2047,13 +2053,20 @@ pub fn develop_preview_framed(
 /// pixels passes the same edge to [`develop_preview_framed`]; the analysis
 /// surfaces (the reverse fit, the judge) keep the forms above, which treat the
 /// preview itself as the film and compare like with like.
+///
+/// `raw_source` (v1.6.0) is the KIND of the source (`decode::is_raw`): an
+/// absent Sharpening amount renders at Lightroom's own default for it — 40
+/// on a RAW negative, none on a baked raster
+/// (`EditRecipe::capture_sharpening`). The analysis forms above develop as
+/// baked, which is what they did before the default existed.
 pub fn develop_preview_film(
     preview: &DynamicImage,
     recipe: &EditRecipe,
     diag: &crate::diag::Diag<'_>,
     film_short_edge: Option<u32>,
+    raw_source: bool,
 ) -> DynamicImage {
-    develop_preview_inner(preview, recipe, diag, None, film_short_edge)
+    develop_preview_inner(preview, recipe, diag, None, film_short_edge, raw_source)
 }
 
 /// [`develop_preview`] with the caller's own diagnostics channel — the injected
@@ -2064,7 +2077,7 @@ pub fn develop_preview_with(
     recipe: &EditRecipe,
     diag: &crate::diag::Diag<'_>,
 ) -> DynamicImage {
-    develop_preview_inner(preview, recipe, diag, None, None)
+    develop_preview_inner(preview, recipe, diag, None, None, false)
 }
 
 /// The preview develop. `frame` is `None` for the two entry points that let the
@@ -2076,6 +2089,7 @@ fn develop_preview_inner(
     diag: &crate::diag::Diag<'_>,
     frame: Option<MaskFrame<'_>>,
     film_short_edge: Option<u32>,
+    raw_source: bool,
 ) -> DynamicImage {
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
     // ValidatedRecipe token (arch item c) replaces four hand-rolled
@@ -2103,7 +2117,7 @@ fn develop_preview_inner(
     let geom = geometry_profile(recipe);
     let frame = frame.unwrap_or_else(|| MaskFrame::downstream(&geom, recipe.lens_distortion));
     let film = FilmScale::of(film_short_edge, w as usize, h as usize);
-    apply_develop(&mut data, w as usize, h as usize, recipe, diag, frame, film);
+    apply_develop(&mut data, w as usize, h as usize, recipe, diag, frame, film, raw_source);
     let mut buf = vec![0u8; (w * h * 3) as usize];
     buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
         o[0] = to_u8(px[0]);
@@ -2119,7 +2133,9 @@ fn develop_preview_inner(
 /// Operates in place on sRGB-gamma RGB in [0,1].
 ///
 /// `diag` is the caller's channel for the mask-raster loader's refusals — the
-/// only thing in here that can say anything.
+/// only thing in here that can say anything. `raw_source` is the kind of the
+/// source (see [`develop_preview_film`]).
+#[allow(clippy::too_many_arguments)] // one value each of the develop's own frame: pixels, size, recipe, channel, mask frame, film scale, source kind
 fn apply_develop(
     data: &mut [[f32; 3]],
     w: usize,
@@ -2128,9 +2144,10 @@ fn apply_develop(
     diag: &crate::diag::Diag<'_>,
     frame: MaskFrame<'_>,
     film: FilmScale,
+    raw_source: bool,
 ) {
     let rasters = best_effort_mask_raster_snapshot(r, diag);
-    apply_develop_with_rasters(data, w, h, r, &rasters, frame, film);
+    apply_develop_with_rasters(data, w, h, r, &rasters, frame, film, raw_source);
 }
 
 /// [`apply_develop`] on pixels with no owner and no caller to route to — the
@@ -2142,7 +2159,7 @@ fn apply_develop_anon(data: &mut [[f32; 3]], w: usize, h: usize, r: &EditRecipe)
     // `AsRendered`: these fixtures construct a raw pixel buffer and inspect it
     // directly — no geometry stage runs after them, so every mask belongs at
     // its stored coordinates (`MaskFrame`).
-    apply_develop(data, w, h, r, &crate::diag::pixels(), MaskFrame::AsRendered, FilmScale::NATIVE);
+    apply_develop(data, w, h, r, &crate::diag::pixels(), MaskFrame::AsRendered, FilmScale::NATIVE, false);
 }
 
 /// The recipe's retouch areas as heal spots for a `w`×`h` working frame
@@ -2205,6 +2222,7 @@ pub fn retouch_spots(r: &EditRecipe, w: usize, h: usize) -> Vec<crate::retouch::
     out
 }
 
+#[allow(clippy::too_many_arguments)] // `apply_develop`'s frame with the rasters already loaded
 fn apply_develop_with_rasters(
     data: &mut [[f32; 3]],
     w: usize,
@@ -2213,6 +2231,7 @@ fn apply_develop_with_rasters(
     rasters: &MaskRasterSnapshot,
     frame: MaskFrame<'_>,
     film: FilmScale,
+    raw_source: bool,
 ) {
     // 0-) spot removal (v1.5.0 F9) — Lightroom's `crs:RetouchAreas`, which
     //    this engine re-solves from the frame's own pixels. FIRST, for two
@@ -2369,7 +2388,7 @@ fn apply_develop_with_rasters(
     if let Some(p) = detail::LumaNrParams::global(r) {
         detail::luma_nr(data, w, h, &p, film, |_, _, _| 1.0);
     }
-    if let Some(p) = detail::SharpenParams::global(r) {
+    if let Some(p) = detail::SharpenParams::global(r, raw_source) {
         detail::sharpen(data, w, h, &p, film, |_, _, _| 1.0);
     }
     // 6) local masked adjustments (linear/radial gradients).
@@ -7206,32 +7225,51 @@ fn base_curve_lut(knots: &[[f32; 2]]) -> Vec<f32> {
 }
 
 /// Estimate a photo's camera base curve: `[x, y]` knots mapping the NEUTRAL
-/// develop's luma toward the camera's embedded rendition by CDF match.
+/// develop's luma toward the camera's embedded rendition by CDF match, read
+/// off BLOCK MEANS of the two pictures (2026-09-23).
 ///
-/// Knots are QUANTILE-anchored — `x = Q_neutral(p), y = Q_camera(p)` over a
-/// shared probability grid — so they only ever sit where the neutral
-/// histogram HAS mass. A fixed input grid (the first design) planted pairs
-/// of equal-y knots inside empty luma bands (night sky vs street lamps),
-/// which the monotone LUT builder flattened into ~30-level posterised
-/// plateaus; and on any frame darker than the grid its top knots hit
-/// `quantile(1.0)` and latched to 1.0, pinning whole upper bands to pure
-/// white in the export (adversarial review, reproduced on synthetic gapped
-/// histograms). The probability grid stops at p = 0.98 and the pinned (1,1)
-/// endpoint carries the tail smoothly instead.
+/// Both pictures go through the SAME ≤1024px box-thumbnail, are cut into
+/// 64-column block-mean lumas on their own pixel grids ([`block_lumas`], the
+/// grid [`corner_residual`] reads), and the two sorted lists of blocks are
+/// walked together from the darkest: a knot closes when its blocks span at
+/// least `MIN_SPAN` of neutral luma AND number at least `MIN_BLOCKS`, and it
+/// is the median block on each side. Knots therefore sit only where the
+/// picture HAS mass (a fixed input grid once planted equal-y knots inside
+/// empty luma bands — night sky vs street lamps — which the monotone LUT
+/// builder flattened into ~30-level plateaus, and latched its top knots to
+/// white on frames darker than the grid); the pinned (1,1) endpoint carries
+/// the tail.
 ///
-/// Both inputs go through the SAME ≤1024px box-thumbnail + 1024-bin
-/// histogram before matching: resampling narrows a luma distribution, so
-/// comparing a small thumbnail against a native-size preview used to read as
-/// phantom camera contrast (a spurious S on an identity pair, dependent on
-/// the GUI preview-size dropdown). Symmetric processing removes that
-/// asymmetry; residual sensitivity to a caller's own pre-thumbnailing is
-/// sub-bin. Field-measured on A7RIV ARWs: the neutral develop sits
-/// 0.6–1.4 EV under the camera JPEG with a consistent S shape that is NOT a
-/// single gain (midtones move ~3× more than the toe) — hence a curve.
-/// Returns `None` when it cannot JUDGE (degenerate input: too few pixels on
-/// either side — an inability the pre-era repair must never mistake for a
-/// verdict), `Some(empty)` for the identity verdict (= no base look), and
-/// `Some(knots)` otherwise.
+/// Until 2026-09-23 the match was made on PIXELS, with eleven knots at fixed
+/// quantiles. Two things in that reading were not tone. (1) The pixel
+/// histogram of the camera's rendition carries its sharpening, its noise and
+/// its JPEG texture, which a ≤1024 develop of ours has averaged away, so on a
+/// night sky — whose whole picture sits in a band 0.13 wide — the camera's
+/// spread read as contrast: slopes of 1.3–1.5 across the sky where the same
+/// two pictures paired block by block respond at 1.05. (2) Eleven quantiles
+/// of a band that narrow land 0.004–0.01 apart, and the rendition is 8-bit,
+/// so each knot's camera side is quantised to 1/255 = 0.0039: the slope
+/// between neighbours wandered 0.85–1.72 from quantisation alone. Rendered,
+/// both put grain back into the sky that the cleaner had taken out — the
+/// star standard's front-end lines (`scripts/denoise_star_standard.py`, 1f
+/// and 2f) read the final render's fine-noise ratio 0.3315 against the
+/// curve-free 0.2992 (the line: ≤ 0.3001) and its tile-to-tile width 0.0310
+/// against 0.0150 (≤ 0.0278). A block mean averages the texture out before
+/// the match, and knots ≥ 0.06 apart make the 8-bit step at most 6 % of a
+/// slope; through the product path the same frame then reads 0.2914 and
+/// 0.0137, and the render sits nearer the camera's own rendition at the
+/// median block on all seven ILCE-7RM4A frames measured (rms 2.95 vs 2.97 on
+/// the star frame, 11.5–45.6 vs 11.9–47.5 on the six daylight frames, whose
+/// renditions carry local tone the curve cannot follow either way).
+///
+/// A block-mean CDF has no notion of place, so the corner question is still
+/// settled BEFORE it ([`estimation_base`]). Field-measured on A7RIV ARWs: the
+/// neutral develop sits 0.6–1.4 EV under the camera JPEG with a consistent S
+/// shape that is NOT a single gain (midtones move ~3× more than the toe) —
+/// hence a curve. Returns `None` when it cannot JUDGE (a picture smaller than
+/// the block grid on either side — an inability the pre-era repair must never
+/// mistake for a verdict), `Some(empty)` for the identity verdict (= no base
+/// look), and `Some(knots)` otherwise.
 /// The part of `neutral` the camera's embedded rendition shows: the whole
 /// develop when the two share the sensor frame, else the centred crop at the
 /// rendition's aspect. A body set to an in-camera aspect writes a centred
@@ -7258,9 +7296,14 @@ pub fn camera_base_knots(
     neutral: &DynamicImage,
     camera: &DynamicImage,
 ) -> Option<Vec<[f32; 2]>> {
-    const BINS: usize = 1024;
     const EST_EDGE: u32 = 1024;
-    fn luma_hist(img: &DynamicImage) -> (Vec<u64>, u64) {
+    const COLS: usize = 64;
+    /// The least neutral luma a knot's blocks span — 15 levels of the 8-bit
+    /// rendition, so the rendition's quantisation is at most 6 % of a slope.
+    const MIN_SPAN: f32 = 0.06;
+    /// The fewest blocks a knot is read from: a median over 64 block means.
+    const MIN_BLOCKS: usize = 64;
+    fn blocks(img: &DynamicImage, rows: usize) -> Option<Vec<f32>> {
         let small;
         let img = if img.width().max(img.height()) > EST_EDGE {
             small = img.thumbnail(EST_EDGE, EST_EDGE);
@@ -7268,68 +7311,51 @@ pub fn camera_base_knots(
         } else {
             img
         };
-        let rgb = img.to_rgb8();
-        let px = rgb.as_raw();
-        let n_px = px.len() / 3;
-        // Every pixel of the ≤1024px thumbnail (≤~0.7 MP — cheap). A regular
-        // stride here could phase-lock onto periodic image structure, and the
-        // two sides would alias DIFFERENTLY (their strides derive from their
-        // own sizes), distorting the CDF match.
-        let mut h = vec![0u64; BINS];
-        for i in 0..n_px {
-            let p = &px[i * 3..i * 3 + 3];
-            let l = 0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32;
-            h[((l / 255.0) * (BINS - 1) as f32) as usize] += 1;
-        }
-        (h, n_px as u64)
+        let mut v = block_lumas(img, COLS, rows)?;
+        v.sort_by(f32::total_cmp);
+        Some(v)
     }
-    let (hist_n, count_n) = luma_hist(neutral);
-    let (hist_c, count_c) = luma_hist(camera);
-    if count_n < 10_000 || count_c < 10_000 {
-        // Not enough mass to compare CDFs — an INABILITY, distinct from the
-        // identity verdict below. Sharing its empty return meant a tiny
-        // embedded thumbnail read as "this photo needs no base look", and
-        // once the repair adopted empty answers it permanently cleared saved
-        // curves over an estimate that never judged anything.
+    // The grid follows the neutral's aspect; each side is cut on its OWN
+    // pixel grid, so nothing finer than a block has to line up — and a CDF
+    // of block means does not pair blocks at all.
+    let aspect = neutral.height().max(1) as f32 / neutral.width().max(1) as f32;
+    let rows = ((COLS as f32 * aspect).round() as usize).max(1);
+    let (Some(xs), Some(ys)) = (blocks(neutral, rows), blocks(camera, rows)) else {
+        // A picture smaller than the grid cannot be compared — an INABILITY,
+        // distinct from the identity verdict below. Sharing its empty return
+        // meant a tiny embedded thumbnail read as "this photo needs no base
+        // look", and once the repair adopted empty answers it permanently
+        // cleared saved curves over an estimate that never judged anything.
+        return None;
+    };
+    debug_assert_eq!(xs.len(), ys.len(), "one grid, two pictures");
+    let n = xs.len().min(ys.len());
+    if n < MIN_BLOCKS {
         return None;
     }
-    let cumulate = |h: &[u64]| -> Vec<u64> {
-        let mut acc = 0u64;
-        h.iter().map(|&v| { acc += v; acc }).collect()
-    };
-    let cum_n = cumulate(&hist_n);
-    let cum_c = cumulate(&hist_c);
-    // Smallest bin whose cumulative mass reaches p — the same rule on both
-    // sides, so an identical pair maps every p to the identical bin and the
-    // guard below sees an exact identity.
-    let quantile = |cum: &[u64], count: u64, p: f64| -> f32 {
-        let target = (p * count as f64).ceil() as u64;
-        let bin = cum.partition_point(|&c| c < target).min(BINS - 1);
-        bin as f32 / (BINS - 1) as f32
-    };
-    // Denser toward the toe where the S bends hardest; capped at 0.98 (see
-    // the doc comment — the (1,1) pin owns the tail). Quantiles that land in
-    // the SAME neutral bin (spiky / posterised neutrals) are merged by
-    // averaging their camera side: base_curve_lut's strictly-increasing-x
-    // pass would otherwise keep only the FIRST duplicate, biasing that tone
-    // toward the spike's lowest camera quantile.
-    const PS: [f64; 11] = [0.02, 0.05, 0.10, 0.20, 0.32, 0.45, 0.58, 0.70, 0.82, 0.92, 0.98];
-    let mut groups: Vec<(f32, f32, u32)> = Vec::with_capacity(PS.len()); // (x, Σy, n)
-    for &p in &PS {
-        let x = quantile(&cum_n, count_n, p);
-        let y = quantile(&cum_c, count_c, p);
-        match groups.last_mut() {
-            Some(g) if (x - g.0).abs() < 0.5 / (BINS - 1) as f32 => {
-                g.1 += y;
-                g.2 += 1;
-            }
-            _ => groups.push((x, y, 1)),
+    // Walk the sorted neutral blocks from the darkest; the camera side is
+    // read over the SAME index range, which is the CDF match at block scale.
+    let mut knots: Vec<[f32; 2]> = vec![[0.0, 0.0]];
+    let mut groups: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0usize;
+    for i in 1..=n {
+        if i == n || (xs[i] - xs[start] >= MIN_SPAN && i - start >= MIN_BLOCKS) {
+            groups.push((start, i));
+            start = i;
         }
     }
-    let mut knots: Vec<[f32; 2]> = Vec::with_capacity(groups.len() + 2);
-    knots.push([0.0, 0.0]);
-    for (x, y_sum, n) in groups {
-        knots.push([x, y_sum / n as f32]);
+    // A short tail (fewer blocks than a knot needs) joins the knot before it
+    // rather than standing as a knot of its own.
+    if let [.., prev, last] = groups[..]
+        && last.1 - last.0 < MIN_BLOCKS
+    {
+        let len = groups.len();
+        groups[len - 2] = (prev.0, last.1);
+        groups.pop();
+    }
+    for &(a, b) in &groups {
+        let mid = (a + b) / 2;
+        knots.push([xs[mid], ys[mid]]);
     }
     knots.push([1.0, 1.0]);
     // Identity guard: a baked source (or an already camera-matched render)
@@ -8069,6 +8095,26 @@ pub fn orient_point(o: Orientation, u: f32, v: f32) -> (f32, f32) {
     }
 }
 
+/// The LINEAR part of [`orient_point`]: where a DISPLACEMENT measured in the
+/// source frame lands in the display frame. `orient_point` is affine, so this
+/// is `orient_point(o, p + d) − orient_point(o, p)` for every `p` — spelled
+/// out per state rather than computed as that difference, so a small vector
+/// is not read off a subtraction of two numbers near 1 (pinned by
+/// `orient_vector_is_the_linear_part_of_orient_point`). It is what the era-2
+/// recipe migration turns the develop window's move by.
+pub fn orient_vector(o: Orientation, dx: f32, dy: f32) -> (f32, f32) {
+    match o {
+        Orientation::Normal | Orientation::Unknown => (dx, dy),
+        Orientation::HorizontalFlip => (-dx, dy),
+        Orientation::Rotate180 => (-dx, -dy),
+        Orientation::VerticalFlip => (dx, -dy),
+        Orientation::Transpose => (dy, dx),
+        Orientation::Rotate90 => (-dy, dx),
+        Orientation::Transverse => (-dy, -dx),
+        Orientation::Rotate270 => (dy, -dx),
+    }
+}
+
 /// The orientation of `quarter_turns` CLOCKWISE quarter turns on their own —
 /// the photographer's half of [`compose_orientation`].
 ///
@@ -8348,6 +8394,42 @@ fn turn_brush_strokes(
     }
 }
 
+/// One `crs:Dabs` token translated by `(du, dv)` — the era-2 twin of
+/// [`turned_dab_token`]: only `d <x> <y>` is spatial under a translation (a
+/// radius is a length, and a translation changes no length), and a malformed
+/// or overflowed token is `None` and therefore carried verbatim, for the
+/// reasons that function states.
+fn shifted_dab_token(token: &str, du: f32, dv: f32) -> Option<String> {
+    let mut it = token.split_whitespace();
+    if it.next()? != "d" {
+        return None;
+    }
+    let (x, y) = (brush_token_num(&mut it)?, brush_token_num(&mut it)?);
+    if it.next().is_some() {
+        return None;
+    }
+    Some(format!("d {} {}", lr_dab_str(x + du)?, lr_dab_str(y + dv)?))
+}
+
+/// Translate a brush's strokes by `(du, dv)`: every dab coordinate, nothing
+/// else — the stream rebuilt token by token exactly as [`turn_brush_strokes`]
+/// rebuilds it, so the token count cannot change.
+fn shift_brush_strokes(strokes: &mut [crate::recipe::BrushStroke], du: f32, dv: f32) {
+    for s in strokes.iter_mut() {
+        let mut out = String::with_capacity(s.dabs.len() + 16);
+        for (i, token) in s.dabs.split('\n').enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            match shifted_dab_token(token, du, dv) {
+                Some(t) => out.push_str(&t),
+                None => out.push_str(token),
+            }
+        }
+        s.dabs = out;
+    }
+}
+
 /// Rewrite a recipe's stored GEOMETRY from the sensor frame into the display
 /// frame — the deterministic, bijective half of the `coord_era` 0 → 1
 /// migration (`pipeline::migrate_recipe_coord_frame` owns the gating).
@@ -8368,11 +8450,11 @@ fn turn_brush_strokes(
 /// rotation. Verified algebraically against `mask_weight`'s own quadratic
 /// form and pinned by `rotated_radial_mask_covers_the_rotated_pixels`.
 ///
-/// **Not migrated: `MaskGeometry::Bitmap`.** A raster mask is a FILE of
-/// pixels sampled in normalised coordinates, not a coordinate — turning it
-/// would mean rewriting an image on disk that version snapshots and other
-/// recipes may share. The caller discloses this instead of pretending. It is
-/// now the ONLY member of that disclosure ([`recipe_has_raster_masks`]).
+/// **Not moved here: `MaskGeometry::Bitmap`.** A raster mask is a FILE of
+/// pixels sampled in normalised coordinates, not a coordinate. This function
+/// leaves its path alone; the callers that own the file re-write it —
+/// `pipeline::rotate_recipe` and, since v1.5.2, the `coord_era` migration
+/// (`pipeline::migrate_raster_file`), which until then could only disclose it.
 ///
 /// **Migrated since R29 C1: `MaskGeometry::Brush`, by NUMERICALLY REWRITING its
 /// dab stream** (and an `AiMask`'s `crs:Gesture` strokes, which are the same
@@ -8500,9 +8582,9 @@ pub fn orient_recipe_coords(
         // cached alpha does not: that raster was segmented in the OLD frame, so
         // rotating it is not a coordinate migration, it is a re-render. The
         // cache is DROPPED and the next develop recomputes it at the turned
-        // point (`segment::resolve_ai_masks`), which is why such a geometry is
-        // not a member of `recipe_has_raster_masks` — nothing there fails to be
-        // turned, and claiming it did would be the wrong disclosure.
+        // point (`segment::resolve_ai_masks`). A TRANSLATION keeps it instead
+        // (`shift_recipe_coords`): the same pixels, moved, are still the right
+        // alpha, and the file is re-written by the migration.
         //
         // `owned_alpha` is the ONE exception, and it is the zoned reverse-fit's
         // sky/land pair ([`crate::recipe::MaskRole::is_zone`]). Their alpha is
@@ -8624,6 +8706,144 @@ pub fn orient_recipe_coords(
     true
 }
 
+/// Translate a recipe's stored GEOMETRY by `(du, dv)` in the display frame —
+/// the deterministic half of the `coord_era` 1 → 2 migration
+/// (`pipeline::migrate_recipe_coord_frame` owns the gating and the vector,
+/// which is the develop window's move of 2026-09-21 turned by
+/// [`orient_vector`]). Returns `false` for the zero vector, so the caller can
+/// tell "nothing to do" from "moved".
+///
+/// Everything [`orient_recipe_coords`] turns, translated: the crop rectangle,
+/// every mask geometry (base + components), the Range-Mask colour sample
+/// point, every brush dab and gesture dab (token by token, through
+/// [`shift_brush_strokes`]), retouch centres and donor points, and the colour
+/// field — resampled at its cell centres, because a translation of a third of
+/// a percent is a fraction of a cell and no permutation of cells. Lengths and
+/// angles ride unchanged: a radius, an ellipse's half-extents, the straighten,
+/// a feather. Raster masks carry no coordinates and are re-written as files by
+/// the caller.
+///
+/// **The crop is clamped to the frame** after the move. The strip a crop at
+/// the frame's edge would now reach past it is the sensor margin the old
+/// window held and the declared crop does not; it is not in this frame to
+/// keep. Gradient and radial handles are NOT clamped — they legitimately live
+/// off-frame ([`orient_point`]), and clamping would shorten a falloff.
+pub fn shift_recipe_coords(r: &mut EditRecipe, du: f32, dv: f32) -> bool {
+    if du == 0.0 && dv == 0.0 {
+        return false;
+    }
+    if let Some(c) = r.crop.as_mut() {
+        *c = Crop {
+            left: (c.left + du).clamp(0.0, 1.0),
+            right: (c.right + du).clamp(0.0, 1.0),
+            top: (c.top + dv).clamp(0.0, 1.0),
+            bottom: (c.bottom + dv).clamp(0.0, 1.0),
+        };
+    }
+    let shift = |g: &mut MaskGeometry| match g {
+        MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
+            *zero_x += du;
+            *zero_y += dv;
+            *full_x += du;
+            *full_y += dv;
+        }
+        MaskGeometry::Radial { top, left, bottom, right, .. } => {
+            *left += du;
+            *right += du;
+            *top += dv;
+            *bottom += dv;
+        }
+        // A file, re-written by the caller (`pipeline::migrate_raster_file`).
+        MaskGeometry::Bitmap { .. } => {}
+        MaskGeometry::Brush { strokes, .. } => shift_brush_strokes(strokes, du, dv),
+        // The cached alpha is KEPT, unlike under a turn: the caller re-writes
+        // the file translated, and a translated alpha is the alpha of the
+        // translated picture.
+        MaskGeometry::AiMask { ref_x, ref_y, gesture, .. } => {
+            *ref_x += du;
+            *ref_y += dv;
+            shift_brush_strokes(gesture, du, dv);
+        }
+    };
+    for m in r.masks.iter_mut() {
+        shift(&mut m.mask);
+        for c in m.components.iter_mut() {
+            shift(&mut c.geometry);
+        }
+        if let Some(RangeMask::Color { px, py, .. }) = m.range.as_mut() {
+            *px += du;
+            *py += dv;
+        }
+    }
+    for a in r.retouch.iter_mut() {
+        if let Some(d) = a.donor.as_mut() {
+            d[0] += du;
+            d[1] += dv;
+        }
+        match &mut a.shape {
+            crate::retouch::RetouchShape::Ellipse { cx, cy, .. } => {
+                *cx += du;
+                *cy += dv;
+            }
+            crate::retouch::RetouchShape::Brush(strokes) => shift_brush_strokes(strokes, du, dv),
+        }
+    }
+    // The colour field's spatial axes are the frame's (R33 §G). Each cell of
+    // the moved field reads the OLD field where its centre came from —
+    // bilinear between the four nearest old cell centres, clamped to the
+    // field's edge — so a shift of a fraction of a cell blends neighbours by
+    // that fraction instead of snapping to the nearest cell or moving none.
+    if let Some(field) = r.colour_field.as_mut().filter(|f| f.renderable()) {
+        let (nx, ny, nb) = (field.x, field.y, field.b);
+        let mut moved = vec![[0.0f32; 5]; nx * ny * nb];
+        for j in 0..ny {
+            for i in 0..nx {
+                let fx = (i as f32 - du * nx as f32).clamp(0.0, (nx - 1) as f32);
+                let fy = (j as f32 - dv * ny as f32).clamp(0.0, (ny - 1) as f32);
+                let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+                let (x1, y1) = ((x0 + 1).min(nx - 1), (y0 + 1).min(ny - 1));
+                let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+                for b in 0..nb {
+                    let at = |x: usize, y: usize| field.grid[(y * nx + x) * nb + b];
+                    let (v00, v10, v01, v11) = (at(x0, y0), at(x1, y0), at(x0, y1), at(x1, y1));
+                    let out = &mut moved[(j * nx + i) * nb + b];
+                    for p in 0..5 {
+                        out[p] = (v00[p] * (1.0 - tx) + v10[p] * tx) * (1.0 - ty)
+                            + (v01[p] * (1.0 - tx) + v11[p] * tx) * ty;
+                    }
+                }
+            }
+        }
+        field.grid = moved;
+    }
+    true
+}
+
+/// A greyscale raster translated by `(dx, dy)` pixels: `out(x, y) =
+/// in(x − dx, y − dy)`, bilinear, with samples past the edge clamped to it —
+/// the file half of the era-2 migration (`pipeline::migrate_raster_file`
+/// says why the edge continues rather than going to zero). An integer move
+/// is an exact copy.
+pub fn shift_luma_raster(img: &image::GrayImage, dx: f32, dy: f32) -> image::GrayImage {
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return img.clone();
+    }
+    let sample = |x: f32, y: f32| -> f32 {
+        let x = x.clamp(0.0, (w - 1) as f32);
+        let y = y.clamp(0.0, (h - 1) as f32);
+        let (x0, y0) = (x.floor() as u32, y.floor() as u32);
+        let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+        let (tx, ty) = (x - x0 as f32, y - y0 as f32);
+        let at = |px: u32, py: u32| img.get_pixel(px, py).0[0] as f32;
+        (at(x0, y0) * (1.0 - tx) + at(x1, y0) * tx) * (1.0 - ty)
+            + (at(x0, y1) * (1.0 - tx) + at(x1, y1) * tx) * ty
+    };
+    image::GrayImage::from_fn(w, h, |x, y| {
+        image::Luma([sample(x as f32 - dx, y as f32 - dy).round().clamp(0.0, 255.0) as u8])
+    })
+}
+
 /// Does this recipe hold any geometry the `coord_era` migration would move?
 /// Used for the disclosure: a recipe with nothing but global sliders is
 /// re-stamped in silence, because nothing about it changed.
@@ -8633,6 +8853,10 @@ pub fn orient_recipe_coords(
 /// but a curve still counts here through its geometry, so the distinction is
 /// invisible in the answer and easy to misread as an omission. It is not one;
 /// see [`orient_recipe_coords`].
+///
+/// Retouch areas (v1.5.0 F9) and a renderable colour field (R33 §G) count
+/// since v1.5.2: both move under a turn and under a translation, and a recipe
+/// carrying nothing else used to be migrated in silence.
 ///
 /// `straighten_deg` is deliberately NOT counted (R27 L-16c), even though the
 /// migration now reverses it under a mirror. It moves for FOUR of the eight
@@ -8644,6 +8868,8 @@ pub fn orient_recipe_coords(
 /// where the tilt has something to be wrong about — is disclosed by that.
 pub fn recipe_has_frame_coords(r: &EditRecipe) -> bool {
     r.crop.is_some()
+        || !r.retouch.is_empty()
+        || r.colour_field.as_ref().is_some_and(|f| f.renderable())
         || r.masks.iter().any(|m| {
             // Bitmap is the ONE geometry that does not move (its pixels are a
             // file). Brush left this exclusion in R29 C1: its dab stream is
@@ -8677,39 +8903,6 @@ pub fn recipe_has_brush_strokes(r: &EditRecipe) -> bool {
     r.masks
         .iter()
         .any(|m| brushed(&m.mask) || m.components.iter().any(|c| brushed(&c.geometry)))
-}
-
-/// Does this recipe carry a geometry the `coord_era` migration cannot turn
-/// (see [`orient_recipe_coords`])? Drives the honest half of the migration's
-/// disclosure.
-///
-/// ONE member since R29 C1: a raster [`MaskGeometry::Bitmap`], whose pixels are
-/// a FILE — rewriting someone's PNG is not a coordinate migration, and version
-/// snapshots or another saved recipe may point at that same file. The NAME is
-/// exact again, which it had stopped being: R27 Batch-4 put
-/// [`MaskGeometry::Brush`] in here too (its dabs were carried verbatim for the
-/// sidecar round trip and there was no frame aspect to rescale their radii
-/// with), so the function meant "cannot be turned" while it said "raster". The
-/// brush turns now — numerically, see the `Brush` arm of
-/// [`orient_recipe_coords`] — and is counted by [`recipe_has_frame_coords`]
-/// with every other geometry that moves.
-///
-/// An [`MaskGeometry::AiMask`] is a member only when its adjustment is a ZONE
-/// ([`crate::recipe::MaskRole::is_zone`]). Every other AI alpha is a cache
-/// [`orient_recipe_coords`] DROPS rather than leaves behind, so nothing about
-/// it fails to be turned. A zone's alpha is the fit's own file — kept and
-/// turned exactly like a `Bitmap`, and therefore exactly as un-turnable by the
-/// `coord_era` migration, which rewrites coordinates and owns no PNG.
-pub fn recipe_has_raster_masks(r: &EditRecipe) -> bool {
-    let unturnable = |g: &MaskGeometry, zone: bool| match g {
-        MaskGeometry::Bitmap { .. } => true,
-        MaskGeometry::AiMask { raster: Some(_), .. } => zone,
-        _ => false,
-    };
-    r.masks.iter().any(|m| {
-        let zone = m.role.is_zone();
-        unturnable(&m.mask, zone) || m.components.iter().any(|c| unturnable(&c.geometry, zone))
-    })
 }
 
 /// In-place horizontal flip that stays in the image's OWN pixel type.
@@ -9221,7 +9414,8 @@ fn geometry_fill_scale(
 /// The camera-matched base look of one photo — the ONE entry of the three open
 /// paths (the GUI open worker, `pipeline::photo_base_knots*`, `serve`'s fresh
 /// open): the neutral develop paired with the camera's embedded rendition LIKE
-/// WITH LIKE ([`estimation_base`]), then CDF-matched ([`camera_base_knots`]).
+/// WITH LIKE ([`estimation_base`]), then CDF-matched on block means
+/// ([`camera_base_knots`]).
 /// Until 2026-09-21 each path assembled the pair by hand, and they had drifted:
 /// only the pipeline's paired the frame the rendition shows (v1.2.2), so a GUI
 /// or web open of a body set to an in-camera aspect matched the whole sensor
@@ -11039,7 +11233,7 @@ mod tests {
         let n = DynamicImage::ImageRgb8(n);
         let c = DynamicImage::ImageRgb8(c);
         let knots =
-            camera_base_knots(&n, &c).expect("512x64 clears the degenerate-input guard");
+            camera_base_knots(&n, &c).expect("512x64 holds 512 blocks of the 64-column grid");
         assert!(!knots.is_empty(), "a real lift must be detected");
         assert_eq!(knots.first(), Some(&[0.0, 0.0]), "black endpoint pinned");
         assert_eq!(knots.last(), Some(&[1.0, 1.0]), "white endpoint pinned");
@@ -11063,7 +11257,7 @@ mod tests {
             DynamicImage::ImageRgb8(RgbImage::from_pixel(50, 50, image::Rgb([128, 128, 128])));
         assert!(
             camera_base_knots(&tiny, &tiny).is_none(),
-            "too few pixels is an inability, not an identity verdict"
+            "a picture smaller than the block grid is an inability, not an identity verdict"
         );
     }
 
@@ -11090,7 +11284,7 @@ mod tests {
             }
         }
         let knots = camera_base_knots(&DynamicImage::ImageRgb8(n), &DynamicImage::ImageRgb8(c))
-            .expect("512x64 clears the degenerate-input guard");
+            .expect("512x64 holds 512 blocks of the 64-column grid");
         assert!(!knots.is_empty(), "a real lift must be detected");
         // Apply through the real render path over a full ramp and measure.
         let mut ramp = RgbImage::new(256, 1);
@@ -14657,6 +14851,7 @@ mod tests {
                     &crate::diag::pixels(),
                     MaskFrame::AsRendered,
                     None,
+                    false,
                 ),
                 &profile,
                 0.0,
@@ -14776,7 +14971,7 @@ mod tests {
         assert_eq!(a.to_rgb8().as_raw(), b.to_rgb8().as_raw(), "an inert profile moved a mask");
         // …and both equal the explicitly-unadapted chain, which is what
         // "unchanged from before this batch" means.
-        let c = develop_preview_framed(&base, &none, &crate::diag::pixels(), MaskFrame::AsRendered, None);
+        let c = develop_preview_framed(&base, &none, &crate::diag::pixels(), MaskFrame::AsRendered, None, false);
         assert_eq!(a.to_rgb8().as_raw(), c.to_rgb8().as_raw());
 
         // (a2) The case the identity short-circuit in `MaskUnwarp::new` exists
@@ -15097,8 +15292,8 @@ mod tests {
         // the fix, not a counter-example to the ordering, and asking with the
         // frame pinned is how the ordering stays measurable.
         let anon = crate::diag::pixels();
-        let masked_off = develop_preview_framed(&base, &off, &anon, MaskFrame::AsRendered, None);
-        let masked_on = develop_preview_framed(&base, &on, &anon, MaskFrame::AsRendered, None);
+        let masked_off = develop_preview_framed(&base, &off, &anon, MaskFrame::AsRendered, None, false);
+        let masked_on = develop_preview_framed(&base, &on, &anon, MaskFrame::AsRendered, None, false);
         assert_eq!(
             masked_off.to_rgb8().as_raw(),
             masked_on.to_rgb8().as_raw(),
@@ -16644,10 +16839,11 @@ mod tests {
         }
     }
 
-    /// A raster mask is an image FILE: the migration must leave its path alone
-    /// and REPORT it, never quietly claim to have turned it.
+    /// A raster mask is an image FILE: the coordinate rewrites must leave its
+    /// path alone — its owner re-writes the file and re-points the path
+    /// afterwards (`pipeline::rotate_recipe`, `pipeline::migrate_raster_file`).
     #[test]
-    fn raster_masks_are_reported_not_turned() {
+    fn raster_masks_are_left_for_their_owner_to_rewrite() {
         use crate::recipe::LocalAdjustment;
         let mut r = EditRecipe {
             masks: vec![LocalAdjustment {
@@ -16656,11 +16852,208 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(recipe_has_raster_masks(&r));
         assert!(!recipe_has_frame_coords(&r), "a raster-only recipe has no turnable coordinate");
         let before = r.clone();
         orient_recipe_coords(&mut r, Orientation::Rotate270, probe_frame());
-        assert_eq!(r, before, "the raster path must survive byte-for-byte");
+        assert_eq!(r, before, "the raster path must survive byte-for-byte under a turn");
+        assert!(shift_recipe_coords(&mut r, 0.01, 0.02));
+        assert_eq!(r, before, "and under a translation");
+    }
+
+    /// [`orient_vector`] is exactly the difference of two [`orient_point`]
+    /// images for every state — the affine map's linear part, spelled per
+    /// state so a small vector is not read off a subtraction near 1.
+    #[test]
+    fn orient_vector_is_the_linear_part_of_orient_point() {
+        let states = [
+            Orientation::Normal,
+            Orientation::Unknown,
+            Orientation::HorizontalFlip,
+            Orientation::Rotate180,
+            Orientation::VerticalFlip,
+            Orientation::Transpose,
+            Orientation::Rotate90,
+            Orientation::Transverse,
+            Orientation::Rotate270,
+        ];
+        let (dx, dy) = (-0.003367f32, 0.003157f32);
+        for o in states {
+            for (px, py) in [(0.0f32, 0.0f32), (0.3, 0.7), (1.0, 0.25)] {
+                let (ax, ay) = orient_point(o, px + dx, py + dy);
+                let (bx, by) = orient_point(o, px, py);
+                let (vx, vy) = orient_vector(o, dx, dy);
+                assert!(
+                    (ax - bx - vx).abs() < 1e-6 && (ay - by - vy).abs() < 1e-6,
+                    "{o:?} at ({px}, {py}): ({}, {}) vs ({vx}, {vy})",
+                    ax - bx,
+                    ay - by
+                );
+            }
+        }
+    }
+
+    /// The era-2 translation moves every coordinate carrier by the same
+    /// vector, leaves every length alone, clamps only the crop, and undoes
+    /// itself.
+    #[test]
+    fn shift_recipe_coords_moves_every_carrier_and_round_trips() {
+        use crate::recipe::{BrushStroke, ColourField, LocalAdjustment, MaskComponent};
+        use crate::retouch::{RetouchArea, RetouchShape};
+        let stroke = || BrushStroke {
+            radius: 0.05,
+            dabs: "r 0.050000\nd 0.500000 0.500000\nf 1.000000\nd 0.600000 0.400000".into(),
+            ..Default::default()
+        };
+        let seed = || EditRecipe {
+            crop: Some(Crop { left: 0.0, top: 0.2, right: 0.8, bottom: 1.0 }),
+            straighten_deg: 3.0,
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Radial {
+                    top: 0.1,
+                    left: 0.2,
+                    bottom: 0.6,
+                    right: 0.7,
+                    feather: 0.5,
+                    roundness: 0.0,
+                    flipped: false,
+                    angle: 15.0,
+                    midpoint: 50.0,
+                    mask_version: 2,
+                },
+                components: vec![
+                    MaskComponent {
+                        geometry: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 0.45 },
+                        ..Default::default()
+                    },
+                    MaskComponent {
+                        geometry: MaskGeometry::Brush {
+                            name: "Brush 1".into(),
+                            blend_mode: 0,
+                            value: 1.0,
+                            inverted: false,
+                            strokes: vec![stroke()],
+                        },
+                        ..Default::default()
+                    },
+                    MaskComponent {
+                        geometry: MaskGeometry::AiMask {
+                            name: "Sky 1".into(),
+                            subtype: 2,
+                            ref_x: 0.25,
+                            ref_y: 0.10,
+                            blend_mode: 0,
+                            value: 1.0,
+                            inverted: false,
+                            mask_version: 1,
+                            provenance: Vec::new(),
+                            gesture: vec![stroke()],
+                            raster: Some("alpha.png".into()),
+                        },
+                        ..Default::default()
+                    },
+                ],
+                range: Some(RangeMask::Color { r: 0.2, g: 0.4, b: 0.9, amount: 0.5, px: 0.25, py: 0.75 }),
+                ..Default::default()
+            }],
+            retouch: vec![
+                RetouchArea {
+                    donor: Some([0.3, 0.3]),
+                    shape: RetouchShape::Ellipse { cx: 0.5, cy: 0.5, size_x: 0.02, size_y: 0.02 },
+                    ..Default::default()
+                },
+                RetouchArea { donor: None, shape: RetouchShape::Brush(vec![stroke()]), ..Default::default() },
+            ],
+            colour_field: Some(ColourField {
+                x: 2,
+                y: 1,
+                b: 1,
+                grid: vec![[0.0; 5], [1.0; 5]],
+                amount: 1.0,
+                enabled: true,
+            }),
+            ..Default::default()
+        };
+        let mut r = seed();
+        assert!(!shift_recipe_coords(&mut r, 0.0, 0.0), "the zero vector is no move");
+        assert_eq!(r, seed());
+        let (du, dv) = (0.01f32, -0.02f32);
+        assert!(shift_recipe_coords(&mut r, du, dv));
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-6;
+        let c = r.crop.unwrap();
+        assert!(near(c.left, 0.01) && near(c.top, 0.18) && near(c.right, 0.81), "{c:?}");
+        assert!(near(c.bottom, 0.98), "bottom moved up, off the edge it sat on: {c:?}");
+        assert_eq!(r.straighten_deg, 3.0, "a translation turns nothing");
+        let MaskGeometry::Radial { top, left, bottom, right, angle, feather, .. } = r.masks[0].mask else {
+            panic!("radial")
+        };
+        assert!(near(left, 0.21) && near(right, 0.71) && near(top, 0.08) && near(bottom, 0.58));
+        assert!(near(right - left, 0.5) && near(bottom - top, 0.5), "the radii are lengths");
+        assert_eq!((angle, feather), (15.0, 0.5));
+        let MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } = r.masks[0].components[0].geometry else {
+            panic!("linear")
+        };
+        assert!(near(zero_x, 0.51) && near(zero_y, -0.02) && near(full_x, 0.51) && near(full_y, 0.43));
+        let MaskGeometry::Brush { strokes, .. } = &r.masks[0].components[1].geometry else { panic!("brush") };
+        assert_eq!(strokes[0].dabs, "r 0.050000\nd 0.510000 0.480000\nf 1.000000\nd 0.610000 0.380000");
+        assert_eq!(strokes[0].radius, 0.05, "a radius is a length");
+        let MaskGeometry::AiMask { ref_x, ref_y, gesture, raster, .. } = &r.masks[0].components[2].geometry
+        else {
+            panic!("ai mask")
+        };
+        assert!(near(*ref_x, 0.26) && near(*ref_y, 0.08));
+        assert_eq!(gesture[0].dabs, "r 0.050000\nd 0.510000 0.480000\nf 1.000000\nd 0.610000 0.380000");
+        assert_eq!(raster.as_deref(), Some("alpha.png"), "the cache is kept for the file rewrite");
+        let Some(RangeMask::Color { px, py, .. }) = r.masks[0].range else { panic!("range") };
+        assert!(near(px, 0.26) && near(py, 0.73));
+        let RetouchShape::Ellipse { cx, cy, size_x, size_y } = r.retouch[0].shape else { panic!("ellipse") };
+        assert!(near(cx, 0.51) && near(cy, 0.48) && size_x == 0.02 && size_y == 0.02);
+        let d = r.retouch[0].donor.unwrap();
+        assert!(near(d[0], 0.31) && near(d[1], 0.28));
+        let RetouchShape::Brush(strokes) = &r.retouch[1].shape else { panic!("retouch brush") };
+        assert_eq!(strokes[0].dabs, "r 0.050000\nd 0.510000 0.480000\nf 1.000000\nd 0.610000 0.380000");
+        // The colour field: a 2 x 1 grid holding 0 and 1 moved right by a
+        // fiftieth of the frame = 0.02 of a cell, so the right cell reads 0.98
+        // of the way from 0 to 1 and the left cell clamps to the edge.
+        let f = r.colour_field.as_ref().unwrap();
+        assert!(near(f.grid[0][0], 0.0) && near(f.grid[1][0], 0.98), "{:?}", f.grid);
+        // And back, on everything that was not clamped or resampled.
+        assert!(shift_recipe_coords(&mut r, -du, -dv));
+        let back = seed();
+        let (
+            MaskGeometry::Radial { top, left, bottom, right, .. },
+            MaskGeometry::Radial { top: t0, left: l0, bottom: b0, right: r0, .. },
+        ) = (&r.masks[0].mask, &back.masks[0].mask)
+        else {
+            panic!("radial")
+        };
+        assert!(near(*top, *t0) && near(*left, *l0) && near(*bottom, *b0) && near(*right, *r0), "radial round trip");
+        let (MaskGeometry::Brush { strokes: a, .. }, MaskGeometry::Brush { strokes: b, .. }) =
+            (&r.masks[0].components[1].geometry, &back.masks[0].components[1].geometry)
+        else {
+            panic!("brush")
+        };
+        assert_eq!(a[0].dabs, b[0].dabs, "the dab stream round-trips on Lightroom's six-decimal grid");
+        let c = r.crop.unwrap();
+        assert!(near(c.left, 0.0) && near(c.top, 0.2) && near(c.right, 0.8) && near(c.bottom, 1.0), "{c:?}");
+    }
+
+    /// The raster half reads the picture where it came from, clamps past the
+    /// edge, copies exactly on an integer move and blends on a fractional one.
+    #[test]
+    fn a_raster_shift_reads_the_picture_where_it_came_from() {
+        let img = image::GrayImage::from_fn(6, 4, |x, y| image::Luma([(x * 10 + y) as u8]));
+        let moved = shift_luma_raster(&img, -2.0, -1.0);
+        for y in 0..4u32 {
+            for x in 0..6u32 {
+                let (sx, sy) = ((x + 2).min(5), (y + 1).min(3));
+                assert_eq!(moved.get_pixel(x, y).0[0], (sx * 10 + sy) as u8, "({x}, {y})");
+            }
+        }
+        let half = shift_luma_raster(&img, -0.5, 0.0);
+        assert_eq!(half.get_pixel(0, 0).0[0], 5, "half way between 0 and 10");
+        assert_eq!(half.get_pixel(5, 0).0[0], 50, "past the right edge the edge continues");
+        let same = shift_luma_raster(&img, 0.0, 0.0);
+        assert_eq!(same.as_raw(), img.as_raw(), "the zero move is the identity");
     }
 
     /// One brush group with `n` strokes built from `(value, radius, flow,
@@ -16745,7 +17138,6 @@ mod tests {
             masks: vec![LocalAdjustment { mask: g, ..Default::default() }],
             ..Default::default()
         };
-        assert!(!recipe_has_raster_masks(&r), "a brush group is not a raster mask FILE");
         assert!(recipe_has_frame_coords(&r), "and its dabs ARE frame coordinates");
         let before = r.clone();
         orient_recipe_coords(&mut r, Orientation::Rotate270, probe_frame());
@@ -17938,7 +18330,8 @@ mod tests {
         let recipe = EditRecipe { masks: vec![adj.clone()], ..Default::default() };
         let coverage = mask_coverage(&adj, &base, MaskFrame::AsRendered);
         let rendered =
-            develop_preview_framed(&base, &recipe, &crate::diag::pixels(), MaskFrame::AsRendered, None).to_rgb8();
+            develop_preview_framed(&base, &recipe, &crate::diag::pixels(), MaskFrame::AsRendered, None, false)
+                .to_rgb8();
         let (mut claimed, mut agreed, mut clear, mut clean) = (0u32, 0u32, 0u32, 0u32);
         for (x, y, p) in coverage.enumerate_pixels() {
             let lit = rendered.get_pixel(x, y).0[1];
@@ -19925,10 +20318,10 @@ mod tests {
         let snapshot = load_mask_raster_snapshot(&recipe, &crate::diag::pixels()).unwrap();
         let untouched = vec![[0.25, 0.25, 0.25]; 4];
         let mut before_delete = untouched.clone();
-        apply_develop_with_rasters(&mut before_delete, 2, 2, &recipe, &snapshot, MaskFrame::AsRendered, FilmScale::NATIVE);
+        apply_develop_with_rasters(&mut before_delete, 2, 2, &recipe, &snapshot, MaskFrame::AsRendered, FilmScale::NATIVE, false);
         std::fs::remove_file(&mask).unwrap();
         let mut after_delete = untouched.clone();
-        apply_develop_with_rasters(&mut after_delete, 2, 2, &recipe, &snapshot, MaskFrame::AsRendered, FilmScale::NATIVE);
+        apply_develop_with_rasters(&mut after_delete, 2, 2, &recipe, &snapshot, MaskFrame::AsRendered, FilmScale::NATIVE, false);
         assert_eq!(after_delete, before_delete);
         assert_ne!(after_delete, untouched, "the retained white mask must still apply");
         let _ = std::fs::remove_dir_all(&dir);
@@ -20936,10 +21329,6 @@ mod tests {
             recipe_has_frame_coords(&r),
             "an AI mask's reference point IS a frame coordinate the migration moves"
         );
-        assert!(
-            !recipe_has_raster_masks(&r),
-            "and it is not 'unturnable' — nothing here fails to be turned"
-        );
         let turned = orient_recipe_coords(&mut r, rawler::Orientation::Rotate90, probe_frame());
         assert!(turned, "the migration ran");
         let MaskGeometry::AiMask { ref_x, ref_y, raster, .. } = &r.masks[0].mask else {
@@ -20959,9 +21348,8 @@ mod tests {
     /// inert forever on a machine with no segmentation sidecar, i.e. the
     /// photographer's edit silently gone. So it is KEPT here and turned by
     /// `pipeline::rotate_recipe` phase 1 with the `Bitmap` rasters
-    /// (`LocalAdjustment::turnable_raster_paths_mut`), which is also why it is
-    /// a member of `recipe_has_raster_masks`: a file the `coord_era` migration
-    /// cannot rewrite.
+    /// (`LocalAdjustment::turnable_raster_paths_mut`), and by the `coord_era`
+    /// migration since v1.5.2 (`pipeline::migrate_raster_file`).
     ///
     /// MUTATION: drop the `owned_alpha` guard in `orient_recipe_coords`' AiMask
     /// arm and the `raster` assertion fails.
@@ -20977,10 +21365,6 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(
-            recipe_has_raster_masks(&r),
-            "a zone's alpha is a FILE this migration cannot rewrite — it must be disclosed"
-        );
         assert_eq!(
             r.masks[0].turnable_raster_paths_mut(),
             vec![&mut "mask-zone-sky.png".to_string()],

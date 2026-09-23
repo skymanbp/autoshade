@@ -1,6 +1,6 @@
 {
-  "version": 2,
-  "coord_era": 1,
+  "version": 3,
+  "coord_era": 2,
   "schema_era": 2,
   "exposure_ev": 0.0,
   "contrast": 0.0,

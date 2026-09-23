@@ -1934,59 +1934,27 @@ fn carry_radial_carried_attributes(recipe: &mut EditRecipe, base: &EditRecipe) {
     }
 }
 
-/// Does this saved curve carry the fingerprint of the +0.5 preview bias?
+/// Was this saved curve estimated by an EARLIER calibration era?
 ///
-/// `camera_base_knots` pins `[0,0]` and `[1,1]` and fills the middle with
-/// quantiles of the NEUTRAL develop (x) against the camera rendition (y).
-/// A develop biased by +0.5 puts every sample in the top half by
-/// construction, so every interior x lands at or above 0.5. A real neutral
-/// never does — it is the dark render the base curve exists to lift (the
-/// user's own pre-bias develops top out at x = 0.493).
+/// Every non-empty `base_curve` the store holds was estimated by the build
+/// that wrote it (no surface edits one by hand), and the estimator has
+/// changed twice: era 1 read a washed working develop, era 2 matched pixel
+/// histograms and took the rendition's texture for tone
+/// (`render::camera_base_knots`). A curve stamped below [`CALIB_ERA`] is
+/// therefore re-estimated on the next open, whatever its shape. Until
+/// 2026-09-23 only an era-1 curve that LOOKED washed was (every interior
+/// input above the half and the curve darkening somewhere), and an era-2
+/// curve never, so a photo saved under either kept its old look for good —
+/// the operator ruled that it must not.
 ///
-/// Era-stamped recipes are exempt: only an era-1 curve has unknown
-/// provenance. A false positive costs one re-estimate that reproduces the
-/// same curve, so this errs toward checking.
-pub fn base_curve_looks_pre_era(version: u32, curve: &[[f32; 2]]) -> bool {
-    if version >= crate::recipe::CALIB_ERA || curve.len() < 3 {
-        return false;
-    }
-    let interior = &curve[1..curve.len() - 1];
-    // (a) Every interior INPUT in the top half — what a +0.5 bias produces by
-    // construction.
-    if !interior.iter().all(|k| k[0] >= 0.5) {
-        return false;
-    }
-    // (b) ...AND the curve DARKENS somewhere. This half is what keeps a
-    // legitimately high-key photo — one whose darkest 2% really does sit above
-    // mid-grey — from being re-estimated: (a) alone is a property of the
-    // SCENE, not of the bias, and replacing a saved look the current estimator
-    // need not reproduce (an older estimator's, or a hand-authored one) would
-    // change how that photo renders for no reason.
-    //
-    // A camera base look LIFTS: it maps a dark neutral develop onto the
-    // camera's own brighter rendition, which is the entire reason it exists,
-    // and every legitimately derived curve in the user's store has y > x
-    // throughout. The bias shifts only the INPUT side up by 0.5 while the
-    // camera side keeps its true, low values — so a washed curve comes out
-    // strongly DARKENING, which no real camera base look is.
-    // No interior knot LIFTS, and at least one measurably darkens.
-    //
-    // Requiring every knot to darken STRICTLY was wrong at the clipped end:
-    // the bias pushes every neutral sample to the top of the range, so the
-    // last interior knot's input is 1.0 for any frame with sky or highlights,
-    // and when the camera rendition also clips there (a blown window, the sun,
-    // a specular highlight) that knot is exactly [1.0, 1.0]. A tie is not a
-    // lift, but `1.0 < 1.0` is false, so one saturated frame disabled the
-    // repair for the whole photo. The toe is where the bias is unmistakable —
-    // it darkens hugely there — so a small margin on the maximum keeps the
-    // shallow cases a 0.15 margin used to lose, without demanding anything of
-    // the saturated end. What the margin lets escape is bounded by itself: a
-    // curve that darkens NOWHERE by more than 0.05 can also mis-render by no
-    // more than that, and only a clipped-bright frame (all knots pinned near
-    // [1,1]) produces one — while dropping the margin would re-estimate
-    // legitimate pre-cap near-flat curves over quantile noise, the exact harm
-    // the SCENE/bias split above exists to avoid.
-    interior.iter().all(|k| k[1] <= k[0]) && interior.iter().any(|k| k[1] < k[0] - 0.05)
+/// An EMPTY curve is left alone: it is the identity verdict, or a recipe
+/// written before base looks existed, and every legacy develop was tuned on
+/// exactly that rendering. Endpoints alone (fewer than three knots) are the
+/// same nothing.
+///
+/// [`CALIB_ERA`]: crate::recipe::CALIB_ERA
+pub fn base_curve_is_pre_era(version: u32, curve: &[[f32; 2]]) -> bool {
+    version < crate::recipe::CALIB_ERA && curve.len() >= 3
 }
 
 /// Successful estimates already computed this run, keyed by photo identity —
@@ -2047,16 +2015,17 @@ pub fn prime_curve_memo(raw: &Path, ident: CurveIdent, knots: Vec<[f32; 2]>) {
     }
 }
 
-/// Re-estimate a base curve that was fitted against a washed frame, and say
+/// Re-estimate a base curve that an earlier calibration era saved, and say
 /// so. Returns the disclosure when the curve was replaced.
 ///
-/// The bias was a PREVIEW defect only in the sense that it never touched an
-/// export's pixels directly. It reached deliverables anyway: the estimate
-/// runs on a capped develop ([`photo_base_knots`]), the result is persisted
-/// like any user edit, and `build_tone_lut` composes it under the full-
-/// resolution render. Batch 43 fixed the sampler and thereby made an
-/// already-stored curve WORSE — it is now laid over a correct develop, which
-/// is what turns "slightly off" into several stops dark.
+/// The estimate runs on a capped develop ([`photo_base_knots`]), the result
+/// is persisted like any user edit, and `build_tone_lut` composes it under
+/// the full-resolution render — so an estimator's defect reaches every
+/// deliverable of every photo saved under it: era 1's washed working develop
+/// rendered several stops dark once batch 43 fixed the sampler (the stored
+/// curve was then laid over a correct develop), and era 2's pixel-histogram
+/// match put grain back into a night sky. This is the one place a saved
+/// curve is replaced, and it replaces only with an ANSWER.
 pub fn repair_pre_era_base_curve(raw: &Path, r: &mut EditRecipe) -> Option<String> {
     repair_pre_era_base_curve_in(raw, r, &crate::diag::photo(raw))
 }
@@ -2073,7 +2042,7 @@ pub fn repair_pre_era_base_curve_in(
     r: &mut EditRecipe,
     d: &crate::diag::Diag,
 ) -> Option<String> {
-    if !base_curve_looks_pre_era(r.version, &r.base_curve) {
+    if !base_curve_is_pre_era(r.version, &r.base_curve) {
         return None;
     }
     let ident = curve_ident(raw);
@@ -2111,23 +2080,36 @@ pub fn repair_pre_era_base_curve_in(
     r.base_curve = knots;
     r.version = crate::recipe::CALIB_ERA;
     Some(
-        "this photo's camera base look was re-estimated: it was saved by a version whose \
-         preview sampler ran bright, so the stored base look rendered too dark"
+        "this photo's camera base look was re-estimated: it was saved by an earlier version, \
+         whose estimate of the camera's tone this version replaces"
             .to_string(),
     )
 }
 
-/// What [`migrate_recipe_coord_frame`] did, for the caller's disclosure.
+/// What [`migrate_recipe_coord_frame`] did, for the caller's disclosure —
+/// three separate facts, each said in its own sentence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoordMigration {
-    /// The EXIF orientation the geometry was turned by.
+    /// The orientation an era-0 recipe's geometry was turned by (EXIF plus
+    /// the photographer's turns); `Normal` when the recipe was already in the
+    /// display frame.
     pub orientation: rawler::Orientation,
-    /// The recipe also carries RASTER masks — [`crate::recipe::MaskGeometry::
-    /// Bitmap`], whose pixels are an image file and cannot be turned by a
-    /// coordinate rewrite. The one honest gap in an otherwise lossless
-    /// migration, and since R29 C1 the ONLY one: the brush left this set when
-    /// its dab stream started turning numerically.
-    pub rasters_left: bool,
+    /// Sensor pixels the geometry was translated by — the develop window's
+    /// move of 2026-09-21 ([`crate::decode::SourceWindow::legacy_shift`]);
+    /// `(0, 0)` for a photo whose window never moved.
+    pub shift: (i32, i32),
+    /// Raster mask files re-written into the corrected frame (turned and/or
+    /// translated) under names derived from the operation, originals kept.
+    /// Until v1.5.2 a raster was the one thing this migration could only
+    /// disclose; it is re-written now, so nothing is left to apologise for.
+    pub rasters: usize,
+}
+
+impl CoordMigration {
+    /// Did the geometry TURN (as opposed to only translate)?
+    pub fn turned(&self) -> bool {
+        !matches!(self.orientation, rawler::Orientation::Normal | rawler::Orientation::Unknown)
+    }
 }
 
 /// The photo's SOURCE frame and its EXIF turn — [`crate::decode::source_frame`]
@@ -2142,10 +2124,13 @@ pub struct CoordMigration {
 /// per recipe, not per photo, which is what the memo is for.
 type SourceFrame = ((usize, usize), rawler::Orientation);
 
-fn orient_memo() -> &'static std::sync::Mutex<std::collections::HashMap<CurveMemoKey, SourceFrame>>
-{
+/// The memo holds the WHOLE [`crate::decode::SourceWindow`] — the frame, the
+/// turn and, since v1.5.2, the legacy window shift the era-2 migration needs —
+/// so its readers still cost one header walk per photo per process.
+fn orient_memo(
+) -> &'static std::sync::Mutex<std::collections::HashMap<CurveMemoKey, crate::decode::SourceWindow>> {
     static MEMO: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<CurveMemoKey, SourceFrame>>,
+        std::sync::Mutex<std::collections::HashMap<CurveMemoKey, crate::decode::SourceWindow>>,
     > = std::sync::OnceLock::new();
     MEMO.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
@@ -2161,47 +2146,103 @@ fn orient_memo() -> &'static std::sync::Mutex<std::collections::HashMap<CurveMem
 /// frame supply had a second private memo of its own, so a photo could be
 /// walked twice for one fact.
 pub(crate) fn source_frame_memo(path: &Path) -> Option<SourceFrame> {
+    source_window_memo(path).map(|w| (w.size, w.exif))
+}
+
+/// [`source_frame_memo`] with the third answer the era-2 migration reads
+/// ([`crate::decode::SourceWindow::legacy_shift`]): the same memo, the same
+/// retry-on-inability rule.
+pub(crate) fn source_window_memo(path: &Path) -> Option<crate::decode::SourceWindow> {
     let key = (path.to_path_buf(), curve_ident(path));
     if let Some(hit) = orient_memo().lock().ok().and_then(|m| m.get(&key).copied()) {
         return Some(hit);
     }
-    let answer = crate::decode::source_frame(path).ok()?;
+    let answer = crate::decode::source_window(path).ok()?;
     Some(match orient_memo().lock() {
         Ok(mut m) => *m.entry(key).or_insert(answer),
         Err(_) => answer,
     })
 }
 
-/// Bring a saved recipe's geometry into the DISPLAY frame — the load-time
-/// half of [`crate::recipe::COORD_ERA`].
+/// Bring a saved recipe's geometry into THIS build's display frame — the
+/// load-time half of [`crate::recipe::COORD_ERA`], two eras deep.
 ///
-/// Every recipe written up to v0.29.x stored its crop rectangle and mask
-/// geometries against the frame the app actually drew, and for a
-/// rotated/flipped RAW that was the SENSOR frame: rawler 0.7.2 reports
-/// `Orientation::Normal` for everything but DNG/QTK, so a portrait ARW was
-/// displayed sideways and the user drew on a sideways canvas. Now that
-/// `render::orient_f32` turns the frame for real, those coordinates land on
-/// the wrong axis unless they are turned with it.
+/// **Era 0 → 1 (v0.30.0): the turn.** Every recipe written up to v0.29.x
+/// stored its crop rectangle and mask geometries against the frame the app
+/// actually drew, and for a rotated/flipped RAW that was the SENSOR frame:
+/// rawler 0.7.2 reports `Orientation::Normal` for everything but DNG/QTK, so
+/// a portrait ARW was displayed sideways and the user drew on a sideways
+/// canvas. Now that `render::orient_f32` turns the frame for real, those
+/// coordinates land on the wrong axis unless they are turned with it.
+///
+/// **Era 1 → 2 (v1.5.2): the translation.** On 2026-09-21 the develop window
+/// of a body that declares a crop but no active area moved from the sensor's
+/// corner onto the declared origin (`decode::align_default_crop`; the
+/// ILCE-7RM4A files: `(32, 20)`). The window kept its size and every stored
+/// coordinate is normalised to the frame, so a recipe saved by any earlier
+/// release keeps its numbers while the picture under them moved by 0.34 % of
+/// the width and 0.32 % of the height. [`crate::decode::SourceWindow::
+/// legacy_shift`] says how far, per file; the vector is turned into the
+/// display frame by `render::orient_vector` and every coordinate goes through
+/// `render::shift_recipe_coords`. Raster masks are FILES and are re-written
+/// as translated (and, for an era-0 recipe, turned) files — the gap the first
+/// era could only disclose is closed with the same stroke, see
+/// [`migrate_raster_file`].
 ///
 /// Tri-state, the [`repair_pre_era_base_curve`] discipline:
-///   * already era-current, or a photo with no rotation → stamp, no note;
-///   * turned → stamp AND say so;
-///   * the orientation could NOT be read (unreadable/locked RAW) → nothing is
-///     stamped and nothing is moved, so the next reader retries. Stamping on
-///     an inability would declare the coordinates migrated when they are not,
-///     and no later reader could tell.
-pub fn migrate_recipe_coord_frame(raw: &Path, r: &mut EditRecipe) -> Option<CoordMigration> {
+///   * already era-current, or a photo whose frame neither turns nor moves →
+///     stamp, no note;
+///   * turned and/or translated → stamp AND say so;
+///   * the frame could NOT be read (unreadable/locked RAW) → `Ok(None)`,
+///     nothing stamped, nothing moved, so the next reader retries; a raster
+///     that cannot be read or re-written → `Err`, the same nothing-moved
+///     state, and the caller says so. Stamping on an inability would declare
+///     the coordinates migrated when they are not, and no later reader could
+///     tell.
+pub fn migrate_recipe_coord_frame(
+    raw: &Path,
+    r: &mut EditRecipe,
+) -> std::io::Result<Option<CoordMigration>> {
     if r.coord_era >= crate::recipe::COORD_ERA {
-        return None;
+        return Ok(None);
     }
     // A baked image is not a RAW: `decode::load_image` has applied its EXIF
-    // orientation since long before this era, so its saved coordinates are
+    // orientation since long before this era, and its window never moved
+    // (`legacy_shift` is zero by construction), so its saved coordinates are
     // already display-frame. Stamp and stop — asking rawler would only fail.
     if !crate::decode::is_raw(raw) {
         r.coord_era = crate::recipe::COORD_ERA;
-        return None;
+        return Ok(None);
     }
-    let ((sw, sh), orientation) = source_frame_memo(raw)?;
+    let Some(window) = source_window_memo(raw) else {
+        return Ok(None);
+    };
+    migrate_recipe_geometry(raw, r, window)
+}
+
+/// The frame-independent half of [`migrate_recipe_coord_frame`]: what to do
+/// to `r` once the photo's [`crate::decode::SourceWindow`] is known. Split
+/// off so the whole path — geometry, rasters, the stamp, the second pass that
+/// finds nothing to do, the refusal — is exercised without a decodable RAW.
+///
+/// **All-or-nothing, in memory AND on disk**, the [`rotate_recipe`] rule:
+/// every raster is re-written BEFORE the recipe is touched, and a failure
+/// returns with `r` exactly as it was, era stamp included. The files written
+/// before the failure are NOT deleted, unlike the rotate's fresh claims: their
+/// names are derived from the operation, so the next attempt finds them and
+/// goes straight to the one that failed — nothing accumulates.
+pub(crate) fn migrate_recipe_geometry(
+    src: &Path,
+    r: &mut EditRecipe,
+    window: crate::decode::SourceWindow,
+) -> std::io::Result<Option<CoordMigration>> {
+    // The era gate once more, cheaply: the funnel above checks it before it
+    // pays for the window, and a caller that has the window in hand (the
+    // tests, a future second pass) must find the same wall.
+    if r.coord_era >= crate::recipe::COORD_ERA {
+        return Ok(None);
+    }
+    let (sw, sh) = window.size;
     // The composed orientation, not the EXIF one (R27): era 0 means "these
     // numbers are in the SENSOR frame", and the frame they must reach is the
     // one this build DISPLAYS — EXIF plus the photographer's own turns. Today
@@ -2209,22 +2250,188 @@ pub fn migrate_recipe_coord_frame(raw: &Path, r: &mut EditRecipe) -> Option<Coor
     // v0.33, and no era-0 recipe can carry one), so this is correctness by
     // construction rather than a behaviour change; writing `raw_orientation`
     // alone would be a latent bug the day a v0.33 recipe is hand-edited to
-    // era 0, or the day a future era forces a second migration.
-    let orientation = crate::render::compose_orientation(orientation, r.quarter_turns);
-    let rasters_left = crate::render::recipe_has_raster_masks(r);
-    // Era-0 numbers are SENSOR-frame by definition, so the frame the brush
-    // rewrite must rescale out of is the source rectangle `source_frame` just
-    // reported — not the display one (R29 C1, `render::CoordFrame`).
-    let frame = crate::render::CoordFrame::new(sw as f64, sh as f64);
-    let moved = crate::render::orient_recipe_coords(r, orientation, frame);
-    // The stamp lands either way once the orientation is KNOWN: a Normal
-    // photo's coordinates are already display-frame, and leaving it era-0
-    // would pay the metadata read again on every future load.
+    // era 0. The era-2 translation, on the other hand, is applied in the
+    // DISPLAY frame of an era-1 recipe, which IS this composed state — so the
+    // same value serves both halves.
+    let orientation = crate::render::compose_orientation(window.exif, r.quarter_turns);
+    let turn = (r.coord_era == 0
+        && !matches!(orientation, rawler::Orientation::Normal | rawler::Orientation::Unknown))
+    .then_some(orientation);
+    // The translation: `legacy_shift` is where this build's window sits
+    // RELATIVE to the old one, in sensor pixels, so the picture — and every
+    // coordinate drawn on it — moves the other way, by that many pixels over
+    // the frame's own size, and then into the display frame by the same
+    // linear map the pixels take.
+    let (dx, dy) = window.legacy_shift;
+    let shift = if (dx, dy) == (0, 0) || sw == 0 || sh == 0 {
+        (0.0, 0.0)
+    } else {
+        crate::render::orient_vector(orientation, -(dx as f32) / sw as f32, -(dy as f32) / sh as f32)
+    };
+    if turn.is_none() && shift == (0.0, 0.0) {
+        // The stamp lands once the frame is KNOWN: an unrotated photo whose
+        // window never moved is already in this era's frame, and leaving it
+        // behind would pay the metadata read again on every future load.
+        r.coord_era = crate::recipe::COORD_ERA;
+        return Ok(None);
+    }
+
+    // --- Phase 1: every raster into its re-written file. Nothing in `r`
+    // moves until all of them are on disk.
+    //
+    // WHICH rasters differs by half. A turn (era 0) walks
+    // `turnable_raster_paths_mut`: `orient_recipe_coords` DROPS any other AI
+    // mask's cached alpha so the next develop re-segments at the turned
+    // point, and re-writing a file phase 2 then forgets is the orphan R28
+    // Batch-3 3b closed. A translation alone walks `bitmap_paths_mut`, the
+    // caches included: a translated alpha IS the alpha of the translated
+    // picture (the same pixels, moved), and keeping it is what leaves the mask
+    // working on a machine with no segmentation sidecar to re-derive it.
+    let mut rewritten: Vec<(String, String)> = Vec::new();
+    {
+        let mut probe = r.clone();
+        for m in probe.masks.iter_mut() {
+            let paths = if turn.is_some() { m.turnable_raster_paths_mut() } else { m.bitmap_paths_mut() };
+            for path in paths {
+                if rewritten.iter().any(|(from, _)| from == path.as_str()) {
+                    continue; // one file, several masks — re-write it once
+                }
+                let to = migrate_raster_file(path.as_str(), src, turn, orientation, shift, (dx, dy))?;
+                rewritten.push((path.clone(), to));
+            }
+        }
+    }
+
+    // --- Phase 2: commit. Geometry, then the raster references, then the
+    // stamp.
+    let mut moved = false;
+    if let Some(o) = turn {
+        // Era-0 numbers are SENSOR-frame by definition, so the frame the
+        // brush rewrite must rescale out of is the source rectangle
+        // `source_window` reported — not the display one (R29 C1,
+        // `render::CoordFrame`).
+        let frame = crate::render::CoordFrame::new(sw as f64, sh as f64);
+        moved |= crate::render::orient_recipe_coords(r, o, frame);
+    }
+    if shift != (0.0, 0.0) {
+        moved |= crate::render::shift_recipe_coords(r, shift.0, shift.1);
+    }
+    for m in r.masks.iter_mut() {
+        // A superset of both walks phase 1 staged from, so every re-written
+        // file is re-pointed and nothing is pointed at a file never made.
+        for path in m.bitmap_paths_mut() {
+            if let Some((_, to)) = rewritten.iter().find(|(from, _)| from == path.as_str()) {
+                *path = to.clone();
+            }
+        }
+    }
     r.coord_era = crate::recipe::COORD_ERA;
-    // Nothing to say when nothing moved — an unrotated photo, or a recipe
-    // whose only content is global sliders.
-    (moved && (crate::render::recipe_has_frame_coords(r) || rasters_left))
-        .then_some(CoordMigration { orientation, rasters_left })
+    // Nothing to say when nothing moved — a recipe whose only content is
+    // global sliders.
+    let said = moved && (crate::render::recipe_has_frame_coords(r) || !rewritten.is_empty());
+    Ok(said.then_some(CoordMigration {
+        orientation: turn.unwrap_or(rawler::Orientation::Normal),
+        shift: if shift == (0.0, 0.0) { (0, 0) } else { (dx, dy) },
+        rasters: rewritten.len(),
+    }))
+}
+
+/// The EXIF tag value of an orientation (1..=8; `Unknown` reads as `Normal`),
+/// for the raster file names [`migrate_raster_file`] derives.
+fn orientation_code(o: rawler::Orientation) -> u8 {
+    use rawler::Orientation as O;
+    match o {
+        O::Normal | O::Unknown => 1,
+        O::HorizontalFlip => 2,
+        O::Rotate180 => 3,
+        O::VerticalFlip => 4,
+        O::Transpose => 5,
+        O::Rotate90 => 6,
+        O::Transverse => 7,
+        O::Rotate270 => 8,
+    }
+}
+
+/// One raster mask brought into the current frame: turned by `turn` when an
+/// era-0 recipe sits on a rotated RAW, then translated by `shift` (display
+/// frame, normalised — the raster's own pixel count turns it into pixels, so
+/// a full-resolution zone alpha moves by exactly the declared origin and a
+/// downscaled brush base by the same fraction of ITS width). Returns the
+/// path to store in the recipe, spelled like the one it replaces: a bare name
+/// stays bare (the store's own convention, and what `serve` hands back
+/// byte-for-byte), an absolute path stays absolute.
+///
+/// **The name is derived from the operation, never claimed fresh**:
+/// `<stem>-e2-o<orientation code>[t]-<dx>x<dy>.png` in the photo's develop
+/// dir. Every recipe that points at the same raster — the live one, each
+/// variant card, each version snapshot — lands on ONE file, and a pass that
+/// nothing re-saves (the CLI's every render, the web UI's every `api_recipe`
+/// read, an export) finds the file and stops instead of growing a fresh orphan
+/// per pass, which a `claim_raster` name would have done. The rewrite goes
+/// through a `.part` file and a rename, so a file that exists is complete. The
+/// original stays put: version snapshots froze their own copies and a saved
+/// recipe elsewhere may still point at it.
+///
+/// Off-frame samples clamp to the raster's edge: the strip the new window
+/// exposes past the old one held no mask, and continuing the edge value is
+/// what a gradient that reached the frame's border means there. An integer
+/// pixel move is an exact copy; a fractional one (a downscaled raster) is
+/// bilinear.
+fn migrate_raster_file(
+    from: &str,
+    src: &Path,
+    turn: Option<rawler::Orientation>,
+    orientation: rawler::Orientation,
+    shift: (f32, f32),
+    shift_px: (i32, i32),
+) -> std::io::Result<String> {
+    let given = Path::new(from);
+    let bare = given.is_relative() && given.parent().is_none_or(|p| p.as_os_str().is_empty());
+    let from_path = if bare { crate::store::develop_dir(src).join(given) } else { given.to_path_buf() };
+    let stem = from_path.file_stem().and_then(|s| s.to_str()).unwrap_or("mask");
+    let kind = format!(
+        "{stem}-e2-o{}{}-{}x{}",
+        orientation_code(orientation),
+        if turn.is_some() { "t" } else { "" },
+        shift_px.0,
+        shift_px.1
+    );
+    let target = crate::store::raster_target(src, &kind);
+    let stored = if bare {
+        target.file_name().and_then(|n| n.to_str()).unwrap_or(&kind).to_string()
+    } else {
+        target.to_string_lossy().into_owned()
+    };
+    if std::fs::metadata(&target).is_ok_and(|m| m.len() > 0) {
+        return Ok(stored);
+    }
+    let img = crate::render::open_mask_bounded(&from_path).map_err(|e| {
+        std::io::Error::other(format!("re-write the mask raster {}: {e:#}", from_path.display()))
+    })?;
+    let img = match turn {
+        Some(o) => crate::render::oriented(img, o),
+        None => img,
+    };
+    let luma = img.to_luma8();
+    // A move that is a whole number of pixels to within a thousandth is one —
+    // the fraction is f32 rounding of `shift`, and snapping it is what makes
+    // the full-resolution case an exact copy rather than a 0.999 blend.
+    let snap = |v: f32| if (v - v.round()).abs() < 1e-3 { v.round() } else { v };
+    let moved = crate::render::shift_luma_raster(
+        &luma,
+        snap(shift.0 * luma.width() as f32),
+        snap(shift.1 * luma.height() as f32),
+    );
+    if let Some(par) = target.parent() {
+        std::fs::create_dir_all(par)?;
+    }
+    let part = target.with_extension(format!("part-{}", std::process::id()));
+    if let Err(e) = moved.save_with_format(&part, image::ImageFormat::Png) {
+        let _ = std::fs::remove_file(&part);
+        return Err(std::io::Error::other(format!("write {}: {e}", part.display())));
+    }
+    std::fs::rename(&part, &target)?;
+    Ok(stored)
 }
 
 /// Everything a saved recipe must be brought through before it becomes a live
@@ -2236,19 +2443,25 @@ pub fn migrate_recipe_coord_frame(raw: &Path, r: &mut EditRecipe) -> Option<Coor
 pub struct LoadMigration {
     /// The washed pre-era base curve was re-estimated; the engine's sentence.
     pub relook: Option<String>,
-    /// The geometry was turned into the display frame.
+    /// The geometry was turned and/or translated into this build's frame.
     pub reframe: Option<CoordMigration>,
+    /// The reframe could NOT be done (a raster mask unreadable or
+    /// unwritable): nothing moved, nothing was stamped, and this is the
+    /// reason — said, because the photo then renders with its saved geometry
+    /// off the picture until the cause is fixed.
+    pub reframe_error: Option<String>,
 }
 
 impl LoadMigration {
     /// Did anything change? (Drives ● / thumb invalidation at the call sites
-    /// that only need "is this recipe different now".)
+    /// that only need "is this recipe different now".) A failed reframe
+    /// changed nothing.
     pub fn any(&self) -> bool {
         self.relook.is_some() || self.reframe.is_some()
     }
 
     /// The chained ENGINE sentence for the CLI / HTTP surfaces. The GUI has
-    /// its own localized pair — these two facts are disclosed separately
+    /// its own localized set — these facts are disclosed separately
     /// everywhere, because they are unrelated corrections.
     pub fn note(&self) -> Option<String> {
         let mut parts: Vec<String> = Vec::new();
@@ -2258,24 +2471,54 @@ impl LoadMigration {
         if let Some(c) = &self.reframe {
             parts.push(coord_migration_note(*c));
         }
+        if let Some(e) = &self.reframe_error {
+            parts.push(coord_migration_failure_note(e));
+        }
         (!parts.is_empty()).then(|| parts.join(" · "))
     }
 }
 
-/// The engine (English, CLI/HTTP) sentence for a coordinate-frame migration.
+/// The engine (English, CLI/HTTP) sentences for a coordinate-frame migration
+/// — one per fact, joined: a translation and a raster rewrite are each their
+/// own sentence rather than a clause buried in the turn's.
 pub fn coord_migration_note(c: CoordMigration) -> String {
-    let base = "this photo's saved crop and masks were moved to match the RAW's EXIF \
-                orientation: earlier versions displayed rotated RAWs sideways, so their \
-                coordinates were stored against the sideways frame"
-        .to_string();
-    if c.rasters_left {
-        format!(
-            "{base}; its raster mask(s) are image files and could NOT be turned — \
-             check and re-generate them"
+    let mut parts: Vec<String> = Vec::new();
+    if c.turned() {
+        parts.push(concat!(
+            "this photo's saved crop and masks were moved to match the RAW's EXIF orientation: ",
+            "earlier versions displayed rotated RAWs sideways, so their coordinates were stored ",
+            "against the sideways frame"
         )
-    } else {
-        base
+        .to_string());
     }
+    if c.shift != (0, 0) {
+        parts.push(format!(
+            concat!(
+                "this photo's saved crop, masks and retouches were moved by ({}, {}) px: earlier ",
+                "versions developed this camera's RAWs from the sensor's corner instead of the crop ",
+                "the camera declares, so everything drawn on them sat that far off the picture"
+            ),
+            c.shift.0, c.shift.1
+        ));
+    }
+    if c.rasters > 0 {
+        parts.push(format!(
+            "{} raster mask file(s) were re-written into the corrected frame; the originals are kept",
+            c.rasters
+        ));
+    }
+    parts.join("; ")
+}
+
+/// The engine sentence for a coordinate-frame migration that could NOT run.
+pub fn coord_migration_failure_note(err: &str) -> String {
+    format!(
+        concat!(
+            "this photo's saved geometry could NOT be brought into the corrected frame ({}): ",
+            "it is left as saved and will be tried again on the next open"
+        ),
+        err
+    )
 }
 
 /// What a [`rotate_recipe`] call actually did, for the caller's disclosure.
@@ -2308,11 +2551,11 @@ pub struct RotateOutcome {
 ///     aspect comes from). That function is the era-0 → era-1 migration's own
 ///     engine, proven exact for tilted radials by
 ///     `rotated_radial_mask_covers_the_rotated_pixels`.
-///  2. **The raster masks** — really turned, unlike the `coord_era` migration,
-///     which could only disclose them. The difference is ownership: those were
-///     files an OLD build had already written against a frame nobody could
-///     re-derive, whereas these are our own PNGs and `image`'s `rotate90` is
-///     lossless. Turned copies land under FRESHLY CLAIMED names
+///  2. **The raster masks** — really turned: these are our own PNGs and
+///     `image`'s `rotate90` is lossless. (The `coord_era` migration could only
+///     disclose them until v1.5.2; it re-writes them the same way now, under
+///     operation-derived names — [`migrate_raster_file`] says why the two
+///     naming rules differ.) Turned copies land under FRESHLY CLAIMED names
 ///     (`store::claim_raster`) and the old files stay put — version snapshots
 ///     freeze their own copies and a saved recipe elsewhere may still point at
 ///     them, so rewriting in place would silently change what an old version
@@ -2477,10 +2720,12 @@ fn turn_raster_file(
 /// reads the photo's PIXELS (decode + neutral develop) while the reframe reads
 /// only its metadata, and the repair's early-out is the cheaper of the two.
 pub fn migrate_loaded_recipe(raw: &Path, r: &mut EditRecipe) -> LoadMigration {
-    LoadMigration {
-        relook: repair_pre_era_base_curve(raw, r),
-        reframe: migrate_recipe_coord_frame(raw, r),
-    }
+    let relook = repair_pre_era_base_curve(raw, r);
+    let (reframe, reframe_error) = match migrate_recipe_coord_frame(raw, r) {
+        Ok(c) => (c, None),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    LoadMigration { relook, reframe, reframe_error }
 }
 
 /// The photo's saved recipe (central store first, then legacy), parsed once —
@@ -6000,49 +6245,27 @@ mod tests {
     }
 
     #[test]
-    fn the_pre_era_base_curve_fingerprint_separates_washed_from_tuned() {
+    fn a_curve_saved_under_an_earlier_era_is_re_estimated_and_an_empty_one_is_not() {
         use crate::recipe::CALIB_ERA;
-        // A +0.5-biased develop puts EVERY sample in the top half, so every
-        // interior knot's input does too. This is the shape that renders
-        // several stops dark once batch 43 made the develop correct.
+        // Era 1 (a washed working develop) and era 2 (a pixel-histogram
+        // match) each saved curves this build's estimator does not
+        // reproduce; whatever the shape, a stamp below the current era is
+        // re-estimated. `washed` is era 1's fingerprint (every interior input
+        // above the half, darkening); `tuned` is a curve the old fingerprint
+        // rule deliberately left alone.
         let washed = vec![[0.0, 0.0], [0.55, 0.10], [0.72, 0.44], [0.96, 0.90], [1.0, 1.0]];
-        assert!(base_curve_looks_pre_era(1, &washed), "the washed shape must be caught");
-        // The user's own pre-bias develops: interior inputs 0.126..0.493 —
-        // a real neutral is DARK, which is why the base curve exists.
         let tuned = vec![[0.0, 0.0], [0.126, 0.29], [0.31, 0.55], [0.493, 0.78], [1.0, 1.0]];
-        assert!(!base_curve_looks_pre_era(1, &tuned), "a legitimate curve must be left alone");
-        // A washed curve whose TOP interior knot clips on both sides: the
-        // neutral saturates because of the bias, the camera rendition because
-        // the frame really does hold blown highlights. The tie must not read
-        // as a lift — one saturated frame used to disable the repair entirely.
-        let washed_clipped = vec![[0.0, 0.0], [0.55, 0.10], [0.80, 0.55], [1.0, 1.0], [1.0, 1.0]];
-        assert!(
-            base_curve_looks_pre_era(1, &washed_clipped),
-            "a clipped tie at the top is not a lift"
-        );
-        // ...and a curve that merely FLATTENS (never darkens measurably) is
-        // not the bias either.
-        let flat = vec![[0.0, 0.0], [0.55, 0.55], [0.80, 0.79], [1.0, 1.0], [1.0, 1.0]];
-        assert!(!base_curve_looks_pre_era(1, &flat), "no measurable darkening is no fingerprint");
-        // A legitimately HIGH-KEY photo: its darkest 2% really is above
-        // mid-grey, so every interior input clears 0.5 — but the curve still
-        // LIFTS, as a camera base look does. Re-estimating it would replace a
-        // saved look for no reason (the estimator need not reproduce a curve
-        // an older build, or the user, authored).
-        let high_key = vec![[0.0, 0.0], [0.55, 0.68], [0.72, 0.84], [0.93, 0.97], [1.0, 1.0]];
-        assert!(
-            !base_curve_looks_pre_era(1, &high_key),
-            "a bright scene is not a washed frame — the curve still lifts"
-        );
-        // ONE interior knot below the half is enough to clear it: quantiles
-        // are non-decreasing, so a real neutral's toe always lands low.
-        let mostly_high = vec![[0.0, 0.0], [0.49, 0.10], [0.80, 0.60], [1.0, 1.0]];
-        assert!(!base_curve_looks_pre_era(1, &mostly_high));
+        assert!(base_curve_is_pre_era(1, &washed));
+        assert!(base_curve_is_pre_era(1, &tuned), "the shape no longer decides; the era does");
+        assert!(base_curve_is_pre_era(2, &tuned), "an era-2 pixel-histogram estimate too");
         // Era-stamped recipes are never second-guessed, whatever they hold.
-        assert!(!base_curve_looks_pre_era(CALIB_ERA, &washed), "an era stamp is trusted");
-        // Nothing to judge: no curve, or endpoints only.
-        assert!(!base_curve_looks_pre_era(1, &[]));
-        assert!(!base_curve_looks_pre_era(1, &[[0.0, 0.0], [1.0, 1.0]]));
+        assert!(!base_curve_is_pre_era(CALIB_ERA, &washed), "an era stamp is trusted");
+        assert!(!base_curve_is_pre_era(CALIB_ERA + 1, &washed));
+        // Nothing to judge: no curve (the identity verdict, or a develop from
+        // before base looks existed — tuned on that rendering), or endpoints
+        // only.
+        assert!(!base_curve_is_pre_era(1, &[]));
+        assert!(!base_curve_is_pre_era(2, &[[0.0, 0.0], [1.0, 1.0]]));
     }
 
     #[test]
@@ -6101,6 +6324,7 @@ mod tests {
         };
         let before = current.clone();
         assert!(migrate_recipe_coord_frame(Path::new("no-such-file-ever.arw"), &mut current)
+            .unwrap()
             .is_none());
         assert_eq!(current, before, "an era-current recipe must be untouched");
 
@@ -6108,7 +6332,7 @@ mod tests {
         // its saved coordinates are already display-frame: stamped, silently,
         // without asking rawler anything.
         let mut baked = EditRecipe { coord_era: 0, ..Default::default() };
-        assert!(migrate_recipe_coord_frame(Path::new("photo.jpg"), &mut baked).is_none());
+        assert!(migrate_recipe_coord_frame(Path::new("photo.jpg"), &mut baked).unwrap().is_none());
         assert_eq!(baked.coord_era, COORD_ERA, "a non-RAW is stamped, not left to retry");
 
         // (3) An UNREADABLE RAW is an inability, not an answer: nothing moves
@@ -6122,8 +6346,180 @@ mod tests {
         };
         let untouched = legacy.clone();
         assert!(migrate_recipe_coord_frame(Path::new("no-such-file-ever.arw"), &mut legacy)
+            .unwrap()
             .is_none());
         assert_eq!(legacy, untouched, "an inability must not move or stamp anything");
+    }
+
+    /// The era-2 half end to end on a synthetic window: geometry translated,
+    /// the raster re-written under a name the second pass finds, the stamp
+    /// landing, one file however many recipes point at the raster, and a
+    /// raster that cannot be read leaving the recipe exactly as it was.
+    #[test]
+    fn the_era_two_migration_translates_geometry_and_rewrites_rasters_once() {
+        use crate::decode::SourceWindow;
+        use crate::recipe::{Crop, LocalAdjustment, MaskGeometry, COORD_ERA};
+        let raw = scratch_photo("era2");
+        let dir = crate::store::develop_dir(&raw);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A 40 x 30 mask: black left of x = 20, white from it on.
+        let edge = |x: u32| if x >= 20 { 255u8 } else { 0 };
+        image::GrayImage::from_fn(40, 30, |x, _| image::Luma([edge(x)]))
+            .save(dir.join("mask-sky.png"))
+            .unwrap();
+        // The window: 400 x 300, developed 40 px right and 30 px down of
+        // where v1.5.1 cut it — a tenth of each edge, so the 40 x 30 raster
+        // moves by exactly (-4, -3) pixels.
+        let window = SourceWindow {
+            size: (400, 300),
+            exif: rawler::Orientation::Normal,
+            legacy_shift: (40, 30),
+        };
+        let seed = || EditRecipe {
+            coord_era: 1,
+            crop: Some(Crop { left: 0.1, top: 0.2, right: 0.8, bottom: 0.9 }),
+            masks: vec![
+                LocalAdjustment {
+                    mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 0.45 },
+                    ..Default::default()
+                },
+                LocalAdjustment {
+                    mask: MaskGeometry::Bitmap { path: "mask-sky.png".into() },
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut r = seed();
+        let done = migrate_recipe_geometry(&raw, &mut r, window).expect("the raster is readable");
+        assert_eq!(
+            done,
+            Some(CoordMigration { orientation: rawler::Orientation::Normal, shift: (40, 30), rasters: 1 })
+        );
+        assert_eq!(r.coord_era, COORD_ERA, "stamped");
+        let c = r.crop.expect("the crop survives");
+        for (got, want, what) in
+            [(c.left, 0.0, "left"), (c.top, 0.1, "top"), (c.right, 0.7, "right"), (c.bottom, 0.8, "bottom")]
+        {
+            assert!((got - want).abs() < 1e-6, "crop {what}: {got} != {want}");
+        }
+        let MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } = r.masks[0].mask else {
+            panic!("linear survives")
+        };
+        assert!(
+            (zero_x - 0.4).abs() < 1e-6
+                && (zero_y + 0.1).abs() < 1e-6
+                && (full_x - 0.4).abs() < 1e-6
+                && (full_y - 0.35).abs() < 1e-6,
+            "a gradient handle may leave the frame: {:?}",
+            r.masks[0].mask
+        );
+        let MaskGeometry::Bitmap { path } = &r.masks[1].mask else { panic!("bitmap survives") };
+        let path = path.clone();
+        assert_eq!(path, "mask-sky-e2-o1-40x30.png", "a bare name stays bare and says what was done");
+        let moved = image::open(dir.join(&path)).unwrap().to_luma8();
+        assert_eq!(moved.dimensions(), (40, 30));
+        for x in 0..40u32 {
+            // new[x] = old[x + 4]: the edge sits at 16 now, and past the old
+            // right border the edge value continues.
+            let want = if x + 4 >= 20 { 255 } else { 0 };
+            assert_eq!(moved.get_pixel(x, 7).0[0], want, "column {x}");
+        }
+        assert!(dir.join("mask-sky.png").is_file(), "the original is kept");
+        // Second pass: era-current, nothing looked at, nothing written.
+        let before = r.clone();
+        let stamp = std::fs::metadata(dir.join(&path)).unwrap().modified().unwrap();
+        assert_eq!(migrate_recipe_geometry(&raw, &mut r, window).unwrap(), None);
+        assert_eq!(r, before);
+        assert_eq!(
+            std::fs::metadata(dir.join(&path)).unwrap().modified().unwrap(),
+            stamp,
+            "the file was reused, not rewritten"
+        );
+        // A fresh era-1 recipe pointing at the same raster lands on the SAME
+        // file — a variant card, a version snapshot, a CLI render.
+        let mut again = seed();
+        assert_eq!(migrate_recipe_geometry(&raw, &mut again, window).unwrap().map(|c| c.rasters), Some(1));
+        assert_eq!(again.masks[1].mask, r.masks[1].mask);
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            2,
+            "one original, one re-written file, however many recipes"
+        );
+        // A window that never moved: stamped, silently, nothing written.
+        let mut still = seed();
+        let flat = SourceWindow { legacy_shift: (0, 0), ..window };
+        assert_eq!(migrate_recipe_geometry(&raw, &mut still, flat).unwrap(), None);
+        assert_eq!(still.coord_era, COORD_ERA);
+        assert_eq!(still.crop, seed().crop, "nothing moved");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "nothing written");
+        // A raster that cannot be read refuses the WHOLE migration: no stamp,
+        // no geometry moved, the reason returned.
+        let mut broken = seed();
+        if let MaskGeometry::Bitmap { path } = &mut broken.masks[1].mask {
+            *path = "gone.png".into();
+        }
+        let err = migrate_recipe_geometry(&raw, &mut broken, window).expect_err("a missing raster is an error");
+        assert!(err.to_string().contains("gone.png"), "{err}");
+        assert_eq!(broken.coord_era, 1, "not stamped");
+        assert_eq!(broken.crop, seed().crop, "not moved");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An era-0 recipe on a rotated RAW whose window also moved: turned and
+    /// translated in ONE pass, the raster with it, and the translation applied
+    /// in the DISPLAY frame the turn produces.
+    #[test]
+    fn an_era_zero_recipe_on_a_rotated_raw_turns_and_translates_in_one_pass() {
+        use crate::decode::SourceWindow;
+        use crate::recipe::{Crop, LocalAdjustment, MaskGeometry, COORD_ERA};
+        let raw = scratch_photo("era2-turn");
+        let dir = crate::store::develop_dir(&raw);
+        std::fs::create_dir_all(&dir).unwrap();
+        let edge = |x: u32| if x >= 20 { 255u8 } else { 0 };
+        image::GrayImage::from_fn(40, 30, |x, _| image::Luma([edge(x)]))
+            .save(dir.join("mask-sky.png"))
+            .unwrap();
+        let window = SourceWindow {
+            size: (400, 300),
+            exif: rawler::Orientation::Rotate90,
+            legacy_shift: (40, 30),
+        };
+        let mut r = EditRecipe {
+            coord_era: 0,
+            crop: Some(Crop { left: 0.1, top: 0.2, right: 0.8, bottom: 0.9 }),
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Bitmap { path: "mask-sky.png".into() },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let done = migrate_recipe_geometry(&raw, &mut r, window).unwrap();
+        assert_eq!(
+            done,
+            Some(CoordMigration { orientation: rawler::Orientation::Rotate90, shift: (40, 30), rasters: 1 })
+        );
+        assert_eq!(r.coord_era, COORD_ERA);
+        // Rotate90 sends (u, v) to (1 - v, u): the crop's corners land at
+        // (0.8, 0.1) and (0.1, 0.8); the source move (-40, -30) is (+30, -40)
+        // px in the turned 300 x 400 frame, i.e. (+0.1, -0.1).
+        let c = r.crop.expect("crop");
+        for (got, want, what) in
+            [(c.left, 0.2, "left"), (c.right, 0.9, "right"), (c.top, 0.0, "top"), (c.bottom, 0.7, "bottom")]
+        {
+            assert!((got - want).abs() < 1e-6, "crop {what}: {got} != {want}");
+        }
+        let MaskGeometry::Bitmap { path } = &r.masks[0].mask else { panic!("bitmap survives") };
+        assert_eq!(path, "mask-sky-e2-o6t-40x30.png", "the name carries the turn as well");
+        let moved = image::open(dir.join(path)).unwrap().to_luma8();
+        assert_eq!(moved.dimensions(), (30, 40), "turned first");
+        for y in 0..40u32 {
+            // Clockwise, the white right half becomes the bottom half (y >= 20);
+            // then new[y] = turned[y + 4], so the edge sits at 16.
+            let want = if y + 4 >= 20 { 255 } else { 0 };
+            assert_eq!(moved.get_pixel(5, y).0[0], want, "row {y}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A scratch photo path whose develop dir is wiped clean, so a raster
@@ -6594,21 +6990,32 @@ mod tests {
     fn load_migration_reports_its_two_halves_separately() {
         let none = LoadMigration::default();
         assert!(!none.any() && none.note().is_none());
-        let curve_only = LoadMigration { relook: Some("relooked".into()), reframe: None };
+        let curve_only = LoadMigration { relook: Some("relooked".into()), ..Default::default() };
         assert!(curve_only.any());
         assert_eq!(curve_only.note().as_deref(), Some("relooked"));
         let frame = CoordMigration {
             orientation: rawler::Orientation::Rotate270,
-            rasters_left: false,
+            shift: (0, 0),
+            rasters: 0,
         };
-        let both = LoadMigration { relook: Some("relooked".into()), reframe: Some(frame) };
+        let both =
+            LoadMigration { relook: Some("relooked".into()), reframe: Some(frame), ..Default::default() };
         let note = both.note().expect("a note");
         assert!(note.starts_with("relooked · "), "{note}");
         assert!(note.contains("EXIF orientation"), "{note}");
-        // The raster gap is SAID, never folded into the success sentence.
-        let with_rasters = CoordMigration { rasters_left: true, ..frame };
-        assert!(coord_migration_note(with_rasters).contains("could NOT be turned"));
-        assert!(!coord_migration_note(frame).contains("could NOT be turned"));
+        // A translation and a raster rewrite are each their OWN sentence,
+        // never a clause inside the turn's — and a photo that only translated
+        // says nothing about orientation.
+        let moved = CoordMigration { orientation: rawler::Orientation::Normal, shift: (32, 20), rasters: 2 };
+        let said = coord_migration_note(moved);
+        assert!(said.contains("(32, 20) px") && said.contains("2 raster mask file(s)"), "{said}");
+        assert!(!said.contains("EXIF orientation"), "{said}");
+        assert!(!coord_migration_note(frame).contains("raster"), "{}", coord_migration_note(frame));
+        // A reframe that could not run is a fourth fact: nothing changed, and
+        // the reason is said.
+        let failed = LoadMigration { reframe_error: Some("gone.png".into()), ..Default::default() };
+        assert!(!failed.any(), "an inability changes nothing");
+        assert!(failed.note().expect("said").contains("gone.png"));
     }
 
     #[test]

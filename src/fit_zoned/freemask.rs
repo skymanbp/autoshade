@@ -43,6 +43,11 @@ pub(super) enum FreeMaskWhy {
     Rim,
     Unmeasured,
     Inert,
+    /// R39. The boundary gate found a shrink inside its budget, but the
+    /// SHRUNK mask leaves its footprint worse than the frame without it, or
+    /// the frame past its allowed drift (`AcceptedZone::still_accepted`);
+    /// the numbers are in the zone's own refusal note.
+    Shrunk,
 }
 
 impl FreeMaskWhy {
@@ -62,6 +67,7 @@ impl FreeMaskWhy {
             Self::Rim => "boundary-step",
             Self::Unmeasured => "boundary-unmeasurable",
             Self::Inert => "boundary-inert",
+            Self::Shrunk => "shrunk-below-acceptance",
         }
     }
 }

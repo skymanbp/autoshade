@@ -68,7 +68,7 @@ An AI decides *what to change*. A deterministic Rust engine *does* it.
 - **Reverse-fit** — `match` estimates an engine recipe from any target look,
   measures how far its *content* diverged before trusting it, then fits
   global, semantic, luminance-range and colour-range corrections behind
-  evidence gates; past the default Strength it may also carry a smooth
+  evidence gates; from the default Strength up it may also carry a smooth
   12×8×8 local colour field, the one control Lightroom cannot render (the
   sidecar still carries it).
   A structured sky/land residual can earn two or three overlapping native
@@ -271,8 +271,10 @@ error — measures whether the target still shows the same scene.
   **Atmosphere** mode: EV ±1, WB gain [0.80, 1.25], saturation ±30, curve
   slope [0.5, 1.5], confidence capped at 0.50, no per-channel curves, and a
   *structure-blind* ruler that stops asking replaced content to survive.
-- Strength governs that budget: the shipped 0.65 path is byte-identical to the
-  calibrated path, WB included; above it an out-of-budget WB is shrunk along
+- Strength governs that budget: the shipped 0.65 path's global controls, WB
+  included, are byte-identical to the calibrated path's (the colour field is
+  the one control that attaches at 0.65 and not one click below); above it an
+  out-of-budget WB is shrunk along
   its fitted log-K/linear-tint manifold and must clear the foreign-hue veto
   and a rotation budget opening from 0.05 at default through 0.593 at 0.85 to
   1.0 at full strength, or it is withheld.
@@ -319,8 +321,10 @@ Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-a
   regions, the spatial tiles and the free-form field masks are still raster
   masks classic XMP cannot hold, and keep the named bitmap loss.
 - A semantic zone's boundary is held to the same per-crossing budget a tile's
-  is: no seam larger than the scene's own local variation, floored at one code
-  value and capped at the calibrated 0.012 — and, since R37, charged only on
+  is: no seam larger than what the scene itself carries there — a feathered
+  zone's band variation, a hard-edged tile's scene discontinuity (a smooth sky
+  gradient masks nothing) — floored at one code value and capped at the
+  calibrated 0.012 — and, since R37, charged only on
   the part of a step the paired target does not itself carry there, read as a
   cell average so a repainted texture cannot vote, so a horizon the target has
   is reproduced rather than shrunk away. Both rulers read luma **and** each
@@ -441,9 +445,102 @@ v1.2.4 against Lightroom's own coverage rather than exported luma, on a
 
 Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
 
+### 11. The RAW denoiser is trained here and judged by lines written before the run
+
+- **The mosaic is cleaned before demosaic**, by AutoShade's own weights: DPIR's
+  DRUNet-colour architecture fine-tuned for this exact transform on RawNIND
+  pairs and synthetic sensor noise over the operator's own low-ISO frames,
+  shipped as `autoshade-raw-denoise-v2.pth`. The network is promised unit
+  variance everywhere, so the noise is **measured where it stands**: per tile,
+  on the finest diagonal wavelet band, with the samples chosen by the three
+  orthogonal bands so the choice cannot bias the number; a local linear field
+  is divided out before the network and multiplied back after. On the star
+  frame the per-tile residual's maximum fell 0.508 → 0.070 and the tile-to-tile
+  width of the fine-luminance ratio 0.185 → 0.014 (Lightroom's own: 0.011).
+- **Only luminance grain comes back.** At any positive strength the full clean
+  output is requested; the original and the clean frame go through the same
+  demosaic and calibration, and in linear light `1 − strength` of the
+  luminance difference returns along the grey axis. Every strength keeps the
+  clean chroma, so colour noise cannot come back by construction. The default
+  is 0.71.
+- **Hot pixels are mapped in every develop** of a Bayer RAW, before the grain
+  source and the cleaner read the mosaic: an isolated site stronger than 20
+  sigma of its own neighbourhood (half the MAD of the 24 same-colour samples
+  within 4 px, or the tile's sigma if larger), where a clipped sample never
+  measures noise and eight neighbours must vouch. On ten 61 MP frames: 86 /
+  20 / 77 sites inside the picture on three night frames, none on the fourth,
+  0 / 0 / 0 / 6 / 0 / 4 on ordinary frames; a frame with no mappable site
+  renders byte-identically.
+- **Faint stars survive.** The v1 weights had never seen a star and kept 10 %
+  of a 4σ star's flux, 42 % at 6σ, 73 % at 10σ. v2 continued from them with
+  point sources injected on the clean side of half of every batch and a loss
+  that seeks the mean in the units light adds in; the shipped checkpoint keeps
+  54 % at 4σ, 84 % at 6σ, 92 % at 10σ, chosen among its checkpoints by
+  acceptance lines committed before the run (`scripts/accept_v2.py`).
+- **The star-frame standard is a release gate.** Whenever the denoiser moves,
+  the operator's ISO-2500 star frame is compared line by line against
+  Lightroom's Denoise 50 on the same frame (`scripts/denoise_star_standard.py`):
+  eight cleaner lines decide, two front-end lines are reported. On the v1.6.0
+  build: 6 of 8 — 98.70 % of 17,817 true faint stars kept against Lightroom's
+  98.80 %; bright-star peaks 0.939 of the input against 0.953, and the four
+  colour planes' flux spread 0.0385 against a 0.02 limit, stay red; the front
+  end reads 0.2922 against Lightroom's 0.2701 (limit ±0.03) and 0.0139 (limit
+  0.0278). Two further fine-tunes — v3 with composite stars, v4 as five runs
+  on a rented GPU with a comet prior and a star-core-weighted loss — each had
+  their lines written first, failed them, and were refused.
+
+Details: [docs/TECH_STACK.md#raw-denoise](docs/TECH_STACK.md#raw-denoise) and
+the release notes, [docs/RELEASE_NOTES_v1.5.2.md](docs/RELEASE_NOTES_v1.5.2.md).
+
+### 12. The camera's own look is read from the picture, like with like
+
+A neutral develop of a RAW does not look like the camera's JPEG. The **base
+look** is the tone curve that closes that gap, estimated per photo from the
+RAW's embedded preview, and since v1.6.0 it is estimated in three ways that
+were each measured:
+
+- **Paired like with like.** The pairing is made at the camera's own framing,
+  and whether the preview carries the lens profile's corner lift is measured
+  on the pair (outer ring against inner ring) rather than assumed. On ten
+  ILCE-7RM4A frames with profile corner gains of 1.33–1.98 no embedded preview
+  carried it, and the lift used to become tone: on night frames, a run of
+  curve slopes from 0.33 to 2.25.
+- **On block means, not pixels.** The two pictures are matched on 64-column
+  block means: both sorted, walked in groups spanning at least 0.06 of neutral
+  luminance with at least 64 blocks each, one knot per group at its median
+  block, the ends pinned; a curve within 0.02 of the identity is no curve.
+  The preview's in-camera sharpening, noise reduction and JPEG texture no
+  longer read as tone: on the star frame the estimate is four knots instead of
+  thirteen, and the develop sits 0.75 levels rms from the camera's rendition
+  (median +0.19) against 4.24 (+2.56) before.
+- **Every photo gets it.** A recipe's version stamp says which estimator made
+  its curve (calibration era 3); one saved by an earlier version is
+  re-estimated the first time it is opened — by the app, batch export, the web
+  UI or `apply`, each of which says so. A recipe saved with no base look
+  keeps none.
+
+The tone stage scales colour by the luminance ratio, so every wiggle of slope
+acted on grain; on the star-frame standard's two front-end lines this moved
+0.3075 → 0.2922 (Lightroom 0.2701, limit ±0.03) and 0.0387 (limit 0.0309) →
+0.0139 (limit 0.0278). Details:
+[docs/TECH_STACK.md#camera-base-look](docs/TECH_STACK.md#camera-base-look).
+
 ### Designed, not yet shipped
 
-Nothing. Everything that used to sit here has shipped: the style-retrieval
+- **The star standard's lines 6 and 7c.** On the v1.6.0 build v2 keeps a
+  bright star's flux (the 5×5 aperture reads 1.00–1.03 of the input) but
+  spreads its core a little (single-sample peak 0.82 of the input for faint
+  true stars, 0.92 for bright ones), which is what the two lines read (§11).
+  v3 and v4 were designed against exactly this, trained, and refused by their
+  own pre-written lines; v2 ships with both lines recorded red.
+- **The sharpening amount's scale against Lightroom's.** A RAW that carries no
+  amount renders at Lightroom's own default of 40 since v1.6.0 (radius 1.0,
+  detail 25, masking 0; a baked raster at 0; an absent amount is left to
+  Lightroom in the sidecar), but the operator is this engine's own, so 40 here
+  and 40 there are the same default, not a measured equivalence. The
+  calibration needs three same-frame Lightroom exports at Sharpness 0 / 40 / 80.
+
+Everything else that used to sit here has shipped: the style-retrieval
 expansion (finished exports as a look library, the SigLIP 2 text tower, local
 Qwen3-VL descriptions, the GUI embedding switch and the Direction-adherence
 axis) landed across steps 14 and S1–S3; the eased linear-gradient falloff — the
@@ -508,6 +605,11 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 | Roundness (tilted 2:1 ellipse, feather 25/50/75) | Lightroom's R−100/0/+100 exports differ by max\|Δ\| = 0 DN over 26 Mpx; the engine draws one ellipse too | [Masks](#masks) |
 | Brush geometry | D1 error 874 px → 9.8 px after pixel-centre sampling and the pixel/aspect metric | [Masks](#masks) |
 | X-Trans demosaic (approximate) | X-S10 G/R ratio 1.5503 → 0.9476 | [RAW decode](#raw-decode-and-cfa) |
+| RAW denoise, measured noise field (star frame) | per-tile residual max 0.508 → 0.070; tile-to-tile width of the fine-luminance ratio 0.185 → 0.014 (Lightroom's own 0.011); ground-truth bench moved ≤ 0.01 dB | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-lines-written-before-the-run) |
+| Faint stars through the cleaner (synthetic-truth probe, G1 plane) | flux kept at 4σ / 6σ / 10σ: v1 0.105 / 0.420 / 0.726 → v2 0.541 / 0.835 / 0.918; lines fixed before the run | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-lines-written-before-the-run) |
+| Star-frame standard, v1.6.0 build, against Lightroom Denoise 50 on the same frame | cleaner group 6 of 8: 98.70 % of 17,817 true faint stars kept against 98.80 %; bright-star peak 0.939 against 0.953 (red); four-plane flux spread 0.0385 against 0.02 (red); front end 0.2922 against 0.2701 (±0.03) and 0.0139 against 0.0278 | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-lines-written-before-the-run) |
+| Hot-pixel map (ten 61 MP frames) | 86 / 20 / 77 sites inside the picture on three night frames, none on the fourth; 0 / 0 / 0 / 6 / 0 / 4 on ordinary frames; about 0.1 s a frame | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-lines-written-before-the-run) |
+| Camera base look, era 3 (star frame, 8-bit levels) | develop against the camera's rendition 0.75 rms (median +0.19), 4.24 (+2.56) before; 4 knots instead of 13; front-end lines 0.3075 → 0.2922 and 0.0387 → 0.0139 | [What is new §12](#12-the-cameras-own-look-is-read-from-the-picture-like-with-like) |
 | Reverse-fit, stone viaduct (full solve, Reverse-fit strength 100 %) | look error 0.161 → 0.023 at confidence 0.63 (a global solve with the cast curves projected to t = 0.485, the per-band mixer on Orange/Yellow/Aqua/Blue at the 45 ceiling, two semantic zones, two boundary-gated tiles and one field mask), D = 0.180; at the default 65 % the pair fits to 0.047 at confidence 0.25 with the mixer capped at 18, four tiles and two field masks, and v1.2.2's fit of it is where the seam fix was measured: sky tile 0.0278 → 0.0042 (k 0.121), delivered +3.15 → +0.92 codes | [What is new §2](#2-reverse-fit-inverse-rendering-from-any-finished-look) |
 | Reverse-fit, Cornwall islet (full solve, composed calibration) | look error 0.137 → 0.027 at confidence 0.66, D = 0.136 sized from the sensor frame (0.304 from the cropped preview); the global cast projected to t = 0.363, delivered sky hue spread 9.6° (v1.2.2 shipped 33.1°) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Reverse-fit, desert canyon at dusk (full solve, Reverse-fit strength 85 %; the v1.3.0/v1.3.1 reference pair) | look error 0.110 → 0.048 at confidence 0.25, D = 0.275 at pixel scale and 0.609 at layout scale (sky zone 0.617); on the 2048 px acceptance render, whole-frame mean \|diff\| against the target 0.0276 (v1.2.6: 0.0571), sky ΔE 18.2 → 4.9, land 7.0 → 6.9; a solved white balance, two Select Sky bands, four boundary-gated tiles and the 12×8×8 colour field; `match --zoned` 5 min 29 s | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
@@ -759,6 +861,10 @@ numbers](#measured-numbers) are not repeated.
   order were measured on the installed pool rather than assumed, and the one
   half that does not decode (a Look's creative colour table) is named on screen
   instead of being silently dropped. Nothing Adobe ships is redistributed.
+- `src/denoise.rs` and `python/denoise_raw.py` clean a Bayer RAW's mosaic
+  before demosaic with the weights fine-tuned here, after its hot pixels are
+  mapped and its noise measured tile by tile; `src/render.rs` returns
+  `1 − strength` of the luminance grain in linear light (§11).
 
 ### Develop pipeline and tone model
 
@@ -768,6 +874,10 @@ numbers](#measured-numbers) are not repeated.
   saturation, NR, sharpening and local edits.
 - Negative Texture is two measured parallel low-pass arms (`A1=0.172443`,
   `A2=0.304888`) with a calibrated hyperbolic depth law.
+- `render::camera_base_look` estimates the per-photo base curve from the
+  RAW's embedded preview on 64-column block means, paired like with like
+  (calibration era 3, §12); a RAW that carries no sharpening amount renders
+  at Lightroom's default of 40, a baked raster at 0.
 
 ### Masks
 

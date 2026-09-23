@@ -73,6 +73,109 @@ coercing either to RGB would invent a colour model.
   sRGB assumption is disclosed because the file contains no tag that can make
   the choice authoritative.
 
+### RAW denoise
+
+**Method.** A Bayer RAW's sensor mosaic is cleaned before demosaic
+(`src/denoise.rs` → `python/denoise_raw.py`) by AutoShade's own network: DPIR's
+DRUNet-colour architecture carrying weights fine-tuned for this exact transform
+on RawNIND pairs (Brummer & De Vleeschouwer, UCLouvain Dataverse,
+doi:10.14428/DVN/DEQCIM, CC BY-SA 4.0) and synthetic sensor noise over the
+operator's own low-ISO frames. The four colour planes are stabilised by a
+generalised Anscombe transform under a per-plane affine noise model
+`var = a·x + b` fitted on the frame's flat blocks; the network is promised unit
+variance everywhere, so the residual noise is then **measured where it
+stands**: per tile, on the finest diagonal Haar band, with the samples chosen by
+the three orthogonal bands (LL for point sources, LH/HL for texture) so that
+the choice cannot bias the number; a Gaussian-weighted local linear field,
+clamped to 0.5–2.0, is divided out before the network and multiplied back
+before the inverse transform. At any positive strength the Rust side requests
+the full clean output; the original and the clean mosaic go through the same
+demosaic and calibration, and in linear light `1 − strength` of the LUMINANCE
+difference returns along the grey axis (the Y row of the working space's own
+matrix), so the chroma stays clean at every strength (`render/denoise_grain`).
+Before the grain source and the cleaner read the mosaic, hot pixels are mapped
+(`denoise::hot_pixels`, hooked unconditionally in `src/render.rs`): an isolated
+site stronger than 20 sigma of its own neighbourhood (half the MAD of the 24
+same-colour samples within 4 px, or the tile's sigma if larger), where a
+clipped sample never measures noise and eight neighbours must vouch.
+
+**Training and acceptance.** `scripts/fetch_rawnind.py` → `prep_pairs.py` /
+`prep_clean.py` → `train_raw.py`. v1 (v1.5.0) trained on the pairs alone; v2
+(v1.5.2) continued from v1 with point sources injected on the clean side of
+half of every batch (`point_sources.py`, `--stars 0.5`) and a loss that seeks
+the mean in the units light adds in (`--loss l2x`), 60000 steps. Every
+candidate's acceptance lines are committed before the run
+(`scripts/accept_v2.py`): flux returned at 1.5σ and 2.5σ at most 0.35, at 4σ
+at least 0.50, 6σ 0.75, 10σ 0.90, 20σ and 40σ 0.95 on the synthetic-truth
+instrument (`denoise_flux_truth.py`); the star-free sky's mean shift at most
+0.40 DN per plane; the ground-truth bench's two windows within 0.150 dB of v1
+(`denoise_bench.py`); and the star-frame standard's cleaner group must not lose
+a line v1 passes. The **star-frame standard** (`denoise_star_standard.py`) is
+the release gate whenever the denoiser moves: the operator's ISO-2500 star
+frame against Lightroom's Denoise 50 on the same frame, every render through
+the product path, ten lines in two groups — the cleaner group (1c, 2c, 3, 4,
+5c, 6, 7c, 8) decides the exit status; the front-end group (1f, 2f) reads the
+finished develop, which carries the camera base look, and is reported.
+
+**Parameters.**
+
+- Noise model `var = a·x + b` per plane, its affine span widened by the field's
+  minimum; the field clamped to `0.5–2.0`; tiles of 256 samples (**measured
+  per frame**).
+- Hot-pixel threshold 20 local sigma; neighbourhood 24 same-colour samples
+  within 4 px, MAD halved; eight vouching neighbours (**designed**, each guard
+  ablated on ten 61 MP frames; the rule is a subset of its first version on
+  every frame).
+- Luminance grain return: default strength 0.71 on a RAW (**measured**:
+  fine-luminance residual 0.3145 / 0.2938 of the input's on two ordinary night
+  frames, beside Lightroom's Denoise 50's 0.28–0.30); baked sources keep SCUNet
+  at 0.5.
+- Weights `autoshade-raw-denoise-v2.pth`, 130,590,559 bytes, pinned by SHA-256
+  in `python/denoise_raw.py`, mirrored at
+  `Azng0/autoshade-mirror-autoshade-raw-denoise` and tried there first
+  (`python/_mirror.py`).
+
+**Measured results & disclosures.**
+
+- Noise field, star frame F1: per-tile σ after stabilisation, p5–p95, 0.83–1.19
+  before (edge tiles up to 1.34) → 0.963–1.031 after; per-tile residual max
+  0.508 → 0.070; tile-to-tile width of the fine-luminance ratio on the same
+  develop 0.185 → 0.014 (Lightroom's own 0.011); the ground-truth bench moved
+  by at most 0.01 dB.
+- Faint stars, synthetic-truth probe on the operator's frame (G1 plane, flux
+  kept at 4σ / 6σ / 10σ): v1 0.105 / 0.420 / 0.726; v2, the 50000-step
+  checkpoint, 0.541 / 0.835 / 0.918, with 1.5σ noise peaks at 0.045.
+- Star-frame standard on the v1.6.0 build: cleaner group 6 of 8 — 1c 0.2924,
+  2c 0.0116, 3, 4 and 8 pass; 5c 98.70 % of 17,817 true faint stars kept
+  against Lightroom's 98.80 %; 6 reads 0.939 of the input's bright-star peak
+  against Lightroom's 0.953 (limit Lightroom − 0.01: red); 7c's four-plane flux
+  spread 0.0385 (1.033 / 1.012 / 1.011 / 0.995) against 0.02 (red). Front end:
+  1f 0.2922 against Lightroom's 0.2701 (limit ±0.03), 2f 0.0139 (limit 0.0278).
+  The two red lines are one effect, in the network: on its own output mosaic
+  the single-sample peak reads 0.82 of the input's for faint true stars (v1
+  0.89) and 0.92 for bright ones (v1 0.97) while the 5×5 aperture reads
+  1.00–1.03 — the flux is kept and the core spread a little, the price of a
+  loss that seeks the mean.
+- Refused: v3 (composite stars — a core on a streak, an end, a halo;
+  `scripts/denoise_composite_truth.py`) moved line 6 only 0.871 → 0.88, lost
+  0.7–0.9 pt of 5c and failed the flux-truth lines at 10,000 steps; v4 (five
+  runs on a rented H200 from the v2 weights: a comet prior and a star-core-
+  weighted loss, K 3 / 6 / 12, alone and together) gave ten candidates that all
+  failed the synthetic-core and ordinary-frame lines and kept fewer faint stars
+  (93.7–94.9 % against 96.3 %) and lower peaks (0.867–0.894 against 0.94) than
+  v2. A return of the input's own 3×3 star cores after the network was measured
+  and withdrawn (+40 % spikes in the flat blocks of a daylight frame, colour
+  noise beside faint stars).
+- Hot pixels on ten 61 MP frames: 86 / 20 / 77 sites inside the picture on
+  three night frames, none on the fourth; 0 / 0 / 0 / 6 / 0 / 4 on ordinary
+  frames; about 0.1 s; a frame with no mappable site renders byte-identically.
+  Known limit: a pure-colour point source no wider than one photosite on flat
+  dark ground reaches no witness of another colour and is mapped as a defect
+  (the red LED dots of one calibration frame).
+- Not matched on the star frame: chroma-to-luma of the fine grain 0.268
+  against Lightroom's 0.152; star widths on two frames +0.285 / +0.325 px
+  against Lightroom's +0.147 / +0.291 px.
+
 ### Imported spot removal (v1.5.0 F9)
 
 `crs:RetouchAreas` — the dust, the power line, the stranger on the beach — is
@@ -226,6 +329,11 @@ bundled; a machine with no profiles gets a named refusal.
 - `src/dcp.rs` — `.dcp` parse, table lookup and profile discovery (v1.5.0).
 - `src/adobe.rs` — the Adobe Camera Raw roots `dcp.rs` and `lcp.rs` share.
 - `src/render/profile.rs` — the profile render stage (v1.5.0).
+- `src/denoise.rs` — the RAW-mosaic cleaner's sidecar contract, `mosaic_args_for`
+  and the `hot_pixels` map; `python/denoise_raw.py` — stabilisation, the
+  measured noise field and the network; `scripts/train_raw.py`,
+  `point_sources.py`, `accept_v2.py`, `denoise_flux_truth.py`,
+  `denoise_bench.py`, `denoise_star_standard.py` — training and acceptance.
 - `docs/ARCHITECTURE.md` — release decode matrix and refusal policy.
 - `docs/ROADMAP-archive.md` — X-S10 before/after measurements.
 
@@ -366,6 +474,14 @@ supposed to remove.
   `L = 0.02 → 1.0` over Detail²; Laplacian fine band `0 → 0.5` over Detail;
   Masking edge gate full at a blurred-luma gradient of `0 → 0.04` per film px
   (**designed, provisional** until the kit's `SH-*` ladder).
+- Sharpening default (v1.6.0): a recipe that holds no amount renders at
+  `LR_RAW_SHARPENING` = 40 on a RAW negative — Lightroom's own default for a
+  RAW (radius 1.0, detail 25, masking 0) — and at nothing on a baked raster;
+  an explicit 0 is a real 0; the sidecar leaves an absent amount out so
+  Lightroom applies its own default, and the 40 it writes back reads as a
+  materialisation, not an edit (**designed to Lightroom's documented
+  default**; the amount's SCALE is not calibrated against Lightroom, which
+  needs three same-frame exports at Sharpness 0 / 40 / 80).
 - Luminance noise reduction: self-guided filter on luma, box radius
   `1 → 4` film px and noise threshold `0.004 → 0.054` (gamma units) over
   Luminance, the threshold scaled `1.6 → 0.4` over Detail, ε = threshold²;
@@ -400,12 +516,65 @@ supposed to remove.
   Whites −50 compressed input `0.9568…0.9731` from 411 codes to 75, while
   Highlights +60 clipped above `0.8195`, affecting 740 of 4096 inputs (18%).
 
+### Camera base look
+
+**Method.** A neutral develop does not look like the camera's own JPEG; the
+base look is the per-photo tone curve that closes the gap, estimated by
+`render::camera_base_look` from the RAW's embedded preview and stored in the
+recipe. One entry serves the app's open path, the pipeline and the web UI. The
+neutral develop and the preview are paired at the camera's own framing;
+whether the preview carries the lens profile's corner lift is measured on the
+pair (outer-ring against inner-ring residual, `corner_residual`), and the lift
+enters the estimate only where the pairing says the camera made it. The match
+is then made on 64-column block-mean lumas of both ≤1024 px thumbnails
+(`block_lumas`, the grid the corner measure uses; `camera_base_knots`): both
+sorted, walked in groups spanning at least `MIN_SPAN` = 0.06 of neutral
+luminance with at least `MIN_BLOCKS` = 64 blocks each (a short tail merges into
+the group before it), one knot per group at its median block, (0, 0) and
+(1, 1) pinned; a curve within 0.02 of the identity is no curve, and a grid that
+does not fit or holds fewer than 64 blocks gives no estimate. The recipe's
+`version` stamp names the estimator (`CALIB_ERA` = 3, v1.6.0); a recipe stamped
+below it that carries a curve of three or more knots is re-estimated the first
+time it is opened — by the app, batch export, the web UI or `apply`, each of
+which says so (`pipeline::base_curve_is_pre_era`) — and a recipe with no curve
+keeps none.
+
+**Measured results & disclosures.**
+
+- Why not pixels: a pixel-level CDF match put eleven quantile knots 0.004–0.01
+  apart on a night frame, at the scale of the 8-bit preview's own
+  quantisation, and read the preview's in-camera sharpening, noise reduction
+  and JPEG texture as tone (F1's curve ran slopes of 0.85–1.72 across the sky
+  band). The tone stage scales colour by the luminance ratio, so each wiggle
+  of slope acted on the input's grain and the cleaner's output differently.
+- Why like with like: on ten ILCE-7RM4A frames (profile corner gain 1.33–1.98)
+  no embedded preview carried the lens profile's lift, and the lift had become
+  tone — on night frames a run of slopes from 0.33 to 2.25. Estimates paired
+  that way are brighter by +1.3 to +8.5 levels (8-bit) on average over the ten
+  frames.
+- Engine probe, render against the camera's preview in 8-bit levels: F1 0.75
+  rms, median +0.19 (era 2: 4.24 / +2.56), four knots instead of thirteen;
+  calibration pairs p37 11.92 / −2.05 and p39 22.50 / −0.60; a Sony ILCE-7M3
+  zoo frame 2.85 / −1.69 (7.02 / −6.30). The design was chosen on the real
+  engine, not on the Python simulator, which sat 0.006 above it: pixel-level
+  matching with merged knots failed at 0.3234, in-place pairing produced
+  plateaus on three other bodies, every block-mean variant passed.
+- Star-frame standard, front-end lines, product path: 1f 0.3075 → 0.2922
+  (Lightroom 0.2701, limit ±0.03); 2f 0.0387 (limit 0.0309) → 0.0139 (limit
+  0.0278).
+- The calibration corpus moved with the curve: the fan gate's two real
+  two-temperature pairs read 12.1° / 10.3° (11.9° / 9.0° before), both still
+  admitted under the 15° line; the test's pins carry the record.
+
 ### Source
 
 - `src/render.rs` — pipeline order, transfer LUTs, dehaze, tone LUT,
   `tone_knot_weights`, the parametric curve, Texture arms, and clarity.
 - `src/render/detail.rs` — `FilmScale`, sharpening, luminance and colour noise
   reduction (v1.5.0).
+- `src/render.rs` — `camera_base_look`, `camera_base_knots`, `block_lumas`,
+  `corner_residual` (calibration era 3, v1.6.0); `src/pipeline.rs` —
+  `base_curve_is_pre_era`, the re-estimate on open.
 - `src/render/hdr.rs` — HDR edit mode and the SDR rendition, the develop's last
   stage (v1.5.0 F8).
 - `src/recipe.rs` — bounded global and local adjustment domains.
@@ -459,6 +628,15 @@ well: the crossing charge is the part of the introduced step the paired
 target does not carry, the target's own step read as a cell mean (eight-crossing
 quorum; one-code floor; two standard errors from zero) as a share of the
 frozen candidate's. The unchanged colour-field producer runs on that stack.
+Since R39 the correction a gate SHIPS is judged once more at its shrunk
+strength — do-no-harm against the same render without it, plus the
+attachment's own frame-drift tolerance (`AcceptedZone::still_accepted`,
+`refuse_shrunk_zones`) — because a tile admitted at k = 1 had shipped at
+k = 0.134 with its own cell's colour-inclusive residual worse than untouched
+(that tile itself passes R39, its luma-only acceptance residual improving;
+the block it left is R40's, the boundary ruler's, to refuse — the 2026-09-22
+re-fit no longer attaches it at 0.85 and ships it at 1.0 at k = 0.119 with a
+context-charged p90 of 0.0078 luma, against k = 0.161 and 0.0104 before R40).
 
 The ramp itself is centralized in `linear_coverage(t, profile)`. Since
 v1.2.4 it ships `LINEAR_FALLOFF = Measured`: the C1 smoothstep on the warped
@@ -874,25 +1052,30 @@ reading.
   differ from its parent by at least `2/255`.
 - `SPATIAL_FRAME_REGRESSION_TOL = 0.0` and the shared boundary ceiling is
   `0.012`, read for these hard 0/255 rasters as a CROSS-BOUNDARY STEP
-  (`ZONE_STEP_OFFSET = 2` px paired samples across the 50% contour,
-  differenced against the render without the correction, and since R37
+  (`ZONE_STEP_OFFSET = 2` px paired samples across the 50% contour, each
+  read as a discontinuity — the 3-px step less the frame's own trend over
+  `STEP_FLANK_BASELINES = 2` x 3-px flanks, R40 — differenced against the
+  render without the correction, and since R37
   charged only for what the paired target does not itself carry across the
   same feet, read as a per-cell mean). Zero measured crossings refuses the
   correction instead of passing it.
-- Both mask families charge each crossing against the same per-crossing
-  budget: `max(the scene's own change across the crossing, BOUNDARY_STEP_SHAPE
-  = 3 x the correction's own same-side slope off the frozen k=1 candidate,
-  minimum over two consecutive baselines)` clamped to `[BOUNDARY_STEP_FLOOR =
-  1/255, the family's ceiling]`, with the charge `raw x (ceiling / budget)`
-  below the ceiling and the raw reading at or above it. The soft
-  transition-band ruler joined that rule on 2026-09-10; the luminance/colour
+- Both mask families charge each crossing against its own per-crossing
+  budget, with the charge `raw x (ceiling / budget)` below the ceiling and
+  the raw reading at or above it. Soft family (since 2026-09-10): `max(the
+  scene's own change across the band, BOUNDARY_STEP_SHAPE = 3 x the
+  correction's own same-side slope off the frozen k=1 candidate, minimum
+  over two consecutive baselines)` clamped to `[BOUNDARY_STEP_FLOOR = 1/255,
+  ZONE_BOUNDARY_RIM_MAX]`. Hard family (R40, v1.5.2): the scene's own
+  discontinuity `|disc(reference)|` clamped to `[BOUNDARY_STEP_FLOOR,
+  ZONE_BOUNDARY_STEP_MAX]` — no gradient context, no slope credit (a ramp
+  reads ~0 under the de-trending and needs none). The luminance/colour
   range family still declines, because it admits only already-smooth crossings
   and reports the rendered gradient there.
 - Every crossing is read in luma AND per channel (the soft family transports
   each channel through the settled zone's own multiplier `M_c`), the crossing
   reports the largest of the three channel magnitudes, and the gate compares
-  `max(charged luma p90, charged colour p90)`. The channel's slope credit is
-  floored at the LUMA slope (`colour_slope_credit`): one channel's `u1` is a
+  `max(charged luma p90, charged colour p90)`. The soft family's channel slope
+  credit is floored at the LUMA slope (`colour_slope_credit`): one channel's `u1` is a
   difference of two 8-bit renders, so its slope over a 3-px baseline
   quantises to whole codes and the min-over-two-baselines rule reads 0 on a
   real ramp, while luma resolves that same shared ramp sub-code.

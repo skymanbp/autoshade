@@ -34,6 +34,27 @@ faint point sources (`point_sources.py` has the numbers).
 Validation reports, next to the PSNR of the star-free held-out pairs, the share
 of injected star flux the network returns, by brightness class.
 
+v4 (2026-09-23, `--comet`, `--core-weight`) is for the frame's own bright stars,
+which v2 keeps at 0.87 of the input's peak against Lightroom's 0.94 (the star
+standard's line 6), the outer third of the frame at 0.81: a core narrower than
+a photosite pair at the head of a flare (`point_sources.py`, the comet). Two
+things, each its own flag so a run can carry one without the other:
+  * `--comet S`: a share S of the star-bearing crops draw comets.
+  * `--core-weight K`: the loss counts K times where a star's own light stands
+    `CORE_WEIGHT_SIGMAS[1]` sigma or more over the noise of the clean level,
+    ramped in from 1 at `CORE_WEIGHT_SIGMAS[0]` — below that the flux-truth
+    lines call a returned star returned noise, and from 4 sigma up they ask
+    for it — normalised by the weights' mean so the step size does not move.
+    This weight reads the CLEAN side on purpose,
+    unlike the variance divisor above: a faint or narrow core is "star" or
+    "spike of noise / hot photosite" and the mean-seeking loss hands it the
+    conditional mean of the two, which the prior alone -- stars are rare --
+    pulls toward the spike (an injected 8-sigma core alone keeps 0.67 under
+    v2). With the star's pixels weighted K the minimiser is that mean with
+    the star hypothesis' odds multiplied by K. What that costs on ordinary
+    frames -- noise spikes kept as stars -- is what the acceptance lines B
+    and E measure; K = 1 is v2's loss exactly.
+
 Half of every batch is a REAL pair (RawNIND, the dataset's train split: its
 noisy frame, its own estimated (a, b), the gain-matched mean of its GT
 frames); half is SYNTHETIC: a clean crop (the operator's low-ISO frames or a
@@ -195,11 +216,35 @@ def make_batch(x_noisy, x_clean, a, b):
 # network's OUTPUT and never on the thing it is learning — which is what
 # `test_the_clamp_never_touches_a_target` holds it to.
 Z_FLOOR = 1.0
+# v4: the core weight is 1 up to a star's light standing this many sigma over the noise of the clean level
+# (below it a returned star is returned noise, accept_v2.py's 1.5- and 2.5-sigma lines) and whole from the
+# second value up (the 4-sigma line asks for half the flux, the 6-sigma one three quarters).
+CORE_WEIGHT_SIGMAS = (2.0, 5.0)
 
 
-def loss_mean_seeking(out, zn_span, x_noisy, x_clean, a, b):
+def core_weight(light, x_clean, a, b, k):
+    """v4's per-pixel loss weight (B,4,H,W): 1 where a star's own light (`light`,
+    x units) stands under `CORE_WEIGHT_SIGMAS[0]` sigma of the noise of the
+    clean level, `k` from `CORE_WEIGHT_SIGMAS[1]` up, linear between. None when
+    k is 1 (v2's loss). The noise carries the transform's own 3/8 a^2 term, as
+    `loss_mean_seeking`'s variance does: 166 of 400 sampled real pairs carry
+    b = 0 in a channel and 196 of 400 crops hold clean pixels at 0, where the
+    sigma of a x + b alone is 0 and 0 / 0 made the weight, the loss and the
+    step NaN — the 2026-09-23 cloud leg's four weighted runs froze at ~5000
+    steps that way (the grad scaler halved its scale on every NaN batch until
+    every fp16 gradient flushed to zero, with the printed loss finite)."""
+    if k <= 1.0:
+        return None
+    lo, hi = CORE_WEIGHT_SIGMAS
+    a4, b4 = a[:, :, None, None], b[:, :, None, None]
+    sigma = torch.sqrt(a4 * x_clean.clamp_min(0.0) + b4 + 0.375 * a4 * a4)
+    return 1.0 + (k - 1.0) * ((light / sigma - lo) / (hi - lo)).clamp(0.0, 1.0)
+
+
+def loss_mean_seeking(out, zn_span, x_noisy, x_clean, a, b, weight=None):
     """The v2 loss (see the module docstring). out (2B,3,H,W) is the network's
-    answer in normalised z; a, b (B,4)."""
+    answer in normalised z; a, b (B,4). `weight` (B,4,H,W), v4's `core_weight`,
+    multiplies each pixel's cost and is normalised by its own mean; None is v2."""
     pick = lambda v: torch.cat([v[:, [0, 1, 3]], v[:, [0, 2, 3]]], 0)[:, :, None, None]
     a3, b3 = pick(a), pick(b)
     span = torch.cat([zn_span, zn_span]).view(-1, 1, 1, 1)
@@ -207,7 +252,11 @@ def loss_mean_seeking(out, zn_span, x_noisy, x_clean, a, b):
     x_hat = ns.igat((out * span).clamp_min(Z_FLOOR), a3, b3)
     level = F.avg_pool2d(F.pad(to_triplets(x_noisy), (4, 4, 4, 4), mode="reflect"), 9, stride=1).clamp_min(0.0)
     variance = a3 * level + b3 + 0.375 * a3 * a3
-    return ((x_hat - to_triplets(x_clean)) ** 2 / variance).mean()
+    cost = (x_hat - to_triplets(x_clean)) ** 2 / variance
+    if weight is None:
+        return cost.mean()
+    w = to_triplets(weight)
+    return (cost * w).sum() / w.sum()
 
 
 FLUX_CLASSES = ((1.5, 3.0), (3.0, 6.0), (6.0, 12.0), (12.0, 25.0), (25.0, 400.0))
@@ -276,6 +325,15 @@ def main():
     ap.add_argument("--resume", default="")
     ap.add_argument("--stars", type=float, default=0.5, help="share of crops that get point sources; 0 is v1")
     ap.add_argument("--loss", choices=("l2x", "l1z"), default="l2x", help="l1z is v1's")
+    ap.add_argument("--composite", type=float, default=0.0,
+                    help="share of star-bearing crops whose stars are a compact core on a trail or halo "
+                         "(point_sources.draw); 0 is v2's prior")
+    ap.add_argument("--comet", type=float, default=0.0,
+                    help="share of star-bearing crops whose stars are a narrow core at the head of a flare "
+                         "(point_sources.draw, v4); 0 is v2's and v3's prior")
+    ap.add_argument("--core-weight", type=float, default=1.0,
+                    help="the loss's weight where a star's own light stands 5 sigma over the noise, ramped in "
+                         "from 1 at 2 sigma (v4); 1 is v2's loss")
     args = ap.parse_args()
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -402,9 +460,10 @@ def main():
         if n_syn:
             xc_syn = torch.from_numpy(np.stack(syn_clean)).to(dev)
             p = ns.sample_params(n_syn, gen, dev)
+            light_syn = torch.zeros_like(xc_syn)
             if args.stars > 0:
-                xc_syn, _, _ = ps.add_to_pair(xc_syn, None, p["a"][:, None].expand(-1, 4), p["b"][:, None].expand(-1, 4),
-                                              rng, gen, args.stars)
+                xc_syn, _, light_syn = ps.add_to_pair(xc_syn, None, p["a"][:, None].expand(-1, 4), p["b"][:, None].expand(-1, 4),
+                                                      rng, gen, args.stars, composite=args.composite, comet=args.comet)
             xn_syn, b_seen = ns.synthesize(xc_syn, p, gen)
             a_est = p["a"] * torch.exp(torch.randn(n_syn, generator=gen, device=dev) * 0.03)
             b_est = b_seen * torch.exp(torch.randn(n_syn, generator=gen, device=dev) * 0.15)
@@ -413,15 +472,17 @@ def main():
             xc_real = torch.from_numpy(np.stack(xs_c)).to(dev)
             a_real = torch.from_numpy(np.stack(as_)).to(dev).clamp_min(1e-7)
             b_real = torch.from_numpy(np.stack(bs_)).to(dev).clamp_min(0)
+            light_real = torch.zeros_like(xc_real)
             if args.stars > 0:
-                xc_real, xn_real, _ = ps.add_to_pair(xc_real, xn_real, a_real, b_real, rng, gen, args.stars)
+                xc_real, xn_real, light_real = ps.add_to_pair(xc_real, xn_real, a_real, b_real, rng, gen, args.stars,
+                                                              composite=args.composite, comet=args.comet)
         if n_real and n_syn:
-            xn = torch.cat([xn_real, xn_syn]); xc = torch.cat([xc_real, xc_syn])
+            xn = torch.cat([xn_real, xn_syn]); xc = torch.cat([xc_real, xc_syn]); light = torch.cat([light_real, light_syn])
             a = torch.cat([a_real, a_est[:, None].expand(-1, 4)]); b = torch.cat([b_real, b_est[:, None].expand(-1, 4)])
         elif n_real:
-            xn, xc, a, b = xn_real, xc_real, a_real, b_real
+            xn, xc, a, b, light = xn_real, xc_real, a_real, b_real, light_real
         else:
-            xn, xc, a, b = xn_syn, xc_syn, a_est[:, None].expand(-1, 4), b_est[:, None].expand(-1, 4)
+            xn, xc, a, b, light = xn_syn, xc_syn, a_est[:, None].expand(-1, 4), b_est[:, None].expand(-1, 4), light_syn
         a, b = a.contiguous(), b.contiguous()
         zn, tn, sigma, span = make_batch(xn, xc, a, b)
         with torch.autocast("cuda", dtype=torch.float16):
@@ -429,7 +490,7 @@ def main():
         if args.loss == "l1z":
             loss = (o.float() - to_triplets(tn)).abs().mean()
         else:
-            loss = loss_mean_seeking(o.float(), span, xn, xc, a, b)
+            loss = loss_mean_seeking(o.float(), span, xn, xc, a, b, core_weight(light, xc, a, b, args.core_weight))
         opt.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         scaler.unscale_(opt)

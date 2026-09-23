@@ -1399,6 +1399,53 @@ pub fn film_short_edge(path: &Path) -> Option<u32> {
     frame_size(path).ok().and_then(|(w, h)| u32::try_from(w.min(h)).ok())
 }
 
+/// The window a develop of `path` lands in: [`source_frame`]'s two halves, and
+/// how far that window sits from the one every release up to v1.5.1 cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceWindow {
+    /// The frame the file STORES, un-turned — [`default_crop`]'s size for a
+    /// RAW, the header's own dimensions for a baked image.
+    pub size: (usize, usize),
+    /// The turn the file's own metadata asks for.
+    pub exif: rawler::Orientation,
+    /// Sensor pixels between this build's develop window and the window every
+    /// release up to v1.5.1 developed the same file from — `(0, 0)` for every
+    /// file whose window never moved, and for a baked image. It is the
+    /// DefaultCrop origin on the shape [`align_default_crop`] moves off the
+    /// sensor's corner (the measured ILCE-7RM4A files: `(32, 20)`); see
+    /// [`legacy_window_shift`] for why the v0.32.0 shape reads zero.
+    pub legacy_shift: (i32, i32),
+}
+
+/// How far, in sensor pixels, [`align_default_crop`]'s window sits from where
+/// releases up to v1.5.1 cut the same file — the vector
+/// `pipeline::migrate_recipe_coord_frame` moves an era-≤1 recipe's geometry
+/// by (`recipe::COORD_ERA` 2).
+///
+/// Only the shape rawler cuts from the sensor's CORNER counts: no active area,
+/// a declared crop origin off `(0, 0)`. Every release before 2026-09-21
+/// developed that shape from the corner, so a recipe saved by any of them is
+/// drawn against the corner window and the shift is the declared origin. The
+/// other shape `aligned_demosaic_roi` moves — an active area of the crop's
+/// size at another origin — has been developed from the declared origin since
+/// v0.32.0, so a recipe saved since then is already in this frame and reads
+/// zero. (A recipe saved by v0.30–v0.31 on THAT shape would be
+/// `crop.p − active.p` off and its stamp cannot tell; no file of that shape
+/// exists in hand — it is a source read, row 1b of the decode table.) A
+/// refused window (off-sensor tags) develops from the un-aligned window
+/// before and after, so it reads zero too.
+pub(crate) fn legacy_window_shift(
+    crop: Option<rawler::imgop::Rect>,
+    active: Option<rawler::imgop::Rect>,
+    width: usize,
+    height: usize,
+) -> (i32, i32) {
+    match aligned_demosaic_roi(crop, active, width, height) {
+        CropAlignment::Moved(r) if active.is_none() => (r.p.x as i32, r.p.y as i32),
+        _ => (0, 0),
+    }
+}
+
 /// The frame the FILE STORES, un-turned, together with the turn its own
 /// metadata asks for — the two halves [`frame_size_turned`] folds together,
 /// and the pair `xmp::FrameAspect` needs whole (R27 A7/A8).
@@ -1418,7 +1465,11 @@ pub fn film_short_edge(path: &Path) -> Option<u32> {
 ///
 /// Metadata only: `dummy = true` on the RAW arm means no sensor
 /// decompression, and the baked arm decodes no pixel at all.
-pub fn source_frame(path: &Path) -> Result<((usize, usize), rawler::Orientation)> {
+///
+/// Since v1.5.2 the answer also carries [`SourceWindow::legacy_shift`], read
+/// off the same dummy decode: [`legacy_window_shift`] needs only the
+/// rectangles `align_default_crop` judges on the real one.
+pub fn source_window(path: &Path) -> Result<SourceWindow> {
     if !is_raw(path) {
         use image::ImageDecoder as _;
         use image::metadata::Orientation as ImgO;
@@ -1447,7 +1498,7 @@ pub fn source_frame(path: &Path) -> Result<((usize, usize), rawler::Orientation)
             ImgO::Rotate270 => O::Rotate270,
         };
         let (w, h) = decoder.dimensions();
-        return Ok(((w as usize, h as usize), exif));
+        return Ok(SourceWindow { size: (w as usize, h as usize), exif, legacy_shift: (0, 0) });
     }
     guard_tiff_chain(path)?;
     guard_raw_plane_extent(path)?;
@@ -1464,7 +1515,14 @@ pub fn source_frame(path: &Path) -> Result<((usize, usize), rawler::Orientation)
         Ok((md, raw))
     })?;
     let d = default_crop(&raw).d;
-    Ok(((d.w, d.h), raw_orientation_of(&md)))
+    let legacy_shift = legacy_window_shift(raw.crop_area, raw.active_area, raw.width, raw.height);
+    Ok(SourceWindow { size: (d.w, d.h), exif: raw_orientation_of(&md), legacy_shift })
+}
+
+/// [`source_window`]'s frame and turn alone, for the callers that need no
+/// more — one header walk either way.
+pub fn source_frame(path: &Path) -> Result<((usize, usize), rawler::Orientation)> {
+    source_window(path).map(|w| (w.size, w.exif))
 }
 
 /// Does this orientation swap width and height in the display frame?
@@ -4310,6 +4368,43 @@ mod tests {
                 CropAlignment::Moved(_)
             ),
             "TFR: ARW-shaped, so the same correction applies"
+        );
+    }
+
+    /// The vector the era-2 recipe migration moves saved geometry by, per
+    /// shape of the table above. Only the corner-cut shape reads the declared
+    /// origin; every other shape — including the one v0.32.0 already
+    /// developed from the right origin — reads zero.
+    #[test]
+    fn the_legacy_window_shift_is_the_declared_origin_only_where_rawler_cut_from_the_corner() {
+        use rawler::imgop::{Dim2, Point, Rect};
+        let r = |x, y, w, h| Rect::new(Point::new(x, y), Dim2::new(w, h));
+        let a7r4 = Some(r(32, 20, 9504, 6336));
+        assert_eq!(
+            legacy_window_shift(a7r4, None, 9600, 6376),
+            (32, 20),
+            "row 1: the measured ILCE-7RM4A shape was cut from the corner by every release to v1.5.1"
+        );
+        assert_eq!(
+            legacy_window_shift(a7r4, Some(r(0, 0, 9504, 6336)), 9600, 6376),
+            (0, 0),
+            "row 1b: v0.32.0 has developed this shape from the declared origin since it shipped"
+        );
+        assert_eq!(
+            legacy_window_shift(Some(r(0, 0, 9504, 6336)), None, 9600, 6376),
+            (0, 0),
+            "a crop at the corner never moved"
+        );
+        assert_eq!(legacy_window_shift(None, None, 9600, 6376), (0, 0), "no declared crop, nothing moved");
+        assert_eq!(
+            legacy_window_shift(Some(r(12, 12, 6000, 4000)), Some(r(0, 0, 6048, 4024)), 6048, 4024),
+            (0, 0),
+            "A7 III: sizes differ, rawler's own CropDefault always cut it right"
+        );
+        assert_eq!(
+            legacy_window_shift(Some(r(200, 20, 9504, 6336)), None, 9600, 6376),
+            (0, 0),
+            "a refused window develops from the un-aligned window before and after"
         );
     }
 }

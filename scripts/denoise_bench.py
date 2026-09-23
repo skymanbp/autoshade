@@ -39,6 +39,7 @@ loaded with ``weights_only=True`` because a ``.pth`` is a pickle.
         --cache python/weights --out bench_out [--weights RUN/best_state.pth]
 """
 import argparse
+import json
 import os
 import sys
 import time
@@ -261,6 +262,7 @@ def main():
     windows = [tuple(int(v) for v in w.split(",")) for w in args.windows.split(";")]
     size = args.window_size
     failures = []
+    results = {}   # "<level>/<window>" -> output name -> report(); written to <out>/bench.json for the acceptance lines
 
     for li, (ka, kb) in enumerate(parse_pairs(args.levels)):
         rng = np.random.default_rng(args.seed)
@@ -300,6 +302,9 @@ def main():
                       f"{m['noise'] * 100:6.0f}% {m['cerr']:9.2f}")
                 save16(os.path.join(args.out, f"{lname}_{wname}_{k.replace(' ', '_')}.png"), v)
             save16(os.path.join(args.out, f"{lname}_{wname}_clean.png"), clean)
+            results[f"{lname}/{wname}"] = {k: {kk: float(vv) for kk, vv in m.items()} for k, m in scores.items()}
+            with open(os.path.join(args.out, "bench.json"), "w", encoding="utf-8") as fh:
+                json.dump({"clean": args.clean, "noisy": args.noisy, "weights": args.weights, "windows": results}, fh, indent=1)
             lead = scores["RAW DRUNet 1.0"]["dpsnr"] - scores["SCUNet 1.0"]["dpsnr"]
             verdict = "PASS" if lead >= args.margin else "FAIL"
             print(f"[{lname}/{wname}] RAW path leads SCUNet 1.0 on dPSNR by {lead:+.2f} dB "

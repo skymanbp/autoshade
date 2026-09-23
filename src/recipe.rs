@@ -22,10 +22,9 @@ use serde::{Deserialize, Serialize};
 pub struct EditRecipe {
     /// Schema version so we can evolve the contract without silently
     /// misreading old recipes — and, since [`CALIB_ERA`], the CALIBRATION
-    /// era that produced `base_curve`. Version 1 recipes were written by
-    /// builds whose working-resolution cap biased every sample, so a curve
-    /// they stored may have been fitted against a washed frame; see
-    /// `pipeline::repair_pre_era_base_curve`.
+    /// era that produced `base_curve`: a curve stamped below the current era
+    /// was estimated by an earlier estimator and is re-estimated on the next
+    /// open; see `pipeline::repair_pre_era_base_curve`.
     pub version: u32,
 
     /// Which COORDINATE FRAME `crop` and every `masks` geometry are expressed
@@ -162,7 +161,10 @@ pub struct EditRecipe {
     pub color_grade: ColorGrade,
 
     // --- Detail -------------------------------------------------------------
-    /// 0..=150, capture sharpening amount.
+    /// 0..=150, capture sharpening amount. A COMPANION since v1.6.0: a stored
+    /// 0 is "absent" and renders at Lightroom's own default for the KIND of
+    /// source — 40 on a RAW negative, none on a baked raster — read through
+    /// [`EditRecipe::capture_sharpening`], never this field alone.
     pub sharpening: f32,
     /// 0..=100, luminance noise reduction.
     pub noise_reduction: f32,
@@ -399,7 +401,8 @@ pub struct EditRecipe {
     /// a real value rather than "the sidecar said nothing", by serde name,
     /// sorted and de-duplicated by [`EditRecipe::clamp`].
     ///
-    /// Since R25 a stored 0 on these ten fields has meant ABSENT, and the
+    /// Since R25 a stored 0 on these fields (ten then; the Sharpening amount
+    /// joined in v1.6.0) has meant ABSENT, and the
     /// writer has let Lightroom's own default (Detail 25, Feather 50, …) reach
     /// the sidecar by leaving the key out. That encoding could not say
     /// "Detail 0" — a value Lightroom's slider has — and while the controls
@@ -593,8 +596,8 @@ pub struct EditRecipe {
     // --- Camera-matched base look (engine-only, NEVER exported to XMP) -------
     /// Base tone curve `[x, y]` knots (luma, 0..=1) mapping the NEUTRAL raw
     /// develop toward the camera's own rendition, estimated per photo by
-    /// luma-CDF-matching the neutral develop against the embedded preview
-    /// (`render::camera_base_knots`). The engine composes it UNDER the user
+    /// CDF-matching block means of the neutral develop against the embedded
+    /// preview (`render::camera_base_knots`). The engine composes it UNDER the user
     /// tone controls (`build_tone_lut`), so sliders start from a camera-like
     /// base instead of the darker scene-referred develop. Empty = no base look
     /// — exactly the pre-0.14 rendering, which every legacy recipe.json
@@ -810,9 +813,14 @@ impl ColourField {
 /// Era 1 = any build up to R12 batch 43. Its working-resolution cap added
 /// +0.5 to every channel of every capped frame, and `photo_base_knots`
 /// estimates the camera base curve from exactly such a capped develop — so an
-/// era-1 `base_curve` may encode a washed frame. Bumping this is what lets a
-/// later load tell the two apart; nothing else in the file could.
-pub const CALIB_ERA: u32 = 2;
+/// era-1 `base_curve` may encode a washed frame. Era 2 (up to v1.5.1) = the
+/// estimate from a PIXEL histogram match, which took the camera rendition's
+/// sharpening, noise and JPEG texture for tone and crowded its knots on a
+/// night sky. Era 3 (v1.6.0) = the match made on block means
+/// (`render::camera_base_knots`). A stamp below the current era is what lets
+/// a later load tell an older estimate apart and replace it
+/// (`pipeline::base_curve_is_pre_era`); nothing else in the file could.
+pub const CALIB_ERA: u32 = 3;
 
 /// The current COORDINATE-FRAME era, stamped into every recipe we write.
 ///
@@ -825,9 +833,18 @@ pub const CALIB_ERA: u32 = 2;
 /// what `render::orient_f32` now produces and what the C2 coordinate contract
 /// ("masks live in the ORIGINAL frame") has always claimed.
 ///
-/// For a `Normal`-oriented photo the two frames are identical, so the era
+/// For a `Normal`-oriented photo the two frames are identical, so era 1
 /// only ever changes what a rotated/flipped RAW's saved geometry means.
-pub const COORD_ERA: u32 = 1;
+///
+/// Era 2 (v1.5.2) = the same display frame, measured from the develop window
+/// THIS build cuts — the RAW's declared crop origin. Up to v1.5.1 a body that
+/// declares a crop but no active area (the ILCE-7RM4A) was developed from the
+/// sensor's corner, so an era-≤1 recipe on such a file is drawn `(32, 20)` px
+/// off the picture; `pipeline::migrate_recipe_coord_frame` translates it once
+/// (`decode::SourceWindow::legacy_shift`, `render::shift_recipe_coords`) and
+/// re-writes its raster masks as moved files. For every other file the two
+/// eras are the same frame and only the stamp moves.
+pub const COORD_ERA: u32 = 2;
 
 /// Serde default for [`EditRecipe::coord_era`] — deliberately NOT the
 /// container's `Default::default()` value: a file with no `coord_era` key was
@@ -970,12 +987,17 @@ pub const V150_CONTROLS: [&str; 45] = [
 /// [`EditRecipe::explicit_zero`]. [`EditRecipe::resolved`] is the one reader.
 ///
 /// Every default is Adobe's own, read off the user's sidecars where Lightroom
-/// materialises them (`SharpenRadius="+1.0"`, `SharpenDetail="25"`, the Detail
-/// and Smoothness 50s) and off Lightroom's panels for the effects block.
+/// materialises them (`Sharpness="40"`, `SharpenRadius="+1.0"`,
+/// `SharpenDetail="25"`, the Detail and Smoothness 50s) and off Lightroom's
+/// panels for the effects block.
 /// Style 1 is Highlight Priority. Radius and Style have no real 0 in
 /// Lightroom (bands 0.5..3 and 1..3); the list still names them so every
-/// member resolves the same way.
-pub const LR_COMPANION_DEFAULTS: [(&str, f32); 10] = [
+/// member resolves the same way. The Sharpening amount (v1.6.0) is the one
+/// member whose default is the SOURCE KIND's — [`LR_RAW_SHARPENING`] on a
+/// RAW negative, none on a baked raster — so the render reads it through
+/// [`EditRecipe::capture_sharpening`], never through `resolved` alone.
+pub const LR_COMPANION_DEFAULTS: [(&str, f32); 11] = [
+    ("sharpening", LR_RAW_SHARPENING),
     ("sharpen_radius", 1.0),
     ("sharpen_detail", 25.0),
     ("nr_detail", 50.0),
@@ -987,6 +1009,16 @@ pub const LR_COMPANION_DEFAULTS: [(&str, f32); 10] = [
     ("post_crop_vignette_feather", 50.0),
     ("post_crop_vignette_style", 1.0),
 ];
+
+/// Lightroom's default Sharpening amount for a RAW negative — `Sharpness="40"`
+/// on every RAW sidecar the user's Lightroom wrote untouched (six of the seven
+/// reference files; the seventh was moved to 35) — and the amount a RAW whose
+/// recipe holds none renders at ([`EditRecipe::capture_sharpening`], v1.6.0).
+/// Lightroom gives a baked raster (JPEG / TIFF) no sharpening by default, so
+/// this is the table's RAW entry, not a plain default: before v1.6.0 the app
+/// rendered every fresh RAW unsharpened and wrote `Sharpness="0"` for it,
+/// 40 short of the Lightroom develop it was measured against.
+pub const LR_RAW_SHARPENING: f32 = 40.0;
 
 /// Serde default for [`EditRecipe::schema_era`] — deliberately NOT the
 /// container's `Default::default()` value, the same field-level-beats-
@@ -3120,11 +3152,11 @@ impl LocalAdjustment {
     /// turned or the photo comes back with its masks somewhere else". A
     /// `Bitmap` qualifies — its pixels are the mask, and nothing can re-derive
     /// them. An `AiMask`'s raster does not: it is a CACHE of a recomputation,
-    /// and the rotation's own semantics already discard it in both of the
-    /// places that decide (`render::orient_recipe_coords` clears it so the next
-    /// develop re-segments at the turned point, and `render::
-    /// recipe_has_raster_masks` refuses to count it as something the migration
-    /// could not turn). Turning it too produced a correctly-turned file nothing
+    /// and the rotation's own semantics already discard it
+    /// (`render::orient_recipe_coords` clears it so the next develop
+    /// re-segments at the turned point; the era-2 TRANSLATION keeps and
+    /// re-writes it instead — `pipeline::migrate_recipe_geometry` says why the
+    /// two walks differ). Turning it too produced a correctly-turned file nothing
     /// ever pointed at, plus a `rasters_turned` count that promised work the
     /// recipe did not keep.
     ///
@@ -4021,6 +4053,7 @@ impl EditRecipe {
     fn companion_slot(&mut self, name: &str) -> Option<(&mut f32, f32)> {
         let default = LR_COMPANION_DEFAULTS.iter().find(|(n, _)| *n == name)?.1;
         let slot = match name {
+            "sharpening" => &mut self.sharpening,
             "sharpen_radius" => &mut self.sharpen_radius,
             "sharpen_detail" => &mut self.sharpen_detail,
             "nr_detail" => &mut self.nr_detail,
@@ -4164,11 +4197,25 @@ impl EditRecipe {
         }
     }
 
-    /// Just the ten companion fields and the list, copied into an otherwise
+    /// The Sharpening amount the CAPTURE renders at (v1.6.0). Lightroom's
+    /// default for it is a property of the source's KIND — `Sharpness` 40 on
+    /// a RAW negative, none on a baked raster (a JPEG, a TIFF, an AI
+    /// rendition) — so a RAW whose recipe holds no value renders at
+    /// [`LR_RAW_SHARPENING`] through [`resolved`](Self::resolved), a baked one
+    /// at its stored value, and a real 0 on a RAW is an explicit zero. Every
+    /// rendering surface passes the kind it develops (`decode::is_raw`); the
+    /// analysis surfaces (the reverse fit, the judge) develop their
+    /// thumbnails as baked, which is what they did before the default existed.
+    pub fn capture_sharpening(&self, raw_source: bool) -> f32 {
+        if raw_source { self.resolved("sharpening") } else { self.sharpening }
+    }
+
+    /// Just the eleven companion fields and the list, copied into an otherwise
     /// default recipe — what [`resolved`](Self::resolved) needs to borrow a
     /// slot without cloning masks, curves and fields.
     fn clone_companions(&self) -> EditRecipe {
         EditRecipe {
+            sharpening: self.sharpening,
             sharpen_radius: self.sharpen_radius,
             sharpen_detail: self.sharpen_detail,
             nr_detail: self.nr_detail,
@@ -5308,7 +5355,7 @@ mod tests {
         );
         // And it round-trips: what we write, we read back unchanged.
         let json = serde_json::to_string(&EditRecipe::default()).unwrap();
-        assert!(json.contains("\"coord_era\":1"), "{json}");
+        assert!(json.contains("\"coord_era\":2"), "{json}");
         assert_eq!(serde_json::from_str::<EditRecipe>(&json).unwrap().coord_era, COORD_ERA);
         // A legacy recipe whose only difference from neutral is the missing
         // stamp is still "no edits" — otherwise a neutral legacy recipe.json
@@ -6167,6 +6214,33 @@ mod tests {
         );
     }
 
+    /// v1.6.0: the Sharpening amount is the companion whose default is the
+    /// SOURCE KIND's — Lightroom sharpens a RAW at 40 and a JPEG not at all
+    /// until told otherwise — so a recipe holding no value renders 40 on a
+    /// RAW and nothing on a baked raster, a real 0 on a RAW is an explicit
+    /// zero, and a stated value is itself on both.
+    ///
+    /// MUTATIONS THIS CATCHES: `capture_sharpening` reading the stored field
+    /// on a RAW (a fresh RAW renders unsharpened, 40 short of Lightroom);
+    /// reading `resolved` on a baked raster (a JPEG gains a sharpening
+    /// Lightroom never gives it); `LR_RAW_SHARPENING` off 40; the amount
+    /// missing from the companion table (its real 0 could not be stated).
+    #[test]
+    fn the_sharpening_amount_defaults_to_lightrooms_raw_forty_and_to_nothing_on_a_baked_raster() {
+        let mut r = EditRecipe::default();
+        assert_eq!(LR_RAW_SHARPENING, 40.0);
+        assert_eq!(r.capture_sharpening(true), 40.0, "a RAW holding no value renders at Lightroom's 40");
+        assert_eq!(r.capture_sharpening(false), 0.0, "a baked raster holding no value renders unsharpened");
+        r.set_resolved("sharpening", 0.0);
+        assert_eq!(r.capture_sharpening(true), 0.0, "a real 0 on a RAW");
+        assert_eq!(r.explicit_zero, vec!["sharpening".to_string()]);
+        r.set_resolved("sharpening", 70.0);
+        assert_eq!((r.capture_sharpening(true), r.capture_sharpening(false)), (70.0, 70.0), "a stated value is itself");
+        assert!(r.explicit_zero.is_empty());
+        r.clear_resolved("sharpening");
+        assert_eq!((r.sharpening, r.capture_sharpening(true)), (0.0, 40.0), "cleared: absent again");
+    }
+
     /// v1.5.0: a COMPANION control reads through `resolved` — Lightroom's own
     /// default while the recipe holds no value, the stored value otherwise,
     /// and a real 0 only when `explicit_zero` names it — and the list costs no
@@ -6183,7 +6257,7 @@ mod tests {
         for (name, default) in LR_COMPANION_DEFAULTS {
             assert_eq!(r.resolved(name), default, "{name}: absent renders at Lightroom's default");
         }
-        assert_eq!(r.resolved("sharpening"), 0.0, "a non-companion has no default to read");
+        assert_eq!(r.resolved("sharpen_mask"), 0.0, "a non-companion has no default to read");
         let bare = serde_json::to_string(&r).unwrap();
         assert!(!bare.contains("explicit_zero"), "no explicit zero, no key: {bare}");
 

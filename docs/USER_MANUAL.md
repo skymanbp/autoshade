@@ -32,6 +32,13 @@ one AutoShade opens it in, not the camera's original. A turn made here is
 written back into the sidecar, so Lightroom picks it up too. The neutral view
 is AutoShade's own conversion, not the camera JPEG; histogram and clipping
 information are computed from the decoded image and also feed the AI verifier.
+The develop starts from a **camera-matched base look**: a tone curve read off
+the camera's own embedded preview, block by block, so the neutral develop
+looks like the camera's JPEG rather than a flat conversion. Since v1.6.0 that
+estimate is made on block means of the two pictures, and a photo saved by an
+earlier version gets the current estimate the first time it is opened — here,
+in batch export, in the web UI or with `apply` — and a toast says so; a photo
+saved with no base look keeps none.
 
 ## 2. Develop the image
 
@@ -62,7 +69,12 @@ it is shrunk to the canvas: a 1-pixel sharpening radius on a 61 MP frame is
 subtle on screen and plain in the exported file. A slider whose Lightroom
 default is not zero (radius 1.0, sharpen detail 25, the noise detail and
 smoothness sliders 50) shows that default until you move it; setting it to 0
-writes a real 0 to the sidecar. These operators are AutoShade's own, built from
+writes a real 0 to the sidecar. Since v1.6.0 the Sharpening amount is one of
+them, with the default Lightroom itself uses for the kind of file — 40 on a
+RAW, 0 on a JPEG or TIFF — so a RAW you never sharpened here is sharpened the
+way Lightroom sharpens it by default, a sidecar that says nothing about the
+amount lets Lightroom keep its own, and dragging the slider to 0 on a RAW is a
+real 0. These operators are AutoShade's own, built from
 what Adobe documents about each slider — close to Lightroom, not identical.
 
 The **Lens** fold finishes the set since v1.5.0. **Remove chromatic
@@ -481,6 +493,29 @@ cell, so a repainted texture's pixel noise neither grants nor refuses
 anything. The pass line says how much the target asked for (`of which the
 target's own boundary asks …`).
 
+**A correction that shrank is judged again.** The boundary gate negotiates an
+over-budget correction down to a strength `k` rather than refusing it, and since
+R39 (v1.5.2) the correction that ships at that strength is held to one more
+test: it must leave its own zone no worse than the same render without it, and
+the frame within the drift its attachment was allowed. A correction admitted at
+full strength can fail this once shrunk and is then refused with its readings
+(`refused after its boundary shrink to k=…`); the survivors are gated again
+from full strength.
+
+**A tile edge cannot hide a step behind a smooth sky.** The reference pair's
+sky tile that shipped at k = 0.134 — a pale block no gate had judged — passes
+the test above (what its acceptance read improves), and what let it through
+was the boundary ruler itself: it budgeted each crossing by the scene's own
+change over three pixels, so a smooth gradient bought a tile edge a step of
+its own size. Since R40 (v1.5.2) a hard-edged mask's crossings are read as
+discontinuities — the step less the sky's own trend on either side — and
+budgeted only by a discontinuity the scene already has there, so in smooth
+sky the budget is one code value at the crossing and the tile is shrunk to
+fit it or refused. On the reference pair the re-fit under this ruler no
+longer attaches that tile at 0.85; at 1.0 it attaches at k = 0.119 (0.161
+before), and what remains of its edge is a soft ramp of about two code
+values across ten pixels of a 1000 px render, not a step.
+
 **A sky can earn bands.** When the sky or land residual has a measured vertical
 colour pattern, the fit trials two or three overlapping corrections in place
 of the single zone. Each band must pass the same evidence and quality gates,
@@ -510,9 +545,11 @@ AutoShade's intent attributes did not, and since v1.3.1 the zone roles ride
 in the payload and in the corrections' names instead). AI alpha and local
 recolour gains still have their existing separate disclosures.
 
-**The colour field.** Past the 65% default, and only there, the fit may also
-attach a smooth 12×8×8 local colour/tone field — the residual its masks and
-range bands cannot shape. It appears in the develop panel's **Local Masks**
+**The colour field.** From the 65% default up (never below it), the fit may
+also attach a smooth 12×8×8 local colour/tone field — the residual its masks
+and range bands cannot shape; at the default it is held to a per-channel gain
+of 0.35, at 85% 0.61, at 100% 0.80, so the default's field is the most
+conservative of the three. It appears in the develop panel's **Local Masks**
 section as its own row, `▦ Colour field · engine-only`, with an eye to mute it
 and an Amount slider; deleting the row removes it. It is the first control in
 this app with **no Lightroom equivalent at all**: classic XMP has no

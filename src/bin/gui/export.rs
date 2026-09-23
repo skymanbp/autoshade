@@ -59,8 +59,10 @@ pub(crate) fn resolve_snapshot_develop(
         // a portrait RAW exported with its crop and masks on the wrong axis
         // while the interactive open showed them correctly — the exact
         // cross-surface divergence `warns` exists to close.
-        if let Some(c) = autoshade::pipeline::migrate_recipe_coord_frame(p, &mut r) {
-            warns.push(autoshade::pipeline::coord_migration_note(c));
+        match autoshade::pipeline::migrate_recipe_coord_frame(p, &mut r) {
+            Ok(Some(c)) => warns.push(autoshade::pipeline::coord_migration_note(c)),
+            Err(e) => warns.push(autoshade::pipeline::coord_migration_failure_note(&e.to_string())),
+            Ok(None) => {}
         }
         return Ok(Some((r, "recipe.json")));
     }
@@ -1267,7 +1269,7 @@ impl AutoShadeApp {
                         " · {}",
                         tr(
                             lang,
-                            "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                            "camera base look re-estimated — this photo was saved by an earlier version, whose estimate of the camera's tone this version replaces",
                         )
                     ));
                 }
@@ -1285,7 +1287,7 @@ impl AutoShadeApp {
                         " · {}",
                         tr(
                             lang,
-                            "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                            "camera base look re-estimated — this photo was saved by an earlier version, whose estimate of the camera's tone this version replaces",
                         )
                     ));
                 }

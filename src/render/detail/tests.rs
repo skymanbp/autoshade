@@ -264,7 +264,7 @@ fn the_film_scale_reaches_the_develop() {
     };
     let native = moved(&crate::render::develop_preview(&img, &r).to_rgb8());
     let diag = crate::diag::pixels();
-    let as_preview = moved(&crate::render::develop_preview_film(&img, &r, &diag, Some(64 * 8)).to_rgb8());
+    let as_preview = moved(&crate::render::develop_preview_film(&img, &r, &diag, Some(64 * 8), false).to_rgb8());
     assert!(native > 0, "premise: sharpening 150 moves the native develop");
     assert!(as_preview < native / 2, "{as_preview} vs {native}");
 }

@@ -1155,9 +1155,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Version v{n} saved → {path}", "版本 v{n} 已存 → {path}"),
     ("Save version failed: {err}", "存版本失败: {err}"),
     ("Loaded version v{n} — Ctrl+Z returns to before the load", "已载入版本 v{n} — Ctrl+Z 可回到载入前"),
-    ("camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark", "相机基调已重估——这张照片由预览采样偏亮的旧版本保存，存档基调渲染过暗"),
+    ("camera base look re-estimated — this photo was saved by an earlier version, whose estimate of the camera's tone this version replaces", "相机基调已重估——这张照片由旧版本保存，其相机基调估计已按本版本重做"),
     ("this photo's saved crop and masks were rotated to match the RAW's EXIF orientation — earlier versions displayed rotated RAWs sideways, so their coordinates were stored against the sideways frame", "本照片存档的裁剪与蒙版已按 RAW 的 EXIF 方向转正——旧版本没有把旋转过的 RAW 转正显示，这些位置便是按未转正的画面记录的"),
-    ("its raster masks are image files, not coordinates, and could NOT be rotated — check them and re-generate if they no longer fit", "其栅格蒙版是图片文件，不是可换算的位置，无法随之转正——请检查，若已对不上请重新生成"),
+    ("this photo's saved crop, masks and retouches were moved by ({dx}, {dy}) px — earlier versions developed this camera's RAWs from the sensor's corner instead of the crop the camera declares, so everything drawn on them sat that far off the picture", "本照片存档的裁剪、蒙版与修饰已平移 ({dx}, {dy}) px——旧版本把这台相机的 RAW 从传感器角落开始显影，而不是从相机声明的裁剪框，画在上面的一切都偏了这么多"),
+    ("{n} raster mask file(s) were re-written into the corrected frame; the originals are kept", "{n} 个栅格蒙版文件已按修正后的画面重写；原文件保留"),
+    ("this photo's saved geometry could NOT be brought into the corrected frame ({err}) — it is left as saved and will be tried again on the next open", "本照片存档的几何无法换算到修正后的画面（{err}）——保持原样，下次打开时再试"),
     ("busy — the preview-resolution switch was not applied; pick it again when the current task finishes", "忙碌中——预览分辨率切换未生效；当前任务结束后请再选一次"),
     ("preview resolution kept — this retouched canvas has no saved master to re-decode at the new size; save the photo, then switch", "预览分辨率保持不变——修饰后的画布尚无已保存母版可按新尺寸重解码；请先保存照片再切换"),
     ("preview resolution kept — this canvas's retouch master is no longer on disk, so it cannot be re-decoded at the new size", "预览分辨率保持不变——本画布的修饰母版已不在磁盘上，无法按新尺寸重解码"),
@@ -1226,7 +1228,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("batch {n} done → {path}", "批量 {n} 张完成 → {path}"),
     ("Batch: {ok} succeeded, {fail} failed: {detail}", "批量：{ok} 成功、{fail} 失败：{detail}"),
     (" · same-name photos kept apart: {list}", " · 同名照片已避让：{list}"),
-    (" · {n} base look(s) re-estimated (a pre-era save rendered too dark)", " · {n} 张的相机基调已重估（旧版保存的基调渲染过暗）"),
+    (" · {n} base look(s) re-estimated (saved by an earlier version)", " · {n} 张的相机基调已重估（旧版本保存）"),
     ("Batch-rendering {done}/{total} …", "批量渲染 {done}/{total} …"),
     ("Pasting recipe to {n} photos…", "粘贴配方到 {n} 张…"),
     ("Recipe pasted to {ok} photos ({xmp} XMP) → develop store", "配方已粘贴到 {ok} 张（{xmp} 个 XMP）→ 显影库"),
@@ -2418,6 +2420,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       transitions. An inert attachment would occupy the correction budget \
       and disclose a change it did not make.",
         " {n} 个分区校正被边界连续性门弃用：候选引入的边缘亮度为 {before}，而上限 {max} 之内最大的收缩为 k={k}，其渲染结果与不含该校正的画面逐字节相同——亮度读数为 {after}（语境计费读数 {charged}，色彩读数 {colour}、计费后 {colour_charged}），测量了 {transitions} 个过渡。无效的附加会占用校正预算，并报告一项它其实没有做出的改动。"),
+    (" {label} correction refused after its boundary shrink to k={k}: at that \
+     strength its own residual reads {after} against {before} for the same render \
+     without it, with the frame {frame_before} -> {frame_after}; a shrunk \
+     correction ships only while it leaves its zone no worse and the frame within \
+     its allowed drift.",
+     " {label} 校正在边界收缩到 k={k} 之后被拒绝：按该强度，其自身残差为 {after}，同一画面去掉它时为 {before}，画面 {frame_before} -> {frame_after}；收缩后的校正只有在不让自身区域变差、画面不超出允许漂移时才会发出。"),
     (" No zoned {label} correction attached: every control that survived \
       the evidence and quality gates solved to neutral, so the zone \
       residual {before} is left uncorrected.",

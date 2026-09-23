@@ -277,12 +277,14 @@ impl AutoShadeApp {
                 // The canvas's own film edge: the Detail passes ran before this
                 // mask on the canvas, at that scale, so the range must too.
                 let film = self.film_short_edge();
+                let raw_source = self.source_is_raw();
                 let img = autoshade::render::develop_preview_framed(
                     &base,
                     &pre,
                     &autoshade::diag::pixels(),
                     autoshade::render::MaskFrame::without_downstream(&pre.lens_profile),
                     film,
+                    raw_source,
                 );
                 self.overlay_ref = Some((pre, img));
             }
@@ -910,12 +912,14 @@ impl AutoShadeApp {
                 // reasons as the overlay build above, and they must MATCH it —
                 // they share cache.
                 let film = self.film_short_edge();
+                let raw_source = self.source_is_raw();
                 let img = autoshade::render::develop_preview_framed(
                     &base,
                     &pre,
                     &autoshade::diag::pixels(),
                     autoshade::render::MaskFrame::without_downstream(&pre.lens_profile),
                     film,
+                    raw_source,
                 );
                 self.overlay_ref = Some((pre, img));
             }
@@ -964,12 +968,14 @@ impl AutoShadeApp {
             let Some(base) = self.base_preview.clone() else { return };
             let reference = autoshade::render::point_color_sampling_recipe(&self.recipe);
             let film = self.film_short_edge();
+            let raw_source = self.source_is_raw();
             let img = autoshade::render::develop_preview_framed(
                 &base,
                 &reference,
                 &autoshade::diag::pixels(),
                 autoshade::render::MaskFrame::without_downstream(&reference.lens_profile),
                 film,
+                raw_source,
             );
             let Some(px) = sample_5x5_mean(&img, nx, ny) else { return };
             px

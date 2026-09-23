@@ -1072,7 +1072,7 @@ impl AutoShadeApp {
                 ToastKind::Success,
                 tr(
                     lang,
-                    "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                    "camera base look re-estimated — this photo was saved by an earlier version, whose estimate of the camera's tone this version replaces",
                 )
                 .to_string(),
             );
@@ -2096,8 +2096,15 @@ impl AutoShadeApp {
                         .to_string(),
                     );
                 }
-                if let Some(c) = reframe {
-                    self.toast(ToastKind::Success, coord_migration_sentence(lang, c));
+                match reframe {
+                    Ok(Some(c)) => self.toast(ToastKind::Success, coord_migration_sentence(lang, c)),
+                    // Said as an error: the snapshot loaded, but its geometry
+                    // is off the picture until the raster can be re-written.
+                    Err(e) => self.toast(
+                        ToastKind::Error,
+                        coord_migration_failure_sentence(lang, &e.to_string()),
+                    ),
+                    Ok(None) => {}
                 }
                 self.status = if relook {
                     // The GUI's OWN sentence, localized: the engine note is
@@ -2108,7 +2115,7 @@ impl AutoShadeApp {
                         "{loaded} — {}",
                         tr(
                             lang,
-                            "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                            "camera base look re-estimated — this photo was saved by an earlier version, whose estimate of the camera's tone this version replaces",
                         )
                     )
                 } else {
@@ -2419,7 +2426,7 @@ impl AutoShadeApp {
                 ToastKind::Success,
                 tr(
                     lang,
-                    "camera base look re-estimated — this photo was saved by a version whose preview sampler ran bright, so its stored base look rendered too dark",
+                    "camera base look re-estimated — this photo was saved by an earlier version, whose estimate of the camera's tone this version replaces",
                 )
                 .to_string(),
             );

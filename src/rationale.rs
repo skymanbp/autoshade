@@ -656,6 +656,17 @@ pub mod keys {
          {colour} charged {colour_charged}) over {transitions} measured \
          transitions. An inert attachment would occupy the correction budget \
          and disclose a change it did not make.";
+    /// R39. A correction was admitted at full strength, a boundary gate then
+    /// shrank it to k, and the SHRUNK correction — the one that would ship —
+    /// no longer satisfies the acceptance that admitted it (its own residual
+    /// or the frame's). Distinct from every boundary note: the boundary was
+    /// fine; the correction stopped earning its place.
+    pub const ZONE_SHRUNK_REFUSED: &str =
+        " {label} correction refused after its boundary shrink to k={k}: at that \
+         strength its own residual reads {after} against {before} for the same \
+         render without it, with the frame {frame_before} -> {frame_after}; a \
+         shrunk correction ships only while it leaves its zone no worse and the \
+         frame within its allowed drift.";
     pub const ZONE_BOUNDARY_DROPPED: &str =
         " Zoned corrections dropped by the boundary-continuity gate: candidate \
          rim {before} luma, and even shared shrink k=0 left {after} \
