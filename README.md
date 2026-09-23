@@ -7,6 +7,9 @@
 
 An AI decides *what to change*. A deterministic Rust engine *does* it.
 **In the recipe-development path, the AI never touches a pixel.**
+The one network that does, the RAW denoiser, was trained here on this
+project's own data and is held to a same-frame comparison with Lightroom
+on a real star field whenever it changes.
 
 [Download v1.6.0](https://github.com/skymanbp/autoshade/releases/tag/v1.6.0) ·
 [Architecture](docs/ARCHITECTURE.md) ·
