@@ -10254,9 +10254,12 @@ mod tests {
     /// The RAW arm cannot be exercised end-to-end without a real sensor file
     /// (the repo carries no RAW fixture), but the DISPATCH can: a .ARW must
     /// reach the develop engine — proven by the failure it produces being the
-    /// raw decoder's, never `load_image`'s "is a camera RAW" refusal. That
-    /// refusal appearing here would mean the gate had sent a RAW down the baked
-    /// arm, which is exactly the v0.22 mask-refine bug.
+    /// raw decoder's (`decoder_for`'s "does not read as any RAW format"),
+    /// never `load_image`'s "is a camera RAW, and this step reads finished
+    /// images" refusal. That refusal appearing here would mean the gate had
+    /// sent a RAW down the baked arm, which is exactly the v0.22 mask-refine
+    /// bug. The needle is the refusal's own clause, not the bare "is a camera
+    /// RAW": the decoder's message says "if it really is a camera RAW" too.
     #[test]
     fn the_source_dispatch_sends_each_kind_down_its_own_arm() {
         let dir = std::env::temp_dir().join(format!("autoshade-source-px-{}", std::process::id()));
@@ -10267,8 +10270,12 @@ mod tests {
         std::fs::write(&raw, b"not really a raw").unwrap();
         let e = format!("{:#}", source_pixels(&raw, None).unwrap_err());
         assert!(
-            !e.contains("is a camera RAW"),
+            !e.contains("is a camera RAW, and this step reads finished images"),
             "a RAW must be DEVELOPED, not sent to the baked decoder: {e}"
+        );
+        assert!(
+            e.contains("does not read as any RAW format"),
+            "the failure is the RAW decoder's own: {e}"
         );
 
         // Baked arm: full resolution when uncapped...
