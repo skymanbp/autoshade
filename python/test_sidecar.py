@@ -13,7 +13,6 @@ Run: python -m unittest test_sidecar -v   (from python/)
 
 import io
 import os
-import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr

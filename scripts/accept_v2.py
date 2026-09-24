@@ -150,12 +150,12 @@ def main():
         print(f"{plane:>6} {d:+10.3f} {V1_SKY.get(plane, float('nan')):+8.3f} {'PASS' if ok else 'FAIL':>8}")
 
     print("\nStill to run by hand, because each needs a photograph or a long run:")
-    print(f"  3. denoising must not pay for it (dPSNR within 0.15 dB of v1, v1 measured +3.13 / +5.92 dB):")
-    print(f"     $ python scripts/denoise_bench.py --clean CLEAN.ARW --noisy NOISY.ARW \\")
+    print("  3. denoising must not pay for it (dPSNR within 0.15 dB of v1, v1 measured +3.13 / +5.92 dB):")
+    print("     $ python scripts/denoise_bench.py --clean CLEAN.ARW --noisy NOISY.ARW \\")
     print(f"           --out {out / 'bench-v2'} --weights {weights}")
     print(f"     $ python scripts/denoise_bench.py --clean CLEAN.ARW --noisy NOISY.ARW --out {out / 'bench-v1'}")
-    print(f"  4. the star standard's cleaner group must not lose a line it passes today:")
-    print(f"     $ python scripts/denoise_star_standard.py --help   # for this lane's current invocation")
+    print("  4. the star standard's cleaner group must not lose a line it passes today:")
+    print("     $ python scripts/denoise_star_standard.py --help   # for this lane's current invocation")
 
     if failures:
         print("\nFAIL:")

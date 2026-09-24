@@ -102,7 +102,6 @@ import argparse
 import json
 import math
 import pathlib
-import random
 import sys
 import time
 

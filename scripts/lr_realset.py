@@ -42,7 +42,6 @@ from this file's location: none of it knows the machine it was written on.
 """
 import argparse
 import json
-import os
 import pathlib
 import re
 import sys

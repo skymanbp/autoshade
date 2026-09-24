@@ -25,7 +25,6 @@ from this file's location: none of it knows the machine it was written on.
 import argparse
 import concurrent.futures as cf
 import json
-import os
 import pathlib
 import sys
 
