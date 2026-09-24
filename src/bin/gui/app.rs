@@ -385,7 +385,6 @@ pub(crate) struct AutoShadeApp {
     #[cfg(test)]
     pub(crate) strip_row_rect: Option<egui::Rect>,    // test seam: variant strip's inner row rect
     #[cfg(test)]
-    #[cfg(test)]
     pub(crate) strip_card_rect: Option<egui::Rect>,   // test seam: first variant card's column rect
     #[cfg(test)]
     pub(crate) strip_title_rect: Option<egui::Rect>,  // test seam: the painted "Variants" title rect
@@ -1784,7 +1783,6 @@ impl Default for AutoShadeApp {
             curve_rect: None,
             #[cfg(test)]
             strip_row_rect: None,
-            #[cfg(test)]
             #[cfg(test)]
             strip_card_rect: None,
             #[cfg(test)]
