@@ -385,7 +385,6 @@ pub(crate) struct AutoShadeApp {
     #[cfg(test)]
     pub(crate) strip_row_rect: Option<egui::Rect>,    // test seam: variant strip's inner row rect
     #[cfg(test)]
-    pub(crate) strip_thumb_rect: Option<egui::Rect>,  // test seam: first variant card's thumb rect
     #[cfg(test)]
     pub(crate) strip_card_rect: Option<egui::Rect>,   // test seam: first variant card's column rect
     #[cfg(test)]
@@ -1786,7 +1785,6 @@ impl Default for AutoShadeApp {
             #[cfg(test)]
             strip_row_rect: None,
             #[cfg(test)]
-            strip_thumb_rect: None,
             #[cfg(test)]
             strip_card_rect: None,
             #[cfg(test)]
