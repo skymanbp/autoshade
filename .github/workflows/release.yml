@@ -25,7 +25,27 @@ permissions:
   contents: write
 
 jobs:
+  # A release is cut from a TAG that names the version being built. `gh release
+  # create` would otherwise mint tag v<input> at whatever branch head a manual
+  # dispatch ran on, and the version in the input could differ from the tag the
+  # run stands on. Every release so far (23 runs) was a tag push; this job makes
+  # the other shape fail in seconds instead of after four platform builds.
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: The ref is the release tag
+        run: |
+          v="${{ github.event.inputs.version }}"
+          if [ -z "$v" ]; then v="${GITHUB_REF_NAME#v}"; fi
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "::error::a release runs on a tag, not on $GITHUB_REF_TYPE '$GITHUB_REF_NAME'"; exit 1
+          fi
+          if [ "$GITHUB_REF_NAME" != "v$v" ]; then
+            echo "::error::tag '$GITHUB_REF_NAME' does not name version $v"; exit 1
+          fi
+          echo "releasing v$v from tag $GITHUB_REF_NAME"
   windows:
+    needs: guard
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v7
@@ -94,6 +114,7 @@ jobs:
           if-no-files-found: error
 
   macos:
+    needs: guard
     runs-on: macos-15
     env:
       # M3 landed in v1.2.0 (the .app is built and inspected below), so this
@@ -256,6 +277,7 @@ jobs:
   # reproducibility — and because the oldest supported image is the one whose
   # glibc the widest set of distributions can run.
   linux:
+    needs: guard
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -318,6 +340,7 @@ jobs:
   # nothing was reused) and doubled the macOS wall time. Release profile —
   # the canonical battery mode, and the profile the assets above ship in.
   macos-battery:
+    needs: guard
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
@@ -398,5 +421,13 @@ jobs:
             echo
             echo "\`checksums.txt\` carries the SHA-256 of each file."
           } > notes.md
-          gh release create "v$v" --title "v$v" --notes-file notes.md release-assets/* \
-            || gh release upload "v$v" release-assets/* --clobber
+          # Create, or on a re-run of the same tag replace the assets of the
+          # release that already exists. The old `create || upload --clobber`
+          # fell through to the upload on ANY create failure — a bad token or a
+          # network error became a silent second attempt at the wrong step.
+          if gh release view "v$v" >/dev/null 2>&1; then
+            echo "release v$v exists — replacing its assets"
+            gh release upload "v$v" release-assets/* --clobber
+          else
+            gh release create "v$v" --title "v$v" --notes-file notes.md release-assets/*
+          fi

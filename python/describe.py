@@ -243,7 +243,8 @@ CHAT_TURN_TOKENS = ("<|im_start|>", "<|im_end|>")
 # by CODE POINT because the characters themselves are invisible in an editor,
 # so a literal class could not be reviewed.
 _INVISIBLE = re.compile(
-    "[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ufff9-\ufffb]"
+    "[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ufff9-\ufffb"
+    "\U000e0001\U000e0020-\U000e007f]"
 )
 
 

@@ -273,6 +273,7 @@ function Get-PayloadMap {
     $map['autoshade.exe'] = Join-Path $Root 'dist\autoshade.exe'
     $map['autoshade-gui.exe'] = Join-Path $Root 'dist\autoshade-gui.exe'
     $map['LICENSE'] = Join-Path $Root 'LICENSE'
+    $map['README.md'] = Join-Path $Root 'README.md'
 
     $assets = Join-Path $Root 'assets'
     foreach ($f in Get-ChildItem -LiteralPath $assets -Recurse -File) {

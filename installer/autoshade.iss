@@ -59,7 +59,7 @@ OutputDir=..\target\installer
 ; artifact's filename; with no override this is exactly AutoShade-Setup-<v>.exe,
 ; the name scripts/build_installer.ps1 and the release workflow expect.
 OutputBaseFilename={#AppName}-Setup-{#AppVersion}
-SetupIconFile=autoshade.ico
+SetupIconFile=..\assets\autoshade.ico
 UninstallDisplayIcon={app}\autoshade-gui.exe
 Compression=lzma2
 SolidCompression=yes
@@ -127,6 +127,7 @@ Type: files; Name: "{autodesktop}\Autoshop.lnk"
 Source: "..\dist\autoshade.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\autoshade-gui.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Runtime sidecars are copied recursively for forward-compatible additions, while
 ; developer tests, Python bytecode, and multi-gigabyte downloaded weights stay out.
