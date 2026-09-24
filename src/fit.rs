@@ -1309,8 +1309,10 @@ pub const STRUCTURE_MIN_CORE_PX: usize = 100;
 /// contribute the RMS log2 energy-ratio error.
 ///
 /// `None` is an ABSTENTION and never a matched reading. It is returned when
-/// the rasters are not one geometry, or when the eroded core holds fewer than
-/// [`STRUCTURE_MIN_CORE_PX`] pixels. Both used to return
+/// the rasters are not one geometry, when the eroded core holds fewer than
+/// [`STRUCTURE_MIN_CORE_PX`] pixels, or when no translation offers a
+/// gradient on BOTH sides to correlate (one side flat — until 2026-09-24 that
+/// case read as correlation 1.0, a constant of the guard). The first two used to return
 /// `Divergence::matched()`, i.e. D = 0 — the value every consumer reads as
 /// "the structure survived" — so a free-mask component of 90 core pixels
 /// cleared the structural gate for free and [`crate::fit_field::local_support`]
@@ -1500,7 +1502,10 @@ pub fn structure_divergence(
             }
         }
     }
-    let correlation = if best > -1.0 { best as f32 } else { 1.0 };
+    if best <= -1.0 {
+        return None;
+    }
+    let correlation = best as f32;
     let energy_error = (src_energy
         .iter()
         .zip(tgt_energy)
@@ -3658,7 +3663,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         &evidence.source_weights,
         &evidence.target_weights,
     );
-    let mut harm = terminal_harm(err_before, err_after, None, None);
+    let mut harm = terminal_harm(err_before, err_after, joint_base, joint_after);
     if harm.scalar
         && detail_supported
         && only_detail_and_quantized_companions(&recipe, base)
@@ -4205,7 +4210,7 @@ fn fit_atmosphere_from_parts(
         &evidence.source_weights,
         &evidence.target_weights,
     );
-    let mut harm = terminal_harm(err_before, err_after, None, None);
+    let mut harm = terminal_harm(err_before, err_after, joint_base, joint_after);
     if harm.scalar
         && detail_supported
         && only_detail_and_quantized_companions(&recipe, base)
@@ -4274,7 +4279,13 @@ fn fit_atmosphere_from_parts(
             budget: Some(budget),
             strength: Some(strength.get()),
             veto_luma: (budget.vetoes == VetoPolicy::Disclose).then(|| moved_unsupported_luma_range_names(sp, &after_px, veto_evidence)).flatten(),
-            veto_hue: (budget.vetoes == VetoPolicy::Disclose).then_some(moved_hue).flatten(),
+            // Read of the render that SHIPS (`after_px`, after the detail, HSL,
+            // shrink and terminal stages), like `veto_luma` beside it: the
+            // `moved_hue` reading above was taken before those stages and
+            // could name a range the terminal reset had already given back.
+            veto_hue: (budget.vetoes == VetoPolicy::Disclose && structural.global_cast.is_none())
+                .then(|| moved_unsupported_hue_range_names(sp, &after_px, veto_evidence))
+                .flatten(),
             wb_clamped: facts.clamped,
             wb_search_bound: facts.search_bound,
             wb_rotation_coverage: Some(facts.rotation_coverage),
@@ -5506,15 +5517,20 @@ pub(crate) fn append_finished_disclosure(
 /// In Full mode `err_before` is the caller's, unchanged by construction. An
 /// Atmosphere rescore rebuilds the same structure-blind ruler as the solve and
 /// re-measures the untouched base on it, so the report cannot mix rulers.
-/// That base is a bare-default develop of `src`: this function is not handed
-/// the caller's composed calibration base (`pipeline::calibration_recipe`),
-/// so on a photo whose calibration is not neutral the rescored Atmosphere
-/// `err_before`, and the evidence model under it, match the solve's only up
-/// to that calibration.
+/// `base` is the recipe the SOLVE started from — the caller's composed
+/// calibration base (`pipeline::calibration_recipe`) on a photograph, the
+/// default on a fixture — and the evidence model, the divergence reading and
+/// the veto disclosures are all measured against ITS develop. Until
+/// 2026-09-24 this function developed a bare default instead, so on every
+/// photo whose calibration was not neutral (which, since v1.6.0's estimated
+/// base look, is every photo) the rescored Atmosphere evidence model was not
+/// the solve's, and `calibration_atmosphere_rescore_reproduces_report_ruler`
+/// held only because the fixture's base is the default.
 pub fn rescore_report(
     src: &DynamicImage,
     target: &DynamicImage,
     recipe: &EditRecipe,
+    base: &EditRecipe,
     err_before: f32,
     prior: &[crate::rationale::Note],
 ) -> FitReport {
@@ -5523,7 +5539,7 @@ pub fn rescore_report(
     let (s, t) = analysis_pair(src, target);
     let tp = pixels_of(&t);
     let after_px = pixels_of(&render::develop_preview(&s, recipe));
-    let base_px = pixels_of(&render::develop_preview(&s, &EditRecipe::default()));
+    let base_px = pixels_of(&render::develop_preview(&s, base));
     let structural = evidence_model_for(&base_px, &tp, s.width(), s.height());
     let carried = |k: &str| prior.iter().any(|n| n.key == k);
     let carried_arg = |note_key: &str, arg_key: &str| {
@@ -5594,7 +5610,7 @@ pub fn rescore_report(
     let carried_fan = carried_arg(keys::FIT_NOTE_CAST_HUE_FANNED, "share")
         .and_then(|share| share.parse::<f32>().ok())
         .zip(carried_arg(keys::FIT_NOTE_CAST_HUE_FANNED, "fan").and_then(|fan| fan.parse::<f32>().ok()));
-    let readings = divergence_pair_for(src, target, &EditRecipe::default());
+    let readings = divergence_pair_for(src, target, base);
     let divergence = readings.fine;
     // Same stance as the solve path: an unread frame is not promoted.
     let mode = if divergence.is_some_and(|r| r.d >= DIVERGENCE_GLOBAL)
@@ -8608,6 +8624,7 @@ fn only_detail_and_quantized_companions(recipe: &EditRecipe, base: &EditRecipe) 
             .zip(base_wb)
             .all(|(&candidate, baseline)| (candidate - baseline).abs() < 1e-3)
         && recipe.saturation == base.saturation
+        && recipe.hsl == base.hsl
         && recipe_tone
             .iter()
             .zip(base_tone)
@@ -9443,6 +9460,99 @@ mod tests {
         assert!(rotated_share > FitBudget::for_strength(crate::recipe::GradeStrength::new(0.70)).wb_rotation_share);
     }
 
+    /// The joint arm of the terminal do-no-harm check was documented as a live
+    /// veto from the day it was written (899798e) and never wired: both
+    /// terminal sites computed `joint_base` / `joint_after` and then handed
+    /// `terminal_harm` two `None`s, so `harm.joint` was false on every
+    /// photograph and `FIT_NOTE_JOINT_REGRESSED` was unreachable. The two
+    /// readings are what the sites must pass.
+    #[test]
+    fn the_joint_veto_is_wired_at_both_terminal_sites() {
+        // The BODY, not the file: this test's own literals would count.
+        let src = include_str!("fit.rs");
+        let src = &src[..src.rfind("mod tests {").expect("the tests module")];
+        assert_eq!(
+            src.matches("terminal_harm(err_before, err_after, joint_base, joint_after)").count(),
+            2,
+            "both terminal sites hand the joint readings to terminal_harm"
+        );
+        assert!(
+            !src.contains("terminal_harm(err_before, err_after, None, None)"),
+            "a terminal site still discards its joint readings"
+        );
+    }
+
+    /// A flat side has no gradient to correlate at any offset; the reading
+    /// used to come back as correlation 1.0 — the guard's constant, which
+    /// every consumer reads as "the structure survived" — and now abstains.
+    #[test]
+    fn structure_divergence_abstains_when_one_side_is_flat() {
+        let (w, h) = (40u32, 30u32);
+        let n = (w * h) as usize;
+        let flat = vec![[0.5f32; 3]; n];
+        let textured: Vec<[f32; 3]> = (0..n)
+            .map(|i| {
+                let v = if ((i % w as usize) / 4 + (i / w as usize) / 4).is_multiple_of(2) { 0.2 } else { 0.8 };
+                [v; 3]
+            })
+            .collect();
+        let weights = vec![1.0f32; n];
+        assert_eq!(structure_divergence(&flat, &textured, w, h, &weights), None);
+        assert_eq!(structure_divergence(&textured, &flat, w, h, &weights), None);
+        let read = structure_divergence(&textured, &textured, w, h, &weights)
+            .expect("two textured sides correlate");
+        assert!(read.correlation > 0.99, "{read:?}");
+    }
+
+    /// The detail stage's own escape from the scalar do-no-harm check applies
+    /// only to a recipe whose non-detail controls stand at the base; the HSL
+    /// wheel is one of them and was not read.
+    #[test]
+    fn an_hsl_move_is_not_a_detail_only_companion() {
+        let base = EditRecipe::default();
+        let mut detail_only = base.clone();
+        detail_only.clarity = 12.0;
+        assert!(only_detail_and_quantized_companions(&detail_only, &base));
+        let mut with_hsl = detail_only.clone();
+        with_hsl.hsl.saturation[0] = 20.0;
+        assert!(!with_hsl.hsl.is_neutral(), "premise: the wheel moved");
+        assert!(!only_detail_and_quantized_companions(&with_hsl, &base));
+    }
+
+    /// The rescore's evidence model is measured on the base the caller names:
+    /// the calibration base on a photograph, which is what the CLI and the
+    /// desktop app now pass. Named twice, it reproduces the solve's model bit
+    /// for bit; named as the default it does not — so the parameter is read.
+    #[test]
+    fn a_rescore_measures_against_the_base_the_caller_names() {
+        let Some(root) = calibration_corpus() else { return };
+        let source = image::open(root.join("neutral.jpg")).expect("calibration neutral.jpg");
+        let target = image::open(root.join("target.jpg")).expect("calibration target.jpg");
+        let calibrated = EditRecipe { exposure_ev: 0.6, contrast: 15.0, ..EditRecipe::default() };
+        let solved = fit_recipe_from_with(&source, &target, &calibrated, FitOptions::default());
+        let same_base = rescore_report(
+            &source,
+            &target,
+            &solved.recipe,
+            &calibrated,
+            solved.err_before,
+            &solved.notes,
+        );
+        assert_evidence_models_bit_equal(&same_base.evidence, &solved.evidence);
+        let other_base = rescore_report(
+            &source,
+            &target,
+            &solved.recipe,
+            &EditRecipe::default(),
+            solved.err_before,
+            &solved.notes,
+        );
+        assert!(
+            other_base.evidence.source_pixels != solved.evidence.source_pixels,
+            "a different base develops different evidence pixels"
+        );
+    }
+
     #[test]
     fn rescoring_round_trips_fractional_strength_and_budget() {
         let prior = vec![crate::rationale::Note::new(
@@ -9454,7 +9564,8 @@ mod tests {
         assert_eq!(FitBudget::for_strength(strength), FitBudget::for_strength(crate::recipe::GradeStrength::new(0.644)));
         let src = hazy_canyon_source();
         let tgt = vivid_warm_target();
-        let rescored = rescore_report(&src, &tgt, &EditRecipe::default(), 0.2, &prior);
+        let rescored =
+            rescore_report(&src, &tgt, &EditRecipe::default(), &EditRecipe::default(), 0.2, &prior);
         let carried_s = rescored
             .notes
             .iter()
@@ -9478,7 +9589,14 @@ mod tests {
             r.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_VETO_DISCLOSED)
         };
         assert!(disclosed(&solved), "fixture must disclose unsupported movement at strength 1.0");
-        let rescored = rescore_report(&src, &tgt, &solved.recipe, solved.err_before, &solved.notes);
+        let rescored = rescore_report(
+            &src,
+            &tgt,
+            &solved.recipe,
+            &EditRecipe::default(),
+            solved.err_before,
+            &solved.notes,
+        );
         assert!(disclosed(&rescored), "the rescoring must re-derive the disclosure for the same recipe");
         let cap = FitBudget::for_strength(crate::recipe::GradeStrength::new(1.0)).confidence_cap;
         assert!(
@@ -9490,7 +9608,14 @@ mod tests {
         // disclosure, exactly the pre-F1 rescoring.
         let shipped = fit_recipe_from_with(&src, &tgt, &EditRecipe::default(), FitOptions::default());
         let rescored_default =
-            rescore_report(&src, &tgt, &shipped.recipe, shipped.err_before, &shipped.notes);
+            rescore_report(
+                &src,
+                &tgt,
+                &shipped.recipe,
+                &EditRecipe::default(),
+                shipped.err_before,
+                &shipped.notes,
+            );
         assert!(!disclosed(&rescored_default), "the shipped default must not gain a disclosure");
     }
 
@@ -9758,6 +9883,7 @@ mod tests {
             &source,
             &target,
             &solved.recipe,
+            &EditRecipe::default(),
             solved.err_before,
             &solved.notes,
         );
@@ -11163,6 +11289,7 @@ mod tests {
             &source,
             &target,
             &solved.recipe,
+            &EditRecipe::default(),
             solved.err_before,
             &solved.notes,
         );
@@ -12573,8 +12700,14 @@ mod tests {
             "premise broken: this pair no longer projects: {}",
             solved.recipe.rationale
         );
-        let rescored =
-            rescore_report(&src, &tgt, &solved.recipe, solved.err_before, &solved.notes);
+        let rescored = rescore_report(
+            &src,
+            &tgt,
+            &solved.recipe,
+            &EditRecipe::default(),
+            solved.err_before,
+            &solved.notes,
+        );
         for arg in ["share", "fan_before", "t", "ratio", "bound", "rehued"] {
             assert_eq!(
                 head(&rescored, arg),
@@ -14459,7 +14592,8 @@ mod tests {
         // not re-exported); the size is immaterial here, only that it moves.
         moved.saturation += 10.0;
         moved.clamp();
-        let rep = rescore_report(&src, &tgt, &moved, solved.err_before, &prior);
+        let rep =
+            rescore_report(&src, &tgt, &moved, &EditRecipe::default(), solved.err_before, &prior);
         let has = |k: &str| rep.notes.iter().any(|n| n.key == k);
 
         // (1) The terminal-reset verdict must NOT survive. This is the arm with
@@ -15678,7 +15812,14 @@ mod tests {
         let target = image::open(root.join("target.jpg")).expect("calibration target.jpg");
         let conservative = fit_recipe(&source, &target);
         let preferred = calibration_recipe(&root);
-        let rescored = rescore_report(&source, &target, &preferred, conservative.err_before, &[]);
+        let rescored = rescore_report(
+            &source,
+            &target,
+            &preferred,
+            &EditRecipe::default(),
+            conservative.err_before,
+            &[],
+        );
         assert_eq!((conservative.mode, rescored.mode), (FitMode::Atmosphere, FitMode::Atmosphere));
         assert_evidence_models_bit_equal(&rescored.evidence, &conservative.evidence);
         let (thumb, _) = analysis_pair(&source, &target);

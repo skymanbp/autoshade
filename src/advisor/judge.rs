@@ -164,9 +164,16 @@ const SAT_DOMAIN: [&str; 11] = [
 ];
 
 /// The spellings that carry a DIRECTION as well as the domain.
-const SAT_DOWN: [&str; 10] = [
-    "too ", "reduce", "desatur", "oversatur", "over-satur", "muted", "lower",
-    "pull back", "dial back", "tone down",
+///
+/// A bare "too " was a direction until 2026-09-24, and it read "the
+/// saturation is too weak / too flat / too timid" as a pull-back — the
+/// opposite of the hint, and against this function's own default that
+/// under-reaching is the failure mode. Only the OVER-reach phrases stay
+/// (`a_judge_reads_too_weak_as_a_push_and_not_a_pull_back`).
+const SAT_DOWN: [&str; 19] = [
+    "too much", "too strong", "too heavy", "too intense", "too far", "too saturat",
+    "too vivid", "too colourful", "too colorful", "too punch", "reduce", "desatur",
+    "oversatur", "over-satur", "muted", "lower", "pull back", "dial back", "tone down",
 ];
 
 pub fn hint_action(hint: &str, zoned_used: bool, can_zone: bool) -> FitAction {
@@ -174,7 +181,10 @@ pub fn hint_action(hint: &str, zoned_used: bool, can_zone: bool) -> FitAction {
     let any = |ws: &[&str]| ws.iter().any(|w| mentions(&h, w));
     if !zoned_used
         && can_zone
-        && any(&["sky", "region", "local", "area", "zone", "foreground", "background", "horizon"])
+        // "local" and "area" were in this list until 2026-09-24: "add local
+        // contrast" and "the shadow areas" are tonal remarks, not a PART of
+        // the frame, and each bought a zoned re-solve nobody asked for.
+        && any(&["sky", "region", "zone", "foreground", "background", "horizon"])
     {
         return FitAction::Zoned;
     }
@@ -675,11 +685,39 @@ mod tests {
     #[test]
     fn every_saturation_direction_word_is_also_a_domain_word() {
         for word in SAT_DOWN.iter().filter(|w| w.contains("satur")) {
+            // Reachability, not literal membership: "too saturat" reaches
+            // the gate through "saturat", the way the hint itself would.
             assert!(
-                SAT_DOMAIN.contains(word),
+                SAT_DOMAIN.iter().any(|d| mentions(word, d)),
                 "{word} chooses a direction the domain gate never reaches"
             );
         }
+    }
+
+    /// "too weak" asks for MORE, and "local contrast" / "the shadow areas"
+    /// are tonal remarks, not a part of the frame. Until 2026-09-24 the first
+    /// read as a pull-back (through a bare "too ") and the other two bought
+    /// a zoned re-solve (through "local" / "area").
+    ///
+    /// MUTATION: put "too " back in `SAT_DOWN`, or "local" / "area" back in
+    /// the zone list.
+    #[test]
+    fn a_judge_reads_too_weak_as_a_push_and_not_a_pull_back() {
+        for h in ["the saturation is too weak", "the chroma reads too timid and too flat"] {
+            assert_eq!(hint_action(h, false, false), FitAction::Saturation(FIT_ACTION_SAT_STEP), "{h}");
+        }
+        for h in [
+            "the render is too saturated",
+            "there is too much saturation",
+            "the chroma goes too far",
+            "the colours are too vivid",
+        ] {
+            assert_eq!(hint_action(h, false, false), FitAction::Saturation(-FIT_ACTION_SAT_STEP), "{h}");
+        }
+        for h in ["add local contrast to the midtones", "the shadow areas look muddy"] {
+            assert_eq!(hint_action(h, false, true), FitAction::None, "{h}");
+        }
+        assert_eq!(hint_action("the foreground is flat", false, true), FitAction::Zoned);
     }
 
     #[test]

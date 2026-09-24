@@ -71,7 +71,8 @@ def main():
     args = ap.parse_args()
     root = pathlib.Path(args.root)
     (root / "raw").mkdir(parents=True, exist_ok=True)
-    files = {f["dataFile"]["filename"]: f["dataFile"] for f in json.load(open(root / "files.json", encoding="utf-8"))}
+    with open(root / "files.json", encoding="utf-8") as fh:
+        files = {f["dataFile"]["filename"]: f["dataFile"] for f in json.load(fh)}
     scenes = yaml.safe_load(open(root / "dataset.yaml", encoding="utf-8"))["Bayer"]
 
     def rank(item):

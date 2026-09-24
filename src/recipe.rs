@@ -267,9 +267,14 @@ pub struct EditRecipe {
     /// which is the crop's angle and runs after this stage.
     /// → `crs:PerspectiveRotate`.
     pub perspective_rotate: f32,
-    /// Transform, Scale, 0..=200 with 100 neutral — the third control in this
-    /// struct whose neutral is 100 (with the two lens-profile strengths).
-    /// → `crs:PerspectiveScale`.
+    /// Transform, Scale, 50..=150 with 100 neutral — Lightroom's own band
+    /// (its slider stops at both ends; the 162 sidecars in this library that
+    /// carry it all read 100) and the third control in this struct whose
+    /// neutral is 100 (with the two lens-profile strengths). Bounded below
+    /// 50 rather than at 0 since 2026-09-24: a scale of 0 collapses the
+    /// Transform map to a point, and the stage then handed the frame back
+    /// UNTOUCHED — every other slider and the Upright matrix silently
+    /// dropped with it. → `crs:PerspectiveScale`.
     pub perspective_scale: f32,
     /// Transform, Aspect, -100..=100: stretches the frame vertically (+) or
     /// horizontally (−), area-preserving. → `crs:PerspectiveAspect`.
@@ -3785,7 +3790,7 @@ impl EditRecipe {
         self.perspective_vertical = c(self.perspective_vertical, -100.0, 100.0);
         self.perspective_horizontal = c(self.perspective_horizontal, -100.0, 100.0);
         self.perspective_rotate = c(self.perspective_rotate, -10.0, 10.0);
-        self.perspective_scale = c(self.perspective_scale, 0.0, 200.0);
+        self.perspective_scale = c(self.perspective_scale, 50.0, 150.0);
         self.perspective_aspect = c(self.perspective_aspect, -100.0, 100.0);
         self.perspective_x = c(self.perspective_x, -100.0, 100.0);
         self.perspective_y = c(self.perspective_y, -100.0, 100.0);
@@ -3798,6 +3803,11 @@ impl EditRecipe {
         if self.upright_transform.iter().flatten().any(|v| !v.is_finite()) {
             self.upright_transform.clear();
         }
+        // Only Lightroom's six modes can select a matrix (`perspective_upright`
+        // is clamped to 0..=5 above), so entries past the sixth are memory
+        // nothing reads — a hand-edited file could carry a million of them
+        // until 2026-09-24.
+        self.upright_transform.truncate(6);
         self.ca_r = c(self.ca_r, -100.0, 100.0);
         self.ca_b = c(self.ca_b, -100.0, 100.0);
         // De-fringe: Adobe's own bands (amount 0..20, hue windows 0..100).
@@ -4593,6 +4603,34 @@ mod tests {
     /// is_noop branch". It can, and that branch DELETES the photo's saved
     /// edits: a body carrying only a zero-area crop is a real edit on arrival
     /// and `EditRecipe::default()` afterwards. The route now decides on the
+    /// Only six Upright matrices are addressable, so a seventh is memory and
+    /// nothing else; a non-finite one still drops the whole list (the index →
+    /// mode correspondence must not shift).
+    #[test]
+    fn upright_matrices_past_the_sixth_are_dropped() {
+        use super::*;
+        let mut r = EditRecipe { upright_transform: vec![[1.0; 9]; 9], ..Default::default() };
+        r.clamp();
+        assert_eq!(r.upright_transform.len(), 6);
+        let mut r = EditRecipe { upright_transform: vec![[f32::NAN; 9]; 2], ..Default::default() };
+        r.clamp();
+        assert!(r.upright_transform.is_empty());
+    }
+
+    /// A hand-edited Transform scale outside Lightroom's own 50..=150 is
+    /// brought to the band's edge, never to the 0 that collapsed the whole
+    /// stage (a collapsed map has no inverse and the frame came back with
+    /// every other Transform slider and the Upright matrix dropped).
+    #[test]
+    fn transform_scale_is_clamped_to_lightrooms_band() {
+        use super::*;
+        for (given, want) in [(0.0, 50.0), (49.9, 50.0), (100.0, 100.0), (150.0, 150.0), (200.0, 150.0)] {
+            let mut r = EditRecipe { perspective_scale: given, ..Default::default() };
+            r.clamp();
+            assert_eq!(r.perspective_scale, want, "scale {given}");
+        }
+    }
+
     /// pre-clamp recipe; this pins the property that makes the order matter,
     /// so the assertion cannot quietly come back.
     #[test]

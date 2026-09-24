@@ -23,7 +23,10 @@ Provenance labels used below are deliberate:
 
 `decode_any` dispatches 24 camera-RAW extensions to rawler and eight baked
 raster extensions to `image`; embedded ICC profiles on baked images are
-converted with qcms. Bayer data uses rawler's normal demosaic path, while a
+converted with qcms (a TIFF's profile tag is read through the tiff crate
+itself: image's own probe folds every read error into "untagged", so since
+2026-09-24 only a missing tag is untagged and a profile the reader cannot read
+is a hard error). Bayer data uses rawler's normal demosaic path, while a
 non-2×2 three-colour CFA takes AutoShade's geometry-driven X-Trans path: for
 each missing colour at a pixel it fits a plane to matching photosites in a
 5×5 neighbourhood, then evaluates that plane at the target while retaining

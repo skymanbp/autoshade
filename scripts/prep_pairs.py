@@ -226,7 +226,8 @@ def main():
     args = ap.parse_args()
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    scenes = yaml.safe_load(open(pathlib.Path(args.root) / "dataset.yaml", encoding="utf-8"))["Bayer"]
+    with open(pathlib.Path(args.root) / "dataset.yaml", encoding="utf-8") as fh:
+        scenes = yaml.safe_load(fh)["Bayer"]
     jobs = []
     for i, (name, s) in enumerate(sorted(scenes.items())):
         split = "val" if (s.get("unknown_sensor") or s.get("test_reserve")) else "train"

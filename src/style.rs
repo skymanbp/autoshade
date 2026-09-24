@@ -589,6 +589,17 @@ pub fn vocab_version_of(provenance: &str) -> Option<u32> {
         .and_then(|n| n.parse().ok())
 }
 
+/// The MODEL half of a provenance string — everything but the `vocab-vN`
+/// field — which two populations must share before one stamp can describe
+/// both ([`StyleIndex::save`]'s merge).
+pub fn model_of(provenance: &str) -> String {
+    provenance
+        .split_whitespace()
+        .filter(|field| !field.starts_with("vocab-v"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// ONE retrieval query: the vectors it was able to produce and what those
 /// vectors are worth.
 ///
@@ -794,7 +805,17 @@ fn walkdir(root: &Path) -> Result<Vec<PathBuf>> {
         }
         for ent in std::fs::read_dir(&dir).with_context(|| format!("scan {}", dir.display()))? {
             let p = ent?.path();
-            if p.is_dir() { stack.push(p); } else { out.push(p); }
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.exists() {
+                out.push(p);
+            } else {
+                // A link whose target is gone: `is_dir` and `exists` both
+                // follow it and both say no. Listed as a file (until
+                // 2026-09-24) it failed the first decode and the whole build
+                // with it; a missing reference is named and stepped over.
+                eprintln!("⚠ {} points nowhere (a link whose target is missing) — skipped", p.display());
+            }
         }
     }
     Ok(out)
@@ -3272,17 +3293,55 @@ impl StyleIndex {
                     // without `--embed`) used to rewrite the file with `null`
                     // over the looks it had just merged in, and `load`'s
                     // vocabulary check then had nothing left to read.
-                    let mut merged_vectors = false;
+                    let (mut merged_raw, mut merged_looks) = (false, false);
                     if value.exemplars.is_empty() {
-                        merged_vectors |= existing.exemplars.iter().any(|e| e.embed.is_some());
+                        merged_raw = existing.exemplars.iter().any(|e| e.embed.is_some());
                         value.exemplars = existing.exemplars; value.mean = existing.mean; value.std = existing.std; value.source_dir = existing.source_dir;
                     }
                     if value.looks.is_empty() {
-                        merged_vectors |= !existing.looks.is_empty();
+                        merged_looks = !existing.looks.is_empty();
                         value.looks = existing.looks; value.looks_dir = existing.looks_dir;
                     }
+                    let merged_vectors = merged_raw || merged_looks;
                     if value.embed_provenance.is_none() && merged_vectors {
                         value.embed_provenance = existing.embed_provenance;
+                    } else if merged_vectors
+                        && let (Some(ours), Some(theirs)) =
+                            (value.embed_provenance.as_deref(), existing.embed_provenance.as_deref())
+                        && model_of(ours) != model_of(theirs)
+                    {
+                        // ONE stamp cannot describe two populations embedded by
+                        // two models, and until 2026-09-24 the fresh half's stamp
+                        // was kept over vectors the other model wrote — a query
+                        // vector from this build compared against them is a
+                        // number, not a similarity. The merged half keeps its
+                        // features and settings and loses its vectors, said out
+                        // loud; the next `--embed` build restores them.
+                        let (kept, lost) = (model_of(ours), model_of(theirs));
+                        if merged_raw {
+                            for e in &mut value.exemplars {
+                                e.embed = None;
+                                e.desc_embed = None;
+                            }
+                            eprintln!(
+                                "existing style index {}: its {} RAW image vector(s) were embedded by {lost} \
+                                 and this build embeds with {kept} — they are dropped (features and settings \
+                                 stand); rebuild the index with --embed to score them again",
+                                path.display(),
+                                value.exemplars.len()
+                            );
+                        }
+                        if merged_looks {
+                            eprintln!(
+                                "existing style index {}: its {} look record(s) were embedded by {lost} and \
+                                 this build embeds with {kept} — they are dropped; rebuild the look library \
+                                 with --embed",
+                                path.display(),
+                                value.looks.len()
+                            );
+                            value.looks.clear();
+                            value.looks_dir = None;
+                        }
                     }
                 }
                 Err(err) if path.exists() => {
@@ -3463,6 +3522,18 @@ impl StyleIndex {
                     "style index {} exemplar {i} contains a non-finite number",
                     path.display()
                 );
+            }
+            // The RAW half's tags reach the prompt exactly as a look's do, so
+            // they meet the look door's bound (`LOOK_TAGS_K` phrases of at most
+            // 128 chars) — TRUNCATED rather than refused, like `desc` below,
+            // because an overlong tag is not worth an hour-long rebuild. Until
+            // 2026-09-24 a record without `vocab_scores` (which `retag` would
+            // have rewritten) carried arbitrary tags to the prompt.
+            exemplar.tags.truncate(LOOK_TAGS_K);
+            for t in &mut exemplar.tags {
+                if t.chars().count() > 128 {
+                    *t = t.chars().take(128).collect();
+                }
             }
 
             // The tag is free text that reaches the model prompt; only the
@@ -5094,9 +5165,22 @@ pub fn distillation_preview(ex: &[&StyleExemplar], style: f32) -> String {
 
 /// Style axis pull: preserve the shipped 0.3 default's historical 0.18 pull,
 /// while allowing Style 1.0 to reach the retrieved target fully.
+///
+/// CONTINUOUS since 2026-09-24. The old `if s >= 0.5 { s } else { s * 0.6 }`
+/// jumped from 0.294 to 0.500 between Style 0.49 and 0.50 — a slider tick
+/// that moved the pull by 0.2. The three points anything documents or
+/// renders against stay exactly where they were (0.3 → 0.18, 0.5 → 0.5,
+/// 1.0 → 1.0), and nothing at or above 0.5 moves; the piece between 0.3
+/// and 0.5 now rises straight from 0.18 to 0.5 instead of falling to 0.294.
 pub fn style_pull(style: f32) -> f32 {
     let s = style.clamp(0.0, 1.0);
-    if s >= 0.5 { s } else { s * 0.6 }
+    if s < 0.3 {
+        s * 0.6
+    } else if s < 0.5 {
+        0.18 + (s - 0.3) * 1.6
+    } else {
+        s
+    }
 }
 
 fn normalize(mut v: [f32; NDIM], mean: &[f32], std: &[f32]) -> [f32; NDIM] {
@@ -5224,6 +5308,16 @@ mod tests {
     fn style_pull_is_full_at_one_and_unchanged_at_default() {
         assert_eq!(style_pull(1.0), 1.0);
         assert_eq!(style_pull(0.3), 0.18);
+        assert_eq!(style_pull(0.5), 0.5);
+        // …and continuous, monotone in between: no slider tick moves the
+        // pull by more than the tick (the 0.49 → 0.50 jump of 0.2 is gone).
+        let mut last = style_pull(0.0);
+        for i in 1..=1000 {
+            let now = style_pull(i as f32 / 1000.0);
+            assert!(now >= last, "monotone at {i}: {last} -> {now}");
+            assert!(now - last < 0.002, "continuous at {i}: {last} -> {now}");
+            last = now;
+        }
     }
 
     #[test]
@@ -8151,6 +8245,71 @@ mod tests {
         let merged = StyleIndex::load(&path).unwrap();
         assert_eq!(merged.exemplars.len(), 1); assert_eq!(merged.looks.len(), 1);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A link whose target is gone is stepped over, not decoded.
+    #[test]
+    fn walkdir_steps_over_a_dangling_link() {
+        let dir = crate::test_dir("style-walk-dangling");
+        std::fs::write(dir.join("a.jpg"), b"x").unwrap();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(dir.join("gone.jpg"), dir.join("dangling.jpg"));
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(dir.join("gone.jpg"), dir.join("dangling.jpg"));
+        if made.is_err() {
+            crate::test_skipped("walkdir dangling link", "this account cannot create symbolic links");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let found: Vec<String> = walkdir(&dir)
+            .expect("a dangling link must not fail the scan")
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(found, ["a.jpg"], "the dangling link is not a file to decode");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A RAW exemplar's tags meet the look door's bound on the way in:
+    /// truncated, never refused.
+    #[test]
+    fn raw_exemplar_tags_are_bounded_at_the_door() {
+        let dir = crate::test_dir("style-raw-tags-bound");
+        let path = dir.join("style-index.json");
+        let mut raw = plain_exemplar("raw");
+        raw.tags = vec!["t".repeat(300); LOOK_TAGS_K + 3];
+        StyleIndex { version: CURRENT_INDEX_VERSION, mean: vec![0.0; NDIM], std: vec![1.0; NDIM], exemplars: vec![raw], source_dir: Some("raws".into()), looks: Vec::new(), looks_dir: None, embed_provenance: None }.save(&path).unwrap();
+        let back = StyleIndex::load(&path).unwrap();
+        assert_eq!(back.exemplars[0].tags.len(), LOOK_TAGS_K);
+        assert!(back.exemplars[0].tags.iter().all(|t| t.chars().count() == 128), "{:?}", back.exemplars[0].tags);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One stamp, two models: a looks build over RAW vectors another model
+    /// embedded must not launder them under its own stamp. The merged half
+    /// loses its vectors (features and settings stand) and the file's stamp
+    /// names the one model that wrote what it keeps.
+    ///
+    /// MUTATION: drop the `model_of` comparison from `save`'s merge and the
+    /// other model's RAW vectors survive under this build's stamp.
+    #[test]
+    fn a_merge_across_two_embedding_models_drops_the_other_models_vectors() {
+        let dir = crate::test_dir("style-merge-two-models");
+        let path = dir.join("style-index.json");
+        let mut raw = plain_exemplar("raw");
+        raw.embed = Some(unit_embed());
+        let other = embed_provenance_string().replace(crate::embed::MODEL_REVISION, "0123456789abcdef0123456789abcdef01234567");
+        assert_ne!(model_of(&other), model_of(&embed_provenance_string()), "premise: another model");
+        assert_eq!(vocab_version_of(&other), Some(LOOK_VOCAB_VERSION), "premise: the same vocabulary");
+        StyleIndex { version: CURRENT_INDEX_VERSION, mean: vec![0.0; NDIM], std: vec![1.0; NDIM], exemplars: vec![raw], source_dir: Some("raws".into()), looks: Vec::new(), looks_dir: None, embed_provenance: Some(other) }.save(&path).unwrap();
+        let look = LookExemplar { stem: "look".into(), path: "look.jpg".into(), embed: unit_embed(), tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None };
+        StyleIndex { version: CURRENT_INDEX_VERSION, mean: vec![0.0; NDIM], std: vec![1.0; NDIM], exemplars: Vec::new(), source_dir: None, looks: vec![look], looks_dir: Some("looks".into()), embed_provenance: Some(embed_provenance_string()) }.save(&path).unwrap();
+        let merged = StyleIndex::load(&path).unwrap();
+        assert_eq!(merged.exemplars.len(), 1, "the RAW half's features and settings stand");
+        assert!(merged.exemplars[0].embed.is_none(), "…but the other model's vector is gone");
+        assert_eq!(merged.looks.len(), 1);
+        assert_eq!(merged.embed_provenance.as_deref(), Some(embed_provenance_string().as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The provenance stamp travels with the VECTORS: a 14-dim RAW build

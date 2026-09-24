@@ -114,22 +114,13 @@ function Get-UserPathRaw {
     return [string]$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
 }
 
-# The uninstaller's promise about the user PATH, as it can be kept. An
-# installer before 1.2.4 recorded that it added the entry but not whether it
-# wrote the separator, so an uninstall over such a base is exact up to one
-# trailing ';' -- exact outright when the PATH ended in ';' to begin with,
-# which the Windows default user PATH does. From a 1.2.4 base on, byte for
-# byte. The comparison is keyed on the base VERSION, so this relaxation
-# expires by itself once the previous published release is 1.2.4 or later.
+# The uninstaller's promise about the user PATH: byte for byte. (Until
+# 2026-09-24 a base older than 1.2.4 was compared up to one trailing ';' —
+# every published base has been newer for a year, and the `[version]` parse
+# that keyed it threw on a suffixed version such as 1.7.0-rc1.)
 function Assert-UserPathRestored {
     param([string]$Before, [string]$What)
-    $now = Get-UserPathRaw
-    if ([version]$BaseVersion -lt [version]'1.2.4') {
-        Assert-Same $now.TrimEnd(';') $Before.TrimEnd(';') "$What, up to the trailing separator a pre-1.2.4 installer could not record"
-    }
-    else {
-        Assert-Same $now $Before $What
-    }
+    Assert-Same (Get-UserPathRaw) $Before $What
 }
 
 function Set-UserPathRaw {
@@ -307,6 +298,23 @@ function Assert-PayloadInstalled {
     }
     Assert-That ($missing.Count -eq 0) "$Label -- every shipped file is present" ($missing -join ', ')
     Assert-That ($wrong.Count -eq 0) "$Label -- every shipped file hashes to this build" ($wrong -join ', ')
+    # The EXCLUDES, asserted as absences: an Excludes regression in the .iss
+    # ships test suites, bytecode and the weights cache, and the presence
+    # checks above would pass it.
+    $python = Join-Path $InstallDir 'python'
+    $stray = New-Object System.Collections.Generic.List[string]
+    if (Test-Path -LiteralPath $python -PathType Container) {
+        foreach ($f in Get-ChildItem -LiteralPath $python -Recurse -Force) {
+            $rel = $f.FullName.Substring($python.Length + 1)
+            if ($f.PSIsContainer) {
+                if ($f.Name -eq '__pycache__' -or $rel -eq 'weights') { $stray.Add($rel) }
+            }
+            elseif ($f.Extension -eq '.pyc' -or $f.Name -like 'test_*.py' -or $rel -like 'weights\*') {
+                $stray.Add($rel)
+            }
+        }
+    }
+    Assert-That ($stray.Count -eq 0) "$Label -- nothing the .iss excludes was shipped" ($stray -join ', ')
 }
 
 # --------------------------------------------------------------------------

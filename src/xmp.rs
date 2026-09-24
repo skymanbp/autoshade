@@ -520,6 +520,33 @@ fn honour_declared_orientation(
     }
 }
 
+/// The frame an orientation-only document's geometry was written in — the
+/// photograph's own rectangle under the honoured turn — or `None` without
+/// a readable photograph. `merge_frame`'s Keep and Orientation arms fold a
+/// recipe through exactly this frame when the base declares no rectangle,
+/// so every reader of such a document decodes in it: the recipe reader
+/// (`xmp_to_recipe_clamped_impl`) and the photo-aware disclosure doors
+/// ([`crop_import_note_for_photo`], [`import_losses_for_photo`]).
+fn frame_fallback(
+    source: Option<((usize, usize), rawler::Orientation)>,
+    turn: &HonouredTurn,
+) -> Option<FrameAspect> {
+    source.and_then(|((w, h), _)| FrameAspect::from_size_turned(w as f64, h as f64, turn.turn))
+}
+
+/// [`frame_fallback`] from a document and the photograph beside it: the
+/// document's declared orientation composed with the RAW's own frame, the
+/// way the recipe reader composes them. `None` when the document declares
+/// no orientation (nothing was folded) or the photograph is not a readable
+/// RAW (nothing to compose against — the declaration stands alone).
+fn photo_frame_fallback(xmp: &str, photo: Option<&std::path::Path>) -> Option<FrameAspect> {
+    let declared = declared_orientation(xmp)?;
+    let photo = photo.filter(|p| crate::decode::is_raw(p))?;
+    let source = crate::pipeline::source_frame_memo(photo)?;
+    let turn = honour_declared_orientation(Some(declared), Some(source.1));
+    frame_fallback(Some(source), &turn)
+}
+
 /// The five numbers Lightroom stores for one `Mask/CircularGradient`, in its
 /// own normalised frame. NOT a bounding box — see [`lr_to_engine`].
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1088,27 +1115,37 @@ fn read_crop(scope: Scope<'_>, frame: Option<FrameAspect>, ours: bool) -> CropDe
 /// `None` when the crop arrived whole, which is every uncropped document and
 /// every un-straightened crop.
 pub fn crop_import_note(xmp: &str) -> Option<String> {
+    crop_import_note_in(xmp, None)
+}
+
+/// [`crop_import_note`] with the photograph beside the document, so an
+/// orientation-only sidecar's rectangle is placed in the frame it was
+/// written in ([`photo_frame_fallback`]) instead of being reported as
+/// unplaceable — the same frame the recipe reader decodes it in, so the two
+/// surfaces cannot disagree about one file.
+pub fn crop_import_note_for_photo(xmp: &str, photo: &std::path::Path) -> Option<String> {
+    crop_import_note_in(xmp, Some(photo))
+}
+
+fn crop_import_note_in(xmp: &str, photo: Option<&std::path::Path>) -> Option<String> {
     if xmp.len() > MAX_XMP_BYTES || xmlns_conflict(xmp).is_some() {
         return None;
     }
     let scope = crs_own_scope(xmp);
-    let frame = FrameAspect::from_xmp(xmp);
+    let frame = FrameAspect::from_xmp(xmp).or_else(|| photo_frame_fallback(xmp, photo));
     match read_crop(Scope::new(scope.as_ref()), frame, is_autoshade_sidecar(xmp)) {
         CropDecode::Read { overshoot_frac, .. } if overshoot_frac > 0.0 => {
-            // In pixels of the frame the document declares, when it declares
-            // one — a fraction means nothing to a photographer. The decoder
-            // measures the overshoot in units of the source HEIGHT
+            // In pixels of the frame the crop was decoded in — a `Read` with
+            // an overshoot implies one, since only a placed rectangle can
+            // overshoot; a fraction means nothing to a photographer. The
+            // decoder measures the overshoot in units of the source HEIGHT
             // (`CropDecode::Read`), so that is the side to scale by; the
             // longer side put every bottom-edge overshoot on a 3:2 frame 50 %
             // too high.
-            let px = frame.map(|f| overshoot_frac * f.h);
+            let px = overshoot_frac * frame?.h;
             Some(format!(
-                "the straightened crop reaches {} outside the frame this build's straighten \
-                 leaves behind, and was trimmed to fit",
-                match px {
-                    Some(px) => format!("{px:.0} px"),
-                    None => format!("{:.2} % of one edge", overshoot_frac * 100.0),
-                }
+                "the straightened crop reaches {px:.0} px outside the frame this build's \
+                 straighten leaves behind, and was trimmed to fit"
             ))
         }
         CropDecode::NoFrame { .. } => Some(
@@ -2136,18 +2173,23 @@ pub fn import_losses(xmp: &str) -> Vec<MaskImportLoss> {
 }
 
 /// [`import_losses`] with the photo identity needed to resolve a sibling ACR
-/// MaskBrushTable. The structured loss channel is already user-visible, so
-/// this re-read is silent; the recipe import emits any named table refusal.
+/// MaskBrushTable — and, since 2026-09-24, to place an orientation-only
+/// document's geometry in the frame it was written in. The structured loss
+/// channel is already user-visible, so this re-read is silent; the recipe
+/// import emits any named table refusal.
 pub fn import_losses_for_photo(xmp: &str, photo: &std::path::Path) -> Vec<MaskImportLoss> {
     if xmp.len() > MAX_XMP_BYTES || xmlns_conflict(xmp).is_some() {
         return Vec::new();
     }
     let authored_by_autoshade = is_autoshade_sidecar(xmp);
     let scope = crs_own_scope(xmp);
+    // The frame the recipe reader decodes in, photograph included
+    // (`photo_frame_fallback`): an orientation-only document's rotated
+    // radial is a rotation that imports, not a loss to report.
     mask_summary_with_source(
         scope.as_ref(),
         authored_by_autoshade,
-        FrameAspect::from_xmp(xmp),
+        FrameAspect::from_xmp(xmp).or_else(|| photo_frame_fallback(xmp, Some(photo))),
         Some(photo),
         None,
     )
@@ -8929,6 +8971,14 @@ fn xmp_to_recipe_clamped_impl(
             refused.to_u16()
         ));
     }
+    // A document that declares only an orientation — 154 of the 175 sidecars
+    // in the operator's library — had its geometry folded through the
+    // PHOTOGRAPH's rectangle on the way out (`merge_frame`'s Keep and
+    // Orientation arms), so that rectangle is the frame it must be read in.
+    // Without it (until 2026-09-24) the crop's verbatim arm read folded
+    // corners as unfolded and a rotated radial decoded as unrotated, with a
+    // rotation loss disclosed that had not happened.
+    let frame = frame.or_else(|| frame_fallback(source, &turn));
     // Adobe applies `CropAngle` only under `HasCrop="True"` — importing a
     // stale angle from a DISABLED crop activated a straighten Adobe itself
     // does not render.
@@ -12146,6 +12196,33 @@ mod tests {
         assert!((tilt - -60.486).abs() < 1e-2, "major-axis tilt {tilt}°, measured −60.5 ± 0.9");
     }
 
+    /// One mask, one verdict: a mask that names the same missing raster
+    /// through its base geometry AND a component is one mask that lost one
+    /// raster, not two losses with the same name.
+    #[test]
+    fn a_mask_naming_one_missing_raster_twice_loses_it_once() {
+        use crate::recipe::{MaskCombine, MaskComponent};
+        let recipe = EditRecipe {
+            masks: vec![LocalAdjustment {
+                mask: MaskGeometry::Bitmap { path: "gone-raster.png".into() },
+                components: vec![MaskComponent {
+                    geometry: MaskGeometry::Bitmap { path: "gone-raster.png".into() },
+                    mode: MaskCombine::Add,
+                    inverted: false,
+                }],
+                exposure_ev: 0.3,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let (_, losses) = recipe_to_xmp_with_losses(&recipe);
+        assert_eq!(
+            losses.iter().filter(|l| l.reason == MaskLossReason::RasterNotEmbedded).count(),
+            1,
+            "one raster, one verdict: {losses:?}"
+        );
+    }
+
     /// The corner encoding is a bijection, and the WRITER is its other half.
     /// Both of Lightroom's legal corner arrangements go out byte-identical to
     /// the way they came in — `Left < Right` (probe #4) and `Left > Right`
@@ -13356,6 +13433,151 @@ mod tests {
     ///
     /// MUTATION THIS CATCHES: return `FrameDecl::Keep` unconditionally from
     /// `merge_frame`'s disagreement arm and the turned save leaves
+    /// An orientation-only document — the shape 154 of this library's 175
+    /// sidecars have — is read in the PHOTOGRAPH's frame, which is the frame
+    /// its geometry was folded through on the way out. With the RAW beside
+    /// it, a rotated radial comes back rotated and a tilted crop placed; the
+    /// document-only readers still abstain (nothing to compose against), and
+    /// the photo-aware disclosure doors agree with the recipe reader instead
+    /// of reporting a rotation loss that did not happen.
+    ///
+    /// MUTATION THIS CATCHES: drop the `frame_fallback` line from the reader
+    /// (the radial decodes `Unrotated`), or the `photo_frame_fallback` from
+    /// either door (the false loss note returns).
+    #[test]
+    fn an_orientation_only_sidecar_is_read_in_the_photographs_frame() {
+        let Some(root) = crate::fit::calibration_corpus() else { return };
+        let raw = root.join("p36.arw");
+        if !raw.is_file() {
+            crate::test_skipped("orientation-only sidecar", "p36.arw not in the corpus");
+            return;
+        }
+        let ((w, h), exif) = crate::pipeline::source_frame_memo(&raw).expect("p36's header reads");
+        let frame = FrameAspect::from_size_turned(w as f64, h as f64, exif).expect("a rectangle");
+        let r = EditRecipe {
+            crop: Some(crate::recipe::Crop { left: 0.1, top: 0.1, right: 0.9, bottom: 0.9 }),
+            straighten_deg: 3.0,
+            masks: vec![LocalAdjustment {
+                // Clearly elongated (0.6 w by 0.2 h): a near-circular ellipse
+                // reads back with either axis as the major one, and its
+                // tilt then a quarter turn off, which says nothing about
+                // the frame it was read in.
+                mask: MaskGeometry::Radial {
+                    top: 0.3,
+                    left: 0.2,
+                    bottom: 0.5,
+                    right: 0.8,
+                    feather: 0.5,
+                    roundness: 0.0,
+                    flipped: false,
+                    angle: 37.0,
+                    midpoint: 50.0,
+                    mask_version: 2,
+                },
+                exposure_ev: 0.5,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // The projection through the photograph's frame with no payload to
+        // restore from, then the frame block reduced to the orientation alone:
+        // exactly what a merge into a Lightroom base that declares only
+        // `tiff:Orientation` writes (`merge_frame`'s Keep arm).
+        let full = bare_document(&r, Some(frame));
+        let doc = full
+            .lines()
+            .filter(|l| !l.contains("tiff:ImageWidth=") && !l.contains("tiff:ImageLength="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(doc.contains("tiff:Orientation=") && !doc.contains("tiff:ImageWidth"), "premise: {doc}");
+        assert_eq!(FrameAspect::from_xmp(&doc), None, "premise: the document declares no rectangle");
+        // The recipe reader, with the photograph: the rotation and the crop come home.
+        let with_photo = xmp_to_recipe_for_photo(&doc, &raw);
+        let MaskGeometry::Radial { angle, .. } = with_photo.masks[0].mask else { panic!("a radial") };
+        assert!((angle - 37.0).abs() < 0.5, "the rotation is read in the photo's frame: {angle}");
+        let crop = with_photo.crop.expect("the tilted crop is placed");
+        assert!((crop.left - 0.1).abs() < 0.02 && (crop.right - 0.9).abs() < 0.02, "{crop:?}");
+        // …and without it the reader abstains exactly as before.
+        let MaskGeometry::Radial { angle: blind, .. } = xmp_to_recipe(&doc).masks[0].mask else { panic!() };
+        assert_eq!(blind, 0.0, "no photograph, no frame, no rotation");
+        // The disclosure doors agree with the reader they describe.
+        assert!(
+            import_losses(&doc).iter().any(|l| matches!(l.reason, MaskImportReason::Rotation(_))),
+            "premise: the document-only door reports the rotation as lost"
+        );
+        assert!(
+            !import_losses_for_photo(&doc, &raw).iter().any(|l| matches!(l.reason, MaskImportReason::Rotation(_))),
+            "with the photograph the rotation imported, so it is not a loss"
+        );
+        // (The crop half of the same door is stated on Lightroom's own
+        // documents by `the_census_has_no_false_rotation_loss_beside_a_readable_raw`:
+        // an AutoShade-authored document places its rectangle through the
+        // verbatim arm with no frame at all.)
+        assert!(
+            crop_import_note_for_photo(&doc, &raw).is_none_or(|n| !n.contains("could not be placed")),
+            "with the photograph the rectangle is placed"
+        );
+    }
+
+    /// The library census, read through both doors: on every orientation-only
+    /// sidecar beside a readable RAW the photo-aware door reports no rotation
+    /// loss the document-only door invented. Runs only where the census is
+    /// (`AUTOSHADE_CENSUS_ROOT`), and prints its counts for the ledger.
+    #[test]
+    fn the_census_has_no_false_rotation_loss_beside_a_readable_raw() {
+        let Some(root) = std::env::var_os("AUTOSHADE_CENSUS_ROOT") else {
+            crate::test_skipped("census rotation losses", "AUTOSHADE_CENSUS_ROOT unset");
+            return;
+        };
+        let mut sidecars = Vec::new();
+        let mut stack = vec![std::path::PathBuf::from(root)];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("xmp")) {
+                    sidecars.push(p);
+                }
+            }
+        }
+        let (mut orientation_only, mut with_raw, mut doc_rotation, mut photo_rotation, mut doc_crop, mut photo_crop) =
+            (0, 0, 0, 0, 0, 0);
+        for xmp in &sidecars {
+            let Ok(text) = std::fs::read_to_string(xmp) else { continue };
+            if declared_orientation(&text).is_none() || FrameAspect::from_xmp(&text).is_some() {
+                continue;
+            }
+            orientation_only += 1;
+            let Some(raw) = ["arw", "ARW", "dng", "DNG"]
+                .iter()
+                .map(|ext| xmp.with_extension(ext))
+                .find(|p| p.is_file())
+            else {
+                continue;
+            };
+            if crate::pipeline::source_frame_memo(&raw).is_none() {
+                continue;
+            }
+            with_raw += 1;
+            let rot = |l: &[MaskImportLoss]| l.iter().any(|l| matches!(l.reason, MaskImportReason::Rotation(_)));
+            doc_rotation += usize::from(rot(&import_losses(&text)));
+            photo_rotation += usize::from(rot(&import_losses_for_photo(&text, &raw)));
+            let unplaced = |n: Option<String>| n.is_some_and(|n| n.contains("could not be placed"));
+            doc_crop += usize::from(unplaced(crop_import_note(&text)));
+            photo_crop += usize::from(unplaced(crop_import_note_for_photo(&text, &raw)));
+        }
+        eprintln!(
+            "CENSUS orientation-only {orientation_only} of {} sidecars, {with_raw} beside a readable RAW; \
+             rotation losses document-only {doc_rotation} / photo-aware {photo_rotation}; \
+             unplaced crops document-only {doc_crop} / photo-aware {photo_crop}",
+            sidecars.len()
+        );
+        assert_eq!(photo_rotation, 0, "a rotation the photo-aware reader imports is not a loss");
+        assert_eq!(photo_crop, 0, "a rectangle the photo-aware reader places is not unplaceable");
+    }
+
     /// `tiff:Orientation="8"` on a document whose geometry is now landscape.
     #[test]
     fn a_merge_corrects_the_declared_orientation_only_when_the_turn_moved() {

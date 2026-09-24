@@ -431,7 +431,12 @@ impl AutoShadeApp {
     /// dispatch — this worker fed a .ARW straight to `decode::load_image`
     /// since v0.22, which is the "AI mask refine failed" report.
     pub(crate) fn start_mask_refine(&mut self, i: usize) {
-        if self.busy {
+        // The frame gate the seven pixel doors take (panels/retouch.rs):
+        // the guide is read through `source_pixels` in the EXIF frame while
+        // the raster being refined was turned into the plate frame by
+        // `rotate_recipe`, and a guided filter handed a turned mask and an
+        // unturned guide writes a refined raster that fits neither.
+        if self.busy || self.refuse_pixel_work_on_a_turned_photo() {
             return;
         }
         let Some(src) = self.src_path.clone() else { return };

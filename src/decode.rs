@@ -681,12 +681,11 @@ fn load_image_gated(path: &Path, develop: bool) -> Result<DynamicImage> {
     // 256 MiB `decoding_buffer_size` at those ~32 bytes per profile byte —
     // room for an ~8 MiB profile, far past any ICC file (`ifd_value_size`, the
     // "1 MiB per value" this comment used to cite, is declared by tiff 0.11 and
-    // enforced nowhere) — and NO pixel is ever decoded here. What the codec
-    // still hides: `TiffDecoder::icc_profile` folds EVERY tiff error into
-    // `None` (image 0.25.10 `codecs/tiff.rs`), so a profile past that budget,
-    // or an I/O error inside the tag read, reads as "untagged" below. Only a
-    // direct `tiff` crate read of `Tag::IccProfile` could make that a hard
-    // error; nothing reached through `image` can see it.
+    // enforced nowhere) — and NO pixel is ever decoded here. The read goes
+    // through the `tiff` crate itself, not image's `TiffDecoder::icc_profile`,
+    // which folds EVERY tiff error into `None` (image 0.25.10
+    // `codecs/tiff.rs`) — see the arm below for what that hid until
+    // 2026-09-24.
     let icc_profile = match icc_profile {
         Some(p) => Some(p),
         None if format == Some(image::ImageFormat::Tiff) => {
@@ -695,12 +694,24 @@ fn load_image_gated(path: &Path, develop: bool) -> Result<DynamicImage> {
             // assume-sRGB fall-through — "that fall-through IS the bug".
             // The old .ok() pair folded a failed profile READ into "no
             // profile" (L05-2). Ok(None) is the real no-profile case.
-            image::codecs::tiff::TiffDecoder::new(std::io::BufReader::new(
-                std::fs::File::open(path)
-                    .with_context(|| format!("open image {}", path.display()))?,
-            ))
-            .and_then(|mut d| d.icc_profile())
-            .with_context(|| format!("read the ICC profile of {}", path.display()))?
+            //
+            // Through the `tiff` crate DIRECTLY (2026-09-24): image's probe is
+            // `Ok(get_tag_u8_vec(IccProfile).ok())`, so a profile tag of the
+            // wrong type or an I/O error inside the tag read came back as
+            // "untagged" and the file opened as sRGB. Here only "no such tag"
+            // is untagged; every other answer is the hard error the rule asks.
+            let file = std::fs::File::open(path)
+                .with_context(|| format!("open image {}", path.display()))?;
+            let mut probe = tiff::decoder::Decoder::new(std::io::BufReader::new(file))
+                .with_context(|| format!("read the ICC profile of {}", path.display()))?;
+            match probe.get_tag_u8_vec(tiff::tags::Tag::IccProfile) {
+                Ok(profile) => Some(profile),
+                Err(tiff::TiffError::FormatError(tiff::TiffFormatError::RequiredTagNotFound(_))) => None,
+                Err(e) => {
+                    return Err(anyhow::Error::new(e)
+                        .context(format!("read the ICC profile of {}", path.display())));
+                }
+            }
         }
         None => None,
     };
@@ -1641,9 +1652,11 @@ fn tiff_u32(r: &mut impl std::io::Read, le: bool) -> std::io::Result<u32> {
 /// interception exists short of vendoring rawler; a chain of length one
 /// reaches it, and this guard does nothing about it.
 ///
-/// Called from EVERY `get_decoder` caller in the crate — `decode_raw`,
-/// `camera_rendition`, the full-res sensor render, and `as_shot_wb`. A new
-/// `get_decoder` call site needs this line too.
+/// Called ahead of every rawler entry in the crate — `raw_orientation`,
+/// `source_window` (the frame / window memo), `decode_raw_turned`, the
+/// CR3/RAF embedded-XMP read (`embedded_xmp`) and `camera_rendition`: the
+/// five callers that reach `decoder_for`, the one door a decoder is made
+/// at. A new rawler entry point needs this line too.
 ///
 /// Rejects ONLY on proof; any IO error or non-TIFF magic passes through, so
 /// no file that decodes today changes behaviour (truncation is end-of-chain
@@ -2840,6 +2853,31 @@ mod tests {
             "a TIFF profile must reach the parser, not vanish into the limits bug"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A profile tag of the WRONG TYPE (SHORT values, not bytes) is an error
+    /// image's probe folded into "untagged": the file then opened as sRGB
+    /// with its profile ignored, the exact fall-through the rule forbids. The
+    /// direct read names it. MUTATION: route the re-probe back through
+    /// `image::codecs::tiff::TiffDecoder::icc_profile` and this loads Ok.
+    #[test]
+    fn a_tiff_profile_tag_of_the_wrong_type_is_a_hard_error_not_an_untagged_file() {
+        let dir =
+            std::env::temp_dir().join(format!("autoshade-decode-icctype-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("short-typed-profile.tiff");
+        {
+            let f = std::fs::File::create(&path).unwrap();
+            let mut enc = tiff::encoder::TiffEncoder::new(std::io::BufWriter::new(f)).unwrap();
+            let mut img = enc.new_image::<tiff::encoder::colortype::RGB8>(1, 1).unwrap();
+            img.encoder().write_tag(tiff::tags::Tag::IccProfile, &[1u16, 2, 3][..]).unwrap();
+            img.write_data(&[32u8, 128, 240]).unwrap();
+        }
+        // not-a-consumer-call: the gate's own wrong-typed-profile fixture.
+        let err = load_image(&path).expect_err("a profile the reader cannot read is not an untagged file");
+        assert!(format!("{err:#}").contains("read the ICC profile"), "{err:#}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

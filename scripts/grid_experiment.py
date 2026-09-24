@@ -26,7 +26,10 @@ ANALYSIS = OUT / "analysis"
 RENDERS = OUT / "results" / "renders"
 PROBE_DATA = OUT / "results" / "probe"
 GRID_OUT = OUT / "results" / "grid"
-PROBE = OUT / "target" / "release" / "fitgrid-probe.exe"
+# The metric probe binary. The default names the 2026-08 experiment's own
+# build, which no longer exists in the tree; point FITGRID_PROBE at a build
+# of it to re-run the grid.
+PROBE = Path(os.environ.get("FITGRID_PROBE", str(OUT / "target" / "release" / "fitgrid-probe.exe")))
 SX, SY, SB, PARAMS = 12, 8, 8, 5
 VERTICES = SX * SY * SB
 BOUNDS_LOW = np.array([-1.25, -0.35, -0.35, -0.35, -0.50], dtype=np.float32)

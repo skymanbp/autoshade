@@ -202,7 +202,13 @@ pub(super) fn rasters_element(
                 seen.push((name, embedded));
                 embedded
             };
-            if !embedded {
+            // ONE verdict per mask: a mask naming the same missing raster
+            // through two geometries (an alpha and a component) recorded the
+            // same loss twice until 2026-09-24.
+            let said = losses
+                .iter()
+                .any(|l| l.name == mask_name && l.reason == MaskLossReason::RasterNotEmbedded);
+            if !embedded && !said {
                 losses.push(MaskLoss {
                     name: mask_name.clone(),
                     reason: MaskLossReason::RasterNotEmbedded,

@@ -275,13 +275,20 @@ pub(crate) fn solve_upright(luma: &[f32], w: usize, h: usize, mode: u8) -> Optio
     } else {
         (vert.n >= Tune::MIN_SAMPLES).then(|| quarter_turn(in_pixels(vert.mean_angle())))
     };
-    let rotate = {
+    let turn = {
         let (s, c) = (-level.unwrap_or(0.0)).sin_cos();
-        Homography::about_centre([c, -s / aspect, 0.0, s * aspect, c, 0.0, 0.0, 0.0, 1.0])
+        [c, -s / aspect, 0.0, s * aspect, c, 0.0, 0.0, 0.0, 1.0]
     };
+    let rotate = Homography::about_centre(turn);
     if mode == 2 {
         return level.and_then(|_| super::fill_the_frame(rotate));
     }
+    // The keystone row runs AFTER the turn (`rotate.then(warp)` below), so it
+    // must send the families' points to infinity where the turn has put
+    // them. Built from the unturned points, as it was until 2026-09-24, the
+    // row missed them by the turn's own angle and a levelled Vertical / Full
+    // render kept a residual convergence in the row's direction.
+    let (pv, ph) = (pv.map(|q| turned(&turn, q)), ph.map(|q| turned(&turn, q)));
 
     let row = match (mode, pv, ph) {
         (3, Some(a), _) => null_row_through(a),
@@ -297,6 +304,16 @@ pub(crate) fn solve_upright(luma: &[f32], w: usize, h: usize, mode: u8) -> Optio
     let row = if mode == 1 { [row[0] * Tune::AUTO_DAMP, row[1] * Tune::AUTO_DAMP] } else { row };
     let warp = Homography::about_centre([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, row[0], row[1], 1.0]);
     super::fill_the_frame(rotate.then(warp))
+}
+
+/// A homogeneous point under a map written about the origin — the centred
+/// frame the families' points are measured in.
+pub(super) fn turned(m: &[f32; 9], q: [f32; 3]) -> [f32; 3] {
+    [
+        m[0] * q[0] + m[1] * q[1] + m[2] * q[2],
+        m[3] * q[0] + m[4] * q[1] + m[5] * q[2],
+        m[6] * q[0] + m[7] * q[1] + m[8] * q[2],
+    ]
 }
 
 /// Bring an angle a quarter turn, into the band the levelling measures in.

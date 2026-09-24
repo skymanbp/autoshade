@@ -453,7 +453,6 @@ pub(crate) enum RetouchNote {
     /// rendered as its own line, so "healed N" never stands for "asked N".
     Healed {
         n: usize,
-        skipped: usize,
         out: PathBuf,
         ai_prose: String,
         notes: Vec<autoshade::rationale::Note>,

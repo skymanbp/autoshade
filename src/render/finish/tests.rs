@@ -108,6 +108,24 @@ fn the_vignette_is_centred_on_the_crop_and_not_on_the_frame() {
     }
 }
 
+/// The falloff is symmetric about the crop's continuous centre: on a 100 px
+/// wide crop that centre is x = 50.0, and the pixels 5 and 94 — centres
+/// 5.5 and 94.5, each 44.5 px from it — must darken alike. Sampled at the
+/// pixel CORNER (until 2026-09-24) they sat 45 and 44 px from it and the
+/// whole vignette rode half a pixel up-left. (Pixels 25 / 74 would sit
+/// inside the core a Midpoint-50 falloff leaves untouched.)
+///
+/// MUTATION: sample `vg.weight` at `(fx, fy)` again.
+#[test]
+fn the_vignette_is_sampled_at_the_pixel_centre() {
+    let img = finished(grey(100, 100, 0.5), &vignetted(-100.0), CropPolicy::Keep);
+    for (a, b) in [((5, 50), (94, 50)), ((50, 5), (50, 94)), ((10, 10), (89, 89))] {
+        let (la, lb) = (luma(&img, a.0, a.1), luma(&img, b.0, b.1));
+        assert!(la < 0.48, "premise: the vignette reaches ({}, {}): {la}", a.0, a.1);
+        assert!((la - lb).abs() < 2e-4, "{a:?} {la} against {b:?} {lb}: not symmetric about the centre");
+    }
+}
+
 #[test]
 fn the_companions_render_lightrooms_own_defaults_when_the_sidecar_is_silent() {
     // A Lightroom sidecar writes Midpoint / Feather / Style only when they are

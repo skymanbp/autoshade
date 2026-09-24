@@ -36,7 +36,9 @@ jobs:
       SHIPPED_APP_ID: '{B2C8B506-4DD8-4F06-B25D-7A3FBE9A742C}'
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: stable
       - name: Toolchain
         shell: bash
         run: |
@@ -81,7 +83,7 @@ jobs:
           .\dist\autoshade.exe --version
 
       - name: Install Inno Setup
-        run: choco install innosetup -y --no-progress
+        run: choco install innosetup --version 6.7.1 -y --no-progress
 
       # The real installer, real AppId, through the same script the release
       # workflow calls — so a change that breaks packaging fails here first.

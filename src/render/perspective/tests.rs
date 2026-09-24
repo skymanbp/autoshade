@@ -713,6 +713,56 @@ fn level_on_a_three_by_two_frame_keeps_right_angles_right() {
     assert!(solved.covers(), "a levelled frame must not deliver empty corners");
 }
 
+/// The keystone row is applied after the levelling turn, so it must send the
+/// families' points to infinity WHERE THE TURN HAS PUT THEM. Stated as
+/// arithmetic on one point: the row built from the turned point composes
+/// with the turn into a map whose horizon passes through the original point
+/// (its homogeneous `w` is 0 there); the row built from the unturned point
+/// — the construction until 2026-09-24 — misses it by the turn's angle.
+///
+/// MUTATION: build the row from `pv` / `ph` before they are turned.
+#[test]
+fn the_keystone_row_converges_the_turned_points_not_the_unturned_ones() {
+    let aspect = 1.5f32;
+    let (s, c) = 6f32.to_radians().sin_cos();
+    let turn = [c, -s / aspect, 0.0, s * aspect, c, 0.0, 0.0, 0.0, 1.0];
+    let rotate = Homography::about_centre(turn);
+    // A vertical family's point: far above the frame, a little right of centre.
+    let q = [0.3f32, -40.0, 1.0];
+    let converge = |point: [f32; 3]| {
+        let row = super::upright::null_row_through(point).expect("a point outside the frame states a row");
+        rotate.then(Homography::about_centre([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, row[0], row[1], 1.0]))
+    };
+    // The point in frame coordinates: the maps are pivoted on the centre.
+    let (x, y) = (0.5 + q[0] / q[2], 0.5 + q[1] / q[2]);
+    let w_of = |h: Homography| h.0[6] * x + h.0[7] * y + h.0[8];
+    let right = w_of(converge(super::upright::turned(&turn, q)));
+    let wrong = w_of(converge(q));
+    assert!(right.abs() < 1e-4, "the turned point is sent to infinity: w = {right}");
+    assert!(wrong.abs() > 1e-3, "premise: the unturned row misses it by the turn: w = {wrong}");
+}
+
+/// …and end to end: a chart both turned 6° and keystoned on a 3:2 frame is
+/// levelled AND squared by Full, with the perspective term gone rather than
+/// left at the turn's share of the row.
+#[test]
+fn full_squares_a_turned_keystone_with_no_residual_convergence() {
+    const W: usize = 384;
+    const H: usize = 256;
+    let aspect = (W as f32 - 1.0) / (H as f32 - 1.0);
+    let (s, c) = 6f32.to_radians().sin_cos();
+    let turn = Homography::about_centre([c, -s / aspect, 0.0, s * aspect, c, 0.0, 0.0, 0.0, 1.0]);
+    let truth = keystone(0.35).then(turn);
+    let data = chart(W, H, truth, true);
+    let solved = solve_upright(&data, W, H, 4).expect("a turned, converging chart states its lines");
+    let (before, after) = (perspective_strength(truth), perspective_strength(truth.then(solved)));
+    assert!(before > 0.1, "premise: the probe really converges ({before})");
+    assert!(after < before * 0.03, "the convergence must go, not stay at the turn's share: {before} -> {after}");
+    let both = truth.then(solved);
+    let left = (both.0[3] / aspect).atan2(both.0[0]).to_degrees();
+    assert!(left.abs() < 0.5, "the 6° turn must come back level, not {left:.2}°");
+}
+
 /// `Σ w lᵀl` is positive semi-definite, so its smallest eigenvalue is zero or
 /// above in exact arithmetic — and a hair below zero in Jacobi's, on exactly
 /// the near-singular matrix that having a vanishing point produces. Refusing

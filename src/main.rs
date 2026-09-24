@@ -1229,11 +1229,20 @@ fn lightroom_import_note(raw: &Path) -> Option<String> {
     // the DOCUMENT and cannot see what the recipe's own size caps then cut —
     // a 393 KB dab stream truncated to 256 KiB is a real change to the mask
     // this photo will render, and it used to be said nowhere at all.
+    // The photo-aware crop door, like the mask door above: an orientation-
+    // only sidecar's rectangle is placed in the photograph's frame, which is
+    // the frame the reader decoded it in. The UNREADABLE numbers ride too —
+    // the GUI's open path has always named them (`persist.rs` `xmp_bad`),
+    // and this line was the CLI's only account of the file.
+    let bad = autoshade::xmp::unparsable_crs_numbers(&text);
     let line = [
         autoshade::xmp::describe_import_losses(imported, &losses),
-        autoshade::xmp::crop_import_note(&text),
+        autoshade::xmp::crop_import_note_for_photo(&text, raw),
         (!clamped.is_empty())
             .then(|| format!("recipe limits then discarded {}", clamped.describe())),
+        (!bad.is_empty()).then(|| {
+            format!("{} numeric setting(s) unreadable and treated as neutral ({})", bad.len(), bad.join(", "))
+        }),
     ]
     .into_iter()
     .flatten()
@@ -2070,7 +2079,9 @@ fn match_cmd(
                         // set describes the settings the recipe had BEFORE the
                         // step, and this one is persisted into recipe.json.
                         (r.saturation != rep.recipe.saturation)
-                            .then(|| fit::rescore_report(&src, &tgt, &r, rep.err_before, &rep.notes))
+                            .then(|| {
+                                fit::rescore_report(&src, &tgt, &r, &fit_base, rep.err_before, &rep.notes)
+                            })
                     }
                     autoshade::advisor::FitAction::None => None,
                 };

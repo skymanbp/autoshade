@@ -951,6 +951,12 @@ pub mod keys {
         " No colour field was attached: the field's own ceiling {ceiling} is not \
          more than {margin} better than the frame this fit already reached \
          ({err_after}), so there was nothing left for it to carry.";
+    /// The field SOLVER abstained — no vertex had evidence to fit. Said, at
+    /// the analysis stage and at the attach stage, because a silent
+    /// abstention read exactly like a field nobody asked for.
+    pub const FIELD_UNSOLVED: &str =
+        " No colour field was solved at the {stage} stage: the field solver found \
+         no evidence to fit, so nothing was measured and nothing attached.";
     /// R34 §D4. The other half of the field's do-no-harm, and the one the
     /// frame ruler cannot make: a field that pays for one zone out of another
     /// wins on the frame and loses the picture.
@@ -1144,6 +1150,13 @@ pub mod keys {
     pub const HEAL_DETECT_FAILED: &str =
         "AI spot-detection failed ({e}); healed the painted mask only.";
     pub const HEAL_NOTE_SEP: &str = "; ";
+    /// Planned spots the engine left untouched because no donor disk of the
+    /// spot's own size fits inside the frame (`HealReport::skipped`). A typed
+    /// note since 2026-09-24 — it used to be a stderr line plus one
+    /// hand-written sentence per surface (GUI, web page, header).
+    pub const HEAL_SKIPPED_NO_DONOR: &str =
+        "{n} of {planned} spot(s) left untouched — no donor area of the spot's own size fits \
+         inside the frame around it";
     pub const HEAL_BUDGET: &str =
         "healed {n} of {total} painted region(s) — the rest exceeded the retouch budget \
          ({max_spots} regions / {max_bbox}x bbox / {max_disk}x \

@@ -1386,9 +1386,6 @@ async function selectPhoto(id, stem, el) {
       setAfterSrc(afterImg, blob);
       if (useMask) fctx.clearRect(0, 0, fc.width, fc.height);
       const saved = outPath(r), n = r.headers.get("X-Heal-Spots");
-      // Planned spots the engine left untouched (no donor of that size fits
-      // inside the frame) — named, so "healed N" is never read as "asked N".
-      const skipped = Number(r.headers.get("X-Heal-Skipped") || 0);
       // Same chain + recipe-composited re-render as fill (see there); the
       // heal joins history so Ctrl+Z can step back over it (D13).
       if (saved) { state.sessionMaster = saved; pushHistory(state.recipe); renderAfter(); }
@@ -1396,7 +1393,9 @@ async function selectPhoto(id, stem, el) {
       // only the painted mask healed) — surface it, don't imply full success.
       let why = r.headers.get("X-Heal-Rationale");
       if (why) { try { why = decodeURIComponent(why); } catch (e) { /* show raw */ } }
-      setStatus(`healed ${n || "?"} spot(s)${skipped > 0 ? ` · ${skipped} left untouched (no donor area of that size fits inside the frame)` : ""}${saved ? " → " + saved : ""}${why ? " · " + why : ""} (in ./out; Save records it for reopening)`);
+      // Spots left untouched (no donor of their size fits the frame) arrive
+      // inside the rationale as the engine's own typed note.
+      setStatus(`healed ${n || "?"} spot(s)${saved ? " → " + saved : ""}${why ? " · " + why : ""} (in ./out; Save records it for reopening)`);
     } catch (e) {
       // Same stale-aware catch as fill (see there).
       const stale = reqId !== state.id || reqSeq !== selectSeq;

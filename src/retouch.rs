@@ -1100,11 +1100,25 @@ pub fn heal(
     let healed = heal_and_save(base, &spots, out)?;
     let skipped = planned - healed;
     if skipped > 0 {
-        // stderr for the CLI; the GUI and the server cannot see this line and
-        // read `skipped` off the report instead.
-        eprintln!(
-            "⚠ {skipped} of {planned} spot(s) left untouched: no donor area of the spot's own \
-             size fits inside the frame around it"
+        // A typed note in the report, like every other partial outcome
+        // (L12#2B): the CLI prints the rationale, the GUI renders the note
+        // localized, the web page reads the rationale header. Until
+        // 2026-09-24 this was a stderr line plus three hand-written
+        // sentences, one per surface.
+        if !rationale.is_empty() {
+            crate::rationale::push_note(
+                &mut rationale,
+                &mut notes,
+                crate::rationale::Note::plain(crate::rationale::keys::HEAL_NOTE_SEP),
+            );
+        }
+        crate::rationale::push_note(
+            &mut rationale,
+            &mut notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::HEAL_SKIPPED_NO_DONOR,
+                vec![("n", skipped.to_string()), ("planned", planned.to_string())],
+            ),
         );
     }
     Ok(HealReport { spots: healed, skipped, rationale, dims: (w, h), notes })

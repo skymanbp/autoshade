@@ -190,6 +190,50 @@ fn the_cells_of_a_repainted_region_admit_the_support_free_field() {
     );
 }
 
+/// The per-zone do-no-harm judges EVERY mask the recipe carries. A Custom-role
+/// linear mask over the right half is hurt by a render that moves that half
+/// away from the target, and the check names it by the mask's own name.
+#[test]
+fn the_field_do_no_harm_judges_a_custom_region_mask_too() {
+    let (src, tgt) = (repainted_right_half(false), repainted_right_half(true));
+    let (current, target, w, _h, mut report) = field_probe(&src, &tgt);
+    report.recipe.masks.push(crate::recipe::LocalAdjustment {
+        mask: crate::recipe::MaskGeometry::Linear { zero_x: 0.49, zero_y: 0.5, full_x: 0.51, full_y: 0.5 },
+        name: "region-1".into(),
+        role: crate::recipe::MaskRole::Custom,
+        amount: 1.0,
+        ..Default::default()
+    });
+    let (s_img, _) = fit::analysis_pair(&src, &tgt);
+    assert_eq!(zone_regressed(&s_img, &report, &current, &target), None, "unchanged pixels hurt no mask");
+    let mut hurt = current.clone();
+    for (i, px) in hurt.iter_mut().enumerate() {
+        if i % w as usize >= w as usize / 2 {
+            *px = [0.02, 0.02, 0.98];
+        }
+    }
+    let (label, was, now) = zone_regressed(&s_img, &report, &hurt, &target)
+        .expect("the region mask's own residual grew past the tolerance");
+    assert_eq!(label, "region-1");
+    assert!(now > was + crate::fit_zoned::ZONE_GLOBAL_REGRESSION_TOL, "{was} -> {now}");
+}
+
+/// A pair the field solver cannot fit (every evidence weight zero) says so
+/// in the report instead of leaving the field's absence unexplained.
+#[test]
+fn an_unsolvable_field_is_disclosed_not_silent() {
+    let (src, tgt) = (repainted_right_half(false), repainted_right_half(true));
+    let (_, _, _, _, mut report) = field_probe(&src, &tgt);
+    for w in &mut report.evidence.source_weights {
+        *w = 0.0;
+    }
+    assert!(solve_local_field(&src, &tgt, &mut report).is_none(), "premise: nothing to fit");
+    let unsolved = report.notes.iter().find(|n| n.key == crate::rationale::keys::FIELD_UNSOLVED)
+        .expect("the abstention is a note");
+    assert_eq!(unsolved.args, vec![("stage", "analysis".to_string())]);
+    assert!(report.recipe.rationale.contains("No colour field was solved"));
+}
+
 /// …and the abstention that keeps the pre-R34 field byte for byte: a pair with
 /// nothing to recolour has no cell that moved closer to anything, so no cell
 /// is admitted and the shipped grid IS the analysis grid.

@@ -218,7 +218,7 @@ class Canvas:
         return rid
 
     def rect(self, x, y, w, h, fill, stroke, *, rx=10, sw=1.0, dash=None,
-             rid=None, kind="node", parent=None, record=True):
+             rid=None, kind="node", parent=None):
         rid = self._rid("r", rid)
         d = ' stroke-dasharray="%s"' % dash if dash else ""
         self.parts.append(
@@ -226,12 +226,11 @@ class Canvas:
             'stroke="{{%s}}" stroke-width="%s"%s/>'
             % (_fmt(x), _fmt(y), _fmt(w), _fmt(h), _fmt(rx), fill, stroke,
                _fmt(sw), d))
-        if record:
-            self.rects.append(_Rect(x, y, w, h, rid, kind, parent))
+        self.rects.append(_Rect(x, y, w, h, rid, kind, parent))
         return rid
 
     def text(self, lines, x, top, *, size, weight, role, anchor="middle",
-             leading=None, owner=None, letter=None):
+             leading=None, owner=None):
         """One block of text. `top` is the top of the first line's box, not a
         baseline, because every caller lays out from the top down."""
         leading = leading if leading is not None else round(size * 1.24, 1)
@@ -239,18 +238,15 @@ class Canvas:
             "R0: leading %.1f is tighter than one em at size %.1f" % (leading, size))
         self._blocks += 1
         block = self._blocks
-        ls = ' letter-spacing="%s"' % _fmt(letter) if letter else ""
         for i, line in enumerate(lines):
             base = top + ASCENT * size + i * leading
             wpx = text_width(line, size, weight)
-            if letter:
-                wpx += letter * max(0, len(line) - 1)
             x0 = {"start": x, "middle": x - wpx / 2, "end": x - wpx}[anchor]
             self.parts.append(
                 '<text x="%s" y="%s" text-anchor="%s" font-family="%s" '
-                'font-size="%s" font-weight="%d" fill="{{%s}}"%s>%s</text>'
+                'font-size="%s" font-weight="%d" fill="{{%s}}">%s</text>'
                 % (_fmt(x), _fmt(base), anchor, FONT, _fmt(size), weight, role,
-                   ls, esc(line)))
+                   esc(line)))
             self.runs.append(_Run(x0, top + i * leading, x0 + wpx,
                                   top + i * leading + (ASCENT + DESCENT) * size,
                                   line, owner, block))
@@ -329,8 +325,7 @@ class Canvas:
                                  role=accent, anchor=anchor, owner=rid)
         raise OverlapError("no free corner for the panel caption %r" % label)
 
-    def connector(self, points, *, src=None, dst=None, label=None,
-                  label_at=None, label_anchor="middle", dashed=False,
+    def connector(self, points, *, src=None, dst=None, dashed=False,
                   eid=None, head=True, role="arrow"):
         """An orthogonal or gently rounded polyline. `points` is the full route
         including both endpoints, which must already sit on the borders of the
@@ -344,11 +339,6 @@ class Canvas:
             (px, py), (qx, qy) = points[-2], points[-1]
             n = math.hypot(qx - px, qy - py) or 1.0
             self.heads.append((qx, qy, (qx - px) / n, (qy - py) / n, eid, dst))
-        if label:
-            lx, ly = label_at
-            lines = label if isinstance(label, list) else [label]
-            self.text(lines, lx, ly, size=10.5, weight=400, role="note",
-                      anchor=label_anchor, leading=13)
         return eid
 
     def would_collide(self, lines, x, top, *, size, weight, anchor="middle",

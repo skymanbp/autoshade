@@ -81,11 +81,11 @@ class StarStandardTests(unittest.TestCase):
                  'mottle_colourfulness_magnitude': .1415, 'glow_correlation': 1.0}
         star = {'faint_retention_percent': 99., 'peak_ratio': .95, 'fwhm_change': .2,
                 'core_colour_change': [.01, .01]}
-        gates = s.acceptance(noise, star, {}, noise, star, 'unreviewed')
+        gates = s.acceptance(noise, star, noise, star, 'unreviewed')
         self.assertEqual(gates['8'], 'FAIL')
-        self.assertEqual(set(s.acceptance(noise, star, {}, noise, star, 'clear').values()), {'PASS'})
+        self.assertEqual(set(s.acceptance(noise, star, noise, star, 'clear').values()), {'PASS'})
         candidate = dict(noise, fine_y=.331, fine_y_p10_p90=[.25, .35])
-        gates = s.acceptance(candidate, star, {}, noise, star, 'clear')
+        gates = s.acceptance(candidate, star, noise, star, 'clear')
         self.assertEqual((gates['1'], gates['2']), ('FAIL', 'FAIL'))
 
     def test_colourfulness_gate_uses_vector_magnitude_not_separate_axes(self):
@@ -96,10 +96,10 @@ class StarStandardTests(unittest.TestCase):
         star = {'faint_retention_percent': 99., 'peak_ratio': .95, 'fwhm_change': .2,
                 'core_colour_change': [.01, .01]}
         rotated = dict(noise, fine_colourfulness=[0, .2], mottle_colourfulness=[0, .2])
-        gates = s.acceptance(rotated, star, {}, noise, star, 'clear')
+        gates = s.acceptance(rotated, star, noise, star, 'clear')
         self.assertEqual((gates['3'], gates['4']), ('PASS', 'PASS'))
         larger = dict(rotated, fine_colourfulness_magnitude=.21, mottle_colourfulness_magnitude=.21)
-        gates = s.acceptance(larger, star, {}, noise, star, 'clear')
+        gates = s.acceptance(larger, star, noise, star, 'clear')
         self.assertEqual((gates['3'], gates['4']), ('FAIL', 'FAIL'))
 
     def test_tone_map_is_monotone_and_preserves_linear_slope_including_tails(self):

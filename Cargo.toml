@@ -87,6 +87,12 @@ image = { version = "0.25", default-features = false, features = [
 # locked through rawler; direct because MaskBrushTable verifies the target blob.
 md5 = "=0.8.0"
 rawler = "0.7.2"
+# Same version `image` already locks (0.11.3). Direct since 2026-09-24:
+# decode.rs reads a TIFF's ICC tag through the tiff crate itself (image's own
+# probe folds every tiff error into "untagged"), and the ICC regression tests
+# write their fixture through it too (image's TIFF *encoder* cannot round-trip
+# an IccProfile tag — probed: the written tag read back None).
+tiff = "0.11"
 # ICC → sRGB for baked imports (the LR "Edit in…" round-trip exports ProPhoto
 # 16-bit TIFFs; treating those pixels as sRGB fed every tone decision wrong
 # numbers). Pure Rust — this tree has no C build dependency and keeps none.
@@ -152,8 +158,3 @@ winresource = "0.1"
 windows-sys = { version = "0.59", features = ["Win32_System_ProcessStatus"] }
 
 [dev-dependencies]
-# Same version `image` already locks (0.11.3) — its own TIFF *encoder* cannot
-# round-trip an IccProfile tag (probed: written tag reads back None), so the
-# ICC regression tests write their TIFF fixture through the tiff crate
-# directly, the way Lightroom-style writers produce real profiled TIFFs.
-tiff = "0.11"

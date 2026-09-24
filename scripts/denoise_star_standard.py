@@ -486,7 +486,7 @@ def fit_tone_map(ours, reference, mask, offset):
     return fit
 
 
-def acceptance(noise, star, absolute, lrnoise, lrstar, banding):
+def acceptance(noise, star, lrnoise, lrstar, banding):
     width = lambda row: row['fine_y_p10_p90'][1]-row['fine_y_p10_p90'][0]
     values = [abs(noise['fine_y']-lrnoise['fine_y']) <= .03,
               width(noise) <= width(lrnoise)+.02,
@@ -743,7 +743,7 @@ def run(args, work):
                        'core_chroma_median_delta_magnitude': float(np.median(np.linalg.norm(ch_a-ch_b, axis=1))),
                        'faint_colour_count': int(fm.sum()),
                        'faint_colour_excess_share': float(np.mean(colour_excess[fm] > .05))}
-    gates = {k: acceptance(noise[k], star[k], absolute[k], noise['Lightroom'], star['Lightroom'], args.banding)
+    gates = {k: acceptance(noise[k], star[k], noise['Lightroom'], star['Lightroom'], args.banding)
              for k in absolute}
     # Line 7c(b): the same bright stars' aperture colour, each product against its own Lightroom counterpart.
     colour = None

@@ -20,9 +20,13 @@
 //!   the 64 near-identity ones, many of them to 5e-10, against 2.6e-2 for the
 //!   sidecar's own `UprightCenterNorm` and 3.6e-1 for a [−1,1] centre. So the
 //!   matrices live in [0,1] frame coordinates, pivoted on the frame centre;
-//! * the normalisation is **per axis**, not aspect-aware: a 0.9786° rotation
-//!   carries a scale of 1.017110, which is the UNIT SQUARE's cover factor
-//!   `cos+sin = 1.016934` and not a 3:2 frame's 1.011237;
+//! * the normalisation is **per axis**, and Adobe's turn is written in that
+//!   box as the RIGID pixel rotation: the verbatim matrix has
+//!   `h10 / h01 = −2.25 = −aspect²` on its 3:2 frame. Read as a plain box
+//!   angle it looks like 0.9786°; in pixels it is 0.6525°, and its scale
+//!   1.01702 (= `h00 / cos θ`) is exactly that frame's cover factor at that
+//!   angle, `cos θ + aspect · sin θ = 1.01702` (the header said "unit
+//!   square's cover factor" until 2026-09-24, reading the box angle);
 //! * Adobe has already folded the cover scale in. Inverting each of the 13
 //!   matrices a photo actually SELECTED and mapping the four destination
 //!   corners back, the worst excursion outside the source frame is
@@ -340,9 +344,13 @@ pub(crate) fn upright_from_sidecar(r: &EditRecipe) -> Option<Homography> {
 pub(crate) fn transform(r: &EditRecipe, img: &DynamicImage) -> Option<Homography> {
     let up = upright_from_sidecar(r).or_else(|| solve_for_mode(r, img));
     // The frame this stage is about to warp, which two of the sliders are
-    // defined against. Adobe's own matrix needs none of it — `upright.rs`
-    // measured its normalisation to be per axis and shape-blind.
-    let aspect = img.width().max(1) as f32 / img.height().max(1) as f32;
+    // defined against — `(w − 1) / (h − 1)`, the box `source_of` normalises
+    // by and the one the Upright solver measures in, so the Rotate slider
+    // is rigid to the pixel rather than to one part in h. Adobe's own matrix
+    // needs none of it — `upright.rs` measured its normalisation to be per
+    // axis and shape-blind.
+    let aspect =
+        (img.width().max(2) as f32 - 1.0) / (img.height().max(2) as f32 - 1.0);
     match (up, manual(r, aspect)) {
         (None, None) => None,
         (Some(u), None) => Some(u),

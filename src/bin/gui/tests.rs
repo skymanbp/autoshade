@@ -316,7 +316,7 @@
         assert_eq!(rec.active_name.as_deref(), Some("偏暖"));
         assert_eq!(rec.others[0].id.as_deref(), Some("card-a"));
         assert_eq!(rec.others[0].name.as_deref(), Some("base"));
-        let back = crate::persist::strip_from_record(&rec, None);
+        let (back, _) = crate::persist::strip_from_record(&rec, None);
         assert_eq!(back[0].id, "card-a");
         assert_eq!(back[0].name.as_deref(), Some("base"));
 
@@ -339,7 +339,7 @@
                 name: None,
             }],
         };
-        let minted = crate::persist::strip_from_record(&legacy, None);
+        let (minted, _) = crate::persist::strip_from_record(&legacy, None);
         assert!(!minted[0].id.is_empty(), "an id-less legacy entry is minted an identity");
 
         // Hop 3 (live strip → stash) and hop 5 (stash → record), driven
@@ -3758,7 +3758,6 @@
                 image::DynamicImage::ImageRgba8(image::RgbaImage::new(6, 4)),
                 RetouchNote::Healed {
                     n: 1,
-                    skipped: 0,
                     out: healed.clone(),
                     ai_prose: String::new(),
                     notes: Vec::new(),
@@ -4653,7 +4652,6 @@
                 image::DynamicImage::new_rgba8(4, 4),
                 RetouchNote::Healed {
                     n: 1,
-                    skipped: 0,
                     out: std::path::PathBuf::from("out/_retouch_order_test.png"),
                     ai_prose: String::new(),
                     notes: Vec::new(),
@@ -11312,6 +11310,35 @@
         }
     }
 
+    /// The AI mask refine is a pixel worker too (its guide is decoded in the
+    /// EXIF frame, the raster it refines lives in the turned plate frame), so
+    /// it takes the same refusal gate before any worker. MUTATION: drop the
+    /// `|| self.refuse_pixel_work_on_a_turned_photo()` in start_mask_refine.
+    #[test]
+    fn a_mask_refine_on_a_turned_photo_is_refused_before_it_spawns() {
+        for lang in [Lang::En, Lang::Zh] {
+            let mut app = AutoShadeApp { lang, ..Default::default() };
+            app.src_path = Some(PathBuf::from("refine-turn-guard.png"));
+            let refusal = tr(
+                lang,
+                "this photo is turned, and pixel repairs still work on the un-turned frame — turn it back to 0 first",
+            );
+            for turns in [1u8, 2, 3] {
+                app.recipe.quarter_turns = turns;
+                app.status.clear();
+                app.start_mask_refine(0);
+                assert!(!app.busy, "quarter_turns={turns}: a refused refine never reaches a worker");
+                assert_eq!(app.status, refusal, "quarter_turns={turns}");
+            }
+            // Un-turned, with no mask at that index: the verb returns quietly.
+            app.recipe.quarter_turns = 0;
+            app.status.clear();
+            app.start_mask_refine(0);
+            assert!(!app.busy);
+            assert!(app.status.is_empty(), "{}", app.status);
+        }
+    }
+
     /// An unreadable CENTRAL XMP is `Unreadable`, exactly as an unreadable
     /// recipe.json is — not `NoopOnly`. The XMP loop set `any` and broke
     /// without recording the error, so the store answered "sidecars exist,
@@ -11369,7 +11396,7 @@
                 name: None,
             }],
         };
-        let strip = crate::persist::strip_from_record(&rec, None);
+        let (strip, _) = crate::persist::strip_from_record(&rec, None);
         let mut expected = wild;
         let _ = expected.clamp();
         assert_eq!(strip[0].recipe, expected, "the restored card carries the CLAMPED recipe");

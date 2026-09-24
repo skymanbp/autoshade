@@ -69,6 +69,12 @@ TONE_BUCKETS = np.arange(24, 244, 6)
 #: reported as "at the floor".
 ALPHA_FLOOR = 0.005
 
+
+def alpha_text(value):
+    """An α residual as this instrument can state it: below ALPHA_FLOOR it is
+    "at the floor", not a number the fit does not resolve."""
+    return "at the floor" if abs(value) < ALPHA_FLOOR else f"{value:.4f}"
+
 #: The exponent `render.rs`'s `LINEAR_FALLOFF_WARP` ships. It is fitted BELOW,
 #: per gradient, as `fit_warp_q`; this constant only says which value the engine
 #: was given, so `fit_warped` scores the shipped law rather than a fresh fit.
@@ -539,8 +545,8 @@ def main() -> None:
             ("lr_boundary_rho", "{:.5f}"),
             ("engine_boundary_rho", "{:.5f}"),
             ("boundary_px", "{:+.2f}px"),
-            ("alpha_rms", "rms {:.4f}"),
-            ("alpha_max", "max {:.4f}"),
+            ("alpha_rms", "rms {}"),
+            ("alpha_max", "max {}"),
             ("rho50_lr", "ρ50lr {:.4f}"),
             ("rho50_engine", "ρ50en {:.4f}"),
             ("t50_lr", "t50lr {:.4f}"),
@@ -552,7 +558,9 @@ def main() -> None:
             ("fit_warp_q", "q {:.4f}"),
         ):
             if key in row and row[key] == row[key]:
-                parts.append(fmt.format(row[key]))
+                # The α residuals are stated against the instrument's floor.
+                value = alpha_text(row[key]) if key in ("alpha_rms", "alpha_max") else row[key]
+                parts.append(fmt.format(value))
         parts.append(f"lrΔ {row['lr_max_dn']}DN")
         parts.append(f"engα {row['engine_alpha_max']:.3f}")
         print("  ".join(parts))

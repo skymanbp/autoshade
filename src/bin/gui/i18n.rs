@@ -303,6 +303,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "提示：gpt-image-1.5 对照片最忠实（input_fidelity）；gpt-image-2 等较新模型会忽略该锁定、编辑更自由。"),
     ("Save settings", "保存设置"),
     ("saved → {path}", "已保存 → {path}"),
+    ("saved → {path} — but this file sits in the shared temp folder, which is not trusted with keys: the API key and base URL fields will be ignored (only the models are read). Set AUTOSHADE_DATA_DIR to a folder only you can write and save again.",
+        "已保存 → {path} — 但这个文件位于所有用户共用的文件夹，不受信任保存密钥：API 密钥和 base URL 字段将被忽略（只读取模型名）。请把 AUTOSHADE_DATA_DIR 设为只有你能写入的文件夹后再保存。"),
     ("save failed: {err}", "保存失败: {err}"),
 
     // ── Local adjustments (masks) ────────────────────────────────────────────
@@ -1351,6 +1353,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "就绪 — 已恢复本会话未保存的编辑（● 尚未保存；Ctrl+S）"),
     ("recipe limits discarded {n} mask(s), {m} component(s), {c} curve point(s) and {s} string byte(s) on restore — the saved file exceeds the app's caps",
         "恢复时因配方上限丢弃了 {n} 个蒙版、{m} 个组合项、{c} 个曲线点、{s} 个字符字节 — 存档文件超出应用上限"),
+    ("recipe limits discarded {n} mask(s), {m} component(s), {c} curve point(s) and {s} string byte(s) from the saved variant cards — the saved file exceeds the app's caps",
+        "因配方上限从已存的变体卡片丢弃了 {n} 个蒙版、{m} 个组合项、{c} 个曲线点、{s} 个字符字节 — 存档文件超出应用上限"),
     ("not saved — a develop-store write failed: {err}",
         "未保存 — 显影库写入失败：{err}"),
     ("this photo's variant strip (variants.json) cannot be read — background variants stay hidden and saving refuses until the file is fixed or deleted",
@@ -1431,8 +1435,6 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("healing painted area…", "修复涂抹区域中…"),
     ("AI healing… (~10-30s)", "AI 去瑕疵中…（约 10-30 秒）"),
     ("healed {n} spot(s) → {path}", "已修复 {n} 处 → {path}"),
-    ("{n} spot(s) left untouched — no donor area of that size fits inside the frame",
-        "{n} 处未修复 — 画面内容不下同等大小的取样区域"),
     ("Clone source sampled — brush the area to cover, then 「⎘ Clone painted area」",
         "克隆源已取样 — 画笔涂要覆盖的区域，然后「⎘ 克隆已涂区域」"),
     ("Alt+click to set the clone source first", "先 Alt+点击取克隆源点"),
@@ -2241,6 +2243,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       more than {margin} better than the frame this fit already reached \
       ({err_after}), so there was nothing left for it to carry.",
         " 未附加颜色场：色场自身的上限 {ceiling} 相比本次反推已经达到的整幅误差（{err_after}）并没有好过 {margin}，因此它没有还能承担的部分。"),
+    (" No colour field was solved at the {stage} stage: the field solver found \
+      no evidence to fit, so nothing was measured and nothing attached.",
+        " 在 {stage} 阶段没有解出颜色场：色场求解器找不到可拟合的证据，因此什么都没有测量、也没有附加。"),
     (" Colour field cell admission: {admitted} of {read} measured cells took the \
       support-free solve, because the target's own cell means vouch there what \
       their pixels cannot, at a per-channel gain bound of {bound}. The rest kept \
@@ -2368,6 +2373,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("AI spot-detection failed ({e}); healed the painted mask only.",
         "AI 斑点检测失败（{e}）；仅修复了手绘蒙版。"),
     ("; ", "；"),
+    ("{n} of {planned} spot(s) left untouched — no donor area of the spot's own size fits inside the frame around it",
+        "{n}/{planned} 处未修复 — 画面内容不下与瑕疵同等大小的取样区域"),
     ("healed {n} of {total} painted region(s) — the rest exceeded the retouch budget \
       ({max_spots} regions / {max_bbox}x bbox / {max_disk}x \
       heal coverage) and were left UNTOUCHED; paint fewer or smaller regions",

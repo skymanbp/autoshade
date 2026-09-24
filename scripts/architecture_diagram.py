@@ -270,8 +270,8 @@ def layout(doc):
                 col_x=col_x, band_of=band_of, stack=stack, depth=depth,
                 rows=rows, nrows=nrows, x=x, y=node_y, h=height,
                 band_box=band_box, long_edges=long_edges,
-                long_lane_y=long_lane_y, pred=pred, succ=succ,
-                w=width, hgt=height_px, main=main)
+                long_lane_y=long_lane_y,
+                w=width, hgt=height_px)
 
 
 # ── 5. routes ──────────────────────────────────────────────────────────────

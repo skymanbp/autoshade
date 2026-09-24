@@ -75,14 +75,10 @@ its fixed margin, so a label that clears its neighbours here still clears them
 in a face a few per cent wider.
 """
 
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/145.0.7632.6 Safari/537.36"
-
 FONT_STACK = (
     "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, "
     "'Helvetica Neue', Arial, sans-serif"
 )
-
-RESOLVED_FAMILY = "Segoe UI"
 
 ADVANCE_400 = {
     " ": 274, "!": 284, "\"": 392, "#": 591, "$": 539, "%": 818, "&": 800, "'": 230, "(": 302,

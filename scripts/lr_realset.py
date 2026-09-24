@@ -122,16 +122,12 @@ def pick_windows(g1, ab_g1):
     return {"flat": to_mosaic(flat), "detail": to_mosaic(detail), "centre": (cy // 2 * 2, cx // 2 * 2)}
 
 
-def develop(planes_or_rgb, wbn, gain, is_planes):
-    if is_planes:
-        p = planes_or_rgb
-        h, w = p["R"].shape
-        rgb = np.zeros((h, w, 3), np.float32)
-        rgb[:, :, 0] = p["R"]
-        rgb[:, :, 1] = (p["G1"] + p["G2"]) / 2.0
-        rgb[:, :, 2] = p["B"]
-    else:
-        rgb = planes_or_rgb
+def develop(p, wbn, gain):
+    h, w = p["R"].shape
+    rgb = np.zeros((h, w, 3), np.float32)
+    rgb[:, :, 0] = p["R"]
+    rgb[:, :, 1] = (p["G1"] + p["G2"]) / 2.0
+    rgb[:, :, 2] = p["B"]
     img = np.clip(rgb * wbn[None, None, :] * gain, 0, 1)
     img = np.where(img <= 0.0031308, img * 12.92, 1.055 * img ** (1 / 2.4) - 0.055)
     return (np.clip(img, 0, 1)[:, :, ::-1] * 255 + 0.5).astype(np.uint8)
@@ -316,9 +312,9 @@ def main():
                 crop = lambda p: {n: p[n][cy:cy + 300, cx:cx + 450] for n in dr.PLANES}
                 ref = crop(planes)
                 gain = 0.9 / max(np.percentile(np.stack([ref["R"], ref["G1"], ref["B"]]), 99.5), 1e-4)
-                tiles = [develop(crop(planes), wbn, gain, True), develop(crop(den), wbn, gain, True)]
+                tiles = [develop(crop(planes), wbn, gain), develop(crop(den), wbn, gain)]
                 if lrp:
-                    tiles.append(develop(crop(lrp), wbn, gain, True))
+                    tiles.append(develop(crop(lrp), wbn, gain))
                 big = [cv2.resize(t, (t.shape[1] * 2, t.shape[0] * 2), interpolation=cv2.INTER_NEAREST) for t in tiles]
                 cv2.imwrite(str(out / f"{tag}_iso{iso}_detail_in-ours{'-lr' if lrp else ''}.png"), np.concatenate(big, axis=1))
         results.append(frame)

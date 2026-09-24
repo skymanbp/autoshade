@@ -1346,7 +1346,9 @@ mask — `bd3f9d4` fixed a recipe that dragged sea foam to grey), and the prompt
 matching "recovering highlights must NOT grey out specular whites" rule, which
 stays unconditional at every strength. `clamp`'s hard ranges are a safety bound
 and are not on the axis either. The **Style** slider's `style_pull` (0.18 at the
-shipped Style 0.3, full at Style 1.0) is off the strength axis on purpose too:
+shipped Style 0.3, 0.5 at 0.5, full at Style 1.0, and continuous between them
+since 2026-09-24 — it used to jump from 0.294 to 0.500 between Style 0.49 and
+0.50) is off the strength axis on purpose too:
 that number bounds mean-regression toward the user's
 own average edit, so coupling it to strength would turn "push harder" into "look
 more like my average" — the other axis, pointing the other way. Since v1.2.3 there
@@ -1764,7 +1766,10 @@ replace it (`PCV-*`, `GRAIN-*`).
   per channel (which is what shifts colour), Colour Priority computes it from
   the pixel's luminance (which cannot), and Paint Overlay is a flat mix toward
   black or white in the encoded domain with no recovery at all. Highlights acts
-  only where the vignette darkens, as Adobe states.
+  only where the vignette darkens, as Adobe states. The contour is sampled at
+  the pixel CENTRE, like every other spatial read in the engine
+  (`MASK_SAMPLE_CENTRE`); until 2026-09-24 it was sampled at the pixel corner,
+  half a pixel up-left of the rectangle it belongs to.
 - **Film grain** is two octaves of value noise on a lattice sized in FILM
   pixels (`FilmScale`, the Detail panel's rule), Roughness mixing the coarser
   octave in as an amplitude modulation so the grain clumps rather than merely
@@ -1949,8 +1954,13 @@ composed (`atan2(sin a, aspect·cos a)`, rotation `[c, −s/aspect; s·aspect, c
 2026-09-24 the solver rotated in the box itself, which on a 3:2 frame
 over-corrected a horizontal-family tilt about 1.5× and sheared the frame
 (Adobe's own `UprightTransform` matrices carry `h10/h01 = −aspect²`, the rigid
-pixel rotation written in that box). Guided is a named refusal — it needs guides
-no sidecar carries in a form this engine models.
+pixel rotation written in that box). The keystone row is built from the
+families' points AFTER that turn has moved them (`rotate.then(warp)`: the row
+runs second, so it must send the points to infinity where the turn has put
+them); until 2026-09-24 it was built from the unturned points, and a levelled
+Vertical or Full render kept a residual convergence of the turn's own angle.
+Guided is a named refusal — it needs guides no sidecar carries in a form this
+engine models.
 
 `crs:CropConstrainToWarp` is OBEYED (user ruling, 2026-09-17): at 0 — which is
 what all 52 sidecars in the library that carry it say — the empty corners a
@@ -2816,7 +2826,17 @@ require both, so those 17 files' masks stayed in the sensor frame while the
 render delivered the turned one, and the merge wrote DISPLAY-frame numbers back
 under a declaration saying they were sensor-frame. Both halves now fall back to
 the photograph's own rectangle when the document declares none, which is the
-reading `xmp::merge_frame`'s no-`tiff:` arm already took.
+reading `xmp::merge_frame`'s no-`tiff:` arm already took. Since 2026-09-24 the
+READER takes it too (`xmp::frame_fallback`: the photograph's rectangle under
+the honoured turn): the recipe reader and the two photo-aware disclosure doors
+(`crop_import_note_for_photo`, `import_losses_for_photo`) decode such a
+document in the frame it was folded through, so a rotated radial comes back
+rotated and a tilted crop placed instead of a rotation loss being disclosed
+that never happened. Census of the library through both doors
+(`xmp::tests::the_census_has_no_false_rotation_loss_beside_a_readable_raw`,
+2026-09-24): 154 of 175 sidecars are orientation-only, 151 of them beside a
+readable RAW; on those the document-only door reports 37 rotation losses and
+8 unplaceable crops, the photo-aware door 0 and 0.
 
 Every me6-2026-09 number in this document comes from one producer and one
 script: `render::lr_pack::export_lr_pack_renders_for_the_mask_measurement`
@@ -3787,7 +3807,10 @@ both feed the deterministic [`heal_image`](../src/retouch.rs) engine. Donors are
 auto-searched (the in-bounds neighbour whose surroundings best match the spot's
 border) unless an explicit source offset is given; a spot so large that no donor
 disk of its own size fits inside the frame is left untouched and COUNTED as
-such (`HealReport::skipped`, the GUI note, the `X-Heal-Skipped` header), so
+such (`HealReport::skipped`, and since 2026-09-24 one typed note in the report,
+`HEAL_SKIPPED_NO_DONOR`, which the CLI prints, the GUI renders localized and
+the web page reads through the rationale header — the `X-Heal-Skipped` header
+and the GUI's own sentence were a second and a third channel for one fact), so
 "healed N" never stands for "asked N". Output is a pixel master in
 the delivery root (see below) — **non-XMP** (pixel edits don't serialise to ACR)
 — and the develop
@@ -4232,7 +4255,13 @@ threshold. Four sites consume it:
     is the pre-R34 field byte for byte. Two do-no-harm checks follow, the
     frame's and a per-ZONE one read off the attached zone masks through
     `render::mask_coverage`, because a field that pays for the sky out of the
-    land wins on the frame and loses the picture.
+    land wins on the frame and loses the picture. Since 2026-09-24 both checks
+    measure the ROUNDED field the render will apply
+    (`render::apply_colour_field`), not the unrounded solve, and the per-zone
+    check reads every attached mask with coverage — a custom region or a free
+    mask included, where it used to read the sky and land roles only; a stage
+    whose solver finds nothing to fit says so (`FIELD_UNSOLVED`) instead of
+    attaching nothing in silence.
   * **the zone tone estimator** (R34 §D5). MODE governs the control set, SCALE
     governs the estimator — R33 §D's split, now asked of the ZONE's own reading
     at the frame's own line. A Full zone whose divergence is past
@@ -4290,6 +4319,29 @@ at all — is unchanged, rising to 0.80 at Strength 1. The ladder is calibrated
 against a measured demand, not chosen: after the whole zone ladder has run, the
 reference sky still wants R x1.465 / G x1.07 / B x0.78 in linear mean gain.
 
+**Nine corrections from the 2026-09-24 audit** (issue #6), each pinned by a
+test of its own: the terminal veto's joint readings are wired (§the confidence
+cap); `rescore_report` measures against the base the caller names (§R33 §H);
+the Atmosphere route's hue veto is recomputed at compose time from the recipe
+it ships instead of the one it measured three stages earlier, and only where
+no global cast was attached; `structure_divergence` abstains when one side is
+flat instead of reporting a correlation of 1.0 (the guard's own constant, which
+every consumer read as "the structure survived"); an HSL move is not a
+detail-only companion; a zone's after-reading is taken on the SOURCE weights
+it was solved on, and the accepted zone records those same weights; the
+luma-only tone ladder probes the fitted tone (factor 1.0) before backing off;
+and the colour field's two do-no-harm checks read the rounded field over every
+mask (above). On the calibration corpus the ladder is the one of the nine that
+moves a pinned number (`calibration_sky_zone_survives_luminance_with_partial_chroma_refusal`,
+re-pinned): the sky's luma-only band passes the local quality gate at its full
+step and ships −0.174 EV where it shipped three quarters of its fit
+(−0.152 EV); the partition re-arbitrated around that step — the second band
+−0.062 → −0.007 EV at saturation +2.2 (was +2.4), the land bands' saturation
++2.4 → +1.6 — with the sky bands' ΔE after the fit 21.41 → 21.24, the land
+bands' 5.91 → 6.08 and the frame-wide residual 0.095 either way. Measured by
+reverting each of the two zoned-fit corrections alone in a copy of the tree:
+the after-reading population moves one land gain by one ulp and nothing else.
+
 **The feather widener's smoothness reading follows its guide** (R34 §D8). The
 one-code rule in `mask_refine::widen_smooth_feather` is an absolute statement
 calibrated on an absolute guide — the camera's embedded preview, with the
@@ -4315,7 +4367,12 @@ local half missing from the rationale. The carrying rule is now a DENYLIST in
 one place, `rationale::GLOBAL_SOLVE_KEYS`; everything else rides through in
 order. An allowlist was the defect — a list a new producer forgets to join, and
 five families had — and the denylist is pinned against `rationale.rs`'s own
-text, because a key's value is its English template and not its name.
+text, because a key's value is its English template and not its name. Since
+2026-09-24 `rescore_report` also measures against the BASE the caller names
+(`fit_base`, the calibration base the solve itself measured against): it used
+to read `base_px` off `EditRecipe::default()`, so every rescore of a `--deep`
+or GUI-adjusted recipe took its divergence and its terminal harm from a base
+the solve never used.
 
 The fourth veto, the **hue-fan gate** (v1.2.3), closes the hole the first
 three structurally cannot see. They all ask about a pixel's DESTINATION: how
@@ -5634,7 +5691,10 @@ question no term of `look_err` computes — its colour term is three
 chroma — and it has exactly three jobs: report; cap the reported confidence
 (downward only, never raise); and act as ONE additional bounded-drift veto at
 the pipeline END (`fit::terminal_harm`), fail-open, in
-`ZONE_GLOBAL_REGRESSION_TOL`'s shape. It is deliberately NOT a per-stage gate:
+`ZONE_GLOBAL_REGRESSION_TOL`'s shape — with its JOINT hue/chroma readings
+since 2026-09-24 (both terminal sites handed it `None, None` for them until
+then, so the joint veto the function carried was unreachable). It is
+deliberately NOT a per-stage gate:
 measured on this repo's own fixtures, the bucket a change fixes loses its
 members to a neighbour, so a per-stage worst-bucket comparison rejects the one
 correct cast in the set and admits both wrecks

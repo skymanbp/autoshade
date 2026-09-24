@@ -781,10 +781,15 @@ pub(crate) fn reconcile_snapshot_calibration(
 /// curve — a strip entry is one click from BEING the canvas. Pixel-state
 /// entries carry empty curves by invariant and are skipped
 /// ([`VariantKind::is_source_based`]).
+/// …and, beside the strip, what the restore-time clamps DISCARDED from its
+/// cards (summed over them), for the same W20 channel the active card's
+/// losses reach: a stored card past the caps restores minus edits, and
+/// until 2026-09-24 the strip's losses had no channel at all.
 pub(crate) fn strip_from_record(
     rec: &autoshade::store::VariantsRecord,
     src: Option<&std::path::Path>,
-) -> Vec<Variant> {
+) -> (Vec<Variant>, autoshade::recipe::ClampSummary) {
+    let mut dropped = autoshade::recipe::ClampSummary::default();
     let mut strip: Vec<Variant> = rec
         .others
         .iter()
@@ -802,7 +807,7 @@ pub(crate) fn strip_from_record(
             // the frame, or NaN) reached `upd_shortcuts`' nudge maths and
             // panicked there. The summary has no per-card channel here.
             let mut recipe = e.recipe.clone();
-            let _ = recipe.clamp();
+            dropped.absorb(recipe.clamp());
             Some(Variant {
                 kind,
                 // Hop 2 of 6 (R24-2): disk → live strip.
@@ -831,5 +836,5 @@ pub(crate) fn strip_from_record(
             let _ = autoshade::pipeline::migrate_recipe_coord_frame(p, &mut v.recipe);
         }
     }
-    strip
+    (strip, dropped)
 }

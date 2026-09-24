@@ -231,9 +231,12 @@ pub(super) fn solve_local_field(
     let current = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
     let target_pixels = fit::pixels_of(&t_img);
     #[allow(unused_mut)]
-    let mut field = LocalField::solve(
+    let Some(mut field) = LocalField::solve(
         &current, &target_pixels, s_img.width(), s_img.height(), &report.evidence,
-    )?;
+    ) else {
+        note(report, crate::rationale::keys::FIELD_UNSOLVED, vec![("stage", "analysis".into())]);
+        return None;
+    };
     // The forced-None override fires AFTER the solve so the byte-identity test
     // proves the analysis itself leaves the report untouched, not merely that an
     // early return does.
@@ -359,12 +362,22 @@ pub(super) fn attach_colour_field(
     let (w, h) = (s_img.width(), s_img.height());
     let Some(pass_a) = LocalField::solve(&current, &target_pixels, w, h, &report.evidence)
     else {
+        note(report, crate::rationale::keys::FIELD_UNSOLVED, vec![("stage", "attach".into())]);
         return;
     };
     let budget = fit::FitBudget::for_strength(strength);
     let (solved, admitted, read) =
         admit_cells(&current, &target_pixels, w, h, report, pass_a, budget.field_gain);
-    let after = solved.render(&current);
+    // Rendered from the field the recipe will CARRY — rounded the way
+    // `ColourField::round` stores it — so the do-no-harm verdicts and
+    // `FIELD_ATTACHED`'s numbers describe the render a reopen produces.
+    let mut field = solved.as_recipe_field();
+    field.round();
+    let after = {
+        let mut out = current.clone();
+        render::apply_colour_field(&mut out, w as usize, h as usize, Some(&field));
+        out
+    };
     let err_with = fit::look_err_with_evidence(&after, &target_pixels, &report.evidence);
     if err_with >= report.err_after {
         note(report, crate::rationale::keys::FIELD_REGRESSED, vec![
@@ -390,8 +403,6 @@ pub(super) fn attach_colour_field(
         ("admitted", admitted.to_string()), ("read", read.to_string()),
         ("bound", format!("{:.2}", budget.field_gain)),
     ]);
-    let mut field = solved.as_recipe_field();
-    field.round();
     let realized = realized_share(solved.global, solved.ceiling, err_with)
         .map_or_else(|| "n/a".to_string(), |value| format!("{value:.3}"));
     note(report, crate::rationale::keys::FIELD_ATTACHED, vec![
@@ -461,9 +472,12 @@ fn admit_cells(
     (merged, admitted, read)
 }
 
-/// The per-ZONE half of the field's do-no-harm: the first attached zone whose
+/// The per-ZONE half of the field's do-no-harm: the first attached mask whose
 /// own look distance the field made worse by more than a zone is ever allowed
-/// to cost the frame, or `None` if it hurt none of them.
+/// to cost the frame, or `None` if it hurt none of them. EVERY mask the fit
+/// carries is judged — the two zone roles, and the Custom-role region masks
+/// of the multi-region route; until 2026-09-24 the role filter left the
+/// check inert on that route.
 ///
 /// Membership comes from [`render::preview_mask_coverage`] — the engine's OWN
 /// weight for that mask in the preview's frame, the same number the render
@@ -475,10 +489,6 @@ fn zone_regressed(
 ) -> Option<(String, f32, f32)> {
     let current = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
     report.recipe.masks.iter().find_map(|mask| {
-        if !matches!(mask.role, crate::recipe::MaskRole::ZoneSky | crate::recipe::MaskRole::ZoneLand)
-        {
-            return None;
-        }
         let coverage = render::preview_mask_coverage(mask, s_img, &report.recipe);
         let weights: Vec<f32> =
             coverage.as_raw().iter().map(|v| *v as f32 / 255.0).collect();
@@ -489,8 +499,8 @@ fn zone_regressed(
             fit::look_err_with_evidence(px, target, &report.evidence.scoped(target, &weights, &weights))
         };
         let (was, now) = (err(&current), err(after));
-        (now > was + super::ZONE_GLOBAL_REGRESSION_TOL)
-            .then(|| (mask.role.tag().to_string(), was, now))
+        let label = if mask.name.is_empty() { mask.role.tag().to_string() } else { mask.name.clone() };
+        (now > was + super::ZONE_GLOBAL_REGRESSION_TOL).then_some((label, was, now))
     })
 }
 

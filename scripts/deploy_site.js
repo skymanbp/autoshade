@@ -86,11 +86,18 @@ function stage() {
 }
 
 function deploy(tempValue, dir) {
-  const args = ["wrangler", "pages", "deploy", dir, "--project-name", PROJECT, "--branch", "main", "--commit-dirty=true"];
+  // Pinned: the freshly minted token is handed to exactly this build of
+  // wrangler, never to whatever `npx` would resolve on the day.
+  const args = ["wrangler@4.138.0", "pages", "deploy", dir, "--project-name", PROJECT, "--branch", "main", "--commit-dirty=true"];
   console.log(`[deploy] $ npx ${args.join(" ")}`);
-  const run = spawnSync("npx", args, {
+  // On Windows `npx` is a .cmd shim, which Node refuses to spawn without a
+  // shell (CVE-2024-27980); with one the arguments are joined verbatim, so a
+  // staging directory under a %TEMP% with a space in it must be quoted.
+  const shell = process.platform === "win32";
+  const argv = shell ? args.map((a) => (/\s/.test(a) ? `"${a}"` : a)) : args;
+  const run = spawnSync("npx", argv, {
     cwd: root,
-    shell: process.platform === "win32",
+    shell,
     stdio: "inherit",
     env: { ...process.env, CLOUDFLARE_API_TOKEN: tempValue, CLOUDFLARE_ACCOUNT_ID: ACCOUNT },
   });
@@ -114,8 +121,15 @@ async function main() {
     try {
       status = deploy(temp.value, staged.dir);
     } finally {
-      await cf("DELETE", `/user/tokens/${temp.id}`, master);
-      console.log(`[cleanup] temp token ${temp.id} deleted`);
+      // A failed DELETE must not replace the deploy's own outcome: the
+      // token expires within the hour on its own, the deploy error is the
+      // one worth seeing.
+      try {
+        await cf("DELETE", `/user/tokens/${temp.id}`, master);
+        console.log(`[cleanup] temp token ${temp.id} deleted`);
+      } catch (e) {
+        console.error(`[cleanup] temp token ${temp.id} NOT deleted (${e.message}); it expires on its own`);
+      }
     }
   } finally {
     fs.rmSync(staged.dir, { recursive: true, force: true });

@@ -117,7 +117,9 @@ did not touch them. Since v1.5.0 it moves pixels. Vertical and Horizontal are
 the two keystones — the shape a building takes when the camera is tilted up or
 sideways — with Rotate, Scale, Aspect and the two Offsets beside them, and they
 run as one step after the lens correction and before the straighten, so masks
-and brushes stay on what they were painted on.
+and brushes stay on what they were painted on. Scale runs from 50 to 150, as
+Lightroom's own slider does; a smaller or larger number in a hand-edited file
+is read as the nearest end of that range.
 
 Adobe has never published what a Transform slider does, so AutoShade measured
 it: fifteen test photographs were edited in Lightroom, one slider at a time, and

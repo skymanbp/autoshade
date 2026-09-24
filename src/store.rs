@@ -1274,11 +1274,15 @@ fn resume_orphan_adoption_once(root: &Path, ck: &str) {
         return;
     }
     match resume_marked_adoption(&cd, DevelopLockMode::NoWait) {
-        Ok(()) => {
-            eprintln!(
-                "⚠ finished a crashed adoption into {} (left by an aliased path spelling)",
-                cd.display()
-            );
+        Ok(done) => {
+            // Only the process that copied says so: one beaten to it by a
+            // concurrent resume claimed the other's work until 2026-09-24.
+            if done {
+                eprintln!(
+                    "⚠ finished a crashed adoption into {} (left by an aliased path spelling)",
+                    cd.display()
+                );
+            }
             checked.lock().unwrap().insert((root.to_path_buf(), ck.to_string()));
         }
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -1318,8 +1322,9 @@ const MAX_ADOPTION_MARKER: u64 = 64 * 1024;
 /// was beaten to the finish and copies NOTHING. `adopt_files` SYNCHRONIZES
 /// the destination to the source, so a second run over a completed adoption
 /// would replace a save that landed in the meantime with the superseded
-/// source's bytes.
-fn resume_marked_adoption(cd: &Path, mode: DevelopLockMode) -> std::io::Result<()> {
+/// source's bytes. Answers whether THIS call did the copying — `false` when
+/// a concurrent resume finished first — so a caller reports its own work.
+fn resume_marked_adoption(cd: &Path, mode: DevelopLockMode) -> std::io::Result<bool> {
     let marker = cd.join("adopting-from.txt");
     let recorded = read_text_capped(&marker, MAX_ADOPTION_MARKER)?;
     let source = PathBuf::from(recorded.trim());
@@ -1329,10 +1334,10 @@ fn resume_marked_adoption(cd: &Path, mode: DevelopLockMode) -> std::io::Result<(
     with_path_lock(source.join(".develop.lock"), mode, || {
         with_path_lock(cd.join(".develop.lock"), mode, || {
             match read_text_capped(&marker, MAX_ADOPTION_MARKER) {
-                Ok(now) if source == Path::new(now.trim()) => adopt_files(cd, &source),
+                Ok(now) if source == Path::new(now.trim()) => adopt_files(cd, &source).map(|()| true),
                 // Finished by a concurrent resume while this one waited for
                 // the locks: the dir is whole and unfenced — nothing to copy.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
                 // A newer attempt (from yet another spelling) crashed in the
                 // window: its source is not the one these locks cover.
                 Ok(_) => Err(std::io::Error::other(
@@ -2664,15 +2669,21 @@ pub fn variants_member(src: &Path, w: ActiveWrite<'_>) -> std::io::Result<Commit
             }
             if !(outgoing_pristine && same_master) {
                 // The master this develop sits on had no pristine card of
-                // its own yet.
+                // its own yet. When the OUTGOING card was a pristine card
+                // with no pixel record to mint its ghost from (pixels.json
+                // missing, or not marked generated), its identity and name
+                // — what version snapshots point at (R24-2) — move onto
+                // this fresh master card rather than vanishing, as they did
+                // until 2026-09-24.
+                let orphaned = outgoing_pristine && recorded.is_none();
                 rec.others.insert(
                     pos,
                     VariantEntry {
                         kind: "generated".to_string(),
                         recipe: EditRecipe::default(),
                         origin: Some(master.to_path_buf()),
-                        id: None,
-                        name: None,
+                        id: orphaned.then(|| rec.active_id.take()).flatten(),
+                        name: orphaned.then(|| rec.active_name.take()).flatten(),
                         extra: Default::default(),
                     },
                 );
@@ -4784,7 +4795,7 @@ fn snapshot_xmp_text(src: &Path, text: String) -> std::io::Result<Option<u32>> {
     // rotate-then-crop composition cannot always express one — it is trimmed,
     // or (with no declared frame) not placed at all. Same channel, same
     // background-path rule as the numbers above.
-    if let Some(note) = crate::xmp::crop_import_note(&text) {
+    if let Some(note) = crate::xmp::crop_import_note_for_photo(&text, src) {
         eprintln!("⚠ {note}");
     }
     derived.clamp();
@@ -6121,6 +6132,13 @@ pub fn migrate_legacy_from_many(legacy_out: &Path, photos: &[PathBuf]) -> usize 
                 // is reported by the helper; the .bak stays and the backup
                 // gate re-decides on the next touch.
                 let _ = recover_orphan_baks_unlocked(p);
+                // The explicit-clear tombstone, honoured here as the per-photo
+                // path honours it (`migrate_legacy_unlocked`): an "Import
+                // legacy" over a develop the user had cleared re-imported the
+                // files that clear retired, until 2026-09-24.
+                if legacy_suppressed_in(&root, p) {
+                    return Ok::<_, std::io::Error>(false);
+                }
                 Ok::<_, std::io::Error>(migrate_legacy_jobs(&root, legacy_out, p, vjobs).0)
             })
             .unwrap_or(false)
@@ -8428,6 +8446,73 @@ mod tests {
         );
         assert!(!dev.join("recipe.json.bak").exists(), "the restored survivor consumed its .bak");
 
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// The gallery import honours the explicit-clear tombstone the per-photo
+    /// path honours: a cleared develop stays cleared. MUTATION: drop the
+    /// `legacy_suppressed_in` check from the import closure.
+    #[test]
+    fn a_gallery_import_leaves_a_cleared_develop_alone() {
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-import-tomb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let legacy_out = dir.join("out");
+        std::fs::create_dir_all(&legacy_out).unwrap();
+        let raw = dir.join("_import_tomb.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let legacy = legacy_out.join(format!("{}.recipe.json", crate::pipeline::stem(&raw)));
+        std::fs::write(&legacy, serde_json::to_string_pretty(&EditRecipe { exposure_ev: 0.1, ..Default::default() }).unwrap()).unwrap();
+        suppress_legacy_in(&store_root(), &raw).unwrap();
+
+        assert_eq!(migrate_legacy_from_many(&legacy_out, std::slice::from_ref(&raw)), 0);
+        assert!(!recipe_target(&raw).exists(), "a cleared develop is not re-imported");
+        assert!(legacy.exists(), "…and the legacy file is left where it was");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
+    /// A pristine card with no pixel record to mint its ghost from hands its
+    /// identity and name to the fresh master card instead of losing them —
+    /// the version snapshots taken from it (R24-2) keep something to point
+    /// at. MUTATION: put `id: None, name: None` back on the fresh card.
+    #[test]
+    fn a_pristine_card_without_a_pixel_record_hands_its_identity_to_the_fresh_master_card() {
+        let (dir, raw, dev) = commit_fixture("commit-ai-fork-no-record");
+        let master = dev.join("reimagine.png");
+        std::fs::write(&master, b"png").unwrap();
+        // No pixels.json: the record-level answer is "no master".
+        write_variants(
+            &raw,
+            &VariantsRecord {
+                extra: Default::default(),
+                v: 1,
+                active_kind: "generated".into(),
+                active_pos: 0,
+                active_id: Some("g1".into()),
+                active_name: Some("sky".into()),
+                others: Vec::new(),
+            },
+        )
+        .unwrap();
+        let edits = EditRecipe { contrast: 7.0, ..Default::default() };
+        let CommitMember::Write(bytes) =
+            variants_member(&raw, ActiveWrite::DevelopOnAiPixels { recipe: &edits, master: &master }).unwrap()
+        else {
+            panic!("a non-neutral develop over a pristine card writes the record")
+        };
+        let forked: VariantsRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(forked.active_kind, "edited");
+        assert_eq!(forked.active_id, None, "the edited card is still born without an identity");
+        assert_eq!(forked.others.len(), 1, "one fresh master card, no ghost");
+        assert_eq!(forked.others[0].kind, "generated");
+        assert_eq!(forked.others[0].id.as_deref(), Some("g1"), "the identity moves onto the master card");
+        assert_eq!(forked.others[0].name.as_deref(), Some("sky"), "…with its name");
+        assert_eq!(forked.others[0].origin.as_deref(), Some(Path::new("reimagine.png")));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dev);
     }

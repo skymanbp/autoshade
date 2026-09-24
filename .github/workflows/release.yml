@@ -49,11 +49,15 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: stable
       # A45: the repo pins its compiler (`rust-toolchain.toml`), and `rustup`
-      # honours that file for every `cargo` call below without a toolchain
-      # input. Asserted rather than assumed — an unpinned runner building the
-      # published binaries is exactly the drift the pin exists to end.
+      # honours that file for every `cargo` call below whatever the action
+      # installed (its `toolchain: stable` input only exists because a commit
+      # ref cannot name a channel the way `@stable` did). Asserted rather than
+      # assumed — an unpinned runner building the published binaries is
+      # exactly the drift the pin exists to end.
       - name: Toolchain
         shell: bash
         run: |
@@ -96,7 +100,7 @@ jobs:
           cp target/release/autoshade-gui.exe dist/
           ./dist/autoshade.exe --version
       - name: Install Inno Setup
-        run: choco install innosetup -y --no-progress
+        run: choco install innosetup --version 6.7.1 -y --no-progress
       - name: Build the installer
         shell: pwsh
         run: ./scripts/build_installer.ps1 -ExpectedVersion '${{ steps.ver.outputs.version }}'
@@ -124,11 +128,15 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: '12.0'
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: stable
       # A45: the repo pins its compiler (`rust-toolchain.toml`), and `rustup`
-      # honours that file for every `cargo` call below without a toolchain
-      # input. Asserted rather than assumed — an unpinned runner building the
-      # published binaries is exactly the drift the pin exists to end.
+      # honours that file for every `cargo` call below whatever the action
+      # installed (its `toolchain: stable` input only exists because a commit
+      # ref cannot name a channel the way `@stable` did). Asserted rather than
+      # assumed — an unpinned runner building the published binaries is
+      # exactly the drift the pin exists to end.
       - name: Toolchain
         shell: bash
         run: |
@@ -281,11 +289,15 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: stable
       # A45: the repo pins its compiler (`rust-toolchain.toml`), and `rustup`
-      # honours that file for every `cargo` call below without a toolchain
-      # input. Asserted rather than assumed — an unpinned runner building the
-      # published binaries is exactly the drift the pin exists to end.
+      # honours that file for every `cargo` call below whatever the action
+      # installed (its `toolchain: stable` input only exists because a commit
+      # ref cannot name a channel the way `@stable` did). Asserted rather than
+      # assumed — an unpinned runner building the published binaries is
+      # exactly the drift the pin exists to end.
       - name: Toolchain
         shell: bash
         run: |
@@ -344,7 +356,9 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: stable
       - name: Toolchain
         shell: bash
         run: |
@@ -352,7 +366,7 @@ jobs:
           got=$(rustc --version | cut -d' ' -f2)
           echo "rust-toolchain.toml pins $want; rustc reports $got"
           test "$want" = "$got" || { echo "::error::the pin was not honoured"; exit 1; }
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Batteries
         run: |
           cargo test --locked --release
@@ -374,7 +388,7 @@ jobs:
           python-version: '3.12'
       - name: Metal (MPS) measurement
         run: |
-          python3 -m pip install --quiet --disable-pip-version-check torch torchvision
+          python3 -m pip install --quiet --disable-pip-version-check torch==2.14.0 torchvision==0.29.0
           python3 scripts/mps_probe.py
 
   publish:
@@ -420,6 +434,8 @@ jobs:
             echo "Every asset below is reproducible from this tag: $run_url"
             echo
             echo "\`checksums.txt\` carries the SHA-256 of each file."
+            echo
+            echo "The AI denoise weights are not built here: \`python/denoise_raw.py\` pins the release they are fetched from and their SHA-256, and the sidecar verifies the file before use."
           } > notes.md
           # Create, or on a re-run of the same tag replace the assets of the
           # release that already exists. The old `create || upload --clobber`

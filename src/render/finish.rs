@@ -45,7 +45,10 @@ use image::DynamicImage;
 use rayon::prelude::*;
 
 use super::detail::Ramp;
-use super::{luma601, sample_lut, smoothstep, to_u16, to_u8, transfer_luts, FilmScale};
+use super::{
+    luma601, sample_lut, smoothstep, to_u16, to_u8, transfer_luts, FilmScale,
+    MASK_SAMPLE_CENTRE,
+};
 use crate::recipe::{Crop, EditRecipe, LensProfile};
 
 /// What a surface does with the crop rectangle before the finishing pass.
@@ -480,7 +483,12 @@ fn run<S: Copy + Send + Sync>(
             let fx = x as f32;
             let mut v = [dec(px[0]), dec(px[1]), dec(px[2])];
             if let Some(vg) = vignette {
-                vg.apply(&mut v, vg.weight(rect, fx, fy), to_lin, to_gam);
+                // At the PIXEL CENTRE, like every other spatial read in this
+                // engine (`MASK_SAMPLE_CENTRE`): the crop's `cx()` / `cy()`
+                // are continuous centres, and sampling the corner put the
+                // falloff half a pixel up-left of the rectangle it belongs to.
+                let weight = vg.weight(rect, fx + MASK_SAMPLE_CENTRE, fy + MASK_SAMPLE_CENTRE);
+                vg.apply(&mut v, weight, to_lin, to_gam);
             }
             if let Some(gr) = grain {
                 gr.apply(&mut v, fx - rect.x0, fy - rect.y0);

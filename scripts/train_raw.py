@@ -358,12 +358,18 @@ def main():
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.iters, eta_min=args.lr * 0.05)
     scaler = torch.amp.GradScaler("cuda")
     start = 0
+    resumed_history = []
     if args.resume:
         ck = torch.load(args.resume, map_location="cpu", weights_only=False)
         model.load_state_dict(ck["model"])
         opt.load_state_dict(ck["opt"])
         sched.load_state_dict(ck["sched"])
         start = ck["iter"]
+        # The run's own record rides in the checkpoint (a checkpoint written
+        # before 2026-09-24 carries none): without it history.json restarted
+        # empty and `best` at -1, so the first validation after a resume
+        # always overwrote best_state.pth.
+        resumed_history = ck.get("history", [])
 
     # fixed validation set: val pairs (held-out cameras/scenes)
     vrng = np.random.default_rng(12345)
@@ -428,7 +434,7 @@ def main():
               + f"; sky {returned['sky']:+.3f} photons", flush=True)
         return r
 
-    history = []
+    history = resumed_history
     if start == 0 and not args.dry:
         history.append(validate("pretrained", 0.85))
         history.append(validate("pretrained", 1.0))
@@ -508,7 +514,8 @@ def main():
             r = validate(f"it{it + 1}")
             r["iter"] = it + 1
             history.append(r)
-            ck = {"model": model.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(), "iter": it + 1}
+            ck = {"model": model.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(), "iter": it + 1,
+                  "history": history}
             torch.save(ck, out / "last.pt")
             if r["psnr_sqrt"] > best:
                 best = r["psnr_sqrt"]

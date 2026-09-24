@@ -5039,7 +5039,11 @@ fn attach_one_zone(
             let m = report.recipe.masks.last().expect("zone mask just pushed");
             [m.exposure_ev, m.contrast, m.highlights, m.shadows, m.whites, m.blacks]
         };
-        for factor in [0.75f32, 0.5, 0.25, 0.0] {
+        // The fitted tone FIRST: the ladder backs a zone off only when the
+        // quality gate refuses the step above, and until 2026-09-24 it began
+        // at 0.75, so every luma-only zone shipped at three quarters of the
+        // tone it had fitted whether or not the full move passed.
+        for factor in [1.0f32, 0.75, 0.5, 0.25, 0.0] {
             {
                 let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
                 m.exposure_ev = original[0] * factor;
@@ -5084,7 +5088,12 @@ fn attach_one_zone(
     }
     let zoned_px = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
     let zoned_err = fit::look_err_with_evidence(&zoned_px, tgt_px, &report.evidence);
-    let m_after = zone_moments(&zoned_px, sw);
+    // The SAME population `zone_before` was read on (`ms` over the robust-
+    // composed `zw_source`, against `mt` over `zw_target`): until 2026-09-24
+    // the after-reading used the raw attachment weights, so a zone's
+    // before/after pair compared two populations and the final-stack
+    // remeasurement below read a third.
+    let m_after = zone_moments(&zoned_px, &zw_source);
     let zone_after = zone_err(&m_after, &mt);
     let ev_after = (mt.luma_lin.max(1e-6) / m_after.luma_lin.max(1e-6)).log2().abs();
     let quality = local_quality(&cur_px, &zoned_px, sw, s_img.width(), s_img.height());
@@ -5200,8 +5209,8 @@ fn attach_one_zone(
             label: attachment.label.clone(),
             range: attachment.range,
             mask_index: report.recipe.masks.len() - 1,
-            source_weights: attachment.source_weights.clone(),
-            target_weights: attachment.target_weights.clone(),
+            source_weights: zw_source,
+            target_weights: zw_target,
             before: zone_before,
             after: zone_after,
             rendered: zoned_px,
@@ -6689,19 +6698,21 @@ mod tests {
         let source_weights = mask_weights(&source_mask, w, h);
         let direct = fit::structure_divergence(&sp, &tp, w, h, &source_weights);
         assert_eq!(measured.sky.divergence, direct);
+        assert!(direct.is_some(), "the source population resolves (the equality above is not vacuous)");
 
         // A deliberately wrong target-derived population produces a different
         // reading. The production helper cannot receive this mask: D owns the
         // source correspondence while moment matching remains target-masked.
+        // Over this fixture that population is the flat land alone, with no
+        // gradient on either side, and the reading ABSTAINS — until 2026-09-24
+        // it came back as the guard's own constant (correlation 1.0, D = 0),
+        // which is how this assertion's "different reading" used to be met.
         let target_mask = GrayImage::from_fn(16, 16, |_, y| {
             image::Luma([if y < 6 { 255u8 } else { 0 }])
         });
         let wrong_weights = mask_weights(&target_mask, w, h);
         let wrong = fit::structure_divergence(&sp, &tp, w, h, &wrong_weights);
-        assert!(
-            (wrong.expect("resolvable").d - direct.expect("resolvable").d).abs() > 0.05,
-            "the two mask populations must be discriminating: source={direct:?}, target={wrong:?}"
-        );
+        assert_eq!(wrong, None, "a population flat on both sides abstains: source={direct:?}");
 
         // Optional measured calibration; the corpus is located by an
         // environment variable (`fit::calibration_dir`), never by a path
@@ -9049,7 +9060,14 @@ mod tests {
         let mut adjusted = report.recipe.clone();
         adjusted.saturation += 4.0;
         adjusted.clamp();
-        let rescored = fit::rescore_report(&src, &tgt, &adjusted, report.err_before, &report.notes);
+        let rescored = fit::rescore_report(
+            &src,
+            &tgt,
+            &adjusted,
+            &crate::recipe::EditRecipe::default(),
+            report.err_before,
+            &report.notes,
+        );
 
         let after: Vec<&'static str> = rescored.notes.iter().map(|n| n.key).collect();
         let surviving: Vec<&'static str> =
@@ -10327,7 +10345,14 @@ mod tests {
         // `neutral_zone` block and checks which key it emits. Precedent is
         // `pipeline.rs`'s own source-counting test. It cannot tell whether the
         // block is reachable -- only that, when reached, it says this.
+        // The luma-only tone ladder probes the fitted tone before backing off,
+        // and a zone's before / after readings share one population.
+        // Read from the BODY — the whole file holds these literals right
+        // here, and a pin that reads itself cannot fail.
         let src = include_str!("fit_zoned.rs");
+        let src = &src[..src.rfind("mod tests {").expect("the tests module")];
+        assert!(src.contains("for factor in [1.0f32, 0.75, 0.5, 0.25, 0.0] {"));
+        assert!(src.contains("let m_after = zone_moments(&zoned_px, &zw_source);"));
         let at = src.find("    if neutral_zone {").expect("the neutral-solution exit moved");
         let block = &src[at..at + 900];
         assert!(
@@ -10420,14 +10445,25 @@ mod tests {
         // differential ruler let the single sky zone keep -0.186 EV. Since v1.3.0
         // the sky survives as TWO bands — the residual earned a partition ("Zoned
         // sky accepted 2 bands after 15 trials") — and the seam ruler reads the
-        // target's own boundary (it asks 0.220 here; the introduced rim 0.028 ->
-        // 0.007 after shared differential shrink k=0.193). The band that carries
-        // the luminance move keeps -0.152 EV with its colour withheld: the
+        // target's own boundary (it asks 0.217 here; the introduced rim 0.037 ->
+        // 0.007 after shared differential shrink k=0.154). The band that carries
+        // the luminance move keeps -0.174 EV with its colour withheld: the
         // target's 12x8 cell means did not vouch the move (0.628 converged, 0.287
-        // diverged over 60 cells). The second band ships the small colour move
-        // its own cells did vouch (-0.062 EV, saturation +2.4), so the "partial"
-        // refusal of this test's name is now literally partial: one band refuses
-        // colour, the other does not.
+        // diverged over 60 cells). RE-PINNED 2026-09-24 for the tone ladder that
+        // probes the fitted step first: the band passes the local quality gate
+        // at its full step, where it used to ship three quarters of it
+        // (-0.152 EV, the ladder's old first rung; the seam ruler then asked
+        // 0.220 and shrank by k=0.193). The partition re-arbitrated around that
+        // step: the second band's own move went from -0.062 EV to -0.007 EV at
+        // saturation +2.2 (was +2.4) and the land bands' saturation from +2.4 to
+        // +1.6; the sky bands' deltaE after the fit 21.41 -> 21.24, the land
+        // bands' 5.91 -> 6.08, the frame-wide residual 0.095 either way.
+        // Measured by reverting each of the two zoned-fit corrections alone in
+        // a copy of the tree: the ladder moves every number above, the
+        // after-reading population moves one land gain by one ulp. The second
+        // band still ships the small colour move its own cells did vouch, so
+        // the "partial" refusal of this test's name is literally partial: one
+        // band refuses colour, the other does not.
         let sky_bands: Vec<_> =
             report.recipe.masks.iter().filter(|mask| mask.role == MaskRole::ZoneSky).collect();
         let (sky, second) = match sky_bands.as_slice() {
@@ -10455,11 +10491,11 @@ mod tests {
             "CALIBRATION_SKY ev={:.3} gains={:?} sat={:.1} rim={:.4} rationale={}",
             sky.exposure_ev, sky.color_gains, sky.saturation, after, report.recipe.rationale
         );
-        assert!((-0.17..=-0.135).contains(&sky.exposure_ev), "ev {}", sky.exposure_ev);
+        assert!((-0.19..=-0.155).contains(&sky.exposure_ev), "ev {}", sky.exposure_ev);
         assert_gains_withheld(sky.color_gains);
         assert_eq!(sky.saturation, 0.0);
         assert!(
-            (-0.08..=-0.045).contains(&second.exposure_ev),
+            (-0.025..=0.0).contains(&second.exposure_ev),
             "second band ev {}",
             second.exposure_ev
         );

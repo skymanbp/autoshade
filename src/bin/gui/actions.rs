@@ -2594,8 +2594,11 @@ impl AutoShadeApp {
         }
         // A baked master is on disk in its own frame; `can_rotate` refuses to
         // create a delta over one, and this is the same gate seen from the
-        // other side — without it a photo that was rotated BEFORE its retouch
-        // would have its master turned a second time on every open.
+        // other side. Every master is written in the EXIF frame (the pixel
+        // doors refuse a turned photo — `refuse_pixel_work_on_a_turned_photo`),
+        // so what this branch protects is the per-variant `v.base` plate,
+        // whose frame nothing tracks: turning the previews under it would
+        // put the canvas and the cards in two frames.
         if self.variants.iter().any(|v| v.base.is_some() || v.origin.is_some()) {
             self.base_turns = want;
             return;
@@ -3716,6 +3719,7 @@ impl AutoShadeApp {
                                                     &base,
                                                     &target,
                                                     &r,
+                                                    &fit_base,
                                                     rep.err_before,
                                                     &rep.notes,
                                                 ),

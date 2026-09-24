@@ -106,6 +106,8 @@ MAX_DESC_CHARS = 512
 # one block per proxy kind, and a cache without this key is refused rather
 # than half-read — the old file cannot be split into prose and tags after
 # the fact, and reading it as either would silently mis-attribute a weight.
+# The NAME predates the third proxy kind and stays as it is: renaming it
+# would refuse every cache written since S2 for nothing.
 PROXY_CACHE_FORMAT = "two-proxy/1"
 
 

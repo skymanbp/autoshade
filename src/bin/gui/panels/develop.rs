@@ -1827,7 +1827,7 @@ impl AutoShadeApp {
                 // band is ±10 — so the label says so rather than letting a
                 // −100..100 habit read the number wrong.
                 changed |= Self::slider(ui, lang, tr(lang, "Rotate (°)"), &mut self.recipe.perspective_rotate, -10.0, 10.0, 0.0);
-                changed |= Self::slider(ui, lang, tr(lang, "Transform scale"), &mut self.recipe.perspective_scale, 0.0, 200.0, 100.0);
+                changed |= Self::slider(ui, lang, tr(lang, "Transform scale"), &mut self.recipe.perspective_scale, 50.0, 150.0, 100.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Aspect"), &mut self.recipe.perspective_aspect, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "X offset"), &mut self.recipe.perspective_x, -100.0, 100.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Y offset"), &mut self.recipe.perspective_y, -100.0, 100.0, 0.0);

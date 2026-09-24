@@ -214,8 +214,12 @@ impl AutoShadeApp {
     /// raw-vs-baked dispatch and denoise / match / reverse-fit share it.
     /// Registered limitation (ROADMAP, R27 Batch-2 ②).
     ///
+    /// The AI mask refine (`masks.rs`) takes it too, since 2026-09-24: its
+    /// guide is decoded in the EXIF frame and the raster it refines was
+    /// turned into the plate frame.
+    ///
     /// Returns `true` when the caller must stop.
-    fn refuse_pixel_work_on_a_turned_photo(&mut self) -> bool {
+    pub(crate) fn refuse_pixel_work_on_a_turned_photo(&mut self) -> bool {
         if self.recipe.quarter_turns.is_multiple_of(4) {
             return false;
         }
@@ -475,7 +479,7 @@ impl AutoShadeApp {
                     // InPlace: bake into the active variant's base + repoint origin.
                     Ok((
                         img,
-                        RetouchNote::Healed { n: rep.spots, skipped: rep.skipped, out: out.clone(), ai_prose, notes },
+                        RetouchNote::Healed { n: rep.spots, out: out.clone(), ai_prose, notes },
                         out,
                         RetouchKind::InPlace,
                     ))

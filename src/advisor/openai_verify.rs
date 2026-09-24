@@ -126,10 +126,22 @@ impl Advisor for OpenAiVerifier {
                  is not a verdict"
             )));
         }
-        let text = value
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("message"))
+        let message = value.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("message"));
+        // A refusal is the model's own answer: chat completions carries it
+        // in `message.refusal` beside a null `content` (the Responses path
+        // reads its `refusal` item through `output_text_or_refusal`). Named
+        // as a refusal rather than as "no content" since 2026-09-24 — the
+        // first is a verdict about the request, the second a transport shape.
+        if let Some(refusal) = message.and_then(|m| m.get("refusal")).and_then(Value::as_str) {
+            return Err(AdvisorError::ModelFailure(
+                super::BoundedUntrustedText::diagnostic(
+                    &format!("the verifier refused the request: {refusal}"),
+                    &[key],
+                )
+                .into_string(),
+            ));
+        }
+        let text = message
             .and_then(|m| m.get("content"))
             .and_then(Value::as_str)
             .ok_or_else(|| {
@@ -201,6 +213,27 @@ mod tests {
             .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist(), &Default::default())
             .expect_err("finish_reason=tool_calls refuses");
         assert!(format!("{e}").contains("cut off"), "{e}");
+        join_stub(handle);
+    }
+
+    /// A refusal is named as one — chat completions puts it in
+    /// `message.refusal` beside a null `content`, which used to read as
+    /// "no choices[0].message.content".
+    #[test]
+    fn a_chat_refusal_is_named_as_a_refusal() {
+        const REFUSED: &str = r#"{"choices":[{"finish_reason":"stop","message":{"content":null,"refusal":"I cannot assess this image"}}]}"#;
+        let (url, _seen, handle) = stub_endpoint(vec![(200, "application/json", REFUSED.into())]);
+        let verifier = OpenAiVerifier {
+            api_key: Some("test-key".into()),
+            model: "m".into(),
+            base_url: url,
+            effort: None,
+        };
+        let e = verifier
+            .verify(&EditRecipe::default(), &fixture_meta(), &fixture_hist(), &Default::default())
+            .expect_err("a refusal is not a verdict");
+        let text = format!("{e}");
+        assert!(text.contains("refused") && text.contains("cannot assess"), "{text}");
         join_stub(handle);
     }
 

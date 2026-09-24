@@ -5047,6 +5047,17 @@ fn combined_mask_weight(
 ) -> f32 {
     let mut w = mask_weight_in(&m.mask, nx, ny, base, unwarp, dims);
     for (c, bmp) in m.components.iter().zip(comp_bmps) {
+        // A raster-backed component with NO raster carries no coverage, and
+        // its inversion must not turn that into the whole frame (an inverted
+        // Add would cover everything at full strength, an inverted Subtract
+        // would wipe the base). The develop already skips the whole
+        // adjustment for a dead raster (the inert contract, recipe.rs
+        // `MaskGeometry::Bitmap`); this is the same rule for every caller
+        // that reaches the combination directly, and until 2026-09-24 the
+        // component's own `inverted` was applied to the missing raster.
+        if bmp.is_none() && is_raster_backed(&c.geometry) {
+            continue;
+        }
         let cw = mask_weight_in(&c.geometry, nx, ny, *bmp, unwarp, dims);
         let cw = if c.inverted { 1.0 - cw } else { cw };
         w = match c.mode {
@@ -16035,6 +16046,32 @@ mod tests {
         };
         let got = combined_mask_weight(&sub_then_add, nx, ny, None, &[None, None], None, (1.0, 1.0));
         assert!((got - want).abs() < 1e-6, "sequential fold: got {got}, want {want}");
+    }
+
+    /// An inverted component whose raster could not be loaded contributes
+    /// NOTHING — not the whole frame. `mask_weight_in` answers 0 for a missing
+    /// raster, and `1 − 0` is coverage everywhere: an inverted Add then
+    /// covered the frame at full strength and an inverted Subtract wiped the
+    /// base. A parametric component with no raster is unaffected (it never
+    /// had one to lose).
+    #[test]
+    fn an_inverted_component_without_its_raster_covers_nothing() {
+        use crate::recipe::{LocalAdjustment, MaskCombine, MaskComponent, MaskGeometry};
+        let base = MaskGeometry::Linear { zero_x: 0.0, zero_y: 0.5, full_x: 1.0, full_y: 0.5 };
+        let dead = MaskGeometry::Bitmap { path: "nowhere.png".into() };
+        for mode in [MaskCombine::Add, MaskCombine::Subtract, MaskCombine::Intersect] {
+            let m = LocalAdjustment {
+                mask: base.clone(),
+                components: vec![MaskComponent { inverted: true, geometry: dead.clone(), mode }],
+                ..Default::default()
+            };
+            let plain = LocalAdjustment { mask: base.clone(), ..Default::default() };
+            for nx in [0.1f32, 0.5, 0.9] {
+                let got = combined_mask_weight(&m, nx, 0.5, None, &[None], None, (1.0, 1.0));
+                let want = combined_mask_weight(&plain, nx, 0.5, None, &[], None, (1.0, 1.0));
+                assert!((got - want).abs() < 1e-6, "{mode:?} at {nx}: got {got}, the base alone is {want}");
+            }
+        }
     }
 
     #[test]

@@ -3058,12 +3058,10 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             if let Some(h) = header("X-Heal-Spots", &rep.spots.to_string()) {
                 resp = resp.with_header(h);
             }
-            // Planned spots the engine left untouched (no donor of that size
-            // fits inside the frame): its own count, so the page never reads
-            // "healed N" as "asked N".
-            if let Some(h) = header("X-Heal-Skipped", &rep.skipped.to_string()) {
-                resp = resp.with_header(h);
-            }
+            // The spots left untouched ride in the rationale as a typed note
+            // (`HEAL_SKIPPED_NO_DONOR`), the way every other partial outcome
+            // does; the `X-Heal-Skipped` header this sent until 2026-09-24 was
+            // a second channel for one fact.
             // The rationale can disclose a partial outcome (e.g. "AI
             // spot-detection failed; healed the painted mask only") —
             // dropping it reported unqualified success. Percent-encoded:

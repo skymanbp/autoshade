@@ -356,7 +356,9 @@ pub struct ProposeContext<'a> {
 pub struct Thinking {
     /// One sentence: what this photograph is and what its light is doing.
     pub scene: String,
-    /// One entry per control FAMILY (`catalogue::CONTROL_FAMILIES`).
+    /// One entry per AI-VISIBLE control family (`Family::ai_visible` over
+    /// `catalogue::CONTROL_FAMILIES`) — the engine-only families never
+    /// appear here.
     pub tool_plan: Vec<ToolStep>,
     /// One sentence: the finished look being aimed for.
     pub intended_look: String,

@@ -1462,11 +1462,28 @@ impl AutoShadeApp {
                                 // version/base_curve, so healing the live
                                 // strip never lights ● against the mirror.)
                                 let active_v = self.variants.remove(0);
-                                let mut strip = strip_from_record(rec, self.src_path.as_deref());
+                                let (mut strip, strip_dropped) =
+                                    strip_from_record(rec, self.src_path.as_deref());
                                 let pos = rec.active_pos.min(strip.len());
                                 strip.insert(pos, active_v);
                                 self.variants = strip;
                                 self.active = pos;
+                                // The strip's own W20 disclosure, beside the
+                                // active card's above: a card past the caps
+                                // is one click from being the canvas.
+                                if !strip_dropped.is_empty() {
+                                    let t = trf(
+                                        lang,
+                                        "recipe limits discarded {n} mask(s), {m} component(s), {c} curve point(s) and {s} string byte(s) from the saved variant cards — the saved file exceeds the app's caps",
+                                        &[
+                                            ("n", &strip_dropped.dropped_masks.to_string()),
+                                            ("m", &strip_dropped.dropped_components.to_string()),
+                                            ("c", &strip_dropped.truncated_curve_points.to_string()),
+                                            ("s", &strip_dropped.truncated_string_bytes.to_string()),
+                                        ],
+                                    );
+                                    self.toast(ToastKind::Error, t);
+                                }
                             }
                             // The AI-card invariant, restored at the door
                             // (2026-09-13): a record that predates the split
@@ -2392,23 +2409,16 @@ impl AutoShadeApp {
                 };
                 format!("{note} · {}", out.display())
             }
-            RetouchNote::Healed { n, skipped, out, ai_prose, notes } => {
+            RetouchNote::Healed { n, out, ai_prose, notes } => {
                 let mut s = trf(
                     lang,
                     "healed {n} spot(s) → {path}",
                     &[("n", &n.to_string()), ("path", &out.display().to_string())],
                 );
-                if *skipped > 0 {
-                    // The engine's own count (`HealReport::skipped`): a blob
-                    // wider than any donor disk the frame can hold is left
-                    // as it was, and the picture shows exactly that.
-                    let left = trf(
-                        lang,
-                        "{n} spot(s) left untouched — no donor area of that size fits inside the frame",
-                        &[("n", &skipped.to_string())],
-                    );
-                    s = format!("{s} · {left}");
-                }
+                // The spots left untouched (no donor of their size fits the
+                // frame) ride in `notes` as `HEAL_SKIPPED_NO_DONOR` and render
+                // below with every other typed note — one sentence, owned by
+                // the engine, instead of the GUI's own copy of it.
                 if !ai_prose.is_empty() || !notes.is_empty() {
                     // AI prose stays raw (the model's own text); the typed
                     // notes render localized (L12#2B).

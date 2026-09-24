@@ -166,8 +166,18 @@ impl AutoShadeApp {
                 // got. Say it here instead.
                 let refused = (typed_image && !self.settings.image_key_present)
                     || (typed_analysis && !self.settings.analysis_key_present);
+                // The file's HOME decides what `Config::load` reads back:
+                // under the shared temp root (no per-user data directory on
+                // this machine) it is not trusted with a key or an endpoint,
+                // and only the models survive the merge. Said HERE — the
+                // loader's warning goes to stderr, which the windowed GUI
+                // never shows, so "saved" was the whole story until 2026-09-24.
+                let shared = autoshade::config::load_local_settings_from().1
+                    == autoshade::config::SettingsOrigin::SharedRoot;
                 self.settings.status = if refused {
                     tr(self.lang, "saved, but the key was not accepted — it contains characters that cannot appear in an HTTP header (a stray space or newline from a copy/paste?). Re-copy it and save again.").into()
+                } else if shared {
+                    trf(self.lang, "saved → {path} — but this file sits in the shared temp folder, which is not trusted with keys: the API key and base URL fields will be ignored (only the models are read). Set AUTOSHADE_DATA_DIR to a folder only you can write and save again.", &[("path", &p.display().to_string())])
                 } else {
                     trf(self.lang, "saved → {path}", &[("path", &p.display().to_string())])
                 };
