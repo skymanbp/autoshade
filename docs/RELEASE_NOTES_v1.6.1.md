@@ -47,6 +47,14 @@ no external coding model wrote this release.
   mask included, where they used to read the sky and land roles only — and a
   stage whose solver finds nothing to fit says so instead of attaching nothing
   in silence.
+- **A zone whose colour was withheld stays exactly neutral when the boundary
+  gate shrinks the set.** The shrink's explicit common/differential form
+  added the unity offset before the differential, so a withheld channel came
+  out one unit in the last place under unity once the gate bisected; the
+  differential is now summed first and cancels exactly. Found by CI on the
+  close-out: with the mask's own raster back under the boundary ruler and the
+  ladder's full step, a fixture that had always passed the gate at full
+  strength is now bisected.
 
 What these did on the reference pair is in the gates below.
 

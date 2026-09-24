@@ -1807,7 +1807,10 @@ pub(super) fn step_cell_gaps(
 /// masked correction). Thus additive dials land at zero and gains at unity,
 /// every zone keeps its fitted direction, and `k=1` is byte-for-byte the
 /// candidate. The decomposition makes the common policy explicit even though
-/// `k*c + k*(v-c)` deliberately simplifies to `k*v`.
+/// `k*c + k*(v-c)` deliberately simplifies to `k*v`. The gain form sums that
+/// differential BEFORE adding the unity offset, so a channel whose colour was
+/// withheld (`v == 0`) stays at exactly unity under every `k`
+/// (`a_withheld_channel_is_exactly_unity_under_every_shrink`).
 fn shrink_zone_corrections(
     masks: &mut [LocalAdjustment],
     originals: &[LocalAdjustment],
@@ -1848,7 +1851,11 @@ fn shrink_zone_corrections(
         for ((dst, src), _) in masks.iter_mut().zip(originals).zip(shares) {
             let fitted = src.color_gains.unwrap_or([1.0; 3])[channel] - 1.0;
             let gains = dst.color_gains.get_or_insert([1.0; 3]);
-            gains[channel] = 1.0 + k * common + k * (fitted - common);
+            // Differential first, offset last: `k*c` and `k*(0 - c)` are exact
+            // negatives, so a withheld channel cancels to 1.0 exactly, where
+            // `(1.0 + k*c) + k*(0 - c)` read 0.99999994 at k·c ≈ 0.3 (CI on the
+            // 2026-09-24 close-out, the orchestration test's exact pin).
+            gains[channel] = 1.0 + (k * common + k * (fitted - common));
         }
     }
     if k == 0.0 {
@@ -7152,22 +7159,76 @@ mod tests {
         (source, mask, path, report)
     }
 
-    /// Colour withheld means UNITY gains, and since step 9 that is a
-    /// tolerance rather than an equality. The boundary gate no longer waves
-    /// through a correction whose rim the scene was hiding, so more zones now
-    /// reach `shrink_zone_corrections` - and that function writes each gain
-    /// through its deliberately explicit common/differential decomposition,
-    /// `1.0 + k*c + k*(v - c)`, which for a withheld channel (`v == 1.0`)
-    /// cancels to unity only up to float rounding. Measured 0.99999994 on the
-    /// fixtures below. The property is "no colour move", not "these bits";
-    /// the redundant decomposition is kept because it is what makes the
-    /// shrink policy explicit (see that function's own comment).
+    /// Colour withheld means UNITY gains. Since step 9 the boundary gate no
+    /// longer waves through a correction whose rim the scene was hiding, so
+    /// more zones reach `shrink_zone_corrections` - and that function writes
+    /// each gain through its deliberately explicit common/differential
+    /// decomposition. Until 2026-09-24 that read `(1.0 + k*c) + k*(v - c)`,
+    /// which for a withheld channel cancelled to unity only up to float
+    /// rounding (0.99999994 measured); the differential is now summed before
+    /// the unity offset and cancels exactly (pinned at the function). The
+    /// tolerance below stays because the property these tests assert is "no
+    /// colour move", not "these bits".
     fn gains_withheld(gains: Option<[f32; 3]>) -> bool {
         gains.is_some_and(|g| g.iter().all(|v| (v - 1.0).abs() <= 1e-6))
     }
 
     fn assert_gains_withheld(gains: Option<[f32; 3]>) {
         assert!(gains_withheld(gains), "colour was not withheld: {gains:?}");
+    }
+
+    /// The shrink's explicit common/differential decomposition must not
+    /// manufacture a colour cast for a zone whose colour was withheld: with a
+    /// second zone carrying a real cast (so the common term is not zero), the
+    /// withheld zone's gains are EXACTLY unity at every `k` and every share
+    /// split, its additive dials stay at zero, and the cast zone keeps its
+    /// direction. CI on the 2026-09-24 close-out read 0.99999994 here while
+    /// the unity offset was added first.
+    #[test]
+    fn a_withheld_channel_is_exactly_unity_under_every_shrink() {
+        let originals = vec![
+            LocalAdjustment {
+                role: MaskRole::ZoneSky,
+                amount: 1.0,
+                exposure_ev: 0.8,
+                color_gains: Some([1.0; 3]),
+                ..Default::default()
+            },
+            LocalAdjustment {
+                role: MaskRole::ZoneLand,
+                amount: 1.0,
+                inverted: true,
+                exposure_ev: -0.3,
+                saturation: 12.0,
+                color_gains: Some([1.42, 0.97, 0.71]),
+                ..Default::default()
+            },
+        ];
+        for share_sky in [0.25f32, 0.5, 0.75] {
+            let shares = [share_sky, 1.0 - share_sky];
+            for k in [0.05f32, 0.3, 0.5, 0.7, 0.999, 1.0] {
+                let mut masks = originals.clone();
+                shrink_zone_corrections(&mut masks, &originals, &shares, k);
+                assert_eq!(
+                    masks[0].color_gains,
+                    Some([1.0; 3]),
+                    "the withheld sky at k={k}, sky share {share_sky}"
+                );
+                assert_eq!(masks[0].saturation, 0.0, "k={k}, sky share {share_sky}");
+                assert!(masks[0].exposure_ev > 0.0, "the sky keeps its direction at k={k}");
+                let land = masks[1].color_gains.expect("the cast zone keeps its gains");
+                assert!(
+                    land[0] > 1.0 && land[1] < 1.0 && land[2] < 1.0,
+                    "the cast keeps its direction at k={k}: {land:?}"
+                );
+            }
+            let mut masks = originals.clone();
+            shrink_zone_corrections(&mut masks, &originals, &shares, 0.0);
+            assert!(
+                masks.iter().all(|m| m.color_gains.is_none() && m.exposure_ev == 0.0),
+                "k=0 is no local correction: {masks:?}"
+            );
+        }
     }
 
     /// R34 §D2. The RECIPE and the SENTENCE must say the same thing about one

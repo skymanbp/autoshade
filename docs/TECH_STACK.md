@@ -2037,9 +2037,9 @@ than the pre-call state; model weights remain outside the repository.
   1996 MiB / 10.247 s at 0.71: +231 MiB and +5.116 s for luminance return.
   This excludes the Python/model process. Batch rendering does not request
   AI denoise, so its ordinary 1800 MB planning constant is unchanged.
-- The current battery is **1760 library (1745 pass + 15 `#[ignore]`d forensic
+- The current battery is **1761 library (1746 pass + 15 `#[ignore]`d forensic
   probes) / 25 CLI / 223 GUI / 2+2 contract** tests — the v1.6.1 battery; v1.6.0
-  shipped with 1683 library and 215 GUI, and the seventy-eight library names and
+  shipped with 1683 library and 215 GUI, and the seventy-nine library names and
   eight GUI names added since are listed in ARCHITECTURE. Environment-gated real
   Lightroom, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.

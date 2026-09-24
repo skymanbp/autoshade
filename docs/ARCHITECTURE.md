@@ -149,13 +149,13 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1760 library + 25 CLI + 223 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1745 pass + 15 `#[ignore]`d forensic probes and
+> 1761 library + 25 CLI + 223 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1746 pass + 15 `#[ignore]`d forensic probes and
 > the GUI result is 222 pass + one explicit scratch-recipe export probe ignored
 > in the ordinary battery. Counts refreshed 2026-09-24 for v1.6.1 (the
-> 2026-09-24 audit's findings closed, issues #6–#14): +78 / −1 by name against
+> 2026-09-24 audit's findings closed, issues #6–#14): +79 / −1 by name against
 > the v1.6.0 tag (`00d3d09`), listed by the test harness itself on both trees
-> (the v1.6.0 list saved on its release day) — seventy-eight library names: the
+> (the v1.6.0 list saved on its release day) — seventy-nine library names: the
 > audit sessions' fifty-five (advisor: a refine echoing a base mask name keeps
 > it byte for byte, in the client and through projection, a refusal part is the
 > model's own failure and not a shape mismatch, a JSON body past the cap is
@@ -205,12 +205,13 @@
 > rotated left-over-right crop the reader accepts is not disclosed, an
 > unmodelled key is named whatever XML whitespace precedes its equals sign, the
 > crop-overshoot note counts pixels of the straightened frame) and the
-> close-out's twenty-three (advisor: a judge reads "too weak" as a push and not
+> close-out's twenty-four (advisor: a judge reads "too weak" as a push and not
 > a pull-back, a chat refusal is named as a refusal; decode: a TIFF profile tag
 > of the wrong type is a hard error and not an untagged file; fit: a flat side
 > reads through the energy term alone, a rescore measures against the base the
 > caller names, an HSL move is not a detail-only companion, the joint veto is
-> wired at both terminal sites; the colour field: an unsolvable field is
+> wired at both terminal sites, a withheld colour channel is exactly unity
+> under every shrink; the colour field: an unsolvable field is
 > disclosed and not silent, the do-no-harm judges a custom region mask too;
 > recipe: Transform Scale is clamped to Lightroom's band, Upright matrices past
 > the sixth are dropped; render: the vignette is sampled at the pixel centre,
@@ -5397,7 +5398,14 @@ inverted-raster fixture's sky at `k = 0.088` for improving its zone 0.040 ->
 0.038. A refused zone leaves with `ZONE_SHRUNK_REFUSED` (its residual with and
 without it, the frame pair) and the survivors are gated again from their
 full-strength controls, not from a shrink negotiated for a set they are no
-longer part of.
+longer part of. The shrink itself (`shrink_zone_corrections`) writes each
+gain as unity plus a differential summed BEFORE the offset, so a zone whose
+colour was withheld stays at exactly unity under every `k`
+(`a_withheld_channel_is_exactly_unity_under_every_shrink`); the offset-first
+form read one ulp under unity on the day the mask's own raster went back
+under the boundary ruler and the ladder's full step sent a fixture that had
+always passed at full strength through the bisection (2026-09-24, caught by
+CI on every platform).
 
 **The rim ruler follows each band's own coordinate.** `RangeSelector` gives a
 mask the reading its transitions are actually made of — signed luma difference
