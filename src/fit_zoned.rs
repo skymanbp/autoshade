@@ -3236,7 +3236,7 @@ fn attach_semantic_regions(
                     // the cross-boundary step on the calibration corpus and
                     // the viaduct pair (2026-08-30); see the batch report.
                     ruler: spatial::BoundaryRuler::TransitionBand {
-                        weights: &zone.source_weights,
+                        weights: &zone.mask_weights,
                         reference: &current,
                     },
                     target_boundary: Some(&tgt_px[..]),
@@ -3739,8 +3739,8 @@ fn attach_zones_with_divergence(
         let correction_shares = accepted
             .iter()
             .map(|zone| {
-                zone.source_weights.iter().sum::<f32>()
-                    / zone.source_weights.len().max(1) as f32
+                zone.mask_weights.iter().sum::<f32>()
+                    / zone.mask_weights.len().max(1) as f32
             })
             .collect::<Vec<_>>();
         let (k, pixels) = match enforce_boundary_gate_toward(
@@ -3849,9 +3849,20 @@ struct AcceptedZone {
     range: Option<RangeMask>,
     /// Exact correction index, independent of role or free-text identity.
     mask_index: usize,
-    /// Estimator populations retained for the final-stack remeasurement.
+    /// Estimator populations retained for the final-stack remeasurement:
+    /// the robust-composed weights the zone's `before` was read on, so its
+    /// `after` and every remeasurement read the SAME population
+    /// (2026-09-24; until then the raw attachment weights).
     source_weights: Vec<f32>,
     target_weights: Vec<f32>,
+    /// The attachment's own source coverage — the mask's feathered raster
+    /// at analysis size — for what reads GEOMETRY, not a population: the
+    /// boundary ruler's transition band and the correction's share of the
+    /// frame. Handed the robust-composed population above instead, the
+    /// ruler took that population's holes (the content the two zones do
+    /// not share) for transitions and refused the calibration corpus's
+    /// third semantic region (2026-09-24, the four-region test).
+    mask_weights: Vec<f32>,
     /// The zone-local residual before this correction.
     before: f32,
     /// The zone-local residual it landed at ([`zone_err`]).
@@ -5211,6 +5222,7 @@ fn attach_one_zone(
             mask_index: report.recipe.masks.len() - 1,
             source_weights: zw_source,
             target_weights: zw_target,
+            mask_weights: attachment.source_weights.clone(),
             before: zone_before,
             after: zone_after,
             rendered: zoned_px,
@@ -8714,6 +8726,7 @@ mod tests {
             mask_index: 0,
             source_weights: vec![1.0; n],
             target_weights: vec![1.0; n],
+            mask_weights: vec![1.0; n],
             before: 0.0,
             after: 0.0,
             rendered: Vec::new(),
@@ -8798,6 +8811,7 @@ mod tests {
             mask_index: i,
             source_weights: mask_weights(&masks[i], edge, edge),
             target_weights: mask_weights(&masks[i], edge, edge),
+            mask_weights: mask_weights(&masks[i], edge, edge),
             before: 0.0,
             after: 0.0,
             rendered: Vec::new(),
@@ -10356,6 +10370,8 @@ mod tests {
         let src = &src[..src.rfind("mod tests {").expect("the tests module")];
         assert!(src.contains("for factor in [1.0f32, 0.75, 0.5, 0.25, 0.0] {"));
         assert!(src.contains("let m_after = zone_moments(&zoned_px, &zw_source);"));
+        // …and the boundary ruler keeps reading the mask's own raster.
+        assert!(src.contains("weights: &zone.mask_weights,"));
         let at = src.find("    if neutral_zone {").expect("the neutral-solution exit moved");
         let block = &src[at..at + 900];
         assert!(

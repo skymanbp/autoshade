@@ -149,15 +149,93 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1683 library + 25 CLI + 215 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1668 pass + 15 `#[ignore]`d forensic probes and
-> the GUI result is 214 pass + one explicit scratch-recipe export probe ignored
-> in the ordinary battery. Counts refreshed 2026-09-23 for v1.6.0 (the RAW-denoise
-> lanes merged into `main` on 2026-09-21, hot-site mapping in every develop with
-> its rule rebuilt on what ordinary frames showed, v2 of the fine-tune, the
-> base look paired like with like and then read on block means with every saved
-> photo re-estimated, the sharpening default, coordinate era 2, R39–R41 and the
-> calibration-corpus re-judgement): +39 / −5
+> 1760 library + 25 CLI + 223 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1745 pass + 15 `#[ignore]`d forensic probes and
+> the GUI result is 222 pass + one explicit scratch-recipe export probe ignored
+> in the ordinary battery. Counts refreshed 2026-09-24 for v1.6.1 (the
+> 2026-09-24 audit's findings closed, issues #6–#14): +78 / −1 by name against
+> the v1.6.0 tag (`00d3d09`), listed by the test harness itself on both trees
+> (the v1.6.0 list saved on its release day) — seventy-eight library names: the
+> audit sessions' fifty-five (advisor: a refine echoing a base mask name keeps
+> it byte for byte, in the client and through projection, a refusal part is the
+> model's own failure and not a shape mismatch, a JSON body past the cap is
+> reported as over the cap, a non-UTF-8 status body still reaches the
+> negotiation; config: a non-UTF-8 settings file is handed to the rescue with
+> its bytes intact; correspond: two fits in one process stage under distinct
+> names; dcp: table dimensions that overflow usize are refused as such; decode:
+> decoder and baked-reader construction each have one door; describe: an
+> unusable batch is refused and its scratch removed, the description bound holds
+> at the cap with a gap pending, the water fill fills the cap when the own group
+> is the largest; embed: a vocabulary score that is not a number is refused by
+> name, an unusable answer is refused and its scratch removed at every door;
+> fit: a luma-range label names the bins actually folded, the Atmosphere luma
+> veto withdraws the white-balance clamp fact with the white balance; zoned:
+> every typed free-mask refusal reaches the ledger under its label, a plane of
+> another geometry is skipped instead of indexing past the partition;
+> generative: the flex size never exceeds the ratio bound; pipeline: a
+> directory first met past the depth cap is still scanned from a shallower
+> path, the domain note describes the recipe after the carry-over; rationale: a
+> URL scheme is not a drive letter, exit codes are read from the word exit;
+> recipe: a colour field that lies about its shape neither renders nor survives
+> clamp, clamp bounds the camera profile and the creative look like everything
+> else; render: the LR pack lists only the spelling its readers open, a
+> smallest eigenvalue a hair below zero is rounding and not a refusal, Level on
+> a 3:2 frame keeps right angles right, Vertical with no vertical point is
+> refused and not answered sideways, the tone lookup passes white through and
+> starts where the curve does, a RAW without a colour matrix names the missing
+> matrix, the engine's active flag reads the render's own noise gate; retouch:
+> a spot with no room for a donor is left untouched and not counted; serve: a
+> corrupt central recipe outranked by a legacy copy is disclosed, a non-UTF-8
+> request body is the client's error; stack: the residual field is read from
+> split planes bit for bit; store: a gallery import restores the .bak survivor
+> before publishing legacy bytes, a resume that lost the race copies nothing
+> over the finished adoption, a wait-mode touch queues behind a held adoption
+> lock, deleting a version that does not exist leaves no marker and burns
+> nothing; style: a build without the description pass carries the previous
+> prose forward, a build without vectors keeps the stamp of the looks it merges
+> over, a look build that fails early leaves no vocabulary scratch, a manifest
+> that cannot be written still closes the describe stage, a stale vocabulary
+> strips the RAW half of its scores and tags, a vector from another checkpoint
+> is refused at the digest door too, no hubness is named for a pair with no
+> cosine, only a build that staged frames rewrites the exemplar cache; xmp: a
+> claimed name whose write fails is released and not left half-written, a
+> recipe that inflates past the ceiling is refused as too large and not as
+> corrupt, a shared raster that cannot be embedded is a loss for every mask that
+> names it, a conflicting crs binding discloses no mask or global losses, a
+> rotated left-over-right crop the reader accepts is not disclosed, an
+> unmodelled key is named whatever XML whitespace precedes its equals sign, the
+> crop-overshoot note counts pixels of the straightened frame) and the
+> close-out's twenty-three (advisor: a judge reads "too weak" as a push and not
+> a pull-back, a chat refusal is named as a refusal; decode: a TIFF profile tag
+> of the wrong type is a hard error and not an untagged file; fit: a flat side
+> reads through the energy term alone, a rescore measures against the base the
+> caller names, an HSL move is not a detail-only companion, the joint veto is
+> wired at both terminal sites; the colour field: an unsolvable field is
+> disclosed and not silent, the do-no-harm judges a custom region mask too;
+> recipe: Transform Scale is clamped to Lightroom's band, Upright matrices past
+> the sixth are dropped; render: the vignette is sampled at the pixel centre,
+> Full squares a turned keystone with no residual convergence, the keystone row
+> converges the turned points and not the unturned ones, an inverted component
+> without its raster covers nothing; store: a gallery import leaves a cleared
+> develop alone, a pristine card without a pixel record hands its identity to
+> the fresh master card; style: a merge across two embedding models drops the
+> other model's vectors, RAW exemplar tags are bounded at the door, the walk
+> steps over a dangling link; xmp: a mask naming one missing raster twice loses
+> it once, an orientation-only sidecar is read in the photograph's frame, the
+> census has no false rotation loss beside a readable RAW) — and eight GUI
+> names (the audit sessions' seven: a clone on a turned photo is refused before
+> it asks for a source point, a turn rebinds the paint canvas to the transposed
+> plate, an unreadable central XMP is reported and not folded into a no-op,
+> every pixel worker refuses a turned photo, every window in the app carries a
+> fixed egui id, the strip restored from the record clamps each recipe, the
+> range reference is one builder with every geometry field stripped; and the
+> close-out's one: a mask refine on a turned photo is refused before it spawns).
+> One library name left since v1.6.0, replaced by the test named beside it: the
+> style build's carry-forward of the previous embedding pass (now the
+> description pass carrying the previous prose forward). At v1.6.0 (2026-09-23)
+> the battery was 1683
+> library + 25 CLI + 215 GUI + 2+2 contract tests, 1668 and 214 of them
+> passing beside the same ignored probes: +39 / −5
 > by name against the v1.5.1 tag
 > (`1a122c0`), listed by the test harness itself on both trees on release day — thirty-nine library
 > names (the four laws of the luminance return: a full clean is bit-exact and
@@ -4336,7 +4414,12 @@ to uniform patches through exactly that term, and an abstention would also
 have let a flattened target through the mode gate as "not divergent"
 (`fit::tests::a_flat_side_reads_through_the_energy_term_alone`); an HSL move
 is not a detail-only companion; a zone's after-reading is taken on the SOURCE weights
-it was solved on, and the accepted zone records those same weights; the
+it was solved on, and the accepted zone records those same weights as its
+populations while its boundary ruler and its share keep reading the mask's
+own raster (`AcceptedZone::mask_weights` — handed the robust-composed
+population instead, the ruler took that population's holes for transitions
+and refused the calibration corpus's third semantic region, which is how the
+four-region calibration test caught it on the day); the
 luma-only tone ladder probes the fitted tone (factor 1.0) before backing off;
 and the colour field's two do-no-harm checks read the rounded field over every
 mask (above). On the calibration corpus the ladder is the one of the eight that

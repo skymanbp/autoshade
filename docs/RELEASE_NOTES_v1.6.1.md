@@ -25,7 +25,11 @@ no external coding model wrote this release.
   was attached.
 - **An HSL move is not a detail-only companion.**
 - **A zone's after-reading is taken on the source weights it was solved on**,
-  and the accepted zone records those same weights.
+  and the accepted zone records those same weights as its populations. Its
+  boundary ruler and its share keep reading the mask's own raster: handed the
+  robust-composed population instead, the ruler took that population's holes
+  for transitions and refused the calibration corpus's third semantic region
+  — the four-region calibration test caught it before the tag.
 - **The luma-only tone ladder probes the fitted tone first** (factor 1.0)
   before backing off through 0.75, 0.5 and 0.25. On the calibration corpus
   this is the one correction of the eight that moves a pinned number: the sky's
