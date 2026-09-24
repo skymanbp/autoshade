@@ -319,8 +319,10 @@ pub fn produce_recipe(
     let preview = Preview { jpeg };
     // The style QUERY embedding (R27 Batch-5), taken here because this is the
     // last point the camera's own full preview is in scope — and because the
-    // index's vectors were built from exactly this buffer through exactly this
-    // helper (`style::embed_preview`), which is what makes a query vector and a
+    // index's vectors were built from exactly this buffer through exactly the
+    // same reduction (`style::stage_embed_frame`, which the index build's
+    // `style::embed_staged_record` and the `style::embed_preview_with_text`
+    // call below both go through), which is what makes a query vector and a
     // stored vector comparable at all.
     //
     // OFF unless the user asked (`req.embed`, resolved from the CLI flag, the
@@ -597,7 +599,7 @@ pub fn produce_recipe(
         if verbose {
             println!("proposer : OpenAI ({})", cfg.openai_model);
         }
-        match openai.propose_planned(&preview, meta, hist, &propose_ctx) {
+        match openai.propose_planned_with_base(&preview, meta, hist, &propose_ctx, base) {
             Ok(p) => {
                 thinking = p.thinking;
                 lens_opinion = p.lens;
@@ -695,11 +697,12 @@ pub fn produce_recipe(
         // the loop stopped in the rationale, the one channel all three surfaces
         // show (the windowed GUI has no console for the CLI's stderr). A
         // FIRST-round failure still errors: there is no good pair to keep.
-        let revised = match openai.propose_planned(
+        let revised = match openai.propose_planned_with_base(
             &preview,
             meta,
             hist,
             &crate::advisor::ProposeContext { hint: Some(&hint), ..propose_ctx },
+            base,
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -984,7 +987,7 @@ pub fn produce_recipe(
                         &h,
                         &recipe,
                         |h| {
-                            let p = openai.propose_planned(
+                            let p = openai.propose_planned_with_base(
                                 &preview,
                                 meta,
                                 hist,
@@ -992,6 +995,7 @@ pub fn produce_recipe(
                                     hint: Some(h),
                                     ..propose_ctx
                                 },
+                                base,
                             )?;
                             let mut r = p.recipe;
                             candidate_thinking = p.thinking;
@@ -1344,15 +1348,29 @@ pub fn produce_recipe(
     // the user actually had — and, for the three manual lens fields the schema
     // DOES carry since R23-1b, keep the photographer's value only where this
     // proposal said nothing about them.
-    if let Some(b) = base {
-        carry_over_unrepresentable(&mut recipe, b, lens_opinion, Some(&mut det_notes));
-    }
-    // Read AFTER the carry-over: the lens profile it restores is part of the
-    // frame the note describes, so measuring before it could name a domain
-    // shift the delivered recipe does not have (or miss one it does).
-    let shift = post_stamp_domain_shift(&recipe);
-    note_post_stamp_domain(&mut recipe.rationale, &mut det_notes, shift);
+    carry_over_then_note_domain(&mut recipe, base, lens_opinion, &mut det_notes);
     Ok((recipe, verdict, det_notes))
+}
+
+/// The LAST two steps of [`produce_recipe`]'s stamp, in the one order that is
+/// right: the carry-over first, the domain note after it. The carry-over may
+/// replace the lens profile the stamp just wrote with the one the
+/// photographer's base actually has (its toggles included), and that profile
+/// is part of the frame the note describes — so a note read before it could
+/// name a domain shift the delivered recipe does not have, or miss one it
+/// does. One function, so a test pins the order instead of the position of
+/// two lines in a thousand-line body.
+fn carry_over_then_note_domain(
+    recipe: &mut EditRecipe,
+    base: Option<&EditRecipe>,
+    lens_opinion: LensOpinion,
+    det_notes: &mut Vec<crate::rationale::Note>,
+) {
+    if let Some(b) = base {
+        carry_over_unrepresentable(recipe, b, lens_opinion, Some(&mut *det_notes));
+    }
+    let shift = post_stamp_domain_shift(recipe);
+    note_post_stamp_domain(&mut recipe.rationale, det_notes, shift);
 }
 
 /// "These are the shots it referenced" — the transparency half of feedback #6
@@ -2801,9 +2819,12 @@ pub struct PhotoCalibration {
 
 /// ALL calibration halves from ONE saved-recipe snapshot: independent reads
 /// could pair an OLD curve with a NEW profile when a concurrent publish lands
-/// between them (the same single-snapshot rule `produce_recipe` follows).
-/// The fresh arm is era-stamped by construction — those estimates come from
-/// THIS build's sampler.
+/// between them. (`produce_recipe` is the one stamper that reads the snapshot
+/// TWICE — the as-shot anchor early, because its prompt must quote the anchor
+/// the deliverable will carry, and the curve, era and profile late, so that
+/// stamp stays fresh across minutes of network calls; each half is still
+/// read whole from one snapshot.) The fresh arm is era-stamped by
+/// construction — those estimates come from THIS build's sampler.
 pub fn photo_calibration(raw: &Path) -> PhotoCalibration {
     match saved_recipe_snapshot(raw, &crate::diag::photo(raw)) {
         Some(r) => PhotoCalibration {
@@ -2898,10 +2919,12 @@ pub fn stamp_fit_calibration(recipe: &mut crate::recipe::EditRecipe, cal: PhotoC
 /// the calibration existed, so both ask this the same question.
 pub fn post_stamp_domain_shift(recipe: &crate::recipe::EditRecipe) -> Option<String> {
     let curve = !recipe.base_curve.is_empty();
-    // "Enabled" is the three switches, not the presence of knots: a profile
-    // whose arrays are populated but all switched off changes no pixel.
+    // "Enabled" is the recipe's own activity predicates — the ones the
+    // renderer gates each stage on — not the switches alone: a profile whose
+    // arrays are populated but all switched off changes no pixel, and neither
+    // does a switch that is on over an empty array.
     let lp = &recipe.lens_profile;
-    let lens = lp.vignette_on || lp.distortion_on || lp.ca_on;
+    let lens = lp.vignette_active() || lp.geometry_active();
     match (curve, lens) {
         (true, true) => Some("its camera curve and its lens profile".into()),
         (true, false) => Some("its camera curve".into()),
@@ -2929,17 +2952,6 @@ pub fn note_post_stamp_domain(
     }
 }
 
-/// A calibration-only [`EditRecipe`] — the `base` the R16 fit composes
-/// into its solve (`fit::fit_recipe_from` / `fit_zoned::fit_recipe_zoned_from`).
-/// The as-shot WB anchors only RIDE (no temperature is set, so
-/// `apply_recipe_wb` never fires — they exist for the develop panel's WB
-/// baseline). This retired the v0.24.0 two-pass seed
-/// (`fit_calibration_seed`): pre-rendering the calibration clipped
-/// saturated channels at the pass boundary (`scale_chroma` clamp order,
-/// measured up to ~18.7/255 mean on saturated fixtures), while composing
-/// the base INTO the solve makes every candidate render the canvas's own
-/// one-pass `user(base(x))` — the gap is gone by construction and the fit's
-/// residual numbers describe exactly what the user sees.
 /// Working edge of the reverse-fit's source frame. Comfortably above both
 /// consumers (the fit analyses at 384, the AI judge at 1024) and the same
 /// working edge the base-look estimator uses.
@@ -2974,6 +2986,17 @@ pub fn fit_source(raw: &Path) -> Result<(image::DynamicImage, crate::recipe::Edi
     ))
 }
 
+/// A calibration-only [`EditRecipe`] — the `base` the R16 fit composes
+/// into its solve (`fit::fit_recipe_from` / `fit_zoned::fit_recipe_zoned_from`).
+/// The as-shot WB anchors only RIDE (no temperature is set, so
+/// `apply_recipe_wb` never fires — they exist for the develop panel's WB
+/// baseline). This retired the v0.24.0 two-pass seed
+/// (`fit_calibration_seed`): pre-rendering the calibration clipped
+/// saturated channels at the pass boundary (`scale_chroma` clamp order,
+/// measured up to ~18.7/255 mean on saturated fixtures), while composing
+/// the base INTO the solve makes every candidate render the canvas's own
+/// one-pass `user(base(x))` — the gap is gone by construction and the fit's
+/// residual numbers describe exactly what the user sees.
 pub fn calibration_recipe(cal: PhotoCalibration) -> crate::recipe::EditRecipe {
     crate::recipe::EditRecipe {
         version: cal.version,
@@ -3084,7 +3107,7 @@ pub fn fresh_as_shot_wb(raw: &Path) -> (Option<f32>, Option<f32>) {
 /// yields "no base look" rather than failing the caller's real operation
 /// (whose own render will surface the same error loudly). Callers that must
 /// tell that failure apart from the estimator's own empty answer use
-/// [`photo_base_knots_checked`].
+/// [`photo_base_knots_checked_in`].
 pub fn photo_base_knots(raw: &Path) -> Vec<[f32; 2]> {
     photo_base_knots_in(raw, &crate::diag::photo(raw))
 }
@@ -3094,10 +3117,13 @@ pub fn photo_base_knots_in(raw: &Path, d: &crate::diag::Diag) -> Vec<[f32; 2]> {
     photo_base_knots_checked_in(raw, d).unwrap_or_default()
 }
 
-/// [`photo_base_knots_checked`] on a caller-supplied channel. The three
-/// disclosures below name an INABILITY, and each is about the photograph the
-/// channel is bound to — which is why they no longer spell its path
-/// themselves: the sink renders the attribution.
+/// The checked form of [`photo_base_knots_in`]: `None` is an INABILITY (a
+/// non-RAW, no embedded preview, a failed read or develop, too few pixels to
+/// judge) where the unchecked form hands back an empty curve — the estimator's
+/// own empty answer is `Some`. The three disclosures below each name one of
+/// those inabilities, and each is about the photograph the channel is bound
+/// to — which is why they no longer spell its path themselves: the sink
+/// renders the attribution.
 pub fn photo_base_knots_checked_in(
     raw: &Path,
     d: &crate::diag::Diag,
@@ -3645,17 +3671,6 @@ pub fn xmp_target(raw: &Path) -> PathBuf {
     crate::store::xmp_target(raw)
 }
 
-/// By default, AutoShade keeps the source library read-only. If the configured
-/// Delivery folder is inside or above a photo’s folder, that delivery subtree is
-/// intentionally writable; Settings warns when this removes the folder’s
-/// protection. “Export .xmp beside the photo” is the separate, confirmed
-/// per-photo sidecar exception.
-///
-/// The PROJECT's ./out and the per-user store root are always writable, even
-/// when the source itself lives there (e.g. `match` fitting a look onto a
-/// previously exported preview) — the rule protects the photo LIBRARY, not our
-/// own output areas. A folder that merely happens to be NAMED "out" inside the
-/// library is still refused.
 /// Fold `.`/`..` LEXICALLY (no filesystem access — the target may not exist
 /// yet). Shared by [`guard_readonly`] and the CLI's canonical-path equality
 /// check (`-o` spelled with `dir/../` segments must still classify as the
@@ -3708,6 +3723,17 @@ pub fn resolve_existing_pub(p: &Path) -> PathBuf {
     }
 }
 
+/// By default, AutoShade keeps the source library read-only. If the configured
+/// Delivery folder is inside or above a photo’s folder, that delivery subtree is
+/// intentionally writable; Settings warns when this removes the folder’s
+/// protection. “Export .xmp beside the photo” is the separate, confirmed
+/// per-photo sidecar exception.
+///
+/// The PROJECT's ./out and the per-user store root are always writable, even
+/// when the source itself lives there (e.g. `match` fitting a look onto a
+/// previously exported preview) — the rule protects the photo LIBRARY, not our
+/// own output areas. A folder that merely happens to be NAMED "out" inside the
+/// library is still refused.
 pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
     use std::path::absolute;
     // Fold `.`/`..` LEXICALLY (no filesystem access — the target may not
@@ -5349,7 +5375,9 @@ pub fn find_raws(dir: &Path) -> Result<Vec<PathBuf>> {
 /// symlink is the same photo). Resilient per entry: one unreadable
 /// SUBDIRECTORY (AV lock, permissions) warns and is skipped instead of
 /// aborting the whole scan — only an unreadable ROOT is a real failure. The
-/// depth cap stays as a backstop for canonicalize-failing paths.
+/// depth cap stays as a backstop for canonicalize-failing paths, and it is
+/// checked before a directory is recorded as visited, so a directory first
+/// met past the cap is still scanned when a shallower spelling reaches it.
 fn walk_photos(root: &Path, pred: fn(&Path) -> bool) -> Result<Vec<PathBuf>> {
     walk_photos_counted(root, pred).map(|(v, _)| v)
 }
@@ -5370,13 +5398,17 @@ fn walk_photos_counted(
         is_root: bool,
         skipped: &mut usize,
     ) -> std::io::Result<()> {
+        // The backstop is checked BEFORE the identity is recorded: a
+        // directory first met past the cap is not read here, and recording
+        // it would make a shallower spelling of the same directory skip it as
+        // "already scanned" — every RAW under it then went unfound.
+        if depth > 64 {
+            return Ok(());
+        }
         if let Ok(c) = std::fs::canonicalize(dir)
             && !visited.insert(c)
         {
             return Ok(()); // already scanned through another spelling
-        }
-        if depth > 64 {
-            return Ok(());
         }
         let rd = match std::fs::read_dir(dir) {
             Ok(rd) => rd,
@@ -6238,6 +6270,46 @@ mod tests {
         std::fs::write(dir.join("a.arw"), b"raw").unwrap();
         let found = find_raws(&dir).expect("scan");
         assert_eq!(found.len(), 1, "one RAW in a plain directory: {found:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The depth backstop must not poison the identity set. A directory first
+    /// met PAST the cap is not read there, so recording it as visited made a
+    /// shallower spelling of the same directory skip it as "already scanned"
+    /// — and every RAW under it went unfound. Two shallow folders, each with
+    /// a RAW and a chain that reaches the OTHER folder only past the cap:
+    /// whatever the listing order, one folder is met deep first and shallow
+    /// second, so a poisoned set loses exactly one RAW.
+    ///
+    /// MUTATION: record the canonical identity before the depth check in
+    /// `walk` and one of the two RAWs disappears.
+    #[test]
+    fn a_directory_first_met_past_the_depth_cap_is_still_scanned_from_a_shallower_path() {
+        let dir = crate::test_dir("scan-deep-first");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("a.arw"), b"raw").unwrap();
+        std::fs::write(b.join("b.arw"), b"raw").unwrap();
+        // `<folder>/d/d/…/d` (63 levels, depth 64) holds the link, which the
+        // walk meets at depth 65 — one past the cap.
+        let deep_link = |folder: &std::path::Path, target: &std::path::Path| {
+            let mut chain = folder.to_path_buf();
+            for _ in 0..63 {
+                chain.push("d");
+            }
+            std::fs::create_dir_all(&chain).unwrap();
+            link_dir_cycle(target, &chain.join("link")).unwrap_or_else(|e| {
+                panic!("cannot build a directory link, so the backstop is UNTESTED: {e}")
+            })
+        };
+        deep_link(&a, &b);
+        deep_link(&b, &a);
+        let found = find_raws(&dir).expect("scan");
+        let names: Vec<&str> =
+            found.iter().filter_map(|p| p.file_name().and_then(|n| n.to_str())).collect();
+        assert_eq!(names, ["a.arw", "b.arw"], "both RAWs, each once: {found:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7339,7 +7411,8 @@ mod tests {
     ///
     /// MUTATION: make `post_stamp_domain_shift` return `Some` unconditionally
     /// and the no-shift arm fails; make it return `None` unconditionally and
-    /// all three positive arms fail.
+    /// all three positive arms fail; read the three `*_on` switches instead
+    /// of the activity predicates and the switch-without-data arm fails.
     #[test]
     fn a_stamped_calibration_says_the_residual_was_read_on_another_frame() {
         let phrase = |r: &EditRecipe| post_stamp_domain_shift(r);
@@ -7369,8 +7442,17 @@ mod tests {
         let mut lens_on = lens_off.clone();
         lens_on.lens_profile.vignette_on = true;
         assert_eq!(phrase(&lens_on).as_deref(), Some("its lens profile"));
+        // …and a switch over an EMPTY array is not an active stage either: the
+        // renderer skips it (`vignette_active` / `geometry_active`), so the
+        // delivered frame IS the frame the fit measured on.
+        let mut switch_only = EditRecipe::default();
+        switch_only.lens_profile.vignette_on = true;
+        switch_only.lens_profile.distortion_on = true;
+        switch_only.lens_profile.ca_on = true;
+        assert_eq!(phrase(&switch_only), None, "a switch without data moves nothing");
 
         let mut both = curve_only.clone();
+        both.lens_profile.distortion = vec![1.0, 0.99];
         both.lens_profile.distortion_on = true;
         assert_eq!(phrase(&both).as_deref(), Some("its camera curve and its lens profile"));
 
@@ -7388,6 +7470,52 @@ mod tests {
         let mut quiet_notes: Vec<crate::rationale::Note> = Vec::new();
         note_post_stamp_domain(&mut quiet, &mut quiet_notes, phrase(&bare));
         assert!(quiet.is_empty() && quiet_notes.is_empty(), "a no-op stamp must stay silent");
+    }
+
+    /// The domain note is read AFTER the carry-over, on the recipe that is
+    /// delivered. The saved-first stamp writes the SAVED lens profile (every
+    /// component on); a Refine base whose photographer switched those
+    /// components off then replaces it through `carry_over_unrepresentable`.
+    /// A note read between the two would say the residual was measured
+    /// without "its lens profile" while the delivered recipe applies none.
+    ///
+    /// MUTATION: inside `carry_over_then_note_domain`, read `shift` before
+    /// the carry-over and the first arm fails (a note about a lens profile
+    /// the recipe no longer has).
+    #[test]
+    fn the_domain_note_describes_the_recipe_after_the_carry_over() {
+        let data = crate::recipe::LensProfile { vignette: vec![1.0, 1.1], ..Default::default() };
+        // The stamp's profile: the saved one, every available component on.
+        let mut stamped = data.clone();
+        stamped.vignette_on = true;
+        // The photographer's base: the same data, the switch turned off (an
+        // unsaved toggle — exactly what the carry-over exists to preserve).
+        let base = EditRecipe { lens_profile: data.clone(), ..Default::default() };
+        let mut recipe = EditRecipe { lens_profile: stamped.clone(), ..Default::default() };
+        let mut notes: Vec<crate::rationale::Note> = Vec::new();
+        carry_over_then_note_domain(&mut recipe, Some(&base), LensOpinion::default(), &mut notes);
+        assert!(!recipe.lens_profile.vignette_on, "premise: the carry-over restored the base's toggle");
+        assert!(
+            notes.iter().all(|n| n.key != crate::rationale::keys::FIT_RESIDUAL_PRE_CALIBRATION),
+            "the delivered recipe applies no lens profile, so no shift may be claimed: {}",
+            recipe.rationale
+        );
+        assert!(recipe.rationale.is_empty(), "{}", recipe.rationale);
+
+        // The positive arm through the same door: a base that keeps the
+        // component on is carried, and the note is made exactly once.
+        let on = EditRecipe { lens_profile: stamped, ..Default::default() };
+        let mut recipe = EditRecipe::default();
+        let mut notes: Vec<crate::rationale::Note> = Vec::new();
+        carry_over_then_note_domain(&mut recipe, Some(&on), LensOpinion::default(), &mut notes);
+        assert!(recipe.lens_profile.vignette_active(), "premise: the base's profile rode along");
+        assert_eq!(
+            notes.iter().filter(|n| n.key == crate::rationale::keys::FIT_RESIDUAL_PRE_CALIBRATION).count(),
+            1,
+            "{}",
+            recipe.rationale
+        );
+        assert!(recipe.rationale.contains("its lens profile"), "{}", recipe.rationale);
     }
 
     #[test]

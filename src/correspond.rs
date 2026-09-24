@@ -146,6 +146,25 @@ pub fn correspond_file(
     field
 }
 
+/// The three FRESH temp names one [`fit_provider`] call stages under: the
+/// source frame, the target frame and the field.
+///
+/// pid + the process-wide `store::next_tmp_seq`, the shape every other tmp
+/// minter in this tree draws from. pid alone was one name per PROCESS, so any
+/// two fits in one process — a job pool is enough — would have staged over
+/// each other's frames and deleted each other's field mid-run, and the
+/// symptom would have been one pair's field computed on another pair's
+/// pixels. Latent today, like `segment::staging_path`'s sequence, which is
+/// precisely why it is named here and not in an incident report.
+fn fit_stage_paths(dir: &Path) -> [PathBuf; 3] {
+    let tag = format!("{}-{}", std::process::id(), crate::store::next_tmp_seq());
+    [
+        dir.join(format!("autoshade-corr-fit-src-{tag}.png")),
+        dir.join(format!("autoshade-corr-fit-tgt-{tag}.png")),
+        dir.join(format!("autoshade-corr-fit-field-{tag}.json")),
+    ]
+}
+
 /// The fit's correspondence provider (step 7b), shared by the CLI and the
 /// GUI: stages both renditions as bounded PNGs the sidecar can read, runs
 /// it, and hands back the parsed field. Everything staged — including the
@@ -158,11 +177,7 @@ pub fn fit_provider(
     opts: CorrespondOpts,
 ) -> impl Fn(&image::DynamicImage, &image::DynamicImage) -> Result<CorrespondenceField> {
     move |src, target| {
-        let dir = std::env::temp_dir();
-        let pid = std::process::id();
-        let s = dir.join(format!("autoshade-corr-fit-src-{pid}.png"));
-        let t = dir.join(format!("autoshade-corr-fit-tgt-{pid}.png"));
-        let out = dir.join(format!("autoshade-corr-fit-field-{pid}.json"));
+        let [s, t, out] = fit_stage_paths(&std::env::temp_dir());
         // 1024 px is comfortably above the sidecar's own 768² working size;
         // staging the full frame would spend more on the PNG encode than on
         // the model.
@@ -500,6 +515,24 @@ mod tests {
         assert!(e.contains("unusable field"), "{e}");
         assert!(!out.exists(), "an unusable field must not remain at the output name");
         let _ = std::fs::remove_dir_all(out.parent().unwrap());
+    }
+
+    /// Two fits in one process stage under DISTINCT names — the pid alone was
+    /// one name per process, and the second fit read the first's frames.
+    ///
+    /// MUTATION: drop `next_tmp_seq()` from `fit_stage_paths`'s tag and the
+    /// two triples come out identical.
+    #[test]
+    fn two_fits_in_one_process_stage_under_distinct_names() {
+        let dir = Path::new("scratch");
+        let a = fit_stage_paths(dir);
+        let b = fit_stage_paths(dir);
+        for (x, y) in a.iter().zip(&b) {
+            assert_ne!(x, y, "a second fit must never reuse a staged name");
+        }
+        // …and one fit's three names are three different files under `dir`.
+        assert!(a[0] != a[1] && a[1] != a[2] && a[0] != a[2]);
+        assert!(a.iter().all(|p| p.parent() == Some(dir)));
     }
 
     // --- SIDECAR SOURCE CONTRACTS (correspond.py-specific) -------------------

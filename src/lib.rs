@@ -191,7 +191,7 @@ pub fn assign_kill_group(child: &std::process::Child) -> Option<KillGroup> {
 /// and a SigLIP (0.75 GB fp16) resident BESIDE an SD 2.1 UNet (~2.4 GB fp16)
 /// is exactly the co-residency a per-module slot would have permitted. One
 /// process-wide gate makes the budget a single sentence: one model at a time.
-/// (The full gate-not-batcher rationale is on `embed::embed_file`.)
+/// (The full gate-not-batcher rationale is on [`embed::embed_file_record`].)
 ///
 /// Poison is recovered rather than re-panicked, like every other lock in this
 /// tree: one caller panicking inside a sidecar must not turn every other

@@ -3758,6 +3758,7 @@
                 image::DynamicImage::ImageRgba8(image::RgbaImage::new(6, 4)),
                 RetouchNote::Healed {
                     n: 1,
+                    skipped: 0,
                     out: healed.clone(),
                     ai_prose: String::new(),
                     notes: Vec::new(),
@@ -4652,6 +4653,7 @@
                 image::DynamicImage::new_rgba8(4, 4),
                 RetouchNote::Healed {
                     n: 1,
+                    skipped: 0,
                     out: std::path::PathBuf::from("out/_retouch_order_test.png"),
                     ai_prose: String::new(),
                     notes: Vec::new(),
@@ -11271,5 +11273,228 @@
                     );
                 }
             }
+        }
+    }
+
+    /// R27: the clone stamp is a pixel worker like heal and fill — its mask
+    /// is exported from the turned canvas while `retouch::clone_stamp`
+    /// re-develops the un-turned frame — so it takes the same refusal gate,
+    /// before any output claim or worker. MUTATION: drop the
+    /// `|| self.refuse_pixel_work_on_a_turned_photo()` in start_clone and the
+    /// status below becomes the Alt+click prompt.
+    #[test]
+    fn a_clone_on_a_turned_photo_is_refused_before_it_asks_for_a_source_point() {
+        for lang in [Lang::En, Lang::Zh] {
+            let mut app = AutoShadeApp { lang, ..Default::default() };
+            app.src_path = Some(PathBuf::from("clone-turn-guard.png"));
+            app.clone_src = None; // the gate answers before this is even asked for
+            let refusal = tr(
+                lang,
+                "this photo is turned, and pixel repairs still work on the un-turned frame — turn it back to 0 first",
+            );
+            let ask = tr(lang, "Alt+click to set the clone source first");
+            for turns in [1u8, 2, 3, 5] {
+                app.recipe.quarter_turns = turns;
+                app.status.clear();
+                app.start_clone();
+                assert!(!app.busy, "quarter_turns={turns}: a refused clone never reaches a worker");
+                assert_eq!(app.status, refusal, "quarter_turns={turns}");
+            }
+            // No turn, or a full one, IS the un-turned frame: the verb goes on
+            // to its own next check, exactly as heal and fill do.
+            for turns in [0u8, 4] {
+                app.recipe.quarter_turns = turns;
+                app.status.clear();
+                app.start_clone();
+                assert!(!app.busy);
+                assert_eq!(app.status, ask, "quarter_turns={turns}");
+            }
+        }
+    }
+
+    /// An unreadable CENTRAL XMP is `Unreadable`, exactly as an unreadable
+    /// recipe.json is — not `NoopOnly`. The XMP loop set `any` and broke
+    /// without recording the error, so the store answered "sidecars exist,
+    /// nothing in them": the open note said nothing and the next Ctrl+S
+    /// overwrote the file with no version backup. MUTATION: drop the
+    /// `parse_err` assignment in the XMP loop's read-error arm and this
+    /// sees NoopOnly again.
+    #[test]
+    fn an_unreadable_central_xmp_is_reported_not_folded_into_noop() {
+        let src = std::path::Path::new("D:/library/_xmp_unreadable_test.ARW"); // never touched
+        let dev = autoshade::store::develop_dir(src);
+        let _ = std::fs::remove_dir_all(&dev); // a crashed earlier run may have left files
+        std::fs::create_dir_all(&dev).unwrap();
+        let xp = autoshade::pipeline::xmp_target(src);
+        let _scrub = Scrub(vec![dev.clone(), xp.clone()]);
+        // Present but unreadable: `read_text_capped` answers InvalidData (not
+        // NotFound) for bytes that are not UTF-8 — the same door an over-cap
+        // or permission-denied file comes through.
+        std::fs::write(&xp, [0xffu8, 0xfe, 0x00, 0x80]).unwrap();
+        let RestoredDevelop { saved, .. } = read_saved_develop(src);
+        let SavedDevelop::Unreadable { err, fallback } = saved else {
+            panic!("an unreadable central XMP must be reported, not skipped");
+        };
+        assert!(fallback.is_none(), "nothing else answered");
+        assert!(err.starts_with("read "), "the recipe loop's own phrasing: {err}");
+    }
+
+    /// A strip entry's recipe is untrusted input like the active card's —
+    /// `read_saved_develop_locked` clamps recipe.json on the way in, but
+    /// `strip_from_record` copied variants.json recipes verbatim, and a card
+    /// is one click from BEING the canvas: a crop wider than the frame
+    /// reached the crop-nudge maths in `upd_shortcuts`
+    /// (`x.clamp(0.0, 1.0 - w)` with `w > 1`), which panics on `min > max`.
+    /// MUTATION: drop the `recipe.clamp()` in strip_from_record.
+    #[test]
+    fn strip_from_record_clamps_each_restored_recipe() {
+        let wild = EditRecipe {
+            crop: Some(autoshade::recipe::Crop { left: 0.0, top: 0.0, right: 2.0, bottom: 1.5 }),
+            contrast: 9_000.0,
+            ..Default::default()
+        };
+        let rec = autoshade::store::VariantsRecord {
+            extra: Default::default(),
+            v: 1,
+            active_kind: "original".into(),
+            active_pos: 0,
+            active_id: None,
+            active_name: None,
+            others: vec![autoshade::store::VariantEntry {
+                extra: Default::default(),
+                kind: "fitted".into(),
+                recipe: wild.clone(),
+                origin: None,
+                id: Some("card-wild".into()),
+                name: None,
+            }],
+        };
+        let strip = crate::persist::strip_from_record(&rec, None);
+        let mut expected = wild;
+        let _ = expected.clamp();
+        assert_eq!(strip[0].recipe, expected, "the restored card carries the CLAMPED recipe");
+        let c = strip[0].recipe.crop.expect("a clamped crop is kept: ordered and in-frame");
+        let w = c.right - c.left;
+        assert!(w <= 1.0, "crop width {w} would panic the keyboard nudge's clamp(0.0, 1.0 - w)");
+        // The nudge maths itself, as upd_shortcuts spells it — a panic here is the bug.
+        let _ = (c.left + 0.005).clamp(0.0, 1.0 - w);
+    }
+
+    /// egui keys a window's remembered state (position) off its id, and the
+    /// id defaults to the TITLE — every window title here is localised, so a
+    /// language switch dropped the Shortcuts window's state while Settings,
+    /// with a fixed id, kept its own. Pinned in the source: a headless test
+    /// cannot drive eframe's window memory. Each builder chain is located by
+    /// its constructor, never by its title text. MUTATION: delete the
+    /// `.id(...)` line under the Shortcuts window.
+    #[test]
+    fn every_window_in_app_rs_carries_a_fixed_egui_id() {
+        let frame = include_str!("app.rs");
+        let mut seen = 0;
+        // The needle stops at the path: `scripts/audit_i18n.py` walks the
+        // parentheses of every window constructor it sees in GUI source,
+        // string literals included, so spelling the call out here would
+        // derail its literal scanner for the rest of the file.
+        for (start, _) in frame.match_indices("egui::Window::") {
+            let end = frame[start..].find(".show(ctx").expect("the window's show call") + start;
+            let builder = &frame[start..end];
+            assert!(
+                builder.contains(".id(egui::Id::new("),
+                "a window whose id is its localised title, so its state resets with the language:\n{builder}"
+            );
+            seen += 1;
+        }
+        assert!(seen >= 2, "premise: the Settings and Shortcuts windows are both built here ({seen} found)");
+    }
+
+    /// R27, every door: each pixel worker that lands a BAKED master takes
+    /// the turned-photo gate before any output claim or worker thread — the
+    /// masked ones because their mask is in the turned frame, and the
+    /// mask-free ones (AI denoise, stack, reimagine) because their master
+    /// lands as a ◈/▦/✨ card whose raster is in the EXIF frame: `load_active`
+    /// installs it as the plate and `sync_base_turns` cannot turn a baked
+    /// card. MUTATION: drop the gate at any one of the four doors below and
+    /// that door's status is no longer the refusal.
+    #[test]
+    fn every_pixel_worker_refuses_a_turned_photo() {
+        let (mut app, _scrub) = app_with_masked_photo("turned-doors");
+        let src = std::env::temp_dir().join(format!("autoshade-turned-doors-{}.arw", std::process::id()));
+        std::fs::write(&src, b"raw").unwrap();
+        let _src_scrub = Scrub(vec![src.clone()]);
+        app.src_path = Some(src.clone());
+        app.recipe.quarter_turns = 1;
+        type Door = fn(&mut AutoShadeApp, PathBuf);
+        let doors: [(&str, Door); 4] = [
+            ("start_ai_denoise", |a, _| a.start_ai_denoise()),
+            ("start_clone", |a, _| a.start_clone()),
+            ("start_reimagine", |a, _| a.start_reimagine()),
+            ("start_stack", |a, p| a.start_stack(vec![p])),
+        ];
+        for (name, door) in doors {
+            app.busy = false;
+            app.status.clear();
+            door(&mut app, src.clone());
+            assert!(!app.busy, "{name}: a refused pixel worker never reaches a worker thread");
+            assert!(app.status.contains("this photo is turned"), "{name}: {}", app.status);
+        }
+    }
+
+    /// A turn moves the plate AND the paint canvas: the brush canvas is sized
+    /// to the plate, so after `sync_base_turns` transposes the plate a canvas
+    /// left in the old frame painted sideways (and off the long edge). The
+    /// canvas is REBOUND — empty — to the plate's new frame. MUTATION: drop
+    /// the `rebind_paint_canvas` call in sync_base_turns.
+    #[test]
+    fn a_turn_rebinds_the_paint_canvas_to_the_transposed_plate() {
+        let (mut app, _scrub) = app_with_masked_photo("rotate-paint");
+        let ctx = egui::Context::default();
+        let plate = std::sync::Arc::new(image::DynamicImage::new_rgb8(8, 6));
+        app.base_preview = Some(plate.clone());
+        app.source_preview = Some(plate);
+        app.base_turns = 0;
+        app.mask_paint = Some(image::RgbaImage::new(8, 6));
+        app.recipe.quarter_turns = 1;
+        app.sync_base_turns(&ctx);
+        assert_eq!(app.base_preview.as_ref().unwrap().dimensions(), (6, 8));
+        assert_eq!(
+            app.mask_paint.as_ref().unwrap().dimensions(),
+            (6, 8),
+            "the paint canvas follows the plate's frame"
+        );
+        assert!(!app.has_painted_mask(), "a rebound canvas starts empty");
+    }
+
+    /// The coverage overlay and the range eyedropper share the one-slot
+    /// `overlay_ref` cache, compared by recipe equality, so both must build
+    /// the reference recipe through ONE builder — the hand-copied twin that
+    /// forgot the manual CA pair missed the cache on every click under a
+    /// non-zero Red/cyan or Blue/yellow and paid a full develop on the UI
+    /// thread. MUTATION: drop `pre.ca_r = 0.0` from range_reference_recipe,
+    /// or rebuild the copy by hand in either caller.
+    #[test]
+    fn the_range_reference_is_one_builder_with_every_geometry_field_stripped() {
+        let (mut app, _scrub) = app_with_masked_photo("range-ref");
+        app.recipe.masks.push(app.recipe.masks[0].clone());
+        app.recipe.ca_r = 0.4;
+        app.recipe.ca_b = -0.3;
+        app.recipe.straighten_deg = 2.0;
+        app.recipe.lens_distortion = 0.1;
+        let pre = app.range_reference_recipe(1);
+        assert_eq!(pre.masks.len(), 1, "mask 1's reference is the prefix before it");
+        assert_eq!(
+            (pre.ca_r, pre.ca_b),
+            (0.0, 0.0),
+            "manual CA is geometry — stripped, or the eyedropper misses the overlay's cache"
+        );
+        assert_eq!((pre.straighten_deg, pre.lens_distortion), (0.0, 0.0));
+        assert!(pre.crop.is_none());
+        let canvas = include_str!("canvas.rs");
+        for head in ["pub(crate) fn refresh_mask_overlay(", "pub(crate) fn handle_range_pick("] {
+            let body = &canvas[canvas.find(head).unwrap_or_else(|| panic!("{head} moved"))..];
+            let end = body[head.len()..].find("\n    pub(crate) fn ").expect("the next method") + head.len();
+            assert!(
+                body[..end].contains("self.range_reference_recipe("),
+                "{head} builds its own reference copy again"
+            );
         }
     }

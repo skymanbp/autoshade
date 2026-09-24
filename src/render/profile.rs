@@ -277,13 +277,24 @@ fn adobe_tone(rgb: [f32; 3], lut: &[f32]) -> [f32; 3] {
     out
 }
 
-/// The curve at `x`, linearly between samples. Values above 1 keep the curve's
-/// slope at the top rather than clipping: a highlight outside the working gamut
-/// is exactly what the wide-gamut path exists to carry.
+/// The curve at `x`, linearly between samples. Values above 1 are not
+/// clipped — a highlight outside the working gamut is exactly what the
+/// wide-gamut path exists to carry — but continued along the chord through
+/// the origin, `lut[n−1]·x`: the identity for a curve ending at (1, 1), so a
+/// value past white passes through untouched. (Continuing at the shoulder's
+/// own tangent instead would compress every such highlight; the two differ
+/// on real photographs, so the choice waits on the profile fixtures rather
+/// than on this comment.) At and below 0 the answer is the curve's own start
+/// — [`Stage::apply`] clamps every channel before the tables, so nothing
+/// below 0 reaches here, and 0 itself is the curve's first sample. Until
+/// 2026-09-24 the bottom read `lut[0]·max(x, 0)`, which can only ever be ±0.
 fn sample(lut: &[f32], x: f32) -> f32 {
     let n = lut.len();
+    if n < 2 {
+        return lut.first().copied().unwrap_or(x);
+    }
     if x <= 0.0 {
-        return lut[0] * x.max(0.0);
+        return lut[0];
     }
     if x >= 1.0 {
         return lut[n - 1] * x;

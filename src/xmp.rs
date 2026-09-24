@@ -91,7 +91,7 @@ fn local_fmt(v: f32) -> String {
 //
 // v0.32.0. Every constant and every formula below is MEASURED, on the user's
 // own twelve-frame controlled Lightroom experiment plus pixel measurement of
-// the exports (evidence: `~/.claude/plans/r25-materials/lr-experiment/`,
+// the exports (evidence: `lr-experiment/` in the R25 materials ledger, outside the tree,
 // `probe4/PROBE4-FINAL.md` §4 is the settled statement, `probe3/
 // PROBE3-ADDENDUM.md` §3 the falloff, `probe2/PROBE2-VERDICT.md` §5 the
 // eight-frame table, `BBOX-DECODE.md` §2 the corner model's own statistics).
@@ -793,9 +793,12 @@ enum CropDecode {
     /// rectangle that IS the whole straightened frame (the straighten-only
     /// carrier, which the writer emits and this collapses back).
     /// `overshoot_frac` is how far outside the straightened frame the
-    /// rectangle reached before being clamped, as a fraction of that frame's
-    /// longer side — `0.0` when the conversion was exact, and the only lossy
-    /// edge of the whole conversion (see §"the one inexactness" below).
+    /// rectangle reached before being clamped, in units of the SOURCE frame's
+    /// height — the one length every quantity in [`lr_to_engine_crop`] is
+    /// measured in, so `overshoot_frac × tiff:ImageLength` is the overshoot
+    /// in pixels whichever edge it was on. `0.0` when the conversion was
+    /// exact; this is the only lossy edge of the whole conversion (see §"the
+    /// one inexactness" below).
     Read { crop: Option<Crop>, straighten_deg: f64, overshoot_frac: f64 },
     /// Tilted, and the document declares no frame ([`FrameAspect::from_xmp`]):
     /// the rectangle's own side lengths cannot be recovered without `W/H`, so
@@ -980,7 +983,11 @@ fn lr_to_engine_crop(lr: LrCrop, frame: Option<FrameAspect>, ours: bool) -> Crop
     let (x0, y0) = (wi / 2.0 + dx - p, hi / 2.0 + dy - q);
     let (left, right) = (x0 / wi, (x0 + 2.0 * p) / wi);
     let (top, bottom) = (y0 / hi, (y0 + 2.0 * q) / hi);
-    let overshoot = [-left, -top, right - 1.0, bottom - 1.0]
+    // In units of the source height, like `wi`/`hi` themselves. A bare
+    // maximum over the four fractions mixed two axes — `left`/`right` are
+    // fractions of the inscribed WIDTH, `top`/`bottom` of its HEIGHT — and
+    // forgot which one won, so no caller could turn it into pixels.
+    let overshoot = [-left * wi, -top * hi, (right - 1.0) * wi, (bottom - 1.0) * hi]
         .into_iter()
         .fold(0.0f64, f64::max);
     let clamp01 = |v: f64| v.clamp(0.0, 1.0) as f32;
@@ -996,8 +1003,8 @@ fn lr_to_engine_crop(lr: LrCrop, frame: Option<FrameAspect>, ours: bool) -> Crop
     CropDecode::Read {
         crop: (!full(&crop)).then_some(crop),
         straighten_deg,
-        // A fraction of the straightened frame's own axis — the caller turns
-        // it into pixels with the frame it has.
+        // In units of the source frame's height — the caller turns it into
+        // pixels with the `tiff:ImageLength` it has.
         overshoot_frac: overshoot,
     }
 }
@@ -1089,8 +1096,12 @@ pub fn crop_import_note(xmp: &str) -> Option<String> {
     match read_crop(Scope::new(scope.as_ref()), frame, is_autoshade_sidecar(xmp)) {
         CropDecode::Read { overshoot_frac, .. } if overshoot_frac > 0.0 => {
             // In pixels of the frame the document declares, when it declares
-            // one — a fraction means nothing to a photographer.
-            let px = frame.map(|f| overshoot_frac * f.w.max(f.h));
+            // one — a fraction means nothing to a photographer. The decoder
+            // measures the overshoot in units of the source HEIGHT
+            // (`CropDecode::Read`), so that is the side to scale by; the
+            // longer side put every bottom-edge overshoot on a 3:2 frame 50 %
+            // too high.
+            let px = frame.map(|f| overshoot_frac * f.h);
             Some(format!(
                 "the straightened crop reaches {} outside the frame this build's straighten \
                  leaves behind, and was trimmed to fit",
@@ -2107,7 +2118,13 @@ pub struct MaskImportLoss {
 /// import-side counterpart of [`mask_export_losses`]. Empty = every
 /// correction arrived whole (or there were none).
 pub fn import_losses(xmp: &str) -> Vec<MaskImportLoss> {
-    if xmp.len() > MAX_XMP_BYTES {
+    // The two gates the reader itself stands behind
+    // (`xmp_to_recipe_clamped_impl`): under a foreign namespace binding it
+    // imports NOTHING, and `unparsable_crs_numbers` says so in one sentence.
+    // Naming per-correction defects on top of that — read through the very
+    // prefix the gate declared unreliable — reported masks skipped for
+    // reasons that were never the reason.
+    if xmp.len() > MAX_XMP_BYTES || xmlns_conflict(xmp).is_some() {
         return Vec::new();
     }
     let authored_by_autoshade = is_autoshade_sidecar(xmp);
@@ -2122,7 +2139,7 @@ pub fn import_losses(xmp: &str) -> Vec<MaskImportLoss> {
 /// MaskBrushTable. The structured loss channel is already user-visible, so
 /// this re-read is silent; the recipe import emits any named table refusal.
 pub fn import_losses_for_photo(xmp: &str, photo: &std::path::Path) -> Vec<MaskImportLoss> {
-    if xmp.len() > MAX_XMP_BYTES {
+    if xmp.len() > MAX_XMP_BYTES || xmlns_conflict(xmp).is_some() {
         return Vec::new();
     }
     let authored_by_autoshade = is_autoshade_sidecar(xmp);
@@ -2411,7 +2428,11 @@ fn render_gaps_in(
 /// mask name or a `crs:RawFileName` value may contain anything, `crs:Foo=`
 /// included.
 pub fn unmodelled_global_crs(xmp: &str) -> Vec<String> {
-    if xmp.len() > MAX_XMP_BYTES {
+    // Under a foreign `crs:` binding these are not camera-raw properties at
+    // all, and the merge that would keep them refuses the document
+    // ([`merge_recipe_into_xmp_in_frame_for_photo`]) — the conflict sentence
+    // on [`unparsable_crs_numbers`] is the whole disclosure, as for the masks.
+    if xmp.len() > MAX_XMP_BYTES || xmlns_conflict(xmp).is_some() {
         return Vec::new();
     }
     let Some(start) = find_crs_description(xmp) else { return Vec::new() };
@@ -2459,9 +2480,13 @@ pub fn unmodelled_global_crs(xmp: &str) -> Vec<String> {
                         j += 1;
                     }
                     let name: String = b[i + 4..j].iter().collect();
-                    // An ATTRIBUTE, so `=` (possibly spaced) must follow.
+                    // An ATTRIBUTE, so `=` must follow — after any XML
+                    // whitespace (`Eq ::= S? '=' S?`; S is space, tab, CR or
+                    // LF), the same class `next_xml_attribute` skips. Skipping
+                    // spaces alone left a key wrapped as `crs:Foo\n="1"` read
+                    // by the merge and missing from this disclosure.
                     let mut k = j;
-                    while k < b.len() && b[k] == ' ' {
+                    while k < b.len() && b[k].is_ascii_whitespace() {
                         k += 1;
                     }
                     if !name.is_empty() && b.get(k) == Some(&'=') && !owned.contains(&name) {
@@ -2776,14 +2801,6 @@ fn local_curve_elem(tag: &str, points: &[crate::recipe::CurvePoint]) -> String {
     format!("       <crs:{tag}>\n        <rdf:Seq>\n{pts}        </rdf:Seq>\n       </crs:{tag}>\n")
 }
 
-/// Build the `<crs:MaskGroupBasedCorrections>` child element (empty string when
-/// there are no masks) PLUS the per-mask loss list the export-side disclosure
-/// is built from — one loop, so the XML and the claim about it cannot drift.
-/// Local sliders convert UI scale → ACR local scale:
-/// exposure stops ÷4, every other slider ÷100 (verified against the user's real
-/// sidecar; see docs/V2_PLAN.md §2a). All 26 `Local*` fields are emitted (the
-/// ones this engine has no model for as 0) as Lightroom expects the full block
-/// — `LocalHue` and `LocalSharpness` joined the carried set in R23-1b.
 /// The `crs:CorrectionName` a mask goes out under, and the name every loss
 /// verdict about it carries: the user's own label when set; for an unnamed
 /// ZONE its role tag (`sky` / `land`), so that a sidecar Lightroom rewrites —
@@ -2801,6 +2818,14 @@ fn written_name(i: usize, m: &LocalAdjustment) -> String {
     format!("AutoShade {}", i + 1)
 }
 
+/// Build the `<crs:MaskGroupBasedCorrections>` child element (empty string when
+/// there are no masks) PLUS the per-mask loss list the export-side disclosure
+/// is built from — one loop, so the XML and the claim about it cannot drift.
+/// Local sliders convert UI scale → ACR local scale:
+/// exposure stops ÷4, every other slider ÷100 (verified against the user's real
+/// sidecar; see docs/V2_PLAN.md §2a). All 26 `Local*` fields are emitted (the
+/// ones this engine has no model for as 0) as Lightroom expects the full block
+/// — `LocalHue` and `LocalSharpness` joined the carried set in R23-1b.
 fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLoss>) {
     let mut losses: Vec<MaskLoss> = Vec::new();
     if r.masks.is_empty() {
@@ -3054,11 +3079,6 @@ crs:MaskBlendMode=\"{}\" crs:MaskInverted=\"{}\" crs:MaskSyncID=\"{seed}\" crs:M
     )
 }
 
-/// Every crs ATTRIBUTE the writer owns, rendered for `r` — the
-/// `\n    crs:K="v"` block. One authority for what AutoShade owns in a
-/// sidecar, shared by the fresh-document writer and the merge path
-/// ([`merge_recipe_into_xmp`]); the REMOVAL universe lives in
-/// [`owned_attr_keys`] and must cover every key this can ever emit.
 /// Does a detail/NR COMPANION key ride out at zero because its group's AMOUNT
 /// is set? (R27 T4, `P2-feather-k-closures.md` §4.)
 ///
@@ -3106,6 +3126,11 @@ fn amount_carries(key: &str, amount: f32) -> bool {
             && amount != 0.0)
 }
 
+/// Every crs ATTRIBUTE the writer owns, rendered for `r` — the
+/// `\n    crs:K="v"` block. One authority for what AutoShade owns in a
+/// sidecar, shared by the fresh-document writer and the merge path
+/// ([`merge_recipe_into_xmp`]); the REMOVAL universe lives in
+/// [`owned_attr_keys`] and must cover every key this can ever emit.
 fn owned_attrs(r: &EditRecipe, frame: Option<FrameAspect>) -> String {
     let mut a = String::new();
     // The SCHEMA-ERA gate's emission half (R25 P8). It has to sit beside the
@@ -4369,10 +4394,6 @@ fn xmlns_conflict(doc: &str) -> Option<String> {
 
 
 
-/// The `</rdf:Description>` closing the element whose opening tag ended just
-/// before `from` — DEPTH-COUNTED, because Lightroom nests `rdf:Description`
-/// elements inside mask corrections (the batch-3 lesson: naive scans shred
-/// nested structures).
 /// The text constructs whose contents are NOT markup. A `</rdf:Description>`
 /// inside any of them is not a close.
 const CONSTRUCTS: [(&str, &str); 3] = [("<!--", "-->"), ("<![CDATA[", "]]>"), ("<?", "?>")];
@@ -4443,6 +4464,10 @@ impl Landmarks {
     }
 }
 
+/// The `</rdf:Description>` closing the element whose opening tag ended just
+/// before `from` — DEPTH-COUNTED, because Lightroom nests `rdf:Description`
+/// elements inside mask corrections (the batch-3 lesson: naive scans shred
+/// nested structures).
 fn find_matching_close(doc: &str, mut from: usize) -> Option<usize> {
     const CLOSE: &str = "</rdf:Description>";
     let mut depth = 0usize;
@@ -5972,23 +5997,29 @@ pub fn unparsable_crs_numbers(xmp: &str) -> Vec<String> {
         bad.push("PointColors".to_string());
     }
     // A structurally inconsistent crop (HasCrop="True" with a missing
-    // coordinate, an out-of-domain value, or inverted ordering) imports as a
-    // SILENT None and the next save persists HasCrop="False" — a deletion
-    // nobody asked for. Individually unparsable coordinates are named by the
-    // generic scan above; absence and ordering are only visible to a check
-    // of the structure as a whole (the curve rule, applied to the crop).
+    // coordinate, an out-of-domain value, or an ordering the corners cannot
+    // have) imports as a SILENT None and the next save persists
+    // HasCrop="False" — a deletion nobody asked for. Individually unparsable
+    // coordinates are named by the generic scan above; absence and ordering
+    // are only visible to a check of the structure as a whole (the curve
+    // rule, applied to the crop).
+    //
+    // The verdict is the READER's own — `read_crop`, the decode
+    // `xmp_to_recipe` runs — not a restatement of it. This scan used to
+    // require `Left < Right && Top < Bottom` outright, but under the corner
+    // encoding `Left > Right` is a legal ROTATED arrangement (see
+    // `lr_to_engine_crop`, "no ordering guard") that the reader decodes and
+    // renders, so the restated rule disclosed a crop that had imported whole
+    // as "inconsistent". Asking the decoder keeps the two in agreement by
+    // construction; only its `Refused` arm is the silent None this entry
+    // exists for (a frameless tilt nobody can place is `NoFrame`, which
+    // `crop_import_note` discloses by name).
     if scope.crs_str("HasCrop").as_deref() == Some("True") {
-        let coord = |k: &str| scope.crs_f32(k).filter(|v| (0.0..=1.0).contains(v));
-        let consistent = match (
-            coord("CropLeft"),
-            coord("CropTop"),
-            coord("CropRight"),
-            coord("CropBottom"),
-        ) {
-            (Some(l), Some(t), Some(r), Some(b)) => l < r && t < b,
-            _ => false,
-        };
-        if !consistent && !bad.iter().any(|k| k.starts_with("Crop")) {
+        let refused = matches!(
+            read_crop(scope, FrameAspect::from_xmp(xmp), is_autoshade_sidecar(xmp)),
+            CropDecode::Refused { .. }
+        );
+        if refused && !bad.iter().any(|k| k.starts_with("Crop")) {
             bad.push("Crop (HasCrop=\"True\" with missing or inconsistent coordinates)".to_string());
         }
     }
@@ -6355,7 +6386,9 @@ fn parse_retouch_areas(xmp: &str) -> Vec<crate::retouch::RetouchArea> {
 /// `imported + refused` as the size of the user's local work. The named list
 /// of everything, notes included, is [`import_losses`].
 pub fn unsupported_corrections(xmp: &str) -> usize {
-    if xmp.len() > MAX_XMP_BYTES {
+    // Gated like the reader and [`import_losses`]: a document refused whole
+    // for its namespace binding has no per-correction drops to count.
+    if xmp.len() > MAX_XMP_BYTES || xmlns_conflict(xmp).is_some() {
         return 0;
     }
     let authored_by_autoshade = is_autoshade_sidecar(xmp);
@@ -6364,7 +6397,7 @@ pub fn unsupported_corrections(xmp: &str) -> usize {
 }
 
 pub fn unsupported_corrections_for_photo(xmp: &str, photo: &std::path::Path) -> usize {
-    if xmp.len() > MAX_XMP_BYTES {
+    if xmp.len() > MAX_XMP_BYTES || xmlns_conflict(xmp).is_some() {
         return 0;
     }
     let authored_by_autoshade = is_autoshade_sidecar(xmp);
@@ -8543,9 +8576,8 @@ fn parse_one_correction_with_reader(
     };
     let q100 = |k: &str| scaled(k, 100.0);
     let q180 = |k: &str| scaled(k, 180.0);
-    let (_, block, comps) = correction_mask_components(seg)?;
+    let (block_at, block, comps) = correction_mask_components(seg)?;
     let base_at = base_geometry_at(seg)?;
-    let (block_at, _, _) = correction_mask_components(seg)?;
     let base_start = base_at - block_at;
     let correction_tag = next_xml_tag(seg, 0).map(|(s, e, _)| &seg[s..=e]).unwrap_or("");
     let intended_inverted = mask_intent_attr(correction_tag, "Inverted", intent_declared)
@@ -8723,7 +8755,7 @@ fn parse_one_correction_with_reader(
         // 18 distinct public non-zero values; no quantisation lattice). So
         // 0.803738 is the slider at 80.37 and the recollection gives way —
         // user-accepted ruling, 2026-08-19. Evidence archive:
-        // ~/.claude/plans/r27-materials/F3-web-evidence/.
+        // the R27 materials ledger's F3-web-evidence/ folder, outside the tree.
         // See docs/V2_PLAN.md §7 item 10 for the full adjudication.
         sharpness: q100("LocalSharpness"),
         saturation: q100("LocalSaturation"),
@@ -9573,6 +9605,31 @@ mod tests {
         );
     }
 
+    /// `Eq ::= S? '=' S?` — XML lets any whitespace (space, tab, CR, LF) sit
+    /// between an attribute's name and its `=`, and the attribute reader
+    /// (`next_xml_attribute`) accepts all four. This scan skipped ASCII spaces
+    /// only, so a foreign key wrapped as `crs:Foo\n="1"` was kept by the merge
+    /// and missing from the disclosure that says it is there.
+    ///
+    /// MUTATION THIS CATCHES: `is_ascii_whitespace()` back to `== ' '` and
+    /// both keys vanish from the list.
+    #[test]
+    fn an_unmodelled_key_is_named_whatever_xml_whitespace_precedes_its_equals_sign() {
+        let doc = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+                   xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+                   <rdf:Description rdf:about=\"\" \
+                   xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+                   crs:Exposure2012 = \"+1.00\" \
+                   crs:CurveRefineSaturation\t=\t\"100\"\n\
+                   crs:CameraProfileDigest\r\n=\n\"2D1D4700365C3E2831EEAE0D1A8F9CDF\"/>\
+                   </rdf:RDF></x:xmpmeta>";
+        assert_eq!(
+            unmodelled_global_crs(doc),
+            vec!["CameraProfileDigest", "CurveRefineSaturation"],
+            "tab, CR and LF before `=` spell the same attribute as a space"
+        );
+    }
+
     /// L03-3: the import gate must MATCH the disclosure sentence — a
     /// conflicting crs binding imports nothing, because the scanners would
     /// read properties through a prefix the document bound elsewhere.
@@ -9592,6 +9649,47 @@ mod tests {
             unparsable_crs_numbers(doc)[0].contains("not imported"),
             "and the disclosure names the refusal"
         );
+    }
+
+    /// L03-3's mask half: the import refuses the WHOLE document under a
+    /// conflicting binding, and the disclosure sentence says its settings
+    /// were not imported — so the per-correction loss list, the drop count
+    /// and the carried-globals list have nothing to add. Each used to be read
+    /// through the very prefix the gate had just declared unreliable, and
+    /// reported masks skipped for reasons that were never the reason.
+    ///
+    /// MUTATION THIS CATCHES: drop `xmlns_conflict` from any one of the three
+    /// gates and its assertion on the conflicting document fails.
+    #[test]
+    fn a_conflicting_crs_binding_discloses_no_mask_or_global_losses() {
+        let muted = lr_radial("0", "0").replace("crs:MaskValue=\"1\"", "crs:MaskValue=\"0\"");
+        let doc = lr_doc(&lr_correction("Radial 1", "", &muted)).replace(
+            "crs:Exposure2012=\"+0.35\"",
+            "crs:Exposure2012=\"+0.35\"\n   crs:CurveRefineSaturation=\"100\"",
+        );
+        // Premise: under the canonical binding all three channels speak.
+        assert_eq!(unsupported_corrections(&doc), 1);
+        assert!(!import_losses(&doc).is_empty());
+        assert!(
+            unmodelled_global_crs(&doc).contains(&"CurveRefineSaturation".to_string()),
+            "{:?}",
+            unmodelled_global_crs(&doc)
+        );
+        let conflict = doc.replace(CRS_URI, "urn:other");
+        assert!(xmlns_conflict(&conflict).is_some(), "premise: the binding is a conflict");
+        assert!(xmp_to_recipe(&conflict).masks.is_empty(), "premise: nothing imports");
+        assert_eq!(unsupported_corrections(&conflict), 0, "no drop count on a refused document");
+        assert!(import_losses(&conflict).is_empty(), "{:?}", import_losses(&conflict));
+        assert!(
+            unmodelled_global_crs(&conflict).is_empty(),
+            "{:?}",
+            unmodelled_global_crs(&conflict)
+        );
+        // …and the photo-aware doors share the gate (it answers before any
+        // sibling table is looked for, so the path need not exist).
+        let photo = std::path::Path::new("synthetic.arw");
+        assert_eq!(unsupported_corrections_for_photo(&conflict, photo), 0);
+        assert!(import_losses_for_photo(&conflict, photo).is_empty());
     }
 
     /// L03-4: the DEFAULT namespace declaration (bare `xmlns=`) bound to the
@@ -9789,6 +9887,58 @@ mod tests {
         assert!(
             unparsable_crs_numbers(fine).is_empty(),
             "a consistent crop discloses nothing"
+        );
+    }
+
+    /// `Left > Right` under a non-zero `CropAngle` is a legal Lightroom
+    /// arrangement (`P3-cropangle-model.md` §6.3;
+    /// `an_inverted_crop_arrangement_is_read_rather_than_discarded` covers
+    /// the decoder), and the reader imports it whole. The disclosure restated
+    /// the reader's ordering rule as `Left < Right && Top < Bottom`
+    /// unconditionally, so it called this crop "inconsistent" while the
+    /// recipe carried it — two faces of one document disagreeing.
+    ///
+    /// MUTATION THIS CATCHES: put the ordering predicate back in place of the
+    /// `read_crop` verdict and the rotated arrangement is disclosed again.
+    #[test]
+    fn a_rotated_left_over_right_crop_the_reader_accepts_is_not_disclosed() {
+        let frame = FrameAspect::from_size(9504.0, 6336.0);
+        let engine = Crop { left: 0.30, top: 0.10, right: 0.62, bottom: 0.90 };
+        let lr = engine_to_lr_crop(Some(&engine), -35.0, frame).expect("corners");
+        assert!(lr.left > lr.right, "the fixture must reach the inverted region: {lr:?}");
+        let angle = lr_num(lr.angle_deg);
+        let doc = in_frame(&lr_doc(""), 9504, 6336).replace(
+            "crs:Version=\"15.5.1\"",
+            &format!(
+                "crs:Version=\"15.5.1\"\n   crs:HasCrop=\"True\"\n   crs:CropLeft=\"{}\"\n   \
+                 crs:CropTop=\"{}\"\n   crs:CropRight=\"{}\"\n   crs:CropBottom=\"{}\"\n   \
+                 crs:CropAngle=\"{angle}\"",
+                lr_num(lr.left),
+                lr_num(lr.top),
+                lr_num(lr.right),
+                lr_num(lr.bottom),
+            ),
+        );
+        let r = xmp_to_recipe(&doc);
+        assert!(r.crop.is_some(), "premise: the reader imports the rotated arrangement");
+        assert!((r.straighten_deg + 35.0).abs() < 1e-4, "{}", r.straighten_deg);
+        assert!(
+            unparsable_crs_numbers(&doc).is_empty(),
+            "a crop the reader imported whole is not \"inconsistent\": {:?}",
+            unparsable_crs_numbers(&doc)
+        );
+        // …while the SAME corners at θ = 0 are the inverted rectangle they
+        // look like: refused by the reader, and disclosed here — the verdict
+        // follows the decoder, not the ordering.
+        let flat = doc.replace(
+            &format!("crs:CropAngle=\"{angle}\""),
+            "crs:CropAngle=\"0\"",
+        );
+        assert!(xmp_to_recipe(&flat).crop.is_none(), "premise: refused at θ = 0");
+        assert!(
+            unparsable_crs_numbers(&flat).iter().any(|k| k.starts_with("Crop")),
+            "{:?}",
+            unparsable_crs_numbers(&flat)
         );
     }
 
@@ -10071,9 +10221,14 @@ mod tests {
         };
         let xmp = recipe_to_xmp(&r);
         // Write it out so well-formedness can be validated by an XML parser
-        // (out/ is gitignored). Verification aid, not a behavioural assertion.
-        std::fs::create_dir_all("out").ok();
-        std::fs::write("out/_masks_test.xmp", &xmp).ok();
+        // while debugging — under the temp dir, never the working directory:
+        // leaving `out/_masks_test.xmp` behind on every `cargo test` was a
+        // side effect on the tree. Verification aid, not a behavioural
+        // assertion; removed again at the end.
+        let dir = std::env::temp_dir()
+            .join(format!("autoshade-masks-xml-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        std::fs::write(dir.join("_masks_test.xmp"), &xmp).ok();
         assert!(xmp.contains("<crs:MaskGroupBasedCorrections>"));
         assert!(xmp.contains(r#"crs:What="Mask/Gradient""#));
         assert!(xmp.contains(r#"crs:What="Mask/CircularGradient""#));
@@ -10088,6 +10243,7 @@ mod tests {
         assert!(xmp.contains(r#"crs:Feather="50""#));
         // unset masks ⇒ no mask block (v1-compatible)
         assert!(!recipe_to_xmp(&EditRecipe::default()).contains("MaskGroupBasedCorrections"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -11875,7 +12031,7 @@ mod tests {
     //
     // The fixtures below are the SIDECAR NUMBERS of the user's own twelve-frame
     // controlled Lightroom experiment, transcribed from
-    // `~/.claude/plans/r25-materials/lr-experiment/probe2/probe2-extract.txt`
+    // `lr-experiment/probe2/probe2-extract.txt` in the R25 materials ledger, outside the tree
     // and `.../lr-experiment/extract.txt`. No photograph and no export is in
     // the repository — the RENDERED measurements those exports produced are
     // quoted in the assertions, and the fixtures that reproduce them from the
@@ -12271,7 +12427,7 @@ mod tests {
     // ── R27: the crop rectangle is the SAME rotated-corner encoding ─────────
     //
     // The seven rows below are the user's own library, transcribed verbatim
-    // from `~/.claude/plans/r27-materials/p3-scratch/final_table.py:10-18`
+    // from `p3-scratch/final_table.py:10-18` in the R27 materials ledger, outside the tree
     // (the script `P3-cropangle-model.md` §8 lists as its reproduction). Each
     // is a self-consistent pair: the crop block and the pixels come out of the
     // same file, so a stale sidecar cannot contaminate it. NO photograph and
@@ -12391,8 +12547,10 @@ mod tests {
             };
             let back = engine_to_lr_crop(Some(&c), straighten_deg, frame).expect("a crop");
             // The clamp is the only lossy edge, and it moves an edge by at
-            // most its own overshoot — so that is the tolerance, and it is
-            // ZERO on the rows that needed no clamp.
+            // most its own overshoot — in units of the source height, which
+            // bounds every corner coordinate (Top/Bottom are fractions of
+            // that height, Left/Right of the wider width) — so that is the
+            // tolerance, and it is ZERO on the rows that needed no clamp.
             let tol = overshoot_frac + 1e-6;
             for (got, want, key) in [
                 (back.left, l, "Left"),
@@ -12526,6 +12684,53 @@ mod tests {
         let back = xmp_to_recipe(&recipe_to_xmp(&mine));
         assert_eq!(back.crop, mine.crop, "our own frameless round trip is lossless");
         assert!(crop_import_note(&recipe_to_xmp(&mine)).is_none());
+    }
+
+    /// The overshoot sentence counts PIXELS of the frame the straighten leaves
+    /// behind, on the axis the rectangle actually crossed. The decoder
+    /// measures the overshoot in units of the source height; the note used to
+    /// scale a per-axis fraction by the source's LONGER side, so a bottom-edge
+    /// overshoot on a 3:2 frame read 50 % too many pixels (and a width-axis
+    /// one was a fraction of the inscribed width scaled by the source width —
+    /// a different frame again).
+    ///
+    /// The fixture is built through the writer: an engine crop whose bottom
+    /// edge sits 10 % of the straightened height BELOW that frame, folded into
+    /// Lightroom corners that all lie inside the source, so the reader clamps
+    /// it back by exactly that much.
+    ///
+    /// MUTATION THIS CATCHES: `f.h` → `f.w` or `f.w.max(f.h)` in
+    /// `crop_import_note` (264 px), or the bare per-axis maximum back in
+    /// `lr_to_engine_crop` (200 px) — the sentence says 176.
+    #[test]
+    fn the_crop_overshoot_note_counts_pixels_of_the_straightened_frame() {
+        let (w, h, straighten) = (3000.0, 2000.0, 5.0);
+        let frame = FrameAspect::from_size(w, h);
+        let engine = Crop { left: 0.2, top: 0.2, right: 0.8, bottom: 1.1 };
+        let lr = engine_to_lr_crop(Some(&engine), straighten, frame).expect("corners");
+        for v in [lr.left, lr.top, lr.right, lr.bottom] {
+            assert!((0.0..=1.0).contains(&v), "premise: corners inside the source: {lr:?}");
+        }
+        let doc = in_frame(&lr_doc(""), 3000, 2000).replace(
+            "crs:Version=\"15.5.1\"",
+            &format!(
+                "crs:Version=\"15.5.1\"\n   crs:HasCrop=\"True\"\n   crs:CropLeft=\"{}\"\n   \
+                 crs:CropTop=\"{}\"\n   crs:CropRight=\"{}\"\n   crs:CropBottom=\"{}\"\n   \
+                 crs:CropAngle=\"{}\"",
+                lr_num(lr.left),
+                lr_num(lr.top),
+                lr_num(lr.right),
+                lr_num(lr.bottom),
+                lr_num(lr.angle_deg),
+            ),
+        );
+        let c = xmp_to_recipe(&doc).crop.expect("the crop imports, clamped");
+        assert!((c.bottom - 1.0).abs() < 1e-6, "premise: the bottom edge was clamped: {c:?}");
+        // 0.1 of the straightened height, in pixels of the same scale.
+        let (_, hi) = inscribed_norm(w / h, straighten);
+        let want = format!("{:.0} px", 0.1 * hi * h);
+        let note = crop_import_note(&doc).expect("an overshoot is disclosed");
+        assert!(note.contains(&want), "want {want:?} in {note:?}");
     }
 
     /// R27 T3, the second half of `P5-cropped-mask-frame.md` §8's parser
@@ -13348,7 +13553,7 @@ mod tests {
 
     /// The REAL probe sidecars, when they are on the machine. Twelve controlled
     /// Lightroom exports live at
-    /// `~/.claude/plans/r25-materials/lr-experiment/`; point
+    /// `lr-experiment/` in the R25 materials ledger, outside the tree; point
     /// `AUTOSHADE_LR_PROBE_FIXTURES` at that directory and this walks every
     /// `.xmp` in it (and its `probe*/` subdirectories), asserting that every
     /// radial imports and round-trips its corners byte-for-byte.

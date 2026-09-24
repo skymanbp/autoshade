@@ -48,18 +48,6 @@ def tukey_lambda_var(lam):
     return (2.0 / lam ** 2) * (1.0 / (1.0 + 2.0 * lam) - math.exp(2 * g(lam + 1.0) - g(2.0 * lam + 2.0)))
 
 
-def tukey_lambda_mad_var(lam):
-    """(MAD / 0.6745)^2 of the standard Tukey-lambda — what the sidecar's robust
-    white-noise estimator reports for it. Quantile function Q(p) =
-    (p^l - (1-p)^l) / l is symmetric, so MAD = Q(0.75)."""
-    lam = float(lam)
-    if abs(lam) < 1e-4:
-        q = math.log(0.75 / 0.25)
-    else:
-        q = (0.75 ** lam - 0.25 ** lam) / lam
-    return (q / 0.6745) ** 2
-
-
 def sample_params(n, gen, device):
     """Per-sample sensor parameters (each a tensor of length n)."""
     p = {}

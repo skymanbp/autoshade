@@ -58,16 +58,6 @@ fn style_age_hours(age: Option<std::time::Duration>) -> String {
 }
 
 impl AutoShadeApp {
-    /// The AI area — one first-level section, three sub-areas.
-    ///
-    /// The editable gate is REBUILT here (L15-2). While a decode is in flight
-    /// (`open_in_flight`) these controls would read and write the STASHED photo
-    /// A while B lands and replaces the whole recipe — silent input loss. The
-    /// analysis half used to inherit `develop_panel`'s `add_enabled_ui`
-    /// wrapper; moving it out of that closure without restoring the same gate
-    /// here would have re-opened exactly that hole. `busy` alone must NOT gate:
-    /// a 600 s analyze keeps the panel live (each verb has its own `ready`
-    /// gate) — only the open transition freezes it.
     /// Does the AI area carry state worth a ● on its collapsed header?
     ///
     /// Written next to the panel it describes, and enumerating that panel's OWN
@@ -88,9 +78,20 @@ impl AutoShadeApp {
         self.verdict.is_some() || !self.guidance.is_empty()
     }
 
+    /// The AI area — one first-level section, three sub-areas.
+    ///
+    /// The editable gate is REBUILT here (L15-2). While a decode is in flight
+    /// (`open_in_flight`) these controls would read and write the STASHED photo
+    /// A while B lands and replaces the whole recipe — silent input loss. The
+    /// analysis half used to inherit `develop_panel`'s `add_enabled_ui`
+    /// wrapper; moving it out of that closure without restoring the same gate
+    /// here would have re-opened exactly that hole. `busy` alone must NOT gate:
+    /// a 600 s analyze keeps the panel live (each verb has its own `ready`
+    /// gate) — only the open transition freezes it.
     pub(crate) fn ai_panel(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang; // Copy — never borrows self, safe inside egui closures.
-        // Open whenever there's a verdict to show; the inputs are always present.
+        // The header's ● (`section_title`): a verdict or a Direction is this
+        // photo's AI state. The section itself always opens (`default_open`).
         let ai_active = self.ai_section_active();
         let editable = !self.open_in_flight;
         // The gate wraps the WHOLE area, header included — exactly how

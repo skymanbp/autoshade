@@ -116,9 +116,13 @@ pub struct ReimagineReport {
 }
 
 /// The generation-side fidelity reading: decode both PNGs and measure the
-/// reverse-fit's structural-divergence statistic between them. The frames are
-/// pixel-aligned by construction — `canonical_generated_png` already refused
-/// any response whose dimensions differ from the input's request.
+/// reverse-fit's structural-divergence statistic between them. The two frames
+/// need not share dimensions — `canonical_generated_png` admits a same-aspect
+/// endpoint cap below the requested size (`size_is_an_endpoint_cap`) — and
+/// they align because `fit::divergence_raster` resamples BOTH onto its fixed
+/// 384×256 grid. What makes that alignment meaningful is the aspect, which
+/// that door does refuse to let differ: a different aspect, or a LARGER
+/// frame, is a different picture.
 fn generation_divergence(sent_png: &[u8], generated_png: &[u8]) -> Result<crate::fit::Divergence> {
     let sent = image::load_from_memory(sent_png)
         .context("decode the sent input for the fidelity reading")?;
@@ -820,12 +824,21 @@ fn flex_size(w: u32, h: u32, max_px: u32) -> Option<String> {
     let scale = (MAX_EDGE / ow.max(oh)).min(1.0);
     ow *= scale;
     oh *= scale;
-    // Round DOWN to ×16 — keeps every ≤ constraint satisfied.
+    // Round DOWN to ×16 — keeps every ≤ constraint satisfied except the
+    // ratio: floored on its own, each edge loses up to 15 px, and at 3:1 the
+    // short edge can lose proportionally more (3000×1000 floors to 2992×992,
+    // which is 3.016:1, and the API answers such a size with a 400 after a
+    // wasted round trip). So the long edge is capped at three times the
+    // floored short edge afterwards — a multiple of 16 whenever the short
+    // edge is one — which touches only the sizes that broke the bound and
+    // can only shrink, so the edge cap and the pixel budget still hold.
     let ow = ((ow / 16.0).floor() * 16.0) as u32;
     let oh = ((oh / 16.0).floor() * 16.0) as u32;
-    if ow == 0 || oh == 0 || (ow as f64) * (oh as f64) < API_MIN_PX {
+    let (long, short) = (ow.max(oh).min(3 * ow.min(oh)), ow.min(oh));
+    if short == 0 || long == 0 || (long as f64) * (short as f64) < API_MIN_PX {
         return None;
     }
+    let (ow, oh) = if ow >= oh { (long, short) } else { (short, long) };
     Some(format!("{ow}x{oh}"))
 }
 
@@ -1508,8 +1521,6 @@ fn extract_b64(value: &serde_json::Value) -> Option<&str> {
         .and_then(|s| s.as_str())
 }
 
-/// Drain an image SSE stream: log partial-image events (the liveness signal),
-/// fail loudly on an `error` event, and return the final `*.completed` JSON
 /// Does a STREAMED image failure (`read_sse_image`'s "image stream error:"
 /// message, whose payload is the SSE error event verbatim) blame `param` as a
 /// structured validation refusal? Attribution reuses the one shared rule
@@ -1524,10 +1535,6 @@ fn streamed_refusal_blames(top: &str, param: &str) -> bool {
         .is_some_and(|payload| crate::advisor::error_blames_param(payload, param))
 }
 
-/// payload. Matches on the event-type SUFFIX so both the `image_edit.*` and
-/// `image_generation.*` families parse. Framing (multi-line `data:` payloads,
-/// event boundaries, EOF flush, `[DONE]`) lives in the shared
-/// `advisor::for_each_sse_json` — one SSE implementation for every stream.
 /// How far into the body the lead-byte sniff may scan before giving up and
 /// letting the SSE reader have it. An event stream legitimately opens with a
 /// blank line or a `:` comment; nothing legitimate opens with kilobytes of
@@ -1611,6 +1618,12 @@ fn sniff_lead_byte<R: std::io::Read>(
     Ok((lead, std::io::Cursor::new(seen).chain(r)))
 }
 
+/// Drain an image SSE stream: log partial-image events (the liveness signal),
+/// fail loudly on an `error` event, and return the final `*.completed` JSON
+/// payload. Matches on the event-type SUFFIX so both the `image_edit.*` and
+/// `image_generation.*` families parse. Framing (multi-line `data:` payloads,
+/// event boundaries, EOF flush, `[DONE]`) lives in the shared
+/// `advisor::for_each_sse_json` — one SSE implementation for every stream.
 fn read_sse_image(
     r: impl std::io::Read,
     progress_budget: Option<std::time::Duration>,
@@ -1953,6 +1966,51 @@ mod tests {
         // Below the API minimum → no flexible size (enum fallback).
         assert_eq!(flex_size(6000, 4000, 100_000), None);
         assert_eq!(flex_size(0, 4000, u32::MAX), None);
+    }
+
+    /// The 3:1 bound holds for EVERY aspect and budget, exactly. Flooring the
+    /// two edges to ×16 independently let a source at or beyond 3:1 come out
+    /// over it — 3000×1000 became 2992×992 = 3.016:1 — and the API answers
+    /// such a size with a 400 after a wasted round trip.
+    ///
+    /// MUTATION: drop the `.min(3 * ow.min(oh))` cap on the long edge in
+    /// `flex_size` and the 3 MP budget at 3:1 fails by name (2992×992).
+    #[test]
+    fn flex_size_never_exceeds_the_ratio_bound_for_any_aspect_or_budget() {
+        // The shipped defect, stated first so the sweep has a shape to differ
+        // from: 3:1 at a 3 MP budget floors to 992 short, and 3 × 992 = 2976.
+        assert_eq!(flex_size(3000, 1000, 3_000_000).as_deref(), Some("2976x992"));
+        assert_eq!(flex_size(1000, 3000, 3_000_000).as_deref(), Some("992x2976"));
+        // Aspects from 1:16 to 16:1 in odd strides (so the clamp and both
+        // orientations are crossed), budgets from below the API minimum to
+        // past its maximum in a prime stride (so the ×16 floors land on every
+        // phase).
+        let mut produced = 0usize;
+        for a in (100u32..=400).step_by(37) {
+            for b in (100u32..=1600).step_by(53) {
+                for budget in (600_000u32..=9_000_000).step_by(97_003) {
+                    for (w, h) in [(b, a), (a, b)] {
+                        let Some(s) = flex_size(w, h, budget) else { continue };
+                        produced += 1;
+                        let (ow, oh) = parse_size(&s);
+                        let (lo, hi) = (ow.min(oh) as u64, ow.max(oh) as u64);
+                        assert!(hi <= 3 * lo, "{w}x{h} @ {budget}: {s} exceeds 3:1");
+                        assert_eq!(ow % 16, 0, "{s}: width ×16");
+                        assert_eq!(oh % 16, 0, "{s}: height ×16");
+                        assert!(hi <= 3840, "{s}: long edge");
+                        assert!(lo * hi >= 655_360, "{s}: area ≥ API min");
+                        assert!(lo * hi <= (budget as u64).min(8_294_400), "{s}: area ≤ budget");
+                        // Rounding may square a near-square source, never
+                        // turn a landscape into a portrait or back.
+                        assert!(
+                            if w >= h { ow >= oh } else { ow <= oh },
+                            "{w}x{h}: {s} flipped the orientation"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(produced > 1000, "sweep non-vacuity: {produced} sizes checked");
     }
 
     /// v1.2.2: the size plan follows the frame that is SENT. A body set to a

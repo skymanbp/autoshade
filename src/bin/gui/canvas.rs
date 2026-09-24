@@ -3,19 +3,6 @@
 use super::*;
 
 impl AutoShadeApp {
-    /// The edge a BAKE renders at: the canvas's own resolution, not the
-    /// global preference.
-    ///
-    /// They part company whenever the canvas is a baked raster the preference
-    /// could not re-decode — a background retouched / Generated variant keeps
-    /// its own resolution because switching variants cannot re-decode a
-    /// master, and an undo can restore a superseded one. Baking at the
-    /// preference there installed a NEW-edge raster under an OLD-edge canvas
-    /// and the frame jumped resolution mid-retouch: the same disagreement the
-    /// refused resolution switch exists to prevent, one door along.
-    /// `preview_edge` remains the DECODE edge (`open_path`) — a source-based
-    /// canvas is developed from a source decoded AT it, so those two agree by
-    /// construction.
     /// Glide the zoom one step toward its target — run BEFORE any layout
     /// reads it, so the canvas, the % readout and the pan clamp all see one
     /// value. Extracted as the testable seam (L16-10): tests used to drive
@@ -30,6 +17,19 @@ impl AutoShadeApp {
         }
     }
 
+    /// The edge a BAKE renders at: the canvas's own resolution, not the
+    /// global preference.
+    ///
+    /// They part company whenever the canvas is a baked raster the preference
+    /// could not re-decode — a background retouched / Generated variant keeps
+    /// its own resolution because switching variants cannot re-decode a
+    /// master, and an undo can restore a superseded one. Baking at the
+    /// preference there installed a NEW-edge raster under an OLD-edge canvas
+    /// and the frame jumped resolution mid-retouch: the same disagreement the
+    /// refused resolution switch exists to prevent, one door along.
+    /// `preview_edge` remains the DECODE edge (`open_path`) — a source-based
+    /// canvas is developed from a source decoded AT it, so those two agree by
+    /// construction.
     pub(crate) fn canvas_edge(&self) -> u32 {
         self.base_preview
             .as_ref()
@@ -183,6 +183,34 @@ impl AutoShadeApp {
         }
     }
 
+    /// The pixel reference a Range Mask is judged against: this recipe cut
+    /// down to the masks BEFORE mask `i`, with every geometry field stripped.
+    ///
+    /// The PREFIX, not masks-cleared: the engine evaluates a range on the
+    /// pixel as it stands when THIS mask runs — masks stack sequentially, so
+    /// a later mask's range sees earlier masks' output (`render.rs`
+    /// `apply_masks`); a cleared reference judged mask 2's range on pixels
+    /// mask 0/1 had already moved (CX5-6). Geometry runs after develop, so
+    /// it is no part of the reference, and `develop_preview_framed` has no
+    /// geometry stage — left in, the fields only broke the cache key.
+    ///
+    /// ONE builder for the coverage overlay (`refresh_mask_overlay`) and the
+    /// range eyedropper (`handle_range_pick`), which SHARE the one-slot
+    /// `overlay_ref` cache compared by recipe equality. The two used to be
+    /// hand-copied, and the copy that forgot the manual CA pair missed the
+    /// cache on every click under a non-zero Red/cyan or Blue/yellow, paying
+    /// a full preview develop on the UI thread for a 5×5 read.
+    pub(crate) fn range_reference_recipe(&self, i: usize) -> EditRecipe {
+        let mut pre = self.recipe.clone();
+        pre.masks.truncate(i);
+        pre.straighten_deg = 0.0;
+        pre.lens_distortion = 0.0;
+        pre.ca_r = 0.0;
+        pre.ca_b = 0.0;
+        pre.crop = None;
+        pre
+    }
+
     /// (Re)build the translucent red coverage layer for the active mask. A
     /// coverage key prevents local effect sliders from rebuilding this full-
     /// frame raster: Exposure/Temp/Saturation change WHAT happens inside the
@@ -213,20 +241,11 @@ impl AutoShadeApp {
             return;
         };
         let mask = self.recipe.masks[i].clone();
-        let mut pre = self.recipe.clone();
-        // The PREFIX (masks before this one), not masks-cleared: the engine
-        // evaluates a Range Mask on the pixel as it stands when THIS mask
-        // runs — masks stack sequentially, so a later mask's range sees
-        // earlier masks' output (render.rs apply_masks). A cleared reference
-        // judged mask 2's range on pixels mask 0/1 had already moved (CX5-6).
-        pre.masks.truncate(i);
-        // Geometry runs after develop, so it is not part of a Range Mask's
-        // masks-cleared pixel reference. Keep it separately in OverlayKey.
-        pre.straighten_deg = 0.0;
-        pre.lens_distortion = 0.0;
-        pre.ca_r = 0.0;
-        pre.ca_b = 0.0;
-        pre.crop = None;
+        // The PREFIX reference with its geometry stripped — ONE builder,
+        // shared with the range eyedropper (`range_reference_recipe`, which
+        // carries the reasoning). The geometry the coverage WARP still
+        // depends on is keyed separately, in OverlayKey below.
+        let pre = self.range_reference_recipe(i);
         let lp = &self.recipe.lens_profile;
         let key = OverlayKey {
             base: Arc::as_ptr(&base) as usize,
@@ -840,8 +859,10 @@ impl AutoShadeApp {
     /// inverse solver (`render::solve_wb_from_neutral` — the same forward
     /// model the render applies, anchored at this photo's stamped as-shot
     /// Kelvin, or the legacy 5500 K) turns it into Temp + Tint.
-    /// Samples a 5×5 mean of the SOURCE preview: WB runs before develop, so
-    /// the solve must see pre-develop pixels, not the current edit.
+    /// Samples a 5×5 mean of the BASE plate (`base_preview` — the active
+    /// card's own pixel source: the source neutral, or a baked master): WB
+    /// runs before develop, so the solve must see pre-develop pixels, not
+    /// the current edit.
     pub(crate) fn handle_wb_pick(&mut self, ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         if !resp.clicked() {
@@ -873,10 +894,13 @@ impl AutoShadeApp {
     }
 
     /// Colour-range sample: click keys the pending mask's Color range to that
-    /// spot. Samples a 5×5 mean of a PRE-MASK develop (this recipe with masks
-    /// stripped) — the exact pixel state `apply_masks` evaluates range weights
-    /// against, so the picked colour is what the engine will match. One extra
-    /// preview-sized develop per click ≈ the cost of one slider tick.
+    /// spot. Samples a 5×5 mean of the PREFIX develop (this recipe cut down
+    /// to the masks before this one, geometry stripped —
+    /// `range_reference_recipe`): the exact pixel state `apply_masks`
+    /// evaluates range weights against, so the picked colour is what the
+    /// engine will match. The reference is the coverage overlay's own,
+    /// shared through `overlay_ref`: with the overlay on, a click is a 5×5
+    /// read; a miss pays one preview-sized develop ≈ one slider tick.
     pub(crate) fn handle_range_pick(&mut self, ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         if !resp.clicked() {
@@ -895,18 +919,14 @@ impl AutoShadeApp {
             let Some(base) = self.base_preview.clone() else { return };
             // The PREFIX reference (masks before this one — the engine
             // evaluates a range on the pixel as it stands when THIS mask
-            // runs), built EXACTLY like the coverage overlay's (geometry
-            // fields stripped — develop_preview has no geometry stage,
-            // they'd only break the cache key) and SHARING its cache: with
-            // the overlay on, a click costs a 5×5 read instead of a full
-            // preview develop on the UI thread — and a miss here pre-warms
-            // the overlay's next rebuild. A masks-CLEARED reference judged
-            // mask 2's range on pixels mask 0/1 had already moved (CX5-6).
-            let mut pre = self.recipe.clone();
-            pre.masks.truncate(mi);
-            pre.straighten_deg = 0.0;
-            pre.lens_distortion = 0.0;
-            pre.crop = None;
+            // runs), built by the coverage overlay's OWN builder
+            // (`range_reference_recipe` — one door, so the two cannot drift
+            // again) and SHARING its cache: with the overlay on, a click
+            // costs a 5×5 read instead of a full preview develop on the UI
+            // thread — and a miss here pre-warms the overlay's next rebuild.
+            // A masks-CLEARED reference judged mask 2's range on pixels mask
+            // 0/1 had already moved (CX5-6).
+            let pre = self.range_reference_recipe(mi);
             if !matches!(&self.overlay_ref, Some((r, _)) if *r == pre) {
                 // The explicit no-downstream frame and film edge for the same
                 // reasons as the overlay build above, and they must MATCH it —
@@ -1023,20 +1043,6 @@ impl AutoShadeApp {
         );
     }
 
-    /// Box-select on the After image: drag a rectangle to target a local edit;
-    /// the normalized box is folded into the AI direction so it masks exactly
-    /// there (mirrors the web region→mask prompt). A plain click — or a tiny
-    /// drag — clears the selection. Coordinates are full-frame normalized (the
-    /// AI mask space), mapped through the view transform.
-    /// On-image editing of the SELECTED mask's geometry (the LR gesture):
-    /// drag an end/edge knob to reshape, the centre knob to move the whole
-    /// mask — no more redraw-from-scratch via 重画. Geometry lives in the
-    /// ORIGINAL frame, so every write maps the pointer back through
-    /// view_norm_to_orig — the same chain placement uses. Returns true while
-    /// it owns the pointer (hovering a knob or mid-drag) so box-select
-    /// doesn't also react; a box-select drag already in flight keeps
-    /// priority (else its live rectangle would freeze mid-air whenever the
-    /// pointer crossed a knob).
     /// The geometry the canvas tools currently target: the selected mask's
     /// selected COMPONENT when one is selected (and still in bounds), else
     /// the selected mask's base geometry.
@@ -1058,6 +1064,15 @@ impl AutoShadeApp {
         }
     }
 
+    /// On-image editing of the SELECTED mask's geometry (the LR gesture):
+    /// drag an end/edge knob to reshape, the centre knob to move the whole
+    /// mask — no more redraw-from-scratch via 重画. Geometry lives in the
+    /// ORIGINAL frame, so every write maps the pointer back through
+    /// view_norm_to_orig — the same chain placement uses. Returns true while
+    /// it owns the pointer (hovering a knob or mid-drag) so box-select
+    /// doesn't also react; a box-select drag already in flight keeps
+    /// priority (else its live rectangle would freeze mid-air whenever the
+    /// pointer crossed a knob).
     pub(crate) fn handle_mask_edit(&mut self, ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) -> bool {
         if self.region_drag.is_some() {
             return false;
@@ -1193,6 +1208,11 @@ impl AutoShadeApp {
         self.mask_drag.is_some() || hover_h.is_some()
     }
 
+    /// Box-select on the After image: drag a rectangle to target a local edit;
+    /// the normalized box is folded into the AI direction so it masks exactly
+    /// there (mirrors the web region→mask prompt). A plain click — or a tiny
+    /// drag — clears the selection. Coordinates are full-frame normalized (the
+    /// AI mask space), mapped through the view transform.
     pub(crate) fn handle_region_select(&mut self, ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) {
         if resp.drag_started() {
             if let Some(p) = resp.interact_pointer_pos() {

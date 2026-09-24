@@ -13,10 +13,6 @@ TEXT_MARGIN = 2.0        # inflation of a text run, per side, in px
 CROSS_FACE = 0.025       # extra horizontal allowance, as a share of the run
 
 
-def _inflate(b, m):
-    return (b[0] - m, b[1] - m, b[2] + m, b[3] + m)
-
-
 def pad_text(b):
     """A text run's box as the checker sees it: the fixed margin on all four
     sides, plus CROSS_FACE of its own width left and right for the faces this

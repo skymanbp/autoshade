@@ -792,7 +792,20 @@ impl ColourField {
             && self.x > 0
             && self.y > 0
             && self.b > 0
-            && self.grid.len() == self.x * self.y * self.b
+            && self.grid_fits_shape()
+    }
+
+    /// Whether `grid` holds exactly the `x * y * b` vertices the shape
+    /// declares — the one invariant every vertex read in the engine rests on:
+    /// [`crate::render::apply_colour_field`] and the frame turns index `grid`
+    /// by (x, y, b) with no bounds check of their own once [`renderable`]
+    /// has said yes. The product is CHECKED, not wrapped: a posted recipe
+    /// whose `x * y * b` overflowed to exactly 0 matched an empty grid, and
+    /// the render's first vertex read panicked.
+    ///
+    /// [`renderable`]: Self::renderable
+    pub fn grid_fits_shape(&self) -> bool {
+        self.x.checked_mul(self.y).and_then(|xy| xy.checked_mul(self.b)) == Some(self.grid.len())
     }
 
     /// Round every stored parameter to 1e-4, so a solved field's JSON is
@@ -2809,7 +2822,7 @@ pub struct BrushStroke {
     /// be quoted as agreeing better than that). `render::brush_dabs` runs this
     /// state machine at develop time and `render::brush_raster` stamps it;
     /// neither writes anything back here. (docs/V2_PLAN.md §7 item 13;
-    /// `~/.claude/plans/r29-materials/b6-analysis.md`.)
+    /// `b6-analysis.md` in the R29 materials ledger, outside the tree.)
     ///
     /// ~~plus Lightroom rasterising the mask in its PRE-lens-correction
     /// frame~~ — that half is CLOSED (R29 Batch-3). Lightroom does rasterise
@@ -3306,9 +3319,6 @@ impl std::ops::Deref for ValidatedRecipe {
 }
 
 impl EditRecipe {
-    /// Clamp every slider into its documented legal range. The AI is
-    /// instructed to stay in range, but we never trust the input blindly —
-    /// an out-of-range value would otherwise corrupt the render downstream.
     /// The ceiling on the persisted rationale string.
     ///
     /// An abuse bound, not a disclosure budget. The layered zoned fit's typed
@@ -3339,6 +3349,12 @@ impl EditRecipe {
     /// abuse bound: an honest run writes a few tens of kilobytes.
     pub(crate) const MAX_RATIONALE: usize = 512 * 1024;
 
+    /// Clamp every slider into its documented legal range. The AI is
+    /// instructed to stay in range, but we never trust the input blindly —
+    /// an out-of-range value would otherwise corrupt the render downstream.
+    /// The same pass bounds every vector and string a crafted recipe could
+    /// inflate, drops the components it cannot make sense of, and reports
+    /// what it cut in the returned [`ClampSummary`].
     pub fn clamp(&mut self) -> ClampSummary {
         let mut summary = ClampSummary::default();
         // f32::clamp passes a NaN receiver STRAIGHT THROUGH — a non-finite
@@ -3588,6 +3604,45 @@ impl EditRecipe {
         }
         for v in self.passthrough.values_mut() {
             summary.truncated_string_bytes += cap(v, MAX_PASSTHROUGH_VALUE);
+        }
+        // The camera profile and the creative Look (v1.5.0 F7) are strings and
+        // curves from the same foreign document. `crs:CameraProfile` had the
+        // pass-through cap above until it became an owned key — a carrier
+        // bounded in one home and trusted in the other is the hole
+        // `cap_geometry` exists to keep shut — so it keeps the same ceiling,
+        // and so do the Look's names (one of them a 32-hex table reference)
+        // and its list of unrendered keys. The Look's four curves are
+        // `render::curve_lut`'s input exactly like the photographer's own,
+        // cloned and sorted per render, so they take the curves' cap.
+        summary.truncated_string_bytes += cap(&mut self.camera_profile, MAX_PASSTHROUGH_VALUE);
+        if let Some(look) = &mut self.look {
+            for s in [&mut look.name, &mut look.base_profile, &mut look.table] {
+                summary.truncated_string_bytes += cap(s, MAX_PASSTHROUGH_VALUE);
+            }
+            while look.unrendered.len() > MAX_PASSTHROUGH {
+                if let Some(k) = look.unrendered.pop() {
+                    summary.truncated_string_bytes += k.len();
+                }
+            }
+            for k in look.unrendered.iter_mut() {
+                summary.truncated_string_bytes += cap(k, MAX_PASSTHROUGH_VALUE);
+            }
+            for curve in [
+                &mut look.tone_curve,
+                &mut look.red_curve,
+                &mut look.green_curve,
+                &mut look.blue_curve,
+            ] {
+                summary.truncated_curve_points += curve.len().saturating_sub(MAX_CURVE_POINTS);
+                curve.truncate(MAX_CURVE_POINTS);
+            }
+            // …and its baked half is SLIDERS, added onto the photographer's
+            // own by `with_baked`: `crs:Amount` is 0..=1 and the three moves
+            // are Lightroom's ±100, so they take the globals' bands.
+            look.amount = c(look.amount, 0.0, 1.0);
+            look.clarity = c(look.clarity, -100.0, 100.0);
+            look.highlights = c(look.highlights, -100.0, 100.0);
+            look.shadows = c(look.shadows, -100.0, 100.0);
         }
         summary.dropped_masks = self.masks.len().saturating_sub(MAX_MASKS);
         self.masks.truncate(MAX_MASKS);
@@ -3842,6 +3897,22 @@ impl EditRecipe {
                 if cr.right - cr.left < 1e-3 || cr.bottom - cr.top < 1e-3 {
                     self.crop = None;
                 }
+            }
+        }
+        // The colour field is a shape and the vertices it declares, and the
+        // render trusts the shape: once `renderable` agrees the grid holds
+        // `x·y·b` vertices, `apply_colour_field` indexes it by (x, y, b)
+        // without a bounds check. A grid that disagrees with its own shape is
+        // therefore not a field — the render refuses it already, so carrying
+        // it on is dead weight in recipe.json and the sidecar payload — and
+        // a non-finite vertex would ride NaN into every pixel through the
+        // same clamp-passes-NaN rule the sliders above guard. Both drop the
+        // field whole, the crop's policy for a geometry with no sensible
+        // neutral; the amount is the slider it is.
+        if let Some(f) = &mut self.colour_field {
+            f.amount = c(f.amount, 0.0, 1.0);
+            if !f.grid_fits_shape() || f.grid.iter().flatten().any(|v| !v.is_finite()) {
+                self.colour_field = None;
             }
         }
         // Mask GEOMETRY first: a non-finite coordinate (hand-edited or
@@ -5292,6 +5363,136 @@ mod tests {
         ] {
             assert!(!broken.renderable(), "{broken:?} must not render");
         }
+    }
+
+    /// F1 (2026-09-24 audit). `renderable` multiplied `x * y * b` unchecked,
+    /// so a posted recipe whose shape overflowed to exactly 0 matched an
+    /// EMPTY grid, and `render::apply_colour_field`'s first vertex read
+    /// indexed it — a panic reachable from `serve::api_develop`. `clamp`
+    /// never looked at the field at all: neither its shape, nor its
+    /// vertices' finiteness, nor its amount.
+    #[test]
+    fn a_colour_field_that_lies_about_its_shape_neither_renders_nor_survives_clamp() {
+        // 2^(bits-1) × 2 wraps to exactly 0 at every usize width.
+        let wrapped = ColourField {
+            x: usize::MAX / 2 + 1,
+            y: 2,
+            b: 1,
+            grid: Vec::new(),
+            amount: 1.0,
+            enabled: true,
+        };
+        assert!(!wrapped.grid_fits_shape(), "an overflowing shape fits no grid");
+        assert!(!wrapped.renderable(), "…so it is not renderable");
+        let mut px = vec![[0.5f32; 3]; 4];
+        crate::render::apply_colour_field(&mut px, 2, 2, Some(&wrapped));
+        assert!(px.iter().all(|p| *p == [0.5; 3]), "the render leaves the frame alone");
+
+        let sound = ColourField {
+            x: 2,
+            y: 2,
+            b: 2,
+            grid: vec![[0.1, 0.0, 0.05, -0.02, 0.0]; 8],
+            amount: 0.9,
+            enabled: true,
+        };
+        let mut r = EditRecipe { colour_field: Some(sound.clone()), ..Default::default() };
+        assert_eq!(r.clamp(), ClampSummary::default(), "a sound field costs nothing");
+        assert_eq!(r.colour_field.as_ref(), Some(&sound), "…and rides through untouched");
+        // A switched-off or parked field is still a field: shape, not switches.
+        for parked in [
+            ColourField { enabled: false, ..sound.clone() },
+            ColourField { amount: 0.0, ..sound.clone() },
+        ] {
+            let mut r = EditRecipe { colour_field: Some(parked.clone()), ..Default::default() };
+            r.clamp();
+            assert_eq!(r.colour_field.as_ref(), Some(&parked));
+        }
+        let mut poisoned = sound.grid.clone();
+        poisoned[3][2] = f32::NAN;
+        for broken in [
+            wrapped,
+            ColourField { grid: vec![[0.0; 5]; 7], ..sound.clone() },
+            ColourField { x: 0, ..sound.clone() },
+            ColourField { grid: poisoned, ..sound.clone() },
+        ] {
+            let mut r = EditRecipe { colour_field: Some(broken.clone()), ..Default::default() };
+            r.clamp();
+            assert!(r.colour_field.is_none(), "{broken:?} must not survive clamp");
+        }
+        for (amount, want) in [(f32::NAN, 0.0), (7.0, 1.0), (-2.0, 0.0), (0.4, 0.4)] {
+            let mut r = EditRecipe {
+                colour_field: Some(ColourField { amount, ..sound.clone() }),
+                ..Default::default()
+            };
+            r.clamp();
+            assert_eq!(r.colour_field.as_ref().map(|f| f.amount), Some(want), "amount {amount}");
+        }
+    }
+
+    /// F2 (2026-09-24 audit). The camera profile and the creative Look came
+    /// in as owned keys (v1.5.0) and skipped `clamp`: the profile NAME lost
+    /// the 512-byte bound it had while it rode through `passthrough`, the
+    /// Look's four curves escaped the cap every other curve has, and its
+    /// baked sliders were added onto the photographer's own unclamped.
+    #[test]
+    fn clamp_bounds_the_camera_profile_and_the_creative_look_like_everything_else() {
+        let long = "p".repeat(10_000);
+        let curve = |n: usize| -> Vec<CurvePoint> {
+            (0..n).map(|i| CurvePoint { input: (i % 256) as u8, output: 0 }).collect()
+        };
+        let mut r = EditRecipe {
+            camera_profile: long.clone(),
+            look: Some(CreativeLook {
+                name: long.clone(),
+                base_profile: long.clone(),
+                table: long.clone(),
+                amount: 4.0,
+                clarity: f32::NAN,
+                highlights: -1e30,
+                shadows: 1e30,
+                tone_curve: curve(5000),
+                red_curve: curve(300),
+                unrendered: (0..200).map(|i| format!("{long}{i}")).collect(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let summary = r.clamp();
+        assert!(r.camera_profile.len() <= 512, "{}", r.camera_profile.len());
+        let look = r.look.as_ref().expect("a bounded Look is still a Look");
+        assert!(look.name.len() <= 512 && look.base_profile.len() <= 512 && look.table.len() <= 512);
+        assert!(look.unrendered.len() <= 64, "{}", look.unrendered.len());
+        assert!(look.unrendered.iter().all(|k| k.len() <= 512));
+        assert_eq!((look.tone_curve.len(), look.red_curve.len()), (256, 256));
+        assert_eq!(
+            (look.amount, look.clarity, look.highlights, look.shadows),
+            (1.0, 0.0, -100.0, 100.0)
+        );
+        assert_eq!(summary.truncated_curve_points, (5000 - 256) + (300 - 256));
+        assert!(summary.truncated_string_bytes > 0);
+
+        // …and a Look as Lightroom writes one rides through untouched.
+        let adobe_color = CreativeLook {
+            name: "Adobe Color".to_string(),
+            amount: 1.0,
+            base_profile: "Adobe Standard".to_string(),
+            table: "0123456789abcdef0123456789abcdef".to_string(),
+            tone_curve: vec![
+                CurvePoint { input: 0, output: 0 },
+                CurvePoint { input: 64, output: 60 },
+                CurvePoint { input: 255, output: 255 },
+            ],
+            ..Default::default()
+        };
+        let mut r = EditRecipe {
+            camera_profile: "Adobe Standard".to_string(),
+            look: Some(adobe_color.clone()),
+            ..Default::default()
+        };
+        assert_eq!(r.clamp(), ClampSummary::default());
+        assert_eq!(r.look.as_ref(), Some(&adobe_color));
+        assert_eq!(r.camera_profile, "Adobe Standard");
     }
 
     #[test]

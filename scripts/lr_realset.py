@@ -52,7 +52,6 @@ import numpy as np
 import rawpy
 import tifffile
 
-REPO_PY = pathlib.Path(__file__).resolve().parents[0]
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "python"))
 import denoise_raw as dr  # noqa: E402  why: the sidecar directory is only importable after the sys.path insert above
 from _device import pick_device  # noqa: E402  why: same — lives beside denoise_raw.py
@@ -214,7 +213,6 @@ def main():
             desc = raw.color_desc.decode() if isinstance(raw.color_desc, bytes) else raw.color_desc
             wb = np.array(raw.camera_whitebalance[:3], np.float32)
         letters = "".join(desc[pat[dy, dx]] for dy in range(2) for dx in range(2))
-        letters = letters.replace("G", "G")
         phases = dr.parse_pattern(letters)
         black_at = {n: float(blacks[pat[dy, dx]]) for n, (dy, dx) in phases.items()}
         full = {n: np.minimum((p - black_at[n]) / (white - black_at[n]), 1.0)
@@ -237,6 +235,9 @@ def main():
                 r = float(np.corrcoef(a.ravel(), b.ravel())[0, 1])
                 if best is None or r > best[1]:
                     best = (dx, r)
+            if best is None:
+                raise SystemExit(f"{arw}: frame too small for the enhanced-layer offset search "
+                                 "(needs the 3000:3200 x 4000:4464 window)")
             dx_off, corr = best
             print(f"   enhanced layer offset {dx_off} px (r={corr:.3f}); model "
                   + " ".join(f"{n}:a={ab[n][0]:.2e},b={ab[n][1]:.1e}" for n in dr.PLANES))

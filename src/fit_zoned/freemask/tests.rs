@@ -783,3 +783,44 @@ fn free_mask_real_zone_refusal_is_typed() {
     assert!(report.notes.iter().all(|n| n.key != crate::rationale::keys::FIELD_MASK_ATTACHED));
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// Every typed refusal reaches the ledger under its own label. R39's `Shrunk`
+/// was missing from `push_refusal`'s table, so the "shrunk-below-acceptance"
+/// refusal was decided at the boundary gate and never written — a disclosure
+/// that never reaches the note table is a disclosure that was not made.
+/// `NoCandidates` is the one reason with its own sentence (`FIELD_MASK_NONE`),
+/// so it is not in the table and not walked here.
+///
+/// MUTATION: drop `FreeMaskWhy::Shrunk` (or any other variant) from the table
+/// in `push_refusal` and that variant's arm fails.
+#[test]
+fn every_typed_free_mask_refusal_reaches_the_ledger_under_its_label() {
+    use FreeMaskWhy::*;
+    let every = [
+        Share, Divergence, Footprint, Mass, Cap, StructureUnmeasured, RasterClaim,
+        RasterWrite, ZoneRefused, Frame, Rim, Unmeasured, Inert, Shrunk,
+    ];
+    let source = textured_image();
+    let mut report = super::super::tests::neutral_report(&source, &source);
+    let refusals: Vec<FreeMaskRefusal> = every
+        .iter()
+        .enumerate()
+        .map(|(i, &why)| FreeMaskRefusal { n: i + 1, why })
+        .collect();
+    super::attach::push_refusal(&mut report, &refusals);
+    let refused: Vec<_> = report.notes.iter()
+        .filter(|n| n.key == crate::rationale::keys::FIELD_MASK_REFUSED)
+        .collect();
+    assert_eq!(refused.len(), every.len(), "one note per reason: {}", report.recipe.rationale);
+    for (i, why) in every.iter().enumerate() {
+        let n = (i + 1).to_string();
+        assert!(
+            refused.iter().any(|note| {
+                note.args.iter().any(|(k, v)| *k == "why" && v == why.label())
+                    && note.args.iter().any(|(k, v)| *k == "n" && *v == n)
+            }),
+            "{why:?} ({}) never reached the ledger: {}", why.label(), report.recipe.rationale
+        );
+        assert!(report.recipe.rationale.contains(why.label()), "{why:?}: {}", report.recipe.rationale);
+    }
+}

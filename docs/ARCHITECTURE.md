@@ -1158,8 +1158,8 @@ renders from the original RAW using that recipe. Key benefits:
 
 - **Reproducibility** — same recipe + same RAW + the same build ⇒
   byte-identical output, on every run. Across builds the dial layer is stable
-  but the pixels are not promised: no toolchain is pinned (see TECH_STACK
-  §Parameters), so a different compiler may round differently.
+  but the pixels are not promised: the compiler is pinned (`rust-toolchain.toml`,
+  §5), yet a raised pin or another platform may round differently.
 - **Non-destructiveness** — the recipe is a tiny JSON; originals are never modified.
 - **Auditability** — every recipe carries a `rationale` + `confidence`.
 - **Lightroom interop** — the recipe serialises to an XMP sidecar, so the edit
@@ -1942,8 +1942,15 @@ solver, reached only by this app's dropdown on a photograph Lightroom never
 solved: no Hough transform, because every edge pixel already states a line
 (`l = (gx, gy, −(gx·x + gy·y))`) and the family's vanishing point is the
 smallest eigenvector of `Σ w lᵀl`, taken by Jacobi rotations with one robust
-re-weighting pass. Guided is a named refusal — it needs guides no sidecar
-carries in a form this engine models.
+re-weighting pass. The families' angles are measured in the per-axis box the
+solver works in, so the levelling turn is written back to PIXELS before it is
+composed (`atan2(sin a, aspect·cos a)`, rotation `[c, −s/aspect; s·aspect, c]`)
+— the same correction the manual Rotate slider received on 2026-09-19; until
+2026-09-24 the solver rotated in the box itself, which on a 3:2 frame
+over-corrected a horizontal-family tilt about 1.5× and sheared the frame
+(Adobe's own `UprightTransform` matrices carry `h10/h01 = −aspect²`, the rigid
+pixel rotation written in that box). Guided is a named refusal — it needs guides
+no sidecar carries in a form this engine models.
 
 `crs:CropConstrainToWarp` is OBEYED (user ruling, 2026-09-17): at 0 — which is
 what all 52 sidecars in the library that carry it say — the empty corners a
@@ -3539,7 +3546,9 @@ the fourteen features or the ranking changes, an old index loads exactly as
 before, and the version that gates reuse is stamped inside each CACHE entry, so
 a future bump silently invalidates the cache instead of misreading it. Each
 build prints `style index cache: reused N, recomputed M, removed K,
-skipped-for-sidecar S`; a full-hit rebuild loads neither model checkpoint. The
+skipped-for-sidecar S`; a full-hit rebuild loads neither model checkpoint, and a
+build WITHOUT the embedding pass publishes nothing to the cache (its keep-set is
+incomplete: only staged frames carry digests) and reports `removed 0`. The
 LOOK library keeps the description cache and nothing more — its records carry no
 14-dim feature for an entry to be about, it is capped at 500 curated finished
 photos, and it is rebuilt only when that folder is re-curated.
@@ -3776,7 +3785,10 @@ spot-removals) and/or the user paints regions in the UI
 ([`plan_from_mask`](../src/retouch.rs) → connected components → circular targets);
 both feed the deterministic [`heal_image`](../src/retouch.rs) engine. Donors are
 auto-searched (the in-bounds neighbour whose surroundings best match the spot's
-border) unless an explicit source offset is given. Output is a pixel master in
+border) unless an explicit source offset is given; a spot so large that no donor
+disk of its own size fits inside the frame is left untouched and COUNTED as
+such (`HealReport::skipped`, the GUI note, the `X-Heal-Skipped` header), so
+"healed N" never stands for "asked N". Output is a pixel master in
 the delivery root (see below) — **non-XMP** (pixel edits don't serialise to ACR)
 — and the develop
 records it as its pixel source in `<store>/develops/<key>/pixels.json`, so every

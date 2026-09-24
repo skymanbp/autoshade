@@ -16,7 +16,11 @@ fn compact_numbers(mut numbers: Vec<usize>) -> String {
     out.join(",")
 }
 
-fn push_refusal(report: &mut FitReport, refusals: &[FreeMaskRefusal]) {
+/// Every typed refusal reaches the ledger under its own label: one note per
+/// reason, the component numbers compacted. The table below is the contract
+/// — a variant missing from it is a refusal decided and never written (R39's
+/// `Shrunk` shipped that way) — so a test in `freemask::tests` walks it.
+pub(super) fn push_refusal(report: &mut FitReport, refusals: &[FreeMaskRefusal]) {
     for why in [
         FreeMaskWhy::Share, FreeMaskWhy::Divergence, FreeMaskWhy::Cap,
         FreeMaskWhy::Footprint, FreeMaskWhy::Mass, FreeMaskWhy::RasterClaim,

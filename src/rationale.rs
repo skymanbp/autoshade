@@ -1200,7 +1200,7 @@ pub(crate) const GLOBAL_SOLVE_KEYS: &[&str] = &[
 ];
 
 /// Whether `key` belongs to the global solve's own account — see
-/// [`GLOBAL_SOLVE_KEYS`]. Linear over 67 pointers on a path that runs once
+/// [`GLOBAL_SOLVE_KEYS`]. Linear over 68 pointers on a path that runs once
 /// per rescored report; a set would cost more to build than to skip.
 pub(crate) fn is_global_solve_key(key: &str) -> bool {
     GLOBAL_SOLVE_KEYS.iter().any(|k| std::ptr::eq(*k, key) || *k == key)
@@ -1297,10 +1297,22 @@ pub fn error_line(error: &anyhow::Error) -> String {
 }
 
 fn exit_code(text: &str) -> Option<i32> {
+    // ASCII lowercasing keeps every byte offset: a match in `lower` indexes
+    // `text` at the same place.
     let lower = text.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
     for marker in ["exited", "exit"] {
         for (offset, _) in lower.match_indices(marker) {
-            let tail: String = text[offset + marker.len()..].chars().take(32).collect();
+            // The WORD, not the substring: "exiting after 3 retries" and
+            // "SystemExit" carry no exit code, and the substring test read
+            // one out of both ("exits … past 4096" gave 4096).
+            let end = offset + marker.len();
+            let opens_word = offset == 0 || !bytes[offset - 1].is_ascii_alphanumeric();
+            let closes_word = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+            if !opens_word || !closes_word {
+                continue;
+            }
+            let tail: String = text[end..].chars().take(32).collect();
             for token in tail.split(|c: char| !c.is_ascii_digit() && c != '-') {
                 if token.is_empty() || token == "-" {
                     continue;
@@ -1319,9 +1331,13 @@ fn sanitize_error_paths(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0usize;
     while i < chars.len() {
+        // A drive letter OPENS a token, like the unix rule's slash: the `s:/`
+        // inside `https://` is not one, and matching it there ate the URL's
+        // scheme ("httpcompletions").
         let drive = chars[i].is_ascii_alphabetic()
             && chars.get(i + 1) == Some(&':')
-            && matches!(chars.get(i + 2), Some('/' | '\\'));
+            && matches!(chars.get(i + 2), Some('/' | '\\'))
+            && (i == 0 || !chars[i - 1].is_ascii_alphanumeric());
         let unix = chars[i] == '/'
             && chars.get(i + 1).is_some_and(|c| !c.is_whitespace())
             && (i == 0 || !chars[i - 1].is_ascii_alphanumeric());
@@ -1571,6 +1587,41 @@ ValueError: boom at C:\Users\alice\x.py"#
             assert!(!rendered.contains("alice"), "{key}: {rendered}");
             assert!(!rendered.contains("C:\\Users") && !rendered.contains("/home/"), "{key}: {rendered}");
         }
+    }
+
+    /// F3 (2026-09-24 audit). The drive-letter rule matched the `s:/` INSIDE
+    /// `https://` and collapsed a URL to its last segment glued onto `http`
+    /// ("httpcompletions"). A drive letter opens a token; nothing spells one
+    /// mid-word.
+    #[test]
+    fn a_url_scheme_is_not_a_drive_letter() {
+        let line = error_line(&anyhow::anyhow!(
+            "POST https://api.example.test/v1/chat/completions: 429 Too Many Requests"
+        ));
+        assert!(line.starts_with("POST https:"), "{line}");
+        assert!(!line.contains("httpcompletions"), "{line}");
+        // A real drive letter still collapses wherever the sentence puts it.
+        let win = error_line(&anyhow::anyhow!("failed at C:\\Users\\alice\\x.py and (D:/tmp/y.py)"));
+        assert!(!win.contains("alice") && !win.contains("Users") && !win.contains("tmp"), "{win}");
+        assert!(win.contains("x.py") && win.contains("(y.py)"), "{win}");
+    }
+
+    /// F7 (2026-09-24 audit). `exit_code` matched "exit" as a SUBSTRING, so
+    /// "exiting after 3 retries" put "; exit 3" on the disclosure line and
+    /// "exits every frame past 4096" read an exit code of 4096. The marker
+    /// is a word.
+    #[test]
+    fn exit_codes_are_read_from_the_word_exit_and_not_from_inside_other_words() {
+        assert_eq!(exit_code("worker exited Some(12)"), Some(12));
+        assert_eq!(exit_code("sidecar exited with code 9"), Some(9));
+        assert_eq!(exit_code("sys.exit(1) was called"), Some(1));
+        assert_eq!(exit_code("Exit code: 3"), Some(3));
+        assert_eq!(exit_code("exit_code=-1"), Some(-1));
+        assert_eq!(exit_code("exiting after 3 retries"), None);
+        assert_eq!(exit_code("the model exits every frame past 4096"), None);
+        assert_eq!(exit_code("SystemExit raised by 2 workers"), None);
+        let line = error_line(&anyhow::anyhow!("exiting after 3 retries"));
+        assert!(!line.contains("exit 3"), "{line}");
     }
 
     /// push_note keeps string and vec in lockstep, and the vec stops at the

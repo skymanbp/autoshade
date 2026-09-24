@@ -258,7 +258,15 @@ pub struct RetouchPlan {
 
 /// Outcome of a heal run, for the CLI / UI to report.
 pub struct HealReport {
+    /// Spots actually HEALED — pixels written. A planned spot the engine had
+    /// to leave untouched (see `skipped`) is not one of them, so "N spots
+    /// healed" never claims a repair the picture does not show.
     pub spots: usize,
+    /// Planned spots left untouched because no donor disk of the spot's own
+    /// size fits inside the frame around it (`find_donor` found nothing):
+    /// auto-placed blobs of roughly a sixth of the short edge or more. Always
+    /// zero for a clone stamp, whose donor the user picked.
+    pub skipped: usize,
     pub rationale: String,
     pub dims: (u32, u32),
     /// The rationale's DETERMINISTIC tail as typed notes (L12#2B):
@@ -390,16 +398,25 @@ impl HealWrite for PlaneMut<'_> {
 /// The spot loop both entry points share: place each spot in pixels, settle its
 /// donor, heal it. `src` is the PRISTINE frame and `dst` the one being written,
 /// which is what makes each spot's output a pure function of the source.
-fn heal_spots<S: HealRead, D: HealWrite>(src: &S, dst: &mut D, spots: &[HealSpot]) {
+///
+/// Returns how many spots were actually healed. An auto-placed spot for which
+/// [`find_donor`] finds no donor disk inside the frame is left untouched and
+/// NOT counted — it used to be, and "1 spot healed" over an unchanged picture
+/// is the claim this count exists to refuse.
+fn heal_spots<S: HealRead, D: HealWrite>(src: &S, dst: &mut D, spots: &[HealSpot]) -> usize {
     let (w, h) = src.dims();
     let short = w.min(h) as f32;
+    let mut healed = 0usize;
     for s in spots {
         let cx = s.cx.clamp(0.0, 1.0) * w as f32;
         let cy = s.cy.clamp(0.0, 1.0) * h as f32;
         let r = (s.radius.clamp(0.0, 0.5) * short).max(2.0);
         let off = match s.source {
             Some([sx, sy]) => ((sx * w as f32).round() as i32, (sy * h as f32).round() as i32),
-            None => find_donor(src, cx, cy, r),
+            None => match find_donor(src, cx, cy, r) {
+                Some(off) => off,
+                None => continue,
+            },
         };
         heal_one(
             src,
@@ -412,7 +429,9 @@ fn heal_spots<S: HealRead, D: HealWrite>(src: &S, dst: &mut D, spots: &[HealSpot
             s.clone_raw,
             s.coverage.as_ref(),
         );
+        healed += 1;
     }
+    healed
 }
 
 /// Apply every spot to `img` in place, healing from surrounding real pixels.
@@ -420,15 +439,19 @@ fn heal_spots<S: HealRead, D: HealWrite>(src: &S, dst: &mut D, spots: &[HealSpot
 /// no spot ever reads a half-written region and each spot's output is a pure
 /// function of the source. Where spots OVERLAP, the later spot's result wins
 /// (deliberate last-writer rule — not order-independent in the overlap).
-pub fn heal_image<T: HealDepth>(img: &mut ImageBuffer<Rgb<T>, Vec<T>>, spots: &[HealSpot])
+/// Returns the number of spots healed, as [`heal_spots`] counts them.
+pub fn heal_image<T: HealDepth>(
+    img: &mut ImageBuffer<Rgb<T>, Vec<T>>,
+    spots: &[HealSpot],
+) -> usize
 where
     Rgb<T>: image::Pixel<Subpixel = T>,
 {
     if spots.is_empty() {
-        return;
+        return 0;
     }
     let src = img.clone();
-    heal_spots(&src, img, spots);
+    heal_spots(&src, img, spots)
 }
 
 /// [`heal_image`] on the develop chain's float plane, for the retouch areas
@@ -441,24 +464,31 @@ where
 /// always done and what the full-resolution `heal` path already pays. It is
 /// taken ONLY when there is at least one spot, so the photographs that carry
 /// none — 150 of the 175 measured — pay nothing at all.
-pub fn heal_planar(data: &mut [[f32; 3]], w: usize, h: usize, spots: &[HealSpot]) {
+///
+/// Returns the number of spots healed, as [`heal_spots`] counts them.
+pub fn heal_planar(data: &mut [[f32; 3]], w: usize, h: usize, spots: &[HealSpot]) -> usize {
     if spots.is_empty() || w == 0 || h == 0 || data.len() < w * h {
-        return;
+        return 0;
     }
     let snapshot = data.to_vec();
     let src = PlaneRef { px: &snapshot, w: w as i32, h: h as i32 };
     let mut dst = PlaneMut { px: data, w: w as i32 };
-    heal_spots(&src, &mut dst, spots);
+    heal_spots(&src, &mut dst, spots)
 }
 
 /// Search candidate donor offsets on rings around the spot; pick the one whose
 /// surroundings best match the spot's border (so the patch is seamless) and that
 /// stays in-bounds. Returns a pixel offset (dx, dy) from the spot centre, or
-/// (0,0) if no in-bounds donor exists (caller then leaves the spot untouched).
-fn find_donor<S: HealRead>(src: &S, cx: f32, cy: f32, r: f32) -> (i32, i32) {
+/// `None` when no ring position keeps a donor disk of the spot's size inside
+/// the frame — a blob of roughly a sixth of the short edge or more, on a 4000
+/// × 3000 frame anything past ~440 px of radius. The caller then leaves the
+/// spot untouched and does not count it: this used to answer the sentinel
+/// `(0, 0)`, which `heal_one` skipped while the run still reported the spot
+/// as healed.
+fn find_donor<S: HealRead>(src: &S, cx: f32, cy: f32, r: f32) -> Option<(i32, i32)> {
     let (wi, hi) = src.dims();
     let (w, h) = (wi as f32, hi as f32);
-    let mut best = (0i32, 0i32);
+    let mut best = None;
     let mut best_score = f32::INFINITY;
     for dist_mul in [2.4f32, 3.2, 4.4] {
         let dist = r * dist_mul;
@@ -501,7 +531,7 @@ fn find_donor<S: HealRead>(src: &S, cx: f32, cy: f32, r: f32) -> (i32, i32) {
             let score = ssd + var * 0.5;
             if score < best_score {
                 best_score = score;
-                best = (vx.round() as i32, vy.round() as i32);
+                best = Some((vx.round() as i32, vy.round() as i32));
             }
         }
     }
@@ -526,7 +556,11 @@ fn heal_one<S: HealRead, D: HealWrite>(
     coverage: Option<&SpotCoverage>,
 ) {
     if off == (0, 0) {
-        return; // no donor found → honest no-op rather than cloning the spot onto itself
+        // The donor IS the spot (an explicit source picked on the spot itself):
+        // copying it onto itself writes nothing, so skip the work. Auto-heal
+        // never lands here — `find_donor` answers `None` instead of an offset
+        // when nothing around the spot can donate.
+        return;
     }
     // From the SOURCE, which is the same frame as the destination by
     // construction and is the one end of the pair that can be measured.
@@ -1062,9 +1096,18 @@ pub fn heal(
         anyhow::bail!("nothing to heal: {}", parts.join("; "));
     }
 
-    let n = spots.len();
-    heal_and_save(base, &spots, out)?;
-    Ok(HealReport { spots: n, rationale, dims: (w, h), notes })
+    let planned = spots.len();
+    let healed = heal_and_save(base, &spots, out)?;
+    let skipped = planned - healed;
+    if skipped > 0 {
+        // stderr for the CLI; the GUI and the server cannot see this line and
+        // read `skipped` off the report instead.
+        eprintln!(
+            "⚠ {skipped} of {planned} spot(s) left untouched: no donor area of the spot's own \
+             size fits inside the frame around it"
+        );
+    }
+    Ok(HealReport { spots: healed, skipped, rationale, dims: (w, h), notes })
 }
 
 /// Heal at the source's OWN depth, carry alpha through, and stage the result
@@ -1074,7 +1117,7 @@ pub fn heal(
 /// transparency is not a defect — the alpha plane rides through untouched.
 /// Shared by `heal` and `clone_stamp`, which differ only in how they build
 /// the spot list.
-fn heal_and_save(base: DynamicImage, spots: &[HealSpot], out: &Path) -> Result<()> {
+fn heal_and_save(base: DynamicImage, spots: &[HealSpot], out: &Path) -> Result<usize> {
     // A17: the LOCAL full-resolution phase, one at a time process-wide
     // (`crate::full_res_slot`). Scoped HERE rather than at `heal`'s entry, and
     // that is the honest boundary: `base` is live from the decode above and
@@ -1086,16 +1129,17 @@ fn heal_and_save(base: DynamicImage, spots: &[HealSpot], out: &Path) -> Result<(
     // through the same door, so neither caller can forget it.
     let _heavy = crate::full_res_slot();
     let alpha = split_alpha(&base);
-    let healed = if deep_color(&base) {
+    let (healed, n) = if deep_color(&base) {
         let mut rgb = base.into_rgb16();
-        heal_image(&mut rgb, spots);
-        DynamicImage::ImageRgb16(rgb)
+        let n = heal_image(&mut rgb, spots);
+        (DynamicImage::ImageRgb16(rgb), n)
     } else {
         let mut rgb = base.into_rgb8();
-        heal_image(&mut rgb, spots);
-        DynamicImage::ImageRgb8(rgb)
+        let n = heal_image(&mut rgb, spots);
+        (DynamicImage::ImageRgb8(rgb), n)
     };
-    crate::pipeline::save_master(out, reattach_alpha(healed, alpha))
+    crate::pipeline::save_master(out, reattach_alpha(healed, alpha))?;
+    Ok(n)
 }
 
 /// 8-bit or deeper? Everything that is not 8-bit heals at 16 bits.
@@ -1187,13 +1231,13 @@ pub fn clone_stamp(
         s.feather = 0.3;
         s.label = "clone".into();
     }
-    let n = spots.len();
-    heal_and_save(base, &spots, out)?;
+    let planned = spots.len();
+    let healed = heal_and_save(base, &spots, out)?;
     let (rationale, notes) = match budget_note {
         Some(note) => (crate::rationale::render_one(&note), vec![note]),
         None => (String::new(), Vec::new()),
     };
-    Ok(HealReport { spots: n, rationale, dims: (w, h), notes })
+    Ok(HealReport { spots: healed, skipped: planned - healed, rationale, dims: (w, h), notes })
 }
 
 #[cfg(test)]
@@ -1227,6 +1271,48 @@ mod tests {
             Rgb([200, 200, 200]),
             "no donor pixel exists — the target stays untouched instead of smearing the red edge"
         );
+    }
+
+    /// A spot so large that no donor disk of its own size fits anywhere inside
+    /// the frame is left untouched — and, since this count is what the CLI and
+    /// the GUI report as "spots healed", it is not counted as a repair.
+    /// `find_donor` used to answer the sentinel `(0, 0)` here, which `heal_one`
+    /// skipped while the report still said "1 spot healed".
+    ///
+    /// MUTATION: have `find_donor` answer `Some((0, 0))` instead of `None`, or
+    /// count the spot before its donor is settled.
+    #[test]
+    fn a_spot_with_no_room_for_a_donor_is_left_untouched_and_not_counted() {
+        let spot = |radius: f32| HealSpot {
+            cx: 0.5,
+            cy: 0.5,
+            radius,
+            feather: 0.0,
+            source: None,
+            coverage: None,
+            clone_raw: false,
+            label: "auto".into(),
+            origin: SpotOrigin::Painted,
+        };
+        let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(64, 64, Rgb([200u8, 200, 200]));
+        for y in 28..36 {
+            for x in 28..36 {
+                img.put_pixel(x, y, Rgb([0, 0, 0]));
+            }
+        }
+        let before = img.clone();
+        // Half the short edge: r = 32 px on a 64 px frame, so the nearest donor
+        // ring (2.4 r) sits 77 px out and no donor disk fits.
+        assert_eq!(heal_image(&mut img, &[spot(0.5)]), 0, "no donor — nothing to count");
+        assert_eq!(img, before, "an unhealed spot leaves every pixel as it was");
+        // Beside it, a spot that fits heals and is the only one counted.
+        assert_eq!(
+            heal_image(&mut img, &[spot(0.5), spot(0.06)]),
+            1,
+            "only the spot that found a donor counts"
+        );
+        assert_ne!(*img.get_pixel(32, 32), Rgb([0, 0, 0]), "the small spot really was healed");
     }
 
     /// L09-9: clone_stamp carries heal's pre-decode preflight — an output

@@ -60,7 +60,9 @@ pub(super) fn pack_root() -> Option<PathBuf> {
 }
 
 /// Every export code in the pack, sorted — the `xmp/` directory IS the list, so
-/// a pack with a sidecar the spec forgot still measures it.
+/// a pack with a sidecar the spec forgot still measures it. Exactly `.xmp`, the
+/// spelling every reader below joins back onto the code: a sidecar in another
+/// case would be listed here and then fail to open there.
 pub(super) fn codes(root: &Path) -> Vec<String> {
     let mut out: Vec<String> = std::fs::read_dir(root.join("xmp"))
         .into_iter()
@@ -68,8 +70,7 @@ pub(super) fn codes(root: &Path) -> Vec<String> {
         .flatten()
         .filter_map(|e| {
             let p = e.path();
-            (p.extension()?.eq_ignore_ascii_case("xmp"))
-                .then(|| p.file_stem()?.to_str().map(str::to_owned))?
+            (p.extension()? == "xmp").then(|| p.file_stem()?.to_str().map(str::to_owned))?
         })
         .collect();
     out.sort();
@@ -726,4 +727,26 @@ fn the_shipped_linear_warp_lands_on_the_packs_measured_half_coverage() {
         (0.5f32 - 0.5411).abs() > 0.01,
         "premise: an unwarped smoothstep would already be inside the instrument"
     );
+}
+
+/// [`codes`] lists exactly the sidecars its readers can open: every reader
+/// joins `<code>.xmp` in lower case, so a `.XMP` the listing let through would
+/// be read back as a file that is not there — a panic in the middle of the
+/// pack instead of a measurement.
+///
+/// MUTATION: `eq_ignore_ascii_case("xmp")` back in the filter.
+#[test]
+fn codes_lists_only_the_spelling_its_readers_open() {
+    let root = std::env::temp_dir().join(format!("autoshade-lr-pack-codes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let xmp = root.join("xmp");
+    std::fs::create_dir_all(&xmp).unwrap();
+    for name in ["B-ONE.xmp", "A-TWO.xmp", "C-SHOUT.XMP", "notes.txt"] {
+        std::fs::write(xmp.join(name), "<x:xmpmeta/>").unwrap();
+    }
+    let got = codes(&root);
+    let reopened: Vec<bool> = got.iter().map(|c| xmp.join(format!("{c}.xmp")).is_file()).collect();
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(got, ["A-TWO", "B-ONE"], "sorted stems of the `.xmp` files only: {got:?}");
+    assert!(reopened.iter().all(|&ok| ok), "every listed code opens under the readers' own spelling");
 }

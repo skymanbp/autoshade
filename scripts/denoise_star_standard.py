@@ -117,8 +117,6 @@ BY, BX = np.nonzero(BG)
 BY, BX = BY - 20, BX - 20
 HY, HX = np.mgrid[-19.5:20:2, -19.5:20:2]
 HBG = (np.hypot(HY, HX) >= 14) & (np.hypot(HY, HX) <= 19)
-HBY, HBX = np.nonzero(HBG)
-HBY, HBX = HBY * 2 - 20, HBX * 2 - 20
 RADIAL = [R < .75] + [(R >= k-.5) & (R < k+.5) for k in range(1, 13)]
 
 
@@ -600,7 +598,8 @@ def run(args, work):
         n['glow_correlation'] = float(np.corrcoef(a.ravel(), b.ravel())[0, 1])
         noise[k] = n
     np.savez(work/'noise-tiles.npz', **raw_noise)
-    flat_images = {k: images.pop(k) for k in flat_paths}
+    for k in flat_paths:
+        images.pop(k)
     # Fixed sites defined by the original, plus input-only linearity screen.
     starsites = detections['input']; field = {}
     for k, im in images.items():
@@ -624,7 +623,7 @@ def run(args, work):
     valid = (field['input']['excess'] > 0) & (field['LR-OFF']['excess'] > 0)
     faint = valid & (starsites[:, 2] < 10)
     # The mosaic: which faint sites are stars (5c), and what the cleaner alone does to each plane (7c a).
-    truestar = planes = mosaic_report = None
+    planes = mosaic_report = None
     confirmed = np.zeros(len(starsites), bool)
     if args.mosaic_input:
         ox, oy = (int(v) for v in args.mosaic_offset.split(','))

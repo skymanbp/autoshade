@@ -796,6 +796,26 @@ def publish(tmp, output):
                 pass  # why: the original error is already propagating; an unremovable .part (an AV lock) must not replace it
 
 
+def write_mosaic(out, output):
+    """`out` to `output` through a `.part` sibling and `publish`, with the
+    sibling removed on EVERY failure. A refused imwrite used to `die` past its
+    own partial file; `denoise.py` has wrapped the same write in try/finally
+    since L03, and this is that wrapper."""
+    import cv2
+    root, ext = os.path.splitext(output)
+    tmp = f"{root}.{os.getpid()}.part{ext}"
+    try:
+        if not cv2.imwrite(tmp, out):
+            die(f"cannot write the mosaic: {tmp}")
+        publish(tmp, output)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass  # why: the original error is already propagating; an unremovable .part (an AV lock) must not replace it
+
+
 def main():
     ap = argparse.ArgumentParser(description="AutoShade RAW-domain AI denoise (DRUNet on the mosaic)")
     ap.add_argument("--input", required=True, help="16-bit grayscale PNG: the sensor mosaic")
@@ -853,11 +873,7 @@ def main():
         if (h % 2) or (w % 2):
             log(f"odd frame size {w}x{h}: the last row/column is passed through untouched")
 
-    root, ext = os.path.splitext(args.output)
-    tmp = f"{root}.{os.getpid()}.part{ext}"
-    if not cv2.imwrite(tmp, out):
-        die(f"cannot write the mosaic: {tmp}")
-    publish(tmp, args.output)
+    write_mosaic(out, args.output)
     log(f"wrote {args.output} ({w}x{h}, 16-bit)")
 
 

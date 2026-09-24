@@ -37,7 +37,8 @@ def candidate_from(run, out):
     """The file to measure when only --run was given, as a plain state dict.
 
     NOT `best_state.pth`. `train_raw.py` writes that one on held-out PSNR alone, against a
-    threshold seeded from the PRETRAINED model's own validation (train_raw.py:369, 444) —
+    threshold seeded from the PRETRAINED model's own validation (`train_raw.main`: the two
+    `validate("pretrained", …)` rows seed `best`; the loop writes on `psnr_sqrt > best`) —
     so it appears only when a checkpoint beats the shipped weights at denoising. This
     fine-tune deliberately spends a little PSNR to buy back star flux, and §3 below allows
     0.15 dB of it, so a run doing exactly what it was asked can finish without ever writing
@@ -104,6 +105,10 @@ def main():
     ap.add_argument("--out", help="where flux-truth.json goes (default: <run>/accept)")
     ap.add_argument("--reuse", action="store_true", help="read an existing flux-truth.json instead of measuring")
     args = ap.parse_args()
+    if not (args.run or args.weights):
+        ap.error("give --run or --weights")
+    if not (args.run or args.out):
+        ap.error("--out is required with --weights (there is no run directory to default to)")
 
     out = pathlib.Path(args.out) if args.out else pathlib.Path(args.run) / "accept"
     out.mkdir(parents=True, exist_ok=True)

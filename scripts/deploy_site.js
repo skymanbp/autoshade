@@ -107,13 +107,17 @@ async function main() {
     return;
   }
   const master = fs.readFileSync(path.join(root, ".secret"), "utf8").trim();
-  const temp = await mint(master);
   let status = 1;
   try {
-    status = deploy(temp.value, staged.dir);
+    // Minted inside the try so a failed mint still removes the staged copy.
+    const temp = await mint(master);
+    try {
+      status = deploy(temp.value, staged.dir);
+    } finally {
+      await cf("DELETE", `/user/tokens/${temp.id}`, master);
+      console.log(`[cleanup] temp token ${temp.id} deleted`);
+    }
   } finally {
-    await cf("DELETE", `/user/tokens/${temp.id}`, master);
-    console.log(`[cleanup] temp token ${temp.id} deleted`);
     fs.rmSync(staged.dir, { recursive: true, force: true });
   }
   // A failed deploy leaves the old files at the origin, and purging then would

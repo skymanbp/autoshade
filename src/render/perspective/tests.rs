@@ -651,3 +651,91 @@ fn the_inverse_is_an_inverse_and_a_degenerate_map_has_none() {
         "a degenerate map returns the frame untouched"
     );
 }
+
+/// Vertical (mode 3) with no vertical vanishing point is a REFUSAL, not a
+/// horizontal keystone.
+///
+/// A chart of converging HORIZONTAL bars states a horizontal point and no
+/// vertical one. Full (mode 4) rightly degrades to the one point it has;
+/// Vertical asked for the verticals and must not answer with the other
+/// family's row — which is what the match fell through to before the
+/// `(3, None, _) => None` arm existed.
+///
+/// MUTATION: delete that arm; mode 3 then takes `(_, None, Some(a))` and
+/// answers sideways.
+#[test]
+fn vertical_with_no_vertical_point_is_refused_not_answered_sideways() {
+    // The divisor varies along x: the horizontals converge, the verticals stay
+    // parallel and state no finite point.
+    let truth = Homography::about_centre([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.45, 0.0, 1.0]);
+    let data = chart(256, 256, truth, false);
+    assert!(
+        solve_upright(&data, 256, 256, 4).is_some(),
+        "premise: Full finds the horizontal point and degrades to it"
+    );
+    assert_eq!(solve_upright(&data, 256, 256, 3), None, "Vertical has no vertical point to send away");
+}
+
+/// Level on a 3:2 frame is a RIGID turn in pixels: a right angle in the
+/// picture is still a right angle afterwards.
+///
+/// The families' angles are measured in the per-axis box `gather` normalises
+/// by, and a rotation matrix written in that box is a shear on any frame that
+/// is not square — the defect [`manual`] corrected for the Rotate slider. Every
+/// other solver probe here is square, where the box and the picture coincide,
+/// which is why none of them could see it. A chart of bars turned 6° on a
+/// 384 × 256 frame is levelled, and the solved map's linear part, read back in
+/// pixel space, must be a rotation: equal diagonals, opposite off-diagonals.
+///
+/// MUTATION: write the levelling turn as the plain `[c, −s; s, c]` in box
+/// coordinates, or skip the box → pixel conversion of the measured angle.
+#[test]
+fn level_on_a_three_by_two_frame_keeps_right_angles_right() {
+    const W: usize = 384;
+    const H: usize = 256;
+    let aspect = (W as f32 - 1.0) / (H as f32 - 1.0);
+    let (s, c) = 6f32.to_radians().sin_cos();
+    // Turned RIGIDLY in pixels, so the chart shows what a tilted camera shows:
+    // bars 6° off vertical and nothing sheared.
+    let truth = Homography::about_centre([c, -s / aspect, 0.0, s * aspect, c, 0.0, 0.0, 0.0, 1.0]);
+    let data = chart(W, H, truth, true);
+    let solved = solve_upright(&data, W, H, 2).expect("a turned chart states its lines");
+    // The linear part, back in pixels: [[m00, m01·aspect], [m10/aspect, m11]].
+    let px = [solved.0[0], solved.0[1] * aspect, solved.0[3] / aspect, solved.0[4]];
+    assert!(
+        (px[0] - px[3]).abs() < 1e-3 && (px[1] + px[2]).abs() < 1e-3,
+        "Level must be rigid in pixels: {px:?}"
+    );
+    // …and it undoes the turn: composed with the truth, no rotation is left.
+    let both = truth.then(solved);
+    let left = (both.0[3] / aspect).atan2(both.0[0]).to_degrees();
+    assert!(left.abs() < 0.5, "the 6° turn must come back level, not {left:.2}°");
+    assert!(solved.covers(), "a levelled frame must not deliver empty corners");
+}
+
+/// `Σ w lᵀl` is positive semi-definite, so its smallest eigenvalue is zero or
+/// above in exact arithmetic — and a hair below zero in Jacobi's, on exactly
+/// the near-singular matrix that having a vanishing point produces. Refusing
+/// on that sign was refusing on rounding noise; one far below zero is still a
+/// decomposition gone wrong, and two near-zero eigenvalues (all the lines are
+/// one line) still state no point whichever side of zero the smaller rounds to.
+///
+/// Stated on DIAGONAL matrices so the answer is the digits written here and
+/// not a platform's `atan2`.
+///
+/// MUTATION: `lo < 0.0` back in `vanishing_point`, or its separation test
+/// reading `lo` instead of `lo.abs()`.
+#[test]
+fn a_smallest_eigenvalue_a_hair_below_zero_is_rounding_not_a_refusal() {
+    // Eigenvalues −1e-15, 1, 2: the first is what Jacobi returns for a true zero.
+    let p = upright::vanishing_point_of([-1e-15, 0.0, 0.0, 1.0, 0.0, 2.0])
+        .expect("a rounding-noise negative is a zero");
+    assert!(
+        (p[0].abs() - 1.0).abs() < 1e-6 && p[1] == 0.0 && p[2] == 0.0,
+        "the point is that eigenvector: {p:?}"
+    );
+    // A genuinely negative one is not a Gram matrix at all.
+    assert_eq!(upright::vanishing_point_of([-1e-3, 0.0, 0.0, 1.0, 0.0, 2.0]), None);
+    // Two at rounding level, the smaller negative: no separation, no point.
+    assert_eq!(upright::vanishing_point_of([-1e-17, 0.0, 0.0, 3e-17, 0.0, 2.0]), None);
+}

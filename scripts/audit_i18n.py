@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""i18n alignment audit: tr/trf call sites in gui.rs vs ZH_ENTRIES in i18n.rs.
+"""i18n alignment audit: tr/trf call sites in src/bin/gui/*.rs vs ZH_ENTRIES in i18n.rs.
 
-The GUI's i18n is an English-skeleton catalogue (see src/bin/i18n.rs): the
+The GUI's i18n is an English-skeleton catalogue (see src/bin/gui/i18n.rs): the
 English literal at each `tr`/`trf` call site IS the lookup key, and a missing
 Chinese entry silently falls back to English. This audit makes that silence
 visible — and it is a GATE, not a report:
@@ -38,7 +38,7 @@ release.  Run: python scripts/audit_i18n.py
 
 Note: en keys may contain CJK-range punctuation (「」 ＋ －) — that renders
 via the runtime system-CJK font fallback (installed on every Windows/macOS;
-see install_fonts in gui.rs), and is house style, not drift.
+see install_fonts in src/bin/gui/theme.rs), and is house style, not drift.
 """
 
 from __future__ import annotations
@@ -53,11 +53,38 @@ REPO = Path(__file__).resolve().parent.parent
 # tr() call sites moved into new files never escape the gate. i18n.rs itself
 # is the catalogue, not a consumer — keep it out of the call-site scan.
 _GUI_DIR = REPO / "src" / "bin" / "gui"
-GUI = "\n".join(
-    p.read_text(encoding="utf-8")
+_GUI_PARTS = [
+    (p.relative_to(REPO).as_posix(), p.read_text(encoding="utf-8"))
     for p in sorted(_GUI_DIR.glob("**/*.rs"))
     if p.name != "i18n.rs"
-)
+]
+GUI = "\n".join(text for _, text in _GUI_PARTS)
+
+
+def _gui_file_starts() -> list[tuple[int, str]]:
+    """Where each module file begins in the concatenated GUI text, as a
+    1-based line number: the files are joined with one "\\n", so a file
+    starts one line after the previous file's last line."""
+    starts, line = [], 1
+    for rel, text in _GUI_PARTS:
+        starts.append((line, rel))
+        line += text.count("\n") + 1
+    return starts
+
+
+_GUI_STARTS = _gui_file_starts()
+
+
+def locate(line: int) -> str:
+    """`path:line` of a line number measured in the concatenated GUI text —
+    the number every scanner below reports — so a finding names the module
+    file it sits in rather than an offset into the join."""
+    rel, start = _GUI_PARTS[0][0], 1
+    for s, r in _GUI_STARTS:
+        if s > line:
+            break
+        start, rel = s, r
+    return f"{rel}:{line - start + 1}"
 I18N = (_GUI_DIR / "i18n.rs").read_text(encoding="utf-8")
 RECIPE = (REPO / "src" / "recipe.rs").read_text(encoding="utf-8")
 ADVISOR = (REPO / "src" / "advisor" / "mod.rs").read_text(encoding="utf-8")
@@ -625,14 +652,14 @@ def main() -> int:
             print("  " + repr(str(k)[:100]))
     print(f"\n== {len(unregistered)} UNREGISTERED dynamic call sites ==")
     for line, expr in unregistered:
-        print(f"  gui.rs:{line}: {expr[:80]}")
+        print(f"  {locate(line)}: {expr[:80]}")
     print(f"\n== {len(bypass)} UI literals bypassing tr() ==")
     for line, lit in bypass:
-        print(f"  gui.rs:{line}: {lit[:80]!r}")
+        print(f"  {locate(line)}: {lit[:80]!r}")
     worker_tr = worker_side_translations(GUI)
     print(f"\n== {len(worker_tr)} tr()/trf() inside spawn_worker closures ==")
     for line, snippet in worker_tr:
-        print(f"  gui.rs:{line}: {snippet}")
+        print(f"  {locate(line)}: {snippet}")
     bad = (dupes or missing or dead or source_problems or dead_allow
            or unregistered or bypass or ph_bad or worker_tr or moji)
     return 1 if bad else 0

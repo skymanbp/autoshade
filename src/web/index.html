@@ -1386,6 +1386,9 @@ async function selectPhoto(id, stem, el) {
       setAfterSrc(afterImg, blob);
       if (useMask) fctx.clearRect(0, 0, fc.width, fc.height);
       const saved = outPath(r), n = r.headers.get("X-Heal-Spots");
+      // Planned spots the engine left untouched (no donor of that size fits
+      // inside the frame) — named, so "healed N" is never read as "asked N".
+      const skipped = Number(r.headers.get("X-Heal-Skipped") || 0);
       // Same chain + recipe-composited re-render as fill (see there); the
       // heal joins history so Ctrl+Z can step back over it (D13).
       if (saved) { state.sessionMaster = saved; pushHistory(state.recipe); renderAfter(); }
@@ -1393,7 +1396,7 @@ async function selectPhoto(id, stem, el) {
       // only the painted mask healed) — surface it, don't imply full success.
       let why = r.headers.get("X-Heal-Rationale");
       if (why) { try { why = decodeURIComponent(why); } catch (e) { /* show raw */ } }
-      setStatus(`healed ${n || "?"} spot(s)${saved ? " → " + saved : ""}${why ? " · " + why : ""} (in ./out; Save records it for reopening)`);
+      setStatus(`healed ${n || "?"} spot(s)${skipped > 0 ? ` · ${skipped} left untouched (no donor area of that size fits inside the frame)` : ""}${saved ? " → " + saved : ""}${why ? " · " + why : ""} (in ./out; Save records it for reopening)`);
     } catch (e) {
       // Same stale-aware catch as fill (see there).
       const stale = reqId !== state.id || reqSeq !== selectSeq;
@@ -1624,18 +1627,15 @@ async function saveXmp() {
     // a baked source) says so itself, starting with "recipe saved".
     setStatus(body.startsWith("cleared") || body.startsWith("recipe saved")
       ? body : ("xmp + recipe saved → " + body));
-    // ...but NOT the master half when the server says it could not record it:
-    // the recipe landed, the pixel link did not, and baselining the master as
-    // saved let the next thumbnail click discard the fill with no warning.
+    // The recipe and the pixel link land in ONE commit (`commit_develop`), so
+    // a 200 means both are on disk and the baseline is exactly what this
+    // request CARRIED — there is no half-landed master to exclude.
     // What is on disk now carries THIS tag — adopt it (after the stale
     // guard above: a stale answer's tag belongs to another photo's flight).
     const newRev = r.headers.get("ETag");
     if (newRev) savedRev = newRev;
-    savedRecipe = body.includes("recording the retouched master failed")
-      ? JSON.stringify({ recipe: JSON.parse(sentBaseline).recipe, master: null })
-      : sentBaseline; // what is on disk = what this request CARRIED
-    if (sentMaster && !body.startsWith("cleared")
-        && !body.includes("recording the retouched master failed")) {
+    savedRecipe = sentBaseline;
+    if (sentMaster && !body.startsWith("cleared")) {
       // The session master is now the photo's PERSISTED pixel source, so
       // pre-fill history entries (master:null = "render the persisted
       // source") would render the freshly persisted fill under pre-fill

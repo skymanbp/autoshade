@@ -596,7 +596,7 @@ published from the tag beside the Windows and macOS assets.
   <img src="docs/images/architecture-light.svg" alt="AutoShade architecture: three front ends over one Rust library with the style index, reverse-fit, local producers and the local-field analyzer; six local Python sidecars for embeddings, descriptions, correspondence, segmentation and two denoisers; opt-in external AI services" />
 </picture>
 
-<sub>Twenty components, nineteen connections and three boundaries, generated from
+<sub>Twenty-one components, twenty connections and three boundaries, generated from
 [autoshade.architecture.json](docs/architecture/autoshade.architecture.json) by
 [scripts/architecture_diagram.py](scripts/architecture_diagram.py): no position
 in the picture is chosen by hand, and the shared checker in
@@ -1005,7 +1005,7 @@ numbers](#measured-numbers) are not repeated.
   using them interactively: CI is the whole of the evidence. Apple-silicon
   Metal/MPS is measured on every release run by `scripts/mps_probe.py`
   (device, forward time, peak memory, whether `deform_conv2d` falls back to
-  the CPU — the numbers are in the release notes); Linux ships a
+  the CPU — the numbers are in the release run's `macos-battery` job log); Linux ships a
   command-line archive and has no desktop app.
 - Honesty markers: the approximate X-Trans path, locally re-derived rather
   than Adobe-identical AI masks, measured-but-not-bit-exact Lightroom parity,

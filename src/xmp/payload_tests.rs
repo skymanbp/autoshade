@@ -691,3 +691,94 @@ fn an_inversion_keeps_its_authored_home_through_a_rewrite_and_follows_a_lightroo
     assert_eq!((back.masks[1].inverted, back.masks[1].mask.own_inverted()), (true, false));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// F4 (2026-09-24 audit). A raster two masks share is embedded once — right —
+/// and, when it could NOT be embedded, was named as lost once: the second mask
+/// stepped over the `seen` name and was told nothing. The losses say which
+/// masks render inert, so every mask that names the raster is in them.
+#[test]
+fn a_shared_raster_that_cannot_be_embedded_is_a_loss_for_every_mask_that_names_it() {
+    let dir = scratch("shared-loss");
+    let missing = dir.join("mask-zone-sky.png").to_string_lossy().into_owned();
+    let present = raster_file(&dir, "tile-r1c1.png", 5);
+    let zone = |name: &str| LocalAdjustment {
+        mask: MaskGeometry::select_sky(0.5, 0.2, false, missing.clone()),
+        role: MaskRole::ZoneSky,
+        name: name.to_string(),
+        ..Default::default()
+    };
+    let tile = |name: &str| LocalAdjustment {
+        mask: MaskGeometry::Bitmap { path: present.clone() },
+        name: name.to_string(),
+        ..Default::default()
+    };
+    let r = EditRecipe {
+        masks: vec![zone("sky"), tile("tile"), zone("sky · band 1/3"), tile("tile again")],
+        ..Default::default()
+    };
+    let (element, losses) = payload::rasters_element(&r, "asr", None);
+    let lost: Vec<&str> = losses
+        .iter()
+        .filter(|l| l.reason == MaskLossReason::RasterNotEmbedded)
+        .map(|l| l.name.as_str())
+        .collect();
+    assert_eq!(lost, ["sky", "sky · band 1/3"], "{losses:?}");
+    assert_eq!(losses.len(), 2, "the embedded tile is no loss to either mask: {losses:?}");
+    assert_eq!(element.matches("<rdf:li asr:Name=").count(), 1, "the shared tile still rides once: {element}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// F5 (2026-09-24 audit). A recipe that inflated past `MAX_RECIPE_JSON` was
+/// CUT there and then failed its CRC, so the disclosure said "checksum does
+/// not match" about a document whose checksum was fine. Too large is the fact.
+#[test]
+fn a_recipe_that_inflates_past_the_ceiling_is_refused_as_too_large_not_as_corrupt() {
+    use base64::Engine as _;
+    use std::io::Write as _;
+    let doc = recipe_to_xmp(&EditRecipe { exposure_ev: 0.5, ..Default::default() });
+    assert!(payload::find(&doc).is_some_and(|p| p.is_ok()), "premise: a sound payload");
+    let oversize = vec![b' '; payload::MAX_RECIPE_JSON as usize + 1];
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    z.write_all(&oversize).unwrap();
+    let packed = base64::engine::general_purpose::STANDARD.encode(z.finish().unwrap());
+    let recipe = payload::simple_property(&doc, "asr", "Recipe").unwrap();
+    let crc = payload::simple_property(&doc, "asr", "RecipeCrc32").unwrap();
+    let tampered = doc
+        .replacen(&format!("asr:Recipe=\"{recipe}\""), &format!("asr:Recipe=\"{packed}\""), 1)
+        .replacen(
+            &format!("asr:RecipeCrc32=\"{crc}\""),
+            &format!("asr:RecipeCrc32=\"{:08x}\"", crc32fast::hash(&oversize)),
+            1,
+        );
+    assert_ne!(tampered, doc, "the swap landed");
+    let why = match payload::find(&tampered) {
+        Some(Err(why)) => why,
+        Some(Ok(_)) => panic!("an oversize recipe must be refused"),
+        None => panic!("the payload must still be found"),
+    };
+    assert!(why.contains("too large"), "{why}");
+    assert!(!why.contains("checksum"), "{why}");
+    // …and the crs reading stands, as for every payload this build cannot trust.
+    assert_eq!(xmp_to_recipe(&tampered).exposure_ev, 0.5);
+}
+
+/// F6 (2026-09-24 audit). `claim_beside` claimed `<stem>-2.<ext>` with
+/// `create_new` and, when the write or the sync then failed, returned the
+/// error and LEFT the half-written file under the claimed name — where the
+/// next restore's CRC check would find a DIFFERENT file and step on to `-3`.
+/// A claim that could not be filled is released.
+#[test]
+fn a_claimed_name_whose_write_fails_is_released_not_left_half_written() {
+    let dir = scratch("claim-release");
+    let at = dir.join("tile-r3c3-2.png");
+    // The whole write path: a claimed handle takes the bytes.
+    let claimed = std::fs::OpenOptions::new().write(true).create_new(true).open(&at).unwrap();
+    payload::fill_claimed(&at, claimed, b"a raster").expect("a writable claim fills");
+    assert_eq!(std::fs::read(&at).unwrap(), b"a raster");
+    // A handle the bytes cannot go through (opened read-only) is the failing
+    // write — and the name it held is free again.
+    let unwritable = std::fs::File::open(&at).unwrap();
+    payload::fill_claimed(&at, unwritable, b"a raster").expect_err("a read-only handle cannot be filled");
+    assert!(!at.exists(), "the claim is released along with the error");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -411,9 +411,15 @@ impl AutoShadeApp {
     }
 
     pub(crate) fn poll_workers(&mut self, ctx: &egui::Context) {
-        // UI-thread language for status/toast strings built here. Worker RESULT
-        // strings (msg / note / s / label) were already localised inside their
-        // spawn closures before the thread started, so they arrive ready to show.
+        // UI-thread language for the status/toast strings built HERE, at
+        // landing. Worker results carry typed FACTS (FitOutcome, RetouchNote,
+        // PasteOutcome, …) that the landing arms render in the language live
+        // NOW (L12#4 — a sentence translated inside the spawn closure carried
+        // the language captured at spawn, minutes stale by the time it
+        // landed). The Strings that still ride the channel are payloads, not
+        // pre-translated sentences: a generative worker's heartbeat line, a
+        // mask's stable English label and the sidecar's backend name, an
+        // extracted style prompt, a model id, an error's own text.
         let lang = self.lang;
         // Drain a bounded batch each frame so a burst of thumbnails doesn't take
         // one-per-frame to land (try_recv borrow is released before we mutate).
@@ -2386,12 +2392,23 @@ impl AutoShadeApp {
                 };
                 format!("{note} · {}", out.display())
             }
-            RetouchNote::Healed { n, out, ai_prose, notes } => {
+            RetouchNote::Healed { n, skipped, out, ai_prose, notes } => {
                 let mut s = trf(
                     lang,
                     "healed {n} spot(s) → {path}",
                     &[("n", &n.to_string()), ("path", &out.display().to_string())],
                 );
+                if *skipped > 0 {
+                    // The engine's own count (`HealReport::skipped`): a blob
+                    // wider than any donor disk the frame can hold is left
+                    // as it was, and the picture shows exactly that.
+                    let left = trf(
+                        lang,
+                        "{n} spot(s) left untouched — no donor area of that size fits inside the frame",
+                        &[("n", &skipped.to_string())],
+                    );
+                    s = format!("{s} · {left}");
+                }
                 if !ai_prose.is_empty() || !notes.is_empty() {
                     // AI prose stays raw (the model's own text); the typed
                     // notes render localized (L12#2B).

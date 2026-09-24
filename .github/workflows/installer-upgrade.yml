@@ -35,8 +35,15 @@ jobs:
     env:
       SHIPPED_APP_ID: '{B2C8B506-4DD8-4F06-B25D-7A3FBE9A742C}'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - name: Toolchain
+        shell: bash
+        run: |
+          want=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          got=$(rustc --version | cut -d' ' -f2)
+          echo "rust-toolchain.toml pins $want; rustc reports $got"
+          test "$want" = "$got" || { echo "::error::the pin was not honoured"; exit 1; }
 
       - name: Resolve the version
         id: ver
@@ -157,7 +164,7 @@ jobs:
       # only way to read a failure that happened inside setup.
       - name: Keep the setup logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: installer-scenario-logs
           path: ${{ runner.temp }}/installer-scenarios/*/logs

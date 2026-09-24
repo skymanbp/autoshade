@@ -419,8 +419,8 @@ pub fn load_local_settings_from() -> (LocalSettings, SettingsOrigin) {
         // the profile layout. Anyone who needs the real location has it on
         // screen: the Settings panel prints the store root.
         let file = file_label(&p, origin);
-        let s = match crate::store::read_text_capped(&p, crate::store::MAX_STORE_JSON) {
-            Ok(s) => s,
+        let bytes = match crate::store::read_bytes_capped(&p, crate::store::MAX_STORE_JSON) {
+            Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             // Unreadable ≠ absent (over-cap, permissions): the old silent
             // skip fell through to defaults with nothing to say why the
@@ -430,27 +430,46 @@ pub fn load_local_settings_from() -> (LocalSettings, SettingsOrigin) {
                 continue;
             }
         };
-        match serde_json::from_str::<LocalSettings>(&s) {
+        let (bytes, why) = match settings_from_bytes(bytes) {
             Ok(v) => return (v, origin),
-            Err(e) => {
-                // Keep the bytes: they hold the user's API keys, and a save is
-                // about to overwrite this path. Best-effort and once — a
-                // second launch must not clobber the first rescue.
-                let kept = preserve_corrupt_settings(&p, s.as_bytes()).ok();
-                eprintln!(
-                    "warning: {file} is not valid JSON ({e}) — ignoring it{}",
-                    match kept.as_deref().and_then(std::path::Path::file_name) {
-                        Some(n) => format!(
-                            "; your settings were preserved beside it as {}",
-                            n.to_string_lossy()
-                        ),
-                        None => String::new(),
-                    }
-                );
+            Err(malformed) => malformed,
+        };
+        // Keep the bytes: they hold the user's API keys, and a save is about
+        // to overwrite this path. Best-effort and once — a second launch must
+        // not clobber the first rescue. BOTH malformed shapes land here: a
+        // file that is not UTF-8 (Notepad's "Unicode" save is UTF-16) used to
+        // fail inside the text read and take the skip above instead, and the
+        // next save overwrote the keys it held.
+        let kept = preserve_corrupt_settings(&p, &bytes).ok();
+        eprintln!(
+            "warning: {file} {why} — ignoring it{}",
+            match kept.as_deref().and_then(std::path::Path::file_name) {
+                Some(n) => format!(
+                    "; your settings were preserved beside it as {}",
+                    n.to_string_lossy()
+                ),
+                None => String::new(),
             }
-        }
+        );
     }
     (LocalSettings::default(), SettingsOrigin::None)
+}
+
+/// The settings a candidate file's bytes hold — or, for EITHER malformed
+/// shape, text that is not UTF-8 and text that is not this app's JSON, the
+/// same bytes handed back with the reason, so the caller can preserve them
+/// beside the file before a save overwrites it. One door for both shapes on
+/// purpose: the UTF-8 gate used to sit inside the read, where its failure
+/// looked like an unreadable file, which is skipped rather than rescued.
+fn settings_from_bytes(bytes: Vec<u8>) -> Result<LocalSettings, (Vec<u8>, String)> {
+    let text = match String::from_utf8(bytes) {
+        Ok(t) => t,
+        Err(e) => return Err((e.into_bytes(), "is not readable UTF-8 text".to_string())),
+    };
+    match serde_json::from_str::<LocalSettings>(&text) {
+        Ok(v) => Ok(v),
+        Err(e) => Err((text.into_bytes(), format!("is not valid JSON ({e})"))),
+    }
 }
 
 /// The settings a caller should MERGE INTO when saving (see
@@ -1147,18 +1166,6 @@ pub fn dotenv_child_env() -> Vec<(String, String)> {
     kept.into_iter().map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
-/// Normalise a reasoning-effort value from any source into something safe on
-/// a JSON body AND on a child process's argv.
-///
-/// The vocabulary is deliberately NOT a closed set: `claude --help` documents
-/// `low|medium|high|xhigh|max` (measured 2026-08-11) while OpenAI-compatible
-/// endpoints carry their own tiers and third-party bridges add more — pinning
-/// a list here would make this app the bottleneck on someone else's roadmap.
-/// The value is BOUNDED instead: lowercase ASCII, digits, `-`/`_`, at most 32
-/// bytes, never leading `-`. An endpoint that does not know the tier answers
-/// 400 and the caller negotiates it away (`advisor::post_ai_json`). The bound
-/// is the part that matters — this string reaches `Command::args`, where an
-/// unbounded `.env`-supplied value would be argv injection.
 /// Two API base URLs name the same endpoint, ignoring whitespace and a
 /// trailing slash. ONE definition: the GUI's pick-list invalidation and the
 /// key-home check below must never disagree about what "same" means.
@@ -1212,6 +1219,18 @@ fn file_key_for(
     }
 }
 
+/// Normalise a reasoning-effort value from any source into something safe on
+/// a JSON body AND on a child process's argv.
+///
+/// The vocabulary is deliberately NOT a closed set: `claude --help` documents
+/// `low|medium|high|xhigh|max` (measured 2026-08-11) while OpenAI-compatible
+/// endpoints carry their own tiers and third-party bridges add more — pinning
+/// a list here would make this app the bottleneck on someone else's roadmap.
+/// The value is BOUNDED instead: lowercase ASCII, digits, `-`/`_`, at most 32
+/// bytes, never leading `-`. An endpoint that does not know the tier answers
+/// 400 and the caller negotiates it away (`advisor::post_ai_json`). The bound
+/// is the part that matters — this string reaches `Command::args`, where an
+/// unbounded `.env`-supplied value would be argv injection.
 pub(crate) fn effort(v: Option<String>) -> Option<String> {
     let v = v?.trim().to_ascii_lowercase();
     if v.is_empty() {
@@ -2803,6 +2822,45 @@ mod tests {
                 .filter(|e| e.file_name().to_string_lossy().contains("corrupt"))
                 .count();
             assert_eq!(minted, 0, "no rescue copy may claim bytes that are no longer live");
+
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// A settings file that is not UTF-8 — Notepad's "Unicode" save is
+        /// UTF-16 — is malformed the way a stray comma is and gets the same
+        /// rescue: its own bytes, intact, reach `rescue_if_unchanged`. It used
+        /// to fail inside the text read and take the "cannot be read" skip,
+        /// and the next save overwrote the keys it held.
+        ///
+        /// MUTATION: decode with `from_utf8_lossy` and parse on; or hand back
+        /// the UTF-8 failure without its bytes.
+        #[test]
+        fn a_non_utf8_settings_file_is_handed_to_the_rescue_with_its_bytes_intact() {
+            let mut utf16 = vec![0xFF, 0xFE];
+            for u in "{\"analysis_model\":\"good\"}".encode_utf16() {
+                utf16.extend_from_slice(&u.to_le_bytes());
+            }
+            let (bytes, why) = match settings_from_bytes(utf16.clone()) {
+                Err(malformed) => malformed,
+                Ok(_) => panic!("UTF-16 bytes must not parse as settings"),
+            };
+            assert_eq!(bytes, utf16, "the rescue must receive the file's own bytes");
+            assert!(why.contains("UTF-8"), "the warning names the shape: {why}");
+            // Bad JSON takes the same door, and a good file still parses.
+            assert!(matches!(settings_from_bytes(b"{first".to_vec()), Err((b, _)) if b == b"{first"));
+            assert!(settings_from_bytes(b"{\"analysis_model\":\"good\"}".to_vec()).is_ok());
+
+            let dir = env::temp_dir().join(format!(
+                "autoshade-utf16-settings-{}-{}",
+                std::process::id(),
+                crate::store::next_tmp_seq()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("autoshade.local.json");
+            std::fs::write(&path, &utf16).unwrap();
+            let kept = rescue_if_unchanged(&path, &bytes).unwrap();
+            assert_eq!(std::fs::read(kept).unwrap(), utf16, "the rescue copy is the file, byte for byte");
+            assert!(!path.exists(), "the malformed file no longer sits where the next save lands");
 
             let _ = std::fs::remove_dir_all(dir);
         }

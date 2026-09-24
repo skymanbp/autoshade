@@ -108,7 +108,6 @@ pub(crate) struct SolveInfo {
 #[derive(Clone, Debug)]
 pub(crate) struct LocalField {
     /// 768 vertices in `splat_table` order, bound-clipped, occupancy-zeroed.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub grid: Vec<[f32; PARAMS]>,
     /// Weighted trilinear mass at each vertex (fit weight x splat weight).
     #[cfg_attr(not(test), allow(dead_code))]

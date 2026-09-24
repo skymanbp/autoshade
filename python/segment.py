@@ -1003,7 +1003,7 @@ def _self_test():
 
 
 def write_multi_manifest(img_path: str, output: str, cache_dir: str, max_regions: int, mask_size: int, backend: str, prefer_cpu: bool = False):
-    Image, np, labels, img, selected = multi_class_masks(img_path, cache_dir, max_regions)
+    Image, np, labels, img, selected = multi_class_masks(img_path, cache_dir, max_regions, prefer_cpu)
     from PIL import Image as PILImage
     import json
     import os

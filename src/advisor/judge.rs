@@ -31,7 +31,7 @@ use serde_json::{json, Value};
 
 use crate::config::Config;
 
-use super::{extract_output_text, AdvisorError, BoundedUntrustedText, Decision, GradeIntent};
+use super::{output_text_or_refusal, AdvisorError, BoundedUntrustedText, Decision, GradeIntent};
 use crate::recipe::StrengthTier;
 
 /// What the judge is being asked to score — picks the prompt.
@@ -506,9 +506,11 @@ pub fn judge_pair(
         super::SseFamily::Responses,
         cfg.image_effort.as_deref(),
     )?;
-    let text = extract_output_text(&value).ok_or_else(|| {
-        AdvisorError::Transport("could not locate structured output in the judge response".into())
-    })?;
+    let text = output_text_or_refusal(
+        &value,
+        &[key],
+        "could not locate structured output in the judge response",
+    )?;
     parse_judgement(&text, &[key])
 }
 

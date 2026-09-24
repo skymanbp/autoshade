@@ -262,8 +262,10 @@ def _fetch_verified(url, dest, want_sha256, max_bytes, what):
 
     A cache filled by an older build — which fetched this file from a moving
     branch — is exactly the case that must not be trusted, so an existing file
-    is verified too. One mismatch triggers a single re-download (the benign
-    legacy-cache / truncated-download case); a second mismatch is fatal.
+    is verified too: before any source is asked, and discarded on a mismatch
+    (the benign legacy-cache / truncated-download case). Every source then
+    gets its own download and its own verdict, and when none serves the
+    pinned bytes the refusal names each one.
 
     The download is tried against `_mirror.sources(url)` in order: our own copy
     of the pinned bytes first, then the host the pin names. That is what keeps
@@ -275,19 +277,36 @@ def _fetch_verified(url, dest, want_sha256, max_bytes, what):
     """
     _reclaim_stale_parts(dest)
     tried = []
+    if os.path.exists(dest):
+        # The cached copy is judged BEFORE any source is asked. Judged inside
+        # the loop, it consumed the first source's turn without a download —
+        # a legacy cache skipped our mirror outright and went to the upstream,
+        # and the mismatch it logged was charged to a host that had served
+        # nothing.
+        got = _sha256(dest)
+        if got == want_sha256:
+            return
+        log(f"{what}: checksum mismatch in the cached copy "
+            f"(expected {want_sha256}, got {got})")
+        tried.append("cached copy: checksum mismatch")
+        try:
+            os.remove(dest)
+        except OSError:
+            # why: cannot re-fetch over a file we may not delete — refuse
+            # rather than execute unverified bytes.
+            _refuse(what, tried)
     for source in _mirror.sources(url):
-        if not os.path.exists(dest):
-            try:
-                _download(source, dest, max_bytes)
-            except (Exception, SystemExit) as e:
-                # why: a source that refuses, stalls or overshoots its cap is
-                # one to move PAST while another holds the same pinned bytes,
-                # not a reason to abandon a download that can still succeed.
-                # Nothing is swallowed — every reason is carried into the
-                # refusal below, which still fires if no source serves.
-                log(f"{what}: {_where(source)} did not serve it ({e})")
-                tried.append(f"{_where(source)}: {e}")
-                continue
+        try:
+            _download(source, dest, max_bytes)
+        except (Exception, SystemExit) as e:
+            # why: a source that refuses, stalls or overshoots its cap is
+            # one to move PAST while another holds the same pinned bytes,
+            # not a reason to abandon a download that can still succeed.
+            # Nothing is swallowed — every reason is carried into the
+            # refusal below, which still fires if no source serves.
+            log(f"{what}: {_where(source)} did not serve it ({e})")
+            tried.append(f"{_where(source)}: {e}")
+            continue
         if not os.path.exists(dest):
             # A download that produced nothing without raising must not crash
             # this gate with FileNotFoundError — refuse honestly instead.
@@ -304,6 +323,11 @@ def _fetch_verified(url, dest, want_sha256, max_bytes, what):
             # why: cannot re-fetch over a file we may not delete — fail below
             # rather than execute unverified bytes.
             break
+    _refuse(what, tried)
+
+
+def _refuse(what, tried):
+    """The one refusal `_fetch_verified` ends in, naming every source it asked."""
     raise SystemExit(
         f"refusing to run {what}: no source served its pinned bytes "
         f"({'; '.join(tried) or 'nothing was tried'}). Delete the cache "

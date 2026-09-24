@@ -65,7 +65,6 @@ use app::*;
 
 
 
-/// Decode the embedded AutoShade icon for the window title bar / taskbar.
 /// See main(): the last-crash report lands at `<store root>/panic.log`,
 /// and (Windows) a native message box points the user at it.
 fn install_panic_reporter() {
@@ -264,6 +263,7 @@ fn adopt_pre_rename_prefs() -> &'static str {
     }
 }
 
+/// Decode the embedded AutoShade icon for the window title bar / taskbar.
 fn app_icon() -> egui::IconData {
     let img = image::load_from_memory(include_bytes!("../../../assets/icon_256.png"))
         .expect("embedded icon decodes")

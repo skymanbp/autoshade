@@ -117,6 +117,13 @@ pub fn resolve_regions(
     let mut claimed_target = vec![0.0f32; len];
     let mut accepted = Vec::new();
     for mut region in candidates {
+        // One partition, one geometry: the claimed planes are sized from the
+        // first candidate, and a plane of another size shares no pixel `i`
+        // with them — it cannot take part in the overlap resolution, and
+        // accumulating it into the claimed planes would index past them.
+        if region.source.dimensions() != (w, h) {
+            continue;
+        }
         let source = subtract(&region.source, &claimed_source);
         let target = subtract(&region.target, &claimed_target);
         let ss = share(&source);
@@ -191,6 +198,30 @@ mod tests {
         assert_eq!(regions.iter().map(|r| r.class_id).collect::<Vec<_>>(), vec![10, 11]);
         assert!(regions[0].source.get_pixel(0, 0).0[0] > 0);
         assert_eq!(regions[0].source.get_pixel(4, 4).0[0], 0);
+    }
+
+    /// The claimed planes are sized from the first candidate; a later plane of
+    /// another geometry used to be accumulated into them by pixel index and
+    /// panicked past their end. A partition is one geometry, so such a plane
+    /// is skipped — the sidecar hands every class plane at one size, so this
+    /// is hardening, not a route.
+    ///
+    /// MUTATION: remove the dimensions guard in the accept loop and this test
+    /// panics with an out-of-bounds index.
+    #[test]
+    fn a_plane_of_another_geometry_is_skipped_instead_of_indexing_past_the_partition() {
+        let source = vec![
+            plane(3, 255, 0.9),
+            ClassPlane {
+                class_id: 4,
+                label: "wide".into(),
+                mean_confidence: 0.5,
+                mask: GrayImage::from_pixel(20, 20, Luma([255])),
+            },
+        ];
+        let regions = resolve_regions(&source, &source, 4);
+        assert_eq!(regions.iter().map(|r| r.class_id).collect::<Vec<_>>(), vec![3]);
+        assert_eq!(regions[0].source.dimensions(), (10, 10));
     }
 
     #[test]

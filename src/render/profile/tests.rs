@@ -264,3 +264,36 @@ fn the_tone_lookup_refuses_a_curve_it_cannot_read() {
         "an identity curve is the whole profile here, so there is nothing to apply"
     );
 }
+
+/// The tone lookup's two ends: above 1 the curve is continued along the chord
+/// through the origin, `lut[n−1]·x` — the identity for a curve ending at
+/// (1, 1), so a highlight outside the working gamut passes through, which is
+/// what the wide-gamut path carries — and at or below 0 it answers the
+/// curve's own start.
+///
+/// Below 0 the shipped `lut[0]·max(x, 0)` could only ever be ±0 — a step at
+/// exactly 0 for any curve that does not start there. (Whether the top
+/// should instead continue at the shoulder's tangent, which compresses every
+/// such highlight, is a decision for the profile fixtures; this test pins
+/// what ships.)
+///
+/// MUTATION: `lut[0] * x.max(0.0)` back in the bottom arm (the lifted curve
+/// reads 0 at 0), or the shoulder's tangent in the top arm (1.5 reads 1.25).
+#[test]
+fn the_tone_lookup_passes_white_through_and_starts_where_the_curve_does() {
+    let n = TONE_LUT;
+    let sqrt: Vec<f32> = (0..n).map(|i| (i as f32 / (n - 1) as f32).sqrt()).collect();
+    // Inside the range it is the curve.
+    assert!((sample(&sqrt, 0.25) - 0.5).abs() < 2e-3, "√0.25: {}", sample(&sqrt, 0.25));
+    // Above 1: the chord through the origin — the identity for a curve that
+    // ends at (1, 1) — so a highlight past white is carried, not clipped and
+    // not compressed by the shoulder's slope.
+    let got = sample(&sqrt, 1.5);
+    assert!((got - 1.5).abs() < 2e-3, "1.5 passes through on a curve ending at 1: {got}");
+    let half: Vec<f32> = sqrt.iter().map(|v| v * 0.5).collect();
+    assert!((sample(&half, 2.0) - 1.0).abs() < 2e-3, "the chord's slope is the curve's end value");
+    // A curve that starts above zero answers its start at 0 and below it.
+    let lifted: Vec<f32> = (0..n).map(|i| 0.1 + 0.9 * i as f32 / (n - 1) as f32).collect();
+    assert_eq!(sample(&lifted, 0.0), 0.1, "the curve at 0 is its first sample");
+    assert_eq!(sample(&lifted, -0.5), 0.1, "…and below 0 the same, not a sign times a clamp");
+}

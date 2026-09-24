@@ -557,9 +557,10 @@ pub fn load_image_for_develop(path: &Path) -> Result<DynamicImage> {
 /// A baked raster's reader, opened with the RAISED (not lifted) decoder limits
 /// and its format already probed.
 ///
-/// ONE construction, because there are now TWO consumers and they must agree:
-/// the pixel path ([`load_image_gated`]) and the header-only peak estimate
-/// ([`baked_header_peak_bytes`]). Under the crate's own `Limits::default()`
+/// ONE construction, because there are now THREE consumers and they must
+/// agree: the pixel path ([`load_image_gated`]), the header-only peak estimate
+/// ([`baked_header_peak_bytes`]) and the header-only frame read
+/// ([`source_window`]). Under the crate's own `Limits::default()`
 /// the TIFF codec's `set_limits` refuses to build a decoder whose frame is
 /// larger than the default 512 MB `max_alloc` — so an estimate that opened its
 /// own plain reader would answer "unreadable" for precisely the 60 MP-plus
@@ -676,7 +677,16 @@ fn load_image_gated(path: &Path, develop: bool) -> Result<DynamicImage> {
     // Big LR exports clear the budget; small profiled TIFFs would silently
     // skip the transform — the exact assume-sRGB bug this function fixes. Ask
     // a fresh, header-only decoder instead; its tag reads run under the tiff
-    // crate's own 1 MiB per-value default, and NO pixel is ever decoded here.
+    // crate's own defaults, where the one budget a tag value meets is the
+    // 256 MiB `decoding_buffer_size` at those ~32 bytes per profile byte —
+    // room for an ~8 MiB profile, far past any ICC file (`ifd_value_size`, the
+    // "1 MiB per value" this comment used to cite, is declared by tiff 0.11 and
+    // enforced nowhere) — and NO pixel is ever decoded here. What the codec
+    // still hides: `TiffDecoder::icc_profile` folds EVERY tiff error into
+    // `None` (image 0.25.10 `codecs/tiff.rs`), so a profile past that budget,
+    // or an I/O error inside the tag read, reads as "untagged" below. Only a
+    // direct `tiff` crate read of `Tag::IccProfile` could make that a hard
+    // error; nothing reached through `image` can see it.
     let icc_profile = match icc_profile {
         Some(p) => Some(p),
         None if format == Some(image::ImageFormat::Tiff) => {
@@ -1465,11 +1475,13 @@ pub fn source_window(path: &Path) -> Result<SourceWindow> {
         use image::metadata::Orientation as ImgO;
         use rawler::Orientation as O;
         // baked-by-construction: the `is_raw` gate above is this function's
-        // own dispatch, the one `load_image_gated` enforces for pixels.
-        let reader = image::ImageReader::open(path)
-            .with_context(|| format!("open image {}", path.display()))?
-            .with_guessed_format()
-            .with_context(|| format!("probe image {}", path.display()))?;
+        // own dispatch, the one `load_image_gated` enforces for pixels. The
+        // reader is `baked_reader`'s, limits and all: a plain `ImageReader`
+        // under the crate's default 512 MB `max_alloc` refuses to build the
+        // TIFF decoder for a 60 MP-plus 16-bit export at `into_decoder`, so
+        // this header-only read answered "unreadable" for a file the pixel
+        // path develops.
+        let reader = baked_reader(path)?;
         let mut decoder = reader
             .into_decoder()
             .with_context(|| format!("read the header of {}", path.display()))?;
@@ -1962,9 +1974,9 @@ fn describe_decoder_failure(path: &Path, e: &rawler::RawlerError) -> anyhow::Err
 
 /// [`get_decoder`] with [`describe_decoder_failure`]'s wording — the ONE place
 /// a decoder refusal is turned into a sentence, so `decode_raw`, the preview
-/// path, `frame_size`, `raw_orientation` and the full-res render cannot answer
-/// the same file three different ways (they did: "no rawler decoder for …",
-/// "no decoder for …", and rawler's raw Display).
+/// path, `frame_size`, `raw_orientation`, the CR3/RAF XMP-packet read and the
+/// full-res render cannot answer the same file three different ways (they did:
+/// "no rawler decoder for …", "no decoder for …", and rawler's raw Display).
 pub(crate) fn decoder_for<'a>(
     path: &Path,
     src: &'a RawSource,
@@ -2282,8 +2294,7 @@ pub fn embedded_xmp(path: &Path) -> Result<Option<String>> {
         guard_tiff_chain(path)?;
         let src =
             RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
-        let decoder = get_decoder(&src)
-            .map_err(|e| anyhow!("no rawler decoder for {}: {e}", path.display()))?;
+        let decoder = decoder_for(path, &src)?;
         decoder
             .xpacket(&src, &RawDecodeParams { image_index: 0 })
             .map_err(|e| anyhow!("read the XMP packet in {}: {e}", path.display()))?
@@ -2762,6 +2773,30 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two doors, one construction each: every `get_decoder` in this file goes
+    /// through `decoder_for` (the one wording for a refusal — the CR3/RAF
+    /// XMP-packet read had its own), and every baked `ImageReader` is
+    /// `baked_reader`'s (the one set of limits — `source_window` opened its
+    /// own, under the crate's 512 MB default). A second direct call of either
+    /// is the drift this pins against.
+    ///
+    /// MUTATION: call `rawler::get_decoder` or `image::ImageReader::open`
+    /// directly anywhere above the tests.
+    #[test]
+    fn decoder_and_baked_reader_construction_each_have_one_door() {
+        let src = crate::source_before_tests(include_str!("decode.rs"));
+        assert_eq!(
+            src.matches("get_decoder(").count(),
+            1,
+            "a `get_decoder` call outside `decoder_for`"
+        );
+        assert_eq!(
+            src.matches("ImageReader::open(").count(),
+            1,
+            "an `ImageReader` opened outside `baked_reader`"
+        );
     }
 
     /// The TIFF path is the one README's LR/Topaz round-trip actually takes,

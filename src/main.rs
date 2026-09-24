@@ -1758,24 +1758,6 @@ fn auto_cmd(
     Ok(())
 }
 
-/// Standalone AI denoise: RAW → neutral-developed denoised master, or a baked
-/// PNG/TIFF/JPEG → denoised copy. Always writes to ./out (library read-only).
-///
-/// **No `--long-edge` here, and the reason is not "we forgot"** (R29 Batch-2).
-/// Two independent ones, either sufficient:
-///
-/// * This output is a MASTER, not a deliverable — its whole purpose is to be
-///   the source of a later develop (`apply`/`auto` read it back through
-///   `store::render_source_checked`). Delivering it at 2048 px would hand the
-///   next develop a downscaled source and quietly cap every export made from
-///   it, which is the opposite of what a master is for.
-/// * Only the RAW arm below goes through `render_to_file` at all; the baked arm
-///   calls `denoise::denoise_active`, which has no delivery pipeline. A flag on
-///   this command would resize `.arw` inputs and silently ignore `.png` ones —
-///   one flag with two behaviours decided by a file extension.
-///
-/// The route for a small denoised deliverable is the honest one: denoise to a
-/// master, then `apply … --long-edge N` from it.
 /// Merge several frames of one scene into one master.
 ///
 /// Every frame is developed or loaded at the SAME size before anything else,
@@ -1834,6 +1816,24 @@ fn stack_cmd(
     Ok(())
 }
 
+/// Standalone AI denoise: RAW → neutral-developed denoised master, or a baked
+/// PNG/TIFF/JPEG → denoised copy. Always writes to ./out (library read-only).
+///
+/// **No `--long-edge` here, and the reason is not "we forgot"** (R29 Batch-2).
+/// Two independent ones, either sufficient:
+///
+/// * This output is a MASTER, not a deliverable — its whole purpose is to be
+///   the source of a later develop (`apply`/`auto` read it back through
+///   `store::render_source_checked`). Delivering it at 2048 px would hand the
+///   next develop a downscaled source and quietly cap every export made from
+///   it, which is the opposite of what a master is for.
+/// * Only the RAW arm below goes through `render_to_file` at all; the baked arm
+///   calls `denoise::denoise_active`, which has no delivery pipeline. A flag on
+///   this command would resize `.arw` inputs and silently ignore `.png` ones —
+///   one flag with two behaviours decided by a file extension.
+///
+/// The route for a small denoised deliverable is the honest one: denoise to a
+/// master, then `apply … --long-edge N` from it.
 fn denoise_cmd(
     input: &Path,
     out: Option<PathBuf>,
@@ -3355,20 +3355,6 @@ mod tests {
         assert!(!help.contains("RAW only"), "{help}");
     }
 
-    /// R27 L-07. `xmp::describe_import_losses` had two callers and both were
-    /// in the GUI: a CLI run over a photo whose Lightroom sidecar holds a
-    /// brush mask printed nothing at all about it, while the window said it on
-    /// every open. This is the CLI's half of that channel.
-    ///
-    /// The fixture is SYNTHETIC (public repo — no user sidecar bytes here).
-    /// Its shape follows the reference corpus: a `Correction` whose only
-    /// component is a `Mask/Paint`, which Lightroom recomputes from a digest,
-    /// so there are no pixels for a third-party reader to take.
-    ///
-    /// MUTATION THIS CATCHES: drop the `describe_import_losses` call from
-    /// `lightroom_import_note` (or gate it on `decode::is_raw` being FALSE)
-    /// and the brush arm goes silent again; drop the `is_raw` guard entirely
-    /// and the baked arm starts consulting a neighbouring `.xmp` that belongs
     /// `apply` takes a Lightroom sidecar, not only the JSON `analyze` writes.
     ///
     /// Every other front end could already render a photographer's own edit:
@@ -3435,6 +3421,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// R27 L-07. `xmp::describe_import_losses` had two callers and both were
+    /// in the GUI: a CLI run over a photo whose Lightroom sidecar holds a
+    /// brush mask printed nothing at all about it, while the window said it on
+    /// every open. This is the CLI's half of that channel.
+    ///
+    /// The fixture is SYNTHETIC (public repo — no user sidecar bytes here).
+    /// Its shape follows the reference corpus: a `Correction` whose only
+    /// component is a `Mask/Paint`, which Lightroom recomputes from a digest,
+    /// so there are no pixels for a third-party reader to take.
+    ///
+    /// MUTATION THIS CATCHES: drop the `describe_import_losses` call from
+    /// `lightroom_import_note` (or gate it on `decode::is_raw` being FALSE)
+    /// and the brush arm goes silent again; drop the `is_raw` guard entirely
+    /// and the baked arm starts consulting a neighbouring `.xmp` that belongs
     /// to somebody else's file.
     #[test]
     fn a_lossy_lightroom_sidecar_is_disclosed_on_the_cli() {

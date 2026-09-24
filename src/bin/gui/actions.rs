@@ -1027,8 +1027,9 @@ impl AutoShadeApp {
         // silent stand-in is the wrong image wearing the right card label),
         // and Msg::MasterLoaded installs by (photo, origin) identity, so a
         // delete/reorder mid-decode discards the late pixels. A re-click
-        // while decoding just spawns a redundant decode whose install finds
-        // `base` already filled — wasteful once, never wrong.
+        // while decoding is a no-op — `master_loads` holds the in-flight
+        // (photo, origin) pair until the landing clears it — and a re-click
+        // after it lands hits `master_cache`: no second decode either way.
         if vbase.is_none()
             && let Some(o) = &vorigin
             && let Some(photo) = self.src_path.clone()
@@ -2608,10 +2609,18 @@ impl AutoShadeApp {
         // Everything derived from the plate's frame. The Before texture is
         // rebuilt here rather than invalidated: `set_before` is the only
         // writer, and leaving a stale one on screen for a frame is the
-        // sideways-preview bug in miniature.
+        // sideways-preview bug in miniature. The paint canvas is REBOUND
+        // (`refresh_active_pixels`'s rule for a replaced plate): its buffer
+        // is dimension-locked to the plate and an odd turn transposes the
+        // plate, so a canvas left W×H under an H×W plate put every later
+        // brush stroke — and the fill/heal mask exported from it — at the
+        // wrong coordinates. A live brush session dies with the old frame,
+        // disclosed, exactly as at every other replacement door.
         if let Some(b) = self.base_preview.clone() {
             let curve = self.recipe.base_curve.clone();
             self.set_before(ctx, &b, &curve);
+            let (mw, mh) = b.dimensions();
+            self.rebind_paint_canvas(mw, mh);
         }
         self.overlay_ref = None;
         self.overlay_stale = true;
@@ -3468,7 +3477,7 @@ impl AutoShadeApp {
                     // has a real path (the semantic raster needs a home).
                     // Segmentation success produces semantic sky/land; an
                     // unavailable sidecar falls through to native luminance
-                    // ranges inside fit_recipe_zoned_with. The raster
+                    // ranges inside fit_recipe_zoned_with_regions. The raster
                     // gets a FRESH unique name per fit (mask-zone-sky.png,
                     // -2, -3, …, create_new-claimed like every master name):
                     // the old fixed name was rewritten IN PLACE before the

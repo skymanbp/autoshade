@@ -447,9 +447,13 @@ pub(crate) enum RetouchNote {
     /// An adjust of a generated card: region fills have no whole-frame D.
     Adjusted { out: PathBuf, region: bool, divergence: Option<f32> },
     /// Heal: spot count + artifact + the heal report's rationale split per
-    /// the L12#2B suffix contract (AI prose prefix + typed notes).
+    /// the L12#2B suffix contract (AI prose prefix + typed notes). `skipped`
+    /// is the engine's own count of planned spots it left untouched because
+    /// no donor of that size fit inside the frame (`HealReport::skipped`) —
+    /// rendered as its own line, so "healed N" never stands for "asked N".
     Healed {
         n: usize,
+        skipped: usize,
         out: PathBuf,
         ai_prose: String,
         notes: Vec<autoshade::rationale::Note>,
@@ -1447,16 +1451,16 @@ pub(crate) enum MaskKind {
     Radial,
 }
 
-/// Crop aspect presets. `None` = free; `Some(r)` = width/height in PIXELS
-/// (0.0 is the "original" sentinel, resolved against the photo at drag time).
-// Display names are English skeleton keys (localised via `tr` at the render
-// site); the ratio values are language-neutral. "1:1"…"9:16" have no ZH entry
-// and fall back to themselves in both languages.
 /// Export colour-space display names (indices = `exp_space`). Shared by the
 /// Export section and the toolbar buttons' delivery-summary hover.
 pub(crate) const EXPORT_SPACES: [&str; 3] =
     ["sRGB (universal)", "Display P3 (wide-gamut screens)", "Adobe RGB (print)"];
 
+/// Crop aspect presets. `None` = free; `Some(r)` = width/height in PIXELS
+/// (0.0 is the "original" sentinel, resolved against the photo at drag time).
+// Display names are English skeleton keys (localised via `tr` at the render
+// site); the ratio values are language-neutral. "1:1"…"9:16" have no ZH entry
+// and fall back to themselves in both languages.
 pub(crate) const CROP_ASPECTS: [(&str, Option<f32>); 11] = [
     ("Free", None),
     ("Original", Some(0.0)),

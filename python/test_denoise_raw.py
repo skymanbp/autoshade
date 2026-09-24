@@ -16,6 +16,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
+from unittest import mock
 
 import numpy as np
 
@@ -562,6 +563,26 @@ class EndToEnd(unittest.TestCase):
             var_fit = float(fa) * sky + float(fb)
             self.assertAlmostEqual(var_fit / var_true, 1.0, delta=0.15,
                                    msg=f"{name}: fitted {var_fit:.3e} against {var_true:.3e}")
+
+
+class TheMosaicWrite(unittest.TestCase):
+    def test_a_refused_write_leaves_no_part_file_behind(self):
+        # A failed encoder can leave a partial file at the .part name; the
+        # refusal used to `die` past it (`denoise.py` has cleaned up the same
+        # write since L03).
+        import cv2
+        with tempfile.TemporaryDirectory() as d:
+            output = os.path.join(d, "denoised.png")
+
+            def refuse(path, img):
+                with open(path, "wb") as f:
+                    f.write(b"\x89PNG partial")
+                return False
+
+            with mock.patch.object(cv2, "imwrite", refuse), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    denoise_raw.write_mosaic(np.zeros((4, 4), dtype=np.uint16), output)
+            self.assertEqual(os.listdir(d), [], "a refused write must not leave its .part behind")
 
 
 if __name__ == "__main__":

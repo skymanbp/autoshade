@@ -348,6 +348,18 @@ class FetchSourceOrderTests(unittest.TestCase):
         self.assertIn("github.com/cszn", message)
         self.assertFalse(os.path.exists(self.dest), "nothing unverified is left behind")
 
+    def test_a_stale_cache_is_discarded_before_our_copy_is_asked(self):
+        # The cached copy used to be judged INSIDE the source loop, where it
+        # consumed the mirror's turn without a download: a legacy cache went
+        # straight to the upstream, and its mismatch was logged against a
+        # mirror that had served nothing.
+        with open(self.dest, "wb") as f:
+            f.write(IMPOSTOR)
+        asked = self.fetch({self.ours: PINNED, UPSTREAM: PINNED})
+        self.assertEqual(asked, [self.ours], "the mirror keeps its turn after a stale cache")
+        with open(self.dest, "rb") as f:
+            self.assertEqual(f.read(), PINNED)
+
     def test_a_cache_that_matches_the_pin_asks_nobody(self):
         with open(self.dest, "wb") as f:
             f.write(PINNED)

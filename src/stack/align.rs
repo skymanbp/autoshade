@@ -147,11 +147,15 @@ fn centre(w: usize, h: usize) -> (f32, f32) {
 pub struct Warp {
     /// The global part, in centred coordinates of the frame it was solved on.
     pub global: Affine,
-    /// Residual `(dx, dy)` in pixels at each block CENTRE, row-major over
-    /// `bx`×`by`. Empty when local refinement was not asked for or was refused
-    /// everywhere — which is a real answer and not a failure: a tripod bracket
-    /// has no parallax to correct.
-    pub local: Vec<[f32; 2]>,
+    /// Residual in pixels at each block CENTRE, row-major over `bx`×`by`: the
+    /// `dx` plane, then the `dy` plane. Two planes rather than one `[f32; 2]`
+    /// per block because [`Warp::apply`] hands each straight to
+    /// `bilinear_plane` — splitting per call cost one heap allocation per
+    /// component per PIXEL, 48 M on a 24 MP frame. Both empty when local
+    /// refinement was not asked for or was refused everywhere — which is a
+    /// real answer and not a failure: a tripod bracket has no parallax to
+    /// correct.
+    pub local: [Vec<f32>; 2],
     /// Blocks across and down. Both 0 while `local` is empty.
     pub bx: usize,
     pub by: usize,
@@ -160,7 +164,7 @@ pub struct Warp {
 impl Warp {
     /// The identity, with no residual field.
     pub fn identity() -> Warp {
-        Warp { global: Affine::IDENTITY, local: Vec::new(), bx: 0, by: 0 }
+        Warp { global: Affine::IDENTITY, local: [Vec::new(), Vec::new()], bx: 0, by: 0 }
     }
 
     /// Where `(x, y)` lands under the global affine AND the residual field.
@@ -171,19 +175,22 @@ impl Warp {
     /// step at every block boundary, which on a merge reads as tiling.
     pub fn apply(&self, x: f32, y: f32, w: usize, h: usize) -> (f32, f32) {
         let (u, v) = self.global.apply(x, y, w, h);
-        if self.local.is_empty() {
+        if self.local[0].is_empty() {
             return (u, v);
         }
         // Block centres sit at (i + ½)·w/bx, so a pixel's grid coordinate is
         // x·bx/w − ½; `bilinear_plane` clamps the rest.
         let gx = x * self.bx as f32 / w as f32 - 0.5;
         let gy = y * self.by as f32 / h as f32 - 0.5;
-        let comp = |c: usize| {
-            let plane: Vec<f32> = self.local.iter().map(|d| d[c]).collect();
-            bilinear_plane(&plane, self.bx, self.by, gx, gy)
-        };
+        let comp = |c: usize| bilinear_plane(&self.local[c], self.bx, self.by, gx, gy);
         (u + comp(0), v + comp(1))
     }
+}
+
+/// The block field as the two planes [`Warp::local`] stores — split ONCE here,
+/// never per sample.
+fn split_field(field: &[[f32; 2]]) -> [Vec<f32>; 2] {
+    [field.iter().map(|d| d[0]).collect(), field.iter().map(|d| d[1]).collect()]
 }
 
 /// What the solver is allowed to do.
@@ -877,16 +884,16 @@ pub fn solve(
         }
     }
     if params.blocks == 0 {
-        return Warp { global: a, local: Vec::new(), bx: 0, by: 0 };
+        return Warp { global: a, local: [Vec::new(), Vec::new()], bx: 0, by: 0 };
     }
     let (local, bx, by) = refine_blocks(&t, &i, a, params);
     // Every block refused is not "no field" by accident — it is the answer a
     // tripod bracket gives, and carrying an all-zero grid would cost every
     // later sample a bilinear read of zeros.
     if local.iter().all(|d| d[0] == 0.0 && d[1] == 0.0) {
-        return Warp { global: a, local: Vec::new(), bx: 0, by: 0 };
+        return Warp { global: a, local: [Vec::new(), Vec::new()], bx: 0, by: 0 };
     }
-    Warp { global: a, local, bx, by }
+    Warp { global: a, local: split_field(&local), bx, by }
 }
 
 /// Resample `src` through `warp`, in sRGB-encoded RGB.
@@ -1162,7 +1169,7 @@ mod tests {
         let (mut subject, mut ground, mut flat) = (Vec::new(), Vec::new(), Vec::new());
         for bj in 0..warp.by {
             for bi in 0..warp.bx {
-                let d = warp.local[bj * warp.bx + bi][0];
+                let d = warp.local[0][bj * warp.bx + bi];
                 if s.flat.contains(&bi) {
                     flat.push(d);
                 } else if s.cols.contains(&bi) && s.rows.contains(&bj) {
@@ -1314,7 +1321,7 @@ mod tests {
         let params = AlignParams { blocks: 6, ..Default::default() };
         let s = subject_scene(w, h, 6, 4, 12.0, -1.5);
         let warp = solve(&s.reference, &s.moving, w, h, &params);
-        assert!(!warp.local.is_empty(), "a moving subject must leave a residual field");
+        assert!(!warp.local[0].is_empty(), "a moving subject must leave a residual field");
         assert_eq!(
             (warp.bx, warp.by),
             (6, 4),
@@ -1368,7 +1375,7 @@ mod tests {
         // and a second variable in it would only make a failure ambiguous.
         let s = subject_scene(w, h, 9, 6, 3.0, 0.0);
         let warp = solve(&s.reference, &s.moving, w, h, &params);
-        assert!(!warp.local.is_empty(), "a moving subject must leave a residual field");
+        assert!(!warp.local[0].is_empty(), "a moving subject must leave a residual field");
         assert_eq!((warp.bx, warp.by), (9, 6), "premise: the grid the regions were drawn against");
         let (subject, ground, flat) = read_regions(&warp, &s);
         assert!(
@@ -1410,7 +1417,7 @@ mod tests {
         // same direction `solve` answers in.
         let back = Warp {
             global: truth.inverse().expect("a translation is invertible"),
-            local: Vec::new(),
+            local: [Vec::new(), Vec::new()],
             bx: 0,
             by: 0,
         };
@@ -1438,6 +1445,46 @@ mod tests {
             .map(|k| (restored[k][1] - moving[k][1]).abs())
             .fold(0.0f32, f32::max);
         assert_eq!(kept, 0.0, "an uncovered pixel must keep the value it had, worst {kept}");
+    }
+
+    /// The residual field is stored as two planes and read without a per-sample
+    /// allocation; the answer must be the one the interleaved `[dx, dy]` field
+    /// gave, bit for bit — the same `bilinear_plane` on the same grid coordinate.
+    ///
+    /// MUTATION: read `local[1]` for `dx`; drop the `− ½` from the grid
+    /// coordinate; split the field with the components swapped.
+    #[test]
+    fn the_residual_field_is_read_from_split_planes_bit_for_bit() {
+        let (w, h, bx, by) = (40usize, 30usize, 4usize, 3usize);
+        let field: Vec<[f32; 2]> = (0..bx * by)
+            .map(|k| [(k as f32 * 0.7).sin() * 3.0, (k as f32 * 1.3).cos() * 2.0])
+            .collect();
+        let warp = Warp {
+            global: Affine([1.0, 0.02, 1.5, -0.01, 1.0, -0.5]),
+            local: split_field(&field),
+            bx,
+            by,
+        };
+        let mut moved = 0usize;
+        for y in 0..h {
+            for x in 0..w {
+                let (px, py) = (x as f32, y as f32);
+                let (u, v) = warp.global.apply(px, py, w, h);
+                // The pre-split reading: a plane collected per component, per call.
+                let gx = px * bx as f32 / w as f32 - 0.5;
+                let gy = py * by as f32 / h as f32 - 0.5;
+                let want = |c: usize| {
+                    let plane: Vec<f32> = field.iter().map(|d| d[c]).collect();
+                    bilinear_plane(&plane, bx, by, gx, gy)
+                };
+                let (eu, ev) = (u + want(0), v + want(1));
+                let (au, av) = warp.apply(px, py, w, h);
+                assert_eq!(au.to_bits(), eu.to_bits(), "dx at ({x}, {y})");
+                assert_eq!(av.to_bits(), ev.to_bits(), "dy at ({x}, {y})");
+                moved += usize::from((au, av) != (u, v));
+            }
+        }
+        assert!(moved > w * h / 2, "the field must really move most pixels, moved {moved}");
     }
 
     /// v1.5.0 Track S: a shift big enough to push a FIFTH of the frame out of

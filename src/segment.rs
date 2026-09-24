@@ -1335,10 +1335,10 @@ fn stage_source_frame(src: &Path, quarter_turns: u8) -> Option<PathBuf> {
 
 /// A FRESH temp name for one staged source frame.
 ///
-/// pid + seq + stem, the shape `style::embed_preview` settled on
-/// (`style.rs:400`) after the pid + tag pair proved insufficient there for
-/// exactly this reason. `resolve_ai_masks` has two single-photo callers today
-/// (`apply`, `auto`) and neither runs concurrently, so the collision is LATENT
+/// pid + seq + stem, the shape `style::stage_embed_frame` settled on after
+/// the pid + tag pair proved insufficient there for exactly this reason.
+/// `resolve_ai_masks` has two single-photo callers today (`apply`, `auto`)
+/// and neither runs concurrently, so the collision is LATENT
 /// rather than live — which is precisely why the sequence belongs here and not
 /// in a future incident report: the day a pool calls this (the `--jobs`
 /// sequencer already runs `process_one` three-wide) two workers staging the

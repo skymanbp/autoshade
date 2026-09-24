@@ -31,13 +31,19 @@
 //! many photographs took it (`reused N, recomputed M`).
 //!
 //! **Provenance gates, entry by entry.** An entry is only an answer to the
-//! question THIS build is asking: [`CachedExemplar::version`] must be the
-//! index's current feature semantics, [`CachedExemplar::provenance`] must be
-//! this build's embedding provenance (checkpoint, tokenizer and vocabulary
-//! version), and the stored description carries
-//! [`crate::describe::CachedDescription`]'s own model/revision/prompt stamp.
-//! Anything that does not match is dropped at load, so `len()` is the number
-//! of entries that can actually be served.
+//! question THIS build is asking, and the gates sit at two doors. At LOAD:
+//! [`CachedExemplar::version`] must be the index's current feature semantics
+//! and every number must sit inside the index's own bands ([`Bands`]) —
+//! anything else is dropped there, so `len()` is the number of entries that
+//! can be served at all. As an entry is SERVED, because these gate parts of it
+//! rather than the whole: its vectors are served only while
+//! [`CachedExemplar::provenance`] is this build's embedding provenance
+//! (checkpoint, tokenizer and vocabulary version —
+//! [`CachedExemplar::embedding_is_current`]), and its prose only while the
+//! stored description's own [`crate::describe::CachedDescription`]
+//! model/revision/prompt stamp is current ([`CachedExemplar::current_desc`]).
+//! An entry whose vectors are another checkpoint's still serves its features
+//! and its prose; the build measures the vectors again.
 //!
 //! **It is a CACHE, not an index**: losing it costs time, never correctness.
 //! The file mechanics — the byte cap, the four degradations, the atomic
@@ -50,7 +56,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 /// The cache's file name inside a build's scratch directory. One spelling,
-/// because [`cache_path`] and every test that isolates itself must name the
+/// because [`cache_path_in`] and every test that isolates itself must name the
 /// same file.
 pub const CACHE_FILE: &str = "style-exemplars.json";
 

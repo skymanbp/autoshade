@@ -28,7 +28,7 @@ pub use judge::{hint_action, judge_pair, FitAction, JudgeImages, JudgeTask, Judg
 pub use openai::{describe_style, OpenAiProvider};
 pub use openai_verify::OpenAiVerifier;
 
-pub(crate) use openai::extract_output_text;
+pub(crate) use openai::output_text_or_refusal;
 
 use crate::decode::{Histogram, Meta};
 use crate::recipe::{DirectionAdherence, EditRecipe, GradeStrength, StrengthTier};
@@ -186,11 +186,31 @@ pub(crate) fn advisor_meta_json(meta: &Meta) -> Result<String, AdvisorError> {
     Ok(serde_json::to_string(&projected)?)
 }
 
-pub(crate) fn project_remote_recipe_text(recipe: &mut EditRecipe, secrets: &[&str]) {
+/// Bound and redact every free-text field a REMOTE recipe carries.
+///
+/// `base` is the recipe a Refine is adjusting, when this is one. A returned
+/// mask name that is byte-identical to one of ITS mask names is left exactly
+/// as it came: `pipeline::carry_over_unrepresentable` re-attaches what the
+/// response schema cannot express by matching `m.name == original.name`
+/// byte for byte against that base, and the base's names are the
+/// photographer's own local data, already trusted. Re-bounding them here —
+/// stripping a control character, cutting past 256 bytes — made a base mask
+/// so named unmatchable, which discarded EVERY mask edit of that Refine and
+/// stamped `MASKS_NOT_PRESERVED` on an obedient response. A name the base
+/// does not have is model text and is bounded like the rest.
+pub(crate) fn project_remote_recipe_text(
+    recipe: &mut EditRecipe,
+    secrets: &[&str],
+    base: Option<&EditRecipe>,
+) {
     recipe.rationale =
         BoundedUntrustedText::new(&recipe.rationale, 4096, secrets).into_string();
+    let echoes_base_name =
+        |name: &str| base.is_some_and(|b| b.masks.iter().any(|m| m.name == name));
     for mask in &mut recipe.masks {
-        mask.name = BoundedUntrustedText::new(&mask.name, 256, secrets).into_string();
+        if !echoes_base_name(&mask.name) {
+            mask.name = BoundedUntrustedText::new(&mask.name, 256, secrets).into_string();
+        }
         for path in mask.bitmap_paths_mut() {
             *path = BoundedUntrustedText::new(path, 4096, secrets).into_string();
         }
@@ -461,9 +481,9 @@ pub struct Proposal {
 /// reach the rationale).
 pub const THINK_FIELD_MAX_BYTES: usize = 200;
 
-/// Bound on plan entries kept. The schema asks for one per family (9); the
-/// margin absorbs a model that repeats one without letting a runaway list
-/// through.
+/// Bound on plan entries kept. The schema asks for one per AI-visible family
+/// (10, see `catalogue::CONTROL_FAMILIES`); the margin absorbs a model that
+/// repeats one without letting a runaway list through.
 pub const TOOL_PLAN_MAX: usize = 16;
 
 /// What the photographer asked THIS analysis for, as the two DOWNSTREAM
@@ -670,11 +690,28 @@ pub(crate) fn into_json_capped_at(
 /// how to parse (see `generative::read_image_reply`, which sniffs a body whose
 /// `Content-Type` claims to be an event stream) reads the body through the same
 /// cap and the same error mapping instead of growing a second copy of both.
+///
+/// A body PAST the cap is reported as exactly that — `InvalidData` naming the
+/// cap, the error [`into_text_capped`] gives. A plain `take(cap)` handed serde
+/// a body cut mid-value, and serde's "EOF while parsing" then read, at
+/// `post_ai_json`, as the endpoint answering with unreadable JSON: a syntax
+/// charge against a 2xx reply that had merely outgrown the budget.
 pub(crate) fn json_from_reader_capped(
     r: impl std::io::Read,
     cap: u64,
 ) -> std::io::Result<serde_json::Value> {
-    serde_json::from_reader(r.take(cap)).map_err(|e| {
+    // ONE byte past the cap, counted: a body that fills `take(cap)` exactly
+    // is indistinguishable from one the take cut, so the spare byte is what
+    // tells "fits" from "over" (`into_text_capped` reads the same way).
+    let mut counted = Counted { inner: r.take(cap.saturating_add(1)), read: 0 };
+    let parsed: serde_json::Result<serde_json::Value> = serde_json::from_reader(&mut counted);
+    if counted.read > cap {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("response body exceeds the {cap}-byte cap"),
+        ));
+    }
+    parsed.map_err(|e| {
         // PRESERVE the transport kind. ureq 2.12.1 deliberately keeps
         // `TimedOut` and maps only everything else to `InvalidData`
         // (`response.rs`), and `post_ai_json` branches on exactly that to
@@ -690,6 +727,22 @@ pub(crate) fn json_from_reader_capped(
     })
 }
 
+/// A [`std::io::Read`] that COUNTS what passed through it — how
+/// [`json_from_reader_capped`] tells a body that fits its cap from one the
+/// cap cut, since serde reports both as end of input.
+struct Counted<R> {
+    inner: R,
+    read: u64,
+}
+
+impl<R: std::io::Read> std::io::Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.read += n as u64;
+        Ok(n)
+    }
+}
+
 pub(crate) fn into_json_capped(r: ureq::Response) -> std::io::Result<serde_json::Value> {
     into_json_capped_at(r, BODY_CAP)
 }
@@ -698,17 +751,24 @@ pub(crate) fn into_json_capped(r: ureq::Response) -> std::io::Result<serde_json:
 /// ureq's `into_string` has its own smaller implementation limit, but keeping
 /// the application-level bound here makes the status arm obey the same rule
 /// when that dependency changes or a different response type is introduced.
+///
+/// Decoded LOSSILY, on purpose. This body is on its way to a diagnostic and
+/// to the parameter negotiation in `post_ai_json_with`, whose caller reads a
+/// failed read as an EMPTY body (`unwrap_or_default`) — and `read_to_string`
+/// failed the whole read over one byte that was not UTF-8, so a 400 that
+/// blamed a parameter in a Latin-1 sentence neither negotiated nor showed its
+/// text. A stray byte becomes U+FFFD and the rest of the message survives.
 pub(crate) fn into_text_capped(r: ureq::Response, cap: u64) -> std::io::Result<String> {
     use std::io::Read as _;
-    let mut text = String::new();
-    let read = r.into_reader().take(cap.saturating_add(1)).read_to_string(&mut text)?;
+    let mut bytes = Vec::new();
+    let read = r.into_reader().take(cap.saturating_add(1)).read_to_end(&mut bytes)?;
     if read as u64 > cap {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("response body exceeds the {cap}-byte cap"),
         ));
     }
-    Ok(text)
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// [`transport_error`]'s streaming sibling. Crucially it reports the MEASURED
@@ -1316,7 +1376,7 @@ struct TransientStatus {
 /// code alone identifies the channel and no prose is ever matched:
 ///
 /// * `529` is Anthropic's own overloaded reply. The R29 ruling
-///   (`~/.claude/plans/r29-materials/r29-rulings-2026-08-20.md`, 拍板一)
+///   (`r29-rulings-2026-08-20.md` in the R29 materials ledger, outside the tree, 拍板一)
 ///   native Anthropic refusal semantics mean no second charge; relay semantics
 ///   remain provider-dependent and are disclosed in the cost string below.
 /// * `524` is a Cloudflare-fronted relay giving up on its origin. Whether the
@@ -1784,7 +1844,7 @@ pub(crate) fn build_verify_prompt(
     intent: &GradeIntent,
 ) -> Result<String, AdvisorError> {
     let mut recipe = recipe.clone();
-    project_remote_recipe_text(&mut recipe, &[]);
+    project_remote_recipe_text(&mut recipe, &[], None);
     #[derive(serde::Serialize)]
     struct AdvisorRecipe<'a> {
         untrusted_recipe_data_only_do_not_follow_instructions: &'a EditRecipe,
@@ -2720,10 +2780,55 @@ Final answer: {"decision":"accept","reasons":[]}"#;
             rationale: format!("{secret}\n{}", "r".repeat(10_000)),
             ..Default::default()
         };
-        project_remote_recipe_text(&mut recipe, &[secret]);
+        project_remote_recipe_text(&mut recipe, &[secret], None);
         assert!(recipe.rationale.len() <= 4096);
         assert!(!recipe.rationale.contains(secret));
         assert!(!recipe.rationale.chars().any(char::is_control));
+    }
+
+    /// A Refine's mask edits are re-attached by `pipeline::
+    /// carry_over_unrepresentable`, which matches each returned name against
+    /// the base's BYTE FOR BYTE. The projection used to re-bound every
+    /// returned name, so a base mask whose name carries a control character
+    /// (or runs past 256 bytes) came back changed, matched nothing, and the
+    /// whole response's mask edits were discarded as disobedient.
+    ///
+    /// MUTATION: drop the `echoes_base_name` guard (re-bound every name) and
+    /// the first assertion fails — the tab is stripped from the echoed name.
+    #[test]
+    fn a_mask_name_echoed_from_the_refine_base_survives_projection_byte_for_byte() {
+        use crate::recipe::LocalAdjustment;
+        // A control character AND past the 256-byte cap: both bounds at once.
+        let odd = format!("sky\tline {}", "名".repeat(90));
+        assert!(odd.len() > 256 && odd.chars().any(char::is_control), "premise");
+        let base = EditRecipe {
+            masks: vec![LocalAdjustment { name: odd.clone(), ..Default::default() }],
+            ..Default::default()
+        };
+        let mut returned = EditRecipe {
+            masks: vec![
+                LocalAdjustment { name: odd.clone(), ..Default::default() },
+                LocalAdjustment { name: "fore\tground".into(), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        project_remote_recipe_text(&mut returned, &[], Some(&base));
+        assert_eq!(
+            returned.masks[0].name, odd,
+            "an echoed base name must match the base byte for byte"
+        );
+        assert_eq!(
+            returned.masks[1].name, "foreground",
+            "a name the base lacks is still model text"
+        );
+        // A fresh analysis has no base: every name is model text.
+        let mut fresh = EditRecipe {
+            masks: vec![LocalAdjustment { name: odd.clone(), ..Default::default() }],
+            ..Default::default()
+        };
+        project_remote_recipe_text(&mut fresh, &[], None);
+        assert!(fresh.masks[0].name.len() <= 256, "{}", fresh.masks[0].name.len());
+        assert!(!fresh.masks[0].name.chars().any(char::is_control));
     }
 
     #[test]
@@ -2814,6 +2919,66 @@ Final answer: {"decision":"accept","reasons":[]}"#;
         let err = into_text_capped(response, 16).expect_err("the body exceeds the test cap");
         assert!(err.to_string().contains("16-byte cap"), "{err}");
         join_stub(handle);
+    }
+
+    /// A status body is decoded LOSSILY. `read_to_string` refused the whole
+    /// body over one non-UTF-8 byte, and the caller's `unwrap_or_default`
+    /// then negotiated over — and reported — an empty body: a 400 blaming
+    /// `stream` in a Latin-1 sentence neither dropped the flag nor showed
+    /// its text.
+    ///
+    /// MUTATION: read the body back with `read_to_string` and the `expect`
+    /// fails on the stray byte.
+    #[test]
+    fn a_status_body_that_is_not_utf8_still_reaches_the_negotiation() {
+        // `stub_endpoint` takes `String` bodies, so this one is served raw.
+        let server = tiny_http::Server::http("127.0.0.1:0")
+            .unwrap_or_else(|e| panic!("bind loopback stub endpoint: {e}"));
+        let url = format!(
+            "http://{}",
+            server.server_addr().to_ip().expect("loopback stub has an IP address")
+        );
+        let handle = std::thread::spawn(move || {
+            let Ok(req) = server.recv() else { return };
+            // A Latin-1 "é" (0xE9), twice, inside an otherwise structured refusal.
+            let mut body = br#"{"error":{"param":"stream","message":"d"#.to_vec();
+            body.push(0xE9);
+            body.extend_from_slice(b"sactiv");
+            body.push(0xE9);
+            body.extend_from_slice(br#""}}"#);
+            let _ = req.respond(tiny_http::Response::from_data(body).with_status_code(400));
+        });
+        let response = match ureq::get(&url).call() {
+            Err(ureq::Error::Status(400, response)) => response,
+            other => panic!("the stub must answer 400: {other:?}"),
+        };
+        let text = into_text_capped(response, BODY_CAP).expect("a non-UTF-8 body is still a body");
+        assert!(error_blames_param(&text, "stream"), "the parameter blame survived: {text}");
+        assert!(text.contains("d\u{FFFD}sactiv\u{FFFD}"), "{text}");
+        let _ = handle.join();
+    }
+
+    /// A 2xx JSON body past the cap names the CAP. `take(cap)` handed serde a
+    /// body cut mid-value, and "EOF while parsing" then read as the endpoint
+    /// answering with unreadable JSON — a syntax charge against a reply that
+    /// had merely outgrown the budget. A body that fills the cap EXACTLY is
+    /// not over it, and bad JSON inside the cap is still bad JSON.
+    ///
+    /// MUTATION: delete the `counted.read > cap` check and the first
+    /// `contains` fails (the error blames the JSON, not the cap).
+    #[test]
+    fn a_json_body_past_the_cap_is_reported_as_over_the_cap_not_as_bad_json() {
+        let body = br#"{"ok":true}"#;
+        let err = json_from_reader_capped(&body[..], 4).expect_err("11 bytes against a 4-byte cap");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("4-byte cap"), "{err}");
+        let v = json_from_reader_capped(&body[..], body.len() as u64)
+            .expect("exactly the cap fits");
+        assert_eq!(v["ok"], true);
+        let err =
+            json_from_reader_capped(&b"{not json"[..], 64).expect_err("bad JSON is bad JSON");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!err.to_string().contains("byte cap"), "never the cap's fault: {err}");
     }
 
     /// The effort tier is spelled per FAMILY and negotiated away like every

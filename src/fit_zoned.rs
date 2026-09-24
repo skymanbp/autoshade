@@ -97,8 +97,9 @@ pub(crate) const ZONE_ATMOS_GAIN_MAX: f32 = 1.18;
 /// zones; that calibration contradiction is pinned in the fixture test and
 /// disclosed in the implementation report rather than hidden by a false cap.
 const ZONE_TEXTURE_MIN: f32 = 0.70;
-/// Mask-weighted mean-gradient energy may not grow above this ratio. The 2.05
-/// ceiling leaves measured headroom over the accepted maximum of 1.972.
+/// Mask-weighted mean-gradient energy may not grow above this ratio. The 1.95
+/// ceiling leaves measured headroom over the accepted maximum of 1.918 (the
+/// list above).
 const ZONE_TEXTURE_MAX: f32 = 1.95;
 /// Weighted clipped-luma share may grow by at most one percentage point.
 const ZONE_CLIP_GROWTH: f32 = 0.01;
@@ -3191,7 +3192,7 @@ fn attach_semantic_regions(
     let (aw, ah) = preview.dimensions();
     // Region j is measured against the render region j-1 left behind, the
     // same rule the tile sweep already follows with its own `current`
-    // (`spatial::sweep_tiles`). Region 0 reads the pre-region render, which
+    // (`spatial::attach_tiles`). Region 0 reads the pre-region render, which
     // was already being computed for its dimensions and then discarded.
     let mut current = fit::pixels_of(&preview);
     let mut frame_err = report.err_after;
@@ -5220,8 +5221,11 @@ fn attach_one_zone(
                 },
                 vec![
                     ("label", label.to_string()),
-                    ("before", format!("{zone_before:.3}")),
-                    ("after", format!("{zone_after:.3}")),
+                    // The pair the verdict was decided on: with colour
+                    // withheld and tone kept that is the luma-only residual,
+                    // not the whole-zone one an accepted zone records.
+                    ("before", format!("{accepted_before:.3}")),
+                    ("after", format!("{accepted_after:.3}")),
                     ("ratio", format!("{:.0}", ZONE_ACCEPT_RATIO * 100.0)),
                     ("floor", format!("{ZONE_MATCHED_ERR:.3}")),
                     ("gain", format!("{:.0}", (1.0 - ZONE_FLOOR_MIN_GAIN) * 100.0)),

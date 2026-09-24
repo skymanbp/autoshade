@@ -4,8 +4,6 @@
 
 use anyhow::{anyhow, Context, Result};
 
-/// Fetch the sorted, de-duplicated list of model ids from `{base_url}/models`.
-/// `base_url` is the OpenAI-compatible API root (e.g. `https://api.openai.com/v1`).
 const MODELS_RESPONSE_CAP: u64 = 4 * 1024 * 1024;
 const MODEL_ITEM_MAX: usize = 4096;
 const MODEL_ID_MAX_BYTES: usize = 256;
@@ -42,6 +40,8 @@ fn extract_model_ids(value: &serde_json::Value) -> Result<Vec<String>> {
     Ok(ids)
 }
 
+/// Fetch the sorted, de-duplicated list of model ids from `{base_url}/models`.
+/// `base_url` is the OpenAI-compatible API root (e.g. `https://api.openai.com/v1`).
 pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>> {
     // Trim BEFORE the header is built, and refuse what cannot ride one. ureq
     // quotes the whole rejected header line back — `Authorization: Bearer
@@ -194,23 +194,21 @@ mod tests {
         assert!(!is_chat_model(""), "an empty id is not a model");
     }
 
-        #[test]
-        fn model_catalogues_bound_items_and_identifiers_before_sorting() {
-            let excessive = serde_json::json!({
-                "data": (0..=MODEL_ITEM_MAX)
-                    .map(|i| serde_json::json!({"id": format!("gpt-{i}")}))
-                    .collect::<Vec<_>>()
-            });
-            assert!(extract_model_ids(&excessive).is_err());
+    #[test]
+    fn model_catalogues_bound_items_and_identifiers_before_sorting() {
+        let excessive = serde_json::json!({
+            "data": (0..=MODEL_ITEM_MAX)
+                .map(|i| serde_json::json!({"id": format!("gpt-{i}")}))
+                .collect::<Vec<_>>()
+        });
+        assert!(extract_model_ids(&excessive).is_err());
 
-            let long = serde_json::json!({
-                "data": [{"id": "x".repeat(MODEL_ID_MAX_BYTES + 1)}]
-            });
-            assert!(extract_model_ids(&long).is_err());
+        let long = serde_json::json!({
+            "data": [{"id": "x".repeat(MODEL_ID_MAX_BYTES + 1)}]
+        });
+        assert!(extract_model_ids(&long).is_err());
 
-            let controlled = serde_json::json!({"data": [{"id": "gpt-safe\nforged"}]});
-            assert!(extract_model_ids(&controlled).is_err());
-        }
-
-    // FILE: src/config.rs  (append inside the existing `mod tests`)
+        let controlled = serde_json::json!({"data": [{"id": "gpt-safe\nforged"}]});
+        assert!(extract_model_ids(&controlled).is_err());
+    }
 }

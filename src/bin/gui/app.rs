@@ -346,7 +346,8 @@ pub(crate) struct AutoShadeApp {
     // can act at frame start, before layout. 1.0 until a first frame lands.
     pub(crate) zoom_one_to_one: f32,
     // Where the zoom is HEADING: discrete jumps (Fit/1:1/keys/double-click)
-    // set only this and `zoom` glides there over ~120 ms (step_zoom_glide);
+    // set only this and `zoom` glides there over ~120 ms (apply_zoom_glide,
+    // one glide_step per frame from update());
     // continuous inputs (scroll) and photo opens write both, staying
     // instant. Pan is never animated — view_uv's per-frame clamp re-solves
     // it against the gliding zoom, which eases it for free.
@@ -1543,6 +1544,9 @@ impl AutoShadeApp {
             let lang = self.lang;
             let accent = self.theme.colors().accent_text;
             egui::Window::new(tr(lang, "⌨ Shortcuts"))
+                // Fixed id, as for Settings: the title varies with the language
+                // and egui keys window state (position) off the id.
+                .id(egui::Id::new("shortcuts_window"))
                 .collapsible(false)
                 .resizable(false)
                 .open(&mut open)

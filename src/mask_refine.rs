@@ -388,8 +388,11 @@ pub(crate) struct WidenReading {
     /// Share of the mask's own 50% contour that ran through guide smooth
     /// enough to widen, in [0, 1]. Zero is the abstention.
     pub(crate) widened_share: f32,
-    /// The widest ramp radius the rule applied anywhere, in MASK pixels —
-    /// the cap, reached where the guide is perfectly flat.
+    /// The ramp radius the rule was ALLOWED, in MASK pixels: `FEATHER_CAP_SHARE`
+    /// of the mask height, never under one — how far the broadening kernel
+    /// reaches, and so the widest ramp any pixel could have received where the
+    /// guide is perfectly flat. Reported as that cap, not measured per pixel;
+    /// 0 when the rule abstained before computing it.
     pub(crate) max_radius: u32,
     pub(crate) coverage_delta: f32,
     /// Alpha changed outside the collar. Zero by construction; carried

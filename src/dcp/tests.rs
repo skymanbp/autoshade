@@ -176,6 +176,31 @@ fn a_broken_profile_is_refused_by_name_and_never_panics() {
     assert!(matches!(parse(&zero), Err(Refusal::TableMismatch(_))), "zero division");
 }
 
+/// Dimensions whose product does not fit `usize` are refused AS an overflow —
+/// never multiplied around the wrap. `2 × 3340214413 × 2761311370` is
+/// 2^64 + 4, so a wrapping product reads as FOUR cells (twelve floats): a data
+/// tag of exactly twelve floats then passes the length check and hands the
+/// render a table claiming billions of entries it does not hold, and the first
+/// lookup indexes past the end and takes the render down. The local profile
+/// pool is user-installed bytes (`lcp.rs`'s rule), so this is the crafted-file
+/// case, not a theoretical one.
+///
+/// MUTATION: replace the `checked_mul` chain with `wrapping_mul` (what plain
+/// `*` does in a release build) — the fixture then parses.
+#[test]
+fn table_dimensions_that_overflow_usize_are_refused_as_such() {
+    let wrap = build(&[
+        (tag::LOOK_TABLE_DIMS, 4, longs(&[2, 3_340_214_413, 2_761_311_370])),
+        (tag::LOOK_TABLE_DATA, 11, floats(&[0.5; 12])),
+    ]);
+    let why = match parse(&wrap) {
+        Err(Refusal::TableMismatch(why)) => why,
+        Err(other) => panic!("refused, but not as a table mismatch: {other}"),
+        Ok(_) => panic!("a wrapping table was accepted on twelve floats of data"),
+    };
+    assert!(why.contains("overflow"), "refused for the right reason: {why}");
+}
+
 // --- the table -------------------------------------------------------------
 
 /// THE layout claim: `index = (val * hue + h) * sat + s`.

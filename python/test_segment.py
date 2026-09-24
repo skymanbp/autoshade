@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import segment
 
@@ -82,6 +83,25 @@ class GesturePromptTests(unittest.TestCase):
         self.assertEqual(cm.exception.code, 2)
         self.assertIn("Sam2Model.forward accepting input_points", stderr.getvalue())
         self.assertIn("upgrade transformers", stderr.getvalue())
+
+
+class MultiManifestTests(unittest.TestCase):
+    def test_the_manifest_forwards_the_cpu_preference_to_the_model(self):
+        # `--multi --cpu`: the flag reached `write_multi_manifest` and stopped
+        # there, so the OneFormer pass picked its device as if it were absent.
+        seen = {}
+
+        class Stop(Exception):
+            pass
+
+        def fake_multi_class_masks(img_path, cache_dir, max_regions, prefer_cpu=False):
+            seen["prefer_cpu"] = prefer_cpu
+            raise Stop()
+
+        with mock.patch.object(segment, "multi_class_masks", fake_multi_class_masks):
+            with self.assertRaises(Stop):
+                segment.write_multi_manifest("in.jpg", "out.json", "cache", 2, 0, "backend", prefer_cpu=True)
+        self.assertIs(seen["prefer_cpu"], True)
 
 
 if __name__ == "__main__":

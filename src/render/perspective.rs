@@ -175,7 +175,8 @@ const VOID: Rgb<u16> = Rgb([u16::MAX, u16::MAX, u16::MAX]);
 impl Homography {
     pub const IDENTITY: Homography = Homography([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
 
-    /// `self ∘ rhs` — apply `rhs` first.
+    /// `outer ∘ self` — apply `self` first, then `outer`: the matrix product
+    /// `outer · self`, so `a.then(b).then(c)` reads in the order the maps run.
     fn then(self, outer: Homography) -> Homography {
         let (a, b) = (outer.0, self.0);
         let mut m = [0.0f32; 9];
@@ -333,9 +334,9 @@ pub(crate) fn upright_from_sidecar(r: &EditRecipe) -> Option<Homography> {
 
 /// The whole Transform stage as one map, or `None` when nothing moves.
 ///
-/// `luma` is the frame the solver reads when the mode needs solving — the
-/// caller's own working buffer, so a preview and an export answer the same
-/// dropdown with the same lines.
+/// `img` is the frame the solver reads when the mode needs solving (its luma
+/// plane, built by `solve_for_mode`) — the caller's own working buffer, so a
+/// preview and an export answer the same dropdown with the same lines.
 pub(crate) fn transform(r: &EditRecipe, img: &DynamicImage) -> Option<Homography> {
     let up = upright_from_sidecar(r).or_else(|| solve_for_mode(r, img));
     // The frame this stage is about to warp, which two of the sliders are

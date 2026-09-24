@@ -379,21 +379,6 @@ class Canvas:
                     return boxes, True
         return boxes, False
 
-    def place_label(self, lines, candidates, *, size=10.5, weight=400,
-                    role="note", leading=13, what=""):
-        """Draw `lines` at the first candidate `(x, top, anchor)` that collides
-        with nothing. Raises when every candidate is taken, naming the label —
-        a diagram that cannot place a label is a layout bug, not a warning."""
-        for x, top, anchor in candidates:
-            _, bad = self.would_collide(lines, x, top, size=size, weight=weight,
-                                        anchor=anchor, leading=leading)
-            if not bad:
-                return self.text(lines, x, top, size=size, weight=weight,
-                                 role=role, anchor=anchor, leading=leading)
-        raise OverlapError(
-            "no free position for label %r%s — %d candidates all collide"
-            % (" ".join(lines), (" on " + what) if what else "", len(candidates)))
-
     def heading(self, x, y, title, sub):
         bottom = self.text([title], x, y, size=17, weight=700, role="text",
                            anchor="start")

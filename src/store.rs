@@ -126,7 +126,9 @@ where
                 // probed "no marker" before a concurrent adoption started —
                 // and memoized it — must still refuse to run against the
                 // half-copied dir. The resume runs OUTSIDE this lock (it
-                // takes source→dest in the fixed order) and the loop retries.
+                // takes source→dest in the fixed order, in this caller's own
+                // lock mode — a Wait surface queues behind a resume another
+                // process is running) and the loop retries.
                 if dev.join("adopting-from.txt").exists() {
                     return Ok(Gate::Fenced);
                 }
@@ -137,7 +139,7 @@ where
             Ok(Gate::Ran(out)) => return out,
             Ok(Gate::Superseded) => forget_resolved_key(root, src),
             Ok(Gate::Fenced) => {
-                if let Err(e) = resume_marked_adoption(&dev) {
+                if let Err(e) = resume_marked_adoption(&dev, mode) {
                     return Err(E::from(io::Error::new(
                         e.kind(),
                         format!(
@@ -1271,7 +1273,7 @@ fn resume_orphan_adoption_once(root: &Path, ck: &str) {
         checked.lock().unwrap().insert((root.to_path_buf(), ck.to_string()));
         return;
     }
-    match resume_marked_adoption(&cd) {
+    match resume_marked_adoption(&cd, DevelopLockMode::NoWait) {
         Ok(()) => {
             eprintln!(
                 "⚠ finished a crashed adoption into {} (left by an aliased path spelling)",
@@ -1306,15 +1308,39 @@ const MAX_ADOPTION_MARKER: u64 = 64 * 1024;
 /// never from whatever spelling the current session happens to hold: with
 /// three spellings in play, mixing the two merges two generations into one
 /// dir.
-fn resume_marked_adoption(cd: &Path) -> std::io::Result<()> {
-    let recorded = read_text_capped(&cd.join("adopting-from.txt"), MAX_ADOPTION_MARKER)?;
+///
+/// `mode` is the CALLER's: the locked-touch gate hands down its own, so a
+/// Wait surface (CLI, server, worker thread) queues behind a resume another
+/// process is running instead of failing its touch with a WouldBlock, while
+/// the badge-fill probe stays NoWait (a held lock postpones, never hangs).
+/// The marker is re-read UNDER both locks (the `adopt_or_choose` rule — the
+/// pre-lock read raced every other process): a resume that finds it gone
+/// was beaten to the finish and copies NOTHING. `adopt_files` SYNCHRONIZES
+/// the destination to the source, so a second run over a completed adoption
+/// would replace a save that landed in the meantime with the superseded
+/// source's bytes.
+fn resume_marked_adoption(cd: &Path, mode: DevelopLockMode) -> std::io::Result<()> {
+    let marker = cd.join("adopting-from.txt");
+    let recorded = read_text_capped(&marker, MAX_ADOPTION_MARKER)?;
     let source = PathBuf::from(recorded.trim());
     if source.as_os_str().is_empty() {
         return Err(std::io::Error::other("adopting-from.txt names no source"));
     }
-    with_path_lock(source.join(".develop.lock"), DevelopLockMode::NoWait, || {
-        with_path_lock(cd.join(".develop.lock"), DevelopLockMode::NoWait, || {
-            adopt_files(cd, &source)
+    with_path_lock(source.join(".develop.lock"), mode, || {
+        with_path_lock(cd.join(".develop.lock"), mode, || {
+            match read_text_capped(&marker, MAX_ADOPTION_MARKER) {
+                Ok(now) if source == Path::new(now.trim()) => adopt_files(cd, &source),
+                // Finished by a concurrent resume while this one waited for
+                // the locks: the dir is whole and unfenced — nothing to copy.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                // A newer attempt (from yet another spelling) crashed in the
+                // window: its source is not the one these locks cover.
+                Ok(_) => Err(std::io::Error::other(
+                    "adopting-from.txt names a different source than it did before the locks \
+                     were taken — the resume is retried on the next touch",
+                )),
+                Err(e) => Err(e),
+            }
         })
     })
 }
@@ -5457,11 +5483,26 @@ fn forget_version_meta_unlocked(dev: &Path, n: u32) -> std::io::Result<()> {
 }
 
 fn delete_version_unlocked(src: &Path, n: u32) -> std::io::Result<()> {
-    // TRANSACTION MARKER FIRST (L03): a kill mid-sweep used to leave a
-    // half-version — recipe alive with rasters gone (listed, loadable,
-    // rendering dead masks the next save persists as dangling paths) or
-    // rasters alive with the recipe gone (orphan blobs forever, and the
-    // number silently recyclable). The marker records the intent durably;
+    // The stale-list probe comes BEFORE anything durable: a 🗑 on a version
+    // that is already gone (deleted by another surface since the list was
+    // drawn — or a number that never was one) answers NotFound and leaves
+    // NO trace. The marker below used to be written first, survived the
+    // NotFound that `register_deleted_version(.., true)` raised right after
+    // it, and the next recovery then burned that number fingerprint-less
+    // and lifted the high-water mark to it — a registry entry, and a skipped
+    // claim number, for a version that never existed. Only ABSENCE
+    // short-circuits: an unreadable snapshot stays deletable (the registry's
+    // fingerprint-less rule).
+    if let Err(e) = std::fs::metadata(version_target(src, n))
+        && e.kind() == std::io::ErrorKind::NotFound
+    {
+        return Err(e);
+    }
+    // TRANSACTION MARKER before anything is destroyed (L03): a kill mid-sweep
+    // used to leave a half-version — recipe alive with rasters gone (listed,
+    // loadable, rendering dead masks the next save persists as dangling
+    // paths) or rasters alive with the recipe gone (orphan blobs forever, and
+    // the number silently recyclable). The marker records the intent durably;
     // the sweep resumes at the next claim or locked recovery touch.
     durable_write(&deleting_marker(src, n), format!("deleting v{n}\n").as_bytes())?;
     // REGISTRY SECOND, while the fingerprint sources still exist — the
@@ -6031,11 +6072,11 @@ fn migrate_legacy_unlocked(src: &Path) -> bool {
     moved
 }
 
-/// Gallery-wide variant of [`migrate_legacy_from`]: the legacy folder is
-/// scanned ONCE for version snapshots and the result shared across photos —
-/// the per-photo call re-ran that `read_dir` for every photo, making a big
-/// import O(photos × directory entries). Returns how many photos had
-/// anything migrated.
+/// Gallery-wide variant of [`migrate_legacy`] (whose per-photo body is
+/// `migrate_legacy_in`): the legacy folder is scanned ONCE for version
+/// snapshots and the result shared across photos — the per-photo call re-ran
+/// that `read_dir` for every photo, making a big import O(photos × directory
+/// entries). Returns how many photos had anything migrated.
 pub fn migrate_legacy_from_many(legacy_out: &Path, photos: &[PathBuf]) -> usize {
     if !legacy_out.is_dir() {
         return 0;
@@ -6071,6 +6112,15 @@ pub fn migrate_legacy_from_many(legacy_out: &Path, photos: &[PathBuf]) -> usize 
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
             with_develop_lock_in(&root, p, DevelopLockMode::Wait, || {
+                // The crashed-publish survivor FIRST, as the per-photo path
+                // (`migrate_legacy_unlocked`) does: a `.bak` whose live file
+                // never landed is the NEWEST save, and the no-clobber publish
+                // below would otherwise fill the empty slot with the OLDER
+                // legacy bytes — after which the recovery sees a live file
+                // and leaves the survivor retired for good. A failed recovery
+                // is reported by the helper; the .bak stays and the backup
+                // gate re-decides on the next touch.
+                let _ = recover_orphan_baks_unlocked(p);
                 Ok::<_, std::io::Error>(migrate_legacy_jobs(&root, legacy_out, p, vjobs).0)
             })
             .unwrap_or(false)
@@ -6210,10 +6260,12 @@ fn migrate_legacy_jobs(
 ///
 /// Failure-ordering contract (a migration must never make things WORSE than
 /// not migrating): rasters are STAGED as copies first, the rewritten recipe is
-/// published next, and the legacy originals are deleted only after the recipe
-/// landed. Any earlier failure leaves every legacy file byte-identical — the
-/// read fallbacks keep serving it. Staged central copies are NOT rolled back:
-/// they are identical-content derivations a concurrent migration may already
+/// published next, and the legacy originals are never touched — their
+/// stem-only identity cannot prove they belong to this photo, so they are
+/// RETAINED for the read fallbacks and older builds (see the tail below). Any
+/// failure leaves every legacy file byte-identical — the read fallbacks keep
+/// serving it. Staged central copies are NOT rolled back: they are
+/// identical-content derivations a concurrent migration may already
 /// reference (rolling them back deleted the winner's bitmap).
 fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out: &Path) -> bool {
     let Ok(text) = read_text_capped(from, MAX_STORE_JSON) else { return false };
@@ -6225,14 +6277,6 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
         return move_file_no_clobber(from, to).is_ok();
     };
     let raster_prefix = format!("{stem}.");
-    // Legacy rasters (inside the migrated root only) to delete once the
-    // recipe publish lands. Deliberately NOT a rollback list: a staged
-    // central raster is an identical-content derivation of the legacy bytes,
-    // and a concurrent migration may already have ADOPTED it into its own
-    // published recipe — rolling it back deleted the winner's bitmap.
-    // Unreferenced survivors fall under the accepted superseded-raster
-    // boundary.
-
     for m in &mut r.masks {
         for path in m.bitmap_paths_mut() {
             let mut p = PathBuf::from(path.as_str());
@@ -6245,9 +6289,9 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
             };
             // Legacy refs are relative to the OLD launch cwd ("out/<stem>.<kind>.png").
             // PREFER the raster inside the root being migrated: a same-named
-            // file under TODAY'S cwd can belong to a different context, and
-            // the staged source is DELETED on success — resolving the cwd
-            // file first would destroy a bystander. The recipe's own
+            // file under TODAY'S cwd can belong to a different context (same
+            // stem, another photo), while the one beside the legacy recipe is
+            // the raster it was written against. The recipe's own
             // cwd-relative reading stays as the fallback for a launch from
             // the original directory (where the two spellings coincide).
             let cand = legacy_out.join(name);
@@ -6274,18 +6318,11 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
                 continue; // keep the old reference
             }
             // On Err the old reference is kept — the engine's missing-raster
-            // contract reports it.
-            if let Ok(published) = publish_no_clobber(&tmp, &dest) {
-                if published {
-                    // Only a source inside the root BEING MIGRATED may be
-                    // deleted on success: the cwd-relative fallback can
-                    // name a bystander file from an UNRELATED context
-                    // (same stem, different photo) — that one is copied,
-                    // never deleted.
-
-                }
-                // Published OR adopted (an identical-content copy landed
-                // meanwhile): the central raster is in place either way.
+            // contract reports it. Published OR adopted (an identical-content
+            // copy landed meanwhile): the central raster is in place either
+            // way, and the legacy source stays where it was — retained like
+            // every legacy byte (see the fn docs).
+            if publish_no_clobber(&tmp, &dest).is_ok() {
                 *path = bare;
             }
         }
@@ -6306,7 +6343,7 @@ fn migrate_one_recipe(from: &Path, to: &Path, stem: &str, dev: &Path, legacy_out
         matches!(publish_no_clobber(&tmp, to), Ok(true)).then_some(())
     })();
     if published.is_none() {
-        // Deliberately NO raster rollback (see legacy_rasters above): every
+        // Deliberately NO raster rollback (the fn's failure-ordering contract): every
         // legacy file is still byte-identical and keeps serving via the read
         // fallbacks, while the staged central rasters stay as harmless
         // identical-content copies a concurrent migration may already
@@ -6734,6 +6771,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dev);
     }
 
+    /// A 🗑 on a version that is already gone (a stale list, or a number that
+    /// never was one) answers NotFound and leaves NOTHING durable: the delete
+    /// used to write its transaction marker BEFORE the registry probe raised
+    /// that NotFound, and the surviving marker made the next recovery burn the
+    /// number fingerprint-less — lifting the high-water mark to a version that
+    /// never existed, so the next claim skipped past it.
+    ///
+    /// MUTATION: drop the existence probe at the top of
+    /// `delete_version_unlocked` and the marker survives, so the claim below
+    /// comes back as 8, not 1.
+    #[test]
+    fn deleting_a_version_that_does_not_exist_leaves_no_marker_and_burns_nothing() {
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-vdel-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_store_vdel_missing.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+
+        let err = delete_version(&raw, 7).expect_err("a version that does not exist cannot be deleted");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "the stale-list NotFound is kept");
+        assert!(!dev.join(".deleting.v7").exists(), "a refused delete leaves no transaction marker");
+        assert!(!deleted_versions_path(&dev).exists(), "…and no registry entry");
+
+        let (n, _) = claim_version(&raw).unwrap();
+        assert_eq!(n, 1, "the refused delete burned no number");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
+    }
+
     /// L03: a killed clear completes on the next locked touch instead of
     /// leaving a half-cleared develop whose surviving XMP/variants would
     /// resurrect the cleared edits — and the .bak republish never undoes
@@ -7002,6 +7072,106 @@ mod tests {
             "the locked body ran only AFTER the fence was resolved"
         );
         assert!(!cd.join("adopting-from.txt").exists(), "the gate consumed the fence");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fenced dir with the marker naming `old`, and a second thread holding
+    /// `old`'s develop lock the way a resume in another process would — the
+    /// fixture both Wait-mode resume tests share.
+    fn fenced_dir_with_held_source(
+        tag: &str,
+        hold: impl FnOnce(&Path, &Path) + Send + 'static,
+    ) -> (PathBuf, PathBuf, PathBuf, PathBuf, std::thread::JoinHandle<()>) {
+        let root = std::env::temp_dir().join(format!("autoshade-store-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-{tag}-photos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join(format!("_{tag}.arw"));
+        std::fs::write(&raw, b"raw").unwrap();
+        let cd = root.join("develops").join(resolve_key_in(&root, &raw));
+        let old = root.join("develops").join("crashed-alias-held");
+        std::fs::create_dir_all(&cd).unwrap();
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("recipe.json"), b"the-real-develop").unwrap();
+        std::fs::write(cd.join("adopting-from.txt"), format!("{}\n", old.display())).unwrap();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder = {
+            let (old, cd) = (old.clone(), cd.clone());
+            std::thread::spawn(move || {
+                with_path_lock(old.join(".develop.lock"), DevelopLockMode::Wait, || {
+                    held_tx.send(()).unwrap();
+                    // Long enough for the touch under test to read the marker
+                    // and reach the source lock — the real resume holds it
+                    // for a whole directory copy.
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    hold(&cd, &old);
+                    Ok::<_, std::io::Error>(())
+                })
+                .unwrap();
+            })
+        };
+        held_rx.recv().expect("the holder took the source lock");
+        (root, dir, raw, cd, holder)
+    }
+
+    /// A Wait-mode touch of a fenced dir QUEUES behind the process holding the
+    /// adoption's locks — the stated `DevelopLockMode::Wait` contract, the same
+    /// way it queues behind any other mutation — instead of failing the CLI /
+    /// server / worker call with the WouldBlock a NoWait resume produced.
+    ///
+    /// MUTATION: hand `DevelopLockMode::NoWait` to `resume_marked_adoption` from
+    /// the locked-touch gate and the touch errs instead of waiting.
+    #[test]
+    fn a_wait_mode_touch_queues_behind_a_held_adoption_lock_instead_of_failing() {
+        let (root, dir, raw, cd, holder) = fenced_dir_with_held_source("fence-wait", |_, _| {});
+        let mut seen = None;
+        with_develop_lock_in(&root, &raw, DevelopLockMode::Wait, || {
+            seen = Some(std::fs::read(cd.join("recipe.json")).ok());
+            Ok::<_, std::io::Error>(())
+        })
+        .expect("a Wait touch queues behind the held adoption lock");
+        holder.join().unwrap();
+        assert_eq!(
+            seen.flatten().as_deref(),
+            Some(b"the-real-develop".as_slice()),
+            "the body ran only after the resume it waited for had finished"
+        );
+        assert!(!cd.join("adopting-from.txt").exists(), "the resumed adoption consumed its fence");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The resume re-reads the fence UNDER both locks: one that waited while a
+    /// concurrent resume finished copies NOTHING — `adopt_files` synchronizes
+    /// the destination to the source, so a second run over the completed
+    /// adoption would replace a save that landed in between with the
+    /// superseded source's bytes.
+    ///
+    /// MUTATION: call `adopt_files` unconditionally once the locks are held
+    /// (drop the under-lock marker re-read) and the newer save below reads as
+    /// the stale source bytes.
+    #[test]
+    fn a_resume_that_lost_the_race_copies_nothing_over_the_finished_adoption() {
+        let (root, dir, raw, cd, holder) = fenced_dir_with_held_source("fence-lost-race", |cd, _| {
+            // The concurrent resume finishes, and a NEWER save lands in the
+            // now-unfenced dir, before the source lock is released.
+            std::fs::remove_file(cd.join("adopting-from.txt")).unwrap();
+            std::fs::write(cd.join("recipe.json"), b"a-newer-save").unwrap();
+        });
+        let mut seen = None;
+        with_develop_lock_in(&root, &raw, DevelopLockMode::Wait, || {
+            seen = Some(std::fs::read(cd.join("recipe.json")).ok());
+            Ok::<_, std::io::Error>(())
+        })
+        .expect("a finished adoption is an ordinary unfenced dir");
+        holder.join().unwrap();
+        assert_eq!(
+            seen.flatten().as_deref(),
+            Some(b"a-newer-save".as_slice()),
+            "a resume that lost the race must not copy the superseded source over a newer save"
+        );
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -8213,6 +8383,53 @@ mod tests {
         assert!(Path::new(path).exists(), "live mask survives the version delete");
         let _ = std::fs::remove_dir_all(&dev);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The gallery import (`migrate_legacy_from_many`) runs the crashed-publish
+    /// recovery FIRST, like the per-photo path: a `recipe.json.bak` whose live
+    /// file never landed is the NEWEST save, and the no-clobber legacy publish
+    /// used to fill the empty slot with the OLDER ./out recipe — after which
+    /// the recovery saw a live file and left the survivor retired for good.
+    ///
+    /// MUTATION: drop the `recover_orphan_baks_unlocked` call from the import
+    /// closure and the legacy bytes become the develop.
+    #[test]
+    fn a_gallery_import_restores_the_bak_survivor_before_publishing_legacy_bytes() {
+        let dir = std::env::temp_dir().join(format!("autoshade-store-test-import-bak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let legacy_out = dir.join("out");
+        std::fs::create_dir_all(&legacy_out).unwrap();
+        let raw = dir.join("_import_bak.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+
+        // The crashed-publish window: the newer save survives only as .bak…
+        let survivor = EditRecipe { exposure_ev: 0.9, ..Default::default() };
+        std::fs::write(dev.join("recipe.json.bak"), serde_json::to_string_pretty(&survivor).unwrap())
+            .unwrap();
+        // …while an OLDER pre-store sidecar waits in the legacy folder.
+        let older = EditRecipe { exposure_ev: 0.1, ..Default::default() };
+        std::fs::write(
+            legacy_out.join(format!("{}.recipe.json", crate::pipeline::stem(&raw))),
+            serde_json::to_string_pretty(&older).unwrap(),
+        )
+        .unwrap();
+
+        migrate_legacy_from_many(&legacy_out, std::slice::from_ref(&raw));
+
+        let live: EditRecipe =
+            serde_json::from_str(&std::fs::read_to_string(recipe_target(&raw)).unwrap()).unwrap();
+        assert!(
+            (live.exposure_ev - 0.9).abs() < 1e-6,
+            "the .bak survivor is the develop, not the older legacy bytes: {}",
+            live.exposure_ev
+        );
+        assert!(!dev.join("recipe.json.bak").exists(), "the restored survivor consumed its .bak");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
     }
 
     #[test]

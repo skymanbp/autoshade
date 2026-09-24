@@ -2312,9 +2312,9 @@ pub const STAMPED_CALIBRATION: [&str; 6] = [
     "upright_transform",
 ];
 
-/// The 20 families the global controls partition into — 10 the AI plans with
-/// plus ten engine-only groupings (see [`Family::ai_visible`]), the newest
-/// being v1.5.0's `profile`.
+/// The 21 families the global controls partition into — 10 the AI plans with
+/// plus eleven engine-only groupings (see [`Family::ai_visible`]), the newest
+/// three being v1.5.0's `profile`, `calibration` and `hdr`.
 pub const CONTROL_FAMILIES: [Family; 21] = [
     Family {
         name: "tone",
@@ -2669,9 +2669,13 @@ pub fn family_is_active(f: &Family, r: &EditRecipe) -> bool {
         r.explicit_zero.iter().any(|e| e == m)
             || match (global_value(r, m), global_value(&neutral, m)) {
                 (Some(live), Some(base)) => value_is_active(live, base),
-                // Unreachable: `every_ai_visible_control_belongs_to_exactly_one_
-                // family` proves the members ARE registry rows. A typo'd member
-                // must not claim activity it cannot read.
+                // Reached by exactly one member, `upright_transform`, which
+                // `global_value` leaves unmapped on purpose (see its doc):
+                // Adobe's matrices render nothing until `perspective_upright`
+                // selects one, and that mode lights this ● itself. Any other
+                // `None` would be a typo'd member, which `every_ai_visible_
+                // control_belongs_to_exactly_one_family` rules out — either
+                // way a value this function cannot read must not claim activity.
                 _ => false,
             }
     })
@@ -2922,10 +2926,17 @@ impl GlobalValue<'_> {
 ///
 /// **This is one of the two compiler tripwires this module exists for.** The
 /// `let EditRecipe { .. }` below has NO rest pattern, so a new recipe field
-/// fails to compile here; and because every binding is consumed by a match
-/// arm, a field that IS destructured but never mapped fails as an
+/// fails to compile here; and because every binding but one is consumed by a
+/// match arm, a field that IS destructured but never mapped fails as an
 /// `unused_variables` deny. Either way the build stops until the registry
 /// gains the row.
+///
+/// The one exception is `upright_transform`, bound to `_` on purpose: Adobe's
+/// solved Upright matrices have no [`GlobalValue`] shape, so this answers
+/// `None` for that registry row. [`family_is_active`] reads that as "not
+/// active", which is the right answer — the matrices render nothing until
+/// `perspective_upright` (a mapped `Num`) selects one, and that mode lights
+/// the `transform` ● itself.
 pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>> {
     let EditRecipe {
         camera_profile,

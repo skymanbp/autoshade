@@ -577,7 +577,11 @@ pub fn embed_provenance_string() -> String {
 /// The `vocab-vN` stamp out of a provenance string, when it carries one.
 ///
 /// `None` covers both "no stamp" (an index written before the field existed)
-/// and "unparseable"; the loader treats those as unknown, never as a match.
+/// and "unparseable"; the loader treats those as UNKNOWN — never as a match,
+/// but not as a version it can refuse on either, so only a stamp it can read
+/// and disagrees with drops anything. What keeps a stamp from going missing is
+/// `save`: a build with no vectors of its own carries the merged half's stamp
+/// forward instead of writing `null` over it.
 pub fn vocab_version_of(provenance: &str) -> Option<u32> {
     provenance
         .split_whitespace()
@@ -766,10 +770,28 @@ fn style_colour_floor(style: f32) -> (f32, f32) {
 
 const LOOK_GROUPS: &[&[usize]] = &[&[0,1,2], &[3,4,5,6], &[7,8], &[9,10,11], &[12,13,14,15], &[16,17,18,19], &[20,21,22,23,24], &[25,26,27,28,29,30,31,32]];
 
+/// Every file under `root`, through directory links but never twice through
+/// one directory.
+///
+/// `Path::is_dir` follows symlinks, and the walk used to follow a link back
+/// into an ancestor round and round — re-listing the same photos under an
+/// ever longer spelling until the kernel refused the path (too many levels of
+/// links, or a name too long) and the whole look build failed on `scan`. The
+/// rule is `pipeline::walk_photos`'s: a directory is entered once per
+/// CANONICAL identity, whatever spelling reaches it. A link OUT to a folder
+/// kept elsewhere is still followed — a curated look library legitimately
+/// points at references it does not hold itself — and for a tree without a
+/// cycle the files found are the files found before.
 fn walkdir(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
+    let mut visited = std::collections::HashSet::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
+        if let Ok(c) = std::fs::canonicalize(&dir)
+            && !visited.insert(c)
+        {
+            continue; // already listed under another spelling
+        }
         for ent in std::fs::read_dir(&dir).with_context(|| format!("scan {}", dir.display()))? {
             let p = ent?.path();
             if p.is_dir() { stack.push(p); } else { out.push(p); }
@@ -1443,6 +1465,33 @@ fn vocab_scratch_path(dir: &Path, who: &str) -> PathBuf {
     ))
 }
 
+/// The phrase list on disk for the length of ONE builder, removed when that
+/// builder returns — by RAII, for the reason [`StagedFrame`] is: it used to be
+/// removed by a trailing `remove_file`, and every `?` between the write and
+/// that line (a finished photo that would not decode, a frame that would not
+/// stage, a sidecar that refused) left the list behind in the user's store.
+struct VocabScratch(PathBuf);
+
+impl VocabScratch {
+    /// Write [`LOOK_VOCAB`] to [`vocab_scratch_path`] under `dir`. Constructed
+    /// BEFORE the write, so a failed write still cleans up what it started.
+    fn write(dir: &Path, who: &str) -> Result<Self> {
+        let scratch = VocabScratch(vocab_scratch_path(dir, who));
+        std::fs::write(&scratch.0, LOOK_VOCAB.join("\n"))?;
+        Ok(scratch)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for VocabScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// The text whose vector becomes [`StyleExemplar::desc_embed`]: the record's
 /// own description when it has one, otherwise its tag string.
 ///
@@ -1794,6 +1843,17 @@ fn cache_answers_everything(
 /// silently acquire prose — either would make the index claim work the user
 /// did not request this run.
 ///
+/// …and, for the vectors, on PROVENANCE: `embed` and `vocab_scores` are served
+/// only while [`crate::style_cache::CachedExemplar::embedding_is_current`]
+/// says they came out of this build's checkpoint, tokenizer and phrase list.
+/// The warm path asks that before it skips a decode
+/// ([`cache_answers_everything`]); this is the same question at the other
+/// door. A digest-rescued entry from another checkpoint used to hand its
+/// vector straight to the record, the embedding stage then skipped the record
+/// (it "had" a vector), and [`cache_entry`] re-stamped the old vector with
+/// THIS build's provenance — a stale vector laundered into a current one every
+/// time the checkpoint, the tokenizer or the vocabulary moved.
+///
 /// The TAGS are not served here and neither is the description VECTOR, and
 /// that is the v6 shape rather than an omission: both are functions of the
 /// whole population's scores (`retag`), which nothing inside the decode pool
@@ -1804,8 +1864,9 @@ fn apply_cached(
     c: &crate::style_cache::CachedExemplar,
     want_embed: bool,
     want_desc: bool,
+    provenance: &str,
 ) {
-    if want_embed {
+    if want_embed && c.embedding_is_current(provenance) {
         ex.embed = c.embed.clone();
         ex.vocab_scores = c.vocab_scores.clone();
     }
@@ -1822,8 +1883,17 @@ fn apply_cached(
 /// [`retag`], because [`desc_text`] falls back to the tags and since v6 those
 /// are derived from the library mean. Running it inside the pool, as v5 did,
 /// would compare the cached text against tags this build had not derived yet.
-fn adopt_cached_desc_embed(ex: &mut StyleExemplar, c: &crate::style_cache::CachedExemplar) {
+///
+/// And only under this build's own provenance: the text tower's numbers move
+/// with the checkpoint and the tokenizer exactly as the image tower's do, and
+/// the entry's one stamp covers all three of its vectors.
+fn adopt_cached_desc_embed(
+    ex: &mut StyleExemplar,
+    c: &crate::style_cache::CachedExemplar,
+    provenance: &str,
+) {
     if ex.desc_embed.is_none()
+        && c.embedding_is_current(provenance)
         && c.desc_embed.is_some()
         && c.desc_text.is_some()
         && c.desc_text == desc_text(ex.desc.as_deref(), &ex.tags)
@@ -1832,52 +1902,60 @@ fn adopt_cached_desc_embed(ex: &mut StyleExemplar, c: &crate::style_cache::Cache
     }
 }
 
+/// May this build REWRITE the exemplar cache, pruned to `keep`?
+///
+/// Only when its keep-set is COMPLETE, which takes both halves. A build that
+/// staged frames knows the content key of every photograph it decoded, so
+/// whatever its keep-set lacks really has left the library. A `style-index`
+/// without the embedding pass stages nothing: its keep-set still holds the
+/// keys the WARM path carried out of the cache — so it is not empty, which is
+/// all the old guard tested — but a photograph that was merely touched (a
+/// copy, a `touch`, a re-pointed library) decoded without staging and has no
+/// key at all, and pruning to that set retired its entry: the hour of SigLIP
+/// work the cache exists to keep, thrown away by the build that is meant to
+/// be the cheap one. Such a build leaves the file exactly as the previous
+/// embedding build published it.
+///
+/// An EMPTY keep-set is refused even from a build that staged (every frame
+/// failed) — same instinct as `save`'s empty-index refusal.
+fn cache_is_publishable(staged_frames: bool, keep: &std::collections::BTreeSet<String>) -> bool {
+    staged_frames && !keep.is_empty()
+}
+
 /// The cache entry for one finished exemplar.
 ///
-/// A build that did NOT ask for a pass carries the PREVIOUS entry's answer for
-/// it forward instead of overwriting it with the absence: `style-index`
-/// without `--embed` measures no vector at all, and publishing that as the new
-/// truth would throw away an hour of SigLIP work because the user rebuilt the
-/// 14-dim index once.
+/// Only an EMBEDDING build writes one ([`cache_is_publishable`]), so the
+/// vectors here are always this build's own measurements — or the cache's,
+/// served back through [`apply_cached`] under this build's provenance — and
+/// the stamp is an honest one. The DESCRIPTION pass is the one such a build
+/// may not have asked for: `style-index --embed` without `--describe` carries
+/// the PREVIOUS entry's prose forward instead of overwriting it with the
+/// absence, because publishing "no description" as the new truth would throw
+/// away a Qwen pass the user never asked to redo.
 fn cache_entry(
     ex: &StyleExemplar,
     source: crate::style_cache::SourceStamp,
     prior: Option<&crate::style_cache::CachedExemplar>,
-    want_embed: bool,
     want_desc: bool,
     provenance: &str,
 ) -> crate::style_cache::CachedExemplar {
-    let (embed, vocab_scores, desc_embed, stamp, desc_text_now) = if want_embed {
-        (
-            ex.embed.clone(),
-            ex.vocab_scores.clone(),
-            ex.desc_embed.clone(),
-            ex.embed.is_some().then(|| provenance.to_string()),
-            desc_text(ex.desc.as_deref(), &ex.tags),
-        )
-    } else {
-        (
-            prior.and_then(|p| p.embed.clone()),
-            prior.and_then(|p| p.vocab_scores.clone()),
-            prior.and_then(|p| p.desc_embed.clone()),
-            prior.and_then(|p| p.provenance.clone()),
-            prior.and_then(|p| p.desc_text.clone()),
-        )
-    };
     crate::style_cache::CachedExemplar {
         source,
         version: CURRENT_INDEX_VERSION,
         feat: ex.feat.clone(),
-        embed,
-        vocab_scores,
-        provenance: stamp,
+        embed: ex.embed.clone(),
+        vocab_scores: ex.vocab_scores.clone(),
+        // A stamp is a claim about a vector: a record that has none is not
+        // stamped, so no later build can read "measured, from this
+        // checkpoint" off an entry that measured nothing.
+        provenance: ex.embed.is_some().then(|| provenance.to_string()),
         desc: if want_desc {
             ex.desc.clone().map(crate::describe::CachedDescription::current)
         } else {
             prior.and_then(|p| p.desc.clone())
         },
-        desc_text: desc_text_now,
-        desc_embed,
+        desc_text: desc_text(ex.desc.as_deref(), &ex.tags),
+        desc_embed: ex.desc_embed.clone(),
     }
 }
 
@@ -2106,6 +2184,10 @@ fn attach_descriptions<R: DescribableRecord>(
         .join("\n");
     if let Err(e) = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&manifest, body + "\n")) {
         eprintln!("  {what}: the description manifest could not be written ({e}) — no prose this build");
+        // The stage was OPENED above (`hits` of `total`); every other way out
+        // of it closes it, and a progress bar left at the hit count would
+        // read as a description pass still running.
+        report(on_progress, BuildStage::Describe, total, total);
         return;
     }
     let answered = crate::describe::describe_manifest(opts, &manifest, &scratch);
@@ -2634,10 +2716,9 @@ impl StyleIndex {
         report(on_progress, BuildStage::Frames, 0, total);
         std::fs::create_dir_all(&scratch)?;
         sweep_intermediates_and_say(&scratch, "look library");
-        let vocab_path = vocab_scratch_path(&scratch, "looks");
-        std::fs::write(&vocab_path, LOOK_VOCAB.join("\n"))?;
+        let vocab = VocabScratch::write(&scratch, "looks")?;
         let mut opts = opts;
-        opts.vocab_file = Some(vocab_path.clone());
+        opts.vocab_file = Some(vocab.path().to_path_buf());
         // STAGE 1 — decode every finished photo and stage its frame. Nothing
         // else: the model stages below each run ONCE for the whole library.
         let mut looks = Vec::new();
@@ -2667,7 +2748,13 @@ impl StyleIndex {
         report(on_progress, BuildStage::Embed, 0, total);
         let want = vec![true; frames.len()];
         let vectors = embed_frames(&opts, &scratch, &frames, &want, "look library")?;
-        let _ = std::fs::remove_file(vocab_path);
+        // `vocab` stays alive to the end of the function: the description
+        // pass below hands the sidecar the same `--vocab-file`
+        // (`attach_desc_embeddings` clones `opts.vocab_file`), and the
+        // sidecar opens whatever path it is given. Removing the file here,
+        // as the build once did, made every look's text call fail on a path
+        // that no longer existed — a look library without description
+        // vectors, disclosed only as a degradation line.
         for (i, (look, record)) in looks.iter_mut().zip(&vectors).enumerate() {
             let record = record.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("embed look {}: the sidecar returned no vector", files[i].display())
@@ -2882,7 +2969,7 @@ impl StyleIndex {
                         });
                     if let Some((digest, entry, feat)) = warm {
                         let record = read_exemplar(raw, sidecar, feat, loss_counts, |ex| {
-                            apply_cached(ex, entry, want_embed, want_desc)
+                            apply_cached(ex, entry, want_embed, want_desc, provenance)
                         });
                         let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                         if n % 20 == 0 {
@@ -2998,13 +3085,16 @@ impl StyleIndex {
         // A photograph whose FILE identity moved but whose PIXELS did not — a
         // rename, a copy, a `touch`, a re-pointed library — had to decode, and
         // its content key only became knowable just now. Its model answers are
-        // still this build's answers, and it must not pay for them twice.
+        // still this build's answers, and it must not pay for them twice —
+        // when they ARE this build's: a vector from another checkpoint is
+        // refused here exactly as the warm path refuses it, and the embedding
+        // stage below measures that record again.
         for ((ex, digest), frame) in exemplars.iter_mut().zip(&digests).zip(&frames) {
             if frame.is_none() {
                 continue; // came whole out of the cache, already complete
             }
             let Some(entry) = digest.as_deref().and_then(|d| cache.get(d)) else { continue };
-            apply_cached(ex, entry, want_embed, want_desc);
+            apply_cached(ex, entry, want_embed, want_desc, &provenance);
         }
         // What the index LEARNED about this library's local work, and what it
         // could not read, in one line each (S3). The second line is the honest
@@ -3097,7 +3187,7 @@ impl StyleIndex {
             if want_embed {
                 for (ex, digest) in exemplars.iter_mut().zip(&digests) {
                     if let Some(entry) = digest.as_deref().and_then(|d| cache.get(d)) {
-                        adopt_cached_desc_embed(ex, entry);
+                        adopt_cached_desc_embed(ex, entry, &provenance);
                     }
                 }
             }
@@ -3118,21 +3208,20 @@ impl StyleIndex {
             let (Some(digest), Some(stamp)) = (digest.clone(), stamp.clone()) else { continue };
             let prior = cache.get(&digest);
             keep.insert(digest.clone());
-            next.insert(
-                digest,
-                cache_entry(ex, stamp, prior, want_embed, want_desc, &provenance),
-            );
+            next.insert(digest, cache_entry(ex, stamp, prior, want_desc, &provenance));
         }
-        let retired = cache.retired(&keep);
-        // A build that staged NO frames has no content keys at all — every
-        // `style-index` without the embedding pass is one — and publishing its
-        // empty keep-set would destroy an hour of a previous build's work.
-        // Same instinct as `save`'s empty-index refusal.
-        if !keep.is_empty()
-            && let Err(e) = next.save(&cache_path, &keep)
-        {
-            eprintln!("  style index: the exemplar cache could not be published ({e:#})");
-        }
+        // …and only by a build whose keep-set is complete enough to prune to
+        // (`cache_is_publishable`): a `style-index` without the embedding pass
+        // leaves the file as the last embedding build wrote it, and retires
+        // nothing.
+        let retired = if cache_is_publishable(want_embed, &keep) {
+            if let Err(e) = next.save(&cache_path, &keep) {
+                eprintln!("  style index: the exemplar cache could not be published ({e:#})");
+            }
+            cache.retired(&keep)
+        } else {
+            0
+        };
         println!(
             "  style index cache: reused {reused}, recomputed {}, removed {retired}, \
              skipped-for-sidecar {}",
@@ -3177,8 +3266,24 @@ impl StyleIndex {
         if self.exemplars.is_empty() || self.looks.is_empty() {
             match Self::load(path) {
                 Ok(existing) => {
-                    if value.exemplars.is_empty() { value.exemplars = existing.exemplars; value.mean = existing.mean; value.std = existing.std; value.source_dir = existing.source_dir; }
-                    if value.looks.is_empty() { value.looks = existing.looks; value.looks_dir = existing.looks_dir; }
+                    // The provenance stamp travels with the VECTORS it
+                    // describes — `build_reporting` stamps only an index that
+                    // holds one. A build with none of its own (`style-index`
+                    // without `--embed`) used to rewrite the file with `null`
+                    // over the looks it had just merged in, and `load`'s
+                    // vocabulary check then had nothing left to read.
+                    let mut merged_vectors = false;
+                    if value.exemplars.is_empty() {
+                        merged_vectors |= existing.exemplars.iter().any(|e| e.embed.is_some());
+                        value.exemplars = existing.exemplars; value.mean = existing.mean; value.std = existing.std; value.source_dir = existing.source_dir;
+                    }
+                    if value.looks.is_empty() {
+                        merged_vectors |= !existing.looks.is_empty();
+                        value.looks = existing.looks; value.looks_dir = existing.looks_dir;
+                    }
+                    if value.embed_provenance.is_none() && merged_vectors {
+                        value.embed_provenance = existing.embed_provenance;
+                    }
                 }
                 Err(err) if path.exists() => {
                     eprintln!("existing style index {} is unusable ({err:#}); replacing it", path.display());
@@ -3279,20 +3384,50 @@ impl StyleIndex {
         // The LOOKS are dropped, not the index: the RAW half's features,
         // settings and image vectors are unaffected by the phrase list, and
         // refusing the whole file would cost a user their hour-long RAW build
-        // over the half of it that is cheap to rebuild.
+        // over the half of it that is cheap to rebuild. What the RAW half DOES
+        // carry from the phrase list — its `vocab_scores`, the tags derived
+        // from them, and a description vector that was the vector OF those
+        // tags — goes the same way the looks do, so nothing served describes
+        // a vocabulary this build cannot name; the image vectors and the
+        // settings stand, and the next `--embed` build scores them again.
         if let Some(stored) = idx.embed_provenance.as_deref().and_then(vocab_version_of)
             && stored != LOOK_VOCAB_VERSION
-            && !idx.looks.is_empty()
         {
-            eprintln!(
-                "style index {} was built with look vocabulary v{stored} and this build speaks \
-                 v{LOOK_VOCAB_VERSION} — its {} look record(s) are being ignored; rebuild the \
-                 look library (autoshade style-index --looks <dir> --embed) to use them again",
-                path.display(),
-                idx.looks.len()
-            );
-            idx.looks.clear();
-            idx.looks_dir = None;
+            if !idx.looks.is_empty() {
+                eprintln!(
+                    "style index {} was built with look vocabulary v{stored} and this build speaks \
+                     v{LOOK_VOCAB_VERSION} — its {} look record(s) are being ignored; rebuild the \
+                     look library (autoshade style-index --looks <dir> --embed) to use them again",
+                    path.display(),
+                    idx.looks.len()
+                );
+                idx.looks.clear();
+                idx.looks_dir = None;
+            }
+            let scored = idx
+                .exemplars
+                .iter()
+                .filter(|e| e.vocab_scores.is_some() || !e.tags.is_empty())
+                .count();
+            if scored > 0 {
+                eprintln!(
+                    "style index {} was built with look vocabulary v{stored} and this build speaks \
+                     v{LOOK_VOCAB_VERSION} — {scored} RAW exemplar(s) lose their vocabulary scores \
+                     and attribute tags (features, settings and image vectors stand); rebuild the \
+                     index (autoshade style-index <dir> --embed) to score them again",
+                    path.display()
+                );
+                for e in &mut idx.exemplars {
+                    // `retag`'s own rule: a vector is the vector OF a text, and
+                    // a record whose text was its tag string stops saying it.
+                    let before = desc_text(e.desc.as_deref(), &e.tags);
+                    e.vocab_scores = None;
+                    e.tags.clear();
+                    if before != desc_text(e.desc.as_deref(), &e.tags) {
+                        e.desc_embed = None;
+                    }
+                }
+            }
         }
         if idx.mean.len() != NDIM || idx.std.len() != NDIM {
             anyhow::bail!(
@@ -3532,7 +3667,12 @@ impl StyleIndex {
                         desc_gap: desc_gaps[i],
                         txt_standardised: txt.standardised,
                         desc_standardised: desc.standardised,
-                        txt_hub: if txt.hub_corrected { hubs.as_ref().map(|h| h[i]) } else { None },
+                        // `None` for a pair with no cosine even while the
+                        // correction is in force: `standardise` leaves such a
+                        // gap `None`, so nothing was removed from it, and the
+                        // terms line says `hub` bare rather than naming a
+                        // number that corrected nothing.
+                        txt_hub: if txt.hub_corrected { txt_gaps[i].and(hubs.as_ref().map(|h| h[i])) } else { None },
                         txt_hub_corrected: txt.hub_corrected,
                     },
                 )
@@ -3586,7 +3726,7 @@ impl StyleIndex {
                         desc_gap: desc_gaps[i],
                         txt_standardised: txt.standardised,
                         desc_standardised: desc.standardised,
-                        txt_hub: if txt.hub_corrected { hubs.as_ref().map(|h| h[i]) } else { None },
+                        txt_hub: if txt.hub_corrected { txt_gaps[i].and(hubs.as_ref().map(|h| h[i])) } else { None },
                         txt_hub_corrected: txt.hub_corrected,
                     },
                 )
@@ -5999,7 +6139,7 @@ mod tests {
         let mut cache = crate::style_cache::ExemplarCache::default();
         cache.insert(
             digest.clone(),
-            cache_entry(ex, stamp, None, true, true, &embed_provenance_string()),
+            cache_entry(ex, stamp, None, true, &embed_provenance_string()),
         );
         cache.save(&path, &[digest.clone()].into_iter().collect()).expect("publish");
         let back = crate::style_cache::ExemplarCache::load(&path, CACHE_BANDS);
@@ -6036,12 +6176,13 @@ mod tests {
         // stages run: features from the cache, everything else empty.
         let mut second = plain_exemplar("shot");
         second.feat = entry.feat.clone();
-        apply_cached(&mut second, &entry, true, true);
+        let here = embed_provenance_string();
+        apply_cached(&mut second, &entry, true, true, &here);
         // The two stages a build runs after the pool, in the build's own
         // order: the tags are the POPULATION's (v6, `retag`), and only then
         // may a cached description vector be served.
         retag(std::slice::from_mut(&mut second));
-        adopt_cached_desc_embed(&mut second, &entry);
+        adopt_cached_desc_embed(&mut second, &entry, &here);
         let bits = |v: &Option<Vec<f32>>| {
             v.as_ref().map(|v| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>())
         };
@@ -6125,17 +6266,18 @@ mod tests {
         let ex = measured_exemplar();
         let entry = cached_round_trip(&ex, "style-cache-stale-text");
         // Same record, same everything: the vector is served.
+        let here = embed_provenance_string();
         let mut same = plain_exemplar("shot");
-        apply_cached(&mut same, &entry, true, true);
+        apply_cached(&mut same, &entry, true, true, &here);
         retag(std::slice::from_mut(&mut same));
-        adopt_cached_desc_embed(&mut same, &entry);
+        adopt_cached_desc_embed(&mut same, &entry, &here);
         assert!(same.desc_embed.is_some(), "the text has not changed");
         // Now the build does NOT want prose, so the record's text becomes its
         // tag string — a different sentence, and the stored vector is not its.
         let mut retagged = plain_exemplar("shot");
-        apply_cached(&mut retagged, &entry, true, false);
+        apply_cached(&mut retagged, &entry, true, false, &here);
         retag(std::slice::from_mut(&mut retagged));
-        adopt_cached_desc_embed(&mut retagged, &entry);
+        adopt_cached_desc_embed(&mut retagged, &entry, &here);
         assert_eq!(retagged.desc, None, "prose was not asked for");
         assert_eq!(
             retagged.desc_embed, None,
@@ -6143,29 +6285,89 @@ mod tests {
         );
     }
 
-    /// A 14-dim-only rebuild must not throw away the vectors an embedding
-    /// build paid for.
+    /// An embedding build that did not ask for PROSE must not throw away the
+    /// description a previous build paid a Qwen pass for.
     ///
     /// MUTATION: make [`cache_entry`] always write this build's (absent)
-    /// answers and this fails — `style-index` without `--embed` would erase an
-    /// hour of SigLIP work, and the next `--embed` build would redo all of it.
+    /// description and this fails — `style-index --embed` without
+    /// `--describe` would erase the prose, and the next `--describe` build
+    /// would redo all of it.
     #[test]
-    fn a_build_without_the_embedding_pass_carries_the_previous_one_forward() {
+    fn a_build_without_the_description_pass_carries_the_previous_prose_forward() {
         let measured = measured_exemplar();
         let prior = cached_round_trip(&measured, "style-cache-carry");
-        // The same photograph, re-read by a build that asked for neither pass.
-        let bare = plain_exemplar("shot");
-        let stamp = prior.source.clone();
-        let kept = cache_entry(&bare, stamp, Some(&prior), false, false, "irrelevant");
-        assert_eq!(kept.embed, prior.embed, "the image vector survives");
-        assert_eq!(kept.vocab_scores, prior.vocab_scores);
-        assert_eq!(kept.desc_embed, prior.desc_embed);
-        assert_eq!(kept.desc, prior.desc, "and so does the prose");
-        assert_eq!(kept.provenance, prior.provenance, "with the provenance that stamps it");
-        // …while a build that DID ask writes its own answers.
-        let fresh = cache_entry(&bare, prior.source.clone(), Some(&prior), true, true, "now");
-        assert_eq!(fresh.embed, None, "this build measured no vector, and says so");
-        assert_eq!(fresh.desc, None);
+        // The same photograph, re-measured by a build that asked for the
+        // vectors and not the prose: its own vectors, the cache's prose.
+        let mut bare = plain_exemplar("shot");
+        bare.embed = measured.embed.clone();
+        bare.vocab_scores = measured.vocab_scores.clone();
+        let kept = cache_entry(&bare, prior.source.clone(), Some(&prior), false, "now");
+        assert_eq!(kept.desc, prior.desc, "the prose survives");
+        assert_eq!(kept.embed, bare.embed, "the vectors are this build's own");
+        assert_eq!(kept.provenance.as_deref(), Some("now"), "…stamped with this build's provenance");
+        // …while a build that DID ask writes its own answer.
+        let fresh = cache_entry(&bare, prior.source.clone(), Some(&prior), true, "now");
+        assert_eq!(fresh.desc, None, "this build described nothing, and says so");
+        // A stamp is a claim about a vector: a record without one is unstamped.
+        let none = cache_entry(&plain_exemplar("shot"), prior.source.clone(), None, true, "now");
+        assert_eq!(none.embed, None);
+        assert_eq!(none.provenance, None);
+    }
+
+    /// The cache is REWRITTEN only by a build whose keep-set is complete.
+    ///
+    /// A `style-index` without the embedding pass stages no frame, so a
+    /// photograph that was merely touched has no content key this build. Its
+    /// keep-set is not empty — the warm path carries keys out of the cache —
+    /// only incomplete, and the old guard tested emptiness alone: pruning to
+    /// that set retired the touched photograph's vectors, an hour of SigLIP
+    /// work thrown away by the build meant to be the cheap one.
+    ///
+    /// MUTATION: drop `staged_frames &&` from [`cache_is_publishable`] and
+    /// the first assertion fails.
+    #[test]
+    fn only_a_build_that_staged_frames_rewrites_the_exemplar_cache() {
+        let warm: std::collections::BTreeSet<String> = ["ab".repeat(32)].into_iter().collect();
+        assert!(
+            !cache_is_publishable(false, &warm),
+            "keys carried out of the cache are not a complete keep-set"
+        );
+        assert!(cache_is_publishable(true, &warm), "a build that staged its frames prunes");
+        assert!(
+            !cache_is_publishable(true, &std::collections::BTreeSet::new()),
+            "an embedding build whose every frame failed publishes nothing either"
+        );
+    }
+
+    /// The provenance gate holds at the SECOND door too. The warm path asks
+    /// [`cache_answers_everything`] before it skips a decode; a photograph
+    /// that decoded (touched, copied, moved) is served by digest after the
+    /// pool, and that door used to hand a vector from another checkpoint to
+    /// the record — the embedding stage then skipped the record, and
+    /// [`cache_entry`] re-stamped the old vector with this build's provenance.
+    ///
+    /// MUTATION: drop the `embedding_is_current` test from [`apply_cached`]
+    /// (or from [`adopt_cached_desc_embed`]) and this fails.
+    #[test]
+    fn a_vector_from_another_checkpoint_is_refused_at_the_digest_door_too() {
+        let ex = measured_exemplar();
+        let entry = cached_round_trip(&ex, "style-cache-other-checkpoint");
+        let mut rescued = plain_exemplar("shot");
+        apply_cached(&mut rescued, &entry, true, true, "some other checkpoint");
+        assert_eq!(rescued.embed, None, "an image vector of another checkpoint is not this build's");
+        assert_eq!(rescued.vocab_scores, None, "nor the scores that came out of the same call");
+        assert_eq!(rescued.desc, ex.desc, "the prose carries its own stamp and is unaffected");
+        retag(std::slice::from_mut(&mut rescued));
+        adopt_cached_desc_embed(&mut rescued, &entry, "some other checkpoint");
+        assert_eq!(rescued.desc_embed, None, "nor the text vector, whatever text it is of");
+        // …and this build's own provenance is served exactly as before.
+        let here = embed_provenance_string();
+        let mut same = plain_exemplar("shot");
+        apply_cached(&mut same, &entry, true, true, &here);
+        assert_eq!(same.embed, ex.embed);
+        retag(std::slice::from_mut(&mut same));
+        adopt_cached_desc_embed(&mut same, &entry, &here);
+        assert_eq!(same.desc_embed, ex.desc_embed);
     }
 
     /// The RAWs a build could not pair are DISCLOSED — the count always, the
@@ -6624,6 +6826,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The RAW half is not immune to the phrase list either: its
+    /// `vocab_scores` were measured against it, its tags are derived from
+    /// them at load, and a tag-only record's description vector is the vector
+    /// OF those tags. On a mismatch those go the way the looks do — and only
+    /// those: features, settings, image vectors and a PROSE record's vector
+    /// stand.
+    ///
+    /// MUTATION: put the `!idx.looks.is_empty()` condition back on the whole
+    /// block (or drop the RAW arm) and the RAW exemplars keep scores of a
+    /// vocabulary this build cannot name.
+    #[test]
+    fn a_stale_vocabulary_strips_the_raw_half_of_its_scores_and_tags() {
+        let dir = crate::test_dir("style-vocab-raw-half");
+        let path = dir.join("style-index.json");
+        // A tag-only record: its description vector is the vector of its tag
+        // string…
+        let mut tagged = plain_exemplar("tagged");
+        tagged.embed = Some(unit_embed());
+        tagged.vocab_scores = Some(flat_profile(0.25));
+        tagged.tags = vec!["warm golden tones".into()];
+        tagged.desc_embed = Some(unit_embed());
+        // …and one with PROSE, whose vector does not read the tags.
+        let mut prose = plain_exemplar("prose");
+        prose.embed = Some(unit_embed());
+        prose.vocab_scores = Some(flat_profile(0.25));
+        prose.tags = vec!["deep blacks".into()];
+        prose.desc = Some("a warm, hazy grade".into());
+        prose.desc_embed = Some(unit_embed());
+        let write = |provenance: String| {
+            StyleIndex {
+                version: CURRENT_INDEX_VERSION, mean: vec![0.0; NDIM], std: vec![1.0; NDIM],
+                exemplars: vec![tagged.clone(), prose.clone()], source_dir: None,
+                looks: Vec::new(), looks_dir: None, embed_provenance: Some(provenance),
+            }
+            .save(&path)
+            .unwrap();
+        };
+        write(embed_provenance_string().replace(
+            &format!("vocab-v{LOOK_VOCAB_VERSION}"),
+            &format!("vocab-v{}", LOOK_VOCAB_VERSION + 1),
+        ));
+        let stale = StyleIndex::load(&path).unwrap();
+        assert_eq!(stale.exemplars.len(), 2, "the RAW half stays");
+        for e in &stale.exemplars {
+            assert!(e.embed.is_some(), "{}: the image vector does not depend on the phrase list", e.stem);
+            assert_eq!(e.vocab_scores, None, "{}: scores of another vocabulary are not served", e.stem);
+            assert!(e.tags.is_empty(), "{}: nor tags derived from them", e.stem);
+        }
+        assert_eq!(stale.exemplars[0].desc_embed, None, "a tag-only record's vector was of the OLD tag string");
+        assert!(stale.exemplars[1].desc_embed.is_some(), "prose does not read the tags, so its vector stands");
+        // The matching vocabulary leaves the scores in place, and `retag`
+        // derives the tags from them as it always has.
+        write(embed_provenance_string());
+        let current = StyleIndex::load(&path).unwrap();
+        assert!(current.exemplars.iter().all(|e| e.vocab_scores.is_some() && !e.tags.is_empty()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A looks-only index stays readable by a build that predates the look
     /// block — the v1.0.0 guard rail, checked instead of assumed.
     ///
@@ -7052,6 +7312,51 @@ mod tests {
         assert_eq!(top(&text_a), "a");
         assert_eq!(top(&text_b), "b");
         assert_ne!(top(&text_a), top(&text_b), "opposite directions must not retrieve the same look");
+    }
+
+    /// A pair with no cosine claims no correction, even while the correction
+    /// is in force for the set: `standardise` leaves such a gap `None`, so
+    /// nothing was removed from it, and `txt_hub` says so — the bare `hub`
+    /// mark the terms line reserves for exactly this
+    /// ([`DistanceTerms::txt_hub`]).
+    ///
+    /// MUTATION: build `txt_hub` from the profile alone again (drop the
+    /// `txt_gaps[i].and(…)`) and the vector-less candidate names a hubness it
+    /// was never corrected by.
+    #[test]
+    fn no_hubness_is_named_for_a_pair_with_no_cosine() {
+        let (text_a, _, mut idx) = opposite_direction_fixture();
+        // A fourth candidate WITH a vector keeps the live set at the
+        // standardisation minimum once the fifth has none…
+        let mut c = plain_exemplar("c");
+        c.embed = Some(embed_axes(&[(0, 0.1), (5, 0.9)]));
+        c.vocab_scores = Some(flat_profile(0.10));
+        // …and the fifth carries a PROFILE but no image vector: no cosine with
+        // any direction text, whatever the query.
+        let mut profiled = plain_exemplar("profiled");
+        profiled.vocab_scores = Some(flat_profile(0.10));
+        idx.exemplars.extend([c, profiled]);
+        let (meta, hist) = (fixture_meta(), fixture_histogram());
+        let scored = idx.score_candidates(
+            &meta,
+            &hist,
+            StyleQuery::new(None, Some(&text_a), RetrievalWeights::SHIPPED),
+            Path::new("q.arw"),
+        );
+        assert!(
+            scored.iter().all(|(_, t)| t.txt_hub_corrected),
+            "premise: every profile is present, so the correction is in force"
+        );
+        let (_, without) = scored
+            .iter()
+            .find(|(e, _)| e.stem == "profiled")
+            .expect("the vector-less candidate is ranked");
+        assert_eq!(without.txt_gap, None, "premise: no vector, no cosine");
+        assert_eq!(without.txt_hub, None, "nothing was removed from a gap that does not exist");
+        assert!(
+            scored.iter().filter(|(e, _)| e.stem != "profiled").all(|(_, t)| t.txt_hub.is_some()),
+            "…while every pair that HAS a cosine names the hubness removed from it"
+        );
     }
 
     /// The correction is ALL-OR-NOTHING over the candidate set, and the
@@ -7760,6 +8065,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A look build that fails EARLY — here on a finished photo that will not
+    /// decode — must not leave its vocabulary scratch file in the store.
+    ///
+    /// MUTATION: turn [`VocabScratch`] back into a bare path with a trailing
+    /// `remove_file` and this fails: the `?` on the first decode returns
+    /// before that line runs.
+    #[test]
+    fn a_look_build_that_fails_early_leaves_no_vocabulary_scratch() {
+        let root = crate::test_dir("style-vocab-leak");
+        let photos = root.join("photos");
+        std::fs::create_dir_all(&photos).unwrap();
+        std::fs::write(photos.join("broken.jpg"), b"not a photograph").unwrap();
+        let scratch = root.join("scratch");
+        let present = crate::embed::EmbedOpts {
+            python_bin: "python".into(),
+            script: std::path::PathBuf::from(file!()),
+            text_file: None,
+            vocab_file: None,
+        };
+        assert!(present.available(), "premise: the sidecar looks present, so the build gets past its guard");
+        let absent_describer = crate::describe::DescribeOpts {
+            python_bin: "python".into(),
+            script: "this-sidecar-does-not-exist.py".into(),
+        };
+        let err = StyleIndex::build_looks_with(
+            staged(present, absent_describer, &scratch),
+            &photos,
+            EmbeddingSwitch::ON,
+            DescribeSwitch::OFF,
+            &|_| {},
+        )
+        .err()
+        .expect("a finished photo that will not decode fails the build");
+        assert!(format!("{err:#}").contains("decode look"), "{err:#}");
+        assert_eq!(
+            intermediates_at(&scratch),
+            Vec::<String>::new(),
+            "a build that returned, however early, owns no leftovers"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A directory link back into an ancestor must not fail the scan, and a
+    /// link OUT to a folder kept elsewhere must still be followed: the files a
+    /// cycle-free tree yields are the files it yielded before.
+    ///
+    /// Unix only, where an unprivileged process can always create the links.
+    ///
+    /// MUTATION: drop the `visited` set from [`walkdir`] and the `expect`
+    /// fails — the walk follows the loop until the kernel refuses the path.
+    #[cfg(unix)]
+    #[test]
+    fn walkdir_survives_a_directory_link_cycle_and_still_follows_a_link_out() {
+        let dir = crate::test_dir("style-walk-cycle");
+        let outside = crate::test_dir("style-walk-outside");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.jpg"), b"x").unwrap();
+        std::fs::write(dir.join("sub").join("b.jpg"), b"x").unwrap();
+        std::fs::write(outside.join("c.jpg"), b"x").unwrap();
+        // The classic cycle: a subfolder linking back to the root…
+        std::os::unix::fs::symlink(&dir, dir.join("sub").join("loop")).unwrap();
+        // …and a legitimate link to references kept elsewhere.
+        std::os::unix::fs::symlink(&outside, dir.join("elsewhere")).unwrap();
+        let mut found: Vec<String> = walkdir(&dir)
+            .expect("a cycle must not fail the scan")
+            .iter()
+            .map(|p| p.strip_prefix(&dir).unwrap().display().to_string())
+            .collect();
+        found.sort();
+        assert_eq!(found, ["a.jpg", "elsewhere/c.jpg", "sub/b.jpg"], "each file once, the link out followed");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
     #[test]
     fn look_build_rewrites_only_the_looks_block() {
         let dir = std::env::temp_dir().join(format!("autoshade-look-merge-{}", std::process::id()));
@@ -7774,6 +8153,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The provenance stamp travels with the VECTORS: a 14-dim RAW build
+    /// merging over a look library has no stamp of its own, and the file it
+    /// publishes must carry the looks' — not `null`, which `load`'s
+    /// vocabulary check cannot read.
+    ///
+    /// MUTATION: drop the `embed_provenance` carry from `save`'s merge and the
+    /// first stamp assertion fails; carry it unconditionally and the last one
+    /// does.
+    #[test]
+    fn a_build_without_vectors_keeps_the_stamp_of_the_looks_it_merges_over() {
+        let dir = crate::test_dir("style-merge-stamp");
+        let path = dir.join("style-index.json");
+        let look = LookExemplar {
+            stem: "look".into(), path: "look.jpg".into(), embed: unit_embed(), tags: Vec::new(),
+            vocab_scores: None, desc: None, desc_embed: None,
+        };
+        let stamped = embed_provenance_string();
+        StyleIndex {
+            version: CURRENT_INDEX_VERSION, mean: vec![0.0; NDIM], std: vec![1.0; NDIM],
+            exemplars: Vec::new(), source_dir: None, looks: vec![look],
+            looks_dir: Some("looks".into()), embed_provenance: Some(stamped.clone()),
+        }
+        .save(&path)
+        .unwrap();
+        // A RAW build WITHOUT vectors over it: no stamp of its own.
+        let raw_only = |stamp: Option<String>| StyleIndex {
+            version: CURRENT_INDEX_VERSION, mean: vec![0.0; NDIM], std: vec![1.0; NDIM],
+            exemplars: vec![plain_exemplar("raw")], source_dir: Some("raws".into()),
+            looks: Vec::new(), looks_dir: None, embed_provenance: stamp,
+        };
+        raw_only(None).save(&path).unwrap();
+        let merged = StyleIndex::load(&path).unwrap();
+        assert_eq!(merged.looks.len(), 1, "premise: the looks were merged in");
+        assert_eq!(
+            merged.embed_provenance.as_deref(),
+            Some(stamped.as_str()),
+            "…and their stamp with them"
+        );
+        // The mirror: nothing with a vector was merged, so nothing is stamped
+        // — a stamp is a claim about a vector, and `build_reporting` writes
+        // one only when some record carries one.
+        std::fs::remove_file(&path).unwrap();
+        raw_only(Some(stamped)).save(&path).unwrap();
+        raw_only(None).save(&path).unwrap();
+        let alone = StyleIndex::load(&path).unwrap();
+        assert!(alone.looks.is_empty(), "premise: no looks to merge");
+        assert!(alone.embed_provenance.is_none(), "no vector was merged, so no stamp is claimed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // --- S2: the staged build, and the description pass ----------------------
 
     /// The IMAGE and TEXT doors of `embed.py`, stubbed in one script — the two
@@ -7783,6 +8212,14 @@ mod tests {
     /// It ECHOES the manifest back: the answer is mapped by PATH, and the
     /// staged frame names carry a pid and a sequence number, so a fixed
     /// pre-written answer could not name them.
+    ///
+    /// Whatever `--vocab-file` it is handed must EXIST, on either door: the
+    /// real sidecar opens the path it is given, and the look build once
+    /// removed its vocabulary scratch after the image call while the text
+    /// call still named it — every look's description vector failed on a
+    /// path that was gone. `desc_embed_prefers_prose_over_tags` (and every
+    /// `desc_embed.is_some()` assertion on a look build) is what reddens
+    /// if that early removal comes back.
     fn image_text_stub(dir: &Path, texts: usize) -> crate::embed::EmbedOpts {
         std::fs::create_dir_all(dir).unwrap();
         let e = format!("{:.10}", 1.0f32 / (crate::embed::EMBED_DIM as f32).sqrt());
@@ -7812,6 +8249,11 @@ mod tests {
             "embed-stub",
             "@echo off\r\n\
              setlocal enabledelayedexpansion\r\n\
+             set \"PREV=\"\r\n\
+             for %%A in (%*) do (\r\n\
+             if \"!PREV!\"==\"--vocab-file\" if not exist \"%%~A\" exit /b 3\r\n\
+             set \"PREV=%%~A\"\r\n\
+             )\r\n\
              echo %~3>>\"%~dp0calls.log\"\r\n\
              copy /y \"%~4\" \"%~dp0manifest.seen\" >nul\r\n\
              if \"%~3\"==\"--text-manifest\" (\r\n\
@@ -7827,6 +8269,11 @@ mod tests {
              exit /b 0\r\n",
             &format!(
                 "D=\"{d}\"\n\
+                 PREV=\"\"\n\
+                 for A in \"$@\"; do\n\
+                 if [ \"$PREV\" = \"--vocab-file\" ] && [ ! -f \"$A\" ]; then echo \"vocab file missing: $A\" >&2; exit 3; fi\n\
+                 PREV=\"$A\"\n\
+                 done\n\
                  echo \"$3\" >> \"$D/calls.log\"\n\
                  cp \"$4\" \"$D/manifest.seen\"\n\
                  if [ \"$3\" = \"--text-manifest\" ]; then cp \"$D/vectors.json\" \"$6\"; exit 0; fi\n\
@@ -8045,6 +8492,61 @@ mod tests {
         assert_eq!(sweep_stale_intermediates(&dir, STALE_INTERMEDIATE_AGE), 0);
         assert!(dir.join(&fresh).exists(), "a fresh foreign frame is somebody's live build");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The describe stage, once OPENED, is closed on every way out — including
+    /// a manifest that cannot be written. A GUI progress bar reads the last
+    /// report, and one left at the cache-hit count looked like a description
+    /// pass still running.
+    ///
+    /// MUTATION: drop the `report(…, total, total)` from the manifest-write
+    /// failure arm of [`attach_descriptions`] and this fails.
+    #[test]
+    fn a_manifest_that_cannot_be_written_still_closes_the_describe_stage() {
+        let root = crate::test_dir("style-describe-manifest");
+        // A regular FILE where the manifest directory should go: the
+        // `create_dir_all` in the failure arm cannot succeed.
+        std::fs::write(root.join("blocker"), b"in the way").unwrap();
+        let dir = root.join("blocker").join("manifests");
+        let opts = crate::describe::DescribeOpts {
+            python_bin: "python".into(),
+            script: std::path::PathBuf::from(file!()),
+        };
+        assert!(opts.available(), "premise: the sidecar looks present, so the stage opens");
+        let seen = std::cell::RefCell::new(Vec::new());
+        let on_progress = |p: BuildProgress| seen.borrow_mut().push(p);
+        let mut records = vec![plain_exemplar("shot")];
+        let digests = vec![Some("ab".repeat(32))];
+        let frames = vec![Some(StagedFrame {
+            img: root.join("frame.png"),
+            json: root.join("frame.json"),
+        })];
+        attach_descriptions(
+            &opts,
+            DescribeSwitch::ON,
+            &dir,
+            &root.join("descriptions.json"),
+            "lib",
+            &digests,
+            &frames,
+            &mut records,
+            "test",
+            &on_progress,
+        );
+        assert!(records[0].desc.is_none(), "premise: nothing was described");
+        let seen = seen.borrow();
+        let describe = BuildStage::Describe;
+        assert_eq!(
+            seen.first(),
+            Some(&BuildProgress { stage: describe, done: 0, total: 1 }),
+            "the stage opened on the cache's zero hits"
+        );
+        assert_eq!(
+            seen.last(),
+            Some(&BuildProgress { stage: describe, done: 1, total: 1 }),
+            "and closed on the way out: {seen:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The SWITCH is the only thing that starts the description pass — not the

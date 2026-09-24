@@ -1752,7 +1752,7 @@ impl AutoShadeApp {
     /// and those keep the old treatment: Adobe's own property spelling, and a
     /// sentence saying we do not interpret them. Its cached ANSWER — the
     /// matrices, their count, its preview flag and its staleness digest — is
-    /// not carried at all; see [`crate::xmp::PASSTHROUGH_CRS`] for why.
+    /// not carried at all; see [`autoshade::xmp::PASSTHROUGH_CRS`] for why.
     ///
     /// (The Calibration panel used to share this heading. It renders since
     /// v1.5.0 — `dev_calibration` above — and was never in this map: R25

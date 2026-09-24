@@ -672,12 +672,33 @@ impl OpenAiProvider {
     /// (R23-4). The [`Advisor`] trait method below is this one with the second
     /// half dropped — one request builder, one parser, no second code path that
     /// could drift from the default one.
+    ///
+    /// A FRESH analysis: no refine base, so every returned mask name is model
+    /// text. A Refine goes through [`Self::propose_planned_with_base`].
     pub fn propose_planned(
         &self,
         img: &Preview,
         meta: &Meta,
         hist: &Histogram,
         ctx: &ProposeContext,
+    ) -> Result<Proposal, AdvisorError> {
+        self.propose_planned_with_base(img, meta, hist, ctx, None)
+    }
+
+    /// [`Self::propose_planned`] for a REFINE. `base` is the recipe the
+    /// photographer is adjusting — the one `pipeline::carry_over_unrepresentable`
+    /// matches the response's mask names against, byte for byte — so the
+    /// projection leaves a returned name that echoes one of ITS names exactly
+    /// as it came (`advisor::project_remote_recipe_text`). Nothing else about
+    /// the call reads it: the base reaches the model through the refine
+    /// envelope in `ctx.guidance`, as before.
+    pub fn propose_planned_with_base(
+        &self,
+        img: &Preview,
+        meta: &Meta,
+        hist: &Histogram,
+        ctx: &ProposeContext,
+        base: Option<&EditRecipe>,
     ) -> Result<Proposal, AdvisorError> {
         let key = self
             .api_key
@@ -711,9 +732,11 @@ impl OpenAiProvider {
             effort.as_deref(),
         )?;
 
-        let recipe_json = extract_output_text(&value).ok_or_else(|| AdvisorError::Transport(
-            "could not locate structured output in OpenAI response (shape mismatch — see openai.rs)".into(),
-        ))?;
+        let recipe_json = output_text_or_refusal(
+            &value,
+            &[key],
+            "could not locate structured output in OpenAI response (shape mismatch — see openai.rs)",
+        )?;
         // Parse to a Value FIRST so a miscounted HSL axis can be repaired
         // instead of throwing the whole paid call away (see
         // `repair_hsl_axis_lengths`).
@@ -750,7 +773,7 @@ impl OpenAiProvider {
         // own zero would be read as "never seen" and the XMP merge would leave
         // the photographer's old `crs:Texture` standing over it.
         recipe.schema_era = crate::recipe::SCHEMA_ERA;
-        super::project_remote_recipe_text(&mut recipe, &[key]);
+        super::project_remote_recipe_text(&mut recipe, &[key], base);
         // The provider's own disclosures, appended to the English rationale AND
         // carried as typed notes (A10): `push_note` does both, so the persisted
         // string is byte-identical to what it always was while the GUI gets a
@@ -995,9 +1018,11 @@ so the same prompt can restyle ANY other photograph. Output ONLY the prompt text
         super::SseFamily::Responses,
         cfg.image_effort.as_deref(),
     )?;
-    let text = extract_output_text(&value).ok_or_else(|| {
-        AdvisorError::Transport("could not locate output text in OpenAI response".into())
-    })?;
+    let text = output_text_or_refusal(
+        &value,
+        &[key],
+        "could not locate output text in OpenAI response",
+    )?;
     Ok(
         super::BoundedUntrustedText::new(text.trim(), 2048, &[key])
             .into_string(),
@@ -1021,6 +1046,53 @@ pub(crate) fn extract_output_text(v: &Value) -> Option<String> {
         }
     }
     None
+}
+
+/// The `refusal` part a Responses-API reply carries when the model DECLINED
+/// instead of answering — the same `output[].content[]` walk as
+/// [`extract_output_text`], on the part type it skips.
+pub(crate) fn extract_refusal(v: &Value) -> Option<String> {
+    for item in v.get("output")?.as_array()? {
+        if let Some(content) = item.get("content").and_then(Value::as_array) {
+            for c in content {
+                if c.get("type").and_then(Value::as_str) == Some("refusal")
+                    && let Some(s) = c.get("refusal").and_then(Value::as_str) {
+                        return Some(s.to_string());
+                    }
+            }
+        }
+    }
+    None
+}
+
+/// [`extract_output_text`], with the two ways it comes back empty told apart.
+///
+/// A reply whose message is a `refusal` part is the MODEL declining the
+/// request — its own failure, [`AdvisorError::ModelFailure`], the refusal
+/// text bounded and redacted like every other model-authored failure text
+/// (`assemble_sse`'s failure events). It used to fall through to the
+/// Transport arm, so a refusal was reported as a response SHAPE mismatch and
+/// every consumer's messaging blamed the wire for a decision the model had
+/// stated in words. Only a reply with neither part is `missing`, the shape
+/// mismatch the caller names.
+pub(crate) fn output_text_or_refusal(
+    v: &Value,
+    secrets: &[&str],
+    missing: &str,
+) -> Result<String, AdvisorError> {
+    if let Some(text) = extract_output_text(v) {
+        return Ok(text);
+    }
+    if let Some(refusal) = extract_refusal(v) {
+        return Err(AdvisorError::ModelFailure(
+            super::BoundedUntrustedText::diagnostic(
+                &format!("the model refused the request: {refusal}"),
+                secrets,
+            )
+            .into_string(),
+        ));
+    }
+    Err(AdvisorError::Transport(missing.into()))
 }
 
 #[cfg(test)]
@@ -1073,7 +1145,7 @@ mod tests {
             // means a paid network call.
             let whole = include_str!("openai.rs");
             let body = whole
-                .split("super::project_remote_recipe_text(&mut recipe, &[key]);")
+                .split("super::project_remote_recipe_text(&mut recipe, &[key], base);")
                 .nth(1)
                 .expect("the provider body moved")
                 .split("Ok(Proposal {")
@@ -1593,6 +1665,93 @@ mod tests {
             clip_white_pct: 0.0,
             sample_pixels: 256,
         }
+    }
+
+    /// A `refusal` part is the model DECLINING, and the error says so. The
+    /// output walk used to skip it, so a paid call that came back refused
+    /// surfaced as "could not locate structured output … shape mismatch" — a
+    /// transport complaint about a decision the model had stated in words.
+    ///
+    /// MUTATION: drop the `extract_refusal` branch from
+    /// `output_text_or_refusal` and the `ModelFailure` arm below is not taken.
+    #[test]
+    fn a_refusal_part_is_the_models_own_failure_not_a_shape_mismatch() {
+        use crate::advisor::tests::{join_stub, stub_endpoint};
+        let reply = serde_json::json!({
+            "output": [{ "type": "message", "content": [
+                { "type": "refusal", "refusal": "I can't help with editing this image." }
+            ] }]
+        })
+        .to_string();
+        let (url, _seen, handle) = stub_endpoint(vec![(200, "application/json", reply)]);
+        let p = OpenAiProvider::new(&cfg_for(&url));
+        let err = p
+            .propose(
+                &Preview { jpeg: b"JPEG".to_vec() },
+                &meta_fixture(),
+                &hist_fixture(),
+                &ProposeContext::default(),
+            )
+            .expect_err("a refusal is not a recipe");
+        join_stub(handle);
+        match &err {
+            AdvisorError::ModelFailure(m) => {
+                assert!(m.contains("I can't help with editing this image."), "{m}")
+            }
+            other => panic!("a refusal must be the model's own failure, got: {other}"),
+        }
+        // …and a reply with NEITHER part is the shape mismatch it always was.
+        let neither = serde_json::json!({ "output": [{ "content": [{ "type": "reasoning" }] }] });
+        assert!(matches!(
+            output_text_or_refusal(&neither, &[], "shape"),
+            Err(AdvisorError::Transport(m)) if m == "shape"
+        ));
+    }
+
+    /// The projection at the provider seam: a Refine that echoes a base mask
+    /// name hands it to the pipeline byte for byte. The base's name carries a
+    /// tab, which the projection strips from MODEL text — and
+    /// `pipeline::carry_over_unrepresentable` matches names against the base
+    /// byte for byte, so a stripped echo matched nothing and every mask edit
+    /// of the Refine was discarded.
+    ///
+    /// MUTATION: have `propose_planned_with_base` hand `None` to the
+    /// projection and the echoed name loses its tab.
+    #[test]
+    fn a_refine_echoing_a_base_mask_name_keeps_it_byte_for_byte() {
+        use crate::advisor::tests::{join_stub, stub_endpoint};
+        use crate::recipe::LocalAdjustment;
+        let odd = "sky\tline";
+        let base = EditRecipe {
+            masks: vec![LocalAdjustment { name: odd.into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let recipe = serde_json::json!({
+            "exposure_ev": 0.1,
+            "masks": [
+                { "name": odd, "exposure_ev": 0.3 },
+                { "name": "fore\tground", "exposure_ev": -0.2 }
+            ]
+        })
+        .to_string();
+        let reply = serde_json::json!({
+            "output": [{ "content": [{ "type": "output_text", "text": recipe }] }]
+        })
+        .to_string();
+        let (url, _seen, handle) = stub_endpoint(vec![(200, "application/json", reply)]);
+        let p = OpenAiProvider::new(&cfg_for(&url));
+        let proposal = p
+            .propose_planned_with_base(
+                &Preview { jpeg: b"JPEG".to_vec() },
+                &meta_fixture(),
+                &hist_fixture(),
+                &ProposeContext::default(),
+                Some(&base),
+            )
+            .expect("the stub reply parses");
+        join_stub(handle);
+        let names: Vec<&str> = proposal.recipe.masks.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec![odd, "foreground"]);
     }
 
     /// R23-2 (feedback #6, "reference photos as well as the index"): the

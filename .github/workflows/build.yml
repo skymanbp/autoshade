@@ -57,6 +57,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - name: Toolchain
+        shell: bash
+        run: |
+          want=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          got=$(rustc --version | cut -d' ' -f2)
+          echo "rust-toolchain.toml pins $want; rustc reports $got"
+          test "$want" = "$got" || { echo "::error::the pin was not honoured"; exit 1; }
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (default features)
         run: cargo test --locked --release
@@ -78,6 +85,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - name: Toolchain
+        shell: bash
+        run: |
+          want=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          got=$(rustc --version | cut -d' ' -f2)
+          echo "rust-toolchain.toml pins $want; rustc reports $got"
+          test "$want" = "$got" || { echo "::error::the pin was not honoured"; exit 1; }
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (lib, debug profile)
         run: cargo test --locked --lib

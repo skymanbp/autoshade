@@ -115,13 +115,28 @@ impl Family {
         let mut idx = [0usize, 1, 2];
         idx.sort_by(|&a, &b| vals[a].total_cmp(&vals[b]));
         let (lo, next) = (vals[idx[0]], vals[idx[1]]);
-        if !(lo.is_finite() && next.is_finite()) || lo < 0.0 || next < lo * Tune::MIN_SEPARATION {
+        // `Σ w lᵀl` is positive semi-definite by construction, so a smallest
+        // eigenvalue a hair below zero is Jacobi's rounding on a matrix that is
+        // near-singular by design (that is what having a vanishing point
+        // means), not a sign to refuse on; one far below zero is a
+        // decomposition gone wrong. The tolerance scales with the matrix, and
+        // the separation test reads the same magnitude either side of zero.
+        let tol = 1e-9 * vals[idx[2]].abs();
+        if !vals.iter().all(|v| v.is_finite()) || lo < -tol || next < lo.abs() * Tune::MIN_SEPARATION {
             return None;
         }
         let p = vecs[idx[0]];
         let p = [p[0] as f32, p[1] as f32, p[2] as f32];
         p.iter().all(|v| v.is_finite()).then_some(p)
     }
+}
+
+/// [`Family::vanishing_point`] on normal equations stated directly, with the
+/// sample floor met — for the tests that probe its eigenvalue guards without
+/// a picture.
+#[cfg(test)]
+pub(super) fn vanishing_point_of(m: [f64; 6]) -> Option<[f32; 3]> {
+    Family { m, n: Tune::MIN_SAMPLES, ..Family::default() }.vanishing_point()
 }
 
 /// Eigen-decomposition of a 3×3 symmetric matrix given as its upper triangle
@@ -243,14 +258,26 @@ pub(crate) fn solve_upright(luma: &[f32], w: usize, h: usize, mode: u8) -> Optio
     // evidence: a photograph of a doorway may state its verticals far better
     // than its horizontals, and the vertical family's angle is the same fact a
     // quarter turn away.
+    //
+    // Both angles are measured in the per-axis box `gather` normalises by, and
+    // a box normalised per axis has no notion of a circle: the angle there is
+    // not the angle in the picture (tan φ_box = aspect · tan φ_px), and the
+    // plain rotation matrix there is a SHEAR on any frame that is not square —
+    // the defect `super::manual` corrected for the Rotate slider on
+    // 2026-09-19. So the measured angle is brought into pixel space first, and
+    // the turn is written as the rigid pixel rotation expressed in the box,
+    // which is the shape Adobe's own Level matrix has: the `ADOBE_MATRIX` the
+    // tests carry reads h10 / h01 = −2.25 = −aspect² on its 3:2 frame.
+    let aspect = (w as f32 - 1.0).max(1.0) / (h as f32 - 1.0).max(1.0);
+    let in_pixels = |a: f32| a.sin().atan2(aspect * a.cos());
     let level = if horiz.n >= vert.n {
-        (horiz.n >= Tune::MIN_SAMPLES).then(|| horiz.mean_angle())
+        (horiz.n >= Tune::MIN_SAMPLES).then(|| in_pixels(horiz.mean_angle()))
     } else {
-        (vert.n >= Tune::MIN_SAMPLES).then(|| quarter_turn(vert.mean_angle()))
+        (vert.n >= Tune::MIN_SAMPLES).then(|| quarter_turn(in_pixels(vert.mean_angle())))
     };
     let rotate = {
         let (s, c) = (-level.unwrap_or(0.0)).sin_cos();
-        Homography::about_centre([c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0])
+        Homography::about_centre([c, -s / aspect, 0.0, s * aspect, c, 0.0, 0.0, 0.0, 1.0])
     };
     if mode == 2 {
         return level.and_then(|_| super::fill_the_frame(rotate));

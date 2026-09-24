@@ -56,13 +56,16 @@ jobs:
         run: cargo build --release --locked --bins --features gui 2>&1 | tee build-gui.log
       # build.rs turns an icon-embedding failure into a `cargo:warning`, not an
       # error, so a runner missing the resource toolchain would ship an
-      # icon-less exe in silence. The local chain never needed this check
+      # icon-less exe in silence. Cargo prints that warning as
+      # `warning: autoshade@<version>: icon embed skipped …` — the
+      # `cargo:warning=` prefix never reaches the log — so the grep is for
+      # build.rs's own words (an earlier `grep cargo:warning` could never fire). The local chain never needed this check
       # because the toolchain was always there; a hosted runner is not a
       # machine anyone inspects afterwards.
       - name: The icon really was embedded
         shell: bash
         run: |
-          if grep -i "cargo:warning" build-cli.log build-gui.log; then
+          if grep -F "icon embed skipped" build-cli.log build-gui.log; then
             echo "::error::the build warned — the icon may not be embedded"; exit 1
           fi
       - name: Stage dist/
@@ -221,9 +224,10 @@ jobs:
           cp -R assets "$stage/assets"
           cp LICENSE README.md "$stage/"
           # The same three claims the bundle makes, on the shape that has no
-          # plist to lint: the binary runs, its sidecars came along, and no
-          # weights rode in with them.
-          "$stage/autoshade" --version
+          # plist to lint: the binary runs and reports the version the archive
+          # is named for, its sidecars came along, and no weights rode in with
+          # them.
+          test "$("$stage/autoshade" --version)" = "autoshade ${{ steps.ver.outputs.version }}"
           test -f "$stage/python/segment.py"
           test ! -e "$stage/python/weights"
           echo "sidecars: $(find "$stage/python" -type f | wc -l) files"
@@ -286,9 +290,10 @@ jobs:
             python/ "$stage/python/"
           cp -R assets "$stage/assets"
           cp LICENSE README.md "$stage/"
-          # The same three claims the macOS CLI stage makes: the binary runs,
-          # its sidecars came along, and no weights rode in with them.
-          "$stage/autoshade" --version
+          # The same three claims the macOS CLI stage makes: the binary runs
+          # and reports the version the archive is named for, its sidecars came
+          # along, and no weights rode in with them.
+          test "$("$stage/autoshade" --version)" = "autoshade ${{ steps.ver.outputs.version }}"
           test -f "$stage/python/segment.py"
           test ! -e "$stage/python/weights"
           echo "sidecars: $(find "$stage/python" -type f | wc -l) files"
@@ -317,6 +322,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - name: Toolchain
+        shell: bash
+        run: |
+          want=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          got=$(rustc --version | cut -d' ' -f2)
+          echo "rust-toolchain.toml pins $want; rustc reports $got"
+          test "$want" = "$got" || { echo "::error::the pin was not honoured"; exit 1; }
       - uses: Swatinem/rust-cache@v2
       - name: Batteries
         run: |

@@ -266,8 +266,7 @@ pub fn render_to_image_in(
     let (mut rawimage, orientation) = {
         let src = RawSource::new(raw_path)
             .with_context(|| format!("open RAW {}", raw_path.display()))?;
-        let decoder =
-            get_decoder(&src).map_err(|e| anyhow!("no decoder for {}: {e}", raw_path.display()))?;
+        let decoder = crate::decode::decoder_for(raw_path, &src)?;
         let params = RawDecodeParams { image_index: 0 };
         // Which way is up comes from the EXIF metadata, NOT `RawImage
         // .orientation` — rawler 0.7.2 hard-codes that field to `Normal` for
@@ -3151,7 +3150,7 @@ fn apply_masks(
         // includes this mask's own tone move — acceptable drift, NR being the
         // subtler effect. Below a tenth of a slider step the pass allocates
         // nothing.
-        if m.noise_reduction > 0.1 {
+        if m.noise_reduction > LOCAL_NR_GATE {
             let p = detail::LumaNrParams::at_amount(r, m.noise_reduction);
             detail::luma_nr(data, w, h, &p, film, spatial_weight);
         }
@@ -3508,8 +3507,9 @@ fn is_lr_post_correction_geometry(g: &MaskGeometry) -> bool {
 /// # Why a table and not a law
 ///
 /// Three successive closed forms were wrong on this arm, and R29 Batch-7 plus
-/// its supplement Batch-7-2 (`~/.claude/plans/r29-materials/b7-analysis.md`,
-/// `…/b7-analysis-2.md`) closed the question rather than proposing a fourth:
+/// its supplement Batch-7-2 (`b7-analysis.md` and `b7-analysis-2.md` in the R29
+/// materials ledger, outside the tree) closed the question rather than
+/// proposing a fourth:
 /// across all EIGHT rungs those batches measured, no two-parameter closed form
 /// reaches the 0.003 measurement floor. The best is a Beta CDF in `1 − ρ/1.4335`
 /// at 3.1× the floor; the free-endpoint smoothstep this engine shipped scores
@@ -3548,7 +3548,7 @@ fn is_lr_post_correction_geometry(g: &MaskGeometry) -> bool {
 /// `b7b_12_dense.py`, tabulated in `b7-analysis-2.md` §3.1, for eight of them
 /// (f = 25/50/75/100 reproduce B7 §3.1 bit for bit; f = 1/5/10/90 are that
 /// supplement's rungs), and the me3 package's own f = 15/35/65 exports for the
-/// other three (`~/.claude/plans/r29-materials/me3-a-report.md` §0-Q1 and §1,
+/// other three (`me3-a-report.md` §0-Q1 and §1 in the R29 materials ledger,
 /// generator `scripts-archive/me3-a/a_09_table.py`).
 ///
 /// The three me3 columns are INSERTED, not refitted. The eight B7-2 columns
@@ -4342,7 +4342,7 @@ fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image::GrayImage
         // `w·(1−0) = w`.
         //
         // THE MODEL, and every number in it is measured, not chosen (R29
-        // Batch-6, `~/.claude/plans/r29-materials/b6-analysis.md`; the two
+        // Batch-6, `b6-analysis.md` in the R29 materials ledger; the two
         // laws re-confirmed out-of-sample against R27 Batch-8/10):
         //
         //     ρ       = |p − dab| / (Radius·W)          dab is a circle in PIXELS
@@ -4631,6 +4631,14 @@ fn refine_mask_guided_tiled(
     out
 }
 
+/// The local Noise Reduction at or below which the render's NR pass allocates
+/// nothing — a tenth of a slider step. [`engine_active`] reads the SAME line,
+/// because the GUI's ● marker and the raster budget are promises about what
+/// the render will do: one constant, two readers, so a mutation of either is a
+/// mutation of both. (They were two literals once, and before that `!= 0.0` on
+/// one side against `> 0.1` on the other.)
+const LOCAL_NR_GATE: f32 = 0.1;
+
 /// The ENGINE's own activity rule for one local adjustment: does
 /// [`apply_masks`] have anything to do for it? Every `!= 0.0` gate inside that
 /// function is mirrored here — identity tone/sat + no local WB/recolour + no
@@ -4657,8 +4665,8 @@ pub fn engine_active(m: &crate::recipe::LocalAdjustment) -> bool {
         || m.hue != 0.0
         || m.temperature != 0.0
         || m.tint != 0.0
-        // The render's NR pass allocates nothing below a tenth of a step.
-        || m.noise_reduction > 0.1
+        // The render's NR pass allocates nothing at or below `LOCAL_NR_GATE`.
+        || m.noise_reduction > LOCAL_NR_GATE
         // The four local point curves (R25 P6). Empty = identity, exactly as
         // `apply_develop`'s own `tone_neutral` reads the global curves — a
         // non-empty curve is an edit even if its points happen to trace the
@@ -5207,7 +5215,7 @@ pub(crate) fn sample_gray_norm(b: &image::GrayImage, nx: f32, ny: f32) -> f32 {
 // --- Lightroom's brush, rasterised ------------------------------------------
 //
 // Everything from here to `brush_raster` is ONE measurement made executable:
-// R29 Batch-6 (`~/.claude/plans/r29-materials/b6-analysis.md`), 29 controlled
+// R29 Batch-6 (`b6-analysis.md`, R29 materials ledger), 29 controlled
 // Lightroom exports on one capture — a nine-rung hardness ladder (class 07,
 // Δh = 0.125, one dab at the exact frame centre) and a 5 × 2 × 2 flow × radius
 // × hardness grid of drags (class 06) — read back through batch-10's `par`
@@ -6156,9 +6164,10 @@ fn texture_depth(t: f32) -> f32 {
 /// short-edge ratio for rms 0.0048 — its own in-sample residual (B8-2 §1
 /// ruling 4). This engine is the architecture that makes that reading
 /// unambiguous: the develop runs at FULL resolution and `--long-edge` resamples
-/// the FINISHED pixels as the last stage (`src/main.rs:891-894`, the resize at
-/// `src/render.rs:1569-1575`), so the `(w, h)` handed to this pass IS the
-/// render raster and never the delivery size.
+/// the FINISHED pixels as the last stage (the CLI's flag reaches
+/// [`ExportOpts::long_edge`], and `render_to_file` resizes the finished frame as
+/// its last step), so the `(w, h)` handed to this pass IS the render raster and
+/// never the delivery size.
 ///
 /// What the two-resolution pair does NOT decide is whether σ tracks the FILM's
 /// resolution or a fixed pixel count — every fixture came off one ARW, so both
@@ -6284,8 +6293,9 @@ fn texture_pass(
 /// **The domain is load-bearing.** The fit holds in the sRGB-gamma domain and
 /// diverges by 0.041 at a 4 px period in linear light (B8-2 §6-3), so this pass
 /// must run on gamma-encoded pixels. It does: the develop's buffer is
-/// sRGB-encoded before `apply_develop` is ever called (`src/render.rs:326`, the
-/// baked path; `src/render.rs:1417`, `calibrate_camera_buffer`'s last line).
+/// sRGB-encoded before `apply_develop` is ever called — every buffer
+/// `develop_raw_buffer` returns carries the sRGB transfer, and
+/// `calibrate_camera_buffer`'s last line is that encode.
 ///
 /// **Where the model is honest about not applying.** Lightroom's operator is
 /// amplitude-adaptive — not LTI: H spans 0.33 → 0.85 with detail amplitude
@@ -6592,7 +6602,7 @@ pub(crate) fn wb_gains(as_shot_k: f32, target_k: f32, tint: f32) -> [f32; 3] {
 /// wb_gains' "higher target K = warmer" convention), −100 → ~3820 K. Both
 /// endpoints sit inside kelvin_to_rgb's 1000–40000 K validity. ACR's exact
 /// local-temp model is proprietary — this is our documented approximation
-/// (same stance as [`apply_vignette`]); the XMP carries the raw slider value,
+/// (same stance as [`manual_vignette_lut`]); the XMP carries the raw slider value,
 /// so Lightroom re-renders with its own model.
 // `pub`, not `pub(crate)`: the mask panel's Temp-shift tooltip states the
 // equivalent Kelvin for the value on the slider, and it must be THIS
@@ -7231,6 +7241,28 @@ fn base_curve_lut(knots: &[[f32; 2]]) -> Vec<f32> {
         .collect()
 }
 
+/// The part of `neutral` the camera's embedded rendition shows: the whole
+/// develop when the two share the sensor frame, else the centred crop at the
+/// rendition's aspect. A body set to an in-camera aspect writes a centred
+/// crop (a Sony 4:3 preview over the 3:2 sensor measured centred at NCC 0.987
+/// against 0.83 for either side, v1.2.2); pairing the full frame against it
+/// put the edge strips' histogram on one side of the CDF match only.
+pub fn camera_frame_of(neutral: &DynamicImage, camera: &DynamicImage) -> DynamicImage {
+    let (nw, nh) = (neutral.width(), neutral.height());
+    let (cw, ch) = (camera.width(), camera.height());
+    if cw == 0 || ch == 0 || crate::fit::same_frame_plausible_dims((nw, nh), (cw, ch)) {
+        return neutral.clone();
+    }
+    let target = cw as f64 / ch as f64;
+    let (w, h) = if nw as f64 / nh as f64 > target {
+        ((nh as f64 * target).round() as u32, nh)
+    } else {
+        (nw, (nw as f64 / target).round() as u32)
+    };
+    let (w, h) = (w.clamp(1, nw), h.clamp(1, nh));
+    neutral.crop_imm((nw - w) / 2, (nh - h) / 2, w, h)
+}
+
 /// Estimate a photo's camera base curve: `[x, y]` knots mapping the NEUTRAL
 /// develop's luma toward the camera's embedded rendition by CDF match, read
 /// off BLOCK MEANS of the two pictures (2026-09-23).
@@ -7277,28 +7309,6 @@ fn base_curve_lut(knots: &[[f32; 2]]) -> Vec<f32> {
 /// the block grid on either side — an inability the pre-era repair must never
 /// mistake for a verdict), `Some(empty)` for the identity verdict (= no base
 /// look), and `Some(knots)` otherwise.
-/// The part of `neutral` the camera's embedded rendition shows: the whole
-/// develop when the two share the sensor frame, else the centred crop at the
-/// rendition's aspect. A body set to an in-camera aspect writes a centred
-/// crop (a Sony 4:3 preview over the 3:2 sensor measured centred at NCC 0.987
-/// against 0.83 for either side, v1.2.2); pairing the full frame against it
-/// put the edge strips' histogram on one side of the CDF match only.
-pub fn camera_frame_of(neutral: &DynamicImage, camera: &DynamicImage) -> DynamicImage {
-    let (nw, nh) = (neutral.width(), neutral.height());
-    let (cw, ch) = (camera.width(), camera.height());
-    if cw == 0 || ch == 0 || crate::fit::same_frame_plausible_dims((nw, nh), (cw, ch)) {
-        return neutral.clone();
-    }
-    let target = cw as f64 / ch as f64;
-    let (w, h) = if nw as f64 / nh as f64 > target {
-        ((nh as f64 * target).round() as u32, nh)
-    } else {
-        (nw, (nw as f64 / target).round() as u32)
-    };
-    let (w, h) = (w.clamp(1, nw), h.clamp(1, nh));
-    neutral.crop_imm((nw - w) / 2, (nh - h) / 2, w, h)
-}
-
 pub fn camera_base_knots(
     neutral: &DynamicImage,
     camera: &DynamicImage,
@@ -9115,8 +9125,6 @@ pub fn rotate_straighten(img: &DynamicImage, deg: f32) -> DynamicImage {
     DynamicImage::ImageRgb16(out)
 }
 
-/// Clamped bilinear lookup in a 16-bit RGB buffer — the shared resampling core
-/// of the geometric ops ([`rotate_straighten`], [`apply_lens_distortion`]).
 /// Single-channel bilinear fetch — SAME per-channel math as
 /// [`sample_bilinear_rgb16`] (bit-identical result), for the CA path where
 /// each channel samples at its own radius and the other two would be wasted.
@@ -9136,6 +9144,8 @@ fn sample_bilinear_ch(src: &ImageBuffer<Rgb<u16>, Vec<u16>>, sx: f32, sy: f32, c
     (top * (1.0 - fy) + bot * fy).round().clamp(0.0, 65535.0) as u16
 }
 
+/// Clamped bilinear lookup in a 16-bit RGB buffer — the shared resampling core
+/// of the geometric ops ([`rotate_straighten`], [`apply_lens_distortion`]).
 fn sample_bilinear_rgb16(src: &ImageBuffer<Rgb<u16>, Vec<u16>>, sx: f32, sy: f32) -> Rgb<u16> {
     let (w, h) = (src.width() as f32, src.height() as f32);
     let x0 = sx.floor().clamp(0.0, w - 1.0);
@@ -9838,9 +9848,10 @@ pub fn lens_ungeom_norm(
 //
 // WHAT THIS ENGINE DOES WITH IT — and the part that is NOT the same question.
 // This pipeline evaluates every mask in the PRE-lens-correction frame and then
-// resamples the whole frame through the geometry stage (`develop` applies masks
-// at line ~379 and `apply_lens_geometry` at ~404; the comment there states the
-// order outright). A mask this engine draws is therefore carried by the
+// resamples the whole frame through the geometry stage (`apply_develop` runs
+// `apply_masks`; `finish::frame_and_finish` then runs `apply_lens_geometry` on
+// the developed buffer, and its doc states the order outright). A mask this
+// engine draws is therefore carried by the
 // distortion field exactly as the pixels are, without anyone applying `m`:
 //
 //   | mask kind   | downstream geometry | engine frame operation              |
@@ -17470,7 +17481,7 @@ mod tests {
     /// hardness rungs × thirteen ρ rows, each rung normalised by its own
     /// ρ < 0.05 core, zero point +0.00199) and §4.4 (the two cubics and the
     /// `(m, n)` they reproduce) —
-    /// `~/.claude/plans/r29-materials/b6-analysis.md`.
+    /// `b6-analysis.md` in the R29 materials ledger, outside the tree.
     ///
     /// **The tolerances are the report's own numbers, not a bar tuned to pass.**
     /// The deg-3 law scores pooled rms 0.0102 against this table (B6 §4.4's
@@ -19572,6 +19583,21 @@ mod tests {
         }
     }
 
+    /// The render's local-NR pass and [`engine_active`] read ONE gate,
+    /// [`LOCAL_NR_GATE`]: a mask whose only move is a Noise value at or under
+    /// it is inert (the pass allocates nothing there), one just over it is
+    /// active. `!= 0.0` once made a 0.05 mask read as active — a ● the user
+    /// sees for a render that does nothing.
+    ///
+    /// MUTATION: `>=` or `!= 0.0` back in `engine_active`'s NR term.
+    #[test]
+    fn engine_active_reads_the_renders_own_noise_gate() {
+        let nr = |v: f32| LocalAdjustment { noise_reduction: v, ..Default::default() };
+        assert!(!engine_active(&nr(LOCAL_NR_GATE)), "at the gate the pass allocates nothing");
+        assert!(!engine_active(&nr(LOCAL_NR_GATE * 0.5)), "…and below it too");
+        assert!(engine_active(&nr(LOCAL_NR_GATE + 0.05)), "just over it the pass runs");
+    }
+
     /// R25 P6. The registry's one-hot/zeroing probe
     /// (`catalogue::local_tiers_agree_with_the_engines_own_activity_gate`)
     /// cannot reach a `Shape::Curve` row — neither `1.0` nor `0.0` is a curve
@@ -20470,6 +20496,36 @@ mod tests {
         }
         let empty = refine_mask_guided(&small, &DynamicImage::ImageRgb8(RgbImage::new(0, 0)), 2, 1e-4);
         assert_eq!(empty.as_raw(), small.as_raw(), "a 0x0 guide returns the mask unchanged");
+    }
+
+    /// A RAW with no colour matrix is DISCLOSED, not developed without its
+    /// profile in silence: `resolve_camera_profile` forwards this error
+    /// verbatim into its `camera profile "…" is not rendered: …` warning, so
+    /// the text has to name the missing thing. (That arm sits behind
+    /// `dcp::find`, which needs an installed profile pool; the error it
+    /// forwards is what can be pinned without one.)
+    ///
+    /// MUTATION: answer an identity for an empty map, or reword the error.
+    #[test]
+    fn a_raw_without_a_colour_matrix_names_the_missing_matrix() {
+        use rawler::cfa::{PlaneColor, CFA};
+        use rawler::decoders::Camera;
+        use rawler::rawimage::{BlackLevel, CFAConfig, RawImageData, RawPhotometricInterpretation, WhiteLevel};
+        let raw = rawler::RawImage::new_with_data(
+            Camera::new(),
+            RawImageData::Integer(vec![512u16; 16]),
+            4,
+            4,
+            1,
+            [1.0, 1.0, 1.0, f32::NAN],
+            RawPhotometricInterpretation::Cfa(CFAConfig::new(&CFA::new("RGGB"), &PlaneColor::new("RGB"))),
+            Some(BlackLevel::new(&[0u16], 1, 1, 1)),
+            Some(WhiteLevel::new(vec![4095])),
+            false,
+        );
+        assert!(raw.color_matrix.is_empty(), "premise: a body rawler knows nothing about");
+        let e = camera_matrix(&raw).unwrap_err().to_string();
+        assert!(e.contains("no camera colour matrix"), "the refusal names the mechanism: {e}");
     }
 
     /// L04-1: a file-supplied camera matrix that cannot be inverted is

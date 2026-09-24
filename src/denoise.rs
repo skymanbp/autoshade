@@ -420,25 +420,38 @@ fn carry_icc_onto_staged(
         );
         return Ok(());
     }
+    // An encoder that refuses the profile (none of the three does today — the
+    // refusal is the trait's default answer, for codecs that cannot carry one)
+    // is disclosed the way an incapable extension is above, and the product is
+    // still written: the create below truncates `staged`, so bailing here would
+    // destroy the very product it was about to re-tag.
+    let attach = |refused: Result<(), image::error::UnsupportedError>| {
+        if let Err(e) = refused {
+            eprintln!(
+                "⚠ the denoise product .{ext} cannot carry the source ICC profile ({e}) — its \
+                 colours may be read as sRGB"
+            );
+        }
+    };
     let file = std::fs::File::create(staged)
         .with_context(|| format!("re-create {}", staged.display()))?;
     let mut w = std::io::BufWriter::new(file);
     match ext.as_str() {
         "png" => {
             let mut enc = image::codecs::png::PngEncoder::new(&mut w);
-            let _ = enc.set_icc_profile(profile.clone());
+            attach(enc.set_icc_profile(profile.clone()));
             enc.write_image(img.as_bytes(), img.width(), img.height(), img.color().into())
                 .context("re-encode the denoise product with the source profile")?;
         }
         "jpg" | "jpeg" => {
             let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut w, 95);
-            let _ = enc.set_icc_profile(profile.clone());
+            attach(enc.set_icc_profile(profile.clone()));
             enc.write_image(img.as_bytes(), img.width(), img.height(), img.color().into())
                 .context("re-encode the denoise product with the source profile")?;
         }
         _ => {
             let mut enc = image::codecs::tiff::TiffEncoder::new(&mut w);
-            let _ = enc.set_icc_profile(profile.clone());
+            attach(enc.set_icc_profile(profile.clone()));
             enc.write_image(img.as_bytes(), img.width(), img.height(), img.color().into())
                 .context("re-encode the denoise product with the source profile")?;
         }
@@ -1685,10 +1698,13 @@ mod tests {
     fn orphaned_download_parts_are_reclaimed() {
         assert!(SIDECAR_SRC.contains("def _reclaim_stale_parts(dest):"));
         assert!(
-            // Re-pointed 2026-09-19 with the source list (`_mirror.sources`):
-            // the rule is that the sweep is the FIRST thing the verified fetch
-            // does, and the line that follows it is how this file proves it.
-            SIDECAR_SRC.contains("_reclaim_stale_parts(dest)\n    tried = []\n    for source in"),
+            // Re-pointed 2026-09-19 with the source list (`_mirror.sources`)
+            // and 2026-09-24 with the cached-copy check hoisted above that
+            // loop: the rule is that the sweep is the FIRST thing the verified
+            // fetch does, and the line that follows it — the check of the
+            // cached copy, before any source is asked — is how this file
+            // proves it.
+            SIDECAR_SRC.contains("_reclaim_stale_parts(dest)\n    tried = []\n    if os.path.exists(dest):"),
             "the sweep runs at the top of every verified fetch"
         );
         assert!(

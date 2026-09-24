@@ -21,10 +21,11 @@
 //!
 //! **The description is UNTRUSTED text.** It is model output about the user's
 //! own photograph, and it reaches a proposer prompt. [`sanitize_desc`] is the
-//! door: single line, no control characters, no invisible Cf formatting
-//! characters, bounded to [`crate::style::MAX_DESC_CHARS`], non-empty or
-//! absent. The sidecar applies the same rule before writing — a bound that
-//! protects a prompt has to hold even when the program on disk is replaced.
+//! door: single line, no control characters, none of the invisible Cf
+//! formatting characters `is_invisible` names, bounded to
+//! [`crate::style::MAX_DESC_CHARS`], non-empty or absent. The sidecar applies
+//! the same rule before writing — a bound that protects a prompt has to hold
+//! even when the program on disk is replaced.
 //!
 //! **One model at a time.** The run goes through [`crate::run_model_sidecar`]
 //! under the process-wide [`crate::with_model_slot`], so Qwen (4.0 GiB in
@@ -195,12 +196,14 @@ pub fn describe_manifest(
     )?;
     let out = parse_records(&text).with_context(|| {
         format!("look-description sidecar wrote an unusable batch at {}", scratch.display())
-    })?;
+    });
     // The scratch file is an INTERMEDIATE, not an artifact: the descriptions
     // are what the caller keeps, and leaving it behind would litter the store
-    // with a JSONL nothing reads again.
+    // with a JSONL nothing reads again. Removed on BOTH paths — a batch the
+    // parser refused is no more an answer than one it accepted, and it used
+    // to survive the refusal at the scratch name looking like one.
     let _ = std::fs::remove_file(scratch);
-    Ok(out)
+    out
 }
 
 /// The sidecar's JSONL → records, each description through [`sanitize_desc`].
@@ -277,6 +280,9 @@ pub fn parse_records(text: &str) -> Result<Vec<DescribeRecord>> {
 ///   result is `None`, because an empty description is an absent one.
 pub fn sanitize_desc(text: &str) -> Option<String> {
     let mut out = String::with_capacity(text.len().min(crate::style::MAX_DESC_CHARS * 4));
+    // Characters in `out`, counted as they land: the bound below is checked
+    // once per kept character, so a re-count per push was quadratic as well.
+    let mut used = 0usize;
     let mut pending_space = false;
     for ch in text.chars() {
         let drop_it = is_invisible(ch);
@@ -287,21 +293,31 @@ pub fn sanitize_desc(text: &str) -> Option<String> {
             pending_space = !out.is_empty();
             continue;
         }
-        if pending_space {
-            out.push(' ');
-            pending_space = false;
-        }
-        if out.chars().count() >= crate::style::MAX_DESC_CHARS {
+        // The gap and the character behind it land together or not at all,
+        // and the bound is checked over BOTH before either is pushed. Pushing
+        // the space first and checking after it let a description that was
+        // exactly at the cap gain a 513th character — a trailing space — and
+        // `style::exemplar_is_finite` then refused the whole exemplar for
+        // being over the bound this function exists to hold.
+        if used + usize::from(pending_space) >= crate::style::MAX_DESC_CHARS {
             break;
         }
+        if pending_space {
+            out.push(' ');
+            used += 1;
+            pending_space = false;
+        }
         out.push(ch);
+        used += 1;
     }
     (!out.is_empty()).then_some(out)
 }
 
 /// The Cf (format) characters [`sanitize_desc`] removes, by CODE POINT — the
 /// characters themselves are invisible in an editor, so a literal set could
-/// not be reviewed. Mirrors `describe.py`'s `_INVISIBLE`.
+/// not be reviewed. `describe.py`'s `_INVISIBLE` is kept to the same set for
+/// what it writes; this door is the one that has to hold, so a code point is
+/// never stripped THERE alone.
 fn is_invisible(ch: char) -> bool {
     matches!(
         ch,
@@ -311,6 +327,10 @@ fn is_invisible(ch: char) -> bool {
             | '\u{2060}'..='\u{2064}'
             | '\u{2066}'..='\u{2069}'
             | '\u{feff}'
+            // The interlinear annotation anchor, separator and terminator:
+            // named by the rule above since it was written, in neither set
+            // until the 2026-09 audit.
+            | '\u{fff9}'..='\u{fffb}'
     )
 }
 
@@ -527,11 +547,17 @@ impl DescriptionCache {
             }
             groups.entry(v.root.as_deref().unwrap_or("")).or_default().push((k, v));
         }
-        // THIS library's own untouched entries first, at whatever share is
-        // left: a rebuild that dropped a photograph should not lose its
-        // description before another library loses one.
+        // SMALLEST group first, as the rule above says: a water-fill only
+        // fills when the donors are served before the takers. Served first
+        // regardless of size (the shipped order), THIS library's own untouched
+        // group took `left / groups` and the small groups behind it donated to
+        // nobody — the cap went unfilled and the own library lost descriptions
+        // to no one. Among groups of EQUAL size the own group goes LAST:
+        // `left / remaining` rounds down and the remainder falls to the group
+        // served later, and a rebuild that dropped a photograph should not
+        // lose its description before another library loses one.
         let mut order: Vec<&str> = groups.keys().copied().collect();
-        order.sort_by_key(|g| (*g != root, groups[g].len(), *g));
+        order.sort_by_key(|g| (groups[g].len(), *g == root, *g));
         let mut left = cap.saturating_sub(chosen.len());
         let mut remaining = order.len();
         for group in order {
@@ -586,7 +612,7 @@ mod tests {
         );
         // Control characters and the invisible Cf block never survive.
         assert_eq!(
-            sanitize_desc("cool\u{202e}blue\u{200b}\u{feff} tones\u{7f}").as_deref(),
+            sanitize_desc("cool\u{202e}blue\u{200b}\u{feff}\u{fffa} tones\u{7f}").as_deref(),
             Some("cool blue tones")
         );
         // The bound counts CHARACTERS, and a multi-byte codepoint is never
@@ -597,6 +623,31 @@ mod tests {
         // Empty in, absent out — an empty description is not a description.
         assert!(sanitize_desc("   \u{200b}\n ").is_none());
         assert!(sanitize_desc("").is_none());
+    }
+
+    /// The bound holds AT the cap when a gap is pending: the space and the
+    /// character behind it are admitted together or not at all, so the result
+    /// never carries a 513th character and never ends in a space.
+    ///
+    /// MUTATION: push the pending space before checking the bound (the shipped
+    /// order) and the first case comes out 513 characters long, ending in a
+    /// space — the exemplar `style::exemplar_is_finite` then refuses.
+    #[test]
+    fn the_description_bound_holds_at_the_cap_with_a_gap_pending() {
+        let cap = crate::style::MAX_DESC_CHARS;
+        // Exactly the cap, then a gap and more: the gap must not be pushed.
+        let cut = sanitize_desc(&format!("{} more words", "a".repeat(cap))).unwrap();
+        assert_eq!(cut.chars().count(), cap);
+        assert!(!cut.ends_with(' '), "no trailing space at the cap");
+        // One under: the gap and one character would be two, so neither
+        // lands — a lone trailing space is not content.
+        let cut = sanitize_desc(&format!("{} more", "a".repeat(cap - 1))).unwrap();
+        assert_eq!(cut.chars().count(), cap - 1);
+        assert!(!cut.ends_with(' '));
+        // Two under: the gap and one character fit exactly.
+        let cut = sanitize_desc(&format!("{} more", "a".repeat(cap - 2))).unwrap();
+        assert_eq!(cut.chars().count(), cap);
+        assert!(cut.ends_with(" m"), "{:?}", &cut[cap - 4..]);
     }
 
     /// The cache is a CONTENT key: the same frame bytes hit however the file
@@ -732,6 +783,50 @@ mod tests {
             2,
             "an unlabelled entry is its own library, not nobody's"
         );
+    }
+
+    /// The water-fill really FILLS: when this library's untouched group is the
+    /// largest, the small groups have to be served first so what they cannot
+    /// use flows to it — otherwise the cap goes unfilled and the own library
+    /// loses descriptions to nobody.
+    ///
+    /// MUTATION: sort `order` by `(*g != root, len, key)` again — the shipped
+    /// own-group-first order — and the 8 comes out as 4 and the 5 as 3.
+    #[test]
+    fn the_water_fill_fills_the_cap_when_the_own_group_is_the_largest() {
+        let own = library_key(Path::new("D:/library-own"));
+        let b = library_key(Path::new("D:/library-b"));
+        let c = library_key(Path::new("D:/library-c"));
+        let key = |lib: u8, n: usize| format!("{lib:02x}{n:062x}");
+        let mut cache = DescriptionCache::default();
+        let own_keys: Vec<String> = (0..6).map(|n| key(0xaa, n)).collect();
+        for k in &own_keys {
+            cache.insert(k.clone(), "own".into(), &own);
+        }
+        cache.insert(key(0xbb, 0), "b".into(), &b);
+        cache.insert(key(0xcc, 0), "c".into(), &c);
+        // A rebuild that kept nothing: groups of 6, 1 and 1 fit an 8-entry
+        // cap exactly, and all of them survive.
+        let keep = std::collections::BTreeSet::new();
+        assert_eq!(cache.retain(&keep, &own, 8).len(), 8, "groups that fit together all survive");
+        // Under contention the small groups still survive whole and the own
+        // group takes everything they did not use: 1 + 1 + 3 of 5.
+        let tight = cache.retain(&keep, &own, 5);
+        assert_eq!(tight.len(), 5, "the cap is filled, not under-used");
+        assert!(tight.contains_key(&key(0xbb, 0)) && tight.contains_key(&key(0xcc, 0)));
+        assert_eq!(own_keys.iter().filter(|k| tight.contains_key(*k)).count(), 3);
+        // Two groups of equal size over an odd cap: the remainder of the
+        // rounded-down share goes to the group served LAST, which is the own
+        // one — it loses two descriptions where the other loses three.
+        let mut pair = DescriptionCache::default();
+        for n in 0..6 {
+            pair.insert(key(0xaa, n), "own".into(), &own);
+            pair.insert(key(0xbb, n), "b".into(), &b);
+        }
+        let odd = pair.retain(&keep, &own, 7);
+        assert_eq!(odd.len(), 7);
+        assert_eq!(odd.keys().filter(|k| k.starts_with("aa")).count(), 4, "the own group keeps the remainder");
+        assert_eq!(odd.keys().filter(|k| k.starts_with("bb")).count(), 3);
     }
 
     /// The runtime half of the `const` assertion above: a MAXIMAL entry —
@@ -1019,5 +1114,42 @@ mod tests {
         );
         let recs = parse_records(&blank).expect("a blank description is a per-record failure");
         assert!(recs[0].desc.is_none() && recs[0].error.is_some());
+    }
+
+    /// A stand-in interpreter over `crate::write_stand_in` that copies a
+    /// garbage fixture to the `--output` argument (argv position 6 for THIS
+    /// bridge's argv) and exits 0 — a sidecar that ran, and wrote something
+    /// that is not a batch. The script must merely exist: the bridge refuses
+    /// a missing one before it ever spawns.
+    fn garbage_opts(dir: &Path) -> DescribeOpts {
+        std::fs::write(dir.join("garbage.jsonl"), "not-json\n").unwrap();
+        let python_bin = crate::write_stand_in(
+            dir,
+            "garbage",
+            "@copy /y \"%~dp0garbage.jsonl\" \"%~6\" >nul\r\n@exit /b 0\r\n",
+            &format!("cp \"{}/garbage.jsonl\" \"$6\"\nexit 0\n", dir.display()),
+        );
+        let script = dir.join("describe.py");
+        std::fs::write(&script, "# stand-in\n").unwrap();
+        DescribeOpts { python_bin, script }
+    }
+
+    /// The scratch is an intermediate on BOTH paths: a batch the parser
+    /// refused must not survive at the scratch name looking like an answer,
+    /// exactly as `correspond_file` discards an unparseable field.
+    ///
+    /// MUTATION: put the `?` back on `parse_records` ahead of the
+    /// `remove_file` (the shipped order) and the scratch survives the refusal.
+    #[test]
+    fn an_unusable_batch_is_refused_and_its_scratch_removed() {
+        let dir = crate::test_dir("describe-garbage");
+        let opts = garbage_opts(&dir);
+        let manifest = dir.join("frames.jsonl");
+        std::fs::write(&manifest, "{\"path\":\"a.png\"}\n").unwrap();
+        let scratch = dir.join("described.jsonl");
+        let e = describe_manifest(&opts, &manifest, &scratch).unwrap_err().to_string();
+        assert!(e.contains("unusable batch"), "{e}");
+        assert!(!scratch.exists(), "a refused batch must not remain at the scratch name");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

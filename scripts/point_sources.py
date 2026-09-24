@@ -222,7 +222,7 @@ def render(stars, peak_g, height, width, device):
     amplitude = (peak_g * t("r_g"), peak_g, peak_g * t("b_g"))
     flat = out.view(-1)
 
-    def splat(plane, oy, ox, colour, ixx, ixy, iyy, cy, cx, amp, reach):
+    def splat(plane, oy, ox, ixx, ixy, iyy, cy, cx, amp, reach):
         span = torch.arange(-reach, reach + 1, device=device)
         dy, dx = torch.meshgrid(span, span, indexing="ij")
         dy, dx = dy.reshape(1, -1), dx.reshape(1, -1)
@@ -244,11 +244,11 @@ def render(stars, peak_g, height, width, device):
         sx = (optics[:, 6], zero, optics[:, 8])[colour]
         cy, cx = y + sy, x + sx
         ixx, ixy, iyy = _inverse_covariance(minor, major, angle, scale)
-        splat(plane, oy, ox, colour, ixx, ixy, iyy, cy, cx, amplitude[colour] * (1.0 - share), REACH)
+        splat(plane, oy, ox, ixx, ixy, iyy, cy, cx, amplitude[colour] * (1.0 - share), REACH)
         if extended is not None:
             e_minor, e_major, e_angle, offset = extended[:, 1], extended[:, 2], extended[:, 3], extended[:, 5]
             ixx, ixy, iyy = _inverse_covariance(e_minor, e_major, e_angle, scale)
-            splat(plane, oy, ox, colour, ixx, ixy, iyy, cy - offset * torch.sin(e_angle),
+            splat(plane, oy, ox, ixx, ixy, iyy, cy - offset * torch.sin(e_angle),
                   cx - offset * torch.cos(e_angle), amplitude[colour] * share, REACH_EXTENDED)
     return out
 

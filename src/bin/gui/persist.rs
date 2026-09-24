@@ -11,7 +11,8 @@ pub(crate) enum SavedDevelop {
     /// untranslated in the status line).
     Restored(EditRecipe, &'static str),
     /// recipe.json exists but does not parse (interrupted write, or written
-    /// by a newer build — EditRecipe is deny_unknown_fields). The XMP
+    /// by a newer build — EditRecipe is deny_unknown_fields), or a central
+    /// store file (recipe.json or XMP) exists but cannot be read. The XMP
     /// fallback, when it held real edits, comes along.
     Unreadable { err: String, fallback: Option<(EditRecipe, &'static str)> },
     /// Sidecars exist but describe no effective edit (Reset-then-save
@@ -252,12 +253,19 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
         (autoshade::store::legacy_xmp(src), "XMP (legacy ./out)"),
     ] {
         // Same rule as the recipe loop: only NotFound falls through — an
-        // unreadable central XMP must not let a stale legacy one answer.
+        // unreadable central XMP must not let a stale legacy one answer, and
+        // it is REPORTED like an unreadable recipe.json. `any` alone folded it
+        // into NoopOnly: the open note said nothing and the next Ctrl+S
+        // overwrote the file without the version backup `Unreadable` gates.
+        // A recipe.json error already in hand stays the headline.
         let text = match autoshade::store::read_text_capped(&xp, autoshade::store::MAX_STORE_JSON) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => {
+            Err(e) => {
                 any = true;
+                if parse_err.is_none() {
+                    parse_err = Some(format!("read {}: {e}", xp.display()));
+                }
                 break;
             }
         };
@@ -565,7 +573,7 @@ pub(crate) fn resolve_saved_develop(
             unresolved = true;
             open_note = Some(trf(
                 lang,
-                "recipe.json is unreadable ({err}) — edits NOT fully restored; Ctrl+S would overwrite it (the unread save is backed up as a version first)",
+                "the saved develop is unreadable ({err}) — edits NOT fully restored; Ctrl+S would overwrite it (the unread save is backed up as a version first)",
                 &[("err", &err)],
             ));
         }
@@ -788,12 +796,19 @@ pub(crate) fn strip_from_record(
                 );
                 return None;
             };
+            // Untrusted input like the active card's recipe.json, which
+            // `read_saved_develop_locked` clamps on the way in — a card is one
+            // click from BEING the canvas, and an unclamped crop (wider than
+            // the frame, or NaN) reached `upd_shortcuts`' nudge maths and
+            // panicked there. The summary has no per-card channel here.
+            let mut recipe = e.recipe.clone();
+            let _ = recipe.clamp();
             Some(Variant {
                 kind,
                 // Hop 2 of 6 (R24-2): disk → live strip.
                 id: variant_id_or_mint(e.id.as_ref()),
                 name: e.name.clone(),
-                recipe: e.recipe.clone(),
+                recipe,
                 base: None,
                 origin: e.origin.clone(),
                 thumb: None,

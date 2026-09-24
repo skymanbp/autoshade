@@ -113,7 +113,7 @@ function Save-BuildLog {
 
 Write-LogLine "Cargo.toml package version: $cargoVersion"
 if ($buildVersion -ne $cargoVersion) {
-    Write-LogLine "Validation override active: building installer version $buildVersion instead of Cargo.toml version $cargoVersion." -Warning
+    Write-LogLine "-ExpectedVersion $buildVersion differs from Cargo.toml version $cargoVersion; the version probe below refuses a dist\autoshade.exe that does not report it." -Warning
 }
 
 $versionOutputLines = & $cliPath --version 2>&1

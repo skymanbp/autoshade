@@ -35,7 +35,7 @@ const SHA256_K: [u32; 64] = [
 
 /// Streaming SHA-256 — one block at a time, so a 4 GB frame would cost 64
 /// bytes of state rather than its own length in RAM. (The frames this hashes
-/// are ~200 KB; the streaming shape is what lets [`frame_digest`] read the
+/// are ~200 KB; the streaming shape is what lets [`crate::describe::frame_digest`] read the
 /// file in chunks rather than slurping it.)
 pub(crate) struct Sha256 {
     h: [u32; 8],

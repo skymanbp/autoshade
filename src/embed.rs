@@ -185,9 +185,11 @@ pub fn embed_text_batch(
     )?;
     let out = parse_text_vectors(&text, expect).with_context(|| {
         format!("style-embedding sidecar wrote an unusable text batch at {}", scratch.display())
-    })?;
+    });
+    // Removed on BOTH paths: a batch the parser refused is no more an answer
+    // than one it accepted (see [`embed_file_record`]).
     let _ = std::fs::remove_file(scratch);
-    Ok(out)
+    out
 }
 
 /// One `{"text_vectors": [...]}` record → the vectors, each through the same
@@ -315,9 +317,11 @@ pub fn embed_image_batch(
     )?;
     let out = parse_batch_records(&text).with_context(|| {
         format!("style-embedding sidecar wrote an unusable image batch at {}", scratch.display())
-    })?;
+    });
+    // Removed on BOTH paths: a batch the parser refused is no more an answer
+    // than one it accepted (see [`embed_file_record`]).
     let _ = std::fs::remove_file(scratch);
-    Ok(out)
+    out
 }
 
 /// The sidecar's JSONL → records, each vector through the same width /
@@ -390,6 +394,35 @@ pub struct EmbedRecord {
     pub vocab_scores: Option<Vec<f32>>,
 }
 
+/// Run the sidecar on ONE image and return its record: the L2-normalised
+/// vector, plus the text vector and the vocabulary scores when the caller
+/// asked for them.
+///
+/// `scratch` is the JSON file the sidecar writes; the caller owns its lifetime
+/// (`style::stage_embed_frame` hands over a pid + seq name so parallel workers
+/// never share one). The run itself is [`crate::run_model_sidecar`] — the
+/// shared spawn/bound/exit-0-is-not-success executor.
+///
+/// SERIALISED against every other model sidecar in this process — see
+/// [`crate::with_model_slot`]. The fan-out that gate closes (adjudication F3):
+/// `StyleIndex::build` used to reach this door from up to
+/// `decode::MAX_CONCURRENT_DECODES` = 4 workers, each spawning its own
+/// sidecar, so four SigLIP loads could be live at once — 6.0 GB of fp32
+/// weights, 3.0 GB even with `--fp16`, against a consumer GPU that commonly
+/// has 4. Nothing else in the tree serialised them, because every other
+/// budget is shaped like host RAM (`MAX_CONCURRENT_DECODES` counts 181 MB
+/// decodes, `jobs` divides `GlobalMemoryStatusEx`) and the model does not live
+/// in host RAM at all.
+///
+/// A GATE, not a batcher. The index build has since moved onto the manifest
+/// doors ([`embed_image_batch`], [`embed_text_batch`] — one load per build),
+/// but a manifest helps only a build: this single-image door is the
+/// develop-time query, and `pipeline::produce_recipe` under `batch --jobs 3`
+/// is three concurrent single-image calls that no manifest can merge. So the
+/// gate stays, and it needs no new record format, no per-line failure mapping
+/// and no second staging lifetime. The staging the caller did (writing the
+/// PNG) stays OUTSIDE the gate: it is disk work, it costs no model, and
+/// holding the slot across it would serialise the cheap half too.
 pub fn embed_file_record(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Result<EmbedRecord> {
     if !opts.script.exists() {
         bail!(
@@ -406,12 +439,14 @@ pub fn embed_file_record(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Resu
     )?;
     let v = parse_record(&text).with_context(|| {
         format!("style-embedding sidecar wrote an unusable record at {}", scratch.display())
-    })?;
+    });
     // The scratch file is an INTERMEDIATE, not an artifact: the vector is what
     // the caller keeps. Leaving it behind would litter the develop store with
-    // 10 KB JSON files nothing ever reads again.
+    // 10 KB JSON files nothing ever reads again — and a record the parser
+    // refused is no more an answer than one it accepted, so the removal is on
+    // BOTH paths rather than letting the refusal leave it at the scratch name.
     let _ = std::fs::remove_file(scratch);
-    Ok(v)
+    v
 }
 
 /// One sidecar JSON record → the vector, with every invariant the index's own
@@ -467,7 +502,20 @@ pub fn parse_record(text: &str) -> Result<EmbedRecord> {
         if arr.len() != crate::style::LOOK_VOCAB.len() {
             return Err(anyhow::anyhow!("style-embedding `vocab_scores` has wrong width {} (expected {})", arr.len(), crate::style::LOOK_VOCAB.len()));
         }
-        arr.iter().map(|x| x.as_f64().map(|v| v as f32).filter(|v| v.is_finite()).context("style-embedding vocab score is not finite")).collect::<Result<Vec<_>>>()
+        arr.iter()
+            .map(|x| {
+                // Two refusals with two names, as `parse_unit_vector` spells
+                // them: a string or a `null` (serde_json's spelling of a NaN)
+                // is not a number, and only a number can be non-finite — one
+                // message reading "is not finite" named the wrong thing for
+                // the first.
+                let f = x.as_f64().context("style-embedding `vocab_scores` holds a non-number")? as f32;
+                if !f.is_finite() {
+                    bail!("style-embedding `vocab_scores` holds a non-finite element");
+                }
+                Ok(f)
+            })
+            .collect::<Result<Vec<_>>>()
     }).transpose()?;
     Ok(EmbedRecord { vector: v, text_vector: parse_vec("text_vector")?, vocab_scores })
 }
@@ -512,6 +560,76 @@ mod tests {
             + &format!(",\"vocab_scores\":[{short_scores}]}}");
         let error = parse_record(&short).unwrap_err().to_string();
         assert!(error.contains("wrong width"), "{error}");
+    }
+
+    /// MUTATION: fold the two `vocab_scores` refusals back into one "is not
+    /// finite" message and the string case fails by name — a string is not a
+    /// number, and only a number can be non-finite.
+    #[test]
+    fn a_vocab_score_that_is_not_a_number_is_refused_by_name() {
+        let vector = unit_record(EMBED_DIM);
+        let with_scores = |scores: &[String]| {
+            vector.trim_end_matches('}').to_owned()
+                + &format!(",\"vocab_scores\":[{}]}}", scores.join(","))
+        };
+        let mut scores: Vec<String> =
+            (0..crate::style::LOOK_VOCAB.len()).map(|i| format!("{:.1}", i as f32)).collect();
+        scores[3] = "\"warm\"".into();
+        let e = parse_record(&with_scores(&scores)).unwrap_err().to_string();
+        assert!(e.contains("non-number"), "{e}");
+        // A magnitude no f32 can hold is a finite JSON number and infinite
+        // once cast — the second refusal, checked after the cast.
+        scores[3] = "1e300".into();
+        let e = parse_record(&with_scores(&scores)).unwrap_err().to_string();
+        assert!(e.contains("non-finite"), "{e}");
+    }
+
+    /// A stand-in interpreter over `crate::write_stand_in` that copies a
+    /// garbage fixture to the `--output` argument (argv position 6 for every
+    /// one of this bridge's three argv shapes) and exits 0 — a sidecar that
+    /// ran, and wrote something that is not a record. The script must merely
+    /// exist: the bridge refuses a missing one before it ever spawns.
+    fn garbage_opts(dir: &Path) -> EmbedOpts {
+        std::fs::write(dir.join("garbage.json"), "not-json\n").unwrap();
+        let python_bin = crate::write_stand_in(
+            dir,
+            "garbage",
+            "@copy /y \"%~dp0garbage.json\" \"%~6\" >nul\r\n@exit /b 0\r\n",
+            &format!("cp \"{}/garbage.json\" \"$6\"\nexit 0\n", dir.display()),
+        );
+        let script = dir.join("embed.py");
+        std::fs::write(&script, "# stand-in\n").unwrap();
+        EmbedOpts { python_bin, script, text_file: None, vocab_file: None }
+    }
+
+    /// The scratch is an intermediate on BOTH paths at all three doors: an
+    /// answer the parser refused must not survive at the scratch name looking
+    /// like one, exactly as `correspond_file` discards an unparseable field.
+    ///
+    /// MUTATION: put the `?` back on any of the three parses ahead of its
+    /// `remove_file` (the shipped order) and that door's scratch survives.
+    #[test]
+    fn an_unusable_answer_is_refused_and_its_scratch_removed_at_every_door() {
+        let dir = crate::test_dir("embed-garbage");
+        let opts = garbage_opts(&dir);
+        let manifest = dir.join("manifest.jsonl");
+        std::fs::write(&manifest, "{\"path\":\"a.png\"}\n").unwrap();
+
+        let scratch = dir.join("record.json");
+        let e = embed_file_record(&opts, Path::new("a.png"), &scratch).unwrap_err().to_string();
+        assert!(e.contains("unusable record"), "{e}");
+        assert!(!scratch.exists(), "single-image door: a refused record must not remain");
+
+        let scratch = dir.join("text.json");
+        let e = embed_text_batch(&opts, &manifest, &scratch, 1).unwrap_err().to_string();
+        assert!(e.contains("unusable text batch"), "{e}");
+        assert!(!scratch.exists(), "text door: a refused batch must not remain");
+
+        let scratch = dir.join("images.jsonl");
+        let e = embed_image_batch(&opts, &manifest, &scratch).unwrap_err().to_string();
+        assert!(e.contains("unusable image batch"), "{e}");
+        assert!(!scratch.exists(), "image door: a refused batch must not remain");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// MUTATION: drop the norm check and an unnormalised vector is adopted —

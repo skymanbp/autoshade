@@ -480,9 +480,11 @@ fn handle(mut request: Request, state: &AppState, image_token: &str) -> Result<(
 /// slow request stalls every fast one, which is why the whole-handler form was
 /// refused here in the first place.
 ///
-/// Lock ORDER: taken at handler entry, before SAVE_LOCK. No path takes
-/// SAVE_LOCK first and then this, so the two cannot deadlock. The engines take
-/// it deeper, and take nothing else while they hold it.
+/// Lock ORDER: taken at handler entry, before the develop lock
+/// ([`crate::store::with_develop_lock`], which the store takes inside an
+/// export's or download's source read). No path takes the develop lock first
+/// and then this, so the two cannot deadlock. The engines take it deeper, and
+/// take nothing else while they hold it.
 fn heavy() -> crate::FullResSlot {
     crate::full_res_slot()
 }
@@ -1040,6 +1042,25 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
             neutral_store = true;
             break;
         }
+        // A corrupt or unreadable CENTRAL recipe.json outranked by the legacy
+        // ./out copy served from this iteration is disclosed the way the two
+        // fallbacks below (the lossy XMP projection, the embedded packet)
+        // disclose it: the authoritative save is unreadable, the answer is an
+        // OLDER file, and the next explicit save overwrites the unreadable
+        // one. `parse_err` is only ever set by the central iteration, so a
+        // Some here means exactly that. Detail to stderr (the path can be
+        // non-ASCII; header values cannot).
+        let legacy_over_corrupt = parse_err.as_ref().and_then(|err| {
+            eprintln!(
+                "⚠ recipe.json for {} is unreadable ({err}) — serving the legacy ./out recipe instead",
+                raw.display()
+            );
+            header(
+                "X-Recipe-Warning",
+                "the saved recipe.json is unreadable - showing the older legacy ./out recipe \
+                 instead; saving overwrites the unreadable file",
+            )
+        });
         // Bare raster names stay bare — api_develop/api_export re-anchor them
         // before rendering.
         //
@@ -1070,12 +1091,18 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
             // (review R12-05): the valid-recipe returns used to drop it,
             // so "the Lightroom sidecar could not be read" vanished exactly
             // when a store recipe answered.
+            if let Some(h) = legacy_over_corrupt {
+                resp = resp.with_header(h);
+            }
             if let Some(w) = xmp_warn.take() {
                 resp = resp.with_header(w);
             }
             return Ok(resp);
         }
         let mut resp = json_text(text.clone());
+        if let Some(h) = legacy_over_corrupt {
+            resp = resp.with_header(h);
+        }
         if let Some(w) = xmp_warn.take() {
             resp = resp.with_header(w);
         }
@@ -3031,6 +3058,12 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             if let Some(h) = header("X-Heal-Spots", &rep.spots.to_string()) {
                 resp = resp.with_header(h);
             }
+            // Planned spots the engine left untouched (no donor of that size
+            // fits inside the frame): its own count, so the page never reads
+            // "healed N" as "asked N".
+            if let Some(h) = header("X-Heal-Skipped", &rep.skipped.to_string()) {
+                resp = resp.with_header(h);
+            }
             // The rationale can disclose a partial outcome (e.g. "AI
             // spot-detection failed; healed the painted mask only") —
             // dropping it reported unqualified success. Percent-encoded:
@@ -3956,6 +3989,114 @@ mod tests {
             "the old namespace is gone, not copied"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A real `tiny_http::Request` for the body-reading paths (`read_json`,
+    /// the handlers): the type has no constructor outside the accept loop, so
+    /// one is driven over loopback. The client asks for `Connection: close`
+    /// and reads until the server answers (or drops the request), so joining
+    /// it never hangs; the `Server` rides along so the connection outlives
+    /// the request.
+    fn loopback_request(raw_http: Vec<u8>) -> (Server, Request, std::thread::JoinHandle<()>) {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let port = server_port(&server).unwrap();
+        let client = std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            s.write_all(&raw_http).unwrap();
+            s.flush().unwrap();
+            let mut sink = Vec::new();
+            let _ = s.read_to_end(&mut sink);
+        });
+        let request = server.recv().unwrap();
+        (server, request, client)
+    }
+
+    /// A request body that is not UTF-8 is the CLIENT's mistake: `read_json`
+    /// answers it as a `ClientErr` (→ 400 in `handle`), never as the 500 the
+    /// old `read_to_string`'s InvalidData produced. The cap check runs BEFORE
+    /// the decode, so a body the cap cut mid-character reads as "too large";
+    /// only the decode arm is driven here (the cap is 256 MiB).
+    ///
+    /// MUTATION: map the `from_utf8` failure through `.context(..)` instead of
+    /// `ClientErr` and the downcast below fails.
+    #[test]
+    fn a_non_utf8_request_body_is_the_clients_error_not_the_servers() {
+        let body: &[u8] = b"\xff\xfe{}";
+        let mut raw_http = format!(
+            "POST /api/develop HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        raw_http.extend_from_slice(body);
+        let (_server, mut request, client) = loopback_request(raw_http);
+        let err = read_json::<serde_json::Value>(&mut request)
+            .expect_err("bytes that are not UTF-8 cannot be a JSON body");
+        assert!(err.downcast_ref::<ClientErr>().is_some(), "a 400, never a 500: {err:#}");
+        assert!(err.to_string().contains("not UTF-8"), "{err:#}");
+        drop(request);
+        client.join().unwrap();
+    }
+
+    /// A corrupt CENTRAL recipe.json outranked by a valid legacy ./out copy is
+    /// DISCLOSED on the answer, exactly as the lossy-XMP and embedded-packet
+    /// fallbacks disclose it — the browser used to receive the older legacy
+    /// develop with no sign that the authoritative save was unreadable (and
+    /// the next save then overwrote it).
+    ///
+    /// MUTATION: drop `legacy_over_corrupt` from the legacy return arms of
+    /// `api_recipe_locked` and the warning assertion fails.
+    #[test]
+    fn a_corrupt_central_recipe_outranked_by_a_legacy_copy_is_disclosed() {
+        use std::io::Read as _;
+        use std::sync::atomic::AtomicU64;
+        let dir = std::env::temp_dir().join(format!(
+            "autoshade-serve-test-legacy-disclosure-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_serve_legacy_disclosure.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = crate::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(crate::store::recipe_target(&raw), b"{ not a recipe").unwrap();
+        // The legacy copy lives in the cwd-relative ./out root (the pre-store
+        // layout, as the store's own migration tests plant it); the unique
+        // stem keeps it clear of their fixtures.
+        std::fs::create_dir_all("out").unwrap();
+        let legacy = crate::store::legacy_recipe(&raw);
+        let older = EditRecipe { exposure_ev: 0.25, ..Default::default() };
+        std::fs::write(&legacy, serde_json::to_string(&older).unwrap()).unwrap();
+
+        let state = AppState {
+            dir: RwLock::new(dir.clone()),
+            raws: RwLock::new(vec![raw.clone()]),
+            cfg: RwLock::new(Config::load()),
+            dir_gen: AtomicU64::new(0),
+            installed_gen: AtomicU64::new(0),
+            port: 0,
+        };
+        let (_server, request, client) = loopback_request(
+            b"GET /api/recipe?id=0 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".to_vec(),
+        );
+        let resp = api_recipe(&request, &state).expect("the legacy copy answers");
+        let warned = resp.headers().iter().any(|h| {
+            h.field.equiv("X-Recipe-Warning") && h.value.as_str().contains("legacy")
+        });
+        assert!(warned, "the unreadable central save must be disclosed on the legacy answer");
+        let mut body = String::new();
+        resp.into_reader().read_to_string(&mut body).unwrap();
+        let served: EditRecipe = serde_json::from_str(&body).expect("the body is the legacy recipe");
+        assert!((served.exposure_ev - 0.25).abs() < 1e-6, "{body}");
+        drop(request);
+        client.join().unwrap();
+
+        let _ = std::fs::remove_file(&legacy);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dev);
     }
 
     /// L02: the aggregate body budget — a small charge fits, and a charge

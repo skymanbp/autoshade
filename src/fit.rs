@@ -356,8 +356,6 @@ fn budgeted_wb(
         }
         legal = rounded_legal;
         (k, tint) = candidate(legal, true);
-    } else {
-        legal = continuous_legal;
     }
 
     let ratio_after = wb_gain_ratio(render::wb_gains(anchor, k, tint));
@@ -533,8 +531,12 @@ impl EvidenceModel {
     /// survival. Population vetoes remain intact because [`Self::scoped`]
     /// re-derives them from the unchanged source and target pixels.
     ///
-    /// On a frame model whose `globally_same_content` is already true, this is
-    /// byte-equal to `scoped(tp, ones, ones)`; the unit test pins that invariant.
+    /// On a model that is already blind — every spatial weight 1.0, every
+    /// pixel supported, `globally_same_content` true, as an identical pair
+    /// produces — this is byte-equal to `scoped(tp, ones, ones)`, and the unit
+    /// test pins that. Anywhere else the two differ by design: `scoped` reads
+    /// the model's own structural weights and support, and replacing those is
+    /// this function's whole job.
     pub fn structure_blind(&self, tp: &[[f32; 3]]) -> EvidenceModel {
         let n = self.source_pixels.len().min(tp.len());
         let ones = vec![1.0; n];
@@ -571,6 +573,9 @@ pub(crate) fn luma_evidence_for_bins(
 ) -> EvidenceRange {
     let end = last.saturating_add(1).min(evidence.luma.len());
     let start = first.min(end);
+    // The label names the bins actually FOLDED: `last` clamps to the model's
+    // top bin here, and printing the request would name a bin never read.
+    let last = end.saturating_sub(1).max(start);
     let bins = &evidence.luma[start..end];
     let source_share = bins.iter().map(|r| r.source_share).sum::<f32>();
     let target_share = bins.iter().map(|r| r.target_share).sum::<f32>();
@@ -1467,7 +1472,7 @@ pub fn structure_divergence(
                     }
                 }
             }
-            if count < 100 {
+            if count < STRUCTURE_MIN_CORE_PX {
                 continue;
             }
             let (sx_mean, ty_mean) = (sx_sum / count as f64, ty_sum / count as f64);
@@ -3924,8 +3929,11 @@ fn solve_white_balance(
             rotation_limited = rotation_limited || rotated > budget.wb_rotation_share;
         }
         if lambda <= 1e-5 {
-            // This is the only new WB reset above default; grep should find
-            // this guard and the unchanged luma-veto reset, exactly two sites.
+            // This is the only new WB reset above default: grepping
+            // `temperature_k = base.temperature_k` finds this guard and the
+            // Atmosphere luma-veto reset (`withhold_atmosphere_tone`), exactly
+            // two code sites. The terminal do-no-harm `recipe = base.clone()`
+            // is a whole-recipe reset, not a WB one.
             recipe.temperature_k = base.temperature_k;
             recipe.tint = base.tint;
             clamped_ratio = 1.0;
@@ -3960,6 +3968,22 @@ fn solve_white_balance(
         foreign_hue_withheld: wb_foreign_hue_withheld,
         rotation_withheld: wb_rotation_withheld,
     }
+}
+
+/// The Atmosphere luma veto's WITHHOLD arm: the exposure, white-balance and
+/// tone stages return to the base, and the WB clamp fact goes with them — its
+/// "reduced from X to Y" sentence describes a white balance the shipped
+/// recipe no longer carries. Reachable between the shipped default and the
+/// 0.85 disclosure threshold, where the stage clamps and this arm still
+/// withholds. The withheld flags stay: they name a scalar the stage had
+/// already forced to zero, which the shipped as-shot value still is; the
+/// search-bound fact is about the demand, not the delivered value.
+fn withhold_atmosphere_tone(recipe: &mut EditRecipe, base: &EditRecipe, facts: &mut WbFacts) {
+    recipe.exposure_ev = base.exposure_ev;
+    recipe.temperature_k = base.temperature_k;
+    recipe.tint = base.tint;
+    recipe.tone_curve = base.tone_curve.clone();
+    facts.clamped = None;
 }
 
 /// Bounded global solve used when structural correspondence has failed. It
@@ -4071,7 +4095,7 @@ fn fit_atmosphere_from_parts(
     let (pair_tp, pair_w) = atmosphere_wb_pairing(tp, evidence, correspondence, readable);
     let (wb_k, wb_tint, _wanted) =
         atmosphere_wb_from_populations(sp, pair_tp, &pair_w, anchor);
-    let facts = solve_white_balance(
+    let mut facts = solve_white_balance(
         s_img,
         tp,
         &mut recipe,
@@ -4096,10 +4120,7 @@ fn fit_atmosphere_from_parts(
         &pixels_of(&render::develop_preview(s_img, &recipe)),
         veto_evidence,
     ) && budget.vetoes == VetoPolicy::Withhold {
-        recipe.exposure_ev = base.exposure_ev;
-        recipe.temperature_k = base.temperature_k;
-        recipe.tint = base.tint;
-        recipe.tone_curve = base.tone_curve.clone();
+        withhold_atmosphere_tone(&mut recipe, base, &mut facts);
     }
 
     let target_chroma = weighted_mean_chroma(tp, &evidence.target_weights).unwrap_or_else(|| mean_chroma(tp));
@@ -5485,6 +5506,11 @@ pub(crate) fn append_finished_disclosure(
 /// In Full mode `err_before` is the caller's, unchanged by construction. An
 /// Atmosphere rescore rebuilds the same structure-blind ruler as the solve and
 /// re-measures the untouched base on it, so the report cannot mix rulers.
+/// That base is a bare-default develop of `src`: this function is not handed
+/// the caller's composed calibration base (`pipeline::calibration_recipe`),
+/// so on a photo whose calibration is not neutral the rescored Atmosphere
+/// `err_before`, and the evidence model under it, match the solve's only up
+/// to that calibration.
 pub fn rescore_report(
     src: &DynamicImage,
     target: &DynamicImage,
@@ -14708,6 +14734,67 @@ mod tests {
         assert!(identical.globally_same_content, "premise: identical frames are structurally supported");
         let expected = identical.scoped(&source, &ones, &ones);
         assert_evidence_models_bit_equal(&identical.structure_blind(&source), &expected);
+    }
+
+    /// The range label names the bins that were FOLDED. `last` clamps to the
+    /// model's top bin inside the function, so a caller's over-long request
+    /// used to be labelled with a bin the verdict never read.
+    ///
+    /// MUTATION: print the caller's `last` instead of the clamped one in
+    /// `luma_evidence_for_bins` and the first assertion fails.
+    #[test]
+    fn a_luma_range_label_names_the_bins_actually_folded() {
+        let px = vec![[0.4, 0.4, 0.4]; 64];
+        let evidence = evidence_model_for(&px, &px, 8, 8);
+        let top = EVIDENCE_LUMA_BINS - 1;
+        let clipped = luma_evidence_for_bins(&evidence, 0, 99);
+        assert_eq!(clipped.label, format!("luma bins 00-{top:02}"));
+        let exact = luma_evidence_for_bins(&evidence, 0, top);
+        assert_eq!(clipped.label, exact.label, "the same bins fold under the same name");
+        assert_eq!(clipped.source_share.to_bits(), exact.source_share.to_bits());
+        // An in-range request is labelled as asked.
+        assert_eq!(luma_evidence_for_bins(&evidence, 3, 5).label, "luma bins 03-05");
+    }
+
+    /// The Atmosphere luma veto returns the WB to the base, so the clamp fact
+    /// the stage produced must not outlive it: the report would otherwise say
+    /// the white balance was "reduced from X to Y" while the recipe carries
+    /// the base's. Reachable at strengths between the shipped default and the
+    /// 0.85 disclosure threshold, where the stage clamps and the veto still
+    /// withholds.
+    ///
+    /// MUTATION: drop `facts.clamped = None` from `withhold_atmosphere_tone`
+    /// and the clamp assertion fails.
+    #[test]
+    fn the_atmosphere_luma_veto_withdraws_the_wb_clamp_fact_with_the_wb() {
+        let base = EditRecipe { tint: -3.0, ..Default::default() };
+        let mut recipe = EditRecipe {
+            exposure_ev: -0.5,
+            temperature_k: Some(7000.0),
+            tint: 12.0,
+            tone_curve: vec![
+                CurvePoint { input: 0, output: 0 },
+                CurvePoint { input: 128, output: 150 },
+                CurvePoint { input: 255, output: 255 },
+            ],
+            ..Default::default()
+        };
+        let mut facts = WbFacts {
+            clamped: Some((1.4, 1.2, 0.1, 0.9)),
+            search_bound: Some(40000.0),
+            rotation_coverage: 0.9,
+            rotation_disclosure: None,
+            foreign_hue_withheld: false,
+            rotation_withheld: false,
+        };
+        withhold_atmosphere_tone(&mut recipe, &base, &mut facts);
+        assert_eq!(recipe.temperature_k, base.temperature_k);
+        assert_eq!(recipe.tint, base.tint);
+        assert_eq!(recipe.exposure_ev, base.exposure_ev);
+        assert_eq!(recipe.tone_curve, base.tone_curve);
+        assert_eq!(facts.clamped, None, "a clamp describes a white balance the recipe no longer has");
+        assert_eq!(facts.search_bound, Some(40000.0), "the search's own fact stands");
+        assert_eq!(facts.rotation_coverage, 0.9);
     }
 
     #[test]

@@ -195,12 +195,19 @@ impl AutoShadeApp {
         }
     }
 
-    /// R27 — the pixel workers (heal, generative fill) take the PHOTO PATH and
+    /// R27 — every pixel worker takes this gate: heal, fill, adjust, clone,
+    /// AI denoise, stack and reimagine. They take the PHOTO PATH and
     /// re-develop it through `render::source_pixels`, which applies the EXIF
-    /// orientation and NOTHING else, while the mask exported from the canvas
-    /// is drawn in the frame `recipe.quarter_turns` produces. On a turned
-    /// photo those are different frames, so the repair would land on the wrong
-    /// pixels — and it lands BAKED, into a master no slider can undo.
+    /// orientation and NOTHING else, while the canvas is in the frame
+    /// `recipe.quarter_turns` produces. On a turned photo those are different
+    /// frames, and each door suffers it in its own way:
+    ///   * the masked four (heal, fill, adjust, clone) export their mask from
+    ///     the turned canvas, so the repair lands on the wrong pixels — BAKED,
+    ///     into a master no slider can undo;
+    ///   * the mask-free three (AI denoise, stack, reimagine) land their
+    ///     master as a ◈/▦/✨ card whose raster is in the EXIF frame:
+    ///     `load_active` installs it as the plate, and `sync_base_turns`
+    ///     cannot turn a baked card — the canvas shows it sideways.
     ///
     /// Refused with a reason rather than approximated. Threading the turn
     /// through `source_pixels` is its own change: that function is THE
@@ -468,7 +475,7 @@ impl AutoShadeApp {
                     // InPlace: bake into the active variant's base + repoint origin.
                     Ok((
                         img,
-                        RetouchNote::Healed { n: rep.spots, out: out.clone(), ai_prose, notes },
+                        RetouchNote::Healed { n: rep.spots, skipped: rep.skipped, out: out.clone(), ai_prose, notes },
                         out,
                         RetouchKind::InPlace,
                     ))
@@ -499,7 +506,9 @@ impl AutoShadeApp {
         // Denoise the ACTIVE variant's pixels (a Generated variant → its
         // origin PNG), same source rule as heal/clone.
         let Some(path) = self.active_source_path() else { return };
-        if self.busy {
+        // R27 gate (`refuse_pixel_work_on_a_turned_photo`): the ◈ master
+        // would land in the EXIF frame, and a baked card cannot be turned.
+        if self.busy || self.refuse_pixel_work_on_a_turned_photo() {
             return;
         }
         let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
@@ -558,7 +567,9 @@ impl AutoShadeApp {
     /// baked from a working copy caps every later export at that size.
     pub(crate) fn start_stack(&mut self, extra: Vec<PathBuf>) {
         let Some(path) = self.active_source_path() else { return };
-        if self.busy || extra.is_empty() {
+        // R27 gate (`refuse_pixel_work_on_a_turned_photo`): the ▦ master
+        // would land in the EXIF frame, and a baked card cannot be turned.
+        if self.busy || extra.is_empty() || self.refuse_pixel_work_on_a_turned_photo() {
             return;
         }
         let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
@@ -637,7 +648,11 @@ impl AutoShadeApp {
     pub(crate) fn start_clone(&mut self) {
         // Clone within the ACTIVE variant's pixels (Generated → its origin PNG).
         let Some(path) = self.active_source_path() else { return };
-        if self.busy {
+        // The R27 gate heal and fill take (`refuse_pixel_work_on_a_turned_photo`):
+        // `retouch::clone_stamp` re-develops the photo through `render::source_pixels`
+        // (the un-turned frame) while the mask comes from the turned canvas, so
+        // a clone on a turned photo landed transposed — and baked in place.
+        if self.busy || self.refuse_pixel_work_on_a_turned_photo() {
             return;
         }
         let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
@@ -713,7 +728,9 @@ impl AutoShadeApp {
         // cross-wire their export / reverse-fit).
         let Some(path) = self.src_path.clone() else { return };
         let Some(negative) = self.negative_path() else { return };
-        if self.busy {
+        // R27 gate (`refuse_pixel_work_on_a_turned_photo`): the ✨ card's
+        // raster would land in the EXIF frame, and a baked card cannot be turned.
+        if self.busy || self.refuse_pixel_work_on_a_turned_photo() {
             return;
         }
         // First FREE ./out name (shared `unique_out` probe) so

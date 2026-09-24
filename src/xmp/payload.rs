@@ -65,7 +65,7 @@ pub(crate) const PAYLOAD_FORMAT: &str = "1";
 pub(crate) const RASTER_BUDGET: usize = 6 * 1024 * 1024;
 /// Inflation cap for the recipe JSON — a hostile sidecar cannot make a 300-byte
 /// attribute expand without bound.
-const MAX_RECIPE_JSON: u64 = super::MAX_XMP_BYTES as u64;
+pub(super) const MAX_RECIPE_JSON: u64 = super::MAX_XMP_BYTES as u64;
 /// How far a number may drift through Lightroom's rewrite (six decimals) and
 /// this reader's own quantisation before it counts as an EDIT. Slider leaves
 /// are integers or hundredths; geometry is in frame units, where 2e-4 is a
@@ -165,7 +165,10 @@ pub(super) fn rasters_element(
     photo: Option<&Path>,
 ) -> (String, Vec<MaskLoss>) {
     let mut losses: Vec<MaskLoss> = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
+    // Each raster ONCE, by bare name — and its verdict with it: a raster two
+    // masks share that cannot be embedded is a loss to BOTH of them, and the
+    // second mask used to step over the name in silence.
+    let mut seen: Vec<(String, bool)> = Vec::new();
     let mut items = String::new();
     let mut used = 0usize;
     let develop = photo.map(crate::store::develop_dir);
@@ -174,29 +177,31 @@ pub(super) fn rasters_element(
         let mut walk = m.clone();
         for path in walk.turnable_raster_paths_mut() {
             let name = bare_name(path);
-            if seen.contains(&name) {
-                continue;
-            }
-            let p = Path::new(path.as_str());
-            let at: PathBuf = if p.is_relative() && let Some(d) = &develop {
-                d.join(p)
+            let embedded = if let Some(&(_, embedded)) = seen.iter().find(|(n, _)| *n == name) {
+                embedded
             } else {
-                p.to_path_buf()
+                let p = Path::new(path.as_str());
+                let at: PathBuf = if p.is_relative() && let Some(d) = &develop {
+                    d.join(p)
+                } else {
+                    p.to_path_buf()
+                };
+                let embedded = match std::fs::read(&at) {
+                    Ok(bytes) if bytes.len() <= RASTER_BUDGET - used && valid_name(&name) => {
+                        used += bytes.len();
+                        let crc = crc32fast::hash(&bytes);
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        items.push_str(&format!(
+                            "     <rdf:li {prefix}:Name=\"{}\" {prefix}:Crc32=\"{crc:08x}\" {prefix}:Data=\"{b64}\"/>\n",
+                            xml_attr_escape(&name),
+                        ));
+                        true
+                    }
+                    _ => false,
+                };
+                seen.push((name, embedded));
+                embedded
             };
-            let embedded = match std::fs::read(&at) {
-                Ok(bytes) if bytes.len() <= RASTER_BUDGET - used && valid_name(&name) => {
-                    used += bytes.len();
-                    let crc = crc32fast::hash(&bytes);
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                    items.push_str(&format!(
-                        "     <rdf:li {prefix}:Name=\"{}\" {prefix}:Crc32=\"{crc:08x}\" {prefix}:Data=\"{b64}\"/>\n",
-                        xml_attr_escape(&name),
-                    ));
-                    true
-                }
-                _ => false,
-            };
-            seen.push(name);
             if !embedded {
                 losses.push(MaskLoss {
                     name: mask_name.clone(),
@@ -351,10 +356,18 @@ fn decode(xmp: &str, prefix: &str, packed: &str) -> Result<Payload, String> {
         .decode(packed.trim().as_bytes())
         .map_err(|e| format!("the recipe is not base64: {e}"))?;
     let mut json = Vec::new();
+    // One byte past the ceiling, so an overrun is SEEN: `take` AT the ceiling
+    // cut the JSON in silence, the cut bytes then failed the CRC, and the line
+    // blamed a checksum that was never wrong.
     flate2::read::ZlibDecoder::new(&deflated[..])
-        .take(MAX_RECIPE_JSON)
+        .take(MAX_RECIPE_JSON + 1)
         .read_to_end(&mut json)
         .map_err(|e| format!("the recipe does not inflate: {e}"))?;
+    if json.len() as u64 > MAX_RECIPE_JSON {
+        return Err(format!(
+            "the recipe is too large: it inflates past the {MAX_RECIPE_JSON}-byte ceiling this build reads"
+        ));
+    }
     let want = simple_property(xmp, prefix, "RecipeCrc32")
         .and_then(|s| u32::from_str_radix(s.trim(), 16).ok());
     let got = crc32fast::hash(&json);
@@ -959,10 +972,10 @@ fn claim_beside(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<String>
     };
     for n in 2..=999u32 {
         let fresh = format!("{stem}-{n}{ext}");
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(dir.join(&fresh)) {
-            Ok(mut f) => {
-                f.write_all(bytes)?;
-                f.sync_all()?;
+        let at = dir.join(&fresh);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&at) {
+            Ok(f) => {
+                fill_claimed(&at, f, bytes)?;
                 return Ok(fresh);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -970,4 +983,20 @@ fn claim_beside(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<String>
         }
     }
     Err(std::io::Error::other(format!("over 999 '{stem}' rasters beside this develop")))
+}
+
+/// Fill a name [`claim_beside`] has just created, and RELEASE it when the
+/// write or the sync fails: the error used to return with the half-written
+/// file still under the claimed name, where the next restore's CRC check
+/// found a DIFFERENT file, stepped on to `-3`, and left a truncated raster
+/// nothing references beside the develop. A claim that could not be filled
+/// is unlinked along with the error.
+pub(super) fn fill_claimed(at: &Path, mut f: std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
+        // Closed before it is unlinked: Windows refuses to remove an open file.
+        drop(f);
+        let _ = std::fs::remove_file(at);
+        return Err(e);
+    }
+    Ok(())
 }

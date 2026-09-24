@@ -4,7 +4,8 @@ REM  AutoShade web UI launcher (portable - resolves paths from this file's
 REM  own folder, so it works wherever the repo is cloned).
 REM  - Double-click             -> serves %USERPROFILE%\Pictures
 REM  - Drag a folder onto this  -> serves just that folder (faster).
-REM  Opens the browser automatically. Outputs go to <project>\out.
+REM  Opens the browser automatically. Imports land in <project>\out\imported;
+REM  exports go to the delivery folder (Settings / AUTOSHADE_OUT_DIR).
 REM ==========================================================================
 
 REM cd into the project (this .bat's own folder) so .env and ./out resolve.

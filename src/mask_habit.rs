@@ -478,7 +478,7 @@ impl MaskHabit {
     /// index file is disk input.
     ///
     /// The bands are the ENGINE's own (`recipe::EditRecipe::clamp`): exposure
-    /// ±5 EV, the other seven ±100, `amount` 0..=1 so a bucket's weight cannot
+    /// ±5 EV, the other ten ±100, `amount` 0..=1 so a bucket's weight cannot
     /// exceed its mask count. A bucket with no masks is emptied outright — a
     /// mean with no population behind it is a claim, not a measurement — and
     /// no bucket may claim more masks than the exemplar counted.
