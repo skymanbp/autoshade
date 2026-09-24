@@ -22,7 +22,7 @@ fn push_refusal(report: &mut FitReport, refusals: &[FreeMaskRefusal]) {
         FreeMaskWhy::Footprint, FreeMaskWhy::Mass, FreeMaskWhy::RasterClaim,
         FreeMaskWhy::RasterWrite, FreeMaskWhy::ZoneRefused,
         FreeMaskWhy::Frame, FreeMaskWhy::Rim, FreeMaskWhy::Unmeasured,
-        FreeMaskWhy::Inert, FreeMaskWhy::StructureUnmeasured,
+        FreeMaskWhy::Inert, FreeMaskWhy::StructureUnmeasured, FreeMaskWhy::Shrunk,
     ] {
         let numbers = refusals.iter().filter(|r| r.why == why).map(|r| r.n).collect::<Vec<_>>();
         if numbers.is_empty() { continue; }

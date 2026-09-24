@@ -128,11 +128,6 @@ impl SpotOrigin {
     pub fn is_synthesised(self) -> bool {
         matches!(self, Self::LightroomContentAware | Self::LightroomGenerative)
     }
-
-    /// Did this area arrive from a sidecar rather than from this session?
-    pub fn is_imported(self) -> bool {
-        !matches!(self, Self::Painted)
-    }
 }
 
 /// One area of Lightroom's spot removal (`crs:RetouchAreas`), as the sidecar

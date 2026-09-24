@@ -5274,9 +5274,6 @@ pub enum EditStateKind {
         kind: String,
         /// The card `recipe.json` currently mirrors.
         active: bool,
-        /// The baked raster behind this card, if any — an ORTHOGONAL second
-        /// attribute (an in-place heal hangs one off an Original card).
-        origin: Option<PathBuf>,
     },
     /// A numbered snapshot (`v<n>.recipe.json`) plus its advisory metadata.
     Version {
@@ -5326,7 +5323,6 @@ pub fn list_edits(src: &Path) -> Vec<EditState> {
                 state: EditStateKind::Variant {
                     kind: e.kind.clone(),
                     active: false,
-                    origin: e.origin.clone(),
                 },
             })
             .collect();
@@ -5342,11 +5338,6 @@ pub fn list_edits(src: &Path) -> Vec<EditState> {
                 state: EditStateKind::Variant {
                     kind: rec.active_kind.clone(),
                     active: true,
-                    // The ACTIVE card's baked master is recorded in
-                    // pixels.json, never in the strip record (recipe.json +
-                    // pixels.json stay the cross-surface authority for the
-                    // active develop).
-                    origin: read_pixel_source(src).map(|(p, _generated)| p),
                 },
             },
         );
@@ -5786,7 +5777,6 @@ pub(crate) fn durable_retire_and_write(
     // to prevent, and `clear_develop` / `clear_pixel_source` are the only
     // things allowed to remove one (they must, or a cleared develop
     // resurrects). Each retire supersedes the previous `.bak` above.
-    let _ = retired;
     Ok(())
 }
 
@@ -6039,15 +6029,6 @@ fn migrate_legacy_unlocked(src: &Path) -> bool {
         done.remove(&photo_key(src));
     }
     moved
-}
-
-/// Explicit migration from a user-picked old ./out folder (the GUI Settings
-/// 「Import develops」 button) — no memo, the user asked for this scan NOW.
-pub fn migrate_legacy_from(legacy_out: &Path, src: &Path) -> bool {
-    with_develop_lock(src, DevelopLockMode::Wait, || {
-        Ok::<_, std::io::Error>(migrate_legacy_in(&store_root(), legacy_out, src).0)
-    })
-    .unwrap_or(false)
 }
 
 /// Gallery-wide variant of [`migrate_legacy_from`]: the legacy folder is

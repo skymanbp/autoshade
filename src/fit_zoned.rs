@@ -2395,27 +2395,6 @@ pub fn fit_recipe_zoned(
     fit_recipe_zoned_from(src, target, seg, mask_path, &crate::recipe::EditRecipe::default())
 }
 
-/// [`fit_recipe_zoned`] with a correspondence provider (step 7b) — see
-/// [`fit::fit_recipe_with`]. `None` is bit-for-bit the plain zoned fit.
-pub fn fit_recipe_zoned_with(
-    src: &DynamicImage,
-    target: &DynamicImage,
-    seg: &SegmentOpts,
-    mask_path: &crate::store::OwnedRaster,
-    base: &crate::recipe::EditRecipe,
-    options: fit::FitOptions<'_>,
-) -> FitReport {
-    fit_recipe_zoned_with_regions(
-        src,
-        target,
-        seg,
-        mask_path,
-        base,
-        options,
-        semantic::DEFAULT_SEMANTIC_REGIONS,
-    )
-}
-
 /// Multi-region entry point shared by the CLI and GUI.  `2` intentionally
 /// routes through the historical sky/land implementation so its recipe bytes
 /// and rationale remain unchanged. `options` carries the step-11 strength

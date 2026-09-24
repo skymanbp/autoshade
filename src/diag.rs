@@ -279,14 +279,6 @@ impl<'a> Diag<'a> {
         Diag::new(self.sink, subject)
     }
 
-    pub fn sink(&self) -> &'a dyn Sink {
-        self.sink
-    }
-
-    pub fn subject(&self) -> &Subject {
-        &self.subject
-    }
-
     /// The photograph this channel is about, when it is about one. Callers that
     /// need the PATH (not just the attribution) read it from here rather than
     /// taking a second parameter that could disagree with the first.

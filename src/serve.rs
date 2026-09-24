@@ -2869,6 +2869,7 @@ fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // default_out name let a rerun overwrite a master an earlier develop —
     // possibly a GUI-saved pixels.json — still references.
     let Some(out) = pipeline::unique_out(&raw, "retouch") else {
+        let _ = std::fs::remove_file(&mask_tmp);
         return Ok(status_response(500, "no free retouch output name (999 in ./out)"));
     };
     // Config SNAPSHOT, not the read guard: holding the RwLock across the
@@ -2996,10 +2997,18 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         Ok(Some((p, g))) => (p, g),
         Ok(None) => crate::store::read_pixel_source(&raw)
             .unwrap_or_else(|| (raw.clone(), false)),
-        Err(msg) => return Ok(status_response(400, &msg)),
+        Err(msg) => {
+            if let Some(t) = &mask_tmp {
+                let _ = std::fs::remove_file(t);
+            }
+            return Ok(status_response(400, &msg));
+        }
     };
     // Same unique-claim + config-snapshot rules as api_retouch (see there).
     let Some(out) = pipeline::unique_out(&raw, "heal") else {
+        if let Some(t) = &mask_tmp {
+            let _ = std::fs::remove_file(t);
+        }
         return Ok(status_response(500, "no free heal output name (999 in ./out)"));
     };
     let cfg = state.config().clone();
@@ -3439,7 +3448,7 @@ fn read_json<T: serde::de::DeserializeOwned>(request: &mut Request) -> Result<T>
     // over.
     use std::io::Read as _;
     const BODY_CAP: u64 = 256 * 1024 * 1024;
-    let mut body = String::new();
+    let mut body = Vec::new();
     // Declared-size pre-reject: a Content-Length past the cap refuses before
     // the first byte is read (chunked bodies carry no length and fall
     // through to the read cap below).
@@ -3456,11 +3465,16 @@ fn read_json<T: serde::de::DeserializeOwned>(request: &mut Request) -> Result<T>
     // UFCS: `take` on the sized adapter (autoref on the UNSIZED trait object
     // fights the method resolver).
     std::io::Read::take(&mut gb, BODY_CAP + 1)
-        .read_to_string(&mut body)
+        .read_to_end(&mut body)
         .context("read body")?;
     if body.len() as u64 > BODY_CAP {
         anyhow::bail!(ClientErr(format!("request body exceeds {} MiB", BODY_CAP / (1024 * 1024))));
     }
+    // Decoded AFTER the cap check, so a body cut mid-character by the cap
+    // still reads as "too large" rather than as "not UTF-8" — and a body that
+    // really is not UTF-8 is the client's mistake, never a 500.
+    let body = String::from_utf8(body)
+        .map_err(|e| anyhow!(ClientErr(format!("request body is not UTF-8: {e}"))))?;
     serde_json::from_str(&body).map_err(|e| anyhow!(ClientErr(format!("parse request JSON: {e}"))))
 }
 

@@ -3332,6 +3332,9 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // Only the call that produces the recipe the user gets says yes; see the
     // ordering note at the 4a' loop below for why.
     let mut fit_cast_stage = |recipe: &mut EditRecipe, rescue: bool| -> CastOutcome {
+        // Cleared per call: the fact must describe the recipe this call
+        // produces, not a probe an earlier call admitted.
+        cast_admission = None;
         recipe.red_curve = Vec::new();
         recipe.green_curve = Vec::new();
         recipe.blue_curve = Vec::new();
@@ -3912,7 +3915,6 @@ fn solve_white_balance(
             lambda = legal;
             let (_, final_rotated, _, _, _) = evaluate(lambda);
             rotated = final_rotated;
-            let (_, _, _, _, _final_after) = evaluate(lambda);
             wb_rotation_coverage = rehued_coverage_weighted(evidence);
             // Retain the reason that actually forced the scalar to zero. If
             // both gates reject the free demand, foreign hue is the stronger

@@ -1423,47 +1423,10 @@ fn frame_digests(frames: &[Option<StagedFrame>], what: &str) -> Vec<Option<Strin
         .collect()
 }
 
-/// Hand a [`StagedFrame`] to the sidecar. Serialised process-wide against
-/// every other embed (`embed::with_model_slot`) — one resident model, whatever
-/// the caller's concurrency.
-pub fn embed_staged(opts: &crate::embed::EmbedOpts, staged: &StagedFrame) -> Result<Vec<f32>> {
-    crate::embed::embed_file(opts, &staged.img, &staged.json)
-}
-
 pub fn embed_staged_record(opts: &crate::embed::EmbedOpts, staged: &StagedFrame) -> Result<crate::embed::EmbedRecord> {
     crate::embed::embed_file_record(opts, &staged.img, &staged.json)
 }
 
-/// One photo's SigLIP 2 vector, from the camera's embedded preview.
-///
-/// The ONE entry point for a caller that has nothing useful to do between the
-/// two halves — the develop-time query, which needs the vector before it can
-/// build the advisor request at all. `StyleIndex::build` splits them instead,
-/// so its decode buffer and its decode permit are released before the sidecar
-/// runs.
-///
-/// Errors are the CALLER's to degrade: the build skips the vector for that
-/// photo and keeps the exemplar, the develop path retrieves on the 14 dims
-/// alone. Neither may fail the run — a style index is not worth an aborted
-/// develop, and a 1.5 GB download must never be able to break one.
-pub fn embed_preview(
-    opts: &crate::embed::EmbedOpts,
-    preview: &image::DynamicImage,
-    dir: &Path,
-    tag: &str,
-) -> Result<Vec<f32>> {
-    let staged = stage_embed_frame(preview, dir, tag)?;
-    embed_staged(opts, &staged)
-}
-
-/// The text whose vector becomes [`StyleExemplar::desc_embed`]: the record's
-/// own description when it has one, otherwise its tag string.
-///
-/// ONE rule, used by both builders, so a RAW exemplar and a look record can
-/// never end up describing themselves in two different vocabularies. `None`
-/// means there is nothing to embed — a record with no description and no tags
-/// keeps `desc_embed: None`, and the W_DESC term is simply absent for it
-/// (`embed_distance`'s existing rule).
 /// The phrase-list scratch file for ONE builder in ONE process.
 ///
 /// Named by `who` as well as the pid because both builders wrote
@@ -1480,6 +1443,14 @@ fn vocab_scratch_path(dir: &Path, who: &str) -> PathBuf {
     ))
 }
 
+/// The text whose vector becomes [`StyleExemplar::desc_embed`]: the record's
+/// own description when it has one, otherwise its tag string.
+///
+/// ONE rule, used by both builders, so a RAW exemplar and a look record can
+/// never end up describing themselves in two different vocabularies. `None`
+/// means there is nothing to embed — a record with no description and no tags
+/// keeps `desc_embed: None`, and the W_DESC term is simply absent for it
+/// (`embed_distance`'s existing rule).
 fn desc_text(desc: Option<&str>, tags: &[String]) -> Option<String> {
     match desc.map(str::trim).filter(|d| !d.is_empty()) {
         Some(d) => Some(d.chars().take(MAX_DESC_CHARS).collect()),
@@ -3163,7 +3134,8 @@ impl StyleIndex {
             eprintln!("  style index: the exemplar cache could not be published ({e:#})");
         }
         println!(
-            "  style index cache: reused {reused}, recomputed {}, removed {retired},              skipped-for-sidecar {}",
+            "  style index cache: reused {reused}, recomputed {}, removed {retired}, \
+             skipped-for-sidecar {}",
             live - reused,
             unpaired.len()
         );
@@ -3313,7 +3285,9 @@ impl StyleIndex {
             && !idx.looks.is_empty()
         {
             eprintln!(
-                "style index {} was built with look vocabulary v{stored} and this build speaks                  v{LOOK_VOCAB_VERSION} — its {} look record(s) are being ignored; rebuild the                  look library (autoshade style-index --looks <dir> --embed) to use them again",
+                "style index {} was built with look vocabulary v{stored} and this build speaks \
+                 v{LOOK_VOCAB_VERSION} — its {} look record(s) are being ignored; rebuild the \
+                 look library (autoshade style-index --looks <dir> --embed) to use them again",
                 path.display(),
                 idx.looks.len()
             );
@@ -4227,27 +4201,6 @@ pub const TARGET_CONSISTENCY: f32 = 0.75;
 /// chose.
 const GRADE_NOT_A_DECISION: [&str; 2] = ["blending", "balance"];
 
-/// The weighted mean of a population, or `None` when that mean is not a habit.
-///
-/// Two ways to answer `None`, and they are one rule — *do not claim a habit we
-/// did not measure*:
-///
-/// * The population never exercised the axis (`mean(|v|) == 0`). `rho` is
-///   `0 / 0` there: UNDEFINED, which is not the same as passing. Returning the
-///   mean anyway would give every untouched band a target of `0`, and at Style
-///   1.0 a target of `0` DELETES whatever the proposal decided. The twelve-slider
-///   version of exactly that is why this batch exists; reproducing it
-///   thirty-eight times over would have been the cure making the disease.
-/// * The population contradicts itself (`|mean| < TARGET_CONSISTENCY * mean(|v|)`).
-///   The mean of `+20` and `-18` is `+1`, and pulling a proposal onto `+1` is
-///   not "distil my habit", it is erasing a decision and calling the wreckage a
-///   style.
-///
-/// Weights are `amount`-style masses (1.0 for a plain per-exemplar value, the
-/// bucket weight for a mask habit), so the mask half is the exact
-/// `sum(w*mean)/sum(w)` that `mask_habit::BucketHabit::w` exists to make
-/// possible rather than a mean of means. Non-finite and non-positive weights
-/// are dropped at the door, like every other number that reaches a render.
 /// The settings labels whose band has no negative side — a MAGNITUDE, where
 /// "which way does the library lean" is a question with one possible answer.
 ///
@@ -4305,6 +4258,27 @@ fn habit_mean(label: &str, vals: impl IntoIterator<Item = (f32, f32)>) -> Option
     if label_is_one_sided(label) { exercised_mean(vals) } else { consistent_mean(vals) }
 }
 
+/// The weighted mean of a population, or `None` when that mean is not a habit.
+///
+/// Two ways to answer `None`, and they are one rule — *do not claim a habit we
+/// did not measure*:
+///
+/// * The population never exercised the axis (`mean(|v|) == 0`). `rho` is
+///   `0 / 0` there: UNDEFINED, which is not the same as passing. Returning the
+///   mean anyway would give every untouched band a target of `0`, and at Style
+///   1.0 a target of `0` DELETES whatever the proposal decided. The twelve-slider
+///   version of exactly that is why this batch exists; reproducing it
+///   thirty-eight times over would have been the cure making the disease.
+/// * The population contradicts itself (`|mean| < TARGET_CONSISTENCY * mean(|v|)`).
+///   The mean of `+20` and `-18` is `+1`, and pulling a proposal onto `+1` is
+///   not "distil my habit", it is erasing a decision and calling the wreckage a
+///   style.
+///
+/// Weights are `amount`-style masses (1.0 for a plain per-exemplar value, the
+/// bucket weight for a mask habit), so the mask half is the exact
+/// `sum(w*mean)/sum(w)` that `mask_habit::BucketHabit::w` exists to make
+/// possible rather than a mean of means. Non-finite and non-positive weights
+/// are dropped at the door, like every other number that reaches a render.
 fn consistent_mean(vals: impl IntoIterator<Item = (f32, f32)>) -> Option<f32> {
     let (mut wsum, mut sum, mut abs) = (0.0f64, 0.0f64, 0.0f64);
     for (w, v) in vals {
@@ -4874,8 +4848,6 @@ pub fn distilled_fields(pre: &EditRecipe, post: &EditRecipe) -> String {
 /// `rationale::MAX_RATIONALE` ceiling every other note is spent against.
 pub const MAX_DISTILLED_FIELDS_CHARS: usize = 384;
 
-/// Style axis pull: preserve the shipped 0.3 default's historical 0.18 pull,
-/// while allowing Style 1.0 to reach the retrieved target fully.
 /// What ONE retrieved neighbour set distils to, and what the Style dial would
 /// do with it — printed, never rendered (A30).
 ///
@@ -4980,6 +4952,8 @@ pub fn distillation_preview(ex: &[&StyleExemplar], style: f32) -> String {
     out
 }
 
+/// Style axis pull: preserve the shipped 0.3 default's historical 0.18 pull,
+/// while allowing Style 1.0 to reach the retrieved target fully.
 pub fn style_pull(style: f32) -> f32 {
     let s = style.clamp(0.0, 1.0);
     if s >= 0.5 { s } else { s * 0.6 }

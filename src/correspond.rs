@@ -84,7 +84,7 @@ fn sidecar_args(script: &Path, source: &Path, target: &Path, output: &Path) -> V
 /// One correspondence field, parsed and gated. Flat arrays over source cells
 /// in row-major order (`cell = y * grid_w + x`); `map_x`/`map_y` are TARGET
 /// grid coordinates, `confidence` is the sidecar's cyclic×smoothness product
-/// in [0, 1], and `sim` is the raw cosine kept for diagnostics only.
+/// in [0, 1].
 #[derive(Debug)]
 pub struct CorrespondenceField {
     pub model: String,
@@ -95,7 +95,6 @@ pub struct CorrespondenceField {
     pub map_x: Vec<f32>,
     pub map_y: Vec<f32>,
     pub confidence: Vec<f32>,
-    pub sim: Vec<f32>,
 }
 
 impl CorrespondenceField {
@@ -198,7 +197,6 @@ pub(crate) fn identity_test_field() -> CorrespondenceField {
         map_x: (0..cells).map(|c| (c % GRID) as f32).collect(),
         map_y: (0..cells).map(|c| (c / GRID) as f32).collect(),
         confidence: vec![1.0; cells],
-        sim: vec![1.0; cells],
     }
 }
 
@@ -282,7 +280,6 @@ pub fn parse_field(text: &str) -> Result<CorrespondenceField> {
         map_x,
         map_y,
         confidence,
-        sim,
     })
 }
 

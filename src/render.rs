@@ -1703,8 +1703,14 @@ fn resolve_camera_profile(
             "camera profile \"{name}\" states three calibration illuminants; rendering with two"
         ));
     }
-    let kelvin = wb_to_kelvin_tint(&camera_matrix(rawimage).ok()?, normalise_wb(rawimage.wb_coeffs))
-        .map(|(k, _)| k);
+    let matrix = match camera_matrix(rawimage) {
+        Ok(m) => m,
+        Err(e) => {
+            diag.warn(format!("camera profile \"{name}\" is not rendered: {e}"));
+            return None;
+        }
+    };
+    let kelvin = wb_to_kelvin_tint(&matrix, normalise_wb(rawimage.wb_coeffs)).map(|(k, _)| k);
     let stage = profile::Stage::build(&prof, space, kelvin);
     if stage.is_none() {
         diag.warn(format!(
@@ -4651,7 +4657,8 @@ pub fn engine_active(m: &crate::recipe::LocalAdjustment) -> bool {
         || m.hue != 0.0
         || m.temperature != 0.0
         || m.tint != 0.0
-        || m.noise_reduction != 0.0
+        // The render's NR pass allocates nothing below a tenth of a step.
+        || m.noise_reduction > 0.1
         // The four local point curves (R25 P6). Empty = identity, exactly as
         // `apply_develop`'s own `tone_neutral` reads the global curves — a
         // non-empty curve is an edit even if its points happen to trace the

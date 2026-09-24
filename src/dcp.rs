@@ -86,7 +86,7 @@ pub struct Table {
 
 impl Table {
     fn at(&self, h: u32, s: u32, v: u32) -> [f32; 3] {
-        self.data[((v * self.hue + h) * self.sat + s) as usize]
+        self.data[(v as usize * self.hue as usize + h as usize) * self.sat as usize + s as usize]
     }
 
     /// The correction at `(hue in degrees, saturation, value)`, interpolated
@@ -390,7 +390,13 @@ fn table(
     if d.len() < 3 || d[0] == 0 || d[1] == 0 || d[2] == 0 {
         return Err(Refusal::TableMismatch(format!("tag {dims_tag} dims {d:?}")));
     }
-    let want = (d[0] as usize) * (d[1] as usize) * (d[2] as usize) * 3;
+    let want = (d[0] as usize)
+        .checked_mul(d[1] as usize)
+        .and_then(|n| n.checked_mul(d[2] as usize))
+        .and_then(|n| n.checked_mul(3));
+    let Some(want) = want else {
+        return Err(Refusal::TableMismatch(format!("tag {dims_tag} dims {d:?} overflow")));
+    };
     let v = data.floats();
     if v.len() != want {
         return Err(Refusal::TableMismatch(format!(

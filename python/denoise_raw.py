@@ -121,11 +121,10 @@ warnings.filterwarnings("ignore")  # requests/urllib3 version warnings only
 import numpy as np
 
 import _sidecar
-from denoise import _fetch_verified, _tile_window
+from denoise import _fetch_verified, _nullctx, _tile_window
 
 TAG = "denoise_raw"
 
-_KAIR_RELEASE = "https://github.com/cszn/KAIR/releases/download/v1.0"
 _KAIR_RAW = "https://raw.githubusercontent.com/cszn/KAIR"
 # The fine-tuned weights ride with the release that introduced them, so a
 # given AutoShade always fetches the network it was measured with. Since
@@ -699,14 +698,6 @@ def run_tiled(model, rgb, sigma, device, tile=512, overlap=32, fp16=False):
                 wsum[y0:y1, x0:x1, :] += win
     wsum[wsum == 0] = 1.0
     return acc / wsum
-
-
-class _nullctx:
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
 
 
 def stabilised(planes, ab):

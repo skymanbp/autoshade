@@ -1330,16 +1330,6 @@ pub enum CropAlignment {
     OffSensor { crop: rawler::imgop::Rect, width: usize, height: usize },
 }
 
-impl CropAlignment {
-    /// The origin the window moved to, for the callers that only wanted that.
-    pub fn moved_to(self) -> Option<(usize, usize)> {
-        match self {
-            CropAlignment::Moved(r) => Some((r.p.x, r.p.y)),
-            _ => None,
-        }
-    }
-}
-
 /// The decision half of [`align_default_crop`], as a function of the numbers
 /// alone — a `RawImage` needs a whole `Camera` and a sensor buffer to build,
 /// and the thing worth pinning is which rectangles move and which do not.

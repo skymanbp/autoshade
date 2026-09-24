@@ -575,7 +575,6 @@ impl AutoShadeApp {
         // Interim BatchProgress ticks flow through this extra clone; the
         // TERMINAL Msg::Exported is owned by spawn_worker (panic-safe).
         let tx = self.tx.clone();
-        let ext = ext.to_string();
         // In-memory state outranks disk WHOLESALE — recipes AND pixel
         // identities, for every photo that has any: the nav stash holds work
         // navigated away from, and the open photo's live canvas outranks even

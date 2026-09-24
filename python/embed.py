@@ -205,13 +205,6 @@ TEXT_GOLDEN_IDS = {
 TEXT_EOS_ID = 1
 TEXT_PAD_ID = 0
 TEXT_BOS_ID = 2
-TEXT_SPECIAL_TOKENS = (
-    TEXT_TOKENIZER_CONTRACT["unk_token"],
-    TEXT_TOKENIZER_CONTRACT["pad_token"],
-    TEXT_TOKENIZER_CONTRACT["eos_token"],
-    TEXT_TOKENIZER_CONTRACT["bos_token"],
-    *TEXT_TOKENIZER_CONTRACT["additional_special_tokens"],
-)
 
 
 def _tokenizer_config_problems(cfg):

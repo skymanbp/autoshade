@@ -1334,8 +1334,6 @@ pub fn produce_recipe(
     // The stamp is complete, and every number this call produced -- the fit's
     // residual and the judge's score alike -- was read before it existed. Same
     // disclosure as CLI `match`, from the other production stamper.
-    let shift = post_stamp_domain_shift(&recipe);
-    note_post_stamp_domain(&mut recipe.rationale, &mut det_notes, shift);
     // REFINE means "adjust MY edit", so it must not delete work the model was
     // never able to return. The strict response schema
     // (advisor::catalogue::edit_recipe_schema) can express only LINEAR and RADIAL
@@ -1349,6 +1347,11 @@ pub fn produce_recipe(
     if let Some(b) = base {
         carry_over_unrepresentable(&mut recipe, b, lens_opinion, Some(&mut det_notes));
     }
+    // Read AFTER the carry-over: the lens profile it restores is part of the
+    // frame the note describes, so measuring before it could name a domain
+    // shift the delivered recipe does not have (or miss one it does).
+    let shift = post_stamp_domain_shift(&recipe);
+    note_post_stamp_domain(&mut recipe.rationale, &mut det_notes, shift);
     Ok((recipe, verdict, det_notes))
 }
 
@@ -2425,7 +2428,11 @@ fn migrate_raster_file(
     if let Some(par) = target.parent() {
         std::fs::create_dir_all(par)?;
     }
-    let part = target.with_extension(format!("part-{}", std::process::id()));
+    let part = target.with_extension(format!(
+        "part-{}-{}",
+        std::process::id(),
+        crate::store::next_tmp_seq()
+    ));
     if let Err(e) = moved.save_with_format(&part, image::ImageFormat::Png) {
         let _ = std::fs::remove_file(&part);
         return Err(std::io::Error::other(format!("write {}: {e}", part.display())));
@@ -3085,16 +3092,6 @@ pub fn photo_base_knots(raw: &Path) -> Vec<[f32; 2]> {
 /// [`photo_base_knots`] on a caller-supplied channel.
 pub fn photo_base_knots_in(raw: &Path, d: &crate::diag::Diag) -> Vec<[f32; 2]> {
     photo_base_knots_checked_in(raw, d).unwrap_or_default()
-}
-
-/// The tri-state form the pre-era repair needs: `None` = no estimate could be
-/// PRODUCED this time (not a RAW, unreadable or absent embedded preview,
-/// failed neutral develop); `Some(knots)` is the estimator's ANSWER —
-/// possibly EMPTY, `camera_base_knots`' documented identity verdict ("this
-/// photo needs no base look"). An answer may replace a saved curve; an
-/// inability must leave it alone.
-pub fn photo_base_knots_checked(raw: &Path) -> Option<Vec<[f32; 2]>> {
-    photo_base_knots_checked_in(raw, &crate::diag::photo(raw))
 }
 
 /// [`photo_base_knots_checked`] on a caller-supplied channel. The three

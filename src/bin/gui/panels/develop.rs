@@ -555,10 +555,6 @@ impl AutoShadeApp {
                             } else {
                                 ui.add_sized([64.0, STRIP_THUMB_H], egui::Button::new("…"))
                             };
-                            #[cfg(test)]
-                            if i == 0 {
-                                self.strip_thumb_rect = Some(resp.rect);
-                            }
                             if resp
                                 .on_hover_text(tr(
                                     lang,

@@ -83,11 +83,6 @@ pub fn cache_path_in(dir: &Path) -> PathBuf {
     dir.join(CACHE_FILE)
 }
 
-/// The production location: the per-user store, beside the style index itself.
-pub fn cache_path() -> PathBuf {
-    cache_path_in(&crate::store::store_root())
-}
-
 /// WHICH FILE an entry was measured from, exactly enough to know that the file
 /// has not changed since.
 ///

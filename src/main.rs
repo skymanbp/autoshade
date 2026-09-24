@@ -756,7 +756,7 @@ fn correspond_cmd(source: &Path, target: &Path, out: Option<PathBuf>) -> Result<
         field.grid_w,
         field.grid_h,
         field.model,
-        &field.revision[..12]
+        field.revision.get(..12).unwrap_or(&field.revision)
     );
     println!(
         "  median confidence {:.3} · coverage(conf>=0.5) {:.1}% · mean |flow| {:.2} cells",

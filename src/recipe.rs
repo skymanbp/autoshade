@@ -3814,14 +3814,6 @@ impl EditRecipe {
             Some(t) if t.is_finite() => Some(t.clamp(-100.0, 100.0)),
             _ => None,
         };
-        // Base-look knots are luma coordinates — anything outside [0,1] is
-        // corrupt input (monotonisation is the LUT builder's job, values here).
-        // A non-finite knot survives f32::clamp: drop it outright.
-        self.base_curve.retain(|p| p[0].is_finite() && p[1].is_finite());
-        for p in self.base_curve.iter_mut() {
-            p[0] = p[0].clamp(0.0, 1.0);
-            p[1] = p[1].clamp(0.0, 1.0);
-        }
         // Crop is a normalized [0,1] view-frame rectangle; untrusted input
         // (AI JSON, foreign XMP, a hand-edited recipe) can carry values
         // outside the frame or an inverted/empty rectangle. Clamp into the

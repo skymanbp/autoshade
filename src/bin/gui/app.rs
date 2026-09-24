@@ -1618,8 +1618,6 @@ impl AutoShadeApp {
                 self.show_shortcuts = false;
             }
         }
-
-        // Drag & drop affordance: show a full-window overlay while files hover.
     }
 }
 

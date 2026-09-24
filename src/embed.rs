@@ -383,39 +383,6 @@ fn sidecar_args(script: &Path, input: &Path, output: &Path, fp16: bool, text_fil
     v
 }
 
-/// Run the sidecar on ONE image and return its L2-normalised vector.
-///
-/// `scratch` is the JSON file the sidecar writes; the caller owns its lifetime
-/// (the style build hands over a per-photo temp name so parallel workers never
-/// share one). The run itself is [`crate::run_model_sidecar`] — the shared
-/// spawn/bound/exit-0-is-not-success executor, extracted when the
-/// correspondence bridge (step 7a) would have been the fourth copy of it.
-///
-/// SERIALISED against every other model sidecar in this process — see
-/// [`crate::with_model_slot`]. The fan-out that gate closes here
-/// (adjudication F3): `StyleIndex::build` runs up to
-/// `decode::MAX_CONCURRENT_DECODES` = 4 workers and each one used to spawn
-/// its own sidecar, so four SigLIP loads could be live at once — 6.0 GB of
-/// fp32 weights, 3.0 GB even with `--fp16`, against a consumer GPU that
-/// commonly has 4. Nothing else in the tree serialised them, because every
-/// other budget is shaped like host RAM (`MAX_CONCURRENT_DECODES` counts
-/// 181 MB decodes, `jobs` divides `GlobalMemoryStatusEx`) and the model does
-/// not live in host RAM at all.
-///
-/// A GATE, not a batcher, chosen over wiring `embed.py --manifest`: the
-/// manifest path helps only the index build, while the gate covers the
-/// develop-time query too (`pipeline::produce_recipe` under `batch --jobs 3`
-/// is three concurrent single-image calls that no manifest can merge), and it
-/// needs no new record format, no per-line failure mapping and no second
-/// staging lifetime. The cost is honest and bounded: the embedding arm of a
-/// build runs serially, while the decode that dominates it still runs
-/// four-wide. The staging the caller did (writing the PNG) stays OUTSIDE the
-/// gate: it is disk work, it costs no model, and holding the slot across it
-/// would serialise the cheap half too.
-pub fn embed_file(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Result<Vec<f32>> {
-    Ok(embed_file_record(opts, input, scratch)?.vector)
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct EmbedRecord {
     pub vector: Vec<f32>,

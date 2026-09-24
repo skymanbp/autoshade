@@ -1083,8 +1083,7 @@ impl AutoShadeApp {
                             }
                             if stamp {
                                 stamp_calibration(&mut recipe, &knots, &lens, as_shot);
-                            } else if !stamp
-                                && recipe.base_curve.is_empty()
+                            } else if recipe.base_curve.is_empty()
                                 && !knots.is_empty()
                                 && open_note.is_none()
                             {

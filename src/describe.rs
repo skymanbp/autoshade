@@ -417,7 +417,7 @@ pub struct DescriptionCache {
 }
 
 /// The cache's file name inside a build's scratch directory. One spelling,
-/// because [`cache_path`] and every test that isolates itself must name the
+/// because [`cache_path_in`] and every test that isolates itself must name the
 /// same file.
 pub const CACHE_FILE: &str = "style-descriptions.json";
 
@@ -436,16 +436,7 @@ pub fn cache_path_in(dir: &Path) -> PathBuf {
     dir.join(CACHE_FILE)
 }
 
-/// The production location: the per-user store, beside the style index itself.
-pub fn cache_path() -> PathBuf {
-    cache_path_in(&crate::store::store_root())
-}
-
 impl DescriptionCache {
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

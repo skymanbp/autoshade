@@ -258,6 +258,7 @@ pub(crate) fn solve_upright(luma: &[f32], w: usize, h: usize, mode: u8) -> Optio
 
     let row = match (mode, pv, ph) {
         (3, Some(a), _) => null_row_through(a),
+        (3, None, _) => None,
         // Full and Auto want the horizon — the line through BOTH points. With
         // only one of them the correction degrades to that one, which is better
         // than refusing a photograph that states its verticals clearly and its
