@@ -909,7 +909,9 @@ pub const RECIPE_CONTROLS: [Control; 114] = [
     Control {
         name: "perspective_scale",
         shape: Shape::Number,
-        range: Some((0.0, 200.0)),
+        // Lightroom's own band (since 2026-09-24; the recipe clamps to it —
+        // at 0 the transform map collapsed and the whole step dropped out).
+        range: Some((50.0, 150.0)),
         neutral: "100 (the frame as it is)",
         engine_only: true,
         crs: CrsKey::Attr("PerspectiveScale"),

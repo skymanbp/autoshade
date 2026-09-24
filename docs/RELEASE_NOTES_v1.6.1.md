@@ -23,15 +23,12 @@ no external coding model wrote this release.
 - **The Atmosphere route's hue veto is recomputed on the recipe it ships**, not
   on the one it measured three stages earlier, and only where no global cast
   was attached.
-- **The structure-divergence reading abstains on a flat side** instead of
-  reporting a correlation of 1.0 — the guard's own constant, which every
-  consumer read as "the structure survived".
 - **An HSL move is not a detail-only companion.**
 - **A zone's after-reading is taken on the source weights it was solved on**,
   and the accepted zone records those same weights.
 - **The luma-only tone ladder probes the fitted tone first** (factor 1.0)
   before backing off through 0.75, 0.5 and 0.25. On the calibration corpus
-  this is the one correction of the nine that moves a pinned number: the sky's
+  this is the one correction of the eight that moves a pinned number: the sky's
   luma-only band passes the local quality gate at its full step and ships
   −0.174 EV where it used to ship three quarters of its fit (−0.152 EV). The
   partition re-arbitrated around that step (the second band −0.062 → −0.007 EV
@@ -173,6 +170,16 @@ What these did on the reference pair is in the gates below.
 
 ## Kept, with the reason
 
+- **A flat side of the structure-divergence reading keeps its correlation of
+  1.0.** The audit read it as a manufactured match; it is the value that
+  switches the correlation term off. When no translation offers gradient
+  variance on both sides, the reading is the band-energy ratio alone, and that
+  term is the whole structural evidence such a pair offers: a uniform patch
+  that stayed uniform reads D = 0, a checkerboard that became flat reads far
+  past the divergence line. The abstention was tried and withdrawn on the day:
+  the tile stage's own tests attach to uniform patches through that term, and
+  an abstention would have let a flattened target through the mode gate as
+  "not divergent". Now written down at the function and pinned.
 - **Camera-profile samples above white** stay as they are: pinned by
   `the_tone_lookup_passes_white_through_and_starts_where_the_curve_does`.
 - **The error-path sanitiser still collapses URLs** ("https://host/v1/…" →

@@ -1309,10 +1309,8 @@ pub const STRUCTURE_MIN_CORE_PX: usize = 100;
 /// contribute the RMS log2 energy-ratio error.
 ///
 /// `None` is an ABSTENTION and never a matched reading. It is returned when
-/// the rasters are not one geometry, when the eroded core holds fewer than
-/// [`STRUCTURE_MIN_CORE_PX`] pixels, or when no translation offers a
-/// gradient on BOTH sides to correlate (one side flat — until 2026-09-24 that
-/// case read as correlation 1.0, a constant of the guard). The first two used to return
+/// the rasters are not one geometry, or when the eroded core holds fewer than
+/// [`STRUCTURE_MIN_CORE_PX`] pixels. Both used to return
 /// `Divergence::matched()`, i.e. D = 0 — the value every consumer reads as
 /// "the structure survived" — so a free-mask component of 90 core pixels
 /// cleared the structural gate for free and [`crate::fit_field::local_support`]
@@ -1502,10 +1500,19 @@ pub fn structure_divergence(
             }
         }
     }
-    if best <= -1.0 {
-        return None;
-    }
-    let correlation = best as f32;
+    // No translation offered gradient variance on BOTH sides (one side, or
+    // both, flat inside the core): the correlation term is not a
+    // measurement and contributes NOTHING to D — 1.0 is the value that
+    // zeroes it, not a claim that the structure survived. What D then reads
+    // is the band-energy ratio alone, and that term is the whole structural
+    // evidence such a pair offers: a uniform patch that stayed uniform reads
+    // D = 0, a checkerboard that became flat reads far past DIVERGENCE_ZONE.
+    // The tile stage depends on exactly this (`fit_zoned::spatial::tests::
+    // depth_three_never_attaches`, `…cannot_become_a_tile`), which is why the
+    // 2026-09-24 audit's proposal to abstain here was tried and withdrawn:
+    // an abstention refuses the uniform tile and, through `is_some_and`,
+    // lets a flattened target through the mode gate as "not divergent".
+    let correlation = if best > -1.0 { best as f32 } else { 1.0 };
     let energy_error = (src_energy
         .iter()
         .zip(tgt_energy)
@@ -9482,11 +9489,14 @@ mod tests {
         );
     }
 
-    /// A flat side has no gradient to correlate at any offset; the reading
-    /// used to come back as correlation 1.0 — the guard's constant, which
-    /// every consumer reads as "the structure survived" — and now abstains.
+    /// A flat side has no gradient to correlate at any offset, so the
+    /// correlation term contributes nothing and D is the band-energy ratio
+    /// alone: a checkerboard that became flat (or a flat patch that grew a
+    /// checkerboard) reads divergent, a flat patch that stayed flat reads
+    /// matched, and two textured sides correlate. Pinned because the 2026-09-24
+    /// audit's abstention here was tried and withdrawn (see the function).
     #[test]
-    fn structure_divergence_abstains_when_one_side_is_flat() {
+    fn a_flat_side_reads_through_the_energy_term_alone() {
         let (w, h) = (40u32, 30u32);
         let n = (w * h) as usize;
         let flat = vec![[0.5f32; 3]; n];
@@ -9497,8 +9507,13 @@ mod tests {
             })
             .collect();
         let weights = vec![1.0f32; n];
-        assert_eq!(structure_divergence(&flat, &textured, w, h, &weights), None);
-        assert_eq!(structure_divergence(&textured, &flat, w, h, &weights), None);
+        for (a, b) in [(&flat, &textured), (&textured, &flat)] {
+            let read = structure_divergence(a, b, w, h, &weights).expect("one flat side still reads");
+            assert_eq!(read.correlation, 1.0, "the correlation term is switched off: {read:?}");
+            assert!(read.d >= DIVERGENCE_ZONE && (read.d - read.energy_error).abs() < 1e-5, "{read:?}");
+        }
+        let same = structure_divergence(&flat, &flat, w, h, &weights).expect("two flat sides read");
+        assert_eq!(same.d, 0.0, "a uniform patch that stayed uniform: {same:?}");
         let read = structure_divergence(&textured, &textured, w, h, &weights)
             .expect("two textured sides correlate");
         assert!(read.correlation > 0.99, "{read:?}");

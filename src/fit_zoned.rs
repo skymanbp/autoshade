@@ -6703,16 +6703,19 @@ mod tests {
         // A deliberately wrong target-derived population produces a different
         // reading. The production helper cannot receive this mask: D owns the
         // source correspondence while moment matching remains target-masked.
-        // Over this fixture that population is the flat land alone, with no
-        // gradient on either side, and the reading ABSTAINS — until 2026-09-24
-        // it came back as the guard's own constant (correlation 1.0, D = 0),
-        // which is how this assertion's "different reading" used to be met.
+        // (Over this fixture that population is the flat land alone: no
+        // gradient on either side, so its D is the energy term's 0 — a uniform
+        // patch that stayed uniform — while the sky population's blend rows
+        // carry gradient on both sides and correlate.)
         let target_mask = GrayImage::from_fn(16, 16, |_, y| {
             image::Luma([if y < 6 { 255u8 } else { 0 }])
         });
         let wrong_weights = mask_weights(&target_mask, w, h);
         let wrong = fit::structure_divergence(&sp, &tp, w, h, &wrong_weights);
-        assert_eq!(wrong, None, "a population flat on both sides abstains: source={direct:?}");
+        assert!(
+            (wrong.expect("resolvable").d - direct.expect("resolvable").d).abs() > 0.05,
+            "the two mask populations must be discriminating: source={direct:?}, target={wrong:?}"
+        );
 
         // Optional measured calibration; the corpus is located by an
         // environment variable (`fit::calibration_dir`), never by a path

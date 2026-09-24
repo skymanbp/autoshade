@@ -4319,19 +4319,27 @@ at all — is unchanged, rising to 0.80 at Strength 1. The ladder is calibrated
 against a measured demand, not chosen: after the whole zone ladder has run, the
 reference sky still wants R x1.465 / G x1.07 / B x0.78 in linear mean gain.
 
-**Nine corrections from the 2026-09-24 audit** (issue #6), each pinned by a
-test of its own: the terminal veto's joint readings are wired (§the confidence
-cap); `rescore_report` measures against the base the caller names (§R33 §H);
-the Atmosphere route's hue veto is recomputed at compose time from the recipe
-it ships instead of the one it measured three stages earlier, and only where
-no global cast was attached; `structure_divergence` abstains when one side is
-flat instead of reporting a correlation of 1.0 (the guard's own constant, which
-every consumer read as "the structure survived"); an HSL move is not a
-detail-only companion; a zone's after-reading is taken on the SOURCE weights
+**Eight corrections from the 2026-09-24 audit and one finding kept** (issue
+#6), each pinned by a test of its own: the terminal veto's joint readings are
+wired (§the confidence cap); `rescore_report` measures against the base the
+caller names (§R33 §H); the Atmosphere route's hue veto is recomputed at
+compose time from the recipe it ships instead of the one it measured three
+stages earlier, and only where no global cast was attached; a flat side of
+`structure_divergence` KEEPS its correlation of 1.0, now documented as the
+value that switches the correlation term off — when no translation offers
+gradient variance on both sides, D is the band-energy ratio alone, which is the
+whole structural evidence such a pair offers (a uniform patch that stayed
+uniform reads D = 0, a checkerboard that became flat reads far past
+`DIVERGENCE_ZONE`); the audit's abstention was tried and withdrawn on the
+day, because `fit_zoned::spatial`'s own tests show the tile stage attaching
+to uniform patches through exactly that term, and an abstention would also
+have let a flattened target through the mode gate as "not divergent"
+(`fit::tests::a_flat_side_reads_through_the_energy_term_alone`); an HSL move
+is not a detail-only companion; a zone's after-reading is taken on the SOURCE weights
 it was solved on, and the accepted zone records those same weights; the
 luma-only tone ladder probes the fitted tone (factor 1.0) before backing off;
 and the colour field's two do-no-harm checks read the rounded field over every
-mask (above). On the calibration corpus the ladder is the one of the nine that
+mask (above). On the calibration corpus the ladder is the one of the eight that
 moves a pinned number (`calibration_sky_zone_survives_luminance_with_partial_chroma_refusal`,
 re-pinned): the sky's luma-only band passes the local quality gate at its full
 step and ships −0.174 EV where it shipped three quarters of its fit

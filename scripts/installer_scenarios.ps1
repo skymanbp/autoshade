@@ -300,16 +300,30 @@ function Assert-PayloadInstalled {
     Assert-That ($wrong.Count -eq 0) "$Label -- every shipped file hashes to this build" ($wrong -join ', ')
     # The EXCLUDES, asserted as absences: an Excludes regression in the .iss
     # ships test suites, bytecode and the weights cache, and the presence
-    # checks above would pass it.
+    # checks above would pass it. The weights directory itself is the USER'S
+    # (the scenario plants markers there that an upgrade must keep), so what
+    # is asserted absent under it is what an Excludes regression would ship:
+    # the files the SOURCE tree's own python\weights holds at build time —
+    # never the planted markers.
     $python = Join-Path $InstallDir 'python'
+    $sourceWeights = Join-Path $PayloadRoot 'python\weights'
+    $shippable = @{}
+    if (Test-Path -LiteralPath $sourceWeights -PathType Container) {
+        foreach ($f in Get-ChildItem -LiteralPath $sourceWeights -Recurse -File -Force) {
+            $shippable['weights\' + $f.FullName.Substring($sourceWeights.Length + 1)] = $true
+        }
+    }
     $stray = New-Object System.Collections.Generic.List[string]
     if (Test-Path -LiteralPath $python -PathType Container) {
         foreach ($f in Get-ChildItem -LiteralPath $python -Recurse -Force) {
             $rel = $f.FullName.Substring($python.Length + 1)
             if ($f.PSIsContainer) {
-                if ($f.Name -eq '__pycache__' -or $rel -eq 'weights') { $stray.Add($rel) }
+                if ($f.Name -eq '__pycache__') { $stray.Add($rel) }
             }
-            elseif ($f.Extension -eq '.pyc' -or $f.Name -like 'test_*.py' -or $rel -like 'weights\*') {
+            elseif ($f.Extension -eq '.pyc' -or $f.Name -like 'test_*.py') {
+                $stray.Add($rel)
+            }
+            elseif ($shippable.ContainsKey($rel)) {
                 $stray.Add($rel)
             }
         }
