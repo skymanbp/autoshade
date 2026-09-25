@@ -248,22 +248,23 @@ What these did on the reference pair is in the gates below.
 
 ## Gates
 
-Measured before the tag on the release code (`dd7bb79`; the version bump
+Measured before the tag on the release code (`04c2d30`; the version bump
 touches Cargo.toml, Cargo.lock, the documents, the site's cache keys and the
 bug template's dropdown, and the CLI, contract and doc-test suites, clippy,
 the Python suites and `check_docs` are re-run after it). The three-lane
 release battery (`scripts/release_battery.sh`, a frozen snapshot worktree,
 the p36–p41 calibration corpus and the sidecar weights in reach): library
-**1745 passed / 0 failed / 15 ignored** (1989.53 s, release profile, one
-process per module), CLI **25 / 0**, contract 2 + 2, doc-tests 0, GUI **222 /
-0 / 1**, calibration lane **1745 / 0 / 15** (3094.73 s; one skip line, the
+**1748 passed / 0 failed / 15 ignored** (4110.10 s, release profile, one
+process per module, beside another session's cargo tests on the same
+machine), CLI **25 / 0**, contract 2 + 2, doc-tests 0, GUI **222 / 0 / 1**,
+calibration lane **1748 / 0 / 15** (4343.17 s; one skip line, the
 mask-brush specimen test whose `AUTOSHADE_MB_SAMPLE_ROOT` specimen is not on
 this machine, named in every release since v1.3.2), `audit_i18n` and the font
 check exit 0 inside the battery; the Python suites 81 OK from `python/` and 44
 OK from `scripts/` (CPU, the real weights, `-W error::RuntimeWarning`). By name
 against the v1.6.0 tag (`00d3d09`), listed by the harness on both trees:
-library 1683 → 1760 (+78 / −1: the audit sessions' fifty-five and this
-close-out's twenty-three, listed by theme in ARCHITECTURE; the one name removed
+library 1683 → 1763 (+81 / −1: the audit sessions' fifty-five and this
+close-out's twenty-six, listed by theme in ARCHITECTURE; the one name removed
 is the style build's carry-forward of the previous embedding pass, replaced
 beside it by the description pass carrying the previous prose forward); GUI
 215 → 223 (+8 / −0: the audit sessions' seven and the mask-refine refusal on a
