@@ -4420,7 +4420,8 @@ populations while its boundary ruler and its share keep reading the mask's
 own raster (`AcceptedZone::mask_weights` — handed the robust-composed
 population instead, the ruler took that population's holes for transitions
 and refused the calibration corpus's third semantic region, which is how the
-four-region calibration test caught it on the day); the
+four-region calibration test caught it on the day — the release battery's
+calibration lane, not the default lane, which was green); the
 luma-only tone ladder probes the fitted tone (factor 1.0) before backing off;
 and the colour field's two do-no-harm checks read the rounded field over every
 mask (above). On the calibration corpus the ladder is the one of the eight that
@@ -4433,6 +4434,10 @@ step and ships −0.174 EV where it shipped three quarters of its fit
 bands' 5.91 → 6.08 and the frame-wide residual 0.095 either way. Measured by
 reverting each of the two zoned-fit corrections alone in a copy of the tree:
 the after-reading population moves one land gain by one ulp and nothing else.
+On the reference pair (the final gate, before the tag) the release CLI
+re-fitted at 0.65 / 0.85 / 1.0 reads sky ΔE / whole-frame mean |diff| of
+7.0 / 0.0295, 4.6 / 0.0260 and 4.7 / 0.0263 against the target,
+where v1.6.0 read 7.0 / 0.0296, 4.6 / 0.0260 and 4.7 / 0.0263.
 
 **The feather widener's smoothness reading follows its guide** (R34 §D8). The
 one-code rule in `mask_refine::widen_smooth_feather` is an absolute statement

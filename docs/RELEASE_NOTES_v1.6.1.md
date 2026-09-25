@@ -213,8 +213,74 @@ What these did on the reference pair is in the gates below.
   Style between 0.3 and 0.5 pulls more toward the retrieved target than before
   (at 0.4: 0.24 → 0.34; 0.3, 0.5 and above are unchanged); a Transform scale
   below 50 or above 150 in a saved file is clamped to the band; a reverse fit
-  may differ where the joint veto or the rescore base now acts. Recipes,
-  sidecars, the store and the library API keep their formats.
+  may differ where the joint veto, the rescore base or the tone ladder now
+  acts (a zone's luma-only step can ship at its full fit where it used to
+  ship three quarters of it). Recipes, sidecars, the store and the library
+  API keep their formats.
 - **Downloads.** None new; the weights are the v1.6.0 release's.
 - **HTTP.** The `X-Heal-Skipped` header is no longer sent; the count is in the
   `X-Heal-Rationale` text.
+
+## Gates
+
+Measured before the tag on the release code (`dd7bb79`; the version bump
+touches Cargo.toml, Cargo.lock, the documents, the site's cache keys and the
+bug template's dropdown, and the CLI, contract and doc-test suites, clippy,
+the Python suites and `check_docs` are re-run after it). The three-lane
+release battery (`scripts/release_battery.sh`, a frozen snapshot worktree,
+the p36–p41 calibration corpus and the sidecar weights in reach): library
+**1745 passed / 0 failed / 15 ignored** (1989.53 s, release profile, one
+process per module), CLI **25 / 0**, contract 2 + 2, doc-tests 0, GUI **222 /
+0 / 1**, calibration lane **1745 / 0 / 15** (3094.73 s; one skip line, the
+mask-brush specimen test whose `AUTOSHADE_MB_SAMPLE_ROOT` specimen is not on
+this machine, named in every release since v1.3.2), `audit_i18n` and the font
+check exit 0 inside the battery; the Python suites 81 OK from `python/` and 44
+OK from `scripts/` (CPU, the real weights, `-W error::RuntimeWarning`). By name
+against the v1.6.0 tag (`00d3d09`), listed by the harness on both trees:
+library 1683 → 1760 (+78 / −1: the audit sessions' fifty-five and this
+close-out's twenty-three, listed by theme in ARCHITECTURE; the one name removed
+is the style build's carry-forward of the previous embedding pass, replaced
+beside it by the description pass carrying the previous prose forward); GUI
+215 → 223 (+8 / −0: the audit sessions' seven and the mask-refine refusal on a
+turned photo). clippy 0 warnings on both feature sets (`--all-targets --
+-D warnings`). `check_docs.py --gates` on the transcript with the XMP census
+root supplied: **32 PASS / 0 FAIL / 0 SKIP**, before the bump and after it.
+Photo-name, token-shape and user-path greps on every commit of the release:
+0 / 0 / 0.
+
+The calibration lane earned its place in this release: on the close-out
+commit before the fix (`a91cf25`) the four-region calibration test read two
+semantic regions where the corpus reads three — the boundary ruler had been
+handed the robust population instead of the mask's raster, above — while the
+default lane, which runs every test but the corpus ones, was green. With the
+fix (`436ab2c`) the lane reads three regions again and the run's look error is
+unchanged (0.050973 against 0.050972). CI on that fix then caught the one
+ulp of colour the boundary shrink manufactured for a withheld channel — the
+inverted-raster orchestration test's exact pin, red on ubuntu, macOS and the
+debug-asserts job alike and reproduced here — closed by summing the
+differential before the unity offset and pinned at the function.
+
+Each correction that touches a pinned number was reverted alone in a copy of
+the tree and the calibration tests re-run: the tone ladder moves the sky's
+luma-only band (the numbers above), the after-reading correction is inert at
+one unit in the last place, and the abstention the audit proposed for a flat
+side turned the tile stage's own tests red and was withdrawn (kept, with the
+reason, above).
+
+Final gate, reference pair, before the tag: the pre-bump release CLI re-fitted
+the reference pair at 0.65 / 0.85 / 1.0 (`match --zoned`) and rendered each at
+the target's size. At 0.85: sky ΔE 4.6 and whole-frame mean |diff| 0.0260 against the target
+(v1.6.0 read 4.6 / 0.0260); at 0.65: 7.0 / 0.0295 (7.0 / 0.0296); at 1.0:
+4.7 / 0.0263 (4.7 / 0.0263). This release moves the reverse fit (the joint
+veto, the rescore base, the tone ladder, the zone populations), so the numbers
+are read against v1.6.0's and the three side-by-sides went to the user, whose
+eyes are the gate.
+
+Not measured: no paid image call was made for this release (the target is the
+one every release since v1.3.2 has been measured against); the GUI executable
+was not launched; the Upright correction and the vignette's half pixel were
+measured on synthetic charts and by the engine's own tests, not on a
+photograph against Lightroom's render; the star standard's two red readings
+recorded for v1.6.0 stay as recorded there — nothing in this release touches
+the denoiser. The ship facts (the release run, the downloaded assets, the
+site, the local upgrade) are in the ROADMAP ledger entry.
