@@ -231,13 +231,13 @@ error — measures whether the target still shows the same scene.
   **Atmosphere** mode: EV ±1, WB gain [0.80, 1.25], saturation ±30, curve
   slope [0.5, 1.5], confidence capped at 0.50, no per-channel curves, and a
   *structure-blind* ruler that stops asking replaced content to survive.
-- Strength governs that budget: the shipped 0.65 path's global controls, WB
+- Strength governs that budget: at the shipped 0.65 the global controls, WB
   included, are byte-identical to the calibrated path's (the colour field is
-  the one control that attaches at 0.65 and not one click below); above it an
-  out-of-budget WB is shrunk along
-  its fitted log-K/linear-tint manifold and must clear the foreign-hue veto
-  and a rotation budget opening from 0.05 at default through 0.593 at 0.85 to
-  1.0 at full strength, or it is withheld.
+  the one control that attaches at 0.65 and not one click below); above it
+  an out-of-budget WB is shrunk along its fitted log-K/linear-tint manifold
+  and must clear the foreign-hue veto and a rotation budget opening from
+  0.05 at default through 0.593 at 0.85 to 1.0 at full strength, or it is
+  withheld.
 
 Details: [docs/TECH_STACK.md#reverse-fit-freedom-budget](docs/TECH_STACK.md#reverse-fit-freedom-budget).
 
@@ -273,29 +273,25 @@ Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-a
   gain.
 - The **sky and land zones ride out to Lightroom** as its own Select Sky mask
   (`crs:What="Mask/Image"`, `crs:MaskSubType="2"`, the land zone the same
-  component inverted), so the two corrections that separate a repainted sky
-  from its ground reach the sidecar instead of being skipped as raster masks.
-  Lightroom rebuilds its own sky alpha from that intent; the raster AutoShade
-  renders from is its own, which the save line says in as many words (「AI
-  masks ×N re-derived locally — not Adobe's raster」). The opt-in four-class
-  regions, the spatial tiles and the free-form field masks are still raster
-  masks classic XMP cannot hold, and keep the named bitmap loss.
+  component inverted); Lightroom rebuilds its own sky alpha from that intent,
+  and the save line says the raster rendered here is AutoShade's own, not
+  Adobe's. The opt-in four-class regions, the spatial tiles and the free-form
+  field masks remain raster masks classic XMP cannot hold, with the named
+  bitmap loss.
 - A semantic zone's boundary is held to the same per-crossing budget a tile's
-  is: no seam larger than what the scene itself carries there — a feathered
-  zone's band variation, a hard-edged tile's scene discontinuity (a smooth sky
-  gradient masks nothing) — floored at one code value and capped at the
-  calibrated 0.012 — and, since R37, charged only on
-  the part of a step the paired target does not itself carry there, read as a
-  cell average so a repainted texture cannot vote, so a horizon the target has
-  is reproduced rather than shrunk away. Both rulers read luma **and** each
-  colour channel, so a gain set that reproduces a target's mean colour cannot
-  hide a coloured halo behind an unmoved luma.
+  is: no seam larger than what the scene itself carries there (a feathered
+  zone's band variation, a hard-edged tile's scene discontinuity; a smooth sky
+  gradient masks nothing), floored at one code value, capped at the
+  calibrated 0.012, and charged only on the part of a step the paired target
+  does not itself carry there, read as a cell average so a repainted texture
+  cannot vote. Both rulers read luma **and** each colour channel, so a gain
+  set that matches a target's mean colour cannot hide a coloured halo behind
+  an unmoved luma.
 - Because a budget can only take strength away, the source raster's feather is
-  **widened first** where the guide is too smooth to hide anything: the same
-  correction height is delivered over a ramp up to 6 % of the frame height, so
-  its per-pixel step falls by the same factor at full strength, while alpha
-  under a real edge is left byte-identical and silhouettes stay crisp. Both the
-  widening and its abstention are disclosed.
+  **widened first** where the guide is too smooth to hide anything — the same
+  correction over a ramp up to 6 % of the frame height, alpha under a real
+  edge left byte-identical so silhouettes stay crisp — and both the widening
+  and its abstention are disclosed.
 
 Details: [docs/TECH_STACK.md#zone-scoped-evidence-view](docs/TECH_STACK.md#zone-scoped-evidence-view).
 
@@ -307,9 +303,9 @@ supported nodes first and stops at a 4×4 grid.
 - A tile is kept only when both frames contribute ≥ 3 % evidence, original
   structure stays comparable, its confidence interval excludes zero, its
   boundary stays within the calibrated rim ceiling (0.012, charged per
-  crossing against the scene's own step since v1.2.2 — in luma and per colour
-  channel, and since R37 only for what the target does not itself carry
-  there), and the composed frame does not regress.
+  crossing against the scene's own step, in luma and per colour channel, and
+  only for what the target does not itself carry there), and the composed
+  frame does not regress.
 - Hard tiles are editable intersections of four gradients and export to
   Lightroom. A guided raster keeps its named bitmap loss only when the native
   trial fails the shared gates or fits the photo worse than the raster on the
@@ -359,22 +355,22 @@ Details: [docs/TECH_STACK.md#layered-spatial-reverse-fit-and-mask-refinement](do
   result's structural divergence with the same `D` the reverse-fit uses, warns
   at `D ≥ 0.35`, and can spend one bounded retry keeping the closer image.
 - The GUI's **Adjust generated image** edits a ✨ card or its ✎ edit with its
-  own prompt: the whole picture without strokes, or just the shared painted
-  region (blank = remove). One paid generation lands as a new ✨ card, leaving
-  its source intact; whole-image edits report divergence against the sent input.
+  own prompt — the whole picture without strokes, or just the shared painted
+  region (blank = remove); one paid generation lands as a new ✨ card, its
+  source intact, and whole-image edits report divergence against the sent
+  input.
 - `heal` only ever copies, shifts and averages pixels that already exist, and
   anything that changed pixels lives on its own card as a pixel source — never
   disguised as a Lightroom adjustment.
 - Spot removal imported from a Lightroom sidecar is re-solved here from the
-  photograph's own pixels, and the panel says so: it names how many areas
-  Lightroom removed, how many of those Adobe synthesised (content-aware or
-  generative, whose pixels the sidecar does not carry), and offers to re-run a
-  generative model over exactly those.
+  photograph's own pixels, and the panel names how many areas Lightroom
+  removed, how many of those Adobe synthesised (content-aware or generative,
+  pixels the sidecar does not carry), and offers to re-run a generative
+  model over exactly those.
 - A photo edited in Lightroom's HDR mode renders as its **SDR rendition** —
   Lightroom's own seven-control answer to publishing an HDR edit as an SDR
-  file — rather than as if the mode had never been set. The seven render only
-  while the mode is on, as in Lightroom; they are stored and round-tripped
-  either way.
+  file — and the seven render only while the mode is on, as in Lightroom;
+  they are stored and round-tripped either way.
 
 Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
 
@@ -440,16 +436,15 @@ the brush law `(1 − ρ^m)^n` with the measured flow constant `κ = 0.1284`
 Sony's own 16 native samples (radial 41/41 vectors within 1 px; linear
 openly *not* pixel-closed, RMS 9.748/7.025/6.336 px) were each fitted to
 Lightroom output. The XMP layer is hand-rolled on purpose — no XML crate —
-so a catalogue sidecar is merged into byte for byte — down to the SVD fold
+so a catalogue sidecar is merged into byte for byte, down to the SVD fold
 between Lightroom's pixel-space radial tilt and the engine's normalised
-rotation, and down to its `tiff:Orientation`, rewritten only when the
-photographer's own turn has moved away from it — and Lightroom's Brotli-packed
+rotation and to its `tiff:Orientation`, rewritten only when the
+photographer's own turn has moved away from it; Lightroom's Brotli-packed
 brush dab streams are imported and verified (`MD5 → .acr → Brotli`). Two of
-those fits were re-measured in
-v1.2.4 against Lightroom's own coverage rather than exported luma, on a
-46-export pack: the LINEAR falloff moved onto the abscissa `t^1.124`
-(α rms 0.0293 → 0.0074), and the radial boundary was shown to be a pure
-0.99876 scale of the stored ellipse — no dilation law.
+those fits were re-measured in v1.2.4 against Lightroom's own coverage on a
+46-export pack: the linear falloff moved onto the abscissa `t^1.124`
+(α rms 0.0293 → 0.0074), and the radial boundary is a pure 0.99876 scale of
+the stored ellipse — no dilation law.
 
 ### 11. The RAW denoiser is trained here and judged by pass marks written before the run
 
@@ -477,45 +472,44 @@ look unchanged, the 1:1 window's grain 3.1 → 0.6 codes.
   shipped as `autoshade-raw-denoise-v2.pth`. The network expects noise of one
   known strength everywhere, so the noise is **measured where it stands**: per
   tile, on the finest diagonal wavelet band, with the samples chosen by the
-  three other bands so the choice cannot bias the number; a smooth map of the
-  measured noise is divided out before the network and multiplied back after.
-  On the star frame the per-tile residual's maximum fell 0.508 → 0.070 and the
-  tile-to-tile spread of the fine-luminance ratio — how much fine grain the
-  finished develop keeps — 0.185 → 0.014 (Lightroom's own: 0.011).
+  three other bands so the choice cannot bias the number, and a smooth map of
+  it is divided out before the network and multiplied back after. On the
+  star frame the per-tile residual's maximum fell 0.508 → 0.070 and the
+  tile-to-tile spread of the fine-luminance ratio 0.185 → 0.014 (Lightroom's
+  own: 0.011).
 - **Only luminance grain comes back.** At any positive strength the full clean
   output is requested; the original and the clean frame go through the same
   demosaic and calibration, and in linear light `1 − strength` of the
-  luminance difference returns along the grey axis. Every strength keeps the
-  clean chroma, so colour noise cannot come back by construction. The default
-  is 0.71.
+  luminance difference returns along the grey axis, so colour noise cannot
+  come back by construction. The default is 0.71.
 - **Hot pixels are mapped in every develop** of a Bayer RAW, before the grain
   source and the cleaner read the mosaic: an isolated site stronger than 20
   sigma of its own neighbourhood (half the MAD of the 24 same-colour samples
   within 4 px, or the tile's sigma if larger), where a clipped sample never
   measures noise and eight neighbours must vouch. On ten 61 MP frames: 86 /
-  20 / 77 sites inside the picture on three night frames, none on the fourth,
-  0 / 0 / 0 / 6 / 0 / 4 on ordinary frames; a frame with no mappable site
-  renders byte-identically.
+  20 / 77 sites on three night frames, none on the fourth, 0 / 0 / 0 / 6 / 0
+  / 4 on ordinary frames; a frame with no mappable site renders
+  byte-identically.
 - **Faint stars survive.** The first training run had never seen a star and
   kept 10 % of the light of a star four times the noise level (4σ), 42 % at
   6σ, 73 % at 10σ. The second run continued from it with stars added to the
   clean side of half of every batch and a loss that seeks the mean in the
   units light adds in; the weights that ship keep 54 % at 4σ, 84 % at 6σ,
-  92 % at 10σ, and were chosen among that run's snapshots by pass marks
-  written down before the run (`scripts/accept_v2.py`).
+  92 % at 10σ, chosen among that run's snapshots by pass marks written down
+  before the run (`scripts/accept_v2.py`).
 - **The star-field test is a release gate.** Whenever the denoiser changes,
   the author's ISO 2500 star field is denoised by AutoShade and by Lightroom's
   Denoise 50 and the two results are compared reading by reading
-  (`scripts/denoise_star_standard.py`): eight readings on the denoiser itself
-  decide, two on the finished develop are reported. On the v1.6.0 build: 6 of
-  8 — 98.70 % of 17,817 real faint stars kept against Lightroom's 98.80 %;
-  bright-star peaks 0.939 of the input against 0.953, and the four colour
-  planes' flux spread 0.0385 against a 0.02 limit, stay behind; the finished
+  (`scripts/denoise_star_standard.py`): eight readings on the denoiser decide,
+  two on the finished develop are reported. On the v1.6.0 build, 6 of 8:
+  98.70 % of 17,817 real faint stars kept against Lightroom's 98.80 %;
+  bright-star peaks 0.939 of the input against 0.953 and the four colour
+  planes' flux spread 0.0385 against a 0.02 limit stay behind; the finished
   develop reads 0.2922 against Lightroom's 0.2701 (limit ±0.03) and 0.0139
   (limit 0.0278). Two later training runs — one on stars drawn as a core on a
   streak, one as five runs on a rented cloud GPU with comet-shaped stars and
-  extra weight on star cores — each had their pass marks written first,
-  failed them, and were refused.
+  extra weight on star cores — had their pass marks written first, failed
+  them, and were refused.
 
 Details: [docs/TECH_STACK.md#raw-denoise](docs/TECH_STACK.md#raw-denoise) and
 the release notes, [docs/RELEASE_NOTES_v1.6.1.md](docs/RELEASE_NOTES_v1.6.1.md).
@@ -529,23 +523,23 @@ were each measured:
 
 - **Paired like with like.** The pairing is made at the camera's own framing,
   and whether the preview carries the lens profile's corner lift is measured
-  on the pair (outer ring against inner ring) rather than assumed. On ten
-  ILCE-7RM4A frames with profile corner gains of 1.33–1.98 no embedded preview
-  carried it, and the lift used to become tone: on night frames, a run of
-  curve slopes from 0.33 to 2.25.
+  on the pair (outer ring against inner ring) rather than assumed: on ten
+  ILCE-7RM4A frames with profile corner gains of 1.33–1.98 no embedded
+  preview carried it, and the lift used to become tone — on night frames, a
+  run of curve slopes from 0.33 to 2.25.
 - **On block means, not pixels.** The two pictures are matched on 64-column
-  block means: both sorted, walked in groups spanning at least 0.06 of neutral
-  luminance with at least 64 blocks each, one knot per group at its median
-  block, the ends pinned; a curve within 0.02 of the identity is no curve.
-  The preview's in-camera sharpening, noise reduction and JPEG texture no
-  longer read as tone: on the star frame the estimate is four knots instead of
-  thirteen, and the develop sits 0.75 levels rms from the camera's rendition
-  (median +0.19) against 4.24 (+2.56) before.
+  block means, both sorted and walked in groups of at least 64 blocks
+  spanning at least 0.06 of neutral luminance, one knot per group at its
+  median block, the ends pinned; a curve within 0.02 of the identity is no
+  curve. The preview's in-camera sharpening, noise reduction and JPEG texture
+  no longer read as tone: on the star frame the estimate is four knots
+  instead of thirteen, and the develop sits 0.75 levels rms from the camera's
+  rendition (median +0.19) against 4.24 (+2.56) before.
 - **Every photo gets it.** A recipe's version stamp says which estimator made
   its curve (v1.6.0's is the third); one saved by an earlier version is
-  re-estimated the first time it is opened — by the app, batch export, the web
-  UI or `apply`, each of which says so. A recipe saved with no base look
-  keeps none.
+  re-estimated the first time it is opened — by the app, batch export, the
+  web UI or `apply`, each of which says so — and a recipe saved with no base
+  look keeps none.
 
 The tone stage scales colour by the luminance ratio, so every wiggle of slope
 acted on grain; on the star-field test's two finished-develop readings (§11)
@@ -579,11 +573,10 @@ this moved 0.3075 → 0.2922 (Lightroom 0.2701, limit ±0.03) and 0.0387 (limit
 
 <sub>Twenty-one components, twenty connections and three boundaries, generated from
 [autoshade.architecture.json](docs/architecture/autoshade.architecture.json) by
-[scripts/architecture_diagram.py](scripts/architecture_diagram.py): no position
-in the picture is chosen by hand, and the shared checker in
-[scripts/diagram_check.py](scripts/diagram_check.py) refuses to write the file
-when any two labels, borders or arrows touch. Zoom and pan it at
-[autoshade.dev/architecture.html](https://autoshade.dev/architecture.html).</sub>
+[scripts/architecture_diagram.py](scripts/architecture_diagram.py) — no position
+is chosen by hand, and [scripts/diagram_check.py](scripts/diagram_check.py)
+refuses to write the file when any two labels, borders or arrows touch. Zoom
+and pan it at [autoshade.dev/architecture.html](https://autoshade.dev/architecture.html).</sub>
 
 - [`src/decode.rs`](src/decode.rs) decodes the RAW into a preview, EXIF and a
   histogram; the advisor in [`src/advisor/`](src/advisor/) turns those into an
@@ -925,13 +918,12 @@ numbers](#measured-numbers) are not repeated.
   `degrees/180`, the other measured local family is `/100`, global Sharpness
   is 1:1, and polarity comes from `MaskInverted` rather than `Flipped`.
 - **One inversion, composed in one place.** A recipe spells a mask's polarity
-  twice — the correction's own Invert flag and the geometry's own bit (a
-  radial's `Flip`, a brush group's or an AI mask's `MaskInverted`) — and
-  `LocalAdjustment::net_inverted` is the only place the two meet. The render,
+  twice — the correction's own Invert flag and the geometry's own bit — and
+  `LocalAdjustment::net_inverted` is the only place the two meet: the render,
   the sidecar writer, the mask-habit classifier and the GUI overlay all read
-  that one helper, so an inverted brush or AI selection leaves for Lightroom
-  as the half it really covers, and a Lightroom mask that arrives inverted
-  renders inverted.
+  it, so an inverted brush or AI selection leaves for Lightroom as the half
+  it really covers, and a Lightroom mask that arrives inverted renders
+  inverted.
 
 ### AI advisor and reverse fit
 
@@ -971,9 +963,8 @@ numbers](#measured-numbers) are not repeated.
   are above.
 - macOS has shipped binaries and an app since v1.2.0 and nobody has reported
   using them interactively: CI is the whole of the evidence. Apple-silicon
-  Metal/MPS is measured on every release run by `scripts/mps_probe.py`
-  (device, forward time, peak memory, whether `deform_conv2d` falls back to
-  the CPU — the numbers are in the release run's `macos-battery` job log); Linux ships a
+  Metal/MPS is measured on every release run by `scripts/mps_probe.py` (the
+  numbers are in the release run's `macos-battery` job log); Linux ships a
   command-line archive and has no desktop app.
 - Honesty markers: the approximate X-Trans path, locally re-derived rather
   than Adobe-identical AI masks, measured-but-not-bit-exact Lightroom parity,
@@ -1023,14 +1014,13 @@ project's licence with its training sources credited below (and, since v1.6.0,
 has a copy of ours on Hugging Face like every other pinned download).
 
 Every pinned model also has a **byte-exact copy of ours** on Hugging Face
-(`Azng0/autoshade-mirror-*`), which the sidecars try before the upstream host.
-A pinned revision is what makes a download verifiable and also what makes a
-vanished upstream unrecoverable — nothing else is that revision — so the copy
-exists to keep a cold cache installable years from now. Hosting it makes this
-project a redistributor: each mirror carries the upstream licence declaration
-unchanged, and whatever that licence permits or restricts applies to the copy.
-The checksum decides in either case, so a mirror is a second host and never a
-second source of truth. The table is [`python/_mirror.py`](python/_mirror.py).
+(`Azng0/autoshade-mirror-*`), which the sidecars try before the upstream host:
+a pinned revision is what makes a download verifiable and also what makes a
+vanished upstream unrecoverable, so the copy keeps a cold cache installable
+years from now. Hosting it makes this project a redistributor — each mirror
+carries the upstream licence declaration unchanged — and the checksum decides
+in either case, so a mirror is a second host and never a second source of
+truth. The table is [`python/_mirror.py`](python/_mirror.py).
 
 | Model | Purpose | License |
 |---|---|---|
