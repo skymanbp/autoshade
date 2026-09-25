@@ -9,7 +9,9 @@ stone-viaduct panel's right column was re-rendered on 2026-09-03 on the v1.2.4
 build at Reverse-fit strength 100 %, its other two columns being the v1.2.2
 composition's frames re-encoded once; the desert-canyon panel was
 re-rendered on 2026-09-25 on the v1.6.1 build from the release gate's own
-fit, keeping the 2026-09-12 panel's middle column (the target, unchanged);
+fit, keeping the 2026-09-12 panel's middle column (the target, unchanged),
+and given its fourth column the same day (the same recipe on the
+AI-denoised RAW);
 every frame not marked
 *generated* is rendered by AutoShade's engine from a recipe, and every
 "straight conversion" is AutoShade's own neutral develop of the RAW, not the
@@ -99,13 +101,14 @@ delivered sky spread of 9.6° against the target's 1.6° and v1.2.2's
 
 ### Desert canyon at dusk
 
-<img src="images/showcase-canyon-reverse-fit.jpg" alt="Desert canyon at dusk: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" />
+<img src="images/showcase-canyon-reverse-fit.jpg" alt="Desert canyon at dusk: straight conversion, generated target, the recovered recipe rendered on the RAW, and the same recipe on the AI-denoised RAW, with a 1:1 detail row" />
 
 <sub><b>Desert canyon at dusk.</b> The reference pair every release has
 been gated on since v1.3.0, re-rendered on 2026-09-25 on the v1.6.1 build:
-the left and right columns are the installed 1.6.1 command line's own
-renders, the recipe being the one the v1.6.1 release gate fitted at
-Reverse-fit strength 85 % (the product default is 65 %). The target is a
+the left column and the two right-hand columns are the installed 1.6.1
+command line's own renders, the recipe being the one the v1.6.1 release
+gate fitted at Reverse-fit strength 85 % (the product default is 65 %).
+The target is a
 3520 × 2336 <code>reimagine</code> purchase made from the desktop app on
 2026-09-10; the app records such a purchase as its origin file only, not
 the Direction text or the model, so unlike the two panels above this
@@ -147,7 +150,27 @@ the same fit settings, and the 2026-09-12 render of this pair, measured on
 a 2048 px acceptance render, read sky ΔE 18.2 → 4.9 and 0.0276. The far
 mesas keep a warm haze on the land side that the render reads cooler, a
 haze-colour gap along a real edge, inside the land's ΔE, disclosed as the
-known gap rather than measured away. The v1.6.1 gate's three-strength
+known gap rather than measured away.
+The fourth column is the same recipe on the same RAW after AutoShade's own
+RAW denoiser (Part C) cleaned the sensor mosaic first: the command line's
+<code>denoise</code> at its 71 % default wrote the denoised negative as a
+16-bit 9504 × 6336 master (42 s on an RTX 4060 Ti), and <code>apply</code>
+rendered the gate's recipe on that master with the lens profile and the base
+look composed as on the RAW — the route the command line itself names for a
+denoised deliverable. Against the target on the same 1000 × 663 convention:
+sky ΔE <b>3.5</b> (dL −0.1, L\*std 1.01 of the target's), land ΔE 5.8,
+whole-frame mean |diff| <b>0.0238</b>; against the third column the two
+renders are 0.0145 apart in mean |diff| with under one code of mean shift
+per channel, so the look is the third column's and only the grain changed:
+in the 1:1 window the spread of a 2-px high-pass of the luma falls from
+3.12 to 0.61 codes, in a flat sky patch from 2.10 to 0.48. The literal
+alternative — denoise first, then solve a new reverse-fit on the master —
+was measured and is not the column: a baked master composes no calibration
+into the solve, its sky reads a structural divergence of 0.716 against the
+RAW's 0.649 (the zone line is 0.65, so that solve took the bounded
+atmosphere path), and its render, without the lens profile, does not share
+the other columns' frame; on the same convention it lands sky ΔE 2.1 and
+mean |diff| 0.0177. The v1.6.1 gate's three-strength
 numbers are in the release ledger, [ROADMAP.md](ROADMAP.md); the first
 three-strength table is in
 [RELEASE_NOTES_v1.3.0.md](RELEASE_NOTES_v1.3.0.md).</sub>
