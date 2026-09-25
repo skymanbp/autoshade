@@ -202,6 +202,12 @@
     9 个已装侧车与仓库哈希全等。未启动 GUI 程序。
   - 回填之后 `check_docs.py --gates`（带 XMP 普查根）**32 PASS / 0 FAIL / 0 SKIP**。issue #6–#15 全部关闭（各带一句指向发布说明对应节的说明），仓库 open issue 0 条；
     云端会话的两条分支（`claude/busy-lamport-okz8fg`、`claude/loving-wright-98lzxf`，均已并入 main）已删，远端只剩 `main`。
+  - tag 之后 main 上的文档提交：`4b355d1`（用户令 2026-09-25「AI 整图生成＋反推是最大卖点」，README 与官网把它和 AI 分析对调——README 导语、「What AutoShade is」与「What it does」首条改为它领头，
+    「What is new here」重编号：旧 §2–§8、§10 → §1–§8，风格检索旧 §1 → §9，Lightroom 对标旧 §9 → §10，§11/§12 不动，§1 加一段白话开场，表内 §2→§1、§7→§6 引用与支柱图 alt 编号随之换；
+    官网首屏与 og:image 换成高架桥三联、四联岛图搬进 Part B，概览导语与第一张卡片写它、「Three front ends」并入「One develop engine」保持 12 张卡片，Showcase Part A ↔ B、支柱 I ↔ II，
+    `scripts/pillar_diagrams.py` 的「Pillar 1/2」对调后重烤四份 SVG 与内联图（0 overlaps）；SHOWCASE Part A ↔ B；官网技术段电池行从 v1.6.0 的 1683/25/215 改到本版 1763/25/223（发版时漏改）。
+    门：`check_docs.py` 27 PASS / 0 FAIL / 5 SKIP（无普查根、无 gates 记录），黑话与照片名 grep 0，两页标签配平，内部锚点全解析；官网重部署（首页 1 文件新传、23 沿用、`_headers`，区级缓存已清），
+    线上 24 文件逐字节 + `/`（三个 HTML 各剥掉 367 B 的 `type="module"` beacon）、`_headers` 四条按效果。峡谷三联图仍是 v1.3.1 构建的渲染（含本版修掉的灰蓝块），未重渲。）
 
 ### v1.6.0 — RAW 降噪拿到按位置实测的真实噪声、只还亮度颗粒、保住暗星；相机基础外观按块均值「同类相比」估计且每张都重估；锐化 RAW 默认 40；坐标 2 代；反推 R39–R41（2026-09-23）
 
