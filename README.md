@@ -63,51 +63,39 @@ on a real star field whenever it changes.
 
 - **Whole-image AI generation, then reverse-fit** — `reimagine` asks an
   image model (gpt-image-2) for the picture you describe, generated from
-  your own frame; `match` estimates an engine recipe from that picture, or
-  from any finished look of the same frame, measures how far its *content*
-  diverged before trusting it, then fits global, semantic, luminance-range
-  and colour-range corrections behind evidence gates; from the default
-  Strength up it may also carry a smooth
-  12×8×8 local colour field, the one control Lightroom cannot render (the
-  sidecar still carries it).
-  A structured sky/land residual can earn two or three overlapping native
-  bands that replace its single correction; hard spatial tiles use four
-  intersecting gradients. Each candidate keeps the existing evidence and
-  boundary gates, and the field solves the remainder after accepted bands.
-  Where a repaint broke the pixel-to-pixel correspondence inside one region —
-  and only there, since a region whose pixels still correspond may not overrule
-  them — that region's own 12×8 cell means decide whether the move ships: closer
-  to each cell's target, and in the direction that target asks for. A
-  same-layout recolour is recoverable, a region whose layout moved is still
-  refused, and the refusal is a measurement printed with the shares it was
-  decided on.
+  your own frame; `match` recovers an editable recipe from that picture, or
+  from any finished look of the same frame: it measures how far the
+  *content* diverged before trusting it, then fits global, semantic,
+  luminance-range and colour-range corrections behind evidence gates, and
+  from the default Strength up a smooth 12×8×8 local colour field (the one
+  control Lightroom cannot render; the sidecar still carries it). Where a
+  repaint broke the pixel correspondence inside one region, that region's
+  own cell means decide whether a move ships, and a refusal is printed with
+  the shares it was decided on. [§1](#1-whole-image-ai-generation-then-reverse-fit-an-editable-recipe-from-any-finished-look) has the three pairs.
 - **AI develop** — `analyze`, `auto` and **Analyze** propose an editable
   recipe from preview, EXIF and histogram, check it data-only, render it, and
   may buy one bounded revision.
 - **A deterministic develop engine** — tone, white balance, curves, HSL,
   colour grading, texture, clarity, dehaze, NR, sharpening, vignette, crop and
   lens correction, under linear, radial, brush, bitmap, luminance-range and
-  colour-range masks composed by Add/Subtract/Intersect. Linear, radial, brush
-  and AI components export that composition in Lightroom's own grammar;
-  Bitmap components retain a named loss.
+  colour-range masks composed by Add/Subtract/Intersect; linear, radial,
+  brush and AI components export that composition in Lightroom's own
+  grammar, bitmap components retain a named loss.
 - **A RAW denoiser trained and judged here** — the sensor mosaic is cleaned
-  before demosaic by a network whose weights were trained on this project's
-  own data, told the noise measured tile by tile on the frame itself, and
-  held, release after release, to a same-frame comparison with Lightroom's
-  Denoise 50 on a real star field. It returns only luminance grain (71 %
-  default), keeps faint stars (98.70 % of 17,817 real faint stars against
-  Lightroom's 98.80 %) and maps hot pixels in every develop. Four training
-  runs were made: the first two shipped, the last two failed the pass marks
-  written down before they started and were refused. [§11](#11-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run)
-  has the picture and the numbers.
+  before demosaic by weights trained on this project's own data, told the
+  noise measured tile by tile on the frame itself, and held, release after
+  release, to a same-frame comparison with Lightroom's Denoise 50 on a real
+  star field; only luminance grain comes back (71 % default), faint stars
+  stay, and hot pixels are mapped in every develop. [§11](#11-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) has the
+  picture, the numbers and the two refused training runs.
 - **Local AI masks** — subject (BiRefNet, named U²-Net fallback), sky
   (OneFormer ADE20K) and point-prompted object (SAM 2.1), as local Python
   sidecars with pinned weights; no API key.
 - **Lightroom/ACR interoperability** — sidecar XMP is the merge base, written
-  back with unmodeled fields preserved byte for byte; beside-RAW export is a
-  separate confirmed action. Since v1.3.1 the whole develop also rides inside
-  the sidecar under AutoShade's own namespace — measured to survive a
-  Lightroom 9.4 rewrite byte for byte — so a sidecar that went through
+  back with unmodeled fields preserved byte for byte, and beside-RAW export is
+  a separate confirmed action; since v1.3.1 the whole develop also rides
+  inside the sidecar under AutoShade's own namespace, measured to survive a
+  Lightroom 9.4 rewrite byte for byte, so a sidecar that went through
   Lightroom reopens exactly, with Lightroom's own edits on top.
 - **Style read** — your past Lightroom edits, and a separate library of
   finished looks, retrieved as soft references through opt-in local SigLIP 2
@@ -115,18 +103,13 @@ on a real star field whenever it changes.
 - **Generative and pixel tools, opt-in and labelled** — reimagine
   (gpt-image-2), retouch, heal and AI denoise are the only paths that can
   invent or alter scene content, and are marked so; a denoise lands as its
-  own card and never rewrites the original. RAW denoise is the trained
-  denoiser above: higher is cleaner, 100 % is the complete network output,
-  0 % the input; the first launch after the RAW default changed reset old
-  RAW dials to it once, and baked SCUNet choices are kept separately.
-- **Stacking and merging** — several frames of one scene into one, over a
+  own card and never rewrites the original.
+- **Stacking and merging** — several frames of one scene into one over a
   single alignment: HDR merge (exposures measured from the pixels, samples
   weighted by how trustworthy they are, the recovered stops handed to the SDR
   rendition stage), exposure fusion, focus stack and noise stack. The
-  alignment is a global affine — shift, rotation, scale and a zoom's breathing
-  — refined per block for a subject that moved on its own, and it works on a
-  bracket because it matches in log luminance, where a change of exposure is a
-  constant offset that a gradient cannot see.
+  alignment is a global affine refined per block, matched in log luminance,
+  where a change of exposure is a constant offset a gradient cannot see.
 - **Versions, variants and three front ends** — Original, AI-generated
   (immutable: an edit on one continues on an Edited-AI card beside it),
   Reverse-fit, Denoised and Stacked cards with numbered snapshots in a
@@ -179,35 +162,27 @@ fine texture leaves exactly the regional luma a repaint moved.
 <sub><b>Stone viaduct.</b> Top row: the straight conversion, a 3520×2352
 <code>gpt-image-2</code> target asked for <i>a clearer afternoon, a little more
 contrast, a slightly deeper blue sky, everything else unchanged</i>
-(<b>D = 0.180</b>, under the 0.35 threshold, so the full solve ran),
-and the recovered recipe rendered on the 9504×6336 RAW, fitted at Reverse-fit
-strength 100 % (the product default is 65 %): look error
-<b>0.161 → 0.023</b> at confidence 0.63 through a global solve whose cast
-curves were projected to t = 0.485, a four-band colour mixer at the 45
-ceiling, two semantic zones, two boundary-gated tiles and one field mask.
-Bottom row: the same window of the frame at each source's native
-resolution — the recipe carries the look, the RAW carries the detail, and
-the generated frame carries neither at full size. At the default 65 % the
-same pair fits to 0.047 at confidence 0.25 with the mixer capped at 18, and
-v1.2.2's fit of it is where the seam fix was measured, on the top-left sky
-tile: cross-boundary step 0.0278 → 0.0042, the delivered seam +3.15 → +0.92
-codes on the mask-free ruler.</sub>
+(<b>D = 0.180</b>, under the 0.35 threshold, so the full solve ran), and the
+recovered recipe rendered on the 9504×6336 RAW at Reverse-fit strength 100 %
+(the product default is 65 %): look error <b>0.161 → 0.023</b> at confidence
+0.63. Bottom row: the same window of the frame at each source's native
+resolution — the recipe carries the look, the RAW carries the detail, and the
+generated frame carries neither at full size. Every control the fit set, the
+default-strength fit and the seam measurement are in
+[docs/SHOWCASE.md](docs/SHOWCASE.md).</sub>
 
 <img src="docs/images/showcase-cornwall-reverse-fit.jpg" alt="Cornwall lighthouse islet: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" />
 
 <sub><b>Cornwall lighthouse islet.</b> The same three stages on a frame shot
-with the body set to a 4:3 aspect, which is how it found the two frame defects
-v1.2.2 fixes: sized from the sensor frame the same prompt bought a target at
-<b>D = 0.136</b> (0.304 when the request was sized from the cropped
-preview), and the fit ran on a neutral develop of the full frame with the
-calibration composed into the solve — look error <b>0.137 → 0.027</b> at
-confidence 0.66, two semantic zones, four boundary-gated tiles and two field masks. This is the frame
-that found v1.2.3's cast defect: the v1.2.2 fit admitted three channel curves that
-passed every hue veto and still fanned the sky 33.1° across luminance
-(violet at the top, green-cyan in the bright cloud). A fourth veto now reads that fan,
-and the curves are shrunk toward one shared shape (t = 0.363) until it clears —
-the delivered sky spread is 9.6° against the target's 1.6°. Full measurements
-and prompts in [docs/SHOWCASE.md](docs/SHOWCASE.md).</sub>
+with the body set to a 4:3 aspect: sized from the sensor frame the same
+prompt bought a target at <b>D = 0.136</b>, and the fit ran on a neutral
+develop of the full frame with the calibration composed into the solve —
+look error <b>0.137 → 0.027</b> at confidence 0.66. This is the frame that
+found v1.2.3's cast defect: three channel curves that passed every hue veto
+still fanned the sky 33.1° across luminance, so a fourth veto now reads that
+fan and shrinks the curves toward one shared shape until it clears — the
+delivered sky spread is 9.6°. Full measurements and prompts in
+[docs/SHOWCASE.md](docs/SHOWCASE.md).</sub>
 
 <img src="docs/images/showcase-canyon-reverse-fit.jpg" alt="Desert canyon at dusk: straight conversion, generated target, the recovered recipe rendered on the RAW, and the same recipe on the AI-denoised RAW, with a 1:1 detail row" />
 
@@ -420,15 +395,11 @@ lakeside frame and three AI develops of the same RAW at the same
 index — 169 Lightroom RAW+XMP edits and a 94-photo finished-look library —
 where only the <b>direction text</b> changes. Since v1.2.3 a written
 direction leads and those edits become background: mean saturation
-28 % / 11 % / 30 % for moody / golden / vivid against the
-conversion's 17 %, mean brightness 43 % / 58 % / 70 % against
-47 %. The vivid develop's recipe crops — its cell is 9504×5702, 7 % off
-the top and 3 % off the bottom — while moody, golden and the conversion are
-the full 9504×6336 frame. On v1.2.2 the same three directions on the same index came back
-at 23 % / 11 % / 17 % saturation and 54 % / 58 % / 55 % brightness — inside those
-edits' cool, hazy register, four points of brightness apart. Judge trails,
-prompts and the finished-look-only run in [docs/SHOWCASE.md](docs/SHOWCASE.md);
-model-judge scores are automated review, not human aesthetic approval.</sub>
+28 % / 11 % / 30 % for moody / golden / vivid against the conversion's
+17 %, mean brightness 43 % / 58 % / 70 % against 47 %. Judge trails,
+prompts, the v1.2.2 comparison and the finished-look-only run in
+[docs/SHOWCASE.md](docs/SHOWCASE.md); model-judge scores are automated
+review, not human aesthetic approval.</sub>
 
 `autoshade style-index <dir>` turns every Lightroom RAW+XMP pair you finished
 into an exemplar ([`src/style.rs`](src/style.rs)); a photo retrieves its **4
@@ -599,19 +570,6 @@ this moved 0.3075 → 0.2922 (Lightroom 0.2701, limit ±0.03) and 0.0387 (limit
   and 40 there are the same default, not a measured equivalence. The
   calibration needs three same-frame Lightroom exports at Sharpness 0 / 40 / 80.
 
-Everything else that used to sit here has shipped: the style-retrieval
-expansion (finished exports as a look library, the SigLIP 2 text tower, local
-Qwen3-VL descriptions, the GUI embedding switch and the Direction-adherence
-axis) landed across steps 14 and S1–S3; the eased linear-gradient falloff — the
-C1 Hermite smoothstep, RMS 0.0045 against 0.017 for a straight ramp on its
-first measurement — shipped in v1.2.0, and v1.2.4 moved its abscissa onto
-`t^1.124` against Lightroom's own 46 exports (α rms 0.0064; 0.0315 for the
-plain smoothstep, 0.0598 for a straight ramp); and v1.2.4 closed the last two
-entries: the colour-range producer (the reverse-fit's second range family:
-one mask keyed to each ACR hue band's own mean colour, written as the
-colour range mask Lightroom itself writes) and a Linux x64 command-line archive built and
-published from the tag beside the Windows and macOS assets.
-
 ## How it works
 
 <picture>
@@ -669,12 +627,12 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 | Star-field test, v1.6.0 build, against Lightroom Denoise 50 on the same frame | denoiser readings 6 of 8 pass: 98.70 % of 17,817 real faint stars kept against 98.80 %; bright-star peak 0.939 against 0.953 (behind); four-plane flux spread 0.0385 against 0.02 (behind); finished develop 0.2922 against 0.2701 (±0.03) and 0.0139 against 0.0278 | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
 | Hot-pixel map (ten 61 MP frames) | 86 / 20 / 77 sites inside the picture on three night frames, none on the fourth; 0 / 0 / 0 / 6 / 0 / 4 on ordinary frames; about 0.1 s a frame | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
 | Camera base look, v1.6.0 estimator (star frame, 8-bit levels) | develop against the camera's rendition 0.75 rms (median +0.19), 4.24 (+2.56) before; 4 knots instead of 13; finished-develop readings 0.3075 → 0.2922 and 0.0387 → 0.0139 | [What is new §12](#12-the-cameras-own-look-is-read-from-the-picture-like-with-like) |
-| Reverse-fit, stone viaduct (full solve, Reverse-fit strength 100 %) | look error 0.161 → 0.023 at confidence 0.63 (a global solve with the cast curves projected to t = 0.485, the per-band mixer on Orange/Yellow/Aqua/Blue at the 45 ceiling, two semantic zones, two boundary-gated tiles and one field mask), D = 0.180; at the default 65 % the pair fits to 0.047 at confidence 0.25 with the mixer capped at 18, four tiles and two field masks, and v1.2.2's fit of it is where the seam fix was measured: sky tile 0.0278 → 0.0042 (k 0.121), delivered +3.15 → +0.92 codes | [What is new §1](#1-whole-image-ai-generation-then-reverse-fit-an-editable-recipe-from-any-finished-look) |
+| Reverse-fit, stone viaduct (full solve, Reverse-fit strength 100 %) | look error 0.161 → 0.023 at confidence 0.63, D = 0.180; at the default 65 % the pair fits to 0.047 at confidence 0.25; v1.2.2's fit of it is where the seam fix was measured: sky tile 0.0278 → 0.0042, delivered +3.15 → +0.92 codes | [What is new §1](#1-whole-image-ai-generation-then-reverse-fit-an-editable-recipe-from-any-finished-look) |
 | Reverse-fit, Cornwall islet (full solve, composed calibration) | look error 0.137 → 0.027 at confidence 0.66, D = 0.136 sized from the sensor frame (0.304 from the cropped preview); the global cast projected to t = 0.363, delivered sky hue spread 9.6° (v1.2.2 shipped 33.1°) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Reverse-fit, desert canyon at dusk (full solve, Reverse-fit strength 85 %; the reference pair every release is gated on, the v1.6.1 gate's own fit) | look error 0.129 → 0.048 at confidence 0.25, D = 0.278 at pixel scale and 0.658 at layout scale (sky zone 0.649); against the target, measured at 1000 px: sky ΔE 3.8 (v1.6.0: 4.6), whole-frame mean \|diff\| 0.0248 (v1.6.0: 0.0260), land ΔE 6.0; the same recipe on the AI-denoised RAW: sky ΔE 3.5, mean \|diff\| 0.0238, the two renders 0.0145 apart, the 1:1 window's grain 3.1 → 0.6 codes | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §6](#6-a-bilateral-grid-local-field-prices-every-local-producer-first) |
-| AI develop, model judge | 2026-09-02 four-looks batch on the full 169 + 94 index at `--style 1.0 --strength 0.9`, the direction leading: moody 68 → 70 → 78 (both adopted) → 69 (discarded), verdict Accept; golden 87 → 84 (discarded) after the verifier twice sent the proposal back for the grain it never set, verdict Revise — unsaved, the figure renders the proposal; vivid 70 → 84 (adopted) → 82 (discarded), verdict Accept. The finished-look-only run (2026-09-01) and v1.2.2's full-index run are on the showcase page | [AI advisor](#ai-advisor-and-reverse-fit) |
-| Style retrieval weights | corpus harness (169 described exemplars, 156 queries): `W_EMB=4`, `W_TXT=0.5`, `W_DESC=0.5`, standardised variant with the text-hubness correction — MAE 0.688864 vs baseline 0.713143, +0.024280, CI [+0.005837, +0.041111] under the prose proxy; the corrected point at the old `W_TXT=4` regresses with CI [−0.069654, −0.005140], which is why the weight moved; under the tag-string proxy nothing beats the text-free row; `W_LOOK=1.0` is unmeasured (the harness cannot see the look library) and its scale is a real ratio against the direction terms — it ships inside a stable band, order unchanged to 2x and first moving at 4x | [AI advisor](#ai-advisor-and-reverse-fit) |
+| AI develop, model judge | 2026-09-02 four-looks batch on the full 169 + 94 index at `--style 1.0 --strength 0.9`, the direction leading: moody 68 → 78 over two adopted revisions and vivid 70 → 84 over one, both Accept; golden 87 with its revision discarded, verdict Revise, the figure renders the unsaved proposal. The trails, the finished-look-only run (2026-09-01) and v1.2.2's full-index run are on the showcase page | [AI advisor](#ai-advisor-and-reverse-fit) |
+| Style retrieval weights | corpus harness (169 described exemplars, 156 queries): `W_EMB=4`, `W_TXT=0.5`, `W_DESC=0.5` — MAE 0.688864 vs baseline 0.713143, CI [+0.005837, +0.041111] under the prose proxy, and the old `W_TXT=4` regresses (CI [−0.069654, −0.005140]); under the tag-string proxy nothing beats the text-free row; `W_LOOK=1.0` is unmeasured (the harness cannot see the look library) and ships inside a stable band, order unchanged to 2x and first moving at 4x | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Memory budget | 1800 MB per photo from a 1771 MB reference probe; 4 GiB RAW admission gate | [Application](#application-and-infrastructure) |
 
 ## Install and quickstart
@@ -709,28 +667,15 @@ unpickled on trust.
 Download from the
 [v1.6.1 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.6.1):
 
-\
 - **Installer (recommended):** run `AutoShade-Setup-1.6.1.exe`. It installs for
   the current user without administrator access, adds Start Menu shortcuts, and
   offers optional desktop and user `PATH` tasks.
-- **Upgrading is in place.** Run a newer installer over an existing install and
-  it stays the same install: same directory, one entry in Programs and
-  Features, one `PATH` entry, shortcuts replaced rather than duplicated, and
-  your develop store and downloaded model weights left exactly as they were.
-  A running AutoShade is closed for you first. An OLDER installer is refused
-  and names both versions when it refuses. Upgrading over a pre-rename install
-  also deletes the executables, icon and fonts that carried the old name.
-- **Uninstalling has two doors** — the Programs and Features entry, and
-  「Uninstall AutoShade」 in the Start Menu group. Either one asks whether
-  to delete the two things it never installed: the downloaded model
-  weights and the develop store in `%LOCALAPPDATA%\autoshade`. It names the
-  size it found for each, and keeping both is the default, so a later install
-  starts where you left off.
-- **Silently, for a scripted rollout:** `AutoShade-Setup-1.6.1.exe /VERYSILENT
-  /SUPPRESSMSGBOXES /NORESTART` installs or upgrades with no window and no
-  prompt, and `unins000.exe /VERYSILENT /SUPPRESSMSGBOXES` in the install
-  directory uninstalls the same way. The silent uninstall keeps your weights
-  and develop store unless you add `/DELETEDATA=1`.
+- **Upgrading, uninstalling and a silent rollout** are in the manual,
+  [Install, upgrade, and uninstall on Windows](docs/USER_MANUAL.md#install-upgrade-and-uninstall-on-windows):
+  an upgrade is in place and keeps your develop store and model weights, an
+  older installer is refused, either uninstall door asks before deleting the
+  two things it never installed, and `/VERYSILENT` installs, upgrades or
+  uninstalls with no window.
 - **Portable archive:** extract `autoshade-1.6.1-windows-x64.zip` to a directory
   you can keep intact and run either executable from there, beside the bundled
   `assets/` and `python/` sidecars.
