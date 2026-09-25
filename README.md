@@ -86,7 +86,7 @@ on a real star field whenever it changes.
   noise measured tile by tile on the frame itself, and held, release after
   release, to a same-frame comparison with Lightroom's Denoise 50 on a real
   star field; only luminance grain comes back (71 % default), faint stars
-  stay, and hot pixels are mapped in every develop. [§11](#11-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) has the
+  stay, and hot pixels are mapped in every develop. [§5](#5-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) has the
   picture, the numbers and the two refused training runs.
 - **Local AI masks** — subject (BiRefNet, named U²-Net fallback), sky
   (OneFormer ADE20K) and point-prompted object (SAM 2.1), as local Python
@@ -195,7 +195,7 @@ the 3520×2336 <code>reimagine</code> target, the recipe the v1.6.1 release
 gate itself recovered at Reverse-fit strength 85 % rendered on the
 9504×6336 RAW — look error <b>0.129 → 0.048</b>, and against the target
 sky ΔE <b>3.8</b> with whole-frame mean |diff| <b>0.0248</b> — and the same
-recipe rendered after the RAW denoiser of [§11](#11-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) cleaned the
+recipe rendered after the RAW denoiser of [§5](#5-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) cleaned the
 sensor mosaic first, at its 71 % default: sky ΔE 3.5, mean |diff| 0.0238,
 the look unchanged. Bottom row: the same window at each source's native
 resolution; between the last two crops only the denoiser differs, and the
@@ -222,159 +222,75 @@ regression**:
 
 Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
 
-### 2. A structural-divergence statistic decides how much to believe a target
+### 2. How the reverse-fit decides: divergence, evidence gates and a priced local field
 
-A structural reading `D` — gradient correlation and a five-band pyramid energy
-error — measures whether the target still shows the same scene.
+Every local move is admitted on evidence, budgeted at its seams and priced
+against a ceiling before it ships; the equations and the calibration numbers
+are in [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
 
-- Same scene → the Full solve above. Repainted scene (`D ≥ 0.35`) → bounded
-  **Atmosphere** mode: EV ±1, WB gain [0.80, 1.25], saturation ±30, curve
-  slope [0.5, 1.5], confidence capped at 0.50, no per-channel curves, and a
-  *structure-blind* ruler that stops asking replaced content to survive.
-- Strength governs that budget: at the shipped 0.65 the global controls, WB
-  included, are byte-identical to the calibrated path's (the colour field is
-  the one control that attaches at 0.65 and not one click below); above it
-  an out-of-budget WB is shrunk along its fitted log-K/linear-tint manifold
-  and must clear the foreign-hue veto and a rotation budget opening from
-  0.05 at default through 0.593 at 0.85 to 1.0 at full strength, or it is
-  withheld.
+- **A structural reading `D`** (gradient correlation and a five-band pyramid
+  energy error) says whether the target still shows the same scene: same
+  scene → the full solve; repainted (`D ≥ 0.35`) → a bounded **Atmosphere**
+  mode (EV ±1, WB gain [0.80, 1.25], saturation ±30, curve slope [0.5, 1.5],
+  confidence capped at 0.50, no per-channel curves). At the shipped Strength
+  0.65 the global controls, WB included, are byte-identical to the
+  calibrated path's; above it an out-of-budget white balance is shrunk along
+  its fitted log-K/linear-tint manifold and must clear the foreign-hue veto
+  and a rotation budget (0.05 at default, 0.593 at 0.85, 1.0 at full) or it
+  is withheld ([docs/TECH_STACK.md#reverse-fit-freedom-budget](docs/TECH_STACK.md#reverse-fit-freedom-budget)).
+- **Where the content moved**, a DIFT correspondence field (Stable Diffusion
+  2.1's UNet as a featurizer, `t = 261`, 768² inputs, an 8-draw ensemble, a
+  48×48 grid) weights a zone's pixel pairs; its confidence is cyclic
+  consistency × flow smoothness, so a pixel-shuffle of the same frame stays
+  unmatchable (an identity pair reads 1.000 at 100 % coverage, the
+  calibration pair's generated sky 0.009 at 21.5 %).
+- **Semantic zones, luminance bands and colour bands** come from mutually
+  exclusive producers — a local OneFormer ADE20K pass (sky/land, up to four
+  class regions opt-in), or with segmentation off XMP-native luminance-range
+  bands from rank-paired residuals and colour-range bands keyed to the eight
+  ACR hue bands, each refused without evidence on both sides of the edit —
+  and every verdict follows the population a correction moves. Sky and land
+  ride out to Lightroom as its own Select Sky mask (`crs:What="Mask/Image"`,
+  `crs:MaskSubType="2"`); four-class regions, tiles and field masks remain
+  raster masks with the named bitmap loss
+  ([docs/TECH_STACK.md#zone-scoped-evidence-view](docs/TECH_STACK.md#zone-scoped-evidence-view)).
+- **Seams are budgeted per crossing**: no larger than what the scene itself
+  carries there, floored at one code value, capped at the calibrated 0.012,
+  charged only on what the paired target does not itself carry, in luma and
+  in each colour channel; a feather too smooth to hide anything is widened
+  first (a ramp up to 6 % of the frame height), and both the widening and
+  its abstention are disclosed.
+- **Tiles split on frozen evidence**, a quadtree stopping at a 4×4 grid: a
+  tile is kept only when both frames contribute ≥ 3 % evidence, structure
+  stays comparable, its confidence interval excludes zero, its boundary
+  clears the rim ceiling and the composed frame does not regress; hard tiles
+  are intersections of four gradients and export to Lightroom, and a
+  free-form remainder pass has refused every proposal on the calibration
+  corpus ([docs/TECH_STACK.md#layered-spatial-reverse-fit-and-mask-refinement](docs/TECH_STACK.md#layered-spatial-reverse-fit-and-mask-refinement)).
+- **A bilateral-grid local field prices every producer first**: a read-only
+  12×8×8 grid (x, y, luma) of five develop parameters solved by conjugate
+  gradients in f64 (λ = 1 Tikhonov, a Laplacian smoother, ≤ 90 iterations),
+  whose residual is the **ceiling** any spatially varying develop could
+  reach — the calibration pair's reading is under
+  [Measured numbers](#measured-numbers), and the Rust solve agrees with the
+  NumPy reference to 1.5 × 10⁻⁵ across 768 vertices. It never touches a
+  pixel: it proposes bands, halves the tile budget when the remainder is not
+  tile-shaped, and ends the fit within 0.002 of a ceiling that beat the
+  producer-free frame ([docs/TECH_STACK.md#local-field-analyzer](docs/TECH_STACK.md#local-field-analyzer)).
+- **Masks earn their refinement** (guided, radius 8): the original bytes win
+  unless coverage is conserved, pixels outside the collar are unchanged,
+  guide-edge alignment does not fall and the gates still pass; the AI masks
+  run locally with weights pinned to the byte and every alpha cached under a
+  provenance key.
+- **Generated pixels are quarantined**: `reimagine` composes the prompt onto
+  a faithfulness scaffold (`input_fidelity` is silently dropped by
+  gpt-image-2), measures the result with the same `D` and can spend one
+  bounded retry; every paid generation lands as a new ✨ card; `heal` only
+  copies, shifts and averages existing pixels; Lightroom spot removal is
+  re-solved from the photograph's own pixels with the synthesised areas
+  named; an HDR-mode edit renders as Lightroom's own SDR rendition.
 
-Details: [docs/TECH_STACK.md#reverse-fit-freedom-budget](docs/TECH_STACK.md#reverse-fit-freedom-budget).
-
-### 3. Diffusion features find where the content moved
-
-On divergent pairs the fit consults a **DIFT correspondence field** — Stable
-Diffusion 2.1's UNet as a featurizer (`t = 261`, 768² inputs, `up_blocks[1]`
-features, an 8-draw ensemble run one at a time to bound VRAM) — whose 48×48
-grid weights a Full zone's pixel pairs and reads shifted content where it
-moved.
-
-- Confidence is cyclic consistency × local flow smoothness, with raw cosine
-  kept out of it, so a pixel-shuffle of the same frame stays honestly
-  unmatchable.
-- An identity pair reads median confidence 1.000 at 100 % coverage against
-  0.009 (21.5 %) for the calibration pair's generated sky; identity and
-  zero-confidence fields change nothing, by test.
-
-Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
-
-### 4. Semantic zones, luminance bands and colour bands, judged on their own population
-
-- Local corrections come from mutually exclusive producers: a local OneFormer
-  ADE20K pass yields semantic regions (sky/land by default, up to four
-  disjoint class regions opt-in), and with segmentation off or unavailable a
-  pure-Rust pass derives **XMP-native luminance-range bands** from rank-paired
-  residuals under an evidence gate, then **colour-range bands** from the eight
-  ACR hue bands — one mask keyed to each band's own mean colour, read on both
-  frames, and refused unless the band has evidence on both sides of the edit.
-- Every verdict follows the population a correction moves: a land zone is not
-  withheld because a replaced sky shares its luminance bins, and a zone whose
-  luminance already matches says so instead of being dialled for a hairline
-  gain.
-- The **sky and land zones ride out to Lightroom** as its own Select Sky mask
-  (`crs:What="Mask/Image"`, `crs:MaskSubType="2"`, the land zone the same
-  component inverted); Lightroom rebuilds its own sky alpha from that intent,
-  and the save line says the raster rendered here is AutoShade's own, not
-  Adobe's. The opt-in four-class regions, the spatial tiles and the free-form
-  field masks remain raster masks classic XMP cannot hold, with the named
-  bitmap loss.
-- A semantic zone's boundary is held to the same per-crossing budget a tile's
-  is: no seam larger than what the scene itself carries there (a feathered
-  zone's band variation, a hard-edged tile's scene discontinuity; a smooth sky
-  gradient masks nothing), floored at one code value, capped at the
-  calibrated 0.012, and charged only on the part of a step the paired target
-  does not itself carry there, read as a cell average so a repainted texture
-  cannot vote. Both rulers read luma **and** each colour channel, so a gain
-  set that matches a target's mean colour cannot hide a coloured halo behind
-  an unmoved luma.
-- Because a budget can only take strength away, the source raster's feather is
-  **widened first** where the guide is too smooth to hide anything — the same
-  correction over a ramp up to 6 % of the frame height, alpha under a real
-  edge left byte-identical so silhouettes stay crisp — and both the widening
-  and its abstention are disclosed.
-
-Details: [docs/TECH_STACK.md#zone-scoped-evidence-view](docs/TECH_STACK.md#zone-scoped-evidence-view).
-
-### 5. Quadtree tile splitting on frozen evidence
-
-After the zones or bands, a frozen-evidence quadtree visits the strongest
-supported nodes first and stops at a 4×4 grid.
-
-- A tile is kept only when both frames contribute ≥ 3 % evidence, original
-  structure stays comparable, its confidence interval excludes zero, its
-  boundary stays within the calibrated rim ceiling (0.012, charged per
-  crossing against the scene's own step, in luma and per colour channel, and
-  only for what the target does not itself carry there), and the composed
-  frame does not regress.
-- Hard tiles are editable intersections of four gradients and export to
-  Lightroom. A guided raster keeps its named bitmap loss only when the native
-  trial fails the shared gates or fits the photo worse than the raster on the
-  tile's own cell or on the frame.
-- A **free-form remainder pass** ranks 4-connected, sign-pure components of
-  the residual no tile covers, at most two, through the same gates; every
-  proposal on the calibration corpus was refused, so it contributes
-  disclosure, not corrections.
-
-Details: [docs/TECH_STACK.md#layered-spatial-reverse-fit-and-mask-refinement](docs/TECH_STACK.md#layered-spatial-reverse-fit-and-mask-refinement).
-
-### 6. A bilateral-grid local field prices every local producer first
-
-Before any local producer runs, a read-only **12×8×8 bilateral grid** (x, y,
-luma) of five develop parameters is solved by conjugate gradients in f64 — λ =
-1 Tikhonov toward the global fit, a Laplacian smoother, ≤ 90 iterations,
-weights = frozen evidence × structural support × unclipped.
-
-- Its rendered residual is the **ceiling**: how much of the remaining
-  difference *any* spatially varying develop could reach; the calibration
-  pair's reading is under [Measured numbers](#measured-numbers), and the Rust
-  solve agrees with the NumPy reference to 1.5 × 10⁻⁵ across 768 vertices.
-- The field never touches a pixel: it proposes luminance bands to the range
-  producer, refused when the sign disagrees, halves the tile budget when the
-  remainder is not tile-shaped, and ends the fit early within 0.002 of a
-  ceiling that beat the producer-free frame.
-
-Details: [docs/TECH_STACK.md#local-field-analyzer](docs/TECH_STACK.md#local-field-analyzer).
-
-### 7. Edge-aware mask refinement that has to earn its keep
-
-- Semantic silhouettes and eligible tile boundaries go through guided
-  refinement (radius 8) before their corrections are fitted — and the original
-  mask bytes win unless coverage is conserved, every pixel outside the fixed
-  collar is unchanged, guide-edge alignment does not fall, and the rim and
-  frame gates still pass.
-- The AI masks themselves run locally, weights pinned to the byte and every
-  alpha cached under a provenance key, so a better backend forces an honest
-  re-derivation rather than serving an older mask as the new model's.
-
-Details: [docs/TECH_STACK.md#layered-spatial-reverse-fit-and-mask-refinement](docs/TECH_STACK.md#layered-spatial-reverse-fit-and-mask-refinement).
-
-### 8. Generated pixels are quarantined and measured
-
-- `reimagine` composes the prompt onto an unconditional faithfulness scaffold
-  (because `input_fidelity` is silently dropped by gpt-image-2), measures the
-  result's structural divergence with the same `D` the reverse-fit uses, warns
-  at `D ≥ 0.35`, and can spend one bounded retry keeping the closer image.
-- The GUI's **Adjust generated image** edits a ✨ card or its ✎ edit with its
-  own prompt — the whole picture without strokes, or just the shared painted
-  region (blank = remove); one paid generation lands as a new ✨ card, its
-  source intact, and whole-image edits report divergence against the sent
-  input.
-- `heal` only ever copies, shifts and averages pixels that already exist, and
-  anything that changed pixels lives on its own card as a pixel source — never
-  disguised as a Lightroom adjustment.
-- Spot removal imported from a Lightroom sidecar is re-solved here from the
-  photograph's own pixels, and the panel names how many areas Lightroom
-  removed, how many of those Adobe synthesised (content-aware or generative,
-  pixels the sidecar does not carry), and offers to re-run a generative
-  model over exactly those.
-- A photo edited in Lightroom's HDR mode renders as its **SDR rendition** —
-  Lightroom's own seven-control answer to publishing an HDR edit as an SDR
-  file — and the seven render only while the mode is on, as in Lightroom;
-  they are stored and round-tripped either way.
-
-Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
-
-### 9. Style reference is retrieval over your whole catalogue, not a preset
+### 3. Style reference is retrieval over your whole catalogue, not a preset
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/pillar-analysis-dark.svg" />
@@ -403,16 +319,15 @@ most similar past shots** as a soft reference.
 
 - An exemplar carries a 14-dimensional EXIF/histogram feature, the 12 develop
   settings you moved, your curve shape, colour families and a local-work habit
-  — summary statistics only.
-- Optional local models add a 768-dimensional **SigLIP 2** image vector and,
-  with `--describe`, one **Qwen3-VL-2B** sentence about the *grade*; nothing
-  leaves the machine.
+  — summary statistics only; optional local models add a 768-dimensional
+  **SigLIP 2** image vector and, with `--describe`, one **Qwen3-VL-2B**
+  sentence about the *grade*, and nothing leaves the machine.
 - Retrieval is
   `d14 + W_EMB·(1−cos(q_img,e_img)) + W_TXT·(1−cos(q_txt,e_img)) + W_DESC·(1−cos(q_txt,e_desc))`,
   shipped at `W_EMB = 4`, `W_TXT = 0.5`, `W_DESC = 0.5` — the calibration
-  harness's winners on the real corpus, hubness removed before the z-score.
-- `W_LOOK = 1.0` is the unmeasured term: the look library carries no develop
-  settings for that objective to see, so it ships inside a stable band.
+  harness's winners on the real corpus, hubness removed before the z-score;
+  `W_LOOK = 1.0` is the unmeasured term (the look library carries no develop
+  settings for that objective to see) and ships inside a stable band.
 - `style_pull` (0.18 at the shipped Style 0.3, full at Style 1.0) moves the
   proposal toward your historical means, unless a Direction at Adherence above
   40 % leads; a `--looks` library guides the proposer but never becomes a
@@ -420,7 +335,7 @@ most similar past shots** as a soft reference.
 
 Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
 
-### 10. Lightroom parity is measured, and the residuals are published
+### 4. Lightroom parity is measured, and the residuals are published
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/pillar-lightroom-math-dark.svg" />
@@ -446,7 +361,7 @@ those fits were re-measured in v1.2.4 against Lightroom's own coverage on a
 (α rms 0.0293 → 0.0074), and the radial boundary is a pure 0.99876 scale of
 the stored ellipse — no dilation law.
 
-### 11. The RAW denoiser is trained here and judged by pass marks written before the run
+### 5. The RAW denoiser is trained here and judged by pass marks written before the run
 
 <img src="docs/images/showcase-denoise-star-field.jpg" alt="One 1:1 window of a 61 MP star field, four ways: Lightroom's develop with Denoise off and at 50, AutoShade's neutral develop with no denoise and with its own denoiser at the 71 % default" />
 
@@ -468,28 +383,23 @@ look unchanged, the 1:1 window's grain 3.1 → 0.6 codes.
 
 - **The mosaic is cleaned before demosaic**, by AutoShade's own weights: DPIR's
   DRUNet-colour architecture, fine-tuned for this exact transform on RawNIND
-  pairs and on synthetic sensor noise over the author's own low-ISO frames,
-  shipped as `autoshade-raw-denoise-v2.pth`. The network expects noise of one
-  known strength everywhere, so the noise is **measured where it stands**: per
-  tile, on the finest diagonal wavelet band, with the samples chosen by the
-  three other bands so the choice cannot bias the number, and a smooth map of
-  it is divided out before the network and multiplied back after. On the
-  star frame the per-tile residual's maximum fell 0.508 → 0.070 and the
-  tile-to-tile spread of the fine-luminance ratio 0.185 → 0.014 (Lightroom's
-  own: 0.011).
+  pairs and on synthetic sensor noise over the author's own low-ISO frames
+  (`autoshade-raw-denoise-v2.pth`). The noise is **measured where it stands**,
+  per tile on the finest diagonal wavelet band, and divided out before the
+  network; on the star frame the per-tile residual's maximum fell 0.508 →
+  0.070 and the tile-to-tile spread of the fine-luminance ratio 0.185 → 0.014
+  (Lightroom's own: 0.011).
 - **Only luminance grain comes back.** At any positive strength the full clean
   output is requested; the original and the clean frame go through the same
   demosaic and calibration, and in linear light `1 − strength` of the
   luminance difference returns along the grey axis, so colour noise cannot
   come back by construction. The default is 0.71.
-- **Hot pixels are mapped in every develop** of a Bayer RAW, before the grain
-  source and the cleaner read the mosaic: an isolated site stronger than 20
-  sigma of its own neighbourhood (half the MAD of the 24 same-colour samples
-  within 4 px, or the tile's sigma if larger), where a clipped sample never
-  measures noise and eight neighbours must vouch. On ten 61 MP frames: 86 /
-  20 / 77 sites on three night frames, none on the fourth, 0 / 0 / 0 / 6 / 0
-  / 4 on ordinary frames; a frame with no mappable site renders
-  byte-identically.
+- **Hot pixels are mapped in every develop** of a Bayer RAW before the mosaic
+  is read: an isolated site stronger than 20 sigma of its own neighbourhood,
+  where a clipped sample never measures noise and eight neighbours must vouch.
+  On ten 61 MP frames: 86 / 20 / 77 sites on three night frames, none on the
+  fourth, 0 / 0 / 0 / 6 / 0 / 4 on ordinary frames; a frame with no mappable
+  site renders byte-identically.
 - **Faint stars survive.** The first training run had never seen a star and
   kept 10 % of the light of a star four times the noise level (4σ), 42 % at
   6σ, 73 % at 10σ. The second run continued from it with stars added to the
@@ -499,22 +409,19 @@ look unchanged, the 1:1 window's grain 3.1 → 0.6 codes.
   before the run (`scripts/accept_v2.py`).
 - **The star-field test is a release gate.** Whenever the denoiser changes,
   the author's ISO 2500 star field is denoised by AutoShade and by Lightroom's
-  Denoise 50 and the two results are compared reading by reading
-  (`scripts/denoise_star_standard.py`): eight readings on the denoiser decide,
-  two on the finished develop are reported. On the v1.6.0 build, 6 of 8:
-  98.70 % of 17,817 real faint stars kept against Lightroom's 98.80 %;
-  bright-star peaks 0.939 of the input against 0.953 and the four colour
-  planes' flux spread 0.0385 against a 0.02 limit stay behind; the finished
-  develop reads 0.2922 against Lightroom's 0.2701 (limit ±0.03) and 0.0139
-  (limit 0.0278). Two later training runs — one on stars drawn as a core on a
-  streak, one as five runs on a rented cloud GPU with comet-shaped stars and
-  extra weight on star cores — had their pass marks written first, failed
-  them, and were refused.
+  Denoise 50 and compared reading by reading
+  (`scripts/denoise_star_standard.py`). On the v1.6.0 build, 6 of 8 denoiser
+  readings pass: 98.70 % of 17,817 real faint stars kept against Lightroom's
+  98.80 %; bright-star peaks 0.939 of the input against 0.953 and the four
+  colour planes' flux spread 0.0385 against a 0.02 limit stay behind; the
+  finished develop reads 0.2922 against Lightroom's 0.2701 (limit ±0.03) and
+  0.0139 (limit 0.0278). Two later training runs had their pass marks written
+  first, failed them, and were refused.
 
 Details: [docs/TECH_STACK.md#raw-denoise](docs/TECH_STACK.md#raw-denoise) and
 the release notes, [docs/RELEASE_NOTES_v1.6.1.md](docs/RELEASE_NOTES_v1.6.1.md).
 
-### 12. The camera's own look is read from the picture, like with like
+### 6. The camera's own look is read from the picture, like with like
 
 A neutral develop of a RAW does not look like the camera's JPEG. The **base
 look** is the tone curve that closes that gap, estimated per photo from the
@@ -542,7 +449,7 @@ were each measured:
   look keeps none.
 
 The tone stage scales colour by the luminance ratio, so every wiggle of slope
-acted on grain; on the star-field test's two finished-develop readings (§11)
+acted on grain; on the star-field test's two finished-develop readings (§5)
 this moved 0.3075 → 0.2922 (Lightroom 0.2701, limit ±0.03) and 0.0387 (limit
 0.0309) → 0.0139 (limit 0.0278). Details:
 [docs/TECH_STACK.md#camera-base-look](docs/TECH_STACK.md#camera-base-look).
@@ -553,7 +460,7 @@ this moved 0.3075 → 0.2922 (Lightroom 0.2701, limit ±0.03) and 0.0387 (limit
   the denoiser keeps a bright star's light (a 5×5 aperture reads 1.00–1.03 of
   the input) but spreads its core a little (the single brightest sample reads
   0.82 of the input for faint stars, 0.92 for bright ones), which is what the
-  bright-star peak and the flux-spread readings measure (§11). The two later
+  bright-star peak and the flux-spread readings measure (§5). The two later
   training runs were designed against exactly this, trained, and refused by
   their own pre-written pass marks; the denoiser ships with both readings
   recorded as behind.
@@ -580,20 +487,19 @@ and pan it at [autoshade.dev/architecture.html](https://autoshade.dev/architectu
 
 - [`src/decode.rs`](src/decode.rs) decodes the RAW into a preview, EXIF and a
   histogram; the advisor in [`src/advisor/`](src/advisor/) turns those into an
-  `EditRecipe` ([`src/recipe.rs`](src/recipe.rs)), and a verifier that
-  receives recipe, EXIF, histogram and clipping data — never pixels — checks
-  it.
+  `EditRecipe` ([`src/recipe.rs`](src/recipe.rs)), which a verifier checks
+  from recipe, EXIF, histogram and clipping data — never pixels.
 - [`src/render.rs`](src/render.rs) applies it; the image, the recipe and a
   Lightroom-readable sidecar ([`src/xmp.rs`](src/xmp.rs)) go to the per-user
   develop store, and local masks, style retrieval, reverse-fit and the
   generative tools hang off that path unchanged.
 - `EditRecipe` is the **only** channel between the AI and the pixels: strict
   `json_schema`, every control bounded and clamped on entry, missing fields
-  defaulted so older recipes stay readable, one struct behind GUI, CLI, web UI
-  and the XMP projection.
-- The renderer is a deterministic f32 pipeline, so the same recipe on the same
-  RAW yields the same bytes every run; and the XMP writer edits only the
-  fields it owns, so a Lightroom catalogue survives a round trip.
+  defaulted so older recipes stay readable, one struct behind GUI, CLI, web
+  UI and the XMP projection. The renderer is a deterministic f32 pipeline,
+  so the same recipe on the same RAW yields the same bytes every run, and the
+  XMP writer edits only the fields it owns, so a Lightroom catalogue survives
+  a round trip.
 
 Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -615,15 +521,15 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 | Roundness (tilted 2:1 ellipse, feather 25/50/75) | Lightroom's R−100/0/+100 exports differ by max\|Δ\| = 0 DN over 26 Mpx; the engine draws one ellipse too | [Masks](#masks) |
 | Brush geometry | D1 error 874 px → 9.8 px after pixel-centre sampling and the pixel/aspect metric | [Masks](#masks) |
 | X-Trans demosaic (approximate) | X-S10 G/R ratio 1.5503 → 0.9476 | [RAW decode](#raw-decode-and-cfa) |
-| RAW denoise, measured noise field (star frame) | per-tile residual max 0.508 → 0.070; tile-to-tile width of the fine-luminance ratio 0.185 → 0.014 (Lightroom's own 0.011); ground-truth bench moved ≤ 0.01 dB | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
-| Faint stars through the denoiser (stars of known brightness added to one green plane of the star frame) | light kept at 4σ / 6σ / 10σ: first training run 0.105 / 0.420 / 0.726 → the run that ships 0.541 / 0.835 / 0.918; pass marks written before the run | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
-| Star-field test, v1.6.0 build, against Lightroom Denoise 50 on the same frame | denoiser readings 6 of 8 pass: 98.70 % of 17,817 real faint stars kept against 98.80 %; bright-star peak 0.939 against 0.953 (behind); four-plane flux spread 0.0385 against 0.02 (behind); finished develop 0.2922 against 0.2701 (±0.03) and 0.0139 against 0.0278 | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
-| Hot-pixel map (ten 61 MP frames) | 86 / 20 / 77 sites inside the picture on three night frames, none on the fourth; 0 / 0 / 0 / 6 / 0 / 4 on ordinary frames; about 0.1 s a frame | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
-| Camera base look, v1.6.0 estimator (star frame, 8-bit levels) | develop against the camera's rendition 0.75 rms (median +0.19), 4.24 (+2.56) before; 4 knots instead of 13; finished-develop readings 0.3075 → 0.2922 and 0.0387 → 0.0139 | [What is new §12](#12-the-cameras-own-look-is-read-from-the-picture-like-with-like) |
+| RAW denoise, measured noise field (star frame) | per-tile residual max 0.508 → 0.070; tile-to-tile width of the fine-luminance ratio 0.185 → 0.014 (Lightroom's own 0.011); ground-truth bench moved ≤ 0.01 dB | [What is new §5](#5-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
+| Faint stars through the denoiser (stars of known brightness added to one green plane of the star frame) | light kept at 4σ / 6σ / 10σ: first training run 0.105 / 0.420 / 0.726 → the run that ships 0.541 / 0.835 / 0.918; pass marks written before the run | [What is new §5](#5-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
+| Star-field test, v1.6.0 build, against Lightroom Denoise 50 on the same frame | denoiser readings 6 of 8 pass: 98.70 % of 17,817 real faint stars kept against 98.80 %; bright-star peak 0.939 against 0.953 (behind); four-plane flux spread 0.0385 against 0.02 (behind); finished develop 0.2922 against 0.2701 (±0.03) and 0.0139 against 0.0278 | [What is new §5](#5-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
+| Hot-pixel map (ten 61 MP frames) | 86 / 20 / 77 sites inside the picture on three night frames, none on the fourth; 0 / 0 / 0 / 6 / 0 / 4 on ordinary frames; about 0.1 s a frame | [What is new §5](#5-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
+| Camera base look, v1.6.0 estimator (star frame, 8-bit levels) | develop against the camera's rendition 0.75 rms (median +0.19), 4.24 (+2.56) before; 4 knots instead of 13; finished-develop readings 0.3075 → 0.2922 and 0.0387 → 0.0139 | [What is new §6](#6-the-cameras-own-look-is-read-from-the-picture-like-with-like) |
 | Reverse-fit, stone viaduct (full solve, Reverse-fit strength 100 %) | look error 0.161 → 0.023 at confidence 0.63, D = 0.180; at the default 65 % the pair fits to 0.047 at confidence 0.25; v1.2.2's fit of it is where the seam fix was measured: sky tile 0.0278 → 0.0042, delivered +3.15 → +0.92 codes | [What is new §1](#1-whole-image-ai-generation-then-reverse-fit-an-editable-recipe-from-any-finished-look) |
 | Reverse-fit, Cornwall islet (full solve, composed calibration) | look error 0.137 → 0.027 at confidence 0.66, D = 0.136 sized from the sensor frame (0.304 from the cropped preview); the global cast projected to t = 0.363, delivered sky hue spread 9.6° (v1.2.2 shipped 33.1°) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Reverse-fit, desert canyon at dusk (full solve, Reverse-fit strength 85 %; the reference pair every release is gated on, the v1.6.1 gate's own fit) | look error 0.129 → 0.048 at confidence 0.25, D = 0.278 at pixel scale and 0.658 at layout scale (sky zone 0.649); against the target, measured at 1000 px: sky ΔE 3.8 (v1.6.0: 4.6), whole-frame mean \|diff\| 0.0248 (v1.6.0: 0.0260), land ΔE 6.0; the same recipe on the AI-denoised RAW: sky ΔE 3.5, mean \|diff\| 0.0238, the two renders 0.0145 apart, the 1:1 window's grain 3.1 → 0.6 codes | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
-| Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §6](#6-a-bilateral-grid-local-field-prices-every-local-producer-first) |
+| Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §2](#2-how-the-reverse-fit-decides-divergence-evidence-gates-and-a-priced-local-field) |
 | AI develop, model judge | 2026-09-02 four-looks batch on the full 169 + 94 index at `--style 1.0 --strength 0.9`, the direction leading: moody 68 → 78 over two adopted revisions and vivid 70 → 84 over one, both Accept; golden 87 with its revision discarded, verdict Revise, the figure renders the unsaved proposal. The trails, the finished-look-only run (2026-09-01) and v1.2.2's full-index run are on the showcase page | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Style retrieval weights | corpus harness (169 described exemplars, 156 queries): `W_EMB=4`, `W_TXT=0.5`, `W_DESC=0.5` — MAE 0.688864 vs baseline 0.713143, CI [+0.005837, +0.041111] under the prose proxy, and the old `W_TXT=4` regresses (CI [−0.069654, −0.005140]); under the tag-string proxy nothing beats the text-free row; `W_LOOK=1.0` is unmeasured (the harness cannot see the look library) and ships inside a stable band, order unchanged to 2x and first moving at 4x | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Memory budget | 1800 MB per photo from a 1771 MB reference probe; 4 GiB RAW admission gate | [Application](#application-and-infrastructure) |
@@ -677,19 +583,16 @@ Download from the
 
 Both macOS archives are universal (Apple silicon and Intel in one binary);
 unpack either with Finder or `ditto -x -k <zip> <dir>`.
-
-- `AutoShade-1.6.1-macos-universal.zip` is the app: move `AutoShade.app` to
-  `/Applications`. The command line travels inside it
-  (`AutoShade.app/Contents/MacOS/autoshade`), so this download alone serves a
-  terminal user; `AutoShade-1.6.1-macos-cli.zip` is that binary alone.
-- The bundle is **ad-hoc signed, not notarised**, so the first launch is
-  refused: macOS reports that the developer cannot be verified. Clearing it is
-  per machine, not per launch — **System Settings → Privacy & Security → Open
-  Anyway**, or right-click in Finder and choose **Open**.
-- **Python 3** is needed for the AI sidecars only, and **model weights**
-  download on first use into the develop store, not the signed read-only
-  bundle; the interpreter is a Settings field with **Detect**
-  ([manual](docs/USER_MANUAL.md#configure-and-use-the-ai-features)).
+`AutoShade-1.6.1-macos-universal.zip` is the app: move `AutoShade.app` to
+`/Applications`; the command line travels inside it
+(`AutoShade.app/Contents/MacOS/autoshade`), and `AutoShade-1.6.1-macos-cli.zip`
+is that binary alone. The bundle is **ad-hoc signed, not notarised**, so the
+first launch is refused once per machine, not per launch: **System Settings →
+Privacy & Security → Open Anyway**, or right-click in Finder and choose
+**Open**. **Python 3** is needed for the AI sidecars only, and **model
+weights** download on first use into the develop store, not the signed
+read-only bundle; the interpreter is a Settings field with **Detect**
+([manual](docs/USER_MANUAL.md#configure-and-use-the-ai-features)).
 
 The Linux archive, `AutoShade-1.6.1-linux-x64.zip`, is the command line for
 x86-64 Linux, built on Ubuntu 22.04 with the same payload as the macOS
@@ -837,124 +740,91 @@ cannot end a batch.
 
 ### Implementation
 
-The canonical page is **[Tech stack and algorithms](docs/TECH_STACK.md)** —
-equations, provenance, measured results, honesty markers and source paths
-behind each summary below. Numbers already in [Measured
-numbers](#measured-numbers) are not repeated.
+The canonical page is **[Tech stack and algorithms](docs/TECH_STACK.md)** — equations,
+provenance, measured results, honesty markers and source paths behind each
+line below. Numbers already in [Measured numbers](#measured-numbers) are not
+repeated.
 
-### RAW decode and CFA
+#### RAW decode and CFA
 
-- `src/decode.rs` uses rawler for **RAW decode, 24 formats**, with 725 bodies
-  in the release database; `orient_f32` applies the composed orientation — the
-  RAW's EXIF state plus the photographer's own quarter turns — at the head of
-  the chain, and an imported Lightroom sidecar's `tiff:Orientation` chooses
-  those turns, so a rotation made in Lightroom survives the import.
-- Bayer data takes rawler's demosaic path; X-Trans uses an **approximate** 5×5
-  CFA-geometry plane fit, and no-preview RAWs, untagged 16-bit rasters and
-  mono sensors are disclosed or refused.
-- `src/dcp.rs` and `src/render/profile.rs` develop a Lightroom photo through
-  the **camera profile it names** — the `.dcp` Adobe installed, plus the
-  creative profile in the sidecar's `crs:Look`. Table semantics and memory
-  order were measured on the installed pool rather than assumed, and the one
-  half that does not decode (a Look's creative colour table) is named on screen
-  instead of being silently dropped. Nothing Adobe ships is redistributed.
-- `src/denoise.rs` and `python/denoise_raw.py` clean a Bayer RAW's mosaic
-  before demosaic with the weights fine-tuned here, after its hot pixels are
-  mapped and its noise measured tile by tile; `src/render.rs` returns
-  `1 − strength` of the luminance grain in linear light (§11).
+`src/decode.rs` uses rawler (24 formats, 725 bodies), with the composed
+orientation — EXIF plus the photographer's own turns, an imported sidecar's
+`tiff:Orientation` included — applied at the head of the chain; Bayer takes
+rawler's demosaic, X-Trans an **approximate** 5×5 plane fit; `src/dcp.rs`
+develops a Lightroom photo through the `.dcp` profile and `crs:Look` it names,
+the one undecoded half (a Look's creative colour table) named on screen, and
+nothing Adobe ships is redistributed; the RAW denoiser of §5 cleans the mosaic
+before demosaic.
 
-### Develop pipeline and tone model
+#### Develop pipeline and tone model
 
-- `src/render.rs` is a deterministic f32 pipeline: linear-light vignette and
-  dehaze, a monotone Fritsch–Carlson tone LUT with `tone_knot_weights` and
-  Highlights inside it, then RGB curves, HSL, colour grade, clarity/Texture,
-  saturation, NR, sharpening and local edits.
-- Negative Texture is two measured parallel low-pass arms (`A1=0.172443`,
-  `A2=0.304888`) with a calibrated hyperbolic depth law.
-- `render::camera_base_look` estimates the per-photo base curve from the
-  RAW's embedded preview on 64-column block means, paired like with like
-  (the v1.6.0 estimator, §12); a RAW that carries no sharpening amount renders
-  at Lightroom's default of 40, a baked raster at 0.
+`src/render.rs` is a deterministic f32
+pipeline: linear-light vignette and dehaze, a monotone Fritsch–Carlson tone
+LUT with Highlights inside it, then RGB curves, HSL, colour grade,
+clarity/Texture (two measured low-pass arms, `A1=0.172443`,
+`A2=0.304888`), saturation, NR, sharpening (a RAW with no amount at
+Lightroom's default of 40, a baked raster at 0) and local edits, under the
+per-photo base look of §6.
 
-### Masks
+#### Masks
 
-- `src/recipe.rs`, `src/render.rs` and `src/xmp.rs` implement radial, linear,
-  brush, bitmap, luminance-range and colour-range masks with ordered
-  Add/Subtract/Intersect composition in both the engine and the Lightroom
-  sidecar for every spellable component. Lightroom's own feathered
-  intersection rendering remains unmeasured.
-- Radial feather is a measured 290×11 `alpha(rho, feather)` LUT; brush dabs
-  use `(1-rho^m)^n` and the measured `kappa=0.1284` flow law over pixel-centre
-  sampling and the pixel/aspect metric, and `MaskBrushTable` import validates
-  MD5→`.acr`→Brotli.
+radial, linear, brush, bitmap, luminance-range and colour-range
+masks with ordered Add/Subtract/Intersect composition in the engine and
+the sidecar; a measured 290×11 `alpha(rho, feather)` LUT, brush dabs by
+`(1-rho^m)^n` with `kappa=0.1284` over pixel-centre sampling, and
+`MaskBrushTable` import validated MD5→`.acr`→Brotli. Lightroom's own
+feathered intersection rendering remains unmeasured.
 
-### AI masks
+#### AI masks
 
-- `src/segment.rs` and `python/segment.py` run commit-pinned BiRefNet subject
-  selection with a named U²-Net fallback, OneFormer ADE20K sky selection
-  through the 150-class checked-in table, and SAM 2.1 objects from ordered
-  gesture points over the `gp1` IPC.
-- Provenance-keyed caches include the backend generation and exact prompt
-  points, so a fallback alpha is re-derived once the pinned backend arrives;
-  these are local re-creations, not Adobe-computed mask pixels.
+`src/segment.rs` and `python/segment.py`: commit-pinned
+BiRefNet with a named U²-Net fallback, OneFormer ADE20K sky through the
+checked-in 150-class table, SAM 2.1 objects from ordered gesture points;
+provenance-keyed caches, local re-creations rather than Adobe's mask pixels.
 
-### Lens correction and Lightroom mask-frame laws
+#### Lens correction and Lightroom mask-frame laws
 
-- `src/lensmeta.rs`, `src/lcp.rs` and `src/render.rs` combine Sony 0x7037's 16
-  native `(i+1)/16` samples, a 2048-node/64-knot mask solve, and guarded
-  Newton inversion for rectilinear `.lcp` profiles while refusing fisheye-only
-  entries.
-- Radials use exact-once `m_lr^-1 ∘ T_engine` transport; linear H2 keeps
-  corrected-frame handles but is openly not pixel-closed, and brushes remain
-  in the raw frame.
+Sony 0x7037's 16 native
+`(i+1)/16` samples, a 2048-node/64-knot mask solve and guarded Newton
+inversion for rectilinear `.lcp` profiles (fisheye-only entries refused);
+radials use exact-once `m_lr^-1 ∘ T_engine` transport, linear H2 is openly
+not pixel-closed, brushes stay in the raw frame.
 
-### XMP and Lightroom interoperability
+#### XMP and Lightroom interoperability
 
-- [`src/xmp.rs`](src/xmp.rs) uses scoped, typed XML traversal, including
-  nested `Look`, and conservatively merges owned edits while preserving
-  unmodeled fields; Save writes the develop store and beside-RAW export is
-  explicit.
-- `LR_MASK_FRAME_SCALE=1.0`, `LocalExposure2012=EV/4`, local Hue is
-  `degrees/180`, the other measured local family is `/100`, global Sharpness
-  is 1:1, and polarity comes from `MaskInverted` rather than `Flipped`.
-- **One inversion, composed in one place.** A recipe spells a mask's polarity
-  twice — the correction's own Invert flag and the geometry's own bit — and
-  `LocalAdjustment::net_inverted` is the only place the two meet: the render,
-  the sidecar writer, the mask-habit classifier and the GUI overlay all read
-  it, so an inverted brush or AI selection leaves for Lightroom as the half
-  it really covers, and a Lightroom mask that arrives inverted renders
-  inverted.
+[`src/xmp.rs`](src/xmp.rs) uses
+scoped, typed XML traversal (nested `Look` included), merges owned edits
+conservatively and preserves unmodeled fields; `LR_MASK_FRAME_SCALE=1.0`,
+`LocalExposure2012=EV/4`, local Hue `degrees/180`, the other measured local
+family `/100`, global Sharpness 1:1, polarity from `MaskInverted`; a mask's
+two polarity bits meet in one place, `LocalAdjustment::net_inverted`, read
+by the render, the sidecar writer, the mask-habit classifier and the GUI.
 
-### AI advisor and reverse fit
+#### AI advisor and reverse fit
 
-- `src/advisor/` validates AI proposals into bounded recipes, keeps Responses
-  at `store:false`, gives the verifier data rather than pixels, and adopts a
-  guided revision only when it does not lower the score.
-- `src/style.rs` retrieves z-scored RAW+XMP exemplars with four optional
-  cosine terms (image, direction text, description text, and the separate
-  finished-photo look library); the shipped weights are `W_EMB = 4`,
-  `W_TXT = 0.5` and `W_DESC = 0.5` from the calibration harness, plus
-  `W_LOOK = 1.0`, the one term that harness cannot score.
-- `src/fit.rs` runs the luminance-CDF, exposure, basis, tone, saturation and
-  cast inverse stages behind a >45°/≥5% foreign-hue veto, consulting the DIFT
-  (SD 2.1) field of `src/correspond.rs` + `python/correspond.py` on divergent
-  pairs; `src/generative.rs` negotiates gpt-image-2 sizes and `src/retouch.rs`
-  is the deterministic heal.
+`src/advisor/` validates proposals into bounded
+recipes, keeps Responses at `store:false`, gives the verifier data rather than
+pixels and adopts a guided revision only when it does not lower the score;
+`src/style.rs` retrieves z-scored exemplars with the shipped `W_EMB = 4`,
+`W_TXT = 0.5`, `W_DESC = 0.5` and the unmeasured `W_LOOK = 1.0`; `src/fit.rs`
+runs the inverse stages behind the >45°/≥5% foreign-hue veto and consults
+the DIFT field of `src/correspond.rs` on divergent pairs; `src/generative.rs`
+negotiates gpt-image-2 sizes and `src/retouch.rs` is the deterministic heal.
 
-### Application and infrastructure
+#### Application and infrastructure
 
-- Rust (rustc/cargo **1.94**, edition 2024) · rawler (RAW decode, 24 formats /
-  725 bodies) · `image`, qcms, rayon, clap, serde, ureq, `eframe`/egui and
-  `tiny_http` back the shared library, CLI, desktop GUI and loopback web UI.
-- The server uses a 32-byte token plus Host/Origin/no-store defenses; the GUI
-  keeps variants, versions and a deleted-version registry; a denoise's success
-  requires the typed `sidecar_wrote` contract; a 1771 MB reference probe sets
-  the 1800 MB per-photo budget, and a 4 GiB RAW gate bounds admission.
-- The [`build` workflow](.github/workflows/build.yml) covers default and GUI
-  feature sets on Ubuntu and macOS; model weights are not stored here. The
-  current battery is **1763 library (1748 pass + 15 `#[ignore]`d forensic probes) / 25 CLI / 223 GUI / 2+2 contract** tests, and
-  [`scripts/check_docs.py`](scripts/check_docs.py) re-derives the pinned
-  release claims.
+Rust (rustc/cargo **1.94**, edition
+2024) · rawler · `image`, qcms, rayon, clap, serde, ureq, `eframe`/egui and
+`tiny_http` behind the shared library, CLI, desktop GUI and loopback web UI.
+The server uses a 32-byte token plus Host/Origin/no-store defenses; a
+denoise's success requires the typed `sidecar_wrote` contract; a 1771 MB
+reference probe sets the 1800 MB per-photo budget and a 4 GiB RAW gate
+bounds admission. The [`build` workflow](.github/workflows/build.yml)
+covers default and GUI feature sets on Ubuntu and macOS; the current
+battery is **1763 library (1748 pass + 15 `#[ignore]`d forensic probes) /
+25 CLI / 223 GUI / 2+2 contract** tests, and
+[`scripts/check_docs.py`](scripts/check_docs.py) re-derives the pinned
+release claims.
 
 ## Status, roadmap, and known limitations
 
