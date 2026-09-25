@@ -164,10 +164,10 @@ below are the whole path, and every number in their captions is measured.
 The source frame is one function for both entry points: a neutral develop of
 the RAW at a 2048 px working edge, never the camera's embedded JPEG preview.
 That matters because the two read differently — on the desert pair below, the
-embedded rendition measures D = 0.361 and buys the bounded atmosphere path,
-while the neutral develop of the same sensor frame measures D = 0.275 and
+embedded rendition measured D = 0.361 and bought the bounded atmosphere path,
+while the neutral develop of the same sensor frame reads D = 0.278 and
 earns the full solve. The pair is read at TWO scales and both are printed:
-D = 0.275 per pixel and 0.609 per layout on that frame, so a report says
+D = 0.278 per pixel and 0.658 per layout on that frame, so a report says
 whether the solve paired source pixel with target pixel or only their
 statistics. The coarse reading is a second scale, not a more forgiving one —
 measured, it reads HIGHER at frame, zone and cell scope, because the luma is
@@ -212,25 +212,27 @@ and prompts in [docs/SHOWCASE.md](docs/SHOWCASE.md).</sub>
 <img src="docs/images/showcase-canyon-reverse-fit.jpg" alt="Desert canyon at dusk: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" />
 
 <sub><b>Desert canyon at dusk.</b> The desert pair from the paragraph
-above — the reference pair v1.3.0 and v1.3.1 were measured on — and the
-hardest of the three: the target is a full regeneration, not a grade, so
-the sky's texture is re-synthesised and only its layout survives
-(<b>D = 0.275</b> at pixel scale, 0.609 at layout scale; the sky zone alone
-reads 0.617, past the 0.35 pairing line). Top row: the straight
-conversion, the 3520×2336 <code>reimagine</code> target, and the recovered
-recipe rendered on the 9504×6336 RAW, fitted at Reverse-fit strength 85 %: look
-error <b>0.110 → 0.048</b>, whole-frame mean |diff| against the target
-<b>0.0276</b> (v1.2.6 shipped 0.0571), sky ΔE <b>18.2 → 4.9</b> — a solved
-white balance (5653 K as shot → 8400 K), −1.3 EV under a six-knot residual
-curve, global saturation +35 with clarity and texture +20, the mixer on Red
-and Orange (+33/+33), two Select Sky bands vouched by the region's own
-cells where its re-synthesised pixels have no partner, four boundary-gated
-bitmap tiles, and the 12×8×8 colour field that renders in-app and rides in
-the sidecar's payload. Confidence 0.25, read from the accepted zone's
-residual, not from the frame. Bottom row: the same window at each source's
-native resolution. What the fit does not reach is disclosed rather than
-measured away: the land stays at ΔE 6.9, and the warm haze on the far mesas
-is the known gap. Full numbers in [docs/SHOWCASE.md](docs/SHOWCASE.md).</sub>
+above — the reference pair every release is gated on — and the hardest of
+the three: the target is a full regeneration, not a grade, so the sky's
+texture is re-synthesised and only its layout survives (<b>D = 0.278</b>
+at pixel scale, 0.658 at layout scale; the sky zone alone reads 0.649,
+past the 0.35 pairing line). Top row: the straight conversion, the
+3520×2336 <code>reimagine</code> target, and the recipe the v1.6.1 release
+gate itself recovered at Reverse-fit strength 85 %, rendered on the
+9504×6336 RAW: look error <b>0.129 → 0.048</b>, and against the target,
+measured at 1000 px, sky ΔE <b>3.8</b> (v1.6.0: 4.6) and whole-frame mean
+|diff| <b>0.0248</b> (v1.6.0: 0.0260) — a solved white balance (5653 K as
+shot → 8700 K), −1.35 EV under a six-knot residual curve, saturation +36
+with clarity and texture +20, the mixer on Red and Orange (+33/+33), two
+Select Sky bands vouched by the region's own cells where its re-synthesised
+pixels have no partner, two land bands, two boundary-gated bitmap tiles,
+one field mask, and the 12×8×8 colour field whose eight unreadable
+cells at the top of the sky are now read on the region pairing. Confidence
+0.25, read from the accepted zone's residual, not from the frame. Bottom
+row: the same window at each source's native resolution. What the fit does
+not reach is disclosed rather than measured away: the land stays at ΔE 6.0,
+and the warm haze on the far mesas is the known gap. Full numbers in
+[docs/SHOWCASE.md](docs/SHOWCASE.md).</sub>
 
 `match` recovers an editable recipe from any finished rendition of the same
 frame ([`src/fit.rs`](src/fit.rs)). A generated target is not pixel-aligned
@@ -670,7 +672,7 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 | Camera base look, v1.6.0 estimator (star frame, 8-bit levels) | develop against the camera's rendition 0.75 rms (median +0.19), 4.24 (+2.56) before; 4 knots instead of 13; finished-develop readings 0.3075 → 0.2922 and 0.0387 → 0.0139 | [What is new §12](#12-the-cameras-own-look-is-read-from-the-picture-like-with-like) |
 | Reverse-fit, stone viaduct (full solve, Reverse-fit strength 100 %) | look error 0.161 → 0.023 at confidence 0.63 (a global solve with the cast curves projected to t = 0.485, the per-band mixer on Orange/Yellow/Aqua/Blue at the 45 ceiling, two semantic zones, two boundary-gated tiles and one field mask), D = 0.180; at the default 65 % the pair fits to 0.047 at confidence 0.25 with the mixer capped at 18, four tiles and two field masks, and v1.2.2's fit of it is where the seam fix was measured: sky tile 0.0278 → 0.0042 (k 0.121), delivered +3.15 → +0.92 codes | [What is new §1](#1-whole-image-ai-generation-then-reverse-fit-an-editable-recipe-from-any-finished-look) |
 | Reverse-fit, Cornwall islet (full solve, composed calibration) | look error 0.137 → 0.027 at confidence 0.66, D = 0.136 sized from the sensor frame (0.304 from the cropped preview); the global cast projected to t = 0.363, delivered sky hue spread 9.6° (v1.2.2 shipped 33.1°) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
-| Reverse-fit, desert canyon at dusk (full solve, Reverse-fit strength 85 %; the v1.3.0/v1.3.1 reference pair) | look error 0.110 → 0.048 at confidence 0.25, D = 0.275 at pixel scale and 0.609 at layout scale (sky zone 0.617); on the 2048 px acceptance render, whole-frame mean \|diff\| against the target 0.0276 (v1.2.6: 0.0571), sky ΔE 18.2 → 4.9, land 7.0 → 6.9; a solved white balance, two Select Sky bands, four boundary-gated tiles and the 12×8×8 colour field; `match --zoned` 5 min 29 s | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
+| Reverse-fit, desert canyon at dusk (full solve, Reverse-fit strength 85 %; the reference pair every release is gated on, the v1.6.1 gate's own fit) | look error 0.129 → 0.048 at confidence 0.25, D = 0.278 at pixel scale and 0.658 at layout scale (sky zone 0.649); against the target, measured at 1000 px: sky ΔE 3.8 (v1.6.0: 4.6), whole-frame mean \|diff\| 0.0248 (v1.6.0: 0.0260), land ΔE 6.0; a solved white balance, two Select Sky bands, two land bands, two boundary-gated tiles, one field mask and the 12×8×8 colour field (8 of its cells read on the region pairing) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §6](#6-a-bilateral-grid-local-field-prices-every-local-producer-first) |
 | AI develop, model judge | 2026-09-02 four-looks batch on the full 169 + 94 index at `--style 1.0 --strength 0.9`, the direction leading: moody 68 → 70 → 78 (both adopted) → 69 (discarded), verdict Accept; golden 87 → 84 (discarded) after the verifier twice sent the proposal back for the grain it never set, verdict Revise — unsaved, the figure renders the proposal; vivid 70 → 84 (adopted) → 82 (discarded), verdict Accept. The finished-look-only run (2026-09-01) and v1.2.2's full-index run are on the showcase page | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Style retrieval weights | corpus harness (169 described exemplars, 156 queries): `W_EMB=4`, `W_TXT=0.5`, `W_DESC=0.5`, standardised variant with the text-hubness correction — MAE 0.688864 vs baseline 0.713143, +0.024280, CI [+0.005837, +0.041111] under the prose proxy; the corrected point at the old `W_TXT=4` regresses with CI [−0.069654, −0.005140], which is why the weight moved; under the tag-string proxy nothing beats the text-free row; `W_LOOK=1.0` is unmeasured (the harness cannot see the look library) and its scale is a real ratio against the direction terms — it ships inside a stable band, order unchanged to 2x and first moving at 4x | [AI advisor](#ai-advisor-and-reverse-fit) |

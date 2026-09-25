@@ -7,8 +7,10 @@ four-looks panel and the Cornwall panel were rendered on 2026-09-02 on the
 v1.2.3 build; the
 stone-viaduct panel's right column was re-rendered on 2026-09-03 on the v1.2.4
 build at Reverse-fit strength 100 %, its other two columns being the v1.2.2
-composition's frames re-encoded once; the desert-canyon panel was rendered
-on 2026-09-12 on the v1.3.1 build; every frame not marked
+composition's frames re-encoded once; the desert-canyon panel was
+re-rendered on 2026-09-25 on the v1.6.1 build from the release gate's own
+fit, keeping the 2026-09-12 panel's middle column (the target, unchanged);
+every frame not marked
 *generated* is rendered by AutoShade's engine from a recipe, and every
 "straight conversion" is AutoShade's own neutral develop of the RAW, not the
 camera JPEG. Model-judge scores are automated review, not human aesthetic
@@ -99,41 +101,55 @@ delivered sky spread of 9.6° against the target's 1.6° and v1.2.2's
 
 <img src="images/showcase-canyon-reverse-fit.jpg" alt="Desert canyon at dusk: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" />
 
-<sub><b>Desert canyon at dusk.</b> The reference pair v1.3.0 and v1.3.1
-were measured on, rendered on 2026-09-12 on the v1.3.1 build. The target
-is a 3520 × 2336 <code>reimagine</code> purchase made from the desktop app
-on 2026-09-10; the app records such a purchase as its origin file only,
-not the Direction text or the model, so unlike the two panels above this
-caption cannot quote the prompt. It is a full regeneration rather than a
-grade: the sky's texture is re-synthesised and only its layout survives,
-which is why this pair reads <b>D = 0.275</b> at pixel scale and 0.609 at
-layout scale (the sky zone 0.617, the land 0.273) — under the 0.35 line at
-frame scope, so the full solve ran, with the sky's pixels admitted on the
-region's own 12 × 8 cell means where no pixel has a partner. The right
-column is the v1.3.1 fit at Reverse-fit strength 85 % (`match --zoned`,
-5 min 29 s; the product default is 65 %, where the colour field is inert by
-design and the sky stays 27 ΔE from the target). Look error <b>0.110 →
-0.048</b>: a solved white balance (5653 K as shot → 8400 K, tint +33),
-exposure −1.3 EV with contrast +3.1 and blacks −3.4 under a six-knot
-residual tone curve, global saturation +35, clarity and texture +20 within
-the ±20 budget, the per-band mixer on Red and Orange (saturation +33,
-luminance +33; Aqua and Blue one-sided, left neutral), no cast curves (they
-would have re-hued a region), two Select Sky bands (band 1/2 at +0.14 EV,
-saturation +6; band 2/2 at +0.19 EV, contrast +0.5, shadows −0.9,
-saturation +3; accepted after 15 trials, analysis-scale ΔE 30.1 → 27.1),
-four boundary-gated bitmap tiles (r2c2, r2c0, r1c0, r3c3; cross-boundary
-steps 0.0023–0.0074 after shrink, each context-charged within the 0.012
-ceiling), no field mask (both candidates refused by the zone gate), and the
-12 × 8 × 8 colour field (frame residual 0.0439 → 0.0171, 85 of 88 measured
-cells on the support-free solve). Confidence 0.25, read from the accepted
-zone's residual (0.436), not the frame's 0.047. On the 2048 px acceptance
-render: whole-frame mean |diff| against the target <b>0.0276</b> (v1.2.6
-shipped 0.0571 from the command line and 0.0949 from the saved desktop
-fit), sky ΔE <b>18.2 → 4.9</b> with |dL| 0.6 and L\*std 1.03 of the
-target's, land ΔE 7.0 → 6.9. The far mesas keep a warm haze on the land
-side that the render reads cooler (a\* 24.5 against 18): a haze-colour gap
-along a real edge, inside the land's ΔE, disclosed as the known gap rather
-than measured away. The full three-strength table is in
+<sub><b>Desert canyon at dusk.</b> The reference pair every release has
+been gated on since v1.3.0, re-rendered on 2026-09-25 on the v1.6.1 build:
+the left and right columns are the installed 1.6.1 command line's own
+renders, the recipe being the one the v1.6.1 release gate fitted at
+Reverse-fit strength 85 % (the product default is 65 %). The target is a
+3520 × 2336 <code>reimagine</code> purchase made from the desktop app on
+2026-09-10; the app records such a purchase as its origin file only, not
+the Direction text or the model, so unlike the two panels above this
+caption cannot quote the prompt. The full-size file has since left the
+machine, so the gate's fit reads a 1000 × 663 copy of it, and the panel's
+middle column is the 2026-09-12 panel's, made from the full file; the
+2026-09-12 panel's right-hand detail crop sat 60 × 27 px off the other two,
+which this panel corrects. It is a full regeneration rather than a grade:
+the sky's texture is re-synthesised and only its layout survives, which is
+why this pair reads <b>D = 0.278</b> at pixel scale and 0.658 at layout
+scale (the sky zone 0.649, the land 0.273) — under the 0.35 line at frame
+scope, so the full solve ran, with the sky's pixels admitted on the
+region's own 12 × 8 cell means where no pixel has a partner. Look error
+<b>0.129 → 0.048</b>: a solved white balance (5653 K as shot → 8700 K,
+tint +39), exposure −1.35 EV with contrast +3.1, highlights −0.9 and
+shadows −1.9 under a six-knot residual tone curve, global saturation +36,
+clarity and texture +20 within the ±20 budget, the per-band mixer on Red
+and Orange (saturation +33, luminance +33; Aqua and Blue one-sided, left
+neutral), no cast curves (they would have re-hued a region), two Select
+Sky bands (band 1/2 at +0.15 EV, saturation +0.8; band 2/2 at +0.19 EV,
+contrast +0.4, shadows −0.7, saturation +3.2; their colour controls
+shipped at 0.797 and 0.875 of the solved move on the target's own cell
+means; accepted after 15 trials, analysis-scale ΔE 29.4 → 26.9), two land
+bands (band 1/2 at +0.12 EV, contrast +1.7, shadows −2.9, blacks −1.0;
+band 2/2 saturation −0.2; ΔE 6.44 → 6.39), two boundary-gated bitmap
+tiles (r1c3 and r1c0; cross-boundary steps 0.0631 → 0.0020 and
+0.0987 → 0.0062 luma after shrink, each context-charged within the 0.012
+ceiling), one field mask (frame residual 0.0434 → 0.0399), and the
+12 × 8 × 8 colour field (frame residual 0.0399 → 0.0216; 88 of 88 measured
+cells on the support-free solve, and the 8 cells at the top of the sky
+that pixel evidence could not read at all — the grey-blue block of every
+earlier build — read on the region the segmenter found in both frames).
+Confidence 0.25, read from the accepted sky zone's residual (0.424), not
+the frame's 0.046. Measured against the target at 1000 × 663, the gate's
+own convention: sky ΔE <b>3.8</b> with dL −0.1 and L\*std 1.10 of the
+target's, land ΔE <b>6.0</b> with dL +0.7, whole-frame mean |diff|
+<b>0.0248</b> (6.3 of 255 codes); the v1.6.0 build read 4.6 / 0.0260 on
+the same fit settings, and the 2026-09-12 render of this pair, measured on
+a 2048 px acceptance render, read sky ΔE 18.2 → 4.9 and 0.0276. The far
+mesas keep a warm haze on the land side that the render reads cooler, a
+haze-colour gap along a real edge, inside the land's ΔE, disclosed as the
+known gap rather than measured away. The v1.6.1 gate's three-strength
+numbers are in the release ledger, [ROADMAP.md](ROADMAP.md); the first
+three-strength table is in
 [RELEASE_NOTES_v1.3.0.md](RELEASE_NOTES_v1.3.0.md).</sub>
 
 ## Part B — AI analysis with a style reference: one photograph, four looks

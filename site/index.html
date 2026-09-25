@@ -11,8 +11,8 @@
   <meta property="og:title" content="AutoShade · AI-assisted RAW development">
   <meta property="og:description" content="Describe the picture you want; get it back as an editable develop of your own RAW.">
   <meta property="og:url" content="https://autoshade.dev/">
-  <meta property="og:image" content="https://autoshade.dev/images/showcase-viaduct-reverse-fit.jpg">
-  <meta property="og:image:alt" content="Stone viaduct: the straight conversion, the picture an image model generated from it, and the recipe AutoShade recovered from that picture rendered on the RAW">
+  <meta property="og:image" content="https://autoshade.dev/images/showcase-canyon-reverse-fit.jpg">
+  <meta property="og:image:alt" content="Desert canyon at dusk: the straight conversion, the picture an image model generated from it, and the recipe AutoShade recovered from that picture rendered on the RAW">
   <meta name="theme-color" content="#f5f1e9" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#101817" media="(prefers-color-scheme: dark)">
   <link rel="icon" type="image/png" href="favicon.png">
@@ -55,8 +55,8 @@
         <p class="hero-meta">Windows · macOS · Linux (CLI) · Open source under MIT</p>
       </div>
       <figure class="hero-figure">
-        <img src="images/showcase-viaduct-reverse-fit.jpg?v=1.6.1" width="1600" height="1000" alt="Stone viaduct: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row">
-        <figcaption><strong>Ask for the picture, keep the RAW.</strong> One Sony α7R IVA 61 MP <code>.ARW</code>: the straight conversion, the picture <code>gpt-image-2</code> generated from it for <em>a clearer afternoon, a little more contrast, a slightly deeper blue sky, everything else unchanged</em>, and the recipe AutoShade recovered from that picture, rendered on the full RAW &mdash; look error <strong>0.161 → 0.023</strong>. The bottom row is one window at 1:1: the recipe carries the look, the sensor carries the detail, and the generated picture is a target, never the delivery. <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Every number and prompt</a>.</figcaption>
+        <img src="images/showcase-canyon-reverse-fit.jpg?v=1.6.1-r2" width="1600" height="1000" alt="Desert canyon at dusk: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row">
+        <figcaption><strong>Ask for the picture, keep the RAW.</strong> One Sony α7R IVA 61 MP <code>.ARW</code> at dusk: the straight conversion, the picture an image model generated from it &mdash; a full regeneration, the sky's texture re-synthesised and only its layout kept &mdash; and the recipe AutoShade recovered from that picture, rendered on the full RAW: sky ΔE <strong>3.8</strong> against the target, whole-frame mean |diff| <strong>0.0248</strong>, the recipe editable and exportable to Lightroom. The bottom row is one window at 1:1: the recipe carries the look, the sensor carries the detail, and the generated picture is a target, never the delivery. <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Every number</a>.</figcaption>
       </figure>
     </section>
 
@@ -165,16 +165,16 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
     <section class="section showcase" id="showcase-a" aria-labelledby="showcase-a-title">
       <p class="section-kicker">Showcase · Part A</p>
       <h2 id="showcase-a-title">Reimagine → reverse-fit</h2>
-      <p class="section-lede">Targets can invent content; fitted renders cannot. Fit an editable recipe to the target's look, then apply it to the full RAW. The stone viaduct at the top of the page is the third pair.</p>
+      <p class="section-lede">Targets can invent content; fitted renders cannot. Fit an editable recipe to the target's look, then apply it to the full RAW. The desert canyon at the top of the page is the third pair.</p>
+
+      <figure class="wide-figure">
+        <img src="images/showcase-viaduct-reverse-fit.jpg?v=1.6.1" width="1600" height="1000" alt="Stone viaduct: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
+        <figcaption><strong><a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Stone viaduct.</a></strong> Top row: straight conversion, <code>gpt-image-2</code> target (<strong>D = 0.180</strong>, under the 0.35 threshold: full solve), recovered recipe on the RAW. Look error <strong>0.161 → 0.023</strong> at confidence 0.63, at Reverse-fit strength 100 %, not the 65 % default.</figcaption>
+      </figure>
 
       <figure class="wide-figure">
         <img src="images/showcase-cornwall-reverse-fit.jpg?v=1.6.1" width="1600" height="1000" alt="Cornwall lighthouse islet: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
         <figcaption><strong><a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Cornwall lighthouse islet: the same three stages.</a></strong> The body's 4:3 aspect makes its embedded preview a centred crop of the 3:2 sensor. Sized from the sensor frame the prompt bought a target at <strong>D = 0.136</strong>, against 0.304 from the preview. Look error <strong>0.137 → 0.027</strong> at confidence 0.66.</figcaption>
-      </figure>
-
-      <figure class="wide-figure">
-        <img src="images/showcase-canyon-reverse-fit.jpg?v=1.6.1" width="1600" height="1000" alt="Desert canyon at dusk: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
-        <figcaption><strong><a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Desert canyon at dusk: the reference pair v1.3.0 and v1.3.1 were measured on.</a></strong> A full regeneration, not a grade: the sky's texture is re-synthesised and only its layout survives, <strong>D = 0.275</strong> at pixel scale and 0.609 at layout scale. Fitted at Reverse-fit strength 85 %: look error <strong>0.110 → 0.048</strong>, sky ΔE <strong>18.2 → 4.9</strong>, whole-frame mean |diff| 0.0276 against the target, through a solved white balance, two Select Sky bands, four boundary-gated tiles and the colour field.</figcaption>
       </figure>
 
       <aside class="honesty" aria-label="Reverse-fit limitation">
