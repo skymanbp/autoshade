@@ -1,6 +1,13 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.6.0 — the RAW denoiser is told the true noise,
+> Status: **implemented** (v1.6.1 — the colour field reads a paired region's
+> cells on the pairing where the pixel evidence cannot read them (R42), and the
+> 2026-09-24 audit's findings closed: the reverse fit's joint veto, rescore base
+> and tone ladder, Upright's keystone row after the turn, the vignette's half
+> pixel, orientation-only sidecars read in the photograph's frame, and the
+> advisor, style, store, decode, GUI, script and workflow fixes of issues
+> #6–#14;
+> v1.6.0 — the RAW denoiser is told the true noise,
 > place by place, gives back only luminance grain, keeps faint stars with v2 of
 > its fine-tune and maps hot pixels in every develop; the camera base look is
 > paired like with like and read on block means, and every saved photo gets it;

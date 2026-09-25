@@ -17,7 +17,7 @@
   <meta name="theme-color" content="#101817" media="(prefers-color-scheme: dark)">
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="preload" href="fonts/Inter-autoshade.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="styles.css?v=1.6.0">
+  <link rel="stylesheet" href="styles.css?v=1.6.1">
 </head>
 <body>
   <a class="skip-link" href="#main-content">Skip to content</a>
@@ -55,7 +55,7 @@
         <p class="hero-meta">Windows · macOS · Linux (CLI) · Open source under MIT</p>
       </div>
       <figure class="hero-figure">
-        <img src="images/showcase-island-four-looks.jpg?v=1.6.0" width="1600" height="1112" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts">
+        <img src="images/showcase-island-four-looks.jpg?v=1.6.1" width="1600" height="1112" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts">
         <figcaption><strong>One photograph, four looks.</strong> One Sony α7R IVA 61 MP <code>.ARW</code>: straight conversion and three AI develops, changing only direction text. <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Judge trails</a> are automated review, not human aesthetic approval.</figcaption>
       </figure>
     </section>
@@ -125,7 +125,7 @@
     <section class="section split-section" id="download" aria-labelledby="download-title">
       <div>
         <p class="section-kicker">Download</p>
-        <h2 id="download-title">Download v1.6.0.</h2>
+        <h2 id="download-title">Download v1.6.1.</h2>
         <p>9 assets: the first 7 files below, plus <code>checksums.txt</code> with their SHA-256, and the trained RAW denoiser in the last row &mdash; uploaded by hand from the training run rather than built from the tag, and not something you install: the AI denoise sidecar fetches it once against a pinned digest, trying a byte-exact copy on Hugging Face first.</p>
         <table class="release-files">
           <thead>
@@ -134,15 +134,15 @@
           <tbody>
             <tr><td><code>autoshade.exe</code></td><td class="asset-use">CLI</td><td class="asset-bytes">22,996,992</td></tr>
             <tr><td><code>autoshade-gui.exe</code></td><td class="asset-use">desktop app</td><td class="asset-bytes">29,428,224</td></tr>
-            <tr><td><code>AutoShade-Setup-1.6.0.exe</code></td><td class="asset-use">installer</td><td class="asset-bytes">15,313,652</td></tr>
-            <tr><td><code>autoshade-1.6.0-windows-x64.zip</code></td><td class="asset-use">portable archive</td><td class="asset-bytes">20,650,243</td></tr>
-            <tr><td><code>AutoShade-1.6.0-macos-universal.zip</code></td><td class="asset-use">macOS app bundle</td><td class="asset-bytes">41,551,662</td></tr>
-            <tr><td><code>AutoShade-1.6.0-linux-x64.zip</code></td><td class="asset-use">Linux command line only</td><td class="asset-bytes">9,982,925</td></tr>
-            <tr><td><code>AutoShade-1.6.0-macos-cli.zip</code></td><td class="asset-use">macOS command line only</td><td class="asset-bytes">18,078,588</td></tr>
+            <tr><td><code>AutoShade-Setup-1.6.1.exe</code></td><td class="asset-use">installer</td><td class="asset-bytes">15,313,652</td></tr>
+            <tr><td><code>autoshade-1.6.1-windows-x64.zip</code></td><td class="asset-use">portable archive</td><td class="asset-bytes">20,650,243</td></tr>
+            <tr><td><code>AutoShade-1.6.1-macos-universal.zip</code></td><td class="asset-use">macOS app bundle</td><td class="asset-bytes">41,551,662</td></tr>
+            <tr><td><code>AutoShade-1.6.1-linux-x64.zip</code></td><td class="asset-use">Linux command line only</td><td class="asset-bytes">9,982,925</td></tr>
+            <tr><td><code>AutoShade-1.6.1-macos-cli.zip</code></td><td class="asset-use">macOS command line only</td><td class="asset-bytes">18,078,588</td></tr>
             <tr><td><code>autoshade-raw-denoise-v2.pth</code></td><td class="asset-use">RAW denoiser weights, fetched on demand from the v1.6.0 release</td><td class="asset-bytes">130,590,559</td></tr>
           </tbody>
         </table>
-        <p><a class="button button-primary" href="https://github.com/skymanbp/autoshade/releases/tag/v1.6.0">Open the v1.6.0 release</a></p>
+        <p><a class="button button-primary" href="https://github.com/skymanbp/autoshade/releases/tag/v1.6.1">Open the v1.6.1 release</a></p>
       </div>
       <div class="quickstart" aria-labelledby="quickstart-title">
         <h3 id="quickstart-title">Quickstart</h3>
@@ -189,17 +189,17 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
       <p class="section-lede">Targets can invent content; fitted renders cannot. Fit an editable recipe to the target's look, then apply it to the full RAW.</p>
 
       <figure class="wide-figure">
-        <img src="images/showcase-viaduct-reverse-fit.jpg?v=1.6.0" width="1600" height="1000" alt="Stone viaduct: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
+        <img src="images/showcase-viaduct-reverse-fit.jpg?v=1.6.1" width="1600" height="1000" alt="Stone viaduct: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
         <figcaption><strong><a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Stone viaduct.</a></strong> Top row: straight conversion, <code>gpt-image-2</code> target (<strong>D = 0.180</strong>, under the 0.35 threshold: full solve), recovered recipe on the RAW. Look error <strong>0.161 → 0.023</strong> at confidence 0.63, at Reverse-fit strength 100 %, not the 65 % default.</figcaption>
       </figure>
 
       <figure class="wide-figure">
-        <img src="images/showcase-cornwall-reverse-fit.jpg?v=1.6.0" width="1600" height="1000" alt="Cornwall lighthouse islet: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
+        <img src="images/showcase-cornwall-reverse-fit.jpg?v=1.6.1" width="1600" height="1000" alt="Cornwall lighthouse islet: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
         <figcaption><strong><a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Cornwall lighthouse islet: the same three stages.</a></strong> The body's 4:3 aspect makes its embedded preview a centred crop of the 3:2 sensor. Sized from the sensor frame the prompt bought a target at <strong>D = 0.136</strong>, against 0.304 from the preview. Look error <strong>0.137 → 0.027</strong> at confidence 0.66.</figcaption>
       </figure>
 
       <figure class="wide-figure">
-        <img src="images/showcase-canyon-reverse-fit.jpg?v=1.6.0" width="1600" height="1000" alt="Desert canyon at dusk: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
+        <img src="images/showcase-canyon-reverse-fit.jpg?v=1.6.1" width="1600" height="1000" alt="Desert canyon at dusk: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
         <figcaption><strong><a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Desert canyon at dusk: the reference pair v1.3.0 and v1.3.1 were measured on.</a></strong> A full regeneration, not a grade: the sky's texture is re-synthesised and only its layout survives, <strong>D = 0.275</strong> at pixel scale and 0.609 at layout scale. Fitted at Reverse-fit strength 85 %: look error <strong>0.110 → 0.048</strong>, sky ΔE <strong>18.2 → 4.9</strong>, whole-frame mean |diff| 0.0276 against the target, through a solved white balance, two Select Sky bands, four boundary-gated tiles and the colour field.</figcaption>
       </figure>
 
@@ -215,7 +215,7 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
       <p class="section-lede">The one network this project ships its own weights for. Four training runs were made on this project's own data; the first two shipped, the last two were refused by pass marks written down before they started. Every number here was measured on the v1.6.0 build, against Lightroom's Denoise 50 on the same frame.</p>
 
       <figure class="wide-figure">
-        <img src="images/showcase-denoise-star-field.jpg?v=1.6.0" width="1600" height="1000" alt="One 1:1 window of a 61 MP star field, four ways: Lightroom's develop with Denoise off and at 50, AutoShade's neutral develop with no denoise and with its own denoiser at the 71 % default" loading="lazy">
+        <img src="images/showcase-denoise-star-field.jpg?v=1.6.1" width="1600" height="1000" alt="One 1:1 window of a 61 MP star field, four ways: Lightroom's develop with Denoise off and at 50, AutoShade's neutral develop with no denoise and with its own denoiser at the 71 % default" loading="lazy">
         <figcaption><strong><a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">One star field, four ways.</a></strong> The author's own ISO 2500 frame, one 796 × 462 px window at 1:1, shown one stop brighter than the develops (the same gain on all four panels). Top: Lightroom's own develop with Denoise off and at 50. Bottom: AutoShade's neutral develop with no denoise and with its denoiser at the 71 % default: clean colour, the frame's own luminance grain, the faint stars still there. <strong>98.70 %</strong> of 17,817 real faint stars kept against Lightroom's 98.80 %; the finished develop keeps fine grain at a ratio of <strong>0.2922</strong> against Lightroom's 0.2701 (limit ±0.03).</figcaption>
       </figure>
 
@@ -242,39 +242,39 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
 
       <div class="format-grid">
         <figure>
-          <img src="images/formats/cr2.jpg?v=1.6.0" width="600" height="400" alt="Canon CR2 develop" loading="lazy">
+          <img src="images/formats/cr2.jpg?v=1.6.1" width="600" height="400" alt="Canon CR2 develop" loading="lazy">
           <figcaption><strong>.cr2</strong><span>Canon EOS 40D</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/cr3.jpg?v=1.6.0" width="600" height="400" alt="Canon CR3 develop" loading="lazy">
+          <img src="images/formats/cr3.jpg?v=1.6.1" width="600" height="400" alt="Canon CR3 develop" loading="lazy">
           <figcaption><strong>.cr3</strong><span>Canon EOS R6</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/nef.jpg?v=1.6.0" width="600" height="399" alt="Nikon NEF develop" loading="lazy">
+          <img src="images/formats/nef.jpg?v=1.6.1" width="600" height="399" alt="Nikon NEF develop" loading="lazy">
           <figcaption><strong>.nef</strong><span>Nikon D700</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/arw.jpg?v=1.6.0" width="600" height="400" alt="Sony ARW develop" loading="lazy">
+          <img src="images/formats/arw.jpg?v=1.6.1" width="600" height="400" alt="Sony ARW develop" loading="lazy">
           <figcaption><strong>.arw</strong><span>Sony α7 III</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/orf.jpg?v=1.6.0" width="600" height="450" alt="Olympus ORF develop" loading="lazy">
+          <img src="images/formats/orf.jpg?v=1.6.1" width="600" height="450" alt="Olympus ORF develop" loading="lazy">
           <figcaption><strong>.orf</strong><span>Olympus E-M5</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/rw2.jpg?v=1.6.0" width="600" height="451" alt="Panasonic RW2 develop" loading="lazy">
+          <img src="images/formats/rw2.jpg?v=1.6.1" width="600" height="451" alt="Panasonic RW2 develop" loading="lazy">
           <figcaption><strong>.rw2</strong><span>Panasonic DMC-GX85</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/pef.jpg?v=1.6.0" width="600" height="397" alt="Pentax PEF develop" loading="lazy">
+          <img src="images/formats/pef.jpg?v=1.6.1" width="600" height="397" alt="Pentax PEF develop" loading="lazy">
           <figcaption><strong>.pef</strong><span>Pentax K-5</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/dng.jpg?v=1.6.0" width="600" height="398" alt="Ricoh DNG develop" loading="lazy">
+          <img src="images/formats/dng.jpg?v=1.6.1" width="600" height="398" alt="Ricoh DNG develop" loading="lazy">
           <figcaption><strong>.dng</strong><span>Ricoh GR II</span></figcaption>
         </figure>
         <figure>
-          <img src="images/formats/raf.jpg?v=1.6.0" width="600" height="400" alt="Fujifilm RAF X-Trans develop" loading="lazy">
+          <img src="images/formats/raf.jpg?v=1.6.1" width="600" height="400" alt="Fujifilm RAF X-Trans develop" loading="lazy">
           <figcaption><strong>.raf</strong><span>Fujifilm X-S10 · X-Trans, approximate</span></figcaption>
         </figure>
       </div>
@@ -318,7 +318,7 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
     <section class="section technology" id="pillars" aria-labelledby="pillars-title">
       <p class="section-kicker">Three pillars</p>
       <h2 id="pillars-title">Three things this does.</h2>
-      <p class="section-lede">Three pillars and their infrastructure, with mathematics and measured results. v1.6.0.</p>
+      <p class="section-lede">Three pillars and their infrastructure, with mathematics and measured results. v1.6.1.</p>
 
       <div class="tech-list">
         <article id="pillar-analysis">
@@ -514,6 +514,6 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
 
   <!-- Shared diagram controls stay external for script-src self. Bump the
        script URL on both diagram pages whenever its bytes change. -->
-  <script src="diagram.js?v=1.6.0" defer></script>
+  <script src="diagram.js?v=1.6.1" defer></script>
 </body>
 </html>
