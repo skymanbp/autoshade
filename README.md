@@ -747,9 +747,9 @@ repeated.
 
 #### RAW decode and CFA
 
-`src/decode.rs` uses rawler (24 formats, 725 bodies), with the composed
-orientation — EXIF plus the photographer's own turns, an imported sidecar's
-`tiff:Orientation` included — applied at the head of the chain; Bayer takes
+`src/decode.rs` uses rawler for **RAW decode, 24 formats**, 725 bodies, with
+the composed orientation — EXIF plus the photographer's own turns, an imported
+sidecar's `tiff:Orientation` included — applied at the head of the chain; Bayer takes
 rawler's demosaic, X-Trans an **approximate** 5×5 plane fit; `src/dcp.rs`
 develops a Lightroom photo through the `.dcp` profile and `crs:Look` it names,
 the one undecoded half (a Look's creative colour table) named on screen, and
@@ -820,9 +820,8 @@ The server uses a 32-byte token plus Host/Origin/no-store defenses; a
 denoise's success requires the typed `sidecar_wrote` contract; a 1771 MB
 reference probe sets the 1800 MB per-photo budget and a 4 GiB RAW gate
 bounds admission. The [`build` workflow](.github/workflows/build.yml)
-covers default and GUI feature sets on Ubuntu and macOS; the current
-battery is **1763 library (1748 pass + 15 `#[ignore]`d forensic probes) /
-25 CLI / 223 GUI / 2+2 contract** tests, and
+covers default and GUI feature sets on Ubuntu and macOS; the
+current battery is **1763 library (1748 pass + 15 `#[ignore]`d forensic probes) / 25 CLI / 223 GUI / 2+2 contract** tests, and
 [`scripts/check_docs.py`](scripts/check_docs.py) re-derives the pinned
 release claims.
 
