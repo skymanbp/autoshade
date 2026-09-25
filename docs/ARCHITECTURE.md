@@ -149,13 +149,13 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1761 library + 25 CLI + 223 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1746 pass + 15 `#[ignore]`d forensic probes and
+> 1763 library + 25 CLI + 223 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1748 pass + 15 `#[ignore]`d forensic probes and
 > the GUI result is 222 pass + one explicit scratch-recipe export probe ignored
 > in the ordinary battery. Counts refreshed 2026-09-24 for v1.6.1 (the
-> 2026-09-24 audit's findings closed, issues #6–#14): +79 / −1 by name against
+> 2026-09-24 audit's findings closed, issues #6–#14): +81 / −1 by name against
 > the v1.6.0 tag (`00d3d09`), listed by the test harness itself on both trees
-> (the v1.6.0 list saved on its release day) — seventy-nine library names: the
+> (the v1.6.0 list saved on its release day) — eighty-one library names: the
 > audit sessions' fifty-five (advisor: a refine echoing a base mask name keeps
 > it byte for byte, in the client and through projection, a refusal part is the
 > model's own failure and not a shape mismatch, a JSON body past the cap is
@@ -205,14 +205,16 @@
 > rotated left-over-right crop the reader accepts is not disclosed, an
 > unmodelled key is named whatever XML whitespace precedes its equals sign, the
 > crop-overshoot note counts pixels of the straightened frame) and the
-> close-out's twenty-four (advisor: a judge reads "too weak" as a push and not
+> close-out's twenty-six (advisor: a judge reads "too weak" as a push and not
 > a pull-back, a chat refusal is named as a refusal; decode: a TIFF profile tag
 > of the wrong type is a hard error and not an untagged file; fit: a flat side
 > reads through the energy term alone, a rescore measures against the base the
 > caller names, an HSL move is not a detail-only companion, the joint veto is
 > wired at both terminal sites, a withheld colour channel is exactly unity
 > under every shrink; the colour field: an unsolvable field is
-> disclosed and not silent, the do-no-harm judges a custom region mask too;
+> disclosed and not silent, the do-no-harm judges a custom region mask too, a
+> cell the pixel evidence cannot read is read on its region pairing; cells:
+> the layout reading raises weight only inside the pairing and only upward;
 > recipe: Transform Scale is clamped to Lightroom's band, Upright matrices past
 > the sixth are dropped; render: the vignette is sampled at the pixel centre,
 > Full squares a turned keystone with no residual convergence, the keystone row
@@ -4434,10 +4436,80 @@ step and ships −0.174 EV where it shipped three quarters of its fit
 bands' 5.91 → 6.08 and the frame-wide residual 0.095 either way. Measured by
 reverting each of the two zoned-fit corrections alone in a copy of the tree:
 the after-reading population moves one land gain by one ulp and nothing else.
+On the reference pair at 0.85 the same population reaches R39's do-no-harm
+re-judgement (`AcceptedZone::judged` on `source_weights`, against
+`judged_before` on the sequential routes): v1.6.0 read the shipped correction
+on the mask's raster against a baseline read on the solver's population, and
+that mixed comparison refused two spatial tiles (k = 0.073, 0.009) and a
+colour-field zone (k = 0.307) that the consistent reading keeps — on its own
+a 0.15 codes mean difference between the renders, measured with the installed
+v1.6.0 re-fitting the pair beside the build at `dd7bb79`, before R42 below.
 On the reference pair (the final gate, before the tag) the release CLI
 re-fitted at 0.65 / 0.85 / 1.0 reads sky ΔE / whole-frame mean |diff| of
-7.0 / 0.0295, 4.6 / 0.0260 and 4.7 / 0.0263 against the target,
-where v1.6.0 read 7.0 / 0.0296, 4.6 / 0.0260 and 4.7 / 0.0263.
+6.3 / 0.0283, 3.8 / 0.0248 and 3.8 / 0.0249 against the target, where
+v1.6.0 read 7.0 / 0.0296, 4.6 / 0.0260 and 4.7 / 0.0263 and the build
+before R42 (below) 7.0 / 0.0295, 4.6 / 0.0260 and 4.7 / 0.0263.
+
+**Layout identity for the colour field (R42, v1.6.1).** The user's eyes at the
+final gate found what those numbers had not: a grey-blue block at the top
+centre of the reference pair's sky, where the target's purple deepens —
+identical in v1.6.0's render (0.15 codes mean between v1.6.0's 0.85 render
+and the build before this correction's). The cause is measured, not
+inferred, with a probe build that dumps
+the frozen evidence model and the per-cell structural readings of the pair:
+the pixel-scale instrument reads the featureless top-centre ninth of the frame
+(the 3×3 spatial-evidence cell r0c1) at correlation +0.479, energy term 1.093,
+D 1.210 — the source's noise against the target's smooth re-synthesis, which
+IS a texture that did not survive — so its confidence is 0, every pixel there
+carries zero evidence weight, and the eight colour-field cells it holds (y0
+and y1, x4–x7 of the 12×8 grid; "88 of 88 measured cells" is 96 less these)
+are neither read by the cell instrument nor given a vertex by either solve.
+The sky's one zone gain, solved from the sky's paired population and vouched
+at 0.797 of its move, then delivers the same shift everywhere: the top corners
+land within 4–7 codes of the target's B−R and the top centre stays 7–12 codes
+too blue, because the source's zenith is bluer than its sides and the
+target's is not. The fix follows the crate's own doctrine rather than adding
+to it: pixel pairing needs the fine reading, cell statistics need only the
+layout (`fit_cells`, R33 §C), and a class the segmenter found in the same
+place on both frames IS the layout. Inside such a pairing (`paired_layout`:
+the product of the source and target rasters at analysis size — the
+two-region route's sky plane, every resolved class on the multi-region route,
+never the land complement) the colour field's pass B reads every pixel at the
+structure-blind population weight where the fine reading gave it less, and
+the cells the fine reading could not read at all are read on the pairing
+(`PairedCells::with_layout`, the same target means) on the same verdict a
+fine-read cell takes it on — converged and aligned against the target's own
+cell mean — and on no further guard. Two guards were tried on the pair and
+withdrawn the same night, both meant to keep a cloud the target grew over
+open sky from being flattened into a blotch. "The target's cell must be no
+more structured than the source's" (raw variance of the guide luma) refused
+all eight, and the probe dump says why: the source, a develop reduced
+sixteenfold, is smoother than the re-synthesised target in EVERY sky cell,
+read or not — the target's variance 5–500 times the source's in the vouched
+cells too — so it read the target's grain and not a cloud. "No more
+structure grown than the pairing's own vouched cells grew" (plane-detrended
+variance over the pairing's pixels, target less source, against the largest
+such growth among the vouched cells the pairing owns whole) refused one — a
+cell holding a faint contrail the target had brightened — and a lone zero
+vertex inside a corrected block is a patch more conspicuous than the block
+it replaced: against the target's B−R the eighth of the top row it sits in
+read +5.7 codes between −1.2 and −5.2 in its neighbours. A cell mean inside
+a pairing is the statistic the zone stage already ships at region scale,
+clouds and all, under the same convergence reading, and the field's two
+do-no-harm checks judge the result as they judge every field; a guard whose
+line moves with which cells happen to be vouched and whole is not a
+measurement. On the reference pair the eight cells are read and admitted at
+every strength; in the 8×6 grid of the frame the top row's B−R excess
+against the target, −3.6 −7.1 −5.0 +7.1 +12.3 +4.5 −5.3 −4.5 codes left to
+right on v1.6.0, reads −3.6 −7.2 −8.7 −8.5 −7.4 −5.9 −5.2 −4.1 — a uniform
+warmth and no block — and sky ΔE / whole-frame mean |diff| go 4.6 / 0.0260
+→ 3.8 / 0.0248 at 0.85 (0.65: 7.0 / 0.0295 → 6.3 / 0.0283; 1.0: 4.7 /
+0.0263 → 3.8 / 0.0249); the calibration corpus pins are unchanged (29
+passed, 0 failed, 3 ignored on the corrected tree). Disclosed by its own
+sentence (`FIELD_LAYOUT_ADMITTED`), printed only when such cells exist;
+every pair without them is byte-identical. Pinned by
+`a_cell_the_pixel_evidence_cannot_read_is_read_on_its_region_pairing` and
+`the_layout_reading_raises_weight_only_inside_the_pairing_and_only_upward`.
 
 **The feather widener's smoothness reading follows its guide** (R34 §D8). The
 one-code rule in `mask_refine::widen_smooth_feather` is an absolute statement

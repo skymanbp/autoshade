@@ -260,3 +260,39 @@ fn the_verdict_is_deterministic() {
     let after = lifted(&source, 0.05);
     assert_eq!(cells.vouch(&source, &after, None), cells.vouch(&source, &after, None));
 }
+
+/// R42. The layout reading raises a cell's weight only inside the pairing,
+/// only upward, and against the same target means: a half the fine evidence
+/// cannot read at all is unread without a pairing, read with one, and the
+/// other half's verdicts are the fine ones, untouched.
+#[test]
+fn the_layout_reading_raises_weight_only_inside_the_pairing_and_only_upward() {
+    let (source, target, w, h) = pair(0.05, 0.05);
+    let n = (w * h) as usize;
+    let right = |i: usize| i as u32 % w >= w / 2;
+    let mut evidence = fit::evidence_model_for(&source, &target, w, h);
+    // Blind the right half the way a re-synthesised texture does: no
+    // structural confidence, so no evidence weight, anywhere in it.
+    for i in (0..n).filter(|i| right(*i)) {
+        evidence.source_weights[i] = 0.0;
+        evidence.spatial_weights[i] = 0.0;
+    }
+    let cells = PairedCells::build(&target, w, h, &evidence).expect("the left half carries weight");
+    let after = lifted(&source, 0.05);
+    let fine = cells.verdicts(&source, &after, None);
+    assert!(
+        fine.iter().enumerate().all(|(c, v)| v.is_none() == (c % CELLS_X >= CELLS_X / 2)),
+        "premise: the blinded half is unread and the other half read: {fine:?}"
+    );
+    let blind = evidence.structure_blind(&target);
+    let none = cells.with_layout(&blind, &vec![0.0; n]).expect("the fine weight still carries");
+    assert_eq!(none.verdicts(&source, &after, None), fine, "an empty pairing changes nothing");
+    let pairing: Vec<f32> = (0..n).map(|i| f32::from(right(i))).collect();
+    let paired = cells.with_layout(&blind, &pairing).expect("the pairing carries weight");
+    let read = paired.verdicts(&source, &after, None);
+    assert!(read.iter().all(|v| *v == Some(true)), "every cell is read now and vouches the lift: {read:?}");
+    assert!(
+        read.iter().zip(&fine).enumerate().filter(|(c, _)| c % CELLS_X < CELLS_X / 2).all(|(_, (a, b))| a == b),
+        "the half the fine reading read keeps its own verdicts"
+    );
+}

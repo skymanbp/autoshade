@@ -2251,6 +2251,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       their pixels cannot, at a per-channel gain bound of {bound}. The rest kept \
       the support-weighted solve.",
         " 颜色场的单元准入：{read} 个已测量单元中有 {admitted} 个采用了不带结构支持项的求解，因为在那里目标自身的单元均值能担保其像素无法担保的部分，逐通道增益上限为 {bound}。其余单元保留带结构支持项的求解。"),
+    (" Colour field layout admission: {read} cells the pixel-scale evidence could \
+      not read at all lie inside a region the segmenter found in both frames and \
+      were read on that pairing instead, and {admitted} took the support-free \
+      solve on the same cell-mean verdict the measured cells take it on.",
+        " 颜色场的布局准入：有 {read} 个像素级证据完全读不到的单元位于分割器在两帧里都找到的同一区域内，改按该区域配对来读；其中 {admitted} 个按与已测单元相同的格均值裁定采用了不带结构支持项的求解。"),
     (" The solved colour field was given back: it improved the frame but moved \
       the {label} zone {before} -> {after}, past the {tol} a zone is ever allowed \
       to cost (per-zone do-no-harm check).",

@@ -567,9 +567,14 @@ Where a region was repainted, the field is solved twice and the target decides
 which answer each of its 96 cells keeps: the ordinary structure-weighted solve,
 or a support-free one with a wider per-channel gain that the Reverse-fit
 strength sets. A cell takes the second only if rendering it moved that cell toward its
-own target; the rationale line says how many of the measured cells did. The
-field is then dropped whole if it makes the frame worse, or if it improved the
-frame by making the sky or the land zone worse.
+own target; the rationale line says how many of the measured cells did. A cell
+the pixel evidence could not read at all — a featureless sky the target
+re-synthesised smooth reads as "texture gone" to the structural instrument — is
+read on the region pairing instead when it lies inside a region the segmenter
+found in both frames, and takes the second solve on the same cell-mean verdict
+as the measured cells; a second rationale line counts those.
+The field is then dropped whole if it makes the frame worse, or if it improved
+the frame by making the sky or the land zone worse.
 
 With **Zoned fit (sky)** enabled, reverse-fit always solves the global recipe
 first. Successful segmentation adds up to four disjoint semantic class bitmap

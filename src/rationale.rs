@@ -947,6 +947,16 @@ pub mod keys {
          support-free solve, because the target's own cell means vouch there what \
          their pixels cannot, at a per-channel gain bound of {bound}. The rest kept \
          the support-weighted solve.";
+    /// R42. The cells the pixel-scale evidence could not read AT ALL that lie
+    /// inside a region the segmenter found in both frames, read on that
+    /// pairing instead (`fit_cells::PairedCells::with_layout`). Printed only
+    /// when there were such cells, so every other pair's rationale is
+    /// unchanged.
+    pub const FIELD_LAYOUT_ADMITTED: &str =
+        " Colour field layout admission: {read} cells the pixel-scale evidence could \
+         not read at all lie inside a region the segmenter found in both frames and \
+         were read on that pairing instead, and {admitted} took the support-free \
+         solve on the same cell-mean verdict the measured cells take it on.";
     pub const FIELD_WITHHELD: &str =
         " No colour field was attached: the field's own ceiling {ceiling} is not \
          more than {margin} better than the frame this fit already reached \

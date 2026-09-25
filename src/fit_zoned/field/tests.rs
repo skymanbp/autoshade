@@ -172,8 +172,8 @@ fn the_cells_of_a_repainted_region_admit_the_support_free_field() {
     );
     let pass_a = LocalField::solve(&current, &target, w, h, &report.evidence)
         .expect("the analysis field solves");
-    let (merged, admitted, read) =
-        admit_cells(&current, &target, w, h, &report, pass_a.clone(), 0.60);
+    let (merged, admitted, read, _) =
+        admit_cells(&current, &target, w, h, &report, pass_a.clone(), 0.60, &[]);
     assert!(read > 0, "the instrument was consulted: {admitted} of {read}");
     assert!(admitted > 0, "the repainted cells must be admitted: {admitted} of {read}");
     let bins = crate::fit_field::FIELD_B;
@@ -244,8 +244,8 @@ fn a_field_no_cell_vouches_is_the_support_weighted_field_byte_for_byte() {
     let Some(pass_a) = LocalField::solve(&current, &target, w, h, &report.evidence) else {
         return;
     };
-    let (merged, admitted, _) =
-        admit_cells(&current, &target, w, h, &report, pass_a.clone(), 0.60);
+    let (merged, admitted, _, _) =
+        admit_cells(&current, &target, w, h, &report, pass_a.clone(), 0.60, &[]);
     assert_eq!(admitted, 0, "a matched pair asks for no recolour");
     assert_eq!(merged.grid, pass_a.grid, "so the shipped grid is the analysis grid");
 }
@@ -265,4 +265,117 @@ fn field_stop_and_realized_helpers_are_well_conditioned() {
     assert!(!stop_verdict(&field, 0.9));
     field.ceiling = 1.2;
     assert!(!stop_verdict(&field, 0.9));
+}
+
+/// R42. A 192x128 pair whose top-right NINTH — one 3x3 spatial-evidence cell,
+/// as on the reference pair — the target re-synthesised SMOOTH: the same slow
+/// base on both sides, the source carrying a per-pixel texture draw
+/// everywhere, the target carrying the same draw outside the ninth and a warm
+/// recolour inside it. The pixel-scale reading's energy term reads the ninth
+/// past its cutoff (noise against smoothness), so its evidence is zero, the
+/// way the reference pair's featureless sky reads; the rest of the frame is
+/// identical on both sides, so the frame stays same-content and its ranges
+/// keep their weight (a smoothed HALF collapses every range's structural
+/// survival under the line and no field solves at all).
+fn smoothed_top_right_ninth(target: bool) -> image::DynamicImage {
+    let (w, h) = (192u32, 128u32);
+    let hash = |i: u32| {
+        let mut v = i.wrapping_mul(747796405).wrapping_add(2891336453);
+        v ^= v >> 16;
+        v = v.wrapping_mul(2246822519);
+        v ^= v >> 13;
+        (v % 10_000) as f32 / 10_000.0 - 0.5
+    };
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| {
+        let base = 0.32 + 0.26 * (y as f32 / (h - 1) as f32);
+        let ninth = x * 3 / w == 2 && y * 3 / h == 0;
+        let texture = if ninth && target { 0.0 } else { 0.12 * hash(y * w + x) };
+        let v = (base + texture).clamp(0.05, 0.95);
+        let p = if ninth && target {
+            [(v * 1.35).min(0.98), v, (v * 0.72).max(0.02)]
+        } else {
+            [v, v, v]
+        };
+        image::Rgb(p.map(|c| (c * 255.0).round() as u8))
+    }))
+}
+
+/// The premise every R42 test rests on, asserted rather than assumed: the
+/// smoothed ninth has cells the pixel-scale evidence cannot read at all, and
+/// only there. Returns those cells.
+fn unread_cells(
+    current: &[[f32; 3]], target: &[[f32; 3]], w: u32, h: u32, report: &FitReport, pass_a: &LocalField,
+) -> Vec<usize> {
+    let cells = crate::fit_cells::PairedCells::build(target, w, h, &report.evidence)
+        .expect("the textured half carries weight");
+    let unread: Vec<usize> = cells
+        .verdicts(current, &pass_a.render(current), None)
+        .iter()
+        .enumerate()
+        .filter_map(|(cell, verdict)| verdict.is_none().then_some(cell))
+        .collect();
+    let (cols, rows) = (crate::fit_cells::CELLS_X, crate::fit_cells::CELLS_Y);
+    assert!(
+        !unread.is_empty()
+            && unread.iter().all(|cell| cell % cols >= cols * 2 / 3 && cell / cols <= rows / 3),
+        "premise: the smoothed ninth has cells the pixel-scale evidence cannot read at all, \
+         and only there: {unread:?}"
+    );
+    unread
+}
+
+/// The pairing: the frame's top third — the smoothed ninth and the two
+/// textured ninths beside it — as the segmenter would hand a sky at analysis
+/// size.
+fn top_third_pairing(w: u32, h: u32) -> Vec<f32> {
+    (0..(w * h) as usize).map(|i| f32::from((i as u32 / w) * 3 / h == 0)).collect()
+}
+
+/// Whether analysis pixel `i` lies in the smoothed ninth.
+fn in_ninth(i: usize, w: u32, h: u32) -> bool {
+    let (x, y) = (i as u32 % w, i as u32 / w);
+    x * 3 / w == 2 && y * 3 / h == 0
+}
+
+/// R42. A cell the pixel-scale evidence cannot read at all keeps the analysis
+/// grid without a pairing, and inside one is read on the pairing: it takes
+/// pass B's vertices, and the render moves the smoothed ninth's mean toward
+/// its target.
+#[test]
+fn a_cell_the_pixel_evidence_cannot_read_is_read_on_its_region_pairing() {
+    let (src, tgt) = (smoothed_top_right_ninth(false), smoothed_top_right_ninth(true));
+    let (current, target, w, h, report) = field_probe(&src, &tgt);
+    let pass_a = LocalField::solve(&current, &target, w, h, &report.evidence)
+        .expect("the analysis field solves");
+    let unread = unread_cells(&current, &target, w, h, &report, &pass_a);
+    let (without, _, _, none) =
+        admit_cells(&current, &target, w, h, &report, pass_a.clone(), 0.60, &[]);
+    assert_eq!(none, LayoutAdmission::default(), "no pairing: nothing is read on one");
+    let pairing = top_third_pairing(w, h);
+    let (merged, _, _, paired) =
+        admit_cells(&current, &target, w, h, &report, pass_a.clone(), 0.60, &pairing);
+    assert_eq!(paired.read, unread.len(), "every unread cell inside the pairing was read on it: {paired:?}");
+    assert!(paired.admitted > 0, "the smooth recolour is admitted: {paired:?}");
+    let bins = crate::fit_field::FIELD_B;
+    for cell in &unread {
+        let span = cell * bins..(cell + 1) * bins;
+        assert_eq!(without.grid[span.clone()], pass_a.grid[span.clone()], "no pairing: cell {cell} keeps the analysis grid");
+    }
+    assert!(
+        unread.iter().any(|cell| merged.grid[cell * bins..(cell + 1) * bins] != pass_a.grid[cell * bins..(cell + 1) * bins]),
+        "with the pairing, the unread cells carry pass B's vertices"
+    );
+    let ninth_mean = |px: &[[f32; 3]], ch: usize| -> f32 {
+        let picked: Vec<f32> =
+            (0..(w * h) as usize).filter(|i| in_ninth(*i, w, h)).map(|i| px[i][ch]).collect();
+        picked.iter().sum::<f32>() / picked.len().max(1) as f32
+    };
+    let rendered = merged.render(&current);
+    for ch in [0usize, 2] {
+        let (before, after) = (
+            (ninth_mean(&current, ch) - ninth_mean(&target, ch)).abs(),
+            (ninth_mean(&rendered, ch) - ninth_mean(&target, ch)).abs(),
+        );
+        assert!(after < before, "channel {ch}: the smoothed ninth moved toward its target ({before:.4} -> {after:.4})");
+    }
 }

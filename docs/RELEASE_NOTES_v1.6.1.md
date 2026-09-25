@@ -29,7 +29,15 @@ no external coding model wrote this release.
   boundary ruler and its share keep reading the mask's own raster: handed the
   robust-composed population instead, the ruler took that population's holes
   for transitions and refused the calibration corpus's third semantic region
-  — the four-region calibration test caught it before the tag.
+  — the four-region calibration test caught it before the tag. On the
+  reference pair at 0.85 the one population also decides the do-no-harm
+  re-judgement after a boundary shrink: v1.6.0 read the shipped correction on
+  the mask's raster against a baseline read on the solver's population, and
+  that mixed comparison refused two spatial tiles at k = 0.073 and 0.009 and
+  a colour-field zone at k = 0.307 that the consistent reading keeps. On its
+  own this moves the render by 0.15 codes mean (6 at most): the installed
+  v1.6.0 re-fitted the pair beside the build as it stood before the layout
+  admission below, to measure it.
 - **The luma-only tone ladder probes the fitted tone first** (factor 1.0)
   before backing off through 0.75, 0.5 and 0.25. On the calibration corpus
   this is the one correction of the eight that moves a pinned number: the sky's
@@ -55,6 +63,23 @@ no external coding model wrote this release.
   close-out: with the mask's own raster back under the boundary ruler and the
   ladder's full step, a fixture that had always passed the gate at full
   strength is now bisected.
+- **The colour field reads a paired region's cells on the pairing where the
+  pixel evidence cannot read them at all.** The user's eyes at the final gate
+  found a grey-blue block at the top centre of the reference pair's sky, where
+  the target's purple deepens — identical in v1.6.0. Measured with a probe of
+  the frozen evidence: the structural instrument reads that featureless ninth
+  of the frame as "texture gone" (the source's noise against the target's
+  smooth re-synthesis, D 1.21), so every pixel there carried zero evidence
+  weight, eight of the colour field's 96 cells could be neither read nor
+  solved, and the sky's single zone gain left the centre 7–12 codes too blue
+  while landing the corners. A class the segmenter found in the same place on
+  both frames is the same scene in the same place whatever its texture did,
+  which is all a cell statistic needs: inside such a pairing the field's
+  support-free solve now reads every pixel as population evidence, and the
+  cells the pixel evidence could not read are read on the pairing — against
+  the same target means — and take the solve on the same cell-mean verdict the
+  measured cells take it on. Every pair without such cells is byte-identical;
+  a new rationale sentence counts them where they exist.
 
 What these did on the reference pair is in the gates below.
 
@@ -269,12 +294,21 @@ reason, above).
 
 Final gate, reference pair, before the tag: the pre-bump release CLI re-fitted
 the reference pair at 0.65 / 0.85 / 1.0 (`match --zoned`) and rendered each at
-the target's size. At 0.85: sky ΔE 4.6 and whole-frame mean |diff| 0.0260 against the target
-(v1.6.0 read 4.6 / 0.0260); at 0.65: 7.0 / 0.0295 (7.0 / 0.0296); at 1.0:
-4.7 / 0.0263 (4.7 / 0.0263). This release moves the reverse fit (the joint
-veto, the rescore base, the tone ladder, the zone populations), so the numbers
-are read against v1.6.0's and the three side-by-sides went to the user, whose
-eyes are the gate.
+the target's size. The first round, on the build before the colour field's
+layout admission, read sky ΔE / whole-frame mean |diff| of 7.0 / 0.0295,
+4.6 / 0.0260 and 4.7 / 0.0263 against the target (v1.6.0: 7.0 / 0.0296,
+4.6 / 0.0260, 4.7 / 0.0263) and went to the user, whose eyes are the gate;
+they found the grey-blue block at the top centre of the sky — identical in
+v1.6.0, re-fitted the same night — and the release waited for the correction
+above. With it the same three fits read 6.3 / 0.0283, 3.8 / 0.0248 and
+3.8 / 0.0249; in the 8×6 grid of the frame the top row's B−R excess against
+the target, −3.6 −7.1 −5.0 +7.1 +12.3 +4.5 −5.3 −4.5 codes left to right on
+v1.6.0, reads −3.6 −7.2 −8.7 −8.5 −7.4 −5.9 −5.2 −4.1: a uniform warmth and
+no block. This release moves the reverse fit (the joint veto, the rescore
+base, the tone ladder, the zone populations, the field's layout admission),
+so the numbers are read against v1.6.0's, and the three side-by-sides and
+the sky strip (target, v1.6.0, the withdrawn guard, this build) went to the
+user.
 
 Not measured: no paid image call was made for this release (the target is the
 one every release since v1.3.2 has been measured against); the GUI executable

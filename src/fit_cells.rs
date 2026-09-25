@@ -223,6 +223,56 @@ impl PairedCells {
         Some(Self { trust, of_pixel, weight, spatial, tgt: tp[..n].to_vec() })
     }
 
+    /// R42. The same cells read on LAYOUT identity as well. `layout` is the
+    /// membership every analysis pixel has in a region the segmenter found
+    /// in BOTH frames (`fit_zoned::paired_layout`) and `blind` the frame's
+    /// own structure-blind model ([`EvidenceModel::structure_blind`]): inside
+    /// the pairing a pixel votes with the population weight `blind` gives it
+    /// wherever the fine reading gave it less, and its cell's trust rises
+    /// with it. The fine reading answers whether a PIXEL has a counterpart;
+    /// a class the segmenter found in the same place on both sides is the
+    /// same scene in the same place whatever its texture did, which is all a
+    /// cell statistic needs (the module doctrine above). On the reference
+    /// pair the featureless top-centre ninth of the sky reads "texture gone"
+    /// to the structural instrument — the source's noise against a smooth
+    /// re-synthesis — and carried no weight at all. The target means are the
+    /// same numbers — `tgt` and the cell geometry are untouched — so a cell
+    /// this reading admits is admitted against the target the fine reading
+    /// judges by; only the weight its pixels vote with changes, and only
+    /// upward. `None` when nothing carries weight, as [`Self::build`].
+    pub(crate) fn with_layout(&self, blind: &EvidenceModel, layout: &[f32]) -> Option<Self> {
+        let n = self.of_pixel.len();
+        if blind.source_weights.len() < n || layout.len() < n {
+            return None;
+        }
+        let member = |i: usize| layout[i].clamp(0.0, 1.0);
+        let weight: Vec<f32> = (0..n)
+            .map(|i| {
+                let via_layout = if unclipped(&self.tgt[i]) {
+                    blind.source_weights[i].max(0.0) * member(i)
+                } else {
+                    0.0
+                };
+                self.weight[i].max(via_layout)
+            })
+            .collect();
+        if weight.iter().sum::<f32>() <= 0.0 {
+            return None;
+        }
+        let spatial: Vec<f32> = (0..n).map(|i| self.spatial[i].max(member(i))).collect();
+        let cells = CELLS_X * CELLS_Y;
+        let mut trust_sum = vec![0.0f64; cells];
+        let mut members = vec![0.0f64; cells];
+        for (i, &cell) in self.of_pixel.iter().enumerate() {
+            members[cell] += 1.0;
+            trust_sum[cell] += spatial[i] as f64;
+        }
+        let trust = (0..cells)
+            .map(|c| if members[c] > 0.0 { (trust_sum[c] / members[c]) as f32 } else { 0.0 })
+            .collect();
+        Some(Self { trust, of_pixel: self.of_pixel.clone(), weight, spatial, tgt: self.tgt.clone() })
+    }
+
     /// How much this pixel's CELL is trusted to hold its target's counterpart.
     /// The per-pixel weight a stage uses when the texture did not survive and
     /// the pixel's own robust weight is therefore not a statement about it.

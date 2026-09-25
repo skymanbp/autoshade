@@ -344,6 +344,7 @@ pub(super) fn attach_colour_field(
     report: &mut FitReport,
     strength: crate::recipe::GradeStrength,
     entry: &LocalField,
+    layout: &[f32],
 ) {
     if strength.get() < crate::recipe::GradeStrength::DEFAULT {
         return;
@@ -366,8 +367,8 @@ pub(super) fn attach_colour_field(
         return;
     };
     let budget = fit::FitBudget::for_strength(strength);
-    let (solved, admitted, read) =
-        admit_cells(&current, &target_pixels, w, h, report, pass_a, budget.field_gain);
+    let (solved, admitted, read, paired) =
+        admit_cells(&current, &target_pixels, w, h, report, pass_a, budget.field_gain, layout);
     // Rendered from the field the recipe will CARRY — rounded the way
     // `ColourField::round` stores it — so the do-no-harm verdicts and
     // `FIELD_ATTACHED`'s numbers describe the render a reopen produces.
@@ -403,6 +404,11 @@ pub(super) fn attach_colour_field(
         ("admitted", admitted.to_string()), ("read", read.to_string()),
         ("bound", format!("{:.2}", budget.field_gain)),
     ]);
+    if paired.read > 0 {
+        note(report, crate::rationale::keys::FIELD_LAYOUT_ADMITTED, vec![
+            ("read", paired.read.to_string()), ("admitted", paired.admitted.to_string()),
+        ]);
+    }
     let realized = realized_share(solved.global, solved.ceiling, err_with)
         .map_or_else(|| "n/a".to_string(), |value| format!("{value:.3}"));
     note(report, crate::rationale::keys::FIELD_ATTACHED, vec![
@@ -435,42 +441,126 @@ pub(super) fn attach_colour_field(
 /// the direction its target asks for takes pass B's eight luma-bin vertices;
 /// every other cell keeps pass A's, unchanged. No cells, no pass B, no change —
 /// the abstention is the pre-R34 field, byte for byte.
+///
+/// R42 (v1.6.1). Inside a region the segmenter found in BOTH frames
+/// (`layout`, at analysis size — `fit_zoned::paired_layout`), pass B reads
+/// every pixel as population evidence: the structure-blind weight the
+/// frame's own ranges give it, wherever the fine reading gave it less. The
+/// fine reading answers whether a PIXEL has a counterpart, and on the
+/// reference pair it answered the featureless top-centre ninth of the sky
+/// with "texture gone" — the source's noise against the target's smooth
+/// re-synthesis: correlation +0.479, energy term 1.093, D 1.210, confidence
+/// 0 — so eight of this field's cells carried no weight at all, neither
+/// solve could put a vertex there, and the sky's one zone gain left a blue
+/// block where the target's purple deepens. A class the segmenter found in
+/// the same place on both sides is the same scene in the same place
+/// whatever its texture did, which is all a cell statistic needs
+/// (`fit_cells`'s own doctrine, applied to the one stage that is spatial).
+/// The cells the fine reading could not read AT ALL are then read on the
+/// pairing (`PairedCells::with_layout`, the same target means) and take
+/// pass B's vertices on the same verdict a fine-read cell takes them on —
+/// converged and aligned against the target's own cell mean — and on no
+/// further guard. Two were tried on the reference pair and withdrawn
+/// (2026-09-25): "the target's cell must be no more structured than the
+/// source's" refused all eight, because a re-synthesised target carries
+/// grain a sixteenfold-reduced develop does not, in every sky cell, read or
+/// not; "no more structure grown than the pairing's own vouched cells
+/// grew" refused one — a cell holding a faint contrail the target had
+/// brightened — and a lone zero vertex inside a corrected block is a patch
+/// more conspicuous than the block it replaced (B−R excess against the
+/// target +5.7 codes between −1.2 and −5.2 in its neighbours). A cell mean
+/// inside a pairing is the statistic the zone stage already ships at
+/// region scale, clouds and all, under the same convergence reading, and
+/// the field's two do-no-harm checks judge the result as they judge every
+/// field. Cells the fine reading reads keep their own admission, on the
+/// pass B that now carries the pairing's weight; no pairing, no change —
+/// the field is R34's byte for byte.
+#[allow(clippy::too_many_arguments)]
 fn admit_cells(
     current: &[[f32; 3]], target: &[[f32; 3]], width: u32, height: u32,
-    report: &FitReport, pass_a: LocalField, gain: f32,
-) -> (LocalField, usize, usize) {
+    report: &FitReport, pass_a: LocalField, gain: f32, layout: &[f32],
+) -> (LocalField, usize, usize, LayoutAdmission) {
     let Some(cells) = crate::fit_cells::PairedCells::build(target, width, height, &report.evidence)
     else {
-        return (pass_a, 0, 0);
+        return (pass_a, 0, 0, LayoutAdmission::default());
     };
+    let paired = (layout.len() == current.len() && layout.iter().any(|m| *m > 0.0)).then(|| {
+        let blind = report.evidence.structure_blind(target);
+        let mut model = report.evidence.clone();
+        for (i, weight) in model.source_weights.iter_mut().enumerate() {
+            let via_layout = blind.source_weights.get(i).copied().unwrap_or(0.0).max(0.0)
+                * layout[i].clamp(0.0, 1.0);
+            if via_layout > *weight {
+                *weight = via_layout;
+            }
+        }
+        (model, blind)
+    });
     let Some(pass_b) = LocalField::solve_with(
-        current, target, width, height, &report.evidence,
+        current, target, width, height,
+        paired.as_ref().map_or(&report.evidence, |(model, _)| model),
         crate::fit_field::TIKHONOV, crate::fit_field::SMOOTH, crate::fit_field::ITERATIONS,
         FieldSolveOpts { gain, local_support: false },
     ) else {
-        return (pass_a, 0, 0);
+        return (pass_a, 0, 0, LayoutAdmission::default());
     };
-    let verdicts = cells.verdicts(current, &pass_b.render(current), None);
+    let rendered = pass_b.render(current);
+    let verdicts = cells.verdicts(current, &rendered, None);
+    let paired_verdicts = paired
+        .as_ref()
+        .and_then(|(_, blind)| cells.with_layout(blind, layout))
+        .map(|paired_cells| paired_cells.verdicts(current, &rendered, None));
     let mut merged = pass_a;
     let (mut admitted, mut read) = (0usize, 0usize);
+    let mut paired_read = LayoutAdmission::default();
     // Vertex `(iy * FIELD_X + ix) * FIELD_B + ib`: a cell owns the `FIELD_B`
     // consecutive luma-bin vertices at its own (ix, iy), which is why
     // `fit_cells` takes its geometry from this grid rather than choosing one.
     let bins = crate::fit_field::FIELD_B;
     for (cell, verdict) in verdicts.iter().enumerate() {
-        let Some(vouched) = verdict else { continue };
-        read += 1;
-        if !vouched {
+        let admit = match verdict {
+            Some(vouched) => {
+                read += 1;
+                if *vouched {
+                    admitted += 1;
+                }
+                *vouched
+            }
+            None => {
+                // The fine reading could not read this cell at all: inside
+                // the pairing it is read on the pairing, and takes pass B on
+                // the same verdict a fine-read cell takes it on.
+                let Some(Some(vouched)) = paired_verdicts.as_ref().map(|v| v[cell]) else {
+                    continue;
+                };
+                paired_read.read += 1;
+                if vouched {
+                    paired_read.admitted += 1;
+                }
+                vouched
+            }
+        };
+        if !admit {
             continue;
         }
-        admitted += 1;
         let span = cell * bins..(cell + 1) * bins;
         if merged.grid.len() >= span.end && pass_b.grid.len() >= span.end {
             merged.grid[span.clone()].clone_from_slice(&pass_b.grid[span]);
         }
     }
-    (merged, admitted, read)
+    (merged, admitted, read, paired_read)
 }
+
+/// R42. What the layout reading did: the cells the fine reading could not
+/// read that lie inside the pairing, and how many of them took pass B. Both
+/// zero when there is no pairing or nothing unread inside it, and the
+/// disclosure is then not printed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct LayoutAdmission {
+    pub(super) read: usize,
+    pub(super) admitted: usize,
+}
+
 
 /// The per-ZONE half of the field's do-no-harm: the first attached mask whose
 /// own look distance the field made worse by more than a zone is ever allowed

@@ -2481,7 +2481,7 @@ fn fit_recipe_zoned_inner_seeded(
         Some(pair) => Ok(pair),
         None => segment_both(src, target, seg, mask_path),
     };
-    let (mut report, field, first_producer) = match segmented {
+    let (mut report, field, first_producer, layout) = match segmented {
         Ok((mut src_mask, mut tgt_mask)) => {
             let refinements = if layers.refine_masks {
                 let source = crate::mask_refine::guided_refine(
@@ -2579,7 +2579,7 @@ fn fit_recipe_zoned_inner_seeded(
                     mask_path,
                     zone_divergence,
                 );
-                (report, field, "zones")
+                (report, field, "zones", paired_layout(src, target, &[(&src_mask, &tgt_mask)]))
             } else {
             let zone_divergence = measure_zone_divergence(src, target, base, &src_mask);
             let divergent_cover = [zone_divergence.sky, zone_divergence.land]
@@ -2606,7 +2606,7 @@ fn fit_recipe_zoned_inner_seeded(
                 mask_path,
                 zone_divergence,
             );
-            (report, field, "zones")
+            (report, field, "zones", paired_layout(src, target, &[(&src_mask, &tgt_mask)]))
             }
         }
         Err(e) => {
@@ -2633,17 +2633,45 @@ fn fit_recipe_zoned_inner_seeded(
             let proposals = field.as_ref()
                 .map(|(_, reading)| reading.proposals.as_slice()).unwrap_or(&[]);
             range::attach_ranges(src, target, &mut report, proposals);
-            (report, field, "ranges")
+            (report, field, "ranges", Vec::new())
         }
     };
-    run_local_sequencer(src, target, &mut report, &field, first_producer, mask_path, layers);
+    run_local_sequencer(src, target, &mut report, &field, first_producer, mask_path, layers, &layout);
     report
+}
+
+/// R42. The membership every analysis pixel has in a region the segmenter
+/// found in BOTH frames: per pair of rasters the product of the source and
+/// target memberships at analysis size, so a pixel counts only where the same
+/// class sits in the same place on both sides, and the union over the pairs.
+/// The two-region route pairs its sky plane alone — its land is the sky's
+/// complement, "not sky" on both sides, which is not a class the segmenter
+/// found; the multi-region route pairs every class it resolved; the range
+/// fallback has none. The colour field reads it
+/// (`field::attach_colour_field`) for the cells the pixel-scale evidence
+/// cannot read at all.
+fn paired_layout(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    pairs: &[(&GrayImage, &GrayImage)],
+) -> Vec<f32> {
+    let (s_img, t_img) = fit::analysis_pair(src, target);
+    let (w, h) = (s_img.width(), s_img.height());
+    let mut out = vec![0.0f32; w as usize * h as usize];
+    for (source, tgt) in pairs {
+        let sw = mask_weights(source, w, h);
+        let tw = mask_weights(tgt, t_img.width(), t_img.height());
+        for ((o, s), t) in out.iter_mut().zip(&sw).zip(&tw) {
+            *o = o.max(s * t);
+        }
+    }
+    out
 }
 
 /// The single local producer sequencer shared by the historical two-region
 /// route, the semantic multi-region route, and the range fallback.  Keep the
 /// order and disclosures stable: first producer -> stop -> tiles -> stop ->
-/// free masks.
+/// free masks. `layout` is [`paired_layout`]'s reading for the colour field.
 #[allow(clippy::too_many_arguments)]
 fn run_local_sequencer(
     src: &DynamicImage,
@@ -2653,6 +2681,7 @@ fn run_local_sequencer(
     first_producer: &str,
     mask_path: &crate::store::OwnedRaster,
     layers: ZonedLayerOpts,
+    layout: &[f32],
 ) {
     if let Some((local, _)) = field {
         field::push_realized(report, local, first_producer);
@@ -2710,6 +2739,7 @@ fn run_local_sequencer(
             report,
             fit::carried_strength_from_notes(&report.notes),
             local,
+            layout,
         );
     }
 }
@@ -2776,7 +2806,7 @@ fn fit_recipe_zoned_multi_inner(
         );
         return report;
     }
-    let (mut report, field, first_producer) = {
+    let (mut report, field, first_producer, layout) = {
         let (sp, tp, w, h) = fit::divergence_raster(src, target, base);
         let divergences = regions.iter().map(|r| {
             let weights = mask_weights(&r.source, w, h);
@@ -2794,9 +2824,11 @@ fn fit_recipe_zoned_multi_inner(
         push_widening_notes(&mut report, &widenings);
         let field = SHIPPED_LAYERS.field.then(|| field::solve_local_field(src, target, &mut report)).flatten();
         attach_semantic_regions(src, target, &mut report, &regions, &rasters, &divergences);
-        (report, field, "semantic regions")
+        let pairs: Vec<(&GrayImage, &GrayImage)> =
+            regions.iter().map(|region| (&region.source, &region.target)).collect();
+        (report, field, "semantic regions", paired_layout(src, target, &pairs))
     };
-    run_local_sequencer(src, target, &mut report, &field, first_producer, mask_path, SHIPPED_LAYERS);
+    run_local_sequencer(src, target, &mut report, &field, first_producer, mask_path, SHIPPED_LAYERS, &layout);
     // The four-region producer may leave pixels to the global fit by design;
     // the historical two-region producer owns the inverse-sky complement.
     // Compare against the unchanged legacy sequencer and keep the multi-class
