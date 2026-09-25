@@ -2,8 +2,9 @@
 
 The four figures behind the README's pillars and the frames on
 [autoshade.dev](https://autoshade.dev/#showcase-a), with every number the
-captions quote and the prompts that bought the generated targets. Part A and
-the Cornwall panel were rendered on 2026-09-02 on the v1.2.3 build; the
+captions quote and the prompts that bought the generated targets. The
+four-looks panel and the Cornwall panel were rendered on 2026-09-02 on the
+v1.2.3 build; the
 stone-viaduct panel's right column was re-rendered on 2026-09-03 on the v1.2.4
 build at Reverse-fit strength 100 %, its other two columns being the v1.2.2
 composition's frames re-encoded once; the desert-canyon panel was rendered
@@ -18,57 +19,10 @@ shot with the body set to a 4:3 aspect, which is how it surfaced the frame
 defect v1.2.2 fixes — one class, three places — on the way to this page (see
 [RELEASE_NOTES_v1.2.2.md](RELEASE_NOTES_v1.2.2.md)).
 
-## Part A — AI analysis with a style reference: one photograph, four looks
+## Part A — Reimagine → reverse-fit: the recipe carries the look, the RAW carries the detail
 
-<img src="images/showcase-island-four-looks.jpg" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts" />
-
-<sub><b>Lakeside island town.</b> Top left, the straight conversion of a hazy
-frame. The other three are AI develops of the same RAW at the same
-<code>--style 1.0 --strength 0.9</code> against the same index — the
-photographer's 169 Lightroom RAW+XMP edits (SigLIP 2 image vectors + Qwen3-VL
-descriptions) beside the 94-photo finished-look library — and the only thing
-that changes between them is the <b>direction text</b>. Since v1.2.3 a
-written direction at the default Adherence leads: the four nearest past edits
-reach the model as background continuity, the finished photo the direction
-ranked highest reaches it as an image, and no pull toward the library's means
-is applied. Measured on the panel's cells: mean saturation
-28 % / 11 % / 30 % (moody / golden / vivid) against the conversion's
-17 %, mean brightness 43 % / 58 % / 70 % against 47 %. The vivid develop's
-recipe crops — its cell is 9504×5702, 7 % off the top and 3 % off the
-bottom — while moody, golden and the conversion are the full 9504×6336
-frame.
-Direction and judge trail, per panel: <i>dark moody low-key tones, a
-cross-processed colour treatment, a teal-and-orange split tone</i> — visual judge 68/100 Revise (the village and foreground shadows crushed, the orange counterpoint too weak), guided revisions re-scored 70 and 78 and were adopted, a third 69 was discarded, verdict Accept;
-<i>warm golden tones, film-like grain, lifted matte shadows</i> — the verifier sent the proposal back twice because it never set the grain the direction asked for, the visual judge then scored 87 Revise (chroma noise across the smooth sky), its guided revision re-scored 84 and was discarded, and the verifier's word on the recipe was Revise, so this panel is the unsaved proposal rendered with <code>--out</code>;
-<i>vivid saturated colours, punchy high contrast, crisp clarity</i> — visual judge 70/100 Revise (foliage and village crushed to near-black, dehaze and clarity halos), its guided revision re-scored 84 and was adopted, a second 82 was discarded, verdict Accept.
-For contrast, the same three directions on the same index on v1.2.2 came back
-at 23 % / 11 % / 17 % saturation and 54 % / 58 % / 55 % brightness — inside the
-photographer's own cool, hazy register, four points of brightness apart —
-because <code>--style 1.0</code> stated the four nearest edits' habits as the
-target and the direction could only move within that anchor. Nothing is
-copied pixel for pixel: the references reach the model as numbers, prose and
-one image, the direction as text, and what comes back is a recipe the
-engine renders.</sub>
-
-<img src="images/showcase-island-four-looks-looks-only.jpg" alt="Lakeside island town: the same three directions against the finished-look library alone" />
-
-<sub><b>The same frame against the finished-look library alone</b> (2026-09-01,
-the v1.2.2 showcase panel). With no RAW+XMP exemplars indexed — the state
-v1.2.2's Defect 3 had left every index built on v1.2.0/v1.2.1 in — the Style
-axis had nothing to act on and each run took one finished photo, chosen by
-the direction text, as an image: mean saturation 34 % / 12 % / 29 % against
-17 %, brightness 38 % / 61 % / 65 % against 47 %. Judge trails: moody 71 Revise
-(guided revision 64 discarded), verdict Accept; golden 84 → 92 (adopted) after
-the verifier twice sent the proposal back for the grain it never set, verdict
-Revise (the unsaved proposal rendered with <code>--out</code>); vivid 64 → 72 →
-84 (adopted) → 73 (discarded), verdict Accept. This is the ceiling on what a
-direction can do with no library holding it back, and the v1.2.3 panel above
-is measured against it.</sub>
-
-## Part B — Reimagine → reverse-fit: the recipe carries the look, the RAW carries the detail
-
-Part B is a different workflow: buy a complete visual target from a
-generative model, then fit an ordinary engine recipe to its look. The
+Part A buys a complete visual target from a generative model, then fits an
+ordinary engine recipe to its look. The
 generated target can invent content; the fitted render cannot — it is the
 original RAW through a recipe, so it has every pixel the sensor recorded. Each
 panel's bottom row is the same small window of the frame from each stage at
@@ -181,6 +135,53 @@ side that the render reads cooler (a\* 24.5 against 18): a haze-colour gap
 along a real edge, inside the land's ΔE, disclosed as the known gap rather
 than measured away. The full three-strength table is in
 [RELEASE_NOTES_v1.3.0.md](RELEASE_NOTES_v1.3.0.md).</sub>
+
+## Part B — AI analysis with a style reference: one photograph, four looks
+
+<img src="images/showcase-island-four-looks.jpg" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts" />
+
+<sub><b>Lakeside island town.</b> Top left, the straight conversion of a hazy
+frame. The other three are AI develops of the same RAW at the same
+<code>--style 1.0 --strength 0.9</code> against the same index — the
+photographer's 169 Lightroom RAW+XMP edits (SigLIP 2 image vectors + Qwen3-VL
+descriptions) beside the 94-photo finished-look library — and the only thing
+that changes between them is the <b>direction text</b>. Since v1.2.3 a
+written direction at the default Adherence leads: the four nearest past edits
+reach the model as background continuity, the finished photo the direction
+ranked highest reaches it as an image, and no pull toward the library's means
+is applied. Measured on the panel's cells: mean saturation
+28 % / 11 % / 30 % (moody / golden / vivid) against the conversion's
+17 %, mean brightness 43 % / 58 % / 70 % against 47 %. The vivid develop's
+recipe crops — its cell is 9504×5702, 7 % off the top and 3 % off the
+bottom — while moody, golden and the conversion are the full 9504×6336
+frame.
+Direction and judge trail, per panel: <i>dark moody low-key tones, a
+cross-processed colour treatment, a teal-and-orange split tone</i> — visual judge 68/100 Revise (the village and foreground shadows crushed, the orange counterpoint too weak), guided revisions re-scored 70 and 78 and were adopted, a third 69 was discarded, verdict Accept;
+<i>warm golden tones, film-like grain, lifted matte shadows</i> — the verifier sent the proposal back twice because it never set the grain the direction asked for, the visual judge then scored 87 Revise (chroma noise across the smooth sky), its guided revision re-scored 84 and was discarded, and the verifier's word on the recipe was Revise, so this panel is the unsaved proposal rendered with <code>--out</code>;
+<i>vivid saturated colours, punchy high contrast, crisp clarity</i> — visual judge 70/100 Revise (foliage and village crushed to near-black, dehaze and clarity halos), its guided revision re-scored 84 and was adopted, a second 82 was discarded, verdict Accept.
+For contrast, the same three directions on the same index on v1.2.2 came back
+at 23 % / 11 % / 17 % saturation and 54 % / 58 % / 55 % brightness — inside the
+photographer's own cool, hazy register, four points of brightness apart —
+because <code>--style 1.0</code> stated the four nearest edits' habits as the
+target and the direction could only move within that anchor. Nothing is
+copied pixel for pixel: the references reach the model as numbers, prose and
+one image, the direction as text, and what comes back is a recipe the
+engine renders.</sub>
+
+<img src="images/showcase-island-four-looks-looks-only.jpg" alt="Lakeside island town: the same three directions against the finished-look library alone" />
+
+<sub><b>The same frame against the finished-look library alone</b> (2026-09-01,
+the v1.2.2 showcase panel). With no RAW+XMP exemplars indexed — the state
+v1.2.2's Defect 3 had left every index built on v1.2.0/v1.2.1 in — the Style
+axis had nothing to act on and each run took one finished photo, chosen by
+the direction text, as an image: mean saturation 34 % / 12 % / 29 % against
+17 %, brightness 38 % / 61 % / 65 % against 47 %. Judge trails: moody 71 Revise
+(guided revision 64 discarded), verdict Accept; golden 84 → 92 (adopted) after
+the verifier twice sent the proposal back for the grain it never set, verdict
+Revise (the unsaved proposal rendered with <code>--out</code>); vivid 64 → 72 →
+84 (adopted) → 73 (discarded), verdict Accept. This is the ceiling on what a
+direction can do with no library holding it back, and the v1.2.3 panel above
+is measured against it.</sub>
 
 ## Part C — The RAW denoiser: one star field, four ways
 

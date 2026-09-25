@@ -5,8 +5,12 @@
 
 **AI-assisted automatic development of RAW photographs.**
 
-An AI decides *what to change*. A deterministic Rust engine *does* it.
-**In the recipe-development path, the AI never touches a pixel.**
+Describe the picture you want; an image model generates it from your frame,
+and AutoShade recovers from it an editable develop recipe that renders that
+look on the full-resolution RAW — the recipe carries the look, the sensor
+carries the detail, and the generated picture is a target, never the
+delivery. An AI decides *what to change*; a deterministic Rust engine *does*
+it, and **in the recipe-development path the AI never touches a pixel.**
 The one network that does, the RAW denoiser, was trained here on this
 project's own data and is held to a same-frame comparison with Lightroom
 on a real star field whenever it changes.
@@ -22,6 +26,12 @@ on a real star field whenever it changes.
 
 ## What AutoShade is
 
+- The way to get the picture you can only describe: `reimagine` asks an
+  image model for it, generated from your own frame; `match` measures how
+  far that picture strayed from the frame and recovers an engine recipe that
+  renders its look on the full-resolution RAW — editable, replayable,
+  exportable to Lightroom — while the generated picture stays a target,
+  never the delivery.
 - A non-destructive developer for RAW and baked images: an AI proposal becomes
   a small, inspectable `EditRecipe` — bounded controls, a rationale, a
   confidence — rendered by one local Rust engine behind the app, the CLI and
@@ -51,6 +61,26 @@ on a real star field whenever it changes.
 
 ## What it does
 
+- **Whole-image AI generation, then reverse-fit** — `reimagine` asks an
+  image model (gpt-image-2) for the picture you describe, generated from
+  your own frame; `match` estimates an engine recipe from that picture, or
+  from any finished look of the same frame, measures how far its *content*
+  diverged before trusting it, then fits global, semantic, luminance-range
+  and colour-range corrections behind evidence gates; from the default
+  Strength up it may also carry a smooth
+  12×8×8 local colour field, the one control Lightroom cannot render (the
+  sidecar still carries it).
+  A structured sky/land residual can earn two or three overlapping native
+  bands that replace its single correction; hard spatial tiles use four
+  intersecting gradients. Each candidate keeps the existing evidence and
+  boundary gates, and the field solves the remainder after accepted bands.
+  Where a repaint broke the pixel-to-pixel correspondence inside one region —
+  and only there, since a region whose pixels still correspond may not overrule
+  them — that region's own 12×8 cell means decide whether the move ships: closer
+  to each cell's target, and in the direction that target asks for. A
+  same-layout recolour is recoverable, a region whose layout moved is still
+  refused, and the refusal is a measurement printed with the shares it was
+  decided on.
 - **AI develop** — `analyze`, `auto` and **Analyze** propose an editable
   recipe from preview, EXIF and histogram, check it data-only, render it, and
   may buy one bounded revision.
@@ -82,23 +112,6 @@ on a real star field whenever it changes.
 - **Style read** — your past Lightroom edits, and a separate library of
   finished looks, retrieved as soft references through opt-in local SigLIP 2
   embeddings.
-- **Reverse-fit** — `match` estimates an engine recipe from any target look,
-  measures how far its *content* diverged before trusting it, then fits
-  global, semantic, luminance-range and colour-range corrections behind
-  evidence gates; from the default Strength up it may also carry a smooth
-  12×8×8 local colour field, the one control Lightroom cannot render (the
-  sidecar still carries it).
-  A structured sky/land residual can earn two or three overlapping native
-  bands that replace its single correction; hard spatial tiles use four
-  intersecting gradients. Each candidate keeps the existing evidence and
-  boundary gates, and the field solves the remainder after accepted bands.
-  Where a repaint broke the pixel-to-pixel correspondence inside one region —
-  and only there, since a region whose pixels still correspond may not overrule
-  them — that region's own 12×8 cell means decide whether the move ships: closer
-  to each cell's target, and in the direction that target asks for. A
-  same-layout recolour is recoverable, a region whose layout moved is still
-  refused, and the refusal is a measurement printed with the shares it was
-  decided on.
 - **Generative and pixel tools, opt-in and labelled** — reimagine
   (gpt-image-2), retouch, heal and AI denoise are the only paths that can
   invent or alter scene content, and are marked so; a denoise lands as its
@@ -130,64 +143,23 @@ The techniques below are the ones you will not find in another RAW developer.
 Each ends at the document that carries the rest; the last subsection lists
 what is designed but not yet shipped.
 
-### 1. Style reference is retrieval over your whole catalogue, not a preset
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/pillar-analysis-dark.svg" />
-  <img src="docs/images/pillar-analysis-light.svg" alt="Pillar 1: a Lightroom RAW+XMP library becomes exemplars carrying a 14-dimension feature, a SigLIP 2 image vector, a Qwen3-VL sentence and a local-work habit; a query retrieves its four nearest past shots by the hybrid distance, and their habits reach the proposer behind an untrusted-data fence before a capped pull moves the proposal toward the photographer's own means" />
-</picture>
-
-<sub>Zoom and pan this diagram at [autoshade.dev/#pillar-analysis](https://autoshade.dev/#pillar-analysis).</sub>
-
-<img src="docs/images/showcase-island-four-looks.jpg" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts" />
-
-<sub><b>One photograph, four looks.</b> The straight conversion of a hazy
-lakeside frame and three AI develops of the same RAW at the same
-<code>--style 1.0 --strength 0.9</code> against the photographer's full
-index — 169 Lightroom RAW+XMP edits and a 94-photo finished-look library —
-where only the <b>direction text</b> changes. Since v1.2.3 a written
-direction leads and those edits become background: mean saturation
-28 % / 11 % / 30 % for moody / golden / vivid against the
-conversion's 17 %, mean brightness 43 % / 58 % / 70 % against
-47 %. The vivid develop's recipe crops — its cell is 9504×5702, 7 % off
-the top and 3 % off the bottom — while moody, golden and the conversion are
-the full 9504×6336 frame. On v1.2.2 the same three directions on the same index came back
-at 23 % / 11 % / 17 % saturation and 54 % / 58 % / 55 % brightness — inside those
-edits' cool, hazy register, four points of brightness apart. Judge trails,
-prompts and the finished-look-only run in [docs/SHOWCASE.md](docs/SHOWCASE.md);
-model-judge scores are automated review, not human aesthetic approval.</sub>
-
-`autoshade style-index <dir>` turns every Lightroom RAW+XMP pair you finished
-into an exemplar ([`src/style.rs`](src/style.rs)); a photo retrieves its **4
-most similar past shots** as a soft reference.
-
-- An exemplar carries a 14-dimensional EXIF/histogram feature, the 12 develop
-  settings you moved, your curve shape, colour families and a local-work habit
-  — summary statistics only.
-- Optional local models add a 768-dimensional **SigLIP 2** image vector and,
-  with `--describe`, one **Qwen3-VL-2B** sentence about the *grade*; nothing
-  leaves the machine.
-- Retrieval is
-  `d14 + W_EMB·(1−cos(q_img,e_img)) + W_TXT·(1−cos(q_txt,e_img)) + W_DESC·(1−cos(q_txt,e_desc))`,
-  shipped at `W_EMB = 4`, `W_TXT = 0.5`, `W_DESC = 0.5` — the calibration
-  harness's winners on the real corpus, hubness removed before the z-score.
-- `W_LOOK = 1.0` is the unmeasured term: the look library carries no develop
-  settings for that objective to see, so it ships inside a stable band.
-- `style_pull` (0.18 at the shipped Style 0.3, full at Style 1.0) moves the
-  proposal toward your historical means, unless a Direction at Adherence above
-  40 % leads; a `--looks` library guides the proposer but never becomes a
-  recipe target.
-
-Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
-
-### 2. Reverse-fit: inverse rendering from any finished look
+### 1. Whole-image AI generation, then reverse-fit: an editable recipe from any finished look
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/pillar-reimagine-fit-dark.svg" />
-  <img src="docs/images/pillar-reimagine-fit-light.svg" alt="Pillar 2: a generated or finished target is measured against the input by the structural-divergence statistic D, which selects a full solve or a bounded atmosphere mode; a robust tone regression and gated local stages produce a recipe, and only the recipe reaches the full-resolution render" />
+  <img src="docs/images/pillar-reimagine-fit-light.svg" alt="Pillar 1: a generated or finished target is measured against the input by the structural-divergence statistic D, which selects a full solve or a bounded atmosphere mode; a robust tone regression and gated local stages produce a recipe, and only the recipe reaches the full-resolution render" />
 </picture>
 
 <sub>Zoom and pan this diagram at [autoshade.dev/#pillar-reimagine-fit](https://autoshade.dev/#pillar-reimagine-fit).</sub>
+
+Ask for the picture in words. `reimagine` sends the frame and the prompt to
+an image model and gets back a complete picture that may have invented
+content; `match` then recovers, from that picture, a recipe the engine can
+render on the full-resolution RAW — global tone and colour first, then
+zones, bands, tiles and a smooth colour field, each admitted only on
+evidence. The recipe carries the look and the sensor carries the detail;
+the generated picture is a target, never the delivery. The three pairs
+below are the whole path, and every number in their captions is measured.
 
 The source frame is one function for both entry points: a neutral develop of
 the RAW at a 2048 px working edge, never the camera's embedded JPEG preview.
@@ -277,7 +249,7 @@ regression**:
 
 Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
 
-### 3. A structural-divergence statistic decides how much to believe a target
+### 2. A structural-divergence statistic decides how much to believe a target
 
 A structural reading `D` — gradient correlation and a five-band pyramid energy
 error — measures whether the target still shows the same scene.
@@ -296,7 +268,7 @@ error — measures whether the target still shows the same scene.
 
 Details: [docs/TECH_STACK.md#reverse-fit-freedom-budget](docs/TECH_STACK.md#reverse-fit-freedom-budget).
 
-### 4. Diffusion features find where the content moved
+### 3. Diffusion features find where the content moved
 
 On divergent pairs the fit consults a **DIFT correspondence field** — Stable
 Diffusion 2.1's UNet as a featurizer (`t = 261`, 768² inputs, `up_blocks[1]`
@@ -313,7 +285,7 @@ moved.
 
 Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
 
-### 5. Semantic zones, luminance bands and colour bands, judged on their own population
+### 4. Semantic zones, luminance bands and colour bands, judged on their own population
 
 - Local corrections come from mutually exclusive producers: a local OneFormer
   ADE20K pass yields semantic regions (sky/land by default, up to four
@@ -354,7 +326,7 @@ Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-a
 
 Details: [docs/TECH_STACK.md#zone-scoped-evidence-view](docs/TECH_STACK.md#zone-scoped-evidence-view).
 
-### 6. Quadtree tile splitting on frozen evidence
+### 5. Quadtree tile splitting on frozen evidence
 
 After the zones or bands, a frozen-evidence quadtree visits the strongest
 supported nodes first and stops at a 4×4 grid.
@@ -376,7 +348,7 @@ supported nodes first and stops at a 4×4 grid.
 
 Details: [docs/TECH_STACK.md#layered-spatial-reverse-fit-and-mask-refinement](docs/TECH_STACK.md#layered-spatial-reverse-fit-and-mask-refinement).
 
-### 7. A bilateral-grid local field prices every local producer first
+### 6. A bilateral-grid local field prices every local producer first
 
 Before any local producer runs, a read-only **12×8×8 bilateral grid** (x, y,
 luma) of five develop parameters is solved by conjugate gradients in f64 — λ =
@@ -394,7 +366,7 @@ weights = frozen evidence × structural support × unclipped.
 
 Details: [docs/TECH_STACK.md#local-field-analyzer](docs/TECH_STACK.md#local-field-analyzer).
 
-### 8. Edge-aware mask refinement that has to earn its keep
+### 7. Edge-aware mask refinement that has to earn its keep
 
 - Semantic silhouettes and eligible tile boundaries go through guided
   refinement (radius 8) before their corrections are fitted — and the original
@@ -407,7 +379,83 @@ Details: [docs/TECH_STACK.md#local-field-analyzer](docs/TECH_STACK.md#local-fiel
 
 Details: [docs/TECH_STACK.md#layered-spatial-reverse-fit-and-mask-refinement](docs/TECH_STACK.md#layered-spatial-reverse-fit-and-mask-refinement).
 
-### 9. Lightroom parity is measured, and the residuals are published
+### 8. Generated pixels are quarantined and measured
+
+- `reimagine` composes the prompt onto an unconditional faithfulness scaffold
+  (because `input_fidelity` is silently dropped by gpt-image-2), measures the
+  result's structural divergence with the same `D` the reverse-fit uses, warns
+  at `D ≥ 0.35`, and can spend one bounded retry keeping the closer image.
+- The GUI's **Adjust generated image** edits a ✨ card or its ✎ edit with its
+  own prompt: the whole picture without strokes, or just the shared painted
+  region (blank = remove). One paid generation lands as a new ✨ card, leaving
+  its source intact; whole-image edits report divergence against the sent input.
+- `heal` only ever copies, shifts and averages pixels that already exist, and
+  anything that changed pixels lives on its own card as a pixel source — never
+  disguised as a Lightroom adjustment.
+- Spot removal imported from a Lightroom sidecar is re-solved here from the
+  photograph's own pixels, and the panel says so: it names how many areas
+  Lightroom removed, how many of those Adobe synthesised (content-aware or
+  generative, whose pixels the sidecar does not carry), and offers to re-run a
+  generative model over exactly those.
+- A photo edited in Lightroom's HDR mode renders as its **SDR rendition** —
+  Lightroom's own seven-control answer to publishing an HDR edit as an SDR
+  file — rather than as if the mode had never been set. The seven render only
+  while the mode is on, as in Lightroom; they are stored and round-tripped
+  either way.
+
+Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
+
+### 9. Style reference is retrieval over your whole catalogue, not a preset
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/pillar-analysis-dark.svg" />
+  <img src="docs/images/pillar-analysis-light.svg" alt="Pillar 2: a Lightroom RAW+XMP library becomes exemplars carrying a 14-dimension feature, a SigLIP 2 image vector, a Qwen3-VL sentence and a local-work habit; a query retrieves its four nearest past shots by the hybrid distance, and their habits reach the proposer behind an untrusted-data fence before a capped pull moves the proposal toward the photographer's own means" />
+</picture>
+
+<sub>Zoom and pan this diagram at [autoshade.dev/#pillar-analysis](https://autoshade.dev/#pillar-analysis).</sub>
+
+<img src="docs/images/showcase-island-four-looks.jpg" alt="Lakeside island town: straight conversion and three AI develops driven by three different direction texts" />
+
+<sub><b>One photograph, four looks.</b> The straight conversion of a hazy
+lakeside frame and three AI develops of the same RAW at the same
+<code>--style 1.0 --strength 0.9</code> against the photographer's full
+index — 169 Lightroom RAW+XMP edits and a 94-photo finished-look library —
+where only the <b>direction text</b> changes. Since v1.2.3 a written
+direction leads and those edits become background: mean saturation
+28 % / 11 % / 30 % for moody / golden / vivid against the
+conversion's 17 %, mean brightness 43 % / 58 % / 70 % against
+47 %. The vivid develop's recipe crops — its cell is 9504×5702, 7 % off
+the top and 3 % off the bottom — while moody, golden and the conversion are
+the full 9504×6336 frame. On v1.2.2 the same three directions on the same index came back
+at 23 % / 11 % / 17 % saturation and 54 % / 58 % / 55 % brightness — inside those
+edits' cool, hazy register, four points of brightness apart. Judge trails,
+prompts and the finished-look-only run in [docs/SHOWCASE.md](docs/SHOWCASE.md);
+model-judge scores are automated review, not human aesthetic approval.</sub>
+
+`autoshade style-index <dir>` turns every Lightroom RAW+XMP pair you finished
+into an exemplar ([`src/style.rs`](src/style.rs)); a photo retrieves its **4
+most similar past shots** as a soft reference.
+
+- An exemplar carries a 14-dimensional EXIF/histogram feature, the 12 develop
+  settings you moved, your curve shape, colour families and a local-work habit
+  — summary statistics only.
+- Optional local models add a 768-dimensional **SigLIP 2** image vector and,
+  with `--describe`, one **Qwen3-VL-2B** sentence about the *grade*; nothing
+  leaves the machine.
+- Retrieval is
+  `d14 + W_EMB·(1−cos(q_img,e_img)) + W_TXT·(1−cos(q_txt,e_img)) + W_DESC·(1−cos(q_txt,e_desc))`,
+  shipped at `W_EMB = 4`, `W_TXT = 0.5`, `W_DESC = 0.5` — the calibration
+  harness's winners on the real corpus, hubness removed before the z-score.
+- `W_LOOK = 1.0` is the unmeasured term: the look library carries no develop
+  settings for that objective to see, so it ships inside a stable band.
+- `style_pull` (0.18 at the shipped Style 0.3, full at Style 1.0) moves the
+  proposal toward your historical means, unless a Direction at Adherence above
+  40 % leads; a `--looks` library guides the proposer but never becomes a
+  recipe target.
+
+Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
+
+### 10. Lightroom parity is measured, and the residuals are published
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/pillar-lightroom-math-dark.svg" />
@@ -433,32 +481,6 @@ v1.2.4 against Lightroom's own coverage rather than exported luma, on a
 46-export pack: the LINEAR falloff moved onto the abscissa `t^1.124`
 (α rms 0.0293 → 0.0074), and the radial boundary was shown to be a pure
 0.99876 scale of the stored ellipse — no dilation law.
-
-### 10. Generated pixels are quarantined and measured
-
-- `reimagine` composes the prompt onto an unconditional faithfulness scaffold
-  (because `input_fidelity` is silently dropped by gpt-image-2), measures the
-  result's structural divergence with the same `D` the reverse-fit uses, warns
-  at `D ≥ 0.35`, and can spend one bounded retry keeping the closer image.
-- The GUI's **Adjust generated image** edits a ✨ card or its ✎ edit with its
-  own prompt: the whole picture without strokes, or just the shared painted
-  region (blank = remove). One paid generation lands as a new ✨ card, leaving
-  its source intact; whole-image edits report divergence against the sent input.
-- `heal` only ever copies, shifts and averages pixels that already exist, and
-  anything that changed pixels lives on its own card as a pixel source — never
-  disguised as a Lightroom adjustment.
-- Spot removal imported from a Lightroom sidecar is re-solved here from the
-  photograph's own pixels, and the panel says so: it names how many areas
-  Lightroom removed, how many of those Adobe synthesised (content-aware or
-  generative, whose pixels the sidecar does not carry), and offers to re-run a
-  generative model over exactly those.
-- A photo edited in Lightroom's HDR mode renders as its **SDR rendition** —
-  Lightroom's own seven-control answer to publishing an HDR edit as an SDR
-  file — rather than as if the mode had never been set. The seven render only
-  while the mode is on, as in Lightroom; they are stored and round-tripped
-  either way.
-
-Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
 
 ### 11. The RAW denoiser is trained here and judged by pass marks written before the run
 
@@ -646,10 +668,10 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 | Star-field test, v1.6.0 build, against Lightroom Denoise 50 on the same frame | denoiser readings 6 of 8 pass: 98.70 % of 17,817 real faint stars kept against 98.80 %; bright-star peak 0.939 against 0.953 (behind); four-plane flux spread 0.0385 against 0.02 (behind); finished develop 0.2922 against 0.2701 (±0.03) and 0.0139 against 0.0278 | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
 | Hot-pixel map (ten 61 MP frames) | 86 / 20 / 77 sites inside the picture on three night frames, none on the fourth; 0 / 0 / 0 / 6 / 0 / 4 on ordinary frames; about 0.1 s a frame | [What is new §11](#11-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
 | Camera base look, v1.6.0 estimator (star frame, 8-bit levels) | develop against the camera's rendition 0.75 rms (median +0.19), 4.24 (+2.56) before; 4 knots instead of 13; finished-develop readings 0.3075 → 0.2922 and 0.0387 → 0.0139 | [What is new §12](#12-the-cameras-own-look-is-read-from-the-picture-like-with-like) |
-| Reverse-fit, stone viaduct (full solve, Reverse-fit strength 100 %) | look error 0.161 → 0.023 at confidence 0.63 (a global solve with the cast curves projected to t = 0.485, the per-band mixer on Orange/Yellow/Aqua/Blue at the 45 ceiling, two semantic zones, two boundary-gated tiles and one field mask), D = 0.180; at the default 65 % the pair fits to 0.047 at confidence 0.25 with the mixer capped at 18, four tiles and two field masks, and v1.2.2's fit of it is where the seam fix was measured: sky tile 0.0278 → 0.0042 (k 0.121), delivered +3.15 → +0.92 codes | [What is new §2](#2-reverse-fit-inverse-rendering-from-any-finished-look) |
+| Reverse-fit, stone viaduct (full solve, Reverse-fit strength 100 %) | look error 0.161 → 0.023 at confidence 0.63 (a global solve with the cast curves projected to t = 0.485, the per-band mixer on Orange/Yellow/Aqua/Blue at the 45 ceiling, two semantic zones, two boundary-gated tiles and one field mask), D = 0.180; at the default 65 % the pair fits to 0.047 at confidence 0.25 with the mixer capped at 18, four tiles and two field masks, and v1.2.2's fit of it is where the seam fix was measured: sky tile 0.0278 → 0.0042 (k 0.121), delivered +3.15 → +0.92 codes | [What is new §1](#1-whole-image-ai-generation-then-reverse-fit-an-editable-recipe-from-any-finished-look) |
 | Reverse-fit, Cornwall islet (full solve, composed calibration) | look error 0.137 → 0.027 at confidence 0.66, D = 0.136 sized from the sensor frame (0.304 from the cropped preview); the global cast projected to t = 0.363, delivered sky hue spread 9.6° (v1.2.2 shipped 33.1°) | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
 | Reverse-fit, desert canyon at dusk (full solve, Reverse-fit strength 85 %; the v1.3.0/v1.3.1 reference pair) | look error 0.110 → 0.048 at confidence 0.25, D = 0.275 at pixel scale and 0.609 at layout scale (sky zone 0.617); on the 2048 px acceptance render, whole-frame mean \|diff\| against the target 0.0276 (v1.2.6: 0.0571), sky ΔE 18.2 → 4.9, land 7.0 → 6.9; a solved white balance, two Select Sky bands, four boundary-gated tiles and the 12×8×8 colour field; `match --zoned` 5 min 29 s | [docs/SHOWCASE.md](docs/SHOWCASE.md) |
-| Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §7](#7-a-bilateral-grid-local-field-prices-every-local-producer-first) |
+| Local-field ceiling, calibration pair | global fit 0.0961 against a ceiling of 0.0700; the accepted sky zone realizes 0.134 of the distance | [What is new §6](#6-a-bilateral-grid-local-field-prices-every-local-producer-first) |
 | AI develop, model judge | 2026-09-02 four-looks batch on the full 169 + 94 index at `--style 1.0 --strength 0.9`, the direction leading: moody 68 → 70 → 78 (both adopted) → 69 (discarded), verdict Accept; golden 87 → 84 (discarded) after the verifier twice sent the proposal back for the grain it never set, verdict Revise — unsaved, the figure renders the proposal; vivid 70 → 84 (adopted) → 82 (discarded), verdict Accept. The finished-look-only run (2026-09-01) and v1.2.2's full-index run are on the showcase page | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Style retrieval weights | corpus harness (169 described exemplars, 156 queries): `W_EMB=4`, `W_TXT=0.5`, `W_DESC=0.5`, standardised variant with the text-hubness correction — MAE 0.688864 vs baseline 0.713143, +0.024280, CI [+0.005837, +0.041111] under the prose proxy; the corrected point at the old `W_TXT=4` regresses with CI [−0.069654, −0.005140], which is why the weight moved; under the tag-string proxy nothing beats the text-free row; `W_LOOK=1.0` is unmeasured (the harness cannot see the look library) and its scale is a real ratio against the direction terms — it ships inside a stable band, order unchanged to 2x and first moving at 4x | [AI advisor](#ai-advisor-and-reverse-fit) |
 | Memory budget | 1800 MB per photo from a 1771 MB reference probe; 4 GiB RAW admission gate | [Application](#application-and-infrastructure) |

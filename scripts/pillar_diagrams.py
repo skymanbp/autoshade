@@ -14,7 +14,7 @@ graph to be laid out — but nothing else is. Every box takes the height its own
 wrapped text needs, every row takes the tallest box in it, and every connector
 label goes wherever the checker says nothing else already is. Two defects the
 previous hand-placed version carried are gone with that: three captions sat on
-top of the vertical arrows they named, and pillar 1's "the block is a reference"
+top of the vertical arrows they named, and the analysis pillar's "the block is a reference"
 arrow pointed at empty canvas instead of at the advisor box.
 """
 import os
@@ -98,7 +98,7 @@ def chain(c, s, ids):
         c.connector([s.right(a), s.left(b)], src=a, dst=b)
 
 
-# ── Pillar 1 — AI analysis develop ─────────────────────────────────────────
+# ── Pillar 2 — AI analysis develop ─────────────────────────────────────────
 def pillar_analysis():
     s = Sheet(
         "pillar-analysis",
@@ -107,7 +107,7 @@ def pillar_analysis():
         "a query retrieves four neighbours by the hybrid distance; their "
         "habits reach the proposer behind an untrusted-data fence and a capped "
         "pull moves the result toward the photographer's means",
-        "Pillar 1 — AI analysis develop",
+        "Pillar 2 — AI analysis develop",
         "your own library decides what “your style” means; the model only "
         "proposes")
     first = s.row(92, [
@@ -154,7 +154,7 @@ def pillar_analysis():
     return c
 
 
-# ── Pillar 2 — generation and reverse fit ──────────────────────────────────
+# ── Pillar 1 — generation and reverse fit ──────────────────────────────────
 def pillar_reimagine():
     s = Sheet(
         "pillar-reimagine-fit",
@@ -163,7 +163,7 @@ def pillar_reimagine():
         "or a bounded atmosphere mode; a Tukey-biweight tone regression and "
         "gated local stages produce a recipe, and only the recipe reaches the "
         "full-resolution render",
-        "Pillar 2 — AI generates the look, the engine recovers the recipe",
+        "Pillar 1 — AI generates the look, the engine recovers the recipe",
         "the generated pixels are a TARGET, never the delivery")
     top = s.row(92, [
         dict(rid="neutral", x=28, w=176, num="01", title="Neutral render",
@@ -267,8 +267,8 @@ def pillar_lightroom():
 
 def main():
     os.chdir(ROOT)
-    for name, fn in (("pillar-analysis", pillar_analysis),
-                     ("pillar-reimagine-fit", pillar_reimagine),
+    for name, fn in (("pillar-reimagine-fit", pillar_reimagine),
+                     ("pillar-analysis", pillar_analysis),
                      ("pillar-lightroom-math", pillar_lightroom)):
         canvas = fn()
         written, runs, segs = write_svgs(canvas, name, OUT_DIRS,
