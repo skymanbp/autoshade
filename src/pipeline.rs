@@ -5737,8 +5737,11 @@ mod tests {
     fn both_reverse_fit_entries_take_their_source_frame_from_one_function() {
         let cli = production_text("src/main.rs");
         let gui = production_text("src/bin/gui/actions.rs");
+        // The CLI picks its source arm in `match_source` (2026-09-26): a RAW's
+        // frame is `fit_source`'s, and `match_cmd` takes its pair from there.
         assert!(
-            cli.contains("pipeline::fit_source(raw)?"),
+            cli.contains("return pipeline::fit_source(raw);")
+                && cli.contains("let (src, fit_base) = match_source(raw, negative.as_deref())?;"),
             "the CLI match command must take its source frame from pipeline::fit_source"
         );
         assert!(
