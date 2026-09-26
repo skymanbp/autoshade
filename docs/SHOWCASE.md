@@ -177,7 +177,14 @@ followed, and the same master then reads its sky at 0.645, takes the full
 solve like the RAW, renders in the RAW's frame (offset 0, 0 against the
 third column) and lands sky ΔE 3.4, land 5.8, mean |diff| 0.0239 — 0.0031
 from the fourth column in mean |diff| with under one code of mean shift per
-channel. Two routes, one look; the column stays the documented one. The
+channel. Two routes, one look; the column stays the documented one. Most of
+the fourth column's shift from the third was the reader's: the master
+carries AutoShade's own sRGB profile, which v1.6.1 and v1.6.2 read through a
+colour transform that left the render 0.64 to 1.07 codes darker per channel,
+and v1.6.3 reads it as written. On v1.6.3 the same recipe on the same master
+lands sky ΔE 3.5 and mean |diff| 0.0239 against the target, 0.0142 from the
+third column within 0.13 codes of its mean per channel, the grain as above,
+and 0.0011 from the <code>--negative</code> route. The
 v1.6.1 gate's three-strength
 numbers are in the release ledger, [ROADMAP.md](ROADMAP.md); the first
 three-strength table is in
