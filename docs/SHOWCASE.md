@@ -165,12 +165,20 @@ per channel, so the look is the third column's and only the grain changed:
 in the 1:1 window the spread of a 2-px high-pass of the luma falls from
 3.12 to 0.61 codes, in a flat sky patch from 2.10 to 0.48. The literal
 alternative — denoise first, then solve a new reverse-fit on the master —
-was measured and is not the column: a baked master composes no calibration
-into the solve, its sky reads a structural divergence of 0.716 against the
-RAW's 0.649 (the zone line is 0.65, so that solve took the bounded
-atmosphere path), and its render, without the lens profile, does not share
-the other columns' frame; on the same convention it lands sky ΔE 2.1 and
-mean |diff| 0.0177. The v1.6.1 gate's three-strength
+was measured too and is not the column. On v1.6.1 a baked master composed
+no calibration into the solve: its sky read a structural divergence of
+0.716 against the RAW's 0.649 (the zone line is 0.65, so that solve took
+the bounded atmosphere path) and its render, without the lens profile, did
+not share the other columns' frame (sky ΔE 2.1 and mean |diff| 0.0177 on
+the same convention, on a flatter sky, L\*std 0.92 of the target's).
+v1.6.2 closes that: <code>match --negative RAW</code> composes the photo's
+calibration into a master's solve, the rule the desktop app already
+followed, and the same master then reads its sky at 0.645, takes the full
+solve like the RAW, renders in the RAW's frame (offset 0, 0 against the
+third column) and lands sky ΔE 3.4, land 5.8, mean |diff| 0.0239 — 0.0031
+from the fourth column in mean |diff| with under one code of mean shift per
+channel. Two routes, one look; the column stays the documented one. The
+v1.6.1 gate's three-strength
 numbers are in the release ledger, [ROADMAP.md](ROADMAP.md); the first
 three-strength table is in
 [RELEASE_NOTES_v1.3.0.md](RELEASE_NOTES_v1.3.0.md).</sub>
