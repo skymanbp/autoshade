@@ -710,8 +710,23 @@ prints each frame's measured exposure and alignment travel, and `--no-align`
 skips the alignment for frames shot on a tripod. After an HDR merge it also
 writes a recipe beside the master with the SDR rendition switched on and the
 recovered stops filled in, because that is the only way to reach them.
-Either command's master reverse-fits under its RAW's calibration with
-`match <master> <target> --negative <RAW>` — for a stack, the first frame.
+
+**`match` on a denoised or stacked master (v1.6.2).** `match` fits what the
+desktop app fits. A RAW is fitted
+on a neutral develop of its sensor frame with the photo's calibration —
+camera base look, lens profile, as-shot white balance — composed into the
+solve. A master `denoise` or `stack` wrote is a baked image that carries no
+calibration of its own, so name the RAW it was made from (for a stack, the
+first frame) with `--negative`: the calibration then composes on top of the
+master's pixels, exactly as the desktop app fits a ◈ Denoised or ▦ Stacked
+card, the fit reads the same structure the RAW's fit reads, and `--render`
+shares the RAW's frame. Without the flag a baked source is fitted as it
+stands, with no calibration; on the reference pair that read the denoised
+master's sky at a structural divergence of 0.716 against the RAW's 0.649 —
+across the 0.65 line into the bounded atmosphere solver — and rendered
+without the lens profile. A RAW source refuses the flag: it is its own
+negative, and `match` on it describes the RAW itself, which is what its
+saved develop and its Lightroom sidecar render afterwards.
 
 ### Where your `.xmp` sidecars are — `--xmp-dir`
 
@@ -857,21 +872,6 @@ negative weight would rank the *least* similar photo first.
 
 `match` itself is local inverse rendering and needs no key. Its optional
 `--ai-judge` and `--deep` review paths do; `--deep` permits one guided retry.
-What it fits follows one rule with the desktop app (v1.6.2). A RAW is fitted
-on a neutral develop of its sensor frame with the photo's calibration —
-camera base look, lens profile, as-shot white balance — composed into the
-solve. A master `denoise` or `stack` wrote is a baked image that carries no
-calibration of its own, so name the RAW it was made from (for a stack, the
-first frame) with `--negative`: the calibration then composes on top of the
-master's pixels, exactly as the desktop app fits a ◈ Denoised or ▦ Stacked
-card, the fit reads the same structure the RAW's fit reads, and `--render`
-shares the RAW's frame. Without the flag a baked source is fitted as it
-stands, with no calibration; on the reference pair that read the denoised
-master's sky at a structural divergence of 0.716 against the RAW's 0.649 —
-across the 0.65 line into the bounded atmosphere solver — and rendered
-without the lens profile. A RAW source refuses the flag: it is its own
-negative, and `match` on it describes the RAW itself, which is what its
-saved develop and its Lightroom sidecar render afterwards.
 `heal` can use a supplied mask offline, while its automatic detector uses the
 vision role.
 
