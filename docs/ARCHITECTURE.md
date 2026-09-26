@@ -1,6 +1,12 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.6.2 — `match --negative <RAW>`: a denoised or
+> Status: **implemented** (v1.6.3 — the app's own files read back as the pixels
+> it wrote: the engine's sRGB profile reads as the working space, the 16-bit
+> profile lattice sits on exact codes, and the stack, heal and clone masters and
+> a 16-bit denoise master carry the profile wherever the format holds one; a
+> baked `match` source is fitted under the calibration its own saved develop
+> carries;
+> v1.6.2 — `match --negative <RAW>`: a denoised or
 > stacked master is reverse-fitted under its photo's calibration on the command
 > line, as the desktop app already did; v1.6.1 — the colour field reads a paired region's
 > cells on the pairing where the pixel evidence cannot read them (R42), and the
