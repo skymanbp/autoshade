@@ -68,51 +68,51 @@
       <div class="feature-grid">
         <article>
           <h3>A generated look, recovered as a recipe</h3>
-          <p><code>reimagine</code> asks an image model for the picture you describe, generated from your own frame; <code>match</code> measures how far that picture strayed from the frame, then fits an editable recipe to its look &mdash; global tone and colour, then semantic zones, luminance and colour bands and evidence-gated tiles &mdash; and renders it on the full RAW. The generated picture is a target, never the delivery. <a href="#showcase-a">Three pairs &rarr;</a></p>
+          <p><code>reimagine</code> asks an image model for the picture you describe, from your own frame; <code>match</code> measures how far that picture strayed, fits an editable recipe to its look and renders it on the full RAW. The picture is a target, never the delivery. <a href="#showcase-a">Two pairs &rarr;</a></p>
         </article>
         <article>
           <h3>One develop engine</h3>
-          <p>Exposure, white balance, curves, HSL, color grading, texture, clarity, dehaze, sharpening, both noise reductions, de-fringing, grain, vignettes, perspective, crop, and lens-aware local adjustments &mdash; one shared library behind the desktop GUI, the scriptable CLI and the local web UI.</p>
+          <p>Exposure, white balance, curves, HSL, colour grading, texture, clarity, dehaze, sharpening, both noise reductions, de-fringing, grain, vignettes, perspective, crop and lens-aware local adjustments &mdash; one shared library behind the desktop app, the command line and the local web UI.</p>
         </article>
         <article>
           <h3>Editable AI proposals</h3>
-          <p><code>analyze</code> and <code>auto</code> propose and validate recipes against image statistics, render them, and allow one bounded visual-review revision.</p>
+          <p><code>analyze</code> and <code>auto</code> propose a recipe from preview, EXIF and histogram, check it against the image's own statistics, render it, and may buy one bounded visual-review revision. The recipe is the only channel between the AI and the pixels.</p>
         </article>
         <article>
           <h3>Local masks</h3>
-          <p>Linear, radial, brush, luminance-range, color-range; local subject, sky and point-prompted object selection.</p>
+          <p>Linear, radial, brush, bitmap, luminance-range and colour-range masks composed by Add, Subtract and Intersect, plus local subject, sky and point-prompted object selection from pinned models that run on your own machine, no API key.</p>
         </article>
         <article>
           <h3>Sidecars both ways</h3>
-          <p>Lightroom/ACR round-trip; conservative merges preserve unmodeled fields.</p>
+          <p>Lightroom and Camera Raw sidecars are the merge base: owned edits are written back, unmodeled fields survive byte for byte, and the whole develop rides inside the sidecar under AutoShade's own namespace, so a Lightroom round trip reopens exactly.</p>
         </article>
         <article>
           <h3>Versions and variants</h3>
-          <p>Ordinary develops, generated targets and reverse-fitted looks stay distinct; the source stays untouched.</p>
+          <p>Ordinary develops, generated targets, reverse-fitted looks, denoised negatives and stacked frames stay distinct cards with numbered snapshots in a per-user store; the source library is read-only and the original is never rewritten.</p>
         </article>
         <article>
           <h3>Stacking and merging</h3>
-          <p>Several frames of one scene become one over a single alignment: an HDR merge that records the stops it recovered, an exposure fusion, a focus stack, a noise stack. The merge lands as its own <span aria-hidden="true">▦</span> card and the frame it started from keeps its pixels.</p>
+          <p>Several frames of one scene become one over a single alignment: an HDR merge that records the stops it recovered, an exposure fusion, a focus stack, a noise stack. The merge lands as its own <span aria-hidden="true">▦</span> card and the frames it started from keep their pixels.</p>
         </article>
         <article>
           <h3>Every slider renders</h3>
-          <p>Sharpening, luminance and colour noise reduction, de-fringing, Transform and Upright, camera profiles, HDR edit mode and imported spot removal are read from the sidecar <em>and</em> rendered — not carried through untouched.</p>
+          <p>Sharpening, luminance and colour noise reduction, de-fringing, Transform and Upright, camera profiles, HDR edit mode and imported spot removal are read from the sidecar <em>and</em> rendered &mdash; not carried through untouched, and not silently dropped.</p>
         </article>
         <article>
           <h3>A denoiser trained here</h3>
-          <p>The RAW denoiser cleans the sensor mosaic before demosaic with weights fine-tuned for this exact transform, told the noise measured tile by tile on the frame itself; since v1.6.0 they are trained on star fields too, so faint stars survive the cleaning instead of leaving as noise. At the 71% RAW default it returns the frame's own luminance grain after demosaic in linear light; every positive strength keeps clean chroma; 100% is the complete network output. Baked files keep SCUNet and its separate 50% default. <a href="#showcase-c">See the star field &rarr;</a></p>
+          <p>The RAW denoiser cleans the sensor mosaic before demosaic with weights trained on this project's own data, told the noise measured tile by tile on the frame itself; only luminance grain comes back (71% by default) and faint stars survive. <a href="#showcase-c">See the star field &rarr;</a></p>
         </article>
         <article>
           <h3>Pass marks written before training</h3>
-          <p>Every training run's pass marks are committed before it starts: the light a star must keep at 4σ, 6σ and 10σ, a sky that must not lift, two windows of a known-answer test, and a same-frame comparison against Lightroom's Denoise 50 on a real star field, read in ten measurements. The second run passed and ships; two later runs, aimed at the two readings still behind Lightroom, failed their own marks and were refused. The numbers are in the release notes.</p>
+          <p>Every training run's pass marks are committed before it starts, among them a same-frame comparison against Lightroom's Denoise 50 on a real star field. The second run passed and ships; two later runs failed their own marks and were refused.</p>
         </article>
         <article>
           <h3>The camera's look, read like with like</h3>
-          <p>The tone curve that makes a neutral develop look like the camera's own JPEG is estimated from the embedded preview on block means, paired at the camera's framing, with the lens profile's corner lift counted only where the pair shows the camera made it. Older recipes are re-estimated once, the first time they are opened, and say so.</p>
+          <p>The tone curve that makes a neutral develop look like the camera's own JPEG is estimated from the embedded preview on block means, paired at the camera's own framing; older recipes are re-estimated once, the first time they are opened, and say so.</p>
         </article>
         <article>
           <h3>Hot pixels mapped every develop</h3>
-          <p>Before the grain source and the cleaner read a Bayer mosaic, isolated sites 20 sigma above their own neighbourhood are mapped, with clipped samples never measuring noise and eight neighbours vouching. Ordinary frames map none or a handful; a frame with no mappable site renders byte-identically.</p>
+          <p>Before the denoiser reads a Bayer mosaic, isolated sites 20 sigma above their own neighbourhood are mapped, with eight neighbours vouching and clipped samples never measuring noise; ordinary frames map none or a handful, and a frame with no mappable site renders byte-identically.</p>
         </article>
       </div>
 
@@ -165,16 +165,11 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
     <section class="section showcase" id="showcase-a" aria-labelledby="showcase-a-title">
       <p class="section-kicker">Showcase · Part A</p>
       <h2 id="showcase-a-title">Reimagine → reverse-fit</h2>
-      <p class="section-lede">Targets can invent content; fitted renders cannot. Fit an editable recipe to the target's look, then apply it to the full RAW. The desert canyon at the top of the page is the third pair.</p>
+      <p class="section-lede">Targets can invent content; fitted renders cannot. Fit an editable recipe to the target's look, then apply it to the full RAW. The desert canyon at the top of the page is the second pair; a third, a Cornwall lighthouse islet, is on <a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">the showcase page</a>.</p>
 
       <figure class="wide-figure">
         <img src="images/showcase-viaduct-reverse-fit.jpg?v=1.6.1" width="1600" height="1000" alt="Stone viaduct: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
         <figcaption><strong><a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Stone viaduct.</a></strong> Top row: straight conversion, <code>gpt-image-2</code> target (<strong>D = 0.180</strong>, under the 0.35 threshold: full solve), recovered recipe on the RAW. Look error <strong>0.161 → 0.023</strong> at confidence 0.63, at Reverse-fit strength 100 %, not the 65 % default.</figcaption>
-      </figure>
-
-      <figure class="wide-figure">
-        <img src="images/showcase-cornwall-reverse-fit.jpg?v=1.6.1" width="1600" height="1000" alt="Cornwall lighthouse islet: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" loading="lazy">
-        <figcaption><strong><a href="https://github.com/skymanbp/autoshade/blob/main/docs/SHOWCASE.md">Cornwall lighthouse islet: the same three stages.</a></strong> The body's 4:3 aspect makes its embedded preview a centred crop of the 3:2 sensor. Sized from the sensor frame the prompt bought a target at <strong>D = 0.136</strong>, against 0.304 from the preview. Look error <strong>0.137 → 0.027</strong> at confidence 0.66.</figcaption>
       </figure>
 
       <aside class="honesty" aria-label="Reverse-fit limitation">

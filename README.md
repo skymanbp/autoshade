@@ -141,8 +141,10 @@ content; `match` then recovers, from that picture, a recipe the engine can
 render on the full-resolution RAW — global tone and colour first, then
 zones, bands, tiles and a smooth colour field, each admitted only on
 evidence. The recipe carries the look and the sensor carries the detail;
-the generated picture is a target, never the delivery. The three pairs
-below are the whole path, and every number in their captions is measured.
+the generated picture is a target, never the delivery. The two pairs
+below are the whole path, and every number in their captions is measured;
+a third pair, a Cornwall lighthouse islet, is on
+[docs/SHOWCASE.md](docs/SHOWCASE.md).
 
 The source frame is one function for both entry points: a neutral develop of
 the RAW at a 2048 px working edge, never the camera's embedded JPEG preview.
@@ -169,19 +171,6 @@ recovered recipe rendered on the 9504×6336 RAW at Reverse-fit strength 100 %
 resolution — the recipe carries the look, the RAW carries the detail, and the
 generated frame carries neither at full size. Every control the fit set, the
 default-strength fit and the seam measurement are in
-[docs/SHOWCASE.md](docs/SHOWCASE.md).</sub>
-
-<img src="docs/images/showcase-cornwall-reverse-fit.jpg" alt="Cornwall lighthouse islet: straight conversion, generated target, and the recovered recipe rendered on the RAW, with a 1:1 detail row" />
-
-<sub><b>Cornwall lighthouse islet.</b> The same three stages on a frame shot
-with the body set to a 4:3 aspect: sized from the sensor frame the same
-prompt bought a target at <b>D = 0.136</b>, and the fit ran on a neutral
-develop of the full frame with the calibration composed into the solve —
-look error <b>0.137 → 0.027</b> at confidence 0.66. This is the frame that
-found v1.2.3's cast defect: three channel curves that passed every hue veto
-still fanned the sky 33.1° across luminance, so a fourth veto now reads that
-fan and shrinks the curves toward one shared shape until it clears — the
-delivered sky spread is 9.6°. Full measurements and prompts in
 [docs/SHOWCASE.md](docs/SHOWCASE.md).</sub>
 
 <img src="docs/images/showcase-canyon-reverse-fit.jpg" alt="Desert canyon at dusk: straight conversion, generated target, the recovered recipe rendered on the RAW, and the same recipe on the AI-denoised RAW, with a 1:1 detail row" />
