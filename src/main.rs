@@ -519,8 +519,7 @@ enum Command {
         /// exactly as the desktop app fits its ◈ Denoised card, so the
         /// fit reads the same room the RAW's fit reads and the render
         /// shares the RAW's frame. Refused with a RAW source: a RAW is its
-        /// own negative, and a master the app recorded for it is found
-        /// through the develop store without this flag.
+        /// own negative.
         #[arg(long)]
         negative: Option<PathBuf>,
     },
@@ -1924,54 +1923,35 @@ fn match_cmd(
             o.display()
         );
     }
-    // The source frame and the calibration composed into the solve: ONE
-    // rule with the desktop app's ◭ worker (`negative_origin`). The
-    // negative's pixels are its recorded master when a denoise or a stack
-    // remade it, else the sensor frame — what `apply` renders — and the
-    // calibration is always the photo's own. The camera's embedded
-    // rendition used to be this command's contract, and a bare master used
-    // to be fitted with no calibration at all: on the reference pair the
-    // denoised negative then read its sky at a structural divergence of
-    // 0.716 against 0.649 from the RAW, crossed the 0.65 zone line into the
-    // bounded solver, and rendered without the lens profile — a different
-    // frame from the RAW's render (v1.6.2). See `fit_source`.
-    let negative = negative.as_deref();
-    let (src, fit_base, composed, src_path) = if decode::is_raw(raw) {
-        if let Some(n) = negative {
+    // The source frame and the calibration composed into the solve. A RAW
+    // is fitted on `pipeline::fit_source` — a neutral develop of its sensor
+    // frame with the photo's calibration composed — the ONE choice both
+    // entry points make (the camera's embedded rendition used to be this
+    // command's contract, and the structural reading the CLI and the app
+    // are judged by disagreed across the mode threshold on a real pair; see
+    // `fit_source`). It stays the RAW's own frame even when the app has
+    // recorded a retouch master for the photo: the publish below writes the
+    // RAW's saved develop and its Lightroom sidecar and CLEARS that link, so
+    // what renders afterwards is the RAW, and the fit must describe it.
+    // A master `denoise` or `stack` wrote is a baked file with no
+    // calibration of its own: named with `--negative`, its RAW's
+    // calibration composes on top, exactly as the desktop app fits its
+    // ◈ Denoised / ▦ Stacked card (v1.6.2). Fitted bare, the reference
+    // pair's denoised master read its sky at a structural divergence of
+    // 0.716 against 0.649 from the RAW, crossed the 0.65 zone line into
+    // the bounded solver, and rendered without the lens profile — a
+    // different frame from the RAW's render.
+    let (src, fit_base, composed) = if decode::is_raw(raw) {
+        if let Some(n) = negative.as_deref() {
             anyhow::bail!(
                 "--negative {} is for a baked master; {} is a RAW and is its own negative",
                 n.display(),
                 raw.display()
             );
         }
-        match autoshade::store::read_pixel_source(raw) {
-            // A ◈ denoised or ▦ stacked master IS this photo's negative, so
-            // the fit reads it under the photo's calibration. A generated
-            // master is not a negative (the app fits the photo, not the ✨
-            // card) and keeps the sensor-frame path.
-            Some((master, false)) => {
-                println!("  (fitting on the saved pixel master {})", master.display());
-                (
-                    render::source_pixels(&master, Some(pipeline::FIT_SOURCE_EDGE))?,
-                    pipeline::calibration_recipe(pipeline::fit_calibration(raw)),
-                    true,
-                    master,
-                )
-            }
-            // The same refusal `apply` makes: a recorded master that cannot
-            // be loaded must not silently become a fit on the noisy frame.
-            None if autoshade::store::has_pixel_source(raw) => anyhow::bail!(
-                "the saved pixel master of {} could not be loaded - fitting the sensor frame \
-                 instead would silently drop it; open the photo for the cause, then re-save \
-                 or clear the link with a parametric-only save",
-                raw.display()
-            ),
-            _ => {
-                let (frame, cal) = pipeline::fit_source(raw)?;
-                (frame, cal, true, raw.to_path_buf())
-            }
-        }
-    } else if let Some(neg) = negative {
+        let (frame, cal) = pipeline::fit_source(raw)?;
+        (frame, cal, true)
+    } else if let Some(neg) = negative.as_deref() {
         if !decode::is_raw(neg) {
             anyhow::bail!(
                 "--negative must name the RAW this master was made from; {} is not a RAW",
@@ -1983,12 +1963,11 @@ fn match_cmd(
             render::source_pixels(raw, Some(pipeline::FIT_SOURCE_EDGE))?,
             pipeline::calibration_recipe(pipeline::fit_calibration(neg)),
             true,
-            raw.to_path_buf(),
         )
     } else {
         // No sensor frame to develop, no calibration to compose: the baked
         // file IS the source, and the post-stamp below stays available.
-        (decode::preview_only(raw)?, EditRecipe::default(), false, raw.to_path_buf())
+        (decode::preview_only(raw)?, EditRecipe::default(), false)
     };
     // THE raw-vs-baked dispatch (R22-1). The target is a finished rendition
     // of this frame — usually a baked file, but "another RAW you developed
@@ -2345,8 +2324,7 @@ fn match_cmd(
         pipeline::guard_readonly(&img_out, raw)?;
         ensure_parent(&img_out)?;
         println!("rendering the fitted recipe at full resolution …");
-        // On the pixels the fit read: the recorded master when there is one.
-        let (w, h) = render::render_to_file(&src_path, &rep.recipe, &img_out, None, None, autoshade::diag::stderr())?;
+        let (w, h) = render::render_to_file(raw, &rep.recipe, &img_out, None, None, autoshade::diag::stderr())?;
         println!("render -> {} ({w} x {h})", img_out.display());
     }
     if style_prompt {
