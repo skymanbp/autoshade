@@ -244,7 +244,12 @@ else
 fi
 
 # ------------------------------------------------------------- the transcript
-SKIPS=$(grep -c '^SKIPPED ' "$WORK/calib.txt" 2>/dev/null || true)
+# Counted wherever a skip line lands, not only at a line start: under
+# --nocapture a test's skip line (stderr) can arrive between libtest's
+# `test <name> ... ` and its `ok` (stdout), and the v1.6.3 battery's summary
+# read 0 for the one skip it had. A name runs to the first ": " (names carry
+# spaces, never a colon).
+SKIPS=$({ grep -oE 'SKIPPED [^:]+: ' "$WORK/calib.txt" 2>/dev/null || true; } | wc -l | tr -d ' ')
 [ -z "$SKIPS" ] && SKIPS=0
 FAILED=0
 for rc in "$RC_DEFAULT" "$RC_GUI" "$RC_CALIB"; do

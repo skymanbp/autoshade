@@ -619,7 +619,11 @@ def check_release_battery_lanes(args: argparse.Namespace) -> tuple[str, list[str
             "change which tests exist"
         ]
     body = _battery_block_text(path, "test calib") or ""
-    skips = sum(1 for line in body.split("\n") if line.startswith("SKIPPED "))
+    # Counted wherever a skip line lands, as release_battery.sh counts it:
+    # under --nocapture it can arrive mid-line, between libtest's `test
+    # <name> ... ` and its `ok` (the v1.6.3 battery). A name runs to the first
+    # ": ".
+    skips = len(re.findall(r"SKIPPED [^:\n]+: ", body))
     detail.append(
         f"        {path.name}: calibration lane ran {calib.get(lib, 0)} library tests, "
         f"{skips} of them skipped for want of a corpus or a sidecar"
