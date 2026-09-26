@@ -2895,10 +2895,12 @@ pub fn fit_calibration(raw: &Path) -> PhotoCalibration {
     }
 }
 
-/// Stamp a reverse-fit recipe with the photo's calibration — ONE rule shared
-/// by the CLI `match` command and the GUI 反推 worker: without it the fitted
-/// deltas landed on a much darker base than the one they were solved
-/// against, and the render disagreed with the fit's own numbers. The era
+/// Stamp a recipe with the photo's calibration (the GUI's snapshot and open
+/// stampers cite its era rule, below). No reverse fit stamps after its solve:
+/// every fit surface composes the calibration INTO the solve (`fit_source`,
+/// the CLI's `match_source`, the GUI's fit arms), because a stamp laid on
+/// after the solve is a base the fitted deltas never saw — the CLI's
+/// baked-source arm did exactly that until 2026-09-26. The era
 /// stamp rides WITH the curve (the paste rule): the fitted recipe is era-2
 /// by Default, and stamping a saved era-1 curve under it would launder the
 /// provenance the pre-era repair keys on.
@@ -2913,10 +2915,11 @@ pub fn stamp_fit_calibration(recipe: &mut crate::recipe::EditRecipe, cal: PhotoC
 /// What a post-stamp calibration adds to the delivered render, as a phrase --
 /// or `None` when it adds nothing and the two frames are already one.
 ///
-/// The two production stampers are [`stamp_fit_calibration`] (CLI `match`) and
-/// the inline saved-first stamp inside [`produce_recipe`] (analyze / batch /
-/// web). Both leave a recipe whose residual and review score were read BEFORE
-/// the calibration existed, so both ask this the same question.
+/// The production stamper is the inline saved-first stamp inside
+/// [`produce_recipe`] (analyze / batch / web): it leaves a recipe whose
+/// residual and review score were read BEFORE the calibration existed, so it
+/// asks this question. CLI `match` composed its calibration into every solve
+/// from 2026-09-26 and has nothing left to disclose.
 pub fn post_stamp_domain_shift(recipe: &crate::recipe::EditRecipe) -> Option<String> {
     let curve = !recipe.base_curve.is_empty();
     // "Enabled" is the recipe's own activity predicates — the ones the
@@ -7409,10 +7412,10 @@ mod tests {
     /// what was missing was any statement of it, so a reader compared a
     /// printed residual against a picture it never saw.
     ///
-    /// Both production stampers ask the same question through
-    /// `post_stamp_domain_shift`: CLI `match` (main.rs, via
-    /// `stamp_fit_calibration`) and `produce_recipe` (analyze / batch / web,
-    /// via its own saved-first stamp).
+    /// The production stamper asks it through `post_stamp_domain_shift`:
+    /// `produce_recipe` (analyze / batch / web, via its own saved-first
+    /// stamp). CLI `match` stamped a baked source's calibration after its
+    /// solve until 2026-09-26 and composes it into the solve now.
     ///
     /// MUTATION: make `post_stamp_domain_shift` return `Some` unconditionally
     /// and the no-shift arm fails; make it return `None` unconditionally and

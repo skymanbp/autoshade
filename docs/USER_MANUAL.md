@@ -720,11 +720,16 @@ calibration of its own, so name the RAW it was made from (for a stack, the
 first frame) with `--negative`: the calibration then composes on top of the
 master's pixels, exactly as the desktop app fits a ◈ Denoised or ▦ Stacked
 card, the fit reads the same structure the RAW's fit reads, and `--render`
-shares the RAW's frame. Without the flag a baked source is fitted as it
-stands, with no calibration; on the reference pair that read the denoised
-master's sky at a structural divergence of 0.716 against the RAW's 0.649 —
-across the 0.65 line into the bounded atmosphere solver — and rendered
-without the lens profile. A RAW source refuses the flag: it is its own
+shares the RAW's frame. Without the flag a baked source is fitted under the
+calibration its own saved develop carries, composed the same way — the
+desktop app's rule for a baked file. For a file nothing has calibrated that
+is none, and it is fitted as it stands: on the reference pair a bare
+denoised master read its sky at a structural divergence of 0.716 against
+the RAW's 0.649 — across the 0.65 line into the bounded atmosphere solver —
+and rendered without the lens profile. A master fitted once with
+`--negative` keeps its RAW's calibration in its saved develop, so a later
+`match` on it without the flag fits under that calibration too. A RAW
+source refuses the flag: it is its own
 negative, and `match` on it describes the RAW itself, which is what its
 saved develop and its Lightroom sidecar render afterwards.
 

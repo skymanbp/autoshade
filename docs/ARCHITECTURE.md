@@ -5925,10 +5925,13 @@ residual equals a recompute of the canvas's DEVELOP pass to 1e-6
 (unit-pinned; the GUI's later lens-geometry resample sits outside the
 fit's model — pre-existing, second-order), which retired v0.24.0's
 two-pass seed and its `scale_chroma` clamp-order gap (measured up to
-~18.7/255 mean on saturated fixtures). The CLI `match`
-keeps its embedded-preview + post-stamp contract
-(`pipeline::stamp_fit_calibration`) — `preview_only` needs no demosaic,
-and that command's contract was validated on it.
+~18.7/255 mean on saturated fixtures). The CLI `match` composes the
+same way on every source (`match_source`): a RAW through
+`pipeline::fit_source` (v1.3.0), a `--negative` master under its RAW's
+calibration (v1.6.2), and any other baked file on `preview_only` under
+the calibration its own saved develop carries (2026-09-26 — the
+post-stamp it used before put a camera curve under deltas solved
+without one).
 
 **The base look is estimated against the picture the camera drew**
 (2026-09-21). The three open paths — the GUI open worker,

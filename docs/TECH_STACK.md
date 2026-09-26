@@ -1738,7 +1738,9 @@ fits a RAW on a neutral develop of the full sensor frame with the calibration
 composed (`pipeline::fit_source`, one frame for the CLI and the app since
 v1.3.0; the embedded rendition is never fitted), and a ◈/▦ master on its own
 pixels under the photo's calibration — in the app through its card, on the
-command line with `match --negative <RAW>` (v1.6.2); parameter downgrades occur only when structured error blame—or
+command line with `match --negative <RAW>` (v1.6.2) — and any other baked file under the calibration its own
+saved develop carries, composed into the solve in both front ends rather than stamped on after it; parameter
+downgrades occur only when structured error blame—or
 the equivalent streamed-refusal wrapper—names that parameter, while `heal`
 copies real neighbouring pixels, mean-corrects and feather-blends the patch,
 and remains a deterministic pixel operation rather than XMP.

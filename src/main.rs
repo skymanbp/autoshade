@@ -1883,6 +1883,63 @@ fn denoise_cmd(
     Ok(())
 }
 
+/// What `match` fits, and the calibration composed into its solve — one rule
+/// with the desktop app's reverse fit (`src/bin/gui/actions.rs`, where the
+/// source and its ◈/▦ negative pick the frame). Every arm composes; nothing
+/// is stamped on after the solve, so the residual and the judge describe the
+/// render the recipe delivers.
+///
+/// - A RAW is fitted on `pipeline::fit_source`, a neutral develop of its
+///   sensor frame with the photo's calibration composed (the camera's
+///   embedded rendition used to be this command's source, and the structural
+///   reading the CLI and the app are judged by disagreed across the mode
+///   threshold on a real pair; see `fit_source`). It stays the RAW's own
+///   frame even when the app has recorded a retouch master for the photo:
+///   the publish in `match_cmd` writes the RAW's saved develop and its
+///   Lightroom sidecar and CLEARS that link, so what renders afterwards is
+///   the RAW, and the fit must describe it.
+/// - A master `denoise` or `stack` wrote, named with `--negative`, is fitted
+///   on its own pixels under its RAW's calibration, exactly as the app fits a
+///   ◈ Denoised or ▦ Stacked card (v1.6.2). Fitted bare, the reference pair's
+///   denoised master read its sky at a structural divergence of 0.716 against
+///   0.649 from the RAW, crossed the 0.65 zone line into the bounded solver,
+///   and rendered without the lens profile.
+/// - Any other baked file is fitted on its own pixels under the calibration
+///   its OWN saved develop carries (`pipeline::fit_calibration`, the app's
+///   rule for a baked source) — none for a file nothing has calibrated, which
+///   is then fitted as it stands. This arm used to solve with no calibration
+///   and stamp the saved one on afterwards (2026-09-26): once a `--negative`
+///   fit had saved the RAW's calibration with its master, a later fit of that
+///   master without the flag shipped a camera curve its solve had never seen,
+///   and on a real three-frame stack the render came out 50–60 codes per
+///   channel brighter than the target.
+fn match_source(raw: &Path, negative: Option<&Path>) -> Result<(image::DynamicImage, EditRecipe)> {
+    if decode::is_raw(raw) {
+        if let Some(n) = negative {
+            anyhow::bail!(
+                "--negative {} is for a baked master; {} is a RAW and is its own negative",
+                n.display(),
+                raw.display()
+            );
+        }
+        return pipeline::fit_source(raw);
+    }
+    if let Some(neg) = negative {
+        if !decode::is_raw(neg) {
+            anyhow::bail!(
+                "--negative must name the RAW this master was made from; {} is not a RAW",
+                neg.display()
+            );
+        }
+        println!("  (a master of {}: its calibration composes into the solve)", neg.display());
+        return Ok((
+            render::source_pixels(raw, Some(pipeline::FIT_SOURCE_EDGE))?,
+            pipeline::calibration_recipe(pipeline::fit_calibration(neg)),
+        ));
+    }
+    Ok((decode::preview_only(raw)?, pipeline::calibration_recipe(pipeline::fit_calibration(raw))))
+}
+
 /// Reverse-fit: solve for the EditRecipe that maps `raw`'s look onto `target`'s
 /// (the same frame, differently developed — e.g. the reimagine output). The
 /// deliverables are parametric (recipe JSON + XMP + optional full-res render),
@@ -1923,52 +1980,9 @@ fn match_cmd(
             o.display()
         );
     }
-    // The source frame and the calibration composed into the solve. A RAW
-    // is fitted on `pipeline::fit_source` — a neutral develop of its sensor
-    // frame with the photo's calibration composed — the ONE choice both
-    // entry points make (the camera's embedded rendition used to be this
-    // command's contract, and the structural reading the CLI and the app
-    // are judged by disagreed across the mode threshold on a real pair; see
-    // `fit_source`). It stays the RAW's own frame even when the app has
-    // recorded a retouch master for the photo: the publish below writes the
-    // RAW's saved develop and its Lightroom sidecar and CLEARS that link, so
-    // what renders afterwards is the RAW, and the fit must describe it.
-    // A master `denoise` or `stack` wrote is a baked file with no
-    // calibration of its own: named with `--negative`, its RAW's
-    // calibration composes on top, exactly as the desktop app fits its
-    // ◈ Denoised / ▦ Stacked card (v1.6.2). Fitted bare, the reference
-    // pair's denoised master read its sky at a structural divergence of
-    // 0.716 against 0.649 from the RAW, crossed the 0.65 zone line into
-    // the bounded solver, and rendered without the lens profile — a
-    // different frame from the RAW's render.
-    let (src, fit_base, composed) = if decode::is_raw(raw) {
-        if let Some(n) = negative.as_deref() {
-            anyhow::bail!(
-                "--negative {} is for a baked master; {} is a RAW and is its own negative",
-                n.display(),
-                raw.display()
-            );
-        }
-        let (frame, cal) = pipeline::fit_source(raw)?;
-        (frame, cal, true)
-    } else if let Some(neg) = negative.as_deref() {
-        if !decode::is_raw(neg) {
-            anyhow::bail!(
-                "--negative must name the RAW this master was made from; {} is not a RAW",
-                neg.display()
-            );
-        }
-        println!("  (a master of {}: its calibration composes into the solve)", neg.display());
-        (
-            render::source_pixels(raw, Some(pipeline::FIT_SOURCE_EDGE))?,
-            pipeline::calibration_recipe(pipeline::fit_calibration(neg)),
-            true,
-        )
-    } else {
-        // No sensor frame to develop, no calibration to compose: the baked
-        // file IS the source, and the post-stamp below stays available.
-        (decode::preview_only(raw)?, EditRecipe::default(), false)
-    };
+    // The source frame and the calibration composed into the solve — one
+    // rule with the desktop app's fit (`match_source`).
+    let (src, fit_base) = match_source(raw, negative.as_deref())?;
     // THE raw-vs-baked dispatch (R22-1). The target is a finished rendition
     // of this frame — usually a baked file, but "another RAW you developed
     // elsewhere" is a legitimate reference and `decode::load_image` refuses a
@@ -2054,18 +2068,10 @@ fn match_cmd(
             d(rep.divergence_coarse),
         );
     }
-    // Calibration stamp, ONE snapshot (produce_recipe's rule), kept for the
-    // BAKED-source arm alone: there the fit solves against a file that
-    // carries its own look, the deliverable renders from that same file, and
-    // the stamp is what gives the recipe a camera curve to name. A RAW source
-    // goes through `pipeline::fit_source`, which COMPOSES the calibration
-    // into the solve, so its deliverable carries it by construction — no
-    // stamp, and `post_stamp_domain_shift` has nothing to disclose.
-    // R20 opt-in AI review (LLM-as-a-judge), rendered PRE-stamp on purpose:
-    // this fit solved its deltas ON `src` (the room the solve ran in), so the
-    // judge must see develop_preview(src, deltas) — on the baked arm, after
-    // the calibration stamp below the same render would apply the base curve
-    // a second time. Informational: a failure warns, never errs.
+    // R20 opt-in AI review (LLM-as-a-judge). Every source arm composed its
+    // calibration into the solve (`match_source`), so develop_preview(src,
+    // recipe) is the room the solve ran in and the render the recipe
+    // delivers. Informational: a failure warns, never errs.
     const JUDGE_EDGE: u32 = 1024; // detail:high tiles at 512 px — 4 tiles read a grade
     let judge_of = |recipe: &EditRecipe| -> Result<autoshade::advisor::Judgement> {
         let cfg = Config::load();
@@ -2172,28 +2178,11 @@ fn match_cmd(
     } else {
         None
     };
-    // With the calibration composed into the solve the recipe already
-    // carries it and the residual describes the delivered frame: nothing to
-    // stamp, nothing to disclose.
-    let shift = if composed {
-        None
-    } else {
-        let cal = pipeline::fit_calibration(raw);
-        pipeline::stamp_fit_calibration(&mut rep.recipe, cal);
-        // The residual above was read before that stamp existed, so it
-        // describes the embedded rendition rather than the file this command
-        // writes. Say so in BOTH places the number appears -- the console line
-        // the user is reading right now, and the rationale that ships with the
-        // recipe.
-        pipeline::post_stamp_domain_shift(&rep.recipe)
-    };
-    let domain = match shift.as_deref() {
-        Some(what) => format!("; measured on the camera's embedded rendition, before {what}"),
-        None => String::new(),
-    };
-    pipeline::note_post_stamp_domain(&mut rep.recipe.rationale, &mut rep.notes, shift);
+    // Every arm composed its calibration into the solve (`match_source`): the
+    // recipe carries it by construction and the residual describes the
+    // delivered frame — nothing to stamp afterwards, nothing to disclose.
     println!(
-        "  look error {:.3} → {:.3}  (0 = identical distributions; masks/local edits are not recoverable{domain})",
+        "  look error {:.3} → {:.3}  (0 = identical distributions; masks/local edits are not recoverable)",
         rep.err_before, rep.err_after
     );
     match judged {
@@ -2952,6 +2941,65 @@ mod tests {
         );
         assert!(e.contains("is not a RAW") && e.contains("target.png"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A baked source is fitted under the calibration its OWN saved develop
+    /// carries, composed into the solve (the desktop app's rule). The arm used
+    /// to solve with none and stamp the saved camera curve on afterwards, so
+    /// after a `--negative` fit had saved its RAW's calibration with a master,
+    /// fitting that master again without the flag delivered a curve the solve
+    /// had never seen (a real three-frame stack: 50–60 codes per channel too
+    /// bright). A master whose saved develop carries a strong camera curve is
+    /// fitted onto a target rendered through that curve and a look; the
+    /// fitted recipe, rendered, must land on the target.
+    /// MUTATION: solve `match_source`'s last arm on `EditRecipe::default()`
+    /// and stamp `pipeline::fit_calibration` after the fit — the render
+    /// overshoots the target.
+    #[test]
+    fn match_fits_a_baked_source_under_its_saved_calibration() {
+        let root = std::env::temp_dir().join(format!("autoshade-match-saved-cal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let library = root.join("library");
+        let outs = root.join("outs");
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::create_dir_all(&outs).unwrap();
+        let master = library.join("master.png");
+        let img = image::RgbImage::from_fn(96, 64, |x, y| {
+            let (t, u) = (x as f32 / 95.0, y as f32 / 63.0);
+            image::Rgb([
+                (30.0 + 180.0 * t) as u8,
+                (40.0 + 150.0 * (0.5 * t + 0.5 * u)) as u8,
+                (50.0 + 120.0 * u) as u8,
+            ])
+        });
+        img.save(&master).unwrap();
+        let dev = autoshade::store::develop_dir(&master);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let curve: Vec<[f32; 2]> = vec![[0.0, 0.0], [0.25, 0.42], [0.5, 0.70], [1.0, 1.0]];
+        let saved = EditRecipe { base_curve: curve.clone(), ..Default::default() };
+        std::fs::write(autoshade::store::recipe_target(&master), serde_json::to_string(&saved).unwrap())
+            .unwrap();
+        let look = EditRecipe { base_curve: curve.clone(), exposure_ev: 0.3, contrast: 15.0, ..Default::default() };
+        let base = image::DynamicImage::ImageRgb8(img);
+        let want = autoshade::render::develop_preview(&base, &look).to_rgb8();
+        let target = outs.join("target.png");
+        want.save(&target).unwrap();
+        let fitted = outs.join("fit.json");
+        match_cmd(&master, &target, false, false, 2, false, false, false, None, Some(fitted.clone()), None)
+            .expect("the fit runs");
+        let recipe: EditRecipe = serde_json::from_str(&std::fs::read_to_string(&fitted).unwrap()).unwrap();
+        assert_eq!(recipe.base_curve, curve, "the saved camera curve rides in the recipe");
+        let got = autoshade::render::develop_preview(&base, &recipe).to_rgb8();
+        let mad = got
+            .pixels()
+            .zip(want.pixels())
+            .map(|(a, b)| (0..3).map(|c| (a[c] as f32 - b[c] as f32).abs()).sum::<f32>())
+            .sum::<f32>()
+            / (96.0 * 64.0 * 3.0);
+        assert!(mad < 6.0, "the fitted recipe must render onto the target: mean |diff| {mad:.1} codes");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&dev);
     }
 
     #[test]
