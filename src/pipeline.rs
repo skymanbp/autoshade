@@ -2972,8 +2972,13 @@ pub const FIT_SOURCE_EDGE: u32 = 2048;
 /// Full — one threshold, two answers, same photograph. So the composed branch
 /// is now unconditional and the embedded-preview branch is gone.
 ///
-/// A non-RAW source has no sensor frame to develop and no calibration to
-/// compose; both entries keep their existing path for it.
+/// A bare non-RAW source has no sensor frame to develop and no calibration
+/// to compose. A master a denoise or a stack remade the negative into is
+/// different: both entries fit its pixels under the PHOTO's calibration —
+/// the desktop app through its ◈ card, the CLI through the recorded master
+/// or `match --negative <RAW>` (v1.6.2; a bare master used to be fitted with
+/// no calibration, which on the reference pair moved the sky's structural
+/// reading across the zone line and dropped the lens profile from the render).
 pub fn fit_source(raw: &Path) -> Result<(image::DynamicImage, crate::recipe::EditRecipe)> {
     Ok((
         crate::render::render_to_image(

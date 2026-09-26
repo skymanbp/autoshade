@@ -513,6 +513,16 @@ enum Command {
         /// written too.
         #[arg(short, long)]
         out: Option<PathBuf>,
+        /// The RAW a baked SOURCE was made from — a master `denoise` or
+        /// `stack` wrote. The photo's calibration (camera base look, lens
+        /// profile, as-shot white balance) then composes into the solve
+        /// exactly as the desktop app fits its ◈ Denoised card, so the
+        /// fit reads the same room the RAW's fit reads and the render
+        /// shares the RAW's frame. Refused with a RAW source: a RAW is its
+        /// own negative, and a master the app recorded for it is found
+        /// through the develop store without this flag.
+        #[arg(long)]
+        negative: Option<PathBuf>,
     },
     /// EXPERIMENTAL diagnostic: measure the cross-image CORRESPONDENCE between
     /// two renditions of one frame (DIFT / SD 2.1 python sidecar, local;
@@ -671,10 +681,10 @@ fn main() -> Result<()> {
             generative::reimagine(&cfg, &raw, &prompt, &fidelity, &q, fidelity_retry, &out)
                 .map(|_report| ())
         }
-        Command::Match { raw, target, render, zoned, regions, style_prompt, ai_judge, deep, strength, out } => {
+        Command::Match { raw, target, render, zoned, regions, style_prompt, ai_judge, deep, strength, out, negative } => {
             // --deep IS the review, iterated: asking for the loop without the
             // reviewer is not a configuration, it is a typo.
-            match_cmd(&raw, &target, render, zoned, regions, style_prompt, ai_judge || deep, deep, strength, out)
+            match_cmd(&raw, &target, render, zoned, regions, style_prompt, ai_judge || deep, deep, strength, out, negative)
         }
         Command::Correspond { source, target, out } => correspond_cmd(&source, &target, out),
         Command::Retouch { raw, mask, prompt, quality, full_res, out } => {
@@ -1890,6 +1900,7 @@ fn match_cmd(
     deep: bool,
     strength: Option<f32>,
     out: Option<PathBuf>,
+    negative: Option<PathBuf>,
 ) -> Result<()> {
     if !(autoshade::fit_zoned::semantic::DEFAULT_SEMANTIC_REGIONS..=autoshade::fit_zoned::semantic::MAX_SEMANTIC_REGIONS).contains(&regions) {
         anyhow::bail!(
@@ -1913,19 +1924,71 @@ fn match_cmd(
             o.display()
         );
     }
-    // The source frame: `pipeline::fit_source`, the ONE choice both entry
-    // points make. The camera's embedded rendition used to be this command's
-    // contract, with a neutral develop kept for the in-camera-crop class
-    // alone; that made the CLI and the desktop app fit two different images
-    // of one capture, and the structural reading they are both judged by
-    // disagreed across the mode threshold on a real pair. See `fit_source`.
-    let composed = decode::is_raw(raw);
-    let (src, fit_base) = if composed {
-        pipeline::fit_source(raw)?
+    // The source frame and the calibration composed into the solve: ONE
+    // rule with the desktop app's ◭ worker (`negative_origin`). The
+    // negative's pixels are its recorded master when a denoise or a stack
+    // remade it, else the sensor frame — what `apply` renders — and the
+    // calibration is always the photo's own. The camera's embedded
+    // rendition used to be this command's contract, and a bare master used
+    // to be fitted with no calibration at all: on the reference pair the
+    // denoised negative then read its sky at a structural divergence of
+    // 0.716 against 0.649 from the RAW, crossed the 0.65 zone line into the
+    // bounded solver, and rendered without the lens profile — a different
+    // frame from the RAW's render (v1.6.2). See `fit_source`.
+    let negative = negative.as_deref();
+    let (src, fit_base, composed, src_path) = if decode::is_raw(raw) {
+        if let Some(n) = negative {
+            anyhow::bail!(
+                "--negative {} is for a baked master; {} is a RAW and is its own negative",
+                n.display(),
+                raw.display()
+            );
+        }
+        match autoshade::store::read_pixel_source(raw) {
+            // A ◈ denoised or ▦ stacked master IS this photo's negative, so
+            // the fit reads it under the photo's calibration. A generated
+            // master is not a negative (the app fits the photo, not the ✨
+            // card) and keeps the sensor-frame path.
+            Some((master, false)) => {
+                println!("  (fitting on the saved pixel master {})", master.display());
+                (
+                    render::source_pixels(&master, Some(pipeline::FIT_SOURCE_EDGE))?,
+                    pipeline::calibration_recipe(pipeline::fit_calibration(raw)),
+                    true,
+                    master,
+                )
+            }
+            // The same refusal `apply` makes: a recorded master that cannot
+            // be loaded must not silently become a fit on the noisy frame.
+            None if autoshade::store::has_pixel_source(raw) => anyhow::bail!(
+                "the saved pixel master of {} could not be loaded - fitting the sensor frame \
+                 instead would silently drop it; open the photo for the cause, then re-save \
+                 or clear the link with a parametric-only save",
+                raw.display()
+            ),
+            _ => {
+                let (frame, cal) = pipeline::fit_source(raw)?;
+                (frame, cal, true, raw.to_path_buf())
+            }
+        }
+    } else if let Some(neg) = negative {
+        if !decode::is_raw(neg) {
+            anyhow::bail!(
+                "--negative must name the RAW this master was made from; {} is not a RAW",
+                neg.display()
+            );
+        }
+        println!("  (a master of {}: its calibration composes into the solve)", neg.display());
+        (
+            render::source_pixels(raw, Some(pipeline::FIT_SOURCE_EDGE))?,
+            pipeline::calibration_recipe(pipeline::fit_calibration(neg)),
+            true,
+            raw.to_path_buf(),
+        )
     } else {
         // No sensor frame to develop, no calibration to compose: the baked
         // file IS the source, and the post-stamp below stays available.
-        (decode::preview_only(raw)?, EditRecipe::default())
+        (decode::preview_only(raw)?, EditRecipe::default(), false, raw.to_path_buf())
     };
     // THE raw-vs-baked dispatch (R22-1). The target is a finished rendition
     // of this frame — usually a baked file, but "another RAW you developed
@@ -2282,7 +2345,8 @@ fn match_cmd(
         pipeline::guard_readonly(&img_out, raw)?;
         ensure_parent(&img_out)?;
         println!("rendering the fitted recipe at full resolution …");
-        let (w, h) = render::render_to_file(raw, &rep.recipe, &img_out, None, None, autoshade::diag::stderr())?;
+        // On the pixels the fit read: the recorded master when there is one.
+        let (w, h) = render::render_to_file(&src_path, &rep.recipe, &img_out, None, None, autoshade::diag::stderr())?;
         println!("render -> {} ({w} x {h})", img_out.display());
     }
     if style_prompt {
@@ -2852,7 +2916,7 @@ mod tests {
 
         let e = format!(
             "{:#}",
-            match_cmd(&src, &target, false, false, 4, false, false, false, None, None)
+            match_cmd(&src, &target, false, false, 4, false, false, false, None, None, None)
                 .expect_err("an undecodable RAW target must refuse")
         );
         assert!(
@@ -2880,6 +2944,35 @@ mod tests {
         );
         // A genuinely different absent leaf stays different on either volume.
         assert!(!same_path(&dir.join("recipe.json"), &dir.join("other.json")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--negative` (v1.6.2) names the RAW a baked master was made from, so
+    /// the photo's calibration composes into the solve as the desktop app
+    /// does for a ◈ card. Both misuses refuse before any decode: a RAW
+    /// source is its own negative, and a negative must itself be a RAW.
+    #[test]
+    fn match_negative_refuses_a_raw_source_and_a_baked_negative() {
+        let dir = std::env::temp_dir().join(format!("autoshade-match-negative-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("photo.ARW");
+        std::fs::write(&raw, b"not really a raw").unwrap();
+        let master = dir.join("master.png");
+        image::RgbImage::from_pixel(8, 6, image::Rgb([120, 120, 120])).save(&master).unwrap();
+        let target = dir.join("target.png");
+        image::RgbImage::from_pixel(8, 6, image::Rgb([140, 120, 100])).save(&target).unwrap();
+        let e = format!(
+            "{:#}",
+            match_cmd(&raw, &target, false, false, 2, false, false, false, None, None, Some(master.clone()))
+                .expect_err("a RAW source is its own negative")
+        );
+        assert!(e.contains("its own negative") && e.contains("photo.ARW"), "{e}");
+        let e = format!(
+            "{:#}",
+            match_cmd(&master, &target, false, false, 2, false, false, false, None, None, Some(target.clone()))
+                .expect_err("a negative must be a RAW")
+        );
+        assert!(e.contains("is not a RAW") && e.contains("target.png"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2943,7 +3036,18 @@ mod tests {
         let cli = Cli::try_parse_from(["autoshade", "match", "source.png", "target.png", "--strength", "0.85"])
             .expect("match --strength must parse");
         match cli.command {
-            Command::Match { strength, .. } => assert_eq!(strength, Some(0.85)),
+            Command::Match { strength, negative, .. } => {
+                assert_eq!(strength, Some(0.85));
+                assert_eq!(negative, None, "no --negative means none");
+            }
+            _ => panic!("match parser returned another command"),
+        }
+        let cli = Cli::try_parse_from(["autoshade", "match", "master.tif", "target.png", "--negative", "photo.arw"])
+            .expect("match --negative must parse");
+        match cli.command {
+            Command::Match { negative, .. } => {
+                assert_eq!(negative.as_deref(), Some(Path::new("photo.arw")))
+            }
             _ => panic!("match parser returned another command"),
         }
         // …and the flag actually decides the request `analyze`/`auto` build —

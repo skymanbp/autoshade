@@ -1734,9 +1734,11 @@ lossy generated target, negotiates a flexible size and its supported fallback
 (sized from the frame it sends: a RAW sends its sensor frame, never an
 in-camera-cropped embedded preview, since v1.2.2), then can feed that target
 into `match` for an editable full-resolution approximation — `match` in turn
-fits on the camera's embedded rendition only while that rendition is the
-sensor frame, and on a neutral develop of the full frame with the calibration
-composed when it is an in-camera crop (the same 2 % aspect rule); parameter downgrades occur only when structured error blame—or
+fits a RAW on a neutral develop of the full sensor frame with the calibration
+composed (`pipeline::fit_source`, one frame for the CLI and the app since
+v1.3.0; the embedded rendition is never fitted), and a ◈/▦ master on its own
+pixels under the photo's calibration — the recorded master through the
+develop store, or a bare master with `--negative <RAW>` (v1.6.2); parameter downgrades occur only when structured error blame—or
 the equivalent streamed-refusal wrapper—names that parameter, while `heal`
 copies real neighbouring pixels, mean-corrects and feather-blends the patch,
 and remains a deterministic pixel operation rather than XMP.
