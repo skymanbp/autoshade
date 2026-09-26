@@ -158,12 +158,18 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1763 library + 26 CLI + 223 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1748 pass + 15 `#[ignore]`d forensic probes and
+> 1767 library + 27 CLI + 223 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1752 pass + 15 `#[ignore]`d forensic probes and
 > the GUI result is 222 pass + one explicit scratch-recipe export probe ignored
 > in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
 > refusal pair (a RAW source, a baked negative); the library and GUI lists are
-> v1.6.1's. Counts refreshed 2026-09-24 for v1.6.1 (the
+> v1.6.1's. For v1.6.3, four library names (decode: the 16-bit profile lattice
+> hands an identity transform its pixels back, a file tagged with the engine's
+> own sRGB profile reads back bit for bit; pipeline: a pixel master carries the
+> working space's tag and reads back exactly; denoise: a deep baked denoise
+> master carries the working space's tag) and one CLI name (a baked `match`
+> source is fitted under the calibration its own saved develop carries); the
+> GUI list is v1.6.1's. Counts refreshed 2026-09-24 for v1.6.1 (the
 > 2026-09-24 audit's findings closed, issues #6–#14): +81 / −1 by name against
 > the v1.6.0 tag (`00d3d09`), listed by the test harness itself on both trees
 > (the v1.6.0 list saved on its release day) — eighty-one library names: the
