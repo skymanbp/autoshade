@@ -1745,7 +1745,10 @@ fn transcode_srgb_trc_to_adobe(img: DynamicImage) -> DynamicImage {
 /// All three from saucecontrol/Compact-ICC-Profiles, licensed CC0-1.0 (public
 /// domain, repo license verified) — redistribution in this public repo is fine.
 /// `acsp` signature + header size field validated at download time.
-const SRGB_ICC: &[u8] = include_bytes!("../assets/sRGB-v2-magic.icc");
+/// `SRGB_ICC` also tags the stack, heal and clone masters and a baked
+/// source's 16-bit denoise master ([`write_working_space`]), and the reader
+/// takes it as the working space itself (`decode::apply_icc_profile`).
+pub(crate) const SRGB_ICC: &[u8] = include_bytes!("../assets/sRGB-v2-magic.icc");
 const DISPLAY_P3_ICC: &[u8] = include_bytes!("../assets/DisplayP3-v2-magic.icc");
 const ADOBE_RGB_ICC: &[u8] = include_bytes!("../assets/AdobeCompat-v2.icc");
 
@@ -1806,6 +1809,42 @@ fn tag_icc<E: ImageEncoder>(
     if let Err(e) = enc.set_icc_profile(profile.to_vec()) {
         diag.warn(format!("could not embed the {space:?} ICC profile: {e:?}"));
     }
+}
+
+/// Encode WORKING-SPACE pixels, this pipeline's sRGB, to `path` as `fmt`,
+/// tagged with the engine's sRGB profile wherever the format carries one
+/// (JPEG, PNG, TIFF), as an sRGB export is ([`tag_icc`]); another format is
+/// written untagged. The encoders are the ones `save_with_format` picks, so
+/// the file differs from an untagged write by the tag alone.
+///
+/// The one encoder for the pixel masters (`pipeline::save_master`: stack,
+/// heal, clone) and for the deep working copy a baked denoise hands its
+/// sidecar, whose tag the product inherits (`denoise::denoise_active`). The
+/// reader takes this tag as the working space and keeps the numbers as they
+/// are (`decode::apply_icc_profile`). Written untagged, a 16-bit master
+/// re-read as "16-bit but carries no ICC profile" (the warning meant for an
+/// editor's ProPhoto export that lost its tag) and any other editor had to
+/// guess its space (2026-09-26).
+pub(crate) fn write_working_space(path: &Path, img: &DynamicImage, fmt: image::ImageFormat) -> Result<()> {
+    use std::io::Write as _;
+    // `set_icc_profile` cannot fail on these three encoders in image 0.25
+    // (see `tag_icc`); if it ever does, the write fails rather than publish
+    // an untagged master.
+    fn tagged(img: &DynamicImage, mut enc: impl ImageEncoder) -> image::ImageResult<()> {
+        enc.set_icc_profile(SRGB_ICC.to_vec()).map_err(image::ImageError::Unsupported)?;
+        img.write_with_encoder(enc)
+    }
+    let file = std::fs::File::create(path).with_context(|| format!("create {}", path.display()))?;
+    let mut wr = std::io::BufWriter::new(file);
+    match fmt {
+        image::ImageFormat::Jpeg => tagged(img, image::codecs::jpeg::JpegEncoder::new(&mut wr)),
+        image::ImageFormat::Png => tagged(img, image::codecs::png::PngEncoder::new(&mut wr)),
+        image::ImageFormat::Tiff => tagged(img, image::codecs::tiff::TiffEncoder::new(&mut wr)),
+        _ => img.write_to(&mut wr, fmt),
+    }
+    .with_context(|| format!("encode {}", path.display()))?;
+    // Flushed explicitly: BufWriter's drop-time flush swallows its error.
+    wr.flush().with_context(|| format!("flush {}", path.display()))
 }
 
 /// Render and save to `out` at the highest fidelity the format allows:

@@ -710,6 +710,9 @@ prints each frame's measured exposure and alignment travel, and `--no-align`
 skips the alignment for frames shot on a tripod. After an HDR merge it also
 writes a recipe beside the master with the SDR rendition switched on and the
 recovered stops filled in, because that is the only way to reach them.
+A 16-bit TIFF or PNG master from `stack`, `heal` or `denoise` carries the sRGB
+profile an sRGB export carries (v1.6.3): another editor reads its colours as
+they are, and reading it back raises no untagged-16-bit warning.
 
 **`match` on a denoised or stacked master (v1.6.2).** `match` fits what the
 desktop app fits. A RAW is fitted

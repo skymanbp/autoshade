@@ -26,7 +26,11 @@ raster extensions to `image`; embedded ICC profiles on baked images are
 converted with qcms (a TIFF's profile tag is read through the tiff crate
 itself: image's own probe folds every read error into "untagged", so since
 2026-09-24 only a missing tag is untagged and a profile the reader cannot read
-is a hard error). Bayer data uses rawler's normal demosaic path, while a
+is a hard error). The engine's own sRGB profile, the tag on the app's sRGB
+exports and its masters (as JPEG, TIFF or PNG, the formats that hold one),
+names the working space and is read with no transform (since v1.6.3); a 16-bit
+image goes through a 52³ lattice of qcms's 8-bit transform whose nodes sit on
+exact codes. Bayer data uses rawler's normal demosaic path, while a
 non-2×2 three-colour CFA takes AutoShade's geometry-driven X-Trans path: for
 each missing colour at a pixel it fits a plane to matching photosites in a
 5×5 neighbourhood, then evaluates that plane at the target while retaining
@@ -56,6 +60,10 @@ coercing either to RGB would invent a colour model.
   (**designed**).
 - Baked untagged 16-bit input: assume sRGB and emit a disclosure
   (**designed fallback**, explicitly not a colour-space measurement).
+- The engine's own sRGB profile on a baked input: the working space, read with
+  no transform (**designed identity**, since v1.6.3).
+- 16-bit profile lattice: 52 nodes per axis, 5 codes apart (**designed**:
+  N − 1 must divide 255, so every node input is an exact code).
 - RAW memory admission: refuse an estimated decode above 4 GiB, using the
   measured 31 B/pixel envelope, or 138,547,333 pixels (**measured gate**).
 
@@ -75,6 +83,14 @@ coercing either to RGB would invent a colour model.
 - An untagged 16-bit TIFF/PNG may actually be in an editor working space; the
   sRGB assumption is disclosed because the file contains no tag that can make
   the choice authoritative.
+- Until v1.6.3 the 16-bit lattice had 33 nodes, 7.97 codes apart: their inputs
+  truncated to whole codes below the positions the lookup assumed, so every
+  16-bit profiled read came back darker, by 0.48 codes on average and 0.97 at
+  worst through an sRGB → sRGB transform qcms itself applies exactly. The
+  engine's own sRGB profile, transformed, moved 575,212 of an 8-bit cube's
+  50,331,648 samples by up to 2 codes; and the stack, heal and clone masters
+  were written untagged, so a 16-bit one re-read with the untagged-input
+  warning.
 
 ### RAW denoise
 

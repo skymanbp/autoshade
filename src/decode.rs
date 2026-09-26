@@ -144,6 +144,16 @@ pub fn is_raw(path: &Path) -> bool {
 /// fall-through to "assume sRGB" — that fall-through IS the bug, and in a
 /// batch run it would pay for a grade computed from incorrect colors.
 fn apply_icc_profile(img: &mut DynamicImage, profile: &[u8], path: &Path) -> Result<()> {
+    // The engine's own sRGB tag (`render::SRGB_ICC`, on the app's sRGB exports
+    // and its masters, as JPEG, TIFF or PNG) names the working space itself:
+    // those numbers ARE this pipeline's sRGB, so the read is the identity by
+    // definition. Transformed anyway, qcms renders that compact profile's
+    // sampled curve against its own parametric sRGB (575 212 of an 8-bit
+    // cube's 50 331 648 samples moved, by up to 2 codes, 2026-09-26), and a
+    // file the app wrote did not read back as the pixels it wrote.
+    if profile == crate::render::SRGB_ICC {
+        return Ok(());
+    }
     let input = qcms::Profile::new_from_slice(profile, false)
         .ok_or_else(|| anyhow!("invalid ICC profile in {}", path.display()))?;
     let output = qcms::Profile::new_sRGB();
@@ -188,20 +198,28 @@ fn apply_icc_profile(img: &mut DynamicImage, profile: &[u8], path: &Path) -> Res
 /// only (DataType is RGB8/RGBA8/BGRA8/Gray8/GrayA8 — checked against qcms
 /// 0.3's source), and rounding the IMAGE to 8 bits would trade the
 /// colour-space error for permanent banding in every later tone move. So:
-/// run the profile pair ONCE over a 33³ RGB lattice at qcms's native 8-bit
+/// run the profile pair ONCE over a 52³ RGB lattice at qcms's native 8-bit
 /// precision, then map the 16-bit samples through that lattice by trilinear
 /// interpolation in f32. The colour mapping is 8-bit-accurate (≤1/255 per
 /// lattice value — the transform's own output precision) while the DATA
 /// keeps its 16-bit smoothness, because interpolation is continuous between
 /// lattice points. ICC display-class transforms are smooth by construction,
-/// so 33 points per axis track them closely.
+/// so 52 points per axis track them closely.
+///
+/// 52, because a node's INPUT is an 8-bit integer while the lookup places
+/// node i at exactly i/(N − 1) of full scale: N − 1 must divide 255, and
+/// 51 × 5 = 255 puts every node on a code. The 33 nodes this used until
+/// 2026-09-26 sat 255/32 = 7.97 codes apart, so the inputs truncated to
+/// 8·i − 1 where the lookup assumed 7.97·i, and every 16-bit profiled read
+/// came back darker: by 0.48 codes on average and 0.97 at worst through an
+/// sRGB → sRGB transform qcms itself applies exactly.
 fn apply_icc_profile_16(
     img: &mut DynamicImage,
     input: &qcms::Profile,
     output: &qcms::Profile,
     path: &Path,
 ) -> Result<()> {
-    const N: usize = 33;
+    const N: usize = 52;
     let mut lattice = vec![0u8; N * N * N * 3];
     for r in 0..N {
         for g in 0..N {
@@ -2919,6 +2937,78 @@ mod tests {
             "linear-TRC input through the sRGB transform must move the values"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A 16-bit grey ramp over the whole range, then random colours: the
+    /// fixture both lattice tests below read.
+    fn deep_fixture() -> DynamicImage {
+        let mut s = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (s >> 48) as u16
+        };
+        DynamicImage::ImageRgb16(image::ImageBuffer::from_fn(4096, 3, |x, y| {
+            if y == 0 {
+                let v = (x * 65535 / 4095) as u16;
+                image::Rgb([v, v, v])
+            } else {
+                image::Rgb([next(), next(), next()])
+            }
+        }))
+    }
+
+    /// The 16-bit arm's lattice hands an IDENTITY transform its pixels back:
+    /// node i's 8-bit input must sit exactly where the lookup places it. With
+    /// 33 nodes the inputs truncated below those positions, and every 16-bit
+    /// profiled read came back darker: 0.48 codes on average, 0.97 at worst,
+    /// through an sRGB → sRGB transform qcms itself applies exactly (measured
+    /// 2026-09-26).
+    /// MUTATION: `const N: usize = 33` in `apply_icc_profile_16`.
+    #[test]
+    fn the_16bit_lattice_is_exact_on_an_identity_transform() {
+        let srgb = qcms::Profile::new_sRGB();
+        let src = deep_fixture();
+        let mut img = src.clone();
+        apply_icc_profile_16(&mut img, &srgb, &srgb, Path::new("identity")).unwrap();
+        let worst = src
+            .to_rgb16()
+            .as_raw()
+            .iter()
+            .zip(img.to_rgb16().as_raw())
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert_eq!(worst, 0, "an identity transform moved a 16-bit sample by {worst}/65535");
+    }
+
+    /// A file tagged with the engine's own sRGB profile (`render::SRGB_ICC`,
+    /// on the app's sRGB exports and its masters, as JPEG, TIFF or PNG) reads
+    /// back bit for bit, 16-bit and 8-bit: that tag is the working space.
+    /// Transformed anyway, qcms moved 575 212 of an 8-bit cube's 50 331 648
+    /// samples by up to 2 codes, and a tagged 16-bit frame came back up to
+    /// 2.8 codes off (2026-09-26).
+    /// MUTATION: drop `apply_icc_profile`'s `SRGB_ICC` early return.
+    #[test]
+    fn the_engines_own_srgb_tag_reads_back_bit_for_bit() {
+        use image::ImageEncoder as _;
+        let dir = crate::test_dir("decode-engine-tag");
+        let deep = deep_fixture();
+        let flat = DynamicImage::ImageRgb8(deep.to_rgb8());
+        for (name, img) in [("deep.png", &deep), ("flat.png", &flat)] {
+            let p = dir.join(name);
+            let file = std::fs::File::create(&p).unwrap();
+            let mut enc = image::codecs::png::PngEncoder::new(std::io::BufWriter::new(file));
+            enc.set_icc_profile(crate::render::SRGB_ICC.to_vec()).unwrap();
+            img.write_with_encoder(enc).unwrap();
+            // not-a-consumer-call: the gate's own engine-tagged fixture.
+            let back = load_image(&p).unwrap();
+            assert_eq!(back.color(), img.color(), "{name}: the depth survives");
+            assert!(
+                back.as_bytes() == img.as_bytes(),
+                "{name}: the engine's own tag must read back as the pixels written"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

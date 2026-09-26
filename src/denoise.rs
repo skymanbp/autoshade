@@ -492,7 +492,24 @@ pub fn denoise_active(opts: &DenoiseOpts, input: &Path, out: &Path) -> Result<()
     // master.
     let img = crate::render::source_pixels(input, None)?;
     let tmp = temp_path("autoshade_denoise_base")?;
-    if let Err(e) = img.save(&tmp) {
+    // A DEEP working copy carries the working space's tag
+    // (`render::write_working_space`) and the product inherits it
+    // (`carry_icc_onto_staged`): `img` is this pipeline's sRGB (the decode
+    // transformed any profile the source carried), and an untagged 16-bit
+    // master re-read as "16-bit but carries no ICC profile", the warning
+    // meant for an editor's ProPhoto export (2026-09-26). An 8-bit copy stays
+    // untagged: it reads as sRGB everywhere without one, and carrying a tag
+    // onto a JPEG product would re-encode it.
+    let deep = !matches!(
+        img.color(),
+        image::ColorType::Rgb8 | image::ColorType::Rgba8 | image::ColorType::L8 | image::ColorType::La8
+    );
+    let written = if deep {
+        crate::render::write_working_space(&tmp, &img, image::ImageFormat::Png)
+    } else {
+        img.save(&tmp).map_err(anyhow::Error::from)
+    };
+    if let Err(e) = written {
         // A failed save can still have created a partial file — don't leak it
         // into the temp dir.
         let _ = std::fs::remove_file(&tmp);
@@ -1154,6 +1171,40 @@ mod tests {
             "the product now carries the input's profile"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A baked source's DEEP working copy is written with the working space's
+    /// tag and the master inherits it; it came out untagged and re-read as
+    /// "16-bit but carries no ICC profile" (2026-09-26). An 8-bit copy stays
+    /// untagged, so a JPEG product is never re-encoded to carry a tag.
+    /// MUTATION: write the working copy with `img.save(&tmp)` whatever its
+    /// depth (the deep half fails), or through `write_working_space` always
+    /// (the 8-bit half fails).
+    #[test]
+    fn a_deep_baked_denoise_master_carries_the_working_space_tag() {
+        let tag_of = |p: &std::path::Path| {
+            let mut dec = image::ImageReader::open(p).unwrap().into_decoder().unwrap();
+            image::ImageDecoder::icc_profile(&mut dec).unwrap()
+        };
+        let deep = image::DynamicImage::ImageRgb16(image::ImageBuffer::from_fn(8, 8, |x, y| {
+            image::Rgb([(x * 4000) as u16, (y * 4000) as u16, 30000])
+        }));
+        for (name, img, want) in [
+            ("deep", deep.clone(), Some(crate::render::SRGB_ICC)),
+            ("flat", image::DynamicImage::ImageRgb8(deep.to_rgb8()), None),
+        ] {
+            let dir = crate::test_dir(&format!("denoise-tag-{name}"));
+            // The stand-in's product: the same frame, untagged, as the
+            // sidecar writes it.
+            img.save(dir.join("product.png")).unwrap();
+            let opts = stand_in_opts(&dir, copying_stand_in(&dir, "product.png"));
+            let input = dir.join("in.png");
+            img.save(&input).unwrap();
+            let out = dir.join("out.png");
+            denoise_active(&opts, &input, &out).expect("the stand-in product is accepted");
+            assert_eq!(tag_of(&out).as_deref(), want, "{name}: the master's tag");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     use super::*;

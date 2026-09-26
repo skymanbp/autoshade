@@ -5220,6 +5220,12 @@ impl BatchNames {
 /// flattened — the caller chose that format, and the alternative is failing a
 /// write the caller asked for.
 ///
+/// Tagged with the engine's sRGB profile ([`crate::render::write_working_space`]):
+/// a master holds this pipeline's working space by construction, and written
+/// untagged a 16-bit one re-read as "16-bit but carries no ICC profile", the
+/// warning meant for an editor's ProPhoto export (a real three-frame stack,
+/// 2026-09-26).
+///
 /// It lives HERE, beside [`default_out`] and [`guard_readonly`], because every
 /// pixel master goes out the same door: `retouch`'s heal and clone, and the
 /// stacked master from [`crate::stack`]. A second copy of this would be a
@@ -5238,7 +5244,7 @@ pub fn save_master(out: &Path, img: image::DynamicImage) -> Result<()> {
         std::process::id(),
         crate::store::next_tmp_seq()
     ));
-    if let Err(e) = img.save_with_format(&staged, fmt) {
+    if let Err(e) = crate::render::write_working_space(&staged, &img, fmt) {
         let _ = std::fs::remove_file(&staged);
         return Err(e).with_context(|| format!("write {}", staged.display()));
     }
@@ -7259,6 +7265,39 @@ mod tests {
         // cross-clobber the store exists to prevent).
         let other = Path::new("D:/Photography/Raw/2025/DSC0001.ARW");
         assert_ne!(xmp_target(raw), xmp_target(other));
+    }
+
+    /// A pixel master written as TIFF or PNG carries the working space's tag
+    /// (`render::write_working_space`) and reads back as the pixels written.
+    /// Written untagged, a 16-bit master re-read as "16-bit but carries no
+    /// ICC profile", the warning meant for an editor's ProPhoto export (a
+    /// real three-frame stack, 2026-09-26).
+    /// MUTATION: write with `img.save_with_format(&staged, fmt)` again.
+    #[test]
+    fn a_pixel_master_carries_the_working_space_tag_and_reads_back_exactly() {
+        let dir = crate::test_dir("save-master-tag");
+        let img = image::DynamicImage::ImageRgb16(image::ImageBuffer::from_fn(64, 48, |x, y| {
+            image::Rgb([(x * 1021) as u16, (y * 1361) as u16, ((x + y) * 577) as u16])
+        }));
+        for name in ["stack.tif", "heal.png"] {
+            let out = dir.join(name);
+            save_master(&out, img.clone()).unwrap();
+            // The TIFF tag through the `tiff` crate, as the reader asks it
+            // (image's TIFF probe folds a limits error into "no profile").
+            let profile = if name.ends_with(".tif") {
+                let file = std::io::BufReader::new(std::fs::File::open(&out).unwrap());
+                let mut dec = tiff::decoder::Decoder::new(file).unwrap();
+                dec.get_tag_u8_vec(tiff::tags::Tag::IccProfile).ok()
+            } else {
+                let mut dec = image::ImageReader::open(&out).unwrap().into_decoder().unwrap();
+                image::ImageDecoder::icc_profile(&mut dec).unwrap()
+            };
+            assert_eq!(profile.as_deref(), Some(crate::render::SRGB_ICC), "{name} carries the working space's tag");
+            // not-a-consumer-call: the writer's own round-trip fixture.
+            let back = crate::decode::load_image(&out).unwrap();
+            assert!(back.as_bytes() == img.as_bytes(), "{name} reads back as the pixels written");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
