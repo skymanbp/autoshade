@@ -176,9 +176,9 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1768 library + 27 CLI + 225 GUI + 2+2 contract tests are enumerated in the GUI
+> 1768 library + 27 CLI + 226 GUI + 2+2 contract tests are enumerated in the GUI
 > build; the library result is 1753 pass + 15 `#[ignore]`d forensic probes and
-> the GUI result is 224 pass + one explicit scratch-recipe export probe ignored
+> the GUI result is 225 pass + one explicit scratch-recipe export probe ignored
 > in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
 > refusal pair (a RAW source, a baked negative); the library and GUI lists are
 > v1.6.1's. For v1.6.3, four library names (decode: the 16-bit profile lattice
@@ -193,7 +193,10 @@
 > a mask session — this last replacing the R22-3 pin on the retired 「Paint
 > mask」 checkbox, so +3 / −1 by name against v1.6.3). For v1.6.5, one library
 > name (the dark halo digs with the pixel's own luminance — the measured
-> sharpening law's luminance-bound dark cap); the CLI list is v1.6.3's. Counts
+> sharpening law's luminance-bound dark cap); the CLI list is v1.6.3's. For
+> v1.6.7, one GUI name (the reverse-fit solves from the picked source card —
+> automatic, the ▣ card, another ◈ card, and a pick that is not a source or
+> is gone falling back); the library and CLI lists are v1.6.6's. Counts
 > refreshed 2026-09-24 for v1.6.1 (the
 > 2026-09-24 audit's findings closed, issues #6–#14): +81 / −1 by name against
 > the v1.6.0 tag (`00d3d09`), listed by the test harness itself on both trees
