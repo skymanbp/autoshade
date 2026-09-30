@@ -189,6 +189,64 @@ class BlendLawTests(unittest.TestCase):
             np.testing.assert_allclose(out[..., 1], out[..., 2], atol=1e-6)
 
 
+def _starts(n, tile, overlap):
+    """Tile origins along one axis, edge tiles pulled back to a full tile."""
+    if n <= tile:
+        return [(0, n)]
+    return [(min(s, n - tile), min(s, n - tile) + tile) for s in range(0, n - overlap, tile - overlap)]
+
+
+def _whole_frame(model, img, tile, overlap):
+    """The pre-2026-09-30 arithmetic as a reference: one accumulator and one
+    weight plane for the whole frame, filled in the same tile order, then one
+    quotient."""
+    import numpy as np
+    import torch
+
+    shape = img.shape[:2]
+    total = np.zeros(shape + (3,), np.float32)
+    weight = np.zeros(shape + (1,), np.float32)
+    for top, bottom in _starts(shape[0], tile, overlap):
+        for left, right in _starts(shape[1], tile, overlap):
+            block = torch.from_numpy(np.moveaxis(img[top:bottom, left:right], 2, 0)[None])
+            got = np.moveaxis(model(block)[0].float().clamp(0, 1).numpy(), 0, 2)
+            feather = denoise._tile_window(bottom - top, right - left, overlap)[..., None]
+            total[top:bottom, left:right] += got * feather
+            weight[top:bottom, left:right] += feather
+    weight[weight == 0] = 1.0
+    return total / weight
+
+
+class StreamedBandsTest(unittest.TestCase):
+    """`denoise_bands` (2026-09-30): the sidecar holds one tile row in float,
+    not the whole frame — a 60 MP master used to commit ~8 GB and page the
+    user's machine to a standstill. The bands must be the whole-frame result's
+    rows bit for bit, top to bottom with no gap, and each no taller than a
+    tile row. A model that mixes neighbours (a box blur) makes every overlap
+    matter."""
+
+    def test_the_bands_are_the_whole_frame_result_bit_for_bit(self):
+        import numpy as np
+        import torch
+
+        def model(t):
+            return torch.nn.functional.avg_pool2d(t, 3, stride=1, padding=1, count_include_pad=False) * 0.9 + 0.03
+
+        rng = np.random.default_rng(3)
+        for h, w, tile, overlap in ((301, 257, 96, 16), (90, 70, 96, 16), (200, 150, 64, 32)):
+            img = rng.random((h, w, 3), dtype=np.float32)
+            bands = list(denoise.denoise_bands(model, img, lambda rows: rows, "cpu", tile, overlap))
+            self.assertEqual(bands[0][0], 0)
+            self.assertEqual(bands[-1][1], h)
+            for (_, a, _), (b, _, _) in zip(bands, bands[1:]):
+                self.assertEqual(a, b, "the bands leave a gap or overlap")
+            self.assertTrue(all(r1 - r0 <= tile for r0, r1, _ in bands), "a band taller than a tile row")
+            if h > 2 * tile:
+                self.assertGreater(len(bands), 2, "the frame came back in one piece")
+            streamed = np.concatenate([den for _, _, den in bands])
+            np.testing.assert_array_equal(streamed, _whole_frame(model, img, tile, overlap))
+
+
 
 
 # ── Where the bytes come from (2026-09-19) ──────────────────────────────────

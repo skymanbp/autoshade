@@ -515,6 +515,9 @@ pub fn denoise_active(opts: &DenoiseOpts, input: &Path, out: &Path) -> Result<()
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("write denoise input {}", tmp.display()));
     }
+    // On disk now: holding the frame through the sidecar kept a second
+    // whole-frame copy committed for minutes (2026-09-30, a 60 MP master).
+    drop(img);
     let res = denoise_file(opts, &tmp, out);
     let _ = std::fs::remove_file(&tmp);
     res

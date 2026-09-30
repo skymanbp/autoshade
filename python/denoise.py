@@ -408,40 +408,72 @@ def _tile_window(th, tw, overlap):
     return np.clip(np.outer(wy, wx), 1e-3, 1.0)
 
 
-def denoise(model, img, device, tile=512, overlap=32, fp16=False):
-    """img: float32 HxWx3 in [0,1]. Returns denoised float32 HxWx3 in [0,1]."""
+def denoise_bands(model, src, to_float, device, tile=512, overlap=32, fp16=False):
+    """Yield (r0, r1, den): the denoised float32 rows [r0, r1) of `src`, top to
+    bottom, each band as soon as no later tile can touch it.
+
+    `src` is any HxWx3 array (a view of the 16-bit file is fine) and
+    `to_float(rows)` turns a slice of it into float32 RGB in [0,1]. Only one
+    tile row is ever held in float: the whole-frame float copies this used to
+    keep (input, accumulator, weights, quotient, then the blend's planes) cost
+    86 B/px beside a ~3.3 GB model baseline — measured 2026-09-30, about 8 GB
+    of commit for a 60 MP master, which paged the user's machine to a
+    standstill. Tiles run in the same order and each pixel's weighted sum
+    accumulates in the same order from zero, so every band is bit-identical
+    to the whole-frame quotient's rows.
+    """
     import torch
 
     # Guard the tiling maths: overlap >= tile turns the step into 1px
     # (millions of forward passes) and edge windows of mismatched sizes.
     tile = max(64, int(tile))
     overlap = int(np.clip(overlap, 0, tile // 2))
-    h, w, _ = img.shape
-    acc = np.zeros((h, w, 3), dtype=np.float32)
-    wsum = np.zeros((h, w, 1), dtype=np.float32)
+    h, w, _ = src.shape
     step = max(1, tile - overlap)
     ys = list(range(0, max(1, h - overlap), step)) if h > tile else [0]
     xs = list(range(0, max(1, w - overlap), step)) if w > tile else [0]
+    # Every tile of a row spans the same rows; edge rows re-anchor to keep a
+    # full tile, so the spans only move down.
+    spans = [(max(0, min(y + tile, h) - tile), min(y + tile, h)) for y in ys]
 
     autocast = torch.autocast(device_type=device.split(":")[0], dtype=torch.float16) \
         if fp16 and device.startswith("cuda") else _nullctx()
 
+    lo = 0  # first row not yet emitted; acc/wsum hold rows [lo, lo + len)
+    acc = np.zeros((0, w, 3), dtype=np.float32)
+    wsum = np.zeros((0, w, 1), dtype=np.float32)
     with torch.no_grad():
-        for y in ys:
+        for i, (y0, y1) in enumerate(spans):
+            if y1 - lo > acc.shape[0]:
+                grow = y1 - lo - acc.shape[0]
+                acc = np.concatenate([acc, np.zeros((grow, w, 3), np.float32)])
+                wsum = np.concatenate([wsum, np.zeros((grow, w, 1), np.float32)])
+            band = to_float(src[y0:y1])
             for x in xs:
-                y0, x0 = y, x
-                y1, x1 = min(y0 + tile, h), min(x0 + tile, w)
-                y0, x0 = max(0, y1 - tile), max(0, x1 - tile)  # keep full tile near edges
-                patch = img[y0:y1, x0:x1, :]
+                x1 = min(x + tile, w)
+                x0 = max(0, x1 - tile)  # keep full tile near edges
+                patch = band[:, x0:x1, :]
                 t = torch.from_numpy(patch.transpose(2, 0, 1)).unsqueeze(0).to(device)
                 with autocast:
                     out = model(t)  # SCUNet pads to /64 internally
                 out = out.squeeze(0).float().clamp(0, 1).cpu().numpy().transpose(1, 2, 0)
                 win = _tile_window(y1 - y0, x1 - x0, overlap)[:, :, None]
-                acc[y0:y1, x0:x1, :] += out * win
-                wsum[y0:y1, x0:x1, :] += win
-    wsum[wsum == 0] = 1.0
-    return acc / wsum
+                acc[y0 - lo:y1 - lo, x0:x1, :] += out * win
+                wsum[y0 - lo:y1 - lo, x0:x1, :] += win
+            done = spans[i + 1][0] if i + 1 < len(spans) else h
+            if done > lo:
+                k = done - lo
+                ws = wsum[:k]
+                ws[ws == 0] = 1.0
+                yield lo, done, acc[:k] / ws
+                acc, wsum, lo = acc[k:].copy(), wsum[k:].copy(), done
+
+
+def denoise(model, img, device, tile=512, overlap=32, fp16=False):
+    """img: float32 HxWx3 in [0,1]. Returns denoised float32 HxWx3 in [0,1]
+    (the whole frame at once — for the bench; the sidecar streams bands)."""
+    bands = denoise_bands(model, img, lambda rows: rows, device, tile, overlap, fp16)
+    return np.concatenate([den for _, _, den in bands])
 
 
 class _nullctx:
@@ -521,11 +553,6 @@ def main():
         raise SystemExit(f"cannot read image: {args.input}")
     if raw.ndim == 2:
         raw = cv2.cvtColor(raw, cv2.COLOR_GRAY2BGR)
-    # Preserve alpha through the round-trip instead of silently dropping it.
-    alpha = None
-    if raw.shape[2] == 4:
-        alpha = raw[:, :, 3].copy()
-        raw = raw[:, :, :3]
     # Only 8/16-bit integer data is supported: a float TIFF interpreted as
     # 8-bit would be destroyed, so refuse loudly (the Rust bridge always
     # hands over u8/u16).
@@ -533,19 +560,29 @@ def main():
         raise SystemExit(f"unsupported pixel dtype {raw.dtype} (only uint8/uint16)")
     is16 = raw.dtype == np.uint16
     maxv = 65535.0 if is16 else 255.0
-    rgb = cv2.cvtColor(raw, cv2.COLOR_BGR2RGB).astype(np.float32) / maxv
+    h, w = raw.shape[:2]
+    # The file's own integers are the only whole-frame copies (input and
+    # output); float exists one band at a time (`denoise_bands`). cv2 hands
+    # BGR, so `rgb_of` is a reversed-channel VIEW, and the output is written
+    # through the same reversal — the channel swap, without a copy.
+    rgb_of = raw[:, :, 2::-1]
+    out = np.empty_like(raw)
+    # Preserve alpha through the round-trip instead of silently dropping it.
+    if raw.shape[2] == 4:
+        out[:, :, 3] = raw[:, :, 3]
+    bgr_out = out[:, :, 2::-1]
+
+    def to_float(rows):
+        return rows.astype(np.float32) / maxv
 
     model = load_model(args.model, args.cache, device)
-    log(f"input {rgb.shape[1]}x{rgb.shape[0]} ; denoising ...")
-    den = denoise(model, rgb, device, tile=args.tile, overlap=args.overlap, fp16=args.fp16)
-
+    log(f"input {w}x{h} ; denoising ...")
     s = float(np.clip(args.strength, 0.0, 1.0))
-    den = blend_luma_chroma(den, rgb, s)
-
-    out = np.clip(den * maxv + 0.5, 0, maxv).astype(np.uint16 if is16 else np.uint8)
-    out = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
-    if alpha is not None:
-        out = np.dstack([out, alpha])
+    for r0, r1, den in denoise_bands(model, rgb_of, to_float, device,
+                                     tile=args.tile, overlap=args.overlap, fp16=args.fp16):
+        rgb = to_float(rgb_of[r0:r1])
+        den = blend_luma_chroma(den, rgb, s)
+        bgr_out[r0:r1] = np.clip(den * maxv + 0.5, 0, maxv).astype(np.uint16 if is16 else np.uint8)
     # tmp + os.replace: a direct imwrite could leave a NONZERO partial file
     # on interruption — which the caller deliberately preserves as "evidence"
     # while it also occupies the atomically claimed artifact name. The tmp
