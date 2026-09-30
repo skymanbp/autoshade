@@ -1126,6 +1126,60 @@ impl AutoShadeApp {
                 };
                 ui.label(egui::RichText::new(note).weak().small());
             }
+            // ── the SOURCE row (2026-09-30, user decision): which negative the
+            // fit solves FROM — the ▣ card or any ◈ / ▦ master — named and
+            // choosable. Until then the fold showed the target only, and the
+            // source was a rule nobody could see (`negative_index`).
+            let card = |i: usize| format!("{} #{}", self.variant_label(i), i + 1);
+            let sources: Vec<(String, String)> = (0..self.variants.len())
+                .filter(|&i| Self::is_fit_source(&self.variants[i]))
+                .map(|i| (self.variants[i].id.clone(), card(i)))
+                .collect();
+            let to = (self.fit_ref.is_none() && self.fit_target().is_some())
+                .then(|| trf(lang, "To: {card}", &[("card", &card(self.active))]));
+            if !sources.is_empty() {
+                let auto = self.negative_index().map(card).unwrap_or_default();
+                let auto = trf(lang, "Automatic · {card}", &[("card", &auto)]);
+                let shown = match self.fit_from.as_deref() {
+                    Some(id) => sources.iter().find(|(s, _)| s == id).map(|(_, l)| l.clone()),
+                    None => None,
+                }
+                .unwrap_or_else(|| auto.clone());
+                let mut pick: Option<Option<String>> = None;
+                let busy = self.busy;
+                ui.horizontal(|ui| {
+                    ui.label(tr(lang, "From:"));
+                    ui.add_enabled_ui(!busy, |ui| {
+                        egui::ComboBox::from_id_salt("fit_from")
+                            .width(ui.available_width())
+                            .truncate()
+                            .selected_text(shown)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(self.fit_from.is_none(), &auto).clicked() {
+                                    pick = Some(None);
+                                }
+                                for (id, label) in &sources {
+                                    let on = self.fit_from.as_deref() == Some(id.as_str());
+                                    if ui.selectable_label(on, label).clicked() {
+                                        pick = Some(Some(id.clone()));
+                                    }
+                                }
+                            })
+                            .response
+                            .on_hover_text(tr(lang,
+                                "The negative the reverse-fit starts FROM: the ▣ original, or a ◈ denoised / ▦ stacked master. Automatic = the ◈ / ▦ card you stand on, else the first one in the strip, else ▣.",
+                            ));
+                    });
+                });
+                if let Some(p) = pick {
+                    self.fit_from = p;
+                }
+            }
+            // ── the TARGET, named when it is the active card (a picked
+            // reference file names itself in the row below).
+            if let Some(to) = to {
+                ui.label(egui::RichText::new(to).weak().small());
+            }
             // ── the REFERENCE row (R23-6 B): any finished rendition of this same
             // frame — your own Lightroom export, the camera's JPEG, another RAW
             // developed elsewhere. The generated-variant entry below still works

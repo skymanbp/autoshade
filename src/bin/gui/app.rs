@@ -238,6 +238,10 @@ pub(crate) struct AutoShadeApp {
     // one photo, and remembering it across an app restart would silently fit
     // the next photo against the last photo's reference. Cleared on open.
     pub(crate) fit_ref: Option<PathBuf>,
+    // 2026-09-30 (user decision): the card the reverse-fit solves FROM, by
+    // id — `None` = automatic (`negative_index`). Session state, cleared on
+    // open, for `fit_ref`'s reason: an id names a card of one photo.
+    pub(crate) fit_from: Option<String>,
     pub(crate) show_settings: bool,    // the Settings window is open
     pub(crate) show_shortcuts: bool,   // the keyboard cheat-sheet window is open (F1 / ? / ⌨)
     // Tab hides both side panels (the LR grammar) for an edge-to-edge canvas.
@@ -1706,6 +1710,7 @@ impl Default for AutoShadeApp {
             reimagine_retry: false,
             // Session state, never persisted (see the field's comment).
             fit_ref: None,
+            fit_from: None,
             show_settings: false,
             show_shortcuts: false,
             panels_hidden: false,

@@ -999,7 +999,7 @@
         // pinned on the source (the config.rs literal-pin pattern): the fit
         // reads the negative once at the click and the persist links it.
         let fit = include_str!("../actions.rs");
-        assert!(fit.contains("let negative = self.negative_origin();"));
+        assert!(fit.contains("let negative = self.fit_negative();"));
         assert!(
             fit.contains("(Some(p), Some(master)) => ("),
             "the solve's source frame is the master when the negative carries one"
@@ -1059,6 +1059,55 @@
         assert_eq!(app.negative_origin().as_deref(), Some(legacy.as_path()));
         app.variants[0].origin = None;
         assert_eq!(app.negative_origin(), None);
+    }
+
+    /// The reverse-fit's source (2026-09-30, user decision): automatic is the
+    /// negative rule, a pick in the fold wins while that card stands and is a
+    /// negative (▣ / ◈ / ▦), and a pick of anything else — or of a card since
+    /// deleted — falls back to automatic. MUTATION: `fit_negative` back to
+    /// `negative_origin`, and the ▣ pick names it.
+    #[test]
+    fn the_reverse_fit_solves_from_the_picked_source_card() {
+        let one = std::path::PathBuf::from("out/_fit_source_test.denoise.png");
+        let two = std::path::PathBuf::from("out/_fit_source_test.denoise-2.png");
+        let card = |kind: VariantKind, id: &str, origin: Option<std::path::PathBuf>| Variant {
+            id: id.into(),
+            name: None,
+            kind,
+            recipe: EditRecipe::default(),
+            base: None,
+            origin,
+            thumb: None,
+        };
+        let mut app = AutoShadeApp {
+            variants: vec![
+                card(VariantKind::Original, ORIGINAL_VARIANT_ID, None),
+                card(VariantKind::Denoised, "dn1", Some(one.clone())),
+                card(VariantKind::Denoised, "dn2", Some(two.clone())),
+                card(VariantKind::Generated, "gen", Some("out/_fit_source_test.reimagine.png".into())),
+            ],
+            active: 3,
+            ..Default::default()
+        };
+        // Automatic: standing on the ✨ card, the first ◈ master.
+        assert_eq!(app.fit_source_index(), Some(1));
+        assert_eq!(app.fit_negative().as_deref(), Some(one.as_path()));
+        // The ▣ card picked: the loaded file's own frame, not a master.
+        app.fit_from = Some(ORIGINAL_VARIANT_ID.into());
+        assert_eq!(app.fit_source_index(), Some(0));
+        assert_eq!(app.fit_negative(), None, "the ▣ pick solves from the RAW, not the ◈ master");
+        // The second ◈ card picked.
+        app.fit_from = Some("dn2".into());
+        assert_eq!(app.fit_negative().as_deref(), Some(two.as_path()));
+        // Not a source (the ✨ card), or gone: automatic again.
+        app.fit_from = Some("gen".into());
+        assert_eq!(app.fit_source_index(), Some(1));
+        app.fit_from = Some("dn2".into());
+        app.variants.remove(2);
+        assert_eq!(app.fit_negative().as_deref(), Some(one.as_path()));
+        // Only ▣ and ◈ / ▦ cards are offered.
+        let offered: Vec<_> = app.variants.iter().filter(|v| AutoShadeApp::is_fit_source(v)).map(|v| v.id.as_str()).collect();
+        assert_eq!(offered, [ORIGINAL_VARIANT_ID, "dn1"]);
     }
 
     /// A ◈ card round-trips through the strip record: the store admits the

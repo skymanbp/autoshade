@@ -1531,6 +1531,7 @@ impl AutoShadeApp {
                             // "reference is not this frame" case the fit can
                             // now only warn about.
                             self.fit_ref = None;
+                            self.fit_from = None; // …and so does a picked source card
                             // (rationale already restored alongside the recipe)
                             self.refresh_versions(); // version snapshots are per-photo
                             self.dirty = true; // render the (restored or neutral) after

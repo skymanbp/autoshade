@@ -383,6 +383,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Reverse-fit reads the ✨ AI generated card's pixels — select that card; your ✎ edits are sliders over the same pixels and stay where they are.",
         "反推读取的是「✨ AI 生成」卡的像素——请选中那张卡；你在「✎」卡上的编辑是同一像素上的滑杆，原地保留。"),
     ("Choose reference…", "选择参考图…"),
+    // 2026-09-30: the reverse-fit names its source and its target.
+    ("From:", "起点："),
+    ("Automatic · {card}", "自动 · {card}"),
+    ("To: {card}", "目标：{card}"),
+    ("The negative the reverse-fit starts FROM: the ▣ original, or a ◈ denoised / ▦ stacked master. Automatic = the ◈ / ▦ card you stand on, else the first one in the strip, else ▣.",
+        "反推的起点底片：▣ 原片，或 ◈ 去噪 / ▦ 堆栈母片。自动 = 你所在的 ◈ / ▦ 卡，否则卡片条里的第一张，都没有则用 ▣。"),
     ("Reverse-fit toward ANY finished version of THIS SAME photo — your own \
       Lightroom/Capture One export, the camera's JPEG, a TIFF, or another RAW \
       (developed neutrally first). The fit solves the develop parameters that \

@@ -411,12 +411,15 @@ Original when you want an editable recipe and sidecar for the full-resolution
 source. **＋ Save as version** snapshots an ✎ card's develop; a pristine ✨ card
 has nothing to snapshot.
 
-A **◭ Reverse-fit** card develops the photo's negative: the **◈ Denoised
-negative** card's master while one exists (an AI denoise lands as that card
-and never changes the ▣ card), else the ▣ Original card's own in-place master
-after a heal or clone on it, else the loaded file. The fit is solved on that
-negative, the ◭ card renders and exports from it, and the fit's save links it
-in `pixels.json` so a reopen restores the same pixels.
+A **◭ Reverse-fit** card develops the negative the fit started from. The
+Reverse-fit fold names both ends: **From** is a menu of the ▣ Original card and
+every **◈ Denoised negative** / **▦ Stacked** card, and **To** is the ✨ card
+you stand on (or the reference file you picked). **Automatic**, the default,
+is the ◈ / ▦ card you stand on, else the first one in the strip, else the ▣
+card — its own in-place master after a heal or clone on it, else the loaded
+file. The fit is solved on that negative, the ◭ card renders and exports from
+it, and the fit's save links it in `pixels.json` so a reopen restores the same
+pixels.
 
 A **◈ Denoised negative** card is the negative AI-denoised into its own
 16-bit master. Develop it like the ▣ card — heal and clone stay in place on

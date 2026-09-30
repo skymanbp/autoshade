@@ -1444,21 +1444,52 @@ impl AutoShadeApp {
     /// the denoise master's terms, and a reverse-fit solved after it should
     /// read the stacked frame rather than the single frame it was made from.
     pub(crate) fn negative_origin(&self) -> Option<PathBuf> {
-        let denoised =
-            |v: &Variant| v.kind.is_remade_negative().then(|| v.origin.clone()).flatten();
-        if let Some(master) = self.active_variant().and_then(denoised) {
-            return Some(master);
+        self.negative_index().and_then(|i| self.variants[i].origin.clone())
+    }
+
+    /// The card [`Self::negative_origin`] reads — its rule, spelled once so
+    /// the reverse-fit fold can NAME the automatic choice (2026-09-30).
+    pub(crate) fn negative_index(&self) -> Option<usize> {
+        let remade = |v: &Variant| v.kind.is_remade_negative() && v.origin.is_some();
+        if self.active_variant().is_some_and(remade) {
+            return Some(self.active);
         }
-        if let Some(master) = self.variants.iter().find_map(denoised) {
-            return Some(master);
-        }
-        self.original_index().and_then(|i| self.variants[i].origin.clone())
+        self.variants.iter().position(remade).or_else(|| self.original_index())
     }
 
     /// The negative's pixels on disk: its master when it carries one, else
     /// the loaded file — the input a whole-frame reimagine develops from.
     pub(crate) fn negative_path(&self) -> Option<PathBuf> {
         self.negative_origin().or_else(|| self.src_path.clone())
+    }
+
+    /// Can card `v` be the reverse-fit's source? The negative in any of its
+    /// forms: the ▣ card (its in-place master, else the loaded file's own
+    /// frame) or a remade ◈ / ▦ master.
+    pub(crate) fn is_fit_source(v: &Variant) -> bool {
+        v.kind == VariantKind::Original || (v.kind.is_remade_negative() && v.origin.is_some())
+    }
+
+    /// The card the reverse-fit solves FROM: the user's pick in the fit fold
+    /// (`fit_from`) while that card still stands and is a source, else the
+    /// automatic rule ([`Self::negative_index`]). Until 2026-09-30 only the
+    /// rule existed and the fold never said which card it chose: with a ◈
+    /// card in the strip, a fit started on a ✨ card silently solved from the
+    /// first denoised master.
+    pub(crate) fn fit_source_index(&self) -> Option<usize> {
+        self.fit_from
+            .as_deref()
+            .and_then(|id| {
+                self.variants.iter().position(|v| !v.id.is_empty() && v.id == id && Self::is_fit_source(v))
+            })
+            .or_else(|| self.negative_index())
+    }
+
+    /// [`Self::fit_source_index`]'s master on disk (`None` = the loaded
+    /// file's own frame): what the solve's source frame, the ◭ card's origin
+    /// and the persisted pixel link all read.
+    pub(crate) fn fit_negative(&self) -> Option<PathBuf> {
+        self.fit_source_index().and_then(|i| self.variants[i].origin.clone())
     }
 
     /// R24-3 (#7): copy card `idx`'s develop onto the ▣ Original CARD.
@@ -3407,10 +3438,11 @@ impl AutoShadeApp {
             return;
         }
         let src_path = self.src_path.clone();
-        // The negative's in-place master, when the ▣ card carries one: the
-        // source frame below, the ◭ card's origin and the persisted pixel
-        // link all read this ONE capture, so the three cannot disagree.
-        let negative = self.negative_origin();
+        // The source the fold names (`fit_source_index`: the user's pick, else
+        // the automatic negative): the source frame below, the ◭ card's origin
+        // and the persisted pixel link all read this ONE capture, so the three
+        // cannot disagree.
+        let negative = self.fit_negative();
         let fit_strength = self.fit_strength();
         let zoned = self.zoned_fit;
         let zoned_regions = if self.zoned_four_regions {
