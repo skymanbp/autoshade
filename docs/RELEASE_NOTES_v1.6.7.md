@@ -92,8 +92,10 @@ removed; CLI 27 → 27; GUI 225 → 226, one addition,
 0 warnings on both feature sets (`--all-targets -- -D warnings`).
 `check_docs.py --gates` on the transcript with the XMP census root supplied:
 on the frozen snapshot **32 PASS / 0 FAIL / 0 SKIP** — the counts moved with
-the code before the snapshot. The re-run after the bump is recorded at the
-bump.
+the code before the snapshot — and after the bump **32 PASS / 0 FAIL / 0
+SKIP**; after the bump the CLI, contract and doc-test suites read 27 / 0, 2 +
+2 and 0, the denoise module 47 / 0, clippy 0 warnings on both feature sets,
+the `python/` suite 82 OK, and `audit_i18n` and the font check exit 0.
 
 Memory, measured with the process's own peak commit and peak working set
 (`PeakPagefileUsage` / `PeakWorkingSetSize`), 16-bit inputs, strength 0.5, the

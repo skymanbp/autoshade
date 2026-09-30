@@ -1,6 +1,9 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.6.6 — the six source files over ten thousand lines
+> Status: **implemented** (v1.6.7 — the AI denoise sidecar for baked sources works
+> one row of tiles at a time (19 bytes per pixel instead of 83–86, output
+> byte-identical) and the reverse-fit fold names and offers its source card;
+> v1.6.6 — the six source files over ten thousand lines
 > (the develop engine, the sidecar layer, the reverse fit, the zoned fit, the style
 > library, the develop store) and the three test files that size are split into
 > files, code moved and not edited, every render and sidecar byte-identical;
