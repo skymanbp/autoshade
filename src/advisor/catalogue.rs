@@ -347,7 +347,7 @@ fn trim_num(v: f32) -> String {
 /// Every field of [`EditRecipe`], in DECLARATION order — which is also the
 /// order the strict schema's `required` array takes, so the generated schema
 /// is byte-identical to the hand-written mirror it replaced.
-pub const RECIPE_CONTROLS: [Control; 114] = [
+pub const RECIPE_CONTROLS: [Control; 115] = [
     Control {
         name: "version",
         shape: Shape::Integer,
@@ -1676,6 +1676,23 @@ pub const RECIPE_CONTROLS: [Control; 114] = [
         purpose: "spot removal imported from Lightroom — each area re-solved from this frame's own pixels",
     },
     Control {
+        // 2026-10-01. A generative fill's layer: an RGBA patch over the
+        // finished develop (`render::PixelLayer`). `RenderedNotExported` for
+        // `retouch`'s reason — classic XMP has no element for it, so the save
+        // line names it — and `EngineCarrier`/`engine_only` because it is
+        // pixels a model made, not a value an advisor could state: a required
+        // schema field would come back empty and delete the layers on every
+        // Refine.
+        name: "pixel_layers",
+        shape: Shape::EngineCarrier,
+        range: None,
+        neutral: "empty = no layers",
+        engine_only: true,
+        crs: CrsKey::None,
+        tier: Some(Tier::RenderedNotExported),
+        purpose: "generative-fill layers composited over the finished develop",
+    },
+    Control {
         // R33 §G. The THIRD global `RenderedNotExported` row, beside the two
         // calibration carriers — and the first one that is an EDIT rather than
         // a measurement of the photo. A 12×8×8 bilateral grid of local colour
@@ -2894,6 +2911,8 @@ pub enum GlobalValue<'a> {
     /// list, which is the right "is it active" answer for a set of geometries
     /// with no neutral value of their own — an area exists or it does not.
     Retouch(&'a [crate::retouch::RetouchArea]),
+    /// The generative-fill layers (2026-10-01); equality is the whole list.
+    Layers(&'a [crate::render::PixelLayer]),
     Knots(&'a [[f32; 2]]),
     Lens(&'a LensProfile),
     /// The solved colour field, or `None` for a recipe that carries none.
@@ -3035,6 +3054,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         lens_profile,
         masks,
         retouch,
+        pixel_layers,
         colour_field,
         passthrough,
         cal_shadow_tint,
@@ -3150,6 +3170,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         "lens_profile" => GlobalValue::Lens(lens_profile),
         "masks" => GlobalValue::Masks(masks),
         "retouch" => GlobalValue::Retouch(retouch),
+        "pixel_layers" => GlobalValue::Layers(pixel_layers),
         "colour_field" => GlobalValue::ColourField(colour_field.as_ref()),
         "passthrough" => GlobalValue::PassThrough(passthrough),
         "cal_shadow_tint" => GlobalValue::Num(*cal_shadow_tint),
@@ -4288,6 +4309,9 @@ mod tests {
                 "perspective_vertical",
                 "perspective_x",
                 "perspective_y",
+                // 2026-10-01: a fill layer is pixels a model made on THIS
+                // card; a model asked to state it could only delete it.
+                "pixel_layers",
                 "point_colors",
                 "post_crop_vignette",
                 "post_crop_vignette_feather",

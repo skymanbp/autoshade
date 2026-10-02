@@ -2856,10 +2856,24 @@ record ever names the ✨ card as an edit's holder. The in-place retouch
 landing asks `fork_from_generated` directly — a heal is an edit of the
 PIXELS, however neutral the recipe — so the retouched raster bakes into the
 ✎ card and the ✨ card keeps its own. A generative fill is not an in-place
-retouch (2026-09-15): the model is shown the active card's developed picture
-and its answer lands as a new ✨ card, `RetouchKind::NewGenerated`, with the
-filled card untouched. **Adjust generated image** (2026-09-20) uses that same
-landing for an active Generated or Edited card. Its own prompt and quality
+retouch (2026-09-15): the model is shown the active card's developed picture.
+Since 2026-10-01 its answer lands as a LAYER on that card
+(`RetouchKind::Layer`): `FillJob::layer` makes `generative::edit_onto` paste
+the generated pixels onto a transparent frame instead of the base, so the
+published RGBA file is the patch with the feathered painted area as its
+alpha; the landing pushes a `render::PixelLayer` (absolute path, switch,
+opacity) onto `recipe.pixel_layers` as one undo step (forking a pristine ✨
+card to ✎ first), and `render/layers.rs` composites the drawing layers as
+the LAST step of `apply_develop_with_rasters`, after the SDR rendition, at
+stored (pre-geometry) coordinates. The layer files load through the mask
+raster snapshot under the same aggregate budget — strict (an export bails on
+an unreadable one), best-effort in the preview. The catalogue row is
+`EngineCarrier` / `RenderedNotExported`, so the advisor never states it and
+the save line names it; `paste_payload` drops it from a foreign paste and
+`can_rotate` is off while any card holds one. Until then the fill landed as a
+new ✨ card, `RetouchKind::NewGenerated`. **Adjust generated image**
+(2026-09-20) keeps that new-card landing for an active Generated or Edited
+card. Its own prompt and quality
 live in `ai_adjust`, directly after `ai_generate`; `can_adjust` requires
 `!busy && active_on_ai_pixels() && (has_painted_mask() || !adjust_prompt.trim().is_empty())`.
 The prompt stays transient like Reimagine's; `Prefs::adjust_quality` persists

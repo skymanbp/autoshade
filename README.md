@@ -731,9 +731,9 @@ cannot end a batch.
   mosaic, one on baked pixels), correspondence, look descriptions and style
   embeddings run on the machine; pixels leave it only for an AI operation you
   ask for.
-- **Generated pixels are labelled** — reimagine, GUI adjust, retouch, heal
-  and denoise are opt-in exceptions on their own cards, and known weaknesses
-  are honesty markers, not caption polish.
+- **Generated pixels are labelled** — reimagine, GUI adjust and denoise land
+  on their own cards, a GUI fill as a layer you can hide, retouch and heal only
+  when asked; known weaknesses are honesty markers, not caption polish.
 
 ### Implementation
 

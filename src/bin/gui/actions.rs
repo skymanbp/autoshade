@@ -2540,6 +2540,10 @@ impl AutoShadeApp {
             && !self.paint_mode
             && self.region.is_none()
             && self.variants.iter().all(|v| v.base.is_none() && v.origin.is_none())
+            // A fill layer is pixels in the frame it was made in, like a
+            // baked master (2026-10-01): the live card and every stored one.
+            && self.recipe.pixel_layers.is_empty()
+            && self.variants.iter().all(|v| v.recipe.pixel_layers.is_empty())
     }
 
     /// Turn the open photo by `delta` clockwise quarter turns — ONE undo step,

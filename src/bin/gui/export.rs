@@ -243,6 +243,9 @@ pub(crate) struct PastePayload {
     /// Whether a colour field was dropped from `foreign`, for the same toast
     /// and the same reason.
     pub colour_field: bool,
+    /// Fill layers dropped from `foreign` (2026-10-01): each is pixels of the
+    /// source frame, painted where the source's content was.
+    pub layers: usize,
 }
 
 /// The two payloads for `src`. `paste_geometry` off strips crop + straighten
@@ -294,7 +297,11 @@ pub(crate) fn paste_payload(src: EditRecipe, paste_geometry: bool) -> PastePaylo
     // the same coordinates. Counted rather than silently dropped, like the
     // bitmap masks above: the two losses are the same kind of loss.
     let colour_field = foreign.colour_field.take().is_some();
-    PastePayload { own, foreign, unpastable_masks, colour_field }
+    // A fill layer is the source frame's own pixels at the source frame's
+    // coordinates — on another photograph it would paste that scene's patch
+    // over whatever sits there. Counted, like the two losses above.
+    let layers = std::mem::take(&mut foreign.pixel_layers).len();
+    PastePayload { own, foreign, unpastable_masks, colour_field, layers }
 }
 
 impl AutoShadeApp {
@@ -1331,6 +1338,7 @@ impl AutoShadeApp {
             foreign: recipe,
             unpastable_masks: n_raster,
             colour_field: dropped_field,
+            layers: n_layers,
         } = paste_payload(src, self.paste_geometry);
         let copied_from = self.copied_from.clone();
         let has_foreign_target = targets.iter().any(|t| Some(t) != copied_from.as_ref());
@@ -1350,6 +1358,16 @@ impl AutoShadeApp {
                 tr(
                     self.lang,
                     "The colour field was not pasted — its cells are measured on the source photo's own frame",
+                ),
+            );
+        }
+        if n_layers > 0 && has_foreign_target {
+            self.toast(
+                ToastKind::Error,
+                trf(
+                    self.lang,
+                    "{n} fill layer(s) not pasted — they are the source photo's own pixels",
+                    &[("n", &n_layers.to_string())],
                 ),
             );
         }

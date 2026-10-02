@@ -307,17 +307,19 @@ impl AutoShadeApp {
                             prompt: &prompt,
                             quality: &quality,
                             out: &out,
+                            layer: true,
                         },
                     );
                     let _ = std::fs::remove_file(&mask_tmp);
                     r?;
                     // baked-by-construction: the ./out master this job just wrote.
                     let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
-                    // NewGenerated: a picture whose look lives in its pixels →
-                    // a new ✨ card, exactly as a reimagine lands. FACTS, not
-                    // prose (L12#4): the landing renders these with the
-                    // language live when the result lands.
-                    Ok((img, RetouchNote::Filled(out.clone()), out, RetouchKind::NewGenerated))
+                    // Layer (2026-10-01, user decision): the patch joins this
+                    // card's develop (`RetouchKind::Layer`); through v1.6.7 it
+                    // landed as a new ✨ card. FACTS, not prose (L12#4): the
+                    // landing renders these with the language live when the
+                    // result lands.
+                    Ok((img, RetouchNote::Filled(out.clone()), out, RetouchKind::Layer))
                 })();
                 if res.is_err() {
                     release_empty_claim(&out_claim);
@@ -379,7 +381,7 @@ impl AutoShadeApp {
                         let r = autoshade::generative::retouch_onto(
                             &cfg, &src, base, "this card's look",
                             &autoshade::generative::FillJob {
-                                mask_path: &mask_tmp, prompt: &prompt, quality: &quality, out: &out,
+                                mask_path: &mask_tmp, prompt: &prompt, quality: &quality, out: &out, layer: false,
                             },
                         );
                         let _ = std::fs::remove_file(&mask_tmp);
@@ -959,10 +961,61 @@ impl AutoShadeApp {
         }
     }
 
+    /// The card's fill layers (2026-10-01): one row each — 👁 shows or hides
+    /// it (a hidden layer is kept and saved), its name, ✕ removes it from the
+    /// card — and its opacity under it. Every change is a recipe edit like a
+    /// slider's, so Ctrl+Z covers it; the file in `./out` is never deleted,
+    /// so an undone removal has its pixels to come back to.
+    fn layer_rows(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        if self.recipe.pixel_layers.is_empty() {
+            return;
+        }
+        sub_caption(ui, tr(lang, "Layers on this card"));
+        let mut remove = None;
+        let mut changed = false;
+        for i in 0..self.recipe.pixel_layers.len() {
+            ui.horizontal(|ui| {
+                let layer = &mut self.recipe.pixel_layers[i];
+                if glyph_toggle(ui, layer.enabled, "👁")
+                    .on_hover_text(tr(lang, "Show or hide this layer — a hidden layer is kept and saved with the card"))
+                    .clicked()
+                {
+                    layer.enabled = !layer.enabled;
+                    changed = true;
+                }
+                ui.label(trf(lang, "Fill layer {n}", &[("n", &(i + 1).to_string())]))
+                    .on_hover_text(layer.path.as_str());
+                if glyph(ui, true, "✕")
+                    .on_hover_text(tr(lang, "Remove this layer from the card (Ctrl+Z brings it back)"))
+                    .clicked()
+                {
+                    remove = Some(i);
+                }
+            });
+            changed |= Self::slider_pct_hinted(
+                ui,
+                lang,
+                tr(lang, "Layer opacity"),
+                &mut self.recipe.pixel_layers[i].opacity,
+                1.0,
+                1.0,
+                tr(lang, "How strongly this layer covers the develop under it; 100% is the fill as it was made."),
+            );
+        }
+        if let Some(i) = remove {
+            self.recipe.pixel_layers.remove(i);
+            changed = true;
+        }
+        if changed {
+            self.dirty = true;
+        }
+    }
+
     pub(crate) fn retouch_panel(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang; // Copy — never borrows self, safe inside egui closures.
-        ui.separator();
-        ui.heading(tr(lang, "Retouch"));
+        ui.add_space(SPACE_LG);
+        panel_heading(ui, tr(lang, "Retouch"), |_| {});
 
         // Whole-image Reimagine + reverse-fit MOVED to the AI panel (R22 #4,
         // panels/ai.rs): they are AI develop verbs, and living here put them
@@ -982,8 +1035,7 @@ impl AutoShadeApp {
             let total = self.recipe.retouch.len();
             let synth =
                 self.recipe.retouch.iter().filter(|a| a.origin.is_synthesised()).count();
-            ui.add_space(SPACE_XS);
-            group_caption(ui, tr(lang, "Imported removal"));
+            sub_caption(ui, tr(lang, "Imported removal"));
             ui.label(
                 egui::RichText::new(trf(
                     lang,
@@ -1008,7 +1060,7 @@ impl AutoShadeApp {
                 );
                 ui.add_enabled_ui(!self.busy, |ui| {
                     if action_row(ui, true, tr(lang, "✨ Regenerate those areas"))
-                        .on_hover_text(tr(lang, "Paint the synthesised areas into Generative Fill's painted area and run the generative model over exactly them — an empty prompt removes, and the result lands as a new ✨ AI generated card (gpt-image API call — costs per image)"))
+                        .on_hover_text(tr(lang, "Paint the synthesised areas into Generative Fill's painted area and run the generative model over exactly them — an empty prompt removes, and the result lands as a layer over this card (gpt-image API call — costs per image)"))
                         .clicked()
                     {
                         // Paint first, and only spawn if something landed —
@@ -1071,18 +1123,19 @@ impl AutoShadeApp {
                         .on_hover_text(tr(lang, "Composite onto the full-sensor develop (slow, RAW only)"));
                 });
                 if primary_row(ui, !self.busy, tr(lang, "Remove / Fill"))
-                    .on_hover_text(tr(lang, "Regenerate ONLY the painted area — from your prompt, or as a removal when the prompt is empty (gpt-image API call — costs per image); the model sees this card's look, and the result is a new ✨ AI generated card — this card stays as it is"))
+                    .on_hover_text(tr(lang, "Regenerate ONLY the painted area — from your prompt, or as a removal when the prompt is empty (gpt-image API call — costs per image); the model sees this card's look, and the result is a layer over this card's develop — the card's own pixels stay as they are"))
                     .clicked()
                 {
                     self.start_fill();
                 }
                 ui.label(
                     egui::RichText::new(tr(lang,
-                        "Paint the area, then Remove/Fill. An empty prompt removes what you painted (the surroundings continue into it); write what belongs there to fill it with something else. The model sees this card's look and the result lands as a new ✨ AI generated card (crop / straighten are not carried — set them there); this card is untouched. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
+                        "Paint the area, then Remove/Fill. An empty prompt removes what you painted (the surroundings continue into it); write what belongs there to fill it with something else. The model sees this card's look and the result lands as a layer over this card's develop — the card's own pixels never change; hide or remove a layer below, and it is saved with the card. A layer keeps the look it was made with: after a large slider change, fill again. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
                     ))
                     .weak()
                     .small(),
                 );
+                self.layer_rows(ui);
             });
 
         egui::CollapsingHeader::new(tr(lang, "Heal (pixel)"))

@@ -650,6 +650,14 @@ pub struct EditRecipe {
     #[serde(default)]
     pub retouch: Vec<crate::retouch::RetouchArea>,
 
+    /// Generated patches over the finished develop (2026-10-01): a generative
+    /// fill made on this card lands HERE, as a layer, instead of as a new ✨
+    /// card — see [`crate::render::PixelLayer`]. Engine-only and, like
+    /// `retouch`, rendered but never written to the sidecar: Lightroom has no
+    /// element for a pixel layer, and the save line says so.
+    #[serde(default)]
+    pub pixel_layers: Vec<crate::render::PixelLayer>,
+
     // --- HDR edit mode and its SDR rendition (v1.5.0 F8) ---------------------
     // Lightroom's HDR mode re-labels the capture: diffuse white stops being the
     // top of the frame and the brightest stops become HEADROOM above it, with
@@ -1220,6 +1228,7 @@ impl Default for EditRecipe {
             lens_profile: LensProfile::default(),
             masks: Vec::new(),
             retouch: Vec::new(),
+            pixel_layers: Vec::new(),
             colour_field: None,
             rationale: String::new(),
             confidence: 0.0,
@@ -3651,6 +3660,12 @@ impl EditRecipe {
         }
         summary.dropped_masks = self.masks.len().saturating_sub(MAX_MASKS);
         self.masks.truncate(MAX_MASKS);
+        // A layer's one number: an opacity a NaN cannot survive (it would
+        // blank the patch's whole footprint), and a count bounded like masks.
+        self.pixel_layers.truncate(MAX_MASKS);
+        for l in &mut self.pixel_layers {
+            l.opacity = if l.opacity.is_finite() { l.opacity.clamp(0.0, 1.0) } else { 1.0 };
+        }
         for m in &mut self.masks {
             summary.truncated_string_bytes += cap(&mut m.name, MAX_NAME);
             // Strokes cut from an over-long brush group count as COMPONENTS:

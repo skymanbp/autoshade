@@ -455,9 +455,14 @@ pub(crate) struct PaintArea {
 /// How a finished retouch enters the variant strip.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum RetouchKind {
-    /// A reimagine, fill or adjust → a NEW「AI 生成」variant (its look
-    /// lives in the pixels).
+    /// A reimagine or adjust → a NEW「AI 生成」variant (its look lives in
+    /// the pixels).
     NewGenerated,
+    /// A generative fill → a LAYER on the card it was made on (2026-10-01,
+    /// user decision; it was a new ✨ card from v1.3.5): the saved RGBA patch
+    /// joins that card's `recipe.pixel_layers`, over its develop, and the
+    /// card's own pixels never change (`render::PixelLayer`).
+    Layer,
     /// An AI denoise → a NEW「◈ Denoised negative」card (2026-09-15, user
     /// decision): the saved master is its `origin`, the recipe of the card it
     /// was made from is its recipe, and the card it was made from — the ▣

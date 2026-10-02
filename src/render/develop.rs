@@ -419,6 +419,15 @@ pub(super) fn apply_develop_with_rasters(
     if let Some(p) = hdr::SdrRendition::global(r) {
         hdr::apply(data, w, h, &p);
     }
+    // 9) pixel layers (2026-10-01, `layers.rs`): generated patches over the
+    //    FINISHED develop — what the model was shown when it made them — in
+    //    the order they were added. Stored coordinates, like the retouch
+    //    areas above: the geometry stage that follows carries them.
+    for layer in r.pixel_layers.iter().filter(|l| l.draws()) {
+        if let Some(img) = rasters.layer(&layer.path) {
+            layers::composite(data, w, h, img, layer.opacity);
+        }
+    }
 }
 
 /// Render one [`ColourField`] over the frame it is handed, in place.

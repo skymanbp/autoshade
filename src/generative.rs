@@ -449,7 +449,7 @@ pub fn retouch(
         raw_path,
         || crate::render::source_pixels(raw_path, (raw && !full_res).then_some(2048)),
         if full_res && raw { "full-res" } else { "preview" },
-        &FillJob { mask_path, prompt, quality, out },
+        &FillJob { mask_path, prompt, quality, out, layer: false },
     )
 }
 
@@ -464,6 +464,11 @@ pub struct FillJob<'a> {
     pub quality: &'a str,
     /// The claimed `./out` master this fill publishes.
     pub out: &'a Path,
+    /// Publish a LAYER instead of a composite (2026-10-01, the GUI): the
+    /// generated pixels with the feathered painted area as their alpha and
+    /// nothing elsewhere, for `render::PixelLayer` to lay over the card's
+    /// develop. The same paste onto a transparent frame instead of the base.
+    pub layer: bool,
 }
 
 /// The fill on a base its CALLER produces. `base()` runs INSIDE the
@@ -492,7 +497,7 @@ pub fn retouch_onto(
     // Blank = remove, shared by the CLI, browser and GUI.
     let prompt = fill_prompt(job.prompt);
     edit_onto(cfg, base, base_note, &ImageEditJob {
-        mask_path: Some(job.mask_path), prompt: &prompt, quality: job.quality, out: job.out,
+        mask_path: Some(job.mask_path), prompt: &prompt, quality: job.quality, out: job.out, layer: job.layer,
     })?;
     Ok(())
 }
@@ -532,7 +537,7 @@ pub fn adjust_onto(
         return Err(anyhow!("a whole-image adjust needs a non-blank prompt"));
     }
     let divergence = edit_onto(cfg, base, base_note, &ImageEditJob {
-        mask_path: None, prompt, quality: job.quality, out: job.out,
+        mask_path: None, prompt, quality: job.quality, out: job.out, layer: false,
     })?.context("whole-image adjust has no divergence reading")?;
     Ok(AdjustReport { divergence })
 }
@@ -544,6 +549,7 @@ struct ImageEditJob<'a> {
     prompt: &'a str,
     quality: &'a str,
     out: &'a Path,
+    layer: bool,
 }
 
 fn edit_onto(
@@ -552,7 +558,7 @@ fn edit_onto(
     base_note: &str,
     job: &ImageEditJob<'_>,
 ) -> Result<Option<f32>> {
-    let ImageEditJob { mask_path, prompt, quality, out } = *job;
+    let ImageEditJob { mask_path, prompt, quality, out, layer } = *job;
     // A17: the LOCAL full-resolution phase, one at a time process-wide
     // (`crate::full_res_slot`). It is released explicitly before the model call
     // below and re-entered for the composite, because those are the two phases
@@ -607,7 +613,12 @@ fn edit_onto(
     }
     // A whole-image adjust keeps none of the base pixels, so only a fill
     // retains this full-frame buffer across the model call.
-    let composite = mask_img.as_ref().map(|_| base.to_rgba8());
+    // A layer pastes onto a TRANSPARENT frame (`FillJob::layer`): the
+    // premultiplied paste below then leaves exactly the generated pixels
+    // with the feathered weight as alpha, and the base is not kept at all.
+    let composite = mask_img
+        .as_ref()
+        .map(|_| if layer { RgbaImage::new(bw, bh) } else { base.to_rgba8() });
     drop(base);
     // Out of the full-resolution section: what survives across the model call
     // is the ~240 MB composite (the A7 staging above), and waiting on the
@@ -2578,7 +2589,7 @@ mod tests {
             &input,
             || Ok(DynamicImage::ImageRgb8(RgbImage::from_pixel(256, 256, green))),
             "caller",
-            &FillJob { mask_path: &mask, prompt: "", quality: "auto", out: &out },
+            &FillJob { mask_path: &mask, prompt: "", quality: "auto", out: &out, layer: false },
         )
         .expect("the loopback fill onto the caller's base succeeds");
         bounded_join(handle);

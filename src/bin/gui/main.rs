@@ -46,6 +46,7 @@ mod quit;
 #[cfg(target_os = "macos")]
 mod macos;
 mod buttons;
+mod headings;
 mod theme;
 mod util;
 mod actions;
@@ -59,6 +60,7 @@ mod workers;
 use model::*;
 use persist::*;
 use buttons::*;
+use headings::*;
 use theme::*;
 use util::*;
 use app::*;

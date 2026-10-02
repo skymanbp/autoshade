@@ -143,80 +143,90 @@
         assert!(!app.unsaved_marker_dirty(), "the landing saved the forked strip: {}", app.status);
     }
 
-    /// 2026-09-15: a generative fill is NOT an in-place retouch — the model
-    /// was shown the card's picture, so its answer is a picture whose look
-    /// lives in its pixels: it lands as a NEW ✨ card (pristine recipe, the
-    /// artifact as origin, auto-switched to), and the card it was filled
-    /// from keeps its recipe, base and origin. The ▣ negative is untouched
-    /// by construction: `negative_origin` still reads the ▣ card.
+    /// 2026-10-01 (user decision, replacing 2026-09-15's new-card landing): a
+    /// generative fill lands as a LAYER on the card it was made on — the
+    /// strip does not grow, the card keeps its develop, base and pixel
+    /// source, and its recipe gains one drawing `PixelLayer` naming the
+    /// artifact by its absolute path. One Ctrl+Z takes the layer off. On a
+    /// pristine ✨ card the layer is that card's first edit, so it continues
+    /// on an ✎ card and the ✨ card stays as generated.
     #[test]
-    fn a_fill_lands_as_a_new_generated_card_and_leaves_the_filled_card_alone() {
+    fn a_fill_lands_as_a_layer_on_the_card_it_was_made_on() {
         let ctx = egui::Context::default();
-        let src = std::path::PathBuf::from("_fill_new_card_test.ARW");
+        let src = std::path::PathBuf::from("_fill_layer_test.ARW");
         let mut app = AutoShadeApp { src_path: Some(src.clone()), ..Default::default() };
         let b0 = std::sync::Arc::new(image::DynamicImage::new_rgba8(4, 4));
         let developed = EditRecipe { contrast: 7.0, ..Default::default() };
-        app.variants = vec![Variant {
-            id: ORIGINAL_VARIANT_ID.into(),
+        let card = |kind, id: &str, recipe: &EditRecipe, origin: Option<std::path::PathBuf>| Variant {
+            id: id.into(),
             name: None,
-            kind: VariantKind::Original,
-            recipe: developed.clone(),
+            kind,
+            recipe: recipe.clone(),
             base: Some(b0.clone()),
-            origin: None,
+            origin,
             thumb: None,
-        }];
+        };
+        app.variants = vec![card(VariantKind::Original, ORIGINAL_VARIANT_ID, &developed, None)];
         app.active = 0;
         app.recipe = developed.clone();
         app.base_preview = Some(b0.clone());
         app.reset_history();
-        let out = std::path::PathBuf::from("out/_fill_new_card_test.fill.png");
-        let epoch = app.gen_epoch;
-        app.on_retouched(
-            &ctx,
-            Lang::En,
-            epoch,
-            Ok((
-                image::DynamicImage::new_rgba8(4, 4),
-                RetouchNote::Filled(out.clone()),
-                out.clone(),
-                RetouchKind::NewGenerated,
-            )),
-        );
-        assert_eq!(
-            strip_kinds(&app),
-            vec![VariantKind::Original, VariantKind::Generated],
-            "{}",
-            app.status
-        );
-        assert_eq!(app.active, 1, "the new card is under the canvas");
-        assert_eq!(app.variants[1].origin.as_deref(), Some(out.as_path()));
-        assert!(app.variants[1].recipe.is_noop(), "a ✨ card's look lives in its pixels");
-        assert!(app.recipe.is_noop(), "…and the canvas recipe followed the switch");
-        assert_eq!(app.variants[0].recipe, developed, "the filled card keeps its develop");
+        let out = std::path::PathBuf::from("out/_fill_layer_test.fill.png");
+        let land = |app: &mut AutoShadeApp| {
+            let epoch = app.gen_epoch;
+            app.on_retouched(
+                &ctx,
+                Lang::En,
+                epoch,
+                Ok((image::DynamicImage::new_rgba8(4, 4), RetouchNote::Filled(out.clone()), out.clone(), RetouchKind::Layer)),
+            );
+        };
+        land(&mut app);
+        assert_eq!(strip_kinds(&app), vec![VariantKind::Original], "{}", app.status);
+        assert_eq!(app.active, 0, "the canvas stays on the card it filled");
+        let layers = &app.recipe.pixel_layers;
+        assert_eq!(layers.len(), 1, "one layer on the card");
+        assert!(layers[0].draws(), "a new layer is on, at full opacity");
+        let abs = std::path::absolute(&out).unwrap();
+        assert_eq!(layers[0].path, abs.display().to_string(), "the layer names its file absolutely");
+        assert_eq!(app.recipe.contrast, 7.0, "the card keeps its develop under the layer");
         assert!(
             app.variants[0].base.as_ref().is_some_and(|b| std::sync::Arc::ptr_eq(b, &b0)),
             "…and its base"
         );
         assert_eq!(app.variants[0].origin, None, "…and its pixel source");
-        assert_eq!(app.negative_origin(), None, "the negative is untouched by a fill");
-        assert!(app.status.contains("new"), "{}", app.status);
+        assert!(app.status.contains("layer"), "{}", app.status);
+        app.undo(&ctx);
+        assert!(app.recipe.pixel_layers.is_empty(), "one Ctrl+Z takes the layer off");
+        assert_eq!(app.recipe.contrast, 7.0, "…and only the layer");
+
+        // On a pristine ✨ card: the layer continues on an ✎ card.
+        let generated = EditRecipe::default();
+        app.variants = vec![card(VariantKind::Generated, "gen", &generated, Some("out/_fill_layer_test.reimagine.png".into()))];
+        app.active = 0;
+        app.recipe = generated.clone();
+        app.reset_history();
+        land(&mut app);
+        assert_eq!(strip_kinds(&app), vec![VariantKind::Generated, VariantKind::Edited]);
+        assert_eq!(app.active, 1, "the ✎ card is under the canvas");
+        assert!(app.variants[0].recipe.pixel_layers.is_empty(), "the ✨ card stays as generated");
+        assert_eq!(app.recipe.pixel_layers.len(), 1, "the layer is the ✎ card's");
+
         // The verb's own choices are pinned in the source (the house pattern
         // for a worker whose model call cannot run offline): the fill develops
-        // the card's picture for the model and lands as a NEW card, never in
-        // place. MUTATION: `NewGenerated` → `InPlace` in start_fill, or the
-        // develop replaced by the neutral base, and this names it.
+        // the card's picture for the model, asks the library for a LAYER and
+        // lands as one. MUTATION: `layer: true` → false, or `Layer` →
+        // `NewGenerated` / `InPlace`, and this names it.
         let fill = include_str!("../panels/retouch.rs");
         let body = &fill[fill.find("pub(crate) fn start_fill(").expect("start_fill moved")..];
         let body = &body[..body.find("pub(crate) fn start_heal(").expect("start_heal moved")];
-        assert!(
-            body.contains("autoshade::generative::retouch_onto("),
-            "the fill no longer hands the library its own base"
-        );
+        assert!(body.contains("autoshade::generative::retouch_onto("), "the fill no longer hands the library its own base");
         assert!(
             body.contains("developed_card_pixels(&path, &recipe, full_res)"),
             "the fill no longer develops the card's picture for the model"
         );
-        assert!(body.contains("RetouchKind::NewGenerated))"), "the fill no longer lands as a new card");
+        assert!(body.contains("layer: true,"), "the fill no longer asks for a layer");
+        assert!(body.contains("RetouchKind::Layer))"), "the fill no longer lands as a layer");
         assert!(!body.contains("RetouchKind::InPlace"), "the fill went back to an in-place landing");
     }
 

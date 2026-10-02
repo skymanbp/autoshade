@@ -466,6 +466,14 @@ pub(crate) fn install_theme(ctx: &egui::Context, theme: ThemePref) {
     style.visuals.widgets.hovered.bg_stroke =
         Stroke::new(1.0, c.selection_stroke.gamma_multiply(0.55));
     style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, c.selection_stroke);
+    // Hairlines (the panel edge, the separators left in lists and dialogs,
+    // framed groups) one step quieter than egui's stock grey (60 dark / 190
+    // light) — structure is carried by headings and air (`headings.rs`), and
+    // a stock-weight line read as a rule drawn across the panel (2026-10-01).
+    style.visuals.widgets.noninteractive.bg_stroke.color = match theme {
+        ThemePref::Dark => egui::Color32::from_gray(46),
+        ThemePref::Light => egui::Color32::from_gray(212),
+    };
     let rounding = Rounding::same(RADIUS_MD);
     for w in [
         &mut style.visuals.widgets.noninteractive,
@@ -500,7 +508,9 @@ pub(crate) fn install_theme(ctx: &egui::Context, theme: ThemePref) {
     // CJK at 12.5 px is where the "看着有点晕" complaint lives. Small stays
     // proportionally readable instead of egui's 9 px squint.
     for (ts, size) in [
-        (TextStyle::Heading, 16.5),
+        // 17.5 since 2026-10-01: Heading now marks only the three panel
+        // titles (`headings::panel_heading`), which must out-rank the folds.
+        (TextStyle::Heading, 17.5),
         (TextStyle::Body, 13.0),
         (TextStyle::Button, 13.0),
         (TextStyle::Small, 10.5),

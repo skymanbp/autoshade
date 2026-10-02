@@ -17,3 +17,4 @@ include!("tests/local_effects_and_hsl.rs");
 include!("tests/budgets_and_refine.rs");
 include!("tests/raw_matrix_and_ca.rs");
 include!("tests/ai_masks_and_cfa.rs");
+include!("tests/pixel_layers.rs");

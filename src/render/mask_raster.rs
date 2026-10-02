@@ -195,11 +195,17 @@ pub(super) fn refine_mask_guided_tiled(
 #[derive(Debug, Default)]
 pub(super) struct MaskRasterSnapshot {
     images: std::collections::HashMap<String, std::sync::Arc<image::GrayImage>>,
+    /// The recipe's drawing pixel layers (`layers.rs`), under the same budget.
+    layers: std::collections::HashMap<String, std::sync::Arc<image::RgbaImage>>,
 }
 
 impl MaskRasterSnapshot {
     pub(super) fn get(&self, geometry: &MaskGeometry) -> Option<&image::GrayImage> {
         self.images.get(geometry_raster_path(geometry)?).map(std::sync::Arc::as_ref)
+    }
+
+    pub(super) fn layer(&self, path: &str) -> Option<&image::RgbaImage> {
+        self.layers.get(path).map(std::sync::Arc::as_ref)
     }
 }
 
@@ -536,6 +542,7 @@ pub(super) fn load_mask_raster_snapshot_with_budget(
         held_bytes = next_bytes;
         snapshot.images.insert(path.to_string(), bitmap);
     }
+    layers::load_layers(recipe, budget_bytes, &mut held_bytes, strict, diag, &mut snapshot.layers)?;
     Ok(snapshot)
 }
 

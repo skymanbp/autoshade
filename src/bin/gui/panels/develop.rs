@@ -308,7 +308,8 @@ impl AutoShadeApp {
     pub(crate) fn develop_panel(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang; // Copy — never borrows self, safe inside egui closures.
         let mut changed = false;
-        ui.heading(tr(lang, "Develop"));
+        ui.add_space(SPACE_LG);
+        panel_heading(ui, tr(lang, "Develop"), |_| {});
         // OUTSIDE the editable gate below, deliberately (#4 review point): the
         // histogram is a READOUT. Its only interaction is the pair of clipping
         // triangles, whose click reaches `toggle_clipping` — that writes
@@ -824,8 +825,8 @@ impl AutoShadeApp {
             .filter(|f| f.name == "tone" || f.name == "white_balance")
             .any(|f| family_is_active(f, &self.recipe));
 
-        ui.add_space(SPACE_MD); // same section fence as every sibling
-        // #14b: the FIRST of the panel's group captions. The two existing group
+        // #14b: the FIRST of the panel's group captions (its air is its own:
+        // `headings::group_caption`). The two existing group
         // fences (before Detail, before Local Masks) marked boundaries without
         // ever saying what they divided; the five groups the panel actually has
         // are AI (its own panel above) → tone & colour → detail & lens → local
@@ -979,8 +980,7 @@ impl AutoShadeApp {
     /// the curve renders (`EditRecipe::parametric_splits`).
     fn parametric_curve(ui: &mut egui::Ui, lang: Lang, r: &mut EditRecipe) -> bool {
         use autoshade::recipe::{PARAMETRIC_SPLITS, PARAMETRIC_SPLIT_GAP};
-        ui.separator();
-        ui.label(egui::RichText::new(tr(lang, "Parametric curve")).weak().small());
+        sub_caption(ui, tr(lang, "Parametric curve"));
         let mut changed = false;
         changed |= Self::slider(ui, lang, tr(lang, "Highlights"), &mut r.param_highlights, -100.0, 100.0, 0.0);
         changed |= Self::slider(ui, lang, tr(lang, "Lights"), &mut r.param_lights, -100.0, 100.0, 0.0);
@@ -1351,8 +1351,7 @@ impl AutoShadeApp {
                 // Blending/Balance shape the WHOLE grade, not the region the
                 // combo shows — a scope caption keeps them from reading as
                 // "shadow Blending".
-                ui.separator();
-                ui.label(egui::RichText::new(tr(lang, "All regions")).weak().small());
+                sub_caption(ui, tr(lang, "All regions"));
                 changed |= Self::slider(ui, lang, tr(lang, "Blending"), &mut cg.blending, 0.0, 100.0, 50.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Balance"), &mut cg.balance, -100.0, 100.0, 0.0);
             });
@@ -1367,11 +1366,8 @@ impl AutoShadeApp {
 
         // Look ends here — detail, then geometry (lens BEFORE crop: the lens
         // profile / manual distortion redefine the frame the crop sits in).
-        // Group boundary rhythm: fence + hairline + breather (deliberate —
-        // stronger than the plain SPACE_MD fence between sibling sections).
-        ui.add_space(SPACE_MD);
-        ui.separator();
-        ui.add_space(SPACE_XS);
+        // Group boundary: the group head's own air and gold caption (2026-10-01:
+        // the full-width hairline that used to fence each group is gone).
         group_caption(ui, tr(lang, "Detail & Lens")); // #14b, group 2 of 4 here
         egui::CollapsingHeader::new(section_title(tr(lang, "Detail"), detail_active))
             .id_salt("sec_detail")
@@ -1654,14 +1650,14 @@ impl AutoShadeApp {
                         self.overlay_stale = true;
                         changed = true;
                     }
-                    ui.separator();
+                    ui.add_space(SPACE_MD);
                 } else if self.src_path.as_deref().is_some_and(autoshade::decode::is_raw) {
                     ui.label(
                         egui::RichText::new(tr(lang, "No in-camera lens correction data in this file"))
                             .weak()
                             .small(),
                     );
-                    ui.separator();
+                    ui.add_space(SPACE_MD);
                 }
                 // 「Lens vignetting」, not 「Vignette」 (R25 B2): the Effects
                 // section above now carries Lightroom's POST-CROP vignette,
@@ -2044,10 +2040,7 @@ impl AutoShadeApp {
         let mut changed = false;
 
         // Geometry ends here — local adjustments and management below.
-        // (Group boundary rhythm — see the Detail section's comment.)
-        ui.add_space(SPACE_MD);
-        ui.separator();
-        ui.add_space(SPACE_XS);
+        // (Group boundary — see the Detail section's comment.)
         // #14b, group 3: masks and the pixel-level tools they reach.
         group_caption(ui, tr(lang, "Local & Pixel"));
         // --- 局部调整: manual masks — the SAME recipe.masks the AI writes -----
@@ -2428,11 +2421,10 @@ impl AutoShadeApp {
                     self.recipe.colour_field = None;
                     changed = true;
                 }
-                ui.separator();
             }
             // Selected mask: its full slider set.
             if let Some(i) = self.sel_mask.filter(|&i| i < self.recipe.masks.len()) {
-                ui.separator();
+                ui.add_space(SPACE_MD);
                 ui.horizontal(|ui| {
                     // The name edits a LOCAL buffer and commits one recipe
                     // mutation on focus loss (Enter included) — binding the
@@ -3013,11 +3005,7 @@ impl AutoShadeApp {
                 // grouping replaces — the same reason the global panel is
                 // sectioned. `Tone` is our own caption for LR's "Light" group:
                 // the key "Light" already means the light THEME.
-                let group = |ui: &mut egui::Ui, title: &str| {
-                    ui.add_space(SPACE_XS);
-                    ui.separator();
-                    ui.label(egui::RichText::new(title).weak().small());
-                };
+                let group = |ui: &mut egui::Ui, title: &str| sub_caption(ui, title);
                 group(ui, tr(lang, "Tone"));
                 changed |= Self::slider(ui, lang, tr(lang, "Exposure"), &mut m.exposure_ev, -5.0, 5.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Contrast"), &mut m.contrast, -100.0, 100.0, 0.0);
@@ -3161,9 +3149,6 @@ impl AutoShadeApp {
         // (Detail, Local Masks) — the rhythm is completed here, not changed:
         // Versions previously opened with a bare sibling-section fence while
         // being the head of a different KIND of group.
-        ui.add_space(SPACE_MD);
-        ui.separator();
-        ui.add_space(SPACE_XS);
         group_caption(ui, tr(lang, "Versions & Export"));
         let n_ver = self.versions.len();
         let n_ver_s = n_ver.to_string();
@@ -3312,14 +3297,8 @@ impl AutoShadeApp {
                             });
                         }
                     }
-                    ui.add_space(SPACE_XS);
-                    ui.separator();
                 }
-                ui.label(
-                    egui::RichText::new(tr(lang, "Snapshot history"))
-                        .weak()
-                        .small(),
-                );
+                sub_caption(ui, tr(lang, "Snapshot history"));
                 if ui
                     .button(tr(lang, "＋ Save as version"))
                     .on_hover_text(tr(lang, "Snapshot this card's develop only as a numbered version (v<N>.recipe.json with frozen mask rasters); Ctrl+S saves every card"))
@@ -3657,8 +3636,7 @@ impl AutoShadeApp {
                 // one thing users do with an XMP is give it to Lightroom, and
                 // Lightroom only looks for it beside the photo. That left the
                 // hand-off as "browse into %LOCALAPPDATA% yourself".
-                ui.add_space(SPACE_MD);
-                ui.separator();
+                ui.add_space(SPACE_LG);
                 let raw = self.can_export_xmp_beside();
                 let label = if self.xmp_beside_confirm {
                     tr(lang, "⚠ Overwrite the .xmp already there")

@@ -257,18 +257,6 @@ pub(crate) fn fit_in_capped(tex_size: egui::Vec2, max_w: f32, avail_y: f32, cap:
     tex_size * s
 }
 
-/// A GROUP caption: the weak small line that names one band of sections
-/// (#14b). The develop panel's five groups — tone & colour, detail & lens,
-/// local & pixel, versions & export, plus the AI panel above it — already had
-/// the two `separator` fences that mark three of those boundaries and nothing
-/// that said what the fence divided; per-mask sliders got captions in R22-5
-/// (the `group` closure in `dev_masks`) and this is the same device one level
-/// up. Caption only — the sections keep their own collapsing state, so
-/// nothing here can hide a control.
-pub(crate) fn group_caption(ui: &mut egui::Ui, title: &str) {
-    ui.label(egui::RichText::new(title).weak().small());
-}
-
 /// ONE cross-reference sentence appended to a pixel-level AI verb's own
 /// tooltip (#4). The AI *develop* verbs (Analyze / Refine / Reimagine /
 /// reverse-fit) collected into the AI panel; the pixel-level ones deliberately
@@ -524,6 +512,7 @@ pub(crate) fn xmp_loss_line(
             "base_curve" => tr(lang, "camera base curve").to_string(),
             "lens_profile" => tr(lang, "lens profile correction").to_string(),
             "colour_field" => tr(lang, "colour field").to_string(),
+            "pixel_layers" => tr(lang, "fill layers").to_string(),
             other => other.to_string(),
         });
     }

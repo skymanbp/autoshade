@@ -435,21 +435,29 @@ own: for all but the plainest kind Lightroom keeps its result in Adobe's store
 rather than in the sidecar, so the panel also says how many areas Adobe
 synthesised and leaves a **✨ Regenerate those areas** button, which paints
 exactly those shapes into Generative Fill's painted area and re-runs the generative
-model over them (an empty prompt removes; the result lands as a new ✨ card
-like any other fill). One thing to know when you save: a merge into an existing
+model over them (an empty prompt removes; the result lands as a layer on the
+card, like any other fill). One thing to know when you save: a merge into an existing
 `.xmp` keeps your original removal block untouched, but a sidecar written where
 none existed carries no removals at all, and the save line names that.
 
 Each of Generative Fill, Heal and Clone Stamp carries its own **🖌 Paint area**
 / **Clear area** row and its own painted area — what you paint for one tool is
 not what another reads — and the **Brush size** slider appears under whichever
-brush is armed. A generative fill is not an in-place retouch. The model is shown the active
+brush is armed. A generative fill does not touch the card's pixels. The model is shown the active
 card's developed picture — its sliders and masks applied, in the uncropped
 frame the brush paints in — the painted area is regenerated (an empty prompt
-removes it), and the result lands as a new **✨ AI generated** card: its look
-lives in its pixels, crop and straighten are not carried over, and the card you
-filled from is unchanged, the ▣ negative included. The browser's Fill and the
-CLI's `retouch` still composite onto the source's neutral develop.
+removes it), and the result lands as a **layer** over that card's develop: the
+card, its crop and its ▣ negative stay as they were, and the fold lists the
+card's layers under its button, each with 👁 to hide it, ✕ to remove it and an
+opacity slider. Layers are saved with the card (Ctrl+S) and drawn on every
+export; Ctrl+Z takes the last one off. A layer keeps the look it was made
+with, so after a large slider change, fill again. Lightroom has no place for a
+layer: the `.xmp` carries the rest of the develop and the save line says the
+layers stayed behind. Pasting a develop onto another photo leaves the layers
+out (they are this photo's pixels), and turning the photo is off while a card
+holds one. Through v1.6.7 a fill landed as a new **✨ AI generated** card
+instead. The browser's Fill and the CLI's `retouch` still composite onto the
+source's neutral develop.
 **Adjust generated image** is GUI-only: the browser and CLI retain region
 retouch and have no whole-image adjust entry.
 

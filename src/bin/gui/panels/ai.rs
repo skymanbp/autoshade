@@ -98,30 +98,27 @@ impl AutoShadeApp {
         // develop_panel wraps its sections, so the two read the same mid-open
         // (greyed) instead of one panel looking live beside a dead one.
         ui.add_enabled_ui(editable, |ui| {
-            // A section header like Develop's and Retouch's, only collapsible.
-            // `CollapsingHeader` indents its body, which set every AI row
-            // 18 px right of the other two panels' rows and cut its cells by
-            // 9 px (2026-09-27): the body is laid UNINDENTED, and the folds
-            // inside keep their own indent, so their rows start where a
-            // Develop fold's do. Same persistent id as the header it
+            // A panel title like Develop's and Retouch's (`panel_heading`),
+            // only collapsible. `CollapsingHeader` indents its body, which set
+            // every AI row 18 px right of the other two panels' rows and cut
+            // its cells by 9 px (2026-09-27): the body is laid UNINDENTED, and
+            // the folds inside keep their own indent, so their rows start
+            // where a Develop fold's do. Same persistent id as the header it
             // replaces, so an open state a user already has carries over.
+            // 2026-10-01: the title used to be drawn at fold size, so the
+            // five folds under it read as its siblings; it is a Heading now,
+            // and the folds sit under two group heads, as Develop's do.
             let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
                 ui.ctx(),
                 ui.make_persistent_id("sec_ai"),
                 true,
             );
-            let header = ui.horizontal(|ui| {
+            let title = section_title(tr(lang, "AI"), ai_active);
+            let header = panel_heading(ui, &title, |ui| {
                 state.show_toggle_button(ui, egui::collapsing_header::paint_default_icon);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(section_title(tr(lang, "AI"), ai_active))
-                            .text_style(egui::TextStyle::Button),
-                    )
-                    .sense(egui::Sense::click()),
-                )
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-            });
-            if header.inner.clicked() {
+            })
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if header.clicked() {
                 state.toggle(ui);
             }
             state.show_body_unindented(ui, |ui| {
@@ -130,8 +127,10 @@ impl AutoShadeApp {
                     // The gate's own witness: a comment cannot keep it here.
                     self.ai_gate_enabled = Some(ui.is_enabled());
                 }
+                group_caption(ui, tr(lang, "Analysis & References"));
                 self.ai_analysis(ui);
                 self.ai_libraries(ui);
+                group_caption(ui, tr(lang, "Generate & Reverse-fit"));
                 self.ai_generate(ui);
                 self.ai_adjust(ui);
                 self.ai_reverse_fit(ui);
@@ -545,7 +544,7 @@ impl AutoShadeApp {
     /// this rung rather than behind a fold of its own.
     fn ai_edits_library(&mut self, ui: &mut egui::Ui, reads_a_library: bool) {
         let lang = self.lang;
-        group_caption(ui, tr(lang, "My Lightroom edits library (RAW + .xmp)"));
+        sub_caption(ui, tr(lang, "My Lightroom edits library (RAW + .xmp)"));
         // ── the status line: which library, how big, how old, and where.
         match self.style_info.as_ref().map(|i| (i.path.clone(), i.state.clone())) {
             Some((path, autoshade::style::StyleIndexState::Built { total, source_dir, age, with_embedding, looks, .. })) => {
@@ -796,9 +795,7 @@ impl AutoShadeApp {
     /// position in a ladder.
     fn ai_retrieval_engine(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        ui.add_space(SPACE_XS);
-        ui.separator();
-        group_caption(ui, tr(lang, "Retrieval engine (what a build computes, what a query matches)"));
+        sub_caption(ui, tr(lang, "Retrieval engine (what a build computes, what a query matches)"));
         let embed = ui.checkbox(&mut self.style_embed, tr(lang, "Use SigLIP 2 look embedding (downloads 1.5 GB once; index builds and analyses take longer)"));
         #[cfg(test)]
         {
@@ -825,9 +822,7 @@ impl AutoShadeApp {
     /// gates that stop its switch from lying about itself.
     fn ai_look_library(&mut self, ui: &mut egui::Ui, reads_a_library: bool) {
         let lang = self.lang;
-        ui.add_space(SPACE_XS);
-        ui.separator();
-        group_caption(ui, tr(lang, "Finished-photo look library (JPEG)"));
+        sub_caption(ui, tr(lang, "Finished-photo look library (JPEG)"));
         if let Some(info) = &self.style_info
             && let autoshade::style::StyleIndexState::Built { looks, looks_dir, age, .. } = &info.state {
                 let from = looks_dir.clone().unwrap_or_else(|| tr(lang, "an unrecorded folder").to_string());
@@ -1148,10 +1143,17 @@ impl AutoShadeApp {
                 let mut pick: Option<Option<String>> = None;
                 let busy = self.busy;
                 ui.horizontal(|ui| {
-                    ui.label(tr(lang, "From:"));
-                    ui.add_enabled_ui(!busy, |ui| {
+                    // The row's width is measured at its start, before the
+                    // label, and capped at FIELD_W_MAX (`columns`), so the menu
+                    // ends on the same right edge as the buttons under it;
+                    // `available_width()` alone stretched it across a wide
+                    // panel (2026-10-01 user report).
+                    let row = columns(ui, 1).x;
+                    let label = ui.label(tr(lang, "From:")).rect.width();
+                    let menu = (row - label - ui.spacing().item_spacing.x).max(FIELD_W_MIN);
+                    let _menu = ui.add_enabled_ui(!busy, |ui| {
                         egui::ComboBox::from_id_salt("fit_from")
-                            .width(ui.available_width())
+                            .width(menu)
                             .truncate()
                             .selected_text(shown)
                             .show_ui(ui, |ui| {
@@ -1168,8 +1170,12 @@ impl AutoShadeApp {
                             .response
                             .on_hover_text(tr(lang,
                                 "The negative the reverse-fit starts FROM: the ▣ original, or a ◈ denoised / ▦ stacked master. Automatic = the ◈ / ▦ card you stand on, else the first one in the strip, else ▣.",
-                            ));
+                            ))
                     });
+                    #[cfg(test)]
+                    {
+                        self.fit_from_rect = Some(_menu.inner.rect);
+                    }
                 });
                 if let Some(p) = pick {
                     self.fit_from = p;

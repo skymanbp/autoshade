@@ -497,13 +497,14 @@
         // Premise, from the registry rather than from memory. It used to read
         // "every global the export can lose IS engine calibration", and R33 §G
         // ended that: `colour_field` is an unexportable global the USER asked
-        // for. So the premise is now the split itself — six rows in the tier
-        // since v1.5.0 F9, of which exactly the un-actionable ones are quiet.
+        // for. So the premise is now the split itself — seven rows in the
+        // tier since 2026-10-01's fill layers, of which exactly the
+        // un-actionable ones are quiet.
         let rows: Vec<_> = RECIPE_CONTROLS
             .iter()
             .filter(|c| c.tier == Some(Tier::RenderedNotExported))
             .collect();
-        assert_eq!(rows.len(), 6, "the tier's membership moved — re-read this test");
+        assert_eq!(rows.len(), 7, "the tier's membership moved — re-read this test");
         assert!(
             rows.iter().all(|c| c.engine_only),
             "premise: no unexportable global is a value the advisor can state"
@@ -527,11 +528,13 @@
         // would be noise. A retouch area is on 14% of it, a FRESH sidecar
         // write really does drop all 121 of them, and the panel now offers
         // something to do about it (「✨ Regenerate those areas」). Actionable
-        // and not universal is exactly what the loud arm is for.
+        // and not universal is exactly what the loud arm is for. A fill
+        // layer (2026-10-01) is the same kind: the photographer made it, and
+        // no sidecar write of any kind carries it.
         assert_eq!(
             chosen,
-            vec!["retouch", "colour_field"],
-            "…and the two the photographer asked for and can still act on"
+            vec!["retouch", "pixel_layers", "colour_field"],
+            "…and the three the photographer asked for and can still act on"
         );
 
         // The quiet arm: the real, universal case — a stamped base curve.

@@ -2396,7 +2396,7 @@ impl AutoShadeApp {
         match n {
             RetouchNote::Filled(p) => trf(
                 lang,
-                "filled → {path} (a new ✨ AI generated card built on this card's look — the card you filled from is untouched)",
+                "filled → {path} (a layer over this card's develop — Ctrl+Z takes it off; the card's own pixels are untouched)",
                 &[("path", &p.display().to_string())],
             ),
             RetouchNote::Adjusted { out, region, divergence } => {
@@ -2570,6 +2570,28 @@ impl AutoShadeApp {
                                     },
                                     ctx,
                                 );
+                            }
+                            RetouchKind::Layer => {
+                                // A fill layer (2026-10-01): the patch joins
+                                // THIS card's develop as one undo step, the
+                                // Analyze landing's order — commit what was
+                                // there first, so Ctrl+Z takes the layer off
+                                // and keeps a slider moved while it ran. On a
+                                // pristine ✨ card the first edit continues on
+                                // an ✎ card, as every edit there does.
+                                self.commit_pending_names();
+                                self.commit_now();
+                                self.fork_from_generated();
+                                // Absolute, so the saved recipe finds it from
+                                // any working directory.
+                                let path = std::path::absolute(&saved).unwrap_or(saved);
+                                self.recipe.pixel_layers.push(autoshade::render::PixelLayer {
+                                    path: path.display().to_string(),
+                                    ..Default::default()
+                                });
+                                self.dirty = true;
+                                self.commit_now();
+                                drop(img);
                             }
                             RetouchKind::NewDenoised | RetouchKind::NewStacked => {
                                 // A REMADE NEGATIVE — an AI denoise (◈,

@@ -419,6 +419,8 @@ pub(crate) struct AutoShadeApp {
     #[cfg(test)]
     pub(crate) reimagine_btn_rect: Option<egui::Rect>, // test seam: the ✨ Generate button's rect
     #[cfg(test)]
+    pub(crate) fit_from_rect: Option<egui::Rect>, // test seam: the reverse-fit From menu's rect
+    #[cfg(test)]
     pub(crate) adjust_btn_enabled: Option<bool>,      // actual egui response, including parent gates
     #[cfg(test)]
     pub(crate) gallery_slot_rect: Option<egui::Rect>, // test seam: first drawn gallery thumb's SLOT
@@ -1812,6 +1814,8 @@ impl Default for AutoShadeApp {
             edit_list_actions: Vec::new(),
             #[cfg(test)]
             reimagine_btn_rect: None,
+            #[cfg(test)]
+            fit_from_rect: None,
             #[cfg(test)]
             adjust_btn_enabled: None,
             #[cfg(test)]

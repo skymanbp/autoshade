@@ -19,3 +19,4 @@
     include!("tests/sections_and_dots.rs");
     include!("tests/ai_panel.rs");
     include!("tests/turns_and_layout.rs");
+    include!("tests/headings_and_widths.rs");
