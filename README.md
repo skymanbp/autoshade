@@ -5,6 +5,25 @@
 
 **AI-assisted automatic development of RAW photographs.**
 
+**[Download v1.7.0](https://github.com/skymanbp/autoshade/releases/tag/v1.7.0)** ·
+[Website](https://autoshade.dev/) ·
+[User manual](docs/USER_MANUAL.md) ·
+[Showcase](docs/SHOWCASE.md) ·
+[Architecture](docs/ARCHITECTURE.md) ·
+[Release ledger](docs/ROADMAP.md) ·
+[MIT](LICENSE)
+
+<br />
+
+<img src="docs/images/showcase-canyon-reverse-fit.jpg" width="880" alt="Desert canyon at dusk: straight conversion, generated target, the recovered recipe rendered on the RAW, and the same recipe on the AI-denoised RAW, with a 1:1 detail row" />
+
+<sub><b>Ask for the picture, keep the RAW.</b> The desert pair of
+<a href="#1-whole-image-ai-generation-then-reverse-fit-an-editable-recipe-from-any-finished-look">§1</a>.</sub>
+
+</div>
+
+<br />
+
 Describe the picture you want; an image model generates it from your frame,
 and AutoShade recovers from it an editable develop recipe that renders that
 look on the full-resolution RAW — the recipe carries the look, the sensor
@@ -14,13 +33,6 @@ it, and **in the recipe-development path the AI never touches a pixel.**
 The one network that does, the RAW denoiser, was trained here on this
 project's own data and is held to a same-frame comparison with Lightroom
 on a real star field whenever it changes.
-
-[Download v1.7.0](https://github.com/skymanbp/autoshade/releases/tag/v1.7.0) ·
-[Architecture](docs/ARCHITECTURE.md) ·
-[Release ledger](docs/ROADMAP.md) ·
-[MIT](LICENSE)
-
-</div>
 
 ---
 
@@ -115,10 +127,11 @@ on a real star field whenever it changes.
   Reverse-fit, Denoised and Stacked cards with numbered snapshots in a
   per-user develop store shared by all three.
 
-Out of scope in this release: bit-exact Adobe rendering (parity is measured),
-an exact X-Trans demosaic (the plane fit is approximate) and a notarised macOS
-build (a decision, not a gap — the bundle stays ad-hoc signed, so the first
-launch needs one explicit 「Open Anyway」 per machine).
+> [!NOTE]
+> Out of scope in this release: bit-exact Adobe rendering (parity is measured),
+> an exact X-Trans demosaic (the plane fit is approximate) and a notarised macOS
+> build (a decision, not a gap — the bundle stays ad-hoc signed, so the first
+> launch needs one explicit 「Open Anyway」 per machine).
 
 ## What is new here
 
@@ -592,6 +605,8 @@ weights** download on first use into the develop store, not the signed
 read-only bundle; the interpreter is a Settings field with **Detect**
 ([manual](docs/USER_MANUAL.md#configure-and-use-the-ai-features)).
 
+#### Linux
+
 The Linux archive, `AutoShade-1.7.0-linux-x64.zip`, is the command line for
 x86-64 Linux, built on Ubuntu 22.04 with the same payload as the macOS
 command-line archive: the binary, the Python sidecars without their weights,
@@ -670,23 +685,27 @@ interoperability, the AI roles and the privacy boundary. The essentials:
 
 ## Supported formats
 
+<div align="center">
+
 <table>
 <tr>
-<td align="center"><img src="docs/images/formats/cr2.jpg" alt="Canon CR2 develop" /><br /><sub><b>.cr2</b> · Canon EOS 40D</sub></td>
-<td align="center"><img src="docs/images/formats/cr3.jpg" alt="Canon CR3 develop" /><br /><sub><b>.cr3</b> · Canon EOS R6</sub></td>
-<td align="center"><img src="docs/images/formats/nef.jpg" alt="Nikon NEF develop" /><br /><sub><b>.nef</b> · Nikon D700</sub></td>
+<td align="center"><img src="docs/images/formats/cr2.jpg" width="260" alt="Canon CR2 develop" /><br /><sub><b>.cr2</b> · Canon EOS 40D</sub></td>
+<td align="center"><img src="docs/images/formats/cr3.jpg" width="260" alt="Canon CR3 develop" /><br /><sub><b>.cr3</b> · Canon EOS R6</sub></td>
+<td align="center"><img src="docs/images/formats/nef.jpg" width="260" alt="Nikon NEF develop" /><br /><sub><b>.nef</b> · Nikon D700</sub></td>
 </tr>
 <tr>
-<td align="center"><img src="docs/images/formats/arw.jpg" alt="Sony ARW develop" /><br /><sub><b>.arw</b> · Sony α7 III</sub></td>
-<td align="center"><img src="docs/images/formats/orf.jpg" alt="Olympus ORF develop" /><br /><sub><b>.orf</b> · Olympus E-M5</sub></td>
-<td align="center"><img src="docs/images/formats/rw2.jpg" alt="Panasonic RW2 develop" /><br /><sub><b>.rw2</b> · Panasonic DMC-GX85</sub></td>
+<td align="center"><img src="docs/images/formats/arw.jpg" width="260" alt="Sony ARW develop" /><br /><sub><b>.arw</b> · Sony α7 III</sub></td>
+<td align="center"><img src="docs/images/formats/orf.jpg" width="260" alt="Olympus ORF develop" /><br /><sub><b>.orf</b> · Olympus E-M5</sub></td>
+<td align="center"><img src="docs/images/formats/rw2.jpg" width="260" alt="Panasonic RW2 develop" /><br /><sub><b>.rw2</b> · Panasonic DMC-GX85</sub></td>
 </tr>
 <tr>
-<td align="center"><img src="docs/images/formats/pef.jpg" alt="Pentax PEF develop" /><br /><sub><b>.pef</b> · Pentax K-5</sub></td>
-<td align="center"><img src="docs/images/formats/dng.jpg" alt="Ricoh DNG develop" /><br /><sub><b>.dng</b> · Ricoh GR II</sub></td>
-<td align="center"><img src="docs/images/formats/raf.jpg" alt="Fujifilm RAF X-Trans develop" /><br /><sub><b>.raf</b> · Fujifilm X-S10 — X-Trans, approximate</sub></td>
+<td align="center"><img src="docs/images/formats/pef.jpg" width="260" alt="Pentax PEF develop" /><br /><sub><b>.pef</b> · Pentax K-5</sub></td>
+<td align="center"><img src="docs/images/formats/dng.jpg" width="260" alt="Ricoh DNG develop" /><br /><sub><b>.dng</b> · Ricoh GR II</sub></td>
+<td align="center"><img src="docs/images/formats/raf.jpg" width="260" alt="Fujifilm RAF X-Trans develop" /><br /><sub><b>.raf</b> · Fujifilm X-S10 — X-Trans, approximate</sub></td>
 </tr>
 </table>
+
+</div>
 
 This grid is also the nine-camera RAW zoo: one real CC0 file per format tile,
 fully decoded and neutral-rendered rather than copied from an embedded

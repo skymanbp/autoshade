@@ -134,6 +134,11 @@ a:hover {
   border-radius: 0.15rem;
 }
 
+::selection {
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
 code,
 pre,
 kbd {
@@ -195,12 +200,17 @@ h1 {
   letter-spacing: -0.062em;
 }
 
+/* Section titles sit a step below the hero: at up to 4.3rem inside 19ch, five
+   of the nine broke onto a second line at desktop width and competed with the
+   name in the hero. 3.6rem in 22ch keeps them on one line where the copy
+   allows and leaves the hero the loudest thing on the page. */
 h2 {
-  max-width: 19ch;
-  margin-bottom: 1.3rem;
-  font-size: clamp(2.15rem, 4.6vw, 4.3rem);
+  max-width: 22ch;
+  margin-bottom: 1.2rem;
+  font-size: clamp(2rem, 4vw, 3.6rem);
   font-weight: 720;
-  letter-spacing: -0.05em;
+  letter-spacing: -0.045em;
+  text-wrap: balance;
 }
 
 h3 {
@@ -307,17 +317,31 @@ h4 {
 .section {
   width: min(calc(100% - var(--gutter)), var(--measure));
   margin: 0 auto;
-  padding: clamp(5rem, 10vw, 9rem) 0;
+  padding: clamp(4.5rem, 8vw, 7rem) 0;
   border-bottom: 1px solid var(--line);
 }
 
+/* A short accent rule leads every kicker, so the eyebrow reads as the start of
+   a section rather than as a stray line of small caps. Decorative only. */
 .section-kicker {
+  display: flex;
+  align-items: center;
   margin-bottom: 1rem;
+  gap: 0.7rem;
   color: var(--accent-strong);
   font-size: 0.76rem;
   font-weight: 780;
   letter-spacing: 0.15em;
   text-transform: uppercase;
+}
+
+.section-kicker::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 1.6rem;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
 }
 
 .section-lede {
@@ -421,6 +445,11 @@ h4 {
   color: var(--ink);
 }
 
+.button-secondary:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
 /* The UA stylesheet sets `figure { margin: 1em 40px }`. The h1..p reset above
    zeroes only margin-top and `.image-pair figure` zeroed only margin-bottom, so
    40px INLINE margins survived on `.hero-figure` and on every before/after
@@ -490,24 +519,27 @@ h4 {
   max-width: var(--measure-text);
 }
 
+/* Separate rounded cards on a 1rem gap, the same idiom as the format tiles and
+   the documentation cards further down, rather than a ruled table: the page
+   now draws every card group one way. */
 .feature-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin-top: 3.5rem;
-  border-top: 1px solid var(--line);
-  border-left: 1px solid var(--line);
+  margin-top: 3rem;
+  gap: 1rem;
 }
 
 .feature-grid article {
-  min-height: 13rem;
-  padding: 1.5rem;
-  border-right: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--surface) 74%, transparent);
+  padding: 1.45rem 1.5rem 1.55rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
 }
 
 .feature-grid h3 {
-  font-size: 1.1rem;
+  margin-bottom: 0.55rem;
+  font-size: 1.08rem;
+  letter-spacing: -0.015em;
 }
 
 .feature-grid p {
@@ -522,6 +554,7 @@ h4 {
   margin-top: 2.5rem;
   padding: 1.4rem 1.5rem;
   border-left: 4px solid var(--warm);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   background: color-mix(in srgb, var(--warm) 9%, var(--surface));
   gap: 1.5rem;
 }
@@ -545,9 +578,9 @@ h4 {
    content for. */
 .split-section {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.12fr) minmax(0, 0.88fr);
   align-items: start;
-  gap: clamp(2.5rem, 7vw, 7rem);
+  gap: clamp(2.5rem, 5vw, 4.5rem);
 }
 
 .split-section > div:first-child {
@@ -635,7 +668,7 @@ h4 {
 .tech-index {
   color: var(--warm);
   font-family: var(--font-mono);
-  font-size: 0.8rem;
+  font-size: 0.95rem;
   font-weight: 720;
   letter-spacing: 0.08em;
 }
@@ -930,6 +963,9 @@ h4 {
 .tech-list article {
   display: grid;
   grid-template-columns: var(--rail) minmax(0, 1fr);
+  /* The index number sits on the heading's first baseline instead of floating
+     at the top edge of a heading up to 2.35rem tall. */
+  align-items: baseline;
   padding: clamp(2.5rem, 5vw, 4.5rem) 0;
   border-bottom: 1px solid var(--line);
   gap: var(--rail-gap);
@@ -1158,6 +1194,74 @@ h4 {
   font-size: 0.9rem;
 }
 
+/* Interaction and wrapping polish, gathered in one place.
+
+   Inline code in running prose may be a whole repository path -- the
+   architecture page's lede names `docs/architecture/autoshade.architecture.json`
+   -- and one unbreakable token that long pushed that page 24px wider than a
+   390px phone. It may break anywhere; code inside `pre` keeps its own
+   horizontal scroll and is not reached by these selectors.
+
+   The release table's rows take a quiet tint under the pointer so a byte count
+   can be read across from its filename. The documentation cards gain a trailing
+   arrow, the affordance the doc-card hover already implied; the arrow is
+   decorative, so its alternative text is empty. */
+p code,
+li code,
+.section-lede code {
+  overflow-wrap: anywhere;
+}
+
+.release-files tbody tr:hover {
+  background: color-mix(in srgb, var(--accent-soft) 45%, transparent);
+}
+
+.doc-grid > a {
+  position: relative;
+  padding-right: 3.2rem;
+}
+
+.doc-grid > a::after {
+  content: "\2192";
+  content: "\2192" / "";
+  position: absolute;
+  top: 1.8rem;
+  right: 1.4rem;
+  color: var(--accent-strong);
+  font-size: 1.15rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.doc-grid > a:hover strong {
+  color: var(--accent-strong);
+}
+
+/* Motion is opt-in by the reader's own setting: buttons, cards and the
+   documentation arrow ease instead of snapping, and nothing moves at all for a
+   reader who asked for reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  .button,
+  .header-repo,
+  .site-header nav a,
+  .feature-grid article,
+  .doc-grid > a,
+  .doc-grid > a::after,
+  .release-files tbody tr {
+    transition: color 0.16s ease, background-color 0.16s ease, border-color 0.16s ease,
+      box-shadow 0.2s ease, transform 0.2s ease;
+  }
+
+  .button:hover,
+  .doc-grid > a:hover {
+    transform: translateY(-1px);
+  }
+
+  .doc-grid > a:hover::after {
+    transform: translateX(3px);
+  }
+}
+
 @media (max-width: 58rem) {
   .site-header nav {
     display: none;
@@ -1194,8 +1298,39 @@ h4 {
     font-size: 0.96rem;
   }
 
+  /* 2rem total is 16px a side: 1.25rem left 10px, too tight a margin for text
+     against a phone's bezel. */
   :root {
-    --gutter: 1.25rem;
+    --gutter: 2rem;
+  }
+
+  /* Three columns of 328px left a filename wrapped four times. On a phone each row
+     becomes two stacked parts instead: the filename across the full width, then what it
+     is for and its byte count. The header row follows the same grid, so the
+     column labels stay above what they label. */
+  .release-files,
+  .release-files thead,
+  .release-files tbody {
+    display: block;
+  }
+
+  .release-files tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--line);
+    column-gap: 1rem;
+  }
+
+  .release-files th,
+  .release-files td {
+    padding: 0;
+    border-bottom: 0;
+  }
+
+  .release-files tr > :first-child {
+    grid-column: 1 / -1;
+    margin-bottom: 0.15rem;
   }
 
   .feature-grid,
