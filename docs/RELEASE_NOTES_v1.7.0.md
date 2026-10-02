@@ -114,7 +114,11 @@ removed; CLI 27 → 27; GUI 226 → 228, three additions
 the behaviour this release replaces). clippy 0 warnings on both feature sets
 (`--all-targets -- -D warnings`). `check_docs.py --gates` on the transcript
 with the XMP census root supplied: on the frozen snapshot **32 PASS / 0 FAIL
-/ 0 SKIP** — the counts moved with the code before the snapshot. The re-run after the bump is recorded at the bump.
+/ 0 SKIP** — the counts moved with the code before the snapshot. After the bump
+**32 PASS / 0 FAIL / 0 SKIP**; after the bump the CLI, contract and doc-test
+suites read 27 / 0, 2 + 2 and 0, the denoise module 47 / 0, clippy 0 warnings
+on both feature sets, the `python/` suite 82 OK, `audit_i18n` and the font
+check exit 0, and Cargo.lock is unchanged by `cargo metadata`.
 
 Final gate, reference pair, before the tag: the release code's CLI re-fitted
 the reference pair at 0.65 / 0.85 / 1.0 and rendered each at the target's

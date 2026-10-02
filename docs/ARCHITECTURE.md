@@ -1,6 +1,10 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.6.7 — the AI denoise sidecar for baked sources works
+> Status: **implemented** (v1.7.0 — a generative fill lands as a pixel layer over
+> the card it was made on (`recipe.pixel_layers`, composited last in the develop
+> chain; switch it off or delete it and the photograph is back) and the side
+> panel gains three heading levels with no separator lines;
+> v1.6.7 — the AI denoise sidecar for baked sources works
 > one row of tiles at a time (19 bytes per pixel instead of 83–86, output
 > byte-identical) and the reverse-fit fold names and offers its source card;
 > v1.6.6 — the six source files over ten thousand lines
