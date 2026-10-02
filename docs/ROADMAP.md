@@ -2,7 +2,12 @@
 
 > 这是**已发生之事的台账**，不是待办表：每一条要么是已发布的版本与实测数字，
 > 要么是带理由的终局裁定（一个测出来的数、一条仪器极限、一次用户拍板）。
-> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-09-30**。
+> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-10-02**。
+>
+> **v1.7.0 已发布**（2026-10-02，tag `v1.7.0` → `27d4d53`，release run `37048267665` 六工位绿，发版事实见台账首条；
+> 用户 10-01 报「这个按钮的宽度无限拉长」「看不出哪些子类别是属于哪些大类别的」「这些分类线太丑了」与生成式填充「作为图层，非破坏式的覆盖到原图上（并保存）」，问卷裁定「盖在调色上面」，随后令「走标准发布流程」）**：
+> ① 生成式填充落成做它的那张卡上的像素图层（配方 `pixel_layers`，调色链最后一步叠加、可开关、可调不透明度，XMP 不写）；
+> ② 侧栏三级标题（面板标题＋金线 / 金色分组头 / 折叠区）、三个侧栏面板零分隔线、起点下拉止于动词行右缘；③ 库 1768 → 1771、GUI 226 → 228，终门 20/23 逐字节同 v1.6.7、其余 3 项只差内嵌配方里的空图层列表。
 >
 > **v1.6.7 已发布**（2026-09-30，tag `v1.6.7` → `e4362d3`，release run `36690692259` 六工位绿，发版事实见台账首条；
 > 用户 09-30 凌晨报「操作了一小会，电脑就变得奇卡无比」与「不知道是用什么反推的」，问卷裁定「加一个起点下拉框」，随后令「走标准发布流程」）**：
@@ -208,6 +213,40 @@
 > [docs/ROADMAP-archive.md](ROADMAP-archive.md)（追加式档案，勿重写）。
 
 ## 版本台账（逐版已发布内容与实测数字，新在上；均已完成，勿重做）
+
+### v1.7.0 — 生成式填充落成本卡上的像素图层（盖在调色上面、可开关可调不透明度、随配方保存），侧栏三级标题、去掉全部分隔线、起点下拉封宽（2026-10-02）
+
+- **来龙去脉**：用户 10-01 在装好的 1.6.7 里报——①（三张截图）「这个按钮的宽度无限拉长」（反推折叠区的「起点」下拉随拖宽的侧栏一路拉到底）、「看不出哪些子类别是属于哪些大类别的」（AI 标题与它的五个折叠区同字号）、「这些分类线太丑了」、「整体UI再打磨一下，更加美观、大气、高级」；②「为什么我选中正常图片变体，涂抹并AI生成填充后，出来的结果是一个新"AI生成"变体？…如何让生成式填充的部分作为图层，非破坏式的覆盖到原图上（并保存）」。问卷裁定②「盖在调色上面」（模型看到的是调好的画面、图层保持生成时的样子）；两件做完后用户令「走标准发布流程」，并补「记得走ce closeout，还有确保所有文档都更新并对齐事实」。
+- **① 的修法**（`ae4dea5`）：起点下拉在行首量 `columns(ui,1)` 的行宽、减去「起点：」标签宽，止于下面动词按钮行的右缘（同受 420 px 上限）；新 `src/bin/gui/headings.rs` 三级：面板标题（AI / 调色 / 修饰）用 Heading 字号压一条 28 px 金线、分组头金色带短竖标（调色四组 + AI 新分两组「分析与参考」「生成与反推」）、折叠区在下；三个侧栏面板里的 `ui.separator()` 全删（组间留白、折叠区内小标题改 `sub_caption`）；主题细线淡一档（暗 46 / 亮 212）、Heading 16.5 → 17.5。新 GUI 测试两条（下拉右缘在 320 / 900 px 两种宽度、中英两种语言下都等于动词行右缘；AI 标题字号高于折叠区且侧栏源码零分隔线）。
+- **② 的修法**（`ae4dea5`）：`FillJob::layer` 让填充把生成像素贴到透明帧上（预乘 source-over 原本就支持），发布的 RGBA 母片＝补丁、羽化涂抹区即 alpha；配方新增 `pixel_layers`（路径、开关、不透明度；`deny_unknown_fields`），`render/layers.rs` 经蒙版栅格快照、同一份 256 MB 总预算加载（导出读不到就拒绝、预览跳过并提示一次），在调色链**最后一步**（SDR 呈现之后、几何之前）叠加；目录行 `pixel_layers` 为 EngineCarrier / engine_only / RenderedNotExported（RECIPE_CONTROLS 114 → 115），XMP 不写、保存行点名「填充图层」；GUI 的 `RetouchKind::Layer` 落在做填充的那张卡上、一步撤销（纯 ✨ 卡先分叉成 ✎），生成式填充折叠区列出本卡图层（👁 / ✕ / 不透明度）；跨照片粘贴丢弃图层并提示条数；有图层时禁 90° 旋转。调整（Adjust）、浏览器的填充、CLI 的 `retouch` 不变。代价写在手册：图层定格生成时的样子，之后大幅调色会在补丁边见缝，需重填。新库测试三条、GUI 填充落地测试改写（退役「落新 ✨ 卡」那条）。计数随代码先动（`0499b71`：库 1768 → 1771、GUI 226 → 228）。
+- **收尾清扫**（`27d4d53`，用户补令之后）：全仓 grep 本版说法，改掉三处——README「每次付费生成都落新 ✨ 卡」（GUI 填充改落图层）、ARCHITECTURE 导入移除段「重生成结果落新 ✨ 卡」（它跑的就是填充）、手册按钮词汇段补侧栏三级标题；提交在 tag 之前，所以安装包里随附的 README 是改好的那份（tag 因此打在 `27d4d53` 而不是提升提交 `9b54b15`，两者版本字面量相同）。
+- **打 tag 前的门（冻结快照 `0499b71`；自 v1.6.7 起两个提交＝侧栏与填充图层、计数；`rel170\battery-170.sh` → `battery-170.out` / `battery\transcript.txt`）**：
+  库 **1756 过 / 0 败 / 15 忽略**（1072.26 s，逐模块一进程）、CLI **27 / 0**、契约 2 + 2、doc-tests 0、GUI **227 / 0 / 1**、
+  校准车道 **1756 / 0 / 15**（1626.50 s）、`audit_i18n` 与字体检查在电池内 exit 0；clippy 默认与 `--features gui` 两组 `-D warnings` 均 0 警告；
+  Python 两套 82 + 44 项 OK（CPU、真权重、`-W error::RuntimeWarning`）；
+  按名对 v1.6.7 的发布电池：库 1768 → 1771 增 3（`a_layer_replaces_where_it_is_opaque_and_leaves_the_rest`、`the_develop_draws_its_layers_and_an_export_refuses_a_missing_one`、`layers_round_trip_through_the_recipe_and_refuse_unknown_keys`）删 0、CLI 27 → 27、
+  GUI 226 → 228 增 3（`the_reverse_fit_from_menu_ends_where_the_verb_row_ends`、`the_ai_title_outranks_its_folds_and_its_folds_sit_under_group_heads`、`a_fill_lands_as_a_layer_on_the_card_it_was_made_on`）删 1（`a_fill_lands_as_a_new_generated_card_and_leaves_the_filled_card_alone`，本版替换掉的行为）。
+  `check_docs.py --gates`（带 XMP 普查根）提升前对冻结快照 **32 PASS / 0 FAIL / 0 SKIP**、提升后与收尾清扫后各 **32 / 0 / 0**；
+  版本号提升后在主树重跑（`rel170\post_bump_170.sh` → `postbump-170.out`）：CLI 27 / 0、契约 2 + 2、doc-tests 0、去噪模块 47 / 0、clippy 两组 0 警告、`python/` 套件 82 项 OK、`audit_i18n` 与字体检查 exit 0、`cargo metadata` 不改 Cargo.lock、站点 `?v=` 键 20 处全是 1.7.0。
+  变异证伪（`rel170\mutation-170.sh` → `mutation-170.out`，快照上四次各红、按 sha256 还原四文件、树干净）：起点下拉改回 `available_width()` → 下拉宽度测试红；面板标题改按钮字号 → 标题层级测试红；
+  调色链跳过图层叠加 → `the_develop_draws_its_layers_and_an_export_refuses_a_missing_one` 红；填充改回落新 ✨ 卡 → `a_fill_lands_as_a_layer_on_the_card_it_was_made_on` 红。
+  每个提交的新增行与提交说明做照片名 / 令牌形状 / 用户路径扫描 0 / 0 / 0（`rel170\scan_release.py`）。
+- **终门（参考对，版本号提升之前）**：`0499b71` 的本机 release CLI（35,926,654 B）把参考对按 0.85 / 0.65 / 1.0 三档重新反推并按目标图尺寸重渲（`rel170\run_fit_170.sh 085 065 100` → `run_fit_170.log`）：23 项比对中 20 项与 v1.6.7 终门**逐字节相同**——三档配方（剔除新增的空 `"pixel_layers": [],` 一行后）、11 张蒙版栅格、带 / 不带蒙版的 6 张 1000 px 渲染；另 3 项＝写出的侧车 XMP，只差在它内嵌的压缩配方副本：解码后多一个 `pixel_layers: []`、其余全等，副本以外的 XMP 字节全等（`rel170\cmp_xmp_recipe.py`）。求解裁定同（full solve、像素尺度配对，D 0.277 / 0.657）；读数（天空 ΔE / 整幅 mean |diff|）0.65：6.3 / 0.0284、0.85：3.9 / 0.0250、1.0：3.9 / 0.0252，与 v1.6.7 台账一字不差。三向图（目标 | v1.6.1 认可的终门 | 本构建，`rel170\fig\probe\three-way-085-170.png`）亲眼看过：天空一条平滑渐变、无块无缝无瓦片，地面同认可终门。
+- **发版事实（发布运行结束之后写，数字全部取自发布过程自己的记录）**：tag `v1.7.0` → `27d4d53`，release run `37048267665` 六工位绿
+  （guard 5 s、linux 2 m 31 s、windows 10 m 25 s、macos 13 m 31 s、macos-battery 23 m 27 s、publish 12 s；`rel170\watch-release-170.log`）；tag 之前先推 main 并等推送触发的
+  `build`（`9b54b15` 的 `37044595694`、`27d4d53` 的 `37045207016`）与 `installer-upgrade`（`37044595626`、`37045206880`）全绿才打 tag，tag 自己的 `installer-upgrade`（`37048267540`）也绿。macOS 工位自己的电池：库 **1753 / 0 / 14**（835.40 s）、
+  CLI 27 / 0、契约 2 + 2、doc-tests 0、GUI 227 / 0 / 1；Metal 实测设备 `mps`、前向 **8.7 ms**（20 次均值，1×3×512×512）、峰值 **1067.0 MiB**、`deform_conv2d` 原生（`rel170\macos-battery-170.log`）。
+  - **权重本版不重发**：侧车钉的仍是 v1.6.0 的 `autoshade-raw-denoise-v2.pth`（130,590,559 B、sha256 `ffafa40a…`）；钉住的地址整份拉回，字节数与哈希与钉值全等；
+    `checksums.txt` 只有 7 个 CI 构建资产（7 行、648 B、0 个 CR），没有权重行。
+  - **8 资产回验 7/7**（`rel170\verify_assets_170.sh` → `verify-assets-170.out`）：全部下载回来独立算 SHA-256 对 `checksums.txt` 逐一 OK；便携 zip 里的两个 exe 与单独资产逐字节同、
+    zip 内无权重目录；每个带 python/ 的包都含 `_mirror.py`、不含 `test_*.py`，9 个侧车对 tag 的 blob 逐一同哈希；解包的 CLI 答 `autoshade 1.7.0`；GUI 字节里有「Fill layer {n}」「Generate & Reverse-fit」；
+    随附 README 是收尾清扫后的那份。资产表按下载回来的字节回填（`7f480c0`：README 尺寸 + 摘要、官网尺寸，21 处；CLI 23,153,152 B、桌面版 29,681,664 B、安装包 15,401,793 B、便携包 20,767,546 B、
+    macOS 应用包 41,897,914 B、Linux 10,110,103 B、macOS 命令行 18,250,304 B），`check_docs --gates` 32 / 0 / 0。
+  - **官网**：`deploy_site.js`（令牌进程内读、输出过滤）wrangler exit 0，新传 4 个文件 + 19 个沿用 + `_headers`，边缘缓存整站清除；`verify_site_170.py` 部署后立刻跑是 29 / 31（404 与 site/README 还在发旧字节，同长度＝`?v=` 键未换），
+    片刻后重跑 **31 / 31**（三页各剥一个 367 B beacon 后与 git blob 逐字节同），服务页上的 `?v=` 键 **15 / 15** 都是 `1.7.0`（`rel170\verify-site-170.out`）。
+  - **本机升级**（`upgrade_170.ps1`，Inno 静默原地）：先验安装包摘要 `e8876182…` OK；113 → 113 文件（12,842,054,240 → 12,841,991,539 B），改 39、新 0、删 0；`autoshade.exe` / `autoshade-gui.exe`
+    的 sha256 与 `checksums.txt` 全等、FileVersion 1.7.0、CLI 答 `autoshade 1.7.0`；卸载表只一条 `AutoShade version 1.7.0`；PendingFileRenameOperations 22 条中 0 条涉及 AutoShade；
+    随装 9 个侧车 .py 与仓库同哈希、缺 0 错 0；权重类文件 14 个 / 9,968,356,573 B 前后不变（`rel170\upgrade-170.out`）。GUI 程序全程未启动。
 
 ### v1.6.7 — 烘焙图片的 AI 去噪侧车按瓦片行流式处理（83–86 → 19 B/px、输出逐字节同 v1.6.6），反推折叠区写明起点与目标、起点可选（2026-09-30）
 
