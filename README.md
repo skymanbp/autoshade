@@ -274,7 +274,8 @@ are in [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-adv
 - **Generated pixels are quarantined**: `reimagine` composes the prompt onto
   a faithfulness scaffold (`input_fidelity` is silently dropped by
   gpt-image-2), measures the result with the same `D` and can spend one
-  bounded retry; every paid generation lands as a new ✨ card; `heal` only
+  bounded retry; every paid generation lands as a new ✨ card except a GUI
+  fill, which lands as a layer you can switch off; `heal` only
   copies, shifts and averages existing pixels; Lightroom spot removal is
   re-solved from the photograph's own pixels with the synthesised areas
   named; an HDR-mode edit renders as Lightroom's own SDR rendition.

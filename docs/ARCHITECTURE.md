@@ -2270,8 +2270,8 @@ result in its own store and records only where. So this engine re-solves each
 area from the frame's own pixels and says which areas those are: the Retouch
 panel names the count, names how many Adobe synthesised, and offers
 「✨ Regenerate those areas」, which paints exactly those shapes into the shared
-brush mask and runs the generative verb over them (the result lands as a new
-✨ card, like every other generative landing).
+brush mask and runs the generative verb over them (the result lands as a
+pixel layer on the card, like every other fill since 2026-10-01).
 
 **Units, at exactly one place** (`render::retouch_spots`). `crs:SizeX`/`SizeY`
 are a half-extent in WIDTH units on both axes — the convention `BrushDab::r`

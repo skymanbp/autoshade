@@ -285,7 +285,11 @@ session, Save settings), icon-only buttons are squares as tall as the text
 buttons beside them, and rows of equal actions in the side panels sit in
 aligned columns. These rows share the prompt fields' 420 px readable ceiling
 and stay left-aligned when the panel is wider; the panel itself can still
-grow for the curve and HSL editors. A glyph in front of a label always means
+grow for the curve and HSL editors. The side panel reads in three levels: a
+panel title (AI, Develop, Retouch) in large type over a short gold rule, group
+heads in gold with a small tick (in the AI panel, **Analysis & References** and
+**Generate & Reverse-fit**), and the folds under them; groups are set apart
+by space rather than lines. A glyph in front of a label always means
 the same thing —
 🤖 an AI verb, ✓ finish, ✕ cancel, ＋ add, ↺ reset, 🗂 a folder, 🖌 paint, 💧
 pick from the image.
