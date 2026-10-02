@@ -294,7 +294,8 @@ Lightroom's HDR mode moves diffuse white down inside the capture and calls the
 stops above it headroom (`crs:HDRMaxValue`). Every file this engine writes is
 SDR, so what it owes such a photograph is Lightroom's own answer: the SDR
 rendition, tuned by the seven `crs:SDR*` controls that panel shows only in HDR
-mode. `render/hdr.rs` renders it as the develop's LAST stage — one tone pass
+mode. `render/hdr.rs` renders it as the develop's last edit stage (only the
+generative fill's pixel layers are drawn after it) — one tone pass
 through the already-calibrated knot model plus the Basic panel's own Clarity
 operator at the same radius (`clarity_radius`, now one definition instead of
 two). The headroom enters as a negative Highlights push, which is what an
@@ -413,8 +414,9 @@ exposure, contrast, whites, blacks, Highlights, shadows, base curve, the
 parametric curve and the master point curve before the B&W grey mix (when the
 photo is black and white), RGB point curves, eight-band HSL and the point
 colours, colour grading,
-clarity, Texture, saturation/vibrance, noise reduction, sharpening, and local
-adjustments. The frame is then resampled — lens geometry, the Transform/Upright projective
+clarity, Texture, saturation/vibrance, noise reduction, sharpening, local
+adjustments, the colour field, the SDR rendition when the photo is in HDR edit
+mode, and last the generative fill's pixel layers. The frame is then resampled — lens geometry, the Transform/Upright projective
 step (`render/perspective.rs`), straighten, crop —
 and only after that does the **finishing pass** run: the post-crop vignette and
 film grain, whose whole definition is "after the crop" (`render/finish.rs`).
@@ -610,7 +612,8 @@ keeps none.
   `block_lumas`, `corner_residual` (calibration era 3, v1.6.0); `src/pipeline.rs` —
   `base_curve_is_pre_era`, the re-estimate on open.
 - `src/render/hdr.rs` — HDR edit mode and the SDR rendition, the develop's last
-  stage (v1.5.0 F8).
+  edit stage (v1.5.0 F8); `src/render/layers.rs` — the generative fill's pixel
+  layers, composited after it (v1.7.0).
 - `src/recipe.rs` — bounded global and local adjustment domains.
 - `docs/V2_PLAN.md` — white-balance, tone, detail-model calibration ledger.
   Kept outside the public tree (`.gitignore`), like the other planning memos;
@@ -2124,6 +2127,8 @@ than the pre-call state; model weights remain outside the repository.
 - `src/bin/gui/buttons.rs` — the button vocabulary (R38): primary / action /
   glyph square / toggle, every one exactly one row tall, grid cells for rows
   of equal verbs; the layout pin renders every panel in both languages.
+- `src/bin/gui/headings.rs` — the side panel's three heading levels (panel
+  title over a gold rule, gold group head, sub-caption; v1.7.0).
 - `src/serve.rs` and `src/web/` — embedded web UI and loopback defenses.
 - `src/denoise.rs`, `python/denoise_raw.py` and `python/denoise.py` — the
   RAW-mosaic DRUNet and baked-source SCUNet sidecars and the `sidecar_wrote`

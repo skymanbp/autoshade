@@ -80,7 +80,7 @@ MIRRORS = {
     # describe.py MODEL — Qwen3-VL, the scene sentence
     "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/":
         "https://huggingface.co/Azng0/autoshade-mirror-qwen3-vl-2b-instruct/resolve/98a81c7fe41ce524020d242aa49a1d2ce4c63de8/",
-    # correspond.py MODEL — Stable Diffusion 2.1, the generative fill
+    # correspond.py MODEL — Stable Diffusion 2.1, the DIFT correspondence field
     "https://huggingface.co/sd2-community/stable-diffusion-2-1/resolve/bb2154823665391b4fb29b0b9cf82a198964ee05/":
         "https://huggingface.co/Azng0/autoshade-mirror-stable-diffusion-2-1/resolve/9c4a4c5bac209d2ad06dce8ed03c79609dbee112/",
     # denoise.py WEIGHT_URLS — the KAIR v1.0 release assets

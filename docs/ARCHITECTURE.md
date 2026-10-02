@@ -2433,10 +2433,11 @@ tuned by the seven-control panel Lightroom shows only in HDR mode
 `…Whites`, `…Clarity`). Rendering that rendition is rendering the photograph
 the photographer approved for SDR output.
 
-It is the develop's LAST stage, after the colour field, because that is what it
-is: not another edit but the mapping of the finished edit into the range this
-engine can publish. A control that ran before the masks would be one they could
-then undo.
+It is the develop's last EDIT stage, after the colour field, because that is
+what it is: not another edit but the mapping of the finished edit into the
+range this engine can publish. A control that ran before the masks would be one
+they could then undo. Only the generative fill's pixel layers (v1.7.0) are drawn
+after it: they are pictures of that finished develop, not edits of it.
 
 The model is one tone pass plus Clarity, and the headroom gets its OWN curve:
 
@@ -2826,7 +2827,7 @@ baked image, and `Keep` only when the writer learned nothing (a failed
 projection keeps the previous file rather than publishing a half-truth) —
 staged as `projection.xmp` in the same `.commit/` generation, named in the
 manifest (an older manifest without the member replays as `Keep`), landed
-after the three JSON members and replayed by `resolve_pending_commit`, so the
+after the three JSON members and replayed by `resolve_pending_commit_unlocked`, so the
 file cannot outlive the recipe it projects; every surface that commits a
 develop (GUI Ctrl+S, quit-time Save-all, the Analyze landing, the paste
 worker, the reverse-fit worker, the CLI `match`, the web save) hands the
@@ -3541,7 +3542,7 @@ silently drops what you are looking at」 were both unrepresentable claims.
 | `Rendered` | yes | yes | the ordinary controls — **98 global, 24 local** (counted from the registry 2026-09-18; R25 added global `texture` and the manual CA pair `ca_r`/`ca_b`; per mask, the four point curves; v1.5.0 the Detail panel's eight shaping axes, the parametric curve's seven keys, the Calibration panel's seven, the B&W switch with its eight mixer bands, the Point Color swatch list, F6's Transform panel — seven sliders, its Upright mode and `crop_constrain_to_warp` — F7's `camera_profile`, which arrived by LEAVING `PassThrough` rather than by being invented, and F8's HDR edit mode with its headroom and the seven SDR-rendition controls) | — nothing to disclose |
 | `CarriedOnly` | no | yes | **1**: the mask `name`, a label rather than an operator — the one member that never had an engine stage to wait for. R25 ruled 24 globals into this tier under policy SF4-C; v1.5.0 rendered all of them, batch by batch (the eight Detail axes → `render/detail.rs`, the nine Effects → `render/finish.rs`, the auto-CA switch and the six de-fringe keys → `render/lens.rs`), so **`CARRIED_ONLY_GLOBAL` is now empty**. The list and its gates stay: emptiness is a measurement, and the next carried row discloses itself the day it is added | `xmp::global_render_gaps` → 「carried to Lightroom, not rendered here」, on the control and in the save line |
 | `PassThrough` | no | verbatim | **1 row, 6 keys**: `passthrough`, a `BTreeMap<String,String>` over the named `xmp::PASSTHROUGH_CRS` block — what is left is exactly Lightroom's own Upright SOLVER bookkeeping (`UprightVersion`, `UprightCenterMode`, `UprightCenterNormX/Y`, `UprightFocalMode`, `UprightFocalLength35mm`). (R25 counted 16, the seven `CameraCalibration*` keys included; Lightroom writes no such key, and its Calibration panel renders since v1.5.0. It counted 9 until v1.5.0 F6, when the eight `crs:Perspective*` keys became owned controls, and 7 until F7, when `CameraProfile` became one — the tier shrinking by itself twice, which is what its own note hoped for.) A NAMED key set, deliberately not 「everything unknown」: the merge's strip universe is a static list, so a free-form map would desynchronise from what is actually written. `unmodelled_global_crs` keeps naming the rest — that is the feature, not the omission | the Transform section's read-only tail: values shown, no slider offered, because a slider on something never interpreted would be a lie. The section's own sliders above it are a different matter — those keys render |
-| `RenderedNotExported` | yes | no | **6 global** in registry order: `upright_transform` (F6), `look` (F7), `base_curve`, `lens_profile`, `retouch` (F9), `colour_field`; per mask `enabled`, `color_gains`. The first four are quiet on save (`catalogue::STAMPED_CALIBRATION`) — nothing the photographer can act on, and for the two Adobe ones the merge preserves the document's own copy anyway — while `retouch` and `colour_field` say so out loud. `retouch` is the sharpest illustration of the split: a MERGE keeps the photographer's `crs:RetouchAreas` byte for byte (this writer does not own the element, so it never strips it), and a FRESH `recipe_to_xmp` emits nothing at all for it. The tier names the worse half, because that is the half a disclosure is for | `xmp::global_export_losses` + the mask loss list |
+| `RenderedNotExported` | yes | no | **7 global** in registry order: `upright_transform` (F6), `look` (F7), `base_curve`, `lens_profile`, `retouch` (F9), `pixel_layers` (v1.7.0), `colour_field`; per mask `enabled`, `color_gains`. The first four are quiet on save (`catalogue::STAMPED_CALIBRATION`) — nothing the photographer can act on, and for the two Adobe ones the merge preserves the document's own copy anyway — while `retouch`, `pixel_layers` and `colour_field` say so out loud. `retouch` is the sharpest illustration of the split: a MERGE keeps the photographer's `crs:RetouchAreas` byte for byte (this writer does not own the element, so it never strips it), and a FRESH `recipe_to_xmp` emits nothing at all for it. The tier names the worse half, because that is the half a disclosure is for | `xmp::global_export_losses` + the mask loss list |
 | `DerivedWriteOnly` | (yes) | no — only a derived value | `as_shot_k`/`as_shot_tint`, which reach the sidecar as `crs:Temperature`/`Tint` | — |
 
 `Control.tier` is `Option<Tier>`; `None` is not "unclassified" but "not a

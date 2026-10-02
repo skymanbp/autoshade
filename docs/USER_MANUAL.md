@@ -462,6 +462,7 @@ out (they are this photo's pixels), and turning the photo is off while a card
 holds one. Through v1.6.7 a fill landed as a new **✨ AI generated** card
 instead. The browser's Fill and the CLI's `retouch` still composite onto the
 source's neutral develop.
+
 **Adjust generated image** is GUI-only: the browser and CLI retain region
 retouch and have no whole-image adjust entry.
 
@@ -685,8 +686,9 @@ master and a web copy.
 
 ## CLI reference
 
-The following commands and flags match the v1.0.0 command definitions in
-`src/main.rs`:
+The following commands and flags match the command definitions in
+`src/main.rs` (checked flag for flag against each command's `--help` for
+v1.7.0):
 
 ```text
 autoshade decode <src> [-o|--out FILE]

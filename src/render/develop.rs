@@ -402,13 +402,13 @@ pub(super) fn apply_develop_with_rasters(
     if !r.masks.is_empty() {
         apply_masks(data, w, h, r, rasters, frame, film);
     }
-    // 7) the colour field, LAST and on purpose: it is the residual the
+    // 7) the colour field, after the masks on purpose: it is the residual the
     //    mask-shaped controls above could not reach, so it must read the
     //    frame they produced. Its guide is the render's own smoothed luma at
     //    the render's own resolution, which is what makes it a pure function
     //    of the pixels in front of it at any size.
     apply_colour_field(data, w, h, r.colour_field.as_ref());
-    // 8) the SDR rendition (v1.5.0 F8), LAST because that is what it is: not
+    // 8) the SDR rendition (v1.5.0 F8), the last EDIT because that is what it is: not
     //    another edit but the mapping of the finished edit into the range this
     //    engine can publish. Lightroom derives it from the completed HDR
     //    develop, and a control that ran BEFORE the colour field or the masks

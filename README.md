@@ -900,7 +900,7 @@ truth. The table is [`python/_mirror.py`](python/_mirror.py).
 | SAM 2.1 | Point-prompted object masks | Apache-2.0 |
 | SigLIP 2 | Optional style embeddings | Apache-2.0 |
 | Qwen3-VL-2B-Instruct | Optional local look descriptions | Apache-2.0 |
-| Stable Diffusion 2.1 | DIFT correspondence field; generative fill | CreativeML Open RAIL++-M (use-based restrictions travel with the weights) |
+| Stable Diffusion 2.1 | DIFT correspondence field | CreativeML Open RAIL++-M (use-based restrictions travel with the weights) |
 
 The project acknowledges the rawler, image, qcms, rayon, clap, serde, ureq,
 egui/eframe, tiny_http and local-model communities whose work makes these
