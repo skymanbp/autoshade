@@ -183,7 +183,12 @@
 > wrong reason; it writes a `=== name ===` transcript that
 > `scripts/check_docs.py --gates` reads the counts and the lane set back out
 > of, and it prints the by-name test-set difference against a saved baseline.
-> 1771 library + 27 CLI + 228 GUI + 2+2 contract tests are enumerated in the GUI
+> After the lanes it runs three script gates — `audit_i18n.py`, the font
+> subset check and, since 2026-10-02, `check_doc_drift.py` (every path, code
+> symbol, link and tier count the living documents name exists in the tree;
+> CI's `docs` job runs it on every push) — and a gate that exits non-zero
+> fails the battery like a lane.
+> 1771 library + 28 CLI + 228 GUI + 2+2 contract tests are enumerated in the GUI
 > build; the library result is 1756 pass + 15 `#[ignore]`d forensic probes and
 > the GUI result is 227 pass + one explicit scratch-recipe export probe ignored
 > in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
@@ -210,7 +215,9 @@
 > names (the From menu ending on the verb row's edge, the AI title out-ranking
 > its folds under two group heads with no separators left in the side panels,
 > and a fill landing as a layer on its own card), one GUI name retired (the
-> fill landing as a new ✨ card); the CLI list is v1.6.7's. Counts
+> fill landing as a new ✨ card), and after the release one CLI name (the
+> manual's CLI synopsis matches every subcommand's clap flags — the doc-drift
+> gate's half that needs the clap tree). Counts
 > refreshed 2026-09-24 for v1.6.1 (the
 > 2026-09-24 audit's findings closed, issues #6–#14): +81 / −1 by name against
 > the v1.6.0 tag (`00d3d09`), listed by the test harness itself on both trees

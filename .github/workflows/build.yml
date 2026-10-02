@@ -18,6 +18,17 @@ permissions:
   contents: read
 
 jobs:
+  # The doc-drift gate (user ruling 2026-10-02, after a sweep found nine facts
+  # the code had moved past): every path, code symbol, link and tier count the
+  # living documents name must exist in the tree. Standard library only, so it
+  # runs before any compiler is installed; the manual's CLI synopsis is checked
+  # by a CLI test in the `test` job below.
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: doc drift
+        run: python3 scripts/check_doc_drift.py
   build:
     strategy:
       fail-fast: false

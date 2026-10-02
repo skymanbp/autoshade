@@ -197,17 +197,21 @@ RC_DEFAULT=$(rc_of default)
 RC_GUI=$(rc_of gui)
 RC_CALIB=$(rc_of calib)
 
-# ------------------------------------------------------- the two script gates
+# ----------------------------------------------------- the three script gates
+# (the doc-drift gate since 2026-10-02: every path, symbol, link and tier count
+# the living documents name must exist in the tree). A script gate that exits
+# non-zero fails the battery like a lane does.
 CHECKS="$WORK/checks.txt"
-{
-    echo "\$ python scripts/audit_i18n.py"
-    (cd "$REPO" && python scripts/audit_i18n.py 2>&1)
-    echo "exit $?"
-    echo
-    echo "\$ python scripts/subset_gui_fonts.py --check"
-    (cd "$REPO" && python scripts/subset_gui_fonts.py --check 2>&1)
-    echo "exit $?"
-} > "$CHECKS" 2>&1
+CHECKS_FAILED=0
+for gate in "scripts/audit_i18n.py" "scripts/subset_gui_fonts.py --check" "scripts/check_doc_drift.py"; do
+    echo "\$ python $gate" >> "$CHECKS"
+    # $gate is word-split on purpose: the script and its flags.
+    (cd "$REPO" && python $gate >> "$CHECKS" 2>&1)
+    rc=$?
+    echo "exit $rc" >> "$CHECKS"
+    echo >> "$CHECKS"
+    [ "$rc" = 0 ] || CHECKS_FAILED=$((CHECKS_FAILED + 1))
+done
 
 # ------------------------------------------------------------- the name diff
 NAMES="$WORK/names.txt"
@@ -287,10 +291,11 @@ done
     echo "calib skipped: $SKIPS"
     echo "test names: $NAME_COUNT (+$ADDED -$REMOVED)"
     echo "lanes failed: $FAILED"
+    echo "script gates failed: $CHECKS_FAILED"
 } > "$OUT"
 
 sed -n '/^=== summary ===$/,$p' "$OUT"
 echo
 echo "transcript: $OUT"
-[ "$FAILED" = 0 ] || exit 1
+[ "$FAILED" = 0 ] && [ "$CHECKS_FAILED" = 0 ] || exit 1
 exit 0

@@ -4136,4 +4136,68 @@ fn ")
             "the neighbour line prints the counts"
         );
     }
+
+    /// The manual's CLI synopsis (docs/USER_MANUAL.md, the `text` block under
+    /// 「CLI reference」) names every subcommand and exactly the long flags each
+    /// one's clap definition takes. The 2026-10-02 doc sweep found that block's
+    /// preamble still claiming the v1.0.0 definitions; the block itself was
+    /// right only because someone had kept it so by hand. This keeps it right
+    /// on every push (`scripts/check_doc_drift.py` names this test as the
+    /// home of the check, because it needs the clap tree rather than text).
+    ///
+    /// MUTATION: delete `--negative RAW` from the manual's `match` line, or add
+    /// a flag to any subcommand without documenting it, and this fails naming
+    /// the subcommand.
+    #[test]
+    fn the_manuals_cli_synopsis_matches_every_commands_help() {
+        use clap::CommandFactory;
+        use std::collections::{BTreeMap, BTreeSet};
+        let manual = include_str!("../docs/USER_MANUAL.md");
+        let block = manual
+            .split("## CLI reference")
+            .nth(1)
+            .expect("the manual has a CLI reference")
+            .split("```text")
+            .nth(1)
+            .expect("the reference opens a text block")
+            .split("```")
+            .next()
+            .unwrap();
+        let mut documented: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for line in block.lines() {
+            let mut words = line.split_whitespace();
+            if words.next() != Some("autoshade") {
+                continue;
+            }
+            let Some(sub) = words.next() else { continue };
+            let flags = documented.entry(sub.to_owned()).or_default();
+            for word in line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')) {
+                if let Some(long) = word.strip_prefix("--").filter(|l| !l.is_empty()) {
+                    flags.insert(long.to_owned());
+                }
+            }
+        }
+        let cli = Cli::command();
+        let real: BTreeMap<String, BTreeSet<String>> = cli
+            .get_subcommands()
+            .filter(|s| s.get_name() != "help")
+            .map(|s| {
+                let flags = s
+                    .get_arguments()
+                    .filter(|a| !a.is_hide_set())
+                    .filter_map(|a| a.get_long())
+                    .filter(|l| *l != "help" && *l != "version")
+                    .map(str::to_owned)
+                    .collect();
+                (s.get_name().to_owned(), flags)
+            })
+            .collect();
+        for (sub, flags) in &real {
+            let doc = documented.get(sub).unwrap_or_else(|| panic!("the manual's CLI reference has no `{sub}` line"));
+            assert_eq!(doc, flags, "`autoshade {sub}`: the manual's flags against the clap definition");
+        }
+        for sub in documented.keys() {
+            assert!(real.contains_key(sub), "the manual's CLI reference names `{sub}`, which is not a subcommand");
+        }
+    }
 }

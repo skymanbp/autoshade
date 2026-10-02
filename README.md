@@ -508,7 +508,7 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 
 | What | Measured | Where |
 |---|---|---|
-| Automated test battery | 1771 library / 27 CLI / 228 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
+| Automated test battery | 1771 library / 28 CLI / 228 GUI / 2+2 contract tests; `check_docs` re-derives the pinned release claims | [Tech stack](#tech-stack-algorithms-and-design-philosophy) |
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
 | Lightroom Sharpening parity (v1.6.5; one star-field frame at Sharpness 0 / 40 / 80, Radius 1.0, Detail 25, Masking 0) | per-pixel R² 0.93 / 0.92 over the frame, 0.95 on the edges and stars; star peaks +0.07 / +0.11 / +0.12 in Lightroom against the law's +0.08 / +0.11 / +0.13; the ring around them 0.02 / 0.04 / 0.08 against 0.02 / 0.04 / 0.07 | [What is new §4](#4-lightroom-parity-is-measured-and-the-residuals-are-published) |
@@ -820,7 +820,7 @@ denoise's success requires the typed `sidecar_wrote` contract; a 1771 MB
 reference probe sets the 1800 MB per-photo budget and a 4 GiB RAW gate
 bounds admission. The [`build` workflow](.github/workflows/build.yml)
 covers default and GUI feature sets on Ubuntu and macOS; the
-current battery is **1771 library (1756 pass + 15 `#[ignore]`d forensic probes) / 27 CLI / 228 GUI / 2+2 contract** tests, and
+current battery is **1771 library (1756 pass + 15 `#[ignore]`d forensic probes) / 28 CLI / 228 GUI / 2+2 contract** tests, and
 [`scripts/check_docs.py`](scripts/check_docs.py) re-derives the pinned
 release claims.
 

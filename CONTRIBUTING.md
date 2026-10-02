@@ -16,6 +16,7 @@ cargo clippy --release --all-targets                         # must be warning-f
 python scripts/check_docs.py                                 # pinned release claims re-derived from the tree
 python scripts/audit_i18n.py                                 # every user-facing string has both languages, byte-identical to its source constant
 python scripts/subset_gui_fonts.py --check                   # the GUI font subsets still cover every glyph the UI can show
+python scripts/check_doc_drift.py                            # every path, code symbol, link and tier count the docs name exists in the tree
 ```
 
 The Python sidecars (`python/*.py`) need the packages in `python/requirements-*.txt`;

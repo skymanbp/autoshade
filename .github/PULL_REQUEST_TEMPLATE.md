@@ -37,7 +37,9 @@ configuration and broken on the other.
       row it can derive. That gate re-derives the hard numbers in the docs from
       the tree, and a claim site it can no longer find is a **FAIL**, not a
       silent skip — if you rephrased a sentence it was anchored on, re-anchor
-      the row.
+      the row. `python scripts/check_doc_drift.py` exits 0: every path, code
+      symbol, link and tier count the docs name still exists (CI runs it on
+      every push).
 - [ ] **No `cargo fmt`.** This tree is hand-formatted and has no
       `rustfmt.toml`; running it rewrites tens of thousands of lines and buries
       the actual diff. `cargo fmt -- <file>` is not a file filter — it
