@@ -188,10 +188,10 @@
 > symbol, link and tier count the living documents name exists in the tree;
 > CI's `docs` job runs it on every push) — and a gate that exits non-zero
 > fails the battery like a lane.
-> 1771 library + 28 CLI + 228 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1756 pass + 15 `#[ignore]`d forensic probes and
-> the GUI result is 227 pass + one explicit scratch-recipe export probe ignored
-> in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
+> 1777 library + 28 CLI + 230 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1761 pass + 16 `#[ignore]`d forensic probes and
+> the GUI result is 228 pass + two ignored (an explicit scratch-recipe export
+> probe and the side panel's offline screenshots) in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
 > refusal pair (a RAW source, a baked negative); the library and GUI lists are
 > v1.6.1's. For v1.6.3, four library names (decode: the 16-bit profile lattice
 > hands an identity transform its pixels back, a file tagged with the engine's
@@ -215,9 +215,15 @@
 > names (the From menu ending on the verb row's edge, the AI title out-ranking
 > its folds under two group heads with no separators left in the side panels,
 > and a fill landing as a layer on its own card), one GUI name retired (the
-> fill landing as a new ✨ card), and after the release one CLI name (the
-> manual's CLI synopsis matches every subcommand's clap flags — the doc-drift
-> gate's half that needs the clap tree). Counts
+> fill landing as a new ✨ card). For v1.8.0, one CLI name (the manual's CLI
+> synopsis matches every subcommand's clap flags — the doc-drift gate's half
+> that needs the clap tree), six library names (a fill levelled onto its
+> surroundings, pull-push keeping known cells and filling holes from their
+> rim, the found area being the changed block and not the drift, a sky-sized
+> edit read as the edit, a maskless edit sending no mask and layering only
+> what changed, and the ignored tuning bench on real answers) and two GUI names
+> (no side-panel text runs under the scrollbar, and the ignored offline panel
+> screenshots). Counts
 > refreshed 2026-09-24 for v1.6.1 (the
 > 2026-09-24 audit's findings closed, issues #6–#14): +81 / −1 by name against
 > the v1.6.0 tag (`00d3d09`), listed by the test harness itself on both trees
