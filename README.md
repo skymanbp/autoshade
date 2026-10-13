@@ -5,7 +5,7 @@
 
 **AI-assisted automatic development of RAW photographs.**
 
-**[Download v1.7.0](https://github.com/skymanbp/autoshade/releases/tag/v1.7.0)** ·
+**[Download v1.8.0](https://github.com/skymanbp/autoshade/releases/tag/v1.8.0)** ·
 [Website](https://autoshade.dev/) ·
 [User manual](docs/USER_MANUAL.md) ·
 [Showcase](docs/SHOWCASE.md) ·
@@ -435,7 +435,7 @@ look unchanged, the 1:1 window's grain 3.1 → 0.6 codes.
   first, failed them, and were refused.
 
 Details: [docs/TECH_STACK.md#raw-denoise](docs/TECH_STACK.md#raw-denoise) and
-the release notes, [docs/RELEASE_NOTES_v1.7.0.md](docs/RELEASE_NOTES_v1.7.0.md).
+the release notes, [docs/RELEASE_NOTES_v1.8.0.md](docs/RELEASE_NOTES_v1.8.0.md).
 
 ### 6. The camera's own look is read from the picture, like with like
 
@@ -549,7 +549,7 @@ the tests [`scripts/check_docs.py`](scripts/check_docs.py) re-derives.
 
 ### Download a release
 
-The v1.7.0 release is built by GitHub Actions from the tag: the Windows front
+The v1.8.0 release is built by GitHub Actions from the tag: the Windows front
 ends, two macOS universal (arm64 + x86_64) archives and a Linux x64
 command-line archive; `checksums.txt` carries the SHA-256 of every asset.
 One file the app uses is not a build product: `autoshade-raw-denoise-v2.pth`,
@@ -567,17 +567,17 @@ unpickled on trust.
 |---|---:|---|
 | `autoshade.exe` (CLI) | 23,153,152 bytes | `9a0683fed8b178741022c75c338d885e30fd325d4f4d43ea93368a15e4b161f1` |
 | `autoshade-gui.exe` (desktop app) | 29,681,664 bytes | `d4d210afe04c718338369cc30f9f97cbc0a3c14da2845598846693f94968baa7` |
-| `AutoShade-Setup-1.7.0.exe` (installer) | 15,401,793 bytes | `e8876182132790ac378353d787889e18bae8f8c79716af28264cf7c86d148d39` |
-| `autoshade-1.7.0-windows-x64.zip` (portable archive) | 20,767,546 bytes | `34e4c73e0fadeadd7fa6a80dd0b5a2aef7a3f1800c7136409aba64687f44c9dd` |
-| `AutoShade-1.7.0-macos-universal.zip` (macOS app bundle) | 41,897,914 bytes | `1ed3e2481bef8ea7c8827e39c113c2ef344b10b8d3a09f62e6fa4a6d06912380` |
-| `AutoShade-1.7.0-linux-x64.zip` (Linux command line only) | 10,110,103 bytes | `495a0be654e1d382743da2b2c29d3050f706bcf1d4c7685008dd71b6de999f46` |
-| `AutoShade-1.7.0-macos-cli.zip` (macOS command line only) | 18,250,304 bytes | `da91d9ec54430364cd5ef4166233b221ef77b854358db7d48c69070ebcb5a384` |
+| `AutoShade-Setup-1.8.0.exe` (installer) | 15,401,793 bytes | `e8876182132790ac378353d787889e18bae8f8c79716af28264cf7c86d148d39` |
+| `autoshade-1.8.0-windows-x64.zip` (portable archive) | 20,767,546 bytes | `34e4c73e0fadeadd7fa6a80dd0b5a2aef7a3f1800c7136409aba64687f44c9dd` |
+| `AutoShade-1.8.0-macos-universal.zip` (macOS app bundle) | 41,897,914 bytes | `1ed3e2481bef8ea7c8827e39c113c2ef344b10b8d3a09f62e6fa4a6d06912380` |
+| `AutoShade-1.8.0-linux-x64.zip` (Linux command line only) | 10,110,103 bytes | `495a0be654e1d382743da2b2c29d3050f706bcf1d4c7685008dd71b6de999f46` |
+| `AutoShade-1.8.0-macos-cli.zip` (macOS command line only) | 18,250,304 bytes | `da91d9ec54430364cd5ef4166233b221ef77b854358db7d48c69070ebcb5a384` |
 | `autoshade-raw-denoise-v2.pth` (RAW denoiser weights, fetched on demand from the v1.6.0 release) | 130,590,559 bytes | `ffafa40a53f52092149db2fcf03636117ad6855e1068142d4f6b03b634e9f9c4` |
 
 Download from the
-[v1.7.0 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.7.0):
+[v1.8.0 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.8.0):
 
-- **Installer (recommended):** run `AutoShade-Setup-1.7.0.exe`. It installs for
+- **Installer (recommended):** run `AutoShade-Setup-1.8.0.exe`. It installs for
   the current user without administrator access, adds Start Menu shortcuts, and
   offers optional desktop and user `PATH` tasks.
 - **Upgrading, uninstalling and a silent rollout** are in the manual,
@@ -586,7 +586,7 @@ Download from the
   older installer is refused, either uninstall door asks before deleting the
   two things it never installed, and `/VERYSILENT` installs, upgrades or
   uninstalls with no window.
-- **Portable archive:** extract `autoshade-1.7.0-windows-x64.zip` to a directory
+- **Portable archive:** extract `autoshade-1.8.0-windows-x64.zip` to a directory
   you can keep intact and run either executable from there, beside the bundled
   `assets/` and `python/` sidecars.
 
@@ -594,9 +594,9 @@ Download from the
 
 Both macOS archives are universal (Apple silicon and Intel in one binary);
 unpack either with Finder or `ditto -x -k <zip> <dir>`.
-`AutoShade-1.7.0-macos-universal.zip` is the app: move `AutoShade.app` to
+`AutoShade-1.8.0-macos-universal.zip` is the app: move `AutoShade.app` to
 `/Applications`; the command line travels inside it
-(`AutoShade.app/Contents/MacOS/autoshade`), and `AutoShade-1.7.0-macos-cli.zip`
+(`AutoShade.app/Contents/MacOS/autoshade`), and `AutoShade-1.8.0-macos-cli.zip`
 is that binary alone. The bundle is **ad-hoc signed, not notarised**, so the
 first launch is refused once per machine, not per launch: **System Settings →
 Privacy & Security → Open Anyway**, or right-click in Finder and choose
@@ -607,7 +607,7 @@ read-only bundle; the interpreter is a Settings field with **Detect**
 
 #### Linux
 
-The Linux archive, `AutoShade-1.7.0-linux-x64.zip`, is the command line for
+The Linux archive, `AutoShade-1.8.0-linux-x64.zip`, is the command line for
 x86-64 Linux, built on Ubuntu 22.04 with the same payload as the macOS
 command-line archive: the binary, the Python sidecars without their weights,
 the assets, LICENSE and README. Unpack it anywhere and run `./autoshade`;
@@ -845,7 +845,7 @@ release claims.
 
 ## Status, roadmap, and known limitations
 
-- Release gates for v1.7.0 cover the CLI, desktop GUI, sidecar contracts,
+- Release gates for v1.8.0 cover the CLI, desktop GUI, sidecar contracts,
   format fixtures and the deterministic renderer; artifact sizes and hashes
   are above.
 - macOS has shipped binaries and an app since v1.2.0 and nobody has reported

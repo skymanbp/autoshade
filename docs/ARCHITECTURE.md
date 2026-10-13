@@ -1,6 +1,10 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.7.0 — a generative fill lands as a pixel layer over
+> Status: **implemented** (v1.8.0 — a painted fill is levelled onto its
+> surroundings before it is pasted, and with nothing painted the same fold
+> edits from words alone, layering only the area the answer changed; the side
+> panel keeps a gutter under its scroll bar and draws open folds as cards;
+> v1.7.0 — a generative fill lands as a pixel layer over
 > the card it was made on (`recipe.pixel_layers`, composited last in the develop
 > chain; switch it off or delete it and the photograph is back) and the side
 > panel gains three heading levels with no separator lines;

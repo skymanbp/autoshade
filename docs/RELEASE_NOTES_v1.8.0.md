@@ -110,7 +110,10 @@ test added after v1.7.0); GUI 228 → 230, two additions
 `panel_screenshots`), nothing removed. clippy 0 warnings on both feature sets
 (`--all-targets -- -D warnings`). `check_docs.py --gates` on the transcript
 with the XMP census root supplied: on the frozen snapshot **32 PASS / 0 FAIL
-/ 0 SKIP**. After the bump ⟨POST⟩.
+/ 0 SKIP**. After the bump **32 PASS / 0 FAIL / 0 SKIP**; after the bump the CLI, contract and doc-test
+suites read 28 / 0, 2 + 2 and 0, the denoise module 47 / 0, clippy 0 warnings
+on both feature sets, the `python/` suite 82 OK, `audit_i18n` and the font
+check exit 0, and Cargo.lock is unchanged by `cargo metadata`.
 
 Final gate, reference pair: not re-run for this release. This batch changes
 neither the reverse fit nor the develop (the diff touches the generative
