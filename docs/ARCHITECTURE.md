@@ -1,6 +1,7 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.8.0 — a painted fill is levelled onto its
+> Status: **implemented** (v1.8.1 — rustls 0.23.45, a dependency update only;
+> v1.8.0 — a painted fill is levelled onto its
 > surroundings before it is pasted, and with nothing painted the same fold
 > edits from words alone, layering only the area the answer changed; the side
 > panel keeps a gutter under its scroll bar and draws open folds as cards;
