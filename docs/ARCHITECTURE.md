@@ -2911,7 +2911,7 @@ model (per-level tone curves) absorbed a real "make the sky bluer" as drift;
 seeds pass median + 8·MAD of the drift cells (floor 14 levels) AND 0.4 of the
 frame's strongest change, growth passes median + 4·MAD (floor 7), specks of
 ≤ 2 cells drop, holes fill, one cell of growth — and that area is levelled and
-published as the same layer (on the real answers: the removed tree 2.7 % of
+published as the same layer (on the real answers: the removed tree 2.6 % of
 the frame, the bluer sky 51 %). **Adjust generated image**
 (2026-09-20) keeps that new-card landing for an active Generated or Edited
 card. Its own prompt and quality

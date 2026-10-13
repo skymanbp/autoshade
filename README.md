@@ -288,7 +288,7 @@ are in [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-adv
   a faithfulness scaffold (`input_fidelity` is silently dropped by
   gpt-image-2), measures the result with the same `D` and can spend one
   bounded retry; every paid generation lands as a new ✨ card except a GUI
-  fill, which lands as a layer you can switch off; `heal` only
+  fill or AI edit, which lands as a layer you can switch off; `heal` only
   copies, shifts and averages existing pixels; Lightroom spot removal is
   re-solved from the photograph's own pixels with the synthesised areas
   named; an HDR-mode edit renders as Lightroom's own SDR rendition.
@@ -752,7 +752,7 @@ cannot end a batch.
   embeddings run on the machine; pixels leave it only for an AI operation you
   ask for.
 - **Generated pixels are labelled** — reimagine, GUI adjust and denoise land
-  on their own cards, a GUI fill as a layer you can hide, retouch and heal only
+  on their own cards, a GUI fill or AI edit as a layer you can hide, retouch and heal only
   when asked; known weaknesses are honesty markers, not caption polish.
 
 ### Implementation
