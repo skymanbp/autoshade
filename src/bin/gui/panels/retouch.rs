@@ -258,10 +258,15 @@ impl AutoShadeApp {
         // (`generative::fill_prompt`), so an empty box is a verb, not an
         // error — the mask already says what should go.
         let prompt = self.fill_prompt.trim().to_string();
-        let Some(mask_png) = self.export_area_png(BrushOwner::Fill) else {
-            self.status = tr(lang, "paint the area to remove or fill first (🖌 Paint area, in this fold)").into();
+        // No painted area: the words alone say what to change, and the model
+        // finds where (`generative::auto_fill_onto`; user request 2026-10-12,
+        // 「跟原先的涂抹后ai生成一个道理，只不过省去了涂抹这一步骤」). Only an empty
+        // box over an empty canvas has nothing to go on.
+        let mask_png = self.export_area_png(BrushOwner::Fill);
+        if mask_png.is_none() && prompt.is_empty() {
+            self.status = tr(lang, "write what to change (e.g. remove the wires on the left), or paint the area to remove (🖌 Paint area, in this fold)").into();
             return;
-        };
+        }
         let Some(out) = unique_out(&src, "fill") else {
             self.status = tr(lang, "over 999 retouch masters for this photo — clean up ./out first").into();
             return;
@@ -295,23 +300,36 @@ impl AutoShadeApp {
                 let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
                 let res = (|| -> RetouchDone {
                     let cfg = autoshade::config::Config::load();
-                    let mask_tmp = gui_tmp_png("fill");
-                    std::fs::write(&mask_tmp, &mask_png)?;
-                    let r = autoshade::generative::retouch_onto(
-                        &cfg,
-                        &src,
-                        || developed_card_pixels(&path, &recipe, full_res),
-                        "this card's look",
-                        &autoshade::generative::FillJob {
-                            mask_path: &mask_tmp,
-                            prompt: &prompt,
-                            quality: &quality,
-                            out: &out,
-                            layer: true,
-                        },
-                    );
-                    let _ = std::fs::remove_file(&mask_tmp);
-                    r?;
+                    let base = || developed_card_pixels(&path, &recipe, full_res);
+                    let note = if let Some(mask_png) = mask_png {
+                        let mask_tmp = gui_tmp_png("fill");
+                        std::fs::write(&mask_tmp, &mask_png)?;
+                        let r = autoshade::generative::retouch_onto(
+                            &cfg,
+                            &src,
+                            base,
+                            "this card's look",
+                            &autoshade::generative::FillJob {
+                                mask_path: &mask_tmp,
+                                prompt: &prompt,
+                                quality: &quality,
+                                out: &out,
+                                layer: true,
+                            },
+                        );
+                        let _ = std::fs::remove_file(&mask_tmp);
+                        r?;
+                        RetouchNote::Filled(out.clone())
+                    } else {
+                        let report = autoshade::generative::auto_fill_onto(
+                            &cfg,
+                            &src,
+                            base,
+                            "this card's look",
+                            &autoshade::generative::AutoFillJob { prompt: &prompt, quality: &quality, out: &out },
+                        )?;
+                        RetouchNote::FoundFilled { out: out.clone(), coverage: report.coverage }
+                    };
                     // baked-by-construction: the ./out master this job just wrote.
                     let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
                     // Layer (2026-10-01, user decision): the patch joins this
@@ -319,7 +337,7 @@ impl AutoShadeApp {
                     // landed as a new ✨ card. FACTS, not prose (L12#4): the
                     // landing renders these with the language live when the
                     // result lands.
-                    Ok((img, RetouchNote::Filled(out.clone()), out, RetouchKind::Layer))
+                    Ok((img, note, out, RetouchKind::Layer))
                 })();
                 if res.is_err() {
                     release_empty_claim(&out_claim);
@@ -1080,18 +1098,18 @@ impl AutoShadeApp {
         // folds, and that the AI panel's Adjust fold read without a control of
         // its own, is gone.
         ui.add_space(SPACE_XS);
-        egui::CollapsingHeader::new(tr(lang, "Generative Fill"))
+        card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Generative Fill"))
             .id_salt("sec_fill")
             .default_open(false)
             // Test-only force-open: this fold hides a width-pinned prompt row
             // (see util::fold_open_in_tests).
             .open(fold_open_in_tests())
-            .show(ui, |ui| {
+            , |ui| {
                 // #14a: was `desired_width(f32::INFINITY)`.
                 let _field = prompt_field(
                     ui,
                     &mut self.fill_prompt,
-                    tr(lang, "what belongs there (e.g. extend the sky) — leave empty to remove what you painted"),
+                    tr(lang, "what to change — e.g. remove the wires on the left, make the sky bluer; or paint an area (empty then removes it)"),
                 );
                 #[cfg(test)]
                 {
@@ -1122,15 +1140,28 @@ impl AutoShadeApp {
                     ui.add_enabled(src_is_raw, egui::Checkbox::new(&mut self.fill_fullres, tr(lang, "Full-res fill")))
                         .on_hover_text(tr(lang, "Composite onto the full-sensor develop (slow, RAW only)"));
                 });
-                if primary_row(ui, !self.busy, tr(lang, "Remove / Fill"))
-                    .on_hover_text(tr(lang, "Regenerate ONLY the painted area — from your prompt, or as a removal when the prompt is empty (gpt-image API call — costs per image); the model sees this card's look, and the result is a layer over this card's develop — the card's own pixels stay as they are"))
-                    .clicked()
-                {
+                // One verb, two ways in (2026-10-12): a painted area is
+                // regenerated as before; with none, the words alone go to the
+                // model and it chooses where (`start_fill`).
+                let painted = self.area_painted(BrushOwner::Fill);
+                let (verb, hint) = if painted {
+                    (
+                        tr(lang, "Remove / Fill"),
+                        tr(lang, "Regenerate ONLY the painted area — from your prompt, or as a removal when the prompt is empty (gpt-image API call — costs per image); the model sees this card's look, and the result is a layer over this card's develop — the card's own pixels stay as they are"),
+                    )
+                } else {
+                    (
+                        tr(lang, "✨ AI edit"),
+                        tr(lang, "Send this card's picture with your words and no painted area: the model decides where to change it, and only what it changed lands as a layer over this card (gpt-image API call — costs per image)"),
+                    )
+                };
+                let ready = !self.busy && (painted || !self.fill_prompt.trim().is_empty());
+                if primary_row(ui, ready, verb).on_hover_text(hint).clicked() {
                     self.start_fill();
                 }
                 ui.label(
                     egui::RichText::new(tr(lang,
-                        "Paint the area, then Remove/Fill. An empty prompt removes what you painted (the surroundings continue into it); write what belongs there to fill it with something else. The model sees this card's look and the result lands as a layer over this card's develop — the card's own pixels never change; hide or remove a layer below, and it is saved with the card. A layer keeps the look it was made with: after a large slider change, fill again. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
+                        "Write what to change and press ✨ AI edit — the model finds where. Or paint an area first: an empty prompt then removes it, words fill it. Either way the result is a layer over this card (its own pixels never change), levelled to the colours around it; a layer keeps the look it was made with, so after a large slider change, run it again. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
                     ))
                     .weak()
                     .small(),
@@ -1138,10 +1169,10 @@ impl AutoShadeApp {
                 self.layer_rows(ui);
             });
 
-        egui::CollapsingHeader::new(tr(lang, "Heal (pixel)"))
+        card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Heal (pixel)"))
             .id_salt("sec_heal")
             .default_open(false)
-            .show(ui, |ui| {
+            , |ui| {
                 self.brush_row(ui, BrushOwner::Heal);
                 // R38: the two heal verbs share one aligned row and the
                 // full-res switch sits under them — three free-width controls
@@ -1183,10 +1214,10 @@ impl AutoShadeApp {
                 );
             });
 
-        egui::CollapsingHeader::new(tr(lang, "Clone Stamp"))
+        card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Clone Stamp"))
             .id_salt("sec_clone")
             .default_open(false)
-            .show(ui, |ui| {
+            , |ui| {
                 // The stamp's arm toggle IS its brush toggle (Alt+click samples
                 // a source, plain drags paint the Stamp's own area), so the
                 // clear verb sits beside it, the radius follows while armed,

@@ -454,8 +454,16 @@ removes it), and the result lands as a **layer** over that card's develop: the
 card, its crop and its ▣ negative stay as they were, and the fold lists the
 card's layers under its button, each with 👁 to hide it, ✕ to remove it and an
 opacity slider. Layers are saved with the card (Ctrl+S) and drawn on every
-export; Ctrl+Z takes the last one off. A layer keeps the look it was made
-with, so after a large slider change, fill again. Lightroom has no place for a
+export; Ctrl+Z takes the last one off. The model redraws the whole frame a
+little brighter or darker than it was sent, so before the regenerated area is
+pasted it is levelled by how far the model moved the parts it was meant to
+leave alone, and its edge meets the colours around it. With nothing painted,
+the same fold edits from words alone: write what to change ("remove the wires
+on the left", "make the sky bluer") and press **✨ AI edit** — the model is
+sent the card's picture with no mask, and only the area its answer changed
+lands as the layer (the status line says what share of the picture that is).
+A layer keeps the look it was made with, so after a large slider change,
+fill again. Lightroom has no place for a
 layer: the `.xmp` carries the rest of the develop and the save line says the
 layers stayed behind. Pasting a develop onto another photo leaves the layers
 out (they are this photo's pixels), and turning the photo is off while a card

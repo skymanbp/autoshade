@@ -833,10 +833,10 @@ impl AutoShadeApp {
         // & pixel → versions & export. Captions only: no section moved, no
         // fence rhythm changed.
         group_caption(ui, tr(lang, "Tone & Colour"));
-        egui::CollapsingHeader::new(section_title(tr(lang, "Tone & WB"), tone_active))
+        card_fold(ui, egui::CollapsingHeader::new(section_title(tr(lang, "Tone & WB"), tone_active))
             .id_salt("sec_tone")
             .default_open(true)
-            .show(ui, |ui| {
+            , |ui| {
                 // R38: wrapped, so the eyedropper drops under the checkbox when
                 // the row is short — the pair is 351 px at the 320 px default,
                 // and a plain `horizontal` never wraps: it widened the
@@ -933,10 +933,10 @@ impl AutoShadeApp {
         // interrupted by sharpening. add_space fences each header so the ten
         // sections read as groups, not one undivided list.
         ui.add_space(SPACE_MD);
-        egui::CollapsingHeader::new(section_title(tr(lang, "Presence"), presence_active))
+        card_fold(ui, egui::CollapsingHeader::new(section_title(tr(lang, "Presence"), presence_active))
             .id_salt("sec_presence")
             .default_open(true)
-            .show(ui, |ui| {
+            , |ui| {
                 let r = &mut self.recipe;
                 // Lightroom's Basic-panel order inside Presence is Texture →
                 // Clarity → Dehaze, and the engine runs them in that order too
@@ -961,10 +961,10 @@ impl AutoShadeApp {
         ui.add_space(SPACE_MD);
         // --- 曲线: master + RGB tone curves (engine + XMP already apply them,
         // this is purely the editing surface — Lightroom's panel order) --------
-        egui::CollapsingHeader::new(section_title(tr(lang, "Curves"), curves_active))
+        card_fold(ui, egui::CollapsingHeader::new(section_title(tr(lang, "Curves"), curves_active))
             .id_salt("sec_curves")
             .default_open(false)
-            .show(ui, |ui| {
+            , |ui| {
                 changed |= self.curve_editor(ui);
                 changed |= Self::parametric_curve(ui, lang, &mut self.recipe);
             });
@@ -1020,10 +1020,10 @@ impl AutoShadeApp {
         let lang = self.lang;
         let mut changed = false;
         ui.add_space(SPACE_MD);
-        egui::CollapsingHeader::new(section_title(tr(lang, "Color Mixer (HSL)"), hsl_active))
+        card_fold(ui, egui::CollapsingHeader::new(section_title(tr(lang, "Color Mixer (HSL)"), hsl_active))
             .id_salt("sec_hsl")
             .default_open(false)
-            .show(ui, |ui| {
+            , |ui| {
                 changed |= ui
                     .checkbox(&mut self.recipe.convert_to_grayscale, tr(lang, "Black & White"))
                     .changed();
@@ -1208,10 +1208,10 @@ impl AutoShadeApp {
         let lang = self.lang;
         let mut changed = false;
         ui.add_space(SPACE_MD);
-        egui::CollapsingHeader::new(section_title(tr(lang, "Calibration"), calibration_active))
+        card_fold(ui, egui::CollapsingHeader::new(section_title(tr(lang, "Calibration"), calibration_active))
             .id_salt("sec_calibration")
             .default_open(false)
-            .show(ui, |ui| {
+            , |ui| {
                 let r = &mut self.recipe;
                 // Lightroom's own order and grouping: the shadows tint first,
                 // then a hue + saturation pair per primary.
@@ -1252,10 +1252,10 @@ impl AutoShadeApp {
         let lang = self.lang;
         let mut changed = false;
         ui.add_space(SPACE_MD);
-        egui::CollapsingHeader::new(section_title(tr(lang, "HDR & SDR"), hdr_active))
+        card_fold(ui, egui::CollapsingHeader::new(section_title(tr(lang, "HDR & SDR"), hdr_active))
             .id_salt("sec_hdr")
             .default_open(false)
-            .show(ui, |ui| {
+            , |ui| {
                 if ui
                     .checkbox(&mut self.recipe.hdr_edit, tr(lang, "HDR edit mode"))
                     .on_hover_text(tr(
@@ -1305,10 +1305,10 @@ impl AutoShadeApp {
         let mut changed = false;
 
         ui.add_space(SPACE_MD);
-        egui::CollapsingHeader::new(section_title(tr(lang, "Color Grading"), grade_active))
+        card_fold(ui, egui::CollapsingHeader::new(section_title(tr(lang, "Color Grading"), grade_active))
             .id_salt("sec_grade")
             .default_open(false)
-            .show(ui, |ui| {
+            , |ui| {
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_id_salt("grade_region")
                         .selected_text(tr(lang, GRADE_REGIONS[self.grade_region]))
@@ -1369,10 +1369,10 @@ impl AutoShadeApp {
         // Group boundary: the group head's own air and gold caption (2026-10-01:
         // the full-width hairline that used to fence each group is gone).
         group_caption(ui, tr(lang, "Detail & Lens")); // #14b, group 2 of 4 here
-        egui::CollapsingHeader::new(section_title(tr(lang, "Detail"), detail_active))
+        card_fold(ui, egui::CollapsingHeader::new(section_title(tr(lang, "Detail"), detail_active))
             .id_salt("sec_detail")
             .default_open(false)
-            .show(ui, |ui| {
+            , |ui| {
                 {
                     // All eleven controls render since v1.5.0
                     // (`render/detail.rs`), so none carries the "not rendered
@@ -1480,10 +1480,10 @@ impl AutoShadeApp {
         // only state this fold owns that outlives the click.
         let has = self.variants.iter().any(|v| v.kind == VariantKind::Stacked);
         ui.add_space(SPACE_MD);
-        egui::CollapsingHeader::new(section_title(tr(lang, "Stack"), has))
+        card_fold(ui, egui::CollapsingHeader::new(section_title(tr(lang, "Stack"), has))
             .id_salt("sec_stack")
             .default_open(false)
-            .show(ui, |ui| {
+            , |ui| {
                 ui.label(
                     egui::RichText::new(tr(
                         lang,
@@ -1539,10 +1539,10 @@ impl AutoShadeApp {
         let mut changed = false;
 
         ui.add_space(SPACE_MD);
-        egui::CollapsingHeader::new(section_title(tr(lang, "Effects"), effects_active))
+        card_fold(ui, egui::CollapsingHeader::new(section_title(tr(lang, "Effects"), effects_active))
             .id_salt("sec_effects")
             .default_open(false)
-            .show(ui, |ui| {
+            , |ui| {
                 let r = &mut self.recipe;
                 ui.label(egui::RichText::new(tr(lang, "Post-crop vignetting")).weak().small());
                 changed |= Self::slider(ui, lang, tr(lang, "Vignette amount"), &mut r.post_crop_vignette, -100.0, 100.0, 0.0);
@@ -1586,10 +1586,10 @@ impl AutoShadeApp {
             .filter(|f| f.name == "lens" || f.name == "lens_effects")
             .any(|f| family_is_active(f, &self.recipe))
             || !self.recipe.lens_profile.is_as_opened();
-        egui::CollapsingHeader::new(section_title(tr(lang, "Lens"), lens_active))
+        card_fold(ui, egui::CollapsingHeader::new(section_title(tr(lang, "Lens"), lens_active))
             .id_salt("sec_lens")
             .default_open(false)
-            .show(ui, |ui| {
+            , |ui| {
                 // In-camera profile corrections (lensmeta): the manufacturer's
                 // exact per-shot data read from the RAW itself — no lens
                 // database. Toggling a component ON whose data a legacy
@@ -1762,10 +1762,10 @@ impl AutoShadeApp {
         let lang = self.lang;
         let mut changed = false;
         ui.add_space(SPACE_MD);
-        egui::CollapsingHeader::new(section_title(tr(lang, "Transform"), transform_active))
+        card_fold(ui, egui::CollapsingHeader::new(section_title(tr(lang, "Transform"), transform_active))
             .id_salt("sec_transform")
             .default_open(false)
-            .show(ui, |ui| {
+            , |ui| {
                 // Upright is a MODE, so a dropdown and not a slider — and the
                 // one control in this panel whose answer may come from either
                 // side: Lightroom publishes the matrix its own solver found
@@ -1946,10 +1946,10 @@ impl AutoShadeApp {
             .iter()
             .filter(|f| f.name == "framing")
             .any(|f| family_is_active(f, &self.recipe));
-        egui::CollapsingHeader::new(section_title(tr(lang, "Crop"), crop_active))
+        card_fold(ui, egui::CollapsingHeader::new(section_title(tr(lang, "Crop"), crop_active))
             .id_salt("sec_crop")
             .default_open(false)
-            .show(ui, |ui| {
+            , |ui| {
                 // The two verbs share the row as equal cells and the aspect
                 // preset sits under them on a captioned row of its own
                 // (2026-09-27): a 70 px combo between two own-width verbs was
@@ -2046,13 +2046,13 @@ impl AutoShadeApp {
         // --- 局部调整: manual masks — the SAME recipe.masks the AI writes -----
         let n_masks = self.recipe.masks.len();
         let n_masks_s = n_masks.to_string();
-        egui::CollapsingHeader::new(section_title(
+        card_fold(ui, egui::CollapsingHeader::new(section_title(
             &trf(lang, "Local Masks ({n})", &[("n", &n_masks_s)]),
             self.masks_section_active(),
         ))
         .id_salt("sec_local")
         .default_open(false)
-        .show(ui, |ui| {
+        , |ui| {
             // R38: three equal cells — three free-width toggles in a
             // non-wrapping row overran the default panel width in English.
             ui.horizontal(|ui| {
@@ -3155,10 +3155,10 @@ impl AutoShadeApp {
         // Deferred like the strip's, and dispatched through the same owner
         // after the section's closures release `self` (R24-5).
         let mut act: Option<VariantAction> = None;
-        egui::CollapsingHeader::new(section_title(&trf(lang, "Versions ({n})", &[("n", &n_ver_s)]), n_ver > 0))
+        card_fold(ui, egui::CollapsingHeader::new(section_title(&trf(lang, "Versions ({n})", &[("n", &n_ver_s)]), n_ver > 0))
             .id_salt("sec_versions")
             .default_open(false)
-            .show(ui, |ui| {
+            , |ui| {
                 // Clearing the list on open (see `open_path`) already stops a
                 // STALE row from acting on the incoming photo. This is the
                 // second half: while a photo is still decoding, "Save as
@@ -3519,10 +3519,10 @@ impl AutoShadeApp {
         ui.add_space(SPACE_MD);
         // Delivery preferences have no per-photo neutral, so this header has
         // no adjustment dot. The toolbar's Export hover carries the summary.
-        egui::CollapsingHeader::new(tr(lang, "Export"))
+        card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Export"))
             .id_salt("sec_export")
             .default_open(false)
-            .show(ui, |ui| {
+            , |ui| {
                 // WHERE first (R22-7): the delivery target is now a setting
                 // rather than a property of which toolbar button was pressed,
                 // and it is the one whose wrong value sends the file somewhere

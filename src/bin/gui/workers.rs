@@ -2399,6 +2399,11 @@ impl AutoShadeApp {
                 "filled → {path} (a layer over this card's develop — Ctrl+Z takes it off; the card's own pixels are untouched)",
                 &[("path", &p.display().to_string())],
             ),
+            RetouchNote::FoundFilled { out, coverage } => trf(
+                lang,
+                "changed {pct}% of the picture → {path} (a layer over this card's develop — Ctrl+Z takes it off; the card's own pixels are untouched)",
+                &[("pct", &format!("{:.0}", coverage * 100.0)), ("path", &out.display().to_string())],
+            ),
             RetouchNote::Adjusted { out, region, divergence } => {
                 let note = if *region {
                     tr(lang, "adjusted → new ✨ card (painted area only)").to_string()

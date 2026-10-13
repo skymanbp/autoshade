@@ -1347,30 +1347,23 @@ impl AutoShadeApp {
 
     /// One update() phase — body extracted verbatim from the eframe
     /// update loop (round-12 decomposition).
-    fn upd_strips_and_side_panels(&mut self, ctx: &egui::Context) {
-        // Variant strip — sits directly above the status bar (registered after
-        // it so it stacks on top), only when a photo is open. The selector for
-        // 原片 / AI 生成 / 反推 renditions.
-        if self.src_path.is_some() {
-            egui::TopBottomPanel::bottom("variants")
-                // At the old 96 the cards' slack all pooled below the labels
-                // — height and its derivation live on VARIANT_STRIP_H.
-                .exact_height(Self::VARIANT_STRIP_H)
-                .show(ctx, |ui| {
-                    self.variant_strip(ui);
-                });
-        }
-
-        // Left-most: the library gallery (folder browse + thumbnails), then
-        // the develop controls. Tab collapses both for an edge-to-edge canvas
-        // (LR's panel-hiding grammar); all state lives on, only layout skips.
-        if !self.panels_hidden {
-            egui::SidePanel::left("gallery").default_width(240.0).show(ctx, |ui| {
-                self.gallery_panel(ui);
-            });
-
-            let controls = egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
+    /// The controls panel's one scroll column: the AI, Develop and Retouch
+    /// panels with a photo open, the empty state without.
+    ///
+    /// The column keeps a gutter on its right as wide as the scrollbar and a
+    /// breath more (user report 2026-10-12: the Generative Fill hint ran under
+    /// the bar). egui 0.29's bar FLOATS over the content and reserves no width
+    /// of its own, so every row used to fill the panel to its last pixel. The
+    /// gutter is a margin, not the scroll style's `floating_allocated_width`:
+    /// that one reserves only while the bar shows, and a side panel sizes
+    /// itself to its content, so the panel shrank a few pixels on every frame
+    /// the bar faded in.
+    pub(crate) fn controls_column(&mut self, ui: &mut egui::Ui) {
+        let gutter = ui.spacing().scroll.bar_width + SPACE_SM;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::Frame::none()
+                .inner_margin(egui::Margin { right: gutter, ..Default::default() })
+                .show(ui, |ui| {
                     if self.src_path.is_some() {
                         // The AI area is FIRST (R22 #4): one first-level
                         // section holding every AI develop verb — analysis,
@@ -1413,7 +1406,34 @@ impl AutoShadeApp {
                         });
                     }
                 });
+        });
+    }
+
+    fn upd_strips_and_side_panels(&mut self, ctx: &egui::Context) {
+        // Variant strip — sits directly above the status bar (registered after
+        // it so it stacks on top), only when a photo is open. The selector for
+        // 原片 / AI 生成 / 反推 renditions.
+        if self.src_path.is_some() {
+            egui::TopBottomPanel::bottom("variants")
+                // At the old 96 the cards' slack all pooled below the labels
+                // — height and its derivation live on VARIANT_STRIP_H.
+                .exact_height(Self::VARIANT_STRIP_H)
+                .show(ctx, |ui| {
+                    self.variant_strip(ui);
+                });
+        }
+
+        // Left-most: the library gallery (folder browse + thumbnails), then
+        // the develop controls. Tab collapses both for an edge-to-edge canvas
+        // (LR's panel-hiding grammar); all state lives on, only layout skips.
+        if !self.panels_hidden {
+            egui::SidePanel::left("gallery").default_width(240.0).show(ctx, |ui| {
+                self.gallery_panel(ui);
             });
+
+            let controls = egui::SidePanel::left("controls")
+                .default_width(320.0)
+                .show(ctx, |ui| self.controls_column(ui));
             // ↑/↓ routing (see upd_shortcuts): over this panel the keys
             // belong to a hovered slider; anywhere else they walk the
             // library. One frame stale — panels draw after the shortcuts.

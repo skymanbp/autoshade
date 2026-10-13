@@ -488,6 +488,9 @@ pub(crate) enum RetouchNote {
     /// Generative fill landed at this ./out artifact — as a NEW ✨ card since
     /// 2026-09-15 (the model is shown the card's picture; see `start_fill`).
     Filled(PathBuf),
+    /// A fill with no painted area: the model chose where, and the layer
+    /// covers this share of the frame (`generative::auto_fill_onto`).
+    FoundFilled { out: PathBuf, coverage: f32 },
     /// An adjust of a generated card: region fills have no whole-frame D.
     Adjusted { out: PathBuf, region: bool, divergence: Option<f32> },
     /// Heal: spot count + artifact + the heal report's rationale split per
@@ -536,7 +539,10 @@ impl RetouchNote {
             RetouchNote::Adjusted { .. } => Some(BrushOwner::Adjust),
             RetouchNote::Healed { .. } => Some(BrushOwner::Heal),
             RetouchNote::Cloned { .. } => Some(BrushOwner::Stamp),
-            RetouchNote::Stacked { .. } | RetouchNote::Denoised { .. } | RetouchNote::Reimagined { .. } => None,
+            RetouchNote::FoundFilled { .. }
+            | RetouchNote::Stacked { .. }
+            | RetouchNote::Denoised { .. }
+            | RetouchNote::Reimagined { .. } => None,
         }
     }
 }

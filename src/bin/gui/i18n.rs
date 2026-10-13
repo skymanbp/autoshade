@@ -432,8 +432,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Wipe this tool's painted area (the other tools' areas stay)",
         "清空这个工具的涂抹区域（其他工具的不动）"),
     ("Generative Fill", "生成填充 · Generative Fill"),
-    ("what belongs there (e.g. extend the sky) — leave empty to remove what you painted",
-        "那里该有什么（例如：延展天空）——留空即移除涂抹的内容"),
+    ("what to change — e.g. remove the wires on the left, make the sky bluer; or paint an area (empty then removes it)",
+        "要改什么——例如：去掉左侧的电线、让天空更蓝；或涂抹区域（留空即移除涂抹的内容）"),
     // R22 #16: one 「Full-res」 key served FOUR checkboxes in three panels (fill
     // here, heal + clone below, denoise in Develop · Detail) with three different
     // gates — RAW-only for fill, both source types for the rest. Each label now
@@ -452,8 +452,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("medium", "中"),
     ("low", "低"),
     ("Remove / Fill", "移除 / 填充"),
-    ("Paint the area, then Remove/Fill. An empty prompt removes what you painted (the surroundings continue into it); write what belongs there to fill it with something else. The model sees this card's look and the result lands as a layer over this card's develop — the card's own pixels never change; hide or remove a layer below, and it is saved with the card. A layer keeps the look it was made with: after a large slider change, fill again. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
-        "涂抹区域，再点 Remove/Fill。提示词留空即移除涂抹的内容（用周围延续填上）；写下那里该有什么则填入别的内容。模型收到的是本卡的外观，结果作为图层盖在本卡的调色之上——本卡自己的像素不变；可在下方隐藏或删除图层，图层随本卡保存。图层保持生成时的外观：滑杆改动较大后请重新填充。需图像 API（OPENAI_API_KEY，或设置里的 OAuth 图像桥）。"),
+    ("✨ AI edit", "✨ AI 修改"),
+    ("Send this card's picture with your words and no painted area: the model decides where to change it, and only what it changed lands as a layer over this card (gpt-image API call — costs per image)",
+        "把本卡的画面和你的文字发给模型，不涂抹：由模型决定改动的位置，只有它改动的部分作为图层盖在本卡之上（gpt-image API 调用，按图计费）"),
+    ("Write what to change and press ✨ AI edit — the model finds where. Or paint an area first: an empty prompt then removes it, words fill it. Either way the result is a layer over this card (its own pixels never change), levelled to the colours around it; a layer keeps the look it was made with, so after a large slider change, run it again. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
+        "写下要改什么，点「✨ AI 修改」——由模型找位置；或先涂抹区域：提示词留空即移除，写字则填入。结果都作为图层盖在本卡之上（本卡像素不变），并按周围的颜色对齐；图层保持生成时的外观，滑杆改动较大后请重新生成。需图像 API（OPENAI_API_KEY，或设置里的 OAuth 图像桥）。"),
     ("Layers on this card", "本卡的图层"),
     ("{n} fill layer(s) not pasted — they are the source photo's own pixels", "{n} 个填充图层未粘贴——它们是源照片自己的像素"),
     ("Fill layer {n}", "填充图层 {n}"),
@@ -1444,10 +1447,13 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "蒙版已放置 — 在左侧「局部蒙版」里拉滑杆（当前全为 0，无可见效果）"),
 
     // ── Status bar · generative fill / heal / clone ──────────────────────────
-    ("paint the area to remove or fill first (🖌 Paint area, in this fold)", "先在本折叠区点「🖌 涂抹区域」，涂抹要移除/填充的区域"),
+    ("write what to change (e.g. remove the wires on the left), or paint the area to remove (🖌 Paint area, in this fold)",
+        "写下要改什么（例如：去掉左侧的电线），或在本折叠区点「🖌 涂抹区域」涂抹要移除的区域"),
     ("generative fill (full-res render)… (slow, minutes)", "生成填充（全分辨率渲染）…（慢，数分钟）"),
     ("generative fill via gpt-image… (high quality can run minutes — progress in the status bar; ✕ Cancel to stop)",
         "gpt-image 生成填充中…（高质量可能需要数分钟——进度见状态栏；✕ 取消可停止）"),
+    ("changed {pct}% of the picture → {path} (a layer over this card's develop — Ctrl+Z takes it off; the card's own pixels are untouched)",
+        "已改动画面的 {pct}% → {path}（作为图层盖在本卡调色之上——Ctrl+Z 可撤下；本卡自己的像素不动）"),
     ("filled → {path} (a layer over this card's develop — Ctrl+Z takes it off; the card's own pixels are untouched)",
         "已填充 → {path}（作为图层盖在本卡调色之上——Ctrl+Z 可撤下；本卡自己的像素不动）"),
     ("paint the spots first (🖌 Paint area, in this fold), then Heal area",

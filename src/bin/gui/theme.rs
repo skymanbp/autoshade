@@ -62,6 +62,13 @@ pub(crate) struct ThemeColors {
     /// The armed-tool hint line: ACCENT-family text on chrome, darkened on
     /// the light theme where the canvas blue fails AA at text size.
     pub(crate) armed_hint: egui::Color32,
+    /// An open fold's plate ([`crate::headings::card_fold`]): one step above
+    /// the panel fill, with a hairline a step above that.
+    pub(crate) card_fill: egui::Color32,
+    pub(crate) card_stroke: egui::Color32,
+    /// The hairline every framed widget (button, field, menu) wears at rest,
+    /// so a control has an edge on the plate instead of a flat grey slab.
+    pub(crate) widget_edge: egui::Color32,
 }
 
 pub(crate) const DARK_COLORS: ThemeColors = ThemeColors {
@@ -93,6 +100,9 @@ pub(crate) const DARK_COLORS: ThemeColors = ThemeColors {
         egui::Color32::from_rgb(90, 130, 240),
     ],
     armed_hint: ACCENT,
+    card_fill: egui::Color32::from_gray(33),
+    card_stroke: egui::Color32::from_gray(44),
+    widget_edge: egui::Color32::from_gray(72),
 };
 
 pub(crate) const LIGHT_COLORS: ThemeColors = ThemeColors {
@@ -122,6 +132,9 @@ pub(crate) const LIGHT_COLORS: ThemeColors = ThemeColors {
         egui::Color32::from_rgb(0x2b, 0x4f, 0xc0),
     ],
     armed_hint: egui::Color32::from_rgb(0x24, 0x56, 0xb0),
+    card_fill: egui::Color32::from_gray(253),
+    card_stroke: egui::Color32::from_gray(222),
+    widget_edge: egui::Color32::from_gray(196),
 };
 
 impl ThemePref {
@@ -401,6 +414,9 @@ pub(crate) const SPACE_LG: f32 = 12.0;
 pub(crate) const RADIUS_SM: f32 = 3.0;
 pub(crate) const RADIUS_MD: f32 = 6.0;
 pub(crate) const RADIUS_LG: f32 = 10.0;
+/// How far an open fold's plate reaches past its rows on each side
+/// ([`crate::headings::card_fold`]).
+pub(crate) const FOLD_CARD_PAD: f32 = 6.0;
 
 /// Width tokens (#14a). One readable width for every row-filling control:
 /// the panel keeps no max width, so the ceiling lives on the controls.
@@ -503,6 +519,13 @@ pub(crate) fn install_theme(ctx: &egui::Context, theme: ThemePref) {
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.button_padding = egui::vec2(10.0, 5.0);
     style.spacing.interact_size.y = 26.0;
+    // Controls get an edge at rest, and fields stop being black holes on the
+    // dark plate; a fold's plate replaces the indent hairline (`card_fold`).
+    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, c.widget_edge);
+    style.visuals.indent_has_left_vline = false;
+    if theme == ThemePref::Dark {
+        style.visuals.extreme_bg_color = egui::Color32::from_gray(20);
+    }
     // Type scale: headings one step DOWN from egui's shouty 18 so sections
     // group instead of competing; body/buttons half a step UP from 12.5 —
     // CJK at 12.5 px is where the "看着有点晕" complaint lives. Small stays
@@ -521,4 +544,10 @@ pub(crate) fn install_theme(ctx: &egui::Context, theme: ThemePref) {
         .text_styles
         .insert(TextStyle::Monospace, FontId::new(12.0, FontFamily::Monospace));
     ctx.set_style(style);
+}
+
+/// The theme a `Ui` is drawn in, read off egui's own dark/light switch —
+/// which `install_theme` pins to the app's choice.
+pub(crate) fn theme_of(ui: &egui::Ui) -> ThemePref {
+    if ui.visuals().dark_mode { ThemePref::Dark } else { ThemePref::Light }
 }

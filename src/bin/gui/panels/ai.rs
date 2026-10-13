@@ -213,7 +213,7 @@ impl AutoShadeApp {
     /// Default OPEN: it is the panel's first read.
     fn ai_analysis(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        egui::CollapsingHeader::new(tr(lang, "Analysis · paid API"))
+        card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Analysis · paid API"))
             .id_salt("sec_ai_analysis")
             .default_open(true)
             // Headless layout tests must see these rows — a test frame never
@@ -221,7 +221,7 @@ impl AutoShadeApp {
             // rule. Only `cfg(test)` forces it; a real run keeps the user's
             // own fold state.
             .open(fold_open_in_tests())
-            .show(ui, |ui| {
+            , |ui| {
             if let Some((d, reasons)) = &self.verdict {
                 // Accept reads calm; anything else (Revise/Reject)
                 // gets the warn colour so it can't be skimmed past.
@@ -489,14 +489,14 @@ impl AutoShadeApp {
         // build-side and read-side controls and only the second half is dead
         // at Style 0.
         let reads_a_library = self.style_strength > 0.0;
-        egui::CollapsingHeader::new(tr(lang, "Reference libraries · local"))
+        card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Reference libraries · local"))
             .id_salt("sec_ai_libraries")
             .default_open(false)
             // Headless layout tests must see these rows: a test frame never
             // clicks a header, and an unopened fold makes an assertion about
             // them silently vacuous instead of red.
             .open(fold_open_in_tests())
-            .show(ui, |ui| {
+            , |ui| {
                 if !reads_a_library {
                     // OUTSIDE the disabled scope below, deliberately: the one
                     // sentence that explains a greyed section must not itself
@@ -907,14 +907,14 @@ impl AutoShadeApp {
     fn ai_generate(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         ui.add_space(SPACE_XS);
-        egui::CollapsingHeader::new(tr(lang, "Reimagine (whole image) · paid API"))
+        card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Reimagine (whole image) · paid API"))
             .id_salt("sec_ai_reimagine")
             .default_open(false)
             // Headless layout tests must see this row: it carries the R19
             // width arithmetic, and a test frame never clicks a header. Only
             // `cfg(test)` forces it; a real run keeps the user's fold state.
             .open(fold_open_in_tests())
-            .show(ui, |ui| {
+            , |ui| {
                 // This entry's OWN style prompt, right next to its trigger
                 // (it used to silently borrow the Direction field at the top
                 // of the panel — a prompt and its button belong together).
@@ -1031,11 +1031,11 @@ impl AutoShadeApp {
     fn ai_adjust(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         ui.add_space(SPACE_XS);
-        egui::CollapsingHeader::new(tr(lang, "Adjust generated image · paid API"))
+        card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Adjust generated image · paid API"))
             .id_salt("sec_ai_adjust")
             .default_open(false)
             .open(fold_open_in_tests())
-            .show(ui, |ui| {
+            , |ui| {
                 let _field = prompt_field(
                     ui,
                     &mut self.adjust_prompt,
@@ -1095,7 +1095,7 @@ impl AutoShadeApp {
     fn ai_reverse_fit(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         ui.add_space(SPACE_XS);
-        egui::CollapsingHeader::new(tr(lang, "Reverse-fit · local; AI review is paid"))
+        card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Reverse-fit · local; AI review is paid"))
             .id_salt("sec_ai_reverse_fit")
             .default_open(true)
             // Same reason as the folds above: a headless frame never clicks a
@@ -1103,7 +1103,7 @@ impl AutoShadeApp {
             // `the_generate_button_stays_one_line_and_the_panel_stays_put`
             // exists to catch.
             .open(fold_open_in_tests())
-            .show(ui, |ui| {
+            , |ui| {
             let can_fit = self.fit_target().is_some() && self.source_preview.is_some();
             if !can_fit {
                 // An ✎ card is not a fit target (`fit_target`): the fit reads

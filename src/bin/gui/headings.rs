@@ -65,3 +65,38 @@ pub(crate) fn sub_caption(ui: &mut egui::Ui, title: &str) {
     ui.add_space(SPACE_MD);
     ui.label(egui::RichText::new(title).weak().small());
 }
+
+/// A fold drawn as a CARD while it is open (2026-10-12, user: 「UI 美观继续打磨，
+/// 现在的还是有点"原始"」): its title and body sit on one rounded, slightly
+/// raised plate that spans the column, so an open fold reads as one object
+/// instead of a run of indented rows hung off a hairline. A closed fold stays a
+/// single row. The plate is painted UNDER what the fold drew (a placeholder
+/// shape reserved before the header, filled in once the body's extent is
+/// known), so it changes no layout but the breath after an open card.
+pub(crate) fn card_fold<R>(
+    ui: &mut egui::Ui,
+    header: egui::CollapsingHeader,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::CollapsingResponse<R> {
+    let plate = ui.painter().add(egui::Shape::Noop);
+    let (left, right) = (ui.max_rect().left(), ui.max_rect().right());
+    let r = header.show(ui, body);
+    if let Some(b) = &r.body_response {
+        let c = theme_of(ui).colors();
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(left - FOLD_CARD_PAD, r.header_response.rect.top() - FOLD_CARD_PAD / 2.0),
+            egui::pos2(right + FOLD_CARD_PAD, b.rect.bottom() + FOLD_CARD_PAD),
+        );
+        ui.painter().set(
+            plate,
+            egui::Shape::Rect(egui::epaint::RectShape::new(
+                rect,
+                RADIUS_MD,
+                c.card_fill,
+                egui::Stroke::new(1.0, c.card_stroke),
+            )),
+        );
+        ui.add_space(FOLD_CARD_PAD + SPACE_XS);
+    }
+    r
+}

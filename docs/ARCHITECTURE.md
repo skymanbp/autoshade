@@ -1550,7 +1550,7 @@ image path and the API analysis path each need an OpenAI-compatible key.
 | M5 | Local web UI | `tiny_http` + vanilla JS (gallery, live before/after) | **done** |
 | V2 | AI denoise (high-ISO/astro) | two Python sidecars called from Rust → a non-blind **DRUNet** on the RAW sensor mosaic before demosaic (2026-09-15; the frame's own noise model, GAT + exact unbiased inverse), **SCUNet** on baked sources; the GUI lands the result as a ◈ Denoised negative card | **done** |
 | V2 | Baked-source mode (edit exported PNG/TIFF) | extension dispatch; develop runs on loaded pixels | **done** |
-| V2 | Generative reimagine / retouch / GUI adjust | OpenAI Images (`gpt-image-*`); reimagine composes a faithfulness scaffold onto the prompt under `high` (the `input_fidelity` parameter is negotiated away on gpt-image-2), measures the result's structural divergence D with the reverse-fit's own statistic (`fit::structure_divergence_for`, threshold `fit::DIVERGENCE_GLOBAL`), disclosures it, and offers a bounded opt-in retry that keeps the closer of two results; `retouch_onto` and `adjust_onto` share the private `edit_onto` request core, with a mask for region compositing or no mask for a whole-frame edit and its sent-input D | **done (experimental)** |
+| V2 | Generative reimagine / retouch / GUI adjust | OpenAI Images (`gpt-image-*`); reimagine composes a faithfulness scaffold onto the prompt under `high` (the `input_fidelity` parameter is negotiated away on gpt-image-2), measures the result's structural divergence D with the reverse-fit's own statistic (`fit::structure_divergence_for`, threshold `fit::DIVERGENCE_GLOBAL`), disclosures it, and offers a bounded opt-in retry that keeps the closer of two results; `retouch_onto`, `auto_fill_onto` and `adjust_onto` share the private `edit_onto` request core (`Keep::Painted` / `Found` / `Whole`): a painted mask or the area the answer changed is levelled onto the base and composited, a whole-frame edit keeps the answer and its sent-input D | **done (experimental)** |
 | V2 | Pixel retouch / heal (spot removal) | deterministic heal engine + vision spot-detect ([`src/retouch.rs`](../src/retouch.rs)) | **done (experimental)** |
 | V2 | Look matching / reverse-fit (`match`) | distribution-level solve for the recipe that reproduces a target rendition ([`src/fit.rs`](../src/fit.rs); zoned variant [`src/fit_zoned.rs`](../src/fit_zoned.rs), range layer [`src/fit_zoned/range.rs`](../src/fit_zoned/range.rs)) | **done** |
 | V2 | Cross-image correspondence (content-divergent pairs) | DIFT (SD 2.1) sidecar → 48×48 field of target coordinates + cyclic×smoothness confidences ([`src/correspond.rs`](../src/correspond.rs), [`python/correspond.py`](../python/correspond.py)); CLI `correspond` diagnostic; the reverse-fit consults it automatically on content-divergent pairs (the fit's own D gate, single-sourced) and FULL zone fits weight pairs by confidence + read shifted content at its corresponded position — share gates and Atmosphere zones keep pre-field semantics, and identity/zero fields are conservation-tested to change nothing | **done (7a instrument + 7b estimator wiring)** |
@@ -2890,7 +2890,23 @@ an unreadable one), best-effort in the preview. The catalogue row is
 `EngineCarrier` / `RenderedNotExported`, so the advisor never states it and
 the save line names it; `paste_payload` drops it from a foreign paste and
 `can_rotate` is off while any card holds one. Until then the fill landed as a
-new ✨ card, `RetouchKind::NewGenerated`. **Adjust generated image**
+new ✨ card, `RetouchKind::NewGenerated`. Since 2026-10-12 every composited
+answer is LEVELLED first: the model redraws the whole frame shifted from the
+one it was sent (+42 / +40 / +24 levels in R/G/B at a user's fill edge, the
+seam reported that day), so `level_field` takes the mean of sent − answer per
+cell over the texels the region keeps, fills the regenerated cells by
+`pull_push`, and `LevelField::apply` adds it to the model's pixels before
+`composite_in_place`. With no painted area the GUI's fill verb becomes
+**✨ AI edit**: `generative::auto_fill_onto` (`Keep::Found`) sends no mask, and
+`found_region` reads the changed area off the answer — the drift is one shift
+per channel (the median over the half of the cells that moved least) plus a
+smooth field learnt only from the cells it leaves unchanged, since a freer
+model (per-level tone curves) absorbed a real "make the sky bluer" as drift;
+seeds pass median + 8·MAD of the drift cells (floor 14 levels) AND 0.4 of the
+frame's strongest change, growth passes median + 4·MAD (floor 7), specks of
+≤ 2 cells drop, holes fill, one cell of growth — and that area is levelled and
+published as the same layer (on the real answers: the removed tree 2.7 % of
+the frame, the bluer sky 51 %). **Adjust generated image**
 (2026-09-20) keeps that new-card landing for an active Generated or Edited
 card. Its own prompt and quality
 live in `ai_adjust`, directly after `ai_generate`; `can_adjust` requires

@@ -497,9 +497,64 @@ pub fn retouch_onto(
     // Blank = remove, shared by the CLI, browser and GUI.
     let prompt = fill_prompt(job.prompt);
     edit_onto(cfg, base, base_note, &ImageEditJob {
-        mask_path: Some(job.mask_path), prompt: &prompt, quality: job.quality, out: job.out, layer: job.layer,
+        keep: Keep::Painted(job.mask_path), prompt: &prompt, quality: job.quality, out: job.out, layer: job.layer,
     })?;
     Ok(())
+}
+
+/// A fill whose area the MODEL chooses (user request 2026-10-12: 「跟原先的涂抹后ai生成一个道理，
+/// 只不过省去了涂抹这一步骤」): the words say what to change — "remove the tree on the
+/// left", "make the sky bluer" — and no mask is painted.
+pub struct AutoFillJob<'a> {
+    /// What to change; a blank instruction is refused (there is no painted
+    /// area to read "remove" off).
+    pub prompt: &'a str,
+    /// `low` / `medium` / `high` / `auto`.
+    pub quality: &'a str,
+    /// The claimed `./out` layer this edit publishes.
+    pub out: &'a Path,
+}
+
+/// What one [`auto_fill_onto`] found.
+#[derive(Debug)]
+pub struct AutoFillReport {
+    /// The share of the frame the model changed and the layer covers, 0..=1.
+    pub coverage: f32,
+}
+
+/// The wire prompt of an [`AutoFillJob`]: the user's instruction under a
+/// clause that keeps the rest of the photograph as it is, because everything
+/// the model changes beyond the instruction is read back as part of the edit.
+fn auto_fill_prompt(user: &str) -> String {
+    format!(
+        "Edit this photograph exactly as instructed and change nothing else: keep the framing, \
+         geometry, light, colours, grain and every detail the instruction does not concern \
+         exactly as they are.\nInstruction: {}",
+        user.trim()
+    )
+}
+
+/// The edit with no painted area: the whole picture goes to the model with
+/// no mask, and the area it CHANGED — found by comparing its answer with the
+/// picture it was sent ([`found_region`]) — is published as a layer, levelled
+/// onto its surroundings like a painted fill. Everything the model left alone
+/// stays the card's own develop.
+pub fn auto_fill_onto(
+    cfg: &Config,
+    source: &Path,
+    base: impl FnOnce() -> Result<DynamicImage>,
+    base_note: &str,
+    job: &AutoFillJob<'_>,
+) -> Result<AutoFillReport> {
+    pipeline::preflight_out(job.out, source)?;
+    if job.prompt.trim().is_empty() {
+        return Err(anyhow!("an edit without a painted area needs words saying what to change"));
+    }
+    let prompt = auto_fill_prompt(job.prompt);
+    let outcome = edit_onto(cfg, base, base_note, &ImageEditJob {
+        keep: Keep::Found, prompt: &prompt, quality: job.quality, out: job.out, layer: true,
+    })?;
+    Ok(AutoFillReport { coverage: outcome.coverage.context("an edit without a painted area found no area")? })
 }
 
 /// A prompt-only edit of the caller's whole picture, without a painted mask.
@@ -536,20 +591,39 @@ pub fn adjust_onto(
     if prompt.is_empty() {
         return Err(anyhow!("a whole-image adjust needs a non-blank prompt"));
     }
-    let divergence = edit_onto(cfg, base, base_note, &ImageEditJob {
-        mask_path: None, prompt, quality: job.quality, out: job.out, layer: false,
-    })?.context("whole-image adjust has no divergence reading")?;
-    Ok(AdjustReport { divergence })
+    let outcome = edit_onto(cfg, base, base_note, &ImageEditJob {
+        keep: Keep::Whole, prompt, quality: job.quality, out: job.out, layer: false,
+    })?;
+    Ok(AdjustReport { divergence: outcome.divergence.context("whole-image adjust has no divergence reading")? })
 }
 
-/// One shared request/size ladder and output path. Only the mask decides
-/// whether the answer is composited or kept whole; callers preflight first.
+/// Which of the model's pixels an edit keeps.
+#[derive(Clone, Copy)]
+enum Keep<'a> {
+    /// The painted area of this RGBA mask (transparent = regenerate); the
+    /// mask rides on the request.
+    Painted(&'a Path),
+    /// The area the model's answer changed ([`found_region`]); no mask is sent.
+    Found,
+    /// The whole returned frame.
+    Whole,
+}
+
+/// One shared request/size ladder and output path; `keep` decides what of
+/// the answer is published.
 struct ImageEditJob<'a> {
-    mask_path: Option<&'a Path>,
+    keep: Keep<'a>,
     prompt: &'a str,
     quality: &'a str,
     out: &'a Path,
     layer: bool,
+}
+
+/// What [`edit_onto`] measured: D for a whole frame, the found area's share
+/// for [`Keep::Found`].
+struct EditOutcome {
+    divergence: Option<f32>,
+    coverage: Option<f32>,
 }
 
 fn edit_onto(
@@ -557,8 +631,8 @@ fn edit_onto(
     base: impl FnOnce() -> Result<DynamicImage>,
     base_note: &str,
     job: &ImageEditJob<'_>,
-) -> Result<Option<f32>> {
-    let ImageEditJob { mask_path, prompt, quality, out, layer } = *job;
+) -> Result<EditOutcome> {
+    let ImageEditJob { keep, prompt, quality, out, layer } = *job;
     // A17: the LOCAL full-resolution phase, one at a time process-wide
     // (`crate::full_res_slot`). It is released explicitly before the model call
     // below and re-entered for the composite, because those are the two phases
@@ -577,10 +651,13 @@ fn edit_onto(
     // image from THIS base so the generated pixels match its look (no seam shift).
     let small = DynamicImage::ImageRgb8(base.resize_exact(sw, sh, FilterType::Lanczos3).to_rgb8());
     let png = encode_png(&small)?;
-    let mask_img = mask_path.map(|path| {
-        crate::render::open_mask_bounded(path)
-            .with_context(|| format!("open mask {}", path.display()))
-    }).transpose()?;
+    drop(small);
+    let mask_img = match keep {
+        Keep::Painted(path) => Some(
+            crate::render::open_mask_bounded(path).with_context(|| format!("open mask {}", path.display()))?,
+        ),
+        Keep::Found | Keep::Whole => None,
+    };
     let mask_at = |w, h| {
         mask_img.as_ref().map(|m| encode_png(&m.resize_exact(w, h, FilterType::Nearest))).transpose()
     };
@@ -616,16 +693,19 @@ fn edit_onto(
     // A layer pastes onto a TRANSPARENT frame (`FillJob::layer`): the
     // premultiplied paste below then leaves exactly the generated pixels
     // with the feathered weight as alpha, and the base is not kept at all.
-    let composite = mask_img
-        .as_ref()
-        .map(|_| if layer { RgbaImage::new(bw, bh) } else { base.to_rgba8() });
+    let composite = (!matches!(keep, Keep::Whole))
+        .then(|| if layer { RgbaImage::new(bw, bh) } else { base.to_rgba8() });
     drop(base);
     // Out of the full-resolution section: what survives across the model call
     // is the ~240 MB composite (the A7 staging above), and waiting on the
     // network is not what the slot exists to serialise.
     drop(heavy);
 
-    let (verb, mode) = if mask_img.is_some() { ("fill", "composite") } else { ("adjust", "whole image") };
+    let (verb, mode) = match keep {
+        Keep::Painted(_) => ("fill", "composite"),
+        Keep::Found => ("edit", "changed area"),
+        Keep::Whole => ("adjust", "whole image"),
+    };
     println!(
         "⚠ EXPERIMENTAL generative {verb} via {} ({}, quality={quality}, base={bw}x{bh} {}; {mode})",
         cfg.openai_image_model,
@@ -654,6 +734,12 @@ fn edit_onto(
         // — at 61 MP it is real work whose result would be discarded anyway.
         return Err(anyhow!("cancelled by user"));
     }
+    // The input actually sent, and its mask (the enum fallback's when the
+    // negotiation fell back) — what the model's answer is measured against.
+    let (sent_png, sent_mask) = match &fallback {
+        Some((fpng, fmask)) if result.requested != primary_size => (fpng, fmask.as_ref()),
+        _ => (&png, mask_png.as_ref()),
+    };
 
     // Composite the regenerated region back onto the base. Upscale the generative
     // tile to base dimensions; the user's mask (alpha=0 = regenerate) becomes the
@@ -678,74 +764,96 @@ fn edit_onto(
     // upscale and the weight plane are ~241 MB each at 61 MP, and this is the
     // phase the slot was scoped to.
     let _heavy = crate::full_res_slot();
-    let divergence = if mask_img.is_none() {
-        let sent = if result.requested != primary_size {
-            fallback.as_ref().map_or(&png, |fb| &fb.0)
-        } else {
-            &png
-        };
-        Some(generation_divergence(sent, &result.bytes)?.d)
-    } else {
-        None
+    let answer = image::load_from_memory(&result.bytes).context("decode generative result")?;
+    let mut outcome = EditOutcome { divergence: None, coverage: None };
+    let Some(mut composite) = composite else {
+        outcome.divergence = Some(generation_divergence(sent_png, &result.bytes)?.d);
+        // No composite and no mask: keep the WHOLE returned frame, at the
+        // base's dimensions, using the fill's Lanczos3 filter and RGBA8 writer.
+        let whole = answer.resize_exact(bw, bh, FilterType::Lanczos3).to_rgba8();
+        publish_master(&whole, out)?;
+        println!("generative {verb} -> {} ({bw}x{bh}, {mode})", out.display());
+        return Ok(outcome);
     };
-    let generated = image::load_from_memory(&result.bytes)
-        .context("decode generative result")?
-        .resize_exact(bw, bh, FilterType::Lanczos3);
+
+    // The model never answers ONLY inside the area: it redraws the whole
+    // frame, and the frame it draws is shifted from the one it was sent —
+    // measured on a user's fill (2026-10-12) at +42 / +40 / +24 levels in
+    // R/G/B right at the feathered edge, which is the seam the user saw. The
+    // pixels it was meant to leave alone say by how much, so the kept area is
+    // levelled by that shift before it is pasted ([`level_field`]), and the
+    // area a maskless edit changed is read off the same comparison.
+    let sent = image::load_from_memory(sent_png).context("decode the sent input")?.to_rgb8();
+    let (tw, th) = sent.dimensions();
+    let answer_at_sent = answer.resize_exact(tw, th, FilterType::Triangle).to_rgb8();
+    let region = match keep {
+        Keep::Painted(_) => {
+            let m = image::load_from_memory(sent_mask.context("a painted fill sends its mask")?)
+                .context("decode the sent mask")?
+                .to_rgba8();
+            Region::from_mask(&m)
+        }
+        Keep::Found => {
+            let found = found_region(&sent, &answer_at_sent);
+            let share = found.share();
+            if share <= 0.0 {
+                return Err(anyhow!(
+                    "the model's answer changed nothing this edit could find — paint the area and use Remove / Fill instead"
+                ));
+            }
+            outcome.coverage = Some(share);
+            found
+        }
+        Keep::Whole => unreachable!("a whole-frame edit keeps no composite"),
+    };
+    let level = level_field(&sent, &answer_at_sent, &region);
+    drop(answer_at_sent);
+    drop(sent);
+    let mut gen_img = answer.resize_exact(bw, bh, FilterType::Lanczos3).to_rgb8();
+    drop(answer);
     // Cancel checkpoints through the composite: at 61 MP the decode/weight/
     // blend stages take seconds each, and a cancel arriving during them was
     // ignored — the abandoned result then landed in ./out anyway.
     if cancelled() {
         return Err(anyhow!("cancelled by user"));
     }
-    let composite = if let (Some(mask_img), Some(mut composite)) = (mask_img, composite) {
-        let gen_img = generated.to_rgb8();
-        drop(generated);
-        let frame_feather = ((bw.min(bh) as usize) / 100).clamp(2, 64); // ~1% of short side, capped
-        let weight = {
-            let mask_full = mask_img.resize_exact(bw, bh, FilterType::Nearest).to_rgba8();
-            let w: Vec<f32> = mask_full.pixels().map(|p| 1.0 - p[3] as f32 / 255.0).collect();
-            // The full-res mask dies HERE, not at the end of this block: it and
-            // the weight plane are ~241 MB each at 61 MP and the blur below
-            // never touches it.
-            drop(mask_full);
-            // Feather scales with the SELECTION, not only the frame (L09-3):
-            // the frame rule alone put a 20 px blur on a 10 px selection at a
-            // 2048 frame — centre weight ~6%, and the fill "looked like it did
-            // nothing". The frame rule stays as the CEILING, so large
-            // selections keep their exact look.
-            let feather = frame_feather.min(selection_feather(&w, bw as usize));
-            if feather > 0 { box_blur(w, bw as usize, bh as usize, feather) } else { w }
-        };
-        if cancelled() {
-            return Err(anyhow!("cancelled by user"));
-        }
-        composite_in_place(&mut composite, &gen_img, &weight);
-        drop(gen_img);
-        if cancelled() {
-            return Err(anyhow!("cancelled by user"));
-        }
-
-        composite
-    } else {
-        // No composite and no mask: keep the WHOLE returned frame, at the
-        // base's dimensions, using the fill's Lanczos3 filter and RGBA8 writer.
-        generated.to_rgba8()
+    let frame_feather = ((bw.min(bh) as usize) / 100).clamp(2, 64); // ~1% of short side, capped
+    let weight = {
+        let w = region.weight_at(bw, bh);
+        // Feather scales with the SELECTION, not only the frame (L09-3):
+        // the frame rule alone put a 20 px blur on a 10 px selection at a
+        // 2048 frame — centre weight ~6%, and the fill "looked like it did
+        // nothing". The frame rule stays as the CEILING, so large
+        // selections keep their exact look.
+        let feather = frame_feather.min(selection_feather(&w, bw as usize));
+        if feather > 0 { box_blur(w, bw as usize, bh as usize, feather) } else { w }
     };
     if cancelled() {
         return Err(anyhow!("cancelled by user"));
     }
+    level.apply(&mut gen_img, &weight);
+    composite_in_place(&mut composite, &gen_img, &weight);
+    drop(gen_img);
+    if cancelled() {
+        return Err(anyhow!("cancelled by user"));
+    }
+    publish_master(&composite, out)?;
+    println!("generative {verb} -> {} ({bw}x{bh}, {mode})", out.display());
+    Ok(outcome)
+}
 
-    // (Parent already prepared by the pre-pay preflight at the top, L09#1.)
-    // Stage + rename over the claimed name — same rule as reimagine. The
-    // staged name cannot carry the real extension, so the format comes from
-    // the TARGET path explicitly (PNG for every claimed ./out master).
+/// Stage + rename over the claimed name — same rule as reimagine. The
+/// staged name cannot carry the real extension, so the format comes from
+/// the TARGET path explicitly (PNG for every claimed ./out master). (Parent
+/// already prepared by the pre-pay preflight, L09#1.)
+fn publish_master(img: &RgbaImage, out: &Path) -> Result<()> {
     let tmp = out.with_extension(format!(
         "tmp.{}.{}",
         std::process::id(),
         crate::store::next_tmp_seq()
     ));
     let fmt = image::ImageFormat::from_path(out).unwrap_or(image::ImageFormat::Png);
-    if let Err(e) = composite.save_with_format(&tmp, fmt) {
+    if let Err(e) = img.save_with_format(&tmp, fmt) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("write {}", tmp.display()));
     }
@@ -755,8 +863,412 @@ fn edit_onto(
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("publish {}", out.display()));
     }
-    println!("generative {verb} -> {} ({bw}x{bh}, {mode})", out.display());
-    Ok(divergence)
+    Ok(())
+}
+
+/// The area an edit regenerates, at the resolution of the input it SENT:
+/// 1 = take the model's pixel, 0 = keep the base's. A painted mask gives it
+/// texel for texel; [`found_region`] gives it per cell.
+struct Region {
+    w: usize,
+    h: usize,
+    take: Vec<f32>,
+}
+
+impl Region {
+    /// From the RGBA mask on the wire: transparent = regenerate.
+    fn from_mask(m: &RgbaImage) -> Self {
+        let take = m.pixels().map(|p| 1.0 - p[3] as f32 / 255.0).collect();
+        Region { w: m.width() as usize, h: m.height() as usize, take }
+    }
+
+    /// The share of the frame the model's pixels are taken over.
+    fn share(&self) -> f32 {
+        self.take.iter().sum::<f32>() / self.take.len().max(1) as f32
+    }
+
+    /// The weight plane at the base's `bw`×`bh`, by nearest texel — the
+    /// painted mask's own rule (`FilterType::Nearest`); the caller feathers.
+    fn weight_at(&self, bw: u32, bh: u32) -> Vec<f32> {
+        let (bw, bh) = (bw as usize, bh as usize);
+        let mut out = Vec::with_capacity(bw * bh);
+        for y in 0..bh {
+            let sy = (y * self.h / bh.max(1)).min(self.h - 1);
+            out.extend((0..bw).map(|x| self.take[sy * self.w + (x * self.w / bw.max(1)).min(self.w - 1)]));
+        }
+        out
+    }
+}
+
+/// The cell edge of the levelling and finding grids on a `w`×`h` sent frame:
+/// ~1/96 of the short side — coarse enough that the model re-drawing grass or
+/// rock in its own texture averages out, fine enough to follow a sky's
+/// gradient into the painted area.
+fn cell_edge(w: usize, h: usize) -> usize {
+    (w.min(h) / 96).max(2)
+}
+
+/// A smooth per-channel offset over the frame, in 8-bit levels, stored on a
+/// coarse grid of `cell`-px cells of the sent frame.
+struct LevelField {
+    gw: usize,
+    gh: usize,
+    v: Vec<[f32; 3]>,
+}
+
+/// How far the model's answer sits from the sent input where it was meant to
+/// change nothing — `region.take == 0` — as a smooth field that runs on into
+/// the area it did change. Each cell holds the mean of (sent − answer) over its
+/// kept texels; cells with none are filled from their neighbours by
+/// pull-push ([`pull_push`]), the membrane-like interpolation Poisson-style
+/// blending reduces to at low frequency. Added to the model's pixels, it puts
+/// the regenerated area on the level of what surrounds it while leaving the
+/// structure the model drew inside untouched.
+fn level_field(sent: &RgbImage, answer: &RgbImage, region: &Region) -> LevelField {
+    let (w, h) = (sent.width() as usize, sent.height() as usize);
+    let cell = cell_edge(w, h);
+    let (gw, gh) = (w.div_ceil(cell), h.div_ceil(cell));
+    let mut sum = vec![[0f32; 3]; gw * gh];
+    let mut kept = vec![0f32; gw * gh];
+    for y in 0..h {
+        for x in 0..w {
+            let k = 1.0 - region.take[y * w + x];
+            if k <= 0.0 {
+                continue;
+            }
+            let i = (y / cell) * gw + x / cell;
+            let (s, a) = (sent.get_pixel(x as u32, y as u32), answer.get_pixel(x as u32, y as u32));
+            for c in 0..3 {
+                sum[i][c] += k * (s[c] as f32 - a[c] as f32);
+            }
+            kept[i] += k;
+        }
+    }
+    let area = (cell * cell) as f32;
+    let mut v = vec![[0f32; 3]; gw * gh];
+    let mut conf = vec![0f32; gw * gh];
+    for i in 0..gw * gh {
+        if kept[i] > 0.0 {
+            v[i] = sum[i].map(|s| s / kept[i]);
+            conf[i] = (kept[i] / area).min(1.0);
+        }
+    }
+    LevelField { gw, gh, v: pull_push(v, conf, gw, gh) }
+}
+
+impl LevelField {
+    /// The offset at normalised frame position (u, v), bilinear between cell
+    /// centres.
+    fn at(&self, u: f32, v: f32) -> [f32; 3] {
+        let fx = (u * self.gw as f32 - 0.5).clamp(0.0, (self.gw - 1) as f32);
+        let fy = (v * self.gh as f32 - 0.5).clamp(0.0, (self.gh - 1) as f32);
+        let (x0, y0) = (fx as usize, fy as usize);
+        let (x1, y1) = ((x0 + 1).min(self.gw - 1), (y0 + 1).min(self.gh - 1));
+        let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+        let p = |x: usize, y: usize| self.v[y * self.gw + x];
+        let (a, b, c, d) = (p(x0, y0), p(x1, y0), p(x0, y1), p(x1, y1));
+        std::array::from_fn(|k| {
+            (a[k] * (1.0 - tx) + b[k] * tx) * (1.0 - ty) + (c[k] * (1.0 - tx) + d[k] * tx) * ty
+        })
+    }
+
+    /// Level the model's pixels wherever the composite will take any of them.
+    fn apply(&self, img: &mut RgbImage, weight: &[f32]) {
+        let (w, h) = img.dimensions();
+        for y in 0..h {
+            for x in 0..w {
+                if weight[(y * w + x) as usize] <= 0.0001 {
+                    continue;
+                }
+                let off = self.at((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+                let p = img.get_pixel_mut(x, y);
+                for c in 0..3 {
+                    p[c] = (p[c] as f32 + off[c]).round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
+}
+
+/// Fill a grid's unknown cells from its known ones: pull — halve the grid,
+/// each coarse cell the confidence-weighted mean of its four — until one cell
+/// is left, then push — every fine cell keeps its own value in proportion to
+/// its confidence and takes the rest from the coarser level, read bilinearly.
+/// A fully known cell is returned exactly; a hole gets a smooth blend of the
+/// values around it, the nearer ones weighing more.
+fn pull_push(v: Vec<[f32; 3]>, conf: Vec<f32>, w: usize, h: usize) -> Vec<[f32; 3]> {
+    if w <= 1 && h <= 1 {
+        return v;
+    }
+    let (w2, h2) = (w.div_ceil(2), h.div_ceil(2));
+    let mut cv = vec![[0f32; 3]; w2 * h2];
+    let mut cc = vec![0f32; w2 * h2];
+    for y in 0..h {
+        for x in 0..w {
+            let (i, j) = (y * w + x, (y / 2) * w2 + x / 2);
+            for c in 0..3 {
+                cv[j][c] += conf[i] * v[i][c];
+            }
+            cc[j] += conf[i];
+        }
+    }
+    for j in 0..w2 * h2 {
+        if cc[j] > 0.0 {
+            cv[j] = cv[j].map(|s| s / cc[j]);
+        }
+        cc[j] = cc[j].min(1.0);
+    }
+    let coarse = pull_push(cv, cc, w2, h2);
+    let mut out = v;
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let c = conf[i].clamp(0.0, 1.0);
+            if c >= 1.0 {
+                continue;
+            }
+            let fx = ((x as f32 + 0.5) / 2.0 - 0.5).clamp(0.0, (w2 - 1) as f32);
+            let fy = ((y as f32 + 0.5) / 2.0 - 0.5).clamp(0.0, (h2 - 1) as f32);
+            let (x0, y0) = (fx as usize, fy as usize);
+            let (x1, y1) = ((x0 + 1).min(w2 - 1), (y0 + 1).min(h2 - 1));
+            let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+            let p = |x: usize, y: usize| coarse[y * w2 + x];
+            for (k, v) in out[i].iter_mut().enumerate() {
+                let up = (p(x0, y0)[k] * (1.0 - tx) + p(x1, y0)[k] * tx) * (1.0 - ty)
+                    + (p(x0, y1)[k] * (1.0 - tx) + p(x1, y1)[k] * tx) * ty;
+                *v = c * *v + (1.0 - c) * up;
+            }
+        }
+    }
+    out
+}
+
+/// One [`found_region`] run's cell scores, grid width and height, seed and
+/// grow thresholds.
+#[cfg(test)]
+type FoundScores = (Vec<f32>, usize, usize, f32, f32);
+
+#[cfg(test)]
+thread_local! {
+    /// The last [`found_region`]'s scores — read by the offline tuning harness.
+    static FOUND_SCORES: std::cell::RefCell<Option<FoundScores>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Per cell of a `cell`-px grid over `sent` and `answer`: how far the answer
+/// sits from `expect` — the sent frame moved by a drift — in mean colour, and
+/// how far its texture (luma spread) changed, folded into one score.
+fn cell_scores(
+    sent: &RgbImage,
+    answer: &RgbImage,
+    cell: usize,
+    gw: usize,
+    drift: &dyn Fn(usize) -> [f32; 3],
+) -> Vec<f32> {
+    let (w, h) = (sent.width() as usize, sent.height() as usize);
+    let luma = |p: [f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+    // Per cell: Σ(answer − expected) per channel, Σ and Σ² of each luma, count.
+    let mut acc = vec![[0f64; 8]; gw * h.div_ceil(cell)];
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y / cell) * gw + x / cell;
+            let d = drift(i);
+            let (s, a) = (sent.get_pixel(x as u32, y as u32), answer.get_pixel(x as u32, y as u32));
+            // Clamped like the answer is: a drift cannot lift a clipped white.
+            let e: [f32; 3] = std::array::from_fn(|c| (s[c] as f32 + d[c]).clamp(0.0, 255.0));
+            let a: [f32; 3] = std::array::from_fn(|c| a[c] as f32);
+            let (le, la) = (luma(e) as f64, luma(a) as f64);
+            let t = &mut acc[i];
+            for c in 0..3 {
+                t[c] += (a[c] - e[c]) as f64;
+            }
+            t[3] += le;
+            t[4] += le * le;
+            t[5] += la;
+            t[6] += la * la;
+            t[7] += 1.0;
+        }
+    }
+    acc.iter()
+        .map(|t| {
+            let k = t[7].max(1.0);
+            let colour = (0..3).map(|c| (t[c] / k).powi(2)).sum::<f64>().sqrt();
+            let sd = |sum: f64, sq: f64| (sq / k - (sum / k).powi(2)).max(0.0).sqrt();
+            (colour + 0.5 * (sd(t[5], t[6]) - sd(t[3], t[4])).abs()) as f32
+        })
+        .collect()
+}
+
+/// The area a maskless edit CHANGED, read off its answer against the input
+/// it was sent, cell by cell ([`cell_edge`]).
+///
+/// The model moves the whole frame a little (see [`edit_onto`]) and redraws
+/// every edge and texture a pixel or two off, so "changed" is read against
+/// both. The drift is modelled as little as it can be — one shift per
+/// channel, the median over the half of the cells that moved least, then a
+/// smooth field ([`pull_push`]) learnt ONLY from the cells that shift leaves
+/// unchanged — because a model
+/// any freer learns the edit itself: measured on a real "make the sky bluer"
+/// (2026-10-12; sky −28 / −9 / +14 levels, ground +7 / +2 / −1), a per-level
+/// tone curve absorbed the whole sky as drift and found 1 % of the frame.
+/// Texels at 0 or 255 are left out of the drift's estimate, and the expected
+/// frame is clamped, so a clipped white is not read as a change.
+///
+/// Thresholds are the larger of a floor in 8-bit levels and the scatter of
+/// the cells taken for drift (median + k·MAD); a seed must ALSO reach a fixed share of the
+/// strongest change in the frame, which is what keeps the redrawn edges
+/// (scores ~10–25 on the same real answer, the removed tree 69) out of the
+/// area. Seeds grow through weaker connected cells, specks of one or two
+/// cells are dropped, enclosed holes are filled and the area is grown by one
+/// cell so the feather starts outside what changed.
+fn found_region(sent: &RgbImage, answer: &RgbImage) -> Region {
+    const SEED_FLOOR: f32 = 14.0;
+    const GROW_FLOOR: f32 = 7.0;
+    const PROMINENCE: f32 = 0.4;
+    let (w, h) = (sent.width() as usize, sent.height() as usize);
+    let cell = cell_edge(w, h);
+    let (gw, gh) = (w.div_ceil(cell), h.div_ceil(cell));
+    let n = gw * gh;
+    // Per cell: the mean shift over its unclipped texels, and how many.
+    let mut shift = vec![[0f64; 4]; n];
+    for y in 0..h {
+        for x in 0..w {
+            let (s, a) = (sent.get_pixel(x as u32, y as u32), answer.get_pixel(x as u32, y as u32));
+            if (0..3).any(|c| s[c] <= 2 || s[c] >= 253 || a[c] <= 2 || a[c] >= 253) {
+                continue;
+            }
+            let t = &mut shift[(y / cell) * gw + x / cell];
+            for c in 0..3 {
+                t[c] += a[c] as f64 - s[c] as f64;
+            }
+            t[3] += 1.0;
+        }
+    }
+    let measured: Vec<usize> = (0..n).filter(|&i| shift[i][3] > 0.0).collect();
+    let mean_shift = |i: usize| -> [f32; 3] { std::array::from_fn(|c| (shift[i][c] / shift[i][3].max(1.0)) as f32) };
+    let median = |mut v: Vec<f32>| -> f32 {
+        if v.is_empty() {
+            return 0.0;
+        }
+        v.sort_by(f32::total_cmp);
+        v[v.len() / 2]
+    };
+    // The scatter of the cells taken for drift, not of the frame: an edit as
+    // large as the sky makes the scores bimodal, and a MAD over both modes put
+    // the thresholds above the edit itself.
+    let thresholds = |score: &[f32], drift_cells: &[usize]| -> (f32, f32) {
+        let quiet: Vec<f32> = drift_cells.iter().map(|&i| score[i]).collect();
+        let med = median(quiet.clone());
+        let mad = 1.4826 * median(quiet.iter().map(|s| (s - med).abs()).collect());
+        ((med + 8.0 * mad).max(SEED_FLOOR), (med + 4.0 * mad).max(GROW_FLOOR))
+    };
+    // Pass 1: one shift for the frame, the median over the half of the cells
+    // that moved LEAST — the model's drift is the smaller movement (2–7
+    // levels on the real answers above, an edit 30 and more), and over all
+    // cells a sky-sized edit would be the median itself.
+    // By RANK, not "at or below the median": on a frame whose edit moved
+    // every one of its cells alike, the ties put the whole edit in.
+    let size = |d: [f32; 3]| d.iter().map(|v| v * v).sum::<f32>();
+    let mut still = measured.clone();
+    still.sort_by(|&i, &j| size(mean_shift(i)).total_cmp(&size(mean_shift(j))));
+    still.truncate(still.len().div_ceil(2));
+    let global: [f32; 3] = std::array::from_fn(|c| median(still.iter().map(|&i| mean_shift(i)[c]).collect()));
+    let first = cell_scores(sent, answer, cell, gw, &|_| global);
+    let (_, grow1) = thresholds(&first, &still);
+    // Pass 2: a smooth field from the cells pass 1 left alone.
+    let conf: Vec<f32> = (0..n).map(|i| if first[i] < grow1 && shift[i][3] > 0.0 { 1.0 } else { 0.0 }).collect();
+    let field = if conf.iter().any(|&c| c > 0.0) {
+        pull_push((0..n).map(mean_shift).collect(), conf.clone(), gw, gh)
+    } else {
+        vec![global; n]
+    };
+    let score = cell_scores(sent, answer, cell, gw, &|i| field[i]);
+    let calm: Vec<usize> = (0..n).filter(|&i| conf[i] > 0.0).collect();
+    let (seed, grow) = thresholds(&score, if calm.is_empty() { &still } else { &calm });
+    let seed = seed.max(PROMINENCE * score.iter().copied().fold(0.0, f32::max));
+    #[cfg(test)]
+    FOUND_SCORES.with_borrow_mut(|d| *d = Some((score.clone(), gw, gh, seed, grow)));
+    // Seeds, then 4-connected growth through the weaker cells.
+    let mut on: Vec<bool> = score.iter().map(|&s| s > seed).collect();
+    let mut stack: Vec<usize> = (0..n).filter(|&i| on[i]).collect();
+    while let Some(i) = stack.pop() {
+        let (x, y) = (i % gw, i / gw);
+        for (nx, ny) in [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)] {
+            if nx < gw && ny < gh {
+                let j = ny * gw + nx;
+                if !on[j] && score[j] > grow {
+                    on[j] = true;
+                    stack.push(j);
+                }
+            }
+        }
+    }
+    // Specks: a component of one or two cells is a redrawn edge or a fleck of
+    // texture that crossed the seed line, not an edit (the real "sky bluer"
+    // answer left six of them on the ground). Anything an edit can be asked
+    // to remove spans more cells than that at ~1/96 of the short side.
+    let mut seen = vec![false; n];
+    for start in 0..n {
+        if !on[start] || seen[start] {
+            continue;
+        }
+        let mut comp = vec![start];
+        seen[start] = true;
+        let mut k = 0;
+        while k < comp.len() {
+            let (x, y) = (comp[k] % gw, comp[k] / gw);
+            for (nx, ny) in [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)] {
+                if nx < gw && ny < gh {
+                    let j = ny * gw + nx;
+                    if on[j] && !seen[j] {
+                        seen[j] = true;
+                        comp.push(j);
+                    }
+                }
+            }
+            k += 1;
+        }
+        if comp.len() <= 2 {
+            comp.iter().for_each(|&i| on[i] = false);
+        }
+    }
+    // Holes: every off cell the frame's border cannot reach through off cells.
+    let mut outside = vec![false; n];
+    let mut stack: Vec<usize> = (0..n)
+        .filter(|&i| {
+            let (x, y) = (i % gw, i / gw);
+            !on[i] && (x == 0 || y == 0 || x + 1 == gw || y + 1 == gh)
+        })
+        .collect();
+    stack.iter().for_each(|&i| outside[i] = true);
+    while let Some(i) = stack.pop() {
+        let (x, y) = (i % gw, i / gw);
+        for (nx, ny) in [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)] {
+            if nx < gw && ny < gh {
+                let j = ny * gw + nx;
+                if !on[j] && !outside[j] {
+                    outside[j] = true;
+                    stack.push(j);
+                }
+            }
+        }
+    }
+    // One cell of growth, so the feather starts outside what changed.
+    let grown: Vec<bool> = (0..n)
+        .map(|i| {
+            let (x, y) = (i % gw, i / gw);
+            let near = |dx: isize, dy: isize| {
+                let (nx, ny) = (x as isize + dx, y as isize + dy);
+                nx >= 0 && ny >= 0 && (nx as usize) < gw && (ny as usize) < gh && {
+                    let j = ny as usize * gw + nx as usize;
+                    on[j] || !outside[j]
+                }
+            };
+            (-1..=1).any(|dy| (-1..=1).any(|dx| near(dx, dy)))
+        })
+        .collect();
+    let take = (0..w * h).map(|p| if grown[((p / w) / cell) * gw + (p % w) / cell] { 1.0 } else { 0.0 }).collect();
+    Region { w, h, take }
 }
 
 /// The frame `reimagine` puts on the wire for `path`: a RAW's sensor frame
@@ -2571,9 +3083,13 @@ mod tests {
         })
         .save(&mask)
         .unwrap();
-        // The model answers a flat red frame at the enum size the plan asks
-        // for (the endpoint contract refuses any other size).
-        let red = DynamicImage::ImageRgb8(RgbImage::from_pixel(1024, 1024, image::Rgb([200, 20, 20])));
+        // The model answers at the enum size the plan asks for (the endpoint
+        // contract refuses any other size): the caller's base where it was
+        // told to keep it, red over the painted block.
+        let green = image::Rgb([20, 200, 20]);
+        let red = DynamicImage::ImageRgb8(RgbImage::from_fn(1024, 1024, |x, y| {
+            if (384..640).contains(&x) && (384..640).contains(&y) { image::Rgb([200, 20, 20]) } else { green }
+        }));
         let b64 = base64::engine::general_purpose::STANDARD.encode(encode_png(&red).unwrap());
         let (url, _seen, handle) = stub_endpoint(vec![(
             200,
@@ -2583,7 +3099,6 @@ mod tests {
         let cfg = stub_cfg(url);
         let out = dir.join("exports").join("onto.png");
         // The caller's base: a flat green frame the file on disk never had.
-        let green = image::Rgb([20, 200, 20]);
         retouch_onto(
             &cfg,
             &input,
@@ -2606,6 +3121,230 @@ mod tests {
             "inside the mask: the model's answer ({:?})",
             got.get_pixel(128, 128)
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The model's answer, as it really comes back: the sent frame shifted by
+    /// `drift` levels everywhere (user report 2026-10-12: +42 / +40 / +24
+    /// measured at a fill's edge) and `inside` drawn over the block.
+    fn drifted_answer(sent: &RgbImage, drift: [i16; 3], block: (u32, u32, u32, u32), inside: [u8; 3]) -> RgbImage {
+        RgbImage::from_fn(sent.width(), sent.height(), |x, y| {
+            let (x0, y0, x1, y1) = block;
+            if (x0..x1).contains(&x) && (y0..y1).contains(&y) {
+                return image::Rgb(inside);
+            }
+            let p = sent.get_pixel(x, y);
+            image::Rgb(std::array::from_fn(|c| (p[c] as i16 + drift[c]).clamp(0, 255) as u8))
+        })
+    }
+
+    /// User report 2026-10-12 (「涂抹生成后的区域跟周围还是有很明显的差距」): the
+    /// model redraws the whole frame shifted, so a fill pasted as it came
+    /// back sat +42 levels off its surroundings. Levelled by what the model
+    /// was meant to leave alone, the fill meets the base, and what the model
+    /// drew inside keeps its own structure.
+    ///
+    /// MUTATION THIS CATCHES: the kept texels left out of `level_field` — the
+    /// area reads the drift again (`level.apply` dropped from `edit_onto` is
+    /// caught by the wire test below, which reads the published layer).
+    #[test]
+    fn a_fill_is_levelled_onto_its_surroundings() {
+        let sent = structured_frame(384, 256).to_rgb8();
+        let hole = (160u32, 96u32, 240u32, 176u32);
+        let in_hole = |x: u32, y: u32| (hole.0..hole.2).contains(&x) && (hole.1..hole.3).contains(&y);
+        let mask = RgbaImage::from_fn(384, 256, |x, y| Rgba([0, 0, 0, if in_hole(x, y) { 0 } else { 255 }]));
+        // The model shifted everything and drew stripes inside.
+        let drift = [42i16, 40, 24];
+        let answer = RgbImage::from_fn(384, 256, |x, y| {
+            let s = sent.get_pixel(x, y);
+            let stripe = if in_hole(x, y) { if (x / 8) % 2 == 0 { 30 } else { -30 } } else { 0 };
+            image::Rgb(std::array::from_fn(|c| (s[c] as i16 + drift[c] + stripe).clamp(0, 255) as u8))
+        });
+        let region = Region::from_mask(&mask);
+        let level = level_field(&sent, &answer, &region);
+        let weight = region.weight_at(384, 256);
+        let mut levelled = answer.clone();
+        level.apply(&mut levelled, &weight);
+        let mean_off = |img: &RgbImage| -> [f32; 3] {
+            let (mut sum, mut n) = ([0f32; 3], 0f32);
+            for y in hole.1..hole.3 {
+                for x in hole.0..hole.2 {
+                    let (a, b) = (img.get_pixel(x, y), sent.get_pixel(x, y));
+                    for c in 0..3 {
+                        sum[c] += a[c] as f32 - b[c] as f32;
+                    }
+                    n += 1.0;
+                }
+            }
+            sum.map(|s| s / n)
+        };
+        let before = mean_off(&answer);
+        let after = mean_off(&levelled);
+        assert!(before[0] > 35.0, "the fixture carries the drift: {before:?}");
+        assert!(after.iter().all(|d| d.abs() < 4.0), "levelled inside the area: {after:?} (was {before:?})");
+        let (a, b) = (levelled.get_pixel(196, 136)[1] as i32, levelled.get_pixel(204, 136)[1] as i32);
+        assert!((a - b).abs() >= 50, "the model's own stripes are kept: {a} vs {b}");
+        assert_eq!(levelled.get_pixel(8, 8), answer.get_pixel(8, 8), "nothing outside the area is touched");
+    }
+
+    /// Not a check — the tuning bench for [`found_region`] on REAL answers:
+    /// `AUTOSHADE_FOUND_SENT=<sent.png> AUTOSHADE_FOUND_ANSWERS=<a.png;b.png>
+    /// AUTOSHADE_FOUND_OUT=<dir> cargo test found_region_bench -- --ignored
+    /// --nocapture` prints each answer's share and score spread and writes its
+    /// score map and area.
+    #[test]
+    #[ignore = "reads real model answers from the environment"]
+    fn found_region_bench() {
+        let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k}"));
+        let sent = image::open(var("AUTOSHADE_FOUND_SENT")).unwrap().to_rgb8();
+        let out = std::path::PathBuf::from(var("AUTOSHADE_FOUND_OUT"));
+        for a in var("AUTOSHADE_FOUND_ANSWERS").split(';') {
+            let answer = image::open(a).unwrap().resize_exact(sent.width(), sent.height(), FilterType::Triangle).to_rgb8();
+            let found = found_region(&sent, &answer);
+            let (score, gw, gh, seed, grow) = FOUND_SCORES.with_borrow(|d| d.clone().unwrap());
+            let mut sorted = score.clone();
+            sorted.sort_by(f32::total_cmp);
+            let q = |f: f32| sorted[((sorted.len() - 1) as f32 * f) as usize];
+            println!(
+                "{a}: share {:.3}  seed {seed:.1} grow {grow:.1}  score p50 {:.1} p90 {:.1} p99 {:.1} max {:.1}",
+                found.share(), q(0.5), q(0.9), q(0.99), q(1.0)
+            );
+            let stem = std::path::Path::new(a).file_stem().unwrap().to_string_lossy().to_string();
+            let top = q(1.0).max(1.0);
+            image::GrayImage::from_fn(gw as u32, gh as u32, |x, y| {
+                image::Luma([(255.0 * score[y as usize * gw + x as usize] / top).min(255.0) as u8])
+            })
+            .save(out.join(format!("{stem}_score.png")))
+            .unwrap();
+            image::GrayImage::from_fn(found.w as u32, found.h as u32, |x, y| {
+                image::Luma([(255.0 * found.take[y as usize * found.w + x as usize]) as u8])
+            })
+            .save(out.join(format!("{stem}_area.png")))
+            .unwrap();
+        }
+    }
+
+    /// A hole in the grid is filled from its rim by pull-push, and a fully
+    /// known grid comes back exactly as it went in.
+    #[test]
+    fn pull_push_keeps_known_cells_and_fills_holes_from_their_rim() {
+        let (w, h) = (9usize, 7usize);
+        let v: Vec<[f32; 3]> = (0..w * h).map(|i| [(i % w) as f32, 0.0, 5.0]).collect();
+        assert_eq!(pull_push(v.clone(), vec![1.0; w * h], w, h), v, "a known grid is returned exactly");
+        let mut conf = vec![1.0; w * h];
+        for y in 2..5 {
+            for x in 3..6 {
+                conf[y * w + x] = 0.0;
+            }
+        }
+        let holes: Vec<[f32; 3]> = v.iter().zip(&conf).map(|(p, &c)| if c > 0.0 { *p } else { [999.0; 3] }).collect();
+        let got = pull_push(holes, conf.clone(), w, h);
+        for i in (0..w * h).filter(|&i| conf[i] == 0.0) {
+            let x = (i % w) as f32;
+            assert!((got[i][0] - x).abs() < 1.5, "cell {i}: the ramp runs on into the hole: {:?}", got[i]);
+            assert!((got[i][2] - 5.0).abs() < 1e-3, "a constant channel stays constant: {:?}", got[i]);
+        }
+    }
+
+    /// A maskless edit's area is what the model CHANGED: a block it redrew is
+    /// found; the frame-wide drift and a re-drawn texture everywhere else are
+    /// not, and pure drift finds nothing at all.
+    ///
+    /// MUTATION THIS CATCHES: the drift left out of the score — every cell
+    /// then reads +30 and the whole frame is flagged.
+    #[test]
+    fn the_found_area_is_the_changed_block_not_the_drift() {
+        let sent = structured_frame(480, 320).to_rgb8();
+        let block = (300u32, 60u32, 380u32, 140u32);
+        let mut answer = drifted_answer(&sent, [30, 28, 18], block, [250, 250, 250]);
+        // Re-drawn texture: up to ±3 levels of hash noise over the frame.
+        for (x, y, p) in answer.enumerate_pixels_mut() {
+            let n = ((x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)) >> 13) % 7;
+            for c in 0..3 {
+                p[c] = (p[c] as i16 + n as i16 - 3).clamp(0, 255) as u8;
+            }
+        }
+        let found = found_region(&sent, &answer);
+        let at = |x: usize, y: usize| found.take[y * found.w + x];
+        assert_eq!(at(340, 100), 1.0, "the redrawn block is found");
+        assert_eq!(at(20, 300), 0.0, "a drifted corner is not");
+        assert_eq!(at(100, 200), 0.0, "nor the drifted middle");
+        let block_share = (80.0 * 80.0) / (480.0 * 320.0);
+        let share = found.share();
+        assert!(share >= block_share && share < 3.0 * block_share, "the area is the block and its rim: {share} vs {block_share}");
+        let echo = drifted_answer(&sent, [30, 28, 18], (0, 0, 0, 0), [0, 0, 0]);
+        assert_eq!(found_region(&sent, &echo).share(), 0.0, "pure drift is no edit");
+    }
+
+    /// An edit as large as the sky is the EDIT, not the drift — the real
+    /// "make the sky bluer" of 2026-10-12, in its own numbers: the top 55 %
+    /// moved −28 / −9 / +14 levels, the ground +7 / +2 / −1. Over all cells
+    /// the sky is the median, and a drift read there found 1 % of the frame;
+    /// read off the half that moved least, the sky is found and the ground is
+    /// not.
+    ///
+    /// MUTATION THIS CATCHES: the drift's median taken over every measured
+    /// cell instead of the stiller half.
+    #[test]
+    fn a_sky_sized_edit_is_the_edit_not_the_drift() {
+        let sent = structured_frame(480, 320).to_rgb8();
+        let horizon = 176u32;
+        let answer = RgbImage::from_fn(480, 320, |x, y| {
+            let p = sent.get_pixel(x, y);
+            let d: [i16; 3] = if y < horizon { [-28, -9, 14] } else { [7, 2, -1] };
+            image::Rgb(std::array::from_fn(|c| (p[c] as i16 + d[c]).clamp(0, 255) as u8))
+        });
+        let found = found_region(&sent, &answer);
+        let at = |x: usize, y: usize| found.take[y * found.w + x];
+        assert_eq!(at(240, 60), 1.0, "the sky is found");
+        assert_eq!(at(240, 300), 0.0, "the drifted ground is not");
+        let share = found.share();
+        assert!((0.5..0.7).contains(&share), "the area is the sky and its rim: {share}");
+    }
+
+    /// On the wire: a maskless edit sends NO mask part, rides the user's
+    /// words under the keep-the-rest clause, and publishes a LAYER that is
+    /// transparent wherever the model only drifted. A blank instruction is
+    /// refused before the base is developed or a call is paid.
+    #[test]
+    fn an_auto_fill_sends_no_mask_and_layers_only_what_changed() {
+        let dir = std::env::temp_dir().join(format!("autoshade-auto-fill-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("library")).unwrap();
+        let input = dir.join("library/input.png");
+        structured_frame(192, 128).save(&input).unwrap();
+        // What the plan sends at the enum size, drifted, one block repainted.
+        let sent = structured_frame(192, 128).resize_exact(1536, 1024, FilterType::Lanczos3).to_rgb8();
+        let answer = drifted_answer(&sent, [20, 20, 20], (1000, 200, 1300, 500), [250, 250, 250]);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(encode_png(&DynamicImage::ImageRgb8(answer)).unwrap());
+        let (url, seen, handle) = stub_endpoint(vec![(
+            200, "application/json", format!(r#"{{"data":[{{"b64_json":"{b64}"}}]}}"#),
+        )]);
+        let out = dir.join("exports/auto.png");
+        let report = auto_fill_onto(
+            &stub_cfg(url.clone()), &input, || Ok(structured_frame(192, 128)), "caller",
+            &AutoFillJob { prompt: "remove the sign", quality: "high", out: &out },
+        ).expect("the loopback maskless edit succeeds");
+        bounded_join(handle);
+        let bodies = seen.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 1, "one edit buys one generation");
+        assert!(!bodies[0].contains("name=\"mask\""), "a maskless edit sends no mask part");
+        assert!(bodies[0].contains("Instruction: remove the sign"), "the user's words ride under the clause");
+        assert!(bodies[0].contains("change nothing else"), "the keep-the-rest clause rides with them");
+        let layer = image::open(&out).unwrap().to_rgba8();
+        assert_eq!(layer.dimensions(), (192, 128), "the layer is the caller's base size");
+        // The block (1000..1300, 200..500 of 1536x1024) is ~(125..162, 25..62) here.
+        assert_eq!(layer.get_pixel(143, 43)[3], 255, "the changed block is covered");
+        // Levelled: the model's +20 drift is taken back off what it drew.
+        let p = layer.get_pixel(143, 43);
+        assert!((0..3).all(|c| p[c].abs_diff(230) <= 3), "the block is levelled by the drift: {p:?}");
+        assert_eq!(layer.get_pixel(20, 110)[3], 0, "where the model only drifted, nothing is pasted");
+        assert!(report.coverage > 0.03 && report.coverage < 0.2, "coverage reads the block: {}", report.coverage);
+
+        let err = auto_fill_onto(
+            &stub_cfg(url), &input, || panic!("blank must be refused before the base"), "caller",
+            &AutoFillJob { prompt: "  ", quality: "high", out: &dir.join("exports/blank.png") },
+        ).unwrap_err();
+        assert!(err.to_string().contains("needs words"), "blank is named: {err:#}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

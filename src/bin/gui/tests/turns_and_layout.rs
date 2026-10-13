@@ -561,16 +561,8 @@
                             let gallery = egui::SidePanel::left("gallery")
                                 .default_width(800.0)
                                 .show(ctx, |ui| app.gallery_panel(ui));
-                            let controls = egui::SidePanel::left("controls")
-                                .default_width(controls_width)
-                                .show(ctx, |ui| {
-                                    egui::ScrollArea::vertical().show(ui, |ui| {
-                                        app.ai_panel(ui);
-                                        app.develop_panel(ui);
-                                        app.retouch_panel(ui);
-                                    });
-                                });
-                            widths.push([gallery.response.rect.width(), controls.response.rect.width()]);
+                            let controls = controls_panel(ctx, &mut app, controls_width);
+                            widths.push([gallery.response.rect.width(), controls.width()]);
                         },
                     );
                     let drawn = DRAWN.with_borrow(|d| d.clone());
