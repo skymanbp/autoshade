@@ -425,6 +425,41 @@ impl AutoShadeApp {
     /// paint canvas, box-select — or the SOURCE flashed in the same rect while
     /// `comparing` (B held). Scroll zooms to the cursor; middle-drag or
     /// Space+drag pans; all image-space handlers map through [`ViewXform`].
+    /// The canvas image with its two fades: the B-key compare cross-fades
+    /// between the source and the edit, and a swap's first frame fades in
+    /// over the frame it replaced. `id` is the texture `comparing` selects;
+    /// the other one is painted over it while the compare fade runs.
+    fn paint_canvas_image(&mut self, ui: &egui::Ui, rect: egui::Rect, uv: egui::Rect, id: egui::TextureId, comparing: bool) {
+        let painter = ui.painter_at(rect);
+        let ctx = ui.ctx();
+        // 1 = showing the source. Driven by `comparing`, so a held B fades
+        // in and its release fades back.
+        let to_before = ctx.animate_bool_with_time(egui::Id::new("canvas_compare"), comparing, MOTION_FADE_S);
+        let other_alpha = if comparing { 1.0 - to_before } else { to_before };
+        let swap = self.canvas_fade.as_ref().map(|(old, t)| (old.clone(), ease_out(t.elapsed().as_secs_f32() / MOTION_FADE_S)));
+        match &swap {
+            // A swap still landing: the outgoing frame under, the new one
+            // fading in on top (from the bare canvas when there was none).
+            Some((old, k)) if *k < 1.0 => {
+                if let Some(old) = old {
+                    painter.image(old.id(), rect, uv, egui::Color32::WHITE);
+                }
+                painter.image(id, rect, uv, egui::Color32::WHITE.gamma_multiply(*k));
+                ctx.request_repaint();
+            }
+            _ => {
+                self.canvas_fade = None;
+                painter.image(id, rect, uv, egui::Color32::WHITE);
+            }
+        }
+        let other = if comparing { &self.after_tex } else { &self.before_tex };
+        if other_alpha > 0.0
+            && let Some(t) = other
+        {
+            painter.image(t.id(), rect, uv, egui::Color32::WHITE.gamma_multiply(other_alpha));
+        }
+    }
+
     pub(crate) fn after_view(&mut self, ui: &mut egui::Ui, max_w: f32, avail_y: f32, comparing: bool) {
         let lang = self.lang;
         let tex = if comparing { self.before_tex.as_ref() } else { self.after_tex.as_ref() };
@@ -600,7 +635,7 @@ impl AutoShadeApp {
         });
 
         let (rect, resp) = ui.allocate_exact_size(disp, egui::Sense::click_and_drag());
-        ui.painter_at(rect).image(id, rect, uv, egui::Color32::WHITE);
+        self.paint_canvas_image(ui, rect, uv, id, comparing);
         // Diagnostic layers, uv-synced with the image (hidden while comparing):
         // clipping warnings, then the selected mask's coverage on top.
         if !comparing {

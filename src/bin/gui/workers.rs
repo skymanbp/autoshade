@@ -363,12 +363,19 @@ impl AutoShadeApp {
         // The ColorImage arrives worker-built (see PreviewDone.after) — the UI
         // thread only uploads. The raw RGB is retained so the clipping toggle
         // can rebuild its overlay later without a redevelop.
-        if let Some(tex) = &mut self.after_tex {
-            tex.set(frame.after, egui::TextureOptions::LINEAR);
-        } else {
-            self.after_tex =
-                Some(ctx.load_texture("after", frame.after, egui::TextureOptions::LINEAR));
+        // A frame of the SAME photo and version re-renders in place (a slider
+        // drag must not flicker); the first frame of a different one lands on
+        // a fresh texture and the old one fades out over it (MOTION_FADE_S).
+        let shows = self.src_path.clone().map(|p| (p, self.active));
+        match &mut self.after_tex {
+            Some(tex) if self.after_shows == shows => tex.set(frame.after, egui::TextureOptions::LINEAR),
+            old => {
+                let fresh = ctx.load_texture("after", frame.after, egui::TextureOptions::LINEAR);
+                self.canvas_fade = Some((old.replace(fresh), Instant::now()));
+                ctx.request_repaint();
+            }
         }
+        self.after_shows = shows;
         // The clipping layer follows the CURRENT toggle, not the one baked at
         // dispatch: pressing J changes no recipe field, so an in-flight frame
         // is still accepted — its stale decision used to blank the layer under

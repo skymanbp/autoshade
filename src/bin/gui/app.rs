@@ -28,6 +28,14 @@ pub(crate) struct AutoShadeApp {
     pub(crate) film_edge: Option<(PathBuf, Option<std::time::SystemTime>, Option<u32>)>,
     pub(crate) before_tex: Option<egui::TextureHandle>,
     pub(crate) after_tex: Option<egui::TextureHandle>,
+    /// The canvas cross-fade in flight: the frame being faded OUT (`None` =
+    /// fade in from the empty canvas) and when the new one landed. Set when
+    /// the first frame of a different photo or version lands
+    /// (`after_shows` changes); cleared once [`MOTION_FADE_S`] has passed.
+    pub(crate) canvas_fade: Option<(Option<egui::TextureHandle>, Instant)>,
+    /// Which photo and version `after_tex` shows, so a landing frame can tell
+    /// a slider re-render (no fade) from a swap (fade).
+    pub(crate) after_shows: Option<(PathBuf, usize)>,
     pub(crate) recipe: EditRecipe,
     pub(crate) dirty: bool, // recipe changed → queue the latest preview state
     // --- asynchronous develop scheduler (single in-flight, latest wins) ---
@@ -1657,6 +1665,8 @@ impl Default for AutoShadeApp {
             film_edge: None,
             before_tex: None,
             after_tex: None,
+            canvas_fade: None,
+            after_shows: None,
             recipe: EditRecipe::default(),
             dirty: false,
             develop_inflight: false,
@@ -2082,17 +2092,22 @@ impl eframe::App for AutoShadeApp {
             let mut dismiss: Option<usize> = None;
             let mut fading = false;
             egui::Area::new(egui::Id::new("toasts"))
-                .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -40.0))
+                .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0 + MOTION_TOAST_SLIDE, -40.0))
+                .constrain(false)
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
                     let c = self.theme.colors();
+                    // Right-aligned rows: a toast slides in from the right
+                    // edge by a shrinking right-hand gap.
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
                     for (idx, t) in self.toasts.iter().enumerate() {
                         let (bg, fg) = match t.kind {
                             ToastKind::Success => (c.toast_ok_bg, c.toast_ok_fg),
                             ToastKind::Error => (c.toast_err_bg, c.toast_err_fg),
                         };
                         let left = t.ttl().saturating_sub(t.born.elapsed());
-                        let fade = (left.as_millis() as f32 / 300.0).min(1.0);
+                        let arrive = ease_out(t.born.elapsed().as_secs_f32() / MOTION_TOAST_IN_S);
+                        let fade = (left.as_millis() as f32 / 300.0).min(1.0) * arrive;
                         fading |= fade < 1.0;
                         // Elevated pill: the theme's popup shadow + a faint
                         // text-tinted hairline lift it off the photo — a flat
@@ -2100,7 +2115,13 @@ impl eframe::App for AutoShadeApp {
                         // all where the photo matched the toast colour.
                         let mut shadow = ui.visuals().popup_shadow;
                         shadow.color = shadow.color.gamma_multiply(fade);
-                        let r = egui::Frame::none()
+                        let r = ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                        // The area's right edge sits MOTION_TOAST_SLIDE past
+                        // the old anchor (unconstrained, so it may leave the
+                        // window); a settled toast keeps that gap, an
+                        // arriving one starts with none — off to the right.
+                        ui.add_space(arrive * MOTION_TOAST_SLIDE);
+                        egui::Frame::none()
                             .fill(bg.gamma_multiply(fade))
                             .stroke(egui::Stroke::new(1.0, fg.gamma_multiply(0.35 * fade)))
                             .shadow(shadow)
@@ -2115,7 +2136,9 @@ impl eframe::App for AutoShadeApp {
                                 ui.label(egui::RichText::new(&t.text).color(fg.gamma_multiply(fade)));
                             })
                             .response
-                            .interact(egui::Sense::click());
+                            .interact(egui::Sense::click())
+                        })
+                        .inner;
                         if r.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
@@ -2124,6 +2147,7 @@ impl eframe::App for AutoShadeApp {
                         }
                         ui.add_space(SPACE_MD);
                     }
+                    });
                 });
             if let Some(i) = dismiss {
                 self.toasts.remove(i);

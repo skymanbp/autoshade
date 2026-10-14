@@ -45,6 +45,45 @@
 
     }
 
+    /// MOTION (2026-10-14): a re-render of the same photo and version updates
+    /// the texture IN PLACE with no fade (a slider drag must not flicker); the
+    /// first frame of another version lands on a fresh texture and starts a
+    /// cross-fade from the old one, which the canvas clears once it is done.
+    ///
+    /// MUTATION: drop the `self.after_shows == shows` guard (every frame
+    /// fades) or the fade arm (no swap fades).
+    #[test]
+    fn a_swap_fades_in_and_a_rerender_does_not() {
+        let (mut app, _scrub) = app_with_masked_photo("fade");
+        // The fixture opens no file; the fade keys on (photo, version).
+        app.src_path.get_or_insert_with(|| PathBuf::from("fade-photo.arw"));
+        let ctx = egui::Context::default();
+        let base = app.base_preview.clone().unwrap();
+        let frame = |app: &AutoShadeApp| build_preview(base.clone(), app.recipe.clone(), false, None, false);
+
+        app.finish_redevelop(&ctx, Ok(frame(&app)));
+        assert!(app.canvas_fade.is_some(), "the first frame fades in from the empty canvas");
+        let first = app.after_tex.as_ref().unwrap().id();
+        app.canvas_fade = None;
+
+        app.finish_redevelop(&ctx, Ok(frame(&app)));
+        assert!(app.canvas_fade.is_none(), "a re-render of the same version must not fade");
+        assert_eq!(app.after_tex.as_ref().unwrap().id(), first, "…and updates the texture in place");
+
+        app.active += 1; // the version the frame is for changed
+        app.finish_redevelop(&ctx, Ok(frame(&app)));
+        let (old, _) = app.canvas_fade.as_ref().expect("a swap fades");
+        assert_eq!(old.as_ref().map(|t| t.id()), Some(first), "the outgoing frame is the one faded out");
+        assert_ne!(app.after_tex.as_ref().unwrap().id(), first, "the new frame gets its own texture");
+
+        // Past the fade, the canvas drops the outgoing frame.
+        app.canvas_fade = Some((None, Instant::now() - Duration::from_secs(1)));
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.after_view(ui, 400.0, 300.0, false));
+        });
+        assert!(app.canvas_fade.is_none(), "a finished fade is cleared");
+    }
+
     #[test]
     fn mask_rename_flushes_at_entry_points() {
         // A typed-but-uncommitted mask rename (TextEdit still focused, so

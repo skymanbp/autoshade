@@ -679,6 +679,28 @@ pub(crate) const FIELD_W_MIN: f32 = 80.0;
 /// stretch across a 4K canvas (see [`FIELD_W_MAX`] on why these are two).
 pub(crate) const TOAST_W_MAX: f32 = 420.0;
 
+/// MOTION (2026-10-14, user: folds, toasts, compare and image swaps should
+/// move rather than jump). One place for every duration, in seconds.
+///
+/// A fold opening or closing — egui's own `animation_time`, which its
+/// collapsing headers, combo boxes and scroll-to read. egui ships 1/12 s,
+/// short enough that a fold read as a jump; 0.18 s reads as a slide and is
+/// still under the ~200 ms where a UI starts to feel like it is waiting.
+pub(crate) const MOTION_FOLD_S: f32 = 0.18;
+/// The B-key compare cross-fade and a new photo's (or version's) first frame
+/// fading in over the old one. Short: the compare is a glance tool.
+pub(crate) const MOTION_FADE_S: f32 = 0.16;
+/// A toast sliding in from the right edge, eased out.
+pub(crate) const MOTION_TOAST_IN_S: f32 = 0.22;
+/// …and how far it travels, in points.
+pub(crate) const MOTION_TOAST_SLIDE: f32 = 36.0;
+
+/// Ease-out cubic over `t` in 0..1 — fast start, soft landing, the curve
+/// every motion here uses so no two of them feel different.
+pub(crate) fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
+}
+
 /// The controls panel's width: where it opens, and the narrowest a drag may
 /// take it (below this the two-cell button rows clip their labels).
 pub(crate) const CONTROLS_W_DEFAULT: f32 = 320.0;
@@ -825,6 +847,7 @@ pub(crate) fn install_look(ctx: &egui::Context, theme: ThemePref, accent: Accent
     style.spacing.button_padding = egui::vec2(10.0, 5.0);
     style.spacing.interact_size.y = 26.0;
     style.spacing.slider_rail_height = SLIDER_RAIL_H;
+    style.animation_time = MOTION_FOLD_S;
     // Controls get an edge at rest, and fields stop being black holes on the
     // dark plate; a fold's plate replaces the indent hairline (`card_fold`).
     style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, c.widget_edge);
