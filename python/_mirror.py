@@ -48,7 +48,7 @@ by `denoise.py`, which every other sidecar reaches the network through, and
 """
 
 # Verified 2026-09-20 at the revisions below, anonymously, against the pin each
-# sidecar enforces: 52 files over seven repos, the large ones by the server's
+# sidecar enforces (MoGe-2 added 2026-10-13, see its entry): 52 files over seven repos, the large ones by the server's
 # own LFS digest and the rest pulled back and hashed here, zero disagreements.
 # Each revision is a tree that carries the upstream licence as well as the
 # bytes — the repos were re-pinned after the licence files landed, so what a
@@ -94,6 +94,10 @@ MIRRORS = {
     # ourselves (v1.6.0); verified 2026-09-22 the same way as the seven repos above
     "https://github.com/skymanbp/autoshade/releases/download/v1.6.0/":
         "https://huggingface.co/Azng0/autoshade-mirror-autoshade-raw-denoise/resolve/0361b7af8853a57aa5c4a5c18ee589233caf14a0/",
+    # depth.py MODEL — MoGe-2, the lens-blur depth map; verified 2026-10-13
+    # anonymously (model.pt LFS digest = the pin, LICENSE byte-equal to ours)
+    "https://huggingface.co/Ruicheng/moge-2-vitl-normal/resolve/cb0e8bbd6b1e243589717c78e750b1ba4c093acf/":
+        "https://huggingface.co/Azng0/autoshade-mirror-moge-2-vitl-normal/resolve/eedf82d7cf301a59cebbbffde9c03dc03c726b9f/",
 }
 
 

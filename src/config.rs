@@ -754,6 +754,10 @@ pub struct Config {
     pub weights_dir: String,
     /// AI segmentation sidecar (`python/segment.py`) — subject/sky bitmap masks.
     pub segment_script: String,
+    /// Depth sidecar (`python/depth.py`, 2026-10-13) — the AI lens blur's
+    /// MoGe-2 depth map. Env-only and Destination-trusted like its siblings:
+    /// it names a program's argv.
+    pub depth_script: String,
     /// Style-embedding sidecar (`python/embed.py`) — SigLIP 2 vectors for the
     /// style index (R27 Batch-5). Same trust class as the other two: it names
     /// a program's argv, so it is env-only and Destination-trusted.
@@ -912,6 +916,7 @@ pub(crate) const SETTINGS: &[Setting] = &[
     env_only("AUTOSHADE_DENOISE_SCRIPT", Trust::Destination), // that command's argv
     env_only("AUTOSHADE_DENOISE_RAW_SCRIPT", Trust::Destination),
     env_only("AUTOSHADE_SEGMENT_SCRIPT", Trust::Destination),
+    env_only("AUTOSHADE_DEPTH_SCRIPT", Trust::Destination),
     env_only("AUTOSHADE_EMBED_SCRIPT", Trust::Destination),
     env_only("AUTOSHADE_CORRESPOND_SCRIPT", Trust::Destination),
     env_only("AUTOSHADE_DESCRIBE_SCRIPT", Trust::Destination),
@@ -1358,6 +1363,8 @@ impl Config {
             .unwrap_or_else(|| default_weights_dir(&denoise_script));
         let segment_script =
             env_val("AUTOSHADE_SEGMENT_SCRIPT").unwrap_or_else(|| bundled_helper("python/segment.py"));
+        let depth_script =
+            env_val("AUTOSHADE_DEPTH_SCRIPT").unwrap_or_else(|| bundled_helper("python/depth.py"));
         let embed_script =
             env_val("AUTOSHADE_EMBED_SCRIPT").unwrap_or_else(|| bundled_helper("python/embed.py"));
         let correspond_script = env_val("AUTOSHADE_CORRESPOND_SCRIPT")
@@ -1442,6 +1449,7 @@ impl Config {
             denoise_raw_script,
             weights_dir,
             segment_script,
+            depth_script,
             embed_script,
             correspond_script,
             describe_script,
@@ -1864,6 +1872,7 @@ mod tests {
             "AUTOSHADE_DENOISE_SCRIPT",
             "AUTOSHADE_DENOISE_RAW_SCRIPT",
             "AUTOSHADE_SEGMENT_SCRIPT",
+            "AUTOSHADE_DEPTH_SCRIPT",
             "AUTOSHADE_EMBED_SCRIPT",
             "AUTOSHADE_CORRESPOND_SCRIPT",
             "AUTOSHADE_DESCRIBE_SCRIPT",
@@ -2103,7 +2112,7 @@ mod tests {
     #[test]
     fn no_sidecar_picks_its_device_by_hand_any_more() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("python");
-        for name in ["segment.py", "embed.py", "denoise.py", "correspond.py", "describe.py"] {
+        for name in ["segment.py", "embed.py", "denoise.py", "correspond.py", "describe.py", "depth.py"] {
             let src = std::fs::read_to_string(dir.join(name))
                 .unwrap_or_else(|e| panic!("{name} must ship beside the others: {e}"));
             assert!(

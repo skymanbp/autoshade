@@ -294,6 +294,7 @@ pub(crate) struct Prefs {
     pub(crate) show_clipping: bool,
     pub(crate) lang: Lang,
     pub(crate) theme: ThemePref,
+    pub(crate) accent: AccentPref,
 }
 
 impl Default for Prefs {
@@ -347,6 +348,7 @@ impl Default for Prefs {
             show_clipping: false,
             lang: Lang::En, // English is the default / skeleton language
             theme: ThemePref::Dark, // the historical look
+            accent: AccentPref::Gold,
         }
     }
 }
@@ -411,7 +413,6 @@ pub(crate) const HSL_SWATCH: [egui::Color32; 8] = [
     egui::Color32::from_rgb(208, 82, 184), // Magenta
 ];
 
-pub(crate) const GRADE_REGIONS: [&str; 4] = ["Shadows", "Midtones", "Highlights", "Global"];
 
 /// The tool a painted area belongs to. Each tool keeps its own strokes
 /// (user decision 2026-09-27, 「各区各一块」): the area painted for Heal is
@@ -717,6 +718,9 @@ pub(crate) enum Msg {
     /// shown and then dropped, never persisted, because it describes the RUN
     /// and the recipe is data. Empty when the sidecar did not say.
     Segmented(anyhow::Result<(String, PathBuf, String)>),
+    /// The depth sidecar finished (2026-10-13): the claimed depth PNG for the
+    /// AI lens blur, or why not.
+    DepthEstimated(anyhow::Result<PathBuf>),
     /// Full-res mask refine finished — see [`MaskRefineOutcome`].
     MaskRefined(anyhow::Result<MaskRefineOutcome>),
     /// Batch render advanced: `done` of `total` photos finished (ok or err).

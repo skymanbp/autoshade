@@ -22,6 +22,13 @@ fn developed_card_pixels(
     ))
 }
 
+/// The brush radius range, in After-image display px. The ceiling was 80 —
+/// a 160 px disc, too small to paint a sky on a large screen in one pass.
+pub(crate) const BRUSH_R_MIN: f32 = 4.0;
+pub(crate) const BRUSH_R_MAX: f32 = 200.0;
+/// How long the ring stays up, with its size, after the size changes.
+const BRUSH_SIZE_FLASH_S: f64 = 1.2;
+
 impl AutoShadeApp {
     /// Brush-paint into the mask while dragging on the After image. The canvas
     /// is full-frame at preview resolution; pointer→canvas goes through the
@@ -29,6 +36,7 @@ impl AutoShadeApp {
     /// radius converts display px → canvas px by the current pixel scale.
     pub(crate) fn handle_paint(&mut self, resp: &egui::Response, xf: ViewXform) {
         let brush = self.brush;
+        let tip = self.brush_tip();
         let (dims, deg, dist) = self.geom_ctx();
         // Mask-brush session: strokes write the display canvas AND the
         // greyscale weight buffer; erase clears both.
@@ -90,30 +98,34 @@ impl AutoShadeApp {
             });
         };
         let mut stamped = false;
-        // PRIMARY button only: `dragged()` is button-agnostic, so a
-        // secondary-button drag — which the caller intercepts for panning —
-        // was also reported here and painted into the fill/heal/clone mask.
-        if resp.dragged_by(egui::PointerButton::Primary)
-            || resp.drag_started_by(egui::PointerButton::Primary)
-        {
-            if let Some(p) = resp.interact_pointer_pos() {
+        // Ink from the moment the PRIMARY button goes down on the canvas
+        // (2026-10-13, user: 「操作感觉也不连贯」): egui reports a drag only
+        // once the pointer has travelled ~6 px, and a press that stayed put
+        // only as a click on RELEASE, so a stroke used to start late and a dab
+        // appeared only when the button came up. Primary only — a secondary
+        // or middle drag is the caller's pan — and never with Space held, the
+        // pan chord, whose press frame comes before the caller sees a drag.
+        let down = resp.is_pointer_button_down_on()
+            && resp.ctx.input(|i| i.pointer.primary_down() && !i.key_down(egui::Key::Space));
+        if down {
+            if let Some(p) = resp.interact_pointer_pos().or(resp.hover_pos()) {
                 let cur = to_mask(p);
                 let r = brush_at(p);
                 match self.paint_last {
                     Some(prev) => {
-                        stamped = stamp_line_px(m, prev, cur, r, display_px);
+                        stamped = stamp_line_px(m, prev, cur, r, display_px, tip);
                         if let Some(g) = gray.as_mut() {
-                            stamp_line_gray(g, prev, cur, r, gray_v);
+                            stamp_line_gray(g, prev, cur, r, gray_v, tip);
                         }
                     }
-                    // First stroke event: connect from the PRESS ORIGIN —
-                    // drag_started fires ~6 px in, and a lone dot at the
-                    // current pointer dropped the stroke's lead-in.
+                    // First stroke frame: from the PRESS ORIGIN (on the press
+                    // frame itself that is the pointer, so a still press
+                    // stamps one dab at once).
                     None => {
                         let start = ui_press_origin(resp).map(&to_mask).unwrap_or(cur);
-                        stamped = stamp_line_px(m, start, cur, r, display_px);
+                        stamped = stamp_line_px(m, start, cur, r, display_px, tip);
                         if let Some(g) = gray.as_mut() {
-                            stamp_line_gray(g, start, cur, r, gray_v);
+                            stamp_line_gray(g, start, cur, r, gray_v, tip);
                         }
                         grow(&mut self.mask_dirty_rect, start, cur, r);
                     }
@@ -122,20 +134,7 @@ impl AutoShadeApp {
                 self.paint_last = Some(cur);
             }
         } else {
-            // A quick tap is a CLICK to egui (<6 px / <0.8 s — never a drag):
-            // stamp a single dot so marking dust spots doesn't require a smear.
-            if resp.clicked()
-                && let Some(p) = resp.interact_pointer_pos()
-            {
-                let cur = to_mask(p);
-                let r = brush_at(p);
-                stamped = stamp_dot_px(m, cur, r, display_px);
-                if let Some(g) = gray.as_mut() {
-                    stamp_dot_gray(g, cur, r, gray_v);
-                }
-                grow(&mut self.mask_dirty_rect, cur, cur, r);
-            }
-            // No stroke is in flight on any non-drag frame — clearing here
+            // No stroke is in flight while the button is up — clearing here
             // (not just on drag_stopped) also covers strokes interrupted by
             // Esc / hold-B / an Alt source-pick, whose drag_stopped frame
             // never reaches this handler and used to leave a stale anchor
@@ -915,6 +914,58 @@ impl AutoShadeApp {
     /// over one value is house precedent — global and per-mask Exposure), so
     /// the tooltip discloses the sharing rather than pretending there are two
     /// brushes.
+    /// The brush's footprint where it will land (2026-10-13, user: 「点了之后
+    /// 不知道大小」): a ring of the brush's radius under the pointer — dark
+    /// outside, light inside, so it reads on sky and on shadow alike — with
+    /// a centre dot, in place of the OS cursor. For a second after the size
+    /// changes ([ / ] or the slider) the ring also shows with the size beside
+    /// it, at the canvas centre when the pointer is off the canvas. Erasing
+    /// marks the centre with a minus.
+    pub(crate) fn draw_brush_cursor(&self, ui: &egui::Ui, resp: &egui::Response, rect: egui::Rect) {
+        let now = ui.input(|i| i.time);
+        let resized = self.brush_resized_at.is_some_and(|t| now - t < BRUSH_SIZE_FLASH_S);
+        let Some(c) = resp.hover_pos().or_else(|| resized.then(|| rect.center())) else { return };
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+        }
+        let p = ui.painter_at(rect);
+        let r = self.brush;
+        p.circle_stroke(c, r, egui::Stroke::new(3.0, egui::Color32::from_black_alpha(150)));
+        p.circle_stroke(c, r, egui::Stroke::new(1.25, egui::Color32::from_white_alpha(235)));
+        // Lightroom's second ring: where the feather starts to fade.
+        let inner = r * (1.0 - self.brush_feather);
+        if self.brush_feather > 0.005 && inner > 2.0 {
+            p.circle_stroke(c, inner, egui::Stroke::new(1.0, egui::Color32::from_white_alpha(140)));
+        }
+        if self.mask_brush.is_some_and(|(_, erase)| erase) {
+            let s = (r * 0.35).clamp(3.0, 8.0);
+            p.line_segment([c - egui::vec2(s, 0.0), c + egui::vec2(s, 0.0)], egui::Stroke::new(1.5, egui::Color32::WHITE));
+        } else {
+            p.circle_filled(c, 1.5, egui::Color32::WHITE);
+        }
+        if resized {
+            let label = format!("{} {:.0}", tr(self.lang, "Brush size"), r);
+            let at = c + egui::vec2(0.0, r + 8.0);
+            let font = egui::TextStyle::Small.resolve(ui.style());
+            p.text(at + egui::vec2(1.0, 1.0), egui::Align2::CENTER_TOP, &label, font.clone(), egui::Color32::from_black_alpha(200));
+            p.text(at, egui::Align2::CENTER_TOP, &label, font, egui::Color32::WHITE);
+            // Keep frames coming until the flash has run out.
+            ui.ctx().request_repaint();
+        }
+    }
+
+    /// The tip every brush paints with: the Feather and Flow dials beside
+    /// Brush size (both shared by every brush, as the radius is).
+    pub(crate) fn brush_tip(&self) -> BrushTip {
+        BrushTip { feather: self.brush_feather, flow: self.brush_flow }
+    }
+
+    /// Set the one brush radius, clamped to its range, and flash the ring.
+    pub(crate) fn set_brush(&mut self, radius: f32, now: f64) {
+        self.brush = radius.clamp(BRUSH_R_MIN, BRUSH_R_MAX);
+        self.brush_resized_at = Some(now);
+    }
+
     pub(crate) fn brush_size_slider(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         // The band the slider occupies, read off the layout cursor before and
@@ -923,16 +974,43 @@ impl AutoShadeApp {
         #[cfg(test)]
         let before = ui.cursor();
         // The radius is live tool state, never a recipe field: no dirty flag,
-        // no redevelop — hence the discarded `changed`.
-        Self::slider_hinted(
+        // no redevelop — a change only flashes the ring on the canvas.
+        let mut radius = self.brush;
+        if Self::slider_hinted(
             ui,
             lang,
             tr(lang, "Brush size"),
-            &mut self.brush,
-            4.0,
-            80.0,
+            &mut radius,
+            BRUSH_R_MIN,
+            BRUSH_R_MAX,
             30.0,
             tr(lang, "One radius for every brush: the mask brush and the Fill / Heal / Stamp brush are the same size ([ / ] move it too)"),
+        ) {
+            let now = ui.input(|i| i.time);
+            self.set_brush(radius, now);
+        }
+        // Feather and Flow (2026-10-13): Lightroom's two brush dials, shared
+        // by every brush like the radius. Feather fades the disc's outer part
+        // (the inner ring on the canvas marks where the fade starts); Flow is
+        // how much one pass lays down, so a low flow builds up stroke by
+        // stroke. The defaults are the hard full-strength brush of before.
+        Self::slider_pct_hinted(
+            ui,
+            lang,
+            tr(lang, "Feather"),
+            &mut self.brush_feather,
+            1.0,
+            0.0,
+            tr(lang, "How soft the brush edge is: 0 = a hard edge, 100 = fading from the centre. The inner ring on the image marks where the fade starts."),
+        );
+        Self::slider_pct_hinted(
+            ui,
+            lang,
+            tr(lang, "Flow"),
+            &mut self.brush_flow,
+            1.0,
+            1.0,
+            tr(lang, "How much one pass lays down: 100 = full strength at once; lower builds up gradually as you paint over the same place."),
         );
         #[cfg(test)]
         {
@@ -1033,7 +1111,7 @@ impl AutoShadeApp {
     pub(crate) fn retouch_panel(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang; // Copy — never borrows self, safe inside egui closures.
         ui.add_space(SPACE_LG);
-        panel_heading(ui, tr(lang, "Retouch"), |_| {});
+        panel_heading(ui, tr(lang, "Retouch"), false, |_| {});
 
         // Whole-image Reimagine + reverse-fit MOVED to the AI panel (R22 #4,
         // panels/ai.rs): they are AI develop verbs, and living here put them

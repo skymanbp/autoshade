@@ -115,7 +115,8 @@ impl AutoShadeApp {
         // Restore the theme and re-apply it — main() installed the Dark
         // default before prefs were readable (same shape as the greeting).
         app.theme = prefs.theme;
-        install_theme(&app.egui_ctx, app.theme);
+        app.accent = prefs.accent;
+        install_look(&app.egui_ctx, app.theme, app.accent);
         // The greeting was set by default() BEFORE the language was known —
         // re-issue it, or a Chinese install opens with one English line.
         app.status =
@@ -2263,6 +2264,7 @@ impl AutoShadeApp {
         self.wb_picking = false;
         self.range_picking = None;
         self.point_color_picking = false;
+        self.lens_focus_picking = false;
         self.placing_mask = None;
         self.place_start = None;
         self.crop_drag = None;
@@ -2544,6 +2546,10 @@ impl AutoShadeApp {
             // baked master (2026-10-01): the live card and every stored one.
             && self.recipe.pixel_layers.is_empty()
             && self.variants.iter().all(|v| v.recipe.pixel_layers.is_empty())
+            // …and so is a lens blur's depth map (2026-10-13): estimated in
+            // the frame the photo had, its texels would not follow a turn.
+            && self.recipe.lens_blur.is_none()
+            && self.variants.iter().all(|v| v.recipe.lens_blur.is_none())
     }
 
     /// Turn the open photo by `delta` clockwise quarter turns — ONE undo step,

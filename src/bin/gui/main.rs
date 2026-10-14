@@ -56,6 +56,8 @@ mod canvas;
 mod export;
 mod masks;
 mod panels;
+mod side_panel;
+mod window_chrome;
 mod workers;
 use model::*;
 use persist::*;
@@ -64,6 +66,7 @@ use headings::*;
 use theme::*;
 use util::*;
 use app::*;
+use side_panel::*;
 
 
 
@@ -291,6 +294,8 @@ fn main() -> eframe::Result<()> {
             // usable canvas; wrapping (not clipping) covers everything above.
             .with_min_inner_size([980.0, 620.0])
             .with_title("AutoShade")
+            // Windows: the toolbar is the title bar (`window_chrome.rs`).
+            .with_decorations(!window_chrome::CUSTOM_CHROME)
             .with_icon(std::sync::Arc::new(app_icon())),
         // The develop STORE already follows AUTOSHADE_DATA_DIR; the eframe
         // prefs file (last library, theme, window geometry) did not, so a

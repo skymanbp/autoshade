@@ -53,6 +53,7 @@ mod develop;
 mod export;
 mod geometry;
 mod layers;
+mod lens_blur;
 mod luma;
 mod mask_falloff;
 mod mask_raster;
@@ -140,6 +141,7 @@ pub use mask_raster::{
 };
 pub(crate) use mask_raster::{sample_gray_norm};
 pub use layers::PixelLayer;
+pub use lens_blur::LensBlur;
 use mask_raster::{
     MaskRasterSnapshot, best_effort_mask_raster_snapshot, load_mask_bitmap,
     load_mask_raster_snapshot,

@@ -1762,6 +1762,16 @@ pub(crate) fn carry_over_unrepresentable(
     // nothing re-stamps it per photo. A refine that dropped it would silently
     // delete a solved field the user can see in the canvas.
     recipe.colour_field = base.colour_field.clone();
+    // …and so does every other engine-only carrier with no `crs:` key
+    // (2026-10-13): the imported spot removals, the generative-fill layers and
+    // the AI lens blur. Each is pixels or geometry measured from THIS photo,
+    // the schema never asks for them, and the GUI lands a refine by replacing
+    // the card's recipe whole — so a refine without these lines silently
+    // deleted the removals and the layers. Pinned from the registry by
+    // `every_crs_less_engine_carrier_survives_a_refine`.
+    recipe.retouch = base.retouch.clone();
+    recipe.pixel_layers = base.pixel_layers.clone();
+    recipe.lens_blur = base.lens_blur.clone();
     recipe.post_crop_vignette = base.post_crop_vignette;
     recipe.post_crop_vignette_mid = base.post_crop_vignette_mid;
     recipe.post_crop_vignette_feather = base.post_crop_vignette_feather;
@@ -4260,6 +4270,63 @@ mod guard_tests {
         assert_eq!(fresh.schema_era, crate::recipe::SCHEMA_ERA);
     }
 
+    /// The `crs:`-less engine carriers survive a refine (2026-10-13). They are
+    /// the rows `carried_effects_survive_a_refine` leaves to tests of their
+    /// own: no sidecar property, nothing re-stamps them per photo, and the
+    /// response schema never names them — the refine's carry-over is their
+    /// only way home. Until this test the imported spot removals and the
+    /// generative-fill layers had no carry line at all, and an AI refine
+    /// deleted them from the card.
+    ///
+    /// MUTATION: delete any one of the carry lines for `retouch`,
+    /// `pixel_layers`, `colour_field` or `lens_blur` and this names it.
+    #[test]
+    fn every_crs_less_engine_carrier_survives_a_refine() {
+        use crate::advisor::catalogue::{Shape, RECIPE_CONTROLS};
+        let all: Vec<&str> = RECIPE_CONTROLS
+            .iter()
+            .filter(|c| c.engine_only && c.shape == Shape::EngineCarrier && !c.crs.is_owned())
+            .map(|c| c.name)
+            .collect();
+        // The whole class, so a new row fails here until it is placed. Five
+        // have a way home of their own: `lens_profile` (honouring the
+        // proposal's opinion), `upright_transform`, `look` and
+        // `explicit_zero` each have a carry line above, and `base_curve` is
+        // re-stamped by `produce_recipe` for every photo. The other four are
+        // probed below.
+        assert_eq!(
+            all,
+            [
+                "upright_transform",
+                "explicit_zero",
+                "look",
+                "base_curve",
+                "lens_profile",
+                "retouch",
+                "pixel_layers",
+                "lens_blur",
+                "colour_field"
+            ],
+            "a new crs-less carrier needs a carry line and a probe value here"
+        );
+        let rows = ["retouch", "pixel_layers", "lens_blur", "colour_field"];
+        let base = EditRecipe {
+            retouch: vec![crate::retouch::RetouchArea::default()],
+            pixel_layers: vec![crate::render::PixelLayer { path: "layer.png".into(), ..Default::default() }],
+            lens_blur: Some(crate::render::LensBlur { depth_map: "depth.png".into(), ..Default::default() }),
+            colour_field: Some(crate::recipe::ColourField::default()),
+            ..Default::default()
+        };
+        let field = |r: &EditRecipe, name: &str| serde_json::to_value(r).ok().and_then(|v| v.get(name).cloned());
+        let neutral = EditRecipe::default();
+        let mut proposed = EditRecipe { exposure_ev: 0.4, ..Default::default() };
+        carry_over_unrepresentable(&mut proposed, &base, LensOpinion::default(), None);
+        for name in rows {
+            assert_ne!(field(&base, name), field(&neutral, name), "{name}: the probe must move the field");
+            assert_eq!(field(&proposed, name), field(&base, name), "{name}: a refine dropped it");
+        }
+    }
+
     /// R25 B2: every `Tier::CarriedOnly` global survives a Refine.
     ///
     /// These are the one class of recipe value with NO other way back: the
@@ -5093,16 +5160,19 @@ mod guard_tests {
         // Case must fold: the filesystem collides DSC with dsc even though
         // the strings differ.
         let c = names.claim(Path::new("D:/roll3/dsc00001.arw"), "developed", "tif");
-        assert_eq!(a, PathBuf::from("out").join("DSC00001.developed.tif"));
-        assert_eq!(b, PathBuf::from("out").join("DSC00001 (2).developed.tif"));
-        assert_eq!(c, PathBuf::from("out").join("dsc00001 (3).developed.tif"));
+        // An un-rooted batch delivers into the configured delivery root, which
+        // is `out` only while the machine's settings leave it unset.
+        let out = crate::config::delivery_root();
+        assert_eq!(a, out.join("DSC00001.developed.tif"));
+        assert_eq!(b, out.join("DSC00001 (2).developed.tif"));
+        assert_eq!(c, out.join("dsc00001 (3).developed.tif"));
         // Exactly the deviations are disclosed; the first claimant is silent.
         assert_eq!(names.renamed.len(), 2);
         assert!(names.renamed[0].contains("DSC00001 (2).developed.tif"));
         assert!(names.renamed[0].contains("roll2"), "the SOURCE photo is named");
         // A distinct stem stays untouched — bare name, no disclosure.
         let d = names.claim(Path::new("D:/roll1/DSC00002.ARW"), "developed", "tif");
-        assert_eq!(d, PathBuf::from("out").join("DSC00002.developed.tif"));
+        assert_eq!(d, out.join("DSC00002.developed.tif"));
         assert_eq!(names.renamed.len(), 2);
     }
 
@@ -8007,6 +8077,7 @@ mod tests {
             denoise_raw_script: String::new(),
             weights_dir: String::new(),
             segment_script: String::new(),
+            depth_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),
             describe_script: String::new(),

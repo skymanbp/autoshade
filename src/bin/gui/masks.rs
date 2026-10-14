@@ -2,6 +2,14 @@
 
 use super::*;
 
+/// Write a preview to a per-process temp PNG a model sidecar reads — the
+/// input half every original-frame sidecar run shares (segmentation, depth).
+pub(crate) fn stage_preview_png(base: &image::DynamicImage, tag: &str) -> anyhow::Result<PathBuf> {
+    let tmp = std::env::temp_dir().join(format!("autoshade_{tag}_{}.png", std::process::id()));
+    base.to_rgb8().save(&tmp).map_err(|e| anyhow::anyhow!("write the {tag} input {}: {e}", tmp.display()))?;
+    Ok(tmp)
+}
+
 impl AutoShadeApp {
     /// Run the AI segmentation sidecar on the ORIGINAL-frame preview and attach
     /// the resulting raster as a Bitmap local mask (gap batch A②). The AI only
@@ -32,11 +40,7 @@ impl AutoShadeApp {
                     // The sidecar sees the ORIGINAL-frame preview — the space recipe
                     // masks live in. Preview resolution is enough: the engine samples
                     // the raster bilinearly in normalised coords at any render size.
-                    let mut tmp = std::env::temp_dir();
-                    tmp.push(format!("autoshade_seg_{}_{target}.png", std::process::id()));
-                    base.to_rgb8()
-                        .save(&tmp)
-                        .map_err(|e| anyhow::anyhow!("write segmentation input {}: {e}", tmp.display()))?;
+                    let tmp = stage_preview_png(&base, &format!("seg-{target}"))?;
                     // A FRESH claimed name per run (mask-sky.png, -2, …):
                     // rewriting one fixed file replaced bytes a SAVED recipe
                     // still referenced before any save — the same corruption
@@ -140,8 +144,8 @@ impl AutoShadeApp {
                 }
                 // An ellipse IS its disk — 84 of the library's 121 areas.
                 None => {
-                    stamp_dot_px(canvas, c, r, image::Rgba([255, 64, 64, 160]));
-                    stamp_dot_gray(gray, c, r, 255);
+                    stamp_dot_px(canvas, c, r, image::Rgba([255, 64, 64, 160]), BrushTip::HARD);
+                    stamp_dot_gray(gray, c, r, 255, BrushTip::HARD);
                 }
             }
         }

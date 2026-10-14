@@ -123,7 +123,7 @@ fn the_export_names_the_globals_the_sidecar_cannot_carry() {
     // worse half, which is what a disclosure is for. 2026-10-01 adds
     // `pixel_layers`, declared right after it: a generative fill's layer,
     // which no sidecar has an element for on either path.
-    vec!["upright_transform", "look", "base_curve", "lens_profile", "retouch", "pixel_layers", "colour_field"],
+    vec!["upright_transform", "look", "base_curve", "lens_profile", "retouch", "pixel_layers", "lens_blur", "colour_field"],
     );
 }
 

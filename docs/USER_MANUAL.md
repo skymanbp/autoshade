@@ -283,12 +283,36 @@ Buttons follow one vocabulary: the gold button in a group is its main action
 (Export on the toolbar, AI Analyze, Reverse-fit recipe, Apply in a brush
 session, Save settings), icon-only buttons are squares as tall as the text
 buttons beside them, and rows of equal actions in the side panels sit in
-aligned columns. These rows share the prompt fields' 420 px readable ceiling
-and stay left-aligned when the panel is wider; the panel itself can still
-grow for the curve and HSL editors. The side panel reads in three levels: a
+aligned columns. The controls panel keeps the width you drag it to — opening
+a fold never widens it — between 280 px and the width at which its column is
+the prompt fields' 420 px readable ceiling, so every row and fold ends on the
+same right edge. On Windows the toolbar is also the window's title bar: drag
+its empty space to move the window, double-click it to maximize, and use the
+minimize / maximize / close buttons at its right end; the window's edges
+resize it. A slider is laid as in Lightroom: its name on the left and
+its value on the right of one line, a thin rail the width of the column under
+them; double-click or right-click the rail or the name to reset it, hover it
+and press ↑/↓ to nudge it, or click the value to type one. **Color Grading**
+is drawn as Lightroom's colour wheels: **3-way** shows the midtone wheel over
+the shadow and highlight wheels, **Global** one wheel for the whole picture;
+the angle is the hue, the distance from the centre the saturation, Shift
+drags finely and a double-click returns a wheel to neutral, with each region's
+Luminance under its wheel and Blending / Balance under all three. **Lens
+Blur** blurs a photo by distance, as a wide-open lens would: **🤖 Estimate
+depth** runs a local depth model (MoGe-2; the first run downloads about 1.3 GB)
+over the photo, then **🎯 Pick focus** and a click on the image choose what
+stays sharp — everything nearer and farther blurs by how far it is from that
+distance, more the farther. **Blur amount** sets the strongest blur and
+**Focus range** how deep the sharp zone is; 👁 mutes it and 🗑 removes it. The
+blur renders on the canvas and in every export from this app, but a Lightroom
+sidecar has no place for it, so the save line names it; it is not pasted onto
+other photos (each needs its own depth), and a photo with a lens blur cannot
+be rotated until it is removed. The side panel
+reads in three levels: a
 panel title (AI, Develop, Retouch) in large type over a short gold rule, group
-heads in gold with a small tick (in the AI panel, **Analysis & References** and
-**Generate & Reverse-fit**), and the folds under them; groups are set apart
+heads as small spaced grey captions (in the AI panel, **Analysis & References** and
+**Generate & Reverse-fit**), and the folds under them, each opened by a
+chevron and drawn as a card while open; groups are set apart
 by space rather than lines. A glyph in front of a label always means
 the same thing —
 🤖 an AI verb, ✓ finish, ✕ cancel, ＋ add, ↺ reset, 🗂 a folder, 🖌 paint, 💧
@@ -447,7 +471,14 @@ none existed carries no removals at all, and the save line names that.
 Each of Generative Fill, Heal and Clone Stamp carries its own **🖌 Paint area**
 / **Clear area** row and its own painted area — what you paint for one tool is
 not what another reads — and the **Brush size** slider appears under whichever
-brush is armed. A generative fill does not touch the card's pixels. The model is shown the active
+brush is armed. Every brush shows as a ring of its own size in place of the
+pointer, inks the moment the button goes down, and flashes its size for a
+second when `[` / `]` (each press about 15 %) or the slider changes it; the
+radius runs from 4 to 200 screen pixels. **Feather** and **Flow** under Brush
+size are shared by every brush: Feather softens the outer part of the disc (an
+inner ring on the canvas marks where the fade starts), Flow is how much one pass
+lays down so a low flow builds up as you go over the same place; their defaults,
+0 and 100, are the hard full-strength brush of earlier versions. A generative fill does not touch the card's pixels. The model is shown the active
 card's developed picture — its sliders and masks applied, in the uncropped
 frame the brush paints in — the painted area is regenerated (an empty prompt
 removes it), and the result lands as a **layer** over that card's develop: the
@@ -678,6 +709,11 @@ settings and the AI Style, Strength, and Reverse-fit strength dials — never
 light it. The AI header lights only for a verdict on screen or a typed Direction.
 The Export header carries no ●; hover over the toolbar's Export button to read
 the current delivery summary.
+
+An analysis's verdict, rationale and deep-thinking working sit in one box at
+the top of the Analysis fold, about eight lines tall; a longer analysis scrolls
+inside it and adds **View full text…**, which opens the whole text in a
+window you can move, resize and copy from.
 
 **🤖 AI Denoise on export** runs the AI denoise inside every full-resolution
 delivery — a RAW on its sensor mosaic, a baked source through SCUNet — at the
@@ -1096,7 +1132,7 @@ kept in the local cache rather than committed to the repository.
 | Deterministic render and manual develop, including `apply` | Full vision-backed `analyze` / `auto` proposals and visual model review |
 | Local `match` inverse rendering | `match --style-prompt`, `--ai-judge`, or `--deep` |
 | XMP read/write, masks, curves, and GUI sliders | Generative `reimagine` / `retouch` |
-| AI denoise (DRUNet on the RAW mosaic, SCUNet on baked sources) and local BiRefNet/U²-Net, OneFormer, and SAM masks | Automatic target detection in `heal`; a supplied mask works offline |
+| AI denoise (DRUNet on the RAW mosaic, SCUNet on baked sources), local BiRefNet/U²-Net, OneFormer, and SAM masks, and the MoGe-2 depth map behind Lens Blur | Automatic target detection in `heal`; a supplied mask works offline |
 | Style indexing and retrieval | |
 
 Without the vision role, the advisor can fall back to its disclosed histogram

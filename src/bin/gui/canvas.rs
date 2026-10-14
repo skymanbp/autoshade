@@ -735,11 +735,18 @@ impl AutoShadeApp {
             self.handle_range_pick(ui, &resp, xf);
         } else if self.point_color_picking {
             self.handle_point_color_pick(ui, &resp, xf);
+        } else if self.lens_focus_picking {
+            self.draw_lens_focus(ui, xf);
+            self.handle_lens_focus_pick(ui, &resp, xf);
         } else if self.clone_mode {
             self.handle_clone(ui, &resp, xf);
             self.ensure_mask_tex(ui.ctx());
             if let Some(t) = &self.mask_tex {
                 ui.painter_at(rect).image(t.id(), rect, uv, egui::Color32::WHITE);
+            }
+            // Alt is the source pick, with its own crosshair.
+            if !ui.input(|i| i.modifiers.alt) {
+                self.draw_brush_cursor(ui, &resp, rect);
             }
         } else if self.paint_mode {
             self.handle_paint(&resp, xf);
@@ -747,6 +754,7 @@ impl AutoShadeApp {
             if let Some(t) = &self.mask_tex {
                 ui.painter_at(rect).image(t.id(), rect, uv, egui::Color32::WHITE);
             }
+            self.draw_brush_cursor(ui, &resp, rect);
         } else {
             // The selected mask's on-image knobs take priority over box-select
             // (a knob hit means "edit the mask", never "start a region").
@@ -868,16 +876,22 @@ impl AutoShadeApp {
     /// card's own pixel source: the source neutral, or a baked master): WB
     /// runs before develop, so the solve must see pre-develop pixels, not
     /// the current edit.
-    pub(crate) fn handle_wb_pick(&mut self, ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) {
+    /// The one door every click-on-the-photo tool shares: a crosshair while
+    /// armed, and on a click the point in the ORIGINAL frame (the frame
+    /// `base_preview`, the develop and every raster live in), mapped out of
+    /// the transformed view. `None` until the click.
+    pub(crate) fn clicked_orig_norm(&self, ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) -> Option<(f32, f32)> {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         if !resp.clicked() {
-            return;
+            return None;
         }
-        let Some(q) = resp.interact_pointer_pos() else { return };
-        let (nx, ny) = xf.to_norm(q);
-        // base_preview is the ORIGINAL frame — map out of the transformed view.
+        let (nx, ny) = xf.to_norm(resp.interact_pointer_pos()?);
         let ((bw, bh), deg, dist) = self.geom_ctx();
-        let (nx, ny) = view_norm_to_orig(nx, ny, (bw, bh), deg, &dist);
+        Some(view_norm_to_orig(nx, ny, (bw, bh), deg, &dist))
+    }
+
+    pub(crate) fn handle_wb_pick(&mut self, ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) {
+        let Some((nx, ny)) = self.clicked_orig_norm(ui, resp, xf) else { return };
         let px = {
             let Some(base) = &self.base_preview else { return };
             let Some(px) = sample_5x5_mean(base, nx, ny) else { return };
@@ -907,19 +921,11 @@ impl AutoShadeApp {
     /// shared through `overlay_ref`: with the overlay on, a click is a 5×5
     /// read; a miss pays one preview-sized develop ≈ one slider tick.
     pub(crate) fn handle_range_pick(&mut self, ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-        if !resp.clicked() {
-            return;
-        }
-        let Some(q) = resp.interact_pointer_pos() else { return };
+        let Some((nx, ny)) = self.clicked_orig_norm(ui, resp, xf) else { return };
         let Some(mi) = self.range_picking.filter(|&i| i < self.recipe.masks.len()) else {
             self.range_picking = None; // stale index (mask deleted mid-pick)
             return;
         };
-        let (nx, ny) = xf.to_norm(q);
-        // develop_preview works in the ORIGINAL frame — map out of the view.
-        let ((bw, bh), deg, dist) = self.geom_ctx();
-        let (nx, ny) = view_norm_to_orig(nx, ny, (bw, bh), deg, &dist);
         let smp = {
             let Some(base) = self.base_preview.clone() else { return };
             // The PREFIX reference (masks before this one — the engine
@@ -980,15 +986,7 @@ impl AutoShadeApp {
     /// and the film edge are that build's too (no geometry stage, the canvas's
     /// own film edge), and the click maps back to the original frame first.
     pub(crate) fn handle_point_color_pick(&mut self, ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-        if !resp.clicked() {
-            return;
-        }
-        let Some(q) = resp.interact_pointer_pos() else { return };
-        let (nx, ny) = xf.to_norm(q);
-        // develop_preview works in the ORIGINAL frame — map out of the view.
-        let ((bw, bh), deg, dist) = self.geom_ctx();
-        let (nx, ny) = view_norm_to_orig(nx, ny, (bw, bh), deg, &dist);
+        let Some((nx, ny)) = self.clicked_orig_norm(ui, resp, xf) else { return };
         let px = {
             let Some(base) = self.base_preview.clone() else { return };
             let reference = autoshade::render::point_color_sampling_recipe(&self.recipe);

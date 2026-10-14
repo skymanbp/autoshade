@@ -335,12 +335,39 @@ pub(crate) fn prompt_field(ui: &mut egui::Ui, buf: &mut String, hint: &str) -> e
 /// field set it covers; two of them are named methods
 /// ([`AutoShadeApp::ai_section_active`], [`AutoShadeApp::masks_section_active`])
 /// because a header and something else must agree on the answer.
-pub(crate) fn section_title(base: &str, active: bool) -> String {
+pub(crate) fn section_label(base: &str, active: bool) -> String {
     if active {
         format!("{base}  ●")
     } else {
         base.to_string()
     }
+}
+
+/// [`section_label`] as a fold header draws it: the name in the theme's text
+/// colour, the dot a small disc in the accent gold (2026-10-13 — at full size
+/// in the text colour it read as a stray white blob beside every header).
+/// The galley's text is [`section_label`]'s, so a test reading the drawn text
+/// still sees the ●.
+pub(crate) fn section_title(base: &str, active: bool) -> egui::WidgetText {
+    let label = section_label(base, active);
+    if !active {
+        return label.into();
+    }
+    let split = base.len();
+    let mut job = egui::text::LayoutJob::default();
+    let text_font = egui::FontId::proportional(TEXT_BODY);
+    job.append(&label[..split], 0.0, egui::TextFormat::simple(text_font, egui::Color32::PLACEHOLDER));
+    job.append(
+        &label[split..],
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::proportional(TEXT_BODY * 0.6),
+            color: current_theme().colors().accent_text,
+            valign: egui::Align::Center,
+            ..Default::default()
+        },
+    );
+    job.into()
 }
 
 /// "This mask is doing something": the ENGINE's own non-neutrality rule plus the
@@ -513,6 +540,7 @@ pub(crate) fn xmp_loss_line(
             "lens_profile" => tr(lang, "lens profile correction").to_string(),
             "colour_field" => tr(lang, "colour field").to_string(),
             "pixel_layers" => tr(lang, "fill layers").to_string(),
+            "lens_blur" => tr(lang, "lens blur").to_string(),
             other => other.to_string(),
         });
     }
@@ -1532,76 +1560,123 @@ pub(crate) fn build_preview(
     PreviewDone { base, recipe, rgb, after, histogram, clipping, thumb }
 }
 
-/// Stamp a filled brush dot into the paint mask (painted = translucent red).
-/// One brush dot writing an arbitrary pixel — the shared kernel behind the
-/// classic red paint stamp and the mask-brush ERASE stamp (fully clear).
-/// Reports whether any pixel was written, including at/outside image edges.
-pub(crate) fn stamp_dot_px(m: &mut image::RgbaImage, c: (f32, f32), r: f32, px: image::Rgba<u8>) -> bool {
-    let (w, h) = (m.width() as i32, m.height() as i32);
+/// A brush tip (2026-10-13, user: 画笔羽化 / 流量): how far in from the rim the
+/// disc starts to fade (`feather`, 0 = a hard edge, 1 = fading from the
+/// centre) and how much of the target one dab lays down (`flow`, 1 = all of
+/// it at once). Lightroom's two brush dials. [`BrushTip::HARD`] is the old
+/// hard full-strength disc exactly: the weight is 1 inside the disc and the
+/// blend then writes the target value itself.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BrushTip {
+    pub(crate) feather: f32,
+    pub(crate) flow: f32,
+}
+
+impl BrushTip {
+    pub(crate) const HARD: BrushTip = BrushTip { feather: 0.0, flow: 1.0 };
+
+    /// This dab's weight at distance `d` from its centre, radius `r`: 1 out
+    /// to the feather's start, a smoothstep to 0 at the rim, scaled by flow.
+    fn weight(self, d: f32, r: f32) -> f32 {
+        let inner = r * (1.0 - self.feather.clamp(0.0, 1.0));
+        let w = if d <= inner {
+            1.0
+        } else {
+            let t = ((r - d) / (r - inner).max(1e-6)).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+        w * self.flow.clamp(0.0, 1.0)
+    }
+}
+
+/// Move `cur` toward `target` by `k` (0..=1); `k == 1` lands on `target`.
+fn blend_toward(cur: u8, target: u8, k: f32) -> u8 {
+    if k >= 1.0 {
+        return target;
+    }
+    (cur as f32 + (target as f32 - cur as f32) * k).round().clamp(0.0, 255.0) as u8
+}
+
+/// Visit every pixel of the disc at `c`, radius `r`, with its tip weight.
+fn for_disc(w: u32, h: u32, c: (f32, f32), r: f32, tip: BrushTip, mut f: impl FnMut(u32, u32, f32)) {
+    let (w, h) = (w as i32, h as i32);
     let (cx, cy) = c;
-    let r2 = r * r;
     let x0 = (cx - r).floor().max(0.0) as i32;
     let x1 = ((cx + r).ceil() as i32).min(w - 1);
     let y0 = (cy - r).floor().max(0.0) as i32;
     let y1 = ((cy + r).ceil() as i32).min(h - 1);
-    let mut wrote = false;
     for y in y0..=y1 {
         for x in x0..=x1 {
-            let (dx, dy) = (x as f32 - cx, y as f32 - cy);
-            if dx * dx + dy * dy <= r2 {
-                m.put_pixel(x as u32, y as u32, px);
-                wrote = true;
+            let d = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt();
+            if d <= r {
+                let k = tip.weight(d, r);
+                if k > 0.0 {
+                    f(x as u32, y as u32, k);
+                }
             }
         }
     }
+}
+
+/// Stamp one brush dab into the paint mask (painted = translucent red). The
+/// kernel behind the red paint stamp and the mask-brush ERASE stamp: a dab
+/// with `px.alpha() == 0` lowers the alpha toward clear and leaves the
+/// colour; any other dab sets the colour and raises the alpha toward
+/// `px`'s. Reports whether any pixel was touched.
+pub(crate) fn stamp_dot_px(m: &mut image::RgbaImage, c: (f32, f32), r: f32, px: image::Rgba<u8>, tip: BrushTip) -> bool {
+    let erase = px[3] == 0;
+    let (w, h) = (m.width(), m.height());
+    let mut wrote = false;
+    for_disc(w, h, c, r, tip, |x, y, k| {
+        let p = m.get_pixel_mut(x, y);
+        let a = blend_toward(p[3], px[3], k);
+        *p = if erase { image::Rgba([p[0], p[1], p[2], a]) } else { image::Rgba([px[0], px[1], px[2], a]) };
+        wrote = true;
+    });
     wrote
 }
 
-/// The mask-brush gray-buffer twin of [`stamp_dot_px`]: same disc, writing
-/// the WEIGHT (255 = selected, 0 = erased) into the greyscale source of
-/// truth the Apply bakes to a raster.
-pub(crate) fn stamp_dot_gray(g: &mut image::GrayImage, c: (f32, f32), r: f32, v: u8) {
-    let (w, h) = (g.width() as i32, g.height() as i32);
-    let (cx, cy) = c;
-    let r2 = r * r;
-    let x0 = (cx - r).floor().max(0.0) as i32;
-    let x1 = ((cx + r).ceil() as i32).min(w - 1);
-    let y0 = (cy - r).floor().max(0.0) as i32;
-    let y1 = ((cy + r).ceil() as i32).min(h - 1);
-    for y in y0..=y1 {
-        for x in x0..=x1 {
-            let (dx, dy) = (x as f32 - cx, y as f32 - cy);
-            if dx * dx + dy * dy <= r2 {
-                g.put_pixel(x as u32, y as u32, image::Luma([v]));
-            }
-        }
-    }
+/// The mask-brush gray-buffer twin of [`stamp_dot_px`]: the same dab, moving
+/// the WEIGHT (255 = selected, 0 = erased) of the greyscale source of truth
+/// the Apply bakes to a raster toward `v`.
+pub(crate) fn stamp_dot_gray(g: &mut image::GrayImage, c: (f32, f32), r: f32, v: u8, tip: BrushTip) {
+    let (w, h) = (g.width(), g.height());
+    for_disc(w, h, c, r, tip, |x, y, k| {
+        let p = g.get_pixel_mut(x, y);
+        p[0] = blend_toward(p[0], v, k);
+    });
 }
 
-/// Stamp a brush stroke between two points (interpolated dots — no gaps).
+/// The dab centres of a stroke from `a` to `b`: every half radius, so the
+/// discs overlap with no gaps.
+fn stroke_dabs(a: (f32, f32), b: (f32, f32), r: f32) -> impl Iterator<Item = (f32, f32)> {
+    let dist = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+    let steps = (dist / (r * 0.5).max(1.0)).ceil().max(1.0) as i32;
+    (0..=steps).map(move |i| {
+        let t = i as f32 / steps as f32;
+        (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+    })
+}
+
+/// Stamp a brush stroke between two points (interpolated dabs — no gaps).
 pub(crate) fn stamp_line_px(
     m: &mut image::RgbaImage,
     a: (f32, f32),
     b: (f32, f32),
     r: f32,
     px: image::Rgba<u8>,
+    tip: BrushTip,
 ) -> bool {
-    let dist = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
-    let steps = (dist / (r * 0.5).max(1.0)).ceil().max(1.0) as i32;
     let mut wrote = false;
-    for i in 0..=steps {
-        let t = i as f32 / steps as f32;
-        wrote |= stamp_dot_px(m, (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t), r, px);
+    for c in stroke_dabs(a, b, r) {
+        wrote |= stamp_dot_px(m, c, r, px, tip);
     }
     wrote
 }
 
-pub(crate) fn stamp_line_gray(g: &mut image::GrayImage, a: (f32, f32), b: (f32, f32), r: f32, v: u8) {
-    let dist = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
-    let steps = (dist / (r * 0.5).max(1.0)).ceil().max(1.0) as i32;
-    for i in 0..=steps {
-        let t = i as f32 / steps as f32;
-        stamp_dot_gray(g, (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t), r, v);
+pub(crate) fn stamp_line_gray(g: &mut image::GrayImage, a: (f32, f32), b: (f32, f32), r: f32, v: u8, tip: BrushTip) {
+    for c in stroke_dabs(a, b, r) {
+        stamp_dot_gray(g, c, r, v, tip);
     }
 }
 
@@ -1627,9 +1702,23 @@ pub(crate) fn big_decode_gate() -> &'static std::sync::Mutex<()> {
 /// so the answer cannot change under a running process.
 pub(crate) fn segment_helper_available() -> bool {
     static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OK.get_or_init(|| {
+    helper_answer(&OK, |cfg| vec![cfg.segment_script.clone()])
+}
+
+/// The AI lens blur's depth sidecar (`python/depth.py`, 2026-10-13), answered
+/// like the segmentation helper above.
+pub(crate) fn depth_helper_available() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    helper_answer(&OK, |cfg| vec![cfg.depth_script.clone()])
+}
+
+/// The one shape of every `*_helper_available`: each script `scripts` names is
+/// on disk and the configured Python runs, resolved once per process into the
+/// caller's own slot (the answer cannot change under a running process).
+fn helper_answer(slot: &std::sync::OnceLock<bool>, scripts: fn(&autoshade::config::Config) -> Vec<String>) -> bool {
+    *slot.get_or_init(|| {
         let cfg = autoshade::config::Config::load();
-        std::path::Path::new(&cfg.segment_script).exists() && python_available()
+        scripts(&cfg).iter().all(|s| std::path::Path::new(s).exists()) && python_available()
     })
 }
 
@@ -1669,12 +1758,7 @@ fn python_available() -> bool {
 /// the cwd) and the env override is read at launch.
 pub(crate) fn denoise_helper_available() -> bool {
     static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OK.get_or_init(|| {
-        let cfg = autoshade::config::Config::load();
-        std::path::Path::new(&cfg.denoise_script).exists()
-            && std::path::Path::new(&cfg.denoise_raw_script).exists()
-            && python_available()
-    })
+    helper_answer(&OK, |cfg| vec![cfg.denoise_script.clone(), cfg.denoise_raw_script.clone()])
 }
 
 /// Where the persistent 160px thumbnail for `src` lives, or `None` when the

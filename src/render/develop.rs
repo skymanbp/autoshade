@@ -428,6 +428,12 @@ pub(super) fn apply_develop_with_rasters(
             layers::composite(data, w, h, img, layer.opacity);
         }
     }
+    // 10) the AI lens blur (2026-10-13, `lens_blur.rs`), last of all: a lens
+    //     blurs the whole scene in front of it, fill layers included, and it
+    //     reads the depth of what the finished picture shows.
+    if let (Some(lb), Some(depth)) = (r.lens_blur.as_ref().filter(|l| l.draws()), rasters.depth()) {
+        lens_blur::apply(data, w, h, lb, depth);
+    }
 }
 
 /// Render one [`ColourField`] over the frame it is handed, in place.

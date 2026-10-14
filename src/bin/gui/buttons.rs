@@ -197,12 +197,25 @@ pub(crate) fn action_in(
 
 /// The group's one main verb at its own width.
 pub(crate) fn primary(ui: &mut egui::Ui, enabled: bool, text: impl Into<String>) -> egui::Response {
-    place(ui, "primary", None, enabled, primary_text(text), |b| b.fill(PILL))
+    place(ui, "primary", None, enabled, primary_label(text, enabled), |b| primary_fill(b, enabled))
 }
 
 /// The group's one main verb filling one grid cell of the row.
 pub(crate) fn primary_in(ui: &mut egui::Ui, cell: egui::Vec2, enabled: bool, text: impl Into<String>) -> egui::Response {
-    place(ui, "primary", Some(cell), enabled, primary_text(text), |b| b.fill(PILL))
+    place(ui, "primary", Some(cell), enabled, primary_label(text, enabled), |b| primary_fill(b, enabled))
+}
+
+/// A disabled primary is an ordinary disabled button (2026-10-13): egui's
+/// disabled fade over the gold fill made a muddy brown slab — the panel's
+/// loudest colour on a control that cannot be pressed.
+fn primary_fill(b: egui::Button<'static>, enabled: bool) -> egui::Button<'static> {
+    if enabled { b.fill(current_theme().colors().accent_fill) } else { b }
+}
+
+/// …and its label takes the theme's text colour then, not the near-black
+/// made for the gold.
+fn primary_label(text: impl Into<String>, enabled: bool) -> egui::WidgetText {
+    if enabled { primary_text(text) } else { egui::WidgetText::from(text.into()) }
 }
 
 /// A row's one secondary verb, filling the row (one cell of [`columns`] 1).
@@ -220,7 +233,7 @@ pub(crate) fn primary_row(ui: &mut egui::Ui, enabled: bool, text: impl Into<Stri
 /// The primary verb as a builder, for the one row that sizes its button by
 /// hand (the Reimagine prompt row measures it against its field).
 pub(crate) fn primary_button(text: impl Into<String>) -> egui::Button<'static> {
-    egui::Button::new(primary_text(text)).fill(PILL)
+    egui::Button::new(primary_text(text)).fill(current_theme().colors().accent_fill)
 }
 
 /// An armed / selected text state filling one grid cell of the row.

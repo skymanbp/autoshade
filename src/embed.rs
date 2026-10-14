@@ -766,6 +766,7 @@ mod tests {
 
     const DENOISE_RAW_SRC: &str =
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/denoise_raw.py"));
+    const DEPTH_SRC: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/depth.py"));
 
     /// Our own copy of every pinned download. Like `_sidecar.py` it is NOT on
     /// the roster — it pins no model of its own — but every pin on the roster
@@ -776,16 +777,25 @@ mod tests {
     /// The family roster, in one place: a sidecar that fails to enrol here
     /// escapes all four shared contracts below. `describe.py` (S2) is the
     /// fifth member of the family and `denoise_raw.py` (2026-09-15, the
-    /// RAW-domain denoiser) the sixth — `denoise.py` holds the
-    /// `_fetch_verified` gate itself and is pinned by its own module's tests;
-    /// the other five fetch through it and are held to the contracts here.
-    const SIDECARS: [(&str, &str); 5] = [
+    /// RAW-domain denoiser) the sixth, `depth.py` (2026-10-13, the lens-blur
+    /// depth map) the seventh — `denoise.py` holds the `_fetch_verified` gate
+    /// itself and is pinned by its own module's tests; the other six fetch
+    /// through it and are held to the contracts here.
+    const SIDECARS: [(&str, &str); 6] = [
         ("embed.py", EMBED_SRC),
         ("segment.py", SEGMENT_SRC),
         ("correspond.py", CORRESPOND_SRC),
         ("describe.py", DESCRIBE_SRC),
         ("denoise_raw.py", DENOISE_RAW_SRC),
+        ("depth.py", DEPTH_SRC),
     ];
+    /// How many digests each roster member pins at least — the non-vacuity
+    /// floor of the contract below, per file. `depth.py` downloads ONE file
+    /// (MoGe-2's `model.pt`); its architecture is vendored source, not a
+    /// download, so a floor of three would demand pins that do not exist.
+    fn min_digests(what: &str) -> usize {
+        if what == "depth.py" { 1 } else { 3 }
+    }
 
     /// Every pinned model file carries BOTH a sha256 and a byte count, in both
     /// sidecars. A partial pin leaves a live unpinned download path — a
@@ -799,7 +809,8 @@ mod tests {
         for (what, src) in SIDECARS {
             let sha = src.matches("\"sha256\":").count();
             let bytes = src.matches("\"bytes\":").count();
-            assert!(sha >= 3, "{what}: extractor non-vacuity — found {sha} digests");
+            let floor = min_digests(what);
+            assert!(sha >= floor, "{what}: extractor non-vacuity — found {sha} digests, want {floor}+");
             assert_eq!(sha, bytes, "{what}: {sha} digests but {bytes} byte caps");
             // No placeholders left behind from the design document.
             assert!(
@@ -886,7 +897,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(found, 6, "extractor non-vacuity: six pinned model trees");
+        assert_eq!(found, 7, "extractor non-vacuity: seven pinned model trees");
     }
 
     /// `trust_remote_code` downloads and EXECUTES upstream Python through HF's
@@ -903,7 +914,7 @@ mod tests {
         // at once.
         // `_mirror.py` joins the sweep for the reason the shared module did:
         // it names a source for every download the family makes, so a hazard
-        // planted there would reach all six at once.
+        // planted there would reach all seven at once.
         for (what, src) in SIDECARS
             .iter()
             .chain([&("_sidecar.py", SIDECAR_SHARED_SRC), &("_mirror.py", MIRROR_SRC)])

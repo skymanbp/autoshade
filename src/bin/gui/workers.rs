@@ -582,6 +582,7 @@ impl AutoShadeApp {
                 }
                 Msg::StyleBuilt(outcome) => self.on_style_built(lang, *outcome),
                 Msg::Segmented(res) => self.on_segmented(lang, res),
+                Msg::DepthEstimated(res) => self.on_depth_estimated(res),
                 Msg::MaskRefined(res) => self.on_mask_refined(lang, res),
                 Msg::Folder(boxed) => {
                     self.on_folder(lang, *boxed);

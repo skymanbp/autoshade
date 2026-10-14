@@ -285,6 +285,7 @@
             denoise_raw_script: String::new(),
             weights_dir: String::new(),
             segment_script: String::new(),
+            depth_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),
             describe_script: String::new(),

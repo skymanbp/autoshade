@@ -208,7 +208,9 @@
             ..Default::default()
         };
         assert_eq!(asking.export_route(), ExportRoute::Ask);
-        let candidate = PathBuf::from("out").join("DSC00042.developed.jpg");
+        // The out-folder destination is the configured delivery root, `out`
+        // only while the machine's settings leave it unset.
+        let candidate = autoshade::config::delivery_root().join("DSC00042.developed.jpg");
         assert!(
             !candidate.exists(),
             "deciding the route must not have created {}",
@@ -375,4 +377,220 @@
 
         let _ = std::fs::remove_dir_all(&dev);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One frame of the paint canvas (1024 × 768 at the origin of a central
+    /// panel) with `events`; the brush cursor drawn as the canvas draws it.
+    /// The frame's shapes and the cursor egui was asked for.
+    fn paint_frame(
+        app: &mut AutoShadeApp,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        time: f64,
+    ) -> (Vec<egui::epaint::ClippedShape>, egui::CursorIcon, egui::Rect) {
+        let mut canvas = egui::Rect::NOTHING;
+        let out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 850.0))),
+                events,
+                time: Some(time),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(1024.0, 768.0), egui::Sense::click_and_drag());
+                    canvas = rect;
+                    let xf = ViewXform { rect, uv: egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)) };
+                    app.handle_paint(&resp, xf);
+                    app.draw_brush_cursor(ui, &resp, rect);
+                });
+            },
+        );
+        (out.shapes, out.platform_output.cursor_icon, canvas)
+    }
+
+    fn painted_pixels(app: &AutoShadeApp) -> usize {
+        app.mask_paint.as_ref().map_or(0, |m| m.pixels().filter(|p| p[3] > 10).count())
+    }
+
+    /// User report 2026-10-13: 「操作感觉也不连贯」. A press on the canvas inks
+    /// at once — before the pointer moves and before the button comes up —
+    /// where egui's drag (≥ 6 px of travel) and click (on release) used to
+    /// leave the canvas blank. Space held is the pan chord and must not ink.
+    ///
+    /// MUTATION THIS CATCHES: the stroke gated on `dragged_by` again.
+    #[test]
+    fn a_brush_press_inks_before_the_pointer_moves_or_lifts() {
+        let fresh = || {
+            let mut app = AutoShadeApp { paint_mode: true, ..Default::default() };
+            app.mask_paint = Some(image::RgbaImage::new(1024, 768));
+            app
+        };
+        let press = |pos| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut app = fresh();
+        let ctx = egui::Context::default();
+        let (_, _, canvas) = paint_frame(&mut app, &ctx, vec![], 0.0);
+        let at = canvas.center();
+        paint_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(at), press(at)], 0.1);
+        let inked = painted_pixels(&app);
+        assert!(inked > 0, "a still press left the canvas blank until release");
+        // Moving 3 px — under egui's drag threshold — extends the stroke.
+        paint_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(at + egui::vec2(40.0, 0.0))], 0.2);
+        assert!(painted_pixels(&app) > inked, "the stroke did not follow the pointer");
+
+        let mut app = fresh();
+        let ctx = egui::Context::default();
+        paint_frame(&mut app, &ctx, vec![], 0.0);
+        let space = egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        paint_frame(&mut app, &ctx, vec![space, egui::Event::PointerMoved(at), press(at)], 0.1);
+        assert_eq!(painted_pixels(&app), 0, "Space + press is a pan, not a dab");
+    }
+
+    /// User report 2026-10-13: 「点了之后不知道大小」. Over the canvas the brush
+    /// shows as a ring of its own radius in place of the OS cursor; after a
+    /// size change the ring also flashes with the size, at the canvas centre
+    /// when the pointer is elsewhere, and goes away after the flash.
+    ///
+    /// MUTATION THIS CATCHES: the ring drawn at a fixed radius, or the
+    /// cursor left as the crosshair.
+    #[test]
+    fn the_brush_shows_its_size_where_it_will_land() {
+        fn rings(shapes: &[egui::epaint::ClippedShape], r: f32) -> Vec<egui::Pos2> {
+            fn walk(s: &egui::Shape, r: f32, out: &mut Vec<egui::Pos2>) {
+                match s {
+                    egui::Shape::Circle(c) if (c.radius - r).abs() < 0.01 && c.stroke.width > 0.0 => out.push(c.center),
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, r, out)),
+                    _ => {}
+                }
+            }
+            let mut out = Vec::new();
+            shapes.iter().for_each(|c| walk(&c.shape, r, &mut out));
+            out
+        }
+        let mut app = AutoShadeApp { paint_mode: true, ..Default::default() };
+        app.mask_paint = Some(image::RgbaImage::new(1024, 768));
+        app.set_brush(57.0, 0.0);
+        let ctx = egui::Context::default();
+        let (_, _, canvas) = paint_frame(&mut app, &ctx, vec![], 0.0);
+        let at = canvas.center() + egui::vec2(-100.0, 50.0);
+        let (shapes, cursor, _) = paint_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(at)], 0.1);
+        assert!(rings(&shapes, 57.0).iter().any(|c| c.distance(at) < 0.5), "no 57 px ring under the pointer");
+        assert_eq!(cursor, egui::CursorIcon::None, "the ring replaces the OS cursor over the canvas");
+        let texts = drawn_texts(&shapes);
+        assert!(texts.iter().any(|t| t.ends_with(" 57")), "the size flashes beside the ring: {texts:?}");
+
+        // Off the canvas, during the flash: the ring at the centre.
+        let (shapes, _, _) = paint_frame(&mut app, &ctx, vec![egui::Event::PointerGone], 0.2);
+        assert!(rings(&shapes, 57.0).iter().any(|c| c.distance(canvas.center()) < 0.5), "no flash ring at the centre");
+        // …and gone after it.
+        let (shapes, _, _) = paint_frame(&mut app, &ctx, vec![], 5.0);
+        assert!(rings(&shapes, 57.0).is_empty(), "the flash ring outlived its second");
+        // The range clamps.
+        app.set_brush(10_000.0, 6.0);
+        assert_eq!(app.brush, crate::panels::retouch::BRUSH_R_MAX);
+    }
+
+    /// User report 2026-10-13: 「UI 现在最上方 -□x 条，太丑了」. On Windows the
+    /// toolbar is the title bar; its groups must stop short of the three
+    /// window buttons at its right end however narrow the window, and the
+    /// window must be undecorated exactly where the toolbar draws them.
+    ///
+    /// MUTATION THIS CATCHES: the toolbar row taking the full width again
+    /// (a group under the window buttons).
+    #[test]
+    fn the_toolbar_leaves_the_window_buttons_their_corner() {
+        use crate::buttons::DRAWN;
+        for width in [1400.0f32, 1000.0] {
+            let mut app = app_with_every_button(crate::i18n::Lang::Zh);
+            let ctx = egui::Context::default();
+            crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+            DRAWN.with_borrow_mut(Vec::clear);
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 800.0))),
+                    ..Default::default()
+                },
+                |ctx| app.upd_top_bar(ctx),
+            );
+            let limit = width - crate::window_chrome::controls_width();
+            let drawn = DRAWN.with_borrow(|d| d.clone());
+            assert!(!drawn.is_empty(), "the toolbar drew no buttons");
+            for d in &drawn {
+                assert!(
+                    d.rect.right() <= limit + 0.5,
+                    "{width} px: {:?} ends at {:.0}, under the window buttons (from {limit:.0})",
+                    d.label,
+                    d.rect.right()
+                );
+            }
+        }
+        let main = include_str!("../main.rs");
+        assert!(main.contains(".with_decorations(!window_chrome::CUSTOM_CHROME)"), "the frame and the drawn buttons must agree");
+    }
+
+    /// User request 2026-10-13 (画笔羽化 / 流量): Feather fades the disc's
+    /// outer part, Flow scales one dab, and the defaults are the old hard
+    /// full-strength disc to the pixel — what the fill / heal / stamp areas
+    /// and every existing mask were painted with.
+    ///
+    /// MUTATION THIS CATCHES: the weight ignoring feather or flow, or HARD
+    /// no longer landing exactly on the target value.
+    #[test]
+    fn a_brush_tip_feathers_its_rim_and_scales_by_flow() {
+        let red = image::Rgba([255, 64, 64, 160]);
+        let alpha = |tip: BrushTip, x: u32| {
+            let mut m = image::RgbaImage::new(101, 1);
+            stamp_dot_px(&mut m, (50.0, 0.0), 40.0, red, tip);
+            m.get_pixel(x, 0)[3]
+        };
+        // HARD: full target inside, untouched outside — the old disc.
+        assert_eq!(alpha(BrushTip::HARD, 50), 160);
+        assert_eq!(alpha(BrushTip::HARD, 89), 160);
+        assert_eq!(alpha(BrushTip::HARD, 91), 0);
+        // Feather 0.5: full out to 20 px, fading over the outer 20.
+        let soft = BrushTip { feather: 0.5, flow: 1.0 };
+        assert_eq!(alpha(soft, 65), 160, "inside the feather's start");
+        let (near, mid, rim) = (alpha(soft, 72), alpha(soft, 80), alpha(soft, 88));
+        assert!(160 > near && near > mid && mid > rim && rim > 0, "no fade across the rim: {near} {mid} {rim}");
+        // Flow 0.5: one dab lays half; a second over it climbs toward full.
+        let half = BrushTip { feather: 0.0, flow: 0.5 };
+        assert_eq!(alpha(half, 50), 80);
+        let mut m = image::RgbaImage::new(101, 1);
+        stamp_dot_px(&mut m, (50.0, 0.0), 40.0, red, half);
+        stamp_dot_px(&mut m, (50.0, 0.0), 40.0, red, half);
+        assert_eq!(m.get_pixel(50, 0)[3], 120, "flow builds up pass by pass");
+        // Erase moves toward clear by the same weights.
+        let mut g = image::GrayImage::from_pixel(101, 1, image::Luma([255]));
+        stamp_dot_gray(&mut g, (50.0, 0.0), 40.0, 0, half);
+        assert_eq!(g.get_pixel(50, 0)[0], 128);
+    }
+
+    /// The grading wheel (2026-10-13) maps angle → hue and distance →
+    /// saturation and back in the recipe's whole steps: what the puck shows is
+    /// what a drag to that spot writes, a centred puck has no hue, and the
+    /// rim clamps at 100.
+    ///
+    /// MUTATION THIS CATCHES: the y axis not flipped (hues mirrored), or
+    /// saturation not clamped at the rim.
+    #[test]
+    fn a_grade_wheel_point_is_the_hue_and_saturation_it_shows() {
+        use crate::panels::grade_wheel::{wheel_offset, wheel_value};
+        let r = 80.0;
+        for (h, s) in [(0.0, 40.0), (30.0, 100.0), (120.0, 25.0), (210.0, 60.0), (300.0, 85.0), (359.0, 50.0)] {
+            assert_eq!(wheel_value(wheel_offset(h, s, r), r), (h, s), "round trip of hue {h} sat {s}");
+        }
+        assert_eq!(wheel_value(egui::vec2(0.0, -40.0), r), (90.0, 50.0), "up is 90° (screen y grows down)");
+        assert_eq!(wheel_value(egui::Vec2::ZERO, r), (0.0, 0.0));
+        assert_eq!(wheel_value(egui::vec2(500.0, 0.0), r), (0.0, 100.0), "past the rim clamps");
     }

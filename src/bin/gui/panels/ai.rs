@@ -113,9 +113,8 @@ impl AutoShadeApp {
                 ui.make_persistent_id("sec_ai"),
                 true,
             );
-            let title = section_title(tr(lang, "AI"), ai_active);
-            let header = panel_heading(ui, &title, |ui| {
-                state.show_toggle_button(ui, egui::collapsing_header::paint_default_icon);
+            let header = panel_heading(ui, tr(lang, "AI"), ai_active, |ui| {
+                state.show_toggle_button(ui, paint_chevron);
             })
             .on_hover_cursor(egui::CursorIcon::PointingHand);
             if header.clicked() {
@@ -152,54 +151,144 @@ impl AutoShadeApp {
         ui.add_space(SPACE_MD); // fence to the Develop heading below
     }
 
-    /// Sub-area ① continued — the deep-thinking WORKING in a box of its own.
+    /// Sub-area ① continued — the deep-thinking WORKING as a block of its own.
     ///
     /// User feedback 2026-09-11: listed inline in the rationale sentence, the
     /// three R23-4 sentences and the R23-1b pixel-tool line ran the fold to a
-    /// wall of italic text. Here they are a framed box under the sentence,
-    /// bounded to [`THINK_BOX_MAX_H`] and scrolling past it, one row per note
-    /// with the note's SUBJECT as a bold lead and the model's own sentence
-    /// selectable beside it — the arg text rides verbatim, exactly as it did
-    /// inside the sentence (the rationale contract: model prose is never
-    /// reworded on a surface).
+    /// wall of italic text. Here they are a captioned block under the
+    /// sentence, one row per note with the note's SUBJECT as a bold lead and
+    /// the model's own sentence selectable beside it — the arg text rides
+    /// verbatim, exactly as it did inside the sentence (the rationale
+    /// contract: model prose is never reworded on a surface). Its height is
+    /// bounded by the analysis box it sits in (2026-10-13), not by a scroll
+    /// of its own: a scroll inside that box would steal the wheel.
     ///
     /// Drawn only when the caller's split actually took these notes OUT of
-    /// the sentence; on the fallback path they are still in it, and boxing
+    /// the sentence; on the fallback path they are still in it, and drawing
     /// them too would print the working twice.
-    fn thinking_box(&self, ui: &mut egui::Ui, working: &[&autoshade::rationale::Note]) {
+    fn thinking_notes(&self, ui: &mut egui::Ui, working: &[&autoshade::rationale::Note]) {
         use autoshade::rationale::keys;
         let lang = self.lang;
         ui.add_space(SPACE_SM);
         ui.label(egui::RichText::new(tr(lang, "Deep thinking · its working")).small().strong());
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("ai_thinking_box")
-                .max_height(THINK_BOX_MAX_H)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    for n in working {
-                        // The lead is OURS (one catalogue literal per key, so
-                        // the i18n audit sees each); the body is the note's
-                        // single arg, the model's sentence.
-                        let lead = match n.key {
-                            keys::THINK_SCENE => tr(lang, "What it saw:"),
-                            keys::THINK_LOOK => tr(lang, "The look it aimed for:"),
-                            keys::THINK_CRITIQUE => {
-                                tr(lang, "Its own critique against your strength target:")
-                            }
-                            keys::PIXEL_TOOLS => {
-                                tr(lang, "Pixel tools it suggests (nothing was run):")
-                            }
-                            _ => continue,
-                        };
-                        let Some((_, body)) = n.args.first() else { continue };
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(egui::RichText::new(lead).strong());
-                            ui.add(egui::Label::new(body.as_str()).selectable(true));
-                        });
+        for n in working {
+            // The lead is OURS (one catalogue literal per key, so the i18n
+            // audit sees each); the body is the note's single arg, the
+            // model's sentence.
+            let lead = match n.key {
+                keys::THINK_SCENE => tr(lang, "What it saw:"),
+                keys::THINK_LOOK => tr(lang, "The look it aimed for:"),
+                keys::THINK_CRITIQUE => tr(lang, "Its own critique against your strength target:"),
+                keys::PIXEL_TOOLS => tr(lang, "Pixel tools it suggests (nothing was run):"),
+                _ => continue,
+            };
+            let Some((_, body)) = n.args.first() else { continue };
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(lead).strong());
+                ui.add(egui::Label::new(body.as_str()).selectable(true));
+            });
+        }
+    }
+
+    /// Whether the last analysis left anything to read.
+    fn has_analysis_output(&self) -> bool {
+        self.verdict.is_some() || !self.rationale.is_empty()
+    }
+
+    /// What one Analyze run wrote — the verdict, the rationale sentence and
+    /// the deep-thinking working — drawn by both the Analysis fold's bounded
+    /// box and the full-text window, so the two can never disagree.
+    fn analysis_output(&self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        if let Some((d, reasons)) = &self.verdict {
+            // Accept reads calm; anything else (Revise/Reject)
+            // gets the warn colour so it can't be skimmed past.
+            // Matched on the TYPED decision, never its rendered
+            // spelling — the old `starts_with("Accept")` sniff
+            // would have flipped every verdict to warn the moment
+            // the word was translated.
+            let col = if matches!(d, autoshade::advisor::Decision::Accept) {
+                ui.visuals().strong_text_color()
+            } else {
+                ui.visuals().warn_fg_color
+            };
+            let text = trf(
+                lang,
+                "{decision} — {reasons}",
+                &[
+                    ("decision", tr(lang, autoshade::advisor::decision_key(d))),
+                    ("reasons", &reasons.join("; ")),
+                ],
+            );
+            ui.label(egui::RichText::new(text).color(col));
+        }
+        // The deterministic tail renders LOCALIZED when its typed
+        // notes ride along and still match the string's suffix
+        // (L12#2B); any mismatch — a truncation, a disk-restored
+        // develop with no notes — shows the raw English instead
+        // (silent-English fallback, user decision 2026-08-11).
+        //
+        // The typed tail splits in two at draw time (user feedback
+        // 2026-09-11): the deterministic notes stay in the sentence, the
+        // deep-thinking WORKING — the notes only a thinking analysis
+        // produces, see `is_working_note` — draws in a box of its own
+        // under it. The persisted string is untouched (one suffix, five
+        // surfaces); the split is a display decision, and on the fallback
+        // path the working is still inside `shown`, so no box is drawn.
+        let (working, tail): (Vec<_>, Vec<_>) =
+            self.rationale_notes.iter().partition(|n| is_working_note(n.key));
+        let localized = (!self.rationale_notes.is_empty())
+            .then(|| {
+                let det: String = self
+                    .rationale_notes
+                    .iter()
+                    .map(autoshade::rationale::render_one)
+                    .collect();
+                self.rationale.strip_suffix(det.as_str()).map(|prose| {
+                    let mut s = String::from(prose);
+                    for n in &tail {
+                        s.push_str(&trf(lang, n.key, &note_args(n)));
                     }
-                });
-        });
+                    s
+                })
+            })
+            .flatten();
+        let shown = localized.as_deref().unwrap_or(&self.rationale);
+        if !shown.is_empty() {
+            ui.label(
+                egui::RichText::new(format!("“{shown}”"))
+                    .italics()
+                    .weak(),
+            );
+        }
+        if localized.is_some() && !working.is_empty() {
+            self.thinking_notes(ui, &working);
+        }
+    }
+
+    /// The analysis output's full text in a window of its own: movable,
+    /// resizable, scrolling, its text selectable. Not a transient sheet — it
+    /// is a reading pane, so the editor's keys stay live beside it. Closes
+    /// itself once there is nothing to show (a new photo, a cleared result).
+    pub(crate) fn analysis_full_window(&mut self, ctx: &egui::Context) {
+        if !self.show_analysis_full {
+            return;
+        }
+        let mut open = self.has_analysis_output();
+        egui::Window::new(tr(self.lang, "AI analysis · full text"))
+            // Fixed id: the title varies with the language, and egui keys
+            // the window's position and size off the id.
+            .id(egui::Id::new("analysis_full_window"))
+            .collapsible(false)
+            .resizable(true)
+            .default_size(egui::vec2(520.0, 420.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.analysis_output(ui));
+            });
+        self.show_analysis_full = open;
     }
 
     /// Sub-area ① — ANALYSIS (paid API): the verdict and rationale one Analyze
@@ -222,69 +311,30 @@ impl AutoShadeApp {
             // own fold state.
             .open(fold_open_in_tests())
             , |ui| {
-            if let Some((d, reasons)) = &self.verdict {
-                // Accept reads calm; anything else (Revise/Reject)
-                // gets the warn colour so it can't be skimmed past.
-                // Matched on the TYPED decision, never its rendered
-                // spelling — the old `starts_with("Accept")` sniff
-                // would have flipped every verdict to warn the moment
-                // the word was translated.
-                let col = if matches!(d, autoshade::advisor::Decision::Accept) {
-                    ui.visuals().strong_text_color()
-                } else {
-                    ui.visuals().warn_fg_color
-                };
-                let text = trf(
-                    lang,
-                    "{decision} — {reasons}",
-                    &[
-                        ("decision", tr(lang, autoshade::advisor::decision_key(d))),
-                        ("reasons", &reasons.join("; ")),
-                    ],
-                );
-                ui.label(egui::RichText::new(text).color(col));
-            }
-            // The deterministic tail renders LOCALIZED when its typed
-            // notes ride along and still match the string's suffix
-            // (L12#2B); any mismatch — a truncation, a disk-restored
-            // develop with no notes — shows the raw English instead
-            // (silent-English fallback, user decision 2026-08-11).
-            //
-            // The typed tail splits in two at draw time (user feedback
-            // 2026-09-11): the deterministic notes stay in the sentence, the
-            // deep-thinking WORKING — the notes only a thinking analysis
-            // produces, see `is_working_note` — draws in a box of its own
-            // under it. The persisted string is untouched (one suffix, five
-            // surfaces); the split is a display decision, and on the fallback
-            // path the working is still inside `shown`, so no box is drawn.
-            let (working, tail): (Vec<_>, Vec<_>) =
-                self.rationale_notes.iter().partition(|n| is_working_note(n.key));
-            let localized = (!self.rationale_notes.is_empty())
-                .then(|| {
-                    let det: String = self
-                        .rationale_notes
-                        .iter()
-                        .map(autoshade::rationale::render_one)
-                        .collect();
-                    self.rationale.strip_suffix(det.as_str()).map(|prose| {
-                        let mut s = String::from(prose);
-                        for n in &tail {
-                            s.push_str(&trf(lang, n.key, &note_args(n)));
-                        }
-                        s
+            // The analysis output lives in ONE bounded box (2026-10-13, user:
+            // 「思考过程输出有时候太长了会占满屏幕」): the verdict, the rationale
+            // sentence and the deep-thinking working scroll inside
+            // ANALYSIS_BOX_MAX_H, and once they overflow it a verb opens the
+            // whole text in a window of its own (`analysis_full_window`).
+            if self.has_analysis_output() {
+                let out = egui::Frame::group(ui.style())
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("ai_analysis_box")
+                            .max_height(ANALYSIS_BOX_MAX_H)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| self.analysis_output(ui))
                     })
-                })
-                .flatten();
-            let shown = localized.as_deref().unwrap_or(&self.rationale);
-            if !shown.is_empty() {
-                ui.label(
-                    egui::RichText::new(format!("“{shown}”"))
-                        .italics()
-                        .weak(),
-                );
-            }
-            if localized.is_some() && !working.is_empty() {
-                self.thinking_box(ui, &working);
+                    .inner;
+                #[cfg(test)]
+                {
+                    self.analysis_box_rect = Some(out.inner_rect);
+                }
+                if out.content_size.y > out.inner_rect.height() + 0.5
+                    && action_row(ui, true, tr(lang, "View full text…")).clicked()
+                {
+                    self.show_analysis_full = true;
+                }
             }
             ui.label(tr(lang, "Direction"))
                 .on_hover_text(tr(lang, "Free-text direction for AI Analyze — e.g. warmer and moodier"));
@@ -1345,12 +1395,13 @@ impl AutoShadeApp {
     }
 }
 
-/// Bound on the deep-thinking box's height before it scrolls: about six body
-/// lines. Each of the four notes is capped at 200 bytes at the trust boundary
-/// (`advisor::THINK_FIELD_MAX_BYTES`), so a wrapped row is two or three lines
-/// on a 320 px panel and the box shows most of the working at once; the bound
-/// is for the long-language, narrow-panel corner, not the common case.
-const THINK_BOX_MAX_H: f32 = 132.0;
+/// Bound on the analysis box's height before it scrolls: about eight body
+/// lines — the verdict, a few lines of rationale and the first of the
+/// working. The rationale's deterministic tail grows with every note a run
+/// raises, so the box used to take whatever the text asked for and an
+/// over-long analysis filled the screen (2026-10-13); the rest is one
+/// 「View full text…」 away.
+pub(crate) const ANALYSIS_BOX_MAX_H: f32 = 160.0;
 
 /// The notes only a DEEP-THINKING analysis produces (`pipeline.rs`, R23-4's
 /// three sentences + R23-1b's pixel-tool line): the model's working, as

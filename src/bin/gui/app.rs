@@ -244,6 +244,7 @@ pub(crate) struct AutoShadeApp {
     pub(crate) fit_from: Option<String>,
     pub(crate) show_settings: bool,    // the Settings window is open
     pub(crate) show_shortcuts: bool,   // the keyboard cheat-sheet window is open (F1 / ? / ⌨)
+    pub(crate) show_analysis_full: bool, // the AI analysis full-text window is open
     // Tab hides both side panels (the LR grammar) for an edge-to-edge canvas.
     // Session-only on purpose: relaunching with an invisible library reads as
     // a broken app, so the state never persists.
@@ -255,7 +256,8 @@ pub(crate) struct AutoShadeApp {
     pub(crate) defocus_next: bool,
     pub(crate) settings: SettingsForm, // editable buffers for that window
     pub(crate) lang: Lang,             // UI language: English skeleton / Chinese overlay (i18n.rs)
-    pub(crate) theme: ThemePref,       // dark/light chrome — applied via install_theme, kept in Prefs
+    pub(crate) theme: ThemePref,       // surface scheme — applied via install_look, kept in Prefs
+    pub(crate) accent: AccentPref,     // chrome accent — applied with the theme, kept in Prefs
     // --- library / gallery ---
     pub(crate) gallery: Vec<PathBuf>,          // sources in the working folder (sorted)
     pub(crate) gallery_dir: Option<PathBuf>,   // the working folder
@@ -280,6 +282,9 @@ pub(crate) struct AutoShadeApp {
     // --- retouch: mask painting + generative fill + heal ---
     pub(crate) paint_mode: bool,                      // brush-paint a mask (pauses box-select)
     pub(crate) brush: f32,                            // brush radius in After-image display px
+    pub(crate) brush_resized_at: Option<f64>,         // when the radius last changed (the ring's size flash)
+    pub(crate) brush_feather: f32,                    // brush edge softness 0..=1 (every brush)
+    pub(crate) brush_flow: f32,                       // brush strength per pass 0..=1 (every brush)
     pub(crate) mask_paint: Option<image::RgbaImage>,  // painted overlay (red where painted), at preview res
     // Presence is independent of the texture upload flag: None means one
     // scan is due after a change; Some is an O(1) answer on every frame.
@@ -429,6 +434,8 @@ pub(crate) struct AutoShadeApp {
     #[cfg(test)]
     pub(crate) brush_slider_rect: Option<egui::Rect>, // test seam: the last Brush size slider's rect
     #[cfg(test)]
+    pub(crate) analysis_box_rect: Option<egui::Rect>, // test seam: the analysis box's visible rect
+    #[cfg(test)]
     pub(crate) histogram_rect: Option<egui::Rect>, // test seam: the histogram readout's rect
     /// Test seam (#14a): every prompt field laid out this frame, in draw order
     /// (Direction, Reimagine, Generative Fill). A Vec, not three Options: the
@@ -501,6 +508,8 @@ pub(crate) struct AutoShadeApp {
     pub(crate) range_picking: Option<usize>,          // next image click keys masks[i]'s Color range
     // --- Point Color eyedropper (v1.5.0) ---
     pub(crate) point_color_picking: bool,             // next image click adds a Point Color swatch
+    // --- AI lens blur (2026-10-13) ---
+    pub(crate) lens_focus_picking: bool,              // next image click sets the lens blur's focus point
     // --- clone stamp ---
     pub(crate) clone_mode: bool,                      // brush paints the clone target; Alt+click = source
     pub(crate) clone_src: Option<(f32, f32)>,         // picked source point, original-frame normalized
@@ -896,7 +905,11 @@ impl AutoShadeApp {
                 self.defocus_next = true; // undo egui's Tab focus traversal next frame
             }
             if brush_delta != 0.0 {
-                self.brush = (self.brush + brush_delta).clamp(4.0, 80.0);
+                // Proportional, as Lightroom's [ / ]: a fixed 4 px step was
+                // fifty presses across the range.
+                let now = ctx.input(|i| i.time);
+                let factor = if brush_delta > 0.0 { 1.15 } else { 1.0 / 1.15 };
+                self.set_brush((self.brush * factor).round(), now);
             }
             if do_cheatsheet {
                 self.show_shortcuts = !self.show_shortcuts;
@@ -1066,8 +1079,11 @@ impl AutoShadeApp {
     pub(crate) fn upd_top_bar(&mut self, ctx: &egui::Context) {
         // egui's side_top_panel frame keeps only 2px of vertical margin —
         // at that spacing the action row visually touches the strip edges.
+        window_chrome::edge_resize(ctx);
+        window_chrome::window_outline(ctx);
         let frame = egui::Frame::side_top_panel(&ctx.style())
-            .inner_margin(egui::Margin::symmetric(8.0, SPACE_MD));
+            .inner_margin(egui::Margin::symmetric(8.0, SPACE_MD))
+            .fill(self.theme.colors().bar_fill);
         egui::TopBottomPanel::top("top").frame(frame).show(ctx, |ui| {
             let lang = self.lang;
             // ONE wrapped row of ACTIONS only (UX batch): settings that used
@@ -1091,7 +1107,8 @@ impl AutoShadeApp {
             // The group fence sits INSIDE each group's end, where a wrapped
             // line start cannot orphan it. Export is the row's one primary
             // verb; Settings and the shortcut sheet are glyph squares.
-            ui.horizontal_wrapped(|ui| {
+            // On Windows the row is also the title bar (`window_chrome`).
+            window_chrome::toolbar_row(ui, lang, |ui| {
                 group(ui, &[tr(lang, "Open photo…"), tr(lang, "Reset")], 0, |ui| {
                     if action(ui, !self.busy, tr(lang, "Open photo…"))
                         .on_hover_text(tr(lang, "Ctrl+O · or drag a file into the window"))
@@ -1279,8 +1296,9 @@ impl AutoShadeApp {
 
     /// One update() phase — body extracted verbatim from the eframe
     /// update loop (round-12 decomposition).
-    fn upd_status_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+    pub(crate) fn upd_status_bar(&mut self, ctx: &egui::Context) {
+        let frame = egui::Frame::side_top_panel(&ctx.style()).fill(self.theme.colors().bar_fill);
+        egui::TopBottomPanel::bottom("status").frame(frame).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if self.busy {
                     ui.spinner();
@@ -1359,7 +1377,7 @@ impl AutoShadeApp {
     /// itself to its content, so the panel shrank a few pixels on every frame
     /// the bar faded in.
     pub(crate) fn controls_column(&mut self, ui: &mut egui::Ui) {
-        let gutter = ui.spacing().scroll.bar_width + SPACE_SM;
+        let gutter = controls_gutter(ui.style());
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::Frame::none()
                 .inner_margin(egui::Margin { right: gutter, ..Default::default() })
@@ -1409,7 +1427,7 @@ impl AutoShadeApp {
         });
     }
 
-    fn upd_strips_and_side_panels(&mut self, ctx: &egui::Context) {
+    pub(crate) fn upd_strips_and_side_panels(&mut self, ctx: &egui::Context) {
         // Variant strip — sits directly above the status bar (registered after
         // it so it stacks on top), only when a photo is open. The selector for
         // 原片 / AI 生成 / 反推 renditions.
@@ -1431,9 +1449,7 @@ impl AutoShadeApp {
                 self.gallery_panel(ui);
             });
 
-            let controls = egui::SidePanel::left("controls")
-                .default_width(320.0)
-                .show(ctx, |ui| self.controls_column(ui));
+            let controls = controls_side_panel(ctx, |ui| self.controls_column(ui));
             // ↑/↓ routing (see upd_shortcuts): over this panel the keys
             // belong to a hovered slider; anywhere else they walk the
             // library. One frame stale — panels draw after the shortcuts.
@@ -1456,7 +1472,7 @@ impl AutoShadeApp {
 
     /// One update() phase — body extracted verbatim from the eframe
     /// update loop (round-12 decomposition).
-    fn upd_central(&mut self, ctx: &egui::Context) {
+    pub(crate) fn upd_central(&mut self, ctx: &egui::Context) {
         // The canvas sits on a bed one step below the panel fill (recessed
         // stage / raised chrome) — keep the stock margins, swap the fill.
         let bed = egui::Frame::central_panel(&ctx.style())
@@ -1540,6 +1556,7 @@ impl AutoShadeApp {
     /// One update() phase — body extracted verbatim from the eframe
     /// update loop (round-12 decomposition).
     fn upd_sheets(&mut self, ctx: &egui::Context) {
+        self.analysis_full_window(ctx);
         // Settings window (provider / model / API keys). A local `open` avoids a
         // double &mut self borrow (Window::open vs the closure that reads self).
         if self.show_settings {
@@ -1735,6 +1752,7 @@ impl Default for AutoShadeApp {
             fit_from: None,
             show_settings: false,
             show_shortcuts: false,
+            show_analysis_full: false,
             panels_hidden: false,
             defocus_next: false,
             settings: SettingsForm::default(),
@@ -1742,6 +1760,7 @@ impl Default for AutoShadeApp {
             // (restored in `new`) overrides this on launch.
             lang: Lang::En,
             theme: ThemePref::Dark,
+            accent: AccentPref::Gold,
             gallery: Vec::new(),
             gallery_dir: None,
             gallery_gen: 0,
@@ -1772,6 +1791,9 @@ impl Default for AutoShadeApp {
             region_restore: None,
             paint_mode: false,
             brush: 30.0,
+            brush_resized_at: None,
+            brush_feather: 0.0,
+            brush_flow: 1.0,
             mask_paint: None,
             mask_painted: std::cell::Cell::new(None),
             paint_owner: BrushOwner::Fill,
@@ -1845,6 +1867,8 @@ impl Default for AutoShadeApp {
             #[cfg(test)]
             brush_slider_rect: None,
             #[cfg(test)]
+            analysis_box_rect: None,
+            #[cfg(test)]
             histogram_rect: None,
             #[cfg(test)]
             prompt_rects: Vec::new(),
@@ -1867,6 +1891,7 @@ impl Default for AutoShadeApp {
             wb_picking: false,
             range_picking: None,
             point_color_picking: false,
+            lens_focus_picking: false,
             clone_mode: false,
             clone_src: None,
             clone_fullres: false,
@@ -1916,10 +1941,7 @@ impl eframe::App for AutoShadeApp {
         // event loop runs are dropped — a FIRST-ever launch (no prefs, so no
         // second install) kept the OS-default titlebar over dark chrome.
         if !std::mem::replace(&mut self.os_theme_synced, true) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(match self.theme {
-                ThemePref::Dark => egui::SystemTheme::Dark,
-                ThemePref::Light => egui::SystemTheme::Light,
-            }));
+            ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(self.theme.system()));
             // …and say which system faces the font chain turned away.
             // `install_fonts` runs before this app exists and can only reach
             // stderr, which a windowed build does not have — so the first
@@ -2065,8 +2087,12 @@ impl eframe::App for AutoShadeApp {
                 egui::Id::new("drop_overlay"),
             ));
             let rect = ctx.screen_rect();
-            // Chrome-side veil → the PILL gold family (see the colour rule at ACCENT).
-            painter.rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(58, 47, 20, 150));
+            // Chrome-side veil → the chrome accent's family (see the colour
+            // rule at ACCENT), dimmed to 0.29 so the white line reads on it
+            // in every theme.
+            let a = self.theme.colors().accent_fill;
+            let dim = |v: u8| (f32::from(v) * 0.29).round() as u8;
+            painter.rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(dim(a.r()), dim(a.g()), dim(a.b()), 150));
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -2200,6 +2226,7 @@ impl eframe::App for AutoShadeApp {
                 show_clipping: self.show_clipping,
                 lang: self.lang,
                 theme: self.theme,
+                accent: self.accent,
             },
         );
     }

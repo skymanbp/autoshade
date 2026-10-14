@@ -1,117 +1,94 @@
 // One part of the GUI's tests (src/bin/gui/tests.rs includes it): theme contrast, the embedded fonts, the pickers and the curve editor.
 
-    /// Both themes must keep every text-on-chrome pairing at WCAG AA (4.5:1
-    /// for text, 3:1 for the armed indicator glyph). This is the contract the
-    /// Light scheme was tuned against, and the guard that keeps a future
-    /// colour tweak from shipping unreadable text on one theme. Pairings
-    /// tested = pairings actually rendered (see each line's comment);
-    /// `clip_tri_off` is deliberately dim (disarmed state) and exempt.
+    /// Every theme × accent must keep every text-on-chrome pairing at WCAG
+    /// AA (4.5:1 for text, 3:1 for indicators). The accent forms are derived
+    /// to clear these bars (`theme::build`); this checks the outcome on the
+    /// surfaces the screen really shows — the installed panel fill and text
+    /// well, not egui's stock ones. Pairings tested = pairings actually
+    /// rendered (see each line's comment); `clip_tri_off` is deliberately dim
+    /// (disarmed state) and exempt.
     #[test]
-    fn both_themes_pass_contrast_checks() {
-        // WCAG 2.x relative luminance + contrast ratio.
-        fn lum(c: egui::Color32) -> f64 {
-            let ch = |v: u8| {
-                let v = f64::from(v) / 255.0;
-                if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
-            };
-            0.2126 * ch(c.r()) + 0.7152 * ch(c.g()) + 0.0722 * ch(c.b())
-        }
-        fn ratio(a: egui::Color32, b: egui::Color32) -> f64 {
-            let (hi, lo) = (lum(a).max(lum(b)), lum(a).min(lum(b)));
-            (hi + 0.05) / (lo + 0.05)
-        }
-        for theme in [ThemePref::Dark, ThemePref::Light] {
-            let c = theme.colors();
-            let visuals = match theme {
-                ThemePref::Dark => egui::Visuals::dark(),
-                ThemePref::Light => egui::Visuals::light(),
-            };
-            let panel = visuals.panel_fill;
-            let text = visuals.widgets.noninteractive.fg_stroke.color;
-            let checks: [(&str, egui::Color32, egui::Color32, f64); 8] = [
-                // (what, fg, bg, minimum). The selected row carries ONLY
-                // accent-coloured text (name + badges — see the gallery row),
-                // so text-on-sel_bg is not a rendered pairing; multi-select
-                // rows DO render default-colour names on sel_bg_dim.
-                ("default text on panels", text, panel, 4.5),
-                ("gold accent text on panels", c.accent_text, panel, 4.5),
-                ("gold accent text on the selected row", c.accent_text, c.sel_bg, 4.5),
-                ("default text on a multi-select row", text, c.sel_bg_dim, 4.5),
-                ("success toast", c.toast_ok_fg, c.toast_ok_bg, 4.5),
-                ("error toast", c.toast_err_fg, c.toast_err_bg, 4.5),
-                // Non-text indicator: WCAG AA for UI components is 3:1.
-                ("armed clipping triangle", c.clip_tri_on, panel, 3.0),
-                // R38: the primary verb's near-black text on its solid gold.
-                ("primary verb text on its gold fill", crate::buttons::PRIMARY_FG, crate::theme::PILL, 4.5),
-            ];
-            for (what, fg, bg, min) in checks {
-                let r = ratio(fg, bg);
-                assert!(
-                    r >= min,
-                    "{theme:?} theme: {what} is {r:.2}:1, needs {min}:1"
-                );
-            }
-            // Coloured text that sits on panel chrome (not on the dark plot).
-            assert!(
-                ratio(c.armed_hint, panel) >= 4.5,
-                "{theme:?} theme: armed-tool hint is {:.2}:1",
-                ratio(c.armed_hint, panel)
-            );
-            // selection_fill is PREMULTIPLIED-alpha: what actually renders is
-            // its composite over the surface beneath, not the raw constant —
-            // checking the raw colour validated a pairing no pixel ever shows.
-            // Selected text / combo rows draw DEFAULT text over that
-            // composite, on panels and on the text-edit well alike.
-            let over = |fgp: egui::Color32, bg: egui::Color32| {
-                let a = f64::from(fgp.a()) / 255.0;
-                let ch = |f: u8, b: u8| {
-                    (f64::from(f) + f64::from(b) * (1.0 - a)).round().clamp(0.0, 255.0) as u8
-                };
-                egui::Color32::from_rgb(
-                    ch(fgp.r(), bg.r()),
-                    ch(fgp.g(), bg.g()),
-                    ch(fgp.b(), bg.b()),
-                )
-            };
-            for (surface, bg) in
-                [("panels", panel), ("the text-edit well", visuals.extreme_bg_color)]
-            {
-                let composite = over(c.selection_fill, bg);
-                // Default text over a TRANSIENT text-selection highlight: the
-                // 3:1 component bar, not the 4.5:1 text bar — the user is
-                // mid-manipulation on text they just produced, and holding
-                // 4.5:1 here would force the highlight to near-invisibility
-                // on the dark panel's tiny luminance headroom.
-                let r = ratio(text, composite);
-                assert!(
-                    r >= 3.0,
-                    "{theme:?} theme: default text on selection over {surface} is {r:.2}:1 \
-                     (fill composites to {composite:?}), needs 3:1"
-                );
-                // Selected COMBO rows draw their text with selection_stroke —
-                // persistent state, full AA text bar.
-                let r = ratio(c.selection_stroke, composite);
-                assert!(
-                    r >= 4.5,
-                    "{theme:?} theme: selection-stroke text on selection over {surface} is \
-                     {r:.2}:1 (fill composites to {composite:?}), needs 4.5:1"
-                );
-            }
-            // The selection outline is a non-text UI component: 3:1 (same
-            // class as the armed clipping triangle above).
-            assert!(
-                ratio(c.selection_stroke, panel) >= 3.0,
-                "{theme:?} theme: selection stroke on panels is {:.2}:1, needs 3:1",
-                ratio(c.selection_stroke, panel)
-            );
-            for (i, col) in c.curve_labels.iter().enumerate() {
-                let r = ratio(*col, panel);
-                assert!(
-                    r >= 4.5,
-                    "{theme:?} theme: curve label {i} is {r:.2}:1, needs 4.5:1"
-                );
+    fn every_theme_and_accent_passes_contrast_checks() {
+        use crate::theme::{composite, contrast as ratio, palette, AccentPref};
+        for theme in ThemePref::ALL {
+            for accent in AccentPref::ALL {
+                let c = palette(theme, accent);
+                let visuals = if theme.is_dark() { egui::Visuals::dark() } else { egui::Visuals::light() };
+                let panel = c.panel_fill;
+                let well = c.text_well.unwrap_or(visuals.extreme_bg_color);
+                let text = visuals.widgets.noninteractive.fg_stroke.color;
+                let checks: [(&str, egui::Color32, egui::Color32, f64); 10] = [
+                    // (what, fg, bg, minimum). The selected row carries ONLY
+                    // accent-coloured text (name + badges — see the gallery
+                    // row); multi-select rows render default-colour names.
+                    ("default text on panels", text, panel, 4.5),
+                    ("default text on an open fold's card", text, c.card_fill, 4.5),
+                    ("accent text on panels", c.accent_text, panel, 4.5),
+                    ("accent text on the selected row", c.accent_text, c.sel_bg, 4.5),
+                    ("default text on a multi-select row", text, c.sel_bg_dim, 4.5),
+                    ("success toast", c.toast_ok_fg, c.toast_ok_bg, 4.5),
+                    ("error toast", c.toast_err_fg, c.toast_err_bg, 4.5),
+                    // Coloured text that sits on panel chrome.
+                    ("armed-tool hint", c.armed_hint, panel, 4.5),
+                    // Non-text indicator: WCAG AA for UI components is 3:1.
+                    ("armed clipping triangle", c.clip_tri_on, panel, 3.0),
+                    // R38: the primary verb's near-black text on its solid fill.
+                    ("primary verb text on its accent fill", crate::buttons::PRIMARY_FG, c.accent_fill, 4.5),
+                ];
+                for (what, fg, bg, min) in checks {
+                    let r = ratio(fg, bg);
+                    assert!(r >= min, "{theme:?} × {accent:?}: {what} is {r:.2}:1, needs {min}:1");
+                }
+                // selection_fill is PREMULTIPLIED-alpha: what renders is its
+                // composite over the surface beneath.
+                for (surface, bg) in [("panels", panel), ("the text-edit well", well)] {
+                    let under = composite(c.selection_fill, bg);
+                    // Default text over a TRANSIENT text-selection highlight:
+                    // the 3:1 component bar, not the 4.5:1 text bar — holding
+                    // 4.5:1 would force the highlight to near-invisibility on
+                    // a dark panel's tiny luminance headroom.
+                    let r = ratio(text, under);
+                    assert!(r >= 3.0, "{theme:?} × {accent:?}: default text on selection over {surface} is {r:.2}:1");
+                    // Selected COMBO rows draw their text with
+                    // selection_stroke — persistent state, full text bar.
+                    let r = ratio(c.selection_stroke, under);
+                    assert!(r >= 4.5, "{theme:?} × {accent:?}: selection-stroke text over {surface} is {r:.2}:1");
+                }
+                // The selection outline is a non-text UI component: 3:1.
+                let r = ratio(c.selection_stroke, panel);
+                assert!(r >= 3.0, "{theme:?} × {accent:?}: selection stroke on panels is {r:.2}:1");
+                for (i, col) in c.curve_labels.iter().enumerate() {
+                    let r = ratio(*col, panel);
+                    assert!(r >= 4.5, "{theme:?} × {accent:?}: curve label {i} is {r:.2}:1");
+                }
             }
         }
+        // The default look is the historical one: dark grey, the gold fill.
+        assert_eq!(palette(ThemePref::Dark, AccentPref::Gold).accent_fill, crate::theme::PILL);
+    }
+
+    /// Picking a theme and an accent re-installs the style with both, and the
+    /// pair survives a save and a restart.
+    #[test]
+    fn the_theme_and_accent_install_together_and_persist() {
+        use crate::theme::AccentPref;
+        let ctx = egui::Context::default();
+        crate::theme::install_look(&ctx, ThemePref::CoolBlue, AccentPref::Teal);
+        let c = crate::theme::palette(ThemePref::CoolBlue, AccentPref::Teal);
+        assert_eq!(ctx.style().visuals.panel_fill, c.panel_fill);
+        assert_eq!(ctx.style().visuals.selection.stroke.color, c.selection_stroke);
+        assert_eq!(crate::theme::current_theme().colors().accent_fill, c.accent_fill, "colors() follows the installed accent");
+        // A theme change alone keeps the accent.
+        crate::theme::install_theme(&ctx, ThemePref::WarmInk);
+        assert_eq!(crate::theme::current_accent(), AccentPref::Teal);
+        assert!(ctx.style().visuals.dark_mode, "warm ink is a dark scheme");
+
+        let json = serde_json::to_string(&Prefs { theme: ThemePref::WarmInk, accent: AccentPref::Coral, ..Prefs::default() }).unwrap();
+        let back: Prefs = serde_json::from_str(&json).unwrap();
+        assert_eq!((back.theme, back.accent), (ThemePref::WarmInk, AccentPref::Coral));
+        // A save from before the accent existed opens in the historical gold.
+        let old: Prefs = serde_json::from_str(r#"{"theme":"Light"}"#).unwrap();
+        assert_eq!((old.theme, old.accent), (ThemePref::Light, AccentPref::Gold));
     }
 
     /// Every symbol the GUI renders must have a glyph in the guaranteed font

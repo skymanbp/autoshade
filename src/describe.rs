@@ -1012,15 +1012,23 @@ mod tests {
         }
         // …and the shared executor really is what holds the slot.
         let lib = include_str!("lib.rs").replace("\r\n", "\n");
-        let exec = lib
-            .split("pub fn run_model_sidecar_bounded(")
-            .nth(1)
-            .expect("the shared executor exists")
-            .split("\npub fn ")
-            .next()
-            .unwrap();
+        let body_of = |name: &str| {
+            lib.split(&format!("pub fn {name}("))
+                .nth(1)
+                .unwrap_or_else(|| panic!("{name} exists"))
+                .split("\npub fn ")
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        // The text reader runs through the artifact run (2026-10-13), and THAT
+        // is what holds the slot — for the depth PNG as for every text output.
         assert!(
-            exec.contains("with_model_slot("),
+            body_of("run_model_sidecar_bounded").contains("run_model_sidecar_artifact("),
+            "the shared text executor must run through the artifact run"
+        );
+        assert!(
+            body_of("run_model_sidecar_artifact").contains("with_model_slot("),
             "the shared executor must take the process-wide model slot"
         );
     }

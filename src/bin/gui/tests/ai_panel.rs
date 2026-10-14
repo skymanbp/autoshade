@@ -951,3 +951,54 @@
         // line is built at all and the caller falls back to `Command::arg`.
         assert_eq!(q("C:\\odd\"q"), None);
     }
+
+    /// User report 2026-10-13: 「思考过程输出有时候太长了会占满屏幕」. The verdict,
+    /// the rationale and the working share ONE box bounded to
+    /// `ANALYSIS_BOX_MAX_H`; past it a 「View full text…」 verb appears, and the
+    /// window it opens draws the whole text. A short analysis gets no verb.
+    ///
+    /// MUTATION THIS CATCHES: the box's `max_height` dropped (the box grows
+    /// with the text), or the window drawing a truncated copy.
+    #[test]
+    fn a_long_analysis_scrolls_in_its_box_and_opens_whole_in_a_window() {
+        let long = format!("{}END-OF-RATIONALE", "The sky is lifted and the shadows are opened a little. ".repeat(60));
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            let verb = tr(lang, "View full text…");
+            let mut app = AutoShadeApp { lang, rationale: long.clone(), ..Default::default() };
+            let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+            let rect = app.analysis_box_rect.expect("the analysis box was drawn");
+            assert!(
+                rect.height() <= crate::panels::ai::ANALYSIS_BOX_MAX_H + 0.5,
+                "{lang:?}: the analysis box grew to {:.0} px with its text",
+                rect.height()
+            );
+            assert!(seen.iter().any(|t| t == verb), "{lang:?}: an overflowing analysis offers {verb:?}: {seen:?}");
+
+            app.show_analysis_full = true;
+            let ctx = egui::Context::default();
+            crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+            // A window spends its first frame measuring itself (egui's sizing
+            // pass draws nothing), so the text is read off the third.
+            let mut window = Vec::new();
+            for i in 0..3 {
+                let out = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 20_000.0))),
+                        time: Some(f64::from(i) / 60.0),
+                        ..Default::default()
+                    },
+                    |ctx| app.analysis_full_window(ctx),
+                );
+                window = drawn_texts(&out.shapes);
+            }
+            assert!(
+                window.iter().any(|t| t.contains("END-OF-RATIONALE")),
+                "{lang:?}: the window must draw the whole rationale"
+            );
+            assert!(app.show_analysis_full, "{lang:?}: the window stays open while there is text");
+
+            let mut short = AutoShadeApp { lang, rationale: "Balanced.".into(), ..Default::default() };
+            let seen = tall_frame(&mut short, |a, ui| a.ai_panel(ui));
+            assert!(!seen.iter().any(|t| t == verb), "{lang:?}: a short analysis offers no {verb:?}");
+        }
+    }

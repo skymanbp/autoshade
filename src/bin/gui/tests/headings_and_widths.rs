@@ -113,3 +113,58 @@
         let fences = panels.iter().map(|src| src.matches(".separator()").count()).sum::<usize>();
         assert_eq!(fences, 0, "a side panel (ai / develop / retouch) draws a hairline separator again");
     }
+
+    /// User report 2026-10-13: 「最大宽度会随着展开的编辑选项变化而变化」. egui's
+    /// side panel stores the rect its CONTENT covered as next frame's width,
+    /// so one over-wide row — here a 900 px allocation standing in for any
+    /// fold opened on a long line — ratcheted the panel wider for good. The
+    /// panel must keep the width it was laid at, a width remembered from
+    /// before must come back inside the range, and a drag to the far right
+    /// stops where the content column is exactly the readable ceiling.
+    ///
+    /// MUTATION THIS CATCHES: `controls_side_panel`'s write-back removed (the
+    /// first arm grows to the 900 px row), or its `width_range` dropped (the
+    /// second arm restores 1200 px).
+    #[test]
+    fn the_controls_panel_width_follows_the_drag_not_the_content() {
+        let run = |ctx: &egui::Context, row: f32| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 900.0))),
+                ..Default::default()
+            };
+            // The width the panel keeps for the next frame — the response
+            // rect is the CONTENT's (wider when it overflows, narrower when a
+            // 10 px row does not fill the panel), not the panel's.
+            let _ = ctx.run(input, |ctx| {
+                crate::side_panel::controls_side_panel(ctx, |ui| {
+                    ui.allocate_exact_size(egui::vec2(row, 20.0), egui::Sense::hover());
+                });
+            });
+            egui::containers::panel::PanelState::load(ctx, egui::Id::new("controls")).expect("stored").rect.width()
+        };
+        let ctx = egui::Context::default();
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let widths: Vec<f32> = (0..4).map(|_| run(&ctx, 900.0)).collect();
+        assert!(
+            widths.iter().all(|w| (w - crate::theme::CONTROLS_W_DEFAULT).abs() < 0.5),
+            "an over-wide row widened the panel: {widths:?}"
+        );
+
+        let ctx = egui::Context::default();
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let id = egui::Id::new("controls");
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 900.0));
+        ctx.data_mut(|d| d.insert_persisted(id, egui::containers::panel::PanelState { rect }));
+        let max = crate::theme::controls_w_max(&ctx.style());
+        let w = run(&ctx, 10.0);
+        assert!((w - max).abs() < 0.5, "a remembered 1200 px came back at {w}, not the {max} cap");
+        let style = ctx.style();
+        let column = max
+            - egui::Frame::side_top_panel(&style).inner_margin.sum().x
+            - crate::theme::controls_gutter(&style);
+        assert!(
+            (column - crate::theme::FIELD_W_MAX).abs() < 0.5,
+            "at the cap the content column is {column}, not the {} readable ceiling",
+            crate::theme::FIELD_W_MAX
+        );
+    }

@@ -17,19 +17,38 @@ use super::*;
 /// A first-level panel title: Heading type with a short gold rule under the
 /// text. `lead` is drawn first on the same row (the AI panel's fold toggle);
 /// the returned response is the title's own, sensing clicks so a collapsible
-/// panel can toggle on it.
+/// panel can toggle on it. `active` adds the section's activity dot — a small
+/// gold disc, as on the folds (`util::section_title`); the drawn text is still
+/// [`section_label`]'s, so a test reading it sees the ●.
 pub(crate) fn panel_heading(
     ui: &mut egui::Ui,
     title: &str,
+    active: bool,
     lead: impl FnOnce(&mut egui::Ui),
 ) -> egui::Response {
     let accent = ui.visuals().hyperlink_color;
+    let text: egui::WidgetText = if active {
+        let font = egui::TextStyle::Heading.resolve(ui.style());
+        let label = section_label(title, true);
+        let mut job = egui::text::LayoutJob::default();
+        job.append(title, 0.0, egui::TextFormat::simple(font.clone(), ui.visuals().strong_text_color()));
+        job.append(
+            &label[title.len()..],
+            0.0,
+            egui::TextFormat {
+                font_id: egui::FontId::new(font.size * 0.5, font.family),
+                color: accent,
+                valign: egui::Align::Center,
+                ..Default::default()
+            },
+        );
+        job.into()
+    } else {
+        egui::RichText::new(title).heading().strong().into()
+    };
     let row = ui.horizontal(|ui| {
         lead(ui);
-        ui.add(
-            egui::Label::new(egui::RichText::new(title).heading().strong())
-                .sense(egui::Sense::click()),
-        )
+        ui.add(egui::Label::new(text).sense(egui::Sense::click()))
     });
     let title_rect = row.inner.rect;
     let y = row.response.rect.bottom() + 2.0;
@@ -45,16 +64,34 @@ pub(crate) fn panel_heading(
 /// above, a short gold tick, the name in the accent colour. Caption only: the
 /// sections keep their own collapsing state, so nothing here can hide a
 /// control.
+///
+/// Set as the quiet, spaced small caption Lightroom and RapidRaw put over a
+/// band (2026-10-13): the gold tick and gold text made every band head shout
+/// as loud as the panel title above it, so the gold is now the title's alone.
 pub(crate) fn group_caption(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(SPACE_LG);
-    let accent = ui.visuals().hyperlink_color;
-    ui.horizontal(|ui| {
-        let h = ui.text_style_height(&egui::TextStyle::Small);
-        let (tick, _) = ui.allocate_exact_size(egui::vec2(3.0, h), egui::Sense::hover());
-        ui.painter().rect_filled(tick, 1.5, accent);
-        ui.label(egui::RichText::new(title).small().strong().color(accent));
-    });
+    ui.add_space(SPACE_LG + SPACE_SM);
+    ui.label(
+        egui::RichText::new(title)
+            .small()
+            .strong()
+            .extra_letter_spacing(0.8)
+            .color(ui.visuals().weak_text_color()),
+    );
     ui.add_space(SPACE_XS);
+}
+
+/// The fold disclosure: a thin chevron that turns from › to ⌄ as the fold
+/// opens, in place of egui's filled triangle (2026-10-13 — the triangle is
+/// the one glyph that read as a 2005 tree view).
+pub(crate) fn paint_chevron(ui: &mut egui::Ui, openness: f32, response: &egui::Response) {
+    let colour = ui.style().interact(response).fg_stroke.color;
+    let rect = response.rect;
+    let s = rect.width().min(rect.height()) * 0.2;
+    let turn = egui::emath::Rot2::from_angle(openness * std::f32::consts::FRAC_PI_2);
+    let points = [egui::vec2(-0.5 * s, -s), egui::vec2(0.5 * s, 0.0), egui::vec2(-0.5 * s, s)]
+        .map(|v| rect.center() + turn * v)
+        .to_vec();
+    ui.painter().add(egui::Shape::line(points, egui::Stroke::new(1.5, colour)));
 }
 
 /// A caption for one block INSIDE a fold (the colour-grading scope, a mask's
@@ -80,7 +117,7 @@ pub(crate) fn card_fold<R>(
 ) -> egui::CollapsingResponse<R> {
     let plate = ui.painter().add(egui::Shape::Noop);
     let (left, right) = (ui.max_rect().left(), ui.max_rect().right());
-    let r = header.show(ui, body);
+    let r = header.icon(paint_chevron).show(ui, body);
     if let Some(b) = &r.body_response {
         let c = theme_of(ui).colors();
         let rect = egui::Rect::from_min_max(

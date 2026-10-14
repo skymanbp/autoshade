@@ -246,6 +246,9 @@ pub(crate) struct PastePayload {
     /// Fill layers dropped from `foreign` (2026-10-01): each is pixels of the
     /// source frame, painted where the source's content was.
     pub layers: usize,
+    /// Whether a lens blur was dropped from `foreign` (2026-10-13): its depth
+    /// map measures the source photo's scene.
+    pub lens_blur: bool,
 }
 
 /// The two payloads for `src`. `paste_geometry` off strips crop + straighten
@@ -301,7 +304,11 @@ pub(crate) fn paste_payload(src: EditRecipe, paste_geometry: bool) -> PastePaylo
     // coordinates — on another photograph it would paste that scene's patch
     // over whatever sits there. Counted, like the two losses above.
     let layers = std::mem::take(&mut foreign.pixel_layers).len();
-    PastePayload { own, foreign, unpastable_masks, colour_field, layers }
+    // A lens blur's depth map is the source scene's distances — on another
+    // photograph it would blur whatever sat where the source's background
+    // was. Counted, like the losses above.
+    let lens_blur = foreign.lens_blur.take().is_some();
+    PastePayload { own, foreign, unpastable_masks, colour_field, layers, lens_blur }
 }
 
 impl AutoShadeApp {
@@ -1339,6 +1346,7 @@ impl AutoShadeApp {
             unpastable_masks: n_raster,
             colour_field: dropped_field,
             layers: n_layers,
+            lens_blur: dropped_blur,
         } = paste_payload(src, self.paste_geometry);
         let copied_from = self.copied_from.clone();
         let has_foreign_target = targets.iter().any(|t| Some(t) != copied_from.as_ref());
@@ -1359,6 +1367,12 @@ impl AutoShadeApp {
                     self.lang,
                     "The colour field was not pasted — its cells are measured on the source photo's own frame",
                 ),
+            );
+        }
+        if dropped_blur && has_foreign_target {
+            self.toast(
+                ToastKind::Error,
+                tr(self.lang, "The lens blur was not pasted — its depth map was measured on the source photo (estimate the depth on each target)"),
             );
         }
         if n_layers > 0 && has_foreign_target {

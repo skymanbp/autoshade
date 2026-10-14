@@ -21,3 +21,4 @@
     include!("tests/turns_and_layout.rs");
     include!("tests/headings_and_widths.rs");
     include!("tests/screenshot.rs");
+    include!("tests/lens_blur.rs");

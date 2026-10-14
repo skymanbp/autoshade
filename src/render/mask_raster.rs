@@ -197,6 +197,8 @@ pub(super) struct MaskRasterSnapshot {
     images: std::collections::HashMap<String, std::sync::Arc<image::GrayImage>>,
     /// The recipe's drawing pixel layers (`layers.rs`), under the same budget.
     layers: std::collections::HashMap<String, std::sync::Arc<image::RgbaImage>>,
+    /// The lens blur's depth map (`lens_blur.rs`), under the same budget.
+    depth: Option<std::sync::Arc<super::lens_blur::DepthImage>>,
 }
 
 impl MaskRasterSnapshot {
@@ -206,6 +208,10 @@ impl MaskRasterSnapshot {
 
     pub(super) fn layer(&self, path: &str) -> Option<&image::RgbaImage> {
         self.layers.get(path).map(std::sync::Arc::as_ref)
+    }
+
+    pub(super) fn depth(&self) -> Option<&super::lens_blur::DepthImage> {
+        self.depth.as_deref()
     }
 }
 
@@ -543,6 +549,7 @@ pub(super) fn load_mask_raster_snapshot_with_budget(
         snapshot.images.insert(path.to_string(), bitmap);
     }
     layers::load_layers(recipe, budget_bytes, &mut held_bytes, strict, diag, &mut snapshot.layers)?;
+    snapshot.depth = lens_blur::load_depth(recipe, budget_bytes, &mut held_bytes, strict, diag)?;
     Ok(snapshot)
 }
 
@@ -658,7 +665,14 @@ pub(super) fn load_mask_bitmap(
 
 /// Bilinear weight lookup in an 8-bit greyscale mask at normalised (nx, ny).
 pub(crate) fn sample_gray_norm(b: &image::GrayImage, nx: f32, ny: f32) -> f32 {
-    let (w, h) = (b.width() as f32, b.height() as f32);
+    sample_texels_norm(b.width(), b.height(), nx, ny, |x, y| b.get_pixel(x, y)[0] as f32 / 255.0)
+}
+
+/// [`sample_gray_norm`]'s texel-centre bilinear read over any `w`×`h` raster
+/// whose texel (x, y) reads as `g(x, y)` — the lens blur's 16-bit depth map
+/// samples through the same convention as the 8-bit masks.
+pub(crate) fn sample_texels_norm(w: u32, h: u32, nx: f32, ny: f32, g: impl Fn(u32, u32) -> f32) -> f32 {
+    let (w, h) = (w as f32, h as f32);
     // EXTENT scaling (`* w`), not endpoint scaling (`* (w - 1)`): a texel owns
     // a SLICE of the frame, `[i/w, (i+1)/w]`, so mapping onto 0..=size-1 here
     // was a DIFFERENT convention. A frame-sized mask then never reached its
@@ -694,7 +708,7 @@ pub(crate) fn sample_gray_norm(b: &image::GrayImage, nx: f32, ny: f32) -> f32 {
     let x1 = (x0 + 1.0).min(w - 1.0);
     let y1 = (y0 + 1.0).min(h - 1.0);
     let (fx, fy) = (sx - x0, sy - y0);
-    let g = |x: f32, y: f32| b.get_pixel(x as u32, y as u32)[0] as f32 / 255.0;
+    let g = |x: f32, y: f32| g(x as u32, y as u32);
     let top = g(x0, y0) * (1.0 - fx) + g(x1, y0) * fx;
     let bot = g(x0, y1) * (1.0 - fx) + g(x1, y1) * fx;
     top * (1.0 - fy) + bot * fy

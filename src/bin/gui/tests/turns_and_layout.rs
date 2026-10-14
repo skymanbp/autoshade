@@ -424,6 +424,9 @@
         });
         app.recipe.colour_field =
             Some(ColourField { x: 1, y: 1, b: 1, grid: vec![[0.0; 5]], amount: 0.5, enabled: true });
+        // 2026-10-13: a lens blur, so its section's rows are laid too.
+        app.recipe.lens_blur =
+            Some(autoshade::render::LensBlur { depth_map: "depth-buttons.png".into(), ..Default::default() });
         // v1.5.0: a Point Color swatch — its row is a chip, a name and a
         // ✕, and its four sliders are laid beside the mixer's own.
         app.recipe.point_colors.push(autoshade::recipe::PointColor::sampled(0.9, 0.7, 0.5));
@@ -599,7 +602,10 @@
                         );
                     }
                 }
-                for (i, (panel, expected)) in [("gallery", 800.0), ("controls", controls_width)].into_iter().enumerate() {
+                // The controls panel stops at its cap (2026-10-13): a drag
+                // past it leaves the panel at `controls_w_max`.
+                let controls_expected = controls_width.min(crate::theme::controls_w_max(&ctx.style()));
+                for (i, (panel, expected)) in [("gallery", 800.0), ("controls", controls_expected)].into_iter().enumerate() {
                     let seen: Vec<f32> = widths.iter().map(|w| w[i]).collect();
                     assert!(
                         (seen[0] - seen[2]).abs() < 0.5,

@@ -29,3 +29,7 @@ diffusers
 
 # U^2-Net, the subject fallback tier when the BiRefNet stack is unavailable
 rembg
+
+# MoGe-2 depth for the AI lens blur (python/depth.py); its vendored code
+# (python/_moge/) recovers the depth shift with scipy's least squares
+scipy

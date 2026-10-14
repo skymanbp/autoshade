@@ -347,7 +347,7 @@ fn trim_num(v: f32) -> String {
 /// Every field of [`EditRecipe`], in DECLARATION order — which is also the
 /// order the strict schema's `required` array takes, so the generated schema
 /// is byte-identical to the hand-written mirror it replaced.
-pub const RECIPE_CONTROLS: [Control; 115] = [
+pub const RECIPE_CONTROLS: [Control; 116] = [
     Control {
         name: "version",
         shape: Shape::Integer,
@@ -1693,6 +1693,24 @@ pub const RECIPE_CONTROLS: [Control; 115] = [
         purpose: "generative-fill layers composited over the finished develop",
     },
     Control {
+        // 2026-10-13. The AI lens blur: a depth map MoGe-2 estimated for this
+        // photo, a focus point and two dials (`render::LensBlur`).
+        // `RenderedNotExported` for `pixel_layers`' reason — classic XMP has
+        // no element for a depth-driven blur, so the save line names it — and
+        // `EngineCarrier`/`engine_only` because a depth map is a measurement
+        // of THIS photo's scene, not a value an advisor could state: a
+        // required schema field would come back empty and delete it on every
+        // Refine.
+        name: "lens_blur",
+        shape: Shape::EngineCarrier,
+        range: None,
+        neutral: "absent = no blur",
+        engine_only: true,
+        crs: CrsKey::None,
+        tier: Some(Tier::RenderedNotExported),
+        purpose: "AI lens blur from an estimated depth map, focused where the photographer clicked",
+    },
+    Control {
         // R33 §G. The THIRD global `RenderedNotExported` row, beside the two
         // calibration carriers — and the first one that is an EDIT rather than
         // a measurement of the photo. A 12×8×8 bilateral grid of local colour
@@ -2913,6 +2931,8 @@ pub enum GlobalValue<'a> {
     Retouch(&'a [crate::retouch::RetouchArea]),
     /// The generative-fill layers (2026-10-01); equality is the whole list.
     Layers(&'a [crate::render::PixelLayer]),
+    /// The AI lens blur (2026-10-13), or `None` for a recipe without one.
+    LensBlur(Option<&'a crate::render::LensBlur>),
     Knots(&'a [[f32; 2]]),
     Lens(&'a LensProfile),
     /// The solved colour field, or `None` for a recipe that carries none.
@@ -3055,6 +3075,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         masks,
         retouch,
         pixel_layers,
+        lens_blur,
         colour_field,
         passthrough,
         cal_shadow_tint,
@@ -3171,6 +3192,7 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         "masks" => GlobalValue::Masks(masks),
         "retouch" => GlobalValue::Retouch(retouch),
         "pixel_layers" => GlobalValue::Layers(pixel_layers),
+        "lens_blur" => GlobalValue::LensBlur(lens_blur.as_ref()),
         "colour_field" => GlobalValue::ColourField(colour_field.as_ref()),
         "passthrough" => GlobalValue::PassThrough(passthrough),
         "cal_shadow_tint" => GlobalValue::Num(*cal_shadow_tint),
@@ -3625,6 +3647,8 @@ mod tests {
             // R33 §G's field skips on `None`, for the argument its doc spells
             // out — the same argument `quarter_turns` makes one line up.
             colour_field: Some(crate::recipe::ColourField::default()),
+            // …and so does the 2026-10-13 lens blur.
+            lens_blur: Some(crate::render::LensBlur::default()),
             // v1.5.0's list skips when empty, by the same argument again.
             explicit_zero: vec!["sharpen_detail".to_string()],
             // …and so does v1.5.0's parametric curve, at Adobe's defaults.
@@ -4271,6 +4295,8 @@ mod tests {
                 // has already been mapped into SDR.
                 "hdr_edit",
                 "hdr_max_ev",
+                // 2026-10-13: a depth map measured from this photo's pixels.
+                "lens_blur",
                 "lens_profile",
                 // v1.5.0 F5: the profile correction strengths. They scale
                 // MEASURED optics — the camera's own knots, or an Adobe `.lcp` on

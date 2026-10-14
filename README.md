@@ -917,6 +917,7 @@ truth. The table is [`python/_mirror.py`](python/_mirror.py).
 | U²-Net | Subject fallback | Apache-2.0 |
 | OneFormer ADE20K | Sky segmentation | MIT |
 | SAM 2.1 | Point-prompted object masks | Apache-2.0 |
+| MoGe-2 ViT-L (inference code copied into `python/_moge/`) | AI lens blur depth map | MIT (its DINOv2 backbone code Apache-2.0) |
 | SigLIP 2 | Optional style embeddings | Apache-2.0 |
 | Qwen3-VL-2B-Instruct | Optional local look descriptions | Apache-2.0 |
 | Stable Diffusion 2.1 | DIFT correspondence field | CreativeML Open RAIL++-M (use-based restrictions travel with the weights) |

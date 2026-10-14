@@ -658,6 +658,15 @@ pub struct EditRecipe {
     #[serde(default)]
     pub pixel_layers: Vec<crate::render::PixelLayer>,
 
+    /// The AI lens blur (2026-10-13): a depth map the MoGe-2 sidecar estimated
+    /// for this photo, a focus point and two dials — see
+    /// [`crate::render::LensBlur`]. Engine-only and rendered but never written
+    /// to the sidecar, like `pixel_layers`: Lightroom has no element for it.
+    /// **Skipped when absent**, by `colour_field`'s argument: a recipe that
+    /// never used it serialises byte for byte as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lens_blur: Option<crate::render::LensBlur>,
+
     // --- HDR edit mode and its SDR rendition (v1.5.0 F8) ---------------------
     // Lightroom's HDR mode re-labels the capture: diffuse white stops being the
     // top of the frame and the brightest stops become HEADROOM above it, with
@@ -1229,6 +1238,7 @@ impl Default for EditRecipe {
             masks: Vec::new(),
             retouch: Vec::new(),
             pixel_layers: Vec::new(),
+            lens_blur: None,
             colour_field: None,
             rationale: String::new(),
             confidence: 0.0,
@@ -3665,6 +3675,15 @@ impl EditRecipe {
         self.pixel_layers.truncate(MAX_MASKS);
         for l in &mut self.pixel_layers {
             l.opacity = if l.opacity.is_finite() { l.opacity.clamp(0.0, 1.0) } else { 1.0 };
+        }
+        // The lens blur's dials and focus point clamp to their ranges; one
+        // with no depth map has nothing to draw from and is dropped whole.
+        if let Some(lb) = &mut self.lens_blur {
+            lb.clamp();
+            summary.truncated_string_bytes += cap(&mut lb.depth_map, MAX_PATH);
+            if lb.depth_map.is_empty() {
+                self.lens_blur = None;
+            }
         }
         for m in &mut self.masks {
             summary.truncated_string_bytes += cap(&mut m.name, MAX_NAME);

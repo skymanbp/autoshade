@@ -16,6 +16,7 @@ pub mod correspond;
 pub mod dcp;
 pub mod decode;
 pub mod denoise;
+pub mod depth;
 pub mod describe;
 pub mod diag;
 pub mod embed;
@@ -434,6 +435,35 @@ pub fn run_model_sidecar_bounded(
     max_bytes: Option<u64>,
 ) -> anyhow::Result<String> {
     use anyhow::{bail, Context};
+    let before = run_model_sidecar_artifact(who, python_bin, args, output)?;
+    let discard = || crate::denoise::discard_failed_output(output, before);
+    if let Some(cap) = max_bytes {
+        let len = std::fs::metadata(output)
+            .with_context(|| format!("stat {who} output {}", output.display()))?
+            .len();
+        if len > cap {
+            discard();
+            bail!("{who} output is too large ({} bytes; cap {} bytes)", len, cap);
+        }
+        let bytes = std::fs::read(output)
+            .with_context(|| format!("read {who} output {}", output.display()))?;
+        return String::from_utf8(bytes).with_context(|| format!("read {who} output {}", output.display()));
+    }
+    std::fs::read_to_string(output).with_context(|| format!("read {who} output {}", output.display()))
+}
+
+/// The run itself, for a sidecar whose artifact is not text (the lens-blur
+/// depth PNG, 2026-10-13): everything [`run_model_sidecar`] promises — the
+/// model slot for the child's whole life, the bounded wait, exit 0 is not
+/// success, a refusal discards the half-artifact — and nothing about how the
+/// artifact is read. Returns the output path's state from BEFORE the spawn, so
+/// a caller that refuses the artifact afterwards can discard it the same way.
+pub fn run_model_sidecar_artifact(
+    who: &str,
+    python_bin: &str,
+    args: Vec<std::ffi::OsString>,
+    output: &std::path::Path,
+) -> anyhow::Result<Option<(u64, Option<std::time::SystemTime>)>> {
     crate::pipeline::ensure_parent(output)?;
     // The output name may already exist (a previous run's leftover, or a
     // caller's 0-byte claim file), so the artifact state is sampled BEFORE
@@ -454,19 +484,7 @@ pub fn run_model_sidecar_bounded(
         return Err(sidecar_exit_error(who, &out));
     }
     sidecar_wrote(who, output, before).inspect_err(|_| discard())?;
-    if let Some(cap) = max_bytes {
-        let len = std::fs::metadata(output)
-            .with_context(|| format!("stat {who} output {}", output.display()))?
-            .len();
-        if len > cap {
-            discard();
-            bail!("{who} output is too large ({} bytes; cap {} bytes)", len, cap);
-        }
-        let bytes = std::fs::read(output)
-            .with_context(|| format!("read {who} output {}", output.display()))?;
-        return String::from_utf8(bytes).with_context(|| format!("read {who} output {}", output.display()));
-    }
-    std::fs::read_to_string(output).with_context(|| format!("read {who} output {}", output.display()))
+    Ok(before)
 }
 
 /// Snapshot of a sidecar's promised artifact path BEFORE the sidecar runs:

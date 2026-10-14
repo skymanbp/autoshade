@@ -45,19 +45,38 @@ impl PixelLayer {
     }
 }
 
-/// Decode one layer file through a process-wide cache keyed by the file's
-/// (mtime, length) — the preview re-develops on every slider tick, and a
-/// layer file never changes once written (a new fill writes a new name), so
-/// the decode is paid once. A failure is cached too, so its warning fires
-/// once rather than per tick; the bounded header probe runs before any
-/// decode, as for every mask raster ([`open_mask_bounded`]).
-fn load_layer_image(path: &str, diag: &crate::diag::Diag<'_>) -> Option<std::sync::Arc<image::RgbaImage>> {
-    use std::sync::{Arc, Mutex, OnceLock};
-    type Ident = Option<(Option<std::time::SystemTime>, u64)>;
-    type Entry = (String, Ident, Option<Arc<image::RgbaImage>>);
-    static DECODED: OnceLock<Mutex<Vec<Entry>>> = OnceLock::new();
-    let ident: Ident = std::fs::metadata(path).ok().map(|m| (m.modified().ok(), m.len()));
-    let slots = DECODED.get_or_init(Default::default);
+/// What a whole-frame raster loader names in its messages: `what` before the
+/// path ("pixel layer"), and the consequence of an unreadable file after it
+/// ("the layer is not drawn").
+pub(super) struct RasterKind {
+    pub(super) what: &'static str,
+    pub(super) unloaded: &'static str,
+}
+
+const LAYER: RasterKind = RasterKind { what: "pixel layer", unloaded: "the layer is not drawn" };
+
+/// One slot of a [`decode_cached`] cache: the path, the file's (mtime, length)
+/// when it was decoded, and the decode (or `None` for a cached failure).
+pub(super) type DecodeSlot<T> =
+    (String, Option<(Option<std::time::SystemTime>, u64)>, Option<std::sync::Arc<T>>);
+
+/// Decode one whole-frame raster (a pixel layer, the lens blur's depth map)
+/// through a process-wide cache keyed by the file's (mtime, length) — the
+/// preview re-develops on every slider tick, and these files never change once
+/// written (a new fill or a new estimate writes a new name), so the decode is
+/// paid once. A failure is cached too, so its warning fires once rather than
+/// per tick; the bounded header probe runs before any decode, as for every
+/// mask raster ([`open_mask_bounded`]). `cap` bounds the entries without LRU
+/// bookkeeping on the hot path.
+pub(super) fn decode_cached<T>(
+    slots: &std::sync::Mutex<Vec<DecodeSlot<T>>>,
+    cap: usize,
+    path: &str,
+    kind: &RasterKind,
+    decode: impl FnOnce(image::DynamicImage) -> T,
+    diag: &crate::diag::Diag<'_>,
+) -> Option<std::sync::Arc<T>> {
+    let ident = std::fs::metadata(path).ok().map(|m| (m.modified().ok(), m.len()));
     let hit = slots
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -68,29 +87,69 @@ fn load_layer_image(path: &str, diag: &crate::diag::Diag<'_>) -> Option<std::syn
         return img;
     }
     let decoded = match open_mask_bounded(std::path::Path::new(path)) {
-        Ok(img) => Some(Arc::new(img.to_rgba8())),
+        Ok(img) => Some(std::sync::Arc::new(decode(img))),
         Err(e) => {
-            diag.warn(format!("pixel layer '{path}' could not be loaded ({e}) — the layer is not drawn"));
+            diag.warn(format!("{} '{path}' could not be loaded ({e}) — {}", kind.what, kind.unloaded));
             None
         }
     };
     let mut held = slots.lock().unwrap_or_else(|p| p.into_inner());
     held.retain(|(p, _, _)| p != path);
-    // A card holds a handful of layers; eight entries bound the cache at a
-    // few full-resolution frames without LRU bookkeeping on the hot path.
-    if held.len() >= 8 {
+    if held.len() >= cap {
         held.remove(0);
     }
     held.push((path.to_owned(), ident, decoded.clone()));
     decoded
 }
 
-/// Load every drawing layer of `recipe` into `out`, charging each one's
-/// header-projected footprint to the SAME aggregate budget the mask rasters
-/// are charged to (`held` carries what they already hold). `strict` (an
-/// export) refuses an unreadable or over-budget layer outright — a file that
-/// silently left out a patch the canvas showed would be the wrong file; the
-/// preview skips it with one line on `diag`.
+fn load_layer_image(path: &str, diag: &crate::diag::Diag<'_>) -> Option<std::sync::Arc<image::RgbaImage>> {
+    static DECODED: std::sync::OnceLock<std::sync::Mutex<Vec<DecodeSlot<image::RgbaImage>>>> =
+        std::sync::OnceLock::new();
+    // A card holds a handful of layers; eight entries bound the cache at a
+    // few full-resolution frames.
+    decode_cached(DECODED.get_or_init(Default::default), 8, path, &LAYER, |img| img.to_rgba8(), diag)
+}
+
+/// Load one whole-frame raster, charging its header-projected footprint
+/// (`bytes_per_px`) to the SAME aggregate budget the mask rasters are charged
+/// to (`held` carries what they already hold). `strict` (an export) refuses an
+/// unreadable or over-budget file outright — a file that silently left out
+/// what the canvas showed would be the wrong file; the preview skips it with
+/// one line on `diag` and gets `None`.
+#[allow(clippy::too_many_arguments)] // the budget's three, the policy's two, and the decode
+pub(super) fn load_budgeted<T>(
+    path: &str,
+    kind: &RasterKind,
+    bytes_per_px: usize,
+    budget_bytes: usize,
+    held: &mut usize,
+    strict: bool,
+    diag: &crate::diag::Diag<'_>,
+    decode: impl FnOnce() -> Option<(std::sync::Arc<T>, usize)>,
+) -> Result<Option<std::sync::Arc<T>>> {
+    let what = kind.what;
+    let projected = image::ImageReader::open(path)
+        .ok()
+        .and_then(|r| r.into_dimensions().ok())
+        .map_or(0, |(w, h)| (w as usize).saturating_mul(h as usize).saturating_mul(bytes_per_px));
+    if held.saturating_add(projected) > budget_bytes {
+        if strict {
+            bail!("{what} '{path}' exceeds the {budget_bytes}-byte raster budget — no pixels were rendered");
+        }
+        diag.warn(format!("{what} '{path}' skipped: the raster set exceeds the {budget_bytes}-byte budget"));
+        return Ok(None);
+    }
+    let Some((img, bytes)) = decode() else {
+        if strict {
+            bail!("{what} '{path}' is unreadable — no pixels were rendered");
+        }
+        return Ok(None);
+    };
+    *held = held.saturating_add(bytes);
+    Ok(Some(img))
+}
+
+/// Load every drawing layer of `recipe` into `out` through [`load_budgeted`].
 pub(super) fn load_layers(
     recipe: &EditRecipe,
     budget_bytes: usize,
@@ -104,25 +163,13 @@ pub(super) fn load_layers(
         if out.contains_key(path) {
             continue;
         }
-        let projected = image::ImageReader::open(path)
-            .ok()
-            .and_then(|r| r.into_dimensions().ok())
-            .map_or(0, |(w, h)| (w as usize).saturating_mul(h as usize).saturating_mul(4));
-        if held.saturating_add(projected) > budget_bytes {
-            if strict {
-                bail!("pixel layer '{path}' exceeds the {budget_bytes}-byte raster budget — no pixels were rendered");
-            }
-            diag.warn(format!("pixel layer '{path}' skipped: the raster set exceeds the {budget_bytes}-byte budget"));
-            continue;
+        let decode = || load_layer_image(path, diag).map(|img| {
+            let bytes = img.as_raw().len();
+            (img, bytes)
+        });
+        if let Some(img) = load_budgeted(path, &LAYER, 4, budget_bytes, held, strict, diag, decode)? {
+            out.insert(path.to_owned(), img);
         }
-        let Some(img) = load_layer_image(path, diag) else {
-            if strict {
-                bail!("pixel layer '{path}' is unreadable — no pixels were rendered");
-            }
-            continue;
-        };
-        *held = held.saturating_add(img.as_raw().len());
-        out.insert(path.to_owned(), img);
     }
     Ok(())
 }

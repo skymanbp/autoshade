@@ -5,6 +5,7 @@ use crate::*;
 // The section ● predicate and the table it reads (R25 P0) — see
 // `develop_panel` and `dev_lens`.
 use autoshade::advisor::catalogue::{family_is_active, CONTROL_FAMILIES};
+use crate::panels::grade_wheel::{grade_wheel, GRADE_VIEWS};
 
 impl AutoShadeApp {
     /// One labelled slider; double-click resets to `default` (the Lightroom
@@ -226,25 +227,12 @@ impl AutoShadeApp {
         } else {
             format!("{hint}\n{grammar}")
         };
-        // R38: the rail takes what the row leaves after the label and the
-        // value box (floor 60 px, never wider than egui's default): egui's
-        // fixed 100 px rail beside a long label ("Colour noise smoothness")
-        // ran a Detail row 22 px past the 320 px default and widened the
-        // auto-fitting panel, and every later row then laid out to that
-        // width. The style is restored after the widget, so the sibling
-        // rows are untouched.
-        let label_w = ui.fonts(|f| {
-            f.layout_no_wrap(label.to_owned(), egui::TextStyle::Body.resolve(ui.style()), egui::Color32::WHITE).size().x
-        });
-        // The value box is egui's DragValue: a button at least
-        // `interact_size` wide that GROWS with its text. Budgeting it at the
-        // minimum fit the row only while the value was short — a 3-digit
-        // "100" beside the long-labelled percent dials (the denoise dials'
-        // 100 % default, 2026-09-15) ran 4 px past the panel, which then
-        // widened by that much every frame. The budget is the widest text the
-        // track can show (both ends, at the shown decimals) plus the button's
-        // padding, so a row that fits at its default still fits at either
-        // end of a drag.
+        // The value box is egui's DragValue: a button that GROWS with its
+        // text, so its width is budgeted at the widest text the track can
+        // show (both ends, at the shown decimals) plus the button's padding —
+        // the label then truncates into what is left, and a row that fits at
+        // its default still fits at either end of a drag (the 2026-09-15
+        // 「100」 that ran the panel 4 px wide every frame).
         let value_w = {
             let style = ui.style().drag_value_text_style.resolve(ui.style());
             let widest = ui.fonts(|f| {
@@ -255,30 +243,83 @@ impl AutoShadeApp {
             });
             (widest + 2.0 * ui.spacing().button_padding.x).max(ui.spacing().interact_size.x)
         };
-        let spacing = ui.spacing();
-        let rail = (ui.available_width() - label_w - value_w - 2.0 * spacing.item_spacing.x)
-            .clamp(60.0, spacing.slider_width);
-        let rail_before = std::mem::replace(&mut ui.spacing_mut().slider_width, rail);
-        let resp = ui
-            .add(
+        // Lightroom / RapidRaw's slider (2026-10-13, user: 「UI 整体还是不够
+        // 现代化」): the name on the left and the number on the right of one
+        // line, a thin rail the full width of the column under them. egui's
+        // stock row — rail, framed number, name trailing on the right — put
+        // the eye on the number box and gave every rail a different length.
+        // Both lines take exactly the column's width, so no label length can
+        // widen the panel (R38's runaway came from a fixed rail beside one).
+        // A vertical child, not a scope: a caller that lays the slider in a
+        // row (the Style dial and its warning) gets the two lines as one item
+        // of that row instead of the rail continuing the row.
+        let scope = ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.spacing_mut().interact_size.y = SLIDER_LINE_H;
+            let full = ui.available_width();
+            let head = ui.horizontal(|ui| {
+                let name_w = (full - value_w - ui.spacing().item_spacing.x).max(0.0);
+                let name = ui
+                    .allocate_ui_with_layout(
+                        egui::vec2(name_w, SLIDER_LINE_H),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.set_min_width(name_w);
+                            ui.add(
+                                egui::Label::new(label)
+                                    .truncate()
+                                    .sense(egui::Sense::click()),
+                            )
+                        },
+                    )
+                    .inner;
+                // The number reads as text until it is touched: no frame at
+                // rest, egui's own frame on hover / drag / typing.
+                let number = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let w = &mut ui.visuals_mut().widgets.inactive;
+                    w.weak_bg_fill = egui::Color32::TRANSPARENT;
+                    w.bg_stroke = egui::Stroke::NONE;
+                    // Hug the text so the digits end where the rail ends.
+                    ui.spacing_mut().interact_size.x = 0.0;
+                    // …and keep the line one text high: the button's stock
+                    // 5 px vertical padding made it 28 px, pushing the rail
+                    // a whole row away from its name.
+                    ui.spacing_mut().button_padding = egui::vec2(SPACE_XS, 0.0);
+                    let speed = if matches!(feel, SliderFeel::LogK) { (*value).abs() * 0.002 } else { range / 300.0 };
+                    ui.add(
+                        egui::DragValue::new(value)
+                            .range(min..=max)
+                            .speed(f64::from(speed).max(snap * 0.5))
+                            .fixed_decimals(decimals),
+                    )
+                });
+                (name, number.inner)
+            });
+            let (name, number) = head.inner;
+            ui.spacing_mut().slider_width = full;
+            let rail = ui.add(
                 egui::Slider::new(value, min..=max)
                     .logarithmic(matches!(feel, SliderFeel::LogK))
                     .step_by(snap)
                     .fixed_decimals(decimals)
-                    .text(label),
-            )
-            .on_hover_text(tip);
-        ui.spacing_mut().slider_width = rail_before;
-        // Right-click = reset too (阶段5 手感): the double-click twin — LR
-        // muscle memory, and reachable without the precise double timing.
-        if (resp.double_clicked() || resp.secondary_clicked()) && *value != default {
+                    .show_value(false),
+            );
+            paint_slider_knob(ui, &rail, *value, min, max, matches!(feel, SliderFeel::LogK));
+            (name, number, rail)
+        });
+        let (name, number, rail) = scope.inner;
+        let name = name.on_hover_text(&tip);
+        let rail = rail.on_hover_text(&tip);
+        // Double-click (the Lightroom gesture) or right-click resets, on the
+        // rail or on the name — LR resets from either.
+        if [&name, &rail].iter().any(|r| r.double_clicked() || r.secondary_clicked()) && *value != default {
             *value = default;
             return true;
         }
-        let mut changed = resp.changed();
+        let mut changed = rail.changed() || number.changed();
         // The nudge is gated on "no widget owns the keyboard", so arrows typed
         // into a text field can never double-apply here.
-        if resp.hovered() && ui.memory(|m| m.focused().is_none()) {
+        if (name.hovered() || rail.hovered() || number.hovered()) && ui.memory(|m| m.focused().is_none()) {
             let shift = ui.input(|i| i.modifiers.shift);
             let (up, down) = ui.input_mut(|i| {
                 (
@@ -309,7 +350,7 @@ impl AutoShadeApp {
         let lang = self.lang; // Copy — never borrows self, safe inside egui closures.
         let mut changed = false;
         ui.add_space(SPACE_LG);
-        panel_heading(ui, tr(lang, "Develop"), |_| {});
+        panel_heading(ui, tr(lang, "Develop"), false, |_| {});
         // OUTSIDE the editable gate below, deliberately (#4 review point): the
         // histogram is a READOUT. Its only interaction is the pair of clipping
         // triangles, whose click reaches `toggle_clipping` — that writes
@@ -403,6 +444,7 @@ impl AutoShadeApp {
         changed |= self.dev_calibration(ui, calibration_active);
         changed |= self.dev_detail(ui, detail_active);
         changed |= self.dev_effects(ui, effects_active);
+        changed |= self.dev_lens_blur(ui);
         changed |= self.dev_lens(ui);
         // In Lightroom's own panel order (Transform follows Lens Corrections).
         // R25 B4 drew this section read-only because nothing here moved a pixel;
@@ -527,19 +569,21 @@ impl AutoShadeApp {
                                     egui::pos2(1.0, 1.0),
                                 );
                                 // Card chrome tokens (L15-1): the glow is
-                                // the PILL accent at low alpha and its radius
-                                // is DERIVED — the literal 0xc9a14a/7.0 copy
-                                // silently detached from any theme change.
+                                // the chrome accent at low alpha and its
+                                // radius is DERIVED — the literal
+                                // 0xc9a14a/7.0 copy silently detached from
+                                // any theme change.
                                 const CARD_RADIUS: f32 = 4.0;
                                 const GLOW_EXPAND: f32 = 3.0;
+                                let ring = self.theme.colors().accent_fill;
                                 if active {
                                     ui.painter().rect_filled(
                                         rect.expand(GLOW_EXPAND),
                                         CARD_RADIUS + GLOW_EXPAND,
                                         egui::Color32::from_rgba_unmultiplied(
-                                            PILL.r(),
-                                            PILL.g(),
-                                            PILL.b(),
+                                            ring.r(),
+                                            ring.g(),
+                                            ring.b(),
                                             46,
                                         ),
                                     );
@@ -549,7 +593,7 @@ impl AutoShadeApp {
                                     ui.painter().rect_stroke(
                                         rect,
                                         CARD_RADIUS,
-                                        egui::Stroke::new(2.0, PILL),
+                                        egui::Stroke::new(2.0, ring),
                                     );
                                 }
                                 resp
@@ -1309,48 +1353,58 @@ impl AutoShadeApp {
             .id_salt("sec_grade")
             .default_open(false)
             , |ui| {
+                // Lightroom's grading panel (2026-10-13): the 3-way view shows
+                // the shadow, midtone and highlight wheels together, each with
+                // its luminance under it; Global is one wheel for the whole
+                // picture (`panels/grade_wheel.rs`).
                 ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("grade_region")
-                        .selected_text(tr(lang, GRADE_REGIONS[self.grade_region]))
-                        .show_ui(ui, |ui| {
-                            for (i, name) in GRADE_REGIONS.iter().enumerate() {
-                                ui.selectable_value(&mut self.grade_region, i, tr(lang, name));
-                            }
-                        });
-                    // R38: a glyph square — the same reset in every mixer row;
-                    // as a text button it ran the HSL tab row to 318 px at the
-                    // 320 px default and widened the auto-fitting panel.
+                    let gap = ui.spacing().item_spacing.x;
+                    let w = ((ui.available_width().min(FIELD_W_MAX) - row_h(ui) - 2.0 * gap) / 2.0).floor();
+                    for (i, name) in GRADE_VIEWS.iter().enumerate() {
+                        if toggle_in(ui, egui::vec2(w, row_h(ui)), self.grade_region == i, tr(lang, name)).clicked() {
+                            self.grade_region = i;
+                        }
+                    }
+                    // R38: a glyph square — the same reset in every mixer row.
                     if glyph(ui, true, "↺").on_hover_text(tr(lang, "Reset all")).clicked() {
                         self.recipe.color_grade = ColorGrade::default();
                         changed = true;
                     }
                 });
+                ui.add_space(SPACE_SM);
                 let cg = &mut self.recipe.color_grade;
-                let (mut hue, mut sat, mut lum) = match self.grade_region {
-                    0 => (cg.shadow_hue, cg.shadow_sat, cg.shadow_lum),
-                    1 => (cg.midtone_hue, cg.midtone_sat, cg.midtone_lum),
-                    2 => (cg.highlight_hue, cg.highlight_sat, cg.highlight_lum),
-                    _ => (cg.global_hue, cg.global_sat, cg.global_lum),
+                // One wheel with its luminance slider in a column `width` wide.
+                let wheel = |ui: &mut egui::Ui, title: &str, width: f32, h: &mut f32, s: &mut f32, l: &mut f32| {
+                    let mut c = false;
+                    ui.vertical(|ui| {
+                        ui.set_width(width);
+                        c |= grade_wheel(ui, lang, title, (width - 8.0).min(170.0), h, s);
+                        c |= Self::slider(ui, lang, tr(lang, "Luminance"), l, -100.0, 100.0, 0.0);
+                    });
+                    c
                 };
-                let mut wheel_changed = false;
-                // 359.9, not 360: the recipe normalizes hue by rem_euclid(360),
-                // so a drag to the very end snapped the knob back to 0 — same
-                // colour, but the knob teleported under the pointer (L15-3).
-                wheel_changed |= Self::slider(ui, lang, tr(lang, "Hue"), &mut hue, 0.0, 359.9, 0.0);
-                wheel_changed |= Self::slider(ui, lang, tr(lang, "Saturation"), &mut sat, 0.0, 100.0, 0.0);
-                wheel_changed |= Self::slider(ui, lang, tr(lang, "Luminance"), &mut lum, -100.0, 100.0, 0.0);
-                if wheel_changed {
-                    match self.grade_region {
-                        0 => { cg.shadow_hue = hue; cg.shadow_sat = sat; cg.shadow_lum = lum; }
-                        1 => { cg.midtone_hue = hue; cg.midtone_sat = sat; cg.midtone_lum = lum; }
-                        2 => { cg.highlight_hue = hue; cg.highlight_sat = sat; cg.highlight_lum = lum; }
-                        _ => { cg.global_hue = hue; cg.global_sat = sat; cg.global_lum = lum; }
-                    }
-                    changed = true;
+                let avail = ui.available_width();
+                if self.grade_region == 0 {
+                    // Midtones on top, centred; shadows and highlights under it.
+                    let half = ((avail - ui.spacing().item_spacing.x) / 2.0).floor();
+                    ui.horizontal(|ui| {
+                        ui.add_space(((avail - half) / 2.0).floor());
+                        changed |= wheel(ui, tr(lang, "Midtones"), half, &mut cg.midtone_hue, &mut cg.midtone_sat, &mut cg.midtone_lum);
+                    });
+                    ui.add_space(SPACE_SM);
+                    ui.horizontal(|ui| {
+                        changed |= wheel(ui, tr(lang, "Shadows"), half, &mut cg.shadow_hue, &mut cg.shadow_sat, &mut cg.shadow_lum);
+                        changed |= wheel(ui, tr(lang, "Highlights"), half, &mut cg.highlight_hue, &mut cg.highlight_sat, &mut cg.highlight_lum);
+                    });
+                } else {
+                    let width = (avail * 0.7).floor();
+                    ui.horizontal(|ui| {
+                        ui.add_space(((avail - width) / 2.0).floor());
+                        changed |= wheel(ui, tr(lang, "Global"), width, &mut cg.global_hue, &mut cg.global_sat, &mut cg.global_lum);
+                    });
                 }
-                // Blending/Balance shape the WHOLE grade, not the region the
-                // combo shows — a scope caption keeps them from reading as
-                // "shadow Blending".
+                // Blending/Balance shape the WHOLE grade, not one wheel — a
+                // scope caption keeps them from reading as a wheel's own.
                 sub_caption(ui, tr(lang, "All regions"));
                 changed |= Self::slider(ui, lang, tr(lang, "Blending"), &mut cg.blending, 0.0, 100.0, 50.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Balance"), &mut cg.balance, -100.0, 100.0, 0.0);
@@ -2404,17 +2458,15 @@ impl AutoShadeApp {
                     }
                 });
                 let field = self.recipe.colour_field.as_mut().expect("just checked");
-                let mut pct = field.amount * 100.0;
+                // Through the shared slider (its look, reset to the solved
+                // field's full amount, ↑/↓) — it was the one bare egui slider.
+                let enabled = field.enabled;
                 if ui
-                    .add_enabled(
-                        field.enabled,
-                        egui::Slider::new(&mut pct, 0.0..=100.0)
-                            .text(tr(lang, "Amount"))
-                            .suffix("%"),
-                    )
-                    .changed()
+                    .add_enabled_ui(enabled, |ui| {
+                        Self::slider_pct(ui, lang, tr(lang, "Amount"), &mut field.amount, 1.0, 1.0)
+                    })
+                    .inner
                 {
-                    field.amount = (pct / 100.0).clamp(0.0, 1.0);
                     changed = true;
                 }
                 if remove_field {

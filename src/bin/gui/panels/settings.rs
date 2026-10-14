@@ -292,18 +292,27 @@ impl AutoShadeApp {
             });
         ui.separator();
         ui.heading(tr(lang, "Theme"));
-        // Two complete looks (see ThemeColors) — switching re-installs the
-        // egui style this frame and persists with the other prefs.
-        let before_theme = self.theme;
+        // Four surface schemes and an accent picked apart from them (see
+        // ThemeColors) — switching either re-installs the egui style this
+        // frame and persists with the other prefs.
+        let before = (self.theme, self.accent);
         egui::ComboBox::from_id_salt("theme_picker")
             .selected_text(tr(lang, self.theme.label()))
             .show_ui(ui, |ui| {
-                for t in [ThemePref::Dark, ThemePref::Light] {
+                for t in ThemePref::ALL {
                     ui.selectable_value(&mut self.theme, t, tr(lang, t.label()));
                 }
             });
-        if self.theme != before_theme {
-            install_theme(ui.ctx(), self.theme);
+        ui.horizontal(|ui| {
+            ui.label(tr(lang, "Accent colour"));
+            for a in AccentPref::ALL {
+                if accent_swatch(ui, a.hue(), self.accent == a).on_hover_text(tr(lang, a.label())).clicked() {
+                    self.accent = a;
+                }
+            }
+        });
+        if (self.theme, self.accent) != before {
+            install_look(ui.ctx(), self.theme, self.accent);
         }
         // 「Zoned fit (sky)」 MOVED to the AI panel's reverse-fit sub-area (R22
         // #4): it is a setting for ONE button, and it sat two panels away from
