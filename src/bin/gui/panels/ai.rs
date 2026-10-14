@@ -24,38 +24,16 @@
 //! feedback #13), which sits under both dials because it reads them: the visual
 //! judge's round budget comes off the Strength band directly above it.
 //!
-//! R30 cut the panel along the line the USER PAYS ON, and made one hidden
-//! dependency visible. Each sub-area is now its own `CollapsingHeader` whose
-//! title carries a COST TAG (`· paid API` / `· local`), and the library
-//! controls — which spend local disk, CPU and one download, never an API
-//! call — left `ai_analysis` for a sub-area of their own
-//! ([`AutoShadeApp::ai_libraries`]), drawn as the three-rung LADDER they
-//! always were:
-//!
-//!   * a library is read at all only while Style > 0 (`pipeline.rs`'s
-//!     `(req.style > 0.0).then(load_effective)`);
-//!   * the LOOK library is retrieved ONLY through the SigLIP 2 query vector,
-//!     which `pipeline.rs` builds as `req.style > 0.0 && req.embed.on()` and
-//!     without which `StyleIndex::retrieve_looks_with_terms` returns an empty
-//!     list;
-//!   * and `use_looks` defaults to true while `style_embed` defaults to false
-//!     (`model.rs`), so a fresh install shipped a ticked look-library switch
-//!     that provably read nothing, disclosed only by a rationale note AFTER a
-//!     paid analysis (`pipeline.rs`'s `looks_unreachable`).
-//!
-//! The three gates below (a)/(b)/(c) are those three facts, drawn. Gate (a)
-//! covers the two USE switches only (user ruling): everything that shapes a
-//! library rather than consuming one stays live at Style 0 — the folder
-//! pickers, both Build buttons, and the retrieval-engine rung, whose two
-//! switches `actions.rs` resolves when it starts a build. Greying those would
-//! have made the library nobody has yet the one library nobody can make, and
-//! the Style slider's own 「⚠ no library」 flag points straight at them.
+//! R30 cut the panel along the line the USER PAYS ON. Each sub-area is its
+//! own `CollapsingHeader` whose title carries a COST TAG (`· paid API` /
+//! `· local`). The reference library — local disk, CPU and one model download,
+//! never an API call — is its own sub-area ([`AutoShadeApp::ai_libraries`]).
+//! A library is read only while Style > 0 (`pipeline.rs`'s
+//! `(req.style > 0.0).then(library::load)`), so the controls that only feed an
+//! analysis go dark at Style 0 while the build side stays live: building a
+//! library is not reading one, and greying the build at Style 0 would make the
+//! library nobody has yet the one nobody can make.
 use crate::*;
-
-fn style_age_hours(age: Option<std::time::Duration>) -> String {
-    age.map(|d| format!("{:.1}h", d.as_secs_f64() / 3600.0))
-        .unwrap_or_else(|| "?".into())
-}
 
 impl AutoShadeApp {
     /// Does the AI area carry state worth a ● on its collapsed header?
@@ -430,7 +408,7 @@ impl AutoShadeApp {
                     &mut self.style_strength,
                     1.0,
                     STYLE_STRENGTH_DEFAULT,
-                    tr(lang, "Personal style strength: how far AI proposals lean toward your past XMP editing habits (0 = ignore). With a Direction written above at Adherence over 40%, the direction leads instead and your habits are sent as background only — whatever this dial says."),
+                    tr(lang, "How far AI proposals follow the looks in your reference library (0 = ignore it). With a Direction written above at Adherence over 40%, the direction leads instead and the references are sent as background only — whatever this dial says."),
                 );
                 // R23-2: a slider that provably cannot do anything must not read as
                 // live. The old one showed 30% and a tooltip about "your past XMP
@@ -439,11 +417,8 @@ impl AutoShadeApp {
                 // when the status is KNOWN and negative (never while it is still
                 // being read, which would flash a false warning every launch).
                 if matches!(
-                    self.style_info.as_ref().map(|i| &i.state),
-                    Some(
-                        autoshade::style::StyleIndexState::Absent
-                            | autoshade::style::StyleIndexState::Unusable { .. }
-                    )
+                    self.style_info,
+                    Some(autoshade::library::Summary::Absent | autoshade::library::Summary::Unusable(_))
                 ) {
                     ui.label(
                         egui::RichText::new(tr(lang, "⚠ no library"))
@@ -451,7 +426,7 @@ impl AutoShadeApp {
                             .small(),
                     )
                     .on_hover_text(tr(lang,
-                        "This slider does nothing until a style reference library is built — the 「Reference libraries」 section below builds one.",
+                        "This slider does nothing until a reference library is built — the 「Reference library」 section below builds one.",
                     ));
                 }
             });
@@ -468,7 +443,7 @@ impl AutoShadeApp {
                 1.0,
                 GRADE_STRENGTH_DEFAULT,
                 tr(lang,
-                    "How hard the AI pushes the grade — a different axis from Style: Style asks how close to your own past edits, Strength asks how committed the result should be. 50% is where every AI guardrail NUMBER was calibrated: the ±50/±35 pair and the soft caps are bit-for-bit the ones earlier releases used, but the restraint WORDING those releases sent is now the 40%-and-below prose, so no single setting brings an old release back whole. From 41% up the AI must decide EACH colour control explicitly instead of leaving it neutral by default; the default 65% (double-click to reset) leans a little further than the calibration point. Above 70% it is additionally told to use the controls it wants at a strength a viewer can see, and the visual review may then run up to 3 rounds — the same ceiling 「Deep thinking」 raises it to, and either one ALONE is enough to make the worst case 17 API calls (10 carrying images). The clipping and white-point safeguards never widen with it.",
+                    "How hard the AI pushes the grade — a different axis from Style: Style asks how close to your reference looks, Strength asks how committed the result should be. 50% is where every AI guardrail NUMBER was calibrated: the ±50/±35 pair and the soft caps are bit-for-bit the ones earlier releases used, but the restraint WORDING those releases sent is now the 40%-and-below prose, so no single setting brings an old release back whole. From 41% up the AI must decide EACH colour control explicitly instead of leaving it neutral by default; the default 65% (double-click to reset) leans a little further than the calibration point. Above 70% it is additionally told to use the controls it wants at a strength a viewer can see, and the visual review may then run up to 3 rounds — the same ceiling 「Deep thinking」 raises it to, and either one ALONE is enough to make the worst case 17 API calls (10 carrying images). The clipping and white-point safeguards never widen with it.",
                 ),
             );
             let has_direction = !self.guidance.trim().is_empty();
@@ -486,7 +461,7 @@ impl AutoShadeApp {
                     &mut self.direction_adherence,
                     1.0,
                     autoshade::recipe::DirectionAdherence::DEFAULT,
-                    tr(lang, "How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit. Direct and Brief also decide WHO LEADS: your style library becomes background and its distillation pull is skipped, so a direction can take a photo somewhere your past edits never went. Hint leaves the library in the lead."),
+                    tr(lang, "How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit. Direct and Brief also decide WHO LEADS: your reference library becomes background, so a direction can take a photo somewhere your references never went. Hint leaves the library in the lead."),
                 );
             });
             // R23-4 (feedback #13): the THIRD analysis-side control, under the two
@@ -499,47 +474,28 @@ impl AutoShadeApp {
             });
     }
 
-    /// Sub-area ② — REFERENCE LIBRARIES (local): the three switches an analysis
-    /// leans on, drawn as the dependency LADDER they actually are (R30).
+    /// Sub-area ② — the REFERENCE LIBRARY (local): finished photos whose look
+    /// an analysis may follow — which library, how to build it, and the two
+    /// switches an analysis reads.
     ///
-    /// Nothing in this fold reaches a paid API — disk, CPU, and one model
-    /// download — which is what its 「· local」 tag says. COLLAPSED by default
-    /// because it is a setup-time surface: built once, then left alone.
-    ///
-    /// Gate (a) is decided here and applied by two rungs, to the two USE
-    /// switches ONLY (user ruling): at Style 0 the pipeline opens no library at
-    /// all (`(req.style > 0.0).then(load_effective)`), so the two controls that
-    /// only ever feed an analysis — rung 1's reference-photo switch and rung
-    /// 3's 「Use look library」 — are drawn disabled with the reason above them.
-    /// Everything else stays live at every Style value: the folder pickers,
-    /// both Build buttons, the status lines, the captions, and the whole
-    /// retrieval-engine rung, whose switches are read by the index BUILDERS as
-    /// well as by a query. BUILDING a library is not READING one, and greying
-    /// the build side at Style 0 would have made the library nobody has yet the
-    /// one library nobody can make. Gates (b) and (c) — the look library's
-    /// dependency on the SigLIP 2 query vector, and the default trap that ships
-    /// from it — belong to one rung and live in
-    /// [`AutoShadeApp::ai_look_library`].
+    /// COLLAPSED by default because it is a setup-time surface: built once,
+    /// then left alone. The status line is half the feature (R23-2: "I have no
+    /// idea which library it is referencing"), so it heads the fold.
     fn ai_libraries(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        // Read the status ONCE per session (cached in `style_info`) — the file
-        // can reach 32 MB, and this draws every frame. OUTSIDE the fold and
-        // outside the gate on purpose: the Style slider's own 「⚠ no library」
-        // flag one sub-area up reads this same cached answer, so a collapsed
-        // (or gated) ② must not starve it. Not in tests: a headless frame
-        // would spawn a worker reading the developer's own store, and the
-        // tests drive `style_info` directly instead.
+        // Read the status ONCE per session (cached in `style_info`). OUTSIDE
+        // the fold on purpose: the Style slider's own 「⚠ no library」 flag one
+        // sub-area up reads this same answer, so a collapsed fold must not
+        // starve it. Not in tests: a headless frame would spawn a worker
+        // reading the developer's own store; tests set `style_info` directly.
         if !cfg!(test) && self.style_info.is_none() && !self.style_info_loading {
             self.start_style_info();
         }
         ui.add_space(SPACE_XS);
-        // Gate (a). Read off the SAME comparison the pipeline makes, so the
-        // two can never disagree about what "reads a library" means. Handed to
-        // each rung rather than wrapped around them, because the rungs mix
-        // build-side and read-side controls and only the second half is dead
-        // at Style 0.
+        // Read off the SAME comparison the pipeline makes, so the two can never
+        // disagree about what "reads a library" means.
         let reads_a_library = self.style_strength > 0.0;
-        card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Reference libraries · local"))
+        card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Reference library · local"))
             .id_salt("sec_ai_libraries")
             .default_open(false)
             // Headless layout tests must see these rows: a test frame never
@@ -547,397 +503,168 @@ impl AutoShadeApp {
             // them silently vacuous instead of red.
             .open(fold_open_in_tests())
             , |ui| {
+                self.ai_library_status(ui);
+                self.ai_library_build(ui);
                 if !reads_a_library {
-                    // OUTSIDE the disabled scope below, deliberately: the one
-                    // sentence that explains a greyed section must not itself
-                    // be greyed out.
+                    // Outside the disabled scope below: the sentence that
+                    // explains a greyed control must not itself be greyed.
                     ui.label(
-                        egui::RichText::new(tr(lang,
-                            "Style is at 0%: the analysis reads no library",
-                        ))
-                        .weak()
-                        .small(),
+                        egui::RichText::new(tr(lang, "Style is at 0%: the analysis reads no library"))
+                            .weak()
+                            .small(),
                     );
                 }
-                self.ai_edits_library(ui, reads_a_library);
-                self.ai_retrieval_engine(ui);
-                self.ai_look_library(ui, reads_a_library);
+                ui.add_enabled_ui(reads_a_library, |ui| {
+                    #[cfg(test)]
+                    {
+                        self.ai_library_read_enabled = Some(ui.is_enabled());
+                    }
+                    self.ai_library_use(ui);
+                });
             });
     }
 
-    /// Fold one read-side wrapper's enablement into the single witness the
-    /// gate-(a) test reads.
-    ///
-    /// OR, deliberately — not AND, and not assignment. The claim being pinned
-    /// is 「at Style 0 NEITHER use switch is live」, so the witness has to
-    /// answer 「was EITHER of them live?」: a wrapper dropped at one of the two
-    /// sites then flips it true on its own, where an AND would have been
-    /// masked by the site that still said false. The test clears it each
-    /// frame, so `None` means "no use switch laid out at all" — also a red,
-    /// since the assertions compare against `Some`.
-    #[cfg(test)]
-    fn note_library_read_gate(&mut self, ui: &egui::Ui) {
-        let live = self.ai_library_read_enabled.unwrap_or(false) || ui.is_enabled();
-        self.ai_library_read_enabled = Some(live);
-    }
-
-    /// Ladder rung 1 — YOUR OWN EDITS (RAW + `.xmp`): what the Style slider
-    /// actually leans on, and the only place in the desktop app that can build
-    /// it (R23-2, feedback #6).
-    ///
-    /// Two defects in one section. The library had no production-side entry
-    /// point outside the CLI and the web panel, so the slider above was
-    /// permanently inert for anyone who double-clicks the exe; and even with a
-    /// library built, nothing ever said WHICH one — the user's own words were
-    /// "I have no idea which library it is referencing". So the status line is
-    /// not decoration here, it is half the feature, and it stays at the head of
-    /// this rung rather than behind a fold of its own.
-    fn ai_edits_library(&mut self, ui: &mut egui::Ui, reads_a_library: bool) {
+    /// Which library, how big, how old, and where — or why there is none.
+    fn ai_library_status(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
-        sub_caption(ui, tr(lang, "My Lightroom edits library (RAW + .xmp)"));
-        // ── the status line: which library, how big, how old, and where.
-        match self.style_info.as_ref().map(|i| (i.path.clone(), i.state.clone())) {
-            Some((path, autoshade::style::StyleIndexState::Built { total, source_dir, age, with_embedding, looks, .. })) => {
-                let from = source_dir.unwrap_or_else(|| tr(lang, "an unrecorded folder").to_string());
-                ui.label(
-                    egui::RichText::new(trf(
-                        lang,
-                        "{n} of your own edits · from {path} · embeddings {with_embedding}/{total} · looks {looks}",
-                        &[("n", &total.to_string()), ("path", &from), ("with_embedding", &with_embedding.to_string()), ("total", &total.to_string()), ("looks", &looks.to_string())],
-                    ))
-                    .small(),
-                )
-                .on_hover_text(trf(
+        let line = match &self.style_info {
+            Some(autoshade::library::Summary::Built { photos, phrased, dir, age }) => {
+                let mut t = trf(
                     lang,
-                    "Library file: {path}",
-                    &[("path", &abs_display(&path))],
-                ));
+                    "{n} finished photos · from {path} · {m} with look phrases",
+                    &[("n", &photos.to_string()), ("path", dir), ("m", &phrased.to_string())],
+                );
                 if let Some(age) = age {
-                    // Coarse buckets, no calendar arithmetic (this tree carries
-                    // no date library): "how stale is my library" is answered by
-                    // hours or days, and both spellings avoid a plural rule.
+                    // Coarse buckets, no calendar arithmetic: "how stale is my
+                    // library" is answered by hours or days, and both spellings
+                    // avoid a plural rule.
                     const HOUR: u64 = 3600;
                     let secs = age.as_secs();
-                    let line = if secs < 48 * HOUR {
+                    t.push_str(" · ");
+                    t.push_str(&if secs < 48 * HOUR {
                         trf(lang, "built {hours}h ago", &[("hours", &(secs / HOUR).to_string())])
                     } else {
                         trf(lang, "built {days}d ago", &[("days", &(secs / (24 * HOUR)).to_string())])
-                    };
-                    ui.label(egui::RichText::new(line).weak().small());
+                    });
                 }
+                egui::RichText::new(t).small()
             }
-            Some((_, autoshade::style::StyleIndexState::Unusable { err })) => {
-                ui.label(
-                    egui::RichText::new(trf(
-                        lang,
-                        "The style library could not be read ({err}) — rebuild it below.",
-                        &[("err", &err)],
-                    ))
+            Some(autoshade::library::Summary::Unusable(err)) => egui::RichText::new(trf(
+                lang,
+                "The reference library could not be read ({err}) — rebuild it below.",
+                &[("err", err)],
+            ))
+            .color(ui.visuals().warn_fg_color)
+            .small(),
+            Some(autoshade::library::Summary::Absent) => egui::RichText::new(tr(lang,
+                "No reference library yet — the Style slider above has nothing to follow. Pick a folder of finished photos whose look you like (JPEG, TIFF or PNG exports).",
+            ))
+            .small(),
+            None => egui::RichText::new(tr(lang, "reading the reference library…")).weak().small(),
+        };
+        ui.label(line).on_hover_text(trf(
+            lang,
+            "Library file: {path}",
+            &[("path", &abs_display(&autoshade::library::path()))],
+        ));
+    }
+
+    /// The folder picker, the build button, the phrase switch and progress —
+    /// the BUILD side, live at every Style value; only a running build greys it.
+    fn ai_library_build(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        let building = self.style_build_inflight;
+        let mut pick = false;
+        let mut build: Option<PathBuf> = None;
+        ui.add_enabled_ui(!building, |ui| {
+            #[cfg(test)]
+            {
+                self.ai_library_build_enabled = Some(ui.is_enabled());
+            }
+            // 🗂, the same glyph Settings uses for a folder action: the
+            // embedded font subset covers it already (📂 is not in it).
+            let cell = columns(ui, 2);
+            if action_in(ui, cell, true, tr(lang, "🗂 Pick folder…"))
+                .on_hover_text(tr(lang,
+                    "Choose a folder of finished photos whose look you like — your own exports or anyone's. Nothing reads their .xmp: each photo is measured from its pixels. Building starts as soon as you choose.",
+                ))
+                .clicked()
+            {
+                pick = true;
+            }
+            // Rebuilding needs a folder: the remembered one, or one picked now.
+            let have = self.style_src_dir.clone().filter(|d| d.is_dir());
+            let label = if building { tr(lang, "building…") } else { tr(lang, "🔄 Build / rebuild") };
+            let resp = primary_in(ui, cell, have.is_some(), label).on_hover_text(if have.is_some() {
+                tr(lang,
+                    "Measure every finished photo in that folder (local compute, no API cost). A rebuild measures only new or changed photos. It cannot be cancelled, and a failed build leaves your existing library untouched.",
+                )
+            } else {
+                tr(lang, "Pick a folder first")
+            });
+            if resp.clicked() {
+                build = have;
+            }
+            ui.checkbox(&mut self.style_describe, tr(lang, "Also write each look as short phrases (local vision model; downloads 4.3 GB once, slower builds)"))
+                .on_hover_text(tr(lang,
+                    "A local model (Qwen3-VL-2B) writes a few phrases per photo about its GRADE — \"warm, faded, low contrast\" — so a typed Direction can pick the reference whose look it names. Nothing leaves this machine and nothing is billed. Off = references are chosen by picture alone.",
+                ));
+        });
+        if let Some((stage, done, total)) = self.style_build_progress {
+            ui.label(
+                egui::RichText::new(trf(
+                    lang,
+                    "{stage}: {done} / {total} photos",
+                    &[("stage", tr(lang, stage.label())), ("done", &done.to_string()), ("total", &total.to_string())],
+                ))
+                .weak()
+                .small(),
+            );
+        }
+        // rfd after the row is laid out: the dialog is modal and blocks.
+        if pick {
+            let mut dialog = rfd::FileDialog::new();
+            // Reopen where the last build ran, when that folder still exists.
+            if let Some(d) = self.style_src_dir.clone().filter(|d| d.is_dir()) {
+                dialog = dialog.set_directory(d);
+            }
+            if let Some(dir) = dialog.pick_folder() {
+                // Remembered on the PICK: a build that then fails must not
+                // lose the folder the rebuild button needs.
+                self.style_src_dir = Some(dir.clone());
+                build = Some(dir);
+            }
+        }
+        if let Some(dir) = build {
+            self.start_style_build(dir);
+        }
+    }
+
+    /// The READ side: whether an analysis searches the library, and whether
+    /// the references also go to the model as pictures.
+    fn ai_library_use(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        let built = matches!(self.style_info, Some(autoshade::library::Summary::Built { .. }));
+        ui.checkbox(&mut self.style_embed, tr(lang, "Search the library when analysing (SigLIP 2, local; downloads 1.5 GB once)"))
+            .on_hover_text(tr(lang,
+                "Each analysis measures this photo (and your Direction) with a local model and picks the closest references. Building a library turns this on, since the build has already downloaded the model.",
+            ));
+        if built && !self.style_embed {
+            ui.label(
+                egui::RichText::new(tr(lang, "built, but not searched: the switch above is off"))
                     .color(ui.visuals().warn_fg_color)
                     .small(),
-                );
-            }
-            Some((_, autoshade::style::StyleIndexState::Absent)) => {
-                // The shared refusal's own wording (the CLI's `StyleIndex::save`
-                // and the web handler say the same): an AutoShade OUTPUT folder
-                // always yields nothing, because AutoShade's own .xmp lives in
-                // the develop store — that is the mistake this sentence exists
-                // to pre-empt, and it must not be reworded per surface.
-                ui.label(
-                    egui::RichText::new(tr(lang,
-                        "No library built yet — the Style slider above has nothing to lean on. Point this at the folder you edit in Lightroom (each RAW with its .xmp sidecar beside it); AutoShade keeps its own .xmp in the develop store, never beside your RAWs, so its output folder always yields nothing.",
-                    ))
-                    .small(),
-                );
-            }
-            None => {
-                ui.label(
-                    egui::RichText::new(tr(lang, "reading the style library…")).weak().small(),
-                );
-            }
-        }
-        // ── the folder picker + the build button.
-        ui.horizontal_wrapped(|ui| {
-            let building = self.style_build_inflight;
-            let mut pick = false;
-            let mut build: Option<PathBuf> = None;
-            ui.add_enabled_ui(!building, |ui| {
-                #[cfg(test)]
-                {
-                    // The BUILD side's own witness. Gate (a) must never reach
-                    // this row (user ruling), so a read gate accidentally
-                    // widened over it turns this false — which is exactly the
-                    // regression the split exists to prevent.
-                    self.ai_library_build_enabled = Some(ui.is_enabled());
-                }
-                // 🗂, the same glyph Settings uses for a folder action: the
-                // embedded font subset covers it already (📂 is not in it).
-                let cell = columns(ui, 2);
-                if action_in(ui, cell, true, tr(lang, "🗂 Pick folder…"))
-                    .on_hover_text(tr(lang,
-                        "Choose the folder of your OWN edited RAWs — the ones with a Lightroom .xmp sidecar beside them. Each pair teaches AutoShade one of your finished looks. Indexing starts as soon as you choose.",
-                    ))
-                    .clicked()
-                {
-                    pick = true;
-                }
-                // Rebuilding needs a folder: the remembered one, or one picked
-                // now. Enabled only when there IS one, so the button can never
-                // launch a build against nothing.
-                let have = self.style_src_dir.clone().filter(|d| d.is_dir());
-                let label = if building {
-                    tr(lang, "building…")
-                } else {
-                    tr(lang, "🔄 Build / rebuild")
-                };
-                let resp = primary_in(ui, cell, have.is_some(), label)
-                    .on_hover_text(if have.is_some() {
-                        tr(lang,
-                            "Index every RAW+.xmp pair in that folder (local compute, no API cost). Every RAW is decoded, so a large library takes minutes; the app stays usable and this button re-arms when it finishes. It cannot be cancelled — a build that indexes nothing is refused and leaves your existing library untouched.",
-                        )
-                    } else {
-                        tr(lang, "Pick a folder first")
-                    });
-                if resp.clicked() {
-                    build = have;
-                }
-            });
-            if let Some((stage, done, total)) = self.style_build_progress {
-                // The STAGE is named (S2): the build is four phases over the
-                // whole library and only the first reports per record, so a
-                // bare pair would sweep 0..N three times with nothing to say
-                // which sweep this is.
-                ui.label(
-                    egui::RichText::new(trf(
-                        lang,
-                        "{stage}: {done} / {total} photos",
-                        &[
-                            ("stage", tr(lang, stage.label())),
-                            ("done", &done.to_string()),
-                            ("total", &total.to_string()),
-                        ],
-                    ))
-                    .weak()
-                    .small(),
-                );
-            }
-            // rfd OUTSIDE the closures above (they borrow `ui`), and after the
-            // row is laid out: the dialog is modal and blocks this thread.
-            if pick {
-                let mut dialog = rfd::FileDialog::new();
-                // Reopen where the last build ran, when that folder still
-                // exists — a dialog pointed at a missing path lands wherever
-                // the OS decides (Explorer drops you in Documents).
-                if let Some(d) = self.style_src_dir.clone().filter(|d| d.is_dir()) {
-                    dialog = dialog.set_directory(d);
-                }
-                if let Some(dir) = dialog.pick_folder() {
-                    // Remembered on the PICK, not only on a successful build:
-                    // the rebuild button needs a folder before it can do
-                    // anything, and a build that then fails must not lose it.
-                    self.style_src_dir = Some(dir.clone());
-                    self.start_style_build(dir);
-                }
-            }
-            if let Some(dir) = build {
-                self.start_style_build(dir);
-            }
-        });
-        // ── where the SIDECARS are, when they are not beside the RAWs (the
-        // GUI half of `style-index --xmp-dir`). A second row rather than a
-        // second picker on the row above: it is the OPTIONAL half of "which
-        // library", and the common answer — beside each RAW — needs no click.
-        ui.horizontal_wrapped(|ui| {
-            let building = self.style_build_inflight;
-            let mut pick = false;
-            let mut clear = false;
-            ui.add_enabled_ui(!building, |ui| {
-                let cell = columns(ui, 2);
-                if action_in(ui, cell, true, tr(lang, "🗂 XMP folder…"))
-                    .on_hover_text(tr(lang,
-                        "Where your .xmp sidecars live when they are NOT beside the RAWs — an exported catalogue, or a photo volume you cannot write to. AutoShade looks for a mirror of the library's own folder tree first, then a flat folder of sidecars, then beside the RAW as before.",
-                    ))
-                    .clicked()
-                {
-                    pick = true;
-                }
-                if action_in(ui, cell, self.style_xmp_dir.is_some(), tr(lang, "Beside the RAWs"))
-                    .on_hover_text(tr(lang,
-                        "Forget that folder and pair each RAW with the .xmp beside it, the way every build before this one did.",
-                    ))
-                    .clicked()
-                {
-                    clear = true;
-                }
-            });
-            let shown = match &self.style_xmp_dir {
-                Some(d) => abs_display(d),
-                None => tr(lang, "beside each RAW").to_string(),
-            };
-            ui.label(
-                egui::RichText::new(trf(lang, "sidecars: {path}", &[("path", &shown)]))
-                    .weak()
-                    .small(),
             );
-            // rfd OUTSIDE the enabled-closure above, for its reason: modal, and
-            // it borrows nothing.
-            if pick {
-                let mut dialog = rfd::FileDialog::new();
-                if let Some(d) = self.style_xmp_dir.clone().filter(|d| d.is_dir()) {
-                    dialog = dialog.set_directory(d);
-                } else if let Some(d) = self.style_src_dir.clone().filter(|d| d.is_dir()) {
-                    dialog = dialog.set_directory(d);
-                }
-                if let Some(dir) = dialog.pick_folder() {
-                    // Remembered, NOT built from: choosing where the sidecars
-                    // are is not asking for an hour of decoding — the build
-                    // button above is. (Picking the RAW folder starts a build
-                    // because that IS the request; this one qualifies it.)
-                    self.style_xmp_dir = Some(dir);
-                }
-            }
-            if clear {
-                self.style_xmp_dir = None;
-            }
-        });
-        // ── the opt-in reference PHOTO (the "both" half of feedback #6: the
-        // index AND an actual picture).
-        let built = matches!(
-            self.style_info.as_ref().map(|i| &i.state),
-            Some(autoshade::style::StyleIndexState::Built { .. })
-        );
-        // …and it is a READ-side switch: the reference photo rides an analysis
-        // call, so gate (a) wraps it. OUTSIDE the `built` gate, so the witness
-        // reads the gate and not the library's existence.
-        ui.add_enabled_ui(reads_a_library, |ui| {
-            #[cfg(test)]
-            self.note_library_read_gate(ui);
-            ui.add_enabled_ui(built, |ui| {
-                ui.checkbox(
-                    &mut self.send_style_ref_image,
-                    tr(lang, "Also give the model a reference photo"),
-                )
+        }
+        ui.add_enabled_ui(built && self.style_embed, |ui| {
+            ui.checkbox(&mut self.send_style_ref_image, tr(lang, "Also show the model the reference photos"))
                 .on_hover_text(if built {
                     tr(lang,
-                        "WILL UPLOAD TWO IMAGES per analysis call: this photo, plus the ONE most similar shot from your style library, so the model can match your look by eye instead of only by numbers. COST: an analysis with two images is billed for two images instead of one — and a revision round sends both again. The reference is never stored by the provider (store:false), and the rationale names the photo that was used. Off = the numeric style reference only.",
+                        "WILL UPLOAD UP TO 3 MORE IMAGES per analysis call: the closest reference photos, so the model can match their look by eye as well as by words. COST: each is billed as one more image — and a revision round sends them again. They are never stored by the provider (store:false), and the rationale says how many went. Off = the references go as words only.",
                     )
                 } else {
-                    tr(lang, "Build a style library first — there is no reference photo to send")
+                    tr(lang, "Build a reference library first — there is no reference photo to send")
                 });
-            });
-        });
-    }
-
-    /// Ladder rung 2 — the RETRIEVAL ENGINE: the vectors the rungs on either
-    /// side of it are searched with. It sits BETWEEN the two libraries because
-    /// that is where it sits in the pipeline: rung 1 still works without it
-    /// (the 14-dim feature retrieval), rung 3 does not — `pipeline.rs`'s
-    /// `query_embed` is the only query vector the look search has.
-    ///
-    /// BUILD-side as well as read-side, and gate (a) therefore does not touch
-    /// it (user ruling). Both switches are resolved by the two index builders —
-    /// `actions.rs`'s `EmbeddingSwitch::resolve(None, self.style_embed)` and
-    /// `DescribeSwitch::resolve(None, self.style_describe)` — so they decide
-    /// what a build COMPUTES, not only what a query is matched on. Greying them
-    /// at Style 0 would let a user start a build they were not allowed to
-    /// configure, which is worse than either half alone. The caption says so,
-    /// because a switch whose effect spans two phases cannot be read off its
-    /// position in a ladder.
-    fn ai_retrieval_engine(&mut self, ui: &mut egui::Ui) {
-        let lang = self.lang;
-        sub_caption(ui, tr(lang, "Retrieval engine (what a build computes, what a query matches)"));
-        let embed = ui.checkbox(&mut self.style_embed, tr(lang, "Use SigLIP 2 look embedding (downloads 1.5 GB once; index builds and analyses take longer)"));
-        #[cfg(test)]
-        {
-            // This rung's witness, read off the WIDGET and not the ambient
-            // `Ui`: gate (a) must never reach it, and a read gate wrapped back
-            // around the rung turns this false wherever the wrapper is put.
-            self.retrieval_engine_enabled = Some(embed.enabled);
-        }
-        embed.on_hover_text(tr(lang, "Embedding is optional and local. The environment override wins when set; rebuild the index after changing this switch."));
-        // The description pass needs the embedding pass: it runs over the same
-        // staged frames, and its prose only reaches the ranking through the
-        // SigLIP text tower.
-        ui.add_enabled_ui(self.style_embed, |ui| {
-            ui.checkbox(&mut self.style_describe, tr(lang, "Describe looks with the local vision model (downloads 4.3 GB once; slower builds)"))
-                .on_hover_text(if self.style_embed {
-                    tr(lang, "Writes ONE short sentence per photo about its GRADE — white balance, tonality, contrast, colour, finishing — with a local model (Qwen3-VL-2B). Nothing leaves this machine and nothing is billed. Descriptions are cached by frame content, so a rebuild only describes what changed. Off = the fixed attribute tags alone.")
-                } else {
-                    tr(lang, "Turn on the look embedding first — the description pass runs over the same frames")
-                });
-        });
-    }
-
-    /// Ladder rung 3 — FINISHED PHOTOS (JPEG): the look library, plus the two
-    /// gates that stop its switch from lying about itself.
-    fn ai_look_library(&mut self, ui: &mut egui::Ui, reads_a_library: bool) {
-        let lang = self.lang;
-        sub_caption(ui, tr(lang, "Finished-photo look library (JPEG)"));
-        if let Some(info) = &self.style_info
-            && let autoshade::style::StyleIndexState::Built { looks, looks_dir, age, .. } = &info.state {
-                let from = looks_dir.clone().unwrap_or_else(|| tr(lang, "an unrecorded folder").to_string());
-                let age = style_age_hours(*age);
-                ui.label(egui::RichText::new(trf(lang, "{n} finished photos · from {path} · built {age} ago", &[("n", &looks.to_string()), ("path", &from), ("age", &age)])).small());
-        }
-        ui.horizontal_wrapped(|ui| {
-            let building = self.style_build_inflight;
-            let mut pick = false;
-            let mut build: Option<PathBuf> = None;
-            ui.add_enabled_ui(!building, |ui| {
-                let cell = columns(ui, 2);
-                if action_in(ui, cell, true, tr(lang, "Pick look folder…")).clicked() { pick = true; }
-                let have = self.looks_src_dir.clone().filter(|d| d.is_dir());
-                if primary_in(ui, cell, have.is_some(), tr(lang, "Build look library")).clicked() { build = have; }
-            });
-            if pick {
-                let mut dialog = rfd::FileDialog::new();
-                if let Some(d) = self.looks_src_dir.clone().filter(|d| d.is_dir()) { dialog = dialog.set_directory(d); }
-                if let Some(dir) = dialog.pick_folder() { self.looks_src_dir = Some(dir.clone()); self.start_looks_build(dir); }
-            }
-            if let Some(dir) = build { self.start_looks_build(dir); }
-        });
-        // Gates (b) and (c). The look library is reached ONLY through the
-        // SigLIP 2 query vector — `pipeline.rs` builds it as `req.style > 0.0
-        // && req.embed.on()`, and `StyleIndex::retrieve_looks_with_terms`
-        // returns an empty list when there is no query vector at all — so the
-        // switch is live only when there are looks AND something to retrieve
-        // them with, and the tooltip names the half that is missing.
-        let has_looks = matches!(self.style_info.as_ref().map(|i| &i.state), Some(autoshade::style::StyleIndexState::Built { looks, .. }) if *looks > 0);
-        let retrievable = self.style_embed;
-        ui.horizontal_wrapped(|ui| {
-            // Gate (a) OUTSIDE gates (b)/(c): three reasons this switch can be
-            // dead, and each witness has to read its own one.
-            ui.add_enabled_ui(reads_a_library, |ui| {
-                #[cfg(test)]
-                self.note_library_read_gate(ui);
-                ui.add_enabled_ui(has_looks && retrievable, |ui| {
-                    #[cfg(test)]
-                    {
-                        // The gate's own witness (the same seam as
-                        // `ai_gate_enabled`): a comment cannot keep it here.
-                        self.looks_switch_enabled = Some(ui.is_enabled());
-                    }
-                    let resp = ui.checkbox(&mut self.use_looks, tr(lang, "Use look library"));
-                    if !retrievable {
-                        resp.on_hover_text(tr(lang,
-                            "Turn on the SigLIP 2 look embedding first — the look library is retrieved through it",
-                        ));
-                    }
-                });
-            });
-            // (c) the DEFAULT TRAP, named where it happens rather than after a
-            // paid call: `use_looks` defaults to true and `style_embed` to
-            // false (model.rs:281/286), so a fresh install ships this box
-            // ticked over a retrieval that cannot run. The rationale's
-            // `looks_unreachable` note says the same thing — but only once an
-            // analysis has already been billed for.
-            if self.use_looks && !retrievable {
-                ui.label(
-                    egui::RichText::new(tr(lang, "ticked, but unreachable: SigLIP 2 is off"))
-                        .color(ui.visuals().warn_fg_color)
-                        .small(),
-                );
-            }
         });
     }
 

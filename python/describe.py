@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Look-description sidecar - image -> one short sentence about its GRADE.
+"""Look-phrase sidecar - image -> a few short phrases about its GRADE.
 
 Fifth member of the sidecar family (`denoise.py` = SCUNet, `segment.py` =
 subject/sky/object masks, `embed.py` = SigLIP 2 vectors, `correspond.py` =
@@ -12,15 +12,17 @@ Usage:
   python describe.py --manifest-jsonl frames.jsonl --output descs.jsonl
   python describe.py --self-test                               # pins + template
 
-WHAT IT WRITES, and what it must never write. The description is about the
+WHAT IT WRITES, and what it must never write. The phrases are about the
 PHOTOGRAPHIC GRADE - white balance lean, tonality, contrast, saturation and
-colour treatment, finishing, mood - and never about the subject. That is the
-whole reason a local model was chosen over the attribute vocabulary alone:
-`embed.py --vocab-file` can only score a photograph against 33 fixed phrases,
-while a sentence can say something the vocabulary has no word for. The prompt
-FENCES the subject out; a description that named one could not be detected
-after the fact, so the Rust side treats every description as UNTRUSTED text
-and it reaches a prompt only through the bounded, fenced reference blocks.
+colour treatment, finishing, mood - and never about the subject, written the
+way a photographer types a look request ("warm golden tones, lifted shadows,
+soft contrast"). They are SHORT on purpose: the reference library compares a
+typed direction against them through SigLIP's text tower, and a short request
+against a paragraph was the measured weakness of the sentence this replaced
+(src/library.rs says why). The prompt FENCES the subject out; phrases that
+named one could not be detected after the fact, so the Rust side treats them
+as UNTRUSTED text and they reach a prompt only through the bounded, fenced
+reference block.
 
 MODEL - `Qwen/Qwen3-VL-2B-Instruct`, HF licence tag `apache-2.0` (not gated,
 no remote code). Chosen over the three obvious alternatives on the same
@@ -175,26 +177,28 @@ MODEL = {
     },
 }
 
-# THE PROMPT, one constant, English. Changing a single character changes every
-# description in every index built afterwards, which is why PROMPT_VERSION sits
-# beside it and travels in every record: the Rust description cache keys on
-# (frame digest, model, revision, prompt_version), so a prompt edit that forgot
-# to move the version would serve descriptions from the OLD prompt for ever.
+# THE PROMPT, one constant, English. Changing a single character changes the
+# phrases of every library built afterwards, which is why PROMPT_VERSION sits
+# beside it and travels in every record: it is part of a library's model stamp
+# (src/library/switches.rs), so a rebuild after a prompt edit describes again
+# instead of keeping phrases from the OLD prompt.
 PROMPT = (
-    "Describe ONLY the photographic grade of this image in at most 45 words: "
-    "white-balance lean, tonality (blacks, shadows, highlights), contrast, "
-    "saturation and colour treatment, finishing (haze, clarity, grain) and mood. "
-    "Do not name subjects, places, objects or people. Output one plain sentence."
+    "Describe ONLY the photographic grade of this image as 4 to 8 short "
+    "comma-separated phrases of one to three words each, the way a photographer "
+    "types a look request: white-balance lean, tonality, contrast, saturation "
+    "and colour treatment, finishing (haze, clarity, grain) and mood. "
+    "Do not name subjects, places, objects or people. "
+    "Output the phrases on one line and nothing else."
 )
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2
 
 # Greedy, and pinned as constants so the Rust side can assert them from the
 # source. `generation_config.json` at this revision ships `do_sample: true`
 # with a temperature/top_p/top_k triple; a description that changed run to run
-# would make the description cache a lie and two rebuilds of one library
+# would make a library's phrases drift between rebuilds and two builds of one library
 # incomparable. The sampling knobs are therefore passed as None explicitly -
 # leaving them in place merely produces a warning while the values sit unused.
-MAX_NEW_TOKENS = 80
+MAX_NEW_TOKENS = 60
 DO_SAMPLE = False
 NUM_BEAMS = 1
 SEED = 0
@@ -203,7 +207,7 @@ SEED = 0
 # (`describe::sanitize_desc`) applies the SAME bounds again, because a sidecar
 # is a program on disk and the bound that protects the prompt has to hold even
 # if this file is replaced.
-MAX_DESC_CHARS = 512
+MAX_DESC_CHARS = 200
 
 # The processor's image budget. `smart_resize` UP-scales when a frame carries
 # fewer than `min_pixels` (its `elif h_bar * w_bar < min_pixels` branch), and
@@ -405,7 +409,7 @@ def sanitize(text):
 
 
 def describe_one(model, processor, device, path):
-    """One image -> one sanitized sentence.
+    """One image -> one sanitized line of phrases.
 
     ONE image per forward pass, deliberately. Batched generation needs left
     padding and a padding mask, and a padded batch does not produce token-for-

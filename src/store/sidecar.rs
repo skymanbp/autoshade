@@ -2,11 +2,6 @@
 
 use super::*;
 
-/// The style reference index — one per user, not per photo.
-pub fn style_index_path() -> PathBuf {
-    store_root().join("style-index.json")
-}
-
 /// UI-written local settings (used to be a cwd-relative `autoshade.local.json`).
 pub fn settings_path() -> PathBuf {
     store_root().join(crate::config::SETTINGS_FILE)

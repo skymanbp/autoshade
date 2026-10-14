@@ -17,32 +17,24 @@ use crate::recipe::{DirectionAdherence, EditRecipe, GradeStrength, StrengthTier}
 use crate::xmp;
 
 /// The TASTE dials one develop is asked for — the two independent axes plus the
-/// style library's opt-in second image.
+/// reference library's opt-in images.
 ///
-/// A struct rather than three more parameters: `produce_recipe` was already at
+/// A struct rather than more parameters: `produce_recipe` was already at
 /// clippy's argument ceiling. It carries both axes because both are per-develop
 /// user intent, but they are deliberately SEPARATE fields with separate names:
-///   * [`style`](Self::style) = "how much like MY past edits" — mean-regression
-///     toward the user's own habits (R23-2);
+///   * [`style`](Self::style) = "how much like my reference looks" — how far the
+///     proposal follows the finished photos the library returns;
 ///   * [`strength`](Self::strength) = "how hard to push" — how committed the
 ///     grade is (R23-3).
-///
-/// They used to be ONE thing by accident: a non-zero Style injected a reference
-/// block that said "do NOT exceed it", so asking for more personal style bought
-/// more restraint and the app had no way to ask for less restraint at all
-/// (feedback #5).
-///
-/// Renamed from `StyleRequest` in R23-3: the field it was named after is now one
-/// of three, and the old name would have read as "the strength in here is the
-/// style strength" at every call site.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GradeRequest {
-    /// 0..1 — how far the proposal leans on the user's past edits (the GUI's
-    /// 「Style」 slider, `--style` on the CLI). 0 disables retrieval entirely.
+    /// 0..1 — how far the proposal follows the reference looks (the GUI's
+    /// 「Style」 slider, `--style` on the CLI). 0 disables the search entirely.
     pub style: f32,
-    /// Also SHOW the model the single most similar past photo, as a second
-    /// input image. Opt-in and off by default: it is an extra image on every
-    /// call of a paid analysis (the GUI's checkbox discloses the cost).
+    /// Also SHOW the model the reference photos, as extra input images after
+    /// the develop target. Opt-in and off by default: up to
+    /// [`crate::library::REFERENCE_COUNT`] extra images on every call of a paid
+    /// analysis (the GUI's checkbox discloses the cost).
     pub send_reference_image: bool,
     /// How COMMITTED the grade should be (the GUI's 「Strength」 slider,
     /// `--strength` on the CLI). Defaults to [`GradeStrength::DEFAULT`].
@@ -62,23 +54,16 @@ pub struct GradeRequest {
     pub think: bool,
     /// How closely to follow the optional direction.
     pub adherence: DirectionAdherence,
-    /// Whether the separate finished-photo look library may answer retrieval.
-    pub use_looks: bool,
-    /// May the SigLIP sidecar answer this develop's style query? A VALUE, not
-    /// a process-environment read: the CLI resolves it from `--embed` /
-    /// `--no-embed`, the GUI from its own preference, and both go through
-    /// [`crate::style::EmbeddingSwitch::resolve`]. Until this batch the CLI
-    /// flag was implemented by WRITING `AUTOSHADE_STYLE_EMBED` into the process
-    /// and the pipeline read it back — a flag as a global side effect, and a
-    /// GUI preference that could never reach the develop at all (the read was
-    /// hard-coded `pref = false`).
-    pub embed: crate::style::EmbeddingSwitch,
-    /// The retrieval weights in force for this develop, resolved once.
-    pub weights: crate::style::RetrievalWeights,
+    /// May the SigLIP sidecar embed this develop's query? A VALUE, not a
+    /// process-environment read: the CLI resolves it from `--embed` /
+    /// `--no-embed`, the GUI from its own preference, both through
+    /// [`crate::library::EmbeddingSwitch::resolve`]. Without it the library
+    /// cannot be searched, and the rationale says so.
+    pub embed: crate::library::EmbeddingSwitch,
 }
 
 impl Default for GradeRequest {
-    /// The struct defaults, PLUS the two fields whose default is the
+    /// The struct defaults, PLUS the embedding switch, whose default is the
     /// environment's answer — resolved here, once per request, so nothing
     /// downstream reads the process environment again.
     fn default() -> Self {
@@ -88,51 +73,23 @@ impl Default for GradeRequest {
             strength: Default::default(),
             think: Default::default(),
             adherence: Default::default(),
-            use_looks: Default::default(),
-            embed: crate::style::EmbeddingSwitch::resolve(None, false),
-            weights: crate::style::RetrievalWeights::from_env(),
+            embed: crate::library::EmbeddingSwitch::resolve(None, false),
         }
     }
 }
 
 impl GradeRequest {
-    /// Text reference only, at the shipped grade strength — the shape every
-    /// non-GUI surface uses unless it says otherwise.
+    /// References as words only, at the shipped grade strength — the shape
+    /// every non-GUI surface uses unless it says otherwise.
     pub fn with_style(style: f32) -> Self {
         Self { style, ..Self::default() }
     }
 }
 
 /// The long edge of the JPEG preview handed to the vision proposer. Named
-/// since R23-2 so the opt-in style REFERENCE photo goes through the same
-/// sizing as the photo being developed instead of a second hand-typed number.
+/// since R23-2 so the opt-in REFERENCE photos go through the same sizing as
+/// the photo being developed instead of a second hand-typed number.
 const ADVISOR_PREVIEW_EDGE: u32 = 1568;
-
-/// What ONE style retrieval produced — the prompt block, the blend targets,
-/// and (R23-2) the two DISCLOSURE facts the old two-tuple had nowhere to put:
-/// which shots answered, and where the nearest one lives.
-struct StyleRetrieval {
-    /// The soft text reference block, or `None` when nothing was retrieved.
-    reference: Option<String>,
-    targets: crate::style::StyleTargets,
-    /// File names of the shots used, bounded (`style::neighbour_stems`).
-    stems: Vec<String>,
-    /// Absolute path of the NEAREST shot, when the index recorded one.
-    nearest: Option<String>,
-    /// Finished-photo look reference block, if the look library answered.
-    look_reference: Option<String>,
-    /// Nearest look image path, used only when the reference-image opt-in is on.
-    look_nearest: Option<String>,
-    look_stem: Option<String>,
-    look_tags: Vec<String>,
-    /// The LOOK this retrieval is asking for, as phrases, for the DOWNSTREAM
-    /// REVIEWERS (B2) — `style::StyleIndex::look_summary`. `None` when the
-    /// library carried no tags at all, which is the state a pre-S1 index and an
-    /// undescribed one share.
-    look_summary: Option<String>,
-    looks_unreachable: bool,
-    looks_count: usize,
-}
 
 /// The intent every downstream reviewer of one analysis shares (R23-3, B2).
 ///
@@ -143,16 +100,15 @@ struct StyleRetrieval {
 /// round it is revising — which is the mechanism that flattened the look in the
 /// first place (six showcase runs, revision hints that were pure subtraction).
 ///
-/// `style_voice` is the SAME value the reference block and the distillation
-/// pull read (v1.2.3). It is a parameter and not a second
-/// `StyleVoice::choose` call for the reason the whole function exists: a
-/// reviewer deciding for itself whose aim this develop pursues is how the
-/// wording and the arithmetic came apart in the first place.
+/// `style_voice` is the SAME value the reference block reads (v1.2.3). It is
+/// a parameter and not a second `StyleVoice::choose` call for the reason the
+/// whole function exists: a reviewer deciding for itself whose aim this
+/// develop pursues is how two readings of one develop come apart.
 fn grade_intent<'a>(
     req: &GradeRequest,
     direction: Option<&'a str>,
     style_look: Option<&'a str>,
-    style_voice: crate::style::StyleVoice,
+    style_voice: crate::library::StyleVoice,
 ) -> crate::advisor::GradeIntent<'a> {
     crate::advisor::GradeIntent {
         strength: req.strength,
@@ -161,42 +117,6 @@ fn grade_intent<'a>(
         style_look,
         style_voice,
     }
-}
-
-/// The single retrieval entry point shared by the develop pipeline and the
-/// offline `style-query` diagnostic. Keeping the selection here prevents the
-/// diagnostic from growing a subtly different ranking path.
-pub fn retrieve_style<'a>(
-    ix: &'a crate::style::StyleIndex,
-    meta: &decode::Meta,
-    histogram: &decode::Histogram,
-    query: crate::style::StyleQuery<'_>,
-    raw: &Path,
-    use_looks: bool,
-) -> (Vec<&'a crate::style::StyleExemplar>, Vec<&'a crate::style::LookExemplar>) {
-    let exemplars = ix.retrieve_with_embed(meta, histogram, query, crate::style::RETRIEVE_K, raw);
-    let looks = if use_looks { ix.retrieve_looks(query, 2) } else { Vec::new() };
-    (exemplars, looks)
-}
-
-fn reference_image_choice(retrieved: &StyleRetrieval) -> Option<(&str, bool)> {
-    retrieved
-        .look_nearest
-        .as_deref()
-        .map(|path| (path, true))
-        .or_else(|| retrieved.nearest.as_deref().map(|path| (path, false)))
-}
-
-/// The RAW neighbour, when the look the chooser preferred could not be read.
-///
-/// A look-library file that has been moved or deleted used to cost the develop
-/// its reference image ENTIRELY: `reference_image_choice` prefers the look, the
-/// decode failed, and the RAW neighbour that was sitting there all along was
-/// never tried. The user had paid for the two-image call and got one image and
-/// a note. Falling back is the honest behaviour, and the note now says which
-/// photo actually went.
-fn reference_image_fallback(retrieved: &StyleRetrieval) -> Option<&str> {
-    retrieved.nearest.as_deref()
 }
 
 pub fn direction_adherence_tier(
@@ -208,7 +128,7 @@ pub fn direction_adherence_tier(
         .map(|_| adherence.tier().as_str())
 }
 
-/// Encode one past photo as the JPEG preview the vision model receives —
+/// Encode one reference photo as the JPEG preview the vision model receives —
 /// the same decode → resize → JPEG path the photo being developed takes
 /// ([`ADVISOR_PREVIEW_EDGE`]), so the two frames arrive comparable.
 ///
@@ -218,7 +138,7 @@ pub fn direction_adherence_tier(
 fn reference_preview(path: &Path) -> Result<Vec<u8>> {
     let _permit = decode::DecodePermit::acquire();
     let decoded = decode::decode_any(path)
-        .with_context(|| format!("decode the style reference photo {}", path.display()))?;
+        .with_context(|| format!("decode the reference photo {}", path.display()))?;
     let img = decoded.preview_resized(ADVISOR_PREVIEW_EDGE);
     let mut jpeg = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
@@ -237,7 +157,7 @@ fn reference_preview(path: &Path) -> Result<Vec<u8>> {
 /// prompt.
 ///
 /// `sink` is where this call's DISCLOSURES go (R29-1). The chain raises two
-/// ungated lines — the proposer fallback and the style-embedding degrade — and
+/// ungated lines — the proposer fallback and the reference-search degrade — and
 /// until this parameter existed they were hard-coded `eprintln!`s a caller
 /// could neither route nor order (see [`crate::diag`]). Pass
 /// [`crate::diag::stderr`] for the shipped behaviour; a pooled caller passes a
@@ -317,219 +237,110 @@ pub fn produce_recipe(
         .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
         .context("encode preview JPEG for advisor")?;
     let preview = Preview { jpeg };
-    // The style QUERY embedding (R27 Batch-5), taken here because this is the
-    // last point the camera's own full preview is in scope — and because the
-    // index's vectors were built from exactly this buffer through exactly the
-    // same reduction (`style::stage_embed_frame`, which the index build's
-    // `style::embed_staged_record` and the `style::embed_preview_with_text`
-    // call below both go through), which is what makes a query vector and a
-    // stored vector comparable at all.
-    //
-    // OFF unless the user asked (`req.embed`, resolved from the CLI flag, the
-    // environment or the GUI preference before this call): the sidecar reloads
-    // 1.5 GB of weights per call, so this is seconds of latency on every
-    // develop, spent only when the index it is being compared against has the
-    // vectors to spend it on. A failure degrades to the 14-dim retrieval with
-    // a stderr line, never an aborted develop.
-    let mut query_text: Option<Vec<f32>> = None;
-    let query_embed: Option<Vec<f32>> = (req.style > 0.0 && req.embed.on())
-        .then(|| crate::embed::EmbedOpts::from_config(cfg))
-        .filter(|o| o.available())
-        .and_then(|o| {
-            match crate::style::embed_preview_with_text(
-                &o,
-                &decoded.preview,
-                &crate::store::store_root(),
-                "query",
-                user_direction,
-            ) {
-                Ok(r) => { query_text = r.text_vector; Some(r.vector) },
+    // The REFERENCE LIBRARY (2026-10-13): the finished looks this develop may
+    // follow. Searched with this photo's image vector and the direction's text
+    // vector, embedded from exactly this preview through the frame a build
+    // stages (`library::query_vectors`), so a query and a stored vector are
+    // comparable. Nothing here can fail the develop: every gap degrades to no
+    // references, and the rationale says why (`style_gap_note`).
+    let mut library_gap: Option<String> = None;
+    let library = match (req.style > 0.0).then(crate::library::load) {
+        Some(crate::library::Loaded::Ready(lib)) => Some(lib),
+        Some(crate::library::Loaded::Unusable(err)) => {
+            // Once per RUN on stderr — the file is unusable for every photo in
+            // it, so naming whichever worker reached it first would misread as
+            // "this photo's library". The per-photo half rides the rationale.
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            let run = diag.rebound(crate::diag::Subject::Run);
+            let msg = err.clone();
+            ONCE.call_once(move || {
+                run.warn(format!(
+                    "reference library unavailable ({msg}) — the Style slider has no effect \
+                     until it is rebuilt"
+                ));
+            });
+            library_gap = Some(err);
+            None
+        }
+        Some(crate::library::Loaded::Absent) | None => None,
+    };
+    let query = match &library {
+        Some(_) if !req.embed.on() => {
+            library_gap = Some("image embedding is switched off, so the library cannot be searched".into());
+            None
+        }
+        Some(_) => {
+            let opts = crate::embed::EmbedOpts::from_config(cfg);
+            match crate::library::query_vectors(&opts, &decoded.preview, user_direction, &crate::store::store_root()) {
+                Ok(q) => Some(q),
                 Err(e) => {
-                    // A SIBLING of the four lines the adjudication enumerated,
-                    // found by re-walking `eprintln!` in this file at R28 HEAD
-                    // (Batch-2 did the same re-enumeration for the render's
-                    // two): per-photo, ungated, worker-reachable, and it named
-                    // no photograph either. It travels the caller's channel for
-                    // the same reason.
-                    diag.warn(format!(
-                        "style embedding unavailable ({e:#}) — retrieving on the 14-dim \
-                         feature alone"
-                    ));
+                    diag.warn(format!("reference search unavailable ({e:#}) — no reference looks for this develop"));
+                    library_gap = Some(crate::rationale::error_line(&e));
                     None
                 }
             }
-        });
+        }
+        None => None,
+    };
     // The full-resolution preview buffer is DEAD from here on — only meta and
     // histogram feed the advise chain, which can stall on the network for
     // minutes. Keeping `decoded` whole pinned hundreds of MB of 61MP pixels
     // for that entire window.
     let decode::Decoded { meta, histogram, .. } = decoded;
-
-    // Style influence: retrieve the user's edits on the most SIMILAR past shots
-    // (needs a built style library). strength == 0 disables it entirely;
-    // otherwise we inject a soft text reference AND, at higher strength, gently
-    // pull the FINAL recipe toward those historical means (the blend below).
-    // `style::load_effective` owns the central-then-legacy walk for every
-    // surface (R23-2) — this used to be a third hand-written copy of it.
-    let mut style_err: Option<String> = None;
-    let style_ix = match (req.style > 0.0).then(crate::style::load_effective) {
-        Some(crate::style::EffectiveIndex::Loaded(ix, _)) => Some(ix),
-        Some(crate::style::EffectiveIndex::Unusable { err, .. }) => {
-            // Surfaced ONCE on stderr: the original `.ok()` swallowed the
-            // version-gate message, so a stale index silently disabled the
-            // style reference with nothing to say why. The windowed GUI has no
-            // console, so the same fact also rides the rationale below (L08
-            // disclosure threading).
-            //
-            // NOT attributed to a photograph, and now the TYPE says so
-            // (R29-1): the `Once` makes this a statement about the RUN — the
-            // index is stale for every photo in it — and naming whichever
-            // worker happened to reach it first would read as "this photo's
-            // index is stale". R28 Batch-5 5c could only leave it un-stamped
-            // and explain the gap in a comment; `Subject::Run` states it, on
-            // the caller's own channel, so a sink can file it once for the run
-            // instead of under an arbitrary photo. The per-photo half of the
-            // same fact is `style_err`, which the rationale carries on every
-            // photo.
-            static ONCE: std::sync::Once = std::sync::Once::new();
-            let once_msg = err.clone();
-            let run = diag.rebound(crate::diag::Subject::Run);
-            ONCE.call_once(move || {
-                run.warn(format!(
-                    "style reference unavailable ({once_msg}) — the Style slider has \
-                     no effect until the index is rebuilt"
-                ));
-            });
-            style_err = Some(err);
-            None
-        }
-        // Nothing built yet, or nothing asked for. NOT silent any more: the
-        // rationale block after the AI chain discloses it (R23-2).
-        Some(crate::style::EffectiveIndex::Absent) | None => None,
+    // WHOSE aim the reference block states (v1.2.3, user ruling 2026-09-01),
+    // decided ONCE from the Style axis, the direction and the adherence dial.
+    let style_voice = crate::library::StyleVoice::choose(req.style, user_direction, req.adherence);
+    let hits: Vec<crate::library::Hit> = match (&library, &query) {
+        (Some(lib), Some(q)) => lib.search(
+            &crate::library::Query { image: &q.image, prompt: q.prompt.as_deref(), exclude: Some(raw) },
+            crate::library::REFERENCE_COUNT,
+        ),
+        _ => Vec::new(),
     };
-    let style_query =
-        crate::style::StyleQuery::new(query_embed.as_deref(), query_text.as_deref(), req.weights);
-    // Whether the DIRECTION had any part in ranking the looks. Computed from
-    // the weights in force, once, and carried into both places that would
-    // otherwise claim it: the look block and the IMAGE 2 sentence.
-    let look_by_direction = crate::style::StyleIndex::look_ranked_by_direction(style_query);
-    // WHOSE aim the style block states, and — inseparably — whether the
-    // recipe is afterwards pulled onto the library's means at all (v1.2.3,
-    // user ruling 2026-09-01). Decided ONCE here, from the Style axis, the
-    // direction and the adherence dial, and read by both halves below; the
-    // wording and the arithmetic disagreeing about who leads is precisely
-    // the defect this replaces.
-    let style_voice =
-        crate::style::StyleVoice::choose(req.style, user_direction, req.adherence);
-    let retrieved = style_ix.as_ref().map(|ix| {
-        let (ex, looks) =
-            retrieve_style(ix, &meta, &histogram, style_query, raw, req.use_looks);
-        let look_reference = ix.render_look_reference(&looks, look_by_direction);
-        StyleRetrieval {
-            // GATE 5: the reference block's own "do not exceed it" clauses are
-            // templated on the STYLE axis, not on grade strength.
-            reference: ix.render_reference_for_style(
-                &ex,
-                req.style,
-                user_direction,
-                req.adherence,
-            ),
-            targets: crate::style::style_targets(&ex),
-            stems: crate::style::neighbour_stems(&ex),
-            // The nearest shot's own file, for the opt-in reference IMAGE. A
-            // pre-path index records none — that degrades with a note rather
-            // than silently sending nothing (see below).
-            nearest: ex.first().and_then(|e| e.path.clone()),
-            look_nearest: looks.first().map(|l| l.path.clone()),
-            look_stem: looks.first().map(|l| l.stem.clone()),
-            look_tags: looks.first().map(|l| l.tags.clone()).unwrap_or_default(),
-            look_summary: crate::style::StyleIndex::look_summary(&looks, &ex),
-            look_reference,
-            looks_unreachable: req.use_looks && (query_embed.is_none() && query_text.is_none()) && !ix.looks.is_empty(),
-            looks_count: ix.looks.len(),
-        }
-    });
-    let reference: Option<String> = retrieved.as_ref().and_then(|r| r.reference.clone());
-    let ref_str = reference.as_deref();
-    // B2: the intent every downstream reviewer in this function shares (R23-3),
-    // built HERE rather than above the retrieval because it now carries what
-    // the retrieval found. ONE value, spread into the verifier, the first
-    // judgement and every hint-guided re-judge below.
-    let style_look = retrieved.as_ref().and_then(|r| r.look_summary.as_deref());
-    let intent = grade_intent(&req, user_direction, style_look, style_voice);
-    if verbose && ref_str.is_some() {
-        println!("style    : reference from similar past edits (strength {:.0}%)", req.style * 100.0);
-    }
-    // R23-2 opt-in: SHOW the model the nearest past photo, not just its
-    // numbers. Fail-open in every arm — a missing or unreadable reference must
-    // degrade this develop to the text reference (which is the historical
-    // behaviour), never fail a paid analysis — and every degradation says so.
-    let mut ref_preview: Option<Preview> = None;
-    let mut ref_image_stem: Option<String> = None;
-    let mut ref_image_is_look = false;
+    let by_prompt = query.as_ref().is_some_and(|q| q.prompt.is_some());
+    // Opt-in: SHOW the model the references, not only their phrases. Each that
+    // loads becomes the next image after the develop target; one that does not
+    // is named and goes as words, and the rest still go.
+    let mut ref_previews: Vec<Preview> = Vec::new();
+    let mut image_numbers: Vec<Option<usize>> = Vec::new();
     let mut ref_image_err: Option<String> = None;
-    if req.send_reference_image
-        && let Some(r) = &retrieved
-    {
-        match reference_image_choice(r) {
-            Some((p, is_look)) => match reference_preview(Path::new(p)) {
+    if req.send_reference_image {
+        for h in &hits {
+            match reference_preview(Path::new(&h.entry.path)) {
                 Ok(jpeg) => {
-                    ref_image_stem = Some(stem(Path::new(p)).to_string());
-                    ref_image_is_look = is_look;
-                    ref_preview = Some(Preview { jpeg });
+                    ref_previews.push(Preview { jpeg });
+                    image_numbers.push(Some(1 + ref_previews.len()));
                 }
-                // A LOOK that would not load falls back to the RAW neighbour
-                // rather than costing this develop its reference image. Both
-                // outcomes are disclosed: the fallback names the file it could
-                // not read, and the RAW-neighbour arm is a plain failure as
-                // before (there is nothing further to fall back to).
                 Err(e) => {
-                    let first = crate::rationale::error_line(&e);
-                    match reference_image_fallback(r).filter(|_| is_look) {
-                        Some(raw_path) => match reference_preview(Path::new(raw_path)) {
-                            Ok(jpeg) => {
-                                ref_image_stem = Some(stem(Path::new(raw_path)).to_string());
-                                ref_image_is_look = false;
-                                ref_preview = Some(Preview { jpeg });
-                                ref_image_err = Some(format!(
-                                    "{first}; the closest RAW neighbour went instead"
-                                ));
-                            }
-                            Err(e2) => {
-                                ref_image_err = Some(format!(
-                                    "{first}; the RAW neighbour did not load either ({})",
-                                    crate::rationale::error_line(&e2)
-                                ))
-                            }
-                        },
-                        None => ref_image_err = Some(first),
-                    }
+                    image_numbers.push(None);
+                    ref_image_err.get_or_insert_with(|| crate::rationale::error_line(&e));
                 }
-            },
-            // No path recorded, yet exemplars WERE retrieved: a pre-R23 index.
-            // (Nothing retrieved at all is the no-reference note's business.)
-            None if !r.stems.is_empty() => {
-                ref_image_err = Some(
-                    "this style index was built before per-photo paths were recorded — \
-                     rebuild it to send a reference photo"
-                        .into(),
-                )
             }
-            None => {}
+        }
+    }
+    let reference = crate::library::reference_block(&hits, &image_numbers, style_voice, by_prompt);
+    let ref_str = reference.as_deref();
+    // B2: the intent every downstream reviewer in this function shares (R23-3).
+    // ONE value, spread into the verifier, the first judgement and every
+    // hint-guided re-judge below; it carries the look the references name.
+    let style_look = crate::library::look_summary(&hits);
+    let intent = grade_intent(&req, user_direction, style_look.as_deref(), style_voice);
+    let reference_files: Vec<String> = hits.iter().map(|h| stem(Path::new(&h.entry.path)).to_string()).collect();
+    if verbose && !hits.is_empty() {
+        println!("style    : {} reference look(s) — {}", hits.len(), reference_files.join(", "));
+        if !ref_previews.is_empty() {
+            println!(
+                "style    : {} of them go to the vision model as images (the reference-image option \
+                 is on) — extra images on each call of this analysis",
+                ref_previews.len()
+            );
         }
     }
     if verbose
-        && let Some(file) = &ref_image_stem
+        && let Some(e) = &ref_image_err
     {
-        println!(
-            "style    : {file} is going to the vision model as IMAGE 2 (the reference-image \
-             option is on) — one extra image on each call of this analysis"
-        );
+        println!("style    : a reference photo could not be prepared ({e}) — it went as words only");
     }
-    if verbose
-        && let Some(e) = &ref_image_err {
-            println!("style    : no reference image ({e}) — the text reference only");
-        }
     if verbose
         && let Some(g) = guidance {
             println!("direction: {g}");
@@ -572,10 +383,7 @@ pub fn produce_recipe(
         // Rides EVERY round of this analysis (the revision rounds spread this
         // struct): a reference the first call saw and the revision did not
         // would make the two rounds answer different questions.
-        reference_image: ref_preview.as_ref(),
-        look_reference: retrieved.as_ref().and_then(|r| r.look_reference.as_deref()),
-        reference_image_is_look: ref_image_is_look,
-        look_ranked_by_direction: look_by_direction,
+        reference_images: &ref_previews,
         // GATE 1 (prompt) + GATE 2 (`temper`, inside the provider).
         strength: req.strength,
         // R23-4: the structured working + the deepened tier, on EVERY propose
@@ -743,82 +551,6 @@ pub fn produce_recipe(
         }
     }
 
-    // Distill toward the user's historical style: pull the proposal toward what
-    // similar past edits agreed this photographer does. The Style axis supplies
-    // `style_pull` (0.18 at the shipped 0.3, FULL at 1.0 — `blend_toward` says
-    // what "full" means and why it is not capped), so grade strength never
-    // silently changes the historical-style blend.
-    //
-    // DELIBERATELY NOT on the grade-strength axis (R23-3, GATE 5's other half):
-    // this Style pull bounds MEAN REGRESSION — how far the proposal is dragged
-    // toward the arithmetic mean of `style::style_targets` — and its whole job is
-    // to keep the AI's scene-specific reading from being averaged away. Coupling
-    // it to strength would mean "push harder" silently became "look MORE like my
-    // average past edit", which is the opposite direction on the other axis and
-    // exactly the entanglement this round exists to undo. What grade strength changes
-    // is the WORDING the model reads about the reference
-    // (`style::render_reference`), never the blend arithmetic; the Style slider
-    // keeps sole ownership of that number.
-    // …and NOT when the direction leads. `StyleVoice::Background` already told
-    // the proposer these habits are background; lerping its answer onto the
-    // library's arithmetic mean afterwards would put the numbers back exactly
-    // where the words had just given them up, and at Style 1.0 `style_pull` is
-    // FULL — the proposal's own value replaced. The skip is disclosed by
-    // `STYLE_BACKGROUND` in the block below; the re-verification that follows a
-    // real blend goes with it, because there is no second recipe to describe.
-    if let Some(r) = &retrieved
-        && let Some(pull) = style_blend_pull(style_voice, req.style)
-    {
-        let pre_blend = recipe.clone();
-        crate::style::blend_toward(&mut recipe, &r.targets, pull);
-        recipe.clamp();
-        // The blend mutates the recipe AFTER the rationale was written and
-        // AFTER the verdict above. When it actually changed something (a pull
-        // toward targets the recipe already matches is a no-op — claiming a
-        // pull then would be its own honesty bug), disclose it in the
-        // rationale — the derivation numbers must not silently contradict the
-        // final sliders (a real verifier flagged exactly that on a heuristic
-        // fallback whose "exposure +0.0EV" text sat next to blended
-        // -0.06EV/-20/+4 values) — then re-verify the FINAL recipe so the
-        // returned verdict honestly reflects what will actually be applied.
-        if recipe != pre_blend {
-            // Measured BEFORE the note borrows the rationale out of the very
-            // recipe it describes.
-            let fields = crate::style::distilled_fields(&pre_blend, &recipe);
-            crate::rationale::push_note(
-                &mut recipe.rationale,
-                &mut det_notes,
-                crate::rationale::Note::new(
-                    crate::rationale::keys::STYLE_DISTILLED,
-                    vec![
-                        ("pct", format!("{pct:.0}", pct = pull * 100.0)),
-                        ("fields", fields),
-                    ],
-                ),
-            );
-            // Degrade like the revision loop above: a transient verifier
-            // failure at this LAST step used to error out the whole call,
-            // discarding the paid, already-verified proposal. Keep the pair
-            // and disclose which recipe the verdict describes.
-            match verifier.verify(&recipe, meta, hist, &intent) {
-                Ok(v) => verdict = v,
-                Err(e) => {
-                    crate::rationale::push_note(
-                        &mut recipe.rationale,
-                        &mut det_notes,
-                        crate::rationale::Note::new(
-                            crate::rationale::keys::STYLE_REVERIFY_FAILED,
-                            vec![("e", crate::rationale::error_line(&anyhow::Error::new(e)))],
-                        ),
-                    );
-                }
-            }
-        }
-    }
-    // (The style DISCLOSURE block used to sit here. It moved below the judge
-    // — R23-2: an adopted visual revision replaces `recipe` wholesale and
-    // clears `det_notes` with it, so every note written here was silently
-    // dropped on exactly the runs that changed the most.)
     // R20: the visual CLOSED LOOP — the first eye ever laid on the result.
     // The proposer emits numbers blind (it never sees what they render to)
     // and the verifier judges data-only by contract, so a plausible-but-off
@@ -830,8 +562,7 @@ pub fn produce_recipe(
     //
     // Placed at the END of the look-mutation chain on purpose (review R20:
     // M1+S1+S2 shared this one upstream cause — the judge used to sit in
-    // the middle): the style distillation has already landed, the WB anchor
-    // is the hoisted one the deliverable will carry (temperature_k is
+    // the middle): the WB anchor is the hoisted one the deliverable will carry (temperature_k is
     // ABSOLUTE Kelvin against it — an unanchored clone rendered a tungsten
     // shot's correction as identity), and a refine's bitmap masks are
     // carried into the render clone. The judged render IS the look the user
@@ -972,15 +703,6 @@ pub fn produce_recipe(
                             rounds_done + 1
                         );
                     }
-                    // The FIELD LIST, not a flag: the note this feeds names what
-                    // moved, and the candidate's pull is a different pull from
-                    // the one above (a different proposal went into it).
-                    // The pull the candidate was ACTUALLY blended with rides WITH
-                    // the field list (A6): the note used to re-derive the
-                    // percentage from `style_pull(req.style)` while the blend used
-                    // `style_blend_pull`'s answer, and two derivations of one fact
-                    // are two places for the disclosure to drift from the edit.
-                    let mut candidate_distilled: Option<(f32, String)> = None;
                     let mut candidate_thinking: Option<crate::advisor::Thinking> = None;
                     let mut candidate_notes: Vec<crate::rationale::Note> = Vec::new();
                     let outcome = visual_review_round(
@@ -997,24 +719,10 @@ pub fn produce_recipe(
                                 },
                                 base,
                             )?;
-                            let mut r = p.recipe;
                             candidate_thinking = p.thinking;
                             candidate_lens.set(p.lens);
                             candidate_notes = p.notes;
-                            // The candidate walks the SAME look chain the
-                            // original walked (style distillation above)
-                            // — otherwise adopting it would silently
-                            // undo the user's style pull (review R20-S2).
-                            if let Some(sr) = &retrieved
-                                && let Some(pull) = style_blend_pull(style_voice, req.style)
-                            {
-                                let pre = r.clone();
-                                crate::style::blend_toward(&mut r, &sr.targets, pull);
-                                r.clamp();
-                                candidate_distilled = (r != pre)
-                                    .then(|| (pull, crate::style::distilled_fields(&pre, &r)));
-                            }
-                            Ok(r)
+                            Ok(p.recipe)
                         },
                         |r| verifier.verify(r, meta, hist, &intent),
                         // The candidate's own opinion: `visual_review_round`
@@ -1070,15 +778,6 @@ pub fn produce_recipe(
                                     ]
                                 },
                             ));
-                            if let Some((pull, fields)) = candidate_distilled.clone() {
-                                log.push(crate::rationale::Note::new(
-                                    crate::rationale::keys::STYLE_DISTILLED,
-                                    vec![
-                                        ("pct", format!("{pct:.0}", pct = pull * 100.0)),
-                                        ("fields", fields),
-                                    ],
-                                ));
-                            }
                             if !more {
                                 break;
                             }
@@ -1208,31 +907,25 @@ pub fn produce_recipe(
         }
     }
 
-    // ── R23-2 style DISCLOSURE, after every wholesale recipe replacement ──
-    // The one channel all three surfaces show. Three facts, in reading order:
-    // which of the user's shots this develop leaned on (feedback #6's headline
-    // — "I have no idea which library it is referencing"), whether a reference
-    // PHOTO went along, and whether the whole mechanism came up empty.
-    if let Some(note) = retrieved.as_ref().and_then(|r| style_neighbours_note(&r.stems)) {
+    // ── R23-2 reference DISCLOSURE, after every wholesale recipe replacement ──
+    // The one channel all three surfaces show, written HERE because an adopted
+    // visual revision replaces `recipe` wholesale and clears `det_notes` with
+    // it. In reading order: which finished photos this develop leaned on, in
+    // which voice, whether they went as images, and whether the whole
+    // mechanism came up empty.
+    if let Some(note) = references_note(&reference_files) {
         crate::rationale::push_note(&mut recipe.rationale, &mut det_notes, note);
     }
-    // …and in WHICH VOICE those shots were quoted (v1.2.3). Written HERE, in
-    // the post-judge disclosure block, for the same reason every other style
-    // note is: an adopted visual revision replaces `recipe` wholesale and
-    // clears `det_notes` with it, so a note left beside the blend is dropped on
-    // exactly the runs that changed the most. `STYLE_DISTILLED` can afford to
-    // sit there because the adopted candidate re-runs the blend and writes its
-    // own; a skip has no such second writer.
     if let Some(note) = style_background_note(style_voice, req.adherence, ref_str) {
         crate::rationale::push_note(&mut recipe.rationale, &mut det_notes, note);
     }
-    if let Some(file) = &ref_image_stem {
+    if !ref_previews.is_empty() {
         crate::rationale::push_note(
             &mut recipe.rationale,
             &mut det_notes,
             crate::rationale::Note::new(
                 crate::rationale::keys::STYLE_REF_IMAGE,
-                vec![("file", file.clone())],
+                vec![("n", ref_previews.len().to_string())],
             ),
         );
     }
@@ -1246,41 +939,6 @@ pub fn produce_recipe(
             ),
         );
     }
-    if let Some(r) = &retrieved {
-        if let Some(stem) = &r.look_stem {
-            crate::rationale::push_note(
-                &mut recipe.rationale,
-                &mut det_notes,
-                crate::rationale::Note::new(
-                    crate::rationale::keys::STYLE_LOOK_REFERENCE,
-                    vec![
-                        ("stem", stem.clone()),
-                        ("tags", r.look_tags.join(", ")),
-                    ],
-                ),
-            );
-        }
-        if r.looks_unreachable {
-            crate::rationale::push_note(
-                &mut recipe.rationale,
-                &mut det_notes,
-                crate::rationale::Note::new(
-                    crate::rationale::keys::STYLE_LOOKS_UNREACHABLE,
-                    vec![("n", r.looks_count.to_string())],
-                ),
-            );
-        }
-    }
-    if let Some(stem) = &ref_image_stem && ref_image_is_look {
-            crate::rationale::push_note(
-                &mut recipe.rationale,
-                &mut det_notes,
-                crate::rationale::Note::new(
-                    crate::rationale::keys::STYLE_LOOK_IMAGE,
-                    vec![("stem", stem.clone())],
-                ),
-            );
-    }
     if let Some(tier) = direction_adherence_tier(user_direction, req.adherence) {
         crate::rationale::push_note(
             &mut recipe.rationale,
@@ -1291,7 +949,7 @@ pub fn produce_recipe(
             ),
         );
     }
-    if let Some(note) = style_gap_note(req.style, ref_str, style_err.as_deref()) {
+    if let Some(note) = style_gap_note(req.style, ref_str, library_gap.as_deref()) {
         crate::rationale::push_note(&mut recipe.rationale, &mut det_notes, note);
     }
 
@@ -1373,52 +1031,29 @@ fn carry_over_then_note_domain(
     note_post_stamp_domain(&mut recipe.rationale, det_notes, shift);
 }
 
-/// "These are the shots it referenced" — the transparency half of feedback #6
-/// (R23-2). `None` when nothing was retrieved: the gap note below covers that
-/// case, and a "referenced 0 shots" line would be noise.
-///
-/// A pure function beside [`style_gap_note`] for the same reason: the
-/// production path reaches it only after minutes of paid network work.
-pub(crate) fn style_neighbours_note(stems: &[String]) -> Option<crate::rationale::Note> {
-    if stems.is_empty() {
+/// "These are the looks it followed" — the transparency half of feedback #6
+/// (R23-2). `None` when nothing was found: the gap note below covers that
+/// case, and a "referenced 0 photos" line would be noise.
+pub fn references_note(files: &[String]) -> Option<crate::rationale::Note> {
+    if files.is_empty() {
         return None;
     }
     Some(crate::rationale::Note::new(
         crate::rationale::keys::STYLE_NEIGHBOURS,
-        vec![("files", stems.join(", ")), ("n", stems.len().to_string())],
+        vec![("files", files.join(", ")), ("n", files.len().to_string())],
     ))
 }
 
-/// The distillation pull this develop should apply, or `None` when the
-/// direction leads and the photographer's library is only background.
-///
-/// The gate and the arithmetic in ONE place, because the pull is applied
-/// TWICE — once to the verified proposal and once, inside the judge loop, to
-/// every candidate that might replace it ("the candidate walks the SAME look
-/// chain"). A skip written at only one of the two would mean an adopted
-/// visual revision silently re-imposed the library the words had just
-/// released, on exactly the runs that changed the most.
-///
-/// A pure function so both halves of the v1.2.3 ruling are testable without a
-/// paid call (`the_direction_led_develop_skips_the_distillation_pull`).
-pub(crate) fn style_blend_pull(voice: crate::style::StyleVoice, style: f32) -> Option<f32> {
-    voice.distils().then(|| crate::style::style_pull(style))
-}
-
-/// "Your library was quoted as background and NOT pulled onto" — the
-/// counterpart of `STYLE_DISTILLED` for the develop that skipped the blend
-/// (v1.2.3, user ruling 2026-09-01).
-///
-/// Conditioned on the REFERENCE, not on the index: a develop that retrieved
-/// nothing has no library to have kept as background, and saying otherwise
-/// would be a claim about a block that was never rendered. Pure, and beside
-/// [`style_gap_note`], for the same reason that one is.
-pub(crate) fn style_background_note(
-    voice: crate::style::StyleVoice,
+/// "Your references were quoted as background" — the develop where the
+/// direction led (v1.2.3, user ruling 2026-09-01). Conditioned on the
+/// REFERENCE: a develop that found nothing has nothing to have kept as
+/// background.
+pub fn style_background_note(
+    voice: crate::library::StyleVoice,
     adherence: crate::recipe::DirectionAdherence,
     reference: Option<&str>,
 ) -> Option<crate::rationale::Note> {
-    (reference.is_some() && !voice.distils()).then(|| {
+    (reference.is_some() && voice == crate::library::StyleVoice::Background).then(|| {
         crate::rationale::Note::new(
             crate::rationale::keys::STYLE_BACKGROUND,
             vec![("tier", adherence.tier().as_str().to_string())],
@@ -1426,19 +1061,11 @@ pub(crate) fn style_background_note(
     })
 }
 
-/// "This develop asked for personal style and got NOTHING" — the disclosure
-/// that closes feedback #6's three silent arms with ONE condition (R23-2).
-///
-/// The old test was "an index FILE exists and failed to load", which is why
-/// only one of the three arms ever said anything:
-///   a) no index file at all (fresh install)     → silent, and the GUI had no
-///      way to build one either;
-///   b) the index loaded but `retrieve` matched nothing, so `render_reference`
-///      returned `None` (`style.rs`)              → silent;
-///   c) an unusable file (version gate, corrupt) → the only arm that spoke.
-/// Keying off the FINAL reference covers all three: (a) and (b) are the same
-/// user-visible fact ("no reference for this photo") and share a note, while
-/// (c) keeps the loader's own message, which names what to fix.
+/// "This develop asked for the reference looks and got NOTHING" — the
+/// disclosure that closes feedback #6's silent arms with ONE condition
+/// (R23-2): keyed off the FINAL reference, so no library at all and a search
+/// that found nothing share one note, while a known cause — an unusable
+/// file, embedding switched off, a failed query — names itself.
 ///
 /// A pure function so all three arms are testable without a paid call — the
 /// production path reaches this only after minutes of network work.
@@ -5442,7 +5069,7 @@ fn entry_is_dir(entry: &std::fs::DirEntry) -> std::io::Result<bool> {
 /// "A RAW" has exactly ONE definition app-wide — [`decode::is_raw`] (arw, dng,
 /// raw, raf, nef, cr2, cr3, orf, rw2), the same predicate [`find_sources`] and
 /// the render/decode path use. This scanner used to accept `.arw` alone, which
-/// left `batch`, `eval` and `style-index` blind to libraries the GUI and web
+/// left `batch` and `eval` blind to libraries the GUI and web
 /// open fine.
 pub fn find_raws(dir: &Path) -> Result<Vec<PathBuf>> {
     walk_photos(dir, decode::is_raw)
@@ -5955,10 +5582,10 @@ mod tests {
         // (file, fragment, how many times it must be raised through the sink)
         const SITES: [(&str, &str, usize); 21] = [
             ("src/pipeline.rs", "GPT proposer failed", 1),
-            ("src/pipeline.rs", "style embedding unavailable", 1),
+            ("src/pipeline.rs", "reference search unavailable", 1),
             // The run-scoped `Once` line — 5c had to leave this one
             // un-stamped and say so in a comment; `Subject::Run` states it.
-            ("src/pipeline.rs", "style reference unavailable", 1),
+            ("src/pipeline.rs", "reference library unavailable (", 1),
             ("src/pipeline.rs", "recipe limits discarded {}", 1),
             ("src/pipeline.rs", "warn(msg.clone())", 1),
             ("src/pipeline.rs", "warn(m)", 1),
@@ -6034,15 +5661,16 @@ mod tests {
         //   disclosure is bound to its photograph. The last two are routed but
         //   not injectable, which `crate::diag`'s module doc states as the
         //   decision and the reason.
-        // * `src/main.rs` = 9: the SERIAL single-photo commands (`analyze`,
-        //   `apply`, `auto`, `fit`) and their import-note siblings. One photo,
-        //   one thread, a printed header directly above — nothing to order and
-        //   nobody to route to. The pooled `batch` worker has none.
+        // * `src/main.rs` = 10: the SERIAL single-photo commands (`analyze`,
+        //   `apply`, `auto`, `fit`) and their import-note siblings, plus the
+        //   line `library-build` ends its one-line progress meter with. One
+        //   job, one thread, a printed header directly above — nothing to
+        //   order and nobody to route to. The pooled `batch` worker has none.
         const CENSUS: [(&str, usize); 5] = [
             ("src/diag.rs", 1),
             ("src/pipeline.rs", 0),
             ("src/render.rs", 0),
-            ("src/main.rs", 9),
+            ("src/main.rs", 10),
             ("src/recipe.rs", 0),
         ];
         for (rel, want) in CENSUS {
@@ -6180,7 +5808,7 @@ mod tests {
 
     /// find_raws must accept EVERY format decode::is_raw does (one definition of
     /// "a RAW" app-wide) and nothing else — a Canon/Nikon library used to scan
-    /// as empty for batch/eval/style-index.
+    /// as empty for batch/eval.
     ///
     /// R27: the RAW set went from 9 extensions to 24, so the fixture is
     /// GENERATED from `decode::RAW_EXTS` rather than re-typed. A hand-written
@@ -8102,49 +7730,42 @@ mod tests {
         );
     }
 
-    /// R23-2, feedback #6: the develop that ASKED for personal style and got
-    /// none must SAY so — in all three arms. Before this, the condition was
-    /// "an index file exists and failed to load", so two of the three were
-    /// silent: a fresh install (no library) and a retrieval that matched
-    /// nothing both left a Style slider that visibly did nothing.
-    ///
-    /// The arms are exercised at the seam they converge on, and the mapping
-    /// from each arm to its triple is pinned by the loader's own test
-    /// (`style::the_shared_status_read_reports_absent_built_and_unusable`)
-    /// plus `render_reference([]) == None` (`style.rs`).
+    /// R23-2, feedback #6: the develop that ASKED for the reference looks and
+    /// got none must SAY so — with no library, with a search that found
+    /// nothing, and with a known cause. Exercised at the seam they converge on.
     #[test]
     fn every_silent_style_arm_now_discloses_itself() {
         use crate::rationale::{keys, render_one};
         let note = |strength, reference, err| style_gap_note(strength, reference, err);
 
-        // Arm (a): no index file at all — `EffectiveIndex::Absent`, so no
-        // loader error, and no reference.
+        // Arm (a): no library file at all — `Loaded::Absent`, so no cause,
+        // and no reference.
         let a = note(0.65, None, None).expect("a fresh install must not stay silent");
         assert_eq!(a.key, keys::STYLE_NO_REFERENCE);
         let text = render_one(&a);
         assert!(text.contains("65%"), "the slider position the user set: {text}");
         assert!(
-            text.contains("My Lightroom edits library"),
+            text.contains("Reference library"),
             "and where to fix it, in the GUI the user is looking at: {text}"
         );
 
-        // Arm (b): the index LOADED, but `retrieve` matched nothing, so
-        // `render_reference` returned None. Same user-visible fact, same note.
-        let b = note(0.3, None, None).expect("a retrieval that matched nothing is not silent");
+        // Arm (b): the library loaded but the search found nothing. Same
+        // user-visible fact, same note.
+        let b = note(0.3, None, None).expect("a search that found nothing is not silent");
         assert_eq!(b.key, keys::STYLE_NO_REFERENCE);
 
-        // Arm (c): a file exists and cannot be used — the loader's message
-        // survives, because it names what to rebuild.
-        let c = note(0.3, None, Some("style index … is version 2 (current 3)"))
-            .expect("an unusable index still discloses");
+        // Arm (c): a known cause — an unusable file, embedding switched off —
+        // survives, because it names what to fix.
+        let c = note(0.3, None, Some("it is format v0, this build reads v1 — rebuild it"))
+            .expect("an unusable library still discloses");
         assert_eq!(c.key, keys::STYLE_UNAVAILABLE);
-        assert!(render_one(&c).contains("is version 2"), "the cause rides along");
+        assert!(render_one(&c).contains("format v0"), "the cause rides along");
 
         // …and the two NEGATIVE controls, which is what stops this from
         // becoming a note on every develop: a reference that arrived, and a
         // slider the user turned off.
         assert!(
-            note(0.65, Some("STYLE REFERENCE — …"), None).is_none(),
+            note(0.65, Some("REFERENCE LOOKS — …"), None).is_none(),
             "no complaint when the reference is right there"
         );
         assert!(
@@ -8154,126 +7775,50 @@ mod tests {
     }
 
     /// R23-2, feedback #6's headline ("I have no idea which library it is
-    /// referencing"): a develop that DID get a reference names the shots it
-    /// leaned on. Driven through the same seam the pipeline uses, over stub
-    /// exemplars — the production path needs an index and a paid call.
+    /// referencing"): a develop that found references names them, by file
+    /// name and never by folder (the string is persisted and displayed).
     #[test]
-    fn a_develop_names_the_past_shots_it_referenced() {
+    fn a_develop_names_the_reference_looks_it_followed() {
         use crate::rationale::render_one;
-        use crate::style::StyleExemplar;
-        let ex = |stem: &str| StyleExemplar {
-            stem: stem.into(),
-            feat: vec![0.0; 14],
-            tag: "wide/mid/midday/landscape".into(),
-            settings: std::collections::BTreeMap::new(),
-            curve: None,
-            path: Some(format!("D:\\rolls\\{stem}.ARW")),
-            families: None,
-            embed: None,
-            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
-            masks: None,
-            mono: false,
-        };
-        let all = [ex("DSC0001"), ex("DSC0002"), ex("DSC0003")];
-        let refs: Vec<&StyleExemplar> = all.iter().collect();
-        let stems = crate::style::neighbour_stems(&refs);
-        let text = render_one(&style_neighbours_note(&stems).expect("a retrieval discloses itself"));
-        assert!(text.contains("DSC0001, DSC0002, DSC0003"), "the shots by name: {text}");
-        assert!(text.contains("the 3 most similar"), "…and how many answered: {text}");
-        assert!(
-            !text.contains("D:\\rolls"),
-            "file names, not the folder layout (this string is persisted and displayed): {text}"
-        );
-        // Nothing retrieved ⇒ no claim (the gap note owns that case).
-        assert!(style_neighbours_note(&[]).is_none());
+        let files: Vec<String> = ["sunset-01", "harbour", "dune-03"].map(String::from).to_vec();
+        let text = render_one(&references_note(&files).expect("a search discloses itself"));
+        assert!(text.contains("sunset-01, harbour, dune-03"), "the looks by name: {text}");
+        assert!(text.contains("the 3 closest"), "…and how many answered: {text}");
+        // Nothing found ⇒ no claim (the gap note owns that case).
+        assert!(references_note(&[]).is_none());
     }
 
-    /// v1.2.3, the NUMERIC half of the 2026-09-01 ruling: a develop the
-    /// direction leads is not pulled onto the library's means, and says so.
-    ///
-    /// The wording half (`style::a_leading_direction_speaks_the_block_as_
-    /// background`) on its own would have been a lie by arithmetic: the block
-    /// would tell the model these habits are background, and `blend_toward`
-    /// would then lerp its answer back onto them — at Style 1.0 replacing the
-    /// proposal's own value outright (`style::blend_toward`, "t = 1 reaches
-    /// the target"). Both halves read the same `StyleVoice`.
-    ///
-    /// MUTATION: make `style_blend_pull` return `Some(style_pull(style))`
-    /// unconditionally (i.e. keep blending in the Background voice) and the
-    /// `Background` rows fail.
+    /// v1.2.3, the 2026-09-01 ruling: a develop the direction leads quotes
+    /// its references as background, says so, and names the dial that chose
+    /// the voice — and nothing else says it.
     #[test]
-    fn the_direction_led_develop_skips_the_distillation_pull() {
+    fn a_direction_led_develop_discloses_its_references_as_background() {
+        use crate::library::StyleVoice;
         use crate::rationale::{keys, render_one};
         use crate::recipe::DirectionAdherence as A;
-        use crate::style::StyleVoice;
-
-        // The two shipped voices pull exactly what they always pulled — the
-        // Style axis keeps sole ownership of that number (GATE 5).
-        for (voice, style) in [
-            (StyleVoice::Ceiling, 0.3f32),
-            (StyleVoice::Ceiling, 0.65),
-            (StyleVoice::Target, 0.9),
-            (StyleVoice::Target, 1.0),
-        ] {
-            assert_eq!(
-                style_blend_pull(voice, style),
-                Some(crate::style::style_pull(style)),
-                "{voice:?} at Style {style} must still distil"
-            );
-        }
-        // …and the leading direction pulls NOTHING, at every Style value,
-        // including the 1.0 that used to replace the proposal outright.
-        for style in [0.0f32, 0.3, 0.85, 0.9, 1.0] {
-            assert_eq!(
-                style_blend_pull(StyleVoice::Background, style),
-                None,
-                "a direction-led develop must not be pulled at Style {style}"
-            );
-        }
-
-        // The skip is DISCLOSED, and names the dial that caused it.
-        let block = Some("STYLE BACKGROUND — …");
+        let block = Some("REFERENCE LOOKS — …");
         for (adherence, tier) in [(A::DEFAULT, "direct"), (0.9, "brief")] {
             let note = style_background_note(StyleVoice::Background, A::new(adherence), block)
-                .expect("a skipped pull is not silent");
+                .expect("a direction-led develop is not silent");
             assert_eq!(note.key, keys::STYLE_BACKGROUND);
             let text = render_one(&note);
             assert!(text.contains(tier), "the dial that chose the voice: {text}");
-            // The DIAL, in the user's own words — not a CLI flag. This note is
-            // persisted and re-rendered in the desktop app and the browser too,
-            // and neither has a command line to type one on.
-            assert!(
-                text.contains("lower the Adherence dial to 40% or below"),
-                "…and how to hand the lead back: {text}"
-            );
+            // The DIAL, in the user's own words — not a CLI flag: the note is
+            // persisted and re-rendered in the desktop app and the browser.
+            assert!(text.contains("lower the Adherence dial to 40% or below"), "{text}");
             assert!(!text.contains("--"), "a rationale note names no flag: {text}");
         }
-        // The three negative controls, which is what stops this becoming a
-        // note on every develop: a voice that DID distil, and a develop whose
-        // retrieval produced no block to have kept as background.
         for voice in [StyleVoice::Ceiling, StyleVoice::Target] {
-            assert!(
-                style_background_note(voice, A::default(), block).is_none(),
-                "{voice:?} distilled — it has no skip to disclose"
-            );
+            assert!(style_background_note(voice, A::default(), block).is_none(), "{voice:?} leads nothing away");
         }
         assert!(
             style_background_note(StyleVoice::Background, A::default(), None).is_none(),
-            "no reference was rendered, so there is no library to call background"
+            "no reference was rendered, so there is nothing to call background"
         );
-
-        // End to end through the ONE derivation: the develop the user actually
-        // ran (Style 1.0, the default adherence, a direction) is the case that
-        // must skip, and the same develop with the direction removed is not.
+        // End to end through the ONE derivation.
         let d = Some("dark moody low-key, teal-and-orange");
-        assert_eq!(
-            style_blend_pull(StyleVoice::choose(1.0, d, A::default()), 1.0),
-            None
-        );
-        assert_eq!(
-            style_blend_pull(StyleVoice::choose(1.0, None, A::default()), 1.0),
-            Some(crate::style::style_pull(1.0))
-        );
+        assert_eq!(StyleVoice::choose(1.0, d, A::default()), StyleVoice::Background);
+        assert_eq!(StyleVoice::choose(1.0, None, A::default()), StyleVoice::Target);
     }
 
     /// L09#1: a missing parent is created up-front (the documented
@@ -8302,113 +7847,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    #[test]
-    fn look_reference_image_replaces_the_raw_neighbour_and_is_named() {
-        let retrieved = StyleRetrieval {
-            reference: Some("raw reference".into()),
-            targets: Default::default(),
-            stems: vec!["raw-shot".into()],
-            nearest: Some("D:\\raw\\raw-shot.arw".into()),
-            look_reference: Some("finished look reference".into()),
-            look_nearest: Some("D:\\looks\\finished.jpg".into()),
-            look_stem: Some("finished".into()),
-            look_tags: vec!["warm golden tones".into()],
-            look_summary: None,
-            looks_unreachable: false,
-            looks_count: 1,
-        };
-        let (path, is_look) = reference_image_choice(&retrieved).expect("look answer");
-        assert_eq!(path, "D:\\looks\\finished.jpg");
-        assert!(is_look, "the selected image is explicitly from the look library");
-        assert!(crate::rationale::keys::STYLE_LOOK_IMAGE.contains("look photo"));
-    }
-
-    /// A6: a disclosed style pull is the pull the blend ACTUALLY used.
-    ///
-    /// The adopted candidate's `STYLE_DISTILLED` note re-derived its percentage
-    /// from `style_pull(req.style)` while the blend beside it used
-    /// `style_blend_pull`'s answer. The two agree today; they are not the same
-    /// function, and `style_blend_pull` is where the v1.2.3 direction ruling
-    /// lives — it already answers `None` where `style_pull` answers a number,
-    /// which is a case where they differ outright. A second derivation of one
-    /// fact is a second place for the disclosure to drift from the edit it
-    /// describes, and the drifting one governed an ADOPTED revision.
-    ///
-    /// MUTATION: put `crate::style::style_pull(req.style) * 100.0` back into
-    /// the candidate's note and the count assertion names it.
-    #[test]
-    fn a_disclosed_style_pull_is_the_one_the_blend_used() {
-        // The case where the two derivations differ, driven for real.
-        let voice = crate::style::StyleVoice::Background;
-        assert_eq!(style_blend_pull(voice, 1.0), None, "a direction-led develop is not pulled");
-        assert!(
-            crate::style::style_pull(1.0) > 0.0,
-            "…while the re-derivation would have stated a pull anyway"
-        );
-        // So only ONE of them may reach a rationale. In production code this
-        // file derives the pull in exactly one place: `style_blend_pull`.
-        let src = crate::source_before_tests(include_str!("pipeline.rs"));
-        let needle = concat!("style::style", "_pull(");
-        assert_eq!(
-            src.matches(needle).count(),
-            1,
-            "a second derivation of the style pull came back into production code"
-        );
-        // …and both notes state a percentage taken from a `pull` binding.
-        assert_eq!(
-            src.matches("(\"pct\", format!(\"{pct:.0}\", pct = pull * 100.0))").count(),
-            2,
-            "the verified proposal and the adopted candidate each state their own pull"
-        );
-    }
-
-    /// v1.2.3: EVERY `blend_toward` in this file is guarded by the voice.
-    ///
-    /// `the_direction_led_develop_skips_the_distillation_pull` proves the
-    /// HELPER — that `style_blend_pull` returns `None` in `Background`. It
-    /// cannot prove that either call site reads it, because nothing in the
-    /// battery runs `produce_recipe`'s blend path (it needs a paid analysis).
-    /// Restoring `crate::style::style_pull(req.style)` at either site would
-    /// compile and leave the whole battery green — including the
-    /// judge-candidate site, which is the one that governs an ADOPTED
-    /// revision, i.e. exactly the recipe two of the three 2026-09-01
-    /// acceptance develops actually shipped.
-    ///
-    /// So this is a source guard, the same instrument
-    /// `the_style_look_summary_reaches_every_reviewer...` uses on
-    /// `GradeIntent`: count equality plus adjacency, with both needles
-    /// assembled so the assertion cannot match itself.
-    ///
-    /// MUTATION: delete `&& let Some(pull) = style_blend_pull(style_voice,
-    /// req.style)` from either site (restoring an unguarded pull) and the
-    /// count assertion fails.
-    #[test]
-    fn every_blend_site_in_this_file_is_guarded_by_the_style_voice() {
-        let src = include_str!("pipeline.rs");
-        let call = concat!("blend_toward", "(&mut ");
-        let guard = concat!("style_blend_pull", "(style_voice, req.style)");
-        let calls: Vec<usize> = src.match_indices(call).map(|(i, _)| i).collect();
-        let guards: Vec<usize> = src.match_indices(guard).map(|(i, _)| i).collect();
-        assert_eq!(calls.len(), 2, "the two blend sites: the verified proposal and the judge candidate");
-        assert_eq!(
-            guards.len(),
-            calls.len(),
-            "every blend in this file must be gated on the voice, and nothing else may be"
-        );
-        // ADJACENCY, not just arithmetic: each guard is the one immediately
-        // above its own call, so two guards on one site and none on the other
-        // cannot satisfy the count. 400 bytes is the `if let` chain plus its
-        // opening brace — measured at 112 and 173 bytes on 2026-09-01.
-        for (g, c) in guards.iter().zip(&calls) {
-            assert!(g < c, "a guard must precede its blend (guard {g}, call {c})");
-            assert!(
-                c - g < 400,
-                "the guard at {g} is {} bytes from the blend at {c} — too far to be its gate",
-                c - g
-            );
-        }
-    }
-
     /// B2: the style-look summary reaches EVERY reviewer of one analysis —
     /// the verifier, the first judgement, and the re-judge inside every
     /// hint-guided revision round.
@@ -8434,7 +7872,7 @@ mod tests {
             &req,
             Some("moodier"),
             Some("warm golden tones"),
-            crate::style::StyleVoice::Background,
+            crate::library::StyleVoice::Background,
         );
         assert_eq!(intent.style_look, Some("warm golden tones"), "the look must reach the intent");
         assert_eq!(intent.direction, Some("moodier"), "and it must not displace the direction");
@@ -8443,7 +7881,7 @@ mod tests {
         // No library, no claim: the reviewers are told nothing rather than an
         // empty look.
         assert_eq!(
-            grade_intent(&req, None, None, crate::style::StyleVoice::Ceiling).style_look,
+            grade_intent(&req, None, None, crate::library::StyleVoice::Ceiling).style_look,
             None
         );
 
@@ -8459,61 +7897,21 @@ mod tests {
         );
     }
 
-    /// B2, the retrieval half: a develop with a look library hands the
-    /// reviewers the phrases, and one without hands them nothing.
-    ///
-    /// MUTATION: make the `look_summary` field of `StyleRetrieval` always
-    /// `None` in `produce_recipe`'s retrieval closure and the first assert
-    /// fails (it is the same `style::StyleIndex::look_summary` call).
+    /// B2, the search half: `produce_recipe` hands the reviewers the look the
+    /// references name (`library::look_summary`). A unit test cannot drive
+    /// that path — it needs a library and a paid call — so the wiring is
+    /// asserted at the source: without it the field could be pinned to `None`
+    /// in production and every behavioural test would stay green.
     #[test]
-    fn the_retrieval_carries_the_look_summary_the_reviewers_are_given() {
-        let look = crate::style::LookExemplar {
-            stem: "finished".into(),
-            path: "D:\\looks\\finished.jpg".into(),
-            embed: Vec::new(),
-            tags: vec!["warm golden tones".into()],
-            vocab_scores: None,
-            desc: None,
-            desc_embed: None,
-        };
-        let summary = crate::style::StyleIndex::look_summary(&[&look], &[]);
+    fn the_reviewers_are_given_the_look_the_references_name() {
+        let src = crate::source_before_tests(include_str!("pipeline.rs"));
         assert!(
-            summary.as_deref().is_some_and(|s| s.starts_with("warm golden tones")),
-            "{summary:?}"
+            src.contains(concat!("let style_look = crate::library::", "look_summary(&hits);")),
+            "produce_recipe must take the reviewers' look from the search's hits"
         );
-        let retrieved = StyleRetrieval {
-            reference: None,
-            targets: Default::default(),
-            stems: Vec::new(),
-            nearest: None,
-            look_reference: None,
-            look_nearest: None,
-            look_stem: None,
-            look_tags: Vec::new(),
-            look_summary: summary.clone(),
-            looks_unreachable: false,
-            looks_count: 1,
-        };
-        let req = GradeRequest::with_style(0.7);
-        let intent = grade_intent(
-            &req,
-            None,
-            retrieved.look_summary.as_deref(),
-            crate::style::StyleVoice::Ceiling,
-        );
-        assert_eq!(intent.style_look, summary.as_deref());
-        // An empty library answers None, and the reviewers are told nothing.
-        assert_eq!(crate::style::StyleIndex::look_summary(&[], &[]), None);
-
-        // …and `produce_recipe`'s retrieval closure is what FILLS that field.
-        // A unit test cannot drive that closure — it needs a built index and a
-        // real RAW — so the wiring is asserted at the source, the same way the
-        // one-intent rule above is. Without this the field could be pinned to
-        // `None` in production and every assertion above would stay green.
-        let src = include_str!("pipeline.rs");
         assert!(
-            src.contains(concat!("look_summary: crate::style::StyleIndex::", "look_summary(&looks, &ex)")),
-            "the retrieval closure must fill `look_summary` from `style::StyleIndex::look_summary`"
+            src.contains(concat!("grade_intent(&req, user_direction, ", "style_look.as_deref(), style_voice)")),
+            "…and hand that look to the one shared intent"
         );
     }
 
@@ -8532,98 +7930,6 @@ mod tests {
         assert_eq!(
             direction_adherence_tier(Some("warmer"), DirectionAdherence::new(0.9)),
             Some("brief")
-        );
-    }
-
-    /// A look image that will not load costs the develop its LOOK, not its
-    /// reference image.
-    ///
-    /// `reference_image_choice` prefers the look library, so a look file the
-    /// user moved or deleted used to end the reference-image path entirely -
-    /// the RAW neighbour that was sitting right there was never tried, and the
-    /// user had paid for a two-image call and received one image plus a note.
-    ///
-    /// MUTATION: delete the `reference_image_fallback` arm and the fallback
-    /// assertion fails.
-    #[test]
-    fn a_look_image_that_will_not_load_falls_back_to_the_raw_neighbour() {
-        let both = StyleRetrieval {
-            reference: None,
-            targets: Default::default(),
-            stems: vec!["raw-shot".into()],
-            nearest: Some("D:\\raw\\raw-shot.arw".into()),
-            look_reference: None,
-            look_nearest: Some("D:\\looks\\gone.jpg".into()),
-            look_stem: Some("gone".into()),
-            look_tags: Vec::new(),
-            look_summary: None,
-            looks_unreachable: false,
-            looks_count: 1,
-        };
-        // The chooser still prefers the look…
-        let (chosen, is_look) = reference_image_choice(&both).expect("a look is preferred");
-        assert_eq!(chosen, "D:\\looks\\gone.jpg");
-        assert!(is_look);
-        // …and the fallback is the RAW neighbour, which is what the failure arm
-        // now reaches for.
-        assert_eq!(reference_image_fallback(&both), Some("D:\\raw\\raw-shot.arw"));
-        // With no RAW neighbour recorded there is nothing to fall back to, and
-        // the arm must say None rather than invent a path.
-        let look_only = StyleRetrieval { nearest: None, ..both };
-        assert_eq!(reference_image_fallback(&look_only), None);
-    }
-
-    /// `style-query` and the develop rank through ONE helper, and the
-    /// diagnostic prints the terms that helper produced.
-    ///
-    /// This used to be a grep for the string `"pipeline::retrieve_style("` in
-    /// `main.rs`, which said nothing about the numbers: `distance_components`
-    /// re-implemented the 14-dimension sum, so the diagnostic could print terms
-    /// the ranking never used and both greps would still pass. The behavioural
-    /// half now lives in `style::the_diagnostic_prints_the_terms_the_ranking_used`;
-    /// what remains here is the one thing a behavioural test cannot see - that
-    /// the CLI has not grown a SECOND retrieval path beside the shared one.
-    ///
-    /// MUTATION: call `ix.retrieve_with_embed` directly from `style_query_cmd`
-    /// and the single-call-site assertion fails.
-    #[test]
-    fn style_query_uses_the_pipeline_retrieval_path() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let main = std::fs::read_to_string(root.join("src/main.rs")).expect("main source");
-        assert_eq!(
-            main.matches("pipeline::retrieve_style(").count(),
-            1,
-            "style-query must reach retrieval through the shared helper, once"
-        );
-        assert_eq!(
-            main.matches(".retrieve_with_embed(").count(),
-            0,
-            "…and never around it"
-        );
-        // The PRODUCTION half only: this test spells the patterns it counts, so
-        // reading its own module would count them twice (it did).
-        // Line endings follow the checkout (LF on CI, CRLF under
-        // autocrlf), so normalize before matching or the wrapped-call
-        // pattern below is Windows-only.
-        let pipeline = std::fs::read_to_string(root.join("src/pipeline.rs"))
-            .expect("pipeline source")
-            .replace("\r\n", "\n")
-            .split("mod tests {")
-            .next()
-            .expect("pipeline production half")
-            .to_string();
-        assert!(
-            pipeline.contains("let (ex, looks) =\n            retrieve_style(")
-                || pipeline.contains("let (ex, looks) = retrieve_style("),
-            "develop must use the shared helper"
-        );
-        // The helper itself is the only door to the index's scorers, on both
-        // sides of the feature flag.
-        assert_eq!(
-            pipeline.matches("ix.retrieve_with_embed(").count()
-                + pipeline.matches("ix.retrieve_looks(").count(),
-            2,
-            "retrieve_style is the single place the index is asked to rank"
         );
     }
 }

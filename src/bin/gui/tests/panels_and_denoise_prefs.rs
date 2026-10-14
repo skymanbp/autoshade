@@ -482,9 +482,7 @@
             strength: autoshade::recipe::GradeStrength::new(app.grade_strength),
             think: app.deep_think,
             adherence: autoshade::recipe::DirectionAdherence::default(),
-            use_looks: true,
-            embed: autoshade::style::EmbeddingSwitch::resolve(None, app.style_embed),
-            weights: autoshade::style::RetrievalWeights::from_env(),
+            embed: autoshade::library::EmbeddingSwitch::resolve(None, app.style_embed),
         };
         assert_eq!(req.strength.get(), 0.9);
         assert_eq!(req.style, 0.2);

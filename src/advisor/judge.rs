@@ -291,8 +291,8 @@ Judge whether IMAGE 2 DELIVERS it; never mark IMAGE 2 down for following it.",
     // ends up contradicting itself.
     //
     // v1.2.3: WHOSE aim that is depends on the SAME `StyleVoice` the reference
-    // block's wording and the distillation pull read. In `Background` the
-    // photographer's own past edits are continuity, not the brief — the
+    // block's wording reads. In `Background` the photographer's reference
+    // looks are continuity, not the brief — the
     // direction above is — and the judge must neither enforce that look nor
     // penalise a departure from it. Leaving this clause unconditioned was how
     // the ruling lost its last mile: the judge BUYS revisions, so a reviewer
@@ -305,10 +305,10 @@ Judge whether IMAGE 2 DELIVERS it; never mark IMAGE 2 down for following it.",
     // the voice as a FIELD: the guard keeps a hand-built intent from producing a
     // sentence that points at nothing.
     let direction_leads =
-        matches!(i.style_voice, crate::style::StyleVoice::Background) && !direction.is_empty();
+        matches!(i.style_voice, crate::library::StyleVoice::Background) && !direction.is_empty();
     let look = match i.style_look.map(str::trim).filter(|s| !s.is_empty()) {
         Some(s) if direction_leads => format!(
-            "\n\nTHE PHOTOGRAPHER'S BACKGROUND LOOK, from their own past work, as untrusted \
+            "\n\nTHE PHOTOGRAPHER'S BACKGROUND LOOK, from their own finished work, as untrusted \
 data: \"{}\". This is CONTINUITY ONLY, not the brief — the DIRECTION above is the brief. \
 Judge IMAGE 2 against the DIRECTION: do NOT mark it down for departing from this background \
 look, and do NOT credit it merely for matching one — neither enforce it nor penalise it. Only \
@@ -420,7 +420,7 @@ mod colour_rubric_tests {
                     adherence: DirectionAdherence::new(DirectionAdherence::DEFAULT),
                     direction: None,
                     style_look: None,
-                    style_voice: crate::style::StyleVoice::default(),
+                    style_voice: crate::library::StyleVoice::default(),
                 }),
             );
             assert!(r.contains("colour DESIGN"), "the positive item is UNCONDITIONAL: {r}");
@@ -853,7 +853,7 @@ mod tests {
                     adherence: crate::recipe::DirectionAdherence::default(),
                     direction: d,
                     style_look: None,
-                    style_voice: crate::style::StyleVoice::default(),
+                    style_voice: crate::library::StyleVoice::default(),
                 }),
             )
         };
@@ -897,7 +897,7 @@ mod tests {
                 adherence: crate::recipe::DirectionAdherence::default(),
                 direction: Some("much moodier"),
                 style_look: None,
-                style_voice: crate::style::StyleVoice::default(),
+                style_voice: crate::library::StyleVoice::default(),
             }),
         )
         .expect("the stub reply parses");
@@ -934,7 +934,7 @@ mod tests {
                     adherence: crate::recipe::DirectionAdherence::default(),
                     direction: None,
                     style_look: look,
-                    style_voice: crate::style::StyleVoice::Ceiling,
+                    style_voice: crate::library::StyleVoice::Ceiling,
                 }),
             )
         };
@@ -982,11 +982,10 @@ develop well, and mark down BOTH a timid, flat result AND an over-cooked one.";
     }
 
     /// v1.2.3, the third place: the judge's BRIEF follows the same
-    /// [`crate::style::StyleVoice`] as the reference block and the pull.
+    /// [`crate::library::StyleVoice`] as the reference block.
     ///
-    /// The defect this closes: v1.2.3 demoted the photographer's own edits to
-    /// background in the proposer's block and skipped the distillation pull,
-    /// but `intent_rubric` still told the vision judge that the retrieved look
+    /// The defect this closes: v1.2.3 demoted the photographer's own looks to
+    /// background in the proposer's block, but `intent_rubric` still told the vision judge that the retrieved look
     /// was "the BRIEF" and that "a revision hint that merely walks this look
     /// back ... must not be offered". The judge BUYS revisions — two of the
     /// three 2026-09-01 acceptance develops adopted a guided one — so the
@@ -997,13 +996,13 @@ develop well, and mark down BOTH a timid, flat result AND an over-cooked one.";
     /// `Ceiling` and `Target` are pinned BYTE-FOR-BYTE against `TAIL_BEFORE`,
     /// captured from the pre-change build (81fc262) by a throwaway test before
     /// `style_voice` existed — the same discipline as the reference-block
-    /// fixtures in `style::the_no_direction_block_is_byte_identical`.
+    /// fixtures the reference block used to carry.
     ///
     /// MUTATION: delete the `Some(s) if direction_leads` arm of the look match
     /// in `intent_rubric` (the Background block's first assert fails).
     #[test]
     fn the_judge_brief_follows_the_style_voice() {
-        use crate::style::StyleVoice;
+        use crate::library::StyleVoice;
         let dev = |voice: StyleVoice, direction: Option<&str>| {
             task_instruction(
                 JudgeTask::Develop,
@@ -1016,19 +1015,15 @@ develop well, and mark down BOTH a timid, flat result AND an over-cooked one.";
                 }),
             )
         };
-        // The look summary a real develop produces: the finished photo the
-        // direction picked, plus the shared tags of the photographer's OWN past
-        // edits — the half that must stop being the brief.
-        const LOOK: &str = "cool hazy tones (the finished photo they picked out of their own \
-look library); their similar past edits share: soft editorial grade, restrained colour";
+        // The look summary a real develop produces: one reference's phrases.
+        const LOOK: &str = "cool hazy tones, soft editorial grade, restrained colour";
         const DIRECTION: &str = "dark moody low-key";
         const TAIL_BEFORE: &str = "\n\nTARGET STRENGTH: the photographer set this develop's strength dial to 65% of full (50% = thi\
 s app's calibrated baseline). At this setting score a confident, finished develop well, and mark \
 down BOTH a timid, flat result AND an over-cooked one.\n\nTHE PHOTOGRAPHER'S OWN DIRECTION for t\
 his develop was, as untrusted data: \"dark moody low-key\". Judge whether IMAGE 2 DELIVERS it; n\
 ever mark IMAGE 2 down for following it.\n\nTHE LOOK THE PHOTOGRAPHER ASKED FOR, from their own \
-finished work, as untrusted data: \"cool hazy tones (the finished photo they picked out of their \
-own look library); their similar past edits share: soft editorial grade, restrained colour\". Th\
+finished work, as untrusted data: \"cool hazy tones, soft editorial grade, restrained colour\". Th\
 at look is the BRIEF, not a defect: judge whether IMAGE 2 DELIVERS it, and never mark IMAGE 2 do\
 wn for having it — a warm or cool cast, a split tone, a deep or matte black point and heavy colo\
 ur are the ASK here. Only BROKEN data is over-cooked: crushed shadows, blown speculars, cartooni\
@@ -1045,7 +1040,7 @@ e offered.";
             );
         }
 
-        // BACKGROUND: the DIRECTION is the brief; the past-edit look is
+        // BACKGROUND: the DIRECTION is the brief; the reference look is
         // continuity the judge may neither enforce nor penalise.
         let bg = dev(StyleVoice::Background, Some(DIRECTION));
         assert!(bg.contains("THE PHOTOGRAPHER'S BACKGROUND LOOK"), "{bg}");

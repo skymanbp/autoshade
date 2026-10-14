@@ -1001,77 +1001,44 @@ pub mod keys {
     pub const REVISION_VERIFY_FAILED: &str =
         " [verification of revision round {round} failed ({e}) — keeping the previous \
          verified proposal]";
-    /// NAMES THE FIELDS (batch 2). The percentage alone said that something had
-    /// been pulled and left "toward what, and what moved?" unanswered on a note
-    /// that is persisted, re-rendered in three UIs, and sits beside a
-    /// derivation it can contradict. `style::distilled_fields` measures the
-    /// list from the two recipes and bounds it.
-    pub const STYLE_DISTILLED: &str =
-        " [style distillation then pulled this recipe toward this user's past \
-         edits (effective strength {pct}%; moved: {fields}) — final values can \
-         differ from the derivation above]";
-    /// The develop where the DIRECTION led and the library did not pull
-    /// (v1.2.3, user ruling 2026-09-01). It is the counterpart of
-    /// [`STYLE_DISTILLED`] and exists for the same reason: the recipe's final
-    /// numbers are read beside a derivation that must not be able to
-    /// contradict them, and "no pull was applied" is as much a fact about
-    /// this develop as a 100% pull would have been. It names the adherence
-    /// tier because that dial — not a new control — is what chose the voice,
-    /// so a user who wants their library back knows which slider to move.
+    /// The develop where the DIRECTION led and the references followed
+    /// (v1.2.3, user ruling 2026-09-01). "The references were background" is
+    /// as much a fact about this develop as the references it names. It names
+    /// the adherence tier because that dial — not a new control — chose the
+    /// voice, so a user who wants their library back knows which slider to
+    /// move.
     ///
-    /// It names the DIAL, not a flag. Rationale notes are surface-neutral by
-    /// construction — this text is persisted into the recipe and re-rendered
-    /// in the CLI, the desktop app and the browser — and this was the only key
-    /// in the file whose TEXT spelled a CLI option. The desktop app has an
-    /// Adherence slider and the web page has had one since v1.2.3; neither has
-    /// a command line to type a flag on.
+    /// It names the DIAL, not a flag: rationale notes are persisted into the
+    /// recipe and re-rendered in the CLI, the desktop app and the browser, and
+    /// only one of those has a command line.
     pub const STYLE_BACKGROUND: &str =
-        " [your style library was kept as BACKGROUND for this develop — the direction \
-         leads at adherence tier {tier}, so no style-distillation pull was applied to \
-         these numbers; lower the Adherence dial to 40% or below to hand the library \
-         back the lead]";
-    pub const STYLE_REVERIFY_FAILED: &str =
-        " [re-verification after style distillation failed ({e}) — the verdict \
-         above describes the PRE-distillation recipe]";
+        " [your reference library was kept as BACKGROUND for this develop — the direction \
+         leads at adherence tier {tier}; lower the Adherence dial to 40% or below to hand \
+         the references back the lead]";
     pub const STYLE_UNAVAILABLE: &str =
-        " [style reference unavailable ({e}) — the Style slider had no effect on this \
-         develop; rebuild it with: autoshade style-index <folder>]";
-    /// R23-2, feedback #6: the OTHER two silent arms. `STYLE_UNAVAILABLE`
-    /// above only ever fired when an index FILE existed and failed to load, so
-    /// a fresh install (no library at all) and a retrieval that matched
-    /// nothing both produced a Style slider that did nothing, silently, on
-    /// every surface. One note covers both — the condition is "asked for
-    /// style, ended up with no reference" — and it names the GUI entry point,
-    /// because the windowed app is where this is most often read.
-    /// (The arrow is `→`, not `›`: this template is RENDERED BY THE GUI, whose
-    /// embedded font subset is generated from the GUI sources — a character
-    /// only this module uses would draw as a tofu box there.)
+        " [reference library unavailable ({e}) — the Style slider had no effect on this \
+         develop]";
+    /// R23-2, feedback #6: a develop that asked for references and got none
+    /// says so — no library yet, or a search that found nothing — and names
+    /// the GUI entry point, because the windowed app is where this is most
+    /// often read. (The arrow is `→`, not `›`: the GUI's embedded font subset
+    /// is generated from the GUI sources, and a character only this module
+    /// used would draw as a tofu box there.)
     pub const STYLE_NO_REFERENCE: &str =
-        " [no style reference was available for this photo — the Style slider ({pct}%) had \
-         no effect on this develop. Build your style library in the AI panel → Reference \
-         libraries → My Lightroom edits library: a folder of your own RAWs with their \
-         Lightroom .xmp sidecars beside them]";
-    /// Which past shots this develop actually leaned on (R23-2 transparency).
+        " [no reference look was available for this photo — the Style slider ({pct}%) had \
+         no effect on this develop. Build your reference library in the AI panel → \
+         Reference library: a folder of finished photos whose look you like]";
+    /// Which finished photos this develop followed (R23-2 transparency).
     pub const STYLE_NEIGHBOURS: &str =
-        " [style reference: your own edits on {files} — the {n} most similar shots in your \
-         style library]";
-    /// The opt-in reference IMAGE (off by default — it is an extra image on a
-    /// paid vision call).
+        " [reference looks: {files} — the {n} closest finished photos in your reference \
+         library]";
+    /// The opt-in reference IMAGES (off by default — each is an extra image on
+    /// a paid vision call).
     pub const STYLE_REF_IMAGE: &str =
-        " [{file} also went to the vision model as a reference IMAGE — one extra image on \
-         each call of this analysis]";
+        " [{n} reference photo(s) also went to the vision model as images — that many \
+         extra images on each call of this analysis]";
     pub const STYLE_REF_IMAGE_FAILED: &str =
-        " [the reference photo could not be prepared ({e}) — this develop used the text \
-         reference only]";
-    pub const STYLE_LOOK_REFERENCE: &str = " [look reference: finished photo {stem} from the photographer's look library; tags: {tags}]";
-    pub const STYLE_LOOK_IMAGE: &str = " [finished look photo {stem} also went to the vision model as IMAGE 2]";
-    pub const STYLE_LOOKS_UNREACHABLE: &str = " [look library unavailable for this develop ({n} finished photos): style embedding was off or no query vector was produced]";
-    /// Step 14 / S2: how many exemplars of a freshly built library carry a
-    /// LOCAL prose description of their grade. It is a build-path note, not a
-    /// develop-path one: the count is a property of the library, and the thing
-    /// a user needs to know after a build that took minutes is how much of it
-    /// the optional pass actually covered.
-    pub const STYLE_DESCRIBED: &str = " [look descriptions: {n} of {total} exemplars carry a local prose description]";
+        " [a reference photo could not be prepared ({e}) — it went as words only]";
     pub const ADVISOR_NOTE_DIRECTION_ADHERENCE: &str = " [direction adherence tier: {tier}]";
     pub const MASKS_NOT_PRESERVED: &str =
         "\n⚠ the response did not preserve mask identities (a mask was renamed or \
@@ -1470,23 +1437,6 @@ mod tests {
             )),
             format!(" [revision round {round} failed ({e}) — keeping the previous verified proposal]"),
         );
-        let strength: f32 = 0.7;
-        assert_eq!(
-            render_one(&Note::new(
-                keys::STYLE_DISTILLED,
-                vec![
-                    ("pct", format!("{:.0}", strength * 0.6 * 100.0)),
-                    ("fields", "vibrance, hsl.saturation.blue".to_string()),
-                ],
-            )),
-            format!(
-                " [style distillation then pulled this recipe toward this user's past \
-                 edits (effective strength {:.0}%; moved: {}) — final values can \
-                 differ from the derivation above]",
-                strength * 0.6 * 100.0,
-                "vibrance, hsl.saturation.blue",
-            ),
-        );
         let (err_before, err_after) = (0.2013_f32, 0.0567_f32);
         assert_eq!(
             render_one(&Note::new(
@@ -1582,7 +1532,6 @@ ValueError: boom at C:\Users\alice\x.py"#
             keys::ZONED_UNAVAILABLE,
             keys::REVISION_FAILED,
             keys::REVISION_VERIFY_FAILED,
-            keys::STYLE_REVERIFY_FAILED,
             keys::STYLE_UNAVAILABLE,
             keys::STYLE_REF_IMAGE_FAILED,
             keys::JUDGE_ROUND_FAILED,

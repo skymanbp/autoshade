@@ -316,25 +316,24 @@ prompts, the v1.2.2 comparison and the finished-look-only run in
 [docs/SHOWCASE.md](docs/SHOWCASE.md); model-judge scores are automated
 review, not human aesthetic approval.</sub>
 
-`autoshade style-index <dir>` turns every Lightroom RAW+XMP pair you finished
-into an exemplar ([`src/style.rs`](src/style.rs)); a photo retrieves its **4
-most similar past shots** as a soft reference.
+`autoshade library-build <dir>` turns a folder of finished photos whose look
+you like into a reference library ([`src/library.rs`](src/library.rs)); each
+develop is shown the **3 closest** as a soft reference.
 
-- An exemplar carries a 14-dimensional EXIF/histogram feature, the 12 develop
-  settings you moved, your curve shape, colour families and a local-work habit
-  — summary statistics only; optional local models add a 768-dimensional
-  **SigLIP 2** image vector and, with `--describe`, one **Qwen3-VL-2B**
-  sentence about the *grade*, and nothing leaves the machine.
-- Retrieval is
-  `d14 + W_EMB·(1−cos(q_img,e_img)) + W_TXT·(1−cos(q_txt,e_img)) + W_DESC·(1−cos(q_txt,e_desc))`,
-  shipped at `W_EMB = 4`, `W_TXT = 0.5`, `W_DESC = 0.5` — the calibration
-  harness's winners on the real corpus, hubness removed before the z-score;
-  `W_LOOK = 1.0` is the unmeasured term (the look library carries no develop
-  settings for that objective to see) and ships inside a stable band.
-- `style_pull` (0.18 at the shipped Style 0.3, full at Style 1.0) moves the
-  proposal toward your historical means, unless a Direction at Adherence above
-  40 % leads; a `--looks` library guides the proposer but never becomes a
-  recipe target.
+- An entry is measured from its pixels only — no `.xmp` is read, so exports
+  that went through other editors count as they look: a 768-dimensional
+  **SigLIP 2** image vector and, with `--describe`, a few short **Qwen3-VL-2B**
+  phrases about the *grade* ("warm, faded, low contrast") with their text
+  vector. Nothing leaves the machine, and a rebuild measures only new or
+  changed photos.
+- A develop asks two questions of every entry: is its scene like this photo
+  (image against image), and does its look answer your Direction (your words
+  against its phrases). Each is standardised over the library and the two are
+  summed, the Direction counting double; with no Direction the scene alone
+  ranks.
+- The references reach the model as words and, if you opt in, as pictures.
+  With a Direction at Adherence above 40 % they are background and your words
+  lead; nothing is blended into the recipe.
 
 Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
 
@@ -823,8 +822,8 @@ by the render, the sidecar writer, the mask-habit classifier and the GUI.
 `src/advisor/` validates proposals into bounded
 recipes, keeps Responses at `store:false`, gives the verifier data rather than
 pixels and adopts a guided revision only when it does not lower the score;
-`src/style.rs` retrieves z-scored exemplars with the shipped `W_EMB = 4`,
-`W_TXT = 0.5`, `W_DESC = 0.5` and the unmeasured `W_LOOK = 1.0`; `src/fit.rs`
+`src/library/` searches finished photos by standardised scene and Direction
+similarity and hands the three closest to the proposer; `src/fit.rs`
 runs the inverse stages behind the >45°/≥5% foreign-hue veto and consults
 the DIFT field of `src/correspond.rs` on divergent pairs; `src/generative.rs`
 negotiates gpt-image-2 sizes and `src/retouch.rs` is the deterministic heal.

@@ -1583,9 +1583,9 @@ fn hist_copy(img: &DynamicImage) -> DynamicImage {
 
 /// Process-wide cap on CONCURRENT full-res embedded-preview decodes. A 61 MP
 /// ARW preview lands as a 9504×6336 Rgb8 frame (~181 MB), and a portrait
-/// rotation holds a second copy while it turns. `StyleIndex::build`'s worker
-/// pool bounds ONE build; two builds in the same process (the web server's
-/// request threads — see `StyleIndex::save`'s tmp-name comment) used to
+/// rotation holds a second copy while it turns. The old style-index
+/// build's worker pool bounded ONE build; two builds in the same process (the
+/// web server's request threads) used to
 /// stack 8 decodes ≈ 1.4 GB. This bounds them together. Taken at the BUILD
 /// call site only: gating inside `decode_raw` would silently throttle the
 /// GUI thumbnail path, whose own cap deliberately keeps RAW thumbs
@@ -2141,7 +2141,7 @@ fn neutral_rendition(path: &Path, quarter_turns: u8) -> Result<DynamicImage> {
 /// only; never writes near the source.
 ///
 /// The EXIF orientation only — the door for a caller that holds no recipe (the
-/// `decode` CLI command, the style-index scan of a foreign library). A caller
+/// `decode` CLI command, a reference-library build). A caller
 /// that DOES hold one takes [`decode_raw_turned`].
 pub fn decode_raw(path: &Path) -> Result<Decoded> {
     decode_raw_turned(path, 0)

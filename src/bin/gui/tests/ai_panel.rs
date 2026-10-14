@@ -1,119 +1,58 @@
-// One part of the GUI's tests (src/bin/gui/tests.rs includes it): the AI panel's folds, the reference libraries, the picker, deep thinking and the style library build.
+// One part of the GUI's tests (src/bin/gui/tests.rs includes it): the AI panel's folds, the reference library, the picker, deep thinking and the library build.
 
-    /// R23-2 (feedback #6): the AI panel now OWNS the style reference library —
-    /// its status, its build entry, and the honesty of the Style slider above
-    /// it. All three read the ONE cached status, so this pins the rendered
-    /// panel in each state rather than the predicate alone.
+    /// R23-2 (feedback #6): the AI panel OWNS the reference library — its
+    /// status, its build entry, and the honesty of the Style slider above it.
+    /// All three read the ONE cached status, so this pins the rendered panel in
+    /// each state rather than the predicate alone.
     ///
-    /// R30 moved that section out of `ai_analysis` into the 「Reference
-    /// libraries」 fold and renamed its caption to say WHICH library it is
-    /// (「My Lightroom edits library (RAW + .xmp)」, against the finished-photo
-    /// look library one rung below). The states, the entry point and the
-    /// slider's flag are unchanged — only the name this test looks for is.
-    ///
-    /// The status is INJECTED: the production panel spawns a worker to read it
-    /// (the file reaches 32 MB), and a headless frame must not go to the
-    /// developer's own store for an answer.
+    /// The status is INJECTED: the production panel spawns a worker to read it,
+    /// and a headless frame must not go to the developer's own store.
     #[test]
-    fn the_ai_panel_says_which_style_library_it_is_referencing() {
-        use autoshade::style::{StyleIndexInfo, StyleIndexState};
-        let info =
-            |state| Some(StyleIndexInfo { path: "C:/store/style-index.json".into(), state });
-
+    fn the_ai_panel_says_which_reference_library_it_is_referencing() {
+        use autoshade::library::Summary;
         // ── Nothing built: the entry point, the pointer sentence, AND the
-        // slider's own warning — the defect was a slider showing 30% with
-        // nothing behind it and no way in the app to build one.
-        let mut app =
-            AutoShadeApp { style_info: info(StyleIndexState::Absent), ..Default::default() };
+        // slider's own warning.
+        let mut app = AutoShadeApp { style_info: Some(Summary::Absent), ..Default::default() };
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
-        assert!(
-            seen.iter().any(|t| t == "My Lightroom edits library (RAW + .xmp)"),
-            "the section must exist at all — otherwise this test proves nothing: {seen:?}"
-        );
-        assert!(
-            seen.iter().any(|t| t.contains("No library built yet")),
-            "an unbuilt library must say so: {seen:?}"
-        );
-        assert!(
-            seen.iter().any(|t| t.contains("folder you edit in Lightroom")),
-            "…and where to point it (an AutoShade output folder yields nothing): {seen:?}"
-        );
-        assert!(
-            seen.iter().any(|t| t.contains("no library")),
-            "the Style slider must not read as live when it provably is not: {seen:?}"
-        );
-        assert!(
-            seen.iter().any(|t| t.contains("Pick folder")),
-            "the GUI build entry point — the whole missing surface: {seen:?}"
-        );
+        for want in ["No reference library yet", "folder of finished photos", "no library", "Pick folder"] {
+            assert!(seen.iter().any(|t| t.contains(want)), "missing {want:?}: {seen:?}");
+        }
 
-        // ── Built: WHICH library, how big, how old. This is the answer to the
-        // user's "I have no idea which library it is referencing".
+        // ── Built: WHICH library, how big, how old — the answer to "I have no
+        // idea which library it is referencing".
         let mut app = AutoShadeApp {
-            style_info: info(StyleIndexState::Built {
-                total: 412,
-                version: 3,
-                source_dir: Some("D:/photos/edited".into()),
-                scenes: vec![("wide/mid/midday/landscape".into(), 12)],
-                // The v5 half of the state, which the AI panel prints beside
-                // the count ("embeddings 300/412 - looks 7"). This fixture
-                // predates those fields and had stopped compiling.
-                with_embedding: 300,
-                looks: 7,
-                looks_dir: Some("D:/photos/finished".into()),
+            style_info: Some(Summary::Built {
+                photos: 412,
+                phrased: 300,
+                dir: "D:/photos/finished".into(),
                 age: Some(std::time::Duration::from_secs(5 * 3600)),
             }),
             ..Default::default()
         };
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
         assert!(
-            seen.iter().any(|t| t.contains("412") && t.contains("D:/photos/edited")),
-            "the count AND the folder it came from: {seen:?}"
+            seen.iter().any(|t| t.contains("412") && t.contains("D:/photos/finished") && t.contains("300 with look phrases")),
+            "the count, the folder and the phrase coverage: {seen:?}"
         );
-        assert!(
-            seen.iter().any(|t| t.contains("built 5h ago")),
-            "and how stale it is: {seen:?}"
-        );
-        assert!(
-            !seen.iter().any(|t| t.contains("no library")),
-            "no false warning beside the slider once a library exists: {seen:?}"
-        );
+        assert!(seen.iter().any(|t| t.contains("built 5h ago")), "and how stale it is: {seen:?}");
+        assert!(!seen.iter().any(|t| t.contains("no library")), "no false warning once a library exists: {seen:?}");
 
-        // ── Unusable: the loader's reason, not silence (this arm always spoke
-        // in the rationale; now the panel says it before an analysis is paid
-        // for).
+        // ── Unusable: the loader's reason, before an analysis is paid for.
         let mut app = AutoShadeApp {
-            style_info: info(StyleIndexState::Unusable {
-                err: "is version 2 (current 3)".into(),
-            }),
+            style_info: Some(Summary::Unusable("it is format v0, this build reads v1".into())),
             ..Default::default()
         };
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
-        assert!(
-            seen.iter().any(|t| t.contains("is version 2 (current 3)")),
-            "the cause reaches the user: {seen:?}"
-        );
-        assert!(
-            seen.iter().any(|t| t.contains("no library")),
-            "and the slider is flagged: {seen:?}"
-        );
+        assert!(seen.iter().any(|t| t.contains("format v0")), "the cause reaches the user: {seen:?}");
+        assert!(seen.iter().any(|t| t.contains("no library")), "and the slider is flagged: {seen:?}");
     }
 
     /// R30: the AI panel is FOUR folds, in one order, each saying what it
-    /// costs — and the middle one is a three-rung dependency ladder.
+    /// costs in its header — the one thing a collapsed fold still shows. Both
+    /// languages, because a tag that only exists in English is not a
+    /// disclosure.
     ///
-    /// The reported defect was that the panel mixed paid and local controls
-    /// with nothing to tell them apart, so the fix is only real if the cost
-    /// tag is IN THE HEADER (the one thing a collapsed fold still shows) and
-    /// the rungs sit in dependency order: the edits library is usable on its
-    /// own, the retrieval engine is what the look library is reached through,
-    /// so the engine must sit between them and not after both.
-    ///
-    /// Both languages, because a tag that only exists in English is not a
-    /// disclosure for the user who reported this.
-    ///
-    /// MUTATION THIS KILLS: drop a cost tag, reorder the sub-areas, or move
-    /// the retrieval engine below the look library it feeds.
+    /// MUTATION THIS KILLS: drop a cost tag or reorder the sub-areas.
     #[test]
     fn the_ai_panel_is_four_folds_that_each_say_what_they_cost() {
         for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
@@ -121,10 +60,7 @@
             let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
             let want = [
                 tr(lang, "Analysis · paid API"),
-                tr(lang, "Reference libraries · local"),
-                tr(lang, "My Lightroom edits library (RAW + .xmp)"),
-                tr(lang, "Retrieval engine (what a build computes, what a query matches)"),
-                tr(lang, "Finished-photo look library (JPEG)"),
+                tr(lang, "Reference library · local"),
                 tr(lang, "Reimagine (whole image) · paid API"),
                 tr(lang, "Reverse-fit · local; AI review is paid"),
             ];
@@ -139,196 +75,71 @@
     }
 
     /// R30 gate (a), split the way the user ruled it: only what CONSUMES a
-    /// library goes dark at Style 0. Everything that shapes one stays live.
+    /// library goes dark at Style 0; the build side stays live. At Style 0 the
+    /// pipeline opens no library at all (`(req.style > 0.0).then(library::load)`),
+    /// so the two switches that only feed an analysis are decoration there.
+    /// Greying the build would make the library nobody has yet the one nobody
+    /// can make. The threshold is the PIPELINE'S, so 1% re-arms the read side.
     ///
-    /// At Style 0 the pipeline opens no index at all — `pipeline.rs`'s
-    /// `(req.style > 0.0).then(load_effective)` — so the two switches that do
-    /// nothing but feed an analysis (rung 1's reference-photo switch, rung 3's
-    /// 「Use look library」) are decoration at that setting and are drawn
-    /// disabled with the reason above them. Three things are NOT: the folder
-    /// pickers, the two Build buttons, and the whole retrieval-engine rung,
-    /// whose two switches `actions.rs` resolves when it STARTS a build and so
-    /// decide what that build computes. Greying those would have made the
-    /// library nobody has yet the one library nobody can make — and the Style
-    /// slider's own 「⚠ no library」 flag points straight at them.
-    ///
-    /// The threshold is the PIPELINE'S, not a rounded band, so 1% must re-arm
-    /// the read side — that is why phase ③ exists.
-    ///
-    /// MUTATION THIS KILLS: widen the read gate over the build row (phase ②'s
-    /// build witness goes false), wrap the retrieval-engine rung back in it
-    /// (the retrieval witness goes false), drop the wrapper from EITHER use
-    /// switch (the read witness ORs the two, so one ungated switch flips phase
-    /// ② on its own), widen the comparison to `>= 0.0`, or drop the sentence
-    /// that says why.
+    /// MUTATION THIS KILLS: widen the read gate over the build row, drop it
+    /// from the read switches, widen the comparison to `>= 0.0`, or drop the
+    /// sentence that says why.
     #[test]
-    fn the_reference_libraries_build_at_style_zero_but_do_not_read() {
+    fn the_reference_library_builds_at_style_zero_but_is_not_read() {
         let ctx = egui::Context::default();
         crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
-        // (build row, retrieval rung, use switches) — one frame answers all
-        // three, so a change that moves the boundary between them cannot pass
-        // by moving the lot.
-        let frame = |app: &mut AutoShadeApp| -> (Option<bool>, Option<bool>, Option<bool>) {
+        let frame = |app: &mut AutoShadeApp| -> (Option<bool>, Option<bool>) {
             app.ai_library_build_enabled = None; // this frame's evidence only
-            app.retrieval_engine_enabled = None;
             app.ai_library_read_enabled = None;
             let _ = ctx.run(
                 egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(1000.0, 900.0),
-                    )),
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 900.0))),
                     ..Default::default()
                 },
                 |ctx| {
-                    // The sub-area ships COLLAPSED; egui's own test hook opens
-                    // every collapsible, so a fold state cannot make this
-                    // vacuous.
+                    // egui's own test hook opens every collapsible, so a fold
+                    // state cannot make this vacuous.
                     ctx.memory_mut(|m| m.set_everything_is_visible(true));
                     egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
                         app.ai_panel(ui);
                     });
                 },
             );
-            (
-                app.ai_library_build_enabled,
-                app.retrieval_engine_enabled,
-                app.ai_library_read_enabled,
-            )
+            (app.ai_library_build_enabled, app.ai_library_read_enabled)
         };
-        // ① the shipped default: Style is above 0, so everything is live.
         let mut app = AutoShadeApp::default();
         assert!(app.style_strength > 0.0, "premise: the app ships with Style above 0");
-        assert_eq!(
-            frame(&mut app),
-            (Some(true), Some(true), Some(true)),
-            "above Style 0 a library is buildable, configurable and read"
-        );
-        // ② Style at 0: the two USE switches go dark, and nothing else does.
+        assert_eq!(frame(&mut app), (Some(true), Some(true)), "above Style 0 a library is buildable and read");
         app.style_strength = 0.0;
-        let (build, retrieval, read) = frame(&mut app);
-        assert_eq!(
-            read,
-            Some(false),
-            "at Style 0 the pipeline loads no index, so neither use switch can change it"
-        );
-        assert_eq!(
-            build,
-            Some(true),
-            "building a library is how a user gets something for Style to read (user ruling)"
-        );
-        // The retrieval engine is BUILD-side too, which is why it is named
-        // separately: `actions.rs` resolves both of its switches when it starts
-        // an index build, so greying them at Style 0 would let a user start a
-        // build they were not allowed to configure.
-        assert_eq!(
-            retrieval,
-            Some(true),
-            "the SigLIP 2 switch configures the BUILD as well as the query — it must stay usable at Style 0"
-        );
-        // …and the reason is ON SCREEN, not only in a tooltip.
+        assert_eq!(frame(&mut app), (Some(true), Some(false)), "at Style 0: still buildable, not read");
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
-        assert!(
-            seen.iter().any(|t| t.contains("Style is at 0%")),
-            "a greyed control must say why it is grey: {seen:?}"
-        );
-        // …beside a build entry that is still there to be used.
-        assert!(
-            seen.iter().any(|t| t.contains("Build / rebuild")),
-            "the build entry stays on the panel at Style 0: {seen:?}"
-        );
-        // ③ the smallest step off 0 re-arms the read side.
+        assert!(seen.iter().any(|t| t.contains("Style is at 0%")), "a greyed control must say why: {seen:?}");
+        assert!(seen.iter().any(|t| t.contains("Build / rebuild")), "the build entry stays at Style 0: {seen:?}");
         app.style_strength = 0.01;
-        assert_eq!(
-            frame(&mut app),
-            (Some(true), Some(true), Some(true)),
-            "any non-zero Style opens a library"
-        );
+        assert_eq!(frame(&mut app), (Some(true), Some(true)), "any non-zero Style opens a library");
     }
 
-    /// R30 gates (b) and (c): 「Use look library」 was a switch that shipped ON
-    /// over a retrieval that could not run.
-    ///
-    /// The look library is reached ONLY through the SigLIP 2 query vector
-    /// (`pipeline.rs` builds it as `req.style > 0.0 && req.embed.on()`, and
-    /// `StyleIndex::retrieve_looks_with_terms` returns an EMPTY list when
-    /// neither query vector exists), while `use_looks` defaults to true and
-    /// `style_embed` to false. So a fresh install carried a ticked switch that
-    /// read nothing, and the only disclosure was the rationale's
-    /// `looks_unreachable` note — after an analysis had already been billed.
-    ///
-    /// MUTATION THIS KILLS: drop `retrievable` from the switch's enablement,
-    /// delete the warn label, or leave the label up once the embedding is on.
+    /// A built library whose search switch is off would be read by nothing,
+    /// so the panel says so before an analysis is paid for — and the warning
+    /// does not outlive its cause.
     #[test]
-    fn the_look_library_switch_is_dead_and_says_so_while_siglip_is_off() {
-        use autoshade::style::{StyleIndexInfo, StyleIndexState};
-        let built = |looks| {
-            Some(StyleIndexInfo {
-                path: "C:/store/style-index.json".into(),
-                state: StyleIndexState::Built {
-                    total: 40,
-                    version: 6,
-                    source_dir: Some("D:/photos/edited".into()),
-                    scenes: Vec::new(),
-                    with_embedding: 40,
-                    looks,
-                    looks_dir: Some("D:/photos/finished".into()),
-                    age: Some(std::time::Duration::from_secs(3600)),
-                },
-            })
-        };
-        // The DEFAULTS are the trap, and that is the premise this rests on.
-        assert!(AutoShadeApp::default().use_looks, "premise: the look library ships ON");
-        assert!(!AutoShadeApp::default().style_embed, "…over an embedding that ships OFF");
-
-        // ── looks exist, SigLIP off: inert, and it says why on the panel.
-        let mut app = AutoShadeApp { style_info: built(94), ..Default::default() };
+    fn a_built_library_that_is_not_searched_says_so() {
+        let built = Some(autoshade::library::Summary::Built {
+            photos: 40,
+            phrased: 0,
+            dir: "D:/photos/finished".into(),
+            age: None,
+        });
+        let warn = "built, but not searched";
+        let mut app = AutoShadeApp { style_info: built.clone(), style_embed: false, ..Default::default() };
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
-        assert!(
-            seen.iter().any(|t| t == "Use look library"),
-            "premise: the switch is on screen at all: {seen:?}"
-        );
-        assert_eq!(
-            app.looks_switch_enabled,
-            Some(false),
-            "a library that cannot be retrieved must not offer a live switch"
-        );
-        assert!(
-            seen.iter().any(|t| t.contains("ticked, but unreachable")),
-            "the default trap must be visible BEFORE an analysis is paid for: {seen:?}"
-        );
-
-        // ── SigLIP on: retrievable, so the switch is live and the flag is gone.
+        assert!(seen.iter().any(|t| t.contains(warn)), "{seen:?}");
         app.style_embed = true;
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
-        assert_eq!(
-            app.looks_switch_enabled,
-            Some(true),
-            "with the embedding on, the switch is usable"
-        );
-        assert!(
-            !seen.iter().any(|t| t.contains("ticked, but unreachable")),
-            "and the warning must not outlive its cause: {seen:?}"
-        );
-
-        // ── no finished photos: still inert, but for the OTHER half — and an
-        // UNTICKED switch is not a trap, so no warning either.
-        let mut app = AutoShadeApp {
-            style_info: built(0),
-            use_looks: false,
-            style_embed: true,
-            ..Default::default()
-        };
+        assert!(!seen.iter().any(|t| t.contains(warn)), "{seen:?}");
+        let mut app = AutoShadeApp { style_info: Some(autoshade::library::Summary::Absent), ..Default::default() };
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
-        assert_eq!(
-            app.looks_switch_enabled,
-            Some(false),
-            "no finished photos means nothing to use"
-        );
-        assert!(
-            !seen.iter().any(|t| t.contains("ticked, but unreachable")),
-            "an unticked switch is not the default trap: {seen:?}"
-        );
+        assert!(!seen.iter().any(|t| t.contains(warn)), "nothing built, nothing to warn about: {seen:?}");
     }
 
     /// R23-6 B (user decision 2026-08-17 ⑤): the reverse-fit target used to
@@ -449,43 +260,6 @@
         assert!(app.fit_deep && app.fit_ai_judge);
     }
 
-    /// The sidecar folder (`style-index --xmp-dir`'s GUI half) is remembered
-    /// BESIDE the library folder it qualifies, and defaults to "beside each
-    /// RAW" in both places.
-    ///
-    /// MUTATION: drop `style_xmp_dir` from either `Prefs` or the save/restore
-    /// pair and this fails — a remembered library folder with a forgotten
-    /// sidecar folder rebuilds to an EMPTY index on the next launch, which is
-    /// the one failure mode this control exists to remove.
-    #[test]
-    fn the_sidecar_folder_is_persisted_beside_the_library_folder() {
-        assert_eq!(
-            AutoShadeApp::default().style_xmp_dir,
-            None,
-            "the default is the beside-the-RAW convention every build has used"
-        );
-        assert_eq!(
-            Prefs::default().style_xmp_dir,
-            None,
-            "and a prefs file written before this key existed decodes to the same answer"
-        );
-        let prefs = Prefs {
-            style_src_dir: Some(std::path::PathBuf::from("D:/library")),
-            style_xmp_dir: Some(std::path::PathBuf::from("D:/sidecars")),
-            ..Prefs::default()
-        };
-        let json = serde_json::to_string(&prefs).expect("prefs serialize");
-        let decoded: Prefs = serde_json::from_str(&json).expect("prefs deserialize");
-        assert_eq!(decoded.style_xmp_dir, prefs.style_xmp_dir);
-        assert_eq!(decoded.style_src_dir, prefs.style_src_dir);
-        // An older file that predates the key still loads, and answers None.
-        let older = json.replace(r#""style_xmp_dir":"D:/sidecars","#, "");
-        assert!(!older.contains("style_xmp_dir"), "the key really was removed: {older}");
-        let decoded: Prefs = serde_json::from_str(&older).expect("an older prefs file loads");
-        assert_eq!(decoded.style_xmp_dir, None);
-        assert_eq!(decoded.style_src_dir, prefs.style_src_dir, "and loses nothing else");
-    }
-
     /// R23-2: the reference-PHOTO switch is off by default in BOTH defaults
     /// (the app's and the prefs'), so neither a fresh install nor an upgraded
     /// prefs file silently starts putting a second image on every paid call.
@@ -511,27 +285,22 @@
             strength: autoshade::recipe::GradeStrength::new(app.grade_strength),
             think: app.deep_think,
             adherence: autoshade::recipe::DirectionAdherence::default(),
-            use_looks: true,
-            embed: autoshade::style::EmbeddingSwitch::resolve(None, app.style_embed),
-            weights: autoshade::style::RetrievalWeights::from_env(),
+            embed: autoshade::library::EmbeddingSwitch::resolve(None, app.style_embed),
         };
         assert!(req.send_reference_image);
         assert!(
             !autoshade::pipeline::GradeRequest::with_style(0.65).send_reference_image,
-            "every non-GUI surface stays on the text reference"
+            "every non-GUI surface sends the references as words only"
         );
     }
 
-    /// W2-2: the panel's 「style embedding」 checkbox reaches the DEVELOP, not
-    /// only the index build.
+    /// W2-2: the panel's 「search the library」 checkbox reaches the DEVELOP.
     ///
     /// `produce_recipe` used to resolve the switch itself, with the preference
-    /// hard-coded to `false` (`style::embedding_effective(false)`), so the
-    /// checkbox governed `Build style library` and nothing else: from the
-    /// desktop app the look library and every embedding term were dead unless
-    /// the user happened to set AUTOSHADE_STYLE_EMBED in their environment. The
-    /// switch is now a value on the request, read on the UI thread with the
-    /// rest of it.
+    /// hard-coded to `false`, so from the desktop app the search was dead
+    /// unless the user happened to set AUTOSHADE_STYLE_EMBED in their
+    /// environment. The switch is now a value on the request, read on the UI
+    /// thread with the rest of it.
     ///
     /// MUTATION: build the request with `EmbeddingSwitch::OFF`, or make
     /// `produce_recipe` resolve the switch again instead of reading
@@ -548,11 +317,7 @@
             strength: autoshade::recipe::GradeStrength::new(app.grade_strength),
             think: app.deep_think,
             adherence: autoshade::recipe::DirectionAdherence::default(),
-            use_looks: app.use_looks,
-            embed: autoshade::style::EmbeddingSwitch::resolve_with(
-                None, app.style_embed, |_| None,
-            ),
-            weights: autoshade::style::RetrievalWeights::SHIPPED,
+            embed: autoshade::library::EmbeddingSwitch::resolve_with(None, app.style_embed, |_| None),
         };
         assert!(request_from(&on).embed.on(), "the checkbox must reach the develop's request");
         assert!(!request_from(&off).embed.on(), "…and un-checking it must too");
@@ -571,13 +336,11 @@
             1,
             "exactly one read of the request's switch"
         );
-        // The two GUI workers build their switch from the SAME preference, so
-        // an index built with it and a develop querying it cannot disagree.
         let actions = include_str!("../actions.rs");
         assert_eq!(
             actions.matches("EmbeddingSwitch::resolve(None, self.style_embed)").count(),
-            3,
-            "the RAW build, the look build and the develop request all read the preference"
+            1,
+            "the develop request reads the preference"
         );
     }
 
@@ -696,9 +459,7 @@
             strength: autoshade::recipe::GradeStrength::new(app.grade_strength),
             think: app.deep_think,
             adherence: autoshade::recipe::DirectionAdherence::default(),
-            use_looks: true,
-            embed: autoshade::style::EmbeddingSwitch::resolve(None, app.style_embed),
-            weights: autoshade::style::RetrievalWeights::from_env(),
+            embed: autoshade::library::EmbeddingSwitch::resolve(None, app.style_embed),
         };
         assert!(req.think, "the checkbox must reach the worker's request");
         assert!(
@@ -708,141 +469,63 @@
     }
 
     /// R23-2: the build landing — typed outcome in, sentence + state out
-    /// (L12#4). A minutes-long build must re-arm its button in every arm, and
-    /// only the SAVED arm may remember the folder or refresh the status.
+    /// (L12#4). A minutes-long build must re-arm its button in both arms, and
+    /// only the SAVED arm may remember the folder, turn the search on or
+    /// refresh the status.
     #[test]
-    fn a_style_library_build_lands_as_a_typed_outcome_in_every_arm() {
+    fn a_library_build_lands_as_a_typed_outcome_in_every_arm() {
         let ctx = egui::Context::default();
-        let dir = std::path::PathBuf::from("D:/photos/edited");
+        let dir = std::path::PathBuf::from("D:/photos/finished");
+        let stage = autoshade::library::BuildStage::Images;
 
-        // Saved: success toast, folder remembered (so a rebuild starts there),
-        // and a fresh status read armed — the panel must not keep the OLD
-        // counts.
+        // Saved: success toast, folder remembered, search switched on, and a
+        // fresh status read armed.
         let mut app = AutoShadeApp {
             style_build_inflight: true,
-            style_build_progress: Some((autoshade::style::BuildStage::Frames, 7, 9)),
+            style_build_progress: Some((stage, 7, 9)),
             ..Default::default()
         };
+        assert!(!app.style_embed, "premise: the search ships off");
         app.tx
-            .send(Msg::StyleBuilt(Box::new(StyleBuildOutcome::Saved {
-                total: 412,
-                dir: dir.clone(),
-                without_embedding: 0,
-                described: 0,
-            })))
+            .send(Msg::StyleBuilt(Box::new(StyleBuildOutcome::Saved { total: 412, dir: dir.clone(), phrased: 0 })))
             .unwrap();
         app.poll_workers(&ctx);
         assert!(!app.style_build_inflight, "the button re-arms");
         assert_eq!(app.style_build_progress, None, "the counter belongs to ONE build");
-        assert!(app.status.contains("412"), "{}", app.status);
-        assert!(
-            !app.status.contains("without a style embedding"),
-            "a build with nothing to disclose must not grow a clause: {}",
-            app.status
-        );
-        assert_eq!(
-            app.style_src_dir.as_deref(),
-            Some(dir.as_path()),
-            "the folder is remembered"
-        );
-        // The landing ARMS a fresh status read (start_style_info), but that
-        // read runs on a real worker thread and `poll_workers` drains up to 64
-        // messages per call — on a fast scheduler the StyleInfo answer lands
-        // inside this same drain and legitimately clears the flag again (first
-        // observed losing that race on CI ubuntu). The durable claim is "the
-        // build asked for a fresh read": still in flight OR already answered.
-        // A fresh app starts with `style_info = None`, so dropping the
-        // `start_style_info` call from the landing fails both halves.
-        assert!(
-            app.style_info_loading || app.style_info.is_some(),
-            "a build invalidates the cached status"
-        );
+        assert!(app.status.contains("412") && !app.status.contains("look phrases"), "{}", app.status);
+        assert_eq!(app.style_src_dir.as_deref(), Some(dir.as_path()), "the folder is remembered");
+        assert!(app.style_embed, "a built library is a searched library");
+        // The landing ARMS a fresh status read on a real worker thread, which
+        // may already have answered inside this drain: in flight OR answered.
+        assert!(app.style_info_loading || app.style_info.is_some(), "a build invalidates the cached status");
         assert!(app.toasts.iter().any(|t| matches!(t.kind, ToastKind::Success)));
 
-        // R28 Batch-4 4b: a build where the embedding sidecar failed must NOT
-        // land the same sentence as one where it worked. The release GUI is
-        // `windows_subsystem = "windows"` and has no console, so the per-photo
-        // stderr line the CLI shows is invisible there — this toast is the
-        // user's only account of it (adjudication F3).
-        //
-        // MUTATION THIS KILLS: revert `on_style_built` to the single
-        // unconditional sentence, or drop `without_embedding` from the outcome
-        // — the status then reads exactly like the all-embedded case above and
-        // this assertion fails. It is the same status in BOTH languages, so it
-        // is asserted in both.
-        for (lang, needle) in [(Lang::En, "without a style embedding"), (Lang::Zh, "没有嵌入向量")] {
-            let mut app = AutoShadeApp {
-                style_build_inflight: true,
-                lang,
-                ..Default::default()
-            };
+        // The phrase coverage is told when there is some, in both languages.
+        for (lang, needle) in [(Lang::En, "with look phrases"), (Lang::Zh, "外观短语")] {
+            let mut app = AutoShadeApp { style_build_inflight: true, lang, ..Default::default() };
             app.tx
-                .send(Msg::StyleBuilt(Box::new(StyleBuildOutcome::Saved {
-                    total: 412,
-                    dir: dir.clone(),
-                    without_embedding: 400,
-                    described: 0,
-                })))
+                .send(Msg::StyleBuilt(Box::new(StyleBuildOutcome::Saved { total: 412, dir: dir.clone(), phrased: 400 })))
                 .unwrap();
             app.poll_workers(&ctx);
-            assert!(
-                app.status.contains("400") && app.status.contains(needle),
-                "a degraded build must say how many photos lost their vector ({lang:?}): {}",
-                app.status
-            );
-            // …and it is still a SUCCESS: the index published, the folder is
-            // remembered, the panel re-reads. A degradation is not a failure.
-            assert!(app.toasts.iter().any(|t| matches!(t.kind, ToastKind::Success)));
-            assert_eq!(app.style_src_dir.as_deref(), Some(dir.as_path()));
+            assert!(app.status.contains("400") && app.status.contains(needle), "{lang:?}: {}", app.status);
         }
 
-        // Nothing indexed: the SHARED refusal wording (the CLI and the web say
-        // the same), an ERROR toast, and NOTHING remembered — the folder was
-        // the wrong kind of folder.
+        // Failed: the cause, an error toast, button re-armed, nothing else.
         let mut app = AutoShadeApp { style_build_inflight: true, ..Default::default() };
         app.tx
-            .send(Msg::StyleBuilt(Box::new(StyleBuildOutcome::NothingIndexed {
-                dir: dir.clone(),
-            })))
-            .unwrap();
-        app.poll_workers(&ctx);
-        assert!(!app.style_build_inflight);
-        assert!(
-            app.status.contains("folder you edit in Lightroom")
-                && app.status.contains("left untouched"),
-            "the refusal must say where to point instead, and that the old library \
-             stands: {}",
-            app.status
-        );
-        assert!(app.toasts.iter().any(|t| matches!(t.kind, ToastKind::Error)));
-        assert!(!app.style_info_loading, "a refused build changed nothing to re-read");
-
-        // Failed: the cause, an error toast, button re-armed.
-        let mut app = AutoShadeApp { style_build_inflight: true, ..Default::default() };
-        app.tx
-            .send(Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed {
-                err: "read the folder: access denied".into(),
-            })))
+            .send(Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed { err: "read the folder: access denied".into() })))
             .unwrap();
         app.poll_workers(&ctx);
         assert!(!app.style_build_inflight);
         assert!(app.status.contains("access denied"), "{}", app.status);
         assert!(app.toasts.iter().any(|t| matches!(t.kind, ToastKind::Error)));
+        assert!(!app.style_embed && app.style_src_dir.is_none() && !app.style_info_loading, "a failed build changes nothing");
 
         // Progress ticks land as counts, not as a worker-built sentence.
         let mut app = AutoShadeApp { style_build_inflight: true, ..Default::default() };
-        app.tx
-            .send(Msg::StyleBuildProgress {
-                stage: autoshade::style::BuildStage::Frames,
-                done: 40,
-                total: 300,
-            })
-            .unwrap();
+        app.tx.send(Msg::StyleBuildProgress { stage, done: 40, total: 300 }).unwrap();
         app.poll_workers(&ctx);
-        assert_eq!(
-            app.style_build_progress,
-            Some((autoshade::style::BuildStage::Frames, 40, 300))
-        );
+        assert_eq!(app.style_build_progress, Some((stage, 40, 300)));
         assert!(app.status.contains("40") && app.status.contains("300"), "{}", app.status);
     }
 

@@ -90,37 +90,26 @@ pub(crate) struct AutoShadeApp {
     /// grade. Persisted, OFF by default — it downloads 4.3 GB once and makes
     /// every build slower, which is not a cost an upgrade may take unasked.
     pub(crate) style_describe: bool,
-    /// The folder the style library was last built FROM — prefilled into the
-    /// picker so a rebuild does not mean finding it again. Persisted.
+    /// The folder the reference library was last built FROM — prefilled into
+    /// the picker so a rebuild does not mean finding it again. Persisted.
     pub(crate) style_src_dir: Option<PathBuf>,
-    /// Where that library's `.xmp` sidecars live when they are NOT beside the
-    /// RAWs — the GUI half of `style-index --xmp-dir`. `None` is the
-    /// beside-the-RAW convention every build before this one used, and stays
-    /// the default. Persisted beside the folder it qualifies, because the two
-    /// are one answer to "which library": a remembered source folder with a
-    /// forgotten sidecar folder would rebuild to an EMPTY index on the next
-    /// launch.
-    pub(crate) style_xmp_dir: Option<PathBuf>,
-    pub(crate) looks_src_dir: Option<PathBuf>,
-    pub(crate) use_looks: bool,
     pub(crate) direction_adherence: f32,
-    /// The style library's status as last READ (`autoshade::style::index_info`),
-    /// cached: this is a disk read of a file that can reach 32 MB, so it must
-    /// never happen per frame. `None` = not read yet.
-    pub(crate) style_info: Option<autoshade::style::StyleIndexInfo>,
+    /// The reference library's status as last READ (`library::summary`),
+    /// cached: it parses a file that can reach tens of MB, so it must never
+    /// happen per frame. `None` = not read yet.
+    pub(crate) style_info: Option<autoshade::library::Summary>,
     /// A status read is on a worker thread (keeps the first draw off the disk).
     pub(crate) style_info_loading: bool,
     /// A library BUILD is running. Its own flag, never the global `busy`:
-    /// building decodes every RAW in a folder and takes minutes, and freezing
+    /// building measures every photo in a folder and takes minutes, and freezing
     /// the whole app for that would be worse than the missing entry point this
     /// closes. Only the build button gates on it.
     pub(crate) style_build_inflight: bool,
     /// The running build's `(stage, completed, total)` — typed facts, worded
-    /// at draw time (L12#4). The STAGE joined the pair in S2, when the build
-    /// became four phases over the whole library and only the first of them
-    /// can report per record: a bare pair would have swept 0..N three times
-    /// with nothing to say which sweep the user was looking at.
-    pub(crate) style_build_progress: Option<(autoshade::style::BuildStage, usize, usize)>,
+    /// at draw time (L12#4). The STAGE is named because the build is four
+    /// phases over the whole folder: a bare pair would sweep 0..N more than
+    /// once with nothing to say which sweep the user was looking at.
+    pub(crate) style_build_progress: Option<(autoshade::library::BuildStage, usize, usize)>,
     pub(crate) hsl_tab: usize, // Color Mixer property tab: 0=Hue 1=Saturation 2=Luminance
     pub(crate) grade_region: usize,
     pub(crate) guidance: String, // free-text direction for the AI ("warmer, moodier")
@@ -462,11 +451,8 @@ pub(crate) struct AutoShadeApp {
     /// analysis are drawn disabled — and nothing but this can tell a rebuilt
     /// `add_enabled_ui(self.style_strength > 0.0, …)` from a comment about one.
     ///
-    /// ONE Option for a gate applied at THREE sites (the reference-photo
-    /// switch, the retrieval engine, 「Use look library」): the sites fold into
-    /// it with OR, so it answers "was ANY read-side control live this frame?"
-    /// — the question the Style-0 claim actually turns on, and one that a
-    /// wrapper dropped at any single site flips on its own.
+    /// ONE Option for the one wrapper around the read side (the search switch
+    /// and the reference-photo switch).
     #[cfg(test)]
     pub(crate) ai_library_read_enabled: Option<bool>,
     /// Test seam (R30, user ruling): …and was the BUILD side still live?
@@ -476,24 +462,6 @@ pub(crate) struct AutoShadeApp {
     /// `style_build_inflight` may grey that row.
     #[cfg(test)]
     pub(crate) ai_library_build_enabled: Option<bool>,
-    /// Test seam (R30, user ruling): was the SigLIP 2 switch — the head of the
-    /// retrieval-engine rung — usable this frame? That rung is BUILD-side too:
-    /// `actions.rs` resolves both of its switches when it starts an index
-    /// build, so they decide what a build COMPUTES and not only what a query
-    /// matches on. Gate (a) must therefore not reach it, and this is read off
-    /// the checkbox's own `Response` rather than the surrounding `Ui`, so a
-    /// read gate wrapped back around the rung turns it false wherever the
-    /// wrapper is put.
-    #[cfg(test)]
-    pub(crate) retrieval_engine_enabled: Option<bool>,
-    /// Test seam (R30): was 「Use look library」 usable this frame? The look
-    /// library is retrieved ONLY through the SigLIP 2 query vector, so the
-    /// switch is live only when there are finished photos AND an embedding to
-    /// find them with — two halves, and a rendered tick says nothing about
-    /// either. Its warn label is readable from the drawn text; its
-    /// ENABLEMENT is not.
-    #[cfg(test)]
-    pub(crate) looks_switch_enabled: Option<bool>,
     // --- batch recipe copy / paste ---
     pub(crate) multi_sel: HashSet<usize>,             // Ctrl+click gallery multi-selection
     pub(crate) copied: Option<EditRecipe>,            // the recipe "clipboard" (in-app only)
@@ -1713,9 +1681,6 @@ impl Default for AutoShadeApp {
             style_embed: false,
             style_describe: false,
             style_src_dir: None,
-            style_xmp_dir: None,
-            looks_src_dir: None,
-            use_looks: true,
             direction_adherence: autoshade::recipe::DirectionAdherence::DEFAULT,
             style_info: None,
             style_info_loading: false,
@@ -1880,10 +1845,6 @@ impl Default for AutoShadeApp {
             ai_library_read_enabled: None,
             #[cfg(test)]
             ai_library_build_enabled: None,
-            #[cfg(test)]
-            retrieval_engine_enabled: None,
-            #[cfg(test)]
-            looks_switch_enabled: None,
             multi_sel: HashSet::new(),
             copied: None,
             copied_from: None,
@@ -2193,9 +2154,6 @@ impl eframe::App for AutoShadeApp {
                 style_embed: self.style_embed,
                 style_describe: self.style_describe,
                 style_src_dir: self.style_src_dir.clone(),
-                style_xmp_dir: self.style_xmp_dir.clone(),
-                looks_src_dir: self.looks_src_dir.clone(),
-                use_looks: self.use_looks,
                 direction_adherence: self.direction_adherence,
                 // Both written: exp_format is the truth, save_jpeg keeps a
                 // pre-阶段4 build reading this prefs file sane.

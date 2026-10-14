@@ -417,8 +417,8 @@ fn handle(mut request: Request, state: &AppState, image_token: &str) -> Result<(
         (false, "/api/preview") => api_image(&request, state, PREVIEW_EDGE),
         (false, "/api/recipe") => api_recipe(&request, state),
         (false, "/api/fresh-base") => api_fresh_base(&request, state),
-        (false, "/api/style-info") => api_style_info(state),
-        (true, "/api/style-build") => api_style_build(&mut request),
+        (false, "/api/library-info") => api_library_info(state),
+        (true, "/api/library-build") => api_library_build(&mut request),
         (false, "/api/settings") => api_settings_get(state),
         (true, "/api/settings") => api_settings_post(&mut request, state),
         (true, "/api/setdir") => api_setdir(&mut request, state),
@@ -1335,102 +1335,65 @@ fn fresh_base_payload(raw: &Path) -> String {
     .to_string()
 }
 
-/// Style-library info for the UI's info box: is an index built, how many of the
-/// user's edits it holds, and the scene "tags" it covers. Instant (just reads the
-/// JSON; no per-photo decode).
-fn api_style_info(state: &AppState) -> Result<ResponseBox> {
+/// Library info for the UI's info box: where things live, and whether a
+/// reference library is built, from which folder, with how many photos.
+/// Instant (reads the library file; no decode).
+fn api_library_info(state: &AppState) -> Result<ResponseBox> {
     let abs = |p: &str| {
         std::path::absolute(p).map(|x| x.display().to_string()).unwrap_or_else(|_| p.to_string())
     };
-    // Style reference library status — read through the SHARED reader
-    // (`style::index_info`), which owns the central-then-legacy walk and the
-    // scene histogram for every surface. This handler used to be the only
-    // place that logic existed, which is why the GUI shipped without it
-    // (R23-2).
-    let info = crate::style::index_info();
-    let index_file = info.path.display().to_string();
-    let style = match info.state {
-        crate::style::StyleIndexState::Built { total, source_dir, scenes, .. } => {
-            let scenes: Vec<_> =
-                scenes.into_iter().map(|(t, n)| json!({ "tag": t, "n": n })).collect();
-            json!({ "built": true, "total": total, "scenes": scenes,
-                    "index_file": index_file, "source_dir": source_dir })
-        }
-        // Same two-key answer the web page has always parsed: `built:false`
-        // (the reason is the GUI's status line, which has room for it).
-        _ => json!({ "built": false }),
+    let library = match crate::library::summary() {
+        crate::library::Summary::Built { photos, dir, .. } => json!({
+            "built": true,
+            "total": photos,
+            "file": crate::library::path().display().to_string(),
+            "source_dir": dir,
+        }),
+        crate::library::Summary::Unusable(why) => json!({ "built": false, "error": why }),
+        crate::library::Summary::Absent => json!({ "built": false }),
     };
     Ok(json_response(&json!({
-        // Where the photos being browsed live (the "原图库"), where RENDERED
-        // outputs land (the "成片库" = the delivery root, `./out` unless the
-        // user moved it), where the develop store keeps recipes / XMP /
-        // versions, and the style-library status. out_dir and store_dir are
-        // DIFFERENT places — the XMP has lived in the store since the sidecars
-        // moved out of ./out. Reported through `config::delivery_root` (M8)
-        // rather than a second literal, so this page cannot name a folder the
-        // renderer no longer writes to.
+        // Where the photos being browsed live, where RENDERED outputs land
+        // (the delivery root, `./out` unless the user moved it), and where the
+        // develop store keeps recipes / XMP / versions. Reported through
+        // `config::delivery_root` (M8) rather than a second literal, so this
+        // page cannot name a folder the renderer no longer writes to.
         "working_dir": state.dir_display(),
         "working_count": state.count(),
         "out_dir": abs(&crate::config::delivery_root().display().to_string()),
         "store_dir": crate::store::store_root().display().to_string(),
-        "style": style,
+        "library": library,
     })))
 }
 
 #[derive(Deserialize)]
-struct StyleBuildReq {
-    /// Folder of the user's edited RAWs (each RAW with its Lightroom .xmp beside it).
+struct LibraryBuildReq {
+    /// Folder of the photographer's finished photos.
     dir: String,
 }
 
-/// Build the style reference index from a folder of the user's RAW+.xmp pairs, so
-/// non-CLI users can point the app at THEIR OWN library from the info panel. Writes
-/// the central store's style-index.json (same as `autoshade style-index <dir>`).
-/// Decodes every RAW, so it can take minutes on a large library.
-fn api_style_build(request: &mut Request) -> Result<ResponseBox> {
-    let req: StyleBuildReq = read_json(request)?;
+/// Build the reference library from a folder of finished photos, so the
+/// browser can point the app at the photographer's own looks. Same file and
+/// same call as `autoshade library-build <dir>`; a rebuild measures only new
+/// or changed photos.
+fn api_library_build(request: &mut Request) -> Result<ResponseBox> {
+    let req: LibraryBuildReq = read_json(request)?;
     let cleaned = req.dir.trim().trim_matches('"').trim();
     let p = PathBuf::from(cleaned);
     if !p.is_dir() {
         return Ok(status_response(400, &format!("not a folder: {cleaned}")));
     }
-    // The web surface has no `--embed` / `--describe` flag, so both switches
-    // are what the environment says with the preference off — exactly what
-    // `build` used to read for itself before they became values.
-    let embed = crate::style::EmbeddingSwitch::resolve(None, false);
-    let describe = crate::style::DescribeSwitch::resolve(None, false);
-    // `None`: the web panel takes a library folder and nothing else, so the
-    // sidecars are the beside-the-RAW ones. `--xmp-dir` is a CLI/GUI control.
-    let index = match crate::style::StyleIndex::build(&p, None, embed, describe) {
-        Ok(ix) => ix,
-        Err(e) => return Ok(status_response(500, &format!("build failed: {e}"))),
-    };
-    let total = index.exemplars.len();
-    // An empty build is a FAILURE, not a success: `save` truncates the file in
-    // place, so writing it would silently replace a good index (and every
-    // surface's Style slider goes inert with nothing to say why). A folder
-    // yields 0 whenever no RAW has its Lightroom .xmp SITTING BESIDE IT — and
-    // AutoShade never puts one there: its own XMP projection lives in the
-    // per-user develop store. Point this at the folder you edit in LIGHTROOM.
-    // Refuse, and leave the previous index alone.
-    if total == 0 {
-        return Ok(status_response(
-            400,
-            &format!(
-                "nothing indexed in {} — found no RAW with its .xmp sidecar beside it \
-                 (AutoShade keeps its own .xmp in the develop store, never beside the \
-                 RAW, so point this at the folder you edit in Lightroom). The existing \
-                 style index was left untouched.",
-                p.display()
-            ),
-        ));
+    // The web surface has no `--describe` flag: the environment decides, with
+    // the preference off.
+    let describe = crate::library::DescribeSwitch::resolve(None, false);
+    let sidecars = crate::library::Sidecars::from_config(&Config::load());
+    match crate::library::rebuild(&p, &sidecars, describe, &|_| {}) {
+        Ok(lib) => Ok(json_response(
+            &json!({ "ok": true, "total": lib.entries.len(), "source_dir": lib.dir }),
+        )),
+        // A failed build leaves the previous library alone (nothing is saved).
+        Err(e) => Ok(status_response(400, &format!("{e:#}"))),
     }
-    if let Err(e) = index.save(&crate::store::style_index_path()) {
-        return Ok(status_response(500, &format!("save index: {e}")));
-    }
-    Ok(json_response(
-        &json!({ "ok": true, "total": total, "source_dir": p.display().to_string() }),
-    ))
 }
 
 #[derive(Deserialize)]
@@ -1446,7 +1409,7 @@ struct AnalyzeReq {
     /// read as a v0.30 file.
     #[serde(default, deserialize_with = "refine_base")]
     base: Option<EditRecipe>,
-    /// 0..1 — how strongly to follow the user's historical style (the Style
+    /// 0..1 — how strongly to follow the reference library (the Style
     /// slider). `None` falls back to the configured default.
     #[serde(default)]
     style_strength: Option<f32>,
@@ -1464,9 +1427,8 @@ struct AnalyzeReq {
     /// It exists as a request field since v1.2.3. Before that this dial was
     /// PROMPT INTENT ONLY, so pinning it to the default here cost the browser
     /// nothing but a tier word in the verifier's prompt. It now also decides
-    /// WHO LEADS (`style::StyleVoice::choose`): at `Direct`/`Brief` a develop
-    /// carrying a direction sends the style library as background and skips
-    /// the distillation pull entirely. Without this field every web develop
+    /// WHO LEADS (`library::StyleVoice::choose`): at `Direct`/`Brief` a develop
+    /// carrying a direction sends the reference looks as background. Without this field every web develop
     /// with a direction was forced into that voice with no way back, while the
     /// CLI (`--adherence`) and the desktop app (the Adherence slider) could
     /// both choose `Hint`.
@@ -1921,8 +1883,7 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             strength: grade,
             think: req.deep.unwrap_or(false),
             adherence: crate::recipe::DirectionAdherence::from_optional(req.adherence),
-            use_looks: true,
-            // `..default()` for the two resolved-once fields: the browser has
+            // `..default()` for the resolved-once fields: the browser has
             // no way to set them, and spelling them out here would be a second
             // place that has to agree with `GradeRequest::default`.
             ..Default::default()
@@ -3758,7 +3719,7 @@ mod tests {
     #[test]
     fn an_analyze_body_can_choose_who_leads_and_omitting_it_keeps_the_default() {
         use crate::recipe::{AdherenceTier, DirectionAdherence};
-        use crate::style::StyleVoice;
+        use crate::library::StyleVoice;
         let parse = |body: &str| serde_json::from_str::<AnalyzeReq>(body).expect("body parses");
         // The PRODUCTION resolver and the PRODUCTION derivation, not
         // re-implementations of either.

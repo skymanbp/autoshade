@@ -742,9 +742,8 @@ autoshade auto <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strengt
 autoshade denoise <src> [-o|--out FILE] [--strength 0..1] [--model NAME]
 autoshade batch <dir> [--render] [--limit N] [--include-baked] [--jobs N] [--long-edge N]
 autoshade eval <dir> [--xmp-dir DIR] [--limit N] [--jobs N] [--fresh] [--state FILE]
-autoshade style-index <dir> [--xmp-dir DIR] [--embed|--no-embed] [--describe]
-autoshade style-index --looks <dir> [--embed|--no-embed] [--describe]
-autoshade style-query <photo> [--direction TEXT] [--style 0..1] [--adherence 0..1] [--embed] [--distil]
+autoshade library-build <dir> [--describe]
+autoshade library-search <photo> [--direction TEXT] [--style 0..1] [--adherence 0..1]
 autoshade reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [--fidelity-retry] [-o|--out FILE]
 autoshade match <src> <target> [--render] [--zoned] [--regions 2..4] [--strength 0..1] [--style-prompt] [--ai-judge] [--deep] [--negative RAW] [-o|--out FILE]
 autoshade correspond <source> <target> [-o|--out FILE]
@@ -1041,48 +1040,31 @@ settings file can supply them.
   checks the proposal, and normal visual review may attempt one revision;
   `--deep` permits additional bounded rounds. Accepted output remains a normal
   recipe and XMP.
-- **Style match/read:** build the RAW+XMP style reference library with the GUI
-  (**AI › Reference libraries › My Lightroom edits library**) or `style-index`,
-  and optionally build a separate finished-photo look library with
-  `style-index --looks` (**AI › Reference libraries › Finished-photo look
-  library**). Both libraries are read only while the Style control is above 0,
-  so at Style 0 the two switches that only feed an analysis — the reference
-  photo and **Use look library** — are disabled. Nothing else is: the folder
-  pickers, both Build buttons and the two retrieval-engine switches stay usable
-  at any Style value, because they decide what a *build* computes as well as
-  what a query is matched on, and you build a library before raising Style onto
-  it. The look library is retrieved through the SigLIP 2 embedding alone, so
-  its **Use look library** switch stays disabled until **Use SigLIP 2 look
-  embedding**, one rung above it, is on. The Style control retrieves similar prior edits
-  and pulls the proposal toward them with `style_pull` (0.18 at the shipped
-  Style 0.3, full at Style 1.0 — at 1.0 a control that has a target ends ON it).
-  It pulls the twelve global sliders, the 8-band mixer's saturation and
-  luminance, the colour-grade wheels, the master tone curve's shape and each
-  mask's slider amounts — never a mask's position or size. A control is pulled
-  only where your past edits AGREE on a direction; where they cancel out, or
-  where you never touched that control, the AI's own choice for this photograph
-  is kept. The rationale names every field that moved. Look records guide the
-  proposer only. The embedding switch
-  is opt-in and reports how many indexed records carry vectors. Strength
+- **Reference library:** pick a folder of finished photos whose look you like
+  (JPEG, TIFF or PNG exports — yours or anyone's) in **AI › Reference library**
+  or run `autoshade library-build <folder>`. Each photo is measured from its
+  pixels; no `.xmp` is read. Tick **Also write each look as short phrases** (or
+  pass `--describe`) to have a local model write a few phrases per photo about
+  its grade, so a typed Direction can pick the reference whose look it names. A
+  rebuild measures only new or changed photos. Each analysis then searches the
+  library and gives the model the 3 closest references as words, and — with
+  **Also show the model the reference photos** — as pictures, one extra image
+  each on every call. The **Style** control sets how closely they are followed:
+  below 85 % they are a ceiling, at 85 % or above a target, and at 0 the library
+  is not read (only the two switches that feed an analysis go grey; building
+  stays available). `autoshade library-search <photo> [--direction TEXT]` shows
+  which references a develop would get, with no paid call. Strength
   independently controls the fit budget and confidence cap; Direction adherence
   chooses Hint, Direct, or Brief wording when a Direction is present.
 - **Who leads, Direction or your library (v1.2.3):** write a **Direction** and
   leave **Adherence** at its default 65 % (or higher) and the direction leads.
-  Your library is still retrieved, still ranked by that direction, still shown to
-  the model and still named in the rationale — but it arrives as BACKGROUND for
-  continuity ("where these habits and the direction conflict, follow the
-  direction"), and the `style_pull` above is **not applied at all**, whatever the
-  Style slider says. That is the whole point: measured on one frame at Style 100 %
-  and Strength 90 %, three directions as far apart as *dark moody low-key,
-  teal-and-orange*, *warm golden tones with lifted matte shadows* and *vivid
-  saturated colours, punchy high contrast* all came back inside the library's own
-  cool hazy register. Drop Adherence to 40 % or below (tier **Hint**) and the
-  library leads again, exactly as it did in v1.2.2 — with no Direction at all, or
-  a blank one, nothing about the Style control changes. A develop that skipped the
-  pull says so in its rationale and names the tier that decided it. The judge that
-  reviews the finished frame is briefed the same way: with the direction leading it
-  is told your past-edit look is CONTINUITY, not the brief, so a revision it buys
-  cannot be spent walking the direction back toward your library.
+  Your references are still searched, still shown to the model and still named
+  in the rationale — but as BACKGROUND for continuity ("where these looks and
+  the direction disagree, follow the direction"). Drop Adherence to 40 % or below
+  (tier **Hint**) and the library leads again; with no Direction, or a blank one,
+  nothing about the Style control changes. The judge that reviews the finished
+  frame is briefed the same way, so a revision it buys cannot be spent walking
+  the direction back toward your references.
 
   All three surfaces can choose. CLI: `--adherence` on `analyze` and `auto`.
   Desktop: the **Adherence** slider, active once Direction has text. Browser

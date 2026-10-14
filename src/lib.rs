@@ -11,7 +11,6 @@
 pub mod adobe;
 pub mod advisor;
 pub mod config;
-pub mod content_cache;
 pub mod correspond;
 pub mod dcp;
 pub mod decode;
@@ -29,7 +28,7 @@ pub mod generative;
 pub mod jobs;
 pub mod lcp;
 pub mod lensmeta;
-pub mod mask_habit;
+pub mod library;
 pub(crate) mod mask_refine;
 pub mod openai_models;
 pub mod panic_guard;
@@ -43,8 +42,6 @@ pub mod sha256;
 pub mod serve;
 pub mod stack;
 pub mod store;
-pub mod style;
-pub mod style_cache;
 pub mod xmp;
 pub mod xmp_pair;
 

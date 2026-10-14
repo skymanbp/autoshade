@@ -1455,13 +1455,19 @@ the structured proposal, not photo pixels—and all Responses requests set
 `store:false`; a visual judge may buy one guided revision, but the replacement
 is adopted only when its rescore is at least the original score.
 
-Style retrieval indexes RAW+XMP exemplars, extracts normalized photographic
-features, z-scores the varying dimensions, and optionally adds SigLIP 2 image,
-Direction-text, and description-text cosine blocks. The distance is
-`d14 + W_EMB(1−cos(q_img,e_img)) + W_TXT(1−cos(q_txt,e_img)) + W_DESC(1−cos(q_txt,e_desc))`;
-missing or width-mismatched vectors contribute zero and zero weights reproduce
-the feature-only ranking exactly. A separate look-library block uses the image,
-text, and description terms with `W_LOOK=1.0` and never supplies style targets.
+The reference library (`src/library/`, 2026-10-13 redesign) holds finished
+photographs only — JPEG, TIFF or PNG exports whose look the photographer wants
+to follow — and reads no `.xmp`: a finished photo may carry work no sidecar
+records, and a sidecar may be stale or one of several. Each entry is a SigLIP 2
+image vector of the staged 512-px frame, optional look phrases written by
+Qwen3-VL-2B, and the SigLIP text vector of those phrases. A develop searches it
+with two questions: is the entry's scene like this photo (image against image),
+and does its look answer what the photographer typed (direction text against
+phrases). Each similarity is standardised over the candidates and the two are
+summed, the direction term at weight 2; without a direction the scene term ranks
+alone. The three closest go to the proposer as a fenced block of their phrases
+and, when the photographer opts in, as images after the develop target. Nothing
+is blended into the recipe: a finished photo carries no settings to blend.
 
 #### SigLIP 2 text tower and look metadata
 
@@ -1493,10 +1499,11 @@ rather than restated from its metadata. `--self-test` additionally pins the ids
 of five golden strings and runs one real text forward pass. It loads local files
 only and disallows remote code.
 
-Every index records the door as well as the checkpoint —
-`<repo>@<revision> tokenizer=GemmaTokenizer@<revision12> vocab-v<N>` — so two
-incomparable indices cannot look identical, and the loader drops the look block
-(keeping the RAW half) when the stored `vocab-v` disagrees with this build.
+Every library records the door as well as the checkpoint in its model stamp —
+`<repo>@<revision> tokenizer=GemmaTokenizer@<revision12>`, then the describe
+model's repo and revision and its prompt version — so vectors from another model
+are never compared: a rebuild under a different stamp measures every photo
+again.
 
 | Tokenizer file | Bytes | SHA-256 |
 |---|---:|---|
@@ -1505,31 +1512,21 @@ incomparable indices cannot look identical, and the loader drops the look block
 | `tokenizer_config.json` | 47,164 | `14afe629fe4959b9e0d51e1852b8d9f7ad074f90a1a7125a4fcdd17f06e78fc8` |
 | `special_tokens_map.json` | 636 | `baec30ea10906f16adb8c18af7a34023002c1746542612b8b41c9f09e1351351` |
 
-Look tags are the top four zero-shot SigLIP captions after a per-group
-argmax over the versioned 33-phrase vocabulary in `src/style/voice.rs`; changing a
-phrase changes every stored score.
+`phrases_vec` is the SigLIP **text** vector of an entry's look phrases. A build
+computes all of them in **one** sidecar process: the whole build's phrases go
+out as a single `--text-manifest` JSONL and come back in order.
 
-`desc_embed` is the SigLIP **text** vector of the record's description when it
-has one, and of its tag string (`"warm golden tones, deep blacks"`) when it does
-not; a record with neither carries no vector and contributes no description
-term. Since S2 that description can be real prose from `describe.py` rather
-than a re-spelling of the tags, and prose wins whenever both exist — the tag
-string is the fallback, not the preference. Both builders fill it in **one** sidecar process per build: the whole
-build's texts go out as a single `--text-manifest` JSONL and come back in
-record order. The look build used to re-invoke the sidecar — a fresh 1.5 GB
-model load and a second image forward pass — once per photograph, and the RAW
-build did not compute the vector at all, which made `W_DESC` structurally dead
-on every RAW index.
+#### Qwen3-VL-2B look phrases
 
-#### Qwen3-VL-2B look descriptions (S2)
-
-`python/describe.py` is the fifth sidecar and the second model in the style
-path. It writes ONE sentence per photograph about its **grade** — white balance
-lean, tonality, contrast, saturation and colour treatment, finishing, mood —
-and is fenced against naming the subject. The point is coverage the fixed
-vocabulary cannot have: `embed.py --vocab-file` can only score a photograph
-against 33 designed phrases, while a sentence can say something none of them
-spells.
+`python/describe.py` is the fifth sidecar and the second model in the
+reference library. It writes 4 to 8 short comma-separated phrases per photograph
+about its **grade** — white-balance lean, tonality, contrast, saturation and
+colour treatment, finishing, mood — the way a photographer types a look request,
+and is fenced against naming the subject. Phrases rather than a sentence because
+the other side of the comparison is a short typed direction: the previous index
+embedded a 45-word sentence against it, and on that index the term made the
+settings prediction worse while it was the only thing separating opposite
+directions — the pairing, a short text against a paragraph, was the cause.
 
 | Property | Value |
 |---|---|
@@ -1540,7 +1537,7 @@ spells.
 | Download | `4,255,140,312 B` weights + `11,499,994 B` of config/tokenizer = `4.27 GB` |
 | Precision | bfloat16 on CUDA (`--bf16`), fp32 on CPU |
 | Peak VRAM | `4.03 GiB` allocated / `4.07 GiB` reserved, measured on an RTX 4060 Ti 8 GB |
-| Decoding | greedy — `do_sample=False`, `num_beams=1`, `max_new_tokens=80`, seed `0` |
+| Decoding | greedy — `do_sample=False`, `num_beams=1`, `max_new_tokens=60`, seed `0` |
 | Input | the SAME staged 512-px frame the SigLIP image tower reads; RAWs are never decoded twice |
 
 **Why this model.** Licence is a selection criterion here as everywhere else in
@@ -1559,195 +1556,49 @@ Qwen3-VL declares `architectures = ["Qwen3VLForConditionalGeneration"]` with no
 loads through NAMED classes (`Qwen3VLForConditionalGeneration`,
 `Qwen3VLProcessor`) with `local_files_only=True`.
 
-**The prompt is a versioned constant.** One English sentence, 293 characters,
-carried in every record the sidecar emits together with the repo and revision,
-because those four facts are the description cache's key. Editing a character
-without bumping `PROMPT_VERSION` would serve the old prompt's answers for ever;
-a Rust test pins the version and the prompt's three load-bearing clauses
-against the sidecar's own source.
+**The prompt is a versioned constant.** One English instruction, 377
+characters, `PROMPT_VERSION = 2`; the version is part of a library's model stamp,
+so editing the prompt and bumping the version makes the next rebuild describe
+every photo again instead of keeping the old prompt's phrases. A Rust test pins
+the version and the prompt's load-bearing clauses against the sidecar's own
+source. The output is UNTRUSTED text: bounded to one line of at most `200`
+characters at the door, checked again when the library loads, and flattened to
+one line again when it enters the proposer's block.
 
-**Descriptions are cached by CONTENT.** `style-descriptions.json` beside the
-index maps the sha256 of the staged frame's bytes to `{desc, model, revision,
-prompt_version}`, capped at `20,000` entries under a re-derived file bound, so a
-rebuild describes only what changed and a corrupt cache is rebuilt rather than
-trusted. The model's output is UNTRUSTED text: it is bounded to one line of at
-most `512` characters at the door in both languages, invisible format characters
-stripped, and every surface that renders it — the two proposer reference blocks
-and the `style-query` diagnostic — passes it through that same door again.
+**The library file is its own cache.** `reference-library.json` in the per-user
+store keeps, per entry, the file's path, size and modified time and the sha256
+of its staged frame. A rebuild keeps every entry whose file is unchanged (same
+path, size and time — not even decoded) and every entry whose pixels it has
+already measured (same frame digest — a moved or renamed file), so adding a
+photo to the folder measures one photo. A build under a different model stamp
+keeps nothing. The file holds at most `3,000` entries; the loader refuses a
+larger file unread, and checks every vector (width 768, finite, unit length
+within 1e-3) at the door, because one bad vector would turn a search into an
+unspecified ranking.
 
-**…and so is everything else a build measures.** `style-exemplars.json`
-(`src/style_cache.rs`) sits beside it under the same key shape and the same file
-mechanics (`src/content_cache.rs` owns both: the byte cap, the four
-degradations, the `tmp`+`durable_replace` publish, the 64-hex key rule). It maps
-that digest to the 14-dim feature, the SigLIP image vector, the vocabulary
-scores, the description and its text vector, plus a `SourceStamp` (absolute
-path case-folded on Windows, length, mtime, saved quarter-turns) — the stamp is
-what lets an unchanged file skip the DECODE, which the digest alone cannot,
-since the digest is of the frame that decode produces. Entries are gated per
-field by the index feature version, `embed_provenance_string()` and
-`CachedDescription::is_current()`, and admitted only inside the index door's own
-bands, so a bit-rotted vector can never reach a published index. It is capped at
-`5,000` entries (the RAW library's own cap) under a 40 KiB per-entry bound, and
-PRUNED to what the build used rather than topped up — an entry here is ~16 KiB
-of vector text against the description cache's ~200 bytes. The index's
-normalisation is never cached: `compute_norm` is a mean and σ over the whole
-merged exemplar set.
+#### Searching the reference library
 
-The two populations have separate caps because one file holds both: 5,000 RAW
-exemplars and **500 looks**, against a 40 KiB per-record bound and a 228 MiB
-file envelope (5,500 × 40 KiB = 214.84 MiB). A look library is a curated set of
-reference grades, not an archive; both caps are refused at the build door and at
-load, and `capacity_constants_hold_two_vectors_and_the_scores` measures a
-maximal record of each kind against the bound.
+`Library::search` scores every entry except the photo being developed. The
+scene term is the cosine of the query image vector against the entry's image
+vector; the prompt term is the cosine of the direction's text vector against the
+entry's phrase vector. Each term is standardised over the candidates (mean 0,
+standard deviation 1) so two similarities on different spreads add fairly; an
+entry with no phrases sits at the mean of the prompt term — neither helped nor
+hurt. The score is `z(scene) + 2·z(prompt)` with a direction and `z(scene)` without
+one; ties keep library order, so a search is deterministic. The three best
+(`REFERENCE_COUNT`) form the block.
 
-#### Mask habits (S3)
+**Who leads.** `StyleVoice::choose(style, direction, adherence)` is the one
+derivation: a non-blank direction at adherence `Direct` or `Brief` makes the
+references BACKGROUND (the direction overrides them); otherwise Style below
+`0.85` makes them a ceiling ("do not go further than they do") and at or above
+it a target ("reproduce their look"). The same voice briefs the visual judge, so
+a reviewer cannot be told to enforce a look the block has just demoted.
 
-A v5 exemplar may additionally carry a `MaskHabit` (`src/mask_habit.rs`) — what
-the photographer did LOCALLY on that frame, as summary statistics. It is read
-from the same sidecar the settings come from, through the develop chain's own
-path-aware importer (`xmp::xmp_to_recipe_for_photo`), so a mask this engine
-cannot honour is counted the way the develop path would actually see it.
-
-**What it holds.** The number of masks ENABLED with a non-zero amount; how many
-carry a Range Mask refinement; and, per use, a count plus the amount-weighted
-mean of the eleven local sliders in `HABIT_SLIDERS` (`exposure`, `highlights`,
-`shadows`, `whites`, `blacks`, `clarity`, `dehaze`, `saturation`,
-`temperature`, `tint`, `hue`), and `curved` — the share of uses that carry their
-own local point curve (a curve is a point list, not a slider, so it is a fact
-beside the mean rather than a column of it). `hue` joined in G3, APPENDED so no
-existing column moves: it was measured at `0` on all 42 corpus masks, and an
-axis the index never measures can never become a habit the reference block can
-name. A v5 index written from this
-batch on stores the 11-wide mean; an older build refuses it with
-`invalid length 11` and must rebuild, while this build still reads the 8-wide
-S3 and 10-wide B5 shapes (missing columns zero-filled, and a zero-filled column
-prints nothing because it is below the slider floor) so the version gate's
-actionable message stays reachable and no data migration is needed. The refined
-count is taken from the imported recipe AND from the importer's own
-`MaskImportReason::ForeignRangeMask` refusals, because a Range Mask this engine
-cannot honour is dropped on the way in: on the 169-sidecar calibration library
-all `12` non-inverted Range Masks are refused and none is carried, so a count
-read from the recipe alone would report zero refinement for a library that uses
-it fourteen times.
-
-**Which use, from one pure function.** `bucket_of` maps one adjustment to
-`Sky`, `Subject`, `Ground`, `Range` or `Other` in a fixed order. An AI mask
-answers from its own `MaskSubType` (`2` Sky, `1` Subject; `0` is
-*Object OR Background*, which the sidecar does not separate, so it falls
-through to `Other`). A linear gradient is read by which END of the frame it
-covers — `mask_weight` is 0 at `zero` and 1 at `full` and the normalised frame
-is y-DOWN, so a `full` end above its `zero` end is a sky — XORed with
-`MaskInverted`, which reverses the covered end (`8` of the library's `192`
-gradients set it). A radial is a subject when it covers its own ellipse and a
-surround when inverted (`41` of `186`). A Range Mask is considered LAST, and
-that is the one ordering decision worth stating: Lightroom's Range Mask is a
-refinement intersected with a geometry (`LocalAdjustment::range` sits beside
-`mask`, it does not replace it), so ranking it first would move the library's
-most carefully refined corrections out of `sky`/`subject`/`ground` into a
-bucket that says nothing about WHERE they were placed.
-
-**What it never holds: geometry.** A mask's coordinates are a fact about one
-frame, so nothing spatial is averaged across photos. The block carries counts,
-slider means and English — `local_work_note` renders one sentence naming at
-most `HABIT_SLIDERS_SHOWN = 3` sliders per clause, and its worst case is proved
-against `MAX_LOCAL_WORK_CHARS = 768` by construction rather than truncated at
-runtime. Since G3 one of those three slots is RESERVED: whenever any colour axis
-(`saturation`, `temperature`, `tint`, `hue`) clears its floor, at least one of
-the three named is a colour axis. Ranking by magnitude alone is a tonal
-photographer's ranking — a dodge-and-burn library moves exposure and the two
-tone ends by tens and its colour axis by a five — so a colour habit the
-photographer really has never once reached the note. The COUNT is unchanged,
-which is why the character bound does not move.
-
-**It does not rank.** Retrieval does not read the field at all. That is why it
-ships WITHOUT an index-version bump, on `families`' precedent:
-`#[serde(default)]` in both directions, so a pre-S3 index loads with the field
-ABSENT — a different fact from a measured zero — and a pre-S3 build ignores the
-new key. `blend_toward` DOES read it, as one of the five distillation channels
-below, and moves a mask's slider amplitudes only.
-
-#### The Style axis: what distillation pulls
-
-`style_pull(style)` is `0.18` at the shipped Style `0.3` and `1.0` at Style
-`1.0`, and `blend_toward` is a plain `lerp`, so **Style 100 % reaches the
-target**: a channel that has one ends on it. There is no cap, and until this
-batch two doc comments claimed there was.
-
-**One exception, since v1.2.3: when the direction leads, nothing is pulled at
-all.** `pipeline::style_blend_pull` returns `None` in the `Background` voice — a
-non-blank direction at adherence tier `Direct` or `Brief` — so `blend_toward` is
-not called, no channel moves, and the Style dial's arithmetic is out of the
-picture however high it is set. The develop discloses it with the
-`STYLE_BACKGROUND` rationale note. Everything below this line describes what the
-pull does when it runs, which is every other develop: no direction, a blank one,
-or one at tier `Hint`.
-
-What keeps that from meaning "delete the colour" is the VOCABULARY and the
-GATE, not a cap. Distillation used to pull twelve flat sliders and nothing else,
-so at Style 1.0 a proposal's `vibrance` and `saturation` were replaced by the
-library's means while the mixer, the wheels, the curve and the masks — where a
-photographer's colour actually lives — carried no target at all. Colour could
-only be subtracted. Five channels now, one mechanism (`lerp` toward a retrieved
-mean):
-
-| Channel | Target | Gated |
-|---|---|---|
-| 12 flat globals | mean over the neighbours that carry the key | no — shipped behaviour |
-| 8-band HSL saturation + luminance | per band | yes |
-| 8-band HSL hue | ingested, never distilled | — |
-| Grade wheels `_sat` / `_lum` | per wheel | yes |
-| Grade wheel `_hue` | saturation-weighted CIRCULAR mean, and only for a wheel whose own intensity is a habit | yes |
-| Master tone curve | `[black_lift, s_strength]`, written back through points that pin inputs 0/64/191/255 | yes, per component |
-| Mask sliders, per `bucket_of` use | `mask_habit` bucket mean, amplitudes only | yes |
-
-**The gate** is `rho = |mean| / mean(|v|) >= 0.75`. `rho = 1` is unanimity
-(zeros included — a neighbour who left an axis alone is not opposing it) and
-`rho = 0` is exact cancellation; an axis the neighbours never exercised has
-`rho` UNDEFINED and gets no target, because a target of `0` at Style 1.0 would
-delete the proposal's whole mixer. `0.75` is calibrated against the four real
-four-neighbour sets the colour diagnosis measured, whose defined ratios fall in
-two groups — `0.037, 0.465, 0.587` and `0.942, 1.000` — with `0.75` inside the
-gap. It sits high because the errors are asymmetric: a refusal leaves the
-proposal's own decision standing and is disclosed, while a false target replaces
-a scene-specific colour decision with a number that cancelled to near zero.
-
-**`blending` and `balance` are excluded** — `ColorGrade::is_neutral` already
-states that they do nothing without a saturated or lifted wheel, and
-`blending`'s library mean is ACR's own default on 157 of 157 measured sidecars.
-
-**The mixer's hue axis is ingested and never distilled**, because it changes
-WHICH colour a band is on whatever content occupies it in this photograph, and
-the corpus shows that is scene-bound: the Orange band's hue mean is `-3.75` on
-one neighbour set and `+16.0` on another, Yellow inside one set is
-`[-17, 0, +83, -29]` and Green inside another is `[-24, -12, +19, 0]` — the sign
-flips between neighbourhoods and inside them. Wheel hue is the opposite case — a
-tint applied to a tonal range, stable at 201–229 degrees across the same
-neighbourhoods — and is distilled.
-
-The distillation vocabulary rides in the same `settings` map, so the reference
-block filters back to `REF_KEYS`: an index built with it renders the proposer's
-block byte for byte like one built without it, and an index built without it
-degrades to the twelve, which is why this too ships with no version bump. The
-`STYLE_DISTILLED` rationale note names every field that actually moved, measured
-from the two recipes and bounded at `MAX_DISTILLED_FIELDS_CHARS = 384` with a
-`+N more` tail.
-
-**The block's own budget.** Storage bounds and prompt bounds are two different
-budgets, and until S3 one number was spending both. An index record may carry
-`MAX_DESC_CHARS = 512` of description and `128` characters per tag; a reference
-block is bounded by `advisor::REFERENCE_BUDGET_BYTES = 4,096`, with
-`BoundedUntrustedText` cutting whatever overflows. Four neighbours at their
-storage bounds measured `5,920 B` — 45 % over — so the TAIL was being cut, and
-since S3 that tail is the local-work note. The block now has its own door (user
-ruling 2026-08-30): `REFERENCE_DESC_CHARS = 200` per description,
-`REFERENCE_TAG_PHRASE_CHARS = 48` per tag phrase and
-`REFERENCE_TAGS_CHARS = 128` per joined tag list, applied at all three of the
-block's tag consumers — the per-exemplar look note, the shared-tag note and the
-look-reference block. The index, the text tower and `style-query` still see the
-whole sentence; only the block is cut, and it says so with an ellipsis. The
-widest block this app can build now measures `3,565 B` with the note and a
-realistic one `2,517 B`
-(`style::tests::the_local_work_note_fits_the_proposers_budget` prints both).
+**The block's budget.** Three references of at most 200 characters of phrases
+each plus the header stay under `advisor::REFERENCE_BUDGET_BYTES = 4,096`, which
+`library::tests` asserts on the widest block; file names never enter the paid
+prompt, only the rationale.
 
 `match` is inverse rendering rather than pixel copying: it aligns luminance
 CDFs, searches exposure, solves a regularized basis of engine controls, adds a
@@ -1816,69 +1667,15 @@ and zero-confidence fields are conservation-tested to change nothing.
   (**designed privacy control**).
 - Revision gate: accept revised recipe only when `new_score >= old_score`
   (**designed do-no-harm rule**).
-- Style features: 14 dimensions in the persisted normalization block, with
-  only dimensions having useful variance z-scored (**designed representation**).
-- SigLIP 2: 768-dimensional image and text vectors. `W_EMB = 4`, `W_TXT = 0.5`,
-  `W_DESC = 0.5` are the corpus harness's winners after the retrieval-rank
-  recalibration on the described index, which re-ran S2's grid with the hubness
-  correction the standardisation now applies (**calibration-controlled**; see
-  *Measured results*). `W_LOOK = 1.0` is **unmeasured, not inert**: the look
-  library carries no develop settings, so the harness's leave-one-out settings
-  objective cannot see it at all. Its scale is a real ratio whenever a
-  direction is given — the text and description terms rank looks against each
-  other too, against each look's own image vector and its description — so it
-  can change which look wins. What is pinned instead is each regime for what it
-  is: `look_weight_cannot_reorder_without_a_direction` (no direction: the look
-  term is the only live one, so the scale is inert) and
-  `look_weight_is_a_real_ratio_against_the_direction_terms` (shipped weights, a
-  library where direction and image disagree: the order holds from 0 through
-  2x the shipped value and first moves at 4x, so 1.0 sits inside a measured
-  stable band rather than on a knife edge).
-- The two direction-text terms have a **standardised variant** (cosines
-  computed against every candidate first, z-scored over that candidate set, and
-  only then weighted) because raw SigLIP image↔text cosines are tiny and
-  tightly clustered, so a raw term barely reorders anything and a grid over it
-  can find 0 for the wrong reason. S1 evaluated both variants and the raw one
-  won — on a grid whose query text and `desc_embed` vectors were both the
-  exemplar's tag string, because no exemplar had a description yet. S2's
-  recalibration on the described index reverses it: best standardised
-  `(4, 4, 0.5)` = 0.664818 against best raw `(4, 2, 0)` = 0.693811, and only
-  the standardised variant's text terms beat their own variant's text-free row
-  with a paired CI excluding 0. The standardised arm is therefore the only one that ships — the
-  switch is gone rather than left as an untested second ranking carrying
-  weights nobody calibrated for it, and the harness still sweeps both arms
-  and prints both tables. A third proxy of typed SHORT directions separates
-  the head-to-head S2 could not: best raw 0.410916 against best standardised
-  0.377820, paired 95% CI [+0.021870, +0.043719]. Below three comparable
-  candidates, or with a degenerate spread, the standardised variant falls back
-  to the raw gap and discloses it (**measured variant choice,
-  mutation-tested**).
-- The standardisation additionally removes each candidate's **text hubness**
-  from the direction-text ↔ exemplar-IMAGE term before the z-score — the mean
-  of its stored `vocab_scores`, i.e. how much that photograph resembles *any*
-  sentence about a grade. A per-query z-score centres the level the PHRASE sits
-  at and nothing else, so the per-CANDIDATE constant survived it: 21.7 % of the
-  cosine's variance on the user's index, against 25.3 % for the direction ×
-  candidate interaction. Twelve real direction texts forming six ANTONYM pairs
-  ranked the corpus with a mean Spearman of **+0.27 between the two members of
-  a pair** — opposite wishes agreeing about which photographs to show — and
-  **−0.17** with the hubness removed first. Two independent estimates put the
-  coefficient at 1, so full subtraction carries no free parameter: the mean OLS
-  slope of the cosine on hubness is 0.942 (per-direction range 0.247–2.000),
-  and the antonym-pair Spearman is minimised at coefficient 1.00. The
-  correction is ALL-OR-NOTHING over the candidate set and disclosed
-  (`txt_hub_corrected`); the description term is left alone, because the only
-  bank available to it made antonym pairs agree MORE (+0.339 → +0.377)
-  (**measured, mutation-tested**).
-- Four environment overrides, each read in exactly one place and never again:
-  `AUTOSHADE_STYLE_EMBED_WEIGHT`, `AUTOSHADE_STYLE_TEXT_WEIGHT`,
-  `AUTOSHADE_STYLE_DESC_WEIGHT`, `AUTOSHADE_STYLE_LOOK_WEIGHT`. All four parse the
-  same way — trimmed, finite, non-negative, otherwise the shipped default (a
-  negative weight would rank the *least* similar photo first). The two sidecar
-  switches `AUTOSHADE_STYLE_EMBED` and `AUTOSHADE_STYLE_DESCRIBE` are likewise
-  resolved once, as values: `--embed`/`--no-embed`, `--describe` and the GUI
-  preferences travel on the request, and nothing writes the process environment
-  to express a flag.
+- Reference library: SigLIP 2 768-dimensional image and text vectors; score
+  `z(scene) + 2·z(prompt)` over the candidates, the three best sent; at most
+  3,000 finished photos per library (**designed**; reviewed by the photographer
+  on their own library rather than against a numeric acceptance line, user
+  ruling 2026-10-13).
+- Two sidecar switches, each resolved once as a value: `AUTOSHADE_STYLE_EMBED`
+  (may an analysis search the library) and `AUTOSHADE_STYLE_DESCRIBE` (may a
+  build write look phrases). `--embed`/`--no-embed`, `--describe` and the GUI
+  preferences travel on the request; nothing writes the process environment.
 - Foreign-hue veto: distance `>45 deg` (four 15° bins) and newly painted share `>=5%`
   (**calibrated against known cast failures and haze controls**).
 - Reimagine flexible-size budget: dimensions are multiples of 16, aspect ratio

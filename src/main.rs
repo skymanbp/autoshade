@@ -23,7 +23,6 @@ use autoshade::pipeline::{
 };
 use autoshade::recipe::{DirectionAdherence, EditRecipe, GradeStrength};
 use autoshade::stack::merge::{MergeOptions, StackKind};
-use autoshade::style::StyleIndex;
 
 #[derive(Parser)]
 #[command(
@@ -68,12 +67,12 @@ enum Command {
         /// shadows, keep skin natural".
         #[arg(long)]
         guidance: Option<String>,
-        /// How strongly to follow your historical edit style, 0..1 (needs a built
-        /// `style-index`). Omit to use AUTOSHADE_STYLE_STRENGTH (default 0.3).
-        /// With NO --guidance, >=0.85 states the retrieved habits as a TARGET to
-        /// reproduce. WITH a --guidance direction at --adherence above 0.40, the
-        /// direction leads instead: the habits are quoted as BACKGROUND for
-        /// continuity and no distillation pull is applied, whatever this value is.
+        /// How strongly to follow your reference library, 0..1 (needs one built
+        /// with `library-build`). Omit to use AUTOSHADE_STYLE_STRENGTH (default
+        /// 0.3). With NO --guidance, >=0.85 asks for the reference looks rather
+        /// than staying within them. WITH a --guidance direction at --adherence
+        /// above 0.40, the direction leads instead: the references are quoted as
+        /// BACKGROUND, whatever this value is.
         #[arg(long, value_parser = unit_interval)]
         style: Option<f32>,
         /// How COMMITTED the grade should be, 0..1 — a different axis from
@@ -93,15 +92,15 @@ enum Command {
         /// before.
         #[arg(long, value_parser = unit_interval)]
         adherence: Option<f32>,
-        /// Let the local SigLIP 2 sidecar answer the style query, so the look
-        /// library and the embedding terms can rank. First run downloads
+        /// Let the local SigLIP 2 sidecar measure this photo and the direction,
+        /// so the reference library can be searched. First run downloads
         /// ~1.5 GB of weights into python/weights and every call re-loads them.
         /// Overrides AUTOSHADE_STYLE_EMBED for this run.
         #[arg(long, conflicts_with = "no_embed")]
         embed: bool,
         /// Refuse the embedding sidecar for this run even if
-        /// AUTOSHADE_STYLE_EMBED is set: the 14-dim ranking only, and no look
-        /// library.
+        /// AUTOSHADE_STYLE_EMBED is set: the develop goes without reference
+        /// looks.
         #[arg(long, conflicts_with = "embed")]
         no_embed: bool,
         /// DEEP THINKING: the proposer first states the scene, decides each tool
@@ -114,12 +113,11 @@ enum Command {
         /// output tokens per proposal. `batch` never does this.
         #[arg(long)]
         deep: bool,
-        /// SHOW the model the retrieved reference photo, not just its numbers:
-        /// the nearest finished photo from your look library (or, failing that,
-        /// the nearest RAW neighbour) rides the analysis as IMAGE 2. OFF by
-        /// default — it puts one of YOUR OWN photographs on a paid vision call,
-        /// and costs one extra image on every call of the run. The rationale
-        /// names the file that went. `AUTOSHADE_SEND_REFERENCE_IMAGE=1` makes it
+        /// SHOW the model the reference photos, not only their look phrases:
+        /// the closest finished photos from your reference library ride the
+        /// analysis as IMAGE 2 onward. OFF by default — it puts photographs on a
+        /// paid vision call, one extra image per reference on every call of the
+        /// run. The rationale says how many went. `AUTOSHADE_SEND_REFERENCE_IMAGE=1` makes it
         /// the standing answer.
         #[arg(long)]
         reference_image: bool,
@@ -159,12 +157,12 @@ enum Command {
         /// Optional direction for the AI (e.g. "warmer and moodier").
         #[arg(long)]
         guidance: Option<String>,
-        /// How strongly to follow your historical edit style, 0..1 (needs a built
-        /// `style-index`). Omit for AUTOSHADE_STYLE_STRENGTH (default 0.3).
-        /// With NO --guidance, >=0.85 states the retrieved habits as a TARGET to
-        /// reproduce. WITH a --guidance direction at --adherence above 0.40, the
-        /// direction leads instead: the habits are quoted as BACKGROUND for
-        /// continuity and no distillation pull is applied, whatever this value is.
+        /// How strongly to follow your reference library, 0..1 (needs one built
+        /// with `library-build`). Omit for AUTOSHADE_STYLE_STRENGTH (default 0.3).
+        /// With NO --guidance, >=0.85 asks for the reference looks rather than
+        /// staying within them. WITH a --guidance direction at --adherence above
+        /// 0.40, the direction leads instead: the references are quoted as
+        /// BACKGROUND, whatever this value is.
         #[arg(long, value_parser = unit_interval)]
         style: Option<f32>,
         /// How COMMITTED the grade should be, 0..1 (see `analyze --strength`);
@@ -182,27 +180,26 @@ enum Command {
         /// before.
         #[arg(long, value_parser = unit_interval)]
         adherence: Option<f32>,
-        /// Let the local SigLIP 2 sidecar answer the style query, so the look
-        /// library and the embedding terms can rank. First run downloads
+        /// Let the local SigLIP 2 sidecar measure this photo and the direction,
+        /// so the reference library can be searched. First run downloads
         /// ~1.5 GB of weights into python/weights and every call re-loads them.
         /// Overrides AUTOSHADE_STYLE_EMBED for this run.
         #[arg(long, conflicts_with = "no_embed")]
         embed: bool,
         /// Refuse the embedding sidecar for this run even if
-        /// AUTOSHADE_STYLE_EMBED is set: the 14-dim ranking only, and no look
-        /// library.
+        /// AUTOSHADE_STYLE_EMBED is set: the develop goes without reference
+        /// looks.
         #[arg(long, conflicts_with = "embed")]
         no_embed: bool,
         /// DEEP THINKING (see `analyze --deep`): structured working + a raised
         /// reasoning tier + a multi-round visual judge. Costs more per photo.
         #[arg(long)]
         deep: bool,
-        /// SHOW the model the retrieved reference photo, not just its numbers:
-        /// the nearest finished photo from your look library (or, failing that,
-        /// the nearest RAW neighbour) rides the analysis as IMAGE 2. OFF by
-        /// default — it puts one of YOUR OWN photographs on a paid vision call,
-        /// and costs one extra image on every call of the run. The rationale
-        /// names the file that went. `AUTOSHADE_SEND_REFERENCE_IMAGE=1` makes it
+        /// SHOW the model the reference photos, not only their look phrases:
+        /// the closest finished photos from your reference library ride the
+        /// analysis as IMAGE 2 onward. OFF by default — it puts photographs on a
+        /// paid vision call, one extra image per reference on every call of the
+        /// run. The rationale says how many went. `AUTOSHADE_SEND_REFERENCE_IMAGE=1` makes it
         /// the standing answer.
         #[arg(long)]
         reference_image: bool,
@@ -348,83 +345,42 @@ enum Command {
         #[arg(long)]
         state: Option<PathBuf>,
     },
-    /// Build the style index from your edited library (RAW+.xmp pairs) → the
-    /// advisor then references your edits on similar shots. Run once / on update.
-    StyleIndex {
-        /// Folder to scan recursively for RAW + .xmp pairs (your edits).
-        #[arg(default_value = ".")]
+    /// Build or refresh the REFERENCE LIBRARY from a folder of FINISHED photos
+    /// (JPEG / TIFF / PNG exports whose look you like). Each develop then
+    /// shows the advisor the closest few. A rebuild measures only new or
+    /// changed photos. First run downloads the SigLIP 2 weights (~1.5 GB)
+    /// into python/weights.
+    LibraryBuild {
+        /// Folder of finished photos, searched recursively.
         dir: PathBuf,
-        /// Folder holding the .xmp sidecars, when they are NOT beside the
-        /// RAWs (an exported catalogue, a read-only photo volume). Searched
-        /// as a MIRROR of the library tree first
-        /// (<xmp-dir>/<subfolder>/<name>.xmp), then flat
-        /// (<xmp-dir>/<name>.xmp), then beside the RAW as before. The
-        /// extension matches in any case (.xmp / .XMP) on every platform.
+        /// Also write each photo's look as a few short phrases with the local
+        /// Qwen3-VL model, so a typed direction can be matched against the
+        /// looks (first run downloads ~4.3 GB; adds seconds per photo).
+        /// Overrides AUTOSHADE_STYLE_DESCRIBE for this run.
         #[arg(long)]
-        xmp_dir: Option<PathBuf>,
-        /// Build the LOOK LIBRARY instead: a folder of FINISHED photos
-        /// (JPEG/TIFF exports) whose grade the advisor may point at. Looks are
-        /// embedding-only — they carry no settings and never enter the recipe
-        /// blend — so this needs --embed, and it replaces only the look block
-        /// of the stored index, never your RAW exemplars.
-        #[arg(long)]
-        looks: Option<PathBuf>,
-        /// Compute a SigLIP 2 vector per record as well as the 14-dim feature.
-        /// First run downloads ~1.5 GB of weights into python/weights.
-        /// Overrides AUTOSHADE_STYLE_EMBED for this run.
-        #[arg(long, conflicts_with = "no_embed")]
-        embed: bool,
-        /// Build the 14-dim index only, even if AUTOSHADE_STYLE_EMBED is set.
-        #[arg(long, conflicts_with = "embed")]
-        no_embed: bool,
-        /// Also write a short LOCAL description of each record's grade
-        /// (Qwen3-VL-2B; first run downloads ~4.3 GB into python/weights, and
-        /// the pass adds seconds per photo). Needs --embed. Descriptions are
-        /// cached by frame content, so a rebuild only describes what changed.
-        #[arg(long, requires = "embed")]
         describe: bool,
     },
-    /// Offline retrieval diagnostic: what the style index would answer for one
-    /// photo, in the ranking's own numbers.
-    ///
-    /// Prints the weights in force, then every retrieved neighbour with its
-    /// distance broken into the terms that produced it (the 14-dim block, the
-    /// image-embedding term, and the two direction-text terms beside the raw
-    /// cosines behind them), the reference block the proposer would be
-    /// given, the look-library block, and the disclosure notes the develop
-    /// would emit. No advisor call, no network, no spend.
-    StyleQuery {
-        /// The photo to query with (RAW or a baked image).
+    /// Offline search diagnostic: which reference looks a develop of this
+    /// photo would follow, in the search's own numbers — each hit's scene and
+    /// prompt scores and phrases, the block the advisor would receive, and the
+    /// notes the develop would write. No advisor call, no network, no spend.
+    LibrarySearch {
+        /// The photo to search with (RAW or a baked image).
         photo: PathBuf,
-        /// Optional free-text direction, embedded with the text tower so the
-        /// direction terms and the look library have something to rank
-        /// against. Needs --embed.
+        /// Optional direction, matched against each reference's look phrases.
         #[arg(long)]
         direction: Option<String>,
-        /// The Style axis used to render the reference block, 0..1 (default
-        /// 0.3). At >=0.85 the block states the retrieved habits as a TARGET
-        /// rather than a ceiling — unless a --direction leads it (see
-        /// --adherence).
+        /// The Style axis, 0..1 (default 0.3). At >=0.85 the block asks for
+        /// the references' look rather than staying within it — unless a
+        /// --direction leads (see --adherence).
         #[arg(long, value_parser = unit_interval)]
         style: Option<f32>,
-        /// The adherence dial this forecast should assume, 0..1 (default 0.65,
-        /// i.e. Direct — the same default `analyze` uses). With a --direction
-        /// at Direct or Brief the block is rendered in its BACKGROUND voice,
-        /// which is what the develop would send; at Hint the historical
-        /// ceiling/target wording stands.
+        /// The adherence dial to assume, 0..1 (default 0.65, i.e. Direct — the
+        /// same default `analyze` uses). With a --direction at Direct or Brief
+        /// the references are quoted as BACKGROUND, which is what the develop
+        /// would send; at Hint the Style axis decides.
         #[arg(long, value_parser = unit_interval)]
         adherence: Option<f32>,
-        /// Ask the SigLIP 2 sidecar for the query vectors. Without it the
-        /// diagnostic shows the 14-dim ranking and says the look library is
-        /// unreachable.
-        #[arg(long)]
-        embed: bool,
-        /// Also print the DISTILLATION the Style dial would apply: which
-        /// bands, wheels, curve and mask sliders the retrieved neighbours
-        /// agree on, which ones they do not, and what that moves on a neutral
-        /// proposal at this --style. Prints, never renders; spends nothing.
-        #[arg(long)]
-        distil: bool,
     },
     /// EXPERIMENTAL: full-frame generative restyle via OpenAI Images (low-res,
     /// lossy re-render — NOT a master; the XMP/render path is the real workflow).
@@ -642,28 +598,17 @@ fn main() -> Result<()> {
         Command::Eval { dir, xmp_dir, limit, jobs, fresh, state } => {
             eval::run(&dir, xmp_dir.as_deref(), limit, jobs, fresh, state.as_deref())
         }
-        Command::StyleIndex { dir, xmp_dir, looks, embed, no_embed, describe } => {
-            let switch = embed_switch(embed, no_embed);
-            // `--describe` is a three-state read like `--embed`, minus the
-            // negative flag: the description pass is off by default, so
-            // "explicitly off" is what NOT passing it already means.
-            let prose = autoshade::style::DescribeSwitch::resolve(describe.then_some(true), false);
-            if let Some(d) = looks {
-                style_looks_cmd(&d, switch, prose)
-            } else {
-                style_index_cmd(&dir, xmp_dir.as_deref(), switch, prose)
-            }
+        Command::LibraryBuild { dir, describe } => {
+            // Three-state like `--embed`, minus the negative flag: the phrase
+            // pass is off by default, so not passing it already means off.
+            library_build_cmd(&dir, autoshade::library::DescribeSwitch::resolve(describe.then_some(true), false))
         }
-        Command::StyleQuery { photo, direction, style, adherence, embed, distil } => {
-            style_query_cmd(
-                &photo,
-                direction.as_deref(),
-                style.unwrap_or(0.3),
-                adherence.map(DirectionAdherence::new).unwrap_or_default(),
-                embed_switch(embed, false),
-                distil,
-            )
-        }
+        Command::LibrarySearch { photo, direction, style, adherence } => library_search_cmd(
+            &photo,
+            direction.as_deref(),
+            style.unwrap_or(0.3),
+            adherence.map(DirectionAdherence::new).unwrap_or_default(),
+        ),
         Command::Reimagine { raw, prompt, fidelity, quality, fidelity_retry, out } => {
             let cfg = Config::load();
             let out = out.unwrap_or_else(|| default_out(&raw, "reimagine", "png"));
@@ -776,317 +721,87 @@ fn correspond_cmd(source: &Path, target: &Path, out: Option<PathBuf>) -> Result<
     Ok(())
 }
 
-fn style_index_cmd(
-    dir: &Path,
-    xmp_dir: Option<&Path>,
-    embed: autoshade::style::EmbeddingSwitch,
-    describe: autoshade::style::DescribeSwitch,
-) -> Result<()> {
-    let index = StyleIndex::build(dir, xmp_dir, embed, describe)?;
-    // Central per-user location: the index describes the user's whole library,
-    // so it must not depend on which directory the command ran from.
-    let out = autoshade::store::style_index_path();
-    index.save(&out)?;
+fn library_build_cmd(dir: &Path, describe: autoshade::library::DescribeSwitch) -> Result<()> {
+    let sidecars = autoshade::library::Sidecars::from_config(&Config::load());
+    let lib = autoshade::library::rebuild(dir, &sidecars, describe, &|p| {
+        eprint!("\r{} {}/{}    ", p.stage.label(), p.done, p.total);
+    })?;
+    eprintln!();
     println!(
-        "style index → {} ({} exemplars). The advisor will now reference your edits on similar shots.",
-        out.display(),
-        index.exemplars.len()
+        "reference library -> {} ({} finished photos, {} with look phrases)",
+        autoshade::library::path().display(),
+        lib.entries.len(),
+        lib.entries.iter().filter(|e| e.phrases.is_some()).count()
     );
-    print_described(describe, index.exemplars.iter().filter(|e| e.desc.is_some()).count(), index.exemplars.len());
     Ok(())
 }
 
-/// The S2 build note, from the SHARED rationale template — the GUI's toast
-/// renders the same key after the same build, so the two surfaces cannot drift
-/// into two sentences about one fact.
-///
-/// Printed only when the pass was asked for AND covered something: 0 means
-/// either "never asked" or "reached nothing", and a line claiming 0 of N would
-/// read as a failure on every build that simply did not want prose.
-fn print_described(describe: autoshade::style::DescribeSwitch, described: usize, total: usize) {
-    if !describe.on() || described == 0 {
-        return;
-    }
-    println!(
-        " {}",
-        autoshade::rationale::keys::STYLE_DESCRIBED
-            .trim()
-            .replace("{n}", &described.to_string())
-            .replace("{total}", &total.to_string())
-    );
-}
-
-fn style_looks_cmd(
-    dir: &Path,
-    embed: autoshade::style::EmbeddingSwitch,
-    describe: autoshade::style::DescribeSwitch,
-) -> Result<()> {
-    let index = StyleIndex::build_looks(dir, embed, describe, &|_| {})?;
-    let out = autoshade::store::style_index_path();
-    index.save(&out)?;
-    println!("look library -> {} ({} finished photos)", out.display(), index.looks.len());
-    print_described(describe, index.looks.iter().filter(|l| l.desc.is_some()).count(), index.looks.len());
-    Ok(())
-}
-
-/// `--embed` / `--no-embed` as a VALUE, resolved once at the command's door.
-///
-/// It used to be an `unsafe` write of `AUTOSHADE_STYLE_EMBED` into the process
-/// environment at three sites: a CLI flag implemented as a global side effect,
-/// read back several call frames later. `cargo test` runs tests on parallel
-/// threads in one process, so that made the switch a shared mutable global the
-/// retrieval happened to read — see `style::EmbeddingSwitch`.
-fn embed_switch(embed: bool, no_embed: bool) -> autoshade::style::EmbeddingSwitch {
+/// `--embed` / `--no-embed` as a VALUE, resolved once at the command's door
+/// (see `library::EmbeddingSwitch`).
+fn embed_switch(embed: bool, no_embed: bool) -> autoshade::library::EmbeddingSwitch {
     // clap already refuses both at once (`conflicts_with`), so this is a
     // three-state read, not a precedence decision.
     let flag = embed.then_some(true).or(no_embed.then_some(false));
-    autoshade::style::EmbeddingSwitch::resolve(flag, false)
+    autoshade::library::EmbeddingSwitch::resolve(flag, false)
 }
 
-/// The two standardised text terms as the diagnostic prints them: the term that
-/// entered the sum, the raw `1−cos` it came from, and whether the candidate set
-/// was large enough to standardise at all.
-///
-/// `raw=–` marks a pair that had no comparable vectors (no direction text, or an
-/// exemplar with no description embedding); such a candidate scores 0 — not a
-/// penalty and not a bonus, and under the standardised variant that is exactly
-/// the candidate-set mean. `,z` marks a term the standardised variant really
-/// z-scored and `,raw-fallback` its disclosed give-up (fewer than three
-/// comparable candidates, or a degenerate spread). There is no third mark
-/// because there is no third variant: the raw arm behind the old
-/// `STANDARDISE_TEXT_TERMS` switch is gone (see `style::standardise`).
-fn fmt_text_terms(t: &autoshade::style::DistanceTerms) -> String {
-    let one = |label: &str, term: f64, gap: Option<f64>, standardised: bool| -> String {
-        let raw = gap.map(|g| format!("{g:.6}")).unwrap_or_else(|| "–".into());
-        // `z` marks a term the ranking z-scored; `raw-fallback` is the
-        // ranking giving up on a candidate set it could not standardise, which
-        // is a DEGRADATION and says so.
-        let mark = if standardised { ",z" } else { ",raw-fallback" };
-        format!(" {label}={term:.6}(raw={raw}{mark})")
+/// The offline search diagnostic: the develop's own search, block and notes
+/// for one photo, through the same calls `produce_recipe` makes.
+fn library_search_cmd(photo: &Path, direction: Option<&str>, style: f32, adherence: DirectionAdherence) -> Result<()> {
+    use autoshade::library;
+    let lib = match library::load() {
+        library::Loaded::Ready(lib) => lib,
+        library::Loaded::Absent => anyhow::bail!("no reference library yet — build one with: autoshade library-build <folder>"),
+        library::Loaded::Unusable(why) => anyhow::bail!("reference library unusable: {why}"),
     };
-    // The hubness disclosure (clearing A8): `txt_hub_corrected`'s doc promises
-    // a reader of the terms is TOLD when the candidates' hubness was removed,
-    // and this line is where terms are read. `,hub=<mean>` names the value
-    // subtracted; bare `,hub` is a correction in force over a pair with no
-    // cosine; nothing marks a pre-vocabulary index, whose ranking — and line
-    // — are bit for bit what they were before the correction existed.
-    let hub = match (t.txt_hub_corrected, t.txt_hub) {
-        (true, Some(v)) => format!(",hub={v:.6}"),
-        (true, None) => ",hub".into(),
-        (false, _) => String::new(),
-    };
-    let txt = one("txt", t.txt, t.txt_gap, t.txt_standardised);
-    let txt = match txt.strip_suffix(')') {
-        Some(head) => format!("{head}{hub})"),
-        None => txt,
-    };
-    format!(
-        "{}{}",
-        txt,
-        one("desc", t.desc, t.desc_gap, t.desc_standardised)
-    )
-}
-
-/// The local look DESCRIPTION as the diagnostic prints it, through the same
-/// bounded door the reference blocks use (S2).
-///
-/// The diagnostic already prints the `desc=` retrieval TERM — a number derived
-/// from the description's vector. That number cannot be read without the
-/// sentence behind it: a neighbour that scores well on `desc` and turns out to
-/// have been described as the wrong grade is a calibration finding, and it is
-/// invisible while only the term is on the line.
-///
-/// Absent prose prints NOTHING rather than an empty field, so a pre-S2 index
-/// and an index built with the switch off read exactly as they did before.
-fn fmt_desc(desc: Option<&str>) -> String {
-    desc.and_then(autoshade::describe::sanitize_desc)
-        .map(|d| format!(" desc=\"{d}\""))
-        .unwrap_or_default()
-}
-
-/// The neighbour's LOCAL-WORK habit as the diagnostic prints it (S3).
-///
-/// The reference block below states this as prose ("3 of 4 mask the sky …"),
-/// and prose is not a thing a bucket rule can be debugged against: the
-/// per-neighbour counts are what says WHICH exemplar contributed which use, and
-/// they are the only place a mis-bucketed mask is visible before it becomes a
-/// sentence in a paid prompt.
-///
-/// An unmeasured neighbour (a pre-S3 index) prints NOTHING rather than
-/// `masks=0`, which would claim a photographer works globally when the truth is
-/// that nobody looked — the same distinction [`autoshade::mask_habit::MaskHabit`]
-/// keeps in its three states.
-fn fmt_masks(masks: Option<&autoshade::mask_habit::MaskHabit>) -> String {
-    use autoshade::mask_habit::Bucket;
-    masks
-        .map(|h| {
-            format!(
-                " masks={} sky={} subject={} ground={} range={} other={} refined={} curved={}",
-                h.count,
-                h.bucket(Bucket::Sky).n,
-                h.bucket(Bucket::Subject).n,
-                h.bucket(Bucket::Ground).n,
-                h.bucket(Bucket::Range).n,
-                h.bucket(Bucket::Other).n,
-                h.refined,
-                h.curved,
-            )
-        })
-        .unwrap_or_default()
-}
-
-/// The offline retrieval diagnostic: what the ranking saw, in the ranking's own
-/// numbers.
-///
-/// It re-derives NOTHING. The neighbour lines print `DistanceTerms` straight
-/// out of `distance_components`, and the look lines out of
-/// `retrieve_looks_with_terms` — the same call `retrieve_looks` makes. Both the
-/// standardised term and the raw `1−cos` behind it are shown, because a
-/// standardised term is only readable next to the weights that produced it, so
-/// those are the header.
-fn style_query_cmd(
-    photo: &Path,
-    direction: Option<&str>,
-    style: f32,
-    adherence: autoshade::recipe::DirectionAdherence,
-    embed: autoshade::style::EmbeddingSwitch,
-    distil: bool,
-) -> Result<()> {
+    let opts = autoshade::embed::EmbedOpts::from_config(&Config::load());
+    anyhow::ensure!(opts.available(), "the embedding sidecar is not present, so the library cannot be searched");
     let decoded = decode::decode_any(photo)?;
-    let idx = match autoshade::style::load_effective() {
-        autoshade::style::EffectiveIndex::Loaded(ix, _) => ix,
-        autoshade::style::EffectiveIndex::Absent => anyhow::bail!("style index is absent"),
-        autoshade::style::EffectiveIndex::Unusable { err, .. } => anyhow::bail!("style index unusable: {err}"),
-    };
-    // Resolved ONCE, printed, then passed to every scorer below: the diagnostic
-    // cannot be read against weights it did not state.
-    let weights = autoshade::style::RetrievalWeights::from_env();
-    println!(
-        "weights: W_EMB={:.6} W_TXT={:.6} W_DESC={:.6} W_LOOK={:.6}  text terms:          standardised (z-scored per query, hubness removed first)",
-        weights.emb, weights.txt, weights.desc, weights.look,
+    let q = library::query_vectors(&opts, &decoded.preview, direction, &autoshade::store::store_root())?;
+    let hits = lib.search(
+        &library::Query { image: &q.image, prompt: q.prompt.as_deref(), exclude: Some(photo) },
+        library::REFERENCE_COUNT,
     );
-    let (mut qi, mut qt) = (None, None);
-    let mut embedding_status = "disabled (embedding switch is off)".to_string();
-    if embed.on() {
-        let opts = autoshade::embed::EmbedOpts::from_config(&Config::load());
-        if !opts.available() {
-            embedding_status = "unavailable (style-embedding sidecar is not present)".into();
-        } else {
-            match autoshade::style::embed_preview_with_text(&opts, &decoded.preview, &std::env::temp_dir(), "style-query", direction) {
-                Ok(r) => {
-                    qi = Some(r.vector);
-                    qt = r.text_vector;
-                    embedding_status = "ready (image vector plus optional direction text vector)".into();
-                }
-                Err(e) => embedding_status = format!("unavailable ({e:#}); using 14-D retrieval"),
-            }
-        }
-    }
-    println!("embedding: {embedding_status}");
-    let query = autoshade::style::StyleQuery::new(qi.as_deref(), qt.as_deref(), weights);
-    let (ex, looks_scored) = (
-        pipeline::retrieve_style(&idx, &decoded.meta, &decoded.histogram, query, photo, true).0,
-        idx.retrieve_looks_with_terms(query, 2),
-    );
-    let looks: Vec<_> = looks_scored.iter().map(|(e, _)| *e).collect();
-    println!("neighbours:");
-    for e in &ex {
-        let t = idx.distance_components(&decoded.meta, &decoded.histogram, query, photo, e);
+    println!("library: {} ({} finished photos from {})", library::path().display(), lib.entries.len(), lib.dir);
+    println!("prompt term: {}", if q.prompt.is_some() { "on (the direction against each look's phrases)" } else { "off (no direction)" });
+    for h in &hits {
+        let phrases: String = h.entry.phrases.as_deref().unwrap_or("–").chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
         println!(
-            "  {} distance={:.6} d14={:.6} emb={:.6}{}{}{}",
-            e.stem,
-            t.total(),
-            t.d14,
-            t.emb,
-            fmt_text_terms(&t),
-            fmt_masks(e.masks.as_ref()),
-            fmt_desc(e.desc.as_deref())
+            "  {} score={:.3} scene={:.3}{} phrases=\"{phrases}\"",
+            stem(Path::new(&h.entry.path)),
+            h.score,
+            h.scene,
+            h.prompt.map(|p| format!(" prompt={p:.3}")).unwrap_or_default(),
         );
     }
-    // The block the DEVELOP would send, voice and all: this diagnostic used to
-    // render the Style axis alone, so from v1.2.3 on it would have forecast a
-    // TARGET block for a run that actually sends a BACKGROUND one.
-    let voice = autoshade::style::StyleVoice::choose(style, direction, adherence);
-    let reference = idx.render_reference_for_style(&ex, style, direction, adherence);
+    let voice = library::StyleVoice::choose(style, direction, adherence);
     println!(
         "voice: {voice:?} (Style {style:.2}, adherence {:.2} = {}, direction {})",
         adherence.get(),
         adherence.tier().as_str(),
         if direction.is_some_and(|d| !d.trim().is_empty()) { "present" } else { "none" },
     );
-    // The SHARED fence constants, not a second literal: the point of printing
-    // the proposer's block is that it is the proposer's block.
-    println!("reference (proposer block):\n{}", reference.as_deref()
-        .map(|r| format!("{}{r}", autoshade::advisor::FENCE_STYLE_REFERENCE))
-        .unwrap_or_else(|| "(none)".into()));
-    if looks.is_empty() {
-        if idx.looks.is_empty() {
-            println!("looks: unreachable (look library is empty)");
-        } else {
-            println!("looks: unreachable (style embedding is off or no query vector was produced; {} finished photos)", idx.looks.len());
-        }
-    } else {
-        // …and the block is worded from the WEIGHTS, like the develop's:
-        // "and direction" appears only when a text weight is non-zero.
-        let by_direction = autoshade::style::StyleIndex::look_ranked_by_direction(query);
-        println!(
-            "look reference (proposer block):\n{}{}",
-            autoshade::advisor::FENCE_LOOK_REFERENCE,
-            idx.render_look_reference(&looks, by_direction).unwrap_or_default()
-        );
-        for (l, t) in &looks_scored {
-            println!(
-                "  look {} distance={:.6} look={:.6}{} tags=[{}]{}",
-                l.stem, t.total(), t.emb, fmt_text_terms(t), l.tags.join(", "),
-                fmt_desc(l.desc.as_deref())
-            );
-        }
-    }
-    // The distillation, on the SAME retrieved set the lines above printed —
-    // `style::distillation_preview` runs the production `style_targets` and
-    // `blend_toward`, so this is what the develop would pull toward and not a
-    // second reading of the neighbours.
-    if distil {
-        print!("{}", autoshade::style::distillation_preview(&ex, style));
-    }
+    // The SHARED fence constant: the point of printing the block is that it is
+    // the advisor's block.
+    let block = library::reference_block(&hits, &[], voice, q.prompt.is_some());
+    println!(
+        "reference (advisor block):\n{}",
+        block.as_deref().map(|b| format!("{}{b}", autoshade::advisor::FENCE_STYLE_REFERENCE)).unwrap_or_else(|| "(none)".into())
+    );
     println!("disclosure notes:");
-    if !ex.is_empty() {
-        println!("  {}", autoshade::rationale::keys::STYLE_NEIGHBOURS
-            .replace("{files}", &autoshade::style::neighbour_stems(&ex).join(", "))
-            .replace("{n}", &ex.len().to_string()));
+    let files: Vec<String> = hits.iter().map(|h| stem(Path::new(&h.entry.path)).to_string()).collect();
+    let notes = [
+        pipeline::references_note(&files),
+        pipeline::style_background_note(voice, adherence, block.as_deref()),
+    ];
+    for note in notes.iter().flatten() {
+        println!("  {}", autoshade::rationale::render_one(note).trim());
     }
-    if let Some(first) = looks.first() {
-        println!("  {}", autoshade::rationale::keys::STYLE_LOOK_REFERENCE
-            .replace("{stem}", &first.stem)
-            .replace("{tags}", &first.tags.join(", ")));
-        // The develop emits this one only when the look ALSO went to the vision
-        // model as a second image, which is an opt-in this diagnostic does not
-        // have (and never pays for). Printed with its condition stated, so the
-        // line is a forecast and not a claim about this run.
-        println!(
-            "  (with the reference-image option on) {}",
-            autoshade::rationale::keys::STYLE_LOOK_IMAGE.replace("{stem}", &first.stem)
-        );
-    } else if !idx.looks.is_empty() {
-        println!("  {}", autoshade::rationale::keys::STYLE_LOOKS_UNREACHABLE
-            .replace("{n}", &idx.looks.len().to_string()));
-    }
-    // DERIVED, through the pipeline's own mapping. It used to print the literal
-    // "direct" whatever the dial said — a diagnostic that reported a tier the
-    // develop would not have used. Since v1.2.3 `--adherence` is a flag here,
-    // so the line quotes the dial that was actually asked for.
     if let Some(tier) = pipeline::direction_adherence_tier(direction, adherence) {
         println!(
             "  {}   (from adherence dial {:.2})",
-            autoshade::rationale::keys::ADVISOR_NOTE_DIRECTION_ADHERENCE.replace("{tier}", tier),
+            autoshade::rationale::keys::ADVISOR_NOTE_DIRECTION_ADHERENCE.replace("{tier}", tier).trim(),
             adherence.get()
-        );
-    }
-    if !voice.distils() {
-        println!(
-            "  {}",
-            autoshade::rationale::keys::STYLE_BACKGROUND
-                .replace("{tier}", adherence.tier().as_str())
         );
     }
     Ok(())
@@ -1294,7 +1009,7 @@ fn analyze_request(
     adherence: Option<f32>,
     deep: bool,
     reference_image: bool,
-    embed: autoshade::style::EmbeddingSwitch,
+    embed: autoshade::library::EmbeddingSwitch,
     cfg: &Config,
 ) -> GradeRequest {
     GradeRequest {
@@ -1309,12 +1024,10 @@ fn analyze_request(
         send_reference_image: reference_image || cfg.send_reference_image,
         strength: GradeStrength::from_optional(strength),
         adherence: adherence.map(DirectionAdherence::new).unwrap_or_default(),
-        use_looks: true,
-        // The sidecar switch and the retrieval weights travel WITH the request
-        // instead of being read back out of the process environment several
-        // frames down (see `style::EmbeddingSwitch`).
+        // The sidecar switch travels WITH the request instead of being read
+        // back out of the process environment several frames down (see
+        // `library::EmbeddingSwitch`).
         embed,
-        weights: autoshade::style::RetrievalWeights::from_env(),
         // R23-4: opt-in per invocation, and per invocation only — `batch`
         // builds its request through `GradeRequest::with_style`, which has no
         // way to reach this flag.
@@ -1332,7 +1045,7 @@ fn analyze_cmd(
     adherence: Option<f32>,
     deep: bool,
     reference_image: bool,
-    embed: autoshade::style::EmbeddingSwitch,
+    embed: autoshade::library::EmbeddingSwitch,
 ) -> Result<()> {
     let cfg = Config::load();
     if let Some(o) = &out {
@@ -1618,7 +1331,7 @@ fn auto_cmd(
     denoise_strength: Option<f32>,
     denoise_model: Option<String>,
     long_edge: Option<u32>,
-    embed: autoshade::style::EmbeddingSwitch,
+    embed: autoshade::library::EmbeddingSwitch,
 ) -> Result<()> {
     let cfg = Config::load();
     // Validate the render target BEFORE the PAID AI call (and before touching
@@ -2411,8 +2124,8 @@ fn batch_cmd(
     // opens. It is nevertheless OPT-IN, because the default would be
     // expensive and surprising: RAW+JPEG is a standard camera setting, so a
     // library folder routinely holds a baked twin of every RAW, and each twin
-    // is a paid analysis. `eval` and `style-index` do NOT get this flag — see
-    // their own call sites.
+    // is a paid analysis. `eval` does NOT get this flag — see its own call
+    // site.
     let raws = if include_baked {
         autoshade::pipeline::find_sources(dir)?
     } else {
@@ -3082,7 +2795,7 @@ mod tests {
         let cfg = autoshade::config::Config { style_strength: 0.3, ..cfg_fixture() };
         // The switch is a VALUE these dial assertions are indifferent to, so it
         // is spelled once rather than resolved from the environment per call.
-        const OFF: autoshade::style::EmbeddingSwitch = autoshade::style::EmbeddingSwitch::OFF;
+        const OFF: autoshade::library::EmbeddingSwitch = autoshade::library::EmbeddingSwitch::OFF;
         let plain = analyze_request(None, None, None, false, false, OFF, &cfg);
         assert_eq!(plain.style, 0.3, "omitted --style keeps AUTOSHADE_STYLE_STRENGTH");
         assert_eq!(
@@ -3127,7 +2840,7 @@ mod tests {
     /// either half of the `||` (one arm fails).
     #[test]
     fn the_reference_photo_is_opt_in_on_every_non_gui_surface() {
-        const OFF: autoshade::style::EmbeddingSwitch = autoshade::style::EmbeddingSwitch::OFF;
+        const OFF: autoshade::library::EmbeddingSwitch = autoshade::library::EmbeddingSwitch::OFF;
         let quiet = autoshade::config::Config { send_reference_image: false, ..cfg_fixture() };
         assert!(
             !analyze_request(None, None, None, false, false, OFF, &quiet).send_reference_image,
@@ -3186,16 +2899,15 @@ mod tests {
         // DISCLOSURE. Sending one of the photographer's own photographs is the
         // kind of thing that must never be silent: the rationale names the FILE
         // that went and the extra cost it bought, on every surface that renders
-        // a rationale, and `style-query`'s forecast line quotes the same key.
-        let note = autoshade::rationale::keys::STYLE_REF_IMAGE.replace("{file}", "golden-hour-01");
-        assert!(note.contains("golden-hour-01"), "the note must NAME the photo: {note}");
-        assert!(note.contains("reference IMAGE"), "{note}");
-        assert!(note.contains("one extra image on each call"), "the cost is disclosed: {note}");
-        assert!(!note.contains("{file}"), "every placeholder must be filled: {note}");
-        // …and the failure arm says the develop fell back to text rather than
+        // a rationale.
+        let note = autoshade::rationale::keys::STYLE_REF_IMAGE.replace("{n}", "3");
+        assert!(note.contains("3 reference photo(s)"), "the note must COUNT the photos: {note}");
+        assert!(note.contains("extra images on each call"), "the cost is disclosed: {note}");
+        assert!(!note.contains("{n}"), "every placeholder must be filled: {note}");
+        // …and the failure arm says that reference went as words rather than
         // leaving the user to assume a photo went.
         assert!(
-            autoshade::rationale::keys::STYLE_REF_IMAGE_FAILED.contains("used the text reference only"),
+            autoshade::rationale::keys::STYLE_REF_IMAGE_FAILED.contains("it went as words only"),
             "{}",
             autoshade::rationale::keys::STYLE_REF_IMAGE_FAILED
         );
@@ -3228,7 +2940,7 @@ mod tests {
         let dir = std::env::temp_dir()
             .join(format!("autoshade-prepay-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let off = autoshade::style::EmbeddingSwitch::OFF;
+        let off = autoshade::library::EmbeddingSwitch::OFF;
         let e = analyze_cmd(Path::new("no-such.arw"), Some(dir.clone()), None, None, None, None, false, false, off)
             .unwrap_err()
             .to_string();
@@ -3744,8 +3456,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Every flag S1 added carries `--help` text, and `style-query` carries a
-    /// description.
+    /// Every flag S1 added carries `--help` text, and the library commands say
+    /// what they do.
     ///
     /// clap prints a bare `--adherence <ADHERENCE>` for an undocumented flag,
     /// which is indistinguishable from a flag that does nothing. The tiers in
@@ -3771,7 +3483,7 @@ mod tests {
             ("--adherence", "Direct"),
             ("--adherence", "Brief"),
             ("--embed", "SigLIP 2 sidecar"),
-            ("--no-embed", "14-dim ranking"),
+            ("--no-embed", "without reference"),
         ] {
             assert!(analyze.contains(flag), "analyze must offer {flag}");
             assert!(analyze.contains(phrase), "analyze --help must explain {flag}: missing {phrase:?}");
@@ -3781,21 +3493,17 @@ mod tests {
         for phrase in ["Hint", "Direct", "Brief", "SigLIP 2 sidecar"] {
             assert!(auto.contains(phrase), "auto --help must explain the flag: missing {phrase:?}");
         }
-        // `style-index --looks` says what a look library IS, since it is not
-        // the same thing as the RAW library the same command builds.
-        let index = render("style-index");
-        assert!(index.contains("FINISHED photos"), "{index}");
-        assert!(index.contains("--looks"), "{index}");
-        // …and `style-query` says what it prints and that it spends nothing.
-        let query = render("style-query");
-        for phrase in [
-            "weights in force", "No advisor call", "--direction", "--embed",
-            "--distil", "Prints, never renders",
-        ] {
-            assert!(query.contains(phrase), "style-query --help must say {phrase:?}: {query}");
+        // `library-build` says what a reference library IS…
+        let build = render("library-build");
+        assert!(build.contains("FINISHED photos"), "{build}");
+        assert!(build.contains("--describe"), "{build}");
+        // …and `library-search` says what it prints and that it spends nothing.
+        let search = render("library-search");
+        for phrase in ["No advisor call", "--direction", "--adherence", "BACKGROUND"] {
+            assert!(search.contains(phrase), "library-search --help must say {phrase:?}: {search}");
         }
-        // No flag on any of the three may ship with an empty help line.
-        for name in ["analyze", "auto", "style-index", "style-query"] {
+        // No flag on any of them may ship with an empty help line.
+        for name in ["analyze", "auto", "library-build", "library-search"] {
             let mut cmd = Cli::command();
             let sub = cmd.find_subcommand_mut(name).unwrap();
             for arg in sub.get_arguments() {
@@ -3859,71 +3567,37 @@ mod tests {
         );
     }
 
-    /// `--describe` reaches the build as a VALUE, requires `--embed`, and
-    /// resolving it writes nothing (S2).
+    /// `--describe` reaches the build as a VALUE, and resolving it writes
+    /// nothing (S2).
     ///
-    /// The description pass is a 4.3 GB checkpoint and minutes of GPU time; it
-    /// must never start because a stale environment variable said so while the
-    /// user typed a plain `style-index`. And it is meaningless without the
-    /// embedding: the prose exists to be EMBEDDED (`desc_embed`), so clap
-    /// refuses the combination rather than building an index whose
-    /// descriptions nothing can retrieve on.
+    /// The phrase pass is a 4.3 GB checkpoint and minutes of GPU time; it must
+    /// never start because a stale environment variable said so while the
+    /// user typed a plain `library-build`.
     ///
-    /// MUTATION THIS KILLS: drop `requires = "embed"` from the flag (the
-    /// `--describe` alone case then parses), or resolve the switch with
-    /// `Some(true)` regardless of the flag (the plain case then comes back on).
+    /// MUTATION THIS KILLS: resolve the switch with `Some(true)` regardless of
+    /// the flag (the plain case then comes back on).
     #[test]
     fn cli_describe_flag_reaches_the_build() {
+        use autoshade::library::DescribeSwitch;
         let before = std::env::var_os("AUTOSHADE_STYLE_DESCRIBE");
-        let switch = |args: &[&str]| -> autoshade::style::DescribeSwitch {
+        let switch = |args: &[&str]| -> DescribeSwitch {
             let cli = Cli::try_parse_from(args).expect("the command parses");
             match cli.command {
-                Command::StyleIndex { describe, .. } => {
-                    // The pref default is FALSE here, as it is for the CLI:
-                    // the CLI has no preferences file.
-                    autoshade::style::DescribeSwitch::resolve(describe.then_some(true), false)
-                }
-                _ => panic!("expected style-index"),
+                // The pref default is FALSE here: the CLI has no preferences file.
+                Command::LibraryBuild { describe, .. } => DescribeSwitch::resolve(describe.then_some(true), false),
+                _ => panic!("expected library-build"),
             }
         };
+        assert!(switch(&["autoshade", "library-build", "finals", "--describe"]).on(), "--describe must reach the build as an ON value");
         assert!(
-            switch(&["autoshade", "style-index", "raws", "--embed", "--describe"]).on(),
-            "--describe must reach the build as an ON value"
-        );
-        // Not passing it is what "off" means on the CLI, which has no
-        // preferences file: with nothing set, a plain `style-index` must not
-        // start a 4.3 GB pass.
-        assert!(
-            !switch(&["autoshade", "style-index", "raws", "--embed"]).on()
+            !switch(&["autoshade", "library-build", "finals"]).on()
                 || autoshade::config::live_env_os("AUTOSHADE_STYLE_DESCRIBE").is_some(),
-            "a plain style-index must not describe unless the environment asked for it"
+            "a plain library-build must not describe unless the environment asked for it"
         );
-        assert!(
-            !autoshade::style::DescribeSwitch::resolve_with(None, false, |_| None).on(),
-            "nothing set: OFF"
-        );
-        // The environment override is the documented middle rank (flag > env >
-        // preference), exactly as `AUTOSHADE_STYLE_EMBED` behaves — and the
-        // FLAG still wins over it in both directions.
-        assert!(
-            autoshade::style::DescribeSwitch::resolve_with(None, false, |_| Some("1".into())).on(),
-            "an explicit environment override is honoured"
-        );
-        assert!(
-            !autoshade::style::DescribeSwitch::resolve_with(None, true, |_| Some("0".into())).on(),
-            "…and it can turn a stored preference off again"
-        );
-        // …and the look-library form takes it too.
-        assert!(
-            switch(&["autoshade", "style-index", "--looks", "finals", "--embed", "--describe"]).on(),
-            "the look library must be describable as well"
-        );
-        // Without --embed clap refuses, before any work starts.
-        let msg = match Cli::try_parse_from(["autoshade", "style-index", "raws", "--describe"]) {
-            Ok(_) => panic!("--describe alone must be refused"),
-            Err(e) => e.to_string(),
-        };
-        assert!(msg.contains("--embed"), "the refusal must name the missing flag: {msg}");
+        assert!(!DescribeSwitch::resolve_with(None, false, |_| None).on(), "nothing set: OFF");
+        // flag > env > preference, exactly as `AUTOSHADE_STYLE_EMBED` behaves.
+        assert!(DescribeSwitch::resolve_with(None, false, |_| Some("1".into())).on(), "an explicit environment override is honoured");
+        assert!(!DescribeSwitch::resolve_with(None, true, |_| Some("0".into())).on(), "…and it can turn a stored preference off again");
         assert_eq!(
             before,
             std::env::var_os("AUTOSHADE_STYLE_DESCRIBE"),
@@ -3931,224 +3605,22 @@ mod tests {
         );
     }
 
-    /// The retrieval diagnostic shows the SENTENCE behind the `desc=` term
-    /// when the index carries one, and changes nothing when it does not.
-    ///
-    /// MUTATION THIS KILLS: print `e.desc` directly instead of through
-    /// `sanitize_desc` (the newline case then forges a diagnostic line), or
-    /// print an empty `desc=""` for records that carry no prose (every pre-S2
-    /// index's diagnostic then grows a field that says nothing).
+    /// The search diagnostic prints the develop's own notes through the
+    /// pipeline's helpers, not a second spelling of them.
     #[test]
-    fn style_query_prints_prose_when_present() {
-        assert_eq!(fmt_desc(None), "", "no prose, no field");
-        assert_eq!(fmt_desc(Some("   ")), "", "a blank description is not a field either");
-        assert_eq!(
-            fmt_desc(Some("a warm, hazy grade")),
-            " desc=\"a warm, hazy grade\"",
-            "the sentence is printed beside the term it explains"
-        );
-        // The door, on the diagnostic surface too: a description with a
-        // newline in it must not be able to forge a second neighbour line.
-        let forged = fmt_desc(Some("cool blue\n  photo-2 distance=0.000000"));
-        assert!(!forged.contains('\n'), "a description must not forge a line: {forged:?}");
-        assert_eq!(forged, " desc=\"cool blue photo-2 distance=0.000000\"");
-        // And the diagnostic really calls it on BOTH kinds of candidate: a
-        // helper wired to the neighbour lines only would pass every assertion
-        // above while the look lines still printed nothing.
+    fn library_search_renders_the_develops_own_notes() {
         let body = include_str!("main.rs")
-            .split("fn style_query_cmd(")
+            .split("fn library_search_cmd(")
             .nth(1)
             .expect("the diagnostic exists")
-            .split("
-fn ")
+            .split("\nfn ")
             .next()
             .unwrap();
-        assert_eq!(
-            body.matches("fmt_desc(").count(),
-            2,
-            "the neighbour line and the look line both print the prose"
-        );
-    }
-
-    /// A30 — the distillation preview is a flag on the diagnostic that already
-    /// retrieves, and it really rides the command.
-    ///
-    /// The preview's CONTENT is `style::distillation_preview`'s own test; what
-    /// this pins is the wiring, the same way the prose and mask helpers above
-    /// are pinned: a diagnostic that computed the preview and never printed it
-    /// would pass every assertion in the library.
-    ///
-    /// MUTATION THIS KILLS: dropping the `if distil` call from
-    /// `style_query_cmd`, or leaving the flag out of the `Command::StyleQuery`
-    /// match arm (the count is then 0).
-    #[test]
-    fn style_query_prints_the_distillation_when_asked() {
-        let body = include_str!("main.rs")
-            .split("fn style_query_cmd(")
-            .nth(1)
-            .expect("the diagnostic exists")
-            .split("
-fn ")
-            .next()
-            .unwrap();
-        assert_eq!(
-            body.matches("distillation_preview(").count(),
-            1,
-            "the diagnostic prints the preview it took a flag for"
-        );
-        assert!(body.contains("if distil"), "…and only when asked: {body:.0}");
-        // The flag reaches the function: clap builds the arm, so a missing
-        // parameter is a compile error, but a flag parsed and dropped is not.
-        let parsed = Cli::try_parse_from([
-            "autoshade", "style-query", "photo.arw", "--distil", "--style", "0.9",
-        ])
-        .expect("the flag parses");
-        match parsed.command {
-            Command::StyleQuery { distil, style, .. } => {
-                assert!(distil, "the flag is carried, not swallowed");
-                assert_eq!(style, Some(0.9));
-            }
-            _ => panic!("expected the style-query arm"),
+        for call in ["pipeline::references_note(", "pipeline::style_background_note(", "library::reference_block(", "lib.search("] {
+            assert!(body.contains(call), "the diagnostic must call {call}");
         }
-        let off = Cli::try_parse_from(["autoshade", "style-query", "photo.arw"])
-            .expect("and it is optional");
-        assert!(
-            matches!(off.command, Command::StyleQuery { distil: false, .. }),
-            "the preview is off unless asked for"
-        );
     }
 
-    /// The hubness disclosure on the terms line (clearing A8):
-    /// `txt_hub_corrected`'s doc promises the reader of the terms is TOLD
-    /// when the candidates' hubness was removed — `,hub=<mean>` with the
-    /// subtracted value, bare `,hub` for a correction in force over a pair
-    /// with no cosine, and NOTHING on a pre-vocabulary index whose line must
-    /// read bit for bit as it did before the correction existed.
-    ///
-    /// MUTATION THIS KILLS: dropping the `hub` suffix from the txt term, or
-    /// printing it on an uncorrected index.
-    #[test]
-    fn style_query_terms_disclose_the_hub_correction() {
-        let mut t = autoshade::style::DistanceTerms {
-            txt: 0.25,
-            txt_gap: Some(0.5),
-            txt_hub: Some(0.125),
-            txt_standardised: true,
-            desc_standardised: true,
-            txt_hub_corrected: true,
-            ..Default::default()
-        };
-        let line = fmt_text_terms(&t);
-        assert!(
-            line.contains("txt=0.250000(raw=0.500000,z,hub=0.125000)"),
-            "the subtracted mean is named on the txt term: {line}"
-        );
-        let desc_part = line.split("desc=").nth(1).unwrap();
-        assert!(!desc_part.contains("hub"), "desc never wears the mark: {line}");
-        t.txt_hub = None;
-        let line = fmt_text_terms(&t);
-        assert!(
-            line.contains("txt=0.250000(raw=0.500000,z,hub)"),
-            "a correction in force with no cosine still tells the reader: {line}"
-        );
-        t.txt_hub_corrected = false;
-        t.txt_hub = Some(0.125);
-        let line = fmt_text_terms(&t);
-        assert!(
-            !line.contains("hub"),
-            "a pre-vocabulary index reads exactly as before the correction: {line}"
-        );
-    }
-
-    /// The offline diagnostic prints each neighbour's mask counts beside the
-    /// terms, so a mis-bucketed mask is visible as a NUMBER before it becomes a
-    /// sentence in a paid prompt (S3).
-    ///
-    /// An unmeasured neighbour prints nothing at all — a `masks=0` there would
-    /// read as "this photographer works globally" when the truth is that a
-    /// pre-S3 index never looked.
-    ///
-    /// MUTATION THIS KILLS: dropping `fmt_masks` from the neighbour line, or
-    /// making it answer `masks=0` for an absent habit.
-    #[test]
-    fn style_query_prints_mask_counts() {
-        use autoshade::mask_habit::MaskHabit;
-        use autoshade::recipe::{LocalAdjustment, MaskGeometry};
-        assert_eq!(fmt_masks(None), "", "no habit, no field");
-        let measured_but_global = MaskHabit::of(&[]);
-        assert_eq!(
-            fmt_masks(Some(&measured_but_global)),
-            " masks=0 sky=0 subject=0 ground=0 range=0 other=0 refined=0 curved=0",
-            "a MEASURED zero is printed — it is a finding, not an absence"
-        );
-        let habit = MaskHabit::of(&[
-            LocalAdjustment {
-                mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.8, full_x: 0.5, full_y: 0.0 },
-                exposure_ev: -0.6,
-                ..Default::default()
-            },
-            LocalAdjustment {
-                mask: MaskGeometry::Radial {
-                    top: 0.3, left: 0.3, bottom: 0.7, right: 0.7, feather: 0.5,
-                    roundness: 0.0, flipped: false, angle: 0.0, midpoint: 50.0,
-                    mask_version: 2,
-                },
-                exposure_ev: 0.4,
-                range: Some(autoshade::recipe::RangeMask::Luminance {
-                    lo_outer: 0.4, lo: 0.6, hi: 1.0, hi_outer: 1.0,
-                }),
-                ..Default::default()
-            },
-        ]);
-        assert_eq!(
-            fmt_masks(Some(&habit)),
-            " masks=2 sky=1 subject=1 ground=0 range=0 other=0 refined=1 curved=0",
-            "every bucket is named, and the refinement count beside them"
-        );
-        // B5: the CURVE count is a column of its own, and it counts a mask
-        // that draws one — `refined` and `curved` are different questions.
-        let curved = MaskHabit::of(&[LocalAdjustment {
-            mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.8, full_x: 0.5, full_y: 0.0 },
-            exposure_ev: -0.6,
-            main_curve: vec![autoshade::recipe::CurvePoint { input: 0, output: 12 }],
-            ..Default::default()
-        }]);
-        assert_eq!(
-            fmt_masks(Some(&curved)),
-            " masks=1 sky=1 subject=0 ground=0 range=0 other=0 refined=0 curved=1",
-            "a local curve is counted and printed, and it is not a range refinement"
-        );
-        // A count must not be able to forge a second neighbour line, the way
-        // the description door already guards prose.
-        assert!(!fmt_masks(Some(&habit)).contains('\n'));
-        // …and the diagnostic really calls it, on the neighbour lines: a helper
-        // nothing invokes would pass every assertion above.
-        let body = include_str!("main.rs")
-            .split("fn style_query_cmd(")
-            .nth(1)
-            .expect("the diagnostic exists")
-            .split("
-fn ")
-            .next()
-            .unwrap();
-        assert_eq!(
-            body.matches("fmt_masks(").count(),
-            1,
-            "the neighbour line prints the counts"
-        );
-    }
-
-    /// The manual's CLI synopsis (docs/USER_MANUAL.md, the `text` block under
-    /// 「CLI reference」) names every subcommand and exactly the long flags each
-    /// one's clap definition takes. The 2026-10-02 doc sweep found that block's
-    /// preamble still claiming the v1.0.0 definitions; the block itself was
-    /// right only because someone had kept it so by hand. This keeps it right
-    /// on every push (`scripts/check_doc_drift.py` names this test as the
-    /// home of the check, because it needs the clap tree rather than text).
-    ///
-    /// MUTATION: delete `--negative RAW` from the manual's `match` line, or add
-    /// a flag to any subcommand without documenting it, and this fails naming
-    /// the subcommand.
     #[test]
     fn the_manuals_cli_synopsis_matches_every_commands_help() {
         use clap::CommandFactory;

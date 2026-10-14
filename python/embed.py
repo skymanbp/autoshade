@@ -557,12 +557,6 @@ def embed_texts(model, tokenizer, device, texts, np):
     return out.cpu().numpy().astype(np.float32)
 
 
-def cosine_scores(image_vec, text_vecs, np):
-    if text_vecs is None or len(text_vecs) == 0:
-        return []
-    return [float(np.dot(image_vec, row)) for row in text_vecs]
-
-
 def vec_json(np, v):
     """The vector as JSON array text, printed at float32's own shortest
     round-tripping precision.
@@ -590,7 +584,6 @@ def main() -> None:
         help='JSONL manifest of {"text": ...} — N strings in, N text vectors out, in the '
         "same order, from ONE process",
     )
-    ap.add_argument("--vocab-file", help="UTF-8 phrases, one per line")
     ap.add_argument("--output")
     ap.add_argument("--batch", type=int, default=8, help="images per forward pass")
     ap.add_argument("--cache", default=os.path.join(os.path.dirname(__file__), "weights"))
@@ -618,11 +611,6 @@ def main() -> None:
     device = pick_device(a.cpu, "cuda:0")
     model = load_model(a.cache, device, a.fp16)
     tokenizer = load_tokenizer(model_dir(a.cache))
-    vocab = []
-    if a.vocab_file:
-        with open(a.vocab_file, encoding="utf-8") as f:
-            vocab = [line.strip() for line in f if line.strip()]
-    vocab_vecs = embed_texts(model, tokenizer, device, vocab, np) if vocab else None
     dtype = "float16" if a.fp16 and device.startswith("cuda") else "float32"
     log(f"device={device} dtype={dtype} model={MODEL['repo']}")
 
@@ -667,8 +655,6 @@ def main() -> None:
                 value = f.read().strip()
             if value:
                 rec += ',"text_vector":' + vec_json(np, embed_texts(model, tokenizer, device, [value], np)[0])
-        if vocab_vecs is not None:
-            rec += ',"vocab_scores":' + json.dumps(cosine_scores(v, vocab_vecs, np), separators=(",", ":"))
         publish(a.output, rec + "}\n")
         log(f"wrote {a.output} ({MODEL['dim']}-dim)")
         return
@@ -720,8 +706,6 @@ def main() -> None:
             txt = texts_by_path.get(p)
             if txt:
                 rec += ',"text_vector":' + vec_json(np, embed_texts(model, tokenizer, device, [txt], np)[0])
-            if vocab_vecs is not None:
-                rec += ',"vocab_scores":' + json.dumps(cosine_scores(v, vocab_vecs, np), separators=(",", ":"))
             out.append(rec + "}")
         log(f"{min(start + batch, len(paths))} / {len(paths)}")
     publish(a.output, "\n".join(out) + "\n")

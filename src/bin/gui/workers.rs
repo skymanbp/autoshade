@@ -1972,72 +1972,27 @@ impl AutoShadeApp {
     /// in the language live NOW (L12#4), the button re-arms, and a successful
     /// build both remembers its folder (so a rebuild starts there) and triggers
     /// a fresh status read — the panel must not keep showing the OLD counts.
-    ///
-    /// The description note is APPENDED rather than woven into the sentence:
-    /// it renders only above 0, so an ordinary build (or one with the pass off)
-    /// reads exactly as it did before S2.
     fn on_style_built(&mut self, lang: Lang, outcome: StyleBuildOutcome) {
         self.style_build_inflight = false;
         self.style_build_progress = None;
         match outcome {
-            StyleBuildOutcome::Saved { total, dir, without_embedding, described } => {
-                // TWO sentences, not one with an "(0 without …)" tail: the
-                // degraded case is the exception and an always-on clause would
-                // read as noise on every ordinary build. The count is what
-                // makes the toast different at all — before R28 Batch-4 a
-                // build whose every embedding failed said exactly what a fully
-                // embedded one said, and the release GUI has no console for
-                // the per-photo stderr line that would have told the user
-                // otherwise (adjudication F3).
-                let t = if without_embedding > 0 {
-                    trf(
-                        lang,
-                        "Style library built: {n} of your own edits from {path} ({m} of them without a style embedding)",
-                        &[
-                            ("n", &total.to_string()),
-                            ("path", &abs_display(&dir)),
-                            ("m", &without_embedding.to_string()),
-                        ],
-                    )
+            StyleBuildOutcome::Saved { total, dir, phrased } => {
+                let (n, path, m) = (total.to_string(), abs_display(&dir), phrased.to_string());
+                let t = if phrased > 0 {
+                    trf(lang, "Reference library built: {n} finished photos from {path}, {m} with look phrases", &[("n", &n), ("path", &path), ("m", &m)])
                 } else {
-                    trf(
-                        lang,
-                        "Style library built: {n} of your own edits from {path}",
-                        &[("n", &total.to_string()), ("path", &abs_display(&dir))],
-                    )
+                    trf(lang, "Reference library built: {n} finished photos from {path}", &[("n", &n), ("path", &path)])
                 };
-                let t = t + &described_note(lang, described, total);
                 self.status = t.clone();
                 self.toast(ToastKind::Success, t);
                 self.style_src_dir = Some(dir);
+                // A build has just run the embedding model, so its one-time
+                // download is done: searching is what the user built it for.
+                self.style_embed = true;
                 self.start_style_info();
-            }
-            StyleBuildOutcome::LooksSaved { total, dir, described } => {
-                let t = trf(lang, "Look library built: {n} finished photos from {path}", &[("n", &total.to_string()), ("path", &abs_display(&dir))])
-                    + &described_note(lang, described, total);
-                self.status = t.clone();
-                self.toast(ToastKind::Success, t);
-                self.looks_src_dir = Some(dir);
-                self.start_style_info();
-            }
-            // The shared guard's refusal, in the shared WORDING (serve.rs says
-            // the same thing to the web): the folder, why it yielded nothing,
-            // where to point instead, and that the old library still stands.
-            StyleBuildOutcome::NothingIndexed { dir } => {
-                let t = trf(
-                    lang,
-                    "Nothing to index in {path} — no RAW there has its .xmp sidecar beside it (AutoShade keeps its own .xmp in the develop store, never beside the RAW, so point this at the folder you edit in Lightroom). Your existing style library was left untouched.",
-                    &[("path", &abs_display(&dir))],
-                );
-                self.status = t.clone();
-                self.toast(ToastKind::Error, t);
             }
             StyleBuildOutcome::Failed { err } => {
-                let t = trf(
-                    lang,
-                    "Building the style library failed: {err}",
-                    &[("err", &err)],
-                );
+                let t = trf(lang, "Building the reference library failed: {err}", &[("err", &err)]);
                 self.status = t.clone();
                 self.toast(ToastKind::Error, t);
             }
@@ -3068,21 +3023,4 @@ impl AutoShadeApp {
         }
     }
 
-}
-
-/// The S2 build note, rendered from the SHARED rationale template rather than
-/// a second spelling of it: the CLI prints the same key after the same build,
-/// so a user comparing the two surfaces sees one sentence.
-///
-/// Empty below 1, which is what makes the toast identical to its pre-S2 self
-/// whenever the description pass was off or reached nothing.
-fn described_note(lang: Lang, described: usize, total: usize) -> String {
-    if described == 0 {
-        return String::new();
-    }
-    trf(
-        lang,
-        autoshade::rationale::keys::STYLE_DESCRIBED,
-        &[("n", &described.to_string()), ("total", &total.to_string())],
-    )
 }

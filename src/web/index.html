@@ -1140,37 +1140,36 @@ async function selectPhoto(id, stem, el) {
     if (!pop.hidden) { pop.hidden = true; return; }
     pop.hidden = false; pop.innerHTML = "Loading…";
     try {
-      const d = await (await fetch("/api/style-info")).json();
-      const s = d.style || {};
+      const d = await (await fetch("/api/library-info")).json();
+      const s = d.library || {};
       const styleHtml = !s.built
-        ? `<b>Style reference library:</b> <i>not built yet</i> — the Style slider needs an index of YOUR past edits.`
-        : `<b>Style reference library:</b> ${s.total} of your edits indexed${s.source_dir?` from <code>${escapeHtml(s.source_dir)}</code>`:""}.${s.index_file?`<div class="scenes">Index file: <code>${escapeHtml(s.index_file)}</code></div>`:""}<div class="scenes">Scenes it knows: ${(s.scenes||[]).map(x=>`${escapeHtml(x.tag)} ×${x.n}`).join("  ·  ") || "—"}</div>`;
+        ? `<b>Reference library:</b> <i>${s.error ? escapeHtml(s.error) : "not built yet"}</i> — the Style slider needs a folder of YOUR finished photos.`
+        : `<b>Reference library:</b> ${s.total} finished photos${s.source_dir?` from <code>${escapeHtml(s.source_dir)}</code>`:""}.${s.file?`<div class="scenes">Library file: <code>${escapeHtml(s.file)}</code></div>`:""}`;
       pop.innerHTML = `<h4>Library</h4>
         <b>Working folder:</b> <code>${escapeHtml(d.working_dir||"—")}</code> · ${d.working_count||0} source(s)<br>
         <b>Output:</b> <code>${escapeHtml(d.out_dir||"./out")}</code> — renders / heals / exports land here<br>
         <b>Develop store:</b> <code>${escapeHtml(d.store_dir||"—")}</code> — recipes / XMP / versions live here<br><br>
         ${styleHtml}
         <div class="srow" style="margin-top:8px; gap:6px; flex-wrap:nowrap">
-          <input class="sinput sb-dir" placeholder="Your library folder (RAW + .xmp pairs)…" style="font-size:11px" />
-          <button class="sb-build" type="button" style="white-space:nowrap">Build index</button>
+          <input class="sinput sb-dir" placeholder="Folder of your finished photos (JPEG / TIFF / PNG)…" style="font-size:11px" />
+          <button class="sb-build" type="button" style="white-space:nowrap">Build library</button>
         </div>
-        <div class="scenes" style="margin-top:6px">Other users: point this at YOUR own folder of edited RAWs (each RAW with its Lightroom <code>.xmp</code> beside it) and Build — the Style slider then leans the AI toward how YOU edit (0% ignores it). Equivalent CLI: <code>autoshade style-index &lt;dir&gt;</code>.</div>`;
+        <div class="scenes" style="margin-top:6px">Point this at a folder of finished photos whose look you like and Build — each develop then shows the AI the closest few and their look in words (the Style slider sets how much; 0% ignores it). A rebuild measures only new or changed photos. Equivalent CLI: <code>autoshade library-build &lt;dir&gt;</code>.</div>`;
       const sbDir = pop.querySelector(".sb-dir"), sbBuild = pop.querySelector(".sb-build");
       sbDir.value = s.source_dir || d.working_dir || "";
       sbBuild.onclick = async () => {
         const dir = sbDir.value.trim().replace(/^"+|"+$/g, "").trim();
         if (!dir) { sbBuild.textContent = "need a folder"; return; }
-        sbBuild.disabled = true; sbBuild.textContent = "building… (decodes your RAWs, can take minutes)";
+        sbBuild.disabled = true; sbBuild.textContent = "building… (can take minutes the first time)";
         try {
-          const rr = await fetch("/api/style-build", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({dir})});
-          // The button is too small for the real reason (an empty build now
-          // REFUSES to overwrite a good index and says why) — put it in the
+          const rr = await fetch("/api/library-build", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({dir})});
+          // The button is too small for the real reason — put it in the
           // status line, where the whole message fits.
-          if (!rr.ok) { sbBuild.textContent = "failed"; sbBuild.disabled = false; setStatus("style index: " + (await rr.text() || "build failed")); return; }
+          if (!rr.ok) { sbBuild.textContent = "failed"; sbBuild.disabled = false; setStatus("reference library: " + (await rr.text() || "build failed")); return; }
           const j = await rr.json();
           sbBuild.textContent = `built ${j.total} ✓`;
           sbBuild.disabled = false;
-          setStatus(`style index built: ${j.total} edits from ${j.source_dir}`);
+          setStatus(`reference library built: ${j.total} finished photos from ${j.source_dir}`);
         } catch (e) { sbBuild.textContent = "error"; sbBuild.disabled = false; }
       };
     } catch (e) { pop.innerHTML = "failed to load library info"; }

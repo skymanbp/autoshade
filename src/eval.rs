@@ -398,126 +398,6 @@ fn curve_rmse(a: &[f32; 256], b: &[f32; 256]) -> f64 {
     (s / 256.0).sqrt()
 }
 
-/// The user's master tone-curve SHAPE from an XMP, summarised as
-/// `(black_lift, s_strength)` for the style library — `None` if they drew no
-/// curve. Stores the shape, not the raw point list (averaging point lists is
-/// mush). Reused by `style.rs` so the curve metric has one definition.
-pub(crate) fn user_curve_shape(xmp: &str) -> Option<(f32, f32)> {
-    // Scoped like every other whole-document read (`xmp::crs_own_scope`): a
-    // creative profile bakes its OWN ToneCurvePV2012 inside `<crs:Look>`, and
-    // a flat scan learned that curve as the photographer's habit.
-    let pts = parse_tone_curve(&crate::xmp::crs_own_scope(xmp), "ToneCurvePV2012");
-    // ANY point counts — even a one-point curve renders (pinned endpoints,
-    // the same rule the comparison loop follows). `< 2` silently dropped
-    // real one-point curve habits from the style library.
-    if pts.is_empty() {
-        return None;
-    }
-    let lut = curve_lut(&pts);
-    Some((curve_black_lift(&lut), curve_s_strength(&lut)))
-}
-
-/// The 256-entry LUT of a RECIPE's own master tone curve.
-///
-/// Exposed (batch 2) because the style distillation pulls a proposal's curve
-/// toward the library's curve habit, and it has to measure "before" with the
-/// ruler that measured the library — [`user_curve_shape`] above. An empty
-/// curve is the identity, which `curve_lut` already answers, so there is no
-/// special case here.
-pub(crate) fn recipe_curve_lut(r: &EditRecipe) -> [f32; 256] {
-    curve_lut(&ai_tone_curve_points(r))
-}
-
-/// `(black_lift, s_strength)` off a LUT — the same pair
-/// [`user_curve_shape`] learns from a sidecar, so "the library's habit" and
-/// "this proposal's curve" are quantities on one scale.
-pub(crate) fn curve_shape(lut: &[f32; 256]) -> (f32, f32) {
-    (curve_black_lift(lut), curve_s_strength(lut))
-}
-
-/// Family SUMMARY statistics for one user sidecar — the colour-shaping
-/// aggregates the style index stores beside its flat slider map (R23-1 / B6).
-///
-/// Aggregates on purpose, not the 38 individual keys: averaging per-band values
-/// across four retrieved exemplars is mush (one photo's blue and another's
-/// orange cancel), and 38 numbers per exemplar would swamp the reference block
-/// the prompt can afford. Two or three numbers per family answer the question
-/// the reference exists to answer — how hard does this photographer push
-/// colour?
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-pub struct FamilySummary {
-    /// Mean |value| over the 8 bands, per axis: hue, saturation, luminance.
-    pub hsl: [f32; 3],
-    /// `[strongest wheel saturation, mean |wheel luminance|]`.
-    pub grade: [f32; 2],
-    /// How many of the three per-channel RGB curves they drew (0..=3).
-    pub rgb_curves: u8,
-}
-
-impl Default for FamilySummary {
-    fn default() -> Self {
-        Self { hsl: [0.0; 3], grade: [0.0; 2], rgb_curves: 0 }
-    }
-}
-
-impl FamilySummary {
-    /// Every number finite (a NaN serialises as `null` and makes the whole
-    /// index unloadable — the `exemplar_is_finite` rule).
-    pub fn is_finite(&self) -> bool {
-        self.hsl.iter().chain(&self.grade).all(|v| v.is_finite())
-    }
-
-    /// Bound every number to its band and the curve count to 3 — this reaches
-    /// a paid prompt, so it gets invariants at the door like the rest of the
-    /// index.
-    pub fn clamp(&mut self) {
-        for v in self.hsl.iter_mut().chain(self.grade.iter_mut()) {
-            *v = if v.is_finite() { v.clamp(0.0, 100.0) } else { 0.0 };
-        }
-        self.rgb_curves = self.rgb_curves.min(3);
-    }
-}
-
-/// The colour-family summary of a user sidecar, or `None` when they shaped no
-/// colour at all (all bands neutral, no wheel, no channel curve) — an all-zero
-/// summary in the index would tell the AI "this user pushes nothing", which is
-/// only honest if we measured something.
-///
-/// Read through the SAME registry expansions the eval ruler uses, so the index
-/// and the report can never disagree about what "uses the mixer" means.
-pub(crate) fn user_family_summary(xmp: &str) -> Option<FamilySummary> {
-    // Same scope rule as every other whole-document read: a creative Look's
-    // baked mixer belongs to the PROFILE, not the photographer.
-    let scope = crate::xmp::crs_own_scope(xmp);
-    let scope = Scope::new(scope.as_ref());
-    let mut sums = [0.0f32; 3];
-    for f in catalogue::hsl_expansion() {
-        sums[f.axis] += scope.crs_f32(&f.crs).unwrap_or(0.0).abs();
-    }
-    let hsl = sums.map(|s| s / crate::recipe::HSL_BANDS.len() as f32);
-    let wheel = |suffix: &str| -> Vec<f32> {
-        COLOR_GRADE_CRS
-            .iter()
-            .filter(|(field, _)| field.ends_with(suffix))
-            .map(|(_, key)| scope.crs_f32(key).unwrap_or(0.0))
-            .collect()
-    };
-    let max_sat = wheel("_sat").into_iter().fold(0.0f32, |a, v| a.max(v.abs()));
-    let lums = wheel("_lum");
-    let mean_lum = if lums.is_empty() {
-        0.0
-    } else {
-        lums.iter().map(|v| v.abs()).sum::<f32>() / lums.len() as f32
-    };
-    let rgb_curves = ["ToneCurvePV2012Red", "ToneCurvePV2012Green", "ToneCurvePV2012Blue"]
-        .iter()
-        .filter(|tag| !parse_tone_curve(scope.text(), tag).is_empty())
-        .count() as u8;
-    let mut out = FamilySummary { hsl, grade: [max_sat, mean_lum], rgb_curves };
-    out.clamp();
-    (out != FamilySummary::default()).then_some(out)
-}
 
 #[derive(Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct Acc {
@@ -1296,7 +1176,7 @@ pub fn run(
             // user curve is a valid comparison baseline — curve_lut of no points
             // is the identity LUT). ANY point counts: even a one-point curve
             // renders (pinned endpoints), so `>= 2` still hid real curves.
-            // Scoped like `user_curve_shape` and `parse_user_xmp` — the SAME rule
+            // Scoped like `parse_user_xmp` — the SAME rule
             // at every read of a whole sidecar, or the report scores the AI
             // against a curve the profile baked, not the one the user drew.
             let user_curve =
@@ -2077,7 +1957,9 @@ mod tests {
         assert!(lut[129] > 190.0, "no cliff after the duplicate: {}", lut[129]);
         // A ONE-point user curve is a real habit, not "no curve".
         let one = r#"<crs:ToneCurvePV2012><rdf:Seq><rdf:li>0, 30</rdf:li></rdf:Seq></crs:ToneCurvePV2012>"#;
-        let (lift, _s) = user_curve_shape(one).expect("one-point curve counts");
+        let pts = parse_tone_curve(one, "ToneCurvePV2012");
+        assert_eq!(pts.len(), 1, "one-point curve counts");
+        let lift = curve_black_lift(&curve_lut(&pts));
         assert!(lift > 25.0, "black lift read from the single point: {lift}");
     }
 

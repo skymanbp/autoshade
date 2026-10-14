@@ -1,11 +1,13 @@
-//! Style-embedding bridge — Rust side of the sidecar (`python/embed.py`).
+//! Image-and-text embedding bridge — Rust side of the sidecar (`python/embed.py`).
 //!
 //! Same shell-out pattern as [`crate::denoise`] and [`crate::segment`]: a local
-//! Python process runs SigLIP 2 over one image (or a manifest of them) and
-//! writes a JSON record holding a 768-dim L2-normalised vector, which
-//! [`crate::style`] stores beside each exemplar's 14-dim hand feature. The
-//! weights auto-download to `python/weights` on first run (~1.50 GB, digest
-//! pinned) — nothing is stored in this repo.
+//! Python process runs SigLIP 2 over one image (or a manifest of them, or a
+//! manifest of texts) and writes 768-dim L2-normalised vectors. The reference
+//! library ([`crate::library`]) keeps one image vector per finished photo and
+//! one text vector per look-phrase list; a develop asks with its own image
+//! vector and its direction's text vector. The weights auto-download to
+//! `python/weights` on first run (~1.50 GB, digest pinned) — nothing is stored
+//! in this repo.
 //!
 //! **Budgeted, since R28 Batch-4.** The model is the largest thing this tree
 //! loads and it does not live in host RAM, so neither of the two budgets that
@@ -14,12 +16,6 @@
 //! [`fp16_wanted`] half precision, and calls are SINGLE-FLIGHTED
 //! ([`crate::with_model_slot`]) so at most one model is resident whatever the caller's
 //! concurrency. Together, 4 concurrent × 1.50 GB becomes 1 × 0.75 GB.
-//!
-//! **The embedding is additive, in both directions.** An index built without
-//! this sidecar loads and retrieves exactly as it did before (the field is
-//! `None` and the cosine block contributes nothing), and a build whose sidecar
-//! fails keeps going with the 14-dim feature alone. That is deliberate: a
-//! 1.5 GB download must never be able to turn a working Style panel off.
 
 use std::path::{Path, PathBuf};
 
@@ -37,8 +33,8 @@ pub const MODEL_REVISION: &str = "f775b65a79762255128c981547af89addcfe0f88";
 /// The ONE tokenizer class `python/embed.py` instantiates, and the class the
 /// pinned `tokenizer_config.json` names.
 ///
-/// Spelled on this side because it goes into the stored index provenance
-/// ([`crate::style::embed_provenance_string`]): the checkpoint alone did not
+/// Spelled on this side because it goes into a library's model stamp
+/// ([`crate::library::Library::model`]): the checkpoint alone did not
 /// distinguish two indices whose text vectors came from different doors, and
 /// this batch's own root cause was exactly two doors on one checkpoint
 /// answering vectors at cosine 0.72-0.78 of each other.
@@ -48,11 +44,11 @@ pub const TEXT_TOKENIZER_CLASS: &str = "GemmaTokenizer";
 
 /// Everything one embedding run needs; built from [`Config`] like
 /// [`crate::segment::SegmentOpts`].
+#[derive(Clone, Debug)]
 pub struct EmbedOpts {
     pub python_bin: String,
     pub script: PathBuf,
     pub text_file: Option<PathBuf>,
-    pub vocab_file: Option<PathBuf>,
 }
 
 impl EmbedOpts {
@@ -61,13 +57,12 @@ impl EmbedOpts {
             python_bin: cfg.python_bin.clone(),
             script: PathBuf::from(&cfg.embed_script),
             text_file: None,
-            vocab_file: None,
         }
     }
 
-    /// Is the sidecar even present? The style index build asks BEFORE the
-    /// worker pool starts, so a build without the script says so once instead
-    /// of failing 150 times.
+    /// Is the sidecar even present? A library build asks BEFORE it decodes
+    /// anything, so a build without the script says so once instead of
+    /// failing per photo.
     pub fn available(&self) -> bool {
         crate::sidecar_script_present(&self.script)
     }
@@ -86,44 +81,17 @@ impl EmbedOpts {
 /// to fp32 and normalises THERE (`v = v.float()` before the norm), so the
 /// record it writes is still float32 text declaring `"norm":"l2"` — no
 /// invariant `parse_vector` checks moves, including the ±1e-3 norm gate. The
-/// only consumer of the elements themselves is `style::embed_distance`, which
-/// is a ranking: a dot product of two unit vectors, clamped to [-1, 1] and
-/// multiplied by the configured embedding weight against a 14-dim block.
-/// fp16 carries ~4.9e-4 of relative precision per element
-/// (10 explicit mantissa bits), and the quantity built from them is an order
-/// COMPARISON, not a measurement.
+/// only consumer of the elements is a ranking — dot products of unit vectors
+/// ([`crate::library`]'s search) — and fp16 carries ~4.9e-4 of relative
+/// precision per element, which an order COMPARISON does not feel.
 ///
-/// **MEASURED.** The 169-exemplar library was indexed twice by the same binary
-/// on the same GPU, the two arms differing only in `AUTOSHADE_EMBED_FP32`.
-/// Image vectors: `1 - cos(fp16, fp32)` is at most 2.235e-5 and 2.951e-6 on
-/// average, the largest single element differs by 1.025e-3, not one of the 169
-/// vectors is bit-identical, and both arms land within 1.2e-7 of unit norm. On
-/// the ranking with no direction in it — the 14-dim block plus
-/// `style::embed_distance` at the shipped weight — the top-5 is
-/// IDENTICAL for 168 of 169 leave-one-out queries, and the exception swaps
-/// ranks 1 and 2 of the same five photographs. No retrieved SET moves at all,
-/// so the distilled targets, which are a mean over the retrieved set and not
-/// over its order, cannot move either.
-///
-/// **Where it is not free**, which is why `AUTOSHADE_EMBED_FP32` is a real
-/// escape hatch rather than a decorative one. The same tower scores
-/// `style::LOOK_VOCAB`, and a tag is an ARGMAX over those scores: they differ
-/// by at most 5.4e-4 between the arms, and that is enough to flip a group's
-/// winner wherever two captions sit that close. 6 of the 169 exemplars come
-/// out with different tags. When the description sidecar is OFF,
-/// `style::desc_text` falls back to the tag string and `desc_embed` is that
-/// string's vector, so those six — and, measured, only those six — carry a
-/// cosine of 0.924 to 0.997 against their fp32 selves where every other
-/// exemplar carries 0.999998. The description term then reorders around them:
-/// over the three showcase directions the top-5 SET differs for 6, 5 and 31 of
-/// 169 queries and the top-1 for 1, 2 and 9. With descriptions present
-/// `desc_text` prefers the prose, which no tag argmax feeds, and the flips
-/// leave the ranking alone.
-///
-/// So the default stays fp16: half the resident weights, an image-side drift
-/// that moved no retrieved set in 169 queries, and one discrete
-/// boundary — the tag argmax — named here rather than discovered later. An
-/// index built in the other precision is still queried in the arithmetic it
+/// **MEASURED** (on the previous index, 169 photos, same binary and GPU, the
+/// two arms differing only in `AUTOSHADE_EMBED_FP32`): `1 - cos(fp16, fp32)`
+/// of the image vectors is at most 2.235e-5 and 2.951e-6 on average, both
+/// arms land within 1.2e-7 of unit norm, and an image-only ranking's top-5
+/// was identical for 168 of 169 leave-one-out queries (the exception swapped
+/// ranks 1 and 2 of the same five). `AUTOSHADE_EMBED_FP32` stays a real escape
+/// hatch: a library built in one precision is queried in the arithmetic it
 /// was built with by setting the variable.
 fn fp16_wanted() -> bool {
     !crate::config::live_env("AUTOSHADE_EMBED_FP32")
@@ -172,19 +140,19 @@ pub fn embed_text_batch(
 ) -> Result<Vec<Vec<f32>>> {
     if !opts.script.exists() {
         bail!(
-            "style-embedding sidecar not found at {} — run from the project dir or set \
+            "embedding sidecar not found at {} — run from the project dir or set \
              AUTOSHADE_EMBED_SCRIPT.",
             opts.script.display()
         );
     }
     let text = crate::run_model_sidecar(
-        "style-embedding sidecar",
+        "embedding sidecar",
         &opts.python_bin,
         text_sidecar_args(&opts.script, manifest, scratch, fp16_wanted()),
         scratch,
     )?;
     let out = parse_text_vectors(&text, expect).with_context(|| {
-        format!("style-embedding sidecar wrote an unusable text batch at {}", scratch.display())
+        format!("embedding sidecar wrote an unusable text batch at {}", scratch.display())
     });
     // Removed on BOTH paths: a batch the parser refused is no more an answer
     // than one it accepted (see [`embed_file_record`]).
@@ -196,17 +164,17 @@ pub fn embed_text_batch(
 /// width / finiteness / unit-norm gate a single vector goes through.
 pub fn parse_text_vectors(text: &str, expect: usize) -> Result<Vec<Vec<f32>>> {
     let rec: serde_json::Value =
-        serde_json::from_str(text.trim()).context("style-embedding text output is not JSON")?;
+        serde_json::from_str(text.trim()).context("embedding text output is not JSON")?;
     if let Some(e) = rec.get("error").and_then(|v| v.as_str()) {
-        bail!("style-embedding sidecar declined this text batch: {e}");
+        bail!("embedding sidecar declined this text batch: {e}");
     }
     let rows = rec
         .get("text_vectors")
         .and_then(|v| v.as_array())
-        .context("style-embedding text output has no `text_vectors` array")?;
+        .context("embedding text output has no `text_vectors` array")?;
     if rows.len() != expect {
         bail!(
-            "style-embedding sidecar answered {} text vectors for {expect} texts — a batch that \
+            "embedding sidecar answered {} text vectors for {expect} texts — a batch that \
              does not line up would attach a vector to the wrong record",
             rows.len()
         );
@@ -224,19 +192,19 @@ pub fn parse_text_vectors(text: &str, expect: usize) -> Result<Vec<Vec<f32>>> {
 /// `text_vectors`) agree about width, finiteness and norm.
 fn parse_unit_vector(arr: &[serde_json::Value], key: &str) -> Result<Vec<f32>> {
     if arr.len() != EMBED_DIM {
-        bail!("style-embedding `{key}` has wrong width {}", arr.len());
+        bail!("embedding `{key}` has wrong width {}", arr.len());
     }
     let mut out = Vec::with_capacity(arr.len());
     for x in arr {
-        let f = x.as_f64().context("style-embedding vector holds a non-number")? as f32;
+        let f = x.as_f64().context("embedding vector holds a non-number")? as f32;
         if !f.is_finite() {
-            bail!("style-embedding `{key}` holds a non-finite element");
+            bail!("embedding `{key}` holds a non-finite element");
         }
         out.push(f);
     }
     let n = out.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
     if (n - 1.0).abs() > 1e-3 {
-        bail!("style-embedding `{key}` is not L2-normalised (norm {n:.6})");
+        bail!("embedding `{key}` is not L2-normalised (norm {n:.6})");
     }
     Ok(out)
 }
@@ -253,7 +221,7 @@ pub struct EmbedBatchRecord {
 /// The BATCH IMAGE door's argv — N frames in one process, one model load.
 ///
 /// It exists for the same reason the batch TEXT door does, one step later:
-/// until S2 `StyleIndex::build` called this sidecar once PER PHOTOGRAPH on the
+/// until S2 the old style-index build called this sidecar once PER PHOTOGRAPH on the
 /// image side too, so a 169-photo library re-loaded 1.50 GB of weights 169
 /// times — 5,618 s measured on the photographer's own corpus. `embed.py` has
 /// implemented `--manifest-jsonl` since R27 Batch-5; nothing was wired to it.
@@ -262,7 +230,6 @@ fn image_batch_args(
     manifest: &Path,
     output: &Path,
     fp16: bool,
-    vocab_file: Option<&Path>,
 ) -> Vec<std::ffi::OsString> {
     let mut v: Vec<std::ffi::OsString> = vec![
         // `-E`: the second layer against a PYTHON* import hijack (the env
@@ -276,9 +243,6 @@ fn image_batch_args(
     ];
     if fp16 {
         v.push("--fp16".into());
-    }
-    if let Some(p) = vocab_file {
-        v.extend(["--vocab-file".into(), p.into()]);
     }
     v
 }
@@ -298,25 +262,24 @@ pub fn embed_image_batch(
 ) -> Result<Vec<EmbedBatchRecord>> {
     if !opts.script.exists() {
         bail!(
-            "style-embedding sidecar not found at {} — run from the project dir or set \
+            "embedding sidecar not found at {} — run from the project dir or set \
              AUTOSHADE_EMBED_SCRIPT.",
             opts.script.display()
         );
     }
     let text = crate::run_model_sidecar(
-        "style-embedding sidecar",
+        "embedding sidecar",
         &opts.python_bin,
         image_batch_args(
             &opts.script,
             manifest,
             scratch,
             fp16_wanted(),
-            opts.vocab_file.as_deref(),
         ),
         scratch,
     )?;
     let out = parse_batch_records(&text).with_context(|| {
-        format!("style-embedding sidecar wrote an unusable image batch at {}", scratch.display())
+        format!("embedding sidecar wrote an unusable image batch at {}", scratch.display())
     });
     // Removed on BOTH paths: a batch the parser refused is no more an answer
     // than one it accepted (see [`embed_file_record`]).
@@ -338,11 +301,11 @@ pub fn parse_batch_records(text: &str) -> Result<Vec<EmbedBatchRecord>> {
             continue;
         }
         let value: serde_json::Value = serde_json::from_str(line.trim())
-            .with_context(|| format!("style-embedding batch line {} is not JSON", i + 1))?;
+            .with_context(|| format!("embedding batch line {} is not JSON", i + 1))?;
         let path = value
             .get("path")
             .and_then(|v| v.as_str())
-            .with_context(|| format!("style-embedding batch line {} names no path", i + 1))?
+            .with_context(|| format!("embedding batch line {} names no path", i + 1))?
             .to_string();
         if let Some(e) = value.get("error").and_then(|v| v.as_str()) {
             out.push(EmbedBatchRecord { path, record: None, error: Some(e.to_string()) });
@@ -368,7 +331,7 @@ pub fn parse_batch_records(text: &str) -> Result<Vec<EmbedBatchRecord>> {
 /// The sidecar's argv, as a pure function of the four things that decide it —
 /// so the flags this build passes can be pinned by a test instead of being
 /// visible only to a running Python.
-fn sidecar_args(script: &Path, input: &Path, output: &Path, fp16: bool, text_file: Option<&Path>, vocab_file: Option<&Path>) -> Vec<std::ffi::OsString> {
+fn sidecar_args(script: &Path, input: &Path, output: &Path, fp16: bool, text_file: Option<&Path>) -> Vec<std::ffi::OsString> {
     let mut v: Vec<std::ffi::OsString> = vec![
         // `-E`: the second layer against a PYTHON* import hijack (the env
         // allowlist in `dotenv_child_env` is the first).
@@ -383,7 +346,6 @@ fn sidecar_args(script: &Path, input: &Path, output: &Path, fp16: bool, text_fil
         v.push("--fp16".into());
     }
     if let Some(p) = text_file { v.extend(["--text-file".into(), p.into()]); }
-    if let Some(p) = vocab_file { v.extend(["--vocab-file".into(), p.into()]); }
     v
 }
 
@@ -391,21 +353,19 @@ fn sidecar_args(script: &Path, input: &Path, output: &Path, fp16: bool, text_fil
 pub struct EmbedRecord {
     pub vector: Vec<f32>,
     pub text_vector: Option<Vec<f32>>,
-    pub vocab_scores: Option<Vec<f32>>,
 }
 
 /// Run the sidecar on ONE image and return its record: the L2-normalised
-/// vector, plus the text vector and the vocabulary scores when the caller
-/// asked for them.
+/// vector, plus the text vector when the caller asked for one.
 ///
-/// `scratch` is the JSON file the sidecar writes; the caller owns its lifetime
-/// (`style::stage_embed_frame` hands over a pid + seq name so parallel workers
-/// never share one). The run itself is [`crate::run_model_sidecar`] — the
+/// `scratch` is the JSON file the sidecar writes; the caller names it
+/// (`library::frames` hands over a pid + seq name so parallel workers never
+/// share one). The run itself is [`crate::run_model_sidecar`] — the
 /// shared spawn/bound/exit-0-is-not-success executor.
 ///
 /// SERIALISED against every other model sidecar in this process — see
 /// [`crate::with_model_slot`]. The fan-out that gate closes (adjudication F3):
-/// `StyleIndex::build` used to reach this door from up to
+/// the old style-index build used to reach this door from up to
 /// `decode::MAX_CONCURRENT_DECODES` = 4 workers, each spawning its own
 /// sidecar, so four SigLIP loads could be live at once — 6.0 GB of fp32
 /// weights, 3.0 GB even with `--fp16`, against a consumer GPU that commonly
@@ -426,19 +386,19 @@ pub struct EmbedRecord {
 pub fn embed_file_record(opts: &EmbedOpts, input: &Path, scratch: &Path) -> Result<EmbedRecord> {
     if !opts.script.exists() {
         bail!(
-            "style-embedding sidecar not found at {} — run from the project dir or set \
+            "embedding sidecar not found at {} — run from the project dir or set \
              AUTOSHADE_EMBED_SCRIPT.",
             opts.script.display()
         );
     }
     let text = crate::run_model_sidecar(
-        "style-embedding sidecar",
+        "embedding sidecar",
         &opts.python_bin,
-        sidecar_args(&opts.script, input, scratch, fp16_wanted(), opts.text_file.as_deref(), opts.vocab_file.as_deref()),
+        sidecar_args(&opts.script, input, scratch, fp16_wanted(), opts.text_file.as_deref()),
         scratch,
     )?;
     let v = parse_record(&text).with_context(|| {
-        format!("style-embedding sidecar wrote an unusable record at {}", scratch.display())
+        format!("embedding sidecar wrote an unusable record at {}", scratch.display())
     });
     // The scratch file is an INTERMEDIATE, not an artifact: the vector is what
     // the caller keeps. Leaving it behind would litter the develop store with
@@ -464,26 +424,26 @@ pub fn parse_vector(text: &str) -> Result<Vec<f32>> {
 
 pub fn parse_record(text: &str) -> Result<EmbedRecord> {
     let rec: serde_json::Value = serde_json::from_str(text.trim())
-        .context("style-embedding output is not JSON")?;
+        .context("embedding output is not JSON")?;
     if let Some(e) = rec.get("error").and_then(|v| v.as_str()) {
-        bail!("style-embedding sidecar declined this image: {e}");
+        bail!("embedding sidecar declined this image: {e}");
     }
     let arr = rec
         .get("vector")
         .and_then(|v| v.as_array())
-        .context("style-embedding output has no `vector` array")?;
+        .context("embedding output has no `vector` array")?;
     if arr.len() != EMBED_DIM {
         bail!(
-            "style-embedding sidecar returned a {}-dim vector; this build indexes {EMBED_DIM}-dim \
+            "embedding sidecar returned a {}-dim vector; this build indexes {EMBED_DIM}-dim \
              vectors and mixing widths in one index makes its exemplars incomparable",
             arr.len()
         );
     }
     let mut v = Vec::with_capacity(EMBED_DIM);
     for x in arr {
-        let f = x.as_f64().context("style-embedding vector holds a non-number")? as f32;
+        let f = x.as_f64().context("embedding vector holds a non-number")? as f32;
         if !f.is_finite() {
-            bail!("style-embedding vector holds a non-finite element");
+            bail!("embedding vector holds a non-finite element");
         }
         v.push(f);
     }
@@ -492,32 +452,13 @@ pub fn parse_record(text: &str) -> Result<EmbedRecord> {
     // elements (~1e-7 each) and tight enough that an unnormalised vector — the
     // only failure this is guarding — never passes.
     if (norm - 1.0).abs() > 1e-3 {
-        bail!("style-embedding vector is not L2-normalised (norm {norm:.6})");
+        bail!("embedding vector is not L2-normalised (norm {norm:.6})");
     }
     let parse_vec = |key: &str| -> Result<Option<Vec<f32>>> {
         let Some(arr) = rec.get(key).and_then(|v| v.as_array()) else { return Ok(None) };
         parse_unit_vector(arr, key).map(Some)
     };
-    let vocab_scores = rec.get("vocab_scores").and_then(|v| v.as_array()).map(|arr| {
-        if arr.len() != crate::style::LOOK_VOCAB.len() {
-            return Err(anyhow::anyhow!("style-embedding `vocab_scores` has wrong width {} (expected {})", arr.len(), crate::style::LOOK_VOCAB.len()));
-        }
-        arr.iter()
-            .map(|x| {
-                // Two refusals with two names, as `parse_unit_vector` spells
-                // them: a string or a `null` (serde_json's spelling of a NaN)
-                // is not a number, and only a number can be non-finite — one
-                // message reading "is not finite" named the wrong thing for
-                // the first.
-                let f = x.as_f64().context("style-embedding `vocab_scores` holds a non-number")? as f32;
-                if !f.is_finite() {
-                    bail!("style-embedding `vocab_scores` holds a non-finite element");
-                }
-                Ok(f)
-            })
-            .collect::<Result<Vec<_>>>()
-    }).transpose()?;
-    Ok(EmbedRecord { vector: v, text_vector: parse_vec("text_vector")?, vocab_scores })
+    Ok(EmbedRecord { vector: v, text_vector: parse_vec("text_vector")? })
 }
 
 #[cfg(test)]
@@ -541,49 +482,6 @@ mod tests {
         assert!(e.contains("512-dim"), "{e}");
     }
 
-    #[test]
-    fn vocab_scores_width_is_the_vocab_len() {
-        let vector = unit_record(EMBED_DIM);
-        let scores = (0..crate::style::LOOK_VOCAB.len())
-            .map(|i| format!("{:.1}", i as f32))
-            .collect::<Vec<_>>()
-            .join(",");
-        let text = vector.trim_end_matches('}').to_owned()
-            + &format!(",\"vocab_scores\":[{scores}]}}");
-        let record = parse_record(&text).expect("a full vocabulary score vector parses");
-        assert_eq!(record.vocab_scores.as_ref().map(Vec::len), Some(crate::style::LOOK_VOCAB.len()));
-        let short_scores = (0..crate::style::LOOK_VOCAB.len() - 1)
-            .map(|i| format!("{:.1}", i as f32))
-            .collect::<Vec<_>>()
-            .join(",");
-        let short = vector.trim_end_matches('}').to_owned()
-            + &format!(",\"vocab_scores\":[{short_scores}]}}");
-        let error = parse_record(&short).unwrap_err().to_string();
-        assert!(error.contains("wrong width"), "{error}");
-    }
-
-    /// MUTATION: fold the two `vocab_scores` refusals back into one "is not
-    /// finite" message and the string case fails by name — a string is not a
-    /// number, and only a number can be non-finite.
-    #[test]
-    fn a_vocab_score_that_is_not_a_number_is_refused_by_name() {
-        let vector = unit_record(EMBED_DIM);
-        let with_scores = |scores: &[String]| {
-            vector.trim_end_matches('}').to_owned()
-                + &format!(",\"vocab_scores\":[{}]}}", scores.join(","))
-        };
-        let mut scores: Vec<String> =
-            (0..crate::style::LOOK_VOCAB.len()).map(|i| format!("{:.1}", i as f32)).collect();
-        scores[3] = "\"warm\"".into();
-        let e = parse_record(&with_scores(&scores)).unwrap_err().to_string();
-        assert!(e.contains("non-number"), "{e}");
-        // A magnitude no f32 can hold is a finite JSON number and infinite
-        // once cast — the second refusal, checked after the cast.
-        scores[3] = "1e300".into();
-        let e = parse_record(&with_scores(&scores)).unwrap_err().to_string();
-        assert!(e.contains("non-finite"), "{e}");
-    }
-
     /// A stand-in interpreter over `crate::write_stand_in` that copies a
     /// garbage fixture to the `--output` argument (argv position 6 for every
     /// one of this bridge's three argv shapes) and exits 0 — a sidecar that
@@ -599,7 +497,7 @@ mod tests {
         );
         let script = dir.join("embed.py");
         std::fs::write(&script, "# stand-in\n").unwrap();
-        EmbedOpts { python_bin, script, text_file: None, vocab_file: None }
+        EmbedOpts { python_bin, script, text_file: None }
     }
 
     /// The scratch is an intermediate on BOTH paths at all three doors: an
@@ -645,8 +543,8 @@ mod tests {
 
     /// MUTATION: drop the `is_finite` guard and a NaN reaches the index, where
     /// serde writes it as `null` and the NEXT load of the whole index fails —
-    /// one bad photo costs the user an hour-long rebuild (the exact failure
-    /// `style::exemplar_is_finite` exists for).
+    /// one bad photo costs the user a rebuild (the failure the library's own
+    /// door, `library::is_unit_vector`, exists for).
     #[test]
     fn a_non_finite_element_is_refused() {
         let mut body: Vec<String> = (0..EMBED_DIM).map(|_| "0.0".to_string()).collect();
@@ -678,7 +576,7 @@ mod tests {
     #[test]
     fn the_sidecar_argv_carries_the_half_precision_flag() {
         let args = |fp16| {
-            sidecar_args(Path::new("embed.py"), Path::new("in.png"), Path::new("out.json"), fp16, None, None)
+            sidecar_args(Path::new("embed.py"), Path::new("in.png"), Path::new("out.json"), fp16, None)
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()

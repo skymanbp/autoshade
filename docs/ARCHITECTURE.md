@@ -505,7 +505,7 @@
 > battery is +1, the sidecar-folder preference; before that, v1.2.1's release
 > run of disclosure fixes was net +5 —
 > `a_truncated_rationale_says_how_much_it_lost` and
-> `look_weight_is_a_real_ratio_against_the_direction_terms` (`13cebf9`), the
+> the look-weight ratio test of the retired style index (`13cebf9`), the
 > neutral-solution exit's own note and the post-stamp domain disclosure
 > (`693917b`), and `a_build_that_does_not_adopt_leaves_the_old_folder_strictly_alone`,
 > the store adoption's refusal branch, which the macOS opt-out had until then
@@ -533,7 +533,7 @@
 > `2a415a5` — 5 `advisor` for the colour guardrail pair, the templated
 > neutral hatch, the numeric curve/mask freedoms, the three-band snapshot
 > and the judge's palette item, 1 `advisor::mod` for the verifier checklist,
-> 3 `mask_habit` for the hue habit dimension — so library 1245→1254;
+> 3 for the retired mask-habit hue dimension — so library 1245→1254;
 > before it, R30 batch 2 added 18 named tests against
 > `a31eb2f` — 15 `style` for the vocabulary-complete distillation (one of
 > them the env-gated `#[ignore]` calibration harness) and 3
@@ -1505,17 +1505,12 @@ Two things the axis must never touch, both measured defects rather than taste:
 mask — `bd3f9d4` fixed a recipe that dragged sea foam to grey), and the prompt's
 matching "recovering highlights must NOT grey out specular whites" rule, which
 stays unconditional at every strength. `clamp`'s hard ranges are a safety bound
-and are not on the axis either. The **Style** slider's `style_pull` (0.18 at the
-shipped Style 0.3, 0.5 at 0.5, full at Style 1.0, and continuous between them
-since 2026-09-24 — it used to jump from 0.294 to 0.500 between Style 0.49 and
-0.50) is off the strength axis on purpose too:
-that number bounds mean-regression toward the user's
-own average edit, so coupling it to strength would turn "push harder" into "look
-more like my average" — the other axis, pointing the other way. Since v1.2.3 there
-is exactly one case in which that pull does not run at all — a direction leading at
-adherence `Direct`/`Brief` (`pipeline::style_blend_pull`, §4.6). That is not a
-strength decision either; it is the same `StyleVoice` the wording above reads, so
-the block and the arithmetic cannot disagree about who leads.
+and are not on the axis either. The **Style** slider is off the strength axis
+on purpose too: it says how closely to follow the reference library's looks (a
+ceiling below 0.85, a target at or above it), and coupling it to strength would
+turn "push harder" into "look more like my references" — the other axis. When a
+direction leads at adherence `Direct`/`Brief` the references become background
+(`library::StyleVoice`, §4.6); that is not a strength decision either.
 
 This also closes a gap this document had already declared: the verifier row above
 has always promised "consistent with metadata **& intent**", while
@@ -3753,52 +3748,47 @@ report prints that line itself), and a photo where only one side toned no
 longer reaches the hue row at all — its omission is recorded on the `*_sat` row,
 which is the control that carries the decision. Every other row is untouched.
 
-**Three surfaces, one loader (R23-2).** The library
-([`src/style.rs`](../src/style.rs)) is built from RAW+`.xmp` pairs by
-`autoshade style-index <dir>`, by the web info panel, and — since R23-2 — by the
-GUI's **AI panel › Reference libraries › My Lightroom edits library** (folder
-picker → background worker with per-photo progress; no cancel, because
-`StyleIndex::build` has no cancellation checkpoints, so the button simply stays
-disabled until it lands). R30 gave that entry its own sub-area and gated what
-CONSUMES a library, not what shapes one: while the Style slider sits at 0,
-`(req.style > 0.0).then(load_effective)` in `pipeline.rs` opens no index, so the
-two switches that do nothing but feed an analysis — the reference-photo switch
-and **Use look library** — are drawn disabled with the reason above them.
-Everything else stays live at every Style value: the folder pickers, both Build
-buttons, and the retrieval-engine rung, whose **Use SigLIP 2 look embedding**
-and **Describe looks…** switches `actions.rs` resolves when it starts a build
-and which therefore decide what that build computes, not only what a query is
-matched on.
-The index always publishes to the per-user store (`store::style_index_path`);
-the legacy cwd-relative `out/style-index.json` stays readable. Reading it is
-`style::load_effective` / `style::index_info` — ONE central-then-legacy walk
-returning three typed states (`Loaded` / `Absent` / `Unusable`), consumed by the
-pipeline, the web handler and the GUI status line alike. The empty-index refusal
-lives in `StyleIndex::save`, so no caller can truncate a good index with a
-failed build.
+**The reference library (2026-10-13 redesign).** One kind of entry, one file,
+one question. The library ([`src/library.rs`](../src/library.rs) and
+[`src/library/`](../src/library/)) holds FINISHED photographs only — JPEG, TIFF
+or PNG exports whose look the photographer wants to follow — and reads no
+`.xmp`: a finished photo may carry work no sidecar records (a Photoshop pass),
+and a sidecar may be stale or one of several. It replaced the RAW+XMP style
+index and its separate look library, whose recipe blend and distillation pull
+had no place once the entries carry no settings.
 
-The style library's source is `src/style.rs` and the files under `src/style/`.
-Through v1.6.5 the root was one file of 10,782 lines; it is now the module doc,
-the imports, the `mod` declarations and a re-export of every moved item in the
-visibility it had (no `style::` path changed), and the code sits where its stage
-sits: `limits.rs` (dimensions, weights, the index versions, the size limits, the
-bounded-text helpers), `switches.rs` (the environment switches: the retrieval
-weights, the embedding and describe switches, their provenance), `voice.rs` (the
-style query, the look vocabulary, the colour-habit floor, the style voice),
-`features.rs` (feature vectors: the library walk, the distilled keys, setting
-bands, the sidecar readers), `exemplar.rs` (the style and look records,
-embedding distances, the staged frame, the intermediates sweep, description
-embeddings), `build.rs` (building the index: the sidecars and stages, the
-exemplar cache, frame embedding, descriptions, the self check),
-`standardise.rs` (finiteness, hubness, the standardised and distance terms,
-retagging), `index.rs` (the style index: its record and everything it does),
-`load.rs` (the effective index, the index info and state, neighbour stems),
-`targets.rs` (style targets: consistency, the exercised and habit means, the
-targets record, blending toward them), `distil.rs` (the distilled fields, the
-preview, the style pull, normalisation) and `tests.rs` (the module's own
-tests). The split moved code and did not edit it: beyond visibility and the one
-test helper that read the file as text, every non-blank line of the old file
-lands once in the new ones.
+| Part | File | Job |
+|---|---|---|
+| Entry, file, loader | `library.rs` | `Library { version, dir, model, entries }`; each `Entry` holds the frame digest, the path and its size+mtime `Stamp`, the image vector, optional look phrases and their text vector. `load()` answers `Absent` / `Unusable(reason)` / `Ready`; every vector is checked at the door. |
+| Build | `library/build.rs` | `rebuild(dir, sidecars, describe, progress)` loads the current file, keeps what it already measured (same path+stamp, or same frame digest), measures the rest — decode and stage 512-px frames, then one SigLIP image pass, one Qwen3-VL phrase pass, one SigLIP text pass — and publishes atomically. An empty build is refused, never saved. |
+| Frames and sidecars | `library/frames.rs` | Staging, the finished-photo walk, and the three sidecar batches; `query_vectors` embeds a develop's own preview and direction through the same staging, so a query and a stored vector are comparable. |
+| Search | `library/search.rs` | Scene (image↔image) and prompt (direction text↔phrases) cosines, each standardised over the candidates, summed with the prompt at weight 2; the photo being developed is excluded; top 3. |
+| Voice and block | `library/voice.rs` | `StyleVoice` (ceiling / target / background) and the `REFERENCE LOOKS` block the proposer reads, one line per reference, numbered against the images that went with it. |
+| Switches | `library/switches.rs` | The embed and describe switches as values (flag > environment > preference) and the model stamp. |
+
+Three surfaces build it through the same `rebuild` call: `autoshade
+library-build <dir>`, the web info panel (`POST /api/library-build`), and the
+GUI's **AI panel › Reference library** (folder picker → background worker with
+per-stage progress; no cancel, and a killed process leaves the previous file
+intact). `autoshade library-search <photo>` prints what a develop would get —
+each hit's scene and prompt numbers and phrases, the fenced block, and the
+rationale notes — through the pipeline's own helpers, with no paid call.
+
+**In a develop** (`pipeline::produce_recipe`), the library is opened only when
+Style is above 0. Every gap degrades to no references and says why in the
+rationale: no library, an unusable file, the search switch off, a failed query.
+The block goes behind `FENCE_STYLE_REFERENCE`; with the opt-in reference images
+each loaded reference becomes the next image after the develop target, and one
+that will not load goes as words while the others still go. The reviewers get
+the first reference's phrases as the look summary (`library::look_summary`), so
+a judge cannot punish a develop for following the library.
+
+**Who leads.** `StyleVoice::choose(style, direction, adherence)` is the one
+derivation: a non-blank direction at adherence `Direct` or `Brief` makes the
+references BACKGROUND and the direction leads (user ruling 2026-09-01); `Hint`,
+a blank direction or none leaves Style to decide between a ceiling (below 0.85)
+and a target. The proposer's block, the judge's brief and the rationale's
+background note all read that one voice.
 
 **ONE RAW/XMP pairing rule ([`src/xmp_pair.rs`](../src/xmp_pair.rs)).** The rule
 used to be open-coded as `raw.with_extension("xmp")` at six sites — the
@@ -3825,264 +3815,6 @@ base, which only reads, moved with the note that discloses it. The build now
 also discloses the RAWs it could not pair (count, first ten stems), so "you
 pointed me at the wrong folder" no longer reads as "you have edited 40
 photographs".
-
-**Incremental builds: one content-keyed cache mechanism, two caches.** Every
-build used to redo the decode, the 14-dim feature, the SigLIP image vector, the
-vocabulary scores and the SigLIP text vector for every photograph; only the Qwen
-description survived, in `describe::DescriptionCache`. The file mechanics of a
-content-keyed cache — the byte cap, the four degradations (absent / over-cap /
-not UTF-8 / unparseable ⇒ an EMPTY cache and one sentence, never an error), the
-`tmp` + `durable_replace` publish, the 64-hex key rule — now live once in
-[`src/content_cache.rs`](../src/content_cache.rs), and
-[`src/style_cache.rs`](../src/style_cache.rs) is the second user:
-`<store>/style-exemplars.json`, keyed by the **SHA-256 of the staged frame**
-(`describe::frame_digest`), the same key shape the description cache has always
-used. Each entry also records a `SourceStamp` — absolute path (case-folded on
-Windows), length, mtime and the photographer's saved quarter-turns — because
-the frame digest cannot be known without the decode that produces the frame, and
-the 14 features are a function of the FILE (EXIF + histogram + rotation) rather
-than of the frame. A build that finds an exact stamp match may reuse the entry
-whole and never open the RAW; anything else decodes, stages, hashes, and still
-reuses the model answers under the digest. That fast path is ALL-OR-NOTHING
-against the passes the build asked for (`cache_answers_everything`): a record
-that skipped its decode has no staged frame and so could never afterwards be
-embedded or described. Entries are gated per field — the index feature version,
-`embed_provenance_string()` for the vectors, and
-`describe::CachedDescription::is_current()` for the prose — and admitted at load
-only inside the INDEX door's own bands (`CACHE_BANDS`, from
-`exemplar_is_finite`), because a bit-rotted vector served into a published index
-would make that index refuse to load. What is never cached is the
-NORMALISATION: `compute_norm` takes the mean and σ over the whole exemplar set,
-so one photograph joining or leaving legitimately moves every z-scored
-dimension, and both are recomputed from the merged set on every build. The
-`.xmp` is re-read every build too — sliders, curve, colour families and mask
-habit are properties of the sidecar, not of the pixels. `CURRENT_INDEX_VERSION`
-does NOT bump for this: no field is added to the serialised index, nothing about
-the fourteen features or the ranking changes, an old index loads exactly as
-before, and the version that gates reuse is stamped inside each CACHE entry, so
-a future bump silently invalidates the cache instead of misreading it. Each
-build prints `style index cache: reused N, recomputed M, removed K,
-skipped-for-sidecar S`; a full-hit rebuild loads neither model checkpoint, and a
-build WITHOUT the embedding pass publishes nothing to the cache (its keep-set is
-incomplete: only staged frames carry digests) and reports `removed 0`. The
-LOOK library keeps the description cache and nothing more — its records carry no
-14-dim feature for an entry to be about, it is capped at 500 curated finished
-photos, and it is rebuilt only when that folder is re-curated.
-
-The index door has ONE table for the `settings` labels it admits —
-`style::setting_bands`, the recipe's own clamp bands, read by `load` for every
-stored exemplar. `read_settings` writes the twelve reference sliders and the
-distillation vocabulary v1.2.0 added (the 24 HSL cells and the 14 colour-grade
-fields, `distil_keys`); until v1.2.2 the loader carried its own twelve-label
-list, so a library with one HSL or colour-grade edit produced an index the same
-binary refused to read back ("exemplar 0 has an unsupported setting key"), and
-`style-index --looks`, which merges into the existing file, replaced it with a
-looks-only index. Two tests hold the two sides together: every label the writer
-can produce has a band, and an exemplar carrying all fifty survives
-`save` → `load` clamped to the recipe's ranges. A label nobody writes is still
-refused at the door.
-
-Two disclosure rules follow from those states. A develop that ASKED for style
-and ended with no reference always says so in the rationale — the condition is
-"strength > 0 and the final reference is `None`", which covers a missing
-library, a retrieval that matched nothing and an unusable file in one place
-(before R23-2 only the last of the three spoke, so a fresh install had an inert
-Style slider and no explanation). And every analysis that DID get a reference
-names the shots it used, bounded to file stems. The optional
-reference-**image** switch (GUI only, off by default) additionally sends the
-nearest past photo as a second `input_image` on the propose call — the prompt
-names the two frames by position, `store:false` covers both, and the extra image
-is disclosed in the tooltip and in the rationale.
-
-**S1 continuation: text and finished-look retrieval.** The RAW index keeps the
-14-dimensional EXIF/histogram retrieval it shipped at v5, is written at version
-6, and may carry additive
-SigLIP 2 image vectors, Direction text vectors, zero-shot vocabulary scores,
-bounded tags, and an optional description vector. Its distance is
-`d14 + W_EMB(1-cos(q_img,e_img)) + W_TXT(1-cos(q_txt,e_img)) + W_DESC(1-cos(q_txt,e_desc))`;
-missing or width-mismatched vectors contribute zero, and zero weights preserve
-the v5 order bit for bit. The vocabulary is a versioned, grouped list of 33
-SigLIP-style photographic phrases; at most one winning phrase per group enters
-the four-tag summary, and a group's winner is the phrase whose score stands
-furthest above the LIBRARY's own mean for it, so a caption every photograph
-scores highly on cannot own a tag everywhere. That is what version 6 is: tags
-feed `desc_text`, so re-deriving them moves the ranking and not just the
-printed summary. Every index this build reads — v4, v5 or v6 — therefore has
-its tags re-derived on load rather than trusted from disk.
-
-**S3: the local-work habit.** An exemplar may additionally carry a
-`MaskHabit` (`src/mask_habit.rs`) read from the same sidecar the settings come
-from, through the develop chain's own path-aware importer
-(`xmp::xmp_to_recipe_for_photo`): the number of masks the photographer ENABLED
-with a non-zero amount, how many carry a Range Mask refinement (counted from the
-imported recipe AND from the import's own `ForeignRangeMask` refusals, because a
-Range Mask this engine cannot honour is dropped on the way in — twelve are
-refused and none carried on the calibration library), and per USE
-(`sky` / `subject` / `ground` / `range` / `other`) a count plus the
-amount-weighted mean of ten local sliders (in-mask temperature and tint
-included) plus the share of uses carrying a local point curve. The use is
-decided by one pure
-function, `bucket_of` — an AI selection answers from its own `MaskSubType`, a
-linear gradient from which end of the y-down frame its `full` handle covers, a
-radial from whether it is inverted, and a Range Mask only when the geometry
-says nothing, so a refined sky gradient stays a sky gradient. Every arm reads
-`LocalAdjustment::net_inverted` — the correction's Invert flag composed with
-the geometry's own bit — rather than either flag on its own, so an imported
-inverted sky selection is filed under `ground` and a flipped radial under
-`ground` rather than `subject`. **No geometry is ever averaged**:
-a mask's coordinates are a fact about one frame, so the block carries counts,
-slider means and English, never a coordinate. Retrieval does not read the field
-at all, which is why it ships WITHOUT an index-version bump on `families`'
-precedent — `#[serde(default)]` in both directions, so a pre-S3 index loads with
-the field absent (a different fact from a measured zero) and a pre-S3 build
-ignores the new key. `style_targets`/`blend_toward` DO read it: a mask's slider
-AMPLITUDES are one of the five distillation channels, gated per (bucket, slider)
-by the same consistency rule as every other channel, and nothing spatial is read
-or written — the proposer still places every mask itself. The build prints
-one aggregate line for what it learned and one for the mask content
-`xmp::import_losses` says it could not carry whole; `style-query` prints the
-per-neighbour counts.
-
-**The block's own budget.** Everything an index carries is bounded for STORAGE
-(`MAX_DESC_CHARS` 512 per description, 128 per tag), and a prompt block is a
-different budget: `advisor::REFERENCE_BUDGET_BYTES` (4,096) with
-`BoundedUntrustedText` cutting whatever overflows. Four neighbours at their
-storage bounds measured 5,920 B — 45 % over — so the tail was being cut, and
-since S3 that tail is the local-work note. The block now has its own door
-(user ruling 2026-08-30): `REFERENCE_DESC_CHARS` 200 per description,
-`REFERENCE_TAG_PHRASE_CHARS` 48 per tag phrase and `REFERENCE_TAGS_CHARS` 128
-per joined tag list, applied at all three tag consumers (the per-exemplar look
-note, the shared-tag note and the look-reference block). The index, the text
-tower and `style-query` still see the whole sentence; only the block is cut,
-and it says so with an ellipsis. Measured: the widest block this app can build
-is 3,565 B with the note, a realistic one 2,517 B
-(`style::tests::the_local_work_note_fits_the_proposers_budget` prints both).
-
-The two direction-text terms carry a **standardised variant** (z-score over the
-candidate set, with a disclosed raw fallback below three comparable candidates
-or a degenerate spread), built because raw SigLIP image↔text cosines are tightly
-clustered. Since the retrieval-rank batch that standardisation is TWO centrings:
-the direction-text ↔ exemplar-IMAGE term first has each candidate's **text
-hubness** removed — its mean cosine against the whole 33-phrase vocabulary, which
-every embedded record already stores as `vocab_scores`. Centring over the
-candidate set only takes out the level the PHRASE sits at; the photographs that
-score high against *every* sentence survived it, and on the user's 169-exemplar
-index that per-candidate constant is 21.7 % of the cosine's variance against
-25.3 % for the direction × candidate interaction that is the only part able to
-tell two directions apart. It is ALL-OR-NOTHING over the candidate set (a
-corrected candidate must never be ranked against an uncorrected one) and the
-terms disclose which happened; the description term keeps no correction, because
-the only available bank made antonym pairs agree *more*. S2's calibration harness measured both variants over the whole grid
-under BOTH query-text proxies: under the tag-string proxy the raw variant
-wins and neither text term can be told apart from zero, while under the
-real-prose proxy the standardised variant beats its own text-free row with a
-paired CI excluding 0. So the standardised arm is the only one that ships and
-the raw path is gone rather than kept one flag away: a switch nothing flips is
-an untested second ranking carrying weights nobody calibrated for it, while the
-harness still sweeps both arms and prints both tables. A third proxy of typed
-SHORT directions then settled the head-to-head S2 could not — best raw 0.410916
-against best standardised 0.377820, paired CI [+0.021870, +0.043719] — and
-priced the shipped weights on the same run: `W_TXT` 0.5 costs nothing
-measurable (+0.000447, CI [-0.006972, +0.007980]) and is the largest weight
-that leaves the corpus open, while `W_DESC` 0.5 costs +0.013643 (CI
-[+0.006785, +0.020881]) and buys the antonym separation that is the Direction
-control's only other mechanism (top-1 overlap 46.9 % with it, 60.7 % without).
-The switch and the
-four weights are resolved once, as values (`EmbeddingSwitch`,
-`RetrievalWeights`), and travel on the develop request; nothing writes the
-process environment to express a flag, and `retrieve_with_embed`,
-`distance_components` and `retrieve_looks` all read one scoring helper, so the
-diagnostic prints the numbers the ranking used rather than a second
-implementation of them.
-
-Finished baked photos are stored in a separate look-library block with their
-own source directory and no camera features or develop settings, capped at 500
-records (the file holds both populations, so both are capped against one
-envelope). Look retrieval uses image/text/description cosine terms only, with
-`W_LOOK=1.0`; it can guide the proposer and optionally supply the reference
-image, but it never reaches `style_targets` or `blend_toward`. A look image
-that fails to load falls back to the RAW neighbour and discloses both. With
-embedding disabled or no query vector, the look answer is unreachable and the
-rationale states that fact. The look block and the IMAGE 2 sentence claim the
-direction helped choose the look only when a text weight is actually non-zero.
-Direction adherence is an independent Hint/Direct/Brief prompt tier using the
-same band edges as Strength; the verifier is told the selected tier, and only
-when a direction exists.
-
-**Who leads when a direction is given (v1.2.3).** Until v1.2.3 the retrieved
-library was always the thing to hit: the block said either "stay within it" or
-"REPRODUCE this look", and `blend_toward` then lerped the finished proposal onto
-the neighbours' means. A free-text direction could only move the proposal WITHIN
-that. Measured on the island showcase frame (2026-09-01, `--style 1.0 --strength
-0.9`, an index of 169 RAW+XMP exemplars plus 94 finished looks): three directions
-as far apart as *dark moody low-key … teal-and-orange*, *warm golden tones,
-film-like grain, lifted matte shadows* and *vivid saturated colours, punchy high
-contrast, crisp clarity* developed to per-panel-cell mean HSV S/V of **23/54 ·
-11/58 · 17/55** — all three inside the library's own cool hazy register, against
-the neutral develop's 17/47. The same three directions against an index with the
-photographer's own edits removed separated to **34/38 · 12/61 · 29/65**.
-
-The user's ruling: when a direction is given, the photographer's own edits are
-background and the direction leads. The mechanism is the adherence dial the app
-already had, not a fourth control. `style::StyleVoice::choose(style, direction,
-adherence)` is the ONE derivation — `Background` when a non-empty direction meets
-tier `Direct` or `Brief`, otherwise the historical `Ceiling`/`Target` split at
-Style 0.85 — and it decides two things at once:
-
-* **the wording.** `render_reference_voiced` renders the block in that voice. In
-  `Background` the header reads "STYLE BACKGROUND … The DIRECTION LEADS" and each
-  of the four aim clauses (curve, colour families, shared look, local work) becomes
-  a habit the direction may override. The measured NUMBERS are byte-identical
-  across all three voices; only the aims move.
-* **the arithmetic.** `pipeline::style_blend_pull` returns `None` in `Background`,
-  so neither the verified proposal nor a judge candidate is pulled toward
-  `style_targets`, and the re-verification that follows a real blend is skipped
-  with it. Wording alone would have been a lie by arithmetic: at Style 1.0
-  `style_pull` is FULL, i.e. the proposal's own value is replaced. Both call sites
-  are pinned by a source guard
-  (`pipeline::every_blend_site_in_this_file_is_guarded_by_the_style_voice`), because
-  no test in the battery can run the blend path itself — it needs a paid analysis —
-  and the judge-candidate site is the one that governs an ADOPTED revision.
-* **the reviewer's brief.** `GradeIntent` carries the same voice to
-  `judge::intent_rubric`. In `Ceiling`/`Target` the retrieved look is stated as the
-  BRIEF that a revision may not walk back (B2, unchanged and pinned byte-for-byte);
-  in `Background` it is stated as CONTINUITY the judge must neither enforce nor
-  penalise, and the refusal is re-aimed at the DIRECTION. This is not decoration:
-  the judge BUYS revisions, and two of the three 2026-09-01 acceptance develops
-  adopted a guided one, so an unconditioned rubric left the own-edit library as the
-  stated brief for the reviewer that chose the recipe that shipped.
-
-Retrieval is unchanged — `req.style > 0` still gates it, the direction still ranks
-the exemplars and the look, IMAGE 2 still goes, and `STYLE_NEIGHBOURS` /
-`STYLE_REF_IMAGE` / the look notes still disclose it. The skip has its own note,
-`STYLE_BACKGROUND`, which names the adherence tier that caused it and the DIAL to
-move — not a CLI flag: the note is persisted and re-rendered in three surfaces, two
-of which have no command line.
-
-**Why the look-library block and IMAGE 2 keep saying "match its grade".** The
-reference block says the direction leads while `render_look_reference` still sends
-"match its grade, not its content" and the IMAGE 2 sentences still say "Match that
-LEVEL of grading". That is not a contradiction: the finished photo in those two
-places is ranked WITH the direction among its terms — `look_ranked_by_direction` is
-true exactly when the direction text carries a non-zero text or description weight,
-and only then may the block claim "and direction" — so following that photo's grade
-is following the direction rather than overruling it. The half that is NOT
-direction-ranked — the shared tags of the photographer's own past RAW+XMP edits,
-folded into `look_summary` — is the half the voice demotes, in the block and in the
-judge's brief alike.
-
-The adherence dial reaches every surface: `--adherence` (CLI), the Adherence slider
-(desktop, and the browser page since v1.2.3), and the optional `adherence` field on
-the analyze request body. That field exists because the dial stopped being prompt
-intent only: without it every web develop carrying a direction was forced into
-`Background` with no way back, while the other two surfaces could choose `Hint`.
-Absent, it resolves through `DirectionAdherence::from_optional` to the same 0.65
-every other surface defaults to, so an older client's request is unchanged.
-
-With no direction, a blank one, or one at tier `Hint`, the block is byte-identical
-to v1.2.2 at every Style value
-(`style::the_no_direction_block_is_byte_identical`, whose three fixtures were
-captured from the v1.2.2 build before the third voice existed).
 
 ### 4.7 Pixel retouch / heal (optional) — V2
 
@@ -4174,7 +3906,7 @@ inside `mask_weight`). `LocalAdjustment::net_inverted` is the ONE place they
 meet, and everything that must agree about which half of a mask is covered
 reads it: `xmp::lr_net_inverted` (so `ai_mask_xml` and `brush_mask_xml` write
 the NET as the component's `crs:MaskInverted`, never the raw geometry bit),
-`mask_habit::bucket_of`, and the GUI's `draw_mask_overlay`. The land zone sets
+and the GUI's `draw_mask_overlay`. The land zone sets
 the correction's flag and leaves the component's at `false`
 (`src/fit_zoned/attach.rs`'s `land_attachment`); Lightroom has only the component, so the
 sidecar carries the net there, and re-importing our own file lands the bit in

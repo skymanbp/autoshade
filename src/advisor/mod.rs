@@ -16,10 +16,10 @@ mod claude;
 mod heuristic;
 mod judge;
 mod openai;
-// The two prompt-injection fences, re-exported: `style-query` prints the SAME
-// blocks the proposer receives, and a second literal there could drift from
-// these without anything failing.
-pub use openai::{FENCE_LOOK_REFERENCE, FENCE_STYLE_REFERENCE, REFERENCE_BUDGET_BYTES};
+// The prompt-injection fence, re-exported: `library-search` prints the SAME
+// block the proposer receives, and a second literal there could drift from it
+// without anything failing.
+pub use openai::{FENCE_STYLE_REFERENCE, REFERENCE_BUDGET_BYTES};
 mod openai_verify;
 
 pub use claude::ClaudeProvider;
@@ -287,8 +287,8 @@ pub enum AdvisorError {
 /// compiles — every caller names the fields it sets.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProposeContext<'a> {
-    /// The retrieved style reference (UNTRUSTED index data — the provider
-    /// fences it).
+    /// The REFERENCE LOOKS block from the reference library (UNTRUSTED file
+    /// data — the provider fences it).
     pub reference: Option<&'a str>,
     /// The photographer's own direction for this develop, or the refine
     /// envelope carrying their current edit.
@@ -296,19 +296,11 @@ pub struct ProposeContext<'a> {
     /// The verifier's / visual judge's revision instruction on a later round
     /// (UNTRUSTED model text — the provider fences it).
     pub hint: Option<&'a str>,
-    /// The single most similar past photo, as a JPEG preview, when the
-    /// photographer opted into SHOWING it to the model (R23-2, off by
-    /// default: it is a second image on every call of a paid analysis).
-    /// `None` = the text reference alone, which is the historical shape.
-    pub reference_image: Option<&'a Preview>,
-    /// Finished-photo look-library reference, already bounded and fenced by
-    /// the provider just like the RAW style reference.
-    pub look_reference: Option<&'a str>,
-    pub reference_image_is_look: bool,
-    /// Did the DIRECTION take part in choosing that look? False at the shipped
-    /// weights, where the look is ranked by its image vector alone — see
-    /// [`crate::style::StyleIndex::look_ranked_by_direction`].
-    pub look_ranked_by_direction: bool,
+    /// The references' own finished photos, as JPEG previews, in the order the
+    /// reference block numbers them — empty unless the photographer opted into
+    /// SHOWING them to the model (R23-2, off by default: each is another
+    /// image on every call of a paid analysis).
+    pub reference_images: &'a [Preview],
     /// The photo's as-shot white balance in ABSOLUTE Kelvin, the anchor
     /// `temperature_k` is measured against (`None` = unknown, the engine's
     /// 5500 K fallback). The prompt states it because the model otherwise has
@@ -512,26 +504,25 @@ pub struct GradeIntent<'a> {
     ///
     /// `direction` fixed "the reviewer punished a develop for obeying the
     /// photographer's WORDS". This fixes "the reviewer punished a develop for
-    /// obeying the photographer's LIBRARY": the whole style reference goes to
+    /// obeying the photographer's LIBRARY": the whole reference block goes to
     /// the proposer and nowhere else, so a warm golden lean the photographer
     /// asked for reached the judge as an unexplained cast, and the judge —
     /// which BUYS revisions — spent them flattening it back out.
     ///
-    /// The SUMMARY, never the block. The block is kilobytes and it is untrusted
-    /// index text; this is [`crate::style::StyleIndex::look_summary`], the
-    /// phrases alone, fenced at the consumer exactly like `direction`.
+    /// The SUMMARY, never the block: [`crate::library::look_summary`], one
+    /// reference's phrases, fenced at the consumer exactly like `direction`.
     pub style_look: Option<&'a str>,
-    /// WHOSE aim `style_look` states — the SAME [`crate::style::StyleVoice`] the
-    /// reference block's wording and the distillation pull read (v1.2.3).
+    /// WHOSE aim `style_look` states — the SAME [`crate::library::StyleVoice`]
+    /// the reference block's wording reads (v1.2.3).
     ///
-    /// v1.2.3 gave a direction the lead in two places — the block's wording and
-    /// `blend_toward` — and left a third untouched: the judge was still told the
+    /// v1.2.3 gave a direction the lead in the block's wording and left the
+    /// judge untouched: the judge was still told the
     /// retrieved look was "the BRIEF" that a revision "must not walk back". The
     /// judge BUYS revisions (two of the three acceptance develops adopted one), so
     /// the reviewer that chose the final recipe was briefed on the very library the
     /// block had just demoted to background. One voice, read by all three, is the
-    /// only shape in which the wording and the arithmetic cannot drift apart again.
-    pub style_voice: crate::style::StyleVoice,
+    /// only shape in which they cannot drift apart again.
+    pub style_voice: crate::library::StyleVoice,
 }
 
 /// One AI advisor. A provider implements the role(s) it serves; the unserved
@@ -2148,7 +2139,7 @@ mod tests {
                 adherence: DirectionAdherence::new(DirectionAdherence::DEFAULT),
                 direction: None,
                 style_look: None,
-                style_voice: crate::style::StyleVoice::default(),
+                style_voice: crate::library::StyleVoice::default(),
             };
             let p = build_verify_prompt(&recipe, &meta, &hist, &intent).expect("verify prompt");
             assert!(p.contains("COLOUR is part of the develop, not decoration"), "{s}: {p}");
@@ -2306,7 +2297,7 @@ mod tests {
                 &EditRecipe::default(),
                 &meta,
                 &hist,
-                &GradeIntent { strength: s, adherence: crate::recipe::DirectionAdherence::default(), direction: None, style_look: None, style_voice: crate::style::StyleVoice::for_style(s.get()) },
+                &GradeIntent { strength: s, adherence: crate::recipe::DirectionAdherence::default(), direction: None, style_look: None, style_voice: crate::library::StyleVoice::for_style(s.get()) },
             )
             .unwrap()
         };
@@ -2334,40 +2325,18 @@ mod tests {
         let judge = |s| {
             super::judge::task_instruction(
                 JudgeTask::Develop,
-                Some(GradeIntent { strength: s, adherence: crate::recipe::DirectionAdherence::default(), direction: None, style_look: None, style_voice: crate::style::StyleVoice::for_style(s.get()) }),
+                Some(GradeIntent { strength: s, adherence: crate::recipe::DirectionAdherence::default(), direction: None, style_look: None, style_voice: crate::library::StyleVoice::for_style(s.get()) }),
             )
         };
         assert_ne!(judge(calib), judge(bold), "gate 4 (visual judge) is deaf");
 
-        // GATE 5 — the style reference's ceiling/floor wording. `render_reference`
-        // reads the EXEMPLARS only (settings / curve / families / tag), so the
-        // index's own version and feature statistics are inert here and stay
-        // empty rather than pretending to be a real index.
-        let idx = crate::style::StyleIndex {
-            version: 0,
-            mean: Vec::new(),
-            std: Vec::new(),
-            exemplars: Vec::new(),
-            source_dir: None,
-            looks: Vec::new(), looks_dir: None, embed_provenance: None,
-        };
-        let ex = crate::style::StyleExemplar {
-            stem: "x".into(),
-            feat: Vec::new(),
-            tag: "wide/mid/midday/landscape".into(),
-            settings: std::collections::BTreeMap::from([("contrast".to_string(), 15.0)]),
-            curve: Some([6.0, 20.0]),
-            path: None,
-            families: None,
-            embed: None,
-            tags: Vec::new(), vocab_scores: None, desc: None, desc_embed: None,
-            masks: None,
-            mono: false,
-        };
-        assert_ne!(
-            idx.render_reference(&[&ex], calib),
-            idx.render_reference(&[&ex], bold),
-            "gate 5 (style reference) is deaf"
+        // GATE 5 — the references' ceiling/floor. The reference block carries
+        // no parameters, so strength reaches the references through the
+        // proposer clause that tells the model how to read them.
+        let refs = super::openai::strength_clause;
+        assert!(
+            refs(GradeStrength::new(0.2)).contains("do NOT exceed it") && refs(bold).contains("FLOOR of your range"),
+            "gate 5 (reference looks) is deaf"
         );
 
         // GATE 6 — the no-AI heuristic fallback.
@@ -2421,7 +2390,7 @@ mod tests {
                 &EditRecipe::default(),
                 &meta,
                 &hist,
-                &GradeIntent { strength: GradeStrength::new(s), adherence: crate::recipe::DirectionAdherence::default(), direction: d, style_look: None, style_voice: crate::style::StyleVoice::default() },
+                &GradeIntent { strength: GradeStrength::new(s), adherence: crate::recipe::DirectionAdherence::default(), direction: d, style_look: None, style_voice: crate::library::StyleVoice::default() },
             )
             .expect("the verify prompt builds")
         };
@@ -3661,7 +3630,7 @@ Final answer: {"decision":"accept","reasons":[]}"#;
                 adherence: DirectionAdherence::new(adherence),
                 direction: Some("warmer"),
                 style_look: None,
-                style_voice: crate::style::StyleVoice::default(),
+                style_voice: crate::library::StyleVoice::default(),
             })
             .unwrap()
         };
@@ -3709,7 +3678,7 @@ Final answer: {"decision":"accept","reasons":[]}"#;
                 adherence: DirectionAdherence::new(0.9),
                 direction,
                 style_look: None,
-                style_voice: crate::style::StyleVoice::default(),
+                style_voice: crate::library::StyleVoice::default(),
             })
             .unwrap()
         };

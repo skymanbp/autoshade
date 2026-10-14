@@ -89,10 +89,8 @@ I18N = (_GUI_DIR / "i18n.rs").read_text(encoding="utf-8")
 RECIPE = (REPO / "src" / "recipe.rs").read_text(encoding="utf-8")
 ADVISOR = (REPO / "src" / "advisor" / "mod.rs").read_text(encoding="utf-8")
 RATIONALE = (REPO / "src" / "rationale.rs").read_text(encoding="utf-8")
-# the style module is a directory of files plus its root (the split of 2026-09-28):
-# the extractor below anchors on `impl BuildStage`, wherever that file sits in the join
-_STYLE_PARTS = [*sorted((REPO / "src" / "style").glob("*.rs")), REPO / "src" / "style.rs"]
-STYLE = "\n".join(p.read_text(encoding="utf-8") for p in _STYLE_PARTS)
+# the reference library's build phases are named in one table (`STAGE_LABELS`)
+LIBRARY = (REPO / "src" / "library" / "build.rs").read_text(encoding="utf-8")
 STACK = (REPO / "src" / "stack" / "merge.rs").read_text(encoding="utf-8")
 
 # ── Dynamic-key registry ────────────────────────────────────────────────────
@@ -107,13 +105,14 @@ DYNAMIC_SITES = [
     # name, falling back to this label). Same key set, same extraction.
     (r"^(?:self\.variants\[self\.active\]\.|v\.)?kind\.label\(\)", "VariantKind::label"),
     (r"^(?:self\.theme|t)\.label\(\)", "ThemePref::label"),
+    (r"^a\.label\(\)", "AccentPref::label"),
     (r"^(?:self\.exp_format|f)\.label\(\)", "ExportFormat::label"),
     # v1.5.0 Track S: the four merges, named in the Stack fold's picker and in
     # the landing line. The labels live in the library beside their persisted
     # spellings (one table, so the two cannot drift), and the extractor below
     # takes that table's LABEL column.
     (r"^(?:self\.stack_kind|k|kind)\.label\(\)", "StackKind::label"),
-    # S2: the index build's phase names (`style::BuildStage::label`), rendered
+    # S2: the library build's phase names (`library::BuildStage::label`), rendered
     # by the AI panel's progress line and the status bar.
     (r"^stage\.label\(\)", "BuildStage::label"),
     # R22-7 export DESTINATION labels. `ExportDest::Ask.label()` is the export
@@ -121,7 +120,6 @@ DYNAMIC_SITES = [
     # second spelling of it, so it belongs on this pattern too.
     (r"^(?:self\.exp_dest|d|ExportDest::Ask)\.label\(\)", "ExportDest::label"),
     (r"^EXPORT_SPACES\[", "EXPORT_SPACES"),
-    (r"^GRADE_REGIONS\[", "GRADE_REGIONS"),
     (r"^CROP_ASPECTS\[", "CROP_ASPECTS"),
     # v1.5.0 F6. Both key sets are extracted from their own named arrays in
     # DYNAMIC_SOURCES above, so a seventh Upright mode or a fourth solver note
@@ -130,7 +128,7 @@ DYNAMIC_SITES = [
     (r"^MODES\[", "Upright modes"),
     (r"^upright_note\b", "Upright solver notes"),
     (r"^what\b", "clipping-triangle what"),
-    (r"^name\b", "named rows (CURVE_CHANNELS / HSL_BANDS / GRADE_REGIONS / MaskRole)"),
+    (r"^name\b", "named rows (CURVE_CHANNELS / HSL_BANDS / GRADE_VIEWS / MaskRole)"),
     (r"^label\b", "AI segmentation labels"),
     (r"^en\b", "MaskRole::en_name"),
     (r"^busy_key\b", "persist_postponed keys"),
@@ -159,7 +157,7 @@ DYNAMIC_SOURCES = [
     # Round-12 L16-7: the GUI re-exports the recipe's own band table (one
     # source of truth), so the literal array now lives in recipe.rs.
     ("array", "recipe", "pub const HSL_BANDS"),
-    ("array", "gui", "const GRADE_REGIONS"),
+    ("array", "gui", "const GRADE_VIEWS"),
     ("array", "gui", "const EXPORT_SPACES"),
     ("array", "gui", "const CROP_ASPECTS"),
     # v1.5.0 F6: the Upright dropdown's six modes, and the three answers to
@@ -175,6 +173,7 @@ DYNAMIC_SOURCES = [
     # gate the way a fourth export destination does.
     ("tuple_col", "stack", "const SPELLINGS", 1),
     ("impl_fn", "gui", "impl ThemePref", "fn label"),
+    ("impl_fn", "gui", "impl AccentPref", "fn label"),
     # 阶段4 delivery format+depth labels (model.rs); a sixth variant without
     # a zh pair fails the gate.
     ("impl_fn", "gui", "impl ExportFormat", "fn label"),
@@ -182,9 +181,9 @@ DYNAMIC_SOURCES = [
     # without a zh pair fails the gate the same way.
     ("impl_fn", "gui", "impl ExportDest", "fn label"),
     ("impl_fn", "recipe", "impl MaskRole", "fn en_name"),
-    # S2 index-build phase names; a fifth stage without a zh pair fails the
+    # Library-build phase names; a fifth stage without a zh pair fails the
     # gate the same way a fourth export destination does.
-    ("impl_fn", "style", "impl BuildStage", "fn label"),
+    ("array", "library", "const STAGE_LABELS"),
     # decision_key is a free fn; the "impl_fn" extractor only needs the fn's
     # body braces, so anchoring on the pub declaration works the same way.
     ("impl_fn", "advisor", "pub fn decision_key", "fn decision_key"),
@@ -230,7 +229,7 @@ ALLOWED_BYPASS = {
 }
 
 SRC = {"gui": GUI, "recipe": RECIPE, "advisor": ADVISOR, "rationale": RATIONALE,
-       "style": STYLE, "stack": STACK}
+       "library": LIBRARY, "stack": STACK}
 
 
 def parse_literal(src: str, i: int) -> tuple[str, int]:

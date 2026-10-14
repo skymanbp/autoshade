@@ -117,7 +117,6 @@ pub use sidecar::{
     LrSidecar, MAX_STORE_JSON, SidecarRead, SidecarStamp, embedded_packet_for_restore, has_develop,
     has_develop_or_sidecar, legacy_recipe, legacy_xmp, lightroom_sidecar, read_bytes_capped,
     read_sidecar, read_sidecar_checked, read_sidecar_stamped, read_text_capped, settings_path,
-    style_index_path,
 };
 use sidecar::{
     clear_pending, clear_pending_in, legacy_out_roots, legacy_suppressed, legacy_suppressed_in,

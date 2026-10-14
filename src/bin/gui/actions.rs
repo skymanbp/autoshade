@@ -86,9 +86,6 @@ impl AutoShadeApp {
         // a deleted path lands wherever the OS decides (the same rule the
         // gallery restore above follows).
         app.style_src_dir = prefs.style_src_dir.clone().filter(|d| d.is_dir());
-        app.style_xmp_dir = prefs.style_xmp_dir.clone().filter(|d| d.is_dir());
-        app.looks_src_dir = prefs.looks_src_dir.clone().filter(|d| d.is_dir());
-        app.use_looks = prefs.use_looks;
         app.direction_adherence = autoshade::recipe::DirectionAdherence::new(prefs.direction_adherence).get();
         app.exp_format = ExportFormat::from_pref(prefs.exp_format, prefs.save_jpeg);
         app.exp_dest = ExportDest::from_pref(prefs.exp_dest);
@@ -3157,12 +3154,12 @@ impl AutoShadeApp {
         );
     }
 
-    /// Read the style library's status onto a worker thread (R23-2).
+    /// Read the reference library's status onto a worker thread (R23-2).
     ///
-    /// Off the UI thread because the file it parses can reach 32 MB, and
+    /// Off the UI thread because the file it parses can reach tens of MB, and
     /// CACHED in `style_info` because the panel that shows it draws every
     /// frame. Re-run after a build; nothing else invalidates it (another
-    /// process rebuilding the shared index mid-session is the one staleness
+    /// process rebuilding the shared library mid-session is the one staleness
     /// this accepts — the alternative is a stat per frame forever).
     pub(crate) fn start_style_info(&mut self) {
         if self.style_info_loading {
@@ -3170,36 +3167,22 @@ impl AutoShadeApp {
         }
         self.style_info_loading = true;
         self.spawn_worker(
-            || Msg::StyleInfo(Box::new(autoshade::style::index_info())),
+            || Msg::StyleInfo(Box::new(autoshade::library::summary())),
             // A read that PANICS must still clear the flag, or the status line
-            // says "reading…" for the rest of the session. Absent is the
-            // honest fallback: no usable library was read.
-            |_e| {
-                Msg::StyleInfo(Box::new(autoshade::style::StyleIndexInfo {
-                    path: autoshade::store::style_index_path(),
-                    state: autoshade::style::StyleIndexState::Absent,
-                }))
-            },
+            // says "reading…" for the rest of the session.
+            |e| Msg::StyleInfo(Box::new(autoshade::library::Summary::Unusable(e.to_string()))),
         );
     }
 
-    /// Build (or rebuild) the style library from `dir` — the GUI's missing
-    /// production-side entry point (R23-2, feedback #6: building existed only
-    /// on the CLI and in the web panel, neither of which a user who
-    /// double-clicks the exe can reach).
+    /// Build (or rebuild) the reference library from a folder of finished
+    /// photos (R23-2, feedback #6: the desktop app's own entry point).
     ///
-    /// Background, with progress: `StyleIndex::build` decodes EVERY RAW in the
-    /// folder, minutes on a real library. NOT `busy`-gated — freezing the whole
-    /// app for that would be its own defect — so only this button gates on
-    /// `style_build_inflight`.
-    ///
-    /// NO cancel: `StyleIndex::build` has no cancellation checkpoints (its
-    /// decode workers run a scoped loop to completion), and an abandon-only ✕
-    /// like Analyze's would leave every core decoding for minutes with nothing
-    /// to show for it. The button stays disabled until the build lands and the
-    /// panel says so; closing the window during a build is safe — the index is
-    /// published tmp+rename (`StyleIndex::save`), so a killed process leaves
-    /// the previous library intact.
+    /// Background, with progress, and NOT `busy`-gated — freezing the whole
+    /// app for minutes would be its own defect — so only this button gates on
+    /// `style_build_inflight`. No cancel: the build has no cancellation
+    /// checkpoints, and closing the window mid-build is safe because the
+    /// library is published atomically (`Library::save`), so a killed process
+    /// leaves the previous library intact.
     pub(crate) fn start_style_build(&mut self, dir: PathBuf) {
         if self.style_build_inflight {
             return;
@@ -3208,120 +3191,30 @@ impl AutoShadeApp {
         self.style_build_progress = None;
         self.status = trf(
             self.lang,
-            "Building the style library from {path} … every RAW is decoded, so a big folder takes minutes",
+            "Building the reference library from {path} … the first build measures every photo, so a big folder takes minutes",
             &[("path", &abs_display(&dir))],
         );
         // The progress channel is the app's own sender: `spawn_worker` delivers
         // ONE terminal message, and this build has to report while it runs.
         let tx = self.tx.clone();
         let ctx = self.egui_ctx.clone();
-        // Resolved HERE, on the UI thread, with the rest of the request the
-        // worker will carry: the switch is a value, and a preference flipped
-        // mid-build must not change what this build is doing.
-        let embed = autoshade::style::EmbeddingSwitch::resolve(None, self.style_embed);
-        let describe = autoshade::style::DescribeSwitch::resolve(None, self.style_describe);
-        // Read here with the rest of the request, for the reason the two
-        // switches above are: a folder the user re-picks mid-build must not
-        // change which sidecars THIS build is pairing against.
-        let xmp_dir = self.style_xmp_dir.clone();
+        // Resolved HERE, on the UI thread: a preference flipped mid-build must
+        // not change what this build is doing.
+        let describe = autoshade::library::DescribeSwitch::resolve(None, self.style_describe);
         self.spawn_worker(
             move || {
-                let progress = |p: autoshade::style::BuildProgress| {
-                    let _ = tx.send(Msg::StyleBuildProgress {
-                        stage: p.stage,
-                        done: p.done,
-                        total: p.total,
-                    });
+                let progress = |p: autoshade::library::BuildProgress| {
+                    let _ = tx.send(Msg::StyleBuildProgress { stage: p.stage, done: p.done, total: p.total });
                     // An mpsc send does not wake egui (see `spawn_worker`).
                     ctx.request_repaint();
                 };
-                let index = match autoshade::style::StyleIndex::build_reporting(&dir, xmp_dir.as_deref(), embed, describe, &progress) {
-                    Ok(ix) => ix,
-                    Err(e) => {
-                        return Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed {
-                            err: format!("{e:#}"),
-                        }))
-                    }
-                };
-                let total = index.exemplars.len();
-                // The embedding degradation count (R28 Batch-4 4b). Asked here
-                // rather than carried on `StyleIndex`, which is the SERIALISED
-                // index: adding a field to it would be a file-format change for
-                // a fact that is about this RUN, not about the library.
-                //
-                // Gated on the switch, because "no exemplar has a vector"
-                // means two opposite things — the user never asked for the
-                // sidecar (nothing to report), or they did and it failed for
-                // every photo (the whole point of reporting).
-                let without_embedding = if embed.on() {
-                    index.exemplars.iter().filter(|e| e.embed.is_none()).count()
-                } else {
-                    0
-                };
-                // The S2 sibling, gated the same way and for the same reason:
-                // "no exemplar carries prose" means two opposite things — the
-                // user never asked for the pass, or they did and it reached
-                // nothing.
-                let described = if describe.on() {
-                    index.exemplars.iter().filter(|e| e.desc.is_some()).count()
-                } else {
-                    0
-                };
-                // The empty-index refusal is NOT re-implemented here: `save`
-                // owns it for every caller (an empty write truncates a good
-                // index in place). The count only decides WHICH sentence the
-                // landing shows for the refusal it hands back.
-                match index.save(&autoshade::store::style_index_path()) {
-                    Ok(()) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::Saved {
-                        total,
+                let sidecars = autoshade::library::Sidecars::from_config(&autoshade::config::Config::load());
+                match autoshade::library::rebuild(&dir, &sidecars, describe, &progress) {
+                    Ok(lib) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::Saved {
+                        total: lib.entries.len(),
+                        phrased: lib.entries.iter().filter(|e| e.phrases.is_some()).count(),
                         dir,
-                        without_embedding,
-                        described,
                     })),
-                    Err(_) if total == 0 => {
-                        Msg::StyleBuilt(Box::new(StyleBuildOutcome::NothingIndexed { dir }))
-                    }
-                    Err(e) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed {
-                        err: format!("{e:#}"),
-                    })),
-                }
-            },
-            |e| Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed { err: e.to_string() })),
-        );
-    }
-
-    pub(crate) fn start_looks_build(&mut self, dir: PathBuf) {
-        if self.style_build_inflight { return; }
-        self.style_build_inflight = true;
-        self.style_build_progress = None;
-        self.status = trf(self.lang, "Building the look library from {path}", &[("path", &abs_display(&dir))]);
-        let tx = self.tx.clone();
-        let ctx = self.egui_ctx.clone();
-        let embed = autoshade::style::EmbeddingSwitch::resolve(None, self.style_embed);
-        let describe = autoshade::style::DescribeSwitch::resolve(None, self.style_describe);
-        self.spawn_worker(
-            move || {
-                let progress = |p: autoshade::style::BuildProgress| {
-                    let _ = tx.send(Msg::StyleBuildProgress {
-                        stage: p.stage,
-                        done: p.done,
-                        total: p.total,
-                    });
-                    ctx.request_repaint();
-                };
-                match autoshade::style::StyleIndex::build_looks(&dir, embed, describe, &progress) {
-                    Ok(index) => {
-                        let total = index.looks.len();
-                        let described = if describe.on() {
-                            index.looks.iter().filter(|l| l.desc.is_some()).count()
-                        } else {
-                            0
-                        };
-                        match index.save(&autoshade::store::style_index_path()) {
-                            Ok(()) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::LooksSaved { total, dir, described })),
-                            Err(e) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed { err: format!("{e:#}") })),
-                        }
-                    }
                     Err(e) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::Failed { err: format!("{e:#}") })),
                 }
             },
@@ -3345,7 +3238,7 @@ impl AutoShadeApp {
             tr(lang, "analyzing with AI (GPT + Claude)…").into()
         };
         // Both style inputs travel as one request (R23-2): the strength, and
-        // whether the nearest past photo goes along as a second image. Read
+        // whether the reference photos go along as images. Read
         // HERE, on the UI thread, so the worker cannot pick up a toggle the
         // user flipped after starting the call.
         let req = autoshade::pipeline::GradeRequest {
@@ -3360,14 +3253,9 @@ impl AutoShadeApp {
             // what this call is paying for.
             think: self.deep_think,
             adherence: autoshade::recipe::DirectionAdherence::new(self.direction_adherence),
-            use_looks: self.use_looks,
-            // The GUI's own 「style embedding」 preference, read on the UI
-            // thread like every other field above. Until this batch the
-            // develop path resolved the switch itself with the preference
-            // hard-coded to `false`, so this checkbox reached the index BUILD
-            // and never the develop — the two could disagree with nothing said.
-            embed: autoshade::style::EmbeddingSwitch::resolve(None, self.style_embed),
-            weights: autoshade::style::RetrievalWeights::from_env(),
+            // The GUI's own 「search the library」 preference, read on the UI
+            // thread like every other field above.
+            embed: autoshade::library::EmbeddingSwitch::resolve(None, self.style_embed),
         };
         // Free-text direction ("warmer, moodier") steers the proposal; with
         // `refine` (its own button now — no pre-armed checkbox), the AI

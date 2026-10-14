@@ -237,9 +237,8 @@
         assert!(zh.contains("主导"), "the zh tooltip must carry the clause too: {zh}");
     }
 
-    /// S2: the description preference survives a restart, defaults OFF in
-    /// BOTH defaults, is what both build workers read, and cannot be reached
-    /// while the embedding it depends on is off.
+    /// S2: the phrase preference survives a restart, defaults OFF in BOTH
+    /// defaults, and is what the build worker reads.
     ///
     /// OFF in both defaults is the load-bearing half. The pass downloads a
     /// 4.3 GB checkpoint and adds GPU minutes to every library build; a user
@@ -249,8 +248,8 @@
     ///
     /// MUTATION THIS KILLS: default the key to `true` in either `Prefs` or
     /// `AutoShadeApp`, drop it from the saved preferences (the round trip then
-    /// loses it), or wire one of the two build workers to a literal switch
-    /// instead of the preference.
+    /// loses it), or wire the build worker to a literal switch instead of the
+    /// preference.
     #[test]
     fn gui_describe_pref_round_trips() {
         assert!(
@@ -276,14 +275,14 @@
         let on = AutoShadeApp { style_describe: true, ..Default::default() };
         let off = AutoShadeApp { style_describe: false, ..Default::default() };
         let unset = |_: &str| None;
-        assert!(autoshade::style::DescribeSwitch::resolve_with(None, on.style_describe, unset).on());
-        assert!(!autoshade::style::DescribeSwitch::resolve_with(None, off.style_describe, unset).on());
+        assert!(autoshade::library::DescribeSwitch::resolve_with(None, on.style_describe, unset).on());
+        assert!(!autoshade::library::DescribeSwitch::resolve_with(None, off.style_describe, unset).on());
 
         let actions = include_str!("../actions.rs");
         assert_eq!(
             actions.matches("DescribeSwitch::resolve(None, self.style_describe)").count(),
-            2,
-            "the RAW build and the look build both read the preference"
+            1,
+            "the library build reads the preference"
         );
         assert!(
             actions.contains("app.style_describe = prefs.style_describe;"),
@@ -293,39 +292,24 @@
             include_str!("../app.rs").contains("style_describe: self.style_describe,"),
             "…and written back when preferences are saved"
         );
-        // The checkbox is unreachable while the embedding is off: the prose
-        // only enters the ranking through the SigLIP text tower, so a
-        // description-only build would produce a field nothing can retrieve on.
-        let panel = include_str!("../panels/ai.rs");
-        let gated = panel
-            .split("ui.add_enabled_ui(self.style_embed, |ui| {")
-            .nth(1)
-            .expect("the describe checkbox sits behind an enablement gate");
-        // NB the needle is spelled without its leading `ui.`: a literal that
-        // reads as a widget constructor makes `scripts/audit_i18n.py`'s
-        // bypass scanner start parsing THIS test as GUI code and desynchronise
-        // for the rest of the file (109 phantom findings, measured).
-        let first = gated.lines().find(|l| l.contains("checkbox(")).unwrap_or("");
-        assert!(
-            first.contains("&mut self.style_describe"),
-            "the gated block must be the describe checkbox itself: {first}"
-        );
     }
 
     #[test]
-    fn gui_prefs_round_trip_the_three_new_keys() {
+    fn gui_prefs_round_trip_the_library_and_adherence_keys() {
         let prefs = Prefs {
             style_embed: true,
-            looks_src_dir: Some(std::path::PathBuf::from("D:/looks")),
-            use_looks: false,
+            style_src_dir: Some(std::path::PathBuf::from("D:/looks")),
             direction_adherence: 0.91,
             ..Prefs::default()
         };
         let json = serde_json::to_string(&prefs).expect("prefs serialize");
         let decoded: Prefs = serde_json::from_str(&json).expect("prefs deserialize");
         assert!(decoded.style_embed);
-        assert_eq!(decoded.looks_src_dir, prefs.looks_src_dir);
-        assert!(!decoded.use_looks);
+        assert_eq!(decoded.style_src_dir, prefs.style_src_dir);
+        // A prefs file from before the redesign still loads: its retired keys
+        // are ignored, not refused.
+        let older = json.replacen('{', r#"{"style_xmp_dir":"D:/x","looks_src_dir":"D:/y","use_looks":false,"#, 1);
+        assert!(serde_json::from_str::<Prefs>(&older).is_ok(), "{older}");
         assert!((decoded.direction_adherence - 0.91).abs() < 1e-6);
     }
 

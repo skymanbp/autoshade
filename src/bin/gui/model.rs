@@ -228,22 +228,9 @@ pub(crate) struct Prefs {
     /// gives, so an upgrade never silently starts a 4.3 GB download.
     #[serde(default)]
     pub(crate) style_describe: bool,
-    /// The folder the style library was last built from (R23-2), so a rebuild
-    /// starts where the last build did.
+    /// The folder the reference library was last built from (R23-2), so a
+    /// rebuild starts where the last build did.
     pub(crate) style_src_dir: Option<PathBuf>,
-    /// The folder of `.xmp` sidecars that library pairs against, when they are
-    /// not beside the RAWs (`style-index --xmp-dir`). `#[serde(default)]`
-    /// decodes an older prefs file as `None`, which is the beside-the-RAW
-    /// convention that file was written under — so an upgrade never changes
-    /// which sidecars an existing library would rebuild from.
-    #[serde(default)]
-    pub(crate) style_xmp_dir: Option<PathBuf>,
-    /// Folder of finished photos used by the separate look library.
-    #[serde(default)]
-    pub(crate) looks_src_dir: Option<PathBuf>,
-    /// Whether look-library retrieval is enabled for analyses.
-    #[serde(default = "default_true")]
-    pub(crate) use_looks: bool,
     /// Direction adherence axis, persisted independently of style strength.
     #[serde(default = "default_adherence")]
     pub(crate) direction_adherence: f32,
@@ -313,9 +300,6 @@ impl Default for Prefs {
             style_embed: false,
             style_describe: false,
             style_src_dir: None,
-            style_xmp_dir: None,
-            looks_src_dir: None,
-            use_looks: true,
             direction_adherence: autoshade::recipe::DirectionAdherence::DEFAULT,
             save_jpeg: false,
             exp_format: 0,
@@ -361,7 +345,6 @@ impl Default for Prefs {
 /// third copy to drift from the other two.
 pub(crate) const STYLE_STRENGTH_DEFAULT: f32 = 0.30;
 
-fn default_true() -> bool { true }
 fn default_adherence() -> f32 { autoshade::recipe::DirectionAdherence::DEFAULT }
 
 /// Where the GRADE strength starts, and what its slider's double-click /
@@ -747,52 +730,24 @@ pub(crate) enum Msg {
     /// A batch recipe paste finished — counts and per-photo details,
     /// rendered at landing (L12#4).
     Pasted(anyhow::Result<PasteOutcome>),
-    /// A style-library STATUS read finished (R23-2). Boxed like every other
-    /// large payload — `StyleIndexInfo` carries the scene histogram.
-    StyleInfo(Box<autoshade::style::StyleIndexInfo>),
-    /// The running style-library build advanced: `done` of `total` photos
-    /// decoded. Typed counts, worded at landing (L12#4) — same shape as
+    /// A reference-library STATUS read finished (R23-2).
+    StyleInfo(Box<autoshade::library::Summary>),
+    /// The running reference-library build advanced: `done` of `total` photos
+    /// in `stage`. Typed counts, worded at landing (L12#4) — same shape as
     /// [`Msg::BatchProgress`].
-    StyleBuildProgress { stage: autoshade::style::BuildStage, done: usize, total: usize },
-    /// A style-library build finished — see [`StyleBuildOutcome`].
+    StyleBuildProgress { stage: autoshade::library::BuildStage, done: usize, total: usize },
+    /// A reference-library build finished — see [`StyleBuildOutcome`].
     StyleBuilt(Box<StyleBuildOutcome>),
 }
 
-/// What building the style library did — FACTS, not prose (L12#4): the build
-/// runs for minutes, so its sentence is composed at LANDING in the language
-/// live then, never with the language captured at spawn.
+/// What building the reference library did — FACTS, not prose (L12#4): the
+/// build runs for minutes, so its sentence is composed at LANDING in the
+/// language live then, never with the language captured at spawn.
 pub(crate) enum StyleBuildOutcome {
-    /// Indexed and published: how many of the user's edits, from where — and
-    /// how many of them ended up WITHOUT a style embedding.
-    ///
-    /// `without_embedding` is 0 both when every photo got a vector and when the
-    /// embedding was never asked for (`AUTOSHADE_STYLE_EMBED` unset), which are
-    /// the two cases with nothing to disclose. Anything above 0 is a real
-    /// degradation: the sidecar was wanted and did not deliver for that many
-    /// photos, and the index is a legitimate but weaker mixed one.
-    ///
-    /// It is a COUNT rather than a sentence for the same reason the rest of
-    /// this enum is (L12#4) — the build runs for minutes and the language may
-    /// change while it does. Before R28 Batch-4 the outcome carried no such
-    /// fact at all, so a build where every single embedding failed landed the
-    /// identical success toast as one where none did: the release GUI is
-    /// `windows_subsystem = "windows"`, so the per-photo `eprintln!` the CLI
-    /// shows goes to a console that does not exist (adjudication F3).
-    ///
-    /// `described` is the S2 sibling of the same idea, from the other
-    /// direction: how many exemplars the OPTIONAL local description pass
-    /// actually covered. 0 both when the switch was off and when the pass
-    /// reached nothing — and the note only renders above 0, so the two
-    /// silent cases stay silent.
-    Saved { total: usize, dir: PathBuf, without_embedding: usize, described: usize },
-    /// Finished-photo look library published into the shared index.
-    LooksSaved { total: usize, dir: PathBuf, described: usize },
-    /// The folder held no RAW with its `.xmp` sidecar beside it, so
-    /// `StyleIndex::save` REFUSED (the one empty-index guard, shared by the
-    /// CLI, the web handler and this button — writing an empty index would
-    /// truncate a good one in place). The previous library is untouched.
-    NothingIndexed { dir: PathBuf },
-    /// The build or the publish failed for any other reason.
+    /// Built and published: how many finished photos, from where, and how
+    /// many carry look phrases (0 when the describe pass was off).
+    Saved { total: usize, dir: PathBuf, phrased: usize },
+    /// The build or the publish failed; the previous library is untouched.
     Failed { err: String },
 }
 

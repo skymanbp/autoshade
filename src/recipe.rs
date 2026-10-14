@@ -3145,8 +3145,8 @@ impl LocalAdjustment {
     /// `xmp::lr_net_inverted` composed the radial pair and no other, so a
     /// brush or AI mask exported the geometry's bit and DROPPED the
     /// correction's; `render::mask_weight`'s AI arm applied neither; and
-    /// `mask_habit::bucket_of` read the correction's and ignored every
-    /// geometry's. A sky mask inverted in Lightroom therefore round-tripped
+    /// the old style index's mask-habit bucketing read the correction's and
+    /// ignored every geometry's. A sky mask inverted in Lightroom therefore round-tripped
     /// out of this app as a mask over the sky.
     ///
     /// SCOPE: the BASE geometry. A COMPONENT carries its own bit and it is
