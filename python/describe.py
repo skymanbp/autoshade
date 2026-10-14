@@ -182,15 +182,24 @@ MODEL = {
 # beside it and travels in every record: it is part of a library's model stamp
 # (src/library/switches.rs), so a rebuild after a prompt edit describes again
 # instead of keeping phrases from the OLD prompt.
+#
+# Version 3 shows the FORMAT with a short example instead of listing the
+# qualities to cover: on the photographer's own 94-photo album, version 2's
+# category list came back verbatim for 23 photos ("white-balance lean,
+# tonality, ...") and ran past eight phrases for 40, while this wording gave
+# 7-8 distinct phrases on all 20 photos tried and copied the example on none.
 PROMPT = (
-    "Describe ONLY the photographic grade of this image as 4 to 8 short "
-    "comma-separated phrases of one to three words each, the way a photographer "
-    "types a look request: white-balance lean, tonality, contrast, saturation "
-    "and colour treatment, finishing (haze, clarity, grain) and mood. "
+    "Describe the colour grade of this photograph, not what it shows, as 4 to 8 "
+    "short comma-separated phrases of two or three words each, for example: "
+    "golden highlights, crushed blacks, faded greens. "
     "Do not name subjects, places, objects or people. "
     "Output the phrases on one line and nothing else."
 )
-PROMPT_VERSION = 2
+PROMPT_VERSION = 3
+
+# The most phrases one answer keeps. The prompt asks for 4 to 8; a small model
+# under greedy decoding can still loop, so the door enforces the upper bound.
+MAX_PHRASES = 8
 
 # Greedy, and pinned as constants so the Rust side can assert them from the
 # source. `generation_config.json` at this revision ships `do_sample: true`
@@ -408,6 +417,27 @@ def sanitize(text):
     return cleaned[:MAX_DESC_CHARS]
 
 
+def tidy_phrases(line):
+    """A sanitized answer -> its phrases, each once, at most MAX_PHRASES.
+
+    Split on commas, trimmed, a trailing full stop dropped, duplicates removed
+    (case-insensitively, first spelling kept). The repetition a looping greedy
+    decode produces ("soft, natural, soft, atmospheric, soft") would otherwise
+    weigh the phrase vector toward whatever word the loop landed on.
+    """
+    seen = set()
+    kept = []
+    for part in line.split(","):
+        phrase = part.strip().rstrip(".").strip()
+        key = phrase.lower()
+        if phrase and key not in seen:
+            seen.add(key)
+            kept.append(phrase)
+        if len(kept) == MAX_PHRASES:
+            break
+    return ", ".join(kept)
+
+
 def describe_one(model, processor, device, path):
     """One image -> one sanitized line of phrases.
 
@@ -448,7 +478,7 @@ def describe_one(model, processor, device, path):
     text = processor.batch_decode(
         out[:, prompt_len:], skip_special_tokens=True, clean_up_tokenization_spaces=False
     )[0]
-    return sanitize(text)
+    return tidy_phrases(sanitize(text))
 
 
 def self_test(cache_dir):

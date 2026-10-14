@@ -35,7 +35,7 @@ pub const MODEL_REVISION: &str = "89644892e4d85e24eaac8bacfd4f463576704203";
 /// `python/describe.py`'s `PROMPT_VERSION`, part of a library's model stamp
 /// so an edited prompt re-describes. `the_prompt_version_is_the_sidecars_own`
 /// pins the two together. v2 (2026-10-13): short look phrases, not a sentence.
-pub const PROMPT_VERSION: u32 = 2;
+pub const PROMPT_VERSION: u32 = 3;
 
 /// The longest phrase list, in characters — the sidecar's own `MAX_DESC_CHARS`,
 /// pinned to it by `the_phrase_bound_is_the_sidecars_own`.
@@ -582,8 +582,8 @@ mod tests {
         // …and the prompt itself must still be the one the version names: a
         // silent edit is exactly what the version exists to make impossible.
         for phrase in [
-            "Describe ONLY the photographic grade",
-            "comma-separated phrases of one to three words each",
+            "Describe the colour grade of this photograph, not what it shows",
+            "comma-separated phrases of two or three words each",
             "Do not name subjects, places, objects or people",
             "Output the phrases on one line and nothing else",
         ] {

@@ -1556,8 +1556,11 @@ Qwen3-VL declares `architectures = ["Qwen3VLForConditionalGeneration"]` with no
 loads through NAMED classes (`Qwen3VLForConditionalGeneration`,
 `Qwen3VLProcessor`) with `local_files_only=True`.
 
-**The prompt is a versioned constant.** One English instruction, 377
-characters, `PROMPT_VERSION = 2`; the version is part of a library's model stamp,
+**The prompt is a versioned constant.** One English instruction, 292
+characters, `PROMPT_VERSION = 3`, which shows the format with a three-phrase
+example rather than listing the qualities to cover (the listed version came back
+verbatim for 23 of the photographer's 94 photos); the sidecar then keeps each
+phrase once and at most eight. The version is part of a library's model stamp,
 so editing the prompt and bumping the version makes the next rebuild describe
 every photo again instead of keeping the old prompt's phrases. A Rust test pins
 the version and the prompt's load-bearing clauses against the sidecar's own

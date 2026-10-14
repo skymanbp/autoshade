@@ -55,5 +55,17 @@ class TheOutputDoor(unittest.TestCase):
         self.assertEqual(describe.sanitize(None), "")
 
 
+class ThePhraseTidy(unittest.TestCase):
+    def test_a_looping_answer_keeps_each_phrase_once_and_at_most_eight(self):
+        looped = "soft, natural, Soft, atmospheric, soft, muted, cool, calm, quiet, airy, clean, even"
+        self.assertEqual(describe.tidy_phrases(looped),
+                         "soft, natural, atmospheric, muted, cool, calm, quiet, airy")
+
+    def test_empty_parts_and_a_trailing_full_stop_are_dropped(self):
+        self.assertEqual(describe.tidy_phrases("warm tones,, lifted shadows ,  faded greens."),
+                         "warm tones, lifted shadows, faded greens")
+        self.assertEqual(describe.tidy_phrases(""), "")
+
+
 if __name__ == "__main__":
     unittest.main()
