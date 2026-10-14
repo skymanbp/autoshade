@@ -1,6 +1,11 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.8.1 — rustls 0.23.45, a dependency update only;
+> Status: **implemented** (v1.9.0 — a reference library of finished photos
+> replaces the style index, and a develop follows it or the typed direction,
+> never both; a reference carries its RAW's settings when its sidecar develops
+> to it; an AI lens blur from a local depth map; colour themes, one icon set,
+> motion and a quieter side panel in the desktop app;
+> v1.8.1 — rustls 0.23.45, a dependency update only;
 > v1.8.0 — a painted fill is levelled onto its
 > surroundings before it is pasted, and with nothing painted the same fold
 > edits from words alone, layering only the area the answer changed; the side
