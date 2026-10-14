@@ -384,7 +384,7 @@ pub(crate) fn palette(theme: ThemePref, accent: AccentPref) -> &'static ThemeCol
 /// Embedded font subsets (see assets/fonts/README.md): egui's bundled fonts
 /// lack most of the toolbar/panel symbols (⧉ ⊖ ◭ ▭ ◯ ◌ ✓ ✕ 🖌 …), and leaning
 /// on system fonts made rendering machine-dependent — a stock Windows install
-/// shows tofu boxes because DengXian lacks them too. ~623 KB total buys
+/// shows tofu boxes because DengXian lacks them too. ~684 KB total buys
 /// identical rendering on every OS. Order = lookup priority; the
 /// `embedded_fonts_cover_every_ui_symbol` test pins full-chain coverage.
 ///
@@ -395,12 +395,22 @@ pub(crate) fn palette(theme: ThemePref, accent: AccentPref) -> &'static ThemeCol
 /// a full CJK face (~16 MB): the runtime fallback below still handles text
 /// this static extraction cannot know, like a user's own file names.
 pub(crate) const EMBEDDED_SYMBOL_FONTS: &[(&str, &[u8])] = &[
+    ICON_FONT,
     ("symbols2", include_bytes!("../../../assets/fonts/NotoSansSymbols2-autoshade.ttf")),
     ("symbols", include_bytes!("../../../assets/fonts/NotoSansSymbols-autoshade.ttf")),
     ("math", include_bytes!("../../../assets/fonts/NotoSansMath-autoshade.ttf")),
     ("emoji-extra", include_bytes!("../../../assets/fonts/NotoEmoji-autoshade.ttf")),
     ("cjk-ui", include_bytes!("../../../assets/fonts/NotoSansSC-autoshade.ttf")),
 ];
+
+/// The icon face (scripts/build_icon_font.py): Lucide outlines under the
+/// GUI's own icon-like symbol codepoints (✨ ⚠ 🗑 ⚙ …), so every verb icon is
+/// drawn in one stroke family instead of five donors' hands. It goes SECOND
+/// in each family: right after egui's text face (epaint takes a row's height
+/// and ascent from the first face, and that one has none of these glyphs),
+/// ahead of egui's emoji faces, and it carries nothing but those codepoints,
+/// so it wins exactly them and all other text falls through unchanged.
+pub(crate) const ICON_FONT: (&str, &[u8]) = ("icons", include_bytes!("../../../assets/fonts/LucideIcons-autoshade.ttf"));
 
 /// Per-face byte budget for a RUNTIME system font (L12#3): the old path
 /// `std::fs::read` an arbitrary file unbounded. Every real candidate is
@@ -611,7 +621,8 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
     }
     for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         let list = fonts.families.entry(fam).or_default();
-        for (name, _) in EMBEDDED_SYMBOL_FONTS {
+        list.insert(1.min(list.len()), ICON_FONT.0.to_owned());
+        for (name, _) in EMBEDDED_SYMBOL_FONTS.iter().filter(|(name, _)| *name != ICON_FONT.0) {
             list.push((*name).to_owned());
         }
         if cjk.is_some() {

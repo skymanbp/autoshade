@@ -30,6 +30,24 @@ shipped face's name always matches the weight of its outlines (NotoSansSC
 defaults to wght=100, and without that flag the subset would ship carrying
 Regular outlines while labelled `Thin`).
 
+## Icon face
+
+`LucideIcons-autoshade.ttf` (14.7 KB) redraws the GUI's 37 icon-like symbol
+codepoints (✨ ⚠ 🗑 ⚙ 🖌 …) in one stroke family, [Lucide](https://lucide.dev)
+(`lucide-static@0.460.0`, `font/lucide.ttf`), instead of the five donors'
+mixed hands. Each Lucide outline is copied under the GUI symbol's own
+codepoint, so no label changes; the face sits second in egui's chain, right
+after its text face, and carries only those codepoints, so everything else
+falls through to the faces above. Its line metrics are copied from egui's
+Ubuntu-Light so the icons share the text's baseline. Prose symbols (→ × ± ≈ ≤
+≥ ← ↑ ↓ ●) are deliberately not mapped. Lucide is licensed under the ISC
+licence (portions from Feather, MIT) — full text in `ISC-Lucide.txt`.
+
+Regenerate with `python scripts/build_icon_font.py --lucide <dir with
+lucide.ttf and info.json>`; the symbol → icon table is in that script.
+
+## Regenerating the Noto subsets
+
 Regenerate with `python scripts/subset_gui_fonts.py --fonts-dir <donors>`;
 the needed-glyph list is extracted from the GUI sources automatically, and
 the GUI test `embedded_fonts_cover_every_ui_symbol` fails if any string

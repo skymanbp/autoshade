@@ -117,7 +117,16 @@ fn place(
         let padding = if square { 0.0 } else { 2.0 * ui.spacing().button_padding.x };
         width + padding <= cell.x
     });
+    // The look (2026-10-14, after shadcn/ui's variants): a text verb is a
+    // tonal fill with no outline — the outline made every row a grid of
+    // boxes; an icon-only verb at rest is a GHOST, no fill and no edge, and
+    // gets its plate only under the pointer (painted into a slot reserved
+    // BEFORE the button, so it lies beneath the icon). A selected glyph
+    // keeps its selection frame.
+    let ghost = square && !matches!(kind, "glyph_toggle_on");
     let button = style(egui::Button::new(text));
+    let button = if ghost { button.frame(false) } else { button.stroke(egui::Stroke::NONE) };
+    let plate = ui.painter().add(egui::Shape::Noop);
     let response = match cell {
         Some(cell) => {
             let layout = egui::Layout::centered_and_justified(ui.layout().main_dir());
@@ -131,6 +140,13 @@ fn place(
         }
         None => ui.add_enabled(enabled, button),
     };
+    if ghost && enabled && (response.hovered() || response.has_focus()) {
+        let w = &ui.visuals().widgets;
+        let fill = if response.is_pointer_button_down_on() { w.active.weak_bg_fill } else { w.hovered.weak_bg_fill };
+        ui.painter().set(plate, egui::Shape::rect_filled(response.rect, w.hovered.rounding, fill));
+    }
+    #[cfg(test)]
+    let kind = if kind == "glyph_toggle_on" { "glyph_toggle" } else { kind };
     #[cfg(test)]
     DRAWN.with_borrow_mut(|d| d.push(Drawn { kind, label, rect: response.rect, fits, cell: cell.is_some() }));
     response
@@ -251,5 +267,6 @@ pub(crate) fn glyph(ui: &mut egui::Ui, enabled: bool, g: impl Into<egui::WidgetT
 /// frame while on.
 pub(crate) fn glyph_toggle(ui: &mut egui::Ui, on: bool, g: impl Into<egui::WidgetText>) -> egui::Response {
     let h = row_h(ui);
-    place(ui, "glyph_toggle", Some(egui::vec2(h, h)), true, g.into(), |b| b.selected(on))
+    let kind = if on { "glyph_toggle_on" } else { "glyph_toggle" };
+    place(ui, kind, Some(egui::vec2(h, h)), true, g.into(), |b| b.selected(on))
 }
