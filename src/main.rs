@@ -121,6 +121,14 @@ enum Command {
         /// the standing answer.
         #[arg(long)]
         reference_image: bool,
+        /// RESTYLE CANDIDATE: also have the image model repaint this photo
+        /// toward its reference looks, reverse-fit the repaint's settings, and
+        /// keep whichever develop the visual judge scores higher. Needs a
+        /// reference library and --embed. OFF by default — one more paid image
+        /// generation and one more judge call, plus a verify when the repaint
+        /// wins. The rationale says which develop was kept and both scores.
+        #[arg(long)]
+        restyle: bool,
     },
     /// Render an existing EditRecipe onto a RAW and save the developed image.
     /// The recipe may be the JSON `analyze` writes, or a Lightroom / Camera Raw
@@ -203,6 +211,14 @@ enum Command {
         /// the standing answer.
         #[arg(long)]
         reference_image: bool,
+        /// RESTYLE CANDIDATE: also have the image model repaint this photo
+        /// toward its reference looks, reverse-fit the repaint's settings, and
+        /// keep whichever develop the visual judge scores higher. Needs a
+        /// reference library and --embed. OFF by default — one more paid image
+        /// generation and one more judge call, plus a verify when the repaint
+        /// wins. The rationale says which develop was kept and both scores.
+        #[arg(long)]
+        restyle: bool,
         /// Run AI denoise (GPU sidecar) before developing — for high-ISO/astro.
         /// A RAW is denoised on its sensor mosaic, before demosaic (DRUNet,
         /// noise level measured on the frame); a baked source takes SCUNet.
@@ -561,8 +577,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Decode { raw, out } => decode_cmd(&raw, out),
-        Command::Analyze { raw, out, guidance, style, strength, adherence, embed, no_embed, deep, reference_image } => {
-            analyze_cmd(&raw, out, guidance, style, strength, adherence, deep, reference_image, embed_switch(embed, no_embed))
+        Command::Analyze { raw, out, guidance, style, strength, adherence, embed, no_embed, deep, reference_image, restyle } => {
+            analyze_cmd(&raw, out, guidance, style, strength, adherence, deep, reference_image, restyle, embed_switch(embed, no_embed))
         }
         Command::Apply { raw, recipe, out, long_edge } => {
             apply_cmd(&raw, &recipe, &out, long_edge)
@@ -578,13 +594,14 @@ fn main() -> Result<()> {
             no_embed,
             deep,
             reference_image,
+            restyle,
             denoise,
             denoise_strength,
             denoise_model,
             long_edge,
         } => {
             auto_cmd(
-                &raw, out, guidance, style, strength, adherence, deep, reference_image, denoise,
+                &raw, out, guidance, style, strength, adherence, deep, reference_image, restyle, denoise,
                 denoise_strength, denoise_model, long_edge, embed_switch(embed, no_embed),
             )
         }
@@ -1032,6 +1049,9 @@ fn analyze_request(
         // builds its request through `GradeRequest::with_style`, which has no
         // way to reach this flag.
         think: deep,
+        // Set by the two commands' own --restyle, never here: no dial or
+        // preference resolved in this function may buy an image generation.
+        restyle: false,
     }
 }
 
@@ -1045,6 +1065,7 @@ fn analyze_cmd(
     adherence: Option<f32>,
     deep: bool,
     reference_image: bool,
+    restyle: bool,
     embed: autoshade::library::EmbeddingSwitch,
 ) -> Result<()> {
     let cfg = Config::load();
@@ -1059,7 +1080,9 @@ fn analyze_cmd(
     // "adjust current edit" path is a web-UI affordance. judge = true: an
     // explicitly invoked single-photo analyze gets the visual closed loop
     // (batch passes false — spend never multiplies silently).
-    let req = analyze_request(style, strength, adherence, deep, reference_image, embed, &cfg);
+    // The restyle candidate is a per-run opt-in only — no standing preference
+    // can buy an image generation on every develop.
+    let req = GradeRequest { restyle, ..analyze_request(style, strength, adherence, deep, reference_image, embed, &cfg) };
     let (recipe, verdict, _notes) =
         produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true, autoshade::diag::stderr())?;
     // Remember whether -o redirected the recipe: the XMP has to follow it (below)
@@ -1327,6 +1350,7 @@ fn auto_cmd(
     adherence: Option<f32>,
     deep: bool,
     reference_image: bool,
+    restyle: bool,
     denoise: bool,
     denoise_strength: Option<f32>,
     denoise_model: Option<String>,
@@ -1351,7 +1375,7 @@ fn auto_cmd(
     // Resolved BEFORE the paid call so the banner below can say what is coming
     // (it also costs nothing and cannot fail).
     let export = export_opts(long_edge);
-    let req = analyze_request(style, strength, adherence, deep, reference_image, embed, &cfg);
+    let req = GradeRequest { restyle, ..analyze_request(style, strength, adherence, deep, reference_image, embed, &cfg) };
     // judge = true: `auto` is the explicit one-shot develop of ONE photo —
     // same interactive class as analyze (batch passes false).
     let (recipe, verdict, _notes) =
@@ -2838,6 +2862,34 @@ mod tests {
     /// MUTATION: make `analyze_request` hard-code `send_reference_image: true`
     /// (the default arm fails), or `false` (both opt-in arms fail), or drop
     /// either half of the `||` (one arm fails).
+    /// The restyle candidate buys an image generation, so it is a flag on the
+    /// two single-photo commands and nothing else: off unless typed, absent
+    /// from `batch`, and never reachable through a standing preference.
+    #[test]
+    fn the_restyle_candidate_is_a_per_run_flag_on_the_single_photo_commands() {
+        for cmd in ["analyze", "auto"] {
+            let flagged = Cli::try_parse_from(["autoshade", cmd, "p.arw", "--restyle"])
+                .unwrap_or_else(|e| panic!("{cmd} --restyle must parse: {e}"));
+            let plain = Cli::try_parse_from(["autoshade", cmd, "p.arw"]).expect("plain parses");
+            let read = |c: Command| match c {
+                Command::Analyze { restyle, .. } | Command::Auto { restyle, .. } => restyle,
+                _ => panic!("`{cmd}` parsed as some other subcommand"),
+            };
+            assert!(read(flagged.command), "{cmd} must carry --restyle");
+            assert!(!read(plain.command), "{cmd} without the flag must be off");
+        }
+        assert!(
+            Cli::try_parse_from(["autoshade", "batch", ".", "--restyle"]).is_err(),
+            "`batch` must have no way to buy an image generation per photo"
+        );
+        const OFF: autoshade::library::EmbeddingSwitch = autoshade::library::EmbeddingSwitch::OFF;
+        let standing = autoshade::config::Config { send_reference_image: true, ..cfg_fixture() };
+        assert!(
+            !analyze_request(None, None, None, true, true, OFF, &standing).restyle,
+            "no other opt-in or preference may turn the restyle on"
+        );
+    }
+
     #[test]
     fn the_reference_photo_is_opt_in_on_every_non_gui_surface() {
         const OFF: autoshade::library::EmbeddingSwitch = autoshade::library::EmbeddingSwitch::OFF;
@@ -2941,7 +2993,7 @@ mod tests {
             .join(format!("autoshade-prepay-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let off = autoshade::library::EmbeddingSwitch::OFF;
-        let e = analyze_cmd(Path::new("no-such.arw"), Some(dir.clone()), None, None, None, None, false, false, off)
+        let e = analyze_cmd(Path::new("no-such.arw"), Some(dir.clone()), None, None, None, None, false, false, false, off)
             .unwrap_err()
             .to_string();
         assert!(e.contains("is a directory"), "analyze: {e}");
@@ -2952,6 +3004,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             false,
             false,
             false,

@@ -78,6 +78,11 @@ pub(crate) struct AutoShadeApp {
     /// not only its numbers. Persisted, and OFF by default — it puts a second
     /// image on every call of a paid analysis (the checkbox says so).
     pub(crate) send_style_ref_image: bool,
+    /// The paid restyle candidate (user ruling 2026-10-14): each analysis also
+    /// has the image model repaint the photo toward the reference looks, and
+    /// the judge keeps whichever develop scores higher. Persisted, OFF by
+    /// default — one more image generation per analysis.
+    pub(crate) restyle_candidate: bool,
     /// R23-4, feedback #13 ("let it think"): DEEP THINKING for this photo's
     /// analysis — the structured working in the proposal, one step more
     /// reasoning effort, and a visual judge allowed to converge over more than
@@ -1676,6 +1681,8 @@ impl Default for AutoShadeApp {
             // OFF: an extra image on a paid call is the user's opt-in, never a
             // default (the same rule `fit_ai_judge` follows).
             send_style_ref_image: false,
+            // OFF: an image generation per analysis is the user's opt-in.
+            restyle_candidate: false,
             // OFF, same rule and a bigger bill (up to 17 calls per analyze).
             deep_think: false,
             style_embed: false,
@@ -2150,6 +2157,7 @@ impl eframe::App for AutoShadeApp {
                 grade_strength: self.grade_strength,
                 fit_strength: self.fit_strength,
                 send_style_ref_image: self.send_style_ref_image,
+                restyle_candidate: self.restyle_candidate,
                 deep_think: self.deep_think,
                 style_embed: self.style_embed,
                 style_describe: self.style_describe,

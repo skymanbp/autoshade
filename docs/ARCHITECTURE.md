@@ -3783,6 +3783,19 @@ that will not load goes as words while the others still go. The reviewers get
 the first reference's phrases as the look summary (`library::look_summary`), so
 a judge cannot punish a develop for following the library.
 
+**The restyle candidate (2026-10-14, opt-in, paid).** With
+`GradeRequest::restyle` set (GUI checkbox, `--restyle`), the end of the judge
+loop buys one more develop to compare: `generative::restyle_toward` sends the
+advisor preview FIRST and the references after it as the `image[]` array at the
+enum size, and `pipeline::restyle_candidate` reverse-fits the repaint from that
+same preview with the photo's white-balance anchor as the base — the room the
+judge renders every candidate in, so both develops are scored on equal terms.
+The judge's score for the held recipe is the bar; the repaint's settings
+replace it only when they score strictly higher and the verifier then answers
+for them (the verdict travels with its recipe). A refine, a develop with no
+reference and one the judge never scored skip it, and every outcome is a
+`RESTYLE_*` rationale note.
+
 **Who leads.** `StyleVoice::choose(style, direction, adherence)` is the one
 derivation: a non-blank direction at adherence `Direct` or `Brief` makes the
 references BACKGROUND and the direction leads (user ruling 2026-09-01); `Hint`,

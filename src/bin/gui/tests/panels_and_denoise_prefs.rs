@@ -483,6 +483,7 @@
             think: app.deep_think,
             adherence: autoshade::recipe::DirectionAdherence::default(),
             embed: autoshade::library::EmbeddingSwitch::resolve(None, app.style_embed),
+            restyle: app.restyle_candidate,
         };
         assert_eq!(req.strength.get(), 0.9);
         assert_eq!(req.style, 0.2);

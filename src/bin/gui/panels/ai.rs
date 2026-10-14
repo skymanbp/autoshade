@@ -665,6 +665,14 @@ impl AutoShadeApp {
                 } else {
                     tr(lang, "Build a reference library first — there is no reference photo to send")
                 });
+            ui.checkbox(&mut self.restyle_candidate, tr(lang, "Also try a repaint toward the references (paid)"))
+                .on_hover_text(if built {
+                    tr(lang,
+                        "ONE MORE PAID IMAGE GENERATION per analysis: the image model repaints this photo in the look of its references, the repaint's settings are worked out from it, and the visual judge keeps whichever develop scores higher — the AI's own or the repaint's. Also one more judge call, and a check when the repaint wins. Not used on Refine. The rationale says which was kept and both scores.",
+                    )
+                } else {
+                    tr(lang, "Build a reference library first — there is no reference photo to send")
+                });
         });
     }
 
