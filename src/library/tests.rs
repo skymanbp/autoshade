@@ -16,8 +16,10 @@ fn toward(a: usize, b: usize, t: f32) -> Vec<f32> {
     v
 }
 
+/// A photo path the tests name but never create — per process all the same,
+/// as every temp-dir name in the tree must be (`test_fixture_dirs_are_process_unique`).
 fn photo(name: &str) -> String {
-    std::env::temp_dir().join("autoshade-library-tests").join(name).display().to_string()
+    std::env::temp_dir().join(format!("autoshade-library-tests-{}", std::process::id())).join(name).display().to_string()
 }
 
 fn entry(name: &str, image: Vec<f32>, phrases: Option<&str>) -> Entry {

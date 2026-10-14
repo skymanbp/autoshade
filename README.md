@@ -891,8 +891,9 @@ covered by the MIT license, omit EXIF and carry no watermark.
 
 ### Fonts and model weights
 
-The GUI bundles subset Noto faces under the SIL Open Font License (texts under
-`assets/fonts/`); model weights download separately and remain their authors'
+The GUI bundles subset Noto faces under the SIL Open Font License and an icon
+face drawn from Lucide under the ISC licence (texts under `assets/fonts/`);
+model weights download separately and remain their authors'
 property. The one exception is `autoshade-raw-denoise-v2.pth`, this project's
 own fine-tune of DPIR's architecture, which ships as a release asset under this
 project's licence with its training sources credited below (and, since v1.6.0,

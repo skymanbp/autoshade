@@ -1005,6 +1005,11 @@ model/provider preferences but cannot supply API credentials, endpoints,
 executable/script paths, or output destinations, so an opened photo folder
 cannot become a credential or path override.
 
+**Theme.** Settings also picks the desktop app's look: **Dark**, **Light**,
+**Warm ink** or **Cool blue**, and an **Accent colour** (gold, teal, coral,
+violet or green) for the main buttons and highlights. The choice is saved with
+your preferences and applies at once.
+
 **Python interpreter.** The AI sidecars run under a Python 3 that AutoShade
 does not bundle. Settings carries a **Python interpreter** field with a
 **Detect** button beside it; Detect looks in the standard install locations and
