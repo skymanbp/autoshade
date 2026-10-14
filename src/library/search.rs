@@ -12,6 +12,14 @@ pub const REFERENCE_COUNT: usize = 3;
 /// breaks ties between looks that answer it equally well.
 const PROMPT_WEIGHT: f64 = 2.0;
 
+/// Two entries whose image vectors are at least this similar are versions of
+/// ONE shot (an export and its re-edit, a noise-reduced copy), and take one
+/// reference slot between them (user ruling 2026-10-14). Measured on the
+/// photographer's 94-photo album: the three version pairs read 0.985, 0.991
+/// and 1.000, the closest two DIFFERENT frames (one sunset, two exposures
+/// minutes apart) 0.947; the line sits in that gap.
+const SAME_SHOT: f64 = 0.97;
+
 /// What a search asks with.
 #[derive(Debug, Clone, Copy)]
 pub struct Query<'a> {
@@ -66,7 +74,11 @@ impl Library {
     /// against the entry's phrase vector. Each is standardised over the
     /// candidates, then summed with the prompt at [`PROMPT_WEIGHT`]; without
     /// a prompt the scene alone ranks. Ties keep library order, so a search
-    /// is deterministic.
+    /// is deterministic. Versions of one shot ([`SAME_SHOT`]) count once: the
+    /// best-ranked stands for them and the next different photo takes the
+    /// freed slot. The develop's own finished version is NOT dropped by this —
+    /// it is compared with the other references, not with the query, so it
+    /// leads when it is the closest (user ruling 2026-10-14).
     pub fn search<'a>(&'a self, q: &Query<'_>, k: usize) -> Vec<Hit<'a>> {
         let candidates: Vec<&Entry> =
             self.entries.iter().filter(|e| q.exclude.is_none_or(|x| !same_file(&e.path, x))).collect();
@@ -88,7 +100,17 @@ impl Library {
             })
             .collect();
         hits.sort_by(|a, b| a.score.total_cmp(&b.score));
-        hits.truncate(k);
-        hits
+        let mut kept: Vec<Hit<'a>> = Vec::with_capacity(k);
+        for h in hits {
+            if kept.len() == k {
+                break;
+            }
+            let another_version =
+                kept.iter().any(|t| cosine(&t.entry.image, &h.entry.image).is_some_and(|c| c >= SAME_SHOT));
+            if !another_version {
+                kept.push(h);
+            }
+        }
+        kept
     }
 }

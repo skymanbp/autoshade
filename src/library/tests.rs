@@ -124,8 +124,8 @@ fn a_prompt_lifts_the_look_it_names_over_a_closer_scene() {
 fn an_entry_without_phrases_neither_gains_nor_loses_on_the_prompt() {
     let lib = library(vec![
         entry("plain.jpg", toward(0, 2, 0.2), None),
-        entry("wrong.jpg", toward(0, 2, 0.2), Some(("cool", toward(5, 6, 1.5)))),
-        entry("right.jpg", toward(0, 2, 0.2), Some(("warm", axis(5)))),
+        entry("wrong.jpg", toward(0, 3, 0.2), Some(("cool", toward(5, 6, 1.5)))),
+        entry("right.jpg", toward(0, 4, 0.2), Some(("warm", axis(5)))),
     ]);
     let warm = axis(5);
     let hits = lib.search(&Query { image: &axis(0), prompt: Some(&warm), exclude: None }, 3);
@@ -141,11 +141,28 @@ fn the_photo_being_developed_is_never_its_own_reference() {
     assert_eq!(names(&hits), ["other.jpg"]);
 }
 
+/// Versions of one shot take one slot; a different frame just under the line
+/// keeps its own. MUTATION: drop the version check (the second version comes
+/// back) or compare against the query instead of the kept references (the
+/// closest photo itself is dropped).
+#[test]
+fn versions_of_one_shot_take_one_reference_slot() {
+    let lib = library(vec![
+        entry("shot.jpg", toward(0, 2, 0.10), None),
+        // cos 0.15 = 0.989 to shot.jpg: the same shot, re-edited.
+        entry("shot_v2.jpg", toward(0, 2, 0.25), None),
+        // cos(0.3)·cos(0.1) = 0.951 to shot.jpg: a different frame.
+        entry("next_frame.jpg", toward(0, 3, 0.30), None),
+        entry("far.jpg", toward(0, 4, 1.2), None),
+    ]);
+    assert_eq!(names(&search_plain(&lib)), ["shot.jpg", "next_frame.jpg", "far.jpg"]);
+}
+
 #[test]
 fn the_block_numbers_the_references_and_carries_their_phrases_on_one_line_each() {
     let lib = library(vec![
         entry("a.jpg", toward(0, 2, 0.1), Some(("warm, faded,\nlow contrast", axis(5)))),
-        entry("b.jpg", toward(0, 2, 0.2), None),
+        entry("b.jpg", toward(0, 3, 0.4), None),
     ]);
     let hits = search_plain(&lib);
     assert!(reference_block(&[], &[], StyleVoice::Ceiling, false).is_none(), "nothing found, no block");
@@ -170,7 +187,7 @@ fn the_block_numbers_the_references_and_carries_their_phrases_on_one_line_each()
 fn the_look_summary_is_the_first_reference_that_has_phrases() {
     let lib = library(vec![
         entry("a.jpg", toward(0, 2, 0.1), None),
-        entry("b.jpg", toward(0, 2, 0.2), Some(("cool,\thazy", axis(5)))),
+        entry("b.jpg", toward(0, 3, 0.4), Some(("cool,\thazy", axis(5)))),
     ]);
     let hits = search_plain(&lib);
     assert_eq!(look_summary(&hits).as_deref(), Some("cool, hazy"));

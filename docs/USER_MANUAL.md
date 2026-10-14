@@ -1047,7 +1047,8 @@ settings file can supply them.
   pass `--describe`) to have a local model write a few phrases per photo about
   its grade, so a typed Direction can pick the reference whose look it names. A
   rebuild measures only new or changed photos. Each analysis then searches the
-  library and gives the model the 3 closest references as words, and — with
+  library and gives the model the 3 closest references (versions of one shot —
+  an export and its re-edit — count once) as words, and — with
   **Also show the model the reference photos** — as pictures, one extra image
   each on every call. The **Style** control sets how closely they are followed:
   below 85 % they are a ceiling, at 85 % or above a target, and at 0 the library
