@@ -87,6 +87,7 @@ ICONS = {
     "⬆": "arrow-up",            # move a mask up
     "⬇": "arrow-down",          # move a mask down
     "⧉": "copy",                # duplicate
+    "ⓘ": "info",                # a folded explanation (headings::explainer)
 }
 
 

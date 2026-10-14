@@ -944,13 +944,20 @@
                 seen.iter().any(|t| t == lens_header),
                 "{lang:?}: the Lens section was not drawn — this proves nothing: {seen:?}"
             );
+            // The explanation is folded to one line since 2026-10-14
+            // (`headings::explainer`); the paragraph is its tooltip.
+            let at = seen.iter().position(|t| t == lens_header).unwrap();
             assert!(
-                seen.iter().any(|t| t.contains("XMP")),
+                seen[at..].iter().any(|t| t == crate::i18n::tr(lang, "ⓘ How this works")),
                 "{lang:?}: the lens explainer line itself is missing: {seen:?}"
             );
+            let paragraph = crate::i18n::tr(lang,
+                "Vignette: positive brightens the corners (compensates falloff), negative darkens; a radial gain in linear light. Distortion: positive fixes barrel (wide-angle bulge), negative fixes pincushion (tele pinch); auto-scales to fill the frame, and masks / brush still position on the corrected image. Preview / export / XMP match. Manual CA, the auto-CA switch and de-fringe all render here too.",
+            );
+            assert!(paragraph.contains("XMP"), "{lang:?}: not the lens paragraph: {paragraph}");
             assert!(
-                !seen.iter().any(|t| t.contains(promise)),
-                "{lang:?}: the retired {promise:?} promise is still on screen: {seen:?}"
+                !paragraph.contains(promise) && !seen.iter().any(|t| t.contains(promise)),
+                "{lang:?}: the retired {promise:?} promise is still in the panel"
             );
         }
     }

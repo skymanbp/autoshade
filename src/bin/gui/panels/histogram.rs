@@ -342,14 +342,7 @@ impl AutoShadeApp {
             }
         }
 
-        ui.label(
-            egui::RichText::new(tr(
-                self.lang,
-                "Click to add a point · drag to move · drag outside the box to delete — preview and export match (XMP carries the closest Lightroom form)",
-            ))
-            .weak()
-            .small(),
-        );
+        explainer(ui, self.lang, tr(self.lang, "Click to add a point · drag to move · drag outside the box to delete — preview and export match (XMP carries the closest Lightroom form)"));
         changed
     }
 }

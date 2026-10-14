@@ -1538,13 +1538,7 @@ impl AutoShadeApp {
             .id_salt("sec_stack")
             .default_open(false)
             , |ui| {
-                ui.label(
-                    egui::RichText::new(tr(
-                        lang,
-                        "Merge several frames of one scene into a new ▦ negative. This card's frame is the reference — its framing and its exposure are the ones the result keeps — and the frames you pick join it.",
-                    ))
-                    .small(),
-                );
+                explainer(ui, lang, tr(lang, "Merge several frames of one scene into a new ▦ negative. This card's frame is the reference — its framing and its exposure are the ones the result keeps — and the frames you pick join it."));
                 ui.add_space(SPACE_SM);
                 egui::ComboBox::from_id_salt("stack_kind")
                     .selected_text(tr(lang, self.stack_kind.label()))
@@ -1782,13 +1776,7 @@ impl AutoShadeApp {
                     changed |= Self::slider_hinted(ui, lang, tr(lang, "Green hue high"), &mut r.defringe_green_hi, 0.0, 100.0, 60.0, window);
                 }
                 ui.add_space(SPACE_SM);
-                ui.label(
-                    egui::RichText::new(tr(lang,
-                        "Vignette: positive brightens the corners (compensates falloff), negative darkens; a radial gain in linear light. Distortion: positive fixes barrel (wide-angle bulge), negative fixes pincushion (tele pinch); auto-scales to fill the frame, and masks / brush still position on the corrected image. Preview / export / XMP match. Manual CA, the auto-CA switch and de-fringe all render here too.",
-                    ))
-                    .weak()
-                    .small(),
-                );
+                explainer(ui, lang, tr(lang, "Vignette: positive brightens the corners (compensates falloff), negative darkens; a radial gain in linear light. Distortion: positive fixes barrel (wide-angle bulge), negative fixes pincushion (tele pinch); auto-scales to fill the frame, and masks / brush still position on the corrected image. Preview / export / XMP match. Manual CA, the auto-CA switch and de-fringe all render here too."));
             });
         changed
     }
@@ -1894,13 +1882,7 @@ impl AutoShadeApp {
                     changed = true;
                 }
                 ui.add_space(SPACE_SM);
-                ui.label(
-                    egui::RichText::new(tr(lang,
-                        "One projective map, after the lens correction and before the straighten. Preview / export / XMP match. Upright renders the matrix Lightroom published when there is one; the sliders were measured against Lightroom's own exports. A keystone frames a little differently — Lightroom also stretches that axis, by an amount its lens sets.",
-                    ))
-                    .weak()
-                    .small(),
-                );
+                explainer(ui, lang, tr(lang, "One projective map, after the lens correction and before the straighten. Preview / export / XMP match. Upright renders the matrix Lightroom published when there is one; the sliders were measured against Lightroom's own exports. A keystone frames a little differently — Lightroom also stretches that axis, by an amount its lens sets."));
                 // v1.5.0 F7 — WHICH rendering this photograph starts from.
                 // Read-only here on purpose: the profile is a file on the
                 // photographer's machine and the Look is Adobe's own creative
@@ -2062,13 +2044,7 @@ impl AutoShadeApp {
                     45.0,
                     0.0,
                 );
-                ui.label(
-                    egui::RichText::new(tr(lang,
-                        "Once in (R): drag corner/edge handles to resize, drag inside to move, drag OUTSIDE the box (or the canvas border while the box is full-frame) to rotate-straighten; arrows nudge the box, Enter commits; preview, export and XMP all match. Straighten auto-crops the black corners.",
-                    ))
-                    .weak()
-                    .small(),
-                );
+                explainer(ui, lang, tr(lang, "Once in (R): drag corner/edge handles to resize, drag inside to move, drag OUTSIDE the box (or the canvas border while the box is full-frame) to rotate-straighten; arrows nudge the box, Enter commits; preview, export and XMP all match. Straighten auto-crops the black corners."));
             });
         changed
     }
@@ -2921,11 +2897,7 @@ impl AutoShadeApp {
                         changed = true;
                     }
                     if n_comp > 0 {
-                        ui.label(
-                            egui::RichText::new(tr(lang, "Shapes compose in order onto the base mask. Linear, radial, brush and AI components export to Lightroom; bitmap components have a named loss."))
-                                .weak()
-                                .small(),
-                        );
+                        explainer(ui, lang, tr(lang, "Shapes compose in order onto the base mask. Linear, radial, brush and AI components export to Lightroom; bitmap components have a named loss."));
                     }
                 }
                 // --- Range Mask（LR 范围蒙版）: refines WHERE the geometry applies —
@@ -3169,11 +3141,7 @@ impl AutoShadeApp {
                 group(ui, tr(lang, "Curve"));
                 changed |= self.curve_editor_for(ui, CurveTarget::Mask(i));
             } else if n_masks == 0 {
-                ui.label(
-                    egui::RichText::new(tr(lang, "Lightroom-style local adjustments: add a gradient to darken the sky, a radial to brighten the subject. AI Analyze also writes to this list."))
-                        .weak()
-                        .small(),
-                );
+                explainer(ui, lang, tr(lang, "Lightroom-style local adjustments: add a gradient to darken the sky, a radial to brighten the subject. AI Analyze also writes to this list."));
             } else {
                 // Masks exist, none is selected — one click on the selected
                 // row (it toggles) lands here, and the section then showed a
@@ -3351,8 +3319,7 @@ impl AutoShadeApp {
                     }
                 }
                 sub_caption(ui, tr(lang, "Snapshot history"));
-                if ui
-                    .button(tr(lang, "＋ Save as version"))
+                if action_row(ui, true, tr(lang, "＋ Save as version"))
                     .on_hover_text(tr(lang, "Snapshot this card's develop only as a numbered version (v<N>.recipe.json with frozen mask rasters); Ctrl+S saves every card"))
                     .clicked()
                 {
@@ -3544,11 +3511,7 @@ impl AutoShadeApp {
                     }
                 }
                 if n_ver == 0 {
-                    ui.label(
-                        egui::RichText::new(tr(lang, "Like LR virtual copies: store multiple parameter sets for one photo (B&W, cropped…) without overwriting."))
-                            .weak()
-                            .small(),
-                    );
+                    explainer(ui, lang, tr(lang, "Like LR virtual copies: store multiple parameter sets for one photo (B&W, cropped…) without overwriting."));
                 }
                 }); // add_enabled_ui: inert while a photo is still opening
             });
@@ -3677,11 +3640,7 @@ impl AutoShadeApp {
                         ),
                     );
                 });
-                ui.label(
-                    egui::RichText::new(tr(lang, "Applied by 「Export」 in the toolbar (Ctrl+Shift+E, or Ctrl+E) and by 「Render selected」 in the library. The ▾ beside Export delivers one file to a path you pick without touching the Destination."))
-                        .weak()
-                        .small(),
-                );
+                explainer(ui, lang, tr(lang, "Applied by 「Export」 in the toolbar (Ctrl+Shift+E, or Ctrl+E) and by 「Render selected」 in the library. The ▾ beside Export delivers one file to a path you pick without touching the Destination."));
                 // --- SF8-A: hand the Lightroom sidecar over ----------------
                 // The XMP projection has always been written INSIDE the hashed
                 // develop folder, which is the right home for state — but the

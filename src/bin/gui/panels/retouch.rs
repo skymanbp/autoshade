@@ -1237,13 +1237,7 @@ impl AutoShadeApp {
                 if primary_row(ui, ready, verb).on_hover_text(hint).clicked() {
                     self.start_fill();
                 }
-                ui.label(
-                    egui::RichText::new(tr(lang,
-                        "Write what to change and press ✨ AI edit — the model finds where. Or paint an area first: an empty prompt then removes it, words fill it. Either way the result is a layer over this card (its own pixels never change), levelled to the colours around it; a layer keeps the look it was made with, so after a large slider change, run it again. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
-                    ))
-                    .weak()
-                    .small(),
-                );
+                explainer(ui, lang, tr(lang, "Write what to change and press ✨ AI edit — the model finds where. Or paint an area first: an empty prompt then removes it, words fill it. Either way the result is a layer over this card (its own pixels never change), levelled to the colours around it; a layer keeps the look it was made with, so after a large slider change, run it again. Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings)."));
                 self.layer_rows(ui);
             });
 
@@ -1283,13 +1277,7 @@ impl AutoShadeApp {
                 // downsample the unchecked path bakes into the master.
                 ui.checkbox(&mut self.heal_fullres, tr(lang, "Full-res heal"))
                     .on_hover_text(tr(lang, "Heal at full resolution (slow; without it a baked image is saved at 2048px)"));
-                ui.label(
-                    egui::RichText::new(tr(lang,
-                        "AI auto-detects dust / blemishes, or paint a mask and Heal it. Pixel retouch from surrounding pixels; saved to ./out.",
-                    ))
-                    .weak()
-                    .small(),
-                );
+                explainer(ui, lang, tr(lang, "AI auto-detects dust / blemishes, or paint a mask and Heal it. Pixel retouch from surrounding pixels; saved to ./out."));
             });
 
         card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Clone Stamp"))
@@ -1340,15 +1328,9 @@ impl AutoShadeApp {
                 // rule as Heal beside it (L15-7).
                 ui.checkbox(&mut self.clone_fullres, tr(lang, "Full-res clone"))
                     .on_hover_text(tr(lang, "Clone at full resolution (slow; without it a baked image is saved at 2048px)"));
-                ui.label(
-                    egui::RichText::new(tr(lang,
-                        "Photoshop-style clone stamp: Alt+click to sample a source (cross marker), brush the area to \
+                explainer(ui, lang, tr(lang, "Photoshop-style clone stamp: Alt+click to sample a source (cross marker), brush the area to \
                          cover, and pixels are carried over as-is from the source (feathered edges, no tone matching). \
-                         Local compute, saves a ./out pixel master.",
-                    ))
-                    .weak()
-                    .small(),
-                );
+                         Local compute, saves a ./out pixel master."));
             });
     }
 }

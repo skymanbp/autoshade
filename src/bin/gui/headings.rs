@@ -94,6 +94,21 @@ pub(crate) fn paint_chevron(ui: &mut egui::Ui, openness: f32, response: &egui::R
     ui.painter().add(egui::Shape::line(points, egui::Stroke::new(1.5, colour)));
 }
 
+/// A section's how-it-works paragraph, folded to one quiet line (2026-10-14,
+/// user: 「文字需要精简，不要过于 overwhelming」): the paragraph opens as the
+/// line's tooltip, so nothing it says is lost, and the panel shows one row
+/// where it used to show three to six. Status lines and warnings stay plain
+/// labels — only explanation goes here.
+pub(crate) fn explainer(ui: &mut egui::Ui, lang: Lang, text: &str) -> egui::Response {
+    ui.label(egui::RichText::new(tr(lang, "ⓘ How this works")).small().weak()).on_hover_ui(|ui| {
+        ui.set_max_width(EXPLAINER_W);
+        ui.label(text);
+    })
+}
+
+/// How wide an [`explainer`]'s paragraph opens.
+pub(crate) const EXPLAINER_W: f32 = 320.0;
+
 /// A caption for one block INSIDE a fold (the colour-grading scope, a mask's
 /// slider groups, the library ladder's rungs, the snapshot history): air and
 /// a weak small line, no hairline — the fold's own indent already says whose
@@ -116,8 +131,32 @@ pub(crate) fn card_fold<R>(
     body: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::CollapsingResponse<R> {
     let plate = ui.painter().add(egui::Shape::Noop);
+    let lift = ui.painter().add(egui::Shape::Noop);
     let (left, right) = (ui.max_rect().left(), ui.max_rect().right());
     let r = header.icon(paint_chevron).show(ui, body);
+    // The header is the fold's button, and it rises under the pointer
+    // (2026-10-14, user: 「"展开折叠"的按钮，放上去给阴影动画」): a raised plate
+    // with a soft downward shadow fades in over MOTION_FADE_S and out again,
+    // painted beneath the header's text, open fold or closed.
+    let h = r.header_response.clone();
+    let rise = ui.ctx().animate_bool_with_time(h.id.with("lift"), h.hovered(), MOTION_FADE_S);
+    if rise > 0.0 {
+        let c = theme_of(ui).colors();
+        let row = egui::Rect::from_x_y_ranges(left - FOLD_CARD_PAD + 2.0..=right + FOLD_CARD_PAD - 2.0, h.rect.y_range()).expand2(egui::vec2(0.0, 2.0));
+        let shadow = egui::epaint::Shadow {
+            offset: egui::vec2(0.0, 2.0 * rise),
+            blur: 8.0,
+            spread: 0.0,
+            color: egui::Color32::from_black_alpha((f32::from(c.shadow_alpha) * rise) as u8),
+        };
+        ui.painter().set(
+            lift,
+            egui::Shape::Vec(vec![
+                shadow.as_shape(row, RADIUS_MD).into(),
+                egui::Shape::rect_filled(row, RADIUS_MD, c.widget_hover.gamma_multiply(rise)),
+            ]),
+        );
+    }
     if let Some(b) = &r.body_response {
         let c = theme_of(ui).colors();
         let rect = egui::Rect::from_min_max(

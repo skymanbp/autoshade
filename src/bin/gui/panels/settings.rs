@@ -358,8 +358,7 @@ impl AutoShadeApp {
             self.status = t.clone();
             self.toast(ToastKind::Error, t);
         }
-        if ui
-            .button(tr(lang, "Import develops from an old ./out folder…"))
+        if action(ui, true, tr(lang, "Import develops from an old ./out folder…"))
             .on_hover_text(tr(
                 lang,
                 "Saves made before v0.13 lived in a ./out folder next to wherever the app was launched. If your old edits are missing, point this at that folder — its recipes / XMP / versions migrate into the develop store.",
@@ -402,8 +401,7 @@ impl AutoShadeApp {
                         "Pointing it inside your photo library removes that folder's read-only protection: AutoShade refuses to write beside your originals, but never into its own delivery folder.",
                     ),
                 ));
-                if ui
-                    .button(tr(lang, "Browse…"))
+                if action(ui, true, tr(lang, "Browse…"))
                     .on_hover_text(tr(lang, "Pick the delivery folder"))
                     .clicked()
                     && let Some(dir) = rfd::FileDialog::new().pick_folder()
@@ -467,8 +465,7 @@ impl AutoShadeApp {
                     lang,
                     "Which Python runs the AI sidecars (segmentation, denoise, style). Blank = the platform default. It can only be set here or by the AUTOSHADE_PYTHON environment variable — never by a file that arrives beside your photos.",
                 ));
-                if ui
-                    .button(tr(lang, "Detect"))
+                if action(ui, true, tr(lang, "Detect"))
                     .on_hover_text(tr(
                         lang,
                         "Look in the standard install locations for a working Python 3",

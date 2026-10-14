@@ -1047,7 +1047,7 @@ settings file can supply them.
   `.xmp` is developed, and only when that develop looks like the finished photo
   (mean colour difference ΔE ≤ 11) do its settings go to the model beside that
   reference. A sidecar that develops to a different picture — an older grade,
-  or one later reworked in Photoshop — is ignored. Tick **Also write each look as short phrases** (or
+  or one later reworked in Photoshop — is ignored. Tick **Write look phrases** (or
   pass `--describe`) to have a local model write a few phrases per photo about
   its grade, which go to the model beside each reference. A rebuild measures
   only new or changed photos. Each analysis guided by the library then

@@ -32,7 +32,7 @@ Regular outlines while labelled `Thin`).
 
 ## Icon face
 
-`LucideIcons-autoshade.ttf` (14.7 KB) redraws the GUI's 37 icon-like symbol
+`LucideIcons-autoshade.ttf` (15.1 KB) redraws the GUI's 38 icon-like symbol
 codepoints (✨ ⚠ 🗑 ⚙ 🖌 …) in one stroke family, [Lucide](https://lucide.dev)
 (`lucide-static@0.460.0`, `font/lucide.ttf`), instead of the five donors'
 mixed hands. Each Lucide outline is copied under the GUI symbol's own

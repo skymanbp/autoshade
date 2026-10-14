@@ -168,3 +168,56 @@
             crate::theme::FIELD_W_MAX
         );
     }
+
+    /// User 2026-10-14: 「"展开折叠"的按钮，放上去给阴影动画」. A fold's header
+    /// rises under the pointer — a raised plate in the theme's hover fill fades
+    /// in — and settles back once the pointer leaves.
+    ///
+    /// MUTATION THIS CATCHES: `card_fold` never filling its `lift` slot.
+    #[test]
+    fn a_fold_header_rises_under_the_pointer_and_settles_back() {
+        fn has_fill(shapes: &[egui::epaint::ClippedShape], fill: egui::Color32) -> bool {
+            fn walk(s: &egui::Shape, fill: egui::Color32) -> bool {
+                match s {
+                    egui::Shape::Rect(r) => r.fill == fill,
+                    egui::Shape::Vec(v) => v.iter().any(|s| walk(s, fill)),
+                    _ => false,
+                }
+            }
+            shapes.iter().any(|c| walk(&c.shape, fill))
+        }
+        let ctx = egui::Context::default();
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let hover = crate::theme::current_theme().colors().widget_hover;
+        let header = std::cell::Cell::new(egui::Rect::NOTHING);
+        let frame = |t: f64, pointer: Option<egui::Pos2>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))),
+                time: Some(t),
+                events: pointer.map(egui::Event::PointerMoved).into_iter().collect(),
+                ..Default::default()
+            };
+            ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let r = crate::headings::card_fold(ui, egui::CollapsingHeader::new("Fold").default_open(true), |ui| {
+                        ui.add_space(40.0);
+                    });
+                    header.set(r.header_response.rect);
+                });
+            })
+        };
+        let rest = frame(0.0, Some(egui::pos2(390.0, 290.0)));
+        assert!(!has_fill(&rest.shapes, hover), "a header the pointer is not on is flat");
+        let on = header.get().center();
+        let mut risen = None;
+        for i in 1..=40 {
+            risen = Some(frame(i as f64 / 60.0, Some(on)));
+        }
+        assert!(has_fill(&risen.unwrap().shapes, hover), "under the pointer the header carries its raised plate");
+        let mut settled = None;
+        for i in 41..=80 {
+            settled = Some(frame(i as f64 / 60.0, Some(egui::pos2(390.0, 290.0))));
+        }
+        let settled = settled.unwrap();
+        assert!(!has_fill(&settled.shapes, hover), "the plate fades out once the pointer leaves");
+    }

@@ -116,13 +116,7 @@ impl AutoShadeApp {
                 // otherwise, and the pixel-level tools are deliberately
                 // elsewhere.
                 ui.add_space(SPACE_XS);
-                ui.label(
-                    egui::RichText::new(tr(lang,
-                        "Pixel-level AI tools stay at their tools: select subject / select sky in Local Masks, denoise in Detail, heal and fill in Retouch.",
-                    ))
-                    .weak()
-                    .small(),
-                );
+                explainer(ui, lang, tr(lang, "Pixel-level AI tools stay at their tools: select subject / select sky in Local Masks, denoise in Detail, heal and fill in Retouch."));
             });
             state.store(ui.ctx());
         });
@@ -611,6 +605,7 @@ impl AutoShadeApp {
             // 🗂, the same glyph Settings uses for a folder action: the
             // embedded font subset covers it already (📂 is not in it).
             let cell = columns(ui, 2);
+            ui.horizontal(|ui| {
             if action_in(ui, cell, true, tr(lang, "🗂 Pick folder…"))
                 .on_hover_text(tr(lang,
                     "Choose a folder of finished photos whose look you like — your own exports or anyone's. Nothing reads their .xmp: each photo is measured from its pixels. Building starts as soon as you choose.",
@@ -632,9 +627,11 @@ impl AutoShadeApp {
             if resp.clicked() {
                 build = have;
             }
+            });
             // The RAW folder for the settings check: optional, remembered, and
             // read on the next build.
             let mut pick_raw = false;
+            ui.horizontal(|ui| {
             if action_in(ui, cell, true, tr(lang, "🗂 RAW folder…"))
                 .on_hover_text(tr(lang,
                     "Optional: the folder your RAWs live in. On the next build each finished photo's RAW is found by its file name; when the RAW's .xmp develops to the finished photo, its settings go to the AI beside that reference. A .xmp that develops to a different picture (an older version, or work done later in Photoshop) is ignored.",
@@ -643,12 +640,13 @@ impl AutoShadeApp {
             {
                 pick_raw = true;
             }
-            if action_in(ui, cell, self.style_raw_dir.is_some(), tr(lang, "✕ Clear RAW folder"))
+            if action_in(ui, cell, self.style_raw_dir.is_some(), tr(lang, "✕ Clear"))
                 .on_hover_text(tr(lang, "Stop looking for RAW settings"))
                 .clicked()
             {
                 self.style_raw_dir = None;
             }
+            });
             let raw_note = match &self.style_raw_dir {
                 Some(d) => abs_display(d),
                 None => tr(lang, "no RAW folder: references go without settings").to_string(),
@@ -657,9 +655,9 @@ impl AutoShadeApp {
             if pick_raw && let Some(d) = rfd::FileDialog::new().pick_folder() {
                 self.style_raw_dir = Some(d);
             }
-            ui.checkbox(&mut self.style_describe, tr(lang, "Also write each look as short phrases (local vision model; downloads 4.3 GB once, slower builds)"))
+            ui.checkbox(&mut self.style_describe, tr(lang, "Write look phrases (local model)"))
                 .on_hover_text(tr(lang,
-                    "A local model (Qwen3-VL-2B) writes a few phrases per photo about its GRADE — \"warm, faded, low contrast\" — which go to the AI beside each reference. Nothing leaves this machine and nothing is billed. Off = the references go without words.",
+                    "A local model (Qwen3-VL-2B, 4.3 GB, downloaded once; builds get slower) writes a few phrases per photo about its GRADE — \"warm, faded, low contrast\" — which go to the AI beside each reference. Nothing leaves this machine and nothing is billed. Off = the references go without words.",
                 ));
         });
         if let Some((stage, done, total)) = self.style_build_progress {
@@ -697,9 +695,9 @@ impl AutoShadeApp {
     fn ai_library_use(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         let built = matches!(self.style_info, Some(autoshade::library::Summary::Built { .. }));
-        ui.checkbox(&mut self.style_embed, tr(lang, "Search the library when analysing (SigLIP 2, local; downloads 1.5 GB once)"))
+        ui.checkbox(&mut self.style_embed, tr(lang, "Search the library when analysing"))
             .on_hover_text(tr(lang,
-                "Each analysis measures this photo with a local model and picks the closest references. Building a library turns this on, since the build has already downloaded the model.",
+                "Each analysis measures this photo with a local model (SigLIP 2, 1.5 GB, downloaded once) and picks the closest references. Building a library turns this on, since the build has already downloaded the model.",
             ));
         if built && !self.style_embed {
             ui.label(
@@ -839,14 +837,8 @@ impl AutoShadeApp {
                      Off = never spend extra.",
                     &[("limit", &format!("{:.2}", autoshade::fit::DIVERGENCE_GLOBAL))],
                 ));
-                ui.label(
-                    egui::RichText::new(tr(lang,
-                        "After generating, use 「Reverse-fit recipe」 to turn the look into sliders + XMP \
-                         (the full-resolution way).",
-                    ))
-                    .weak()
-                    .small(),
-                );
+                explainer(ui, lang, tr(lang, "After generating, use 「Reverse-fit recipe」 to turn the look into sliders + XMP \
+                         (the full-resolution way)."));
             });
     }
 
@@ -1022,8 +1014,8 @@ impl AutoShadeApp {
             let mut pick_ref = false;
             let mut clear_ref = false;
             ui.horizontal_wrapped(|ui| {
-                // One cell of the grid, measured at the row's start; the file
-                // name and its ✕ follow, wrapping under when short (2026-09-27).
+                // Two cells of the grid, measured at the row's start: the
+                // verb, then the file name with its ✕ (2026-09-27, 2026-10-14).
                 let cell = columns(ui, 2);
                 if action_in(ui, cell, !self.busy, tr(lang, "Choose reference…"))
                     .on_hover_text(tr(lang,
@@ -1043,25 +1035,30 @@ impl AutoShadeApp {
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| p.display().to_string());
-                    // Truncated, never wrapped: a file name is one unbreakable
-                    // word, and egui's inline text layout in a wrapped row ran
-                    // it past the panel edge (11 px at the 320 px default) and
-                    // widened the auto-fitting panel; the full path is on
-                    // hover. Truncation keeps it one atomic widget that wraps
-                    // under the button when the line is short.
-                    ui.add(egui::Label::new(egui::RichText::new(name).weak().small()).truncate())
-                        .on_hover_text(p.display().to_string());
-                    // Bare glyph, not `tr` — the symbol IS the label in every
-                    // language (the same rule the variant-strip and gallery ✕
-                    // buttons follow); only the tooltip is translated.
-                    if glyph(ui, true, "✕")
-                        .on_hover_text(tr(lang,
-                            "Forget this reference and go back to reverse-fitting the active generated variant",
-                        ))
-                        .clicked()
-                    {
-                        clear_ref = true;
-                    }
+                    // The name and its ✕ share the row's second cell, laid
+                    // right to left: the ✕ takes the cell's right end and the
+                    // name is truncated into what is left (2026-10-14 — a
+                    // truncating label took the whole remaining width and
+                    // pushed the ✕ onto a line of its own). Truncated, never
+                    // wrapped: a file name is one unbreakable word, and egui's
+                    // inline layout in a wrapped row ran it past the panel
+                    // edge; the full path is on hover.
+                    ui.allocate_ui_with_layout(cell, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Bare glyph, not `tr` — the symbol IS the label in
+                        // every language (the same rule the variant-strip and
+                        // gallery ✕ buttons follow); only the tooltip is
+                        // translated.
+                        if glyph(ui, true, "✕")
+                            .on_hover_text(tr(lang,
+                                "Forget this reference and go back to reverse-fitting the active generated variant",
+                            ))
+                            .clicked()
+                        {
+                            clear_ref = true;
+                        }
+                        ui.add(egui::Label::new(egui::RichText::new(name).weak().small()).truncate())
+                            .on_hover_text(p.display().to_string());
+                    });
                 }
             });
             // rfd OUTSIDE the closure above (it borrows `ui`) and after the row is
