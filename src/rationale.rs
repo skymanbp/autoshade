@@ -1001,20 +1001,6 @@ pub mod keys {
     pub const REVISION_VERIFY_FAILED: &str =
         " [verification of revision round {round} failed ({e}) — keeping the previous \
          verified proposal]";
-    /// The develop where the DIRECTION led and the references followed
-    /// (v1.2.3, user ruling 2026-09-01). "The references were background" is
-    /// as much a fact about this develop as the references it names. It names
-    /// the adherence tier because that dial — not a new control — chose the
-    /// voice, so a user who wants their library back knows which slider to
-    /// move.
-    ///
-    /// It names the DIAL, not a flag: rationale notes are persisted into the
-    /// recipe and re-rendered in the CLI, the desktop app and the browser, and
-    /// only one of those has a command line.
-    pub const STYLE_BACKGROUND: &str =
-        " [your reference library was kept as BACKGROUND for this develop — the direction \
-         leads at adherence tier {tier}; lower the Adherence dial to 40% or below to hand \
-         the references back the lead]";
     pub const STYLE_UNAVAILABLE: &str =
         " [reference library unavailable ({e}) — the Style slider had no effect on this \
          develop]";

@@ -512,17 +512,6 @@ pub struct GradeIntent<'a> {
     /// The SUMMARY, never the block: [`crate::library::look_summary`], one
     /// reference's phrases, fenced at the consumer exactly like `direction`.
     pub style_look: Option<&'a str>,
-    /// WHOSE aim `style_look` states — the SAME [`crate::library::StyleVoice`]
-    /// the reference block's wording reads (v1.2.3).
-    ///
-    /// v1.2.3 gave a direction the lead in the block's wording and left the
-    /// judge untouched: the judge was still told the
-    /// retrieved look was "the BRIEF" that a revision "must not walk back". The
-    /// judge BUYS revisions (two of the three acceptance develops adopted one), so
-    /// the reviewer that chose the final recipe was briefed on the very library the
-    /// block had just demoted to background. One voice, read by all three, is the
-    /// only shape in which they cannot drift apart again.
-    pub style_voice: crate::library::StyleVoice,
 }
 
 /// One AI advisor. A provider implements the role(s) it serves; the unserved
@@ -2139,7 +2128,6 @@ mod tests {
                 adherence: DirectionAdherence::new(DirectionAdherence::DEFAULT),
                 direction: None,
                 style_look: None,
-                style_voice: crate::library::StyleVoice::default(),
             };
             let p = build_verify_prompt(&recipe, &meta, &hist, &intent).expect("verify prompt");
             assert!(p.contains("COLOUR is part of the develop, not decoration"), "{s}: {p}");
@@ -2297,7 +2285,7 @@ mod tests {
                 &EditRecipe::default(),
                 &meta,
                 &hist,
-                &GradeIntent { strength: s, adherence: crate::recipe::DirectionAdherence::default(), direction: None, style_look: None, style_voice: crate::library::StyleVoice::for_style(s.get()) },
+                &GradeIntent { strength: s, adherence: crate::recipe::DirectionAdherence::default(), direction: None, style_look: None },
             )
             .unwrap()
         };
@@ -2325,7 +2313,7 @@ mod tests {
         let judge = |s| {
             super::judge::task_instruction(
                 JudgeTask::Develop,
-                Some(GradeIntent { strength: s, adherence: crate::recipe::DirectionAdherence::default(), direction: None, style_look: None, style_voice: crate::library::StyleVoice::for_style(s.get()) }),
+                Some(GradeIntent { strength: s, adherence: crate::recipe::DirectionAdherence::default(), direction: None, style_look: None }),
             )
         };
         assert_ne!(judge(calib), judge(bold), "gate 4 (visual judge) is deaf");
@@ -2390,7 +2378,7 @@ mod tests {
                 &EditRecipe::default(),
                 &meta,
                 &hist,
-                &GradeIntent { strength: GradeStrength::new(s), adherence: crate::recipe::DirectionAdherence::default(), direction: d, style_look: None, style_voice: crate::library::StyleVoice::default() },
+                &GradeIntent { strength: GradeStrength::new(s), adherence: crate::recipe::DirectionAdherence::default(), direction: d, style_look: None },
             )
             .expect("the verify prompt builds")
         };
@@ -3630,7 +3618,6 @@ Final answer: {"decision":"accept","reasons":[]}"#;
                 adherence: DirectionAdherence::new(adherence),
                 direction: Some("warmer"),
                 style_look: None,
-                style_voice: crate::library::StyleVoice::default(),
             })
             .unwrap()
         };
@@ -3678,7 +3665,6 @@ Final answer: {"decision":"accept","reasons":[]}"#;
                 adherence: DirectionAdherence::new(0.9),
                 direction,
                 style_look: None,
-                style_voice: crate::library::StyleVoice::default(),
             })
             .unwrap()
         };

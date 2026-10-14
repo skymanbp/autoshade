@@ -423,7 +423,7 @@ def tidy_phrases(line):
     Split on commas, trimmed, a trailing full stop dropped, duplicates removed
     (case-insensitively, first spelling kept). The repetition a looping greedy
     decode produces ("soft, natural, soft, atmospheric, soft") would otherwise
-    weigh the phrase vector toward whatever word the loop landed on.
+    read as emphasis on whatever word the loop landed on.
     """
     seen = set()
     kept = []

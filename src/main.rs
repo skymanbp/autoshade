@@ -67,12 +67,17 @@ enum Command {
         /// shadows, keep skin natural".
         #[arg(long)]
         guidance: Option<String>,
+        /// What guides the AI: `library` (the finished photos in your
+        /// reference library closest to this one) or `direction` (the
+        /// --guidance text) — one or the other, never both. Omitted: a
+        /// --guidance picks `direction`, none picks `library`. `library` with a
+        /// --guidance is refused.
+        #[arg(long, value_parser = parse_guide)]
+        guide: Option<pipeline::Guide>,
         /// How strongly to follow your reference library, 0..1 (needs one built
-        /// with `library-build`). Omit to use AUTOSHADE_STYLE_STRENGTH (default
-        /// 0.3). With NO --guidance, >=0.85 asks for the reference looks rather
-        /// than staying within them. WITH a --guidance direction at --adherence
-        /// above 0.40, the direction leads instead: the references are quoted as
-        /// BACKGROUND, whatever this value is.
+        /// with `library-build`; read only with `--guide library`). Omit to use
+        /// AUTOSHADE_STYLE_STRENGTH (default 0.3). >=0.85 asks for the
+        /// reference looks rather than staying within them.
         #[arg(long, value_parser = unit_interval)]
         style: Option<f32>,
         /// How COMMITTED the grade should be, 0..1 — a different axis from
@@ -85,15 +90,11 @@ enum Command {
         /// and the TIER NAME is what the proposer and the verifier are told:
         /// <=0.40 Hint, 0.40..0.70 Direct, >0.70 Brief. Omitted = 0.65, i.e.
         /// Direct. Prompt intent only — it never moves a render bound — and it
-        /// does nothing at all without a direction. At Direct or Brief it also
-        /// decides WHO LEADS: your style library becomes background and its
-        /// distillation pull is skipped, so a direction can take a photo
-        /// somewhere your past edits never went. At Hint the library leads as
-        /// before.
+        /// does nothing at all without a direction.
         #[arg(long, value_parser = unit_interval)]
         adherence: Option<f32>,
-        /// Let the local SigLIP 2 sidecar measure this photo and the direction,
-        /// so the reference library can be searched. First run downloads
+        /// Let the local SigLIP 2 sidecar measure this photo, so the reference
+        /// library can be searched. First run downloads
         /// ~1.5 GB of weights into python/weights and every call re-loads them.
         /// Overrides AUTOSHADE_STYLE_EMBED for this run.
         #[arg(long, conflicts_with = "no_embed")]
@@ -157,12 +158,17 @@ enum Command {
         /// Optional direction for the AI (e.g. "warmer and moodier").
         #[arg(long)]
         guidance: Option<String>,
+        /// What guides the AI: `library` (the finished photos in your
+        /// reference library closest to this one) or `direction` (the
+        /// --guidance text) — one or the other, never both. Omitted: a
+        /// --guidance picks `direction`, none picks `library`. `library` with a
+        /// --guidance is refused.
+        #[arg(long, value_parser = parse_guide)]
+        guide: Option<pipeline::Guide>,
         /// How strongly to follow your reference library, 0..1 (needs one built
-        /// with `library-build`). Omit for AUTOSHADE_STYLE_STRENGTH (default 0.3).
-        /// With NO --guidance, >=0.85 asks for the reference looks rather than
-        /// staying within them. WITH a --guidance direction at --adherence above
-        /// 0.40, the direction leads instead: the references are quoted as
-        /// BACKGROUND, whatever this value is.
+        /// with `library-build`; read only with `--guide library`). Omit for
+        /// AUTOSHADE_STYLE_STRENGTH (default 0.3). >=0.85 asks for the
+        /// reference looks rather than staying within them.
         #[arg(long, value_parser = unit_interval)]
         style: Option<f32>,
         /// How COMMITTED the grade should be, 0..1 (see `analyze --strength`);
@@ -173,15 +179,11 @@ enum Command {
         /// and the TIER NAME is what the proposer and the verifier are told:
         /// <=0.40 Hint, 0.40..0.70 Direct, >0.70 Brief. Omitted = 0.65, i.e.
         /// Direct. Prompt intent only — it never moves a render bound — and it
-        /// does nothing at all without a direction. At Direct or Brief it also
-        /// decides WHO LEADS: your style library becomes background and its
-        /// distillation pull is skipped, so a direction can take a photo
-        /// somewhere your past edits never went. At Hint the library leads as
-        /// before.
+        /// does nothing at all without a direction.
         #[arg(long, value_parser = unit_interval)]
         adherence: Option<f32>,
-        /// Let the local SigLIP 2 sidecar measure this photo and the direction,
-        /// so the reference library can be searched. First run downloads
+        /// Let the local SigLIP 2 sidecar measure this photo, so the reference
+        /// library can be searched. First run downloads
         /// ~1.5 GB of weights into python/weights and every call re-loads them.
         /// Overrides AUTOSHADE_STYLE_EMBED for this run.
         #[arg(long, conflicts_with = "no_embed")]
@@ -360,27 +362,17 @@ enum Command {
         #[arg(long)]
         describe: bool,
     },
-    /// Offline search diagnostic: which reference looks a develop of this
-    /// photo would follow, in the search's own numbers — each hit's scene and
-    /// prompt scores and phrases, the block the advisor would receive, and the
-    /// notes the develop would write. No advisor call, no network, no spend.
+    /// Offline search diagnostic: which reference looks a library-guided
+    /// develop of this photo would follow, in the search's own numbers — each
+    /// hit's scene score and phrases, the block the advisor would receive, and
+    /// the note the develop would write. No advisor call, no network, no spend.
     LibrarySearch {
         /// The photo to search with (RAW or a baked image).
         photo: PathBuf,
-        /// Optional direction, matched against each reference's look phrases.
-        #[arg(long)]
-        direction: Option<String>,
         /// The Style axis, 0..1 (default 0.3). At >=0.85 the block asks for
-        /// the references' look rather than staying within it — unless a
-        /// --direction leads (see --adherence).
+        /// the references' look rather than staying within it.
         #[arg(long, value_parser = unit_interval)]
         style: Option<f32>,
-        /// The adherence dial to assume, 0..1 (default 0.65, i.e. Direct — the
-        /// same default `analyze` uses). With a --direction at Direct or Brief
-        /// the references are quoted as BACKGROUND, which is what the develop
-        /// would send; at Hint the Style axis decides.
-        #[arg(long, value_parser = unit_interval)]
-        adherence: Option<f32>,
     },
     /// EXPERIMENTAL: full-frame generative restyle via OpenAI Images (low-res,
     /// lossy re-render — NOT a master; the XMP/render path is the real workflow).
@@ -561,8 +553,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Decode { raw, out } => decode_cmd(&raw, out),
-        Command::Analyze { raw, out, guidance, style, strength, adherence, embed, no_embed, deep, reference_image } => {
-            analyze_cmd(&raw, out, guidance, style, strength, adherence, deep, reference_image, embed_switch(embed, no_embed))
+        Command::Analyze { raw, out, guidance, guide, style, strength, adherence, embed, no_embed, deep, reference_image } => {
+            let guide = pipeline::Guide::resolve(guide, guidance.as_deref())?;
+            analyze_cmd(&raw, out, guidance, guide, style, strength, adherence, deep, reference_image, embed_switch(embed, no_embed))
         }
         Command::Apply { raw, recipe, out, long_edge } => {
             apply_cmd(&raw, &recipe, &out, long_edge)
@@ -571,6 +564,7 @@ fn main() -> Result<()> {
             raw,
             out,
             guidance,
+            guide,
             style,
             strength,
             adherence,
@@ -583,8 +577,9 @@ fn main() -> Result<()> {
             denoise_model,
             long_edge,
         } => {
+            let guide = pipeline::Guide::resolve(guide, guidance.as_deref())?;
             auto_cmd(
-                &raw, out, guidance, style, strength, adherence, deep, reference_image, denoise,
+                &raw, out, guidance, guide, style, strength, adherence, deep, reference_image, denoise,
                 denoise_strength, denoise_model, long_edge, embed_switch(embed, no_embed),
             )
         }
@@ -603,12 +598,7 @@ fn main() -> Result<()> {
             // pass is off by default, so not passing it already means off.
             library_build_cmd(&dir, autoshade::library::DescribeSwitch::resolve(describe.then_some(true), false))
         }
-        Command::LibrarySearch { photo, direction, style, adherence } => library_search_cmd(
-            &photo,
-            direction.as_deref(),
-            style.unwrap_or(0.3),
-            adherence.map(DirectionAdherence::new).unwrap_or_default(),
-        ),
+        Command::LibrarySearch { photo, style } => library_search_cmd(&photo, style.unwrap_or(0.3)),
         Command::Reimagine { raw, prompt, fidelity, quality, fidelity_retry, out } => {
             let cfg = Config::load();
             let out = out.unwrap_or_else(|| default_out(&raw, "reimagine", "png"));
@@ -745,9 +735,9 @@ fn embed_switch(embed: bool, no_embed: bool) -> autoshade::library::EmbeddingSwi
     autoshade::library::EmbeddingSwitch::resolve(flag, false)
 }
 
-/// The offline search diagnostic: the develop's own search, block and notes
+/// The offline search diagnostic: the develop's own search, block and note
 /// for one photo, through the same calls `produce_recipe` makes.
-fn library_search_cmd(photo: &Path, direction: Option<&str>, style: f32, adherence: DirectionAdherence) -> Result<()> {
+fn library_search_cmd(photo: &Path, style: f32) -> Result<()> {
     use autoshade::library;
     let lib = match library::load() {
         library::Loaded::Ready(lib) => lib,
@@ -757,52 +747,26 @@ fn library_search_cmd(photo: &Path, direction: Option<&str>, style: f32, adheren
     let opts = autoshade::embed::EmbedOpts::from_config(&Config::load());
     anyhow::ensure!(opts.available(), "the embedding sidecar is not present, so the library cannot be searched");
     let decoded = decode::decode_any(photo)?;
-    let q = library::query_vectors(&opts, &decoded.preview, direction, &autoshade::store::store_root())?;
-    let hits = lib.search(
-        &library::Query { image: &q.image, prompt: q.prompt.as_deref(), exclude: Some(photo) },
-        library::REFERENCE_COUNT,
-    );
+    let image = library::query_vector(&opts, &decoded.preview, &autoshade::store::store_root())?;
+    let hits = lib.search(&library::Query { image: &image, exclude: Some(photo) }, library::REFERENCE_COUNT);
     println!("library: {} ({} finished photos from {})", library::path().display(), lib.entries.len(), lib.dir);
-    println!("prompt term: {}", if q.prompt.is_some() { "on (the direction against each look's phrases)" } else { "off (no direction)" });
     for h in &hits {
         let phrases: String = h.entry.phrases.as_deref().unwrap_or("–").chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
-        println!(
-            "  {} score={:.3} scene={:.3}{} phrases=\"{phrases}\"",
-            stem(Path::new(&h.entry.path)),
-            h.score,
-            h.scene,
-            h.prompt.map(|p| format!(" prompt={p:.3}")).unwrap_or_default(),
-        );
+        println!("  {} scene={:.3} phrases=\"{phrases}\"", stem(Path::new(&h.entry.path)), h.scene);
     }
-    let voice = library::StyleVoice::choose(style, direction, adherence);
-    println!(
-        "voice: {voice:?} (Style {style:.2}, adherence {:.2} = {}, direction {})",
-        adherence.get(),
-        adherence.tier().as_str(),
-        if direction.is_some_and(|d| !d.trim().is_empty()) { "present" } else { "none" },
-    );
+    let voice = library::StyleVoice::for_style(style);
+    println!("voice: {voice:?} (Style {style:.2})");
     // The SHARED fence constant: the point of printing the block is that it is
     // the advisor's block.
-    let block = library::reference_block(&hits, &[], voice, q.prompt.is_some());
+    let block = library::reference_block(&hits, &[], voice);
     println!(
         "reference (advisor block):\n{}",
         block.as_deref().map(|b| format!("{}{b}", autoshade::advisor::FENCE_STYLE_REFERENCE)).unwrap_or_else(|| "(none)".into())
     );
     println!("disclosure notes:");
     let files: Vec<String> = hits.iter().map(|h| stem(Path::new(&h.entry.path)).to_string()).collect();
-    let notes = [
-        pipeline::references_note(&files),
-        pipeline::style_background_note(voice, adherence, block.as_deref()),
-    ];
-    for note in notes.iter().flatten() {
-        println!("  {}", autoshade::rationale::render_one(note).trim());
-    }
-    if let Some(tier) = pipeline::direction_adherence_tier(direction, adherence) {
-        println!(
-            "  {}   (from adherence dial {:.2})",
-            autoshade::rationale::keys::ADVISOR_NOTE_DIRECTION_ADHERENCE.replace("{tier}", tier).trim(),
-            adherence.get()
-        );
+    if let Some(note) = pipeline::references_note(&files) {
+        println!("  {}", autoshade::rationale::render_one(&note).trim());
     }
     Ok(())
 }
@@ -869,6 +833,11 @@ fn unit_interval(s: &str) -> Result<f32, String> {
         return Err(format!("`{s}` is outside 0..=1 (a finite fraction)"));
     }
     Ok(v)
+}
+
+/// clap value parser for `--guide`: the library's own spelling.
+fn parse_guide(s: &str) -> Result<pipeline::Guide, String> {
+    pipeline::Guide::parse(s).map_err(|e| e.to_string())
 }
 
 /// Same file? canonicalize when it exists (kills case/alias spellings — the
@@ -1013,6 +982,9 @@ fn analyze_request(
     cfg: &Config,
 ) -> GradeRequest {
     GradeRequest {
+        // The caller sets the guide, resolved from --guide and --guidance
+        // (`Guide::resolve`); kept out of the arguments like `guidance`.
+        guide: pipeline::Guide::default(),
         style: style.unwrap_or(cfg.style_strength),
         // B1: the reference PHOTO is opt-in on every surface, and this is the
         // non-GUI half of that opt-in (the GUI has had its checkbox since
@@ -1040,6 +1012,7 @@ fn analyze_cmd(
     raw: &Path,
     out: Option<PathBuf>,
     guidance: Option<String>,
+    guide: pipeline::Guide,
     style: Option<f32>,
     strength: Option<f32>,
     adherence: Option<f32>,
@@ -1059,7 +1032,7 @@ fn analyze_cmd(
     // "adjust current edit" path is a web-UI affordance. judge = true: an
     // explicitly invoked single-photo analyze gets the visual closed loop
     // (batch passes false — spend never multiplies silently).
-    let req = analyze_request(style, strength, adherence, deep, reference_image, embed, &cfg);
+    let req = GradeRequest { guide, ..analyze_request(style, strength, adherence, deep, reference_image, embed, &cfg) };
     let (recipe, verdict, _notes) =
         produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true, autoshade::diag::stderr())?;
     // Remember whether -o redirected the recipe: the XMP has to follow it (below)
@@ -1322,6 +1295,7 @@ fn auto_cmd(
     raw: &Path,
     out: Option<PathBuf>,
     guidance: Option<String>,
+    guide: pipeline::Guide,
     style: Option<f32>,
     strength: Option<f32>,
     adherence: Option<f32>,
@@ -1351,7 +1325,7 @@ fn auto_cmd(
     // Resolved BEFORE the paid call so the banner below can say what is coming
     // (it also costs nothing and cannot fail).
     let export = export_opts(long_edge);
-    let req = analyze_request(style, strength, adherence, deep, reference_image, embed, &cfg);
+    let req = GradeRequest { guide, ..analyze_request(style, strength, adherence, deep, reference_image, embed, &cfg) };
     // judge = true: `auto` is the explicit one-shot develop of ONE photo —
     // same interactive class as analyze (batch passes false).
     let (recipe, verdict, _notes) =
@@ -2941,7 +2915,7 @@ mod tests {
             .join(format!("autoshade-prepay-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let off = autoshade::library::EmbeddingSwitch::OFF;
-        let e = analyze_cmd(Path::new("no-such.arw"), Some(dir.clone()), None, None, None, None, false, false, off)
+        let e = analyze_cmd(Path::new("no-such.arw"), Some(dir.clone()), None, pipeline::Guide::Library, None, None, None, false, false, off)
             .unwrap_err()
             .to_string();
         assert!(e.contains("is a directory"), "analyze: {e}");
@@ -2949,6 +2923,7 @@ mod tests {
             Path::new("no-such.arw"),
             Some(dir.join("x.xyz")),
             None,
+            pipeline::Guide::Library,
             None,
             None,
             None,
@@ -3479,6 +3454,7 @@ mod tests {
         };
         let analyze = render("analyze");
         for (flag, phrase) in [
+            ("--guide", "never both"),
             ("--adherence", "Hint"),
             ("--adherence", "Direct"),
             ("--adherence", "Brief"),
@@ -3490,7 +3466,7 @@ mod tests {
         }
         // `auto` carries the same three flags and must explain them too.
         let auto = render("auto");
-        for phrase in ["Hint", "Direct", "Brief", "SigLIP 2 sidecar"] {
+        for phrase in ["Hint", "Direct", "Brief", "SigLIP 2 sidecar", "never both"] {
             assert!(auto.contains(phrase), "auto --help must explain the flag: missing {phrase:?}");
         }
         // `library-build` says what a reference library IS…
@@ -3499,7 +3475,7 @@ mod tests {
         assert!(build.contains("--describe"), "{build}");
         // …and `library-search` says what it prints and that it spends nothing.
         let search = render("library-search");
-        for phrase in ["No advisor call", "--direction", "--adherence", "BACKGROUND"] {
+        for phrase in ["No advisor call", "--style", "library-guided"] {
             assert!(search.contains(phrase), "library-search --help must say {phrase:?}: {search}");
         }
         // No flag on any of them may ship with an empty help line.
@@ -3547,6 +3523,18 @@ mod tests {
             }
             _ => panic!("expected analyze command"),
         }
+        // --guide: parsed as the library's spelling; `library` beside a
+        // --guidance is refused by the one resolver, not silently dropped.
+        let guide_of = |args: &[&str]| match Cli::try_parse_from(args).expect("parses").command {
+            Command::Analyze { guide, guidance, .. } | Command::Auto { guide, guidance, .. } => {
+                pipeline::Guide::resolve(guide, guidance.as_deref())
+            }
+            _ => panic!("expected analyze or auto"),
+        };
+        assert_eq!(guide_of(&["autoshade", "analyze", "p.arw"]).unwrap(), pipeline::Guide::Library);
+        assert_eq!(guide_of(&["autoshade", "auto", "p.arw", "--guidance", "warmer"]).unwrap(), pipeline::Guide::Direction);
+        assert!(guide_of(&["autoshade", "analyze", "p.arw", "--guide", "library", "--guidance", "warmer"]).is_err());
+        assert!(Cli::try_parse_from(["autoshade", "analyze", "p.arw", "--guide", "both"]).is_err());
         // The opposite flag, and the one that used to WRITE the variable.
         let cli = Cli::try_parse_from(["autoshade", "auto", "photo.arw", "--no-embed"])
             .expect("--no-embed parses");
@@ -3616,7 +3604,7 @@ mod tests {
             .split("\nfn ")
             .next()
             .unwrap();
-        for call in ["pipeline::references_note(", "pipeline::style_background_note(", "library::reference_block(", "lib.search("] {
+        for call in ["pipeline::references_note(", "library::reference_block(", "lib.search("] {
             assert!(body.contains(call), "the diagnostic must call {call}");
         }
     }

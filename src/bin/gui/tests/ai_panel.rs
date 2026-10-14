@@ -117,6 +117,10 @@
         assert!(seen.iter().any(|t| t.contains("Build / rebuild")), "the build entry stays at Style 0: {seen:?}");
         app.style_strength = 0.01;
         assert_eq!(frame(&mut app), (Some(true), Some(true)), "any non-zero Style opens a library");
+        // Guided by the direction, no library is read whatever Style says —
+        // and it is still buildable.
+        app.guide = autoshade::pipeline::Guide::Direction;
+        assert_eq!(frame(&mut app), (Some(true), Some(false)), "direction-guided: buildable, not read");
     }
 
     /// A built library whose search switch is off would be read by nothing,
@@ -280,6 +284,7 @@
         // checkbox cannot become decoration.
         let app = AutoShadeApp { send_style_ref_image: true, ..Default::default() };
         let req = autoshade::pipeline::GradeRequest {
+            guide: app.guide,
             style: app.style_strength,
             send_reference_image: app.send_style_ref_image,
             strength: autoshade::recipe::GradeStrength::new(app.grade_strength),
@@ -312,6 +317,7 @@
         let on = AutoShadeApp { style_embed: true, ..Default::default() };
         let off = AutoShadeApp { style_embed: false, ..Default::default() };
         let request_from = |app: &AutoShadeApp| autoshade::pipeline::GradeRequest {
+            guide: app.guide,
             style: app.style_strength,
             send_reference_image: app.send_style_ref_image,
             strength: autoshade::recipe::GradeStrength::new(app.grade_strength),
@@ -454,6 +460,7 @@
 
         let app = AutoShadeApp { deep_think: true, ..Default::default() };
         let req = autoshade::pipeline::GradeRequest {
+            guide: app.guide,
             style: app.style_strength,
             send_reference_image: app.send_style_ref_image,
             strength: autoshade::recipe::GradeStrength::new(app.grade_strength),

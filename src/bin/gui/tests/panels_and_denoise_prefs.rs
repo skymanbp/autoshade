@@ -477,6 +477,7 @@
         // `GradeStrength`, so a transposed pair would not compile).
         let app = AutoShadeApp { grade_strength: 0.9, style_strength: 0.2, ..Default::default() };
         let req = autoshade::pipeline::GradeRequest {
+            guide: app.guide,
             style: app.style_strength,
             send_reference_image: app.send_style_ref_image,
             strength: autoshade::recipe::GradeStrength::new(app.grade_strength),

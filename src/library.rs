@@ -2,26 +2,19 @@
 //! (2026-10-13 redesign, user ruling — "只使用成片是对的").
 //!
 //! One kind of entry, one file, one question. An entry is a finished photo
-//! and three things measured from it once:
+//! and two things measured from it once:
 //!
 //! * an IMAGE vector — SigLIP 2 over the 512-px frame: what the photo looks
 //!   like, scene and grade together;
 //! * a few short LOOK PHRASES — Qwen3-VL writing the grade the way a
-//!   photographer types a request ("warm, faded, low contrast");
-//! * the phrases' TEXT vector — SigLIP 2's text tower over those phrases.
+//!   photographer types a request ("warm, faded, low contrast"), the words
+//!   the advisor reads beside each reference image.
 //!
-//! A search asks two things of every entry ([`search`]): is its scene like
-//! this photo (image against image), and does its look answer what the
-//! photographer typed (prompt against phrases). Without a prompt only the
-//! first is asked. The best few go to the advisor as images and as words.
-//!
-//! Why phrases and not a sentence: the previous index embedded a 45-word
-//! sentence and compared a short typed direction against it. Measured on that
-//! index, the term made the settings prediction worse (+0.0128 pooled error)
-//! while it was the only thing that separated opposite directions — and the
-//! cause was the pairing, a short text against a paragraph through a tower
-//! trained for image against text. Phrases put the same kind of text on both
-//! sides.
+//! A search asks one thing of every entry ([`search`]): is its scene like
+//! this photo. The best few go to the advisor as images and as words. A
+//! develop is guided EITHER by the library OR by a typed direction, never
+//! both (user ruling 2026-10-14, [`crate::pipeline::Guide`]), so no typed
+//! text ever meets the library.
 //!
 //! Nothing here reads a sidecar `.xmp`: a finished photo may have had work no
 //! `.xmp` records (a Photoshop pass), and an `.xmp` may be stale or one of
@@ -44,7 +37,7 @@ mod switches;
 mod voice;
 
 pub use build::{BuildProgress, BuildStage, Sidecars, build};
-pub use frames::{QueryVectors, query_vectors};
+pub use frames::query_vector;
 pub use search::{Hit, Query, REFERENCE_COUNT};
 pub use switches::{DescribeSwitch, EmbeddingSwitch};
 pub use voice::{STYLE_TARGET_MIN, StyleVoice, look_summary, reference_block};
@@ -57,7 +50,7 @@ pub const VERSION: u32 = 1;
 pub const FILE_NAME: &str = "reference-library.json";
 
 /// The most finished photos one library holds. A search is a linear pass
-/// over two 768-float dot products per entry, so the cap is about the file
+/// over one 768-float dot product per entry, so the cap is about the file
 /// (≈ 16 KB of JSON per entry), not the search.
 pub const MAX_ENTRIES: usize = 3_000;
 
@@ -100,9 +93,6 @@ pub struct Entry {
     /// The look in a few comma-separated phrases, when the describe model ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phrases: Option<String>,
-    /// SigLIP 2 text vector of [`Self::phrases`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phrases_vec: Option<Vec<f32>>,
 }
 
 /// A file's size and modified time, the cheap identity a rebuild checks
@@ -247,9 +237,6 @@ impl Library {
         );
         for e in &self.entries {
             anyhow::ensure!(is_unit_vector(&e.image), "an entry ({}) has no usable image vector", e.path);
-            if let Some(v) = &e.phrases_vec {
-                anyhow::ensure!(is_unit_vector(v), "an entry ({}) has an unusable phrase vector", e.path);
-            }
             if let Some(p) = &e.phrases {
                 anyhow::ensure!(
                     p.chars().count() <= MAX_PHRASE_CHARS,

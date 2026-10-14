@@ -176,20 +176,27 @@
   </div>
 
   <div class="row">
-    <input class="guidance" type="text" placeholder="Direction for the AI, e.g. warmer and moodier, lift the shadows" />
+    <label class="chk" title="What guides the AI: your reference library (the finished photos closest to this one) or the Direction you type. One or the other, never both.">
+      Guide
+      <select class="guide">
+        <option value="library">Reference library</option>
+        <option value="direction">Direction</option>
+      </select>
+    </label>
+    <input class="guidance" type="text" placeholder="Direction for the AI, e.g. warmer and moodier, lift the shadows" disabled />
     <label class="chk" title="On: adjust your CURRENT sliders. Off: propose fresh from the original.">
       <input type="checkbox" class="refine" /> Refine current edit
     </label>
   </div>
   <div class="row" style="position:relative">
-    <label class="chk" title="How strongly the AI leans on your past editing style (needs a built style-index; 0% = ignore the library, 100% = strongest pull toward your historical look).">
+    <label class="chk" title="How closely the AI follows your reference library (needs a built library; 0% = ignore it, 85% and up = reproduce its look).">
       Style influence
       <input type="range" class="style-strength" min="0" max="100" step="5" value="30" style="width:140px" />
       <span class="style-val">30%</span>
     </label>
-    <label class="chk" title="How closely the AI follows the Direction above; it does nothing without one. 40% or below (Hint) leaves your style library in the lead and keeps the distillation pull; above 40% (Direct / Brief) the direction leads and your library is sent as background only.">
+    <label class="chk" title="How closely the AI follows the Direction above: 40% or below is a hint, above 70% a brief to carry out in full.">
       Adherence
-      <input type="range" class="adherence" min="0" max="100" step="5" value="65" style="width:140px" />
+      <input type="range" class="adherence" min="0" max="100" step="5" value="65" style="width:140px" disabled />
       <span class="adherence-val">65%</span>
     </label>
     <button type="button" class="info-btn" title="What's in my style library?">ⓘ Library info</button>
@@ -1135,6 +1142,15 @@ async function selectPhoto(id, stem, el) {
   ss.oninput = () => { main.querySelector(".style-val").textContent = ss.value + "%"; };
   const ad = main.querySelector(".adherence");
   ad.oninput = () => { main.querySelector(".adherence-val").textContent = ad.value + "%"; };
+  // Library OR direction: the controls of the one not chosen are greyed out.
+  const gd = main.querySelector(".guide");
+  gd.onchange = () => {
+    const byDirection = gd.value === "direction";
+    main.querySelector(".guidance").disabled = !byDirection;
+    ad.disabled = !byDirection;
+    ss.disabled = byDirection;
+  };
+  gd.onchange();
   const pop = main.querySelector(".popover");
   main.querySelector(".info-btn").onclick = async () => {
     if (!pop.hidden) { pop.hidden = true; return; }
@@ -1502,8 +1518,10 @@ let analyzeBusy = false;   // pane recreation resurrects the button — gate glo
 async function analyze() {
   if (analyzeBusy) { setStatus("an analysis is already running — wait for it to finish"); return; }
   analyzeBusy = true;
+  // Library OR direction: the direction is sent only when it guides.
+  const guide = document.querySelector(".guide")?.value === "direction" ? "direction" : "library";
   const gi = document.querySelector(".guidance");
-  const guidance = gi && gi.value.trim() ? gi.value.trim() : null;
+  const guidance = guide === "direction" && gi && gi.value.trim() ? gi.value.trim() : null;
   const refine = document.querySelector(".refine")?.checked || false;
   setStatus(refine ? "refining your current edit with AI…" : "analyzing with GPT + Claude… (~10-30s)");
   const btn = $(".analyze"); btn.disabled = true;
@@ -1519,12 +1537,12 @@ async function analyze() {
   const stale = () => setStatus("analysis for another photo finished — its result was NOT applied here; if it saved, reopening that photo shows it, otherwise re-run Analyze there");
   try {
     const style = (parseFloat(document.querySelector(".style-strength")?.value ?? "30") || 0) / 100;
-    // Adherence decides WHO LEADS when a direction is given (v1.2.3): at 40%
-    // or below the style library keeps the lead, above it the direction does.
     // The `?? "65"` fallback is the server's own DirectionAdherence::DEFAULT,
     // so a page without the control sends what this surface sent before.
     const adherence = (parseFloat(document.querySelector(".adherence")?.value ?? "65") || 0) / 100;
-    const body = { id, guidance, style_strength: style, adherence };
+    const body = { id, guide, guidance, style_strength: style, adherence };
+    // A dragged box is a local DIRECTION: it guides by the direction.
+    if (state.region) body.guide = "direction";
     if (refine) body.base = state.recipe;          // adjust current edit, don't start over
     if (state.region) {
       body.region = state.region;  // box-select: target this region

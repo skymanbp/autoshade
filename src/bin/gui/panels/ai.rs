@@ -314,20 +314,35 @@ impl AutoShadeApp {
                     self.show_analysis_full = true;
                 }
             }
-            ui.label(tr(lang, "Direction"))
-                .on_hover_text(tr(lang, "Free-text direction for AI Analyze — e.g. warmer and moodier"));
-            // #14a: was `desired_width(f32::INFINITY)` — a full-panel ribbon on a
-            // wide side panel. `prompt_field` caps it, widens while focused and
-            // shows the whole text on hover.
-            let _field = prompt_field(
-                ui,
-                &mut self.guidance,
-                tr(lang, "e.g. warmer and moodier, lift the shadows"),
-            );
-            #[cfg(test)]
-            {
-                self.prompt_rects.push(_field.rect);
-            }
+            // Library OR direction (user ruling 2026-10-14): the switch heads
+            // the controls it chooses between, and greys the other side.
+            use autoshade::pipeline::Guide;
+            ui.horizontal_wrapped(|ui| {
+                ui.label(tr(lang, "Guided by"));
+                ui.radio_value(&mut self.guide, Guide::Library, tr(lang, "Reference library")).on_hover_text(tr(
+                    lang,
+                    "The AI follows the finished photos in your reference library closest to this one; the Direction text is not sent.",
+                ));
+                ui.radio_value(&mut self.guide, Guide::Direction, tr(lang, "Direction")).on_hover_text(tr(
+                    lang,
+                    "The AI follows the Direction you type; the reference library is not read.",
+                ));
+            });
+            let by_direction = self.guide == Guide::Direction;
+            ui.add_enabled_ui(by_direction, |ui| {
+                // #14a: was `desired_width(f32::INFINITY)` — a full-panel ribbon on a
+                // wide side panel. `prompt_field` caps it, widens while focused and
+                // shows the whole text on hover.
+                let _field = prompt_field(
+                    ui,
+                    &mut self.guidance,
+                    tr(lang, "e.g. warmer and moodier, lift the shadows"),
+                );
+                #[cfg(test)]
+                {
+                    self.prompt_rects.push(_field.rect);
+                }
+            });
             // The prompt's triggers sit DIRECTLY under it (user feedback:
             // the toolbar Analyze button sat nowhere near the text it
             // consumes). TWO explicit verbs replace the old pre-armed
@@ -359,7 +374,8 @@ impl AutoShadeApp {
                         "AI proposes a recipe from scratch (GPT proposal + validation + a visual \
                          review: the result is RENDERED and judged by the vision model, which may \
                          buy one guided revision), written into the sliders — undoable. Uses the \
-                         Direction above; Style and Strength steer it. COST, worst case: 11 API \
+                         reference library or the Direction above (the switch picks one); Strength \
+                         steers it. COST, worst case: 11 API \
                          calls, 6 of them carrying images (8 high-detail frames). Ticking 「Deep \
                          thinking」 below OR pushing Strength above 70% raises that ceiling — \
                          either one alone does it; the Deep thinking tooltip has the numbers.",
@@ -391,7 +407,11 @@ impl AutoShadeApp {
             // value ("30"), with the word "Style" itself off-panel, and a headless
             // frame confirms it. Adding a second dial to that row hid it outright.
             // One dial per line is also what every other slider in this app does.
-            ui.horizontal_wrapped(|ui| {
+            ui.add_enabled_ui(!by_direction, |ui| ui.horizontal_wrapped(|ui| {
+                #[cfg(test)]
+                {
+                    self.guide_gate_enabled = Some((by_direction, ui.is_enabled()));
+                }
                 // #16: the ONE slider in the app that never went through the
                 // panel's own helper — a bare `egui::Slider` with `show_value(false)`
                 // and a hand-rolled "30%" label beside it, so it alone had no
@@ -408,7 +428,7 @@ impl AutoShadeApp {
                     &mut self.style_strength,
                     1.0,
                     STYLE_STRENGTH_DEFAULT,
-                    tr(lang, "How far AI proposals follow the looks in your reference library (0 = ignore it). With a Direction written above at Adherence over 40%, the direction leads instead and the references are sent as background only — whatever this dial says."),
+                    tr(lang, "How far AI proposals follow the looks in your reference library: below 85% they stay within its grading, from 85% they reproduce its look (0 = ignore it). Greyed while the Direction guides."),
                 );
                 // R23-2: a slider that provably cannot do anything must not read as
                 // live. The old one showed 30% and a tooltip about "your past XMP
@@ -429,7 +449,7 @@ impl AutoShadeApp {
                         "This slider does nothing until a reference library is built — the 「Reference library」 section below builds one.",
                     ));
                 }
-            });
+            }));
             // R23-3 (feedback #5): the SECOND taste axis, directly under the first —
             // they are a PAIR, and the whole reported problem was that only the style
             // half existed, so "lean on my habits" was the only dial there was and it
@@ -446,7 +466,7 @@ impl AutoShadeApp {
                     "How hard the AI pushes the grade — a different axis from Style: Style asks how close to your reference looks, Strength asks how committed the result should be. 50% is where every AI guardrail NUMBER was calibrated: the ±50/±35 pair and the soft caps are bit-for-bit the ones earlier releases used, but the restraint WORDING those releases sent is now the 40%-and-below prose, so no single setting brings an old release back whole. From 41% up the AI must decide EACH colour control explicitly instead of leaving it neutral by default; the default 65% (double-click to reset) leans a little further than the calibration point. Above 70% it is additionally told to use the controls it wants at a strength a viewer can see, and the visual review may then run up to 3 rounds — the same ceiling 「Deep thinking」 raises it to, and either one ALONE is enough to make the worst case 17 API calls (10 carrying images). The clipping and white-point safeguards never widen with it.",
                 ),
             );
-            let has_direction = !self.guidance.trim().is_empty();
+            let has_direction = by_direction && !self.guidance.trim().is_empty();
             ui.add_enabled_ui(has_direction, |ui| {
                 #[cfg(test)]
                 {
@@ -461,7 +481,7 @@ impl AutoShadeApp {
                     &mut self.direction_adherence,
                     1.0,
                     autoshade::recipe::DirectionAdherence::DEFAULT,
-                    tr(lang, "How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit. Direct and Brief also decide WHO LEADS: your reference library becomes background, so a direction can take a photo somewhere your references never went. Hint leaves the library in the lead."),
+                    tr(lang, "How closely the AI follows your direction; disabled until the Direction guides and has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit."),
                 );
             });
             // R23-4 (feedback #13): the THIRD analysis-side control, under the two
@@ -492,9 +512,11 @@ impl AutoShadeApp {
             self.start_style_info();
         }
         ui.add_space(SPACE_XS);
-        // Read off the SAME comparison the pipeline makes, so the two can never
-        // disagree about what "reads a library" means.
-        let reads_a_library = self.style_strength > 0.0;
+        // Read off the SAME comparison the pipeline makes
+        // (`GradeRequest::library_style`), so the two can never disagree
+        // about what "reads a library" means.
+        let by_direction = self.guide == autoshade::pipeline::Guide::Direction;
+        let reads_a_library = !by_direction && self.style_strength > 0.0;
         card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Reference library · local"))
             .id_salt("sec_ai_libraries")
             .default_open(false)
@@ -508,11 +530,12 @@ impl AutoShadeApp {
                 if !reads_a_library {
                     // Outside the disabled scope below: the sentence that
                     // explains a greyed control must not itself be greyed.
-                    ui.label(
-                        egui::RichText::new(tr(lang, "Style is at 0%: the analysis reads no library"))
-                            .weak()
-                            .small(),
-                    );
+                    let why = if by_direction {
+                        tr(lang, "Guided by the Direction: the analysis reads no library")
+                    } else {
+                        tr(lang, "Style is at 0%: the analysis reads no library")
+                    };
+                    ui.label(egui::RichText::new(why).weak().small());
                 }
                 ui.add_enabled_ui(reads_a_library, |ui| {
                     #[cfg(test)]
@@ -607,7 +630,7 @@ impl AutoShadeApp {
             }
             ui.checkbox(&mut self.style_describe, tr(lang, "Also write each look as short phrases (local vision model; downloads 4.3 GB once, slower builds)"))
                 .on_hover_text(tr(lang,
-                    "A local model (Qwen3-VL-2B) writes a few phrases per photo about its GRADE — \"warm, faded, low contrast\" — so a typed Direction can pick the reference whose look it names. Nothing leaves this machine and nothing is billed. Off = references are chosen by picture alone.",
+                    "A local model (Qwen3-VL-2B) writes a few phrases per photo about its GRADE — \"warm, faded, low contrast\" — which go to the AI beside each reference. Nothing leaves this machine and nothing is billed. Off = the references go without words.",
                 ));
         });
         if let Some((stage, done, total)) = self.style_build_progress {
@@ -647,7 +670,7 @@ impl AutoShadeApp {
         let built = matches!(self.style_info, Some(autoshade::library::Summary::Built { .. }));
         ui.checkbox(&mut self.style_embed, tr(lang, "Search the library when analysing (SigLIP 2, local; downloads 1.5 GB once)"))
             .on_hover_text(tr(lang,
-                "Each analysis measures this photo (and your Direction) with a local model and picks the closest references. Building a library turns this on, since the build has already downloaded the model.",
+                "Each analysis measures this photo with a local model and picks the closest references. Building a library turns this on, since the build has already downloaded the model.",
             ));
         if built && !self.style_embed {
             ui.label(

@@ -75,6 +75,7 @@ impl AutoShadeApp {
     /// in headless tests; no access to the user's actual prefs is needed.
     pub(crate) fn restore_prefs(&mut self, prefs: Prefs) {
         let app = self;
+        app.guide = prefs.guide;
         app.style_strength = prefs.style_strength.clamp(0.0, 1.0);
         app.grade_strength = prefs.grade_strength.clamp(0.0, 1.0);
         app.fit_strength = prefs.fit_strength.clamp(0.0, 1.0);
@@ -3241,7 +3242,11 @@ impl AutoShadeApp {
         // whether the reference photos go along as images. Read
         // HERE, on the UI thread, so the worker cannot pick up a toggle the
         // user flipped after starting the call.
+        // A box-selected region is a local DIRECTION, so it guides by the
+        // direction whatever the switch says (the web page does the same).
+        let guide = if self.region.is_some() { autoshade::pipeline::Guide::Direction } else { self.guide };
         let req = autoshade::pipeline::GradeRequest {
+            guide,
             style: self.style_strength,
             send_reference_image: self.send_style_ref_image,
             // R23-3: the OTHER axis — how committed the grade should be. Read
@@ -3257,7 +3262,8 @@ impl AutoShadeApp {
             // thread like every other field above.
             embed: autoshade::library::EmbeddingSwitch::resolve(None, self.style_embed),
         };
-        // Free-text direction ("warmer, moodier") steers the proposal; with
+        // Free-text direction ("warmer, moodier") steers the proposal — only
+        // when the direction guides (library OR direction); with
         // `refine` (its own button now — no pre-armed checkbox), the AI
         // ADJUSTS the current recipe instead of starting from scratch. A
         // box-selected region (if any) folds into the direction so the AI
@@ -3273,7 +3279,7 @@ impl AutoShadeApp {
                      for a thin edge band). Direction: {}",
                     if g.is_empty() { "make a tasteful local improvement" } else { g }
                 )),
-                None => (!g.is_empty()).then(|| g.to_string()),
+                None => (guide == autoshade::pipeline::Guide::Direction && !g.is_empty()).then(|| g.to_string()),
             }
         };
         let base = refine.then(|| {

@@ -1402,6 +1402,12 @@ struct AnalyzeReq {
     /// Optional user direction woven into the AI prompt.
     #[serde(default)]
     guidance: Option<String>,
+    /// What guides the develop, `"library"` or `"direction"` — either/or
+    /// (`pipeline::Guide`). Absent: a direction (or a dragged region) picks
+    /// `direction`, otherwise `library`, which is what an older client that
+    /// never sends the field gets. `"library"` with a direction is refused.
+    #[serde(default)]
+    guide: Option<pipeline::Guide>,
     /// Refine mode: the user's CURRENT edit to adjust instead of starting fresh.
     /// `None` (the default) = propose from the original. Its control-set era
     /// follows the page's rule ([`body_recipe`]): the Refine takes the base's
@@ -1421,17 +1427,8 @@ struct AnalyzeReq {
     grade_strength: Option<f32>,
     /// 0..1 — how strongly to follow `guidance` (the Adherence dial). `None` =
     /// the shipped default (0.65), which is what an older client that never
-    /// sends the field gets — byte-identical to the request this surface used
-    /// to build.
-    ///
-    /// It exists as a request field since v1.2.3. Before that this dial was
-    /// PROMPT INTENT ONLY, so pinning it to the default here cost the browser
-    /// nothing but a tier word in the verifier's prompt. It now also decides
-    /// WHO LEADS (`library::StyleVoice::choose`): at `Direct`/`Brief` a develop
-    /// carrying a direction sends the reference looks as background. Without this field every web develop
-    /// with a direction was forced into that voice with no way back, while the
-    /// CLI (`--adherence`) and the desktop app (the Adherence slider) could
-    /// both choose `Hint`.
+    /// sends the field gets — the same answer the CLI (`--adherence`) and the
+    /// desktop Adherence slider give.
     #[serde(default)]
     adherence: Option<f32>,
     /// DEEP THINKING (R23-4, feedback #13): the proposer returns its structured
@@ -1845,6 +1842,13 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         )
     });
     let guidance = region_guidance.as_deref().or(req.guidance.as_deref());
+    // A dragged region is a direction too: it only means something to a
+    // direction-guided develop, so it resolves the guide the same way typed
+    // words do.
+    let guide = match pipeline::Guide::resolve(req.guide, guidance) {
+        Ok(g) => g,
+        Err(e) => return Ok(status_response(400, &format!("{e:#}"))),
+    };
     // base = Some → refine the current edit; None → fresh proposal from
     // original. SNAPSHOT the config — the read guard must not sit across the
     // whole AI chain blocking every settings save.
@@ -1878,6 +1882,7 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         // reasoning tier and up to three judge rounds through a field it never
         // set — the same rule as the reference photo above.
         pipeline::GradeRequest {
+            guide,
             style,
             send_reference_image: false,
             strength: grade,
@@ -3700,63 +3705,32 @@ mod tests {
         assert_eq!(resolve(&parse(r#"{"id":0,"grade_strength":1e39}"#)), GradeStrength::DEFAULT);
     }
 
-    /// v1.2.3: the web body's own end of the ADHERENCE dial — and its way back.
-    ///
-    /// Until v1.2.3 this handler pinned `DirectionAdherence::default()` and said
-    /// so in a comment, on the argument that adherence was prompt intent only.
-    /// That stopped being true when the dial started deciding WHO LEADS: every
-    /// web develop carrying a direction was forced into the `Background` voice,
-    /// losing the distillation pull, with no field a browser could send to get
-    /// the library's lead back — while the CLI's `--adherence` and the desktop
-    /// Adherence slider could both choose `Hint`.
-    ///
-    /// The default is unchanged, which is the other half: an older client that
-    /// never sends the field must still get the same voice it got yesterday.
+    /// The web body's ADHERENCE dial and GUIDE switch: both read from the
+    /// request, both absent in an older client's body and then resolved to
+    /// the same answers the other surfaces give.
     ///
     /// MUTATION: pin the analyze handler back to a bare
-    /// `DirectionAdherence::default()`, dropping its `from_optional` read of the
-    /// request field — the source guard at the end fails.
+    /// `DirectionAdherence::default()`, or drop its `Guide::resolve` of the
+    /// request's own field — a source guard at the end fails.
     #[test]
-    fn an_analyze_body_can_choose_who_leads_and_omitting_it_keeps_the_default() {
+    fn an_analyze_body_chooses_its_guide_and_dial_and_omitting_them_keeps_the_defaults() {
         use crate::recipe::{AdherenceTier, DirectionAdherence};
-        use crate::library::StyleVoice;
+        use pipeline::Guide;
         let parse = |body: &str| serde_json::from_str::<AnalyzeReq>(body).expect("body parses");
-        // The PRODUCTION resolver and the PRODUCTION derivation, not
-        // re-implementations of either.
-        let voice = |r: &AnalyzeReq| {
-            StyleVoice::choose(
-                r.style_strength.unwrap_or(0.3),
-                r.guidance.as_deref(),
-                DirectionAdherence::from_optional(r.adherence),
-            )
-        };
+        let guide = |r: &AnalyzeReq| Guide::resolve(r.guide, r.guidance.as_deref());
 
-        // The pre-v1.2.3 body shape, verbatim: no field at all. Same default,
-        // same tier, and — with a direction — the new Background voice.
+        // The older body shape, verbatim: no guide, no dial.
         let old = parse(r#"{"id":0,"guidance":"vivid saturated colours","style_strength":1.0}"#);
-        assert_eq!(old.adherence, None);
-        assert_eq!(
-            DirectionAdherence::from_optional(old.adherence).get(),
-            DirectionAdherence::DEFAULT
+        assert_eq!((old.guide, old.adherence), (None, None));
+        assert_eq!(DirectionAdherence::from_optional(old.adherence).tier(), AdherenceTier::Direct);
+        assert_eq!(guide(&old).unwrap(), Guide::Direction, "words with no guide: the direction guides");
+        assert_eq!(guide(&parse(r#"{"id":0,"style_strength":1.0}"#)).unwrap(), Guide::Library);
+        assert_eq!(guide(&parse(r#"{"id":0,"guide":"direction"}"#)).unwrap(), Guide::Direction);
+        assert!(
+            guide(&parse(r#"{"id":0,"guide":"library","guidance":"warmer"}"#)).is_err(),
+            "library with words is refused, not silently dropped"
         );
-        assert_eq!(
-            DirectionAdherence::from_optional(old.adherence).tier(),
-            AdherenceTier::Direct
-        );
-        assert_eq!(voice(&old), StyleVoice::Background, "the default still leads");
-
-        // The way back: Hint, and the library keeps the lead at both Style bands.
-        let hint =
-            parse(r#"{"id":0,"guidance":"vivid saturated colours","style_strength":1.0,"adherence":0.3}"#);
-        assert_eq!(DirectionAdherence::from_optional(hint.adherence).tier(), AdherenceTier::Hint);
-        assert_eq!(voice(&hint), StyleVoice::Target, "Style 1.0 keeps the TARGET voice");
-        let low =
-            parse(r#"{"id":0,"guidance":"vivid saturated colours","style_strength":0.3,"adherence":0.3}"#);
-        assert_eq!(voice(&low), StyleVoice::Ceiling, "Style 0.3 keeps the CEILING voice");
-
-        // No direction, no lead to give away — whatever the dial says.
-        let bare = parse(r#"{"id":0,"style_strength":1.0,"adherence":0.9}"#);
-        assert_eq!(voice(&bare), StyleVoice::Target);
+        assert!(serde_json::from_str::<AnalyzeReq>(r#"{"id":0,"guide":"both"}"#).is_err());
 
         // Untrusted numbers go through the same door as the other two dials.
         let d = |b: &str| DirectionAdherence::from_optional(parse(b).adherence).get();
@@ -3769,8 +3743,8 @@ mod tests {
         assert_eq!((both.style_strength, both.grade_strength, both.adherence),
             (Some(0.3), Some(0.9), Some(0.2)));
 
-        // WIRED: the handler reads the field, and the shipped page sends it.
-        // Without both halves the field is a dial nothing turns. The needles
+        // WIRED: the handler reads the fields, and the shipped page sends them.
+        // Without both halves a field is a dial nothing turns. The needles
         // are assembled so this test cannot match itself.
         let guard = concat!("DirectionAdherence::from_optional", "(req.adherence)");
         assert_eq!(
@@ -3786,6 +3760,12 @@ mod tests {
             INDEX_HTML.contains(concat!("style_strength: style,", " adherence")),
             "the page must put it on the wire"
         );
+        assert!(
+            include_str!("serve.rs").contains(concat!("pipeline::Guide::resolve", "(req.guide, guidance)")),
+            "the analyze handler must resolve the request's own guide"
+        );
+        assert!(INDEX_HTML.contains(concat!("class=", "\"guide\"")), "the page needs the switch");
+        assert!(INDEX_HTML.contains(concat!("const body = { id, ", "guide,")), "and must put it on the wire");
     }
 
     /// v1.5.0: a request body's control-set era is the one it STATES, and this

@@ -28,8 +28,12 @@ use crate::xmp;
 ///     grade is (R23-3).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GradeRequest {
+    /// What guides this develop: the reference library or the typed direction
+    /// ([`Guide`]). With [`Guide::Direction`] the library is not read at all.
+    pub guide: Guide,
     /// 0..1 — how far the proposal follows the reference looks (the GUI's
-    /// 「Style」 slider, `--style` on the CLI). 0 disables the search entirely.
+    /// 「Style」 slider, `--style` on the CLI). 0 disables the search entirely;
+    /// read only under [`Guide::Library`].
     pub style: f32,
     /// Also SHOW the model the reference photos, as extra input images after
     /// the develop target. Opt-in and off by default: up to
@@ -68,6 +72,7 @@ impl Default for GradeRequest {
     /// downstream reads the process environment again.
     fn default() -> Self {
         GradeRequest {
+            guide: Default::default(),
             style: Default::default(),
             send_reference_image: Default::default(),
             strength: Default::default(),
@@ -83,6 +88,69 @@ impl GradeRequest {
     /// every non-GUI surface uses unless it says otherwise.
     pub fn with_style(style: f32) -> Self {
         Self { style, ..Self::default() }
+    }
+
+    /// The Style value the library is searched at: [`Self::style`] when the
+    /// library guides this develop, 0 (no search, nothing to disclose) when
+    /// the direction does.
+    pub fn library_style(&self) -> f32 {
+        match self.guide {
+            Guide::Library => self.style,
+            Guide::Direction => 0.0,
+        }
+    }
+}
+
+/// What guides one develop: the photographer's reference library OR their
+/// typed direction — never both (user ruling 2026-10-14: 「"参考图库"和"提示词"
+/// 两者只能二选一」). Two aims in one prompt made the advisor arbitrate between
+/// them, and every reviewer downstream had to be told which one won; with one
+/// aim per develop there is nothing to arbitrate.
+///
+/// `Default` is [`Self::Library`]: a develop with no direction typed is the
+/// library's (or, at Style 0, nobody's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Guide {
+    /// The finished photos the library returns; any typed direction is not sent.
+    #[default]
+    Library,
+    /// The typed direction; the library is not read.
+    Direction,
+}
+
+impl Guide {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Guide::Library => "library",
+            Guide::Direction => "direction",
+        }
+    }
+
+    /// The command-line / request spelling.
+    pub fn parse(text: &str) -> Result<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "library" => Ok(Guide::Library),
+            "direction" => Ok(Guide::Direction),
+            other => anyhow::bail!("unknown guide {other:?} — use \"library\" or \"direction\""),
+        }
+    }
+
+    /// The ONE resolution the command line and the web body share. Unsaid,
+    /// a typed direction picks [`Self::Direction`] and no direction picks
+    /// [`Self::Library`]. Said as `library` WITH a direction is refused rather
+    /// than dropping the photographer's words unseen.
+    pub fn resolve(explicit: Option<Guide>, direction: Option<&str>) -> Result<Self> {
+        let typed = direction.is_some_and(|d| !d.trim().is_empty());
+        match explicit {
+            Some(Guide::Library) if typed => anyhow::bail!(
+                "a direction was given but the develop is guided by the reference library — \
+                 the two are either/or: drop the direction, or guide by the direction"
+            ),
+            Some(g) => Ok(g),
+            None if typed => Ok(Guide::Direction),
+            None => Ok(Guide::Library),
+        }
     }
 }
 
@@ -100,23 +168,12 @@ const ADVISOR_PREVIEW_EDGE: u32 = 1568;
 /// round it is revising — which is the mechanism that flattened the look in the
 /// first place (six showcase runs, revision hints that were pure subtraction).
 ///
-/// `style_voice` is the SAME value the reference block reads (v1.2.3). It is
-/// a parameter and not a second `StyleVoice::choose` call for the reason the
-/// whole function exists: a reviewer deciding for itself whose aim this
-/// develop pursues is how two readings of one develop come apart.
 fn grade_intent<'a>(
     req: &GradeRequest,
     direction: Option<&'a str>,
     style_look: Option<&'a str>,
-    style_voice: crate::library::StyleVoice,
 ) -> crate::advisor::GradeIntent<'a> {
-    crate::advisor::GradeIntent {
-        strength: req.strength,
-        adherence: req.adherence,
-        direction,
-        style_look,
-        style_voice,
-    }
+    crate::advisor::GradeIntent { strength: req.strength, adherence: req.adherence, direction, style_look }
 }
 
 pub fn direction_adherence_tier(
@@ -201,6 +258,13 @@ pub fn produce_recipe(
     // decode_any: a camera RAW, or an already-baked PNG/TIFF/JPEG (PNG-source mode).
     let decoded = decode::decode_any(raw)?;
 
+    // Library OR direction (user ruling 2026-10-14): a library-guided develop
+    // sends no direction. The surfaces resolve the choice first
+    // (`Guide::resolve`, the desktop switch), so nothing typed is lost here.
+    let guidance = match req.guide {
+        Guide::Library => None,
+        Guide::Direction => guidance,
+    };
     // The photographer's OWN words, captured BEFORE the Refine envelope below
     // shadows `guidance` with a whole EditRecipe JSON. Gates 3 and 4 (verifier,
     // visual judge) want the intent, not the recipe they are already reading.
@@ -238,13 +302,13 @@ pub fn produce_recipe(
         .context("encode preview JPEG for advisor")?;
     let preview = Preview { jpeg };
     // The REFERENCE LIBRARY (2026-10-13): the finished looks this develop may
-    // follow. Searched with this photo's image vector and the direction's text
+    // follow, when the library guides it. Searched with this photo's image
     // vector, embedded from exactly this preview through the frame a build
-    // stages (`library::query_vectors`), so a query and a stored vector are
+    // stages (`library::query_vector`), so a query and a stored vector are
     // comparable. Nothing here can fail the develop: every gap degrades to no
     // references, and the rationale says why (`style_gap_note`).
     let mut library_gap: Option<String> = None;
-    let library = match (req.style > 0.0).then(crate::library::load) {
+    let library = match (req.library_style() > 0.0).then(crate::library::load) {
         Some(crate::library::Loaded::Ready(lib)) => Some(lib),
         Some(crate::library::Loaded::Unusable(err)) => {
             // Once per RUN on stderr — the file is unusable for every photo in
@@ -271,7 +335,7 @@ pub fn produce_recipe(
         }
         Some(_) => {
             let opts = crate::embed::EmbedOpts::from_config(cfg);
-            match crate::library::query_vectors(&opts, &decoded.preview, user_direction, &crate::store::store_root()) {
+            match crate::library::query_vector(&opts, &decoded.preview, &crate::store::store_root()) {
                 Ok(q) => Some(q),
                 Err(e) => {
                     diag.warn(format!("reference search unavailable ({e:#}) — no reference looks for this develop"));
@@ -287,17 +351,13 @@ pub fn produce_recipe(
     // minutes. Keeping `decoded` whole pinned hundreds of MB of 61MP pixels
     // for that entire window.
     let decode::Decoded { meta, histogram, .. } = decoded;
-    // WHOSE aim the reference block states (v1.2.3, user ruling 2026-09-01),
-    // decided ONCE from the Style axis, the direction and the adherence dial.
-    let style_voice = crate::library::StyleVoice::choose(req.style, user_direction, req.adherence);
     let hits: Vec<crate::library::Hit> = match (&library, &query) {
         (Some(lib), Some(q)) => lib.search(
-            &crate::library::Query { image: &q.image, prompt: q.prompt.as_deref(), exclude: Some(raw) },
+            &crate::library::Query { image: q, exclude: Some(raw) },
             crate::library::REFERENCE_COUNT,
         ),
         _ => Vec::new(),
     };
-    let by_prompt = query.as_ref().is_some_and(|q| q.prompt.is_some());
     // Opt-in: SHOW the model the references, not only their phrases. Each that
     // loads becomes the next image after the develop target; one that does not
     // is named and goes as words, and the rest still go.
@@ -318,13 +378,14 @@ pub fn produce_recipe(
             }
         }
     }
-    let reference = crate::library::reference_block(&hits, &image_numbers, style_voice, by_prompt);
+    let reference =
+        crate::library::reference_block(&hits, &image_numbers, crate::library::StyleVoice::for_style(req.style));
     let ref_str = reference.as_deref();
     // B2: the intent every downstream reviewer in this function shares (R23-3).
     // ONE value, spread into the verifier, the first judgement and every
     // hint-guided re-judge below; it carries the look the references name.
     let style_look = crate::library::look_summary(&hits);
-    let intent = grade_intent(&req, user_direction, style_look.as_deref(), style_voice);
+    let intent = grade_intent(&req, user_direction, style_look.as_deref());
     let reference_files: Vec<String> = hits.iter().map(|h| stem(Path::new(&h.entry.path)).to_string()).collect();
     if verbose && !hits.is_empty() {
         println!("style    : {} reference look(s) — {}", hits.len(), reference_files.join(", "));
@@ -911,12 +972,9 @@ pub fn produce_recipe(
     // The one channel all three surfaces show, written HERE because an adopted
     // visual revision replaces `recipe` wholesale and clears `det_notes` with
     // it. In reading order: which finished photos this develop leaned on, in
-    // which voice, whether they went as images, and whether the whole
-    // mechanism came up empty.
+    // whether they went as images, and whether the whole mechanism came up
+    // empty.
     if let Some(note) = references_note(&reference_files) {
-        crate::rationale::push_note(&mut recipe.rationale, &mut det_notes, note);
-    }
-    if let Some(note) = style_background_note(style_voice, req.adherence, ref_str) {
         crate::rationale::push_note(&mut recipe.rationale, &mut det_notes, note);
     }
     if !ref_previews.is_empty() {
@@ -949,7 +1007,7 @@ pub fn produce_recipe(
             ),
         );
     }
-    if let Some(note) = style_gap_note(req.style, ref_str, library_gap.as_deref()) {
+    if let Some(note) = style_gap_note(req.library_style(), ref_str, library_gap.as_deref()) {
         crate::rationale::push_note(&mut recipe.rationale, &mut det_notes, note);
     }
 
@@ -1042,23 +1100,6 @@ pub fn references_note(files: &[String]) -> Option<crate::rationale::Note> {
         crate::rationale::keys::STYLE_NEIGHBOURS,
         vec![("files", files.join(", ")), ("n", files.len().to_string())],
     ))
-}
-
-/// "Your references were quoted as background" — the develop where the
-/// direction led (v1.2.3, user ruling 2026-09-01). Conditioned on the
-/// REFERENCE: a develop that found nothing has nothing to have kept as
-/// background.
-pub fn style_background_note(
-    voice: crate::library::StyleVoice,
-    adherence: crate::recipe::DirectionAdherence,
-    reference: Option<&str>,
-) -> Option<crate::rationale::Note> {
-    (reference.is_some() && voice == crate::library::StyleVoice::Background).then(|| {
-        crate::rationale::Note::new(
-            crate::rationale::keys::STYLE_BACKGROUND,
-            vec![("tier", adherence.tier().as_str().to_string())],
-        )
-    })
 }
 
 /// "This develop asked for the reference looks and got NOTHING" — the
@@ -7788,37 +7829,40 @@ mod tests {
         assert!(references_note(&[]).is_none());
     }
 
-    /// v1.2.3, the 2026-09-01 ruling: a develop the direction leads quotes
-    /// its references as background, says so, and names the dial that chose
-    /// the voice — and nothing else says it.
+    /// Library OR direction (user ruling 2026-10-14): unsaid, the words
+    /// decide; said, it is obeyed — except `library` with words, which is
+    /// refused rather than dropping them. Under `Direction` the library is
+    /// not searched and its gap note cannot fire.
     #[test]
-    fn a_direction_led_develop_discloses_its_references_as_background() {
-        use crate::library::StyleVoice;
-        use crate::rationale::{keys, render_one};
-        use crate::recipe::DirectionAdherence as A;
-        let block = Some("REFERENCE LOOKS — …");
-        for (adherence, tier) in [(A::DEFAULT, "direct"), (0.9, "brief")] {
-            let note = style_background_note(StyleVoice::Background, A::new(adherence), block)
-                .expect("a direction-led develop is not silent");
-            assert_eq!(note.key, keys::STYLE_BACKGROUND);
-            let text = render_one(&note);
-            assert!(text.contains(tier), "the dial that chose the voice: {text}");
-            // The DIAL, in the user's own words — not a CLI flag: the note is
-            // persisted and re-rendered in the desktop app and the browser.
-            assert!(text.contains("lower the Adherence dial to 40% or below"), "{text}");
-            assert!(!text.contains("--"), "a rationale note names no flag: {text}");
+    fn a_develop_is_guided_by_the_library_or_the_direction_never_both() {
+        assert_eq!(Guide::resolve(None, None).unwrap(), Guide::Library);
+        assert_eq!(Guide::resolve(None, Some("   ")).unwrap(), Guide::Library);
+        assert_eq!(Guide::resolve(None, Some("warmer")).unwrap(), Guide::Direction);
+        assert_eq!(Guide::resolve(Some(Guide::Direction), None).unwrap(), Guide::Direction);
+        let err = Guide::resolve(Some(Guide::Library), Some("warmer")).unwrap_err().to_string();
+        assert!(err.contains("either/or"), "{err}");
+        for g in [Guide::Library, Guide::Direction] {
+            assert_eq!(Guide::parse(g.as_str()).unwrap(), g);
+            assert_eq!(serde_json::to_string(&g).unwrap(), format!("\"{}\"", g.as_str()));
         }
-        for voice in [StyleVoice::Ceiling, StyleVoice::Target] {
-            assert!(style_background_note(voice, A::default(), block).is_none(), "{voice:?} leads nothing away");
+        assert!(Guide::parse("both").is_err());
+        assert_eq!(GradeRequest::default().guide, Guide::Library);
+
+        let lib = GradeRequest::with_style(0.7);
+        let dir = GradeRequest { guide: Guide::Direction, ..lib };
+        assert_eq!(lib.library_style(), 0.7);
+        assert_eq!(dir.library_style(), 0.0, "a direction-guided develop never searches");
+        assert!(style_gap_note(dir.library_style(), None, None).is_none(), "and claims no missing reference");
+        // The wiring the arithmetic above stands for.
+        let src = crate::source_before_tests(include_str!("pipeline.rs"));
+        for needle in [
+            concat!("(req.library_style() > 0.0)", ".then(crate::library::load)"),
+            concat!("style_gap_note(req.library_style(), ", "ref_str"),
+            concat!("Guide::Library => ", "None,"),
+            concat!("Guide::Direction => ", "guidance,"),
+        ] {
+            assert!(src.contains(needle), "produce_recipe must apply the guide: {needle}");
         }
-        assert!(
-            style_background_note(StyleVoice::Background, A::default(), None).is_none(),
-            "no reference was rendered, so there is nothing to call background"
-        );
-        // End to end through the ONE derivation.
-        let d = Some("dark moody low-key, teal-and-orange");
-        assert_eq!(StyleVoice::choose(1.0, d, A::default()), StyleVoice::Background);
-        assert_eq!(StyleVoice::choose(1.0, None, A::default()), StyleVoice::Target);
     }
 
     /// L09#1: a missing parent is created up-front (the documented
@@ -7868,22 +7912,14 @@ mod tests {
             adherence: DirectionAdherence::new(0.2),
             ..GradeRequest::with_style(0.7)
         };
-        let intent = grade_intent(
-            &req,
-            Some("moodier"),
-            Some("warm golden tones"),
-            crate::library::StyleVoice::Background,
-        );
+        let intent = grade_intent(&req, None, Some("warm golden tones"));
         assert_eq!(intent.style_look, Some("warm golden tones"), "the look must reach the intent");
-        assert_eq!(intent.direction, Some("moodier"), "and it must not displace the direction");
+        assert_eq!(grade_intent(&req, Some("moodier"), None).direction, Some("moodier"), "and so must a direction");
         assert_eq!(intent.strength.get(), 0.9);
         assert_eq!(intent.adherence.get(), 0.2);
         // No library, no claim: the reviewers are told nothing rather than an
         // empty look.
-        assert_eq!(
-            grade_intent(&req, None, None, crate::library::StyleVoice::Ceiling).style_look,
-            None
-        );
+        assert_eq!(grade_intent(&req, None, None).style_look, None);
 
         // …and there is exactly ONE place in this file that builds one. A
         // second literal is how the revision round would come to judge against
@@ -7910,7 +7946,7 @@ mod tests {
             "produce_recipe must take the reviewers' look from the search's hits"
         );
         assert!(
-            src.contains(concat!("grade_intent(&req, user_direction, ", "style_look.as_deref(), style_voice)")),
+            src.contains(concat!("grade_intent(&req, user_direction, ", "style_look.as_deref())")),
             "…and hand that look to the one shared intent"
         );
     }

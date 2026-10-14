@@ -736,14 +736,14 @@ v1.7.0):
 
 ```text
 autoshade decode <src> [-o|--out FILE]
-autoshade analyze <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image]
+autoshade analyze <src> [-o|--out FILE] [--guidance TEXT] [--guide library|direction] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image]
 autoshade apply <src> <recipe.json> (-o|--out) FILE [--long-edge N]
-autoshade auto <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image] [--denoise] [--denoise-strength 0..1] [--denoise-model NAME] [--long-edge N]
+autoshade auto <src> [-o|--out FILE] [--guidance TEXT] [--guide library|direction] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image] [--denoise] [--denoise-strength 0..1] [--denoise-model NAME] [--long-edge N]
 autoshade denoise <src> [-o|--out FILE] [--strength 0..1] [--model NAME]
 autoshade batch <dir> [--render] [--limit N] [--include-baked] [--jobs N] [--long-edge N]
 autoshade eval <dir> [--xmp-dir DIR] [--limit N] [--jobs N] [--fresh] [--state FILE]
 autoshade library-build <dir> [--describe]
-autoshade library-search <photo> [--direction TEXT] [--style 0..1] [--adherence 0..1]
+autoshade library-search <photo> [--style 0..1]
 autoshade reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [--fidelity-retry] [-o|--out FILE]
 autoshade match <src> <target> [--render] [--zoned] [--regions 2..4] [--strength 0..1] [--style-prompt] [--ai-judge] [--deep] [--negative RAW] [-o|--out FILE]
 autoshade correspond <source> <target> [-o|--out FILE]
@@ -918,11 +918,9 @@ looks with the local vision model* checkbox, which stays greyed out until the
 embedding checkbox above it is on.
 `--adherence 0..1` picks the prompt tier the proposer and verifier are told:
 `<=0.40` Hint, `0.40..0.70` Direct, above `0.70` Brief, default `0.65`
-(Direct). It never moves a render bound. It chooses the prompt tier and, since
-v1.2.3, who leads: at Direct or Brief the direction leads and the library's
-style pull is not applied (see *Who leads* below); at Hint the library leads.
-It does nothing without a `--guidance` direction, which is why the desktop app
-greys the slider out until Direction has text.
+(Direct). It never moves a render bound. It does nothing without a direction
+that guides the develop, which is why the desktop app greys the slider out
+until the switch is on **Direction** and Direction has text.
 
 Every setting below is named `AUTOSHADE_*`. Up to v1.1.0 the app was called
 Autoshop and these variables were named `AUTOSHOP_*`; the old spelling still
@@ -1045,35 +1043,34 @@ settings file can supply them.
   or run `autoshade library-build <folder>`. Each photo is measured from its
   pixels; no `.xmp` is read. Tick **Also write each look as short phrases** (or
   pass `--describe`) to have a local model write a few phrases per photo about
-  its grade, so a typed Direction can pick the reference whose look it names. A
-  rebuild measures only new or changed photos. Each analysis then searches the
-  library and gives the model the 3 closest references (versions of one shot —
+  its grade, which go to the model beside each reference. A rebuild measures
+  only new or changed photos. Each analysis guided by the library then
+  searches it and gives the model the 3 closest references (versions of one shot —
   an export and its re-edit — count once) as words, and — with
   **Also show the model the reference photos** — as pictures, one extra image
   each on every call. The **Style** control sets how closely they are followed:
   below 85 % they are a ceiling, at 85 % or above a target, and at 0 the library
   is not read (only the two switches that feed an analysis go grey; building
-  stays available). `autoshade library-search <photo> [--direction TEXT]` shows
-  which references a develop would get, with no paid call. Strength
-  independently controls the fit budget and confidence cap; Direction adherence
-  chooses Hint, Direct, or Brief wording when a Direction is present.
-- **Who leads, Direction or your library (v1.2.3):** write a **Direction** and
-  leave **Adherence** at its default 65 % (or higher) and the direction leads.
-  Your references are still searched, still shown to the model and still named
-  in the rationale — but as BACKGROUND for continuity ("where these looks and
-  the direction disagree, follow the direction"). Drop Adherence to 40 % or below
-  (tier **Hint**) and the library leads again; with no Direction, or a blank one,
-  nothing about the Style control changes. The judge that reviews the finished
-  frame is briefed the same way, so a revision it buys cannot be spent walking
-  the direction back toward your references.
+  stays available). `autoshade library-search <photo>` shows which references
+  a develop would get, with no paid call. Strength independently controls the
+  fit budget and confidence cap; Direction adherence chooses Hint, Direct, or
+  Brief wording when a Direction guides.
+- **Library or Direction — one or the other:** an analysis is guided EITHER
+  by your reference library OR by the Direction you type, never both. With the
+  library, the Direction text is not sent; with the Direction, the library is
+  not read and the Style control does nothing. The judge that reviews the
+  finished frame is briefed on the same one aim.
 
-  All three surfaces can choose. CLI: `--adherence` on `analyze` and `auto`.
-  Desktop: the **Adherence** slider, active once Direction has text. Browser
-  (`autoshade serve`): the **Adherence** slider beside **Style influence**, and
-  for anything driving that HTTP API directly, the `POST /api/analyze` body takes
-  an optional `adherence` field (0..1). Omitting it means 0.65 — the same default
-  every other surface has — so a client written before v1.2.3 sends the same
-  request it always sent.
+  All three surfaces choose. Desktop: the **Guided by** switch above Direction
+  (*Reference library* / *Direction*); the side not chosen is greyed out, and
+  the choice is remembered. CLI: `--guide library|direction` on `analyze` and
+  `auto`; omitted, a `--guidance` picks the direction and no `--guidance` picks
+  the library, and `--guide library` together with `--guidance` is refused.
+  Browser (`autoshade serve`): the **Guide** menu beside Direction, and for
+  anything driving that HTTP API directly, the `POST /api/analyze` body takes an
+  optional `guide` field (`"library"` or `"direction"`) resolved the same way,
+  plus an optional `adherence` (0..1, default 0.65). A box dragged on the image
+  is a local direction, so it always guides by the direction.
 - **Reimagine:** enter a prompt in the AI panel or use `reimagine` to create a
   generated, lower-resolution target. `--fidelity high` (the default, and the
   GUI's mode) tells the model to re-develop the same photograph, not repaint

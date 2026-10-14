@@ -164,8 +164,8 @@
         );
     }
 
-    /// The Adherence slider is INERT without a direction, and the tier the dial
-    /// picks is the one the develop's request carries.
+    /// The Adherence slider is INERT without a direction that guides, and the
+    /// tier the dial picks is the one the develop's request carries.
     ///
     /// The old spelling of this test asserted that a default app has an empty
     /// direction and the shipped adherence default - two facts about
@@ -203,9 +203,14 @@
         // (2) whitespace is still blank - the gate trims.
         app.guidance = "   \n\t ".into();
         assert_eq!(frame(&mut app), Some(false), "whitespace is not a direction");
-        // (3) a real direction: live.
+        // (3) a real direction under the library guide: still inert — the
+        // direction is not sent (library OR direction, 2026-10-14).
         app.guidance = "warmer, moodier".into();
-        assert_eq!(frame(&mut app), Some(true), "with a direction the dial must be usable");
+        assert_eq!(app.guide, autoshade::pipeline::Guide::Library, "premise: the default guide");
+        assert_eq!(frame(&mut app), Some(false), "a direction the library overrides has no dial");
+        // (4) guided by that direction: live.
+        app.guide = autoshade::pipeline::Guide::Direction;
+        assert_eq!(frame(&mut app), Some(true), "with a guiding direction the dial must be usable");
         // …and the DIAL reaches the request as a tier, which is the only thing
         // the value is for.
         app.direction_adherence = 0.1;
@@ -217,24 +222,67 @@
         assert_ne!(hint.tier(), brief.tier(), "the dial must be able to change the tier");
         // …and the tooltip NAMES the tiers, which is what a user needs to know
         // the dial is not a magnitude.
-        let tip = tr(
-            Lang::En,
-            "How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit. Direct and Brief also decide WHO LEADS: your style library becomes background and its distillation pull is skipped, so a direction can take a photo somewhere your past edits never went. Hint leaves the library in the lead.",
-        );
+        let tip = tr(Lang::En, "How closely the AI follows your direction; disabled until the Direction guides and has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit.");
         for tier in ["Hint", "Direct", "Brief"] {
             assert!(tip.contains(tier), "the tooltip must name the {tier} tier: {tip}");
         }
-        // v1.2.3: …and that two of those three tiers ALSO decide who leads.
-        // A user reading only "prompt intent only" would have no way to know
-        // that this dial is what stops their own library from being distilled
-        // into the answer.
-        for clause in ["WHO LEADS", "background", "Hint leaves the library in the lead"] {
-            assert!(tip.contains(clause), "the tooltip must say {clause:?}: {tip}");
-        }
         // The zh half is a translation of the SAME key, so a drifted pair
         // would fall back to English here rather than fail silently.
-        let zh = tr(Lang::Zh, "How closely the AI follows your direction; disabled until Direction has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit. Direct and Brief also decide WHO LEADS: your style library becomes background and its distillation pull is skipped, so a direction can take a photo somewhere your past edits never went. Hint leaves the library in the lead.");
-        assert!(zh.contains("主导"), "the zh tooltip must carry the clause too: {zh}");
+        let zh = tr(Lang::Zh, "How closely the AI follows your direction; disabled until the Direction guides and has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit.");
+        assert!(zh.contains("遵循程度"), "the zh tooltip must exist: {zh}");
+    }
+
+    /// Library OR direction (user ruling 2026-10-14): the switch greys the
+    /// side it did not choose — the Direction field under the library, the
+    /// Style slider under the direction — survives a restart, and is what the
+    /// develop's request carries.
+    ///
+    /// MUTATION: drop either `add_enabled_ui(by_direction / !by_direction, …)`
+    /// wrapper in panels/ai.rs, or leave `guide` out of the saved prefs.
+    #[test]
+    fn gui_guide_switch_greys_the_other_side_and_persists() {
+        use autoshade::pipeline::Guide;
+        let ctx = egui::Context::default();
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let frame = |app: &mut AutoShadeApp| -> Option<(bool, bool)> {
+            app.guide_gate_enabled = None;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 900.0))),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::SidePanel::left("controls").default_width(320.0).show(ctx, |ui| {
+                        app.ai_panel(ui);
+                    });
+                },
+            );
+            app.guide_gate_enabled
+        };
+        let mut app = AutoShadeApp::default();
+        assert_eq!(frame(&mut app), Some((false, true)), "library: Direction greyed, Style live");
+        app.guide = Guide::Direction;
+        assert_eq!(frame(&mut app), Some((true, false)), "direction: Direction live, Style greyed");
+        let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        assert!(seen.iter().any(|t| t.contains("Guided by the Direction")), "a greyed library must say why: {seen:?}");
+
+        assert_eq!(Prefs::default().guide, Guide::Library, "an older prefs file decodes to the library");
+        let json = serde_json::to_string(&Prefs { guide: Guide::Direction, ..Prefs::default() }).unwrap();
+        let back: Prefs = serde_json::from_str(&json).unwrap();
+        let mut restored = AutoShadeApp::default();
+        restored.restore_prefs(back);
+        assert_eq!(restored.guide, Guide::Direction, "the switch must survive a restart");
+
+        // The request half: the worker reads `guide` and sends the direction
+        // only under it (source guard: the request is built inside a worker
+        // spawn no unit test can drive).
+        let actions = include_str!("../actions.rs");
+        for needle in [
+            concat!("let guide = if self.region.is_some() ", "{ autoshade::pipeline::Guide::Direction } else { self.guide };"),
+            concat!("guide == autoshade::pipeline::Guide::Direction ", "&& !g.is_empty()"),
+        ] {
+            assert!(actions.contains(needle), "start_analyze must apply the guide: {needle}");
+        }
     }
 
     /// S2: the phrase preference survives a restart, defaults OFF in BOTH

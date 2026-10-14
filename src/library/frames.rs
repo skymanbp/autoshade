@@ -1,4 +1,4 @@
-//! The library's file work and its three model calls: walking a folder,
+//! The library's file work and its model calls: walking a folder,
 //! staging the 512-px frame both a build and a query embed, and ONE sidecar
 //! process per model per build.
 
@@ -186,43 +186,11 @@ pub(super) fn look_phrases(
     Ok(out)
 }
 
-/// ONE SigLIP text call over `texts`, answered in order.
-pub(super) fn text_vectors(opts: &crate::embed::EmbedOpts, dir: &Path, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-    if texts.is_empty() {
-        return Ok(Vec::new());
-    }
-    let m = manifest(dir, "texts", texts.iter().map(|t| serde_json::json!({ "text": t })))?;
-    let answer = Scratch::new(dir, "texts-out", "json");
-    crate::embed::embed_text_batch(opts, m.path(), answer.path(), texts.len())
-}
-
-/// What a develop asks the library with: the photo's image vector and, when
-/// the photographer typed a direction, its text vector.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct QueryVectors {
-    pub image: Vec<f32>,
-    pub prompt: Option<Vec<f32>>,
-}
-
-/// Embed a develop's preview (and its direction, if any) in ONE sidecar call,
-/// through the same frame a build stages.
-pub fn query_vectors(
-    opts: &crate::embed::EmbedOpts,
-    preview: &image::DynamicImage,
-    direction: Option<&str>,
-    dir: &Path,
-) -> Result<QueryVectors> {
+/// The vector a develop asks the library with: its preview through the same
+/// frame a build stages, in one sidecar call.
+pub fn query_vector(opts: &crate::embed::EmbedOpts, preview: &image::DynamicImage, dir: &Path) -> Result<Vec<f32>> {
     let frame = stage(preview, dir, "query")?;
-    let prompt = match direction.map(str::trim).filter(|d| !d.is_empty()) {
-        Some(d) => {
-            let p = Scratch::new(dir, "prompt", "txt");
-            std::fs::write(p.path(), d)?;
-            Some(p)
-        }
-        None => None,
-    };
-    let opts = crate::embed::EmbedOpts { text_file: prompt.as_ref().map(|p| p.path().to_path_buf()), ..opts.clone() };
+    let opts = crate::embed::EmbedOpts { text_file: None, ..opts.clone() };
     let answer = Scratch::new(dir, "query-out", "json");
-    let record = crate::embed::embed_file_record(&opts, frame.path(), answer.path())?;
-    Ok(QueryVectors { image: record.vector, prompt: record.text_vector })
+    Ok(crate::embed::embed_file_record(&opts, frame.path(), answer.path())?.vector)
 }

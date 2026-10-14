@@ -1459,15 +1459,13 @@ The reference library (`src/library/`, 2026-10-13 redesign) holds finished
 photographs only — JPEG, TIFF or PNG exports whose look the photographer wants
 to follow — and reads no `.xmp`: a finished photo may carry work no sidecar
 records, and a sidecar may be stale or one of several. Each entry is a SigLIP 2
-image vector of the staged 512-px frame, optional look phrases written by
-Qwen3-VL-2B, and the SigLIP text vector of those phrases. A develop searches it
-with two questions: is the entry's scene like this photo (image against image),
-and does its look answer what the photographer typed (direction text against
-phrases). Each similarity is standardised over the candidates and the two are
-summed, the direction term at weight 2; without a direction the scene term ranks
-alone. The three closest go to the proposer as a fenced block of their phrases
-and, when the photographer opts in, as images after the develop target. Nothing
-is blended into the recipe: a finished photo carries no settings to blend.
+image vector of the staged 512-px frame and optional look phrases written by
+Qwen3-VL-2B. A develop is guided EITHER by the library OR by the typed direction
+(`pipeline::Guide`, user ruling 2026-10-14); a library-guided develop searches
+it by scene alone (image against image) and sends no direction. The three
+closest go to the proposer as a fenced block of their phrases and, when the
+photographer opts in, as images after the develop target. Nothing is blended
+into the recipe: a finished photo carries no settings to blend.
 
 #### SigLIP 2 text tower and look metadata
 
@@ -1512,21 +1510,15 @@ again.
 | `tokenizer_config.json` | 47,164 | `14afe629fe4959b9e0d51e1852b8d9f7ad074f90a1a7125a4fcdd17f06e78fc8` |
 | `special_tokens_map.json` | 636 | `baec30ea10906f16adb8c18af7a34023002c1746542612b8b41c9f09e1351351` |
 
-`phrases_vec` is the SigLIP **text** vector of an entry's look phrases. A build
-computes all of them in **one** sidecar process: the whole build's phrases go
-out as a single `--text-manifest` JSONL and come back in order.
-
 #### Qwen3-VL-2B look phrases
 
 `python/describe.py` is the fifth sidecar and the second model in the
 reference library. It writes 4 to 8 short comma-separated phrases per photograph
 about its **grade** — white-balance lean, tonality, contrast, saturation and
 colour treatment, finishing, mood — the way a photographer types a look request,
-and is fenced against naming the subject. Phrases rather than a sentence because
-the other side of the comparison is a short typed direction: the previous index
-embedded a 45-word sentence against it, and on that index the term made the
-settings prediction worse while it was the only thing separating opposite
-directions — the pairing, a short text against a paragraph, was the cause.
+and is fenced against naming the subject. The phrases are the words the
+proposer reads beside each reference; nothing searches them (a develop guided
+by a typed direction does not read the library at all).
 
 | Property | Value |
 |---|---|
@@ -1581,22 +1573,17 @@ unspecified ranking.
 
 #### Searching the reference library
 
-`Library::search` scores every entry except the photo being developed. The
-scene term is the cosine of the query image vector against the entry's image
-vector; the prompt term is the cosine of the direction's text vector against the
-entry's phrase vector. Each term is standardised over the candidates (mean 0,
-standard deviation 1) so two similarities on different spreads add fairly; an
-entry with no phrases sits at the mean of the prompt term — neither helped nor
-hurt. The score is `z(scene) + 2·z(prompt)` with a direction and `z(scene)` without
-one; ties keep library order, so a search is deterministic. The three best
+`Library::search` scores every entry except the photo being developed by the
+cosine of the query image vector against the entry's image vector, closest
+first; ties keep library order, so a search is deterministic. Versions of one
+shot (cosine ≥ 0.97 between two candidates) take one slot. The three best
 (`REFERENCE_COUNT`) form the block.
 
-**Who leads.** `StyleVoice::choose(style, direction, adherence)` is the one
-derivation: a non-blank direction at adherence `Direct` or `Brief` makes the
-references BACKGROUND (the direction overrides them); otherwise Style below
-`0.85` makes them a ceiling ("do not go further than they do") and at or above
-it a target ("reproduce their look"). The same voice briefs the visual judge, so
-a reviewer cannot be told to enforce a look the block has just demoted.
+**The block's ask.** `StyleVoice::for_style(style)`: below `0.85` the
+references are a ceiling ("do not go further than they do"), at or above it a
+target ("reproduce their look"). The judge is briefed on the first reference's
+phrases as the look asked for. A direction-guided develop has no block and no
+look brief — only the direction.
 
 **The block's budget.** Three references of at most 200 characters of phrases
 each plus the header stay under `advisor::REFERENCE_BUDGET_BYTES = 4,096`, which
@@ -1670,8 +1657,8 @@ and zero-confidence fields are conservation-tested to change nothing.
   (**designed privacy control**).
 - Revision gate: accept revised recipe only when `new_score >= old_score`
   (**designed do-no-harm rule**).
-- Reference library: SigLIP 2 768-dimensional image and text vectors; score
-  `z(scene) + 2·z(prompt)` over the candidates, the three best sent; at most
+- Reference library: SigLIP 2 768-dimensional image vectors; ranked by scene
+  cosine, versions of one shot counted once, the three best sent; at most
   3,000 finished photos per library (**designed**; reviewed by the photographer
   on their own library rather than against a numeric acceptance line, user
   ruling 2026-10-13).

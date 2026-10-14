@@ -198,6 +198,10 @@ pub(crate) struct Prefs {
     #[serde(default)]
     pub(crate) prefs_era: u32,
     pub(crate) gallery_dir: Option<PathBuf>,
+    /// Library OR direction for AI Analyze (2026-10-14). An older prefs file
+    /// decodes to the default, `Library` — what an analysis without a typed
+    /// direction already was.
+    pub(crate) guide: autoshade::pipeline::Guide,
     pub(crate) style_strength: f32,
     /// R23-3: how COMMITTED the AI's grade should be, 0..1 — the second taste
     /// axis. `#[serde(default)]` on the struct would decode an older prefs file
@@ -291,6 +295,7 @@ impl Default for Prefs {
         Self {
             prefs_era: PREFS_ERA,
             gallery_dir: None,
+            guide: autoshade::pipeline::Guide::default(),
             style_strength: STYLE_STRENGTH_DEFAULT,
             grade_strength: GRADE_STRENGTH_DEFAULT,
             fit_strength: autoshade::recipe::GradeStrength::DEFAULT,

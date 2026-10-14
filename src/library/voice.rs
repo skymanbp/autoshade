@@ -1,5 +1,5 @@
-//! What the advisor is told about the references: whose aim leads, and the
-//! block of words that carries them.
+//! What the advisor is told about the references: how closely to follow them,
+//! and the block of words that carries them.
 
 use super::Hit;
 
@@ -7,43 +7,23 @@ use super::Hit;
 /// the look to reproduce.
 pub const STYLE_TARGET_MIN: f32 = 0.85;
 
-/// WHOSE aim the reference block states.
+/// What the reference block asks of the references.
 ///
-/// User ruling 2026-09-01: **when a direction is given, the references are
-/// background and the direction leads** ([`Self::Background`]), chosen by the
-/// direction-adherence dial whose whole job is "how strongly should this
-/// direction be followed". Without a leading direction the Style axis decides
-/// between a ceiling and a target.
-///
-/// `Default` is [`Self::Ceiling`], the voice that says nothing is leading: a
-/// forgotten field must not tell a reviewer the references are background.
+/// Used only when the develop is guided by the library ([`crate::pipeline::Guide`]);
+/// a develop guided by a typed direction never reads the library (user ruling
+/// 2026-10-14: the two are either/or). `Default` is [`Self::Ceiling`], the
+/// milder ask.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StyleVoice {
-    /// Below [`STYLE_TARGET_MIN`], nothing leading: stay within the
-    /// references' level of grading.
+    /// Below [`STYLE_TARGET_MIN`]: stay within the references' level of grading.
     #[default]
     Ceiling,
-    /// At or above [`STYLE_TARGET_MIN`], nothing leading: reproduce their look.
+    /// At or above [`STYLE_TARGET_MIN`]: reproduce their look.
     Target,
-    /// A non-empty direction at adherence tier `Direct` or `Brief`: the
-    /// references are background and the direction overrides them.
-    Background,
 }
 
 impl StyleVoice {
-    /// The ONE derivation every surface that renders or forecasts the block
-    /// calls. A blank direction cannot lead, and a `Hint` direction has asked
-    /// not to.
-    pub fn choose(style: f32, direction: Option<&str>, adherence: crate::recipe::DirectionAdherence) -> Self {
-        let leads = direction.is_some_and(|d| !d.trim().is_empty())
-            && matches!(
-                adherence.tier(),
-                crate::recipe::AdherenceTier::Direct | crate::recipe::AdherenceTier::Brief
-            );
-        if leads { Self::Background } else { Self::for_style(style) }
-    }
-
-    /// The split for entry points with no direction to offer.
+    /// The split by the Style axis.
     pub fn for_style(style: f32) -> Self {
         if style >= STYLE_TARGET_MIN { Self::Target } else { Self::Ceiling }
     }
@@ -54,9 +34,6 @@ impl StyleVoice {
                 "Use them as a soft guide to this photographer's taste: grade toward their tonality and colour treatment, and do not go further than they do."
             }
             StyleVoice::Target => "Reproduce their look on this photo: tonality, contrast and colour treatment.",
-            StyleVoice::Background => {
-                "The photographer's direction leads; these looks are background for continuity only, and the direction overrides them wherever they disagree."
-            }
         }
     }
 }
@@ -74,13 +51,12 @@ fn one_line(text: &str) -> String {
 /// image (the develop target is image 1); an empty slice means the references
 /// go as words only. The block is UNTRUSTED — phrases are file data — and the
 /// provider fences it.
-pub fn reference_block(hits: &[Hit<'_>], images: &[Option<usize>], voice: StyleVoice, by_prompt: bool) -> Option<String> {
+pub fn reference_block(hits: &[Hit<'_>], images: &[Option<usize>], voice: StyleVoice) -> Option<String> {
     if hits.is_empty() {
         return None;
     }
-    let chosen = if by_prompt { "closest to this photo and to the direction" } else { "closest to this photo" };
     let mut out = format!(
-        "REFERENCE LOOKS — {} finished photo(s) from the photographer's reference library, {chosen}. Match their grading, never their subject, framing or content. {}",
+        "REFERENCE LOOKS — {} finished photo(s) from the photographer's reference library, closest to this photo. Match their grading, never their subject, framing or content. {}",
         hits.len(),
         voice.instruction()
     );

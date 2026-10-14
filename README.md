@@ -323,17 +323,13 @@ develop is shown the **3 closest** as a soft reference.
 - An entry is measured from its pixels only — no `.xmp` is read, so exports
   that went through other editors count as they look: a 768-dimensional
   **SigLIP 2** image vector and, with `--describe`, a few short **Qwen3-VL-2B**
-  phrases about the *grade* ("warm, faded, low contrast") with their text
-  vector. Nothing leaves the machine, and a rebuild measures only new or
-  changed photos.
-- A develop asks two questions of every entry: is its scene like this photo
-  (image against image), and does its look answer your Direction (your words
-  against its phrases). Each is standardised over the library and the two are
-  summed, the Direction counting double; with no Direction the scene alone
-  ranks.
-- The references reach the model as words and, if you opt in, as pictures.
-  With a Direction at Adherence above 40 % they are background and your words
-  lead; nothing is blended into the recipe.
+  phrases about the *grade* ("warm, faded, low contrast"). Nothing leaves the
+  machine, and a rebuild measures only new or changed photos.
+- An analysis follows EITHER your library OR your typed Direction — a switch
+  picks one. Guided by the library, it picks the photos whose scene is closest
+  to this one (versions of one shot count once) and sends no Direction.
+- The references reach the model as words and, if you opt in, as pictures;
+  nothing is blended into the recipe.
 
 Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
 

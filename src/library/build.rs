@@ -31,18 +31,17 @@ impl Sidecars {
 }
 
 /// The phases of a build, in order: decode-and-stage (this process, per
-/// photo), then one sidecar process each for image vectors, look phrases and
-/// phrase vectors over every photo that needs it.
+/// photo), then one sidecar process each for image vectors and look phrases
+/// over every photo that needs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildStage {
     Frames,
     Images,
     Phrases,
-    Text,
 }
 
 /// What a UI calls each [`BuildStage`], in English (the GUI translates it).
-const STAGE_LABELS: [&str; 4] = ["decoding", "image vectors", "look phrases", "phrase vectors"];
+const STAGE_LABELS: [&str; 3] = ["decoding", "image vectors", "look phrases"];
 
 impl BuildStage {
     pub fn label(self) -> &'static str {
@@ -96,7 +95,7 @@ pub fn build(
     let describe = describe.on() && sidecars.describe.available();
     let model = model_stamp();
     let kept: Vec<&Entry> = previous.filter(|p| p.model == model).map(|p| p.entries.iter().collect()).unwrap_or_default();
-    let complete = |e: &&Entry| !describe || e.phrases_vec.is_some();
+    let complete = |e: &&Entry| !describe || e.phrases.is_some();
     let by_path: HashMap<&str, &Entry> = kept.iter().copied().filter(complete).map(|e| (e.path.as_str(), e)).collect();
     let by_id: HashMap<&str, &Entry> = kept.iter().copied().filter(complete).map(|e| (e.id.as_str(), e)).collect();
 
@@ -133,12 +132,9 @@ pub fn build(
                     }
                 }
             }
-            Err(e) => eprintln!("  reference library: look phrases unavailable ({e:#}) — searches ask the scene question only"),
+            Err(e) => eprintln!("  reference library: look phrases unavailable ({e:#}) — the references go as images only"),
         }
         report(BuildStage::Phrases, total);
-        report(BuildStage::Text, 0);
-        attach_phrase_vectors(&sidecars.embed, &sidecars.scratch, &mut slots);
-        report(BuildStage::Text, total);
     }
 
     let entries: Vec<Entry> = slots.into_iter().map(|s| s.entry).collect();
@@ -165,23 +161,6 @@ fn slot_for(photo: &Path, scratch: &Path, by_path: &HashMap<&str, &Entry>, by_id
         let entry = Entry { path, stamp, ..(*e).clone() };
         return Ok(Slot { entry, frame: None });
     }
-    let entry = Entry { id, path, stamp, image: Vec::new(), phrases: None, phrases_vec: None };
+    let entry = Entry { id, path, stamp, image: Vec::new(), phrases: None };
     Ok(Slot { entry, frame: Some(frame) })
-}
-
-/// The text vector of every entry's phrases that lacks one, in one call. A
-/// failure leaves those entries without the prompt question, with a line.
-fn attach_phrase_vectors(embed: &crate::embed::EmbedOpts, scratch: &Path, slots: &mut [Slot]) {
-    let todo: Vec<usize> = (0..slots.len())
-        .filter(|&i| slots[i].entry.phrases.is_some() && slots[i].entry.phrases_vec.is_none())
-        .collect();
-    let texts: Vec<&str> = todo.iter().filter_map(|&i| slots[i].entry.phrases.as_deref()).collect();
-    match frames::text_vectors(embed, scratch, &texts) {
-        Ok(vectors) => {
-            for (i, v) in todo.into_iter().zip(vectors) {
-                slots[i].entry.phrases_vec = Some(v);
-            }
-        }
-        Err(e) => eprintln!("  reference library: phrase vectors unavailable ({e:#}) — searches ask the scene question only"),
-    }
 }

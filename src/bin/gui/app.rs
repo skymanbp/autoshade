@@ -58,6 +58,10 @@ pub(crate) struct AutoShadeApp {
     /// develop restored from disk carries none) the raw English rationale
     /// shows instead. Cleared wherever `rationale` is reloaded from disk.
     pub(crate) rationale_notes: Vec<autoshade::rationale::Note>,
+    /// What guides AI Analyze: the reference library or the Direction text —
+    /// either/or (user ruling 2026-10-14). The controls of the one not chosen
+    /// are greyed out. Persisted.
+    pub(crate) guide: autoshade::pipeline::Guide,
     pub(crate) style_strength: f32,
     /// R23-3, feedback #5 ("the AI is too timid"): how COMMITTED the grade
     /// should be, 0..1. A SEPARATE axis from `style_strength` — that one asks
@@ -445,11 +449,15 @@ pub(crate) struct AutoShadeApp {
     /// is there or not.
     #[cfg(test)]
     pub(crate) adherence_gate_enabled: Option<bool>,
+    /// Test seam: were the Direction field and the Style slider enabled this
+    /// frame, `(direction, style)`? The guide switch greys one of them.
+    #[cfg(test)]
+    pub(crate) guide_gate_enabled: Option<(bool, bool)>,
     /// Test seam (R30): was the reference libraries' READ side enabled this
-    /// frame? At Style 0 the pipeline opens no library at all
-    /// (`(req.style > 0.0).then(load_effective)`), so the controls that feed an
-    /// analysis are drawn disabled — and nothing but this can tell a rebuilt
-    /// `add_enabled_ui(self.style_strength > 0.0, …)` from a comment about one.
+    /// frame? At Style 0, or guided by the direction, the pipeline opens no
+    /// library at all (`req.library_style() > 0.0`), so the controls that feed
+    /// an analysis are drawn disabled — and nothing but this can tell a rebuilt
+    /// `add_enabled_ui(reads_a_library, …)` from a comment about one.
     ///
     /// ONE Option for the one wrapper around the read side (the search switch
     /// and the reference-photo switch).
@@ -1667,6 +1675,7 @@ impl Default for AutoShadeApp {
             // target and the AI section's ● baseline (R22 #16) — see
             // model::STYLE_STRENGTH_DEFAULT for why the literal cannot live in
             // two Default impls.
+            guide: autoshade::pipeline::Guide::default(),
             style_strength: STYLE_STRENGTH_DEFAULT,
             // 0.65 — braver than the 0.5 calibration point, by user decision
             // (2026-08-17 ⑦). Same one-definition rule as above: the constant is
@@ -1841,6 +1850,8 @@ impl Default for AutoShadeApp {
             ai_gate_enabled: None,
             #[cfg(test)]
             adherence_gate_enabled: None,
+            #[cfg(test)]
+            guide_gate_enabled: None,
             #[cfg(test)]
             ai_library_read_enabled: None,
             #[cfg(test)]
@@ -2146,6 +2157,7 @@ impl eframe::App for AutoShadeApp {
             &Prefs {
                 prefs_era: PREFS_ERA,
                 gallery_dir: self.gallery_dir.clone(),
+                guide: self.guide,
                 style_strength: self.style_strength,
                 grade_strength: self.grade_strength,
                 fit_strength: self.fit_strength,

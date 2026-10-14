@@ -3759,11 +3759,11 @@ had no place once the entries carry no settings.
 
 | Part | File | Job |
 |---|---|---|
-| Entry, file, loader | `library.rs` | `Library { version, dir, model, entries }`; each `Entry` holds the frame digest, the path and its size+mtime `Stamp`, the image vector, optional look phrases and their text vector. `load()` answers `Absent` / `Unusable(reason)` / `Ready`; every vector is checked at the door. |
-| Build | `library/build.rs` | `rebuild(dir, sidecars, describe, progress)` loads the current file, keeps what it already measured (same path+stamp, or same frame digest), measures the rest — decode and stage 512-px frames, then one SigLIP image pass, one Qwen3-VL phrase pass, one SigLIP text pass — and publishes atomically. An empty build is refused, never saved. |
-| Frames and sidecars | `library/frames.rs` | Staging, the finished-photo walk, and the three sidecar batches; `query_vectors` embeds a develop's own preview and direction through the same staging, so a query and a stored vector are comparable. |
-| Search | `library/search.rs` | Scene (image↔image) and prompt (direction text↔phrases) cosines, each standardised over the candidates, summed with the prompt at weight 2; the photo being developed is excluded; versions of one shot (image cosine ≥ 0.97 between two candidates) take one slot; top 3. |
-| Voice and block | `library/voice.rs` | `StyleVoice` (ceiling / target / background) and the `REFERENCE LOOKS` block the proposer reads, one line per reference, numbered against the images that went with it. |
+| Entry, file, loader | `library.rs` | `Library { version, dir, model, entries }`; each `Entry` holds the frame digest, the path and its size+mtime `Stamp`, the image vector and optional look phrases. `load()` answers `Absent` / `Unusable(reason)` / `Ready`; every vector is checked at the door. |
+| Build | `library/build.rs` | `rebuild(dir, sidecars, describe, progress)` loads the current file, keeps what it already measured (same path+stamp, or same frame digest), measures the rest — decode and stage 512-px frames, then one SigLIP image pass and one Qwen3-VL phrase pass — and publishes atomically. An empty build is refused, never saved. |
+| Frames and sidecars | `library/frames.rs` | Staging, the finished-photo walk, and the sidecar batches; `query_vector` embeds a develop's own preview through the same staging, so a query and a stored vector are comparable. |
+| Search | `library/search.rs` | Scene (image↔image) cosine, closest first; the photo being developed is excluded; versions of one shot (image cosine ≥ 0.97 between two candidates) take one slot; top 3. |
+| Voice and block | `library/voice.rs` | `StyleVoice` (ceiling / target, by Style) and the `REFERENCE LOOKS` block the proposer reads, one line per reference, numbered against the images that went with it. |
 | Switches | `library/switches.rs` | The embed and describe switches as values (flag > environment > preference) and the model stamp. |
 
 Three surfaces build it through the same `rebuild` call: `autoshade
@@ -3771,11 +3771,11 @@ library-build <dir>`, the web info panel (`POST /api/library-build`), and the
 GUI's **AI panel › Reference library** (folder picker → background worker with
 per-stage progress; no cancel, and a killed process leaves the previous file
 intact). `autoshade library-search <photo>` prints what a develop would get —
-each hit's scene and prompt numbers and phrases, the fenced block, and the
-rationale notes — through the pipeline's own helpers, with no paid call.
+each hit's scene number and phrases, the fenced block, and the rationale note
+— through the pipeline's own helpers, with no paid call.
 
 **In a develop** (`pipeline::produce_recipe`), the library is opened only when
-Style is above 0. Every gap degrades to no references and says why in the
+the library guides it and Style is above 0 (`GradeRequest::library_style`). Every gap degrades to no references and says why in the
 rationale: no library, an unusable file, the search switch off, a failed query.
 The block goes behind `FENCE_STYLE_REFERENCE`; with the opt-in reference images
 each loaded reference becomes the next image after the develop target, and one
@@ -3783,12 +3783,13 @@ that will not load goes as words while the others still go. The reviewers get
 the first reference's phrases as the look summary (`library::look_summary`), so
 a judge cannot punish a develop for following the library.
 
-**Who leads.** `StyleVoice::choose(style, direction, adherence)` is the one
-derivation: a non-blank direction at adherence `Direct` or `Brief` makes the
-references BACKGROUND and the direction leads (user ruling 2026-09-01); `Hint`,
-a blank direction or none leaves Style to decide between a ceiling (below 0.85)
-and a target. The proposer's block, the judge's brief and the rationale's
-background note all read that one voice.
+**Library or direction.** `pipeline::Guide` (user ruling 2026-10-14) picks ONE
+aim per develop: `Library` sends no direction, `Direction` reads no library.
+`Guide::resolve(explicit, direction)` is the one resolution the CLI
+(`--guide`) and the web body (`guide`) share — unsaid, a direction picks
+`Direction`; `library` beside a direction is refused — and the desktop app's
+**Guided by** switch greys the side it did not choose. `produce_recipe` applies
+it at the top, so the proposer, verifier and judge are never told two aims.
 
 **ONE RAW/XMP pairing rule ([`src/xmp_pair.rs`](../src/xmp_pair.rs)).** The rule
 used to be open-coded as `raw.with_extension("xmp")` at six sites — the
