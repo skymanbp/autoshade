@@ -1039,26 +1039,6 @@ pub mod keys {
          extra images on each call of this analysis]";
     pub const STYLE_REF_IMAGE_FAILED: &str =
         " [a reference photo could not be prepared ({e}) — it went as words only]";
-    /// The paid restyle candidate (user ruling 2026-10-14): a repaint toward
-    /// the reference looks, reverse-fitted and judged beside the AI's own
-    /// develop. Every outcome is said, because each one was paid for or was
-    /// asked for and not done.
-    pub const RESTYLE_ADOPTED: &str =
-        " [a repaint toward your reference looks scored {score2}/100 against the AI's own \
-         {score1}/100 — its reverse-fitted settings were kept instead]";
-    pub const RESTYLE_KEPT: &str =
-        " [a repaint toward your reference looks scored {score2}/100 against the AI's own \
-         {score1}/100 — the AI's settings were kept]";
-    pub const RESTYLE_FAILED: &str =
-        " [the repaint toward your reference looks failed ({e}) — the AI's settings were kept]";
-    pub const RESTYLE_NO_REFERENCE: &str =
-        " [no repaint was tried: no reference look was found for this photo]";
-    pub const RESTYLE_NO_SCORE: &str =
-        " [no repaint was tried: the visual judge gave the AI's own develop no score to \
-         compare against]";
-    pub const RESTYLE_REFINE: &str =
-        " [no repaint was tried: this is a refine, and a repaint would replace your current \
-         edit rather than adjust it]";
     pub const ADVISOR_NOTE_DIRECTION_ADHERENCE: &str = " [direction adherence tier: {tier}]";
     pub const MASKS_NOT_PRESERVED: &str =
         "\n⚠ the response did not preserve mask identities (a mask was renamed or \
@@ -1554,7 +1534,6 @@ ValueError: boom at C:\Users\alice\x.py"#
             keys::REVISION_VERIFY_FAILED,
             keys::STYLE_UNAVAILABLE,
             keys::STYLE_REF_IMAGE_FAILED,
-            keys::RESTYLE_FAILED,
             keys::JUDGE_ROUND_FAILED,
             keys::JUDGE_REJUDGE_FAILED,
             keys::JUDGE_UNAVAILABLE,

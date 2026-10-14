@@ -60,13 +60,6 @@ pub struct GradeRequest {
     /// [`crate::library::EmbeddingSwitch::resolve`]. Without it the library
     /// cannot be searched, and the rationale says so.
     pub embed: crate::library::EmbeddingSwitch,
-    /// The paid RESTYLE CANDIDATE (user ruling 2026-10-14): also have the image
-    /// model repaint this photo toward the reference looks, reverse-fit the
-    /// repaint's settings, and keep whichever develop the visual judge scores
-    /// higher. Off by default and never set by batch, eval or the web page: one
-    /// more image generation and one more judge call per develop, plus a verify
-    /// when the repaint wins. Needs the judge and at least one reference.
-    pub restyle: bool,
 }
 
 impl Default for GradeRequest {
@@ -81,7 +74,6 @@ impl Default for GradeRequest {
             think: Default::default(),
             adherence: Default::default(),
             embed: crate::library::EmbeddingSwitch::resolve(None, false),
-            restyle: false,
         }
     }
 }
@@ -152,45 +144,6 @@ fn reference_preview(path: &Path) -> Result<Vec<u8>> {
     img.write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
         .context("encode the style reference preview as JPEG")?;
     Ok(jpeg)
-}
-
-/// The restyle candidate's settings (user ruling 2026-10-14): repaint the
-/// advisor preview toward the references' grade, then reverse-fit the repaint
-/// FROM that same preview with the photo's white-balance anchor as the base.
-/// That is the room `produce_recipe`'s judge renders every candidate in
-/// (preview pixels, no base curve, no lens profile, the deliverable's anchor),
-/// so the two develops it compares are scored on equal terms.
-fn restyle_candidate(
-    cfg: &Config,
-    preview: &image::DynamicImage,
-    hits: &[crate::library::Hit],
-    direction: Option<&str>,
-    anchor: (Option<f32>, Option<f32>),
-    strength: GradeStrength,
-) -> Result<crate::fit::FitReport> {
-    // A reference that will not decode is left out rather than failing the
-    // candidate: the others still carry the look, and the develop's own
-    // reference notes already name a photo that could not be prepared.
-    let references: Vec<image::DynamicImage> = hits
-        .iter()
-        .filter_map(|h| {
-            let _permit = decode::DecodePermit::acquire();
-            decode::decode_any(Path::new(&h.entry.path))
-                .ok()
-                .map(|d| d.preview_resized(ADVISOR_PREVIEW_EDGE))
-        })
-        .collect();
-    if references.is_empty() {
-        anyhow::bail!("no reference photo could be decoded");
-    }
-    let restyled = crate::generative::restyle_toward(cfg, preview, &references, direction)?;
-    let base = EditRecipe { as_shot_k: anchor.0, as_shot_tint: anchor.1, ..EditRecipe::default() };
-    Ok(crate::fit::fit_recipe_from_with(
-        preview,
-        &restyled.image,
-        &base,
-        crate::fit::FitOptions { strength, provider: None },
-    ))
 }
 
 /// Run the full advise chain for one RAW: decode → propose (GPT or heuristic
@@ -710,10 +663,6 @@ pub fn produce_recipe(
         // shared mutability of anything the round can observe out of order — the
         // round always proposes before it judges.
         let candidate_lens = std::cell::Cell::new(LensOpinion::default());
-        // The judge's score for the recipe the loop ends holding — what the
-        // restyle candidate below has to beat. None when the judge never
-        // scored it.
-        let mut held_score: Option<f32> = None;
         match judge_of(&recipe, lens_opinion) {
             Err(e) => {
                 log.push(crate::rationale::Note::new(
@@ -734,7 +683,6 @@ pub fn produce_recipe(
                 let mut rounds_done = 0usize;
                 loop {
                     let score1 = format!("{:.0}", current.score);
-                    held_score = Some(current.score);
                     // R20's rule owns round 1 (a non-Accept verdict WITH an
                     // instruction); the target and the cap own every round
                     // after it. See `judge_next_round`.
@@ -831,7 +779,6 @@ pub fn produce_recipe(
                                 },
                             ));
                             if !more {
-                                held_score = Some(second.score);
                                 break;
                             }
                             current = second;
@@ -886,93 +833,6 @@ pub fn produce_recipe(
                                 ],
                             ));
                             break;
-                        }
-                    }
-                }
-            }
-        }
-        // The paid RESTYLE CANDIDATE (user ruling 2026-10-14), only when the
-        // photographer switched it on: the image model repaints this photo
-        // toward the reference looks, the repaint's settings are reverse-fitted
-        // (`restyle_candidate`), and the judge scores them with the same
-        // rubric. The AI's own develop stays unless the repaint scores strictly
-        // higher; a tie keeps the settings the model chose by eye. A refine is
-        // never replaced: it means "adjust MY edit", and a fit starts over.
-        if req.restyle {
-            let skip = if base.is_some() {
-                Some(crate::rationale::keys::RESTYLE_REFINE)
-            } else if hits.is_empty() {
-                Some(crate::rationale::keys::RESTYLE_NO_REFERENCE)
-            } else {
-                None
-            };
-            match (skip, held_score) {
-                (Some(key), _) => log.push(crate::rationale::Note::plain(key)),
-                (None, None) => log.push(crate::rationale::Note::plain(crate::rationale::keys::RESTYLE_NO_SCORE)),
-                (None, Some(score1)) => {
-                    if verbose {
-                        println!("restyle  : repainting toward the reference looks (one paid image generation) …");
-                    }
-                    let tried = restyle_candidate(
-                        cfg,
-                        &preview_img,
-                        &hits,
-                        user_direction,
-                        (anchor_k, anchor_tint),
-                        req.strength,
-                    )
-                    .and_then(|fit| {
-                        let judged = judge_of(&fit.recipe, LensOpinion::default())?;
-                        Ok((fit, judged))
-                    });
-                    let scores = |score2: f32| {
-                        vec![("score1", format!("{score1:.0}")), ("score2", format!("{score2:.0}"))]
-                    };
-                    match tried {
-                        Err(e) => log.push(crate::rationale::Note::new(
-                            crate::rationale::keys::RESTYLE_FAILED,
-                            vec![("e", crate::rationale::error_line(&e))],
-                        )),
-                        // The verdict travels with the recipe it describes, so
-                        // a winning repaint is verified before it is adopted.
-                        Ok((fit, judged)) if judged.score > score1 => {
-                            match verifier.verify(&fit.recipe, meta, hist, &intent) {
-                                Ok(v) => {
-                                    if verbose {
-                                        println!(
-                                            "restyle  : scored {:.0}/100 against {score1:.0} — adopted",
-                                            judged.score
-                                        );
-                                    }
-                                    recipe = fit.recipe;
-                                    // The fit's rationale is fully deterministic:
-                                    // its notes ARE its suffix (the contract).
-                                    det_notes = fit.notes;
-                                    thinking = None;
-                                    lens_opinion = LensOpinion::default();
-                                    verdict = v;
-                                    log.push(crate::rationale::Note::new(
-                                        crate::rationale::keys::RESTYLE_ADOPTED,
-                                        scores(judged.score),
-                                    ));
-                                }
-                                Err(e) => log.push(crate::rationale::Note::new(
-                                    crate::rationale::keys::RESTYLE_FAILED,
-                                    vec![("e", crate::rationale::error_line(&anyhow::Error::new(e)))],
-                                )),
-                            }
-                        }
-                        Ok((_, judged)) => {
-                            if verbose {
-                                println!(
-                                    "restyle  : scored {:.0}/100 against {score1:.0} — the AI's develop kept",
-                                    judged.score
-                                );
-                            }
-                            log.push(crate::rationale::Note::new(
-                                crate::rationale::keys::RESTYLE_KEPT,
-                                scores(judged.score),
-                            ));
                         }
                     }
                 }

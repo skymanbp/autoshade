@@ -736,9 +736,9 @@ v1.7.0):
 
 ```text
 autoshade decode <src> [-o|--out FILE]
-autoshade analyze <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image] [--restyle]
+autoshade analyze <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image]
 autoshade apply <src> <recipe.json> (-o|--out) FILE [--long-edge N]
-autoshade auto <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image] [--restyle] [--denoise] [--denoise-strength 0..1] [--denoise-model NAME] [--long-edge N]
+autoshade auto <src> [-o|--out FILE] [--guidance TEXT] [--style 0..1] [--strength 0..1] [--adherence 0..1] [--embed|--no-embed] [--deep] [--reference-image] [--denoise] [--denoise-strength 0..1] [--denoise-model NAME] [--long-edge N]
 autoshade denoise <src> [-o|--out FILE] [--strength 0..1] [--model NAME]
 autoshade batch <dir> [--render] [--limit N] [--include-baked] [--jobs N] [--long-edge N]
 autoshade eval <dir> [--xmp-dir DIR] [--limit N] [--jobs N] [--fresh] [--state FILE]
@@ -1057,18 +1057,6 @@ settings file can supply them.
   which references a develop would get, with no paid call. Strength
   independently controls the fit budget and confidence cap; Direction adherence
   chooses Hint, Direct, or Brief wording when a Direction is present.
-- **Repaint toward the references (paid, off by default):** tick **Also try a
-  repaint toward the references (paid)** in the same fold, or pass `--restyle`
-  to `analyze` / `auto`. After the AI's own develop has been judged, the image
-  model repaints the photo in the look of its references (and your Direction),
-  the settings that reproduce the repaint are reverse-fitted, and the visual
-  judge scores that develop with the same rubric. The higher score is kept; a
-  tie keeps the AI's own. It costs one more image generation and one more judge
-  call per analysis, plus a verify when the repaint wins. It is not tried on
-  Refine (a repaint would replace your edit, not adjust it), without a
-  reference, or when the judge gave no score; the rationale says which develop
-  was kept and both scores, or why none was tried. `batch` and the browser page
-  never do this.
 - **Who leads, Direction or your library (v1.2.3):** write a **Direction** and
   leave **Adherence** at its default 65 % (or higher) and the direction leads.
   Your references are still searched, still shown to the model and still named

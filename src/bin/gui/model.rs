@@ -215,9 +215,6 @@ pub(crate) struct Prefs {
     /// answer as [`Prefs::default`], so an upgrade never silently starts
     /// spending an extra image per analysis.
     pub(crate) send_style_ref_image: bool,
-    /// The restyle candidate (2026-10-14). An older prefs file decodes it as
-    /// `false`, so an upgrade never starts buying an image generation.
-    pub(crate) restyle_candidate: bool,
     /// R23-4: deep thinking. `#[serde(default)]` on the struct decodes an older
     /// prefs file as `false` — the same answer [`Prefs::default`] gives, so an
     /// upgrade never silently starts paying for a deeper (and longer) analyze.
@@ -299,7 +296,6 @@ impl Default for Prefs {
             fit_strength: autoshade::recipe::GradeStrength::DEFAULT,
             // OFF, like every other paid opt-in here (see `fit_ai_judge`).
             send_style_ref_image: false,
-            restyle_candidate: false,
             deep_think: false,
             style_embed: false,
             style_describe: false,

@@ -79,7 +79,6 @@ impl AutoShadeApp {
         app.grade_strength = prefs.grade_strength.clamp(0.0, 1.0);
         app.fit_strength = prefs.fit_strength.clamp(0.0, 1.0);
         app.send_style_ref_image = prefs.send_style_ref_image;
-        app.restyle_candidate = prefs.restyle_candidate;
         app.deep_think = prefs.deep_think;
         app.style_embed = prefs.style_embed;
         app.style_describe = prefs.style_describe;
@@ -3257,7 +3256,6 @@ impl AutoShadeApp {
             // The GUI's own 「search the library」 preference, read on the UI
             // thread like every other field above.
             embed: autoshade::library::EmbeddingSwitch::resolve(None, self.style_embed),
-            restyle: self.restyle_candidate,
         };
         // Free-text direction ("warmer, moodier") steers the proposal; with
         // `refine` (its own button now — no pre-armed checkbox), the AI

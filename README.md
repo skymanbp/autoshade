@@ -334,10 +334,6 @@ develop is shown the **3 closest** as a soft reference.
 - The references reach the model as words and, if you opt in, as pictures.
   With a Direction at Adherence above 40 % they are background and your words
   lead; nothing is blended into the recipe.
-- Opt in to **repaint toward the references** (`--restyle`, paid) and the image
-  model also repaints the photo in their look; the settings reverse-fitted from
-  that repaint compete with the AI's own, and the visual judge keeps the higher
-  score.
 
 Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
 

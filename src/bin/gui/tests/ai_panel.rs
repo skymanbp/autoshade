@@ -286,7 +286,6 @@
             think: app.deep_think,
             adherence: autoshade::recipe::DirectionAdherence::default(),
             embed: autoshade::library::EmbeddingSwitch::resolve(None, app.style_embed),
-            restyle: app.restyle_candidate,
         };
         assert!(req.send_reference_image);
         assert!(
@@ -319,7 +318,6 @@
             think: app.deep_think,
             adherence: autoshade::recipe::DirectionAdherence::default(),
             embed: autoshade::library::EmbeddingSwitch::resolve_with(None, app.style_embed, |_| None),
-            restyle: app.restyle_candidate,
         };
         assert!(request_from(&on).embed.on(), "the checkbox must reach the develop's request");
         assert!(!request_from(&off).embed.on(), "…and un-checking it must too");
@@ -462,7 +460,6 @@
             think: app.deep_think,
             adherence: autoshade::recipe::DirectionAdherence::default(),
             embed: autoshade::library::EmbeddingSwitch::resolve(None, app.style_embed),
-            restyle: app.restyle_candidate,
         };
         assert!(req.think, "the checkbox must reach the worker's request");
         assert!(

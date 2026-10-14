@@ -413,88 +413,6 @@ pub fn reimagine(
     Ok(ReimagineReport { divergence, first_divergence })
 }
 
-/// The scaffold a reference restyle is composed onto: the first input image is
-/// the photograph, every later one a finished photo whose GRADE to borrow. The
-/// preservation clause is [`FAITHFUL_SCAFFOLD`]'s, because the result is only
-/// worth anything as a reverse-fit target, and a fit needs the same frame.
-const REFERENCE_SCAFFOLD: &str =
-    "The FIRST image is the photograph to re-develop. Keep its camera angle, framing, \
-     geometry and every physical object exactly as they are: do not add, remove, move, \
-     or invent any content, structure, or texture. The other images are finished \
-     photographs whose colour grade to follow: match their white balance, tonality, \
-     contrast, saturation and colour treatment. Take nothing else from them - not their \
-     subjects, objects, composition or detail. The result must read as the first \
-     photograph, developed in their look.";
-
-/// The long edge each reference photo is sent at. A reference only has to
-/// carry its grade, and every extra input image adds to the request's billed
-/// input, so it goes small.
-const RESTYLE_REFERENCE_EDGE: u32 = 1024;
-
-/// One [`restyle_toward`] result: the repaint at the photo's own dimensions,
-/// and how far its structure moved from what was sent.
-#[derive(Debug)]
-pub struct Restyled {
-    pub image: DynamicImage,
-    /// The same reading [`reimagine`] discloses; at or past
-    /// `fit::DIVERGENCE_GLOBAL` a reverse-fit of this repaint runs in
-    /// atmosphere mode.
-    pub divergence: crate::fit::Divergence,
-}
-
-/// Repaint `photo` toward the grade of `references` (and the optional
-/// `direction`) with ONE billed image generation, for a develop's restyle
-/// candidate (user ruling 2026-10-14: off unless the photographer switches it
-/// on, and the visual judge keeps whichever develop scores higher).
-///
-/// Nothing is written to disk: the caller reverse-fits the pixels at once.
-/// The request asks for the fixed enum size, never the flexible high-res one:
-/// the fit reads its target at 384x256, so a larger frame would be paid for and
-/// thrown away. The aspect squeeze an enum size implies is undone on return by
-/// the exact inverse resize (the L09-2 rule).
-pub fn restyle_toward(
-    cfg: &Config,
-    photo: &DynamicImage,
-    references: &[DynamicImage],
-    direction: Option<&str>,
-) -> Result<Restyled> {
-    if references.is_empty() {
-        return Err(anyhow!("a restyle needs at least one reference photo"));
-    }
-    let (w, h) = photo.dimensions();
-    let sizes = SizePlan { flexible: None, enum_size: pick_size(w, h) };
-    let (sw, sh) = parse_size(sizes.enum_size);
-    let png = encode_png(&DynamicImage::ImageRgb8(
-        photo.resize_exact(sw, sh, FilterType::Lanczos3).to_rgb8(),
-    ))?;
-    let refs = references
-        .iter()
-        .map(|r| {
-            encode_png(&DynamicImage::ImageRgb8(
-                r.thumbnail(RESTYLE_REFERENCE_EDGE, RESTYLE_REFERENCE_EDGE).to_rgb8(),
-            ))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let prompt = match direction.map(str::trim).filter(|d| !d.is_empty()) {
-        Some(d) => format!("{REFERENCE_SCAFFOLD}\nStyle direction: {d}"),
-        None => REFERENCE_SCAFFOLD.to_string(),
-    };
-    let generated = call_images_edit_with(
-        cfg,
-        &mut |_| Ok((png.clone(), None)),
-        &refs,
-        &prompt,
-        "high",
-        &sizes,
-        &cfg.openai_image_quality,
-    )?;
-    let divergence = generation_divergence(&png, &generated.bytes)?;
-    let image = image::load_from_memory(&generated.bytes)
-        .context("decode the restyled photo")?
-        .resize_exact(w, h, FilterType::Lanczos3);
-    Ok(Restyled { image, divergence })
-}
-
 /// Object removal / generative fill on the SOURCE's own pixels. `mask_path`
 /// is an RGBA PNG; transparent (alpha=0) pixels mark the region to
 /// regenerate. A blank `prompt` is the removal instruction ([`fill_prompt`]);
@@ -1827,23 +1745,6 @@ fn call_images_edit(
     sizes: &SizePlan,
     quality: &str,
 ) -> Result<GeneratedImage> {
-    call_images_edit_with(cfg, inputs, &[], prompt, fidelity, sizes, quality)
-}
-
-/// [`call_images_edit`] with further input images after the photo: PNGs sent
-/// as-is at every negotiated size (they are references, not the frame the
-/// size describes). With any present, every image goes as the `image[]` array,
-/// the photo first; with none, the body is the single `image` part it has
-/// always been.
-fn call_images_edit_with(
-    cfg: &Config,
-    inputs: &mut dyn FnMut(&str) -> Result<SizedInputs>,
-    references: &[Vec<u8>],
-    prompt: &str,
-    fidelity: &str,
-    sizes: &SizePlan,
-    quality: &str,
-) -> Result<GeneratedImage> {
     let key = cfg
         .openai_api_key
         .as_ref()
@@ -1876,7 +1777,7 @@ fn call_images_edit_with(
         let mask_png = mask_png.as_deref();
         // Chosen over EVERY part THIS attempt's body carries — see
         // choose_boundary for why the const alone is not enough.
-        let mut parts: Vec<&[u8]> = vec![
+        let boundary = choose_boundary(&[
             cfg.openai_image_model.as_bytes(),
             prompt.as_bytes(),
             fidelity.as_bytes(),
@@ -1884,9 +1785,7 @@ fn call_images_edit_with(
             quality.as_bytes(),
             image_png,
             mask_png.unwrap_or_default(),
-        ];
-        parts.extend(references.iter().map(Vec::as_slice));
-        let boundary = choose_boundary(&parts)?;
+        ])?;
         let build_body = |include_fidelity: bool, size: &str, stream: bool| -> Vec<u8> {
             let mut body = Vec::new();
             part_text(&mut body, &boundary, "model", &cfg.openai_image_model);
@@ -1900,14 +1799,7 @@ fn call_images_edit_with(
                 part_text(&mut body, &boundary, "stream", "true");
                 part_text(&mut body, &boundary, "partial_images", &IMAGES_EDIT_PARTIALS.to_string());
             }
-            if references.is_empty() {
-                part_file(&mut body, &boundary, "image", "image.png", image_png);
-            } else {
-                part_file(&mut body, &boundary, "image[]", "image.png", image_png);
-                for (i, r) in references.iter().enumerate() {
-                    part_file(&mut body, &boundary, "image[]", &format!("reference-{}.png", i + 1), r);
-                }
-            }
+            part_file(&mut body, &boundary, "image", "image.png", image_png);
             if let Some(m) = mask_png {
                 part_file(&mut body, &boundary, "mask", "mask.png", m);
             }
@@ -2872,52 +2764,6 @@ mod tests {
             }
         });
         (url, seen, handle)
-    }
-
-    /// The restyle candidate's one billed call (2026-10-14): the photo goes
-    /// FIRST and each reference after it, all as the `image[]` array, at the
-    /// enum size, and the repaint comes back at the photo's own dimensions.
-    /// MUTATION: send the references before the photo, keep the single
-    /// `image` part name, or drop the inverse resize, and this fails.
-    #[test]
-    fn a_restyle_sends_the_photo_first_then_its_references_and_returns_the_photo_frame() {
-        let photo = DynamicImage::ImageRgb8(RgbImage::from_fn(300, 200, |x, y| {
-            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
-        }));
-        // The stub echoes exactly what a restyle of this photo sends.
-        let echo = encode_png(&DynamicImage::ImageRgb8(
-            photo.resize_exact(1536, 1024, FilterType::Lanczos3).to_rgb8(),
-        ))
-        .unwrap();
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&echo);
-        let (url, seen, handle) = stub_endpoint(vec![(
-            200,
-            "application/json",
-            format!(r#"{{"data":[{{"b64_json":"{b64}"}}]}}"#),
-        )]);
-        let cfg = stub_cfg(url);
-        let reference = DynamicImage::ImageRgb8(RgbImage::from_pixel(40, 30, image::Rgb([200, 120, 40])));
-        let got = restyle_toward(&cfg, &photo, &[reference], Some("warmer")).expect("one echoed generation");
-        assert_eq!(got.image.dimensions(), (300, 200), "the repaint comes back in the photo's frame");
-        assert!(got.divergence.d < crate::fit::DIVERGENCE_GLOBAL, "an echo is the same frame: {}", got.divergence.d);
-        let _ = handle.join();
-        let body = seen.lock().unwrap().join("");
-        let photo_at = body.find(r#"name="image[]"; filename="image.png""#).expect("the photo goes in the array");
-        let ref_at = body.find(r#"name="image[]"; filename="reference-1.png""#).expect("the reference goes in the array");
-        assert!(photo_at < ref_at, "the photo is the FIRST image the prompt names");
-        assert!(!body.contains(r#"name="image"; "#), "no single-image part beside the array");
-        assert!(body.contains("1536x1024"), "the enum size, never the flexible one");
-        assert!(body.contains("The FIRST image is the photograph") && body.contains("Style direction: warmer"));
-    }
-
-    /// No reference, no call: the refusal comes before anything is billed
-    /// (the endpoint here does not exist).
-    #[test]
-    fn a_restyle_without_references_is_refused_before_any_request() {
-        let cfg = stub_cfg("http://127.0.0.1:1".into());
-        let photo = DynamicImage::ImageRgb8(RgbImage::new(30, 20));
-        let e = restyle_toward(&cfg, &photo, &[], None).expect_err("nothing to follow");
-        assert!(e.to_string().contains("at least one reference"), "{e}");
     }
 
     /// R12-08: a streamed refusal that arrives AFTER a partial frame is
