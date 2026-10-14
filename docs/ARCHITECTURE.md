@@ -193,10 +193,10 @@
 > symbol, link and tier count the living documents name exists in the tree;
 > CI's `docs` job runs it on every push) — and a gate that exits non-zero
 > fails the battery like a lane.
-> 1777 library + 28 CLI + 230 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1761 pass + 16 `#[ignore]`d forensic probes and
-> the GUI result is 228 pass + two ignored (an explicit scratch-recipe export
-> probe and the side panel's offline screenshots) in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
+> 1643 library + 25 CLI + 243 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1628 pass + 15 `#[ignore]`d forensic probes and
+> the GUI result is 240 pass + three ignored (an explicit scratch-recipe export
+> probe and the offline panel and window screenshots) in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
 > refusal pair (a RAW source, a baked negative); the library and GUI lists are
 > v1.6.1's. For v1.6.3, four library names (decode: the 16-bit profile lattice
 > hands an identity transform its pixels back, a file tagged with the engine's
@@ -228,7 +228,17 @@
 > edit read as the edit, a maskless edit sending no mask and layering only
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
-> screenshots). Counts
+> screenshots). For v1.9.0, by name against the v1.8.0 battery: library
+> +26 / −160 — 143 names retired with the modules the reference library
+> replaced (style 106, mask_habit 29, style_cache 5, content_cache 3) and 17
+> with the style index's callers (pipeline 8, describe 4, embed 2, and one
+> each in serve, the judge and the OpenAI provider); the 26 added are the
+> reference library's 11, the lens blur's 7 (render 5, depth 2), pipeline's 4
+> (the either/or guide among them) and one each in serve, describe, the judge
+> and the OpenAI provider. GUI +20 / −7 (the seven renamed or replaced with the
+> reference library, the colour themes and the controls panel's width), CLI
+> +1 / −4 (the four `style-query` names retired with the command, one for
+> `library-search`'s notes). Counts
 > refreshed 2026-09-24 for v1.6.1 (the
 > 2026-09-24 audit's findings closed, issues #6–#14): +81 / −1 by name against
 > the v1.6.0 tag (`00d3d09`), listed by the test harness itself on both trees
