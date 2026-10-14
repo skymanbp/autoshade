@@ -16,9 +16,11 @@
 //! both (user ruling 2026-10-14, [`crate::pipeline::Guide`]), so no typed
 //! text ever meets the library.
 //!
-//! Nothing here reads a sidecar `.xmp`: a finished photo may have had work no
-//! `.xmp` records (a Photoshop pass), and an `.xmp` may be stale or one of
-//! several. The library is pixels in, look out.
+//! The library is pixels in, look out. A sidecar `.xmp` is never TRUSTED for
+//! being there — a finished photo may have had work no `.xmp` records (a
+//! Photoshop pass), and an `.xmp` may be stale or one of several — but when
+//! the photographer names their RAW folder, a sidecar that develops to the
+//! finished photo is attached as that reference's settings ([`settings`]).
 //!
 //! The file IS the cache: a rebuild keeps every entry whose file is unchanged
 //! (same path, size and modified time) and every entry whose pixels it has
@@ -33,12 +35,14 @@ use serde::{Deserialize, Serialize};
 mod build;
 mod frames;
 mod search;
+mod settings;
 mod switches;
 mod voice;
 
 pub use build::{BuildProgress, BuildStage, Sidecars, build};
 pub use frames::query_vector;
 pub use search::{Hit, Query, REFERENCE_COUNT};
+pub use settings::{MATCH_DE_MAX, MAX_SETTINGS_CHARS, Settings, settings_line};
 pub use switches::{DescribeSwitch, EmbeddingSwitch};
 pub use voice::{STYLE_TARGET_MIN, StyleVoice, look_summary, reference_block};
 
@@ -93,6 +97,14 @@ pub struct Entry {
     /// The look in a few comma-separated phrases, when the describe model ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phrases: Option<String>,
+    /// The settings of the RAW sidecar that develops to this photo, when one
+    /// was found and matched ([`settings`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<Settings>,
+    /// What the last sidecar check looked at — each candidate sidecar's path
+    /// and stamp — so a rebuild checks again only when that changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_checked: Option<String>,
 }
 
 /// A file's size and modified time, the cheap identity a rebuild checks
@@ -148,6 +160,8 @@ pub enum Summary {
         photos: usize,
         /// How many carry look phrases (the optional describe pass).
         phrased: usize,
+        /// How many carry matched sidecar settings.
+        with_settings: usize,
         /// The folder it was built from.
         dir: String,
         /// Time since the file was last written, when the filesystem says.
@@ -168,6 +182,7 @@ pub fn summary_of(file: &Path) -> Summary {
         Loaded::Ready(lib) => Summary::Built {
             photos: lib.entries.len(),
             phrased: lib.entries.iter().filter(|e| e.phrases.is_some()).count(),
+            with_settings: lib.entries.iter().filter(|e| e.settings.is_some()).count(),
             dir: lib.dir,
             age: std::fs::metadata(file).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()),
         },
@@ -181,13 +196,14 @@ pub fn rebuild(
     dir: &Path,
     sidecars: &Sidecars,
     describe: DescribeSwitch,
+    raw_root: Option<&Path>,
     on_progress: &dyn Fn(BuildProgress),
 ) -> Result<Library> {
     let previous = match load() {
         Loaded::Ready(lib) => Some(lib),
         _ => None,
     };
-    let lib = build(dir, sidecars, previous.as_ref(), describe, on_progress)?;
+    let lib = build(dir, sidecars, previous.as_ref(), describe, raw_root, on_progress)?;
     lib.save(&path())?;
     Ok(lib)
 }
@@ -241,6 +257,13 @@ impl Library {
                 anyhow::ensure!(
                     p.chars().count() <= MAX_PHRASE_CHARS,
                     "an entry ({}) carries over {MAX_PHRASE_CHARS} characters of phrases",
+                    e.path
+                );
+            }
+            if let Some(s) = &e.settings {
+                anyhow::ensure!(
+                    s.line.chars().count() <= MAX_SETTINGS_CHARS && s.match_de.is_finite(),
+                    "an entry ({}) carries unusable settings",
                     e.path
                 );
             }

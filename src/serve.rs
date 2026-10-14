@@ -1370,6 +1370,10 @@ fn api_library_info(state: &AppState) -> Result<ResponseBox> {
 struct LibraryBuildReq {
     /// Folder of the photographer's finished photos.
     dir: String,
+    /// Optional folder of their RAWs: a sidecar `.xmp` that develops to a
+    /// finished photo is attached as that reference's settings.
+    #[serde(default)]
+    raw_root: Option<String>,
 }
 
 /// Build the reference library from a folder of finished photos, so the
@@ -1387,7 +1391,11 @@ fn api_library_build(request: &mut Request) -> Result<ResponseBox> {
     // the preference off.
     let describe = crate::library::DescribeSwitch::resolve(None, false);
     let sidecars = crate::library::Sidecars::from_config(&Config::load());
-    match crate::library::rebuild(&p, &sidecars, describe, &|_| {}) {
+    let raw_root = req.raw_root.as_deref().map(|r| PathBuf::from(r.trim().trim_matches('"').trim()));
+    if let Some(r) = raw_root.as_ref().filter(|r| !r.is_dir()) {
+        return Ok(status_response(400, &format!("not a folder: {}", r.display())));
+    }
+    match crate::library::rebuild(&p, &sidecars, describe, raw_root.as_deref(), &|_| {}) {
         Ok(lib) => Ok(json_response(
             &json!({ "ok": true, "total": lib.entries.len(), "source_dir": lib.dir }),
         )),

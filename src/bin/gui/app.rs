@@ -105,6 +105,9 @@ pub(crate) struct AutoShadeApp {
     /// The folder the reference library was last built FROM — prefilled into
     /// the picker so a rebuild does not mean finding it again. Persisted.
     pub(crate) style_src_dir: Option<PathBuf>,
+    /// The RAW folder a build looks in for each finished photo's sidecar
+    /// settings (`library::settings`). Persisted; `None` = no settings check.
+    pub(crate) style_raw_dir: Option<PathBuf>,
     pub(crate) direction_adherence: f32,
     /// The reference library's status as last READ (`library::summary`),
     /// cached: it parses a file that can reach tens of MB, so it must never
@@ -1700,6 +1703,7 @@ impl Default for AutoShadeApp {
             style_embed: false,
             style_describe: false,
             style_src_dir: None,
+            style_raw_dir: None,
             direction_adherence: autoshade::recipe::DirectionAdherence::DEFAULT,
             style_info: None,
             style_info_loading: false,
@@ -2190,6 +2194,7 @@ impl eframe::App for AutoShadeApp {
                 style_embed: self.style_embed,
                 style_describe: self.style_describe,
                 style_src_dir: self.style_src_dir.clone(),
+                style_raw_dir: self.style_raw_dir.clone(),
                 direction_adherence: self.direction_adherence,
                 // Both written: exp_format is the truth, save_jpeg keeps a
                 // pre-阶段4 build reading this prefs file sane.

@@ -1467,6 +1467,19 @@ closest go to the proposer as a fenced block of their phrases and, when the
 photographer opts in, as images after the develop target. Nothing is blended
 into the recipe: a finished photo carries no settings to blend.
 
+When the photographer names a RAW folder, a reference may also carry the
+SETTINGS it was made with — but only after they prove themselves. Each finished
+photo's RAW is found by file-stem prefix (no digit right after it), its `.xmp`
+is developed by this engine at 512 px with the photo's own calibration, and the
+develop must lie within a mean CIELAB ΔE76 of 11 of the finished photo on a
+96-px-wide grid. The line was set by eye on the photographer's album
+(2026-10-14): of 63 photos with a candidate sidecar, every pair up to 10.7 was
+the same picture and pairs from 11.4 up a different one (an older grade, a
+later Photoshop pass); 17 matched.
+A kept sidecar's non-neutral global controls reach the proposer as one line
+under its reference, in the recipe's field names; nothing is copied into the
+recipe.
+
 #### SigLIP 2 text tower and look metadata
 
 The local sidecar uses the same pinned `google/siglip2-base-patch16-384`

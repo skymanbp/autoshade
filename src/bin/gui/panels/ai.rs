@@ -551,12 +551,16 @@ impl AutoShadeApp {
     fn ai_library_status(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         let line = match &self.style_info {
-            Some(autoshade::library::Summary::Built { photos, phrased, dir, age }) => {
+            Some(autoshade::library::Summary::Built { photos, phrased, with_settings, dir, age }) => {
                 let mut t = trf(
                     lang,
                     "{n} finished photos · from {path} · {m} with look phrases",
                     &[("n", &photos.to_string()), ("path", dir), ("m", &phrased.to_string())],
                 );
+                if *with_settings > 0 {
+                    t.push_str(" · ");
+                    t.push_str(&trf(lang, "{k} with RAW settings", &[("k", &with_settings.to_string())]));
+                }
                 if let Some(age) = age {
                     // Coarse buckets, no calendar arithmetic: "how stale is my
                     // library" is answered by hours or days, and both spellings
@@ -627,6 +631,31 @@ impl AutoShadeApp {
             });
             if resp.clicked() {
                 build = have;
+            }
+            // The RAW folder for the settings check: optional, remembered, and
+            // read on the next build.
+            let mut pick_raw = false;
+            if action_in(ui, cell, true, tr(lang, "🗂 RAW folder…"))
+                .on_hover_text(tr(lang,
+                    "Optional: the folder your RAWs live in. On the next build each finished photo's RAW is found by its file name; when the RAW's .xmp develops to the finished photo, its settings go to the AI beside that reference. A .xmp that develops to a different picture (an older version, or work done later in Photoshop) is ignored.",
+                ))
+                .clicked()
+            {
+                pick_raw = true;
+            }
+            if action_in(ui, cell, self.style_raw_dir.is_some(), tr(lang, "✕ Clear RAW folder"))
+                .on_hover_text(tr(lang, "Stop looking for RAW settings"))
+                .clicked()
+            {
+                self.style_raw_dir = None;
+            }
+            let raw_note = match &self.style_raw_dir {
+                Some(d) => abs_display(d),
+                None => tr(lang, "no RAW folder: references go without settings").to_string(),
+            };
+            ui.label(egui::RichText::new(raw_note).small().weak());
+            if pick_raw && let Some(d) = rfd::FileDialog::new().pick_folder() {
+                self.style_raw_dir = Some(d);
             }
             ui.checkbox(&mut self.style_describe, tr(lang, "Also write each look as short phrases (local vision model; downloads 4.3 GB once, slower builds)"))
                 .on_hover_text(tr(lang,

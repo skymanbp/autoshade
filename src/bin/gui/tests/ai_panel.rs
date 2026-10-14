@@ -23,7 +23,7 @@
         let mut app = AutoShadeApp {
             style_info: Some(Summary::Built {
                 photos: 412,
-                phrased: 300,
+                phrased: 300, with_settings: 0,
                 dir: "D:/photos/finished".into(),
                 age: Some(std::time::Duration::from_secs(5 * 3600)),
             }),
@@ -130,7 +130,7 @@
     fn a_built_library_that_is_not_searched_says_so() {
         let built = Some(autoshade::library::Summary::Built {
             photos: 40,
-            phrased: 0,
+            phrased: 0, with_settings: 0,
             dir: "D:/photos/finished".into(),
             age: None,
         });

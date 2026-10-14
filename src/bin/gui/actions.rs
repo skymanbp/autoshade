@@ -87,6 +87,7 @@ impl AutoShadeApp {
         // a deleted path lands wherever the OS decides (the same rule the
         // gallery restore above follows).
         app.style_src_dir = prefs.style_src_dir.clone().filter(|d| d.is_dir());
+        app.style_raw_dir = prefs.style_raw_dir.clone().filter(|d| d.is_dir());
         app.direction_adherence = autoshade::recipe::DirectionAdherence::new(prefs.direction_adherence).get();
         app.exp_format = ExportFormat::from_pref(prefs.exp_format, prefs.save_jpeg);
         app.exp_dest = ExportDest::from_pref(prefs.exp_dest);
@@ -3202,6 +3203,7 @@ impl AutoShadeApp {
         // Resolved HERE, on the UI thread: a preference flipped mid-build must
         // not change what this build is doing.
         let describe = autoshade::library::DescribeSwitch::resolve(None, self.style_describe);
+        let raw_root = self.style_raw_dir.clone().filter(|d| d.is_dir());
         self.spawn_worker(
             move || {
                 let progress = |p: autoshade::library::BuildProgress| {
@@ -3210,7 +3212,7 @@ impl AutoShadeApp {
                     ctx.request_repaint();
                 };
                 let sidecars = autoshade::library::Sidecars::from_config(&autoshade::config::Config::load());
-                match autoshade::library::rebuild(&dir, &sidecars, describe, &progress) {
+                match autoshade::library::rebuild(&dir, &sidecars, describe, raw_root.as_deref(), &progress) {
                     Ok(lib) => Msg::StyleBuilt(Box::new(StyleBuildOutcome::Saved {
                         total: lib.entries.len(),
                         phrased: lib.entries.iter().filter(|e| e.phrases.is_some()).count(),

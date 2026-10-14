@@ -330,6 +330,9 @@ develop is shown the **3 closest** as a soft reference.
   to this one (versions of one shot count once) and sends no Direction.
 - The references reach the model as words and, if you opt in, as pictures;
   nothing is blended into the recipe.
+- Optionally name your RAW folder: when a finished photo's RAW sidecar,
+  developed here, looks like the finished photo, its settings go with that
+  reference; a sidecar that develops to a different picture is ignored.
 
 Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](docs/TECH_STACK.md#ai-advisor-and-reverse-fit).
 

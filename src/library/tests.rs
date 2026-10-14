@@ -21,7 +21,7 @@ fn photo(name: &str) -> String {
 }
 
 fn entry(name: &str, image: Vec<f32>, phrases: Option<&str>) -> Entry {
-    Entry { id: format!("id-{name}"), path: photo(name), stamp: Stamp { len: 1, modified: 1 }, image, phrases: phrases.map(str::to_string) }
+    Entry { id: format!("id-{name}"), path: photo(name), stamp: Stamp { len: 1, modified: 1 }, image, phrases: phrases.map(str::to_string), settings: None, settings_checked: None }
 }
 
 fn library(entries: Vec<Entry>) -> Library {
@@ -168,4 +168,63 @@ fn the_style_axis_alone_picks_ceiling_or_target() {
     assert_eq!(StyleVoice::for_style(0.3), StyleVoice::Ceiling);
     assert_eq!(StyleVoice::for_style(STYLE_TARGET_MIN), StyleVoice::Target);
     assert_eq!(StyleVoice::default(), StyleVoice::Ceiling);
+}
+
+#[test]
+fn a_proven_reference_carries_its_settings_on_its_own_line() {
+    let mut with = entry("a.jpg", toward(0, 2, 0.1), Some("warm, faded"));
+    with.settings = Some(Settings {
+        raw: "a.arw".into(),
+        xmp: "a.xmp".into(),
+        xmp_stamp: Stamp { len: 1, modified: 1 },
+        match_de: 4.0,
+        line: "exposure_ev=+0.30,\ncontrast=-12.00".into(),
+    });
+    let lib = library(vec![with, entry("b.jpg", toward(0, 3, 0.4), Some("cool"))]);
+    let block = reference_block(&search_plain(&lib), &[], StyleVoice::Target).unwrap();
+    has_all(&block, &["\n  reference 1: warm, faded\n    its settings (", "): exposure_ev=+0.30, contrast=-12.00\n  reference 2: cool"]);
+    assert_eq!(block.lines().count(), 4, "a settings line must not forge a line: {block}");
+    assert!(!block.contains(".arw") && !block.contains(".xmp"), "paths stay out of the paid prompt: {block}");
+}
+
+#[test]
+fn a_finished_photo_names_its_raw_by_prefix_but_not_a_longer_number() {
+    let index: std::collections::HashMap<String, Vec<PathBuf>> = [
+        ("frame0264", vec![PathBuf::from("r/frame0264.ARW")]),
+        ("frame0264-hdr", vec![PathBuf::from("r/frame0264-HDR.dng")]),
+        ("frame026", vec![PathBuf::from("r/frame026.ARW")]),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    let names = |f: &str| settings::candidates(Path::new(f), &index).iter().map(|p| p.display().to_string()).collect::<Vec<_>>();
+    assert_eq!(names("frame0264-HDR-Enhanced.jpg"), ["r/frame0264-HDR.dng", "r/frame0264.ARW"], "longest prefix first");
+    assert_eq!(names("frame0264-final.jpg"), ["r/frame0264.ARW"]);
+    assert!(names("frame02641.jpg").is_empty(), "a longer frame number is a different frame");
+    assert!(names("other.jpg").is_empty());
+}
+
+#[test]
+fn the_settings_line_lists_what_differs_from_neutral_in_recipe_names() {
+    assert_eq!(settings_line(&crate::recipe::EditRecipe::default()), "");
+    let r = crate::recipe::EditRecipe {
+        exposure_ev: 0.3,
+        contrast: -12.0,
+        tone_curve: [(0, 0), (128, 150), (255, 255)].map(|(input, output)| crate::recipe::CurvePoint { input, output }).to_vec(),
+        ..Default::default()
+    };
+    let line = settings_line(&r);
+    assert_eq!(line, "exposure_ev=+0.30, contrast=-12.00, tone_curve=3 points");
+    assert!(line.chars().count() <= MAX_SETTINGS_CHARS);
+}
+
+#[test]
+fn the_match_reads_zero_for_the_same_picture_and_grows_with_a_shift() {
+    let a = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(192, 128, |x, y| image::Rgb([(x % 256) as u8, (y * 2) as u8, 90])));
+    assert!(settings::mean_de(&a, &a) < 0.01);
+    let half = a.resize_exact(96, 64, image::imageops::FilterType::Triangle);
+    assert!(settings::mean_de(&a, &half) < 1.0, "the size of the develop does not matter");
+    let mut darker = a.to_rgb8();
+    darker.pixels_mut().for_each(|p| p.0 = p.0.map(|c| c / 2));
+    assert!(settings::mean_de(&a, &image::DynamicImage::ImageRgb8(darker)) > 10.0);
 }

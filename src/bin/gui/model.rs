@@ -235,6 +235,8 @@ pub(crate) struct Prefs {
     /// The folder the reference library was last built from (R23-2), so a
     /// rebuild starts where the last build did.
     pub(crate) style_src_dir: Option<PathBuf>,
+    /// The RAW folder for the sidecar settings check (2026-10-14).
+    pub(crate) style_raw_dir: Option<PathBuf>,
     /// Direction adherence axis, persisted independently of style strength.
     #[serde(default = "default_adherence")]
     pub(crate) direction_adherence: f32,
@@ -305,6 +307,7 @@ impl Default for Prefs {
             style_embed: false,
             style_describe: false,
             style_src_dir: None,
+            style_raw_dir: None,
             direction_adherence: autoshade::recipe::DirectionAdherence::DEFAULT,
             save_jpeg: false,
             exp_format: 0,

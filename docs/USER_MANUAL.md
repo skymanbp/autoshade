@@ -742,7 +742,7 @@ autoshade auto <src> [-o|--out FILE] [--guidance TEXT] [--guide library|directio
 autoshade denoise <src> [-o|--out FILE] [--strength 0..1] [--model NAME]
 autoshade batch <dir> [--render] [--limit N] [--include-baked] [--jobs N] [--long-edge N]
 autoshade eval <dir> [--xmp-dir DIR] [--limit N] [--jobs N] [--fresh] [--state FILE]
-autoshade library-build <dir> [--describe]
+autoshade library-build <dir> [--describe] [--raw-root DIR]
 autoshade library-search <photo> [--style 0..1]
 autoshade reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [--fidelity-retry] [-o|--out FILE]
 autoshade match <src> <target> [--render] [--zoned] [--regions 2..4] [--strength 0..1] [--style-prompt] [--ai-judge] [--deep] [--negative RAW] [-o|--out FILE]
@@ -1041,7 +1041,13 @@ settings file can supply them.
 - **Reference library:** pick a folder of finished photos whose look you like
   (JPEG, TIFF or PNG exports — yours or anyone's) in **AI › Reference library**
   or run `autoshade library-build <folder>`. Each photo is measured from its
-  pixels; no `.xmp` is read. Tick **Also write each look as short phrases** (or
+  pixels; the finished photos' own `.xmp` files are never read. Optionally
+  pick a **RAW folder** (or pass `--raw-root DIR`): each finished photo's RAW
+  is then found by its file name (`frame0264-final.jpg` → `frame0264.ARW`), the RAW's
+  `.xmp` is developed, and only when that develop looks like the finished photo
+  (mean colour difference ΔE ≤ 11) do its settings go to the model beside that
+  reference. A sidecar that develops to a different picture — an older grade,
+  or one later reworked in Photoshop — is ignored. Tick **Also write each look as short phrases** (or
   pass `--describe`) to have a local model write a few phrases per photo about
   its grade, which go to the model beside each reference. A rebuild measures
   only new or changed photos. Each analysis guided by the library then

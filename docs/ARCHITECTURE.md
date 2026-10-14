@@ -3760,10 +3760,11 @@ had no place once the entries carry no settings.
 | Part | File | Job |
 |---|---|---|
 | Entry, file, loader | `library.rs` | `Library { version, dir, model, entries }`; each `Entry` holds the frame digest, the path and its size+mtime `Stamp`, the image vector and optional look phrases. `load()` answers `Absent` / `Unusable(reason)` / `Ready`; every vector is checked at the door. |
-| Build | `library/build.rs` | `rebuild(dir, sidecars, describe, progress)` loads the current file, keeps what it already measured (same path+stamp, or same frame digest), measures the rest — decode and stage 512-px frames, then one SigLIP image pass and one Qwen3-VL phrase pass — and publishes atomically. An empty build is refused, never saved. |
+| Build | `library/build.rs` | `rebuild(dir, sidecars, describe, raw_root, progress)` loads the current file, keeps what it already measured (same path+stamp, or same frame digest), measures the rest — decode and stage 512-px frames, then one SigLIP image pass and one Qwen3-VL phrase pass — and publishes atomically. An empty build is refused, never saved. |
 | Frames and sidecars | `library/frames.rs` | Staging, the finished-photo walk, and the sidecar batches; `query_vector` embeds a develop's own preview through the same staging, so a query and a stored vector are comparable. |
 | Search | `library/search.rs` | Scene (image↔image) cosine, closest first; the photo being developed is excluded; versions of one shot (image cosine ≥ 0.97 between two candidates) take one slot; top 3. |
 | Voice and block | `library/voice.rs` | `StyleVoice` (ceiling / target, by Style) and the `REFERENCE LOOKS` block the proposer reads, one line per reference, numbered against the images that went with it. |
+| Settings | `library/settings.rs` | The optional RAW settings check: a finished photo names its RAW by file-stem prefix under the `--raw-root` folder; the RAW's sidecar is developed at the frame size (camera base look, lens profile and as-shot WB as on open; AI masks inert) and kept only within `MATCH_DE_MAX` = 11 mean ΔE76 of the finished photo. A kept `Settings` carries the non-neutral global controls as one `name=value` line, which the reference block prints under its reference. Re-checked only when a candidate sidecar changes. |
 | Switches | `library/switches.rs` | The embed and describe switches as values (flag > environment > preference) and the model stamp. |
 
 Three surfaces build it through the same `rebuild` call: `autoshade

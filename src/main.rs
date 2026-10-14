@@ -361,6 +361,12 @@ enum Command {
         /// Overrides AUTOSHADE_STYLE_DESCRIBE for this run.
         #[arg(long)]
         describe: bool,
+        /// Also look for each finished photo's RAW (same file name, minus any
+        /// suffix) under this folder: a RAW whose sidecar .xmp develops to the
+        /// finished photo lends that photo its settings, which the AI then
+        /// reads beside the reference. Sidecars that do not match are ignored.
+        #[arg(long)]
+        raw_root: Option<PathBuf>,
     },
     /// Offline search diagnostic: which reference looks a library-guided
     /// develop of this photo would follow, in the search's own numbers — each
@@ -593,10 +599,14 @@ fn main() -> Result<()> {
         Command::Eval { dir, xmp_dir, limit, jobs, fresh, state } => {
             eval::run(&dir, xmp_dir.as_deref(), limit, jobs, fresh, state.as_deref())
         }
-        Command::LibraryBuild { dir, describe } => {
+        Command::LibraryBuild { dir, describe, raw_root } => {
             // Three-state like `--embed`, minus the negative flag: the phrase
             // pass is off by default, so not passing it already means off.
-            library_build_cmd(&dir, autoshade::library::DescribeSwitch::resolve(describe.then_some(true), false))
+            library_build_cmd(
+                &dir,
+                autoshade::library::DescribeSwitch::resolve(describe.then_some(true), false),
+                raw_root.as_deref(),
+            )
         }
         Command::LibrarySearch { photo, style } => library_search_cmd(&photo, style.unwrap_or(0.3)),
         Command::Reimagine { raw, prompt, fidelity, quality, fidelity_retry, out } => {
@@ -711,17 +721,21 @@ fn correspond_cmd(source: &Path, target: &Path, out: Option<PathBuf>) -> Result<
     Ok(())
 }
 
-fn library_build_cmd(dir: &Path, describe: autoshade::library::DescribeSwitch) -> Result<()> {
+fn library_build_cmd(dir: &Path, describe: autoshade::library::DescribeSwitch, raw_root: Option<&Path>) -> Result<()> {
+    if let Some(r) = raw_root {
+        anyhow::ensure!(r.is_dir(), "--raw-root {} is not a folder", r.display());
+    }
     let sidecars = autoshade::library::Sidecars::from_config(&Config::load());
-    let lib = autoshade::library::rebuild(dir, &sidecars, describe, &|p| {
+    let lib = autoshade::library::rebuild(dir, &sidecars, describe, raw_root, &|p| {
         eprint!("\r{} {}/{}    ", p.stage.label(), p.done, p.total);
     })?;
     eprintln!();
     println!(
-        "reference library -> {} ({} finished photos, {} with look phrases)",
+        "reference library -> {} ({} finished photos, {} with look phrases, {} with settings)",
         autoshade::library::path().display(),
         lib.entries.len(),
-        lib.entries.iter().filter(|e| e.phrases.is_some()).count()
+        lib.entries.iter().filter(|e| e.phrases.is_some()).count(),
+        lib.entries.iter().filter(|e| e.settings.is_some()).count()
     );
     Ok(())
 }

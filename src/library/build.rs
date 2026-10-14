@@ -32,16 +32,18 @@ impl Sidecars {
 
 /// The phases of a build, in order: decode-and-stage (this process, per
 /// photo), then one sidecar process each for image vectors and look phrases
-/// over every photo that needs it.
+/// over every photo that needs it, then — with a RAW folder — the sidecar
+/// settings check (this process, per photo with a candidate RAW).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildStage {
     Frames,
     Images,
     Phrases,
+    Settings,
 }
 
 /// What a UI calls each [`BuildStage`], in English (the GUI translates it).
-const STAGE_LABELS: [&str; 3] = ["decoding", "image vectors", "look phrases"];
+const STAGE_LABELS: [&str; 4] = ["decoding", "image vectors", "look phrases", "matching settings"];
 
 impl BuildStage {
     pub fn label(self) -> &'static str {
@@ -76,6 +78,7 @@ pub fn build(
     sidecars: &Sidecars,
     previous: Option<&Library>,
     describe: DescribeSwitch,
+    raw_root: Option<&Path>,
     on_progress: &dyn Fn(BuildProgress),
 ) -> Result<Library> {
     anyhow::ensure!(
@@ -137,7 +140,10 @@ pub fn build(
         report(BuildStage::Phrases, total);
     }
 
-    let entries: Vec<Entry> = slots.into_iter().map(|s| s.entry).collect();
+    let mut entries: Vec<Entry> = slots.into_iter().map(|s| s.entry).collect();
+    if let Some(root) = raw_root {
+        attach_settings(root, &mut entries, &|done| on_progress(BuildProgress { stage: BuildStage::Settings, done, total }))?;
+    }
     anyhow::ensure!(!entries.is_empty(), "no photo in {} got an image vector", dir.display());
     let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf()).display().to_string();
     Ok(Library { version: VERSION, dir, model, entries })
@@ -161,6 +167,67 @@ fn slot_for(photo: &Path, scratch: &Path, by_path: &HashMap<&str, &Entry>, by_id
         let entry = Entry { path, stamp, ..(*e).clone() };
         return Ok(Slot { entry, frame: None });
     }
-    let entry = Entry { id, path, stamp, image: Vec::new(), phrases: None };
+    let entry = Entry { id, path, stamp, image: Vec::new(), phrases: None, settings: None, settings_checked: None };
     Ok(Slot { entry, frame: Some(frame) })
+}
+
+/// The sidecar settings check over every entry whose candidates changed since
+/// it was last checked ([`super::settings`]). Per entry the closest candidate
+/// under [`super::MATCH_DE_MAX`] wins; none, and the entry carries none. A
+/// photo that fails to decode or develop is stepped over with a line — the
+/// settings are an enrichment, never a reason to fail the build.
+fn attach_settings(root: &Path, entries: &mut [Entry], report: &dyn Fn(usize)) -> Result<()> {
+    let index = super::settings::raw_index(root)?;
+    let pairing = crate::xmp_pair::XmpPairing::new(root, None);
+    report(0);
+    let (mut matched, mut rejected) = (0usize, 0usize);
+    for (i, e) in entries.iter_mut().enumerate() {
+        let finished = Path::new(&e.path).to_path_buf();
+        let cands = super::settings::candidates(&finished, &index);
+        let mut sig = String::new();
+        for raw in &cands {
+            if let Some(x) = pairing.find(raw) {
+                let st = Stamp::of(&x).map(|s| format!("{}:{}", s.len, s.modified)).unwrap_or_default();
+                sig.push_str(&format!("{}|{st};", x.display()));
+            }
+        }
+        if e.settings_checked.as_deref() == Some(sig.as_str()) {
+            report(i + 1);
+            continue;
+        }
+        e.settings = None;
+        if !sig.is_empty() {
+            match best_settings(root, &finished, &cands) {
+                Ok(best) => {
+                    if best.is_some() { matched += 1 } else { rejected += 1 }
+                    e.settings = best;
+                }
+                Err(err) => eprintln!("  reference library: settings check failed for one photo ({err:#})"),
+            }
+        }
+        e.settings_checked = Some(sig);
+        report(i + 1);
+    }
+    if matched + rejected > 0 {
+        println!("  reference library: {matched} photo(s) matched their RAW's settings, {rejected} did not (the sidecar develops to a different picture)");
+    }
+    Ok(())
+}
+
+/// Every candidate tried; the closest under the line wins.
+fn best_settings(root: &Path, finished: &Path, cands: &[&Path]) -> Result<Option<super::Settings>> {
+    let frame = {
+        let _permit = crate::decode::DecodePermit::acquire();
+        let d = crate::decode::decode_any(finished).with_context(|| format!("decode {}", finished.display()))?;
+        d.preview.resize(frames::FRAME_EDGE, frames::FRAME_EDGE, image::imageops::FilterType::Triangle)
+    };
+    let mut best: Option<super::Settings> = None;
+    for raw in cands {
+        // No permit here: the develop inside takes the decoder's own.
+        let Some(s) = super::settings::try_candidate(raw, root, &frame).with_context(|| format!("develop {}", raw.display()))? else { continue };
+        if s.match_de <= super::MATCH_DE_MAX && best.as_ref().is_none_or(|b| s.match_de < b.match_de) {
+            best = Some(s);
+        }
+    }
+    Ok(best)
 }

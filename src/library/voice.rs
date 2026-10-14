@@ -41,8 +41,12 @@ impl StyleVoice {
 /// Phrases as one line of the block: control characters become spaces so no
 /// phrase can forge a line of its own, and length is bounded.
 fn one_line(text: &str) -> String {
+    one_line_within(text, super::MAX_PHRASE_CHARS)
+}
+
+fn one_line_within(text: &str, cap: usize) -> String {
     let flat: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
-    flat.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(super::MAX_PHRASE_CHARS).collect()
+    flat.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(cap).collect()
 }
 
 /// The reference block the proposer reads, or `None` when nothing was found.
@@ -64,6 +68,12 @@ pub fn reference_block(hits: &[Hit<'_>], images: &[Option<usize>], voice: StyleV
         let image = images.get(i).copied().flatten().map(|n| format!(" (IMAGE {n})")).unwrap_or_default();
         let look = h.entry.phrases.as_deref().map(one_line).filter(|p| !p.is_empty());
         out.push_str(&format!("\n  reference {}{image}: {}", i + 1, look.as_deref().unwrap_or("(no phrases)")));
+        // The photographer's own settings for this reference, only when its
+        // RAW's sidecar was proven to develop to it (`library::settings`):
+        // in the recipe's field names, as a starting point, not a copy.
+        if let Some(s) = h.entry.settings.as_ref().map(|s| one_line_within(&s.line, super::MAX_SETTINGS_CHARS)).filter(|l| !l.is_empty()) {
+            out.push_str(&format!("\n    its settings (the photographer's own develop of this reference, measured on its RAW — scale them to this photo's light): {s}"));
+        }
     }
     Some(out)
 }
