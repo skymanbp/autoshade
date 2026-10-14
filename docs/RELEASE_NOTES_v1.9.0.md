@@ -136,6 +136,18 @@ read a never-created photo path in the reference library's tests. The path
 carries the process id now (`d7198be`) and the battery above is the second run
 on that commit.
 
+The push of the bump failed CI's doc-drift job: two documents still named the
+retired style index's source files. The same check had passed on the
+maintainer's Windows checkout, because Git for Windows reads a blank line of a
+CRLF `.gitignore` as a pattern that ignores every `dir/` spelling, and the
+check asks about each path both ways; it now drops a match with an empty
+pattern, and turned red on the same documents locally before they were fixed.
+The sweep that followed rewrote what still described the style index as
+current: the manual's command-line chapter (its `.xmp` folder rule now names
+only `eval`, and the four retrieval-weight variables are gone from the table),
+the install note, a README results row and the architecture diagram's
+reference library box.
+
 **A recipe without a lens blur renders as in v1.8.1.** One RAW and one recipe
 (exposure, contrast, highlights, shadows, vibrance, temperature, clarity) were
 developed at a 1600 px long edge by v1.8.1 and by the release code, both built

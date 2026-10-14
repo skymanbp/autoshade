@@ -62,6 +62,7 @@ HISTORY = {
     "cast_curves_must_not_fan_a_coherent_sky_across_luminance": "ARCHITECTURE: a count clause records its replacement",
     "a_rim_that_cannot_be_shrunk_is_dropped_with_its_own_note": "ARCHITECTURE: a count clause records its rename",
     "legacy_autoshop_sidecar_": "ARCHITECTURE: a count clause records a renamed test prefix",
+    "src/style.rs": "ARCHITECTURE: a count clause names where tests lived before v1.9.0 retired the style index",
 }
 
 REPO_PATH = re.compile(
@@ -91,9 +92,15 @@ def ignored(root: Path, paths: list[str]) -> set[str]:
     # pattern (`.gstack/`) matches only the spelling with the slash, so each
     # path is asked about both ways.
     asked = [q for p in paths for q in (p, p + "/")]
-    out = subprocess.run(["git", "check-ignore", "--no-index", "-z", "--stdin"], cwd=root,
+    out = subprocess.run(["git", "check-ignore", "--no-index", "-v", "-z", "--stdin"], cwd=root,
                          input="\0".join(asked).encode("utf-8"), capture_output=True).stdout
-    return {p.rstrip("/") for p in out.decode("utf-8").split("\0") if p}
+    # -v gives source, line, pattern, path per match. A match with an empty
+    # pattern is dropped: Git for Windows (2.52) reads a blank line of a CRLF
+    # .gitignore as a pattern that ignores every `dir/` spelling, so on a
+    # Windows checkout each missing path looked kept out and the check passed
+    # where CI's LF checkout failed (v1.9.0's push, `src/style` in two docs).
+    f = out.decode("utf-8").split("\0")
+    return {f[i + 3].rstrip("/") for i in range(0, len(f) - 3, 4) if f[i + 2].strip()}
 
 
 def check_paths(root: Path, files: set[str], dirs: set[str]) -> list[str]:
@@ -102,7 +109,7 @@ def check_paths(root: Path, files: set[str], dirs: set[str]) -> list[str]:
         for n, line in enumerate(read(root, doc).splitlines(), 1):
             for m in REPO_PATH.finditer(line):
                 p, ln = m.group(1).rstrip("/."), m.group(2)
-                if "*" in p or "<" in p or "{" in p:
+                if "*" in p or "<" in p or "{" in p or p in HISTORY:
                     continue
                 if not (p in files or p in dirs):
                     # a glob stem such as `python/requirements-*.txt` ends at the dash

@@ -70,9 +70,9 @@
     {
       "id": "style-index",
       "type": "database",
-      "label": "Style index",
-      "sublabel": "14-d + 12 settings + SigLIP 2",
-      "tag": "k = 4 retrieval"
+      "label": "Reference library",
+      "sublabel": "finished photos · SigLIP 2",
+      "tag": "3 closest"
     },
     {
       "id": "develop-store",
@@ -261,7 +261,7 @@
       "id": "style-to-advisor",
       "from": "style-index",
       "to": "ai-advisor",
-      "label": "4 nearest edits as soft reference"
+      "label": "3 closest finished photos"
     },
     {
       "id": "embed-to-style",
@@ -303,7 +303,7 @@
       "id": "describe-to-style",
       "from": "describe-sidecar",
       "to": "style-index",
-      "label": "one sentence per photo"
+      "label": "a few look phrases per photo"
     },
     {
       "id": "denoise-to-render",
@@ -321,11 +321,11 @@
   "cards": [
     {
       "dot": "cyan",
-      "title": "Style reference = retrieval over your whole catalogue",
+      "title": "Reference library = finished photos whose look you like",
       "items": [
-        "Every Lightroom RAW+XMP pair becomes an exemplar: 14-d EXIF/histogram features, the 12 settings you moved, curve and colour habits",
-        "Optional 768-d SigLIP 2 image embedding; hybrid distance sum w(q-e)^2 + W_EMB(1-cos), W_EMB = 2.0 from a 147-exemplar scan",
-        "The 4 nearest past edits reach the advisor as a soft reference; blend cap 0.6, never a copy; the rationale names them"
+        "Every finished photo is measured from its pixels: a 768-d SigLIP 2 vector and, optionally, a few look phrases from a local model",
+        "The 3 closest reach the advisor as phrases and, opted in, as pictures; versions of one shot take one place; nothing is blended into the recipe",
+        "With a RAW folder, a RAW sidecar whose develop matches the finished photo (mean dE <= 11) lends that reference its settings"
       ]
     },
     {

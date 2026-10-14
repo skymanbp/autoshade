@@ -482,7 +482,7 @@ def draw(L):
     doc_title = "AutoShade — the architecture, drawn from its own source"
     alt = ("AutoShade architecture: three front ends over one Rust library "
            "holding RAW decode, the AI advisor, the recipe, the render engine, "
-           "the style index, reverse-fit, the local producers and the "
+           "the reference library, reverse-fit, the local producers and the "
            "local-field analyzer; six local Python sidecars below it; two "
            "opt-in external AI services above it")
     c = Canvas(L["w"], L["hgt"], alt, dom_id="architecture")

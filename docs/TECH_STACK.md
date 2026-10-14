@@ -1797,8 +1797,9 @@ and zero-confidence fields are conservation-tested to change nothing.
 - `src/advisor/mod.rs`, `src/advisor/openai.rs`, `src/advisor/claude.rs`, and
   `src/advisor/judge.rs` — proposal, negotiation, data-only verification, and
   revision gate.
-- `src/style/` (`features.rs`, `standardise.rs`, `exemplar.rs`, `index.rs`) and
-  `src/embed.rs` — feature index, z-scoring, SigLIP vectors, and hybrid distance.
+- `src/library/` (`build.rs`, `search.rs`, `settings.rs`, `voice.rs`) and
+  `src/embed.rs` — the reference library: build, search, RAW settings, the
+  prompt block, and SigLIP vectors.
 - `src/fit/` (`structure.rs`, `atmosphere.rs`, `tone.rs`, `hue_gates.rs`,
   `cast_outcome.rs`) and `src/fit_zoned.rs` — structural-divergence modes,
   bounded atmosphere fitting, CDF/basis tone solves, per-zone quality gates,

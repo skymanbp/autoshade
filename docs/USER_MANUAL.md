@@ -803,9 +803,21 @@ source refuses the flag: it is its own
 negative, and `match` on it describes the RAW itself, which is what its
 saved develop and its Lightroom sidecar render afterwards.
 
+### The reference library — `library-build` and `library-search`
+
+`library-build <dir>` measures every finished photo under `<dir>` (searched
+recursively) with the local SigLIP 2 model and writes `reference-library.json`
+in your develop store; a rebuild measures only new or changed photos. It ends
+with one line: `reference library -> <file> (N finished photos, P with look
+phrases, S with settings)`. `--describe` and `--raw-root` are described under
+[Configure and use the AI features](#configure-and-use-the-ai-features).
+`library-search <photo>` is the offline diagnostic: it prints which references
+a library-guided develop of that photo would get, in the search's own numbers,
+and never calls a paid model.
+
 ### Where your `.xmp` sidecars are — `--xmp-dir`
 
-`style-index` and `eval` pair each RAW with the `.xmp` sidecar your editor
+`eval` pairs each RAW with the `.xmp` sidecar your editor
 wrote. By default that is the file **beside the RAW**, which is where Lightroom
 and ACR put it. If yours live somewhere else — an exported catalogue, or a
 photo volume you cannot write to — point `--xmp-dir` at that folder and three
@@ -821,101 +833,11 @@ The extension matches in any case (`.xmp` or `.XMP`) on every platform,
 Windows and macOS alike. The stem does not: a sidecar belongs to the photograph
 whose name it carries exactly.
 
-`style-index` now also says which RAWs it **skipped** for want of a sidecar —
-the count, and the first ten by name. A library that indexed 40 of 2,000
-photographs used to look exactly like a library of 40.
+On `analyze` and `auto`, `--embed` lets the local SigLIP 2 sidecar measure the
+photo so the reference library can be searched, and `--no-embed` refuses it
+(the develop then goes without references); either flag wins over the
+environment, and neither writes to it.
 
-### Rebuilds only measure what changed
-
-A `style-index` build caches what it measured per photograph — the 14 camera
-features, the SigLIP image vector, the vocabulary scores, the description and
-its text vector — in `style-exemplars.json` beside the index, keyed by the
-content of the frame it measured (the same key the description cache has always
-used). A rebuild:
-
-* **reuses** a photograph whose file is unchanged and whose cached answers cover
-  the passes you asked for — no decode, no model call at all;
-* **recomputes** anything new, edited, moved or rotated, and anything whose
-  cached answers came from a different checkpoint, phrase list or prompt;
-* **retires** entries for photographs that have left the library;
-* still re-reads every `.xmp`, because your sliders, curve, colour families and
-  mask habit can change without the pixels changing;
-* still recomputes the index's normalisation over the **whole merged set** —
-  adding one photograph legitimately moves the mean and deviation of every
-  normalised dimension, so those are never cached.
-
-Each build prints one line saying so:
-`style index cache: reused N, recomputed M, removed K, skipped-for-sidecar S`.
-A rebuild where every photograph is reused starts no model sidecar at all —
-neither the 1.5 GB SigLIP checkpoint nor the 4.3 GB Qwen one is loaded. The
-cache is only ever a saving: deleting `style-exemplars.json` costs time, never
-correctness, and a corrupt or foreign one is rebuilt with a printed reason.
-
-**Built your index on v1.2.0 or v1.2.1?** If your library carries any HSL or
-colour-grade edit, that index was written correctly but refused on load
-(`exemplar 0 has an unsupported setting key`), and the Style control read
-nothing. Run `style-index` once on v1.2.2 or any later release; the build is the
-same, only the read was wrong.
-
-`style-index --looks` builds the separate finished-photo look library; it never
-adds camera features or develop settings to those records, and it is capped at
-**500** finished photos (a curated set of reference grades, not an archive —
-the RAW half's 5,000-exemplar cap and this one share a 228 MiB index envelope).
-`style-query` is an offline diagnostic that prints the weights in force, the
-exact retrieval terms behind every ranked neighbour and look — each weighted
-term beside the raw cosine it came from — each neighbour's local-work counts
-(`masks=… sky=… subject=…`), the VOICE the reference block will be spoken in
-(`Ceiling` / `Target` / `Background` — pass `--adherence` to forecast a
-different dial than the shipped 0.65), and the proposer reference
-blocks, including the explicit reason a look library is unreachable when no
-embedding vector is available — and with `--distil`, the distillation a develop
-would apply: every channel including the ones it refuses, the Style pull, and
-how many neighbours are black-and-white and therefore take no part in the
-mixer. It prints; it never renders.
-
-A RAW index build also reads the **masks** in each sidecar, and summarises them
-as a habit: how many you enabled, how many carry a Range Mask, and per use —
-sky, subject, foreground, range, other — a count and the average strength of
-ten local sliders (in-mask temperature and tint included), plus whether the
-mask carries its own local curve. It reaches the proposer as one sentence ("3 of 4 mask the
-sky (linear from the top: exposure -0.6 EV, highlights -25) …"), so the AI
-places its own masks the way you place yours. **No mask shape is copied or
-averaged**: geometry belongs to one frame, and only counts and slider averages
-cross between photographs. The Range Mask count is taken from both the imported
-recipe and the import's own refusal notes, because a Range Mask in an encoding
-this engine does not model is dropped on the way in — counting only what
-survived would report "none use range masks" about a library that plainly does. The build prints what it learned and, separately,
-any mask content it could not read whole (an unresolvable AI mask, a brush
-table it refuses) so the summary is never mistaken for a complete one. An index
-built before this feature keeps working; its reference block simply says
-nothing about local work, and nothing needs rebuilding to keep using it.
-
-`--embed` opts into the local SigLIP 2 sidecar for that run and `--no-embed`
-refuses it; either flag wins over the environment, and neither writes to it.
-
-`--describe` adds the local **look-description** pass to an index build. A
-second local model (Qwen3-VL-2B-Instruct, Apache-2.0) writes ONE short sentence
-per photo about its *grade* — white balance lean, tonality, contrast,
-saturation and colour treatment, finishing, mood — and never about the subject.
-That sentence is what the SigLIP text tower embeds for that record, in place of
-the fixed attribute tags, and it is what `style-query` prints beside the
-`desc=` term and what the proposer's reference blocks carry after the tags.
-
-The pass needs `--embed` (the prose only reaches the ranking through the text
-tower), and the **first run downloads about 4.3 GB** of weights into
-`python/weights/` — every file pinned to a 40-hex Hugging Face commit and gated
-on its own sha256 and exact byte count. Since 2026-09-20 the download asks
-AutoShade's own mirror of that exact revision first and the original host
-second, so a model whose upstream repository is renamed or removed still
-installs; the checksum decides either way, and a mirror that disagreed with it
-would be refused exactly as a bad upstream download is. It is off by default on
-both front ends. Nothing leaves this machine and nothing is billed. Descriptions are
-cached by frame CONTENT in `style-descriptions.json` beside the index, so a
-rebuild only describes the photographs that actually changed; editing the
-prompt bumps a version that invalidates the cache rather than serving the old
-prompt's answers for ever. In the desktop app the same switch is the *Describe
-looks with the local vision model* checkbox, which stays greyed out until the
-embedding checkbox above it is on.
 `--adherence 0..1` picks the prompt tier the proposer and verifier are told:
 `<=0.40` Hint, `0.40..0.70` Direct, above `0.70` Brief, default `0.65`
 (Direct). It never moves a render bound. It does nothing without a direction
@@ -927,21 +849,13 @@ Autoshop and these variables were named `AUTOSHOP_*`; the old spelling still
 works everywhere, warns once naming its replacement, and is removed in the
 release after this one. Where both are set, the `AUTOSHADE_*` one wins.
 
-Six environment overrides steer retrieval, each read in exactly one place:
+Three environment overrides steer the reference library, each read in exactly one place:
 
 | Variable | Effect |
 |---|---|
 | `AUTOSHADE_STYLE_EMBED` | `1`/`0` — use the SigLIP sidecar. Set (any value) beats the GUI preference; `--embed`/`--no-embed` beats both. |
-| `AUTOSHADE_STYLE_DESCRIBE` | `1`/`0` — run the local look-description pass during an index build. Set (any value) beats the GUI preference; `--describe` beats both. It never turns the embedding on by itself. |
-| `AUTOSHADE_STYLE_EMBED_WEIGHT` | `W_EMB`, the query-image ↔ exemplar-image cosine block. `0` reproduces the 14-dimension ranking exactly. |
-| `AUTOSHADE_STYLE_TEXT_WEIGHT` | `W_TXT`, the Direction-text ↔ exemplar-image term, scored after each exemplar's text hubness is subtracted. Ships at `0.5`: it spent one batch at `4`, where the corrected re-measurement showed the ranking collapsing onto a few hub exemplars; it shipped at `0` while the only query text available to the harness was a tag string. Re-tested in v1.2.4 against typed short Directions: 0.5 costs nothing measurable on the settings objective and is the largest weight that leaves the corpus open. |
-| `AUTOSHADE_STYLE_DESC_WEIGHT` | `W_DESC`, the Direction-text ↔ exemplar-description term. Ships at `0.5`. It shipped at `4` when both sides of the term were tag strings; with real prose that point measures *worse* than switching the term off, so it was re-fitted. |
-| `AUTOSHADE_STYLE_LOOK_WEIGHT` | `W_LOOK`, the look-library image term. |
-| `AUTOSHADE_SEND_REFERENCE_IMAGE` | `1`/`0` — also send the retrieved reference photo itself (not just its text) with `analyze`/`auto` proposals; `--reference-image` turns it on per run. Destination-trust: only your own environment or user-level settings can set it — a downloaded photo pack's `.env` cannot, because it decides whether your photograph goes on the wire. `batch` never sends one. |
-
-All four weights parse the same way: trimmed, and taken only if finite and
-non-negative — anything else falls back to the shipped default, because a
-negative weight would rank the *least* similar photo first.
+| `AUTOSHADE_STYLE_DESCRIBE` | `1`/`0` — write look phrases with the local model during `library-build`. Set (any value) beats the GUI preference; `--describe` beats both. |
+| `AUTOSHADE_SEND_REFERENCE_IMAGE` | `1`/`0` — also send the reference photos themselves (not just their phrases) with `analyze`/`auto` proposals; `--reference-image` turns it on per run. Destination-trust: only your own environment or user-level settings can set it — a downloaded photo pack's `.env` cannot, because it decides whether your photograph goes on the wire. `batch` never sends one. |
 
 `match` itself is local inverse rendering and needs no key. Its optional
 `--ai-judge` and `--deep` review paths do; `--deep` permits one guided retry.
@@ -1161,7 +1075,7 @@ rather than a second copy of each. Two things it does not touch: the model
 weights under `python\weights` inside the install folder, which are a
 multi-gigabyte download the AI sidecars fetch on first use, and your develop
 store in `%LOCALAPPDATA%\autoshade`, which holds your edits, thumbnails and
-style index. If AutoShade is running, setup closes it before replacing its
+reference library. If AutoShade is running, setup closes it before replacing its
 files and does not start it again afterwards.
 
 Running an OLDER installer over a newer install is refused, with a message
