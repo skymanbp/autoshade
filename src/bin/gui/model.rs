@@ -734,7 +734,7 @@ pub(crate) enum Msg {
     /// whenever the two base URLs differed. The `u64` is the catalogue
     /// generation captured at launch ([`ModelCatalogue::gen`]): a completion
     /// is installed only if nothing invalidated the catalogue while it flew.
-    Models(ModelRole, u64, anyhow::Result<Vec<String>>),
+    Models(ModelRole, u64, anyhow::Result<Vec<autoshade::openai_models::ModelInfo>>),
     /// A batch recipe paste finished — counts and per-photo details,
     /// rendered at landing (L12#4).
     Pasted(anyhow::Result<PasteOutcome>),
@@ -943,6 +943,13 @@ pub(crate) struct ModelCatalogue {
     /// Image-generation ids. Only the image role has a use for these; the
     /// analysis catalogue leaves it empty.
     pub(crate) image_gen: Vec<String>,
+    /// The reasoning tiers each id takes, for the ids whose listing SAID
+    /// (`openai_models::ModelInfo::effort_options`): an empty list is a
+    /// model that takes no tier. An id absent here is one the listing said
+    /// nothing about, and its picker offers the fixed suggestions.
+    pub(crate) efforts: std::collections::HashMap<String, Vec<String>>,
+    /// Whether each id accepts an image part, for the ids whose listing said.
+    pub(crate) vision: std::collections::HashMap<String, bool>,
     /// A `GET /models` worker is in flight for this role.
     pub(crate) fetching: bool,
     /// The endpoint these ids came FROM. Editing the Base/Bridge URL (or the
@@ -984,7 +991,24 @@ impl ModelCatalogue {
     pub(crate) fn clear(&mut self) {
         self.chat.clear();
         self.image_gen.clear();
+        self.efforts.clear();
+        self.vision.clear();
         self.generation += 1;
+    }
+
+    /// The tiers to offer for `id`: what its listing said, when it said
+    /// (an empty list for a model that takes none), else `fallback`.
+    pub(crate) fn tiers_for<'a>(&'a self, id: &str, fallback: &'a [&'a str]) -> Vec<&'a str> {
+        match self.efforts.get(id.trim()) {
+            Some(known) => known.iter().map(String::as_str).collect(),
+            None => fallback.to_vec(),
+        }
+    }
+
+    /// `Some(false)` when the listing said this id takes no image — the one
+    /// answer worth a warning beside the vision picker.
+    pub(crate) fn vision_of(&self, id: &str) -> Option<bool> {
+        self.vision.get(id.trim()).copied()
     }
 }
 

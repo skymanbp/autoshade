@@ -598,9 +598,18 @@ impl AutoShadeApp {
                 // The CLI and the API endpoints accept different tier names —
                 // offer the right list, and keep the free-text field for
                 // anything a given endpoint adds later.
-                let tiers: &[&str] =
-                    if f.analysis_provider_api { &EFFORT_TIERS_API } else { &EFFORT_TIERS_CLI };
-                effort_picker(ui, "set_analysis_effort", &mut f.analysis_effort, tiers, lang);
+                // …and the model's OWN list where the listing said (part D):
+                // a `/models` that names the tiers a model takes is the
+                // detection the fixed suggestions stand in for.
+                let tiers: Vec<&str> = if f.analysis_provider_api {
+                    f.analysis_models.tiers_for(&f.analysis_model, &EFFORT_TIERS_API)
+                } else {
+                    EFFORT_TIERS_CLI.to_vec()
+                };
+                effort_picker(ui, "set_analysis_effort", &mut f.analysis_effort, &tiers, lang);
+                if f.analysis_provider_api && f.analysis_models.efforts.contains_key(f.analysis_model.trim()) {
+                    tiers_note(ui, tiers.is_empty(), lang);
+                }
             });
             if f.analysis_provider_api {
                 ui.horizontal(|ui| {
@@ -702,10 +711,23 @@ impl AutoShadeApp {
                 ui.label(tr(lang, "Vision model"));
                 let opts = model_opts(&f.image_models.chat, &["gpt-5.5", "gpt-4o"], &f.image_model);
                 model_picker(ui, "set_vision_model", &mut f.image_model, &opts, lang);
+                // The one thing the listing can say that a wrong pick would
+                // otherwise only say at the first paid call.
+                if f.image_models.vision_of(&f.image_model) == Some(false) {
+                    ui.label(
+                        egui::RichText::new(tr(lang, "⚠ takes no images, per /models"))
+                            .color(ui.visuals().warn_fg_color)
+                            .small(),
+                    );
+                }
             });
             ui.horizontal(|ui| {
                 ui.label(tr(lang, "Reasoning effort"));
-                effort_picker(ui, "set_image_effort", &mut f.image_effort, &EFFORT_TIERS_API, lang);
+                let tiers = f.image_models.tiers_for(&f.image_model, &EFFORT_TIERS_API);
+                effort_picker(ui, "set_image_effort", &mut f.image_effort, &tiers, lang);
+                if f.image_models.efforts.contains_key(f.image_model.trim()) {
+                    tiers_note(ui, tiers.is_empty(), lang);
+                }
             });
             ui.horizontal(|ui| {
                 ui.label(tr(lang, "API style"));

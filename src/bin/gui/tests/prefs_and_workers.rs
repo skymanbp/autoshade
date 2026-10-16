@@ -253,6 +253,47 @@
         assert!(!app.settings.image_models.fetching);
     }
 
+    /// Part D: what the listing SAYS about a model reaches its pickers — the
+    /// effort picker offers the model's own tiers (none, for a model that
+    /// takes none), the vision picker learns which model takes no image —
+    /// and only for the ids the listing spoke about; the rest keep the fixed
+    /// suggestions. A `clear` forgets it with the ids.
+    #[test]
+    fn the_listing_capabilities_reach_the_pickers_and_clear_with_the_ids() {
+        use autoshade::openai_models::ModelInfo;
+        let mut app = AutoShadeApp::default();
+        app.settings.image_base_url = "http://127.0.0.1:9/v1".into();
+        app.settings.image_api_key = "typed-test-token".into();
+        app.fetch_models(ModelRole::Image);
+        let live_gen = app.settings.image_models.generation;
+        app.on_models(
+            Lang::En,
+            ModelRole::Image,
+            live_gen,
+            Ok(vec![
+                ModelInfo {
+                    id: "reasoner".into(),
+                    effort_options: Some(vec!["minimal".into(), "max".into()]),
+                    vision: Some(true),
+                },
+                ModelInfo { id: "plain".into(), effort_options: Some(vec![]), vision: Some(false) },
+                ModelInfo::from("unknown"),
+            ]),
+        );
+        let cat = &app.settings.image_models;
+        assert_eq!(cat.tiers_for("reasoner", &EFFORT_TIERS_API), vec!["minimal", "max"]);
+        assert_eq!(cat.tiers_for("plain", &EFFORT_TIERS_API), Vec::<&str>::new());
+        assert_eq!(cat.tiers_for("unknown", &EFFORT_TIERS_API), EFFORT_TIERS_API.to_vec());
+        assert_eq!(cat.tiers_for(" reasoner ", &EFFORT_TIERS_API), vec!["minimal", "max"], "trimmed like the field");
+        assert_eq!(cat.vision_of("plain"), Some(false));
+        assert_eq!(cat.vision_of("reasoner"), Some(true));
+        assert_eq!(cat.vision_of("unknown"), None);
+        app.settings.image_models.clear();
+        let cat = &app.settings.image_models;
+        assert!(cat.efforts.is_empty() && cat.vision.is_empty(), "forgotten with the ids");
+        assert_eq!(cat.tiers_for("reasoner", &EFFORT_TIERS_API), EFFORT_TIERS_API.to_vec());
+    }
+
     /// GUI review 2026-08-12 F6: one global "auto-fetched" boolean was
     /// consumed by the first Settings open even when NO role had a key, so a
     /// key saved five minutes later never got its convenience probe on any

@@ -1630,6 +1630,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "列出「这个」端点提供的模型（GET /models）。分析角色有自己的端点和密钥，因此有自己的列表。"),
     ("Reasoning effort", "推理等级"),
     ("API style", "接口风格"),
+    ("⚠ takes no images, per /models", "⚠ 按 /models 所列，此模型不接受图像"),
+    ("this model takes no tier, per /models — leave blank", "按 /models 所列，此模型没有推理等级，留空即可"),
+    ("tiers per /models", "等级来自 /models"),
     ("Auto (Responses, then Chat)", "自动（先 Responses，再 Chat）"),
     (
         "Which request shape the image role sends. Auto tries the Responses API first and, when the endpoint answers 404 or 405 there, sends the same call as a Chat Completion and remembers that until the app closes. Choose Chat Completions for an endpoint that serves only /chat/completions (most OpenAI-compatible endpoints); Responses API pins the original shape.",

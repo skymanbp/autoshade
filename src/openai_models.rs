@@ -1,14 +1,103 @@
-//! List the model ids an OpenAI-compatible account can use (`GET {base}/models`),
+//! List the models an OpenAI-compatible account can use (`GET {base}/models`),
 //! so the Settings UI can offer a real pick-list instead of a blank text box the
-//! user has to guess into. Pure read; never logs the key.
+//! user has to guess into — and, where the endpoint says so, which reasoning
+//! tiers each model takes and whether it accepts images. Pure read; never
+//! logs the key.
 
 use anyhow::{anyhow, Context, Result};
 
 const MODELS_RESPONSE_CAP: u64 = 4 * 1024 * 1024;
 const MODEL_ITEM_MAX: usize = 4096;
 const MODEL_ID_MAX_BYTES: usize = 256;
+/// The most effort tiers one model may declare; a longer list is cut, since
+/// the picker shows them one per row.
+const EFFORT_OPTIONS_MAX: usize = 16;
 
-fn extract_model_ids(value: &serde_json::Value) -> Result<Vec<String>> {
+/// One model as `/models` described it.
+///
+/// The two capabilities are `Option` because the plain OpenAI listing says
+/// nothing about either — `None` is "the endpoint did not say", and the
+/// pickers then offer their fixed suggestions as before. `Some` comes from
+/// the extended listing some providers serve (Venice's
+/// `model_spec.capabilities`, OpenRouter's `architecture` and
+/// `supported_parameters`): `effort_options` is the exact tier list the
+/// model takes (empty: it takes none, the request must carry no tier) and
+/// `vision` whether it accepts an image part.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ModelInfo {
+    pub id: String,
+    pub effort_options: Option<Vec<String>>,
+    pub vision: Option<bool>,
+}
+
+impl From<&str> for ModelInfo {
+    /// An id with nothing known about it — the plain listing's shape.
+    fn from(id: &str) -> Self {
+        Self { id: id.to_string(), ..Default::default() }
+    }
+}
+
+/// What one `/models` item says about its reasoning tiers, when it says
+/// anything (see [`ModelInfo::effort_options`]).
+///
+/// Venice: `model_spec.capabilities.supportsReasoning` false ⇒ no tier;
+/// `reasoningEffortOptions` ⇒ that list (through `config::effort`'s shape
+/// rule, so a stray value cannot reach a request). OpenRouter:
+/// `supported_parameters` without `reasoning` ⇒ no tier; with it the tiers
+/// are the three common ones. Anything else ⇒ unknown.
+fn effort_options_of(model: &serde_json::Value) -> Option<Vec<String>> {
+    let tiers = |v: &serde_json::Value| -> Option<Vec<String>> {
+        let list: Vec<String> = v
+            .as_array()?
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter_map(|s| crate::config::effort(Some(s.to_string())))
+            .take(EFFORT_OPTIONS_MAX)
+            .collect();
+        Some(list)
+    };
+    if let Some(caps) = model.get("model_spec").and_then(|s| s.get("capabilities")) {
+        let reasons = caps.get("supportsReasoning").and_then(serde_json::Value::as_bool);
+        let effort = caps.get("supportsReasoningEffort").and_then(serde_json::Value::as_bool);
+        if reasons == Some(false) || effort == Some(false) {
+            return Some(Vec::new());
+        }
+        if let Some(list) = caps.get("reasoningEffortOptions").and_then(tiers) {
+            return Some(list);
+        }
+        return None;
+    }
+    let params = model.get("supported_parameters")?.as_array()?;
+    let names: Vec<&str> = params.iter().filter_map(serde_json::Value::as_str).collect();
+    if names.iter().any(|n| *n == "reasoning" || *n == "reasoning_effort") {
+        Some(["low", "medium", "high"].map(String::from).to_vec())
+    } else {
+        Some(Vec::new())
+    }
+}
+
+/// Whether one `/models` item accepts an image part, when it says: Venice's
+/// `model_spec.capabilities.supportsVision`, OpenRouter's
+/// `architecture.input_modalities` (or `modality`, "text+image->text").
+fn vision_of(model: &serde_json::Value) -> Option<bool> {
+    if let Some(v) = model
+        .get("model_spec")
+        .and_then(|s| s.get("capabilities"))
+        .and_then(|c| c.get("supportsVision"))
+        .and_then(serde_json::Value::as_bool)
+    {
+        return Some(v);
+    }
+    let arch = model.get("architecture")?;
+    if let Some(inputs) = arch.get("input_modalities").and_then(serde_json::Value::as_array) {
+        return Some(inputs.iter().any(|m| m.as_str() == Some("image")));
+    }
+    let modality = arch.get("modality")?.as_str()?;
+    let (inputs, _) = modality.split_once("->")?;
+    Some(inputs.split('+').any(|m| m.trim() == "image"))
+}
+
+fn extract_models(value: &serde_json::Value) -> Result<Vec<ModelInfo>> {
     let data = value
         .get("data")
         .and_then(serde_json::Value::as_array)
@@ -20,11 +109,9 @@ fn extract_model_ids(value: &serde_json::Value) -> Result<Vec<String>> {
         ));
     }
 
-    let mut ids = Vec::with_capacity(data.len());
-    for id in data
-        .iter()
-        .filter_map(|model| model.get("id").and_then(serde_json::Value::as_str))
-    {
+    let mut models = Vec::with_capacity(data.len());
+    for model in data {
+        let Some(id) = model.get("id").and_then(serde_json::Value::as_str) else { continue };
         let projected =
             crate::advisor::BoundedUntrustedText::new(id, MODEL_ID_MAX_BYTES, &[]);
         if projected.as_str() != id {
@@ -33,16 +120,21 @@ fn extract_model_ids(value: &serde_json::Value) -> Result<Vec<String>> {
                  or containing control characters"
             ));
         }
-        ids.push(projected.into_string());
+        models.push(ModelInfo {
+            id: projected.into_string(),
+            effort_options: effort_options_of(model),
+            vision: vision_of(model),
+        });
     }
-    ids.sort();
-    ids.dedup();
-    Ok(ids)
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    models.dedup_by(|a, b| a.id == b.id);
+    Ok(models)
 }
 
-/// Fetch the sorted, de-duplicated list of model ids from `{base_url}/models`.
+/// Fetch the models from `{base_url}/models`, sorted and de-duplicated by
+/// id, with what the listing says about each ([`ModelInfo`]).
 /// `base_url` is the OpenAI-compatible API root (e.g. `https://api.openai.com/v1`).
-pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>> {
+pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<ModelInfo>> {
     // Trim BEFORE the header is built, and refuse what cannot ride one. ureq
     // quotes the whole rejected header line back — `Authorization: Bearer
     // <the real key>` (2.12.1 `header.rs:147`) — and this call's errors are
@@ -83,7 +175,7 @@ pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>> {
             return Err(anyhow!("transport: {safe}"));
         }
     };
-    extract_model_ids(&value)
+    extract_models(&value)
 }
 
 /// True if `id` looks like an image-generation model (gpt-image-*, *image*).
@@ -201,14 +293,55 @@ mod tests {
                 .map(|i| serde_json::json!({"id": format!("gpt-{i}")}))
                 .collect::<Vec<_>>()
         });
-        assert!(extract_model_ids(&excessive).is_err());
+        assert!(extract_models(&excessive).is_err());
 
         let long = serde_json::json!({
             "data": [{"id": "x".repeat(MODEL_ID_MAX_BYTES + 1)}]
         });
-        assert!(extract_model_ids(&long).is_err());
+        assert!(extract_models(&long).is_err());
 
         let controlled = serde_json::json!({"data": [{"id": "gpt-safe\nforged"}]});
-        assert!(extract_model_ids(&controlled).is_err());
+        assert!(extract_models(&controlled).is_err());
+    }
+
+    /// The capabilities, where a listing carries them: Venice's
+    /// `model_spec.capabilities` and OpenRouter's `architecture` /
+    /// `supported_parameters`; the plain OpenAI listing says nothing, and
+    /// "nothing" must stay distinct from "none" — the pickers keep their
+    /// fixed suggestions on `None` and offer no tier on `Some([])`.
+    #[test]
+    fn the_listing_says_which_tiers_and_images_a_model_takes_when_it_says_anything() {
+        let listing = serde_json::json!({ "data": [
+            { "id": "plain" },
+            { "id": "venice-reasoner", "model_spec": { "capabilities": {
+                "supportsReasoning": true, "supportsReasoningEffort": true,
+                "reasoningEffortOptions": ["low", "medium", "high", "Bad Tier!"],
+                "supportsVision": true } } },
+            { "id": "venice-plain", "model_spec": { "capabilities": {
+                "supportsReasoning": false, "supportsVision": false } } },
+            { "id": "router-vision", "architecture": { "input_modalities": ["text", "image"] },
+              "supported_parameters": ["temperature", "reasoning"] },
+            { "id": "router-text", "architecture": { "modality": "text->text" },
+              "supported_parameters": ["temperature"] }
+        ] });
+        let models = extract_models(&listing).unwrap();
+        let by_id = |id: &str| models.iter().find(|m| m.id == id).unwrap().clone();
+        assert_eq!(by_id("plain"), ModelInfo::from("plain"), "the plain listing knows nothing");
+        let venice = by_id("venice-reasoner");
+        assert_eq!(
+            venice.effort_options.as_deref(),
+            Some(&["low".to_string(), "medium".into(), "high".into()][..]),
+            "the tiers as listed, a malformed one dropped by config::effort's rule"
+        );
+        assert_eq!(venice.vision, Some(true));
+        let plain = by_id("venice-plain");
+        assert_eq!(plain.effort_options.as_deref(), Some(&[][..]), "no tier at all");
+        assert_eq!(plain.vision, Some(false));
+        let router = by_id("router-vision");
+        assert_eq!(router.effort_options.as_deref().map(<[String]>::len), Some(3));
+        assert_eq!(router.vision, Some(true));
+        let text = by_id("router-text");
+        assert_eq!(text.effort_options.as_deref(), Some(&[][..]));
+        assert_eq!(text.vision, Some(false));
     }
 }

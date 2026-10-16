@@ -1097,6 +1097,18 @@ pub(crate) fn effort_picker(
     ));
 }
 
+/// The small note beside an effort picker whose tiers came from the
+/// endpoint's own listing (part D): the list is the model's, or the model
+/// takes none and the field is best left blank.
+pub(crate) fn tiers_note(ui: &mut egui::Ui, none: bool, lang: Lang) {
+    let text = if none {
+        tr(lang, "this model takes no tier, per /models — leave blank")
+    } else {
+        tr(lang, "tiers per /models")
+    };
+    ui.label(egui::RichText::new(text).weak().small());
+}
+
 /// The image role's request-shape picker: `auto`, `responses` or `chat`
 /// (`config::Config::image_api_family`), each named by what it does.
 ///

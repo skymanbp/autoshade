@@ -916,7 +916,12 @@ and local runners); **Responses API** pins the original. A server that
 accepts the Chat shape but not its structured-output contract gets the call
 again without it, and the reply is read as the JSON the prompt asked for.
 Generative edits are the exception: they need `/images/edits` with a mask,
-which only some providers serve. The verifier defaults to the signed-in
+which only some providers serve. **Fetch models** lists what the endpoint
+serves; where the listing also says which reasoning tiers a model takes
+(Venice, OpenRouter), the **Reasoning effort** picker offers that model's
+own tiers, says so beside it, and a model that takes none is marked so that
+the field is left blank; a vision model the listing says takes no images is
+flagged beside the picker. The verifier defaults to the signed-in
 `claude` CLI over OAuth, receives statistics and recipe data rather than
 image pixels, and can instead use an API provider.
 

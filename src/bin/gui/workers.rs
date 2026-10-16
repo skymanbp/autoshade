@@ -2979,7 +2979,13 @@ impl AutoShadeApp {
     /// endpoint and key, so a result only ever fills the catalogue of the
     /// role that asked for it — and by GENERATION: a completion is installed
     /// only if nothing invalidated the catalogue while it flew.
-    pub(crate) fn on_models(&mut self, lang: Lang, role: ModelRole, generation: u64, res: anyhow::Result<Vec<String>>) {
+    pub(crate) fn on_models(
+        &mut self,
+        lang: Lang,
+        role: ModelRole,
+        generation: u64,
+        res: anyhow::Result<Vec<autoshade::openai_models::ModelInfo>>,
+    ) {
         // Single-flight per role (`fetch_models` refuses to start a second
         // while one flies), so whatever lands, THE flight for this role is
         // over — stale or not, the flag must clear or the fetch button and
@@ -2996,22 +3002,22 @@ impl AutoShadeApp {
             return;
         }
         match res {
-            Ok(ids) => {
-                let chat: Vec<String> = ids
+            Ok(models) => {
+                let chat: Vec<String> = models
                     .iter()
-                    .filter(|s| autoshade::openai_models::is_chat_model(s))
-                    .cloned()
+                    .filter(|m| autoshade::openai_models::is_chat_model(&m.id))
+                    .map(|m| m.id.clone())
                     .collect();
-                let imgs: Vec<String> = ids
+                let imgs: Vec<String> = models
                     .iter()
-                    .filter(|s| autoshade::openai_models::is_image_model(s))
-                    .cloned()
+                    .filter(|m| autoshade::openai_models::is_image_model(&m.id))
+                    .map(|m| m.id.clone())
                     .collect();
                 self.settings.status = trf(
                     lang,
                     "fetched {n} models ({chat} chat · {img} image)",
                     &[
-                        ("n", &ids.len().to_string()),
+                        ("n", &models.len().to_string()),
                         ("chat", &chat.len().to_string()),
                         ("img", &imgs.len().to_string()),
                     ],
@@ -3022,6 +3028,19 @@ impl AutoShadeApp {
                 // on the analysis catalogue would let a picker offer ids from
                 // the wrong endpoint.
                 cat.image_gen = if role == ModelRole::Image { imgs } else { Vec::new() };
+                // What the listing SAID about each id, kept only where it
+                // said: the effort picker offers a model's own tiers and the
+                // vision picker warns about a model that takes no image.
+                cat.efforts.clear();
+                cat.vision.clear();
+                for m in models {
+                    if let Some(tiers) = m.effort_options {
+                        cat.efforts.insert(m.id.clone(), tiers);
+                    }
+                    if let Some(v) = m.vision {
+                        cat.vision.insert(m.id, v);
+                    }
+                }
             }
             Err(e) => {
                 self.settings.status =
