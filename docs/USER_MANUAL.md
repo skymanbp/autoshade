@@ -638,7 +638,7 @@ as the measured cells; a second rationale line counts those.
 The field is then dropped whole if it makes the frame worse, or if it improved
 the frame by making the sky or the land zone worse.
 
-With **Zoned fit (sky)** enabled, reverse-fit always solves the global recipe
+With **Fit local areas too** enabled, reverse-fit always solves the global recipe
 first. Successful segmentation adds up to four disjoint semantic class bitmap
 corrections; each region selects Full or Atmosphere independently. If
 segmentation is disabled or unavailable, the same entry automatically tries

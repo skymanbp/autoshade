@@ -198,9 +198,9 @@
 > symbol, link and tier count the living documents name exists in the tree;
 > CI's `docs` job runs it on every push) — and a gate that exits non-zero
 > fails the battery like a lane.
-> 1643 library + 25 CLI + 243 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1628 pass + 15 `#[ignore]`d forensic probes and
-> the GUI result is 240 pass + three ignored (an explicit scratch-recipe export
+> 1648 library + 25 CLI + 244 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1633 pass + 15 `#[ignore]`d forensic probes and
+> the GUI result is 241 pass + three ignored (an explicit scratch-recipe export
 > probe and the offline panel and window screenshots) in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
 > refusal pair (a RAW source, a baked negative); the library and GUI lists are
 > v1.6.1's. For v1.6.3, four library names (decode: the 16-bit profile lattice
@@ -233,7 +233,14 @@
 > edit read as the edit, a maskless edit sending no mask and layering only
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
-> screenshots). For v1.9.0, by name against the v1.8.0 battery: library
+> screenshots). For v1.10.0, by name against the v1.9.0 battery: library
+> +5 / −0 — four in the OpenAI provider for the image role over Chat
+> Completions (the fallback from a missing `/responses`, the learned family
+> not probed again, an explicit Chat family that drops a refused contract,
+> the extractors reading the Chat shape) and one in `openai_models` for the
+> tiers and the vision flag a listing names; GUI +1 / −0 (the listing's
+> capabilities reaching the pickers); CLI 25 unchanged. For v1.9.0, by name
+> against the v1.8.0 battery: library
 > +26 / −160 — 143 names retired with the modules the reference library
 > replaced (style 106, mask_habit 29, style_cache 5, content_cache 3) and 17
 > with the style index's callers (pipeline 8, describe 4, embed 2, and one
