@@ -2137,7 +2137,16 @@ impl eframe::App for AutoShadeApp {
                                 // ceiling that happens to share the number —
                                 // see theme.rs on why they are two constants.
                                 ui.set_max_width(TOAST_W_MAX);
-                                ui.label(egui::RichText::new(&t.text).color(fg.gamma_multiply(fade)));
+                                // `.wrap()` explicitly: this ui is a child of
+                                // the right_to_left row above, and a label in
+                                // a horizontal layout EXTENDS by default
+                                // (egui 0.29 `Ui::wrap_mode`), so a long error
+                                // text ignored the measure and ran past the
+                                // window's edge as one line.
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new(&t.text).color(fg.gamma_multiply(fade)))
+                                        .wrap(),
+                                );
                             })
                             .response
                             .interact(egui::Sense::click())
