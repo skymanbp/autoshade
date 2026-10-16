@@ -2,7 +2,9 @@
 
 > 这是**已发生之事的台账**，不是待办表：每一条要么是已发布的版本与实测数字，
 > 要么是带理由的终局裁定（一个测出来的数、一条仪器极限、一次用户拍板）。
-> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-10-14**。
+> 每项都附 `file:line` 或提交锚点，供新会话不重读全库即可接手。更新于 **2026-10-16**。
+>
+> **v1.10.0 已发布**（2026-10-16，tag `v1.10.0` → `0b1c60f`，release run `38943381781` 六工位绿，发版事实见台账首条）**：图像角色（看图提案、风格描述、视觉评审、找污点）也能走 `/chat/completions`：新设置「API style」默认自动——先试 `/responses`，404/405 就把同一请求改成 Chat Completions 发出并按端点记住，也可钉死一种；结构化输出被拒就去掉再发一次。`/models` 列表里带的推理等级与看图能力直接进选择框（Venice、OpenRouter）。桌面版 25 处文案按 10-16 审读重写；长提示条按 420 px 换行。
 >
 > **v1.9.0 已发布**（2026-10-14，tag `v1.9.0` → `5fe45cb`，release run `38618234420` 六工位绿，发版事实见台账首条）**：风格索引退役、换成成片参考库（只读成片像素；可按文件名找 RAW，侧车显影与成片色差 ≤ 11 才把参数交给模型）；分析二选一：参考库或手写方向；AI 景深虚化；桌面版四套配色＋五种强调色、Lucide 统一图标、动画、侧栏长说明折成一行。
 >
@@ -222,6 +224,13 @@
 > [docs/ROADMAP-archive.md](ROADMAP-archive.md)（追加式档案，勿重写）。
 
 ## 版本台账（逐版已发布内容与实测数字，新在上；均已完成，勿重做）
+
+### v1.10.0 — 图像角色走任意 OpenAI 兼容端点、模型列表按所说取用、文案审读（2026-10-16）
+
+- **内容**：图像角色四路视觉调用原来手写 Responses 体、只发 `/responses`，多数兼容端点（本地运行器、中转、他家兼容层）没有这条路，拿到 404。现在一份调用描述（`advisor::VisionRequest`）按两种家族拼体（Responses 体逐字节同以前，有既有测试钉着；Chat 体用 `image_url` 分段＋`response_format.json_schema`），`post_vision` 发出。设置 `image_api_family`（环境变量 `AUTOSHADE_IMAGE_API_FAMILY`，设置→图像→API style，网页面板也读写）：`auto`（默认）先 `/responses`、404/405 换 `/chat/completions` 并按 base URL 记到进程结束；`responses`/`chat` 钉死。400 点名 `response_format`/`text.format` 就去掉结构化契约再发一次；抽取器兼读 `choices[0].message.content`（字符串或分段）与 `message.refusal`。生成式修改仍需 `/images/edits`。`openai_models::list_models` 返回 `ModelInfo`（id、等级列表、看图标志），Venice `model_spec.capabilities`、OpenRouter `architecture`/`supported_parameters` 都认；推理等级选择框给该模型自己的等级并注明来源，不接受图像的模型在选择框旁标出；纯 OpenAI 列表什么都不说，照旧用固定建议。桌面版 25 处文案（角色标题按用的按钮命名、Codex 桥接改成「Sign in with ChatGPT」＋桥接口令、反推改成「Match a look」、「Zoned fit (sky)」改「Fit local areas too」、「deep」改「Retry once」、`./out` 改「the delivery folder」、Reimagine 统一「Generate whole image」等）；长提示条换行。未做：反推的工程日志式解释折到开关后面（审读的收尾建议）。
+- **门**：冻结快照 `a2019ed` 三车道电池第二遍全绿（第一遍在 `c633897` 三车道全绿、i18n 审计红——API style 下拉的三个标签在一张表里，审计的登记册不认识，两个标签没中文、第三个对不上调用点 → `a2019ed`）：库 1633 / 0 / 15、CLI 25 / 0、契约 2 + 2、GUI 241 / 0 / 3、校准车道 1633 / 0 / 15（画笔样本根未设跳过一条，v1.9.0 同）；clippy 两组 0；check_docs --gates 32 / 0 / 0；check_doc_drift 0；字体 897 / 898。按名字对 v1.9.0：库 +5 / −0、GUI +1 / −0、CLI 25 不变。Python 两套没跑（python/、scripts/、tests/ 与 v1.9.0 逐字节同，按 10-13 裁定只跑改到的）；参考对终门没重跑（反推与显影没动）。变异七条全红、还原 SHA-256 同（六条测试＋i18n 门：第四个家族没中文就红）；提示条换行没有测试，说明里写明。
+- **发版前清扫**：手册反推一章还叫旧开关名「Zoned fit (sky)」→ 改成界面上的「Fit local areas too」（`c633897`，同一提交把电池计数在冻结前改到 1648 / 25 / 244）。桌面「AutoShade-需要你做的-2026-09-21」清单文件夹已不在桌面，本次不写现状文件。
+- **发版事实**：release run `38943381781` 六工位绿；8 资产下载回验 7 / 7、权重钉 v1.6.0 整份拉回同、解包 CLI 报 1.10.0；回填 `7f6a05e`；官网部署后 31 / 31、15 / 15 个缓存键 `?v=1.10.0`；本机原地升级 147 → 147 个文件、改 71，两个 exe 的 SHA-256 等于 checksums、CLI 报 1.10.0、卸载表一条。
 
 ### v1.9.0 — 成片参考库、景深虚化、更安静的桌面版（2026-10-14）
 
