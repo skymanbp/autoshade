@@ -314,7 +314,7 @@ pub mod keys {
     pub const FIT_NOTE_VETO_DISCLOSED: &str =
         " High-strength fit disclosed unsupported movement in {kind}: {ranges}. The controls were retained, but confidence is capped by the strength budget.";
     pub const FIT_NOTE_STRENGTH: &str =
-        " Reverse-fit used panel Strength {pct}% to derive its honesty budget.";
+        " Reverse-fit strength {pct}% set how far weak evidence could move the sliders.";
     pub const FIT_DEGENERATE: &str = " Fit refused: the source or target frame has no tonal variation (blank or single-tone), so a statistical match would produce a constant tone map — no recipe was fitted.";
     pub const FIT_NOTE_REGRESSED: &str =
         " The full fit rendered farther from the target than the untouched \
@@ -1101,13 +1101,9 @@ pub mod keys {
 
     // --- heuristic baseline (advisor/heuristic.rs) ----------------------
     pub const HEURISTIC_UNAVAILABLE: &str =
-        "Heuristic baseline (AI vision unavailable (untrusted provider diagnostic): {e}). \
-         mean_luma={mean}/255, clip black/white={clip_b}%/{clip_w}% → exposure {ev}EV, \
-         highlights {hl}, shadows {sh}.";
+        "AI vision was unavailable ({e}), so a simple automatic exposure fix was applied instead: mean luma {mean}/255, clipped black/white {clip_b}%/{clip_w}% → exposure {ev}EV, highlights {hl}, shadows {sh}. Check the Image model settings.";
     pub const HEURISTIC_NO_KEY: &str =
-        "Heuristic baseline (no AI vision; OPENAI_API_KEY unset). \
-         mean_luma={mean}/255, clip black/white={clip_b}%/{clip_w}% → exposure {ev}EV, \
-         highlights {hl}, shadows {sh}.";
+        "No AI vision (no image API key is set), so a simple automatic exposure fix was applied instead: mean luma {mean}/255, clipped black/white {clip_b}%/{clip_w}% → exposure {ev}EV, highlights {hl}, shadows {sh}. Set the Image model in Settings.";
 
     // --- heal / retouch (retouch.rs) ------------------------------------
     pub const HEAL_DETECT_FAILED: &str =

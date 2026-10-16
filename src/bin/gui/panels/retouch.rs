@@ -263,11 +263,11 @@ impl AutoShadeApp {
         // box over an empty canvas has nothing to go on.
         let mask_png = self.export_area_png(BrushOwner::Fill);
         if mask_png.is_none() && prompt.is_empty() {
-            self.status = tr(lang, "write what to change (e.g. remove the wires on the left), or paint the area to remove (🖌 Paint area, in this fold)").into();
+            self.status = tr(lang, "write what to change (e.g. remove the wires on the left), or paint the area to remove (🖌 Paint area, in this section)").into();
             return;
         }
         let Some(out) = unique_out(&src, "fill") else {
-            self.status = tr(lang, "over 999 retouch masters for this photo — clean up ./out first").into();
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the delivery folder first").into();
             return;
         };
         self.busy = true;
@@ -368,7 +368,7 @@ impl AutoShadeApp {
         let mask_png = self.export_area_png(BrushOwner::Adjust);
         let region = mask_png.is_some();
         let Some(out) = unique_out(&src, "adjust") else {
-            self.status = tr(lang, "over 999 retouch masters for this photo — clean up ./out first").into();
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the delivery folder first").into();
             return;
         };
         self.busy = true;
@@ -444,7 +444,7 @@ impl AutoShadeApp {
                 Some(b) => Some(b),
                 None => {
                     self.status =
-                        tr(lang, "paint the spots first (🖌 Paint area, in this fold), then Heal area").into();
+                        tr(lang, "paint the spots first (🖌 Paint area, in this section), then Heal area").into();
                     return;
                 }
             }
@@ -452,7 +452,7 @@ impl AutoShadeApp {
             None
         };
         let Some(out) = unique_out(&path, "heal") else {
-            self.status = tr(lang, "over 999 retouch masters for this photo — clean up ./out first").into();
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the delivery folder first").into();
             return;
         };
         self.busy = true;
@@ -537,7 +537,7 @@ impl AutoShadeApp {
         }
         let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
         let Some(out) = unique_out(&path, "denoise") else {
-            self.status = tr(lang, "over 999 retouch masters for this photo — clean up ./out first").into();
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the delivery folder first").into();
             return;
         };
         self.busy = true;
@@ -598,7 +598,7 @@ impl AutoShadeApp {
         }
         let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
         let Some(out) = unique_out(&path, "stack") else {
-            self.status = tr(lang, "over 999 retouch masters for this photo — clean up ./out first").into();
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the delivery folder first").into();
             return;
         };
         // This fold's OWN dials, captured at the click like every other input
@@ -689,7 +689,7 @@ impl AutoShadeApp {
             return;
         };
         let Some(out) = unique_out(&path, "clone") else {
-            self.status = tr(lang, "over 999 retouch masters for this photo — clean up ./out first").into();
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the delivery folder first").into();
             return;
         };
         self.busy = true;
@@ -763,7 +763,7 @@ impl AutoShadeApp {
         // reusing an existing origin would cross-wire two variants'
         // export / reverse-fit.
         let Some(out) = unique_out(&path, "reimagine") else {
-            self.status = tr(self.lang, "over 999 generated variants for this photo — clean up ./out first").into();
+            self.status = tr(self.lang, "over 999 generated variants for this photo — clean up the delivery folder first").into();
             return;
         };
         let prompt = {
@@ -1276,8 +1276,8 @@ impl AutoShadeApp {
                 // 61 MP baked TIFF no way to opt out of the 2048px
                 // downsample the unchecked path bakes into the master.
                 ui.checkbox(&mut self.heal_fullres, tr(lang, "Full-res heal"))
-                    .on_hover_text(tr(lang, "Heal at full resolution (slow; without it a baked image is saved at 2048px)"));
-                explainer(ui, lang, tr(lang, "AI auto-detects dust / blemishes, or paint a mask and Heal it. Pixel retouch from surrounding pixels; saved to ./out."));
+                    .on_hover_text(tr(lang, "Heal at full resolution (slow; without it the retouched image is saved at 2048px)"));
+                explainer(ui, lang, tr(lang, "AI auto-detects dust / blemishes, or paint a mask and Heal it. Pixel retouch from surrounding pixels; saved to the delivery folder."));
             });
 
         card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Clone Stamp"))
@@ -1327,10 +1327,10 @@ impl AutoShadeApp {
                 // the flag on both source types (retouch.rs), the same
                 // rule as Heal beside it (L15-7).
                 ui.checkbox(&mut self.clone_fullres, tr(lang, "Full-res clone"))
-                    .on_hover_text(tr(lang, "Clone at full resolution (slow; without it a baked image is saved at 2048px)"));
+                    .on_hover_text(tr(lang, "Clone at full resolution (slow; without it the retouched image is saved at 2048px)"));
                 explainer(ui, lang, tr(lang, "Photoshop-style clone stamp: Alt+click to sample a source (cross marker), brush the area to \
                          cover, and pixels are carried over as-is from the source (feathered edges, no tone matching). \
-                         Local compute, saves a ./out pixel master."));
+                         Local compute, saves a pixel master in the delivery folder."));
             });
     }
 }

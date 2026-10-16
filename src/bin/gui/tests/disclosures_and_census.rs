@@ -269,7 +269,7 @@
                 tr(lang, "Rotation angle"),
                 tr(lang, "Blend mode"),
                 tr(lang, "Extra shapes"),
-                tr(lang, "Range mask (foreign)"),
+                tr(lang, "Range mask (from Lightroom)"),
                 // R25 P6: the four local point curves are modelled now, so
                 // this verdict only fires on a curve that would not PARSE —
                 // and its label says so instead of reading like a gap.

@@ -739,7 +739,7 @@ pub(crate) fn xmp_import_line(
                 tr(lang, "AI mask (re-derived locally, not Adobe's raster)").into()
             }
             R::AiMaskUnresolved => tr(lang, "AI mask (carried, not yet re-derived)").into(),
-            R::ForeignRangeMask => tr(lang, "Range mask (foreign)").into(),
+            R::ForeignRangeMask => tr(lang, "Range mask (from Lightroom)").into(),
             // R25 P6 narrowed this verdict from "we do not model local point
             // curves" to "this one could not be READ" — the label moved with
             // it, because the old phrase now describes a feature that works.

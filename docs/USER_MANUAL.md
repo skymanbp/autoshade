@@ -925,6 +925,15 @@ flagged beside the picker. The verifier defaults to the signed-in
 `claude` CLI over OAuth, receives statistics and recipe data rather than
 image pixels, and can instead use an API provider.
 
+**Sign in with ChatGPT.** The image role's other option uses a ChatGPT
+subscription through a Codex bridge, CLIProxyAPI, that you install and run
+yourself: download it from its GitHub releases, start it, sign in with your
+ChatGPT account when it asks, and paste the `api-keys` value from its
+configuration file into the **Bridge password** field. The bridge must be
+running before an edit, or the call cannot connect. Generated images are
+capped at about 1.5 MP by the subscription; for full-resolution edits use
+the API option with a real key.
+
 The same roles can be configured from the environment: `OPENAI_API_KEY` serves
 the image/vision and generative role; `AUTOSHADE_ANALYSIS_API_KEY` is used only
 when the verifier is set to API mode. Settings are saved in the per-user

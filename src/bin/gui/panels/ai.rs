@@ -457,7 +457,7 @@ impl AutoShadeApp {
                 1.0,
                 GRADE_STRENGTH_DEFAULT,
                 tr(lang,
-                    "How hard the AI pushes the grade — a different axis from Style: Style asks how close to your reference looks, Strength asks how committed the result should be. 50% is where every AI guardrail NUMBER was calibrated: the ±50/±35 pair and the soft caps are bit-for-bit the ones earlier releases used, but the restraint WORDING those releases sent is now the 40%-and-below prose, so no single setting brings an old release back whole. From 41% up the AI must decide EACH colour control explicitly instead of leaving it neutral by default; the default 65% (double-click to reset) leans a little further than the calibration point. Above 70% it is additionally told to use the controls it wants at a strength a viewer can see, and the visual review may then run up to 3 rounds — the same ceiling 「Deep thinking」 raises it to, and either one ALONE is enough to make the worst case 17 API calls (10 carrying images). The clipping and white-point safeguards never widen with it.",
+                    "How bold the AI's edit is — a different axis from Style, which asks how closely it copies your references. From 41% up the AI must decide each colour control explicitly; the default 65% (double-click to reset) leans a little bolder. Above 70% it is told to use its controls at a strength a viewer can see, and the visual review may run up to 3 rounds — the same ceiling 「Deep thinking」 raises it to; either one alone makes the worst case 17 API calls (10 carrying images). The clipping and white-point safeguards never loosen.",
                 ),
             );
             let has_direction = by_direction && !self.guidance.trim().is_empty();
@@ -475,7 +475,7 @@ impl AutoShadeApp {
                     &mut self.direction_adherence,
                     1.0,
                     autoshade::recipe::DirectionAdherence::DEFAULT,
-                    tr(lang, "How closely the AI follows your direction; disabled until the Direction guides and has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit."),
+                    tr(lang, "How closely the AI follows your direction; disabled until the Direction guides and has text. At 40% or below it is a Hint; from 40% to 70% it is followed (Direct); above 70% it is a firm Brief. It changes only what the AI is asked, never a slider limit."),
                 );
             });
             // R23-4 (feedback #13): the THIRD analysis-side control, under the two
@@ -734,7 +734,7 @@ impl AutoShadeApp {
     fn ai_generate(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         ui.add_space(SPACE_XS);
-        card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Reimagine (whole image) · paid API"))
+        card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Generate whole image · paid API"))
             .id_salt("sec_ai_reimagine")
             .default_open(false)
             // Headless layout tests must see this row: it carries the R19
@@ -888,7 +888,7 @@ impl AutoShadeApp {
                 ui.label(egui::RichText::new(note).weak().small());
                 let resp = primary_row(ui, self.can_adjust(), tr(lang, "✨ Adjust"))
                     .on_hover_text(tr(lang,
-                        "Change the generated picture with the prompt: the whole image, or only the painted area when this fold's brush has strokes (blank = remove there). One gpt-image call per adjust — costs per image. The result is a new ✨ AI generated card; this card stays as it is; crop / straighten are not carried (set them on the new card). Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
+                        "Change the generated picture with the prompt: the whole image, or only the painted area when this section's brush has strokes (blank = remove there). One gpt-image call per adjust — costs per image. The result is a new ✨ AI generated card; this card stays as it is; crop / straighten are not carried (set them on the new card). Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
                     ));
                 #[cfg(test)]
                 {
@@ -916,7 +916,7 @@ impl AutoShadeApp {
     fn ai_reverse_fit(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         ui.add_space(SPACE_XS);
-        card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Reverse-fit · local; AI review is paid"))
+        card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Match a look (reverse-fit) · local"))
             .id_salt("sec_ai_reverse_fit")
             .default_open(true)
             // Same reason as the folds above: a headless frame never clicks a
@@ -1083,7 +1083,7 @@ impl AutoShadeApp {
                 1.0,
                 autoshade::recipe::GradeStrength::DEFAULT,
                 tr(lang,
-                    "The reverse-fit's honesty budget — its own dial: the Analysis Strength above does not reach the fit. At or below the default 65% the fit is byte-identical to the calibrated path. Above it the Atmosphere budget widens, and a white balance outside the budget shrinks along its fitted move instead of staying as-shot. From 85% unsupported movement is DISCLOSED (confidence capped) instead of withheld. Double-click to reset.",
+                    "How far the fit may move sliders on weak evidence. At the default 65% it only moves what both images clearly support; higher values let it go further and flag those moves in the notes. This is separate from the Analysis Strength above. Double-click to reset.",
                 ),
             );
             ui.horizontal_wrapped(|ui| {
@@ -1103,8 +1103,8 @@ impl AutoShadeApp {
                 if action_in(ui, cell, can, tr(lang, "Extract style"))
                     .on_hover_text(tr(lang,
                         "Compare the original / generated images and have the vision model write a reusable \
-                         style prompt: auto-fills the Reimagine prompt (ready to restyle other photos) and \
-                         saves ./out/<stem>.style.txt.",
+                         style prompt: auto-fills the Generate image prompt (ready to restyle other photos) and \
+                         saves <stem>.style.txt in the delivery folder.",
                     ))
                     .clicked()
                 {
@@ -1140,20 +1140,13 @@ impl AutoShadeApp {
                 // plus a loop — a checkbox that silently switched the other one
                 // on would be two settings pretending to be one.
                 ui.add_enabled_ui(!self.busy && self.fit_ai_judge, |ui| {
-                    ui.checkbox(&mut self.fit_deep, tr(lang, "deep"))
+                    ui.checkbox(&mut self.fit_deep, tr(lang, "Retry once"))
                         .on_hover_text(if self.fit_ai_judge {
                             tr(lang,
-                                "DEEP REVERSE-FIT: run the review BEFORE saving and let it buy one \
-                                 guided retry — the reviewer's suggestion picks the next ACTION \
-                                 (add the zoned pass, pull the chroma chase back), never the \
-                                 numbers, and the retry is kept only if it re-scores at least as \
-                                 high. COST: up to two paid vision calls instead of one, and the \
-                                 save waits for them; there is NO cancel, exactly as for the \
-                                 review itself. Off = the reviewed fit is saved first and the \
-                                 score is a note (the behaviour of every release since v0.26.0).",
+                                "Retry once: runs the AI review before saving; if the review suggests a fix, tries it once and keeps whichever scores higher. Costs up to two paid vision calls instead of one, and the save waits for them; there is no cancel, as for the review itself. Off = the reviewed fit is saved first and the score is a note.",
                             )
                         } else {
-                            tr(lang, "Turn on 「AI review」 first — the deep fit is that review, iterated")
+                            tr(lang, "Turn on 「AI review」 first — 「Retry once」 repeats that review")
                         });
                 });
             });
@@ -1161,9 +1154,9 @@ impl AutoShadeApp {
             // the button above does. Same rule as 「AI review」 — a persisted
             // preference, so no can_fit gate (and, as in Settings, no busy gate:
             // `start_fit` reads the flag when it runs).
-            ui.checkbox(&mut self.zoned_fit, tr(lang, "Zoned fit (sky)")).on_hover_text(tr(
+            ui.checkbox(&mut self.zoned_fit, tr(lang, "Fit local areas too")).on_hover_text(tr(
                 lang,
-                "On reverse-fit, fit globally first. Sky segmentation and native luminance-range fallback stay exclusive; then frozen-evidence spatial tiles are tried automatically on a 4x4 grid with a four-tile cap and zero frame regression. Conservative guided refinement may keep or abstain before fitting semantic/tile masks, and never changes luminance ranges. The sky and land zones ride out as Lightroom's own Select Sky mask (Lightroom rebuilds its own sky alpha; the raster shown here is ours). Residual-earned bands add intersecting gradients. Tiles also export as intersecting gradients when that replacement passes the shared gates and fits the photo no worse than the refined raster; retained refined tiles and free-form masks keep a named bitmap loss. Native ranges are written to the Lightroom sidecar. Segmentation needs the python dependencies (transformers + torch), and every fallback or abstention is noted in the rationale.",
+                "After the global fit, tries extra local masks where the photo differs region by region: the sky, bright and dark ranges, and up to four tiles of a 4×4 grid. Each mask is kept only if it brings the result closer without making any area worse. Sky masks go to Lightroom as its own Select Sky; other masks Lightroom cannot hold are named when you save. Needs Python with transformers and torch; without them only the tonal ranges are tried.",
             ));
             ui.checkbox(&mut self.zoned_four_regions, tr(lang, "Up to four semantic regions"))
                 .on_hover_text(tr(lang, "Opt in to semantic regions beyond the historical sky/land pass; this costs one OneFormer pass per frame and may take longer."));

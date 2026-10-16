@@ -617,17 +617,17 @@ impl AutoShadeApp {
                         let s = match &note {
                             StyleNote::SavedCopy => tr(
                                 lang,
-                                "Style prompt extracted → filled into the Reimagine prompt (also saved ./out/<stem>.style.txt)",
+                                "Style prompt extracted → filled into the Generate image prompt (also saved <stem>.style.txt in the delivery folder)",
                             )
                             .to_string(),
                             StyleNote::SaveFailed(err) => trf(
                                 lang,
-                                "Style prompt extracted → filled into the Reimagine prompt (saving ./out/<stem>.style.txt failed: {err})",
+                                "Style prompt extracted → filled into the Generate image prompt (saving <stem>.style.txt in the delivery folder failed: {err})",
                                 &[("err", err)],
                             ),
                             StyleNote::NotSaved => tr(
                                 lang,
-                                "Style prompt extracted → filled into the Reimagine prompt",
+                                "Style prompt extracted → filled into the Generate image prompt",
                             )
                             .to_string(),
                         };
@@ -1108,7 +1108,7 @@ impl AutoShadeApp {
                                 open_note = Some(
                                     tr(
                                         lang,
-                                        "saved before the camera base look — renders as originally tuned; Reset switches to the camera-matched base",
+                                        "saved before this version's camera default tone — renders as originally tuned; Reset switches to the camera's own default colour and tone",
                                     )
                                     .into(),
                                 );
@@ -1281,7 +1281,7 @@ impl AutoShadeApp {
                                     // not first at the failing save.
                                     let t = tr(
                                         lang,
-                                        "this photo's variant strip (variants.json) cannot be read — background variants stay hidden and saving refuses until the file is fixed or deleted",
+                                        "this photo's variant list (variants.json in its develop store) cannot be read — background variants stay hidden and saving refuses until that file is repaired or deleted (the store's location is in Settings)",
                                     )
                                     .to_string();
                                     self.toast(ToastKind::Error, t);
@@ -1727,7 +1727,7 @@ impl AutoShadeApp {
                             // back to the pre-analyze edit.
                             let t = trf(
                                 lang,
-                                "AI develop applied — verdict {v}: NOT saved (Ctrl+S keeps it, Ctrl+Z steps back)",
+                                "AI edit applied — the AI's self-check said: {v}. Not saved yet (Ctrl+S saves, Ctrl+Z undoes)",
                                 &[("v", tr(lang, autoshade::advisor::decision_key(&verdict.decision)))],
                             );
                             self.toast(ToastKind::Success, t.clone());
@@ -2683,17 +2683,17 @@ impl AutoShadeApp {
             }
             FitNote::SolverMode { atmosphere: true } => tr(
                 lang,
-                " · Atmosphere mode (bounded robust controls — the structure diverged)",
+                " · mood-only match (the two images differ in content, so only overall tone and colour were matched)",
             )
             .to_string(),
             FitNote::SolverPairing { pixel: true, fine, coarse } => trf(
                 lang,
-                " · paired pixel-to-pixel (D {fine} at pixel scale, {coarse} at layout scale)",
+                " · matched pixel to pixel (difference {fine} at pixel scale, {coarse} at layout scale)",
                 &[("fine", fine), ("coarse", coarse)],
             ),
             FitNote::SolverPairing { pixel: false, fine, coarse } => trf(
                 lang,
-                " · paired by cell statistics only (D {fine} at pixel scale, {coarse} at layout scale)",
+                " · matched by cell statistics only (difference {fine} at pixel scale, {coarse} at layout scale)",
                 &[("fine", fine), ("coarse", coarse)],
             ),
             FitNote::IncludesSkyZone => tr(
@@ -2765,7 +2765,7 @@ impl AutoShadeApp {
                 if let Some(h) = hint.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
                     s.push_str(&trf(
                         lang,
-                        " · it suggests: {hint} (nothing was changed — tick 「deep」 to let it try)",
+                        " · it suggests: {hint} (nothing was changed — tick 「Retry once」 to let it try)",
                         &[("hint", h)],
                     ));
                 }
@@ -2798,22 +2798,22 @@ impl AutoShadeApp {
             // the user has paid for a review either way.
             FitNote::DeepFit { action, outcome } => match outcome {
                 DeepFitOutcome::NothingActionable => {
-                    tr(lang, " · deep: the review found nothing this app can act on — the plain fit stands")
+                    tr(lang, " · retry: the review found nothing this app can act on — the plain fit stands")
                         .to_string()
                 }
                 DeepFitOutcome::ActionDidNotRun => trf(
                     lang,
-                    " · deep: the review asked for {action}, which could not be carried out — the plain fit stands",
+                    " · retry: the review asked for {action}, which could not be carried out — the plain fit stands",
                     &[("action", action)],
                 ),
                 DeepFitOutcome::Adopted => trf(
                     lang,
-                    " · deep: tried {action} on the review's suggestion and kept it (it re-scored at least as high)",
+                    " · retry: tried {action} on the review's suggestion and kept it (it re-scored at least as high)",
                     &[("action", action)],
                 ),
                 DeepFitOutcome::Discarded => trf(
                     lang,
-                    " · deep: tried {action} on the review's suggestion and discarded it (it re-scored lower)",
+                    " · retry: tried {action} on the review's suggestion and discarded it (it re-scored lower)",
                     &[("action", action)],
                 ),
             },
@@ -2851,7 +2851,7 @@ impl AutoShadeApp {
                         self.refresh_versions();
                         let mut note = trf(
                             lang,
-                            "Reverse-fit done: look residual {before}→{after} · created a「Reverse-fit」variant (editable / XMP / full-res)",
+                            "Reverse-fit done: difference from target {before}→{after} (lower = closer) · created a「Reverse-fit」variant (editable / XMP / full-res)",
                             &[
                                 ("before", &format!("{:.3}", out.err_before)),
                                 ("after", &format!("{:.3}", out.err_after)),

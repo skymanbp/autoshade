@@ -898,8 +898,8 @@
     #[test]
     fn the_settings_panel_shows_the_sidecar_path_without_offering_to_change_it() {
         for (lang, heading, browse) in [
-            (crate::i18n::Lang::En, "Segmentation sidecar", "Browse…"),
-            (crate::i18n::Lang::Zh, "分割边车", "浏览…"),
+            (crate::i18n::Lang::En, "Segmentation helper", "Browse…"),
+            (crate::i18n::Lang::Zh, "分割脚本", "浏览…"),
         ] {
             let mut app = AutoShadeApp { lang, ..Default::default() };
             let seen = tall_frame(&mut app, |a, ui| a.settings_ui(ui));

@@ -1476,7 +1476,7 @@ impl AutoShadeApp {
                     1.0,
                     if denoise_raw { autoshade::denoise::DEFAULT_STRENGTH_RAW } else { autoshade::denoise::DEFAULT_STRENGTH },
                     tr(lang,
-                        "Detail AI denoise strength, independent of the Export fold. On a RAW, the dial removes luminance grain after demosaic in linear light; the default targets Lightroom Denoise 50. Higher is cleaner, 100% is the complete network output. Every positive strength keeps clean colour; exactly 0% leaves the input untouched. Baked sources keep SCUNet's separate 50% default. Double-click to reset this source type.",
+                        "Detail AI denoise strength, independent of the Export section. On a RAW, the dial removes luminance grain after demosaic in linear light; the default targets Lightroom Denoise 50. Higher is cleaner, 100% is the complete network output. Every positive strength keeps clean colour; exactly 0% leaves the input untouched. Already-rendered images (JPEG, PNG, TIFF, a retouched or AI result) use a different denoiser with its own 50% default. Double-click to reset this source type.",
                     ),
                 );
                 ui.horizontal(|ui| {
@@ -1490,7 +1490,7 @@ impl AutoShadeApp {
                     let has_helper = denoise_helper_available();
                     let ready = self.src_path.is_some() && !self.busy && has_helper;
                     let missing = tr(lang,
-                        "this build did not ship the python sidecars — run AutoShade from the project directory, or point AUTOSHADE_DENOISE_SCRIPT and AUTOSHADE_DENOISE_RAW_SCRIPT at python/denoise.py and python/denoise_raw.py",
+                        "This feature needs AutoShade's Python helpers, which this download does not include. Install the full package, or (advanced) set AUTOSHADE_DENOISE_SCRIPT and AUTOSHADE_DENOISE_RAW_SCRIPT to the paths of denoise.py and denoise_raw.py",
                     );
                     if action_row(ui, ready, tr(lang, "🤖 AI Denoise now"))
                         // 🤖 + the cross-reference line (#4): this verb stays
@@ -1501,7 +1501,7 @@ impl AutoShadeApp {
                         // segmentation pair.
                         .on_hover_text(if has_helper { ai_xref(lang, tr(lang,
                             "Denoise this card's pixels at full resolution — a RAW on its sensor mosaic before demosaic, \
-                             a baked source through SCUNet — and land the result as a new ◈ Denoised negative card \
+                             an already-rendered image through its own denoiser — and land the result as a new ◈ Denoised negative card \
                              carrying this card's develop; the card you started from keeps its pixels (first run \
                              downloads the model)",
                         )) } else { missing.to_string() })
@@ -2154,7 +2154,7 @@ impl AutoShadeApp {
                 let can_seg = !self.busy && self.base_preview.is_some() && has_helper;
                 let cell = columns(ui, 2);
                 let missing = tr(lang,
-                    "this build did not ship the python sidecar — run AutoShade from the project directory, or point AUTOSHADE_SEGMENT_SCRIPT at python/segment.py",
+                    "This feature needs AutoShade's Python helper, which this download does not include. Install the full package, or (advanced) set AUTOSHADE_SEGMENT_SCRIPT to the path of segment.py",
                 );
                 // 🤖 on BOTH (#4): one prefix marks every AI verb app-wide, and
                 // 「☁ AI select sky」 was the lone exception — a weather glyph
@@ -2169,7 +2169,7 @@ impl AutoShadeApp {
                     // gets a materially softer mask and would otherwise have no
                     // way to know which model drew it.
                     .on_hover_text(if has_helper { ai_xref(lang, tr(lang,
-                        "BiRefNet salient-subject segmentation → bitmap mask (python sidecar: pip install torchvision timm einops; first run auto-downloads a ~444MB model; without them it falls back to U²-Net / pip install rembg, whose edges are softer)",
+                        "BiRefNet salient-subject segmentation → bitmap mask (Python helper: pip install torchvision timm einops; first run auto-downloads a ~444MB model; without them it falls back to U²-Net / pip install rembg, whose edges are softer)",
                     )) } else { missing.to_string() })
                     .clicked()
                 {
@@ -2177,7 +2177,7 @@ impl AutoShadeApp {
                 }
                 if action_in(ui, cell, can_seg, tr(lang, "🤖 Select sky"))
                     .on_hover_text(if has_helper { ai_xref(lang, tr(lang,
-                        "OneFormer-ADE20K sky segmentation → bitmap mask (python sidecar: pip install transformers; first run auto-downloads a ~880MB model)",
+                        "OneFormer-ADE20K sky segmentation → bitmap mask (Python helper: pip install transformers; first run auto-downloads a ~880MB model)",
                     )) } else { missing.to_string() })
                     .clicked()
                 {
@@ -3224,7 +3224,7 @@ impl AutoShadeApp {
                     ui.label(
                         egui::RichText::new(trf(
                             lang,
-                            "Variants (cards) ({n})",
+                            "Variants ({n})",
                             &[("n", &n_var.to_string())],
                         ))
                         .weak()
@@ -3619,7 +3619,7 @@ impl AutoShadeApp {
                 // variant immediately. Same-named twins in two panels made the
                 // difference invisible until an export took minutes.
                 ui.checkbox(&mut self.save_denoise, tr(lang, "🤖 AI Denoise on export")).on_hover_text(
-                    ai_xref(lang, tr(lang, "AI denoise before developing, at the Export denoise strength below — a RAW on its sensor mosaic, a baked source through SCUNet — for high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it, and so does a ◈ Denoised card, whose master is already denoised.")),
+                    ai_xref(lang, tr(lang, "AI denoise before developing, at the Export denoise strength below — a RAW on its sensor mosaic, an already-rendered image through its own denoiser — for high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it, and so does a ◈ Denoised card, whose master is already denoised.")),
                 );
                 // The checkbox's OWN dial, directly under it (user decision
                 // 2026-09-12): the Detail fold's 「AI Denoise now」 has its own
@@ -3636,7 +3636,7 @@ impl AutoShadeApp {
                         1.0,
                         if denoise_raw { autoshade::denoise::DEFAULT_STRENGTH_RAW } else { autoshade::denoise::DEFAULT_STRENGTH },
                         tr(lang,
-                            "Export AI denoise strength, independent of the Detail fold. On a RAW, the dial removes luminance grain after demosaic in linear light; the default targets Lightroom Denoise 50. Higher is cleaner, 100% is the complete network output. Every positive strength keeps clean colour; exactly 0% leaves the input untouched. Baked sources keep SCUNet's separate 50% default. Double-click to reset this source type.",
+                            "Export AI denoise strength, independent of the Detail section. On a RAW, the dial removes luminance grain after demosaic in linear light; the default targets Lightroom Denoise 50. Higher is cleaner, 100% is the complete network output. Every positive strength keeps clean colour; exactly 0% leaves the input untouched. Already-rendered images (JPEG, PNG, TIFF, a retouched or AI result) use a different denoiser with its own 50% default. Double-click to reset this source type.",
                         ),
                     );
                 });

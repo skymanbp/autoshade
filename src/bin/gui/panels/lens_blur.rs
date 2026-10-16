@@ -34,9 +34,9 @@ impl AutoShadeApp {
         let can_run = !self.busy && self.base_preview.is_some() && self.src_path.is_some() && has_helper;
         let verb = if self.recipe.lens_blur.is_some() { tr(lang, "🤖 Re-estimate depth") } else { tr(lang, "🤖 Estimate depth") };
         let tip = if has_helper {
-            ai_xref(lang, tr(lang, "MoGe-2 estimates how far away every part of the photo is (python sidecar; the first run downloads a ~1.3 GB model). Then click the photo to choose what stays sharp."))
+            ai_xref(lang, tr(lang, "MoGe-2 estimates how far away every part of the photo is (Python helper; the first run downloads a ~1.3 GB model). Then click the photo to choose what stays sharp."))
         } else {
-            tr(lang, "this build did not ship the depth sidecar — run AutoShade from the project directory, or point AUTOSHADE_DEPTH_SCRIPT at python/depth.py").to_string()
+            tr(lang, "This feature needs AutoShade's Python helper, which this download does not include. Install the full package, or (advanced) set AUTOSHADE_DEPTH_SCRIPT to the path of depth.py").to_string()
         };
         if action_row(ui, can_run, verb).on_hover_text(tip).clicked() {
             self.start_depth();

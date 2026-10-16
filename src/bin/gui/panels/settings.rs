@@ -183,7 +183,7 @@ impl AutoShadeApp {
                 } else {
                     trf(self.lang, "saved → {path}", &[("path", &p.display().to_string())])
                 };
-                self.status = tr(self.lang, "settings saved — applies to the next AI call (Analyze / Fill / Reimagine)").into();
+                self.status = tr(self.lang, "settings saved — applies to the next AI call (Analyze / Fill / Generate image)").into();
             }
             Err(e) => {
                 self.settings.status =
@@ -276,7 +276,7 @@ impl AutoShadeApp {
             // Theme is the other control here that applies without a save.
             egui::RichText::new(tr(
                 lang,
-                "Language & Theme apply immediately. The provider sections below persist via 「Save settings」 to autoshade.local.json in your per-user AutoShade folder (never in a repo) and apply to the next AI call (Analyze / Fill / Reimagine).",
+                "Language & Theme apply immediately. The provider sections below persist via 「Save settings」 to autoshade.local.json in your per-user AutoShade folder (never in a repo) and apply to the next AI call (Analyze / Fill / Generate image).",
             ))
             .weak()
             .small(),
@@ -525,12 +525,12 @@ impl AutoShadeApp {
         // the two 🤖 buttons already show) is the answer for the missing case,
         // so the missing arm is not a second wording of the same thing.
         ui.separator();
-        ui.heading(tr(lang, "Segmentation sidecar"));
+        ui.heading(tr(lang, "Segmentation helper"));
         let seg = cfg_now.segment_script;
         let seg_path = std::path::PathBuf::from(&seg);
         ui.label(egui::RichText::new(abs_display(&seg_path)).small().weak()).on_hover_text(tr(
             lang,
-            "This path can only be set by environment variable, because it is executed",
+            "Set with the AUTOSHADE_SEGMENT_SCRIPT environment variable (not editable here, because the app runs this file)",
         ));
         // `segment_helper_available` is the SAME predicate the two AI-select
         // buttons gate on (one `exists()` per process), so this row and those
@@ -538,7 +538,7 @@ impl AutoShadeApp {
         if !segment_helper_available() {
             ui.label(
                 egui::RichText::new(tr(lang,
-                    "this build did not ship the python sidecar — run AutoShade from the project directory, or point AUTOSHADE_SEGMENT_SCRIPT at python/segment.py",
+                    "This feature needs AutoShade's Python helper, which this download does not include. Install the full package, or (advanced) set AUTOSHADE_SEGMENT_SCRIPT to the path of segment.py",
                 ))
                 .small()
                 .weak(),
@@ -560,7 +560,7 @@ impl AutoShadeApp {
                 f.analysis_models.clear();
             }
             ui.separator();
-            ui.heading(tr(lang, "Analysis — the verifier"));
+            ui.heading(tr(lang, "Analysis model — used by AI Analyze, AI Refine and AI review"));
             ui.horizontal(|ui| {
                 ui.label(tr(lang, "Provider"));
                 let r1 = ui.radio_value(&mut f.analysis_provider_api, false, tr(lang, "OAuth (Claude CLI)"));
@@ -657,11 +657,11 @@ impl AutoShadeApp {
                 });
             }
             ui.separator();
-            ui.heading(tr(lang, "Image — the vision proposer + generative edits"));
+            ui.heading(tr(lang, "Image model — looks at your photo, and generates or edits images"));
             ui.horizontal(|ui| {
                 ui.label(tr(lang, "Provider"));
                 ui.radio_value(&mut f.image_provider_oauth, false, tr(lang, "API (OpenAI-compatible)"));
-                ui.radio_value(&mut f.image_provider_oauth, true, tr(lang, "OAuth (Codex bridge / ChatGPT sub)"));
+                ui.radio_value(&mut f.image_provider_oauth, true, tr(lang, "Sign in with ChatGPT (via the local Codex bridge)"));
             });
             // Flipping into OAuth while the endpoint is still empty or the stock
             // OpenAI host means the field is wrong for a subscription bridge —
@@ -746,11 +746,11 @@ impl AutoShadeApp {
                 model_picker(ui, "set_imagegen_model", &mut f.image_gen_model, &opts, lang);
             });
             ui.horizontal(|ui| {
-                ui.label(if f.image_provider_oauth { tr(lang, "Gate token") } else { tr(lang, "API Key") });
+                ui.label(if f.image_provider_oauth { tr(lang, "Bridge password") } else { tr(lang, "API Key") });
                 let hint = if f.image_key_present {
                     tr(lang, "set — blank keeps it")
                 } else if f.image_provider_oauth {
-                    tr(lang, "the bridge's own api-keys token (loopback, not a cloud key)")
+                    tr(lang, "the password set in the bridge's own config (api-keys) — it stays on this computer and is not an OpenAI key")
                 } else {
                     tr(lang, "no key set")
                 };
@@ -768,7 +768,7 @@ impl AutoShadeApp {
                 }
             });
             let note = if f.image_provider_oauth {
-                tr(lang, "OAuth rides your ChatGPT subscription via the local Codex bridge — no OpenAI key. Start the bridge first (else edits fail to connect). Generative output is capped at ~1.5 MP by the subscription image tier; for full-resolution edits switch to API mode with a real key.")
+                tr(lang, "Uses your ChatGPT subscription through the Codex bridge (CLIProxyAPI) running on this computer — no OpenAI key. To set it up: download CLIProxyAPI from its GitHub releases, start it, sign in with your ChatGPT account when it asks, and paste the api-keys value from its configuration file as the bridge password above. Start the bridge before an edit, or the call cannot connect. Generated images are capped at about 1.5 MP by the subscription; for full-resolution edits switch to API with a real key.")
             } else {
                 tr(lang, "Tip: gpt-image-1.5 keeps the photo most faithful (input_fidelity); newer models like gpt-image-2 ignore that lock and edit more freely.")
             };

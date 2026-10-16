@@ -139,7 +139,7 @@ impl AutoShadeApp {
                     if prefs.denoise_strength != default || prefs.save_denoise_strength != default {
                         app.startup_note = Some(trf(
                             app.lang,
-                            "RAW AI denoise strength reset to {new} % (Detail fold {a} %, Export fold {b} %): the new default targets Lightroom Denoise 50; higher removes more luminance grain, every positive strength keeps the clean colour, and 0% leaves the input untouched",
+                            "AI denoise strength for RAW files was reset to {new}% (was {a}% in Detail, {b}% in Export). The new default looks like Lightroom's Denoise at 50; higher removes more luminance grain, any positive strength keeps the colour clean, and 0% leaves the input untouched",
                             &[
                                 ("new", &format!("{:.0}", default * 100.0)),
                                 ("a", &format!("{:.0}", prefs.denoise_strength * 100.0)),
@@ -3369,7 +3369,7 @@ impl AutoShadeApp {
             tr(lang, "Reverse-fitting… (statistical fit, local compute)").to_string()
         };
         if deep {
-            running.push_str(tr(lang, " · deep: AI review BEFORE saving, up to one guided retry"));
+            running.push_str(tr(lang, " · retry: AI review BEFORE saving, up to one guided retry"));
         } else if ai_judge {
             // The review runs AFTER the local fit and is a network call — the
             // busy line must own that extra wait up front.

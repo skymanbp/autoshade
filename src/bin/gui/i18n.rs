@@ -174,7 +174,7 @@ fn zh_map() -> &'static HashMap<&'static str, &'static str> {
 /// (placeholders included), or the lookup silently misses.
 #[rustfmt::skip]
 static ZH_ENTRIES: &[(&str, &str)] = &[
-    ("RAW AI denoise strength reset to {new} % (Detail fold {a} %, Export fold {b} %): the new default targets Lightroom Denoise 50; higher removes more luminance grain, every positive strength keeps the clean colour, and 0% leaves the input untouched", "RAW AI 降噪强度已重置为 {new}%（去噪折叠区原 {a}%、导出折叠区原 {b}%）：新默认值以 Lightroom 降噪 50 为参照；调高去除更多亮度颗粒，任何正强度均保留干净的颜色，0% 则保持原片不变"),
+    ("AI denoise strength for RAW files was reset to {new}% (was {a}% in Detail, {b}% in Export). The new default looks like Lightroom's Denoise at 50; higher removes more luminance grain, any positive strength keeps the colour clean, and 0% leaves the input untouched", "RAW 的 AI 降噪强度已重置为 {new}%（原：细节 {a}%、导出 {b}%）。新默认值接近 Lightroom 降噪 50 的效果；调高去除更多亮度颗粒，任何正强度均保留干净的颜色，0% 则保持原片不变"),
     (" [direction adherence tier: {tier}]", " [方向遵循档位：{tier}]"),
     (" White balance withheld: it would paint hues the target does not contain.", " 白平衡已保留：目标没有这些色相。"),
     (" White balance was clamped into the strength budget (gain ratio {from} to {to}, rotated share {rotated_share} over {coverage} of the frame); the requested cast exceeded the honest range.", " 白平衡已限制在强度预算内（增益比 {from} 至 {to}，色相旋转份额 {rotated_share}，覆盖画面 {coverage}）；请求色偏超出范围。"),
@@ -254,7 +254,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("four gradients", "4 条渐变"),
     ("unmeasured", "未测量"),
     ("unmeasured (hard mask)", "未测量（原始蒙版）"),
-    ("native trial gated", "渐变未通过"),
+    ("native trial gated", "原生蒙版试算未通过"),
     ("band estimator", "分带拟合"),
     ("boundary budget", "边界预算"),
     ("deltaE margin", "色差余量"),
@@ -265,36 +265,36 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " [该提案超出了配方上限——已丢弃 {dropped}]"),
     // ── Settings ────────────────────────────────────────────────────────────
     ("Language", "语言"),
-    ("Reverse-fit · local; AI review is paid", "反推 / Reverse-fit · 本地；AI 打分付费"),
-    ("Zoned fit (sky)", "分区反推：天空 / Zoned fit (sky)"),
-    ("Up to four semantic regions", "最多四个语义区域 / Up to four semantic regions"),
-    ("Opt in to semantic regions beyond the historical sky/land pass; this costs one OneFormer pass per frame and may take longer.", "选择历史天空/地面流程之外的语义区域；每次 OneFormer 推理，耗时可能更长。"),
-    ("On reverse-fit, fit globally first. Sky segmentation and native luminance-range fallback stay exclusive; then frozen-evidence spatial tiles are tried automatically on a 4x4 grid with a four-tile cap and zero frame regression. Conservative guided refinement may keep or abstain before fitting semantic/tile masks, and never changes luminance ranges. The sky and land zones ride out as Lightroom's own Select Sky mask (Lightroom rebuilds its own sky alpha; the raster shown here is ours). Residual-earned bands add intersecting gradients. Tiles also export as intersecting gradients when that replacement passes the shared gates and fits the photo no worse than the refined raster; retained refined tiles and free-form masks keep a named bitmap loss. Native ranges are written to the Lightroom sidecar. Segmentation needs the python dependencies (transformers + torch), and every fallback or abstention is noted in the rationale.",
-        "反推时先做全局拟合。天空语义分割与原生亮度范围回退二选一；随后自动在 4x4 网格上尝试冻结证据空间图块，最多四个且不允许画面回归。受限的引导细化会在拟合语义/图块蒙版前选择保留或放弃，绝不改变亮度范围。天空与地面分区以 Lightroom 自有的「选择天空」蒙版写入边车（Lightroom 自行重建天空 alpha，此处的栅格由本机渲染）。残差允许的分带增加相交渐变。空间图块在替换通过同一组门控、且对照片的拟合不差于细化位图时也以相交渐变写出；保留细化边缘的图块与自由蒙版仍报告具名位图损失。原生亮度范围会写入 Lightroom 边车。分割需要 python 依赖（transformers + torch），每次回退或放弃都会写入理由。"),
-    ("Analysis — the verifier", "分析 · 校验器"),
+    ("Match a look (reverse-fit) · local", "反推配方（从成片反求滑杆）· 本地"),
+    ("Fit local areas too", "也拟合局部区域"),
+    ("Up to four semantic regions", "最多四个语义区域"),
+    ("Opt in to semantic regions beyond the historical sky/land pass; this costs one OneFormer pass per frame and may take longer.", "在原有天空/地面之外，再启用最多四个语义区域；每帧多跑一次 OneFormer，耗时可能更长。"),
+    ("After the global fit, tries extra local masks where the photo differs region by region: the sky, bright and dark ranges, and up to four tiles of a 4×4 grid. Each mask is kept only if it brings the result closer without making any area worse. Sky masks go to Lightroom as its own Select Sky; other masks Lightroom cannot hold are named when you save. Needs Python with transformers and torch; without them only the tonal ranges are tried.",
+        "全局拟合之后，再在照片各区域不同的地方尝试局部蒙版：天空、明暗范围、以及 4×4 网格里最多四块。每个蒙版只在让结果更接近、且不让任何区域变差时才保留。天空蒙版以 Lightroom 自己的「选择天空」写出；Lightroom 放不下的其他蒙版在保存时列出。需要装有 transformers 与 torch 的 Python；没有时只尝试明暗范围。"),
+    ("Analysis model — used by AI Analyze, AI Refine and AI review", "分析模型 —— 用于 AI 分析、AI 微调与 AI 打分"),
     ("Provider", "提供方"),
     ("Model", "模型"),
     ("Base URL", "基础 URL"),
     ("API Key", "API 密钥"),
     ("key set — blank keeps it", "已设密钥 — 留空则保留"),
     ("no key set", "未设密钥"),
-    ("Image — the vision proposer + generative edits", "图像 · 视觉提案 + 生成式编辑"),
-    ("OAuth (Codex bridge / ChatGPT sub)", "OAuth (Codex 桥 / ChatGPT 订阅)"),
+    ("Image model — looks at your photo, and generates or edits images", "图像模型 —— 看图提出调整，并生成或修改图像"),
+    ("Sign in with ChatGPT (via the local Codex bridge)", "用 ChatGPT 订阅（经本机 Codex 桥）"),
     ("OAuth (Claude CLI)", "OAuth（Claude CLI）"),
     ("API (OpenAI-compatible)", "API（兼容 OpenAI）"),
-    ("fetching…", "拉取中… / fetching…"),
-    ("🔄 Fetch models", "🔄 拉取可用模型 / Fetch models"),
+    ("fetching…", "拉取中…"),
+    ("🔄 Fetch models", "🔄 拉取可用模型"),
     ("List the models this endpoint serves (GET /models) so you can pick instead of guess — and a live reachability check for the bridge/API. Uses the key/token typed below; a saved key is only used at the endpoint it was saved for.",
         "列出该端点提供的模型（GET /models），可挑选而非猜测 —— 并对桥接/API 做一次连通性检查。使用下方输入的密钥/令牌；已保存的密钥只会用于保存它时的那个端点。"),
     ("{chat} chat · {image} image", "{chat} 对话 · {image} 图像"),
-    ("Bridge URL", "桥接 URL"),
+    ("Bridge URL", "桥接地址"),
     ("Vision model", "视觉模型"),
     ("Image-gen model", "生图模型"),
-    ("Gate token", "网关令牌"),
+    ("Bridge password", "桥接口令"),
     ("set — blank keeps it", "已设 — 留空则保留"),
-    ("the bridge's own api-keys token (loopback, not a cloud key)", "桥接自身的 api-keys 令牌（回环地址，不是云端密钥）"),
-    ("OAuth rides your ChatGPT subscription via the local Codex bridge — no OpenAI key. Start the bridge first (else edits fail to connect). Generative output is capped at ~1.5 MP by the subscription image tier; for full-resolution edits switch to API mode with a real key.",
-        "OAuth 通过本地 Codex 桥使用你的 ChatGPT 订阅 —— 无需 OpenAI 密钥。请先启动桥（否则编辑无法连接）。生成输出受订阅图像档位限制，上限约 1.5 MP；需全分辨率编辑请切换到 API 模式并用真实密钥。"),
+    ("the password set in the bridge's own config (api-keys) — it stays on this computer and is not an OpenAI key", "桥接程序配置里设置的口令（api-keys），只在本机使用，不是 OpenAI 密钥"),
+    ("Uses your ChatGPT subscription through the Codex bridge (CLIProxyAPI) running on this computer — no OpenAI key. To set it up: download CLIProxyAPI from its GitHub releases, start it, sign in with your ChatGPT account when it asks, and paste the api-keys value from its configuration file as the bridge password above. Start the bridge before an edit, or the call cannot connect. Generated images are capped at about 1.5 MP by the subscription; for full-resolution edits switch to API with a real key.",
+        "通过本机运行的 Codex 桥（CLIProxyAPI）使用你的 ChatGPT 订阅 —— 无需 OpenAI 密钥。安装：从 CLIProxyAPI 的 GitHub 发布页下载并启动，按提示完成 ChatGPT 验证，再把它配置文件里的 api-keys 值填到上面的桥接口令。编辑前先启动桥，否则无法连接。生成图受订阅限制，约 1.5 MP 封顶；要全分辨率编辑请切换到 API 并用真实密钥。"),
     ("Tip: gpt-image-1.5 keeps the photo most faithful (input_fidelity); newer models like gpt-image-2 ignore that lock and edit more freely.",
         "提示：gpt-image-1.5 对照片最忠实（input_fidelity）；gpt-image-2 等较新模型会忽略该锁定、编辑更自由。"),
     ("Save settings", "保存设置"),
@@ -344,7 +344,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── Retouch (reimagine / fill / heal / clone) ─────────────────────────────
     ("Retouch", "修饰 · Retouch"),
-    ("Reimagine (whole image) · paid API", "整图 AI 生成 · Reimagine · 付费 API"),
+    ("Generate whole image · paid API", "AI 生成出片（整图）· 付费 API"),
     ("✨ Generate image", "✨ AI 生成出片"),
     ("Adjust generated image · paid API",
         "调整 AI 生成图 · Adjust · 付费 API"),
@@ -358,8 +358,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "整张图（涂抹可限定范围）"),
     ("select a ✨ AI generated card (or its ✎ edit) first",
         "先选中一张「✨ AI 生成」卡（或它的「✎」编辑卡）"),
-    ("Change the generated picture with the prompt: the whole image, or only the painted area when this fold's brush has strokes (blank = remove there). One gpt-image call per adjust — costs per image. The result is a new ✨ AI generated card; this card stays as it is; crop / straighten are not carried (set them on the new card). Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
-        "用提示词修改生成图：本折叠区的画笔没有涂抹时调整整张图，有涂抹时只重新生成涂抹区域（留空＝移除该区域的内容）。每次调整调用一次 gpt-image，按张付费。结果是一张新的「✨ AI 生成」卡；当前卡保持原样；裁剪／拉直不带过去（请在新卡上设置）。需图像 API（OPENAI_API_KEY，或设置里的 OAuth 图像桥）。"),
+    ("Change the generated picture with the prompt: the whole image, or only the painted area when this section's brush has strokes (blank = remove there). One gpt-image call per adjust — costs per image. The result is a new ✨ AI generated card; this card stays as it is; crop / straighten are not carried (set them on the new card). Needs an image API (OPENAI_API_KEY, or the OAuth image bridge in Settings).",
+        "用提示词修改生成图：本节的画笔没有涂抹时调整整张图，有涂抹时只重新生成涂抹区域（留空＝移除该区域的内容）。每次调整调用一次 gpt-image，按张付费。结果是一张新的「✨ AI 生成」卡；当前卡保持原样；裁剪／拉直不带过去（请在新卡上设置）。需图像 API（OPENAI_API_KEY，或设置里的 OAuth 图像桥）。"),
     ("adjusting generated image via gpt-image… (high quality can run minutes — progress in the status bar; ✕ Cancel to stop)",
         "正在通过 gpt-image 调整生成图…（高质量可能需要几分钟——进度见状态栏；点 ✕ 取消可停止）"),
     ("adjusted → new ✨ card (painted area only)",
@@ -384,7 +384,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Automatic · {card}", "自动 · {card}"),
     ("To: {card}", "目标：{card}"),
     ("The negative the reverse-fit starts FROM: the ▣ original, or a ◈ denoised / ▦ stacked master. Automatic = the ◈ / ▦ card you stand on, else the first one in the strip, else ▣.",
-        "反推的起点底片：▣ 原片，或 ◈ 去噪 / ▦ 堆栈母片。自动 = 你所在的 ◈ / ▦ 卡，否则卡片条里的第一张，都没有则用 ▣。"),
+        "反推的起点底片：▣ 原片，或 ◈ 去噪 / ▦ 堆栈底片。自动 = 你所在的 ◈ / ▦ 卡，否则卡片条里的第一张，都没有则用 ▣。"),
     ("Reverse-fit toward ANY finished version of THIS SAME photo — your own \
       Lightroom/Capture One export, the camera's JPEG, a TIFF, or another RAW \
       (developed neutrally first). The fit solves the develop parameters that \
@@ -394,24 +394,17 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "把本图的任意一张成品当作反推目标——你自己在 Lightroom / Capture One 导出的成片、相机直出 JPEG、TIFF，或另一个 RAW（会先中性显影）。反推求解的是能重现该文件观感的显影参数，不动你的像素。它只能是同一张照片：换成别的画面只会得到警告而不会被拒绝，而那样的结果没有意义。"),
     ("Forget this reference and go back to reverse-fitting the active generated variant",
         "清除这张参考图，回到反推当前 AI 生成变体"),
-    ("deep", "深度"),
-    ("DEEP REVERSE-FIT: run the review BEFORE saving and let it buy one \
-      guided retry — the reviewer's suggestion picks the next ACTION \
-      (add the zoned pass, pull the chroma chase back), never the \
-      numbers, and the retry is kept only if it re-scores at least as \
-      high. COST: up to two paid vision calls instead of one, and the \
-      save waits for them; there is NO cancel, exactly as for the \
-      review itself. Off = the reviewed fit is saved first and the \
-      score is a note (the behaviour of every release since v0.26.0).",
-        "深度反推：在保存之前先做复查，并让它换来一次按提示的重试——复查给出的提示只用来挑选下一个动作（加上分区处理、把饱和度拉回来），从不直接写参数；重试只有在复查分数不低于原分时才会被采用。开销：最多两次收费视觉调用而不是一次，保存也要等它们返回；与复查本身一样，没有取消。关闭 = 先保存复查过的反推结果，分数只作为一条注记（v0.26.0 以来每个版本的行为）。"),
-    ("Turn on 「AI review」 first — the deep fit is that review, iterated",
-        "请先勾选「AI 打分」——深度反推就是把这次复查反复做几轮"),
+    ("Retry once", "可重试一次"),
+    ("Retry once: runs the AI review before saving; if the review suggests a fix, tries it once and keeps whichever scores higher. Costs up to two paid vision calls instead of one, and the save waits for them; there is no cancel, as for the review itself. Off = the reviewed fit is saved first and the score is a note.",
+        "可重试一次：保存前先做 AI 打分；若打分给出改进建议，就按它试一次，保留分数更高的那个。开销：最多两次付费视觉调用而不是一次，保存要等它们返回；和打分本身一样没有取消。关闭 = 先保存打过分的反推结果，分数只作为一条注记。"),
+    ("Turn on 「AI review」 first — 「Retry once」 repeats that review",
+        "请先勾选「AI 打分」——「可重试一次」就是把这次打分再做一轮"),
     ("Reverse-fit recipe", "反推配方"),
     ("Statistical fit: reverse the freshly generated look into editable develop params (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes into this photo's develop store; hit Export to render the full-resolution result. Uses the Reverse-fit strength dial above as its honesty budget.",
         "统计拟合：把刚生成的观感反解成可编辑的 develop 参数（本地运算，无 API 费）。滑杆会更新（可 undo），RAW 会在该照片的显影库里生成 Lightroom XMP；再点「导出」可出全分辨率成品。使用上方「反推强度」滑杆作为反推的诚实预算。"),
     ("Extract style", "提取风格提示词"),
-    ("Compare the original / generated images and have the vision model write a reusable style prompt: auto-fills the Reimagine prompt (ready to restyle other photos) and saves ./out/<stem>.style.txt.",
-        "对比 原图/生成图，让 vision 模型写一段可复用的风格 prompt：自动填入 Reimagine 提示词（可直接给别的照片重绘用）并存 ./out/<stem>.style.txt。"),
+    ("Compare the original / generated images and have the vision model write a reusable style prompt: auto-fills the Generate image prompt (ready to restyle other photos) and saves <stem>.style.txt in the delivery folder.",
+        "对比 原图/生成图，让 vision 模型写一段可复用的风格 prompt：自动填入「AI 生成出片」提示词（可直接给别的照片重绘用）并把 <stem>.style.txt 存到成片文件夹。"),
     ("AI review", "AI 打分"),
     // R23-6 D: the hint is no longer discarded, so the tooltip says so.
     ("After the fit, show the target and the fitted render to the vision model and have it SCORE the match (0-100) with a short critique — LLM as a judge. One paid vision call per fit (needs the image API key); the fit itself stays local and free. The score, its critique AND its suggestion land in the status line below — nothing is changed for you. No cancel: like the fit itself, the app stays busy until the review returns.",
@@ -440,8 +433,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // "RAW only" was fill's semantics, copied and never re-synced. The new
     // text names the omission consequence the old one hid.
     ("Full-res heal", "全分辨率修复"),
-    ("Heal at full resolution (slow; without it a baked image is saved at 2048px)",
-        "在全分辨率上修复（慢；不勾选时烘焙图会按 2048px 保存为母版）"),
+    ("Heal at full resolution (slow; without it the retouched image is saved at 2048px)",
+        "在全分辨率上修复（慢；不勾选时修饰结果按 2048px 保存）"),
     ("gpt-image render quality — higher looks better and costs more per image",
         "gpt-image 出图质量 — 越高画质越好、单张费用也越高"),
     ("high", "高"),
@@ -478,8 +471,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ),
     ("🤖 AI heal (auto)", "🤖 AI 去瑕疵 (auto)"),
     ("Heal area", "修复涂抹区域"),
-    ("AI auto-detects dust / blemishes, or paint a mask and Heal it. Pixel retouch from surrounding pixels; saved to ./out.",
-        "AI 自动识别灰尘/瑕疵，或涂抹蒙版后修复。按周围像素做像素级修饰；存 ./out。"),
+    ("AI auto-detects dust / blemishes, or paint a mask and Heal it. Pixel retouch from surrounding pixels; saved to the delivery folder.",
+        "AI 自动识别灰尘/瑕疵，或涂抹蒙版后修复。按周围像素做像素级修饰；存到成片文件夹。"),
     ("Clone Stamp", "仿制图章 · Clone Stamp"),
     // ✓ (geometric) since 阶段5 — one finish-glyph family with 「✓ Apply」.
     ("✓ Done", "✓ 完成"),
@@ -487,10 +480,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "图章：Alt+点击取源点 → 画笔涂目标区 → 「⎘ 克隆已涂区域」"),
     ("⎘ Clone area", "⎘ 克隆已涂区域"),
     ("Full-res clone", "全分辨率克隆图章"),
-    ("Clone at full resolution (slow; without it a baked image is saved at 2048px)",
-        "全分辨率克隆（慢；不开启时烘焙图像按 2048px 保存）"),
-    ("Photoshop-style clone stamp: Alt+click to sample a source (cross marker), brush the area to cover, and pixels are carried over as-is from the source (feathered edges, no tone matching). Local compute, saves a ./out pixel master.",
-        "Photoshop 的仿制图章：Alt+点击取源（十字标记），画笔涂要覆盖的区域，按源点原样搬运像素（羽化边缘、不做色调匹配）。本地运算，存 ./out 像素母版。"),
+    ("Clone at full resolution (slow; without it the retouched image is saved at 2048px)",
+        "全分辨率克隆（慢；不开启时修饰结果按 2048px 保存）"),
+    ("Photoshop-style clone stamp: Alt+click to sample a source (cross marker), brush the area to cover, and pixels are carried over as-is from the source (feathered edges, no tone matching). Local compute, saves a pixel master in the delivery folder.",
+        "Photoshop 的仿制图章：Alt+点击取源（十字标记），画笔涂要覆盖的区域，按源点原样搬运像素（羽化边缘、不做色调匹配）。本地运算，像素母版存到成片文件夹。"),
 
     // ── Develop · shared slider helper ───────────────────────────────────────
     // NOT 归零: five sliders reset to a non-zero default (Temp 5500, Blending/
@@ -787,17 +780,17 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // fallback — a machine without torchvision still gets a mask, just U²-Net's
     // softer one, and 「it worked, but which model drew it」 is not a question
     // the product may leave unanswered.
-    ("BiRefNet salient-subject segmentation → bitmap mask (python sidecar: pip install torchvision timm einops; first run auto-downloads a ~444MB model; without them it falls back to U²-Net / pip install rembg, whose edges are softer)",
-        "BiRefNet 显著主体分割 → 位图蒙版（python sidecar：pip install torchvision timm einops；首次运行自动下载约 444MB 模型；未安装这些依赖时回退到 U²-Net / pip install rembg，边缘更模糊）"),
+    ("BiRefNet salient-subject segmentation → bitmap mask (Python helper: pip install torchvision timm einops; first run auto-downloads a ~444MB model; without them it falls back to U²-Net / pip install rembg, whose edges are softer)",
+        "BiRefNet 显著主体分割 → 位图蒙版（Python 配套脚本：pip install torchvision timm einops；首次运行自动下载约 444MB 模型；未安装这些依赖时回退到 U²-Net / pip install rembg，边缘更模糊）"),
     ("🤖 Select sky", "🤖 选天空"),
     // R27 Batch-4: the model NAME and its download size both changed with the
     // licence fix (SegFormer-B0's weights are "research or evaluation purposes
     // only"; OneFormer Swin-L is MIT). 14 MB -> 880 MB is a number the user
     // acts on before clicking, so the tooltip has to carry the real one.
-    ("OneFormer-ADE20K sky segmentation → bitmap mask (python sidecar: pip install transformers; first run auto-downloads a ~880MB model)",
-        "OneFormer-ADE20K 天空分割 → 位图蒙版（python sidecar：pip install transformers；首次运行自动下载约 880MB 模型）"),
-    ("this build did not ship the python sidecar — run AutoShade from the project directory, or point AUTOSHADE_SEGMENT_SCRIPT at python/segment.py",
-        "本版本未随发布包分发 python 边车——请从项目目录运行 AutoShade，或用 AUTOSHADE_SEGMENT_SCRIPT 指向 python/segment.py"),
+    ("OneFormer-ADE20K sky segmentation → bitmap mask (Python helper: pip install transformers; first run auto-downloads a ~880MB model)",
+        "OneFormer-ADE20K 天空分割 → 位图蒙版（Python 配套脚本：pip install transformers；首次运行自动下载约 880MB 模型）"),
+    ("This feature needs AutoShade's Python helper, which this download does not include. Install the full package, or (advanced) set AUTOSHADE_SEGMENT_SCRIPT to the path of segment.py",
+        "此功能需要 AutoShade 的 Python 配套脚本，当前安装包未包含。请安装完整版，或（高级）把 AUTOSHADE_SEGMENT_SCRIPT 设为 segment.py 的路径"),
 
     // ── Develop · selected-mask controls ─────────────────────────────────────
     ("Name", "名称"),
@@ -880,7 +873,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("this snapshot was taken on a generated variant, whose look lives in its pixels — the photo's own camera base look was applied so it renders on the negative",
         "这个快照存自 AI 生成变体，效果在像素里——已补上本照片自己的相机基础色调，让它在底片上正常渲染"),
     // R24-4: the edit-state list (variant cards above the version rows).
-    ("Variants (cards) ({n})", "变体（卡片） · Variants (cards) ({n})"),
+    ("Variants ({n})", "变体（{n}）"),
     ("Snapshot history", "快照历史 · Snapshot history"),
     ("· current", "· 当前"),
     ("· pixel-state (no XMP)", "· 像素态（不出 XMP）"),
@@ -961,8 +954,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Adjust the CURRENT edit instead of proposing from scratch — your sliders are the starting point (enabled once the edit is non-neutral).",
         "在当前编辑基础上微调，而不是从零提议——你的滑杆就是起点（编辑非中性后可用）。"),
     ("Reset", "重置"),
-    ("Back to this photo's fresh-open look: sliders neutral on the camera-matched base (one undo brings it back)", "回到本照片刚打开的状态：全部滑杆归中性、保留相机基调（一步撤销可回来）"),
-    ("saved before the camera base look — renders as originally tuned; Reset switches to the camera-matched base", "此存档保存于相机基调功能之前——按原样渲染；Reset 可切换到相机基调"),
+    ("Back to this photo's fresh-open look: sliders neutral on the camera's own default colour and tone, like the in-camera JPEG (one undo brings it back)", "回到本照片刚打开的状态：全部滑杆归中性、保留相机自带的默认色调（接近机内 JPEG）（一步撤销可回来）"),
+    ("saved before this version's camera default tone — renders as originally tuned; Reset switches to the camera's own default colour and tone", "此存档保存于相机默认色调功能之前——按原样渲染；「重置」可切换到相机自带的默认色调"),
     ("↶ Undo", "↶ 撤销"),
     ("↷ Redo", "↷ 重做"),
 
@@ -977,8 +970,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "向左转 90 度——裁剪与全部蒙版随之旋转（一步撤销）"),
     ("A quarter turn clockwise — the crop and every mask turn with it (one undo)",
         "向右转 90 度——裁剪与全部蒙版随之旋转（一步撤销）"),
-    ("rotation is off while this photo carries baked pixels (retouch / AI rendition) or a tool is armed — its master raster is a file in the frame it was baked in; turn first, retouch after",
-        "本照片带有已烘焙像素（修复 / AI 生成）或有工具处于待用状态时不可旋转——它的主图是一张按烘焙时画幅写入磁盘的文件；请先旋转，再修复"),
+    ("rotation is off while this photo carries rendered pixels (retouch / AI rendition) or a tool is armed — its master raster is a file in the frame it was rendered in; turn first, retouch after",
+        "本照片带有已成像的像素（修复 / AI 生成）或有工具处于待用状态时不可旋转——它的主图是一张按成像时画幅写入磁盘的文件；请先旋转，再修复"),
     ("could not turn this photo: {err} — nothing was changed",
         "无法旋转本照片：{err}——未做任何改动"),
     ("this photo is turned, and pixel repairs still work on the un-turned frame — turn it back to 0 first",
@@ -990,8 +983,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── AI panel · the reverse-fit's OWN strength (user decision 2026-09-12) ──
     ("Reverse-fit strength", "反推强度"),
-    ("The reverse-fit's honesty budget — its own dial: the Analysis Strength above does not reach the fit. At or below the default 65% the fit is byte-identical to the calibrated path. Above it the Atmosphere budget widens, and a white balance outside the budget shrinks along its fitted move instead of staying as-shot. From 85% unsupported movement is DISCLOSED (confidence capped) instead of withheld. Double-click to reset.",
-        "反推的诚实预算——反推自己的滑杆：上方「分析」里的强度不影响反推。不高于默认 65% 时，拟合与标定路径逐字节相同。高于它，Atmosphere 预算放宽，超出预算的白平衡沿拟合方向收缩而不是退回机内值。85% 起，没有证据支撑的移动改为披露（置信度封顶）而不是扣下。双击复位。"),
+    ("How far the fit may move sliders on weak evidence. At the default 65% it only moves what both images clearly support; higher values let it go further and flag those moves in the notes. This is separate from the Analysis Strength above. Double-click to reset.",
+        "证据不足时反推可以把滑杆推多远。默认 65% 只移动两张图都支持的部分；调高可走得更远，并在说明里标出这些移动。与上方「分析」里的强度无关。双击复位。"),
 
     // ── AI panel · reference libraries (R23-2 feedback #6; R30 ladder) ───────
     ("⚠ no library", "⚠ 未建库"),
@@ -1082,11 +1075,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "Ctrl+S · 把这张照片的显影保存到显影库（配方 + RAW 附带 Lightroom/ACR XMP；已烘焙的修饰母版会被关联，重新打开可恢复）"),
 
     // ── Empty-state landing screen (update()) ────────────────────────────────
-    ("AI auto-develop · RAW develop", "AI 自动出片 · RAW develop"),
+    ("AI auto-edit · RAW processing", "AI 自动出片 · RAW 显影"),
     ("Open photo…  (Ctrl+O)", "打开照片…  (Ctrl+O)"),
     ("🗂 Open folder…", "🗂 打开文件夹…"),
     ("or drag a RAW / image straight into the window · drag & drop anywhere",
-        "或把 RAW / 图片直接拖进窗口 · drag & drop anywhere"),
+        "或把 RAW / 图片直接拖进窗口"),
 
     // ── Variant strip · kind labels + switch status ──────────────────────────
     ("▣ Original", "▣ 原片"),
@@ -1125,14 +1118,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("▨ AI mask (re-derived locally, not Adobe's raster)",
         "▨ AI 蒙版（本机重算，非 Adobe 原栅格）"),
     ("▨ AI mask (carried, not yet re-derived)", "▨ AI 蒙版（已带走，尚未重算）"),
-    ("Select…", "选择… / pick"),
+    ("Select…", "选择…"),
     ("or type a custom id", "或输入自定义模型 id"),
 
     // ── Versions · save / load snapshots (status) ────────────────────────────
     ("Version v{n} saved → {path}", "版本 v{n} 已存 → {path}"),
     ("Save version failed: {err}", "存版本失败: {err}"),
     ("Loaded version v{n} — Ctrl+Z returns to before the load", "已载入版本 v{n} — Ctrl+Z 可回到载入前"),
-    ("camera base look re-estimated — this photo was saved by an earlier version, whose estimate of the camera's tone this version replaces", "相机基调已重估——这张照片由旧版本保存，其相机基调估计已按本版本重做"),
+    ("camera base look re-estimated — this photo was saved by an earlier version, whose estimate of the camera's tone this version replaces", "相机默认色调已重估——这张照片由旧版本保存，其相机默认色调的估计已按本版本重做"),
     ("this photo's saved crop and masks were rotated to match the RAW's EXIF orientation — earlier versions displayed rotated RAWs sideways, so their coordinates were stored against the sideways frame", "本照片存档的裁剪与蒙版已按 RAW 的 EXIF 方向转正——旧版本没有把旋转过的 RAW 转正显示，这些位置便是按未转正的画面记录的"),
     ("this photo's saved crop, masks and retouches were moved by ({dx}, {dy}) px — earlier versions developed this camera's RAWs from the sensor's corner instead of the crop the camera declares, so everything drawn on them sat that far off the picture", "本照片存档的裁剪、蒙版与修饰已平移 ({dx}, {dy}) px——旧版本把这台相机的 RAW 从传感器角落开始显影，而不是从相机声明的裁剪框，画在上面的一切都偏了这么多"),
     ("{n} raster mask file(s) were re-written into the corrected frame; the originals are kept", "{n} 个栅格蒙版文件已按修正后的画面重写；原文件保留"),
@@ -1168,7 +1161,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // ── Status bar · open / decode / scan / settings / esc ───────────────────
     ("decoding {path} …", "解码 {path} …"),
     ("scanning {path} …", "扫描 {path} …"),
-    ("settings saved — applies to the next AI call (Analyze / Fill / Reimagine)", "设置已保存 — 对下一次 AI 调用生效（分析 / 生成填充 / 重绘）"),
+    ("settings saved — applies to the next AI call (Analyze / Fill / Generate image)", "设置已保存 — 对下一次 AI 调用生效（分析 / 填充 / AI 生成出片）"),
     ("preview develop failed", "预览显影失败"),
     ("ready — adjust sliders or run AI Analyze", "就绪 — 拉滑杆或运行 AI 分析"),
     ("ready — restored saved edits ({kind}); Reset returns to neutral",
@@ -1205,7 +1198,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("batch {n} done → {path}", "批量 {n} 张完成 → {path}"),
     ("Batch: {ok} succeeded, {fail} failed: {detail}", "批量：{ok} 成功、{fail} 失败：{detail}"),
     (" · same-name photos kept apart: {list}", " · 同名照片已避让：{list}"),
-    (" · {n} base look(s) re-estimated (saved by an earlier version)", " · {n} 张的相机基调已重估（旧版本保存）"),
+    (" · {n} base look(s) re-estimated (saved by an earlier version)", " · {n} 张的相机默认色调已重估（旧版本保存）"),
     ("Batch-rendering {done}/{total} …", "批量渲染 {done}/{total} …"),
     ("Pasting recipe to {n} photos…", "粘贴配方到 {n} 张…"),
     ("Recipe pasted to {ok} photos ({xmp} XMP) → develop store", "配方已粘贴到 {ok} 张（{xmp} 个 XMP）→ 显影库"),
@@ -1236,7 +1229,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" Zoned {label} kept the current recipe: the residual did not earn bands (R2={r2}).", " 区域 {label} 保留现有配方：残差未支持分段（R2={r2}）。"),
     (" Zoned {label} kept the current recipe: {k} trial bands regressed or failed a gate ({reason}, {trials} trials); R2={r2}, breaks={breaks}, overlap={overlap}, deltaE {before} -> {after}, seam {seam_before} -> {seam_after}, target steps {step_before} -> {step_after}, worst cell regression {regression}.", " 区域 {label} 保留现有配方：{k} 段试算回退或未通过门控（{reason}，{trials} 次试算）；R2={r2}，分界={breaks}，重叠={overlap}，色差 {before} → {after}，边界 {seam_before} → {seam_after}，目标边界 {step_before} → {step_after}，最差单元回退 {regression}。"),
     ("bitmap components omitted ×{n}", "位图组件未写入 ×{n}"),
-    ("mask rasters not embedded ×{n}", "蒙版栅格未嵌入侧车 ×{n}"),
+    ("mask rasters not embedded ×{n}", "蒙版栅格未嵌入边车 ×{n}"),
     (" Zoned {label} colour controls shipped at {share} of the solved move on REGION evidence: the pixel-scale reading withholds hue bands [{hue_bands}], the full move was refused by the target's own 12x8 cell means ({full}), and at this share {converged} of the region moved closer, {diverged} moved away, and {aligned} moved in the direction its own target asks for.",
         " 分区 {label} 的色彩控件按区域证据、以求解移动的 {share} 份额发布：像素尺度的读数暂不调整色相 [{hue_bands}]，完整移动被目标自身的 12x8 单元均值拒绝（{full}），按此份额区域的 {converged} 更接近目标，{diverged} 反而远离，{aligned} 的移动方向与各自目标要求的方向一致。"),
     (" Zoned {label} tone controls shipped at {share} of the solved move on REGION evidence: the pixel-scale reading withholds luma ranges [{luma_ranges}], the full move was refused by the target's own 12x8 cell means ({full}), and at this share {converged} of the region moved closer, {diverged} moved away, and {aligned} moved in the direction its own target asks for.",
@@ -1319,8 +1312,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "已取消的 AI 调用仍在运行（仍在计费）— 它结束或超时后此按钮会重新可用"),
     ("Stop waiting: the app unblocks now and the late result is discarded. A generative call halts at its next checkpoint; an AI analyze keeps running (and billing) until it finishes or times out",
         "停止等待：应用立即解锁，迟到结果将被丢弃。生成类调用会在下一检查点停止；AI 分析则会一直跑到完成或超时（仍然计费）"),
-    ("over 999 retouch masters for this photo — clean up ./out first",
-        "本照片的修饰母版已超过 999 个 — 请先清理 ./out"),
+    ("over 999 retouch masters for this photo — clean up the delivery folder first",
+        "本照片的修饰母版已超过 999 个 — 请先清理成片文件夹"),
     (" · previous save backed up as v{n}", " · 之前的保存已备份为 v{n}"),
     ("● unsaved", "● 未保存"),
     ("This card differs from its saved develop — Ctrl+S saves every card; switching photos keeps unsaved work for this session only",
@@ -1333,15 +1326,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "因配方上限从已存的变体卡片丢弃了 {n} 个蒙版、{m} 个组合项、{c} 个曲线点、{s} 个字符字节 — 存档文件超出应用上限"),
     ("not saved — a develop-store write failed: {err}",
         "未保存 — 显影库写入失败：{err}"),
-    ("this photo's variant strip (variants.json) cannot be read — background variants stay hidden and saving refuses until the file is fixed or deleted",
-        "此照片的变体条（variants.json）无法读取 — 后台变体保持隐藏，保存将被拒绝，直到该文件被修复或删除"),
+    ("this photo's variant list (variants.json in its develop store) cannot be read — background variants stay hidden and saving refuses until that file is repaired or deleted (the store's location is in Settings)",
+        "此照片的变体清单（显影库里的 variants.json）无法读取 — 后台变体保持隐藏，保存将被拒绝，直到该文件修复或删除（显影库位置见设置）"),
     ("the saved develop is unreadable ({err}) — edits NOT fully restored; Ctrl+S would overwrite it (the unread save is backed up as a version first)",
         "已保存的显影无法读取（{err}）— 编辑未完整恢复；Ctrl+S 会覆盖它（未能读取的保存会先备份为版本）"),
     ("a saved develop exists but holds no effective edits", "已保存的显影存在但不含有效编辑"),
     ("the current variant holds no edits; this photo's saved edits live in {n} background variant(s)",
         "当前变体未作修改；本照片已保存的编辑在 {n} 个后台变体中"),
-    ("AI develop applied — verdict {v}: NOT saved (Ctrl+S keeps it, Ctrl+Z steps back)",
-        "AI 显影已应用 — 判词 {v}：未保存（Ctrl+S 保留，Ctrl+Z 回退）"),
+    ("AI edit applied — the AI's self-check said: {v}. Not saved yet (Ctrl+S saves, Ctrl+Z undoes)",
+        "AI 调整已应用 —— AI 自查结果：{v}。尚未保存（Ctrl+S 保存，Ctrl+Z 撤销）"),
     // Verdict decision words (advisor::decision_key) + the verdict line
     // skeleton, rendered at draw time so a language switch re-renders them.
     ("Accept", "接受"),
@@ -1380,8 +1373,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("AI segmenting {what}… (first run auto-downloads the model; failures are reported here)",
         "AI 分割{what}中…（首次运行自动下载模型；失败会在此报告）"),
     ("Reset to its default", "重置为默认值"),
-    ("Language & Theme apply immediately. The provider sections below persist via 「Save settings」 to autoshade.local.json in your per-user AutoShade folder (never in a repo) and apply to the next AI call (Analyze / Fill / Reimagine).",
-        "「语言」与「主题」立即生效。下方的提供商设置经「保存设置」写入你 AutoShade 个人目录下的 autoshade.local.json（不在仓库里），对下一次 AI 调用生效（分析 / 填充 / 重绘）。"),
+    ("Language & Theme apply immediately. The provider sections below persist via 「Save settings」 to autoshade.local.json in your per-user AutoShade folder (never in a repo) and apply to the next AI call (Analyze / Fill / Generate image).",
+        "「语言」与「主题」立即生效。下方的提供商设置经「保存设置」写入你 AutoShade 个人目录下的 autoshade.local.json（不在仓库里），对下一次 AI 调用生效（分析 / 填充 / AI 生成出片）。"),
 
     // ── Status bar · WB / range pick + manual mask placement ─────────────────
     ("WB eyedropper: {k} K · tint {tint} — fine-tune in the Tone section",
@@ -1400,8 +1393,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "蒙版已放置 — 在左侧「局部蒙版」里拉滑杆（当前全为 0，无可见效果）"),
 
     // ── Status bar · generative fill / heal / clone ──────────────────────────
-    ("write what to change (e.g. remove the wires on the left), or paint the area to remove (🖌 Paint area, in this fold)",
-        "写下要改什么（例如：去掉左侧的电线），或在本折叠区点「🖌 涂抹区域」涂抹要移除的区域"),
+    ("write what to change (e.g. remove the wires on the left), or paint the area to remove (🖌 Paint area, in this section)",
+        "写下要改什么（例如：去掉左侧的电线），或在本节点「🖌 涂抹区域」涂抹要移除的区域"),
     ("generative fill (full-res render)… (slow, minutes)", "生成填充（全分辨率渲染）…（慢，数分钟）"),
     ("generative fill via gpt-image… (high quality can run minutes — progress in the status bar; ✕ Cancel to stop)",
         "gpt-image 生成填充中…（高质量可能需要数分钟——进度见状态栏；✕ 取消可停止）"),
@@ -1409,8 +1402,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "已改动画面的 {pct}% → {path}（作为图层盖在本卡调色之上——Ctrl+Z 可撤下；本卡自己的像素不动）"),
     ("filled → {path} (a layer over this card's develop — Ctrl+Z takes it off; the card's own pixels are untouched)",
         "已填充 → {path}（作为图层盖在本卡调色之上——Ctrl+Z 可撤下；本卡自己的像素不动）"),
-    ("paint the spots first (🖌 Paint area, in this fold), then Heal area",
-        "先在本折叠区点「🖌 涂抹区域」涂抹瑕疵，再「修复涂抹区域」"),
+    ("paint the spots first (🖌 Paint area, in this section), then Heal area",
+        "先在本节点「🖌 涂抹区域」涂抹瑕疵，再「修复涂抹区域」"),
     ("healing painted area…", "修复涂抹区域中…"),
     ("AI healing… (~10-30s)", "AI 去瑕疵中…（约 10-30 秒）"),
     ("healed {n} spot(s) → {path}", "已修复 {n} 处 → {path}"),
@@ -1431,20 +1424,20 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // sits in the fold whose verb reads it). The Export fold's twin below
     // keeps that block's 降噪.
     ("AI denoise strength", "AI 去噪强度"),
-    ("Detail AI denoise strength, independent of the Export fold. On a RAW, the dial removes luminance grain after demosaic in linear light; the default targets Lightroom Denoise 50. Higher is cleaner, 100% is the complete network output. Every positive strength keeps clean colour; exactly 0% leaves the input untouched. Baked sources keep SCUNet's separate 50% default. Double-click to reset this source type.", "去噪折叠区的 AI 降噪强度，与导出折叠区独立。RAW 上这把滑杆在去马赛克后以线性光去除亮度颗粒，默认值以 Lightroom 降噪 50 为参照。调高更干净，100% 是网络的完整输出。任何正强度均保留干净的颜色，恰好 0% 则保持原片不变。烘焙图仍用 SCUNet，独立默认值为 50%。双击重置当前源类型的强度。"),
-    ("Denoise this card's pixels at full resolution — a RAW on its sensor mosaic before demosaic, a baked source through SCUNet — and land the result as a new ◈ Denoised negative card carrying this card's develop; the card you started from keeps its pixels (first run downloads the model)",
-        "对本卡的像素做全分辨率去噪——RAW 在 RAW 原始数据上、烘焙图走 SCUNet——结果落成新的「◈ 去噪原片」卡，带着本卡的显影；你出发的那张卡像素不动（首次运行会下载模型）"),
+    ("Detail AI denoise strength, independent of the Export section. On a RAW, the dial removes luminance grain after demosaic in linear light; the default targets Lightroom Denoise 50. Higher is cleaner, 100% is the complete network output. Every positive strength keeps clean colour; exactly 0% leaves the input untouched. Already-rendered images (JPEG, PNG, TIFF, a retouched or AI result) use a different denoiser with its own 50% default. Double-click to reset this source type.", "细节一节的 AI 降噪强度，与导出一节独立。RAW 上这把滑杆在去马赛克后以线性光去除亮度颗粒，默认值以 Lightroom 降噪 50 为参照。调高更干净，100% 是网络的完整输出。任何正强度均保留干净的颜色，恰好 0% 则保持原片不变。已成像的图（JPEG、PNG、TIFF，或修饰/AI 结果）用另一个去噪模型，独立默认值为 50%。双击重置当前源类型的强度。"),
+    ("Denoise this card's pixels at full resolution — a RAW on its sensor mosaic before demosaic, an already-rendered image through its own denoiser — and land the result as a new ◈ Denoised negative card carrying this card's develop; the card you started from keeps its pixels (first run downloads the model)",
+        "对本卡的像素做全分辨率去噪——RAW 在 RAW 原始数据上、已成像的图走它自己的去噪模型——结果落成新的「◈ 去噪底片」卡，带着本卡的显影；你出发的那张卡像素不动（首次运行会下载模型）"),
     // The ◈ card's own line in the strip (2026-09-15).
-    ("◈ Denoised negative", "◈ 去噪原片"),
+    ("◈ Denoised negative", "◈ 去噪底片"),
     ("The negative AI-denoised into its own master: develop it like the ▣ card, reverse-fit and reimagine read it as the negative while it exists; a .xmp from it carries the sliders only — run Lightroom's own Denoise there",
-        "AI 去噪后的原片，自成母图：像 ▣ 卡一样显影；它存在时反推与生图都以它为原片；从它写出的 .xmp 只带滑杆——去噪在 Lightroom 里用它自己的去噪"),
+        "AI 去噪后的底片，自成母图：像 ▣ 卡一样显影；它存在时反推与生图都以它为底片；从它写出的 .xmp 只带滑杆——去噪在 Lightroom 里用它自己的去噪"),
     // The capability arm. WORD-FOR-WORD the segmentation buttons' missing-
     // sidecar line (only the env var and the file name differ), because it is
     // word-for-word the same situation — a release package ships neither
     // helper — and two wordings for one condition is how a user concludes they
     // are two different problems.
-    ("this build did not ship the python sidecars — run AutoShade from the project directory, or point AUTOSHADE_DENOISE_SCRIPT and AUTOSHADE_DENOISE_RAW_SCRIPT at python/denoise.py and python/denoise_raw.py",
-        "本版本未随发布包分发 python 边车——请从项目目录运行 AutoShade，或用 AUTOSHADE_DENOISE_SCRIPT 与 AUTOSHADE_DENOISE_RAW_SCRIPT 指向 python/denoise.py 与 python/denoise_raw.py"),
+    ("This feature needs AutoShade's Python helpers, which this download does not include. Install the full package, or (advanced) set AUTOSHADE_DENOISE_SCRIPT and AUTOSHADE_DENOISE_RAW_SCRIPT to the paths of denoise.py and denoise_raw.py",
+        "此功能需要 AutoShade 的 Python 配套脚本，当前安装包未包含。请安装完整版，或（高级）把 AUTOSHADE_DENOISE_SCRIPT 与 AUTOSHADE_DENOISE_RAW_SCRIPT 设为 denoise.py 与 denoise_raw.py 的路径"),
     ("AI denoise (full frame)… (GPU sidecar, can take minutes; first run downloads the model)",
         "AI 去噪（全画幅）中…（GPU 边车，可能需数分钟；首次运行会下载模型）"),
     // v1.5.0 Track S — 堆栈/合成
@@ -1482,8 +1475,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "正在渲染全分辨率 → {path} …（这张 ◈ 卡已经去噪——导出时 AI 降噪不再运行）"),
     ("An operation is still running — wait for it to finish, then close",
         "还有操作在运行——等它完成后再关闭"),
-    ("over 999 generated variants for this photo — clean up ./out first",
-        "这张照片的生成变体已超过 999 个——请先清理 ./out"),
+    ("over 999 generated variants for this photo — clean up the delivery folder first",
+        "这张照片的生成变体已超过 999 个——请先清理成片文件夹"),
 
     // ── Status bar · reimagine / reverse-fit / style prompt ──────────────────
     ("AI generating… (gpt-image; high quality can run minutes — progress in the status bar; ✕ Cancel to stop; hi-res input needs a full-frame develop first)",
@@ -1493,8 +1486,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Reverse-fitting… (global + semantic/ranges + spatial tiles)",
         "反推配方中…（全局 + 语义/亮度范围 + 空间图块）"),
     ("Reverse-fitting… (statistical fit, local compute)", "反推配方中…（统计拟合，本地运算）"),
-    ("Reverse-fit done: look residual {before}→{after} · created a「Reverse-fit」variant (editable / XMP / full-res)",
-        "反推完成：look 残差 {before}→{after} · 已建「反推」变体（可编辑/导 XMP/出全分辨率）"),
+    ("Reverse-fit done: difference from target {before}→{after} (lower = closer) · created a「Reverse-fit」variant (editable / XMP / full-res)",
+        "反推完成：与目标的差异 {before}→{after}（越小越接近）· 已建「反推」变体（可编辑/导 XMP/出全分辨率）"),
     (" · includes sky-zone correction (editable in the mask panel; native masks export to XMP and remaining losses are named)",
         " · 含天空分区校正（蒙版面板可调；原生蒙版写入 XMP，其余损失分别说明）"),
     (" · includes native range correction (adjustable in the mask panel and written to XMP)",
@@ -1506,32 +1499,32 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " · AI 打分不可用（{err}）——反推本身已完成"),
     // ── R33: the solver facts the status line opens with
     (" · full solve (all develop controls)", " · 完整求解（全部显影控制）"),
-    (" · Atmosphere mode (bounded robust controls — the structure diverged)",
-        " · 氛围模式（有界稳健控制——结构已发生差异）"),
-    (" · paired pixel-to-pixel (D {fine} at pixel scale, {coarse} at layout scale)",
-        " · 逐像素配对（D 像素尺度 {fine}，布局尺度 {coarse}）"),
-    (" · paired by cell statistics only (D {fine} at pixel scale, {coarse} at layout scale)",
-        " · 仅按单元统计配对（D 像素尺度 {fine}，布局尺度 {coarse}）"),
+    (" · mood-only match (the two images differ in content, so only overall tone and colour were matched)",
+        " · 仅匹配氛围（两张图内容不同，只匹配整体影调与色彩）"),
+    (" · matched pixel to pixel (difference {fine} at pixel scale, {coarse} at layout scale)",
+        " · 逐像素配对（差异：像素尺度 {fine}，布局尺度 {coarse}）"),
+    (" · matched by cell statistics only (difference {fine} at pixel scale, {coarse} at layout scale)",
+        " · 仅按单元统计配对（差异：像素尺度 {fine}，布局尺度 {coarse}）"),
     // ── R23-6: the reverse-fit's own status facts (workers::render_fit_note)
-    (" · it suggests: {hint} (nothing was changed — tick 「deep」 to let it try)",
-        " · 它的建议：{hint}（什么都没有改动——勾选「深度」才会让它去试）"),
+    (" · it suggests: {hint} (nothing was changed — tick 「Retry once」 to let it try)",
+        " · 它的建议：{hint}（什么都没有改动——勾选「可重试一次」才会让它去试）"),
     (" · ⚠ THE REVERSE-FIT WAS DISCARDED: every version of it rendered farther from the target than your untouched photo, so the recipe was reset to neutral — this is the same as not having reverse-fitted at all",
         " · ⚠ 反推结果已被丢弃：它的每一个版本渲染出来都比你未处理的原图离目标更远，配方已重置为中性——这与没有做反推是一样的"),
     (" · ⚠ the reference's proportions do not match this photo — it was cropped, or it is not the same frame; either way the two distributions are not comparable",
         " · ⚠ 参考图与本图的比例不一致——它被裁切过，或者不是同一张；两者都会让两边的分布无法相比"),
-    (" · deep: AI review BEFORE saving, up to one guided retry",
-        " · 深度：保存之前先做 AI 复查，最多一次按提示的重试"),
-    (" · deep: the review found nothing this app can act on — the plain fit stands",
-        " · 深度：复查没有给出本应用做得了的动作——保留原始反推结果"),
-    (" · deep: the review asked for {action}, which could not be carried out — the plain fit stands",
-        " · 深度：复查要求「{action}」，但它没能生效——保留原始反推结果"),
-    (" · deep: tried {action} on the review's suggestion and kept it (it re-scored at least as high)",
-        " · 深度：按复查提示试了「{action}」，已采用（复查分数不低于原分）"),
-    (" · deep: tried {action} on the review's suggestion and discarded it (it re-scored lower)",
-        " · 深度：按复查提示试了「{action}」，已丢弃（复查分数更低）"),
+    (" · retry: AI review BEFORE saving, up to one guided retry",
+        " · 重试：保存之前先做 AI 复查，最多一次按提示的重试"),
+    (" · retry: the review found nothing this app can act on — the plain fit stands",
+        " · 重试：复查没有给出本应用做得了的动作——保留原始反推结果"),
+    (" · retry: the review asked for {action}, which could not be carried out — the plain fit stands",
+        " · 重试：复查要求「{action}」，但它没能生效——保留原始反推结果"),
+    (" · retry: tried {action} on the review's suggestion and kept it (it re-scored at least as high)",
+        " · 重试：按复查提示试了「{action}」，已采用（复查分数不低于原分）"),
+    (" · retry: tried {action} on the review's suggestion and discarded it (it re-scored lower)",
+        " · 重试：按复查提示试了「{action}」，已丢弃（复查分数更低）"),
     ("Reverse-fit failed", "反推失败"),
-    ("Style prompt extracted → filled into the Reimagine prompt (also saved ./out/<stem>.style.txt)",
-        "风格提示词已提取 → 已填入 Reimagine 提示词（同时存 ./out/<stem>.style.txt）"),
+    ("Style prompt extracted → filled into the Generate image prompt (also saved <stem>.style.txt in the delivery folder)",
+        "风格提示词已提取 → 已填入「AI 生成出片」提示词（同时把 <stem>.style.txt 存到成片文件夹）"),
     ("Extracting style prompt… (vision, ~5-20s)", "提取风格提示词中…（vision，约 5-20 秒）"),
     ("Style extraction failed", "风格提取失败"),
 
@@ -1598,9 +1591,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Develop store", "显影库 · Develop store"),
     // R25: the read-only segmentation-sidecar row (closing R22-1 as the
     // security ruling it is — see panels/settings.rs).
-    ("Segmentation sidecar", "分割边车"),
-    ("This path can only be set by environment variable, because it is executed",
-        "此路径只能用环境变量设置，因为它会被当作程序启动"),
+    ("Segmentation helper", "分割脚本"),
+    ("Set with the AUTOSHADE_SEGMENT_SCRIPT environment variable (not editable here, because the app runs this file)",
+        "用环境变量 AUTOSHADE_SEGMENT_SCRIPT 设置（此处不能改，因为程序会运行这个文件）"),
     ("Where saved develops live: recipes, Lightroom XMP, version snapshots and mask rasters — one folder per photo, keyed by its absolute path. Override the location with the AUTOSHADE_DATA_DIR environment variable.",
         "已保存显影的存放地：配方、Lightroom XMP、版本快照与蒙版栅格 — 每张照片一个文件夹，按其绝对路径键控。可用 AUTOSHADE_DATA_DIR 环境变量改存放位置。"),
     // R22-8 · SF8-C: the row shows the OPEN photo's hash subdirectory, so it
@@ -1649,25 +1642,25 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("AI", "AI"),
     ("AI Analyze", "AI 分析"),
     ("AI proposes a recipe from scratch (GPT proposal + validation + a visual review: the result is RENDERED and judged by the vision model, which may buy one guided revision), written into the sliders — undoable. Uses the reference library or the Direction above (the switch picks one); Strength steers it. COST, worst case: 11 API calls, 6 of them carrying images (8 high-detail frames). Ticking 「Deep thinking」 below OR pushing Strength above 70% raises that ceiling — either one alone does it; the Deep thinking tooltip has the numbers.",
-        "AI 从零提案配方（GPT 提案+验证+视觉复查：结果渲染后交视觉模型打分，低分会多跑一轮提示修订），直接写入滑杆——可撤销。按上方开关二选一：读参考图库，或读「方向」文本；强度滑杆一同生效。费用最多为 11 次 API 调用，其中 6 次带图（8 张高清图）。勾选下方的「Deep thinking」或把强度调到 70% 以上，都会把这个上限提高——两者占其一即可；具体数字见它自己的说明。"),
+        "AI 从零提案配方（GPT 提案+验证+视觉复查：结果渲染后交视觉模型打分，低分会多跑一轮提示修订），直接写入滑杆——可撤销。按上方开关二选一：读参考图库，或读「方向」文本；强度滑杆一同生效。费用最多为 11 次 API 调用，其中 6 次带图（8 张高清图）。勾选下方的「深度思考」或把强度调到 70% 以上，都会把这个上限提高——两者占其一即可；具体数字见它自己的说明。"),
     // R23-4 · feedback #13: the thinking-mode switch and its cost disclosure.
     ("Deep thinking", "深度思考"),
     ("Make the AI show its work and let it iterate. The proposal must first name what it sees, decide EACH tool family (tone / white balance / presence / HSL / colour grading / curves / detail / framing / masks) with a reason, state the look it is going for, and end by critiquing its own answer — those three sentences land in the 「Deep thinking」 box under the rationale. It also asks the image model for one step more reasoning effort (only when a tier other than 「provider default」 is set in Settings), and lets the visual judge keep going until it scores well enough: 2 rounds at a balanced Strength, 3 above 70%. COST: a normal analyze is at worst 11 API calls (6 with images, 8 high-detail frames); with this box ticked OR Strength above 70% — either one alone is enough — it is at worst 17 calls (10 with images, 14 high-detail), plus roughly 10-20% more output tokens per proposal. Batch and the eval harness never do this.",
-        "让 AI 把思考过程写出来，并允许它反复改进。提案要先说明它读到的画面，对每一类工具（影调 / 白平衡 / 清晰与饱和 / HSL / 调色 / 曲线 / 细节 / 裁切 / 蒙版）逐一给出用或不用的理由，说明想要的成片效果，最后再对自己的结果做一次自查——这三段话会出现在说明下方的「深度思考」框里。它还会把图像模型的推理档位本次提高一级（仅在设置里选了「provider default」以外的档位时有效），并让视觉复查继续跑到分数达标为止：强度中等时 2 轮，高于 70% 时 3 轮。费用：不开本项时一次分析最多 11 次 API 调用（6 次带图，8 张高清图）；只要勾选本项，或把强度调到 70% 以上（两者占其一即可），最多 17 次调用（10 次带图，14 张高清图），每次提案还多约 10-20% 的输出 token。批处理与 eval 从不启用它。"),
+        "让 AI 把思考过程写出来，并允许它反复改进。提案要先说明它读到的画面，对每一类工具（影调 / 白平衡 / 清晰与饱和 / HSL / 调色 / 曲线 / 细节 / 裁切 / 蒙版）逐一给出用或不用的理由，说明想要的成片效果，最后再对自己的结果做一次自查——这三段话会出现在说明下方的「深度思考」框里。它还会把图像模型的推理档位本次提高一级（仅在设置里选了「由供应商决定」以外的档位时有效），并让视觉复查继续跑到分数达标为止：强度中等时 2 轮，高于 70% 时 3 轮。费用：不开本项时一次分析最多 11 次 API 调用（6 次带图，8 张高清图）；只要勾选本项，或把强度调到 70% 以上（两者占其一即可），最多 17 次调用（10 次带图，14 张高清图），每次提案还多约 10-20% 的输出 token。批处理与 eval 从不启用它。"),
     ("Direction", "方向"),
     ("Ctrl+Z · undo the last edit", "Ctrl+Z · 撤销上一步编辑"),
     ("Ctrl+Y · redo the undone edit", "Ctrl+Y · 重做撤销的编辑"),
     ("◫ Compare", "◫ 对比"),
     ("Export", "导出 · Export"),
     ("Export to the Destination (Destination + settings in the Export section)",
-        "导出到「目标位置」（目标位置与设置都在 Export 节）"),
+        "导出到「目标位置」（目标位置与设置都在「导出」一节）"),
     ("Format", "格式"),
     ("Save develop", "保存显影"),
     ("Save develop (recipe + XMP for RAW)", "保存显影（recipe + RAW 的 XMP）"),
     ("Ctrl+Shift+E (or Ctrl+E) · full-resolution render to the Destination below (follows the current variant's pixels); Destination + settings live in the Export section",
-        "Ctrl+Shift+E（或 Ctrl+E）· 全分辨率渲染到下方「目标位置」（跟随当前变体的像素）；目标位置与其余设置都在 Export 节"),
+        "Ctrl+Shift+E（或 Ctrl+E）· 全分辨率渲染到下方「目标位置」（跟随当前变体的像素）；目标位置与其余设置都在「导出」一节"),
     ("Applied by 「Export」 in the toolbar (Ctrl+Shift+E, or Ctrl+E) and by 「Render selected」 in the library. The ▾ beside Export delivers one file to a path you pick without touching the Destination.",
-        "由工具栏的「Export」（Ctrl+Shift+E，或 Ctrl+E）和图库的「Render selected」使用。Export 旁的 ▾ 只把这一次的文件写到你选的路径，不改「目标位置」。"),
+        "由工具栏的「导出」（Ctrl+Shift+E，或 Ctrl+E）和图库的「渲染选中」使用。「导出」旁的 ▾ 只把这一次的文件写到你选的路径，不改「目标位置」。"),
     // R22-8 · SF8-A: hand the stored projection to Lightroom (which only ever
     // looks beside the photo). 边车 is this table's word for the RAW-adjacent
     // .xmp — see the terminology note in the XMP-save block.
@@ -1683,12 +1676,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("a .xmp already sits beside this photo ({path}) — click again to replace it",
         "这张照片旁已有 .xmp（{path}）—— 再点一次会替换它"),
     ("the .xmp could not be delivered: {err}", "无法写出 .xmp：{err}"),
-    ("AI denoise before developing, at the Export denoise strength below — a RAW on its sensor mosaic, a baked source through SCUNet — for high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it, and so does a ◈ Denoised card, whose master is already denoised.",
-        "显影前按下方的导出降噪强度做 AI 降噪——RAW 在 RAW 原始数据上、烘焙图走 SCUNet——高 ISO/星空（慢，GPU；需 python 边车）。批量渲染不含此项；◈ 去噪原片卡也不再做，它的母图已经去噪。"),
+    ("AI denoise before developing, at the Export denoise strength below — a RAW on its sensor mosaic, an already-rendered image through its own denoiser — for high-ISO / astro (slow, GPU; needs the python sidecar). Batch render skips it, and so does a ◈ Denoised card, whose master is already denoised.",
+        "显影前按下方的导出降噪强度做 AI 降噪——RAW 在 RAW 原始数据上、已成像的图走它自己的去噪模型——高 ISO/星空（慢，GPU；需 python 边车）。批量渲染不含此项；◈ 去噪原片卡也不再做，它的母图已经去噪。"),
     // The checkbox's OWN dial (2026-09-13) — its own state and key; the
     // Detail fold's 「AI denoise strength」 does not reach it.
     ("Export denoise strength", "导出降噪强度"),
-    ("Export AI denoise strength, independent of the Detail fold. On a RAW, the dial removes luminance grain after demosaic in linear light; the default targets Lightroom Denoise 50. Higher is cleaner, 100% is the complete network output. Every positive strength keeps clean colour; exactly 0% leaves the input untouched. Baked sources keep SCUNet's separate 50% default. Double-click to reset this source type.", "导出折叠区的 AI 降噪强度，与去噪折叠区独立。RAW 上这把滑杆在去马赛克后以线性光去除亮度颗粒，默认值以 Lightroom 降噪 50 为参照。调高更干净，100% 是网络的完整输出。任何正强度均保留干净的颜色，恰好 0% 则保持原片不变。烘焙图仍用 SCUNet，独立默认值为 50%。双击重置当前源类型的强度。"),
+    ("Export AI denoise strength, independent of the Detail section. On a RAW, the dial removes luminance grain after demosaic in linear light; the default targets Lightroom Denoise 50. Higher is cleaner, 100% is the complete network output. Every positive strength keeps clean colour; exactly 0% leaves the input untouched. Already-rendered images (JPEG, PNG, TIFF, a retouched or AI result) use a different denoiser with its own 50% default. Double-click to reset this source type.", "导出一节的 AI 降噪强度，与细节一节独立。RAW 上这把滑杆在去马赛克后以线性光去除亮度颗粒，默认值以 Lightroom 降噪 50 为参照。调高更干净，100% 是网络的完整输出。任何正强度均保留干净的颜色，恰好 0% 则保持原片不变。已成像的图（JPEG、PNG、TIFF，或修饰/AI 结果）用另一个去噪模型，独立默认值为 50%。双击重置当前源类型的强度。"),
     ("All regions", "全部区域"),
     ("Midtones", "中间调"),
     ("Global", "全局"),
@@ -1757,10 +1750,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "已收编本照片旧路径拼写下保存的显影（{path}）"),
     ("a second saved develop exists at {path} (an older spelling of this photo's path) — it was NOT merged; showing the develop under the photo's true path",
         "检测到另一份保存的显影：{path}（来自本照片路径的旧拼写）——未合并；当前显示的是照片真实路径下的存档"),
-    ("Style prompt extracted → filled into the Reimagine prompt (saving ./out/<stem>.style.txt failed: {err})",
-        "风格提示词已提取 → 已填入重绘提示词（保存 ./out/<stem>.style.txt 失败：{err}）"),
-    ("Style prompt extracted → filled into the Reimagine prompt",
-        "风格提示词已提取 → 已填入重绘提示词"),
+    ("Style prompt extracted → filled into the Generate image prompt (saving <stem>.style.txt in the delivery folder failed: {err})",
+        "风格提示词已提取 → 已填入「AI 生成出片」提示词（把 <stem>.style.txt 存到成片文件夹失败：{err}）"),
+    ("Style prompt extracted → filled into the Generate image prompt",
+        "风格提示词已提取 → 已填入「AI 生成出片」提示词"),
     ("opened the first folder — {n} more dropped item(s) ignored",
         "已打开第一个文件夹——其余 {n} 个拖入项已忽略"),
     ("unsupported file type: {path} — {n} more dropped item(s) ignored",
@@ -1876,7 +1869,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("AI mask (re-derived locally, not Adobe's raster)",
         "AI 蒙版（本机重算，非 Adobe 原栅格）"),
     ("AI mask (carried, not yet re-derived)", "AI 蒙版（已带走，尚未重算）"),
-    ("Range mask (foreign)", "值域蒙版（外部）"),
+    ("Range mask (from Lightroom)", "范围蒙版（来自 Lightroom）"),
     // R25 P6: the four local point curves are modelled now, so this verdict
     // no longer means "not supported" — it means the sidecar's own curve did
     // not parse. The key moved with the meaning rather than staying a phrase
@@ -1989,8 +1982,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       of luma ranges [{luma_ranges}] and hue bands [{hue_bands}] applies to the \
       residual, zone and detail fits, not to the bounded atmosphere controls.",
         " 氛围控制依据整体证据读取；结构性保留的明度范围 [{luma_ranges}] 和色相带 [{hue_bands}] 仅适用于残差、区域和细节拟合，不适用于有界氛围控制。"),
-    (" Reverse-fit used panel Strength {pct}% to derive its honesty budget.",
-        " 反推使用面板 Strength {pct}% 来推导预算。"),
+    (" Reverse-fit strength {pct}% set how far weak evidence could move the sliders.",
+        " 反推强度 {pct}% 决定了证据不足时滑杆可移动的幅度。"),
     (" Fit refused: the source or target frame has no tonal variation (blank or single-tone), so a statistical match would produce a constant tone map — no recipe was fitted.",
         " 拟合已拒绝：源图或目标图没有影调变化（空白或单色画面），统计匹配只会产生恒定影调映射——未生成拟合配方。"),
     (" The full fit rendered farther from the target than the untouched \
@@ -2235,7 +2228,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       rendered in-app only — classic XMP has no coordinate system for a smooth \
       local field, so the Lightroom sidecar carries the rest of this recipe \
       without it.",
-        " 已附加颜色场（{x}x{y}x{b} 个顶点）：整幅 {before} -> {after}，上限 {ceiling}，占比 {realized}，饱和顶点 {saturated}。它只在本机引擎中渲染 —— 经典 XMP 无法描述平滑的局部色场，因此 Lightroom 侧车文件会带上这份配方的其余部分，但不含它。"),
+        " 已附加颜色场（{x}x{y}x{b} 个顶点）：整幅 {before} -> {after}，上限 {ceiling}，占比 {realized}，饱和顶点 {saturated}。它只在本机引擎中渲染 —— 经典 XMP 无法描述平滑的局部色场，因此 Lightroom 边车文件会带上这份配方的其余部分，但不含它。"),
     (" No colour field was attached: the field's own ceiling {ceiling} is not \
       more than {margin} better than the frame this fit already reached \
       ({err_after}), so there was nothing left for it to carry.",
@@ -2333,10 +2326,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("lens blur", "镜头虚化"),
     ("🤖 Estimate depth", "🤖 估算景深"),
     ("🤖 Re-estimate depth", "🤖 重新估算景深"),
-    ("MoGe-2 estimates how far away every part of the photo is (python sidecar; the first run downloads a ~1.3 GB model). Then click the photo to choose what stays sharp.",
-     "MoGe-2 估算照片里每一处离镜头多远（python 边车；首次运行会下载约 1.3 GB 的模型）。之后在照片上点一下，选定哪里保持清晰。"),
-    ("this build did not ship the depth sidecar — run AutoShade from the project directory, or point AUTOSHADE_DEPTH_SCRIPT at python/depth.py",
-     "本版本未随发布包分发景深边车——请从项目目录运行 AutoShade，或用 AUTOSHADE_DEPTH_SCRIPT 指向 python/depth.py"),
+    ("MoGe-2 estimates how far away every part of the photo is (Python helper; the first run downloads a ~1.3 GB model). Then click the photo to choose what stays sharp.",
+     "MoGe-2 估算照片里每一处离镜头多远（Python 配套脚本；首次运行会下载约 1.3 GB 的模型）。之后在照片上点一下，选定哪里保持清晰。"),
+    ("This feature needs AutoShade's Python helper, which this download does not include. Install the full package, or (advanced) set AUTOSHADE_DEPTH_SCRIPT to the path of depth.py",
+     "此功能需要 AutoShade 的 Python 配套脚本，当前安装包未包含。请安装完整版，或（高级）把 AUTOSHADE_DEPTH_SCRIPT 设为 depth.py 的路径"),
     ("Estimate the depth first, then click the photo to choose what stays sharp.", "先估算景深，再在照片上点一下选定哪里保持清晰。"),
     ("Show/mute the lens blur without losing its settings", "显示/关闭镜头虚化，设置保留"),
     ("🎯 Pick focus", "🎯 点选对焦"),
@@ -2374,14 +2367,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       duplicated) — your masks were kept unchanged and the model's mask edits were \
       discarded",
         "\n⚠ 响应未保留蒙版身份（有蒙版被改名或复制）——你的蒙版保持原样，模型的蒙版编辑已丢弃"),
-    ("Heuristic baseline (AI vision unavailable (untrusted provider diagnostic): {e}). \
-      mean_luma={mean}/255, clip black/white={clip_b}%/{clip_w}% → exposure {ev}EV, \
-      highlights {hl}, shadows {sh}.",
-        "启发式基线（AI 视觉不可用（不受信提供方诊断）：{e}）。mean_luma={mean}/255，黑/白裁剪={clip_b}%/{clip_w}% → 曝光 {ev}EV、高光 {hl}、阴影 {sh}。"),
-    ("Heuristic baseline (no AI vision; OPENAI_API_KEY unset). \
-      mean_luma={mean}/255, clip black/white={clip_b}%/{clip_w}% → exposure {ev}EV, \
-      highlights {hl}, shadows {sh}.",
-        "启发式基线（无 AI 视觉；OPENAI_API_KEY 未设置）。mean_luma={mean}/255，黑/白裁剪={clip_b}%/{clip_w}% → 曝光 {ev}EV、高光 {hl}、阴影 {sh}。"),
+    ("AI vision was unavailable ({e}), so a simple automatic exposure fix was applied instead: mean luma {mean}/255, clipped black/white {clip_b}%/{clip_w}% → exposure {ev}EV, highlights {hl}, shadows {sh}. Check the Image model settings.",
+        "AI 视觉不可用（{e}），已改用基本的自动曝光修正：平均亮度 {mean}/255，黑/白裁剪 {clip_b}%/{clip_w}% → 曝光 {ev}EV、高光 {hl}、阴影 {sh}。请检查设置中的图像模型。"),
+    ("No AI vision (no image API key is set), so a simple automatic exposure fix was applied instead: mean luma {mean}/255, clipped black/white {clip_b}%/{clip_w}% → exposure {ev}EV, highlights {hl}, shadows {sh}. Set the Image model in Settings.",
+        "没有 AI 视觉（未设置图像 API 密钥），已改用基本的自动曝光修正：平均亮度 {mean}/255，黑/白裁剪 {clip_b}%/{clip_w}% → 曝光 {ev}EV、高光 {hl}、阴影 {sh}。请在设置里配置图像模型。"),
     ("AI spot-detection failed ({e}); healed the painted mask only.",
         "AI 斑点检测失败（{e}）；仅修复了手绘蒙版。"),
     ("; ", "；"),
@@ -2614,8 +2603,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "依据「方向」：本次分析不读取图库"),
     ("How far AI proposals follow the looks in your reference library: below 85% they stay within its grading, from 85% they reproduce its look (0 = ignore it). Greyed while the Direction guides.",
         "AI 提案跟随参考图库里外观的程度：低于 85% 时不超出参考的调色力度，85% 起照着参考的外观来调（0 = 不参考）。依据「方向」时不可用。"),
-    ("How closely the AI follows your direction; disabled until the Direction guides and has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit.",
-        "AI 对你所写方向的遵循程度；只有依据「方向」且已写了文本时可用：≤ 40% Hint，40-70% Direct，高于 70% Brief。仅影响提示词意图，不会改变任何渲染限制。"),
+    ("How closely the AI follows your direction; disabled until the Direction guides and has text. At 40% or below it is a Hint; from 40% to 70% it is followed (Direct); above 70% it is a firm Brief. It changes only what the AI is asked, never a slider limit.",
+        "AI 对你所写方向的遵循程度；只有依据「方向」且已写了文本时可用。不高于 40% 当作提示（Hint）；40-70% 照着做（Direct）；高于 70% 当作硬性要求（Brief）。只改变对 AI 的要求，不改变任何滑杆上限。"),
     ("A local model (Qwen3-VL-2B, 4.3 GB, downloaded once; builds get slower) writes a few phrases per photo about its GRADE — \"warm, faded, low contrast\" — which go to the AI beside each reference. Nothing leaves this machine and nothing is billed. Off = the references go without words.",
         "本地模型（Qwen3-VL-2B，4.3 GB，只下载一次；建库会变慢）为每张照片写几个描述其调色的短语——如「偏暖、褪色、低反差」——随每张参考一起发给 AI。数据不离开本机，也不计费。关闭 = 参考不带文字说明。"),
     ("Each analysis measures this photo with a local model (SigLIP 2, 1.5 GB, downloaded once) and picks the closest references. Building a library turns this on, since the build has already downloaded the model.",
@@ -2643,8 +2632,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "正在从 {path} 建参考图库……首次建库要逐张测量，文件夹大时需要几分钟"),
     ("Choose a folder of finished photos whose look you like — your own exports or anyone's. Nothing reads their .xmp: each photo is measured from its pixels. Building starts as soon as you choose.",
         "选一个装着你喜欢的成片的文件夹——你自己导出的或别人的都行。不读取任何 .xmp：每张照片都从像素测量。选好后立即开始建库。"),
-    ("How hard the AI pushes the grade — a different axis from Style: Style asks how close to your reference looks, Strength asks how committed the result should be. 50% is where every AI guardrail NUMBER was calibrated: the ±50/±35 pair and the soft caps are bit-for-bit the ones earlier releases used, but the restraint WORDING those releases sent is now the 40%-and-below prose, so no single setting brings an old release back whole. From 41% up the AI must decide EACH colour control explicitly instead of leaving it neutral by default; the default 65% (double-click to reset) leans a little further than the calibration point. Above 70% it is additionally told to use the controls it wants at a strength a viewer can see, and the visual review may then run up to 3 rounds — the same ceiling 「Deep thinking」 raises it to, and either one ALONE is enough to make the worst case 17 API calls (10 carrying images). The clipping and white-point safeguards never widen with it.",
-        "AI 下手有多重 —— 与「风格」是两条不同的轴：风格问「有多接近你的参考外观」，强度问「出手多重」。50% 是所有 AI 限制参数的标定点：±50/±35 这一对与配方的两对上限，与此前各版本逐位相同；但那些版本发出的克制用词，如今属于不高于 40% 的那一档，所以没有任何单一档位能把旧版完整带回来。41% 起，AI 要对每一个颜色控件逐一表态，不能默认留白；默认 65%（双击复位到这里）比标定点再进一点。高于 70% 时还会要求它把想用的控件用到观者可见的力度，并把视觉复查上限提到 3 轮 —— 与勾选「Deep thinking」相同的上限，两者只要占其一，最多就是 17 次 API 调用（其中 10 次带图）。高光与黑位的安全边界永不随强度放宽。"),
+    ("How bold the AI's edit is — a different axis from Style, which asks how closely it copies your references. From 41% up the AI must decide each colour control explicitly; the default 65% (double-click to reset) leans a little bolder. Above 70% it is told to use its controls at a strength a viewer can see, and the visual review may run up to 3 rounds — the same ceiling 「Deep thinking」 raises it to; either one alone makes the worst case 17 API calls (10 carrying images). The clipping and white-point safeguards never loosen.",
+        "AI 下手多重 —— 与「风格」是两条轴：风格管的是多像你的参考。41% 起，AI 要对每个颜色控件逐一表态；默认 65%（双击复位）比中间再进一点。高于 70% 时要求它把想用的控件用到看得见的力度，视觉复查最多 3 轮 —— 与勾选「深度思考」相同的上限；两者占其一，最多 17 次 API 调用（其中 10 次带图）。高光与黑位的安全边界不会放宽。"),
     ("Measure every finished photo in that folder (local compute, no API cost). A rebuild measures only new or changed photos. It cannot be cancelled, and a failed build leaves your existing library untouched.",
         "逐张测量该文件夹里的成片（本地计算，不产生 API 费用）。重建时只测量新增或改过的照片。建库不能取消；建库失败时原有图库保持不变。"),
     ("No reference library yet — the Style slider above has nothing to follow. Pick a folder of finished photos whose look you like (JPEG, TIFF or PNG exports).",

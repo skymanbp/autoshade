@@ -61,8 +61,8 @@
             let want = [
                 tr(lang, "Analysis · paid API"),
                 tr(lang, "Reference library · local"),
-                tr(lang, "Reimagine (whole image) · paid API"),
-                tr(lang, "Reverse-fit · local; AI review is paid"),
+                tr(lang, "Generate whole image · paid API"),
+                tr(lang, "Match a look (reverse-fit) · local"),
             ];
             let mut at = 0usize;
             for w in want {
@@ -250,7 +250,7 @@
         let mut app = AutoShadeApp::default();
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
         assert!(
-            seen.iter().any(|t| t == "deep"),
+            seen.iter().any(|t| t == "Retry once"),
             "the switch must exist: {seen:?}"
         );
         // The gate is on the WIDGET, so the tooltip that explains the gate is
@@ -579,7 +579,7 @@
             }
             // …and the zh half is really translated, not an English fallback.
             if matches!(lang, Lang::Zh) {
-                assert!(failed.contains('深'), "the zh rendering fell back to English: {failed}");
+                assert!(failed.contains("重试"), "the zh rendering fell back to English: {failed}");
             }
         }
     }

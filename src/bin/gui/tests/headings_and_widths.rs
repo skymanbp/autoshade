@@ -105,7 +105,7 @@
                 at(tr(lang, "Analysis & References")),
                 at(tr(lang, "Analysis · paid API")),
                 at(tr(lang, "Generate & Reverse-fit")),
-                at(tr(lang, "Reimagine (whole image) · paid API")),
+                at(tr(lang, "Generate whole image · paid API")),
             ];
             assert!(order.windows(2).all(|w| w[0] < w[1]), "{lang:?}: group heads out of order: {order:?}");
         }

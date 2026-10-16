@@ -222,13 +222,13 @@
         assert_ne!(hint.tier(), brief.tier(), "the dial must be able to change the tier");
         // …and the tooltip NAMES the tiers, which is what a user needs to know
         // the dial is not a magnitude.
-        let tip = tr(Lang::En, "How closely the AI follows your direction; disabled until the Direction guides and has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit.");
+        let tip = tr(Lang::En, "How closely the AI follows your direction; disabled until the Direction guides and has text. At 40% or below it is a Hint; from 40% to 70% it is followed (Direct); above 70% it is a firm Brief. It changes only what the AI is asked, never a slider limit.");
         for tier in ["Hint", "Direct", "Brief"] {
             assert!(tip.contains(tier), "the tooltip must name the {tier} tier: {tip}");
         }
         // The zh half is a translation of the SAME key, so a drifted pair
         // would fall back to English here rather than fail silently.
-        let zh = tr(Lang::Zh, "How closely the AI follows your direction; disabled until the Direction guides and has text: <=40% Hint, 40-70% Direct, above 70% Brief. Prompt intent only - it never moves a render limit.");
+        let zh = tr(Lang::Zh, "How closely the AI follows your direction; disabled until the Direction guides and has text. At 40% or below it is a Hint; from 40% to 70% it is followed (Direct); above 70% it is a firm Brief. It changes only what the AI is asked, never a slider limit.");
         assert!(zh.contains("遵循程度"), "the zh tooltip must exist: {zh}");
     }
 

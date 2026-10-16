@@ -1106,7 +1106,7 @@ impl AutoShadeApp {
                         self.open_path(path);
                     }
                     if action(ui, ready, tr(lang, "Reset"))
-                        .on_hover_text(tr(lang, "Back to this photo's fresh-open look: sliders neutral on the camera-matched base (one undo brings it back)"))
+                        .on_hover_text(tr(lang, "Back to this photo's fresh-open look: sliders neutral on the camera's own default colour and tone, like the in-camera JPEG (one undo brings it back)"))
                         .clicked()
                     {
                         // Reset = the fresh-open look: sliders neutral on this
@@ -1177,7 +1177,7 @@ impl AutoShadeApp {
                     // through a closure parameter is a key it cannot check.
                     let blocked = tr(
                         lang,
-                        "rotation is off while this photo carries baked pixels (retouch / AI rendition) or a tool is armed — its master raster is a file in the frame it was baked in; turn first, retouch after",
+                        "rotation is off while this photo carries rendered pixels (retouch / AI rendition) or a tool is armed — its master raster is a file in the frame it was rendered in; turn first, retouch after",
                     );
                     let left_hover = if can_rotate {
                         tr(lang, "A quarter turn anticlockwise — the crop and every mask turn with it (one undo)")
@@ -1470,7 +1470,7 @@ impl AutoShadeApp {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.32);
                     ui.heading("AutoShade");
-                    ui.label(egui::RichText::new(tr(self.lang, "AI auto-develop · RAW develop")).weak());
+                    ui.label(egui::RichText::new(tr(self.lang, "AI auto-edit · RAW processing")).weak());
                     ui.add_space(SPACE_LG);
                     ui.horizontal(|ui| {
                         // Center the button pair by padding half the leftover width.
