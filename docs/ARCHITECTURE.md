@@ -1,6 +1,10 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.9.0 — a reference library of finished photos
+> Status: **implemented** (v1.10.0 — the image role speaks Chat Completions too,
+> the request shape detected per endpoint or pinned in Settings; the reasoning
+> tiers and the vision flag a `/models` listing names reach the pickers; the
+> desktop app's reviewed strings, and a long toast wraps;
+> v1.9.0 — a reference library of finished photos
 > replaces the style index, and a develop follows it or the typed direction,
 > never both; a reference carries its RAW's settings when its sidecar develops
 > to it; an AI lens blur from a local depth map; colour themes, one icon set,
