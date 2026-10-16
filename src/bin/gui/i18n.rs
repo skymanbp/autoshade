@@ -1627,6 +1627,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("this model takes no tier, per /models — leave blank", "按 /models 所列，此模型没有推理等级，留空即可"),
     ("tiers per /models", "等级来自 /models"),
     ("Auto (Responses, then Chat)", "自动（先 Responses，再 Chat）"),
+    ("Responses API", "Responses 接口"),
+    ("Chat Completions", "Chat Completions 接口"),
     (
         "Which request shape the image role sends. Auto tries the Responses API first and, when the endpoint answers 404 or 405 there, sends the same call as a Chat Completion and remembers that until the app closes. Choose Chat Completions for an endpoint that serves only /chat/completions (most OpenAI-compatible endpoints); Responses API pins the original shape.",
         "图像角色发送请求的格式。自动：先用 Responses API，端点返回 404 或 405 时，把同一请求改以 Chat Completion 发送，并记住到应用关闭为止。只有 /chat/completions 的端点（多数 OpenAI 兼容端点）选 Chat Completions；Responses API 则固定用原格式。",

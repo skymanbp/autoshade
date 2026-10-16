@@ -142,6 +142,10 @@ DYNAMIC_SITES = [
     # note list (S2: `described_note` in workers.rs). Same key set, same
     # extraction — `("impl_fn", "rationale", "pub mod keys", "mod keys")`.
     (r"^(?:autoshade::)?rationale::keys::", "rationale::keys constants"),
+    # v1.10.0: the image role's API-style picker (`util::api_family_picker`)
+    # names its three values from one table, `CHOICES`, whose label column
+    # is extracted below; the fallback spelling reads the table by index.
+    (r"^CHOICES\[", "api_family_picker choices"),
     (r"^\[", "inline literal array"),
 ]
 
@@ -172,6 +176,11 @@ DYNAMIC_SOURCES = [
     # rather than the whole array. A fifth merge without a zh pair fails the
     # gate the way a fourth export destination does.
     ("tuple_col", "stack", "const SPELLINGS", 1),
+    # v1.10.0: the API-style picker's (value, label) rows — the value column
+    # is the persisted `image_api_family` spelling, never translated, so the
+    # label column is taken by index as the stack merges' is. A fourth
+    # family without a zh pair fails the gate.
+    ("tuple_col", "gui", "const CHOICES", 1),
     ("impl_fn", "gui", "impl ThemePref", "fn label"),
     ("impl_fn", "gui", "impl AccentPref", "fn label"),
     # 阶段4 delivery format+depth labels (model.rs); a sixth variant without
