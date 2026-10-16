@@ -7734,6 +7734,7 @@ mod tests {
             openai_image_max_px: 4_000_000,
             image_provider: "api".into(),
             image_effort: None,
+            image_api_family: "auto".into(),
             analysis_provider: "api".into(),
             analysis_model: "gpt-5.5".into(),
             analysis_effort: None,

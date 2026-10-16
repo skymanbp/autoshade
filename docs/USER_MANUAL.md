@@ -906,9 +906,19 @@ still recognised from the name the writer gives it (`sky`, `land`,
 
 Open **Settings** (the ⚙ button at the right end of the toolbar) to configure the image/vision role and the analysis-verifier
 role. The image role uses an OpenAI-compatible API for visual proposals and
-generative images. The verifier defaults to the signed-in `claude` CLI over
-OAuth, receives statistics and recipe data rather than image pixels, and can
-instead use an API provider.
+generative images: any server that speaks that API works from its base URL
+and a key. **API style** says which request shape the vision calls use —
+**Auto** (the default) tries the Responses API and, when the server answers
+404 or 405 there, sends the same call as a Chat Completion and remembers
+that until the app closes; **Chat Completions** pins that shape for a
+server that serves only `/chat/completions` (most OpenAI-compatible servers
+and local runners); **Responses API** pins the original. A server that
+accepts the Chat shape but not its structured-output contract gets the call
+again without it, and the reply is read as the JSON the prompt asked for.
+Generative edits are the exception: they need `/images/edits` with a mask,
+which only some providers serve. The verifier defaults to the signed-in
+`claude` CLI over OAuth, receives statistics and recipe data rather than
+image pixels, and can instead use an API provider.
 
 The same roles can be configured from the environment: `OPENAI_API_KEY` serves
 the image/vision and generative role; `AUTOSHADE_ANALYSIS_API_KEY` is used only

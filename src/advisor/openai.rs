@@ -20,8 +20,9 @@ use crate::recipe::{EditRecipe, HSL_BANDS};
 
 use super::catalogue::{self, edit_recipe_schema};
 use super::{
-    hist_summary, strip_code_fence, Advisor, AdvisorError, BoundedUntrustedText, LensOpinion,
-    PixelTool, PixelToolSuggestion, Preview, Proposal, ProposeContext, Thinking, ToolStep,
+    hist_summary, strip_code_fence, Advisor, AdvisorError, ApiFamily, BoundedUntrustedText,
+    LensOpinion, PixelTool, PixelToolSuggestion, Preview, Proposal, ProposeContext, Thinking,
+    ToolStep, VisionFrame, VisionRequest,
     PIXEL_TOOLS_MAX, THINK_FIELD_MAX_BYTES, TOOL_PLAN_MAX,
 };
 use crate::recipe::{AdherenceTier, DirectionAdherence, GradeStrength, StrengthTier};
@@ -35,6 +36,9 @@ pub struct OpenAiProvider {
     /// `advisor::post_ai_json` and negotiated away if the endpoint has no
     /// such notion.
     effort: Option<String>,
+    /// Which endpoint family to speak — `Auto` probes `/responses` and falls
+    /// back to `/chat/completions` (see `advisor::ApiFamily`).
+    api_family: ApiFamily,
 }
 
 impl OpenAiProvider {
@@ -44,6 +48,7 @@ impl OpenAiProvider {
             model: cfg.openai_model.clone(),
             base_url: cfg.openai_base_url.clone(),
             effort: cfg.image_effort.clone(),
+            api_family: ApiFamily::parse(&cfg.image_api_family),
         }
     }
 }
@@ -548,10 +553,12 @@ pub(crate) fn deepen_effort(current: Option<&str>) -> Option<String> {
 }
 
 impl OpenAiProvider {
-    /// The request body for ONE propose call. Extracted from [`Self::propose`]
-    /// so the field-ORDER probe (an `#[ignore]`d live call) sends byte-for-byte
-    /// the request production sends — a probe that rebuilt the body would
-    /// measure its own copy.
+    /// The Responses-API body for ONE propose call: [`Self::propose_request`]
+    /// spelled by `advisor::vision_body`. Kept so the field-ORDER probe (an
+    /// `#[ignore]`d live call) sends byte-for-byte the request production
+    /// sends on that family — a probe that rebuilt the body would measure its
+    /// own copy.
+    #[cfg(test)]
     fn propose_body(
         &self,
         img: &Preview,
@@ -559,6 +566,22 @@ impl OpenAiProvider {
         hist: &Histogram,
         ctx: &ProposeContext,
     ) -> Result<Value, AdvisorError> {
+        Ok(super::vision_body(
+            super::SseFamily::Responses,
+            &self.propose_request(img, meta, hist, ctx)?,
+        ))
+    }
+
+    /// What ONE propose call sends, before the family spells it: the
+    /// instruction, the frames (the develop target first, then the opt-in
+    /// reference photos) and the schema the answer must take.
+    fn propose_request(
+        &self,
+        img: &Preview,
+        meta: &Meta,
+        hist: &Histogram,
+        ctx: &ProposeContext,
+    ) -> Result<VisionRequest<'_>, AdvisorError> {
         let b64 = base64::engine::general_purpose::STANDARD.encode(&img.jpeg);
         let meta_json = super::advisor_meta_json(meta)?;
         let mut instruction = propose_instruction(&meta_json, &hist_summary(hist), ctx);
@@ -581,51 +604,26 @@ impl OpenAiProvider {
             instruction.push_str(&format!("  REVISION NOTE from the automated reviewer: {h}"));
         }
 
-        // Built as a VEC (R23-2): the content array carries a variable number
-        // of frames — the develop target always, plus the opt-in reference
-        // photos. Order is the contract the prompt above names.
-        let mut content = vec![
-            json!({ "type": "input_text", "text": instruction }),
-            json!({ "type": "input_image",
-                    "image_url": format!("data:image/jpeg;base64,{b64}"),
-                    "detail": "high" }),
-        ];
+        // Built as a VEC (R23-2): the frames are a variable number — the
+        // develop target always, plus the opt-in reference photos. Order is
+        // the contract the prompt above names.
+        let mut frames = vec![VisionFrame { b64, detail: "high" }];
         for rf in ctx.reference_images {
             let rb64 = base64::engine::general_purpose::STANDARD.encode(&rf.jpeg);
             // Same detail tier as the frame beside it: the judge sends both of
             // its frames at "high" for the same reason — a low-detail
             // reference cannot answer a question about tonal depth.
-            content.push(json!({ "type": "input_image",
-                                 "image_url": format!("data:image/jpeg;base64,{rb64}"),
-                                 "detail": "high" }));
+            frames.push(VisionFrame { b64: rb64, detail: "high" });
         }
         // The response CONTRACT is the one thing thinking mode changes on the
         // wire: `think: false` sends the schema (and the schema NAME) every
         // release before R23-4 sent, byte for byte.
-        let (format_name, schema) = if ctx.think {
+        let schema = if ctx.think {
             ("develop_plan", catalogue::think_envelope_schema())
         } else {
             ("edit_recipe", edit_recipe_schema())
         };
-        Ok(json!({
-            "model": self.model,
-            // The Responses API STORES responses (input images included) in
-            // the key owner's account by default — under a key planted by a
-            // photo pack's .env, that is a photo-exfiltration channel. It
-            // covers the reference photo too: `store:false` is one flag for
-            // every frame in `content`.
-            "store": false,
-            "input": [{
-                "role": "user",
-                "content": content
-            }],
-            "text": { "format": {
-                "type": "json_schema",
-                "name": format_name,
-                "strict": true,
-                "schema": schema
-            }}
-        }))
+        Ok(VisionRequest { model: &self.model, instruction, frames, schema: Some(schema) })
     }
 
     /// `propose`, plus the structured WORKING when the caller asked for it
@@ -664,9 +662,8 @@ impl OpenAiProvider {
             .api_key
             .as_ref()
             .ok_or_else(|| AdvisorError::Missing("OPENAI_API_KEY".into()))?;
-        let body = self.propose_body(img, meta, hist, ctx)?;
+        let req = self.propose_request(img, meta, hist, ctx)?;
 
-        let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
         // Deep thinking raises the tier through the EXISTING knob (see
         // `deepen_effort`): `post_ai_json` spells it per endpoint family and
         // negotiates it away when the endpoint has no such notion. Never into
@@ -682,19 +679,16 @@ impl OpenAiProvider {
         // call in the app (the codex bridge adds its own hop). Streaming-first:
         // the budget bounds SILENCE, not healthy generation time — a real 360 s
         // OVERALL deadline killed a healthy reasoning-class propose (see
-        // post_ai_json for the full rationale and the blocking fallback).
-        let value: Value = super::post_ai_json(
-            &url,
+        // post_ai_json for the full rationale and the blocking fallback). The
+        // family — `/responses`, or `/chat/completions` where the endpoint
+        // has no such route — is `post_vision`'s to settle.
+        let recipe_json = super::post_vision(
+            &self.base_url,
             key,
-            body,
+            &req,
             super::PROPOSE_TIMEOUT_SECS,
-            super::SseFamily::Responses,
             effort.as_deref(),
-        )?;
-
-        let recipe_json = output_text_or_refusal(
-            &value,
-            &[key],
+            self.api_family,
             "could not locate structured output in OpenAI response (shape mismatch — see openai.rs)",
         )?;
         // Parse to a Value FIRST so a miscounted HSL axis can be repaired
@@ -948,39 +942,25 @@ split-toning, which colour families were shifted or muted), and finishing charac
 softness, mood). Describe the GRADE, not the scene: never name the subjects, location or objects, \
 so the same prompt can restyle ANY other photograph. Output ONLY the prompt text, no preamble.";
 
-    let body = json!({
-        "model": cfg.openai_model,
-        // Same rule as the proposer: stored responses land in the KEY OWNER's
-        // account — never persist the user's photos there.
-        "store": false,
-        "input": [{
-            "role": "user",
-            "content": [
-                { "type": "input_text", "text": instruction },
-                { "type": "input_image",
-                  "image_url": format!("data:image/jpeg;base64,{b_before}"),
-                  "detail": "low" },
-                { "type": "input_image",
-                  "image_url": format!("data:image/jpeg;base64,{b_after}"),
-                  "detail": "low" }
-            ]
-        }]
-    });
+    let req = VisionRequest {
+        model: &cfg.openai_model,
+        instruction: instruction.to_string(),
+        frames: vec![
+            VisionFrame { b64: b_before, detail: "low" },
+            VisionFrame { b64: b_after, detail: "low" },
+        ],
+        schema: None,
+    };
 
-    let url = format!("{}/responses", cfg.openai_base_url.trim_end_matches('/'));
     // Two low-detail images, short prose out — streaming-first like the
     // proposer; the budget bounds silence, not healthy generation time.
-    let value: Value = super::post_ai_json(
-        &url,
+    let text = super::post_vision(
+        &cfg.openai_base_url,
         key,
-        body,
+        &req,
         super::STYLE_TIMEOUT_SECS,
-        super::SseFamily::Responses,
         cfg.image_effort.as_deref(),
-    )?;
-    let text = output_text_or_refusal(
-        &value,
-        &[key],
+        ApiFamily::parse(&cfg.image_api_family),
         "could not locate output text in OpenAI response",
     )?;
     Ok(
@@ -989,40 +969,63 @@ so the same prompt can restyle ANY other photograph. Output ONLY the prompt text
     )
 }
 
-/// Pull the model's text out of a Responses-API reply (convenience field first,
-/// then walk `output[].content[]`). Shared with the judge (`advisor::judge`).
+/// Pull the model's text out of a reply of EITHER family: the Responses
+/// shape (the `output_text` convenience field, then a walk of
+/// `output[].content[]`) or the Chat Completions shape (`choices[0]
+/// .message.content`, a string or an array of `text` parts — the latter is
+/// what `assemble_sse` builds from a stream and what some relays answer
+/// blocking). Shared with the judge (`advisor::judge`).
 pub(crate) fn extract_output_text(v: &Value) -> Option<String> {
     if let Some(s) = v.get("output_text").and_then(Value::as_str) {
         return Some(s.to_string());
     }
-    for item in v.get("output")?.as_array()? {
-        if let Some(content) = item.get("content").and_then(Value::as_array) {
-            for c in content {
-                if c.get("type").and_then(Value::as_str) == Some("output_text")
-                    && let Some(s) = c.get("text").and_then(Value::as_str) {
-                        return Some(s.to_string());
-                    }
+    if let Some(output) = v.get("output").and_then(Value::as_array) {
+        for item in output {
+            if let Some(content) = item.get("content").and_then(Value::as_array) {
+                for c in content {
+                    if c.get("type").and_then(Value::as_str) == Some("output_text")
+                        && let Some(s) = c.get("text").and_then(Value::as_str) {
+                            return Some(s.to_string());
+                        }
+                }
             }
         }
     }
-    None
+    match chat_message(v)?.get("content")? {
+        Value::String(s) => Some(s.clone()),
+        Value::Array(parts) => parts.iter().find_map(|p| {
+            (p.get("type").and_then(Value::as_str) == Some("text"))
+                .then(|| p.get("text").and_then(Value::as_str).map(str::to_owned))
+                .flatten()
+        }),
+        _ => None,
+    }
 }
 
-/// The `refusal` part a Responses-API reply carries when the model DECLINED
-/// instead of answering — the same `output[].content[]` walk as
-/// [`extract_output_text`], on the part type it skips.
+/// The first choice's `message` of a Chat Completions reply, if the reply has
+/// that shape: `choices[0].message`.
+fn chat_message(v: &Value) -> Option<&Value> {
+    v.get("choices")?.as_array()?.first()?.get("message")
+}
+
+/// The `refusal` the model gives when it DECLINED instead of answering: the
+/// `refusal` part of a Responses reply (the same `output[].content[]` walk as
+/// [`extract_output_text`], on the part type it skips) or the
+/// `message.refusal` field of a Chat Completions reply.
 pub(crate) fn extract_refusal(v: &Value) -> Option<String> {
-    for item in v.get("output")?.as_array()? {
-        if let Some(content) = item.get("content").and_then(Value::as_array) {
-            for c in content {
-                if c.get("type").and_then(Value::as_str) == Some("refusal")
-                    && let Some(s) = c.get("refusal").and_then(Value::as_str) {
-                        return Some(s.to_string());
-                    }
+    if let Some(output) = v.get("output").and_then(Value::as_array) {
+        for item in output {
+            if let Some(content) = item.get("content").and_then(Value::as_array) {
+                for c in content {
+                    if c.get("type").and_then(Value::as_str) == Some("refusal")
+                        && let Some(s) = c.get("refusal").and_then(Value::as_str) {
+                            return Some(s.to_string());
+                        }
+                }
             }
         }
     }
-    None
+    chat_message(v)?.get("refusal")?.as_str().map(str::to_owned)
 }
 
 /// [`extract_output_text`], with the two ways it comes back empty told apart.
@@ -1577,6 +1580,7 @@ mod tests {
             openai_image_max_px: 4_000_000,
             image_provider: "api".into(),
             image_effort: None,
+            image_api_family: "auto".into(),
             analysis_provider: "oauth".into(),
             analysis_model: "opus".into(),
             analysis_effort: None,
@@ -1596,6 +1600,136 @@ mod tests {
             style_strength: 0.5,
             send_reference_image: false,
         }
+    }
+
+    /// A Chat Completions reply carrying `inner` as the message text — the
+    /// blocking shape a `/chat/completions` endpoint answers without `stream`.
+    fn chat_reply(inner: &str) -> String {
+        serde_json::json!({
+            "choices": [{ "index": 0, "finish_reason": "stop",
+                          "message": { "role": "assistant", "content": inner } }]
+        })
+        .to_string()
+    }
+
+    /// The whole of part C in one scenario: a base URL whose server never
+    /// heard of `/responses` (a 404 there) gets the SAME propose as a chat
+    /// completion — the frames as `image_url` parts with their detail tier,
+    /// the recipe schema as `response_format.json_schema` under the same
+    /// name — and the recipe parses out of the Chat reply shape.
+    #[test]
+    fn a_missing_responses_route_falls_back_to_a_chat_completion() {
+        let (url, seen, handle) = stub_endpoint(vec![
+            (404, "text/plain", "no such route".to_string()),
+            (200, "application/json", chat_reply("{\"exposure_ev\":0.3}")),
+        ]);
+        let p = OpenAiProvider::new(&cfg_for(&url));
+        p.propose(
+            &Preview { jpeg: b"TARGETJPEG".to_vec() },
+            &meta_fixture(),
+            &hist_fixture(),
+            &ProposeContext::default(),
+        )
+        .expect("the chat reply parses");
+        join_stub(handle);
+        let seen = seen.lock().unwrap();
+        let first: Value = serde_json::from_str(&seen[0]).unwrap();
+        assert!(first.get("input").is_some(), "the first attempt is the Responses shape");
+        let second: Value = serde_json::from_str(&seen[1]).unwrap();
+        assert!(second.get("input").is_none() && second.get("store").is_none());
+        let content = &second["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["detail"], "high");
+        assert!(content[1]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/jpeg;base64,"));
+        assert_eq!(second["response_format"]["type"], "json_schema");
+        assert_eq!(second["response_format"]["json_schema"]["name"], "edit_recipe");
+        assert_eq!(second["response_format"]["json_schema"]["schema"], edit_recipe_schema());
+        assert_eq!(second["reasoning"], Value::Null, "the Chat family carries no reasoning object");
+    }
+
+    /// The learning half: once a base URL fell back, the next call on it
+    /// goes to `/chat/completions` first — one probe per endpoint per
+    /// process, not one per photo.
+    #[test]
+    fn a_learned_chat_endpoint_is_not_probed_again() {
+        let (url, seen, handle) = stub_endpoint(vec![
+            (404, "text/plain", "no such route".to_string()),
+            (200, "application/json", chat_reply("{\"exposure_ev\":0.1}")),
+            (200, "application/json", chat_reply("{\"exposure_ev\":0.2}")),
+        ]);
+        let p = OpenAiProvider::new(&cfg_for(&url));
+        for _ in 0..2 {
+            p.propose(
+                &Preview { jpeg: b"J".to_vec() },
+                &meta_fixture(),
+                &hist_fixture(),
+                &ProposeContext::default(),
+            )
+            .expect("the chat reply parses");
+        }
+        join_stub(handle);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 3, "one probe, then straight to chat");
+        let third: Value = serde_json::from_str(&seen[2]).unwrap();
+        assert!(third.get("messages").is_some(), "the second propose went to chat first");
+    }
+
+    /// An explicit `chat` family skips the probe entirely, and the response
+    /// contract negotiates like every other knob: a 400 naming
+    /// `response_format` is answered by the same call without it, once.
+    #[test]
+    fn an_explicit_chat_family_posts_chat_first_and_drops_a_refused_contract() {
+        let refused = serde_json::json!({
+            "error": { "message": "response_format is not supported", "param": "response_format" }
+        })
+        .to_string();
+        let (url, seen, handle) = stub_endpoint(vec![
+            (400, "application/json", refused),
+            (200, "application/json", chat_reply("```json\n{\"exposure_ev\":0.4}\n```")),
+        ]);
+        let mut cfg = cfg_for(&url);
+        cfg.image_api_family = "chat".into();
+        let p = OpenAiProvider::new(&cfg);
+        // The fence is stripped as every structured parse does.
+        p.propose(
+            &Preview { jpeg: b"J".to_vec() },
+            &meta_fixture(),
+            &hist_fixture(),
+            &ProposeContext::default(),
+        )
+        .expect("the fenced reply parses");
+        join_stub(handle);
+        let seen = seen.lock().unwrap();
+        let first: Value = serde_json::from_str(&seen[0]).unwrap();
+        assert!(first.get("messages").is_some(), "no Responses probe under an explicit family");
+        assert!(first.get("response_format").is_some());
+        let second: Value = serde_json::from_str(&seen[1]).unwrap();
+        assert!(second.get("messages").is_some());
+        assert!(second.get("response_format").is_none(), "the refused contract is dropped");
+    }
+
+    /// The Chat reply shapes the extractors must read: a plain string, the
+    /// parts array a relay may answer, and a refusal in `message.refusal`.
+    #[test]
+    fn the_extractors_read_the_chat_completions_shape_too() {
+        let plain = serde_json::json!({ "choices": [{ "message": { "content": "hello" } }] });
+        assert_eq!(extract_output_text(&plain).as_deref(), Some("hello"));
+        let parts = serde_json::json!({ "choices": [{ "message": { "content": [
+            { "type": "text", "text": "in parts" }
+        ] } }] });
+        assert_eq!(extract_output_text(&parts).as_deref(), Some("in parts"));
+        let refused = serde_json::json!({ "choices": [{ "message": {
+            "content": null, "refusal": "no" } }] });
+        assert_eq!(extract_output_text(&refused), None);
+        assert_eq!(extract_refusal(&refused).as_deref(), Some("no"));
+        assert!(matches!(
+            output_text_or_refusal(&refused, &[], "shape"),
+            Err(AdvisorError::ModelFailure(m)) if m.contains("no")
+        ));
     }
 
     fn meta_fixture() -> Meta {

@@ -31,7 +31,10 @@ use serde_json::{json, Value};
 
 use crate::config::Config;
 
-use super::{output_text_or_refusal, AdvisorError, BoundedUntrustedText, Decision, GradeIntent};
+use super::{
+    AdvisorError, ApiFamily, BoundedUntrustedText, Decision, GradeIntent, VisionFrame,
+    VisionRequest,
+};
 use crate::recipe::StrengthTier;
 
 /// What the judge is being asked to score — picks the prompt.
@@ -453,45 +456,26 @@ pub fn judge_pair(
         instruction.push_str(&ctx);
     }
 
-    let body = json!({
-        "model": cfg.openai_model,
-        // Same rule as the proposer: stored responses land in the KEY
-        // OWNER's account — never persist the user's photos there.
-        "store": false,
-        "input": [{
-            "role": "user",
-            "content": [
-                { "type": "input_text", "text": instruction },
-                { "type": "input_image",
-                  "image_url": format!("data:image/jpeg;base64,{b_ref}"),
-                  "detail": "high" },
-                { "type": "input_image",
-                  "image_url": format!("data:image/jpeg;base64,{b_cand}"),
-                  "detail": "high" }
-            ]
-        }],
-        "text": { "format": {
-            "type": "json_schema",
-            "name": "judgement",
-            "strict": true,
-            "schema": judgement_schema()
-        }}
-    });
+    let req = VisionRequest {
+        model: &cfg.openai_model,
+        instruction,
+        frames: vec![
+            VisionFrame { b64: b_ref, detail: "high" },
+            VisionFrame { b64: b_cand, detail: "high" },
+        ],
+        schema: Some(("judgement", judgement_schema())),
+    };
 
-    let url = format!("{}/responses", cfg.openai_base_url.trim_end_matches('/'));
     // Two high-detail images, a small structured reply — the propose class,
-    // not the style class: reasoning-tier models inspect both frames.
-    let value: Value = super::post_ai_json(
-        &url,
+    // not the style class: reasoning-tier models inspect both frames. The
+    // family is the image role's (`post_vision`), as the key and base are.
+    let text = super::post_vision(
+        &cfg.openai_base_url,
         key,
-        body,
+        &req,
         super::PROPOSE_TIMEOUT_SECS,
-        super::SseFamily::Responses,
         cfg.image_effort.as_deref(),
-    )?;
-    let text = output_text_or_refusal(
-        &value,
-        &[key],
+        ApiFamily::parse(&cfg.image_api_family),
         "could not locate structured output in the judge response",
     )?;
     parse_judgement(&text, &[key])
@@ -549,6 +533,7 @@ mod tests {
             openai_image_max_px: 4_000_000,
             image_provider: "api".into(),
             image_effort: None,
+            image_api_family: "auto".into(),
             analysis_provider: "oauth".into(),
             analysis_model: "opus".into(),
             analysis_effort: None,

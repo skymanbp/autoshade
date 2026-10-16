@@ -873,50 +873,36 @@ inventing new content (no large areas, no removing big / foreground subjects, no
 only small spot fixes a retoucher could heal from neighbours. Return up to 30 spots; fewer is fine. \
 If the photo is clean, return an empty list.";
 
-    let body = json!({
-        "model": cfg.openai_model,
-        // Stored responses land in the KEY OWNER's account — never persist
-        // the user's photos there (see the proposer's rule in openai.rs).
-        "store": false,
-        "input": [{
-            "role": "user",
-            "content": [
-                { "type": "input_text", "text": instruction },
-                { "type": "input_image",
-                  "image_url": format!("data:image/jpeg;base64,{b64}"),
-                  "detail": "high" }
-            ]
-        }],
-        "text": { "format": {
-            "type": "json_schema",
-            "name": "retouch_plan",
-            "strict": true,
-            "schema": plan_schema()
-        }}
-    });
+    // The stored-response rule and the family (`/responses`, or
+    // `/chat/completions` where the endpoint has no such route) are
+    // `advisor::vision_body`'s and `post_vision`'s — the same request every
+    // vision call of the image role sends.
+    let req = crate::advisor::VisionRequest {
+        model: &cfg.openai_model,
+        instruction: instruction.to_string(),
+        frames: vec![crate::advisor::VisionFrame { b64, detail: "high" }],
+        schema: Some(("retouch_plan", plan_schema())),
+    };
 
-    let url = format!("{}/responses", cfg.openai_base_url.trim_end_matches('/'));
     // Same latency class as the analyze proposer (high-detail image + strict
-    // schema on /responses) — and previously a BARE `ureq::post` with no
-    // deadline at all: a stalled endpoint parked the retouch worker forever,
-    // and `busy` gates every GUI action. Streaming-first via the shared
-    // helper: the propose budget bounds SILENCE, not healthy generation time,
-    // and AUTOSHADE_HTTP_TIMEOUT_SECS still overrides.
+    // schema) — and previously a BARE `ureq::post` with no deadline at all: a
+    // stalled endpoint parked the retouch worker forever, and `busy` gates
+    // every GUI action. Streaming-first via the shared helper: the propose
+    // budget bounds SILENCE, not healthy generation time, and
+    // AUTOSHADE_HTTP_TIMEOUT_SECS still overrides.
     //
     // This is the IMAGE role (a vision call on the image key and base URL), so
     // it takes the image role's reasoning-effort tier — not the analysis one.
-    let value: serde_json::Value = crate::advisor::post_ai_json(
-        &url,
+    let text = crate::advisor::post_vision(
+        &cfg.openai_base_url,
         key,
-        body,
+        &req,
         crate::advisor::PROPOSE_TIMEOUT_SECS,
-        crate::advisor::SseFamily::Responses,
         cfg.image_effort.as_deref(),
+        crate::advisor::ApiFamily::parse(&cfg.image_api_family),
+        "no structured output in vision response (shape mismatch)",
     )
     .map_err(|e| anyhow!("vision API: {e}"))?;
-
-    let text = extract_text(&value)
-        .ok_or_else(|| anyhow!("no structured output in vision response (shape mismatch)"))?;
     let mut plan: RetouchPlan =
         serde_json::from_str(strip_fence(&text)).context("parse retouch plan JSON")?;
     // Defend the engine + keep it "retouch not generation": clamp to small spots.
@@ -950,26 +936,6 @@ fn plan_schema() -> serde_json::Value {
             "confidence": num()
         }
     })
-}
-
-/// Pull the model's text out of a Responses-API reply (convenience field first,
-/// then walk `output[].content[]`). Mirrors `advisor/openai.rs`.
-fn extract_text(v: &serde_json::Value) -> Option<String> {
-    if let Some(s) = v.get("output_text").and_then(|x| x.as_str()) {
-        return Some(s.to_string());
-    }
-    for item in v.get("output")?.as_array()? {
-        if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
-            for c in content {
-                if c.get("type").and_then(|t| t.as_str()) == Some("output_text")
-                    && let Some(s) = c.get("text").and_then(|t| t.as_str())
-                {
-                    return Some(s.to_string());
-                }
-            }
-        }
-    }
-    None
 }
 
 fn strip_fence(s: &str) -> &str {

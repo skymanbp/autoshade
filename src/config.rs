@@ -55,6 +55,10 @@ pub struct LocalSettings {
     /// Reasoning effort for the image (vision proposer) role. Same
     /// absent-vs-explicitly-blank semantics as `analysis_effort`.
     pub image_effort: Option<String>,
+    /// Which request shape the image role sends: `"auto"` (the Responses API,
+    /// then Chat Completions when the endpoint has no `/responses`),
+    /// `"responses"` or `"chat"`. Absent ⇒ `"auto"`.
+    pub image_api_family: Option<String>,
     /// `"oauth"` (ChatGPT-subscription via a local Codex bridge, e.g. CLIProxyAPI)
     /// or `"api"` (a real OpenAI-compatible key). Purely a UI/preset selector —
     /// both resolve to the same OpenAI-compatible HTTP path, differing only in
@@ -719,6 +723,13 @@ pub struct Config {
     /// Validated by [`effort`]; the wire spelling differs per endpoint family
     /// and is applied in `advisor::post_ai_json`.
     pub image_effort: Option<String>,
+    /// Which request shape the image role sends — `"auto"`, `"responses"` or
+    /// `"chat"`, validated by [`api_family`] and read by
+    /// `advisor::ApiFamily::parse`. `auto` tries the Responses API and falls
+    /// back to Chat Completions when the endpoint answers 404 or 405 there,
+    /// so a base URL and a key of ANY OpenAI-compatible server work for the
+    /// image role without the user knowing which of the two it serves.
+    pub image_api_family: String,
 
     // --- analysis role: the verifier (oauth = claude CLI, or api = OpenAI) -----
     /// `"oauth"` (default; the `claude` CLI) or `"api"` (OpenAI-compatible chat).
@@ -898,6 +909,7 @@ pub(crate) const SETTINGS: &[Setting] = &[
     bound("AUTOSHADE_OPENAI_IMAGE_MODEL", Trust::Preference, |s| &mut s.image_gen_model),
     bound("AUTOSHADE_IMAGE_PROVIDER", Trust::Preference, |s| &mut s.image_provider),
     bound("AUTOSHADE_IMAGE_EFFORT", Trust::Preference, |s| &mut s.image_effort),
+    bound("AUTOSHADE_IMAGE_API_FAMILY", Trust::Preference, |s| &mut s.image_api_family),
     env_only("AUTOSHADE_IMAGE_QUALITY", Trust::Preference),
     env_only("AUTOSHADE_IMAGE_MAX_PX", Trust::Preference),
     // --- analysis role: the verifier -----------------------------------------
@@ -1254,6 +1266,24 @@ pub(crate) fn effort(v: Option<String>) -> Option<String> {
     Some(v)
 }
 
+/// The three spellings of the image role's request shape (`Config::
+/// image_api_family`), lower-cased; anything else is `auto` with a warning,
+/// so a typo in the settings file degrades to the probing default rather
+/// than to a request no endpoint serves.
+pub(crate) fn api_family(v: String) -> String {
+    let v = v.trim().to_ascii_lowercase();
+    match v.as_str() {
+        "auto" | "responses" | "chat" => v,
+        _ => {
+            eprintln!(
+                "warning: ignoring an unknown image API style {v:?} — expected auto, responses \
+                 or chat; using auto"
+            );
+            "auto".into()
+        }
+    }
+}
+
 /// Can `k` appear in an `Authorization` header value at all?
 ///
 /// Visible ASCII only. RFC 9110 field values also allow SP and HTAB, but no
@@ -1406,6 +1436,11 @@ impl Config {
             image_effort: effort(explicit_or_env(
                 &local.image_effort,
                 env_val("AUTOSHADE_IMAGE_EFFORT"),
+            )),
+            image_api_family: api_family(pick(
+                &local.image_api_family,
+                env_val("AUTOSHADE_IMAGE_API_FAMILY"),
+                "auto",
             )),
 
             analysis_provider: pick(
@@ -1757,6 +1792,7 @@ mod tests {
             analysis_provider: Some("oauth".into()),
             image_gen_model: Some("gpt-image-2".into()),
             image_effort: Some("high".into()),
+            image_api_family: Some("chat".into()),
             analysis_effort: Some("high".into()),
             // The second thing a planted file would take (M8): the folder
             // every export and every pixel master is WRITTEN to. Destination,
@@ -1790,6 +1826,7 @@ mod tests {
         assert_eq!(safe.analysis_provider.as_deref(), Some("oauth"));
         assert_eq!(safe.image_gen_model.as_deref(), Some("gpt-image-2"));
         assert_eq!(safe.image_effort.as_deref(), Some("high"), "effort is a preference");
+        assert_eq!(safe.image_api_family.as_deref(), Some("chat"), "the API style is a preference");
 
         // A file with only harmless fields must NOT trigger the warning.
         let benign = LocalSettings { image_model: Some("m".into()), ..Default::default() };

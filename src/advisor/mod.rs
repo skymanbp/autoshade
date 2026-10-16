@@ -938,10 +938,203 @@ pub(crate) fn for_each_sse_json(
 /// SSE assembly differs: the Responses API's terminal `response.completed`
 /// event carries the full blocking-shape object, while Chat Completions
 /// streams token deltas the client must reassemble into the blocking shape.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum SseFamily {
     Responses,
     Chat,
+}
+
+/// Which endpoint family the IMAGE role is configured to speak — the setting
+/// `image_api_family` as the user wrote it (`config::api_family`).
+///
+/// `Auto` is the default and the point of the setting: the Responses API
+/// first, the request every release since v0.14 has sent, and when the
+/// endpoint answers 404 or 405 — what a server that never heard of
+/// `/responses` says — the SAME call again as a Chat Completion, remembered
+/// per base URL for the rest of the process so later calls pay no probe.
+/// Most OpenAI-compatible servers (local runners, relays, the other vendors'
+/// compatibility layers) serve `/chat/completions` only; a user who pastes
+/// such a base URL and a key gets a working image role without knowing which
+/// of the two shapes it speaks. The explicit values pin one family and skip
+/// the probe.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum ApiFamily {
+    #[default]
+    Auto,
+    Responses,
+    Chat,
+}
+
+impl ApiFamily {
+    /// The setting's spelling: `auto` / `responses` / `chat`, case-insensitive.
+    /// Anything else is `Auto` — `config::api_family` has already warned.
+    pub(crate) fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "responses" => Self::Responses,
+            "chat" => Self::Chat,
+            _ => Self::Auto,
+        }
+    }
+}
+
+/// One image of a vision call: the JPEG bytes base64-encoded, and the detail
+/// tier the caller chose for it (`"high"` for a frame a tonal question is
+/// asked about, `"low"` for the style description's two thumbnails).
+pub(crate) struct VisionFrame {
+    pub(crate) b64: String,
+    pub(crate) detail: &'static str,
+}
+
+/// What a vision call of the image role sends, independent of the family:
+/// the model, the instruction, the frames in order, and the JSON schema the
+/// answer must take (its name and the schema), if the call has one.
+///
+/// The four callers (the proposer, the style description, the visual judge,
+/// the retouch spot finder) used to each write the Responses body by hand;
+/// one description here is what lets [`vision_body`] spell it for either
+/// family without any of them knowing which one answered.
+pub(crate) struct VisionRequest<'a> {
+    pub(crate) model: &'a str,
+    pub(crate) instruction: String,
+    pub(crate) frames: Vec<VisionFrame>,
+    pub(crate) schema: Option<(&'static str, serde_json::Value)>,
+}
+
+/// The request body of a vision call in the given family.
+///
+/// The Responses body is byte for byte what the callers sent before the
+/// family became a choice (`model`, `store: false`, one user turn of
+/// `input_text` + `input_image` parts, `text.format` as a strict JSON
+/// schema) — `openai::tests::a_default_propose_is_byte_for_byte_the_shipped_request`
+/// pins it. The Chat body is the same call in the Chat Completions
+/// vocabulary: one user message of `text` + `image_url` parts (the data URL
+/// and the detail tier inside the `image_url` object) and the schema as
+/// `response_format.json_schema`. No `store` on the Chat side: that API does
+/// not keep responses unless asked.
+pub(crate) fn vision_body(family: SseFamily, req: &VisionRequest<'_>) -> serde_json::Value {
+    use serde_json::json;
+    match family {
+        SseFamily::Responses => {
+            let mut content = vec![json!({ "type": "input_text", "text": req.instruction })];
+            for f in &req.frames {
+                content.push(json!({ "type": "input_image",
+                                     "image_url": format!("data:image/jpeg;base64,{}", f.b64),
+                                     "detail": f.detail }));
+            }
+            let mut body = json!({
+                "model": req.model,
+                // The Responses API STORES responses (input images included)
+                // in the key owner's account by default — under a key planted
+                // by a photo pack's .env, that is a photo-exfiltration channel.
+                // One flag for every frame in `content`.
+                "store": false,
+                "input": [{ "role": "user", "content": content }]
+            });
+            if let Some((name, schema)) = &req.schema {
+                body["text"] = json!({ "format": {
+                    "type": "json_schema",
+                    "name": name,
+                    "strict": true,
+                    "schema": schema
+                }});
+            }
+            body
+        }
+        SseFamily::Chat => {
+            let mut content = vec![json!({ "type": "text", "text": req.instruction })];
+            for f in &req.frames {
+                content.push(json!({ "type": "image_url",
+                                     "image_url": {
+                                         "url": format!("data:image/jpeg;base64,{}", f.b64),
+                                         "detail": f.detail } }));
+            }
+            let mut body = json!({
+                "model": req.model,
+                "messages": [{ "role": "user", "content": content }]
+            });
+            if let Some((name, schema)) = &req.schema {
+                body["response_format"] = json!({
+                    "type": "json_schema",
+                    "json_schema": { "name": name, "strict": true, "schema": schema }
+                });
+            }
+            body
+        }
+    }
+}
+
+/// What the image role has LEARNED about each base URL in this process:
+/// the family that answered. Written only by `Auto` mode, read only by it.
+static FAMILY_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, SseFamily>>,
+> = std::sync::OnceLock::new();
+
+fn learned_family(base: &str) -> Option<SseFamily> {
+    FAMILY_CACHE.get_or_init(Default::default).lock().ok()?.get(base).copied()
+}
+
+fn learn_family(base: &str, family: SseFamily) {
+    if let Ok(mut m) = FAMILY_CACHE.get_or_init(Default::default).lock() {
+        m.insert(base.to_string(), family);
+    }
+}
+
+/// POST one vision call of the image role and answer the model's TEXT — the
+/// JSON of a structured call, the prose of a plain one — with a refusal told
+/// apart from a missing answer as [`output_text_or_refusal`] does.
+///
+/// The family comes from `choice` (see [`ApiFamily`]): an explicit choice
+/// goes straight to its endpoint; `Auto` goes to what this base URL answered
+/// before, or to `/responses` first, and on a 404 or 405 there sends the same
+/// call to `/chat/completions` and remembers. Only those two statuses switch:
+/// a 400 is the endpoint objecting to a parameter, which [`post_ai_json`]
+/// negotiates knob by knob inside the family; a 401 or 429 is the key or the
+/// quota, which no other shape would cure.
+pub(crate) fn post_vision(
+    base_url: &str,
+    key: &str,
+    req: &VisionRequest<'_>,
+    budget_secs: u64,
+    effort: Option<&str>,
+    choice: ApiFamily,
+    missing: &str,
+) -> Result<String, AdvisorError> {
+    let base = base_url.trim_end_matches('/');
+    let first = match choice {
+        ApiFamily::Responses => SseFamily::Responses,
+        ApiFamily::Chat => SseFamily::Chat,
+        ApiFamily::Auto => learned_family(base).unwrap_or(SseFamily::Responses),
+    };
+    let post = |family: SseFamily| -> Result<serde_json::Value, AdvisorError> {
+        let path = match family {
+            SseFamily::Responses => "responses",
+            SseFamily::Chat => "chat/completions",
+        };
+        post_ai_json(
+            &format!("{base}/{path}"),
+            key,
+            vision_body(family, req),
+            budget_secs,
+            family,
+            effort,
+        )
+    };
+    let (family, value) = match post(first) {
+        Err(AdvisorError::Http { status: 404 | 405, .. })
+            if choice == ApiFamily::Auto && first == SseFamily::Responses =>
+        {
+            eprintln!(
+                "  note: the endpoint has no /responses (HTTP 404/405) — sending the same call                  as a chat completion; remembered for this endpoint until the app closes"
+            );
+            (SseFamily::Chat, post(SseFamily::Chat)?)
+        }
+        Err(e) => return Err(e),
+        Ok(v) => (first, v),
+    };
+    if choice == ApiFamily::Auto {
+        learn_family(base, family);
+    }
+    output_text_or_refusal(&value, &[key], missing)
 }
 
 /// Streaming stall floor. Reasoning-class models can be SILENT on the wire
@@ -1049,6 +1242,13 @@ pub(crate) struct Refused {
     summary: bool,
     effort: bool,
     stream: bool,
+    /// The response contract — `text.format` on the Responses family,
+    /// `response_format` on Chat. A server that serves the Chat vocabulary
+    /// without structured outputs (several local runners and relays) refuses
+    /// it with a 400 that names it; the call is worth more without the
+    /// guarantee than not at all, since every structured parser behind these
+    /// calls strips a code fence and reads the JSON the prompt asked for.
+    format: bool,
 }
 
 /// [`post_ai_json`] for a caller that will retry at its OWN level: the
@@ -1087,11 +1287,24 @@ pub(crate) fn post_ai_json_with(
         let use_summary =
             matches!(family, SseFamily::Responses) && !caller_owns_reasoning && !refused.summary;
         let use_effort = effort.is_some() && !caller_owns_reasoning && !refused.effort;
+        // The response contract is the caller's, under the family's key; it
+        // is sent until the endpoint refuses it by name.
+        let has_format = match family {
+            SseFamily::Responses => body.get("text").and_then(|t| t.get("format")).is_some(),
+            SseFamily::Chat => body.get("response_format").is_some(),
+        };
+        let use_format = has_format && !refused.format;
         // Rebuild from the caller's body each attempt — dropping a negotiated
         // flag must not leave the other attempt's keys behind.
         let mut attempt = body.clone();
         if use_stream {
             attempt["stream"] = serde_json::Value::Bool(true);
+        }
+        if has_format && !use_format && let Some(o) = attempt.as_object_mut() {
+            match family {
+                SseFamily::Responses => o.remove("text"),
+                SseFamily::Chat => o.remove("response_format"),
+            };
         }
         match family {
             SseFamily::Responses => {
@@ -1250,6 +1463,25 @@ pub(crate) fn post_ai_json_with(
                          it (the provider's own default applies)"
                     );
                     refused.effort = true;
+                    continue;
+                }
+                // The contract's own name per family. On Responses the
+                // endpoint names the child (`text.format`) or, rarely, the
+                // object; a bare quoted "text" is NOT read as the contract —
+                // an echo of a content part would carry that word too.
+                let names_format = match family {
+                    SseFamily::Responses => {
+                        error_blames_param(&b, "text.format")
+                            || structured_param(&b).as_deref() == Some("text")
+                    }
+                    SseFamily::Chat => error_blames_param(&b, "response_format"),
+                };
+                if negotiable && use_format && names_format {
+                    eprintln!(
+                        "  note: endpoint rejected the structured-output contract — retrying \
+                         without it (the reply is read as the JSON the prompt asked for)"
+                    );
+                    refused.format = true;
                     continue;
                 }
                 if negotiable && use_stream && error_blames_param(&b, "stream") {

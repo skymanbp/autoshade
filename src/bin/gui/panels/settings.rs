@@ -31,6 +31,7 @@ impl AutoShadeApp {
             image_api_key: String::new(),
             image_key_present: cfg.openai_api_key.is_some(),
             image_effort: cfg.image_effort.clone().unwrap_or_default(),
+            image_api_family: cfg.image_api_family.clone(),
             // The FILE's own spelling, not the resolved root: this is the
             // field the user edits, and showing a resolved absolute path in it
             // would silently turn "use the default" into a pinned folder on
@@ -116,6 +117,7 @@ impl AutoShadeApp {
             // clearing the field could never take effect.
             cur.analysis_effort = Some(form.analysis_effort.trim().to_string());
             cur.image_effort = Some(form.image_effort.trim().to_string());
+            cur.image_api_family = Some(form.image_api_family.trim().to_string());
             // The delivery root (M8), same explicit-blank rule as the two
             // efforts: an emptied field is a real choice ("the default
             // ./out"), so it is STORED empty rather than skipped, or clearing
@@ -704,6 +706,10 @@ impl AutoShadeApp {
             ui.horizontal(|ui| {
                 ui.label(tr(lang, "Reasoning effort"));
                 effort_picker(ui, "set_image_effort", &mut f.image_effort, &EFFORT_TIERS_API, lang);
+            });
+            ui.horizontal(|ui| {
+                ui.label(tr(lang, "API style"));
+                api_family_picker(ui, &mut f.image_api_family, lang);
             });
             ui.horizontal(|ui| {
                 ui.label(tr(lang, "Image-gen model"));

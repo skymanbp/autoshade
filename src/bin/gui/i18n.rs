@@ -1629,6 +1629,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("List the models THIS endpoint serves (GET /models). The analysis role has its own endpoint and key, so it gets its own list.",
         "列出「这个」端点提供的模型（GET /models）。分析角色有自己的端点和密钥，因此有自己的列表。"),
     ("Reasoning effort", "推理等级"),
+    ("API style", "接口风格"),
+    ("Auto (Responses, then Chat)", "自动（先 Responses，再 Chat）"),
+    (
+        "Which request shape the image role sends. Auto tries the Responses API first and, when the endpoint answers 404 or 405 there, sends the same call as a Chat Completion and remembers that until the app closes. Choose Chat Completions for an endpoint that serves only /chat/completions (most OpenAI-compatible endpoints); Responses API pins the original shape.",
+        "图像角色发送请求的格式。自动：先用 Responses API，端点返回 404 或 405 时，把同一请求改以 Chat Completion 发送，并记住到应用关闭为止。只有 /chat/completions 的端点（多数 OpenAI 兼容端点）选 Chat Completions；Responses API 则固定用原格式。",
+    ),
     ("provider default", "由供应商决定"),
     ("or type a tier", "或直接输入等级"),
     ("How hard the model is asked to think. Higher tiers cost more and take longer; blank leaves the choice to the provider. An endpoint that does not know the tier is retried without it.",

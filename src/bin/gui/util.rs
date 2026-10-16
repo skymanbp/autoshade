@@ -1097,6 +1097,38 @@ pub(crate) fn effort_picker(
     ));
 }
 
+/// The image role's request-shape picker: `auto`, `responses` or `chat`
+/// (`config::Config::image_api_family`), each named by what it does.
+///
+/// A dropdown and nothing else: the three values are the whole set the
+/// config accepts, so a free-text field could only ever hold a typo.
+pub(crate) fn api_family_picker(ui: &mut egui::Ui, value: &mut String, lang: Lang) {
+    const CHOICES: [(&str, &str); 3] = [
+        ("auto", "Auto (Responses, then Chat)"),
+        ("responses", "Responses API"),
+        ("chat", "Chat Completions"),
+    ];
+    let current = value.trim().to_ascii_lowercase();
+    let sel = CHOICES
+        .iter()
+        .find(|(v, _)| *v == current)
+        .map(|(_, label)| tr(lang, label).to_owned())
+        .unwrap_or_else(|| tr(lang, CHOICES[0].1).to_owned());
+    egui::ComboBox::from_id_salt("set_image_api_family")
+        .selected_text(sel)
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            for (v, label) in CHOICES {
+                ui.selectable_value(value, v.to_string(), tr(lang, label));
+            }
+        })
+        .response
+        .on_hover_text(tr(
+            lang,
+            "Which request shape the image role sends. Auto tries the Responses API first and, when the endpoint answers 404 or 405 there, sends the same call as a Chat Completion and remembers that until the app closes. Choose Chat Completions for an endpoint that serves only /chat/completions (most OpenAI-compatible endpoints); Responses API pins the original shape.",
+        ));
+}
+
 /// Does a delivery root and the OPEN photo's folder sit inside one another —
 /// in either direction (R24 round-end LOW-3)?
 ///

@@ -3184,6 +3184,9 @@ fn api_settings_get(_state: &AppState) -> Result<ResponseBox> {
             "gen_model": cfg.openai_image_model,
             "key_present": cfg.openai_api_key.is_some(),
             "effort": cfg.image_effort.clone().unwrap_or_default(),
+            // `auto` / `responses` / `chat`: the request shape (see
+            // `config::Config::image_api_family`).
+            "api_family": cfg.image_api_family,
         },
         // The `claude` CLI has no image input in print mode → image-via-OAuth is
         // not available; the image role always uses an OpenAI-compatible API.
@@ -3231,6 +3234,9 @@ fn api_settings_post(request: &mut Request, state: &AppState) -> Result<Response
         }
         if inc.image_effort.is_some() {
             cur.image_effort = inc.image_effort;
+        }
+        if inc.image_api_family.is_some() {
+            cur.image_api_family = inc.image_api_family;
         }
         // Secrets: only overwrite when a non-empty value was actually
         // provided — and a provided key is FOR the base being saved with it
