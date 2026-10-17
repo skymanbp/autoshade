@@ -1,6 +1,9 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.10.0 — the image role speaks Chat Completions too,
+> Status: **implemented** (v1.11.0 — generative edits through any provider's
+> edit call, described as a JSON template in Settings, with the painted area
+> shown as a red-marked copy to a provider that takes no mask;
+> v1.10.0 — the image role speaks Chat Completions too,
 > the request shape detected per endpoint or pinned in Settings; the reasoning
 > tiers and the vision flag a `/models` listing names reach the pickers; the
 > desktop app's reviewed strings, and a long toast wraps;
