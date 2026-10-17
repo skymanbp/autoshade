@@ -915,8 +915,29 @@ server that serves only `/chat/completions` (most OpenAI-compatible servers
 and local runners); **Responses API** pins the original. A server that
 accepts the Chat shape but not its structured-output contract gets the call
 again without it, and the reply is read as the JSON the prompt asked for.
-Generative edits are the exception: they need `/images/edits` with a mask,
-which only some providers serve. **Fetch models** lists what the endpoint
+Generative edits are the exception: by default they use OpenAI's
+`/images/edits`, which only some providers serve. **Image-gen API** →
+**Custom** describes any other provider's edit call as a JSON template sent
+to the same base URL with the same key — `"path"` is added to the base URL,
+`"body"` is what is sent, with `{model}`, `{prompt}`, `{image}`,
+`{image_data_url}`, `{mask}`, `{mask_data_url}`, `{width}`, `{height}`,
+`{size}` and `{quality}` filled in (`{mask}` is white where the picture should
+change). A provider with no mask parameter gets
+`{marked}`, the picture with the painted area tinted red, as another image,
+and `{marked_note}` after the prompt, which tells the model to change only the
+red area; that is how an empty prompt (remove) still says where. A lone
+painted-area entry is dropped, and the note left empty, when nothing is
+painted. `"reply"` is `"image"` when the answer is the picture itself or a JSON
+pointer to its base64 (default `/data/0/b64_json`). The empty box shows an
+example template to start from; the provider's own API reference says what
+its path, field names and reply are, and the **Image-gen model** field holds
+the model id that provider uses for edits. An empty template saves as OpenAI
+standard. The answer is resized to the requested size when it has the same aspect, and
+refused otherwise; either way only the painted area of the answer is kept.
+The same template can come from `AUTOSHADE_IMAGE_GEN_ENDPOINT`. Under **Sign in
+with ChatGPT** the bridge serves OpenAI's call, so the choice is hidden and a
+saved template waits until the API option is chosen again.
+**Fetch models** lists what the endpoint
 serves; where the listing also says which reasoning tiers a model takes
 (Venice, OpenRouter), the **Reasoning effort** picker offers that model's
 own tiers, says so beside it, and a model that takes none is marked so that

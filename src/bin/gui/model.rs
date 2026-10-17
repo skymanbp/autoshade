@@ -1053,6 +1053,12 @@ pub(crate) struct SettingsForm {
     /// (`config::Config::image_api_family`); the picker writes the spelling
     /// the settings file stores.
     pub(crate) image_api_family: String,
+    /// Image-gen API: `false` = OpenAI's `/images/edits`, `true` = the
+    /// template below (`config::Config::image_gen_endpoint`).
+    pub(crate) image_gen_custom: bool,
+    /// The custom template's text, kept while the radio is on OpenAI so a
+    /// flip back does not lose it; saved only when `image_gen_custom`.
+    pub(crate) image_gen_endpoint: String,
     /// The DELIVERY ROOT as the settings FILE spells it (R24-5 M8) — blank
     /// means "the default `./out`", which is also how a blank SAVES (an
     /// explicitly emptied field silences an `AUTOSHADE_OUT_DIR` in the

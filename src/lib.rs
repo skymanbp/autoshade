@@ -25,6 +25,7 @@ pub(crate) mod fit_cells;
 pub(crate) mod fit_field;
 pub mod fit_zoned;
 pub mod generative;
+pub mod image_endpoint;
 pub mod jobs;
 pub mod lcp;
 pub mod lensmeta;

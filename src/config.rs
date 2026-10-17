@@ -59,6 +59,11 @@ pub struct LocalSettings {
     /// then Chat Completions when the endpoint has no `/responses`),
     /// `"responses"` or `"chat"`. Absent ⇒ `"auto"`.
     pub image_api_family: Option<String>,
+    /// The image-EDIT call as a JSON template (`image_endpoint`), for a
+    /// provider whose edit endpoint is not OpenAI's `/images/edits` — Venice's
+    /// `/image/multi-edit`. Absent ⇒ the environment may supply one; an
+    /// explicit `""` ⇒ OpenAI's call, silencing the environment too.
+    pub image_gen_endpoint: Option<String>,
     /// `"oauth"` (ChatGPT-subscription via a local Codex bridge, e.g. CLIProxyAPI)
     /// or `"api"` (a real OpenAI-compatible key). Purely a UI/preset selector —
     /// both resolve to the same OpenAI-compatible HTTP path, differing only in
@@ -730,6 +735,11 @@ pub struct Config {
     /// so a base URL and a key of ANY OpenAI-compatible server work for the
     /// image role without the user knowing which of the two it serves.
     pub image_api_family: String,
+    /// The custom image-edit template as the user wrote it (`image_endpoint`),
+    /// or `None` for OpenAI's `/images/edits`. Kept as text and parsed at the
+    /// call, so a broken template fails the edit with its own message instead
+    /// of quietly falling back to an endpoint the provider does not serve.
+    pub image_gen_endpoint: Option<String>,
 
     // --- analysis role: the verifier (oauth = claude CLI, or api = OpenAI) -----
     /// `"oauth"` (default; the `claude` CLI) or `"api"` (OpenAI-compatible chat).
@@ -910,6 +920,8 @@ pub(crate) const SETTINGS: &[Setting] = &[
     bound("AUTOSHADE_IMAGE_PROVIDER", Trust::Preference, |s| &mut s.image_provider),
     bound("AUTOSHADE_IMAGE_EFFORT", Trust::Preference, |s| &mut s.image_effort),
     bound("AUTOSHADE_IMAGE_API_FAMILY", Trust::Preference, |s| &mut s.image_api_family),
+    // Destination: it names the path the key and the photo are posted to.
+    bound("AUTOSHADE_IMAGE_GEN_ENDPOINT", Trust::Destination, |s| &mut s.image_gen_endpoint),
     env_only("AUTOSHADE_IMAGE_QUALITY", Trust::Preference),
     env_only("AUTOSHADE_IMAGE_MAX_PX", Trust::Preference),
     // --- analysis role: the verifier -----------------------------------------
@@ -1442,6 +1454,13 @@ impl Config {
                 env_val("AUTOSHADE_IMAGE_API_FAMILY"),
                 "auto",
             )),
+            // `explicit_or_env`: a saved `""` is the choice "OpenAI's call".
+            image_gen_endpoint: explicit_or_env(
+                &local.image_gen_endpoint,
+                env_val("AUTOSHADE_IMAGE_GEN_ENDPOINT"),
+            )
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
 
             analysis_provider: pick(
                 &local.analysis_provider,
@@ -1794,6 +1813,8 @@ mod tests {
             image_effort: Some("high".into()),
             image_api_family: Some("chat".into()),
             analysis_effort: Some("high".into()),
+            // A custom image-edit path rides the user's key: Destination.
+            image_gen_endpoint: Some(r#"{"path":"/steal","body":{}}"#.into()),
             // The second thing a planted file would take (M8): the folder
             // every export and every pixel master is WRITTEN to. Destination,
             // so it is stripped with the endpoints.
@@ -1816,6 +1837,7 @@ mod tests {
         assert_eq!(safe.analysis_api_key, None, "an ambient file supplied the analysis key");
         assert_eq!(safe.out_dir, None, "an ambient file chose where the photos are written");
         assert_eq!(safe.python_bin, None, "an ambient file chose which program is executed");
+        assert_eq!(safe.image_gen_endpoint, None, "an ambient file chose where the image edit posts");
 
         // …and it is a scalpel, not a reset: everything else still applies, so
         // the pre-store cwd file keeps working as the migration affordance it

@@ -513,7 +513,9 @@ pixels and adopts a guided revision only when it does not lower the score;
 similarity and hands the three closest to the proposer; `src/fit.rs`
 runs the inverse stages behind the >45°/≥5% foreign-hue veto and consults
 the DIFT field of `src/correspond.rs` on divergent pairs; `src/generative.rs`
-negotiates gpt-image-2 sizes and `src/retouch.rs` is the deterministic heal.
+negotiates gpt-image-2 sizes, `src/image_endpoint.rs` fills a user-written
+template for a provider whose edit call is not OpenAI's, and `src/retouch.rs`
+is the deterministic heal.
 
 ### Application and infrastructure
 

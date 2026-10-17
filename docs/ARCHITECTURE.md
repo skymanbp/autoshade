@@ -202,8 +202,8 @@
 > symbol, link and tier count the living documents name exists in the tree;
 > CI's `docs` job runs it on every push) — and a gate that exits non-zero
 > fails the battery like a lane.
-> 1648 library + 25 CLI + 244 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1633 pass + 15 `#[ignore]`d forensic probes and
+> 1655 library + 25 CLI + 244 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1640 pass + 15 `#[ignore]`d forensic probes and
 > the GUI result is 241 pass + three ignored (an explicit scratch-recipe export
 > probe and the offline panel and window screenshots) in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
 > refusal pair (a RAW source, a baked negative); the library and GUI lists are
@@ -237,7 +237,15 @@
 > edit read as the edit, a maskless edit sending no mask and layering only
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
-> screenshots). For v1.10.0, by name against the v1.9.0 battery: library
+> screenshots). For v1.11.0, by name against the v1.10.0 battery: library
+> +7 / −0 — six in `image_endpoint` for the custom image-edit template (the
+> settings example parses, the painted area reaches a provider with no mask
+> parameter as a red-marked copy only when there is one, placeholders expand
+> once, templates that could misroute the key are refused, replies read by
+> pointer or as the body, the answer resized only at the same aspect) and one
+> in `generative` (one JSON POST with the template filled in, and the
+> subscription bridge still sent OpenAI's call); GUI and CLI unchanged. For
+> v1.10.0, by name against the v1.9.0 battery: library
 > +5 / −0 — four in the OpenAI provider for the image role over Chat
 > Completions (the fallback from a missing `/responses`, the learned family
 > not probed again, an explicit Chat family that drops a refused contract,
@@ -6431,7 +6439,10 @@ two older segmenter paths, which say so in their own comments.
 **The AI services** are two HTTP contracts and one subprocess: an
 OpenAI-compatible **Responses** API for the vision advisor and the visual judge
 (strict `json_schema`, `store: false`), the **Images** API (`/v1/images/edits`,
-`gpt-image-*`) for the experimental generative edits, and the **`claude` CLI**
+`gpt-image-*`) for the experimental generative edits — or, for a provider whose
+edit call is shaped differently (Venice's `/image/multi-edit`), a JSON template
+the user writes in Settings (`image_endpoint.rs`: path on the same base URL,
+body with placeholders, reply as the image or a JSON pointer) — and the **`claude` CLI**
 for the analyst/verifier role — reusing Claude Code OAuth, so that role needs no
 API key at all (§3, §4.3).
 

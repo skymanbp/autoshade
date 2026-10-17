@@ -2,6 +2,48 @@
 
 use crate::*;
 
+/// Image-gen API: OpenAI's `/images/edits`, or a call the user describes as a
+/// JSON template (`autoshade::image_endpoint`). Two choices and no provider
+/// presets (user ruling 2026-10-17): any provider is one user's template, and
+/// the empty box shows the shape to start from.
+fn image_gen_api_ui(ui: &mut egui::Ui, f: &mut SettingsForm, lang: Lang) {
+    use autoshade::image_endpoint::{ImageEndpoint, EXAMPLE};
+    ui.horizontal(|ui| {
+        ui.label(tr(lang, "Image-gen API"));
+        ui.radio_value(&mut f.image_gen_custom, false, tr(lang, "OpenAI standard (/images/edits)"));
+        ui.radio_value(&mut f.image_gen_custom, true, tr(lang, "Custom"));
+    });
+    if !f.image_gen_custom {
+        return;
+    }
+    ui.add(
+        egui::TextEdit::multiline(&mut f.image_gen_endpoint)
+            .code_editor()
+            .desired_rows(8)
+            .desired_width(f32::INFINITY)
+            .hint_text(EXAMPLE),
+    );
+    // A blank template saves as OpenAI's call (`config::Config::load` reads
+    // blank as unset), so say that rather than flag it as broken.
+    let check = if f.image_gen_endpoint.trim().is_empty() {
+        egui::RichText::new(tr(lang, "empty — saved as OpenAI standard")).weak().small()
+    } else {
+        match ImageEndpoint::parse(&f.image_gen_endpoint) {
+            Ok(_) => egui::RichText::new(tr(lang, "✓ template is valid")).weak().small(),
+            Err(e) => egui::RichText::new(format!("⚠ {e:#}")).color(ui.visuals().warn_fg_color).small(),
+        }
+    };
+    ui.label(check);
+    ui.label(
+        egui::RichText::new(tr(
+            lang,
+            "Describe the provider's image-edit call as JSON, sent to the Base URL above with the API key below: \"path\" is added to the Base URL, \"body\" is what is sent, and \"reply\" is \"image\" when the answer is the picture itself, or a JSON pointer to its base64 (default /data/0/b64_json). In the body, {model} {prompt} {image} {image_data_url} {mask} {mask_data_url} {marked} {marked_data_url} {marked_note} {width} {height} {size} {quality} are filled in; {mask} is white where the picture should change. For a provider with no mask parameter, send {marked} (the picture with the painted area tinted red) as another image and put {marked_note} after {prompt}: it tells the model to change only the red area. All three are left out when nothing is painted.",
+        ))
+        .weak()
+        .small(),
+    );
+}
+
 impl AutoShadeApp {
     /// Populate the Settings form from the resolved config (keys are shown only as
     /// "present", never revealed). Called when the window opens.
@@ -32,6 +74,8 @@ impl AutoShadeApp {
             image_key_present: cfg.openai_api_key.is_some(),
             image_effort: cfg.image_effort.clone().unwrap_or_default(),
             image_api_family: cfg.image_api_family.clone(),
+            image_gen_custom: cfg.image_gen_endpoint.is_some(),
+            image_gen_endpoint: cfg.image_gen_endpoint.clone().unwrap_or_default(),
             // The FILE's own spelling, not the resolved root: this is the
             // field the user edits, and showing a resolved absolute path in it
             // would silently turn "use the default" into a pinned folder on
@@ -118,6 +162,12 @@ impl AutoShadeApp {
             cur.analysis_effort = Some(form.analysis_effort.trim().to_string());
             cur.image_effort = Some(form.image_effort.trim().to_string());
             cur.image_api_family = Some(form.image_api_family.trim().to_string());
+            // Stored blank for OpenAI's call, so the choice can undo a template.
+            cur.image_gen_endpoint = Some(if form.image_gen_custom {
+                form.image_gen_endpoint.trim().to_string()
+            } else {
+                String::new()
+            });
             // The delivery root (M8), same explicit-blank rule as the two
             // efforts: an emptied field is a real choice ("the default
             // ./out"), so it is STORED empty rather than skipped, or clearing
@@ -745,6 +795,11 @@ impl AutoShadeApp {
                 let opts = model_opts(&f.image_models.image_gen, fallbacks, &f.image_gen_model);
                 model_picker(ui, "set_imagegen_model", &mut f.image_gen_model, &opts, lang);
             });
+            // The subscription bridge serves OpenAI's call only; a template
+            // stays saved and applies again under the API preset.
+            if !f.image_provider_oauth {
+                image_gen_api_ui(ui, f, lang);
+            }
             ui.horizontal(|ui| {
                 ui.label(if f.image_provider_oauth { tr(lang, "Bridge password") } else { tr(lang, "API Key") });
                 let hint = if f.image_key_present {

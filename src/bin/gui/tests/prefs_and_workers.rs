@@ -315,6 +315,7 @@
             image_provider: "api".into(),
             image_effort: None,
             image_api_family: "auto".into(),
+            image_gen_endpoint: None,
             analysis_provider: "oauth".into(),
             analysis_model: "opus".into(),
             analysis_effort: None,

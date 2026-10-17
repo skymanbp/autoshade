@@ -1525,7 +1525,7 @@ fn box_blur(mut src: Vec<f32>, w: usize, h: usize, radius: usize) -> Vec<f32> {
     src
 }
 
-fn encode_png(img: &DynamicImage) -> Result<Vec<u8>> {
+pub(crate) fn encode_png(img: &DynamicImage) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
         .context("encode png")?;
@@ -1749,6 +1749,12 @@ fn call_images_edit(
         .openai_api_key
         .as_ref()
         .ok_or_else(|| anyhow!("OPENAI_API_KEY not set — generative editing needs the OpenAI API"))?;
+    // The subscription bridge (OAuth preset) serves OpenAI's own call, so a
+    // template saved under the API preset waits there instead of being sent
+    // to the bridge.
+    if let Some(template) = cfg.image_gen_endpoint.as_ref().filter(|_| !cfg.image_is_oauth()) {
+        return call_custom_edit(cfg, template, key, inputs, prompt, sizes.enum_size, quality);
+    }
 
     let url = format!("{}/images/edits", cfg.openai_base_url.trim_end_matches('/'));
     let mut include_fidelity = true;
@@ -2030,6 +2036,86 @@ fn call_images_edit(
         gui_progress(line.trim());
     }
     Ok(GeneratedImage { bytes, requested: used_size, accepted: accepted_size })
+}
+
+/// [`call_images_edit`] for a user-described endpoint (`image_endpoint`, e.g.
+/// Venice's `/image/multi-edit`): one blocking JSON POST at the plan's ENUM
+/// size. Such endpoints pick their own output resolution (Venice: ~1 MP
+/// unless asked otherwise), and the enum input keeps the base64 body far under
+/// the per-image upload limits they set (Venice: 25 MB). Nothing is
+/// negotiated — the template IS the request — and nothing is re-posted past a
+/// 2xx, the same money rule as the OpenAI path.
+fn call_custom_edit(
+    cfg: &Config,
+    template: &str,
+    key: &str,
+    inputs: &mut dyn FnMut(&str) -> Result<SizedInputs>,
+    prompt: &str,
+    size: &str,
+    quality: &str,
+) -> Result<GeneratedImage> {
+    use crate::image_endpoint as ep_mod;
+    let ep = ep_mod::ImageEndpoint::parse(template)
+        .context("the custom image-gen endpoint in Settings")?;
+    if cancelled() {
+        return Err(anyhow!("cancelled by user"));
+    }
+    let (image_png, mask_png) = inputs(size)?;
+    if mask_png.is_some() && !ep.takes_mask() {
+        let line = "  note: the custom image endpoint takes no mask — the model gets the words and the \
+                    whole picture; only the painted area of its answer is kept";
+        eprintln!("{line}");
+        gui_progress(line.trim());
+    }
+    let (w, h) = parse_size(size);
+    let body = ep_mod::render_body(&ep, &ep_mod::Values {
+        model: &cfg.openai_image_model,
+        prompt,
+        quality,
+        width: w,
+        height: h,
+        image_png: &image_png,
+        mask_png: mask_png.as_deref(),
+    })?;
+    let resp = crate::advisor::post_with_timeout(
+        &ep.url(&cfg.openai_base_url),
+        std::time::Duration::from_secs(IMAGES_EDIT_TIMEOUT_SECS),
+    )
+    .set("Authorization", &format!("Bearer {key}"))
+    .send_json(body);
+    let reply = match resp {
+        Ok(r) => {
+            use std::io::Read as _;
+            let mut buf = Vec::new();
+            let read = r.into_reader().take(STREAM_CAP + 1).read_to_end(&mut buf);
+            if read.is_err() || buf.len() as u64 > STREAM_CAP {
+                return Err(anyhow!(
+                    "read image API response failed: the request was accepted (2xx) and may already \
+                     be billed — not re-posting automatically; run the operation again to retry"
+                ));
+            }
+            buf
+        }
+        Err(ureq::Error::Status(code, r)) => {
+            let b = r.into_string().unwrap_or_default();
+            let safe = crate::advisor::BoundedUntrustedText::diagnostic(&b, &[key]);
+            return Err(anyhow!("image API {code}: {safe}"));
+        }
+        Err(ureq::Error::Transport(t)) => return Err(anyhow!("transport: {t}")),
+    };
+    let bytes = ep_mod::reply_bytes(&ep, reply).map_err(|e| {
+        anyhow!(crate::advisor::BoundedUntrustedText::diagnostic(&format!("{e:#}"), &[key]).into_string())
+    })?;
+    let (png, got) = ep_mod::to_requested_size(&bytes, (w, h))?;
+    if got != (w, h) {
+        let line = format!(
+            "  note: {} answered {}x{}; resized to the requested {size}",
+            cfg.openai_image_model, got.0, got.1
+        );
+        eprintln!("{line}");
+        gui_progress(line.trim());
+    }
+    Ok(GeneratedImage { bytes: png, requested: size.to_string(), accepted: size.to_string() })
 }
 
 /// The image payload lives at `data[0].b64_json` in a blocking JSON response
@@ -2823,6 +2909,7 @@ mod tests {
             image_provider: "api".into(),
             image_effort: None,
             image_api_family: "auto".into(),
+            image_gen_endpoint: None,
             analysis_provider: "oauth".into(),
             analysis_model: "opus".into(),
             analysis_effort: None,
@@ -2866,6 +2953,94 @@ mod tests {
         while !handle.is_finished() && grace.elapsed() < std::time::Duration::from_secs(2) {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        let _ = handle.join();
+    }
+
+    /// 2026-10-17: a custom endpoint (Venice's shape, JSON reply variant) gets
+    /// ONE JSON POST at the enum size with the template filled in, and its
+    /// answer — another resolution at the same aspect — comes back at the
+    /// requested size. A non-2xx is reported, never retried.
+    #[test]
+    fn a_custom_endpoint_posts_the_template_and_resizes_the_answer() {
+        let answer = encode_png(&DynamicImage::ImageRgba8(RgbaImage::new(1264, 848))).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&answer);
+        let (url, seen, handle) = stub_endpoint(vec![
+            (200, "application/json", format!(r#"{{"data":[{{"b64_json":"{b64}"}}]}}"#)),
+            (404, "application/json", r#"{"error":"Not found"}"#.into()),
+            (500, "application/json", r#"{"error":"bridge"}"#.into()),
+        ]);
+        let mut cfg = Config {
+            openai_api_key: Some("test-key".into()),
+            openai_model: "test-chat".into(),
+            openai_base_url: url,
+            openai_image_model: "test-image-edit".into(),
+            openai_image_quality: "auto".into(),
+            openai_image_max_px: 4_000_000,
+            image_provider: "api".into(),
+            image_effort: None,
+            image_api_family: "auto".into(),
+            image_gen_endpoint: Some(
+                r#"{"path":"/image/multi-edit","body":{"modelId":"{model}","prompt":"{prompt}",
+                    "images":["{image}","{mask}"]},"reply":"/data/0/b64_json"}"#
+                    .into(),
+            ),
+            analysis_provider: "oauth".into(),
+            analysis_model: "opus".into(),
+            analysis_effort: None,
+            claude_bin: "claude".into(),
+            analysis_api_key: None,
+            analysis_base_url: "http://127.0.0.1:1".into(),
+            python_bin: "python".into(),
+            denoise_model: "scunet_color_real_psnr".into(),
+            denoise_script: String::new(),
+            denoise_raw_script: String::new(),
+            weights_dir: String::new(),
+            segment_script: String::new(),
+            depth_script: String::new(),
+            embed_script: String::new(),
+            correspond_script: String::new(),
+            describe_script: String::new(),
+            style_strength: 0.5,
+            send_reference_image: false,
+        };
+        let src = encode_png(&DynamicImage::ImageRgba8(RgbaImage::new(8, 8))).unwrap();
+        let sizes = SizePlan { flexible: Some("1600x1072".into()), enum_size: "1536x1024" };
+        let mut asked: Vec<String> = Vec::new();
+        let got = call_images_edit(
+            &cfg,
+            &mut |size| {
+                asked.push(size.to_string());
+                Ok((src.clone(), None))
+            },
+            "brighten the sky",
+            "high",
+            &sizes,
+            "auto",
+        )
+        .expect("the custom endpoint answers");
+        assert_eq!(asked, ["1536x1024"], "one request, at the enum size");
+        assert_eq!((got.requested.as_str(), got.accepted.as_str()), ("1536x1024", "1536x1024"));
+        assert_eq!(image::load_from_memory(&got.bytes).unwrap().dimensions(), (1536, 1024));
+        let body: serde_json::Value = serde_json::from_str(&seen.lock().unwrap()[0]).unwrap();
+        assert_eq!(body["modelId"], "test-image-edit");
+        assert_eq!(body["prompt"], "brighten the sky");
+        assert_eq!(body["images"].as_array().unwrap().len(), 1, "no mask was painted");
+
+        let Err(e) = call_images_edit(&cfg, &mut |_| Ok((src.clone(), None)), "x", "high", &sizes, "auto")
+        else {
+            panic!("a 404 is an error")
+        };
+        assert!(e.to_string().starts_with("image API 404"), "{e}");
+
+        // Under the subscription-bridge preset the template waits: the bridge
+        // gets OpenAI's own multipart call.
+        cfg.image_provider = "oauth".into();
+        let Err(e) = call_images_edit(&cfg, &mut |_| Ok((src.clone(), None)), "x", "high", &sizes, "auto")
+        else {
+            panic!("the stub answers 500")
+        };
+        assert!(e.to_string().starts_with("image API 500"), "{e}");
+        assert!(seen.lock().unwrap()[2].contains("Content-Disposition: form-data"), "OpenAI's multipart call");
         let _ = handle.join();
     }
 
@@ -2932,6 +3107,7 @@ mod tests {
             image_provider: "api".into(),
             image_effort: None,
             image_api_family: "auto".into(),
+            image_gen_endpoint: None,
             analysis_provider: "oauth".into(),
             analysis_model: "opus".into(),
             analysis_effort: None,
@@ -3496,6 +3672,7 @@ mod tests {
             image_provider: "api".into(),
             image_effort: None,
             image_api_family: "auto".into(),
+            image_gen_endpoint: None,
             analysis_provider: "oauth".into(),
             analysis_model: "opus".into(),
             analysis_effort: None,
@@ -3676,6 +3853,7 @@ mod tests {
             image_provider: "api".into(),
             image_effort: None,
             image_api_family: "auto".into(),
+            image_gen_endpoint: None,
             analysis_provider: "oauth".into(),
             analysis_model: "opus".into(),
             analysis_effort: None,
