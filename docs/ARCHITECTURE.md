@@ -205,8 +205,8 @@
 > symbol, link and tier count the living documents name exists in the tree;
 > CI's `docs` job runs it on every push) — and a gate that exits non-zero
 > fails the battery like a lane.
-> 1655 library + 25 CLI + 244 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1640 pass + 15 `#[ignore]`d forensic probes and
+> 1656 library + 25 CLI + 246 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1641 pass + 15 `#[ignore]`d forensic probes and
 > the GUI result is 241 pass + three ignored (an explicit scratch-recipe export
 > probe and the offline panel and window screenshots) in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
 > refusal pair (a RAW source, a baked negative); the library and GUI lists are
@@ -240,7 +240,12 @@
 > edit read as the edit, a maskless edit sending no mask and layering only
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
-> screenshots). For v1.11.0, by name against the v1.10.0 battery: library
+> screenshots). For v1.12.0, by name against the v1.11.0 battery: library
+> +1 / −0 (`pipeline`: every pixel master is claimed in the store's masters
+> folder, never the delivery folder) and GUI +2 / −0 (a ▣ card whose master
+> was deleted works from the photo file again; no grid button reaches past
+> the narrowest panel, laid out in the app's real fonts); CLI unchanged. For
+> v1.11.0, by name against the v1.10.0 battery: library
 > +7 / −0 — six in `image_endpoint` for the custom image-edit template (the
 > settings example parses, the painted area reaches a provider with no mask
 > parameter as a red-marked copy only when there is one, placeholders expand
