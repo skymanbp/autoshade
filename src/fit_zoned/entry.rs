@@ -300,7 +300,14 @@ fn paired_layout(
 /// The single local producer sequencer shared by the historical two-region
 /// route, the semantic multi-region route, and the range fallback.  Keep the
 /// order and disclosures stable: first producer -> stop -> tiles -> stop ->
-/// free masks. `layout` is [`paired_layout`]'s reading for the colour field.
+/// free masks -> colour field. `layout` is [`paired_layout`]'s reading for
+/// the colour field.
+///
+/// A stop ends the MASK producers only. The colour field is still asked, and
+/// on a stopped fit it withholds itself on the same verdict and says so
+/// (`FIELD_WITHHELD`): until 2026-10-19 the early return skipped it in
+/// silence, which no fixture reached until zones stopped being capped at
+/// ~1 EV by the texture gate and began ending the sequencer on their own.
 #[allow(clippy::too_many_arguments)]
 fn run_local_sequencer(
     src: &DynamicImage,
@@ -311,6 +318,33 @@ fn run_local_sequencer(
     mask_path: &crate::store::OwnedRaster,
     layers: ZonedLayerOpts,
     layout: &[f32],
+) {
+    run_mask_producers(src, target, report, field, first_producer, mask_path, layers);
+    // R33 §G: the TERMINAL producer, and the only one that is not a mask. It
+    // runs at the shipped default strength and above (R41 moved the gate down
+    // from "above the default"); every result below the default is
+    // byte-identical to the build before R33 §G.
+    if let Some((local, _)) = field {
+        field::attach_colour_field(
+            src,
+            target,
+            report,
+            fit::carried_strength_from_notes(&report.notes),
+            local,
+            layout,
+        );
+    }
+}
+
+/// The mask half of [`run_local_sequencer`]; a stop verdict returns from here.
+fn run_mask_producers(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    report: &mut FitReport,
+    field: &Option<(crate::fit_field::LocalField, field::ShapeReading)>,
+    first_producer: &str,
+    mask_path: &crate::store::OwnedRaster,
+    layers: ZonedLayerOpts,
 ) {
     if let Some((local, _)) = field {
         field::push_realized(report, local, first_producer);
@@ -356,20 +390,6 @@ fn run_local_sequencer(
         );
         debug_assert_eq!(stage.components, stage.disclosed);
         if stage.ran { field::push_realized(report, local, "free masks"); }
-    }
-    // R33 §G: the TERMINAL producer, and the only one that is not a mask. It
-    // runs at the shipped default strength and above (R41 moved the gate down
-    // from "above the default"); every result below the default is
-    // byte-identical to the build before R33 §G.
-    if let Some((local, _)) = field {
-        field::attach_colour_field(
-            src,
-            target,
-            report,
-            fit::carried_strength_from_notes(&report.notes),
-            local,
-            layout,
-        );
     }
 }
 

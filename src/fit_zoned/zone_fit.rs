@@ -277,8 +277,21 @@ impl LocalQuality {
 }
 
 /// Local-quality reading shared by every zone and mode. Texture is the
-/// mask-weighted mean magnitude of the forward Rec.601-luma gradient; clipping
-/// is the weighted share at <=1/255 or >=254/255.
+/// mask-weighted mean magnitude of the forward Rec.601-luma gradient PER UNIT
+/// of the zone's mask-weighted mean luma; clipping is the weighted share at
+/// <=1/255 or >=254/255.
+///
+/// Per unit of brightness because the gate guards CONTRAST, not exposure.
+/// Until v1.12.0 the ratio read the absolute gradient, and an exposure move
+/// scales every gradient with the pixels it scales: a zone lifted `k` times
+/// read `k` however untouched its texture, so the 1.95 ceiling was a hidden
+/// ~1 EV cap underneath the zone's own [`ZONE_EV_LIMIT`]. On a night frame
+/// whose generated target lit the dark ground, the land zone's solved lift
+/// read 2.37 and was dropped, and the colour field — which this gate does not
+/// guard — then chased the same lift alone, pinned at its bounds: half the
+/// brightness at the source's red cast. Normalised, a pure lift reads 1 and
+/// contrast amplification or crushing about an unchanged mean reads exactly
+/// what it read before.
 pub(super) fn local_quality(
     before: &[[f32; 3]],
     after: &[[f32; 3]],
@@ -288,9 +301,11 @@ pub(super) fn local_quality(
 ) -> LocalQuality {
     let (w, h) = (width as usize, height as usize);
     let luma = |p: &[f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
-    let reading = |px: &[[f32; 3]]| -> (f32, f32) {
+    // (mean gradient, mean luma, clipped share), all mask-weighted.
+    let reading = |px: &[[f32; 3]]| -> (f64, f64, f32) {
         let mut total = 0.0f64;
         let mut texture = 0.0f64;
+        let mut level = 0.0f64;
         let mut clipped = 0.0f64;
         for y in 0..h {
             for x in 0..w {
@@ -303,22 +318,30 @@ pub(super) fn local_quality(
                 let dx = if x + 1 < w && i + 1 < px.len() { luma(&px[i + 1]) - here } else { 0.0 };
                 let dy = if y + 1 < h && i + w < px.len() { luma(&px[i + w]) - here } else { 0.0 };
                 texture += weight * (dx * dx + dy * dy).sqrt() as f64;
+                level += weight * here as f64;
                 clipped += weight * (here <= 1.0 / 255.0 || here >= 254.0 / 255.0) as u8 as f64;
                 total += weight;
             }
         }
         if total <= 1e-12 {
-            (0.0, 0.0)
+            (0.0, 0.0, 0.0)
         } else {
-            ((texture / total) as f32, (clipped / total) as f32)
+            (texture / total, level / total, (clipped / total) as f32)
         }
     };
-    let ((texture_before, clipped_before), (texture_after, clipped_after)) =
+    let ((texture_before, level_before, clipped_before), (texture_after, level_after, clipped_after)) =
         (reading(before), reading(after));
+    // A zone black on either side has no brightness scale to divide out; the
+    // pair is then compared as it always was, in absolute gradient.
+    let (texture_before, texture_after) = if level_before > 1e-6 && level_after > 1e-6 {
+        (texture_before / level_before, texture_after / level_after)
+    } else {
+        (texture_before, texture_after)
+    };
     let texture_ratio = if texture_before <= 1e-8 {
         if texture_after <= 1e-8 { 1.0 } else { f32::INFINITY }
     } else {
-        texture_after / texture_before
+        (texture_after / texture_before) as f32
     };
     LocalQuality {
         texture_ratio,

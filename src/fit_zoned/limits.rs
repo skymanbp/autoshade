@@ -48,16 +48,18 @@ pub(super) const ZONE_ATMOS_SAT_LIMIT: f32 = 20.0;
 /// pin the two against each other.
 pub(crate) const ZONE_ATMOS_GAIN_MIN: f32 = 0.85;
 pub(crate) const ZONE_ATMOS_GAIN_MAX: f32 = 1.18;
-/// Mask-weighted mean-gradient energy may not fall below this ratio. Accepted
-/// repository zones measure 0.730, 0.980, 1.084, 1.330, 1.684 and 1.918.
-/// The saved generated-cloud correction measures 0.961 with zero clipped-share
-/// growth, so this exact statistic cannot separate it from those accepted
-/// zones; that calibration contradiction is pinned in the fixture test and
-/// disclosed in the implementation report rather than hidden by a false cap.
+/// Mask-weighted mean-gradient energy PER UNIT of mean luma
+/// ([`super::zone_fit::local_quality`]) may not fall below this ratio. The
+/// window was calibrated on the ABSOLUTE gradient, where accepted repository
+/// zones measured 0.730, 0.980, 1.084, 1.330, 1.684 and 1.918 and the saved
+/// generated-cloud correction 0.961 — inseparable from them, a contradiction
+/// pinned in the fixture test rather than hidden by a false cap. Since
+/// 2026-10-19 the reading divides each side's brightness out, so an exposure
+/// move no longer counts as texture; the window is kept, and the same
+/// generated-cloud correction now reads 1.024.
 pub(super) const ZONE_TEXTURE_MIN: f32 = 0.70;
-/// Mask-weighted mean-gradient energy may not grow above this ratio. The 1.95
-/// ceiling leaves measured headroom over the accepted maximum of 1.918 (the
-/// list above).
+/// The ceiling of the same per-unit ratio: 1.95, headroom over the absolute
+/// calibration's accepted maximum of 1.918 (the list above).
 pub(super) const ZONE_TEXTURE_MAX: f32 = 1.95;
 /// Weighted clipped-luma share may grow by at most one percentage point.
 pub(super) const ZONE_CLIP_GROWTH: f32 = 0.01;

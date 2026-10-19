@@ -2168,7 +2168,13 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
             "{fixture}/{role:?} boundary calibration drifted: {rim:.3} vs {expected:.3}"
         );
     }
-    let expected_candidates = [("sky", 0.0460f32, 0.244f32), ("sky+land", 0.0190, 0.088)];
+    // RE-DERIVED (2026-10-19) for the exposure-invariant texture gate. The
+    // `sky` zone's fitted tone used to fail the absolute-gradient ratio at
+    // full strength, so the tone ladder backed it off before this gate saw
+    // it; per unit of brightness the full tone passes, the candidate carries
+    // the whole fitted move (rim 0.0460 -> 0.0660) and the shrink lands it on
+    // the SAME kept rim, 0.012, at k 0.244 -> 0.183. `sky+land` is unmoved.
+    let expected_candidates = [("sky", 0.0660f32, 0.183f32), ("sky+land", 0.0190, 0.088)];
     for ((fixture, before, k), (want_fixture, want_before, want_k)) in
         candidates.iter().zip(expected_candidates)
     {
@@ -3169,6 +3175,30 @@ fn local_quality_gate_rejects_texture_amplification_and_crushing() {
     assert!(!clip.clipping_passes() && !clip.passes(), "clipping half was bypassed: {clip:?}");
 }
 
+/// The gate guards contrast, not exposure: a dark zone lifted 3x (≈1.6 EV,
+/// inside `ZONE_EV_LIMIT`) carries its gradients up with it and must read 1,
+/// while the same lift WITH its ripple tripled about the lifted mean is still
+/// amplification. Before 2026-10-19 the first read 3.0 and was dropped, which
+/// left the colour field to chase the lift unguarded.
+#[test]
+fn local_quality_gate_reads_a_pure_lift_as_unchanged_texture() {
+    let (w, h) = (16u32, 16u32);
+    let before: Vec<[f32; 3]> = (0..w * h)
+        .map(|i| {
+            let ripple = if (i + i / w) % 2 == 0 { -0.006 } else { 0.006 };
+            [0.05 + ripple; 3]
+        })
+        .collect();
+    let lifted: Vec<[f32; 3]> = before.iter().map(|p| p.map(|v| 3.0 * v)).collect();
+    let amplified: Vec<[f32; 3]> =
+        before.iter().map(|p| p.map(|v| 0.15 + 9.0 * (v - 0.05))).collect();
+    let weights = vec![1.0; before.len()];
+    let lift = local_quality(&before, &lifted, &weights, w, h);
+    let amp = local_quality(&before, &amplified, &weights, w, h);
+    assert!((lift.texture_ratio - 1.0).abs() <= 1e-4 && lift.passes(), "pure lift: {lift:?}");
+    assert!((amp.texture_ratio - 3.0).abs() <= 1e-3 && !amp.passes(), "amplified lift: {amp:?}");
+}
+
 #[test]
 fn local_quality_gate_passes_every_accepted_fixture_zone() {
     let (src, tgt, sky_mask) = zoned_pair();
@@ -3225,8 +3255,10 @@ fn local_quality_gate_passes_every_accepted_fixture_zone() {
             before_image.width(),
             before_image.height(),
         );
+        // 1.024 per unit of brightness (2026-10-19); the absolute-gradient
+        // reading this replaced measured 0.961 on the same pair.
         assert!(
-            (saved.texture_ratio - 0.961).abs() <= 0.02,
+            (saved.texture_ratio - 1.024).abs() <= 0.02,
             "saved generated-cloud quality calibration drifted: {saved:?}"
         );
         assert!(
