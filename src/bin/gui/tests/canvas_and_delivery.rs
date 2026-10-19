@@ -93,6 +93,113 @@
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// User screenshot 2026-10-18: at a panel dragged to its narrowest, the
+    /// reference library's 「🗂 RAW 文件夹…」 grew past its half-row cell and
+    /// pushed 「✕ 清除」 out of the card. A cell button truncates its label
+    /// instead (`buttons::place`), so no cell button reaches past the panel
+    /// at the minimum width, in either language, laid in the app's REAL fonts.
+    /// MUTATION: drop the `.truncate()` in `place` and the rows grow the
+    /// 280 px panel (281 px in English, 282 px in Chinese) — red.
+    #[test]
+    fn no_cell_button_reaches_past_the_narrowest_panel() {
+        use crate::buttons::DRAWN;
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            let ctx = egui::Context::default();
+            crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+            // The REAL fonts (embedded symbols + the system CJK face): egui's
+            // bundle lays the Chinese labels narrower than the app draws them,
+            // which is how the default-width pins missed this row.
+            crate::theme::install_fonts(&ctx);
+            let mut app = AutoShadeApp { lang, style_raw_dir: Some("D:/raw".into()), ..Default::default() };
+            let mut panel = egui::Rect::NOTHING;
+            for _ in 0..3 {
+                DRAWN.with_borrow_mut(Vec::clear);
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 20_000.0))),
+                    ..Default::default()
+                };
+                let _ = ctx.run(input, |ctx| {
+                    ctx.memory_mut(|m| m.set_everything_is_visible(true));
+                    panel = egui::SidePanel::left("controls")
+                        .exact_width(crate::theme::CONTROLS_W_MIN)
+                        .show(ctx, |ui| egui::ScrollArea::vertical().show(ui, |ui| app.ai_panel(ui)))
+                        .response
+                        .rect;
+                });
+            }
+            let drawn = DRAWN.with_borrow(|d| d.clone());
+            assert!(drawn.iter().any(|d| d.label == tr(lang, "🗂 RAW folder…")), "{lang:?}: the library row was drawn");
+            // A label wider than its cell widens its button, and the row then
+            // widens the panel past its fixed width: the panel is the witness.
+            assert!(
+                (panel.width() - crate::theme::CONTROLS_W_MIN).abs() <= 0.5,
+                "{lang:?}: the panel grew to {:.1} px, a row overflows it",
+                panel.width()
+            );
+            for d in drawn.iter().filter(|d| d.cell) {
+                assert!(
+                    d.rect.right() <= panel.right() + 0.5,
+                    "{lang:?}: {} {:?} ends at {:.1}, past the {:.1} px panel edge",
+                    d.kind, d.label, d.rect.right(), panel.right()
+                );
+            }
+        }
+    }
+
+    /// User report 2026-10-18: the ▣ card carried an old in-place denoise
+    /// master the user had since deleted with the delivery folder, so AI
+    /// denoise on 「原片」 failed with "open image …denoise.png: not found".
+    /// A master load that fails because the file is GONE drops the ▣ card's
+    /// dead link (its pixels are the photo file again); a ◈ card keeps its
+    /// link — it has no other pixels — and so does a ▣ master that exists
+    /// but will not decode. MUTATION: drop the `v.origin = None` and the
+    /// first assertion turns red.
+    #[test]
+    fn a_vanished_original_master_hands_the_card_back_to_the_photo() {
+        use crate::model::{Variant, VariantKind};
+        let dir = std::env::temp_dir()
+            .join(format!("autoshade-gui-vanished-master-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let photo = dir.join("_vanished.ARW");
+        let gone = dir.join("_vanished.denoise.png"); // never written
+        let broken = dir.join("_broken.denoise.png");
+        std::fs::write(&broken, b"not a png").unwrap();
+        let mk = |kind, origin: &std::path::Path| Variant {
+            kind,
+            id: crate::model::new_variant_id(),
+            name: None,
+            recipe: EditRecipe::default(),
+            base: None,
+            origin: Some(origin.to_path_buf()),
+            thumb: None,
+        };
+        let mut app = AutoShadeApp {
+            src_path: Some(photo.clone()),
+            variants: vec![mk(VariantKind::Original, &gone), mk(VariantKind::Denoised, &gone)],
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let lost = |o: &std::path::Path| Msg::MasterLoaded {
+            photo: photo.clone(),
+            origin: o.to_path_buf(),
+            edge: 1280,
+            stamp: None,
+            img: Box::new(Err(anyhow::anyhow!("open image {}: not found", o.display()))),
+        };
+        app.tx.send(lost(&gone)).unwrap();
+        app.poll_workers(&ctx);
+        assert_eq!(app.variants[0].origin, None, "the ▣ card let go of the deleted master");
+        assert_eq!(app.active_source_path(), Some(photo.clone()), "AI denoise now reads the photo");
+        assert_eq!(app.variants[1].origin.as_deref(), Some(gone.as_path()), "a ◈ card keeps its link");
+
+        app.variants[0].origin = Some(broken.clone());
+        app.tx.send(lost(&broken)).unwrap();
+        app.poll_workers(&ctx);
+        assert_eq!(app.variants[0].origin.as_deref(), Some(broken.as_path()), "an undecodable master is kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// L12-2: the master cache keys on the SPAWN-time stamp — a file
     /// rewritten during the decode must MISS on the next probe instead of
     /// serving the old pixels under the new identity.

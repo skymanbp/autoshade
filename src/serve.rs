@@ -1579,7 +1579,7 @@ struct RetouchReq {
     master: Option<String>,
 }
 
-/// A browser-carried ./out master path for session chaining: the previous
+/// A browser-carried pixel master path for session chaining: the previous
 /// fill/heal answer's X-Output-Path, posted back so the NEXT operation (or
 /// the preview / an export) builds on it — without this a second fill/heal
 /// restarted from the persisted master and silently discarded the first
@@ -2871,7 +2871,7 @@ fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // possibly a GUI-saved pixels.json — still references.
     let Some(out) = pipeline::unique_out(&raw, "retouch") else {
         let _ = std::fs::remove_file(&mask_tmp);
-        return Ok(status_response(500, "no free retouch output name (999 in ./out)"));
+        return Ok(status_response(500, "no free retouch output name (999 in the masters folder)"));
     };
     // Config SNAPSHOT, not the read guard: holding the RwLock across the
     // multi-minute AI call blocked every settings save until it finished.
@@ -2885,7 +2885,7 @@ fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             // The new master inherits the chain root's generated-ness: a fill
             // composited ONTO a generated master still carries its look.
             issue_session_master(&raw, &out, src_generated);
-            // baked-by-construction: the ./out retouch master written just above.
+            // baked-by-construction: the retouch pixel master written just above.
             let img = decode::load_image(&out)?
                 .resize(1400, 1400, image::imageops::FilterType::Triangle);
             let mut buf = Vec::new();
@@ -3010,7 +3010,7 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         if let Some(t) = &mask_tmp {
             let _ = std::fs::remove_file(t);
         }
-        return Ok(status_response(500, "no free heal output name (999 in ./out)"));
+        return Ok(status_response(500, "no free heal output name (999 in the masters folder)"));
     };
     let cfg = state.config().clone();
     let result = crate::retouch::heal(&cfg, &src, mask_tmp.as_deref(), req.auto, req.full_res, &out);
@@ -3116,7 +3116,7 @@ fn api_stack(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         inputs.push(crate::store::read_pixel_source(r).map(|(m, _)| m).unwrap_or_else(|| r.clone()));
     }
     let Some(out) = pipeline::unique_out(&raws[0], "stack") else {
-        return Ok(status_response(500, "no free stack output name (999 in ./out)"));
+        return Ok(status_response(500, "no free stack output name (999 in the masters folder)"));
     };
     let opts = crate::stack::merge::MergeOptions {
         kind,
@@ -3126,7 +3126,7 @@ fn api_stack(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         Ok(done) => {
             issue_session_master(&raws[0], &out, first_generated);
             let img =
-                // baked-by-construction: the ./out master written just above.
+                // baked-by-construction: the pixel master written just above.
                 decode::load_image(&out)?.resize(1400, 1400, image::imageops::FilterType::Triangle);
             let mut buf = Vec::new();
             img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg).context("encode jpeg")?;

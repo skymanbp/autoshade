@@ -1037,8 +1037,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // checked against the shipped CJK subset before it was written — the
     // whole-chain font gate (`embedded_fonts_cover_every_ui_symbol`) is what
     // catches a 「递」 that would render as tofu.
-    ("Where finished files land: exports, AI/retouch pixel masters and the extracted style prompt — for this window, the CLI, the web surface and batch renders alike. Blank = the default ./out beside the working directory. Saved develops are NOT here (see 「Develop store」 above).",
-        "成品文件的去处：导出、AI/修饰像素母版、提取出的风格提示词 —— 本窗口、CLI、网页端和批量渲染共用同一个。留空 = 默认的 ./out（相对于启动目录）。已保存的显影不在这里（见上方「显影库」）。"),
+    ("Where finished files land: exports and the extracted style prompt — for this window, the CLI, the web surface and batch renders alike. Blank = the default ./out beside the working directory. Saved develops and the pixel masters cards are built on are NOT here (see 「Develop store」 above), so cleaning this folder never breaks a card.",
+        "成品文件的去处：导出、提取出的风格提示词 —— 本窗口、CLI、网页端和批量渲染共用同一个。留空 = 默认的 ./out（相对于启动目录）。已保存的显影和卡片所用的像素母版都不在这里（见上方「显影库」），所以清理这个文件夹不会影响任何卡片。"),
+    ("Pixel masters: {path}", "像素母版：{path}"),
+    ("The full-resolution images AI denoise, stacking, heal, clone, fill and AI edits produce — the cards built on them read these files. Deleting one breaks its card, so delete the card first. Exports are NOT here (see 「Delivery folder」 below).",
+        "AI 降噪、堆栈、修复、仿制、填充和 AI 修改产出的全分辨率图——建在它们上面的卡片读的就是这些文件。删掉一个，对应的卡片就没法用了，所以请先删卡片。导出的成品不在这里（见下方「成片文件夹」）。"),
+    ("🗂 Show masters folder", "🗂 打开母版文件夹"),
+    ("No master yet — the folder appears with the first AI denoise, stack or retouch",
+        "还没有母版——第一次 AI 降噪、堆栈或修饰之后才会出现这个文件夹"),
     // R24 round-end LOW-3: what choosing a folder INSIDE the photo library
     // costs. 「保护」 cannot be spelled here (护 is not in the shipped CJK
     // subset, and neither are 拦 / 防 / 规), so both sentences say the thing
@@ -1312,8 +1318,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "已取消的 AI 调用仍在运行（仍在计费）— 它结束或超时后此按钮会重新可用"),
     ("Stop waiting: the app unblocks now and the late result is discarded. A generative call halts at its next checkpoint; an AI analyze keeps running (and billing) until it finishes or times out",
         "停止等待：应用立即解锁，迟到结果将被丢弃。生成类调用会在下一检查点停止；AI 分析则会一直跑到完成或超时（仍然计费）"),
-    ("over 999 retouch masters for this photo — clean up the delivery folder first",
-        "本照片的修饰母版已超过 999 个 — 请先清理成片文件夹"),
+    ("over 999 retouch masters for this photo — clean up the masters folder first",
+        "本照片的修饰母版已超过 999 个 — 请先清理母版文件夹"),
     (" · previous save backed up as v{n}", " · 之前的保存已备份为 v{n}"),
     ("● unsaved", "● 未保存"),
     ("This card differs from its saved develop — Ctrl+S saves every card; switching photos keeps unsaved work for this session only",
@@ -1475,8 +1481,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "正在渲染全分辨率 → {path} …（这张 ◈ 卡已经去噪——导出时 AI 降噪不再运行）"),
     ("An operation is still running — wait for it to finish, then close",
         "还有操作在运行——等它完成后再关闭"),
-    ("over 999 generated variants for this photo — clean up the delivery folder first",
-        "这张照片的生成变体已超过 999 个——请先清理成片文件夹"),
+    ("over 999 generated variants for this photo — clean up the masters folder first",
+        "这张照片的生成变体已超过 999 个——请先清理母版文件夹"),
 
     // ── Status bar · reimagine / reverse-fit / style prompt ──────────────────
     ("AI generating… (gpt-image; high quality can run minutes — progress in the status bar; ✕ Cancel to stop; hi-res input needs a full-frame develop first)",
@@ -1751,6 +1757,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "正在载入该变体的修饰母版…（期间显示原片显影）"),
     ("this variant's saved master could not be loaded ({err}) — showing the un-retouched source develop instead",
         "该变体已保存的母版无法加载（{err}）——改为显示未修饰的原图显影"),
+    ("the ▣ Original card's retouch master {path} was deleted — the card now works from the photo file itself (Ctrl+S saves that)",
+        "▣ 原片卡片用的修饰母版 {path} 已被删除——这张卡片改回直接用照片文件本身（Ctrl+S 保存这一改动）"),
     ("saved, but {n} variant(s) still count as unsaved — the window stays open; please report this",
         "已保存，但仍有 {n} 个变体计为未保存——窗口保持打开；请反馈此问题"),
     ("mask area redrawn — its existing adjustments now apply to the new area",

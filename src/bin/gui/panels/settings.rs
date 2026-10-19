@@ -410,6 +410,34 @@ impl AutoShadeApp {
             self.status = t.clone();
             self.toast(ToastKind::Error, t);
         }
+        // The pixel masters (2026-10-18): the AI denoise / stack / heal /
+        // clone / fill results cards are built FROM. They left the delivery
+        // folder so cleaning exports cannot break a card, which also hid
+        // them — this row names the folder and opens it.
+        let masters = autoshade::store::masters_dir();
+        ui.label(
+            egui::RichText::new(trf(lang, "Pixel masters: {path}", &[("path", &abs_display(&masters))]))
+                .small()
+                .weak(),
+        )
+        .on_hover_text(tr(
+            lang,
+            "The full-resolution images AI denoise, stacking, heal, clone, fill and AI edits produce — the cards built on them read these files. Deleting one breaks its card, so delete the card first. Exports are NOT here (see 「Delivery folder」 below).",
+        ));
+        let has_masters = masters.is_dir();
+        if action(ui, has_masters, tr(lang, "🗂 Show masters folder"))
+            .on_hover_text(if has_masters {
+                tr(lang, "Open this folder in your file manager")
+            } else {
+                tr(lang, "No master yet — the folder appears with the first AI denoise, stack or retouch")
+            })
+            .clicked()
+            && let Err(e) = reveal_folder(&masters)
+        {
+            let t = trf(lang, "could not open the folder: {err}", &[("err", &e.to_string())]);
+            self.status = t.clone();
+            self.toast(ToastKind::Error, t);
+        }
         if action(ui, true, tr(lang, "Import develops from an old ./out folder…"))
             .on_hover_text(tr(
                 lang,
@@ -442,7 +470,7 @@ impl AutoShadeApp {
                     "{}\n\n{}",
                     tr(
                         lang,
-                        "Where finished files land: exports, AI/retouch pixel masters and the extracted style prompt — for this window, the CLI, the web surface and batch renders alike. Blank = the default ./out beside the working directory. Saved develops are NOT here (see 「Develop store」 above).",
+                        "Where finished files land: exports and the extracted style prompt — for this window, the CLI, the web surface and batch renders alike. Blank = the default ./out beside the working directory. Saved develops and the pixel masters cards are built on are NOT here (see 「Develop store」 above), so cleaning this folder never breaks a card.",
                     ),
                     // R24 round-end LOW-3: choosing a folder inside the photo
                     // library RETIRES that folder's read-only protection

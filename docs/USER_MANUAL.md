@@ -417,7 +417,8 @@ exists it *is* the negative: reverse-fit and reimagine read its master, and so
 does a further stack. Its status line reports how far the aligner had to move
 the worst frame, how much of the frame no source could cover, and — for an HDR
 merge — the stops it recovered. A `.xmp` from it carries the sliders only; the
-merged pixels live in the 16-bit master beside it in `./out`.
+merged pixels live in its 16-bit master in the masters folder (Settings →
+**Develop store** names it and opens it).
 
 In the browser the same four merges are in the **Stack** panel beside Heal.
 There is no variant strip there, so the merged master joins the session chain
@@ -1064,7 +1065,7 @@ settings file can supply them.
   prompt without strokes, another kind of card, or a running job disables it.
   The model sees this card's pixels under its current sliders and masks. Each
   adjust costs one gpt-image generation and lands as a new **✨** card at
-  `./out/<stem>.adjust.png`, then `<stem>.adjust-2.png`, and so on; the source
+  `<stem>.adjust.png` in the masters folder, then `<stem>.adjust-2.png`, and so on; the source
   card stays as it is. Crop and straighten are not carried over; set them on
   the new card.
   Adjusts can chain, and **Reverse-fit** reads the result just like any other
@@ -1101,6 +1102,15 @@ read-only. If the configured Delivery folder is inside or above a photo's
 folder, that delivery subtree is intentionally writable; Settings warns when
 this removes the folder's protection. "Export .xmp beside the photo" is the
 separate, confirmed per-photo sidecar exception.
+
+The Delivery folder holds exports only. The full-resolution images AI denoise,
+stacking, heal, clone, fill and AI edits produce — the masters their cards are
+built on — live in a `masters` folder inside the develop store, so cleaning out
+the Delivery folder never breaks a card. Settings → **Develop store** shows
+that folder and opens it; delete a card before deleting its master. Masters
+made before v1.12.0 stay where they were written. If one of those is deleted,
+a ▣ Original card that used it goes back to the photo file itself and says so,
+and any other card built on it has nothing left to show and can be deleted.
 
 ## Install, upgrade, and uninstall on Windows
 

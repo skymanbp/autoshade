@@ -126,6 +126,12 @@ fn place(
     let ghost = square && !matches!(kind, "glyph_toggle_on");
     let button = style(egui::Button::new(text));
     let button = if ghost { button.frame(false) } else { button.stroke(egui::Stroke::NONE) };
+    // A cell's label TRUNCATES rather than extends (2026-10-18, user
+    // screenshot): a row's default wrap mode is Extend, so a label wider
+    // than its cell — a side panel dragged narrower than the default the
+    // `fits` pin measures at — grew the button past the cell and pushed the
+    // row's last button out of its card. The cell is the width contract.
+    let button = if cell.is_some() { button.truncate() } else { button };
     let plate = ui.painter().add(egui::Shape::Noop);
     let response = match cell {
         Some(cell) => {

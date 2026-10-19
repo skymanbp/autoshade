@@ -605,8 +605,8 @@ pub fn update_local_settings(
 /// a constant, not a repeated literal.
 pub const DEFAULT_DELIVERY_ROOT: &str = "out";
 
-/// **The delivery root** — the one folder rendered deliverables and the pixel
-/// masters behind them are written to (R24-5 M8).
+/// **The delivery root** — the one folder rendered deliverables are written
+/// to (R24-5 M8).
 ///
 /// Before this it was not a setting at all: `pipeline::default_out` spelled
 /// `./out` literally, so the CLI, the batch renderer, the web download route
@@ -615,13 +615,16 @@ pub const DEFAULT_DELIVERY_ROOT: &str = "out";
 /// no answer but "launch the app from a different directory".
 ///
 /// WHAT IT COVERS — everything `pipeline::default_out` names: the developed
-/// deliverable (`<stem>.developed.{tif,jpg}`), the reimagine / retouch / heal
-/// / clone pixel masters (`pipeline::unique_out`), the extracted style prompt
+/// deliverable (`<stem>.developed.{tif,jpg}`), the extracted style prompt
 /// (`<stem>.style.txt`), the `match` report and preview. All of those are
 /// "the files AutoShade produces FROM a photo", one semantic, one root.
 ///
 /// WHAT IT DOES NOT COVER, deliberately — each of these is a DIFFERENT
 /// semantic that merely used to share the same folder name:
+///   * the pixel masters (`pipeline::unique_out`: denoise / stack / heal /
+///     clone / fill / adjust / reimagine) — until v1.12 they were here, and
+///     a user cleaning exports deleted the files cards are built on (user
+///     report 2026-10-18). They live in [`crate::store::masters_dir`] now.
 ///   * the develop store (recipes / XMP / versions / masks) — already
 ///     per-user under [`crate::store::store_root`] since v0.13, and moving it
 ///     is [`crate::store::store_root`]'s own setting (`AUTOSHADE_DATA_DIR`).
@@ -633,8 +636,8 @@ pub const DEFAULT_DELIVERY_ROOT: &str = "out";
 ///     archaeology path pinned to where old builds actually wrote, which a
 ///     new setting cannot retroactively change.
 ///
-/// Memoised: it is consulted on every output-name claim (including
-/// `unique_out`'s up-to-999 probe loop) and resolving it reads a file.
+/// Memoised: it is consulted on every output-name claim and resolving it
+/// reads a file.
 /// [`update_local_settings`] — the one writer — drops the memo.
 ///
 /// A MISS resolves under the WRITE lock, held across the file read (R24

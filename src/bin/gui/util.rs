@@ -1207,7 +1207,7 @@ pub(crate) fn stash_strip_record(st: &StashEntry) -> Option<autoshade::store::Va
     })
 }
 
-/// First FREE ./out artifact path for `tag` — the SHARED atomic claim
+/// First FREE pixel-master path for `tag` — the SHARED atomic claim
 /// (`pipeline::unique_out`, also used by the web fill/heal handlers so the
 /// two surfaces can never hand out colliding master names).
 pub(crate) fn unique_out(path: &std::path::Path, tag: &str) -> Option<PathBuf> {
@@ -1259,8 +1259,8 @@ pub(crate) fn release_empty_claim(p: &std::path::Path) {
 
 /// Do two spellings name the same baked master?
 ///
-/// An in-session retouch records its ./out artifact RELATIVE
-/// (`pipeline::default_out` -> `out/<stem>.heal.png`), while
+/// An in-session retouch can record its master RELATIVE (before v1.12 it
+/// landed in the cwd-relative `out/<stem>.heal.png`), while
 /// `store::write_pixel_source` stores the same file ABSOLUTIZED and
 /// `read_pixel_source` hands the absolute form back. Plain `PathBuf`
 /// equality therefore compared `out/x.png` against `<cwd>/out/x.png` and

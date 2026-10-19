@@ -2342,11 +2342,42 @@ impl AutoShadeApp {
                                 self.install_master(ctx, &photo, &origin, arc);
                             }
                             Err(e) => {
-                                let t = trf(
-                                    lang,
-                                    "this variant's saved master could not be loaded ({err}) — showing the un-retouched source develop instead",
-                                    &[("err", &e.to_string())],
-                                );
+                                // A ▣ Original card's in-place master (an
+                                // old-version in-place denoise, a heal or
+                                // clone) DELETED from disk — e.g. the user
+                                // cleaned the delivery folder: the card's
+                                // pixels are the loaded file again, which is
+                                // what the canvas already shows. Keeping the
+                                // dead link sent every later pixel action
+                                // (AI denoise, heal, export) to a file that
+                                // is not there (user report 2026-10-18). Only
+                                // a VANISHED file drops the link; a master
+                                // that exists but will not decode keeps it.
+                                let mut dropped = false;
+                                if !origin.exists() {
+                                    for v in &mut self.variants {
+                                        if v.kind == VariantKind::Original
+                                            && v.base.is_none()
+                                            && v.origin.as_ref() == Some(&origin)
+                                        {
+                                            v.origin = None;
+                                            dropped = true;
+                                        }
+                                    }
+                                }
+                                let t = if dropped {
+                                    trf(
+                                        lang,
+                                        "the ▣ Original card's retouch master {path} was deleted — the card now works from the photo file itself (Ctrl+S saves that)",
+                                        &[("path", &origin.display().to_string())],
+                                    )
+                                } else {
+                                    trf(
+                                        lang,
+                                        "this variant's saved master could not be loaded ({err}) — showing the un-retouched source develop instead",
+                                        &[("err", &e.to_string())],
+                                    )
+                                };
                                 self.toast(ToastKind::Error, t);
                             }
                         }
@@ -2500,7 +2531,7 @@ impl AutoShadeApp {
                         // A cancelled task's late result: the user already
                         // moved on — never let it mutate the canvas. And the
                         // cancel toast PROMISES "the late result is
-                        // discarded" (L12-7): a late SUCCESS's ./out artifact
+                        // discarded" (L12-7): a late SUCCESS's pixel master
                         // is unreferenced by construction (unique_out claimed
                         // a fresh name; nothing installed it), so it is
                         // removed instead of accumulating one orphan

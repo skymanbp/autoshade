@@ -7,6 +7,17 @@ pub fn develop_dir(src: &Path) -> PathBuf {
     develop_dir_in(&store_root(), src)
 }
 
+/// Where pixel masters live — the AI denoise / stack / heal / clone / fill /
+/// adjust / reimagine results a card works FROM (`pipeline::unique_out`).
+/// Not the delivery folder: that one is the user's to clean, and cleaning it
+/// left cards pointing at deleted files (user report 2026-10-18). Flat, with
+/// the same `<stem>.<tag>.png` names the delivery folder used to hold, and it
+/// moves with the store (`AUTOSHADE_DATA_DIR`). Masters written before v1.12
+/// stay where they are: develops link them by absolute path.
+pub fn masters_dir() -> PathBuf {
+    store_root().join("masters")
+}
+
 /// Root-parameterized core of [`develop_dir`] so tests can use a temp root
 /// without mutating process-global env (set_var is unsafe + racy in 2024).
 pub(super) fn develop_dir_in(root: &Path, src: &Path) -> PathBuf {
@@ -264,7 +275,7 @@ pub fn raster_target(src: &Path, kind: &str) -> PathBuf {
 /// Claim a FRESH raster name in the photo's develop dir: `<prefix>.png`,
 /// `<prefix>-2.png` … `-999`, atomically create_new-claimed so two surfaces
 /// can never hand out the same name (the same scheme `pipeline::unique_out`
-/// uses for ./out masters). The zoned reverse-fit writes each run's raster
+/// uses for pixel masters). The zoned reverse-fit writes each run's raster
 /// under its own claimed name instead of rewriting one fixed file in place —
 /// the in-place rewrite left the still-live saved recipe referencing freshly
 /// replaced bytes whenever the recipe write AFTER it failed or crashed.

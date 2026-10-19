@@ -267,7 +267,7 @@ impl AutoShadeApp {
             return;
         }
         let Some(out) = unique_out(&src, "fill") else {
-            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the delivery folder first").into();
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the masters folder first").into();
             return;
         };
         self.busy = true;
@@ -329,7 +329,7 @@ impl AutoShadeApp {
                         )?;
                         RetouchNote::FoundFilled { out: out.clone(), coverage: report.coverage }
                     };
-                    // baked-by-construction: the ./out master this job just wrote.
+                    // baked-by-construction: the pixel master this job just wrote.
                     let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
                     // Layer (2026-10-01, user decision): the patch joins this
                     // card's develop (`RetouchKind::Layer`); through v1.6.7 it
@@ -368,7 +368,7 @@ impl AutoShadeApp {
         let mask_png = self.export_area_png(BrushOwner::Adjust);
         let region = mask_png.is_some();
         let Some(out) = unique_out(&src, "adjust") else {
-            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the delivery folder first").into();
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the masters folder first").into();
             return;
         };
         self.busy = true;
@@ -452,7 +452,7 @@ impl AutoShadeApp {
             None
         };
         let Some(out) = unique_out(&path, "heal") else {
-            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the delivery folder first").into();
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the masters folder first").into();
             return;
         };
         self.busy = true;
@@ -484,7 +484,7 @@ impl AutoShadeApp {
                         let _ = std::fs::remove_file(t);
                     }
                     let rep = rep?;
-                    // baked-by-construction: the ./out master this job just wrote.
+                    // baked-by-construction: the pixel master this job just wrote.
                     let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
                     // The report's rationale (AI-detect fallback, budget
                     // skips) must reach the status — stderr is invisible in
@@ -537,7 +537,7 @@ impl AutoShadeApp {
         }
         let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
         let Some(out) = unique_out(&path, "denoise") else {
-            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the delivery folder first").into();
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the masters folder first").into();
             return;
         };
         self.busy = true;
@@ -560,7 +560,7 @@ impl AutoShadeApp {
                     let opts =
                         autoshade::denoise::DenoiseOpts::from_config(&cfg, None, strength);
                     autoshade::denoise::denoise_active(&opts, &path, &out)?;
-                    // baked-by-construction: the ./out master this job just wrote.
+                    // baked-by-construction: the pixel master this job just wrote.
                     let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
                     // NewDenoised: a new ◈ card hangs off the master.
                     Ok((img, RetouchNote::Denoised { out: out.clone(), on_mosaic }, out, RetouchKind::NewDenoised))
@@ -598,7 +598,7 @@ impl AutoShadeApp {
         }
         let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
         let Some(out) = unique_out(&path, "stack") else {
-            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the delivery folder first").into();
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the masters folder first").into();
             return;
         };
         // This fold's OWN dials, captured at the click like every other input
@@ -632,7 +632,7 @@ impl AutoShadeApp {
                         align: (!tripod).then_some(autoshade::stack::align::AlignParams::DEFAULT),
                     };
                     let done = autoshade::stack::stack_files(&inputs, &opts, None, &out)?;
-                    // baked-by-construction: the ./out master this job just wrote.
+                    // baked-by-construction: the pixel master this job just wrote.
                     let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
                     let m = &done.merged;
                     Ok((
@@ -689,7 +689,7 @@ impl AutoShadeApp {
             return;
         };
         let Some(out) = unique_out(&path, "clone") else {
-            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the delivery folder first").into();
+            self.status = tr(lang, "over 999 retouch masters for this photo — clean up the masters folder first").into();
             return;
         };
         self.busy = true;
@@ -708,7 +708,7 @@ impl AutoShadeApp {
                     let rep = autoshade::retouch::clone_stamp(&path, &mask_tmp, src_pt, full_res, &out);
                     let _ = std::fs::remove_file(&mask_tmp);
                     let rep = rep?;
-                    // baked-by-construction: the ./out master this job just wrote.
+                    // baked-by-construction: the pixel master this job just wrote.
                     let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
                     // InPlace: a pixel transplant of the current rendition — bake it
                     // into the active variant's base + repoint origin at the artifact.
@@ -763,7 +763,7 @@ impl AutoShadeApp {
         // reusing an existing origin would cross-wire two variants'
         // export / reverse-fit.
         let Some(out) = unique_out(&path, "reimagine") else {
-            self.status = tr(self.lang, "over 999 generated variants for this photo — clean up the delivery folder first").into();
+            self.status = tr(self.lang, "over 999 generated variants for this photo — clean up the masters folder first").into();
             return;
         };
         let prompt = {
@@ -813,7 +813,7 @@ impl AutoShadeApp {
                     let report = autoshade::generative::reimagine(
                         &cfg, &negative, &prompt, "high", &cfg.openai_image_quality, retry, &out,
                     )?;
-                    // baked-by-construction: the ./out master this job just wrote.
+                    // baked-by-construction: the pixel master this job just wrote.
                     let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
                     // NewGenerated: a whole-frame rendition → a new Generated variant.
                     Ok((

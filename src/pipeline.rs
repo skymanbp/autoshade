@@ -2957,7 +2957,9 @@ pub fn recipe_store_bytes(
     recipe_bytes_for(recipe, target.parent(), &crate::diag::Diag::about(sink, raw))
 }
 
-/// First FREE ./out artifact path for `tag` (`tag`, `tag-2`, … `tag-999`),
+/// First FREE pixel-master path for `tag` (`tag`, `tag-2`, … `tag-999`) in
+/// the store's masters folder ([`crate::store::masters_dir`], not the
+/// delivery folder the user cleans),
 /// CLAIMED atomically (`create_new`): pixels.json links these paths, GUI undo
 /// history holds them, and a CANCELLED worker may still be running toward the
 /// name it probed — an existence probe alone would hand the same name to the
@@ -2970,7 +2972,7 @@ pub fn unique_out(path: &Path, tag: &str) -> Option<PathBuf> {
     // n = 0 → "tag"; n = 1..=998 → "tag-2".."tag-999" (never tag-1000).
     for n in 0..=998u32 {
         let t = if n == 0 { tag.to_string() } else { format!("{tag}-{}", n + 1) };
-        let cand = default_out(path, &t, "png");
+        let cand = crate::store::masters_dir().join(format!("{}.{t}.png", stem(path)));
         if ensure_parent(&cand).is_err() {
             return None;
         }
@@ -6993,6 +6995,32 @@ mod tests {
         let src = root.join("DSC0001.preview.jpg");
         let dst = root.join("DSC0001.matched.json");
         assert!(guard_readonly(&dst, &src).is_ok(), "the delivery root is always writable");
+    }
+
+    /// User report 2026-10-18: cleaning the delivery folder deleted the
+    /// masters cards are built on. Every master claim lands in the store's
+    /// masters folder, never the delivery folder, with the old naming
+    /// (`<stem>.<tag>.png`, then `-2`). MUTATION: put `default_out(path, &t,
+    /// "png")` back in `unique_out` and the first assertion turns red.
+    #[test]
+    fn pixel_masters_are_claimed_outside_the_delivery_folder() {
+        let raw = PathBuf::from(format!("D:/Photography/Raw/_masters_{}.ARW", std::process::id()));
+        let first = unique_out(&raw, "denoise").expect("a free master name");
+        let second = unique_out(&raw, "denoise").expect("a second free master name");
+        for p in [&first, &second] {
+            assert!(p.starts_with(crate::store::masters_dir()), "{} is not in the masters folder", p.display());
+            assert!(
+                !p.starts_with(crate::config::delivery_root()),
+                "{} sits in the delivery folder the user cleans",
+                p.display()
+            );
+            assert!(guard_readonly(p, &raw).is_ok(), "the masters folder is ours to write");
+        }
+        let stem = stem(&raw);
+        assert_eq!(first.file_name().unwrap().to_string_lossy(), format!("{stem}.denoise.png"));
+        assert_eq!(second.file_name().unwrap().to_string_lossy(), format!("{stem}.denoise-2.png"));
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
     }
 
     #[test]

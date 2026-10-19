@@ -175,7 +175,7 @@ pub(crate) struct AutoShadeApp {
     pub(crate) master_loads: std::collections::HashSet<(PathBuf, PathBuf)>,
     /// Decoded cold-variant masters, most-recent last. Keyed by the master's
     /// OWN identity (path + the edge it was shrunk to + its file stamp), the
-    /// same rule as `base_cache` — a rewritten ./out master misses, and a px
+    /// same rule as `base_cache` — a rewritten pixel master misses, and a px
     /// preference change re-decodes at the new edge instead of serving the
     /// old one.
     pub(crate) master_cache: Vec<((PathBuf, u32, FileStamp), Arc<image::DynamicImage>)>,

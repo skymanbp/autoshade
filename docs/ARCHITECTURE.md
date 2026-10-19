@@ -6153,7 +6153,7 @@ which is precisely why "where did my export go" had no good answer.
 `config::delivery_root()` is now the one reader, and `pipeline::default_out` the
 one funnel every deliverable name is claimed through. It resolves the settings
 file's `out_dir` over `AUTOSHADE_OUT_DIR` over the default `out`, memoised
-(`unique_out` probes it up to 999 times per claim) and dropped by
+(it is read on every output-name claim) and dropped by
 `update_local_settings`, the one writer. An explicitly blank field is a real
 choice — "the default" — and silences the environment variable too, the same
 rule the two AI effort fields follow. The GUI exposes it in Settings beside the
@@ -6176,6 +6176,18 @@ archaeology path pinned to where pre-v0.13 builds actually wrote, which a new
 setting cannot retroactively change). `guard_readonly` keeps the literal `./out`
 as an output area alongside the configured root, so repointing the root does not
 make a `match` on an older export suddenly refused.
+
+Since v1.12 the pixel masters left it too (user report 2026-10-18). A delivery
+folder is the user's to clean, and cleaning it deleted the files cards are built
+on: an old in-place denoise master on a ▣ card vanished, and AI denoise on that
+card then failed opening it. `pipeline::unique_out` now claims masters in
+`store::masters_dir()` (`<store>/masters/<stem>.<tag>[-n].png`, flat, moving with
+`AUTOSHADE_DATA_DIR`), which `guard_readonly` already allows as part of the
+store. Older masters are not moved: develops link them by absolute path, and a
+vanished one is handled where it is found — `on_master_loaded` drops a ▣ card's
+link when the file is gone (not when it merely fails to decode), so the card
+works from the photo file again. Settings → Develop store names the masters
+folder and opens it, because nothing else in the app deletes masters.
 
 ### 4.11 macOS: the bundle, the quit guard, and two spellings of one store
 

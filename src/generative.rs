@@ -311,7 +311,7 @@ pub fn reimagine(
         call_images_edit(cfg, &mut provide, &wire_prompt, fidelity, &sizes, quality)?;
     if cancelled() {
         // The epoch already discards the UI-side result — writing the
-        // artifact anyway left a persistent ./out master for an operation
+        // artifact anyway left a persistent pixel master for an operation
         // the user abandoned (and kept its claimed name occupied; the
         // caller's 0-byte probe releases it once we bail here).
         return Err(anyhow!("cancelled by user"));
@@ -844,7 +844,7 @@ fn edit_onto(
 
 /// Stage + rename over the claimed name — same rule as reimagine. The
 /// staged name cannot carry the real extension, so the format comes from
-/// the TARGET path explicitly (PNG for every claimed ./out master). (Parent
+/// the TARGET path explicitly (PNG for every claimed pixel master). (Parent
 /// already prepared by the pre-pay preflight, L09#1.)
 fn publish_master(img: &RgbaImage, out: &Path) -> Result<()> {
     let tmp = out.with_extension(format!(

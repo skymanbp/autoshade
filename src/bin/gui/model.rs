@@ -477,7 +477,7 @@ pub(crate) enum RetouchKind {
 /// What one finished retouch DID (L12#4): facts, not prose — the landing
 /// renders them in the landing-time language (`render_retouch_note`).
 pub(crate) enum RetouchNote {
-    /// Generative fill landed at this ./out artifact — as a NEW ✨ card since
+    /// Generative fill landed at this pixel master — as a NEW ✨ card since
     /// 2026-09-15 (the model is shown the card's picture; see `start_fill`).
     Filled(PathBuf),
     /// A fill with no painted area: the model chose where, and the layer
@@ -496,7 +496,7 @@ pub(crate) enum RetouchNote {
         ai_prose: String,
         notes: Vec<autoshade::rationale::Note>,
     },
-    /// A stack landed as a new ▦ card at this ./out master. Facts, not prose:
+    /// A stack landed as a new ▦ card at this pixel master. Facts, not prose:
     /// which merge ran, how many frames it took, how far the aligner had to
     /// move the worst of them, how much of the frame no source could cover,
     /// and the stops of highlight an HDR merge recovered.
@@ -508,7 +508,7 @@ pub(crate) enum RetouchNote {
         uncovered: f32,
         headroom_ev: f32,
     },
-    /// AI denoise landed as a new ◈ card at this ./out master; `on_mosaic`
+    /// AI denoise landed as a new ◈ card at this pixel master; `on_mosaic`
     /// says the source was a RAW, denoised on its sensor mosaic before
     /// demosaic (a baked source goes through SCUNet on developed pixels).
     Denoised { out: PathBuf, on_mosaic: bool },
@@ -541,7 +541,7 @@ impl RetouchNote {
 
 /// A finished retouch from the pixel paths (fill/adjust/heal/denoise/stack/
 /// clone/reimagine): `(preview of the ./out result, typed note, the saved
-/// full-resolution ./out artifact, kind)`. The saved path becomes the affected
+/// full-resolution pixel master, kind)`. The saved path becomes the affected
 /// variant's `origin` — its export / reverse-fit / next-retouch source.
 pub(crate) type RetouchDone =
     anyhow::Result<(image::DynamicImage, RetouchNote, PathBuf, RetouchKind)>;
@@ -1305,7 +1305,7 @@ pub(crate) struct Variant {
     /// background preview dispatch O(1); pixels remain immutable.
     /// `None` ⇒ the shared source neutral (`AutoShadeApp::source_preview`).
     pub(crate) base: Option<Arc<image::DynamicImage>>,
-    /// The ./out artifact behind a raster variant (the reimagine PNG) — the
+    /// The pixel master behind a raster variant (the reimagine PNG) — the
     /// reverse-fit target and the full-res export source. `None` for
     /// source-based variants.
     pub(crate) origin: Option<PathBuf>,
