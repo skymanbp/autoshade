@@ -4,45 +4,123 @@
 use super::*;
 use crate::rationale::values;
 
-const SUBZONE_BINS: usize = 8;
-/// A majority of the horizontal residual variance must have one coherent
-/// two/three-step explanation. Uniform residuals have no variance; eight
-/// alternating colour bands explain only R2=0.25 with three steps, while the
-/// coherent warm/cool fixture exceeds 0.99. A majority separates those arms.
+/// A majority of the vertical residual variance must have one coherent
+/// two- or three-band explanation. Uniform residuals have no variance; eight
+/// alternating colour stripes explain under a third with three bands, while
+/// the coherent warm/cool fixture exceeds 0.99. A majority separates those arms.
 const SUBZONE_R2_MIN: f32 = 0.50;
+/// The base ramp width, as a share of the zone's own height; the widths tried
+/// are [`SUBZONE_WIDTH_SCALES`] times it.
 const SUBZONE_OVERLAP: f32 = 0.06;
-/// R36. How many residual models reach the render gates per zone, best
-/// first (fewer bands, then higher R2). R35 sent every qualifying partition
-/// at sixteen ramp widths each — 95 + 106 trials on the reference pair, all
-/// refused — and a zoned match went from 1 min 35 s to 17 min. A trial costs
-/// three band solves and a boundary bisection; the budget is what keeps the
-/// mechanism affordable on every photo, not only on the one it helps.
-const SUBZONE_MODEL_BUDGET: usize = 3;
+/// The ramp widths a break is tried at, as multiples of [`SUBZONE_OVERLAP`]:
+/// from a near-step to a ramp the whole zone long. A ramp width is a SCALE,
+/// so the rungs are geometric.
+const SUBZONE_WIDTH_SCALES: [f32; 6] = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
+/// How many places along the zone's own extent a break is tried at.
+const SUBZONE_BREAK_STEPS: usize = 32;
+/// How many partitions of each band count reach the render gates, best R2
+/// first and no two with the same breaks. A trial costs three band solves and
+/// a boundary bisection; the budget is what keeps the mechanism affordable on
+/// every photo, not only on the one it helps (R36: an unbounded walk put 95 +
+/// 106 trials on the reference pair and took a zoned match from 1 min 35 s to
+/// 17 min).
+const SUBZONE_MODELS_PER_COUNT: usize = 3;
 
-/// The ramp widths one band model is tried at. A ramp width is a SCALE, so
-/// the ladder is geometric — each rung twice the last, from the 6% floor to
-/// the 96% ceiling, five rungs where R35 walked sixteen six-point steps. The
-/// cap folds the upper rungs onto one width; equal widths are tried once.
-fn overlap_ladder(base: f32, cap: f32) -> Vec<f32> {
-    let mut rungs = Vec::new();
-    for scale in [1.0f32, 2.0, 4.0, 8.0, 16.0] {
-        let overlap = (base * scale).min(cap);
-        if rungs.last().is_none_or(|last: &f32| overlap > *last + 1e-6) {
-            rungs.push(overlap);
-        }
-    }
-    rungs
-}
-
+/// A vertical band partition of a zone: `breaks[i]` is the centre of the ramp
+/// between band `i` and band `i + 1`, `widths[i]` its full width, both as
+/// shares of the frame height, and `r2` how much of the zone's row-profile
+/// residual the partition explains ([`residual_models`]).
 #[derive(Clone, Debug)]
 struct BandModel {
     r2: f32,
     breaks: Vec<f32>,
-    overlap: f32,
+    widths: Vec<f32>,
+    /// A shaped model: the first ramp's falloff is this measured curve
+    /// ([`shaped_model`]) rather than Lightroom's law.
+    shape: Option<Vec<f32>>,
 }
 
-#[derive(Clone, Copy, Default)]
-struct ResidualBin {
+impl BandModel {
+    /// The ramp between band `i` and `i + 1`: its Zero and Full handles.
+    fn ramp(&self, i: usize) -> (f32, f32) {
+        (self.breaks[i] - self.widths[i] * 0.5, self.breaks[i] + self.widths[i] * 0.5)
+    }
+
+    /// The coverage of the ramp between band `i` and `i + 1` at frame-height
+    /// share `y`, the way the renderer composes it: Lightroom's law for a
+    /// measured ramp, the zone's own profile for a shaped one.
+    fn coverage(&self, i: usize, y: f32) -> f32 {
+        let (zero, full) = self.ramp(i);
+        let t = (y - zero) / (full - zero).max(1e-6);
+        match &self.shape {
+            Some(falloff) if i == 0 => render::shaped_ramp_coverage(t, falloff),
+            _ => render::linear_ramp_coverage(t),
+        }
+    }
+}
+
+/// Samples of a shaped ramp's falloff over the zone's extent.
+const SUBZONE_SHAPE_SAMPLES: usize = 64;
+/// The smoothing window of the shaped ramp, as a share of the zone's own
+/// height, each side: wide enough to average the stars and the texture out
+/// of a row (eight rows of a 128-row sky on the analysis frame), narrow
+/// against the horizon glow it has to follow (a sixth of that sky).
+const SUBZONE_SHAPE_WINDOW: f32 = 1.0 / 32.0;
+
+/// The one band model whose ramp IS the zone's residual profile: the rows'
+/// mean Lab residual, smoothed over [`SUBZONE_SHAPE_WINDOW`], projected onto
+/// the direction it moves from the zone's middle half to its bottom quarter,
+/// and scaled so the profile's MEDIAN reads 0 and its peak 1 (negative
+/// clamped) — a ramp from the zone's top to its bottom whose falloff is that
+/// curve ([`crate::recipe::MaskGeometry::Shaped`]). `None` when the bottom
+/// does not differ from the middle. The median, not the minimum, is the
+/// zero: the lower band is the part of the zone that departs from its
+/// typical level, so it is the glow, not half the sky at a third strength —
+/// on the night pair a min-to-max scale gave the glow band 24 % of the
+/// frame, its solve neutralised by the cell voucher (2026-10-20). Its two
+/// levels are the least-squares answer like any other model's, so the
+/// scale's offset is absorbed by them.
+fn shaped_model(rows: &[ProfileRow], top: f32, bottom: f32) -> Option<BandModel> {
+    let n = SUBZONE_SHAPE_SAMPLES;
+    let half = (bottom - top) * SUBZONE_SHAPE_WINDOW;
+    let sample = |y: f32| -> Option<[f64; 3]> {
+        let (mut mass, mut delta) = (0.0f64, [0.0f64; 3]);
+        for row in rows.iter().filter(|r| r.mass > 0.0 && (r.y - y).abs() <= half) {
+            mass += row.mass;
+            for (d, value) in delta.iter_mut().zip(&row.delta) { *d += value * row.mass; }
+        }
+        (mass > 0.0).then(|| delta.map(|d| d / mass))
+    };
+    let samples: Vec<[f64; 3]> = (0..n).map(|s| {
+        let y = top + (bottom - top) * s as f32 / (n - 1) as f32;
+        sample(y)
+    }).collect::<Option<_>>()?;
+    let quarter = n / 4;
+    let mean = |range: std::ops::Range<usize>| -> [f64; 3] {
+        let mut m = [0.0f64; 3];
+        for s in range.clone() { for c in 0..3 { m[c] += samples[s][c]; } }
+        m.map(|v| v / range.len() as f64)
+    };
+    let (middle, tail) = (mean(quarter..n - quarter), mean(n - quarter..n));
+    let direction: [f64; 3] = std::array::from_fn(|c| tail[c] - middle[c]);
+    let norm = direction.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if norm <= f64::from(ZONE_MATCHED_ERR) * 100.0 { return None; }
+    let projected: Vec<f64> = samples.iter()
+        .map(|s| (0..3).map(|c| s[c] * direction[c] / norm).sum::<f64>()).collect();
+    let mut sorted = projected.clone();
+    sorted.sort_by(f64::total_cmp);
+    let zero = sorted[n / 2];
+    let peak = sorted[n - 1];
+    if peak - zero <= f64::from(ZONE_MATCHED_ERR) * 100.0 { return None; }
+    let falloff: Vec<f32> = projected.iter().map(|v| ((v - zero) / (peak - zero)).clamp(0.0, 1.0) as f32).collect();
+    Some(BandModel { r2: 0.0, breaks: vec![(top + bottom) * 0.5], widths: vec![bottom - top], shape: Some(falloff) })
+}
+
+/// One row of the zone's residual profile: its vertical position as a share
+/// of the frame height, its mask mass and the mass-weighted mean Lab residual
+/// (target minus current) over its pixels.
+struct ProfileRow {
+    y: f32,
     mass: f64,
     delta: [f64; 3],
 }
@@ -59,121 +137,201 @@ fn delta_e(before: &[[f32; 3]], target: &[[f32; 3]], weights: &[f32]) -> f32 {
     if mass > 0.0 { (sum / mass) as f32 } else { 0.0 }
 }
 
-fn quantile_y(rows: &[f64], fraction: f64) -> f32 {
-    let want = rows.iter().sum::<f64>() * fraction;
+/// The frame-height share under which `fraction` of the zone's mass lies.
+fn quantile_y(rows: &[ProfileRow], fraction: f64) -> f32 {
+    let want = rows.iter().map(|r| r.mass).sum::<f64>() * fraction;
     let mut mass = 0.0;
-    for (y, row) in rows.iter().enumerate() {
-        if *row > 0.0 && mass + row >= want {
-            return ((y as f64 + (want - mass) / row) / rows.len() as f64) as f32;
+    for (i, row) in rows.iter().enumerate() {
+        if row.mass > 0.0 && mass + row.mass >= want {
+            let next = rows.get(i + 1).map_or(row.y, |r| r.y);
+            return row.y + (next - row.y) * ((want - mass) / row.mass) as f32;
         }
-        mass += row;
+        mass += row.mass;
     }
-    1.0
+    rows.last().map_or(1.0, |r| r.y)
 }
 
+/// The coverage of each band of `model` at frame-height share `y`, the way the
+/// renderer composes them: band `i` is the ramp above it (`i - 1`) intersected
+/// with the inverse of the ramp below it (`i`), through the measured linear
+/// feather ([`render::linear_ramp_coverage`]).
+fn band_coverages(model: &BandModel, y: f32) -> Vec<f32> {
+    let ramp = |i: usize| -> f32 { model.coverage(i, y) };
+    (0..=model.breaks.len())
+        .map(|band| {
+            let above = if band == 0 { 1.0 } else { ramp(band - 1) };
+            let below = if band == model.breaks.len() { 0.0 } else { ramp(band) };
+            above * (1.0 - below)
+        })
+        .collect()
+}
+
+/// The mass-weighted least-squares band levels (one Lab residual per band)
+/// that `model` explains `rows` with, and the share of the rows' residual
+/// variance it leaves unexplained: `(levels, residual)`.
+fn fit_levels(model: &BandModel, rows: &[ProfileRow]) -> (Vec<[f64; 3]>, f64) {
+    let n = model.breaks.len() + 1;
+    // Normal equations: (A^T W A) levels = A^T W delta, A the coverages.
+    let mut ata = vec![vec![0.0f64; n]; n];
+    let mut atd = vec![[0.0f64; 3]; n];
+    for row in rows {
+        if row.mass <= 0.0 { continue; }
+        let a = band_coverages(model, row.y);
+        for i in 0..n {
+            let ai = a[i] as f64 * row.mass;
+            for j in 0..n { ata[i][j] += ai * a[j] as f64; }
+            for (slot, value) in atd[i].iter_mut().zip(&row.delta) { *slot += ai * value; }
+        }
+    }
+    // Gauss-Jordan with partial pivoting on the n x (n + 3) system; a
+    // band no row reaches leaves a zero pivot and its level at 0.
+    let mut m: Vec<Vec<f64>> = (0..n).map(|i| {
+        let mut r = ata[i].clone(); r.extend_from_slice(&atd[i]); r
+    }).collect();
+    for col in 0..n {
+        let pivot = (col..n).max_by(|a, b| m[*a][col].abs().total_cmp(&m[*b][col].abs())).unwrap_or(col);
+        if m[pivot][col].abs() < 1e-12 { continue; }
+        m.swap(col, pivot);
+        let p = m[col][col];
+        for v in m[col].iter_mut() { *v /= p; }
+        for r in 0..n {
+            if r == col { continue; }
+            let f = m[r][col];
+            if f == 0.0 { continue; }
+            let pivot_row = m[col].clone();
+            for (slot, v) in m[r].iter_mut().zip(&pivot_row) { *slot -= f * v; }
+        }
+    }
+    let levels: Vec<[f64; 3]> = (0..n).map(|i| [m[i][n], m[i][n + 1], m[i][n + 2]]).collect();
+    let residual = rows.iter().filter(|r| r.mass > 0.0).map(|row| {
+        let a = band_coverages(model, row.y);
+        (0..3).map(|c| {
+            let pred: f64 = (0..n).map(|i| a[i] as f64 * levels[i][c]).sum();
+            (row.delta[c] - pred).powi(2)
+        }).sum::<f64>() * row.mass
+    }).sum();
+    (levels, residual)
+}
+
+/// The band partitions a zone's residual earns, measured from the target
+/// ([`BandModel`]): the zone's row profile (mass-weighted mean Lab residual
+/// per row) is fitted with every two- and three-band model whose breaks sit
+/// at [`SUBZONE_BREAK_STEPS`] places along the zone's extent and whose ramps
+/// take any of the [`SUBZONE_WIDTH_SCALES`] widths — the band LEVELS being the
+/// least-squares answer for each ([`fit_levels`]) — and the best
+/// [`SUBZONE_MODELS_PER_COUNT`] distinct partitions of each count that explain
+/// a majority of the variance ([`SUBZONE_R2_MIN`]) and separate adjacent bands
+/// by more than the zone acceptance floor are returned, fewer bands first and
+/// higher R2 next. Also the best R2 of any fit, for the disclosure.
+///
+/// The ramp's centre and width are read off the target because they are what
+/// the target shows: the rule used to bin the profile into eight equal-mass
+/// steps, pick the largest jumps, and then try a fixed ladder of widths for
+/// each. On a night pair (2026-10-20) the sky's residual was one continuous
+/// gradient reaching the horizon — bluer and then much brighter row by row
+/// over the lower half — and the step model's best fit (R2 0.62) left the
+/// change to one band at one of five widths; whichever width the gates kept
+/// painted a line where its ramp ended. Fitted ramps read R2 0.83 on the same
+/// profile, the last one still rising at the horizon.
 fn residual_models(
     current: &[[f32; 3]], target: &[[f32; 3]], weights: &[f32], width: u32, height: u32,
 ) -> (f32, Vec<BandModel>) {
     let (w, h) = (width as usize, height as usize);
     if w == 0 || h == 0 || weights.len() != w * h { return (0.0, Vec::new()); }
-    let rows: Vec<f64> = weights.chunks_exact(w)
-        .map(|row| row.iter().map(|v| *v as f64).sum()).collect();
-    let total = rows.iter().sum::<f64>();
-    if total < MIN_MASK_PIXELS as f64 { return (0.0, Vec::new()); }
-    let edges: Vec<f32> = (0..=SUBZONE_BINS)
-        .map(|i| quantile_y(&rows, i as f64 / SUBZONE_BINS as f64)).collect();
-    let mut bins = [ResidualBin::default(); SUBZONE_BINS];
-    // A row can straddle a quantile. Split its mass between bins, never let
-    // rounding give one narrow band a different population currency.
-    let mut cumulative = 0.0;
-    for (y, row_mass) in rows.iter().enumerate() {
-        if *row_mass <= 0.0 { continue; }
-        let mut row_delta = [0.0f64; 3];
+    let rows: Vec<ProfileRow> = (0..h).map(|y| {
+        let (mut mass, mut delta) = (0.0f64, [0.0f64; 3]);
         for x in 0..w {
             let i = y * w + x;
             if weights[i] <= 0.0 { continue; }
             let (b, t) = (lab(&current[i]), lab(&target[i]));
-            for c in 0..3 { row_delta[c] += (t[c] - b[c]) as f64 * weights[i] as f64; }
+            mass += weights[i] as f64;
+            for c in 0..3 { delta[c] += (t[c] - b[c]) as f64 * weights[i] as f64; }
         }
-        for (i, bin) in bins.iter_mut().enumerate() {
-            let lo = total * i as f64 / SUBZONE_BINS as f64;
-            let hi = total * (i + 1) as f64 / SUBZONE_BINS as f64;
-            let share = ((cumulative + row_mass).min(hi) - cumulative.max(lo)).max(0.0);
-            bin.mass += share;
-            for (sum, delta) in bin.delta.iter_mut().zip(row_delta) {
-                *sum += delta * share / row_mass;
-            }
-        }
-        cumulative += row_mass;
-    }
-    let mean = |lo: usize, hi: usize| {
-        let mass = bins[lo..hi].iter().map(|b| b.mass).sum::<f64>().max(1e-12);
-        std::array::from_fn::<_, 3, _>(|c| bins[lo..hi].iter().map(|b| b.delta[c]).sum::<f64>() / mass)
-    };
-    let error = |lo: usize, hi: usize, centre: [f64; 3]| {
-        bins[lo..hi].iter().map(|b| {
-            (0..3).map(|c| (b.delta[c] / b.mass.max(1e-12) - centre[c]).powi(2)).sum::<f64>() * b.mass
-        }).sum::<f64>()
-    };
-    let variance = error(0, SUBZONE_BINS, mean(0, SUBZONE_BINS));
-    if variance / total < 1e-8 { return (0.0, Vec::new()); }
-    let mut jumps: Vec<(usize, f64)> = (1..SUBZONE_BINS).map(|i| {
-        let (a, b) = (mean(i - 1, i), mean(i, i + 1));
-        (i, (0..3).map(|c| (a[c] - b[c]).powi(2)).sum())
+        if mass > 0.0 { for d in delta.iter_mut() { *d /= mass; } }
+        ProfileRow { y: (y as f32 + 0.5) / h as f32, mass, delta }
     }).collect();
-    jumps.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-    let mut candidates: Vec<usize> = jumps.iter().take(4).map(|j| j.0).collect();
-    for i in 1..SUBZONE_BINS {
-        let (a, b) = (mean(i - 1, i), mean(i, i + 1));
-        if (0..3).any(|c| a[c] * b[c] < 0.0) { candidates.push(i); }
-    }
-    candidates.sort_unstable();
-    candidates.dedup();
+    let total = rows.iter().map(|r| r.mass).sum::<f64>();
+    if total < MIN_MASK_PIXELS as f64 { return (0.0, Vec::new()); }
+    let mean: [f64; 3] = std::array::from_fn(|c| rows.iter().map(|r| r.delta[c] * r.mass).sum::<f64>() / total);
+    let variance: f64 = rows.iter().map(|r| (0..3).map(|c| (r.delta[c] - mean[c]).powi(2)).sum::<f64>() * r.mass).sum();
+    if variance / total < 1e-8 { return (0.0, Vec::new()); }
+    let (top, bottom) = (quantile_y(&rows, 0.005), quantile_y(&rows, 0.995));
+    let own_height = bottom - top;
+    if own_height <= 0.0 { return (0.0, Vec::new()); }
+    let step = own_height / SUBZONE_BREAK_STEPS as f32;
+    let centres: Vec<f32> = (1..SUBZONE_BREAK_STEPS).map(|i| top + step * i as f32).collect();
+    let widths: Vec<f32> = SUBZONE_WIDTH_SCALES.iter().map(|s| own_height * SUBZONE_OVERLAP * s).collect();
     let mut best_r2 = 0.0f32;
     let mut models = Vec::new();
-    for k in [2, 3] {
-        for &a in &candidates {
-            let seconds: Vec<usize> = if k == 2 { vec![SUBZONE_BINS] }
-                else { candidates.iter().copied().filter(|b| *b > a).collect() };
-            for b in seconds {
-                let cuts = if k == 2 { vec![0, a, SUBZONE_BINS] }
-                    else { vec![0, a, b, SUBZONE_BINS] };
-                let means: Vec<_> = cuts.windows(2).map(|p| mean(p[0], p[1])).collect();
-                let residual = cuts.windows(2).zip(&means).map(|(p, m)| error(p[0], p[1], *m)).sum::<f64>();
-                let r2 = (1.0 - residual / variance).clamp(0.0, 1.0) as f32;
-                best_r2 = best_r2.max(r2);
-                let difference = means.windows(2).map(|m| {
-                    (0..3).map(|c| (m[0][c] - m[1][c]).powi(2)).sum::<f64>().sqrt()
-                }).fold(f64::INFINITY, f64::min) as f32;
-                // Express the zone's 0.02 acceptance floor in Lab's 100-unit
-                // scale. R2 alone would reward arbitrarily small row noise.
-                if r2 <= SUBZONE_R2_MIN || difference <= ZONE_MATCHED_ERR * 100.0 { continue; }
-                let breaks: Vec<f32> = cuts[1..cuts.len()-1].iter().map(|c| edges[*c]).collect();
-                let own_height = quantile_y(&rows, 0.995) - quantile_y(&rows, 0.005);
-                let gap = breaks.windows(2).map(|p| p[1] - p[0]).fold(own_height, f32::min);
-                let model = BandModel { r2, breaks, overlap: (own_height * SUBZONE_OVERLAP).min(gap * 0.9) };
-                models.push(model);
+    // Every ordered pair of break centres (or one), every width at each;
+    // ramps that would cross are not a partition.
+    let mut consider = |breaks: Vec<f32>, widths: Vec<f32>| {
+        let model = BandModel { r2: 0.0, breaks, widths, shape: None };
+        if (1..model.breaks.len()).any(|i| model.ramp(i - 1).1 > model.ramp(i).0) { return; }
+        let (levels, residual) = fit_levels(&model, &rows);
+        let r2 = (1.0 - residual / variance).clamp(0.0, 1.0) as f32;
+        best_r2 = best_r2.max(r2);
+        let difference = levels.windows(2).map(|m| {
+            (0..3).map(|c| (m[0][c] - m[1][c]).powi(2)).sum::<f64>().sqrt()
+        }).fold(f64::INFINITY, f64::min) as f32;
+        // Express the zone's 0.02 acceptance floor in Lab's 100-unit scale.
+        // R2 alone would reward arbitrarily small row noise.
+        if r2 <= SUBZONE_R2_MIN || difference <= ZONE_MATCHED_ERR * 100.0 { return; }
+        models.push(BandModel { r2, ..model });
+    };
+    for (i, &a) in centres.iter().enumerate() {
+        for &wa in &widths {
+            consider(vec![a], vec![wa]);
+            for &b in &centres[i + 1..] {
+                for &wb in &widths {
+                    consider(vec![a, b], vec![wa, wb]);
+                }
             }
         }
     }
     // Residual R2 earns a trial, not the right to skip render gates for
-    // every other partition. Prefer fewer bands and stronger explanations
-    // only when their measured render improvements tie.
-    models.sort_by(|a, b| a.breaks.len().cmp(&b.breaks.len()).then(b.r2.total_cmp(&a.r2)));
-    (best_r2, models)
+    // every other partition: the best few DISTINCT partitions of each band
+    // count go forward, two partitions being the same when every break is
+    // within one step of the other's. Fewer bands first, then higher R2.
+    models.sort_by(|a, b| b.r2.total_cmp(&a.r2));
+    let mut kept: Vec<BandModel> = Vec::new();
+    // The zone's own profile as the ramp, beside the measured ramps and not
+    // in their quota: it is the one shape no ramp law can stand in for.
+    if let Some(shaped) = shaped_model(&rows, top, bottom) {
+        let (levels, residual) = fit_levels(&shaped, &rows);
+        let r2 = (1.0 - residual / variance).clamp(0.0, 1.0) as f32;
+        best_r2 = best_r2.max(r2);
+        let difference = (0..3).map(|c| (levels[0][c] - levels[1][c]).powi(2)).sum::<f64>().sqrt() as f32;
+        if r2 > SUBZONE_R2_MIN && difference > ZONE_MATCHED_ERR * 100.0 {
+            kept.push(BandModel { r2, ..shaped });
+        }
+    }
+    for count in 1..=2 {
+        let mut taken = 0;
+        for model in models.iter().filter(|m| m.breaks.len() == count) {
+            if taken == SUBZONE_MODELS_PER_COUNT { break; }
+            let same = |k: &BandModel| k.breaks.len() == count && k.shape.is_none()
+                && k.breaks.iter().zip(&model.breaks).all(|(a, b)| (a - b).abs() <= step * 1.001);
+            if kept.iter().any(same) { continue; }
+            kept.push(model.clone());
+            taken += 1;
+        }
+    }
+    kept.sort_by(|a, b| a.breaks.len().cmp(&b.breaks.len()).then(b.r2.total_cmp(&a.r2)));
+    (best_r2, kept)
 }
 
 fn band_components(model: &BandModel, band: usize) -> Vec<MaskComponent> {
-    model.breaks.iter().enumerate().filter_map(|(i, edge)| {
+    model.breaks.iter().enumerate().filter_map(|(i, _)| {
         if i != band && i + 1 != band { return None; }
-        Some(MaskComponent {
-            geometry: MaskGeometry::Linear {
-                zero_x: 0.5, zero_y: edge - model.overlap * 0.5,
-                full_x: 0.5, full_y: edge + model.overlap * 0.5,
+        let (zero_y, full_y) = model.ramp(i);
+        let geometry = match &model.shape {
+            Some(falloff) if i == 0 => MaskGeometry::Shaped {
+                zero_x: 0.5, zero_y, full_x: 0.5, full_y, falloff: falloff.clone(),
             },
-            mode: MaskCombine::Intersect,
-            inverted: i == band,
-        })
+            _ => MaskGeometry::Linear { zero_x: 0.5, zero_y, full_x: 0.5, full_y },
+        };
+        Some(MaskComponent { geometry, mode: MaskCombine::Intersect, inverted: i == band })
     }).collect()
 }
 
@@ -191,11 +349,116 @@ fn band_weights(
     coverage.as_raw().iter().map(|v| *v as f32 / 255.0).collect()
 }
 
+/// How much larger a band's solved controls must be than the solve read
+/// them, for the band to deliver its level at full coverage: the inverse of
+/// the band ramp's mean coverage over the band's own population (sum w*c^2 /
+/// sum w*c, `w` the parent zone's weight, `c` the ramp's), capped at
+/// [`BAND_LIFT_MAX`].
+///
+/// A correction applied through coverage `c` delivers `c` of itself at each
+/// pixel; a band's controls are solved on the population its ramp reaches,
+/// weighted by that ramp, so the solve matched the band's level AS SEEN
+/// THROUGH the ramp and the render delivered that level times the ramp
+/// again. A plateau band reads ~1 and is unchanged. A ramp still rising at
+/// the zone's edge - the band shape the night pair's sky profile measured
+/// (2026-10-20, `residual_models`) - reads ~0.6, and until then shipped at
+/// 60 % of its level: the fitted ramp to the horizon (R2 0.83) lost to a
+/// plateau band (R2 0.64) by deltaE 14.9 to 8.5 on that pair, and the
+/// plateau band's ramp end was the line across the sky. The residual fit
+/// chose the ramp whose SHAPE the correction should take; this gives it the
+/// level that shape needs.
+fn full_coverage_factor(parent: &[f32], ramp: &[f32]) -> f32 {
+    let (mut c1, mut c2) = (0.0f64, 0.0f64);
+    for (w, c) in parent.iter().zip(ramp) {
+        let (w, c) = (*w as f64, *c as f64);
+        c1 += w * c;
+        c2 += w * c * c;
+    }
+    if c1 <= 0.0 || c2 <= 0.0 { return 1.0; }
+    ((c1 / c2) as f32).clamp(1.0, BAND_LIFT_MAX)
+}
+
+/// The most a band's controls are lifted for coverage ([`full_coverage_factor`]):
+/// a band whose ramp reaches its population at under a quarter coverage is
+/// asking for a level nothing in the zone shows.
+const BAND_LIFT_MAX: f32 = 4.0;
+
+/// One band's controls at `factor` times its solved move from `anchor` (the
+/// parent's controls, or neutral): the same blend the boundary gate shrinks
+/// with ([`shrink_to_parent`]), run past 1, inside the limits the solve
+/// itself works to and rounded as it rounds.
+fn stretch_band(band: &mut LocalAdjustment, original: &LocalAdjustment, anchor: &LocalAdjustment, factor: f32) {
+    shrink_to_parent(std::slice::from_mut(band), std::slice::from_ref(original), anchor, factor);
+    let round1 = |v: f32| (v * 10.0).round() / 10.0;
+    let round2 = |v: f32| (v * 100.0).round() / 100.0;
+    band.exposure_ev = round2(band.exposure_ev.clamp(-ZONE_EV_LIMIT, ZONE_EV_LIMIT));
+    for dial in [&mut band.contrast, &mut band.highlights, &mut band.shadows, &mut band.whites, &mut band.blacks] {
+        *dial = round1(*dial);
+    }
+    if let Some(gains) = band.color_gains {
+        band.color_gains = Some(gains.map(|g| round2(g.max(0.05))));
+    }
+    band.saturation = clamp_zone_sat(band.saturation.round());
+}
+
+/// Golden-section steps of the band strength search: eight analysis renders
+/// resolve the factor to under 2 % of its range.
+const BAND_LEVEL_STEPS: usize = 6;
+
+/// The strength a ramp band ships at, MEASURED: the band's controls are
+/// stretched from `anchor` ([`stretch_band`]) by the factor in `1..=bound`
+/// whose render leaves the zone's residual ([`delta_e`] over
+/// `zone_weights`) smallest, the solved move itself never losing to the
+/// search. The last band attached to `report` is the band, and it is left at
+/// the chosen factor.
+///
+/// Why measured and not computed: the band was solved on the population its
+/// ramp reaches, weighted by the ramp, and the render delivers the solve
+/// through the ramp again, so a ramp still rising at the zone's edge ships
+/// under its level ([`full_coverage_factor`], the bound). But each control
+/// reads that shortfall differently - the saturation chase is closed-loop on
+/// the render and already at level, the gains are solved from means and are
+/// short by the ramp's mean coverage, the tone sliders sit between - so one
+/// factor computed for all of them is wrong for most: on the night pair
+/// (2026-10-20) the computed lift took the horizon band to +3.58 EV, past
+/// the +2.5 the solve may reach, and the boundary gate then shrank the whole
+/// sky to 0.415 of it.
+fn level_the_ramp_needs(
+    image: &DynamicImage, target: &[[f32; 3]], report: &mut FitReport, zone_weights: &[f32],
+    anchor: &LocalAdjustment, bound: f32,
+) -> f32 {
+    if bound <= 1.0 { return 1.0; }
+    let original = report.recipe.masks.last().cloned().expect("band just attached");
+    let measure = |report: &mut FitReport, factor: f32| -> f32 {
+        stretch_band(report.recipe.masks.last_mut().expect("band just attached"), &original, anchor, factor);
+        delta_e(&fit::pixels_of(&render::develop_preview(image, &report.recipe)), target, zone_weights)
+    };
+    let golden = 0.618_034f32;
+    let (mut lo, mut hi) = (1.0f32, bound);
+    let (mut a, mut b) = (hi - golden * (hi - lo), lo + golden * (hi - lo));
+    let (mut at_a, mut at_b) = (measure(report, a), measure(report, b));
+    for _ in 0..BAND_LEVEL_STEPS {
+        if at_a < at_b {
+            hi = b; b = a; at_b = at_a;
+            a = hi - golden * (hi - lo); at_a = measure(report, a);
+        } else {
+            lo = a; a = b; at_a = at_b;
+            b = lo + golden * (hi - lo); at_b = measure(report, b);
+        }
+    }
+    let (best, at_best) = if at_a < at_b { (a, at_a) } else { (b, at_b) };
+    let at_one = measure(report, 1.0);
+    let chosen = if at_best < at_one { best } else { 1.0 };
+    measure(report, chosen);
+    chosen
+}
+
 fn band_attachment(
     parent: &ZoneAttachment, model: &BandModel, band: usize, image: &DynamicImage,
     recipe: &crate::recipe::EditRecipe,
-) -> ZoneAttachment {
+) -> (ZoneAttachment, f32) {
     let weights = band_weights(model, band, image, recipe);
+    let lift = full_coverage_factor(&parent.source_weights, &weights);
     let mut attachment = parent.clone();
     attachment.source_weights.iter_mut().zip(&weights).for_each(|(w, a)| *w *= a);
     attachment.target_weights.iter_mut().zip(&weights).for_each(|(w, a)| *w *= a);
@@ -211,7 +474,7 @@ fn band_attachment(
     attachment.components = band_components(model, band);
     attachment.name = format!("{} · band {}/{}", parent.label, band + 1, model.breaks.len() + 1);
     attachment.label = attachment.name.clone();
-    attachment
+    (attachment, lift)
 }
 
 /// R37. The target-referenced band gap of every rim, per evidence cell
@@ -236,37 +499,28 @@ fn target_steps(target: &[[f32; 3]], pixels: &[[f32; 3]], rims: &[Vec<f32>], siz
     rims.iter().flat_map(|weights| step_cell_gaps(target, pixels, weights, size.0, size.1)).collect()
 }
 
-/// The CIE76 colour difference an observer can just tell apart: 2.3 dE*ab
-/// (Mahy, Van Eycken & Oosterlinck 1994, Color Res. Appl. 19(2) 105-121,
-/// doi:10.1111/j.1520-6378.1994.tb00070.x). The chroma reading's own
-/// per-cell tolerance, on its 100-unit scale: the boundary gate has no
-/// chroma ruler whose ceiling could serve, and the reading is perceptual.
-const CHROMA_JND: f32 = 2.3;
-
-/// A band set does not regress a boundary when (1) no cell of any rim moves
-/// away from the target by more than `ceiling` — the family's own seam
-/// ceiling, the largest step the boundary gate lets any one crossing
-/// introduce, so a fidelity ruler that refused less would refuse what the
-/// gate had just accepted as a seam — in luma or the widest channel, nor by
-/// more than one just noticeable difference in chroma ([`CHROMA_JND`]); and
-/// (2) on average over the rims' occupied cells no component gets worse by
-/// more than the one-code floor ([`mean_regression`]), so a drift every
-/// cell can hide cannot add up to a regression the local rule never sees.
-/// A better worst rim still cannot pay for a regression at another break
-/// or at the horizon. The per-cell tolerance used to be the one-code floor
-/// itself: a Pareto demand on 288 entries per rim, which on the reference
-/// pair at 0.85 (2026-09-11) refused a set that improved the sky's deltaE
-/// 30.1 -> 27.0 and every maximum of both rulers, for 1.3 dE of chroma in
-/// one cell of the horizon band and 1.2 codes of luma in one cell of its
-/// contour — read through the verdict's own disclosure.
-fn seams_do_not_regress(before: &[[f32; 3]], after: &[[f32; 3]], ceiling: f32) -> bool {
-    if before.is_empty() || before.len() != after.len() {
-        return false;
-    }
-    let tolerance = [ceiling, ceiling, CHROMA_JND / 100.0];
-    let local = before.iter().zip(after).all(|(b, a)| (0..3).all(|c| a[c] - b[c] <= tolerance[c]));
-    let global = mean_regression(before, after).iter().all(|worse| *worse <= BOUNDARY_STEP_FLOOR);
-    local && global
+/// A band set does not regress the zone's boundary when, on average over the
+/// contour's occupied evidence cells, no component of either trial ruler gets
+/// farther from the target by more than the one-code floor
+/// ([`mean_regression`]).
+///
+/// The mean and not the worst cell, because a visible seam is not this
+/// ruler's to catch: the boundary gate before it
+/// ([`enforce_boundary_gates_with_shrink`]) ranks every crossing the
+/// correction introduces and shrinks the set until none in smooth sky or haze
+/// passes its ceiling. What is left to ask here is whether the boundary as a
+/// whole ended up closer to the target or farther from it. The rule used to
+/// be a per-cell veto as well — the seam ceiling in luma and the widest
+/// channel, one JND (2.3 dE) in chroma — and on a night pair (2026-10-20) it
+/// refused every sky band set the gate had passed at k 0.59-0.88, sets that
+/// took the sky's deltaE 23.4 -> 7.3 and the horizon glow from blue/green 1.50
+/// to 2.22 against the target's 2.20 with no seam visible at 2.5x brightness,
+/// for +0.05-0.10 of chroma in one or two of the contour's cells while its
+/// mean improved by 0.006-0.019.
+fn boundary_does_not_regress(before: &[[f32; 3]], after: &[[f32; 3]]) -> bool {
+    !before.is_empty()
+        && before.len() == after.len()
+        && mean_regression(before, after).iter().all(|worse| *worse <= BOUNDARY_STEP_FLOOR)
 }
 
 /// The change of each component's mean over the cells either reading
@@ -282,8 +536,8 @@ fn mean_regression(before: &[[f32; 3]], after: &[[f32; 3]]) -> [f32; 3] {
 }
 
 /// The largest increase of any entry between two readings of the same rims:
-/// `(entry, component, increase)`, where `entry / cells` is the rim (0 the
-/// horizon, then each break) and `entry % cells` the evidence cell. None
+/// `(entry, component, increase)`, where `entry / cells` is the rim (always
+/// 0, the zone's own contour) and `entry % cells` the evidence cell. None
 /// when nothing got worse, or when the readings do not pair up.
 fn worst_regression(before: &[[f32; 3]], after: &[[f32; 3]]) -> Option<(usize, usize, f32)> {
     if before.is_empty() || before.len() != after.len() {
@@ -319,6 +573,76 @@ fn regression_text(seam: Ruled, step: Ruled) -> String {
         }
     };
     format!("band {}, contour {}", one(seam), one(step))
+}
+
+/// How far apart, as a share of the frame height, the two rows are that a
+/// band ramp's steepness is read between ([`ramp_excess`]). Under the narrowest
+/// ramp a band model is tried at on a zone of ordinary height, and about the
+/// span over which the night pair's (2026-10-20) too-narrow sky ramp read as a
+/// line across the sky: +12 codes of brightness and +20 of blue over 2% of the
+/// height, where the target brightened 1.5 codes over the same rows.
+const RAMP_WINDOW: f32 = 0.02;
+/// How much steeper than the control arm a band set's rows may change before
+/// the extra is a line: one just-noticeable difference, in deltaE.
+const RAMP_JND: f32 = 2.3;
+
+/// How much STEEPER than the target the render changes from one row to a row
+/// [`RAMP_WINDOW`] below it, anywhere inside the zone, in deltaE: per row pair
+/// the lightness and the chroma step of the render's row mean each less the
+/// target's (0 where the render is no steeper), combined. Each row mean is
+/// over the columns settled inside the zone at both rows, because the
+/// target's texture is re-synthesised where bands run and one column of it is
+/// noise.
+///
+/// A band set's ramps are designed gradients, so they are not judged as a
+/// seam against a settled treatment; but a gradient is only as smooth as it
+/// is wide, and a ramp narrower than the change it carries is a line the
+/// target does not have. This is that question, and only that one: a render
+/// that changes no faster than the target anywhere reads 0 whatever its
+/// level. Read in deltaE and not per channel: on the night pair a sky ramp
+/// four times wider carried the horizon glow's blue a few codes faster than
+/// the target with no line visible at 2.2x brightness (3.9 deltaE over the
+/// target's steps against 3.1 for the render without bands), where the narrow
+/// one that drew the line read 8.8.
+fn ramp_excess(target: &[[f32; 3]], pixels: &[[f32; 3]], weights: &[f32], (width, height): (u32, u32)) -> f32 {
+    let (w, h) = (width as usize, height as usize);
+    let span = ((h as f32 * RAMP_WINDOW).round() as usize).max(1);
+    if w == 0 || h <= span || weights.len() < w * h || pixels.len() < w * h || target.len() < w * h {
+        return 0.0;
+    }
+    let mut excess = 0.0f32;
+    for y in 0..h - span {
+        let mut means = [[0.0f32; 3]; 4];
+        let mut columns = 0usize;
+        for x in 0..w {
+            let (upper, lower) = (y * w + x, (y + span) * w + x);
+            if weights[upper] < ZONE_BOUNDARY_HIGH || weights[lower] < ZONE_BOUNDARY_HIGH {
+                continue;
+            }
+            for (mean, p) in means.iter_mut().zip([pixels[upper], pixels[lower], target[upper], target[lower]]) {
+                for c in 0..3 {
+                    mean[c] += p[c];
+                }
+            }
+            columns += 1;
+        }
+        // A row pair reached by a sliver of the zone is a corner, not a ramp.
+        if columns * 8 < w {
+            continue;
+        }
+        let [ru, rl, tu, tl] = means.map(|m| lab(&m.map(|v| v / columns as f32)));
+        let step = |a: [f32; 3], b: [f32; 3]| ((b[0] - a[0]).abs(), (b[1] - a[1]).hypot(b[2] - a[2]));
+        let ((render_l, render_c), (target_l, target_c)) = (step(ru, rl), step(tu, tl));
+        excess = excess.max((render_l - target_l).max(0.0).hypot((render_c - target_c).max(0.0)));
+    }
+    excess
+}
+
+/// A band set keeps its ramps no steeper than the target's own rows unless
+/// the control arm already was: its [`ramp_excess`] may exceed the control's
+/// by at most [`RAMP_JND`].
+fn ramps_follow_the_target(before: f32, after: f32) -> bool {
+    after <= before + RAMP_JND
 }
 
 /// One ruler's two readings of a trial: its worst cell and its means.
@@ -390,16 +714,8 @@ pub(super) fn replace_zone(
     let before = delta_e(&single_px, target, &parent.source_weights);
     let mut best = None;
     let mut rejected = None;
-    // The initial 6% overlap is a starting measurement, not a fixed seam.
-    // Trial wider native ramps against the same residual and all the same
-    // gates. The smallest model wins ties; no reference-pair special case.
-    let models: Vec<_> = models.into_iter().take(SUBZONE_MODEL_BUDGET).flat_map(|model| {
-        let cap = model.breaks.windows(2).map(|p| (p[1] - p[0]) * 0.9).fold(1.0, f32::min);
-        overlap_ladder(model.overlap, cap)
-            .into_iter()
-            .map(|overlap| BandModel { overlap, ..model.clone() })
-            .collect::<Vec<_>>()
-    }).collect();
+    // Every earned partition is tried, ramps as measured, against all the
+    // same gates. The smallest model wins ties; no reference-pair special case.
     let trial_count = models.len();
     // The control arm without its parent renders the same for every trial:
     // one render, not one per trial.
@@ -409,6 +725,7 @@ pub(super) fn replace_zone(
         fit::pixels_of(&render::develop_preview(image, &without_parent))
     };
     let uncorrected_error = fit::look_err_with_evidence(&uncorrected, target, &report.evidence);
+    let neutral = LocalAdjustment::default();
     for model in models {
         report.recipe = saved_recipe.clone();
         report.notes = saved_notes.clone();
@@ -417,19 +734,39 @@ pub(super) fn replace_zone(
         let first_band = report.recipe.masks.len();
         let attachments: Vec<_> = (0..=model.breaks.len())
             .map(|band| band_attachment(parent, &model, band, image, &report.recipe)).collect();
-        let rims: Vec<_> = std::iter::once(parent.source_weights.clone())
-            .chain(attachments.iter().map(|a| a.source_weights.clone())).collect();
+        // The one boundary a trial is judged at: the zone's own contour. A
+        // band's ramp is not a boundary — it is the correction's designed
+        // gradient between two fits of the same region, as wide as the target's
+        // own profile measured it (`residual_models`), and how close it lands
+        // is what `delta_e` over the zone already measures. Read as a rim it was
+        // charged for falling short of the band's settled treatment, which a
+        // ramp does by construction: on the night pair (2026-10-20) that held
+        // every narrow-ramp sky trial at k 0.03-0.09.
+        let rims = vec![parent.source_weights.clone()];
         let mut solved = true;
-        for attachment in &attachments {
+        for (attachment, lift) in &attachments {
             if attach_one_zone(image, target, report, &mut frame_error, attachment, divergence, correspondence.as_ref()).is_none() {
                 solved = false;
                 break;
+            }
+            // The band was solved as seen through its ramp; ship it at the
+            // level its ramp needs, measured (`level_the_ramp_needs`), and
+            // read the frame again so the next band starts from what shipped.
+            if *lift > 1.0 {
+                let original = report.recipe.masks.last().cloned().expect("band just attached");
+                let anchor = parent_band_anchor(&original, parent_index.map_or(&neutral, |i| &saved_recipe.masks[i]));
+                level_the_ramp_needs(image, target, report, &parent.source_weights, &anchor, *lift);
+                let lifted = fit::pixels_of(&render::develop_preview(image, &report.recipe));
+                frame_error = fit::look_err_with_evidence(&lifted, target, &report.evidence);
             }
         }
         let mut pixels = fit::pixels_of(&render::develop_preview(image, &report.recipe));
         let mut boundary_passed = solved;
         if solved {
-            let shares: Vec<f32> = rims[1..].iter().map(|w| w.iter().sum::<f32>() / w.len().max(1) as f32).collect();
+            let shares: Vec<f32> = attachments
+                .iter()
+                .map(|(a, _)| a.source_weights.iter().sum::<f32>() / a.source_weights.len().max(1) as f32)
+                .collect();
             let boundaries: Vec<&[f32]> = rims.iter().map(Vec::as_slice).collect();
             let verdict = if let Some(index) = parent_index {
                 let control = &saved_recipe.masks[index];
@@ -456,11 +793,17 @@ pub(super) fn replace_zone(
         let seam_after = seams(target, &pixels, &rims, size);
         let step_before = target_steps(target, &single_px, &rims, size);
         let step_after = target_steps(target, &pixels, &rims, size);
-        let no_seam_regression = seams_do_not_regress(&seam_before, &seam_after, ZONE_BOUNDARY_RIM_MAX)
-            && seams_do_not_regress(&step_before, &step_after, ZONE_BOUNDARY_STEP_MAX);
-        let regression = regression_text(
-            (worst_regression(&seam_before, &seam_after), mean_regression(&seam_before, &seam_after)),
-            (worst_regression(&step_before, &step_after), mean_regression(&step_before, &step_after)),
+        let no_seam_regression = boundary_does_not_regress(&seam_before, &seam_after)
+            && boundary_does_not_regress(&step_before, &step_after);
+        let ramp_before = ramp_excess(target, &single_px, &parent.source_weights, size);
+        let ramp_after = ramp_excess(target, &pixels, &parent.source_weights, size);
+        let ramps_follow = ramps_follow_the_target(ramp_before, ramp_after);
+        let regression = format!(
+            "{}, ramp steeper than target {ramp_before:.2} -> {ramp_after:.2}",
+            regression_text(
+                (worst_regression(&seam_before, &seam_after), mean_regression(&seam_before, &seam_after)),
+                (worst_regression(&step_before, &step_after), mean_regression(&step_before, &step_after)),
+            ),
         );
         let zone_before = zone_err(&zone_moments(&single_px, &parent.source_weights), &zone_moments(target, &parent.target_weights));
         let zone_after = zone_err(&zone_moments(&pixels, &parent.source_weights), &zone_moments(target, &parent.target_weights));
@@ -470,13 +813,14 @@ pub(super) fn replace_zone(
             else if after >= before - ZONE_GLOBAL_REGRESSION_TOL { values::DELTA_E_MARGIN }
             else if zone_after > zone_before + ZONE_GLOBAL_REGRESSION_TOL { values::ZONE_DO_NO_HARM }
             else if frame_after > saved_error + parent.frame_regression_tol { values::FRAME_DO_NO_HARM }
-            else if !no_seam_regression { values::BOUNDARY_REGRESSION } else { "accepted" };
+            else if !no_seam_regression { values::BOUNDARY_REGRESSION }
+            else if !ramps_follow { values::RAMP_STEEPER } else { "accepted" };
         let complete = solved && boundary_passed;
         let args = vec![
             ("label", parent.label.clone()), ("k", (model.breaks.len() + 1).to_string()),
             ("trials", trial_count.to_string()),
             ("r2", format!("{:.4}", model.r2)),
-            ("overlap", format!("{:.5}", model.overlap)),
+            ("overlap", model.widths.iter().map(|v| format!("{v:.5}")).collect::<Vec<_>>().join(",")),
             ("breaks", model.breaks.iter().map(|v| format!("{v:.5}")).collect::<Vec<_>>().join(",")),
             ("before", format!("{before:.4}")),
             ("after", if complete { format!("{after:.4}") } else { values::UNMEASURED.to_string() }),
@@ -548,10 +892,10 @@ mod tests {
             name: String::new(), label: "sky".into(), min_share: MIN_ZONE_SHARE,
             frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
         };
-        let model = BandModel { r2: 1.0, breaks: vec![0.3125], overlap: 0.625 * SUBZONE_OVERLAP };
+        let model = BandModel { r2: 1.0, breaks: vec![0.3125], widths: vec![0.625 * SUBZONE_OVERLAP], shape: None };
         let masks = if split {
             (0..2).map(|band| {
-                let a = band_attachment(&parent, &model, band, &source, &crate::recipe::EditRecipe::default());
+                let (a, _) = band_attachment(&parent, &model, band, &source, &crate::recipe::EditRecipe::default());
                 LocalAdjustment {
                     mask: a.mask, components: a.components, role: a.role,
                     exposure_ev: 0.15, color_gains: Some(if band == 0 { [1.16, 1.0, 0.84] } else { [0.84, 1.0, 1.16] }),
@@ -579,51 +923,198 @@ mod tests {
     }
 
     #[test]
-    fn the_overlap_ladder_is_geometric_and_folds_onto_its_cap() {
-        assert_eq!(overlap_ladder(0.06, 1.0), vec![0.06, 0.12, 0.24, 0.48, 0.96]);
-        assert_eq!(overlap_ladder(0.06, 0.30), vec![0.06, 0.12, 0.24, 0.30]);
-        assert_eq!(overlap_ladder(0.06, 0.05), vec![0.05], "a cap under the floor is one width, tried once");
+    fn a_ramp_is_measured_from_the_target_where_it_starts_and_how_wide_it_is() {
+        // A zone whose residual is one ramp: flat, then rising over a known
+        // span, then flat again. The fit must put the break at the ramp's
+        // centre and give it the ramp's width, not a preset.
+        let (w, h) = (64, 256);
+        let current = vec![[0.5f32; 3]; w * h];
+        let profile = |y: usize| -> f32 {
+            0.5 + 0.08 * render::linear_ramp_coverage((y as f32 + 0.5 - 96.0) / 64.0)
+        };
+        let target: Vec<_> = (0..w * h).map(|i| [profile(i / w); 3]).collect();
+        let (r2, models) = residual_models(&current, &target, &vec![1.0; w * h], w as u32, h as u32);
+        assert!(r2 > 0.98, "one ramp explains a one-ramp profile: {r2}");
+        // The measured ramps (the zone's own profile is proposed beside them,
+        // `shaped_model`, and is not what this test measures).
+        let ramps = |models: &[BandModel]| -> Vec<BandModel> { models.iter().filter(|m| m.shape.is_none()).cloned().collect() };
+        let models = ramps(&models);
+        let best = models.iter().filter(|m| m.breaks.len() == 1).max_by(|a, b| a.r2.total_cmp(&b.r2)).unwrap();
+        assert!((best.breaks[0] - 0.5).abs() <= 1.0 / 32.0, "centre at the ramp's middle: {:?}", best.breaks);
+        assert!((best.widths[0] - 0.25).abs() <= 0.07, "the ramp's own width, not a preset: {:?}", best.widths);
+        // The same profile four times narrower earns a four times narrower ramp.
+        let narrow: Vec<_> = (0..w * h).map(|i| {
+            [0.5 + 0.08 * render::linear_ramp_coverage(((i / w) as f32 + 0.5 - 120.0) / 16.0); 3]
+        }).collect();
+        let (_, models) = residual_models(&current, &narrow, &vec![1.0; w * h], w as u32, h as u32);
+        let models = ramps(&models);
+        let best = models.iter().filter(|m| m.breaks.len() == 1).max_by(|a, b| a.r2.total_cmp(&b.r2)).unwrap();
+        assert!(best.widths[0] <= 0.1, "a steep profile earns a narrow ramp: {:?}", best.widths);
+        // A ramp still rising at the zone's lower edge (Zero handle at row
+        // 160, Full at 288 of 256) is measured as one: its Full handle lands
+        // past the edge.
+        let unfinished: Vec<_> = (0..w * h).map(|i| {
+            [0.5 + 0.08 * render::linear_ramp_coverage(((i / w) as f32 + 0.5 - 160.0) / 128.0); 3]
+        }).collect();
+        let (_, models) = residual_models(&current, &unfinished, &vec![1.0; w * h], w as u32, h as u32);
+        let models = ramps(&models);
+        let best = models.iter().filter(|m| m.breaks.len() == 1).max_by(|a, b| a.r2.total_cmp(&b.r2)).unwrap();
+        assert!(best.ramp(0).1 > 1.0, "the Full handle lies past the frame: {:?}", best.ramp(0));
     }
 
     #[test]
-    fn an_improved_worst_rim_cannot_hide_another_band_boundary_regression() {
-        let ceiling = ZONE_BOUNDARY_RIM_MAX;
+    fn a_band_is_lifted_to_the_level_its_ramp_needs() {
+        let parent = vec![1.0f32; 100];
+        let plateau = vec![1.0f32; 100];
+        assert_eq!(full_coverage_factor(&parent, &plateau), 1.0, "a plateau band is shipped as solved");
+        // A ramp from 0 to 1 over the whole population: mean coverage over
+        // its own mass is sum c^2 / sum c = 2/3, so the level at full coverage is 1.5x.
+        let ramp: Vec<f32> = (0..100).map(|i| i as f32 / 99.0).collect();
+        assert!((full_coverage_factor(&parent, &ramp) - 1.5).abs() < 0.02);
+        let outside = vec![0.0f32; 100];
+        assert_eq!(full_coverage_factor(&outside, &ramp), 1.0, "no population, no lift");
+        let sliver: Vec<f32> = (0..100).map(|i| i as f32 / 99.0 * 0.1).collect();
+        assert_eq!(full_coverage_factor(&parent, &sliver), BAND_LIFT_MAX, "capped");
+        let solved = LocalAdjustment { exposure_ev: 1.0, contrast: 10.0, saturation: 8.0,
+            color_gains: Some([1.2, 1.0, 0.8]), ..Default::default() };
+        let mut m = solved.clone();
+        stretch_band(&mut m, &solved, &LocalAdjustment::default(), 2.0);
+        assert_eq!((m.exposure_ev, m.contrast, m.saturation), (2.0, 20.0, 16.0));
+        assert_eq!(m.color_gains, Some([1.4, 1.0, 0.6]));
+        let mut same = solved.clone();
+        stretch_band(&mut same, &solved, &LocalAdjustment::default(), 1.0);
+        assert_eq!(same, solved, "a factor of one changes nothing");
+        let mut capped = solved.clone();
+        stretch_band(&mut capped, &solved, &LocalAdjustment::default(), 4.0);
+        assert_eq!(capped.exposure_ev, ZONE_EV_LIMIT, "inside the limit the solve works to");
+        // From the parent's controls, not from neutral: a band solved at the
+        // parent's own level is not stretched anywhere.
+        let parent = LocalAdjustment { exposure_ev: 0.5, color_gains: Some([1.1, 1.0, 0.9]), ..Default::default() };
+        let mut from_parent = solved.clone();
+        stretch_band(&mut from_parent, &solved, &parent, 2.0);
+        assert_eq!(from_parent.exposure_ev, 1.5);
+        assert_eq!(from_parent.color_gains, Some([1.3, 1.0, 0.7]));
+    }
+
+    #[test]
+    fn a_ramp_band_ships_at_the_level_its_render_needs() {
+        // The sky's lower part is brightened through a ramp whose Full handle
+        // lies past the horizon (coverage under 0.5 everywhere in the sky);
+        // the band that made the target was +1 EV, the band under test was
+        // solved short, at +0.4 EV. The search must take it to where the
+        // zone's residual is smallest - near +1 EV - and never past the
+        // open-loop bound.
+        let (source, _, parent, _) = fixture(false);
+        let model = BandModel { r2: 1.0, breaks: vec![0.7], widths: vec![0.6], shape: None };
+        let (band, lift) = band_attachment(&parent, &model, 1, &source, &crate::recipe::EditRecipe::default());
+        assert!(lift > 1.5, "a ramp reaching its population at low coverage is short by more than half: {lift}");
+        let at = |ev: f32| LocalAdjustment {
+            mask: band.mask.clone(), components: band.components.clone(), role: band.role,
+            exposure_ev: ev, ..Default::default()
+        };
+        let target = render::develop_preview(&source, &crate::recipe::EditRecipe { masks: vec![at(1.0)], ..Default::default() });
+        let target_px = fit::pixels_of(&target);
+        let mut report = super::super::tests::neutral_report(&source, &target);
+        report.recipe.masks.push(at(0.4));
+        let short = delta_e(&fit::pixels_of(&render::develop_preview(&source, &report.recipe)), &target_px, &parent.source_weights);
+        let factor = level_the_ramp_needs(&source, &target_px, &mut report, &parent.source_weights, &LocalAdjustment::default(), lift);
+        let shipped = report.recipe.masks.last().unwrap().exposure_ev;
+        let after = delta_e(&fit::pixels_of(&render::develop_preview(&source, &report.recipe)), &target_px, &parent.source_weights);
+        assert!(factor > 1.0 && factor <= lift, "{factor} within 1..={lift}");
+        assert!((shipped - 1.0).abs() <= 0.15, "the level the render needs, not the computed one: {shipped} EV (factor {factor})");
+        assert!(after < short * 0.5, "the zone residual fell: {short} -> {after}");
+        // A band already at level is left alone.
+        let mut report = super::super::tests::neutral_report(&source, &target);
+        report.recipe.masks.push(at(1.0));
+        let factor = level_the_ramp_needs(&source, &target_px, &mut report, &parent.source_weights, &LocalAdjustment::default(), lift);
+        assert_eq!(factor, 1.0);
+        assert_eq!(report.recipe.masks.last().unwrap().exposure_ev, 1.0);
+    }
+
+    #[test]
+    fn a_glow_at_the_zones_edge_earns_a_shaped_ramp_that_follows_it() {
+        // The night pair's sky profile: flat, then rising like an exponential
+        // over the lowest sixth of the zone. No S-shaped ramp fits that; the
+        // zone's own profile does.
+        let (w, h) = (64, 256);
+        let current = vec![[0.5f32; 3]; w * h];
+        let glow = |y: usize| -> f32 { 0.5 + 0.12 * ((y as f32 + 0.5 - 256.0) / 20.0).exp() };
+        let target: Vec<_> = (0..w * h).map(|i| [glow(i / w); 3]).collect();
+        let (_, models) = residual_models(&current, &target, &vec![1.0; w * h], w as u32, h as u32);
+        let shaped = models.iter().find(|m| m.shape.is_some()).expect("a shaped model is proposed");
+        let best_ramp = models.iter().filter(|m| m.shape.is_none()).map(|m| m.r2).fold(0.0f32, f32::max);
+        assert!(shaped.r2 > 0.97, "the zone's own profile explains the glow: {}", shaped.r2);
+        assert!(shaped.r2 > best_ramp, "and better than any ramp law: {} vs {best_ramp}", shaped.r2);
+        assert!(models[0].shape.is_some(), "fewest bands and highest R2 first");
+        // Its falloff is the glow: 0 at the top, 1 at the bottom, convex.
+        let falloff = shaped.shape.as_ref().unwrap();
+        assert_eq!(falloff.len(), SUBZONE_SHAPE_SAMPLES);
+        assert!(falloff[0] < 0.02 && falloff[falloff.len() - 1] > 0.98, "{falloff:?}");
+        let mid = falloff[falloff.len() / 2];
+        assert!(mid < 0.1, "convex: half way down the glow has barely begun: {mid}");
+        // The band it composes to is a shaped gradient over the zone's extent,
+        // the upper band its complement.
+        let lower = band_components(shaped, 1);
+        assert!(matches!(&lower[0].geometry, MaskGeometry::Shaped { falloff: f, .. } if f == falloff) && !lower[0].inverted);
+        let upper = band_components(shaped, 0);
+        assert!(matches!(&upper[0].geometry, MaskGeometry::Shaped { .. }) && upper[0].inverted);
+        let y = 0.9;
+        assert!((band_coverages(shaped, y).iter().sum::<f32>() - 1.0).abs() < 1e-5);
+        // A zone whose two ends do not differ proposes no shape.
+        let flat: Vec<_> = (0..w * h).map(|i| [0.5 + 0.02 * ((i / w) % 2) as f32; 3]).collect();
+        let (_, models) = residual_models(&current, &flat, &vec![1.0; w * h], w as u32, h as u32);
+        assert!(models.iter().all(|m| m.shape.is_none()));
+    }
+
+    #[test]
+    fn earned_partitions_are_distinct_and_bounded_per_band_count() {
+        let (w, h) = (64, 256);
+        let current = vec![[0.5f32; 3]; w * h];
+        let target: Vec<_> = (0..w * h).map(|i| {
+            let y = i / w;
+            [if y < 100 { 0.42 } else if y < 180 { 0.5 } else { 0.58 }; 3]
+        }).collect();
+        let (_, models) = residual_models(&current, &target, &vec![1.0; w * h], w as u32, h as u32);
+        assert!(models.iter().filter(|m| m.shape.is_some()).count() <= 1, "at most one shaped model, outside the quota");
+        for count in 1..=2 {
+            let of: Vec<_> = models.iter().filter(|m| m.breaks.len() == count && m.shape.is_none()).collect();
+            assert!(of.len() <= SUBZONE_MODELS_PER_COUNT);
+            for (i, a) in of.iter().enumerate() {
+                for b in &of[i + 1..] {
+                    assert!(a.breaks.iter().zip(&b.breaks).any(|(x, y)| (x - y).abs() > 1.0 / 64.0),
+                        "two trials with the same breaks: {a:?} {b:?}");
+                }
+            }
+        }
+        assert!(models.windows(2).all(|p| p[0].breaks.len() <= p[1].breaks.len()), "fewer bands first");
+    }
+
+    #[test]
+    fn the_boundary_is_judged_on_its_mean_not_its_worst_cell() {
         let before = [[0.10, 0.12, 0.15], [0.30, 0.32, 0.35], [0.20, 0.22, 0.25]];
-        let after = [[0.113, 0.133, 0.163], [0.29, 0.31, 0.34], [0.19, 0.21, 0.24]];
-        assert!(worst_seams(&after).iter().zip(worst_seams(&before)).all(|(a, b)| *a < b),
-            "the old maximum-only comparison would admit this set");
-        assert!(!seams_do_not_regress(&before, &after, ceiling), "the horizon still regressed");
-        let conserved = [[0.10, 0.12, 0.15], after[1], after[2]];
-        assert!(seams_do_not_regress(&before, &conserved, ceiling));
-        assert!(seams_do_not_regress(&before, &before, ceiling));
-        assert!(!seams_do_not_regress(&before, &conserved[..2], ceiling), "a missing rim is not a pass");
-        // R37: a cell may move away from the target by the family's seam
-        // ceiling in luma or the widest channel — the gate's own exchange —
-        // and by one just noticeable difference in chroma.
-        let luma = |worse: f32| [[0.10 + worse, 0.12, 0.15], after[1], after[2]];
-        assert!(seams_do_not_regress(&before, &luma(ceiling - 1e-4), ceiling), "under the ceiling is not a regression");
-        assert!(!seams_do_not_regress(&before, &luma(ceiling + 1e-4), ceiling), "past it, it is");
-        let channel = |worse: f32| [[0.10, 0.12 + worse, 0.15], after[1], after[2]];
-        assert!(seams_do_not_regress(&before, &channel(ceiling - 1e-4), ceiling));
-        assert!(!seams_do_not_regress(&before, &channel(ceiling + 1e-4), ceiling));
-        let chroma = |worse: f32| [[0.10, 0.12, 0.15 + worse], after[1], after[2]];
-        assert!(seams_do_not_regress(&before, &chroma(CHROMA_JND / 100.0 - 1e-4), ceiling), "under a JND of chroma");
-        assert!(!seams_do_not_regress(&before, &chroma(CHROMA_JND / 100.0 + 1e-4), ceiling), "a JND past the target is a regression");
-        assert_eq!(seams_do_not_regress(&before, &chroma(ceiling + 1e-4), ceiling), ceiling < CHROMA_JND / 100.0,
-            "the chroma tolerance is the JND, not the luma ceiling");
-        // …and a drift every cell can hide adds up: every cell under the
-        // ceiling, the mean past the one-code floor.
+        assert!(boundary_does_not_regress(&before, &before));
+        assert!(!boundary_does_not_regress(&before, &before[..2]), "a missing cell is not a pass");
+        assert!(!boundary_does_not_regress(&[], &[]), "an unread boundary is not a pass");
+        // One cell moves away from the target by more than the seam ceiling
+        // and a JND of chroma; the other two land closer by more than that.
+        // The per-cell veto refused exactly this; the mean admits it.
+        let traded = [[0.113, 0.133, 0.18], [0.29, 0.31, 0.33], [0.19, 0.21, 0.23]];
+        assert!(traded[0][0] - before[0][0] > ZONE_BOUNDARY_RIM_MAX && traded[0][2] - before[0][2] > 0.023,
+            "premise: the first cell is past both old per-cell tolerances");
+        assert!(boundary_does_not_regress(&before, &traded));
+        // …and a drift every cell shares adds up: past the one-code floor on
+        // average is a regression however small each cell's share.
         let drift = |worse: f32| -> [[f32; 3]; 3] {
             std::array::from_fn(|i| [before[i][0] + worse, before[i][1], before[i][2]])
         };
-        assert!(seams_do_not_regress(&before, &drift(BOUNDARY_STEP_FLOOR - 1e-4), ceiling), "a mean drift under a code is rounding");
-        assert!(!seams_do_not_regress(&before, &drift(BOUNDARY_STEP_FLOOR + 1e-4), ceiling), "past a code on average it is a regression");
+        assert!(boundary_does_not_regress(&before, &drift(BOUNDARY_STEP_FLOOR - 1e-4)), "a mean drift under a code is rounding");
+        assert!(!boundary_does_not_regress(&before, &drift(BOUNDARY_STEP_FLOOR + 1e-4)), "past a code on average it is a regression");
         assert!((mean_regression(&before, &drift(0.003))[0] - 0.003).abs() < 1e-6);
         // Unoccupied cells dilute nothing.
         let sparse_before = [[0.10, 0.12, 0.15], [0.0; 3], [0.0; 3]];
         let sparse_after = [[0.10 + 0.005, 0.12, 0.15], [0.0; 3], [0.0; 3]];
         assert!((mean_regression(&sparse_before, &sparse_after)[0] - 0.005).abs() < 1e-6, "the mean is over occupied cells");
-        assert!(!seams_do_not_regress(&sparse_before, &sparse_after, ceiling), "one occupied cell past a code is the rim's whole mean");
+        assert!(!boundary_does_not_regress(&sparse_before, &sparse_after), "one occupied cell past a code is the rim's whole mean");
     }
 
     #[test]
@@ -645,7 +1136,7 @@ mod tests {
     fn replacement_shrink_retains_the_parent_tone_at_zero_and_the_fitted_bands_at_one() {
         let image = DynamicImage::ImageRgb8(RgbImage::from_pixel(96, 64, Rgb([96, 112, 144])));
         let parent = LocalAdjustment { exposure_ev: 0.15, color_gains: Some([1.02, 1.0, 0.98]), ..Default::default() };
-        let model = BandModel { r2: 1.0, breaks: vec![0.5], overlap: 0.06 };
+        let model = BandModel { r2: 1.0, breaks: vec![0.5], widths: vec![0.06], shape: None };
         let originals: Vec<_> = (0..2).map(|i| LocalAdjustment {
             components: band_components(&model, i), exposure_ev: if i == 0 { 0.3 } else { -0.1 },
             color_gains: Some([1.1, 1.0, 0.9]), ..Default::default()
@@ -670,14 +1161,41 @@ mod tests {
         let after: Vec<_> = (0..w*h).map(|i| if i/w < h/2 { [0.36; 3] } else { [0.2; 3] }).collect();
         let rims = vec![weights];
         let size = (w as u32, h as u32);
-        assert!(seams_do_not_regress(&seams(&target, &before, &rims, size),
-            &seams(&target, &after, &rims, size), ZONE_BOUNDARY_RIM_MAX), "a hard edge has no soft-rim samples");
-        assert!(!seams_do_not_regress(&target_steps(&target, &before, &rims, size),
-            &target_steps(&target, &after, &rims, size), ZONE_BOUNDARY_STEP_MAX), "the target step still got worse");
+        assert!(boundary_does_not_regress(&seams(&target, &before, &rims, size),
+            &seams(&target, &after, &rims, size)), "a hard edge has no soft-rim samples");
+        assert!(!boundary_does_not_regress(&target_steps(&target, &before, &rims, size),
+            &target_steps(&target, &after, &rims, size)), "the target step still got worse");
     }
 
     #[test]
-    fn a_regressing_boundary_cell_cannot_hide_below_the_horizon_percentile() {
+    fn a_ramp_is_judged_by_how_much_steeper_than_the_target_it_changes() {
+        let (w, h) = (64u32, 200u32);
+        let weights = vec![1.0f32; (w * h) as usize];
+        // A vertical profile: `level(y)` on every column.
+        let frame = |level: &dyn Fn(f32) -> f32| -> Vec<[f32; 3]> {
+            (0..h).flat_map(|y| std::iter::repeat_n([level(y as f32); 3], w as usize)).collect()
+        };
+        let ramp = |width: f32| move |y: f32| 0.2 + 0.1 * ((y - 100.0) / width + 0.5).clamp(0.0, 1.0);
+        let target = frame(&ramp(100.0));
+        let flat = frame(&|_| 0.2);
+        let control = ramp_excess(&target, &flat, &weights, (w, h));
+        assert_eq!(control, 0.0, "a flat render is never steeper than the target");
+        let narrow = ramp_excess(&target, &frame(&ramp(4.0)), &weights, (w, h));
+        assert!(!ramps_follow_the_target(control, narrow), "the same change over 4 rows is a line: {narrow}");
+        let as_wide = ramp_excess(&target, &frame(&ramp(100.0)), &weights, (w, h));
+        assert!(ramps_follow_the_target(control, as_wide), "the target's own ramp: {as_wide}");
+        // The same narrow ramp where the target ITSELF steps there is the
+        // target's edge, not one the bands drew.
+        let stepped = frame(&ramp(4.0));
+        assert!(ramps_follow_the_target(ramp_excess(&stepped, &flat, &weights, (w, h)),
+            ramp_excess(&stepped, &stepped, &weights, (w, h))));
+        // Rows outside the zone are not read.
+        let outside = vec![0.0f32; (w * h) as usize];
+        assert_eq!(ramp_excess(&target, &frame(&ramp(4.0)), &outside, (w, h)), 0.0);
+    }
+
+    #[test]
+    fn one_regressing_contour_cell_is_weighed_against_the_rest_of_the_contour() {
         let (w, h) = (192usize, 96usize);
         let target: Vec<_> = (0..w*h).map(|i| if i/w < h/2 { [0.5; 3] } else { [0.2; 3] }).collect();
         let before: Vec<_> = (0..w*h).map(|i| if i/w < h/2 { [0.49; 3] } else { [0.2; 3] }).collect();
@@ -689,18 +1207,19 @@ mod tests {
         let rims = vec![weights];
         let size = (w as u32, h as u32);
         let steps = |pixels: &[[f32; 3]]| target_steps(&target, pixels, &rims, size);
-        assert!(!seams_do_not_regress(&steps(&before), &steps(&after(0.47)), ZONE_BOUNDARY_STEP_MAX),
-            "one of twelve columns regressed past the ceiling");
-        assert!(seams_do_not_regress(&steps(&before), &steps(&after(0.48)), ZONE_BOUNDARY_STEP_MAX),
-            "a column drifting under the ceiling while eleven land is admitted");
-        assert!(seams_do_not_regress(&steps(&before), &steps(&target), ZONE_BOUNDARY_STEP_MAX));
+        assert!(boundary_does_not_regress(&steps(&before), &steps(&after(0.47))),
+            "one column past the old per-cell ceiling while eleven land is a better contour");
+        assert!(boundary_does_not_regress(&steps(&before), &steps(&target)));
+        // The whole contour moving away is not.
+        let away: Vec<_> = (0..w*h).map(|i| if i/w < h/2 { [0.47; 3] } else { [0.2; 3] }).collect();
+        assert!(!boundary_does_not_regress(&steps(&before), &steps(&away)));
     }
 
     #[test]
     fn adjacent_intersection_bands_sum_to_one_for_the_measured_feather() {
         let source = DynamicImage::new_rgb8(384, 256);
         for breaks in [vec![0.3], vec![0.2, 0.5]] {
-            let model = BandModel { r2: 1.0, breaks, overlap: 0.06 };
+            let model = BandModel { r2: 1.0, widths: vec![0.06; breaks.len()], breaks, shape: None };
             let weights: Vec<_> = (0..=model.breaks.len())
                 .map(|band| band_weights(&model, band, &source, &crate::recipe::EditRecipe::default())).collect();
             for i in 0..384 * 256 {
@@ -717,12 +1236,12 @@ mod tests {
         let (w, h) = (384, 256);
         let current = vec![[0.5; 3]; w * h];
         let target: Vec<_> = (0..w * h).map(|i| {
-            if (i / w / (h / SUBZONE_BINS)).is_multiple_of(2) { [0.58, 0.5, 0.42] }
+            if (i / w / (h / 8)).is_multiple_of(2) { [0.58, 0.5, 0.42] }
             else { [0.42, 0.5, 0.58] }
         }).collect();
         let (r2, models) = residual_models(&current, &target, &vec![1.0; w * h], w as u32, h as u32);
-        assert!((r2 - 0.25).abs() < 1e-3, "alternating residual R2={r2}");
-        assert!(models.is_empty(), "a coarse step explanation must earn a majority of variance");
+        assert!(r2 < SUBZONE_R2_MIN, "eight alternating stripes are not two or three bands: R2={r2}");
+        assert!(models.is_empty(), "a coarse band explanation must earn a majority of variance");
     }
 
     #[test]

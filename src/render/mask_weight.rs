@@ -69,7 +69,7 @@ pub(super) fn mask_weight_in(
     // handles in `MaskFrame::linear_handles_to_raw`, never this sample.
     let (nx, ny) = match (g, unwarp) {
         (MaskGeometry::Radial { .. }, Some(u)) => u.at(nx, ny),
-        (MaskGeometry::Linear { .. }, Some(u)) => u.engine_at(nx, ny),
+        (MaskGeometry::Linear { .. } | MaskGeometry::Shaped { .. }, Some(u)) => u.engine_at(nx, ny),
         _ => (nx, ny),
     };
     mask_weight_metric(g, nx, ny, bmp, dims)
@@ -109,6 +109,24 @@ fn mask_weight_metric(
             let py = vy * h;
             linear_coverage((dx * px + dy * py) / (px * px + py * py), LINEAR_FALLOFF)
         }
+        // The same axis and the same metric as the linear arm above; only
+        // the falloff read along it differs.
+        MaskGeometry::Shaped { zero_x, zero_y, full_x, full_y, falloff } => {
+            let (vx, vy) = (full_x - zero_x, full_y - zero_y);
+            let len2 = vx * vx + vy * vy;
+            if len2 < 1e-9 {
+                return 1.0;
+            }
+            let (w, h) = dims;
+            if vx == 0.0 || vy == 0.0 || w == h || !(w > 0.0 && h > 0.0) {
+                return shaped_coverage(((nx - zero_x) * vx + (ny - zero_y) * vy) / len2, falloff);
+            }
+            let dx = (nx - zero_x) * w;
+            let dy = (ny - zero_y) * h;
+            let px = vx * w;
+            let py = vy * h;
+            shaped_coverage((dx * px + dy * py) / (px * px + py * py), falloff)
+        }
         _ => mask_weight(g, nx, ny, bmp),
     }
 }
@@ -141,6 +159,14 @@ pub(super) fn mask_weight(g: &MaskGeometry, nx: f32, ny: f32, bmp: Option<&image
                 ((nx - zero_x) * vx + (ny - zero_y) * vy) / len2,
                 LINEAR_FALLOFF,
             )
+        }
+        MaskGeometry::Shaped { zero_x, zero_y, full_x, full_y, falloff } => {
+            let (vx, vy) = (full_x - zero_x, full_y - zero_y);
+            let len2 = vx * vx + vy * vy;
+            if len2 < 1e-9 {
+                return 1.0;
+            }
+            shaped_coverage(((nx - zero_x) * vx + (ny - zero_y) * vy) / len2, falloff)
         }
         // `roundness` is carried but deliberately NOT rendered — pure ellipse,
         // see `MaskGeometry::Radial` in recipe.rs. Its DOMAIN is known

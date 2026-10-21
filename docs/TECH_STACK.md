@@ -955,10 +955,19 @@ and `src/recipe.rs` for the module name.
 
 ### Parameters and measurements
 
-- Grid `12 x 8 x 8` x 5 parameters = 768 vertices. `TIKHONOV = 1.0`,
-  `SMOOTH = (1, 1, 1)`, `ITERATIONS = 90`, `OCCUPANCY_MIN = 8`,
-  `IDENTIFIABILITY_MIN = 1e-5`, bounds `EV +-1.25 / gains +-0.35 /
-  slope +-0.5`.
+- Grid `12 x 32 x 8` x 5 parameters = 3072 vertices: the 12 x 8 evidence
+  cells with each row refined `FIELD_Y_REFINE = 4` times (vertex rows 8.5
+  analysis rows apart, under the ~13-row scale of a horizon glow; the 8-row
+  grid's trilinear read drew the night reference pair's glow as a band 1.5 L
+  too bright 25 rows above the horizon). Regulariser calibrated at 12x8x8
+  and carried over per vertex: `TIKHONOV = 1 / 4`, `SMOOTH = (1/4, 1, 1/4)`
+  (the y smoother stays 1 per edge — rescaled to keep a ramp's cost it spread
+  the glow upward and left a 1.0 L shoulder; per edge 0.6 L), `ITERATIONS =
+  90`, `OCCUPANCY_MIN = 8` read per CELL (its four vertex rows summed, per
+  column and luma bin — per vertex it zeroed rows a horizon leaves thin and
+  cost the calibration ceiling 0.0023), `IDENTIFIABILITY_MIN = 1e-5`, bounds
+  `EV +-1.25 / gains +-0.35 / slope +-0.5`. Night pair, sky row profile
+  against the target: ripple 2.40 -> 0.63 L, sky deltaE 3.96 -> 3.26.
 - Verdict constants: `BAND_DISPERSION_MAX = 15/255`, `BAND_MERGE_STEP = 2/255`,
   `TILE_SHAPE_MIN = 0.5`, `LINEAR_SHAPE_MIN = 0.6`,
   `LOCAL_STOP_MARGIN = 0.002`. `BAND_DISPERSION_MAX` is a measured line: the
@@ -967,13 +976,18 @@ and `src/recipe.rs` for the module name.
   bins, spatially structured bins at `21.9-51.8/255`, and the calibration
   pair's re-rendered mid-tones at `28.7-29.1/255`; `15/255` sits in that gap.
 - NumPy cross-check on the calibration pair, on the Rust module's OWN exported
-  analysis pixels, guide and fit weight (NumPy 2.3.5 / Python 3.13.3,
-  2026-08-27): NumPy ceiling `0.070022` against the Rust port's `0.0700223`,
-  largest per-parameter disagreement over all 768 vertices `1.5e-5`. Re-run
-  2026-08-28 on this tree: `max |grid_rust - grid_numpy| = 0.000015`, Rust
-  `iterations 39`, `relative_residual 6.995e-6`, `ceiling 0.070022`,
-  `global 0.096145`, `saturated 3`, `supported 200/768`. The two
-  `#[ignore]`d probes that produce it are
+  analysis pixels, guide and fit weight (NumPy 2.3.5 / Python 3.13.3). Re-run
+  2026-10-21 on the refined 12 x 32 x 8 grid, with `scripts/field_check.py`
+  carrying production's bound-constrained active-set loop (2026-10-19) and
+  per-cell occupancy floor: NumPy ceiling `0.072526` against the Rust port's
+  `0.0725258`, `max |grid_rust - grid_numpy| = 6.0e-7` over all 3072
+  vertices, Rust `iterations 50`, `relative_residual 8.7e-6`,
+  `global 0.099869`, `saturated 13`, `supported 748/3072`. (At the 8-row grid
+  the same solve reads `0.069767`; the clip-after NumPy solver of 2026-08
+  read `0.070085` and disagreed with the bound-constrained grid by `0.138`,
+  so the loop was ported rather than the bound loosened. The 2026-08 figures:
+  ceiling `0.070022`, disagreement `1.5e-5` over 768 vertices,
+  `supported 200/768`.) The two `#[ignore]`d probes that produce it are
   `export_calibration_field_inputs_for_numpy` and
   `compare_calibration_field_with_numpy`.
 - Calibration pair live, `neutral.jpg -> target.jpg`, one release executable
@@ -1040,6 +1054,46 @@ and `src/recipe.rs` for the module name.
   `stop_verdict`, the five disclosures.
 - `src/fit_zoned/entry.rs` — `fit_recipe_zoned_inner`, the sequencer that owns the
   realized and stop notes.
+- `src/fit_zoned/detail.rs` — the sequencer's last stage (2026-10-21): per-zone
+  local-contrast matching. Both frames at `DETAIL_EDGE = 768`; two bands from
+  the engine's own `blur_plane` at `render::texture_radius` (0.5% of the short
+  edge ≥ 2 px) and `render::clarity_radius` (2% ≥ 8 px): FINE = luma − its
+  texture-radius blur, MID = that blur − the clarity-radius blur (the clarity
+  pass's own operand contains the fine band and reads a re-synthesised
+  texture as "softer"). Per band the paired correlation (the gate) and the
+  asked gain (`asked_gain`): the regression slope of the target's band on the
+  render's in mean-normalised units (`r` × the contrast ratio), asked only
+  when the whole band's ratio agrees on the direction — the ratio alone
+  over-drove a half-paired zone to clarity +80, the slope alone would soften
+  a zone against a busier target (`DETAIL_NOT_ON_STRUCTURE`), inside source × target
+  membership. `DETAIL_PAIRED_MIN = 0.6` (calibrated on the eleven final-check
+  pairs: paired zones 0.83–0.99 on both bands; re-synthesised ones 0.01–0.22
+  on the fine band, their mid band 0.24–0.81 read on its own),
+  `DETAIL_MATCHED_GAIN = 0.05`, `DETAIL_MIN_CONTRAST = 0.002`, `DETAIL_STEPS = 3`
+  closed-loop renders with a secant on the measured response (priors 0.010 /
+  0.006 gain per point for texture / clarity; the measured response is held
+  inside `DETAIL_SLOPE_BOUNDS = (0.25, 4)` of the prior and a step inside
+  `DETAIL_STEP_MAX = 40` points — a dark zone's 8-bit render answers a small
+  step with quantisation, and an unbounded secant ran the night pair's ground
+  to the clarity stop), `DETAIL_TEXTURE_RANGE = (0,
+  100)` (the negative half is a film-scale operator the reading cannot see:
+  it drove to −86 on the synthetic softer fixture), `DETAIL_CLARITY_RANGE =
+  (−100, 100)`, `DETAIL_ENERGY_TOL = 0.05`, `DETAIL_SHRINK_LADDER = [0.75,
+  0.5, 0.25]`; gates = reach (a slider on its stop with the band not landed
+  is refused without a ladder: five skies ran clarity to +100 at 0.75–0.95 of
+  the target before it), local quality on the zone's coverage, the energy
+  ceiling by evidence (`pushed_past_evidence`: a paired band may rise to the
+  target's, an unpaired band not at all — the night sky's unpaired fine band
+  rose 0.38 → 0.52 under clarity +53 and the frame's ΔE 5.22 → 8.05 before
+  it), frame drift ≤
+  `ZONE_GLOBAL_REGRESSION_TOL`. Solves texture and clarity only — capture
+  sharpening's radius is in film pixels and is not a quantity a 768-px reading
+  measures. Night pair, fine / mid band: sky r 0.03 / 0.65 at the target's
+  1.5× — a slope of 0.98, nothing asked, nothing ships (the target's
+  brightest fifty stars carry 154× the sky background's light, the RAW
+  0.50×); land 0.35 / 0.81, likewise. Blue hour ground 0.96 / 0.99 at 1.13 /
+  1.17 of the target → texture +10, clarity −56 → 0.93 / 1.00. Eleven-pair
+  check (`fc-detail6`): 0 of 11 worse, every frame within 0.1 ΔE.
 - `src/fit_zoned/range.rs` — the proposal union inside
   `derive_luminance_bands`.
 - `src/fit_zoned/spatial.rs` — the parameterised attachment cap.

@@ -559,7 +559,9 @@ fn transport_linear_handles(
     profile: &crate::recipe::LensProfile,
     knots: &[f32],
 ) -> bool {
-    let MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } = geometry else {
+    let (MaskGeometry::Linear { zero_x, zero_y, full_x, full_y }
+        | MaskGeometry::Shaped { zero_x, zero_y, full_x, full_y, .. }) = geometry
+    else {
         return false;
     };
     (*zero_x, *zero_y) = linear_handle_unwarp_norm(*zero_x, *zero_y, dims, profile, knots);
@@ -746,7 +748,7 @@ impl MaskUnwarp {
 ///   residue is sub-pixel and is registered here rather than modelled.)
 #[cfg(test)]
 pub(super) fn is_lr_post_correction_geometry(g: &MaskGeometry) -> bool {
-    matches!(g, MaskGeometry::Radial { .. } | MaskGeometry::Linear { .. })
+    matches!(g, MaskGeometry::Radial { .. } | MaskGeometry::Linear { .. } | MaskGeometry::Shaped { .. })
 }
 
 /// The local Noise Reduction at or below which the render's NR pass allocates

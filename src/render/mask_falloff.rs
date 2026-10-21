@@ -87,6 +87,26 @@ pub(super) fn linear_coverage(t: f32, profile: LinearFalloff) -> f32 {
     }
 }
 
+/// A [`crate::recipe::MaskGeometry::Shaped`] gradient's coverage at handle
+/// parameter `t`: `falloff` sampled at evenly spaced `t` in 0..=1, linearly
+/// interpolated and clamped to 0..=1. An empty table is Lightroom's own
+/// law ([`linear_coverage`] at [`LINEAR_FALLOFF`]); a one-entry table is
+/// that constant. NaN `t` reads as the Zero end, as a NaN handle parameter
+/// would otherwise index the table with a NaN and render a NaN weight.
+pub(super) fn shaped_coverage(t: f32, falloff: &[f32]) -> f32 {
+    let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
+    match falloff.len() {
+        0 => linear_coverage(t, LINEAR_FALLOFF),
+        1 => falloff[0].clamp(0.0, 1.0),
+        n => {
+            let x = t * (n - 1) as f32;
+            let k = (x as usize).min(n - 2);
+            let u = x - k as f32;
+            (falloff[k] * (1.0 - u) + falloff[k + 1] * u).clamp(0.0, 1.0)
+        }
+    }
+}
+
 /// Lightroom's radial-mask falloff α(ρ), READ OUT OF THE MEASUREMENT.
 ///
 /// `feather` is the recipe's 0..1 fraction, `d` the normalised elliptical

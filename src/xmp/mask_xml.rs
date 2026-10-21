@@ -78,7 +78,10 @@ pub(super) fn mask_geom_xml(
     frame: Option<FrameAspect>,
 ) -> Option<(&'static str, String, Option<f64>)> {
     match g {
-        MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => Some((
+        // A shaped gradient leaves as the plain gradient on its handles: the
+        // curve has no attribute, so Lightroom's own law is the approximation.
+        MaskGeometry::Linear { zero_x, zero_y, full_x, full_y }
+        | MaskGeometry::Shaped { zero_x, zero_y, full_x, full_y, .. } => Some((
             "Mask/Gradient",
             format!(
                 " crs:ZeroX=\"{zero_x}\" crs:ZeroY=\"{zero_y}\" crs:FullX=\"{full_x}\" crs:FullY=\"{full_y}\""

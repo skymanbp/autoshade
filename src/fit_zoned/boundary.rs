@@ -507,6 +507,129 @@ fn median(mut values: Vec<f32>) -> f32 {
     }
 }
 
+/// One frame's settled treatment over the reference, as linear multipliers.
+#[derive(Clone, Copy)]
+struct Multipliers {
+    luma: f32,
+    channels: [f32; 3],
+}
+
+/// [`Multipliers`] on each side of a boundary.
+#[derive(Clone, Copy)]
+struct SideMultipliers {
+    sky: Multipliers,
+    land: Multipliers,
+}
+
+/// How far, in analysis pixels, [`ContentShare`] reaches for the settled sky
+/// and settled land a band pixel's content is read between. Past the widest
+/// soft band the night pair's keyed horizon leaves (2-3 px) and inside one
+/// evidence cell (32 px), so the two levels are this boundary's own.
+const CONTENT_REACH: usize = 6;
+
+/// How much of each band pixel is SKY CONTENT, and how surely that can be
+/// told, read once per frame off the reference (the frame rendered WITHOUT the
+/// correction) — the treatment a band pixel is owed is that mixture of the
+/// settled sky's and the settled land's ([`boundary_line_rims`]).
+///
+/// Read in TWO dimensions, from the settled pixels around the pixel, and not
+/// from the two feet of the scan line it was reached on. The feet version
+/// could only see a step ACROSS its own line: a row scan running along a
+/// near-level horizon walks a band of half-sky, half-mesa pixels with no
+/// settled foot on the far side, found none, and owed every one of them the
+/// whole sky's treatment. On the night pair (2026-10-19) those tangent runs
+/// were what still held the sky at k=0.003 after the mask had been keyed onto
+/// the skyline and the edge crossings traded.
+///
+/// The mixture is trusted along the same ramp the feet used: not at all while
+/// the two local levels are within one code ([`BOUNDARY_STEP_FLOOR`]) — haze,
+/// where the content cannot be told apart and the pixel is read as sky, the
+/// rule as it stood — fully at two codes.
+struct ContentShare {
+    share: Vec<f32>,
+}
+
+impl ContentShare {
+    fn read(reference: &[[f32; 3]], weights: &[f32], width: usize, height: usize) -> Self {
+        let n = reference.len().min(weights.len()).min(width * height);
+        let luma = |p: &[f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+        let linear = |p: &[f32; 3]| {
+            0.2126 * render::srgb_to_linear(p[0])
+                + 0.7152 * render::srgb_to_linear(p[1])
+                + 0.0722 * render::srgb_to_linear(p[2])
+        };
+        let side = |settled: &dyn Fn(f32) -> bool| {
+            let member = (0..width * height)
+                .map(|i| f32::from(i < n && settled(weights[i])))
+                .collect::<Vec<_>>();
+            let weighted = |value: &dyn Fn(&[f32; 3]) -> f32| {
+                let product = (0..width * height)
+                    .map(|i| if member[i] > 0.0 { value(&reference[i]) } else { 0.0 })
+                    .collect::<Vec<_>>();
+                box_sum(&product, width, height, CONTENT_REACH)
+            };
+            (box_sum(&member, width, height, CONTENT_REACH), weighted(&luma), weighted(&linear))
+        };
+        let (sky_n, sky_luma, sky_linear) = side(&|a| a >= ZONE_BOUNDARY_HIGH);
+        let (land_n, land_luma, land_linear) = side(&|a| a <= ZONE_BOUNDARY_LOW);
+        let mut share = vec![1.0f32; width * height];
+        for i in 0..n {
+            if sky_n[i] <= 0.0 || land_n[i] <= 0.0 {
+                continue;
+            }
+            let step = (sky_luma[i] / sky_n[i] - land_luma[i] / land_n[i]).abs();
+            let c = ((step - BOUNDARY_STEP_FLOOR) / BOUNDARY_STEP_FLOOR).clamp(0.0, 1.0);
+            let (y_sky, y_land) = (sky_linear[i] / sky_n[i], land_linear[i] / land_n[i]);
+            if c <= 0.0 || (y_sky - y_land).abs() <= f32::EPSILON {
+                continue;
+            }
+            let mix = ((linear(&reference[i]) - y_land) / (y_sky - y_land)).clamp(0.0, 1.0);
+            share[i] = 1.0 - c * (1.0 - mix);
+        }
+        Self { share }
+    }
+}
+
+/// Sum over the `(2r + 1)`-square window around each pixel, clipped at the
+/// frame — two separable running sums.
+fn box_sum(values: &[f32], width: usize, height: usize, r: usize) -> Vec<f32> {
+    let mut rows = vec![0.0f32; values.len()];
+    for y in 0..height {
+        let mut prefix = vec![0.0f32; width + 1];
+        for x in 0..width {
+            prefix[x + 1] = prefix[x] + values[y * width + x];
+        }
+        for x in 0..width {
+            rows[y * width + x] = prefix[(x + r + 1).min(width)] - prefix[x.saturating_sub(r)];
+        }
+    }
+    let mut out = vec![0.0f32; values.len()];
+    for x in 0..width {
+        let mut prefix = vec![0.0f32; height + 1];
+        for y in 0..height {
+            prefix[y + 1] = prefix[y] + rows[y * width + x];
+        }
+        for y in 0..height {
+            out[y * width + x] = prefix[(y + r + 1).min(height)] - prefix[y.saturating_sub(r)];
+        }
+    }
+    out
+}
+
+/// Every row and every column of the frame through [`boundary_line_rims`],
+/// with the content share read once ([`ContentShare`]).
+fn rim_samples(frames: StepFrames<'_>, weights: &[f32], (w, h): (usize, usize)) -> (Vec<CrossingSample>, Vec<CellSums>) {
+    let content = ContentShare::read(frames.reference, weights, w, h);
+    let (mut rims, mut cells) = (Vec::new(), cells_grid());
+    for y in 0..h {
+        boundary_line_rims(frames, weights, &content, ScanLine::row(y, (w, h)), &mut rims, &mut cells);
+    }
+    for x in 0..w {
+        boundary_line_rims(frames, weights, &content, ScanLine::column(x, (w, h)), &mut rims, &mut cells);
+    }
+    (rims, cells)
+}
+
 /// Add one row's or column's INTRODUCED transition readings to `out`.
 ///
 /// A transition contributes only when that SAME scan line reaches settled sky
@@ -571,6 +694,7 @@ fn median(mut values: Vec<f32>) -> f32 {
 fn boundary_line_rims(
     frames: StepFrames<'_>,
     weights: &[f32],
+    content: &ContentShare,
     line: ScanLine,
     out: &mut Vec<CrossingSample>,
     cells: &mut [CellSums],
@@ -584,7 +708,7 @@ fn boundary_line_rims(
             .then_some(i)
     };
     let mut sky_index = Vec::new();
-    let mut land = Vec::new();
+    let mut land_index = Vec::new();
     for p in 0..len {
         let Some(i) = index(p) else {
             break;
@@ -592,42 +716,61 @@ fn boundary_line_rims(
         if weights[i] >= ZONE_BOUNDARY_HIGH {
             sky_index.push(i);
         } else if weights[i] <= ZONE_BOUNDARY_LOW {
-            land.push(luma(&rendered[i]));
+            land_index.push(i);
         }
     }
-    if sky_index.len() < ZONE_BOUNDARY_INTERIOR_MIN || land.len() < ZONE_BOUNDARY_INTERIOR_MIN {
+    if sky_index.len() < ZONE_BOUNDARY_INTERIOR_MIN || land_index.len() < ZONE_BOUNDARY_INTERIOR_MIN {
         return;
     }
-    // Each frame's settled sky over the reference's: the multiplier that
-    // frame gives the settled treatment, in luma and per channel. The render
-    // under measurement, the FROZEN k=1 candidate (the correction's own
-    // shape, R37) and the paired target (its own shortfall in the band is
-    // the treatment the picture itself gives this transition, R37) each get
-    // their own, all three read off the same settled pixels.
-    let settled = |frame: &[[f32; 3]]| -> (f32, [f32; 3]) {
-        let l = median(sky_index.iter().map(|&i| luma(&frame[i])).collect());
-        let c = std::array::from_fn(|c| median(sky_index.iter().map(|&i| frame[i][c]).collect()));
+    // Each frame's settled treatment over the reference's, on BOTH sides of
+    // the boundary: the multiplier that frame gives the settled sky and the
+    // settled land, in luma and per channel. The render under measurement,
+    // the FROZEN k=1 candidate (the correction's own shape, R37) and the
+    // paired target (its own shortfall in the band is the treatment the
+    // picture itself gives this transition, R37) each get their own, all
+    // read off the same settled pixels.
+    let settled = |side: &[usize], frame: &[[f32; 3]]| -> (f32, [f32; 3]) {
+        let l = median(side.iter().map(|&i| luma(&frame[i])).collect());
+        let c = std::array::from_fn(|c| median(side.iter().map(|&i| frame[i][c]).collect()));
         (l, c)
     };
-    let (reference_settled, reference_channels) = settled(reference);
-    let multipliers = |frame: &[[f32; 3]]| -> (f32, [f32; 3]) {
-        let (l, c) = settled(frame);
-        (
-            render::srgb_to_linear(l) / render::srgb_to_linear(reference_settled).max(1e-5),
-            std::array::from_fn(|k| {
-                render::srgb_to_linear(c[k]) / render::srgb_to_linear(reference_channels[k]).max(1e-5)
+    let reference_sky = settled(&sky_index, reference);
+    let reference_land = settled(&land_index, reference);
+    let over = |(l, c): (f32, [f32; 3]), (base_l, base_c): (f32, [f32; 3])| -> Multipliers {
+        Multipliers {
+            luma: render::srgb_to_linear(l) / render::srgb_to_linear(base_l).max(1e-5),
+            channels: std::array::from_fn(|k| {
+                render::srgb_to_linear(c[k]) / render::srgb_to_linear(base_c[k]).max(1e-5)
             }),
-        )
+        }
     };
-    let (multiplier, channel_multiplier) = multipliers(rendered);
-    let (frozen_multiplier, frozen_channel_multiplier) = multipliers(frozen);
-    let (target_multiplier, target_channel_multiplier) =
-        target.map(multipliers).unwrap_or((1.0, [1.0; 3]));
+    let sides = |frame: &[[f32; 3]]| -> SideMultipliers {
+        SideMultipliers {
+            sky: over(settled(&sky_index, frame), reference_sky),
+            land: over(settled(&land_index, frame), reference_land),
+        }
+    };
+    let rendered_side = sides(rendered);
+    let frozen_side = sides(frozen);
+    let target_side = target.map(sides);
     let transport = |m: f32, v: f32| -> f32 {
         if m == 1.0 {
             v
         } else {
             render::linear_to_srgb(m * render::srgb_to_linear(v))
+        }
+    };
+    // The treatment a band pixel is OWED: the settled sky's multiplier on the
+    // share of it that is sky, the settled land's on the rest (`owed`). A
+    // pixel that is all sky — every pixel of a boundary drawn through haze —
+    // is owed exactly the settled sky's treatment, the rule as it stood.
+    let treat = |side: &SideMultipliers, sky_share: f32, channel: Option<usize>, v: f32| -> f32 {
+        let pick = |m: &Multipliers| channel.map_or(m.luma, |c| m.channels[c]);
+        let (sky, land) = (pick(&side.sky), pick(&side.land));
+        if sky_share >= 1.0 || sky == land {
+            transport(sky, v)
+        } else {
+            transport(sky_share * sky + (1.0 - sky_share) * land, v)
         }
     };
     let inside = |i: usize| weights[i] >= ZONE_BOUNDARY_MID;
@@ -643,10 +786,6 @@ fn boundary_line_rims(
             continue;
         }
         let band_begin = p;
-        // Each argmax remembers WHERE it was read, so the target's own
-        // shortfall is read at that same pixel and nowhere else.
-        let mut introduced: Option<(f32, usize)> = None;
-        let mut coloured: Option<(f32, usize, usize)> = None;
         while p < len {
             let Some(i) = index(p) else {
                 break;
@@ -654,57 +793,83 @@ fn boundary_line_rims(
             if !(ZONE_BOUNDARY_LOW..ZONE_BOUNDARY_HIGH).contains(&weights[i]) {
                 break;
             }
-            if weights[i] >= ZONE_BOUNDARY_MID {
-                let here = luma(&rendered[i]) - transport(multiplier, luma(&reference[i]));
-                introduced = Some(match introduced {
-                    Some((v, at)) if v.abs() >= here.abs() => (v, at),
-                    _ => (here, i),
-                });
-                let transported: [f32; 3] =
-                    std::array::from_fn(|c| transport(channel_multiplier[c], reference[i][c]));
-                for c in 0..3 {
-                    let moved = rendered[i][c] - transported[c];
-                    coloured = Some(match coloured {
-                        Some((v, channel, at)) if v.abs() >= moved.abs() => (v, channel, at),
-                        _ => (moved, c, i),
-                    });
-                }
-                // R37: the cell sums — this pixel's own step on each frame,
-                // each through ITS settled sky's transport, in its own cell.
-                let shortfall = |m: f32, ms: [f32; 3], frame: &[[f32; 3]]| -> [f32; 4] {
-                    [
-                        luma(&frame[i]) - transport(m, luma(&reference[i])),
-                        frame[i][0] - transport(ms[0], reference[i][0]),
-                        frame[i][1] - transport(ms[1], reference[i][1]),
-                        frame[i][2] - transport(ms[2], reference[i][2]),
-                    ]
-                };
-                let (own, moved) = (lab(&rendered[i]), lab(&transported));
-                cells[cell_of(i, grid)].add(
-                    shortfall(multiplier, channel_multiplier, rendered),
-                    shortfall(frozen_multiplier, frozen_channel_multiplier, frozen),
-                    target.map(|t| shortfall(target_multiplier, target_channel_multiplier, t)),
-                    [own[1] - moved[1], own[2] - moved[2]],
-                );
-            }
             p += 1;
         }
-        let Some((here, at)) = introduced else {
-            continue;
-        };
         let band_end = p - 1;
         // The SCENE's own variation over the span the bow was measured on:
         // the settled pixel just outside each end of the transition band.
         // Not the 3-px baseline the hard ruler uses, because the quantity
         // being budgeted is not a 3-px step — it is how far the treatment
-        // inside the band falls short of the settled treatment, which the
+        // inside the band falls short of the treatment it is owed, which the
         // whole band's width carries.
-        let settled = |q: usize| if q < len { index(q) } else { None };
-        let band_feet = match (band_begin.checked_sub(1).and_then(settled), settled(band_end + 1)) {
+        let settled_at = |q: usize| if q < len { index(q) } else { None };
+        let band_feet = match (band_begin.checked_sub(1).and_then(settled_at), settled_at(band_end + 1)) {
             (Some(a), Some(b)) if inside(a) != inside(b) => {
                 Some(if inside(a) { (a, b) } else { (b, a) })
             }
             _ => None,
+        };
+        // How much of band pixel `i` is SKY CONTENT ([`ContentShare`]): where
+        // the scene itself steps across the boundary — a horizon, a mesa
+        // against the night — a band pixel's level between the settled sky
+        // and the settled land around it is the mixture of the two contents
+        // it holds, and that mixture is the treatment it is owed. The ruler
+        // used to owe every band pixel the WHOLE settled sky's treatment,
+        // which is right in haze and wrong on a silhouette: a pixel that is
+        // 40% mesa carries 40% of the land's treatment however exact the
+        // mask, so the shortfall it read grew with the correction itself and
+        // the shrink took the strength away. Measured on a night pair
+        // (2026-10-19) whose horizon band needed blue x3.7: 662 of 758
+        // crossings charged past the ceiling at full strength, all on the
+        // blue channel, all in the two cell rows on the horizon, and the sky
+        // shipped at k=0.066. In haze the share is 1, the rule as it stood.
+        let owed = |i: usize| -> f32 { content.share[i] };
+        // Each argmax remembers WHERE it was read, so the target's own
+        // shortfall is read at that same pixel and nowhere else.
+        let mut introduced: Option<(f32, usize)> = None;
+        let mut coloured: Option<(f32, usize, usize)> = None;
+        for q in band_begin..=band_end {
+            let Some(i) = index(q) else {
+                continue;
+            };
+            if weights[i] < ZONE_BOUNDARY_MID {
+                continue;
+            }
+            let share = owed(i);
+            let here = luma(&rendered[i]) - treat(&rendered_side, share, None, luma(&reference[i]));
+            introduced = Some(match introduced {
+                Some((v, at)) if v.abs() >= here.abs() => (v, at),
+                _ => (here, i),
+            });
+            let transported: [f32; 3] =
+                std::array::from_fn(|c| treat(&rendered_side, share, Some(c), reference[i][c]));
+            for c in 0..3 {
+                let moved = rendered[i][c] - transported[c];
+                coloured = Some(match coloured {
+                    Some((v, channel, at)) if v.abs() >= moved.abs() => (v, channel, at),
+                    _ => (moved, c, i),
+                });
+            }
+            // R37: the cell sums — this pixel's own step on each frame, each
+            // through ITS settled treatment, in its own cell.
+            let shortfall = |side: &SideMultipliers, frame: &[[f32; 3]]| -> [f32; 4] {
+                [
+                    luma(&frame[i]) - treat(side, share, None, luma(&reference[i])),
+                    frame[i][0] - treat(side, share, Some(0), reference[i][0]),
+                    frame[i][1] - treat(side, share, Some(1), reference[i][1]),
+                    frame[i][2] - treat(side, share, Some(2), reference[i][2]),
+                ]
+            };
+            let (own, moved) = (lab(&rendered[i]), lab(&transported));
+            cells[cell_of(i, grid)].add(
+                shortfall(&rendered_side, rendered),
+                shortfall(&frozen_side, frozen),
+                target.zip(target_side.as_ref()).map(|(t, side)| shortfall(side, t)),
+                [own[1] - moved[1], own[2] - moved[2]],
+            );
+        }
+        let Some((here, at)) = introduced else {
+            continue;
         };
         // The 50% contour inside this band, and the same two far feet the
         // hard ruler stands on, so the slope credit is the same measurement.
@@ -755,9 +920,11 @@ fn boundary_line_rims(
         );
         // The frozen candidate's own shortfall at the same pixels, through
         // ITS settled sky's transport (R37): what the cell's share is of.
-        let luma_frozen = luma(&frozen[at]) - transport(frozen_multiplier, luma(&reference[at]));
+        let luma_frozen =
+            luma(&frozen[at]) - treat(&frozen_side, owed(at), None, luma(&reference[at]));
         let colour_frozen = std::array::from_fn(|c| {
-            frozen[colour_at][c] - transport(frozen_channel_multiplier[c], reference[colour_at][c])
+            frozen[colour_at][c]
+                - treat(&frozen_side, owed(colour_at), Some(c), reference[colour_at][c])
         });
         let cell = cell_of(at, grid);
         cells[cell].crossings += 1;
@@ -819,13 +986,7 @@ pub(super) fn boundary_rim_toward(
     let (w, h) = (width as usize, height as usize);
     debug_assert!(target.is_none_or(|t| t.len() == rendered.len()), "one geometry");
     let frames = StepFrames { reference, rendered, frozen, target };
-    let (mut rims, mut cells) = (Vec::new(), cells_grid());
-    for y in 0..h {
-        boundary_line_rims(frames, weights, ScanLine::row(y, (w, h)), &mut rims, &mut cells);
-    }
-    for x in 0..w {
-        boundary_line_rims(frames, weights, ScanLine::column(x, (w, h)), &mut rims, &mut cells);
-    }
+    let (rims, cells) = rim_samples(frames, weights, (w, h));
     reading_of(&rims, &cells, ZONE_BOUNDARY_RIM_MAX)
 }
 
@@ -1104,13 +1265,7 @@ pub(crate) fn rim_cell_gaps(
 ) -> Vec<[f32; 3]> {
     let (w, h) = (width as usize, height as usize);
     let frames = StepFrames { reference, rendered, frozen: rendered, target: None };
-    let (mut rims, mut cells) = (Vec::new(), cells_grid());
-    for y in 0..h {
-        boundary_line_rims(frames, weights, ScanLine::row(y, (w, h)), &mut rims, &mut cells);
-    }
-    for x in 0..w {
-        boundary_line_rims(frames, weights, ScanLine::column(x, (w, h)), &mut rims, &mut cells);
-    }
+    let (_, cells) = rim_samples(frames, weights, (w, h));
     cell_gaps(&cells)
 }
 

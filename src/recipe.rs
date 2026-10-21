@@ -725,7 +725,7 @@ pub struct EditRecipe {
     pub sdr_clarity: f32,
 
     // --- Colour field (engine-only) -----------------------------------------
-    /// A smooth 12×8×8 bilateral grid of local colour/tone deltas: the
+    /// A smooth 12×32×8 bilateral grid of local colour/tone deltas: the
     /// residual the mask-shaped controls above cannot reach, carried as one
     /// low-frequency field instead of as more rectangles.
     ///
@@ -2353,7 +2353,7 @@ impl MaskGeometry {
             MaskGeometry::Radial { flipped, .. } => *flipped,
             MaskGeometry::Brush { inverted, .. } => *inverted,
             MaskGeometry::AiMask { inverted, .. } => *inverted,
-            MaskGeometry::Linear { .. } | MaskGeometry::Bitmap { .. } => false,
+            MaskGeometry::Linear { .. } | MaskGeometry::Shaped { .. } | MaskGeometry::Bitmap { .. } => false,
         }
     }
 }
@@ -2388,6 +2388,21 @@ pub enum MaskGeometry {
     /// Linear gradient — the zero→full vector sets direction + falloff width.
     /// Maps to ACR `What="Mask/Gradient"`.
     Linear { zero_x: f32, zero_y: f32, full_x: f32, full_y: f32 },
+    /// A linear gradient whose falloff is a MEASURED curve rather than
+    /// Lightroom's law: the zero→full handles set the axis exactly as
+    /// [`MaskGeometry::Linear`] does, and `falloff` is the coverage at evenly
+    /// spaced points of the handle parameter `t` in 0..=1 (first entry at the
+    /// Zero handle, last at Full), interpolated linearly between them and
+    /// clamped to 0..=1 ([`crate::render::shaped_ramp_coverage`]).
+    ///
+    /// Written by the zoned reverse-fit for a zone whose residual follows the
+    /// target's own vertical profile (`fit_zoned::subzones`): on a night sky
+    /// the glow at the horizon rises like an exponential over the lowest
+    /// sixth of the sky, and no S-shaped ramp fits that without a visible
+    /// band where the two shapes part (2026-10-20). Exported to XMP as a
+    /// plain `Mask/Gradient` on the same handles — the curve itself cannot
+    /// be written, so Lightroom renders its own law as the approximation.
+    Shaped { zero_x: f32, zero_y: f32, full_x: f32, full_y: f32, falloff: Vec<f32> },
     /// Radial/elliptical gradient. Maps to ACR `What="Mask/CircularGradient"`.
     /// `feather` IS engine-rendered (clamped to 0..1). `roundness` is **carried
     /// only** — persisted, XMP round-tripped and accepted from the AI, but NOT
@@ -2961,6 +2976,10 @@ fn geometry_is_finite(g: &MaskGeometry) -> bool {
         MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
             [zero_x, zero_y, full_x, full_y].iter().all(|v| v.is_finite())
         }
+        MaskGeometry::Shaped { zero_x, zero_y, full_x, full_y, falloff } => {
+            [zero_x, zero_y, full_x, full_y].iter().all(|v| v.is_finite())
+                && falloff.iter().all(|v| v.is_finite())
+        }
         MaskGeometry::Radial { top, left, bottom, right, feather, roundness, angle, .. } => {
             [top, left, bottom, right, feather, roundness, angle].iter().all(|v| v.is_finite())
         }
@@ -3008,6 +3027,16 @@ fn clamp_geometry(g: &mut MaskGeometry) {
         MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
             for v in [zero_x, zero_y, full_x, full_y] {
                 *v = v.clamp(-COORD_LIMIT, COORD_LIMIT);
+            }
+        }
+        MaskGeometry::Shaped { zero_x, zero_y, full_x, full_y, falloff } => {
+            for v in [zero_x, zero_y, full_x, full_y] {
+                *v = v.clamp(-COORD_LIMIT, COORD_LIMIT);
+            }
+            // A coverage is a 0..=1 fraction (a non-finite entry dropped the
+            // whole correction at `geometry_is_finite`, before this).
+            for v in falloff.iter_mut() {
+                *v = v.clamp(0.0, 1.0);
             }
         }
         MaskGeometry::Radial { top, left, bottom, right, feather, roundness, angle, midpoint, .. } => {
@@ -3607,7 +3636,7 @@ impl EditRecipe {
                     }
                     (bytes, over + emptied)
                 }
-                MaskGeometry::Linear { .. } | MaskGeometry::Radial { .. } => (0, 0),
+                MaskGeometry::Linear { .. } | MaskGeometry::Shaped { .. } | MaskGeometry::Radial { .. } => (0, 0),
             }
         }
         summary.truncated_string_bytes +=

@@ -7,7 +7,7 @@
 //! `ash:` intent attributes inside `crs:MaskGroupBasedCorrections` are dropped
 //! (so a zone's role came back as `Custom`), unknown `crs:` attributes and
 //! elements are dropped, and everything classic XMP has no encoding for —
-//! bitmap tiles, the 12×8×8 colour field, a muted mask, the alpha the zoned fit
+//! bitmap tiles, the 12×32×8 colour field, a muted mask, the alpha the zoned fit
 //! measured its numbers against — was never in the file to begin with. A
 //! develop that went through Lightroom therefore came back as an
 //! approximation of itself, and `recipe.json` beside the store was the only

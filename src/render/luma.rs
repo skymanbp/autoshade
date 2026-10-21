@@ -64,8 +64,17 @@ pub(crate) fn neighbours4(p: &[f32], w: usize, h: usize, x: usize, y: usize) -> 
 /// the SAME control at two points in the chain. Two copies of "0.02 · min(w,h)"
 /// is how one of them would later be tuned and the other left behind, which is
 /// exactly the split `texture_pass` was built to end.
-pub(super) fn clarity_radius(w: usize, h: usize) -> usize {
+pub(crate) fn clarity_radius(w: usize, h: usize) -> usize {
     ((0.02 * w.min(h) as f32).round() as usize).max(8)
+}
+
+/// The positive Texture radius: 0.5% of the short edge, floored at 2 px —
+/// the small-radius sibling of [`clarity_radius`], named for the same reason
+/// (the zoned fit's detail stage reads the band this radius defines, and a
+/// reading taken at a second spelling of the radius would measure a band the
+/// pass does not move).
+pub(crate) fn texture_radius(w: usize, h: usize) -> usize {
+    ((0.005 * w.min(h) as f32).round() as usize).max(2)
 }
 
 /// Unsharp mask on luminance (chroma-preserving). `amount` scales the detail;
@@ -311,7 +320,7 @@ pub(super) fn texture_pass(
     weight: impl Fn(usize, usize, &[f32; 3]) -> f32 + Sync,
 ) {
     if amount >= 0.0 {
-        let radius = ((0.005 * w.min(h) as f32).round() as usize).max(2);
+        let radius = texture_radius(w, h);
         unsharp_luma_weighted(data, w, h, radius, amount, false, weight);
         return;
     }
@@ -451,7 +460,7 @@ pub(super) fn texture_negative_pass(
 /// Approximate a Gaussian blur with 3 separable box-blur passes. Box blur uses a
 /// running sum, so cost is O(N) regardless of `radius` — essential for clarity's
 /// large radius on a 60 MP frame.
-pub(super) fn blur_plane(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
+pub(crate) fn blur_plane(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
     // Zero-dim guard: the box-blur seeds use `Ord::clamp(0, w-1)`, which PANICS
     // when w or h is 0 (min > max). No caller produces a 0-dim buffer today —
     // this turns a future one into a no-op instead of a crash.

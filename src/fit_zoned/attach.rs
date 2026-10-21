@@ -151,6 +151,21 @@ pub(super) fn segment_both(
     out
 }
 
+/// The carrier the sky and land zones ride — Lightroom's own Select Sky
+/// component over the claimed raster, referenced at the alpha's centre of
+/// mass ([`raster_centroid`]) — built in ONE place so the tone zones and
+/// the detail stage's masks are the same geometry to the byte. The land
+/// zone is this component with `LocalAdjustment::inverted`, never a second
+/// component (see the inversion note in [`attach_zones_with_divergence`]).
+pub(super) fn sky_land_geometry(
+    src_mask: &GrayImage,
+    mask_path: &crate::store::OwnedRaster,
+) -> MaskGeometry {
+    let zone_raster = mask_path.path().to_string_lossy().into_owned();
+    let (ref_x, ref_y) = raster_centroid(src_mask);
+    MaskGeometry::select_sky(ref_x, ref_y, false, zone_raster)
+}
+
 /// The post-segmentation half (separable so tests drive it with hand-built
 /// masks, no python): correct the SKY zone, then the LAND zone — the same
 /// raster reused with `inverted = true`, so one segmentation buys the whole
@@ -187,6 +202,13 @@ pub(super) fn attach_zones(
     );
 }
 
+/// Returns whether the sky/land PARTITION held — false on the two exits
+/// that judge the split itself invalid (`ZONED_NO_PARTITION`,
+/// `ZONE_SHARE_MISMATCH`), which drop the anchor raster and attach no zone;
+/// true when the partition was judged and the zones were tried, whatever
+/// their tone verdict. The detail stage reads sky/land zones only from a
+/// partition that held (a 0% sky once handed it a "land" of the whole frame
+/// and the anchor raster outlived the failed partition, 2026-10-21).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn attach_zones_with_divergence(
     src: &DynamicImage,
@@ -196,7 +218,7 @@ pub(super) fn attach_zones_with_divergence(
     tgt_mask: &GrayImage,
     mask_path: &crate::store::OwnedRaster,
     divergence: ZoneDivergences,
-) {
+) -> bool {
     let (s_img, t_img) = fit::analysis_pair(src, target);
     let tgt_px = fit::pixels_of(&t_img);
     // This render was already being made and thrown away for its dimensions
@@ -236,7 +258,7 @@ pub(super) fn attach_zones_with_divergence(
             &finished,
             &tgt_px,
         );
-        return;
+        return false;
     }
     let (lo, hi) = (s_share.min(t_share), s_share.max(t_share));
     if hi > 2.0 * lo {
@@ -260,7 +282,7 @@ pub(super) fn attach_zones_with_divergence(
         mask_path.remove();
         let finished = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
         fit::append_finished_disclosure(report, &finished, &tgt_px);
-        return;
+        return false;
     }
     let swl: Vec<f32> = sw.iter().map(|w| 1.0 - w).collect();
     let twl: Vec<f32> = tw.iter().map(|w| 1.0 - w).collect();
@@ -299,13 +321,12 @@ pub(super) fn attach_zones_with_divergence(
     // no click to carry, so it hands over the one point that is inside this sky
     // by construction. Both zones name the SAME point: the land zone is this
     // sky inverted, not a second segmentation.
-    let zone_raster = mask_path.path().to_string_lossy().into_owned();
-    let (ref_x, ref_y) = raster_centroid(src_mask);
+    let geometry = sky_land_geometry(src_mask, mask_path);
     let sky_attachment = ZoneAttachment {
         source_weights: sw.clone(),
         target_weights: tw.clone(),
         coverage: None,
-        mask: MaskGeometry::select_sky(ref_x, ref_y, false, zone_raster.clone()),
+        mask: geometry.clone(),
         components: Vec::new(),
         range: None,
         name: String::new(),
@@ -331,7 +352,7 @@ pub(super) fn attach_zones_with_divergence(
         source_weights: swl,
         target_weights: twl,
         coverage: None,
-        mask: MaskGeometry::select_sky(ref_x, ref_y, false, zone_raster),
+        mask: geometry,
         components: Vec::new(),
         range: None,
         name: String::new(),
@@ -369,7 +390,7 @@ pub(super) fn attach_zones_with_divergence(
             &finished,
             &tgt_px,
         );
-        return;
+        return true;
     }
     let first_zone = report.recipe.masks.len() - accepted.len();
     debug_assert_eq!(
@@ -415,7 +436,7 @@ pub(super) fn attach_zones_with_divergence(
                     &finished,
                     &tgt_px,
                 );
-                return;
+                return true;
             }
         };
         let frame_after = fit::look_err_with_evidence(&pixels, &tgt_px, &report.evidence);
@@ -434,7 +455,7 @@ pub(super) fn attach_zones_with_divergence(
                 &finished,
                 &tgt_px,
             );
-            return;
+            return true;
         }
         report.recipe.masks.extend(originals.iter().cloned());
         for (j, zone) in accepted.iter_mut().enumerate() {
@@ -487,4 +508,5 @@ pub(super) fn attach_zones_with_divergence(
         &final_px,
         &tgt_px,
     );
+    true
 }

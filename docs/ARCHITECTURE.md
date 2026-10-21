@@ -4119,12 +4119,15 @@ both hard-cell residuals. These geometry tiles can be pasted and turned with
 their components; any Bitmap component still belongs to its source photo.
 
 After the single sky/land corrections and their horizon gate,
-`fit_zoned::subzones` bins the alpha-weighted signed Lab residual into eight
-quantiles of the zone's own vertical mass. Signed a/b matters: equal-strength
-warm and cool residuals have the same unsigned deltaE. Two/three-band models
-use sign changes and the largest residual jumps, require R2 > 0.50 and a
-difference between every adjacent band above the zone's 0.02 floor expressed
-on Lab's 100-unit scale. Every qualifying partition reaches the render gates;
+`fit_zoned::subzones` reads the zone's ROW PROFILE — the mask-weighted mean
+signed Lab residual of every analysis row (`residual_models`). Signed a/b
+matters: equal-strength warm and cool residuals have the same unsigned
+deltaE. Two/three-band models are fitted to that profile: every ramp centre
+on a 32-step grid of the zone's extent at every width of a geometric scale
+(`SUBZONE_WIDTH_SCALES`), the band levels the least-squares answer for each
+(`fit_levels`), requiring R2 > 0.50 and a difference between every adjacent
+band above the zone's 0.02 floor expressed on Lab's 100-unit scale. Every
+qualifying partition reaches the render gates;
 R2 does not discard a weaker explanation whose native rendering may fare
 better. Both candidate sizes use `attach_one_zone`, the parent's
 PairingScale/correspondence, and the band's own population/cell probes. A
@@ -4146,7 +4149,7 @@ refused less would refuse what the gate had just accepted as a seam — and
 by no more than one just noticeable difference in chroma (2.3 ΔE*ab; Mahy,
 Van Eycken & Oosterlinck 1994); and on average over the occupied cells no
 component may get worse by more than the one-code floor, so a drift every
-cell can hide cannot add up (`seams_do_not_regress`, `mean_regression`,
+cell can hide cannot add up (`boundary_does_not_regress`, `mean_regression`,
 `CHROMA_JND`). Until R37 both readings were per-crossing 90th-percentile
 ranks, which on a re-synthesised target rank its texture: on the reference
 pair at 0.85 they read 24 codes of noise, and a band set that improved the
@@ -4176,16 +4179,37 @@ final target-step and do-no-harm checks still compare against the original
 single correction, so overlap equivalence is measured, not assumed.
 
 Band geometry is Select Sky (inverted in the base for land) intersected with
-one or two shared linear ramps. Overlap is searched on a geometric ladder —
-6%, 12%, 24%, 48% and 96% of the zone's own height, a ramp width being a
-scale (R36, `overlap_ladder`) — capped before neighbouring ramps overlap and
-deduplicated, and at most `SUBZONE_MODEL_BUDGET` (3) residual models per zone
-reach the render gates, fewer bands first and higher R2 next. R35 had walked
-sixteen six-point steps for every qualifying model: 95 + 106 trials on the
-reference pair, all refused, and a zoned match took 17 min where it had taken
-1 min 35 s. The trials' control render (the recipe without its parent) is
-rendered once per zone rather than once per trial. Every width owes the same
-boundary and do-no-harm gates.
+one or two shared ramps. A ramp's centre and width are read off the target's
+own profile (2026-10-20): the rule used to bin the profile into eight
+equal-mass steps and try a preset ladder of widths at the largest jumps, and
+on a night sky whose residual is one continuous gradient to the horizon,
+whichever width the gates kept painted a line where its ramp ended. Ramps
+that would cross are not a partition; at most `SUBZONE_MODELS_PER_COUNT` (3)
+distinct partitions per band count reach the render gates, fewer bands first
+and higher R2 next (R35 had walked sixteen six-point steps for every
+qualifying model: 95 + 106 trials on the reference pair, all refused, and a
+zoned match took 17 min where it had taken 1 min 35 s). Beside the measured
+ramps, and outside their quota, ONE model's ramp is the zone's own profile
+(`shaped_model`): the row residual smoothed over a thirty-second of the
+zone's height, projected onto the direction it moves between the zone's two
+ends and scaled to 0..1, rendered as a `MaskGeometry::Shaped` gradient — a
+linear gradient on the zone's extent whose falloff is that table rather than
+Lightroom's law. It exists because the horizon glow of a night sky rises
+like an exponential over the lowest sixth of the sky and no S-shaped ramp
+fits that without a visible band where the two shapes part (±1.5 L* on the
+reference pair); it leaves for XMP as a plain gradient on the same handles.
+A band's controls are solved on the population its ramp reaches and are
+delivered through the ramp again, so a ramp still rising at the zone's edge
+ships under its level; each band is therefore stretched from the parent's
+controls to the factor whose render leaves the zone's deltaE smallest
+(`level_the_ramp_needs`, golden section up to the open-loop bound
+`full_coverage_factor`). A trial whose ramps are steeper than the target's
+own profile by more than one just noticeable difference is refused
+(`ramp_excess`, `RAMP_JND`): the Lab step per 2 % of height, read row pair
+by row pair over the settled zone, may exceed the target's by at most 2.3.
+The trials' control render (the recipe without its parent) is rendered once
+per zone rather than once per trial. Every width owes the same boundary and
+do-no-harm gates.
 The renderer's measured linear feather is asymmetric, so a new optional
 component inversion bit complements the SAME ramp; reversing handles would
 not sum to one. Adjacent bands sum to one, within coverage quantization, using
@@ -4349,8 +4373,9 @@ threshold. Four sites consume it:
     where a repaint put the residual, so the horizon row saturated 15 red
     vertices covering for two rows that carried no weight at all — and takes
     its per-channel gain bound from `FitBudget::field_gain`. Pass B is then
-    RENDERED and put to the cells: an admitted cell takes its eight luma-bin
-    vertices, every other cell keeps pass A's, and a field that admits no cell
+    RENDERED and put to the cells: an admitted cell takes its vertices (its
+    column, the vertex rows that refine its row, every luma bin —
+    `fit_field::cell_vertex_spans`), every other cell keeps pass A's, and a field that admits no cell
     is the pre-R34 field byte for byte. Two do-no-harm checks follow, the
     frame's and a per-ZONE one read off the attached zone masks through
     `render::mask_coverage`, because a field that pays for the sky out of the
@@ -5068,7 +5093,10 @@ divergence and attachment records, segmentation of both renditions, and
 `attach_zones` with its divergence gate), `accept.rs` (the accepted-zone record,
 the refusal of shrunk zones, the boundary gates and the attached note),
 `one_zone.rs` (`attach_one_zone`: the per-zone solve and its acceptance, the
-zone confidence slope), `rasters.rs` (the centroid, the colour and tone refusal
+zone confidence slope), `detail.rs` (per-zone local-contrast matching: the
+band readings at the engine's texture and clarity radii, the pairing gate, the
+closed-loop slider solve and its gates — see **Per-zone local-contrast
+matching** below), `rasters.rs` (the centroid, the colour and tone refusal
 classifiers, the mask weights) and `tests.rs` (the module's own tests). The
 split moved code and did not edit it: beyond visibility and the two lines of
 the one test that read the file as text, every non-blank line of the old file
@@ -5674,6 +5702,39 @@ on the 384×256 analysis raster renders correctly at any size; the guide's
 the reference pair rather than argued: 0.173 codes mean, 1.0 at p99, 2.0 worst
 case, against a field effect of 8.9 codes mean and 60 at p99.
 
+**The field's rows are refined (2026-10-20).** The grid is the 12×8 evidence
+cell grid along x and FOUR vertex rows per cell row along y
+(`fit_field::FIELD_Y_REFINE`, `FIELD_Y = 32`), because the trilinear read
+between vertex rows 36 analysis rows apart cannot follow a horizon glow that
+rises over the lowest sixth of a sky with an e-folding of about 13 rows. On
+the night reference pair the 8-row field averaged that flat-then-steep demand
+into a band 1.5 L brighter and 1 b* bluer than the target 25 rows above the
+horizon, kinked at a vertex row — the faint line the user circled, which
+neither the sub-zone band's shape (`MaskGeometry::Shaped`) nor its strength
+could remove because it was drawn by the field, not the bands. Measured
+rather than argued (`field_profile.py` in the lane: the field's own per-row
+contribution, with and without it): twofold refinement narrowed the band but
+kept its depth (−1.3 L, the 17-row spacing still above the glow's scale);
+fourfold removed it (−0.6 L; sky row-profile ripple 2.40 → 0.63 L, sky
+deltaE 3.96 → 3.26). Three things follow from the refinement and are
+written next to it. The regulariser was calibrated at 12×8×8 and is carried
+per vertex — Tikhonov and the x/luma smoothers weigh `1 / FIELD_Y_REFINE`
+because they are summed over four times as many vertices — while the y
+smoother stays 1 per EDGE: rescaled to keep a ramp's cost (×31/7) it spread
+the glow upward and left a 1.0 L shoulder, which is the thing the refinement
+exists to remove. The occupancy floor (`OCCUPANCY_MIN = 8`) is read per CELL
+(`fit_field::supported`: the vertex rows that refine a cell summed, per
+column and luma bin), not per vertex: per vertex it zeroed rows a sharp
+horizon or a dark bin leaves thin inside a well-measured cell and cost the
+calibration ceiling 0.0023. And the cell admission copies a vouched cell's
+verdict onto all of its vertices (`fit_field::cell_vertex_spans`), so
+`fit_cells::CELLS_Y` is now `fit_field::CELL_ROWS`, the 8 the instrument has
+always read, not `FIELD_Y`. `local_support`'s 96 structural readings are
+taken on the cells, unchanged. The recipe grows with the grid: 3072
+vertices where there were 768 (`ColourField.y = 32`; a stored `y = 8` field
+still renders, the engine reads the shape the recipe declares). Nothing was
+measured along x and nothing changed there.
+
 A quarter turn permutes the field's cells with every other coordinate in
 `orient_recipe_coords` and swaps its two axis lengths (a 12×8 grid over a
 landscape frame is an 8×12 grid over the portrait one); the five parameters are
@@ -5695,7 +5756,7 @@ every save and a field the user asked for says so out loud.
 **The local-field analyzer (B2, 2026-08-28).** Before any local producer runs,
 `fit_zoned::field::solve_local_field`
 ([`src/fit_zoned/field.rs`](../src/fit_zoned/field.rs)) solves a read-only
-12x8x8 bilateral field over the pair's shared analysis geometry
+12x32x8 bilateral field over the pair's shared analysis geometry
 ([`src/fit_field.rs`](../src/fit_field.rs)) and reads shape verdicts off it. It
 was DISCLOSURE ONLY until R33 §G (v1.3.0): the field is an owned local of
 `fit_recipe_zoned_inner`, never a `FitReport` member, and a test greps
@@ -5731,6 +5792,129 @@ final render, so a skipped tile stage leaves exactly one finished disclosure,
 and the persisted rationale string is never rebuilt from the
 `MAX_NOTES`-bounded typed vector (which would truncate it and render the
 truncation sentinel).
+
+**Per-zone local-contrast matching (2026-10-21,
+[`src/fit_zoned/detail.rs`](../src/fit_zoned/detail.rs)).** The sequencer's
+last stage, after the colour field and not ended by a stop: a stop is a
+verdict on the tone residual, and a zone's local contrast is a question the
+tone producers never asked. Every zone solve matches a luma DISTRIBUTION and
+colour MOMENTS; a quantile map is monotone and pointwise, so it cannot tell
+"the target's bricks have twice the contrast of mine" from a midtone lift,
+and every zone shipped with texture and clarity at 0 whatever the target
+showed. The stage reads both frames at `DETAIL_EDGE = 768` (at the 384
+analysis size both radii sit on their floors — texture 2 px is 0.8% of the
+short edge against the 0.5% it means, clarity 8 px is 3.1% against 2% — at
+768 both land on their ratio) and splits each side's Rec.601 luma into two
+bands with the engine's own box³ blur (`render::texture_radius`,
+`render::clarity_radius`, `render::blur_plane`: one definition): the FINE
+band, luma minus its blur at the texture radius — what the positive texture
+pass multiplies by `1 + amount`, to within a few percent — and the MID band,
+that blur minus the blur at the clarity radius. The mid band is read instead
+of the clarity pass's own operand because that operand contains the fine
+band, and a re-synthesised texture then biases the coarse reading toward
+"softer" and asks for a negative clarity the layout never asked for
+(measured: clarity −31 on the synthetic re-synthesised fixture). Inside the
+zone — the source membership times the target membership — two numbers per
+band: the CORRELATION of the two bands, which is the evidence gate
+(`DETAIL_PAIRED_MIN = 0.6`), and the gain the band ASKS (`asked_gain`):
+the regression slope of the target's band on the render's in units of each
+zone's mean luma (`r` times the ratio of the two normalised contrasts) — the
+gain this photo's OWN structure needs where the two frames' structure
+corresponds — asked only when the ratio of the whole bands agrees on the
+direction. Not the ratio alone: that counts the target's unpaired energy
+(its grain, a re-synthesised texture, JPEG halos), which no slider on this
+photo can produce; measured with the ratio as the gain, the busy street's
+ground (fine texture drawn, r 0.02; mid band paired at 0.65 with the target
+at 1.37× the render's contrast) took clarity +80 and its lanterns ended
+harder than the target's, where the slope reads 0.89. And not the slope
+alone either: where the slope is under 1 and the ratio over it, the target
+is busier overall but its corresponding structure is softer, so its extra
+contrast sits somewhere other than on this photo's structure, and softening
+what corresponds would move the photo away from a busier target — that band
+is left alone and says so (`DETAIL_NOT_ON_STRUCTURE`). The first cut's one
+worse frame (the busy street's building at clarity −52 for a slope of 0.92,
+ΔE 13.03 → 13.62) was the unbounded secant below, not the estimator. Calibrated on
+the eleven final-check pairs: paired zones read r 0.83–0.99 on both bands; a
+re-synthesised zone fails the fine band by a wide margin (the night pair's
+AI-drawn sky 0.03, its repainted ground 0.22, the desert pair 0.01 and 0.04)
+while its mid band tells the layout's own story (night sky 0.65 at the
+target's 1.5× — a slope of 0.98, nothing asked; the desert's sky 0.70,
+asked clarity +48 and refused by the evidence ceiling), and each band is
+gated on its own. What ships is two-sided and modest (`fc-detail6`,
+2026-10-21): the blue hour's ground pairs at 0.96/0.99 and stands at
+1.13/1.17 of the target's contrast, so texture +10 and clarity −56 land it at
+0.93/1.00; a daylight sky paired at 0.83 takes clarity +25 (a quarter of its
+solve, the ladder's last rung); the desert's mountain +8. Zones whose fine
+band is drawn and whose mid band just pairs — the busy street's ground (0.02
+/ 0.65, the target 1.37× busier, the slope 0.89), the sunset city's ground —
+ship nothing: their asks are not corroborated or their unpaired band would
+rise, and they say which. The eleven-pair check reads every frame as neutral
+(ΔE within 0.1 of the frame without the stage, 0 of 11 worse). The night pair is why the gate is a
+correlation: its target's brightest fifty stars carry 154× the sky
+background's light in a 5×5 window where the RAW decoded plainly carries
+0.50× (0.32× after the AI denoise); every combination of the three detail
+sliders that lifted them to 60% of the target's contrast put the flat sky's
+noise at 2.3× the target's. The sliders solved are texture and clarity — both
+defined as a share of the short edge, so the reading and the 61 MP export
+mean the same thing — and NOT capture sharpening, whose radius is in film
+pixels (σ 0.75 of the negative is 0.06 px at this reading, and the target, an
+AI rendition or an export of a few megapixels, has no 1:1 pixels of the
+negative to compare against). Texture is solved on its positive half only
+(`DETAIL_TEXTURE_RANGE = (0, 100)`): the negative half is a different
+operator fitted to Lightroom's — two film-scale low-passes, σ 13 px and
+1.17 px of a 4160-px short edge — whose fine arm is clamped out at this
+reading and whose coarse arm is 1.6 px, so a closed loop drives it to its
+stop measuring nothing (texture −86 on the synthetic softer-target fixture),
+and the target has no pixels at the scale it works on; a softer fine band is
+read, disclosed, and left to the clarity solve, whose operand contains it and
+whose negative half is the same unsharp mask with its sign turned. The solve
+is closed loop on real renders (`DETAIL_STEPS = 3`: a response prior, then
+the measured response, held inside `DETAIL_SLOPE_BOUNDS = (0.25, 4)` of the
+prior with each step capped at `DETAIL_STEP_MAX = 40` points — a dark zone's
+8-bit render answers a small step with quantisation, and the unbounded
+secant ran the night pair's ground to clarity +100; the two sliders leak into each other's band and the
+loop re-reads both — a softer target above the clarity radius lands as a
+negative clarity plus the positive texture that gives the fine band back),
+then the gates every zone control answers to — the local-quality gate on the
+zone's coverage, a band-energy ceiling that follows the evidence
+(`pushed_past_evidence`, `DETAIL_ENERGY_TOL = 0.05`: judged on every band
+both frames carry structure in, since the sliders leak across bands; a
+PAIRED band may rise to the target's energy, an UNPAIRED band may not rise
+at all — the target's energy there is drawn, so it is no ceiling, and what a
+clarity move adds there is leak: the night pair's sky took clarity +53 for a
+mid band paired at 0.62, its unpaired fine band rose 0.38 → 0.52 of the
+target's, and the frame's ΔE went 5.22 → 8.05 with every gate passing until
+this one) and the frame's drift budget
+(`ZONE_GLOBAL_REGRESSION_TOL`) — with the tone ladder's shrink
+(`DETAIL_SHRINK_LADDER = [0.75, 0.5, 0.25]`) before a refusal. Before those
+three, a reach rule with no ladder: a slider that ran to its stop in the
+direction it was still asked, with the band outside the matched window, is
+refused (`DETAIL_REFUSED_REACH`) — what the target shows at that scale is
+not what the slider makes, and a share of a slider that did not reach
+reaches less. Measured on the ratio estimator without it, five skies ran
+clarity to +100 and stayed at 0.75–0.95 of the target (the night sky asked
+1.5×, +100 answered 1.2×, and the frame's ΔE went 5.22 → 5.55). The sliders
+ride on a mask of their OWN with the zone's geometry (the Select Sky
+component the sky and land zones ride, a region's raster — `sky_land_geometry`
+is the one place that builds it), because a zone's tone may have been
+refused, shrunk or split into bands and its local contrast is a separate
+answer; a zone whose tone was refused has released its raster, and the stage
+puts the alpha back only for a mask it ships. One sentence per outcome:
+`DETAIL_ATTACHED` (the sliders, the ladder share, both correlations,
+the render's contrast before and after as a share of the target's),
+`DETAIL_UNPAIRED`, `DETAIL_NOT_ON_STRUCTURE` (both bands pair, the
+contrast difference is not where the structure is shared),
+`DETAIL_ALREADY_MATCHED` (`DETAIL_MATCHED_GAIN = 0.05`),
+`DETAIL_NO_STRUCTURE`, the reach refusal and the three refusals by gate. Lightroom carries both
+sliders (`LocalTexture`, `LocalClarity2012`) on every mask type the fit emits.
+The stage is a layer like the field, the tiles and the free masks
+(`ZonedLayerOpts::detail`, on in `SHIPPED_LAYERS`; off, the recipe is
+byte-identical to the build before it — `layered_disabled_is_byte_identical_to_current_zoned_fit`),
+and it reads sky/land zones only from a partition `attach_zones_with_divergence`
+judged valid (it now returns that verdict): a 0% sky once handed it a "land"
+of the whole frame, and the anchor raster the failed partition had dropped
+came back under the detail mask
+(`empty_semantic_region_set_hands_off_to_the_seeded_legacy_route`).
 
 When a multi-region trial loses — or ties — arbitration, the two-region `FitReport` remains
 intact and receives one typed `REGION_FRAME_REFUSED` note naming the trialled

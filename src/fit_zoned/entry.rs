@@ -110,7 +110,7 @@ fn fit_recipe_zoned_inner_seeded(
         Some(pair) => Ok(pair),
         None => segment_both(src, target, seg, mask_path),
     };
-    let (mut report, field, first_producer, layout) = match segmented {
+    let (mut report, field, first_producer, layout, zones) = match segmented {
         Ok((mut src_mask, mut tgt_mask)) => {
             let refinements = if layers.refine_masks {
                 let source = crate::mask_refine::guided_refine(
@@ -156,6 +156,15 @@ fn fit_recipe_zoned_inner_seeded(
                 // The SOURCE feather only: a seam is a property of the frame
                 // that gets rendered, and the target raster is read for
                 // statistics that a wider ramp would only blur.
+                // The matte before the widener, for the reason the
+                // multi-region bridge gives; the raster the recipe points at
+                // is rewritten so the gate measures the alpha that renders.
+                let mattes = vec![matte_source_edge(src, &mut src_mask, "semantic source")];
+                if mattes.iter().any(|(_, matted, _, holes)| *matted || holes.is_some())
+                    && src_mask.save(mask_path.path()).is_err()
+                {
+                    src_mask = image::open(mask_path.path()).map(|i| i.to_luma8()).unwrap_or(src_mask);
+                }
                 let widenings = vec![widen_source_feather(
                     src,
                     &mut src_mask,
@@ -196,10 +205,11 @@ fn fit_recipe_zoned_inner_seeded(
                         ),
                     );
                 }
+                push_matte_notes(&mut report, &mattes);
                 push_widening_notes(&mut report, &widenings);
                 let field = layers.field
                     .then(|| field::solve_local_field(src, target, &mut report)).flatten();
-                attach_zones_with_divergence(
+                let partitioned = attach_zones_with_divergence(
                     src,
                     target,
                     &mut report,
@@ -208,7 +218,13 @@ fn fit_recipe_zoned_inner_seeded(
                     mask_path,
                     zone_divergence,
                 );
-                (report, field, "zones", paired_layout(src, target, &[(&src_mask, &tgt_mask)]))
+                (
+                    report,
+                    field,
+                    "zones",
+                    paired_layout(src, target, &[(&src_mask, &tgt_mask)]),
+                    if partitioned { detail::sky_land_zones(&src_mask, &tgt_mask, mask_path) } else { Vec::new() },
+                )
             } else {
             let zone_divergence = measure_zone_divergence(src, target, base, &src_mask);
             let divergent_cover = [zone_divergence.sky, zone_divergence.land]
@@ -226,7 +242,7 @@ fn fit_recipe_zoned_inner_seeded(
             );
             let field = layers.field
                 .then(|| field::solve_local_field(src, target, &mut report)).flatten();
-            attach_zones_with_divergence(
+            let partitioned = attach_zones_with_divergence(
                 src,
                 target,
                 &mut report,
@@ -235,7 +251,13 @@ fn fit_recipe_zoned_inner_seeded(
                 mask_path,
                 zone_divergence,
             );
-            (report, field, "zones", paired_layout(src, target, &[(&src_mask, &tgt_mask)]))
+            (
+                report,
+                field,
+                "zones",
+                paired_layout(src, target, &[(&src_mask, &tgt_mask)]),
+                if partitioned { detail::sky_land_zones(&src_mask, &tgt_mask, mask_path) } else { Vec::new() },
+            )
             }
         }
         Err(e) => {
@@ -262,10 +284,11 @@ fn fit_recipe_zoned_inner_seeded(
             let proposals = field.as_ref()
                 .map(|(_, reading)| reading.proposals.as_slice()).unwrap_or(&[]);
             range::attach_ranges(src, target, &mut report, proposals);
-            (report, field, "ranges", Vec::new())
+            // No segmentation, no zone whose local contrast could be paired.
+            (report, field, "ranges", Vec::new(), Vec::new())
         }
     };
-    run_local_sequencer(src, target, &mut report, &field, first_producer, mask_path, layers, &layout);
+    run_local_sequencer(src, target, &mut report, &field, first_producer, mask_path, layers, &layout, &zones);
     report
 }
 
@@ -308,6 +331,14 @@ fn paired_layout(
 /// (`FIELD_WITHHELD`): until 2026-10-19 the early return skipped it in
 /// silence, which no fixture reached until zones stopped being capped at
 /// ~1 EV by the texture gate and began ending the sequencer on their own.
+///
+/// The detail stage ([`detail::attach_zone_detail`]) runs LAST, after the
+/// colour field, and is not ended by a stop either: a stop is a verdict on
+/// the tone residual, and a zone's local contrast is a separate question
+/// the tone producers never asked (2026-10-21). `zones` are the segmented
+/// regions the stage may read — the sky and land of the two-region route,
+/// every resolved class of the multi-region route, none on the range
+/// fallback.
 #[allow(clippy::too_many_arguments)]
 fn run_local_sequencer(
     src: &DynamicImage,
@@ -318,21 +349,24 @@ fn run_local_sequencer(
     mask_path: &crate::store::OwnedRaster,
     layers: ZonedLayerOpts,
     layout: &[f32],
+    zones: &[detail::DetailZone],
 ) {
     run_mask_producers(src, target, report, field, first_producer, mask_path, layers);
     // R33 §G: the TERMINAL producer, and the only one that is not a mask. It
     // runs at the shipped default strength and above (R41 moved the gate down
     // from "above the default"); every result below the default is
     // byte-identical to the build before R33 §G.
-    if let Some((local, _)) = field {
+    if field.is_some() {
         field::attach_colour_field(
             src,
             target,
             report,
             fit::carried_strength_from_notes(&report.notes),
-            local,
             layout,
         );
+    }
+    if layers.detail {
+        detail::attach_zone_detail(src, target, report, zones);
     }
 }
 
@@ -406,7 +440,7 @@ fn fit_recipe_zoned_multi_inner(
     max_regions: usize,
 ) -> FitReport {
     let semantic = segment_multiclass_both(src, target, seg, mask_path, max_regions);
-    let (regions, rasters, sky_pair, refinements, widenings) = match semantic {
+    let (regions, rasters, sky_pair, refinements, widenings, mattes) = match semantic {
         Ok(pair) => pair,
         Err(e) => {
             // A multi-manifest failure is a semantic-layer failure, not a
@@ -444,6 +478,7 @@ fn fit_recipe_zoned_multi_inner(
             src, target, seg, mask_path, base, options, SHIPPED_LAYERS, Some(sky_pair),
         );
         push_refinement_notes(&mut report, &refinements);
+        push_matte_notes(&mut report, &mattes);
         push_widening_notes(&mut report, &widenings);
         crate::rationale::push_note(
             &mut report.recipe.rationale,
@@ -455,7 +490,12 @@ fn fit_recipe_zoned_multi_inner(
         );
         return report;
     }
-    let (mut report, field, first_producer, layout) = {
+    // The five things the sequencer needs from this route: the report the
+    // global solve and the region producer built, the colour field, the
+    // producer's name for the disclosures, the paired layout for the field,
+    // and the regions as the detail stage reads them (every resolved class
+    // on its own raster, source and target membership both).
+    let (mut report, field, first_producer, layout, zones) = {
         let (sp, tp, w, h) = fit::divergence_raster(src, target, base);
         let divergences = regions.iter().map(|r| {
             let weights = mask_weights(&r.source, w, h);
@@ -470,14 +510,21 @@ fn fit_recipe_zoned_multi_inner(
             divergent_cover >= fit::DIVERGENT_COVER_PROMOTES, true, options);
         // The same disclosure the sky/land route makes for ITS refinement.
         push_refinement_notes(&mut report, &refinements);
+        push_matte_notes(&mut report, &mattes);
         push_widening_notes(&mut report, &widenings);
         let field = SHIPPED_LAYERS.field.then(|| field::solve_local_field(src, target, &mut report)).flatten();
         attach_semantic_regions(src, target, &mut report, &regions, &rasters, &divergences);
         let pairs: Vec<(&GrayImage, &GrayImage)> =
             regions.iter().map(|region| (&region.source, &region.target)).collect();
-        (report, field, "semantic regions", paired_layout(src, target, &pairs))
+        (
+            report,
+            field,
+            "semantic regions",
+            paired_layout(src, target, &pairs),
+            detail::region_zones(&regions, &rasters),
+        )
     };
-    run_local_sequencer(src, target, &mut report, &field, first_producer, mask_path, SHIPPED_LAYERS, &layout);
+    run_local_sequencer(src, target, &mut report, &field, first_producer, mask_path, SHIPPED_LAYERS, &layout, &zones);
     // The four-region producer may leave pixels to the global fit by design;
     // the historical two-region producer owns the inverse-sky complement.
     // Compare against the unchanged legacy sequencer and keep the multi-class
@@ -629,6 +676,67 @@ pub(super) type PlaneRefinement = (String, bool, crate::mask_refine::RefineReadi
 
 /// One feather-widening reading, as the caller needs to disclose it.
 pub(super) type FeatherWidening = (String, bool, crate::mask_refine::WidenReading);
+
+/// One content-matte reading, as the caller needs to disclose it: the label,
+/// whether the keying changed the mask, its reading, and the confidence-hole
+/// fill before it as `(share of partial pixels moved, reach)` when it moved any.
+pub(super) type EdgeMatte = (String, bool, crate::mask_refine::MatteReading, Option<(f32, u32)>);
+
+/// Settle a SOURCE semantic raster's transition onto the scene's own edge
+/// ([`crate::mask_refine::content_matte`]) in place. The caller owns the
+/// bytes on disk: the two-region route rewrites the raster it already claimed,
+/// and the multi-region route claims its region rasters from these planes.
+pub(super) fn matte_source_edge(guide: &DynamicImage, mask: &mut GrayImage, label: &str) -> EdgeMatte {
+    // The holes first, so the keying's side references are the region's own
+    // level and not the model's hesitation.
+    let holes = crate::mask_refine::fill_confidence_holes(mask).map(|(filled, share, reach)| {
+        *mask = filled;
+        (share, reach)
+    });
+    match crate::mask_refine::content_matte(guide, mask) {
+        crate::mask_refine::MatteOutcome::Matted { mask: matted, reading } => {
+            *mask = matted;
+            (label.to_string(), true, reading, holes)
+        }
+        crate::mask_refine::MatteOutcome::Abstained { reading } => (label.to_string(), false, reading, holes),
+    }
+}
+
+fn push_matte_notes(report: &mut FitReport, mattes: &[EdgeMatte]) {
+    for (label, matted, reading, holes) in mattes {
+        if let Some((share, reach)) = holes {
+            crate::rationale::push_note(
+                &mut report.recipe.rationale,
+                &mut report.notes,
+                crate::rationale::Note::new(
+                    crate::rationale::keys::MASK_HOLES_FILLED,
+                    vec![
+                        ("label", label.clone()),
+                        ("share", format!("{:.1}", share * 100.0)),
+                        ("radius", reach.to_string()),
+                    ],
+                ),
+            );
+        }
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                if *matted {
+                    crate::rationale::keys::MASK_EDGE_MATTED
+                } else {
+                    crate::rationale::keys::MASK_EDGE_MATTE_ABSTAINED
+                },
+                vec![
+                    ("label", label.clone()),
+                    ("share", format!("{:.1}", reading.matted_share * 100.0)),
+                    ("radius", reading.radius.to_string()),
+                    ("coverage", format!("{:.6}", reading.coverage_delta)),
+                ],
+            ),
+        );
+    }
+}
 
 /// Widen a SOURCE semantic raster's feather where the guide is smooth and
 /// replace its PNG bytes, exactly the way a kept guided refinement replaces

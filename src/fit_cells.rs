@@ -32,10 +32,12 @@
 use crate::fit::{self, EvidenceModel};
 use crate::fit_field::unclipped;
 
-/// Cell geometry: the local field's own grid, so a field attached later is
-/// vouched over exactly the cells it is solved on.
+/// Cell geometry: the local field's own columns and the cell rows its vertex
+/// rows refine (`fit_field::FIELD_Y_REFINE` per cell), so a field attached
+/// later is vouched over exactly the cells its vertices belong to
+/// (`fit_field::cell_vertex_spans`).
 pub(crate) const CELLS_X: usize = crate::fit_field::FIELD_X;
-pub(crate) const CELLS_Y: usize = crate::fit_field::FIELD_Y;
+pub(crate) const CELLS_Y: usize = crate::fit_field::CELL_ROWS;
 
 /// A cell's mean must land strictly closer than it started, by this margin —
 /// `fit::converges_toward`'s own margin, in the same display domain, so the
@@ -61,6 +63,20 @@ const ALIGN_COS: f32 = 0.5;
 /// region whose cells mostly moved closer but a third of them sideways is not
 /// a region this edit recovered.
 const VOUCH_MIN_ALIGNED: f32 = 0.70;
+/// Linear luminance under which a cell mean's chromaticity is not read: a
+/// cell that black has no colour to point anywhere.
+const CHROMATICITY_FLOOR: f32 = 1e-4;
+
+/// Which part of a cell's move the DIRECTION test reads ([`aligned`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MoveAxis {
+    /// All three channels: an edit that changes brightness and colour together.
+    Full,
+    /// Chromaticity only: an edit whose tone controls were zeroed for the probe.
+    Colour,
+    /// Luminance only: an edit whose colour controls were zeroed for the probe.
+    Tone,
+}
 
 /// The target's cell statistics for one pair, plus the weight each cell
 /// carries in a verdict. Built ONCE per solve from the frozen evidence model
@@ -148,9 +164,33 @@ fn distance(a: &[f32; 3], b: &[f32; 3]) -> f32 {
 /// A cell that is ALREADY where its target is asks for no move, so leaving it
 /// alone is aligned and moving it is not — without that arm every matched cell
 /// in a region would vote against an edit that correctly did nothing to it.
-fn aligned(before: &[f32; 3], after: &[f32; 3], target: &[f32; 3]) -> bool {
+///
+/// `axis` names the part of the move the edit being judged CAN make. A zone's
+/// colour controls are probed with its tone zeroed, and its tone with its
+/// colour zeroed; the direction to a target that is both brighter and bluer
+/// is mostly "brighter", so a colour probe put to the whole of it is put to a
+/// question it has no control over. Measured on a night pair (2026-10-19):
+/// the band of sky above the horizon, linear-light blue/green 0.51 against
+/// the target's 2.20 and half the target's luminance, moved every one of its
+/// cells closer and none away, and still read 0.685 aligned — refused by the
+/// 0.70 line, so the band kept its green. Each probe is therefore asked along
+/// its own axis: chromaticity (linear RGB over its luminance) for a colour
+/// probe, luminance alone for a tone probe, all three channels for a move that
+/// does both.
+fn aligned(before: &[f32; 3], after: &[f32; 3], target: &[f32; 3], axis: MoveAxis) -> bool {
     let linear = |p: &[f32; 3]| p.map(crate::render::srgb_to_linear);
-    let (b, a, t) = (linear(before), linear(after), linear(target));
+    let luminance = |p: &[f32; 3]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+    let project = |p: [f32; 3]| -> [f32; 3] {
+        match axis {
+            MoveAxis::Full => p,
+            MoveAxis::Colour => {
+                let y = luminance(&p).max(CHROMATICITY_FLOOR);
+                p.map(|c| c / y)
+            }
+            MoveAxis::Tone => [luminance(&p), 0.0, 0.0],
+        }
+    };
+    let (b, a, t) = (project(linear(before)), project(linear(after)), project(linear(target)));
     let moved: [f32; 3] = std::array::from_fn(|c| a[c] - b[c]);
     let wanted: [f32; 3] = std::array::from_fn(|c| t[c] - b[c]);
     let reach = |v: &[f32; 3]| v.iter().fold(0.0f32, |m, c| m.max(c.abs()));
@@ -302,7 +342,20 @@ impl PairedCells {
         after: &[[f32; 3]],
         region: Option<&[f32]>,
     ) -> CellVouch {
-        Self::fold(&self.measure(before, after, region))
+        self.vouch_along(MoveAxis::Full, before, after, region)
+    }
+
+    /// [`Self::vouch`] for an edit that can move only one [`MoveAxis`] of a
+    /// cell: the direction test reads that axis; convergence and divergence
+    /// are read as always.
+    pub(crate) fn vouch_along(
+        &self,
+        axis: MoveAxis,
+        before: &[[f32; 3]],
+        after: &[[f32; 3]],
+        region: Option<&[f32]>,
+    ) -> CellVouch {
+        Self::fold(&self.measure(before, after, region, axis))
     }
 
     /// R34. The per-CELL verdicts behind [`Self::vouch`]'s shares, for the
@@ -319,7 +372,7 @@ impl PairedCells {
         after: &[[f32; 3]],
         region: Option<&[f32]>,
     ) -> Vec<Option<bool>> {
-        Self::cellwise(self.measure(before, after, region))
+        Self::cellwise(self.measure(before, after, region, MoveAxis::Full))
     }
 
     /// R34 §D3. The per-cell verdicts for one edit — but ONLY when the region
@@ -345,7 +398,7 @@ impl PairedCells {
         before: &[[f32; 3]],
         after: &[[f32; 3]],
     ) -> Option<(CellVouch, Vec<Option<bool>>)> {
-        let readings = self.measure(before, after, None);
+        let readings = self.measure(before, after, None, MoveAxis::Full);
         let vouch = Self::fold(&readings);
         vouch.vouched().then(|| (vouch, Self::cellwise(readings)))
     }
@@ -384,6 +437,7 @@ impl PairedCells {
         before: &[[f32; 3]],
         after: &[[f32; 3]],
         region: Option<&[f32]>,
+        axis: MoveAxis,
     ) -> Vec<Option<CellReading>> {
         let cells = CELLS_X * CELLS_Y;
         let n = self.of_pixel.len().min(before.len()).min(after.len());
@@ -440,7 +494,7 @@ impl PairedCells {
                     vote,
                     converged: da + CONVERGE_MARGIN < db,
                     diverged: da > db + fit::UNSUPPORTED_RANGE_MOVE,
-                    aligned: aligned(&b, &a, t),
+                    aligned: aligned(&b, &a, t, axis),
                 })
             })
             .collect()

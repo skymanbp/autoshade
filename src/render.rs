@@ -125,13 +125,31 @@ use geometry::{profile_fill_scale};
 #[cfg(test)]
 use geometry::{geometry_fill_scale, lens_geom_factor};
 pub(crate) use luma::{bilinear_plane, gauss_blur_plane, neighbours4};
+// The zoned fit's detail stage reads the two bands the local Texture and
+// Clarity passes move, with this engine's own blur and radii.
+pub(crate) use luma::{blur_plane, clarity_radius, texture_radius};
 use luma::{
-    blur_plane, box_blur_h, box_blur_v, clarity_radius, scale_chroma, texture_pass, unsharp_luma,
+    box_blur_h, box_blur_v, scale_chroma, texture_pass, unsharp_luma,
     unsharp_luma_weighted, write_luma_additive, write_luma_weighted,
 };
 #[cfg(test)]
 use luma::{TEXTURE_MIN_SIGMA_PX, texture_negative_pass, texture_sigmas};
-use mask_falloff::{LINEAR_FALLOFF, linear_coverage, radial_falloff};
+use mask_falloff::{LINEAR_FALLOFF, linear_coverage, radial_falloff, shaped_coverage};
+
+/// The coverage a linear gradient mask gives at `t` along its handles (0 at
+/// the Zero handle, 1 at Full), the measured Lightroom profile the renderer
+/// paints — so a caller modelling a ramp before rendering it models the ramp
+/// that will be painted.
+pub(crate) fn linear_ramp_coverage(t: f32) -> f32 {
+    linear_coverage(t, LINEAR_FALLOFF)
+}
+
+/// A [`MaskGeometry::Shaped`] ramp's coverage at handle parameter `t`
+/// ([`mask_falloff::shaped_coverage`]) — the same table the renderer reads,
+/// for a caller modelling the ramp before rendering it.
+pub(crate) fn shaped_ramp_coverage(t: f32, falloff: &[f32]) -> f32 {
+    mask_falloff::shaped_coverage(t, falloff)
+}
 #[cfg(test)]
 use mask_falloff::{LinearFalloff, RADIAL_FALLOFF, RADIAL_FALLOFF_F};
 pub use mask_raster::{

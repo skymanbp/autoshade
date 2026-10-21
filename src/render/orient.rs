@@ -528,7 +528,8 @@ pub fn orient_recipe_coords(
         };
     }
     let turn = |g: &mut MaskGeometry, owned_alpha: bool| match g {
-        MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
+        MaskGeometry::Linear { zero_x, zero_y, full_x, full_y }
+        | MaskGeometry::Shaped { zero_x, zero_y, full_x, full_y, .. } => {
             (*zero_x, *zero_y) = orient_point(o, *zero_x, *zero_y);
             (*full_x, *full_y) = orient_point(o, *full_x, *full_y);
         }
@@ -717,7 +718,8 @@ pub fn shift_recipe_coords(r: &mut EditRecipe, du: f32, dv: f32) -> bool {
         };
     }
     let shift = |g: &mut MaskGeometry| match g {
-        MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
+        MaskGeometry::Linear { zero_x, zero_y, full_x, full_y }
+        | MaskGeometry::Shaped { zero_x, zero_y, full_x, full_y, .. } => {
             *zero_x += du;
             *zero_y += dv;
             *full_x += du;

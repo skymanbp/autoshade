@@ -837,7 +837,7 @@ fn layered_disabled_is_byte_identical_to_current_zoned_fit() {
         prompt_points: None,
     };
     let layers = ZonedLayerOpts {
-        field: false, spatial: false, free_masks: false, refine_masks: false,
+        field: false, spatial: false, free_masks: false, refine_masks: false, detail: false,
     };
 
     let semantic_path = fixture_mask_path("layered-disabled-semantic");
@@ -997,7 +997,7 @@ fn layered_disabled_is_byte_identical_to_current_zoned_fit() {
 #[ignore]
 fn export_layered_head_equivalence_artifacts() {
     let layers = ZonedLayerOpts {
-        field: false, spatial: false, free_masks: false, refine_masks: false,
+        field: false, spatial: false, free_masks: false, refine_masks: false, detail: false,
     };
     let (Some(head_semantic), Some(head_range)) = (
         crate::config::live_env("AUTOSHADE_LAYERED_HEAD_SEMANTIC"),
@@ -1100,10 +1100,13 @@ fn the_colour_field_ships_from_the_default_strength_and_not_below() {
             SHIPPED_LAYERS,
         )
     };
+    // Every way the stage can end: attached, withheld, given back for the
+    // frame, or given back for one zone it would have paid for out of another.
     let verdict_keys = [
         crate::rationale::keys::FIELD_ATTACHED,
         crate::rationale::keys::FIELD_WITHHELD,
         crate::rationale::keys::FIELD_REGRESSED,
+        crate::rationale::keys::FIELD_ZONE_REGRESSED,
     ];
 
     let below = solve(crate::recipe::GradeStrength::CALIBRATED, "colour-field-below");
@@ -1188,7 +1191,7 @@ fn field_disabled_layer_is_byte_identical() {
     let disabled = fit_recipe_zoned_inner(
         &source, &target, &seg, &path, &crate::recipe::EditRecipe::default(), None,
         ZonedLayerOpts {
-            field: false, spatial: false, free_masks: false, refine_masks: false,
+            field: false, spatial: false, free_masks: false, refine_masks: false, detail: false,
         },
     );
     SEGMENT_BOTH_OVERRIDE.with(|value|
@@ -1197,7 +1200,7 @@ fn field_disabled_layer_is_byte_identical() {
     let refused = fit_recipe_zoned_inner(
         &source, &target, &seg, &path, &crate::recipe::EditRecipe::default(), None,
         ZonedLayerOpts {
-            field: true, spatial: false, free_masks: false, refine_masks: false,
+            field: true, spatial: false, free_masks: false, refine_masks: false, detail: false,
         },
     );
     assert_eq!(serde_json::to_vec(&disabled.recipe).unwrap(),
@@ -1230,7 +1233,7 @@ fn field_stop_rule_skips_the_tile_producer_and_names_it() {
     let report = fit_recipe_zoned_inner(
         &source, &target, &seg, &path, &crate::recipe::EditRecipe::default(), None,
         ZonedLayerOpts {
-            field: true, spatial: true, free_masks: true, refine_masks: false,
+            field: true, spatial: true, free_masks: true, refine_masks: false, detail: false,
         },
     );
     let stop = report.notes.iter().position(|note| note.key == crate::rationale::keys::LOCAL_STOP)
@@ -1262,7 +1265,7 @@ fn calibration_local_field_discloses_ceiling_and_realized_share() {
     let head = fit_recipe_zoned_inner(
         &source, &target, &seg, &head_path, &crate::recipe::EditRecipe::default(), None,
         ZonedLayerOpts {
-            field: false, spatial: true, free_masks: false, refine_masks: true,
+            field: false, spatial: true, free_masks: false, refine_masks: true, detail: false,
         },
     );
     let path = fixture_mask_path("field-calibration");
@@ -4261,12 +4264,26 @@ fn synthetic_zone_survives_luminance_with_one_sided_hue_refusal() {
         None,
     );
     assert!(accepted.is_some(), "supported luminance must keep the synthetic sky zone: {}", report.recipe.rationale);
+    // The hue BAND evidence is one-sided (the neutral target has no blue
+    // population), but the region's cells are not: the move the band could
+    // not verify takes a blue sky to the target's neutral, and read along
+    // chromaticity (`fit_cells::MoveAxis::Colour`) every cell says so. This
+    // test used to pin `color_gains == [1, 1, 1]` with a refusal sentence;
+    // that refusal came from the full-RGB cosine, where the target's x1.5
+    // brightening outweighed the colour move it was asked about.
     let sky = report.recipe.masks.last().expect("accepted synthetic sky mask");
-    assert_eq!(sky.color_gains, Some([1.0; 3]));
-    assert_eq!(sky.saturation, 0.0);
+    let gains = sky.color_gains.expect("the verified neutralising move ships");
     assert!(
-        report.notes.iter().any(|n| is_colour_refusal(n.key)),
-        "the synthetic acceptance must disclose the refused hue band: {}",
+        gains[0] > 1.0 && gains[2] < 1.0,
+        "a blue sky taken toward a neutral target warms: {gains:?}"
+    );
+    assert!(
+        report.notes.iter().any(|n| matches!(
+            n.key,
+            crate::rationale::keys::ZONE_COLOUR_VOUCHED_BY_CELLS
+                | crate::rationale::keys::ZONE_COLOUR_VOUCHED_AT_SHARE
+        )),
+        "the band's refusal overturned by the cells must be disclosed: {}",
         report.recipe.rationale
     );
     path.remove();
@@ -5234,7 +5251,21 @@ fn calibration_sky_zone_survives_luminance_with_partial_chroma_refusal() {
     // after-reading population moves one land gain by one ulp. The second
     // band still ships the small colour move its own cells did vouch, so
     // the "partial" refusal of this test's name is literally partial: one
-    // band refuses colour, the other does not.
+    // band refuses colour, the other does not. RE-PINNED 2026-10-21 for the
+    // refined colour field (12×32×8, `fit_field::FIELD_Y_REFINE`): the
+    // head-of-sequencer field's band marginal proposes different luminance
+    // ranges, so the sky partition re-arbitrated (breaks 0.276, overlap
+    // 0.543, 7 trials, R² 0.914; the sky bands' deltaE 21.02 -> 20.25 against
+    // 21.41 -> 21.24 before), and the band that carries the luminance move
+    // (-0.211 EV) now ships its colour at 0.672 of the solved move on the
+    // R36 share ladder: the FULL move is still refused by the cells (0.559
+    // converged, 0.338 diverged over 60 cells — the refusal this test is
+    // named for), and the share the cells did vouch (0.783 closer, 0.080
+    // away, 0.916 aligned) carries gains [1.037 0.985 0.977] at saturation
+    // +4.2. The second band: -0.047 EV, saturation +5.3. On the 11-pair final
+    // check the calibration pair's own deltaE against its target went
+    // 5.57 -> 4.41. "Partial" now reads: the full move refused, a share
+    // shipped — on both bands.
     let sky_bands: Vec<_> =
         report.recipe.masks.iter().filter(|mask| mask.role == MaskRole::ZoneSky).collect();
     let (sky, second) = match sky_bands.as_slice() {
@@ -5262,11 +5293,15 @@ fn calibration_sky_zone_survives_luminance_with_partial_chroma_refusal() {
         "CALIBRATION_SKY ev={:.3} gains={:?} sat={:.1} rim={:.4} rationale={}",
         sky.exposure_ev, sky.color_gains, sky.saturation, after, report.recipe.rationale
     );
-    assert!((-0.19..=-0.155).contains(&sky.exposure_ev), "ev {}", sky.exposure_ev);
-    assert_gains_withheld(sky.color_gains);
-    assert_eq!(sky.saturation, 0.0);
+    assert!((-0.23..=-0.19).contains(&sky.exposure_ev), "ev {}", sky.exposure_ev);
     assert!(
-        (-0.025..=0.0).contains(&second.exposure_ev),
+        !gains_withheld(sky.color_gains) && sky.saturation > 0.0,
+        "the luminance band ships the share of its colour the cells vouched: {:?} sat {}",
+        sky.color_gains,
+        sky.saturation
+    );
+    assert!(
+        (-0.06..=0.0).contains(&second.exposure_ev),
         "second band ev {}",
         second.exposure_ev
     );
@@ -5281,12 +5316,12 @@ fn calibration_sky_zone_survives_luminance_with_partial_chroma_refusal() {
         .notes
         .iter()
         .find(|note| {
-            is_colour_refusal(note.key)
+            note.key == crate::rationale::keys::ZONE_COLOUR_VOUCHED_AT_SHARE
                 && note.args.iter().any(|(key, value)| {
                     *key == "label" && value == MaskRole::ZoneSky.tag()
                 })
         })
-        .expect("the one-sided calibration sky band must refuse colour");
+        .expect("the one-sided calibration sky must refuse its full colour move and ship a share");
     assert!(
         colour_note
             .args
@@ -5472,7 +5507,16 @@ fn zoned_fit_degrades_gracefully_without_python() {
     };
     let mask_path = fixture_mask_path("zoned-orch-nopython-mask");
     let report = fit_recipe_zoned(&src, &tgt, &seg, &mask_path);
-    assert!(report.recipe.masks.is_empty(), "fallback must not attach masks");
+    // The FALLBACK attaches no zone: the sky/land pair needs the segmenter
+    // that failed to launch. The later stages run on the global fit exactly
+    // as they would without a zone step, under their own gates, and the
+    // free-mask stage keeps a field mask on this fixture (frame 0.0315 ->
+    // 0.0300): that stage's verdict, not the fallback's.
+    assert!(
+        report.recipe.masks.iter().all(|m| m.role == crate::recipe::MaskRole::Custom),
+        "fallback must not attach a sky or land zone: {}",
+        report.recipe.rationale
+    );
     assert!(
         report.recipe.rationale.contains("automatic luminance-range fallback"),
         "rationale must explain the fallback: {}",
@@ -5593,7 +5637,7 @@ fn multi_and_single_class_inputs_are_prepared_identically() {
         let multi_path = crate::store::OwnedRaster::scratch(dir.join("multi.png"));
         let (sm, tm) = segment_both(&src, &tgt, &seg, &legacy_path)
             .unwrap_or_else(|e| panic!("{tag}: single-class bridge: {e:#}"));
-        let (regions, rasters, (ms, mt), _refinements, _widenings) =
+        let (regions, rasters, (ms, mt), _refinements, _widenings, _mattes) =
             segment_multiclass_both(&src, &tgt, &seg, &multi_path, 4)
                 .unwrap_or_else(|e| panic!("{tag}: multi-class bridge: {e:#}"));
         assert_eq!(sm.dimensions(), (ew, eh), "{tag}: single-class input sizing");
@@ -5918,11 +5962,30 @@ fn loopback_multi_run_arbitrates_against_the_seeded_two() {
             format!("{}{}", two.recipe.rationale, crate::rationale::render_one(refusal)),
             "a refusal appends one note to the reference rationale and transplants nothing"
         );
+        // A raster's claimed NAME is not content: both candidates claim in
+        // the one develop store, the refused one first, so a raster the kept
+        // run also claims is numbered past the refused one's (`-2.png`, see
+        // `OwnedRaster::claim_sibling`) — on the night pair (2026-10-20) the
+        // multi run's free mask did exactly that. The claim suffix is folded
+        // out; everything the raster carries is still compared byte for byte.
+        let unclaimed = |json: String| -> String {
+            let mut out = String::with_capacity(json.len());
+            let mut rest = json.as_str();
+            while let Some(at) = rest.find(".png") {
+                let head = &rest[..at];
+                let stem = head.trim_end_matches(|c: char| c.is_ascii_digit());
+                out.push_str(if stem.len() < head.len() && stem.ends_with('-') { &stem[..stem.len() - 1] } else { head });
+                out.push_str(".png");
+                rest = &rest[at + 4..];
+            }
+            out.push_str(rest);
+            out
+        };
         let normalise = |r: &FitReport, dir: &std::path::Path| {
             let mut recipe = r.recipe.clone();
             recipe.rationale.clear();
-            serde_json::to_string(&recipe).unwrap().replace(&dir.to_string_lossy().replace('\\', "\\\\"), "<dir>")
-                .replace(&dir.to_string_lossy().into_owned(), "<dir>")
+            unclaimed(serde_json::to_string(&recipe).unwrap().replace(&dir.to_string_lossy().replace('\\', "\\\\"), "<dir>")
+                .replace(&dir.to_string_lossy().into_owned(), "<dir>"))
         };
         assert_eq!(normalise(&four, &four_dir), normalise(&two, &two_dir));
         assert_eq!(four.err_after.to_bits(), two.err_after.to_bits());

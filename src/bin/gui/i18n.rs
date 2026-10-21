@@ -261,6 +261,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("zone do-no-harm", "区域不退步"),
     ("frame do-no-harm", "整幅不退步"),
     ("boundary regression", "边界退步"),
+    ("ramp steeper than target", "过渡比目标陡"),
     (" [the proposal exceeded recipe limits — discarded {dropped}]",
         " [该提案超出了配方上限——已丢弃 {dropped}]"),
     // ── Settings ────────────────────────────────────────────────────────────
@@ -305,6 +306,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
 
     // ── Local adjustments (masks) ────────────────────────────────────────────
     ("Linear", "线性"),
+    ("Shaped gradient", "实测渐变"),
     ("Radial", "径向"),
     ("Bitmap", "位图"),
     // The mask-row kind label for a Lightroom `Mask/Aggregate` group.
@@ -2130,6 +2132,25 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" Local quality gate passed for {label}: texture ratio {texture}, clipped \
       share {clip_before}% → {clip_after}%.",
         " {label} 区已通过局部质量门：纹理比 {texture}，裁切占比 {clip_before}% → {clip_after}%。"),
+    // The detail stage's five sentences (2026-10-21).
+    (" Local contrast matched for {label}: texture {texture}, clarity {clarity} (share {k} of the solve). The target's structure pairs with this photo's at r={r_tex} on the texture scale and r={r_cla} on the clarity scale; the render's local contrast went from {tex_before} to {tex_after} of the target's at the texture scale and from {cla_before} to {cla_after} at the clarity scale.",
+        " 已为 {label} 区匹配局部对比度：纹理 {texture}、清晰度 {clarity}（取解出值的 {k}）。目标的结构与本图在纹理尺度上的配对相关 r={r_tex}、清晰度尺度 r={r_cla}；渲染的局部对比度在纹理尺度上从目标的 {tex_before} 到 {tex_after}，在清晰度尺度上从 {cla_before} 到 {cla_after}。"),
+    (" Local contrast left alone for {label}: the target's fine structure does not sit where this photo's does (paired r={r_tex} on the texture scale, r={r_cla} on the clarity scale, line {min}). A slider can only amplify what the photograph holds, so what the target shows there was drawn in, not developed.",
+        " {label} 区的局部对比度未动：目标的细节结构与本图对不上位置（纹理尺度配对相关 r={r_tex}、清晰度尺度 r={r_cla}，门线 {min}）。滑块只能放大照片里已有的东西，目标在那里显示的是画上去的，不是显影出来的。"),
+    (" Local contrast already matched for {label} (paired r={r_tex}/{r_cla}; the target asks {beta_tex} of the render's structure at the texture scale and {beta_cla} at the clarity scale).",
+        " {label} 区的局部对比度已经匹配（配对相关 r={r_tex}/{r_cla}；目标在纹理尺度上要求渲染结构的 {beta_tex} 倍、清晰度尺度 {beta_cla} 倍）。"),
+    (" Local contrast left alone for {label}: the target shows {ratio_tex}x this render's contrast at the texture scale and {ratio_cla}x at the clarity scale, but on the structure the two frames share (paired r={r_tex}/{r_cla}) it asks {beta_tex}x and {beta_cla}x — the difference is not on this photo's structure, and a slider cannot put it there.",
+        " {label} 区的局部对比度没动：目标在纹理尺度上显示本图对比度的 {ratio_tex} 倍、清晰度尺度 {ratio_cla} 倍，但在两图共有的结构上（配对相关 r={r_tex}/{r_cla}）只要求 {beta_tex} 倍和 {beta_cla} 倍——差别不在本图的结构上，滑块加不上去。"),
+    (" Local contrast not measured for {label}: neither frame carries fine structure there to pair.",
+        " {label} 区未量局部对比度：两边在那里都没有可配对的细节结构。"),
+    (" Local contrast match for {label} refused by the local-quality gate at every rung of the shrink ladder (solved texture {texture}, clarity {clarity}; paired r={r_tex}/{r_cla}).",
+        " {label} 区的局部对比度匹配被局部质量门拒绝，收缩阶梯每一档都没过（解出纹理 {texture}、清晰度 {clarity}；配对相关 r={r_tex}/{r_cla}）。"),
+    (" Local contrast match for {label} refused: at every rung of the shrink ladder it would push a band's local contrast past what the evidence allows — the target's at a scale where the structure pairs, this render's own at one where it does not (solved texture {texture}, clarity {clarity}; paired r={r_tex}/{r_cla}).",
+        " {label} 区的局部对比度匹配被拒绝：收缩阶梯每一档都会把某个尺度的局部对比度推过证据允许的上限——结构配对的尺度以目标为限，不配对的尺度以本图原有的为限（解出纹理 {texture}、清晰度 {clarity}；配对相关 r={r_tex}/{r_cla}）。"),
+    (" Local contrast match for {label} refused: at every rung of the shrink ladder it moved the frame past its drift budget (solved texture {texture}, clarity {clarity}; paired r={r_tex}/{r_cla}).",
+        " {label} 区的局部对比度匹配被拒绝：收缩阶梯每一档都让整幅画面超出漂移预算（解出纹理 {texture}、清晰度 {clarity}；配对相关 r={r_tex}/{r_cla}）。"),
+    (" Local contrast match for {label} refused: a slider ran to its stop (texture {texture}, clarity {clarity}) with the render's local contrast still at {share} of the target's at that scale — what the target shows there is not what this slider makes (paired r={r_tex}/{r_cla}).",
+        " {label} 区的局部对比度匹配被拒绝：滑块已推到头（纹理 {texture}、清晰度 {clarity}），渲染在该尺度的局部对比度仍只有目标的 {share}——目标在那里显示的对比度不是这个滑块能做出来的（配对相关 r={r_tex}/{r_cla}）。"),
     (" Zoned {label} correction dropped by the local-quality texture gate: \
       ratio {ratio} is outside [{min}, {max}].",
         " {label} 区校正被局部质量纹理门弃用：比值 {ratio} 超出 [{min}, {max}]。"),
@@ -2538,6 +2559,23 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       (coverage delta {coverage}); where the guide has edges the alpha was \
       left untouched, so silhouettes stay crisp.",
         " {label} 的语义蒙版羽化已加宽：50% 等值线有 {share}% 落在平滑到藏不住接缝的引导图内容上，该处的 alpha 斜坡被展宽到最大 {radius} px 半径（覆盖变化 {coverage}）；引导图有边缘的地方 alpha 原样保留，因此轮廓依旧锐利。"),
+    (" Semantic mask edge keyed to the scene for {label}: {share}% of the 50% \
+      contour runs along an edge the scene itself makes, so within {radius} \
+      px of it each pixel the model was unsure of was set to the share of it \
+      that is this region's content, read off the scene's brightness between \
+      the two sides (coverage delta {coverage}); where the scene is smooth \
+      the ramp was left to the feather widening.",
+        " {label} 的语义蒙版边缘已按画面定位：50% 等值线有 {share}% 沿着画面自身的边缘，那里 {radius} px 以内模型没把握的像素，按画面亮度在两侧之间的位置设为它属于该区域的比例（覆盖变化 {coverage}）；画面平滑的地方斜坡交给羽化加宽处理。"),
+    (" Semantic mask edge keying abstained for {label}: {share}% of the 50% \
+      contour runs along an edge the scene makes (coverage delta \
+      {coverage}); the original mask bytes were retained.",
+        " {label} 的语义蒙版边缘定位已放弃：50% 等值线有 {share}% 沿着画面自身的边缘（覆盖变化 {coverage}）；保留原始蒙版字节。"),
+    (" Semantic mask confidence holes filled for {label}: {share}% of the \
+      pixels the model left partial had no other region within {radius} px, \
+      so they were not a transition between two regions but the model's \
+      hesitation inside one; they were taken to that region's own level, \
+      fully beyond twice that reach and fading to untouched at it.",
+        " {label} 的语义蒙版置信空洞已填补：模型留下的半透明像素中有 {share}% 在 {radius} px 内没有别的区域，它们不是两个区域之间的过渡，而是模型在同一区域内部的犹豫；已补到所在区域的水平，超出两倍距离时完全补齐，在该距离处减为不动。"),
     (" Semantic mask feather widening abstained for {label}: {share}% of \
       the 50% contour was smooth enough to widen against a radius cap of \
       {radius} px (coverage delta {coverage}); the original mask bytes were \

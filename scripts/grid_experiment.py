@@ -37,6 +37,16 @@ BOUNDS_HIGH = np.array([1.25, 0.35, 0.35, 0.35, 0.50], dtype=np.float32)
 OCCUPANCY_MIN = 8.0
 
 
+def configure(sy: int, occupancy_min: float) -> None:
+    """Re-shape the grid BEFORE any `GridSystem` is built. Production
+    (`src/fit_field.rs`) refines this experiment's 8 vertex rows and scales
+    the occupancy floor with the refinement; `field_check.py` mirrors that
+    here so the two solvers see one system. The experiment's own runs keep
+    the module defaults."""
+    global SY, VERTICES, OCCUPANCY_MIN
+    SY, VERTICES, OCCUPANCY_MIN = sy, SX * sy * SB, occupancy_min
+
+
 def load_rgb(path: Path) -> np.ndarray:
     return np.asarray(Image.open(path).convert("RGB"), dtype=np.float32) / 255.0
 

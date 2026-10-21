@@ -506,7 +506,7 @@ fn free_mask_layer_off_is_byte_identical() {
     let disabled = super::super::fit_recipe_zoned_inner(
         &source, &target, &seg, &path, &crate::recipe::EditRecipe::default(), None,
         super::super::ZonedLayerOpts {
-            field: true, spatial: false, free_masks: false, refine_masks: false,
+            field: true, spatial: false, free_masks: false, refine_masks: false, detail: false,
         },
     );
     assert_eq!(FREE_MASK_CALLS.with(|calls| calls.get()), 0,
@@ -517,7 +517,7 @@ fn free_mask_layer_off_is_byte_identical() {
     let without_stage = super::super::fit_recipe_zoned_inner(
         &source, &target, &seg, &path, &crate::recipe::EditRecipe::default(), None,
         super::super::ZonedLayerOpts {
-            field: true, spatial: false, free_masks: true, refine_masks: false,
+            field: true, spatial: false, free_masks: true, refine_masks: false, detail: false,
         },
     );
     assert_eq!(FREE_MASK_CALLS.with(|calls| calls.get()), 1,
@@ -533,7 +533,7 @@ fn free_mask_layer_off_is_byte_identical() {
         FREE_MASK_CALLS.with(|calls| calls.set(0));
         let off = super::super::fit_recipe_zoned_inner(
             &source, &target, &seg, &off_path, &crate::recipe::EditRecipe::default(), None,
-            super::super::ZonedLayerOpts { field: true, spatial, free_masks: false, refine_masks: false },
+            super::super::ZonedLayerOpts { field: true, spatial, free_masks: false, refine_masks: false, detail: false },
         );
         assert_eq!(FREE_MASK_CALLS.with(|calls| calls.get()), 0);
         if let Some(stop) = off.notes.iter().find(|note| note.key == crate::rationale::keys::LOCAL_STOP) {
@@ -569,7 +569,7 @@ fn free_masks_are_skipped_when_the_ceiling_is_met() {
     let report = super::super::fit_recipe_zoned_inner(
         &source, &target, &seg, &path, &crate::recipe::EditRecipe::default(), None,
         super::super::ZonedLayerOpts {
-            field: true, spatial: true, free_masks: true, refine_masks: false,
+            field: true, spatial: true, free_masks: true, refine_masks: false, detail: false,
         },
     );
     let stop = report.notes.iter().find(|note| note.key == crate::rationale::keys::LOCAL_STOP)
@@ -599,7 +599,7 @@ fn corpus_layers(free_masks: bool) -> super::super::ZonedLayerOpts {
         field: true,
         spatial: true,
         free_masks,
-        refine_masks: true,
+        refine_masks: true, detail: false,
     }
 }
 
@@ -737,7 +737,7 @@ fn free_mask_stage_publishes_its_own_realized_reading() {
         let report = super::super::fit_recipe_zoned_inner(
             &source, &target, &seg, &path, &crate::recipe::EditRecipe::default(), None,
             super::super::ZonedLayerOpts {
-                field: true, spatial: false, free_masks, refine_masks: false,
+                field: true, spatial: false, free_masks, refine_masks: false, detail: false,
             },
         );
         let producers = realized_by(&report);

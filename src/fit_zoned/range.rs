@@ -2697,7 +2697,7 @@ mod tests {
             &crate::recipe::EditRecipe::default(),
             None,
             ZonedLayerOpts {
-                field: false, spatial: false, free_masks: false, refine_masks: false,
+                field: false, spatial: false, free_masks: false, refine_masks: false, detail: false,
             },
         );
         let calls = RANGE_DERIVATION_CALLS.with(std::cell::Cell::get);
@@ -2743,7 +2743,7 @@ mod tests {
             &crate::recipe::EditRecipe::default(),
             None,
             ZonedLayerOpts {
-                field: false, spatial: false, free_masks: false, refine_masks: true,
+                field: false, spatial: false, free_masks: false, refine_masks: true, detail: false,
             },
         );
         assert_eq!(
@@ -3243,7 +3243,7 @@ mod tests {
     }
 
     fn range_only_layers() -> ZonedLayerOpts {
-        ZonedLayerOpts { field: false, spatial: false, free_masks: false, refine_masks: false }
+        ZonedLayerOpts { field: false, spatial: false, free_masks: false, refine_masks: false, detail: false }
     }
 
     fn segmentation_off() -> SegmentOpts {

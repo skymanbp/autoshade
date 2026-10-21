@@ -2226,6 +2226,7 @@ impl AutoShadeApp {
                             Some(RangeMask::Color { .. }) => tr(self.lang, "Color range"),
                             None => match m.mask {
                                 MaskGeometry::Linear { .. } => tr(self.lang, "Linear"),
+                                MaskGeometry::Shaped { .. } => tr(self.lang, "Shaped gradient"),
                                 MaskGeometry::Radial { .. } => tr(self.lang, "Radial"),
                                 MaskGeometry::Bitmap { .. } => tr(self.lang, "Bitmap"),
                                 MaskGeometry::Brush { .. } => tr(self.lang, "Brush"),
@@ -2538,9 +2539,13 @@ impl AutoShadeApp {
                         // its reference point is a MODEL PROMPT, so "redraw"
                         // would mean re-running the segmenter, not moving a
                         // shape — a different action from this button's.
+                        // A shaped gradient's curve was measured from a
+                        // target; redrawing its handles would keep a curve
+                        // measured for another span.
                         MaskGeometry::Bitmap { .. }
                         | MaskGeometry::Brush { .. }
-                        | MaskGeometry::AiMask { .. } => None,
+                        | MaskGeometry::AiMask { .. }
+                        | MaskGeometry::Shaped { .. } => None,
                     };
                     if let Some(kind) = kind {
                         let redraw_armed = matches!(
@@ -2846,6 +2851,7 @@ impl AutoShadeApp {
                             };
                             let kind = match comp.geometry {
                                 MaskGeometry::Linear { .. } => tr(lang, "Linear"),
+                                MaskGeometry::Shaped { .. } => tr(lang, "Shaped gradient"),
                                 MaskGeometry::Radial { .. } => tr(lang, "Radial"),
                                 MaskGeometry::Bitmap { .. } => tr(lang, "Bitmap"),
                                 MaskGeometry::Brush { .. } => tr(lang, "Brush"),

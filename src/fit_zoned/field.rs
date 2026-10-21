@@ -333,7 +333,13 @@ pub(super) fn push_realized(report: &mut FitReport, field: &LocalField, producer
 /// The field is RE-SOLVED here rather than reused. The one from the head of
 /// the sequencer measured the producer-free frame; every producer since has
 /// moved pixels, and a field solved against a render that no longer exists
-/// would spend its budget re-doing work already attached.
+/// would spend its budget re-doing work already attached. The headroom
+/// verdict reads the RE-SOLVED field for the same reason: it used to read the
+/// head's, and on a night pair (2026-10-20) whose zones had taken the frame
+/// from 0.123 to 0.073 that stale ceiling, 0.094, said there was nothing left
+/// and the field never ran — while the sky's horizon strip, the one residual
+/// a smooth spatial field exists to carry, was still blue/green 1.50 against
+/// the target's 2.20.
 ///
 /// Finally, do-no-harm: the attached field is kept only if the frame it
 /// renders is closer to the target than the frame without it. A field that
@@ -343,18 +349,9 @@ pub(super) fn attach_colour_field(
     target: &DynamicImage,
     report: &mut FitReport,
     strength: crate::recipe::GradeStrength,
-    entry: &LocalField,
     layout: &[f32],
 ) {
     if strength.get() < crate::recipe::GradeStrength::DEFAULT {
-        return;
-    }
-    if !stop_verdict_has_headroom(entry, report.err_after) {
-        note(report, crate::rationale::keys::FIELD_WITHHELD, vec![
-            ("ceiling", format!("{:.6}", entry.ceiling)),
-            ("err_after", format!("{:.6}", report.err_after)),
-            ("margin", format!("{LOCAL_STOP_MARGIN:.3}")),
-        ]);
         return;
     }
     let (s_img, t_img) = fit::analysis_pair(src, target);
@@ -366,6 +363,14 @@ pub(super) fn attach_colour_field(
         note(report, crate::rationale::keys::FIELD_UNSOLVED, vec![("stage", "attach".into())]);
         return;
     };
+    if !stop_verdict_has_headroom(&pass_a, report.err_after) {
+        note(report, crate::rationale::keys::FIELD_WITHHELD, vec![
+            ("ceiling", format!("{:.6}", pass_a.ceiling)),
+            ("err_after", format!("{:.6}", report.err_after)),
+            ("margin", format!("{LOCAL_STOP_MARGIN:.3}")),
+        ]);
+        return;
+    }
     let budget = fit::FitBudget::for_strength(strength);
     let (solved, admitted, read, paired) =
         admit_cells(&current, &target_pixels, w, h, report, pass_a, budget.field_gain, layout);
@@ -427,8 +432,8 @@ pub(super) fn attach_colour_field(
 /// this function ships from the field the analyzer measures.
 ///
 /// The analyzer's fit weight is `evidence x local_support x unclipped`, and
-/// `local_support` is `1 - clamp(D)` over the same 12x8 cells this grid is
-/// solved on. On a generative repaint that term is ~0 exactly where the
+/// `local_support` is `1 - clamp(D)` over the 12x8 cells this grid's vertex
+/// rows refine. On a generative repaint that term is ~0 exactly where the
 /// residual is: on the desert-dusk pair the two rows above the horizon carry
 /// almost no weight, so the field solves them at nothing and the row that DOES
 /// carry weight saturates 15 of its red vertices trying to cover for them.
@@ -438,8 +443,8 @@ pub(super) fn attach_colour_field(
 ///
 /// So pass B is not trusted, it is TESTED: solved, rendered, and put to the
 /// target's own cell means. A cell whose mean moved closer to its target AND in
-/// the direction its target asks for takes pass B's eight luma-bin vertices;
-/// every other cell keeps pass A's, unchanged. No cells, no pass B, no change —
+/// the direction its target asks for takes pass B's vertices
+/// (`fit_field::cell_vertex_spans`); every other cell keeps pass A's, unchanged. No cells, no pass B, no change —
 /// the abstention is the pre-R34 field, byte for byte.
 ///
 /// R42 (v1.6.1). Inside a region the segmenter found in BOTH frames
@@ -513,10 +518,9 @@ fn admit_cells(
     let mut merged = pass_a;
     let (mut admitted, mut read) = (0usize, 0usize);
     let mut paired_read = LayoutAdmission::default();
-    // Vertex `(iy * FIELD_X + ix) * FIELD_B + ib`: a cell owns the `FIELD_B`
-    // consecutive luma-bin vertices at its own (ix, iy), which is why
-    // `fit_cells` takes its geometry from this grid rather than choosing one.
-    let bins = crate::fit_field::FIELD_B;
+    // A cell owns its column's vertices on the vertex rows that refine it, all
+    // luma bins — which is why `fit_cells` takes its geometry from this grid
+    // rather than choosing one.
     for (cell, verdict) in verdicts.iter().enumerate() {
         let admit = match verdict {
             Some(vouched) => {
@@ -543,9 +547,10 @@ fn admit_cells(
         if !admit {
             continue;
         }
-        let span = cell * bins..(cell + 1) * bins;
-        if merged.grid.len() >= span.end && pass_b.grid.len() >= span.end {
-            merged.grid[span.clone()].clone_from_slice(&pass_b.grid[span]);
+        for span in crate::fit_field::cell_vertex_spans(cell) {
+            if merged.grid.len() >= span.end && pass_b.grid.len() >= span.end {
+                merged.grid[span.clone()].clone_from_slice(&pass_b.grid[span]);
+            }
         }
     }
     (merged, admitted, read, paired_read)

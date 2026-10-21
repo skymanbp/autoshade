@@ -1171,7 +1171,10 @@ impl AutoShadeApp {
             // knobs recoverable instead of letting them fly to infinity.
             let cl = |v: f32| v.clamp(-0.5, 1.5);
             match self.sel_target_geometry_mut() {
-                Some(MaskGeometry::Linear { zero_x, zero_y, full_x, full_y }) => match h {
+                Some(
+                    MaskGeometry::Linear { zero_x, zero_y, full_x, full_y }
+                    | MaskGeometry::Shaped { zero_x, zero_y, full_x, full_y, .. },
+                ) => match h {
                     1 => (*zero_x, *zero_y) = (cl(cur.0), cl(cur.1)),
                     2 => (*full_x, *full_y) = (cl(cur.0), cl(cur.1)),
                     _ => {

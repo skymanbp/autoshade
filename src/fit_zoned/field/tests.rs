@@ -176,11 +176,10 @@ fn the_cells_of_a_repainted_region_admit_the_support_free_field() {
         admit_cells(&current, &target, w, h, &report, pass_a.clone(), 0.60, &[]);
     assert!(read > 0, "the instrument was consulted: {admitted} of {read}");
     assert!(admitted > 0, "the repainted cells must be admitted: {admitted} of {read}");
-    let bins = crate::fit_field::FIELD_B;
     let moved: Vec<usize> = (0..crate::fit_cells::CELLS_X * crate::fit_cells::CELLS_Y)
         .filter(|cell| {
-            merged.grid[cell * bins..(cell + 1) * bins]
-                != pass_a.grid[cell * bins..(cell + 1) * bins]
+            crate::fit_field::cell_vertex_spans(*cell)
+                .any(|span| merged.grid[span.clone()] != pass_a.grid[span])
         })
         .collect();
     assert_eq!(moved.len(), admitted, "exactly the admitted cells took pass B");
@@ -356,13 +355,14 @@ fn a_cell_the_pixel_evidence_cannot_read_is_read_on_its_region_pairing() {
         admit_cells(&current, &target, w, h, &report, pass_a.clone(), 0.60, &pairing);
     assert_eq!(paired.read, unread.len(), "every unread cell inside the pairing was read on it: {paired:?}");
     assert!(paired.admitted > 0, "the smooth recolour is admitted: {paired:?}");
-    let bins = crate::fit_field::FIELD_B;
     for cell in &unread {
-        let span = cell * bins..(cell + 1) * bins;
-        assert_eq!(without.grid[span.clone()], pass_a.grid[span.clone()], "no pairing: cell {cell} keeps the analysis grid");
+        for span in crate::fit_field::cell_vertex_spans(*cell) {
+            assert_eq!(without.grid[span.clone()], pass_a.grid[span], "no pairing: cell {cell} keeps the analysis grid");
+        }
     }
     assert!(
-        unread.iter().any(|cell| merged.grid[cell * bins..(cell + 1) * bins] != pass_a.grid[cell * bins..(cell + 1) * bins]),
+        unread.iter().any(|cell| crate::fit_field::cell_vertex_spans(*cell)
+            .any(|span| merged.grid[span.clone()] != pass_a.grid[span])),
         "with the pairing, the unread cells carry pass B's vertices"
     );
     let ninth_mean = |px: &[[f32; 3]], ch: usize| -> f32 {

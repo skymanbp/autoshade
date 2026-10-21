@@ -1,6 +1,6 @@
 //! The local-field ANALYZER (step 10 / B2 phase A).
 //!
-//! A 12x8x8 bilateral grid solved on the analysis rasters purely to MEASURE what
+//! A 12x32x8 bilateral grid solved on the analysis rasters purely to MEASURE what
 //! a spatially varying edit could still win on one pair.  The field never reaches
 //! [`crate::render`] or an [`crate::recipe::EditRecipe`]: this module takes pixel
 //! slices and returns numbers, so the recipe schema (era 1), the engine and XMP
@@ -9,7 +9,9 @@
 //! (`smooth_3tap`, `splat_table`, `GridSystem.forward/adjoint/rhs/matvec/solve`,
 //! `BOUNDS_LOW/HIGH`, `OCCUPANCY_MIN`) at `fit::ANALYZE_EDGE` size: same vertex
 //! order, same trilinear splat, same conjugate-gradient stopping rule, same
-//! post-solve bounds and occupancy floor.  Independent structural cell readings
+//! post-solve bounds and occupancy floor — at the experiment's 12x8 cells
+//! refined to [`FIELD_Y`] vertex rows, with the regulariser rescaled to the
+//! refinement (see [`TIKHONOV`]).  Independent structural cell readings
 //! run in parallel and are scattered in cell order; the CG solve and every
 //! reduction stay sequential/f64, so two solves of one input are bit-identical.
 
@@ -18,9 +20,32 @@ use rayon::prelude::*;
 
 /// Grid extent on the x, y and luma axes.  A vertex is
 /// `(iy * FIELD_X + ix) * FIELD_B + ib`, exactly `splat_table`'s order.
+///
+/// The x axis is the evidence-cell grid's 12 columns (`fit_cells`); the y
+/// axis is that grid's [`CELL_ROWS`] refined [`FIELD_Y_REFINE`] times, so a
+/// cell owns `FIELD_Y_REFINE` vertex rows ([`cell_vertex_spans`]). The
+/// refinement is vertical only, and measured rather than aesthetic: a horizon
+/// glow rises over the lowest ~15 % of a sky (e-folding ~5 % of the frame,
+/// 13 rows at analysis size), and the trilinear read between vertex rows 36
+/// rows apart (8 rows over 256) cannot bend that fast. On the night reference
+/// pair it averaged a flat-then-steep demand into a band 1.5 L brighter and
+/// 1 b* bluer than the target 25 rows above the horizon, kinked at the vertex
+/// row (2026-10-20: error left after the field −1.1 L at row 178, +1.4 L at
+/// row 200, +0.5 L at the vertex row 146). Twofold (17-row spacing) narrowed
+/// the band but left its depth (−1.3 L: the spacing was still above the
+/// glow's scale); fourfold (8.5 rows, under it) with the smoother per edge
+/// (see [`SMOOTH`]) left 0.6 L, and the sky's row-profile ripple went
+/// 2.40 → 0.63 L, its deltaE 3.96 → 3.26. Nothing comparable has been
+/// measured along x, and the 12×8 cell grid every admission instrument reads
+/// is unchanged. The cost is the recipe: 3072 vertices where there were 768.
 pub(crate) const FIELD_X: usize = 12;
-pub(crate) const FIELD_Y: usize = 8;
+pub(crate) const FIELD_Y: usize = CELL_ROWS * FIELD_Y_REFINE;
 pub(crate) const FIELD_B: usize = 8;
+/// The evidence-cell grid's rows (`fit_cells::CELLS_Y`), the grid
+/// [`local_support`] is read on.
+pub(crate) const CELL_ROWS: usize = 8;
+/// Vertex rows per cell row.
+pub(crate) const FIELD_Y_REFINE: usize = 4;
 /// The parameters carried at every vertex: `[ev, gain_r, gain_g, gain_b, slope]`.
 const PARAMS: usize = 5;
 const VERTICES: usize = FIELD_X * FIELD_Y * FIELD_B;
@@ -28,15 +53,43 @@ const VERTICES: usize = FIELD_X * FIELD_Y * FIELD_B;
 /// ([`LocalField::saturated`]); the bounds are never widened to fit a field.
 const BOUNDS_LOW: [f32; PARAMS] = [-1.25, -0.35, -0.35, -0.35, -0.50];
 const BOUNDS_HIGH: [f32; PARAMS] = [1.25, 0.35, 0.35, 0.35, 0.50];
-/// A vertex under this much weighted trilinear mass was never measured; it is
-/// zeroed rather than left on whatever the regulariser diffused into it.
+/// A CELL under this much weighted trilinear mass (summed over the vertex
+/// rows that refine it, per column and luma bin — [`supported`]) was never
+/// measured; its vertices are zeroed rather than left on whatever the
+/// regulariser diffused into them. The floor belongs to the 12×8 cell it was
+/// set on, not to a vertex: read per refined vertex (at 8 / `FIELD_Y_REFINE`)
+/// it zeroed rows a sharp horizon or a dark luma bin leaves thin while their
+/// cell is well measured, and on the calibration pair that alone cost the
+/// ceiling 0.0023 (0.07242 against 0.07009 at the 8-row grid; with no floor
+/// at all the refined grid reads 0.06831).
 const OCCUPANCY_MIN: f32 = 8.0;
 /// The production regulariser, FIXED — no per-image sweep, ever.  The experiment's
 /// sweep picked s=0 on two of its five pairs (an overfitting bias) to buy a last
 /// 0.003 of the objective; determinism and no selection bias are worth more.
-pub(crate) const TIKHONOV: f32 = 1.0;
-pub(crate) const SMOOTH: [f32; 3] = [1.0, 1.0, 1.0];
+///
+/// Calibrated at 12×8×8 (λ = 1, s = 1 per axis). On the refined rows the
+/// terms summed over VERTICES are rescaled so the field costs what it cost
+/// there: the Tikhonov term and the x and luma differences are summed over
+/// `FIELD_Y_REFINE` times as many vertices, so each weighs
+/// `1 / FIELD_Y_REFINE`. The y smoother is NOT rescaled: it stays 1 per
+/// edge, which over `(FIELD_Y − 1) / (CELL_ROWS − 1)` as many, shorter, edges
+/// is a weaker penalty on a given ramp than the 8-row grid paid — and that is
+/// the point. Rescaled to keep the ramp penalty (×31/7), the smoother spread
+/// the night pair's horizon glow upward and left a 1.0 L shoulder 20 rows
+/// above the horizon that the refinement existed to remove; per edge it left
+/// 0.6 L (ripple 1.07 → 0.63 L). A per-edge weight is what the smoother
+/// means — adjacent vertices should agree — and resolving what the grid can
+/// now resolve is what refining it was for. (v1.3.0 tried a 16×12×8 grid with
+/// nothing rescaled and read it worse on the calibration pair, 0.023750
+/// against 0.021035; the vertex-count terms above are why.)
+pub(crate) const TIKHONOV: f32 = 1.0 / FIELD_Y_REFINE as f32;
+pub(crate) const SMOOTH: [f32; 3] = [1.0 / FIELD_Y_REFINE as f32, 1.0, 1.0 / FIELD_Y_REFINE as f32];
 pub(crate) const ITERATIONS: usize = 90;
+/// Ceiling on the active-set passes of the bound-constrained solve
+/// ([`System::solve`]); each pass is one warm-started CG of at most
+/// [`ITERATIONS`] steps. The loop normally stops earlier, when the set of
+/// parameters pinned on a bound repeats.
+const ACTIVE_SET_PASSES: usize = 40;
 /// The refusal line of `fit::look_err_with_evidence`, reused verbatim: a pair the
 /// objective calls unmeasurable gets no field either.
 const IDENTIFIABILITY_MIN: f32 = 1e-5;
@@ -107,7 +160,8 @@ pub(crate) struct SolveInfo {
 /// persisted or rendered at full resolution; every array is at analysis size.
 #[derive(Clone, Debug)]
 pub(crate) struct LocalField {
-    /// 768 vertices in `splat_table` order, bound-clipped, occupancy-zeroed.
+    /// `FIELD_X * FIELD_Y * FIELD_B` vertices in `splat_table` order,
+    /// bound-clipped, occupancy-zeroed.
     pub grid: Vec<[f32; PARAMS]>,
     /// Weighted trilinear mass at each vertex (fit weight x splat weight).
     #[cfg_attr(not(test), allow(dead_code))]
@@ -186,29 +240,29 @@ impl LocalField {
         if !mass.is_finite() || mass <= 0.0 { return None; }
         let guide = smooth_3tap_luma(current, w, h);
         let system = System::new(current, target, &guide, &fit_weight, w, h);
-        let (raw, solve) = system.solve(tikhonov, smooth, iterations);
+        let (raw, solve) = system.solve(tikhonov, smooth, iterations, |p| opts.bounds(p));
         if raw.iter().any(|value| !value.is_finite()) { return None; }
 
         let mut flat = vec![0.0f32; VERTICES * PARAMS];
         let mut grid = vec![[0.0f32; PARAMS]; VERTICES];
         let mut saturated = 0usize;
+        let measured = supported(&system.occupancy);
         for (vertex, cell) in grid.iter_mut().enumerate() {
-            let supported = system.occupancy[vertex] >= OCCUPANCY_MIN;
-            let mut clipped = false;
+            let supported = measured[vertex];
+            let mut on_bound = false;
             for (p, value) in cell.iter_mut().enumerate() {
-                let solved = raw[vertex * PARAMS + p];
                 let (low, high) = opts.bounds(p);
-                let bounded = solved.clamp(low, high);
-                clipped |= bounded != solved;
+                let bounded = raw[vertex * PARAMS + p].clamp(low, high);
+                on_bound |= bounded <= low || bounded >= high;
                 *value = if supported { bounded } else { 0.0 };
                 flat[vertex * PARAMS + p] = *value;
             }
-            saturated += usize::from(supported && clipped);
+            saturated += usize::from(supported && on_bound);
         }
         let field_render = apply_flat(current, &guide, &system.splat, &flat);
         let ceiling = fit::look_err_with_evidence(&field_render, target, evidence);
         let global = fit::look_err_with_evidence(current, target, evidence);
-        let (band_marginal, band_dispersion) = band_summary(&grid, &system.occupancy);
+        let (band_marginal, band_dispersion) = band_summary(&grid, &system.occupancy, &measured);
         let projection = apply_bands(current, &guide, &band_marginal);
         let remainder = field_render.iter().zip(&projection)
             .map(|(field, band)| fit::luma601(field) - fit::luma601(band)).collect();
@@ -269,7 +323,7 @@ pub(crate) fn local_support(
     let n = width as usize * height as usize;
     let mut support = vec![0.0f32; n];
     if n == 0 || current.len() != n || target.len() != n { return support; }
-    let readings = (0..FIELD_X * FIELD_Y)
+    let readings = (0..FIELD_X * CELL_ROWS)
         .into_par_iter()
         .map(|cell| {
             let (cell_x, cell_y) = ((cell % FIELD_X) as u32, (cell / FIELD_X) as u32);
@@ -277,7 +331,7 @@ pub(crate) fn local_support(
                 .map(|i| {
                     let (x, y) = (i as u32 % width, i as u32 / width);
                     f32::from(x * FIELD_X as u32 / width == cell_x
-                        && y * FIELD_Y as u32 / height == cell_y)
+                        && y * CELL_ROWS as u32 / height == cell_y)
                 })
                 .collect::<Vec<_>>();
             fit::structure_divergence(current, target, width, height, &mask)
@@ -289,11 +343,43 @@ pub(crate) fn local_support(
     }
     for (i, slot) in support.iter_mut().enumerate() {
         let (x, y) = (i as u32 % width, i as u32 / width);
-        let cell = (y * FIELD_Y as u32 / height * FIELD_X as u32
+        let cell = (y * CELL_ROWS as u32 / height * FIELD_X as u32
             + x * FIELD_X as u32 / width) as usize;
         *slot = readings[cell].unwrap_or(0.0);
     }
     support
+}
+
+/// Which vertices were measured: a vertex is supported when the CELL it
+/// belongs to — its column and luma bin, summed over the [`FIELD_Y_REFINE`]
+/// vertex rows that refine the cell's row — carries at least
+/// [`OCCUPANCY_MIN`] of weighted trilinear mass. One reading per cell and bin,
+/// so refining the rows cannot zero a vertex its cell has measured.
+pub(crate) fn supported(occupancy: &[f32]) -> Vec<bool> {
+    let mut out = vec![false; occupancy.len()];
+    for cell in 0..FIELD_X * CELL_ROWS {
+        let spans: Vec<_> = cell_vertex_spans(cell).collect();
+        for bin in 0..FIELD_B {
+            let mass: f32 = spans.iter().map(|span| occupancy[span.start + bin]).sum();
+            for span in &spans {
+                out[span.start + bin] = mass >= OCCUPANCY_MIN;
+            }
+        }
+    }
+    out
+}
+
+/// The vertices evidence cell `cell` (row-major over the 12×8 cell grid)
+/// owns: its column, its `FIELD_Y_REFINE` vertex rows, all `FIELD_B` luma
+/// bins — one contiguous span per vertex row. The cell admission
+/// (`fit_zoned::field::admit_cells`) carries a cell's verdict onto exactly
+/// these, so a vouched cell and the vertices it switches cannot disagree.
+pub(crate) fn cell_vertex_spans(cell: usize) -> impl Iterator<Item = std::ops::Range<usize>> {
+    let (ix, cy) = (cell % FIELD_X, cell / FIELD_X);
+    (0..FIELD_Y_REFINE).map(move |k| {
+        let start = ((cy * FIELD_Y_REFINE + k) * FIELD_X + ix) * FIELD_B;
+        start..start + FIELD_B
+    })
 }
 
 /// Both frames strictly inside `(1/255, 254/255)` on all three channels.
@@ -396,7 +482,7 @@ fn apply_bands(
 /// not a measurement, and averaging it in reports spatial structure that is really
 /// missing evidence.
 fn band_summary(
-    grid: &[[f32; PARAMS]], occupancy: &[f32],
+    grid: &[[f32; PARAMS]], occupancy: &[f32], supported: &[bool],
 ) -> ([[f32; PARAMS]; FIELD_B], [f32; FIELD_B]) {
     let mut marginal = [[0.0f32; PARAMS]; FIELD_B];
     let mut dispersion = [0.0f32; FIELD_B];
@@ -407,7 +493,7 @@ fn band_summary(
         for spatial in 0..FIELD_X * FIELD_Y {
             let vertex = spatial * FIELD_B + bin;
             let (cell, weight) = (&grid[vertex], occupancy[vertex] as f64);
-            if occupancy[vertex] < OCCUPANCY_MIN { continue; }
+            if !supported[vertex] { continue; }
             mass += weight;
             for (p, slot) in sums.iter_mut().enumerate() { *slot += weight * cell[p] as f64; }
             let effect = LN2 * centre * cell[0] as f64 + centre
@@ -490,20 +576,79 @@ impl<'a> System<'a> {
         out
     }
 
-    /// `GridSystem.solve`: conjugate gradients with f64 dot products, a fixed step
-    /// budget, a relative-residual stop at 1e-10 and the same `denominator <= 1e-20`
-    /// break.  Returns the UNCLIPPED solution; bounds/occupancy are the caller's.
-    fn solve(&self, tikhonov: f32, smooth: [f32; 3], iterations: usize) -> (Vec<f32>, SolveInfo) {
+    /// The bound-constrained least-squares solve: an active-set loop around
+    /// conjugate gradients (f64 dot products, a per-pass step budget, a
+    /// relative-residual stop at 1e-10, the `denominator <= 1e-20` break).
+    ///
+    /// The bounds are honoured INSIDE the solve, not clipped onto an
+    /// unconstrained answer afterwards — and that difference is the whole
+    /// reason this is a loop. A vertex's five parameters act on a pixel
+    /// jointly (EV and the three gains are one per-channel multiplier between
+    /// them; the slope trades against both), so clipping one of them after the
+    /// solve leaves the others balanced for a value it no longer has. Measured
+    /// on a night-landscape pair (2026-10-19) whose dark ground the field had
+    /// to lift about 1.8 EV: the clipped field left the ground at a linear-light
+    /// red/green ratio of 3.69 against the target's 3.16 — redder than the 3.46
+    /// it started from — while the constrained solve of the same system reads
+    /// 3.59 end to end. Each pass pins the parameters sitting on a bound whose gradient
+    /// points outward, re-solves the free ones with the pinned ones held, and
+    /// releases any pinned one whose gradient turns inward; it stops when the
+    /// pinned set repeats. Returns a solution inside the bounds; occupancy is
+    /// the caller's.
+    fn solve(
+        &self, tikhonov: f32, smooth: [f32; 3], iterations: usize, bounds: impl Fn(usize) -> (f32, f32),
+    ) -> (Vec<f32>, SolveInfo) {
         let rhs = self.adjoint(&self.weigh(&self.target_delta));
-        let mut vector = vec![0.0f32; VERTICES * PARAMS];
-        let mut residual = rhs.clone();
-        let mut direction = rhs;
+        let (low, high): (Vec<f32>, Vec<f32>) = (0..rhs.len()).map(|i| bounds(i % PARAMS)).unzip();
+        let mut free = vec![true; rhs.len()];
+        let (mut vector, mut info) =
+            self.conjugate_gradients(&rhs, vec![0.0f32; rhs.len()], &free, tikhonov, smooth, iterations);
+        for _ in 0..ACTIVE_SET_PASSES {
+            for (i, slot) in vector.iter_mut().enumerate() { *slot = slot.clamp(low[i], high[i]); }
+            let product = self.matvec(&vector, tikhonov, smooth);
+            let pinned: Vec<bool> = (0..rhs.len())
+                .map(|i| {
+                    let descent = rhs[i] - product[i];
+                    !((vector[i] <= low[i] && descent < 0.0) || (vector[i] >= high[i] && descent > 0.0))
+                })
+                .collect();
+            if pinned == free && (0..rhs.len()).all(|i| !free[i] || (low[i] < vector[i] && vector[i] < high[i])) {
+                break;
+            }
+            free = pinned;
+            (vector, info) = self.conjugate_gradients(&rhs, vector, &free, tikhonov, smooth, iterations);
+        }
+        for (i, slot) in vector.iter_mut().enumerate() { *slot = slot.clamp(low[i], high[i]); }
+        (vector, info)
+    }
+
+    /// `GridSystem.solve` restricted to the `free` parameters, warm-started
+    /// from `start`: the held ones keep their value and take no step. With
+    /// every parameter free and a zero start this is the original solve step
+    /// for step.
+    fn conjugate_gradients(
+        &self, rhs: &[f32], start: Vec<f32>, free: &[bool], tikhonov: f32, smooth: [f32; 3],
+        iterations: usize,
+    ) -> (Vec<f32>, SolveInfo) {
+        let mask = |values: &mut [f32]| {
+            for (slot, &open) in values.iter_mut().zip(free) { if !open { *slot = 0.0; } }
+        };
+        let mut vector = start;
+        let mut residual: Vec<f32> = if vector.iter().all(|&v| v == 0.0) {
+            rhs.to_vec()
+        } else {
+            let product = self.matvec(&vector, tikhonov, smooth);
+            rhs.iter().zip(&product).map(|(b, a)| b - a).collect()
+        };
+        mask(&mut residual);
+        let mut direction = residual.clone();
         let mut rr = dot(&residual, &residual);
         let initial = rr.max(1e-30);
         let mut used = 0usize;
         for step in 1..=iterations {
             used = step;
-            let product = self.matvec(&direction, tikhonov, smooth);
+            let mut product = self.matvec(&direction, tikhonov, smooth);
+            mask(&mut product);
             let denominator = dot(&direction, &product);
             if denominator <= 1e-20 { break; }
             let alpha = (rr / denominator) as f32;

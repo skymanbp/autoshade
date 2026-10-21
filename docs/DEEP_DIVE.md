@@ -150,12 +150,14 @@ are in [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](TECH_STACK.md#ai-advisor-
   free-form remainder pass has refused every proposal on the calibration
   corpus ([docs/TECH_STACK.md#layered-spatial-reverse-fit-and-mask-refinement](TECH_STACK.md#layered-spatial-reverse-fit-and-mask-refinement)).
 - **A bilateral-grid local field prices every producer first**: a read-only
-  12×8×8 grid (x, y, luma) of five develop parameters solved by conjugate
-  gradients in f64 (λ = 1 Tikhonov, a Laplacian smoother, ≤ 90 iterations),
+  12×32×8 grid (x, y, luma; the 12×8 evidence cells with every row refined
+  four times) of five develop parameters solved by conjugate gradients in
+  f64 (a Tikhonov term and a Laplacian smoother calibrated at 12×8×8,
+  ≤ 90 iterations),
   whose residual is the **ceiling** any spatially varying develop could
   reach — the calibration pair's reading is under
   [Measured numbers](#measured-numbers), and the Rust solve agrees with the
-  NumPy reference to 1.5 × 10⁻⁵ across 768 vertices. It never touches a
+  NumPy reference across all 3072 vertices. It never touches a
   pixel: it proposes bands, halves the tile budget when the remainder is not
   tile-shaped, and ends the fit within 0.002 of a ceiling that beat the
   producer-free frame ([docs/TECH_STACK.md#local-field-analyzer](TECH_STACK.md#local-field-analyzer)).

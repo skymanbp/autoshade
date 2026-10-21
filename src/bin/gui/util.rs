@@ -96,7 +96,8 @@ pub(crate) fn draw_mask_overlay(
     let p = ui.painter_at(xf.rect);
     let stroke = egui::Stroke::new(2.0, ACCENT);
     match geom {
-        MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
+        MaskGeometry::Linear { zero_x, zero_y, full_x, full_y }
+        | MaskGeometry::Shaped { zero_x, zero_y, full_x, full_y, .. } => {
             let a = xf.to_screen(*zero_x, *zero_y);
             let b = xf.to_screen(*full_x, *full_y);
             // Invert swaps which end carries the full effect.
@@ -200,7 +201,8 @@ pub(crate) fn draw_mask_overlay(
 /// (empty).
 pub(crate) fn mask_handle_points(geom: &MaskGeometry, xf: ViewXform) -> Vec<(u8, egui::Pos2)> {
     match *geom {
-        MaskGeometry::Linear { zero_x, zero_y, full_x, full_y } => {
+        MaskGeometry::Linear { zero_x, zero_y, full_x, full_y }
+        | MaskGeometry::Shaped { zero_x, zero_y, full_x, full_y, .. } => {
             let a = xf.to_screen(zero_x, zero_y);
             let b = xf.to_screen(full_x, full_y);
             vec![(0, a + (b - a) * 0.5), (1, a), (2, b)]
@@ -939,6 +941,11 @@ pub(crate) fn geom_to_view(geom: &MaskGeometry, dims: (f32, f32), deg: f32, dist
             let a = orig_norm_to_view(zero_x, zero_y, dims, deg, dist);
             let b = orig_norm_to_view(full_x, full_y, dims, deg, dist);
             MaskGeometry::Linear { zero_x: a.0, zero_y: a.1, full_x: b.0, full_y: b.1 }
+        }
+        MaskGeometry::Shaped { zero_x, zero_y, full_x, full_y, ref falloff } => {
+            let a = orig_norm_to_view(zero_x, zero_y, dims, deg, dist);
+            let b = orig_norm_to_view(full_x, full_y, dims, deg, dist);
+            MaskGeometry::Shaped { zero_x: a.0, zero_y: a.1, full_x: b.0, full_y: b.1, falloff: falloff.clone() }
         }
         MaskGeometry::Radial {
             top, left, bottom, right, feather, roundness, flipped, angle, midpoint, mask_version,

@@ -340,6 +340,41 @@ fn shipped_linear_falloff_is_eased() {
 }
 
 #[test]
+fn a_shaped_gradient_reads_its_own_falloff_along_the_handles() {
+    let falloff = vec![0.0, 0.1, 0.5, 1.0];
+    let g = MaskGeometry::Shaped { zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 1.0, falloff: falloff.clone() };
+    // At the samples the table is read exactly; between them, linearly.
+    assert_eq!(mask_weight(&g, 0.2, 0.0, None), 0.0);
+    assert!((mask_weight(&g, 0.2, 1.0 / 3.0, None) - 0.1).abs() < 1e-5);
+    assert!((mask_weight(&g, 0.2, 0.5, None) - 0.3).abs() < 1e-5);
+    assert_eq!(mask_weight(&g, 0.2, 1.0, None), 1.0);
+    assert_eq!(mask_weight(&g, 0.2, 1.5, None), 1.0, "past the Full handle the last entry holds");
+    assert_eq!(mask_weight(&g, 0.2, -0.5, None), 0.0, "before the Zero handle the first entry holds");
+    // An empty table is the measured linear law, and the metric form agrees
+    // with the plain one on an axis-aligned gradient as it does for Linear.
+    let plain = MaskGeometry::Shaped { zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 1.0, falloff: Vec::new() };
+    let linear = MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 1.0 };
+    for i in 0..=10 {
+        let y = i as f32 / 10.0;
+        assert_eq!(mask_weight(&plain, 0.5, y, None), mask_weight(&linear, 0.5, y, None));
+        assert_eq!(mask_weight_in(&g, 0.5, y, None, None, (300.0, 200.0)), mask_weight(&g, 0.5, y, None));
+    }
+    // It survives the recipe's JSON round trip, and an entry outside 0..=1
+    // is clamped to a coverage.
+    let json = serde_json::to_string(&g).unwrap();
+    assert!(json.contains("\"kind\":\"shaped\""), "{json}");
+    assert_eq!(serde_json::from_str::<MaskGeometry>(&json).unwrap(), g);
+    let mut r = EditRecipe::default();
+    r.masks.push(LocalAdjustment {
+        mask: MaskGeometry::Shaped { zero_x: 0.5, zero_y: 0.0, full_x: 0.5, full_y: 1.0, falloff: vec![-1.0, 0.5, 2.0] },
+        ..Default::default()
+    });
+    let clean = crate::recipe::ValidatedRecipe::new(&r);
+    let MaskGeometry::Shaped { falloff, .. } = &clean.masks[0].mask else { panic!("the geometry survives") };
+    assert_eq!(falloff, &vec![0.0, 0.5, 1.0]);
+}
+
+#[test]
 fn linear_ramp_has_a_single_definition() {
     let src = include_str!("../mask_weight.rs");
     let metric = &src[src.find("fn mask_weight_metric").unwrap()..src.find("/// Mask coverage").unwrap()];

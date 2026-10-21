@@ -13,6 +13,7 @@ type MultiClassSegments = (
     (GrayImage, GrayImage),
     Vec<PlaneRefinement>,
     Vec<FeatherWidening>,
+    Vec<EdgeMatte>,
 );
 
 pub(super) fn segment_multiclass_both(
@@ -82,6 +83,7 @@ pub(super) fn segment_multiclass_both(
         // semantic path.
         let mut refinements: Vec<PlaneRefinement> = Vec::new();
         let mut widenings: Vec<FeatherWidening> = Vec::new();
+        let mut mattes: Vec<EdgeMatte> = Vec::new();
         for (side, frame, planes) in [("source", src, &mut source), ("target", target, &mut target_planes)] {
             for plane in planes.iter_mut() {
                 let label = format!("semantic {side} class {} {}", plane.class_id, plane.label);
@@ -104,7 +106,11 @@ pub(super) fn segment_multiclass_both(
                 // must be built from the alphas the renderer will persist.
                 // The region raster is claimed and written further down from
                 // exactly these bytes, so nothing here needs its own save.
+                // The matte first: it settles the ramp where the scene steps,
+                // and the widener then broadens it only where the scene does
+                // not — the two read complementary halves of one contour.
                 if side == "source" {
+                    mattes.push(matte_source_edge(frame, &mut plane.mask, &label));
                     match crate::mask_refine::widen_smooth_feather(frame, &plane.mask) {
                         crate::mask_refine::WidenOutcome::Widened { mask, reading } => {
                             plane.mask = mask;
@@ -149,7 +155,7 @@ pub(super) fn segment_multiclass_both(
             }
             rasters.push(raster);
         }
-        Ok((regions, rasters, (source_sky, target_sky), refinements, widenings))
+        Ok((regions, rasters, (source_sky, target_sky), refinements, widenings, mattes))
     })();
     for p in [&src_in, &tgt_in, &src_manifest, &tgt_manifest] { let _ = std::fs::remove_file(p); }
     run

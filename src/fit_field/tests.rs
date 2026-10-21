@@ -162,6 +162,28 @@ fn field_splat_is_a_partition_of_unity() {
     }
 }
 
+/// Every vertex belongs to exactly one evidence cell, through the cell's own
+/// column and the `FIELD_Y_REFINE` vertex rows that refine its row — the
+/// ownership the cell admission copies verdicts along. A span that skipped a
+/// bin, a row that two cells claimed, or a vertex no cell owned would each
+/// break the count.
+#[test]
+fn cell_vertex_spans_partition_the_grid_by_cell() {
+    let mut owner = vec![None::<usize>; VERTICES];
+    for cell in 0..FIELD_X * CELL_ROWS {
+        for span in cell_vertex_spans(cell) {
+            assert_eq!(span.len(), FIELD_B, "one span per vertex row, all luma bins");
+            for vertex in span {
+                let (ix, iy) = ((vertex / FIELD_B) % FIELD_X, vertex / FIELD_B / FIELD_X);
+                assert_eq!(ix, cell % FIELD_X, "a cell owns only its own column");
+                assert_eq!(iy / FIELD_Y_REFINE, cell / FIELD_X, "…and only the rows that refine its row");
+                assert!(owner[vertex].replace(cell).is_none(), "vertex {vertex} claimed twice");
+            }
+        }
+    }
+    assert!(owner.iter().all(Option::is_some), "every vertex has a cell");
+}
+
 /// `<F x, y> == <x, F^T y>`: the only thing that keeps the CG solving the system it
 /// thinks it is solving.  A transposed channel index in `adjoint` breaks it.
 #[test]
@@ -339,13 +361,13 @@ fn field_recovers_a_planted_two_band_exposure() {
             field.band_dispersion[bin] * 255.0,
         );
     }
-    let unmeasured = field.occupancy.iter().filter(|&&o| o < OCCUPANCY_MIN).count();
-    assert!(unmeasured > 0, "premise: this pair leaves vertices below the occupancy floor");
+    let measured = supported(&field.occupancy);
+    assert!(measured.iter().any(|m| !m), "premise: this pair leaves cells below the occupancy floor");
     for (vertex, (cell, &occupancy)) in field.grid.iter().zip(&field.occupancy).enumerate() {
-        if occupancy < OCCUPANCY_MIN {
+        if !measured[vertex] {
             assert_eq!(
                 *cell, [0.0; PARAMS],
-                "vertex {vertex} carries {occupancy} of mass and must be zeroed",
+                "vertex {vertex}'s cell carries too little mass ({occupancy} here) and must be zeroed",
             );
         }
     }
@@ -598,7 +620,24 @@ fn calibration_local_support_is_not_constant() {
 /// The NumPy solver's ceiling on the calibration pair `neutral.jpg -> target.jpg`,
 /// measured on the Rust module's OWN exported analysis pixels, guide and fit weight.
 ///
-/// PROVENANCE — RE-MEASURED 2026-08-31 (step 9) on NumPy 2.3.5 / Python 3.13.3
+/// PROVENANCE — RE-MEASURED 2026-10-21 on the refined grid (12×32×8, 3072
+/// vertices; `FIELD_Y_REFINE = 4`, `TIKHONOV = 1/4`, `SMOOTH = (1/4, 1, 1/4)`,
+/// the occupancy floor read per cell) on NumPy 2.3.5 / Python 3.13.3, by the
+/// three documented steps below with `scripts/field_check.py` now carrying
+/// production's bound-constrained active-set loop and per-cell floor: NumPy
+/// ceiling 0.072526 against the Rust port's 0.07252583 on a global figure of
+/// 0.099869, `max |grid_rust - grid_numpy| = 6.0e-7`, Rust 50 CG iterations,
+/// relative residual 8.7e-6, 748 supported vertices, 13 saturated. Two
+/// things moved the figure from 0.070085: the 2026-10-19 bound-constrained
+/// solve (at the 8-row grid it reads 0.069767, and against the clip-after
+/// NumPy solver of that day the grids disagreed by 0.138 — the cross-check
+/// had gone stale with it, which is why the loop is ported), and the
+/// refinement itself, which on THIS pair fits 0.0024 worse at any smoother
+/// weight (0.07124 twofold, 0.07253 fourfold) while fitting the night pair
+/// better (ceiling 0.0577 → 0.0553) and removing the band the refinement
+/// exists for. Below, the earlier provenance as it stood.
+///
+/// RE-MEASURED 2026-08-31 (step 9) on NumPy 2.3.5 / Python 3.13.3
 /// (Windows 11), by the same three documented steps:
 ///   `cargo test --release -- --ignored export_calibration_field_inputs_for_numpy`
 ///   `python scripts/field_check.py`   (tikhonov=1.0, smooth=(1,1,1), iterations=90)
@@ -616,9 +655,10 @@ fn calibration_local_support_is_not_constant() {
 /// 0.070_022_5 before that (2026-08-27, before the mixer). The recon's
 /// published grid figures are NOT reusable here: they were measured on the
 /// RAW-path renders, a different baseline.
-const NUMPY_FIELD_CEILING_CALIBRATION: f32 = 0.070_085_0;
-/// The largest per-parameter disagreement between the two solvers over all 768
-/// vertices: measured 1.50e-5 in the same run, bounded here at a legible 1e-4.
+const NUMPY_FIELD_CEILING_CALIBRATION: f32 = 0.072_526_0;
+/// The largest per-parameter disagreement between the two solvers over all
+/// 3072 vertices: measured 6.0e-7 in the 2026-10-21 run (1.50e-5 at the 8-row
+/// grid in 2026-08), bounded here at a legible 1e-4.
 const NUMPY_FIELD_GRID_MAX_DELTA: f32 = 1e-4;
 
 fn probe_dir() -> PathBuf {
@@ -737,7 +777,7 @@ fn export_calibration_field_inputs_for_numpy() {
         "iterations": field.solve.iterations,
         "relative_residual": field.solve.relative_residual,
         "saturated": field.saturated,
-        "supported_vertices": field.occupancy.iter().filter(|&&o| o >= OCCUPANCY_MIN).count(),
+        "supported_vertices": supported(&field.occupancy).iter().filter(|&&s| s).count(),
         "fit_weight_mass": weights.iter().map(|&w| w as f64).sum::<f64>(),
         "band_dispersion": field.band_dispersion,
         "band_marginal": field.band_marginal,
@@ -792,7 +832,7 @@ fn compare_calibration_field_with_numpy() {
     println!(
         "saturated={} supported={}",
         field.saturated,
-        field.occupancy.iter().filter(|&&o| o >= OCCUPANCY_MIN).count(),
+        supported(&field.occupancy).iter().filter(|&&s| s).count(),
     );
     println!("band_dispersion = {:?}", field.band_dispersion);
     println!("wall: LocalField::solve {solve_seconds:.3}s, local_support {support_seconds:.3}s");

@@ -1713,7 +1713,7 @@ pub const RECIPE_CONTROLS: [Control; 116] = [
     Control {
         // R33 §G. The THIRD global `RenderedNotExported` row, beside the two
         // calibration carriers — and the first one that is an EDIT rather than
-        // a measurement of the photo. A 12×8×8 bilateral grid of local colour
+        // a measurement of the photo. A 12×32×8 bilateral grid of local colour
         // and tone deltas is a coordinate system classic XMP does not have, so
         // there is no `crs:` key to lose it to and no partial projection worth
         // making: the sidecar carries the rest of the recipe unchanged and the
@@ -1731,7 +1731,7 @@ pub const RECIPE_CONTROLS: [Control; 116] = [
         engine_only: true,
         crs: CrsKey::None,
         tier: Some(Tier::RenderedNotExported),
-        purpose: "smooth 12x8x8 local colour/tone field solved by the reverse fit (rendered in-app, never exported to XMP)",
+        purpose: "smooth 12x32x8 local colour/tone field solved by the reverse fit (rendered in-app, never exported to XMP)",
     },
     Control {
         name: "rationale",

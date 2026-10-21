@@ -94,12 +94,14 @@ pub mod values {
     pub const ZONE_DO_NO_HARM: &str = "zone do-no-harm";
     pub const FRAME_DO_NO_HARM: &str = "frame do-no-harm";
     pub const BOUNDARY_REGRESSION: &str = "boundary regression";
+    pub const RAMP_STEEPER: &str = "ramp steeper than target";
 
     /// Every enumerated value, for the renderer and for the audit.
     pub const ALL: &[&str] = &[
         LUMA_RANGES, HUE_BANDS, BITMAP_CARRIER, FOUR_GRADIENTS, UNMEASURED,
         UNMEASURED_HARD_MASK, NATIVE_TRIAL_GATED, BAND_ESTIMATOR, BOUNDARY_BUDGET,
         DELTA_E_MARGIN, ZONE_DO_NO_HARM, FRAME_DO_NO_HARM, BOUNDARY_REGRESSION,
+        RAMP_STEEPER,
     ];
 }
 
@@ -629,6 +631,28 @@ pub mod keys {
         " Zoned {label} kept the current recipe: {k} trial bands regressed or failed a gate ({reason}, {trials} trials); R2={r2}, breaks={breaks}, overlap={overlap}, deltaE {before} -> {after}, seam {seam_before} -> {seam_after}, target steps {step_before} -> {step_after}, worst cell regression {regression}.";
     pub const ZONE_PAIRING_SCALE: &str =
         " Zoned {label} tone was solved at CELL scale: this zone's own structural reading is {d}, past the {line} pairing line, so its pixels are not each other's counterparts — the tone came from the zone's own luma distribution rather than from a per-pixel regression, which reads a re-synthesised texture's contrast low.";
+    /// The detail stage (2026-10-21, `fit_zoned::detail`): a zone's local
+    /// contrast at the engine's texture and clarity scales, paired by
+    /// correlation and solved closed loop. One sentence per outcome;
+    /// `k` is the shrink-ladder share the shipped sliders are of the solve.
+    pub const DETAIL_ATTACHED: &str =
+        " Local contrast matched for {label}: texture {texture}, clarity {clarity} (share {k} of the solve). The target's structure pairs with this photo's at r={r_tex} on the texture scale and r={r_cla} on the clarity scale; the render's local contrast went from {tex_before} to {tex_after} of the target's at the texture scale and from {cla_before} to {cla_after} at the clarity scale.";
+    pub const DETAIL_UNPAIRED: &str =
+        " Local contrast left alone for {label}: the target's fine structure does not sit where this photo's does (paired r={r_tex} on the texture scale, r={r_cla} on the clarity scale, line {min}). A slider can only amplify what the photograph holds, so what the target shows there was drawn in, not developed.";
+    pub const DETAIL_ALREADY_MATCHED: &str =
+        " Local contrast already matched for {label} (paired r={r_tex}/{r_cla}; the target asks {beta_tex} of the render's structure at the texture scale and {beta_cla} at the clarity scale).";
+    pub const DETAIL_NOT_ON_STRUCTURE: &str =
+        " Local contrast left alone for {label}: the target shows {ratio_tex}x this render's contrast at the texture scale and {ratio_cla}x at the clarity scale, but on the structure the two frames share (paired r={r_tex}/{r_cla}) it asks {beta_tex}x and {beta_cla}x — the difference is not on this photo's structure, and a slider cannot put it there.";
+    pub const DETAIL_NO_STRUCTURE: &str =
+        " Local contrast not measured for {label}: neither frame carries fine structure there to pair.";
+    pub const DETAIL_REFUSED_QUALITY: &str =
+        " Local contrast match for {label} refused by the local-quality gate at every rung of the shrink ladder (solved texture {texture}, clarity {clarity}; paired r={r_tex}/{r_cla}).";
+    pub const DETAIL_REFUSED_ENERGY: &str =
+        " Local contrast match for {label} refused: at every rung of the shrink ladder it would push a band's local contrast past what the evidence allows — the target's at a scale where the structure pairs, this render's own at one where it does not (solved texture {texture}, clarity {clarity}; paired r={r_tex}/{r_cla}).";
+    pub const DETAIL_REFUSED_FRAME: &str =
+        " Local contrast match for {label} refused: at every rung of the shrink ladder it moved the frame past its drift budget (solved texture {texture}, clarity {clarity}; paired r={r_tex}/{r_cla}).";
+    pub const DETAIL_REFUSED_REACH: &str =
+        " Local contrast match for {label} refused: a slider ran to its stop (texture {texture}, clarity {clarity}) with the render's local contrast still at {share} of the target's at that scale — what the target shows there is not what this slider makes (paired r={r_tex}/{r_cla}).";
     /// The share-mismatch exit attaches NO zone. It used to borrow the
     /// evidence-withheld sentence with both range lists empty, which read
     /// as "it would move zero-evidence luma ranges [none]" -- a claim about
@@ -849,6 +873,28 @@ pub mod keys {
          alpha ramp there was broadened to a radius of up to {radius} px \
          (coverage delta {coverage}); where the guide has edges the alpha was \
          left untouched, so silhouettes stay crisp.";
+    /// The third, and the one that MOVES a ramp: where the scene steps across
+    /// the boundary, the transition is set to each pixel's own content share
+    /// (`mask_refine::content_matte`).
+    pub const MASK_EDGE_MATTED: &str =
+        " Semantic mask edge keyed to the scene for {label}: {share}% of the 50% \
+         contour runs along an edge the scene itself makes, so within {radius} \
+         px of it each pixel the model was unsure of was set to the share of it \
+         that is this region's content, read off the scene's brightness between \
+         the two sides (coverage delta {coverage}); where the scene is smooth \
+         the ramp was left to the feather widening.";
+    pub const MASK_EDGE_MATTE_ABSTAINED: &str =
+        " Semantic mask edge keying abstained for {label}: {share}% of the 50% \
+         contour runs along an edge the scene makes (coverage delta \
+         {coverage}); the original mask bytes were retained.";
+    /// Before the keying: partial alpha with no other region in reach is the
+    /// model's hesitation, not a transition (`mask_refine::fill_confidence_holes`).
+    pub const MASK_HOLES_FILLED: &str =
+        " Semantic mask confidence holes filled for {label}: {share}% of the \
+         pixels the model left partial had no other region within {radius} px, \
+         so they were not a transition between two regions but the model's \
+         hesitation inside one; they were taken to that region's own level, \
+         fully beyond twice that reach and fading to untouched at it.";
     pub const MASK_FEATHER_ABSTAINED: &str =
         " Semantic mask feather widening abstained for {label}: {share}% of \
          the 50% contour was smooth enough to widen against a radius cap of \

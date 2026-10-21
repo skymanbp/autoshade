@@ -9,6 +9,9 @@ pub(super) struct ZonedLayerOpts {
     pub(super) spatial: bool,
     pub(super) free_masks: bool,
     pub(super) refine_masks: bool,
+    /// The per-zone local-contrast stage (`detail.rs`), last in the
+    /// sequencer; off, the recipe is byte-identical to the build before it.
+    pub(super) detail: bool,
 }
 
 pub(super) const SHIPPED_LAYERS: ZonedLayerOpts = ZonedLayerOpts {
@@ -16,6 +19,7 @@ pub(super) const SHIPPED_LAYERS: ZonedLayerOpts = ZonedLayerOpts {
     spatial: true,
     free_masks: true,
     refine_masks: true,
+    detail: true,
 };
 
 /// A zone must cover at least this weighted share of ITS frame on BOTH sides

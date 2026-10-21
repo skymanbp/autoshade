@@ -31,10 +31,12 @@ use anyhow::{Context, Result};
 use image::{DynamicImage, GenericImageView, GrayImage};
 
 use crate::fit::{self, FitReport};
+use crate::fit_cells::MoveAxis;
 use crate::recipe::{LocalAdjustment, MaskCombine, MaskComponent, MaskGeometry, MaskRole, RangeMask};
 use crate::render;
 use crate::segment::{segment_file, SegmentOpts};
 
+mod detail;
 mod field;
 mod freemask;
 mod range;
@@ -60,19 +62,19 @@ use accept::{
 use accept::{enforce_boundary_gate};
 use attach::{
     ZoneAttachment, ZoneCoverage, ZoneDivergence, attach_zones_with_divergence,
-    measure_zone_divergence, segment_both, segmentation_input,
+    measure_zone_divergence, segment_both, segmentation_input, sky_land_geometry,
 };
 #[cfg(test)]
 use attach::{SEGMENT_BOTH_OVERRIDE, ZoneDivergences, attach_zones};
 pub(super) use boundary::{BoundaryReading, rim_cell_gaps, step_cell_gaps};
-use boundary::{ZONE_BOUNDARY_PERCENTILE, boundary_rim_toward, boundary_step_toward, lab};
+use boundary::{ZONE_BOUNDARY_HIGH, ZONE_BOUNDARY_PERCENTILE, boundary_rim_toward, boundary_step_toward, lab};
 #[cfg(test)]
 use boundary::{
-    CellSums, TARGET_STEP_MIN_CROSSINGS, ZONE_BOUNDARY_HIGH, ZONE_BOUNDARY_LOW, boundary_rim,
+    CellSums, TARGET_STEP_MIN_CROSSINGS, ZONE_BOUNDARY_LOW, boundary_rim,
     boundary_step, cell_shares, unasked,
 };
 pub use entry::{fit_recipe_zoned, fit_recipe_zoned_from, fit_recipe_zoned_with_regions};
-use entry::{FeatherWidening, PlaneRefinement};
+use entry::{EdgeMatte, FeatherWidening, PlaneRefinement, matte_source_edge};
 #[cfg(test)]
 use entry::{
     fit_recipe_zoned_inner, fit_recipe_zoned_inner_with_options, frame_err_under,
@@ -108,7 +110,7 @@ pub(crate) use zone_fit::{
     ZoneMoments, fit_zone_dials, zone_err, zone_luma_cdf, zone_moments, zone_sat_step,
 };
 use zone_fit::{
-    ZONE_VOUCH_SHRINK_STEPS, ZoneAcceptArm, clamp_zone_sat_for_mode, local_quality,
+    ZONE_VOUCH_SHRINK_STEPS, ZoneAcceptArm, clamp_zone_sat, clamp_zone_sat_for_mode, local_quality,
     scale_zone_colour, scale_zone_tone, shrink_atmosphere_gains_in, shrink_zone_corrections,
     zone_accepts, zone_skips,
 };

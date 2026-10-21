@@ -567,6 +567,287 @@ pub(crate) fn widen_smooth_feather(guide: &DynamicImage, mask: &GrayImage) -> Wi
     WidenOutcome::Widened { mask: output, reading }
 }
 
+/// Which of the model's own pixels [`content_matte`] takes as each side's
+/// reference: alpha at or above this is sky content, at or below `1 - this` is
+/// land. Not 1.0 and 0.0, because the model's plateau beside a horizon is not
+/// at 1 (0.88-0.93 over whole columns of the night pair) and a reference that
+/// demanded certainty would find none exactly where one is needed.
+const MATTE_REFERENCE: f32 = 0.85;
+
+/// Fill a SOFT mask's confidence holes: partial alpha with no pixel of the
+/// OTHER region anywhere near it. A transition has two sides; a partial pixel
+/// that has only one is not a transition but the model hesitating inside one
+/// region, and its alpha does not describe the scene.
+///
+/// WHY, measured on a night pair (2026-10-19): the sky probability sat at
+/// 0.80-0.95 in rings round bright stars and meteors, in patches of glow low
+/// in the sky and in strips down both frame edges — 2.1% of the sky, every
+/// pixel of it sky, none of it near the land. Each received that share of the
+/// sky's correction, so each was a pocket of the uncorrected night inside a
+/// corrected sky, and the boundary gate read the pockets (311 of the 323
+/// crossings it still charged at full strength) and held the whole sky at
+/// k=0.002.
+///
+/// The rule, deterministic and symmetric: a partial pixel on the sky side
+/// (alpha >= 0.5) is lifted toward 1 by `t`, one on the land side lowered
+/// toward 0, where `t` is the share of five reaches — `cap` to `2 * cap` in
+/// quarter steps, `cap` the feather widener's own — at which no pixel of the
+/// other region ([`MATTE_REFERENCE`]) lies. A pixel within `cap` of the other
+/// region is untouched: every transition the widener or the keying shapes
+/// lies in there. One beyond `2 * cap` is filled outright. Between, the fill
+/// fades in, so no step is drawn where a broad ramp crosses the reach. A
+/// pixel moves by at most `min(alpha, 1 - alpha)`, its own uncertainty.
+///
+/// Returns the filled mask and the share of the partial pixels it moved, or
+/// `None` when nothing moved.
+pub(crate) fn fill_confidence_holes(mask: &GrayImage) -> Option<(GrayImage, f32, u32)> {
+    let (width, height) = mask.dimensions();
+    let (w, h) = (width as usize, height as usize);
+    if w < 3 || h < 3 {
+        return None;
+    }
+    let cap = ((height as f32 * FEATHER_CAP_SHARE).round() as usize).max(1);
+    let original = mask.as_raw();
+    let alpha = original.iter().map(|v| *v as f32 / 255.0).collect::<Vec<_>>();
+    let reaches = (0..5).map(|q| cap + cap * q / 4).collect::<Vec<_>>();
+    let near = |member: &dyn Fn(f32) -> bool| -> Vec<Vec<bool>> {
+        let seed = alpha.iter().map(|a| member(*a)).collect::<Vec<_>>();
+        reaches.iter().map(|r| dilate(&seed, w, h, *r)).collect()
+    };
+    let near_land = near(&|a| a <= 1.0 - MATTE_REFERENCE);
+    let near_sky = near(&|a| a >= MATTE_REFERENCE);
+    let mut partial = 0usize;
+    let mut moved = 0usize;
+    let bytes = (0..alpha.len())
+        .map(|i| {
+            let (a, byte) = (alpha[i], original[i]);
+            if byte == 0 || byte == 255 {
+                return byte;
+            }
+            partial += 1;
+            let other = if a >= 0.5 { &near_land } else { &near_sky };
+            let t = other.iter().filter(|reach| !reach[i]).count() as f32 / reaches.len() as f32;
+            let filled = if a >= 0.5 { a + t * (1.0 - a) } else { a - t * a };
+            let out = (filled.clamp(0.0, 1.0) * 255.0).round() as u8;
+            moved += usize::from(out != byte);
+            out
+        })
+        .collect::<Vec<u8>>();
+    if moved == 0 {
+        return None;
+    }
+    let mut output = GrayImage::new(width, height);
+    for (pixel, value) in output.pixels_mut().zip(bytes) {
+        *pixel = Luma([value]);
+    }
+    Some((output, moved as f32 / partial.max(1) as f32, cap as u32))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MatteReading {
+    /// Share of the mask's 50% contour that runs along an edge the scene
+    /// itself makes, in [0, 1]. Zero is the abstention.
+    pub(crate) matted_share: f32,
+    /// How far from the contour the keyed alpha reaches, in MASK pixels: twice
+    /// the feather widener's own cap, where [`fill_confidence_holes`] takes
+    /// over.
+    pub(crate) radius: u32,
+    pub(crate) coverage_delta: f32,
+    /// Alpha changed outside the collar. Zero by construction.
+    pub(crate) core_changed: usize,
+}
+
+#[derive(Debug)]
+pub(crate) enum MatteOutcome {
+    Matted { mask: GrayImage, reading: MatteReading },
+    Abstained { reading: MatteReading },
+}
+
+/// Where a SOFT mask's contour runs along an edge the scene itself makes, set
+/// each pixel the model was unsure of to the share of it that IS this region's
+/// content, read off the scene; leave the mask exactly as it is wherever the
+/// scene is smooth. The mirror of [`widen_smooth_feather`], read on the same
+/// guide with the same variation and the same noise-aware line: one rule
+/// decides which crossings are edges, this keys those and the widener
+/// broadens the rest.
+///
+/// WHY, measured on a night pair (2026-10-19). A semantic raster IS the
+/// model's probability, and beside the horizon the model is unsure in two
+/// ways the scene is not. Its plateau above the skyline stays at 0.88-0.93
+/// over whole columns, so the glow strip — sky, every pixel of it — got that
+/// share of the sky's correction; and its 50% line runs 2-6 px of its 2048-px
+/// raster ABOVE the skyline, so a strip of pixels as bright as the glow
+/// (display luma 0.13-0.14 against the mesa's 0.04-0.05) was land. With the
+/// sky asking for blue x3.7 that strip stayed green under a blue sky; the
+/// boundary gate read the shortfall correctly (the largest charges sat on
+/// alpha 0.5-0.8 pixels whose reference matched the sky foot to 0.004) and
+/// could only answer it by shrinking the whole sky to k=0.008. Steepening the
+/// model's ramp about its own 50% line made the mask hard and kept the line
+/// where it was wrong; the guided refinement that should have moved it
+/// abstained (edge alignment 0.00563 -> 0.00537).
+///
+/// The rule, deterministic and with no per-image sweep:
+///
+///   * a contour crossing is an EDGE in proportion to how far the guide's
+///     variation across it (the widener's own `variation`, at its `probe`)
+///     exceeds the widener's noise-aware `line`: 0 at the line, 1 at twice
+///     it — exactly where the widener's smooth credit has already reached 0;
+///     A contour with no edge at all abstains outright;
+///   * each side's level is the mean of the model's own reference pixels
+///     ([`MATTE_REFERENCE`]) within `2 * cap`, and a pixel the model left partial
+///     is keyed to `(Y - land) / (sky - land)` in linear light, clamped to
+///     [0, 1] — the same mixture the boundary ruler owes a band pixel, so the
+///     mask delivers what the gate measures it against;
+///   * how far the key is trusted is read at the PIXEL, by the same rule: the
+///     step between its two local levels over the noise-aware `line`, 0 at
+///     the line and 1 at twice it. In haze the two levels meet and the ramp is
+///     left to the widener; beside a mesa they do not, whatever the contour
+///     does 40 px away. The first version carried the contour's credit
+///     outward by its minimum in reach ([`spread_min`]), and on the night pair
+///     that left mask pixels as bright as the glow at alpha 0.6-0.9 down both
+///     flanks of a mesa, because a smooth stretch of the same contour lay
+///     within the cap. The delivered alpha is `alpha + credit * (key -
+///     alpha)`; the pixels the model was certain of (0 or 255) are not moved,
+///     nor is anything outside the collar.
+///
+/// It abstains when no crossing is an edge, when nothing would change, or when
+/// coverage moves by more than the model's OWN uncertainty — the mass
+/// `min(alpha, 1 - alpha)` it left on its partial pixels, which is exactly
+/// how far it said its line might be off. Not [`COVERAGE_DELTA_MAX`]: that
+/// bound is for refinements that keep the contour where it is, and this one
+/// exists to move it onto the scene's edge (on the night pair a 2-6 px move
+/// along the horizon is 0.0033 of the frame).
+pub(crate) fn content_matte(guide: &DynamicImage, mask: &GrayImage) -> MatteOutcome {
+    let (width, height) = mask.dimensions();
+    let (w, h) = (width as usize, height as usize);
+    let nothing = MatteReading { matted_share: 0.0, radius: 0, coverage_delta: 0.0, core_changed: 0 };
+    if w < 3 || h < 3 {
+        return MatteOutcome::Abstained { reading: nothing };
+    }
+    let cap = ((height as f32 * FEATHER_CAP_SHARE).round() as usize).max(1);
+    let probe = (cap / 4).max(1);
+    let original = mask.as_raw();
+    let alpha = original.iter().map(|v| *v as f32 / 255.0).collect::<Vec<_>>();
+    let mut contour = vec![false; alpha.len()];
+    let mut contour_len = 0usize;
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let inside = alpha[i] >= 0.5;
+            let crosses = (x + 1 < w && (alpha[i + 1] >= 0.5) != inside)
+                || (x > 0 && (alpha[i - 1] >= 0.5) != inside)
+                || (y + 1 < h && (alpha[i + w] >= 0.5) != inside)
+                || (y > 0 && (alpha[i - w] >= 0.5) != inside);
+            contour[i] = crosses;
+            contour_len += usize::from(crosses);
+        }
+    }
+    if contour_len == 0 {
+        return MatteOutcome::Abstained { reading: nothing };
+    }
+    let guide = guide_luma(guide, width, height);
+    let smoothed = box_mean(&guide, w, h, probe);
+    let variation = |x: usize, y: usize| -> f32 {
+        let here = smoothed[y * w + x];
+        let reach = |xx: usize, yy: usize| (smoothed[yy * w + xx] - here).abs();
+        reach(x.saturating_sub(probe), y)
+            .max(reach((x + probe).min(w - 1), y))
+            .max(reach(x, y.saturating_sub(probe)))
+            .max(reach(x, (y + probe).min(h - 1)))
+    };
+    // The keying reaches TWICE the widener's cap, to meet
+    // [`fill_confidence_holes`], which fills only beyond `2 * cap` of the
+    // other region and fades in from `cap`: at one cap the strip between
+    // was neither keyed nor filled, and on the night pair it held 152
+    // crossings of the glow above the horizon at alpha 0.85-0.95 (the whole
+    // sky at k=0.002). Its side references read over the same reach, so a
+    // pixel up to `2 * cap` from the land still finds the land's level.
+    let reach = 2 * cap;
+    let collar = dilate(&contour, w, h, reach);
+    let line = (SMOOTH_NOISE_MULTIPLE * flat_level(&dilate(&contour, w, h, 2 * cap), w, &variation))
+        .max(ONE_CODE);
+    let mut on_contour = vec![f32::INFINITY; alpha.len()];
+    let mut edged = 0usize;
+    for (i, credit) in on_contour.iter_mut().enumerate() {
+        if contour[i] {
+            *credit = (variation(i % w, i / w) / line - 1.0).clamp(0.0, 1.0);
+            edged += usize::from(*credit > 0.0);
+        }
+    }
+    // Linear light, because a pixel's content share is a share of its LIGHT:
+    // a pixel half mesa and half glow emits the mean of their linear values.
+    let linear = box_mean(&guide, w, h, 1)
+        .into_iter()
+        .map(crate::render::srgb_to_linear)
+        .collect::<Vec<_>>();
+    // Each side's local level, in linear light for the key and on the
+    // guide's own display scale for the credit, so the credit is judged
+    // against the same `line` the contour's edges were.
+    let side = |reference: &dyn Fn(f32) -> bool| {
+        let member = alpha
+            .iter()
+            .zip(&collar)
+            .map(|(a, in_collar)| f32::from(*in_collar && reference(*a)))
+            .collect::<Vec<_>>();
+        let weighted = |values: &[f32]| {
+            let product = values.iter().zip(&member).map(|(v, m)| v * m).collect::<Vec<_>>();
+            box_mean(&product, w, h, reach)
+        };
+        (box_mean(&member, w, h, reach), weighted(&linear), weighted(&guide))
+    };
+    let (sky_mass, sky_linear, sky_display) = side(&|a| a >= MATTE_REFERENCE);
+    let (land_mass, land_linear, land_display) = side(&|a| a <= 1.0 - MATTE_REFERENCE);
+    let keyed = (0..alpha.len())
+        .map(|i| {
+            let a = alpha[i];
+            if !collar[i] || original[i] == 0 || original[i] == 255 {
+                return a;
+            }
+            if sky_mass[i] <= 0.0 || land_mass[i] <= 0.0 {
+                return a;
+            }
+            let step = (sky_display[i] / sky_mass[i] - land_display[i] / land_mass[i]).abs();
+            let credit = (step / line - 1.0).clamp(0.0, 1.0);
+            if credit <= 0.0 {
+                return a;
+            }
+            let (sky, land) = (sky_linear[i] / sky_mass[i], land_linear[i] / land_mass[i]);
+            let key = ((linear[i] - land) / (sky - land)).clamp(0.0, 1.0);
+            a + credit * (key - a)
+        })
+        .collect::<Vec<_>>();
+    let bytes = keyed
+        .iter()
+        .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+        .collect::<Vec<u8>>();
+    let core_changed = bytes
+        .iter()
+        .zip(original)
+        .zip(&collar)
+        .filter(|((after, before), in_collar)| !**in_collar && after != before)
+        .count();
+    let coverage = |values: &[u8]| values.iter().map(|v| *v as f64 / 255.0).sum::<f64>() / alpha.len() as f64;
+    let reading = MatteReading {
+        matted_share: edged as f32 / contour_len as f32,
+        radius: reach as u32,
+        coverage_delta: (coverage(&bytes) - coverage(original)).abs() as f32,
+        core_changed,
+    };
+    let uncertainty = alpha.iter().map(|a| a.min(1.0 - a) as f64).sum::<f64>() / alpha.len() as f64;
+    if edged == 0
+        || bytes.as_slice() == original.as_slice()
+        || core_changed > 0
+        || reading.coverage_delta as f64 > uncertainty
+    {
+        return MatteOutcome::Abstained { reading };
+    }
+    let mut output = GrayImage::new(width, height);
+    for (pixel, value) in output.pixels_mut().zip(bytes) {
+        *pixel = Luma([value]);
+    }
+    MatteOutcome::Matted { mask: output, reading }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

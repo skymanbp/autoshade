@@ -498,14 +498,16 @@ pub(super) fn attach_one_zone(
     // it, "because this region's texture was re-synthesised", was false about
     // every one of them. The reference sky reads 0.617 and is the case this
     // arm was built for.
-    let region_vouch = |probe: &[[f32; 3]]| -> Option<crate::fit_cells::CellVouch> {
+    // Each probe is asked along the axis it can move: the colour probe has its
+    // tone zeroed and the tone probe its colour (`MoveAxis`).
+    let region_vouch = |probe: &[[f32; 3]], axis: MoveAxis| -> Option<crate::fit_cells::CellVouch> {
         if pairing != fit::PairingScale::Cell {
             return None;
         }
-        cells.as_ref().map(|c| c.vouch(&cur_px, probe, Some(moved_source)))
+        cells.as_ref().map(|c| c.vouch_along(axis, &cur_px, probe, Some(moved_source)))
     };
-    let hue_cells = hue_bands.as_ref().and_then(|_| region_vouch(&chroma_probe_px));
-    let luma_cells = luma_ranges.as_ref().and_then(|_| region_vouch(&luma_probe_px));
+    let hue_cells = hue_bands.as_ref().and_then(|_| region_vouch(&chroma_probe_px, MoveAxis::Colour));
+    let luma_cells = luma_ranges.as_ref().and_then(|_| region_vouch(&luma_probe_px, MoveAxis::Tone));
     // R36. A refusal on SIZE is not a refusal on DIRECTION. The reference sky
     // read 0.865 converged / 0.135 diverged / 1.000 aligned: every cell asked
     // for the warm push and a seventh of the mass was pushed PAST its own
@@ -521,7 +523,8 @@ pub(super) fn attach_one_zone(
     // (`aligned` under its line) is not asking for less of one move, and
     // stays refused exactly as before.
     let vouched_share = |probe_at: &dyn Fn(f32) -> crate::recipe::EditRecipe,
-                         full: Option<crate::fit_cells::CellVouch>|
+                         full: Option<crate::fit_cells::CellVouch>,
+                         axis: MoveAxis|
      -> Option<(f32, crate::fit_cells::CellVouch)> {
         let full = full?;
         if full.vouched() || !full.direction_agrees() {
@@ -531,7 +534,7 @@ pub(super) fn attach_one_zone(
         for _ in 0..ZONE_VOUCH_SHRINK_STEPS {
             let mid = 0.5 * (lo + hi);
             let px = fit::pixels_of(&render::develop_preview(s_img, &probe_at(mid)));
-            match region_vouch(&px) {
+            match region_vouch(&px, axis) {
                 Some(v) if v.vouched() => {
                     best = Some((mid, v));
                     lo = mid;
@@ -551,8 +554,8 @@ pub(super) fn attach_one_zone(
         scale_zone_tone(probe.masks.last_mut().expect("zone mask just pushed"), k);
         probe
     };
-    let hue_shrunk = hue_bands.as_ref().and_then(|_| vouched_share(&colour_at, hue_cells));
-    let luma_shrunk = luma_ranges.as_ref().and_then(|_| vouched_share(&tone_at, luma_cells));
+    let hue_shrunk = hue_bands.as_ref().and_then(|_| vouched_share(&colour_at, hue_cells, MoveAxis::Colour));
+    let luma_shrunk = luma_ranges.as_ref().and_then(|_| vouched_share(&tone_at, luma_cells, MoveAxis::Tone));
     // An ABSTENTION is never an admission: no cell grid, or a region whose
     // cells carried no trust-weighted evidence mass, leaves the strict
     // refusal exactly where it was. That is what keeps every zero-evidence
