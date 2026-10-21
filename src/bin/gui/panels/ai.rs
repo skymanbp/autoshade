@@ -56,7 +56,12 @@ impl AutoShadeApp {
         self.verdict.is_some() || !self.guidance.is_empty()
     }
 
-    /// The AI area — one first-level section, three sub-areas.
+    /// The AI area — TWO first-level sections (user ruling 2026-10-20: the two
+    /// AI paths read as one 「AI」 heap before, and they are different
+    /// products): 「AI generation & reverse-fit」 — an image model paints the
+    /// look, the fit recovers it as a recipe — and 「AI analysis & auto
+    /// develop」 — a vision model proposes or adjusts the recipe directly.
+    /// Each is a panel title like Develop's, with its own fold state.
     ///
     /// The editable gate is REBUILT here (L15-2). While a decode is in flight
     /// (`open_in_flight`) these controls would read and write the STASHED photo
@@ -68,49 +73,34 @@ impl AutoShadeApp {
     /// gate) — only the open transition freezes it.
     pub(crate) fn ai_panel(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang; // Copy — never borrows self, safe inside egui closures.
-        // The header's ● (`section_title`): a verdict or a Direction is this
-        // photo's AI state. The section itself always opens (`default_open`).
-        let ai_active = self.ai_section_active();
         let editable = !self.open_in_flight;
-        // The gate wraps the WHOLE area, header included — exactly how
-        // develop_panel wraps its sections, so the two read the same mid-open
+        // The gate wraps BOTH areas, headers included — exactly how
+        // develop_panel wraps its sections, so the three read the same mid-open
         // (greyed) instead of one panel looking live beside a dead one.
         ui.add_enabled_ui(editable, |ui| {
-            // A panel title like Develop's and Retouch's (`panel_heading`),
-            // only collapsible. `CollapsingHeader` indents its body, which set
-            // every AI row 18 px right of the other two panels' rows and cut
-            // its cells by 9 px (2026-09-27): the body is laid UNINDENTED, and
-            // the folds inside keep their own indent, so their rows start
-            // where a Develop fold's do. Same persistent id as the header it
-            // replaces, so an open state a user already has carries over.
-            // 2026-10-01: the title used to be drawn at fold size, so the
-            // five folds under it read as its siblings; it is a Heading now,
-            // and the folds sit under two group heads, as Develop's do.
-            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
-                ui.ctx(),
-                ui.make_persistent_id("sec_ai"),
-                true,
-            );
-            let header = panel_heading(ui, tr(lang, "AI"), ai_active, |ui| {
-                state.show_toggle_button(ui, paint_chevron);
-            })
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
-            if header.clicked() {
-                state.toggle(ui);
-            }
-            state.show_body_unindented(ui, |ui| {
+            // ① Generation: the ● means this photo has a generated card in
+            // play (the prompt is a remembered preference, not photo state —
+            // see `ai_section_active`).
+            let generated = self.active_on_ai_pixels();
+            self.ai_section(ui, "sec_ai_gen", tr(lang, "AI generation & reverse-fit"), generated, |app, ui| {
+                app.ai_generate(ui);
+                app.ai_adjust(ui);
+                app.ai_reverse_fit(ui);
+            });
+            ui.add_space(SPACE_MD);
+            // ② Analysis: the ● is a verdict or a Direction. Same persistent id
+            // as the single heading it grew out of, so an open state a user
+            // already has carries over.
+            let analysed = self.ai_section_active();
+            self.ai_section(ui, "sec_ai", tr(lang, "AI analysis & auto develop"), analysed, |app, ui| {
                 #[cfg(test)]
                 {
                     // The gate's own witness: a comment cannot keep it here.
-                    self.ai_gate_enabled = Some(ui.is_enabled());
+                    app.ai_gate_enabled = Some(ui.is_enabled());
                 }
-                group_caption(ui, tr(lang, "Analysis & References"));
-                self.ai_analysis(ui);
-                self.ai_libraries(ui);
-                group_caption(ui, tr(lang, "Generate & Reverse-fit"));
-                self.ai_generate(ui);
-                self.ai_adjust(ui);
-                self.ai_reverse_fit(ui);
+                app.ai_analysis(ui);
+                app.ai_adjust_edit(ui);
+                app.ai_libraries(ui);
                 // Where the AI verbs that did NOT move to this panel live.
                 // A panel called "AI" reads as the complete inventory
                 // otherwise, and the pixel-level tools are deliberately
@@ -118,9 +108,39 @@ impl AutoShadeApp {
                 ui.add_space(SPACE_XS);
                 explainer(ui, lang, tr(lang, "Pixel-level AI tools stay at their tools: select subject / select sky in Local Masks, denoise in Detail, heal and fill in Retouch."));
             });
-            state.store(ui.ctx());
         });
         ui.add_space(SPACE_MD); // fence to the Develop heading below
+    }
+
+    /// One first-level AI section: a panel title like Develop's and
+    /// Retouch's (`panel_heading`), only collapsible. `CollapsingHeader`
+    /// indents its body, which set every AI row 18 px right of the other two
+    /// panels' rows and cut its cells by 9 px (2026-09-27): the body is laid
+    /// UNINDENTED, and the folds inside keep their own indent, so their rows
+    /// start where a Develop fold's do. The title is a Heading (2026-10-01:
+    /// drawn at fold size, the folds under it read as its siblings).
+    fn ai_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: &str,
+        title: &str,
+        active: bool,
+        body: impl FnOnce(&mut Self, &mut egui::Ui),
+    ) {
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(),
+            ui.make_persistent_id(id),
+            true,
+        );
+        let header = panel_heading(ui, title, active, |ui| {
+            state.show_toggle_button(ui, paint_chevron);
+        })
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if header.clicked() {
+            state.toggle(ui);
+        }
+        state.show_body_unindented(ui, |ui| body(self, ui));
+        state.store(ui.ctx());
     }
 
     /// Sub-area ① continued — the deep-thinking WORKING as a block of its own.
@@ -337,60 +357,45 @@ impl AutoShadeApp {
                     self.prompt_rects.push(_field.rect);
                 }
             });
-            // The prompt's triggers sit DIRECTLY under it (user feedback:
+            // The prompt's trigger sits DIRECTLY under it (user feedback:
             // the toolbar Analyze button sat nowhere near the text it
-            // consumes). TWO explicit verbs replace the old pre-armed
-            // 「Refine」 checkbox — a mode you had to remember to tick
-            // (and untick) before clicking is exactly the kind of hidden
-            // state a button-per-intent design removes.
-            ui.horizontal_wrapped(|ui| {
-                // `analyze_inflight` too, or ✕ leaves these ENABLED while
-                // `start_analyze` silently refuses (it must refuse — the
-                // cancelled call is still on the wire and still billing).
-                // A button that looks live and does nothing, for up to the
-                // 600 s stall budget, with the status line saying the app
-                // is free, is worse than one that says why it is greyed.
-                let ready = self.src_path.is_some() && !self.busy && !self.analyze_inflight;
-                let waiting = self.analyze_inflight && !self.busy;
-                let why = |ui: egui::Response| {
-                    if waiting {
-                        ui.on_hover_text(tr(
-                            lang,
-                            "the cancelled AI call is still running (and still billed) — this re-arms when it finishes or times out",
-                        ))
-                    } else {
-                        ui
-                    }
-                };
-                let cell = columns(ui, 2);
-                if why(primary_in(ui, cell, ready, tr(lang, "AI Analyze"))
-                    .on_hover_text(tr(lang,
-                        "AI proposes a recipe from scratch (GPT proposal + validation + a visual \
-                         review: the result is RENDERED and judged by the vision model, which may \
-                         buy one guided revision), written into the sliders — undoable. Uses the \
-                         reference library or the Direction above (the switch picks one); Strength \
-                         steers it. COST, worst case: 11 API \
-                         calls, 6 of them carrying images (8 high-detail frames). Ticking 「Deep \
-                         thinking」 below OR pushing Strength above 70% raises that ceiling — \
-                         either one alone does it; the Deep thinking tooltip has the numbers.",
-                    )))
-                    .clicked()
-                {
-                    self.start_analyze(false);
+            // consumes). The old 「AI Refine」 beside it is gone (user ruling
+            // 2026-10-20): adjusting the edit you are looking at has its own
+            // fold with its own request box — `ai_adjust_edit` below.
+            //
+            // `analyze_inflight` too, or ✕ leaves this ENABLED while
+            // `start_analyze` silently refuses (it must refuse — the
+            // cancelled call is still on the wire and still billing).
+            // A button that looks live and does nothing, for up to the
+            // 600 s stall budget, with the status line saying the app
+            // is free, is worse than one that says why it is greyed.
+            let ready = self.src_path.is_some() && !self.busy && !self.analyze_inflight;
+            let waiting = self.analyze_inflight && !self.busy;
+            let why = |ui: egui::Response| {
+                if waiting {
+                    ui.on_hover_text(tr(
+                        lang,
+                        "the cancelled AI call is still running (and still billed) — this re-arms when it finishes or times out",
+                    ))
+                } else {
+                    ui
                 }
-                // Refining a neutral edit IS analyzing — disable the verb
-                // until there is an edit to refine.
-                let has_edit = ready && !self.recipe.is_noop();
-                if why(action_in(ui, cell, has_edit, tr(lang, "AI Refine"))
-                    .on_hover_text(tr(lang,
-                        "Adjust the CURRENT edit instead of proposing from scratch — your sliders are \
-                         the starting point (enabled once the edit is non-neutral).",
-                    )))
-                    .clicked()
-                {
-                    self.start_analyze(true);
-                }
-            });
+            };
+            if why(primary_row(ui, ready, tr(lang, "AI Analyze"))
+                .on_hover_text(tr(lang,
+                    "AI proposes a recipe from scratch (GPT proposal + validation + a visual \
+                     review: the result is RENDERED and judged by the vision model, which may \
+                     buy one guided revision), written into the sliders — undoable. Uses the \
+                     reference library or the Direction above (the switch picks one); Strength \
+                     steers it. COST, worst case: 11 API \
+                     calls, 6 of them carrying images (8 high-detail frames). Ticking 「Deep \
+                     thinking」 below OR pushing Strength above 70% raises that ceiling — \
+                     either one alone does it; the Deep thinking tooltip has the numbers.",
+                )))
+                .clicked()
+            {
+                self.start_analyze(None);
+            }
             // The two TASTE DIALS get their own lines, below the verbs (R23-3).
             //
             // They used to share the verbs' row, with a note claiming the wrap kept
@@ -485,6 +490,55 @@ impl AutoShadeApp {
                 .on_hover_text(tr(lang,
                     "Make the AI show its work and let it iterate. The proposal must first name what it sees, decide EACH tool family (tone / white balance / presence / HSL / colour grading / curves / detail / framing / masks) with a reason, state the look it is going for, and end by critiquing its own answer — those three sentences land in the 「Deep thinking」 box under the rationale. It also asks the image model for one step more reasoning effort (only when a tier other than 「provider default」 is set in Settings), and lets the visual judge keep going until it scores well enough: 2 rounds at a balanced Strength, 3 above 70%. COST: a normal analyze is at worst 11 API calls (6 with images, 8 high-detail frames); with this box ticked OR Strength above 70% — either one alone is enough — it is at worst 17 calls (10 with images, 14 high-detail), plus roughly 10-20% more output tokens per proposal. Batch and the eval harness never do this.",
                 ));
+            });
+    }
+
+    /// Sub-area ①b — ADJUST THE SELECTED VARIANT (paid API; user ruling
+    /// 2026-10-20, replacing 「AI Refine」). The request box and its verb,
+    /// together: the AI is shown the selected card AS IT LOOKS NOW and its
+    /// recipe, and returns the complete recipe that replaces it — every
+    /// develop control, and parts of the picture selected by content through
+    /// masks the local segmenter cuts (`pipeline::adjust_envelope`,
+    /// `segment::resolve_ai_masks`). Lands like an analysis: into the sliders,
+    /// undoable, and on a new ✎ card when the selected card is the pristine ✨.
+    fn ai_adjust_edit(&mut self, ui: &mut egui::Ui) {
+        let lang = self.lang;
+        ui.add_space(SPACE_XS);
+        card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Adjust the selected variant · paid API"))
+            .id_salt("sec_ai_adjust_edit")
+            .default_open(true)
+            .open(fold_open_in_tests())
+            , |ui| {
+                explainer(ui, lang, tr(lang, "Type what to change on the selected card; the AI adjusts its develop with the full control set and masks cut by content (sky, subject, an object)."));
+                let _field = prompt_field(
+                    ui,
+                    &mut self.adjust_edit_prompt,
+                    tr(lang, "e.g. darken the sky a little, warm the faces, more texture on the rocks"),
+                );
+                #[cfg(test)]
+                {
+                    self.prompt_rects.push(_field.rect);
+                }
+                let ready = self.src_path.is_some() && !self.busy && !self.analyze_inflight;
+                let asked = ready && !self.adjust_edit_prompt.trim().is_empty();
+                let resp = primary_row(ui, asked, tr(lang, "🤖 AI adjust"))
+                    .on_hover_text(tr(lang,
+                        "Adjust the SELECTED card's develop as you ask: the AI sees the card as it looks \
+                         now and its current recipe, returns the complete recipe that replaces it \
+                         (written into the sliders — undoable), uses every develop control, and selects \
+                         parts by content — sky, subject, an object — through masks the local segmenter \
+                         cuts. Same chain and COST as AI Analyze (worst case 11 API calls; 17 with \
+                         「Deep thinking」 or Strength above 70%), plus seconds of local segmentation \
+                         per mask it asks for. Enabled once the request box has text.",
+                    ));
+                #[cfg(test)]
+                {
+                    self.adjust_edit_btn_enabled = Some(resp.enabled());
+                }
+                if resp.clicked() {
+                    let request = self.adjust_edit_prompt.clone();
+                    self.start_analyze(Some(request));
+                }
             });
     }
 

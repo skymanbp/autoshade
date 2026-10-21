@@ -213,6 +213,18 @@ fn reference_preview(path: &Path) -> Result<Vec<u8>> {
 /// (a prompt steering the edit, e.g. "warmer and moodier") woven into the GPT
 /// prompt.
 ///
+/// `raw` is the PHOTO — what the develop store, the WB anchor and every mask
+/// cache are keyed on. `pixels` is the frame the model sees and the render
+/// uses when that is not the photo itself: a variant on AI-generated pixels
+/// (its ✨ raster), whose look and white balance are baked in, so the anchor
+/// is left unread. `None` is the photo, the case every batch surface is.
+///
+/// With `base` the chain is an ADJUST (the GUI's 「AI adjust the selected
+/// variant」, the CLI's and the web's refine): the model sees the base's own
+/// render, is handed the request and the base's numbers, and may ask for
+/// `ai` masks (sky / subject / object under a point) that
+/// [`crate::segment::resolve_ai_masks`] cuts locally before the judge renders.
+///
 /// `sink` is where this call's DISCLOSURES go (R29-1). The chain raises two
 /// ungated lines — the proposer fallback and the reference-search degrade — and
 /// until this parameter existed they were hard-coded `eprintln!`s a caller
@@ -229,6 +241,7 @@ fn reference_preview(path: &Path) -> Result<Vec<u8>> {
 #[allow(clippy::too_many_arguments)]
 pub fn produce_recipe(
     raw: &Path,
+    pixels: Option<&Path>,
     cfg: &Config,
     verbose: bool,
     guidance: Option<&str>,
@@ -256,7 +269,7 @@ pub fn produce_recipe(
     // This call's diagnostics channel, bound to the photograph it is about.
     let diag = crate::diag::Diag::about(sink, raw);
     // decode_any: a camera RAW, or an already-baked PNG/TIFF/JPEG (PNG-source mode).
-    let decoded = decode::decode_any(raw)?;
+    let decoded = decode::decode_any(pixels.unwrap_or(raw))?;
 
     // Library OR direction (user ruling 2026-10-14): a library-guided develop
     // sends no direction. The surfaces resolve the choice first
@@ -270,28 +283,27 @@ pub fn produce_recipe(
     // visual judge) want the intent, not the recipe they are already reading.
     let user_direction = guidance;
 
-    // Refine mode: when `base` (the user's CURRENT edit) is given, fold it into
-    // the direction so GPT adjusts that edit rather than proposing from scratch.
-    // Absent a base, behaviour is unchanged — a fresh proposal from the original.
-    let refine_owned: Option<String> = base.map(|b| {
-        // The AI proposes/verifies over the camera's embedded preview, where
-        // the base look AND the lens corrections are already IN the pixels —
-        // strip both from the copy woven into the prompt (either would
-        // double-apply in the verifier's render). The strip lives HERE, not
-        // in the callers: `base` must keep the user's REAL profile so
-        // carry_over_unrepresentable below can preserve unsaved lens toggles
-        // (pre-stripped callers made every Refine revert them to the saved
-        // profile).
+    // ADJUST mode: when `base` (the user's CURRENT edit) is given, the model
+    // is shown that edit's render and its numbers and asked for the complete
+    // recipe that replaces it. Absent a base, behaviour is unchanged — a
+    // fresh proposal from the original.
+    //
+    // The AI proposes/verifies over the camera's embedded preview, where the
+    // base look AND the lens corrections are already IN the pixels — strip
+    // both from the copy woven into the prompt and from the render it is
+    // shown (either would double-apply). The strip lives HERE, not in the
+    // callers: `base` must keep the user's REAL profile so
+    // carry_over_unrepresentable below can preserve unsaved lens toggles
+    // (pre-stripped callers made every Refine revert them to the saved
+    // profile).
+    let stripped_base: Option<EditRecipe> = base.map(|b| {
         let mut stripped = b.clone();
         stripped.base_curve = Vec::new();
         stripped.lens_profile = Default::default();
-        let base_json = serde_json::to_string(&stripped).unwrap_or_default();
-        format!(
-            "REFINE the photographer's CURRENT edit instead of starting over — keep its choices and \
-             change only what this direction implies. CURRENT EDIT (EditRecipe JSON): {base_json}. \
-             Direction: {}",
-            guidance.unwrap_or("make a small, tasteful improvement")
-        )
+        stripped
+    });
+    let refine_owned: Option<String> = stripped_base.as_ref().map(|stripped| {
+        adjust_envelope(&serde_json::to_string(stripped).unwrap_or_default(), guidance)
     });
     let guidance = refine_owned.as_deref().or(guidance);
 
@@ -423,12 +435,66 @@ pub fn produce_recipe(
     // AI chain): it has ONE consumer, the deliverable stamp, so reading it late
     // keeps it as fresh as it has always been instead of widening its staleness
     // window across minutes of network calls for no gain.
-    let (anchor_k, anchor_tint) = match saved_recipe_snapshot(raw, &crate::diag::Diag::about(sink, raw)) {
-        // Saved-first, like the base-look stamp below (a legacy save keeps
-        // None -> the 5500 K anchor -> byte-identical rendering of its
-        // tuned Kelvin).
-        Some(saved) => (saved.as_shot_k, saved.as_shot_tint),
-        None => fresh_as_shot_wb(raw),
+    let (anchor_k, anchor_tint) = if pixels.is_some() {
+        // Baked pixels carry their white balance: no anchor to quote or to
+        // stamp (the canvas copy of such a card has none either).
+        (None, None)
+    } else {
+        match saved_recipe_snapshot(raw, &crate::diag::Diag::about(sink, raw)) {
+            // Saved-first, like the base-look stamp below (a legacy save keeps
+            // None -> the 5500 K anchor -> byte-identical rendering of its
+            // tuned Kelvin).
+            Some(saved) => (saved.as_shot_k, saved.as_shot_tint),
+            None => fresh_as_shot_wb(raw),
+        }
+    };
+    // What the PROPOSER sees in adjust mode: the current edit RENDERED — the
+    // same render the judge scores (`judge_view` strips the same two fields
+    // and carries the same anchor) — so the request is answered against the
+    // picture the photographer is looking at, not against the straight
+    // preview plus a JSON to imagine. A fresh analysis sees the straight
+    // preview, as before; the judge's reference stays the straight preview.
+    let proposer_preview = match &stripped_base {
+        Some(stripped) => {
+            let mut shown = stripped.clone();
+            shown.as_shot_k = anchor_k;
+            shown.as_shot_tint = anchor_tint;
+            let mut jpeg = Vec::new();
+            crate::render::develop_preview(&preview_img, &shown)
+                .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+                .context("encode the current edit's render for the advisor")?;
+            Preview { jpeg }
+        }
+        None => Preview { jpeg: preview.jpeg.clone() },
+    };
+    // The `ai` masks a proposal asks for are cut HERE, by the local
+    // segmenter, before the verifier, the judge or the deliverable read the
+    // recipe: the judge renders the recipe, and an AI mask without its alpha
+    // renders as no mask at all. Keyed and homed on the PHOTO, segmented on
+    // the pixels the render uses (`segment::resolve_ai_masks`, F1-C). Cheap
+    // when nothing asks: a recipe with no unresolved AI mask decodes nothing.
+    let cut_ai_masks = |r: &mut EditRecipe, notes: &mut Vec<crate::rationale::Note>| {
+        let res = crate::segment::resolve_ai_masks(cfg, raw, pixels.unwrap_or(raw), r);
+        if res.resolved > 0 {
+            crate::rationale::push_note(
+                &mut r.rationale,
+                notes,
+                crate::rationale::Note::new(
+                    crate::rationale::keys::AI_MASKS_SEGMENTED,
+                    vec![("n", res.resolved.to_string())],
+                ),
+            );
+        }
+        for (name, why) in &res.unresolved {
+            crate::rationale::push_note(
+                &mut r.rationale,
+                notes,
+                crate::rationale::Note::new(
+                    crate::rationale::keys::AI_MASK_NOT_CUT,
+                    vec![("name", name.clone()), ("why", why.clone())],
+                ),
+            );
+        }
     };
 
     // GPT vision when a key is set; on failure (quota/network) warn and fall back
@@ -468,7 +534,7 @@ pub fn produce_recipe(
         if verbose {
             println!("proposer : OpenAI ({})", cfg.openai_model);
         }
-        match openai.propose_planned_with_base(&preview, meta, hist, &propose_ctx, base) {
+        match openai.propose_planned_with_base(&proposer_preview, meta, hist, &propose_ctx, base) {
             Ok(p) => {
                 thinking = p.thinking;
                 lens_opinion = p.lens;
@@ -476,7 +542,9 @@ pub fn produce_recipe(
                 // note list (A10): they were appended to the model's prose, so
                 // by the suffix contract they are where the notes start.
                 det_notes = p.notes;
-                (p.recipe, true)
+                let mut asked = p.recipe;
+                cut_ai_masks(&mut asked, &mut det_notes);
+                (asked, true)
             }
             Err(e) if base.is_some() => {
                 // REFINE means "adjust MY edit": the heuristic fallback
@@ -566,8 +634,8 @@ pub fn produce_recipe(
         // the loop stopped in the rationale, the one channel all three surfaces
         // show (the windowed GUI has no console for the CLI's stderr). A
         // FIRST-round failure still errors: there is no good pair to keep.
-        let revised = match openai.propose_planned_with_base(
-            &preview,
+        let mut revised = match openai.propose_planned_with_base(
+            &proposer_preview,
             meta,
             hist,
             &crate::advisor::ProposeContext { hint: Some(&hint), ..propose_ctx },
@@ -586,6 +654,7 @@ pub fn produce_recipe(
                 break;
             }
         };
+        cut_ai_masks(&mut revised.recipe, &mut revised.notes);
         match verifier.verify(&revised.recipe, meta, hist, &intent) {
             Ok(v) => {
                 recipe = revised.recipe;
@@ -771,7 +840,7 @@ pub fn produce_recipe(
                         &recipe,
                         |h| {
                             let p = openai.propose_planned_with_base(
-                                &preview,
+                                &proposer_preview,
                                 meta,
                                 hist,
                                 &crate::advisor::ProposeContext {
@@ -783,7 +852,9 @@ pub fn produce_recipe(
                             candidate_thinking = p.thinking;
                             candidate_lens.set(p.lens);
                             candidate_notes = p.notes;
-                            Ok(p.recipe)
+                            let mut asked = p.recipe;
+                            cut_ai_masks(&mut asked, &mut candidate_notes);
+                            Ok(asked)
                         },
                         |r| verifier.verify(r, meta, hist, &intent),
                         // The candidate's own opinion: `visual_review_round`
@@ -1271,6 +1342,34 @@ pub(crate) fn visual_review_round(
         Ok(second) => VisualRound::KeptLower { second_score: second.score },
         Err(e) => VisualRound::RejudgeFailed { e: e.to_string() },
     }
+}
+
+/// The ADJUST envelope: what the model is told when `base` is the edit the
+/// photographer is looking at (2026-10-21, replacing the one-line refine
+/// envelope). It names the frame it sees, asks for the COMPLETE recipe that
+/// replaces the edit, and says how to select a part of the picture — an `ai`
+/// mask by content, a `range` to confine it, a gradient for the rest — one
+/// mask per named part, an existing mask reused by its byte-exact `name`.
+pub(crate) fn adjust_envelope(base_json: &str, request: Option<&str>) -> String {
+    format!(
+        "ADJUST the photographer's CURRENT edit of this photograph as they ask — do not start \
+         over. IMAGE 1 shows the photograph AS IT LOOKS NOW, developed from the negative by the \
+         CURRENT EDIT below. Return the COMPLETE EditRecipe that REPLACES that edit — it is \
+         applied to the negative, not on top of the picture you see — keeping every value the \
+         request does not touch and changing exactly what it implies. Use the whole control \
+         set the catalogue lists (tone, white balance, presence, HSL, colour grading, curves, \
+         detail, framing) AND the local masks: when the request names a PART of the picture — \
+         the sky, the subject, a person, a building, the foreground — put the change on a mask \
+         instead of the globals. A kind=ai mask is cut by a local segmenter after you answer: \
+         what=sky, what=subject (the main subject), or what=object under the point ref_x/ref_y \
+         (0..1 frame coordinates, origin top-left); add a `range` (luminance or colour) to \
+         confine any mask further; use linear and radial masks for gradients and vignettes. \
+         One mask per named part: to change a mask the CURRENT EDIT already has, return it \
+         with its `name` byte-exact (its selection is kept) rather than adding a second one on \
+         the same part, and never stack two masks on one part. CURRENT EDIT (EditRecipe JSON): \
+         {base_json}. REQUEST: {}",
+        request.unwrap_or("make a small, tasteful improvement")
+    )
 }
 
 /// Re-attach what the AI's response schema CANNOT express, from the refine
@@ -7785,6 +7884,7 @@ mod tests {
         };
         let e = produce_recipe(
             Path::new("this-file-does-not-exist.arw"),
+            None,
             &cfg,
             false,
             None,
@@ -7979,6 +8079,24 @@ mod tests {
             src.contains(concat!("grade_intent(&req, user_direction, ", "style_look.as_deref())")),
             "…and hand that look to the one shared intent"
         );
+    }
+
+    /// The adjust envelope carries the current edit and the request, asks
+    /// for the COMPLETE replacing recipe (not a delta), and names the
+    /// content-cut masks by the schema's own target words.
+    #[test]
+    fn the_adjust_envelope_carries_the_edit_and_the_request() {
+        let base = r#"{"exposure_ev":0.25,"masks":[]}"#;
+        let text = adjust_envelope(base, Some("darken the sky a little"));
+        assert!(text.contains(base), "the current edit rides verbatim");
+        assert!(text.ends_with("REQUEST: darken the sky a little"), "the request is the last thing read");
+        assert!(text.contains("COMPLETE EditRecipe that REPLACES"), "a full recipe, not a delta");
+        for what in crate::advisor::catalogue::AI_MASK_TARGETS {
+            assert!(text.contains(&format!("what={what}")), "the envelope names `{what}` as the schema does");
+        }
+        assert!(text.contains("byte-exact"), "an existing mask is edited by name, not duplicated");
+        let plain = adjust_envelope(base, None);
+        assert!(plain.ends_with("REQUEST: make a small, tasteful improvement"), "no request → the default");
     }
 
     #[test]

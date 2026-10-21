@@ -384,7 +384,10 @@
             "a pref key missing from an older save must use the same dial default"
         );
         for lang in [Lang::En, Lang::Zh] {
-            let title = tr(lang, "AI");
+            // The analysis section's title (2026-10-21: the verdict and the
+            // Direction belong to it; the generation section lights its own
+            // dot off the selected card instead).
+            let title = tr(lang, "AI analysis & auto develop");
             let lit = format!("{title}  ●");
             for (case, has_verdict, guidance, active) in [
                 ("saved dials only", false, "", false),
@@ -465,8 +468,10 @@
             "a moved Strength slider is a preference, not this photo's AI state"
         );
         let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
+        let title = tr(Lang::En, "AI analysis & auto develop");
+        let lit = format!("{title}  ●");
         assert!(
-            seen.iter().any(|t| t == "AI") && !seen.iter().any(|t| t == "AI  ●"),
+            seen.iter().any(|t| t == title) && !seen.contains(&lit),
             "a moved Strength slider must leave the AI header plain: {seen:?}"
         );
         app.grade_strength = GRADE_STRENGTH_DEFAULT;

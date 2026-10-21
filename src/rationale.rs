@@ -1083,6 +1083,13 @@ pub mod keys {
     /// push both as English prose into `recipe.rationale`, where the
     /// suffix-strip contract reads them as the MODEL's own words and no
     /// surface can translate them.
+    /// The `ai` masks a proposal asked for (sky / subject / the object under
+    /// a point) were cut by the local segmenter before the judge saw the
+    /// render; one note per call, and one per mask it could not cut.
+    pub const AI_MASKS_SEGMENTED: &str =
+        " {n} AI mask(s) the proposal asked for were cut by the local segmenter (an approximation of the named part, not a hand-drawn selection).";
+    pub const AI_MASK_NOT_CUT: &str =
+        " AI mask \"{name}\" asked for by the proposal was carried but NOT rendered ({why}).";
     pub const PROPOSAL_LIMITS_DISCARDED: &str =
         " [the proposal exceeded recipe limits — discarded {dropped}]";
     /// R23-1: OpenAI strict mode cannot bound an array's LENGTH, so a

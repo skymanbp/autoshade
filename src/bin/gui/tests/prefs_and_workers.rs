@@ -541,8 +541,8 @@
     /// exactly where the old code fails: every field then measures its full
     /// available width and blows the `FIELD_W_MAX` assertion.
     ///
-    /// All four prompts are pinned by ONE rule over the `prompt_rects` seam:
-    /// Direction, Adjust and Generative Fill go through `util::prompt_field`, while the
+    /// All five prompts are pinned by ONE rule over the `prompt_rects` seam:
+    /// Direction, AI adjust, Adjust and Generative Fill go through `util::prompt_field`, while the
     /// Reimagine row keeps its own R19 galley arithmetic and only `.min()`s the
     /// result — four sites, one ceiling, and a further field added later is
     /// covered without editing this test.
@@ -595,8 +595,8 @@
             );
             assert_eq!(
                 app.prompt_rects.len(),
-                4,
-                "{lang:?}: expected the Direction / Reimagine / Adjust / Fill prompts to lay out, got {:?}",
+                5,
+                "{lang:?}: expected the Direction / AI adjust / Reimagine / Adjust / Fill prompts to lay out, got {:?}",
                 app.prompt_rects
             );
             for (i, r) in app.prompt_rects.iter().enumerate() {

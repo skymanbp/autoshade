@@ -331,6 +331,10 @@ pub(crate) struct AutoShadeApp {
     pub(crate) heal_fullres: bool,                    // heal the full-res develop
     pub(crate) reimagine_prompt: String,              // whole-image restyle prompt (its own entry)
     pub(crate) adjust_prompt: String,                 // edit the active generated picture
+    /// What to change on the SELECTED card's develop (2026-10-21): the request
+    /// 「AI adjust the selected variant」 sends with the card's render and
+    /// recipe. Its own field — the Direction box guides a fresh analysis.
+    pub(crate) adjust_edit_prompt: String,
     pub(crate) adjust_quality: usize,                 // 0=high 1=medium 2=low
     // --- production niceties ---
     pub(crate) view_mode: ViewMode,                   // side-by-side vs after-only (hold B = compare)
@@ -453,6 +457,8 @@ pub(crate) struct AutoShadeApp {
     /// can tell a rebuilt gate from a comment about one.
     #[cfg(test)]
     pub(crate) ai_gate_enabled: Option<bool>,
+    #[cfg(test)]
+    pub(crate) adjust_edit_btn_enabled: Option<bool>,
     /// Test seam: was the ADHERENCE slider enabled this frame? Same reason as
     /// the gate above — the slider is wrapped in `add_enabled_ui(has_direction,
     /// ...)`, and the falsifier named after that gate used to assert only that
@@ -1800,6 +1806,7 @@ impl Default for AutoShadeApp {
             heal_fullres: false,
             reimagine_prompt: String::new(),
             adjust_prompt: String::new(),
+            adjust_edit_prompt: String::new(),
             adjust_quality: 0,
             view_mode: ViewMode::SideBySide,
             toasts: Vec::new(),
@@ -1862,6 +1869,8 @@ impl Default for AutoShadeApp {
             prompt_rects: Vec::new(),
             #[cfg(test)]
             ai_gate_enabled: None,
+            #[cfg(test)]
+            adjust_edit_btn_enabled: None,
             #[cfg(test)]
             adherence_gate_enabled: None,
             #[cfg(test)]

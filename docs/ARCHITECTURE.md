@@ -1437,6 +1437,22 @@ reimagine/retouch/adjust, heal spot-detection, style-prompt extraction, the deno
 segmentation sidecars — talk to their endpoints directly rather than through
 this trait.)
 
+> **Two AI paths, two panel sections (user ruling 2026-10-20, shipped
+> 2026-10-21).** The desktop's single 「AI」 heading became two first-level
+> sections: 「AI generation & reverse-fit」 (Reimagine, Adjust generated image,
+> Reverse-fit — an image model paints, the fit recovers) and 「AI analysis &
+> auto develop」 (Analysis, Adjust the selected variant, Reference library — a
+> vision model proposes or adjusts the recipe). 「AI Refine」 is retired; its
+> replacement, 「AI adjust」, has its own request box and goes through
+> `start_analyze(Some(request))`: the request is the only guidance, the
+> current recipe is the base, and a card on AI-generated pixels passes its own
+> raster as `produce_recipe`'s `pixels` so the model answers about the picture
+> on screen. The proposer may ask for a `kind=ai` mask (sky / subject / object
+> under a point); `openai::expand_ai_mask_intents` turns it into the engine's
+> `ai_mask` geometry and `segment::resolve_ai_masks` cuts it locally after
+> each proposal — the schema does not carry rasters, so the selection is never
+> the model's to draw.
+
 | Role | Provider options | Sees pixels? | Job |
 |------|------------------|--------------|-----|
 | **Image advisor** (图像) | OpenAI-compatible vision over HTTP — the Responses API, or Chat Completions when the endpoint has no `/responses` (**API style** in Settings, `advisor::post_vision`; default `gpt-5.5`); Settings offers **API** (a real key) or **OAuth** (a local Codex bridge fronting a ChatGPT subscription) | **yes** (preview) | Look at the photo → emit an `EditRecipe`. The `claude` CLI has no image input in print mode, so this role never uses the claude OAuth path. |

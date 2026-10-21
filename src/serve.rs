@@ -1881,6 +1881,7 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // through a field nothing in the page can see.
     let (recipe, verdict, _notes) = pipeline::produce_recipe(
         &raw,
+        None,
         &cfg,
         false,
         guidance,

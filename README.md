@@ -37,6 +37,11 @@ An editable, Lightroom-ready recipe instead of AI pixels.
 > AutoShade fits an editable develop recipe to it and renders that recipe on the full-resolution RAW.
 > The recipe carries the look, the sensor carries the detail — and in the recipe path, **the AI never touches a pixel.**
 
+**Two AI paths, kept apart in the app, the command line and this page:**
+
+- **AI generation & reverse-fit** — an image model paints the picture you describe from your own frame (`reimagine`), and the reverse fit recovers that look as an editable recipe on the full RAW (`match`). The generated pixels are only ever a target.
+- **AI analysis & auto develop** — a vision model looks at the photo and proposes the recipe directly (`analyze`, `auto`), guided by your reference library or a typed direction; **AI adjust** sends the develop you are looking at with a request ("darken the sky a little") and gets the complete adjusted recipe back, with any part it names selected by a content mask cut locally.
+
 <br />
 
 ## Highlights

@@ -710,6 +710,11 @@ impl OpenAiProvider {
         // "zero it".
         let lens = take_lens_opinion(&mut parsed);
         let repaired = repair_hsl_axis_lengths(&mut parsed);
+        // The `ai` masks the model asked for, spelled as the engine's own
+        // geometry with no alpha yet (the pipeline cuts it locally). An
+        // unknown target — a bridge that ignored the enum — drops that one
+        // mask and is disclosed below, rather than failing the paid call.
+        let masks_dropped = expand_ai_mask_intents(&mut parsed);
         let mut recipe: EditRecipe = serde_json::from_value(parsed)?;
         // The model's JSON is not a FILE: `coord_era`'s serde default means
         // "written before the field existed", i.e. sensor-frame coordinates,
@@ -733,6 +738,16 @@ impl OpenAiProvider {
         // string is byte-identical to what it always was while the GUI gets a
         // key it can render in the session language.
         let mut notes: Vec<Note> = Vec::new();
+        if !masks_dropped.is_empty() {
+            crate::rationale::push_note(
+                &mut recipe.rationale,
+                &mut notes,
+                Note::new(
+                    keys::PROPOSAL_LIMITS_DISCARDED,
+                    vec![("dropped", format!("masks on an unknown ai target: {}", masks_dropped.join(", ")))],
+                ),
+            );
+        }
         if !repaired.is_empty() {
             // Repaired, but never silently: the mixer bands the model meant
             // are not the bands it will get. Our own text (axis names + the
@@ -767,6 +782,49 @@ impl OpenAiProvider {
         recipe.temper(ctx.strength);
         Ok(Proposal { recipe, thinking, lens, notes })
     }
+}
+
+/// The `ai` mask the schema lets the model ask for — `{kind:"ai", what, ref_x,
+/// ref_y}` (`catalogue::AI_MASK_TARGETS`) — spelled out as the engine's own
+/// `ai_mask` geometry with NO raster: the pipeline cuts the alpha with the
+/// local segmenter before the verifier, the judge or the deliverable read the
+/// recipe (`segment::resolve_ai_masks`). The component name is Lightroom's own
+/// spelling for the kind (`Sky 1`, `Subject 1`, `Object 1` — the measured
+/// `crs:MaskName` values), so the mask round-trips like a photographer's; the
+/// reference point is clamped into the frame. A mask whose target is not one
+/// of the three is REMOVED and its target returned, for the caller's
+/// disclosure — an unknown kind would otherwise fail the whole paid parse.
+pub(crate) fn expand_ai_mask_intents(v: &mut Value) -> Vec<String> {
+    let mut dropped = Vec::new();
+    let Some(masks) = v.get_mut("masks").and_then(Value::as_array_mut) else {
+        return dropped;
+    };
+    masks.retain_mut(|m| {
+        let Some(geom) = m.get_mut("mask") else { return true };
+        if geom.get("kind").and_then(Value::as_str) != Some("ai") {
+            return true;
+        }
+        let what = geom.get("what").and_then(Value::as_str).unwrap_or("").to_string();
+        let (subtype, name) = match what.as_str() {
+            "sky" => (2, "Sky 1"),
+            "subject" => (1, "Subject 1"),
+            "object" => (0, "Object 1"),
+            _ => {
+                dropped.push(what);
+                return false;
+            }
+        };
+        let point = |k: &str| geom.get(k).and_then(Value::as_f64).unwrap_or(0.5).clamp(0.0, 1.0);
+        let (ref_x, ref_y) = (point("ref_x"), point("ref_y"));
+        *geom = json!({
+            "kind": "ai_mask", "name": name, "subtype": subtype,
+            "ref_x": ref_x, "ref_y": ref_y,
+            "blend_mode": 0, "value": 1.0, "inverted": false, "mask_version": 1,
+            "provenance": [], "gesture": [], "raster": null
+        });
+        true
+    });
+    dropped
 }
 
 /// Read the three manual lens controls' "did the model state one?" answer and
@@ -1062,6 +1120,7 @@ pub(crate) fn output_text_or_refusal(
 mod tests {
     use super::*;
     use crate::advisor::tests::{join_stub, stub_endpoint};
+    use crate::recipe::MaskGeometry;
 
     /// Strict mode cannot bound an array's LENGTH, so a miscounted HSL axis is
     /// a real response shape — and it used to fail the WHOLE recipe parse,
@@ -1121,10 +1180,12 @@ mod tests {
                 !body.contains("recipe.rationale.push_str("),
                 "the provider is writing untyped prose into the rationale again"
             );
+            // Three: the dropped ai-mask targets (2026-10-21), the repaired
+            // HSL axes, and the discarded over-limit controls.
             assert_eq!(
                 body.matches("&mut notes,").count(),
-                2,
-                "both provider disclosures must ride the typed channel"
+                3,
+                "all three provider disclosures must ride the typed channel"
             );
 
         // A correctly-sized mixer is left completely alone (no false note).
@@ -2333,5 +2394,42 @@ mod tests {
              this probe records is wrong. Either way the rustdoc above and \
              `catalogue::think_envelope_schema` state a measurement that no longer holds."
         );
+    }
+
+    /// A `kind=ai` intent in a proposal becomes the geometry the local
+    /// segmenter cuts (`MaskGeometry::AiMask`, the Lightroom shape); an
+    /// unknown target is dropped and named; every other mask passes through.
+    #[test]
+    fn ai_mask_intents_expand_to_the_segmenter_geometry() {
+        let mut v = json!({"masks": [
+            {"mask": {"kind": "ai", "what": "sky"}},
+            {"mask": {"kind": "ai", "what": "object", "ref_x": 1.7, "ref_y": -0.2}},
+            {"mask": {"kind": "ai", "what": "moon"}},
+            {"mask": {"kind": "linear", "x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0, "feather": 0.5}},
+        ]});
+        let dropped = expand_ai_mask_intents(&mut v);
+        assert_eq!(dropped, vec!["moon".to_string()]);
+        let masks = v["masks"].as_array().unwrap();
+        assert_eq!(masks.len(), 3, "the unknown target is gone, the rest stay");
+        let sky: MaskGeometry = serde_json::from_value(masks[0]["mask"].clone()).expect("the sky parses");
+        match sky {
+            MaskGeometry::AiMask { name, subtype, raster, .. } => {
+                assert_eq!((name.as_str(), subtype), ("Sky 1", 2));
+                assert!(raster.is_none(), "the alpha is cut later, by the segmenter");
+            }
+            other => panic!("the sky intent became {other:?}"),
+        }
+        let object: MaskGeometry = serde_json::from_value(masks[1]["mask"].clone()).expect("the object parses");
+        match object {
+            MaskGeometry::AiMask { name, subtype, ref_x, ref_y, .. } => {
+                assert_eq!((name.as_str(), subtype), ("Object 1", 0));
+                assert_eq!((ref_x, ref_y), (1.0, 0.0), "the point is clamped into the frame");
+            }
+            other => panic!("the object intent became {other:?}"),
+        }
+        assert_eq!(masks[2]["mask"]["kind"], "linear", "a drawn mask is untouched");
+        // No masks at all: nothing to do, nothing dropped.
+        let mut none = json!({"exposure_ev": 0.0});
+        assert!(expand_ai_mask_intents(&mut none).is_empty());
     }
 }

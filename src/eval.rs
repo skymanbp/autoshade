@@ -1070,6 +1070,7 @@ pub fn run(
             let (ai, _verdict, notes) =
                 match pipeline::produce_recipe(
                     raw,
+                    None,
                     &cfg,
                     false,
                     None,

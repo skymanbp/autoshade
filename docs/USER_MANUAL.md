@@ -309,9 +309,10 @@ sidecar has no place for it, so the save line names it; it is not pasted onto
 other photos (each needs its own depth), and a photo with a lens blur cannot
 be rotated until it is removed. The side panel
 reads in three levels: a
-panel title (AI, Develop, Retouch) in large type over a short gold rule, group
-heads as small spaced grey captions (in the AI panel, **Analysis & References** and
-**Generate & Reverse-fit**), and the folds under them, each opened by a
+panel title (**AI generation & reverse-fit**, **AI analysis & auto develop**,
+Develop, Retouch) in large type over a short gold rule, group
+heads as small spaced grey captions (in Develop, **Tone & Colour** and **Detail
+& Lens**), and the folds under them, each opened by a
 chevron and drawn as a card while open; groups are set apart
 by space rather than lines. A glyph in front of a label always means
 the same thing —
@@ -998,13 +999,31 @@ directory to write into — so neither may come from a `./autoshade.local.json`
 sitting in the working directory. Only the environment or the per-user
 settings file can supply them.
 
-- **Analyze:** choose **Analyze** in the AI panel or run `autoshade analyze`.
+The side panel keeps the two AI paths apart: **AI generation & reverse-fit**
+(Reimagine, Adjust generated image, Reverse-fit) and **AI analysis & auto
+develop** (Analysis, Adjust the selected variant, Reference library).
+
+- **Analyze:** choose **AI Analyze** under **AI analysis & auto develop** or
+  run `autoshade analyze`.
   The vision advisor proposes bounded sliders and masks, a data-only verifier
   checks the proposal, and normal visual review may attempt one revision;
   `--deep` permits additional bounded rounds. Accepted output remains a normal
   recipe and XMP.
+- **Adjust the selected variant · paid API:** the fold under Analysis. Type
+  what to change on the card you are looking at ("darken the sky a little,
+  warm the faces") and click **🤖 AI adjust**. The model sees the card as it
+  looks now and its current recipe, and returns the complete recipe that
+  replaces it, using every develop control; a part it names — the sky, the
+  subject, an object — is selected by a content mask the local segmenter
+  cuts after the answer (an approximation of that part, not a hand-drawn
+  selection, and the rationale says so), with linear, radial and range masks
+  for the rest. It lands like an analysis: into the sliders, undoable, and
+  as a new **✎** card when the selected card is a pristine **✨** one; a card
+  on AI-generated pixels is adjusted from its own picture. Same chain and
+  cost as Analyze, plus a few seconds of local segmentation per content mask.
 - **Reference library:** pick a folder of finished photos whose look you like
-  (JPEG, TIFF or PNG exports — yours or anyone's) in **AI › Reference library**
+  (JPEG, TIFF or PNG exports — yours or anyone's) under **AI analysis & auto
+  develop › Reference library**
   or run `autoshade library-build <folder>`. Each photo is measured from its
   pixels; the finished photos' own `.xmp` files are never read. Optionally
   pick a **RAW folder** (or pass `--raw-root DIR`): each finished photo's RAW
@@ -1042,7 +1061,8 @@ settings file can supply them.
   optional `guide` field (`"library"` or `"direction"`) resolved the same way,
   plus an optional `adherence` (0..1, default 0.65). A box dragged on the image
   is a local direction, so it always guides by the direction.
-- **Reimagine:** enter a prompt in the AI panel or use `reimagine` to create a
+- **Reimagine:** enter a prompt under **AI generation & reverse-fit** or use
+  `reimagine` to create a
   generated, lower-resolution target. `--fidelity high` (the default, and the
   GUI's mode) tells the model to re-develop the same photograph, not repaint
   it. The structural divergence **D** against the sent input is disclosed;
@@ -1052,8 +1072,9 @@ settings file can supply them.
   closer result. Use **Reverse-fit** or `match` to infer a deterministic recipe
   and apply it to the original RAW at full resolution.
 
-- **Adjust generated image · paid API:** the fold directly after Reimagine in
-  the AI panel edits the selected **✨ AI generated** card or its **✎** edit.
+- **Adjust generated image · paid API:** the fold directly after Reimagine
+  under **AI generation & reverse-fit** edits the selected **✨ AI generated**
+  card or its **✎** edit.
   It has its own prompt, remembered high/medium/low quality, and its own
   **🖌 Paint area** / **Clear area** pair: every tool that takes a brush
   (Generative Fill, Heal, Clone Stamp and this fold) keeps a painted area of

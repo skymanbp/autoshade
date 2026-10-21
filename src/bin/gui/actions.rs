@@ -3225,7 +3225,14 @@ impl AutoShadeApp {
         );
     }
 
-    pub(crate) fn start_analyze(&mut self, refine: bool) {
+    /// `adjust`: `None` is a fresh analysis (「AI Analyze」); `Some(request)`
+    /// adjusts the SELECTED card's develop as the request says (「AI adjust」,
+    /// 2026-10-21): the current recipe is the base, the request guides alone
+    /// (the library is not read), and a card on AI-generated pixels sends its
+    /// own raster as the frame — the old Refine sent the RAW's preview under
+    /// a generated card, so the model answered about a picture nobody was
+    /// looking at.
+    pub(crate) fn start_analyze(&mut self, adjust: Option<String>) {
         let Some(path) = self.src_path.clone() else { return };
         // `busy` alone stopped guarding this the moment Analyze became
         // cancellable: ✕ clears it while the request is still on the wire and
@@ -3235,8 +3242,9 @@ impl AutoShadeApp {
         }
         let lang = self.lang;
         self.busy = true;
-        self.status = if refine {
-            tr(lang, "refining your current edit with AI…").into()
+        let adjusting = adjust.is_some();
+        self.status = if adjusting {
+            tr(lang, "adjusting the selected variant with AI…").into()
         } else {
             tr(lang, "analyzing with AI (GPT + Claude)…").into()
         };
@@ -3245,8 +3253,13 @@ impl AutoShadeApp {
         // HERE, on the UI thread, so the worker cannot pick up a toggle the
         // user flipped after starting the call.
         // A box-selected region is a local DIRECTION, so it guides by the
-        // direction whatever the switch says (the web page does the same).
-        let guide = if self.region.is_some() { autoshade::pipeline::Guide::Direction } else { self.guide };
+        // direction whatever the switch says (the web page does the same);
+        // an adjust is guided by its request alone.
+        let guide = if adjusting || self.region.is_some() {
+            autoshade::pipeline::Guide::Direction
+        } else {
+            self.guide
+        };
         let req = autoshade::pipeline::GradeRequest {
             guide,
             style: self.style_strength,
@@ -3265,26 +3278,27 @@ impl AutoShadeApp {
             embed: autoshade::library::EmbeddingSwitch::resolve(None, self.style_embed),
         };
         // Free-text direction ("warmer, moodier") steers the proposal — only
-        // when the direction guides (library OR direction); with
-        // `refine` (its own button now — no pre-armed checkbox), the AI
-        // ADJUSTS the current recipe instead of starting from scratch. A
-        // box-selected region (if any) folds into the direction so the AI
-        // masks exactly there — same prompt the web UI sends.
-        let guidance = {
-            let g = self.guidance.trim();
-            match self.region {
-                Some([l, t, r, b]) => Some(format!(
-                    "The user SELECTED a target region (normalized 0..1 frame coords): \
-                     left={l:.3} top={t:.3} right={r:.3} bottom={b:.3}. Apply the direction ONLY to \
-                     that region — emit a mask covering it (a radial mask with those exact \
-                     left/top/right/bottom bounds and feather ~0.4 is ideal, or a linear gradient \
-                     for a thin edge band). Direction: {}",
-                    if g.is_empty() { "make a tasteful local improvement" } else { g }
-                )),
-                None => (guide == autoshade::pipeline::Guide::Direction && !g.is_empty()).then(|| g.to_string()),
-            }
+        // when the direction guides (library OR direction); an adjust's
+        // request is the direction, and the AI ADJUSTS the current recipe
+        // instead of starting from scratch. A box-selected region (if any)
+        // folds into the text so the AI masks exactly there — same prompt the
+        // web UI sends.
+        let typed: String = match &adjust {
+            Some(request) => request.trim().to_string(),
+            None => self.guidance.trim().to_string(),
         };
-        let base = refine.then(|| {
+        let guidance = match self.region {
+            Some([l, t, r, b]) => Some(format!(
+                "The user SELECTED a target region (normalized 0..1 frame coords): \
+                 left={l:.3} top={t:.3} right={r:.3} bottom={b:.3}. Apply the direction ONLY to \
+                 that region — emit a mask covering it (a radial mask with those exact \
+                 left/top/right/bottom bounds and feather ~0.4 is ideal, or a linear gradient \
+                 for a thin edge band). Direction: {}",
+                if typed.is_empty() { "make a tasteful local improvement" } else { &typed }
+            )),
+            None => (guide == autoshade::pipeline::Guide::Direction && !typed.is_empty()).then(|| typed.clone()),
+        };
+        let base = adjusting.then(|| {
             // UNSTRIPPED: produce_recipe strips the base look + lens profile
             // from its PROMPT copy itself now, and carry_over_unrepresentable
             // needs the user's REAL profile to preserve unsaved lens toggles
@@ -3292,6 +3306,12 @@ impl AutoShadeApp {
             // profile (the same defect the web caller had, fixed in B48).
             self.recipe.clone()
         });
+        // The frame the model sees and the render uses: a card on
+        // AI-generated pixels adjusts ITS raster (the look is baked into it),
+        // every other card the photo itself (`None`).
+        let pixels: Option<PathBuf> = (adjusting && self.active_on_ai_pixels())
+            .then(|| self.active_variant().and_then(|v| v.origin.clone()))
+            .flatten();
         // Every other network starter arms this; Analyze — the one a stalled
         // endpoint holds the longest — did not, so a hung stream left no ✕
         // and only killing the process recovered. Abandon semantics (like the
@@ -3307,6 +3327,7 @@ impl AutoShadeApp {
                 let cfg = autoshade::config::Config::load();
                 let res = autoshade::pipeline::produce_recipe(
                     &path,
+                    pixels.as_deref(),
                     &cfg,
                     false,
                     guidance.as_deref(),

@@ -98,16 +98,25 @@
                     .position(|(s, _)| s == t)
                     .unwrap_or_else(|| panic!("{lang:?}: 「{t}」 was not drawn: {seen:?}"))
             };
-            let title = seen[at(tr(lang, "AI"))].1;
+            // Two first-level sections (2026-10-21), each a Heading over its
+            // own folds: generation and reverse-fit first, analysis second,
+            // and the adjust fold sits inside the analysis section.
             let fold = seen[at(tr(lang, "Analysis · paid API"))].1;
-            assert!(title > fold + 2.0, "{lang:?}: the AI title ({title}) does not out-rank its folds ({fold})");
+            let titles = [tr(lang, "AI generation & reverse-fit"), tr(lang, "AI analysis & auto develop")];
+            for title in titles {
+                let size = seen[at(title)].1;
+                assert!(size > fold + 2.0, "{lang:?}: the 「{title}」 title ({size}) does not out-rank its folds ({fold})");
+            }
             let order = [
-                at(tr(lang, "Analysis & References")),
-                at(tr(lang, "Analysis · paid API")),
-                at(tr(lang, "Generate & Reverse-fit")),
+                at(tr(lang, "AI generation & reverse-fit")),
                 at(tr(lang, "Generate whole image · paid API")),
+                at(tr(lang, "AI analysis & auto develop")),
+                at(tr(lang, "Analysis · paid API")),
+                at(tr(lang, "Adjust the selected variant · paid API")),
             ];
-            assert!(order.windows(2).all(|w| w[0] < w[1]), "{lang:?}: group heads out of order: {order:?}");
+            assert!(order.windows(2).all(|w| w[0] < w[1]), "{lang:?}: section heads out of order: {order:?}");
+            // The retired verb, by its two old labels (no longer in the table).
+            assert!(!seen.iter().any(|(s, _)| s == "AI Refine" || s == "AI 微调"), "{lang:?}: the retired Refine verb is still drawn");
         }
         let panels = [include_str!("../panels/ai.rs"), include_str!("../panels/develop.rs"), include_str!("../panels/retouch.rs")];
         let fences = panels.iter().map(|src| src.matches(".separator()").count()).sum::<usize>();

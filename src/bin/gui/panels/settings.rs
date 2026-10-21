@@ -638,7 +638,7 @@ impl AutoShadeApp {
                 f.analysis_models.clear();
             }
             ui.separator();
-            ui.heading(tr(lang, "Analysis model — used by AI Analyze, AI Refine and AI review"));
+            ui.heading(tr(lang, "Analysis model — used by AI Analyze, AI adjust and AI review"));
             ui.horizontal(|ui| {
                 ui.label(tr(lang, "Provider"));
                 let r1 = ui.radio_value(&mut f.analysis_provider_api, false, tr(lang, "OAuth (Claude CLI)"));

@@ -278,8 +278,10 @@
         // spawn no unit test can drive).
         let actions = include_str!("../actions.rs");
         for needle in [
-            concat!("let guide = if self.region.is_some() ", "{ autoshade::pipeline::Guide::Direction } else { self.guide };"),
-            concat!("guide == autoshade::pipeline::Guide::Direction ", "&& !g.is_empty()"),
+            // An adjust (2026-10-21) is guided by its request alone, a box
+            // region by the direction; otherwise the switch decides.
+            concat!("let guide = if adjusting || self.region.is_some() ", "{"),
+            concat!("guide == autoshade::pipeline::Guide::Direction ", "&& !typed.is_empty()"),
         ] {
             assert!(actions.contains(needle), "start_analyze must apply the guide: {needle}");
         }

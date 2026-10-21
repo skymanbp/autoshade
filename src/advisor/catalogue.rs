@@ -1789,13 +1789,16 @@ pub const LOCAL_CONTROLS: [Control; 28] = [
         // write a number into the sidecar that Lightroom honours and the
         // preview does not, i.e. it would invent a WYSIWYG gap. Saying 0 keeps
         // the AI where every radial in the reference library already sits.
-        purpose: "WHERE this adjustment applies: kind=linear (zero_* = the no-effect edge, \
-                  full_* = the full-effect edge, in 0..1 frame coords) for skies/horizons, or \
-                  kind=radial (top/left/bottom/right + feather 0..1, roundness 0 — a carried \
-                  Lightroom value this engine does not render, so leave it at 0 — flipped, \
-                  and angle in DEGREES counter-clockwise about the ellipse centre, 0 = \
-                  axis-aligned — rotate it to follow an oblique subject) for subjects and \
-                  vignettes",
+        purpose: "WHERE this adjustment applies: kind=ai (what=sky, what=subject — the main \
+                  subject — or what=object under the point ref_x/ref_y, in 0..1 frame coords; \
+                  cut by a local segmenter after you answer) to select a part of the picture by \
+                  what it IS; kind=linear (zero_* = the no-effect edge, full_* = the \
+                  full-effect edge, in 0..1 frame coords) for a gradient; or kind=radial \
+                  (top/left/bottom/right + feather 0..1, roundness 0 — a carried Lightroom \
+                  value this engine does not render, so leave it at 0 — flipped, and angle in \
+                  DEGREES counter-clockwise about the ellipse centre, 0 = axis-aligned — \
+                  rotate it to follow an oblique subject) for a vignette or a soft spot. \
+                  Add `range` to confine any of them by luminance or colour",
     },
     Control {
         name: "components",
@@ -2155,10 +2158,25 @@ fn mask_geometry_schema() -> Value {
              "properties": {"kind": {"type": "string", "enum": ["radial"]},
                 "top": num(), "left": num(), "bottom": num(), "right": num(),
                 "feather": num(), "roundness": num(), "flipped": {"type": "boolean"},
-                "angle": num()}}
+                "angle": num()}},
+            // A part of the picture named by its CONTENT (2026-10-21): the sky,
+            // the main subject, or the object under a point. The model asks;
+            // the local segmenter cuts the alpha before anything renders it
+            // (`openai::expand_ai_mask_intents`, `segment::resolve_ai_masks`).
+            // The same three targets `python/segment.py` serves the GUI's own
+            // Select Sky / Select Subject / point-prompted object.
+            {"type": "object", "additionalProperties": false,
+             "required": ["kind","what","ref_x","ref_y"],
+             "properties": {"kind": {"type": "string", "enum": ["ai"]},
+                "what": {"type": "string", "enum": AI_MASK_TARGETS},
+                "ref_x": num(), "ref_y": num()}}
         ]
     })
 }
+
+/// The content targets an `ai` mask may name, in the schema's enum order:
+/// `sky` (OneFormer), `subject` (BiRefNet), `object` (SAM 2.1 at the point).
+pub const AI_MASK_TARGETS: [&str; 3] = ["sky", "subject", "object"];
 
 /// RangeMask tagged enum (`#[serde(tag="kind")]`) → anyOf of the two variants
 /// + null (strict mode requires the field to be PRESENT, so "no range" = null).
@@ -2864,8 +2882,9 @@ weakest part.\n\
   6. `pixel_tool_suggestions` — AT MOST 3 entries, and `[]` (empty) is the normal answer. \
 These are the app's PIXEL tools, which NO develop control can reach: {tools}. Name one only \
 when this photograph visibly needs it (a sensor spot or a distracting object → Heal / \
-CloneStamp / GenerativeFill; heavy noise a slider cannot fix → Denoise; a selection the \
-gradient masks above cannot draw → SelectSubject / SelectSky; a re-imagined frame → \
+CloneStamp / GenerativeFill; heavy noise a slider cannot fix → Denoise; a selection that \
+needs the photographer's own painting beyond what a kind=ai mask in `masks` selects → \
+SelectSubject / SelectSky; a re-imagined frame → \
 Reimagine), with ONE clause of `why`. You are ADVISING the photographer, not running these \
 tools: nothing here is executed, several cost money, and the develop you return must stand on \
 its own without them.\n",

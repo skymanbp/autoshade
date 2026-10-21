@@ -1509,6 +1509,24 @@ the structured proposal, not photo pixels—and all Responses requests set
 `store:false`; a visual judge may buy one guided revision, but the replacement
 is adopted only when its rescore is at least the original score.
 
+The same chain has an ADJUST mode (2026-10-21, replacing the desktop's
+「AI Refine」): `pipeline::produce_recipe` takes the current recipe as the base
+and an optional `pixels` path, renders the current edit at preview size and
+sends THAT frame — a card on AI-generated pixels is adjusted from its own
+raster, where the old Refine showed the model the RAW's preview under a
+generated card — with `pipeline::adjust_envelope`: the current recipe in full,
+the photographer's request, and the instruction to return the COMPLETE
+replacing recipe, putting a change on a mask whenever the request names a part
+of the picture. The mask schema gained a third geometry, `kind=ai` with
+`what=sky|subject|object` and a point: `openai::expand_ai_mask_intents`
+rewrites it to the Lightroom-shaped `ai_mask` (name 「Sky 1」/「Subject 1」/
+「Object 1」, subtype 2/1/0, no raster) before the recipe parses, an unknown
+target is dropped and disclosed, and `segment::resolve_ai_masks` cuts the alpha
+locally after every proposal and revision — the model never sees or draws a
+pixel of the selection. A mask the base already has is edited by returning it
+with its byte-exact name (`carry_over_unrepresentable` keeps its raster);
+`AI_MASKS_SEGMENTED` / `AI_MASK_NOT_CUT` say what was cut and what was not.
+
 The reference library (`src/library/`, 2026-10-13 redesign) holds finished
 photographs only — JPEG, TIFF or PNG exports whose look the photographer wants
 to follow — and reads no `.xmp`: a finished photo may carry work no sidecar

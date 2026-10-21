@@ -47,22 +47,26 @@
         assert!(seen.iter().any(|t| t.contains("no library")), "and the slider is flagged: {seen:?}");
     }
 
-    /// R30: the AI panel is FOUR folds, in one order, each saying what it
-    /// costs in its header — the one thing a collapsed fold still shows. Both
-    /// languages, because a tag that only exists in English is not a
-    /// disclosure.
+    /// R30: the AI area is FIVE folds under two section titles (2026-10-21:
+    /// generation and reverse-fit first, analysis and auto develop second),
+    /// in one order, each saying what it costs in its header — the one thing
+    /// a collapsed fold still shows. Both languages, because a tag that only
+    /// exists in English is not a disclosure.
     ///
     /// MUTATION THIS KILLS: drop a cost tag or reorder the sub-areas.
     #[test]
-    fn the_ai_panel_is_four_folds_that_each_say_what_they_cost() {
+    fn the_ai_panel_is_five_folds_that_each_say_what_they_cost() {
         for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
             let mut app = AutoShadeApp { lang, ..Default::default() };
             let seen = tall_frame(&mut app, |a, ui| a.ai_panel(ui));
             let want = [
-                tr(lang, "Analysis · paid API"),
-                tr(lang, "Reference library · local"),
+                tr(lang, "AI generation & reverse-fit"),
                 tr(lang, "Generate whole image · paid API"),
                 tr(lang, "Match a look (reverse-fit) · local"),
+                tr(lang, "AI analysis & auto develop"),
+                tr(lang, "Analysis · paid API"),
+                tr(lang, "Adjust the selected variant · paid API"),
+                tr(lang, "Reference library · local"),
             ];
             let mut at = 0usize;
             for w in want {

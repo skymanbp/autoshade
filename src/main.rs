@@ -1048,7 +1048,7 @@ fn analyze_cmd(
     // (batch passes false — spend never multiplies silently).
     let req = GradeRequest { guide, ..analyze_request(style, strength, adherence, deep, reference_image, embed, &cfg) };
     let (recipe, verdict, _notes) =
-        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true, autoshade::diag::stderr())?;
+        produce_recipe(raw, None, &cfg, true, guidance.as_deref(), None, req, true, autoshade::diag::stderr())?;
     // Remember whether -o redirected the recipe: the XMP has to follow it (below)
     // so one develop never splits across two folders. `-o` POINTING AT the
     // canonical path IS a canonical write — out.is_some() alone let that
@@ -1343,7 +1343,7 @@ fn auto_cmd(
     // judge = true: `auto` is the explicit one-shot develop of ONE photo —
     // same interactive class as analyze (batch passes false).
     let (recipe, verdict, _notes) =
-        produce_recipe(raw, &cfg, true, guidance.as_deref(), None, req, true, autoshade::diag::stderr())?;
+        produce_recipe(raw, None, &cfg, true, guidance.as_deref(), None, req, true, autoshade::diag::stderr())?;
     let accepted = verdict.decision == autoshade::advisor::Decision::Accept;
     // Opt-in AI denoise runs inside the render — on the sensor mosaic for a
     // RAW, before demosaic; on the developed pixels for a baked source. An
@@ -2364,6 +2364,7 @@ fn process_one(
     // (review R20-M2).
     let (recipe, verdict, notes) = produce_recipe(
         raw,
+        None,
         cfg,
         false,
         None,
