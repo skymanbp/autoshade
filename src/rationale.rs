@@ -155,6 +155,17 @@ pub mod keys {
          before it shipped: {converged} of the frame moved closer to its target, \
          {diverged} moved away, and {aligned} moved in the direction its own target \
          asks for.";
+    /// R36 for the white balance (2026-10-21): the third outcome between the
+    /// two above. The cells agreed on the DIRECTION of the solved white
+    /// balance and refused its SIZE (the seaside street: 0.847 converged /
+    /// 0.117 diverged / 0.954 aligned along chromaticity), so the largest
+    /// share of the move the same cells vouch is what ships, and the sentence
+    /// prints both verdicts: the full move's and the shipped share's.
+    pub const FIT_NOTE_WB_CELLS_VOUCHED_AT_SHARE: &str =
+        " The fitted white balance shipped at {share} of the solved move: the full move was \
+         refused by the target's own 12x8 cell means ({full}), and at this share \
+         {converged} of the frame moved closer to its target, {diverged} moved away, and \
+         {aligned} moved in the direction its own target asks for.";
     pub const FIT_NOTE_FAR: &str =
         " NOTE: the fitted recipe still renders far from the target \
          (residual {err_after}) — this look exceeds what global \
@@ -318,6 +329,18 @@ pub mod keys {
     pub const FIT_NOTE_STRENGTH: &str =
         " Reverse-fit strength {pct}% set how far weak evidence could move the sliders.";
     pub const FIT_DEGENERATE: &str = " Fit refused: the source or target frame has no tonal variation (blank or single-tone), so a statistical match would produce a constant tone map — no recipe was fitted.";
+    /// Per-stage do-no-harm (2026-10-21). The terminal `FIT_NOTE_REGRESSED`
+    /// below resets the whole recipe; these two name the ONE stage that
+    /// rendered the frame farther from the target and was withheld there,
+    /// so the stages after it kept solving from the frame as it was.
+    pub const FIT_NOTE_TONE_WITHHELD_HARM: &str =
+        " The tone sliders were withheld: rendered, they left the frame's tones farther from \
+         the target's than the untouched source's (tonal reading {before} → {after}), so the \
+         tone stage shipped nothing and the stages after it solved from the untoned frame.";
+    pub const FIT_NOTE_CURVE_WITHHELD_HARM: &str =
+        " The residual tone curve was withheld: rendered on top of the sliders it left the \
+         frame's tones farther from the target's (tonal reading {before} → {after}), so the \
+         sliders ship without it.";
     pub const FIT_NOTE_REGRESSED: &str =
         " The full fit rendered farther from the target than the untouched \
          source at every saturation level — returning a NEUTRAL recipe \
@@ -570,6 +593,15 @@ pub mod keys {
     pub const ZONE_QUALITY_CLIPPING_FAILED: &str =
         " Zoned {label} correction dropped by the local-quality clipping gate: \
          clipped share {before}% → {after}% (allowed growth {growth} percentage point).";
+    /// 2026-10-21. The quality gate's refusal of the COLOUR class alone: a
+    /// colour move the evidence admitted (paired pixels or the region's
+    /// cells) that crushed, amplified or clipped the zone's texture is
+    /// withheld here, and the tone move is judged on its own through the
+    /// ladder — where the gate used to drop the whole correction. The third
+    /// carrier of "zone colour withheld" (`is_colour_refusal`), and the only
+    /// one that is not about evidence, so it prints the gate's readings.
+    pub const ZONE_COLOUR_WITHHELD_BY_QUALITY: &str =
+        " Zoned {label} colour controls withheld by the local-quality gate: with them the zone read texture ratio {ratio} and clipped share {clip_before}% → {clip_after}% (allowed texture [{min}, {max}], clipping growth {growth} percentage point); the tone controls are judged alone.";
     /// The zoned fit withholds control CLASSES, not whole corrections: a
     /// one-sided hue band silences colour movement while supported luma
     /// evidence still earns the zone its tone correction, and the reverse.
@@ -603,6 +635,17 @@ pub mod keys {
         " Zoned {label} colour controls shipped on REGION evidence: the pixel-scale reading withholds hue bands [{hue_bands}] because this region's texture was re-synthesised, so the move was rendered and put to the target's own 12x8 cell means over the zone — {converged} of the region moved closer, {diverged} moved away, and {aligned} moved in the direction its own target asks for.";
     pub const ZONE_TONE_VOUCHED_BY_CELLS: &str =
         " Zoned {label} tone controls shipped on REGION evidence: the pixel-scale reading withholds luma ranges [{luma_ranges}] because this region's texture was re-synthesised, so the move was rendered and put to the target's own 12x8 cell means over the zone — {converged} of the region moved closer, {diverged} moved away, and {aligned} moved in the direction its own target asks for.";
+    /// 2026-10-21 (user ruling). The third carrier of "zone colour shipped",
+    /// for a region whose pixels ARE each other's counterparts: the zone's
+    /// colour probe now hands the hue guard the per-pixel paired voucher the
+    /// global end-state guard has carried since the paired doctrine
+    /// ([`FIT_NOTE_VOUCHED_CONVERGENCE`] is the frame's sentence for the same
+    /// claim). A one-sided band on such a region is band MEMBERSHIP, not a
+    /// lack of evidence, when each moved pixel lands closer to its own paired
+    /// target; the pixels that did not were still vetoed, and if enough of
+    /// them were the refusal rides instead and this sentence does not.
+    pub const ZONE_COLOUR_VOUCHED_BY_PIXELS: &str =
+        " Zoned {label} colour controls shipped on PAIRED evidence through one-sided hue bands [{hue_bands}]: this region's pixels are each other's counterparts, and each moved pixel was individually vouched (robust weight) and moved toward its own paired target pixel; unvouched pixels kept the veto.";
     /// R34 §D5. A zone's tone estimator follows the REGION's own pairing scale
     /// rather than the frame's: a Full zone whose pixels do not pair solves its
     /// tone from the zone's population instead of from paired pixels. Mode
@@ -631,6 +674,11 @@ pub mod keys {
         " Zoned {label} kept the current recipe: {k} trial bands regressed or failed a gate ({reason}, {trials} trials); R2={r2}, breaks={breaks}, overlap={overlap}, deltaE {before} -> {after}, seam {seam_before} -> {seam_after}, target steps {step_before} -> {step_after}, worst cell regression {regression}.";
     pub const ZONE_PAIRING_SCALE: &str =
         " Zoned {label} tone was solved at CELL scale: this zone's own structural reading is {d}, past the {line} pairing line, so its pixels are not each other's counterparts — the tone came from the zone's own luma distribution rather than from a per-pixel regression, which reads a re-synthesised texture's contrast low.";
+    /// The dilution guard (2026-10-22, `fit_zoned::limits::ZONE_PAIRED_SPREAD_FLOOR`):
+    /// a Pixel-scale zone whose paired tone map squeezed its luma spread
+    /// under the floor is solved by distribution matching instead.
+    pub const ZONE_TONE_PAIRING_DILUTED: &str =
+        " Zoned {label} tone was solved from the zone's own luma distribution: the per-pixel pairing at D={d} squeezed the zone's spread to {ratio} of the target's (p10–p90 {mapped} vs {target}), below the {floor} floor — a conditional median narrows a loosely paired zone.";
     /// The detail stage (2026-10-21, `fit_zoned::detail`): a zone's local
     /// contrast at the engine's texture and clarity scales, paired by
     /// correlation and solved closed loop. One sentence per outcome;
@@ -745,6 +793,15 @@ pub mod keys {
          Local quality read texture ratio {texture}; that texture floor is calibrated but \
          known not to separate every case, so this correction rests on the clipping gate, \
          the zero-regression frame reading and the boundary gate.";
+    /// 2026-10-22: the fourth acceptance arm, tried after the three moments
+    /// arms, says what it was decided on — the zone's luma quantile gap — and
+    /// the three readings it also demanded, because a moments residual alone
+    /// would print a pair no arm accepts.
+    pub const ZONE_DISTRIBUTION_MATCHED: &str =
+        " Zoned {label} correction accepted on its luma distribution: the quantile gap \
+         to the target fell {before} → {after} (floor {floor}), the frame {frame_before} → \
+         {frame_after}, and the zone moments did not regress ({zone_before} → {zone_after}); \
+         a moments ruler cannot see a contrast-type reshape.";
     /// Which frame the residual above was measured on.
     ///
     /// The AI-proposal path solves and scores over the camera's EMBEDDED
@@ -1194,7 +1251,8 @@ pub mod keys {
 pub(crate) const GLOBAL_SOLVE_KEYS: &[&str] = &[
     keys::FIT_SUMMARY_WITH_CURVE, keys::FIT_SUMMARY_NO_CURVE, keys::FIT_SUMMARY_ATMOSPHERE,
     keys::FIT_NOTE_PAIRING_PIXEL, keys::FIT_NOTE_PAIRING_CELL, keys::FIT_NOTE_MODE_MARGIN,
-    keys::FIT_NOTE_WB_CELLS_REFUSED, keys::FIT_NOTE_WB_CELLS_VOUCHED, keys::FIT_NOTE_FAR,
+    keys::FIT_NOTE_WB_CELLS_REFUSED, keys::FIT_NOTE_WB_CELLS_VOUCHED,
+    keys::FIT_NOTE_WB_CELLS_VOUCHED_AT_SHARE, keys::FIT_NOTE_FAR,
     keys::FIT_NOTE_SAT_PEGGED, keys::FIT_NOTE_ATMOSPHERE_SAT_PEGGED,
     keys::FIT_NOTE_ATMOSPHERE_CONFIDENCE, keys::FIT_NOTE_ATMOSPHERE_POPULATION_EVIDENCE,
     keys::FIT_NOTE_WB_CLAMPED, keys::FIT_NOTE_WB_WITHHELD_FOREIGN_HUE,
@@ -1207,6 +1265,7 @@ pub(crate) const GLOBAL_SOLVE_KEYS: &[&str] = &[
     keys::FIT_NOTE_DELIVERED_FAN, keys::FIT_NOTE_DELIVERED_FAN_UNCAUSED,
     keys::FIT_NOTE_GLOBAL_CAST, keys::FIT_NOTE_VETO_DISCLOSED, keys::FIT_NOTE_STRENGTH,
     keys::FIT_DEGENERATE, keys::FIT_NOTE_REGRESSED, keys::FIT_NOTE_SAT_REDUCED,
+    keys::FIT_NOTE_TONE_WITHHELD_HARM, keys::FIT_NOTE_CURVE_WITHHELD_HARM,
     keys::FIT_NOTE_REHUE_BLOCKED, keys::FIT_NOTE_CAST_REJECTED, keys::FIT_NOTE_JOINT,
     keys::FIT_NOTE_JOINT_NONE, keys::FIT_NOTE_JOINT_MISS, keys::FIT_NOTE_JOINT_REFUSED,
     keys::FIT_NOTE_JOINT_REGRESSED, keys::FIT_NOTE_EVIDENCE_CONTRADICTED,

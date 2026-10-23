@@ -317,6 +317,7 @@ pub(super) fn attach_one_zone(
     // move and a tone residual nothing had refused, explained, or named. The
     // count is taken inside the solve's own borrow and disclosed after it.
     let mut unsupported_knots: Option<usize> = None;
+    let mut diluted_spread: Option<(f32, f32)> = None;
     if mode == ZoneMode::Full {
         let rp = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
         let s_cdf = zone_luma_cdf(&rp, &zw_source);
@@ -351,17 +352,48 @@ pub(super) fn attach_one_zone(
                 })
                 .flatten();
             let points = refit.as_ref().map(|r| r.points.clone()).unwrap_or_default();
-            let support = fit::knot_support_for(&rp, &zw_source, &points);
-            let score_set: Vec<(f32, f32, f32)> = match refit.as_ref() {
-                Some(r) if r.points.len() >= 6 => r
-                    .points
-                    .iter()
-                    .zip(&r.masses)
-                    .map(|(&(x, y), &mass)| (x, y, mass))
-                    .collect(),
-                _ => Vec::new(),
-            };
             let t_cdf = zone_luma_cdf(tgt_eff, &zw_target);
+            // DILUTION GUARD (2026-10-22, [`ZONE_PAIRED_SPREAD_FLOOR`]). The
+            // paired map is the target's conditional median at each source
+            // level, and a loosely paired zone's median is narrower than the
+            // target: the neon street's building mapped to 0.70 of the
+            // target's p10–p90 and the frame regressed. The question is about
+            // the POPULATIONS, so it is asked under the mask alphas `sw`/`tw`,
+            // not `zw_source`/`zw_target`: the robust weights are the map's
+            // own verdict on which pixels it could explain, and they trim
+            // exactly the target pixels a squeezed map fails to predict (the
+            // building's target p90 fell 0.282 → 0.227, the map's plateau, and
+            // the ratio read 0.89). A map that squeezes the spread under the
+            // floor is discarded and the distribution branch below — the one
+            // an empty `points` selects — solves it, on the same populations.
+            let spread = |cdf: &[f32]| fit::quantile(cdf, 0.9) - fit::quantile(cdf, 0.1);
+            let population = (points.len() >= 6)
+                .then(|| (zone_luma_cdf(&rp, sw), zone_luma_cdf(tgt_eff, tw)));
+            let diluted = population
+                .as_ref()
+                .map(|(_, t_pop)| {
+                    let mapped: Vec<[f32; 3]> = rp
+                        .iter()
+                        .map(|p| {
+                            let l = 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+                            [fit::sample_tone_points(&points, l); 3]
+                        })
+                        .collect();
+                    (spread(&zone_luma_cdf(&mapped, sw)), spread(t_pop))
+                })
+                .filter(|&(mapped, target)| {
+                    mapped < super::limits::ZONE_PAIRED_SPREAD_FLOOR * target
+                });
+            diluted_spread = diluted;
+            let points = if diluted.is_some() { Vec::new() } else { points };
+            // Fired: the transport maps population onto population, and the
+            // knots read their support there too — on the trimmed target the
+            // highlight knots would read unsupported. Not fired: unchanged.
+            let (s_cdf, t_cdf, support_weights) = match (diluted, population) {
+                (Some(_), Some((s_pop, t_pop))) => (s_pop, t_pop, sw),
+                _ => (s_cdf, t_cdf, zw_source.as_slice()),
+            };
+            let support = fit::knot_support_for(&rp, support_weights, &points);
             let tone_map = |x: f32| {
                 if points.len() >= 6 {
                     fit::sample_tone_points(&points, x)
@@ -372,12 +404,52 @@ pub(super) fn attach_one_zone(
                     )
                 }
             };
+            // The distribution branch scores (and refines, below) on the zone's
+            // OWN population: 24 equal-mass quantiles of the same `s_cdf` the
+            // map reads. Without them the solve saw the map only at the eight
+            // fixed knots, and the neon street's building (luma 0.066–0.25)
+            // has just 0 / 0.10 / 0.25 there: the map put p10 at 0.0437
+            // (target 0.0436), the knot-fitted sliders rendered 0.0785 — the
+            // x = 0 knot, an extrapolation below the population, lifting the
+            // blacks the map deepens.
+            const POPULATION_POINTS: usize = 24;
+            let score_set: Vec<(f32, f32, f32)> = if points.len() >= 6 {
+                match refit.as_ref().filter(|_| diluted.is_none()) {
+                    Some(r) if r.points.len() >= 6 => r
+                        .points
+                        .iter()
+                        .zip(&r.masses)
+                        .map(|(&(x, y), &mass)| (x, y, mass))
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            } else {
+                (0..POPULATION_POINTS)
+                    .map(|q| {
+                        let x = fit::quantile(&s_cdf, (q as f32 + 0.5) / POPULATION_POINTS as f32);
+                        (x, tone_map(x), 1.0)
+                    })
+                    .collect()
+            };
             let supported_knots = support.iter().filter(|value| **value > 0.0).count();
             if supported_knots < 2 {
                 unsupported_knots = Some(supported_knots);
             }
             let (ev, sliders) =
                 fit::fit_tone_sliders_supported(&tone_map, &support, &score_set);
+            // The knots cannot see a bend inside the zone's own range; the
+            // score set can (see `fit::refine_tone_sliders_on`). Distribution
+            // branch only: its map is the deterministic quantile transport,
+            // while the paired branch's points carry pairing noise that a
+            // refinement chases (the toy land zone went highlights −0.06 →
+            // −0.15 and the frame paid +0.049 over its 0.02 tolerance), so
+            // there the score set keeps choosing the exposure only. A
+            // neutral under-supported answer stays neutral.
+            let (ev, sliders) = if supported_knots >= 2 && points.len() < 6 {
+                fit::refine_tone_sliders_on(&score_set, ev, sliders)
+            } else {
+                (ev, sliders)
+            };
             m.exposure_ev = round2(ev.clamp(-ZONE_EV_LIMIT, ZONE_EV_LIMIT));
             m.contrast = round1(sliders[0] * 100.0);
             m.highlights = round1(sliders[1] * 100.0);
@@ -390,6 +462,24 @@ pub(super) fn attach_one_zone(
     } else {
         let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
         m.exposure_ev = round2(d.exposure_ev.clamp(-ZONE_ATMOS_EV_LIMIT, ZONE_ATMOS_EV_LIMIT));
+    }
+    if let Some((mapped, target)) = diluted_spread {
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_TONE_PAIRING_DILUTED,
+                vec![
+                    ("label", label.to_string()),
+                    ("d", divergence.map_or_else(
+                        || "unmeasured".to_string(), |d| format!("{:.3}", d.d))),
+                    ("ratio", format!("{:.2}", mapped / target.max(1e-6))),
+                    ("mapped", format!("{mapped:.3}")),
+                    ("target", format!("{target:.3}")),
+                    ("floor", format!("{:.2}", super::limits::ZONE_PAIRED_SPREAD_FLOOR)),
+                ],
+            ),
+        );
     }
     if let Some(knots) = unsupported_knots {
         crate::rationale::push_note(
@@ -454,11 +544,38 @@ pub(super) fn attach_one_zone(
         m.blacks = 0.0;
     }
     let chroma_probe_px = fit::pixels_of(&render::develop_preview(s_img, &chroma_probe));
-    let hue_bands = fit::moved_unsupported_hue_range_names(
+    // 2026-10-21 (user ruling). The zone's colour probe hands the hue guard
+    // the same per-pixel voucher the global end-state guard has carried since
+    // the paired doctrine: the zone's own robust pairing weights and each
+    // pixel's paired target. It is handed in ONLY where the region pairs at
+    // pixel scale — that is the whole of the rule above ("the cells answer
+    // where the pixels cannot be asked"), read from the other side: where the
+    // pixels CAN be asked, they are, pixel by pixel. A one-sided band is a
+    // fact about band MEMBERSHIP, not about evidence, when every pixel the
+    // move touches has its own counterpart and lands closer to it: the
+    // seaside street's source sky sits in Aqua and the target's in Blue, so
+    // the recolour was "zero-evidence" by construction and the zone shipped
+    // unity gains over a sky whose pixels paired. Unvouched pixels keep the
+    // veto exactly as before — a diverging pixel, or one the robust fit threw
+    // out, is still evidence AGAINST the move — and a Cell-scale region still
+    // passes None and asks its cells. The probe is judged in CHROMATICITY
+    // (`MoveAxis::Colour`), the axis its controls move along, as the cells
+    // have been since 2026-10-19: put to the full distance, a colour probe
+    // over a sky whose target is also darker read 2445 of 7388 paired pixels
+    // "closer" and was withheld for the 36% it could not have moved.
+    let hue_vouch = (pairing == fit::PairingScale::Pixel)
+        .then(|| zone_robust.as_ref().map(|r| (r.weights.as_slice(), tgt_eff, MoveAxis::Colour)))
+        .flatten();
+    let hue_bands = fit::moved_unsupported_hue_range_names_vouched(
         &cur_px,
         &chroma_probe_px,
         &zone_evidence,
+        hue_vouch,
+        None,
     );
+    let hue_vouched_bands = hue_vouch.and_then(|_| {
+        fit::vouched_hue_band_names(&cur_px, &chroma_probe_px, &zone_evidence, hue_vouch, None)
+    });
     // R34 §D2. THE admission gate for a region whose PIXELS cannot pair.
     //
     // R33 §F refused to consult `fit_cells` here, on the ground that
@@ -560,7 +677,7 @@ pub(super) fn attach_one_zone(
     // cells carried no trust-weighted evidence mass, leaves the strict
     // refusal exactly where it was. That is what keeps every zero-evidence
     // pin standing by construction rather than by threshold.
-    let colour_withheld = hue_bands.is_some()
+    let mut colour_withheld = hue_bands.is_some()
         && !hue_cells.is_some_and(|v| v.vouched())
         && hue_shrunk.is_none();
     let tone_withheld = luma_ranges.is_some()
@@ -584,6 +701,34 @@ pub(super) fn attach_one_zone(
     } else if let Some((k, _)) = hue_shrunk {
         scale_zone_colour(report.recipe.masks.last_mut().expect("zone mask just pushed"), k, mode);
     }
+    // A colour class that shipped on evidence is still the local-quality
+    // gate's to refuse — and until 2026-10-21 that gate had one answer for a
+    // zone whose colour shipped: drop the whole correction, tone included.
+    // The tone ladder below backs a colour-WITHHELD zone's tone off until
+    // the gate passes; a zone whose colour shipped never reached it, so a
+    // colour move that crushed or clipped the zone's texture took a passing
+    // tone move down with it (the strictly-better fixture: its warm gains
+    // crushed the zone's texture under the gate's floor while the tone move
+    // alone passed — the current readings are pinned by
+    // `a_colour_move_the_quality_gate_refuses_leaves_the_tone_to_ship_alone`). Admission
+    // and quality are two questions: the colour class is probed FIRST, the
+    // full move alone against the gate, and where it fails the colour is
+    // withheld — by the gate, under its own sentence, not by the evidence —
+    // and the zone is then judged as every colour-withheld zone is, tone
+    // alone through the ladder. A zone whose tone was withheld has nothing
+    // to fall back to and is dropped at the gate below as before.
+    let mut colour_quality = None;
+    if !colour_withheld && !tone_withheld {
+        let full = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
+        let quality = local_quality(&cur_px, &full, sw, s_img.width(), s_img.height());
+        if !quality.passes() {
+            let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
+            m.color_gains = Some([1.0; 3]);
+            m.saturation = 0.0;
+            colour_withheld = true;
+            colour_quality = Some(quality);
+        }
+    }
     // ONE NOTE PER CONTROL CLASS, AND IT NAMES THE OUTCOME. The two probes
     // withhold independently, so a single "correction withheld" sentence
     // described none of the three outcomes correctly. Since R34 each class
@@ -604,7 +749,7 @@ pub(super) fn attach_one_zone(
             _ => "abstained: no cell of this region carried measurable evidence".to_string(),
         }
     };
-    if let Some(hue_bands) = hue_bands.as_ref() {
+    if let Some(hue_bands) = hue_bands.as_ref().filter(|_| colour_quality.is_none()) {
         let note = match (hue_shrunk, colour_withheld, hue_cells) {
             (Some((k, v)), _, Some(full)) => {
                 let (converged, diverged, aligned) = v.shares();
@@ -650,6 +795,42 @@ pub(super) fn attach_one_zone(
             ),
         };
         crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes, note);
+    }
+    // The gate's own refusal of the colour class — the one carrier that is
+    // not about evidence, so it replaces whichever evidence sentence the
+    // colour had earned rather than riding beside it.
+    if let Some(quality) = colour_quality {
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_COLOUR_WITHHELD_BY_QUALITY,
+                vec![
+                    ("label", label.to_string()),
+                    ("ratio", format!("{:.3}", quality.texture_ratio)),
+                    ("min", format!("{ZONE_TEXTURE_MIN:.2}")),
+                    ("max", format!("{ZONE_TEXTURE_MAX:.2}")),
+                    ("clip_before", format!("{:.2}", quality.clipped_before * 100.0)),
+                    ("clip_after", format!("{:.2}", quality.clipped_after * 100.0)),
+                    ("growth", format!("{:.2}", ZONE_CLIP_GROWTH * 100.0)),
+                ],
+            ),
+        );
+    }
+    // The paired-pixel carrier's sentence. It rides only where the colour
+    // actually shipped: a region whose veto stood (some band's unvouched
+    // pixels over the share line) prints the refusal above, and a sentence
+    // claiming the vouched bands "shipped" would be false about gains that
+    // were flattened to unity.
+    if let Some(bands) = hue_vouched_bands.as_ref().filter(|_| !colour_withheld) {
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_COLOUR_VOUCHED_BY_PIXELS,
+                vec![("label", label.to_string()), ("hue_bands", bands.clone())],
+            ),
+        );
     }
     if let Some(luma_ranges) = luma_ranges.as_ref() {
         let note = match (luma_shrunk, tone_withheld, luma_cells) {
@@ -841,6 +1022,17 @@ pub(super) fn attach_one_zone(
     } else {
         zone_after
     };
+    // The distribution arm's ruler (2026-10-22): the zone's luma quantile gap
+    // to the target, read on the zone's POPULATION — the mask alphas `sw`/`tw`,
+    // as the dilution guard above reads it, not the robust-composed weights
+    // that trim exactly the target pixels a narrow tone map fails to reach.
+    let tonal = (mode == ZoneMode::Full).then(|| {
+        let target_cdf = zone_luma_cdf(tgt_eff, tw);
+        (
+            zone_tonal(&zone_luma_cdf(&cur_px, sw), &target_cdf),
+            zone_tonal(&zone_luma_cdf(&zoned_px, sw), &target_cdf),
+        )
+    });
     let arm = match mode {
         ZoneMode::Full => zone_accepts(
             accepted_before,
@@ -848,6 +1040,7 @@ pub(super) fn attach_one_zone(
             ev_after,
             *frame_err,
             zoned_err,
+            tonal.expect("read for every Full zone"),
         ),
         // Atmosphere keeps its own do-no-harm arm: a bounded atmosphere move
         // is judged only on not making its zone worse, and the absolute-gain
@@ -877,6 +1070,29 @@ pub(super) fn attach_one_zone(
                         ("frame_before", format!("{:.5}", *frame_err)),
                         ("frame_after", format!("{zoned_err:.5}")),
                         ("texture", format!("{:.3}", quality.texture_ratio)),
+                    ],
+                ),
+            );
+        }
+        // The fourth arm says so too, with the ruler it was decided on: a
+        // moments reading alone would print a residual no arm accepts.
+        if arm == Some(ZoneAcceptArm::DistributionMatched)
+            && let Some((tonal_before, tonal_after)) = tonal
+        {
+            crate::rationale::push_note(
+                &mut report.recipe.rationale,
+                &mut report.notes,
+                crate::rationale::Note::new(
+                    crate::rationale::keys::ZONE_DISTRIBUTION_MATCHED,
+                    vec![
+                        ("label", label.to_string()),
+                        ("before", format!("{tonal_before:.4}")),
+                        ("after", format!("{tonal_after:.4}")),
+                        ("floor", format!("{ZONE_TONAL_MATCHED:.3}")),
+                        ("frame_before", format!("{:.5}", *frame_err)),
+                        ("frame_after", format!("{zoned_err:.5}")),
+                        ("zone_before", format!("{accepted_before:.4}")),
+                        ("zone_after", format!("{accepted_after:.4}")),
                     ],
                 ),
             );

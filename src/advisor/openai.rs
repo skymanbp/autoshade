@@ -21,7 +21,7 @@ use crate::recipe::{EditRecipe, HSL_BANDS};
 use super::catalogue::{self, edit_recipe_schema};
 use super::{
     hist_summary, strip_code_fence, Advisor, AdvisorError, ApiFamily, BoundedUntrustedText,
-    LensOpinion, PixelTool, PixelToolSuggestion, Preview, Proposal, ProposeContext, Thinking,
+    Opinions, PixelTool, PixelToolSuggestion, Preview, Proposal, ProposeContext, Thinking,
     ToolStep, VisionFrame, VisionRequest,
     PIXEL_TOOLS_MAX, THINK_FIELD_MAX_BYTES, TOOL_PLAN_MAX,
 };
@@ -461,6 +461,16 @@ discarded wholesale in favour of the original masks.  ",
     // They are optical corrections for this lens, applied in linear light
     // before any tonal work and independent of the crop — a photographer may
     // have dialled one in by hand, and 0 would silently undo it.
+    // 2026-10-21: the nullable set widened past the lens trio — the effects,
+    // the B&W treatment and the calibration take null the same way, and a
+    // nullable field the model is not told about comes back as 0 every time.
+    instruction.push_str(
+        "NULL ANSWERS: every control typed number|null (and the Black & White switch, \
+boolean|null) takes NULL for \"I have no opinion\" — the photographer's current value stands. \
+That is how you leave the post-crop vignette, the grain, the Black & White treatment and the \
+Calibration primaries alone when they are not part of your answer; a number (or true/false) \
+is an explicit instruction, and 0 (or false) switches that control off.  ",
+    );
     instruction.push_str(
         "MANUAL LENS CORRECTIONS (`lens_vignette`, `lens_vignette_mid`, `lens_distortion`) are \
 PHYSICAL corrections for this lens — falloff and geometry — NOT mood tools: the vignette one is a \
@@ -703,12 +713,13 @@ impl OpenAiProvider {
             .think
             .then(|| take_thinking(&mut parsed, key))
             .flatten();
-        // R23-1b: the three manual lens controls arrive as `["number","null"]`,
-        // and null is an ANSWER ("no opinion"), not a missing field. Lift it out
-        // here — before the recipe parse, whose `f32` fields have no null — so
-        // the pipeline can tell "leave the photographer's correction alone" from
+        // R23-1b: the nullable controls arrive as `["number","null"]` (the
+        // B&W switch as `["boolean","null"]`), and null is an ANSWER ("no
+        // opinion"), not a missing field. Lift it out here — before the
+        // recipe parse, whose `f32` / `bool` fields have no null — so the
+        // pipeline can tell "leave the photographer's value alone" from
         // "zero it".
-        let lens = take_lens_opinion(&mut parsed);
+        let opinions = take_opinions(&mut parsed);
         let repaired = repair_hsl_axis_lengths(&mut parsed);
         // The `ai` masks the model asked for, spelled as the engine's own
         // geometry with no alpha yet (the pipeline cuts it locally). An
@@ -780,7 +791,7 @@ impl OpenAiProvider {
         // GATE 2: the same axis that shaped the prompt shapes the soft caps, or
         // a bolder proposal is compressed straight back to the old ceiling here.
         recipe.temper(ctx.strength);
-        Ok(Proposal { recipe, thinking, lens, notes })
+        Ok(Proposal { recipe, thinking, opinions, notes })
     }
 }
 
@@ -827,38 +838,40 @@ pub(crate) fn expand_ai_mask_intents(v: &mut Value) -> Vec<String> {
     dropped
 }
 
-/// Read the three manual lens controls' "did the model state one?" answer and
+/// Read every nullable control's "did the model state one?" answer and
 /// normalise the nulls away, so the recipe parse behind this sees the shape it
 /// has always seen.
 ///
 /// A key that is `null` (or absent — a bridge that dropped it) is REMOVED, so
 /// `EditRecipe`'s container-level `#[serde(default)]` fills the engine's own
-/// neutral (0 / 50 / 0). The pipeline then either keeps that neutral (a fresh
-/// analyze) or re-attaches the photographer's value (a refine) —
-/// `carry_over_unrepresentable`, driven by the flags returned here.
-fn take_lens_opinion(v: &mut Value) -> LensOpinion {
-    let Some(obj) = v.as_object_mut() else { return LensOpinion::default() };
-    let mut stated = |key: &str| -> bool {
-        match obj.get(key) {
-            Some(Value::Null) | None => {
-                obj.remove(key);
-                false
-            }
-            // A non-number (a string "30") is not a stated value either: the
-            // recipe parse would fail the WHOLE paid proposal on it, so it is
-            // dropped to the neutral like a null.
-            Some(x) if !x.is_number() => {
-                obj.remove(key);
-                false
-            }
-            Some(_) => true,
+/// neutral (0 / 50 / 0 / false). The pipeline then either keeps that neutral
+/// (a fresh analyze) or re-attaches the photographer's value (a refine) —
+/// `carry_over_unrepresentable`, driven by the set returned here. The set of
+/// keys is the registry's (`catalogue::nullable_controls`): the lens trio
+/// since R23-1b, the effects, the B&W treatment and the calibration since
+/// 2026-10-21.
+fn take_opinions(v: &mut Value) -> Opinions {
+    let Some(obj) = v.as_object_mut() else { return Opinions::default() };
+    let mut out = Opinions::default();
+    for key in catalogue::nullable_controls() {
+        let wants_bool =
+            catalogue::global_control(key).is_some_and(|c| c.shape == catalogue::Shape::NullableBool);
+        let stated = match obj.get(key) {
+            Some(Value::Null) | None => false,
+            // A value of the wrong type (a string "30", a number for the
+            // switch) is not a stated value either: the recipe parse would
+            // fail the WHOLE paid proposal on it, so it is dropped to the
+            // neutral like a null.
+            Some(x) if wants_bool => x.is_boolean(),
+            Some(x) => x.is_number(),
+        };
+        if stated {
+            out = out.with(key);
+        } else {
+            obj.remove(key);
         }
-    };
-    LensOpinion {
-        vignette: stated("lens_vignette"),
-        vignette_mid: stated("lens_vignette_mid"),
-        distortion: stated("lens_distortion"),
     }
+    out
 }
 
 impl Advisor for OpenAiProvider {
@@ -2030,8 +2043,8 @@ mod tests {
             .expect("a null lens field must not fail the whole paid proposal");
         join_stub(handle);
         assert_eq!(
-            out.lens,
-            LensOpinion { vignette: false, vignette_mid: false, distortion: true },
+            out.opinions,
+            Opinions::default().with("lens_distortion"),
             "only the field the model actually stated counts as an opinion"
         );
         assert_eq!(out.recipe.lens_distortion, 30.0, "a stated value is the model's answer");
@@ -2063,8 +2076,47 @@ mod tests {
         // A non-schema answer (a bridge that dropped the keys, or answered a
         // string) states nothing — the historical behaviour, exactly.
         let mut v = serde_json::json!({"lens_vignette": "30"});
-        assert_eq!(take_lens_opinion(&mut v), LensOpinion::default());
+        assert_eq!(take_opinions(&mut v), Opinions::default());
         assert!(v.get("lens_vignette").is_none(), "an unparseable value is dropped, not kept");
+    }
+
+    /// 2026-10-21: the unlocked controls take null the way the lens trio
+    /// does — on the wire (the schema offers it, the prompt explains it) and
+    /// in the parse (a stated number or boolean is an opinion, a null, a
+    /// missing key or a wrong type is not, and only an opinion survives into
+    /// the recipe parse).
+    #[test]
+    fn every_nullable_control_takes_null_for_no_opinion() {
+        let schema = edit_recipe_schema();
+        for name in catalogue::nullable_controls() {
+            let ty = &schema["properties"][name]["type"];
+            let wants_bool = catalogue::global_control(name).is_some_and(|c| c.shape == catalogue::Shape::NullableBool);
+            let want = if wants_bool { json!(["boolean", "null"]) } else { json!(["number", "null"]) };
+            assert_eq!(ty, &want, "{name}: the schema must offer null");
+        }
+        for name in ["grain", "post_crop_vignette", "convert_to_grayscale", "gray_red", "cal_red_hue"] {
+            assert!(
+                catalogue::nullable_controls().contains(&name),
+                "{name} is an unlocked control and must be nullable"
+            );
+        }
+        let mut v = json!({
+            "grain": 20.0, "convert_to_grayscale": true, "gray_red": null,
+            "cal_red_hue": "x", "post_crop_vignette": false, "lens_distortion": -5.0
+        });
+        let got = take_opinions(&mut v);
+        let want = Opinions::default().with("grain").with("convert_to_grayscale").with("lens_distortion");
+        assert_eq!(got, want, "a number or a boolean of the right type is an opinion, nothing else is");
+        for gone in ["gray_red", "cal_red_hue", "post_crop_vignette"] {
+            assert!(v.get(gone).is_none(), "{gone}: a non-opinion is removed before the parse");
+        }
+        assert_eq!(v["grain"], 20.0, "a stated value stays for the parse");
+        assert!(!got.stated("grain_size") && !got.stated("exposure_ev"), "unstated, and not nullable at all");
+        let text = propose_instruction("{}", "hist", &ProposeContext::default());
+        assert!(
+            text.contains("NULL ANSWERS") && text.contains("Black & White switch"),
+            "the prompt must explain null for every nullable control: {text}"
+        );
     }
 
     /// R23-4 (feedback #13), the half that protects everyone who did NOT ask

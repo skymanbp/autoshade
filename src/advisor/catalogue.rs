@@ -55,6 +55,9 @@ pub enum Shape {
     /// XMP writer and R21's fingerprint for a value the renderer must always
     /// have (R23-1b).
     NullableNumber,
+    /// `["boolean","null"]` — null is "no opinion", as for [`Shape::NullableNumber`];
+    /// the Black & White switch (2026-10-21).
+    NullableBool,
     /// An `integer` (the schema-era stamp).
     Integer,
     /// A `boolean`.
@@ -90,6 +93,7 @@ impl Shape {
         Some(match self {
             Shape::Number => num(),
             Shape::NullableNumber => json!({"type": ["number", "null"]}),
+            Shape::NullableBool => json!({"type": ["boolean", "null"]}),
             Shape::Integer => json!({"type": "integer"}),
             Shape::Bool => json!({"type": "boolean"}),
             Shape::Text => json!({"type": "string"}),
@@ -109,6 +113,33 @@ impl Shape {
     pub fn is_scalar(self) -> bool {
         matches!(self, Shape::Number | Shape::NullableNumber)
     }
+
+    /// Does the schema offer this shape as null — "no opinion", the
+    /// photographer's own value stands ([`crate::advisor::Opinions`])?
+    pub fn is_nullable(self) -> bool {
+        matches!(self, Shape::NullableNumber | Shape::NullableBool)
+    }
+}
+
+/// The AI-visible controls whose null the PARSE LAYER resolves — "no
+/// opinion", the photographer's value stands — in registry order: the bit
+/// order of [`crate::advisor::Opinions`]. At most 64 (one `u64`).
+///
+/// `temperature_k` is nullable too but is NOT here: its null travels into the
+/// recipe as `Option::None` ("keep as-shot"), which is the recipe's own
+/// spelling and needs no carry (see [`Shape::NullableNumber`]). Read off the
+/// typed value rather than the name, so a second such row is excluded by the
+/// same rule.
+pub fn nullable_controls() -> Vec<&'static str> {
+    let neutral = EditRecipe::default();
+    let out: Vec<&str> = RECIPE_CONTROLS
+        .iter()
+        .filter(|c| !c.engine_only && c.shape.is_nullable())
+        .filter(|c| !matches!(global_value(&neutral, c.name), Some(GlobalValue::OptNum(_))))
+        .map(|c| c.name)
+        .collect();
+    assert!(out.len() <= 64, "Opinions is one u64: {} nullable controls", out.len());
+    out
 }
 
 /// Where a control lands in a Lightroom / Camera Raw sidecar.
@@ -288,12 +319,15 @@ pub struct Control {
     /// engine-only on `ca_r`'s ground (one-to-three-pixel structure the
     /// advisor's preview cannot show). The parametric tone curve (v1.5.0) is
     /// engine-only because the point curve the model already has is the more
-    /// expressive spelling of the same move. The Calibration panel, the B&W
-    /// treatment and the point colours (v1.5.0) are engine-only for the same
-    /// pair of reasons: the colour mixer and the grade are the model's spelling
-    /// of a colour move, and a required field would return neutral values over
-    /// the photographer's own on every Refine. `enabled` stays here for a
-    /// reason of its own — see [`LOCAL_CONTROLS`]' row for it.
+    /// expressive spelling of the same move. The point colours (v1.5.0) are
+    /// engine-only because a swatch is picked off the photo, not stated.
+    /// The nine effects, the B&W treatment with its grey mix and the
+    /// Calibration panel WERE engine-only until 2026-10-21 (user ruling: the
+    /// AI gets every develop tool it can judge from the preview) and are
+    /// NULLABLE rows now — null is "no opinion", so a required field no
+    /// longer returns neutral values over the photographer's own on every
+    /// refine; `crate::advisor::Opinions` carries which were stated. `enabled`
+    /// stays here for a reason of its own — see [`LOCAL_CONTROLS`]' row for it.
     ///
     /// Every engine-only row needs a HOME for its value across a refine: the
     /// response cannot restate it, so either the pipeline re-stamps it
@@ -562,97 +596,98 @@ pub const RECIPE_CONTROLS: [Control; 116] = [
     },
     // v1.5.0 — Lightroom's Black & White treatment: the switch and its
     // eight-band grey mix, rendered by `render::apply_gray_mix` in the colour
-    // mixer's place. Engine-only on the parametric curve's ground: required
-    // fields would return a colour photo and a flat mix over the
-    // photographer's own on every Refine.
+    // mixer's place. Engine-only until 2026-10-21 on the parametric curve's
+    // ground (required fields would return a colour photo and a flat mix
+    // over the photographer's own on every refine); nullable now, so the
+    // model can ask for a black-and-white rendering and leave one alone.
     Control {
         name: "convert_to_grayscale",
-        shape: Shape::Bool,
+        shape: Shape::NullableBool,
         // A switch, not a band: `Shape::is_scalar` is false, so there is no
         // range to state (the `auto_lateral_ca` row's rule).
         range: None,
-        neutral: "false",
-        engine_only: true,
+        neutral: "null = no opinion (false = colour)",
+        engine_only: false,
         crs: CrsKey::Attr("ConvertToGrayscale"),
         tier: Some(Tier::Rendered),
         purpose: "Lightroom's Black & White treatment: the photo renders as a grey mix of its colours",
     },
     Control {
         name: "gray_red",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("GrayMixerRed"),
         tier: Some(Tier::Rendered),
         purpose: "B&W mix, reds: how light (+) or dark (−) what was red turns in the grey rendering",
     },
     Control {
         name: "gray_orange",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("GrayMixerOrange"),
         tier: Some(Tier::Rendered),
         purpose: "B&W mix, oranges: how light (+) or dark (−) what was orange turns in the grey rendering",
     },
     Control {
         name: "gray_yellow",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("GrayMixerYellow"),
         tier: Some(Tier::Rendered),
         purpose: "B&W mix, yellows: how light (+) or dark (−) what was yellow turns in the grey rendering",
     },
     Control {
         name: "gray_green",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("GrayMixerGreen"),
         tier: Some(Tier::Rendered),
         purpose: "B&W mix, greens: how light (+) or dark (−) what was green turns in the grey rendering",
     },
     Control {
         name: "gray_aqua",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("GrayMixerAqua"),
         tier: Some(Tier::Rendered),
         purpose: "B&W mix, aquas: how light (+) or dark (−) what was aqua turns in the grey rendering",
     },
     Control {
         name: "gray_blue",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("GrayMixerBlue"),
         tier: Some(Tier::Rendered),
         purpose: "B&W mix, blues: how light (+) or dark (−) what was blue turns in the grey rendering",
     },
     Control {
         name: "gray_purple",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("GrayMixerPurple"),
         tier: Some(Tier::Rendered),
         purpose: "B&W mix, purples: how light (+) or dark (−) what was purple turns in the grey rendering",
     },
     Control {
         name: "gray_magenta",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("GrayMixerMagenta"),
         tier: Some(Tier::Rendered),
         purpose: "B&W mix, magentas: how light (+) or dark (−) what was magenta turns in the grey rendering",
@@ -1101,54 +1136,55 @@ pub const RECIPE_CONTROLS: [Control; 116] = [
     },
     // The nine Effects. Carried and unrendered from R25 B2 until v1.5.0, when
     // the engine grew a stage after the crop (`render/finish.rs`) and they
-    // became `Tier::Rendered` like everything else a slider can move. Still
-    // `engine_only`: they have no model of their own in the advisor.
+    // became `Tier::Rendered` like everything else a slider can move.
+    // Engine-only until 2026-10-21; nullable now — a vignette and a grain are
+    // looks a vision model can ask for, and null leaves the photographer's.
     Control {
         name: "post_crop_vignette",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("PostCropVignetteAmount"),
         tier: Some(Tier::Rendered),
         purpose: "creative corner darkening applied AFTER the crop",
     },
     Control {
         name: "post_crop_vignette_mid",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((0.0, 100.0)),
-        neutral: "0 = absent (Lightroom's own default is 50)",
-        engine_only: true,
+        neutral: "null = no opinion (0 = absent (Lightroom's own default is 50))",
+        engine_only: false,
         crs: CrsKey::Attr("PostCropVignetteMidpoint"),
         tier: Some(Tier::Rendered),
         purpose: "how far toward the centre the post-crop vignette reaches",
     },
     Control {
         name: "post_crop_vignette_feather",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((0.0, 100.0)),
-        neutral: "0 = absent (Lightroom's own default is 50)",
-        engine_only: true,
+        neutral: "null = no opinion (0 = absent (Lightroom's own default is 50))",
+        engine_only: false,
         crs: CrsKey::Attr("PostCropVignetteFeather"),
         tier: Some(Tier::Rendered),
         purpose: "how soft the post-crop vignette's edge is",
     },
     Control {
         name: "post_crop_vignette_round",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("PostCropVignetteRoundness"),
         tier: Some(Tier::Rendered),
         purpose: "how circular (positive) or rectangular (negative) the post-crop vignette is",
     },
     Control {
         name: "post_crop_vignette_style",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((0.0, 3.0)),
-        neutral: "0 = absent (Lightroom's own default is 1, Highlight Priority)",
-        engine_only: true,
+        neutral: "null = no opinion (0 = absent (Lightroom's own default is 1, Highlight Priority))",
+        engine_only: false,
         crs: CrsKey::Attr("PostCropVignetteStyle"),
         tier: Some(Tier::Rendered),
         purpose: "WHICH post-crop vignette operator Adobe applies: 1 = Highlight Priority, \
@@ -1156,40 +1192,40 @@ pub const RECIPE_CONTROLS: [Control; 116] = [
     },
     Control {
         name: "post_crop_vignette_hl",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((0.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("PostCropVignetteHighlightContrast"),
         tier: Some(Tier::Rendered),
         purpose: "how far a DARKENING post-crop vignette spares the highlights inside it",
     },
     Control {
         name: "grain",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((0.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("GrainAmount"),
         tier: Some(Tier::Rendered),
         purpose: "film-grain amount",
     },
     Control {
         name: "grain_size",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((0.0, 100.0)),
-        neutral: "0 = absent (Lightroom's own default is 25)",
-        engine_only: true,
+        neutral: "null = no opinion (0 = absent (Lightroom's own default is 25))",
+        engine_only: false,
         crs: CrsKey::Attr("GrainSize"),
         tier: Some(Tier::Rendered),
         purpose: "how coarse each grain particle is",
     },
     Control {
         name: "grain_rough",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((0.0, 100.0)),
-        neutral: "0 = absent (Lightroom's own default is 50)",
-        engine_only: true,
+        neutral: "null = no opinion (0 = absent (Lightroom's own default is 50))",
+        engine_only: false,
         crs: CrsKey::Attr("GrainFrequency"),
         tier: Some(Tier::Rendered),
         purpose: "how irregular the grain pattern is",
@@ -1566,70 +1602,70 @@ pub const RECIPE_CONTROLS: [Control; 116] = [
     },
     Control {
         name: "cal_shadow_tint",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("ShadowTint"),
         tier: Some(Tier::Rendered),
         purpose: "Calibration, shadows tint: pushes the darkest tones toward green (−) or magenta (+)",
     },
     Control {
         name: "cal_red_hue",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("RedHue"),
         tier: Some(Tier::Rendered),
         purpose: "Calibration, red primary hue: turns every colour the camera's red primary builds",
     },
     Control {
         name: "cal_red_sat",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("RedSaturation"),
         tier: Some(Tier::Rendered),
         purpose: "Calibration, red primary saturation: strengthens (+) or mutes (−) every colour it builds",
     },
     Control {
         name: "cal_green_hue",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("GreenHue"),
         tier: Some(Tier::Rendered),
         purpose: "Calibration, green primary hue: turns every colour the camera's green primary builds",
     },
     Control {
         name: "cal_green_sat",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("GreenSaturation"),
         tier: Some(Tier::Rendered),
         purpose: "Calibration, green primary saturation: strengthens (+) or mutes (−) every colour it builds",
     },
     Control {
         name: "cal_blue_hue",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("BlueHue"),
         tier: Some(Tier::Rendered),
         purpose: "Calibration, blue primary hue: turns every colour the camera's blue primary builds",
     },
     Control {
         name: "cal_blue_sat",
-        shape: Shape::Number,
+        shape: Shape::NullableNumber,
         range: Some((-100.0, 100.0)),
-        neutral: "0",
-        engine_only: true,
+        neutral: "null = no opinion (0 = none)",
+        engine_only: false,
         crs: CrsKey::Attr("BlueSaturation"),
         tier: Some(Tier::Rendered),
         purpose: "Calibration, blue primary saturation: strengthens (+) or mutes (−) every colour it builds",
@@ -2367,9 +2403,9 @@ pub const STAMPED_CALIBRATION: [&str; 6] = [
     "upright_transform",
 ];
 
-/// The 21 families the global controls partition into — 10 the AI plans with
-/// plus eleven engine-only groupings (see [`Family::ai_visible`]), the newest
-/// three being v1.5.0's `profile`, `calibration` and `hdr`.
+/// The 21 families the global controls partition into — 13 the AI plans with
+/// plus eight engine-only groupings (see [`Family::ai_visible`]); `effects`,
+/// `black_white` and `calibration` crossed to the planned side on 2026-10-21.
 pub const CONTROL_FAMILIES: [Family; 21] = [
     Family {
         name: "tone",
@@ -2475,15 +2511,13 @@ pub const CONTROL_FAMILIES: [Family; 21] = [
         members: &["colour_field"],
     },
     Family {
-        // The ONE family with no AI-visible member (R25 B2). It exists so the
-        // develop panel's Effects section gets its ● from the same table every
-        // other section does — see [`Family::ai_visible`], which keeps it out
-        // of the thinking envelope's `control` enum and out of the prompt: a
-        // family whose every member is engine-only is a GROUPING, not a tool
-        // the model can plan with.
+        // The first family with no AI-visible member (R25 B2), which is what
+        // [`Family::ai_visible`] was derived for; AI-visible since 2026-10-21,
+        // when its nine rows became nullable.
         name: "effects",
-        covers: "the post-crop vignette and the film grain — Adobe-only operators AutoShade \
-                 carries through the sidecar without rendering",
+        covers: "the post-crop vignette (amount, midpoint, feather, roundness, style, highlights) \
+                 and the film grain (amount, size, roughness), rendered after the crop — null \
+                 leaves the photographer's effects alone",
         members: &[
             "post_crop_vignette",
             "post_crop_vignette_mid",
@@ -2548,8 +2582,8 @@ pub const CONTROL_FAMILIES: [Family; 21] = [
         // the B&W treatment and the point colours are families of their own,
         // and the develop panel's mixer ● is the OR of the three.
         name: "black_white",
-        covers: "Lightroom's Black & White treatment and its eight-band grey mix — rendered here, \
-                 set by the photographer rather than the AI",
+        covers: "Lightroom's Black & White treatment and its eight-band grey mix (how light each \
+                 colour turns in grey) — null leaves the photographer's treatment alone",
         members: &[
             "convert_to_grayscale",
             "gray_red",
@@ -2580,8 +2614,9 @@ pub const CONTROL_FAMILIES: [Family; 21] = [
     Family {
         // v1.5.0. A develop-panel section of its own, as in Lightroom.
         name: "calibration",
-        covers: "Lightroom's Calibration panel — the shadows tint and the red, green and blue \
-                 primaries — rendered here, set by the photographer rather than the AI",
+        covers: "Lightroom's Calibration panel — the shadows tint and the hue / saturation of the \
+                 red, green and blue primaries, the deepest colour move there is — null leaves \
+                 the photographer's calibration alone",
         members: &[
             "cal_shadow_tint",
             "cal_red_hue",
@@ -3948,11 +3983,16 @@ mod tests {
         for n in PROMOTED {
             let c = global_control(n).unwrap_or_else(|| panic!("{n} left the registry"));
             assert_eq!(c.tier, Some(Tier::Rendered), "{n} was promoted and then demoted");
-            // Promotion is about RENDERING, never about who plans: all
-            // twenty-four stay engine-only, because the advisor has no model of
-            // a grain lattice or a hue window and a required schema field would
-            // return 0 and delete the photographer's own value on every Refine.
-            assert!(c.engine_only, "{n} renders now, but that is not a reason to ask the model");
+            // Promotion is about RENDERING, never about who plans: a promoted
+            // row is engine-only — the advisor has no model of a hue window,
+            // and a required schema field would return 0 and delete the
+            // photographer's own value on every Refine — or, since 2026-10-21,
+            // NULLABLE, which is the only way out of that trap: the nine
+            // effects are asked for with null as "no opinion".
+            assert!(
+                c.engine_only || c.shape.is_nullable(),
+                "{n} renders now, but that alone is not a reason to ask the model"
+            );
         }
         // The AMOUNT-GATED companions among them are exactly the rows that
         // cannot light a section's ● on their own, which is `DOT_EXEMPT`'s
@@ -4249,6 +4289,10 @@ mod tests {
             // R25 B4 adds a FIFTH kind, and the plainest of them all:
             // `passthrough` is a value nobody interprets, so there is no
             // question to ask the model about it (`Tier::PassThrough`).
+            // 2026-10-21 took the nine effects, the B&W treatment and the
+            // calibration OUT: `Shape::NullableNumber` / `NullableBool` give
+            // them the "no opinion" expression the lens trio has, so a
+            // required field no longer deletes the photographer's value.
             vec![
                 "as_shot_k",
                 "as_shot_tint",
@@ -4256,17 +4300,10 @@ mod tests {
                 "base_curve",
                 "ca_b",
                 "ca_r",
-                // v1.5.0: the Calibration panel, the B&W treatment and the
-                // point colours, on the parametric curve's ground below — with
-                // the colour mixer and the grade as the model's own spelling
-                // of a colour move.
-                "cal_blue_hue",
-                "cal_blue_sat",
-                "cal_green_hue",
-                "cal_green_sat",
-                "cal_red_hue",
-                "cal_red_sat",
-                "cal_shadow_tint",
+                // v1.5.0 put the Calibration panel, the B&W treatment and the
+                // point colours here on the parametric curve's ground;
+                // 2026-10-21 unlocked the first two (and the nine effects) as
+                // NULLABLE rows, so only the swatches remain.
                 // v1.5.0 F7, the fifth kind again — nothing to ask. A camera
                 // profile is a FILE on the photographer's machine and a Look
                 // is Adobe's own creative block; a model that named one would
@@ -4280,7 +4317,6 @@ mod tests {
                 // schema field would return an empty grid and delete a solved
                 // field on every Refine.
                 "colour_field",
-                "convert_to_grayscale",
                 "coord_era",
                 // v1.5.0 F6. `crop_constrain_to_warp` is a FLAG about the
                 // frame, not a look, and `upright_transform` is Adobe's own
@@ -4297,17 +4333,6 @@ mod tests {
                 // Refine with them — a model has no view on which zeros are
                 // meant.
                 "explicit_zero",
-                "grain",
-                "grain_rough",
-                "grain_size",
-                "gray_aqua",
-                "gray_blue",
-                "gray_green",
-                "gray_magenta",
-                "gray_orange",
-                "gray_purple",
-                "gray_red",
-                "gray_yellow",
                 // v1.5.0 F8, the first kind again: a declaration ABOUT the
                 // capture's range and about the rendition it is published
                 // through, neither of which a model can see in a preview that
@@ -4358,12 +4383,6 @@ mod tests {
                 // card; a model asked to state it could only delete it.
                 "pixel_layers",
                 "point_colors",
-                "post_crop_vignette",
-                "post_crop_vignette_feather",
-                "post_crop_vignette_hl",
-                "post_crop_vignette_mid",
-                "post_crop_vignette_round",
-                "post_crop_vignette_style",
                 // R27 adds a SIXTH kind: `quarter_turns` is the
                 // photographer's own hand on the frame. The model is shown the
                 // photo ALREADY in its display frame, so "how far should this
@@ -4528,6 +4547,36 @@ mod tests {
     /// schema and in the prompt catalogue while being absent from the plan the
     /// model is asked to make about its own tools — the exact blind spot #13
     /// reports, reintroduced through the back door.
+    /// 2026-10-21: the nine effects, the B&W treatment and the Calibration
+    /// panel are planned with, as nullable rows — and every nullable row is
+    /// AI-visible, so `Opinions` has a bit for exactly the controls the
+    /// schema can answer null for.
+    ///
+    /// MUTATION THIS KILLS: put `engine_only: true` back on any of the
+    /// twenty-five, or give one a plain `Number` shape.
+    #[test]
+    fn the_unlocked_families_are_planned_with_as_nullable_rows() {
+        for fam in ["effects", "black_white", "calibration"] {
+            let f = CONTROL_FAMILIES.iter().find(|f| f.name == fam).expect("a family");
+            assert!(f.ai_visible(), "{fam} must be a family the model plans with");
+            for m in f.members {
+                let c = global_control(m).expect("a registry row");
+                assert!(c.shape.is_nullable(), "{m}: an unlocked control must take null for no opinion");
+            }
+        }
+        // The lens trio plus twenty-five; not the white balance (its null is
+        // the recipe's own) and not the engine-only nullable rows (the
+        // stamped as-shot pair), which the schema never sends.
+        let nullable = nullable_controls();
+        assert_eq!(nullable.len(), 28, "the lens trio plus twenty-five: {nullable:?}");
+        assert!(!nullable.contains(&"temperature_k") && !nullable.contains(&"as_shot_k"), "{nullable:?}");
+        assert_eq!(
+            global_control("convert_to_grayscale").map(|c| c.shape),
+            Some(Shape::NullableBool),
+            "the switch is the one boolean the model may decline to answer"
+        );
+    }
+
     #[test]
     fn every_ai_visible_control_belongs_to_exactly_one_family() {
         let mut owned: Vec<&str> = Vec::new();

@@ -1971,6 +1971,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       {diverged} moved away, and {aligned} moved in the direction its own target \
       asks for.",
         " 拟合出的白平衡在发布前已按目标自身的 12x8 单元均值比对：画面的 {converged} 更接近目标，{diverged} 反而远离，{aligned} 的移动方向与各自目标要求的方向一致。"),
+    (" The fitted white balance shipped at {share} of the solved move: the full move was \
+      refused by the target's own 12x8 cell means ({full}), and at this share \
+      {converged} of the frame moved closer to its target, {diverged} moved away, and \
+      {aligned} moved in the direction its own target asks for.",
+        " 拟合出的白平衡按求解移动的 {share} 发布：完整移动被目标自身的 12x8 单元均值拒绝（{full}），按此份额则画面的 {converged} 更接近目标，{diverged} 反而远离，{aligned} 的移动方向与各自目标要求的方向一致。"),
     (" The region's own cells carried movement through one-sided hue bands \
       [{bands}]: those pixels are re-synthesised and have no paired counterpart, so \
       admission was asked of the target's 12x8 cell means instead — {converged} of \
@@ -2013,6 +2018,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       (do-no-harm terminal case); this look is outside the global \
       model's reach.",
         " 全强度拟合在每个饱和度档位上都比未处理原图离目标更远——返回中性配方（不伤害原则的终止情形）；此风格在全局模型能力之外。"),
+    (" The tone sliders were withheld: rendered, they left the frame's tones farther from \
+      the target's than the untouched source's (tonal reading {before} → {after}), so the \
+      tone stage shipped nothing and the stages after it solved from the untoned frame.",
+        " 影调滑杆暂不调整：渲染后它们让画面的影调比未动的原图离目标更远（影调读数 {before} → {after}），因此影调一级不发布任何东西，后面各级从未调影调的画面继续求解。"),
+    (" The residual tone curve was withheld: rendered on top of the sliders it left the \
+      frame's tones farther from the target's (tonal reading {before} → {after}), so the \
+      sliders ship without it.",
+        " 残差影调曲线暂不调整：叠在滑杆之上渲染后它让画面的影调离目标更远（影调读数 {before} → {after}），因此滑杆不带曲线发布。"),
     (" Saturation was pulled back from the chroma-matched {sat_fitted} \
       to {sat_now} after the full-strength fit rendered farther from the \
       target than the untouched source (do-no-harm check).",
@@ -2087,8 +2100,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 分区 {label} 的色彩控件按区域证据发布：像素尺度的读数因该区域纹理是重新合成的而暂不调整色相 [{hue_bands}]，于是把这次移动渲染出来，交由目标自身在该分区上的 12x8 单元均值裁定 —— 区域的 {converged} 更接近目标，{diverged} 反而远离，{aligned} 的移动方向与各自目标要求的方向一致。"),
     (" Zoned {label} tone controls shipped on REGION evidence: the pixel-scale reading withholds luma ranges [{luma_ranges}] because this region's texture was re-synthesised, so the move was rendered and put to the target's own 12x8 cell means over the zone — {converged} of the region moved closer, {diverged} moved away, and {aligned} moved in the direction its own target asks for.",
         " 分区 {label} 的影调控件按区域证据发布：像素尺度的读数因该区域纹理是重新合成的而暂不调整亮度范围 [{luma_ranges}]，于是把这次移动渲染出来，交由目标自身在该分区上的 12x8 单元均值裁定 —— 区域的 {converged} 更接近目标，{diverged} 反而远离，{aligned} 的移动方向与各自目标要求的方向一致。"),
+    (" Zoned {label} colour controls shipped on PAIRED evidence through one-sided hue bands [{hue_bands}]: this region's pixels are each other's counterparts, and each moved pixel was individually vouched (robust weight) and moved toward its own paired target pixel; unvouched pixels kept the veto.",
+        " 分区 {label} 的色彩控件按配对证据发布，穿过单侧色相带 [{hue_bands}]：该区域的像素与目标像素逐一对应，每个被移动的像素都逐一获得担保（稳健权重），并向其自身的配对目标像素靠近；未获担保的像素维持否决。"),
     (" Zoned {label} tone was solved at CELL scale: this zone's own structural reading is {d}, past the {line} pairing line, so its pixels are not each other's counterparts — the tone came from the zone's own luma distribution rather than from a per-pixel regression, which reads a re-synthesised texture's contrast low.",
         " 分区 {label} 的影调按单元尺度求解：该分区自身的结构读数为 {d}，已越过 {line} 的配对界线，其像素与目标像素并非逐一对应 —— 影调取自该分区自身的亮度分布，而不是逐像素回归，后者会把重新合成的纹理的对比度读低。"),
+    (" Zoned {label} tone was solved from the zone's own luma distribution: the per-pixel pairing at D={d} squeezed the zone's spread to {ratio} of the target's (p10–p90 {mapped} vs {target}), below the {floor} floor — a conditional median narrows a loosely paired zone.",
+        " 分区 {label} 的影调取自该分区自身的亮度分布：在 D={d} 下逐像素配对把该分区的亮度跨度压到目标的 {ratio}（p10–p90 {mapped} 对 {target}），低于 {floor} 的下限 —— 条件中位数会让配对松散的分区跨度变小。"),
     (" No zoned correction attached: the source and target zone shares differ by more than 2:1, so neither population is a comparable measurement of the same subject.",
         " 未附加任何分区修正：源图与目标的分区占比之比超过 2:1，两侧不是对同一主体的可比测量。"),
     (" This target's look appears to use {controls}, which the reverse-fit \
@@ -2158,6 +2175,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" Zoned {label} correction dropped by the local-quality clipping gate: \
       clipped share {before}% → {after}% (allowed growth {growth} percentage point).",
         " {label} 区校正被局部质量裁切门弃用：裁切占比 {before}% → {after}%（允许增加 {growth}%）。"),
+    (" Zoned {label} colour controls withheld by the local-quality gate: with them the zone read texture ratio {ratio} and clipped share {clip_before}% → {clip_after}% (allowed texture [{min}, {max}], clipping growth {growth} percentage point); the tone controls are judged alone.",
+        " 分区 {label} 的色彩控件被局部画质门暂不调整：带上它们，该分区的纹理比读作 {ratio}、裁切占比 {clip_before}% → {clip_after}%（允许纹理 [{min}, {max}]、裁切增加 {growth}%）；影调控件单独裁定。"),
     (" Zoned {label} correction attached ({label}-to-{label} moments → \
       local exposure {ev} EV, colour gains [{g0} {g1} {g2}], \
       saturation {sat}): zone residual {before} → {after}. The correction \
@@ -2646,6 +2665,13 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
          而「减半或落位」两臂本会丢弃它；帧上没有付出代价（{frame_before} → {frame_after}）。\
          局部质量读数为纹理比 {texture}；该纹理下限虽经标定，但已知无法区分所有情形，\
          故此校正实际依托的是裁切门、零回归的帧读数与边界门。"),
+    (" Zoned {label} correction accepted on its luma distribution: the quantile gap \
+      to the target fell {before} → {after} (floor {floor}), the frame {frame_before} → \
+      {frame_after}, and the zone moments did not regress ({zone_before} → {zone_after}); \
+      a moments ruler cannot see a contrast-type reshape.",
+        " {label} 区校正按亮度分布接受：与目标的分位数差距 {before} → {after}（下限 {floor}），\
+         全画面 {frame_before} → {frame_after}，区内矩未变差（{zone_before} → {zone_after}）；\
+         以矩为尺读不出对比度式的形状改变。"),
     (" Cross-image correspondence measured (DIFT): {cov}% of the frame has a confident counterpart in the target (median confidence {med}); full zone fits weight pairs by it and read shifted content at its corresponded position.",
         " 跨图对应已测量（DIFT）：画面 {cov}% 在目标中有可信对应（中位置信 {med}）；完整区拟合按其为像素对加权，并在对应位置读取被移动的内容。"),
     (" Cross-image correspondence unavailable ({e}) — the content-divergent estimators ran without it.",

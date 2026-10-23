@@ -207,7 +207,7 @@ pub(super) fn cast_gate_outcome(
     with_px: &[[f32; 3]],
     tp: &[[f32; 3]],
     evidence: &EvidenceModel,
-    vouch: Option<(&[f32], &[[f32; 3]])>,
+    vouch: Option<PixelVouch<'_>>,
     cells: Option<CellArm<'_>>,
 ) -> CastOutcome {
     cast_gate_outcome_with_ratio(cur, with_px, tp, evidence, vouch, cells, CAST_ACCEPT_RATIO)
@@ -237,7 +237,7 @@ pub(super) fn cast_gate_outcome_with_ratio(
     with_px: &[[f32; 3]],
     tp: &[[f32; 3]],
     evidence: &EvidenceModel,
-    vouch: Option<(&[f32], &[[f32; 3]])>,
+    vouch: Option<PixelVouch<'_>>,
     cells: Option<CellArm<'_>>,
     accept_ratio: f32,
 ) -> CastOutcome {

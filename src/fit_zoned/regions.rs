@@ -225,6 +225,9 @@ pub(super) fn attach_semantic_regions(
                     target_boundary: Some(&tgt_px[..]),
                     initial_px: zone.rendered,
                     frame_before,
+                    // The tolerance `attach_one_zone` admitted this region
+                    // on, so the gate cannot silently override the admission.
+                    frame_tol: ZONE_GLOBAL_REGRESSION_TOL,
                 },
             );
             match boundary {
@@ -254,6 +257,7 @@ pub(super) fn attach_semantic_regions(
                                 ("k", format!("{:.3}", boundary.k)),
                                 ("max", format!("{:.3}", ZONE_BOUNDARY_RIM_MAX)),
                                 ("transitions", boundary.reading.transitions.to_string()),
+                                ("asked", format!("{:.3}", boundary.reading.asked)),
                                 ("charged", format!("{:.3}", boundary.reading.charged)),
                                 ("colour", format!("{:.3}", boundary.reading.colour)),
                                 (

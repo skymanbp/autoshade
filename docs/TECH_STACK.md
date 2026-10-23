@@ -1509,6 +1509,19 @@ the structured proposal, not photo pixels—and all Responses requests set
 `store:false`; a visual judge may buy one guided revision, but the replacement
 is adopted only when its rescore is at least the original score.
 
+The schema is derived from the control registry (`advisor::catalogue`), and
+on 2026-10-21 the registry unlocked twenty-five more rows for the model — the
+post-crop vignette and grain, the Black & White treatment with its grey mix,
+and the Calibration panel — as NULLABLE fields on the manual-lens pattern:
+null is "no opinion" and the photographer's current value stands, a number (or
+the switch's boolean) is the answer, and 0 switches the control off.
+`advisor::Opinions` records which were stated, so a refine or an adjust
+carries the base's value exactly where the model said nothing. What stays
+engine-only has a stated reason each: the eight detail axes and the CA pair
+(one-to-three-pixel structure the ~1024 px preview cannot show), the
+parametric curve (the point curve says the same), the point-colour swatches,
+the lens profile scales, Transform, de-fringe, HDR and the profile names.
+
 The same chain has an ADJUST mode (2026-10-21, replacing the desktop's
 「AI Refine」): `pipeline::produce_recipe` takes the current recipe as the base
 and an optional `pixels` path, renders the current edit at preview size and
@@ -1687,7 +1700,9 @@ luminance); a cast only the fan gate convicts is projected along
 `C(t) = x + min(1, 2t)(L − x) + max(0, 2t − 1)(C − L)` toward the shared shape
 `L` and beyond it toward no curves, the largest `t` whose rendered candidate
 clears 7.5 degrees, all four gates and a `FIT_QUANT` gain bar shipping; terminal do-no-harm can shrink saturation or reset to
-the caller's base recipe.
+the caller's base recipe, and since 2026-10-21 the tone sliders and the residual
+curve are each held to do no harm at their own stage, and a white balance the
+target's cells refuse only on size ships at the largest share they vouch.
 
 Atmosphere mode is entered because structure diverges; its instruments are the
 budgets (EV ±1, WB gain [0.80, 1.25], saturation ±30, curve slope [0.5, 1.5])

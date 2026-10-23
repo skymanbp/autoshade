@@ -71,7 +71,7 @@ use boundary::{ZONE_BOUNDARY_HIGH, ZONE_BOUNDARY_PERCENTILE, boundary_rim_toward
 #[cfg(test)]
 use boundary::{
     CellSums, TARGET_STEP_MIN_CROSSINGS, ZONE_BOUNDARY_LOW, boundary_rim,
-    boundary_step, cell_shares, unasked,
+    boundary_step, cell_shares, colour_charge_of_one_crossing, unasked,
 };
 pub use entry::{fit_recipe_zoned, fit_recipe_zoned_from, fit_recipe_zoned_with_regions};
 use entry::{EdgeMatte, FeatherWidening, PlaneRefinement, matte_source_edge};
@@ -98,7 +98,8 @@ use limits::{
     MASK_REFINE_EPSILON, MASK_REFINE_RADIUS, SHIPPED_LAYERS, ZONE_ACCEPT_RATIO, ZONE_ATMOS_EV_LIMIT,
     ZONE_ATMOS_SAT_LIMIT, ZONE_CLIP_GROWTH, ZONE_EV_LIMIT, ZONE_FLOOR_MIN_GAIN,
     ZONE_GLOBAL_REGRESSION_TOL, ZONE_MATCHED_ERR, ZONE_MATCHED_EV, ZONE_MIN_ABS_GAIN,
-    ZONE_SAT_LIMIT, ZONE_SKIP_ERR, ZONE_TEXTURE_MAX, ZONE_TEXTURE_MIN, ZonedLayerOpts,
+    ZONE_SAT_LIMIT, ZONE_SKIP_ERR, ZONE_TEXTURE_MAX, ZONE_TEXTURE_MIN, ZONE_TONAL_MATCHED,
+    ZonedLayerOpts,
 };
 use one_zone::{ZONE_CONFIDENCE_SLOPE, attach_one_zone};
 pub(crate) use rasters::{is_colour_refusal, is_tone_refusal};
@@ -112,7 +113,7 @@ pub(crate) use zone_fit::{
 use zone_fit::{
     ZONE_VOUCH_SHRINK_STEPS, ZoneAcceptArm, clamp_zone_sat, clamp_zone_sat_for_mode, local_quality,
     scale_zone_colour, scale_zone_tone, shrink_atmosphere_gains_in, shrink_zone_corrections,
-    zone_accepts, zone_skips,
+    zone_accepts, zone_skips, zone_tonal,
 };
 
 /// The zoned fit's source as ONE text, for the source-text gates that read what

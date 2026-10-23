@@ -320,6 +320,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 evidence_refused: false,
                 sat_fitted: None,
                 regressed: None,
+                tone_harm: None,
+                curve_harm: None,
                 detail: (0.0, 0.0),
                 detail_withheld: false,
                 robust: None,
@@ -359,7 +361,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 structural_evidence: None,
                 defer_disclosure,
             },
-            SolveFacts { budget: Some(FitBudget::for_strength(options.strength)), strength: Some(options.strength.get()), veto_luma: None, veto_hue: None, wb_clamped: None, wb_search_bound: None, wb_rotation_coverage: None, wb_rotation_disclosure: None, cast_admitted_by_strength: None, cast_admitted: None, cast_projected: None, wb_cells: None, wb_foreign_hue_withheld: false, wb_rotation_withheld: false, sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None, cast_cells: None, hsl: HslStageFacts::default(), atmosphere_reference: AtmosphereReference::WholeFrame },
+            SolveFacts { budget: Some(FitBudget::for_strength(options.strength)), strength: Some(options.strength.get()), veto_luma: None, veto_hue: None, wb_clamped: None, wb_search_bound: None, wb_rotation_coverage: None, wb_rotation_disclosure: None, cast_admitted_by_strength: None, cast_admitted: None, cast_projected: None, wb_cells: None, wb_foreign_hue_withheld: false, wb_rotation_withheld: false, sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, tone_harm: None, curve_harm: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None, cast_cells: None, hsl: HslStageFacts::default(), atmosphere_reference: AtmosphereReference::WholeFrame },
         );
     }
 
@@ -379,10 +381,20 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     let full_cast_accept_ratio = budget.cast_ratio;
 
     // --- 1) tone: exposure scan × linear solve on the engine's knot basis ----
-    // Tone evidence comes from NEAR-NEUTRAL pixels: saturated pixels clip
-    // channels at the gamut ceiling under chroma scaling, so their luma lands
-    // short of the tone map and would bias the solve (measured: one polluted
-    // knot skews contrast by tens of points). Greys carry clean evidence.
+    // The MARGINAL arm's evidence comes from NEAR-NEUTRAL pixels: saturated
+    // pixels clip channels at the gamut ceiling under chroma scaling, so
+    // their luma lands short of the tone map and would bias a quantile map
+    // (measured: one polluted knot skews contrast by tens of points) — and
+    // `tone_cdf_pair_weighted` drops that gate itself where the two sides'
+    // neutral classes are not one population. The PAIRED arm below reads
+    // EVERY paired pixel (2026-10-21): it has each pixel's own counterpart
+    // and a robust fit to reject the inconsistent ones, so the gate was not
+    // identifying anything there — it was choosing a population. On the
+    // seaside street the near-neutral eighth of the frame is its shadow
+    // walls, which the target crushes (0.06–0.28 → 0.024), while the
+    // chromatic seven eighths at the same brightness go 0.06 → 0.058 and
+    // 0.25 → 0.156; the gated map solved contrast 100 and the lower-left
+    // shadows went black. The frame's map is the frame's.
     let (s_cdf, t_cdf) = tone_cdf_pair_weighted(&sp, &tp, &evidence);
     let robust_tone = paired_robust_tone(
         &sp,
@@ -395,7 +407,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 .unwrap_or(0.0)
                 .min(evidence.target_weights.get(i).copied().unwrap_or(0.0))
         },
-        true,
+        false,
     );
     // The paired path is gated by the ROBUST FIT'S OWN diagnostics: enough
     // populated bins to shape a map, and a majority-consistent pairing. The
@@ -514,6 +526,42 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         recipe.whites = 0.0;
         recipe.blacks = 0.0;
     }
+    // Do-no-harm, PER STAGE (2026-10-21). The terminal check below resets
+    // the WHOLE recipe to the base when the finished render lands farther
+    // from the target than the untouched source — and on the lantern street
+    // it was the tone stage alone that had put it there: the paired robust
+    // regression asked for +1.65 EV and contrast 7.5 against a target that
+    // is darker and warmer (a sixth of the pairs are content the two frames
+    // do not share, and the survivors still disagree with the population),
+    // the look error went 0.0595 → 0.0815 on the sliders alone, every later
+    // stage inherited the deficit, and the terminal threw away a white
+    // balance the cells had vouched along with the sliders that caused the
+    // harm. A stage that renders the frame farther from the target than it
+    // found it ships nothing; the stages after it solve from the frame as
+    // it was. The ruler is the TONAL term of the terminal's objective — the
+    // term the sliders control (`look::tonal_err_with_evidence`). Held to
+    // the whole objective, a correct luma move was charged for the
+    // colour-mean drift it brings to a muted frame whose target is vivid
+    // (the land-and-sky toy: whole objective 0.1233 → 0.1240 on the sliders
+    // alone, and the zones downstream lost the global move they were solved
+    // beside), drift the saturation, white-balance and cast stages exist to
+    // correct; the lantern street's sliders raised the tonal term itself,
+    // 0.0468 → 0.0748, and are refused on it alone.
+    let tonal_before = look::tonal_err_with_evidence(&sp, &tp, &evidence);
+    let mut tone_harm = None;
+    {
+        let toned = pixels_of(&render::develop_preview(&s_img, &recipe));
+        let err_toned = look::tonal_err_with_evidence(&toned, &tp, &evidence);
+        if err_toned > tonal_before + 1e-4 {
+            recipe.exposure_ev = base.exposure_ev;
+            recipe.contrast = base.contrast;
+            recipe.highlights = base.highlights;
+            recipe.shadows = base.shadows;
+            recipe.whites = base.whites;
+            recipe.blacks = base.blacks;
+            tone_harm = Some((tonal_before, err_toned));
+        }
+    }
 
     // --- 2) residual master curve (composed on top of the sliders) -----------
     // Domain care (R16): the sliders solved in the USER domain (their input
@@ -581,6 +629,34 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         recipe.blacks = base.blacks;
         recipe.tone_curve = base.tone_curve.clone();
     }
+    // The residual curve's own do-no-harm (2026-10-21), the same rule as the
+    // sliders': it fits the paired map more exactly than five sliders can,
+    // and where that map disagrees with the population the exactness is the
+    // harm — the seaside street's sliders took the frame 0.0746 → 0.0538 and
+    // the curve on top of them took it back to 0.0649 (its tonal term
+    // 0.0555 → 0.0745). Judged against the render WITHOUT it, so a curve on
+    // withheld sliders is judged against the base and not against a harm
+    // the sliders already undid; and on the tonal term, as the sliders are,
+    // for the same reason. Measured 2026-10-21 on four real pairs, the
+    // tonal term, the whole objective and the cells' vouch along luminance
+    // agreed on every curve they refused (the seaside street's cells read
+    // 0.174 converged / 0.509 diverged under its curve).
+    let mut curve_harm = None;
+    if recipe.tone_curve != base.tone_curve {
+        let with_curve = pixels_of(&render::develop_preview(&s_img, &recipe));
+        let err_with = look::tonal_err_with_evidence(&with_curve, &tp, &evidence);
+        let mut without = recipe.clone();
+        without.tone_curve = base.tone_curve.clone();
+        let err_without = look::tonal_err_with_evidence(
+            &pixels_of(&render::develop_preview(&s_img, &without)),
+            &tp,
+            &evidence,
+        );
+        if err_with > err_without + 1e-4 {
+            recipe.tone_curve = base.tone_curve.clone();
+            curve_harm = Some((err_without, err_with));
+        }
+    }
 
     // --- 2b) white balance ---------------------------------------------------
     // Full mode had no white-balance stage AT ALL until R33 — not a gate that
@@ -622,9 +698,17 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             })
             .collect()
     };
-    let (free_k, free_tint, _wanted) =
-        atmosphere_wb_from_populations(&sp, &tp, &wb_weights, anchor);
+    // The demand is read from the frame AS THE STAGE FINDS IT (2026-10-21):
+    // the render after the tone stage, not the base. The tone sliders act on
+    // every channel, so a strong contrast move changes the three channel
+    // ratios between the base and the target on its own, and a demand read
+    // from the base charges that change to the light: the seaside street
+    // (contrast 100) read 40000 K / tint −24.2 from the base and 17400 K /
+    // +4.8 from the toned render against the same target. The chroma chase
+    // below has always read the current render for the same reason.
     let before_wb = pixels_of(&render::develop_preview(&s_img, &recipe));
+    let (free_k, free_tint, _wanted) =
+        atmosphere_wb_from_populations(&before_wb, &tp, &wb_weights, anchor);
     let wb_restore = (recipe.temperature_k, recipe.tint);
     let wb_facts = solve_white_balance(
         &s_img,
@@ -637,23 +721,89 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         budget,
         options.strength,
     );
-    // The verdict is on what the stage DID, not on what it wanted.
+    // The verdict is on what the stage DID, not on what it wanted — and it
+    // is asked along the axis the stage can move. A white balance moves
+    // chromaticity only, so its direction test reads chromaticity
+    // (`MoveAxis::Colour`), as a zone's colour probe has since 2026-10-19;
+    // put to the FULL direction it was refused wherever the target was also
+    // darker or brighter than the tone stage left the cell, because that
+    // direction is mostly luminance and no white balance can point along
+    // it. Measured 2026-10-21: the lantern street's warm target read 0.866
+    // converged / 0.065 diverged and still 0.502 aligned, the seaside
+    // street 0.847 / 0.117 / 0.546; both casts went back to as-shot.
     let wb_moved = (recipe.temperature_k, recipe.tint) != wb_restore;
-    let wb_cells = wb_moved
-        .then(|| {
-            cells.as_ref().map(|c| {
-                c.vouch(&before_wb, &pixels_of(&render::develop_preview(&s_img, &recipe)), None)
-            })
+    let vouch_wb = |recipe: &EditRecipe| {
+        cells.as_ref().map(|c| {
+            c.vouch_along(
+                crate::fit_cells::MoveAxis::Colour,
+                &before_wb,
+                &pixels_of(&render::develop_preview(&s_img, recipe)),
+                None,
+            )
         })
-        .flatten();
+    };
+    let wb_cells = wb_moved.then(|| vouch_wb(&recipe)).flatten();
+    // R36 for the white balance (2026-10-21). A refusal on SIZE is not a
+    // refusal on DIRECTION: the seaside street's cast read 0.847 converged /
+    // 0.117 diverged / 0.954 aligned along chromaticity — nineteen cells in
+    // twenty asked for the move and a ninth of the mass was pushed PAST its
+    // own target, because the one white balance the population solved was
+    // too large for those cells, not wrong for them — and the stage returned
+    // the whole cast to as-shot. As the zone probes do (`vouched_share`), the
+    // largest share of the solved move whose RENDER the same voucher admits
+    // is searched for instead, along the as-shot-to-solved path the budget
+    // itself walks (`wb_path_between`: the log-gain segment, each point
+    // inverted for its own Kelvin, quantised as the solve quantises).
+    // Admission stays evidence — the white balance that ships is
+    // one the cells vouched — and the search is a budget on size. It is asked
+    // only where the direction agrees: a frame whose cells want opposite
+    // moves is not asking for less of one move and stays refused. And a
+    // share is accepted only on SIZE evidence (`WB_SHARE_SIZE_EVIDENCE`):
+    // the cells that diverged at the full move must mostly stop diverging at
+    // the share, or they were not pushed past their targets but away from
+    // them — the seaside street's sky, a tenth of the frame under a cast the
+    // other nine tenths asked for, kept diverging at 0.969 of the move and
+    // the threshold alone would have shipped it.
+    let mut wb_shipped_at = None;
+    if let Some(full) = wb_cells
+        && !full.vouched()
+        && full.direction_agrees()
+    {
+        let solved = (recipe.temperature_k.unwrap_or(anchor), recipe.tint);
+        let from = (wb_restore.0.unwrap_or(anchor), wb_restore.1);
+        let at = |share: f32| -> (Option<f32>, f32) {
+            let (k, tint) = wb_path_between(anchor, from, solved, share);
+            (Some(k), tint)
+        };
+        let (mut lo, mut hi, mut best) = (0.0f32, 1.0f32, None);
+        for _ in 0..WB_VOUCH_SHRINK_STEPS {
+            let mid = 0.5 * (lo + hi);
+            (recipe.temperature_k, recipe.tint) = at(mid);
+            match vouch_wb(&recipe) {
+                Some(v) if v.vouched() && v.diverged <= full.diverged * WB_SHARE_SIZE_EVIDENCE => {
+                    best = Some((mid, v));
+                    lo = mid;
+                }
+                _ => hi = mid,
+            }
+        }
+        if let Some((share, _)) = best {
+            (recipe.temperature_k, recipe.tint) = at(share);
+        }
+        wb_shipped_at = best;
+    }
     // An ABSTENTION cannot admit a control either: where no cell resolved
     // there is no verdict, and a stage that did not exist before does not get
     // to ship on silence.
-    if wb_moved && !wb_cells.is_some_and(|v| v.vouched()) {
+    if wb_moved && !wb_cells.is_some_and(|v| v.vouched()) && wb_shipped_at.is_none() {
         (recipe.temperature_k, recipe.tint) = wb_restore;
     }
     let wb_admitted = (recipe.temperature_k, recipe.tint) != wb_restore;
-    let wb_cells = wb_cells.map(|vouch| WbCellVerdict { vouch, admitted: wb_admitted });
+    let wb_cells = wb_cells.map(|vouch| WbCellVerdict {
+        vouch,
+        admitted: wb_admitted,
+        shipped_at: wb_shipped_at.filter(|_| wb_admitted),
+    });
 
     // --- 3) global saturation, secant-refined through the real engine --------
     // Saturation stays BEFORE the cast curves: channel CDFs of a desaturated
@@ -736,11 +886,13 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     let (detail, detail_supported) = fit_detail_stage(&s_img, &tp, &evidence, &mut recipe);
     // The paired voucher every hue-damage guard consults (see
     // converges_toward): robust per-pixel weights plus each pixel's own
-    // paired target. None on marginal-path runs — strict doctrine.
+    // paired target, judged on the full display pixel because the mixer and
+    // the cast curves move brightness and colour together. None on
+    // marginal-path runs — strict doctrine.
     let hue_vouch = robust_tone
         .as_ref()
         .filter(|_| paired)
-        .map(|r| (r.weights.as_slice(), tp.as_slice()));
+        .map(|r| (r.weights.as_slice(), tp.as_slice(), crate::fit_cells::MoveAxis::Full));
 
     // --- 4a) per-band colour mixer, BEFORE the cast curves ------------------
     // Ordering follows the stage-3 argument one level down: the mixer is the
@@ -1192,6 +1344,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             evidence_refused: evidence_has_one_sided(&evidence),
             sat_fitted: sat_reduced.then_some(sat_fitted),
             regressed: fit_regressed.then_some(joint_regressed),
+            tone_harm,
+            curve_harm,
             detail,
             detail_withheld: !detail_supported,
             robust: robust_facts,

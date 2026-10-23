@@ -503,6 +503,8 @@ fn boundary_args(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BitmapBoundaryWhy {
+    /// The composed frame at the surviving `k` regressed by more than the
+    /// caller's own admission tolerance (`BitmapBoundaryInput::frame_tol`).
     Frame,
     Rim,
     /// The mask reaches the gate with a contour that could not be sampled at
@@ -598,10 +600,21 @@ pub(super) struct BitmapBoundaryInput<'a> {
     pub(super) target_boundary: Option<&'a [[f32; 3]]>,
     pub(super) initial_px: Vec<[f32; 3]>,
     pub(super) frame_before: f32,
+    /// The composed-frame regression this caller's ADMISSION allowed: the
+    /// gate re-checks the frame at the surviving `k` under the same
+    /// tolerance the candidate was admitted on, never a stricter one of its
+    /// own. Spatial tiles and free masks pass
+    /// [`SPATIAL_FRAME_REGRESSION_TOL`]; a semantic region passes
+    /// [`ZONE_GLOBAL_REGRESSION_TOL`] (2026-10-22: the gate used to apply 0.0
+    /// to every family, so a region `attach_one_zone` had admitted within its
+    /// 0.02 drift budget was silently refused here).
+    pub(super) frame_tol: f32,
 }
 
 /// One bitmap boundary/composed-frame gate shared by tiles, free masks and
-/// the multi-region semantic path, each naming its own ruler.
+/// the multi-region semantic path, each naming its own ruler and its own
+/// frame tolerance (`frame_tol`, the caller's admission tolerance — one
+/// tolerance per gate family).
 ///
 /// For [`BoundaryRuler::CrossBoundaryStep`] a reading of `0` transitions is a
 /// REFUSAL. That combination is precisely what shipped a seam: every hard
@@ -614,7 +627,7 @@ pub(super) fn enforce_bitmap_boundary(
     first_mask: usize,
     input: BitmapBoundaryInput<'_>,
 ) -> Result<BitmapBoundaryAccepted, BitmapBoundaryRefusal> {
-    let BitmapBoundaryInput { ruler, target_boundary, initial_px, frame_before } = input;
+    let BitmapBoundaryInput { ruler, target_boundary, initial_px, frame_before, frame_tol } = input;
     let measure = |rendered: &[[f32; 3]]| match ruler {
         BoundaryRuler::TransitionBand { weights, reference } => {
             // `initial_px` is this gate's k=1 candidate, so BOTH rulers read
@@ -713,7 +726,7 @@ pub(super) fn enforce_bitmap_boundary(
         report.recipe.masks.truncate(first_mask);
         return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Inert, initial });
     }
-    if frame > frame_before + SPATIAL_FRAME_REGRESSION_TOL {
+    if frame > frame_before + frame_tol {
         report.recipe.masks.truncate(first_mask);
         return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Frame, initial });
     }
@@ -947,6 +960,7 @@ pub(super) fn attach_tiles(
                 target_boundary: Some(&tgt_px[..]),
                 initial_px: std::mem::take(&mut accepted.rendered),
                 frame_before,
+                frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
             },
         );
         let mut boundary = match boundary {
@@ -1014,6 +1028,7 @@ pub(super) fn attach_tiles(
                         ruler: BoundaryRuler::CrossBoundaryStep { geometry: &weights, reference: &current },
                         target_boundary: Some(&tgt_px[..]),
                         initial_px: std::mem::take(&mut native.rendered), frame_before,
+                        frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
                     });
                 if let Ok(trial) = trial {
                     let raster_pixels = render::develop_preview(&guide, &saved_recipe).to_rgb8();
@@ -1973,6 +1988,7 @@ mod tests {
                 },
                 initial_px: candidate,
                 frame_before,
+                frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
             },
         )
         .expect("a sloping-sky seam is negotiated down, not dropped");
@@ -2105,6 +2121,7 @@ mod tests {
                 },
                 initial_px: candidate,
                 frame_before,
+                frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
             },
         )
         .expect("a shrinkable tile must be negotiated, not dropped");
@@ -2170,6 +2187,7 @@ mod tests {
                 },
                 initial_px: candidate,
                 frame_before,
+                frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
             },
         )
         .expect("a continuous ramp must not be refused");
@@ -2217,6 +2235,7 @@ mod tests {
                     ruler: BoundaryRuler::CrossBoundaryStep { geometry, reference },
                     initial_px: candidate,
                     frame_before,
+                    frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
                 },
             )
         };
@@ -2395,6 +2414,7 @@ mod tests {
                     ruler: BoundaryRuler::CrossBoundaryStep { geometry: &geometry, reference: &reference },
                     initial_px: candidate.clone(),
                     frame_before,
+                    frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
                 },
             )
             .unwrap_or_else(|refusal| panic!("negotiated, not dropped: {:?}", refusal.why));
@@ -2446,6 +2466,7 @@ mod tests {
                     ruler: BoundaryRuler::CrossBoundaryStep { geometry, reference },
                     initial_px: candidate,
                     frame_before,
+                    frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
                 },
             )
         };
@@ -2519,10 +2540,16 @@ mod tests {
     /// Both rulers are run over the same hard raster. The step ruler keeps
     /// its crossing count and its two luma ranks; the rim ruler still reads
     /// nothing at all, because a 0/255 raster has no band; and on a NEUTRAL
-    /// frame under a pure exposure dial the per-channel ranks ARE the luma
+    /// frame under a pure exposure dial the per-channel raw ranks ARE the luma
     /// ranks — which is why every bit-pinned verdict in this module that runs
     /// on a grey fixture (`ARM_B_SHIPPED_K`, `ARM_F_K`, `GRADIENT_K`) is
     /// decided by exactly the numbers it was decided by before.
+    ///
+    /// RE-PINNED 2026-10-22 (R1): the colour CHARGE reads its step through a
+    /// one-code dead band luma's does not, so here (budget saturated) it is
+    /// the raw step less one code — measured 0.05882 raw, 0.05490 charged —
+    /// and on grey it can only sit at or under the luma charge, so `gated()`
+    /// and every grey verdict are still the luma charge's.
     #[test]
     fn the_hard_familys_readings_are_untouched_by_the_soft_familys_charge() {
         let (_, _, _, path, geometry, reference, candidate) =
@@ -2538,9 +2565,10 @@ mod tests {
             measured.transitions, 48,
             "the same 48 crossings this module has always counted: {measured:?}"
         );
+        assert_eq!(measured.gated().to_bits(), measured.charged.to_bits(), "{measured:?}");
         assert!(
             (measured.colour - measured.rim).abs() <= 1e-6
-                && (measured.colour_charged - measured.charged).abs() <= 1e-6,
+                && (measured.colour_charged - (measured.charged - BOUNDARY_STEP_FLOOR)).abs() <= 1e-6,
             "R = G = B under a pure exposure dial makes the colour ruler the luma ruler: \
              {measured:?}"
         );
@@ -2612,6 +2640,7 @@ mod tests {
                 // The candidate render IS the reference: nothing moved.
                 initial_px: reference.clone(),
                 frame_before,
+                frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
             },
         );
         let Err(refusal) = outcome else {
@@ -2642,6 +2671,7 @@ mod tests {
                 },
                 initial_px: candidate,
                 frame_before: 1.0,
+                frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
             },
         );
         // Matched rather than `expect_err`: the Ok payload carries a full
@@ -2672,6 +2702,7 @@ mod tests {
                 },
                 initial_px: candidate,
                 frame_before: 0.0,
+                frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
             },
         );
         assert!(result.is_err(), "a refined alpha cannot bypass composed-frame arbitration");

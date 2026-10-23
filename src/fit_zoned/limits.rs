@@ -305,3 +305,53 @@ pub(super) const ZONE_GLOBAL_REGRESSION_TOL: f32 = 0.02;
 /// `ZONE_SKIP_ERR`: the two are calibrated from different measurements and
 /// only happen to agree today.
 pub(super) const ZONE_MIN_ABS_GAIN: f32 = 0.012;
+/// The distribution arm's landing line (2026-10-22): the largest zone luma
+/// quantile gap to the target ([`super::zone_fit::zone_tonal`], the frame
+/// tonal term's own 21 quantiles, on the mask alphas) a correction may end
+/// at and be called matched in DISTRIBUTION, with the floor arm's real gain
+/// ([`ZONE_FLOOR_MIN_GAIN`]), a still frame and no moments regression.
+///
+/// Derivation, n = 1 pair, and flagged as such (as [`ZONE_MIN_ABS_GAIN`]'s
+/// is): the one measured instance this arm exists for is the neon street's
+/// building (Full, distribution branch), read through this arm's own
+/// disclosure note on a calibration build with the line provisionally at
+/// 0.03: quantile gap 0.0203 -> 0.0135, the frame 0.03699 -> 0.03518, the
+/// moments 0.0091 -> 0.0061. The line is set at the next 0.005 step above
+/// that landing (0.0015 of headroom) rather than on it — one sample cannot
+/// justify a threshold its own value sits on — and no other zone of
+/// that run was bought by the arm at 0.03, so nothing between the two lines
+/// was measured. For scale: 0.015 of display luma is ~4 codes of 255 on
+/// average over the 21 quantiles.
+pub(super) const ZONE_TONAL_MATCHED: f32 = 0.015;
+/// Dilution guard on a Pixel-scale zone's paired tone map (2026-10-22): the
+/// smallest share of the TARGET zone's p10–p90 luma spread, read under the
+/// target's mask alphas, that the paired map, applied to the source zone under
+/// the source's mask alphas, must reproduce before its sliders are fitted.
+/// Below it the paired points are discarded and the zone's tone is solved by
+/// the distribution-matching branch a Cell-scale zone already uses, mapping
+/// the same two alpha-weighted populations.
+///
+/// Why: a per-pixel regression returns the CONDITIONAL MEDIAN of the target
+/// at each source level, and where the zone pairs loosely that median is
+/// narrower than the target itself. Measured on the neon night street: the
+/// building region (Full, Pixel scale, D = 0.264, 50 paired points) reads,
+/// under the alphas, source 0.0657–0.2508, target 0.0436–0.2818 and mapped
+/// 0.0592–0.2260 — 0.700 of the target's spread. The sliders that fit that
+/// map darkened every bin below the target and the composed frame regressed
+/// 0.036988 → 0.043763; the distribution match on the same zone, mask and
+/// gains improved it to ≈0.0315. (An earlier note here quoted 0.66: that was
+/// the spread of the solved-slider render, not of the map.)
+///
+/// Why the alphas and not the robust-composed weights the fit reads: the
+/// robust weights are the paired map's own verdict on which pixels it could
+/// explain, and they trim exactly the target pixels a squeezed map fails to
+/// predict (on the building they keep 0.31 of the target's alpha mass in luma
+/// 0.30–0.40, 0.12 in 0.40–0.60, 0.10 above 0.60), so the trimmed target's
+/// p90 falls to 0.2270 — the map's own plateau — and the same map read 0.893
+/// and passed. A guard that asks the map's survivors whether the map is
+/// narrow is circular; the question is about the populations.
+///
+/// Why 0.80: the real case reads 0.70, and the toy pairs that pair exactly
+/// read ≈1.0, so the line sits between the two with room on both sides. It is
+/// a floor on squeeze only — a map WIDER than the target is not this failure.
+pub(super) const ZONE_PAIRED_SPREAD_FLOOR: f32 = 0.80;

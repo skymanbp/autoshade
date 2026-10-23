@@ -3315,14 +3315,19 @@ mod tests {
         // same rule, and a band that claimed the move would be claiming a
         // population it does not own.
         //
-        // Measured on this fixture, the refusal is not the quiet one. The
-        // global model cannot reproduce this move on these synthetic
-        // colours — it returns a neutral recipe under its own do-no-harm —
-        // so the residual is still on the frame when the producer runs and
-        // two bands ARE proposed. Neither survives: the Orange band's own
-        // populations are 22% against 11%, which is the shared 2:1
-        // composition gate, and the Blue band's correction costs the
-        // composed frame +0.00198 against a tolerance of exactly zero.
+        // Measured on this fixture until 2026-10-21, the refusal was not the
+        // quiet one: the global model could not reproduce this move on these
+        // synthetic colours — it returned a neutral recipe under its own
+        // do-no-harm — so the residual was still on the frame when the
+        // producer ran and two bands WERE proposed, and neither survived
+        // (the Orange band's own populations 22% against 11%, the shared 2:1
+        // composition gate; the Blue band's correction +0.00198 on the
+        // composed frame against a tolerance of exactly zero). Since the
+        // tone stage answers for itself the luma-CDF sliders this toy got
+        // slightly wrong are withheld (tonal reading 0.0002 → 0.0012), the
+        // global saturation ships (look error 0.006 → 0.003), the residual
+        // the producer sees is nothing, and no band is proposed at all. The
+        // subset check below keeps its force for the day one is.
         let (source, _) = scattered_hue_pair([0.20, 0.30, 0.75]);
         let global = crate::recipe::EditRecipe { saturation: 22.0, ..Default::default() };
         let target = render::develop_preview(&source, &global);
@@ -3357,8 +3362,13 @@ mod tests {
         let proposed = bands_named(crate::rationale::keys::COLOUR_RANGE_PROPOSED);
         let refused = bands_named(crate::rationale::keys::COLOUR_RANGE_ABSTAINED);
         assert!(
-            !proposed.is_empty() && proposed.is_subset(&refused),
+            proposed.is_subset(&refused),
             "proposed {proposed:?} but refused only {refused:?}\n{}",
+            report.recipe.rationale,
+        );
+        assert!(
+            report.recipe.saturation > 0.0,
+            "premise: the global solve carried the saturation move: {}",
             report.recipe.rationale,
         );
         path.remove();

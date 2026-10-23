@@ -41,6 +41,24 @@ pub(crate) struct PairedRobustTone {
 }
 
 const ROBUST_TUKEY_C: f32 = 4.685;
+/// A channel at or above this is at the gamut ceiling (254/255 and 255/255 of
+/// an 8-bit side both count: a JPEG's clipped white decodes as either). A
+/// pixel with a channel there and its luma below it is not a tone reading —
+/// its luma is where the ceiling left it, not where the map sent it — and the
+/// paired arm does not sample it. Measured on the roundtrip fixture
+/// (2026-10-21): the chromatic bands match the grey band's map within 0.005
+/// wherever no channel clips and read it 0.028–0.053 short where one does;
+/// read anyway, those pixels were the majority of their bins, the fit
+/// followed them and rejected the honest orange band, and contrast solved
+/// −6.1 against the truth's +18. A grey pixel at the ceiling keeps its say:
+/// its luma IS the ceiling, which is what the map did there.
+const TONE_CLIP_CEILING: f32 = 0.995;
+
+/// A channel at the ceiling while the luma is not: the luma is capped, not
+/// mapped.
+fn luma_capped_by_ceiling(p: &[f32; 3]) -> bool {
+    p[0].max(p[1]).max(p[2]) >= TONE_CLIP_CEILING && luma601(p) < TONE_CLIP_CEILING
+}
 const ROBUST_SCALE_FLOOR: f32 = 2.0 / 255.0;
 const ROBUST_IRLS_ROUNDS: usize = 3;
 /// Below this rejected share the disclosure stays silent — JPEG noise alone
@@ -79,9 +97,36 @@ fn weighted_median_of(mut pairs: Vec<(f32, f32)>) -> f32 {
 /// A vouched pixel's move counts as CONVERGENCE when it lands strictly
 /// closer to its own paired target — the shared predicate behind every
 /// hue-damage guard's paired exemption (one definition, rule 09).
-pub(super) fn converges_toward(target: &[f32; 3], before: &[f32; 3], after: &[f32; 3]) -> bool {
-    let dist =
-        |p: &[f32; 3]| (0..3).map(|c| (p[c] - target[c]).abs()).fold(0.0f32, f32::max);
+///
+/// Asked ALONG THE AXIS of the move being judged (2026-10-21), as the cells'
+/// direction test is: a global cast or mixer moves all three channels and is
+/// read on the display pixel as it always was; a zone's colour probe is
+/// solved with its tone zeroed, and put to the whole distance it is put to a
+/// question it has no control over — the seaside street's sky needed to be
+/// both darker and bluer, the colour probe made it bluer, and only 2445 of
+/// its 7388 paired pixels read "closer" in RGB, so the class was withheld
+/// (36% unvouched against the 5% line). In chromaticity, the projection the
+/// cells read (`fit_cells::project_along`), bluer IS closer.
+pub(super) fn converges_toward(
+    axis: crate::fit_cells::MoveAxis,
+    target: &[f32; 3],
+    before: &[f32; 3],
+    after: &[f32; 3],
+) -> bool {
+    let dist = |p: &[f32; 3]| -> f32 {
+        match axis {
+            crate::fit_cells::MoveAxis::Full => {
+                (0..3).map(|c| (p[c] - target[c]).abs()).fold(0.0f32, f32::max)
+            }
+            _ => {
+                let (p, t) = (
+                    crate::fit_cells::project_along(axis, p),
+                    crate::fit_cells::project_along(axis, target),
+                );
+                (0..3).map(|c| (p[c] - t[c]).abs()).fold(0.0f32, f32::max)
+            }
+        }
+    };
     dist(after) + 1e-3 < dist(before)
 }
 
@@ -131,6 +176,41 @@ pub(super) fn paired_correspondence(
     }
 }
 
+/// The monotone backstop of the robust paired map: pool-adjacent-violators
+/// on the bins' MASS (2026-10-21). Where two neighbouring bins reverse they
+/// are pooled at their mass-weighted mean, so the bin that speaks for the
+/// pixels wins. The clamp this replaces lifted every later bin to the
+/// highest earlier one, which let a bin of negligible mass dictate the whole
+/// map: the seaside street's sky zone holds its mass (11,000) at luma
+/// 0.84–0.97 reading a monotone map 0.04 under identity, and a few mask-edge
+/// pixels (bins of mass 0.0–2.9) at 0.34–0.80 reading targets up to 0.967 —
+/// the clamp carried that 0.967 across every bin above it, and a sky that
+/// asked for −0.18 EV solved as +1.25 EV against a flat map. `points` and
+/// `masses` are index-aligned and sorted by x.
+fn isotonic_by_mass(points: &mut [(f32, f32)], masses: &[f32]) {
+    // Blocks of (start, end exclusive, mass, mass-weighted y).
+    let mut blocks: Vec<(usize, usize, f64, f64)> = Vec::with_capacity(points.len());
+    for (k, (&(_, y), &m)) in points.iter().zip(masses).enumerate() {
+        let m = m.max(1e-6) as f64;
+        blocks.push((k, k + 1, m, m * y as f64));
+        while blocks.len() >= 2 {
+            let n = blocks.len();
+            let (a, b) = (blocks[n - 2], blocks[n - 1]);
+            if b.3 / b.2 + 1e-9 >= a.3 / a.2 {
+                break;
+            }
+            blocks.truncate(n - 2);
+            blocks.push((a.0, b.1, a.2 + b.2, a.3 + b.3));
+        }
+    }
+    for (start, end, m, my) in blocks {
+        let y = (my / m) as f32;
+        for p in &mut points[start..end] {
+            p.1 = y;
+        }
+    }
+}
+
 pub(crate) fn paired_robust_tone(
     sp: &[[f32; 3]],
     tp: &[[f32; 3]],
@@ -148,6 +228,9 @@ pub(crate) fn paired_robust_tone(
     for i in 0..n {
         let (s, t) = (&sp[i], &tp[i]);
         if neutral_gated && (!is_neutralish(s) || !is_neutralish(t)) {
+            continue;
+        }
+        if luma_capped_by_ceiling(s) || luma_capped_by_ceiling(t) {
             continue;
         }
         let w = pair_weight(i);
@@ -199,11 +282,7 @@ pub(crate) fn paired_robust_tone(
         masses = order.iter().map(|&k| masses[k]).collect();
         // Monotone backstop: a real tone map is monotone; bin noise is not
         // allowed to fake a reversal the slider model would then chase.
-        for k in 1..points.len() {
-            if points[k].1 < points[k - 1].1 {
-                points[k].1 = points[k - 1].1;
-            }
-        }
+        isotonic_by_mass(&mut points, &masses);
         if round == ROBUST_IRLS_ROUNDS {
             break;
         }
@@ -507,6 +586,94 @@ pub(crate) fn fit_tone_sliders_supported(
     // actually does.
     (best.0, best.1)
 }
+
+/// Score of one `(ev, sliders)` candidate against a weighted score set — the
+/// score-set branch of [`fit_tone_sliders_supported`]'s model selection,
+/// verbatim: the engine's own spline at each point, mass-weighted, normalised
+/// to the 8-knot scale, plus the magnitude prior.
+fn tone_score_on(score_set: &[(f32, f32, f32)], ev: f32, s: [f32; 5]) -> f64 {
+    let knots = render::tone_model_knots(ev, s);
+    let mut sse = 0.0f64;
+    let mut mass = 0.0f64;
+    for &(x, y, m) in score_set {
+        let d = (render::sample_tone_model(&knots, x) - y.clamp(0.0, 1.0)) as f64;
+        sse += m as f64 * d * d;
+        mass += m as f64;
+    }
+    let penalty: f64 = s.iter().map(|&v| TONE_PRIOR * v as f64 * v as f64).sum();
+    if mass > 0.0 { 8.0 * sse / mass + penalty } else { penalty }
+}
+
+/// Refine a knot solve's `(ev, sliders)` on the engine's RENDERED response at
+/// a score set. Why it exists: [`fit_tone_sliders_supported`] solves the
+/// sliders by least squares at the eight fixed knots, and a zone whose
+/// population sits inside one or two knot intervals has a map whose bend the
+/// knots never see — measured on the neon street's building (luma
+/// 0.066–0.25, only the knots 0 / 0.10 / 0.25 near it): the map wanted p10
+/// 0.068 → 0.044 and the knot solve rendered 0.078, the x = 0 knot (an
+/// extrapolation below the population) dragging the blacks UP. The score set
+/// samples the population itself, so minimising the score set's own score
+/// fixes what the knots miss. It is done on the rendered response, not on
+/// the knot ys, because the engine's limiter, authority weights and
+/// Fritsch–Carlson Hermite make the response nonlinear in the sliders.
+///
+/// Deterministic coordinate descent over the six coordinates (ev in [−3, 3],
+/// each slider in [−1, 1]): each coordinate tries `±step` and keeps an
+/// improvement; a pass that keeps nothing halves the step; stop below
+/// 1e-3 or after [`REFINE_PASS_CAP`] passes. Never worse than the input
+/// (only improvements are accepted). An empty score set returns the input.
+///
+/// Caller: the zoned fit's distribution branch only, whose score set is the
+/// zone population's quantiles through a deterministic transport. A paired
+/// score set carries pairing noise the refinement would chase.
+pub(crate) fn refine_tone_sliders_on(
+    score_set: &[(f32, f32, f32)],
+    ev: f32,
+    sliders: [f32; 5],
+) -> (f32, [f32; 5]) {
+    if score_set.is_empty() {
+        return (ev, sliders);
+    }
+    let mut x = [ev, sliders[0], sliders[1], sliders[2], sliders[3], sliders[4]];
+    let split = |x: &[f32; 6]| (x[0], [x[1], x[2], x[3], x[4], x[5]]);
+    let mut best = {
+        let (e, s) = split(&x);
+        tone_score_on(score_set, e, s)
+    };
+    let mut step = 0.25f32;
+    for _ in 0..REFINE_PASS_CAP {
+        if step < 1e-3 {
+            break;
+        }
+        let mut accepted = false;
+        for c in 0..6 {
+            let limit = if c == 0 { 3.0 } else { 1.0 };
+            for dir in [1.0f32, -1.0] {
+                let mut trial = x;
+                trial[c] = (x[c] + dir * step).clamp(-limit, limit);
+                if trial[c] == x[c] {
+                    continue;
+                }
+                let (e, s) = split(&trial);
+                let score = tone_score_on(score_set, e, s);
+                if score < best {
+                    best = score;
+                    x = trial;
+                    accepted = true;
+                    break;
+                }
+            }
+        }
+        if !accepted {
+            step *= 0.5;
+        }
+    }
+    split(&x)
+}
+
+/// Pass cap for [`refine_tone_sliders_on`]; 0.25 halves to below 1e-3 in
+/// eight idle passes, so the cap only bounds a long accepting run.
+const REFINE_PASS_CAP: usize = 40;
 
 /// Gaussian elimination with partial pivoting for the 5×5 normal equations.
 fn solve5(mut a: [[f64; 5]; 5], mut b: [f64; 5]) -> [f64; 5] {

@@ -178,19 +178,8 @@ fn distance(a: &[f32; 3], b: &[f32; 3]) -> f32 {
 /// probe, luminance alone for a tone probe, all three channels for a move that
 /// does both.
 fn aligned(before: &[f32; 3], after: &[f32; 3], target: &[f32; 3], axis: MoveAxis) -> bool {
-    let linear = |p: &[f32; 3]| p.map(crate::render::srgb_to_linear);
-    let luminance = |p: &[f32; 3]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
-    let project = |p: [f32; 3]| -> [f32; 3] {
-        match axis {
-            MoveAxis::Full => p,
-            MoveAxis::Colour => {
-                let y = luminance(&p).max(CHROMATICITY_FLOOR);
-                p.map(|c| c / y)
-            }
-            MoveAxis::Tone => [luminance(&p), 0.0, 0.0],
-        }
-    };
-    let (b, a, t) = (project(linear(before)), project(linear(after)), project(linear(target)));
+    let project = |p: &[f32; 3]| project_along(axis, p);
+    let (b, a, t) = (project(before), project(after), project(target));
     let moved: [f32; 3] = std::array::from_fn(|c| a[c] - b[c]);
     let wanted: [f32; 3] = std::array::from_fn(|c| t[c] - b[c]);
     let reach = |v: &[f32; 3]| v.iter().fold(0.0f32, |m, c| m.max(c.abs()));
@@ -203,6 +192,25 @@ fn aligned(before: &[f32; 3], after: &[f32; 3], target: &[f32; 3], axis: MoveAxi
     let dot = (0..3).map(|c| moved[c] * wanted[c]).sum::<f32>();
     let length = |v: &[f32; 3]| v.iter().map(|c| c * c).sum::<f32>().sqrt();
     dot / (length(&moved) * length(&wanted)).max(1e-12) >= ALIGN_COS
+}
+
+/// The part of a display pixel a move along `axis` can change, read in
+/// LINEAR light: all three channels, its chromaticity (linear RGB over its
+/// luminance), or its luminance alone. One projection for the cells'
+/// direction test and the per-pixel voucher's convergence test (since
+/// 2026-10-21), so the two instruments cannot disagree about what a colour
+/// probe is being asked.
+pub(crate) fn project_along(axis: MoveAxis, p: &[f32; 3]) -> [f32; 3] {
+    let p = p.map(crate::render::srgb_to_linear);
+    let luminance = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+    match axis {
+        MoveAxis::Full => p,
+        MoveAxis::Colour => {
+            let y = luminance.max(CHROMATICITY_FLOOR);
+            p.map(|c| c / y)
+        }
+        MoveAxis::Tone => [luminance, 0.0, 0.0],
+    }
 }
 
 /// One cell's reading in a single measurement pass. `None` at a cell the

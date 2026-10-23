@@ -10,11 +10,12 @@ pub enum ZoneMode {
     Atmosphere,
 }
 
-/// WHICH acceptance arm bought a zone. Only the third one is disclosed as a
-/// typed note: the first two are the shipped behaviour and are already
-/// described by [`ZONE_ATTACHED`](crate::rationale::keys::ZONE_ATTACHED),
-/// while the third is the relaxation R30 batch 1 introduced and a reader has
-/// to be able to tell that this correction would have been dropped before.
+/// WHICH acceptance arm bought a zone. Only the third and fourth are
+/// disclosed as typed notes: the first two are the shipped behaviour and are
+/// already described by [`ZONE_ATTACHED`](crate::rationale::keys::ZONE_ATTACHED),
+/// while the third is the relaxation R30 batch 1 introduced and the fourth
+/// the distribution arm of 2026-10-22, and a reader has to be able to tell
+/// that such a correction would have been dropped before.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ZoneAcceptArm {
     /// The zone error at most halved ([`ZONE_ACCEPT_RATIO`]).
@@ -25,6 +26,12 @@ pub(super) enum ZoneAcceptArm {
     /// It is strictly better by an absolute margin and the FRAME did not pay
     /// for it ([`ZONE_MIN_ABS_GAIN`]).
     StrictlyBetter,
+    /// Tried LAST, Full zones only (2026-10-22): the zone's luma DISTRIBUTION
+    /// landed on the target's ([`ZONE_TONAL_MATCHED`]) with a real gain
+    /// ([`ZONE_FLOOR_MIN_GAIN`]), the frame did not pay and the moments did
+    /// not regress. [`zone_err`] is a MOMENTS ruler and cannot see a
+    /// contrast-type reshape that leaves the mean alone; see [`zone_accepts`].
+    DistributionMatched,
     /// Atmosphere's own arm, which is not one of the three above: a bounded
     /// atmosphere move is judged only on not making its zone worse. Named
     /// rather than folded into [`Self::Halved`] so no reader concludes an
@@ -62,12 +69,32 @@ pub(super) enum ZoneAcceptArm {
 /// zones, so this arm may not be described as standing behind three hard
 /// safety gates — it stands behind two hard ones and one that is calibrated
 /// but not discriminating.
+///
+/// The fourth arm (2026-10-22), tried after the three above so every verdict
+/// they reach is unchanged, reads `tonal = (before, after)`: the zone's luma
+/// quantile gap to the target ([`zone_tonal`]) on the zone's POPULATION (the
+/// mask alphas), before and after the k=1 candidate. It accepts when the gap
+/// lands at or under [`ZONE_TONAL_MATCHED`] with the same one-fifth real gain
+/// the floor arm demands ([`ZONE_FLOOR_MIN_GAIN`]), the frame did not pay
+/// (`frame_after <= frame_before`, as the third arm) and the moments did not
+/// regress (`zone_after <= zone_before`). Why it exists: `zone_err` is a
+/// MOMENTS ruler — linear channel means plus chroma — and is blind to a
+/// contrast-type reshape that leaves the mean where it was, and the EV
+/// companion of the skip line forces exactly such a zone to be FITTED (its
+/// linear mean, dominated by a bright tail, reads a stop-fraction off) while
+/// no moments arm could then accept it. Measured on the neon street's
+/// building (distribution branch): the frame 0.036988 -> 0.035177, the zone's
+/// p10/p50/p90 0.0683/0.1101/0.2569 -> 0.0633/0.1062/0.2913 against the
+/// target's 0.0436/0.1094/0.2818 — refused by all three: 0.00911 -> 0.00609
+/// is not halved, the EV gap 0.3104 is over [`ZONE_MATCHED_EV`], and a zone
+/// starting at 0.009 can never gain [`ZONE_MIN_ABS_GAIN`] by construction.
 pub(super) fn zone_accepts(
     zone_before: f32,
     zone_after: f32,
     ev_gap_after: f32,
     frame_before: f32,
     frame_after: f32,
+    tonal: (f32, f32),
 ) -> Option<ZoneAcceptArm> {
     if zone_after <= zone_before * ZONE_ACCEPT_RATIO {
         return Some(ZoneAcceptArm::Halved);
@@ -80,6 +107,14 @@ pub(super) fn zone_accepts(
     }
     if zone_after < zone_before - ZONE_MIN_ABS_GAIN && frame_after <= frame_before {
         return Some(ZoneAcceptArm::StrictlyBetter);
+    }
+    let (tonal_before, tonal_after) = tonal;
+    if tonal_after <= ZONE_TONAL_MATCHED
+        && tonal_after <= ZONE_FLOOR_MIN_GAIN * tonal_before
+        && frame_after <= frame_before
+        && zone_after <= zone_before
+    {
+        return Some(ZoneAcceptArm::DistributionMatched);
     }
     None
 }
@@ -423,6 +458,22 @@ pub(crate) fn zone_err(a: &ZoneMoments, b: &ZoneMoments) -> f32 {
     let mean: f32 =
         a.mean_lin.iter().zip(&b.mean_lin).map(|(x, y)| (x - y).abs()).sum::<f32>() / 3.0;
     mean + (a.chroma - b.chroma).abs()
+}
+
+/// The zone-scale TONAL ruler: the mean absolute gap between two zone luma
+/// CDFs ([`zone_luma_cdf`]) at the SAME 21 quantiles the frame metric's tonal
+/// term reads (`fit::tonal_err_with_evidence`: `i / 20` for `i = 0..=20`,
+/// clamped to [`fit::P_CLIP`]`..1 - P_CLIP`, so the end points are 0.002 and
+/// 0.998), so a zone and its frame are held to one tonal yardstick. That
+/// quantile set is inline in the frame's function rather than exposed, so it
+/// is restated here by the same formula.
+pub(super) fn zone_tonal(a_cdf: &[f32], b_cdf: &[f32]) -> f32 {
+    let mut gap = 0.0f32;
+    for i in 0..=20 {
+        let p = (i as f32 / 20.0).clamp(fit::P_CLIP, 1.0 - fit::P_CLIP);
+        gap += (fit::quantile(a_cdf, p) - fit::quantile(b_cdf, p)).abs();
+    }
+    gap / 21.0
 }
 
 /// Mask-weighted luma CDF of a zone (sRGB Rec.601 luma, the same domain as

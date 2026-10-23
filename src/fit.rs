@@ -99,8 +99,8 @@ mod structure;
 mod tone;
 
 use atmosphere::{
-    WbCellVerdict, cast_admitted_by_strength, fit_atmosphere_from_parts, project_curve_slopes,
-    solve_white_balance,
+    WB_SHARE_SIZE_EVIDENCE, WB_VOUCH_SHRINK_STEPS, WbCellVerdict, cast_admitted_by_strength,
+    fit_atmosphere_from_parts, project_curve_slopes, solve_white_balance,
 };
 #[cfg(test)]
 use atmosphere::{WbFacts, withhold_atmosphere_tone};
@@ -110,7 +110,7 @@ use budget::{
     ATMOSPHERE_CONFIDENCE_CAP, ATMOSPHERE_CURVE_SLOPE_MAX, ATMOSPHERE_SAT_LIMIT,
     COARSE_SIGMA_DIVISOR, HIST_BINS, MODE_MARGIN_DISCLOSED, RESIDUAL_SLOPE_CAP, WB_SEARCH_K,
     budgeted_wb, detect_global_cast, mean_chroma_vector, wb_gain_ratio, wb_gains_fit_budget,
-    wb_path_candidate,
+    wb_path_between, wb_path_candidate,
 };
 #[cfg(test)]
 use budget::{
@@ -152,7 +152,7 @@ use evidence::{
 #[cfg(test)]
 pub(crate) use evidence::{evidence_model};
 #[cfg(test)]
-use evidence::{SupportField, aggregate_ranges};
+use evidence::{SupportField, WB_OPPOSING_SHARE, aggregate_ranges, wb_axes_by_range, wb_consensus};
 pub(crate) use gates::{P_CLIP, clamp_confidence};
 use gates::{
     CAST_ACCEPT_RATIO, CONFIDENCE_CEIL, CONFIDENCE_FLOOR, FAN_DEG, FAN_HUE_CLASSES, FAN_PROJECT_DEG,
@@ -165,7 +165,7 @@ use gates::{
 use gates::{CONFIDENCE_SLOPE, NEUTRAL_MISPREDICTION_MAX, ROT_VISIBLE_AFTER, ROT_VISIBLE_BEFORE};
 use hsl::{HslStageFacts, HslWithdrawal, fit_hsl_stage, halved_hsl};
 pub(crate) use hue_gates::{
-    CellArm, cell_vouched_hue_band_names, moved_unsupported_hue_range_names,
+    CellArm, PixelVouch, cell_vouched_hue_band_names, moved_unsupported_hue_range_names,
     moved_unsupported_hue_range_names_vouched, moved_unsupported_luma_range_names,
     moves_unsupported_range, vouched_hue_band_names,
 };
@@ -212,7 +212,7 @@ pub use structure::{DivergencePair, PairingScale, STRUCTURE_MIN_CORE_PX, structu
 pub(crate) use structure::{divergence_pair_for, divergence_raster, structure_divergence_for};
 pub(crate) use tone::{
     PairedRobustTone, ROBUST_REJECT_DISCLOSE_MIN, SUPPORT_MIN_PIXELS, fit_tone_sliders_supported,
-    knot_support_for, paired_robust_tone, sample_tone_points,
+    knot_support_for, paired_robust_tone, refine_tone_sliders_on, sample_tone_points,
 };
 use tone::{converges_toward, paired_correspondence, residual_tone_curve_with_budget};
 #[cfg(test)]

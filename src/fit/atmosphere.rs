@@ -5,9 +5,31 @@ use super::*;
 /// The paired cells' verdict on a rendered white balance, and what came of it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct WbCellVerdict {
+    /// The verdict on the FULL solved move.
     pub(super) vouch: crate::fit_cells::CellVouch,
     pub(super) admitted: bool,
+    /// R36 for the white balance (2026-10-21): where the full move was
+    /// refused on size with its direction agreed, the share of it that
+    /// shipped and the verdict that admitted that share. `None` when the
+    /// full move shipped or nothing did.
+    pub(super) shipped_at: Option<(f32, crate::fit_cells::CellVouch)>,
 }
+
+/// Bisection renders of the white-balance share search, the zone search's
+/// own count (`fit_zoned::ZONE_VOUCH_SHRINK_STEPS`): six halvings resolve the
+/// share to 1/64, finer than the 50 K / 0.1 tint the path is quantised to.
+pub(super) const WB_VOUCH_SHRINK_STEPS: usize = 6;
+
+/// The SIZE evidence a shipped share must carry: its diverged share may be at
+/// most this fraction of the full move's. "Refused on size" is a claim that
+/// the refusing cells were pushed PAST their own targets, and the test of
+/// that claim is that a smaller move un-pushes them; cells that keep
+/// diverging at the share the search lands on were wrong for the move, not
+/// too large for it. Measured 2026-10-21 on the seaside street: the full warm
+/// cast read 0.105 diverged (the blue sky's cells), the bisection found
+/// 0.969 of it reading 0.097 — under the 0.10 line by threshold-crossing, not
+/// by size — and shipped an orange sky over a target whose sky is blue.
+pub(super) const WB_SHARE_SIZE_EVIDENCE: f32 = 0.5;
 
 /// What the white-balance stage decided, in the shape the report needs.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -53,6 +75,18 @@ pub(super) fn solve_white_balance(
     budget: FitBudget,
     strength: crate::recipe::GradeStrength,
 ) -> WbFacts {
+    // No demand is no stage (2026-10-21). The estimator answers the anchor
+    // itself, at this solve's own 50 K quantisation and tint 0, when the
+    // frame's brightness ranges have no colour change in common; persisting
+    // that as a white balance wrote a rounded copy of the as-shot Kelvin into
+    // the recipe and then had the cells "refuse" a move that moved nothing
+    // (the seaside street: 5226 K as shot, 5200 K solved, 0.000 converged,
+    // "returned to as-shot"). An exact comparison, not a tolerance: the
+    // estimator returns exactly this pair and nothing else rounds to it
+    // without being it.
+    if wb_k == (anchor / 50.0).round() * 50.0 && wb_tint == 0.0 {
+        return WbFacts::default();
+    }
     let wb_search_bound = (strength.get() > crate::recipe::GradeStrength::DEFAULT
         && (wb_k <= WB_SEARCH_K.0 || wb_k >= WB_SEARCH_K.1))
         .then_some(wb_k);
@@ -493,6 +527,8 @@ pub(super) fn fit_atmosphere_from_parts(
             evidence_refused: evidence_has_one_sided(evidence),
             sat_fitted: sat_reduced.then_some(sat_fitted),
             regressed: fit_regressed.then_some(joint_regressed),
+            tone_harm: None,
+            curve_harm: None,
             detail,
             detail_withheld: !detail_supported,
             robust: None,

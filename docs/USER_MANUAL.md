@@ -518,11 +518,41 @@ also pass the foreign-hue veto and a weighted rotation allowance, pinned at
 remains, it is withheld and the recipe stays as-shot with a typed explanation.
 
 Since v1.3.0, the full solve has a white balance too, not only the Atmosphere
-path. It is solved from the same population estimator and then RENDERED and
+path. It is solved from the same population estimator — since 2026-10-21 the
+colour change the frame's brightness ranges AGREE on (each range's own median
+of its pixels' colour change with the brightness change taken out; where a
+tenth of the frame or more asks the opposite move, by at least a fifth of
+the agreed one, there is no one light to correct and nothing ships), read from the frame as the tone stage left it
+rather than from the untouched source, so a strong contrast move is no longer
+booked as a colour cast, a warm move no longer comes back green, and a bright
+sky that asks to stay cool is no longer yellowed by a warm majority below it —
+and then RENDERED and
 checked against the target's own 12×8 cell means before it ships: if the
 render did not move the frame toward the target, the recipe returns to as-shot
 and says so. A same-frame pair whose light did not change therefore still
-reports `temperature_k` unset.
+reports `temperature_k` unset. Since 2026-10-21 a white balance the cells
+refuse only on its SIZE — most cells asked for the move's direction, and a
+tenth or more of the frame was pushed past its own target — is not returned
+to as-shot: the largest share of the solved move whose render the same cells
+do vouch ships instead, provided the cells that refused the full move mostly
+stop refusing at that share (otherwise they were not asking for less of the
+move but for none of it), and the sentence prints that share beside the
+refused full move's verdict. A frame whose cells want opposite moves stays
+refused.
+
+The tone stage reads every paired pixel since 2026-10-21, not only the
+near-grey ones: on a street whose grey pixels are the shadow walls the target
+crushes, the grey-only map asked for contrast 100 and took the whole frame's
+shadows with it. The tone stage and the residual tone curve each answer for themselves too,
+on the tonal reading (the luma-distribution term of the look error, the one
+thing a tone move controls): rendered, if the tone sliders leave the frame's
+tones farther from the target's than the untouched source's, they ship nothing
+and the later stages solve from the untoned frame; if the curve on top of the
+sliders reads worse than the sliders alone, the sliders ship without it. Each
+refusal has its own sentence. Before this the
+only such check was the one at the very end, which returned the WHOLE recipe
+to neutral — on a lantern-lit street the white balance the cells had vouched
+was thrown out with the tone move that had harmed the frame.
 
 **When a region was repainted rather than re-graded.** An AI variant that
 recolours the sky and leaves its layout alone breaks the pixel-to-pixel
@@ -1008,7 +1038,15 @@ develop** (Analysis, Adjust the selected variant, Reference library).
   The vision advisor proposes bounded sliders and masks, a data-only verifier
   checks the proposal, and normal visual review may attempt one revision;
   `--deep` permits additional bounded rounds. Accepted output remains a normal
-  recipe and XMP.
+  recipe and XMP. The model may set every develop control it can judge from
+  the preview — tone, white balance, presence, the colour mixer, colour
+  grading, the curves, sharpening and noise amounts, the manual lens trio,
+  crop and straighten, local masks, and (since 2026-10-21) the post-crop
+  vignette, grain, the Black & White treatment and the Calibration panel; a
+  control it has no opinion on keeps your value. It never sets the sharpening
+  radius/detail/mask, the noise-reduction shaping axes, chromatic aberration,
+  de-fringe, Transform, HDR or the profile names: those are either structure
+  its preview cannot show or the photographer's own setup.
 - **Adjust the selected variant · paid API:** the fold under Analysis. Type
   what to change on the card you are looking at ("darken the sky a little,
   warm the faces") and click **🤖 AI adjust**. The model sees the card as it

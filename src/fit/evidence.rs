@@ -818,46 +818,231 @@ pub(super) fn atmosphere_wb_pairing<'a>(
 /// was not overruled by this batch — what the per-pixel form adds is that the
 /// robustness now applies to the CHANGE each pixel underwent rather than to
 /// two brightness distributions read apart from each other.
+///
+/// THE STATISTIC IS A CHROMATICITY (2026-10-21). Brightness is not this
+/// stage's to set (exposure owns it), so each pixel's log colour change is
+/// read as its red and its blue against its green BEFORE any median is
+/// taken: two medians of one cloud of per-pixel chromaticity changes. A
+/// median per channel, even of per-pixel ratios, still draws its red and its
+/// blue from different pixels, and a photo whose dark pixels went one way
+/// and bright pixels another reads a colour no pixel asked for — the lantern
+/// street read tint −29 that way and −5 as a chromaticity (measured on its
+/// 92272 paired pixels, 2026-10-21).
+///
+/// THE DEMAND IS THE CONSENSUS OF THE BRIGHTNESS RANGES (2026-10-21, the
+/// same day; the consensus form later that day). A white balance is an
+/// illuminant, and an illuminant moves every brightness the same way; a
+/// grade that warms the shadows and cools the highlights is not one, and the
+/// robust centre of that cloud is the majority's half of it applied to the
+/// minority — the seaside street's dark 85% asked 40000 K and the sky, sea,
+/// far houses and windows went yellow. So the cloud is read per evidence
+/// luma range (`EVIDENCE_LUMA_BINS` on the source luma, ranges under
+/// `EVIDENCE_MIN_SHARE` of the mass not testifying — the floors the evidence
+/// model already uses), each range's medians are put on the engine's two
+/// axes — red against blue (Kelvin) and green against the red/blue mean
+/// (tint) — and on each axis: where the ranges asking the OPPOSITE sign of
+/// the mass-weighted median, by at least [`WB_OPPOSING_RATIO`] of its size,
+/// hold [`WB_OPPOSING_SHARE`] or more of the testifying mass there is no
+/// single illuminant and the demand is nothing; otherwise it is that median.
+/// A range asking a sliver the other way is idle, not a second light
+/// (2026-10-22: by sign alone a dark quarter at −0.032 against +0.37
+/// vetoed the toy's Kelvin). Pixels too dark to carry a chromaticity
+/// (a channel maximum under [`WB_CHROMA_FLOOR`] on either side — the dark
+/// clause of `is_neutralish`, two or three 8-bit levels where one level is
+/// the whole reading) do not testify.
+///
+/// The first form of this rule took the signed value nearest zero across
+/// the ranges — unanimity — and one small range could zero the frame: the
+/// night sky's darkest fifth (source maximum 0.035, near black) read −0.22
+/// against the sky's −2.6..−2.8 and the stage shipped tint 100 at 5000 K
+/// (ΔE 5.22 → 12.62); the sunset city's two brightest ranges (16%) read
+/// −0.03/−0.14 against +0.3..+0.68 everywhere below and the stage shipped
+/// nothing (4.35 → 5.08); the neon street's darkest 7.5% read −0.13 against
+/// +0.15..+0.60 (6.75 → 8.91). Measured under the consensus rule (opposition
+/// by sign alone, 2026-10-21): night
+/// −2.77 / +0.32 (opposing 0.000), sunset city +0.31 (0.078), neon +0.15 /
+/// +0.25 (0.064), seaside street 0 (0.204), lantern street +1.17 (0.000),
+/// both suburbs 0 (0.36). The size that ships is still the cells' to vouch
+/// (`vouch_along`, then the share search).
+///
+/// INVERSION. The engine's model (`render::wb_gains`) is `[gr(K), 1 −
+/// 0.2·tint/100, gb(K)]` — green 1 under a pure Kelvin move, only the tint
+/// touching it — so the fit is in that normalisation, in log space, up to
+/// the common scalar: the Kelvin is the red/blue axis alone, and the tint is
+/// the green axis against the red/blue mean of what remains at that Kelvin.
+/// Each is exact for the other inside the domain; at the 40000 K edge the
+/// tint is read against the gains the engine will actually deliver, so an
+/// unreachable remainder of warmth stays warmth and is not booked as green.
+/// The estimator this replaces normalised the ratios by their geometric mean
+/// and read the tint off the resulting green, which is 1 only when the
+/// Kelvin gains' own geometric mean is 1 — it never is — so every warm move
+/// came back green: a pure 40000 K move from a 5768 K anchor read tint
+/// −19.7, and the lantern street shipped at 40000 K / −30.5, 3.1 Lab-a units
+/// greener than its target.
+/// Ranges asking the opposite sign on an axis that hold this share of the
+/// testifying mass or more: no single illuminant, no demand on that axis.
+/// Below it the opposition is a minority the median absorbs (the neon
+/// street's darkest 7.5%, the sunset city's blown highlights at 7.8%); at
+/// it and above it is a second light (the seaside street's bright fifth,
+/// 0.204; the suburbs' 0.36).
+pub(super) const WB_OPPOSING_SHARE: f32 = 0.10;
+/// A range opposes the consensus only when it asks the opposite sign by at
+/// least this fraction of the consensus's own size. By sign alone a range
+/// that asks for almost nothing vetoed a demand every other range agreed
+/// on: an idle dark quarter read −0.032 on the Kelvin axis after the tone
+/// sliders (0.102 of the mass, 0.09 of the +0.37 the rest asked) and the
+/// frame shipped no Kelvin; the canyon's unchanged sky read ~0 against the
+/// rocks' warmth and the whole warm demand fell on the cast curves
+/// (2026-10-22). Why a fifth (2026-10-22): on the seven real-photo
+/// per-pixel range dumps (read before the tone stage, chroma floor applied,
+/// ceiling-capped pixels kept as the engine keeps them) every ratio up to
+/// 0.22 leaves all seven demands where sign alone put them, and above it
+/// the seaside street's bright ranges (0.22 / 0.17 / 0.10 of its +0.86)
+/// stop opposing and its veto lifts; the toy's sliver sits at 0.09. A
+/// quarter, which a toned-render reading that dropped capped pixels had
+/// admitted, sits outside that window; a fifth sits inside it on both.
+pub(super) const WB_OPPOSING_RATIO: f32 = 0.20;
+/// A channel maximum under this carries no chromaticity worth a median —
+/// the dark clause of `is_neutralish`, named here because the white
+/// balance reads it for the same reason.
+pub(super) const WB_CHROMA_FLOOR: f32 = 0.04;
+
+/// The per-range readings behind the white-balance demand: for every
+/// evidence luma range holding `EVIDENCE_MIN_SHARE` of the testifying mass,
+/// the range's chromaticity medians on the engine's two axes — red against
+/// blue (Kelvin) and green against the red/blue mean (tint) — each paired
+/// with the range's mass. Pixels under [`WB_CHROMA_FLOOR`] on either side do
+/// not testify.
+pub(super) struct WbAxes {
+    pub(super) kelvin: Vec<(f32, f32)>,
+    pub(super) tint: Vec<(f32, f32)>,
+}
+
+pub(super) fn wb_axes_by_range(sp: &[[f32; 3]], pair_tp: &[[f32; 3]], pair_w: &[f32]) -> WbAxes {
+    let n = sp.len().min(pair_tp.len());
+    // Each pixel's own log colour change with its brightness change removed
+    // PIXEL BY PIXEL — red and blue against green — binned by source luma.
+    let mut red: Vec<Vec<(f32, f32)>> = vec![Vec::new(); EVIDENCE_LUMA_BINS];
+    let mut blue: Vec<Vec<(f32, f32)>> = vec![Vec::new(); EVIDENCE_LUMA_BINS];
+    let mut mass = [0.0f64; EVIDENCE_LUMA_BINS];
+    for i in 0..n {
+        let w = pair_w.get(i).copied().unwrap_or(0.0).max(0.0);
+        if w <= 0.0 {
+            continue;
+        }
+        let too_dark = |p: &[f32; 3]| p[0].max(p[1]).max(p[2]) < WB_CHROMA_FLOOR;
+        if too_dark(&sp[i]) || too_dark(&pair_tp[i]) {
+            continue;
+        }
+        let d: [f32; 3] = std::array::from_fn(|ch| {
+            let source = render::srgb_to_linear(sp[i][ch]).max(1e-5);
+            let target = render::srgb_to_linear(pair_tp[i][ch]).max(1e-5);
+            target.ln() - source.ln()
+        });
+        let bin = evidence_luma_bin(luma601(&sp[i]));
+        red[bin].push((d[0] - d[1], w));
+        blue[bin].push((d[2] - d[1], w));
+        mass[bin] += w as f64;
+    }
+    let total: f64 = mass.iter().sum();
+    let mut axes = WbAxes { kelvin: Vec::new(), tint: Vec::new() };
+    for bin in 0..EVIDENCE_LUMA_BINS {
+        if total <= 0.0 || mass[bin] / total < EVIDENCE_MIN_SHARE as f64 {
+            continue;
+        }
+        let (u, v) = (weighted_median(&mut red[bin]), weighted_median(&mut blue[bin]));
+        axes.kelvin.push((u - v, mass[bin] as f32));
+        axes.tint.push((0.5 * (u + v), mass[bin] as f32));
+    }
+    axes
+}
+
+/// The consensus of one axis across the ranges that testify: `(value,
+/// opposing share)`. The opposing share is the mass of the ranges asking
+/// the sign opposite the mass-weighted median, by at least
+/// [`WB_OPPOSING_RATIO`] of the median's size, over the whole testifying
+/// mass; at [`WB_OPPOSING_SHARE`] or more there is no single illuminant and
+/// the value is zero, below it the value is the median. A median of exactly
+/// zero has nothing to oppose.
+pub(super) fn wb_consensus(axis: &[(f32, f32)]) -> (f32, f32) {
+    let testifying: f32 = axis.iter().map(|&(_, m)| m).sum();
+    if testifying <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let median = weighted_median(&mut axis.to_vec());
+    let opposing = axis
+        .iter()
+        .filter(|&&(v, _)| v * median < 0.0 && v.abs() >= WB_OPPOSING_RATIO * median.abs())
+        .map(|&(_, m)| m)
+        .sum::<f32>()
+        / testifying;
+    if opposing >= WB_OPPOSING_SHARE {
+        return (0.0, opposing);
+    }
+    (median, opposing)
+}
+
 pub(super) fn atmosphere_wb_from_populations(
     sp: &[[f32; 3]],
     pair_tp: &[[f32; 3]],
     pair_w: &[f32],
     anchor: f32,
 ) -> (f32, f32, [f32; 3]) {
-    let n = sp.len().min(pair_tp.len());
-    let mut ratio = [1.0f32; 3];
-    let mut samples: Vec<(f32, f32)> = Vec::with_capacity(n);
-    for (ch, slot) in ratio.iter_mut().enumerate() {
-        samples.clear();
-        for i in 0..n {
-            let w = pair_w.get(i).copied().unwrap_or(0.0).max(0.0);
-            if w <= 0.0 {
-                continue;
-            }
-            let source = render::srgb_to_linear(sp[i][ch]).max(1e-5);
-            let target = render::srgb_to_linear(pair_tp[i][ch]).max(1e-5);
-            samples.push((target.ln() - source.ln(), w));
-        }
-        *slot = weighted_median(&mut samples).exp();
+    let axes = wb_axes_by_range(sp, pair_tp, pair_w);
+    let (a, _) = wb_consensus(&axes.kelvin);
+    let (m, _) = wb_consensus(&axes.tint);
+    // Nothing in common is no demand: the anchor itself, at the solve's own
+    // quantisation, so the stage can tell "no move" from a small one.
+    if a == 0.0 && m == 0.0 {
+        return ((anchor / 50.0).round() * 50.0, 0.0, [1.0; 3]);
     }
-    let common = (ratio[0] * ratio[1] * ratio[2]).max(1e-12).powf(1.0 / 3.0);
-    let wanted = ratio.map(|v| v / common);
+    let want_log = [m + 0.5 * a, 0.0, m - 0.5 * a];
+    // The normalised demand the callers and tests read: the same chromaticity
+    // as gains with unit geometric mean.
+    let common = (want_log[0] + want_log[1] + want_log[2]) / 3.0;
+    let wanted = want_log.map(|v| (v - common).exp());
+    let (k, tint) = invert_wb_log_gains(anchor, want_log);
+    (k, tint, wanted)
+}
+
+/// A wanted log-gain triple put onto the engine's (Kelvin, tint) manifold
+/// around `anchor`: the Kelvin that minimises the red/blue mismatch over
+/// [`WB_SEARCH_K`] (401 steps in log Kelvin), then the tint as the green
+/// against the red/blue mean of the residual AT THAT KELVIN. The Kelvin
+/// comes back rounded to 50, the tint to 0.1, as the recipe persists them.
+///
+/// One inversion for the estimator and for the budget path (2026-10-22): a
+/// tint is a compensation for the Kelvin it was solved with — at the 2000 K
+/// search bound the engine's red and blue gains do not balance about the
+/// green and the tint carries the difference — so any point between as-shot
+/// and the free fit must be inverted for its own Kelvin, not handed a share
+/// of the far end's tint.
+pub(super) fn invert_wb_log_gains(anchor: f32, want_log: [f32; 3]) -> (f32, f32) {
     let (lo, hi) = (WB_SEARCH_K.0.ln(), WB_SEARCH_K.1.ln());
-    let tint = ((1.0 - wanted[1]) / 0.20 * 100.0).clamp(-100.0, 100.0);
+    // The Kelvin search: log residual of the demand against the engine's
+    // Kelvin gains at tint 0, `r = ln(want) − ln(gains(K))`, and the Kelvin
+    // that minimises the red/blue mismatch `(r_R − r_B)²` — the common
+    // brightness scalar cancels in that difference and the green does not
+    // enter it.
+    let log_gains = |k: f32| render::wb_gains(anchor, k, 0.0).map(|v| v.max(1e-5).ln());
     let mut best = (anchor, f32::INFINITY);
     for i in 0..=400 {
         let k = (lo + (hi - lo) * i as f32 / 400.0).exp();
-        let gains = render::wb_gains(anchor, k, tint);
-        let err = gains
-            .iter()
-            .zip(wanted)
-            .map(|(&g, want)| (g.max(1e-5) / want.max(1e-5)).log2().powi(2))
-            .sum::<f32>();
+        let g = log_gains(k);
+        let err = ((want_log[0] - g[0]) - (want_log[2] - g[2])).powi(2);
         if err < best.1 {
             best = (k, err);
         }
     }
-    ((best.0 / 50.0).round() * 50.0, round1(tint), wanted)
+    // The tint: with the common scalar `s` and the green log-gain `t` free,
+    // the least squares of `(r_R − s, r_G − s − t, r_B − s)` is exact in
+    // `s = (r_R + r_B)/2` and `t = r_G − s` — the green against the red/blue
+    // mean of the residual at the Kelvin the engine will deliver.
+    let g = log_gains(best.0);
+    let r = [want_log[0] - g[0], want_log[1] - g[1], want_log[2] - g[2]];
+    let t = r[1] - 0.5 * (r[0] + r[2]);
+    let tint = ((1.0 - t.exp()) / 0.20 * 100.0).clamp(-100.0, 100.0);
+    ((best.0 / 50.0).round() * 50.0, round1(tint))
 }
 
 pub(super) fn weighted_mean(px: &[[f32; 3]], weights: &[f32], ch: usize) -> Option<f32> {

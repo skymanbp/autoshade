@@ -68,6 +68,9 @@ pub(crate) struct BoundaryReading {
     pub(super) colour: f32,
     /// `colour` after the same per-crossing charge, computed on the channel
     /// that produced the reading. The gate compares [`BoundaryReading::gated`].
+    /// Since 2026-10-22 the step is read through a one-code dead band first
+    /// ([`colour_dead_band`]), so unlike `charged >= rim` this rank may sit
+    /// UNDER `colour` — by one code at a saturated budget.
     pub(super) colour_charged: f32,
     /// R37. The step the paired TARGET itself carries across this boundary,
     /// ranked like `rim`: the magnitude 90th percentile of the per-cell
@@ -219,7 +222,8 @@ fn discontinuity_budget(context: f32, ceiling: f32) -> f32 {
 /// A BRANCH, not a multiply by a ratio that happens to be one: at or above
 /// the ceiling the charge IS the raw reading, bit for bit, so a fully
 /// textured or genuinely ramped border is governed by exactly the constant it
-/// was governed by before the charge existed.
+/// was governed by before the charge existed. (The colour coordinate hands
+/// this its step after the one-code dead band, [`colour_dead_band`].)
 fn crossing_charge(introduced: f32, budget: f32, ceiling: f32) -> f32 {
     if budget >= ceiling {
         introduced.abs()
@@ -261,7 +265,8 @@ pub(super) fn unasked(introduced: f32, wanted: f32) -> f32 {
 /// averages out of a mean and does not out of a rank or a vote: measured on
 /// that pair, the per-crossing sign vote this replaced read a coin flip
 /// (385 of 718 crossings agreeing) in cells whose mean stood thirty
-/// standard errors from zero. Soft family: every band pixel of every line,
+/// standard errors from zero. Soft family: every band pixel of every FOOTED
+/// band (one with settled feet on opposite sides, [`boundary_line_rims`]),
 /// each in its own cell; hard family: every crossing.
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct CellSums {
@@ -802,12 +807,33 @@ fn boundary_line_rims(
         // being budgeted is not a 3-px step — it is how far the treatment
         // inside the band falls short of the treatment it is owed, which the
         // whole band's width carries.
+        //
+        // A band with no FEET — both ends on the same side of the contour
+        // (an alpha dip inside the zone, or a bump outside it) or one end on
+        // the frame's edge — is not a transition BETWEEN the two sides, so
+        // this ruler cannot read its context, and reading that context as 0
+        // was the harshest reading there is. Such a band is skipped whole:
+        // no crossing sample and no contribution to its cell's sums, so the
+        // R37 cell means are read from footed transitions only. Measured
+        // (2026-10-22) on the two zones every verdict of the 11-pair battery
+        // bound on: a building whose mask has alpha holes on its sign
+        // letters — 62% of its 4224 crossings unfooted, 93% of those at the
+        // one-code floor budget, 196 of the top-5% 212 unfooted — and a sky
+        // whose top 5% were ALL unfooted (63% of 1655), while on its footed
+        // tree line the target carried the same red step as the candidate
+        // (-0.0995 against -0.106) and every cell still asked 0, its mean
+        // diluted by the unfooted band pixels. An interior alpha dip is the
+        // mask stage's question (`mask_refine`'s confidence-hole filling),
+        // and the hard ruler still reads the tile contours.
         let settled_at = |q: usize| if q < len { index(q) } else { None };
         let band_feet = match (band_begin.checked_sub(1).and_then(settled_at), settled_at(band_end + 1)) {
             (Some(a), Some(b)) if inside(a) != inside(b) => {
                 Some(if inside(a) { (a, b) } else { (b, a) })
             }
             _ => None,
+        };
+        let Some((foot_in, foot_out)) = band_feet else {
+            continue;
         };
         // How much of band pixel `i` is SKY CONTENT ([`ContentShare`]): where
         // the scene itself steps across the boundary — a horizon, a mesa
@@ -905,10 +931,9 @@ fn boundary_line_rims(
             ),
             None => 0.0,
         };
-        let context = |channel: Option<usize>| match (band_feet, channel) {
-            (Some((i_in, i_out)), Some(c)) => reference[i_in][c] - reference[i_out][c],
-            (Some((i_in, i_out)), None) => luma(&reference[i_in]) - luma(&reference[i_out]),
-            (None, _) => 0.0,
+        let context = |channel: Option<usize>| match channel {
+            Some(c) => reference[foot_in][c] - reference[foot_out][c],
+            None => luma(&reference[foot_in]) - luma(&reference[foot_out]),
         };
         let slope = slope_of(None);
         let budget = crossing_budget(context(None), slope, ZONE_BOUNDARY_RIM_MAX);
@@ -1001,6 +1026,9 @@ pub(super) fn boundary_rim_toward(
 /// its own frozen step` ([`unasked`]) at its own context rate
 /// ([`crossing_charge`]). `asked` is that allowance ranked like `rim`, for
 /// the disclosure.
+///
+/// The COLOUR charge reads the introduced step through a one-code dead band
+/// first ([`colour_dead_band`]); luma and the raw `colour` rank do not.
 fn reading_of(samples: &[CrossingSample], cells: &[CellSums], ceiling: f32) -> BoundaryReading {
     if samples.is_empty() {
         return BoundaryReading::nothing_measured();
@@ -1018,7 +1046,7 @@ fn reading_of(samples: &[CrossingSample], cells: &[CellSums], ceiling: f32) -> B
         .iter()
         .map(|s| {
             let a = share[s.channel + 1][s.cell] * s.colour_frozen[s.channel];
-            crossing_charge(unasked(s.colour, a), s.colour_budget, ceiling)
+            crossing_charge(unasked(colour_dead_band(s.colour), a), s.colour_budget, ceiling)
         })
         .collect();
     let mut asked = allowed;
@@ -1030,6 +1058,39 @@ fn reading_of(samples: &[CrossingSample], cells: &[CellSums], ceiling: f32) -> B
         colour_charged: magnitude_rank(&mut colour_charges),
         asked: magnitude_rank(&mut asked),
     }
+}
+
+/// A single channel's introduced step less one code, toward zero:
+/// `sign(v) · max(|v| − BOUNDARY_STEP_FLOOR, 0)`. That step is the difference
+/// of two 8-BIT renders, so ±1 code of it is rounding, and charged at the
+/// floor budget's rate (ceiling / floor, x3) one code of rounding is the
+/// whole ceiling. Measured on the 11-pair battery (fc-v8, 2026-10-22): all 22
+/// zone verdicts bound on the colour charge, every one parked exactly at the
+/// 0.012 ceiling, by raw colour steps of 1-1.5 codes charged x3 at the floor
+/// budget. Luma is the mean of three independent quantisations and resolves
+/// sub-code, so it gets no dead band; the raw `colour` rank the disclosure
+/// reports is not touched either. Monotone and exactly 0.0 at 0.0, so the
+/// shrink bisection keeps its invariant and the k=0 render still reads 0.0.
+fn colour_dead_band(v: f32) -> f32 {
+    v.signum() * (v.abs() - BOUNDARY_STEP_FLOOR).max(0.0)
+}
+
+/// Test window onto [`reading_of`]: one crossing with no target, its colour
+/// step `colour` on channel 0 against `colour_budget`, read at the soft
+/// family's ceiling — the colour charge it is ranked at.
+#[cfg(test)]
+pub(super) fn colour_charge_of_one_crossing(colour: f32, colour_budget: f32) -> f32 {
+    let sample = CrossingSample {
+        luma: 0.0,
+        luma_frozen: 0.0,
+        luma_budget: ZONE_BOUNDARY_RIM_MAX,
+        colour,
+        channel: 0,
+        colour_budget,
+        colour_frozen: [colour; 3],
+        cell: 0,
+    };
+    reading_of(&[sample], &cells_grid(), ZONE_BOUNDARY_RIM_MAX).colour_charged
 }
 
 /// Add one scan line's cross-boundary steps to `out`.

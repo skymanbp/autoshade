@@ -112,7 +112,7 @@ pub(super) fn fit_hsl_stage(
     sp: &[[f32; 3]],
     tp: &[[f32; 3]],
     evidence: &EvidenceModel,
-    vouch: Option<(&[f32], &[[f32; 3]])>,
+    vouch: Option<PixelVouch<'_>>,
     cells: Option<&crate::fit_cells::PairedCells>,
     budget: FitBudget,
     recipe: &mut EditRecipe,

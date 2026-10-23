@@ -498,14 +498,15 @@ pub(crate) fn moved_unsupported_hue_range_names(
 }
 
 /// [`moved_unsupported_hue_range_names`] with a per-pixel robust voucher for
-/// the evacuation exemption (see `moved_unsupported_range_hits`). Only the
-/// global END-STATE guard supplies one; every other caller keeps the strict
-/// doctrine.
+/// the evacuation exemption (see `moved_unsupported_range_hits`). The global
+/// end-state guard, the mixer and the cast outcome supply one on a paired
+/// run, and since 2026-10-21 so does the zone colour probe of a region that
+/// pairs at pixel scale; every other caller keeps the strict doctrine.
 pub(crate) fn moved_unsupported_hue_range_names_vouched(
     cur: &[[f32; 3]],
     with_px: &[[f32; 3]],
     evidence: &EvidenceModel,
-    vouch: Option<(&[f32], &[[f32; 3]])>,
+    vouch: Option<PixelVouch<'_>>,
     cells: Option<CellArm<'_>>,
 ) -> Option<String> {
     let hue = moved_unsupported_range_hits(cur, with_px, evidence, vouch, cells).hue;
@@ -517,7 +518,7 @@ fn moved_unsupported_range_hits(
     cur: &[[f32; 3]],
     with_px: &[[f32; 3]],
     evidence: &EvidenceModel,
-    vouch: Option<(&[f32], &[[f32; 3]])>,
+    vouch: Option<PixelVouch<'_>>,
     cells: Option<CellArm<'_>>,
 ) -> MovedRangeHits {
     let mut moved_luma = 0.0f32;
@@ -552,16 +553,24 @@ fn moved_unsupported_range_hits(
             // the reconstruction's doing, not an edit's) carries a large
             // transport residual, earns no voucher, and keeps its veto.
             // Callers with no paired verdict pass None and get the strict
-            // doctrine unchanged — the zoned colour probes do so
-            // deliberately (zone colour stays class-split withheld, the
-            // user-ratified rule).
+            // doctrine unchanged. The zoned colour probe did so until
+            // 2026-10-21 (zone colour stayed class-split withheld); the
+            // user's ruling of that date hands it the zone's own robust
+            // pairing where the region pairs at pixel scale, because a
+            // one-sided band on such a region is band membership and not a
+            // lack of evidence — the seaside street's source sky sits in
+            // Aqua, the target's in Blue, and the zone shipped unity gains
+            // over a sky whose every pixel had its counterpart. A Cell-scale
+            // region still passes None and asks its cells. The voucher names
+            // the AXIS its move is judged along (`PixelVouch`): a zone's
+            // colour probe is read in chromaticity, a global move in full.
             let spatially = evidence.spatial_supported.get(i).copied().unwrap_or(false);
             let converges = spatially
-                && vouch.is_some_and(|(weights, targets)| {
+                && vouch.is_some_and(|(weights, targets, axis)| {
                     weights.get(i).copied().unwrap_or(0.0) >= 0.5
                         && targets
                             .get(i)
-                            .is_some_and(|target| converges_toward(target, before, after))
+                            .is_some_and(|target| converges_toward(axis, target, before, after))
                 });
             // R34 §D3. THE cell arm, for the pixels the paired one cannot
             // be ASKED about — a strictly smaller set than the pixels it did
@@ -639,6 +648,12 @@ struct MovedRangeHits {
     cell_vouched_hue: [bool; EVIDENCE_HUE_BANDS],
 }
 
+/// The per-pixel voucher: each pixel's robust pairing weight, its own paired
+/// target pixel, and the axis the move it is asked about can move along
+/// (`fit_cells::MoveAxis` — full RGB for a global cast or mixer, chromaticity
+/// for a zone's colour probe solved with its tone zeroed).
+pub(crate) type PixelVouch<'a> = (&'a [f32], &'a [[f32; 3]], crate::fit_cells::MoveAxis);
+
 /// One candidate render's REGION verdicts, and the grid that indexes them:
 /// `fit_cells`'s answer for the pixels the per-pixel voucher cannot reach.
 /// Recomputed per candidate — it is a verdict about what an edit DID, so it
@@ -651,7 +666,7 @@ pub(crate) fn vouched_hue_band_names(
     cur: &[[f32; 3]],
     with_px: &[[f32; 3]],
     evidence: &EvidenceModel,
-    vouch: Option<(&[f32], &[[f32; 3]])>,
+    vouch: Option<PixelVouch<'_>>,
     cells: Option<CellArm<'_>>,
 ) -> Option<String> {
     let hits = moved_unsupported_range_hits(cur, with_px, evidence, vouch, cells);
@@ -665,7 +680,7 @@ pub(crate) fn cell_vouched_hue_band_names(
     cur: &[[f32; 3]],
     with_px: &[[f32; 3]],
     evidence: &EvidenceModel,
-    vouch: Option<(&[f32], &[[f32; 3]])>,
+    vouch: Option<PixelVouch<'_>>,
     cells: Option<CellArm<'_>>,
 ) -> Option<String> {
     let hits = moved_unsupported_range_hits(cur, with_px, evidence, vouch, cells);

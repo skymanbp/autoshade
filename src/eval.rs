@@ -205,7 +205,12 @@ fn hue_carries_colour(row: &Row, scope: Scope<'_>, ai: &EditRecipe) -> bool {
 fn rows() -> Vec<Row> {
     let mut out = Vec::new();
     for c in RECIPE_CONTROLS.iter().filter(|c| !c.engine_only) {
-        if let Some(attr) = c.crs.attr() {
+        // Scalar rows only: the Black & White switch (2026-10-21) is the
+        // first AI-visible boolean with an attribute, and a ruler row needs a
+        // number on both sides.
+        if let Some(attr) = c.crs.attr()
+            && c.shape.is_scalar()
+        {
             out.push(Row {
                 metric: c.name.to_string(),
                 crs: attr.to_string(),
@@ -1826,10 +1831,13 @@ mod tests {
         let metric = |m: &str| ruler.iter().any(|r| r.metric == m);
         // Every AI-visible registry row that lands on one crs attribute.
         for c in RECIPE_CONTROLS.iter().filter(|c| !c.engine_only) {
-            if c.crs.attr().is_some() {
+            if c.crs.attr().is_some() && c.shape.is_scalar() {
                 assert!(metric(c.name), "{} has a crs attribute but no ruler row", c.name);
             }
         }
+        // …and the one AI-visible boolean with an attribute is not a row: a
+        // switch has no number to compare.
+        assert!(!metric("convert_to_grayscale"), "the B&W switch is not a numeric ruler row");
         // Engine-only controls stay OUT: the AI cannot set them, so scoring it
         // against them would measure the schema gap, not the taste gap. (Read
         // off the registry, not a name — R23-1b moved the lens trio to the

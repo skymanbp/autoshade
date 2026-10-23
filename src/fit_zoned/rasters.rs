@@ -30,15 +30,17 @@ pub(super) fn raster_centroid(mask: &GrayImage) -> (f32, f32) {
     ((sx / sa / f64::from(w)) as f32, (sy / sa / f64::from(h)) as f32)
 }
 
-/// Was this note a zone's COLOUR refusal? One outcome, two carriers since
-/// R34 §D2: a region whose pixels are each other's counterparts keeps R33's
-/// sentence, and a region past the pairing line gets the one that also prints
-/// what its cells measured. Everything that asks "was the colour refused, and
-/// was the band named?" asks it here, so the question cannot drift apart from
-/// the two sentences that answer it.
+/// Was this note a zone's COLOUR refusal? One outcome, three carriers: since
+/// R34 §D2 a region whose pixels are each other's counterparts keeps R33's
+/// sentence and a region past the pairing line gets the one that also prints
+/// what its cells measured; since 2026-10-21 the local-quality gate has its
+/// own, for a colour class the evidence admitted and the gate refused.
+/// Everything that asks "was the colour refused?" asks it here, so the
+/// question cannot drift apart from the sentences that answer it.
 pub(crate) fn is_colour_refusal(key: &str) -> bool {
     key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR
         || key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR_CELLS
+        || key == crate::rationale::keys::ZONE_COLOUR_WITHHELD_BY_QUALITY
 }
 
 /// The tone half of [`is_colour_refusal`].

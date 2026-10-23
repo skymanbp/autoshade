@@ -1492,11 +1492,20 @@ this trait.)
 > `["number","null"]`, where **null means "no opinion"** and 0 means "clear the
 > photographer's correction" — a distinction `pipeline::carry_over_unrepresentable`
 > now honours (it used to overwrite all three unconditionally, which would have
-> made the schema addition a no-op on the Refine path). What is left engine-only
-> is permanent: the engine's own per-photo measurement (`as_shot_k`/`as_shot_tint`,
-> `base_curve`, the lens-profile block) and mask state with no ACR spelling
-> (`components`, `color_gains`, `role`, plus the `enabled` eye toggle, whose only
-> possible model answers are "discarded" or "mute the user's mask").
+> made the schema addition a no-op on the Refine path). 2026-10-21 (user ruling:
+> the AI gets every develop tool it can judge from the preview) widened the same
+> mechanism to twenty-five more rows — the post-crop vignette and grain, the
+> Black & White treatment with its grey mix (the switch as `["boolean","null"]`),
+> and the Calibration panel: `advisor::Opinions` is the set of nullable controls a
+> response stated, `openai::take_opinions` strips the nulls before the parse, and
+> `carry_over_unrepresentable` copies the base's value only where the model said
+> nothing. Still engine-only, each for a stated reason: the engine's own per-photo
+> measurement (`as_shot_k`/`as_shot_tint`, `base_curve`, the lens-profile block),
+> mask state with no ACR spelling (`components`, `color_gains`, `role`, plus the
+> `enabled` eye toggle), the eight detail axes and the CA pair (1–3 px structure
+> the preview cannot show), the parametric curve (the point curve says the same),
+> the point-colour swatches (picked off the photo), the lens profile scales,
+> Transform, de-fringe, HDR and the profile names.
 
 ### 3.1 The grade-strength axis — one dial, six gates (R23-3)
 
@@ -2647,9 +2656,9 @@ pinned by `render::profile::tests::a_profile_with_no_tables_and_no_curve_is_not_
 
 **Lightroom's remaining colour panels render since v1.5.0** — the Calibration
 panel, the Black & White treatment with its eight-band mixer, and Point Color.
-All three are engine-only (the model states colour through the mixer and the
-grade, so no response can name them) and all three carry their own `crs:`
-properties, which is why they are `Rendered` and not carried:
+All three carry their own `crs:` properties, which is why they are `Rendered`
+and not carried; the first two are nullable advisor rows since 2026-10-21 and
+Point Color stays engine-only (a swatch is picked off the photo, not stated):
 
 - **Calibration** (`render::Calibration`, the develop's first stage). Lightroom
   writes `crs:ShadowTint`, `crs:RedHue` … `crs:BlueSaturation` — UNPREFIXED and
@@ -4045,7 +4054,37 @@ modes (Atmosphere unchanged), placed after tone and before saturation for the
 reason the cast stage already gives about itself. What decides whether it SHIPS
 is the cells: the WB is solved from the population as before, rendered, and
 returned to as-shot unless the target's own cell means vouch the render it
-produced. Both outcomes are disclosed. The same instrument reopens the mixer's
+produced. Both outcomes are disclosed. Since 2026-10-21 a refusal on SIZE is
+not a refusal on DIRECTION (R36 for the white balance, after the zone probes'
+`vouched_share`): where `CellVouch::direction_agrees` holds and the full move
+fails, the stage bisects the as-shot-to-solved path (Kelvin in log space,
+tint linear, quantised as the solve quantises; `WB_VOUCH_SHRINK_STEPS` = 6
+renders) and ships the largest share the same voucher admits AND that
+carries size evidence — its diverged share at most half the full move's
+(`WB_SHARE_SIZE_EVIDENCE`): cells still diverging at the share were not pushed
+past their targets but away from them. Under `FIT_NOTE_WB_CELLS_VOUCHED_AT_SHARE`
+the refused full verdict rides beside the shipped share's three shares
+(`WbCellVerdict::shipped_at`). Measured on the seaside street: 0.883
+converged / 0.105 diverged / 0.960 aligned along chromaticity — the diverging
+tenth is the blue sky under a cast the sunlit walls asked for — and the
+threshold alone shipped 0.969 of it at 0.097 diverged, an orange sky; the
+size rule refuses it and the cast returns to as-shot.
+The tone stage and the residual curve stage each carry their own do-no-harm
+now (`SolveFacts::tone_harm` / `curve_harm`, `FIT_NOTE_TONE_WITHHELD_HARM` /
+`FIT_NOTE_CURVE_WITHHELD_HARM`): the sliders are rendered against the untouched
+source and withheld where they read worse, the curve against the sliders alone
+— on the TONAL term of the objective (`look::tonal_err_with_evidence`), the
+term a tone move controls. Held to the whole objective, a correct luma move on
+a muted frame with a vivid target was charged for the colour-mean drift the
+later stages exist to correct (the land-and-sky toy: 0.1233 → 0.1240 on the
+sliders alone, and its zones lost the global move they were solved beside).
+Measured on the lantern street: the tone stage alone took the look error from
+0.0595 to 0.0815 and its tonal term from 0.0468 to 0.0748 (+1.65 EV against a
+darker target), the curve on top of the withheld sliders to 0.0837 against
+the untouched source, and the terminal do-no-harm — the only
+such check until then — returned the whole recipe to neutral, the cell-vouched
+40000 K white balance included; with the stage checks the white balance and
+the cast ship (0.0595 → 0.0532). The same instrument reopens the mixer's
 hardest case — a band the frozen evidence calls one-sided is admitted when it
 is two-sided ON THE RENDER THE STAGE SOLVES FROM (the WB having corrected the
 light first) AND the cells holding those members vouch the stages so far. That
@@ -4325,6 +4364,34 @@ region past the line gets the sentence that prints what its cells measured.
 `is_colour_refusal` / `is_tone_refusal` are the one place that knows the two
 carriers are one outcome.
 
+**Where the pixels can be asked, they are** (2026-10-21, user ruling). The rule
+above was read from one side only: a region that pairs at pixel scale was never
+asked anything — its colour probe passed the hue guard no voucher at all, so a
+one-sided band withheld the zone's colour on the strict doctrine even where
+every pixel the move touched had its own counterpart and landed closer to it.
+Measured on the seaside street: the source sky sits in Aqua, the target's in
+Blue, the region pairs, and the sky zone shipped unity gains under
+`ZONE_EVIDENCE_WITHHELD_COLOUR` for a recolour that was "zero-evidence" by
+construction. The zone colour probe now hands the guard the same per-pixel
+voucher the global end-state guard has carried since the paired doctrine — the
+zone's own robust pairing weights and each pixel's paired target
+(`converges_toward`) — and only where `PairingScale::Pixel` holds; a
+Cell-scale region still passes `None` and asks its cells. Evidence is still
+evidence: a pixel that diverges from its counterpart, or that the robust fit
+threw out, keeps the veto, and a band whose unvouched mass crosses the share
+line is refused with R33's sentence as before. What changed is that a band
+changing is no longer read as evidence missing. The shipped outcome has its own
+sentence, `ZONE_COLOUR_VOUCHED_BY_PIXELS`, so the three ways a zone's colour
+can ship — on paired pixels, on the region's cells, at a share of the move —
+never read the same. Admission is not quality: a colour class the evidence
+admitted is still the local-quality gate's to refuse, and that gate used to
+drop the whole correction of a zone whose colour shipped while a
+colour-withheld zone backed its tone off through the ladder. The colour class
+is now probed alone against the gate first and, where the full move fails,
+withheld under the gate's own sentence (`ZONE_COLOUR_WITHHELD_BY_QUALITY`, the
+third carrier `is_colour_refusal` knows); the tone is then judged as every
+colour-withheld zone's is.
+
 SCOPE is the other half of the instrument, and it is not the same at every
 site. Lifting a REGIONAL veto takes a REGIONAL verdict: a veto that is a SHARE
 of the moved population dissolves entirely once enough of that population is
@@ -4410,7 +4477,34 @@ threshold. Four sites consume it:
     measures the regression of one noise draw on another and under-reads the
     contrast (R33 measured 10% low at frame level; the reference sky read 0.72
     of the target's L* spread). The scale is disclosed only where it changed
-    the estimator, so a pixel-scale zone's rationale is unchanged.
+    the estimator, so a pixel-scale zone's rationale is unchanged. A
+    pixel-scale zone is held to the same doctrine by a dilution guard
+    (2026-10-22, `ZONE_PAIRED_SPREAD_FLOOR = 0.80`): the paired map is the
+    target's conditional median, and applied to the source zone it must
+    reproduce at least 0.80 of the target zone's p10–p90 luma spread, or the
+    same distribution match solves the zone instead
+    (`ZONE_TONE_PAIRING_DILUTED`). Both spreads, and the fallback's two
+    CDFs, are read under the mask alphas rather than the robust-composed
+    weights: those weights are the map's own verdict on which pixels it
+    could explain, so a guard read through them is circular. On the neon
+    street pair the building region (D = 0.264) mapped to 0.700 of the
+    target's spread under the alphas (source 0.0657–0.2508, target
+    0.0436–0.2818, mapped 0.0592–0.2260) but to 0.893 under the robust
+    weights, which cut the target's p90 to the map's own plateau (0.2270);
+    its sliders darkened every brightness bin and the frame regressed
+    0.036988 → 0.043763; the distribution match on the same zone improved
+    it to ≈0.0315.
+    The distribution branch scores its slider solve on the zone's own
+    population (24 equal-mass quantiles of the source CDF the transport
+    reads), then refines `(ev, sliders)` by coordinate descent on the
+    engine's rendered spline (`fit::refine_tone_sliders_on`; the paired
+    branch, whose points carry pairing noise, and the global stage are
+    untouched): the eight fixed knots cannot see a bend inside a zone's
+    own range. On the
+    building (luma 0.066–0.25, only the knots 0 / 0.10 / 0.25 nearby) the
+    map put p10 at 0.0437 against the target's 0.0436, and the knot-fitted
+    sliders rendered 0.0785 — the x = 0 knot, an extrapolation below the
+    population, lifted the blacks the map deepens.
 
 What all four did on the reference pair, which is the only honest summary of a
 design — and "did" means CHANGED THE SHIPPED BYTES, read off a leaf-by-leaf
@@ -4936,11 +5030,50 @@ WHITE BALANCE no longer does: it is a weighted median of the PER-PIXEL log
 ratio, one cloud of per-pixel colour changes rather than a ratio of two
 marginals, because three independent per-channel medians on a bimodal frame
 draw their halfway points from different sub-populations and their ratio is no
-pixel's colour. On the crate's own `flat_sky_to_cloud_deck` fixture, where the
+pixel's colour. Since 2026-10-21 the cloud is a cloud of CHROMATICITY changes:
+each pixel's red and blue log ratios are taken against its own green before
+any median is read (a median per channel, even of per-pixel ratios, still
+draws its red and its blue from different pixels — the lantern street read tint
+−29 that way and −5 as a chromaticity), and the inversion is in the engine's
+own normalisation, green 1 under a pure Kelvin move: the Kelvin is the red/blue
+axis, the tint the green axis against the red/blue mean of the residual at that
+Kelvin, so a warm move no longer reads as green (the geometric-mean
+normalisation it replaces read a pure 40000 K move as tint −19.7). And the
+demand is the CONSENSUS of the brightness ranges: the cloud is read per evidence
+luma range (the 17 ranges and the 1.5% share floor the evidence model already
+uses; pixels with a channel maximum under 0.04 on either side carry no
+chromaticity and do not testify), each range's medians go on the engine's two
+axes, and on each axis the ranges asking the opposite sign of the
+mass-weighted median, by at least a fifth of its size (a range asking a
+sliver the other way is idle, not a second light), are weighed — where
+they hold a tenth or more of the testifying mass there is no single illuminant
+and the demand is nothing, otherwise it is that median — because an illuminant moves every brightness the same way and
+a grade that warms the shadows while cooling the highlights is not one. The
+seaside street's dark 85% asks 40000 K and its bright fifth (sky, sea, the far
+houses, the windows) asks cooler: the white balance stays as shot, where the
+whole cloud's centre had shipped 40000 K and turned every bright thing yellow.
+The first form of this rule took the least demand across the ranges, and one
+small range could zero a frame: the night sky's near-black darkest fifth read
+−0.22 against the sky's −2.7 and the stage shipped tint 100 at 5000 K instead
+of the deep cool the frame asked (ΔE 5.2 → 12.6), the sunset city's blown
+highlights read cool against a warm frame and the stage shipped nothing. A
+demand that is the anchor itself is no demand — the stage persists nothing and
+says nothing. And every point BETWEEN as-shot and the solved demand — the
+strength budget's scalar, the cells' share search — is a point of the log-gain
+segment inverted for its own Kelvin (2026-10-22), not a Kelvin walked in log
+space with the tint scaled beside it: a tint is the green against the red/blue
+mean of the residual AT the Kelvin it was solved with, and at the 2000 K search
+bound the engine's red and blue do not balance about the green, so the night
+sky's −100 tint shrunk to −26.8 at 4850 K turned the horizon green (ΔE 5.2 →
+14.8) where the same share in gain space keeps the point on the manifold. The
+Full solve reads the demand from the render AS THE TONE STAGE LEFT
+IT, not from the base: tone sliders act on every channel, and the seaside
+street's contrast 100 read 40000 K / −24 from the base against 17400 K / +5
+from the toned frame. On the crate's own `flat_sky_to_cloud_deck` fixture, where the
 land half is byte-identical between the two frames and the sky keeps its exact
 chromaticity vector with only its luminance redrawn — so no pixel changed
 colour at all — the marginal form read K 4400 / tint +55.2 and the per-pixel
-form reads the anchor back. WITH a field, the
+form reads the anchor back, which is no demand, and persists nothing. WITH a field, the
 SHARED-CONTENT population replaces the whole frame on BOTH sides: target
 pixels no confident source cell maps onto (generated content that is not a
 rendition of this frame) and source pixels whose content the target replaced
@@ -5000,9 +5133,27 @@ demand there is spatially OPPOSITE to its demand over the top two thirds, so
 no single global gain can serve both halves, and the honest contribution is
 removing a wrong-way error rather than supplying a right-way one.
 
-The tone stage's evidence prefers NEAR-NEUTRAL pixels (saturated ones carry
+The tone stage's MARGINAL arm prefers NEAR-NEUTRAL pixels (saturated ones carry
 chroma-clipped luma), which rests on an identification assumption — "grey"
-must name the same pixels on both sides. Since v0.26.0 (R17) that assumption
+must name the same pixels on both sides. The PAIRED arm reads every paired
+pixel since 2026-10-21: it has each pixel's own counterpart and a robust fit to
+reject the inconsistent ones, so the gate chose a population there rather than
+identifying one — on the seaside street the near-neutral eighth of the frame is
+its shadow walls, which the target crushes (0.06–0.28 → 0.024) while the
+chromatic seven eighths at the same brightness go 0.06 → 0.058 and 0.25 →
+0.156; the gated map solved contrast 100 and the lower-left shadows went black.
+The robust map's monotone backstop is mass-weighted isotonic regression
+(pool-adjacent-violators) since the same day: the clamp it replaces lifted every
+later bin to the highest earlier one, so a mask-edge bin of negligible mass
+reading a target of 0.967 flattened a sky zone's whole map and a −0.18 EV sky
+solved as +1.25 EV. And a pixel with a channel at the gamut ceiling (≥ 0.995)
+while its luma is not is no tone reading on either side — its luma is where
+the ceiling left it, not where the map sent it — so the paired arm does not
+sample it: on the crate's roundtrip fixture the chromatic bands agree with the
+grey band's map within 0.005 wherever no channel clips and read it 0.03–0.05
+short where one does, and read anyway those pixels were the majority of their
+bins, the fit followed them and contrast solved −6 against the truth's +18. A
+grey pixel at the ceiling keeps its say. Since v0.26.0 (R17) the marginal arm's assumption
 is policed by three conditions in `tone_cdf_pair`: per-side sample floors, the
 1.75× share-ratio ceiling, and a **misprediction gate**
 (`neutral_gate_misprediction`) that scores the gated evidence map against the
@@ -5074,6 +5225,13 @@ correction itself introduced is budgeted. The two constants are SEPARATE
 they were one constant until step 9, which meant re-deriving either ruler's
 budget silently re-tuned the other, and the island's three accepted tiles
 sit 1.7%-3.3% below the step ceiling where that would have moved them.
+The gate's composed-frame re-check takes ONE tolerance per gate family, the
+one its caller admitted the candidate on (`BitmapBoundaryInput::frame_tol`):
+spatial tiles and free masks keep `SPATIAL_FRAME_REGRESSION_TOL = 0.0`, and a
+semantic region passes `ZONE_GLOBAL_REGRESSION_TOL = 0.02` — until 2026-10-22
+the gate applied 0.0 to every family, so a region `attach_one_zone` had
+admitted inside its drift budget was refused here as "the composed frame
+regressed".
 Since v1.2.2 the step constant is a CEILING rather than a flat budget:
 0.012 was calibrated where neighbourhood contrast masks a discontinuity of
 that size, and a measured tile seam in clean sky sat exactly on it at 7.8
@@ -5235,6 +5393,32 @@ feathered uniform correction's shortfall, and what that horizon asks for is a
 band. That is where the same measurement changed an outcome: the sub-zone
 trial rulers (below). The reference pair's numbers are in the R37 ledger
 entry.
+
+**The soft ruler reads footed transitions only, and colour through a one-code
+dead band (2026-10-22).** Across the 11-pair battery all 22 zone verdicts
+bound on the COLOUR charge, every one parked at the 0.012 ceiling, and the
+charge was rounding: a single channel's step is the difference of two 8-bit
+renders, and raw colour steps of 1–1.5 codes charged ×3 at the one-code floor
+budget fill the whole ceiling. `reading_of` therefore charges the colour step
+through `sign(v)·max(|v| − BOUNDARY_STEP_FLOOR, 0)` (`colour_dead_band`, both
+families, since both rank through it); luma — three quantisations averaged,
+sub-code resolution — and the raw `colour` rank the disclosure prints are
+unchanged. And `boundary_line_rims` now skips a band with no feet — both
+settled ends on one side of the contour (an alpha dip inside the zone, a bump
+outside it) or one end on the frame edge — whole: no crossing sample and no
+contribution to its cell's `CellSums`, so the R37 cell means, and the
+sub-zone trial rulers' `rim_cell_gaps`, are read from footed transitions
+only. Such a band is not a transition between the two sides, its context
+cannot be read, and reading it as 0 was the harshest reading there is.
+Measured: the neon street's building had 62% of its 4224 crossings unfooted
+(49.6% in-in, the mask's alpha holes on its sign letters), 93% of those at the
+floor budget, and 196 of its top-5% 212 unfooted; the same pair's sky had 63% of 1655
+unfooted and its top 5% all unfooted, while on the footed tree line the target
+carried the candidate's own red step (−0.0995 against −0.106) and every cell
+still asked 0, its mean diluted by the unfooted band pixels. An interior alpha
+dip is the mask stage's question (`mask_refine`'s confidence-hole filling);
+the hard ruler still reads tile contours, and the ceiling, the 90th
+percentile, the luma floor and the `cell_share` rules are untouched.
 
 **Both rulers also read COLOUR, charged identically.** The same difference in
 differences is taken per channel — for the step ruler on R, G and B directly,
@@ -5454,8 +5638,8 @@ unchanged and was never what was wrong.
 For the step family a reading of ZERO measured crossings is a refusal, never
 a pass — until 2026-08-30 the rim ruler returned `0.000` from an empty
 transition band for every hard raster ever gated, and the gate read that as
-comfortably inside budget. A Full-zone correction then uses the three-arm gate
-(v0.26.1, third arm R30 batch 1): halve the zone error, land it at/below an
+comfortably inside budget. A Full-zone correction then uses the four-arm gate
+(v0.26.1, third arm R30 batch 1, fourth 2026-10-22): halve the zone error, land it at/below an
 absolute matched floor (0.02 of linear-mean error, brightness within a quarter
 stop — the floor lives in scale-dependent linear light, so the EV companion
 rides both absolute yardsticks) with a real ≥20% gain, or be STRICTLY BETTER —
@@ -5468,7 +5652,19 @@ for that relaxation on the frame side, where zero regression is stricter than
 the semantic route's own `0.02` drift insurance and equal to what the spatial,
 range and free-mask routes already demand; a correction admitted by it carries
 its own typed disclosure naming both readings and naming `ZONE_TEXTURE_MIN` as
-the one safety gate known NOT to discriminate. An Atmosphere zone uses
+the one safety gate known NOT to discriminate. The fourth arm, tried last so
+every verdict the first three reach is unchanged, judges the zone's luma
+DISTRIBUTION: `zone_err` is a moments ruler (linear channel means plus chroma)
+and cannot see a contrast-type reshape that leaves the mean alone, while the EV
+companion forces such a zone to be fitted. `zone_tonal` reads the mean absolute
+gap between the zone's and the target's luma CDFs at the frame tonal term's own
+21 quantiles, on the mask alphas, and the arm buys the zone when that gap lands
+at or under `ZONE_TONAL_MATCHED = 0.015` with the floor arm's ≥20% gain, the
+frame does not regress at all and the moments do not regress. Calibrated on
+one pair (n = 1, flagged): the neon street's building, refused by all three
+moments arms (0.0091 → 0.0061, EV gap 0.31) while the frame improved
+0.03699 → 0.03518, reads a quantile gap 0.0203 → 0.0135; it discloses itself
+with `ZONE_DISTRIBUTION_MATCHED`. An Atmosphere zone uses
 zone-local do-no-harm instead, and the absolute arm never reaches it. A zone already inside the
 observed matched DOMAIN (≤0.012, same EV companion) is left alone with an
 honest "already matches" note instead of being dialled, regressed, and

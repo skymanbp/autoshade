@@ -420,9 +420,9 @@ impl AutoShadeApp {
                 // parametric curve — two families for Detail's reason (one is
                 // AI-visible, one is not), one section, so one ● for both.
                 fam("curves") || fam("parametric"),
-                // R25 B2: the `effects` family has no AI-visible member, so it
-                // reaches the model nowhere — it exists in the table for
-                // exactly this, the section's own ●.
+                // R25 B2 made `effects` the first family with no AI-visible
+                // member; it is planned with since 2026-10-21, and either
+                // way the section's ● comes from the same table.
                 fam("effects"),
                 fam("calibration"),
                 // v1.5.0 F6: the Transform section's own family. It has no

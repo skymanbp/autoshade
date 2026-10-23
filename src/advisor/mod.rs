@@ -425,25 +425,47 @@ pub struct PixelToolSuggestion {
 /// parser's own ceiling on a model that ignores it).
 pub const PIXEL_TOOLS_MAX: usize = 3;
 
-/// Which of the three manual LENS controls the model actually STATED a value
-/// for in this response — the "no opinion" half of R23-1b.
+/// Which NULLABLE controls the model actually STATED a value for in this
+/// response — the "no opinion" half of R23-1b, widened on 2026-10-21 from the
+/// three manual lens controls to every control the schema offers as
+/// `["number","null"]` or `["boolean","null"]`
+/// (`catalogue::nullable_controls`): the lens trio, the post-crop vignette and
+/// the grain, the Black & White treatment with its grey mix, and the
+/// Calibration panel.
 ///
-/// The three fields entered the strict schema as `["number","null"]`, and null
-/// is a real answer: it means "the photographer's own lens correction stands",
+/// Null is a real answer: it means "the photographer's own value stands",
 /// which is what `pipeline::carry_over_unrepresentable` used to assume
-/// UNCONDITIONALLY (it overwrote all three from the refine base, so a model
-/// opinion could never survive a Refine). Without this flag the schema addition
-/// would have been either a no-op on that path or a silent loss of a
-/// hand-dialled correction — the trap the plan calls out.
+/// UNCONDITIONALLY for the lens trio (it overwrote all three from the refine
+/// base, so a model opinion could never survive a Refine) and still assumes
+/// for every engine-only row. Without this set the unlocking would be either
+/// a no-op on the refine path or a silent loss of a hand-dialled value — the
+/// trap R23-1b called out, now over twenty-eight controls instead of three.
 ///
-/// `Default` = nothing stated, which is the honest answer for every proposal
-/// that did not come from the strict schema (the heuristic baseline, a bridge
-/// that dropped the keys).
+/// One bit per nullable control, in the registry's order, so the set is
+/// `Copy` (the judge loop keeps the candidate's in a `Cell`). `Default` =
+/// nothing stated, which is the honest answer for every proposal that did not
+/// come from the strict schema (the heuristic baseline, a bridge that dropped
+/// the keys).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct LensOpinion {
-    pub vignette: bool,
-    pub vignette_mid: bool,
-    pub distortion: bool,
+pub struct Opinions(u64);
+
+impl Opinions {
+    fn bit(name: &str) -> Option<u64> {
+        catalogue::nullable_controls().iter().position(|n| *n == name).map(|i| 1u64 << i)
+    }
+
+    /// Did this response state a value for `name`? False for any name that
+    /// is not a nullable control.
+    pub fn stated(self, name: &str) -> bool {
+        Self::bit(name).is_some_and(|b| self.0 & b != 0)
+    }
+
+    /// The set with `name` stated. Panics on a name that is not a nullable
+    /// control: an opinion about a control the schema never offers as null
+    /// is a programming error, not a model answer.
+    pub fn with(self, name: &str) -> Self {
+        Self(self.0 | Self::bit(name).unwrap_or_else(|| panic!("`{name}` is not a nullable control")))
+    }
 }
 
 /// One proposal, with everything the call produced BESIDES the recipe (R23-1b).
@@ -456,8 +478,8 @@ pub struct Proposal {
     /// The structured working, when thinking mode was asked for and the reply
     /// carried an envelope.
     pub thinking: Option<Thinking>,
-    /// Which manual lens controls this response actually spoke about.
-    pub lens: LensOpinion,
+    /// Which nullable controls this response actually spoke about.
+    pub opinions: Opinions,
     /// The provider's OWN deterministic disclosures, typed (L12#2B).
     ///
     /// The provider makes two: the 8-band mixer arrived the wrong length, and

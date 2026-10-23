@@ -209,6 +209,7 @@ pub(in crate::fit_zoned) fn attach_free_masks(
                 target_boundary: Some(&target_px[..]),
                 initial_px: std::mem::take(&mut accepted.rendered),
                 frame_before,
+                frame_tol: spatial::SPATIAL_FRAME_REGRESSION_TOL,
             },
         );
         let boundary = match boundary {

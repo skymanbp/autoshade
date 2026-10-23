@@ -215,14 +215,36 @@ pub(super) fn wb_gains_fit_budget(gains: [f32; 3], budget: FitBudget) -> bool {
 }
 
 pub(super) fn wb_path_candidate(anchor: f32, wb_k: f32, wb_tint: f32, lambda: f32) -> (f32, f32) {
-    let k = (anchor.ln() + (wb_k.ln() - anchor.ln()) * lambda).exp();
-    ((k / 50.0).round() * 50.0, round1(wb_tint * lambda))
+    wb_path_between(anchor, (anchor, 0.0), (wb_k, wb_tint), lambda)
+}
+
+/// The point `lambda` of the way from one white balance to another, walked
+/// in GAIN space (2026-10-22): the log-gain segment between the two ends,
+/// inverted onto the engine's (Kelvin, tint) manifold for its own Kelvin by
+/// the estimator's inversion. The ends themselves are returned as given
+/// (the inversion's 401-step Kelvin grid would otherwise move a free fit by
+/// a step). Walking Kelvin in log space with the tint scaled linearly, as
+/// this did until then, carried the far end's tint — a compensation for the
+/// far end's Kelvin — to every point between: the night sky's demand hit the
+/// 2000 K bound with tint −100, shrank to 4850 K / −26.8 and the horizon
+/// went green.
+pub(super) fn wb_path_between(anchor: f32, from: (f32, f32), to: (f32, f32), lambda: f32) -> (f32, f32) {
+    if lambda <= 1e-6 {
+        return ((from.0 / 50.0).round() * 50.0, round1(from.1));
+    }
+    if lambda >= 1.0 - 1e-6 {
+        return ((to.0 / 50.0).round() * 50.0, round1(to.1));
+    }
+    let log = |(k, tint): (f32, f32)| render::wb_gains(anchor, k, tint).map(|v| v.max(1e-5).ln());
+    let (a, b) = (log(from), log(to));
+    let want: [f32; 3] = std::array::from_fn(|c| a[c] + (b[c] - a[c]) * lambda);
+    super::evidence::invert_wb_log_gains(anchor, want)
 }
 
 /// Keep a fitted white balance on the renderer's Kelvin/tint manifold while
 /// spending no more than the strength budget. The only degree of freedom is
-/// the scalar distance from as-shot `(anchor, 0)` to the free fit. Kelvin is
-/// interpolated in log space, matching the free search domain.
+/// the scalar distance from as-shot `(anchor, 0)` to the free fit, walked in
+/// gain space (`wb_path_between`).
 pub(super) fn budgeted_wb(
     anchor: f32,
     wb_k: f32,
@@ -235,12 +257,9 @@ pub(super) fn budgeted_wb(
         return (wb_k, wb_tint, false, ratio_before, ratio_before, 1.0);
     }
 
-    let (anchor_log, wb_log) = (anchor.ln(), wb_k.ln());
-    let candidate = |lambda: f32, rounded: bool| {
-        let k = (anchor_log + (wb_log - anchor_log) * lambda).exp();
-        let tint = wb_tint * lambda;
-        if rounded { wb_path_candidate(anchor, wb_k, wb_tint, lambda) } else { (k, tint) }
-    };
+    // Every point of the path is already a persisted (rounded) pair; the
+    // `rounded` flag is kept so the two bisections below read as they did.
+    let candidate = |lambda: f32, _rounded: bool| wb_path_candidate(anchor, wb_k, wb_tint, lambda);
 
     // Zero is as-shot and therefore legal. Maintain a legal lower endpoint
     // and find the largest scalar move admitted by both WB constraints.

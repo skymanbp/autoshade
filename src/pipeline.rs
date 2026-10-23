@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::advisor::{
-    Advisor, ClaudeProvider, Decision, HeuristicProposer, LensOpinion, OpenAiProvider,
+    Advisor, ClaudeProvider, Decision, HeuristicProposer, Opinions, OpenAiProvider,
     OpenAiVerifier, Preview, Verdict,
 };
 use crate::config::Config;
@@ -525,11 +525,12 @@ pub fn produce_recipe(
     // replaces `recipe` wholesale replaces this with it — a plan describing a
     // discarded candidate is worse than none.
     let mut thinking: Option<crate::advisor::Thinking> = None;
-    // …and which manual lens controls THAT proposal spoke about (R23-1b),
-    // tracked the same way and for the same reason: `carry_over_unrepresentable`
-    // must not re-impose the base's lens values over an opinion the surviving
+    // …and which nullable controls THAT proposal spoke about (R23-1b, the
+    // lens trio; 2026-10-21, the effects, B&W and calibration too), tracked
+    // the same way and for the same reason: `carry_over_unrepresentable`
+    // must not re-impose the base's values over an opinion the surviving
     // recipe actually stated. Nothing stated = the historical behaviour.
-    let mut lens_opinion = LensOpinion::default();
+    let mut opinions = Opinions::default();
     let (mut recipe, can_revise) = if cfg.openai_api_key.is_some() {
         if verbose {
             println!("proposer : OpenAI ({})", cfg.openai_model);
@@ -537,7 +538,7 @@ pub fn produce_recipe(
         match openai.propose_planned_with_base(&proposer_preview, meta, hist, &propose_ctx, base) {
             Ok(p) => {
                 thinking = p.thinking;
-                lens_opinion = p.lens;
+                opinions = p.opinions;
                 // The provider's own disclosures are the HEAD of this call's
                 // note list (A10): they were appended to the model's prose, so
                 // by the suffix contract they are where the notes start.
@@ -664,7 +665,7 @@ pub fn produce_recipe(
                 det_notes = revised.notes;
                 // …and the working travels with the proposal it explains.
                 thinking = revised.thinking;
-                lens_opinion = revised.lens;
+                opinions = revised.opinions;
                 verdict = v;
             }
             Err(e) => {
@@ -723,7 +724,7 @@ pub fn produce_recipe(
     // thinking at a committed strength (10 with images, 14 frames) — the
     // numbers the GUI tooltip and `--deep`'s help quote.
     if judge && can_revise {
-        let judge_view = |r: &EditRecipe, lens: LensOpinion| -> EditRecipe {
+        let judge_view = |r: &EditRecipe, opinions: Opinions| -> EditRecipe {
             let mut v = r.clone();
             if let Some(b) = base {
                 // A refine's bitmap masks are part of the look under
@@ -735,7 +736,7 @@ pub fn produce_recipe(
                 // must score the frame the deliverable will BE, and since
                 // R23-1b those two differ whenever the model stated a lens
                 // value (it would otherwise be judged with the base's).
-                carry_over_unrepresentable(&mut v, b, lens, None);
+                carry_over_unrepresentable(&mut v, b, opinions, None);
             }
             v.base_curve = Vec::new();
             v.lens_profile = Default::default();
@@ -744,9 +745,9 @@ pub fn produce_recipe(
             v
         };
         let judge_of = |r: &EditRecipe,
-                        lens: LensOpinion|
+                        opinions: Opinions|
          -> Result<crate::advisor::Judgement, crate::advisor::AdvisorError> {
-            let rendered = crate::render::develop_preview(&preview_img, &judge_view(r, lens));
+            let rendered = crate::render::develop_preview(&preview_img, &judge_view(r, opinions));
             let mut jpeg = Vec::new();
             rendered
                 .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
@@ -789,11 +790,11 @@ pub fn produce_recipe(
         // by the judge closure inside the same `visual_review_round` call. A
         // `Cell` because those two closures are alive together (one `FnMut`, one
         // `Fn`) and a plain `&mut` capture in the first would forbid the read in
-        // the second; `LensOpinion` is `Copy`, so this is a plain slot, not
+        // the second; `Opinions` is `Copy`, so this is a plain slot, not
         // shared mutability of anything the round can observe out of order — the
         // round always proposes before it judges.
-        let candidate_lens = std::cell::Cell::new(LensOpinion::default());
-        match judge_of(&recipe, lens_opinion) {
+        let candidate_opinions = std::cell::Cell::new(Opinions::default());
+        match judge_of(&recipe, opinions) {
             Err(e) => {
                 log.push(crate::rationale::Note::new(
                     crate::rationale::keys::JUDGE_UNAVAILABLE,
@@ -850,7 +851,7 @@ pub fn produce_recipe(
                                 base,
                             )?;
                             candidate_thinking = p.thinking;
-                            candidate_lens.set(p.lens);
+                            candidate_opinions.set(p.opinions);
                             candidate_notes = p.notes;
                             let mut asked = p.recipe;
                             cut_ai_masks(&mut asked, &mut candidate_notes);
@@ -860,7 +861,7 @@ pub fn produce_recipe(
                         // The candidate's own opinion: `visual_review_round`
                         // judges only the recipe its propose closure just
                         // returned (`judge(&revised)`), never the held one.
-                        |r| judge_of(r, candidate_lens.get()),
+                        |r| judge_of(r, candidate_opinions.get()),
                         current.score,
                     );
                     rounds_done += 1;
@@ -873,7 +874,7 @@ pub fn produce_recipe(
                             det_notes = std::mem::take(&mut candidate_notes);
                             // …and the working travels with its proposal.
                             thinking = candidate_thinking;
-                            lens_opinion = candidate_lens.get();
+                            opinions = candidate_opinions.get();
                             verdict = v2;
                             if verbose {
                                 println!(
@@ -1135,7 +1136,7 @@ pub fn produce_recipe(
     // the user actually had — and, for the three manual lens fields the schema
     // DOES carry since R23-1b, keep the photographer's value only where this
     // proposal said nothing about them.
-    carry_over_then_note_domain(&mut recipe, base, lens_opinion, &mut det_notes);
+    carry_over_then_note_domain(&mut recipe, base, opinions, &mut det_notes);
     Ok((recipe, verdict, det_notes))
 }
 
@@ -1150,11 +1151,11 @@ pub fn produce_recipe(
 fn carry_over_then_note_domain(
     recipe: &mut EditRecipe,
     base: Option<&EditRecipe>,
-    lens_opinion: LensOpinion,
+    opinions: Opinions,
     det_notes: &mut Vec<crate::rationale::Note>,
 ) {
     if let Some(b) = base {
-        carry_over_unrepresentable(recipe, b, lens_opinion, Some(&mut *det_notes));
+        carry_over_unrepresentable(recipe, b, opinions, Some(&mut *det_notes));
     }
     let shift = post_stamp_domain_shift(recipe);
     note_post_stamp_domain(&mut recipe.rationale, det_notes, shift);
@@ -1388,18 +1389,21 @@ pub(crate) fn adjust_envelope(base_json: &str, request: Option<&str>) -> String 
 /// painted mask and reverse-fit zone (with its recolour gains) silently
 /// disappeared the moment the user clicked Refine.
 ///
-/// `lens` is the model's OPINION on the three manual lens controls (R23-1b).
-/// The overwrite below used to be unconditional, with a sound reason at the
-/// time — the model never saw those fields, so its zeros meant nothing. Now
-/// that it can state them, an unconditional overwrite would make the schema
-/// addition a no-op on exactly the path (Refine) where a lens correction is
-/// most likely to exist. `LensOpinion::default()` (nothing stated) reproduces
-/// the historical behaviour exactly, which is what every non-schema proposal
-/// passes.
+/// `opinions` is the set of NULLABLE controls the model actually stated
+/// (R23-1b for the three manual lens controls; 2026-10-21 for the post-crop
+/// vignette, the grain, the B&W treatment and the Calibration panel). The
+/// overwrite below used to be unconditional, with a sound reason at the time
+/// — the model never saw those fields, so its zeros meant nothing. Now that it
+/// can state them, an unconditional overwrite would make the schema addition
+/// a no-op on exactly the path (a refine or an adjust) where a hand-dialled
+/// value is most likely to exist; a null is "no opinion" and the base's value
+/// is carried, a number is the answer and stands. `Opinions::default()`
+/// (nothing stated) reproduces the historical behaviour exactly, which is
+/// what every non-schema proposal passes.
 pub(crate) fn carry_over_unrepresentable(
     recipe: &mut EditRecipe,
     base: &EditRecipe,
-    lens: LensOpinion,
+    opinions: Opinions,
     notes: Option<&mut Vec<crate::rationale::Note>>,
 ) {
     use crate::recipe::{MaskGeometry, MaskRole};
@@ -1495,15 +1499,16 @@ pub(crate) fn carry_over_unrepresentable(
     // that DOES state one is answering the question it was asked — the
     // catalogue tells it null means "no opinion" and 0 means "zero it" — so
     // that value stands.
-    if !lens.distortion {
-        recipe.lens_distortion = base.lens_distortion;
+    // A NULLABLE control is carried only where this proposal said nothing
+    // about it: null was "no opinion", a number (or the switch's boolean) is
+    // the answer. Pinned by `an_unlocked_control_is_carried_only_where_the_
+    // model_said_nothing`, which derives the field list from the registry.
+    macro_rules! carry_unless_stated {
+        ($($field:ident),* $(,)?) => {
+            $( if !opinions.stated(stringify!($field)) { recipe.$field = base.$field; } )*
+        };
     }
-    if !lens.vignette {
-        recipe.lens_vignette = base.lens_vignette;
-    }
-    if !lens.vignette_mid {
-        recipe.lens_vignette_mid = base.lens_vignette_mid;
-    }
+    carry_unless_stated!(lens_distortion, lens_vignette, lens_vignette_mid);
     // The lens PROFILE (with the user's toggles) rides too — but only when
     // the base actually carries one: a refine caller that still pre-strips
     // it to Default is sending a sentinel, never "the user turned everything
@@ -1539,12 +1544,12 @@ pub(crate) fn carry_over_unrepresentable(
     recipe.retouch = base.retouch.clone();
     recipe.pixel_layers = base.pixel_layers.clone();
     recipe.lens_blur = base.lens_blur.clone();
-    recipe.post_crop_vignette = base.post_crop_vignette;
-    recipe.post_crop_vignette_mid = base.post_crop_vignette_mid;
-    recipe.post_crop_vignette_feather = base.post_crop_vignette_feather;
-    recipe.post_crop_vignette_round = base.post_crop_vignette_round;
-    recipe.post_crop_vignette_style = base.post_crop_vignette_style;
-    recipe.post_crop_vignette_hl = base.post_crop_vignette_hl;
+    carry_unless_stated!(post_crop_vignette);
+    carry_unless_stated!(post_crop_vignette_mid);
+    carry_unless_stated!(post_crop_vignette_feather);
+    carry_unless_stated!(post_crop_vignette_round);
+    carry_unless_stated!(post_crop_vignette_style);
+    carry_unless_stated!(post_crop_vignette_hl);
     recipe.lens_profile_distortion_scale = base.lens_profile_distortion_scale;
     recipe.lens_profile_vignetting_scale = base.lens_profile_vignetting_scale;
     // v1.5.0 F6: the Transform panel. Engine-only, so no response restates any
@@ -1568,9 +1573,12 @@ pub(crate) fn carry_over_unrepresentable(
     // next save through a different profile than the one on screen.
     recipe.camera_profile = base.camera_profile.clone();
     recipe.look = base.look.clone();
-    recipe.grain = base.grain;
-    recipe.grain_size = base.grain_size;
-    recipe.grain_rough = base.grain_rough;
+    // The effects, the B&W treatment and the calibration (below) are
+    // NULLABLE rows since 2026-10-21: the base's value rides only where the
+    // response answered null.
+    carry_unless_stated!(grain);
+    carry_unless_stated!(grain_size);
+    carry_unless_stated!(grain_rough);
     // R25 B3 widened the block by fifteen: the eight detail axes (carried
     // then, rendered since v1.5.0 and engine-only either way), the auto-CA
     // switch and the six de-fringe keys. Same argument, one sharper edge —
@@ -1622,22 +1630,22 @@ pub(crate) fn carry_over_unrepresentable(
     // properties are owned, so a dropped value would take the photographer's
     // own Lightroom calibration, grey mix or swatches out of the file on the
     // next save.
-    recipe.cal_shadow_tint = base.cal_shadow_tint;
-    recipe.cal_red_hue = base.cal_red_hue;
-    recipe.cal_red_sat = base.cal_red_sat;
-    recipe.cal_green_hue = base.cal_green_hue;
-    recipe.cal_green_sat = base.cal_green_sat;
-    recipe.cal_blue_hue = base.cal_blue_hue;
-    recipe.cal_blue_sat = base.cal_blue_sat;
-    recipe.convert_to_grayscale = base.convert_to_grayscale;
-    recipe.gray_red = base.gray_red;
-    recipe.gray_orange = base.gray_orange;
-    recipe.gray_yellow = base.gray_yellow;
-    recipe.gray_green = base.gray_green;
-    recipe.gray_aqua = base.gray_aqua;
-    recipe.gray_blue = base.gray_blue;
-    recipe.gray_purple = base.gray_purple;
-    recipe.gray_magenta = base.gray_magenta;
+    carry_unless_stated!(cal_shadow_tint);
+    carry_unless_stated!(cal_red_hue);
+    carry_unless_stated!(cal_red_sat);
+    carry_unless_stated!(cal_green_hue);
+    carry_unless_stated!(cal_green_sat);
+    carry_unless_stated!(cal_blue_hue);
+    carry_unless_stated!(cal_blue_sat);
+    carry_unless_stated!(convert_to_grayscale);
+    carry_unless_stated!(gray_red);
+    carry_unless_stated!(gray_orange);
+    carry_unless_stated!(gray_yellow);
+    carry_unless_stated!(gray_green);
+    carry_unless_stated!(gray_aqua);
+    carry_unless_stated!(gray_blue);
+    carry_unless_stated!(gray_purple);
+    carry_unless_stated!(gray_magenta);
     recipe.point_colors = base.point_colors.clone();
     // v1.5.0 F8: HDR edit mode, its headroom and the seven SDR-rendition
     // controls, on the same ground again — rendered, engine-only, owned keys.
@@ -3951,7 +3959,7 @@ mod guard_tests {
             }],
             ..Default::default()
         };
-        carry_over_unrepresentable(&mut proposed, &base, LensOpinion::default(), None);
+        carry_over_unrepresentable(&mut proposed, &base, Opinions::default(), None);
         assert_eq!(proposed.masks.len(), 2, "the bitmap mask must survive Refine");
         // (the lens assertions below are the SILENT half of this test: with no
         // opinion stated, every manual correction is still carried back)
@@ -3972,7 +3980,7 @@ mod guard_tests {
         let mut stamped = EditRecipe::default();
         stamped.lens_profile.vignette = vec![1.0, 0.9];
         stamped.lens_profile.vignette_on = true;
-        carry_over_unrepresentable(&mut stamped, &EditRecipe::default(), LensOpinion::default(), None);
+        carry_over_unrepresentable(&mut stamped, &EditRecipe::default(), Opinions::default(), None);
         assert!(stamped.lens_profile.vignette_on, "sentinel base leaves the stamp alone");
         assert!(!stamped.lens_profile.vignette.is_empty());
         // The model's own proposal is still there, after the carried one.
@@ -3991,7 +3999,7 @@ mod guard_tests {
         assert_eq!(base.resolved("sharpen_detail"), 0.0, "premise: the base holds a real 0");
         let mut refined = EditRecipe { sharpening: 40.0, ..Default::default() };
         assert_eq!(refined.resolved("sharpen_detail"), 25.0, "premise: a response cannot say it");
-        carry_over_unrepresentable(&mut refined, &base, LensOpinion::default(), None);
+        carry_over_unrepresentable(&mut refined, &base, Opinions::default(), None);
         assert_eq!(refined.explicit_zero, vec!["sharpen_detail".to_string()]);
         assert_eq!(refined.resolved("sharpen_detail"), 0.0);
         assert_eq!(refined.sharpening, 40.0, "the response's own amount still stands");
@@ -4028,14 +4036,14 @@ mod guard_tests {
         let base = EditRecipe { schema_era: 1, exposure_ev: 0.2, ..Default::default() };
         let mut refined = EditRecipe { exposure_ev: 0.5, ..Default::default() };
         assert_eq!(refined.schema_era, crate::recipe::SCHEMA_ERA, "premise: a response is stamped current");
-        carry_over_unrepresentable(&mut refined, &base, LensOpinion::default(), None);
+        carry_over_unrepresentable(&mut refined, &base, Opinions::default(), None);
         assert_eq!(refined.schema_era, 1, "the carried defaults are a v1.4 recipe's");
         let out = crate::xmp::merge_recipe_into_xmp(doc, &refined).expect("mergeable");
         assert!(out.doc.contains("crs:ParametricDarks=\"+40\""), "the refine's save deleted the curve: {}", out.doc);
         assert_eq!(refined.exposure_ev, 0.5, "…and the refine itself stands");
         // A current base leaves a current response current.
         let mut fresh = EditRecipe { exposure_ev: 0.5, ..Default::default() };
-        carry_over_unrepresentable(&mut fresh, &EditRecipe::default(), LensOpinion::default(), None);
+        carry_over_unrepresentable(&mut fresh, &EditRecipe::default(), Opinions::default(), None);
         assert_eq!(fresh.schema_era, crate::recipe::SCHEMA_ERA);
     }
 
@@ -4089,7 +4097,7 @@ mod guard_tests {
         let field = |r: &EditRecipe, name: &str| serde_json::to_value(r).ok().and_then(|v| v.get(name).cloned());
         let neutral = EditRecipe::default();
         let mut proposed = EditRecipe { exposure_ev: 0.4, ..Default::default() };
-        carry_over_unrepresentable(&mut proposed, &base, LensOpinion::default(), None);
+        carry_over_unrepresentable(&mut proposed, &base, Opinions::default(), None);
         for name in rows {
             assert_ne!(field(&base, name), field(&neutral, name), "{name}: the probe must move the field");
             assert_eq!(field(&proposed, name), field(&base, name), "{name}: a refine dropped it");
@@ -4210,7 +4218,7 @@ mod guard_tests {
         }
         // What the model returns: a fresh recipe with no such fields at all.
         let mut proposed = EditRecipe { exposure_ev: 0.4, ..Default::default() };
-        carry_over_unrepresentable(&mut proposed, &base, LensOpinion::default(), None);
+        carry_over_unrepresentable(&mut proposed, &base, Opinions::default(), None);
         for name in &carried {
             assert_eq!(
                 field(&proposed, name),
@@ -4219,6 +4227,50 @@ mod guard_tests {
             );
         }
         assert_eq!(proposed.exposure_ev, 0.4, "…without undoing the refine itself");
+    }
+
+    /// 2026-10-21: every NULLABLE control — the lens trio and the twenty-five
+    /// unlocked rows — is carried from the base exactly where the model said
+    /// nothing, and is the model's answer exactly where it spoke. Derived from
+    /// the registry, so a row unlocked later without a carry line fails here.
+    ///
+    /// MUTATION THIS KILLS: drop one `carry_unless_stated!` line (the base's
+    /// value is lost on null), or make one unconditional again (the model's
+    /// answer is overwritten).
+    #[test]
+    fn an_unlocked_control_is_carried_only_where_the_model_said_nothing() {
+        use crate::advisor::catalogue::{global_control, nullable_controls, Shape};
+        let nullable = nullable_controls();
+        assert!(nullable.len() >= 28, "premise: the unlocking happened: {nullable:?}");
+        let neutral = EditRecipe::default();
+        let field = |r: &EditRecipe, name: &str| serde_json::to_value(r).ok().and_then(|v| v.get(name).cloned());
+        // A base with a non-neutral value in every nullable field.
+        let mut json = serde_json::to_value(&neutral).expect("recipe serialises");
+        for name in &nullable {
+            let shape = global_control(name).map(|c| c.shape).expect("a registry row");
+            json[*name] = match shape {
+                Shape::NullableBool => serde_json::json!(true),
+                _ => serde_json::json!(3.0),
+            };
+        }
+        let mut base: EditRecipe = serde_json::from_value(json).expect("the probes are in range");
+        base.clamp();
+        for name in &nullable {
+            assert_ne!(field(&base, name), field(&neutral, name), "{name}: the probe must move the control");
+        }
+        // Nothing stated: every base value rides.
+        let mut silent = EditRecipe { exposure_ev: 0.4, ..Default::default() };
+        carry_over_unrepresentable(&mut silent, &base, Opinions::default(), None);
+        for name in &nullable {
+            assert_eq!(field(&silent, name), field(&base, name), "{name}: a null answer lost the photographer's value");
+        }
+        // Everything stated (at the neutral): the model's answer stands.
+        let all = nullable.iter().fold(Opinions::default(), |o, n| o.with(n));
+        let mut spoken = EditRecipe::default();
+        carry_over_unrepresentable(&mut spoken, &base, all, None);
+        for name in &nullable {
+            assert_eq!(field(&spoken, name), field(&neutral, name), "{name}: a stated value was overwritten by the base");
+        }
     }
 
     /// R23-1b: the lens trio is IN the strict schema now, so the carry-over
@@ -4241,7 +4293,7 @@ mod guard_tests {
         };
         // The model answered on distortion only; the two vignette fields came
         // back null, which `take_lens_opinion` turned into the engine defaults.
-        let stated = LensOpinion { distortion: true, vignette: false, vignette_mid: false };
+        let stated = Opinions::default().with("lens_distortion");
         let mut proposed =
             EditRecipe { lens_distortion: 12.0, lens_vignette: 0.0, lens_vignette_mid: 50.0, ..Default::default() };
         carry_over_unrepresentable(&mut proposed, &base, stated, None);
@@ -4256,7 +4308,7 @@ mod guard_tests {
         carry_over_unrepresentable(
             &mut clearing,
             &base,
-            LensOpinion { distortion: true, vignette: true, vignette_mid: true },
+            Opinions::default().with("lens_distortion").with("lens_vignette").with("lens_vignette_mid"),
             None,
         );
         assert_eq!(
@@ -4302,7 +4354,7 @@ mod guard_tests {
             }],
             ..Default::default()
         };
-        carry_over_unrepresentable(&mut proposed, &base, LensOpinion::default(), None);
+        carry_over_unrepresentable(&mut proposed, &base, Opinions::default(), None);
         assert_eq!(
             proposed.masks[0].mask,
             radial(-40.0, 0.35),
@@ -4364,7 +4416,7 @@ mod guard_tests {
             }],
             ..Default::default()
         };
-        carry_over_unrepresentable(&mut proposed, &base, LensOpinion::default(), None);
+        carry_over_unrepresentable(&mut proposed, &base, Opinions::default(), None);
         let MaskGeometry::Radial { midpoint, mask_version, angle, top, .. } = proposed.masks[0].mask
         else {
             panic!("expected a radial, got {:?}", proposed.masks[0].mask);
@@ -4386,7 +4438,7 @@ mod guard_tests {
             }],
             ..Default::default()
         };
-        carry_over_unrepresentable(&mut renamed, &base, LensOpinion::default(), None);
+        carry_over_unrepresentable(&mut renamed, &base, Opinions::default(), None);
         let MaskGeometry::Radial { midpoint, .. } = renamed.masks[0].mask else {
             panic!("expected a radial")
         };
@@ -7223,7 +7275,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        carry_over_unrepresentable(&mut proposed, &base, LensOpinion::default(), None);
+        carry_over_unrepresentable(&mut proposed, &base, Opinions::default(), None);
         assert!(!proposed.masks[0].enabled);
         assert_eq!(proposed.masks[0].components, vec![component]);
         assert_eq!(
@@ -7254,7 +7306,7 @@ mod tests {
             ..Default::default()
         };
         let mut refined = expected.clone();
-        carry_over_unrepresentable(&mut refined, &plain_base, LensOpinion::default(), None);
+        carry_over_unrepresentable(&mut refined, &plain_base, Opinions::default(), None);
         assert_eq!(refined, expected, "plain masks still take the model response exactly");
     }
 
@@ -7300,7 +7352,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        carry_over_unrepresentable(&mut proposed, &base, LensOpinion::default(), None);
+        carry_over_unrepresentable(&mut proposed, &base, Opinions::default(), None);
         assert_eq!(
             proposed.masks, base.masks,
             "identity lost ⇒ the base masks stand, the response's mask edits are discarded"
@@ -7414,7 +7466,7 @@ mod tests {
         let base = EditRecipe { lens_profile: data.clone(), ..Default::default() };
         let mut recipe = EditRecipe { lens_profile: stamped.clone(), ..Default::default() };
         let mut notes: Vec<crate::rationale::Note> = Vec::new();
-        carry_over_then_note_domain(&mut recipe, Some(&base), LensOpinion::default(), &mut notes);
+        carry_over_then_note_domain(&mut recipe, Some(&base), Opinions::default(), &mut notes);
         assert!(!recipe.lens_profile.vignette_on, "premise: the carry-over restored the base's toggle");
         assert!(
             notes.iter().all(|n| n.key != crate::rationale::keys::FIT_RESIDUAL_PRE_CALIBRATION),
@@ -7428,7 +7480,7 @@ mod tests {
         let on = EditRecipe { lens_profile: stamped, ..Default::default() };
         let mut recipe = EditRecipe::default();
         let mut notes: Vec<crate::rationale::Note> = Vec::new();
-        carry_over_then_note_domain(&mut recipe, Some(&on), LensOpinion::default(), &mut notes);
+        carry_over_then_note_domain(&mut recipe, Some(&on), Opinions::default(), &mut notes);
         assert!(recipe.lens_profile.vignette_active(), "premise: the base's profile rode along");
         assert_eq!(
             notes.iter().filter(|n| n.key == crate::rationale::keys::FIT_RESIDUAL_PRE_CALIBRATION).count(),

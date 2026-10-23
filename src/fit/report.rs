@@ -89,6 +89,11 @@ pub(super) struct SolveFacts {
     /// `Some(joint_arm_fired)` when the TERMINAL do-no-harm check reset the
     /// whole recipe to the calibration base.
     pub(super) regressed: Option<bool>,
+    /// Per-stage do-no-harm (2026-10-21): the tone sliders, or the residual
+    /// curve, rendered the frame farther from the target than it was without
+    /// them (`before` → `after`) and were withheld at their own stage.
+    pub(super) tone_harm: Option<(f32, f32)>,
+    pub(super) curve_harm: Option<(f32, f32)>,
     pub(super) detail: (f32, f32),
     pub(super) detail_withheld: bool,
     /// Paired robust regression engaged and down-weighted this share of the
@@ -260,6 +265,18 @@ pub(super) fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: Sol
         };
         push_note(&mut rationale, &mut notes, Note::new(key, args));
     }
+    for (harm, key) in [
+        (solve.tone_harm, keys::FIT_NOTE_TONE_WITHHELD_HARM),
+        (solve.curve_harm, keys::FIT_NOTE_CURVE_WITHHELD_HARM),
+    ] {
+        if let Some((before, after)) = harm {
+            push_note(
+                &mut rationale,
+                &mut notes,
+                Note::new(key, vec![("before", format!("{before:.4}")), ("after", format!("{after:.4}"))]),
+            );
+        }
+    }
     if let Some(joint_regressed) = solve.regressed {
         push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_REGRESSED));
         if joint_regressed {
@@ -357,23 +374,31 @@ pub(super) fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: Sol
     // is temperature still as-shot on a pair whose light obviously changed? —
     // unanswered.
     if let Some(verdict) = solve.wb_cells {
-        let (converged, diverged, aligned) = verdict.vouch.shares();
-        push_note(
-            &mut rationale,
-            &mut notes,
-            Note::new(
-                if verdict.admitted {
-                    keys::FIT_NOTE_WB_CELLS_VOUCHED
-                } else {
-                    keys::FIT_NOTE_WB_CELLS_REFUSED
-                },
-                vec![
-                    ("converged", converged),
-                    ("diverged", diverged),
-                    ("aligned", aligned),
-                ],
-            ),
-        );
+        // The shares printed are the SHIPPED move's — the full move's where
+        // it shipped or was refused, the share's where a share did — and the
+        // share sentence prints the full move's refusal beside them.
+        let (converged, diverged, aligned) =
+            verdict.shipped_at.map_or(verdict.vouch, |(_, at_share)| at_share).shares();
+        let mut args = vec![("converged", converged), ("diverged", diverged), ("aligned", aligned)];
+        let key = match (verdict.admitted, verdict.shipped_at) {
+            (true, Some((share, _))) => {
+                let (full_converged, full_diverged, full_aligned) = verdict.vouch.shares();
+                args.push(("share", format!("{share:.3}")));
+                args.push((
+                    "full",
+                    format!(
+                        "{full_converged} converged, {full_diverged} diverged, {full_aligned} aligned"
+                    ),
+                ));
+                args.push(("full_converged", full_converged));
+                args.push(("full_diverged", full_diverged));
+                args.push(("full_aligned", full_aligned));
+                keys::FIT_NOTE_WB_CELLS_VOUCHED_AT_SHARE
+            }
+            (true, None) => keys::FIT_NOTE_WB_CELLS_VOUCHED,
+            (false, _) => keys::FIT_NOTE_WB_CELLS_REFUSED,
+        };
+        push_note(&mut rationale, &mut notes, Note::new(key, args));
     }
     if solve.wb_foreign_hue_withheld {
         push_note(
@@ -969,6 +994,7 @@ pub fn rescore_report(
             wb_cells: [
                 (keys::FIT_NOTE_WB_CELLS_REFUSED, false),
                 (keys::FIT_NOTE_WB_CELLS_VOUCHED, true),
+                (keys::FIT_NOTE_WB_CELLS_VOUCHED_AT_SHARE, true),
             ]
             .into_iter()
             .find(|(key, _)| carried(key))
@@ -976,14 +1002,21 @@ pub fn rescore_report(
                 let read = |arg: &str| {
                     carried_arg(key, arg).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0)
                 };
+                let vouch_of = |prefix: &str| crate::fit_cells::CellVouch {
+                    converged: read(&format!("{prefix}converged")),
+                    diverged: read(&format!("{prefix}diverged")),
+                    aligned: read(&format!("{prefix}aligned")),
+                    read: 1,
+                };
+                // The share sentence carries two verdicts: the full move's
+                // (its refusal) and the shipped share's.
+                let at_share = carried_arg(key, "share")
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .map(|share| (share, vouch_of("")));
                 WbCellVerdict {
-                    vouch: crate::fit_cells::CellVouch {
-                        converged: read("converged"),
-                        diverged: read("diverged"),
-                        aligned: read("aligned"),
-                        read: 1,
-                    },
+                    vouch: if at_share.is_some() { vouch_of("full_") } else { vouch_of("") },
                     admitted,
+                    shipped_at: at_share,
                 }
             }),
             wb_foreign_hue_withheld: carried(keys::FIT_NOTE_WB_WITHHELD_FOREIGN_HUE),
@@ -1015,6 +1048,8 @@ pub fn rescore_report(
             // be visible at the place that makes it.
             sat_fitted: None,
             regressed: None,
+            tone_harm: None,
+            curve_harm: None,
             detail: (recipe.clarity, recipe.texture),
             detail_withheld: false,
             robust: None,
