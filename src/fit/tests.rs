@@ -8409,3 +8409,244 @@ fn a_residual_the_mixer_cannot_reach_is_still_named() {
     assert_eq!(report.mode, FitMode::Atmosphere, "premise: the cloud deck is content-divergent");
     assert!(names_hsl(&report), "the unreachable residual stays disclosed: {}", report.recipe.rationale);
 }
+
+// --- cast→WB hand-off (2026-10-23) -----------------------------------------
+
+/// Five hue bands — grey, orange, blue, green, magenta — each a luminance
+/// ramp along x (0.08 → 0.92), the cast→WB hand-off's source.
+fn hue_ramps() -> DynamicImage {
+    let (w, h) = (192u32, 160u32);
+    let mut img = RgbImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let l = 0.08 + 0.84 * x as f32 / (w - 1) as f32;
+            let p = match y * 5 / h {
+                0 => [l * 0.9, l * 0.9, l * 0.9],
+                1 => [l, l * 0.6, l * 0.25],
+                2 => [l * 0.3, l * 0.6, l],
+                3 => [l * 0.35, l * 0.8, l * 0.4],
+                _ => [l, l * 0.25, l * 0.45],
+            };
+            img.put_pixel(x, y, image::Rgb(p.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8)));
+        }
+    }
+    DynamicImage::ImageRgb8(img)
+}
+
+/// The hand-off's target: [`hue_ramps`] under a 3500 K white balance (the
+/// anchor is 5500 K), with its top `warm_rows` rows — part of the grey band —
+/// under 25000 K instead. A cool frame whose grey strip went warm.
+fn cooled_ramps(warm_rows: u32) -> DynamicImage {
+    let src = hue_ramps();
+    let cool = render::develop_preview(
+        &src,
+        &EditRecipe { temperature_k: Some(3500.0), ..Default::default() },
+    )
+    .to_rgb8();
+    let warm = render::develop_preview(
+        &src,
+        &EditRecipe { temperature_k: Some(25000.0), ..Default::default() },
+    )
+    .to_rgb8();
+    DynamicImage::ImageRgb8(RgbImage::from_fn(192, 160, |x, y| {
+        if y < warm_rows { *warm.get_pixel(x, y) } else { *cool.get_pixel(x, y) }
+    }))
+}
+
+/// FNV-1a 64 of a recipe's JSON — a by-value pin of the whole recipe,
+/// rationale included, in sixteen hex digits.
+fn recipe_fnv(recipe: &EditRecipe) -> u64 {
+    let json = serde_json::to_string(recipe).expect("a recipe serialises");
+    json.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// The hand-off ships. [`cooled_ramps`]`(0)` asks for a 3500 K white
+/// balance against the 5500 K anchor, out of the default budget, so the
+/// white-balance stage leaves as-shot and the three channel curves are asked
+/// for the whole cast — and fan a hue class past the limit, so before the
+/// hand-off the projection shrank them. The hand-off walks the white balance
+/// toward the cast inside the budget and ships the curves re-fitted on it at
+/// full strength. Measured 2026-10-23: 5500 K / 0 → 3900 K / +40.6, curves
+/// re-fitted reading +3.8°, cells 1.000 converged / 0.000 diverged.
+#[test]
+fn a_fan_the_white_balance_can_take_back_is_handed_to_it() {
+    use crate::rationale::keys;
+    let rep = fit_recipe(&hue_ramps(), &cooled_ramps(0));
+    let note = rep
+        .notes
+        .iter()
+        .find(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB)
+        .unwrap_or_else(|| panic!("the cast must be handed to the white balance: {}", rep.recipe.rationale));
+    let arg = |name: &str| -> f32 {
+        note.args
+            .iter()
+            .find(|(k, _)| *k == name)
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or_else(|| panic!("the note carries {name}"))
+    };
+    // The white balance moved, toward the cast, and the note says from where
+    // to where — the shipped Kelvin, not a probe's.
+    let k = rep.recipe.temperature_k.expect("the hand-off ships a white balance");
+    assert_eq!(arg("k_before"), 5500.0, "it starts from the as-shot anchor");
+    assert_eq!(arg("k_after"), k, "the note names the Kelvin that shipped");
+    assert_eq!(arg("tint_after"), rep.recipe.tint, "…and the tint");
+    assert!(k < 5500.0, "a 3500 K target asks for a cooler white balance ({k} K)");
+    // The conviction it answered, and the reading that let it ship.
+    assert!(arg("fan_before") >= FAN_DEG, "the as-fitted fan convicted ({})", arg("fan_before"));
+    assert!(arg("fan_after").abs() < FAN_DEG, "the re-fitted curves clear the limit ({})", arg("fan_after"));
+    assert_eq!(arg("limit"), FAN_DEG);
+    // `HandOffFacts.share` is the CONVICTED class's share of the census:
+    // region-sized by the fan gate's own floor, and a share.
+    let share = arg("share");
+    assert!((FAN_SHARE..=1.0).contains(&share), "the class share is a fan-gate class ({share})");
+    // The cell verdict it was admitted on is a vouch.
+    assert!(arg("converged") >= 0.70 && arg("diverged") <= 0.10 && arg("aligned") >= 0.70);
+    // Curves at t = 1: they ship as an ADMITTED cast, never a projected one.
+    assert!(
+        !rep.recipe.red_curve.is_empty() || !rep.recipe.blue_curve.is_empty(),
+        "the re-fitted curves ship: {}",
+        rep.recipe.rationale
+    );
+    assert!(
+        !rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_PROJECTED),
+        "a handed cast is not also projected: {}",
+        rep.recipe.rationale
+    );
+    assert!(
+        rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED),
+        "the re-fitted curves go through the ordinary admission: {}",
+        rep.recipe.rationale
+    );
+    // 3900 K sits inside the domain, so no bound sentence.
+    assert!(!rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_WB_SEARCH_BOUND));
+    assert!(rep.err_after < rep.err_before, "{} -> {}", rep.err_before, rep.err_after);
+}
+
+/// The same frame with eleven rows of its grey band warmed instead: every
+/// white balance the hand-off can reach inside the budget clears all four
+/// cast gates, and the target's own cells refuse each of them (measured
+/// 2026-10-23: 0.111 and 0.122 of the frame moved away, the line is 0.10),
+/// so the stage projects exactly as it did before the hand-off existed.
+/// Pinned BY VALUE: the recipe's JSON hash, read at 9631905 before any of
+/// the hand-off was written.
+#[test]
+fn a_hand_off_the_cells_refuse_leaves_the_projection_as_it_was() {
+    use crate::rationale::keys;
+    let rep = fit_recipe(&hue_ramps(), &cooled_ramps(11));
+    assert!(
+        !rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB),
+        "the cells refused it: {}",
+        rep.recipe.rationale
+    );
+    assert!(
+        rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_PROJECTED),
+        "premise: this pair is on the projection path: {}",
+        rep.recipe.rationale
+    );
+    assert_eq!(rep.recipe.temperature_k, None, "the white balance stays as-shot");
+    assert_eq!(
+        recipe_fnv(&rep.recipe),
+        0x1fb7_ceb6_9005_bd5d,
+        "the projection path's recipe moved: {}",
+        rep.recipe.rationale
+    );
+}
+
+/// A cast the fan gate never convicts never reaches the hand-off: the haze
+/// correction, the fan gate's own legitimate case, pinned by value at
+/// 9631905.
+#[test]
+fn a_cast_with_no_fan_never_enters_the_hand_off() {
+    use crate::rationale::keys;
+    let clean = synth();
+    let mut haze = EditRecipe {
+        exposure_ev: -0.3,
+        contrast: -45.0,
+        blacks: 40.0,
+        saturation: -40.0,
+        blue_curve: vec![
+            CurvePoint { input: 0, output: 25 },
+            CurvePoint { input: 128, output: 132 },
+            CurvePoint { input: 255, output: 255 },
+        ],
+        ..Default::default()
+    };
+    haze.clamp();
+    let rep = fit_recipe(&render::develop_preview(&clean, &haze), &clean);
+    assert!(!rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB));
+    assert_eq!(
+        recipe_fnv(&rep.recipe),
+        0x732f_f6a1_d6b6_ea19,
+        "a recipe the hand-off never touched moved: {}",
+        rep.recipe.rationale
+    );
+}
+
+/// `pull`, as the hand-off measures it: the white-balance estimator read on
+/// the curves' own move. A move that changes no pixel's colour reads no
+/// direction at all; a pure per-channel gain reads that gain's chromaticity.
+#[test]
+fn the_hand_offs_pull_reads_a_white_balance_move_and_nothing_else() {
+    let cur: Vec<[f32; 3]> = (0..400)
+        .map(|i| {
+            let l = 0.1 + 0.8 * (i % 20) as f32 / 19.0;
+            match i / 100 {
+                0 => [l, l, l],
+                1 => [l, 0.6 * l, 0.3 * l],
+                2 => [0.3 * l, 0.6 * l, l],
+                _ => [0.4 * l, l, 0.5 * l],
+            }
+        })
+        .collect();
+    let weights = vec![1.0f32; cur.len()];
+    assert_eq!(cast_wb_direction(&cur, &cur, &weights, 5500.0), None, "no move, no pull");
+    // Linear gains R 1.2, B 0.8: a warm white balance.
+    let gain = [1.2f32, 1.0, 0.8];
+    let warmed: Vec<[f32; 3]> = cur
+        .iter()
+        .map(|p| {
+            std::array::from_fn(|c| {
+                render::linear_to_srgb((render::srgb_to_linear(p[c]) * gain[c]).min(1.0))
+            })
+        })
+        .collect();
+    let d = cast_wb_direction(&cur, &warmed, &weights, 5500.0).expect("a gain is a direction");
+    let red_blue = d[0] - d[2];
+    assert!(
+        (red_blue - (1.2f32 / 0.8).ln()).abs() < 0.05,
+        "the red/blue part is the gain's own ({red_blue:.3} against {:.3})",
+        (1.2f32 / 0.8).ln()
+    );
+    assert!(d.iter().sum::<f32>().abs() < 1e-3, "chromaticity only: unit geometric mean ({d:?})");
+}
+
+/// The selection rule: the look error decides, `pull` only breaks ties
+/// inside FIT_QUANT of the best, and the winner must still beat the frame
+/// without curves by more than FIT_QUANT.
+#[test]
+fn the_hand_off_breaks_look_error_ties_by_pull_and_keeps_the_gain_bar() {
+    let vouch = crate::fit_cells::CellVouch { converged: 1.0, diverged: 0.0, aligned: 1.0, read: 1 };
+    let candidate = |k: f32, err: f32, pull: f32| CastHandOff {
+        wb: (k, 0.0),
+        saturation: 0.0,
+        curves: [Vec::new(), Vec::new(), Vec::new()],
+        outcome: CastOutcome::default(),
+        vouch,
+        err,
+        pull,
+    };
+    let walk = || {
+        vec![
+            candidate(6000.0, 0.0100, 0.50),
+            candidate(7000.0, 0.0100 + 0.9 * FIT_QUANT, 0.20),
+            candidate(8000.0, 0.0100 + 1.1 * FIT_QUANT, 0.05),
+        ]
+    };
+    // 8000 K pulls least but sits outside the band; 7000 K is the tie that
+    // pulls least.
+    let pick = pick_cast_hand_off(walk(), 0.0200).expect("the band's least pull ships");
+    assert_eq!(pick.wb.0, 7000.0);
+    // The gain bar is on the PICK, not on the best error.
+    assert!(pick_cast_hand_off(walk(), 0.0100 + 1.5 * FIT_QUANT).is_none());
+    assert!(pick_cast_hand_off(Vec::new(), 1.0).is_none(), "nothing admitted, nothing handed");
+}

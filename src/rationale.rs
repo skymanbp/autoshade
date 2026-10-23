@@ -322,6 +322,21 @@ pub mod keys {
          were not the cause and they were kept; tone and saturation are what \
          spread that class, and no develop control puts a brightness-sorted \
          hue fan back.";
+    /// The cast→WB hand-off (2026-10-23): the fan gate convicted the
+    /// as-fitted curves, and a white balance moved along the direction they
+    /// pull, vouched by the target's own cells, let the curves re-fitted on
+    /// top of it ship whole instead of being projected.
+    pub const FIT_NOTE_CAST_HANDED_TO_WB: &str =
+        " Colour cast handed to the white balance: as fitted on top of \
+         {k_before} K / tint {tint_before} the channel curves would have opened \
+         a {fan_before} degree hue fan in a class holding {share} of the frame's \
+         measurable colour (limit {limit}), so the white balance was searched \
+         along the direction those curves pull and moved to {k_after} K / tint \
+         {tint_after}, where the curves re-fitted on top of it read {fan_after} \
+         degrees on the same census and ship whole. The target's own 12x8 cell \
+         means vouched the moved white balance: {converged} of the frame moved \
+         closer, {diverged} moved away, and {aligned} moved in the direction its \
+         own target asks for.";
     pub const FIT_NOTE_GLOBAL_CAST: &str =
         " Global colour cast measured from consistent hue rotation across the populated frame (rotation {rotation} degrees, chroma ratio {ratio}); white balance and saturation were read from population evidence.";
     pub const FIT_NOTE_VETO_DISCLOSED: &str =
@@ -1263,6 +1278,7 @@ pub(crate) const GLOBAL_SOLVE_KEYS: &[&str] = &[
     keys::FIT_NOTE_CAST_HUE_FANNED, keys::FIT_NOTE_CAST_PROJECTED,
     keys::FIT_NOTE_CAST_PROJECTED_FAN, keys::FIT_NOTE_CAST_PROJECTED_FAN_NA,
     keys::FIT_NOTE_DELIVERED_FAN, keys::FIT_NOTE_DELIVERED_FAN_UNCAUSED,
+    keys::FIT_NOTE_CAST_HANDED_TO_WB,
     keys::FIT_NOTE_GLOBAL_CAST, keys::FIT_NOTE_VETO_DISCLOSED, keys::FIT_NOTE_STRENGTH,
     keys::FIT_DEGENERATE, keys::FIT_NOTE_REGRESSED, keys::FIT_NOTE_SAT_REDUCED,
     keys::FIT_NOTE_TONE_WITHHELD_HARM, keys::FIT_NOTE_CURVE_WITHHELD_HARM,
@@ -1284,7 +1300,7 @@ pub(crate) const GLOBAL_SOLVE_KEYS: &[&str] = &[
 ];
 
 /// Whether `key` belongs to the global solve's own account — see
-/// [`GLOBAL_SOLVE_KEYS`]. Linear over 68 pointers on a path that runs once
+/// [`GLOBAL_SOLVE_KEYS`]. Linear over 72 pointers on a path that runs once
 /// per rescored report; a set would cost more to build than to skip.
 pub(crate) fn is_global_solve_key(key: &str) -> bool {
     GLOBAL_SOLVE_KEYS.iter().any(|k| std::ptr::eq(*k, key) || *k == key)

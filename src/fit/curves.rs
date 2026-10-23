@@ -444,3 +444,182 @@ pub(super) fn search_cast_projection(
     recipe.blue_curve = blue;
     Some((t, out))
 }
+
+/// How many white balances the cast→WB hand-off tries, and the farthest
+/// along the curves' direction it may look. The walk's EXTENT is found first:
+/// `λ` doubles from 1 until the point it names inverts onto an edge of the
+/// Kelvin domain ([`WB_SEARCH_K`]) or reaches [`HANDOFF_REACH_MAX`], and the
+/// candidates are then `HANDOFF_STEPS` even steps of that extent. Doubling to
+/// the domain rather than stopping at a fixed `λ` is measured, not assumed:
+/// on the neon street pair the estimator reads the curves' pull as mostly
+/// "less green", the tint is already at +100 there, so only the red/blue part
+/// moves the Kelvin — `λ = 2` reached 13900 K where the cast it was asked to
+/// take back wants the domain's 40000 K edge. The strength budget, checked by
+/// the caller on every candidate, stops the walk earlier on a frame whose
+/// budget is tighter than the domain. Candidates that invert onto the same
+/// `(K, tint)` are judged once.
+pub(super) const HANDOFF_STEPS: usize = 24;
+pub(super) const HANDOFF_REACH_MAX: f32 = 64.0;
+
+/// The direction in white-balance space the as-fitted cast curves pull,
+/// read by the white-balance stage's OWN estimator
+/// ([`atmosphere_wb_from_populations`]) with the render the curves were
+/// fitted on as the source and the render WITH them as the target: per
+/// brightness range, each pixel's red and blue log change against its green,
+/// the mass-weighted median across ranges. The result is the estimator's
+/// normalised gain triple as log gains (unit geometric mean — chromaticity
+/// only). `None` when the estimator finds no change in common.
+///
+/// The estimator and not a mean, because a mean is not a white-balance
+/// reading. Measured on the neon street pair (2026-10-23): the ratio of the
+/// evidence-weighted mean LINEAR channel values read
+/// `[+0.222, −0.030, +0.287]` — blue up more than red, so the walk went
+/// COOLER — because the curves' blue lift in the shadows outweighs its crush
+/// of the few bright pixels in a linear sum, while the cast the fan gate
+/// convicted is a warm one. The per-pixel ratio read range by range is the
+/// question a white balance answers, and it is the question the stage that
+/// failed to answer it here was asked.
+pub(super) fn cast_wb_direction(
+    cur: &[[f32; 3]],
+    with_px: &[[f32; 3]],
+    weights: &[f32],
+    anchor: f32,
+) -> Option<[f32; 3]> {
+    let (_, _, wanted) = atmosphere_wb_from_populations(cur, with_px, weights, anchor);
+    let direction = wanted.map(|g| g.max(1e-6).ln());
+    (direction.iter().all(|v| v.is_finite()) && direction.iter().any(|v| v.abs() > 1e-4))
+        .then_some(direction)
+}
+
+/// One white balance the cast→WB hand-off judged admissible: the curves
+/// re-fitted under it, the four cast gates' verdict on them, the paired
+/// cells' verdict on the white balance itself, the finished frame's look
+/// error, and how much white-balance-shaped work the re-fitted curves still
+/// do ([`cast_wb_direction`] read on their own move, as a log-gain length).
+#[derive(Clone, Debug)]
+pub(super) struct CastHandOff {
+    pub(super) wb: (f32, f32),
+    /// Saturation as chased again on `wb`.
+    pub(super) saturation: f32,
+    pub(super) curves: [Vec<CurvePoint>; 3],
+    pub(super) outcome: CastOutcome,
+    pub(super) vouch: crate::fit_cells::CellVouch,
+    pub(super) err: f32,
+    pub(super) pull: f32,
+}
+
+/// What the report says about a hand-off that shipped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct HandOffFacts {
+    pub(super) from: (f32, f32),
+    pub(super) to: (f32, f32),
+    pub(super) share: f32,
+    pub(super) fan_before: f32,
+    pub(super) fan_after: f32,
+    pub(super) vouch: crate::fit_cells::CellVouch,
+}
+
+/// The cast→WB hand-off SEARCH (2026-10-23), tried BEFORE the projection
+/// when the fan gate alone convicts the as-fitted curves.
+///
+/// A fan is what three independent channel curves do when the move they are
+/// asked for is a change of illuminant the white balance did not make: each
+/// channel's keep/skip and clip is decided on its own
+/// ([`residual_channel_curve_weighted`]), so one channel can be left alone
+/// while the other two carry the cast, and a hue class is sorted apart by
+/// luminance. Measured on the neon street pair: at the 10100 K the
+/// per-pixel median read, green got no curve and blue was clamped at 127,
+/// the deep reds of the bright slices turned orange (+44.9° of fan, limit
+/// 15) and the projection kept t = 0.398 of the cast — one shared curve, no
+/// colour at all; from 11700 K up the re-fitted curves give green a curve
+/// too and read +6.1° falling to +2.6° at 40000 K. Only a white balance
+/// moves every channel of every pixel by the same ratio, so the red push is
+/// its job.
+///
+/// The walk: from the shipped white balance `from` along the log-gain
+/// `direction` the as-fitted curves pull ([`cast_wb_direction`]), each point
+/// inverted onto the engine's (Kelvin, tint) manifold for its own Kelvin by
+/// the estimator's inversion, which keeps it inside [`WB_SEARCH_K`], over the
+/// extent [`HANDOFF_STEPS`] describes. `judge` renders a candidate, chases
+/// saturation and re-fits the curves on it, and returns `Some` only when
+/// every gate admits it.
+///
+/// SELECTION: the look error decides, and `pull` only breaks ties inside
+/// the fit's own quantisation band. Let `best` be the lowest look error among
+/// the admissible candidates; every candidate within [`FIT_QUANT`] of it is a
+/// tie — a difference the terminal do-no-harm check would not call a
+/// difference — and among the ties the one with the least `pull` ships. It
+/// ships only when it buys more than [`FIT_QUANT`] of look error over the
+/// frame without curves, the projection's own gain bar, so the two rescues
+/// are held to one standard. `None` = the stage projects exactly as it did
+/// before the hand-off existed.
+///
+/// `pull` is how much white-balance-shaped work the re-fitted curves are
+/// still doing: the white-balance stage's own estimator
+/// ([`cast_wb_direction`]) read on the curves' own move — the candidate
+/// render without them against the same render with them — as the L2 length
+/// of its log-gain triple. Zero means the curves change no illuminant at all.
+/// The tie-break exists because the hand-off exists to give the white balance
+/// the white-balance-shaped work; inside the band the look error cannot tell
+/// the candidates apart, so it is the reason for the stage that picks.
+///
+/// Why not the lowest look error alone, measured on the neon street pair
+/// (2026-10-23, every candidate re-chased and re-fitted): from 13100 K to
+/// 40000 K the admissible look errors lie between 0.03651 and 0.03868, a
+/// plateau whose structure is the curves' keep/skip decisions (the step at
+/// 17050 K), not the white balance. Its minimum, 15900 K, shipped a frame
+/// whose mean CIE76 ΔE to the target was 8.29 — worse than the projection's
+/// 8.22 — with the building +3.4 a* past its target; 40000 K, inside the
+/// band (0.03780 against the best 0.03651) with the least pull (0.24 against
+/// 0.43 at 15900 K), finished at 7.52. 25350 K (0.03832) falls just outside
+/// the band.
+pub(super) fn search_cast_hand_off(
+    anchor: f32,
+    from: (f32, f32),
+    direction: [f32; 3],
+    err_without: f32,
+    mut judge: impl FnMut((f32, f32)) -> Option<CastHandOff>,
+) -> Option<CastHandOff> {
+    let start = render::wb_gains(anchor, from.0, from.1).map(|v| v.max(1e-5).ln());
+    let at = |lambda: f32| {
+        let want: [f32; 3] = std::array::from_fn(|c| start[c] + lambda * direction[c]);
+        super::evidence::invert_wb_log_gains(anchor, want)
+    };
+    let on_edge = |(k, _): (f32, f32)| k <= WB_SEARCH_K.0 || k >= WB_SEARCH_K.1;
+    let mut reach = 1.0f32;
+    while reach < HANDOFF_REACH_MAX && !on_edge(at(reach)) {
+        reach *= 2.0;
+    }
+    let mut tried: Vec<(f32, f32)> = vec![from];
+    let mut admitted: Vec<CastHandOff> = Vec::new();
+    for k in 1..=HANDOFF_STEPS {
+        let wb = at(reach * k as f32 / HANDOFF_STEPS as f32);
+        if tried.contains(&wb) {
+            continue;
+        }
+        tried.push(wb);
+        admitted.extend(judge(wb));
+    }
+    pick_cast_hand_off(admitted, err_without)
+}
+
+/// The selection rule of [`search_cast_hand_off`], pure so it is testable on
+/// its own: the least `pull` among the candidates within [`FIT_QUANT`] of
+/// the lowest look error, shipped only when it beats `err_without` by more
+/// than [`FIT_QUANT`]. The first of equal pulls wins, so the walk's order
+/// (nearest white balance first) breaks an exact tie.
+pub(super) fn pick_cast_hand_off(
+    admitted: Vec<CastHandOff>,
+    err_without: f32,
+) -> Option<CastHandOff> {
+    let best = admitted.iter().map(|c| c.err).fold(f32::INFINITY, f32::min);
+    let mut pick: Option<CastHandOff> = None;
+    for candidate in admitted {
+        if candidate.err <= best + FIT_QUANT
+            && pick.as_ref().is_none_or(|p| candidate.pull < p.pull)
+        {
+            pick = Some(candidate);
+        }
+    }
+    pick.filter(|p| err_without - p.err > FIT_QUANT)
+}

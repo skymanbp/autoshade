@@ -4986,6 +4986,42 @@ because at whole degrees the admitted haze pair's 14.6° rendered as "+15
 degrees, against a limit of 15" — a sentence stating a violation of the
 number beside it, over a reading that had passed.
 
+**The cast→WB hand-off** (2026-10-23) is asked BEFORE the projection, on the
+same fan-only conviction. A fan is often three independent channel curves
+doing a white balance's job: each channel's keep/skip and clip is decided on
+its own (`residual_channel_curve_weighted`, skip at a quantile gap under
+0.012), so one channel is left alone while the other two carry the cast and a
+hue class is sorted apart by luminance. On the neon street pair the per-pixel
+median white balance read 10100 K, green got no curve and blue was clamped at
+127, the bright deep reds turned orange (+44.9°, limit 15) and the projection
+kept `t = 0.398` — one shared curve, no colour — so the sky's red push was
+lost (a* +36.45 against the target's +44.80). `search_cast_hand_off` walks
+the white balance from the shipped one along the direction the as-fitted
+curves pull, read by the white-balance stage's own estimator on the curves'
+own move (a mean of linear values read that warm cast as COOLER, measured),
+doubling the walk until it reaches the `WB_SEARCH_K` edge and trying 24
+points on it. At each point saturation is chased again (stage 3 reads mean
+chroma, and a moved white balance carries a different amount of it) and the
+curves are re-fitted; the candidate counts only if the strength budget holds
+the white balance, all four cast gates admit the re-fitted curves with a
+measured fan, and the target's own 12×8 cells vouch the white balance
+exactly as they vouch the white-balance stage's (`vouch_wb` on the stage's
+own recipe). The look error decides among the candidates and `pull` — the
+L2 length of the estimator's log gains on the curves' own move, the
+white-balance work the curves are still doing — breaks ties inside
+`FIT_QUANT` of the best, because on that pair the admissible look errors are
+a plateau (0.03651–0.03868 from 13100 K to 40000 K) whose minimum, 15900 K,
+finished at a mean ΔE of 8.29 against the target while 40000 K, inside the
+band and pulling least (0.24 against 0.43), finished at 7.52. The winner
+ships only when it beats the frame without curves by more than `FIT_QUANT`,
+the projection's own bar; otherwise the projection runs exactly as before,
+on an untouched recipe, and `a_hand_off_the_cells_refuse_leaves_the_projection_as_it_was`
+pins that path by value against the tree before the hand-off. A shipped
+hand-off says so (`FIT_NOTE_CAST_HANDED_TO_WB`: Kelvin and tint before and
+after, the fan before and after, the cells' shares) and, on the Kelvin
+domain's edge above the default strength, adds the white-balance stage's own
+bound sentence.
+
 **Atmosphere** mode instead uses bounded robust exposure, white balance,
 a five-point tone curve, saturation and the same evidence-gated per-band
 colour mixer, never per-channel curves, and caps the

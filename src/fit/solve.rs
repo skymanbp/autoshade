@@ -804,6 +804,11 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         admitted: wb_admitted,
         shipped_at: wb_shipped_at.filter(|_| wb_admitted),
     });
+    // The recipe as the white-balance stage left it, so the cast→WB hand-off
+    // (stage 4) can put a moved white balance to the SAME cell check this
+    // stage just ran — the same before, the same render of nothing but tone
+    // and white balance, the same colour axis — rather than to a second one.
+    let wb_stage = recipe.clone();
 
     // --- 3) global saturation, secant-refined through the real engine --------
     // Saturation stays BEFORE the cast curves: channel CDFs of a desaturated
@@ -814,27 +819,37 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // cast, but stage 5 fits the cast residual CLOSED-LOOP on the saturated
     // render, so it is measured and removed rather than compounded.
     let t_chroma = weighted_mean_chroma(&tp, &rw_target).unwrap_or_else(|| mean_chroma(&tp));
-    let mut sat_pegged = false;
-    for _ in 0..2 {
-        let cur = pixels_of(&render::develop_preview(&s_img, &recipe));
-        let c_chroma = weighted_mean_chroma(&cur, &rw_source).unwrap_or_else(|| mean_chroma(&cur));
-        if c_chroma < 1e-4 {
-            break;
+    // One closure, because the cast→WB hand-off (stage 4) moves the white
+    // balance this chase was read on and has to chase again on the frame it
+    // leaves — the ordering argument above, applied to the white balance it
+    // ships rather than to the one stage 2b shipped. Returns whether the
+    // chase hit the model cap.
+    let chase_saturation = |recipe: &mut EditRecipe| -> bool {
+        let mut pegged = false;
+        for _ in 0..2 {
+            let cur = pixels_of(&render::develop_preview(&s_img, recipe));
+            let c_chroma =
+                weighted_mean_chroma(&cur, &rw_source).unwrap_or_else(|| mean_chroma(&cur));
+            if c_chroma < 1e-4 {
+                break;
+            }
+            let step = ((t_chroma / c_chroma - 1.0) * 100.0).clamp(-40.0, 40.0);
+            if step.abs() < 1.0 {
+                break;
+            }
+            let want = recipe.saturation + step;
+            let clamped = want.clamp(-full_sat_limit, full_sat_limit);
+            // Hitting the model cap with demand to spare = the target's chroma
+            // is out of the global model's reach — flagged into the rationale
+            // so the user learns WHY the fit stays approximate.
+            if (want - clamped).abs() > 0.5 {
+                pegged = true;
+            }
+            recipe.saturation = round1(clamped);
         }
-        let step = ((t_chroma / c_chroma - 1.0) * 100.0).clamp(-40.0, 40.0);
-        if step.abs() < 1.0 {
-            break;
-        }
-        let want = recipe.saturation + step;
-        let clamped = want.clamp(-full_sat_limit, full_sat_limit);
-        // Hitting the model cap with demand to spare = the target's chroma is
-        // out of the global model's reach — flagged into the rationale so the
-        // user learns WHY the fit stays approximate.
-        if (want - clamped).abs() > 0.5 {
-            sat_pegged = true;
-        }
-        recipe.saturation = round1(clamped);
-    }
+        pegged
+    };
+    let sat_pegged = chase_saturation(&mut recipe);
     // NOTE deliberately NO mid-pipeline hue veto here EITHER (it was tried
     // in the evidence era and removed): the ordering comment above is the
     // contract — saturation legitimately amplifies a latent cast and the
@@ -906,6 +921,10 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         fit_hsl_stage(&s_img, &sp, &tp, &evidence, hue_vouch, cells.as_ref(), budget, &mut recipe);
     let hsl_fitted = recipe.hsl.clone();
     let mut cast_admission: Option<(f32, f32)> = None;
+    // NOT cleared per call, unlike `cast_admission`: a hand-off moves the
+    // white balance, and every later call re-fits the curves ON that white
+    // balance, so the move it describes is still in the recipe after them.
+    let mut cast_handoff: Option<HandOffFacts> = None;
     // `rescue` = may a fan-convicted cast be PROJECTED into something
     // milder rather than thrown away (v1.2.3, `search_cast_projection`)?
     // Only the call that produces the recipe the user gets says yes; see the
@@ -966,24 +985,124 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                     recipe.green_curve.clone(),
                     recipe.blue_curve.clone(),
                 ];
-                let won = search_cast_projection(
-                    &s_img,
-                    recipe,
-                    [&fitted[0], &fitted[1], &fitted[2]],
-                    look_err_with_evidence(&cur, &tp, &evidence),
-                    |px| {
-                        let arm = cells.as_ref().and_then(|c| c.region_arm(&cur, px));
-                        cast_gate_outcome_with_ratio(
-                            &cur,
-                            px,
+                // The cast→WB HAND-OFF (2026-10-23), asked BEFORE the
+                // projection: a fan the white balance can take back is a
+                // white-balance job the curves were handed (see
+                // `search_cast_hand_off`). A candidate ships only when the
+                // curves re-fitted on it pass all four gates with a MEASURED
+                // fan, when the white balance stays inside the strength
+                // budget the white-balance stage spends, and when the target's
+                // own cells vouch it exactly as they vouched the stage's own
+                // white balance (`vouch_wb` on the stage's recipe). Anything
+                // else falls through to the projection below with `recipe`
+                // untouched — every probe is a clone — so a pair the hand-off
+                // cannot help ships byte for byte what it shipped before.
+                let from = (recipe.temperature_k.unwrap_or(anchor), recipe.tint);
+                let err_without = look_err_with_evidence(&cur, &tp, &evidence);
+                let probe_base = recipe.clone();
+                let handed = cast_wb_direction(&cur, &with_px, &wb_weights, anchor).and_then(|direction| {
+                    search_cast_hand_off(anchor, from, direction, err_without, |wb| {
+                        if !wb_gains_fit_budget(render::wb_gains(anchor, wb.0, wb.1), budget) {
+                            return None;
+                        }
+                        let mut probe = probe_base.clone();
+                        (probe.temperature_k, probe.tint) = (Some(wb.0), wb.1);
+                        probe.red_curve = Vec::new();
+                        probe.green_curve = Vec::new();
+                        probe.blue_curve = Vec::new();
+                        // Saturation is chased again on the moved white
+                        // balance, from where stage 3 started and on the
+                        // frame stage 3 read (no mixer yet), because the
+                        // chase reads mean chroma and a warmer white balance
+                        // carries more of it: kept at the value read on the
+                        // old one, the neon street's 18.9 shipped over a
+                        // 13000 K white balance and left the building +3.1
+                        // a* past its target (measured 2026-10-23).
+                        probe.saturation = wb_stage.saturation;
+                        let mixer = std::mem::take(&mut probe.hsl);
+                        chase_saturation(&mut probe);
+                        probe.hsl = mixer;
+                        let under = pixels_of(&render::develop_preview(&s_img, &probe));
+                        probe.red_curve =
+                            residual_channel_curve_weighted(&under, &tp, 0, &rw_source, &rw_target);
+                        probe.green_curve =
+                            residual_channel_curve_weighted(&under, &tp, 1, &rw_source, &rw_target);
+                        probe.blue_curve =
+                            residual_channel_curve_weighted(&under, &tp, 2, &rw_source, &rw_target);
+                        if probe.red_curve.is_empty()
+                            && probe.green_curve.is_empty()
+                            && probe.blue_curve.is_empty()
+                        {
+                            return None;
+                        }
+                        let px = pixels_of(&render::develop_preview(&s_img, &probe));
+                        let arm = cells.as_ref().and_then(|c| c.region_arm(&under, &px));
+                        let outcome = cast_gate_outcome_with_ratio(
+                            &under,
+                            &px,
                             &tp,
                             &evidence,
                             hue_vouch,
                             cells.as_ref().zip(arm.as_ref().map(|(_, v)| v.as_slice())),
                             full_cast_accept_ratio,
-                        )
-                    },
-                );
+                        );
+                        if outcome.refused() || outcome.readings.and_then(|r| r.fan).is_none() {
+                            return None;
+                        }
+                        let mut wb_probe = wb_stage.clone();
+                        (wb_probe.temperature_k, wb_probe.tint) = (Some(wb.0), wb.1);
+                        let vouch = vouch_wb(&wb_probe).filter(|v| v.vouched())?;
+                        Some(CastHandOff {
+                            wb,
+                            saturation: probe.saturation,
+                            curves: [probe.red_curve, probe.green_curve, probe.blue_curve],
+                            outcome,
+                            vouch,
+                            err: look_err_with_evidence(&px, &tp, &evidence),
+                            pull: cast_wb_direction(&under, &px, &wb_weights, anchor).map_or(
+                                0.0,
+                                |d| d.iter().map(|v| v * v).sum::<f32>().sqrt(),
+                            ),
+                        })
+                    })
+                });
+                let won = if let Some(h) = handed {
+                    (recipe.temperature_k, recipe.tint) = (Some(h.wb.0), h.wb.1);
+                    recipe.saturation = h.saturation;
+                    let [red, green, blue] = h.curves;
+                    recipe.red_curve = red;
+                    recipe.green_curve = green;
+                    recipe.blue_curve = blue;
+                    cast_handoff = Some(HandOffFacts {
+                        from: cast_handoff.map_or(from, |prior| prior.from),
+                        to: h.wb,
+                        share,
+                        fan_before,
+                        fan_after: h.outcome.readings.and_then(|r| r.fan).unwrap_or(0.0),
+                        vouch: h.vouch,
+                    });
+                    out = h.outcome;
+                    None
+                } else {
+                    search_cast_projection(
+                        &s_img,
+                        recipe,
+                        [&fitted[0], &fitted[1], &fitted[2]],
+                        err_without,
+                        |px| {
+                            let arm = cells.as_ref().and_then(|c| c.region_arm(&cur, px));
+                            cast_gate_outcome_with_ratio(
+                                &cur,
+                                px,
+                                &tp,
+                                &evidence,
+                                hue_vouch,
+                                cells.as_ref().zip(arm.as_ref().map(|(_, v)| v.as_slice())),
+                                full_cast_accept_ratio,
+                            )
+                        },
+                    )
+                };
                 // `None`, or an outcome carrying no readings, leaves `out`
                 // holding the FITTED conviction — the refusal branch below
                 // empties whatever curves the search left in the recipe, and
@@ -1356,6 +1475,50 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             atmosphere_reference: AtmosphereReference::WholeFrame,
         },
     );
+    // The hand-off's sentence, wherever the moved white balance is still in
+    // the recipe: not after the terminal do-no-harm reset, which put the base
+    // back. It stays when the terminal delivered-fan check withdrew the
+    // re-fitted curves — the white balance did not go with them, and the
+    // delivered-fan sentence that follows says what happened to the curves.
+    if let Some(h) = cast_handoff.filter(|_| !fit_regressed) {
+        let (converged, diverged, aligned) = h.vouch.shares();
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::FIT_NOTE_CAST_HANDED_TO_WB,
+                vec![
+                    ("k_before", format!("{:.0}", h.from.0)),
+                    ("tint_before", format!("{:+.1}", h.from.1)),
+                    ("fan_before", format!("{:.1}", h.fan_before)),
+                    ("share", format!("{:.3}", h.share)),
+                    ("limit", format!("{FAN_DEG:.0}")),
+                    ("k_after", format!("{:.0}", h.to.0)),
+                    ("tint_after", format!("{:+.1}", h.to.1)),
+                    ("fan_after", format!("{:+.1}", h.fan_after)),
+                    ("converged", converged),
+                    ("diverged", diverged),
+                    ("aligned", aligned),
+                ],
+            ),
+        );
+        // A hand-off that stopped on the Kelvin domain's edge says so in the
+        // white-balance stage's own words and on the stage's own terms
+        // (`solve_white_balance` discloses the bound above the default
+        // strength only), so the clamp is as visible here as it is there.
+        if options.strength.get() > crate::recipe::GradeStrength::DEFAULT
+            && (h.to.0 <= WB_SEARCH_K.0 || h.to.0 >= WB_SEARCH_K.1)
+        {
+            crate::rationale::push_note(
+                &mut report.recipe.rationale,
+                &mut report.notes,
+                crate::rationale::Note::new(
+                    crate::rationale::keys::FIT_NOTE_WB_SEARCH_BOUND,
+                    vec![("k", format!("{:.0}", h.to.0))],
+                ),
+            );
+        }
+    }
     // The terminal check speaks last because it acted last, and it speaks
     // whenever it acted — a recipe that lost its cast curves at the very end
     // is not something the reader can work out from the rest of the sentence.

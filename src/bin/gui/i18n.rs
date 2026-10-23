@@ -244,6 +244,17 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       spread that class, and no develop control puts a brightness-sorted \
       hue fan back.",
         " 成品配方再对照未处理的原片读了一次：它把同一个色相类沿亮度分选开了——该色相类占画面可测色彩的 {share}，其暗部与亮部切片最终相差 {fan} 度，上限为 {limit}。把色偏曲线取出来之后仍有 {after} 度，说明起因不是这些曲线，于是把它们保留了下来；把该色相类拉散的是影调与饱和度，而任何显影控件都无法把按明暗分选出来的色相跨度还原。"),
+    (" Colour cast handed to the white balance: as fitted on top of \
+      {k_before} K / tint {tint_before} the channel curves would have opened \
+      a {fan_before} degree hue fan in a class holding {share} of the frame's \
+      measurable colour (limit {limit}), so the white balance was searched \
+      along the direction those curves pull and moved to {k_after} K / tint \
+      {tint_after}, where the curves re-fitted on top of it read {fan_after} \
+      degrees on the same census and ship whole. The target's own 12x8 cell \
+      means vouched the moved white balance: {converged} of the frame moved \
+      closer, {diverged} moved away, and {aligned} moved in the direction its \
+      own target asks for.",
+        " 色偏已交还白平衡：在 {k_before} K / 色调 {tint_before} 之上按拟合原样，通道曲线会在占画面可测色彩 {share} 的色相类内拉开 {fan_before} 度的色相跨度（上限 {limit}），因此沿这些曲线所拉的方向重新求解白平衡，移到 {k_after} K / 色调 {tint_after}；在其之上重新拟合的曲线在同一普查上读数为 {fan_after} 度，全额发布。移动后的白平衡已按目标自身的 12x8 单元均值担保：画面的 {converged} 更接近目标，{diverged} 反而远离，{aligned} 的移动方向与各自目标要求的方向一致。"),
     (" Global colour cast measured from consistent hue rotation across the populated frame (rotation {rotation} degrees, chroma ratio {ratio}); white balance and saturation were read from population evidence.", " 已从画面中各色相带一致的色相旋转测得全局色偏（旋转 {rotation} 度，色度比 {ratio}）；白平衡和饱和度取自整体证据。"),
     (" High-strength fit disclosed unsupported movement in {kind}: {ranges}. The controls were retained, but confidence is capped by the strength budget.", " 高强度拟合显示 {kind} 中没有双侧证据的移动：{ranges}。控制保留，置信度受强度预算限制。"),
     // Enumerated ARGUMENT values (`rationale::values`), substituted through

@@ -127,11 +127,14 @@ use cast_outcome::{
     FIT_QUANT_CLEAN, TerminalHarm, UNREPRESENTED_CHROMATIC_ERR, UNREPRESENTED_CHROMATIC_LEAD,
     UNREPRESENTED_HUE_DEG, cast_gate_outcome, residual_is_colour_shaped,
 };
-use curves::{band_stats_weighted, residual_channel_curve_weighted, search_cast_projection};
+use curves::{
+    CastHandOff, HandOffFacts, band_stats_weighted, cast_wb_direction,
+    residual_channel_curve_weighted, search_cast_hand_off, search_cast_projection,
+};
 #[cfg(test)]
 use curves::{
-    band_stats, cast_curves_are_identity, projected_cast_curves, residual_channel_curve,
-    search_cast_projection_t,
+    band_stats, cast_curves_are_identity, pick_cast_hand_off, projected_cast_curves,
+    residual_channel_curve, search_cast_projection_t,
 };
 use detail::{detail_regression_is_bounded, fit_detail_stage, only_detail_and_quantized_companions};
 #[cfg(test)]
