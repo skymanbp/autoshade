@@ -587,6 +587,21 @@ pub(crate) struct AutoShadeApp {
     /// tombstone can bring a card back — so it asks first, the same
     /// arm-then-act shape as `xmp_beside_confirm`.
     pub(crate) variant_delete_confirm: Option<usize>,
+    /// The workspace's mode (`mode.rs`): which of the shared panels are
+    /// drawn. Persisted, and on the mode page it only highlights a card.
+    pub(crate) mode: Mode,
+    /// A card on the mode page was clicked this launch. False at every
+    /// launch (the page opens first, user ruling 2026-10-23) and again when
+    /// the toolbar's mode button returns to the page.
+    pub(crate) mode_chosen_this_launch: bool,
+    /// The prefs changed in a way worth writing now (a mode was chosen);
+    /// `update` flushes them through eframe's storage and clears this.
+    pub(crate) prefs_save_due: bool,
+    /// Test seam: the mode page's cards as laid this frame.
+    #[cfg(test)]
+    pub(crate) mode_card_rects: Vec<(Mode, egui::Rect)>,
+    /// Normal mode's own sidebar state (`panels/normal.rs`).
+    pub(crate) normal: crate::panels::normal::NormalState,
 }
 
 impl AutoShadeApp {
@@ -654,15 +669,21 @@ impl AutoShadeApp {
                 if i.consume_key(egui::Modifiers::COMMAND, egui::Key::S) { do_xmp = true; }
             });
             if do_open && !self.busy
-                && let Some(path) = photo_file_dialog()
+                && let Some(path) = open_photo_dialog(self.mode)
             {
                 self.selected = None;
                 self.open_path(path);
             }
-            if do_export && self.src_path.is_some() && !self.busy {
+            if self.mode.shell().one_click_sidebar {
+                // Normal has one way to save (`panels/normal.rs` 「Save as jpg」):
+                // both keys take it, never the workspace's export / develop save.
+                if (do_export || do_xmp) && self.src_path.is_some() && !self.busy {
+                    self.start_normal_save();
+                }
+            } else if do_export && self.src_path.is_some() && !self.busy {
                 self.start_export();
             }
-            if do_xmp && self.src_path.is_some() && !self.busy {
+            if do_xmp && !self.mode.shell().one_click_sidebar && self.src_path.is_some() && !self.busy {
                 // The pending-rename flush lives at save_xmp's head now (it
                 // fires while a TextEdit holds focus either way) — the Save
                 // develop BUTTON takes the same entry point (U10).
@@ -687,6 +708,9 @@ impl AutoShadeApp {
             // keys stay unconsumed (free for egui / future bindings).
             let brush_tool = self.paint_mode || self.clone_mode;
             let crop_tool = self.crop_mode;
+            // Normal has no canvas tools to arm (`mode::Shell`), so their
+            // keys do nothing there.
+            let tool_keys = self.mode.shell().canvas_tool_marks;
             // ↑/↓ walk the library ONLY while the pointer is off the controls
             // panel: over it, the same keys nudge a hovered slider — and this
             // handler runs FIRST each frame, so consuming here would eat the
@@ -760,6 +784,7 @@ impl AutoShadeApp {
                     if crop_tool { do_crop_grid = true; } else { do_overlay = true; }
                 }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::J) { do_clip = true; }
+                if tool_keys {
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::R) { do_crop = true; }
                 // LR tool keys (D13): W / Q / K and M / Shift+M (the Shift
                 // variant consumed first — exact match leaves it dead after).
@@ -768,6 +793,7 @@ impl AutoShadeApp {
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::K) { do_brush = true; }
                 if i.consume_key(egui::Modifiers::SHIFT, egui::Key::M) { do_radial = true; }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::M) { do_linear = true; }
+                }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::Backslash) { do_before = true; }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::Y) { do_compare = true; }
                 if i.consume_key(egui::Modifiers::NONE, egui::Key::Tab) { do_panels = true; }
@@ -966,8 +992,10 @@ impl AutoShadeApp {
             }
             // Ctrl+C mirrors ⎘ Copy recipe (same guards + the pending-rename
             // flush); Ctrl+V mirrors ⇩ Paste to selected — and like the
-            // disabled buttons, a press that would not act stays silent.
-            if do_copy && self.src_path.is_some() && !self.busy {
+            // disabled buttons, a press that would not act stays silent. Where
+            // the mode draws no such rows (Normal), the keys are dead too.
+            let batch_keys = self.mode.shell().library_batch_rows;
+            if batch_keys && do_copy && self.src_path.is_some() && !self.busy {
                 // Every name box at once (the 10+1 boundary rule): a name
                 // typed into a mask row, a version row or a variant card and
                 // never blurred still lands before anything else in the app
@@ -981,7 +1009,7 @@ impl AutoShadeApp {
                 )
                 .to_string();
             }
-            if do_paste && !self.busy && self.copied.is_some() && !self.multi_sel.is_empty() {
+            if batch_keys && do_paste && !self.busy && self.copied.is_some() && !self.multi_sel.is_empty() {
                 self.start_paste();
             }
         }
@@ -1102,16 +1130,31 @@ impl AutoShadeApp {
             // verb; Settings and the shortcut sheet are glyph squares.
             // On Windows the row is also the title bar (`window_chrome`).
             window_chrome::toolbar_row(ui, lang, |ui| {
-                group(ui, &[tr(lang, "Open photo…"), tr(lang, "Reset")], 0, |ui| {
+                // The mode's name, at the bar's left end: back to the mode
+                // page (`mode.rs`), the open photo and the library untouched.
+                let mode_name = self.mode.name(lang);
+                group(ui, &[mode_name], 0, |ui| {
+                    if action(ui, true, mode_name)
+                        .on_hover_text(tr(lang, "Back to the mode page — the open photo, its edits and the library stay as they are"))
+                        .clicked()
+                    {
+                        self.return_to_mode_page();
+                    }
+                });
+                // Normal (`mode::Shell`) keeps open, undo, redo, compare and
+                // settings; saving is its sidebar's Save group.
+                let full = self.mode.shell().full_toolbar;
+                let open_group = [tr(lang, "Open photo…"), tr(lang, "Reset")];
+                group(ui, if full { &open_group } else { &open_group[..1] }, 0, |ui| {
                     if action(ui, !self.busy, tr(lang, "Open photo…"))
                         .on_hover_text(tr(lang, "Ctrl+O · or drag a file into the window"))
                         .clicked()
-                        && let Some(path) = photo_file_dialog()
+                        && let Some(path) = open_photo_dialog(self.mode)
                     {
                         self.selected = None; // a one-off file isn't a gallery selection
                         self.open_path(path);
                     }
-                    if action(ui, ready, tr(lang, "Reset"))
+                    if full && action(ui, ready, tr(lang, "Reset"))
                         .on_hover_text(tr(lang, "Back to this photo's fresh-open look: sliders neutral on the camera's own default colour and tone, like the in-camera JPEG (one undo brings it back)"))
                         .clicked()
                     {
@@ -1169,6 +1212,7 @@ impl AutoShadeApp {
                         self.redo(&ctx);
                     }
                 });
+                if full {
                 group(ui, &[tr(lang, "⭯ Turn left"), tr(lang, "⭮ Turn right")], 0, |ui| {
                     // Rotate (R27). NOT ↶/↷ — those two glyphs are Undo/Redo one
                     // button to the left, and ↺/↻ are already 「reset all」/
@@ -1210,6 +1254,20 @@ impl AutoShadeApp {
                         self.rotate_photo(1, &ctx);
                     }
                 });
+                }
+                if !full {
+                    // Normal: the two view buttons are one switch.
+                    group(ui, &[tr(lang, "◫ Compare")], 0, |ui| {
+                        let on = self.view_mode == ViewMode::SideBySide;
+                        if ui
+                            .selectable_label(on, tr(lang, "◫ Compare"))
+                            .on_hover_text(tr(lang, "Before and after side by side — click again for the photo alone; hold B to see the original"))
+                            .clicked()
+                        {
+                            self.view_mode = if on { ViewMode::AfterOnly } else { ViewMode::SideBySide };
+                        }
+                    });
+                } else {
                 group(ui, &[tr(lang, "◫ Compare"), tr(lang, "⬛ Single")], 0, |ui| {
                     // View mode: side-by-side vs a full-width edit (hold B =
                     // compare). ◫ lives in egui's bundled fonts — the old ⿲
@@ -1269,7 +1327,8 @@ impl AutoShadeApp {
                         self.save_xmp();
                     }
                 });
-                group(ui, &[], 2, |ui| {
+                }
+                group(ui, &[], if full { 2 } else { 1 }, |ui| {
                     if glyph(ui, true, "⚙").on_hover_text(tr(lang, "Settings · AI provider / model / API key")).clicked() {
                         // Reload the form only on the closed→open edge — reloading
                         // while open wiped everything already typed (incl. keys).
@@ -1279,7 +1338,7 @@ impl AutoShadeApp {
                         }
                         self.show_settings = !self.show_settings;
                     }
-                    if glyph(ui, true, "⌨").on_hover_text(tr(lang, "Keyboard shortcuts (F1 / ?)")).clicked() {
+                    if full && glyph(ui, true, "⌨").on_hover_text(tr(lang, "Keyboard shortcuts (F1 / ?)")).clicked() {
                         self.show_shortcuts = !self.show_shortcuts;
                     }
                 });
@@ -1290,6 +1349,8 @@ impl AutoShadeApp {
     /// One update() phase — body extracted verbatim from the eframe
     /// update loop (round-12 decomposition).
     pub(crate) fn upd_status_bar(&mut self, ctx: &egui::Context) {
+        // Before the status text and the canvas are drawn (`panels/normal.rs`).
+        self.put_down_hidden_tools();
         let frame = egui::Frame::side_top_panel(&ctx.style()).fill(self.theme.colors().bar_fill);
         egui::TopBottomPanel::bottom("status").frame(frame).show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -1318,7 +1379,19 @@ impl AutoShadeApp {
                 // an unsaved heal is work even under an untouched recipe. It sits FIRST
                 // — before the batch bar and the status text — so neither can
                 // ever push it out of view at narrow widths.
-                if self.unsaved_marker_dirty() {
+                if self.mode.shell().one_click_sidebar {
+                    // Normal's marker follows the jpg, not the develop record
+                    // (`panels/normal.rs` `normal_look_mark`).
+                    if let Some(mark) = self.normal_look_mark() {
+                        let (label, hover) = mark.words(self.lang);
+                        let text = egui::RichText::new(label);
+                        let text = match mark {
+                            crate::panels::normal::LookMark::Unsaved => text.color(ui.visuals().warn_fg_color),
+                            crate::panels::normal::LookMark::Saved => text.color(ui.visuals().weak_text_color()),
+                        };
+                        ui.label(text).on_hover_text(hover);
+                    }
+                } else if self.unsaved_marker_dirty() {
                     ui.label(
                         egui::RichText::new(tr(self.lang, "● unsaved"))
                             .color(ui.visuals().warn_fg_color),
@@ -1375,7 +1448,12 @@ impl AutoShadeApp {
             egui::Frame::none()
                 .inner_margin(egui::Margin { right: gutter, ..Default::default() })
                 .show(ui, |ui| {
-                    if self.src_path.is_some() {
+                    if self.src_path.is_some() && self.mode.shell().one_click_sidebar {
+                        // Normal (`mode::Shell`): its own four groups — the
+                        // one-click look, fine-tune, noise, save
+                        // (`panels/normal.rs`) — in place of the panels below.
+                        self.normal_panel(ui);
+                    } else if self.src_path.is_some() {
                         // The AI area is FIRST (R22 #4): one first-level
                         // section holding every AI develop verb — analysis,
                         // whole-image generation, reverse-fit — above the
@@ -1423,8 +1501,10 @@ impl AutoShadeApp {
     pub(crate) fn upd_strips_and_side_panels(&mut self, ctx: &egui::Context) {
         // Variant strip — sits directly above the status bar (registered after
         // it so it stacks on top), only when a photo is open. The selector for
-        // 原片 / AI 生成 / 反推 renditions.
-        if self.src_path.is_some() {
+        // 原片 / AI 生成 / 反推 renditions. Not drawn where the mode keeps one
+        // look per photo (Normal, `mode::Shell`): a one-click replaces the
+        // look and undo brings the last one back.
+        if self.src_path.is_some() && self.mode.shell().variant_strip {
             egui::TopBottomPanel::bottom("variants")
                 // At the old 96 the cards' slack all pooled below the labels
                 // — height and its derivation live on VARIANT_STRIP_H.
@@ -1483,7 +1563,7 @@ impl AutoShadeApp {
                         let w = 300.0;
                         ui.add_space((ui.available_width() - w).max(0.0) * 0.5);
                         if primary(ui, true, tr(self.lang, "Open photo…  (Ctrl+O)")).clicked()
-                            && let Some(p) = photo_file_dialog()
+                            && let Some(p) = open_photo_dialog(self.mode)
                         {
                             self.open_path(p);
                         }
@@ -1925,12 +2005,20 @@ impl Default for AutoShadeApp {
             last_rgb: None,
             clip_tex: None,
             os_theme_synced: false,
+            mode: Mode::Landscape,
+            mode_chosen_this_launch: false,
+            prefs_save_due: false,
+            #[cfg(test)]
+            mode_card_rects: Vec::new(),
+            normal: Default::default(),
         }
     }
 }
 
-impl eframe::App for AutoShadeApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl AutoShadeApp {
+    /// One frame of the app: the whole of `update` but the prefs flush, so a
+    /// headless test can drive it with a bare `egui::Context`.
+    pub(crate) fn run_frame(&mut self, ctx: &egui::Context) {
         // First frame: re-issue the OS-titlebar theme. install_theme sends it
         // from the creation closure, but viewport commands sent before the
         // event loop runs are dropped — a FIRST-ever launch (no prefs, so no
@@ -2011,6 +2099,15 @@ impl eframe::App for AutoShadeApp {
         }
         if self.confirm_quit {
             self.confirm_quit_layer(ctx);
+        }
+        // The mode page (`mode.rs`) comes before the workspace on every
+        // launch, and again from the toolbar's mode button. Below the workers
+        // and the close guard on purpose: a worker started before a return to
+        // the page still lands, and ✕ with unsaved work still asks.
+        if !self.mode_chosen_this_launch {
+            self.mode_page(ctx);
+            self.pump_repaint_gate(ctx);
+            return;
         }
         // Hover-to-preview is frame-scoped: take last frame's target; the mask
         // list re-sets it below if the cursor is still on a row. The diff is
@@ -2193,6 +2290,18 @@ impl eframe::App for AutoShadeApp {
         // sat in the channel until the next input event.
         self.pump_repaint_gate(ctx);
     }
+}
+
+impl eframe::App for AutoShadeApp {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.run_frame(ctx);
+        if std::mem::take(&mut self.prefs_save_due)
+            && let Some(storage) = frame.storage_mut()
+        {
+            eframe::App::save(self, storage);
+            storage.flush();
+        }
+    }
 
     /// Persist the prefs (last folder, view mode, export options) — restored by
     /// [`AutoShadeApp::new`]. Window geometry is saved by eframe itself.
@@ -2244,6 +2353,7 @@ impl eframe::App for AutoShadeApp {
                 lang: self.lang,
                 theme: self.theme,
                 accent: self.accent,
+                mode: self.mode,
             },
         );
     }

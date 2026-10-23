@@ -3585,13 +3585,22 @@ pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
     // needs no configuration. Writing a NEW file elsewhere stays allowed:
     // the user asked for that path, and nothing of theirs is lost.
     if is_source(&out_abs) && out_abs.exists() {
-        anyhow::bail!(
-            "refusing to overwrite the existing photo {} — outputs must not replace photos \
-             outside ./out. Pick a new name, or write to ./out (the default).",
-            out_abs.display()
-        );
+        return Err(OverwriteRefused { path: out_abs }.into());
     }
     Ok(())
+}
+
+/// [`guard_readonly`]'s refusal to replace an existing photo outside our own
+/// output areas — typed, so a caller can tell it from the other refusals by
+/// `downcast_ref` rather than by its English (the GUI's Normal mode words it
+/// plainly). The message is the one this refusal has always printed.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "refusing to overwrite the existing photo {} — outputs must not replace photos outside ./out. Pick a new name, or write to ./out (the default).",
+    .path.display()
+)]
+pub struct OverwriteRefused {
+    pub path: PathBuf,
 }
 
 #[cfg(test)]

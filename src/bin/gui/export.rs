@@ -368,6 +368,12 @@ impl AutoShadeApp {
     /// variant exports under its reimagine stem (and its AI pixels), not the
     /// original's.
     pub(crate) fn export_file_name(&self) -> String {
+        self.export_file_name_as(self.exp_format.ext())
+    }
+
+    /// [`export_file_name`](Self::export_file_name) with the container given
+    /// (Normal's Save group always delivers a jpg).
+    pub(crate) fn export_file_name_as(&self, ext: &str) -> String {
         let src = self.active_source_path();
         let stem = src
             .as_deref()
@@ -375,7 +381,6 @@ impl AutoShadeApp {
             .and_then(|s| s.to_str())
             .unwrap_or("out")
             .to_string();
-        let ext = self.exp_format.ext();
         format!("{stem}.developed.{ext}")
     }
 
@@ -405,6 +410,29 @@ impl AutoShadeApp {
     /// guard below can refuse a target, and `ExportDest::LastUsed` would
     /// otherwise memorise a folder every future export is refused for.
     pub(crate) fn start_render_to(&mut self, out: PathBuf) -> bool {
+        // A ◈ card's master IS the denoised negative: the export-time denoise
+        // would run SCUNet over it a second time, so it sits out and the
+        // status says so (`export_denoise_applies`, 2026-09-15).
+        let denoise = self.export_denoise_applies();
+        // The Export fold's OWN dial (the Detail fold's 「AI Denoise now」 has
+        // its own), captured at the click like every other export input.
+        let denoise_strength = self.selected_denoise_strength(true);
+        let export = self.export_opts();
+        self.start_render_with(out, export, denoise.then_some(denoise_strength), self.save_denoise)
+    }
+
+    /// [`start_render_to`](Self::start_render_to) with the delivery options
+    /// given rather than read off the Export section — the Normal mode's Save
+    /// group (`panels/normal.rs`) delivers a jpg at its own quality step.
+    /// `denoise` is the AI denoise strength when it runs; `denoise_asked`
+    /// says the switch was on even though it sits out (a ◈ card).
+    pub(crate) fn start_render_with(
+        &mut self,
+        out: PathBuf,
+        export: autoshade::render::ExportOpts,
+        denoise: Option<f32>,
+        denoise_asked: bool,
+    ) -> bool {
         let Some(path) = self.active_source_path() else { return false };
         if self.busy {
             return false;
@@ -424,7 +452,7 @@ impl AutoShadeApp {
         }
         for a in &anchors {
             if let Err(e) = autoshade::pipeline::guard_readonly(&out, a) {
-                let t = e.to_string();
+                let t = self.plain_refusal(lang, &e).unwrap_or_else(|| e.to_string());
                 self.status = t.clone();
                 self.toast(ToastKind::Error, t);
                 return false;
@@ -438,17 +466,13 @@ impl AutoShadeApp {
         // existing file (this one is about to be created) and, unlike
         // `canonicalize`, it does not hand back a `\\?\` verbatim prefix.
         let shown = abs_display(&out);
-        // A ◈ card's master IS the denoised negative: the export-time denoise
-        // would run SCUNet over it a second time, so it sits out and the
-        // status says so (`export_denoise_applies`, 2026-09-15).
-        let denoise = self.export_denoise_applies();
-        self.status = if denoise {
+        self.status = if denoise.is_some() {
             trf(
                 lang,
                 "rendering + AI denoise → {path} … (GPU sidecar, can take minutes)",
                 &[("path", &shown)],
             )
-        } else if self.save_denoise {
+        } else if denoise_asked {
             trf(
                 lang,
                 "rendering full-resolution → {path} … (this ◈ card is already denoised — the export-time AI denoise sits out)",
@@ -458,10 +482,6 @@ impl AutoShadeApp {
             trf(lang, "rendering full-resolution → {path} …", &[("path", &shown)])
         };
         let recipe = self.recipe.clone();
-        // The Export fold's OWN dial (the Detail fold's 「AI Denoise now」 has
-        // its own), captured at the click like every other export input.
-        let denoise_strength = self.selected_denoise_strength(true);
-        let export = self.export_opts();
         let src_photo = self.src_path.clone();
         self.spawn_worker(
             move || {
@@ -490,11 +510,11 @@ impl AutoShadeApp {
                         })
                         .is_some();
                     // SCUNet AI denoise (python sidecar) runs before the develop when on.
-                    let opts = denoise.then(|| {
+                    let opts = denoise.map(|strength| {
                         autoshade::denoise::DenoiseOpts::from_config(
                             &autoshade::config::Config::load(),
                             None,
-                            denoise_strength,
+                            strength,
                         )
                     });
                     autoshade::render::render_to_file(&path, &recipe, &out, opts.as_ref(), Some(&export), autoshade::diag::stderr())?;
@@ -548,33 +568,51 @@ impl AutoShadeApp {
         if targets.is_empty() {
             return;
         }
-        // ONE destination setting for batch and single alike (R22-7): the batch
-        // used to hardcode ./out while a single export could be sent anywhere,
-        // so the same library came out in two different folders. "Ask every
-        // time" asks ONCE for a folder here — a per-photo dialog across 500
-        // frames is not a delivery flow.
-        //
-        // The chosen folder is NOT remembered here (R22 M1). A pick the
-        // read-only-library guard refuses every photo in delivers nothing, and
-        // remembering it made `ExportDest::LastUsed` point at that folder from
-        // then on — a destination that can only ever refuse. The memory is
-        // written where the files actually LAND (the `ExportOutcome::Batch`
-        // arm, `ok > 0`), which is the same rule the single-export dialog
-        // follows one level down (`export_to_chosen_path` records only when the
-        // render started).
-        let dest = match self.export_dest_dir() {
-            Some(d) => d,
-            None => {
-                let mut dlg = rfd::FileDialog::new();
-                if let Some(d) = self.last_export_dir.clone().filter(|d| d.is_dir()) {
-                    dlg = dlg.set_directory(d);
-                }
-                let Some(d) = dlg.pick_folder() else { return };
-                d
-            }
-        };
         let ext = self.exp_format.ext().to_string();
         let export = self.export_opts();
+        let Some(dest) = self.export_dest_dir().or_else(|| self.pick_batch_folder()) else { return };
+        self.start_batch_render_for(targets, ext, export, dest);
+    }
+
+    /// The batch's folder when the destination setting asks (`None` =
+    /// cancelled). ONE destination setting for batch and single alike
+    /// (R22-7): the batch used to hardcode ./out while a single export could
+    /// be sent anywhere, so the same library came out in two different
+    /// folders. "Ask every time" asks ONCE for a folder — a per-photo dialog
+    /// across 500 frames is not a delivery flow.
+    ///
+    /// The chosen folder is NOT remembered here (R22 M1). A pick the
+    /// read-only-library guard refuses every photo in delivers nothing, and
+    /// remembering it made `ExportDest::LastUsed` point at that folder from
+    /// then on — a destination that can only ever refuse. The memory is
+    /// written where the files actually LAND (the `ExportOutcome::Batch` arm,
+    /// `ok > 0`), which is the same rule the single-export dialog follows one
+    /// level down (`export_to_chosen_path` records only when the render
+    /// started).
+    pub(crate) fn pick_batch_folder(&self) -> Option<PathBuf> {
+        let mut dlg = rfd::FileDialog::new();
+        if let Some(d) = self.last_export_dir.clone().filter(|d| d.is_dir()) {
+            dlg = dlg.set_directory(d);
+        }
+        dlg.pick_folder()
+    }
+
+    /// [`start_batch_render`](Self::start_batch_render) over `targets` into
+    /// `dest`, in the container `ext` with `export`'s options — the Normal
+    /// mode's 「apply this look to every photo in the folder」
+    /// (`panels/normal.rs`) renders every photo of the folder as a jpg without
+    /// touching the Export section, into the folder it resolved before its
+    /// paste.
+    pub(crate) fn start_batch_render_for(
+        &mut self,
+        targets: Vec<PathBuf>,
+        ext: String,
+        export: autoshade::render::ExportOpts,
+        dest: PathBuf,
+    ) {
+        if self.busy || targets.is_empty() {
+            return;
+        }
         let lang = self.lang; // pre-spawn UI statuses only; results land as FACTS (L12#4)
         self.busy = true;
         self.status = trf(
@@ -631,6 +669,7 @@ impl AutoShadeApp {
                 let res = {
                     let total = targets.len();
                     let (mut okn, mut errs) = (0usize, Vec::<String>::new());
+                    let mut refused = 0usize;
                     // A selection can hold two same-stem photos (different
                     // folders). Batch-scope claims keep their deliverables
                     // apart; the summary disloses which photo took which
@@ -768,7 +807,13 @@ impl AutoShadeApp {
                         })();
                         match one {
                             Ok(()) => okn += 1,
-                            Err(e) => errs.push(format!("{}: {e}", autoshade::pipeline::stem(p))),
+                            Err(e) => {
+                                // Typed, before the text is all that is left.
+                                if e.chain().any(|c| c.is::<autoshade::pipeline::OverwriteRefused>()) {
+                                    refused += 1;
+                                }
+                                errs.push(format!("{}: {e}", autoshade::pipeline::stem(p)));
+                            }
                         }
                         if !photo_warns.is_empty() {
                             warns.push(format!(
@@ -793,6 +838,7 @@ impl AutoShadeApp {
                         // re-derived at the landing (the Destination combo
                         // stays reachable while a batch runs).
                         dest: dest_fact,
+                        refused,
                     })
                 };
                 Msg::Exported(res)
@@ -1340,6 +1386,25 @@ impl AutoShadeApp {
         if targets.is_empty() {
             return;
         }
+        let copied_from = self.copied_from.clone();
+        self.start_paste_to(src, copied_from, targets, self.paste_geometry);
+    }
+
+    /// [`start_paste`](Self::start_paste) with its inputs given: the recipe
+    /// `src` copied from `copied_from`, onto `targets`, with or without the
+    /// crop. The Normal mode's 「apply this look to every photo in the folder」
+    /// (`panels/normal.rs`) pastes the open photo's look onto the whole folder
+    /// this way — the clipboard and the selection are left as they are.
+    pub(crate) fn start_paste_to(
+        &mut self,
+        src: EditRecipe,
+        copied_from: Option<PathBuf>,
+        targets: Vec<PathBuf>,
+        geometry: bool,
+    ) {
+        if self.busy || targets.is_empty() {
+            return;
+        }
         let PastePayload {
             own: recipe_full,
             foreign: recipe,
@@ -1347,8 +1412,7 @@ impl AutoShadeApp {
             colour_field: dropped_field,
             layers: n_layers,
             lens_blur: dropped_blur,
-        } = paste_payload(src, self.paste_geometry);
-        let copied_from = self.copied_from.clone();
+        } = paste_payload(src, geometry);
         let has_foreign_target = targets.iter().any(|t| Some(t) != copied_from.as_ref());
         if n_raster > 0 && has_foreign_target {
             self.toast(

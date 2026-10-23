@@ -22,3 +22,5 @@
     include!("tests/headings_and_widths.rs");
     include!("tests/screenshot.rs");
     include!("tests/lens_blur.rs");
+    include!("tests/mode.rs");
+    include!("tests/normal.rs");

@@ -288,6 +288,11 @@ pub(crate) struct Prefs {
     pub(crate) lang: Lang,
     pub(crate) theme: ThemePref,
     pub(crate) accent: AccentPref,
+    /// The mode chosen last (`mode.rs`): it only highlights that card on the
+    /// mode page, which opens on every launch (user ruling 2026-10-23). An
+    /// older prefs file decodes to `Landscape` through the struct's
+    /// `#[serde(default)]`, the workspace every user had before.
+    pub(crate) mode: Mode,
 }
 
 impl Default for Prefs {
@@ -341,6 +346,7 @@ impl Default for Prefs {
             lang: Lang::En, // English is the default / skeleton language
             theme: ThemePref::Dark, // the historical look
             accent: AccentPref::Gold,
+            mode: Mode::Landscape,
         }
     }
 }
@@ -574,6 +580,9 @@ pub(crate) enum ExportOutcome {
         relooked: usize,
         warns: Vec<String>,
         dest: PathBuf,
+        /// How many of `errs` are `pipeline::OverwriteRefused` — counted by
+        /// type in the worker, since `errs` carries text only.
+        refused: usize,
     },
 }
 
@@ -746,6 +755,12 @@ pub(crate) enum Msg {
     StyleBuildProgress { stage: autoshade::library::BuildStage, done: usize, total: usize },
     /// A reference-library build finished — see [`StyleBuildOutcome`].
     StyleBuilt(Box<StyleBuildOutcome>),
+    /// Normal mode's reference folder is being read into its own library
+    /// (`panels/normal.rs`): `done` of `total` photos.
+    OneClickBuildProgress { done: usize, total: usize },
+    /// …and finished: how many photos the library holds, or why it failed.
+    /// The landing hands over to the analysis (`on_one_click_built`).
+    OneClickBuilt(Result<usize, String>),
 }
 
 /// What building the reference library did — FACTS, not prose (L12#4): the

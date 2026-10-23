@@ -12,6 +12,7 @@
 //! (batch, or parallel GPT/Claude) can move this to async later if needed.
 
 pub mod catalogue;
+pub mod presets;
 mod claude;
 mod heuristic;
 mod judge;

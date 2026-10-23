@@ -29,7 +29,9 @@ impl AutoShadeApp {
         // full-width rows — at the 240 px default the three verbs never shared
         // a line anyway, and a scoped button after a wrapped line's end was
         // laid past the panel edge (a scope never wraps); ✕ shares the last
-        // row while there is a selection to clear.
+        // row while there is a selection to clear. Not drawn where the mode
+        // runs its batch from the sidebar (Normal, `mode::Shell`).
+        if self.mode.shell().library_batch_rows {
         let cell = columns(ui, 1);
         // `!busy` like both siblings below. `open_path` re-points
         // `src_path` immediately but `recipe` only refreshes when the
@@ -81,6 +83,7 @@ impl AutoShadeApp {
         if self.copied.is_some() {
             ui.checkbox(&mut self.paste_geometry, tr(lang, "Include crop / straighten when pasting"))
                 .on_hover_text(tr(lang, "Off by default — composition rarely transfers between photos"));
+        }
         }
         ui.separator();
         if self.gallery.is_empty() {

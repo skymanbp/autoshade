@@ -66,6 +66,23 @@ pub(crate) fn photo_file_dialog() -> Option<PathBuf> {
     rfd::FileDialog::new().add_filter("Photos", &photo_exts()).pick_file()
 }
 
+/// [`photo_exts`] in the order a mode's Open dialog lists them: unchanged
+/// (RAW first) unless the mode puts rendered images first (Normal, where a
+/// phone's jpg is the usual photo). The same SET either way — only the order
+/// moves, so every mode opens every file the app can decode.
+pub(crate) fn photo_exts_for(mode: Mode) -> Vec<&'static str> {
+    let mut exts = photo_exts();
+    if mode.shell().baked_first {
+        exts.sort_by_key(|e| !autoshade::pipeline::BAKED_EXTS.contains(e));
+    }
+    exts
+}
+
+/// The Open dialog for a photo to edit, in `mode`'s order ([`photo_exts_for`]).
+pub(crate) fn open_photo_dialog(mode: Mode) -> Option<PathBuf> {
+    rfd::FileDialog::new().add_filter("Photos", &photo_exts_for(mode)).pick_file()
+}
+
 /// The plural, for the stack's door: several frames of one scene at once.
 /// Beside its singular deliberately, so both offer the one derived extension
 /// list rather than growing a second copy of it.

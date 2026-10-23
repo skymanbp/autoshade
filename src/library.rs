@@ -53,6 +53,56 @@ pub const VERSION: u32 = 1;
 /// Where the library lives in the per-user store.
 pub const FILE_NAME: &str = "reference-library.json";
 
+/// The library every surface has always read and built: [`FILE_NAME`].
+pub const DEFAULT_NAME: &str = "";
+
+/// The desktop app's Normal mode keeps its own library (its one-click
+/// "match my reference photos" builds from whatever folder was picked), so a
+/// Normal build never replaces the library a Landscape develop follows.
+pub const NORMAL_NAME: &str = "normal";
+
+/// A library name is empty (the default file) or a short lowercase word —
+/// it becomes part of a file name, so nothing that could leave the store.
+pub fn valid_name(name: &str) -> bool {
+    name.len() <= 32 && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// The file a library NAME lives in: [`FILE_NAME`] for [`DEFAULT_NAME`],
+/// `reference-library-<name>.json` otherwise.
+pub fn file_name(name: &str) -> String {
+    assert!(valid_name(name), "library name {name:?} is not a short lowercase word");
+    if name.is_empty() { FILE_NAME.to_string() } else { format!("reference-library-{name}.json") }
+}
+
+thread_local! {
+    /// The library this thread's unnamed calls ([`load`], [`path`],
+    /// [`summary`], [`rebuild`]) act on — [`DEFAULT_NAME`] unless a caller
+    /// is inside [`with_library`].
+    static CURRENT: std::cell::Cell<&'static str> = const { std::cell::Cell::new(DEFAULT_NAME) };
+}
+
+/// The library this thread's unnamed calls act on ([`with_library`]).
+pub fn current_name() -> &'static str {
+    CURRENT.with(std::cell::Cell::get)
+}
+
+/// Run `f` with `name` as this thread's library: every unnamed call inside
+/// it — [`crate::pipeline::produce_recipe`]'s library read among them — acts
+/// on that library's file instead of [`FILE_NAME`]. Scoped and restored on
+/// the way out (a panic included), so a worker thread reused afterwards is
+/// back on the default; no other thread is affected.
+pub fn with_library<R>(name: &'static str, f: impl FnOnce() -> R) -> R {
+    assert!(valid_name(name), "library name {name:?} is not a short lowercase word");
+    struct Restore(&'static str);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CURRENT.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(CURRENT.with(|c| c.replace(name)));
+    f()
+}
+
 /// The most finished photos one library holds. A search is a linear pass
 /// over one 768-float dot product per entry, so the cap is about the file
 /// (≈ 16 KB of JSON per entry), not the search.
@@ -129,9 +179,15 @@ impl Stamp {
     }
 }
 
-/// The library file in the per-user store.
+/// The library file in the per-user store — this thread's current library
+/// ([`with_library`]), [`FILE_NAME`] outside one.
 pub fn path() -> PathBuf {
-    crate::store::store_root().join(FILE_NAME)
+    path_named(current_name())
+}
+
+/// The file of the library called `name` ([`file_name`]) in the per-user store.
+pub fn path_named(name: &str) -> PathBuf {
+    crate::store::store_root().join(file_name(name))
 }
 
 /// What [`load`] found.
@@ -147,6 +203,11 @@ pub enum Loaded {
 /// The library at [`path`].
 pub fn load() -> Loaded {
     load_from(&path())
+}
+
+/// The library called `name` ([`path_named`]).
+pub fn load_named(name: &str) -> Loaded {
+    load_from(&path_named(name))
 }
 
 /// What a status line shows about the library, read off the file once —
@@ -199,12 +260,28 @@ pub fn rebuild(
     raw_root: Option<&Path>,
     on_progress: &dyn Fn(BuildProgress),
 ) -> Result<Library> {
-    let previous = match load() {
+    rebuild_named(current_name(), dir, sidecars, describe, raw_root, on_progress)
+}
+
+/// [`rebuild`] into the library called `name` ([`path_named`]), keeping what
+/// THAT library already measured — another name's file is neither read nor
+/// written.
+pub fn rebuild_named(
+    name: &str,
+    dir: &Path,
+    sidecars: &Sidecars,
+    describe: DescribeSwitch,
+    raw_root: Option<&Path>,
+    on_progress: &dyn Fn(BuildProgress),
+) -> Result<Library> {
+    anyhow::ensure!(valid_name(name), "library name {name:?} is not a short lowercase word");
+    let file = path_named(name);
+    let previous = match load_from(&file) {
         Loaded::Ready(lib) => Some(lib),
         _ => None,
     };
     let lib = build(dir, sidecars, previous.as_ref(), describe, raw_root, on_progress)?;
-    lib.save(&path())?;
+    lib.save(&file)?;
     Ok(lib)
 }
 

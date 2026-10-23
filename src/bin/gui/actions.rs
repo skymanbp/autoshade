@@ -115,6 +115,8 @@ impl AutoShadeApp {
         // default before prefs were readable (same shape as the greeting).
         app.theme = prefs.theme;
         app.accent = prefs.accent;
+        // Only the highlighted card: the mode page still opens first.
+        app.mode = prefs.mode;
         install_look(&app.egui_ctx, app.theme, app.accent);
         // The greeting was set by default() BEFORE the language was known —
         // re-issue it, or a Chinese install opens with one English line.
@@ -3312,6 +3314,30 @@ impl AutoShadeApp {
         let pixels: Option<PathBuf> = (adjusting && self.active_on_ai_pixels())
             .then(|| self.active_variant().and_then(|v| v.origin.clone()))
             .flatten();
+        self.spawn_analyze(path, pixels, guidance, base, req, autoshade::library::DEFAULT_NAME);
+    }
+
+    /// The analyze worker every analysis starter shares — 「AI Analyze」,
+    /// 「AI adjust」 and Normal's one-click looks (`panels/normal.rs`): arms
+    /// the cancel, marks the wire busy and runs `produce_recipe` on a worker
+    /// thread inside `library`'s scope (`library::with_library`), landing as
+    /// `Msg::Analyzed` under the returned epoch. The caller has already set
+    /// `busy` and its status line.
+    pub(crate) fn spawn_analyze(
+        &mut self,
+        path: PathBuf,
+        pixels: Option<PathBuf>,
+        guidance: Option<String>,
+        base: Option<EditRecipe>,
+        req: autoshade::pipeline::GradeRequest,
+        library: &'static str,
+    ) -> u64 {
+        #[cfg(test)]
+        {
+            self.normal.last_request = Some((req, guidance.clone(), library));
+        }
+        #[cfg(test)]
+        let runner = self.normal.runner;
         // Every other network starter arms this; Analyze — the one a stalled
         // endpoint holds the longest — did not, so a hung stream left no ✕
         // and only killing the process recovered. Abandon semantics (like the
@@ -3322,27 +3348,35 @@ impl AutoShadeApp {
         self.analyze_inflight = true;
         self.spawn_worker(
             move || {
+                // Test seam: a headless test stands in for the paid chain.
+                #[cfg(test)]
+                if let Some(run) = runner {
+                    return Msg::Analyzed(epoch, Box::new(run(&path, &req)));
+                }
                 let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
                 // Config is reloaded in-thread (cheap) so we don't need it to be Clone.
                 let cfg = autoshade::config::Config::load();
-                let res = autoshade::pipeline::produce_recipe(
-                    &path,
-                    pixels.as_deref(),
-                    &cfg,
-                    false,
-                    guidance.as_deref(),
-                    base.as_ref(),
-                    req,
-                    // Interactive single-photo analyze: the visual closed
-                    // loop IS the R20 strengthening (cost disclosed in the
-                    // button's hover text; batch surfaces pass false).
-                    true,
-                    autoshade::diag::stderr(),
-                );
+                let res = autoshade::library::with_library(library, || {
+                    autoshade::pipeline::produce_recipe(
+                        &path,
+                        pixels.as_deref(),
+                        &cfg,
+                        false,
+                        guidance.as_deref(),
+                        base.as_ref(),
+                        req,
+                        // Interactive single-photo analyze: the visual closed
+                        // loop IS the R20 strengthening (cost disclosed in the
+                        // button's hover text; batch surfaces pass false).
+                        true,
+                        autoshade::diag::stderr(),
+                    )
+                });
                 Msg::Analyzed(epoch, Box::new(res))
             },
             move |e| Msg::Analyzed(epoch, Box::new(Err(e))),
         );
+        epoch
     }
 
     /// Reverse-fit ("match"): statistically solve the develop parameters that

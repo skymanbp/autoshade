@@ -387,6 +387,7 @@
                 relooked: 0,
                 warns: Vec::new(),
                 dest: refused.clone(),
+                refused: 0,
             })))
             .unwrap();
         app.poll_workers(&ctx);
@@ -409,6 +410,7 @@
                 relooked: 0,
                 warns: Vec::new(),
                 dest: landed.clone(),
+                refused: 0,
             })))
             .unwrap();
         ok_app.poll_workers(&ctx);

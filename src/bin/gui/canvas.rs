@@ -543,10 +543,18 @@ impl AutoShadeApp {
         } else {
             tr(lang, "After — drag a box = local AI · scroll to zoom · space/middle-drag to pan · hold B to compare")
         };
+        // Normal (`mode::Shell`) has no canvas tools: one plain line in place
+        // of the tool hints, and no zoom readout or preview-size box.
+        let marks = self.mode.shell().canvas_tool_marks;
+        let hint = if marks || comparing {
+            hint
+        } else {
+            tr(lang, "Scroll to zoom · drag to move when zoomed in · hold B to see the original")
+        };
         // An armed tool must be visible at NORMAL contrast — .weak().small()
         // is the passive-help style, and it was the only always-on indicator
         // when the arming control sat in a collapsed section.
-        let armed = !comparing && self.tool_armed();
+        let armed = marks && !comparing && self.tool_armed();
         ui.horizontal(|ui| {
             if armed {
                 ui.label(egui::RichText::new(hint).color(self.theme.colors().armed_hint).small());
@@ -576,12 +584,17 @@ impl AutoShadeApp {
                     let ctx = ui.ctx().clone();
                     self.toggle_clipping(&ctx); // instant — no redevelop
                 }
-                ui.label(egui::RichText::new(format!("{:.0}%", scale * 100.0)).weak().small());
+                if marks {
+                    ui.label(egui::RichText::new(format!("{:.0}%", scale * 100.0)).weak().small());
+                }
                 // --- preview resolution (gap batch E): 1:1 that actually
                 // resolves detail. Switching re-decodes the current photo with
                 // the recipe KEPT (the keep_recipe path from batch B).
                 let before = self.preview_edge;
                 ui.add_enabled_ui(!self.busy, |ui| {
+                    if !marks {
+                        return;
+                    }
                     egui::ComboBox::from_id_salt("preview_edge")
                         .selected_text(format!("{}px", self.preview_edge))
                         .width(64.0)
@@ -836,6 +849,8 @@ impl AutoShadeApp {
         // mutates (sel_target_geometry).
         if !self.crop_mode
             && self.placing_mask.is_none()
+            // Normal draws no masks' marks (`mode::Shell`).
+            && self.mode.shell().canvas_tool_marks
             && let Some(m) = self.sel_mask.and_then(|i| self.recipe.masks.get(i))
         {
             let target = match self.sel_component {

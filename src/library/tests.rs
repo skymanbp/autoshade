@@ -230,3 +230,54 @@ fn the_match_reads_zero_for_the_same_picture_and_grows_with_a_shift() {
     darker.pixels_mut().for_each(|p| p.0 = p.0.map(|c| c / 2));
     assert!(settings::mean_de(&a, &image::DynamicImage::ImageRgb8(darker)) > 10.0);
 }
+
+/// A library NAME picks its own file, and the default name is the file every
+/// surface has always used — so Normal mode's library and the Landscape one
+/// sit side by side and neither save replaces the other.
+///
+/// MUTATION: make `file_name` ignore the name (or map "normal" to
+/// `FILE_NAME`) and the two saves below land in one file — the first assert
+/// on the default library fails.
+#[test]
+fn two_library_names_keep_two_files_and_the_default_is_the_old_one() {
+    assert_eq!(file_name(DEFAULT_NAME), FILE_NAME, "every existing caller keeps its file");
+    assert_eq!(file_name(NORMAL_NAME), "reference-library-normal.json");
+    for bad in ["../x", "Normal", "a b", "x.json", "a/b", "a\\b"] {
+        assert!(!valid_name(bad), "{bad:?} would reach the file system as a name");
+        assert!(std::panic::catch_unwind(|| file_name(bad)).is_err(), "{bad:?} refused");
+    }
+    let dir = scratch_file("names").parent().unwrap().to_path_buf();
+    let (main, normal) = (dir.join(file_name(DEFAULT_NAME)), dir.join(file_name(NORMAL_NAME)));
+    library(vec![entry("landscape.jpg", axis(0), None)]).save(&main).unwrap();
+    library(vec![entry("phone-1.jpg", axis(1), None), entry("phone-2.jpg", axis(2), None)]).save(&normal).unwrap();
+    let paths = |file: &Path| match load_from(file) {
+        Loaded::Ready(lib) => lib.entries.iter().map(|e| e.path.clone()).collect::<Vec<_>>(),
+        other => panic!("{file:?}: {other:?}"),
+    };
+    assert_eq!(paths(&main), vec![photo("landscape.jpg")], "the Normal save left the default library alone");
+    assert_eq!(paths(&normal), vec![photo("phone-1.jpg"), photo("phone-2.jpg")]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The unnamed calls follow the thread's library only inside `with_library`,
+/// and the scope is restored on the way out — a panic included — so a reused
+/// worker thread is back on the default library.
+///
+/// MUTATION: drop the `Restore` guard (or restore before `f` runs) and the
+/// "after" asserts fail.
+#[test]
+fn the_library_scope_routes_the_unnamed_calls_and_restores_itself() {
+    assert_eq!(current_name(), DEFAULT_NAME);
+    assert_eq!(path(), path_named(DEFAULT_NAME));
+    let inside = with_library(NORMAL_NAME, || (current_name(), path()));
+    assert_eq!(inside, (NORMAL_NAME, path_named(NORMAL_NAME)));
+    assert_ne!(path_named(NORMAL_NAME), path_named(DEFAULT_NAME));
+    assert_eq!(current_name(), DEFAULT_NAME, "restored after the scope");
+    let caught = std::panic::catch_unwind(|| with_library(NORMAL_NAME, || panic!("a worker panics")));
+    assert!(caught.is_err());
+    assert_eq!(current_name(), DEFAULT_NAME, "restored after a panic too");
+    // Another thread never sees this thread's scope.
+    with_library(NORMAL_NAME, || {
+        assert_eq!(std::thread::spawn(current_name).join().unwrap(), DEFAULT_NAME);
+    });
+}

@@ -435,8 +435,22 @@ impl AutoShadeApp {
             match msg {
                 Msg::Opened(boxed) => self.on_opened(ctx, lang, boxed),
                 Msg::Developed(boxed) => self.finish_redevelop(ctx, *boxed),
-                Msg::Analyzed(epoch, boxed) => self.on_analyzed(lang, epoch, boxed),
+                Msg::Analyzed(epoch, boxed) => {
+                    // Normal's one-click look lands through the same door,
+                    // then says what happened in plain words (`normal.rs`).
+                    let one_click = self.one_click_landing(epoch, &boxed);
+                    self.on_analyzed(lang, epoch, boxed);
+                    if let Some(landed) = one_click {
+                        self.after_one_click(lang, landed);
+                    }
+                }
+                Msg::OneClickBuildProgress { done, total } => {
+                    self.normal.build_progress = Some((done, total));
+                }
+                Msg::OneClickBuilt(res) => self.on_one_click_built(lang, res),
                 Msg::Exported(Ok(outcome)) => {
+                    // Normal's Save group words its own landing (`normal.rs`).
+                    let plain = self.normal_delivery_words(lang, &outcome);
                     self.batch_progress = None; // the bar belongs to ONE batch run
                     match outcome {
                         ExportOutcome::Single { out, relooked } => {
@@ -474,7 +488,7 @@ impl AutoShadeApp {
                             }
                             self.done(trf(lang, "exported → {path}", &[("path", &p)]));
                         }
-                        ExportOutcome::Batch { ok, errs, renamed, relooked, warns, dest } => {
+                        ExportOutcome::Batch { ok, errs, renamed, relooked, warns, dest, refused: _ } => {
                             // Where the batch actually DELIVERED becomes the
                             // remembered destination — here, not at the dialog
                             // (R22 M1): a folder inside the photo library is
@@ -549,9 +563,14 @@ impl AutoShadeApp {
                             }
                         }
                     }
+                    if let Some(plain) = plain {
+                        self.reword_landing(plain);
+                    }
                 }
                 Msg::Exported(Err(e)) => {
                     self.batch_progress = None;
+                    self.normal.delivering = false;
+                    self.normal.saving = None;
                     self.fail(tr(lang, "export failed"), e);
                 }
                 Msg::BatchProgress { done, total } => {
@@ -637,7 +656,19 @@ impl AutoShadeApp {
                         self.fail(tr(lang, "Style extraction failed"), e);
                     }
                 },
-                Msg::Pasted(res) => self.on_pasted(lang, res),
+                Msg::Pasted(res) => {
+                    // Normal's 「apply to every photo」 renders once the paste
+                    // has landed whole (`normal.rs`).
+                    let then_render = self
+                        .normal
+                        .apply_all
+                        .take()
+                        .map(|dest| (dest, res.as_ref().is_ok_and(|o| o.errs.is_empty())));
+                    self.on_pasted(lang, res);
+                    if let Some((dest, pasted)) = then_render {
+                        self.after_apply_all_paste(lang, dest, pasted);
+                    }
+                }
                 Msg::LegacyImported(res) => {
                     self.edited_badge.clear(); // imported sidecars light ● badges
                     match res {

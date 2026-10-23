@@ -10,6 +10,8 @@ is, what is new in it, and how it works are the README's opening sections;
 subsystem boundaries are in [ARCHITECTURE.md](ARCHITECTURE.md) and the
 algorithms in [TECH_STACK.md](TECH_STACK.md).
 
+- [Choosing a mode](#choosing-a-mode)
+- [Normal mode](#normal-mode)
 - [1. Open and inspect a photo](#1-open-and-inspect-a-photo)
 - [2. Develop the image](#2-develop-the-image)
 - [3. Add local masks](#3-add-local-masks)
@@ -20,6 +22,77 @@ algorithms in [TECH_STACK.md](TECH_STACK.md).
 - [Configure and use the AI features](#configure-and-use-the-ai-features)
 - [Privacy, trust, and paid-feature boundary](#privacy-trust-and-paid-feature-boundary)
 - [Install, upgrade, and uninstall on Windows](#install-upgrade-and-uninstall-on-windows)
+
+## Choosing a mode
+
+The desktop app opens on a mode page every time it starts: three cards, and a
+click on one enters the workspace. The card you chose last is marked
+**Last used**. Inside the workspace the mode's name is the first button of the
+toolbar; it brings the page back, and the open photo, its edits and the
+library stay as they are.
+
+| Mode | What the workspace shows |
+|---|---|
+| **Landscape** | Everything — the workspace as it was before modes existed. |
+| **Portraits** | Everything, with the reverse-fit's local-area switches in a fold of their own, closed until you open it. The portrait tools themselves come in a later version. |
+| **Normal** | A short panel of its own for phone and jpg photos — one-click looks, four sliders, a noise switch and saving as jpg; see [Normal mode](#normal-mode). The Open dialog lists jpg and other rendered images before RAWs. |
+
+A mode changes only which controls are drawn. Recipes do not record it, every
+photo opens in every mode, and the CLI and the web UI do not have modes.
+
+## Normal mode
+
+Normal is for photos from a phone or any jpg. Its panel answers four questions,
+top to bottom, and shows nothing else.
+
+**One-click look.** Six cards — **Natural**, **Bright & clean**, **Warm**,
+**Cool night**, **Film** and **Black & white**. A click sends the photo to the
+AI with a short description of that look, and the result lands on the photo;
+`Ctrl+Z` goes back. Only **Black & white** turns the photo grey. Or click
+**Match my reference photos…** and pick a folder of photos whose look you
+like: the app reads the folder on this computer (the first time it downloads
+a 1.5 GB model to do so), then the AI looks at your photo together with the
+three photos from the folder that are most like it, and gives yours their
+look. Each of those reference photos is billed as one more picture. The
+folder is kept in Normal's own reference file, so it never replaces the
+reference library you built in Landscape. **Look strength** sets how strong
+the look is (65 by default). The line under it says what happened; without
+an image key set in Settings (⚙) the app uses a simple built-in look instead
+and says so.
+
+**Fine-tune.** **Brightness**, **Contrast**, **Warmth** and **Vividness** move
+the photo on top of the one-click result. Warmth runs from −100 (cooler) to
++100 (warmer); 0 is the camera's own colour, and the two ends halve or double
+the colour temperature. **Back to the one-click result** puts the four sliders
+back where the last one-click left them.
+
+**Noise.** **AI denoise** cleans grain out of the photo when you save it, at
+the denoiser's default strength. It helps most with night and dark phone
+photos and is slow. It is applied when you save, so the preview does not
+show it. The first time, the noise model is downloaded (about 72 MB).
+
+**Save.** **Save as jpg** saves the photo with its look as a jpg at the
+quality you pick (High, Medium or Small file); the original file is never
+changed. It never goes next to the photo: the line under the button names
+where it goes — the app's output folder (change it in Settings), the folder
+you last saved to, or a question each time, the same destination the full
+workspace's Export uses. `Ctrl+S` and `Ctrl+E` do the same as the button.
+The status bar says **unsaved changes** once the look differs from how the
+photo opened or was last saved, and **saved as jpg** right after a save (the
+folder-wide save counts for the open photo too). Photos saved earlier are
+never replaced outside the app's output folder: if the folder already holds
+them, the app says so and you pick another folder or move the old ones.
+**Apply this look to every photo in the folder** first settles that folder
+(if you cancel, nothing changes), then gives every photo of the folder open
+in the library the same look and saves each one there as a jpg.
+
+The toolbar keeps only the mode button, **Open photo…**, undo and redo,
+**Compare** (click again for the photo alone; hold `B` to see the original)
+and Settings. The library shows the folder and its thumbnails; the canvas
+keeps **Fit** and **1:1**; there is no strip of versions under it — each
+one-click replaces the look, and undo brings the previous one back. Switch to
+Landscape from the mode button for every other control; the photo and its
+look come along.
 
 ## 1. Open and inspect a photo
 

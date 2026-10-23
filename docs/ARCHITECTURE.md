@@ -6798,6 +6798,56 @@ app, with `eframe/persistence` remembering window geometry and our own prefs),
 egui pulls — used to pre-validate a CJK font before handing it to egui, which
 panics on an unparseable one, so font loading degrades safely.
 
+**The GUI's modes.** The desktop app opens on a mode page
+([`src/bin/gui/mode.rs`](../src/bin/gui/mode.rs)) on every launch — Landscape,
+Portraits, Normal — and the choice is a GUI-layer preference only: `Prefs.mode`
+in `gui-prefs.ron`, read back just to mark the last card. A mode is a table of
+display switches (`Mode::shell`) that the shared panel code reads at the one
+place each switch governs — which sections are drawn, whether the reverse-fit's
+local-area switches are folded, the Open dialog's extension order. The
+library, the CLI, the web UI and the recipe format know nothing of it, so no battery, gate or saved develop forks
+on a mode.
+
+**Normal mode's panel.** Normal is the same table of switches, not a second
+workspace: `Shell::one_click_sidebar` draws
+[`src/bin/gui/panels/normal.rs`](../src/bin/gui/panels/normal.rs) in place of
+the shared panels, and `full_toolbar`, `library_batch_rows`,
+`canvas_tool_marks` and `variant_strip` hide the rest (§4 of the design: the
+toolbar keeps mode / open / undo / redo / compare / settings, the library
+panel its folder and thumbnails, the canvas Fit and 1:1). Every verb on the
+panel is an existing door. A one-click look is `pipeline::produce_recipe`
+through the analyze worker every analysis shares (`spawn_analyze`): a preset
+is `Guide::Direction` with a fixed text from
+[`advisor::presets`](../src/advisor/presets.rs) (six looks, each saying what
+to do and what not to do — only `mono` asks for `convert_to_grayscale`), and
+"match my reference photos" is `library::rebuild_named` over the picked
+folder followed by `Guide::Library` at Style 1.0 with the reference photos
+sent. That folder lives in its own file because the library takes a NAME:
+`library::file_name("")` is the historical `reference-library.json` and
+`library::NORMAL_NAME` is `reference-library-normal.json`; the unnamed calls
+(`load`, `path`, `summary`, `rebuild`) act on the thread's current name,
+which is the default unless a caller is inside `library::with_library` — the
+analyze worker wraps `produce_recipe` in it, so the pipeline's own library
+read and its signature are unchanged and no other caller sees a difference.
+The four sliders write `exposure_ev`, `contrast`, `temperature_k` (warmth =
+100·log2 of the temperature over the as-shot anchor) and `saturation`; the
+noise switch is the export-time AI denoise at `denoise::default_strength_for`
+(applied at save, never previewed);
+Save is `start_render_with` (a jpg at a quality step, into the one export
+destination — never beside the photo, which `pipeline::guard_readonly`
+forbids), and Ctrl+S / Ctrl+E take the same path in Normal; "apply to every
+photo" settles that folder first, then runs `start_paste_to` and
+`start_batch_render_for` over the folder. A mode without canvas tools holds
+none armed: `put_down_hidden_tools` runs at the head of the status bar each
+frame, before the status text and the canvas are drawn. The status bar's
+marker in Normal follows the jpg (`normal_look_mark`: the look against the one
+the photo opened with or a landed Save-group delivery last wrote), not the
+develop record the workspace's marker compares. `guard_readonly`'s refusal to
+replace an existing photo is typed (`pipeline::OverwriteRefused`, same
+message as before): the batch worker counts it per photo by type
+(`ExportOutcome::Batch::refused`) and Normal words it plainly on both the
+single and the batch path, never by matching its English.
+
 **Platform.** `windows-sys` 0.59 with five feature gates:
 `Win32_Foundation` + `Win32_System_JobObjects` for the sidecar kill-groups (a
 timeout must reap the sidecar's WHOLE process tree), `Win32_Security` +

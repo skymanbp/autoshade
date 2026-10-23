@@ -969,6 +969,8 @@ impl AutoShadeApp {
     /// what the header's 「AI 打分付费」 half names.
     fn ai_reverse_fit(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
+        // Portraits (`mode::Shell::zoned_folded`) folds the local-area switches.
+        let shell = self.mode.shell();
         ui.add_space(SPACE_XS);
         card_fold(ui, egui::CollapsingHeader::new(tr(lang, "Match a look (reverse-fit) · local"))
             .id_salt("sec_ai_reverse_fit")
@@ -1208,12 +1210,23 @@ impl AutoShadeApp {
             // the button above does. Same rule as 「AI review」 — a persisted
             // preference, so no can_fit gate (and, as in Settings, no busy gate:
             // `start_fit` reads the flag when it runs).
-            ui.checkbox(&mut self.zoned_fit, tr(lang, "Fit local areas too")).on_hover_text(tr(
-                lang,
-                "After the global fit, tries extra local masks where the photo differs region by region: the sky, bright and dark ranges, and up to four tiles of a 4×4 grid. Each mask is kept only if it brings the result closer without making any area worse. Sky masks go to Lightroom as its own Select Sky; other masks Lightroom cannot hold are named when you save. Needs Python with transformers and torch; without them only the tonal ranges are tried.",
-            ));
-            ui.checkbox(&mut self.zoned_four_regions, tr(lang, "Up to four semantic regions"))
-                .on_hover_text(tr(lang, "Opt in to semantic regions beyond the historical sky/land pass; this costs one OneFormer pass per frame and may take longer."));
+            let zoned_rows = |app: &mut Self, ui: &mut egui::Ui| {
+                ui.checkbox(&mut app.zoned_fit, tr(lang, "Fit local areas too")).on_hover_text(tr(
+                    lang,
+                    "After the global fit, tries extra local masks where the photo differs region by region: the sky, bright and dark ranges, and up to four tiles of a 4×4 grid. Each mask is kept only if it brings the result closer without making any area worse. Sky masks go to Lightroom as its own Select Sky; other masks Lightroom cannot hold are named when you save. Needs Python with transformers and torch; without them only the tonal ranges are tried.",
+                ));
+                ui.checkbox(&mut app.zoned_four_regions, tr(lang, "Up to four semantic regions"))
+                    .on_hover_text(tr(lang, "Opt in to semantic regions beyond the historical sky/land pass; this costs one OneFormer pass per frame and may take longer."));
+            };
+            if shell.zoned_folded {
+                // Portraits: the same two switches, in a fold closed by default.
+                egui::CollapsingHeader::new(tr(lang, "Local areas"))
+                    .id_salt("sec_fit_zoned")
+                    .default_open(false)
+                    .show(ui, |ui| zoned_rows(self, ui));
+            } else {
+                zoned_rows(self, ui);
+            }
             });
     }
 }

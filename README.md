@@ -164,7 +164,7 @@ All on the **[v1.12.0 release page](https://github.com/skymanbp/autoshade/releas
 > [!NOTE]
 > **macOS:** the app is ad-hoc signed, not notarised — on first launch use **System Settings → Privacy & Security → Open Anyway** (once per machine).
 
-**Desktop app** — open a photo (`Ctrl+O`), move a slider, export with `Ctrl+Shift+E`. The original is never touched.
+**Desktop app** — it starts on a mode page (Landscape, Portraits, Normal; see [Choosing a mode](docs/USER_MANUAL.md#choosing-a-mode)); then open a photo (`Ctrl+O`), move a slider, export with `Ctrl+Shift+E`. The original is never touched. **Normal** is a short one-click panel for phone and jpg photos ([Normal mode](docs/USER_MANUAL.md#normal-mode)).
 
 **CLI**
 

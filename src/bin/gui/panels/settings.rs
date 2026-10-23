@@ -210,6 +210,8 @@ impl AutoShadeApp {
                 let cfg = autoshade::config::Config::load();
                 self.settings.analysis_key_present = cfg.analysis_api_key.is_some();
                 self.settings.image_key_present = cfg.openai_api_key.is_some();
+                // Normal's sidebar says whether its looks use the AI.
+                self.normal.key_present = Some(cfg.openai_api_key.is_some());
                 // A key that cannot appear in an HTTP header is REFUSED by
                 // Config::load (`header_safe_key` — a newline or space from a
                 // paste is the usual cause). The refusal only prints to
