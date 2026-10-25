@@ -1,6 +1,10 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.12.0 — pixel masters live in the store's masters
+> Status: **implemented** (v1.13.0 — the desktop app opens on a mode page
+> (Landscape, Portraits, Normal), Normal being a one-click panel for phone and
+> jpg photos; the reverse fit reads white balance and tone from every pixel and
+> hands a hue-twisting colour cast to the white balance;
+> v1.12.0 — pixel masters live in the store's masters
 > folder, not the delivery folder, so cleaning exports never breaks a card;
 > v1.11.0 — generative edits through any provider's
 > edit call, described as a JSON template in Settings, with the painted area
@@ -207,10 +211,10 @@
 > symbol, link and tier count the living documents name exists in the tree;
 > CI's `docs` job runs it on every push) — and a gate that exits non-zero
 > fails the battery like a lane.
-> 1656 library + 25 CLI + 246 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1641 pass + 15 `#[ignore]`d forensic probes and
-> the GUI result is 241 pass + three ignored (an explicit scratch-recipe export
-> probe and the offline panel and window screenshots) in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
+> 1702 library + 25 CLI + 265 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1687 pass + 15 `#[ignore]`d forensic probes and
+> the GUI result is 261 pass + four ignored (an explicit scratch-recipe export
+> probe and the offline panel, window and mode-workspace screenshots) in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
 > refusal pair (a RAW source, a baked negative); the library and GUI lists are
 > v1.6.1's. For v1.6.3, four library names (decode: the 16-bit profile lattice
 > hands an identity transform its pixels back, a file tagged with the engine's
@@ -242,7 +246,21 @@
 > edit read as the edit, a maskless edit sending no mask and layering only
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
-> screenshots). For v1.12.0, by name against the v1.11.0 battery: library
+> screenshots). For v1.13.0, by name against the v1.12.0 battery: library
+> +49 / −3 — 29 in `fit_zoned` (the local-contrast stage's band readings and
+> refusals, the shaped ramp bands and their partitions, the boundary judged on
+> its mean, the distribution-matched tone arm, the footed cell share, the
+> one-code colour step, an alpha dip that is not a boundary; three subzone
+> names retired for the ones that replaced them), 9 in `fit` (the hand-off of
+> a hue fan to the white balance and its tie-break, the chromaticity vouch, a
+> sliver that does not veto, the share a refused white balance ships, the
+> spline refinement), 5 in `advisor` (the unlocked nullable controls, the
+> mask intents, the six presets), 2 in `library` (a second library file by
+> name), 2 in `pipeline` (the adjust envelope, the carried unlocked controls),
+> 1 each in `fit_field` and `render`; GUI +20 / −1 (the mode page, the Normal
+> mode's four groups and their plain words, the AI area's five folds replacing
+> the four); CLI unchanged. For
+> v1.12.0, by name against the v1.11.0 battery: library
 > +1 / −0 (`pipeline`: every pixel master is claimed in the store's masters
 > folder, never the delivery folder) and GUI +2 / −0 (a ▣ card whose master
 > was deleted works from the photo file again; no grid button reaches past
