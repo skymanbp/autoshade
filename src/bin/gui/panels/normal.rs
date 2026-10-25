@@ -26,8 +26,8 @@ pub(crate) const PRESET_ADHERENCE: f32 = 0.8;
 pub(crate) const REFERENCE_STYLE: f32 = 1.0;
 
 /// What the first AI denoise of a rendered image downloads: the SCUNet weight
-/// plus its network file (`python/denoise.py` `WEIGHT_BYTES["color_real_psnr"]`
-/// + `NETWORK_BYTES`, 71 994 286 bytes), in MB — pinned by a test against
+/// plus its network file (`python/denoise.py` `WEIGHT_BYTES["color_real_psnr"]` +
+/// `NETWORK_BYTES`, 71 994 286 bytes), in MB — pinned by a test against
 /// that file.
 pub(crate) const DENOISE_FIRST_DOWNLOAD_MB: u32 = 72;
 

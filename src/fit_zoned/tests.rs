@@ -3236,7 +3236,7 @@ fn a_one_code_colour_step_at_the_floor_budget_is_rounding_and_charges_nothing() 
 #[test]
 fn a_cell_share_is_read_from_footed_transitions_only() {
     let (w, h) = (96usize, 256usize);
-    let footed = |y: usize| y % 2 == 0;
+    let footed = |y: usize| y.is_multiple_of(2);
     let alpha = |x: usize, y: usize| -> f32 {
         match x {
             34 => 0.6,
@@ -6054,6 +6054,21 @@ fn calibration_sky_zone_survives_luminance_with_partial_chroma_refusal() {
     // check the calibration pair's own deltaE against its target went
     // 5.57 -> 4.41. "Partial" now reads: the full move refused, a share
     // shipped — on both bands.
+    // RE-PINNED 2026-10-23 for 2d0e750's boundary soft ruler, which reads a
+    // colour step through a one-code dead band: the global fit is unchanged
+    // (0.189 -> 0.100), but the whole-sky shrink now stops at k=0.362
+    // (0.235) and the banded one at k=0.200 (0.088), so more of the solved
+    // move ships. The partition re-arbitrated (breaks 0.395, overlap 0.130,
+    // 7 trials, R² 0.812); the sky bands' deltaE 19.75 -> 18.36 (21.02 ->
+    // 20.25), the whole sky's zone residual 0.164 -> 0.122 (0.162 -> 0.138),
+    // frame 0.087 (0.092). The luminance band keeps -0.371 EV (-0.211) and
+    // ships its colour at 0.688 of the solved move, the full move still
+    // refused by the cells (0.601 converged, 0.254 diverged over 45 cells);
+    // the second band -0.067 EV (-0.047), saturation +8.3 (+5.3). The kept
+    // rim now reads 0.015 raw, over the 0.012 ceiling, because the target's
+    // own boundary asks 0.227 of it: the gate compares the charged ranks
+    // (`BoundaryReading::gated`, 0.011 luma / 0.012 colour), so that is what
+    // is asserted below, as `every_accepted_fixture_zone_...` reads it.
     let sky_bands: Vec<_> =
         report.recipe.masks.iter().filter(|mask| mask.role == MaskRole::ZoneSky).collect();
     let (sky, second) = match sky_bands.as_slice() {
@@ -6081,7 +6096,7 @@ fn calibration_sky_zone_survives_luminance_with_partial_chroma_refusal() {
         "CALIBRATION_SKY ev={:.3} gains={:?} sat={:.1} rim={:.4} rationale={}",
         sky.exposure_ev, sky.color_gains, sky.saturation, after, report.recipe.rationale
     );
-    assert!((-0.23..=-0.19).contains(&sky.exposure_ev), "ev {}", sky.exposure_ev);
+    assert!((-0.39..=-0.35).contains(&sky.exposure_ev), "ev {}", sky.exposure_ev);
     assert!(
         !gains_withheld(sky.color_gains) && sky.saturation > 0.0,
         "the luminance band ships the share of its colour the cells vouched: {:?} sat {}",
@@ -6089,7 +6104,7 @@ fn calibration_sky_zone_survives_luminance_with_partial_chroma_refusal() {
         sky.saturation
     );
     assert!(
-        (-0.06..=0.0).contains(&second.exposure_ev),
+        (-0.09..=-0.04).contains(&second.exposure_ev),
         "second band ev {}",
         second.exposure_ev
     );
@@ -6099,7 +6114,8 @@ fn calibration_sky_zone_survives_luminance_with_partial_chroma_refusal() {
         second.saturation,
         second.color_gains
     );
-    assert!(after <= ZONE_BOUNDARY_RIM_MAX);
+    let gated = note_number(note, "charged").max(note_number(note, "colour_charged"));
+    assert!(gated <= ZONE_BOUNDARY_RIM_MAX, "charged {gated} (raw rim {after})");
     let colour_note = report
         .notes
         .iter()

@@ -226,7 +226,7 @@
             );
             let hint = landscape.status.to_lowercase();
             assert!(hint.contains("mask") || hint.contains("蒙版"), "{lang:?}: the brush hint: {hint}");
-            assert!(texts.iter().any(|t| *t == landscape.status), "{lang:?}: the status bar is scanned");
+            assert!(texts.contains(&landscape.status), "{lang:?}: the status bar is scanned");
         }
     }
 

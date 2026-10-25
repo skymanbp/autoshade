@@ -522,6 +522,15 @@ fn wb_default_strength_is_byte_identical_to_head() {
     // same pair persists the very same move — which the second arm below
     // measures rather than asserting. Wanting a larger white-balance
     // shift is exactly what the F1 freedom axis already ships.
+    //
+    // RE-PINNED 2026-10-23 for 2d0e750: the demand is now the consensus of
+    // the per-range chromaticity medians, inverted in log-gain space against
+    // the engine's own `[gr(K), 1 - 0.2*tint/100, gb(K)]`, where the old
+    // read booked part of every warm move as green. On this pair it asks
+    // K 12700 / tint +72.7, gains [1.234, 0.855, 0.788], ratio 1.566 (was
+    // 16050 / +34.3 at ratio 1.653): still past 1.40 at the default, still
+    // inside 3.0 at full strength. No cast curves ship on this Atmosphere
+    // pair, so 8b4f4ec's hand-off is not involved.
     assert_eq!(report.recipe.temperature_k, None);
     assert_eq!(report.recipe.tint, 0.0);
     // The EXPOSURE solve stays on the marginal weighted-luma median over
@@ -540,10 +549,10 @@ fn wb_default_strength_is_byte_identical_to_head() {
     );
     assert_eq!(
         full.recipe.temperature_k,
-        Some(16050.0),
+        Some(12700.0),
         "the same demand is INSIDE the budget once the strength axis widens it"
     );
-    assert!((full.recipe.tint - 34.3).abs() <= 0.05, "tint {}", full.recipe.tint);
+    assert!((full.recipe.tint - 72.7).abs() <= 0.05, "tint {}", full.recipe.tint);
 }
 
 /// Step 9 / acceptance A1: a pair in which NO pixel changed its
@@ -7774,6 +7783,19 @@ fn hsl_band_budget_is_monotone_across_the_three_strength_stops() {
 /// fit 0.0802 → 0.0253 (0.0745 → 0.0188) at 0.496 (0.498). Both fans
 /// stay under the 15° line by the margin the mutation below measures.
 ///
+/// Re-measured 2026-10-23 for 2d0e750 (the cast hand-off of 8b4f4ec never
+/// enters here: both as-fitted fans are under the limit). The question
+/// keeps its answer on both: admitted, no refusal, no projection. `p40`
+/// is admitted at 11.4° (11.8° at 2d0e750's parent); its tone is now the
+/// paired robust arm, shipped ungated, where the parent fell to the luma
+/// CDF (contrast +3.1 -> -21), which is that commit's disclosed cost on
+/// the night street: fit 0.0676 -> 0.0410 (0.0319), confidence 0.556
+/// (0.604). `p41` now ships a white balance, 3800 K / tint -100, where the
+/// parent shipped none — the consensus read with `WB_OPPOSING_RATIO` 0.20
+/// no longer lets a sliver of opposing range veto it — so the curves are
+/// left less to carry: fan 4.0° (10.2°), fit 0.0800 -> 0.0282 (0.0800 ->
+/// 0.0251), confidence 0.489 (0.496).
+///
 /// Both pairs are OPTIONAL, like every other corpus pair: absent, the
 /// test says so and passes, and the synthetic two-temperature fixture
 /// carries the refusal side of the same question on its own.
@@ -7785,8 +7807,8 @@ fn the_fan_gate_costs_a_real_two_temperature_pair_nothing() {
     use crate::rationale::keys;
     let Some(root) = calibration_corpus() else { return };
     for (code, want_fan, want_before, want_after, want_conf) in [
-        ("p40", 12.1f32, 0.0676f32, 0.0319f32, 0.605f32),
-        ("p41", 10.3, 0.0802, 0.0253, 0.496),
+        ("p40", 11.4f32, 0.0676f32, 0.0410f32, 0.556f32),
+        ("p41", 4.0, 0.0800, 0.0282, 0.489),
     ] {
         let raw = root.join(format!("{code}.arw"));
         let target_path = root.join(format!("{code}-target.jpg"));
