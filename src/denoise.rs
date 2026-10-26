@@ -1878,13 +1878,21 @@ mod tests {
         }
     }
 
+    /// Held by every test that makes `autoshade_dn_mosaic_*` temp files
+    /// (`cargo test` runs one binary's tests on parallel threads): the
+    /// counting test for its whole body, the slot test around its mosaic half,
+    /// whose temp file exists for the 300 ms it waits on the slot. A poisoned
+    /// lock is recovered so one failure does not cascade into the other.
+    static MOSAIC_TEMP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// How many mosaic temp files THIS PROCESS is holding. Scoped by pid on
     /// purpose: the system temp directory is shared, and the release battery
     /// runs the calibration lane beside the default one, so a bare name match
     /// counts the other lane's in-flight files and the assertion below fails
     /// for a reason that has nothing to do with the code under test.
     /// `temp_path` writes `{tag}_{pid}_{stamp}_{n}.png`, so the pid segment is
-    /// the scope; inside one process only this test spawns the sidecar.
+    /// the scope; inside one process the tests that make mosaic temp files
+    /// hold [`MOSAIC_TEMP`], so none of them is in flight while this counts.
     fn mosaic_temp_files() -> usize {
         let mine = format!("_{}_", std::process::id());
         std::fs::read_dir(std::env::temp_dir())
@@ -1961,9 +1969,12 @@ mod tests {
             assert!(super::run_sidecar(&opts, &input, &output).is_err());
         });
         let mut raw = bayer_fixture("RGGB", 8, 6, &[512], 16383);
-        crate::assert_bridge_waits_for_model_slot(|| {
-            assert!(super::denoise_mosaic(&opts, &mut raw).is_err());
-        });
+        {
+            let _temps = MOSAIC_TEMP.lock().unwrap_or_else(|e| e.into_inner());
+            crate::assert_bridge_waits_for_model_slot(|| {
+                assert!(super::denoise_mosaic(&opts, &mut raw).is_err());
+            });
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2021,6 +2032,7 @@ mod tests {
     /// samples untouched, and both temp files are gone either way.
     #[test]
     fn a_denoised_mosaic_replaces_the_samples_in_place_or_is_refused() {
+        let _temps = MOSAIC_TEMP.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("autoshade-dn-mosaic-copy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
