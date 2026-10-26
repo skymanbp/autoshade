@@ -172,10 +172,15 @@ fn bitmap_masks_come_back_only_through_the_payload() {
     assert_eq!(back.masks[0].mask, mixed.masks[0].mask);
     assert_eq!(back.masks[0].exposure_ev, -1.0);
     // The payload (v1.3.1) is what brings it back — by its bare name, the
-    // raster itself being one this test never wrote.
-    let whole = xmp_to_recipe(&recipe_to_xmp(&mixed));
+    // raster itself being one this test never wrote, anchored in the develop
+    // dir of the photo it is loaded for.
+    let photo = std::env::temp_dir().join(format!("bitmap-back-{}", std::process::id())).join("roll-0001.ARW");
+    std::fs::create_dir_all(crate::store::develop_dir(&photo)).unwrap();
+    let whole = crate::xmp::xmp_to_recipe_for_photo(&recipe_to_xmp(&mixed), &photo);
     assert_eq!(whole.masks.len(), 2);
-    assert_eq!(whole.masks[1].mask, MaskGeometry::Bitmap { path: "subject.png".into() });
+    let there = crate::store::develop_dir(&photo).join("subject.png").to_string_lossy().into_owned();
+    assert_eq!(whole.masks[1].mask, MaskGeometry::Bitmap { path: there });
+    let _ = std::fs::remove_dir_all(crate::store::develop_dir(&photo));
     assert_eq!(whole.masks[1].exposure_ev, 0.6);
 }
 

@@ -552,7 +552,9 @@ fn decode_raster(name: &str, crc: &str, data: &str) -> Result<Raster, String> {
 /// `materialize` says the caller is a restore surface: the silent probe
 /// readers (`xmp_to_recipe_for_photo`) compare and never write. The bare
 /// names are then anchored to the develop dir exactly as the store anchors a
-/// loaded `recipe.json`.
+/// loaded `recipe.json`. With no develop dir the names stay as written here;
+/// the photo-less READER disables them once the whole reading is done
+/// (`read::xmp_to_recipe_clamped_impl`).
 pub(crate) fn restore(
     crs: EditRecipe,
     payload: Payload,
@@ -571,7 +573,9 @@ pub(crate) fn restore(
         warn(note.clone());
     }
     let written = strip_mask_intent(&super::bare_document(&payload.recipe, frame));
-    let written_then = super::xmp_to_recipe_clamped_impl(&written, photo, None).0;
+    // The raw reading: a photo-less outer read disables raster names only
+    // once it is finished, so W keeps the bare names P and C are compared in.
+    let written_then = super::read_document(&written, photo, None).0;
     let mut r = match reconcile_recipes(&payload.recipe, &written_then, &crs) {
         Ok(r) => r,
         Err(why) => {

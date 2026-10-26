@@ -188,6 +188,38 @@ pub(super) fn xmp_to_recipe_clamped_impl(
     photo: Option<&std::path::Path>,
     diag: Option<&crate::diag::Diag<'_>>,
 ) -> (EditRecipe, crate::recipe::ClampSummary) {
+    let (mut r, dropped) = read_document(xmp, photo, diag);
+    // A reading with no photo has no develop dir, so nothing can say which
+    // folder a relative or bare raster name means, and a later save would
+    // anchor it to whichever develop the recipe lands in — a different
+    // photo's file of the same name. Such a reading never hands one out,
+    // silent or disclosing. Done HERE, once the whole reading is finished,
+    // and not inside it: the payload restore's own re-read of the projection
+    // (`read_document`) must keep comparing bare names against bare names.
+    // The line reaches a reader that has a channel; a silent read has none.
+    if photo.is_none() {
+        let n = crate::store::disable_unanchored_mask_paths(&mut r);
+        if n > 0
+            && let Some(d) = diag
+        {
+            d.warn(format!(
+                "the sidecar's {n} raster reference(s) were disabled — it was read without its \
+                 photo, so there is no develop to anchor them to; the masks and layers that use \
+                 them render inert"
+            ));
+        }
+    }
+    (r, dropped)
+}
+
+/// The reading itself, raster names as the document gives them. Only the
+/// payload restore calls it directly, for its re-read of the projection;
+/// every other reader goes through [`xmp_to_recipe_clamped_impl`].
+pub(super) fn read_document(
+    xmp: &str,
+    photo: Option<&std::path::Path>,
+    diag: Option<&crate::diag::Diag<'_>>,
+) -> (EditRecipe, crate::recipe::ClampSummary) {
     if xmp.len() > MAX_XMP_BYTES {
         return (EditRecipe::default(), crate::recipe::ClampSummary::default());
     }

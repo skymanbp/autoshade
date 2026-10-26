@@ -64,8 +64,8 @@ use backup::{deleting_marker, read_deleted_versions, register_deleted_version};
 #[cfg(test)]
 use backup::{DeletedVersion, DeletedVersions, deleted_versions_path};
 pub use clear::{
-    ClearOutcome, clear_develop, list_versions, mark_develop_cleared, relativize_mask_paths,
-    resolve_mask_paths,
+    ClearOutcome, clear_develop, disable_unanchored_mask_paths, list_versions, mark_develop_cleared,
+    relativize_mask_paths, resolve_mask_paths,
 };
 use clear::{clear_sweep, contained_join, remote_or_device_path};
 #[cfg(test)]
@@ -99,7 +99,7 @@ pub use migrate::{migrate_legacy, migrate_legacy_from_many};
 use migrate::{migrate_legacy_in};
 pub use paths::{
     OwnedRaster, claim_raster, clear_pixel_source, detach_rasters, develop_dir, export_xmp_beside,
-    masters_dir, pixel_source_path, pixel_source_record_bytes, raster_target, recipe_target, saved_quarter_turns,
+    masters_dir, own_areas_in, pixel_source_path, pixel_source_record_bytes, raster_target, recipe_target, saved_quarter_turns,
     variants_path, version_target, write_pixel_source, xmp_beside_target, xmp_target,
 };
 use paths::{

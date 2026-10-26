@@ -179,6 +179,30 @@ fn collector_diag(collector: &crate::diag::Collector) -> crate::diag::Diag<'_> {
     crate::diag::Diag::about(collector, Path::new("payload-test.ARW"))
 }
 
+/// The photo a test LOADS a document for — never created: a read only needs
+/// its path, which names the develop dir the bare raster names anchor to.
+/// That dir is created, as a real develop's is, because the store anchors a
+/// name only inside a folder that exists.
+fn load_photo() -> PathBuf {
+    let photo = std::env::temp_dir().join(format!("payload-load-{}", std::process::id())).join("roll-0001.ARW");
+    std::fs::create_dir_all(crate::store::develop_dir(&photo)).unwrap();
+    photo
+}
+
+/// Read `doc` the way a real load does: for a photo, whose develop dir
+/// anchors the payload's bare raster names (a photo-less read disables them).
+fn load(doc: &str) -> EditRecipe {
+    xmp_to_recipe_for_photo(doc, &load_photo())
+}
+
+/// What [`load`] gives back for a document written from `r`: the payload's
+/// bare names, anchored in the load photo's develop dir.
+fn loaded(r: &EditRecipe) -> EditRecipe {
+    let mut p = payload::portable(r);
+    crate::store::resolve_mask_paths(&mut p, &crate::store::develop_dir(&load_photo()));
+    p
+}
+
 #[test]
 fn a_fresh_document_carries_the_whole_develop_and_reads_it_back_exactly() {
     let dir = scratch("fresh");
@@ -215,8 +239,8 @@ fn a_fresh_document_carries_the_whole_develop_and_reads_it_back_exactly() {
     // Read back through the ordinary door: everything the `crs:` projection
     // lost is back — the colour field, the roles, the tile, the muted mask,
     // the Intersect spelling, the anchor, the non-round exposure.
-    let back = xmp_to_recipe(&doc);
-    assert_eq!(back, payload::portable(&r));
+    let back = load(&doc);
+    assert_eq!(back, loaded(&r));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -240,8 +264,8 @@ fn a_lightroom_rewrite_keeps_what_it_did_not_touch_and_yields_what_it_did() {
     assert!(!doc.contains("ash:"), "the replay drops every intent attribute: {doc}");
     assert!(doc.contains("crs:ColorNoiseReductionDetail=\"50\""), "{doc}");
 
-    let back = xmp_to_recipe(&doc);
-    let want = payload::portable(&original);
+    let back = load(&doc);
+    let want = loaded(&original);
     // Lightroom's edits win…
     assert_eq!(back.exposure_ev, -0.5, "the edited exposure is Lightroom's");
     let names: Vec<&str> = back.masks.iter().map(|m| m.name.as_str()).collect();
@@ -349,6 +373,101 @@ fn rasters_are_placed_beside_the_develop_on_a_disclosing_read_and_never_on_a_sil
     let _ = std::fs::remove_dir_all(&dev);
 }
 
+/// `doc` with its payload recipe swapped for `r`'s JSON exactly as written —
+/// raster paths included, which the writer itself would have made bare. How a
+/// crafted or foreign sidecar puts a relative or share path in front of the
+/// reader.
+fn with_payload_recipe(doc: &str, r: &EditRecipe) -> String {
+    use base64::Engine as _;
+    use std::io::Write as _;
+    let json = serde_json::to_vec(r).unwrap();
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    z.write_all(&json).unwrap();
+    let packed = base64::engine::general_purpose::STANDARD.encode(z.finish().unwrap());
+    let recipe = payload::simple_property(doc, "asr", "Recipe").unwrap();
+    let crc = payload::simple_property(doc, "asr", "RecipeCrc32").unwrap();
+    let out = doc
+        .replacen(&format!("asr:Recipe=\"{recipe}\""), &format!("asr:Recipe=\"{packed}\""), 1)
+        .replacen(
+            &format!("asr:RecipeCrc32=\"{crc}\""),
+            &format!("asr:RecipeCrc32=\"{:08x}\"", crc32fast::hash(&json)),
+            1,
+        );
+    assert_ne!(out, doc, "the swap landed");
+    out
+}
+
+/// A reading with NO photo has no develop dir, so nothing can say which
+/// folder a relative or bare raster name means — and a later save would anchor
+/// it to whichever develop the recipe lands in, where a different photo's
+/// file may carry the name. Silent or disclosing, such a reading never hands
+/// one out: every relative, bare and share path is disabled.
+#[test]
+fn a_read_without_a_photo_never_keeps_an_unanchored_raster_path() {
+    let bitmap = |path: &str| LocalAdjustment {
+        mask: MaskGeometry::Bitmap { path: path.into() },
+        exposure_ev: 0.5,
+        ..Default::default()
+    };
+    let r = EditRecipe {
+        exposure_ev: 0.3,
+        masks: vec![bitmap("mask-bare.png"), bitmap("sub/rel.png"), bitmap("//host/share/m.png")],
+        lens_blur: Some(crate::render::LensBlur {
+            depth_map: "../depth.png".into(),
+            protect: Some(r"\\host\share\p.png".into()),
+            ..Default::default()
+        }),
+        pixel_layers: vec![crate::render::PixelLayer { path: "layer.png".into(), ..Default::default() }],
+        ..Default::default()
+    };
+    let doc = with_payload_recipe(&recipe_to_xmp(&r), &r);
+    let found = payload::find(&doc).unwrap().unwrap();
+    assert_eq!(found.recipe.clone().raster_paths_mut().len(), 6, "premise: the payload carries all six as written");
+    let sentinel = crate::store::store_root().join(".invalid-mask-reference");
+    let check = |label: &str, mut back: EditRecipe| {
+        let paths: Vec<String> = back.raster_paths_mut().into_iter().map(|p| p.clone()).collect();
+        assert_eq!(paths.len(), 6, "{label}: every reference survives as a reference: {paths:?}");
+        for p in &paths {
+            assert_eq!(Path::new(p), sentinel.as_path(), "{label}: an unanchored raster path came out: {p}");
+        }
+    };
+    check("silent", xmp_to_recipe(&doc));
+    check("silent, clamped", xmp_to_recipe_clamped(&doc).0);
+    let collector = crate::diag::Collector::new();
+    let diag = crate::diag::Diag::pixels_only(&collector);
+    check("disclosing", xmp_to_recipe_with_diag(&doc, &diag));
+    let lines = collector.take();
+    assert!(lines.iter().any(|l| l.text.contains("6 raster reference")), "{lines:?}");
+}
+
+/// The merge's mask-preserve check re-reads its base the way the develop in
+/// hand was read. With no photo both sides are read photo-less and disabled
+/// alike, so an untouched import still compares equal and the base's mask
+/// block is kept — no "not in the new file" note.
+#[test]
+fn a_photo_less_merge_still_preserves_an_untouched_import_with_a_bare_raster() {
+    let mut r = EditRecipe { exposure_ev: 0.3, ..Default::default() };
+    r.masks.push(LocalAdjustment {
+        mask: radial(),
+        exposure_ev: 0.4,
+        ..Default::default()
+    });
+    r.masks.push(LocalAdjustment {
+        mask: MaskGeometry::Bitmap { path: "subject.png".into() },
+        exposure_ev: 0.6,
+        ..Default::default()
+    });
+    let base = recipe_to_xmp(&r);
+    let develop = xmp_to_recipe(&base);
+    assert_eq!(develop.masks.len(), 2, "premise: the bitmap mask comes back through the payload");
+    let merged = merge_recipe_into_xmp(&base, &develop).expect("our own document merges");
+    assert!(
+        !merged.notes.iter().any(|n| n.contains("merge base's mask block")),
+        "an untouched import keeps the base's block: {:?}",
+        merged.notes
+    );
+}
+
 #[test]
 fn a_payload_this_build_cannot_trust_is_disclosed_and_the_crs_reading_stands() {
     let dir = scratch("corrupt");
@@ -391,7 +510,7 @@ fn a_merge_replaces_the_previous_payload_and_steps_around_a_foreign_prefix() {
     assert_eq!(merged.matches("asr:Recipe=").count(), 1, "{merged}");
     assert_eq!(merged.matches("asr:RecipeCrc32=").count(), 1, "{merged}");
     assert_eq!(merged.matches("<asr:Rasters>").count(), 1, "the base's element is gone: {merged}");
-    assert_eq!(xmp_to_recipe(&merged), payload::portable(&r2), "the merged file carries the NEW develop");
+    assert_eq!(load(&merged), loaded(&r2), "the merged file carries the NEW develop");
 
     // A base that binds `asr` to somebody else's URI keeps it; ours goes out
     // under the next free prefix and the reader finds it by URI, not by name.
@@ -409,13 +528,13 @@ fn a_merge_replaces_the_previous_payload_and_steps_around_a_foreign_prefix() {
     assert!(merged.contains("asr1:Recipe=\""), "{merged}");
     assert!(merged.contains("<asr1:Rasters>"), "{merged}");
     assert_eq!(payload::bound_prefix(&merged).as_deref(), Some("asr1"));
-    assert_eq!(xmp_to_recipe(&merged), payload::portable(&r2));
+    assert_eq!(load(&merged), loaded(&r2));
     // …and merging AGAIN over that file replaces the asr1 payload, not the foreign asr.
     let again = merge_recipe_into_xmp(&merged, &r1).expect("mergeable").doc;
     assert_eq!(again.matches("asr1:Recipe=").count(), 1, "{again}");
     assert_eq!(again.matches("<asr1:Rasters>").count(), 1, "{again}");
     assert!(again.contains("asr:Thing=\"kept\""), "{again}");
-    assert_eq!(xmp_to_recipe(&again), payload::portable(&r1));
+    assert_eq!(load(&again), loaded(&r1));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -441,9 +560,10 @@ fn a_raster_over_the_budget_is_left_out_and_named() {
     assert!(doc.len() < 2 * 1024 * 1024, "the document stayed small: {}", doc.len());
     // The recipe itself is whole: the mask is there, naming a raster the
     // store may or may not have.
-    let back = xmp_to_recipe(&doc);
+    let back = load(&doc);
     assert_eq!(back.masks.len(), 7);
-    assert_eq!(back.masks[6].mask, MaskGeometry::Bitmap { path: "huge.png".to_string() });
+    let huge_there = crate::store::develop_dir(&load_photo()).join("huge.png").to_string_lossy().into_owned();
+    assert_eq!(back.masks[6].mask, MaskGeometry::Bitmap { path: huge_there });
     assert!(describe_mask_losses(&losses).unwrap().contains("not embedded"), "{losses:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -659,10 +779,10 @@ fn an_inversion_keeps_its_authored_home_through_a_rewrite_and_follows_a_lightroo
         ..Default::default()
     };
     original.clamp();
-    let want = payload::portable(&original);
+    let want = loaded(&original);
     // Untouched: the intent is gone, the net is the net that was written, and
     // the payload's home comes back — not the native fallback's.
-    let back = xmp_to_recipe(&lightroom_like(&original, &original));
+    let back = load(&lightroom_like(&original, &original));
     assert_eq!(back.masks.len(), 2);
     for (b, w) in back.masks.iter().zip(&want.masks) {
         assert_eq!((b.inverted, b.mask.own_inverted()), (true, false), "{:?}: the authored home", w.name);

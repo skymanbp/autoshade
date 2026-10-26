@@ -3694,12 +3694,20 @@ pub fn resolve_existing_pub(p: &Path) -> PathBuf {
 /// protection. “Export .xmp beside the photo” is the separate, confirmed
 /// per-photo sidecar exception.
 ///
-/// The PROJECT's ./out and the per-user store root are always writable, even
-/// when the source itself lives there (e.g. `match` fitting a look onto a
-/// previously exported preview) — the rule protects the photo LIBRARY, not our
-/// own output areas. A folder that merely happens to be NAMED "out" inside the
-/// library is still refused.
+/// The PROJECT's ./out and the store's own areas (the develop dirs and the
+/// pixel masters, `store::own_areas_in`) are always writable, even when the
+/// source itself lives there (e.g. `match` fitting a look onto a previously
+/// exported preview) — the rule protects the photo LIBRARY, not our own
+/// output areas. A folder that merely happens to be NAMED "out" inside the
+/// library is still refused, and so is a photo folder that merely sits
+/// beneath the store root.
 pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
+    guard_readonly_in(out, raw, &crate::store::store_root(), &crate::config::delivery_root())
+}
+
+/// [`guard_readonly`] over an explicit store root and delivery root, so the
+/// tests can site both without touching the process-global settings.
+pub(crate) fn guard_readonly_in(out: &Path, raw: &Path, store: &Path, delivery: &Path) -> Result<()> {
     use std::path::absolute;
     // Fold `.`/`..` LEXICALLY (no filesystem access — the target may not
     // exist yet): `std::path::absolute` keeps `..` segments, so a path like
@@ -3719,8 +3727,17 @@ pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
     };
     let (out_abs, raw_abs) =
         (resolve_existing(&normalize(&out_abs)), resolve_existing(&normalize(&raw_abs)));
-    if out_abs.starts_with(resolve_existing(&crate::store::store_root())) {
-        return Ok(());
+    // The store's OWN areas, not its whole root: `AUTOSHADE_DATA_DIR` may
+    // name a drive root or a library's parent, and allowing everything
+    // beneath it made every photo folder there writable. A photo that itself
+    // lives in one of these areas (a `match` on a pixel master) writes beside
+    // it because that write lands in the same area.
+    for area in crate::store::own_areas_in(store) {
+        if let Ok(area) = absolute(&area)
+            && out_abs.starts_with(resolve_existing(&normalize(&area)))
+        {
+            return Ok(());
+        }
     }
     // OUR own output areas. Two entries, not one: the configured delivery
     // root (M8) and the historical `./out`, which keeps holding the pixel
@@ -3739,10 +3756,10 @@ pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
     // folder stays writable: that is their explicit choice, and Settings
     // warns when it lifts the folder's protection.
     let raw_dir = raw_abs.parent();
-    // Whether the write was aimed at such a relative area: the refusal's hint
-    // then cannot say "write to ./out" — that is the folder being refused.
-    let mut relative_inside = false;
-    for own in [crate::config::delivery_root(), PathBuf::from(crate::config::DEFAULT_DELIVERY_ROOT)]
+    // The relative area the write was aimed at, as configured: the refusal's
+    // hint then cannot say "write to ./out" — that is the folder refused.
+    let mut relative_inside = None;
+    for own in [delivery.to_path_buf(), PathBuf::from(crate::config::DEFAULT_DELIVERY_ROOT)]
     {
         if let Ok(own_out) = absolute(&own) {
             let own_out = resolve_existing(&normalize(&own_out));
@@ -3753,26 +3770,31 @@ pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
                 if !in_library {
                     return Ok(());
                 }
-                relative_inside = true;
+                relative_inside = Some(own.clone());
             }
         }
     }
     if let Some(raw_dir) = raw_dir
         && out_abs.starts_with(raw_dir) {
-            return Err(SourceFolderRefused { dir: raw_dir.to_path_buf(), relative_inside }.into());
+            return Err(SourceFolderRefused {
+                dir: raw_dir.to_path_buf(),
+                relative_inside,
+                delivery: delivery.to_path_buf(),
+            }
+            .into());
         }
     // NEVER clobber an existing PHOTO outside our own output areas. The rule
     // above guards only the RAW's OWN folder, so a SIBLING folder of the same
     // library (D:/Photos/TripB while the RAW sits in D:/Photos/TripA) was
     // fully writable and `-o` could destroy a library photo. We cannot know
     // where the library ROOT is — there is no such setting — but we do not
-    // need to: outside ./out and the develop store (both allowed above,
+    // need to: outside ./out and the store's areas (both allowed above,
     // where overwriting OUR OWN deliverables is the point), refusing to
     // replace an existing image file is stricter than any root guess and
     // needs no configuration. Writing a NEW file elsewhere stays allowed:
     // the user asked for that path, and nothing of theirs is lost.
     if is_source(&out_abs) && out_abs.exists() {
-        return Err(OverwriteRefused { path: out_abs }.into());
+        return Err(OverwriteRefused { path: out_abs, delivery: delivery.to_path_buf() }.into());
     }
     Ok(())
 }
@@ -3780,42 +3802,88 @@ pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
 /// [`guard_readonly`]'s refusal to replace an existing photo outside our own
 /// output areas — typed, so a caller can tell it from the other refusals by
 /// `downcast_ref` rather than by its English (the GUI's Normal mode words it
-/// plainly). The message is the one this refusal has always printed.
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "refusing to overwrite the existing photo {} — outputs must not replace photos outside ./out. Pick a new name, or write to ./out (the default).",
-    .path.display()
-)]
+/// plainly). With the default delivery folder the message is the one this
+/// refusal has always printed; a configured one is named instead of `./out`.
+#[derive(Debug)]
 pub struct OverwriteRefused {
     pub path: PathBuf,
+    /// The delivery folder in force (`config::delivery_root`), as configured.
+    pub delivery: PathBuf,
+}
+
+impl std::fmt::Display for OverwriteRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if is_default_delivery(&self.delivery) {
+            write!(
+                f,
+                "refusing to overwrite the existing photo {} — outputs must not replace photos outside ./out. Pick a new name, or write to ./out (the default).",
+                self.path.display()
+            )
+        } else {
+            let root = shown_folder(&self.delivery);
+            write!(
+                f,
+                "refusing to overwrite the existing photo {} — outputs must not replace photos outside {root} (the delivery folder). Pick a new name, or write to {root}.",
+                self.path.display()
+            )
+        }
+    }
+}
+
+impl std::error::Error for OverwriteRefused {}
+
+fn is_default_delivery(p: &Path) -> bool {
+    p == Path::new(crate::config::DEFAULT_DELIVERY_ROOT)
+}
+
+/// A folder as the hints spell it: a relative one with the `./` that says it
+/// resolves against the current directory, an absolute one as it stands.
+fn shown_folder(p: &Path) -> String {
+    let starts_dotted = matches!(
+        p.components().next(),
+        Some(std::path::Component::CurDir | std::path::Component::ParentDir)
+    );
+    if p.is_relative() && !starts_dotted {
+        format!("./{}", p.display())
+    } else {
+        p.display().to_string()
+    }
 }
 
 /// [`guard_readonly`]'s refusal to write into the photo's own folder —
 /// typed for the same reason as [`OverwriteRefused`] (the GUI's Normal mode
 /// words it plainly). The message is the one this refusal has always
-/// printed, except when the write was aimed at the relative `./out` and that
-/// resolved inside the photo's folder (`relative_inside`): "write to ./out"
-/// would then name the folder being refused, so the hint says why `./out`
-/// landed there and what to do instead.
+/// printed, except when the write was aimed at a relative delivery folder
+/// (`./out`, or the one Settings configured) that resolved inside the photo's
+/// folder (`relative_inside`): "write to ./out" would then name the folder
+/// being refused, so the hint says why that folder landed there and what to
+/// do instead. A configured delivery folder other than `./out` is the one the
+/// ordinary hint names.
 #[derive(Debug)]
 pub struct SourceFolderRefused {
     pub dir: PathBuf,
-    /// The refused path is the relative delivery folder (`./out`), which
-    /// resolved inside the photo's folder because the current directory is
-    /// that folder (or inside it).
-    pub relative_inside: bool,
+    /// The relative delivery folder the refused path was aimed at, as
+    /// configured (`out` by default), when it resolved inside the photo's
+    /// folder because the current directory is that folder (or inside it).
+    pub relative_inside: Option<PathBuf>,
+    /// The delivery folder in force (`config::delivery_root`), as configured.
+    pub delivery: PathBuf,
 }
 
 impl std::fmt::Display for SourceFolderRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "refusing to write into the source RAW's folder ({}) — the photo library is read-only. ", self.dir.display())?;
-        if self.relative_inside {
-            f.write_str(
-                "AutoShade was run from inside the photo's folder, so ./out is a folder inside the photos. \
+        if let Some(own) = &self.relative_inside {
+            write!(
+                f,
+                "AutoShade was run from inside the photo's folder, so {} is a folder inside the photos. \
                  Run it from another folder, or pass -o with a folder outside the photos.",
+                shown_folder(own)
             )
-        } else {
+        } else if is_default_delivery(&self.delivery) {
             f.write_str("Write outputs to ./out (the default) instead.")
+        } else {
+            write!(f, "Write outputs to {} (the delivery folder) instead.", shown_folder(&self.delivery))
         }
     }
 }
@@ -8505,7 +8573,7 @@ mod develop_surface_tests {
         let err = guard_readonly(Path::new("out/_guard_h_photo.developed.tif"), &photo)
             .expect_err("./out inside the photo's folder is the library, not ours");
         let refused = err.downcast_ref::<SourceFolderRefused>().expect("the typed refusal");
-        assert!(refused.relative_inside, "aimed at the relative ./out: {err:#}");
+        assert_eq!(refused.relative_inside.as_deref(), Some(Path::new("out")), "aimed at the relative ./out: {err:#}");
         // The hint cannot send the user to ./out — that is the folder refused.
         let hint = err.to_string();
         assert!(!hint.contains("Write outputs to ./out"), "{hint}");
@@ -8519,12 +8587,80 @@ mod develop_surface_tests {
         // Any other write into the photo's folder keeps the old hint.
         let beside = guard_readonly(&cwd.join("_guard_h_photo.developed.tif"), &photo).expect_err("beside the photo");
         let beside_refused = beside.downcast_ref::<SourceFolderRefused>().expect("the typed refusal");
-        assert!(!beside_refused.relative_inside);
+        assert!(beside_refused.relative_inside.is_none());
         assert!(beside.to_string().ends_with("Write outputs to ./out (the default) instead."), "{beside}");
         // ./out OUTSIDE the photo's folder stays ours…
         let elsewhere = cwd.parent().unwrap().join("_guard_h_elsewhere").join("p.png");
         assert!(guard_readonly(Path::new("out/p.developed.tif"), &elsewhere).is_ok());
         // …and so does writing beside a photo that itself lives in ./out.
         assert!(guard_readonly(Path::new("out/q.matched.json"), Path::new("out/q.preview.jpg")).is_ok());
+    }
+
+    /// A store root ABOVE the photo's folder (`AUTOSHADE_DATA_DIR` set to a
+    /// drive root, or to the library's parent) opens none of the library: the
+    /// store's allowance covers the areas the store lays out (the develops and
+    /// the masters), not every folder that happens to sit beneath its root.
+    #[test]
+    fn a_store_root_above_the_photos_folder_does_not_open_the_library() {
+        let store = std::env::temp_dir().join(format!("_guard_store_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&store);
+        let folder = store.join("library").join("roll-0001");
+        let photo = folder.join("roll-0001.png");
+        let delivery = Path::new("out");
+        // (a) -o into the photo's own folder is the library, whoever its parent is.
+        let err = guard_readonly_in(&folder.join("roll-0001.developed.tif"), &photo, &store, delivery)
+            .expect_err("the photo's folder beneath the store root is still the library");
+        assert!(err.downcast_ref::<SourceFolderRefused>().is_some(), "{err:#}");
+        // An existing photo in a sibling folder beneath the store is not ours to replace either.
+        let sibling = store.join("library").join("roll-0002").join("roll-0002.png");
+        std::fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+        std::fs::write(&sibling, b"png").unwrap();
+        let err = guard_readonly_in(&sibling, &photo, &store, delivery).expect_err("a library photo");
+        assert!(err.downcast_ref::<OverwriteRefused>().is_some(), "{err:#}");
+        // (c) The store's own areas stay writable for that library photo…
+        let develop = store.join("develops").join("roll-0001-key").join("roll-0001.xmp");
+        assert!(guard_readonly_in(&develop, &photo, &store, delivery).is_ok(), "its develop dir");
+        let master = store.join("masters").join("roll-0001.denoise.png");
+        assert!(guard_readonly_in(&master, &photo, &store, delivery).is_ok(), "the masters folder");
+        // …even when the store root IS the photo's folder.
+        assert!(guard_readonly_in(&folder.join("develops").join("k").join("roll-0001.xmp"), &photo, &folder, delivery).is_ok());
+        assert!(guard_readonly_in(&folder.join("roll-0001.developed.tif"), &photo, &folder, delivery).is_err());
+        // (b) A photo that itself lives in a store area writes beside it.
+        let generated = store.join("develops").join("roll-0001-key").join("generated-1.png");
+        let beside = generated.with_file_name("generated-1.matched.json");
+        assert!(guard_readonly_in(&beside, &generated, &store, delivery).is_ok(), "beside a develop-dir photo");
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    /// A delivery folder configured as another RELATIVE name is the one the
+    /// refusals name: their hints used to promise `./out` whatever the setting.
+    #[test]
+    fn the_refusal_hints_name_the_configured_delivery_folder() {
+        let store = std::env::temp_dir().join(format!("_guard_d_store_{}", std::process::id()));
+        let delivery = Path::new("_guard_exports");
+        // The relative delivery folder resolved inside the photo's folder.
+        let photo = std::env::current_dir().unwrap().join("_guard_d_photo.png");
+        let err = guard_readonly_in(&delivery.join("p.developed.tif"), &photo, &store, delivery)
+            .expect_err("the delivery folder inside the photo's folder is the library");
+        let refused = err.downcast_ref::<SourceFolderRefused>().expect("the typed refusal");
+        assert_eq!(refused.relative_inside.as_deref(), Some(delivery));
+        let hint = err.to_string();
+        assert!(hint.contains("so ./_guard_exports is a folder inside the photos"), "{hint}");
+        assert!(!hint.contains("./out"), "{hint}");
+        // Any other write into the photo's folder points at the configured folder.
+        let folder = std::env::temp_dir().join(format!("_guard_d_lib_{}", std::process::id()));
+        let photo = folder.join("roll-0001").join("roll-0001.png");
+        let err = guard_readonly_in(&folder.join("roll-0001").join("x.tif"), &photo, &store, delivery)
+            .expect_err("beside the photo");
+        assert!(err.to_string().ends_with("Write outputs to ./_guard_exports (the delivery folder) instead."), "{err}");
+        // Replacing a photo elsewhere: the hint must not promise ./out either.
+        let victim = folder.join("roll-0002").join("roll-0002.png");
+        std::fs::create_dir_all(victim.parent().unwrap()).unwrap();
+        std::fs::write(&victim, b"png").unwrap();
+        let err = guard_readonly_in(&victim, &photo, &store, delivery).expect_err("an existing photo");
+        let hint = err.to_string();
+        assert!(hint.contains("./_guard_exports"), "{hint}");
+        assert!(!hint.contains("./out"), "{hint}");
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }

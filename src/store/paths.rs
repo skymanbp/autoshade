@@ -18,6 +18,15 @@ pub fn masters_dir() -> PathBuf {
     store_root().join("masters")
 }
 
+/// The areas under `root` the store lays out for files it writes FROM a
+/// photo — the develop dirs and the pixel masters — and so the only part of
+/// the store `pipeline::guard_readonly` counts as ours. The root itself is
+/// not: `AUTOSHADE_DATA_DIR` may name a drive root or a library's parent,
+/// and the photo folders beneath it stay the library.
+pub fn own_areas_in(root: &Path) -> [PathBuf; 2] {
+    [root.join("develops"), root.join("masters")]
+}
+
 /// Root-parameterized core of [`develop_dir`] so tests can use a temp root
 /// without mutating process-global env (set_var is unsafe + racy in 2024).
 pub(super) fn develop_dir_in(root: &Path, src: &Path) -> PathBuf {

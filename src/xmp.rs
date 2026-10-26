@@ -83,7 +83,7 @@ pub use read::{
     xmp_to_recipe, xmp_to_recipe_clamped, xmp_to_recipe_clamped_with_diag, xmp_to_recipe_for_photo,
     xmp_to_recipe_with_diag,
 };
-use read::{is_autoshade_sidecar, upgrade_era_marker, xmp_to_recipe_clamped_impl};
+use read::{is_autoshade_sidecar, read_document, upgrade_era_marker};
 #[cfg(test)]
 use read::{is_autoshade_era2};
 use read_corrections::{classify_correction, parse_paint_stroke};

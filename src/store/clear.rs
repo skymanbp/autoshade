@@ -343,6 +343,29 @@ pub fn resolve_mask_paths(r: &mut EditRecipe, base: &Path) {
     }
 }
 
+/// Disable every raster reference that cannot be anchored without a develop
+/// dir — a relative name, or a network/device path — and return how many.
+/// A bare name only means "this develop dir" ([`resolve_mask_paths`]), so a
+/// recipe read with no develop dir to hand (a sidecar read without its
+/// photo) cannot keep one: a later save would anchor it to whichever develop
+/// the recipe lands in, where a different file may carry the name. The
+/// sentinel is absolute and under the store root, so no later load re-anchors
+/// it and no develop dir's real file can answer for it.
+pub fn disable_unanchored_mask_paths(r: &mut EditRecipe) -> usize {
+    let sentinel = store_root().join(".invalid-mask-reference").to_string_lossy().into_owned();
+    let mut n = 0;
+    for path in r.raster_paths_mut() {
+        let p = Path::new(path.as_str());
+        // An empty name names no file (an AI mask not yet computed), so there
+        // is nothing for it to resolve against.
+        if !path.is_empty() && (p.is_relative() || remote_or_device_path(p)) {
+            *path = sentinel.clone();
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Inverse of [`resolve_mask_paths`] at write time: an absolute raster path
 /// (any of `EditRecipe::raster_paths_mut`) that lives DIRECTLY inside `base` is stored as its bare file name, keeping
 /// the develop dir relocatable. Paths elsewhere are stored as given.
