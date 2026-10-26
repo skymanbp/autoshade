@@ -159,25 +159,50 @@ fn the_lens_blur_round_trips_and_its_absence_costs_no_bytes() {
     assert!(empty.lens_blur.is_none(), "a blur with no depth map has nothing to draw from");
 }
 
-/// A small synthetic render through the blur, hashed bit for bit: a ramp of
-/// depths (so every level of the ladder is used) under a checker. Pinned on
-/// the renderer BEFORE `protect` existed (2026-10-25), so a blur without a
-/// protect mask is held to the exact pixels it drew then.
-fn pinned_render_hash() -> u64 {
+/// A small synthetic render through the blur: a ramp of depths (so every
+/// level of the ladder is used) under a checker, with the given protect mask.
+fn synthetic_render(protect: Option<&image::GrayImage>) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
     let (w, h) = (48usize, 24usize);
-    let mut out = frame_of(w, h, |x, y| if (x / 2 + y / 3) % 2 == 0 { 0.85 } else { 0.1 + 0.01 * x as f32 });
+    let source = frame_of(w, h, |x, y| if (x / 2 + y / 3) % 2 == 0 { 0.85 } else { 0.1 + 0.01 * x as f32 });
     let depth: lens_blur::DepthImage =
         image::ImageBuffer::from_fn(w as u32, h as u32, |x, _| image::Luma([(x * 65535 / (w as u32 - 1)) as u16]));
-    lens_blur::apply(&mut out, w, h, &blur_at([0.1, 0.5]), &depth, None);
+    let mut out = source.clone();
+    lens_blur::apply(&mut out, w, h, &blur_at([0.1, 0.5]), &depth, protect);
+    (source, out)
+}
+
+/// The synthetic render without a protect mask, hashed bit for bit (only
+/// the Windows x86_64 pin below uses it).
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn pinned_render_hash() -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for b in out.iter().flatten().flat_map(|v| v.to_bits().to_le_bytes()) {
+    for b in synthetic_render(None).1.iter().flatten().flat_map(|v| v.to_bits().to_le_bytes()) {
         hash = (hash ^ b as u64).wrapping_mul(0x0100_0000_01b3);
     }
     hash
 }
 
+/// A blur without a protect mask draws what the renderer drew before
+/// `protect` existed. On every platform: no mask and an all-black mask give
+/// the same pixels bit for bit (a zero mask scales every radius by exactly 1),
+/// and the blur really changed the frame.
+///
+/// The hash pinned on the renderer BEFORE `protect` existed (2026-10-25) is
+/// checked only on Windows x86_64, where it was taken: f32 results differ
+/// between platforms (fused multiply-add, the maths library), so the same
+/// render hashes differently on macOS. The portable half of the test is the
+/// no-mask-equals-zero-mask identity.
 #[test]
 fn a_blur_without_protection_draws_the_pixels_it_drew_before_protection_existed() {
+    let (source, unprotected) = synthetic_render(None);
+    let zero = protect_cols(48, 24, 0..0, 255);
+    let (_, zero_masked) = synthetic_render(Some(&zero));
+    assert!(
+        unprotected.iter().flatten().map(|v| v.to_bits()).eq(zero_masked.iter().flatten().map(|v| v.to_bits())),
+        "an all-black protect mask moved a pixel of the unprotected blur"
+    );
+    assert_ne!(unprotected, source, "the blur did not run");
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     assert_eq!(pinned_render_hash(), 6_719_350_490_590_453_548, "the unprotected blur moved a pixel");
 }
 
