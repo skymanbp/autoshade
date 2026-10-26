@@ -165,7 +165,7 @@ synthetic render bit for bit, and f32 results differ between platforms.
 `78378ec` rewrites that test so every platform checks that a render with no
 protect mask equals, bit for bit, the render with an all-black mask, and
 keeps the historical hash only on Windows x86_64, where it was taken; the
-release is tagged on that commit, with CI green on all three platforms.
+release is tagged with that fix in, CI green on all three platforms.
 
 Final check, portraits: three public-domain (CC0) portraits and one backlit
 profile with no face the finder can see. On the three portraits, with
