@@ -275,15 +275,9 @@ pub(super) fn fit_hsl_stage(
     // answers to, applied where the move is generated instead of three stages
     // later: halve the whole vector until the frame's look error stops
     // objecting AND the finished render stops carrying pixels through hue
-    // bands this stage's own gate never measured. Zero is always reachable.
-    let mut reason: Option<HslWithdrawal> = None;
-    let mut candidate = fitted;
-    loop {
-        if candidate.is_neutral() {
-            recipe.hsl = restore;
-            facts.withdrawn = reason.or(Some(HslWithdrawal::Error));
-            return facts;
-        }
+    // bands this stage's own gate never measured. Withdrawal is always
+    // reachable: at neutral, or at the round bound.
+    let verdict = halve_mixer_until_harmless(fitted, |candidate| {
         recipe.hsl = candidate.clone();
         let px = pixels_of(&render::develop_preview(s_img, recipe));
         let regressed = look_err_with_evidence(&px, tp, evidence) > err_before + 1e-4;
@@ -291,10 +285,51 @@ pub(super) fn fit_hsl_stage(
             && !blind_before
             && moved_unsupported_hue_range_names_vouched(sp, &px, evidence, vouch, None)
                 .is_some();
-        if !regressed && !blind_new {
-            return facts;
+        if blind_new {
+            Some(HslWithdrawal::Blind)
+        } else if regressed {
+            Some(HslWithdrawal::Error)
+        } else {
+            None
         }
-        reason = Some(if blind_new { HslWithdrawal::Blind } else { HslWithdrawal::Error });
+    });
+    match verdict {
+        Ok(kept) => recipe.hsl = kept,
+        Err(reason) => {
+            recipe.hsl = restore;
+            facts.withdrawn = Some(reason);
+        }
+    }
+    facts
+}
+
+/// The stage's do-no-harm control, separated from its measurements so its
+/// termination is testable: halve `fitted` while `objects` names a reason,
+/// and hand back the first candidate it does not object to. `Err` carries
+/// the last objection when the halving reaches neutral, or when
+/// [`super::solve::DO_NO_HARM_MAX_ROUNDS`] candidates have been judged —
+/// the 4b loop's bound, for the same reason: a band at the budget ceiling
+/// reaches neutral in eight halvings, so a mixer that needs more is not
+/// descending. The one that cannot is a mixer carrying a hue rotation from
+/// the base recipe, which `halved_hsl` keeps and `Hsl::is_neutral` reads —
+/// a fixed point of the halving, every round rendering the same frame.
+/// Either way the caller withdraws to the state the stage started from.
+pub(super) fn halve_mixer_until_harmless(
+    fitted: crate::recipe::Hsl,
+    mut objects: impl FnMut(&crate::recipe::Hsl) -> Option<HslWithdrawal>,
+) -> Result<crate::recipe::Hsl, HslWithdrawal> {
+    let mut reason: Option<HslWithdrawal> = None;
+    let mut candidate = fitted;
+    let mut rounds = 0;
+    loop {
+        if candidate.is_neutral() || rounds == super::solve::DO_NO_HARM_MAX_ROUNDS {
+            return Err(reason.unwrap_or(HslWithdrawal::Error));
+        }
+        rounds += 1;
+        match objects(&candidate) {
+            None => return Ok(candidate),
+            Some(why) => reason = Some(why),
+        }
         candidate = halved_hsl(&candidate);
     }
 }

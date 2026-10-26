@@ -8801,3 +8801,123 @@ fn a_hand_off_white_balance_the_stage_would_shrink_is_refused_above_default() {
         "what the stage ships, the hand-off's gates admit: {shipped:?}"
     );
 }
+
+// --- the mixer's two do-no-harm loops share 4b's bound -------------------
+
+/// A call counter that fails the test instead of hanging it: past this many
+/// rounds a loop is spinning, whatever its bound is supposed to be.
+const SPIN_GUARD: u32 = 1000;
+
+/// A mixer rotating Red by `hue` and saturating Yellow by `sat`.
+fn mixer(hue: f32, sat: f32) -> crate::recipe::Hsl {
+    let mut hsl = crate::recipe::Hsl::default();
+    (hsl.hue[0], hsl.saturation[2]) = (hue, sat);
+    hsl
+}
+
+/// The stage's own do-no-harm (4a), on a mixer whose halving cannot reach
+/// neutral — a hue rotation from the base recipe, which `halved_hsl` keeps by
+/// design — against a frame that objects to every candidate. The loop stops
+/// at `DO_NO_HARM_MAX_ROUNDS` and withdraws with the last objection, exactly
+/// as it does when the halving reaches neutral.
+#[test]
+fn the_mixer_stage_do_no_harm_stops_at_its_bound_when_nothing_descends() {
+    use super::hsl::halve_mixer_until_harmless;
+    use super::solve::DO_NO_HARM_MAX_ROUNDS;
+    let rotated = mixer(10.0, 40.0);
+    let mut calls = 0u32;
+    let out = halve_mixer_until_harmless(rotated, |_| {
+        calls += 1;
+        assert!(calls <= SPIN_GUARD, "the stage's do-no-harm spun past {SPIN_GUARD} rounds");
+        Some(HslWithdrawal::Blind)
+    });
+    assert_eq!(out, Err(HslWithdrawal::Blind));
+    assert_eq!(calls, DO_NO_HARM_MAX_ROUNDS);
+    // The bound never binds where halving does reach neutral: a band at the
+    // budget ceiling is withdrawn after eight judged candidates.
+    let pegged = crate::recipe::Hsl { hue: [0.0; 8], saturation: [100.0; 8], luminance: [-100.0; 8] };
+    let mut judged = 0u32;
+    let out = halve_mixer_until_harmless(pegged, |_| {
+        judged += 1;
+        Some(HslWithdrawal::Error)
+    });
+    assert_eq!(out, Err(HslWithdrawal::Error));
+    assert!(judged < DO_NO_HARM_MAX_ROUNDS, "{judged} rounds to neutral");
+    let kept = mixer(0.0, 20.0);
+    assert_eq!(halve_mixer_until_harmless(kept.clone(), |_| None), Ok(kept));
+}
+
+/// The mixer against its own absence (4a'), on the same non-descending
+/// mixer: the loop stops at `DO_NO_HARM_MAX_ROUNDS` and withdraws the mixer
+/// to the neutral state its comparison was measured against.
+#[test]
+fn the_mixer_against_its_absence_stops_at_its_bound_when_nothing_descends() {
+    use super::solve::{DO_NO_HARM_MAX_ROUNDS, halve_mixer_until_it_earns};
+    let mut recipe = EditRecipe { hsl: mixer(10.0, 40.0), ..Default::default() };
+    let mut refits = 0u32;
+    let out = halve_mixer_until_it_earns(
+        &mut recipe,
+        |_| true,
+        |_| {
+            refits += 1;
+            assert!(refits <= SPIN_GUARD, "the 4a' loop spun past {SPIN_GUARD} rounds");
+        },
+    );
+    assert_eq!(out, Err(DO_NO_HARM_MAX_ROUNDS));
+    assert!(recipe.hsl.is_neutral(), "withdrawn to neutral: {:?}", recipe.hsl);
+    let mut pegged = EditRecipe {
+        hsl: crate::recipe::Hsl { hue: [0.0; 8], saturation: [100.0; 8], luminance: [0.0; 8] },
+        ..Default::default()
+    };
+    let out = halve_mixer_until_it_earns(&mut pegged, |_| true, |_| {});
+    assert!(matches!(out, Err(n) if n < DO_NO_HARM_MAX_ROUNDS), "{out:?}");
+    let mut quiet = EditRecipe { hsl: mixer(0.0, 40.0), ..Default::default() };
+    assert_eq!(halve_mixer_until_it_earns(&mut quiet, |r| r.hsl.saturation[2] > 20.0, |_| {}), Ok(1));
+    assert_eq!(quiet.hsl.saturation[2], 20.0);
+}
+
+
+// --- the hand-off's white-balance gates, reached from the public entry ---
+
+/// Two bands, grey and orange, each a luminance ramp along x.
+fn grey_and_orange_ramps() -> DynamicImage {
+    let (w, h) = (192u32, 160u32);
+    DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+        let l = 0.08 + 0.84 * x as f32 / (w - 1) as f32;
+        let c = if y < h / 2 { [0.9, 0.9, 0.9] } else { [1.0, 0.6, 0.25] };
+        image::Rgb(c.map(|c: f32| ((l * c).clamp(0.0, 1.0) * 255.0).round() as u8))
+    }))
+}
+
+/// [`grey_and_orange_ramps`] against itself under a +40 tint, above the
+/// default strength: the white-balance stage leaves the light as shot, the
+/// channel curves are asked for the whole cast and fan, and the cast→WB
+/// hand-off walks white balances the strength budget admits — and the
+/// white-balance stage's own two gates, read on each candidate's step by
+/// `hand_off_wb_step_refused`, refuse some of them. Nothing ships through
+/// the hand-off. Measured 2026-10-26: 6 candidates refused at 0.9.
+#[test]
+fn a_hand_off_candidate_the_stage_gates_refuse_is_refused_from_the_public_entry() {
+    use super::solve::route;
+    use crate::recipe::GradeStrength;
+    use crate::rationale::keys;
+    let src = grey_and_orange_ramps();
+    let target = render::develop_preview(
+        &src,
+        &EditRecipe { temperature_k: Some(5500.0), tint: 40.0, ..Default::default() },
+    );
+    route::take();
+    let rep = fit_recipe_with(
+        &src,
+        &target,
+        FitOptions { strength: GradeStrength::new(0.9), provider: None },
+    );
+    let seen = route::take();
+    assert!(seen.hand_off_entered >= 1, "premise: the hand-off is entered: {seen:?}");
+    assert!(seen.wb_step_refusals >= 1, "the stage's gates refuse a candidate: {seen:?}");
+    assert!(
+        !rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB),
+        "nothing ships through the hand-off: {}",
+        rep.recipe.rationale
+    );
+}

@@ -980,6 +980,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             if rescue.rescues()
                 && let Some((share, fan_before)) = out.earns_projection()
             {
+                #[cfg(test)]
+                route::note(|r| r.hand_off_entered += 1);
                 let fitted = [
                     recipe.red_curve.clone(),
                     recipe.green_curve.clone(),
@@ -1025,6 +1027,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                             budget,
                             options.strength,
                         ) {
+                            #[cfg(test)]
+                            route::note(|r| r.wb_step_refusals += 1);
                             return None;
                         }
                         let mut probe = probe_base.clone();
@@ -1096,6 +1100,10 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                     })
                 });
                 let won = if let Some(h) = handed {
+                    #[cfg(test)]
+                    if rescue == DO_NO_HARM_RESCUE {
+                        route::note(|r| r.descent_hand_offs += 1);
+                    }
                     (recipe.temperature_k, recipe.tint) = (Some(h.wb.0), h.wb.1);
                     recipe.saturation = h.saturation;
                     let [red, green, blue] = h.curves;
@@ -1180,8 +1188,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // is taken again here, against the comparison a user would actually make:
     // this recipe, versus the same recipe with the mixer given back and the
     // channel curves refitted on THAT state. Measured on real renders, halved
-    // until the mixer stops costing the finished frame anything; zero is
-    // always reachable. Judging 4a only where it is fitted was tried first
+    // until the mixer stops costing the finished frame anything; withdrawal
+    // to neutral is always reachable, at zero or at the round bound. Judging 4a only where it is fitted was tried first
     // and it shipped a ceiling-pegged three-band move on the viaduct pair
     // that the cast stage could then no longer clean up (look 0.026 -> 0.035).
     if !recipe.hsl.is_neutral() {
@@ -1205,14 +1213,15 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         // fixture verdicts moved, none of them this feature's business.
         fit_cast_stage(&mut neutral, CastRescue::Off);
         let neutral_err = finished_err(&neutral);
-        while finished_err(&recipe) > neutral_err + 1e-4 {
-            let shrunk = halved_hsl(&recipe.hsl);
-            recipe.hsl = shrunk;
-            if recipe.hsl.is_neutral() {
-                hsl_facts.withdrawn = Some(HslWithdrawal::Error);
-                break;
-            }
-            fit_cast_stage(&mut recipe, CastRescue::Off);
+        let withdrawn = halve_mixer_until_it_earns(
+            &mut recipe,
+            |candidate| finished_err(candidate) > neutral_err + 1e-4,
+            |candidate| {
+                fit_cast_stage(candidate, CastRescue::Off);
+            },
+        );
+        if withdrawn.is_err() {
+            hsl_facts.withdrawn = Some(HslWithdrawal::Error);
         }
     }
     // Re-derive so `cast` and the strength-admission fact describe the recipe
@@ -1296,6 +1305,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         err_after > err_before + 1e-4 || (end_moves_hue && budget.vetoes == VetoPolicy::Withhold)
     };
     let descent = step_down_until_harmless(&mut recipe, objects(err_after, end_moves_hue), |recipe| {
+        #[cfg(test)]
+        route::note(|r| r.descent_rounds += 1);
         cast = fit_cast_stage(recipe, DO_NO_HARM_RESCUE);
         end_px = pixels_of(&render::develop_preview(&s_img, recipe));
         err_after = look_err_with_evidence(&end_px, &tp, &evidence);
@@ -1578,6 +1589,43 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     report
 }
 
+/// Which branches of the solve a run reached that no sentence of the report
+/// names, recorded per thread so a test can drive the public entry and tell
+/// a pair that reached a branch from one that only looks as if it had.
+#[cfg(test)]
+pub(super) mod route {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(in crate::fit) struct Route {
+        /// Rounds the 4b do-no-harm loop ran.
+        pub(in crate::fit) descent_rounds: u32,
+        /// 4b re-fits whose cast→WB hand-off shipped.
+        pub(in crate::fit) descent_hand_offs: u32,
+        /// Calls of any rescuing kind that entered the hand-off.
+        pub(in crate::fit) hand_off_entered: u32,
+        /// Hand-off candidates the white-balance stage's gates refused.
+        pub(in crate::fit) wb_step_refusals: u32,
+    }
+
+    thread_local! {
+        static ROUTE: Cell<Route> = Cell::new(Route::default());
+    }
+
+    pub(super) fn note(f: impl FnOnce(&mut Route)) {
+        ROUTE.with(|cell| {
+            let mut route = cell.get();
+            f(&mut route);
+            cell.set(route);
+        });
+    }
+
+    /// What this thread recorded since the last `take`, and a fresh record.
+    pub(in crate::fit) fn take() -> Route {
+        ROUTE.with(|cell| cell.replace(Route::default()))
+    }
+}
+
 /// Who may rescue a fan-convicted cast, and how. `Off` judges the cast as
 /// the gates measured it; the two rescuing callers both try the cast→WB
 /// hand-off and then the projection, and differ only in what the hand-off
@@ -1610,7 +1658,8 @@ impl CastRescue {
 /// The rescue the 4b do-no-harm loop's re-fit runs with.
 pub(super) const DO_NO_HARM_RESCUE: CastRescue = CastRescue::KeepSaturation;
 
-/// Hard bound on the 4b do-no-harm loop's rounds. Saturation halving from
+/// Hard bound on the rounds of the 4b do-no-harm loop, and of the mixer's
+/// two (the stage's own and 4a'), which share it. Saturation halving from
 /// the model cap reaches zero in at most six rounds and a mixer band halving
 /// from its budget reaches neutral in at most eight, so a solve that needs
 /// more is not descending: a re-fit that raises what the round lowered, or a
@@ -1640,6 +1689,35 @@ pub(super) fn step_down_until_harmless(
         recipe.hsl = shrunk;
         objects = refit(recipe);
         rounds += 1;
+    }
+    Ok(rounds)
+}
+
+/// The 4a' loop's control, separated from its measurements so its
+/// termination is testable: while the finished frame `costs` more with the
+/// mixer than without it, halve the mixer and let `refit` re-fit the cast on
+/// it. `Ok(rounds)` when the mixer stopped costing anything; `Err(rounds)`
+/// when the mixer was withdrawn — the halving reached neutral, or ran
+/// [`DO_NO_HARM_MAX_ROUNDS`] rounds without the cost going away (a hue
+/// rotation from the base recipe, which `halved_hsl` keeps, is a fixed point
+/// of the halving). A withdrawal leaves the mixer at `Hsl::default()`, the
+/// state the comparison measured as no worse; the curves are as the last
+/// round fitted them, and the caller's next cast fit re-derives them.
+pub(super) fn halve_mixer_until_it_earns(
+    recipe: &mut EditRecipe,
+    mut costs: impl FnMut(&EditRecipe) -> bool,
+    mut refit: impl FnMut(&mut EditRecipe),
+) -> Result<u32, u32> {
+    let mut rounds = 0;
+    while costs(recipe) {
+        let shrunk = halved_hsl(&recipe.hsl);
+        recipe.hsl = shrunk;
+        rounds += 1;
+        if recipe.hsl.is_neutral() || rounds == DO_NO_HARM_MAX_ROUNDS {
+            recipe.hsl = crate::recipe::Hsl::default();
+            return Err(rounds);
+        }
+        refit(recipe);
     }
     Ok(rounds)
 }
