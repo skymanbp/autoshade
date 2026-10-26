@@ -580,10 +580,25 @@ pub(crate) enum ExportOutcome {
         relooked: usize,
         warns: Vec<String>,
         dest: PathBuf,
-        /// How many of `errs` are `pipeline::OverwriteRefused` — counted by
-        /// type in the worker, since `errs` carries text only.
+        /// How many of `errs` are `pipeline::SourceFolderRefused` — counted
+        /// by type in the worker, since `errs` carries text only (Normal's
+        /// numbered run never meets `OverwriteRefused`).
         refused: usize,
     },
+}
+
+/// How a single delivery treats a file already at its path
+/// (`start_render_with`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutName {
+    /// The library guard decides (the workspace's Export).
+    Guarded,
+    /// A name the app made itself (Normal's output-folder save): never
+    /// replace a file there — claim the first free `-2`, `-3`, … beside it.
+    Numbered,
+    /// A file the user picked in the save window, which confirms a replace
+    /// itself (Normal): theirs to replace, so it is not numbered.
+    Chosen,
 }
 
 /// Batch recipe-paste facts (L12#4). `errs` non-empty = partial failure —

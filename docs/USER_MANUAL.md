@@ -67,10 +67,13 @@ the photo on top of the one-click result. Warmth runs from −100 (cooler) to
 the colour temperature. **Back to the one-click result** puts the four sliders
 back where the last one-click left them.
 
-**Noise.** **AI denoise** cleans grain out of the photo when you save it, at
-the denoiser's default strength. It helps most with night and dark phone
-photos and is slow. It is applied when you save, so the preview does not
-show it. The first time, the noise model is downloaded (about 72 MB).
+**Noise.** **AI denoise** cleans grain out of the photo. It is the same AI
+denoise as **AI Denoise now** in Landscape, at the same strength. It helps
+most with night and dark phone photos. It takes a moment; then the preview
+shows the cleaned photo, and that is what **Save as jpg** saves. Turn the
+switch off to see the photo without it again, and on again to bring the
+cleaned one back without waiting a second time; your slider changes stay
+either way. The first time, the noise model is downloaded (about 72 MB).
 
 **Save.** **Save as jpg** saves the photo with its look as a jpg at the
 quality you pick (High, Medium or Small file); the original file is never
@@ -80,9 +83,13 @@ you last saved to, or a question each time, the same destination the full
 workspace's Export uses. `Ctrl+S` and `Ctrl+E` do the same as the button.
 The status bar says **unsaved changes** once the look differs from how the
 photo opened or was last saved, and **saved as jpg** right after a save (the
-folder-wide save counts for the open photo too). Photos saved earlier are
-never replaced outside the app's output folder: if the folder already holds
-them, the app says so and you pick another folder or move the old ones.
+folder-wide save counts for the open photo too; turning **AI denoise** on or
+off changes the picture, so the bar says **unsaved changes** until that one is
+saved). A save never replaces a photo saved earlier under a name the app
+made: when the folder already holds a jpg of that name, the new one gets a
+number — `name-2.jpg`, then `name-3.jpg` — and the line says which file was
+written. A name you pick yourself in the save window is yours to replace. The app never saves into the folder the photo itself
+is in; if you pick that folder, it says so and you pick another.
 **Apply this look to every photo in the folder** first settles that folder
 (if you cancel, nothing changes), then gives every photo of the folder open
 in the library the same look and saves each one there as a jpg.

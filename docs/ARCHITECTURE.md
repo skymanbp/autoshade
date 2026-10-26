@@ -6917,22 +6917,34 @@ analyze worker wraps `produce_recipe` in it, so the pipeline's own library
 read and its signature are unchanged and no other caller sees a difference.
 The four sliders write `exposure_ev`, `contrast`, `temperature_k` (warmth =
 100·log2 of the temperature over the as-shot anchor) and `saturation`; the
-noise switch is the export-time AI denoise at `denoise::default_strength_for`
-(applied at save, never previewed);
+noise switch is the Retouch panel's AI denoise (`set_normal_denoise` calls
+`start_ai_denoise`, so the same worker, model and strength, and the ◈ card it
+lands is what the canvas shows and the save renders; off switches back to the
+card it was made from, on again re-shows the remembered ◈ card with no second
+run, the live recipe carried across both ways; `after_normal_denoise` records
+the card after `Msg::Retouched`);
 Save is `start_render_with` (a jpg at a quality step, into the one export
 destination — never beside the photo, which `pipeline::guard_readonly`
-forbids), and Ctrl+S / Ctrl+E take the same path in Normal; "apply to every
+forbids — and `OutName::Numbered` for a name the app made: `pipeline::claim_numbered`
+claims the bare name or the first free `-2`, `-3`, … beside it by
+`create_new`, so a second save never replaces the first and is not refused; a
+file picked in the save window is `OutName::Chosen` and is replaced, as that
+window confirmed), and Ctrl+S / Ctrl+E take the same
+path in Normal; "apply to every
 photo" settles that folder first, then runs `start_paste_to` and
-`start_batch_render_for` over the folder. A mode without canvas tools holds
+`start_batch_render_for` over the folder, numbered the same way (each
+numbered name joins the batch's `renamed` disclosures). A mode without canvas tools holds
 none armed: `put_down_hidden_tools` runs at the head of the status bar each
 frame, before the status text and the canvas are drawn. The status bar's
-marker in Normal follows the jpg (`normal_look_mark`: the look against the one
-the photo opened with or a landed Save-group delivery last wrote), not the
-develop record the workspace's marker compares. `guard_readonly`'s refusal to
-replace an existing photo is typed (`pipeline::OverwriteRefused`, same
-message as before): the batch worker counts it per photo by type
-(`ExportOutcome::Batch::refused`) and Normal words it plainly on both the
-single and the batch path, never by matching its English.
+marker in Normal follows the jpg (`normal_look_mark`: the card on screen — the
+file it renders from — and its look against the ones the photo opened with or
+a landed Save-group delivery last wrote), not the develop record the
+workspace's marker compares. `guard_readonly`'s two refusals are
+typed (`pipeline::OverwriteRefused` and `pipeline::SourceFolderRefused`, same
+messages as before): Normal's numbered saves step past the first and meet only
+the second, which the batch worker counts per photo by type
+(`ExportOutcome::Batch::refused`) and Normal words plainly on both the single
+and the batch path, never by matching its English.
 
 **The Portraits mode's panel.** Portraits keeps every shared panel and adds
 one above them: `Shell::portrait_panel` draws

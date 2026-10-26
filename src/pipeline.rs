@@ -3118,6 +3118,31 @@ pub fn unique_out(path: &Path, tag: &str) -> Option<PathBuf> {
     None
 }
 
+/// First FREE deliverable path for `out`: `out` itself, then
+/// `<stem>-2.<ext>` … `<stem>-999.<ext>` beside it, CLAIMED atomically
+/// (`create_new`) the way [`unique_out`] claims a master — so two saves
+/// racing for one name cannot both take it, and an existing file is never
+/// replaced. The parent folder is made first. The claimed placeholder is
+/// empty; the render's staged publish replaces it, and a caller whose render
+/// fails removes it. Errors past the 999 cap (refuse, never alias). The GUI's
+/// Normal mode saves through this: a second save of one photo lands as
+/// `-2`, not as a refusal and not over the first.
+pub fn claim_numbered(out: &Path) -> Result<PathBuf> {
+    ensure_parent(out)?;
+    let parent = out.parent().unwrap_or(Path::new(""));
+    let file_stem = out.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = out.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    for n in 1..=999u32 {
+        let cand = if n == 1 { out.to_path_buf() } else { parent.join(format!("{file_stem}-{n}{ext}")) };
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&cand) {
+            Ok(_) => return Ok(cand),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("create {}", cand.display())),
+        }
+    }
+    anyhow::bail!("{} and 998 numbered copies of it already exist — pick another folder", out.display())
+}
+
 /// Write the develop's XMP projection: the published path, the note when
 /// the merge could not be performed and the sidecar was REGENERATED instead
 /// (see [`write_xmp_doc`] for why that is a loss worth telling the user
@@ -3594,11 +3619,7 @@ pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
     }
     if let Some(raw_dir) = raw_abs.parent()
         && out_abs.starts_with(raw_dir) {
-            anyhow::bail!(
-                "refusing to write into the source RAW's folder ({}) — the photo library is \
-                 read-only. Write outputs to ./out (the default) instead.",
-                raw_dir.display()
-            );
+            return Err(SourceFolderRefused { dir: raw_dir.to_path_buf() }.into());
         }
     // NEVER clobber an existing PHOTO outside our own output areas. The rule
     // above guards only the RAW's OWN folder, so a SIBLING folder of the same
@@ -3627,6 +3648,19 @@ pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
 )]
 pub struct OverwriteRefused {
     pub path: PathBuf,
+}
+
+/// [`guard_readonly`]'s refusal to write into the photo's own folder —
+/// typed for the same reason as [`OverwriteRefused`] (the GUI's Normal mode
+/// words it plainly). The message is the one this refusal has always
+/// printed.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "refusing to write into the source RAW's folder ({}) — the photo library is read-only. Write outputs to ./out (the default) instead.",
+    .dir.display()
+)]
+pub struct SourceFolderRefused {
+    pub dir: PathBuf,
 }
 
 #[cfg(test)]
@@ -5059,6 +5093,25 @@ mod guard_tests {
             default_out(Path::new("D:/roll1/DSC00001.ARW"), "developed", "tif"),
             "an un-rooted batch is exactly default_out, as every CLI caller expects"
         );
+    }
+
+    /// `claim_numbered` hands out the bare name, then `-2`, `-3` beside it,
+    /// each CLAIMED on disk (so a second claim never gets a name the first
+    /// took), makes the folder, and never touches a file already there.
+    #[test]
+    fn claim_numbered_counts_up_beside_the_name_and_never_replaces() {
+        let dir = std::env::temp_dir().join(format!("autoshade-claim-numbered-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let out = dir.join("sub").join("photo.developed.jpg");
+        let first = claim_numbered(&out).unwrap();
+        assert_eq!(first, out, "a free name is the name itself, its folder made");
+        std::fs::write(&first, b"first").unwrap();
+        let second = claim_numbered(&out).unwrap();
+        assert_eq!(second, dir.join("sub").join("photo.developed-2.jpg"));
+        let third = claim_numbered(&out).unwrap();
+        assert_eq!(third, dir.join("sub").join("photo.developed-3.jpg"), "the empty -2 claim counts as taken");
+        assert_eq!(std::fs::read(&first).unwrap(), b"first", "the earlier file is untouched");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

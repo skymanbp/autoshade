@@ -637,7 +637,11 @@ impl AutoShadeApp {
                         self.status = m;
                     }
                 }
-                Msg::Retouched(epoch, boxed) => self.on_retouched(ctx, lang, epoch, *boxed),
+                Msg::Retouched(epoch, boxed) => {
+                    self.on_retouched(ctx, lang, epoch, *boxed);
+                    // Normal's noise switch lands through the same door.
+                    self.after_normal_denoise(lang);
+                }
                 Msg::Fitted(boxed) => self.on_fitted(ctx, lang, boxed),
                 Msg::Styled(boxed) => match *boxed {
                     Ok((prompt, note)) => {

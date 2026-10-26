@@ -418,7 +418,7 @@ impl AutoShadeApp {
         // its own), captured at the click like every other export input.
         let denoise_strength = self.selected_denoise_strength(true);
         let export = self.export_opts();
-        self.start_render_with(out, export, denoise.then_some(denoise_strength), self.save_denoise)
+        self.start_render_with(out, export, denoise.then_some(denoise_strength), self.save_denoise, OutName::Guarded)
     }
 
     /// [`start_render_to`](Self::start_render_to) with the delivery options
@@ -426,12 +426,19 @@ impl AutoShadeApp {
     /// group (`panels/normal.rs`) delivers a jpg at its own quality step.
     /// `denoise` is the AI denoise strength when it runs; `denoise_asked`
     /// says the switch was on even though it sits out (a ◈ card).
+    /// `name` says what a file already at `out` means ([`OutName`]): the
+    /// guard's refusal to replace an earlier photo stands for the
+    /// workspace; a name Normal made is numbered instead (the first free
+    /// `-2`, `-3`, … beside it, `pipeline::claim_numbered`); a file the user
+    /// picked in the save window is replaced. Every other refusal of the
+    /// guard stands for all three.
     pub(crate) fn start_render_with(
         &mut self,
         out: PathBuf,
         export: autoshade::render::ExportOpts,
         denoise: Option<f32>,
         denoise_asked: bool,
+        name: OutName,
     ) -> bool {
         let Some(path) = self.active_source_path() else { return false };
         if self.busy {
@@ -452,12 +459,34 @@ impl AutoShadeApp {
         }
         for a in &anchors {
             if let Err(e) = autoshade::pipeline::guard_readonly(&out, a) {
+                // A numbered save does not replace the file the guard
+                // protects (it takes a fresh name below); a chosen one is
+                // the user's confirmed replace.
+                if name != OutName::Guarded && e.is::<autoshade::pipeline::OverwriteRefused>() {
+                    continue;
+                }
                 let t = self.plain_refusal(lang, &e).unwrap_or_else(|| e.to_string());
                 self.status = t.clone();
                 self.toast(ToastKind::Error, t);
                 return false;
             }
         }
+        // Claimed on this thread, before the status names it: the line and
+        // the landing name the file actually written.
+        let numbered = name == OutName::Numbered;
+        let out = if numbered {
+            match autoshade::pipeline::claim_numbered(&out) {
+                Ok(p) => p,
+                Err(e) => {
+                    let t = format!("{e:#}");
+                    self.status = t.clone();
+                    self.toast(ToastKind::Error, t);
+                    return false;
+                }
+            }
+        } else {
+            out
+        };
         self.busy = true;
         // ABSOLUTE, both here and at the landing (workers.rs): `./out` is
         // relative to the directory the app was launched from, so a bare
@@ -486,6 +515,7 @@ impl AutoShadeApp {
         self.spawn_worker(
             move || {
                 let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
+                let claim = numbered.then(|| out.clone());
                 let res = (|| {
                     if let Some(p) = out.parent() {
                         std::fs::create_dir_all(p)?;
@@ -525,6 +555,12 @@ impl AutoShadeApp {
                         relooked: relook,
                     })
                 })();
+                // A failed numbered save leaves no empty claim behind.
+                if res.is_err()
+                    && let Some(c) = &claim
+                {
+                    release_empty_claim(c);
+                }
                 Msg::Exported(res)
             },
             |e| Msg::Exported(Err(e)),
@@ -571,7 +607,7 @@ impl AutoShadeApp {
         let ext = self.exp_format.ext().to_string();
         let export = self.export_opts();
         let Some(dest) = self.export_dest_dir().or_else(|| self.pick_batch_folder()) else { return };
-        self.start_batch_render_for(targets, ext, export, dest);
+        self.start_batch_render_for(targets, ext, export, dest, false);
     }
 
     /// The batch's folder when the destination setting asks (`None` =
@@ -602,13 +638,16 @@ impl AutoShadeApp {
     /// mode's 「apply this look to every photo in the folder」
     /// (`panels/normal.rs`) renders every photo of the folder as a jpg without
     /// touching the Export section, into the folder it resolved before its
-    /// paste.
+    /// paste. `numbered` is [`start_render_with`](Self::start_render_with)'s:
+    /// a photo whose jpg is already in `dest` gets a `-2`, `-3`, … copy, and
+    /// each such name is disclosed in `renamed`.
     pub(crate) fn start_batch_render_for(
         &mut self,
         targets: Vec<PathBuf>,
         ext: String,
         export: autoshade::render::ExportOpts,
         dest: PathBuf,
+        numbered: bool,
     ) {
         if self.busy || targets.is_empty() {
             return;
@@ -683,8 +722,12 @@ impl AutoShadeApp {
                     // Per-photo develop disclosures (L16-2) — the open
                     // path's warnings, shipped on the batch outcome.
                     let mut warns: Vec<String> = Vec::new();
+                    // The numbered run's fresh names, disclosed with the
+                    // same-stem ones.
+                    let mut numbered_names: Vec<String> = Vec::new();
                     for p in &targets {
                         let mut photo_warns: Vec<String> = Vec::new();
+                        let mut claimed: Option<PathBuf> = None;
                         let one = (|| -> anyhow::Result<()> {
                             // ONE locked snapshot per photo when DISK decides
                             // (L01): recipe text, pixel source and the .bak
@@ -756,7 +799,7 @@ impl AutoShadeApp {
                                 }
                                 (recipe, snap.pixel_source)
                             };
-                            let out = names.claim(p, "developed", &ext);
+                            let named = names.claim(p, "developed", &ext);
                             // The read-only-library gate the single export has
                             // always run, now needed HERE too (R22-7): the
                             // batch root became user-choosable, so a
@@ -766,7 +809,21 @@ impl AutoShadeApp {
                             // — that is the library folder being protected; a
                             // baked master's own home is ./out, never a
                             // library.
-                            autoshade::pipeline::guard_readonly(&out, p)?;
+                            // A numbered run steps past an earlier jpg of
+                            // the same name instead of refusing it, and
+                            // claims its own (`start_render_with`'s rule).
+                            let out = match autoshade::pipeline::guard_readonly(&named, p) {
+                                Err(e) if !(numbered && e.is::<autoshade::pipeline::OverwriteRefused>()) => return Err(e),
+                                _ if numbered => {
+                                    let out = autoshade::pipeline::claim_numbered(&named)?;
+                                    if out != named {
+                                        numbered_names.push(format!("{} ← {}", out.display(), p.display()));
+                                    }
+                                    claimed = Some(out.clone());
+                                    out
+                                }
+                                _ => named,
+                            };
                             autoshade::pipeline::ensure_parent(&out)?;
                             let mut recipe = recipe;
                             if pix.as_ref().is_some_and(|(_, generated)| *generated) {
@@ -808,8 +865,11 @@ impl AutoShadeApp {
                         match one {
                             Ok(()) => okn += 1,
                             Err(e) => {
+                                if let Some(c) = &claimed {
+                                    release_empty_claim(c);
+                                }
                                 // Typed, before the text is all that is left.
-                                if e.chain().any(|c| c.is::<autoshade::pipeline::OverwriteRefused>()) {
+                                if e.chain().any(|c| c.is::<autoshade::pipeline::SourceFolderRefused>()) {
                                     refused += 1;
                                 }
                                 errs.push(format!("{}: {e}", autoshade::pipeline::stem(p)));
@@ -828,10 +888,12 @@ impl AutoShadeApp {
                     // and the per-photo errors all render at the landing,
                     // with the language live THERE — a batch runs minutes
                     // and the language picker stays reachable throughout.
+                    let mut renamed = names.renamed;
+                    renamed.extend(numbered_names);
                     Ok(ExportOutcome::Batch {
                         ok: okn,
                         errs,
-                        renamed: names.renamed,
+                        renamed,
                         relooked,
                         warns,
                         // Where this run actually delivered — carried, not

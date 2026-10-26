@@ -527,26 +527,149 @@
         }
     }
 
-    /// The noise switch says, in one plain line, that it acts at save time
-    /// and not in the preview; the first-download size follows only when the
-    /// model is missing and the photo is a rendered image; without the helper
-    /// the no-tool line stands alone.
+    /// The words around the noise switch say, plainly, that it takes a
+    /// moment and the preview then shows what gets saved (never "applied at
+    /// save" any more); the first-download size follows while the model is
+    /// not known to be on disk and the photo is a rendered image; without the
+    /// helper the no-tool line stands alone. None of them says a trade word.
     #[test]
-    fn the_noise_lines_say_it_is_applied_at_save_and_not_previewed() {
+    fn the_noise_lines_say_it_takes_a_moment_and_the_first_run_downloads_the_model() {
+        let words = ["配方", "显影", "反推", "变体", "蒙版", "API", "recipe", "develop", "reverse-fit", "variant", "mask", "sidecar"];
         for lang in [Lang::En, Lang::Zh] {
-            let plain = tr(lang, "Applied when you save; not shown in the preview.").to_string();
+            let plain = tr(lang, "It takes a moment; the preview then shows the result, and that is what gets saved.").to_string();
             let mut app = AutoShadeApp { lang, src_path: Some(PathBuf::from("phone.jpg")), ..Default::default() };
             assert_eq!(app.noise_lines(lang, false), vec![tr(lang, "This download does not include the noise tool.").to_string()]);
-            assert_eq!(app.noise_lines(lang, true), vec![plain.clone()], "{lang:?}: off");
-            app.normal.denoise = true;
-            app.normal.denoise_ready = Some(false);
-            let lines = app.noise_lines(lang, true);
-            assert_eq!(lines.len(), 2, "{lang:?}: {lines:?}");
-            assert_eq!(lines[0], plain);
-            assert!(lines[1].contains("72 MB"), "{lang:?}: {lines:?}");
+            app.normal.denoise_ready = Some(true);
+            assert_eq!(app.noise_lines(lang, true), vec![plain.clone()], "{lang:?}: the model is there");
+            for ready in [Some(false), None] {
+                app.normal.denoise_ready = ready;
+                let lines = app.noise_lines(lang, true);
+                assert_eq!(lines.len(), 2, "{lang:?} {ready:?}: {lines:?}");
+                assert_eq!(lines[0], plain);
+                assert!(lines[1].contains("72 MB"), "{lang:?}: {lines:?}");
+            }
             app.src_path = Some(PathBuf::from("camera.arw"));
-            assert_eq!(app.noise_lines(lang, true), vec![plain], "{lang:?}: a RAW downloads nothing new");
+            assert_eq!(app.noise_lines(lang, true), vec![plain.clone()], "{lang:?}: a RAW downloads nothing new");
+            let (moment, preview) = match lang {
+                Lang::En => ("takes a moment", "preview"),
+                Lang::Zh => ("稍等", "预览"),
+            };
+            assert!(plain.contains(moment) && plain.contains(preview), "{lang:?}: {plain}");
+            let mut said = app.noise_lines(lang, true);
+            app.src_path = Some(PathBuf::from("phone.jpg"));
+            said.extend(app.noise_lines(lang, true));
+            said.extend(
+                [
+                    tr(lang, "Cleans the grain out of the photo, and the preview shows the result — it helps night and dark phone photos most; it uses the graphics card when there is one. Turn it off to see the photo without it."),
+                    tr(lang, "Removing the grain… this takes a moment."),
+                    tr(lang, "AI denoise done. Turn the switch off to see the photo without it."),
+                    tr(lang, "AI denoise on"),
+                    tr(lang, "AI denoise off"),
+                ]
+                .map(str::to_string),
+            );
+            for text in &said {
+                assert!(!text.contains("when you save") && !text.contains("保存时处理"), "{lang:?}: {text:?}");
+                let low = text.to_lowercase();
+                for w in words {
+                    let hit = if w.is_ascii() && w != "API" { low.contains(w) } else { text.contains(w) };
+                    assert!(!hit, "{lang:?}: {text:?} says {w:?}");
+                }
+            }
         }
+    }
+
+    /// One AI denoise, not two: Normal's switch IS the Retouch panel's
+    /// (`start_ai_denoise`) — it meets that door's own gate, runs its worker
+    /// and lands through its message (`Msg::Retouched` with a ◈ card) — so
+    /// the canvas shows the result and the save renders that card. Off goes
+    /// back to the card it was made from; on again shows the ◈ card already
+    /// made with no second run; the look the sliders made rides across both
+    /// ways.
+    ///
+    /// MUTATION THIS CATCHES: call anything but `start_ai_denoise` on the
+    /// way on (the turned-photo gate and the worker's own failure are not
+    /// met), drop the `after_normal_denoise` hook (the ◈ card is not
+    /// remembered and on-again runs a second time), switch to the wrong card
+    /// on the way off, or bring back the export-time denoise in
+    /// `start_normal_save`.
+    #[test]
+    fn the_noise_switch_is_the_retouch_denoise_and_round_trips() {
+        use crate::panels::normal::DenoisePair;
+        let (mut app, src, _scrub) = normal_photo("denoise");
+        let ctx = egui::Context::default();
+        let b0 = std::sync::Arc::new(image::DynamicImage::new_rgba8(4, 4));
+        app.variants = vec![Variant {
+            id: ORIGINAL_VARIANT_ID.into(),
+            name: None,
+            kind: VariantKind::Original,
+            recipe: EditRecipe::default(),
+            base: Some(b0.clone()),
+            origin: None,
+            thumb: None,
+        }];
+        app.active = 0;
+        app.base_preview = Some(b0);
+        app.reset_history();
+        // The Retouch door's own gate answers: a turned photo is refused
+        // before any worker, with that door's words.
+        app.recipe.quarter_turns = 1;
+        app.set_normal_denoise(true);
+        assert!(!app.busy, "refused before a worker");
+        assert!(app.status.contains("this photo is turned"), "{}", app.status);
+        assert!(app.normal.denoise_pair.is_none(), "a refused run remembers nothing");
+        app.recipe.quarter_turns = 0;
+        // The door's worker runs: this photo has no file, so it fails fast at
+        // the decode — through `Msg::Retouched`, the Retouch button's message.
+        app.set_normal_denoise(true);
+        assert!(app.busy, "the denoise worker runs: {}", app.status);
+        assert_eq!(app.status, tr(Lang::En, "Removing the grain… this takes a moment."));
+        assert!(app.normal_denoise_on(), "the switch reads on while it runs");
+        land_all(&mut app, &ctx);
+        assert!(!app.normal_denoise_on(), "a failed run leaves the switch off");
+        assert_eq!(app.variants.len(), 1, "and no card");
+        // A landed run, through the same message the worker sends.
+        app.normal.denoise_pair =
+            Some(DenoisePair { photo: src.clone(), plain: ORIGINAL_VARIANT_ID.into(), denoised: None });
+        let master = std::path::PathBuf::from("out/_gui_normal_denoise.denoise.png");
+        let note = RetouchNote::Denoised { out: master.clone(), on_mosaic: false };
+        let done = Ok((image::DynamicImage::new_rgba8(4, 4), note, master.clone(), RetouchKind::NewDenoised));
+        app.tx.send(Msg::Retouched(app.gen_epoch, Box::new(done))).unwrap();
+        app.poll_workers(&ctx);
+        assert_eq!(app.variants[app.active].kind, VariantKind::Denoised, "the ◈ card is on the canvas");
+        assert_eq!(app.active_source_path().as_deref(), Some(master.as_path()), "…and is what a save renders");
+        assert!(app.normal_denoise_on());
+        let made = app.variants[app.active].id.clone();
+        assert_eq!(app.normal.denoise_pair.as_ref().and_then(|d| d.denoised.clone()), Some(made.clone()), "remembered");
+        assert_eq!(app.status, tr(Lang::En, "AI denoise done. Turn the switch off to see the photo without it."));
+        // Off: the card it was made from, the look kept.
+        app.recipe.exposure_ev = 0.7;
+        app.set_normal_denoise(false);
+        assert!(!app.busy);
+        assert_eq!(app.variants[app.active].id, ORIGINAL_VARIANT_ID, "back to the un-denoised card");
+        assert_eq!(app.active_source_path().as_deref(), Some(src.as_path()));
+        assert_eq!(app.recipe.exposure_ev, 0.7, "the look rides across");
+        assert!(!app.normal_denoise_on());
+        assert_eq!(app.status, tr(Lang::En, "AI denoise off"));
+        // On again: the same ◈ card, no second run.
+        app.recipe.contrast = 12.0;
+        app.set_normal_denoise(true);
+        assert!(!app.busy, "no second sidecar run");
+        assert_eq!(app.variants.len(), 2, "no second card");
+        assert_eq!(app.variants[app.active].id, made, "the master already made");
+        assert_eq!((app.recipe.exposure_ev, app.recipe.contrast), (0.7, 12.0), "the look rides across");
+        assert_eq!(app.status, tr(Lang::En, "AI denoise on"));
+        // The switch's way on is the Retouch door, and the save carries no
+        // denoise of its own (pinned on the source, the house pattern for a
+        // worker whose sidecar cannot run offline).
+        let now = include_str!("../panels/normal.rs");
+        let on = &now[now.find("pub(crate) fn set_normal_denoise(").expect("set_normal_denoise moved")..];
+        let on = &on[..on.find("pub(crate) fn after_normal_denoise(").expect("after_normal_denoise moved")];
+        assert!(on.contains("self.start_ai_denoise();"), "the switch no longer runs the Retouch denoise");
+        let save = &now[now.find("pub(crate) fn start_normal_save(").expect("start_normal_save moved")..];
+        let save = &save[..save.find("pub(crate) fn start_apply_to_folder(").expect("start_apply_to_folder moved")];
+        assert!(save.contains("start_render_with(out, export, None, false, how)"), "the save runs a denoise of its own again");
+        assert!(!now.contains("default_strength_for"), "the export-time denoise came back");
     }
 
     /// The status bar's marker in Normal follows the jpg, not the develop
@@ -596,45 +719,202 @@
         assert_eq!(app.normal_look_mark(), Some(LookMark::Saved), "{}", app.status);
     }
 
-    /// The library refuses to replace a jpg saved earlier outside its own
-    /// output areas (`pipeline::OverwriteRefused`) — kept. In Normal the
-    /// refusal reads as one plain sentence on both saving paths, matched by
-    /// the error's type: a second Save as jpg into the same folder (refused
-    /// before it renders) and 「apply to every photo」 into it (refused per
-    /// photo inside the batch). The refused delivery does not mark the jpg
-    /// saved. Landscape, the control, keeps the library's own line.
+    /// A second save into a name the app made never replaces the first and
+    /// is never refused: it gets a number — `-2`, then `-3` — claimed on disk
+    /// (`claim_numbered`), and the finished line names the file actually
+    /// written. A file the user picks in the save window (which confirms a
+    /// replace itself) is theirs: it is replaced, not numbered — and the next
+    /// app-made name is numbered again. 「Apply to every photo」 into a folder
+    /// already saved once writes every photo as `-2`, and says how many got a
+    /// number. Landscape, the control, keeps the library's refusal to replace
+    /// a photo outside its output areas.
     ///
-    /// MUTATION THIS CATCHES: stop counting the refusal by type in the batch
-    /// worker, stop mapping it on the single path, or mark a refused batch
-    /// as saved, and an assert below fails.
+    /// MUTATION THIS CATCHES: drop `OutName::Numbered` on either Normal path
+    /// (the guard refuses the second save), number the picked file
+    /// (`OutName::Chosen` → `Numbered`), claim without `create_new` stepping
+    /// (the first jpg is replaced), or name the bare file in the landing,
+    /// and an assert below fails.
     #[test]
-    fn a_refusal_to_replace_earlier_photos_reads_plainly_in_normal() {
+    fn a_second_save_gets_a_number_and_never_replaces_the_first() {
         use crate::panels::normal::LookMark;
-        let (mut app, src, _scrub) = normal_photo("refuse");
+        let (mut app, src, _scrub) = normal_photo("numbered");
         image::RgbImage::from_pixel(32, 24, image::Rgb([60, 90, 120])).save(&src).unwrap();
-        let out = std::env::temp_dir().join(format!("autoshade-gui-normal-refuse-out-{}", std::process::id()));
+        let src2 = src.with_file_name("_gui_normal_numbered_b.jpg");
+        image::RgbImage::from_pixel(32, 24, image::Rgb([90, 60, 120])).save(&src2).unwrap();
+        let _scrub2 = Scrub(vec![autoshade::store::develop_dir(&src2)]);
+        let out = std::env::temp_dir().join(format!("autoshade-gui-normal-numbered-out-{}", std::process::id()));
         let _scrub_out = Scrub(vec![out.clone()]);
         app.exp_dest = ExportDest::LastUsed;
         app.last_export_dir = Some(out.clone());
         let ctx = egui::Context::default();
-        let plain = tr(Lang::En, "That folder already holds photos saved earlier. Pick another folder, or move the old ones first.");
+        let names = ["_gui_normal_numbered.developed.jpg", "_gui_normal_numbered.developed-2.jpg", "_gui_normal_numbered.developed-3.jpg"];
+        let mut sizes = Vec::new();
+        for (i, name) in names.iter().enumerate() {
+            app.recipe.exposure_ev = 0.2 * (i + 1) as f32;
+            app.start_normal_save();
+            assert!(app.busy, "save {}: {}", i + 1, app.status);
+            assert!(app.status.contains(name), "save {}: the line names the file: {}", i + 1, app.status);
+            land_all(&mut app, &ctx);
+            let folder = out.file_name().unwrap().to_string_lossy().into_owned();
+            assert_eq!(app.status, trf(Lang::En, "Saved {file} to {folder}", &[("file", name), ("folder", &folder)]));
+            assert_eq!(app.normal_look_mark(), Some(LookMark::Saved), "{}", app.status);
+            sizes.push(std::fs::metadata(out.join(name)).map(|m| m.len()).unwrap_or(0));
+        }
+        assert!(sizes.iter().all(|&n| n > 0), "three real jpgs, none replaced by the next: {sizes:?}");
+        // A file picked in the save window: replaced, not numbered.
+        let picked = out.join(names[0]);
+        let before = std::fs::read(&picked).unwrap();
+        app.exp_dest = ExportDest::Ask;
+        app.normal.file_pick = Some(Some(picked.clone()));
+        app.recipe.exposure_ev = -1.5;
+        app.start_normal_save();
+        assert!(app.busy, "the picked save runs: {}", app.status);
+        land_all(&mut app, &ctx);
+        let folder = out.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(app.status, trf(Lang::En, "Saved {file} to {folder}", &[("file", names[0]), ("folder", &folder)]));
+        assert_ne!(std::fs::read(&picked).unwrap(), before, "the picked file was replaced");
+        let fourth = out.join("_gui_normal_numbered.developed-4.jpg");
+        assert!(!fourth.exists(), "a picked file is never numbered");
+        // …while the app-made name is numbered again.
+        app.exp_dest = ExportDest::LastUsed;
+        app.last_export_dir = Some(out.clone());
+        app.recipe.exposure_ev = 0.9;
         app.start_normal_save();
         land_all(&mut app, &ctx);
-        assert_eq!(app.normal_look_mark(), Some(LookMark::Saved), "the first save landed: {}", app.status);
-        // Again, into the same folder: refused before any render starts.
+        assert!(fourth.is_file(), "the app-made name steps on to -4: {}", app.status);
+        // The whole folder, twice: the second run numbers every photo.
+        app.gallery = vec![src.clone(), src2.clone()];
+        let all = std::env::temp_dir().join(format!("autoshade-gui-normal-numbered-all-{}", std::process::id()));
+        let _scrub_all = Scrub(vec![all.clone()]);
+        app.last_export_dir = Some(all.clone());
+        for run in 0..2 {
+            app.recipe.contrast = 10.0 * (run + 1) as f32;
+            app.start_apply_to_folder();
+            land_all(&mut app, &ctx);
+            let folder = all.file_name().unwrap().to_string_lossy().into_owned();
+            let saved = trf(Lang::En, "{n} photos saved to {folder}", &[("n", "2"), ("folder", &folder)]);
+            if run == 0 {
+                assert_eq!(app.status, saved);
+            } else {
+                let numbered = trf(Lang::En, "{k} of them have a number added to the name, so no earlier photo was replaced.", &[("k", "2")]);
+                assert_eq!(app.status, format!("{saved}. {numbered}"));
+            }
+        }
+        let mut written: Vec<String> =
+            std::fs::read_dir(&all).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        written.sort();
+        assert_eq!(
+            written,
+            [
+                "_gui_normal_numbered.developed-2.jpg",
+                "_gui_normal_numbered.developed.jpg",
+                "_gui_normal_numbered_b.developed-2.jpg",
+                "_gui_normal_numbered_b.developed.jpg",
+            ],
+            "every photo once bare, once with -2"
+        );
+        // Landscape keeps the library's refusal (outside its output areas).
+        app.mode = Mode::Landscape;
+        app.start_render_to(out.join(names[0]));
+        assert!(!app.busy);
+        assert!(app.status.contains("refusing to overwrite"), "{}", app.status);
+    }
+
+    /// The marker says 「saved as jpg」 only while the card on screen, with its
+    /// current look, is what was last saved — so the noise switch, which
+    /// changes the picture and not the look, flips it: saved; denoised card
+    /// on → unsaved; saved again → saved; switch off → unsaved (the original
+    /// card was saved, but before the denoised one); on again → saved (that
+    /// card, that look, is the last jpg).
+    ///
+    /// MUTATION THIS CATCHES: drop the card from `look_mark`'s comparison,
+    /// or record the look without the card on a landed save, and a step
+    /// below fails.
+    #[test]
+    fn the_normal_marker_follows_the_card_on_screen() {
+        use crate::panels::normal::{DenoisePair, LookMark};
+        let (mut app, src, _scrub) = normal_photo("markcard");
+        image::RgbImage::from_pixel(32, 24, image::Rgb([120, 90, 60])).save(&src).unwrap();
+        let master = src.with_file_name("_gui_normal_markcard.denoise.png");
+        image::RgbImage::from_pixel(32, 24, image::Rgb([118, 92, 61])).save(&master).unwrap();
+        let out = std::env::temp_dir().join(format!("autoshade-gui-normal-markcard-out-{}", std::process::id()));
+        let _scrub_out = Scrub(vec![out.clone()]);
+        app.exp_dest = ExportDest::LastUsed;
+        app.last_export_dir = Some(out.clone());
+        let b0 = std::sync::Arc::new(image::DynamicImage::new_rgba8(4, 4));
+        app.variants = vec![Variant {
+            id: ORIGINAL_VARIANT_ID.into(),
+            name: None,
+            kind: VariantKind::Original,
+            recipe: EditRecipe::default(),
+            base: Some(b0.clone()),
+            origin: None,
+            thumb: None,
+        }];
+        app.active = 0;
+        app.base_preview = Some(b0);
+        app.reset_history();
+        let ctx = egui::Context::default();
+        assert_eq!(app.normal_look_mark(), None, "as opened");
+        app.recipe.exposure_ev = 0.4;
+        app.start_normal_save();
+        land_all(&mut app, &ctx);
+        assert_eq!(app.normal_look_mark(), Some(LookMark::Saved), "{}", app.status);
+        // The switch's ◈ card lands (through the worker's message): same
+        // look, another picture.
+        app.normal.denoise_pair = Some(DenoisePair { photo: src.clone(), plain: ORIGINAL_VARIANT_ID.into(), denoised: None });
+        let note = RetouchNote::Denoised { out: master.clone(), on_mosaic: false };
+        let done = Ok((image::DynamicImage::new_rgba8(4, 4), note, master.clone(), RetouchKind::NewDenoised));
+        app.tx.send(Msg::Retouched(app.gen_epoch, Box::new(done))).unwrap();
+        app.poll_workers(&ctx);
+        assert_eq!(app.active_source_path().as_deref(), Some(master.as_path()), "the ◈ card is on screen");
+        assert_eq!(app.recipe.exposure_ev, 0.4, "the look is unchanged");
+        assert_eq!(app.normal_look_mark(), Some(LookMark::Unsaved), "denoised: not what was saved");
+        app.start_normal_save();
+        assert!(app.busy, "{}", app.status);
+        land_all(&mut app, &ctx);
+        assert_eq!(app.normal_look_mark(), Some(LookMark::Saved), "the ◈ card saved: {}", app.status);
+        app.set_normal_denoise(false);
+        assert_eq!(app.active_source_path().as_deref(), Some(src.as_path()));
+        assert_eq!(app.normal_look_mark(), Some(LookMark::Unsaved), "off: the last jpg is the denoised one");
+        app.set_normal_denoise(true);
+        assert_eq!(app.normal_look_mark(), Some(LookMark::Saved), "on again: that card and look are the last jpg");
+    }
+
+    /// The refusal Normal's saves still meet — into the photo's own folder,
+    /// which the library guard keeps read-only (`SourceFolderRefused`) —
+    /// reads as one plain sentence on both saving paths, matched by type:
+    /// the single save (refused before it renders, no claim left behind) and
+    /// 「apply to every photo」 (refused per photo inside the batch, nothing
+    /// marked saved). Landscape, the control, keeps the library's own line.
+    ///
+    /// MUTATION THIS CATCHES: let a numbered save step past this refusal,
+    /// stop counting it by type in the batch worker, or stop mapping it on
+    /// the single path, and an assert below fails.
+    #[test]
+    fn a_save_into_the_photos_own_folder_is_refused_plainly_in_normal() {
+        use crate::panels::normal::LookMark;
+        let (mut app, src, _scrub) = normal_photo("ownfolder");
+        image::RgbImage::from_pixel(32, 24, image::Rgb([60, 90, 120])).save(&src).unwrap();
+        let own = src.parent().unwrap().to_path_buf();
+        app.exp_dest = ExportDest::LastUsed;
+        app.last_export_dir = Some(own.clone());
+        let ctx = egui::Context::default();
+        let plain = tr(Lang::En, "AutoShade never saves into the folder your photos are in. Pick another folder.");
+        assert_eq!(app.normal_look_mark(), None, "as opened");
+        app.recipe.exposure_ev = 0.3;
         app.start_normal_save();
         assert!(!app.busy);
         assert_eq!(app.status, plain);
         assert!(app.toasts.iter().any(|t| t.text == plain), "the toast says it too");
-        // The whole folder, into it: refused per photo inside the batch.
-        app.recipe.exposure_ev = 0.3;
         app.gallery = vec![src.clone()];
         app.start_apply_to_folder();
         land_all(&mut app, &ctx);
         assert_eq!(app.status, plain);
         assert_eq!(app.normal_look_mark(), Some(LookMark::Unsaved), "nothing was saved");
-        // Landscape keeps the library's own line.
+        let files: Vec<_> = std::fs::read_dir(&own).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(files, vec![src.file_name().unwrap().to_os_string()], "nothing written beside the photo");
         app.mode = Mode::Landscape;
-        app.start_render_to(out.join(app.export_file_name_as("jpg")));
-        assert!(app.status.contains("refusing to overwrite"), "{}", app.status);
+        app.start_render_to(own.join(app.export_file_name_as("jpg")));
+        assert!(app.status.contains("refusing to write into"), "{}", app.status);
     }
