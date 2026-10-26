@@ -1,6 +1,10 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.13.0 — the desktop app opens on a mode page
+> Status: **implemented** (v1.14.0 — the Portraits mode adds a panel of face,
+> eyes, skin and background tools, the faces found on this computer by
+> MediaPipe, and the lens blur can keep the person sharp; Normal numbers a
+> second save and previews its AI denoise;
+> v1.13.0 — the desktop app opens on a mode page
 > (Landscape, Portraits, Normal), Normal being a one-click panel for phone and
 > jpg photos; the reverse fit reads white balance and tone from every pixel and
 > hands a hue-twisting colour cast to the white balance;
@@ -211,9 +215,9 @@
 > symbol, link and tier count the living documents name exists in the tree;
 > CI's `docs` job runs it on every push) — and a gate that exits non-zero
 > fails the battery like a lane.
-> 1702 library + 25 CLI + 265 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1687 pass + 15 `#[ignore]`d forensic probes and
-> the GUI result is 261 pass + four ignored (an explicit scratch-recipe export
+> 1726 library + 25 CLI + 276 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1711 pass + 15 `#[ignore]`d forensic probes and
+> the GUI result is 272 pass + four ignored (an explicit scratch-recipe export
 > probe and the offline panel, window and mode-workspace screenshots) in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
 > refusal pair (a RAW source, a baked negative); the library and GUI lists are
 > v1.6.1's. For v1.6.3, four library names (decode: the 16-bit profile lattice
@@ -246,7 +250,33 @@
 > edit read as the edit, a maskless edit sending no mask and layering only
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
-> screenshots). For v1.13.0, by name against the v1.12.0 battery: library
+> screenshots). For v1.14.0, by name against the v1.13.0 battery: library
+> +24 / −0 — 14 in `face` (a sidecar result parses and a malformed one is
+> refused whole, the face and eyes masks fill, feather and union every face
+> and land in the same place at any size, a concave outline keeps its notch,
+> the skin seed and the four portrait masks, the skin guardrail's limits and
+> which masks it holds, face intents outlined once and cached or taken out
+> and named when there is no face, a face intent surviving the recipe file's
+> path anchoring, a missing sidecar named with its override, the run going
+> through the shared model sidecar), 4 in `render` (a blur without protection
+> draws the pixels it drew before, a protect mask keeps its white sharp, the
+> develop reads the protect mask and never blurs past a missing one, the
+> field is absent unless used), 2 in `recipe` (every mask role round-trips;
+> an older reader refuses a portrait role by name), 2 in `advisor` (portrait
+> mask intents resolve locally by role; the portrait look asks for the
+> portrait masks under the guardrail), 1 in `pipeline` (a numbered claim
+> counts up beside the name and never replaces) and 1 in `xmp` (portrait
+> roles round-trip and an unknown role tag reads as custom); GUI +13 / −2
+> (the Portraits panel's four groups, its place at the top of the sidebar,
+> the greyed groups without a face, every control writing its field on its
+> role, the found masks landing and refreshing in place, the guardrail on
+> user and AI writes and a saved edit beyond the limits opening unchanged,
+> the AI portrait look; Normal's second save numbered and never replacing,
+> a save into the photo's own folder refused plainly, the noise switch being
+> the Retouch denoise and round-tripping, the marker following the card on
+> screen, the noise lines saying it takes a moment — the last two replacing
+> the refusal-to-replace and applied-at-save names); CLI unchanged. For
+> v1.13.0, by name against the v1.12.0 battery: library
 > +49 / −3 — 29 in `fit_zoned` (the local-contrast stage's band readings and
 > refusals, the shaped ramp bands and their partitions, the boundary judged on
 > its mean, the distribution-matched tone arm, the footed cell share, the
