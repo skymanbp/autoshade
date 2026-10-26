@@ -1259,10 +1259,11 @@
 > in mirror repositories of ours as well (`Azng0/autoshade-mirror-*`), copied
 > from the pins themselves and accepted only after the same sha256 matched,
 > then read back and re-verified anonymously, which is the only access a user's
-> machine has. **One exception, for now:** the Face Landmarker bundle `face.py`
-> pins (v1.14.0) has no copy of ours yet and is fetched from Google's own
-> bucket at its versioned path; `_mirror.py` records that and gains its entry
-> once the copy exists and has been verified the same way. [`python/_mirror.py`](../python/_mirror.py) is the one table
+> machine has. The Face Landmarker bundle `face.py` pins (v1.14.0), the one
+> download served from Google's `mediapipe-models` bucket rather than a Hub
+> repository, joined them on 2026-10-26: its mirror's LFS digest equals the
+> pin, and the repo carries MediaPipe's Apache-2.0 licence text verbatim,
+> both verified anonymously. [`python/_mirror.py`](../python/_mirror.py) is the one table
 > that says where, and `_fetch_verified` walks `sources(url)` — ours, then the
 > upstream, which keeps the one re-try it always had. **The order is a
 > preference, never a trust decision**: a source decides WHERE bytes come from
@@ -1271,8 +1272,9 @@
 > tried. The cache identity is deliberately unchanged — `_sidecar.model_dir`
 > still names a directory after the UPSTREAM repo and revision, because that is
 > what the files are, so no existing installation re-downloads a byte for this.
-> Two source invariants hold the table to the sidecars: every pinned model tree
-> must have an entry (`embed::tests::every_pinned_model_tree_has_a_copy_of_ours`)
+> Three source invariants hold the table to the sidecars: every pinned model tree
+> must have an entry (`embed::tests::every_pinned_model_tree_has_a_copy_of_ours`),
+> so must the face bundle's directory (`embed::tests::the_face_bundle_has_a_copy_of_ours`),
 > and every executed upstream source must too
 > (`denoise::tests::every_executed_upstream_source_has_a_copy_of_ours`), so a
 > re-pin that is not mirrored fails in CI rather than on a user's cold cache.

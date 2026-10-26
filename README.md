@@ -290,7 +290,7 @@ Per-subsystem notes: [In depth → Implementation](docs/DEEP_DIVE.md#implementat
 
 <br />
 
-Model weights download separately and remain their authors' property; every pinned model except the new MediaPipe Face Landmarker bundle (not mirrored yet) also has a byte-exact mirror on Hugging Face (`Azng0/autoshade-mirror-*`), checksum-verified either way — table in [`python/_mirror.py`](python/_mirror.py).
+Model weights download separately and remain their authors' property; every pinned model also has a byte-exact mirror on Hugging Face (`Azng0/autoshade-mirror-*`), checksum-verified either way — table in [`python/_mirror.py`](python/_mirror.py).
 
 | Model | Purpose | License |
 |---|---|---|

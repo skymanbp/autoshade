@@ -1,8 +1,9 @@
 """Our own copy of every pinned download, tried before the upstream host.
 
 Every model this program runs is fetched from somebody else's server at a
-pinned revision: five Hugging Face repos we do not own, a GitHub release from
-2022, and three source files served from `raw.githubusercontent.com`. Each of
+pinned revision: seven Hugging Face repos we do not own, a GitHub release from
+2022, three source files served from `raw.githubusercontent.com`, and one
+bundle in Google's `mediapipe-models` bucket. Each of
 those can go away — an account renamed, a release re-cut, a repo made private,
 a file deleted — and when one does, the pin that makes the download safe is
 exactly what makes it unrecoverable: nothing else on the internet is that
@@ -98,13 +99,10 @@ MIRRORS = {
     # anonymously (model.pt LFS digest = the pin, LICENSE byte-equal to ours)
     "https://huggingface.co/Ruicheng/moge-2-vitl-normal/resolve/cb0e8bbd6b1e243589717c78e750b1ba4c093acf/":
         "https://huggingface.co/Azng0/autoshade-mirror-moge-2-vitl-normal/resolve/eedf82d7cf301a59cebbbffde9c03dc03c726b9f/",
-    # face.py MODEL — MediaPipe's Face Landmarker bundle (v1.14.0), pinned at
-    # https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/
-    # is NOT MIRRORED YET: no copy of ours has been uploaded and verified, so
-    # this table has no entry for it and the download goes to Google's bucket
-    # (twice, as any unmirrored URL). The entry is added only once the copy
-    # exists and was read back anonymously against face.py's sha256, as every
-    # row above was.
+    # face.py MODEL — MediaPipe Face Landmarker, the portrait masks; verified 2026-10-26
+    # anonymously (LFS digest = the pin, LICENSE Apache-2.0)
+    "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/":
+        "https://huggingface.co/Azng0/autoshade-mirror-mediapipe-face-landmarker/resolve/900f000c7e1c7dc9c1d4506f4c7cc6dfafefb1a9/",
 }
 
 

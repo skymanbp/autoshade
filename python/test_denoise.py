@@ -343,6 +343,19 @@ class MirrorTableTests(unittest.TestCase):
             f"https://huggingface.co/{_mirror.MIRROR_OWNER}/"), ours)
         self.assertEqual(_mirror.sources(url), [ours, url, url])
 
+    def test_the_face_bundle_is_tried_from_our_copy_first(self):
+        # The one pin outside Hugging Face and GitHub: Google's bucket, at a
+        # versioned path. Our copy is a second host for the same digest.
+        import face
+
+        url = face.MODEL["url"]
+        ours = _mirror.mirror_of(url)
+        self.assertIsNotNone(ours, f"no copy of ours for {url}")
+        self.assertTrue(ours.startswith(
+            f"https://huggingface.co/{_mirror.MIRROR_OWNER}/"), ours)
+        self.assertTrue(ours.endswith("/" + face.MODEL["file"]), ours)
+        self.assertEqual(_mirror.sources(url), [ours, url, url])
+
     def test_a_url_with_no_entry_keeps_its_re_try(self):
         # No entry — and the source list is then exactly the two attempts
         # the fetch always made.

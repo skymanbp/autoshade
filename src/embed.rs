@@ -803,6 +803,30 @@ mod tests {
         assert_eq!(found, 7, "extractor non-vacuity: seven pinned model trees");
     }
 
+    /// The one pin that is not a Hugging Face tree — `face.py`'s Face
+    /// Landmarker bundle, at a versioned path in Google's bucket — has a copy
+    /// of ours too. The tree sweep above pairs `repo` with `revision` and so
+    /// never sees a plain URL; this holds the bundle's directory to a LIVE
+    /// row of the table (a commented-out row does not count).
+    ///
+    /// MUTATION: comment out the face row in `python/_mirror.py` and this
+    /// fails.
+    #[test]
+    fn the_face_bundle_has_a_copy_of_ours() {
+        let url = FACE_SRC
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("\"url\": \""))
+            .and_then(|r| r.split('"').next())
+            .expect("extractor non-vacuity: face.py pins one URL");
+        assert!(url.starts_with("https://storage.googleapis.com/"), "face.py: {url}");
+        let prefix = &url[..url.rfind('/').unwrap() + 1];
+        let key = format!("\"{prefix}\":");
+        assert!(
+            MIRROR_SRC.lines().any(|l| l.trim().starts_with(&key)),
+            "face.py: {prefix} is pinned but python/_mirror.py has no copy of ours"
+        );
+    }
+
     /// `trust_remote_code` downloads and EXECUTES upstream Python through HF's
     /// own cache, which our digest gate never sees — the exact hazard
     /// `denoise.py` was hardened against. It must never appear, and neither
