@@ -220,9 +220,9 @@
 > symbol, link and tier count the living documents name exists in the tree;
 > CI's `docs` job runs it on every push) — and a gate that exits non-zero
 > fails the battery like a lane.
-> 1747 library + 25 CLI + 289 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1732 pass + 15 `#[ignore]`d forensic probes and
-> the GUI result is 285 pass + four ignored (an explicit scratch-recipe export
+> 1754 library + 25 CLI + 292 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1739 pass + 15 `#[ignore]`d forensic probes and
+> the GUI result is 288 pass + four ignored (an explicit scratch-recipe export
 > probe and the offline panel, window and mode-workspace screenshots) in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
 > refusal pair (a RAW source, a baked negative); the library and GUI lists are
 > v1.6.1's. For v1.6.3, four library names (decode: the 16-bit profile lattice
@@ -255,7 +255,19 @@
 > edit read as the edit, a maskless edit sending no mask and layering only
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
-> screenshots). For v1.15.0, by name against the v1.14.0 battery: library
+> screenshots). For v1.15.1, by name against the v1.15.0 battery: library
+> +7 / −0 — 3 in `fit` (the mixer stage's do-no-harm loop and the
+> mixer-against-its-absence loop stop at the 16-round bound when nothing
+> descends; a handover white-balance candidate refused by the stage's gates
+> from the public fit entry), 2 in `pipeline` (a store root above the
+> photo's folder does not open the library; the refusal hints name the
+> configured delivery folder) and 2 in `xmp` (a read without a photo never
+> keeps an unanchored raster path; a photo-less merge still preserves an
+> untouched import with a bare raster); GUI +3 / −0 (redo after switching
+> the skin guard on turns it back on; undo and redo of a value edit keep the
+> switch the user set; a new edit after undoing the switch-on drops its
+> redo); CLI unchanged. For
+> v1.15.0, by name against the v1.14.0 battery: library
 > +21 / −0 — 3 in `fit` (the do-no-harm loop descends when the handover
 > would re-raise saturation, stops at its bound when nothing descends, and a
 > handover white balance the stage would shrink is refused above default

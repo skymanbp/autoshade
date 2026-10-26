@@ -141,7 +141,7 @@ Six techniques you will not find in another RAW developer. Each is written up in
 
 | What | Measured |
 |---|---|
-| Automated test battery | 1747 library / 25 CLI / 289 GUI / 2+2 contract tests |
+| Automated test battery | 1754 library / 25 CLI / 292 GUI / 2+2 contract tests |
 | RAW coverage | 24 extensions · 725 camera bodies · nine-camera zoo 9/9 |
 | Reverse-fit, stone viaduct | look error 0.161 → 0.023 at confidence 0.63 |
 | Reverse-fit, desert canyon | look error 0.129 → 0.048 · sky ΔE 3.8 |
@@ -271,7 +271,7 @@ preview:** 12 of the 24 formats store none. They are `orf`, `srw`, `nrw`, `mef`,
 **Rust** (rustc/cargo 1.94, edition 2024) · rawler · image · qcms · rayon · egui/eframe · tiny_http — **Python** sidecars on PyTorch.
 
 RAW decode, 24 formats, 725 bodies · deterministic f32 develop engine · hand-rolled XMP layer (no XML crate) for byte-exact Lightroom merges.
-The current battery is **1747 library (1732 pass + 15 `#[ignore]`d forensic probes) / 25 CLI / 289 GUI / 2+2 contract** tests.
+The current battery is **1754 library (1739 pass + 15 `#[ignore]`d forensic probes) / 25 CLI / 292 GUI / 2+2 contract** tests.
 Per-subsystem notes: [In depth → Implementation](docs/DEEP_DIVE.md#implementation) · equations and provenance: [TECH_STACK.md](docs/TECH_STACK.md).
 
 ## Status and limitations
