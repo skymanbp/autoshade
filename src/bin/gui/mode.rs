@@ -12,8 +12,8 @@
 //! never see it, no recipe stores it, and a photo opens the same way in every
 //! mode. What a mode changes is which of the SHARED panels are drawn
 //! ([`Shell`]): Landscape draws everything exactly as before this page
-//! existed; Portraits is the full workspace for now (ruling 3, shell only);
-//! Normal draws its own four-group sidebar (`panels/normal.rs`) in place of
+//! existed; Portraits is the full workspace with its own panel at the top of
+//! the sidebar (`panels/portrait.rs`, v1.14.0); Normal draws its own four-group sidebar (`panels/normal.rs`) in place of
 //! the shared panels, and hides the workspace's tools (design §4).
 
 use super::*;
@@ -55,6 +55,10 @@ pub(crate) struct Shell {
     pub(crate) canvas_tool_marks: bool,
     /// The variant strip under the canvas.
     pub(crate) variant_strip: bool,
+    /// The Portraits panel (`panels/portrait.rs`: people, skin, eyes,
+    /// background) at the top of the sidebar, above the shared panels
+    /// (Portraits).
+    pub(crate) portrait_panel: bool,
 }
 
 impl Mode {
@@ -71,6 +75,7 @@ impl Mode {
                 library_batch_rows: true,
                 canvas_tool_marks: true,
                 variant_strip: true,
+                portrait_panel: false,
             },
             Mode::Portraits => Shell {
                 zoned_folded: true,
@@ -80,6 +85,7 @@ impl Mode {
                 library_batch_rows: true,
                 canvas_tool_marks: true,
                 variant_strip: true,
+                portrait_panel: true,
             },
             Mode::Normal => Shell {
                 zoned_folded: false,
@@ -89,6 +95,7 @@ impl Mode {
                 library_batch_rows: false,
                 canvas_tool_marks: false,
                 variant_strip: false,
+                portrait_panel: false,
             },
         }
     }
@@ -121,12 +128,11 @@ impl Mode {
     }
 
     /// What this version actually delivers, where the card's line promises
-    /// more than the shell has yet (ruling 3: Portraits is shell only).
-    fn note(self, lang: Lang) -> Option<&'static str> {
-        match self {
-            Mode::Portraits => Some(tr(lang, "First version: the full workspace; the face tools come later")),
-            Mode::Landscape | Mode::Normal => None,
-        }
+    /// more than the shell has yet. None since v1.14.0: Portraits has its
+    /// face tools (`panels/portrait.rs`), and its v1.13.0 note — "the face
+    /// tools come later" — would now be false.
+    fn note(self, _lang: Lang) -> Option<&'static str> {
+        None
     }
 }
 

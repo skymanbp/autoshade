@@ -803,36 +803,53 @@ impl OpenAiProvider {
 /// spelling for the kind (`Sky 1`, `Subject 1`, `Object 1` — the measured
 /// `crs:MaskName` values), so the mask round-trips like a photographer's; the
 /// reference point is clamped into the frame. A mask whose target is not one
-/// of the three is REMOVED and its target returned, for the caller's
+/// of the schema's is REMOVED and its target returned, for the caller's
 /// disclosure — an unknown kind would otherwise fail the whole paid parse.
+///
+/// The Portraits mode's three targets (v1.14.0) are resolved on this computer
+/// too, and none of them reads the model's point: `face` and `eyes` become a
+/// FACE / EYES mask naming no raster yet, which the face finder outlines
+/// (`face::resolve_face_masks`); `background` is the subject cut, inverted,
+/// with the BACKGROUND role — the segmenter's own `subject` answer.
 pub(crate) fn expand_ai_mask_intents(v: &mut Value) -> Vec<String> {
     let mut dropped = Vec::new();
     let Some(masks) = v.get_mut("masks").and_then(Value::as_array_mut) else {
         return dropped;
     };
     masks.retain_mut(|m| {
-        let Some(geom) = m.get_mut("mask") else { return true };
+        let Some(geom) = m.get("mask") else { return true };
         if geom.get("kind").and_then(Value::as_str) != Some("ai") {
             return true;
         }
         let what = geom.get("what").and_then(Value::as_str).unwrap_or("").to_string();
-        let (subtype, name) = match what.as_str() {
-            "sky" => (2, "Sky 1"),
-            "subject" => (1, "Subject 1"),
-            "object" => (0, "Object 1"),
+        let point = |k: &str| geom.get(k).and_then(Value::as_f64).unwrap_or(0.5).clamp(0.0, 1.0);
+        let (ref_x, ref_y) = (point("ref_x"), point("ref_y"));
+        let segmenter = |subtype: u32, name: &str| {
+            json!({
+                "kind": "ai_mask", "name": name, "subtype": subtype,
+                "ref_x": ref_x, "ref_y": ref_y,
+                "blend_mode": 0, "value": 1.0, "inverted": false, "mask_version": 1,
+                "provenance": [], "gesture": [], "raster": null
+            })
+        };
+        let (geometry, role) = match what.as_str() {
+            "sky" => (segmenter(2, "Sky 1"), None),
+            "subject" => (segmenter(1, "Subject 1"), None),
+            "object" => (segmenter(0, "Object 1"), None),
+            "face" | "eyes" => (json!({"kind": "bitmap", "path": ""}), Some(what.as_str())),
+            "background" => (segmenter(1, "Subject 1"), Some("background")),
             _ => {
                 dropped.push(what);
                 return false;
             }
         };
-        let point = |k: &str| geom.get(k).and_then(Value::as_f64).unwrap_or(0.5).clamp(0.0, 1.0);
-        let (ref_x, ref_y) = (point("ref_x"), point("ref_y"));
-        *geom = json!({
-            "kind": "ai_mask", "name": name, "subtype": subtype,
-            "ref_x": ref_x, "ref_y": ref_y,
-            "blend_mode": 0, "value": 1.0, "inverted": false, "mask_version": 1,
-            "provenance": [], "gesture": [], "raster": null
-        });
+        m["mask"] = geometry;
+        if let Some(role) = role {
+            m["role"] = json!(role);
+            if role == "background" {
+                m["inverted"] = json!(true);
+            }
+        }
         true
     });
     dropped
@@ -1669,6 +1686,7 @@ mod tests {
             weights_dir: String::new(),
             segment_script: String::new(),
             depth_script: String::new(),
+            face_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),
             describe_script: String::new(),
@@ -2483,5 +2501,43 @@ mod tests {
         // No masks at all: nothing to do, nothing dropped.
         let mut none = json!({"exposure_ev": 0.0});
         assert!(expand_ai_mask_intents(&mut none).is_empty());
+    }
+
+    /// The Portraits targets: `face` and `eyes` become a role-carrying mask
+    /// with no raster for the face finder, `background` the subject cut
+    /// inverted — and none of them keeps the model's point, which no part of
+    /// the resolution reads. Each parses as a recipe mask.
+    ///
+    /// MUTATION THIS CATCHES: drop a target from the match (it is dropped
+    /// and named), lose a role or the background's inversion, or hand the
+    /// face to the segmenter with the model's point.
+    #[test]
+    fn portrait_mask_intents_resolve_locally_by_role() {
+        use crate::recipe::MaskRole;
+        let mut v = json!({"masks": [
+            {"name": "Soften skin", "mask": {"kind": "ai", "what": "face", "ref_x": 0.9, "ref_y": 0.1}, "texture": -30.0},
+            {"mask": {"kind": "ai", "what": "eyes", "ref_x": 0.2, "ref_y": 0.2}},
+            {"mask": {"kind": "ai", "what": "background", "ref_x": 0.5, "ref_y": 0.5}, "inverted": false},
+        ]});
+        assert!(expand_ai_mask_intents(&mut v).is_empty(), "all three are known targets");
+        let masks: Vec<crate::recipe::LocalAdjustment> =
+            serde_json::from_value(v["masks"].clone()).expect("each parses as a recipe mask");
+        assert_eq!(masks[0].role, MaskRole::Face);
+        assert_eq!(masks[0].mask, MaskGeometry::Bitmap { path: String::new() }, "no raster, no point: the face finder draws it");
+        assert!(crate::face::is_face_intent(&masks[0]) && crate::face::is_face_intent(&masks[1]));
+        assert_eq!((masks[0].name.as_str(), masks[0].texture), ("Soften skin", -30.0), "the edit rides along");
+        assert_eq!(masks[1].role, MaskRole::Eyes);
+        assert_eq!((masks[2].role, masks[2].inverted), (MaskRole::Background, true));
+        match &masks[2].mask {
+            MaskGeometry::AiMask { subtype, raster, .. } => {
+                assert_eq!(*subtype, 1, "the subject, cut by the segmenter");
+                assert!(raster.is_none());
+            }
+            other => panic!("the background became {other:?}"),
+        }
+        for what in crate::advisor::catalogue::AI_MASK_TARGETS {
+            let mut one = json!({"masks": [{"mask": {"kind": "ai", "what": what}}]});
+            assert!(expand_ai_mask_intents(&mut one).is_empty(), "{what} is expanded, not dropped");
+        }
     }
 }

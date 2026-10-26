@@ -1346,8 +1346,11 @@ impl AutoShadeApp {
             // due overwrites it.
             cur.recipe = EditRecipe::default();
         }
+        let (from, to) = (self.variants[self.active].id.clone(), forked.id.clone());
         self.variants.insert(self.active + 1, forked);
         self.active += 1;
+        // The ✎ card is an edit of this one: it keeps its skin switch.
+        self.inherit_keep_skin(&from, &to);
         // A ✕ armed on an index past the insertion now names the wrong card.
         self.variant_delete_confirm = None;
         let lang = self.lang;
@@ -2112,6 +2115,10 @@ impl AutoShadeApp {
                 // status line, so the raster caveat has room.
                 let reframe = autoshade::pipeline::migrate_recipe_coord_frame(&src, &mut r);
                 self.recipe = r;
+                // Read from disk: "Keep skin natural" is decided afresh for
+                // this card (`panels/portrait.rs`) — opening never changes a
+                // value.
+                self.decide_keep_skin_for_card();
                 self.resync_recipe_display();
                 self.dirty = true;
                 // A snapshot loaded onto the pristine ✨ card is an edit like

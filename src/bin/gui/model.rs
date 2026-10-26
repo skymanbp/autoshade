@@ -761,6 +761,9 @@ pub(crate) enum Msg {
     /// …and finished: how many photos the library holds, or why it failed.
     /// The landing hands over to the analysis (`on_one_click_built`).
     OneClickBuilt(Result<usize, String>),
+    /// The Portraits panel's find step finished (`panels/portrait.rs`): the
+    /// subject matte and the faces, as facts for the landing.
+    PortraitFound(Box<crate::panels::portrait::PortraitFind>),
 }
 
 /// What building the reference library did — FACTS, not prose (L12#4): the

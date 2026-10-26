@@ -21,9 +21,20 @@
 //! Like a pixel layer it runs LAST in the develop, on the finished picture, at
 //! stored (pre-geometry) coordinates, and like one it has no place in a
 //! Lightroom sidecar: the save line names it.
+//!
+//! **Protection (v1.14.0, the Portraits mode).** A blur may name a soft mask
+//! raster, [`LensBlur::protect`] — in practice the subject matte — and every
+//! pixel's radius is multiplied by `1 − alpha` of it, so white keeps the sharp
+//! source and the mask's own soft edge is the transition. The depth map still
+//! decides everything outside it. A protected pixel's radius is 0, so the halo
+//! guard below also keeps it out of every blur level: the person does not
+//! bleed into the background beside them. Lightroom's own Lens Blur has no
+//! such input, which changes nothing about the sidecar — the blur was never
+//! written there — and the matte itself is an ordinary bitmap mask, skipped by
+//! the writer and named on the save line like any other.
 
 use super::layers::{decode_cached, load_budgeted, DecodeSlot, RasterKind};
-use super::mask_raster::sample_texels_norm;
+use super::mask_raster::{sample_gray_norm, sample_texels_norm};
 use super::*;
 
 /// The lens blur a card carries. See the module docs.
@@ -40,11 +51,22 @@ pub struct LensBlur {
     pub range: f32,
     /// Off = carried and saved, not drawn.
     pub enabled: bool,
+    /// An 8-bit soft mask raster (white = keep sharp) in the photo's develop
+    /// folder, or `None` for no protection — see the module docs. Named by its
+    /// raster path, the way `depth_map` and every bitmap mask name theirs.
+    ///
+    /// **Skipped when absent**, by `EditRecipe::lens_blur`'s own argument: a
+    /// blur without protection serialises byte for byte as before. A build
+    /// from before v1.14.0 refuses a recipe that carries one, by field name
+    /// (`deny_unknown_fields` above) — the class-① forward break, confined to
+    /// the recipes that use it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protect: Option<String>,
 }
 
 impl Default for LensBlur {
     fn default() -> Self {
-        LensBlur { depth_map: String::new(), focus: [0.5, 0.5], amount: 50.0, range: 10.0, enabled: true }
+        LensBlur { depth_map: String::new(), focus: [0.5, 0.5], amount: 50.0, range: 10.0, enabled: true, protect: None }
     }
 }
 
@@ -78,6 +100,9 @@ impl LensBlur {
 pub(super) type DepthImage = image::ImageBuffer<image::Luma<u16>, Vec<u16>>;
 
 const DEPTH: RasterKind = RasterKind { what: "depth map", unloaded: "the lens blur is not drawn" };
+/// Not drawing is the honest fallback for an unreadable protect mask: a blur
+/// drawn without it would blur exactly what the photographer asked to keep.
+const PROTECT: RasterKind = RasterKind { what: "lens blur protect mask", unloaded: "the lens blur is not drawn" };
 
 /// Load the recipe's depth map under the raster budget the masks and layers
 /// share ([`load_budgeted`]: an export refuses an unreadable map, the preview
@@ -104,6 +129,30 @@ pub(super) fn load_depth(
             })
     };
     load_budgeted(path, &DEPTH, 2, budget_bytes, held, strict, diag, decode)
+}
+
+/// Load the blur's protect mask, when it names one, under the same budget and
+/// with the same strictness as [`load_depth`].
+pub(super) fn load_protect(
+    recipe: &EditRecipe,
+    budget_bytes: usize,
+    held: &mut usize,
+    strict: bool,
+    diag: &crate::diag::Diag<'_>,
+) -> Result<Option<std::sync::Arc<image::GrayImage>>> {
+    static DECODED: std::sync::OnceLock<std::sync::Mutex<Vec<DecodeSlot<image::GrayImage>>>> =
+        std::sync::OnceLock::new();
+    let Some(path) = recipe.lens_blur.as_ref().filter(|l| l.draws()).and_then(|l| l.protect.as_deref()) else {
+        return Ok(None);
+    };
+    let decode = || {
+        decode_cached(DECODED.get_or_init(Default::default), 2, path, &PROTECT, |img| img.to_luma8(), diag)
+            .map(|img| {
+                let bytes = img.as_raw().len();
+                (img, bytes)
+            })
+    };
+    load_budgeted(path, &PROTECT, 1, budget_bytes, held, strict, diag, decode)
 }
 
 /// The depth map's nearness (0..=1) resampled to `w`×`h` at pixel centres,
@@ -138,11 +187,24 @@ pub(super) fn focus_nearness(near: &[f32], w: usize, h: usize, focus: [f32; 2]) 
 }
 
 /// Each pixel's blur radius in pixels for a `w`×`h` frame, and the largest.
-fn radii(lb: &LensBlur, near: &[f32], w: usize, h: usize) -> (Vec<f32>, f32) {
+/// With a protect mask every radius is scaled by `1 − alpha` there (the mask
+/// read at pixel centres in normalised coordinates, as every mask raster is);
+/// without one the field is exactly the depth law's.
+fn radii(lb: &LensBlur, near: &[f32], w: usize, h: usize, protect: Option<&image::GrayImage>) -> (Vec<f32>, f32) {
     let max_r = lb.amount / 100.0 * MAX_RADIUS_SHARE * w.max(h) as f32;
     let nf = focus_nearness(near, w, h, lb.focus);
     let band = lb.range / 100.0 * BAND_AT_FULL_RANGE;
-    let r = near.par_iter().map(|n| ((n - nf).abs() - band).clamp(0.0, RAMP) / RAMP * max_r).collect();
+    let mut r: Vec<f32> =
+        near.par_iter().map(|n| ((n - nf).abs() - band).clamp(0.0, RAMP) / RAMP * max_r).collect();
+    if let Some(mask) = protect {
+        r.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            let ny = (y as f32 + 0.5) / h as f32;
+            for (x, v) in row.iter_mut().enumerate() {
+                let alpha = sample_gray_norm(mask, (x as f32 + 0.5) / w as f32, ny).clamp(0.0, 1.0);
+                *v *= 1.0 - alpha;
+            }
+        });
+    }
     (r, max_r)
 }
 
@@ -192,13 +254,21 @@ fn gaussian(buf: &mut Vec<[f32; 4]>, w: usize, h: usize, sigma: f32) {
     }
 }
 
-/// Blur `data` (the develop's sRGB-gamma [0, 1] frame) by depth, in place.
-pub(super) fn apply(data: &mut [[f32; 3]], w: usize, h: usize, lb: &LensBlur, depth: &DepthImage) {
+/// Blur `data` (the develop's sRGB-gamma [0, 1] frame) by depth, in place,
+/// keeping `protect`'s white sharp when one is given.
+pub(super) fn apply(
+    data: &mut [[f32; 3]],
+    w: usize,
+    h: usize,
+    lb: &LensBlur,
+    depth: &DepthImage,
+    protect: Option<&image::GrayImage>,
+) {
     if w == 0 || h == 0 || !lb.draws() {
         return;
     }
     let near = nearness_at(depth, w, h);
-    let (radius, max_r) = radii(lb, &near, w, h);
+    let (radius, max_r) = radii(lb, &near, w, h, protect);
     if max_r < 0.5 {
         return;
     }

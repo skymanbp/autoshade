@@ -310,6 +310,11 @@
             for mode in Mode::ALL {
                 let mut app = app_with_every_button(lang);
                 app.mode = mode;
+                // Portraits with the people found: its panel's four groups
+                // open at the top of the sidebar (`panels/portrait.rs`).
+                if mode == Mode::Portraits {
+                    app.recipe.masks.extend(found_masks());
+                }
                 full_window_shot(&mut app, crate::theme::ThemePref::Dark, egui::vec2(1400.0, 880.0))
                     .save(dir.join(format!("workspace-{mode:?}-{lang:?}.png")))
                     .unwrap();

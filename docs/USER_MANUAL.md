@@ -12,6 +12,7 @@ algorithms in [TECH_STACK.md](TECH_STACK.md).
 
 - [Choosing a mode](#choosing-a-mode)
 - [Normal mode](#normal-mode)
+- [Portraits mode](#portraits-mode)
 - [1. Open and inspect a photo](#1-open-and-inspect-a-photo)
 - [2. Develop the image](#2-develop-the-image)
 - [3. Add local masks](#3-add-local-masks)
@@ -34,7 +35,7 @@ library stay as they are.
 | Mode | What the workspace shows |
 |---|---|
 | **Landscape** | Everything — the workspace as it was before modes existed. |
-| **Portraits** | Everything, with the reverse-fit's local-area switches in a fold of their own, closed until you open it. The portrait tools themselves come in a later version. |
+| **Portraits** | Everything, with a **Portraits** panel of its own at the top of the side panel — the people, the skin, the eyes and the background; see [Portraits mode](#portraits-mode). The reverse-fit's local-area switches sit in a fold of their own, closed until you open it. |
 | **Normal** | A short panel of its own for phone and jpg photos — one-click looks, four sliders, a noise switch and saving as jpg; see [Normal mode](#normal-mode). The Open dialog lists jpg and other rendered images before RAWs. |
 
 A mode changes only which controls are drawn. Recipes do not record it, every
@@ -93,6 +94,59 @@ keeps **Fit** and **1:1**; there is no strip of versions under it — each
 one-click replaces the look, and undo brings the previous one back. Switch to
 Landscape from the mode button for every other control; the photo and its
 look come along.
+
+## Portraits mode
+
+Portraits keeps the whole workspace and adds one panel at the top of the side
+panel, in four groups, top to bottom.
+
+**People and background.** **🤖 Find people and faces** finds the person and
+every face in the photo, on this computer: the person the same way
+**🤖 Select subject** does, the faces and eyes with Google's MediaPipe face
+finder. MediaPipe is a Python package of its own — install it once with
+`pip install mediapipe` into the Python the app uses (Settings, **Python
+interpreter**); the first run downloads its small face model (about 3.8 MB). The
+line under the button says how many faces were found. The search adds four
+masks to the photo — **Face**, **Eyes**, **Skin** (the face, narrowed to the
+colour of its skin) and **Background** (everything but the person) — which
+also appear in the mask list, where every other mask control works on them.
+Searching again moves them onto the new result and keeps their sliders.
+**✨ AI portrait look** sends the photo to the AI with a short description of a
+portrait look — softer skin, brighter eyes, a calmer background — at the
+**Look strength** you set; it needs an image key in Settings (⚙), and
+`Ctrl+Z` goes back. The faces, eyes and background the AI asks for are found
+on this computer the same way, never from coordinates the AI makes up. The
+look replaces the photo's look; the masks the search made come back under it,
+with their sliders at zero, and so does the background blur.
+
+**Skin.** **Soften skin** smooths the skin's fine texture, **Skin warmth**
+makes it cooler or warmer, and **Skin colour intensity** paler or richer —
+each on the skin only. **Keep skin natural** is on by default. While it is on,
+skin colour can be made only a little richer (up to +15), warmer or cooler
+(up to 20 either way) or shifted in tone (up to 8°); softening stops before
+skin looks fake (fine texture no lower than −60, local contrast no lower than
+−40); and skin is never sharpened. The limits hold for your own changes —
+here and in the mask list — and for the AI's alike, on the face and skin
+masks. Turn it off to go further. If a photo's saved edits already go
+further, the switch opens off for that photo, and nothing is changed until you
+turn it on; turning it on brings those values back within the limits, and the
+status line says how many. When no face was found, this group and the
+next are greyed and say **No face found in this photo**.
+
+**Eyes.** **Brighten eyes** lifts the eyes by up to 1.5 stops; **Crisp eyes**
+brings out the detail in them.
+
+**Background.** **🤖 Prepare the background blur** measures how far away every
+part of the photo is, on this computer, the way the Develop panel's Lens Blur
+does (the first run downloads a 1.3 GB model). When it is done the focus is
+set on the face and **Keep the person sharp** is switched on — once a face and
+the person were found — so the whole person stays sharp however far the blur
+reaches. **Blur amount** and **Sharp range** set
+how strong the blur is and how deep the sharp part is. **Darken background**
+and **Fade background colour** work on everything but the person; they need
+only the person to have been found, not a face. Like the Lens Blur, the blur
+is drawn here and in every export from this app, and a Lightroom sidecar
+cannot carry it.
 
 ## 1. Open and inspect a photo
 
@@ -1095,10 +1149,11 @@ shell environment and the variable below therefore cannot be set for it at all.
 | Variable | Effect |
 |---|---|
 | `AUTOSHADE_PYTHON` | The interpreter the sidecars are launched with. The same setting as the Settings field; the environment wins where both are set. |
-| `AUTOSHADE_WEIGHTS_DIR` | Where all six sidecars keep downloaded model weights. Defaults to `weights/` beside the scripts — except inside a macOS `.app`, where it defaults into the develop store, because the bundle is signed and read-only. |
+| `AUTOSHADE_WEIGHTS_DIR` | Where every sidecar keeps downloaded model weights. Defaults to `weights/` beside the scripts — except inside a macOS `.app`, where it defaults into the develop store, because the bundle is signed and read-only. |
+| `AUTOSHADE_FACE_SCRIPT` | The face finder the Portraits panel runs (`python/face.py` beside the app by default) — set it to use a copy elsewhere, for instance one beside a Python that has `mediapipe`. |
 
-Both are *destination* settings — they name a program to execute and a
-directory to write into — so neither may come from a `./autoshade.local.json`
+All three are *destination* settings — they name a program to execute or a
+directory to write into — so none may come from a `./autoshade.local.json`
 sitting in the working directory. Only the environment or the per-user
 settings file can supply them.
 

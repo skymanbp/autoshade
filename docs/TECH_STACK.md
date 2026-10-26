@@ -1236,6 +1236,17 @@ the photo identity, mask subtype, orientation, click/gesture data, backend
 generation, and exact points sent; a fallback-produced subject alpha is
 therefore invalidated when the pinned BiRefNet backend later becomes available.
 
+Faces and eyes for the Portraits mode (v1.14.0) come from MediaPipe's Face
+Landmarker, run by `python/face.py` through the `mediapipe` package. The
+sidecar writes JSON, not a mask: per face a box, the detector's score, the
+face outline and the two eye outlines, taken from the outline sets MediaPipe
+itself publishes and put in order, in the input image's pixels. `src/face.rs`
+fills each outline and feathers it — the face by a share of its box, each eye
+grown about its centre and feathered by a share of its width — and unions all
+faces into one face mask and one eyes mask. The skin mask is the face mask
+narrowed by a colour range seeded from the face's median colour; the
+background mask is the BiRefNet subject matte inverted.
+
 ### Parameters
 
 - BiRefNet repository/revision:
@@ -1258,6 +1269,17 @@ therefore invalidated when the pinned BiRefNet backend later becomes available.
   order and duplicates preserved (**designed IPC contract from measured XMP
   semantics**).
 - AI backend generation: `2` in the cache key (**designed invalidation salt**).
+- Face Landmarker bundle: `face_landmarker.task`, float16, version `1`,
+  `3,758,596 B`, SHA-256 pinned (**manifest-measured file size**); the
+  image is shown to it at a long edge of at most `2048` px and outlines are
+  scaled back to the original (`INFER_EDGE` in `python/face.py`); at most `8`
+  faces by default.
+- Face mask feather `FACE_FEATHER = 0.025` of the face box's longer side; eye
+  growth `EYE_GROW = 1.3`; eye feather `EYE_FEATHER = 0.1` of the eye's
+  width; skin colour-range tolerance `SKIN_RANGE_AMOUNT = 0.6`
+  (**designed first-version values**, to be checked on real portraits).
+- Face result cap: `FACES_MAX_BYTES = 1 MiB` before parsing, at most `32`
+  faces and `64` points per outline.
 
 ### Measured results & disclosures
 
@@ -1270,6 +1292,16 @@ therefore invalidated when the pinned BiRefNet backend later becomes available.
   alpha and says so.
 - Fallback provenance remains visible: an alpha made by U²-Net is not silently
   relabeled as a BiRefNet result.
+- The Face Landmarker's detector is MediaPipe's short-range BlazeFace, tuned
+  for faces that fill a good part of the frame; small faces in a wide shot can
+  be missed, and the app then reports that no face was found. Its Face Mesh
+  model card lists faces turned more than 80° from the camera or less than half
+  visible as unsuitable. The landmarker returns no per-face score, so the
+  score reported is the bundle's own detector, run a second time on the same
+  image; a face it does not match has no score.
+- `mediapipe` depends on `opencv-contrib-python`, a second build of OpenCV
+  beside the `opencv-python` the other sidecars use; both provide the same
+  `cv2` module.
 
 ### Source
 
@@ -1280,6 +1312,9 @@ therefore invalidated when the pinned BiRefNet backend later becomes available.
   and backend generation.
 - `src/recipe.rs`, `src/xmp/mask_xml.rs` and `src/xmp/read_corrections.rs` —
   AI-mask intent and XMP round trip.
+- `python/face.py` — the Face Landmarker pin, outline ordering and the JSON
+  result; `src/face.rs` — the bridge, the result's validation and the four
+  portrait masks.
 
 ## Lens correction and Lightroom mask-frame laws
 

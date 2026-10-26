@@ -665,6 +665,7 @@ mod tests {
     const DENOISE_RAW_SRC: &str =
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/denoise_raw.py"));
     const DEPTH_SRC: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/depth.py"));
+    const FACE_SRC: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/python/face.py"));
 
     /// Our own copy of every pinned download. Like `_sidecar.py` it is NOT on
     /// the roster — it pins no model of its own — but every pin on the roster
@@ -676,23 +677,27 @@ mod tests {
     /// escapes all four shared contracts below. `describe.py` (S2) is the
     /// fifth member of the family and `denoise_raw.py` (2026-09-15, the
     /// RAW-domain denoiser) the sixth, `depth.py` (2026-10-13, the lens-blur
-    /// depth map) the seventh — `denoise.py` holds the `_fetch_verified` gate
-    /// itself and is pinned by its own module's tests; the other six fetch
+    /// depth map) the seventh, `face.py` (v1.14.0, the Portraits mode's face
+    /// outlines) the eighth — `denoise.py` holds the `_fetch_verified` gate
+    /// itself and is pinned by its own module's tests; the other seven fetch
     /// through it and are held to the contracts here.
-    const SIDECARS: [(&str, &str); 6] = [
+    const SIDECARS: [(&str, &str); 7] = [
         ("embed.py", EMBED_SRC),
         ("segment.py", SEGMENT_SRC),
         ("correspond.py", CORRESPOND_SRC),
         ("describe.py", DESCRIBE_SRC),
         ("denoise_raw.py", DENOISE_RAW_SRC),
         ("depth.py", DEPTH_SRC),
+        ("face.py", FACE_SRC),
     ];
     /// How many digests each roster member pins at least — the non-vacuity
     /// floor of the contract below, per file. `depth.py` downloads ONE file
     /// (MoGe-2's `model.pt`); its architecture is vendored source, not a
     /// download, so a floor of three would demand pins that do not exist.
+    /// `face.py` likewise downloads one (the Face Landmarker bundle); the
+    /// runtime that executes it is the `mediapipe` package.
     fn min_digests(what: &str) -> usize {
-        if what == "depth.py" { 1 } else { 3 }
+        if matches!(what, "depth.py" | "face.py") { 1 } else { 3 }
     }
 
     /// Every pinned model file carries BOTH a sha256 and a byte count, in both

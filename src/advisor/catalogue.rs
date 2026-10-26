@@ -1827,8 +1827,10 @@ pub const LOCAL_CONTROLS: [Control; 28] = [
         // the AI where every radial in the reference library already sits.
         purpose: "WHERE this adjustment applies: kind=ai (what=sky, what=subject — the main \
                   subject — or what=object under the point ref_x/ref_y, in 0..1 frame coords; \
-                  cut by a local segmenter after you answer) to select a part of the picture by \
-                  what it IS; kind=linear (zero_* = the no-effect edge, full_* = the \
+                  for people what=face, what=eyes or what=background — everything but the \
+                  person — found on the photo itself, so their ref_x/ref_y are not read; all \
+                  cut locally after you answer) to select a part of the picture by what it IS; \
+                  kind=linear (zero_* = the no-effect edge, full_* = the \
                   full-effect edge, in 0..1 frame coords) for a gradient; or kind=radial \
                   (top/left/bottom/right + feather 0..1, roundness 0 — a carried Lightroom \
                   value this engine does not render, so leave it at 0 — flipped, and angle in \
@@ -2200,7 +2202,10 @@ fn mask_geometry_schema() -> Value {
             // the local segmenter cuts the alpha before anything renders it
             // (`openai::expand_ai_mask_intents`, `segment::resolve_ai_masks`).
             // The same three targets `python/segment.py` serves the GUI's own
-            // Select Sky / Select Subject / point-prompted object.
+            // Select Sky / Select Subject / point-prompted object, and since
+            // v1.14.0 the Portraits mode's face / eyes (`python/face.py`,
+            // `face::resolve_face_masks`) and background (the subject cut,
+            // inverted).
             {"type": "object", "additionalProperties": false,
              "required": ["kind","what","ref_x","ref_y"],
              "properties": {"kind": {"type": "string", "enum": ["ai"]},
@@ -2211,8 +2216,11 @@ fn mask_geometry_schema() -> Value {
 }
 
 /// The content targets an `ai` mask may name, in the schema's enum order:
-/// `sky` (OneFormer), `subject` (BiRefNet), `object` (SAM 2.1 at the point).
-pub const AI_MASK_TARGETS: [&str; 3] = ["sky", "subject", "object"];
+/// `sky` (OneFormer), `subject` (BiRefNet), `object` (SAM 2.1 at the point),
+/// and the Portraits mode's `face` and `eyes` (MediaPipe's Face Landmarker)
+/// and `background` (BiRefNet's subject, inverted) — none of these three
+/// reads the model's point.
+pub const AI_MASK_TARGETS: [&str; 6] = ["sky", "subject", "object", "face", "eyes", "background"];
 
 /// RangeMask tagged enum (`#[serde(tag="kind")]`) → anyOf of the two variants
 /// + null (strict mode requires the field to be PRESENT, so "no range" = null).

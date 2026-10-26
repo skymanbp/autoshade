@@ -290,7 +290,7 @@ Per-subsystem notes: [In depth → Implementation](docs/DEEP_DIVE.md#implementat
 
 <br />
 
-Model weights download separately and remain their authors' property; every pinned model also has a byte-exact mirror on Hugging Face (`Azng0/autoshade-mirror-*`), checksum-verified either way — table in [`python/_mirror.py`](python/_mirror.py).
+Model weights download separately and remain their authors' property; every pinned model except the new MediaPipe Face Landmarker bundle (not mirrored yet) also has a byte-exact mirror on Hugging Face (`Azng0/autoshade-mirror-*`), checksum-verified either way — table in [`python/_mirror.py`](python/_mirror.py).
 
 | Model | Purpose | License |
 |---|---|---|
@@ -301,6 +301,7 @@ Model weights download separately and remain their authors' property; every pinn
 | OneFormer ADE20K | Sky segmentation | MIT |
 | SAM 2.1 | Point-prompted object masks | Apache-2.0 |
 | MoGe-2 ViT-L (code in `python/_moge/`) | AI lens blur depth map | MIT (DINOv2 backbone code Apache-2.0) |
+| MediaPipe Face Landmarker (BlazeFace + Face Mesh V2) | Portraits mode face and eye outlines | Apache-2.0 |
 | SigLIP 2 | Style embeddings | Apache-2.0 |
 | Qwen3-VL-2B-Instruct | Local look descriptions | Apache-2.0 |
 | Stable Diffusion 2.1 | DIFT correspondence field | CreativeML Open RAIL++-M |

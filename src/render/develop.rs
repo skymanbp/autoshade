@@ -430,9 +430,15 @@ pub(super) fn apply_develop_with_rasters(
     }
     // 10) the AI lens blur (2026-10-13, `lens_blur.rs`), last of all: a lens
     //     blurs the whole scene in front of it, fill layers included, and it
-    //     reads the depth of what the finished picture shows.
+    //     reads the depth of what the finished picture shows. A blur that
+    //     names a protect mask the snapshot could not load is not drawn (the
+    //     loader already said why): drawn without it, it would blur exactly
+    //     what the photographer asked to keep sharp.
     if let (Some(lb), Some(depth)) = (r.lens_blur.as_ref().filter(|l| l.draws()), rasters.depth()) {
-        lens_blur::apply(data, w, h, lb, depth);
+        let protect = rasters.blur_protect();
+        if lb.protect.is_none() || protect.is_some() {
+            lens_blur::apply(data, w, h, lb, depth, protect);
+        }
     }
 }
 

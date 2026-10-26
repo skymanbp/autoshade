@@ -24,3 +24,4 @@
     include!("tests/lens_blur.rs");
     include!("tests/mode.rs");
     include!("tests/normal.rs");
+    include!("tests/portrait.rs");

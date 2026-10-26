@@ -495,6 +495,30 @@ pub fn produce_recipe(
                 ),
             );
         }
+        // The Portraits targets `face` / `eyes` (v1.14.0): outlined by the
+        // face finder on the same photo/pixels split; a mask it cannot
+        // outline is taken out, not carried — it has no raster to render.
+        let faces = crate::face::resolve_face_masks(cfg, raw, pixels.unwrap_or(raw), r);
+        if faces.resolved > 0 {
+            crate::rationale::push_note(
+                &mut r.rationale,
+                notes,
+                crate::rationale::Note::new(
+                    crate::rationale::keys::FACE_MASKS_OUTLINED,
+                    vec![("n", faces.resolved.to_string())],
+                ),
+            );
+        }
+        for (name, why) in &faces.dropped {
+            crate::rationale::push_note(
+                &mut r.rationale,
+                notes,
+                crate::rationale::Note::new(
+                    crate::rationale::keys::FACE_MASK_LEFT_OUT,
+                    vec![("name", name.clone()), ("why", why.clone())],
+                ),
+            );
+        }
     };
 
     // GPT vision when a key is set; on failure (quota/network) warn and fall back
@@ -1363,7 +1387,9 @@ pub(crate) fn adjust_envelope(base_json: &str, request: Option<&str>) -> String 
          the sky, the subject, a person, a building, the foreground — put the change on a mask \
          instead of the globals. A kind=ai mask is cut by a local segmenter after you answer: \
          what=sky, what=subject (the main subject), or what=object under the point ref_x/ref_y \
-         (0..1 frame coordinates, origin top-left); add a `range` (luminance or colour) to \
+         (0..1 frame coordinates, origin top-left), and for people what=face, what=eyes or \
+         what=background (everything but the person), found on the photo itself without a \
+         point; add a `range` (luminance or colour) to \
          confine any mask further; use linear and radial masks for gradients and vignettes. \
          One mask per named part: to change a mask the CURRENT EDIT already has, return it \
          with its `name` byte-exact (its selection is kept) rather than adding a second one on \
@@ -7937,6 +7963,7 @@ mod tests {
             weights_dir: String::new(),
             segment_script: String::new(),
             depth_script: String::new(),
+            face_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),
             describe_script: String::new(),

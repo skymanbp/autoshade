@@ -33,3 +33,7 @@ rembg
 # MoGe-2 depth for the AI lens blur (python/depth.py); its vendored code
 # (python/_moge/) recovers the depth shift with scipy's least squares
 scipy
+
+# Face and eye outlines for the Portraits mode (python/face.py); MediaPipe
+# Face Landmarker, its model bundle sha256-pinned at download like the rest
+mediapipe

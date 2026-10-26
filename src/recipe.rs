@@ -2231,9 +2231,23 @@ impl Default for LocalAdjustment {
 /// Which semantic zone a local adjustment came from — a STABLE mask identity
 /// that survives UI translation and user renaming (the display `name` is free
 /// text and, since i18n, no longer a reliable key). Set by the zoned
-/// reverse-fit (fit_zoned.rs); `Custom` for every user-placed or AI-segmented
+/// reverse-fit (fit_zoned.rs) and, since v1.14.0, by the Portraits mode
+/// (`crate::face`); `Custom` for every other user-placed or AI-segmented
 /// mask. Serialised in `recipe.json` as `"custom"` / `"zone_sky"` /
-/// `"zone_land"`; carried as namespaced AutoShade intent in XMP.
+/// `"zone_land"` / `"face"` / `"eyes"` / `"skin"` / `"background"`; carried as
+/// namespaced AutoShade intent in XMP.
+///
+/// **No `#[serde(other)]`, and the four portrait roles are therefore a forward
+/// break.** A build from before v1.14.0 meets `"role":"face"` as an unknown
+/// variant and refuses the whole recipe by name (serde's "unknown variant"),
+/// the same class-① posture `deny_unknown_fields` gives every container here:
+/// an older reader that silently demoted the role to `Custom` would also
+/// write it back as `Custom`, quietly editing the photographer's file. A
+/// catch-all variant could only help readers built AFTER it was added, so it
+/// buys nothing for the builds that exist; it is not added. Recipes whose
+/// masks all carry the three older roles are unaffected. XMP is unaffected
+/// either way: an older reader takes any role tag it does not know as
+/// `Custom` (`xmp::read_corrections`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaskRole {
@@ -2244,19 +2258,53 @@ pub enum MaskRole {
     ZoneSky,
     /// Land zone from the zoned reverse-fit (rides the INVERTED sky raster).
     ZoneLand,
+    /// Every face the face finder outlined, unioned and feathered
+    /// (`crate::face::face_mask`).
+    Face,
+    /// Both eyes of every face found, unioned and feathered
+    /// (`crate::face::eyes_mask`).
+    Eyes,
+    /// The face mask narrowed to skin-coloured pixels by a colour range seeded
+    /// from the face itself (`crate::face::skin_adjustment`).
+    Skin,
+    /// Everything but the subject: the subject matte, inverted
+    /// (`crate::face::background_adjustment`).
+    Background,
 }
 
 impl MaskRole {
-    /// ASCII tag for the fit's rationale text (`"custom"` / `"sky"` / `"land"`).
+    /// ASCII tag for the fit's rationale text and the XMP intent attribute
+    /// (`"custom"` / `"sky"` / `"land"` / `"face"` / `"eyes"` / `"skin"` /
+    /// `"background"`).
     pub fn tag(self) -> &'static str {
         match self {
             MaskRole::Custom => "custom",
             MaskRole::ZoneSky => "sky",
             MaskRole::ZoneLand => "land",
+            MaskRole::Face => "face",
+            MaskRole::Eyes => "eyes",
+            MaskRole::Skin => "skin",
+            MaskRole::Background => "background",
         }
     }
 
-    /// Canonical English display name for a zone mask, or `None` for `Custom`
+    /// The role a [`tag`](Self::tag) names, or `None` for a tag this build
+    /// does not know — the reading half of the XMP intent attribute.
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        [
+            MaskRole::Custom,
+            MaskRole::ZoneSky,
+            MaskRole::ZoneLand,
+            MaskRole::Face,
+            MaskRole::Eyes,
+            MaskRole::Skin,
+            MaskRole::Background,
+        ]
+        .into_iter()
+        .find(|r| r.tag() == tag)
+    }
+
+    /// Canonical English display name for a zone or portrait mask, or `None` for `Custom`
     /// (whose label is the user's own `name`). The GUI runs this through i18n
     /// so the mask row localises alongside the rest of the UI.
     pub fn en_name(self) -> Option<&'static str> {
@@ -2264,6 +2312,10 @@ impl MaskRole {
             MaskRole::Custom => None,
             MaskRole::ZoneSky => Some("Sky (reverse-fit)"),
             MaskRole::ZoneLand => Some("Land (reverse-fit)"),
+            MaskRole::Face => Some("Face"),
+            MaskRole::Eyes => Some("Eyes"),
+            MaskRole::Skin => Some("Skin"),
+            MaskRole::Background => Some("Background"),
         }
     }
 
@@ -3199,9 +3251,14 @@ impl LocalAdjustment {
         // be relativized on save, resolved on load, copied when a version
         // snapshot becomes live, and swept with a deleted version — so the
         // AiMask one goes through the same door rather than growing a second.
+        //
+        // An EMPTY `Bitmap` path names no file — it is a face/eyes intent a
+        // proposal or a hand-written recipe left for the face finder
+        // (`face::is_face_intent`) — and is skipped: rebased on load it would
+        // become the recipe's own folder and stop being an intent.
         self.geometries_mut()
             .filter_map(|g| match g {
-                MaskGeometry::Bitmap { path } => Some(path),
+                MaskGeometry::Bitmap { path } if !path.is_empty() => Some(path),
                 MaskGeometry::AiMask { raster: Some(path), .. } => Some(path),
                 _ => None,
             })
@@ -3237,7 +3294,7 @@ impl LocalAdjustment {
         let zone = self.role.is_zone();
         self.geometries_mut()
             .filter_map(move |g| match g {
-                MaskGeometry::Bitmap { path } => Some(path),
+                MaskGeometry::Bitmap { path } if !path.is_empty() => Some(path),
                 MaskGeometry::AiMask { raster: Some(path), .. } if zone => Some(path),
                 _ => None,
             })
@@ -3710,6 +3767,13 @@ impl EditRecipe {
         if let Some(lb) = &mut self.lens_blur {
             lb.clamp();
             summary.truncated_string_bytes += cap(&mut lb.depth_map, MAX_PATH);
+            // An empty protect path names nothing: no protection, as absent.
+            if let Some(p) = &mut lb.protect {
+                summary.truncated_string_bytes += cap(p, MAX_PATH);
+                if p.is_empty() {
+                    lb.protect = None;
+                }
+            }
             if lb.depth_map.is_empty() {
                 self.lens_blur = None;
             }
@@ -6596,5 +6660,60 @@ mod tests {
         };
         recipe.clamp();
         assert!(recipe.masks.is_empty());
+    }
+
+    /// Every role has its own tag and display name, `from_tag` reads each tag
+    /// back, and each round-trips through `recipe.json` under its snake_case
+    /// spelling. The four portrait roles are not zones: their raster is not
+    /// the fit's measured alpha.
+    #[test]
+    fn every_mask_role_has_a_tag_and_round_trips() {
+        let all = [
+            (MaskRole::Custom, "custom", "custom"),
+            (MaskRole::ZoneSky, "sky", "zone_sky"),
+            (MaskRole::ZoneLand, "land", "zone_land"),
+            (MaskRole::Face, "face", "face"),
+            (MaskRole::Eyes, "eyes", "eyes"),
+            (MaskRole::Skin, "skin", "skin"),
+            (MaskRole::Background, "background", "background"),
+        ];
+        let tags: std::collections::HashSet<&str> = all.iter().map(|(r, _, _)| r.tag()).collect();
+        assert_eq!(tags.len(), all.len(), "tags are distinct");
+        for (role, tag, json) in all {
+            assert_eq!(role.tag(), tag);
+            assert_eq!(MaskRole::from_tag(tag), Some(role));
+            assert_eq!(serde_json::to_string(&role).unwrap(), format!("\"{json}\""));
+            let m = LocalAdjustment { role, ..Default::default() };
+            let back: LocalAdjustment = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+            assert_eq!(back.role, role);
+            assert_eq!(role.en_name().is_none(), role == MaskRole::Custom, "{role:?}");
+        }
+        assert_eq!(MaskRole::from_tag("hair"), None);
+        assert!([MaskRole::Face, MaskRole::Eyes, MaskRole::Skin, MaskRole::Background].iter().all(|r| !r.is_zone()));
+    }
+
+    /// What a build from BEFORE the portrait roles does with one, measured
+    /// rather than assumed: its `MaskRole` (copied here verbatim, three
+    /// variants, no `#[serde(other)]`) refuses the value by name, so the older
+    /// build refuses the recipe instead of demoting the role and writing it
+    /// back as `custom`. A recipe that carries only the old roles still reads.
+    #[test]
+    fn an_older_reader_refuses_a_portrait_role_by_name() {
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        #[allow(dead_code)]
+        enum OldMaskRole {
+            Custom,
+            ZoneSky,
+            ZoneLand,
+        }
+        for role in [MaskRole::Face, MaskRole::Eyes, MaskRole::Skin, MaskRole::Background] {
+            let json = serde_json::to_string(&role).unwrap();
+            let why = serde_json::from_str::<OldMaskRole>(&json).unwrap_err().to_string();
+            assert!(why.contains("unknown variant") && why.contains(role.tag()), "{why}");
+        }
+        for role in [MaskRole::Custom, MaskRole::ZoneSky, MaskRole::ZoneLand] {
+            assert!(serde_json::from_str::<OldMaskRole>(&serde_json::to_string(&role).unwrap()).is_ok());
+        }
     }
 }

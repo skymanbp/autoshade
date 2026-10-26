@@ -324,3 +324,21 @@ fn editor_intent_survives_a_namespace_declaration_hoisted_to_the_document_root()
     let shadowed = hoisted.replacen(" ash:Role=", " xmlns:ash=\"https://example.invalid/other/\" ash:Role=", 1);
     assert_eq!(xmp_to_recipe(&shadowed).masks[0].role, MaskRole::Custom, "{shadowed}");
 }
+
+/// v1.14.0: the four portrait roles ride the intent attribute out and back,
+/// and a role tag this build does not know — a newer build's — reads as
+/// `Custom`, which is exactly what a pre-v1.14.0 build does with these four.
+#[test]
+fn portrait_roles_round_trip_and_an_unknown_role_tag_reads_as_custom() {
+    for role in [MaskRole::Face, MaskRole::Eyes, MaskRole::Skin, MaskRole::Background] {
+        let recipe = EditRecipe {
+            masks: vec![LocalAdjustment { mask: linear(), role, exposure_ev: 0.25, ..Default::default() }],
+            ..Default::default()
+        };
+        let doc = bare_document(&recipe, None);
+        assert!(doc.contains(&format!("ash:Role=\"{}\"", role.tag())), "{doc}");
+        assert_eq!(xmp_to_recipe(&doc).masks[0].role, role, "{doc}");
+        let newer = doc.replace(&format!("ash:Role=\"{}\"", role.tag()), "ash:Role=\"hair\"");
+        assert_eq!(xmp_to_recipe(&newer).masks[0].role, MaskRole::Custom, "{newer}");
+    }
+}

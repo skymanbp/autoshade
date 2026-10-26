@@ -98,6 +98,13 @@ MIRRORS = {
     # anonymously (model.pt LFS digest = the pin, LICENSE byte-equal to ours)
     "https://huggingface.co/Ruicheng/moge-2-vitl-normal/resolve/cb0e8bbd6b1e243589717c78e750b1ba4c093acf/":
         "https://huggingface.co/Azng0/autoshade-mirror-moge-2-vitl-normal/resolve/eedf82d7cf301a59cebbbffde9c03dc03c726b9f/",
+    # face.py MODEL — MediaPipe's Face Landmarker bundle (v1.14.0), pinned at
+    # https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/
+    # is NOT MIRRORED YET: no copy of ours has been uploaded and verified, so
+    # this table has no entry for it and the download goes to Google's bucket
+    # (twice, as any unmirrored URL). The entry is added only once the copy
+    # exists and was read back anonymously against face.py's sha256, as every
+    # row above was.
 }
 
 

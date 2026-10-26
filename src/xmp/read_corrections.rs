@@ -1035,10 +1035,10 @@ fn parse_one_correction_with_reader(
         // Intent first — a document of ours says the role outright, and says
         // `custom` outright too — and the name's verdict only where no intent
         // survives at all.
+        // A tag this build does not know (a NEWER build's role) reads as
+        // `Custom`, which is how a pre-v1.14.0 build reads the portrait ones.
         role: match mask_intent_attr(correction_tag, "Role", intent_declared).as_deref() {
-            Some("sky") => crate::recipe::MaskRole::ZoneSky,
-            Some("land") => crate::recipe::MaskRole::ZoneLand,
-            Some(_) => crate::recipe::MaskRole::Custom,
+            Some(tag) => crate::recipe::MaskRole::from_tag(tag).unwrap_or(crate::recipe::MaskRole::Custom),
             None => name_role.unwrap_or(crate::recipe::MaskRole::Custom),
         },
         exposure_ev: own.crs_f32("LocalExposure2012").unwrap_or(0.0) * 4.0,

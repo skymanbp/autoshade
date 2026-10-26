@@ -1162,6 +1162,13 @@ pub mod keys {
         " {n} AI mask(s) the proposal asked for were cut by the local segmenter (an approximation of the named part, not a hand-drawn selection).";
     pub const AI_MASK_NOT_CUT: &str =
         " AI mask \"{name}\" asked for by the proposal was carried but NOT rendered ({why}).";
+    /// The Portraits targets (`face` / `eyes`, v1.14.0): outlined by the face
+    /// finder on this computer; one note per call, and one per mask it could
+    /// not outline — that mask is taken out (`face::resolve_face_masks`).
+    pub const FACE_MASKS_OUTLINED: &str =
+        " {n} face or eye mask(s) the proposal asked for were outlined on this computer by the face finder (MediaPipe).";
+    pub const FACE_MASK_LEFT_OUT: &str =
+        " Face mask \"{name}\" asked for by the proposal was left out ({why}).";
     pub const PROPOSAL_LIMITS_DISCARDED: &str =
         " [the proposal exceeded recipe limits — discarded {dropped}]";
     /// R23-1: OpenAI strict mode cannot bound an array's LENGTH, so a

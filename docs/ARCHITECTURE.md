@@ -1197,6 +1197,26 @@
 > | `correspond.py` | `correspond.rs` | **Stable Diffusion 2.1** as a DIFT featurizer (unet+vae+text encoder, fp16), sha256-pinned | CreativeML Open RAIL++-M | 2,580,061,174 B |
 > | `describe.py` | `describe.rs` | **Qwen3-VL-2B-Instruct**, one grade sentence per photo, sha256-pinned | Apache-2.0 | 4,255,140,312 B |
 > | `depth.py` | `depth.rs` | **MoGe-2 ViT-L + normal head**, the AI lens blur's depth map, sha256-pinned; its inference code is vendored in `python/_moge/` (see `VENDORED.md`) because the upstream package pulls a web UI, a mesh library and a CUDA extension that must compile | MIT (DINOv2 backbone code Apache-2.0) | 1,323,815,904 B |
+> | `face.py` | `face.rs` | **MediaPipe Face Landmarker** bundle (`face_landmarker.task`, float16, version 1: BlazeFace short-range detector, Face Mesh V2, blendshapes), sha256-pinned; run by the `mediapipe` package; the Portraits mode's face and eye outlines | Apache-2.0 (all three model cards) | 3,758,596 B |
+>
+> **Faces, portrait masks and the protected blur (v1.14.0).** `face.py` writes
+> JSON rather than a mask: every face's box, the detector's score, the face
+> outline and both eye outlines, in the input picture's pixels. `face.rs`
+> validates it, fills each outline and feathers it, and unions all faces into
+> one face mask and one eyes mask; the skin mask is the face mask narrowed by a
+> colour range seeded from the face's median colour, and the background mask is
+> the subject matte inverted. Each is an ordinary bitmap mask carrying one of
+> four new `MaskRole` values — `Face`, `Eyes`, `Skin`, `Background` — so every
+> existing mask slider applies to it. The lens blur gains `LensBlur::protect`, a
+> soft mask raster (in practice the subject matte) that multiplies the blur
+> radius by `1 − alpha`: white stays sharp, the mask's own soft edge is the
+> transition, and a protected pixel also stays out of the blur levels around
+> it, so the person does not bleed into the background. A blur that names a
+> protect mask which cannot be read is not drawn rather than drawn unprotected.
+> Without `protect` the blur is pixel-identical to v1.13.0 (pinned by a
+> checksum test). Neither reaches a Lightroom sidecar: the lens blur never did,
+> and the portrait masks are bitmap masks, which the writer skips and the save
+> line names.
 >
 > **Every pinned model has a copy of ours, and it is tried first (2026-09-20).**
 > Each row above is fetched from somebody else's server at a pinned revision,
@@ -1209,7 +1229,10 @@
 > in mirror repositories of ours as well (`Azng0/autoshade-mirror-*`), copied
 > from the pins themselves and accepted only after the same sha256 matched,
 > then read back and re-verified anonymously, which is the only access a user's
-> machine has. [`python/_mirror.py`](../python/_mirror.py) is the one table
+> machine has. **One exception, for now:** the Face Landmarker bundle `face.py`
+> pins (v1.14.0) has no copy of ours yet and is fetched from Google's own
+> bucket at its versioned path; `_mirror.py` records that and gains its entry
+> once the copy exists and has been verified the same way. [`python/_mirror.py`](../python/_mirror.py) is the one table
 > that says where, and `_fetch_verified` walks `sources(url)` — ours, then the
 > upstream, which keeps the one re-try it always had. **The order is a
 > preference, never a trust decision**: a source decides WHERE bytes come from
@@ -1901,6 +1924,15 @@ fields were dropped without a word by a v0.30 binary, which then wrote the
 truncated geometry back, editing the user's file on their behalf. The old
 comment claiming serde cannot deny unknown fields on an internally tagged enum
 was simply wrong, and was checked against serde 1.0.228 before it was removed.
+The v1.14.0 additions follow the same rule and are disclosed as what they
+cost: a recipe that uses a portrait mask role (`face`, `eyes`, `skin`,
+`background`) or a protected lens blur is refused by a v1.13.0 or older build,
+by name, rather than read with the role demoted to `custom` or the protection
+dropped. `MaskRole` has no catch-all variant because one would only help
+readers built after it. Recipes that use neither read in older builds as
+before, since the new blur field is not written when absent. A Lightroom
+sidecar is unaffected: an older build reads a role tag it does not know as
+`custom`.
 `variants.json` is the deliberate exception in the other direction (see the
 strip's `#[serde(flatten)]` capture-all above): it is a LIST the two builds
 share, so tolerating and carrying unknown members is the correct behaviour
@@ -6901,6 +6933,44 @@ replace an existing photo is typed (`pipeline::OverwriteRefused`, same
 message as before): the batch worker counts it per photo by type
 (`ExportOutcome::Batch::refused`) and Normal words it plainly on both the
 single and the batch path, never by matching its English.
+
+**The Portraits mode's panel.** Portraits keeps every shared panel and adds
+one above them: `Shell::portrait_panel` draws
+[`src/bin/gui/panels/portrait.rs`](../src/bin/gui/panels/portrait.rs) at the
+top of `controls_column`. Its four groups are doors the workspace already has.
+"Find people and faces" is one worker running two sidecars on the
+original-frame preview — `segment::segment_file` with the `subject` target and
+`face::detect_faces` — and its landing (`on_portrait_found`) adds or
+re-points four bitmap masks by `MaskRole` (`face::portrait_adjustment`,
+`face::skin_adjustment`, `face::background_adjustment`), so a second search
+moves the rasters and keeps the sliders. The skin, eyes and background sliders
+write `LocalAdjustment` fields of the mask with that role (soften = texture
+and half as much clarity, crisp = sharpness and half as much clarity, darken =
+exposure, fade = saturation), and the background group's blur is the card's
+`LensBlur`, its "keep the person sharp" switch the blur's `protect` raster
+(the background mask's own subject matte); "prepare the blur" is the Lens Blur
+section's `start_depth`, whose landing (`after_portrait_depth`) aims the focus
+at the skin range's sample point. The AI portrait look is the Normal preset
+door with `advisor::presets::PORTRAIT`, whose text asks for `kind=ai` masks
+on the three portrait targets `AI_MASK_TARGETS` gained: `openai::expand_ai_mask_intents`
+turns `face` / `eyes` into a role-carrying bitmap mask that names no raster
+and `background` into the subject cut, inverted, and `face::resolve_face_masks`
+outlines the first two on the photo's own frame during the analysis (and at
+`apply` / `render`), caching the two rasters beside the develop and taking out
+— with a typed note — a mask that has no face to stand on; the model's
+coordinates are never read. "Keep skin natural" is panel state, not a recipe
+field, kept per photo and card. Opening never changes a value: when the
+photo's strip or a saved version is read from disk, each card read whose
+edit `face::skin_values_beyond` finds past the limits is entered off
+(`decide_keep_skin_for_photo` / `_for_card`); every other card, including
+one this session made, is on, and a forked card inherits its parent's
+switch. The user's turning it on (`set_keep_skin`) is the one act that
+clamps a saved edit, and it says how many values it moved. While it is on,
+`guard_portrait_skin` runs `face::keep_skin_natural_in`
+once per frame, after the workers landed and the panels drew and before the
+fork, the develop and the undo commit — the one place a slider, a paste and
+an AI landing all pass — and the six limits of `face::keep_skin_natural` hold
+the skin and face masks.
 
 **Platform.** `windows-sys` 0.59 with five feature gates:
 `Win32_Foundation` + `Win32_System_JobObjects` for the sidecar kill-groups (a

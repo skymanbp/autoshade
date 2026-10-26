@@ -602,6 +602,8 @@ pub(crate) struct AutoShadeApp {
     pub(crate) mode_card_rects: Vec<(Mode, egui::Rect)>,
     /// Normal mode's own sidebar state (`panels/normal.rs`).
     pub(crate) normal: crate::panels::normal::NormalState,
+    /// The Portraits panel's own state (`panels/portrait.rs`).
+    pub(crate) portrait: crate::panels::portrait::PortraitState,
 }
 
 impl AutoShadeApp {
@@ -1454,6 +1456,12 @@ impl AutoShadeApp {
                         // (`panels/normal.rs`) — in place of the panels below.
                         self.normal_panel(ui);
                     } else if self.src_path.is_some() {
+                        // Portraits (`mode::Shell::portrait_panel`): its own
+                        // panel first — people, skin, eyes, background
+                        // (`panels/portrait.rs`) — above the full workspace.
+                        if self.mode.shell().portrait_panel {
+                            self.portrait_panel(ui);
+                        }
                         // The AI area is FIRST (R22 #4): one first-level
                         // section holding every AI develop verb — analysis,
                         // whole-image generation, reverse-fit — above the
@@ -2011,6 +2019,7 @@ impl Default for AutoShadeApp {
             #[cfg(test)]
             mode_card_rects: Vec::new(),
             normal: Default::default(),
+            portrait: Default::default(),
         }
     }
 }
@@ -2123,6 +2132,11 @@ impl AutoShadeApp {
         self.upd_status_bar(ctx);
 
         self.upd_strips_and_side_panels(ctx);
+        // "Keep skin natural" (Portraits, `panels/portrait.rs`): whatever this
+        // frame wrote into the recipe — a slider, a paste, an AI landing —
+        // meets the skin limits here, before the fork, the develop and the
+        // undo commit below read it.
+        self.guard_portrait_skin();
         // The immutability rule (2026-09-13): whatever this frame wrote into
         // the live recipe — a slider, a shortcut, a landing — continues on
         // an ✎ card when the active card is the pristine ✨ image, BEFORE the

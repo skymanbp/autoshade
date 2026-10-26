@@ -1292,6 +1292,13 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path, long_edge: Option<u32>)
     if let Some(line) = ai.describe() {
         println!("ai mask : {line}");
     }
+    // The face and eye masks a proposal asked for, outlined the same way
+    // (`face::resolve_face_masks`: cached beside the develop; a mask with no
+    // face to stand on is taken out and named).
+    let faces = autoshade::face::resolve_face_masks(&Config::load(), raw, &src, &mut recipe);
+    if let Some(line) = faces.describe() {
+        println!("face mask: {line}");
+    }
     println!("rendering {} with {} ...", raw.display(), recipe_path.display());
     // The delivery size, if one was asked for. The develop above and the render
     // below are unchanged by it — `render_to_file` resizes the FINISHED pixels
@@ -1441,6 +1448,10 @@ fn auto_cmd(
     let ai = autoshade::segment::resolve_ai_masks(&cfg, raw, &src, &mut render_recipe);
     if let Some(line) = ai.describe() {
         println!("ai mask : {line}");
+    }
+    let faces = autoshade::face::resolve_face_masks(&cfg, raw, &src, &mut render_recipe);
+    if let Some(line) = faces.describe() {
+        println!("face mask: {line}");
     }
     let (w, h) = render::render_to_file(
         &src,
@@ -2504,6 +2515,7 @@ mod tests {
             weights_dir: String::new(),
             segment_script: String::new(),
             depth_script: String::new(),
+            face_script: String::new(),
             embed_script: String::new(),
             correspond_script: String::new(),
             describe_script: String::new(),

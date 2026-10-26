@@ -439,15 +439,22 @@ impl AutoShadeApp {
                     // Normal's one-click look lands through the same door,
                     // then says what happened in plain words (`normal.rs`).
                     let one_click = self.one_click_landing(epoch, &boxed);
+                    // …and so does the Portraits panel's AI look (`portrait.rs`).
+                    let portrait = self.portrait_look_landing(epoch);
+                    let landed = boxed.is_ok();
                     self.on_analyzed(lang, epoch, boxed);
                     if let Some(landed) = one_click {
                         self.after_one_click(lang, landed);
+                    }
+                    if let Some((kept, blur)) = portrait {
+                        self.after_portrait_look(kept, blur, landed);
                     }
                 }
                 Msg::OneClickBuildProgress { done, total } => {
                     self.normal.build_progress = Some((done, total));
                 }
                 Msg::OneClickBuilt(res) => self.on_one_click_built(lang, res),
+                Msg::PortraitFound(found) => self.on_portrait_found(lang, *found),
                 Msg::Exported(Ok(outcome)) => {
                     // Normal's Save group words its own landing (`normal.rs`).
                     let plain = self.normal_delivery_words(lang, &outcome);
@@ -608,7 +615,10 @@ impl AutoShadeApp {
                 }
                 Msg::StyleBuilt(outcome) => self.on_style_built(lang, *outcome),
                 Msg::Segmented(res) => self.on_segmented(lang, res),
-                Msg::DepthEstimated(res) => self.on_depth_estimated(res),
+                Msg::DepthEstimated(res) => {
+                    self.on_depth_estimated(res);
+                    self.after_portrait_depth();
+                }
                 Msg::MaskRefined(res) => self.on_mask_refined(lang, res),
                 Msg::Folder(boxed) => {
                     self.on_folder(lang, *boxed);
@@ -1540,6 +1550,11 @@ impl AutoShadeApp {
                                 );
                             }
                             self.saved_strip = disk_strip;
+                            // The strip is settled: each card's "Keep skin
+                            // natural" is decided against the edit just read
+                            // (`panels/portrait.rs`) — opening never changes
+                            // a value.
+                            self.decide_keep_skin_for_photo();
                             self.last_rgb = None; // retained frame was the old photo's
                             self.reset_history(); // a new photo starts a fresh undo history
                             self.region = None; // and a fresh local-edit selection

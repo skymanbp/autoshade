@@ -199,6 +199,8 @@ pub(super) struct MaskRasterSnapshot {
     layers: std::collections::HashMap<String, std::sync::Arc<image::RgbaImage>>,
     /// The lens blur's depth map (`lens_blur.rs`), under the same budget.
     depth: Option<std::sync::Arc<super::lens_blur::DepthImage>>,
+    /// The lens blur's protect mask (`LensBlur::protect`), under the same budget.
+    protect: Option<std::sync::Arc<image::GrayImage>>,
 }
 
 impl MaskRasterSnapshot {
@@ -212,6 +214,10 @@ impl MaskRasterSnapshot {
 
     pub(super) fn depth(&self) -> Option<&super::lens_blur::DepthImage> {
         self.depth.as_deref()
+    }
+
+    pub(super) fn blur_protect(&self) -> Option<&image::GrayImage> {
+        self.protect.as_deref()
     }
 }
 
@@ -550,6 +556,7 @@ pub(super) fn load_mask_raster_snapshot_with_budget(
     }
     layers::load_layers(recipe, budget_bytes, &mut held_bytes, strict, diag, &mut snapshot.layers)?;
     snapshot.depth = lens_blur::load_depth(recipe, budget_bytes, &mut held_bytes, strict, diag)?;
+    snapshot.protect = lens_blur::load_protect(recipe, budget_bytes, &mut held_bytes, strict, diag)?;
     Ok(snapshot)
 }
 

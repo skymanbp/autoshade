@@ -782,6 +782,10 @@ pub struct Config {
     /// MoGe-2 depth map. Env-only and Destination-trusted like its siblings:
     /// it names a program's argv.
     pub depth_script: String,
+    /// Face sidecar (`python/face.py`, v1.14.0) — the Portraits mode's face
+    /// and eye outlines from MediaPipe's Face Landmarker. Env-only and
+    /// Destination-trusted like its siblings: it names a program's argv.
+    pub face_script: String,
     /// Style-embedding sidecar (`python/embed.py`) — SigLIP 2 vectors for the
     /// style index (R27 Batch-5). Same trust class as the other two: it names
     /// a program's argv, so it is env-only and Destination-trusted.
@@ -944,6 +948,7 @@ pub(crate) const SETTINGS: &[Setting] = &[
     env_only("AUTOSHADE_DENOISE_RAW_SCRIPT", Trust::Destination),
     env_only("AUTOSHADE_SEGMENT_SCRIPT", Trust::Destination),
     env_only("AUTOSHADE_DEPTH_SCRIPT", Trust::Destination),
+    env_only("AUTOSHADE_FACE_SCRIPT", Trust::Destination),
     env_only("AUTOSHADE_EMBED_SCRIPT", Trust::Destination),
     env_only("AUTOSHADE_CORRESPOND_SCRIPT", Trust::Destination),
     env_only("AUTOSHADE_DESCRIBE_SCRIPT", Trust::Destination),
@@ -1410,6 +1415,8 @@ impl Config {
             env_val("AUTOSHADE_SEGMENT_SCRIPT").unwrap_or_else(|| bundled_helper("python/segment.py"));
         let depth_script =
             env_val("AUTOSHADE_DEPTH_SCRIPT").unwrap_or_else(|| bundled_helper("python/depth.py"));
+        let face_script =
+            env_val("AUTOSHADE_FACE_SCRIPT").unwrap_or_else(|| bundled_helper("python/face.py"));
         let embed_script =
             env_val("AUTOSHADE_EMBED_SCRIPT").unwrap_or_else(|| bundled_helper("python/embed.py"));
         let correspond_script = env_val("AUTOSHADE_CORRESPOND_SCRIPT")
@@ -1507,6 +1514,7 @@ impl Config {
             weights_dir,
             segment_script,
             depth_script,
+            face_script,
             embed_script,
             correspond_script,
             describe_script,
@@ -1935,6 +1943,7 @@ mod tests {
             "AUTOSHADE_DENOISE_RAW_SCRIPT",
             "AUTOSHADE_SEGMENT_SCRIPT",
             "AUTOSHADE_DEPTH_SCRIPT",
+            "AUTOSHADE_FACE_SCRIPT",
             "AUTOSHADE_EMBED_SCRIPT",
             "AUTOSHADE_CORRESPOND_SCRIPT",
             "AUTOSHADE_DESCRIBE_SCRIPT",

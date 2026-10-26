@@ -67,9 +67,41 @@ pub const PRESETS: [Preset; 6] = [
     },
 ];
 
-/// The preset called `id`.
+/// The skin guardrail as the model reads it (design-portraits-mode.md §4,
+/// the "Keep skin natural" switch's limits from `face::keep_skin_natural`):
+/// part of the portrait direction, and the black-and-white exception named.
+pub const SKIN_GUARDRAIL: &str = "Skin is never pushed orange. Inside the face mask keep saturation at \
+                                  +15 or below, hue within -26..+26 (8 degrees), temperature within \
+                                  -20..+20, texture no lower than -60, clarity no lower than -40 and \
+                                  sharpness never above 0; the only exception is a black-and-white \
+                                  look, where skin colour does not apply.";
+
+/// The Portraits mode's one-click look (v1.14.0): a direction like the six,
+/// usable wherever a preset id is (`preset("portrait")`), and not one of
+/// Normal's six cards — that grid is the user's ruling (「就这 6 档」). It
+/// asks for the three portrait masks by content (`kind=ai`, `what=face` /
+/// `eyes` / `background`, resolved on this computer) and carries
+/// [`SKIN_GUARDRAIL`] word for word.
+pub const PORTRAIT: Preset = Preset {
+    id: "portrait",
+    direction: "Portrait: a flattering, natural portrait of the people in this photo. Put the people's \
+                edits on local masks named by content: a kind=ai mask with what=face for the skin — \
+                soften it gently with negative texture and clarity and keep its colour true; one with \
+                what=eyes to brighten the eyes a little and give them a touch of clarity; and one with \
+                what=background to calm everything behind the person — darken it slightly and fade its \
+                colour a little so the person stands out. Keep the overall exposure and white balance \
+                kind to skin. Skin is never pushed orange. Inside the face mask keep saturation at \
+                +15 or below, hue within -26..+26 (8 degrees), temperature within \
+                -20..+20, texture no lower than -60, clarity no lower than -40 and \
+                sharpness never above 0; the only exception is a black-and-white \
+                look, where skin colour does not apply. Do not smooth the skin into plastic, do not \
+                sharpen it, and do not blur or reshape the face. Keep the photo in colour: leave \
+                convert_to_grayscale false.",
+};
+
+/// The preset called `id`: one of the six, or [`PORTRAIT`].
 pub fn preset(id: &str) -> Option<&'static Preset> {
-    PRESETS.iter().find(|p| p.id == id)
+    PRESETS.iter().chain(std::iter::once(&PORTRAIT)).find(|p| p.id == id)
 }
 
 /// The direction text of the preset called `id`.
@@ -114,12 +146,47 @@ mod tests {
         assert_eq!(preset_guidance("sepia"), None);
     }
 
+    /// The portrait look: found by its id, not one of Normal's six, asks for
+    /// the three portrait masks by content, carries the guardrail sentence
+    /// word for word with the numbers of `face::keep_skin_natural`, and stays
+    /// in colour.
+    ///
+    /// MUTATION THIS CATCHES: change a limit in `face.rs` (or in the
+    /// sentence) without the other, drop a target or the black-and-white
+    /// exception, or add the portrait to the six.
+    #[test]
+    fn the_portrait_look_asks_for_the_portrait_masks_under_the_guardrail() {
+        let p = preset("portrait").expect("the portrait look is a preset id");
+        assert_eq!(*p, PORTRAIT);
+        assert!(!PRESETS.iter().any(|q| q.id == "portrait"), "Normal's grid stays the six");
+        for what in ["what=face", "what=eyes", "what=background", "kind=ai"] {
+            assert!(p.direction.contains(what), "asks for {what}");
+        }
+        assert!(!p.direction.contains("  ") && !SKIN_GUARDRAIL.contains("  "), "one space between words");
+        assert!(p.direction.contains(SKIN_GUARDRAIL), "the guardrail rides word for word");
+        use crate::face::*;
+        let hue = skin_hue_max().floor();
+        for number in [
+            format!("+{SKIN_SATURATION_MAX} or below"),
+            format!("hue within -{hue}..+{hue} ({SKIN_HUE_MAX_DEG} degrees)"),
+            format!("temperature within -{SKIN_TEMPERATURE_MAX}..+{SKIN_TEMPERATURE_MAX}"),
+            format!("texture no lower than {SKIN_TEXTURE_MIN}"),
+            format!("clarity no lower than {SKIN_CLARITY_MIN}"),
+            format!("sharpness never above {SKIN_SHARPNESS_MAX}"),
+        ] {
+            assert!(SKIN_GUARDRAIL.contains(&number), "the sentence says {number:?}: {SKIN_GUARDRAIL}");
+        }
+        assert!(SKIN_GUARDRAIL.contains("never pushed orange") && SKIN_GUARDRAIL.contains("black-and-white"));
+        assert!(p.direction.ends_with(STAY_IN_COLOUR));
+        assert!(p.direction.contains("Do not") || p.direction.contains("do not"));
+    }
+
     /// Every control a preset names is a control the model's schema has —
     /// a misspelt name would be a direction the model cannot follow.
     #[test]
     fn every_control_a_preset_names_is_in_the_catalogue() {
         let known: Vec<&str> = crate::advisor::catalogue::RECIPE_CONTROLS.iter().map(|c| c.name).collect();
-        for p in &PRESETS {
+        for p in PRESETS.iter().chain(std::iter::once(&PORTRAIT)) {
             for word in p.direction.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
                 if word.contains('_') {
                     assert!(known.contains(&word), "{}: names {word:?}, which is no control", p.id);
