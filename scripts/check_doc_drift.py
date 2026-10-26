@@ -28,8 +28,9 @@ rewritten):
                of them and each such local in `LOCAL_CONTROLS`.
 
 The manual's CLI synopsis is checked flag for flag against the binary's own
-`--help` by the CLI test `the_manuals_cli_synopsis_matches_every_commands_help`
-(tests/cli.rs), which needs the built binary and so lives with the CLI tests.
+`--help` by the test `the_manuals_cli_synopsis_matches_every_commands_help`
+(src/main.rs), which reads the command definitions through clap and so lives
+beside them.
 
 Exit 0 when clean; 1 with one line per finding otherwise.
 usage: python scripts/check_doc_drift.py [--root DIR]

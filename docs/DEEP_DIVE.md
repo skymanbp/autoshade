@@ -365,7 +365,7 @@ this moved 0.3075 → 0.2922 (Lightroom 0.2701, limit ±0.03) and 0.0387 (limit
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/architecture-dark.svg" />
-  <img src="images/architecture-light.svg" alt="AutoShade architecture: three front ends over one Rust library with the reference library, reverse-fit, local producers and the local-field analyzer; six local Python sidecars for embeddings, descriptions, correspondence, segmentation and two denoisers; opt-in external AI services" />
+  <img src="images/architecture-light.svg" alt="AutoShade architecture: three front ends over one Rust library with the reference library, reverse-fit, local producers and the local-field analyzer; local Python sidecars for embeddings, descriptions, correspondence, segmentation and two denoisers, plus the depth and face sidecars (eight in all); opt-in external AI services" />
 </picture>
 
 <sub>Twenty-one components, twenty connections and three boundaries, generated from
@@ -435,9 +435,9 @@ the tests [`scripts/check_docs.py`](../scripts/check_docs.py) re-derives.
 - **Non-destructive, interoperable, local first** — the source library stays
   read-only, develops live in a per-user store, and sidecars are merged so a
   Lightroom catalogue survives.
-- **Six local sidecars** — segmentation, two denoisers (one on the RAW sensor
-  mosaic, one on baked pixels), correspondence, look descriptions and style
-  embeddings run on the machine; pixels leave it only for an AI operation you
+- **Eight local sidecars** — segmentation, two denoisers (one on the RAW sensor
+  mosaic, one on baked pixels), correspondence, look descriptions, style
+  embeddings, depth for the lens blur and the face finder run on the machine; pixels leave it only for an AI operation you
   ask for.
 - **Generated pixels are labelled** — reimagine, GUI adjust and denoise land
   on their own cards, a GUI fill or AI edit as a layer you can hide, retouch and heal only

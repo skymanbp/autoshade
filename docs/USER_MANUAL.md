@@ -913,8 +913,8 @@ master and a web copy.
 ## CLI reference
 
 The following commands and flags match the command definitions in
-`src/main.rs` (checked flag for flag against each command's `--help` for
-v1.7.0):
+`src/main.rs` (a test checks them flag for flag against each command's
+`--help`):
 
 ```text
 autoshade decode <src> [-o|--out FILE]
@@ -957,8 +957,10 @@ Generative Fill treat an empty prompt the same way.
 whose framing and exposure the result keeps, and writes a 16-bit master; it
 prints each frame's measured exposure and alignment travel, and `--no-align`
 skips the alignment for frames shot on a tripod. After an HDR merge it also
-writes a recipe beside the master with the SDR rendition switched on and the
-recovered stops filled in, because that is the only way to reach them.
+writes a recipe named after the master (`<master name>.recipe.json`) into the
+Delivery folder (`./out` unless you moved it), even when `-o` puts the master
+elsewhere, with the SDR rendition switched on and the recovered stops filled
+in, because that is the only way to reach them.
 A 16-bit TIFF or PNG master from `stack`, `heal` or `denoise` carries the sRGB
 profile an sRGB export carries (v1.6.3): another editor reads its colours as
 they are, and reading it back raises no untagged-16-bit warning.

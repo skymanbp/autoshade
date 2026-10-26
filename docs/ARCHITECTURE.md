@@ -215,9 +215,9 @@
 > symbol, link and tier count the living documents name exists in the tree;
 > CI's `docs` job runs it on every push) — and a gate that exits non-zero
 > fails the battery like a lane.
-> 1726 library + 25 CLI + 276 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1711 pass + 15 `#[ignore]`d forensic probes and
-> the GUI result is 272 pass + four ignored (an explicit scratch-recipe export
+> 1747 library + 25 CLI + 289 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1732 pass + 15 `#[ignore]`d forensic probes and
+> the GUI result is 285 pass + four ignored (an explicit scratch-recipe export
 > probe and the offline panel, window and mode-workspace screenshots) in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
 > refusal pair (a RAW source, a baked negative); the library and GUI lists are
 > v1.6.1's. For v1.6.3, four library names (decode: the 16-bit profile lattice
@@ -250,7 +250,37 @@
 > edit read as the edit, a maskless edit sending no mask and layering only
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
-> screenshots). For v1.14.0, by name against the v1.13.0 battery: library
+> screenshots). For v1.15.0, by name against the v1.14.0 battery: library
+> +21 / −0 — 3 in `fit` (the do-no-harm loop descends when the handover
+> would re-raise saturation, stops at its bound when nothing descends, and a
+> handover white balance the stage would shrink is refused above default
+> strength), 3 in `retouch` (the limit mask keeps the spots whose centres it
+> holds, heals the spot inside it and leaves the one outside, and without a
+> limit the heal is byte-identical), 3 in `store` (depth, protect and layer
+> paths refused at load like a mask path, round-tripping relative, frozen by a
+> version snapshot), 3 in `pipeline` (a relative out inside the photo's own
+> folder refused, an analyzed develop over a generated master clearing the
+> projection, the write path naming the global controls the sidecar cannot
+> carry), 2 in `segment` (a RAW source's mask frame is its sensor develop and
+> its cache key names that frame), 2 in `serve` (an already-denoised card not
+> denoised again on export; the web develop path resolving AI masks before it
+> renders), 1 each in `denoise` (both denoise bridges wait for the model
+> slot), `embed` (the face bundle has a copy of ours), `face` (the skin seed
+> taken from the developed frame it is matched on), `segment` again
+> (`segment_file` waits for the model slot) and `xmp` (the payload carries
+> depth, protect and layer paths bare and refuses a share); GUI +13 / −0 (the
+> blemish remover greyed without a face and healing held to the face with the
+> landing counting the spots; apply-to-every-photo replacing unsaved work left
+> on another photo; the AI portrait look, a paste and entering Portraits all
+> holding the skin limits on disk and never changing a value pushed in
+> Landscape; undo to an edit past the limits keeping redo; reading the
+> reference folder locking the work and landing on its own photo; the noise
+> switch keeping the look's undo history; a search that finds no face taking
+> the old face masks away; a Normal save remembering its folder; a Lightroom
+> AI mask and a face intent without a raster re-derived on open and on export;
+> the skin seed sampled from the frame the recipe develops before the Skin
+> mask); CLI unchanged. For
+> v1.14.0, by name against the v1.13.0 battery: library
 > +24 / −0 — 14 in `face` (a sidecar result parses and a malformed one is
 > refused whole, the face and eyes masks fill, feather and union every face
 > and land in the same place at any size, a concave outline keeps its notch,
@@ -1170,12 +1200,12 @@
 > deliverable passes; segment's `exists()` guard never fired for pre-claimed
 > names), which is why the contract lives in one place with all three arms.
 >
-> ### The ML sidecar family (R27 Batch-5; S2 added the fifth, the RAW-mosaic denoiser the sixth)
+> ### The ML sidecar family (R27 Batch-5; S2 added the fifth, the RAW-mosaic denoiser the sixth, the lens blur's depth estimator the seventh, the face finder the eighth)
 >
-> There are now **six** Python sidecars, and they share one discipline rather
-> than six copies of it. `python/denoise.py` owns the download-and-refuse
+> There are now **eight** Python sidecars, and they share one discipline rather
+> than eight copies of it. `python/denoise.py` owns the download-and-refuse
 > implementation — `_download` with an in-stream byte cap, `_sha256`,
-> `_reclaim_stale_parts`, `_fetch_verified` — and the other five reach it
+> `_reclaim_stale_parts`, `_fetch_verified` — and the other seven reach it
 > instead of reimplementing it, which is why their progress lines announce
 > themselves as `[denoise]`. `python/denoise_raw.py` (2026-09-15) fetches its
 > own DRUNet weights (`autoshade-raw-denoise-v2.pth` since v1.6.0, a release
