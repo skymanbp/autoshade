@@ -1,6 +1,11 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.14.0 — the Portraits mode adds a panel of face,
+> Status: **implemented** (v1.15.0 — the Portraits panel removes blemishes on the
+> face only, the face model has a byte-exact copy of ours, a read-through of
+> the whole program fixed what it found (stash, guardrail and frame defects,
+> three untrusted raster paths, the three faces agreeing), and the cast
+> handover keeps step 4b's saturation and passes the white-balance gates;
+> v1.14.0 — the Portraits mode adds a panel of face,
 > eyes, skin and background tools, the faces found on this computer by
 > MediaPipe, and the lens blur can keep the person sharp; Normal numbers a
 > second save and previews its AI denoise;
