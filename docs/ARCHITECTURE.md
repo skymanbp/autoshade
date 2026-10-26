@@ -1,6 +1,12 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.15.0 — the Portraits panel removes blemishes on the
+> Status: **implemented** (v1.15.1 — the six leftovers v1.15.0 recorded are closed:
+> both mixer loops bounded, the store allowance held to the folders the store
+> owns, a photo-less sidecar read never keeps a loose raster path, redo puts
+> the skin guard back with the values, the refusal hints name the configured
+> delivery folder, the handover's white-balance gates have an end-to-end
+> sample; and the face finder searches small faces in tiles;
+> v1.15.0 — the Portraits panel removes blemishes on the
 > face only, the face model has a byte-exact copy of ours, a read-through of
 > the whole program fixed what it found (stash, guardrail and frame defects,
 > three untrusted raster paths, the three faces agreeing), and the cast
