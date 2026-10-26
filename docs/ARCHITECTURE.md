@@ -7014,7 +7014,13 @@ clamps a saved edit, and it says how many values it moved. While it is on,
 once per frame, after the workers landed and the panels drew and before the
 fork, the develop and the undo commit — the one place a slider, a paste and
 an AI landing all pass — and the six limits of `face::keep_skin_natural` hold
-the skin and face masks.
+the skin and face masks. The skin group's "Remove blemishes" is the Retouch
+panel's AI heal (`start_heal`) given a limit: the Face-role mask's raster
+(`portrait::face_raster`) goes in as `retouch::heal`'s `limit`, which drops
+every spot whose centre that mask holds below one half
+(`retouch::spots_inside`) before healing and answers the typed
+`retouch::NoSpotInsideLimit` when none is left, and the result lands in place
+like any heal, one undo step.
 
 **Platform.** `windows-sys` 0.59 with five feature gates:
 `Win32_Foundation` + `Win32_System_JobObjects` for the sidecar kill-groups (a

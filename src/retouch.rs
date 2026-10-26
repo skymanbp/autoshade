@@ -944,6 +944,34 @@ fn strip_fence(s: &str) -> &str {
     t.strip_suffix("```").unwrap_or(t).trim()
 }
 
+// --- the limit mask --------------------------------------------------------
+
+/// How much of a limit mask a spot's centre must sit on to be healed: half,
+/// the same reading a soft mask's edge gets everywhere else.
+const LIMIT_INSIDE: f32 = 0.5;
+
+/// The spots a limit mask lets through: those whose centre the mask holds at
+/// [`LIMIT_INSIDE`] or more, in their original order. The mask is read the
+/// way every bitmap mask of a recipe is — luma, white = inside — at the
+/// spot's normalised centre, so it can be at any resolution of the frame it
+/// covers (the Portraits panel's face mask is drawn on the preview).
+pub fn spots_inside(spots: Vec<HealSpot>, limit: &image::GrayImage) -> Vec<HealSpot> {
+    spots
+        .into_iter()
+        .filter(|s| crate::render::sample_gray_norm(limit, s.cx.clamp(0.0, 1.0), s.cy.clamp(0.0, 1.0)) >= LIMIT_INSIDE)
+        .collect()
+}
+
+/// [`heal`] with a limit mask found spots, and none of them inside it —
+/// typed, so the GUI can word "nothing on the face" plainly rather than by
+/// matching this English.
+#[derive(Debug, thiserror::Error)]
+#[error("nothing to heal inside the limit mask: {found} spot(s) found, none of them inside it")]
+pub struct NoSpotInsideLimit {
+    /// How many spots were found before the limit dropped them.
+    pub found: usize,
+}
+
 // --- orchestration ---------------------------------------------------------
 
 /// Run the heal mode for one source: gather spots (AI auto-detect and/or a
@@ -957,12 +985,19 @@ fn strip_fence(s: &str) -> &str {
 /// brightness jump) and put every later slider/export on a different tone
 /// chain than before the heal. Detection runs on a downscaled JPEG —
 /// coordinates are normalised, so placement is resolution-independent.
+///
+/// `limit` is an optional mask raster (luma, white = inside) that holds the
+/// heal to one area: every spot found — by the AI or from the painted mask —
+/// whose centre lies outside it is dropped before healing ([`spots_inside`]),
+/// and the pixels there are left as they are. `None` heals every spot, as
+/// before the limit existed.
 pub fn heal(
     cfg: &Config,
     src_path: &Path,
     manual_mask: Option<&Path>,
     auto_detect: bool,
     full_res: bool,
+    limit: Option<&Path>,
     out: &Path,
 ) -> Result<HealReport> {
     // FIRST, before decode and before the BILLED auto-detect call (Codex
@@ -970,6 +1005,16 @@ pub fn heal(
     // but heal paid for detect_spots and then failed on a directory -o at
     // save time). No-op for GUI/web (unique_out prepared the path).
     crate::pipeline::preflight_out(out, src_path)?;
+    // The limit is read before the billed detect call too: an unreadable
+    // limit mask is a certain failure, and it must not cost a model call.
+    let limit = match limit {
+        Some(p) => Some(
+            crate::render::open_mask_bounded(p)
+                .with_context(|| format!("open limit mask {}", p.display()))?
+                .to_luma8(),
+        ),
+        None => None,
+    };
     // ONE dispatch for both source kinds (`render::source_pixels`): preview
     // mode develops a RAW AT ≤2048 (cap before tone/geometry) instead of
     // developing 61 MP and thumbnailing the result, and bounds a baked source
@@ -1037,6 +1082,13 @@ pub fn heal(
                 );
             }
             crate::rationale::push_note(&mut rationale, &mut notes, n);
+        }
+    }
+    if let Some(l) = &limit {
+        let found = spots.len();
+        spots = spots_inside(spots, l);
+        if spots.is_empty() && found > 0 {
+            return Err(NoSpotInsideLimit { found }.into());
         }
     }
     if spots.is_empty() {
@@ -1363,7 +1415,7 @@ mod tests {
         mask.save(&maskp).unwrap();
         let outp = out_dir.join("healed.png");
         let rep =
-            heal(&Config::load(), &srcp, Some(&maskp), false, true, &outp).unwrap();
+            heal(&Config::load(), &srcp, Some(&maskp), false, true, None, &outp).unwrap();
         assert!(rep.spots >= 1);
         let healed = image::open(&outp).unwrap();
         assert!(
@@ -1583,13 +1635,104 @@ mod tests {
         mask.save(&maskp).unwrap();
         let cfg = crate::config::Config::load();
         let out_small = out_dir.join("small-out.png");
-        heal(&cfg, &src, Some(&maskp), false, false, &out_small).unwrap();
+        heal(&cfg, &src, Some(&maskp), false, false, None, &out_small).unwrap();
         let d = image::image_dimensions(&out_small).unwrap();
         assert_eq!(d.0.max(d.1), 2048, "without --full-res the saved master IS the 2048px thumbnail");
         let out_full = out_dir.join("full-out.png");
-        heal(&cfg, &src, Some(&maskp), false, true, &out_full).unwrap();
+        heal(&cfg, &src, Some(&maskp), false, true, None, &out_full).unwrap();
         let d = image::image_dimensions(&out_full).unwrap();
         assert_eq!((d.0, d.1), (3000, 2000), "with --full-res the source resolution survives");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A 64×64 grey frame with two dark 8×8 defects, left (centre 16, 32) and
+    /// right (centre 48, 32), the painted mask over both, and a limit mask
+    /// that holds the LEFT half only — written into a fresh library/exports
+    /// pair (heal's preflight refuses an out beside the source).
+    fn two_defect_fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf, std::path::PathBuf, RgbImage) {
+        let root = std::env::temp_dir().join(format!("autoshade-heal-limit-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("library");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(root.join("exports")).unwrap();
+        let defect = |x: u32, y: u32| (28..36).contains(&y) && ((12..20).contains(&x) || (44..52).contains(&x));
+        let src = RgbImage::from_fn(64, 64, |x, y| if defect(x, y) { Rgb([20, 20, 20]) } else { Rgb([200, 190, 180]) });
+        let srcp = dir.join("two_defects.png");
+        src.save(&srcp).unwrap();
+        // Painted mask, client contract: TRANSPARENT = heal here.
+        let mask = RgbaImage::from_fn(64, 64, |x, y| {
+            let near = (26..38).contains(&y) && ((10..22).contains(&x) || (42..54).contains(&x));
+            Rgba([0, 0, 0, if near { 0 } else { 255 }])
+        });
+        let maskp = dir.join("mask.png");
+        mask.save(&maskp).unwrap();
+        // The limit at another resolution than the frame: normalised reads.
+        let limit = image::GrayImage::from_fn(32, 32, |x, _| image::Luma([if x < 16 { 255 } else { 0 }]));
+        let limitp = dir.join("limit.png");
+        limit.save(&limitp).unwrap();
+        (root, srcp, maskp, limitp, src)
+    }
+
+    /// A spot whose centre the limit holds is kept, one it does not is
+    /// dropped, and order is kept.
+    #[test]
+    fn spots_inside_keeps_the_centres_the_limit_holds() {
+        let at = |cx: f32| HealSpot { cx, cy: 0.5, radius: 0.05, ..Default::default() };
+        let limit = image::GrayImage::from_fn(10, 10, |x, _| image::Luma([if x < 5 { 255 } else { 0 }]));
+        assert_eq!(spots_inside(vec![at(0.2), at(0.8), at(0.3)], &limit), vec![at(0.2), at(0.3)]);
+        let white = image::GrayImage::from_pixel(10, 10, image::Luma([255]));
+        assert_eq!(spots_inside(vec![at(0.2), at(0.8)], &white), vec![at(0.2), at(0.8)], "a limit over the whole frame drops nothing");
+    }
+
+    /// The limit end to end: the defect inside the limit is healed, the one
+    /// outside keeps every pixel it had, and only the healed one is counted.
+    ///
+    /// MUTATION: drop the `spots_inside` filter in `heal` and the right
+    /// defect is healed too — the byte-equal assert below goes red.
+    #[test]
+    fn a_limit_mask_heals_the_spot_inside_it_and_leaves_the_one_outside() {
+        let (root, srcp, maskp, limitp, src) = two_defect_fixture("inside");
+        let outp = root.join("exports").join("limited.png");
+        let rep = heal(&Config::load(), &srcp, Some(&maskp), false, true, Some(&limitp), &outp).unwrap();
+        assert_eq!(rep.spots, 1, "one spot inside the limit, one healed");
+        let out = image::open(&outp).unwrap().to_rgb8();
+        assert!(out.get_pixel(16, 32).0[0] > 150, "the left defect is healed, got {:?}", out.get_pixel(16, 32));
+        for y in 0..64 {
+            for x in 32..64 {
+                assert_eq!(out.get_pixel(x, y), src.get_pixel(x, y), "({x}, {y}) is outside the limit and must stay as it was");
+            }
+        }
+        // A limit that holds none of the spots refuses, typed, and writes nothing.
+        let none = root.join("library").join("none.png");
+        image::GrayImage::new(8, 8).save(&none).unwrap();
+        let err = heal(&Config::load(), &srcp, Some(&maskp), false, true, Some(&none), &root.join("exports").join("none-out.png"))
+            .err()
+            .expect("nothing inside the limit");
+        assert_eq!(err.downcast_ref::<NoSpotInsideLimit>().map(|e| e.found), Some(2), "{err:#}");
+        assert!(!root.join("exports").join("none-out.png").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Without a limit the heal is what it was before the limit existed: the
+    /// same two spots as the painted mask plans, healed by the same engine to
+    /// the same bytes — and a limit over the whole frame changes nothing.
+    #[test]
+    fn without_a_limit_the_heal_is_byte_identical_to_the_engine_on_every_planned_spot() {
+        let (root, srcp, maskp, _limitp, src) = two_defect_fixture("none");
+        let outp = root.join("exports").join("unlimited.png");
+        let rep = heal(&Config::load(), &srcp, Some(&maskp), false, true, None, &outp).unwrap();
+        let (planned, _) = plan_from_mask(&image::open(&maskp).unwrap().to_rgba8());
+        assert_eq!(planned.len(), 2);
+        let mut expect = src.clone();
+        assert_eq!(heal_image(&mut expect, &planned), 2);
+        assert_eq!(rep.spots, 2, "both defects healed");
+        let out = image::open(&outp).unwrap().to_rgb8();
+        assert_eq!(out, expect, "no limit: the engine's own output on every planned spot, byte for byte");
+        let whole = root.join("library").join("whole.png");
+        image::GrayImage::from_pixel(8, 8, image::Luma([255])).save(&whole).unwrap();
+        let outw = root.join("exports").join("whole-out.png");
+        heal(&Config::load(), &srcp, Some(&maskp), false, true, Some(&whole), &outw).unwrap();
+        assert_eq!(image::open(&outw).unwrap().to_rgb8(), expect, "a limit over the whole frame is no limit");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

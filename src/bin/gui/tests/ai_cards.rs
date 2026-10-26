@@ -685,6 +685,7 @@
                     out: healed.clone(),
                     ai_prose: String::new(),
                     notes: Vec::new(),
+                    in_face: false,
                 },
                 healed.clone(),
                 RetouchKind::InPlace,

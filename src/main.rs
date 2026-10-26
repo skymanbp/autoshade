@@ -2092,7 +2092,7 @@ fn heal_cmd(
         if no_auto { "painted mask only" } else { "AI auto-detect" },
         if mask.is_some() && !no_auto { " + painted mask" } else { "" }
     );
-    let report = retouch::heal(&cfg, src, mask.as_deref(), !no_auto, full_res, &out)?;
+    let report = retouch::heal(&cfg, src, mask.as_deref(), !no_auto, full_res, None, &out)?;
     if !report.rationale.is_empty() {
         println!("  {}", report.rationale);
     }

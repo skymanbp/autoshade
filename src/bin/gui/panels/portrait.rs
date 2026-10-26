@@ -95,11 +95,34 @@ pub(crate) struct PortraitState {
     /// A depth estimate was started from the Background group: its landing
     /// aims the focus at the face and keeps the person sharp.
     pub(crate) blur_from_panel: bool,
+    /// Test seam: what the last heal was started with (painted mask?, the
+    /// limit raster) — `start_heal`, shared by the Retouch panel's heal and
+    /// this panel's 🤖 Remove blemishes.
+    #[cfg(test)]
+    pub(crate) heal_asked: Option<(bool, Option<PathBuf>)>,
+    /// Test seam: stands in for `retouch::heal` inside the heal worker.
+    #[cfg(test)]
+    pub(crate) heal_runner: Option<HealRunner>,
 }
+
+/// What the heal worker runs: `retouch::heal`, or a test's stand-in for it
+/// — (the source, the limit raster, the output).
+pub(crate) type HealRunner =
+    fn(&std::path::Path, Option<&std::path::Path>, &std::path::Path) -> anyhow::Result<autoshade::retouch::HealReport>;
 
 impl Default for PortraitState {
     fn default() -> Self {
-        PortraitState { line: PortraitLine::Idle, found: None, keep_skin: Default::default(), look: None, blur_from_panel: false }
+        PortraitState {
+            line: PortraitLine::Idle,
+            found: None,
+            keep_skin: Default::default(),
+            look: None,
+            blur_from_panel: false,
+            #[cfg(test)]
+            heal_asked: None,
+            #[cfg(test)]
+            heal_runner: None,
+        }
     }
 }
 
@@ -168,6 +191,15 @@ pub(crate) fn subject_raster(r: &EditRecipe) -> Option<String> {
         MaskGeometry::AiMask { raster: Some(path), .. } => Some(path.clone()),
         _ => None,
     })
+}
+
+/// The raster of the first face mask — what 🤖 Remove blemishes holds the
+/// heal to — or `None` when there is no face mask with one.
+pub(crate) fn face_raster(r: &EditRecipe) -> Option<PathBuf> {
+    r.masks
+        .iter()
+        .filter(|m| m.role == MaskRole::Face)
+        .find_map(|m| autoshade::render::geometry_raster_path(&m.mask).filter(|p| !p.is_empty()).map(PathBuf::from))
 }
 
 /// The soften slider (0..=100) a skin mask shows, and what it writes.
@@ -302,6 +334,14 @@ impl AutoShadeApp {
         self.status = tr(self.lang, "Making the portrait look…").into();
         let epoch = self.spawn_analyze(path, None, guidance, None, req, autoshade::library::DEFAULT_NAME);
         self.portrait.look = Some((epoch, kept, blur));
+    }
+
+    /// 🤖 Remove blemishes: the Retouch panel's AI heal, held to the face
+    /// mask — only the spots whose centre is on the face are healed.
+    pub(crate) fn start_remove_blemishes(&mut self) {
+        if let Some(face) = face_raster(&self.recipe) {
+            self.start_heal(false, Some(face));
+        }
     }
 
     /// Before `on_analyzed` consumes a result: is it this panel's look?
@@ -588,6 +628,16 @@ impl AutoShadeApp {
             .changed();
         if flipped {
             self.set_keep_skin(on);
+        }
+        let can_heal = face_raster(&self.recipe).is_some() && !self.busy && self.src_path.is_some();
+        if action_row(ui, can_heal, tr(lang, "🤖 Remove blemishes"))
+            .on_hover_text(tr(
+                lang,
+                "The AI finds small spots and blemishes on the face, and each is healed from the skin around it; nothing outside the face is touched — Ctrl+Z goes back. Needs a service key in Settings (⚙).",
+            ))
+            .clicked()
+        {
+            self.start_remove_blemishes();
         }
         if let Some(why) = gate {
             ui.label(egui::RichText::new(why).weak().small());

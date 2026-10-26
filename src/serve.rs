@@ -3014,7 +3014,7 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         return Ok(status_response(500, "no free heal output name (999 in the masters folder)"));
     };
     let cfg = state.config().clone();
-    let result = crate::retouch::heal(&cfg, &src, mask_tmp.as_deref(), req.auto, req.full_res, &out);
+    let result = crate::retouch::heal(&cfg, &src, mask_tmp.as_deref(), req.auto, req.full_res, None, &out);
     if let Some(t) = &mask_tmp {
         let _ = std::fs::remove_file(t);
     }

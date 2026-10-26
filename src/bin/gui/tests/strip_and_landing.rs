@@ -277,6 +277,7 @@
                     out: std::path::PathBuf::from("out/_retouch_order_test.png"),
                     ai_prose: String::new(),
                     notes: Vec::new(),
+                    in_face: false,
                 },
                 std::path::PathBuf::from("out/_retouch_order_test.png"),
                 RetouchKind::InPlace,

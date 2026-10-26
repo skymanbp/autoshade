@@ -496,11 +496,14 @@ pub(crate) enum RetouchNote {
     /// is the engine's own count of planned spots it left untouched because
     /// no donor of that size fit inside the frame (`HealReport::skipped`) —
     /// rendered as its own line, so "healed N" never stands for "asked N".
+    /// `in_face`: the heal was held to the face mask (the Portraits panel's
+    /// 🤖 Remove blemishes), so `n` counts the spots healed on the face.
     Healed {
         n: usize,
         out: PathBuf,
         ai_prose: String,
         notes: Vec<autoshade::rationale::Note>,
+        in_face: bool,
     },
     /// A stack landed as a new ▦ card at this pixel master. Facts, not prose:
     /// which merge ran, how many frames it took, how far the aligner had to

@@ -431,8 +431,11 @@ impl AutoShadeApp {
     }
 
     /// Heal: AI auto-detect (use_mask=false) or the painted mask (use_mask=true).
-    /// Pixel retouch from surrounding real pixels; saves to ./out.
-    pub(crate) fn start_heal(&mut self, use_mask: bool) {
+    /// Pixel retouch from surrounding real pixels; saves to ./out. `limit` is
+    /// a mask raster the heal is held to (`retouch::heal`'s limit): the
+    /// Portraits panel's 🤖 Remove blemishes passes the face mask's; the
+    /// Retouch panel passes none.
+    pub(crate) fn start_heal(&mut self, use_mask: bool, limit: Option<PathBuf>) {
         // Heal the ACTIVE variant's pixels (Generated → its origin PNG).
         let Some(path) = self.active_source_path() else { return };
         if self.busy || self.refuse_pixel_work_on_a_turned_photo() {
@@ -458,9 +461,20 @@ impl AutoShadeApp {
         self.busy = true;
         self.status = if use_mask {
             tr(lang, "healing painted area…").into()
+        } else if limit.is_some() {
+            tr(lang, "Removing blemishes on the face… (~10-30s)").into()
         } else {
             tr(lang, "AI healing… (~10-30s)").into()
         };
+        #[cfg(test)]
+        {
+            self.portrait.heal_asked = Some((use_mask, limit.clone()));
+        }
+        #[cfg(test)]
+        let runner = self.portrait.heal_runner;
+        #[cfg(not(test))]
+        let runner: Option<crate::panels::portrait::HealRunner> = None;
+        let in_face = limit.is_some();
         let full_res = self.heal_fullres;
         let edge = self.canvas_edge(); // bake at the CANVAS's res (canvas_edge)
         let out_claim = out.clone(); // release the claim on failure (worker tail)
@@ -479,7 +493,12 @@ impl AutoShadeApp {
                         }
                         None => None,
                     };
-                    let rep = autoshade::retouch::heal(&cfg, &path, mask_tmp.as_deref(), !use_mask, full_res, &out);
+                    // Test seam (`PortraitState::heal_runner`): a headless
+                    // test stands in for the billed detect + heal.
+                    let rep = match runner {
+                        Some(run) => run(&path, limit.as_deref(), &out),
+                        None => autoshade::retouch::heal(&cfg, &path, mask_tmp.as_deref(), !use_mask, full_res, limit.as_deref(), &out),
+                    };
                     if let Some(t) = &mask_tmp {
                         let _ = std::fs::remove_file(t);
                     }
@@ -499,7 +518,7 @@ impl AutoShadeApp {
                     // InPlace: bake into the active variant's base + repoint origin.
                     Ok((
                         img,
-                        RetouchNote::Healed { n: rep.spots, out: out.clone(), ai_prose, notes },
+                        RetouchNote::Healed { n: rep.spots, out: out.clone(), ai_prose, notes, in_face },
                         out,
                         RetouchKind::InPlace,
                     ))
@@ -1260,13 +1279,13 @@ impl AutoShadeApp {
                             .on_hover_text(ai_xref(lang, tr(lang, "A vision model finds small dust spots / blemishes (API call), then each is healed from surrounding REAL pixels — never generated")))
                             .clicked()
                         {
-                            self.start_heal(false);
+                            self.start_heal(false, None);
                         }
                         if action_in(ui, cell, true, tr(lang, "Heal area"))
                             .on_hover_text(tr(lang, "Heal the brushed area from surrounding real pixels — local compute, no API"))
                             .clicked()
                         {
-                            self.start_heal(true);
+                            self.start_heal(true, None);
                         }
                     });
                 });

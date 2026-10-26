@@ -2459,12 +2459,14 @@ impl AutoShadeApp {
                 };
                 format!("{note} · {}", out.display())
             }
-            RetouchNote::Healed { n, out, ai_prose, notes } => {
-                let mut s = trf(
-                    lang,
-                    "healed {n} spot(s) → {path}",
-                    &[("n", &n.to_string()), ("path", &out.display().to_string())],
-                );
+            RetouchNote::Healed { n, out, ai_prose, notes, in_face } => {
+                let args = [("n", n.to_string()), ("path", out.display().to_string())];
+                let args: Vec<(&str, &str)> = args.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                let mut s = if *in_face {
+                    trf(lang, "healed {n} spot(s) on the face → {path} (nothing outside the face was touched — Ctrl+Z goes back)", &args)
+                } else {
+                    trf(lang, "healed {n} spot(s) → {path}", &args)
+                };
                 // The spots left untouched (no donor of their size fits the
                 // frame) ride in `notes` as `HEAL_SKIPPED_NO_DONOR` and render
                 // below with every other typed note — one sentence, owned by
@@ -2749,7 +2751,18 @@ impl AutoShadeApp {
                         self.done(msg);
                     }
                     Err(e) => {
-                        self.fail(tr(lang, "retouch failed"), e);
+                        // The face-held heal found spots, none on the face:
+                        // nothing was changed, and that is an answer, not a
+                        // failure (typed, never matched by its English).
+                        if let Some(none) = e.downcast_ref::<autoshade::retouch::NoSpotInsideLimit>() {
+                            self.done(trf(
+                                lang,
+                                "No spots on the face to heal — nothing was changed ({n} found elsewhere were left alone)",
+                                &[("n", &none.found.to_string())],
+                            ));
+                        } else {
+                            self.fail(tr(lang, "retouch failed"), e);
+                        }
                     }
                     }
     }

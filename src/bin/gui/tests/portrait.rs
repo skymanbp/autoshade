@@ -72,6 +72,7 @@
                 "Skin warmth",
                 "Skin colour intensity",
                 "Keep skin natural",
+                "🤖 Remove blemishes",
                 "Eyes",
                 "Brighten eyes",
                 "Crisp eyes",
@@ -459,4 +460,120 @@
             (15.0, hue, -20.0, -40.0),
             "the AI's face mask meets the user's limits"
         );
+    }
+
+    /// A stand-in for the billed detect + heal: three spots healed, the
+    /// output a small real picture (the landing decodes it).
+    fn blemish_runner(
+        _src: &std::path::Path,
+        limit: Option<&std::path::Path>,
+        out: &std::path::Path,
+    ) -> anyhow::Result<autoshade::retouch::HealReport> {
+        assert!(limit.is_some(), "the panel's heal is always held to the face");
+        image::RgbImage::from_pixel(6, 4, image::Rgb([90, 80, 70])).save(out)?;
+        Ok(autoshade::retouch::HealReport { spots: 3, skipped: 0, rationale: String::new(), dims: (6, 4), notes: Vec::new() })
+    }
+
+    /// The photo in Portraits on an ▣ card with pixels, history reset, the
+    /// heal stood in for; the panel's 🤖 Remove blemishes button found on a
+    /// drawn frame.
+    fn blemish_app(tag: &str, lang: Lang, face: bool) -> (AutoShadeApp, egui::Context, egui::Vec2, usize, Option<egui::Rect>, Scrub) {
+        use crate::buttons::DRAWN;
+        let (mut app, _src, scrub) = normal_photo(tag);
+        app.lang = lang;
+        app.choose_mode(Mode::Portraits);
+        let b0 = std::sync::Arc::new(image::DynamicImage::new_rgb8(6, 4));
+        app.variants = vec![crate::model::Variant {
+            id: crate::model::new_variant_id(),
+            name: None,
+            kind: crate::model::VariantKind::Original,
+            recipe: EditRecipe::default(),
+            base: Some(b0.clone()),
+            origin: None,
+            thumb: None,
+        }];
+        app.active = 0;
+        app.base_preview = Some(b0);
+        if face {
+            app.recipe.masks.extend(found_masks());
+        } else {
+            app.recipe.masks.push(autoshade::face::background_adjustment("mask-subject.png".into()));
+        }
+        app.reset_history();
+        app.portrait.heal_runner = Some(blemish_runner);
+        let ctx = egui::Context::default();
+        crate::theme::install_theme(&ctx, crate::theme::ThemePref::Dark);
+        let size = egui::vec2(1400.0, 1600.0);
+        let mut frame = 0;
+        app_frame(&ctx, &mut app, size, frame, Vec::new());
+        frame += 1;
+        DRAWN.with_borrow_mut(Vec::clear);
+        app_frame(&ctx, &mut app, size, frame, Vec::new());
+        frame += 1;
+        let label = tr(lang, "🤖 Remove blemishes");
+        let rect = DRAWN.with_borrow(|d| d.iter().find(|b| b.label == label).map(|b| b.rect));
+        (app, ctx, size, frame, rect, scrub)
+    }
+
+    /// No face mask (the person alone was found): 🤖 Remove blemishes is
+    /// drawn greyed — a click starts nothing.
+    ///
+    /// MUTATION THIS CATCHES: the button's `face_raster(..).is_some()` gate
+    /// dropped (a click then starts a heal with no limit to hold it to).
+    #[test]
+    fn remove_blemishes_is_greyed_without_a_face() {
+        for lang in [Lang::En, Lang::Zh] {
+            let (mut app, ctx, size, mut frame, rect, _scrub) = blemish_app(&format!("blemish-none-{lang:?}"), lang, false);
+            assert_eq!(crate::panels::portrait::face_raster(&app.recipe), None);
+            let rect = rect.expect("the button is drawn, greyed");
+            click_at(&ctx, &mut app, size, &mut frame, rect.center());
+            assert_eq!(app.portrait.heal_asked, None, "{lang:?}: a greyed button starts nothing");
+            assert!(!app.busy);
+        }
+    }
+
+    /// With a face: the click runs the Retouch panel's AI heal (no painted
+    /// area) held to the face mask's raster; the landing says how many spots
+    /// were healed on the face in the session language, bakes the pixels in
+    /// place as one undo step (Ctrl+Z takes it back, as the Retouch heal), and
+    /// "nothing on the face" lands as an answer, not a failure.
+    ///
+    /// MUTATION THIS CATCHES: the face raster not passed as the limit (or the
+    /// painted-area path taken), the landing worded as the plain heal, or the
+    /// typed no-spot answer shown as "retouch failed".
+    #[test]
+    fn remove_blemishes_heals_held_to_the_face_and_the_landing_counts_the_spots() {
+        for lang in [Lang::En, Lang::Zh] {
+            let (mut app, ctx, size, mut frame, rect, _scrub) = blemish_app(&format!("blemish-face-{lang:?}"), lang, true);
+            let before = app.variants[0].base.clone().unwrap();
+            click_at(&ctx, &mut app, size, &mut frame, rect.expect("the button is drawn").center());
+            assert_eq!(app.portrait.heal_asked, Some((false, Some(PathBuf::from("mask-face.png")))), "{lang:?}: the AI heal, held to the face raster");
+            assert_eq!(app.status, tr(lang, "Removing blemishes on the face… (~10-30s)"));
+            let start = std::time::Instant::now();
+            while app.busy {
+                assert!(start.elapsed() < std::time::Duration::from_secs(20), "the heal never landed");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                app.poll_workers(&ctx);
+            }
+            let saved = app.variants[0].origin.clone().expect("the heal baked into the card");
+            let _out = Scrub(vec![saved.clone()]);
+            let want = trf(
+                lang,
+                "healed {n} spot(s) on the face → {path} (nothing outside the face was touched — Ctrl+Z goes back)",
+                &[("n", "3"), ("path", &saved.display().to_string())],
+            );
+            assert_eq!(app.status, want, "{lang:?}");
+            assert!(app.committed.base.as_ref().is_some_and(|b| !std::sync::Arc::ptr_eq(b, &before)), "the healed pixels are the head");
+            let undone = app.undo_stack.last().expect("one undo step");
+            assert!(undone.base.as_ref().is_some_and(|b| std::sync::Arc::ptr_eq(b, &before)), "Ctrl+Z goes back to the pixels before");
+            // Spots found, none on the face.
+            app.busy = true;
+            let epoch = app.gen_epoch;
+            app.on_retouched(&ctx, lang, epoch, Err(autoshade::retouch::NoSpotInsideLimit { found: 2 }.into()));
+            assert!(!app.busy);
+            assert_eq!(
+                app.status,
+                trf(lang, "No spots on the face to heal — nothing was changed ({n} found elsewhere were left alone)", &[("n", "2")])
+            );
+        }
     }
