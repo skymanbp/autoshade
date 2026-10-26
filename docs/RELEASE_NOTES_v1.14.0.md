@@ -159,6 +159,14 @@ battery: library 1702 → 1726, **+24 / −0**; GUI 265 → 276, **+13 / −2** 
 Normal-mode names replaced by the ones that describe the new behaviour); CLI
 25.
 
+After the push, CI's macOS test job failed one test: the lens blur's
+"draws the pixels it drew before protection existed" check hashed its
+synthetic render bit for bit, and f32 results differ between platforms.
+`78378ec` rewrites that test so every platform checks that a render with no
+protect mask equals, bit for bit, the render with an all-black mask, and
+keeps the historical hash only on Windows x86_64, where it was taken; the
+release is tagged on that commit, with CI green on all three platforms.
+
 Final check, portraits: three public-domain (CC0) portraits and one backlit
 profile with no face the finder can see. On the three portraits, with
 **Keep the person sharp** on, the person stays sharp while the background
