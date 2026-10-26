@@ -32,14 +32,27 @@ have one, sha256 + byte cap enforced — and handed to MediaPipe as bytes read
 from that verified file, never by a path MediaPipe could re-resolve.
 
 The short-range detector is tuned for faces that fill a good part of the frame
-(its card: selfie distance). Faces that are small in a wide shot can be missed;
-the app says "no face found" rather than guessing.
+(its card: selfie distance): it sees the whole frame squeezed to 128x128, so a
+face that is small in a wide shot is a few detector pixels and is missed. When
+the whole-frame pass reports fewer faces than `--max-faces`, the same models
+search again on overlapping tiles — a 2x2 grid, then 3x3, then 4x4,
+neighbours overlapping by a quarter of a tile — so the face is larger in what
+the detector sees. A face a tile shows cut by its inner edge is left to the
+neighbour that shows it whole, and a face already found is reported once. The
+whole-frame faces come first and are written exactly as before; a photo in
+which the tiles find nothing new gets the same file as before. On a 16:9 test
+frame the whole-frame pass missed a face 1/15 of the width across; the tiles
+found one 1/25 across and missed one 1/30 across. So what can still be missed:
+a face narrower than 1/25 of the frame's long edge, and faces the mesh cannot
+use at all (turned more than 80 degrees away, less than half visible). The
+app then says "no face found" rather than guessing.
 """
 
 import argparse
 import json
 import os
 import sys
+from types import SimpleNamespace
 
 TAG = "face"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -73,6 +86,19 @@ MIN_PRESENCE = 0.5
 # A detection and an outline are the same face when their boxes overlap by at
 # least this much (intersection over union).
 SAME_FACE_IOU = 0.3
+# The tile search: grids tried in order, each only while the faces found are
+# still fewer than asked, so its cost is bounded at 4 + 9 + 16 extra passes.
+TILE_GRIDS = (2, 3, 4)
+# Each tile overlaps its neighbour by this fraction of a tile, so a face up to
+# that wide lies whole inside at least one tile.
+TILE_OVERLAP = 0.25
+# A tile face whose box comes within this fraction of the tile's size of an
+# edge that is not the frame's own is taken as cut off by the tile.
+TILE_EDGE = 0.01
+# A tile face is one already found when the smaller box lies at least this
+# much inside the other: part of a large face seen by one tile has a low IoU
+# with the whole face but sits inside it.
+SAME_FACE_INSIDE = 0.5
 
 
 def die(msg):
@@ -189,6 +215,77 @@ def shape_faces(meshes, detections, width, height, rings):
     return faces
 
 
+def tiles(width, height, n, overlap=TILE_OVERLAP):
+    """An n x n grid of `[x0, y0, x1, y1]` integer pixel boxes covering a
+    `width` x `height` frame, neighbours overlapping by `overlap` of a tile,
+    the last row and column ending exactly on the frame's edge."""
+    def spans(size):
+        t = size / (n - (n - 1) * overlap)
+        step = t * (1 - overlap)
+        return [(round(i * step), size if i == n - 1 else min(size, round(i * step + t))) for i in range(n)]
+
+    return [[x0, y0, x1, y1] for y0, y1 in spans(height) for x0, x1 in spans(width)]
+
+
+def same_face(a, b):
+    """Two boxes are one face: they overlap as the score match asks, or the
+    smaller one lies mostly inside the other."""
+    if iou(a, b) >= SAME_FACE_IOU:
+        return True
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    small = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
+    return small > 0 and ix * iy / small >= SAME_FACE_INSIDE
+
+
+def cut_by_tile(box, tile, width, height):
+    """True when `box` (frame pixels) reaches an edge of `tile` that is not
+    also the frame's edge: the face runs on into the neighbouring tile."""
+    x0, y0, x1, y1 = tile
+    mx, my = TILE_EDGE * (x1 - x0), TILE_EDGE * (y1 - y0)
+    return ((x0 > 0 and box[0] <= x0 + mx) or (y0 > 0 and box[1] <= y0 + my)
+            or (x1 < width and box[2] >= x1 - mx) or (y1 < height and box[3] >= y1 - my))
+
+
+def search(detect, width, height, max_faces, rings):
+    """The `faces` list for one `width` x `height` frame.
+
+    `detect(box)` runs the models on the frame's `[x0, y0, x1, y1]` region and
+    returns `(meshes, detections)`: meshes normalised to that region,
+    detections in that region's pixels. The whole frame goes first and its
+    faces are kept exactly as shaped; the tiles are visited only while fewer
+    than `max_faces` faces are known, and only add faces not already found."""
+    meshes, detections = detect([0, 0, width, height])
+    faces = shape_faces(meshes, detections, width, height, rings)[:max_faces]
+    for n in TILE_GRIDS:
+        if len(faces) >= max_faces:
+            break
+        for tile in tiles(width, height, n):
+            if len(faces) >= max_faces:
+                break
+            x0, y0, x1, y1 = tile
+            tw, th = x1 - x0, y1 - y0
+            if tw <= 0 or th <= 0:
+                continue
+            t_meshes, t_dets = detect(tile)
+            if not t_meshes:
+                continue
+            # Back into the whole frame, normalised to it, so `shape_faces`
+            # rounds and scores a tile face exactly as it does the first pass's.
+            full = [[SimpleNamespace(x=(x0 + p.x * tw) / width, y=(y0 + p.y * th) / height) for p in lm]
+                    for lm in t_meshes]
+            dets = [(sc, [x0 + b[0], y0 + b[1], x0 + b[2], y0 + b[3]]) for sc, b in t_dets]
+            for f in shape_faces(full, dets, width, height, rings):
+                if len(faces) >= max_faces:
+                    break
+                if cut_by_tile(f["box"], tile, width, height):
+                    continue
+                if any(same_face(f["box"], g["box"]) for g in faces):
+                    continue
+                faces.append(f)
+    return faces
+
+
 def document(faces, width, height):
     return {"version": 1, "backend": BACKEND, "width": width, "height": height, "faces": faces}
 
@@ -245,11 +342,12 @@ def detector_bytes(bundle):
 
 def find_faces(rgb, cache_dir, max_faces):
     """The `faces` list for an HxWx3 uint8 RGB array, in its own pixels."""
+    import numpy as np
+
     mp, BaseOptions, vision = import_mediapipe()
     bundle = fetch_model(cache_dir)
     rings = outline_rings(vision)
     h, w = rgb.shape[:2]
-    image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
     opts = vision.FaceLandmarkerOptions(
         base_options=BaseOptions(model_asset_buffer=bundle),
         running_mode=vision.RunningMode.IMAGE,
@@ -257,22 +355,32 @@ def find_faces(rgb, cache_dir, max_faces):
         min_face_detection_confidence=MIN_DETECTION,
         min_face_presence_confidence=MIN_PRESENCE,
     )
-    with vision.FaceLandmarker.create_from_options(opts) as lm:
-        meshes = lm.detect(image).face_landmarks
-    detections = []
-    if meshes:
-        dopts = vision.FaceDetectorOptions(
-            base_options=BaseOptions(model_asset_buffer=detector_bytes(bundle)),
-            running_mode=vision.RunningMode.IMAGE,
-            min_detection_confidence=MIN_DETECTION,
-        )
-        with vision.FaceDetector.create_from_options(dopts) as det:
-            for d in det.detect(image).detections:
-                b = d.bounding_box
-                score = max((c.score for c in d.categories), default=None)
-                if score is not None:
-                    detections.append((score, [b.origin_x, b.origin_y, b.origin_x + b.width, b.origin_y + b.height]))
-    return shape_faces(meshes, detections, w, h, rings)
+    dopts = vision.FaceDetectorOptions(
+        base_options=BaseOptions(model_asset_buffer=detector_bytes(bundle)),
+        running_mode=vision.RunningMode.IMAGE,
+        min_detection_confidence=MIN_DETECTION,
+    )
+    with vision.FaceLandmarker.create_from_options(opts) as lm, vision.FaceDetector.create_from_options(dopts) as det:
+
+        def detect(box):
+            x0, y0, x1, y1 = box
+            # A tile is shown as it is, not enlarged: the detector squeezes
+            # whatever it is shown to 128x128, so the crop alone makes the
+            # face larger there, and the mesh cuts the face out at its own size.
+            whole = (x0, y0, x1, y1) == (0, 0, w, h)
+            region = rgb if whole else np.ascontiguousarray(rgb[y0:y1, x0:x1])
+            image = mp.Image(image_format=mp.ImageFormat.SRGB, data=region)
+            meshes = lm.detect(image).face_landmarks
+            detections = []
+            if meshes:
+                for d in det.detect(image).detections:
+                    b = d.bounding_box
+                    score = max((c.score for c in d.categories), default=None)
+                    if score is not None:
+                        detections.append((score, [b.origin_x, b.origin_y, b.origin_x + b.width, b.origin_y + b.height]))
+            return meshes, detections
+
+        return search(detect, w, h, max_faces, rings)
 
 
 def publish(path, text):

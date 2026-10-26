@@ -1265,7 +1265,7 @@
 > | `correspond.py` | `correspond.rs` | **Stable Diffusion 2.1** as a DIFT featurizer (unet+vae+text encoder, fp16), sha256-pinned | CreativeML Open RAIL++-M | 2,580,061,174 B |
 > | `describe.py` | `describe.rs` | **Qwen3-VL-2B-Instruct**, one grade sentence per photo, sha256-pinned | Apache-2.0 | 4,255,140,312 B |
 > | `depth.py` | `depth.rs` | **MoGe-2 ViT-L + normal head**, the AI lens blur's depth map, sha256-pinned; its inference code is vendored in `python/_moge/` (see `VENDORED.md`) because the upstream package pulls a web UI, a mesh library and a CUDA extension that must compile | MIT (DINOv2 backbone code Apache-2.0) | 1,323,815,904 B |
-> | `face.py` | `face.rs` | **MediaPipe Face Landmarker** bundle (`face_landmarker.task`, float16, version 1: BlazeFace short-range detector, Face Mesh V2, blendshapes), sha256-pinned; run by the `mediapipe` package; the Portraits mode's face and eye outlines | Apache-2.0 (all three model cards) | 3,758,596 B |
+> | `face.py` | `face.rs` | **MediaPipe Face Landmarker** bundle (`face_landmarker.task`, float16, version 1: BlazeFace short-range detector, Face Mesh V2, blendshapes), sha256-pinned; run by the `mediapipe` package; the Portraits mode's face and eye outlines. When the whole-frame pass finds fewer faces than asked, the same models search again on overlapping 2×2, 3×3 then 4×4 tiles, so a face down to 1/25 of the frame's long edge is found | Apache-2.0 (all three model cards) | 3,758,596 B |
 >
 > **Faces, portrait masks and the protected blur (v1.14.0).** `face.py` writes
 > JSON rather than a mask: every face's box, the detector's score, the face

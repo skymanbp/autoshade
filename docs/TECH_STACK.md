@@ -1293,8 +1293,14 @@ background mask is the BiRefNet subject matte inverted.
 - Fallback provenance remains visible: an alpha made by U²-Net is not silently
   relabeled as a BiRefNet result.
 - The Face Landmarker's detector is MediaPipe's short-range BlazeFace, tuned
-  for faces that fill a good part of the frame; small faces in a wide shot can
-  be missed, and the app then reports that no face was found. Its Face Mesh
+  for faces that fill a good part of the frame. When the whole-frame pass finds
+  fewer faces than asked, `face.py` runs the same models again on overlapping
+  tiles (a 2×2 grid, then 3×3, then 4×4; at most 29 extra passes), keeps only
+  faces a tile shows whole and not already found, and maps them back to the
+  frame. On a 16:9 test frame the whole-frame pass missed a face 1/15 of the
+  width across; the tiles found one 1/25 across and missed one 1/30 across. A
+  face narrower than 1/25 of the frame's long edge can still be missed, and
+  the app then reports that no face was found. Its Face Mesh
   model card lists faces turned more than 80° from the camera or less than half
   visible as unsuitable. The landmarker returns no per-face score, so the
   score reported is the bundle's own detector, run a second time on the same

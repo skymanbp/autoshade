@@ -105,6 +105,141 @@ class ShapeTests(unittest.TestCase):
         self.assertAlmostEqual(face.iou([0, 0, 10, 10], [5, 0, 15, 10]), 1 / 3)
 
 
+# A face planted in a frame, in face-local units: 0-3 the outline (the face's
+# box, corner by corner), 4-6 one eye, 7-9 the other — the RINGS layout.
+FACE_UNITS = [
+    (0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0),
+    (0.1, 0.3), (0.3, 0.3), (0.2, 0.4),
+    (0.7, 0.3), (0.9, 0.3), (0.8, 0.4),
+]
+
+
+class FakeLandmarker:
+    """Stands in for the two models. It sees a planted face when the face is
+    at least `resolve` of the shown region's width — the short-range
+    detector's blindness to small faces — and outlines it normalised to that
+    region. A face the region cuts comes back clipped to the region, the way
+    a mesh of half a face hugs the crop's edge."""
+
+    def __init__(self, faces, resolve=0.1, score=0.9):
+        self.faces, self.resolve, self.score, self.calls = faces, resolve, score, []
+
+    def __call__(self, box):
+        self.calls.append(list(box))
+        rx0, ry0, rx1, ry1 = box
+        rw, rh = rx1 - rx0, ry1 - ry0
+        meshes, dets = [], []
+        for fx0, fy0, fx1, fy1 in self.faces:
+            cx0, cy0, cx1, cy1 = max(fx0, rx0), max(fy0, ry0), min(fx1, rx1), min(fy1, ry1)
+            if cx1 <= cx0 or cy1 <= cy0 or (fx1 - fx0) < self.resolve * rw:
+                continue
+            pts = []
+            for u, v in FACE_UNITS:
+                x = min(max(fx0 + u * (fx1 - fx0), cx0), cx1)
+                y = min(max(fy0 + v * (fy1 - fy0), cy0), cy1)
+                pts.append(((x - rx0) / rw, (y - ry0) / rh))
+            meshes.append(mesh(pts))
+            dets.append((self.score, [cx0 - rx0, cy0 - ry0, cx1 - rx0, cy1 - ry0]))
+        return meshes, dets
+
+
+W, H = 2000, 1000
+
+
+class TileSearchTests(unittest.TestCase):
+    def test_tiles_cover_the_frame_with_overlapping_neighbours(self):
+        for n in face.TILE_GRIDS:
+            with self.subTest(n=n):
+                ts = face.tiles(W, H, n)
+                self.assertEqual(len(ts), n * n)
+                self.assertEqual(min(t[0] for t in ts), 0)
+                self.assertEqual(max(t[2] for t in ts), W)
+                self.assertEqual(max(t[3] for t in ts), H)
+                row = ts[:n]
+                tw = row[0][2] - row[0][0]
+                for a, b in zip(row, row[1:]):
+                    self.assertAlmostEqual((a[2] - b[0]) / tw, face.TILE_OVERLAP, delta=0.01)
+
+    def test_a_first_pass_that_finds_all_it_was_asked_for_visits_no_tile(self):
+        big = [(800.0, 200.0, 1200.0, 700.0)]
+        fake = FakeLandmarker(big)
+        faces = face.search(fake, W, H, 1, RINGS)
+        self.assertEqual(fake.calls, [[0, 0, W, H]], "only the whole frame is shown")
+        meshes, dets = FakeLandmarker(big)([0, 0, W, H])
+        self.assertEqual(faces, face.shape_faces(meshes, dets, W, H, RINGS))
+
+    def test_tiles_that_only_see_the_first_pass_faces_change_nothing(self):
+        # One large face, eight asked for: the tiles are searched, see the same
+        # face (whole or cut), and the result is the first pass's to the byte.
+        big = [(700.0, 150.0, 1300.0, 850.0)]
+        fake = FakeLandmarker(big)
+        faces = face.search(fake, W, H, 8, RINGS)
+        self.assertGreater(len(fake.calls), 1, "the tiles were searched")
+        meshes, dets = FakeLandmarker(big)([0, 0, W, H])
+        first = face.shape_faces(meshes, dets, W, H, RINGS)
+        self.assertEqual(json.dumps(face.document(faces, W, H)), json.dumps(face.document(first, W, H)))
+
+    def test_a_small_face_in_one_tile_comes_back_in_whole_frame_pixels(self):
+        # 100 px wide: under what the whole frame (200 px) and a 2x2 tile
+        # (114 px) resolve, over what a 3x3 tile (80 px) does.
+        small = (150.0, 120.0, 250.0, 220.0)
+        fake = FakeLandmarker([small])
+        faces = face.search(fake, W, H, 8, RINGS)
+        self.assertEqual(len(faces), 1)
+        f = faces[0]
+        x0, y0, x1, y1 = small
+        self.assertEqual(f["oval"], [[x0, y0], [x1, y0], [x1, y1], [x0, y1]])
+        self.assertEqual(f["box"], [x0, y0, x1, y1])
+        self.assertEqual(f["right_eye"][0], [x0 + 10.0, y0 + 30.0])
+        self.assertEqual(f["left_eye"][0], [x0 + 70.0, y0 + 30.0])
+        self.assertEqual(f["confidence"], 0.9, "the tile's detection is mapped back too")
+        self.assertIn(face.tiles(W, H, 3)[0], fake.calls)
+
+    def test_a_face_only_a_4x4_tile_resolves_is_found(self):
+        # 70 px wide: under what a 3x3 tile (80 px) resolves, over what a 4x4
+        # tile (2000 / 3.25 * 0.1 = 62 px) does.
+        tiny = (100.0, 50.0, 170.0, 120.0)
+        fake = FakeLandmarker([tiny])
+        faces = face.search(fake, W, H, 8, RINGS)
+        self.assertEqual([f["box"] for f in faces], [list(tiny)])
+        self.assertIn(face.tiles(W, H, 4)[0], fake.calls)
+        self.assertEqual(len(fake.calls), 1 + 4 + 9 + 16, "every level is searched once, no more")
+
+    def test_a_face_two_tiles_see_whole_is_reported_once(self):
+        # Inside the overlap of the 2x2 grid's top two tiles.
+        t = face.tiles(W, H, 2)
+        mid = (t[0][2] + t[1][0]) / 2
+        shared = (mid - 60.0, 100.0, mid + 60.0, 220.0)
+        fake = FakeLandmarker([shared])
+        faces = face.search(fake, W, H, 8, RINGS)
+        self.assertTrue(any(c == t[0] for c in fake.calls) and any(c == t[1] for c in fake.calls))
+        self.assertEqual(len(faces), 1)
+        self.assertEqual(faces[0]["box"], list(shared))
+
+    def test_a_face_a_tile_cuts_is_not_added_as_a_part(self):
+        # 300 px wide with a 0.2 limit: too small for the whole frame (400 px),
+        # wider than the 2x2 grid's 286 px overlap, so both 2x2 tiles that see
+        # it see it cut; the 3x3 grid's middle column holds it whole.
+        cut = (850.0, 320.0, 1150.0, 500.0)
+        fake = FakeLandmarker([cut], resolve=0.2)
+        faces = face.search(fake, W, H, 8, RINGS)
+        self.assertEqual([f["box"] for f in faces], [list(cut)], "the whole face once, never a part of it")
+
+    def test_max_faces_holds_across_the_tiles(self):
+        crowd = [(100.0 + 300.0 * i, 400.0, 190.0 + 300.0 * i, 490.0) for i in range(6)]
+        fake = FakeLandmarker(crowd)
+        faces = face.search(fake, W, H, 3, RINGS)
+        self.assertEqual(len(faces), 3)
+        self.assertLessEqual(len(fake.calls), 1 + 4 + 9 + 16)
+        everything = face.search(FakeLandmarker(crowd), W, H, 8, RINGS)
+        self.assertEqual(len(everything), 6)
+
+    def test_same_face_reads_containment_as_well_as_overlap(self):
+        self.assertTrue(face.same_face([0, 0, 100, 100], [10, 10, 40, 40]))
+        self.assertTrue(face.same_face([0, 0, 100, 100], [5, 0, 105, 100]))
+        self.assertFalse(face.same_face([0, 0, 100, 100], [90, 90, 130, 130]))
+
+
 class RefusalTests(unittest.TestCase):
     def test_a_missing_mediapipe_is_a_plain_sentence_and_exit_2(self):
         stderr = io.StringIO()
