@@ -1936,10 +1936,13 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         crate::store::DevelopLockMode::Wait,
         || match crate::store::backup_saved_develop(&raw, Some(&recipe)) {
         Ok(backed_up) => {
-            pipeline::write_recipe(&raw, &recipe, None, crate::diag::stderr())?;
-            // The recipe write ALONE decides the saved state (the GUI/CLI
-            // rule): a failed XMP projection degrades to a warning — the old
-            // `?` answered 500 and hid the committed save from the browser.
+            // ONE single-generation commit, the save's (2026-10-26): recipe,
+            // strip record and projection together, so a develop over an
+            // AI-generated master retires the projection instead of writing
+            // one beside it. The recipe write ALONE decides the saved state
+            // (the GUI/CLI rule): a failed XMP projection degrades to a
+            // warning — the old `?` answered 500 and hid the committed save.
+            let projection = pipeline::commit_analyzed_develop(&raw, &recipe, crate::diag::stderr())?;
             let mut body = json!({ "recipe": recipe, "verdict": verdict, "saved": true });
             // The NEW revision rides the answer: the tab adopts it so its
             // own next Save does not 412 against this very analyze. (The
@@ -1951,26 +1954,25 @@ fn api_analyze(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             // net at all. A 412 after a paid AI call would protect less
             // than the snapshot already does.
             body["revision"] = json!(crate::store::develop_revision(&raw));
-            if decode::is_raw(&raw) {
-                match pipeline::write_xmp(&raw, &recipe, crate::diag::stderr()) {
-                    // Two independent disclosures share the one `warning`
-                    // field (the existing shape — no new API): the merge note
-                    // and, since M6a, what the mask PROJECTION itself could
-                    // not carry. Joined, never overwritten: whichever one wrote
-                    // first used to be the only one the tab ever saw.
-                    Ok((_, merge_note, losses)) => {
-                        let mut warns: Vec<String> = Vec::new();
-                        warns.extend(merge_note);
-                        warns.extend(crate::xmp::describe_mask_losses(&losses));
-                        if !warns.is_empty() {
-                            body["warning"] = json!(warns.join("; "));
-                        }
+            match projection {
+                // Independent disclosures share the one `warning` field (the
+                // existing shape — no new API): the merge note and what the
+                // projection could not carry, masks AND global controls.
+                // Joined, never overwritten: whichever one wrote first used
+                // to be the only one the tab ever saw.
+                pipeline::ProjectionOutcome::Written { note, losses, .. } => {
+                    let mut warns: Vec<String> = Vec::new();
+                    warns.extend(note);
+                    warns.extend(pipeline::xmp_loss_lines(&recipe, &losses));
+                    if !warns.is_empty() {
+                        body["warning"] = json!(warns.join("; "));
                     }
-                    Err(e) => {
-                        body["warning"] = json!(format!(
-                            "saved, but the Lightroom XMP projection failed: {e:#}"
-                        ));
-                    }
+                }
+                pipeline::ProjectionOutcome::Cleared => {}
+                pipeline::ProjectionOutcome::Failed(e) => {
+                    body["warning"] = json!(format!(
+                        "saved, but the Lightroom XMP projection failed: {e:#}"
+                    ));
                 }
             }
             if let Some(n) = backed_up {
@@ -2065,6 +2067,18 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     if !funnel_ran {
         recipe_note = crate::pipeline::repair_pre_era_base_curve(&raw, &mut req.recipe);
     }
+    // The develop-time mask step every surface shares (2026-10-26): an AI
+    // mask imported from a sidecar is re-derived (cached beside the develop,
+    // so the next preview pays a PNG probe), a face intent outlined. The
+    // preview used to render an imported AI mask inert, in silence; what
+    // cannot be drawn now rides the preview's warning header.
+    let cfg = state.config().clone();
+    if let Some(w) = crate::pipeline::resolve_develop_masks(&cfg, &raw, &src, &mut req.recipe).warning() {
+        preview_warning = Some(match preview_warning {
+            Some(p) => format!("{p}; {w}"),
+            None => w,
+        });
+    }
     let preview = develop_base(&src)?;
     // The Detail panel's radii are FILM pixels (v1.5.0): the source's own short
     // edge, from its header, so the web pane shows sharpening and noise
@@ -2125,8 +2139,12 @@ fn fmt_ext(req: &DevelopReq) -> &'static str {
 /// OF THE PATH the photo takes — `DEFAULT_STRENGTH_RAW` for a RAW (the
 /// mosaic-domain denoiser, 2026-09-15) and `DEFAULT_STRENGTH` for a baked
 /// source (the SCUNet path) — the same two answers the CLI gives.
-fn denoise_opts(req: &DevelopReq, cfg: &Config, src: &Path) -> Option<DenoiseOpts> {
-    req.denoise.then(|| {
+/// The export-time AI denoise the request asked for — none when `src` is the
+/// recorded master of an already-denoised ◈ card (`store::active_card_is_denoised`):
+/// denoising its pixels again only smears what the first pass kept.
+fn denoise_opts(req: &DevelopReq, cfg: &Config, src: &Path, raw: &Path) -> Option<DenoiseOpts> {
+    let already = src != raw && crate::store::active_card_is_denoised(raw);
+    (req.denoise && !already).then(|| {
         DenoiseOpts::from_config(
             cfg,
             None,
@@ -2316,6 +2334,7 @@ fn registered_export_out(
 fn deliverable_source(
     req: &mut DevelopReq,
     raw: &Path,
+    cfg: &Config,
 ) -> std::result::Result<(PathBuf, Option<String>), ResponseBox> {
     let mut note: Option<String> = None;
     let mut funnel_ran = false;
@@ -2342,6 +2361,16 @@ fn deliverable_source(
     if !funnel_ran {
         note = crate::pipeline::repair_pre_era_base_curve(raw, &mut req.recipe);
     }
+    // The develop-time mask step every surface shares (2026-10-26): an AI
+    // mask imported from a sidecar is re-derived here, a face intent outlined
+    // — the deliverable rendered them inert before. What could not be drawn
+    // rides the same warning header as the recipe note.
+    if let Some(w) = crate::pipeline::resolve_develop_masks(cfg, raw, &src, &mut req.recipe).warning() {
+        note = Some(match note {
+            Some(n) => format!("{n}; {w}"),
+            None => w,
+        });
+    }
     Ok((src, note))
 }
 
@@ -2359,7 +2388,10 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     req.recipe.clamp(); // untrusted network input — see api_develop
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
     // The client reads X-Recipe-Warning on this fetch too (see api_develop).
-    let (src, recipe_note) = match deliverable_source(&mut req, &raw) {
+    // Config SNAPSHOT: the read guard held across a multi-minute render
+    // blocked every settings save (same rule as api_retouch/api_heal).
+    let cfg = state.config().clone();
+    let (src, recipe_note) = match deliverable_source(&mut req, &raw, &cfg) {
         Ok(v) => v,
         Err(resp) => return Ok(resp),
     };
@@ -2375,9 +2407,6 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         fmt_ext(&req),
         &crate::config::delivery_root(),
     )?;
-    // Config SNAPSHOT: the read guard held across a multi-minute render
-    // blocked every settings save (same rule as api_retouch/api_heal).
-    let cfg = state.config().clone();
     // Render into a unique sibling, then rename: two concurrent exports of
     // the same photo/format used to interleave encoders into ONE fixed path.
     // The tmp keeps the real ".jpg"/".tif" suffix — the encoder picks its
@@ -2393,7 +2422,7 @@ fn api_export(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         &src,
         &req.recipe,
         &tmp,
-        denoise_opts(&req, &cfg, &src).as_ref(),
+        denoise_opts(&req, &cfg, &src, &raw).as_ref(),
         None,
         // The shipped channel (R29-1): one request, one photo, one thread.
         crate::diag::stderr(),
@@ -2428,12 +2457,13 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
     };
     req.recipe.clamp(); // untrusted network input — see api_develop
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
-    let (src, recipe_note) = match deliverable_source(&mut req, &raw) {
+    // Config SNAPSHOT: the read guard held across a multi-minute render
+    // blocked every settings save (same rule as api_retouch/api_heal).
+    let cfg = state.config().clone();
+    let (src, recipe_note) = match deliverable_source(&mut req, &raw, &cfg) {
         Ok(v) => v,
         Err(resp) => return Ok(resp),
     };
-    // Config SNAPSHOT — see api_export.
-    let cfg = state.config().clone();
     let ext = fmt_ext(&req);
     let tmp = std::env::temp_dir().join(format!(
         "autoshade_dl_{}_{}.{ext}",
@@ -2447,7 +2477,7 @@ fn api_download(request: &mut Request, state: &AppState) -> Result<ResponseBox> 
             &src,
             &req.recipe,
             &tmp,
-            denoise_opts(&req, &cfg, &src).as_ref(),
+            denoise_opts(&req, &cfg, &src, &raw).as_ref(),
             None,
             // The shipped channel (R29-1): one request, one photo, one thread.
             crate::diag::stderr(),
@@ -2779,9 +2809,12 @@ fn api_xmp(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             // M6a export-side disclosure, in the SAME "\n⚠ …" note shape the
             // merge loss already uses (the reply is plain text; a new field
             // would be a new API the tab does not read).
-            let mask_note = crate::xmp::describe_mask_losses(&losses)
+            // Masks AND global controls (a lens blur, fill layers…): the
+            // GUI said both, the web only the masks until 2026-10-26.
+            let mask_note: String = pipeline::xmp_loss_lines(&req.recipe, &losses)
+                .iter()
                 .map(|m| format!("\n⚠ {m}"))
-                .unwrap_or_default();
+                .collect();
             // The reply's first token names what landed: the projection when
             // one was written (the tab prefixes "xmp + recipe saved →"), else
             // the recipe, with the reason there is no sidecar — the tab shows
@@ -4339,7 +4372,7 @@ mod tests {
         // Nothing recorded: the RAW itself is the source, and the call
         // succeeds — the baseline the refusals below must be measured against.
         let (src, _note) =
-            deliverable_source(&mut req(), &raw).unwrap_or_else(|_| panic!("no master = no refusal"));
+            deliverable_source(&mut req(), &raw, &Config::load()).unwrap_or_else(|_| panic!("no master = no refusal"));
         assert_eq!(src, raw);
 
         // A RECORDED master that is gone: server-side state, so 500 — and
@@ -4348,7 +4381,7 @@ mod tests {
         std::fs::write(&gone, b"png").unwrap();
         crate::store::write_pixel_source(&raw, &gone, false).unwrap();
         std::fs::remove_file(&gone).unwrap();
-        let err = deliverable_source(&mut req(), &raw)
+        let err = deliverable_source(&mut req(), &raw, &Config::load())
             .err()
             .unwrap_or_else(|| panic!("a dead master link must refuse the deliverable"));
         assert_eq!(err.status_code().0, 500, "server-side state → 500");
@@ -4358,7 +4391,7 @@ mod tests {
         std::fs::write(&forged, b"png").unwrap();
         let mut r = req();
         r.master = Some(forged.to_string_lossy().into_owned());
-        let err = deliverable_source(&mut r, &raw)
+        let err = deliverable_source(&mut r, &raw, &Config::load())
             .err()
             .unwrap_or_else(|| panic!("an unissued claim must be refused"));
         assert_eq!(err.status_code().0, 400, "unissued/forged claim → 400");
@@ -4482,4 +4515,120 @@ mod tests {
                 "the authority printed to the browser must pass the same origin guard"
             );
         }
+
+    /// GROUP I (2026-10-26): the desktop app's ◈ denoised card is already
+    /// denoised — its master is the render source and the strip record says
+    /// the active card is `"denoised"` — so the export and download paths
+    /// must not run the AI denoise over it a second time (the GUI's export
+    /// sits it out). A master that is not a denoised card, and the photo
+    /// itself, still take the denoise the request asked for.
+    #[test]
+    fn an_already_denoised_card_is_not_denoised_again_on_export() {
+        let dir = std::env::temp_dir().join(format!("autoshade-serve-test-denoised-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join("_serve_denoised_card.arw");
+        std::fs::write(&raw, b"raw").unwrap();
+        let dev = crate::store::develop_dir(&raw);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let master = dev.join("_serve_denoised_card.denoise.png");
+        std::fs::write(&master, b"png").unwrap();
+        crate::store::write_pixel_source(&raw, &master, false).unwrap();
+        let req: DevelopReq =
+            serde_json::from_value(json!({ "id": 0, "recipe": {}, "denoise": true })).unwrap();
+        let cfg = Config::load();
+        assert!(denoise_opts(&req, &cfg, &master, &raw).is_some(), "a heal master is not a denoised card");
+        crate::store::write_variants(
+            &raw,
+            &crate::store::VariantsRecord {
+                v: 1,
+                active_kind: "denoised".into(),
+                active_pos: 1,
+                others: vec![crate::store::VariantEntry {
+                    kind: "original".into(),
+                    recipe: EditRecipe::default(),
+                    origin: None,
+                    id: None,
+                    name: None,
+                    extra: Default::default(),
+                }],
+                active_id: None,
+                active_name: None,
+                extra: Default::default(),
+            },
+        )
+        .unwrap();
+        assert!(denoise_opts(&req, &cfg, &master, &raw).is_none(), "the ◈ card's pixels are denoised once");
+        assert!(denoise_opts(&req, &cfg, &raw, &raw).is_some(), "rendering the photo itself still denoises");
+        let _ = std::fs::remove_dir_all(&dev);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GROUP G (2026-10-26): an AI mask imported from a Lightroom sidecar is
+    /// re-derived at DEVELOP time on every surface, not only the CLI's — the
+    /// browser's develop path used to render it inert (`raster: None` skips
+    /// the whole adjustment) and say nothing. The segmenter is stubbed the way
+    /// segment's own tests do it, with a script that does not exist: the
+    /// resolve pass then runs and names the mask it could not draw, which is
+    /// exactly the line that was missing.
+    #[test]
+    fn the_web_develop_path_resolves_ai_masks_before_it_renders() {
+        use std::sync::atomic::AtomicU64;
+        let dir = std::env::temp_dir().join(format!("autoshade-serve-test-aimask-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let photo = dir.join("_serve_aimask.png");
+        image::RgbImage::from_pixel(32, 24, image::Rgb([120, 130, 140])).save(&photo).unwrap();
+        let mut cfg = Config::load();
+        cfg.segment_script = "no-such-segment-script-for-this-test.py".into();
+        let state = AppState {
+            dir: RwLock::new(dir.clone()),
+            raws: RwLock::new(vec![photo.clone()]),
+            cfg: RwLock::new(cfg),
+            dir_gen: AtomicU64::new(0),
+            installed_gen: AtomicU64::new(0),
+            port: 0,
+        };
+        let recipe = EditRecipe {
+            masks: vec![crate::recipe::LocalAdjustment {
+                name: "Sky 1".into(),
+                mask: crate::recipe::MaskGeometry::AiMask {
+                    name: "Sky 1".into(),
+                    subtype: 2,
+                    ref_x: 0.5,
+                    ref_y: 0.2,
+                    blend_mode: 0,
+                    value: 1.0,
+                    inverted: false,
+                    mask_version: 1,
+                    provenance: Vec::new(),
+                    gesture: Vec::new(),
+                    raster: None,
+                },
+                exposure_ev: -0.5,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let body = serde_json::to_vec(&json!({ "id": 0, "recipe": recipe })).unwrap();
+        let mut raw_http = format!(
+            "POST /api/develop HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\
+             X-AutoShade-Gen: 0\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        raw_http.extend_from_slice(&body);
+        let (_server, mut request, client) = loopback_request(raw_http);
+        let resp = api_develop(&mut request, &state).expect("the preview renders");
+        let warned = resp.headers().iter().any(|h| {
+            h.field.equiv("X-Preview-Warning") && h.value.as_str().contains("NOT rendered")
+        });
+        assert!(warned, "the develop path must have run the AI-mask resolve and named the inert mask");
+        drop(resp);
+        drop(request);
+        client.join().unwrap();
+        let _ = std::fs::remove_dir_all(crate::store::develop_dir(&photo));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

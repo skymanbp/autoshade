@@ -433,21 +433,34 @@ impl AutoShadeApp {
         for _ in 0..64 {
             let Some(msg) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) else { break };
             match msg {
-                Msg::Opened(boxed) => self.on_opened(ctx, lang, boxed),
+                Msg::Opened(boxed) => {
+                    self.on_opened(ctx, lang, boxed);
+                    // A Lightroom AI mask arrives without an alpha: cut it
+                    // on this computer now, or the canvas skips it.
+                    self.start_ai_mask_resolve(lang);
+                }
+                Msg::AiMasksResolved(boxed) => self.on_ai_masks_resolved(lang, *boxed),
                 Msg::Developed(boxed) => self.finish_redevelop(ctx, *boxed),
-                Msg::Analyzed(epoch, boxed) => {
+                Msg::Analyzed(epoch, mut boxed) => {
                     // Normal's one-click look lands through the same door,
                     // then says what happened in plain words (`normal.rs`).
                     let one_click = self.one_click_landing(epoch, &boxed);
-                    // …and so does the Portraits panel's AI look (`portrait.rs`).
-                    let portrait = self.portrait_look_landing(epoch);
+                    // …and so does the Portraits panel's AI look (`portrait.rs`),
+                    // its masks and blur put back on the landed recipe BEFORE
+                    // `on_analyzed` writes it — the saved file is the look the
+                    // panel shows, not a mask-less one fixed up a frame later.
+                    let portrait = self.portrait_look_landing(epoch).map(|(kept, blur)| {
+                        if let Ok((recipe, _, _)) = &mut *boxed {
+                            crate::panels::portrait::restore_portrait_masks(recipe, kept, blur);
+                        }
+                    });
                     let landed = boxed.is_ok();
                     self.on_analyzed(lang, epoch, boxed);
                     if let Some(landed) = one_click {
                         self.after_one_click(lang, landed);
                     }
-                    if let Some((kept, blur)) = portrait {
-                        self.after_portrait_look(kept, blur, landed);
+                    if portrait.is_some() {
+                        self.after_portrait_look(landed);
                     }
                 }
                 Msg::OneClickBuildProgress { done, total } => {
@@ -460,7 +473,7 @@ impl AutoShadeApp {
                     let plain = self.normal_delivery_words(lang, &outcome);
                     self.batch_progress = None; // the bar belongs to ONE batch run
                     match outcome {
-                        ExportOutcome::Single { out, relooked } => {
+                        ExportOutcome::Single { out, relooked, warn } => {
                             // ABSOLUTE (R22-7): the deliverable exists NOW, and
                             // "exported → out/DSC0001.developed.tif" named a
                             // folder relative to whatever directory the app was
@@ -493,7 +506,21 @@ impl AutoShadeApp {
                                     )
                                 );
                             }
-                            self.done(trf(lang, "exported → {path}", &[("path", &p)]));
+                            let line = trf(lang, "exported → {path}", &[("path", &p)]);
+                            match warn {
+                                // The file is written; the masks that could not
+                                // be drawn are not in it — said, as the open
+                                // path says it.
+                                Some(why) => {
+                                    let t = format!(
+                                        "{line} · {}",
+                                        trf(lang, "Some masks could not be drawn, so they are not applied: {why}", &[("why", &why)])
+                                    );
+                                    self.status = t.clone();
+                                    self.toast(ToastKind::Error, t);
+                                }
+                                None => self.done(line),
+                            }
                         }
                         ExportOutcome::Batch { ok, errs, renamed, relooked, warns, dest, refused: _ } => {
                             // Where the batch actually DELIVERED becomes the
@@ -638,9 +665,11 @@ impl AutoShadeApp {
                     }
                 }
                 Msg::Retouched(epoch, boxed) => {
+                    // Normal's noise switch lands through the same door —
+                    // with the look's undo history kept across its card.
+                    let history = self.normal_denoise_history();
                     self.on_retouched(ctx, lang, epoch, *boxed);
-                    // Normal's noise switch lands through the same door.
-                    self.after_normal_denoise(lang);
+                    self.after_normal_denoise(lang, history);
                 }
                 Msg::Fitted(boxed) => self.on_fitted(ctx, lang, boxed),
                 Msg::Styled(boxed) => match *boxed {
@@ -1738,7 +1767,14 @@ impl AutoShadeApp {
                         // keeps the calibration — stripping there rendered the
                         // canvas neutral-dark while the disk recipe kept the
                         // look.
-                        let stamped = recipe;
+                        let mut stamped = recipe;
+                        // "Keep skin natural" (Portraits) holds where the
+                        // landing is WRITTEN: the persist below saves this
+                        // recipe, and the frame's guard only reaches the
+                        // canvas one frame after the file was written.
+                        if self.skin_held() {
+                            autoshade::face::keep_skin_natural_in(&mut stamped);
+                        }
                         let mut canvas = stamped.clone();
                         if self.active_on_ai_pixels() {
                             canvas.base_curve = Vec::new();
@@ -3003,6 +3039,17 @@ impl AutoShadeApp {
                     // Sidecars were written (possibly partially on error) —
                     // recompute the gallery badges either way.
                     self.edited_badge.clear();
+                    // Every photo the paste wrote now has the pasted look on
+                    // disk, and that look REPLACED whatever unsaved work its
+                    // navigation stash held: left in place, the stash would
+                    // outrank the paste in a batch render, a reopen and
+                    // 「Save all」 at exit (the stash beats disk on all three).
+                    // A partial failure wrote the others all the same.
+                    if let Ok(out) = &res {
+                        for p in &out.written {
+                            self.nav_stash.remove(p);
+                        }
+                    }
                     match res {
                         // A partial failure keeps the error channel (as the
                         // worker-side bail! did) — it must never read as a

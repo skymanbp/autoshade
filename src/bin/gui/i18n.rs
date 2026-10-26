@@ -1236,6 +1236,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("▨ AI mask (re-derived locally, not Adobe's raster)",
         "▨ AI 蒙版（本机重算，非 Adobe 原栅格）"),
     ("▨ AI mask (carried, not yet re-derived)", "▨ AI 蒙版（已带走，尚未重算）"),
+    ("Re-deriving the AI masks from Lightroom on this computer…", "正在本机重算来自 Lightroom 的 AI 蒙版…"),
+    ("Some masks could not be drawn, so they are not applied: {why}", "有些蒙版没能画出来，未生效：{why}"),
+    ("Face masks ×{n} outlined on this computer", "人脸蒙版 ×{n} 已在本机勾出"),
+    ("Finding the faces… (the first run downloads the models)", "正在找脸…（第一次运行会下载模型）"),
     ("Select…", "选择…"),
     ("or type a custom id", "或输入自定义模型 id"),
 
@@ -2924,6 +2928,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Done — Ctrl+Z goes back", "完成 — Ctrl+Z 可以撤回"),
     ("No AI key set — built-in look used", "没填密钥，用的是内置方案"),
     ("Could not read your reference photos: {err}", "参考照片读取失败：{err}"),
+    ("Your reference photos are read, but the look could not start. Click 「Match my reference photos…」 again.", "参考照片已读好，但效果没能开始。请再点一次「照着我的参考照片…」。"),
     ("To make looks with AI, add a service key in Settings (⚙).", "要用 AI 出片，先在设置（⚙）里填服务密钥。"),
     ("Fine-tune", "微调"),
     ("Warmth", "冷暖"),

@@ -100,10 +100,8 @@ pub(super) fn prefix_for(tag: Option<&str>) -> String {
 /// (`store::relativize_mask_paths`) and what [`place_rasters`] resolves again.
 pub(super) fn portable(r: &EditRecipe) -> EditRecipe {
     let mut p = r.clone();
-    for m in &mut p.masks {
-        for path in m.bitmap_paths_mut() {
-            *path = bare_name(path);
-        }
+    for path in p.raster_paths_mut() {
+        *path = bare_name(path);
     }
     p
 }
@@ -958,11 +956,9 @@ fn place_rasters(r: &mut EditRecipe, rasters: &[Raster], dir: &Path, warn: &dyn 
             }
         };
         if placed_as != raster.name {
-            for m in &mut r.masks {
-                for path in m.bitmap_paths_mut() {
-                    if Path::new(path.as_str()).is_relative() && bare_name(path) == raster.name {
-                        *path = placed_as.clone();
-                    }
+            for path in r.raster_paths_mut() {
+                if Path::new(path.as_str()).is_relative() && bare_name(path) == raster.name {
+                    *path = placed_as.clone();
                 }
             }
         }

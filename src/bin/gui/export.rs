@@ -512,6 +512,7 @@ impl AutoShadeApp {
         };
         let recipe = self.recipe.clone();
         let src_photo = self.src_path.clone();
+        let ai_masks = self.ai_mask_runner();
         self.spawn_worker(
             move || {
                 let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&path))); // full-frame commit budget (budget.rs)
@@ -539,6 +540,23 @@ impl AutoShadeApp {
                             autoshade::pipeline::repair_pre_era_base_curve(p, &mut recipe)
                         })
                         .is_some();
+                    // A Lightroom AI mask still without an alpha, or a face
+                    // intent without a raster, is drawn here, on the export's
+                    // own copy (the render skips it otherwise): keyed on the
+                    // PHOTO, on the pixels this render uses.
+                    let mut warn = None;
+                    if let Some(p) = src_photo.as_deref()
+                        && crate::persist::unresolved_develop_masks(&recipe) > 0
+                    {
+                        let res = ai_masks(p, &path, &mut recipe);
+                        if let Some(line) = res.ai.describe() {
+                            eprintln!("ai mask : {line}");
+                        }
+                        if let Some(line) = res.faces.describe() {
+                            eprintln!("face mask: {line}");
+                        }
+                        warn = res.warning();
+                    }
                     // SCUNet AI denoise (python sidecar) runs before the develop when on.
                     let opts = denoise.map(|strength| {
                         autoshade::denoise::DenoiseOpts::from_config(
@@ -553,6 +571,7 @@ impl AutoShadeApp {
                     Ok::<ExportOutcome, anyhow::Error>(ExportOutcome::Single {
                         out,
                         relooked: relook,
+                        warn,
                     })
                 })();
                 // A failed numbered save leaves no empty claim behind.
@@ -677,6 +696,7 @@ impl AutoShadeApp {
         // the axis the flag records (a ✨ card and its ✎ cards sit on the
         // same raster).
         type BatchOverride = (EditRecipe, Option<(PathBuf, bool)>);
+        let ai_masks = self.ai_mask_runner();
         let mut overrides: std::collections::HashMap<PathBuf, BatchOverride> = self
             .nav_stash
             .iter()
@@ -856,6 +876,21 @@ impl AutoShadeApp {
                             )
                             .is_some();
                             let src = pix.map(|(m, _)| m).unwrap_or_else(|| p.clone());
+                            // Lightroom AI masks without an alpha and face
+                            // intents without a raster: drawn here (cached), as
+                            // the single export does; what could not be drawn
+                            // joins this photo's develop warnings.
+                            if crate::persist::unresolved_develop_masks(&recipe) > 0 {
+                                let res = ai_masks(p, &src, &mut recipe);
+                                let stem = autoshade::pipeline::stem(p);
+                                if let Some(line) = res.ai.describe() {
+                                    eprintln!("ai mask : {stem}: {line}");
+                                }
+                                if let Some(line) = res.faces.describe() {
+                                    eprintln!("face mask: {stem}: {line}");
+                                }
+                                photo_warns.extend(res.warning());
+                            }
                             autoshade::render::render_to_file(&src, &recipe, &out, None, Some(&export), autoshade::diag::stderr())?;
                             if repaired {
                                 relooked += 1;
@@ -1476,6 +1511,10 @@ impl AutoShadeApp {
             lens_blur: dropped_blur,
         } = paste_payload(src, geometry);
         let has_foreign_target = targets.iter().any(|t| Some(t) != copied_from.as_ref());
+        // "Keep skin natural" (Portraits) holds each target's write where it
+        // is written, by that target's own switch (`skin_held_for`).
+        let skin_held: std::collections::HashSet<PathBuf> =
+            targets.iter().filter(|t| self.skin_held_for(t)).cloned().collect();
         if n_raster > 0 && has_foreign_target {
             self.toast(
                 ToastKind::Error,
@@ -1526,6 +1565,9 @@ impl AutoShadeApp {
             // writes and the ● baseline can advance on success.
             let chosen = if Some(&open) == copied_from.as_ref() { &recipe_full } else { &recipe };
             let mut live = paste_recipe_for(&open, chosen);
+            if skin_held.contains(&open) {
+                autoshade::face::keep_skin_natural_in(&mut live);
+            }
             // The DISK form keeps its calibration (the worker writes it
             // below), but an active GENERATED canvas must not render it —
             // its pixels already carry the look (the load_version /
@@ -1570,6 +1612,7 @@ impl AutoShadeApp {
                     // shortfall by subtraction.
                     let mut xmp_fails: Vec<String> = Vec::new();
                     let mut xmp_notes: Vec<String> = Vec::new();
+                    let mut written: Vec<PathBuf> = Vec::new();
                     for path in &targets {
                         let mut step = || -> anyhow::Result<bool> {
                             // Worker thread ⇒ Wait: queue behind whichever
@@ -1586,7 +1629,10 @@ impl AutoShadeApp {
                             // clipboard's own photo keeps its bitmap masks.
                             let chosen =
                                 if Some(path) == copied_from.as_ref() { &recipe_full } else { &recipe };
-                            let r = paste_recipe_for(path, chosen);
+                            let mut r = paste_recipe_for(path, chosen);
+                            if skin_held.contains(path) {
+                                autoshade::face::keep_skin_natural_in(&mut r);
+                            }
                             // The programmatic-overwrite gate, like Analyze /
                             // serve / the CLI: one click overwrites MANY saved
                             // develops the user is not even looking at — a
@@ -1704,6 +1750,7 @@ impl AutoShadeApp {
                             Ok(wrote_xmp) => {
                                 okn += 1;
                                 xmpn += usize::from(wrote_xmp);
+                                written.push(path.clone());
                             }
                             Err(e) => errs.push(format!("{}: {e}", autoshade::pipeline::stem(path))),
                         }
@@ -1711,7 +1758,7 @@ impl AutoShadeApp {
                     // FACTS (L12#4): counts and detail lists render at the
                     // landing; a partial failure keeps riding the error
                     // channel there, so it never reads as a clean success.
-                    Ok(PasteOutcome { ok: okn, xmp: xmpn, errs, xmp_fails, xmp_notes })
+                    Ok(PasteOutcome { ok: okn, xmp: xmpn, errs, xmp_fails, xmp_notes, written })
                 };
                 Msg::Pasted(res)
             },

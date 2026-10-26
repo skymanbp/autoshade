@@ -348,7 +348,7 @@
         let abs = std::path::absolute(&rel).unwrap();
         assert_ne!(abs, rel, "fixture: the path must actually be relative");
         app.tx
-            .send(Msg::Exported(Ok(ExportOutcome::Single { out: rel, relooked: false })))
+            .send(Msg::Exported(Ok(ExportOutcome::Single { out: rel, relooked: false, warn: None })))
             .unwrap();
         app.poll_workers(&ctx);
         assert!(
@@ -702,4 +702,228 @@
         assert_eq!(wheel_value(egui::vec2(0.0, -40.0), r), (90.0, 50.0), "up is 90° (screen y grows down)");
         assert_eq!(wheel_value(egui::Vec2::ZERO, r), (0.0, 0.0));
         assert_eq!(wheel_value(egui::vec2(500.0, 0.0), r), (0.0, 100.0), "past the rim clamps");
+    }
+
+    /// A stand-in for `pipeline::resolve_develop_masks`: every AI mask without
+    /// an alpha, and every face intent without a raster, gets an all-white
+    /// one (a real PNG, so the render reads it).
+    fn white_alpha_runner(
+        _photo: &std::path::Path,
+        _pixels: &std::path::Path,
+        r: &mut EditRecipe,
+    ) -> autoshade::pipeline::DevelopMasks {
+        let alpha = std::env::temp_dir().join(format!("autoshade-gui-ai-alpha-{}.png", std::process::id()));
+        if !alpha.is_file() {
+            image::GrayImage::from_pixel(32, 24, image::Luma([255u8])).save(&alpha).unwrap();
+        }
+        let mut n = 0;
+        for m in &mut r.masks {
+            if let autoshade::recipe::MaskGeometry::AiMask { raster, .. } = &mut m.mask
+                && raster.is_none()
+            {
+                *raster = Some(alpha.display().to_string());
+                n += 1;
+            }
+        }
+        let mut faces = autoshade::face::FaceMaskResolution::default();
+        for m in r.masks.iter_mut().filter(|m| autoshade::face::is_face_intent(m)) {
+            m.mask = autoshade::recipe::MaskGeometry::Bitmap { path: alpha.display().to_string() };
+            faces.resolved += 1;
+        }
+        autoshade::pipeline::DevelopMasks { ai: autoshade::segment::AiMaskResolution { resolved: n, ..Default::default() }, faces }
+    }
+
+    /// A stand-in for a face finder that finds no face: every face intent is
+    /// taken out, with the reason, as `face::resolve_face_masks` does.
+    fn no_face_runner(
+        _photo: &std::path::Path,
+        _pixels: &std::path::Path,
+        r: &mut EditRecipe,
+    ) -> autoshade::pipeline::DevelopMasks {
+        let mut faces = autoshade::face::FaceMaskResolution::default();
+        r.masks.retain(|m| {
+            let intent = autoshade::face::is_face_intent(m);
+            if intent {
+                faces.dropped.push(("Face".into(), "no face was found in this photo".into()));
+            }
+            !intent
+        });
+        autoshade::pipeline::DevelopMasks { ai: Default::default(), faces }
+    }
+
+    /// A face mask a proposal asked for, as it arrives: the role, no raster,
+    /// two stops up.
+    fn face_intent() -> autoshade::recipe::LocalAdjustment {
+        autoshade::recipe::LocalAdjustment {
+            exposure_ev: 2.0,
+            ..autoshade::face::portrait_adjustment(autoshade::recipe::MaskRole::Face, String::new())
+        }
+    }
+
+    /// A Lightroom "select sky" correction as the sidecar import leaves it:
+    /// the intent, no alpha, two stops up.
+    fn lightroom_sky() -> autoshade::recipe::LocalAdjustment {
+        autoshade::recipe::LocalAdjustment {
+            name: "Sky 1".into(),
+            mask: autoshade::recipe::MaskGeometry::AiMask {
+                name: "Sky 1".into(),
+                subtype: 2,
+                ref_x: 0.5,
+                ref_y: 0.2,
+                blend_mode: 0,
+                value: 1.0,
+                inverted: false,
+                mask_version: 1,
+                provenance: Vec::new(),
+                gesture: Vec::new(),
+                raster: None,
+            },
+            exposure_ev: 2.0,
+            ..Default::default()
+        }
+    }
+
+    /// The desktop app re-derives a Lightroom AI mask, as the CLI does
+    /// (USER_MANUAL: re-derived locally at develop time): a photo opened
+    /// with one gets its alpha on a worker after the open — into the canvas,
+    /// its saved mark and its undo head, so nothing reads as unsaved — and an
+    /// export of a card still without one cuts it on the export's own copy,
+    /// so the jpg carries the mask instead of skipping it.
+    ///
+    /// MUTATION THIS CATCHES: drop `start_ai_mask_resolve` from the open
+    /// landing (the canvas keeps no alpha) or the export worker's resolve
+    /// (the jpg renders as if the mask were not there).
+    #[test]
+    fn a_lightroom_ai_mask_is_re_derived_on_open_and_on_export() {
+        let dir = std::env::temp_dir().join(format!("autoshade-gui-ai-mask-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("_gui_ai_mask.jpg");
+        image::RgbImage::from_pixel(32, 24, image::Rgb([60, 60, 60])).save(&src).unwrap();
+        let dev = autoshade::store::develop_dir(&src);
+        let _ = std::fs::remove_dir_all(&dev);
+        std::fs::create_dir_all(&dev).unwrap();
+        let out = std::env::temp_dir().join(format!("autoshade-gui-ai-mask-out-{}", std::process::id()));
+        std::fs::create_dir_all(&out).unwrap();
+        let alpha_png = std::env::temp_dir().join(format!("autoshade-gui-ai-alpha-{}.png", std::process::id()));
+        let _scrub = Scrub(vec![dir, dev, out.clone(), alpha_png]);
+        let saved = EditRecipe { masks: vec![lightroom_sky()], ..Default::default() };
+        std::fs::write(autoshade::store::recipe_target(&src), serde_json::to_string(&saved).unwrap()).unwrap();
+        let mut app = AutoShadeApp { ai_mask_stub: Some(white_alpha_runner), ..Default::default() };
+        let ctx = egui::Context::default();
+        let land = |app: &mut AutoShadeApp| {
+            let start = std::time::Instant::now();
+            while app.busy || app.open_in_flight {
+                assert!(start.elapsed() < std::time::Duration::from_secs(60), "never landed: {}", app.status);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                app.poll_workers(&ctx);
+            }
+        };
+        app.open_path(src.clone());
+        land(&mut app);
+        let alpha = |r: &EditRecipe| match &r.masks.first().map(|m| &m.mask) {
+            Some(autoshade::recipe::MaskGeometry::AiMask { raster, .. }) => raster.clone(),
+            other => panic!("the sky mask is not there: {other:?}"),
+        };
+        assert!(alpha(&app.recipe).is_some(), "the open card's AI mask has its alpha: {}", app.status);
+        assert_eq!(alpha(&app.saved_recipe), alpha(&app.recipe), "an alpha is not an edit: ● stays dark");
+        assert_eq!(alpha(&app.committed.recipe), alpha(&app.recipe), "and Ctrl+Z does not take it away");
+        assert_eq!(app.status, trf(Lang::En, "AI masks ×{n} re-derived locally — not Adobe's raster", &[("n", "1")]));
+        // Export: a card still without its alpha is cut on the export's copy.
+        let mean = |p: &std::path::Path| {
+            let img = image::open(p).unwrap_or_else(|e| panic!("{}: {e}", p.display())).to_luma8();
+            img.pixels().map(|px| f64::from(px.0[0])).sum::<f64>() / f64::from(img.width() * img.height())
+        };
+        let export = |app: &mut AutoShadeApp, recipe: EditRecipe, name: &str| {
+            app.recipe = recipe;
+            assert!(app.start_render_to(out.join(name)), "{}", app.status);
+            land(app);
+            mean(&out.join(name))
+        };
+        let plain = export(&mut app, EditRecipe::default(), "plain.jpg");
+        let sky = export(&mut app, saved.clone(), "sky.jpg");
+        assert!(sky > plain + 30.0, "the export carries the mask, two stops up: {sky} vs {plain}");
+    }
+
+    /// A face mask that names no raster yet (a proposal's `face` target) goes
+    /// through the same resolve step as a Lightroom AI mask
+    /// (`pipeline::resolve_develop_masks`): drawn on a worker after the open —
+    /// into the canvas, its saved mark and its undo head — and on an export's
+    /// own copy; when no face is found it is taken out and the status line
+    /// says why (`DevelopMasks::warning`).
+    ///
+    /// MUTATION THIS CATCHES: gate the open's resolve on `unresolved_ai_masks`
+    /// again (a face intent alone never starts it), drop `fill_face_intents`
+    /// from the landing, or the export's face-intent count, and an assertion
+    /// below fails.
+    #[test]
+    fn a_face_intent_without_a_raster_is_resolved_like_an_ai_mask_on_open_and_on_export() {
+        let dir = std::env::temp_dir().join(format!("autoshade-gui-face-intent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (src, bare) = (dir.join("_gui_face_intent.jpg"), dir.join("_gui_face_intent_none.jpg"));
+        let saved = EditRecipe { masks: vec![face_intent()], ..Default::default() };
+        let mut devs = Vec::new();
+        for p in [&src, &bare] {
+            image::RgbImage::from_pixel(32, 24, image::Rgb([60, 60, 60])).save(p).unwrap();
+            let dev = autoshade::store::develop_dir(p);
+            let _ = std::fs::remove_dir_all(&dev);
+            std::fs::create_dir_all(&dev).unwrap();
+            std::fs::write(autoshade::store::recipe_target(p), serde_json::to_string(&saved).unwrap()).unwrap();
+            devs.push(dev);
+        }
+        let out = std::env::temp_dir().join(format!("autoshade-gui-face-intent-out-{}", std::process::id()));
+        std::fs::create_dir_all(&out).unwrap();
+        let alpha_png = std::env::temp_dir().join(format!("autoshade-gui-ai-alpha-{}.png", std::process::id()));
+        let mut scrub = vec![dir, out.clone(), alpha_png];
+        scrub.extend(devs);
+        let _scrub = Scrub(scrub);
+        let mut app = AutoShadeApp { ai_mask_stub: Some(white_alpha_runner), ..Default::default() };
+        let ctx = egui::Context::default();
+        let land = |app: &mut AutoShadeApp| {
+            let start = std::time::Instant::now();
+            while app.busy || app.open_in_flight {
+                assert!(start.elapsed() < std::time::Duration::from_secs(60), "never landed: {}", app.status);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                app.poll_workers(&ctx);
+            }
+        };
+        app.open_path(src.clone());
+        land(&mut app);
+        let raster = |r: &EditRecipe| match r.masks.first().map(|m| (&m.mask, m.role)) {
+            Some((autoshade::recipe::MaskGeometry::Bitmap { path }, autoshade::recipe::MaskRole::Face)) => path.clone(),
+            other => panic!("the face mask is not there: {other:?}"),
+        };
+        assert!(!raster(&app.recipe).is_empty(), "the open card's face mask has its raster: {}", app.status);
+        assert_eq!(raster(&app.saved_recipe), raster(&app.recipe), "a raster is not an edit: ● stays dark");
+        assert_eq!(raster(&app.committed.recipe), raster(&app.recipe), "and Ctrl+Z does not take it away");
+        assert_eq!(app.status, trf(Lang::En, "Face masks ×{n} outlined on this computer", &[("n", "1")]));
+        // Export: a card whose face mask still names no raster is drawn on
+        // the export's copy, so the jpg carries it.
+        let mean = |p: &std::path::Path| {
+            let img = image::open(p).unwrap_or_else(|e| panic!("{}: {e}", p.display())).to_luma8();
+            img.pixels().map(|px| f64::from(px.0[0])).sum::<f64>() / f64::from(img.width() * img.height())
+        };
+        let export = |app: &mut AutoShadeApp, recipe: EditRecipe, name: &str| {
+            app.recipe = recipe;
+            assert!(app.start_render_to(out.join(name)), "{}", app.status);
+            land(app);
+            mean(&out.join(name))
+        };
+        let plain = export(&mut app, EditRecipe::default(), "plain.jpg");
+        let face = export(&mut app, saved.clone(), "face.jpg");
+        assert!(face > plain + 30.0, "the export carries the face mask, two stops up: {face} vs {plain}");
+        // No face found: the intent is taken out and the line says why.
+        let mut app = AutoShadeApp { ai_mask_stub: Some(no_face_runner), ..Default::default() };
+        app.open_path(bare.clone());
+        land(&mut app);
+        assert!(app.recipe.masks.is_empty(), "a face mask with no face to stand on is taken out: {:?}", app.recipe.masks);
+        assert!(app.saved_recipe.masks.is_empty(), "from the saved mark too, so ● stays dark");
+        let why = "\"Face\" left out (no face was found in this photo)";
+        assert!(app.status.contains(why), "the status line names the mask and the reason: {}", app.status);
+        assert!(
+            app.status.starts_with(&trf(Lang::En, "Some masks could not be drawn, so they are not applied: {why}", &[("why", "")])),
+            "{}",
+            app.status
+        );
     }

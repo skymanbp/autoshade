@@ -568,12 +568,16 @@ pub fn segment_file(opts: &SegmentOpts, input: &Path, output: &Path) -> Result<S
         output,
         prompt_file.as_ref().map(|p| p.path.as_path()),
     );
-    let run = crate::run_sidecar_child(
-        &mut cmd,
-        "segmentation sidecar",
-        &format!("{} {}", opts.python_bin, opts.script.display()),
-        crate::denoise::sidecar_timeout(),
-    );
+    // Under the model slot: BiRefNet / OneFormer / SAM are VRAM-resident
+    // models like every other, and `batch --jobs 3` is three of these at once.
+    let run = crate::with_model_slot(|| {
+        crate::run_sidecar_child(
+            &mut cmd,
+            "segmentation sidecar",
+            &format!("{} {}", opts.python_bin, opts.script.display()),
+            crate::denoise::sidecar_timeout(),
+        )
+    });
     let out = match run {
         Ok(out) => out,
         Err(error) => {
@@ -1208,13 +1212,9 @@ pub fn resolve_ai_masks(
             // KEYED AND HOMED ON THE PHOTO, never on the pixel source (F1-C).
             let target = crate::store::raster_target(
                 raw,
-                &ai_cache_key_with_prompt(
-                    raw,
-                    subtype,
-                    rx,
-                    ry,
-                    turns,
-                    prompt_points.as_deref(),
+                &frame_scoped_key(
+                    ai_cache_key_with_prompt(raw, subtype, rx, ry, turns, prompt_points.as_deref()),
+                    src,
                 ),
             );
             // Built BEFORE the cache probe now, because the probe needs it —
@@ -1318,19 +1318,75 @@ pub fn resolve_ai_masks(
 /// normalised space (`render::sample_gray_norm`), so both ends agree without
 /// either one knowing the photo's pixel dimensions.
 fn stage_source_frame(src: &Path, quarter_turns: u8) -> Option<PathBuf> {
-    let decoded = crate::decode::decode_any_turned(src, quarter_turns)
+    let frame = mask_source_frame(src, quarter_turns, SEGMENT_FRAME_EDGE)
         .map_err(|e| {
             eprintln!("⚠ AI mask: cannot decode {} for segmentation: {e:#}", src.display());
         })
         .ok()?;
     let out = staging_path(src);
-    decoded
-        .preview
+    frame
         .to_rgb8()
         .save(&out)
         .map_err(|e| eprintln!("⚠ AI mask: cannot stage the source frame {}: {e}", out.display()))
         .ok()?;
     Some(out)
+}
+
+/// The longest edge a RAW's sensor develop is made at for the segmenter: the
+/// alpha is sampled in normalised coordinates at any render size, and the
+/// desktop app segments its own working preview, which is no larger.
+const SEGMENT_FRAME_EDGE: u32 = 4096;
+
+/// The frame a mask raster is CUT on for `src`, in the recipe's quarter turns,
+/// no longer than `max_edge` — shared by the segmenter and the face finder.
+///
+/// **A RAW's frame is its SENSOR develop, never its embedded preview**
+/// (2026-10-26; the v1.2.2 lesson, `fit::same_frame_plausible_dims`). The
+/// preview is the camera's choice: a body set to an in-camera aspect (Sony at
+/// 4:3) stores a centred 4:3 CROP of the 3:2 sensor, so a mask normalised on
+/// it was stretched and shifted on the render, which samples the sensor frame.
+/// The neutral develop (`render::render_to_image` of a default recipe in the
+/// recipe's turn) IS that frame, and it is the frame the desktop app already
+/// segments and finds faces on — so every surface now cuts the same mask for
+/// the same photo. A baked source (a retouch master, a JPEG) is its own pixels.
+pub(crate) fn mask_source_frame(src: &Path, quarter_turns: u8, max_edge: u32) -> anyhow::Result<image::DynamicImage> {
+    mask_source_frame_with(src, quarter_turns, max_edge, |p, turns, edge| {
+        crate::render::render_to_image(
+            p,
+            &crate::recipe::EditRecipe { quarter_turns: turns, ..Default::default() },
+            None,
+            Some(edge),
+        )
+    })
+}
+
+/// [`mask_source_frame`] with the sensor develop handed in, so the frame RULE
+/// is testable without a RAW file.
+pub(crate) fn mask_source_frame_with(
+    src: &Path,
+    quarter_turns: u8,
+    max_edge: u32,
+    develop: impl FnOnce(&Path, u8, u32) -> anyhow::Result<image::DynamicImage>,
+) -> anyhow::Result<image::DynamicImage> {
+    if crate::decode::is_raw(src) {
+        return develop(src, quarter_turns, max_edge);
+    }
+    let p = crate::decode::decode_any_turned(src, quarter_turns)?.preview;
+    // `thumbnail` also ENLARGES a smaller frame to the box; only shrink.
+    Ok(if p.width().max(p.height()) > max_edge { p.thumbnail(max_edge, max_edge) } else { p })
+}
+
+/// The cache key of an alpha cut on `src`'s mask frame. A RAW's frame changed
+/// on 2026-10-26 from the embedded preview to the sensor develop
+/// ([`mask_source_frame`]), so its key carries that frame and an alpha cut on
+/// the old frame is never served for the new one; a baked source's frame did
+/// not change and its key stays byte-identical.
+fn frame_scoped_key(key: String, src: &Path) -> String {
+    if !crate::decode::is_raw(src) {
+        return key;
+    }
+    let h = fnv1a64(format!("{key}|frame=sensor-develop").bytes());
+    format!("ai-mask-{h:016x}")
 }
 
 /// A FRESH temp name for one staged source frame.
@@ -1519,6 +1575,34 @@ mod tests {
         }
         assert!(other.exists(), "cleanup must stay within this call's outputs");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// SINGLE-FLIGHT: BiRefNet / OneFormer / SAM queue on the same
+    /// process-wide model slot as every other model sidecar.
+    /// MUTATION THIS KILLS: call `crate::run_sidecar_child` in `segment_file`
+    /// without `crate::with_model_slot` around it.
+    #[test]
+    fn segment_file_waits_for_the_model_slot() {
+        let dir = std::env::temp_dir().join(format!("autoshade-seg-test-slot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("segment.py");
+        std::fs::write(&script, "# stand-in
+").unwrap();
+        let opts = SegmentOpts {
+            python_bin: dir.join("no-such-python").to_string_lossy().into_owned(),
+            script,
+            target: "sky".into(),
+            reference_point: None,
+            prompt_points: None,
+        };
+        let input = dir.join("in.png");
+        std::fs::write(&input, b"not-really-a-png").unwrap();
+        let output = dir.join("mask.png");
+        crate::assert_bridge_waits_for_model_slot(|| {
+            assert!(segment_file(&opts, &input, &output).is_err());
+        });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// M-S1: the `crate::sidecar_wrote` call removed (or reverted to the old
@@ -2699,5 +2783,44 @@ mod tests {
         assert!(soft, "the alpha must be SOFT — the render multiplies it in unthresholded");
         assert!(img.width().max(img.height()) <= 4096, "the long-edge cap must hold");
         let _ = std::fs::remove_file(&out);
+    }
+
+    /// GROUP B (2026-10-26): a RAW's mask frame is its SENSOR develop — the
+    /// frame the render samples the alpha in — and never its embedded preview,
+    /// which a body set to an in-camera aspect (Sony at 4:3) stores as a
+    /// centred CROP of the 3:2 sensor; an alpha cut on it lands stretched and
+    /// shifted on the render. The photo here does not exist, so reading its
+    /// preview would fail: the frame can only have come from the develop. A
+    /// baked source is its own pixels, turned.
+    #[test]
+    fn a_raw_sources_mask_frame_is_its_sensor_develop_never_the_embedded_preview() {
+        let raw = Path::new("D:/nowhere/_seg_frame_43_body.ARW");
+        let frame = mask_source_frame_with(raw, 1, 2048, |p, turns, edge| {
+            assert_eq!((p, turns, edge), (raw, 1, 2048), "the develop is asked for the recipe's frame");
+            Ok(image::DynamicImage::new_rgb8(300, 200))
+        })
+        .expect("the sensor develop answers");
+        assert_eq!((frame.width(), frame.height()), (300, 200), "the 3:2 sensor frame, not a 4:3 preview");
+
+        let dir = std::env::temp_dir().join(format!("autoshade-seg-frame-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let baked = dir.join("master.png");
+        image::RgbImage::new(40, 30).save(&baked).unwrap();
+        let frame = mask_source_frame_with(&baked, 1, 2048, |_, _, _| panic!("a baked source is not developed"))
+            .unwrap();
+        assert_eq!((frame.width(), frame.height()), (30, 40), "its own pixels, in the recipe's turn");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The cache identity follows the frame: an alpha a RAW's mask was cut
+    /// on under the old preview frame is not served for the sensor-develop
+    /// frame, while a baked source's key — whose frame did not change — stays
+    /// byte-identical.
+    #[test]
+    fn a_raw_sources_ai_cache_key_names_the_sensor_develop_frame() {
+        let key = ai_cache_key(Path::new("D:/rolls/2024/DSC0001.ARW"), 2, 0.5, 0.5, 0);
+        assert_ne!(frame_scoped_key(key.clone(), Path::new("D:/rolls/2024/DSC0001.ARW")), key);
+        assert_eq!(frame_scoped_key(key.clone(), Path::new("D:/masters/DSC0001.heal.png")), key);
     }
 }

@@ -487,6 +487,10 @@ pub(crate) struct AutoShadeApp {
     /// `style_build_inflight` may grey that row.
     #[cfg(test)]
     pub(crate) ai_library_build_enabled: Option<bool>,
+    /// Test seam: stands in for the local segmenter (`persist.rs`
+    /// `ai_mask_runner`) on the open and export paths.
+    #[cfg(test)]
+    pub(crate) ai_mask_stub: Option<crate::persist::AiMaskRunner>,
     // --- batch recipe copy / paste ---
     pub(crate) multi_sel: HashSet<usize>,             // Ctrl+click gallery multi-selection
     pub(crate) copied: Option<EditRecipe>,            // the recipe "clipboard" (in-app only)
@@ -1967,6 +1971,8 @@ impl Default for AutoShadeApp {
             ai_library_read_enabled: None,
             #[cfg(test)]
             ai_library_build_enabled: None,
+            #[cfg(test)]
+            ai_mask_stub: None,
             multi_sel: HashSet::new(),
             copied: None,
             copied_from: None,

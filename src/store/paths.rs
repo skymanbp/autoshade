@@ -433,19 +433,17 @@ fn is_calibration_corpus(p: &Path) -> bool {
 /// reference (the engine's missing-raster contract still reports it) rather
 /// than failing the whole load.
 pub fn detach_rasters(src: &Path, r: &mut EditRecipe, prefix: &str) {
-    for m in r.masks.iter_mut() {
-        for path in m.bitmap_paths_mut() {
-            let from = PathBuf::from(path.as_str());
-            if !from.exists() {
-                continue;
-            }
-            let Ok(dst) = claim_raster(src, prefix) else { continue };
-            if copy_atomic(&from, &dst).is_ok() {
-                *path = dst.to_string_lossy().into_owned();
-            } else {
-                // Release the claim we could not fill.
-                let _ = std::fs::remove_file(&dst);
-            }
+    for path in r.raster_paths_mut() {
+        let from = PathBuf::from(path.as_str());
+        if !from.exists() {
+            continue;
+        }
+        let Ok(dst) = claim_raster(src, prefix) else { continue };
+        if copy_atomic(&from, &dst).is_ok() {
+            *path = dst.to_string_lossy().into_owned();
+        } else {
+            // Release the claim we could not fill.
+            let _ = std::fs::remove_file(&dst);
         }
     }
 }

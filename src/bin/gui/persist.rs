@@ -838,3 +838,234 @@ pub(crate) fn strip_from_record(
     }
     (strip, dropped)
 }
+
+// ── AI masks imported from Lightroom: re-derived on this computer ───────────
+//
+// A Lightroom sidecar's AI masks (select sky / subject / object) carry the
+// intent only — `xmp` reads them with `raster = None` — and the render SKIPS
+// an AI mask that has no alpha (`render::mask_raster`). The CLI re-derives
+// them at develop time (`segment::resolve_ai_masks`); the app does the same:
+// once the open landed (a sidecar call, so on a worker, with the status
+// line), and on the export's own copy of the recipe (`export.rs`), so a
+// photo never opened this session exports with its masks too. A face / eyes
+// / skin mask that names no raster yet (`face::is_face_intent`) is the same
+// case, drawn by the face finder: both go through the library's one
+// resolve-before-develop step, `pipeline::resolve_develop_masks`.
+
+/// What `face_outcomes` hands the landing.
+pub(crate) type FaceOutcomes = Vec<Option<autoshade::recipe::LocalAdjustment>>;
+
+/// What re-derives a recipe's unresolved AI masks and face intents: the
+/// photo (the cache's key and home), the pixels the render uses, the recipe.
+pub(crate) type AiMaskRunner =
+    fn(&std::path::Path, &std::path::Path, &mut EditRecipe) -> autoshade::pipeline::DevelopMasks;
+
+/// The production runner: `pipeline::resolve_develop_masks`, as `apply` calls it.
+pub(crate) fn resolve_ai_masks_locally(
+    photo: &std::path::Path,
+    pixels: &std::path::Path,
+    recipe: &mut EditRecipe,
+) -> autoshade::pipeline::DevelopMasks {
+    autoshade::pipeline::resolve_develop_masks(&autoshade::config::Config::load(), photo, pixels, recipe)
+}
+
+/// Every geometry of `r` — each mask's own and its components'.
+fn geometries(r: &EditRecipe) -> impl Iterator<Item = &autoshade::recipe::MaskGeometry> {
+    r.masks.iter().flat_map(|m| std::iter::once(&m.mask).chain(m.components.iter().map(|c| &c.geometry)))
+}
+
+/// How many AI masks of `r` have no alpha yet.
+pub(crate) fn unresolved_ai_masks(r: &EditRecipe) -> usize {
+    geometries(r)
+        .filter(|g| matches!(g, autoshade::recipe::MaskGeometry::AiMask { raster: None, .. }))
+        .count()
+}
+
+/// How many masks of `r` the resolve step has work for: AI masks without an
+/// alpha and face intents without a raster.
+pub(crate) fn unresolved_develop_masks(r: &EditRecipe) -> usize {
+    unresolved_ai_masks(r) + r.masks.iter().filter(|m| autoshade::face::is_face_intent(m)).count()
+}
+
+/// What the resolve step made of each face intent of `before`, in recipe
+/// order: the mask it became (`Some`), or `None` when it was taken out.
+/// `after` is `before` resolved — `face::resolve_face_masks` keeps every
+/// other mask, in order, and only re-points or drops the intents.
+pub(crate) fn face_outcomes(before: &EditRecipe, after: &EditRecipe) -> FaceOutcomes {
+    let mut rest = after.masks.iter().peekable();
+    let mut out = Vec::new();
+    for m in &before.masks {
+        if !autoshade::face::is_face_intent(m) {
+            rest.next();
+            continue;
+        }
+        let became = rest.peek().is_some_and(|a| {
+            !autoshade::face::is_face_intent(a)
+                && autoshade::recipe::LocalAdjustment { mask: m.mask.clone(), range: m.range, ..(*a).clone() } == *m
+        });
+        out.push(if became { rest.next().cloned() } else { None });
+    }
+    out
+}
+
+/// Give `dst`'s face intents what the resolve step made of the same intents
+/// (`face_outcomes`): the raster and seeded range, or — for one taken out —
+/// its removal. Matched by order, and only when `dst` still has exactly as
+/// many intents (an edit made while the face finder ran leaves it alone).
+/// Returns how many were filled.
+pub(crate) fn fill_face_intents(dst: &mut EditRecipe, outcomes: &[Option<autoshade::recipe::LocalAdjustment>]) -> usize {
+    let at: Vec<usize> =
+        dst.masks.iter().enumerate().filter(|(_, m)| autoshade::face::is_face_intent(m)).map(|(i, _)| i).collect();
+    if at.len() != outcomes.len() {
+        return 0;
+    }
+    let mut n = 0;
+    for (&i, o) in at.iter().zip(outcomes).rev() {
+        match o {
+            Some(r) => {
+                dst.masks[i].mask = r.mask.clone();
+                if dst.masks[i].range.is_none() {
+                    dst.masks[i].range = r.range;
+                }
+                n += 1;
+            }
+            None => {
+                dst.masks.remove(i);
+            }
+        }
+    }
+    n
+}
+
+/// Give `dst`'s alpha-less AI masks the alpha `from` found for the SAME mask
+/// (the same intent in the same frame; only the raster differs). Matched by
+/// geometry, not by position, so an edit made while the segmenter ran keeps
+/// its masks where it put them. Returns how many were filled.
+pub(crate) fn fill_ai_rasters(dst: &mut EditRecipe, from: &EditRecipe) -> usize {
+    use autoshade::recipe::MaskGeometry;
+    if dst.quarter_turns % 4 != from.quarter_turns % 4 {
+        return 0; // an alpha is cut in one frame
+    }
+    let found: Vec<(MaskGeometry, String)> = geometries(from)
+        .filter_map(|g| match g {
+            MaskGeometry::AiMask { raster: Some(r), .. } => {
+                let mut bare = g.clone();
+                if let MaskGeometry::AiMask { raster, .. } = &mut bare {
+                    *raster = None;
+                }
+                Some((bare, r.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut n = 0;
+    for m in &mut dst.masks {
+        for g in std::iter::once(&mut m.mask).chain(m.components.iter_mut().map(|c| &mut c.geometry)) {
+            if !matches!(g, MaskGeometry::AiMask { raster: None, .. }) {
+                continue;
+            }
+            if let Some((_, r)) = found.iter().find(|(bare, _)| bare == &*g)
+                && let MaskGeometry::AiMask { raster, .. } = g
+            {
+                *raster = Some(r.clone());
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+impl AutoShadeApp {
+    /// The runner the workers call (a test's stand-in when one is set).
+    pub(crate) fn ai_mask_runner(&self) -> AiMaskRunner {
+        #[cfg(test)]
+        if let Some(stub) = self.ai_mask_stub {
+            return stub;
+        }
+        resolve_ai_masks_locally
+    }
+
+    /// After an open landed: re-derive the open card's AI masks that came
+    /// without an alpha (a Lightroom sidecar's), on a worker — the segmenter
+    /// is a sidecar run, seconds of GPU the first time, cached after.
+    pub(crate) fn start_ai_mask_resolve(&mut self, lang: Lang) {
+        if self.busy || self.open_in_flight || unresolved_develop_masks(&self.recipe) == 0 {
+            return;
+        }
+        let (Some(photo), Some(pixels)) = (self.src_path.clone(), self.active_source_path()) else { return };
+        let card = self.active_variant().map(|v| v.id.clone()).unwrap_or_default();
+        let mut recipe = self.recipe.clone();
+        let run = self.ai_mask_runner();
+        self.busy = true;
+        self.status = if unresolved_ai_masks(&recipe) > 0 {
+            tr(lang, "Re-deriving the AI masks from Lightroom on this computer…")
+        } else {
+            tr(lang, "Finding the faces… (the first run downloads the models)")
+        }
+        .into();
+        let (panic_photo, panic_card) = (photo.clone(), card.clone());
+        self.spawn_worker(
+            move || {
+                let before = recipe.clone();
+                let res = run(&photo, &pixels, &mut recipe);
+                let faces = face_outcomes(&before, &recipe);
+                Msg::AiMasksResolved(Box::new((photo, card, recipe, res, faces)))
+            },
+            move |e| {
+                let res = autoshade::pipeline::DevelopMasks {
+                    ai: autoshade::segment::AiMaskResolution { unresolved: vec![(String::new(), e.to_string())], ..Default::default() },
+                    faces: Default::default(),
+                };
+                Msg::AiMasksResolved(Box::new((panic_photo, panic_card, EditRecipe::default(), res, Vec::new())))
+            },
+        );
+    }
+
+    /// `Msg::AiMasksResolved`: the alphas go into the open card — only when
+    /// it is still the photo and card they were cut for — and into its saved
+    /// mark and undo history too: an alpha is derived from the intent, not
+    /// an edit, so it neither lights ● nor goes away on Ctrl+Z.
+    pub(crate) fn on_ai_masks_resolved(
+        &mut self,
+        lang: Lang,
+        (photo, card, resolved, res, faces): (PathBuf, String, EditRecipe, autoshade::pipeline::DevelopMasks, FaceOutcomes),
+    ) {
+        self.busy = false;
+        let here = self.active_variant().map(|v| v.id.clone()).unwrap_or_default();
+        if self.src_path.as_ref() != Some(&photo) || here != card {
+            return;
+        }
+        let fill = |r: &mut EditRecipe| {
+            fill_ai_rasters(r, &resolved);
+            fill_face_intents(r, &faces);
+        };
+        let n = fill_ai_rasters(&mut self.recipe, &resolved);
+        let nf = fill_face_intents(&mut self.recipe, &faces);
+        fill(&mut self.saved_recipe);
+        fill(&mut self.committed.recipe);
+        for s in self.undo_stack.iter_mut().chain(self.redo_stack.iter_mut()) {
+            fill(&mut s.recipe);
+        }
+        if let Some(v) = self.variants.get_mut(self.active) {
+            fill(&mut v.recipe);
+        }
+        if n + nf > 0 || faces.iter().any(Option::is_none) {
+            self.dirty = true;
+            self.overlay_stale = true;
+        }
+        if let Some(why) = res.warning() {
+            let t = trf(lang, "Some masks could not be drawn, so they are not applied: {why}", &[("why", &why)]);
+            self.status = t.clone();
+            self.toast(ToastKind::Error, t);
+        } else {
+            let mut said: Vec<String> = Vec::new();
+            if n > 0 || nf == 0 {
+                said.push(trf(lang, "AI masks ×{n} re-derived locally — not Adobe's raster", &[("n", &n.to_string())]));
+            }
+            if nf > 0 {
+                said.push(trf(lang, "Face masks ×{n} outlined on this computer", &[("n", &nf.to_string())]));
+            }
+            self.done(said.join(" · "));
+        }
+    }
+}

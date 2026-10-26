@@ -193,6 +193,13 @@ pub fn assign_kill_group(child: &std::process::Child) -> Option<KillGroup> {
 /// process-wide gate makes the budget a single sentence: one model at a time.
 /// (The full gate-not-batcher rationale is on [`embed::embed_file_record`].)
 ///
+/// WHO TAKES IT, and it is the whole set: [`run_model_sidecar_artifact`]
+/// (embed, correspond, describe, depth, face, multi-class segmentation),
+/// `segment::segment_file`, and the two denoise bridges
+/// (`denoise::run_sidecar_carrying`, `denoise::denoise_mosaic`). Each holds it
+/// around the child alone and no body calls another taker, so the lock, which
+/// is not reentrant, cannot deadlock.
+///
 /// Poison is recovered rather than re-panicked, like every other lock in this
 /// tree: one caller panicking inside a sidecar must not turn every other
 /// caller's run into a second panic.
@@ -200,6 +207,29 @@ pub fn with_model_slot<T>(body: impl FnOnce() -> T) -> T {
     static SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = SLOT.lock().unwrap_or_else(|p| p.into_inner());
     body()
+}
+
+/// Test helper for the bridges that take [`with_model_slot`] themselves: hold
+/// the slot, start `bridge` on another thread, and require that it has NOT
+/// returned 300 ms later; then release the slot and require that it does.
+/// Each bridge's test hands it a nonexistent interpreter, so an unslotted
+/// bridge fails its spawn in microseconds and this goes red.
+#[cfg(test)]
+pub(crate) fn assert_bridge_waits_for_model_slot(bridge: impl FnOnce() + Send) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let done = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        with_model_slot(|| {
+            let done = &done;
+            s.spawn(move || {
+                bridge();
+                done.store(true, Ordering::SeqCst);
+            });
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            assert!(!done.load(Ordering::SeqCst), "the bridge ran a model sidecar while the model slot was held");
+        });
+    });
+    assert!(done.load(Ordering::SeqCst), "the bridge never got through once the slot was free");
 }
 
 /// The FULL-RESOLUTION slot: local work that holds a whole frame in memory

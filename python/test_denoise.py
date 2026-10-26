@@ -437,5 +437,57 @@ class FetchSourceOrderTests(unittest.TestCase):
         self.assertEqual(self.fetch({}), [])
 
 
+class NonAsciiPathIoTests(unittest.TestCase):
+    """`cv2.imread` / `cv2.imwrite` cannot open a non-ASCII path on Windows:
+    the read returns None and the write returns False, and every denoise
+    entry names its files after the photo (`<stem>.denoise.dnstage.*.png`
+    beside the masters, `<stem>.denoised.tif` in the delivery folder) or
+    stages under %TEMP%, which carries the user's name. Both sidecars go
+    through `_imread` / `_imwrite`, the bytes-through-Python pair
+    `face.py` and `depth.py` already read with."""
+
+    def _dir(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        folder = os.path.join(d.name, "相册")
+        os.mkdir(folder)
+        return folder
+
+    def test_a_16bit_png_and_tif_round_trip_under_a_non_ascii_folder(self):
+        import cv2
+        import numpy as np
+
+        folder = self._dir()
+        rng = np.random.default_rng(3)
+        for name, img in (
+            ("mosaic.png", rng.integers(0, 65536, (6, 8), dtype=np.uint16)),
+            ("photo.denoised.tif", rng.integers(0, 65536, (6, 8, 3), dtype=np.uint16)),
+            ("photo.dnstage.png", rng.integers(0, 256, (6, 8, 4), dtype=np.uint8)),
+        ):
+            path = os.path.join(folder, name)
+            self.assertTrue(denoise._imwrite(path, img), name)
+            back = denoise._imread(path, cv2.IMREAD_UNCHANGED)
+            self.assertIsNotNone(back, name)
+            self.assertEqual(back.dtype, img.dtype, name)
+            self.assertTrue(np.array_equal(back, img), name)
+
+    def test_a_missing_or_empty_file_reads_as_none(self):
+        import cv2
+
+        folder = self._dir()
+        self.assertIsNone(denoise._imread(os.path.join(folder, "absent.png"), cv2.IMREAD_UNCHANGED))
+        empty = os.path.join(folder, "empty.png")
+        open(empty, "wb").close()
+        self.assertIsNone(denoise._imread(empty, cv2.IMREAD_UNCHANGED))
+
+    def test_neither_denoise_sidecar_calls_cv2_imread_or_imwrite(self):
+        import denoise_raw
+
+        for mod in (denoise, denoise_raw):
+            src = open(mod.__file__, encoding="utf-8").read()
+            for call in ("cv2.imread(", "cv2.imwrite("):
+                self.assertFalse(call in src, f"{os.path.basename(mod.__file__)} calls {call}")
+
+
 if __name__ == "__main__":
     unittest.main()

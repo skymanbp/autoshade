@@ -782,3 +782,48 @@ fn a_claimed_name_whose_write_fails_is_released_not_left_half_written() {
     assert!(!at.exists(), "the claim is released along with the error");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// GROUP A (2026-10-26): the payload carries the depth map, protect matte and
+/// pixel-layer paths as bare names, like every mask raster — the GUI holds them
+/// absolute, and an absolute path in a sidecar leaks this machine's layout —
+/// and a received payload naming a network path for any of them is refused on
+/// restore exactly as a mask path is.
+#[test]
+fn the_payload_carries_depth_protect_and_layer_paths_bare_and_refuses_a_share() {
+    let dir = scratch("rasters-bare");
+    let dev = scratch("rasters-bare-dev");
+    let abs = |n: &str| dir.join(n).to_string_lossy().into_owned();
+    let r = EditRecipe {
+        exposure_ev: 0.3,
+        lens_blur: Some(crate::render::LensBlur {
+            depth_map: abs("depth.png"),
+            protect: Some(abs("protect.png")),
+            ..Default::default()
+        }),
+        pixel_layers: vec![crate::render::PixelLayer { path: abs("layer.png"), ..Default::default() }],
+        ..Default::default()
+    };
+    let p = payload::portable(&r);
+    let lb = p.lens_blur.as_ref().unwrap();
+    assert_eq!(
+        (lb.depth_map.as_str(), lb.protect.as_deref(), p.pixel_layers[0].path.as_str()),
+        ("depth.png", Some("protect.png"), "layer.png"),
+        "no directory component goes into the sidecar"
+    );
+
+    let doc = recipe_to_xmp(&r);
+    let mut found = payload::find(&doc).unwrap().unwrap();
+    let lb = found.recipe.lens_blur.as_mut().unwrap();
+    lb.depth_map = r"\\host\share\d.png".into();
+    lb.protect = Some("//host/share/p.png".into());
+    found.recipe.pixel_layers[0].path = r"..\..\outside.png".into();
+    let crs_only = xmp_to_recipe(&bare_document(&r, None));
+    let back = payload::restore(crs_only, found, None, None, Some(&dev), false, None);
+    let sentinel = dev.join(".invalid-mask-reference");
+    let lb = back.lens_blur.as_ref().expect("the lens blur survives the restore");
+    assert_eq!(Path::new(&lb.depth_map), sentinel.as_path());
+    assert_eq!(lb.protect.as_deref().map(Path::new), Some(sentinel.as_path()));
+    assert_eq!(Path::new(&back.pixel_layers[0].path), sentinel.as_path());
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dev);
+}

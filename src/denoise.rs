@@ -711,12 +711,15 @@ pub fn denoise_mosaic(opts: &DenoiseOpts, raw: &mut rawler::RawImage) -> Result<
             .arg("1.0000")
             .arg("--cache")
             .arg(&opts.cache);
-        let out = crate::run_sidecar_child(
-            &mut cmd,
-            who,
-            &format!("{} {}", opts.python_bin, opts.raw_script.display()),
-            sidecar_timeout(),
-        )?;
+        // Under the model slot, as every model sidecar (`crate::with_model_slot`).
+        let out = crate::with_model_slot(|| {
+            crate::run_sidecar_child(
+                &mut cmd,
+                who,
+                &format!("{} {}", opts.python_bin, opts.raw_script.display()),
+                sidecar_timeout(),
+            )
+        })?;
         if !out.status.success() {
             return Err(crate::sidecar_exit_error(who, &out));
         }
@@ -799,12 +802,15 @@ fn run_sidecar_carrying(
     // Cost of the shared capture, stated where a reader of THIS bridge will
     // look for it: the CLI no longer sees live model-download progress, only
     // the tail on failure.
-    let run = crate::run_sidecar_child(
-        &mut cmd,
-        "denoise sidecar",
-        &format!("{} {}", opts.python_bin, opts.script.display()),
-        budget,
-    );
+    // Under the model slot, as every model sidecar (`crate::with_model_slot`).
+    let run = crate::with_model_slot(|| {
+        crate::run_sidecar_child(
+            &mut cmd,
+            "denoise sidecar",
+            &format!("{} {}", opts.python_bin, opts.script.display()),
+            budget,
+        )
+    });
     let out = match run {
         Ok(out) => out,
         Err(error) => {
@@ -1936,6 +1942,29 @@ mod tests {
         let why = super::mosaic_args(&CFA::new("RGGB"), &BlackLevel::new(&[20000u16], 1, 1, 1), &white)
             .unwrap_err();
         assert!(why.contains("below the white level"), "{why}");
+    }
+
+    /// SINGLE-FLIGHT: both denoise bridges — SCUNet on developed pixels and
+    /// DRUNet on the mosaic — queue on the process-wide model slot.
+    /// MUTATION THIS KILLS: drop `crate::with_model_slot` from either
+    /// `run_sidecar_carrying` or `denoise_mosaic`.
+    #[test]
+    fn both_denoise_bridges_wait_for_the_model_slot() {
+        let dir = std::env::temp_dir().join(format!("autoshade-dn-slot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let opts = mosaic_opts(&dir, dir.join("no-such-python"), 1.0);
+        let input = dir.join("in.png");
+        std::fs::write(&input, b"not-really-a-png").unwrap();
+        let output = dir.join("out.png");
+        crate::assert_bridge_waits_for_model_slot(|| {
+            assert!(super::run_sidecar(&opts, &input, &output).is_err());
+        });
+        let mut raw = bayer_fixture("RGGB", 8, 6, &[512], 16383);
+        crate::assert_bridge_waits_for_model_slot(|| {
+            assert!(super::denoise_mosaic(&opts, &mut raw).is_err());
+        });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Strength 0 is the identity and spawns nothing — no python, no script,

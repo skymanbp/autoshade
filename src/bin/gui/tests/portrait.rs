@@ -423,10 +423,16 @@
     /// the look strength, the Normal presets' request), the landing keeps the
     /// photo's found masks that the look has no mask for — with their sliders
     /// at rest — and its lens blur, and the guardrail holds the look's face
-    /// mask at the same place it holds the user's sliders.
+    /// mask at the same place it holds the user's sliders. All of it before
+    /// the landing WRITES the look: recipe.json carries the masks, the blur
+    /// and the held skin, and the saved mark is the look on screen.
+    ///
+    /// MUTATION THIS CATCHES: put the masks back after `on_analyzed` (the old
+    /// `after_portrait_look`) or hold the skin only on the next frame, and
+    /// the file on disk is mask-less and past the limits.
     #[test]
     fn the_ai_portrait_look_asks_for_the_portrait_direction_and_lands_under_the_guardrail() {
-        let (mut app, _src, _scrub) = normal_photo("portrait-look");
+        let (mut app, src, _scrub) = normal_photo("portrait-look");
         app.choose_mode(Mode::Portraits);
         app.normal.runner = Some(portrait_look_runner);
         let mut skin = autoshade::face::skin_adjustment("mask-face.png".into(), [0.8, 0.6, 0.5], [0.4, 0.3]);
@@ -452,9 +458,19 @@
         assert!(back.range.is_some(), "its colour range comes back with it");
         assert_eq!(app.recipe.lens_blur.as_ref().map(|l| l.amount), Some(70.0), "the blur stays");
         assert_eq!(app.portrait.line, crate::panels::portrait::PortraitLine::Looked);
+        // What was WRITTEN is what the panel promises — the masks back, the
+        // blur kept, the skin held — on disk, not only on the next frame's
+        // screen, and the saved mark is the look on screen.
+        let hue = autoshade::face::skin_hue_max();
+        let disk: EditRecipe =
+            serde_json::from_str(&std::fs::read_to_string(autoshade::store::recipe_target(&src)).unwrap()).unwrap();
+        assert_eq!(disk.masks.iter().map(|m| m.role).collect::<Vec<_>>(), roles, "the masks came back before the write");
+        assert_eq!(disk.lens_blur.as_ref().map(|l| l.amount), Some(70.0), "the blur was written too");
+        let f = &disk.masks[0];
+        assert_eq!((f.saturation, f.hue, f.temperature, f.clarity), (15.0, hue, -20.0, -40.0), "held before the write");
+        assert_eq!(app.saved_recipe, app.recipe, "the saved look is the one on screen");
         app.guard_portrait_skin();
         let face = &app.recipe.masks[0];
-        let hue = autoshade::face::skin_hue_max();
         assert_eq!(
             (face.saturation, face.hue, face.temperature, face.clarity),
             (15.0, hue, -20.0, -40.0),
@@ -576,4 +592,158 @@
                 trf(lang, "No spots on the face to heal — nothing was changed ({n} found elsewhere were left alone)", &[("n", "2")])
             );
         }
+    }
+
+    /// A second search that finds the person and no face: the face, eyes and
+    /// skin masks of the first search go — they would keep acting with their
+    /// sliders on a face that is not found — so the groups say 「No face
+    /// found」 and 🤖 Remove blemishes has no face to hold to.
+    ///
+    /// MUTATION THIS CATCHES: leave the old face-role masks in place on a
+    /// no-face landing (`on_portrait_found`), and the masks, the gate and the
+    /// heal's face raster all stay.
+    #[test]
+    fn a_search_that_finds_no_face_takes_the_old_face_masks_away() {
+        use crate::panels::portrait::{FoundFaces, PortraitFind};
+        let mut app = portrait_app(Lang::En, true);
+        let photo = app.src_path.clone().unwrap();
+        crate::panels::portrait::set_soften(crate::panels::portrait::skin_target(&mut app.recipe).unwrap(), 30.0);
+        assert!(crate::panels::portrait::face_raster(&app.recipe).is_some());
+        app.on_portrait_found(
+            Lang::En,
+            PortraitFind {
+                photo: photo.clone(),
+                subject: Ok(PathBuf::from("mask-subject-2.png")),
+                faces: Ok(None::<FoundFaces>),
+            },
+        );
+        let roles: Vec<autoshade::recipe::MaskRole> = app.recipe.masks.iter().map(|m| m.role).collect();
+        for gone in [autoshade::recipe::MaskRole::Face, autoshade::recipe::MaskRole::Eyes, autoshade::recipe::MaskRole::Skin] {
+            assert!(!roles.contains(&gone), "{gone:?} is gone: {roles:?}");
+        }
+        assert!(roles.contains(&autoshade::recipe::MaskRole::Background), "the person still lands");
+        assert_eq!(app.portrait_face_gate(Lang::En), Some("No face found in this photo"));
+        assert_eq!(crate::panels::portrait::face_raster(&app.recipe), None, "🤖 Remove blemishes has no face");
+    }
+
+    /// Switching modes changes only the shell: skin values pushed past the
+    /// limits in Landscape are not pulled back when Portraits opens — the
+    /// card's switch is decided on the way in, as opening a photo decides it.
+    ///
+    /// MUTATION THIS CATCHES: drop the decision from `choose_mode` and the
+    /// first Portraits frame clamps the values.
+    #[test]
+    fn entering_portraits_never_changes_a_value_pushed_in_landscape() {
+        let mut app = app_with_every_button(Lang::En);
+        app.active = 0;
+        app.choose_mode(Mode::Landscape);
+        app.recipe.masks.extend(found_masks());
+        push_skin(&mut app);
+        app.choose_mode(Mode::Portraits);
+        assert!(!app.keep_skin_on(), "past the limits: the switch is off for this card");
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.run_frame(ctx));
+        let skin = crate::panels::portrait::skin_target(&mut app.recipe).unwrap();
+        assert_eq!((skin.saturation, skin.sharpness, skin.texture), (60.0, 40.0, -90.0), "nothing changed");
+    }
+
+    /// Ctrl+Z back to an edit made past the limits (before the switch was
+    /// turned on) puts it back as it was: the switch goes off for the card,
+    /// the next frame does not pull it back, and Ctrl+Y still has its step.
+    ///
+    /// MUTATION THIS CATCHES: leave the switch on after an undo restores a
+    /// value past the limits — the frame clamps it, `commit_now` records a new
+    /// step and the redo stack is cleared.
+    #[test]
+    fn undo_to_an_edit_past_the_skin_limits_puts_it_back_and_keeps_redo() {
+        let mut app = portrait_app(Lang::En, true);
+        app.active = 0;
+        app.mode_chosen_this_launch = true;
+        let ctx = egui::Context::default();
+        app.reset_history();
+        app.set_keep_skin(false);
+        push_skin(&mut app);
+        app.commit_now();
+        app.set_keep_skin(true);
+        app.commit_now();
+        let read = |app: &mut AutoShadeApp| {
+            let s = crate::panels::portrait::skin_target(&mut app.recipe).unwrap();
+            (s.saturation, s.sharpness, s.texture)
+        };
+        assert_eq!(read(&mut app), (15.0, 0.0, -60.0), "turned on: held");
+        app.undo(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.run_frame(ctx));
+        assert_eq!(read(&mut app), (60.0, 40.0, -90.0), "undone as it was");
+        assert!(!app.keep_skin_on(), "the switch follows the edit put back");
+        assert_eq!(app.redo_stack.len(), 1, "the step forward is still there");
+    }
+
+    /// A paste in Portraits meets each target's switch where it is written:
+    /// a target whose switch is on gets the look within the limits on disk;
+    /// the open photo, its switch off, gets it as copied.
+    ///
+    /// MUTATION THIS CATCHES: write the pasted look without the per-target
+    /// guard (`start_paste_to`) and the other photo's recipe.json goes past
+    /// the limits.
+    #[test]
+    fn a_paste_in_portraits_holds_each_targets_skin_on_disk() {
+        let dir = std::env::temp_dir().join(format!("autoshade-gui-paste-skin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (open, other) = (dir.join("_gui_paste_skin_a.jpg"), dir.join("_gui_paste_skin_b.jpg"));
+        let devs: Vec<PathBuf> = [&open, &other].iter().map(|p| autoshade::store::develop_dir(p)).collect();
+        for d in &devs {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        let mut scrub = devs.clone();
+        scrub.push(dir);
+        let _scrub = Scrub(scrub);
+        let mut app = portrait_app(Lang::En, false);
+        app.active = 0;
+        app.src_path = Some(open.clone());
+        let skin = autoshade::recipe::LocalAdjustment {
+            role: autoshade::recipe::MaskRole::Skin,
+            saturation: 60.0,
+            sharpness: 40.0,
+            texture: -90.0,
+            ..Default::default()
+        };
+        let look = EditRecipe { masks: vec![skin], ..Default::default() };
+        app.set_keep_skin(false);
+        app.start_paste_to(look, Some(open.clone()), vec![open.clone(), other.clone()], false);
+        let ctx = egui::Context::default();
+        let start = std::time::Instant::now();
+        while app.busy {
+            assert!(start.elapsed() < std::time::Duration::from_secs(20), "the paste never landed");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            app.poll_workers(&ctx);
+        }
+        let disk = |p: &std::path::Path| -> (f32, f32, f32) {
+            let r: EditRecipe =
+                serde_json::from_str(&std::fs::read_to_string(autoshade::store::recipe_target(p)).unwrap()).unwrap();
+            let m = r.masks.iter().find(|m| m.role == autoshade::recipe::MaskRole::Skin).expect("the skin mask pasted");
+            (m.saturation, m.sharpness, m.texture)
+        };
+        assert_eq!(disk(&other), (15.0, 0.0, -60.0), "the other photo's switch is on: held on disk");
+        assert_eq!(disk(&open), (60.0, 40.0, -90.0), "the open photo's switch is off: as copied");
+    }
+
+    /// The find step seeds the skin colour from the pixels the skin mask's
+    /// colour range is matched on — the photo developed under the recipe up
+    /// to the skin mask (`face::skin_seed_reference`) — not the neutral frame.
+    ///
+    /// MUTATION THIS CATCHES: seed from `base.to_rgb8()` again in
+    /// `panel_skin_seed` and both assertions below fail.
+    #[test]
+    fn the_skin_seed_is_sampled_from_the_frame_the_recipe_develops_before_the_skin_mask() {
+        let base = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(32, 24, image::Rgb([180, 140, 120])));
+        let face = image::GrayImage::from_pixel(32, 24, image::Luma([255]));
+        let mut recipe = EditRecipe { temperature_k: Some(3200.0), tint: 80.0, ..Default::default() };
+        recipe.masks.push(found_masks()[2].clone());
+        let seed = crate::panels::portrait::panel_skin_seed(&base, &face, &recipe, None, false).expect("a seed");
+        let reference = autoshade::face::skin_seed_reference(&base, &recipe, 0, None, false);
+        assert_eq!(Some(seed), autoshade::face::skin_seed(&reference, &face), "seeded from the developed reference");
+        let neutral = autoshade::face::skin_seed(&base.to_rgb8(), &face).unwrap();
+        let moved = (0..3).map(|c| (seed.0[c] - neutral.0[c]).abs()).fold(0.0f32, f32::max);
+        assert!(moved > 0.02, "the white balance moved the seed off the neutral frame's ({moved})");
     }

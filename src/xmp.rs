@@ -55,7 +55,8 @@ use geometry::{
 use geometry::{LrCrop, inscribed_norm, lr_to_engine_crop, svd2};
 pub use losses::{
     MaskImportLoss, MaskImportReason, MaskLoss, MaskLossReason, PASSTHROUGH_CRS,
-    describe_import_losses, describe_mask_losses, global_export_losses, global_render_gaps,
+    describe_global_losses, describe_import_losses, describe_mask_losses, global_export_losses,
+    global_render_gaps,
     import_losses, import_losses_for_photo, lens_profile_enabled, mask_export_losses,
     unmodelled_global_crs,
 };

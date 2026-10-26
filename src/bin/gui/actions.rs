@@ -2471,6 +2471,8 @@ impl AutoShadeApp {
         }
         self.dirty = true;
         self.resync_recipe_display();
+        // A step past the skin limits is put back as it was (Portraits).
+        self.release_skin_for_history();
     }
 
     /// Rebuild the pixel-derived per-variant state after the active variant's

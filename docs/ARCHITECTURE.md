@@ -740,7 +740,10 @@
 > `.env` cannot supply `PYTHONPATH`/`PYTHONHOME`/the weight cache (and the
 > sidecars pass `-E`); every Responses-API body sends `store: false` so no
 > photo persists in the key owner's account; UNC/device paths in develop-store
-> sidecars are refused LEXICALLY before any filesystem probe; the local web
+> sidecars are refused LEXICALLY before any filesystem probe (since 2026-10-26
+> for every raster a recipe references — masks, the lens blur's depth map and
+> protect matte, pixel layers: `EditRecipe::raster_paths_mut` is the one walk
+> resolve, relativize, the version freeze and the sidecar payload share); the local web
 > server requires the session token on every POST and marks all `/api/*`
 > responses `no-store`; an unreadable `variants.json` is a typed
 > `Unresolved` state that the strip save primitives refuse to overwrite or
@@ -1234,7 +1237,10 @@
 > outline and both eye outlines, in the input picture's pixels. `face.rs`
 > validates it, fills each outline and feathers it, and unions all faces into
 > one face mask and one eyes mask; the skin mask is the face mask narrowed by a
-> colour range seeded from the face's median colour, and the background mask is
+> colour range seeded from the face's median colour — sampled on the frame
+> DEVELOPED with the recipe up to that mask (`face::skin_seed_reference`, the
+> eyedropper's convention), because that is the pixel the range is matched on —
+> and the background mask is
 > the subject matte inverted. Each is an ordinary bitmap mask carrying one of
 > four new `MaskRole` values — `Face`, `Eyes`, `Skin`, `Background` — so every
 > existing mask slider applies to it. The lens blur gains `LensBlur::protect`, a
@@ -1409,7 +1415,12 @@
 > alpha beside the develop, keyed by photo + subtype + click + frame
 > (quarter turns, v0.34.0) + backend generation — staged from the render
 > source's pixels in the recipe's own frame, so the alpha is segmented in the
-> frame it will be sampled in. The result is an approximation of the photographer's intent, never
+> frame it will be sampled in. For a camera RAW those pixels are its SENSOR
+> develop (`segment::mask_source_frame`, 2026-10-26; the face finder draws on
+> the same frame), never the embedded preview: a body set to an in-camera 4:3
+> aspect stores a centred crop of the 3:2 sensor there, and an alpha cut on it
+> landed stretched on the render (the v1.2.2 lesson). A RAW's key carries that
+> frame, so an alpha cut on the old one is not served. The result is an approximation of the photographer's intent, never
 > a reproduction of Adobe's mask, and `MaskImportReason::AiMaskRecomputed` /
 > `MaskLossReason::AiMaskRecomputed` say that in both languages and in both
 > directions.
@@ -2996,8 +3007,10 @@ manifest (an older manifest without the member replays as `Keep`), landed
 after the three JSON members and replayed by `resolve_pending_commit_unlocked`, so the
 file cannot outlive the recipe it projects; every surface that commits a
 develop (GUI Ctrl+S, quit-time Save-all, the Analyze landing, the paste
-worker, the reverse-fit worker, the CLI `match`, the web save) hands the
-member over. (2) The four readers — the GUI open path
+worker, the reverse-fit worker, the CLI `match`, the web save, and since
+2026-10-26 the CLI `analyze` / `auto` and the web Analyze through
+`pipeline::commit_analyzed_develop` — they used to write the recipe and the
+projection separately, and projected over AI pixels) hands the member over. (2) The four readers — the GUI open path
 (`persist::read_saved_develop_locked`), the web `api_recipe`, the GUI batch
 resolver and `store::read_develop_snapshot` — consult the projection only
 when the develop has NO `recipe.json`: a neutral recipe is a saved fact (the
@@ -3381,7 +3394,16 @@ a parser question: it needs a segmenter of our own producing our own alpha,
 which is a DIFFERENT feature — `MaskGeometry::AiMask` carries the intent and
 the 11 whitelisted provenance attributes verbatim, `segment::resolve_ai_masks`
 recomputes the alpha at develop time and caches it, and subtype-0 gestures add
-their ordered positive dab points after the ReferencePoint. Every surface calls
+their ordered positive dab points after the ReferencePoint. The desktop app
+calls it twice: once an open has landed, on a worker for the open card's
+alpha-less AI masks (`persist::start_ai_mask_resolve`; the landing fills the
+alphas into the canvas, its saved mark and its undo history by geometry, for
+the same photo and card only), and on every export's own copy of the recipe,
+single and batch, so a card or photo never opened this session exports with
+its masks too. The browser's develop, export and download paths, and the
+CLI's `apply` / `auto`, resolve through `pipeline::resolve_develop_masks`
+(2026-10-26 for the browser, which rendered an imported AI mask inert until
+then), which outlines face intents in the same step. Every surface calls
 the result a re-derivation (see 「AI masks are a RECOMPUTATION」 above). With that arm the
 7-file M-B set imports 42 of 42 corrections and refuses none.
 
@@ -3754,7 +3776,9 @@ missing. Outbound, `xmp::global_export_losses` names the active
 `RenderedNotExported` controls — a photo whose look depends on its camera base
 curve or its lens-profile correction used to export a sidecar that renders
 visibly differently in Lightroom, silently — and they join the mask losses in
-the one save sentence. The other direction of the same honesty is
+the one save sentence: the GUI's, and since 2026-10-26 the CLI's stderr line
+and the browser's reply too (`pipeline::xmp_loss_lines`; until then those two
+named only the masks, so a lens blur saved there left the sidecar in silence). The other direction of the same honesty is
 `xmp::global_render_gaps` (R25), the symmetric list for `CarriedOnly`: what
 LIGHTROOM will render and this canvas will not. It is the precondition for the
 whole carried tier existing — sliders that move a number and no pixel (24 at
@@ -5084,11 +5108,21 @@ own move (a mean of linear values read that warm cast as COOLER, measured),
 doubling the walk until it reaches the `WB_SEARCH_K` edge and trying 24
 points on it. At each point saturation is chased again (stage 3 reads mean
 chroma, and a moved white balance carries a different amount of it) and the
-curves are re-fitted; the candidate counts only if the strength budget holds
-the white balance, all four cast gates admit the re-fitted curves with a
-measured fan, and the target's own 12×8 cells vouch the white balance
-exactly as they vouch the white-balance stage's (`vouch_wb` on the stage's
-own recipe). The look error decides among the candidates and `pull` — the
+curves are re-fitted — except on the 4b do-no-harm loop's re-fit
+(`CastRescue::KeepSaturation`), which keeps the saturation the loop is
+stepping down: a chase there handed back the value the loop had just halved,
+so a hand-off admitted every round would have kept the loop from ever
+descending (found by reading, 2026-10-26; the loop is also bounded at
+`DO_NO_HARM_MAX_ROUNDS` and warns when it hits the bound). The candidate
+counts only if the strength budget holds the white balance; above the
+default strength, the white-balance stage's own two content gates — foreign
+hue and re-hued share, read by `read_wb_step` on the same step from the
+frame the stage found to the stage's recipe under the candidate white
+balance — admit it too (`hand_off_wb_step_refused`; the four cast gates read
+the curve step and cannot see the white-balance one); all four cast gates
+admit the re-fitted curves with a measured fan; and the target's own 12×8
+cells vouch the white balance exactly as they vouch the white-balance
+stage's (`vouch_wb` on the stage's own recipe). The look error decides among the candidates and `pull` — the
 L2 length of the estimator's log gains on the curves' own move, the
 white-balance work the curves are still doing — breaks ties inside
 `FIT_QUANT` of the best, because on that pair the admissible look errors are
@@ -6696,7 +6730,10 @@ deliverable), and `store::legacy_out_roots` / `AUTOSHADE_LEGACY_OUT` (a read-onl
 archaeology path pinned to where pre-v0.13 builds actually wrote, which a new
 setting cannot retroactively change). `guard_readonly` keeps the literal `./out`
 as an output area alongside the configured root, so repointing the root does not
-make a `match` on an older export suddenly refused.
+make a `match` on an older export suddenly refused — but a cwd-relative area
+that resolves INSIDE the photo's own folder grants nothing (2026-10-26): a CLI
+run from inside the library used to write `out\` into it. A photo that itself
+lives in that `./out` may still be written beside.
 
 Since v1.12 the pixel masters left it too (user report 2026-10-18). A delivery
 folder is the user's to clean, and cleaning it deleted the files cards are built
@@ -6940,7 +6977,9 @@ is `Guide::Direction` with a fixed text from
 to do and what not to do — only `mono` asks for `convert_to_grayscale`), and
 "match my reference photos" is `library::rebuild_named` over the picked
 folder followed by `Guide::Library` at Style 1.0 with the reference photos
-sent. That folder lives in its own file because the library takes a NAME:
+sent; the build holds `busy` like any worker and remembers the photo it was
+started on (`NormalState::build_photo`), and a look that cannot start when it
+lands is said on the line, not dropped. That folder lives in its own file because the library takes a NAME:
 `library::file_name("")` is the historical `reference-library.json` and
 `library::NORMAL_NAME` is `reference-library-normal.json`; the unnamed calls
 (`load`, `path`, `summary`, `rebuild`) act on the thread's current name,
@@ -6953,8 +6992,10 @@ noise switch is the Retouch panel's AI denoise (`set_normal_denoise` calls
 `start_ai_denoise`, so the same worker, model and strength, and the ◈ card it
 lands is what the canvas shows and the save renders; off switches back to the
 card it was made from, on again re-shows the remembered ◈ card with no second
-run, the live recipe carried across both ways; `after_normal_denoise` records
-the card after `Msg::Retouched`);
+run, the live recipe carried across both ways, and with it the look's undo
+history — `take_look_history` / `carry_look_history` keep every step's recipe
+on the card now on screen, where `load_active` would reset it;
+`after_normal_denoise` records the card after `Msg::Retouched`);
 Save is `start_render_with` (a jpg at a quality step, into the one export
 destination — never beside the photo, which `pipeline::guard_readonly`
 forbids — and `OutName::Numbered` for a name the app made: `pipeline::claim_numbered`
@@ -7014,7 +7055,17 @@ clamps a saved edit, and it says how many values it moved. While it is on,
 once per frame, after the workers landed and the panels drew and before the
 fork, the develop and the undo commit — the one place a slider, a paste and
 an AI landing all pass — and the six limits of `face::keep_skin_natural` hold
-the skin and face masks. The skin group's "Remove blemishes" is the Retouch
+the skin and face masks. A write that reaches disk in the same step meets
+them where it is written, not a frame later: an analysis landing in
+Portraits clamps the recipe `on_analyzed` saves (`skin_held`), the AI
+portrait look's masks and blur are put back on the landed recipe before that
+write (`restore_portrait_masks`), and a paste clamps each target by its own
+switch (`skin_held_for`). Entering Portraits from another mode switches off a
+card already past the limits (`decide_keep_skin_on_entry`), and an undo or
+redo that puts such a step back does the same (`release_skin_for_history`),
+so neither changes a value nor records a step over the redo history. A
+search that finds no face takes the Face, Eyes and Skin masks away. The skin
+group's "Remove blemishes" is the Retouch
 panel's AI heal (`start_heal`) given a limit: the Face-role mask's raster
 (`portrait::face_raster`) goes in as `retouch::heal`'s `limit`, which drops
 every spot whose centre that mask holds below one half

@@ -54,7 +54,10 @@ AI with a short description of that look, and the result lands on the photo;
 like: the app reads the folder on this computer (the first time it downloads
 a 1.5 GB model to do so), then the AI looks at your photo together with the
 three photos from the folder that are most like it, and gives yours their
-look. Each of those reference photos is billed as one more picture. The
+look. Each of those reference photos is billed as one more picture. While
+the folder is read, saving, the noise switch and the other buttons that start
+work wait for it, and the look is made for the photo you picked the folder
+on; if it cannot start, the line says so. The
 folder is kept in Normal's own reference file, so it never replaces the
 reference library you built in Landscape. **Look strength** sets how strong
 the look is (65 by default). The line under it says what happened; without
@@ -112,12 +115,18 @@ every face in the photo, on this computer: the person the same way
 **🤖 Select subject** does, the faces and eyes with Google's MediaPipe face
 finder. MediaPipe is a Python package of its own — install it once with
 `pip install mediapipe` into the Python the app uses (Settings, **Python
-interpreter**); the first run downloads its small face model (about 3.8 MB). The
+interpreter**); the first run downloads its small face model (about 3.8 MB).
+MediaPipe pulls in `opencv-contrib-python`, which shares one `cv2` folder with
+`opencv-python`: uninstalling either one means reinstalling the other, and
+installing everything from `python/requirements-common.txt` in one go keeps the
+two at the same version. The
 line under the button says how many faces were found. The search adds four
 masks to the photo — **Face**, **Eyes**, **Skin** (the face, narrowed to the
 colour of its skin) and **Background** (everything but the person) — which
 also appear in the mask list, where every other mask control works on them.
-Searching again moves them onto the new result and keeps their sliders.
+Searching again moves them onto the new result and keeps their sliders; a
+search that finds the person and no face takes the **Face**, **Eyes** and
+**Skin** masks away.
 **✨ AI portrait look** sends the photo to the AI with a short description of a
 portrait look — softer skin, brighter eyes, a calmer background — at the
 **Look strength** you set; it needs an image key in Settings (⚙), and
@@ -136,7 +145,8 @@ skin looks fake (fine texture no lower than −60, local contrast no lower than
 here and in the mask list — and for the AI's alike, on the face and skin
 masks. Turn it off to go further. If a photo's saved edits already go
 further, the switch opens off for that photo, and nothing is changed until you
-turn it on; turning it on brings those values back within the limits, and the
+turn it on — the same when you switch to Portraits with skin values set past
+the limits in another mode, or undo back to such an edit; turning it on brings those values back within the limits, and the
 status line says how many. **🤖 Remove blemishes** has the AI find small
 spots and blemishes and heals each from the skin around it, the way
 **🤖 AI heal (auto)** under **Heal (pixel)** does, but only the spots on the face (the heal of a spot at the face's edge
@@ -594,7 +604,8 @@ A **◈ Denoised negative** card is the negative AI-denoised into its own
 16-bit master. Develop it like the ▣ card — heal and clone stay in place on
 it, a `.xmp` from it carries the sliders only (run Lightroom's own Denoise
 there), and the export-time AI denoise sits out on it because its master is
-already denoised.
+already denoised — in the browser's export and download and in `auto
+--denoise` too, once the card is saved as the active one.
 
 **Spot removal you did in Lightroom comes across.** If a photo's `.xmp`
 carries Lightroom's healing — dust, a power line, somebody in the background —
@@ -1299,8 +1310,11 @@ requests, requires a fresh per-run session token for state changes, disables API
 caching, and denies framing. By default, AutoShade keeps the source library
 read-only. If the configured Delivery folder is inside or above a photo's
 folder, that delivery subtree is intentionally writable; Settings warns when
-this removes the folder's protection. "Export .xmp beside the photo" is the
-separate, confirmed per-photo sidecar exception.
+this removes the folder's protection. A relative Delivery folder such as the
+default `./out` is not: run from inside a photo's folder, `./out` lands inside
+the photos and the write is refused, so run AutoShade from another folder or
+pass `-o` with a folder outside the photos. "Export .xmp beside the photo" is
+the separate, confirmed per-photo sidecar exception.
 
 The Delivery folder holds exports only. The full-resolution images AI denoise,
 stacking, heal, clone, fill and AI edits produce — the masters their cards are

@@ -24,7 +24,8 @@
 //! → the system temp dir. EXPORTS (developed/retouch/heal/… images) are user
 //! deliverables and deliberately STAY in ./out.
 //!
-//! Mask rasters are referenced from recipe.json by a path string. Inside the
+//! Rasters (masks, the lens blur's depth map and protect matte, pixel
+//! layers) are referenced from recipe.json by a path string. Inside the
 //! store that string is the BARE file name, resolved against the recipe's own
 //! directory at load time ([`resolve_mask_paths`]) and relativized back at
 //! write time ([`relativize_mask_paths`]) — so a develop dir is relocatable
@@ -38,9 +39,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-// Bitmap raster paths are walked through `LocalAdjustment::bitmap_paths_mut`
-// (base geometry + components in one place), so this module no longer
-// pattern-matches `MaskGeometry` directly.
+// Raster paths are walked through `EditRecipe::raster_paths_mut` (every mask's
+// `LocalAdjustment::bitmap_paths_mut`, plus the lens blur's and the pixel
+// layers'), so this module no longer pattern-matches `MaskGeometry` directly.
 use crate::recipe::EditRecipe;
 mod backup;
 mod clear;
@@ -139,7 +140,7 @@ use snapshot::{
 use snapshot::{revision_of};
 pub use variants::{
     ActiveWrite, CommitMember, MAX_STORE_NAME, VariantEntry, VariantsRead, VariantsRecord,
-    clear_variants, read_variants, read_variants_checked, variants_member, variants_record_bytes,
+    active_card_is_denoised, clear_variants, read_variants, read_variants_checked, variants_member, variants_record_bytes,
     write_variants,
 };
 use variants::{capped_name, refuse_unresolved_strip};

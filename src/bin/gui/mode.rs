@@ -189,6 +189,12 @@ impl AutoShadeApp {
     pub(crate) fn choose_mode(&mut self, mode: Mode) {
         if mode != self.mode {
             self.disarm_tools();
+            // Into Portraits: "Keep skin natural" is decided for the cards an
+            // edit in the other mode took past the limits, so the panel's
+            // guard does not change them (`panels/portrait.rs`).
+            if mode.shell().portrait_panel && !self.mode.shell().portrait_panel {
+                self.decide_keep_skin_on_entry();
+            }
             // The status line may still describe the other mode's tools
             // (a brush hint, a fit's report); Normal starts on its own words.
             if mode.shell().one_click_sidebar {

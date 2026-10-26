@@ -565,8 +565,9 @@ pub(crate) enum StyleNote {
 /// Export result facts (L12#4) — one message enum for both export shapes.
 pub(crate) enum ExportOutcome {
     /// A single render: the deliverable + whether the pre-era base look was
-    /// re-estimated on the way.
-    Single { out: PathBuf, relooked: bool },
+    /// re-estimated on the way + the masks the resolve step could not draw
+    /// (`pipeline::DevelopMasks::warning`, library English).
+    Single { out: PathBuf, relooked: bool, warn: Option<String> },
     /// A batch: counts + per-photo errors (library English, shown verbatim
     /// as today) + the same-stem rename disclosures + relook count + the
     /// per-photo develop warnings the OPEN path would have surfaced (L16-2),
@@ -612,6 +613,9 @@ pub(crate) struct PasteOutcome {
     pub(crate) errs: Vec<String>,
     pub(crate) xmp_fails: Vec<String>,
     pub(crate) xmp_notes: Vec<String>,
+    /// The photos whose recipe the paste wrote — the landing drops their
+    /// navigation stash, which the written look replaced.
+    pub(crate) written: Vec<PathBuf>,
 }
 
 /// CPU-built preview frame. Everything expensive is worker-side: engine
@@ -739,6 +743,10 @@ pub(crate) enum Msg {
     /// The depth sidecar finished (2026-10-13): the claimed depth PNG for the
     /// AI lens blur, or why not.
     DepthEstimated(anyhow::Result<PathBuf>),
+    /// The open card's Lightroom AI masks were re-derived on this computer
+    /// (`persist.rs` `start_ai_mask_resolve`): the photo and card they were
+    /// cut for, the recipe with the alphas found, and what the segmenter did.
+    AiMasksResolved(Box<(PathBuf, String, EditRecipe, autoshade::pipeline::DevelopMasks, crate::persist::FaceOutcomes)>),
     /// Full-res mask refine finished — see [`MaskRefineOutcome`].
     MaskRefined(anyhow::Result<MaskRefineOutcome>),
     /// Batch render advanced: `done` of `total` photos finished (ok or err).

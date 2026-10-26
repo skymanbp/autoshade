@@ -19,7 +19,9 @@
 //! recipe field. While it is on, every write of the recipe in this mode — a
 //! slider here or in the mask list, a paste, an AI landing — meets the same
 //! limits at one place (`guard_portrait_skin`, run once per frame after the
-//! panels drew and the workers landed).
+//! panels drew and the workers landed). A write that goes to DISK in the
+//! same step — an AI landing's save, a paste onto other photos — meets them
+//! where it is written (`skin_held` / `skin_held_for`), before the file.
 
 use crate::*;
 use autoshade::recipe::{LocalAdjustment, MaskGeometry, MaskRole};
@@ -131,8 +133,16 @@ const PORTRAIT_ROLES: [MaskRole; 4] = [MaskRole::Face, MaskRole::Eyes, MaskRole:
 
 /// The find step itself, off the UI thread: the subject matte and the faces
 /// on the original-frame preview, every raster under a freshly claimed name
-/// beside the photo's develop.
-pub(crate) fn find_people(base: &image::DynamicImage, photo: &std::path::Path) -> PortraitFind {
+/// beside the photo's develop. The skin seed is sampled from `base` as
+/// `recipe` develops it up to the skin mask ([`panel_skin_seed`]); `film` /
+/// `raw_source` are the canvas's (`film_short_edge`, `source_is_raw`).
+pub(crate) fn find_people(
+    base: &image::DynamicImage,
+    photo: &std::path::Path,
+    recipe: &EditRecipe,
+    film: Option<u32>,
+    raw_source: bool,
+) -> PortraitFind {
     let cfg = autoshade::config::Config::load();
     let staged = match crate::masks::stage_preview_png(base, "portrait") {
         Ok(p) => p,
@@ -160,7 +170,7 @@ pub(crate) fn find_people(base: &image::DynamicImage, photo: &std::path::Path) -
         let (w, h) = (base.width(), base.height());
         let face_mask = autoshade::face::face_mask(&report, w, h);
         let eyes_mask = autoshade::face::eyes_mask(&report, w, h);
-        let seed = autoshade::face::skin_seed(&base.to_rgb8(), &face_mask);
+        let seed = panel_skin_seed(base, &face_mask, recipe, film, raw_source);
         let face = autoshade::face::save_mask(&face_mask, photo, "mask-face")?;
         let eyes = autoshade::face::save_mask(&eyes_mask, photo, "mask-eyes")?;
         Ok(Some(FoundFaces { n: report.faces.len(), face, eyes, seed }))
@@ -169,6 +179,22 @@ pub(crate) fn find_people(base: &image::DynamicImage, photo: &std::path::Path) -
     let _ = std::fs::remove_file(&staged);
     let _ = std::fs::remove_file(&json);
     PortraitFind { photo: photo.to_path_buf(), subject, faces }
+}
+
+/// The skin seed the find step writes: `face::skin_seed` on the pixels the
+/// skin mask's colour range is matched on — `base` developed with `recipe`'s
+/// masks before the skin mask (all of them when there is none yet), geometry
+/// stripped (`face::skin_seed_reference`, the eyedropper's convention).
+pub(crate) fn panel_skin_seed(
+    base: &image::DynamicImage,
+    face_mask: &image::GrayImage,
+    recipe: &EditRecipe,
+    film: Option<u32>,
+    raw_source: bool,
+) -> Option<([f32; 3], [f32; 2])> {
+    let before = recipe.masks.iter().position(|m| m.role == MaskRole::Skin).unwrap_or(recipe.masks.len());
+    let reference = autoshade::face::skin_seed_reference(base, recipe, before, film, raw_source);
+    autoshade::face::skin_seed(&reference, face_mask)
 }
 
 /// The first mask with `role`.
@@ -200,6 +226,30 @@ pub(crate) fn face_raster(r: &EditRecipe) -> Option<PathBuf> {
         .iter()
         .filter(|m| m.role == MaskRole::Face)
         .find_map(|m| autoshade::render::geometry_raster_path(&m.mask).filter(|p| !p.is_empty()).map(PathBuf::from))
+}
+
+/// An AI portrait look replaces the recipe whole: the masks the photo had
+/// come back under it — with their sliders at rest, the look is the AI's —
+/// wherever the look has no mask of that role, and the lens blur where the
+/// look carries none. Done on the landed recipe BEFORE `on_analyzed` writes
+/// it, so the saved file is the look the panel shows.
+pub(crate) fn restore_portrait_masks(recipe: &mut EditRecipe, kept: Vec<LocalAdjustment>, blur: Option<autoshade::render::LensBlur>) {
+    for m in kept {
+        if recipe.masks.iter().any(|n| n.role == m.role) {
+            continue;
+        }
+        recipe.masks.push(LocalAdjustment {
+            mask: m.mask,
+            range: m.range,
+            inverted: m.inverted,
+            name: m.name,
+            role: m.role,
+            ..Default::default()
+        });
+    }
+    if recipe.lens_blur.is_none() {
+        recipe.lens_blur = blur;
+    }
 }
 
 /// The soften slider (0..=100) a skin mask shows, and what it writes.
@@ -246,11 +296,14 @@ impl AutoShadeApp {
             return;
         }
         let (Some(base), Some(photo)) = (self.base_preview.clone(), self.src_path.clone()) else { return };
+        let recipe = self.recipe.clone();
+        let film = self.film_short_edge();
+        let raw_source = self.source_is_raw();
         self.busy = true;
         self.portrait.line = PortraitLine::Finding;
         self.status = tr(self.lang, "Finding the people and faces… (the first run downloads the models)").into();
         self.spawn_worker(
-            move || Msg::PortraitFound(Box::new(find_people(&base, &photo))),
+            move || Msg::PortraitFound(Box::new(find_people(&base, &photo, &recipe, film, raw_source))),
             |e| Msg::PortraitFound(Box::new(PortraitFind { photo: PathBuf::new(), subject: Err(e.to_string()), faces: Err(e.to_string()) })),
         );
     }
@@ -267,6 +320,12 @@ impl AutoShadeApp {
         }
         let mut fresh: Vec<LocalAdjustment> = Vec::new();
         let mut faces_n = 0;
+        if let Ok(None) = &found.faces {
+            // No face this time: the face, eyes and skin masks of an earlier
+            // search stood on a face that is not found — left in place they
+            // keep acting with their sliders while the groups say "no face".
+            self.recipe.masks.retain(|m| !matches!(m.role, MaskRole::Face | MaskRole::Eyes | MaskRole::Skin));
+        }
         if let Ok(Some(f)) = &found.faces {
             faces_n = f.n;
             let face = f.face.to_string_lossy().into_owned();
@@ -355,39 +414,10 @@ impl AutoShadeApp {
         }
     }
 
-    /// After the portrait look landed through `on_analyzed`: the masks the
-    /// photo had come back under the look — with their sliders at rest, the
-    /// look is the AI's — wherever the look has no mask of that role, and
-    /// the lens blur where the look carries none.
-    pub(crate) fn after_portrait_look(&mut self, kept: Vec<LocalAdjustment>, blur: Option<autoshade::render::LensBlur>, landed: bool) {
-        if !landed {
-            self.portrait.line = PortraitLine::Failed(self.status.clone());
-            return;
-        }
-        let mut changed = false;
-        for m in kept {
-            if self.recipe.masks.iter().any(|n| n.role == m.role) {
-                continue;
-            }
-            self.recipe.masks.push(LocalAdjustment {
-                mask: m.mask,
-                range: m.range,
-                inverted: m.inverted,
-                name: m.name,
-                role: m.role,
-                ..Default::default()
-            });
-            changed = true;
-        }
-        if self.recipe.lens_blur.is_none() && blur.is_some() {
-            self.recipe.lens_blur = blur;
-            changed = true;
-        }
-        if changed {
-            self.overlay_stale = true;
-            self.dirty = true;
-        }
-        self.portrait.line = PortraitLine::Looked;
+    /// After the portrait look landed through `on_analyzed` (its masks and
+    /// blur were put back before it was written — `restore_portrait_masks`).
+    pub(crate) fn after_portrait_look(&mut self, landed: bool) {
+        self.portrait.line = if landed { PortraitLine::Looked } else { PortraitLine::Failed(self.status.clone()) };
     }
 
     /// The frame's one place for "Keep skin natural": run after the panels
@@ -395,8 +425,41 @@ impl AutoShadeApp {
     /// all meet it before the develop or the undo commit sees the recipe.
     /// Only while the switch is on for this card (`keep_skin_on`).
     pub(crate) fn guard_portrait_skin(&mut self) {
-        if self.mode.shell().portrait_panel && self.keep_skin_on() && autoshade::face::keep_skin_natural_in(&mut self.recipe) {
+        if self.skin_held() && autoshade::face::keep_skin_natural_in(&mut self.recipe) {
             self.dirty = true;
+        }
+    }
+
+    /// Does "Keep skin natural" hold the open card's writes: Portraits, and
+    /// the switch on for this card.
+    pub(crate) fn skin_held(&self) -> bool {
+        self.mode.shell().portrait_panel && self.keep_skin_on()
+    }
+
+    /// Does it hold a write landing on `photo` (a paste): the open card's
+    /// switch for the open photo, a stashed photo's card's own, and on for a
+    /// photo not opened this session — the write replaces the edit opening
+    /// would decide it on. Outside Portraits: never.
+    pub(crate) fn skin_held_for(&self, photo: &std::path::Path) -> bool {
+        if self.src_path.as_deref() == Some(photo) {
+            return self.skin_held();
+        }
+        self.mode.shell().portrait_panel
+            && self.nav_stash.get(photo).is_none_or(|st| {
+                self.portrait.keep_skin.get(&(photo.to_path_buf(), st.id.clone())).copied().unwrap_or(true)
+            })
+    }
+
+    /// Undo or redo put back an edit past the skin limits (made before the
+    /// switch was on, or in another mode): it is put back as it was, so the
+    /// switch goes off for the card — the next frame must not pull it back
+    /// and record a new step over the redo history.
+    pub(crate) fn release_skin_for_history(&mut self) {
+        if self.skin_held()
+            && autoshade::face::skin_values_beyond(&self.recipe) > 0
+            && let Some(key) = self.skin_key()
+        {
+            self.portrait.keep_skin.insert(key, false);
         }
     }
 
@@ -439,6 +502,20 @@ impl AutoShadeApp {
     pub(crate) fn decide_keep_skin_for_photo(&mut self) {
         let Some(photo) = self.src_path.clone() else { return };
         self.portrait.keep_skin.retain(|(p, _), _| *p != photo);
+        self.switch_off_cards_past_limits();
+    }
+
+    /// Portraits was just entered from another mode: a card whose edit was
+    /// pushed past the skin limits there is switched off, as opening decides
+    /// it — entering a mode changes no value (design-mode-select.md §2). The
+    /// other cards keep the switch they had.
+    pub(crate) fn decide_keep_skin_on_entry(&mut self) {
+        self.switch_off_cards_past_limits();
+    }
+
+    /// Every card of the open photo whose edit goes past the limits: off.
+    fn switch_off_cards_past_limits(&mut self) {
+        let Some(photo) = self.src_path.clone() else { return };
         for (i, v) in self.variants.iter().enumerate() {
             let recipe = if i == self.active { &self.recipe } else { &v.recipe };
             if autoshade::face::skin_values_beyond(recipe) > 0 {

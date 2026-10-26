@@ -121,7 +121,7 @@ warnings.filterwarnings("ignore")  # requests/urllib3 version warnings only
 import numpy as np
 
 import _sidecar
-from denoise import _fetch_verified, _nullctx, _tile_window
+from denoise import _fetch_verified, _imread, _imwrite, _nullctx, _tile_window
 
 TAG = "denoise_raw"
 
@@ -798,14 +798,13 @@ def publish(tmp, output):
 
 def write_mosaic(out, output):
     """`out` to `output` through a `.part` sibling and `publish`, with the
-    sibling removed on EVERY failure. A refused imwrite used to `die` past its
+    sibling removed on EVERY failure. A refused write used to `die` past its
     own partial file; `denoise.py` has wrapped the same write in try/finally
     since L03, and this is that wrapper."""
-    import cv2
     root, ext = os.path.splitext(output)
     tmp = f"{root}.{os.getpid()}.part{ext}"
     try:
-        if not cv2.imwrite(tmp, out):
+        if not _imwrite(tmp, out):
             die(f"cannot write the mosaic: {tmp}")
         publish(tmp, output)
     finally:
@@ -839,7 +838,7 @@ def main():
     blacks, white = _parse_levels(args.black, args.white)
     strength = float(np.clip(args.strength, 0.0, 1.0))
 
-    raw = cv2.imread(args.input, cv2.IMREAD_UNCHANGED)
+    raw = _imread(args.input, cv2.IMREAD_UNCHANGED)
     if raw is None:
         die(f"cannot read the mosaic: {args.input}")
     if raw.ndim != 2 or raw.dtype != np.uint16:

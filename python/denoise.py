@@ -476,6 +476,38 @@ def denoise(model, img, device, tile=512, overlap=32, fp16=False):
     return np.concatenate([den for _, _, den in bands])
 
 
+def _imread(path, flags):
+    """`cv2.imread` that opens any path: the bytes through Python, then
+    `cv2.imdecode`. `cv2.imread` cannot open a non-ASCII path on Windows (a
+    store under a Chinese user name, an album called 相册) and says so only by
+    returning None; `face.py` and `depth.py` read the same way. None for a
+    missing, empty or undecodable file, as `cv2.imread` would."""
+    import cv2
+
+    try:
+        buf = np.fromfile(path, dtype=np.uint8)
+    except OSError:
+        return None
+    if buf.size == 0:
+        return None
+    return cv2.imdecode(buf, flags)
+
+
+def _imwrite(path, img):
+    """`cv2.imwrite` that writes to any path: `cv2.imencode` by the path's
+    extension, then the bytes through Python (`cv2.imwrite` returns False for a
+    non-ASCII path on Windows). False when the encoder refuses, as
+    `cv2.imwrite` would; the callers' tmp + fsync + os.replace stays theirs."""
+    import cv2
+
+    ok, buf = cv2.imencode(os.path.splitext(path)[1], img)
+    if not ok:
+        return False
+    with open(path, "wb") as f:
+        f.write(buf.tobytes())
+    return True
+
+
 class _nullctx:
     def __enter__(self):
         return self
@@ -548,7 +580,7 @@ def main():
     device = pick_device(args.cpu, "cuda:0")
     log(f"device={device} model={args.model} strength={args.strength}")
 
-    raw = cv2.imread(args.input, cv2.IMREAD_UNCHANGED)
+    raw = _imread(args.input, cv2.IMREAD_UNCHANGED)
     if raw is None:
         raise SystemExit(f"cannot read image: {args.input}")
     if raw.ndim == 2:
@@ -583,14 +615,14 @@ def main():
         rgb = to_float(rgb_of[r0:r1])
         den = blend_luma_chroma(den, rgb, s)
         bgr_out[r0:r1] = np.clip(den * maxv + 0.5, 0, maxv).astype(np.uint16 if is16 else np.uint8)
-    # tmp + os.replace: a direct imwrite could leave a NONZERO partial file
+    # tmp + os.replace: a direct write could leave a NONZERO partial file
     # on interruption — which the caller deliberately preserves as "evidence"
     # while it also occupies the atomically claimed artifact name. The tmp
     # keeps the real extension so cv2 picks the right encoder.
     root, ext = os.path.splitext(args.output)
     tmp = f"{root}.{os.getpid()}.part{ext}"
     try:
-        ok = cv2.imwrite(tmp, out)
+        ok = _imwrite(tmp, out)
         if not ok:
             raise SystemExit(f"cannot write image: {tmp}")
         # fsync before the replace lands it (L03): the caller stages this

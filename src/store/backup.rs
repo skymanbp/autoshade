@@ -403,50 +403,48 @@ fn snapshot_xmp_text(src: &Path, text: String) -> std::io::Result<Option<u32>> {
 /// A copy failure rolls back this call's earlier copies and errors — a
 /// snapshot must never silently keep pointing at a mutable live raster.
 pub fn snapshot_rasters(r: &mut EditRecipe, dev: &Path, n: u32) -> std::io::Result<()> {
-    for m in &mut r.masks {
-        for path in m.bitmap_paths_mut() {
-            let p = Path::new(path.as_str());
-            // Bare name (the store convention) or absolute path inside dev.
-            let name = if p.is_absolute() {
-                (p.parent() == Some(dev)).then(|| p.file_name()).flatten()
-            } else if p.parent().is_none_or(|x| x.as_os_str().is_empty()) {
-                p.file_name()
-            } else {
-                None
-            };
-            let Some(name) = name.and_then(|x| x.to_str()) else { continue };
-            let frozen_name = format!("v{n}.{name}");
-            let live = dev.join(name);
-            // metadata triage, not exists(): a permission/transient error on
-            // an EXISTING raster read as "missing", the freeze was skipped,
-            // and the gate reported a faithful snapshot that never froze the
-            // raster the caller then overwrote.
-            let live_present = match std::fs::metadata(&live) {
-                Ok(_) => true,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-                Err(e) => {
-                    rollback_frozen_rasters(dev, n);
-                    return Err(e);
-                }
-            };
-            if live_present {
-                // `n` is guaranteed FRESH (backup_saved_develop refuses
-                // colliding numbers), so an existing v<n>.* file here is a
-                // crashed earlier attempt's leftover — possibly PARTIAL.
-                // Re-stage it atomically instead of trusting it.
-                let frozen = dev.join(&frozen_name);
-                if let Err(e) = copy_atomic(&live, &frozen) {
-                    rollback_frozen_rasters(dev, n);
-                    return Err(e);
-                }
+    for path in r.raster_paths_mut() {
+        let p = Path::new(path.as_str());
+        // Bare name (the store convention) or absolute path inside dev.
+        let name = if p.is_absolute() {
+            (p.parent() == Some(dev)).then(|| p.file_name()).flatten()
+        } else if p.parent().is_none_or(|x| x.as_os_str().is_empty()) {
+            p.file_name()
+        } else {
+            None
+        };
+        let Some(name) = name.and_then(|x| x.to_str()) else { continue };
+        let frozen_name = format!("v{n}.{name}");
+        let live = dev.join(name);
+        // metadata triage, not exists(): a permission/transient error on
+        // an EXISTING raster read as "missing", the freeze was skipped,
+        // and the gate reported a faithful snapshot that never froze the
+        // raster the caller then overwrote.
+        let live_present = match std::fs::metadata(&live) {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => {
+                rollback_frozen_rasters(dev, n);
+                return Err(e);
             }
-            // The reference moves to the frozen name EVEN when the live
-            // raster is already gone: a dead reference frozen as v<n>.<name>
-            // stays inert forever (the engine's missing-raster warning),
-            // while keeping the live name would silently bind this snapshot
-            // to any FUTURE raster recreated under it.
-            *path = frozen_name;
+        };
+        if live_present {
+            // `n` is guaranteed FRESH (backup_saved_develop refuses
+            // colliding numbers), so an existing v<n>.* file here is a
+            // crashed earlier attempt's leftover — possibly PARTIAL.
+            // Re-stage it atomically instead of trusting it.
+            let frozen = dev.join(&frozen_name);
+            if let Err(e) = copy_atomic(&live, &frozen) {
+                rollback_frozen_rasters(dev, n);
+                return Err(e);
+            }
         }
+        // The reference moves to the frozen name EVEN when the live
+        // raster is already gone: a dead reference frozen as v<n>.<name>
+        // stays inert forever (the engine's missing-raster warning),
+        // while keeping the live name would silently bind this snapshot
+        // to any FUTURE raster recreated under it.
+        *path = frozen_name;
     }
     Ok(())
 }
@@ -578,11 +576,9 @@ fn hex64(h: u64) -> String {
 /// Strip v<n>'s frozen raster prefixes back to the bare live names.
 fn strip_frozen_raster_prefix(r: &mut EditRecipe, n: u32) {
     let frozen = format!("v{n}.");
-    for m in r.masks.iter_mut() {
-        for path in m.bitmap_paths_mut() {
-            if let Some(bare) = path.strip_prefix(frozen.as_str()) {
-                *path = bare.to_string();
-            }
+    for path in r.raster_paths_mut() {
+        if let Some(bare) = path.strip_prefix(frozen.as_str()) {
+            *path = bare.to_string();
         }
     }
 }
@@ -621,23 +617,21 @@ fn file_fnv1a64(path: &Path) -> Option<u64> {
 fn raster_set_hash(r: &EditRecipe, dev: &Path, frozen_n: Option<u32>) -> Option<String> {
     let mut pairs: Vec<(String, u64)> = Vec::new();
     let mut clone = r.clone();
-    for m in clone.masks.iter_mut() {
-        for path in m.bitmap_paths_mut() {
-            let p = Path::new(path.as_str());
-            let name = if p.is_absolute() {
-                (p.parent() == Some(dev)).then(|| p.file_name()).flatten()
-            } else if p.parent().is_none_or(|x| x.as_os_str().is_empty()) {
-                p.file_name()
-            } else {
-                None
-            };
-            let Some(name) = name.and_then(|x| x.to_str()) else { continue };
-            let file = match frozen_n {
-                Some(n) => dev.join(format!("v{n}.{name}")),
-                None => dev.join(name),
-            };
-            pairs.push((name.to_string(), file_fnv1a64(&file)?));
-        }
+    for path in clone.raster_paths_mut() {
+        let p = Path::new(path.as_str());
+        let name = if p.is_absolute() {
+            (p.parent() == Some(dev)).then(|| p.file_name()).flatten()
+        } else if p.parent().is_none_or(|x| x.as_os_str().is_empty()) {
+            p.file_name()
+        } else {
+            None
+        };
+        let Some(name) = name.and_then(|x| x.to_str()) else { continue };
+        let file = match frozen_n {
+            Some(n) => dev.join(format!("v{n}.{name}")),
+            None => dev.join(name),
+        };
+        pairs.push((name.to_string(), file_fnv1a64(&file)?));
     }
     pairs.sort();
     let mut h = FNV_OFFSET;

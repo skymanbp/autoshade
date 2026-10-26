@@ -297,6 +297,45 @@ pub fn skin_seed(reference: &image::RgbImage, face: &GrayImage) -> Option<([f32;
     Some(([median(&mut r), median(&mut g), median(&mut b)], [(sx / n as f64) as f32, (sy / n as f64) as f32]))
 }
 
+/// The pixels a skin seed is SAMPLED from: `frame` (the photo's neutral frame —
+/// a RAW's sensor develop, a baked source's own pixels) developed with
+/// `recipe`'s masks BEFORE index `before` and no geometry stage.
+///
+/// A Range Mask is matched on the pixel as it stands when its mask runs —
+/// after the global white balance, tone and colour, and after the masks
+/// before it (`render::apply_masks` stacks them) — so the seed must come from
+/// those same pixels, which is the eyedropper's convention
+/// ([`crate::render::develop_preview_framed`] with
+/// [`crate::render::MaskFrame::without_downstream`]; the GUI's
+/// `range_reference_recipe`). Seeded from the undeveloped frame (until
+/// 2026-10-26), a recipe that moved the white balance seeded a colour no skin
+/// pixel of the render carries. `film_short_edge` / `raw_source` are
+/// `develop_preview_framed`'s.
+pub fn skin_seed_reference(
+    frame: &image::DynamicImage,
+    recipe: &crate::recipe::EditRecipe,
+    before: usize,
+    film_short_edge: Option<u32>,
+    raw_source: bool,
+) -> image::RgbImage {
+    let mut pre = recipe.clone();
+    pre.masks.truncate(before);
+    pre.straighten_deg = 0.0;
+    pre.lens_distortion = 0.0;
+    pre.ca_r = 0.0;
+    pre.ca_b = 0.0;
+    pre.crop = None;
+    crate::render::develop_preview_framed(
+        frame,
+        &pre,
+        &crate::diag::pixels(),
+        crate::render::MaskFrame::without_downstream(&pre.lens_profile),
+        film_short_edge,
+        raw_source,
+    )
+    .to_rgb8()
+}
+
 /// A bitmap mask over `raster` carrying `role` — the FACE and EYES masks. The
 /// row's label comes from [`MaskRole::en_name`], so `name` stays empty.
 pub fn portrait_adjustment(role: MaskRole, raster: String) -> LocalAdjustment {
@@ -443,7 +482,11 @@ pub fn is_face_intent(m: &LocalAdjustment) -> bool {
 
 /// Bump when the masks drawn from one face result change shape (a feather, a
 /// grow factor), so cached rasters from an older build are drawn again.
-const FACE_MASK_GENERATION: u32 = 1;
+///
+/// 2: a RAW's masks are drawn on its SENSOR develop, no longer on its embedded
+/// preview (`segment::mask_source_frame`), so a raster cached from the old
+/// frame is drawn again.
+const FACE_MASK_GENERATION: u32 = 2;
 /// The longest edge the photo is shown to the face finder at, and the masks
 /// drawn at: the masks are read in normalised coordinates at any render size.
 const RESOLVE_EDGE: u32 = 2048;
@@ -462,12 +505,12 @@ fn cached_rasters(raw: &Path, turns: u8) -> (PathBuf, PathBuf) {
 }
 
 /// The photo's frame as the masks see it: `src`'s pixels in the recipe's
-/// quarter turns, no longer than [`RESOLVE_EDGE`].
+/// quarter turns, no longer than [`RESOLVE_EDGE`] — for a RAW its SENSOR
+/// develop, never its embedded preview ([`crate::segment::mask_source_frame`]:
+/// an in-camera 4:3 preview is a crop of the 3:2 frame the render samples in).
 fn source_frame(src: &Path, turns: u8) -> Result<image::RgbImage> {
-    let decoded = crate::decode::decode_any_turned(src, turns).with_context(|| format!("decode {}", src.display()))?;
-    // `thumbnail` also ENLARGES a smaller frame to the box; only shrink.
-    let p = decoded.preview;
-    let p = if p.width().max(p.height()) > RESOLVE_EDGE { p.thumbnail(RESOLVE_EDGE, RESOLVE_EDGE) } else { p };
+    let p = crate::segment::mask_source_frame(src, turns, RESOLVE_EDGE)
+        .with_context(|| format!("decode {}", src.display()))?;
     Ok(p.to_rgb8())
 }
 
@@ -553,6 +596,22 @@ fn resolve_face_masks_with(
         }
     };
     let (face_s, eyes_s) = (face_path.to_string_lossy().into_owned(), eyes_path.to_string_lossy().into_owned());
+    // The skin seed's reference recipe: the masks before the first skin mask
+    // that needs a seed, with the face/eyes intents among them pointing at the
+    // rasters they are about to get — the pixels that mask's range is judged
+    // on ([`skin_seed_reference`]). One seed serves every such skin mask.
+    let seed_prefix = recipe
+        .masks
+        .iter()
+        .position(|m| is_face_intent(m) && m.role == MaskRole::Skin && m.range.is_none())
+        .map(|at| {
+            let mut pre = recipe.clone();
+            pre.masks.truncate(at);
+            for m in pre.masks.iter_mut().filter(|m| is_face_intent(m)) {
+                m.mask = MaskGeometry::Bitmap { path: if m.role == MaskRole::Eyes { eyes_s.clone() } else { face_s.clone() } };
+            }
+            (pre, at)
+        });
     let mut seed: Option<Option<([f32; 3], [f32; 2])>> = None;
     recipe.masks.retain_mut(|m| {
         if !is_face_intent(m) {
@@ -570,7 +629,15 @@ fn resolve_face_masks_with(
                     None => source_frame(src, turns).ok()?,
                 };
                 let face = crate::render::open_mask_bounded(&face_path).ok()?.to_luma8();
-                skin_seed(&frame, &face)
+                let (pre, at) = seed_prefix.as_ref()?;
+                let developed = skin_seed_reference(
+                    &image::DynamicImage::ImageRgb8(frame),
+                    pre,
+                    *at,
+                    crate::decode::film_short_edge(src),
+                    crate::decode::is_raw(src),
+                );
+                skin_seed(&developed, &face)
             });
             let Some((c, at)) = *s else {
                 out.dropped.push((name, "the face holds no pixel to take the skin colour from".into()));
@@ -968,5 +1035,46 @@ mod tests {
         let res = resolve_face_masks_with(&src, &src, &mut r, |_, _| bail!("set AUTOSHADE_FACE_SCRIPT"));
         assert_eq!(res.dropped.len(), 3);
         assert!(res.dropped[0].1.contains("AUTOSHADE_FACE_SCRIPT"), "the sidecar's own reason: {res:?}");
+    }
+
+    /// GROUP D (2026-10-26): the skin range is MATCHED on developed pixels —
+    /// the range stage runs after the global white balance / tone / colour,
+    /// on the pixel as the masks before it left it (the GUI eyedropper's
+    /// convention, `render::develop_preview_framed`) — so its colour seed is
+    /// taken from that same developed frame. Seeded from the undeveloped frame,
+    /// a recipe that moves the white balance seeded a colour no skin pixel of
+    /// the render carries and the skin mask shrank to nothing.
+    #[test]
+    fn the_skin_seed_is_taken_from_the_developed_frame_it_is_matched_on() {
+        let (src, _scrub) = photo("seed-developed");
+        let mut r = crate::recipe::EditRecipe { tint: 80.0, temperature_k: Some(3200.0), ..intents() };
+        let face = || Ok(FaceReport { faces: parse_faces(&stub()).unwrap().faces[..1].to_vec(), ..parse_faces(&stub()).unwrap() });
+        let res = resolve_face_masks_with(&src, &src, &mut r, |_, _| face());
+        assert_eq!(res.dropped.len(), 0, "{res:?}");
+        let Some(RangeMask::Color { r: cr, g, b, .. }) = r.masks[3].range else { panic!("the skin mask is seeded") };
+        let raw_seed = [200.0 / 255.0, 150.0 / 255.0, 120.0 / 255.0];
+        assert_ne!([cr, g, b], raw_seed, "the WB move reaches the seed");
+        // The pixels the range is judged against: the frame developed with the
+        // masks before the skin mask, no geometry.
+        let mut pre = r.clone();
+        pre.masks.truncate(3);
+        let frame = image::open(&src).unwrap();
+        let developed = crate::render::develop_preview_framed(
+            &frame,
+            &pre,
+            &crate::diag::pixels(),
+            crate::render::MaskFrame::without_downstream(&pre.lens_profile),
+            crate::decode::film_short_edge(&src),
+            false,
+        )
+        .to_rgb8();
+        let p = developed.get_pixel(80, 100);
+        let px = [p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0];
+        // A flat patch: its median IS its pixel, so the seed is exactly the
+        // developed colour the range will meet — not the undeveloped one.
+        assert_eq!([cr, g, b], px, "seeded from the developed skin");
+        assert_ne!(px, raw_seed, "which the recipe moved off the undeveloped colour");
+        let seeded = RangeMask::Color { r: cr, g, b, amount: SKIN_RANGE_AMOUNT, px: 0.0, py: 0.0 };
+        assert!(crate::render::range_weight(&seeded, &px) > 0.99, "the developed skin keeps full weight");
     }
 }

@@ -1084,7 +1084,16 @@ fn analyze_cmd(
     {
         anyhow::bail!("refusing to overwrite the saved develop: backing it up failed ({e})");
     }
-    let recipe_path = write_recipe(raw, &recipe, out, autoshade::diag::stderr())?;
+    // The canonical develop publishes as ONE single-generation commit, the
+    // save's (2026-10-26): recipe, strip record and projection together, so a
+    // develop over an AI-generated master retires the projection instead of
+    // writing one beside it. A redirected -o never touches the develop.
+    let (recipe_path, mut canonical) = if redirected {
+        (write_recipe(raw, &recipe, out, autoshade::diag::stderr())?, None)
+    } else {
+        let outcome = pipeline::commit_analyzed_develop(raw, &recipe, autoshade::diag::stderr())?;
+        (autoshade::store::recipe_target(raw), Some(outcome))
+    };
     println!("\nrecipe -> {}", recipe_path.display());
     // XMP only for a RAW; a baked source (PNG/TIFF) gets the recipe JSON only.
     if decode::is_raw(raw) {
@@ -1110,15 +1119,23 @@ fn analyze_cmd(
             } else {
                 pipeline::write_xmp_at(side, &recipe, &autoshade::diag::photo(raw))
             }
+            .map_or_else(pipeline::ProjectionOutcome::Failed, |(path, note, losses)| {
+                pipeline::ProjectionOutcome::Written { path, note, losses }
+            })
         } else {
-            write_xmp(raw, &recipe, autoshade::diag::stderr())
+            canonical.take().expect("the canonical branch committed above")
         };
         match projected {
-            // The merge note AND the mask-projection loss line (if any)
-            // already went to stderr in write_xmp_doc — one place, so no CLI
+            // The merge note AND the loss lines (masks and global controls)
+            // already went to stderr in build_xmp_doc — one place, so no CLI
             // command can print a different (or no) version of them.
-            Ok((p, _, _)) => println!("xmp    -> {}", p.display()),
-            Err(e) => eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}"),
+            pipeline::ProjectionOutcome::Written { path, .. } => println!("xmp    -> {}", path.display()),
+            pipeline::ProjectionOutcome::Cleared => println!(
+                "xmp    -> none (this develop sits on AI-generated pixels, which no Lightroom sidecar reproduces)"
+            ),
+            pipeline::ProjectionOutcome::Failed(e) => {
+                eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}")
+            }
         }
         // …and the IMPORT half of the same disclosure (R27 L-07): what this
         // photo's own Lightroom sidecar would cost on the way in.
@@ -1288,14 +1305,15 @@ fn apply_cmd(raw: &Path, recipe_path: &Path, out: &Path, long_edge: Option<u32>)
     // recorded. This site used to pass `src` for both, so a photo with a saved
     // master keyed its alpha on the master's path and looked for the cache in a
     // develop directory belonging to no photo.
-    let ai = autoshade::segment::resolve_ai_masks(&Config::load(), raw, &src, &mut recipe);
+    // The face and eye masks a proposal asked for are outlined in the same
+    // step (`face::resolve_face_masks`: cached beside the develop; a mask with
+    // no face to stand on is taken out and named) — the one step every develop
+    // surface shares (`pipeline::resolve_develop_masks`).
+    let pipeline::DevelopMasks { ai, faces } =
+        pipeline::resolve_develop_masks(&Config::load(), raw, &src, &mut recipe);
     if let Some(line) = ai.describe() {
         println!("ai mask : {line}");
     }
-    // The face and eye masks a proposal asked for, outlined the same way
-    // (`face::resolve_face_masks`: cached beside the develop; a mask with no
-    // face to stand on is taken out and named).
-    let faces = autoshade::face::resolve_face_masks(&Config::load(), raw, &src, &mut recipe);
     if let Some(line) = faces.describe() {
         println!("face mask: {line}");
     }
@@ -1355,7 +1373,7 @@ fn auto_cmd(
     // Opt-in AI denoise runs inside the render — on the sensor mosaic for a
     // RAW, before demosaic; on the developed pixels for a baked source. An
     // absent strength is the default of that path.
-    let dn = denoise
+    let mut dn = denoise
         .then(|| {
             denoise::DenoiseOpts::from_config(
                 &cfg,
@@ -1422,12 +1440,17 @@ fn auto_cmd(
                         "refusing to overwrite the saved develop: backing it up failed ({e})"
                     );
                 }
-                write_recipe(raw, &recipe, None, autoshade::diag::stderr())?;
             }
+            // Recipe, strip record and projection in ONE generation — the
+            // save's commit, shared with `analyze` (2026-10-26): over an
+            // AI-generated master the projection is retired, not written.
+            let xmp_result = if accepted {
+                Some(pipeline::commit_analyzed_develop(raw, &recipe, autoshade::diag::stderr())?)
+            } else {
+                None
+            };
             let (src, relook) = autoshade::store::render_source_checked(raw, &mut render_recipe)
                 .map_err(|m| anyhow::anyhow!(m))?;
-            let xmp_result =
-                (accepted && decode::is_raw(raw)).then(|| write_xmp(raw, &recipe, autoshade::diag::stderr()));
             Ok((src, relook, xmp_result))
         },
     )?;
@@ -1439,17 +1462,24 @@ fn auto_cmd(
     }
     if src != raw {
         println!("  (rendering the saved pixel master {})", src.display());
+        // The desktop app's ◈ denoised card IS denoised pixels: a second
+        // pass over them only smears what the first kept (the GUI's export
+        // sits it out the same way).
+        if dn.is_some() && autoshade::store::active_card_is_denoised(raw) {
+            dn = None;
+            println!("  (this saved card is already AI-denoised — --denoise sits out)");
+        }
     }
     // Same develop-time resolution as `apply` (see there, including the
     // photo-vs-pixels split). `render_recipe` is the render's own copy, so the
     // resolved raster paths never reach the saved recipe from here — the cache
     // is keyed by the photo, the intent and the frame, so the next develop
     // finds the same file anyway.
-    let ai = autoshade::segment::resolve_ai_masks(&cfg, raw, &src, &mut render_recipe);
+    let pipeline::DevelopMasks { ai, faces } =
+        pipeline::resolve_develop_masks(&cfg, raw, &src, &mut render_recipe);
     if let Some(line) = ai.describe() {
         println!("ai mask : {line}");
     }
-    let faces = autoshade::face::resolve_face_masks(&cfg, raw, &src, &mut render_recipe);
     if let Some(line) = faces.describe() {
         println!("face mask: {line}");
     }
@@ -1475,10 +1505,15 @@ fn auto_cmd(
     } else {
         // Written under the lock above; only SAID here, in the old order.
         match xmp_result {
-            // Notes + mask-loss line: stderr, from write_xmp_doc (as above).
-            Some(Ok((xmp_path, _, _))) => println!("xmp    -> {}", xmp_path.display()),
-            Some(Err(e)) => eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}"),
-            None => println!("(baked source — recipe.json only, no XMP)"),
+            // Notes + loss lines: stderr, from build_xmp_doc (as above).
+            Some(pipeline::ProjectionOutcome::Written { path, .. }) => println!("xmp    -> {}", path.display()),
+            Some(pipeline::ProjectionOutcome::Failed(e)) => {
+                eprintln!("  ⚠ recipe saved, but the Lightroom XMP failed: {e:#}")
+            }
+            _ if !decode::is_raw(raw) => println!("(baked source — recipe.json only, no XMP)"),
+            _ => println!(
+                "xmp    -> none (this develop sits on AI-generated pixels, which no Lightroom sidecar reproduces)"
+            ),
         }
         // The import half (R27 L-07), same producer as `analyze`.
         if let Some(m) = lightroom_import_note(raw) {

@@ -145,6 +145,9 @@ pub(crate) struct NormalState {
     pub(crate) ref_dir: Option<PathBuf>,
     /// The folder is being read into Normal's library.
     pub(crate) building: bool,
+    /// The photo the folder was picked for: the look the build hands over
+    /// to is made for this photo only (`on_one_click_built`).
+    pub(crate) build_photo: Option<PathBuf>,
     pub(crate) build_progress: Option<(usize, usize)>,
     /// The analysis epoch a one-click started under.
     pub(crate) analyze_epoch: Option<u64>,
@@ -284,10 +287,16 @@ impl AutoShadeApp {
     /// 「Match my reference photos…」 after the folder is picked: read it into
     /// Normal's own library (no look phrases — the photos themselves go to
     /// the model), then hand over to the analysis (`on_one_click_built`).
+    /// The reading is work like any other (minutes; the first time it
+    /// downloads a model): `busy` holds the buttons that start work until it
+    /// lands, and the look it hands over to is for the photo it was started
+    /// for.
     pub(crate) fn start_one_click_folder(&mut self, dir: PathBuf) {
-        if self.normal.building {
+        if self.normal.building || self.busy || self.analyze_inflight || self.src_path.is_none() {
             return;
         }
+        self.busy = true;
+        self.normal.build_photo = self.src_path.clone();
         self.normal.building = true;
         self.normal.build_progress = None;
         self.normal.ref_dir = Some(dir.clone());
@@ -321,8 +330,22 @@ impl AutoShadeApp {
     pub(crate) fn on_one_click_built(&mut self, lang: Lang, res: Result<usize, String>) {
         self.normal.building = false;
         self.normal.build_progress = None;
+        self.busy = false;
+        let for_photo = self.normal.build_photo.take();
         match res {
-            Ok(_) => self.start_one_click(OneClick::References),
+            Ok(_) => {
+                let started = for_photo.is_some() && for_photo == self.src_path && !self.analyze_inflight && {
+                    self.start_one_click(OneClick::References);
+                    self.analyze_inflight
+                };
+                // Not started (another photo is open, or other work runs):
+                // said, never dropped with the line showing nothing.
+                if !started {
+                    let t = tr(lang, "Your reference photos are read, but the look could not start. Click 「Match my reference photos…」 again.");
+                    self.normal.line = NormalLine::Failed(t.into());
+                    self.status = t.into();
+                }
+            }
             Err(err) => {
                 let t = trf(lang, "Could not read your reference photos: {err}", &[("err", &err)]);
                 self.normal.line = NormalLine::Failed(t.clone());
@@ -420,9 +443,16 @@ impl AutoShadeApp {
             }
         };
         let export = self.normal_export_opts();
+        // The folder picked in the save window is remembered when the render
+        // starts — the workspace Export's rule (`export_to_chosen_path`), so
+        // 「the folder you last saved to」 has somewhere to point.
+        let picked = (how == OutName::Chosen).then(|| out.parent().map(|d| d.to_path_buf())).flatten();
         if self.start_render_with(out, export, None, false, how) {
             self.normal.delivering = true;
             self.normal.saving = self.saving_now();
+            if picked.is_some() {
+                self.last_export_dir = picked;
+            }
         }
     }
 
@@ -570,15 +600,37 @@ impl AutoShadeApp {
     }
 
     /// Put card `idx` under the canvas with the look on screen: the switch
-    /// changes the grain, never the look the sliders made.
+    /// changes the grain, never the look the sliders made — nor the look's
+    /// undo history.
     fn show_card_keeping_look(&mut self, idx: usize) {
         let look = self.recipe.clone();
+        let history = self.take_look_history();
         let ctx = self.egui_ctx.clone();
         self.switch_variant(idx, &ctx);
         if self.active == idx {
             self.recipe = look;
             self.dirty = true;
+            self.carry_look_history(history);
         }
+    }
+
+    /// The look's undo history, before the noise switch changes the card
+    /// under it (a card change resets the history — `load_active`). The
+    /// look on screen is committed first, so it is the head.
+    pub(crate) fn take_look_history(&mut self) -> (Vec<UndoStep>, Vec<UndoStep>) {
+        self.commit_now();
+        (self.undo_stack.clone(), self.redo_stack.clone())
+    }
+
+    /// …and back, on the card now on screen: every step keeps its look and
+    /// takes this card's pixels (the switch changes the grain, never the
+    /// look), and the look on screen is the head.
+    pub(crate) fn carry_look_history(&mut self, (undo, redo): (Vec<UndoStep>, Vec<UndoStep>)) {
+        let here = self.current_step();
+        let onto = |s: UndoStep| UndoStep { recipe: s.recipe, base: here.base.clone(), origin: here.origin.clone() };
+        self.undo_stack = undo.into_iter().map(onto).collect();
+        self.redo_stack = redo.into_iter().map(onto).collect();
+        self.committed = here;
     }
 
     /// The noise switch. On: the Retouch panel's own AI denoise
@@ -623,9 +675,20 @@ impl AutoShadeApp {
         }
     }
 
+    /// Before a retouch lands (`Msg::Retouched`): the look's undo history,
+    /// when the landing may be the noise switch's own ◈ card.
+    pub(crate) fn normal_denoise_history(&mut self) -> Option<(Vec<UndoStep>, Vec<UndoStep>)> {
+        self.normal
+            .denoise_pair
+            .as_ref()
+            .is_some_and(|d| d.denoised.is_none() && self.src_path.as_ref() == Some(&d.photo))
+            .then(|| self.take_look_history())
+    }
+
     /// After a retouch landed (`Msg::Retouched`): when it was the noise
-    /// switch's AI denoise, remember its ◈ card and say so plainly.
-    pub(crate) fn after_normal_denoise(&mut self, lang: Lang) {
+    /// switch's AI denoise, remember its ◈ card, carry the look's undo
+    /// history onto it, and say so plainly.
+    pub(crate) fn after_normal_denoise(&mut self, lang: Lang, history: Option<(Vec<UndoStep>, Vec<UndoStep>)>) {
         let Some(d) = self.normal.denoise_pair.as_mut() else { return };
         if d.denoised.is_some() || self.src_path.as_ref() != Some(&d.photo) {
             return;
@@ -634,6 +697,9 @@ impl AutoShadeApp {
             return;
         };
         d.denoised = Some(v.id.clone());
+        if let Some(h) = history {
+            self.carry_look_history(h);
+        }
         if self.mode.shell().one_click_sidebar {
             self.reword_landing(tr(lang, "AI denoise done. Turn the switch off to see the photo without it.").into());
         }

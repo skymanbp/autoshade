@@ -3835,3 +3835,70 @@ fn backup_snapshot_is_a_copy_and_freezes_rasters() {
 
         let _ = std::fs::remove_dir_all(&base);
     }
+
+/// GROUP A (2026-10-26): the lens blur's depth map and protect matte and a
+/// pixel layer's patch are rasters a recipe references exactly like a bitmap
+/// mask, and a develop store from someone else is untrusted input for all of
+/// them. Before `EditRecipe::raster_paths_mut` the load-time guard walked only
+/// the masks, so a `\\host\share\d.png` depth map made a render
+/// authenticate to a remote host and a `..` layer path read outside the store.
+fn raster_refs(r: &mut EditRecipe) -> (String, String, String) {
+    let lb = r.lens_blur.as_ref().expect("lens blur kept");
+    (lb.depth_map.clone(), lb.protect.clone().expect("protect kept"), r.pixel_layers[0].path.clone())
+}
+
+fn recipe_with_rasters(depth: &str, protect: &str, layer: &str) -> EditRecipe {
+    EditRecipe {
+        lens_blur: Some(crate::render::LensBlur {
+            depth_map: depth.into(),
+            protect: Some(protect.into()),
+            ..Default::default()
+        }),
+        pixel_layers: vec![crate::render::PixelLayer { path: layer.into(), ..Default::default() }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn depth_protect_and_layer_paths_are_refused_at_load_like_a_mask_path() {
+    let base = std::env::temp_dir().join(format!("autoshade-store-test-rasters-guard-{}", std::process::id()));
+    std::fs::create_dir_all(&base).unwrap();
+    let sentinel = base.join(".invalid-mask-reference");
+    let mut r = recipe_with_rasters(r"\\host\share\d.png", "//host/share/p.png", r"..\..\outside.png");
+    resolve_mask_paths(&mut r, &base);
+    let (d, p, l) = raster_refs(&mut r);
+    for (what, got) in [("depth map", &d), ("protect matte", &p), ("layer", &l)] {
+        assert_eq!(Path::new(got), sentinel.as_path(), "the {what} must be disabled like a mask path: {got}");
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn depth_protect_and_layer_paths_round_trip_relative_like_a_mask_path() {
+    let base = std::env::temp_dir().join(format!("autoshade-store-test-rasters-rel-{}", std::process::id()));
+    std::fs::create_dir_all(&base).unwrap();
+    let abs = |n: &str| base.join(n).to_string_lossy().into_owned();
+    let mut r = recipe_with_rasters(&abs("depth.png"), &abs("protect.png"), &abs("layer.png"));
+    relativize_mask_paths(&mut r, &base);
+    assert_eq!(raster_refs(&mut r), ("depth.png".into(), "protect.png".into(), "layer.png".into()), "stored bare: the develop dir is relocatable");
+    resolve_mask_paths(&mut r, &base);
+    assert_eq!(raster_refs(&mut r), (abs("depth.png"), abs("protect.png"), abs("layer.png")), "anchored again on load");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_version_snapshot_freezes_depth_protect_and_layer_rasters() {
+    let dev = std::env::temp_dir().join(format!("autoshade-store-test-rasters-freeze-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dev);
+    std::fs::create_dir_all(&dev).unwrap();
+    for n in ["depth.png", "protect.png", "layer.png"] {
+        std::fs::write(dev.join(n), n.as_bytes()).unwrap();
+    }
+    let mut r = recipe_with_rasters("depth.png", "protect.png", "layer.png");
+    snapshot_rasters(&mut r, &dev, 7).unwrap();
+    assert_eq!(raster_refs(&mut r), ("v7.depth.png".into(), "v7.protect.png".into(), "v7.layer.png".into()));
+    for n in ["depth.png", "protect.png", "layer.png"] {
+        assert_eq!(std::fs::read(dev.join(format!("v7.{n}"))).unwrap(), n.as_bytes(), "{n} frozen");
+    }
+    let _ = std::fs::remove_dir_all(&dev);
+}

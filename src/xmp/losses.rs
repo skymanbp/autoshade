@@ -622,6 +622,33 @@ pub fn global_export_losses(r: &EditRecipe) -> Vec<&'static str> {
         .collect()
 }
 
+/// One English sentence naming the GLOBAL controls in `globals` (what
+/// [`global_export_losses`] returned) that the sidecar leaves behind, or
+/// `None` when there are none — the CLI and web counterpart of the GUI's
+/// localised loss line, with the same labels. A control without a label here
+/// is named by its registry name rather than dropped.
+pub fn describe_global_losses(globals: &[&str]) -> Option<String> {
+    if globals.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = globals
+        .iter()
+        .map(|g| match *g {
+            "base_curve" => "camera base curve",
+            "lens_profile" => "lens profile correction",
+            "colour_field" => "colour field",
+            "pixel_layers" => "fill layers",
+            "lens_blur" => "lens blur",
+            "retouch" => "spot removal",
+            other => other,
+        })
+        .collect();
+    Some(format!(
+        "the Lightroom XMP does not carry: {} — recipe.json keeps all of it",
+        names.join(", ")
+    ))
+}
+
 /// **The MIRROR of [`global_export_losses`]** (R25 B4): the controls this
 /// document carries that LIGHTROOM renders and this engine does not.
 ///

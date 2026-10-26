@@ -570,7 +570,6 @@ class TheMosaicWrite(unittest.TestCase):
         # A failed encoder can leave a partial file at the .part name; the
         # refusal used to `die` past it (`denoise.py` has cleaned up the same
         # write since L03).
-        import cv2
         with tempfile.TemporaryDirectory() as d:
             output = os.path.join(d, "denoised.png")
 
@@ -579,7 +578,7 @@ class TheMosaicWrite(unittest.TestCase):
                     f.write(b"\x89PNG partial")
                 return False
 
-            with mock.patch.object(cv2, "imwrite", refuse), redirect_stderr(io.StringIO()):
+            with mock.patch.object(denoise_raw, "_imwrite", refuse), redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     denoise_raw.write_mosaic(np.zeros((4, 4), dtype=np.uint16), output)
             self.assertEqual(os.listdir(d), [], "a refused write must not leave its .part behind")

@@ -1301,6 +1301,26 @@ pub struct CreativeLook {
 }
 
 impl EditRecipe {
+    /// Every machine-local raster path this recipe references: each mask's
+    /// ([`LocalAdjustment::bitmap_paths_mut`]), the lens blur's depth map and
+    /// protect matte, and each pixel layer's patch — the ONE walk the store's
+    /// resolve (and its network/escape refusal), relativize, version freeze,
+    /// detach and the sidecar payload's bare-naming share.
+    ///
+    /// Before it those walks iterated the masks alone, so the three non-mask
+    /// rasters were read verbatim from a develop store or a sidecar someone
+    /// else wrote (a `\\host\share` depth map made a render authenticate to
+    /// a remote host), stored absolute, and never frozen with a version.
+    /// Empty paths name no file and are skipped, as a mask's are.
+    pub fn raster_paths_mut(&mut self) -> Vec<&mut String> {
+        let mut out: Vec<&mut String> = self.masks.iter_mut().flat_map(|m| m.bitmap_paths_mut()).collect();
+        if let Some(lb) = &mut self.lens_blur {
+            out.extend(std::iter::once(&mut lb.depth_map).chain(lb.protect.as_mut()).filter(|p| !p.is_empty()));
+        }
+        out.extend(self.pixel_layers.iter_mut().map(|l| &mut l.path).filter(|p| !p.is_empty()));
+        out
+    }
+
     /// The creative profile's baked half, scaled by its own `crs:Amount`, or
     /// `None` when there is nothing baked to apply.
     ///

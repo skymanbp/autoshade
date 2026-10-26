@@ -474,7 +474,7 @@ pub fn produce_recipe(
     // the pixels the render uses (`segment::resolve_ai_masks`, F1-C). Cheap
     // when nothing asks: a recipe with no unresolved AI mask decodes nothing.
     let cut_ai_masks = |r: &mut EditRecipe, notes: &mut Vec<crate::rationale::Note>| {
-        let res = crate::segment::resolve_ai_masks(cfg, raw, pixels.unwrap_or(raw), r);
+        let DevelopMasks { ai: res, faces } = resolve_develop_masks(cfg, raw, pixels.unwrap_or(raw), r);
         if res.resolved > 0 {
             crate::rationale::push_note(
                 &mut r.rationale,
@@ -498,7 +498,6 @@ pub fn produce_recipe(
         // The Portraits targets `face` / `eyes` (v1.14.0): outlined by the
         // face finder on the same photo/pixels split; a mask it cannot
         // outline is taken out, not carried — it has no raster to render.
-        let faces = crate::face::resolve_face_masks(cfg, raw, pixels.unwrap_or(raw), r);
         if faces.resolved > 0 {
             crate::rationale::push_note(
                 &mut r.rationale,
@@ -3208,6 +3207,111 @@ pub fn xmp_projection_member(
     Ok((crate::store::CommitMember::Write(bytes), note, losses))
 }
 
+/// What [`resolve_develop_masks`] did: the AI masks the local segmenter
+/// re-derived (or could not), and the face / eyes / skin masks the face finder
+/// outlined (or took out).
+pub struct DevelopMasks {
+    pub ai: crate::segment::AiMaskResolution,
+    pub faces: crate::face::FaceMaskResolution,
+}
+
+impl DevelopMasks {
+    /// The line a surface shows as a WARNING, or `None` when every mask that
+    /// asked for a raster got one: the masks left inert or taken out, with the
+    /// segmenter's and face finder's own sentences.
+    pub fn warning(&self) -> Option<String> {
+        let mut lines: Vec<String> = Vec::new();
+        if !self.ai.unresolved.is_empty() {
+            lines.extend(self.ai.describe());
+        }
+        if !self.faces.dropped.is_empty() {
+            lines.extend(self.faces.describe());
+        }
+        (!lines.is_empty()).then(|| lines.join("; "))
+    }
+}
+
+/// THE "resolve before develop" step: give every mask that names no raster
+/// yet its raster, immediately before the render that needs it — an AI mask
+/// imported from a Lightroom sidecar (`segment::resolve_ai_masks`, which the
+/// importer deliberately leaves `raster: None`) and a face / eyes / skin
+/// intent (`face::resolve_face_masks`). Cached beside the photo's develop, so
+/// a second develop costs a PNG probe.
+///
+/// `raw` keys and homes the caches; `src` is the render source's pixels (a
+/// saved retouch master, when there is one). Until 2026-10-26 only the CLI's
+/// `apply` / `auto` and the analysis flow called the two resolvers, so the
+/// browser rendered an imported AI mask inert (`render::mask_raster` skips an
+/// adjustment whose raster is `None`) while the manual promises it is
+/// re-derived locally at develop time. Every develop surface calls this.
+pub fn resolve_develop_masks(
+    cfg: &crate::config::Config,
+    raw: &Path,
+    src: &Path,
+    recipe: &mut EditRecipe,
+) -> DevelopMasks {
+    let ai = crate::segment::resolve_ai_masks(cfg, raw, src, recipe);
+    let faces = crate::face::resolve_face_masks(cfg, raw, src, recipe);
+    DevelopMasks { ai, faces }
+}
+
+/// What became of the Lightroom projection in a [`commit_analyzed_develop`].
+pub enum ProjectionOutcome {
+    /// Published at `path`, with the merge note and the mask verdicts.
+    Written { path: PathBuf, note: Option<String>, losses: Vec<xmp::MaskLoss> },
+    /// Retired: the develop sits on AI-generated pixels, or the photo is not
+    /// a camera RAW — no sidecar reproduces it.
+    Cleared,
+    /// The projection could not be produced; the recipe still landed and any
+    /// earlier projection is kept. Said, never fatal (the cross-surface rule).
+    Failed(anyhow::Error),
+}
+
+/// Publish a PROGRAMMATIC develop (Analyze, web and CLI) the way a save
+/// publishes one: recipe, strip record and Lightroom projection in ONE
+/// single-generation commit ([`crate::store::commit_develop`]).
+///
+/// Before 2026-10-26 both Analyze surfaces called `write_recipe` and then
+/// `write_xmp`, so over an AI-generated master they still wrote a projection
+/// (which no sidecar can honour — [`xmp_projection_member`]) and left the
+/// strip record calling the edited develop the pristine generated card. The
+/// rule is the web save's: the develop sits on the RECORDED generated master
+/// when there is one (`ActiveWrite::DevelopOnAiPixels`), else on the source
+/// (`ActiveWrite::Unknown`, the record stands); the pixel link is kept.
+/// The caller runs the backup gate first, under its develop lock.
+pub fn commit_analyzed_develop(
+    raw: &Path,
+    recipe: &EditRecipe,
+    sink: &dyn crate::diag::Sink,
+) -> Result<ProjectionOutcome> {
+    let ai_master = crate::store::recorded_pixel_source(raw).and_then(|(o, g)| g.then_some(o));
+    let variants = crate::store::variants_member(
+        raw,
+        match &ai_master {
+            Some(m) => crate::store::ActiveWrite::DevelopOnAiPixels { recipe, master: m },
+            None => crate::store::ActiveWrite::Unknown,
+        },
+    )?;
+    let (xmp, outcome) = match xmp_projection_member(raw, recipe, ai_master.is_none(), sink) {
+        Ok((crate::store::CommitMember::Write(b), note, losses)) => (
+            crate::store::CommitMember::Write(b),
+            ProjectionOutcome::Written { path: xmp_target(raw), note, losses },
+        ),
+        Ok((member, _, _)) => (member, ProjectionOutcome::Cleared),
+        Err(e) => (crate::store::CommitMember::Keep, ProjectionOutcome::Failed(e)),
+    };
+    crate::store::commit_develop(
+        raw,
+        crate::store::DevelopCommit {
+            recipe: Some(recipe_store_bytes(raw, recipe, sink)?),
+            pixels: crate::store::CommitMember::Keep,
+            variants,
+            xmp,
+        },
+    )?;
+    Ok(outcome)
+}
+
 /// The projection's BYTES without publishing them: exactly what
 /// [`write_xmp`] puts at [`xmp_target`] for `raw` — merge base (the sidecar
 /// Lightroom writes beside the RAW, else the previous projection) and all —
@@ -3471,10 +3575,25 @@ fn build_xmp_doc(
         Some(pair) => pair,
         None => xmp::recipe_to_xmp_in_frame_for_photo(recipe, frame, photo),
     };
-    if let Some(m) = xmp::describe_mask_losses(&mask_losses) {
-        diag.warn(m);
+    for line in xmp_loss_lines(recipe, &mask_losses) {
+        diag.warn(line);
     }
     Ok((doc, note, mask_losses))
+}
+
+/// What a projection of `recipe` leaves behind, as the English lines a CLI or
+/// web surface shows: the mask half (`losses`, the writer's own verdicts) and
+/// the GLOBAL half ([`xmp::global_export_losses`] — a lens blur, fill layers,
+/// spot removal, a colour field, the camera calibration). Empty = faithful.
+///
+/// One door for both halves: until 2026-10-26 only the GUI asked the global
+/// question, so a recipe saved from the CLI or the browser dropped those
+/// controls from the sidecar without a word.
+pub fn xmp_loss_lines(recipe: &EditRecipe, losses: &[xmp::MaskLoss]) -> Vec<String> {
+    xmp::describe_mask_losses(losses)
+        .into_iter()
+        .chain(xmp::describe_global_losses(&xmp::global_export_losses(recipe)))
+        .collect()
 }
 
 /// The photo's own SOURCE frame — un-rotated size plus the turn that carries
@@ -3609,17 +3728,38 @@ pub fn guard_readonly(out: &Path, raw: &Path) -> Result<()> {
     // root must not find that `match`-ing on one of those old exports is
     // suddenly refused. Both are `Destination`-trusted or literal, so no
     // planted file can widen this allowance (see `config::SETTINGS`).
+    //
+    // A RELATIVE area inside the photo's own folder is not ours, though
+    // (2026-10-26): `./out` resolves against the current directory, so a CLI
+    // run from inside the library made it a subfolder of the library and this
+    // allowance wrote deliverables there. Such an area grants nothing — the
+    // source-folder refusal below answers — unless the photo itself lives in
+    // it (a `match` on a file already in our ./out writes beside it). A
+    // Delivery folder the user CONFIGURED as an absolute path inside a photo
+    // folder stays writable: that is their explicit choice, and Settings
+    // warns when it lifts the folder's protection.
+    let raw_dir = raw_abs.parent();
+    // Whether the write was aimed at such a relative area: the refusal's hint
+    // then cannot say "write to ./out" — that is the folder being refused.
+    let mut relative_inside = false;
     for own in [crate::config::delivery_root(), PathBuf::from(crate::config::DEFAULT_DELIVERY_ROOT)]
     {
-        if let Ok(own_out) = absolute(&own)
-            && out_abs.starts_with(resolve_existing(&normalize(&own_out)))
-        {
-            return Ok(());
+        if let Ok(own_out) = absolute(&own) {
+            let own_out = resolve_existing(&normalize(&own_out));
+            let in_library = own.is_relative()
+                && raw_dir.is_some_and(|d| own_out.starts_with(d))
+                && !raw_abs.starts_with(&own_out);
+            if out_abs.starts_with(&own_out) {
+                if !in_library {
+                    return Ok(());
+                }
+                relative_inside = true;
+            }
         }
     }
-    if let Some(raw_dir) = raw_abs.parent()
+    if let Some(raw_dir) = raw_dir
         && out_abs.starts_with(raw_dir) {
-            return Err(SourceFolderRefused { dir: raw_dir.to_path_buf() }.into());
+            return Err(SourceFolderRefused { dir: raw_dir.to_path_buf(), relative_inside }.into());
         }
     // NEVER clobber an existing PHOTO outside our own output areas. The rule
     // above guards only the RAW's OWN folder, so a SIBLING folder of the same
@@ -3653,15 +3793,34 @@ pub struct OverwriteRefused {
 /// [`guard_readonly`]'s refusal to write into the photo's own folder —
 /// typed for the same reason as [`OverwriteRefused`] (the GUI's Normal mode
 /// words it plainly). The message is the one this refusal has always
-/// printed.
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "refusing to write into the source RAW's folder ({}) — the photo library is read-only. Write outputs to ./out (the default) instead.",
-    .dir.display()
-)]
+/// printed, except when the write was aimed at the relative `./out` and that
+/// resolved inside the photo's folder (`relative_inside`): "write to ./out"
+/// would then name the folder being refused, so the hint says why `./out`
+/// landed there and what to do instead.
+#[derive(Debug)]
 pub struct SourceFolderRefused {
     pub dir: PathBuf,
+    /// The refused path is the relative delivery folder (`./out`), which
+    /// resolved inside the photo's folder because the current directory is
+    /// that folder (or inside it).
+    pub relative_inside: bool,
 }
+
+impl std::fmt::Display for SourceFolderRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "refusing to write into the source RAW's folder ({}) — the photo library is read-only. ", self.dir.display())?;
+        if self.relative_inside {
+            f.write_str(
+                "AutoShade was run from inside the photo's folder, so ./out is a folder inside the photos. \
+                 Run it from another folder, or pass -o with a folder outside the photos.",
+            )
+        } else {
+            f.write_str("Write outputs to ./out (the default) instead.")
+        }
+    }
+}
+
+impl std::error::Error for SourceFolderRefused {}
 
 #[cfg(test)]
 mod visual_round_tests {
@@ -5870,7 +6029,9 @@ mod tests {
             ("src/pipeline.rs", "reference library unavailable (", 1),
             ("src/pipeline.rs", "recipe limits discarded {}", 1),
             ("src/pipeline.rs", "warn(msg.clone())", 1),
-            ("src/pipeline.rs", "warn(m)", 1),
+            // The projection's loss lines, masks and global controls
+            // (`xmp_loss_lines`, 2026-10-26).
+            ("src/pipeline.rs", "warn(line)", 1),
             // The clamp disclosure 5c's sweep MISSED, because it re-walked
             // three files and this one lives in a fourth.
             ("src/recipe.rs", "truncated {} curve point(s)", 1),
@@ -8256,5 +8417,114 @@ mod tests {
             direction_adherence_tier(Some("warmer"), DirectionAdherence::new(0.9)),
             Some("brief")
         );
+    }
+}
+
+#[cfg(test)]
+mod develop_surface_tests {
+    use super::*;
+
+    fn scratch_photo(tag: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("autoshade-pipe-surface-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = dir.join(format!("_pipe_surface_{tag}.arw"));
+        std::fs::write(&raw, b"raw").unwrap();
+        let _ = std::fs::remove_dir_all(crate::store::develop_dir(&raw));
+        (dir, raw)
+    }
+
+    /// GROUP C (2026-10-26): the write path every CLI and web save goes
+    /// through says which GLOBAL controls the sidecar cannot carry, not only
+    /// which masks — the GUI said both, the other surfaces only the masks, so
+    /// a lens blur saved from the CLI or the browser vanished from the sidecar
+    /// in silence.
+    #[test]
+    fn the_write_path_names_the_global_controls_the_sidecar_cannot_carry() {
+        let (dir, raw) = scratch_photo("globals");
+        let r = EditRecipe {
+            lens_blur: Some(crate::render::LensBlur { depth_map: "depth.png".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let collector = crate::diag::Collector::new();
+        let (_, _, losses) = write_xmp(&raw, &r, &collector).unwrap();
+        let said: Vec<String> = collector.take().into_iter().map(|l| l.text).collect();
+        assert!(
+            said.iter().any(|t| t.contains("lens blur")),
+            "the CLI channel must name the lens blur: {said:?}"
+        );
+        let lines = xmp_loss_lines(&r, &losses);
+        assert!(lines.iter().any(|t| t.contains("lens blur")), "…and so must the lines a web reply carries: {lines:?}");
+        let clean = EditRecipe { exposure_ev: 0.3, ..Default::default() };
+        let (_, _, none) = write_xmp(&raw, &clean, &collector).unwrap();
+        assert!(xmp_loss_lines(&clean, &none).is_empty(), "a faithful projection says nothing");
+        let _ = std::fs::remove_dir_all(crate::store::develop_dir(&raw));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GROUP J (2026-10-26): Analyze (web and CLI) publishes through the same
+    /// single-generation commit as a save, so a develop that sits on an
+    /// AI-GENERATED master clears the projection instead of writing one
+    /// beside it (`xmp_projection_member`'s rule), and a develop over the
+    /// source writes it.
+    #[test]
+    fn an_analyzed_develop_over_a_generated_master_clears_the_projection() {
+        let (dir, raw) = scratch_photo("analyze-gen");
+        let dev = crate::store::develop_dir(&raw);
+        std::fs::create_dir_all(&dev).unwrap();
+        let master = dev.join("generated-1.png");
+        std::fs::write(&master, b"png").unwrap();
+        crate::store::write_pixel_source(&raw, &master, true).unwrap();
+        let target = xmp_target(&raw);
+        std::fs::write(&target, b"<x:xmpmeta/>").unwrap();
+        let r = EditRecipe { exposure_ev: 0.4, ..Default::default() };
+        let outcome = commit_analyzed_develop(&raw, &r, crate::diag::stderr()).unwrap();
+        assert!(matches!(outcome, ProjectionOutcome::Cleared), "AI pixels: no sidecar");
+        assert!(!target.exists(), "the stale projection is retired in the same generation");
+        assert!(crate::store::recipe_target(&raw).exists(), "the recipe landed");
+
+        let (dir2, raw2) = scratch_photo("analyze-src");
+        let outcome = commit_analyzed_develop(&raw2, &r, crate::diag::stderr()).unwrap();
+        assert!(matches!(outcome, ProjectionOutcome::Written { .. }), "a source develop projects");
+        assert!(xmp_target(&raw2).exists());
+        for d in [&dev, &crate::store::develop_dir(&raw2), &dir, &dir2] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// GROUP H (2026-10-26): the relative `./out` is ours only when it does
+    /// not sit inside the photo's own folder. A CLI run from inside the
+    /// library made `./out` a subfolder of it, and the unconditional allowance
+    /// wrote deliverables into the read-only library. The photo here does not
+    /// need to exist — the guard is lexical over the current directory, which
+    /// is where `./out` resolves.
+    #[test]
+    fn a_relative_out_inside_the_photos_own_folder_is_refused() {
+        let cwd = std::env::current_dir().unwrap();
+        let photo = cwd.join("_guard_h_photo.png");
+        let err = guard_readonly(Path::new("out/_guard_h_photo.developed.tif"), &photo)
+            .expect_err("./out inside the photo's folder is the library, not ours");
+        let refused = err.downcast_ref::<SourceFolderRefused>().expect("the typed refusal");
+        assert!(refused.relative_inside, "aimed at the relative ./out: {err:#}");
+        // The hint cannot send the user to ./out — that is the folder refused.
+        let hint = err.to_string();
+        assert!(!hint.contains("Write outputs to ./out"), "{hint}");
+        assert!(
+            hint.ends_with(
+                "AutoShade was run from inside the photo's folder, so ./out is a folder inside the photos. \
+                 Run it from another folder, or pass -o with a folder outside the photos."
+            ),
+            "{hint}"
+        );
+        // Any other write into the photo's folder keeps the old hint.
+        let beside = guard_readonly(&cwd.join("_guard_h_photo.developed.tif"), &photo).expect_err("beside the photo");
+        let beside_refused = beside.downcast_ref::<SourceFolderRefused>().expect("the typed refusal");
+        assert!(!beside_refused.relative_inside);
+        assert!(beside.to_string().ends_with("Write outputs to ./out (the default) instead."), "{beside}");
+        // ./out OUTSIDE the photo's folder stays ours…
+        let elsewhere = cwd.parent().unwrap().join("_guard_h_elsewhere").join("p.png");
+        assert!(guard_readonly(Path::new("out/p.developed.tif"), &elsewhere).is_ok());
+        // …and so does writing beside a photo that itself lives in ./out.
+        assert!(guard_readonly(Path::new("out/q.matched.json"), Path::new("out/q.preview.jpg")).is_ok());
     }
 }

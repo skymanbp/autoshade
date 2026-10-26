@@ -171,6 +171,18 @@ pub fn read_variants(src: &Path) -> Option<VariantsRecord> {
     }
 }
 
+/// Are the photo's recorded render-source pixels ALREADY AI-denoised — the
+/// desktop app's ◈ denoised card, saved as the active card? Read off the two
+/// records that card's save already writes: a recorded pixel source (its
+/// master) and a strip whose active card is `"denoised"`. A surface that
+/// renders the recorded source runs no second denoise over it (the GUI's own
+/// export sits it out); the browser and `auto --denoise` ran SCUNet over
+/// SCUNet's output until 2026-10-26.
+pub fn active_card_is_denoised(src: &Path) -> bool {
+    recorded_pixel_source(src).is_some()
+        && matches!(read_variants_checked(src), VariantsRead::Strip(rec) if rec.active_kind == "denoised")
+}
+
 /// [`read_variants`] with the absent/unresolved distinction preserved. A
 /// missing file is silent (the normal single-card case); an existing file
 /// that cannot be honoured warns on stderr and comes back `Unresolved`,

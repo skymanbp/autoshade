@@ -301,60 +301,59 @@ pub(super) fn unc_or_device_spelling(p: &Path) -> bool {
 }
 
 pub fn resolve_mask_paths(r: &mut EditRecipe, base: &Path) {
-    for m in &mut r.masks {
-        for path in m.bitmap_paths_mut() {
-            let p = Path::new(path.as_str());
-            if remote_or_device_path(p) {
-                // A develop store is not trusted to reach OFF this machine:
-                // a crafted `\\attacker\share\mask.png` turned "open the
-                // photo" into an outbound SMB authentication.
-                eprintln!(
-                    "⚠ bitmap mask reference {path:?} names a network/device path — it is disabled"
-                );
-                *path = base
-                    .join(".invalid-mask-reference")
-                    .to_string_lossy()
-                    .into_owned();
-            } else if p.is_relative() {
-                // A BARE name is the store's own convention and can only mean
-                // "this develop dir" — anchor it even when the file is GONE.
-                // Safe multi-component legacy refs retain their old
-                // exists-gated cwd behavior.
-                let bare = p.parent().is_none_or(|x| x.as_os_str().is_empty());
-                match contained_join(base, p) {
-                    Some(cand) if bare || cand.exists() => {
-                        *path = cand.to_string_lossy().into_owned();
-                    }
-                    Some(_) => {}
-                    None => {
-                        eprintln!(
-                            "⚠ bitmap mask reference {path:?} escapes {} — it is disabled",
-                            base.display()
-                        );
-                        *path = base
-                            .join(".invalid-mask-reference")
-                            .to_string_lossy()
-                            .into_owned();
-                    }
+    // Every raster reference, not only the masks' (`EditRecipe::
+    // raster_paths_mut`): a depth map, protect matte or pixel layer named by
+    // an untrusted store reached the render verbatim before.
+    for path in r.raster_paths_mut() {
+        let p = Path::new(path.as_str());
+        if remote_or_device_path(p) {
+            // A develop store is not trusted to reach OFF this machine:
+            // a crafted `\\attacker\share\mask.png` turned "open the
+            // photo" into an outbound SMB authentication.
+            eprintln!(
+                "⚠ raster reference {path:?} names a network/device path — it is disabled"
+            );
+            *path = base
+                .join(".invalid-mask-reference")
+                .to_string_lossy()
+                .into_owned();
+        } else if p.is_relative() {
+            // A BARE name is the store's own convention and can only mean
+            // "this develop dir" — anchor it even when the file is GONE.
+            // Safe multi-component legacy refs retain their old
+            // exists-gated cwd behavior.
+            let bare = p.parent().is_none_or(|x| x.as_os_str().is_empty());
+            match contained_join(base, p) {
+                Some(cand) if bare || cand.exists() => {
+                    *path = cand.to_string_lossy().into_owned();
+                }
+                Some(_) => {}
+                None => {
+                    eprintln!(
+                        "⚠ raster reference {path:?} escapes {} — it is disabled",
+                        base.display()
+                    );
+                    *path = base
+                        .join(".invalid-mask-reference")
+                        .to_string_lossy()
+                        .into_owned();
                 }
             }
         }
     }
 }
 
-/// Inverse of [`resolve_mask_paths`] at write time: an absolute Bitmap path
-/// that lives DIRECTLY inside `base` is stored as its bare file name, keeping
+/// Inverse of [`resolve_mask_paths`] at write time: an absolute raster path
+/// (any of `EditRecipe::raster_paths_mut`) that lives DIRECTLY inside `base` is stored as its bare file name, keeping
 /// the develop dir relocatable. Paths elsewhere are stored as given.
 pub fn relativize_mask_paths(r: &mut EditRecipe, base: &Path) {
-    for m in &mut r.masks {
-        for path in m.bitmap_paths_mut() {
-            let p = Path::new(path.as_str());
-            if p.is_absolute()
-                && p.parent() == Some(base)
-                && let Some(name) = p.file_name().and_then(|n| n.to_str())
-            {
-                *path = name.to_string();
-            }
+    for path in r.raster_paths_mut() {
+        let p = Path::new(path.as_str());
+        if p.is_absolute()
+            && p.parent() == Some(base)
+            && let Some(name) = p.file_name().and_then(|n| n.to_str())
+        {
+            *path = name.to_string();
         }
     }
 }
