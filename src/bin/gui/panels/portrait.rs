@@ -633,7 +633,7 @@ impl AutoShadeApp {
         if action_row(ui, can_heal, tr(lang, "🤖 Remove blemishes"))
             .on_hover_text(tr(
                 lang,
-                "The AI finds small spots and blemishes on the face, and each is healed from the skin around it; nothing outside the face is touched — Ctrl+Z goes back. Needs a service key in Settings (⚙).",
+                "The AI finds small spots and blemishes on the face, and each is healed from the skin around it; only spots on the face are healed, and the heal of a spot at the face's edge reaches a little past it — Ctrl+Z goes back. Needs a service key in Settings (⚙).",
             ))
             .clicked()
         {

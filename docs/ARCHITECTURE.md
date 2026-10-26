@@ -7018,7 +7018,8 @@ the skin and face masks. The skin group's "Remove blemishes" is the Retouch
 panel's AI heal (`start_heal`) given a limit: the Face-role mask's raster
 (`portrait::face_raster`) goes in as `retouch::heal`'s `limit`, which drops
 every spot whose centre that mask holds below one half
-(`retouch::spots_inside`) before healing and answers the typed
+(`retouch::spots_inside`) before healing — a kept spot is healed whole, so
+the heal of one at the face's edge reaches a little past it — and answers the typed
 `retouch::NoSpotInsideLimit` when none is left, and the result lands in place
 like any heal, one undo step.
 

@@ -139,8 +139,8 @@ further, the switch opens off for that photo, and nothing is changed until you
 turn it on; turning it on brings those values back within the limits, and the
 status line says how many. **🤖 Remove blemishes** has the AI find small
 spots and blemishes and heals each from the skin around it, the way
-**🤖 AI heal (auto)** under **Heal (pixel)** does, but only the spots on the face — nothing outside the
-face is touched; it needs the faces found and an image key in Settings (⚙),
+**🤖 AI heal (auto)** under **Heal (pixel)** does, but only the spots on the face (the heal of a spot at the face's edge
+reaches a little past it); it needs the faces found and an image key in Settings (⚙),
 the status line says how many spots were healed on the face, and `Ctrl+Z`
 goes back. When no face was found, this group and the
 next are greyed and say **No face found in this photo**.

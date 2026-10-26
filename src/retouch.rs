@@ -988,9 +988,11 @@ pub struct NoSpotInsideLimit {
 ///
 /// `limit` is an optional mask raster (luma, white = inside) that holds the
 /// heal to one area: every spot found — by the AI or from the painted mask —
-/// whose centre lies outside it is dropped before healing ([`spots_inside`]),
-/// and the pixels there are left as they are. `None` heals every spot, as
-/// before the limit existed.
+/// whose centre lies outside it is dropped before healing ([`spots_inside`]).
+/// A kept spot is healed whole, with its usual disc, so the heal of a spot
+/// at the mask's edge reaches a little past it (cutting the disc at the
+/// edge would leave half a blemish). `None` heals every spot, as before the
+/// limit existed.
 pub fn heal(
     cfg: &Config,
     src_path: &Path,

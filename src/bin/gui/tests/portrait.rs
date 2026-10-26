@@ -559,7 +559,7 @@
             let _out = Scrub(vec![saved.clone()]);
             let want = trf(
                 lang,
-                "healed {n} spot(s) on the face → {path} (nothing outside the face was touched — Ctrl+Z goes back)",
+                "healed {n} spot(s) on the face → {path} (spots elsewhere were left alone — Ctrl+Z goes back)",
                 &[("n", "3"), ("path", &saved.display().to_string())],
             );
             assert_eq!(app.status, want, "{lang:?}");

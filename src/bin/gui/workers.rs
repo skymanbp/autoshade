@@ -2463,7 +2463,7 @@ impl AutoShadeApp {
                 let args = [("n", n.to_string()), ("path", out.display().to_string())];
                 let args: Vec<(&str, &str)> = args.iter().map(|(k, v)| (*k, v.as_str())).collect();
                 let mut s = if *in_face {
-                    trf(lang, "healed {n} spot(s) on the face → {path} (nothing outside the face was touched — Ctrl+Z goes back)", &args)
+                    trf(lang, "healed {n} spot(s) on the face → {path} (spots elsewhere were left alone — Ctrl+Z goes back)", &args)
                 } else {
                     trf(lang, "healed {n} spot(s) → {path}", &args)
                 };
