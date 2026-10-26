@@ -463,6 +463,20 @@ impl AutoShadeApp {
         }
     }
 
+    /// The open card's switch as a history step records it (None: no photo).
+    pub(crate) fn skin_switch(&self) -> Option<bool> {
+        self.skin_key().map(|_| self.keep_skin_on())
+    }
+
+    /// Undo or redo puts back the switch the step was recorded with. The
+    /// values are not touched: the step's recipe already is what the switch
+    /// left it as.
+    pub(crate) fn restore_skin_switch(&mut self, on: Option<bool>) {
+        if let (Some(on), Some(key)) = (on, self.skin_key()) {
+            self.portrait.keep_skin.insert(key, on);
+        }
+    }
+
     /// The open card's key for the per-card switch.
     fn skin_key(&self) -> Option<(PathBuf, String)> {
         let photo = self.src_path.clone()?;

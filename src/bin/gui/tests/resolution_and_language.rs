@@ -228,6 +228,7 @@
             recipe: EditRecipe::default(),
             base: Some(base.clone()),
             origin: Some(PathBuf::from(format!("out/_{tag}.png"))),
+            keep_skin: None,
         };
         let mut app = AutoShadeApp {
             preview_edge: 1280,
@@ -352,17 +353,20 @@
             recipe: EditRecipe::default(),
             base: Some(base.clone()),
             origin: Some(PathBuf::from("out/_spelling.png")),
+            keep_skin: None,
         };
         let abs = UndoStep {
             recipe: EditRecipe::default(),
             base: Some(base),
             origin: Some(std::path::absolute("out/_spelling.png").unwrap()),
+            keep_skin: None,
         };
         assert!(rel.same_pixels(&abs), "one master, two spellings, one pixel identity");
         let other = UndoStep {
             recipe: EditRecipe::default(),
             base: rel.base.clone(),
             origin: Some(PathBuf::from("out/_spelling-2.png")),
+            keep_skin: None,
         };
         assert!(!rel.same_pixels(&other), "…but a DIFFERENT master still differs");
     }
@@ -391,6 +395,7 @@
             recipe: EditRecipe { contrast: 11.0, ..Default::default() },
             base: None,
             origin: None,
+            keep_skin: None,
         };
         app.undo_stack.push(step());
         app.redo_stack.push(step());

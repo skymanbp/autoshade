@@ -467,8 +467,8 @@
             thumb: None,
         }];
         app.recipe = pre_era.clone();
-        app.committed = UndoStep { recipe: pre_era.clone(), base: None, origin: None };
-        app.undo_stack.push(UndoStep { recipe: pre_era.clone(), base: None, origin: None });
+        app.committed = UndoStep { recipe: pre_era.clone(), base: None, origin: None, keep_skin: None };
+        app.undo_stack.push(UndoStep { recipe: pre_era.clone(), base: None, origin: None, keep_skin: None });
         // Same-path FRESH reopen in flight: fact without request — refused.
         app.open_in_flight = true;
         app.open_same_path = true;

@@ -2213,6 +2213,7 @@ impl AutoShadeApp {
             recipe: self.recipe.clone(),
             base: self.active_variant().and_then(|v| v.base.clone()),
             origin: self.active_variant().and_then(|v| v.origin.clone()),
+            keep_skin: self.skin_switch(),
         }
     }
 
@@ -2241,6 +2242,10 @@ impl AutoShadeApp {
                 self.undo_stack.remove(0); // cap history memory
             }
             self.redo_stack.clear();
+        } else {
+            // A flip of the skin switch that changed no value belongs to the
+            // step on screen, so a later undo/redo hands it back as set.
+            self.committed.keep_skin = cur.keep_skin;
         }
     }
 
@@ -2401,6 +2406,7 @@ impl AutoShadeApp {
     /// to the shared source neutral.
     pub(crate) fn apply_step(&mut self, step: UndoStep, ctx: &egui::Context) {
         let pixels_differ = !step.same_pixels(&self.committed);
+        let keep_skin = step.keep_skin;
         self.committed = step.clone();
         self.recipe = step.recipe;
         // The history is a READER too: a step recorded while the canvas was
@@ -2471,7 +2477,9 @@ impl AutoShadeApp {
         }
         self.dirty = true;
         self.resync_recipe_display();
-        // A step past the skin limits is put back as it was (Portraits).
+        // The skin switch comes back as the step had it; a step past the
+        // skin limits is then put back as it was (Portraits).
+        self.restore_skin_switch(keep_skin);
         self.release_skin_for_history();
     }
 

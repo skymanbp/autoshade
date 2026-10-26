@@ -1243,6 +1243,12 @@ pub(crate) struct UndoStep {
     pub(crate) recipe: EditRecipe,
     pub(crate) base: Option<Arc<image::DynamicImage>>,
     pub(crate) origin: Option<PathBuf>,
+    /// The card's "Keep skin natural" switch on this step (Portraits): the
+    /// switch-on that brings values back within the limits is a step, and
+    /// redoing it has to turn the switch back on with them. A flip that
+    /// changes no value records no step and amends the head instead
+    /// (`commit_now`). None: no photo was open.
+    pub(crate) keep_skin: Option<bool>,
 }
 
 impl UndoStep {

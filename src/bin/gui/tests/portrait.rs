@@ -678,6 +678,102 @@
         assert_eq!(app.redo_stack.len(), 1, "the step forward is still there");
     }
 
+    /// Ctrl+Y after that Ctrl+Z gives back what the user had before it: the
+    /// values within the limits AND the switch on, so the next frame records
+    /// nothing and Ctrl+Z still walks back.
+    ///
+    /// MUTATION THIS CATCHES: drop the switch from the history step (or stop
+    /// `apply_step` putting it back) and the redo leaves the switch off.
+    #[test]
+    fn redo_after_switching_the_skin_guard_on_turns_it_back_on() {
+        let mut app = portrait_app(Lang::En, true);
+        app.active = 0;
+        app.mode_chosen_this_launch = true;
+        let ctx = egui::Context::default();
+        app.reset_history();
+        app.set_keep_skin(false);
+        push_skin(&mut app);
+        app.commit_now();
+        app.set_keep_skin(true);
+        app.commit_now();
+        let read = |app: &mut AutoShadeApp| {
+            let s = crate::panels::portrait::skin_target(&mut app.recipe).unwrap();
+            (s.saturation, s.sharpness, s.texture)
+        };
+        app.undo(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.run_frame(ctx));
+        assert!(!app.keep_skin_on(), "undone: off");
+        app.redo(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.run_frame(ctx));
+        assert_eq!(read(&mut app), (15.0, 0.0, -60.0), "redone: held");
+        assert!(app.keep_skin_on(), "redone: the switch is on again");
+        assert_eq!((app.undo_stack.len(), app.redo_stack.len()), (2, 0), "the frame recorded nothing");
+        app.undo(&ctx);
+        assert_eq!(read(&mut app), (60.0, 40.0, -90.0), "Ctrl+Z still walks back");
+        assert!(!app.keep_skin_on());
+    }
+
+    /// A flip of the switch that changes no value is not a step of its own:
+    /// it belongs to the step on screen, so undo and redo of a later value
+    /// edit leave it as the user set it, and a value edit made while held
+    /// comes back held.
+    ///
+    /// MUTATION THIS CATCHES: let `commit_now` keep the switch the head was
+    /// recorded with when a flip records no step — the Ctrl+Z below turns
+    /// the switch the user turned off back on.
+    #[test]
+    fn undo_and_redo_of_a_value_edit_keep_the_switch_the_user_set() {
+        let mut app = portrait_app(Lang::En, true);
+        app.active = 0;
+        app.mode_chosen_this_launch = true;
+        let ctx = egui::Context::default();
+        app.reset_history();
+        assert!(app.keep_skin_on());
+        let edit = |app: &mut AutoShadeApp, v: f32| {
+            crate::panels::portrait::skin_target(&mut app.recipe).unwrap().saturation = v;
+        };
+        edit(&mut app, 5.0);
+        app.commit_now();
+        app.undo(&ctx);
+        app.redo(&ctx);
+        assert!(app.keep_skin_on(), "a value edit made while held comes back held");
+        app.set_keep_skin(false);
+        app.commit_now();
+        assert_eq!(app.undo_stack.len(), 1, "the flip records no step");
+        edit(&mut app, 10.0);
+        app.commit_now();
+        app.undo(&ctx);
+        assert!(!app.keep_skin_on(), "undo of a later edit keeps the switch off");
+        app.redo(&ctx);
+        assert!(!app.keep_skin_on(), "and so does redo");
+    }
+
+    /// After Ctrl+Z past the switch-on, a new edit starts a new branch: the
+    /// redo step (the switch-on) is gone, and the switch stays off.
+    ///
+    /// MUTATION THIS CATCHES: keep the redo stack across a new step in
+    /// `commit_now`.
+    #[test]
+    fn a_new_edit_after_undoing_the_switch_on_drops_its_redo() {
+        let mut app = portrait_app(Lang::En, true);
+        app.active = 0;
+        app.mode_chosen_this_launch = true;
+        let ctx = egui::Context::default();
+        app.reset_history();
+        app.set_keep_skin(false);
+        push_skin(&mut app);
+        app.commit_now();
+        app.set_keep_skin(true);
+        app.commit_now();
+        app.undo(&ctx);
+        crate::panels::portrait::skin_target(&mut app.recipe).unwrap().saturation = 70.0;
+        app.commit_now();
+        assert!(app.redo_stack.is_empty(), "the new edit drops the redo branch");
+        assert!(!app.keep_skin_on(), "the switch stays off");
+        app.undo(&ctx);
+        assert!(!app.keep_skin_on(), "undoing the new edit puts back an edit past the limits: off");
+    }
+
     /// A paste in Portraits meets each target's switch where it is written:
     /// a target whose switch is on gets the look within the limits on disk;
     /// the open photo, its switch off, gets it as copied.
