@@ -8672,3 +8672,132 @@ fn the_hand_off_breaks_look_error_ties_by_pull_and_keeps_the_gain_bar() {
     assert!(pick_cast_hand_off(walk(), 0.0100 + 1.5 * FIT_QUANT).is_none());
     assert!(pick_cast_hand_off(Vec::new(), 1.0).is_none(), "nothing admitted, nothing handed");
 }
+
+// --- 4b termination and the hand-off's white-balance gates (2026-10-26) ---
+
+/// The 4b do-no-harm loop on a re-fit that does to saturation what the
+/// cast→WB hand-off does, admitted every round, against an end state that
+/// never stops objecting. Before 2026-10-26 the 4b re-fit's hand-off
+/// re-chased saturation from stage 3's start, so `recipe.saturation` came
+/// back at that value each round and the loop never descended. The 4b
+/// re-fit keeps the caller's saturation, so the loop walks 40 → 20 → 10 →
+/// 5 → 2.5 → 0 and stops for want of dial.
+#[test]
+fn the_do_no_harm_loop_descends_when_the_hand_off_would_re_raise_saturation() {
+    use super::solve::{DO_NO_HARM_RESCUE, step_down_until_harmless};
+    let stage_start = 40.0;
+    let mut recipe = EditRecipe { saturation: stage_start, ..Default::default() };
+    let mut seen = Vec::new();
+    let out = step_down_until_harmless(&mut recipe, true, |r| {
+        if let Some(start) = DO_NO_HARM_RESCUE.hand_off_chase_from(stage_start) {
+            r.saturation = start;
+        }
+        seen.push(r.saturation);
+        true
+    });
+    assert_eq!(out, Ok(5), "the loop must descend to zero, not run on: {seen:?}");
+    assert_eq!(seen, vec![20.0, 10.0, 5.0, 2.5, 0.0]);
+    assert_eq!(recipe.saturation, 0.0);
+}
+
+/// …and the bound, on stubs that cannot descend: the pre-fix hand-off
+/// (chase from stage 3's start every round), and a mixer carrying a hue
+/// rotation `halved_hsl` never halves. Both stop at
+/// `DO_NO_HARM_MAX_ROUNDS` and say so through `Err`, which the solve turns
+/// into its warning line; a loop whose end state stops objecting stops at
+/// once.
+#[test]
+fn the_do_no_harm_loop_stops_at_its_bound_when_nothing_descends() {
+    use super::solve::{CastRescue, DO_NO_HARM_MAX_ROUNDS, step_down_until_harmless};
+    let mut chased = EditRecipe { saturation: 40.0, ..Default::default() };
+    let out = step_down_until_harmless(&mut chased, true, |r| {
+        if let Some(start) = CastRescue::ChaseSaturation.hand_off_chase_from(40.0) {
+            r.saturation = start;
+        }
+        true
+    });
+    assert_eq!(out, Err(DO_NO_HARM_MAX_ROUNDS));
+    let mut rotated = EditRecipe::default();
+    rotated.hsl.hue[0] = 10.0;
+    assert_eq!(step_down_until_harmless(&mut rotated, true, |_| true), Err(DO_NO_HARM_MAX_ROUNDS));
+    assert_eq!(rotated.hsl.hue[0], 10.0, "the halving never touches hue");
+    let mut quiet = EditRecipe { saturation: 40.0, ..Default::default() };
+    assert_eq!(step_down_until_harmless(&mut quiet, true, |_| false), Ok(1));
+    assert_eq!(quiet.saturation, 20.0);
+    assert_eq!(step_down_until_harmless(&mut quiet, false, |_| true), Ok(0));
+}
+
+/// A neutral-and-blue frame whose target is the same frame under a cool
+/// white balance: a warm white balance turns the neutrals a hue the target
+/// holds nowhere. Above the default strength the white-balance stage does
+/// not ship that white balance whole, and a hand-off candidate asking for
+/// it is refused on the same reading; at the default neither reads the
+/// gates. The white balance the stage DOES ship clears the hand-off's gates,
+/// because both read one step with one reader (`read_wb_step`).
+#[test]
+fn a_hand_off_white_balance_the_stage_would_shrink_is_refused_above_default() {
+    use super::solve::hand_off_wb_step_refused;
+    use crate::recipe::GradeStrength;
+    let (w, h) = (96u32, 64u32);
+    let src = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+        let l = 0.10 + 0.80 * x as f32 / (w - 1) as f32;
+        let p = if y < h / 2 { [l, l, l] } else { [l * 0.3, l * 0.55, l] };
+        image::Rgb(p.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8))
+    }));
+    let target = render::develop_preview(
+        &src,
+        &EditRecipe { temperature_k: Some(4200.0), ..Default::default() },
+    );
+    let wb_stage = EditRecipe::default();
+    let before_wb = pixels_of(&render::develop_preview(&src, &wb_stage));
+    let tp = pixels_of(&target);
+    let evidence = evidence_model_for(&before_wb, &tp, w, h);
+    let strong = GradeStrength::new(1.0);
+    let budget = FitBudget::for_strength(strong);
+    let warm = (16000.0f32, 0.0f32);
+    let mut warmed = wb_stage.clone();
+    warmed.temperature_k = Some(warm.0);
+    let reading = super::atmosphere::read_wb_step(
+        &before_wb,
+        &pixels_of(&render::develop_preview(&src, &warmed)),
+        &tp,
+        &evidence,
+    );
+    assert!(!reading.admits(budget), "premise: the warm step trips a stage gate (foreign {}, rotated {})", reading.foreign, reading.rotated);
+    assert!(
+        hand_off_wb_step_refused(&src, &wb_stage, warm, (&before_wb, &tp, &evidence), budget, strong),
+        "the hand-off must refuse a white balance the stage's gates refuse"
+    );
+    let default = GradeStrength::default();
+    assert!(
+        !hand_off_wb_step_refused(
+            &src,
+            &wb_stage,
+            warm,
+            (&before_wb, &tp, &evidence),
+            FitBudget::for_strength(default),
+            default,
+        ),
+        "at the default strength the stage reads neither gate, and neither does the hand-off"
+    );
+    // The stage, asked for the same white balance at the same strength.
+    let mut staged = wb_stage.clone();
+    let facts = super::atmosphere::solve_white_balance(
+        &src,
+        &tp,
+        &mut staged,
+        &wb_stage,
+        &evidence,
+        warm,
+        5500.0,
+        budget,
+        strong,
+    );
+    let shipped = (staged.temperature_k.unwrap_or(5500.0), staged.tint);
+    assert_ne!(shipped, warm, "the stage does not ship it whole either");
+    assert!(facts.clamped.is_some() || facts.foreign_hue_withheld, "…and says why");
+    assert!(
+        !hand_off_wb_step_refused(&src, &wb_stage, shipped, (&before_wb, &tp, &evidence), budget, strong),
+        "what the stage ships, the hand-off's gates admit: {shipped:?}"
+    );
+}

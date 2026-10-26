@@ -63,6 +63,47 @@ pub(super) struct WbFacts {
 /// there is (the same frame, regraded) could never be told that its light had
 /// changed colour. Behaviour is unchanged for the Atmosphere caller, line for
 /// line; what is new is that a second caller exists.
+/// What a white-balance STEP did to the frame, read by the white-balance
+/// stage's two content gates: did it paint, or move pixels into, hues the
+/// target holds nowhere, and what evidence-weighted share of the frame did it
+/// re-hue. `before` is the render the stage found (tone, no white balance
+/// yet), `after` the same recipe under the candidate white balance and
+/// nothing else. One reader, two callers: [`solve_white_balance`] above the
+/// default strength, and the cast→WB hand-off, whose candidate white balance
+/// must clear the gates the stage's own would have had to (2026-10-26).
+pub(super) struct WbStepReading {
+    pub(super) foreign: bool,
+    pub(super) rotated: f32,
+}
+
+pub(super) fn read_wb_step(
+    before: &[[f32; 3]],
+    after: &[[f32; 3]],
+    tp: &[[f32; 3]],
+    evidence: &EvidenceModel,
+) -> WbStepReading {
+    WbStepReading {
+        foreign: cast_paints_foreign_hues(before, after, tp)
+            || wb_moves_pixels_into_foreign_hues(before, after, tp),
+        rotated: rehued_share_weighted(before, after, evidence),
+    }
+}
+
+impl WbStepReading {
+    /// Both gates clear: no foreign hue, and a re-hued share inside the
+    /// strength budget's `wb_rotation_share`.
+    pub(super) fn admits(&self, budget: FitBudget) -> bool {
+        !self.foreign && self.rotated <= budget.wb_rotation_share
+    }
+}
+
+/// Whether a white-balance step answers to [`WbStepReading`] at all: above
+/// the shipped default strength only. At or below it the stage persists an
+/// in-budget white balance unread (the pre-F1 path, byte for byte).
+pub(super) fn wb_step_gated(strength: crate::recipe::GradeStrength) -> bool {
+    strength.get() > crate::recipe::GradeStrength::DEFAULT
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn solve_white_balance(
     s_img: &DynamicImage,
@@ -100,7 +141,7 @@ pub(super) fn solve_white_balance(
     let mut wb_rejected_rotation_share = 0.0f32;
     let mut wb_rotation_coverage = 0.0f32;
 
-    if strength.get() <= crate::recipe::GradeStrength::DEFAULT {
+    if !wb_step_gated(strength) {
         // The shipped default is the pre-F1 path byte-for-byte: an in-budget
         // free WB is persisted, while an out-of-budget demand stays as-shot.
         if wb_gains_fit_budget(render::wb_gains(anchor, wb_k, wb_tint), budget) {
@@ -120,9 +161,7 @@ pub(super) fn solve_white_balance(
             candidate.temperature_k = Some(k);
             candidate.tint = tint;
             let after = pixels_of(&render::develop_preview(s_img, &candidate));
-            let foreign = cast_paints_foreign_hues(&before_wb_px, &after, tp)
-                || wb_moves_pixels_into_foreign_hues(&before_wb_px, &after, tp);
-            let rotated = rehued_share_weighted(&before_wb_px, &after, evidence);
+            let WbStepReading { foreign, rotated } = read_wb_step(&before_wb_px, &after, tp, evidence);
             (foreign, rotated, k, tint, after)
         };
         let (foreign, mut rotated, _, _, _after) = evaluate(lambda);
@@ -141,8 +180,8 @@ pub(super) fn solve_white_balance(
             let mut illegal = lambda;
             for _ in 0..32 {
                 let middle = (legal + illegal) * 0.5;
-                let (middle_foreign, middle_rotated, _, _, _) = evaluate(middle);
-                if !middle_foreign && middle_rotated <= budget.wb_rotation_share {
+                let (foreign, rotated, _, _, _) = evaluate(middle);
+                if (WbStepReading { foreign, rotated }).admits(budget) {
                     legal = middle;
                 } else {
                     illegal = middle;

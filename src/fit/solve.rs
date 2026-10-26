@@ -929,7 +929,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // milder rather than thrown away (v1.2.3, `search_cast_projection`)?
     // Only the call that produces the recipe the user gets says yes; see the
     // ordering note at the 4a' loop below for why.
-    let mut fit_cast_stage = |recipe: &mut EditRecipe, rescue: bool| -> CastOutcome {
+    let mut fit_cast_stage = |recipe: &mut EditRecipe, rescue: CastRescue| -> CastOutcome {
         // Cleared per call: the fact must describe the recipe this call
         // produces, not a probe an earlier call admitted.
         cast_admission = None;
@@ -977,7 +977,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             // then judged by all four gates from scratch: a projection that
             // makes the ratio gate fail, or that trips a pixel veto the fitted
             // cast happened to clear, is refused and says so.
-            if rescue
+            if rescue.rescues()
                 && let Some((share, fan_before)) = out.earns_projection()
             {
                 let fitted = [
@@ -1005,6 +1005,28 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                         if !wb_gains_fit_budget(render::wb_gains(anchor, wb.0, wb.1), budget) {
                             return None;
                         }
+                        // Above the default strength the white-balance stage
+                        // answers to two more gates than the budget — foreign
+                        // hue and re-hued share, read on ITS step, from
+                        // `before_wb` to the same recipe under the new white
+                        // balance — and a white balance that ships through the
+                        // hand-off answers to them too, read on the same step
+                        // (`wb_stage` differs from the recipe the stage
+                        // measured in nothing but the white balance). The
+                        // four cast gates below read the CURVE step and cannot
+                        // see it. A candidate the stage would have shrunk is
+                        // refused here rather than shrunk: the walk itself
+                        // tries the nearer white balances, each judged anew.
+                        if hand_off_wb_step_refused(
+                            &s_img,
+                            &wb_stage,
+                            wb,
+                            (&before_wb, &tp, &evidence),
+                            budget,
+                            options.strength,
+                        ) {
+                            return None;
+                        }
                         let mut probe = probe_base.clone();
                         (probe.temperature_k, probe.tint) = (Some(wb.0), wb.1);
                         probe.red_curve = Vec::new();
@@ -1018,10 +1040,17 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                         // old one, the neon street's 18.9 shipped over a
                         // 13000 K white balance and left the building +3.1
                         // a* past its target (measured 2026-10-23).
-                        probe.saturation = wb_stage.saturation;
-                        let mixer = std::mem::take(&mut probe.hsl);
-                        chase_saturation(&mut probe);
-                        probe.hsl = mixer;
+                        // Except from the 4b do-no-harm loop: there the
+                        // saturation is the dial the loop is stepping DOWN,
+                        // and a chase from stage 3's start handed back the
+                        // value the loop had just halved — a round that
+                        // never descends (`CastRescue::KeepSaturation`).
+                        if let Some(start) = rescue.hand_off_chase_from(wb_stage.saturation) {
+                            probe.saturation = start;
+                            let mixer = std::mem::take(&mut probe.hsl);
+                            chase_saturation(&mut probe);
+                            probe.hsl = mixer;
+                        }
                         let under = pixels_of(&render::develop_preview(&s_img, &probe));
                         probe.red_curve =
                             residual_channel_curve_weighted(&under, &tp, 0, &rw_source, &rw_target);
@@ -1143,7 +1172,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         }
         out
     };
-    fit_cast_stage(&mut recipe, false);
+    fit_cast_stage(&mut recipe, CastRescue::Off);
 
     // --- 4a') the mixer must EARN its place against its own ABSENCE ----------
     // Stage 4a judged itself on a render the catch-all had not yet touched,
@@ -1174,7 +1203,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         // flipped from withdrawn to [Orange +18 +18, Blue -18 -2.6] and the
         // two-family HSL pair's flipped from attached to withdrawn — four
         // fixture verdicts moved, none of them this feature's business.
-        fit_cast_stage(&mut neutral, false);
+        fit_cast_stage(&mut neutral, CastRescue::Off);
         let neutral_err = finished_err(&neutral);
         while finished_err(&recipe) > neutral_err + 1e-4 {
             let shrunk = halved_hsl(&recipe.hsl);
@@ -1183,7 +1212,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 hsl_facts.withdrawn = Some(HslWithdrawal::Error);
                 break;
             }
-            fit_cast_stage(&mut recipe, false);
+            fit_cast_stage(&mut recipe, CastRescue::Off);
         }
     }
     // Re-derive so `cast` and the strength-admission fact describe the recipe
@@ -1201,7 +1230,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // state this tree can reach — the census at that loop has the numbers and
     // the reason, which is a fact about how the two colour gates behave in a
     // stepped-down state rather than a hole in the fixture set.
-    let mut cast = fit_cast_stage(&mut recipe, true);
+    let mut cast = fit_cast_stage(&mut recipe, CastRescue::ChaseSaturation);
 
     // --- 4b) do-no-harm — the pipeline-END check ------------------------------
     // Goal: don't hand back a recipe that renders FARTHER from the target
@@ -1263,16 +1292,12 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // move that actually carried pixels through an unmeasured band rode out.
     // Halving a neutral mixer is neutral, so a run where the stage attached
     // nothing is byte-identical to the pre-4a loop.
-    while (err_after > err_before + 1e-4
-        || (end_moves_hue && budget.vetoes == VetoPolicy::Withhold))
-        && (recipe.saturation != 0.0 || !recipe.hsl.is_neutral())
-    {
-        let next = if recipe.saturation.abs() < 4.0 { 0.0 } else { recipe.saturation / 2.0 };
-        recipe.saturation = round1(next);
-        let shrunk = halved_hsl(&recipe.hsl);
-        recipe.hsl = shrunk;
-        cast = fit_cast_stage(&mut recipe, true);
-        end_px = pixels_of(&render::develop_preview(&s_img, &recipe));
+    let objects = |err_after: f32, end_moves_hue: bool| {
+        err_after > err_before + 1e-4 || (end_moves_hue && budget.vetoes == VetoPolicy::Withhold)
+    };
+    let descent = step_down_until_harmless(&mut recipe, objects(err_after, end_moves_hue), |recipe| {
+        cast = fit_cast_stage(recipe, DO_NO_HARM_RESCUE);
+        end_px = pixels_of(&render::develop_preview(&s_img, recipe));
         err_after = look_err_with_evidence(&end_px, &tp, &evidence);
         end_cells = cells.as_ref().and_then(|c| c.region_arm(&sp, &end_px));
         end_moves_hue = moved_unsupported_hue_range_names_vouched(
@@ -1283,6 +1308,15 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             cells.as_ref().zip(end_cells.as_ref().map(|(_, v)| v.as_slice())),
         )
         .is_some();
+        objects(err_after, end_moves_hue)
+    });
+    if let Err(rounds) = descent {
+        eprintln!(
+            "warning: fit do-no-harm stopped at its {rounds}-round bound with the end state still \
+             objecting (saturation {:.1}, mixer neutral: {}); the recipe ships as it stands",
+            recipe.saturation,
+            recipe.hsl.is_neutral(),
+        );
     }
     // TERMINAL delivered-fan check — see `withdraw_curves_for_delivered_fan`
     // for why a calibrated per-stage gate needs a structural re-read here.
@@ -1542,4 +1576,94 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         );
     }
     report
+}
+
+/// Who may rescue a fan-convicted cast, and how. `Off` judges the cast as
+/// the gates measured it; the two rescuing callers both try the cast→WB
+/// hand-off and then the projection, and differ only in what the hand-off
+/// does to saturation. `ChaseSaturation` (the call that ships the finished
+/// recipe, before 4b) re-chases it from stage 3's start on each candidate
+/// white balance, because a moved white balance carries a different mean
+/// chroma. `KeepSaturation` (the 4b do-no-harm loop) keeps the caller's: the
+/// loop owns that dial and is stepping it down, and a chase handed back the
+/// value the loop had just halved, so a hand-off admitted every round kept
+/// the loop from ever descending (found by reading, 2026-10-26).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CastRescue {
+    Off,
+    ChaseSaturation,
+    KeepSaturation,
+}
+
+impl CastRescue {
+    pub(super) fn rescues(self) -> bool {
+        self != CastRescue::Off
+    }
+
+    /// The saturation a hand-off candidate's chase starts from, or `None`
+    /// when the candidate keeps the caller's saturation and is not chased.
+    pub(super) fn hand_off_chase_from(self, stage_start: f32) -> Option<f32> {
+        (self == CastRescue::ChaseSaturation).then_some(stage_start)
+    }
+}
+
+/// The rescue the 4b do-no-harm loop's re-fit runs with.
+pub(super) const DO_NO_HARM_RESCUE: CastRescue = CastRescue::KeepSaturation;
+
+/// Hard bound on the 4b do-no-harm loop's rounds. Saturation halving from
+/// the model cap reaches zero in at most six rounds and a mixer band halving
+/// from its budget reaches neutral in at most eight, so a solve that needs
+/// more is not descending: a re-fit that raises what the round lowered, or a
+/// mixer carrying a hue rotation the halving never touches (`halved_hsl`
+/// keeps `hue`, `Hsl::is_neutral` reads it).
+pub(super) const DO_NO_HARM_MAX_ROUNDS: u32 = 16;
+
+/// The 4b loop's control, separated from its measurements so its
+/// termination is testable: while the end state `objects` and a dial is
+/// left, halve saturation (zero under 4) and the mixer, then let `refit`
+/// re-fit the cast and say whether the end state still objects. `Ok(rounds)`
+/// when it stopped objecting or ran out of dial; `Err(rounds)` at
+/// [`DO_NO_HARM_MAX_ROUNDS`], with the recipe as the last round left it.
+pub(super) fn step_down_until_harmless(
+    recipe: &mut EditRecipe,
+    mut objects: bool,
+    mut refit: impl FnMut(&mut EditRecipe) -> bool,
+) -> Result<u32, u32> {
+    let mut rounds = 0;
+    while objects && (recipe.saturation != 0.0 || !recipe.hsl.is_neutral()) {
+        if rounds == DO_NO_HARM_MAX_ROUNDS {
+            return Err(rounds);
+        }
+        let next = if recipe.saturation.abs() < 4.0 { 0.0 } else { recipe.saturation / 2.0 };
+        recipe.saturation = round1(next);
+        let shrunk = halved_hsl(&recipe.hsl);
+        recipe.hsl = shrunk;
+        objects = refit(recipe);
+        rounds += 1;
+    }
+    Ok(rounds)
+}
+
+/// The white-balance stage's content gates, put to a cast→WB hand-off
+/// candidate: `true` when, above the default strength, moving `wb_stage`
+/// (the recipe as the white-balance stage left it) to `wb` paints or moves
+/// pixels into a foreign hue, or re-hues more than `wb_rotation_share`,
+/// measured from `before_wb` exactly as [`super::atmosphere::solve_white_balance`]
+/// measures its own step. At or below the default the stage reads neither
+/// gate and neither does this.
+pub(super) fn hand_off_wb_step_refused(
+    s_img: &DynamicImage,
+    wb_stage: &EditRecipe,
+    wb: (f32, f32),
+    (before_wb, tp, evidence): (&[[f32; 3]], &[[f32; 3]], &EvidenceModel),
+    budget: FitBudget,
+    strength: crate::recipe::GradeStrength,
+) -> bool {
+    if !super::atmosphere::wb_step_gated(strength) {
+        return false;
+    }
+    let mut step = wb_stage.clone();
+    (step.temperature_k, step.tint) = (Some(wb.0), wb.1);
+    let after = pixels_of(&render::develop_preview(s_img, &step));
+    !super::atmosphere::read_wb_step(before_wb, &after, tp, evidence).admits(budget)
 }
