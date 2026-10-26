@@ -3864,7 +3864,7 @@ fn depth_protect_and_layer_paths_are_refused_at_load_like_a_mask_path() {
     let base = std::env::temp_dir().join(format!("autoshade-store-test-rasters-guard-{}", std::process::id()));
     std::fs::create_dir_all(&base).unwrap();
     let sentinel = base.join(".invalid-mask-reference");
-    let mut r = recipe_with_rasters(r"\\host\share\d.png", "//host/share/p.png", r"..\..\outside.png");
+    let mut r = recipe_with_rasters(r"\\host\share\d.png", "//host/share/p.png", "../../outside.png");
     resolve_mask_paths(&mut r, &base);
     let (d, p, l) = raster_refs(&mut r);
     for (what, got) in [("depth map", &d), ("protect matte", &p), ("layer", &l)] {

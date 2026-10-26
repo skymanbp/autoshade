@@ -816,7 +816,7 @@ fn the_payload_carries_depth_protect_and_layer_paths_bare_and_refuses_a_share() 
     let lb = found.recipe.lens_blur.as_mut().unwrap();
     lb.depth_map = r"\\host\share\d.png".into();
     lb.protect = Some("//host/share/p.png".into());
-    found.recipe.pixel_layers[0].path = r"..\..\outside.png".into();
+    found.recipe.pixel_layers[0].path = "../../outside.png".into();
     let crs_only = xmp_to_recipe(&bare_document(&r, None));
     let back = payload::restore(crs_only, found, None, None, Some(&dev), false, None);
     let sentinel = dev.join(".invalid-mask-reference");
