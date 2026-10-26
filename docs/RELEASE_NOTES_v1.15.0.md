@@ -237,7 +237,12 @@ release battery: library 1726 → 1747, **+21 / −0**; GUI 276 → 289, **+13 /
 last, failed one library test in both lanes: the new model-slot test left a
 temporary file in the shared folder for the 300 ms it held the slot, and an
 older test counting those files ran beside it; the two tests now take turns
-(a test-module change only), and the battery above is the re-run.
+(a test-module change only), and the battery above is the re-run. After the
+version bump, CI's Linux and macOS test jobs failed two of the new guard tests:
+their escaping raster path was spelled with backslashes, which on those systems
+is a file name inside the store rather than a path out of it; the tests now
+spell it with forward slashes, the code under test is unchanged, and the tag
+carries that fix.
 
 Final check, portraits: this release adds no new real portrait sample to the
 final check. What **🤖 Remove blemishes** does is pinned by tests instead: a
