@@ -11,12 +11,12 @@ An editable, Lightroom-ready recipe instead of AI pixels.
 
 <br />
 
-[![Release](https://img.shields.io/badge/release-v1.13.0-146b5a?style=flat-square)](https://github.com/skymanbp/autoshade/releases/tag/v1.13.0)
+[![Release](https://img.shields.io/badge/release-v1.14.0-146b5a?style=flat-square)](https://github.com/skymanbp/autoshade/releases/tag/v1.14.0)
 [![Platforms](https://img.shields.io/badge/Windows%20·%20macOS%20·%20Linux-0b4b3f?style=flat-square)](#install-and-quickstart)
 [![Rust](https://img.shields.io/badge/Rust-1.94-a34b29?style=flat-square&logo=rust&logoColor=white)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-MIT-4f5e5a?style=flat-square)](LICENSE)
 
-**[Download v1.13.0](https://github.com/skymanbp/autoshade/releases/tag/v1.13.0)**
+**[Download v1.14.0](https://github.com/skymanbp/autoshade/releases/tag/v1.14.0)**
 &nbsp;·&nbsp; [Website](https://autoshade.dev/)
 &nbsp;·&nbsp; [Manual](docs/USER_MANUAL.md)
 &nbsp;·&nbsp; [Showcase](docs/SHOWCASE.md)
@@ -141,7 +141,7 @@ Six techniques you will not find in another RAW developer. Each is written up in
 
 | What | Measured |
 |---|---|
-| Automated test battery | 1702 library / 25 CLI / 265 GUI / 2+2 contract tests |
+| Automated test battery | 1726 library / 25 CLI / 276 GUI / 2+2 contract tests |
 | RAW coverage | 24 extensions · 725 camera bodies · nine-camera zoo 9/9 |
 | Reverse-fit, stone viaduct | look error 0.161 → 0.023 at confidence 0.63 |
 | Reverse-fit, desert canyon | look error 0.129 → 0.048 · sky ΔE 3.8 |
@@ -155,11 +155,11 @@ Six techniques you will not find in another RAW developer. Each is written up in
 
 | Platform | Get it |
 |---|---|
-| **Windows** | `AutoShade-Setup-1.13.0.exe` — per-user, no admin. Or the portable `autoshade-1.13.0-windows-x64.zip` |
-| **macOS** | `AutoShade-1.13.0-macos-universal.zip` (Apple silicon + Intel), or `-macos-cli.zip` |
-| **Linux** | `AutoShade-1.13.0-linux-x64.zip` — command line only |
+| **Windows** | `AutoShade-Setup-1.14.0.exe` — per-user, no admin. Or the portable `autoshade-1.14.0-windows-x64.zip` |
+| **macOS** | `AutoShade-1.14.0-macos-universal.zip` (Apple silicon + Intel), or `-macos-cli.zip` |
+| **Linux** | `AutoShade-1.14.0-linux-x64.zip` — command line only |
 
-All on the **[v1.13.0 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.13.0)**. Python 3 is needed only for the local AI sidecars; model weights download on first use.
+All on the **[v1.14.0 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.14.0)**. Python 3 is needed only for the local AI sidecars; model weights download on first use.
 
 > [!NOTE]
 > **macOS:** the app is ad-hoc signed, not notarised — on first launch use **System Settings → Privacy & Security → Open Anyway** (once per machine).
@@ -195,11 +195,11 @@ mirrored byte-exact on [Hugging Face](https://huggingface.co/Azng0/autoshade-mir
 |---|---:|---|
 | `autoshade.exe` (CLI) | 23,201,792 bytes | `9b1f6acf1208147be2a756c4088e3e15162df06fa206b8c4d0c3ab27638e1f99` |
 | `autoshade-gui.exe` (desktop app) | 30,367,232 bytes | `bda16a8335138d4d1959c76ca0275e911a47010edaddf880c6a930ddcfbe5c71` |
-| `AutoShade-Setup-1.13.0.exe` (installer) | 15,497,924 bytes | `4e7dfb16d87c14e82c28668fdecffe7576a4c67e966b675321c4a26cf47fba69` |
-| `autoshade-1.13.0-windows-x64.zip` (portable archive) | 20,924,078 bytes | `8d0015ce8adab12274adb840e5241bfdf850319f0a8020460bc49cafbe6e3ae2` |
-| `AutoShade-1.13.0-macos-universal.zip` (macOS app bundle) | 42,070,434 bytes | `c589a583f712268b4dd518ec7dd75f2d9847deb451774c1e8396711fbdb7e2af` |
-| `AutoShade-1.13.0-linux-x64.zip` (Linux command line only) | 10,071,761 bytes | `afcc3df0adc6f6783c25429f03383c77b8bb1b6ef494dbde7469019f574311fc` |
-| `AutoShade-1.13.0-macos-cli.zip` (macOS command line only) | 18,185,561 bytes | `b3ae3013a63db3e4150e0fffcea35f7aaa96449c000a345023420ebb2e359946` |
+| `AutoShade-Setup-1.14.0.exe` (installer) | 15,497,924 bytes | `4e7dfb16d87c14e82c28668fdecffe7576a4c67e966b675321c4a26cf47fba69` |
+| `autoshade-1.14.0-windows-x64.zip` (portable archive) | 20,924,078 bytes | `8d0015ce8adab12274adb840e5241bfdf850319f0a8020460bc49cafbe6e3ae2` |
+| `AutoShade-1.14.0-macos-universal.zip` (macOS app bundle) | 42,070,434 bytes | `c589a583f712268b4dd518ec7dd75f2d9847deb451774c1e8396711fbdb7e2af` |
+| `AutoShade-1.14.0-linux-x64.zip` (Linux command line only) | 10,071,761 bytes | `afcc3df0adc6f6783c25429f03383c77b8bb1b6ef494dbde7469019f574311fc` |
+| `AutoShade-1.14.0-macos-cli.zip` (macOS command line only) | 18,185,561 bytes | `b3ae3013a63db3e4150e0fffcea35f7aaa96449c000a345023420ebb2e359946` |
 | `autoshade-raw-denoise-v2.pth` (RAW denoiser weights, fetched on demand from the v1.6.0 release) | 130,590,559 bytes | `ffafa40a53f52092149db2fcf03636117ad6855e1068142d4f6b03b634e9f9c4` |
 
 </details>
@@ -271,12 +271,12 @@ preview:** 12 of the 24 formats store none. They are `orf`, `srw`, `nrw`, `mef`,
 **Rust** (rustc/cargo 1.94, edition 2024) · rawler · image · qcms · rayon · egui/eframe · tiny_http — **Python** sidecars on PyTorch.
 
 RAW decode, 24 formats, 725 bodies · deterministic f32 develop engine · hand-rolled XMP layer (no XML crate) for byte-exact Lightroom merges.
-The current battery is **1702 library (1687 pass + 15 `#[ignore]`d forensic probes) / 25 CLI / 265 GUI / 2+2 contract** tests.
+The current battery is **1726 library (1711 pass + 15 `#[ignore]`d forensic probes) / 25 CLI / 276 GUI / 2+2 contract** tests.
 Per-subsystem notes: [In depth → Implementation](docs/DEEP_DIVE.md#implementation) · equations and provenance: [TECH_STACK.md](docs/TECH_STACK.md).
 
 ## Status and limitations
 
-- **Release gates at v1.13.0** cover the CLI, desktop GUI, sidecar contracts, format fixtures and the deterministic renderer.
+- **Release gates at v1.14.0** cover the CLI, desktop GUI, sidecar contracts, format fixtures and the deterministic renderer.
 - **Not in scope:** bit-exact Adobe rendering (parity is measured, not identical), an exact X-Trans demosaic, a notarised macOS build, a Linux desktop app.
 - **Honest markers:** AI masks are local re-creations, not Adobe's pixels; linear masks are not pixel-closed (radial closes 41/41 to ≤ 1 px); the macOS app is CI-verified but has no reported interactive users yet.
 - Release ledger and rulings: [ROADMAP.md](docs/ROADMAP.md).
