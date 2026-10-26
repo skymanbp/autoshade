@@ -2819,8 +2819,8 @@ mod tests {
     /// byte-identical.
     #[test]
     fn a_raw_sources_ai_cache_key_names_the_sensor_develop_frame() {
-        let key = ai_cache_key(Path::new("D:/rolls/2024/DSC0001.ARW"), 2, 0.5, 0.5, 0);
-        assert_ne!(frame_scoped_key(key.clone(), Path::new("D:/rolls/2024/DSC0001.ARW")), key);
-        assert_eq!(frame_scoped_key(key.clone(), Path::new("D:/masters/DSC0001.heal.png")), key);
+        let key = ai_cache_key(Path::new("D:/rolls/2024/roll-0001.ARW"), 2, 0.5, 0.5, 0);
+        assert_ne!(frame_scoped_key(key.clone(), Path::new("D:/rolls/2024/roll-0001.ARW")), key);
+        assert_eq!(frame_scoped_key(key.clone(), Path::new("D:/masters/roll-0001.heal.png")), key);
     }
 }
