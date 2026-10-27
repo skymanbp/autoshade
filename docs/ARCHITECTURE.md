@@ -1,6 +1,11 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.15.1 — the six leftovers v1.15.0 recorded are closed:
+> Status: **implemented** (v1.16.0 — the reverse fit measures the target's geometry
+> and pairs in the sensor frame: a lens-corrected export is brought back through
+> the profile's own map and its ring outside the field is absent evidence, an
+> uncorrected one keeps its geometry, and `apply` with a sidecar stamps the
+> lens profile the desktop app stamps;
+> v1.15.1 — the six leftovers v1.15.0 recorded are closed:
 > both mixer loops bounded, the store allowance held to the folders the store
 > owns, a photo-less sidecar read never keeps a loose raster path, redo puts
 > the skin guard back with the values, the refusal hints name the configured

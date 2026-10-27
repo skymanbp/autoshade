@@ -69,4 +69,20 @@ uncorrected target writes the profile's distortion and CA switches off.
 
 ## Gates
 
-待填_GATES
+The release battery (`scripts/release_battery.sh`: the library, the desktop
+app and command line, and the calibration run, on a frozen copy of the release
+code at `1fa9e89`, with the calibration photos and the denoiser weights in
+reach): library **1744 passed / 0 failed / 15 ignored** (847.46 s), CLI
+**26 / 0**, contract 2 + 2, doc-tests 0, GUI **288 / 0 / 4**, calibration run
+**1744 / 0 / 15** (977.47 s; the same seven environment-gated tests as in
+every battery said their sample set was absent and passed without it);
+`audit_i18n` 3 findings on the snapshot — the three new target-geometry rationale sentences had no Chinese line — and 0 once the translations were added, the font check (923 of 924 code points embedded, one
+left to egui's bundle) and `check_doc_drift` (0 findings);
+clippy 0 warnings on both feature sets; the Python suite under `python/` 109
+tests, all passing (none skipped); `check_docs.py
+--gates` 28 / 4 PASS / FAIL on the snapshot — the test-count claims, still
+at v1.15.1's figures — and **32 / 0 / 0 PASS / FAIL / SKIP** once the counts were
+moved. By name against the v1.15.1 release battery: library 1754 → 1759 (+5 / −0); GUI
+292 → 292 (+0 / −0); CLI 25 → 26, **+1 / −0**. The reverse fit changed, so the reference
+pairs were fitted again by the installed v1.15.1 command line and by this build:
+on the four pairs exported with the lens profile on, the look error after the fit fell from 0.023 / 0.025 / 0.034 / 0.035 to 0.009 / 0.006 / 0.011 / 0.013 (their recipes differ from v1.15.1's throughout, their renderings by a mean of 4.6–8.6 codes of 255 against v1.15.1's); the pair exported without the profile and the two generated references read undecided — recipes differing from v1.15.1's only by the rationale's geometry note, renderings identical (the two generated references) or within one code (the uncorrected pair). The three-way sheets (target | v1.15.1 | this build) were viewed for every pair.

@@ -315,7 +315,7 @@ look unchanged, the 1:1 window's grain 3.1 → 0.6 codes.
   first, failed them, and were refused.
 
 Details: [docs/TECH_STACK.md#raw-denoise](TECH_STACK.md#raw-denoise) and
-the release notes, [docs/RELEASE_NOTES_v1.15.1.md](RELEASE_NOTES_v1.15.1.md).
+the release notes, [docs/RELEASE_NOTES_v1.16.0.md](RELEASE_NOTES_v1.16.0.md).
 
 ## 6. The camera's own look is read from the picture, like with like
 
