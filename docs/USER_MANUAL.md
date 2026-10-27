@@ -223,12 +223,17 @@ them, with the default Lightroom itself uses for the kind of file — 40 on a
 RAW, 0 on a JPEG or TIFF — so a RAW you never sharpened here is sharpened the
 way Lightroom sharpens it by default, a sidecar that says nothing about the
 amount lets Lightroom keep its own, and dragging the slider to 0 on a RAW is a
-real 0. Since v1.6.5 the Sharpening slider is calibrated against Lightroom's on
-a measured frame: the same number sharpens about the same, light edges and
-star cores lift the way Lightroom's do, the dark ring around a bright star
-digs as deep as Lightroom's and no deeper, and deep shadows are left alone.
-The two noise reductions are AutoShade's own, built from what Adobe documents
-about each slider — close to Lightroom, not identical.
+real 0. Since v1.17.0 all four Sharpening sliders are calibrated against
+Lightroom's engine (Adobe Camera Raw, rendering a measured night frame): the
+same Amount, Radius, Detail and Masking sharpen about the same, light edges
+and star cores lift the way Lightroom's do, the dark ring around a bright star
+digs as deep as Lightroom's and no deeper, deep shadows are left alone,
+Masking spares flat sky the way Lightroom's does, and a sharpened pixel keeps
+its colour's proportions instead of being lightened toward grey. Detail 0 and
+Amounts past 80 are the least exact. The Luminance and Color noise reductions
+are fitted to the same renders (Color closely; Luminance smooths noise about
+as far as Lightroom's but is not the same filter); their Detail, Contrast and
+Smoothness sliders are AutoShade's own, built from what Adobe documents.
 
 The **Lens** fold finishes the set since v1.5.0. **Remove chromatic
 aberration** used to be carried to the sidecar and nothing else — it is an
@@ -961,7 +966,12 @@ sources get recipe JSON but no RAW XMP. `apply` also takes a Lightroom `.xmp`
 sidecar in place of the recipe, and since v1.16.0 it stamps the camera's lens
 profile from the sidecar's own lens switch exactly as the desktop app does when
 it opens the photo beside that sidecar, so one sidecar renders one geometry on
-both surfaces. `auto` is `analyze` plus render.
+both surfaces. Since v1.17.0 a sidecar renders from where Lightroom starts:
+Adobe's baseline exposure for the body (inferred from the camera profiles
+Adobe installed for it, and said in one line) and, for a profile that states no
+tone curve of its own, such as Adobe Standard, Adobe's default curve. What
+still differs is the creative profile's colour table and Adobe's colour matrix.
+`auto` is `analyze` plus render.
 `batch` analyzes RAWs by default, skips baked photos unless `--include-baked`
 is set (avoiding duplicate analysis and billing for RAW+JPEG pairs), and
 defaults to three photos in flight; `--long-edge` on `batch` requires

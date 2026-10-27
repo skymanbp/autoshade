@@ -76,19 +76,21 @@ fn sharpening_overshoots_a_step_and_leaves_a_flat_field_alone() {
 }
 
 #[test]
-fn detail_zero_damps_the_halo_detail_hundred_does_not() {
-    // A 0.15 / 0.45 step: the Detail-100 overshoot at Amount 150 needs headroom
-    // under the luma clamp at 1.0 (on the 0.3 / 0.6 step it clips to 0.4).
+fn detail_is_the_gain_on_the_finest_signal() {
+    // A small step (0.15 / 0.17), well under every cap: what Detail does shows
+    // whole. On the oracle Detail 0 took the bright side's gain to 0.36 of
+    // Detail 25's and Detail 100 to 2.4 of it; the caps barely moved.
     let overshoot = |detail: f32| {
-        let mut s = frame(32, 4, |x, _| if x < 16 { [0.15; 3] } else { [0.45; 3] });
-        sharpen(&mut s, 32, 4, &sharp(1.5, detail, 0.0), FilmScale::NATIVE, everywhere);
-        s[16][0] - 0.45
+        let mut s = frame(32, 4, |x, _| if x < 16 { [0.15; 3] } else { [0.17; 3] });
+        sharpen(&mut s, 32, 4, &sharp(0.4, detail, 0.0), FilmScale::NATIVE, everywhere);
+        s[16][0] - 0.17
     };
-    let (low, high) = (overshoot(0.0), overshoot(1.0));
-    // Detail 0's cap on the bright side at Amount 150, the law's own number.
-    let cap0 = cap_at_detail(SHARPEN.cap_bright * (1.5f32 / 0.4).powf(SHARPEN.cap_power), 0.0);
-    assert!(low > 0.0 && low <= cap0 + 1e-4, "Detail 0 caps the overshoot: {low} vs {cap0}");
-    assert!(high > 3.0 * low, "Detail 100 lets it through: {high} vs {low}");
+    let (low, mid, high) = (overshoot(0.0), overshoot(0.25), overshoot(1.0));
+    assert!(low > 0.0 && low < 0.5 * mid, "Detail 0 sharpens less: {low} vs {mid}");
+    assert!(high > 2.0 * mid, "Detail 100 sharpens more: {high} vs {mid}");
+    // The factor runs linearly in its logarithm between the measured ends.
+    let half = detail_factor(SHARPEN.detail0.gain_bright, SHARPEN.detail100.gain_bright, 0.125);
+    assert!((half - SHARPEN.detail0.gain_bright.sqrt()).abs() < 1e-6, "{half}");
 }
 
 #[test]
@@ -132,11 +134,11 @@ fn negative_local_sharpness_softens() {
 #[test]
 fn the_dark_halo_digs_with_the_pixels_own_luminance() {
     // Two steps of one height (0.30) at two levels, at Lightroom's RAW default
-    // of 40. The law's dark cap is `dark_cap_luma·Y₀ − dark_cap_free·f` on the
-    // pixel's OWN luminance, so the dark side of the dim step (0.10 → 0.40)
+    // of 40. The law's dark cap is a table over the pixel's OWN luma (0.0045
+    // at 0.10, 0.14 at 0.40), so the dark side of the dim step (0.10 → 0.40)
     // hardly dips while the dark side of the bright step (0.40 → 0.70) dips by
-    // two orders more — the ring Lightroom's export dug around a bright star
-    // and not around a faint one. The light side of both steps lifts alike.
+    // two orders more — the ring Camera Raw digs around a bright star and not
+    // around a faint one. The light side of both steps lifts alike.
     let edge = |lo: f32, hi: f32| {
         let mut s = frame(32, 4, |x, _| if x < 16 { [lo; 3] } else { [hi; 3] });
         sharpen(&mut s, 32, 4, &sharp(0.4, 0.25, 0.0), FilmScale::NATIVE, everywhere);

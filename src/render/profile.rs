@@ -14,6 +14,19 @@
 //! and `step2ApplyTile`): reference-space matrix → HSV → HueSatMap → RGB →
 //! baseline-exposure scale → HSV → LookTable → RGB → ProfileToneCurve.
 //!
+//! # Where a sidecar starts (v1.17.0)
+//!
+//! Two numbers come from Adobe's DNG SDK (`dng_render.cpp`) rather than from
+//! the profile file, because Lightroom's rendering starts from them and the
+//! file alone does not carry them. The EXPOSURE is the body's
+//! `BaselineExposure` plus the profile's `BaselineExposureOffset` (the body's
+//! number inferred from its camera-matching profiles, [`crate::dcp::Baseline`]);
+//! it is clipped at white where the SDK's exposure ramp clips. The TONE CURVE
+//! is the profile's own when it states one and Adobe's default curve when it
+//! does not — "Adobe Standard" states none. Measured on p39 against
+//! Lightroom's own export with no develop settings: without these two the
+//! midtones rendered ~17 L darker and the highlights ~20 L darker.
+//!
 //! # What is rendered, and the one thing that is not
 //!
 //! The tables and the tone curve are rendered. The profile's own COLOUR MATRIX
@@ -67,7 +80,9 @@ pub(crate) struct Stage {
     hue_sat: Option<Table>,
     look: Option<Table>,
     tone: Option<Vec<f32>>,
-    /// `2^BaselineExposureOffset`, as a linear gain.
+    /// `2^(BaselineExposure + BaselineExposureOffset)`, as a linear gain — the
+    /// body's baseline and the profile's offset, Adobe's
+    /// `TotalBaselineExposure`.
     gain: f32,
 }
 
@@ -80,19 +95,31 @@ impl Stage {
     /// — takes the FIRST hue/sat map, because a profile that ships only one
     /// ships it as Data1 and guessing a temperature to blend with would be
     /// inventing a measurement.
+    ///
+    /// `baseline_ev` is Adobe's `BaselineExposure` for the body
+    /// ([`crate::dcp::baseline_exposure`]); the profile's own offset is added
+    /// to it, as the DNG SDK does.
+    ///
+    /// A profile that states no usable tone curve renders through Adobe's
+    /// DEFAULT curve ([`acr3_default::ACR3_DEFAULT`]): `dng_render` starts
+    /// from that curve and replaces it only `if (profile &&
+    /// profile->ToneCurve ().IsValid ())`. A stated straight curve is a valid
+    /// curve, so it stays the identity.
     pub(crate) fn build(
         profile: &Profile,
         space: super::ExportColorSpace,
         kelvin: Option<f32>,
+        baseline_ev: f32,
     ) -> Option<Self> {
         let hue_sat = blend_calibrations(profile, kelvin);
         let look = profile.look_table.clone();
-        let tone = tone_lut(&profile.tone_curve);
-        let gain = if profile.baseline_exposure_offset == 0.0 {
-            1.0
+        let tone = if states_a_curve(&profile.tone_curve) {
+            tone_lut(&profile.tone_curve)
         } else {
-            profile.baseline_exposure_offset.exp2()
+            Some(acr3_default::ACR3_DEFAULT.to_vec())
         };
+        let total_ev = baseline_ev + profile.baseline_exposure_offset;
+        let gain = if total_ev == 0.0 || !total_ev.is_finite() { 1.0 } else { total_ev.exp2() };
         if hue_sat.is_none() && look.is_none() && tone.is_none() && gain == 1.0 {
             return None;
         }
@@ -118,10 +145,20 @@ impl Stage {
             t.apply(&mut hsv);
             r = from_hsv(hsv);
         }
-        if self.gain != 1.0 {
-            for c in &mut r {
-                *c *= self.gain;
-            }
+        // The exposure ramp, where the DNG SDK puts it: after the hue/sat map,
+        // before the look table and the curve, per channel, in linear light —
+        // and CLIPPED at white, `Min ((x − black)·slope, 1)` in
+        // `dng_function_exposure_ramp::Evaluate`. So nothing past 1 reaches the
+        // look table or the curve, whatever the gain. (The SDK's ramp also
+        // carries a small default black subtraction, `fShadows = 5` → 0.005;
+        // it is not rendered: with the gain and the default curve the p39 flat
+        // sidecar's shadows (Lightroom L < 35) sit at ΔL +1.66, inside ±2.)
+        // A NEGATIVE total, which only arises when the body's baseline is
+        // unknown and a camera-matching profile's offset is left uncancelled,
+        // is rendered as the linear gain it states; the SDK instead darkens it
+        // through `dng_function_exposure_tone`, which keeps white at white.
+        for c in &mut r {
+            *c = (*c * self.gain).min(1.0);
         }
         if let Some(t) = &self.look {
             let mut hsv = to_hsv(r);
@@ -216,6 +253,16 @@ fn illuminant_kelvin(code: u16) -> Option<f32> {
     })
 }
 
+/// Whether the profile states a tone curve this reader can use: at least two
+/// distinct knots inside [0, 1]. The SDK's `IsValid` question — a profile
+/// answering no renders through Adobe's default curve instead.
+fn states_a_curve(knots: &[[f32; 2]]) -> bool {
+    let mut xs: Vec<f32> = knots.iter().map(|k| k[0]).filter(|x| (0.0..=1.0).contains(x)).collect();
+    xs.sort_by(f32::total_cmp);
+    xs.dedup();
+    xs.len() >= 2
+}
+
 /// The profile's tone curve as a lookup over [0, 1], or `None` for a profile
 /// that states none or states an identity.
 fn tone_lut(knots: &[[f32; 2]]) -> Option<Vec<f32>> {
@@ -281,10 +328,10 @@ fn adobe_tone(rgb: [f32; 3], lut: &[f32]) -> [f32; 3] {
 /// clipped — a highlight outside the working gamut is exactly what the
 /// wide-gamut path exists to carry — but continued along the chord through
 /// the origin, `lut[n−1]·x`: the identity for a curve ending at (1, 1), so a
-/// value past white passes through untouched. (Continuing at the shoulder's
-/// own tangent instead would compress every such highlight; the two differ
-/// on real photographs, so the choice waits on the profile fixtures rather
-/// than on this comment.) At and below 0 the answer is the curve's own start
+/// value past white passes through untouched. ([`Stage::apply`] clips at white
+/// before the curve since v1.17.0, as the DNG SDK's exposure ramp does, so the
+/// stage no longer hands this arm anything; it stays the answer for a caller
+/// that does.) At and below 0 the answer is the curve's own start
 /// — [`Stage::apply`] clamps every channel before the tables, so nothing
 /// below 0 reaches here, and 0 itself is the curve's first sample. Until
 /// 2026-09-24 the bottom read `lut[0]·max(x, 0)`, which can only ever be ±0.
@@ -338,6 +385,8 @@ fn from_hsv(hsv: [f32; 3]) -> [f32; 3] {
         _ => [v, p, q],
     }
 }
+
+mod acr3_default;
 
 #[cfg(test)]
 mod tests;

@@ -185,6 +185,15 @@ finished develop, which carries the camera base look, and is reported.
   v2. A return of the input's own 3×3 star cores after the network was measured
   and withdrawn (+40 % spikes in the flat blocks of a daylight frame, colour
   noise beside faint stars).
+- Hot pixels against Camera Raw (v1.17.0): of the 89 sites the rule maps on
+  the star frame, 86 lie inside the default crop, and Camera Raw's flat render
+  (every slider 0, sensor size, 16 bits) shows none of them — the brightest
+  pixel within 1 px of a site stands 9.66 / 255 (median; max 37.85) over the
+  ring 3–5 px away, the same as at 200 000 random places (median 8.49, 99.9th
+  percentile 119.87, the threshold used) and as on this engine's mapped render
+  (10.90); stars whose brightest sample stands as far above its background as
+  the sites' do read 137.3 there. Camera Raw maps hot pixels in an ordinary
+  develop too, so this one doing so since v1.6.0 is the same behaviour.
 - Hot pixels on ten 61 MP frames: 86 / 20 / 77 sites inside the picture on
   three night frames, none on the fourth; 0 / 0 / 0 / 6 / 0 / 4 on ordinary
   frames; about 0.1 s; a frame with no mappable site renders byte-identically.
@@ -321,6 +330,16 @@ matrix and the working-space encode: reference matrix → HSV → `HueSatMap` �
 RGB → baseline-exposure gain → HSV → `LookTable` → RGB → tone curve, which is
 the order RawTherapee's `rtengine/dcp.cc` documents. Nothing Adobe ships is
 bundled; a machine with no profiles gets a named refusal.
+
+- Default tone curve (v1.17.0): a profile with no `ProfileToneCurve` renders
+  through Adobe's default curve, the 1025-sample `kTable` of
+  `dng_tone_curve_acr3_default::Evaluate` in the Adobe DNG SDK's
+  `dng_render.cpp`, © 2006–2007 Adobe Systems Incorporated, used under the DNG
+  SDK licence (which permits use, modification and distribution). Embedded in
+  `render/profile/acr3_default.rs`; RawTherapee's
+  `adobe_camera_raw_default_curve` is the same table to the last digit. The
+  stage's gain adds the body's `BaselineExposure`, inferred from the body's
+  camera-matching profiles (`dcp::baseline_exposure`).
 
 - Table entry: `(hue shift in degrees, saturation scale, value scale)`, stored
   `index = (val * hueDivisions + hue) * satDivisions + sat` (**measured** — at
@@ -489,26 +508,44 @@ supposed to remove.
   (**designed**). This retires the V2 §4c/§4d rules (sharpening σ =
   `clamp(0.0008·short_edge, 0.7, 2.0)` raster px, NR at a raster-pixel radius),
   under which one slider value meant two structures at preview and at export.
-- Sharpening (v1.6.5, **measured against Lightroom 9.4**): unsharp mask on
-  luma, true Gaussian σ = 0.75 × Radius film px (Radius 0.5–3.0; an absent key
-  reads Lightroom's 1.0), sampled no finer than 0.6 raster px with the amount
-  faded by the ratio of the two `1 − Ĝ` transfers at Nyquist. Per pixel, with
-  `s` the unsharp signal, `Y` a luminance in the exports' gamma 2.2 and `ρ` the
-  shadow rolloff `Y_b^2.78 / (Y_b^2.78 + 0.0139^2.78)` on the blurred luma:
-  bright side (`s ≥ 0`) free move `f = 1.892·(Amount/40)^1.124·ρ·s` under the
-  cap `0.145·(Amount/40)^0.206`; dark side `f = 2.524·(Amount/40)^1.007·ρ·|s|`
-  under the cap `1.107·Y₀ − 0.0707·f` (`Y₀` the pixel's own luminance, floor
-  1e-4); the move is `±f / √(1 + (f/cap)²)`, the caps carried across Detail on
-  a log ramp over Detail² (no cap at 100); added to R, G, B alike. Fitted per
-  pixel on one 61 MP frame exported at Sharpness 0 / 40 / 80 (Radius 1.0,
-  Detail 25, Masking 0): R² 0.93 / 0.92 over the frame, 0.95 / 0.95 on the
-  pixels with |s| ≥ 0.03, the replaced unsharp mask 0.62; star peaks +0.07 /
-  +0.11 / +0.12 (faint / mid / bright) in Lightroom against +0.08 / +0.11 /
-  +0.13 in the law, ring dips 0.02 / 0.04 / 0.08 against 0.02 / 0.04 / 0.07;
-  the engine reproduces the law on its own renders at R² 0.9997. Masking edge
-  gate full at a blurred-luma gradient of `0 → 0.04` per film px
-  (**unmeasured**: every export was at Masking 0); Detail's other values,
-  Radius ≠ 1.0 and Amount past 80 are the law's own extrapolation.
+- Sharpening (v1.17.0, **measured against Adobe Camera Raw 18.4**, Lightroom
+  9.4's engine, rendering the star frame by script at the sensor's size in 16
+  bits; no AI Denoise): σ = 0.75 × Radius film px (Radius 0.5–3.0; an absent
+  key reads Lightroom's 1.0; free fits read 0.73–0.75 × Radius at all four
+  radii), sampled no finer than 0.6 raster px with the amount faded by the
+  ratio of the two `1 − Ĝ` transfers at Nyquist. Per pixel, with `Lb` the
+  blurred luma and `s = l − Lb`: bright side `f = GB(Lb)·a_b·s` under the cap
+  `CB(l)·k_b`, dark side `f = GD(Lb)·a_d·|s|` under `CD(l)·k_d`, move
+  `±f / √(1 + (f/cap)²)`; `GB`/`GD`/`CB`/`CD` are 11-knot tables over encoded
+  luma (they absorb Camera Raw's tone curve, under which it sharpens);
+  `a = (Amount/40)^1.49` bright / `^2.43` dark, × `(Amount/80)^−0.35` past 80;
+  caps × `(Amount/40)^−0.12 / ^−0.16`; gains × Radius^−0.88; Detail 0 / 100
+  multiply the gains by 0.36 / 2.37 (bright) and 0.61 / 4.40 (dark) and the
+  caps by 0.99 / 0.97 and 0.71 / 0.82, linear in the logarithm between the
+  measured 0 / 25 / 100; Masking gates the move by `smoothstep(0, 0.1506 ×
+  Masking^2.15, G_1.5∗|∇Lb|)` (gradient per film px, blurred 1.5 film px). The
+  move scales the pixel's colour with its luma: per channel, a ratio leaves
+  0.6–0.7 % of Camera Raw's move unexplained at Amount 40 / 80 / Detail 100,
+  an equal addition to R, G, B (v1.6.5's write) 9.8–11.5 %. Per-pixel R² of
+  the move on Camera Raw's own Amount-0 pixels, fit crop / held-out crop:
+  Amount 40 0.966 / 0.963, 80 0.944 / 0.952, 150 0.865 / 0.879; Radius 0.5
+  0.956 / 0.956, 2.0 0.955 / 0.945, 3.0 0.915 / 0.857; Detail 0 0.716 / 0.661,
+  100 0.947 / 0.956; Masking 50 0.961 / 0.942, 100 0.957 / 0.943. The v1.6.5
+  law (fitted on Lightroom's denoised 6144 px exports at Amount 0 / 40 / 80)
+  reads, on the fit crop, 0.908 at 40, 0.822 at 80, 0.741 at 150, 0.770 /
+  0.651 / −0.122 at Radius 0.5 / 2 / 3, −0.576 / 0.466 at Detail 0 / 100,
+  0.806 / −0.539 at Masking 50 / 100; its 40 → 80 gain ratios (× 2.2 / × 2.0)
+  do not hold on the undenoised frame (× 2.8 / × 5.4). The engine's operator
+  reproduces the fitted law at R² 0.9988–1.0000 per case; downsampled 9×, the
+  engine's move on Camera Raw's base lands at ΔE 0.06 / 0.22 / 0.50 from
+  Camera Raw's own render at Amount 40 / 80 / 150 (the v1.6.5 law 0.46 / 1.41
+  / 2.35). **Unmet**: Detail 0 (no shape tried — free tables and σ, a
+  band-pass signal, a blurred move — reached 0.85) and Amount 150 (a per-case
+  free table reaches 0.897); and on the engine's OWN develop the whole-frame
+  ΔE against Camera Raw rises at 1000 px (Amount 40 6.86 → 7.52, 80 6.62 →
+  8.64), because that develop already sits +4.2 L / +4.9 b above Camera Raw's
+  with 1.5× its high-pass noise and the measured move points the same way —
+  it falls with the canvas, not with this law. One frame, one camera, one ISO.
 - Sharpening default (v1.6.0): a recipe that holds no amount renders at
   `LR_RAW_SHARPENING` = 40 on a RAW negative — Lightroom's own default for a
   RAW (radius 1.0, detail 25, masking 0) — and at nothing on a baked raster;
@@ -517,16 +554,30 @@ supposed to remove.
   materialisation, not an edit (**designed to Lightroom's documented
   default**; the amount's SCALE is measured since v1.6.5 — the Sharpening
   bullet above).
-- Luminance noise reduction: self-guided filter on luma, box radius
-  `1 → 4` film px and noise threshold `0.004 → 0.054` (gamma units) over
-  Luminance, the threshold scaled `1.6 → 0.4` over Detail, ε = threshold²;
-  Contrast re-adds the residual box-blurred at twice the radius
-  (**designed, provisional** until `NR-*`).
+- Luminance noise reduction: self-guided filter on luma, box radius 5 film px
+  and noise threshold `0.0121 → 0.0609` (gamma units) over Luminance
+  (**measured against Camera Raw**, v1.17.0: Luminance 25 / 50 / 100 at Detail
+  50, Contrast 0, sharpening off; per-pixel R² of the move 0.805 / 0.833 /
+  0.860 on the fit crop, 0.823 / 0.825 / 0.861 held out, against 0.657 /
+  0.774 / 0.842 for the `1 → 4` / `0.004 → 0.054` it replaces), the threshold
+  scaled `1.6 → 0.4` over Detail, ε = threshold²; Contrast re-adds the
+  residual box-blurred at twice the radius (Detail and Contrast **designed**:
+  only Detail 50 / Contrast 0 were rendered). **Unmet** (R² 0.9): no structure
+  tried reaches it — a linear 11×11 filter 0.71–0.77, a threshold that follows
+  the local level 0.84–0.86, Wiener shrinkage of five Gaussian bands
+  0.79–0.84. Camera Raw takes the flat sky's σ-2 high-pass noise to × 0.62 /
+  0.49 / 0.30 and the brightest 2000 star peaks to × 0.93 / 0.90 / 0.85.
 - Colour noise reduction: fast guided filter on `R − Y` and `B − Y`,
   subsample `s = max(2, ⌊r/2.5⌋)`, radius `2 → 16` film px over Color, luma
   edge threshold `0.08 → 0.01` over Detail, offset plane smoothed `1× → 3×`
   wider over Smoothness, full replacement from Color 25 up (linear below)
-  (**designed, provisional** until `CNR-*`).
+  (**measured against Camera Raw**, v1.17.0, constants unchanged: Color 25 /
+  100 at Detail 50, Smoothness 50, sharpening off; per-pixel R² of the R − Y
+  and B − Y move 0.952 / 0.972 on the fit crop, 0.962 / 0.972 held out;
+  Detail and Smoothness **designed**: only 50 / 50 rendered). Camera Raw's
+  Color 25 and 100 differ little (a × 0.06 / 0.05, b × 0.39 / 0.40 of the flat
+  sky's chroma noise), and it also takes luma noise to × 0.92, which this
+  operator, leaving luma alone, does not.
 - Memory: no Detail pass holds more than three f32 planes beside the frame
   (colour NR: eight planes at `1/s²`), the spatial-pass row of
   `decode::PIPELINE_BYTES_PER_PIXEL`.
