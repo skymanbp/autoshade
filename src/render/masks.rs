@@ -833,11 +833,12 @@ pub fn engine_active(m: &crate::recipe::LocalAdjustment) -> bool {
 //
 // The model is fitted, not guessed: the seaside street exported three times
 // from Lightroom (cloud 9.4) with nothing moved, then with ONE whole-frame
-// mask carrying only the Color swatch, picked in the blue at roughly 73 and
-// roughly 35. Per pixel, tinted − flat says what the control is: the shift
-// points the same way on neutral, mid-chroma and warm pixels (an ADDITIVE
-// chroma shift, not a blend toward a colour — a blend bends it on every
-// pixel that already has a colour); the 73 : 35 shifts stand 1.94–2.05 in
+// mask carrying only the Color swatch — hue 210, amount 0.782609 and
+// 0.391304, as the XMP packet each export embeds records. Per pixel, tinted
+// − flat says what the control is: the shift points the same way on neutral,
+// mid-chroma and warm pixels (an ADDITIVE chroma shift, not a blend toward a
+// colour — a blend bends it on every pixel that already has a colour); the
+// two exports' shifts stand 1.94–2.05 in
 // every bin (linear in the amount); it peaks in the midtones and fades in
 // the shadows and highlights (a lightness window); and lightness hardly
 // moves (≤ 2.2 L where the shift is 23 units). Of the six models fitted to
@@ -847,29 +848,38 @@ pub fn engine_active(m: &crate::recipe::LocalAdjustment) -> bool {
 // toward the hue at the pixel's own luminance (the model this replaced)
 // read 7.87 on the sky.
 //
-// Lightroom wrote no sidecar for those exports, so the swatch's hue and the
-// two amounts are known only as fitted; their RATIO is known. What that
-// leaves unknown is said on the one constant it rests on.
+// The constants below are one joint fit on both exports at their exact
+// settings (150k pixels at 1200 px; mean ΔE 1.70, against 10.44 / 5.38 for
+// no tint), every one of them shared by the two amounts.
 
 /// Centre of the tint's lightness window, in the gamma-encoded Rec.709 luma
-/// of the pixel the tint receives ([`tint_luma`]): fitted with
-/// [`TINT_WINDOW_SIGMA`] on both exports at once (mean ΔE 1.67 over 150k
-/// pixels, against 10.44 / 5.38 for no tint), and independent of the click
-/// positions because both amounts share it.
-pub(crate) const TINT_WINDOW_CENTRE: f32 = 0.469;
+/// of the pixel the tint receives ([`tint_luma`]), fitted jointly with
+/// [`TINT_WINDOW_SIGMA`], [`TINT_OKLAB_PER_UNIT`] and the hue on both
+/// exports (ΔE 2.08 at 0.78 and 1.31 at 0.39).
+pub(crate) const TINT_WINDOW_CENTRE: f32 = 0.470;
 
 /// Width (σ) of the tint's lightness window, same quantity and same fit as
 /// [`TINT_WINDOW_CENTRE`]: the shift reads −16.9 / −16.5 (a / b) on neutral
 /// midtones and −4.9 / −5.3 above L 70, which a Gaussian of this width in
 /// gamma luma reproduces at ΔE 1.82 on the neutral pixels.
-pub(crate) const TINT_WINDOW_SIGMA: f32 = 0.274;
+pub(crate) const TINT_WINDOW_SIGMA: f32 = 0.272;
 
 /// Oklab chroma shift per unit of Lightroom's 0..1 amount at the window's
-/// centre and full mask weight: the fit read 0.0831 on the ≈0.73 export and
-/// 0.0406 on the ≈0.35 one (ratio 2.05), and 0.0831 / 0.73 = 0.114 — the one
-/// number here that rests on where the user's slider actually stopped,
-/// which no sidecar recorded, so a click at 0.70 would make it 0.119.
-pub(crate) const TINT_OKLAB_PER_UNIT: f32 = 0.114;
+/// centre and full mask weight: 0.1051 from the joint fit, and read one
+/// export at a time 0.1079 at 0.782609 and 0.1055 at 0.391304 — linear in
+/// the amount to 2.3 %, which is the whole of what two amounts can say.
+pub(crate) const TINT_OKLAB_PER_UNIT: f32 = 0.105;
+
+/// Where Lightroom's hue wheel sits in Oklab: the swatch at hue `h` pushes
+/// along Oklab hue `h + 8.1°`. ONE measured point pins it — hue 210 pushed
+/// along 218.1° in the joint fit (217.1° / 220.4° read one export at a time)
+/// — and nothing else in the record tests the rest of the wheel, so this is
+/// the least-assuming map through that point, not a measured curve. What it
+/// replaced was worse at the one point there is: reading the hue as the
+/// sRGB HSV hue puts 210 at Oklab 256.2°, 38° off, and the exports read ΔE
+/// 8.53 / 3.93 under it. Candidate wheels with no constant (linear ProPhoto,
+/// linear Rec.2020, sRGB HSV in linear light) land 202°, 213° and 234°.
+pub(crate) const TINT_HUE_OFFSET_DEG: f32 = 8.1;
 
 /// The gamma-encoded Rec.709 luma `0.2126 R' + 0.7152 G' + 0.0722 B'` of a
 /// display-encoded pixel — the quantity the window was fitted in. Not
@@ -912,27 +922,17 @@ pub(crate) fn oklab_to_linear(lab: [f32; 3]) -> [f32; 3] {
 }
 
 /// The direction the swatch at Lightroom hue `hue_deg` pushes in the Oklab
-/// (a, b) plane, as a unit vector: the Oklab hue of the PURE sRGB colour at
-/// that HSV hue (S = V = 1). This is the model's one assumption about
-/// Lightroom's wheel — that its picker hue is the sRGB HSV hue — and it
-/// costs no constant: the same exports fit HSV hue 188–194° under the RGB
-/// models and Oklab hue 218° under this one, and the pure HSV-190° colour
-/// sits at Oklab hue 219°. The wheel is not uniform in Oklab: HSV 222–242°
-/// all land within 1° of pure blue's 264°, so hues there render alike.
+/// (a, b) plane, as a unit vector (see [`TINT_HUE_OFFSET_DEG`]).
 pub(crate) fn tint_direction(hue_deg: f32) -> [f32; 2] {
-    let h = hue_deg.rem_euclid(360.0) / 60.0;
-    let x = 1.0 - (h % 2.0 - 1.0).abs();
-    let enc = match h as u32 {
-        0 => [1.0, x, 0.0],
-        1 => [x, 1.0, 0.0],
-        2 => [0.0, 1.0, x],
-        3 => [0.0, x, 1.0],
-        4 => [x, 0.0, 1.0],
-        _ => [1.0, 0.0, x],
-    };
-    let lab = linear_to_oklab(enc.map(srgb_to_linear));
-    let n = lab[1].hypot(lab[2]).max(1e-9);
-    [lab[1] / n, lab[2] / n]
+    let t = (hue_deg + TINT_HUE_OFFSET_DEG).to_radians();
+    [t.cos(), t.sin()]
+}
+
+/// The Lightroom hue (0..360, to a tenth of a degree) whose swatch pushes
+/// along Oklab hue angle `theta` (radians): [`tint_direction`] inverted.
+pub(crate) fn tint_hue_of(theta: f32) -> f32 {
+    let h = (theta.to_degrees() - TINT_HUE_OFFSET_DEG).rem_euclid(360.0);
+    ((h * 10.0).round() / 10.0).rem_euclid(360.0)
 }
 
 /// One display-encoded pixel under the Color tint: its Oklab (a, b) moved by

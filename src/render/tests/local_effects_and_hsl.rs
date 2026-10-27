@@ -567,10 +567,12 @@ fn a_mask_tint_is_inert_at_amount_zero_and_moves_only_what_the_mask_covers() {
 /// Oklab L untouched. On a grey ramp: L holds to 1e-4 everywhere, the
 /// chroma shift is `k·w` to 1e-4 at every step — the whole `k` at the
 /// window's centre, and at the ends of the ramp the window's own value
-/// there (0.26 of it at luma 0.02, 0.18 at 0.98: the falloff the exports
+/// there (0.25 of it at luma 0.02, 0.17 at 0.98: the falloff the exports
 /// measured, where neutral shadows took 0.36 of the midtones' shift). The
-/// masked path renders the same pixels as the model at full weight, and
-/// hue 0 / 120 / 240 push along the Oklab hues of pure red / green / blue.
+/// masked path renders the same pixels as the model at full weight, and the
+/// wheel puts Lightroom's hue 210 on the Oklab hue the user's own exports
+/// pushed along (218.1°) and every hue `TINT_HUE_OFFSET_DEG` past itself,
+/// with `tint_hue_of` its exact inverse.
 #[test]
 fn the_mask_tint_is_an_oklab_chroma_shift_under_a_lightness_window() {
     let (k, dir) = (TINT_OKLAB_PER_UNIT * 0.5, tint_direction(231.0));
@@ -589,7 +591,7 @@ fn the_mask_tint_is_an_oklab_chroma_shift_under_a_lightness_window() {
         assert!((along - shift).abs() <= 1e-4, "grey {v}: the shift points along the swatch's hue");
     }
     assert!((tint_window(TINT_WINDOW_CENTRE) - 1.0).abs() < 1e-6, "the window is 1 at its centre");
-    assert!((tint_window(0.02) - 0.261).abs() < 1e-3 && (tint_window(0.98) - 0.176).abs() < 1e-3);
+    assert!((tint_window(0.02) - 0.2546).abs() < 1e-3 && (tint_window(0.98) - 0.1724).abs() < 1e-3);
     // Through the mask pass at full weight: the same pixels as the model.
     let base: Vec<[f32; 3]> = ramp.iter().map(|&v| [v; 3]).collect();
     let masked = tint_masked(
@@ -602,14 +604,16 @@ fn the_mask_tint_is_an_oklab_chroma_shift_under_a_lightness_window() {
         let model = tint_px([v; 3], dir, k);
         assert!((0..3).all(|c| (masked[i][c] - model[c]).abs() <= 1e-5), "grey {v}: {:?} vs {model:?}", masked[i]);
     }
-    // The wheel: the swatch's hue is the sRGB HSV hue, so 0 / 120 / 240 push
-    // along the Oklab hues of the pure primaries.
-    for (hue, primary) in [(0.0, [1.0, 0.0, 0.0]), (120.0, [0.0, 1.0, 0.0]), (240.0, [0.0, 0.0, 1.0])] {
-        let lab = linear_to_oklab(primary);
-        let want = lab[2].atan2(lab[1]);
+    // The wheel: 210 lands on the measured push, and the inverse is exact
+    // to the tenth of a degree the recipe stores.
+    let d = tint_direction(210.0);
+    assert!((d[1].atan2(d[0]).to_degrees().rem_euclid(360.0) - 218.1).abs() < 1e-3, "210 pushes along {:?}", d);
+    for hue in [0.0f32, 43.0, 120.0, 210.0, 231.0, 300.0, 359.9] {
         let d = tint_direction(hue);
-        let got = d[1].atan2(d[0]);
-        assert!((got - want).abs() < 1e-4, "hue {hue}: {got} vs the primary's {want}");
+        assert!((d[0].hypot(d[1]) - 1.0).abs() < 1e-6);
+        let off = (tint_direction(hue)[1].atan2(d[0]).to_degrees() - hue - TINT_HUE_OFFSET_DEG).rem_euclid(360.0);
+        assert!(off < 1e-3 || off > 360.0 - 1e-3, "hue {hue} is offset by {off}");
+        assert!((tint_hue_of(d[1].atan2(d[0])) - hue).abs() < 0.051, "hue {hue} back as {}", tint_hue_of(d[1].atan2(d[0])));
     }
     // And the inverse matrices are the forward ones' inverse.
     let c = [0.31, 0.52, 0.07];
@@ -620,18 +624,18 @@ fn the_mask_tint_is_an_oklab_chroma_shift_under_a_lightness_window() {
 /// The model against Lightroom's own pixels, gated on the calibration corpus
 /// like every corpus test. Its `tint/` folder holds the seaside street
 /// exported from Lightroom with nothing moved (`p39-flat.jpg`) and with ONE
-/// whole-frame mask carrying only the Color swatch, picked in the blue at
-/// roughly 73 and 35 (`p39-tint-073.jpg`, `p39-tint-035.jpg`). Lightroom
-/// wrote no sidecar for them, so the hue and amounts here are the FITTED
-/// equivalents: HSV 190° (Oklab 219°, the fit read 218°) at 0.73 and 0.35.
-/// The flat export is tinted as a baked image through the mask pass and put
-/// to each tinted export, mean CIELAB ΔE76 over the whole frame at 1200 px:
-/// no tint reads 10.45 and 5.38 there (floors 10 and 5), the model ≤ 2.2 and
-/// ≤ 1.5. The fit's own 1.67 is the MEAN of the two exports on a 150k-pixel
-/// sample; read one export at a time over the whole frame, the fitted
-/// optimum (Oklab hue 218.1°, k 0.0831 / 0.0406) scores 2.09 and 1.31, and
-/// these wheel-and-constant equivalents 2.13 and 1.29 — so the ceilings
-/// sit just above the optimum, not at the mean.
+/// whole-frame mask (one radial, `Flipped`, feather 0) carrying only the
+/// Color swatch, `LocalToningHue` 210 at `LocalToningSaturation` 0.782609
+/// and 0.391304
+/// (`p39-tint-073.jpg`, `p39-tint-035.jpg` — the file names predate the
+/// exact values, which are read from the XMP packet each export embeds).
+/// The flat export is tinted as a baked image through the mask pass at those
+/// exact settings and put to each tinted export, mean CIELAB ΔE76 over the
+/// whole frame at 1200 px: no tint reads 10.45 and 5.38 there (floors 10 and
+/// 5), the model ≤ 2.2 and ≤ 1.5. The joint fit's 1.70 is the MEAN of the
+/// two exports; this model shape's own optimum, refitted on each export
+/// alone, reads 2.07 and 1.28, so a 2.0 ceiling at the larger amount is not
+/// one the model can meet and the ceiling sits just above its optimum.
 #[test]
 fn the_mask_tint_reproduces_lightroom_s_own_tint_exports() {
     let Some(root) = crate::config::live_env_os("AUTOSHADE_FIT_CALIBRATION_DIR") else {
@@ -671,14 +675,16 @@ fn the_mask_tint_reproduces_lightroom_s_own_tint_exports() {
         (sum / a.len().max(1) as f64) as f32
     };
     let (flat, w, h) = load(names[0]);
-    for (name, amount, untinted_floor, ceiling) in [(names[1], 73.0, 10.0, 2.2), (names[2], 35.0, 5.0, 1.5)] {
+    for (name, amount, untinted_floor, ceiling) in
+        [(names[1], 78.2609, 10.0, 2.2), (names[2], 39.1304, 5.0, 1.5)]
+    {
         let (tinted, tw, th) = load(name);
         assert_eq!((tw, th), (w, h), "{name}: the exports share one frame");
         let model = tint_masked(
             &flat,
             w,
             h,
-            LocalAdjustment { mask: whole_frame(), toning_hue: 190.0, toning_amount: amount, ..Default::default() },
+            LocalAdjustment { mask: whole_frame(), toning_hue: 210.0, toning_amount: amount, ..Default::default() },
         );
         let (none, ours) = (mean_de(&flat, &tinted), mean_de(&model, &tinted));
         eprintln!("mask tint calibration, amount {:.2}: no tint ΔE {none:.2}, model ΔE {ours:.2}", amount / 100.0);
