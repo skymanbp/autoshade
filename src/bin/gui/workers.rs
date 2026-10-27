@@ -1619,6 +1619,7 @@ impl AutoShadeApp {
                             // now only warn about.
                             self.fit_ref = None;
                             self.fit_from = None; // …and so does a picked source card
+                            self.fit_prompt = None; // …and the question about one
                             // (rationale already restored alongside the recipe)
                             self.refresh_versions(); // version snapshots are per-photo
                             self.dirty = true; // render the (restored or neutral) after
@@ -2580,25 +2581,7 @@ impl AutoShadeApp {
                     "「AI generated」variant created → {path} · edits on it continue on an ✎ card, or 「Reverse-fit」",
                     &[("path", &out.display().to_string())],
                 );
-                // The generation-side fidelity reading — the SAME statistic
-                // the reverse-fit's mode selector computes, so the warning
-                // names the consequence in that vocabulary.
-                if *divergence >= autoshade::fit::DIVERGENCE_GLOBAL {
-                    s.push_str(&trf(
-                        lang,
-                        " · ⚠ structure diverged from the original (D={d} ≥ {limit}) — a reverse-fit will fall back to atmosphere mode",
-                        &[
-                            ("d", &format!("{divergence:.3}")),
-                            ("limit", &format!("{:.2}", autoshade::fit::DIVERGENCE_GLOBAL)),
-                        ],
-                    ));
-                } else {
-                    s.push_str(&trf(
-                        lang,
-                        " · faithful to the frame (structural divergence D={d})",
-                        &[("d", &format!("{divergence:.3}"))],
-                    ));
-                }
+                s.push_str(&Self::reimagine_fidelity(lang, *divergence));
                 if let Some(d0) = discarded {
                     s.push_str(&trf(
                         lang,
@@ -2608,6 +2591,30 @@ impl AutoShadeApp {
                 }
                 s
             }
+        }
+    }
+
+    /// A reimagine's generation-side fidelity reading, ` · `-led: the
+    /// landing's status line ends with it and the fit prompt states it — one
+    /// wording, so the two never drift. The SAME statistic the reverse-fit's
+    /// mode selector computes, so the warning names the consequence in that
+    /// vocabulary.
+    pub(crate) fn reimagine_fidelity(lang: Lang, divergence: f32) -> String {
+        if divergence >= autoshade::fit::DIVERGENCE_GLOBAL {
+            trf(
+                lang,
+                " · ⚠ structure diverged from the original (D={d} ≥ {limit}) — a reverse-fit will fall back to atmosphere mode",
+                &[
+                    ("d", &format!("{divergence:.3}")),
+                    ("limit", &format!("{:.2}", autoshade::fit::DIVERGENCE_GLOBAL)),
+                ],
+            )
+        } else {
+            trf(
+                lang,
+                " · faithful to the frame (structural divergence D={d})",
+                &[("d", &format!("{divergence:.3}"))],
+            )
         }
     }
 
@@ -2785,6 +2792,14 @@ impl AutoShadeApp {
                             }
                         }
                         self.done(msg);
+                        // A whole-frame reimagine asks whether to reverse-fit
+                        // it (v1.17.0) — after `done`, so its job is over. An
+                        // adjust lands a ✨ card too, but it edits a look
+                        // already generated; the question follows 「AI
+                        // generate」.
+                        if let RetouchNote::Reimagined { divergence, .. } = &note {
+                            self.offer_fit_prompt(ctx, *divergence);
+                        }
                     }
                     Err(e) => {
                         // The face-held heal found spots, none on the face:
