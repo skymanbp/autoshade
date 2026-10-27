@@ -27,18 +27,24 @@
 //! Lightroom's own export with no develop settings: without these two the
 //! midtones rendered ~17 L darker and the highlights ~20 L darker.
 //!
-//! # What is rendered, and the one thing that is not
+//! # The colour matrix (v1.17.0)
 //!
-//! The tables and the tone curve are rendered. The profile's own COLOUR MATRIX
-//! is deliberately not adopted: the engine's camera→XYZ transform stays the one
-//! it has always used, the one its calibration lane and its base-curve
-//! estimator were measured against. The tables are what distinguishes one
-//! profile from another — "Adobe Standard" and "Camera Vivid" for the same body
-//! carry the same colorimetry and different tables — so rendering them is what
-//! makes the name mean something, while swapping the matrix underneath would
-//! move every pixel of every photograph for a difference the profile name is
-//! not about. Stated as a deviation rather than hidden: if the Lightroom kit
-//! shows the matrix half matters, [`Stage::build`] is where it changes.
+//! A profile that carries a `ForwardMatrix` OWNS the camera → working-space
+//! transform of the render it is in, the way the DNG SDK builds it
+//! (`dng_color_spec.cpp`): the frame's white is solved from its camera
+//! neutral by iterating the profile's two `ColorMatrix`es interpolated at the
+//! white's own temperature (`NeutralToXY`, `FindXYZtoCamera`; the temperature
+//! by Robertson's method, `dng_temperature`), the two calibrations are
+//! weighted by reciprocal temperature between their illuminants — the same
+//! weight the hue/sat maps blend by, one function for both — and the
+//! white-balanced camera triple goes to XYZ D50 through the interpolated,
+//! normalised `ForwardMatrix`, into ProPhoto, and out through a Bradford
+//! adaptation D50 → D65 into the working space. Until v1.17.0 the engine's
+//! own D65-only, row-normalised camera matrix stood in for all of that; it
+//! still does for a profile with no `ForwardMatrix` (the SDK's other branch,
+//! inverse `ColorMatrix` with white preservation, is what that path already
+//! computes at D65) and for every render with no profile at all, so those
+//! renders are byte-identical to before.
 //!
 //! # The reference space
 //!
@@ -77,6 +83,10 @@ pub(crate) struct Stage {
     /// Working space → ProPhoto linear, and back.
     to_ref: [[f32; 3]; 3],
     from_ref: [[f32; 3]; 3],
+    /// White-balanced camera RGB → ProPhoto linear (D50), when the profile's
+    /// `ForwardMatrix` owns the colour transform — and then `from_ref` is
+    /// ProPhoto (D50) → Bradford → the working space.
+    camera: Option<[[f32; 3]; 3]>,
     hue_sat: Option<Table>,
     look: Option<Table>,
     tone: Option<Vec<f32>>,
@@ -84,6 +94,23 @@ pub(crate) struct Stage {
     /// body's baseline and the profile's offset, Adobe's
     /// `TotalBaselineExposure`.
     gain: f32,
+}
+
+/// What one photograph brings to a profile besides the profile itself.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Frame {
+    /// The frame's white balance as a temperature, for a profile whose
+    /// calibrations cannot be solved from `neutral` (no `ColorMatrix`).
+    pub kelvin: Option<f32>,
+    /// The frame's camera-space neutral (the reciprocal of its white-balance
+    /// multipliers). With the profile's `ColorMatrix`es it fixes the white and
+    /// its temperature the way the DNG SDK does, and with a `ForwardMatrix` it
+    /// lets the profile own the colour transform.
+    pub neutral: Option<[f32; 3]>,
+    /// The creative profile's own look table (`crs:LookTable`, decoded by
+    /// [`crate::dcp::find_look_table`]). It REPLACES the camera profile's
+    /// `ProfileLookTableData`: see [`Stage::build_for`].
+    pub creative: Option<Table>,
 }
 
 impl Stage {
@@ -105,14 +132,43 @@ impl Stage {
     /// from that curve and replaces it only `if (profile &&
     /// profile->ToneCurve ().IsValid ())`. A stated straight curve is a valid
     /// curve, so it stays the identity.
+    ///
+    /// The renders call [`Stage::build_for`]; this is its no-neutral,
+    /// no-creative-table form, kept for the stage's own tests.
+    #[cfg(test)]
     pub(crate) fn build(
         profile: &Profile,
         space: super::ExportColorSpace,
         kelvin: Option<f32>,
         baseline_ev: f32,
     ) -> Option<Self> {
+        Self::build_for(profile, space, Frame { kelvin, ..Frame::default() }, baseline_ev)
+    }
+
+    /// [`Stage::build`] with everything the photograph brings ([`Frame`]).
+    ///
+    /// With a camera `neutral` and the profile's two `ColorMatrix`es, the
+    /// white and its temperature are solved as the DNG SDK does
+    /// ([`white_temperature`]) and that temperature — not `kelvin` — weights
+    /// the calibrations. With a `ForwardMatrix` as well, the stage owns the
+    /// camera → working transform ([`Stage::owns_camera`],
+    /// [`Stage::develop_camera`]).
+    ///
+    /// A creative table REPLACES the profile's own look table rather than
+    /// stacking after it. Measured on p39 against Camera Raw's render of the
+    /// same packet with the 「Adobe Color」 Look (v1.17.0, lens-matched, 1000
+    /// px): replacing leaves the sky at Δb +0.22 and the warm tones at Δb
+    /// −1.13; applying both tables leaves +1.01 and −3.21.
+    pub(crate) fn build_for(
+        profile: &Profile,
+        space: super::ExportColorSpace,
+        frame: Frame,
+        baseline_ev: f32,
+    ) -> Option<Self> {
+        let white = frame.neutral.and_then(|n| white_temperature(profile, n));
+        let kelvin = white.or(frame.kelvin);
         let hue_sat = blend_calibrations(profile, kelvin);
-        let look = profile.look_table.clone();
+        let look = frame.creative.or_else(|| profile.look_table.clone());
         let tone = if states_a_curve(&profile.tone_curve) {
             tone_lut(&profile.tone_curve)
         } else {
@@ -120,19 +176,64 @@ impl Stage {
         };
         let total_ev = baseline_ev + profile.baseline_exposure_offset;
         let gain = if total_ev == 0.0 || !total_ev.is_finite() { 1.0 } else { total_ev.exp2() };
-        if hue_sat.is_none() && look.is_none() && tone.is_none() && gain == 1.0 {
+        let camera = white.and_then(|_| forward_matrix(profile, kelvin));
+        if camera.is_none() && hue_sat.is_none() && look.is_none() && tone.is_none() && gain == 1.0
+        {
             return None;
         }
         // Working RGB → XYZ (D65-adapted, as the export spaces are) → ProPhoto.
         let space_to_xyz = super::rgb_to_xyz(super::space_primaries(space), super::D65_XY);
         let ref_to_xyz = super::rgb_to_xyz(PROPHOTO_PRIM, super::D65_XY);
         let to_ref = super::mat_mul3(&super::inv3(&ref_to_xyz), &space_to_xyz);
-        Some(Stage { from_ref: super::inv3(&to_ref), to_ref, hue_sat, look, tone, gain })
+        let (camera, from_ref) = match camera {
+            // camera → XYZ D50 → ProPhoto (D50); out: ProPhoto → XYZ D50 →
+            // Bradford → XYZ D65 → working. The SDK's `fCameraToRGB` and
+            // `fRGBtoFinal`, with the working space where it has the output.
+            Some(fm) => {
+                let pp_to_xyz50 = mat3_f32(&rgb_to_xyz64(PROPHOTO_PRIM, D50_XY));
+                let cam_to_pp = super::mat_mul3(&super::inv3(&pp_to_xyz50), &fm);
+                let adapt = mat3_f32(&map_white(D50_XY, D65_XY64));
+                let out = super::mat_mul3(
+                    &super::inv3(&space_to_xyz),
+                    &super::mat_mul3(&adapt, &pp_to_xyz50),
+                );
+                (Some(cam_to_pp), out)
+            }
+            None => (None, super::inv3(&to_ref)),
+        };
+        Some(Stage { from_ref, to_ref, camera, hue_sat, look, tone, gain })
+    }
+
+    /// Does this stage own the camera → working-space transform? Then the
+    /// caller hands it WHITE-BALANCED CAMERA RGB through
+    /// [`Stage::develop_camera`] instead of a working-space pixel through
+    /// [`Stage::apply`].
+    pub(crate) fn owns_camera(&self) -> bool {
+        self.camera.is_some()
+    }
+
+    /// White-balanced camera RGB → the profiled, LINEAR working-space pixel.
+    /// Only meaningful when [`Stage::owns_camera`]; otherwise the triple is
+    /// taken as working RGB.
+    pub(crate) fn develop_camera(&self, cam: [f32; 3]) -> [f32; 3] {
+        match &self.camera {
+            Some(m) => self.render_ref(super::mat_vec3(m, &cam)),
+            None => {
+                let mut px = cam;
+                self.apply(&mut px);
+                px
+            }
+        }
     }
 
     /// Apply the profile to one LINEAR working-space pixel, in place.
     pub(crate) fn apply(&self, px: &mut [f32; 3]) {
-        let mut r = super::mat_vec3(&self.to_ref, px);
+        *px = self.render_ref(super::mat_vec3(&self.to_ref, px));
+    }
+
+    /// The stage proper, on a ProPhoto-linear triple: the tables, the
+    /// exposure ramp and the curve, then out to the working space.
+    fn render_ref(&self, mut r: [f32; 3]) -> [f32; 3] {
         // HSV is undefined for a negative component, and ProPhoto's gamut is
         // wide enough that a real photograph almost never has one here. The
         // clamp is a guard, not a gamut decision: it keeps a stray negative out
@@ -168,8 +269,213 @@ impl Stage {
         if let Some(lut) = &self.tone {
             r = adobe_tone(r, lut);
         }
-        *px = super::mat_vec3(&self.from_ref, &r);
+        super::mat_vec3(&self.from_ref, &r)
     }
+}
+
+// --- the colour spec: Adobe's camera → XYZ, from the profile's matrices ------
+
+/// The PCS white (D50) and D65, as the DNG SDK states them
+/// (`D50_xy_coord`, `D65_xy_coord`).
+const D50_XY: [f64; 2] = [0.3457, 0.3585];
+const D65_XY64: [f64; 2] = [0.3127, 0.3290];
+
+fn xy_to_xyz(xy: [f64; 2]) -> [f64; 3] {
+    [xy[0] / xy[1], 1.0, (1.0 - xy[0] - xy[1]) / xy[1]]
+}
+
+fn mat3_f64(m: &[[f32; 3]; 3]) -> [[f64; 3]; 3] {
+    m.map(|r| r.map(f64::from))
+}
+
+fn mat3_f32(m: &[[f64; 3]; 3]) -> [[f32; 3]; 3] {
+    m.map(|r| r.map(|v| v as f32))
+}
+
+fn mul64(a: &[[f64; 3]; 3], b: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let mut o = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            o[i][j] = (0..3).map(|k| a[i][k] * b[k][j]).sum();
+        }
+    }
+    o
+}
+
+fn vec64(m: &[[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
+    [0, 1, 2].map(|i| m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2])
+}
+
+fn inv64(m: &[[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
+    let c = |r1: usize, c1: usize, r2: usize, c2: usize| m[r1][c1] * m[r2][c2] - m[r1][c2] * m[r2][c1];
+    let co = [
+        [c(1, 1, 2, 2), -c(1, 0, 2, 2), c(1, 0, 2, 1)],
+        [-c(0, 1, 2, 2), c(0, 0, 2, 2), -c(0, 0, 2, 1)],
+        [c(0, 1, 1, 2), -c(0, 0, 1, 2), c(0, 0, 1, 1)],
+    ];
+    let det = m[0][0] * co[0][0] + m[0][1] * co[0][1] + m[0][2] * co[0][2];
+    if !det.is_finite() || det.abs() < 1e-12 {
+        return None;
+    }
+    // inverse = adjugate / det, adjugate = transpose of the cofactors.
+    Some([0, 1, 2].map(|i| [0, 1, 2].map(|j| co[j][i] / det)))
+}
+
+/// RGB → XYZ for primaries `prim` and white `white`, white at Y = 1 — the
+/// render's own `rgb_to_xyz`, in f64 and with an f64 white.
+fn rgb_to_xyz64(prim: [[f32; 2]; 3], white: [f64; 2]) -> [[f64; 3]; 3] {
+    let cols = prim.map(|p| xy_to_xyz([f64::from(p[0]), f64::from(p[1])]));
+    let m = [0, 1, 2].map(|i| [cols[0][i], cols[1][i], cols[2][i]]);
+    let s = inv64(&m).map(|inv| vec64(&inv, xy_to_xyz(white))).unwrap_or([1.0; 3]);
+    [0, 1, 2].map(|i| [0, 1, 2].map(|j| m[i][j] * s[j]))
+}
+
+/// The DNG SDK's `MapWhiteMatrix`: a linearised Bradford adaptation from
+/// `from` to `to`, its per-cone scale pinned to [0.1, 10] as the SDK pins it.
+fn map_white(from: [f64; 2], to: [f64; 2]) -> [[f64; 3]; 3] {
+    const MB: [[f64; 3]; 3] =
+        [[0.8951, 0.2664, -0.1614], [-0.7502, 1.7135, 0.0367], [0.0389, -0.0685, 1.0296]];
+    let (w1, w2) = (vec64(&MB, xy_to_xyz(from)), vec64(&MB, xy_to_xyz(to)));
+    let mut a = [[0.0; 3]; 3];
+    for i in 0..3 {
+        let (p, q) = (w1[i].max(0.0), w2[i].max(0.0));
+        a[i][i] = if p > 0.0 { (q / p).clamp(0.1, 10.0) } else { 10.0 };
+    }
+    let inv = inv64(&MB).unwrap_or(MB);
+    mul64(&inv, &mul64(&a, &MB))
+}
+
+/// Correlated colour temperature of a chromaticity by Robertson's method —
+/// `dng_temperature::Set_xy_coord`, with its table (Wyszecki & Stiles, *Color
+/// Science*, 2nd ed., p. 228: reciprocal megakelvin, u, v, isotherm slope).
+fn xy_to_kelvin(xy: [f64; 2]) -> f64 {
+    #[allow(clippy::excessive_precision)]
+    const TABLE: [[f64; 4]; 31] = [
+        [0.0, 0.18006, 0.26352, -0.24341],
+        [10.0, 0.18066, 0.26589, -0.25479],
+        [20.0, 0.18133, 0.26846, -0.26876],
+        [30.0, 0.18208, 0.27119, -0.28539],
+        [40.0, 0.18293, 0.27407, -0.30470],
+        [50.0, 0.18388, 0.27709, -0.32675],
+        [60.0, 0.18494, 0.28021, -0.35156],
+        [70.0, 0.18611, 0.28342, -0.37915],
+        [80.0, 0.18740, 0.28668, -0.40955],
+        [90.0, 0.18880, 0.28997, -0.44278],
+        [100.0, 0.19032, 0.29326, -0.47888],
+        [125.0, 0.19462, 0.30141, -0.58204],
+        [150.0, 0.19962, 0.30921, -0.70471],
+        [175.0, 0.20525, 0.31647, -0.84901],
+        [200.0, 0.21142, 0.32312, -1.0182],
+        [225.0, 0.21807, 0.32909, -1.2168],
+        [250.0, 0.22511, 0.33439, -1.4512],
+        [275.0, 0.23247, 0.33904, -1.7298],
+        [300.0, 0.24010, 0.34308, -2.0637],
+        [325.0, 0.24702, 0.34655, -2.4681],
+        [350.0, 0.25591, 0.34951, -2.9641],
+        [375.0, 0.26400, 0.35200, -3.5814],
+        [400.0, 0.27218, 0.35407, -4.3633],
+        [425.0, 0.28039, 0.35577, -5.3762],
+        [450.0, 0.28863, 0.35714, -6.7262],
+        [475.0, 0.29685, 0.35823, -8.5955],
+        [500.0, 0.30505, 0.35907, -11.324],
+        [525.0, 0.31320, 0.35968, -15.628],
+        [550.0, 0.32129, 0.36011, -23.325],
+        [575.0, 0.32931, 0.36038, -40.770],
+        [600.0, 0.33724, 0.36051, -116.45],
+    ];
+    let den = 1.5 - xy[0] + 6.0 * xy[1];
+    let (u, v) = (2.0 * xy[0] / den, 3.0 * xy[1] / den);
+    let mut last_dt = 0.0;
+    for i in 1..TABLE.len() {
+        let len = (1.0 + TABLE[i][3] * TABLE[i][3]).sqrt();
+        let (du, dv) = (1.0 / len, TABLE[i][3] / len);
+        let dt = -(u - TABLE[i][1]) * dv + (v - TABLE[i][2]) * du;
+        if dt <= 0.0 || i == TABLE.len() - 1 {
+            let dt = -dt.min(0.0);
+            let f = if i == 1 { 0.0 } else { dt / (last_dt + dt) };
+            return 1.0e6 / (TABLE[i - 1][0] * f + TABLE[i][0] * (1.0 - f));
+        }
+        last_dt = dt;
+    }
+    unreachable!("the loop returns on its last row")
+}
+
+/// The profile's XYZ → camera matrix at temperature `kelvin`: the two
+/// `ColorMatrix`es weighted like the hue/sat maps ([`illuminant_weight`]),
+/// or the one the profile has.
+fn color_matrix_at(profile: &Profile, kelvin: f64) -> Option<[[f64; 3]; 3]> {
+    match profile.color_matrix {
+        [Some(a), Some(b)] => {
+            let w = f64::from(illuminant_weight(profile, Some(kelvin as f32)));
+            let (a, b) = (mat3_f64(&a), mat3_f64(&b));
+            Some([0, 1, 2].map(|i| [0, 1, 2].map(|j| a[i][j] + (b[i][j] - a[i][j]) * w)))
+        }
+        [Some(a), None] | [None, Some(a)] => Some(mat3_f64(&a)),
+        [None, None] => None,
+    }
+}
+
+/// The temperature of the white this camera `neutral` stands for, solved as
+/// the DNG SDK's `NeutralToXY` does: start at D50, map the neutral to XYZ
+/// through the inverse of the `ColorMatrix` interpolated at the current
+/// estimate, repeat until the chromaticity stops moving (30 passes at most;
+/// a two-value oscillation is averaged, as the SDK averages it). `None` when
+/// the profile has no `ColorMatrix` or the neutral is unusable.
+pub(crate) fn white_temperature(profile: &Profile, neutral: [f32; 3]) -> Option<f32> {
+    if neutral.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+        return None;
+    }
+    let n = neutral.map(f64::from);
+    let mut last = D50_XY;
+    for pass in 0..30 {
+        let cm = color_matrix_at(profile, xy_to_kelvin(last))?;
+        let xyz = vec64(&inv64(&cm)?, n);
+        let s = xyz[0] + xyz[1] + xyz[2];
+        if !s.is_finite() || s <= 0.0 {
+            return None;
+        }
+        let mut next = [xyz[0] / s, xyz[1] / s];
+        if (next[0] - last[0]).abs() + (next[1] - last[1]).abs() < 1e-7 {
+            last = next;
+            break;
+        }
+        if pass == 29 {
+            next = [(last[0] + next[0]) * 0.5, (last[1] + next[1]) * 0.5];
+        }
+        last = next;
+    }
+    let k = xy_to_kelvin(last);
+    k.is_finite().then_some(k as f32)
+}
+
+/// The `ForwardMatrix` for this temperature, normalised so camera white maps
+/// to the D50 white (`NormalizeForwardMatrix`) and weighted like the other
+/// calibrations; `None` when the profile has none — that profile keeps the
+/// engine's own matrix path.
+fn forward_matrix(profile: &Profile, kelvin: Option<f32>) -> Option<[[f32; 3]; 3]> {
+    let norm = |m: [[f32; 3]; 3]| -> Option<[[f64; 3]; 3]> {
+        let m = mat3_f64(&m);
+        let pcs = xy_to_xyz(D50_XY);
+        let mut o = m;
+        for i in 0..3 {
+            let s: f64 = m[i].iter().sum();
+            if !s.is_finite() || s.abs() < 1e-9 {
+                return None;
+            }
+            o[i] = m[i].map(|v| v * pcs[i] / s);
+        }
+        Some(o)
+    };
+    let m = match profile.forward_matrix {
+        [Some(a), Some(b)] => {
+            let (a, b) = (norm(a)?, norm(b)?);
+            let w = f64::from(illuminant_weight(profile, kelvin));
+            [0, 1, 2].map(|i| [0, 1, 2].map(|j| a[i][j] + (b[i][j] - a[i][j]) * w))
+        }
+        [Some(a), None] | [None, Some(a)] => norm(a)?,
+        [None, None] => return None,
+    };
+    Some(mat3_f32(&m))
 }
 
 /// The hue/sat map for this frame's white balance.

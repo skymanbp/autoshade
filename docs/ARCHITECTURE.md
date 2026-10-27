@@ -2754,7 +2754,7 @@ the experiment that would replace it.
 WHICH rendering a photograph starts from. Three things arrive together because
 Lightroom writes them together: `crs:CameraProfile` (the name of a `.dcp` on
 this machine), the `<crs:Look>` element (Adobe's creative profile, with a baked
-half and an undecodable half), and the monochrome treatment a Look can carry
+half and a colour table), and the monochrome treatment a Look can carry
 instead of the Description's own switch.
 
 **It is nearly universal, so the render had to notice it.** Of the 175 sidecars
@@ -2792,25 +2792,54 @@ is wrong:
   and min channels and the median is placed back proportionally between them.
   Per channel is the wrong reading and visibly desaturates.
 
-**A stated deviation.** The profile's own colour MATRIX is not adopted: the
-engine keeps the camera→XYZ transform its calibration lane was measured
-against, and only the tables and the tone curve render. Swapping the matrix in
-is one function (`profile::Stage::build`), and the Lightroom kit will say
-whether it is needed.
+**The colour matrix is Adobe's (v1.17.0).** A profile that carries a
+`ForwardMatrix` owns the camera → working transform of its render, built the
+way the DNG SDK's `dng_color_spec.cpp` builds it: the white is solved from the
+frame's camera neutral by iterating the profile's two `ColorMatrix`es
+interpolated at the white's own temperature (`NeutralToXY`; the temperature by
+Robertson's method, `dng_temperature`), the two calibrations are weighted by
+reciprocal temperature between their illuminants — one weight for the
+matrices and the hue/sat maps — and the white-balanced camera triple goes
+through the interpolated, normalised `ForwardMatrix` to XYZ D50, into ProPhoto,
+and out through the SDK's Bradford adaptation (`MapWhiteMatrix`) to the working
+space (`profile::Stage::build_for`, `develop_camera`). A profile without a
+`ForwardMatrix`, and every render with no profile, keep the engine's own
+D65-only matrix; the no-profile render is byte-identical to v1.16.0. Until
+v1.17.0 the matrix half was a stated deviation: on p39's flat sidecar it left
+the sky at Δb −5.0 and the warm tones at Δb +6.0 against Camera Raw.
 
-**The one half that cannot be rendered is NAMED, not dropped.** A Look's
-`crs:LookTable` is a 32-hex reference to a `crs:Table_<HASH>` payload, and that
-payload does not decode: base85 over a measured 85-character alphabet
-(printable ASCII 33–125 minus `"&,;<>\_`), 6.408 bits per character, magic
-prefixes `vqf00`/`Lir00`, and no decompression under zlib/deflate/gzip/bzip2/
-xz/lzma/zstd/lz4 at any offset ≤ 256 under four base85 conventions. So the
-develop panel says the profile's name and then says which half of it renders,
-and `diag.warn` says the same thing to the CLI. A creative colour table applied
-wrongly would be worse than one not applied at all.
+**The creative colour table renders (v1.17.0).** A Look's `crs:LookTable` is
+the id of a `crs:Table_<id>` payload in a Camera Raw settings file, and the
+payload is the DNG SDK's own "big table" text encoding (`dng_big_table.cpp`): a
+Z85-like base85 whose alphabet swaps out the three XML-unsafe characters, five
+digits per little-endian `u32` with the least significant digit first, then a
+little-endian uncompressed size and a zlib stream; inside, a
+`dng_look_table` — kind, version, divisions, the `(hue °, sat ×, val ×)`
+entries in the order above, the value encoding. The id is the MD5 of those
+bytes, and `dcp::find_look_table` refuses a payload whose digest differs.
+Measured on the install: 330 of 330 tables decode and match their id; 24 are
+look tables (「Adobe Color」: 36 × 16 × 16, linear value) and 306 are RGB tables,
+which stay unrendered and are named as such. The table is read from the
+user's Camera Raw install, never bundled. It REPLACES the camera profile's own
+`ProfileLookTableData` rather than stacking after it — on p39 against Camera
+Raw, replacing leaves the sky at Δb +0.22 and the warm tones at Δb −1.13,
+stacking +1.01 and −3.21. (Until v1.17.0 this payload was recorded as
+undecodable: zlib had been tried behind a most-significant-digit-first base85.)
+A Look whose `crs:Amount` is not 1, a table that is not installed, and an RGB
+table are each disclosed by name in `diag.warn` and the develop panel.
+
+Measured on p39's flat sidecar against Camera Raw's render of the identical
+packet (lens-matched, 1000 px, `rel1170/colour/accept3-*.out`): whole-frame ΔE
+3.85 → 3.03, sky-ish Δb −4.99 → +0.22, warm Δb +6.03 → −1.13. What remains is
+not colour: a 0.19 % magnification difference in the lens-corrected geometry
+(undone, ΔE 1.98), the highlights above Lightroom's roll-off (L > 90 ΔL +2.7,
+the engine clips where Camera Raw compresses) and a shadow lift (L < 30 ΔL
++1.2 to +1.6).
 
 The invariant that keeps F7 from changing any existing picture is
-`Stage::build` returning `None` when a profile has no tables and no curve,
-pinned by `render::profile::tests::a_profile_with_no_tables_and_no_curve_is_not_a_stage`.
+`Stage::build_for` returning `None` when a profile has no tables, no curve and
+no `ForwardMatrix` to own,
+pinned by `render::profile::tests::a_profile_with_no_tables_a_straight_curve_and_no_gain_is_not_a_stage`.
 
 **Lightroom's remaining colour panels render since v1.5.0** — the Calibration
 panel, the Black & White treatment with its eight-band mixer, and Point Color.

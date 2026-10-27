@@ -316,12 +316,14 @@ Landscape」, 「Adobe Monochrome」 and the rest if you picked one. Since v1.5.
 AutoShade reads both and develops through them, which is a large part of why a
 photo now opens looking like it did in Lightroom rather than flatter.
 
-Both rows are read-only, and one of them carries a warning worth reading. A
-creative profile has two halves: a baked tone curve with a few baked sliders,
-which AutoShade renders, and a creative colour table, which Adobe stores in a
-form nobody outside Adobe can read. When a profile has one, the fold says so
-under its name rather than letting you assume the whole profile arrived. Colour
-may therefore sit slightly beside Lightroom's on those photos; tone will not.
+Both rows are read-only. A creative profile has two halves: a baked tone
+curve with a few baked sliders, and a creative colour table. Since v1.17.0
+AutoShade renders both — it reads the colour table from Adobe's own Camera Raw
+install on your machine, and checks it against the name the sidecar gives it.
+When a table cannot be rendered (Camera Raw is not installed, the profile scales
+its Look below 100 %, or the table is one of Adobe's RGB tables), the fold says
+so under the profile's name rather than letting you assume the whole profile
+arrived.
 
 The **Curves** fold holds Lightroom's **parametric curve** too since v1.5.0:
 Highlights, Lights, Darks and Shadows sliders (±100) under the point curve, then
@@ -944,8 +946,12 @@ it opens the photo beside that sidecar, so one sidecar renders one geometry on
 both surfaces. Since v1.17.0 a sidecar renders from where Lightroom starts:
 Adobe's baseline exposure for the body (inferred from the camera profiles
 Adobe installed for it, and said in one line) and, for a profile that states no
-tone curve of its own, such as Adobe Standard, Adobe's default curve. What
-still differs is the creative profile's colour table and Adobe's colour matrix.
+tone curve of its own, such as Adobe Standard, Adobe's default curve; and its
+colour through Adobe's own colour matrix for the profile and the creative
+profile's colour table, both read from your Camera Raw install. On the flat
+reference sidecar the colour now sits within about 1 point of b* of Camera
+Raw's render (sky and warm tones); what still differs is mostly the very
+brightest highlights, which Camera Raw rolls off and AutoShade clips.
 `auto` is `analyze` plus render.
 `batch` analyzes RAWs by default, skips baked photos unless `--include-baked`
 is set (avoiding duplicate analysis and billing for RAW+JPEG pairs), and

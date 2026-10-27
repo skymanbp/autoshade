@@ -642,8 +642,9 @@
     /// The disclosure is the point. A `crs:Look` has two halves — baked
     /// sliders and a baked tone curve, which `render::build_tone_lut` and
     /// `render::apply_rgb_curves` compose as the base rendition, and a
-    /// `crs:LookTable` creative colour table, whose payload does not decode
-    /// (`src/dcp.rs` records what was measured). A panel that printed
+    /// `crs:LookTable` creative colour table, which renders only when Camera
+    /// Raw's install carries it and the Look is at full amount (v1.17.0,
+    /// `dcp::find_look_table`). A panel that printed
     /// 「Adobe Landscape」 and stopped would be claiming the whole profile
     /// renders, on a photograph where the colour half does not — the exact
     /// shape of 「a slider that moves a number and no pixel」 this file's own
@@ -654,14 +655,15 @@
     fn a_creative_profile_names_itself_and_the_half_that_does_not_render() {
         use autoshade::recipe::{CreativeLook, CurvePoint};
         for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
-            // Adobe Color, the shape 152 of the library's 161 Looks have: one
-            // baked S-curve and a colour table we cannot read.
+            // Adobe Color's shape, which 152 of the library's 161 Looks have:
+            // one baked S-curve and a colour table — here one no install
+            // carries, so the table cannot render on any machine.
             let mut app = AutoShadeApp { lang, ..Default::default() };
             app.recipe.look = Some(CreativeLook {
                 name: "Adobe Color".to_string(),
                 amount: 1.0,
                 base_profile: "Adobe Standard".to_string(),
-                table: "0B3BFB5CFB7DBF7FF175E98F24D316B0".to_string(),
+                table: "00000000000000000000000000000000".to_string(),
                 tone_curve: vec![
                     CurvePoint { input: 0, output: 0 },
                     CurvePoint { input: 22, output: 16 },
@@ -703,6 +705,26 @@
                 "{lang:?}: a Look's baked base profile is not the photo's own: {seen:?}"
             );
 
+            // Adobe Color's own table, where Camera Raw is installed, renders
+            // and the panel says so; below full amount it does not.
+            if autoshade::dcp::find_look_table("E1095149FDB39D7A057BAB208837E2E1").is_ok() {
+                let renders = tr(lang, "Its baked tone curve, sliders and creative colour table render");
+                let not = tr(lang, "Its baked tone curve and sliders render; its creative colour table does not");
+                if let Some(look) = app.recipe.look.as_mut() {
+                    look.table = "E1095149FDB39D7A057BAB208837E2E1".to_string();
+                }
+                let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+                assert!(seen.iter().any(|t| t == renders), "{lang:?}: {seen:?}");
+                assert!(!seen.iter().any(|t| t == not), "{lang:?}: {seen:?}");
+                if let Some(look) = app.recipe.look.as_mut() {
+                    look.amount = 0.5;
+                }
+                let seen = tall_frame(&mut app, |a, ui| a.develop_panel(ui));
+                assert!(seen.iter().any(|t| t == not), "{lang:?}: half a Look: {seen:?}");
+                if let Some(look) = app.recipe.look.as_mut() {
+                    look.amount = 1.0;
+                }
+            }
             // A Look with NO table renders whole, so there is nothing to
             // disclose and the line must not appear — an unconditional
             // disclaimer is noise that teaches the reader to skip it.

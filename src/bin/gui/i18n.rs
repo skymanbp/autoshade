@@ -821,6 +821,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Creative profile", "创意配置文件"),
     ("Its baked tone curve and sliders render; its creative colour table does not",
         "它烘焙的色调曲线与滑杆会渲染；它的创意色彩表不会"),
+    // v1.17.0 — the creative colour table renders when Camera Raw's install
+    // carries it (read and checked against its id, never bundled).
+    ("Its baked tone curve, sliders and creative colour table render",
+        "它烘焙的色调曲线、滑杆与创意色彩表都会渲染"),
     ("Carried through to the sidecar unchanged; AutoShade never interprets these",
         "原样带出到边车文件；AutoShade 从不解读这些值"),
     // v1.5.0 F6 — the Transform panel RENDERS now, so the section holds real

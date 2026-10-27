@@ -1459,7 +1459,8 @@ fn without_a_profile_stage_the_recipe_reaches_the_tone_untouched() {
 /// where Lightroom's export of the same frame with no develop settings sits,
 /// band by band in lightness — the v1.17.0 baseline exposure and default
 /// curve. Measured before them: midtones ΔL −17.15, highlights −19.68,
-/// shadows −1.20.
+/// shadows −1.20. Since the colour spec (ForwardMatrix) and the Adobe Color
+/// table, the sky-ish and warm rows' Δb as well (from −5.76 and +7.94).
 ///
 /// Needs the corpus pair (`p39.arw`, `tint/p39-flat.jpg`) and Adobe's
 /// installed profiles; says which is missing and passes without them.
@@ -1509,26 +1510,54 @@ fn calibration_a_flat_sidecar_renders_where_lightroom_starts() {
         .expect("flat export")
         .resize_exact(ours.width(), ours.height(), image::imageops::FilterType::Triangle)
         .to_rgb8();
-    let lightness = |p: &image::Rgb<u8>| {
+    // sRGB → CIE Lab (D65), the measurement script's own conversion.
+    #[allow(clippy::excessive_precision)]
+    let lab = |p: &image::Rgb<u8>| -> [f64; 3] {
         let lin = |v: u8| {
             let c = v as f64 / 255.0;
             if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
         };
-        let y = 0.2126729 * lin(p[0]) + 0.7151522 * lin(p[1]) + 0.0721750 * lin(p[2]);
-        if y > 0.008856 { 116.0 * y.cbrt() - 16.0 } else { 903.3 * y }
+        let (r, g, b) = (lin(p[0]), lin(p[1]), lin(p[2]));
+        let x = (0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047;
+        let y = 0.2126729 * r + 0.7151522 * g + 0.0721750 * b;
+        let z = (0.0193339 * r + 0.1191920 * g + 0.9503041 * b) / 1.08883;
+        let f = |t: f64| if t > 0.008856 { t.cbrt() } else { 7.787 * t + 16.0 / 116.0 };
+        [116.0 * f(y) - 16.0, 500.0 * (f(x) - f(y)), 200.0 * (f(y) - f(z))]
     };
-    // Bands by LIGHTROOM's lightness, ΔL = ours − Lightroom's.
+    // Bands by LIGHTROOM's lightness, ΔL = ours − Lightroom's; and two colour
+    // rows by Lightroom's hue (v1.17.0, the ForwardMatrix and the Adobe Color
+    // table): sky-ish h 190–280° C > 8 and warm h 20–90° C > 12, Δb.
     let mut bands = [(0.0f64, 0usize); 3];
+    let mut colour = [(0.0f64, 0usize); 2];
     for (a, b) in ours.pixels().zip(theirs.pixels()) {
-        let (la, lb) = (lightness(a), lightness(b));
-        let band = if lb < 35.0 { 0 } else if lb < 70.0 { 1 } else { 2 };
-        bands[band].0 += la - lb;
+        let (la, lb) = (lab(a), lab(b));
+        let band = if lb[0] < 35.0 { 0 } else if lb[0] < 70.0 { 1 } else { 2 };
+        bands[band].0 += la[0] - lb[0];
         bands[band].1 += 1;
+        let (c, h) = (lb[1].hypot(lb[2]), lb[2].atan2(lb[1]).to_degrees().rem_euclid(360.0));
+        let row = if h > 190.0 && h < 280.0 && c > 8.0 {
+            Some(0)
+        } else if h > 20.0 && h < 90.0 && c > 12.0 {
+            Some(1)
+        } else {
+            None
+        };
+        if let Some(i) = row {
+            colour[i].0 += la[2] - lb[2];
+            colour[i].1 += 1;
+        }
     }
-    let mean = |i: usize| bands[i].0 / bands[i].1.max(1) as f64;
-    let (dark, mid, light) = (mean(0), mean(1), mean(2));
+    let mean = |s: (f64, usize)| s.0 / s.1.max(1) as f64;
+    let (dark, mid, light) = (mean(bands[0]), mean(bands[1]), mean(bands[2]));
+    let (sky_b, warm_b) = (mean(colour[0]), mean(colour[1]));
     eprintln!("flat sidecar ΔL by band: L<35 {dark:+.2}, L35-70 {mid:+.2}, L>70 {light:+.2}");
+    eprintln!("flat sidecar Δb by row: sky-ish {sky_b:+.2}, warm {warm_b:+.2}");
     assert!(dark.abs() <= 2.0, "shadows ΔL {dark:+.2} (bound ±2)");
     assert!(mid.abs() <= 3.0, "midtones ΔL {mid:+.2} (bound ±3)");
     assert!(light.abs() <= 3.0, "highlights ΔL {light:+.2} (bound ±3)");
+    // Before v1.17.0's colour spec and look table: −5.76 and +7.94.
+    if crate::dcp::find_look_table("E1095149FDB39D7A057BAB208837E2E1").is_ok() {
+        assert!(sky_b.abs() <= 1.5, "sky-ish Δb {sky_b:+.2} (bound ±1.5)");
+        assert!(warm_b.abs() <= 1.5, "warm Δb {warm_b:+.2} (bound ±1.5)");
+    }
 }

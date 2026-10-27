@@ -269,15 +269,24 @@ pub(super) fn calibrate_camera_buffer(
     let m = camera_to_space_matrix(xyz2cam, space);
     data.par_iter_mut().for_each(|px| {
         let v = [px[0] * wb[0], px[1] * wb[1], px[2] * wb[2]];
-        let mut t = mat_vec3(&m, &v);
-        // The camera profile acts HERE: linear working-space light, after the
-        // calibration matrix and before the transfer encode. Everything
-        // downstream — exposure, tone, the mixer, the masks — then sees a frame
-        // that already carries the profile, which is the order Lightroom's own
-        // panel implies. Absent, this line does not exist.
-        if let Some(p) = profile {
-            p.apply(&mut t);
-        }
+        // The camera profile acts HERE: linear light, before the transfer
+        // encode. Everything downstream — exposure, tone, the mixer, the masks
+        // — then sees a frame that already carries the profile, which is the
+        // order Lightroom's own panel implies. A profile with a ForwardMatrix
+        // takes the white-balanced CAMERA triple and owns the matrix too
+        // (`profile::Stage::develop_camera`, the DNG SDK's colour spec); any
+        // other profile acts on the working-space pixel this engine's own D65
+        // matrix makes — and a render with no profile (no Adobe install, or
+        // none named) keeps that matrix alone, as before v1.17.0.
+        let mut t = match profile {
+            Some(p) if p.owns_camera() => p.develop_camera(v),
+            Some(p) => {
+                let mut t = mat_vec3(&m, &v);
+                p.apply(&mut t);
+                t
+            }
+            None => mat_vec3(&m, &v),
+        };
         let max = t[0].max(t[1]).max(t[2]);
         if max > 1.0 {
             // Blown pixels take EXACTLY rawler's treatment, including its
@@ -320,18 +329,25 @@ pub(super) fn resolve_camera_profile(
     if name.is_empty() {
         return None;
     }
-    // The creative colour table is the one thing a Look carries that cannot be
-    // rendered — see `crate::dcp` for what was measured about that payload.
-    // Named here, where the profile is being applied, rather than nowhere.
-    if let Some(look) = r.look.as_ref()
-        && !look.table.is_empty()
-    {
-        diag.warn(format!(
-            "creative profile \"{}\": its colour table ({}) is not rendered — the rest of the \
-             Look is",
-            look.name, look.table
-        ));
-    }
+    // The creative colour table, read from the Camera Raw install and checked
+    // against its fingerprint (`crate::dcp::find_look_table`). Every way it
+    // can stay unrendered is named here, where the profile is being applied.
+    let creative = r.look.as_ref().filter(|l| !l.table.is_empty()).and_then(|look| {
+        let not_rendered = |why: String| {
+            diag.warn(format!(
+                "creative profile \"{}\": its colour table ({}) is not rendered ({why}) — the \
+                 rest of the Look is",
+                look.name, look.table
+            ));
+        };
+        // Lightroom scales a Look by its Amount; every Look measured carries
+        // 1, and how a table scales below that is not modelled.
+        if (look.amount - 1.0).abs() > 1e-3 {
+            not_rendered(format!("its amount is {:.2}, and only 1 is modelled", look.amount));
+            return None;
+        }
+        crate::dcp::find_look_table(&look.table).map_err(|e| not_rendered(e.to_string())).ok()
+    });
     let (make, model) = (rawimage.camera.make.as_str(), rawimage.camera.model.as_str());
     let (path, prof) = match crate::dcp::find(make, model, name) {
         Ok(found) => found,
@@ -352,14 +368,19 @@ pub(super) fn resolve_camera_profile(
             return None;
         }
     };
-    let kelvin = wb_to_kelvin_tint(&matrix, normalise_wb(rawimage.wb_coeffs)).map(|(k, _)| k);
+    let wb = normalise_wb(rawimage.wb_coeffs);
+    let kelvin = wb_to_kelvin_tint(&matrix, wb).map(|(k, _)| k);
+    // The camera neutral is the reciprocal of the white-balance multipliers;
+    // with the profile's own matrices it fixes the white the SDK's way.
+    let neutral = wb.iter().all(|c| c.is_finite() && *c > 0.0).then(|| wb.map(|c| 1.0 / c));
     // Adobe's baseline exposure for the body, which its renderer adds to the
     // profile's own offset. Disclosed either way: inferred, it is a number
     // this engine did not read from the photograph; unknown, it is why the
     // render may sit darker than Lightroom's.
     let baseline = crate::dcp::baseline_exposure(make, model);
     diag.warn(baseline_disclosure(make, model, &baseline));
-    let stage = profile::Stage::build(&prof, space, kelvin, baseline.ev());
+    let frame = profile::Frame { kelvin, neutral, creative };
+    let stage = profile::Stage::build_for(&prof, space, frame, baseline.ev());
     if stage.is_none() {
         diag.warn(format!(
             "camera profile \"{name}\" ({}) carries no table or curve this engine renders",
