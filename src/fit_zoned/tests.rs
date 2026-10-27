@@ -7021,7 +7021,7 @@ fn the_tint_read_returns_the_tint_a_target_was_made_with() {
             }
         })
         .collect();
-    let cover = |i: usize| if i % 4 == 0 { 0.5 } else { 1.0 };
+    let cover = |i: usize| if i.is_multiple_of(4) { 0.5 } else { 1.0 };
     let target: Vec<[f32; 3]> =
         candidate.iter().enumerate().map(|(i, p)| crate::render::tint_px(*p, dir, k * cover(i))).collect();
     let read = super::tint::read_zone_tint(&candidate, &target, &|_| 1.0, &cover).expect("a tint to read");
