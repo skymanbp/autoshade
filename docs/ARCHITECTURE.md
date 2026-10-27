@@ -226,8 +226,8 @@
 > symbol, link and tier count the living documents name exists in the tree;
 > CI's `docs` job runs it on every push) — and a gate that exits non-zero
 > fails the battery like a lane.
-> 1754 library + 25 CLI + 292 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1739 pass + 15 `#[ignore]`d forensic probes and
+> 1759 library + 26 CLI + 292 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1744 pass + 15 `#[ignore]`d forensic probes and
 > the GUI result is 288 pass + four ignored (an explicit scratch-recipe export
 > probe and the offline panel, window and mode-workspace screenshots) in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
 > refusal pair (a RAW source, a baked negative); the library and GUI lists are
@@ -261,7 +261,14 @@
 > edit read as the edit, a maskless edit sending no mask and layering only
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
-> screenshots). For v1.15.1, by name against the v1.15.0 battery: library
+> screenshots). For v1.16.0, by name against the v1.15.1 battery: library
+> +5 / −0 — all 5 in `pipeline` (a lens-corrected target is paired in the
+> sensor frame; an uncorrected target keeps its evidence and drops the
+> profile geometry; the ring outside a moved target is absent, not a
+> refuser; a calibration with no geometry leaves the pair as it was; no zone
+> pair weight survives where the target is absent); GUI +0 / −0; CLI 25 → 26
+> (`apply` with a sidecar stamps the lens profile the desktop app stamps). For
+> v1.15.1, by name against the v1.15.0 battery: library
 > +7 / −0 — 3 in `fit` (the mixer stage's do-no-harm loop and the
 > mixer-against-its-absence loop stop at the 16-round bound when nothing
 > descends; a handover white-balance candidate refused by the stage's gates

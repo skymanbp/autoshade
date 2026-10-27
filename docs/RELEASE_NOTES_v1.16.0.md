@@ -45,7 +45,10 @@ coding model wrote this release.
   sky of the seaside street — the photo that started this — moved from a
   pale, warm-clouded sky toward the target's deeper blue with cooler clouds.
   The pair exported without the profile and the two generated references
-  read as undecided and render the same pixels as v1.15.1.
+  read as undecided: their recipes differ from v1.15.1's only by the
+  geometry note in the rationale, and their renderings are the same pixels
+  (the two generated references) or within one code of 255 (the uncorrected
+  pair).
 
 ## The command line renders a sidecar the way the desktop app does
 
