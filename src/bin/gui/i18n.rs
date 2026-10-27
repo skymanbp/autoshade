@@ -515,8 +515,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Turn on 「AI review」 first — 「Retry once」 repeats that review",
         "请先勾选「AI 打分」——「可重试一次」就是把这次打分再做一轮"),
     ("Reverse-fit recipe", "反推配方"),
-    ("Statistical fit: reverse the freshly generated look into editable develop params (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes into this photo's develop store; hit Export to render the full-resolution result. Uses the Reverse-fit strength dial above as its honesty budget.",
-        "统计拟合：把刚生成的观感反解成可编辑的 develop 参数（本地运算，无 API 费）。滑杆会更新（可 undo），RAW 会在该照片的显影库里生成 Lightroom XMP；再点「导出」可出全分辨率成品。使用上方「反推强度」滑杆作为反推的诚实预算。"),
+    // The explainer is shared with the fit prompt (v1.17.0), so the fold's
+    // own tail — the dial ABOVE the button — is a pair of its own.
+    ("Statistical fit: reverse the freshly generated look into editable develop params (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes into this photo's develop store; hit Export to render the full-resolution result.",
+        "统计拟合：把刚生成的观感反解成可编辑的 develop 参数（本地运算，无 API 费）。滑杆会更新（可 undo），RAW 会在该照片的显影库里生成 Lightroom XMP；再点「导出」可出全分辨率成品。"),
+    (" Uses the Reverse-fit strength dial above as its honesty budget.",
+        "使用上方「反推强度」滑杆作为反推的诚实预算。"),
     ("Extract style", "提取风格提示词"),
     ("Compare the original / generated images and have the vision model write a reusable style prompt: auto-fills the Generate image prompt (ready to restyle other photos) and saves <stem>.style.txt in the delivery folder.",
         "对比 原图/生成图，让 vision 模型写一段可复用的风格 prompt：自动填入「AI 生成出片」提示词（可直接给别的照片重绘用）并把 <stem>.style.txt 存到成片文件夹。"),
@@ -2980,7 +2984,21 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Scroll to zoom · drag to move when zoomed in · hold B to see the original",
         "滚轮缩放 · 放大后拖动移动 · 按住 B 看原图"),
     ("Before and after side by side — click again for the photo alone; hold B to see the original",
-        "前后并排对比 — 再点一下只看照片；按住 B 看原图"),
+        "前后并排对比 — 再点一下只看照片；按住 B 看原图"),    // v1.17.0 — the fit prompt after 「AI generate」: reverse-fit the new ✨
+    // card, and from which negative (默认原图).
+    ("Reverse-fit this AI result?", "是否把这张 AI 生成结果反推成配方？"),
+    ("Reverse-fit strength {pct}% · local areas {zoned} · AI review {review} — set in the AI panel's reverse-fit fold",
+        "反推强度 {pct}% · 局部区域 {zoned} · AI 打分 {review} ——在 AI 面板的「反推配方」一栏里设置"),
+    ("on", "开"),
+    ("off", "关"),
+    ("Don't ask again after generating", "生成后不再询问"),
+    ("Turn it back on in the AI panel's reverse-fit fold: 「Ask after each AI generation」",
+        "可在 AI 面板的「反推配方」一栏里重新打开：「每次 AI 生成后询问」"),
+    ("Not now", "暂不"),
+    ("Reverse-fit", "反推"),
+    ("Ask after each AI generation", "每次 AI 生成后询问"),
+    ("When 「AI generate」 lands a new ✨ card, ask whether to reverse-fit it and from which negative (the ▣ original unless you pick another).",
+        "「AI 生成」产出新的 ✨ 卡后，询问是否反推、以哪张底片为起点（默认 ▣ 原图，可另选）。"),
 ];
 
 #[cfg(test)]

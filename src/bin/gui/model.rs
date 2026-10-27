@@ -276,6 +276,11 @@ pub(crate) struct Prefs {
     /// [`Prefs::default`] gives, so an upgrade never silently starts buying
     /// a second image per reimagine.
     pub(crate) reimagine_retry: bool,
+    /// v1.17.0: ask whether to reverse-fit after a whole-frame「AI generate」
+    /// lands. Routed through [`Prefs::default`] like `fit_strength`: a prefs
+    /// file written before this key existed decodes to `true`, the question
+    /// every user is shown first, never to serde's `false`.
+    pub(crate) ask_fit_after_generate: bool,
     /// The adjust fold's own quality; old prefs default to high (0).
     pub(crate) adjust_quality: usize,
     pub(crate) view_mode: ViewMode,
@@ -335,6 +340,8 @@ impl Default for Prefs {
             fit_deep: false,
             // A second billed generation per diverged reimagine — same rule.
             reimagine_retry: false,
+            // Free to answer, and 「Don't ask again」 is one click inside it.
+            ask_fit_after_generate: true,
             adjust_quality: 0,
             view_mode: ViewMode::SideBySide,
             exp_long_edge: 0,
@@ -528,6 +535,21 @@ pub(crate) enum RetouchNote {
     /// divergence D, and the discarded attempt's D when the opt-in retry
     /// bought a second generation.
     Reimagined { out: PathBuf, divergence: f32, discarded: Option<f32> },
+}
+
+/// The question a whole-frame「AI generate」landing asks (v1.17.0): reverse-fit
+/// the new ✨ card, and from which negative (`fit_prompt_layer`).
+pub(crate) struct FitPrompt {
+    /// The ✨ card the answer is about, by id — the strip switched to it, and
+    /// a newer generation landing while the question is up takes it over.
+    pub(crate) target: String,
+    /// That generation's structural divergence D, for the fidelity line.
+    pub(crate) divergence: f32,
+    /// The source picked in the prompt's「From:」menu (`None` = Automatic);
+    /// it starts on the ▣ original.
+    pub(crate) from: Option<String>,
+    /// The「Don't ask again」box, written to the pref when the prompt closes.
+    pub(crate) dont_ask: bool,
 }
 
 impl RetouchNote {

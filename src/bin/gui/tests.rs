@@ -25,3 +25,4 @@
     include!("tests/mode.rs");
     include!("tests/normal.rs");
     include!("tests/portrait.rs");
+    include!("tests/fit_prompt.rs");
