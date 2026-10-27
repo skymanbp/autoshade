@@ -1272,6 +1272,16 @@ develop** (Analysis, Adjust the selected variant, Reference library).
   off by default, it buys a second image) regenerates once and keeps the
   closer result. Use **Reverse-fit** or `match` to infer a deterministic recipe
   and apply it to the original RAW at full resolution.
+  After a Reimagine lands, the app asks **Reverse-fit this AI result?** The
+  dialog says what the fit does, repeats the result's **D** reading, and has a
+  **From:** menu with the same cards as the reverse-fit fold's menu. It starts
+  on the **▣ Original** card; **Automatic** is still in the list. A line names
+  the strength and the switches the fit will use; you change those in the fold.
+  **Reverse-fit** (Enter) starts the same fit as the fold's button, and **Not
+  now** (Esc) changes nothing. Tick **Don't ask again after generating** to stop
+  the question; **Ask after each AI generation** in the reverse-fit fold turns
+  it back on. An Adjust or a fill does not ask, and neither does Normal mode,
+  which has no reverse-fit.
 
 - **Adjust generated image · paid API:** the fold directly after Reimagine
   under **AI generation & reverse-fit** edits the selected **✨ AI generated**

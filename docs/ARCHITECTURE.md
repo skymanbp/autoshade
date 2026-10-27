@@ -3194,6 +3194,20 @@ the new card, preserve the source card, and permit another adjust or reverse-fit
 using the same `tag`, `tag-2`, … law as every output family. No new variant
 kind or store flag is needed.
 
+A whole-frame reimagine (`RetouchNote::Reimagined`) lands the same way and,
+since v1.17.0, then asks whether to reverse-fit it. `offer_fit_prompt` opens
+a `FitPrompt` (the new card's id, its D, the「From:」pick, the「Don't ask
+again」box) unless a job is running, `Prefs::ask_fit_after_generate` is off,
+or the shell has no reverse-fit fold (`Shell::one_click_sidebar`); an adjust
+does not ask. The pick starts on the ▣ card, not on `negative_index`, which
+would choose a ◈ / ▦ master. `fit_prompt_layer` is the quit layer's shape — a
+scrim and a centred `egui::Window`, with `modal_up` gating the shortcut tiers
+and drops — and owns nothing of the fit: its source list is the fold's
+(`fit_source_menu`), its fidelity line is the status line's
+(`reimagine_fidelity`), and「Reverse-fit」sets `fit_from`, clears `fit_ref`
+(which would otherwise win `fit_target`) and calls `start_fit`. A second
+landing while it is up re-targets it rather than stacking a second one.
+
 The fifth kind, `VariantKind::Denoised` (「◈ Denoised
 negative」, store word `"denoised"`, 2026-09-15), is what an AI denoise lands
 as — source-based over its own denoised master (`origin`), the develop copied
