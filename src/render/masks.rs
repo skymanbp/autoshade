@@ -154,15 +154,11 @@ pub(super) fn apply_masks(
                 colour_gain_luts([g[0] * cg[0], g[1] * cg[1], g[2] * cg[2]])
             });
         // The mask Color tint, compiled ONCE per mask like the LUTs above:
-        // the swatch's direction in Oklab and its shift at full mask weight.
+        // the swatch's Oklab push and its amount at full mask weight.
         // `None` at amount 0, so an untinted mask pays nothing and renders to
         // the bit what it rendered before the tint existed.
-        let toning = (m.toning_amount > 0.0).then(|| {
-            (
-                tint_direction(m.toning_hue),
-                TINT_OKLAB_PER_UNIT * m.toning_amount.min(100.0) / 100.0,
-            )
-        });
+        let toning = (m.toning_amount > 0.0)
+            .then(|| (tint_push(m.toning_hue), m.toning_amount.min(100.0) / 100.0));
         let amount = m.amount.clamp(0.0, 1.0);
         // Amount 0 zeroes every weight below (inverted or not) — skip the
         // full-frame tone scan and a possible NR blur that would all be
@@ -359,8 +355,8 @@ pub(super) fn apply_masks(
                 }
                 // The Color tint last, on the blended pixel at the mask's
                 // own weight (see the colour-stage order on this function).
-                if let Some((dir, k)) = toning {
-                    *out_px = tint_px(*out_px, dir, k * wgt);
+                if let Some((push, a)) = toning {
+                    *out_px = tint_px(*out_px, push, a * wgt);
                 }
             }
         });
@@ -831,55 +827,75 @@ pub fn engine_active(m: &crate::recipe::LocalAdjustment) -> bool {
 
 // The mask Color tint (`crs:LocalToningHue` / `LocalToningSaturation`).
 //
-// The model is fitted, not guessed: the seaside street exported three times
-// from Lightroom (cloud 9.4) with nothing moved, then with ONE whole-frame
-// mask carrying only the Color swatch — hue 210, amount 0.782609 and
-// 0.391304, as the XMP packet each export embeds records. Per pixel, tinted
-// − flat says what the control is: the shift points the same way on neutral,
-// mid-chroma and warm pixels (an ADDITIVE chroma shift, not a blend toward a
-// colour — a blend bends it on every pixel that already has a colour); the
-// two exports' shifts stand 1.94–2.05 in
-// every bin (linear in the amount); it peaks in the midtones and fades in
-// the shadows and highlights (a lightness window); and lightness hardly
-// moves (≤ 2.2 L where the shift is 23 units). Of the six models fitted to
-// both exports at once, the additive shift in Oklab with a Gaussian window
-// is the one that lands the sky — the population this control exists for —
-// at mean ΔE 2.62 (1.82 on the neutral pixels, the clouds), where a blend
-// toward the hue at the pixel's own luminance (the model this replaced)
-// read 7.87 on the sky.
+// The model is fitted, not guessed. First on the seaside street exported from
+// Lightroom (cloud 9.4) with nothing moved, then with ONE whole-frame mask
+// carrying only the Color swatch — hue 210, amount 0.782609 and 0.391304, as
+// the XMP packet each export embeds records. Per pixel, tinted − flat says
+// what the control is: the shift points the same way on neutral, mid-chroma
+// and warm pixels (an ADDITIVE chroma shift, not a blend toward a colour — a
+// blend bends it on every pixel that already has a colour); the two exports'
+// shifts stand 1.94–2.05 in every bin (linear in the amount); it peaks in the
+// midtones and fades in the shadows and highlights (a lightness window); and
+// lightness hardly moves (≤ 2.2 L where the shift is 23 units). Of the six
+// models fitted to both exports at once, the additive shift in Oklab with a
+// Gaussian window lands the sky at mean ΔE 2.62 (1.82 on the neutral pixels,
+// the clouds), where a blend toward the hue at the pixel's own luminance read
+// 7.87 on the sky.
 //
-// The constants below are one joint fit on both exports at their exact
-// settings (150k pixels at 1200 px; mean ΔE 1.70, against 10.44 / 5.38 for
-// no tint), every one of them shared by the two amounts.
+// Then across the wheel, on Camera Raw renders of the user's own mask packet
+// (2026-10-27): the swatch at hues 0, 60, 120, 180, 240 and 300 at amount
+// 0.5, and hue 210 at 0.25, 0.391304, 0.782609 and 1.0, each against the
+// same packet at amount 0. Camera Raw reproduces the user's Lightroom
+// exports of that packet to mean ΔE 0.32 / 0.33 (0.31 untinted), so the
+// renders stand for Lightroom. Neither the direction nor the strength of the
+// push is uniform around the wheel in Oklab: read one hue at a time it
+// pushes along Oklab 12.0°, 100.0°, 155.3°, 190.5°, 217.7°, 276.6° and
+// 336.1° for hues 0, 60, 120, 180, 210, 240 and 300, at 0.086 to 0.158 per
+// unit amount. Both follow Lightroom's own working space: the step from
+// linear mid grey toward the fully saturated linear-ProPhoto colour of the
+// hue ([`prophoto_push`]) points within 5.4° of every measured push, and its
+// length tracks the measured strength at r = 0.97. What it misses, the
+// nodes keep ([`TINT_NODES`]). With one shared window over all twelve pairs
+// (fitted on a 30k-pixel sample at 1200 px) the mean ΔE is 1.66; the map this
+// replaced (Oklab hue = Lightroom hue + 8.1°, one strength) read 2.42–6.14 at
+// the six hues.
 
 /// Centre of the tint's lightness window, in the gamma-encoded Rec.709 luma
 /// of the pixel the tint receives ([`tint_luma`]), fitted jointly with
-/// [`TINT_WINDOW_SIGMA`], [`TINT_OKLAB_PER_UNIT`] and the hue on both
-/// exports (ΔE 2.08 at 0.78 and 1.31 at 0.39).
-pub(crate) const TINT_WINDOW_CENTRE: f32 = 0.470;
+/// [`TINT_WINDOW_SIGMA`] and the seven nodes over all twelve pairs.
+pub(crate) const TINT_WINDOW_CENTRE: f32 = 0.469;
 
 /// Width (σ) of the tint's lightness window, same quantity and same fit as
-/// [`TINT_WINDOW_CENTRE`]: the shift reads −16.9 / −16.5 (a / b) on neutral
-/// midtones and −4.9 / −5.3 above L 70, which a Gaussian of this width in
-/// gamma luma reproduces at ΔE 1.82 on the neutral pixels.
-pub(crate) const TINT_WINDOW_SIGMA: f32 = 0.272;
+/// [`TINT_WINDOW_CENTRE`]. (The two Lightroom exports alone read 0.470 / 0.272.)
+pub(crate) const TINT_WINDOW_SIGMA: f32 = 0.283;
 
-/// Oklab chroma shift per unit of Lightroom's 0..1 amount at the window's
-/// centre and full mask weight: 0.1051 from the joint fit, and read one
-/// export at a time 0.1079 at 0.782609 and 0.1055 at 0.391304 — linear in
-/// the amount to 2.3 %, which is the whole of what two amounts can say.
-pub(crate) const TINT_OKLAB_PER_UNIT: f32 = 0.105;
+/// The measured wheel: per Lightroom hue, the Oklab angle (degrees) the
+/// swatch pushes along and its Oklab chroma shift per unit of the 0..1
+/// amount at the window's centre and full mask weight, each read from that
+/// hue's pairs alone under the window above (one joint fit, 2026-10-27).
+/// Hue 210 pools its six pairs (four Camera Raw amounts, two Lightroom
+/// exports); read one at a time its amounts give 0.1011, 0.1051, 0.1074 and
+/// 0.1029 per unit at 0.25, 0.39, 0.78 and 1.0 — linear to 6 %. Between nodes
+/// the push is the ProPhoto step turned and scaled by the two neighbouring
+/// nodes' corrections, interpolated linearly in hue; those hues are not
+/// measured.
+const TINT_NODES: [(f32, f32, f32); 7] = [
+    (0.0, 12.0, 0.1276),
+    (60.0, 100.0, 0.0926),
+    (120.0, 155.3, 0.1576),
+    (180.0, 190.5, 0.1422),
+    (210.0, 217.7, 0.1004),
+    (240.0, 276.6, 0.0861),
+    (300.0, 336.1, 0.1531),
+];
 
-/// Where Lightroom's hue wheel sits in Oklab: the swatch at hue `h` pushes
-/// along Oklab hue `h + 8.1°`. ONE measured point pins it — hue 210 pushed
-/// along 218.1° in the joint fit (217.1° / 220.4° read one export at a time)
-/// — and nothing else in the record tests the rest of the wheel, so this is
-/// the least-assuming map through that point, not a measured curve. What it
-/// replaced was worse at the one point there is: reading the hue as the
-/// sRGB HSV hue puts 210 at Oklab 256.2°, 38° off, and the exports read ΔE
-/// 8.53 / 3.93 under it. Candidate wheels with no constant (linear ProPhoto,
-/// linear Rec.2020, sRGB HSV in linear light) land 202°, 213° and 234°.
-pub(crate) const TINT_HUE_OFFSET_DEG: f32 = 8.1;
+/// Linear ProPhoto (ROMM) RGB → linear sRGB: ProPhoto → XYZ (D50), Bradford
+/// D50 → D65, XYZ → sRGB (Lindbloom's published matrices, multiplied out).
+const PROPHOTO_TO_LINEAR_SRGB: [[f64; 3]; 3] = [
+    [2.034_076_1, -0.727_334_2, -0.306_741_9],
+    [-0.228_813_4, 1.231_730_1, -0.002_916_8],
+    [-0.008_569_7, -0.153_286_6, 1.161_856_4],
+];
 
 /// The gamma-encoded Rec.709 luma `0.2126 R' + 0.7152 G' + 0.0722 B'` of a
 /// display-encoded pixel — the quantity the window was fitted in. Not
@@ -921,40 +937,103 @@ pub(crate) fn oklab_to_linear(lab: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-/// The direction the swatch at Lightroom hue `hue_deg` pushes in the Oklab
-/// (a, b) plane, as a unit vector (see [`TINT_HUE_OFFSET_DEG`]).
-pub(crate) fn tint_direction(hue_deg: f32) -> [f32; 2] {
-    let t = (hue_deg + TINT_HUE_OFFSET_DEG).to_radians();
-    [t.cos(), t.sin()]
+/// The base wheel: the Oklab (a, b) step, per unit of step, from linear
+/// ProPhoto mid grey toward the fully saturated ProPhoto colour of HSV hue
+/// `hue_deg`. It is the differential, so neither the grey level nor the
+/// encoding matters (measured: grey 0.18, 0.3 and 0.5, linear or gamma 1.8,
+/// all agree). In f64 because it is a difference of nearly equal cube roots.
+fn prophoto_push(hue_deg: f32) -> [f64; 2] {
+    const EPS: f64 = 1e-3;
+    const GREY: f64 = 0.5;
+    let h = f64::from(hue_deg).rem_euclid(360.0) / 60.0;
+    let x = 1.0 - ((h % 2.0) - 1.0).abs();
+    let rgb = match h as u32 {
+        0 => [1.0, x, 0.0],
+        1 => [x, 1.0, 0.0],
+        2 => [0.0, 1.0, x],
+        3 => [0.0, x, 1.0],
+        4 => [x, 0.0, 1.0],
+        _ => [1.0, 0.0, x],
+    };
+    let ab = |p: [f64; 3]| {
+        let m = PROPHOTO_TO_LINEAR_SRGB;
+        let c = [0, 1, 2].map(|r| m[r][0] * p[0] + m[r][1] * p[1] + m[r][2] * p[2]);
+        let l = (0.412_221_470_8 * c[0] + 0.536_332_536_3 * c[1] + 0.051_445_992_9 * c[2]).cbrt();
+        let mm = (0.211_903_498_2 * c[0] + 0.680_699_545_1 * c[1] + 0.107_396_956_6 * c[2]).cbrt();
+        let s = (0.088_302_461_9 * c[0] + 0.281_718_837_6 * c[1] + 0.629_978_700_5 * c[2]).cbrt();
+        [
+            1.977_998_495_1 * l - 2.428_592_205 * mm + 0.450_593_709_9 * s,
+            0.025_904_037_1 * l + 0.782_771_766_2 * mm - 0.808_675_766 * s,
+        ]
+    };
+    let (o0, o1) = (ab([GREY; 3]), ab(rgb.map(|v| GREY + EPS * (v - GREY))));
+    [(o1[0] - o0[0]) / EPS, (o1[1] - o0[1]) / EPS]
 }
 
-/// The Lightroom hue (0..360, to a tenth of a degree) whose swatch pushes
-/// along Oklab hue angle `theta` (radians): [`tint_direction`] inverted.
-pub(crate) fn tint_hue_of(theta: f32) -> f32 {
-    let h = (theta.to_degrees() - TINT_HUE_OFFSET_DEG).rem_euclid(360.0);
-    ((h * 10.0).round() / 10.0).rem_euclid(360.0)
+/// The Oklab (a, b) shift the swatch at Lightroom hue `hue_deg` makes per
+/// unit of amount at the window's centre and full mask weight. At a node of
+/// [`TINT_NODES`] it is that node's measured push exactly; between nodes it
+/// is [`prophoto_push`] turned by, and scaled to, the two neighbouring
+/// nodes' corrections interpolated linearly in hue.
+pub(crate) fn tint_push(hue_deg: f32) -> [f32; 2] {
+    let h = hue_deg.rem_euclid(360.0);
+    let correction = |i: usize| {
+        let (nh, angle, k) = TINT_NODES[i];
+        let u = prophoto_push(nh);
+        let turn = (f64::from(angle).to_radians() - u[1].atan2(u[0])).to_degrees();
+        ((turn + 180.0).rem_euclid(360.0) - 180.0, f64::from(k) / u[0].hypot(u[1]))
+    };
+    let n = TINT_NODES.len();
+    let i = TINT_NODES.iter().rposition(|node| node.0 <= h).unwrap_or(0);
+    let (h0, h1) = (TINT_NODES[i].0, if i + 1 < n { TINT_NODES[i + 1].0 } else { 360.0 });
+    let t = f64::from((h - h0) / (h1 - h0));
+    let ((turn0, scale0), (turn1, scale1)) = (correction(i), correction((i + 1) % n));
+    let (turn, scale) = (turn0 + t * (turn1 - turn0), scale0 + t * (scale1 - scale0));
+    let u = prophoto_push(h);
+    let (sin, cos) = turn.to_radians().sin_cos();
+    [((u[0] * cos - u[1] * sin) * scale) as f32, ((u[0] * sin + u[1] * cos) * scale) as f32]
+}
+
+/// The Lightroom hue (0..360, to a tenth of a degree) and the 0..1 amount
+/// whose swatch makes the Oklab (a, b) shift `push` at the window's centre:
+/// [`tint_push`] inverted by the nearest direction on the tenth-degree
+/// wheel (the measured wheel turns monotonically, so the nearest is the one).
+pub(crate) fn tint_from_push(push: [f32; 2]) -> (f32, f32) {
+    use std::f32::consts::{PI, TAU};
+    let theta = push[1].atan2(push[0]);
+    let (mut best, mut best_gap) = (0.0f32, f32::INFINITY);
+    for tenth in 0..3600u16 {
+        let hue = f32::from(tenth) / 10.0;
+        let p = tint_push(hue);
+        let gap = ((p[1].atan2(p[0]) - theta + PI).rem_euclid(TAU) - PI).abs();
+        if gap < best_gap {
+            (best, best_gap) = (hue, gap);
+        }
+    }
+    let unit = tint_push(best);
+    (best, push[0].hypot(push[1]) / unit[0].hypot(unit[1]))
 }
 
 /// One display-encoded pixel under the Color tint: its Oklab (a, b) moved by
-/// `k · window(luma)` along `dir`, its Oklab L untouched, back to linear
-/// light clipped at 0 and re-encoded. `k` is [`TINT_OKLAB_PER_UNIT`] × the
-/// 0..1 amount × the mask weight at this pixel — the shift is linear in all
-/// three, which is what the exports measured — so a soft mask edge tints
-/// half as far rather than blending half way toward a tinted copy. No gamut
-/// mapping past the clip: Lightroom's exports clip too, and the warm
+/// `push · amount · window(luma)`, its Oklab L untouched, back to linear
+/// light clipped at 0 and re-encoded. `push` is [`tint_push`] of the hue and
+/// `amount` the 0..1 amount × the mask weight at this pixel — the shift is
+/// linear in both, which is what the renders measured — so a soft mask edge
+/// tints half as far rather than blending half way toward a tinted copy. No
+/// gamut mapping past the clip: Lightroom's exports clip too, and the warm
 /// pixels' residual is where that shows. A pixel the window has all but
 /// closed on (a highlight past 1.0 in an HDR develop) is returned as it
 /// came, so the transfer LUTs' clamp cannot touch it.
-pub(crate) fn tint_px(px: [f32; 3], dir: [f32; 2], k: f32) -> [f32; 3] {
-    let shift = k * tint_window(tint_luma(&px));
-    if shift.abs() < 1e-7 {
+pub(crate) fn tint_px(px: [f32; 3], push: [f32; 2], amount: f32) -> [f32; 3] {
+    let shift = amount * tint_window(tint_luma(&px));
+    if (shift * push[0].hypot(push[1])).abs() < 1e-7 {
         return px;
     }
     let (dec, enc) = transfer_luts();
     let lin = px.map(|v| if (0.0..=1.0).contains(&v) { sample_lut(dec, v) } else { srgb_to_linear(v) });
     let mut lab = linear_to_oklab(lin);
-    lab[1] += shift * dir[0];
-    lab[2] += shift * dir[1];
+    lab[1] += shift * push[0];
+    lab[2] += shift * push[1];
     oklab_to_linear(lab).map(|v| {
         let v = v.max(0.0);
         if v <= 1.0 { sample_lut(enc, v) } else { linear_to_srgb(v) }

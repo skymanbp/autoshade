@@ -49,8 +49,8 @@ const TINT_MAX_PAIRS: usize = 40_000;
 /// weight at his own 1.345 on the MAD scale of the per-pair misfit keeps
 /// every pair that fits the model at full weight; three passes settle it.
 ///
-/// The direction goes back to Lightroom's wheel through
-/// `render::tint_hue_of`, and the length through `render::TINT_OKLAB_PER_UNIT`.
+/// The vector goes back to Lightroom's hue and amount through
+/// `render::tint_from_push`, the measured wheel inverted.
 pub(super) fn read_zone_tint(
     rendered: &[[f32; 3]],
     target: &[[f32; 3]],
@@ -109,9 +109,10 @@ pub(super) fn read_zone_tint(
         }
         v = solve(&rw);
     }
-    let amount = (v[0].hypot(v[1]) / render::TINT_OKLAB_PER_UNIT).min(1.0);
+    let (hue, amount) = render::tint_from_push(v);
+    let amount = amount.min(1.0);
     (amount >= TINT_MIN_AMOUNT).then_some(ZoneTint {
-        hue: render::tint_hue_of(v[1].atan2(v[0])),
+        hue,
         amount,
         pairs: samples.len() * stride,
         neutral: neutral * stride,

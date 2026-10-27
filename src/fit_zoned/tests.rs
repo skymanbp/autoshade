@@ -7009,8 +7009,8 @@ fn oklab_degrees_apart(a: [f32; 2], b: [f32; 2]) -> f32 {
 /// of a degree the recipe stores.
 #[test]
 fn the_tint_read_returns_the_tint_a_target_was_made_with() {
-    let dir = crate::render::tint_direction(231.0);
-    let k = crate::render::TINT_OKLAB_PER_UNIT * 0.5;
+    let dir = crate::render::tint_push(231.0);
+    let k = 0.5;
     let candidate: Vec<[f32; 3]> = (0..4000)
         .map(|i| {
             let u = (i % 97) as f32 / 96.0;
@@ -7026,7 +7026,7 @@ fn the_tint_read_returns_the_tint_a_target_was_made_with() {
         candidate.iter().enumerate().map(|(i, p)| crate::render::tint_px(*p, dir, k * cover(i))).collect();
     let read = super::tint::read_zone_tint(&candidate, &target, &|_| 1.0, &cover).expect("a tint to read");
     assert!((read.hue - 231.0).abs() <= 0.5, "hue {}", read.hue);
-    let wheel = crate::render::tint_direction(read.hue);
+    let wheel = crate::render::tint_push(read.hue);
     assert!(oklab_degrees_apart(wheel, dir) <= 0.5, "hue {} pushes {wheel:?}, not {dir:?}", read.hue);
     assert!((read.amount - 0.5).abs() <= 0.005, "amount {}", read.amount);
     assert_eq!(read.pairs, 4000);
@@ -7048,7 +7048,7 @@ fn the_tint_read_returns_the_tint_a_target_was_made_with() {
 /// horizon (it does here, by its own sentence), and that verdict is its own.
 #[test]
 fn a_zone_whose_target_is_one_tint_away_ships_that_tint_and_both_populations_converge() {
-    let (dir, k) = (crate::render::tint_direction(231.0), crate::render::TINT_OKLAB_PER_UNIT * 0.5);
+    let (dir, k) = (crate::render::tint_push(231.0), 0.5);
     let (src, tgt, mask, clouds) =
         two_population_sky_pair(&|p, sky| if sky { crate::render::tint_px(p, dir, k) } else { p });
     let path = fixture_mask_path("zoned-tinted-sky");
@@ -7070,7 +7070,7 @@ fn a_zone_whose_target_is_one_tint_away_ships_that_tint_and_both_populations_con
         .unwrap_or_else(|| panic!("the tint says so: {}", report.recipe.rationale));
     let arg = |k: &str| read.args.iter().find(|(key, _)| *key == k).map(|(_, v)| v.parse::<f32>().unwrap()).unwrap();
     assert!((arg("amount") - 0.5).abs() <= 0.03, "the read amount {} is the target's 0.5", arg("amount"));
-    let read_push = crate::render::tint_direction(arg("hue"));
+    let read_push = crate::render::tint_push(arg("hue"));
     assert!(oklab_degrees_apart(read_push, dir) <= 3.0, "the read hue {} pushes the target's way", arg("hue"));
     assert!(
         sky.toning_amount > 0.0,
@@ -7079,7 +7079,7 @@ fn a_zone_whose_target_is_one_tint_away_ships_that_tint_and_both_populations_con
         sky.saturation,
         report.recipe.rationale
     );
-    let pushed = crate::render::tint_direction(sky.toning_hue);
+    let pushed = crate::render::tint_push(sky.toning_hue);
     assert!(
         oklab_degrees_apart(pushed, dir) <= 3.0,
         "the tint's hue {} must push the target's way ({:.1}° apart)",

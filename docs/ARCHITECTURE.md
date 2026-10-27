@@ -2892,19 +2892,30 @@ mask.
 mask 「颜色」 swatch, `crs:LocalToningSaturation` / `LocalToningHue`) is the last
 step of that fused pass and sits outside its blend (`render::tint_px`): once
 WB and gains → tone → curves → saturation → hue have been blended by the mask
-weight, the pixel's Oklab (a, b) moves by `0.105 · amount · weight · w(L′)`
-along Oklab hue `h + 8.1°` for Lightroom hue `h`, Oklab L untouched, `w` a
-Gaussian (centre 0.470, σ 0.272) in the gamma-encoded Rec.709 luma of the
-pixel it receives. The model is fitted to the user's own Lightroom exports of
-one frame — flat, and one whole-frame mask carrying only the swatch at hue 210,
-amounts 0.782609 and 0.391304 (read from the XMP packet each export embeds):
-the shift points the same way on neutral, mid-chroma and warm pixels
-(additive, not a blend toward a colour), the two amounts' shifts stand 2 : 1
-in every bin, and it peaks in the midtones. One joint fit reads mean ΔE 1.70
-against both exports (2.08 and 1.31 each; 10.44 / 5.38 untinted). The hue
-map rests on that one hue: 210 pushed along Oklab 218.1°, and reading the
-wheel as sRGB HSV — the first guess — would have put it at 256.2° and left
-the exports at ΔE 8.53 / 3.93; the rest of the wheel is not yet measured.
+weight, the pixel's Oklab (a, b) moves by `push(h) · amount · weight · w(L′)`,
+Oklab L untouched, `w` a Gaussian (centre 0.469, σ 0.283) in the
+gamma-encoded Rec.709 luma of the pixel it receives. `push(h)`
+(`render::tint_push`) is the measured wheel: at Lightroom hues 0, 60, 120,
+180, 210, 240 and 300 it is the push measured there — Oklab 12.0°, 100.0°,
+155.3°, 190.5°, 217.7°, 276.6°, 336.1°, at 0.128, 0.093, 0.158, 0.142, 0.100,
+0.086 and 0.153 per unit amount — and between them the step from linear
+ProPhoto mid grey toward the saturated ProPhoto colour of the hue, turned and
+scaled by the neighbouring nodes' corrections interpolated in hue. The model
+was fitted first on the user's own Lightroom exports of one frame (flat, and
+one whole-frame mask carrying only the swatch at hue 210, amounts 0.782609
+and 0.391304, read from the XMP packet each export embeds): the shift points
+the same way on neutral, mid-chroma and warm pixels (additive, not a blend
+toward a colour), the two amounts' shifts stand 2 : 1 in every bin, and it
+peaks in the midtones. The wheel comes from Camera Raw renders of that same
+packet (Camera Raw matches the user's exports of it to ΔE 0.32 / 0.33): six
+hues at 0.5 and hue 210 at 0.25 and 1.0, against the packet at amount 0.
+Neither the direction nor the strength is uniform in Oklab; the ProPhoto
+step points within 5.4° of every measured push and its length tracks the
+measured strength at r = 0.97, which is why it is the base between the
+nodes. The calibration test reads ΔE 1.47–1.77 at the six hues, 1.01 / 2.37 at
+0.25 / 1.0, and 2.11 / 1.31 against the two Lightroom exports (10.45 / 5.38
+untinted); the map it replaced (Oklab hue = hue + 8.1°, one strength) read
+2.42–6.14 at the six hues. Hues between the nodes are not measured.
 Outside the blend because its strength is linear in the mask weight, as the
 exports' 2 : 1 says; last because the swatch names an absolute hue that the
 Hue slider and the gains must not turn. Amount 0 skips it and renders to the
@@ -4628,8 +4639,8 @@ pixels, neutral and coloured alike, after the tone solve. The read regresses
 the Oklab (a, b) gaps target − candidate on the render's own ramp (the tint
 window at the candidate's luma × the mask's coverage) under the zone's robust
 pairing weights, Huber-reweighted three times, which gives the direction and
-the amount in closed form; `render::tint_hue_of` takes the direction back to
-Lightroom's wheel and `TINT_OKLAB_PER_UNIT` the amount. The two trials differ
+the vector in closed form; `render::tint_from_push` takes it back to
+Lightroom's hue and amount through the measured wheel. The two trials differ
 in what the zone-mean gains are asked. Tint-first reads the tint on the zone
 as its tone left it and then solves the gains and the saturation on the
 TINTED candidate — right for a gap that is a tint and nothing else. On-gains

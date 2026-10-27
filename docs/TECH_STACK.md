@@ -694,30 +694,38 @@ validates its envelope and bounds, Brotli-decompresses it, then parses the
 `r/f/h/d` state stream without interpolating extra points.
 
 The mask Color tint (v1.17.0, `render::tint_px`) is an additive Oklab chroma
-shift: `(a, b) += 0.105 · q · m · w(L′) · (cos θ, sin θ)`, Oklab L untouched,
-with `q` Lightroom's 0..1 amount, `m` the mask weight, `w` a Gaussian of centre
-0.470 and σ 0.272 in the gamma-encoded Rec.709 luma `L′` of the pixel it
-receives, and `θ = h + 8.1°` for Lightroom hue `h`, then back to linear sRGB
-clipped at 0 with no gamut mapping. It was fitted (**measured**) on the user's
-own Lightroom 9.4 exports of one frame — flat, and one whole-frame mask
-carrying only the swatch at hue 210 and amounts 0.782609 / 0.391304, the exact
-values the XMP packet in each export records — jointly over both exports on a
-150k-pixel sample at 1200 px: mean CIELAB ΔE76 1.70 (2.08 and 1.31 each;
-10.44 / 5.38 with no tint). In the first fit, with the amounts free, the same
-model shape read 2.62 on the sky and 1.82 on the neutral pixels, against 7.87
-on the sky for a luminance-preserving blend toward the hue and 3.81 for a
-linear-light additive model that wins the frame mean (1.47) on neutral land.
-Read one export at a time the amount scale is 0.1079 and 0.1055 per unit —
-linear to 2.3 %. The hue map is **one measured point**: hue 210 pushed along
-Oklab 218.1° (217.1° / 220.4° per export); reading the wheel as sRGB HSV would
-put it at 256.2° (ΔE 8.53 / 3.93), and candidate wheels with no constant
-(linear ProPhoto, linear Rec.2020, sRGB HSV in linear light) land at 202°, 213°
-and 234°, so `+8.1°` is the least-assuming map through the one point and the
-rest of the wheel is unmeasured. The calibration test
+shift: `(a, b) += q · m · w(L′) · push(h)`, Oklab L untouched, with `q`
+Lightroom's 0..1 amount, `m` the mask weight, `w` a Gaussian of centre 0.469
+and σ 0.283 in the gamma-encoded Rec.709 luma `L′` of the pixel it receives,
+and `push(h)` the measured wheel (`render::tint_push`), then back to linear
+sRGB clipped at 0 with no gamut mapping. It was fitted (**measured**) in two
+steps. First on the user's own Lightroom 9.4 exports of one frame — flat, and
+one whole-frame mask carrying only the swatch at hue 210 and amounts 0.782609
+/ 0.391304, the exact values the XMP packet in each export records: with the
+amounts free, this model shape read 2.62 on the sky and 1.82 on the neutral
+pixels, against 7.87 on the sky for a luminance-preserving blend toward the
+hue and 3.81 for a linear-light additive model that wins the frame mean (1.47)
+on neutral land. Then across the wheel on Camera Raw renders of the 0.78
+export's own packet, which Camera Raw reproduces to mean ΔE 0.32 / 0.33 (0.31
+untinted): the swatch at hues 0, 60, 120, 180, 240 and 300 at 0.5 and at hue
+210 at 0.25 and 1.0, each against the packet at amount 0. Read one hue at a
+time the push runs along Oklab 12.0°, 100.0°, 155.3°, 190.5°, 217.7°, 276.6°
+and 336.1° (210 in its place) at 0.086–0.158 per unit amount — not uniform in
+Oklab, and not the sRGB HSV wheel (4.5° to 38.9° off). The differential step
+from linear ProPhoto mid grey toward the saturated ProPhoto colour of the hue
+— Lightroom's working space — points within 5.4° of every measured push (rms
+2.7°) and tracks the strength at r = 0.97, so `push` is that step turned and
+scaled to the seven measured nodes exactly, the corrections interpolated
+linearly in hue between them; the in-between hues are not measured. Hue 210's
+four amounts read 0.1011, 0.1051, 0.1074 and 0.1029 per unit one at a time
+(0.25, 0.39, 0.78, 1.0): linear to 6 %. One shared window over all twelve
+pairs (fitted on a 30k-pixel sample at 1200 px): mean ΔE 1.66. The
+calibration test
 (`render::tests::the_mask_tint_reproduces_lightroom_s_own_tint_exports`,
-corpus-gated) replays it through the mask pass at the exact settings over the
-whole 1200 px frame. The warm pixels keep the largest residual, where the
-export clips.
+corpus-gated) replays every pair through the mask pass over the whole 1200 px
+frame: 2.11 / 1.31 against the two exports (10.45 / 5.38 untinted), 1.47–1.77
+at the six hues, 1.01 / 2.37 at 0.25 / 1.0. The warm pixels keep the largest
+residual, where the export clips.
 
 ### Parameters
 

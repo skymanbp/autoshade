@@ -561,21 +561,21 @@ fn a_mask_tint_is_inert_at_amount_zero_and_moves_only_what_the_mask_covers() {
     assert!(out[0][2] > out[0][0] + 0.03, "the grey must take the tint: {:?}", out[0]);
 }
 
-/// The render model the user's own Lightroom exports were fitted with
+/// The render model the Lightroom and Camera Raw renders were fitted with
 /// (`render::tint_px`): an ADDITIVE shift of Oklab (a, b) by
-/// `TINT_OKLAB_PER_UNIT · amount · window(luma)` toward the swatch's hue,
-/// Oklab L untouched. On a grey ramp: L holds to 1e-4 everywhere, the
-/// chroma shift is `k·w` to 1e-4 at every step — the whole `k` at the
-/// window's centre, and at the ends of the ramp the window's own value
-/// there (0.25 of it at luma 0.02, 0.17 at 0.98: the falloff the exports
-/// measured, where neutral shadows took 0.36 of the midtones' shift). The
-/// masked path renders the same pixels as the model at full weight, and the
-/// wheel puts Lightroom's hue 210 on the Oklab hue the user's own exports
-/// pushed along (218.1°) and every hue `TINT_HUE_OFFSET_DEG` past itself,
-/// with `tint_hue_of` its exact inverse.
+/// `push(hue) · amount · window(luma)`, Oklab L untouched. On a grey ramp: L
+/// holds to 1e-4 everywhere, the chroma shift is `|push|·amount·w` to 1e-4
+/// at every step — all of it at the window's centre, and at the ends of the
+/// ramp the window's own value there (0.28 of it at luma 0.02, 0.20 at 0.98).
+/// The masked path renders the same pixels as the model at full weight. The
+/// wheel lands every measured hue on its measured push exactly, turns
+/// monotonically and closes on itself at 360, and `tint_from_push` gives
+/// back the hue to the tenth of a degree the recipe stores and the amount.
 #[test]
 fn the_mask_tint_is_an_oklab_chroma_shift_under_a_lightness_window() {
-    let (k, dir) = (TINT_OKLAB_PER_UNIT * 0.5, tint_direction(231.0));
+    let (k, dir) = (0.5, tint_push(231.0));
+    let reach = k * dir[0].hypot(dir[1]);
+    let unit = dir.map(|c| c / dir[0].hypot(dir[1]));
     let ramp: Vec<f32> = (0..=48).map(|i| 0.02 + 0.96 * i as f32 / 48.0).collect();
     let ok = |p: [f32; 3]| linear_to_oklab(p.map(srgb_to_linear));
     for &v in ramp.iter().chain([TINT_WINDOW_CENTRE].iter()) {
@@ -583,15 +583,15 @@ fn the_mask_tint_is_an_oklab_chroma_shift_under_a_lightness_window() {
         assert!((after[0] - before[0]).abs() <= 1e-4, "grey {v}: Oklab L moved {} -> {}", before[0], after[0]);
         let shift = (after[1] - before[1]).hypot(after[2] - before[2]);
         assert!(
-            (shift - k * tint_window(v)).abs() <= 1e-4,
+            (shift - reach * tint_window(v)).abs() <= 1e-4,
             "grey {v}: chroma shift {shift:.5}, the model says {:.5}",
-            k * tint_window(v)
+            reach * tint_window(v)
         );
-        let along = (after[1] - before[1]) * dir[0] + (after[2] - before[2]) * dir[1];
+        let along = (after[1] - before[1]) * unit[0] + (after[2] - before[2]) * unit[1];
         assert!((along - shift).abs() <= 1e-4, "grey {v}: the shift points along the swatch's hue");
     }
     assert!((tint_window(TINT_WINDOW_CENTRE) - 1.0).abs() < 1e-6, "the window is 1 at its centre");
-    assert!((tint_window(0.02) - 0.2546).abs() < 1e-3 && (tint_window(0.98) - 0.1724).abs() < 1e-3);
+    assert!((tint_window(0.02) - 0.2840).abs() < 1e-3 && (tint_window(0.98) - 0.1959).abs() < 1e-3);
     // Through the mask pass at full weight: the same pixels as the model.
     let base: Vec<[f32; 3]> = ramp.iter().map(|&v| [v; 3]).collect();
     let masked = tint_masked(
@@ -604,16 +604,37 @@ fn the_mask_tint_is_an_oklab_chroma_shift_under_a_lightness_window() {
         let model = tint_px([v; 3], dir, k);
         assert!((0..3).all(|c| (masked[i][c] - model[c]).abs() <= 1e-5), "grey {v}: {:?} vs {model:?}", masked[i]);
     }
-    // The wheel: 210 lands on the measured push, and the inverse is exact
-    // to the tenth of a degree the recipe stores.
-    let d = tint_direction(210.0);
-    assert!((d[1].atan2(d[0]).to_degrees().rem_euclid(360.0) - 218.1).abs() < 1e-3, "210 pushes along {:?}", d);
+    // The wheel: every measured hue on its measured push (angle, per-unit
+    // shift), read back from the node table the fit wrote.
+    let angle = |p: [f32; 2]| p[1].atan2(p[0]).to_degrees().rem_euclid(360.0);
+    for (hue, deg, per_unit) in [
+        (0.0f32, 12.0f32, 0.1276f32),
+        (60.0, 100.0, 0.0926),
+        (120.0, 155.3, 0.1576),
+        (180.0, 190.5, 0.1422),
+        (210.0, 217.7, 0.1004),
+        (240.0, 276.6, 0.0861),
+        (300.0, 336.1, 0.1531),
+    ] {
+        let p = tint_push(hue);
+        assert!((angle(p) - deg).abs() < 1e-3, "hue {hue} pushes along {:.3}, measured {deg}", angle(p));
+        assert!((p[0].hypot(p[1]) - per_unit).abs() < 1e-5, "hue {hue} pushes {:.5}, measured {per_unit}", p[0].hypot(p[1]));
+    }
+    // Monotone, closed at 360, and inverted to the tenth of a degree.
+    let mut turned = 0.0f32;
+    for tenth in 0..3600 {
+        let (a, b) = (angle(tint_push(tenth as f32 / 10.0)), angle(tint_push((tenth + 1) as f32 / 10.0)));
+        let step = (b - a).rem_euclid(360.0);
+        assert!(step > 0.0 && step < 2.0, "the wheel turns forward at {}: {a} -> {b}", tenth as f32 / 10.0);
+        turned += step;
+    }
+    assert!((turned - 360.0).abs() < 1e-2, "one turn of the wheel is one turn in Oklab ({turned})");
     for hue in [0.0f32, 43.0, 120.0, 210.0, 231.0, 300.0, 359.9] {
-        let d = tint_direction(hue);
-        assert!((d[0].hypot(d[1]) - 1.0).abs() < 1e-6);
-        let off = (tint_direction(hue)[1].atan2(d[0]).to_degrees() - hue - TINT_HUE_OFFSET_DEG).rem_euclid(360.0);
-        assert!(off < 1e-3 || off > 360.0 - 1e-3, "hue {hue} is offset by {off}");
-        assert!((tint_hue_of(d[1].atan2(d[0])) - hue).abs() < 0.051, "hue {hue} back as {}", tint_hue_of(d[1].atan2(d[0])));
+        let p = tint_push(hue).map(|c| c * 0.37);
+        let (back, amount) = tint_from_push(p);
+        let off = (back - hue + 180.0).rem_euclid(360.0) - 180.0;
+        assert!(off.abs() < 0.051, "hue {hue} back as {back}");
+        assert!((amount - 0.37).abs() < 2e-3, "hue {hue}: amount 0.37 back as {amount}");
     }
     // And the inverse matrices are the forward ones' inverse.
     let c = [0.31, 0.52, 0.07];
@@ -621,8 +642,8 @@ fn the_mask_tint_is_an_oklab_chroma_shift_under_a_lightness_window() {
     assert!((0..3).all(|i| (back[i] - c[i]).abs() < 1e-5), "{back:?}");
 }
 
-/// The model against Lightroom's own pixels, gated on the calibration corpus
-/// like every corpus test. Its `tint/` folder holds the seaside street
+/// The model against Lightroom's and Camera Raw's own pixels, gated on the
+/// calibration corpus like every corpus test. Its `tint/` folder holds the seaside street
 /// exported from Lightroom with nothing moved (`p39-flat.jpg`) and with ONE
 /// whole-frame mask (one radial, `Flipped`, feather 0) carrying only the
 /// Color swatch, `LocalToningHue` 210 at `LocalToningSaturation` 0.782609
@@ -636,6 +657,14 @@ fn the_mask_tint_is_an_oklab_chroma_shift_under_a_lightness_window() {
 /// two exports; this model shape's own optimum, refitted on each export
 /// alone, reads 2.07 and 1.28, so a 2.0 ceiling at the larger amount is not
 /// one the model can meet and the ceiling sits just above its optimum.
+///
+/// The rest of the wheel is Camera Raw's renders of the 0.78 export's own
+/// packet (`acr-*.jpg`, Camera Raw matching the Lightroom exports of that
+/// packet to ΔE 0.32 / 0.33): the swatch at hues 0, 60, 120, 180, 240 and
+/// 300 at amount 0.5 and at hue 210 at 0.25 and 1.0, each against the same
+/// packet at amount 0 (`acr-none.jpg`), tinted through the mask pass and
+/// held to the ceilings the joint fit's own residuals set (1.47–1.77 at the
+/// six hues, 1.01 and 2.37 at 0.25 and 1.0, on its fitting sample).
 #[test]
 fn the_mask_tint_reproduces_lightroom_s_own_tint_exports() {
     let Some(root) = crate::config::live_env_os("AUTOSHADE_FIT_CALIBRATION_DIR") else {
@@ -689,6 +718,35 @@ fn the_mask_tint_reproduces_lightroom_s_own_tint_exports() {
         let (none, ours) = (mean_de(&flat, &tinted), mean_de(&model, &tinted));
         eprintln!("mask tint calibration, amount {:.2}: no tint ΔE {none:.2}, model ΔE {ours:.2}", amount / 100.0);
         assert!(none >= untinted_floor, "{name}: the export must differ from the flat one ({none:.2})");
+        assert!(ours <= ceiling, "{name}: the model must land within ΔE {ceiling} ({ours:.2}, untinted {none:.2})");
+    }
+    let wheel = [
+        ("acr-hue000.jpg", 0.0, 50.0, 2.0),
+        ("acr-hue060.jpg", 60.0, 50.0, 2.0),
+        ("acr-hue120.jpg", 120.0, 50.0, 2.0),
+        ("acr-hue180.jpg", 180.0, 50.0, 2.0),
+        ("acr-hue240.jpg", 240.0, 50.0, 2.0),
+        ("acr-hue300.jpg", 300.0, 50.0, 2.0),
+        ("acr-sat025.jpg", 210.0, 25.0, 1.2),
+        ("acr-sat100.jpg", 210.0, 100.0, 2.6),
+    ];
+    if std::iter::once("acr-none.jpg").chain(wheel.iter().map(|c| c.0)).any(|n| !dir.join(n).is_file()) {
+        crate::test_skipped("mask tint wheel calibration", &format!("no Camera Raw renders under {}", dir.display()));
+        return;
+    }
+    let (none_px, w, h) = load("acr-none.jpg");
+    for (name, hue, amount, ceiling) in wheel {
+        let (tinted, tw, th) = load(name);
+        assert_eq!((tw, th), (w, h), "{name}: the renders share one frame");
+        let model = tint_masked(
+            &none_px,
+            w,
+            h,
+            LocalAdjustment { mask: whole_frame(), toning_hue: hue, toning_amount: amount, ..Default::default() },
+        );
+        let (none, ours) = (mean_de(&none_px, &tinted), mean_de(&model, &tinted));
+        eprintln!("mask tint wheel, hue {hue} amount {:.2}: no tint ΔE {none:.2}, model ΔE {ours:.2}", amount / 100.0);
+        assert!(none >= 3.0, "{name}: the render must differ from the untinted one ({none:.2})");
         assert!(ours <= ceiling, "{name}: the model must land within ΔE {ceiling} ({ours:.2}, untinted {none:.2})");
     }
 }
