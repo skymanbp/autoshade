@@ -4161,6 +4161,33 @@ front ends was the defect; one function is the cure, pinned both by a
 source-text test that neither entry may reach the frame another way and by a
 fixture test on the geometry.
 
+**The target's geometry is measured, and the pair lives in the sensor frame**
+(v1.16.0). `fit_source` is a neutral develop, which runs no geometry stage, while
+five of the six calibration targets were exported from Lightroom with the lens
+profile on: every pixel pair was off by the distortion (top-centre 5 px, corners
+10 px at 1000 px), and the fit read the misalignment as content — cloud edges
+that "moved", refusers along building edges, a structural divergence of 0.205 on
+a frame whose aligned reading is 0.095. `pipeline::fit_target` now measures the
+target before anything is paired: six-patch phase correlation against the source
+as shot and as the profile corrects it, the winner leading by
+`GEOMETRY_WIN_RATIO` (2×) and `GEOMETRY_WIN_MARGIN` (0.10). A corrected target is
+resampled once into the sensor frame through the engine's own inverse map
+(`render::corrected_to_sensor_frame`, the `MaskUnwarp` arithmetic), and the
+sensor pixels outside its field — about 3 % on the calibration photos — carry a
+presence of 0 in the target's alpha (`fit::presence_of`) that runs through one
+mechanism: the evidence model's frame membership, every zone's pair weights, the
+structure readers, the seam samplers and the segmentation vote. An uncorrected
+target (`TargetGeometry::AsShot`) is paired as it stands and the recipe's
+distortion and CA switches go off, so the render keeps the geometry the target
+was exported with; an undecided reading keeps today's behaviour and says so
+(`TARGET_GEOMETRY_*` rationale notes). Masks and recipes stay in the sensor frame;
+only the comparison moved. Both entry points call `fit_target` after `fit_source`,
+and `apply <raw> <sidecar.xmp>` stamps the same `fresh_lens_profile_for_sidecar`
+the desktop app stamps, so one sidecar renders one geometry everywhere. On the
+calibration pairs the look error after the fit fell to 0.009 / 0.006 / 0.011 /
+0.013 from 0.023 / 0.025 / 0.034 / 0.035; the pair exported without the profile
+and the two generated references read undecided and render the same pixels.
+
 The method is deliberately **distribution-level, not per-pixel regression** — a
 generative target is not pixel-aligned with its source, so only statistics are
 trustworthy. A rank/gradient/pyramid structural-divergence reading selects the

@@ -937,7 +937,11 @@ autoshade recipe-schema
 ```
 
 `<src>` is a RAW or baked image. For commands that save develop state, baked
-sources get recipe JSON but no RAW XMP. `auto` is `analyze` plus render.
+sources get recipe JSON but no RAW XMP. `apply` also takes a Lightroom `.xmp`
+sidecar in place of the recipe, and since v1.16.0 it stamps the camera's lens
+profile from the sidecar's own lens switch exactly as the desktop app does when
+it opens the photo beside that sidecar, so one sidecar renders one geometry on
+both surfaces. `auto` is `analyze` plus render.
 `batch` analyzes RAWs by default, skips baked photos unless `--include-baked`
 is set (avoiding duplicate analysis and billing for RAW+JPEG pairs), and
 defaults to three photos in flight; `--long-edge` on `batch` requires
@@ -969,7 +973,13 @@ they are, and reading it back raises no untagged-16-bit warning.
 desktop app fits. A RAW is fitted
 on a neutral develop of its sensor frame with the photo's calibration —
 camera base look, lens profile, as-shot white balance — composed into the
-solve. A master `denoise` or `stack` wrote is a baked image that carries no
+solve. The target's own geometry is read before any pixel is compared
+(v1.16.0): a target you exported from Lightroom with the lens profile on is
+brought into that sensor frame first, one exported without it is paired as it
+stands and the recipe's distortion and chromatic-aberration corrections are
+switched off so the render keeps the geometry the target has, and when neither
+reading wins clearly the fit says so and behaves as before. A master `denoise`
+or `stack` wrote is a baked image that carries no
 calibration of its own, so name the RAW it was made from (for a stack, the
 first frame) with `--negative`: the calibration then composes on top of the
 master's pixels, exactly as the desktop app fits a ◈ Denoised or ▦ Stacked

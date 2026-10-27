@@ -1762,7 +1762,11 @@ in-camera-cropped embedded preview, since v1.2.2), then can feed that target
 into `match` for an editable full-resolution approximation — `match` in turn
 fits a RAW on a neutral develop of the full sensor frame with the calibration
 composed (`pipeline::fit_source`, one frame for the CLI and the app since
-v1.3.0; the embedded rendition is never fitted), and a ◈/▦ master on its own
+v1.3.0; the embedded rendition is never fitted; since v1.16.0 the target's own
+geometry is measured first — `pipeline::fit_target`, six-patch phase correlation
+against the source as shot and as corrected — and a target exported with the lens
+profile on is resampled into that sensor frame, the ring outside its field absent
+from the evidence), and a ◈/▦ master on its own
 pixels under the photo's calibration — in the app through its card, on the
 command line with `match --negative <RAW>` (v1.6.2) — and any other baked file under the calibration its own
 saved develop carries, composed into the solve in both front ends rather than stamped on after it; parameter
