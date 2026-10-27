@@ -508,6 +508,22 @@ the component Invert control complements its shape before composition.
 AI mask rasters are cached with backend provenance, so a better backend forces
 an honest re-derivation instead of presenting an older alpha as its result.
 
+A selected mask's sliders come in Lightroom's groups — **Tone**, **Detail**,
+**Color**, then the mask's own **Curve**. The **Color** group holds
+**Saturation**, **Hue shift**, **Temp shift**, **Tint shift** and, since
+v1.17.0, **Color tint** with its **Color tint hue** (Lightroom's mask
+「颜色」 swatch, 「颜色染色」 in the Chinese interface): it shifts every colour
+inside the mask, neutral and coloured alike, toward one hue — most in the
+midtones, never brighter or darker. That is what a Lightroom sky mask with a
+blue swatch does to a sky and its white clouds together, where **Hue shift**
+turns colours by an angle and the temperature pair warms or cools. The hue is
+on Lightroom's own 0–360 wheel and does nothing while **Color tint** is 0.
+The engine's model was measured on Lightroom's own exports of a whole-frame
+swatch (mean colour difference 2.1 and 1.3 at the two strengths exported,
+against 10.4 and 5.4 without the tint), and
+the reverse fit can solve it: a sky whose target was made with a swatch now
+comes back as one tint read from the sky and its clouds at once.
+
 ## 4. Use versions and variants
 
 A variant is one card for the same photo: **▣ Original**, **✨ AI generated**,
@@ -1063,7 +1079,10 @@ parametric curve, HSL, the B&W mixer, Point Color, camera calibration,
 crop, and supported local corrections; the writer merges owned fields into the
 existing document and preserves unmodeled content byte-for-byte instead of
 round-tripping the whole file through a general XML serializer. Linear and
-radial masks round-trip as editable geometry. Lightroom brush dab streams are
+radial masks round-trip as editable geometry. A mask's Color swatch
+(`crs:LocalToningHue` / `LocalToningSaturation`) is read, rendered and written
+back since v1.17.0; before that it was imported as a setting the engine could
+not draw and written out as 0. Lightroom brush dab streams are
 imported from the sibling `MaskBrushTable`, validated and Brotli decoded, then
 rendered with AutoShade's measured brush model. Classic XMP does not contain
 Lightroom's computed subject/sky/object alpha or arbitrary bitmap alpha, so

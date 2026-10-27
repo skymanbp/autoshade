@@ -2888,6 +2888,24 @@ saturation before local clarity/texture — splitting the fused WB/tone/saturati
 blend to fix either would change the output of every existing partial-weight
 mask.
 
+**The mask Color tint** (v1.17.0; `toning_amount` / `toning_hue`, Lightroom's
+mask 「颜色」 swatch, `crs:LocalToningSaturation` / `LocalToningHue`) is the last
+step of that fused pass and sits outside its blend (`render::tint_px`): once
+WB and gains → tone → curves → saturation → hue have been blended by the mask
+weight, the pixel's Oklab (a, b) moves by `0.114 · amount · weight · w(L′)`
+along the Oklab hue of the pure sRGB colour at the swatch's HSV hue, Oklab L
+untouched, `w` a Gaussian (centre 0.469, σ 0.274) in the gamma-encoded Rec.709
+luma of the pixel it receives. The model is fitted to the user's own Lightroom
+exports of one frame — flat, and one whole-frame mask carrying only the swatch
+at ≈0.73 and ≈0.35: the shift points the same way on neutral, mid-chroma and
+warm pixels (additive, not a blend toward a colour), the two amounts' shifts
+stand 2 : 1 in every bin, and it peaks in the midtones. It reads mean ΔE 1.67
+against both exports (10.44 / 5.38 untinted) and 2.62 on the sky, where the
+luminance-preserving blend it replaced read 7.87. Outside the blend because
+its strength is linear in the mask weight, as the exports' 2 : 1 says; last
+because the swatch names an absolute hue that the Hue slider and the gains must
+not turn. Amount 0 skips it and renders to the bit; the hue alone is inert.
+
 Export adds the colour-space encode (sRGB / Adobe RGB / Display P3 / ProPhoto,
 with a wide-gamut develop path), an optional long-edge resize (Lanczos3, never
 upscales) and resolution-aware sharpening, then writes JPEG, TIFF or **PNG** —
@@ -3765,6 +3783,12 @@ experiment:
   reports these sections cite.)
 * **`crs:LocalHue`'s scale is 180, not 100.** A controlled export with the mask
   Hue slider at +50 wrote `crs:LocalHue="0.277778"`; 0.277778 × 180 = 50.00004.
+* **`crs:LocalToningHue` is degrees, unscaled; `LocalToningSaturation` is
+  0..1** (v1.17.0). The reference sidecar's sky mask reads `231` / `0.73`, its
+  street `43` / `0.24`; the recipe stores the hue as written and the amount
+  ×100, and both keys left `INERT_LOCAL` when the engine began rendering the
+  tint, so a correction carrying them imports without a loss and the writer
+  emits the recipe's own values.
 
 ~~`W, H` are the exported pixel dimensions (= `DefaultCropSize`)~~ **ERRATUM,
 R27 Batch-3:** `W, H` are the **un-rotated SOURCE frame** — `DefaultCropSize`,
@@ -3808,7 +3832,7 @@ silently drops what you are looking at」 were both unrepresentable claims.
 
 | tier | engine renders | own `crs:` property | members today | disclosed by |
 |---|---|---|---|---|
-| `Rendered` | yes | yes | the ordinary controls — **98 global, 24 local** (counted from the registry 2026-09-18; R25 added global `texture` and the manual CA pair `ca_r`/`ca_b`; per mask, the four point curves; v1.5.0 the Detail panel's eight shaping axes, the parametric curve's seven keys, the Calibration panel's seven, the B&W switch with its eight mixer bands, the Point Color swatch list, F6's Transform panel — seven sliders, its Upright mode and `crop_constrain_to_warp` — F7's `camera_profile`, which arrived by LEAVING `PassThrough` rather than by being invented, and F8's HDR edit mode with its headroom and the seven SDR-rendition controls) | — nothing to disclose |
+| `Rendered` | yes | yes | the ordinary controls — **98 global, 26 local** (counted from the registry 2026-09-18 and again for v1.17.0; R25 added global `texture` and the manual CA pair `ca_r`/`ca_b`; per mask, the four point curves, and v1.17.0 the Color tint pair `toning_amount`/`toning_hue`; v1.5.0 the Detail panel's eight shaping axes, the parametric curve's seven keys, the Calibration panel's seven, the B&W switch with its eight mixer bands, the Point Color swatch list, F6's Transform panel — seven sliders, its Upright mode and `crop_constrain_to_warp` — F7's `camera_profile`, which arrived by LEAVING `PassThrough` rather than by being invented, and F8's HDR edit mode with its headroom and the seven SDR-rendition controls) | — nothing to disclose |
 | `CarriedOnly` | no | yes | **1**: the mask `name`, a label rather than an operator — the one member that never had an engine stage to wait for. R25 ruled 24 globals into this tier under policy SF4-C; v1.5.0 rendered all of them, batch by batch (the eight Detail axes → `render/detail.rs`, the nine Effects → `render/finish.rs`, the auto-CA switch and the six de-fringe keys → `render/lens.rs`), so **`CARRIED_ONLY_GLOBAL` is now empty**. The list and its gates stay: emptiness is a measurement, and the next carried row discloses itself the day it is added | `xmp::global_render_gaps` → 「carried to Lightroom, not rendered here」, on the control and in the save line |
 | `PassThrough` | no | verbatim | **1 row, 6 keys**: `passthrough`, a `BTreeMap<String,String>` over the named `xmp::PASSTHROUGH_CRS` block — what is left is exactly Lightroom's own Upright SOLVER bookkeeping (`UprightVersion`, `UprightCenterMode`, `UprightCenterNormX/Y`, `UprightFocalMode`, `UprightFocalLength35mm`). (R25 counted 16, the seven `CameraCalibration*` keys included; Lightroom writes no such key, and its Calibration panel renders since v1.5.0. It counted 9 until v1.5.0 F6, when the eight `crs:Perspective*` keys became owned controls, and 7 until F7, when `CameraProfile` became one — the tier shrinking by itself twice, which is what its own note hoped for.) A NAMED key set, deliberately not 「everything unknown」: the merge's strip universe is a static list, so a free-form map would desynchronise from what is actually written. `unmodelled_global_crs` keeps naming the rest — that is the feature, not the omission | the Transform section's read-only tail: values shown, no slider offered, because a slider on something never interpreted would be a lie. The section's own sliders above it are a different matter — those keys render |
 | `RenderedNotExported` | yes | no | **8 global** in registry order: `upright_transform` (F6), `look` (F7), `base_curve`, `lens_profile`, `retouch` (F9), `pixel_layers` (v1.7.0), `lens_blur` (2026-10-13), `colour_field`; per mask `enabled`, `color_gains`. The first four are quiet on save (`catalogue::STAMPED_CALIBRATION`) — nothing the photographer can act on, and for the two Adobe ones the merge preserves the document's own copy anyway — while `retouch`, `pixel_layers`, `lens_blur` and `colour_field` say so out loud. `retouch` is the sharpest illustration of the split: a MERGE keeps the photographer's `crs:RetouchAreas` byte for byte (this writer does not own the element, so it never strips it), and a FRESH `recipe_to_xmp` emits nothing at all for it. The tier names the worse half, because that is the half a disclosure is for | `xmp::global_export_losses` + the mask loss list |
@@ -4589,6 +4613,31 @@ is now probed alone against the gate first and, where the full move fails,
 withheld under the gate's own sentence (`ZONE_COLOUR_WITHHELD_BY_QUALITY`, the
 third carrier `is_colour_refusal` knows); the tone is then judged as every
 colour-withheld zone's is.
+
+**The zone tint trial** (v1.17.0, `fit_zoned::tint`). A target made with a
+mask Color tint is a move the zone vocabulary could not make: gains solved
+from a zone's mean push a blue sky one way and its neutral clouds another, and
+the per-pixel voucher rightly refused that badly shaped move. Each semantic
+zone that is Full at pixel scale is therefore solved twice. The plain solve is
+as before; the trial, after the tone solve, reads ONE tint from all the zone's
+paired pixels, neutral and coloured alike: the Oklab (a, b) gaps target −
+candidate are regressed on the render's own ramp (the tint window at the
+candidate's luma × the mask's coverage) under the zone's robust pairing
+weights, Huber-reweighted three times, which gives the direction and the
+amount in closed form; the direction goes back to Lightroom's wheel through the
+render's own hue table (nearest of 3600, because the wheel folds back by 0.15°
+near pure blue), the amount through `TINT_OKLAB_PER_UNIT`. The gains and the
+saturation chase are then solved on the TINTED candidate, so they answer only
+what the tint left. The trial runs through `attach_one_zone` itself, so the
+same probes, voucher, quality, acceptance and boundary gates judge it; the
+one-sided band veto alone does not apply, because the tint was read from the
+pairs on both sides of every band. It replaces the plain solve only when it
+shipped a tint, lands the zone's mean ΔE lower than the plain solve by
+`ZONE_GLOBAL_REGRESSION_TOL` and leaves the frame within the zone's own
+regression tolerance — the subzone bands' replacement rule — and otherwise the
+plain solve stands to the byte. That margin is also why a gains-shaped gap
+never comes back as a tint: the tinted candidate's own gains land where the
+plain solve does at best. The shipped tint says so (`ZONE_TINTED`).
 
 SCOPE is the other half of the instrument, and it is not the same at every
 site. Lifting a REGIONAL veto takes a REGIONAL verdict: a veto that is a SHARE

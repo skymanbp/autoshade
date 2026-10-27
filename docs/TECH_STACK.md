@@ -693,6 +693,29 @@ Lightroom brush strokes may arrive indirectly through a sibling
 validates its envelope and bounds, Brotli-decompresses it, then parses the
 `r/f/h/d` state stream without interpolating extra points.
 
+The mask Color tint (v1.17.0, `render::tint_px`) is an additive Oklab chroma
+shift: `(a, b) += 0.114 · q · m · w(L′) · (cos θ, sin θ)`, Oklab L untouched,
+with `q` Lightroom's 0..1 amount, `m` the mask weight, `w` a Gaussian of centre
+0.469 and σ 0.274 in the gamma-encoded Rec.709 luma `L′` of the pixel it
+receives, and `θ` the Oklab hue of the pure sRGB colour at the swatch's HSV
+hue (the one assumption about Lightroom's wheel; it costs no constant), then
+back to linear sRGB clipped at 0 with no gamut mapping. It was fitted
+(**measured**) on the user's own Lightroom 9.4 exports of one frame — flat, and
+one whole-frame mask carrying only the swatch at ≈0.73 and ≈0.35 —
+jointly over both exports on a 150k-pixel sample at 1200 px: mean CIELAB ΔE76
+1.67 (10.44 / 5.38 with no tint), 2.62 on the sky and 1.82 on the neutral
+pixels, against 7.87 on the sky for a luminance-preserving blend toward the
+hue and 3.81 for a linear-light additive model that wins the frame mean (1.47)
+on neutral land. Lightroom wrote
+no sidecar for those exports, so the amounts are fitted (k 0.0831 and 0.0406,
+ratio 2.05): the window and the hue rest on both, while `0.114` is
+0.0831 / 0.73 and moves with wherever the slider actually stopped. The
+calibration test (`render::tests::the_mask_tint_reproduces_lightroom_s_own_tint_exports`,
+corpus-gated) replays it through the mask pass at HSV 190° and 0.73 / 0.35
+over the whole 1200 px frame: ΔE 2.13 and 1.29 (10.45 and 5.38 untinted),
+against 2.09 and 1.31 for the free fit read one export at a time.
+The warm pixels keep the largest residual (4.71), where the export clips.
+
 ### Parameters
 
 - Radial table: 290 radius rows at `rho = 0.0025 + 0.005·i` and 11 measured
@@ -737,6 +760,8 @@ validates its envelope and bounds, Brotli-decompresses it, then parses the
 
 ### Source
 
+- `src/render/masks.rs` — the mask pass, its colour-stage order, and the Color
+  tint (`tint_px`, `TINT_*`, the Oklab pair).
 - `src/render/mask_falloff.rs` — `radial_falloff` and the linear projection;
   `src/render/brush.rs` — brush kernel and accumulation;
   `src/render/mask_weight.rs` — range weights and `MASK_SAMPLE_CENTRE`.
