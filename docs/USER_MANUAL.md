@@ -518,6 +518,9 @@ midtones, never brighter or darker. That is what a Lightroom sky mask with a
 blue swatch does to a sky and its white clouds together, where **Hue shift**
 turns colours by an angle and the temperature pair warms or cools. The hue is
 on Lightroom's own 0–360 wheel and does nothing while **Color tint** is 0.
+How a hue renders is matched to Lightroom at one hue so far, the sky blue
+of 210; other hues follow the same wheel but have not been checked against
+Lightroom yet.
 The engine's model was measured on Lightroom's own exports of a whole-frame
 swatch (mean colour difference 2.1 and 1.3 at the two strengths exported,
 against 10.4 and 5.4 without the tint), and

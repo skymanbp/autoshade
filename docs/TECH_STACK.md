@@ -694,27 +694,30 @@ validates its envelope and bounds, Brotli-decompresses it, then parses the
 `r/f/h/d` state stream without interpolating extra points.
 
 The mask Color tint (v1.17.0, `render::tint_px`) is an additive Oklab chroma
-shift: `(a, b) += 0.114 · q · m · w(L′) · (cos θ, sin θ)`, Oklab L untouched,
+shift: `(a, b) += 0.105 · q · m · w(L′) · (cos θ, sin θ)`, Oklab L untouched,
 with `q` Lightroom's 0..1 amount, `m` the mask weight, `w` a Gaussian of centre
-0.469 and σ 0.274 in the gamma-encoded Rec.709 luma `L′` of the pixel it
-receives, and `θ` the Oklab hue of the pure sRGB colour at the swatch's HSV
-hue (the one assumption about Lightroom's wheel; it costs no constant), then
-back to linear sRGB clipped at 0 with no gamut mapping. It was fitted
-(**measured**) on the user's own Lightroom 9.4 exports of one frame — flat, and
-one whole-frame mask carrying only the swatch at ≈0.73 and ≈0.35 —
-jointly over both exports on a 150k-pixel sample at 1200 px: mean CIELAB ΔE76
-1.67 (10.44 / 5.38 with no tint), 2.62 on the sky and 1.82 on the neutral
-pixels, against 7.87 on the sky for a luminance-preserving blend toward the
-hue and 3.81 for a linear-light additive model that wins the frame mean (1.47)
-on neutral land. Lightroom wrote
-no sidecar for those exports, so the amounts are fitted (k 0.0831 and 0.0406,
-ratio 2.05): the window and the hue rest on both, while `0.114` is
-0.0831 / 0.73 and moves with wherever the slider actually stopped. The
-calibration test (`render::tests::the_mask_tint_reproduces_lightroom_s_own_tint_exports`,
-corpus-gated) replays it through the mask pass at HSV 190° and 0.73 / 0.35
-over the whole 1200 px frame: ΔE 2.13 and 1.29 (10.45 and 5.38 untinted),
-against 2.09 and 1.31 for the free fit read one export at a time.
-The warm pixels keep the largest residual (4.71), where the export clips.
+0.470 and σ 0.272 in the gamma-encoded Rec.709 luma `L′` of the pixel it
+receives, and `θ = h + 8.1°` for Lightroom hue `h`, then back to linear sRGB
+clipped at 0 with no gamut mapping. It was fitted (**measured**) on the user's
+own Lightroom 9.4 exports of one frame — flat, and one whole-frame mask
+carrying only the swatch at hue 210 and amounts 0.782609 / 0.391304, the exact
+values the XMP packet in each export records — jointly over both exports on a
+150k-pixel sample at 1200 px: mean CIELAB ΔE76 1.70 (2.08 and 1.31 each;
+10.44 / 5.38 with no tint). In the first fit, with the amounts free, the same
+model shape read 2.62 on the sky and 1.82 on the neutral pixels, against 7.87
+on the sky for a luminance-preserving blend toward the hue and 3.81 for a
+linear-light additive model that wins the frame mean (1.47) on neutral land.
+Read one export at a time the amount scale is 0.1079 and 0.1055 per unit —
+linear to 2.3 %. The hue map is **one measured point**: hue 210 pushed along
+Oklab 218.1° (217.1° / 220.4° per export); reading the wheel as sRGB HSV would
+put it at 256.2° (ΔE 8.53 / 3.93), and candidate wheels with no constant
+(linear ProPhoto, linear Rec.2020, sRGB HSV in linear light) land at 202°, 213°
+and 234°, so `+8.1°` is the least-assuming map through the one point and the
+rest of the wheel is unmeasured. The calibration test
+(`render::tests::the_mask_tint_reproduces_lightroom_s_own_tint_exports`,
+corpus-gated) replays it through the mask pass at the exact settings over the
+whole 1200 px frame. The warm pixels keep the largest residual, where the
+export clips.
 
 ### Parameters
 

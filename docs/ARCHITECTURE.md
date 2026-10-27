@@ -2892,19 +2892,23 @@ mask.
 mask 「颜色」 swatch, `crs:LocalToningSaturation` / `LocalToningHue`) is the last
 step of that fused pass and sits outside its blend (`render::tint_px`): once
 WB and gains → tone → curves → saturation → hue have been blended by the mask
-weight, the pixel's Oklab (a, b) moves by `0.114 · amount · weight · w(L′)`
-along the Oklab hue of the pure sRGB colour at the swatch's HSV hue, Oklab L
-untouched, `w` a Gaussian (centre 0.469, σ 0.274) in the gamma-encoded Rec.709
-luma of the pixel it receives. The model is fitted to the user's own Lightroom
-exports of one frame — flat, and one whole-frame mask carrying only the swatch
-at ≈0.73 and ≈0.35: the shift points the same way on neutral, mid-chroma and
-warm pixels (additive, not a blend toward a colour), the two amounts' shifts
-stand 2 : 1 in every bin, and it peaks in the midtones. It reads mean ΔE 1.67
-against both exports (10.44 / 5.38 untinted) and 2.62 on the sky, where the
-luminance-preserving blend it replaced read 7.87. Outside the blend because
-its strength is linear in the mask weight, as the exports' 2 : 1 says; last
-because the swatch names an absolute hue that the Hue slider and the gains must
-not turn. Amount 0 skips it and renders to the bit; the hue alone is inert.
+weight, the pixel's Oklab (a, b) moves by `0.105 · amount · weight · w(L′)`
+along Oklab hue `h + 8.1°` for Lightroom hue `h`, Oklab L untouched, `w` a
+Gaussian (centre 0.470, σ 0.272) in the gamma-encoded Rec.709 luma of the
+pixel it receives. The model is fitted to the user's own Lightroom exports of
+one frame — flat, and one whole-frame mask carrying only the swatch at hue 210,
+amounts 0.782609 and 0.391304 (read from the XMP packet each export embeds):
+the shift points the same way on neutral, mid-chroma and warm pixels
+(additive, not a blend toward a colour), the two amounts' shifts stand 2 : 1
+in every bin, and it peaks in the midtones. One joint fit reads mean ΔE 1.70
+against both exports (2.08 and 1.31 each; 10.44 / 5.38 untinted). The hue
+map rests on that one hue: 210 pushed along Oklab 218.1°, and reading the
+wheel as sRGB HSV — the first guess — would have put it at 256.2° and left
+the exports at ΔE 8.53 / 3.93; the rest of the wheel is not yet measured.
+Outside the blend because its strength is linear in the mask weight, as the
+exports' 2 : 1 says; last because the swatch names an absolute hue that the
+Hue slider and the gains must not turn. Amount 0 skips it and renders to the
+bit; the hue alone is inert.
 
 Export adds the colour-space encode (sRGB / Adobe RGB / Display P3 / ProPhoto,
 with a wide-gamut develop path), an optional long-edge resize (Lanczos3, never
@@ -4614,30 +4618,38 @@ withheld under the gate's own sentence (`ZONE_COLOUR_WITHHELD_BY_QUALITY`, the
 third carrier `is_colour_refusal` knows); the tone is then judged as every
 colour-withheld zone's is.
 
-**The zone tint trial** (v1.17.0, `fit_zoned::tint`). A target made with a
+**The zone tint trials** (v1.17.0, `fit_zoned::tint`). A target made with a
 mask Color tint is a move the zone vocabulary could not make: gains solved
 from a zone's mean push a blue sky one way and its neutral clouds another, and
 the per-pixel voucher rightly refused that badly shaped move. Each semantic
-zone that is Full at pixel scale is therefore solved twice. The plain solve is
-as before; the trial, after the tone solve, reads ONE tint from all the zone's
-paired pixels, neutral and coloured alike: the Oklab (a, b) gaps target −
-candidate are regressed on the render's own ramp (the tint window at the
-candidate's luma × the mask's coverage) under the zone's robust pairing
-weights, Huber-reweighted three times, which gives the direction and the
-amount in closed form; the direction goes back to Lightroom's wheel through the
-render's own hue table (nearest of 3600, because the wheel folds back by 0.15°
-near pure blue), the amount through `TINT_OKLAB_PER_UNIT`. The gains and the
-saturation chase are then solved on the TINTED candidate, so they answer only
-what the tint left. The trial runs through `attach_one_zone` itself, so the
-same probes, voucher, quality, acceptance and boundary gates judge it; the
-one-sided band veto alone does not apply, because the tint was read from the
-pairs on both sides of every band. It replaces the plain solve only when it
-shipped a tint, lands the zone's mean ΔE lower than the plain solve by
-`ZONE_GLOBAL_REGRESSION_TOL` and leaves the frame within the zone's own
-regression tolerance — the subzone bands' replacement rule — and otherwise the
-plain solve stands to the byte. That margin is also why a gains-shaped gap
-never comes back as a tint: the tinted candidate's own gains land where the
-plain solve does at best. The shipped tint says so (`ZONE_TINTED`).
+zone that is Full at pixel scale is therefore solved three times: the plain
+solve as before, and two trials that read ONE tint from all the zone's paired
+pixels, neutral and coloured alike, after the tone solve. The read regresses
+the Oklab (a, b) gaps target − candidate on the render's own ramp (the tint
+window at the candidate's luma × the mask's coverage) under the zone's robust
+pairing weights, Huber-reweighted three times, which gives the direction and
+the amount in closed form; `render::tint_hue_of` takes the direction back to
+Lightroom's wheel and `TINT_OKLAB_PER_UNIT` the amount. The two trials differ
+in what the zone-mean gains are asked. Tint-first reads the tint on the zone
+as its tone left it and then solves the gains and the saturation on the
+TINTED candidate — right for a gap that is a tint and nothing else. On-gains
+keeps the plain solve's gains and reads the tint on what they leave — right
+for a cast plus a tint, which is what the seaside street turned out to be: the
+fit's own global stage leaves its sky 35 b* warmer than the target, read first
+the tint swallowed that cast and stopped at Lightroom's end stop (1.00) with
+weaker gains behind it, and the finished sky and clouds both landed further
+from the target than the plain solve's; read on the gains it came out at 0.50
+and the frame, the sky and the clouds all landed closer. Each trial runs
+through `attach_one_zone` itself, so the same probes, voucher, quality,
+acceptance and boundary gates judge it; the one-sided band veto alone does not
+apply, because the tint was read from the pairs on both sides of every band.
+A trial counts only when it shipped a tint, lands the zone's mean ΔE lower
+than the plain solve by `ZONE_GLOBAL_REGRESSION_TOL` and leaves the frame
+within the zone's own regression tolerance — the subzone bands' replacement
+rule — and the counting trial with the lower zone ΔE replaces the plain
+solve; when none counts, the plain solve stands to the byte. That margin is
+also why a gains-shaped gap never comes back as a tint. The shipped tint says
+so (`ZONE_TINTED`).
 
 SCOPE is the other half of the instrument, and it is not the same at every
 site. Lifting a REGIONAL veto takes a REGIONAL verdict: a veto that is a SHARE
