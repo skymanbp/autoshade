@@ -6955,3 +6955,202 @@ fn unrepresented_note_is_derived_from_the_finished_zoned_render() {
     );
     path.remove();
 }
+
+/// A sky of two populations, blue sky and neutral cloud, over a brown land.
+/// `target_of` makes the target from each source pixel (display-encoded in,
+/// display-encoded out); the grain is one draw shared by both sides, so every
+/// pixel is its own counterpart and the zones pair at pixel scale.
+fn two_population_sky_pair(
+    target_of: &dyn Fn([f32; 3], bool) -> [f32; 3],
+) -> (DynamicImage, DynamicImage, GrayImage, Vec<bool>) {
+    let (w, h) = (64u32, 64u32);
+    let hash = |i: u32| {
+        let mut v = i.wrapping_mul(747796405).wrapping_add(2891336453);
+        v ^= v >> 16;
+        v = v.wrapping_mul(2246822519);
+        v ^= v >> 13;
+        (v % 10_000) as f32 / 10_000.0 - 0.5
+    };
+    // Clouds are whole 8x8 blocks, so they survive the analysis downscale.
+    let cloud = |x: u32, y: u32| y < h / 2 && hash(1_000_003 + (y / 8) * 8 + x / 8) > 0.15;
+    let source_px = |x: u32, y: u32| -> [f32; 3] {
+        let grain = 0.06 * hash(y * w + x);
+        if y >= h / 2 {
+            [0.42 + grain, 0.34 + grain, 0.25 + grain]
+        } else if cloud(x, y) {
+            [0.86 + grain, 0.86 + grain, 0.86 + grain]
+        } else {
+            [0.47 + grain, 0.63 + grain, 0.86 + grain]
+        }
+    };
+    let quantise = |p: [f32; 3]| image::Rgb(p.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8));
+    let src = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| quantise(source_px(x, y))));
+    let tgt = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+        let p = src.as_rgb8().expect("rgb8").get_pixel(x, y).0.map(|c| c as f32 / 255.0);
+        quantise(target_of(p, y < h / 2))
+    }));
+    let mask = GrayImage::from_fn(w, h, |_, y| image::Luma([if y < h / 2 { 255 } else { 0 }]));
+    let clouds = (0..w * h).map(|i| cloud(i % w, i / w)).collect();
+    (src, tgt, mask, clouds)
+}
+
+/// The angle between two Oklab directions, in degrees.
+fn oklab_degrees_apart(a: [f32; 2], b: [f32; 2]) -> f32 {
+    (a[1].atan2(a[0]) - b[1].atan2(b[0])).to_degrees().rem_euclid(360.0).min(
+        (b[1].atan2(b[0]) - a[1].atan2(a[0])).to_degrees().rem_euclid(360.0),
+    )
+}
+
+/// The estimator alone (`tint::read_zone_tint`), on pairs whose target IS the
+/// candidate under one mask Color tint (hue 231, amount 0.5, the render's own
+/// `render::tint_px`), with a quarter of the zone at half coverage: the read
+/// returns that direction and that amount, because the solve is the model's
+/// own least squares. The hue comes back as a wheel position whose push is
+/// the same direction — on Lightroom's wheel HSV 222–242° all push within 1°
+/// of pure blue in Oklab, so the direction is what is pinned, not the
+/// degree the slider would print.
+#[test]
+fn the_tint_read_returns_the_tint_a_target_was_made_with() {
+    let dir = crate::render::tint_direction(231.0);
+    let k = crate::render::TINT_OKLAB_PER_UNIT * 0.5;
+    let candidate: Vec<[f32; 3]> = (0..4000)
+        .map(|i| {
+            let u = (i % 97) as f32 / 96.0;
+            match i % 3 {
+                0 => [0.2 + 0.7 * u; 3],
+                1 => [0.30 + 0.25 * u, 0.42 + 0.3 * u, 0.62 + 0.3 * u],
+                _ => [0.5 + 0.3 * u, 0.4 + 0.25 * u, 0.3 + 0.2 * u],
+            }
+        })
+        .collect();
+    let cover = |i: usize| if i % 4 == 0 { 0.5 } else { 1.0 };
+    let target: Vec<[f32; 3]> =
+        candidate.iter().enumerate().map(|(i, p)| crate::render::tint_px(*p, dir, k * cover(i))).collect();
+    let read = super::tint::read_zone_tint(&candidate, &target, &|_| 1.0, &cover).expect("a tint to read");
+    let read_dir = [read.direction.cos(), read.direction.sin()];
+    assert!(oklab_degrees_apart(read_dir, dir) <= 0.5, "direction {read_dir:?} vs {dir:?}");
+    let wheel = crate::render::tint_direction(read.hue);
+    assert!(oklab_degrees_apart(wheel, dir) <= 0.5, "hue {} pushes {wheel:?}, not {dir:?}", read.hue);
+    assert!((read.amount - 0.5).abs() <= 0.005, "amount {}", read.amount);
+    assert_eq!(read.pairs, 4000);
+    // Nothing to read where the pairs agree.
+    assert!(super::tint::read_zone_tint(&candidate, &candidate, &|_| 1.0, &cover).is_none());
+}
+
+/// The zone tint trial, end to end. A target that IS the source under one
+/// mask Color tint over the whole frame (hue 231, amount 0.5) is the move
+/// per-channel gains cannot make: solved from the zone's mean they push the
+/// blue sky and the neutral clouds two different ways. The trial reads one
+/// tint from every paired pixel, both populations alike, and replaces the
+/// plain solve because it lands the zone closer pixel by pixel: the sky
+/// ships a tint whose push is within 3° of the target's and whose amount is
+/// within 0.03 of it, the colour voucher lets it through, and BOTH
+/// populations converge.
+#[test]
+fn a_zone_whose_target_is_one_tint_away_ships_that_tint_and_both_populations_converge() {
+    let (dir, k) = (crate::render::tint_direction(231.0), crate::render::TINT_OKLAB_PER_UNIT * 0.5);
+    let (src, tgt, mask, clouds) = two_population_sky_pair(&|p, _| crate::render::tint_px(p, dir, k));
+    let path = fixture_mask_path("zoned-tinted-sky");
+    mask.save(path.path()).unwrap();
+    let mut report = neutral_report(&src, &tgt);
+
+    attach_zones(&src, &tgt, &mut report, &mask, &mask, &path);
+
+    let sky = report
+        .recipe
+        .masks
+        .iter()
+        .find(|m| m.role == MaskRole::ZoneSky)
+        .unwrap_or_else(|| panic!("the sky zone must attach: {}", report.recipe.rationale));
+    assert!(
+        (sky.toning_amount - 50.0).abs() <= 3.0,
+        "the sky must ship the target's tint amount, not {} (gains {:?} sat {}): {}",
+        sky.toning_amount,
+        sky.color_gains,
+        sky.saturation,
+        report.recipe.rationale
+    );
+    let pushed = crate::render::tint_direction(sky.toning_hue);
+    assert!(
+        oklab_degrees_apart(pushed, dir) <= 3.0,
+        "the tint's hue {} must push the target's way ({:.1}° apart)",
+        sky.toning_hue,
+        oklab_degrees_apart(pushed, dir)
+    );
+    assert!(
+        report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_TINTED),
+        "the tint says so: {}",
+        report.recipe.rationale
+    );
+    for refused in [
+        crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR,
+        crate::rationale::keys::ZONE_COLOUR_WITHHELD_BY_QUALITY,
+    ] {
+        assert!(
+            !report.notes.iter().any(|n| n.key == refused && n.args.iter().any(|(k, v)| *k == "label" && v == MaskRole::ZoneSky.tag())),
+            "the voucher must pass the tinted sky: {}",
+            report.recipe.rationale
+        );
+    }
+    let (s, t) = (fit::pixels_of(&src), fit::pixels_of(&tgt));
+    let rendered = fit::pixels_of(&render::develop_preview(&src, &report.recipe));
+    let gap = |px: &[[f32; 3]], want_cloud: bool| {
+        let (mut sum, mut n) = (0.0f32, 0usize);
+        for i in 0..px.len() / 2 {
+            if clouds[i] == want_cloud {
+                sum += (0..3).map(|c| (px[i][c] - t[i][c]).abs()).sum::<f32>();
+                n += 1;
+            }
+        }
+        sum / n.max(1) as f32
+    };
+    for (name, is_cloud) in [("clouds", true), ("sky", false)] {
+        let (before, after) = (gap(&s, is_cloud), gap(&rendered, is_cloud));
+        assert!(after < 0.5 * before, "{name} must converge: {before:.4} -> {after:.4}: {}", report.recipe.rationale);
+    }
+    path.remove();
+}
+
+/// The other side of the trial: a sky whose target is the source under
+/// per-channel GAINS (a warm recolour, the move the plain solve is built
+/// for) must not come back as a tint. The tinted candidate's own gains can
+/// at best land where the plain solve does, so the trial's margin keeps the
+/// plain one and the sky's tint amount stays ≤ 0.02 — the tint does not
+/// absorb what gains explain.
+#[test]
+fn a_zone_whose_target_is_a_gains_recolour_does_not_read_as_a_tint() {
+    let gains = [1.12, 1.0, 0.86];
+    let (src, tgt, mask, _) = two_population_sky_pair(&|p, sky| {
+        if sky {
+            let lin = p.map(render::srgb_to_linear);
+            std::array::from_fn(|c| render::linear_to_srgb(lin[c] * gains[c]))
+        } else {
+            p
+        }
+    });
+    let path = fixture_mask_path("zoned-gains-sky");
+    mask.save(path.path()).unwrap();
+    let mut report = neutral_report(&src, &tgt);
+
+    attach_zones(&src, &tgt, &mut report, &mask, &mask, &path);
+
+    let sky = report
+        .recipe
+        .masks
+        .iter()
+        .find(|m| m.role == MaskRole::ZoneSky)
+        .unwrap_or_else(|| panic!("the sky zone must attach: {}", report.recipe.rationale));
+    assert!(
+        sky.toning_amount <= 2.0,
+        "a gains recolour read as a tint of {} toward {}: {}",
+        sky.toning_amount,
+        sky.toning_hue,
+        report.recipe.rationale
+    );
+    assert!(
+        !report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_TINTED),
+        "no tint sentence for a gains recolour: {}",
+        report.recipe.rationale
+    );
+    path.remove();
+}

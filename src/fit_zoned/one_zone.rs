@@ -29,6 +29,32 @@ pub(super) fn attach_one_zone(
     divergence: Option<fit::Divergence>,
     corr: Option<&fit::PairCorrespondence>,
 ) -> Option<AcceptedZone> {
+    attach_one_zone_as(s_img, tgt_px, report, frame_err, attachment, divergence, corr, ZoneColour::Gains)
+}
+
+/// The colour move a zone solve makes. `Gains` is the per-channel recolour
+/// every zone has always solved; `Tint` reads ONE mask Color tint from the
+/// zone's paired pixels first (`tint::read_zone_tint`) and solves the gains
+/// on what it leaves. It is only ever run as a trial beside the plain solve
+/// (`tint::attach_zone_tint_or_plain`), never on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ZoneColour {
+    Gains,
+    Tint,
+}
+
+/// [`attach_one_zone`] with its colour model named.
+#[allow(clippy::too_many_arguments)] // `attach_one_zone`'s seven plus the colour model
+pub(super) fn attach_one_zone_as(
+    s_img: &DynamicImage,
+    tgt_px: &[[f32; 3]],
+    report: &mut FitReport,
+    frame_err: &mut f32,
+    attachment: &ZoneAttachment,
+    divergence: Option<fit::Divergence>,
+    corr: Option<&fit::PairCorrespondence>,
+    colour: ZoneColour,
+) -> Option<AcceptedZone> {
     // `label` drives the rationale prose; it's the zone's stable ASCII tag, so
     // the text stays English/identical regardless of the GUI's display language.
     let label = attachment.label.as_str();
@@ -66,6 +92,12 @@ pub(super) fn attach_one_zone(
     } else {
         fit::PairingScale::Pixel
     };
+    // The tint is read from PAIRED pixels, so the trial exists only where a
+    // Full zone's pixels pair one to one; anywhere else the plain solve is
+    // the only one there is, and the trial says nothing.
+    if colour == ZoneColour::Tint && (mode != ZoneMode::Full || pairing != fit::PairingScale::Pixel) {
+        return None;
+    }
     // R34 §D2. The REGION's own 12x8 cells, the instrument that can admit a
     // control this zone's PIXELS cannot vouch. Built here rather than threaded
     // from the orchestration: every one of the six producers hands this
@@ -287,6 +319,9 @@ pub(super) fn attach_one_zone(
         inverted: attachment.inverted,
         color_gains: Some(
             match mode {
+                // The tint trial's colour is the tint, read below on the
+                // zone as its tone leaves it; its gains come after the tint.
+                ZoneMode::Full if colour == ZoneColour::Tint => [1.0; 3],
                 ZoneMode::Full => d.color_gains,
                 ZoneMode::Atmosphere => shrink_atmosphere_gains_in(
                     d.color_gains,
@@ -494,6 +529,36 @@ pub(super) fn attach_one_zone(
             ),
         );
     }
+    // The tint trial's colour move, read on the zone as its tone left it and
+    // BEFORE the gains and the saturation chase, which then answer only what
+    // the tint leaves (a chase run first turns a hue gap into a chroma one
+    // the tint then misreads): every paired pixel, neutral and coloured
+    // alike, under the same robust pairing weights the tone solve used.
+    let mut tint_read = None;
+    if colour == ZoneColour::Tint {
+        let rp = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
+        let pair_weight = |i: usize| {
+            zw_source.get(i).copied().unwrap_or(0.0).min(zw_target.get(i).copied().unwrap_or(0.0))
+        };
+        // The mask's own alpha is the tint's coverage: the render scales the
+        // shift by the mask weight.
+        let coverage = |i: usize| sw.get(i).copied().unwrap_or(0.0);
+        let Some(tint) = super::tint::read_zone_tint(&rp, tgt_eff, &pair_weight, &coverage) else {
+            report.recipe.masks.pop();
+            return None;
+        };
+        let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
+        m.toning_hue = round1(tint.hue);
+        m.toning_amount = round1(tint.amount * 100.0);
+        // The gains on the TINTED candidate: the zone-mean recolour the
+        // plain solve makes, asked of what the tint left rather than of the
+        // whole gap, on the same populations and the same estimator.
+        let tinted_px = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
+        let gains = fit_zone_dials(&zone_moments(&tinted_px, &zw_source), &mt).color_gains;
+        let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
+        m.color_gains = Some(gains.map(round2));
+        tint_read = Some(tint);
+    }
     // Closed-loop zone saturation on real renders (the gains change chroma
     // by themselves — only a render knows where the zone landed).
     for _ in 0..2 {
@@ -532,6 +597,7 @@ pub(super) fn attach_one_zone(
         let m = luma_probe.masks.last_mut().expect("zone mask just pushed");
         m.color_gains = Some([1.0; 3]);
         m.saturation = 0.0;
+        m.toning_amount = 0.0;
     }
     let luma_probe_px = fit::pixels_of(&render::develop_preview(s_img, &luma_probe));
     let luma_ranges = fit::moved_unsupported_luma_range_names(
@@ -572,16 +638,30 @@ pub(super) fn attach_one_zone(
     let hue_vouch = (pairing == fit::PairingScale::Pixel)
         .then(|| zone_robust.as_ref().map(|r| (r.weights.as_slice(), tgt_eff, MoveAxis::Colour)))
         .flatten();
-    let hue_bands = fit::moved_unsupported_hue_range_names_vouched(
+    let mut hue_bands = fit::moved_unsupported_hue_range_names_vouched(
         &cur_px,
         &chroma_probe_px,
         &zone_evidence,
         hue_vouch,
         None,
     );
-    let hue_vouched_bands = hue_vouch.and_then(|_| {
+    let mut hue_vouched_bands = hue_vouch.and_then(|_| {
         fit::vouched_hue_band_names(&cur_px, &chroma_probe_px, &zone_evidence, hue_vouch, None)
     });
+    // The one-sided band veto does not judge the tint. The veto exists because
+    // a band the target never shows carries no evidence for a move THROUGH it;
+    // the tint's hue and amount were read from the pairs on both sides of
+    // every band at once, sky and cloud alike, so band membership is not a
+    // lack of evidence about it. What admits it instead is the trial's own
+    // pixel-by-pixel landing (`tint::attach_zone_tint_or_plain`) and the
+    // quality, acceptance and boundary gates below, which it meets exactly as
+    // the gains do. The bands it moved through are named in its sentence.
+    let tint_bands = if colour == ZoneColour::Tint {
+        hue_vouched_bands = None;
+        hue_bands.take()
+    } else {
+        None
+    };
     // R34 §D2. THE admission gate for a region whose PIXELS cannot pair.
     //
     // R33 §F refused to consult `fit_cells` here, on the ground that
@@ -704,6 +784,7 @@ pub(super) fn attach_one_zone(
         let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
         m.color_gains = Some([1.0; 3]);
         m.saturation = 0.0;
+        m.toning_amount = 0.0;
     } else if let Some((k, _)) = hue_shrunk {
         scale_zone_colour(report.recipe.masks.last_mut().expect("zone mask just pushed"), k, mode);
     }
@@ -731,6 +812,7 @@ pub(super) fn attach_one_zone(
             let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
             m.color_gains = Some([1.0; 3]);
             m.saturation = 0.0;
+            m.toning_amount = 0.0;
             colour_withheld = true;
             colour_quality = Some(quality);
         }
@@ -838,6 +920,26 @@ pub(super) fn attach_one_zone(
             ),
         );
     }
+    // The tint's own sentence, only where it shipped: the hue, the amount on
+    // Lightroom's 0..1 swatch scale, and the population it was read from.
+    if let Some(tint) = tint_read.filter(|_| !colour_withheld) {
+        let m = report.recipe.masks.last().expect("zone mask just pushed");
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_TINTED,
+                vec![
+                    ("label", label.to_string()),
+                    ("hue", format!("{:.0}", m.toning_hue)),
+                    ("amount", format!("{:.2}", m.toning_amount / 100.0)),
+                    ("n", tint.pairs.to_string()),
+                    ("neutral", tint.neutral.to_string()),
+                    ("hue_bands", tint_bands.clone().unwrap_or_else(|| "none".to_string())),
+                ],
+            ),
+        );
+    }
     if let Some(luma_ranges) = luma_ranges.as_ref() {
         let note = match (luma_shrunk, tone_withheld, luma_cells) {
             (Some((k, v)), _, Some(full)) => {
@@ -937,6 +1039,7 @@ pub(super) fn attach_one_zone(
             && m.whites.abs() <= 1e-4
             && m.blacks.abs() <= 1e-4
             && m.saturation.abs() <= 1e-4
+            && m.toning_amount <= 1e-4
             && m.color_gains.map(|g| g.iter().all(|v| (*v - 1.0).abs() <= 1e-4)).unwrap_or(true)
     };
     if neutral_zone {

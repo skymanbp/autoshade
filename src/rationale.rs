@@ -661,6 +661,16 @@ pub mod keys {
     /// them were the refusal rides instead and this sentence does not.
     pub const ZONE_COLOUR_VOUCHED_BY_PIXELS: &str =
         " Zoned {label} colour controls shipped on PAIRED evidence through one-sided hue bands [{hue_bands}]: this region's pixels are each other's counterparts, and each moved pixel was individually vouched (robust weight) and moved toward its own paired target pixel; unvouched pixels kept the veto.";
+    /// The zone tint trial's sentence (`fit_zoned::tint`): the tint shipped
+    /// in place of the plain colour solve. It names the hue, the amount on
+    /// Lightroom's 0..1 swatch scale and the paired population it was read
+    /// from, neutral pixels counted separately — the reason the tint exists:
+    /// gains solved from a zone's mean move a neutral and a coloured
+    /// population apart, while one shift of every pixel's chroma toward one
+    /// hue moves both the way a Lightroom Color swatch does. The one-sided hue
+    /// bands it moved through are named, with the reason they did not veto it.
+    pub const ZONE_TINTED: &str =
+        " Zoned {label} tinted toward {hue}° at {amount}: read from {n} paired pixels, {neutral} of them neutral, clouds and sky alike — one shift of every pixel's chroma toward one hue, strongest in the midtones and leaving lightness alone, lands the zone's neutral and coloured pixels together, where per-channel gains solved from the zone's mean push the two apart. One-sided hue bands [{hue_bands}] did not veto it, because its hue and amount were read from the pairs on both sides of them; it passed the quality, acceptance and boundary gates like every colour move, and replaced the plain colour solve because it landed the zone closer pixel by pixel.";
     /// R34 §D5. A zone's tone estimator follows the REGION's own pairing scale
     /// rather than the frame's: a Full zone whose pixels do not pair solves its
     /// tone from the zone's population instead of from paired pixels. Mode

@@ -42,6 +42,7 @@ mod freemask;
 mod range;
 mod spatial;
 mod subzones;
+mod tint;
 pub mod semantic;
 mod accept;
 mod attach;

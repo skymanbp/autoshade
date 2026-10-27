@@ -363,7 +363,8 @@ pub(super) fn attach_zones_with_divergence(
         min_share: MIN_ZONE_SHARE,
         frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
     };
-    let sky = attach_one_zone(
+    // Both semantic zones also try the tint (`tint::attach_zone_tint_or_plain`).
+    let sky = super::tint::attach_zone_tint_or_plain(
         &s_img,
         &tgt_px,
         report,
@@ -372,7 +373,7 @@ pub(super) fn attach_zones_with_divergence(
         divergence.sky.divergence,
         corr.as_ref(),
     );
-    let land = attach_one_zone(
+    let land = super::tint::attach_zone_tint_or_plain(
         &s_img,
         &tgt_px,
         report,

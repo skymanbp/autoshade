@@ -279,6 +279,8 @@ pub(super) fn scale_zone_colour(m: &mut LocalAdjustment, k: f32, mode: ZoneMode)
         m.color_gains = Some(gains.map(|gain| ((1.0 + k * (gain - 1.0)) * 100.0).round() / 100.0));
     }
     m.saturation = clamp_zone_sat_for_mode((m.saturation * k).round(), mode);
+    // A tint shrinks along its own ramp: the hue is its direction and stays.
+    m.toning_amount = (m.toning_amount * k * 10.0).round() / 10.0;
 }
 
 /// The tone half of [`scale_zone_colour`]: the six tone dials at a share `k`,
@@ -426,6 +428,7 @@ pub(super) fn shrink_zone_corrections(
     shrink_additive!(whites);
     shrink_additive!(blacks);
     shrink_additive!(saturation);
+    shrink_additive!(toning_amount);
     for channel in 0..3 {
         let common = originals
             .iter()

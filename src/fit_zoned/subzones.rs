@@ -125,7 +125,7 @@ struct ProfileRow {
     delta: [f64; 3],
 }
 
-fn delta_e(before: &[[f32; 3]], target: &[[f32; 3]], weights: &[f32]) -> f32 {
+pub(super) fn delta_e(before: &[[f32; 3]], target: &[[f32; 3]], weights: &[f32]) -> f32 {
     let (mut sum, mut mass) = (0.0f64, 0.0f64);
     for ((b, t), w) in before.iter().zip(target).zip(weights) {
         if *w <= 0.0 { continue; }
@@ -399,6 +399,7 @@ fn stretch_band(band: &mut LocalAdjustment, original: &LocalAdjustment, anchor: 
         band.color_gains = Some(gains.map(|g| round2(g.max(0.05))));
     }
     band.saturation = clamp_zone_sat(band.saturation.round());
+    band.toning_amount = round1(band.toning_amount.clamp(0.0, 100.0));
 }
 
 /// Golden-section steps of the band strength search: eight analysis renders
@@ -682,7 +683,11 @@ fn shrink_to_parent(
             ($($field:ident),+ $(,)?) => { $(dst.$field = anchor.$field + k * (original.$field - anchor.$field);)+ };
         }
         blend!(exposure_ev, contrast, highlights, shadows, whites, blacks, saturation,
-            clarity, dehaze, texture, sharpness, hue, temperature, tint, noise_reduction, amount);
+            clarity, dehaze, texture, sharpness, hue, temperature, tint, noise_reduction, amount,
+            toning_amount);
+        // A tint's hue is a direction, not a level: it is the band's own
+        // wherever the band carries a tint, and the parent's where only it does.
+        dst.toning_hue = if original.toning_amount > 0.0 { original.toning_hue } else { anchor.toning_hue };
         let a = anchor.color_gains.unwrap_or([1.0; 3]);
         let b = original.color_gains.unwrap_or([1.0; 3]);
         dst.color_gains = Some(std::array::from_fn(|c| a[c] + k * (b[c] - a[c])));
