@@ -1083,6 +1083,11 @@ fn parse_one_correction_with_reader(
         hue: q180("LocalHue"),
         temperature: q100("LocalTemperature"),
         tint: q100("LocalTint"),
+        // The mask Color swatch. The hue is written in DEGREES, unscaled
+        // (the reference sidecar's sky reads `231`, its street `43`); the
+        // strength on the 0..1 scale every other local slider uses.
+        toning_hue: scaled("LocalToningHue", 1.0),
+        toning_amount: q100("LocalToningSaturation"),
         noise_reduction: q100("LocalLuminanceNoise"),
         // R25 P6: the four local point curves, read with the machinery the
         // global curves already use — `parse_curve` is

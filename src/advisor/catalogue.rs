@@ -1798,7 +1798,7 @@ pub const RECIPE_CONTROLS: [Control; 116] = [
 /// rather than one band), which is exactly why the drift had two independent
 /// surfaces. `texture` used to be the clearest example and is no longer one:
 /// R25 B2 gave it a global row too, sharing this one's operator and radius.
-pub const LOCAL_CONTROLS: [Control; 28] = [
+pub const LOCAL_CONTROLS: [Control; 30] = [
     // KNOWN GRANULARITY LIMIT (stated, not abstracted away). `Tier` hangs on
     // a Control ROW, and the whole geometry is one row — so the row says
     // `Rendered` while three of `MaskGeometry::Radial`'s fields are not:
@@ -2067,6 +2067,26 @@ pub const LOCAL_CONTROLS: [Control; 28] = [
         crs: CrsKey::Family("LocalTint"),
         tier: Some(Tier::Rendered),
         purpose: "local green/magenta shift",
+    },
+    Control {
+        name: "toning_hue",
+        shape: Shape::Number,
+        range: Some((0.0, 360.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Family("LocalToningHue"),
+        tier: Some(Tier::Rendered),
+        purpose: "the hue (0..360°, Lightroom's wheel) of the mask's colour TINT — Lightroom's mask \"Color\" swatch; inert until `toning_amount` is set",
+    },
+    Control {
+        name: "toning_amount",
+        shape: Shape::Number,
+        range: Some((0.0, 100.0)),
+        neutral: "0",
+        engine_only: false,
+        crs: CrsKey::Family("LocalToningSaturation"),
+        tier: Some(Tier::Rendered),
+        purpose: "strength of the mask's colour tint toward `toning_hue`: shifts every pixel in the mask, neutral or coloured, the same way toward that one hue, most in the midtones, without brightening or darkening — unlike `hue`, which rotates colours by an angle",
     },
     Control {
         name: "noise_reduction",
@@ -3328,6 +3348,8 @@ pub fn local_value<'a>(m: &'a LocalAdjustment, name: &str) -> Option<LocalValue<
         hue,
         temperature,
         tint,
+        toning_hue,
+        toning_amount,
         noise_reduction,
         main_curve,
         red_curve,
@@ -3358,6 +3380,8 @@ pub fn local_value<'a>(m: &'a LocalAdjustment, name: &str) -> Option<LocalValue<
         "hue" => LocalValue::Num(*hue),
         "temperature" => LocalValue::Num(*temperature),
         "tint" => LocalValue::Num(*tint),
+        "toning_hue" => LocalValue::Num(*toning_hue),
+        "toning_amount" => LocalValue::Num(*toning_amount),
         "noise_reduction" => LocalValue::Num(*noise_reduction),
         "main_curve" => LocalValue::Curve(main_curve),
         "red_curve" => LocalValue::Curve(red_curve),
@@ -4104,6 +4128,13 @@ mod tests {
     ///     which renders a recipe whose ONLY colour term is `color_gains`
     ///     through `develop_preview` and asserts the masked pixels move (there
     ///     is no test named for `color_gains` inside `render.rs` itself).
+    ///   * `toning_hue` — NOT probed here: it is the tint's DIRECTION and
+    ///     renders only through `toning_amount`, which the gate reads, so a
+    ///     one-hot hue is inert by design and zeroing it cannot put a mask to
+    ///     sleep. Its render half is
+    ///     `render::tests::a_mask_tint_moves_chroma_toward_its_hue_and_never_luminance`,
+    ///     which renders a hue at amount 0 (bit-identical) and at amount 50
+    ///     (the covered pixels turn toward that hue).
     #[test]
     fn local_tiers_agree_with_the_engines_own_activity_gate() {
         // The render-side gate, spelled once (render.rs's mask loop).
@@ -4132,6 +4163,9 @@ mod tests {
                 Shape::Bool => (json!(true), json!(false)),
                 _ => continue,
             };
+            if c.name == "toning_hue" {
+                continue;
+            }
             let with = |m: &LocalAdjustment, v: &serde_json::Value| -> LocalAdjustment {
                 let mut j = serde_json::to_value(m).expect("LocalAdjustment serializes");
                 j[c.name] = v.clone();

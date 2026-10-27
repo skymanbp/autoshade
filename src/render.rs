@@ -182,6 +182,11 @@ use mask_weight::{combined_mask_weight};
 #[cfg(test)]
 use mask_weight::{mask_weight, mask_weight_in};
 pub use masks::{MaskFrame, engine_active};
+pub(crate) use masks::{
+    TINT_OKLAB_PER_UNIT, linear_to_oklab, tint_direction, tint_luma, tint_px, tint_window,
+};
+#[cfg(test)]
+pub(crate) use masks::{TINT_WINDOW_CENTRE, oklab_to_linear};
 use masks::{MaskUnwarp, apply_masks};
 #[cfg(test)]
 use masks::{LOCAL_NR_GATE, is_lr_post_correction_geometry};

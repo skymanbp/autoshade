@@ -476,14 +476,14 @@ pub(super) fn correction_value_reasons(own: Scope<'_>) -> Result<Vec<MaskImportR
     // `LocalHue`/`LocalSharpness` LEFT this list in R23-1b: they have no
     // `*2012` twin, they are read back by `parse_one_correction`, and the
     // writer now emits the recipe's own values — a correction carrying them
-    // is fully supported, not a partial import.
-    const INERT_LOCAL: [&str; 10] = [
+    // is fully supported, not a partial import. `LocalToningHue` /
+    // `LocalToningSaturation` (the mask Color tint) left it on the same
+    // terms once the engine rendered the tint.
+    const INERT_LOCAL: [&str; 8] = [
         "LocalExposure",
         "LocalContrast",
         "LocalClarity",
         "LocalBrightness",
-        "LocalToningHue",
-        "LocalToningSaturation",
         "LocalMoire",
         "LocalDefringe",
         "LocalGrain",
@@ -535,6 +535,14 @@ pub(super) fn correction_value_reasons(own: Scope<'_>) -> Result<Vec<MaskImportR
     // ±100.00008. Gating at exactly 100 would refuse a mask for the wire
     // format's rounding — the band is one wire step wide and nothing else.
     if !optional_scaled_number_in(own, "LocalHue", 180.0, -100.001, 100.001) {
+        return Err(MaskImportReason::OutOfModel);
+    }
+    // The Color swatch's own ranges: a hue in degrees around the wheel and a
+    // strength on the 0..1 scale. Off either end is not a swatch Lightroom
+    // can produce, so it is the same refusal as any other off-slider value.
+    if !optional_scaled_number_in(own, "LocalToningHue", 1.0, 0.0, 360.0)
+        || !optional_scaled_number_in(own, "LocalToningSaturation", 100.0, 0.0, 100.0)
+    {
         return Err(MaskImportReason::OutOfModel);
     }
     // Everything below this line is a NOTE, not a refusal.

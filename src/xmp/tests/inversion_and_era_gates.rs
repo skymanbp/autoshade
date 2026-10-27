@@ -1027,3 +1027,30 @@ fn lr_parametric_doc() -> String {
          </x:xmpmeta>\n"
         .to_string()
 }
+
+/// The mask Color tint is carried both ways: a Lightroom correction holding
+/// `LocalToningHue` / `LocalToningSaturation` imports onto the recipe's own
+/// tint with no loss raised, the writer emits the recipe's values on the
+/// file's own scales, and the round trip returns the same two numbers. A
+/// strength off the swatch's 0..1 range is refused like any off-slider value.
+#[test]
+fn the_mask_colour_tint_imports_exports_and_round_trips() {
+    let doc = lr_doc(
+        &lr_correction("Sky", "", &lr_radial("0", "0"))
+            .replace("crs:LocalToningHue=\"0\"", "crs:LocalToningHue=\"231\"")
+            .replace("crs:LocalToningSaturation=\"0\"", "crs:LocalToningSaturation=\"0.73\""),
+    );
+    let r = xmp_to_recipe(&doc);
+    assert_eq!(r.masks.len(), 1, "the tinted mask imports: {:?}", r.masks);
+    assert_eq!((r.masks[0].toning_hue, r.masks[0].toning_amount), (231.0, 73.0));
+    assert_eq!(import_losses(&doc), vec![], "a tint the engine renders is not a loss");
+    let xmp = recipe_to_xmp(&r);
+    assert!(
+        xmp.contains("crs:LocalToningHue=\"231\"") && xmp.contains("crs:LocalToningSaturation=\"0.73\""),
+        "the writer emits the recipe's tint: {xmp}"
+    );
+    let back = xmp_to_recipe(&xmp);
+    assert_eq!((back.masks[0].toning_hue, back.masks[0].toning_amount), (231.0, 73.0));
+    let wild = doc.replace("crs:LocalToningSaturation=\"0.73\"", "crs:LocalToningSaturation=\"1.5\"");
+    assert_eq!(unsupported_corrections(&wild), 1, "1.5 is off the swatch");
+}

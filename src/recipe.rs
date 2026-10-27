@@ -2155,6 +2155,20 @@ pub struct LocalAdjustment {
     /// Relative warm/cool shift (NOT Kelvin) → `crs:LocalTemperature`.
     pub temperature: f32,
     pub tint: f32,
+    /// Lightroom's mask "Color" swatch, its hue → `crs:LocalToningHue`, 0..360°
+    /// stored as written (the file carries degrees, unscaled). A colour TINT,
+    /// not a rotation: where `hue` turns every colour by the same angle, this
+    /// shifts every pixel's chroma the SAME way, toward this one hue — so a
+    /// neutral cloud and a chromatic sky move together, which no rotation or
+    /// channel gain can do with one setting. Rendered by `render::apply_masks`
+    /// (see `render::tint_px` for the model, fitted to Lightroom's own
+    /// exports). Inert while `toning_amount` is 0.
+    pub toning_hue: f32,
+    /// The swatch's strength → `crs:LocalToningSaturation` × 100, 0..=100 —
+    /// the same ×100 convention as the mask's other 0..1 keys. 0 = no tint,
+    /// the serde default, so every recipe written before the tint existed
+    /// loads and renders unchanged.
+    pub toning_amount: f32,
     /// Local luminance noise reduction, 0..=100 → `crs:LocalLuminanceNoise`.
     /// For "this region is noisy" requests; smooths only inside the mask.
     pub noise_reduction: f32,
@@ -2237,6 +2251,8 @@ impl Default for LocalAdjustment {
             hue: 0.0,
             temperature: 0.0,
             tint: 0.0,
+            toning_hue: 0.0,
+            toning_amount: 0.0,
             noise_reduction: 0.0,
             main_curve: Vec::new(),
             red_curve: Vec::new(),
@@ -4131,6 +4147,11 @@ impl EditRecipe {
                 *v = c(*v, -100.0, 100.0);
             }
             m.noise_reduction = c(m.noise_reduction, 0.0, 100.0);
+            m.toning_amount = c(m.toning_amount, 0.0, 100.0);
+            // The tint's hue CLAMPS to the 0..=360 band the advisor registry
+            // states for it, like every other local slider — a wrap (the
+            // colour-grade wheels' rule) would make that stated band a lie.
+            m.toning_hue = c(m.toning_hue, 0.0, 360.0);
             // The four local point curves (R25 P6) take the GLOBAL curves'
             // own cap, spelled once above: each is cloned and sorted per
             // render exactly like `tone_curve`, and 64 masks × 4 curves is
@@ -6191,6 +6212,26 @@ mod tests {
         assert_eq!(recipe.lens_distortion, -100.0);
     }
 
+    /// The mask Color tint is two plain numbers on disk: they survive a JSON
+    /// round trip exactly, the amount clamps to its 0..=100 band like every
+    /// other local slider, and the hue to its stated 0..=360 band.
+    #[test]
+    fn the_mask_tint_round_trips_and_clamps_to_its_bands() {
+        let mut r = EditRecipe::default();
+        r.masks.push(LocalAdjustment { toning_hue: 231.0, toning_amount: 73.0, ..Default::default() });
+        let back: EditRecipe = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!((back.masks[0].toning_hue, back.masks[0].toning_amount), (231.0, 73.0));
+        let mut wild = back.clone();
+        wild.masks[0].toning_hue = 370.0;
+        wild.masks[0].toning_amount = 140.0;
+        wild.clamp();
+        assert_eq!((wild.masks[0].toning_hue, wild.masks[0].toning_amount), (360.0, 100.0));
+        wild.masks[0].toning_hue = f32::NAN;
+        wild.masks[0].toning_amount = -5.0;
+        wild.clamp();
+        assert_eq!((wild.masks[0].toning_hue, wild.masks[0].toning_amount), (0.0, 0.0));
+    }
+
     /// R23-1b, the T4 schema-change policy in one test: what the two new
     /// `LocalAdjustment` fields do and do NOT change on disk.
     ///
@@ -6221,6 +6262,8 @@ mod tests {
         assert_eq!(back.masks[0].hue, 0.0);
         assert_eq!(back.masks[0].sharpness, 0.0);
         assert_eq!(back.masks[0].exposure_ev, -0.4, "…with its own values intact");
+        // The mask Color tint arrived later on the same policy: absent = no tint.
+        assert_eq!((back.masks[0].toning_hue, back.masks[0].toning_amount), (0.0, 0.0));
 
         // A maskless recipe's bytes cannot have moved: the new fields live on
         // `LocalAdjustment`, which such a recipe never serializes.

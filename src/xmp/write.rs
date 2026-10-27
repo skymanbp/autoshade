@@ -63,7 +63,11 @@ pub(super) fn written_name(i: usize, m: &LocalAdjustment) -> String {
 /// exposure stops ÷4, every other slider ÷100 (verified against the user's real
 /// sidecar; see docs/V2_PLAN.md §2a). All 26 `Local*` fields are emitted (the
 /// ones this engine has no model for as 0) as Lightroom expects the full block
-/// — `LocalHue` and `LocalSharpness` joined the carried set in R23-1b.
+/// — `LocalHue` and `LocalSharpness` joined the carried set in R23-1b, and
+/// `LocalToningHue` / `LocalToningSaturation` (the mask Color tint) in v1.17.0
+/// when the engine learned to render it. Two keys break the ÷100 rule:
+/// `LocalHue` is ÷180 (measured, see below) and `LocalToningHue` is written
+/// in degrees as stored, the way Lightroom writes it.
 pub(super) fn masks_xml(r: &EditRecipe, frame: Option<FrameAspect>) -> (String, Vec<MaskLoss>) {
     let mut losses: Vec<MaskLoss> = Vec::new();
     if r.masks.is_empty() {
@@ -251,7 +255,7 @@ crs:MaskBlendMode=\"{}\" crs:MaskInverted=\"{}\" crs:MaskSyncID=\"{seed}\" crs:M
        crs:CorrectionName=\"{name}\" crs:CorrectionSyncID=\"{corr_id}\"\n\
        crs:LocalExposure=\"0\" crs:LocalHue=\"{hue}\" crs:LocalSaturation=\"{sat}\"\n\
        crs:LocalContrast=\"0\" crs:LocalClarity=\"0\" crs:LocalSharpness=\"{sharp}\"\n\
-       crs:LocalBrightness=\"0\" crs:LocalToningHue=\"0\" crs:LocalToningSaturation=\"0\"\n\
+       crs:LocalBrightness=\"0\" crs:LocalToningHue=\"{thue}\" crs:LocalToningSaturation=\"{tsat}\"\n\
        crs:LocalExposure2012=\"{exp}\" crs:LocalContrast2012=\"{con}\"\n\
        crs:LocalHighlights2012=\"{hi}\" crs:LocalShadows2012=\"{sh}\"\n\
        crs:LocalWhites2012=\"{wh}\" crs:LocalBlacks2012=\"{bl}\"\n\
@@ -289,6 +293,10 @@ crs:MaskBlendMode=\"{}\" crs:MaskInverted=\"{}\" crs:MaskSyncID=\"{seed}\" crs:M
             // in both directions and neither number rests on a family pattern.
             hue = local_fmt(m.hue / 180.0),
             sharp = local_fmt(m.sharpness / 100.0),
+            // The Color swatch: the hue in degrees as Lightroom writes it,
+            // the strength /100 like every other 0..1 local key.
+            thue = local_fmt(m.toning_hue),
+            tsat = local_fmt(m.toning_amount / 100.0),
             exp = local_fmt(m.exposure_ev / 4.0),
             con = local_fmt(m.contrast / 100.0),
             hi = local_fmt(m.highlights / 100.0),
