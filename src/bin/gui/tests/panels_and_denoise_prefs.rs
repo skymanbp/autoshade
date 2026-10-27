@@ -21,20 +21,22 @@
             }
             shapes.iter().for_each(|c| walk(&c.shape, out));
         }
-        for (lang, group, recolour, hint, new_sliders) in [
+        for (lang, group, recolour, hint, new_sliders, tint_shift) in [
             (
                 crate::i18n::Lang::En,
                 "Tone",
                 "carries reverse-fit recolour (not exported to XMP)",
                 "Select a mask above to edit its adjustments",
-                ["Sharpness", "Hue shift"],
+                ["Sharpness", "Hue shift", "Color tint", "Color tint hue"],
+                "Tint shift",
             ),
             (
                 crate::i18n::Lang::Zh,
                 "明暗",
                 "含反推重上色（不写入 XMP）",
                 "选中上面任一蒙版即可编辑它的调整",
-                ["局部锐化", "色相旋转"],
+                ["局部锐化", "色相旋转", "颜色染色", "颜色染色色相"],
+                "色调偏移",
             ),
         ] {
             let ctx = egui::Context::default();
@@ -99,6 +101,14 @@
                     "{lang:?}: the mask panel has no {label:?} slider: {seen:?}"
                 );
             }
+            // The mask Color tint sits in the mask's colour group, after
+            // Temp / Tint (the render applies it last), amount then hue.
+            let at = |label: &str| seen.iter().position(|t| t == label);
+            let (shift, tint, tint_hue) = (at(tint_shift), at(new_sliders[2]), at(new_sliders[3]));
+            assert!(
+                shift.is_some() && shift < tint && tint < tint_hue,
+                "{lang:?}: the Color tint pair must follow {tint_shift:?} in the colour group: {seen:?}"
+            );
             // ② nothing selected (one click on the selected row): the hint.
             app.sel_mask = None;
             let seen = frame(&mut app);

@@ -3110,6 +3110,31 @@ impl AutoShadeApp {
                     0.0,
                     tr(lang, "A RELATIVE green/magenta shift (±100) inside the mask — positive goes magenta. Unlike the global 「Tint」 it is not solved against the photo's as-shot tint."),
                 );
+                // Lightroom's mask "Color" swatch (`crs:LocalToningSaturation`
+                // / `LocalToningHue`), as its two numbers: how strongly, then
+                // toward which hue. Last in the group because the render
+                // applies it last (`render::apply_masks`); engine-rendered and
+                // carried by the sidecar, and the hue does nothing at 0.
+                changed |= Self::slider_hinted(
+                    ui,
+                    lang,
+                    tr(lang, "Color tint"),
+                    &mut m.toning_amount,
+                    0.0,
+                    100.0,
+                    0.0,
+                    tr(lang, "Lightroom's mask Color swatch: shifts every colour inside the mask, neutral and coloured alike, toward 「Color tint hue」 — most in the midtones, never brighter or darker. Unlike 「Hue shift」, which turns colours by an angle."),
+                );
+                changed |= Self::slider_hinted(
+                    ui,
+                    lang,
+                    tr(lang, "Color tint hue"),
+                    &mut m.toning_hue,
+                    0.0,
+                    360.0,
+                    0.0,
+                    tr(lang, "The hue (0–360°) 「Color tint」 pushes toward, on Lightroom's own wheel. Does nothing until 「Color tint」 is above 0."),
+                );
                 // Reverse-fit recolour gains: per-channel linear gains no
                 // classic-ACR key can express (recipe.rs `color_gains`), so
                 // they render in-app and vanish from the sidecar. Not a
