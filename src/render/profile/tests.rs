@@ -2,6 +2,11 @@ use super::*;
 use crate::dcp::{Profile, Table};
 
 /// A profile carrying exactly what a test asks for and nothing else.
+///
+/// Its tone curve is a stated IDENTITY rather than absent: a profile with no
+/// curve renders through Adobe's default one, and these tests isolate the
+/// tables, the gain and the reference space from it. The tests about the
+/// default curve take the curve away explicitly.
 fn bare() -> Profile {
     Profile {
         name: "Test".into(),
@@ -11,7 +16,7 @@ fn bare() -> Profile {
         forward_matrix: [None, None],
         hue_sat_map: [None, None],
         look_table: None,
-        tone_curve: Vec::new(),
+        tone_curve: vec![[0.0, 0.0], [1.0, 1.0]],
         baseline_exposure_offset: 0.0,
         has_third_illuminant: false,
     }
@@ -25,24 +30,29 @@ fn flat(delta: [f32; 3]) -> Table {
 const SPACE: crate::render::ExportColorSpace = crate::render::ExportColorSpace::Srgb;
 
 /// A profile with nothing to say builds NOTHING, so a photograph developed
-/// through a matrix-only profile costs no arithmetic and moves no pixel.
+/// through it costs no arithmetic and moves no pixel.
 ///
-/// This is the invariant the whole stage rests on: the F7 batch must not change
-/// a single existing render, and it cannot if the stage refuses to exist
-/// wherever there is no table, no curve and no exposure offset.
+/// "Nothing to say" is no table, a STATED straight curve and a total exposure
+/// of 0 EV. A profile with no curve at all is not that profile: it renders
+/// through Adobe's default curve
+/// ([`a_profile_without_a_curve_renders_adobes_default_curve`]).
 ///
 /// MUTATION: return `Some` unconditionally from `Stage::build`.
 #[test]
-fn a_profile_with_no_tables_and_no_curve_is_not_a_stage() {
-    assert!(Stage::build(&bare(), SPACE, Some(5500.0)).is_none(), "nothing to apply");
+fn a_profile_with_no_tables_a_straight_curve_and_no_gain_is_not_a_stage() {
+    assert!(Stage::build(&bare(), SPACE, Some(5500.0), 0.0).is_none(), "nothing to apply");
+    // A body baseline that the profile's offset cancels is no gain either.
+    let mut cancelled = bare();
+    cancelled.baseline_exposure_offset = -0.35;
+    assert!(Stage::build(&cancelled, SPACE, Some(5500.0), 0.35).is_none(), "0 EV in total");
     // An identity tone curve is nothing to apply either — a profile stating
     // `0,0 … 1,1` is stating that it does not touch the tone.
     let mut p = bare();
     p.tone_curve = vec![[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]];
-    assert!(Stage::build(&p, SPACE, Some(5500.0)).is_none(), "an identity curve is not a curve");
+    assert!(Stage::build(&p, SPACE, Some(5500.0), 0.0).is_none(), "an identity curve is not a curve");
     // …but a real one is.
     p.tone_curve = vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]];
-    assert!(Stage::build(&p, SPACE, Some(5500.0)).is_some(), "a real curve builds a stage");
+    assert!(Stage::build(&p, SPACE, Some(5500.0), 0.0).is_some(), "a real curve builds a stage");
 }
 
 /// The reference round trip is EXACT when no table acts, so the two matrices
@@ -65,7 +75,7 @@ fn the_reference_round_trip_returns_the_colour_it_was_given() {
     // but convert to the reference space and back.
     p.baseline_exposure_offset = 0.0;
     p.hue_sat_map[0] = Some(flat([0.0, 1.0, 1.0]));
-    let s = Stage::build(&p, SPACE, Some(5500.0)).expect("a table makes a stage");
+    let s = Stage::build(&p, SPACE, Some(5500.0), 0.0).expect("a table makes a stage");
     for px in [[0.2f32, 0.5, 0.8], [1.0, 1.0, 1.0], [0.04, 0.04, 0.04], [0.9, 0.1, 0.3]] {
         let mut got = px;
         s.apply(&mut got);
@@ -87,7 +97,7 @@ fn the_reference_round_trip_returns_the_colour_it_was_given() {
 fn the_baseline_exposure_offset_is_measured_in_stops() {
     let mut p = bare();
     p.baseline_exposure_offset = -1.0;
-    let s = Stage::build(&p, SPACE, None).expect("an offset alone makes a stage");
+    let s = Stage::build(&p, SPACE, None, 0.0).expect("an offset alone makes a stage");
     let mut px = [0.4f32, 0.4, 0.4];
     s.apply(&mut px);
     for c in px {
@@ -104,7 +114,7 @@ fn the_baseline_exposure_offset_is_measured_in_stops() {
 fn a_saturation_scale_of_zero_renders_the_frame_grey() {
     let mut p = bare();
     p.look_table = Some(flat([0.0, 0.0, 1.0]));
-    let s = Stage::build(&p, SPACE, None).expect("a look table makes a stage");
+    let s = Stage::build(&p, SPACE, None, 0.0).expect("a look table makes a stage");
     let mut px = [0.8f32, 0.2, 0.1];
     s.apply(&mut px);
     let (hi, lo) = (px[0].max(px[1]).max(px[2]), px[0].min(px[1]).min(px[2]));
@@ -124,7 +134,7 @@ fn a_saturation_scale_of_zero_renders_the_frame_grey() {
 fn a_hue_shift_turns_the_colour_by_that_many_degrees() {
     let mut p = bare();
     p.look_table = Some(flat([120.0, 1.0, 1.0]));
-    let s = Stage::build(&p, SPACE, None).expect("stage");
+    let s = Stage::build(&p, SPACE, None, 0.0).expect("stage");
     // Pure red in the reference space, turned by 120°, has to come back green:
     // whatever the working space, the GREEN channel must end up the largest.
     let mut px = [0.6f32, 0.05, 0.05];
@@ -260,7 +270,7 @@ fn the_tone_lookup_refuses_a_curve_it_cannot_read() {
     p.baseline_exposure_offset = 0.0;
     p.tone_curve = vec![[0.0, 0.0], [1.0, 1.0]];
     assert!(
-        Stage::build(&p, SPACE, Some(5500.0)).is_none(),
+        Stage::build(&p, SPACE, Some(5500.0), 0.0).is_none(),
         "an identity curve is the whole profile here, so there is nothing to apply"
     );
 }
@@ -296,4 +306,88 @@ fn the_tone_lookup_passes_white_through_and_starts_where_the_curve_does() {
     let lifted: Vec<f32> = (0..n).map(|i| 0.1 + 0.9 * i as f32 / (n - 1) as f32).collect();
     assert_eq!(sample(&lifted, 0.0), 0.1, "the curve at 0 is its first sample");
     assert_eq!(sample(&lifted, -0.5), 0.1, "…and below 0 the same, not a sign times a clamp");
+}
+
+/// A profile that states no tone curve renders through Adobe's default one —
+/// the DNG SDK's `dng_tone_curve_acr3_default`, which `dng_render` starts from
+/// and replaces only with a profile's own valid curve.
+///
+/// The two numbers are the SDK table's own: kTable at 0.5 is 0.80486, and at
+/// 0.18 (between samples 184 and 185) it is 0.3881.
+///
+/// MUTATION: render a curve-less profile through the identity, or resample the
+/// table onto a different grid without interpolating.
+#[test]
+fn a_profile_without_a_curve_renders_adobes_default_curve() {
+    assert_eq!(acr3_default::ACR3_DEFAULT.len(), 1025, "the SDK's 1025 samples");
+    assert_eq!(acr3_default::ACR3_DEFAULT[0], 0.0);
+    assert_eq!(acr3_default::ACR3_DEFAULT[1024], 1.0);
+    assert!(acr3_default::ACR3_DEFAULT.windows(2).all(|w| w[1] >= w[0]), "monotone");
+    let mut p = bare();
+    p.tone_curve = Vec::new();
+    let s = Stage::build(&p, SPACE, None, 0.0).expect("the default curve is something to apply");
+    for (x, want) in [(0.5f32, 0.80486f32), (0.18, 0.3881)] {
+        let mut grey = [x; 3];
+        s.apply(&mut grey);
+        for c in grey {
+            assert!((c - want).abs() < 1e-3, "grey {x} through the default curve: {grey:?}");
+        }
+    }
+    // A curve the profile states but this reader cannot use is, to the SDK, not
+    // a valid curve either — the default renders.
+    p.tone_curve = vec![[0.5, 0.7]];
+    let s = Stage::build(&p, SPACE, None, 0.0).expect("an unusable curve is no curve");
+    let mut grey = [0.5f32; 3];
+    s.apply(&mut grey);
+    assert!((grey[0] - 0.80486).abs() < 1e-3, "{grey:?}");
+}
+
+/// A profile that states its OWN curve renders through that curve, not the
+/// default one, exactly as before.
+///
+/// MUTATION: compose the default curve under the profile's own.
+#[test]
+fn a_profile_with_its_own_curve_keeps_it() {
+    let mut p = bare();
+    p.tone_curve = vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]];
+    let s = Stage::build(&p, SPACE, None, 0.0).expect("a real curve");
+    let mut grey = [0.5f32; 3];
+    s.apply(&mut grey);
+    assert!(grey.iter().all(|c| (c - 0.62).abs() < 2e-3), "its own curve at its knot: {grey:?}");
+}
+
+/// The stage's gain is the body's baseline exposure PLUS the profile's offset,
+/// in stops — Adobe's `TotalBaselineExposure`.
+///
+/// MUTATION: ignore the baseline argument, or subtract it.
+#[test]
+fn the_gain_composes_the_bodys_baseline_with_the_profiles_offset() {
+    let mut p = bare();
+    p.baseline_exposure_offset = -1.0;
+    let s = Stage::build(&p, SPACE, None, 0.5).expect("−0.5 EV in total");
+    let mut px = [0.4f32; 3];
+    s.apply(&mut px);
+    let want = 0.4 * 2f32.powf(-0.5);
+    assert!(px.iter().all(|c| (c - want).abs() < 1e-3), "−1 + 0.5 = −0.5 EV: {px:?}");
+    p.baseline_exposure_offset = 0.0;
+    let s = Stage::build(&p, SPACE, None, 1.0).expect("+1 EV");
+    let mut px = [0.3f32; 3];
+    s.apply(&mut px);
+    assert!(px.iter().all(|c| (c - 0.6).abs() < 1e-3), "+1 EV doubles: {px:?}");
+}
+
+/// Light the gain lifts past white is clipped there, before the look table
+/// and the curve — the DNG SDK's exposure ramp (`dng_function_exposure_ramp::
+/// Evaluate`, `Min ((x − black)·slope, 1)`), applied per channel.
+///
+/// MUTATION: carry the lifted value into the curve (the chord past 1 would
+/// return 1.6 here).
+#[test]
+fn light_lifted_past_white_clips_where_the_sdks_exposure_ramp_does() {
+    let mut p = bare();
+    p.baseline_exposure_offset = 0.0;
+    let s = Stage::build(&p, SPACE, None, 1.0).expect("+1 EV");
+    let mut px = [0.8f32; 3];
+    s.apply(&mut px);
+    assert!(px.iter().all(|c| (c - 1.0).abs() < 1e-3), "0.8 · 2 clips at white: {px:?}");
 }

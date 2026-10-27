@@ -322,6 +322,16 @@ RGB → baseline-exposure gain → HSV → `LookTable` → RGB → tone curve, w
 the order RawTherapee's `rtengine/dcp.cc` documents. Nothing Adobe ships is
 bundled; a machine with no profiles gets a named refusal.
 
+- Default tone curve (v1.17.0): a profile with no `ProfileToneCurve` renders
+  through Adobe's default curve, the 1025-sample `kTable` of
+  `dng_tone_curve_acr3_default::Evaluate` in the Adobe DNG SDK's
+  `dng_render.cpp`, © 2006–2007 Adobe Systems Incorporated, used under the DNG
+  SDK licence (which permits use, modification and distribution). Embedded in
+  `render/profile/acr3_default.rs`; RawTherapee's
+  `adobe_camera_raw_default_curve` is the same table to the last digit. The
+  stage's gain adds the body's `BaselineExposure`, inferred from the body's
+  camera-matching profiles (`dcp::baseline_exposure`).
+
 - Table entry: `(hue shift in degrees, saturation scale, value scale)`, stored
   `index = (val * hueDivisions + hue) * satDivisions + sat` (**measured** — at
   saturation index 0 the saturation scale is exactly 1.0 on 60 of the 60

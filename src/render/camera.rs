@@ -353,7 +353,13 @@ pub(super) fn resolve_camera_profile(
         }
     };
     let kelvin = wb_to_kelvin_tint(&matrix, normalise_wb(rawimage.wb_coeffs)).map(|(k, _)| k);
-    let stage = profile::Stage::build(&prof, space, kelvin);
+    // Adobe's baseline exposure for the body, which its renderer adds to the
+    // profile's own offset. Disclosed either way: inferred, it is a number
+    // this engine did not read from the photograph; unknown, it is why the
+    // render may sit darker than Lightroom's.
+    let baseline = crate::dcp::baseline_exposure(make, model);
+    diag.warn(baseline_disclosure(make, model, &baseline));
+    let stage = profile::Stage::build(&prof, space, kelvin, baseline.ev());
     if stage.is_none() {
         diag.warn(format!(
             "camera profile \"{name}\" ({}) carries no table or curve this engine renders",
@@ -361,4 +367,22 @@ pub(super) fn resolve_camera_profile(
         ));
     }
     stage
+}
+
+/// The one line a profiled render says about the body's baseline exposure.
+pub(super) fn baseline_disclosure(make: &str, model: &str, b: &crate::dcp::Baseline) -> String {
+    let body = if model.to_ascii_lowercase().starts_with(&make.to_ascii_lowercase()) {
+        model.to_string()
+    } else {
+        format!("{make} {model}")
+    };
+    match b {
+        crate::dcp::Baseline::Inferred { ev, .. } => format!(
+            "Adobe's baseline exposure for {body}: {ev:+.2} EV (inferred from its camera profiles)"
+        ),
+        crate::dcp::Baseline::NoCameraProfiles | crate::dcp::Baseline::Disagree { .. } => format!(
+            "Adobe's baseline exposure for {body} is unknown: rendering 0 EV — a \
+             Lightroom-written DNG of this body carries it as BaselineExposure"
+        ),
+    }
 }

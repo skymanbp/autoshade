@@ -259,6 +259,25 @@ pub(crate) fn limit_tone_sliders(ev: f32, s: [f32; 5]) -> [f32; 5] {
     std::array::from_fn(|k| s[k] * lam[k] * lambda)
 }
 
+/// The recipe the tone stage reads, given whether a camera profile stage is
+/// rendering this photograph (v1.17.0) — exactly ONE starting tone.
+///
+/// Lightroom's order is profile → the Look's baked curve → the sliders. When
+/// the sidecar's camera profile renders ([`super::camera::resolve_camera_profile`]
+/// returned a stage), the profile's tone — its own curve, or Adobe's default
+/// one — IS the start, so the camera-matched `base_curve` the app stamps on
+/// open must not also apply: two renditions of one intent in series. The
+/// Look's baked curve still composes on top, as before. Without a profile
+/// stage the recipe is returned untouched, so a fresh open of a RAW renders
+/// exactly as it did.
+pub(crate) fn one_starting_tone(r: &EditRecipe, profiled: bool) -> std::borrow::Cow<'_, EditRecipe> {
+    if profiled && !r.base_curve.is_empty() {
+        std::borrow::Cow::Owned(EditRecipe { base_curve: Vec::new(), ..r.clone() })
+    } else {
+        std::borrow::Cow::Borrowed(r)
+    }
+}
+
 /// Build the develop tone curve as a [`LUT_N`]-entry LUT over input gamma [0,1].
 ///
 /// It is an 8-knot control-point curve fit by a MONOTONE cubic Hermite spline

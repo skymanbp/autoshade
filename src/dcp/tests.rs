@@ -403,3 +403,92 @@ fn the_installed_pool_answers_or_says_why_not() {
         ),
     }
 }
+
+// --- the body's baseline exposure ------------------------------------------
+
+/// A scratch pool of this test's own: `(relative path, offset)` profiles under
+/// one root, returned as the file list the index would hold.
+fn pool(tag: &str, files: &[(&str, f32)]) -> Vec<PathBuf> {
+    let root = std::env::temp_dir().join(format!("autoshade-dcp-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    files
+        .iter()
+        .map(|(rel, offset)| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().expect("parent")).expect("scratch dir");
+            let bytes = build(&[
+                (tag::PROFILE_NAME, 2, ascii("Camera Test")),
+                (tag::BASELINE_EXPOSURE_OFFSET, 10, srational(&[*offset])),
+            ]);
+            std::fs::write(&p, bytes).expect("scratch profile");
+            p
+        })
+        .collect()
+}
+
+/// The body's baseline is the negation of what its camera-matching profiles
+/// agree on — and only ITS profiles vote: the Adobe Standard file sitting
+/// outside `Camera/` and the neighbouring body whose name contains this one's
+/// are not counted.
+///
+/// MUTATION: drop the negation, match the folder by substring, or count files
+/// outside `Camera/`.
+#[test]
+fn the_baseline_is_inferred_from_the_bodys_own_camera_profiles() {
+    let files = pool(
+        "infer",
+        &[
+            ("Camera/Sony TEST-1/Sony TEST-1 Camera Vivid.dcp", -0.35),
+            ("Camera/Sony TEST-1/Sony TEST-1 Camera Neutral.dcp", -0.35),
+            ("Camera/Sony TEST-1A/Sony TEST-1A Camera Vivid.dcp", -0.9),
+            ("Adobe Standard/Sony TEST-1 Adobe Standard.dcp", 0.0),
+        ],
+    );
+    match baseline_from(&files, "SONY", "TEST-1") {
+        Baseline::Inferred { ev, profiles } => {
+            near("baseline", ev, 0.35, 1e-4);
+            assert_eq!(profiles, 2, "only the body's own folder votes");
+        }
+        other => panic!("two agreeing camera profiles must infer the baseline, got {other:?}"),
+    }
+    near("the neighbour's own", baseline_from(&files, "Sony", "TEST-1A").ev(), 0.9, 1e-4);
+}
+
+/// Camera profiles that disagree by more than 0.01 EV name no baseline, and
+/// the render then takes 0 EV.
+///
+/// MUTATION: average the disagreeing offsets, or widen the tolerance.
+#[test]
+fn camera_profiles_that_disagree_infer_nothing() {
+    let files = pool(
+        "disagree",
+        &[
+            ("Camera/Sony TEST-2/Sony TEST-2 Camera Vivid.dcp", -0.35),
+            ("Camera/Sony TEST-2/Sony TEST-2 Camera Neutral.dcp", -0.5),
+        ],
+    );
+    let b = baseline_from(&files, "SONY", "TEST-2");
+    assert!(matches!(b, Baseline::Disagree { .. }), "{b:?}");
+    assert_eq!(b.ev(), 0.0, "unknown renders at 0 EV");
+    // …and agreement inside the tolerance is agreement.
+    let close = pool(
+        "close",
+        &[
+            ("Camera/Sony TEST-3/Sony TEST-3 Camera Vivid.dcp", -0.35),
+            ("Camera/Sony TEST-3/Sony TEST-3 Camera Neutral.dcp", -0.355),
+        ],
+    );
+    assert!(matches!(baseline_from(&close, "SONY", "TEST-3"), Baseline::Inferred { .. }));
+}
+
+/// A body with no camera-matching profile installed has no baseline to read.
+///
+/// MUTATION: answer `Inferred { ev: 0 }` for an empty set.
+#[test]
+fn a_body_without_camera_profiles_has_no_baseline() {
+    let files = pool("none", &[("Adobe Standard/Sony TEST-4 Adobe Standard.dcp", 0.0)]);
+    let b = baseline_from(&files, "SONY", "TEST-4");
+    assert_eq!(b, Baseline::NoCameraProfiles);
+    assert_eq!(b.ev(), 0.0);
+    assert_eq!(baseline_from(&[], "SONY", "TEST-4"), Baseline::NoCameraProfiles);
+}

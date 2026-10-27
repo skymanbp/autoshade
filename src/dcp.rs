@@ -538,5 +538,86 @@ pub fn find(make: &str, model: &str, profile_name: &str) -> Result<(PathBuf, Pro
     Err(last)
 }
 
+/// Adobe's `BaselineExposure` for a body, as far as the installed pool can say.
+///
+/// Adobe states this number per body in every DNG Lightroom writes, and its
+/// renderer adds it to the profile's `BaselineExposureOffset` before anything
+/// else touches the tone (DNG SDK `dng_render.cpp`, `TotalBaselineExposure`).
+/// A RAW from the camera does not carry it, so it is read where Adobe left it
+/// in reach: the CAMERA-MATCHING profiles (`Camera/<make model>/*.dcp`) are
+/// authored to cancel the body's baseline and bring their own curve, so their
+/// offset is its negation — measured on the 7RM4A pool: −0.35 EV on 9 of 9,
+/// against BaselineExposure +0.35 EV in three Lightroom-written DNGs of the
+/// body.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Baseline {
+    /// Every camera-matching profile of the body agrees: `ev` stops, from
+    /// `profiles` files.
+    Inferred { ev: f32, profiles: usize },
+    /// No camera-matching profile of this body is installed.
+    NoCameraProfiles,
+    /// They are installed and disagree by more than 0.01 EV, so none of them
+    /// is the body's number. `lo`/`hi` are the baselines they would imply.
+    Disagree { lo: f32, hi: f32 },
+}
+
+impl Baseline {
+    /// The exposure to render at: the inferred value, or 0 EV when unknown.
+    pub fn ev(&self) -> f32 {
+        match self {
+            Self::Inferred { ev, .. } => *ev,
+            Self::NoCameraProfiles | Self::Disagree { .. } => 0.0,
+        }
+    }
+}
+
+/// [`Baseline`] for this body, from the installed pool.
+pub fn baseline_exposure(make: &str, model: &str) -> Baseline {
+    baseline_from(index(), make, model)
+}
+
+/// [`baseline_exposure`] over an explicit file list.
+///
+/// A file counts when its FOLDER is the body — `Camera/<make model>/` — and
+/// not when its name merely contains the model: the pool holds both
+/// `Sony ILCE-7RM4/` and `Sony ILCE-7RM4A/`, and a substring test would let one
+/// body's profiles vote on the other's baseline.
+fn baseline_from(files: &[PathBuf], make: &str, model: &str) -> Baseline {
+    let model_f = fold(model);
+    if model_f.is_empty() {
+        return Baseline::NoCameraProfiles;
+    }
+    // The make is already a prefix of the model on the bodies that repeat it.
+    let body = if model_f.starts_with(&fold(make)) {
+        model_f.clone()
+    } else {
+        format!("{} {model_f}", fold(make))
+    };
+    let name = |p: Option<&std::path::Path>| {
+        p.and_then(|d| d.file_name()).and_then(|s| s.to_str()).map(fold)
+    };
+    let offsets: Vec<f32> = files
+        .iter()
+        .filter(|p| {
+            let dir = p.parent();
+            name(dir).as_deref() == Some(body.as_str())
+                && name(dir.and_then(|d| d.parent())).as_deref() == Some("camera")
+        })
+        .filter_map(|p| std::fs::read(p).ok())
+        .filter_map(|b| parse(&b).ok())
+        .map(|prof| prof.baseline_exposure_offset)
+        .collect();
+    let (Some(lo), Some(hi)) =
+        (offsets.iter().copied().reduce(f32::min), offsets.iter().copied().reduce(f32::max))
+    else {
+        return Baseline::NoCameraProfiles;
+    };
+    if hi - lo > 0.01 {
+        return Baseline::Disagree { lo: -hi, hi: -lo };
+    }
+    let mean = offsets.iter().sum::<f32>() / offsets.len() as f32;
+    Baseline::Inferred { ev: -mean, profiles: offsets.len() }
+}
+
 #[cfg(test)]
 mod tests;

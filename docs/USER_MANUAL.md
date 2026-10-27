@@ -941,7 +941,12 @@ sources get recipe JSON but no RAW XMP. `apply` also takes a Lightroom `.xmp`
 sidecar in place of the recipe, and since v1.16.0 it stamps the camera's lens
 profile from the sidecar's own lens switch exactly as the desktop app does when
 it opens the photo beside that sidecar, so one sidecar renders one geometry on
-both surfaces. `auto` is `analyze` plus render.
+both surfaces. Since v1.17.0 a sidecar renders from where Lightroom starts:
+Adobe's baseline exposure for the body (inferred from the camera profiles
+Adobe installed for it, and said in one line) and, for a profile that states no
+tone curve of its own, such as Adobe Standard, Adobe's default curve. What
+still differs is the creative profile's colour table and Adobe's colour matrix.
+`auto` is `analyze` plus render.
 `batch` analyzes RAWs by default, skips baked photos unless `--include-baked`
 is set (avoiding duplicate analysis and billing for RAW+JPEG pairs), and
 defaults to three photos in flight; `--long-edge` on `batch` requires
