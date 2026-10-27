@@ -682,7 +682,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // the 「颜色」 group caption it sits under.
     ("Color tint", "颜色染色"),
     ("Lightroom's mask Color swatch: shifts every colour inside the mask, neutral and coloured alike, toward 「Color tint hue」 — most in the midtones, never brighter or darker. Unlike 「Hue shift」, which turns colours by an angle.",
-        "Lightroom 蒙版的「颜色」色板：把蒙版内的每种颜色（中性色和有色一样）朝「颜色染色色相」推过去——中间调推得最多，不会变亮也不会变暗。不同于「色相旋转」：那个是把颜色转一个角度。"),
+        "Lightroom 蒙版的「颜色」色板：把蒙版内的每种颜色（中性色和有色一样）推向「颜色染色色相」——中间调推得最多，不会变亮也不会变暗。不同于「色相旋转」：那个是把颜色转一个角度。"),
     ("Color tint hue", "颜色染色色相"),
     ("The hue (0–360°) 「Color tint」 pushes toward, on Lightroom's own wheel. Does nothing until 「Color tint」 is above 0.",
         "「颜色染色」推向的色相（0–360°），用 Lightroom 自己的色环。「颜色染色」大于 0 之前不起作用。"),
@@ -2223,7 +2223,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" Zoned {label} tone controls shipped on REGION evidence: the pixel-scale reading withholds luma ranges [{luma_ranges}] because this region's texture was re-synthesised, so the move was rendered and put to the target's own 12x8 cell means over the zone — {converged} of the region moved closer, {diverged} moved away, and {aligned} moved in the direction its own target asks for.",
         " 分区 {label} 的影调控件按区域证据发布：像素尺度的读数因该区域纹理是重新合成的而暂不调整亮度范围 [{luma_ranges}]，于是把这次移动渲染出来，交由目标自身在该分区上的 12x8 单元均值裁定 —— 区域的 {converged} 更接近目标，{diverged} 反而远离，{aligned} 的移动方向与各自目标要求的方向一致。"),
     (" Zoned {label} tinted toward {hue}° at {amount}: read from {n} paired pixels, {neutral} of them neutral, clouds and sky alike — one shift of every pixel's chroma toward one hue, strongest in the midtones and leaving lightness alone, lands the zone's neutral and coloured pixels together, where per-channel gains solved from the zone's mean push the two apart. One-sided hue bands [{hue_bands}] did not veto it, because its hue and amount were read from the pairs on both sides of them; it passed the quality, acceptance and boundary gates like every colour move, and replaced the plain colour solve because it landed the zone closer pixel by pixel.",
-        " 分区 {label} 向 {hue}° 做颜色染色，强度 {amount}：由 {n} 个配对像素读出，其中 {neutral} 个是中性像素，云和天空一起读——把每个像素的色度朝同一色相推一次，中间调推得最多、明暗不动，让分区里中性与有色像素一起落到目标上，而按分区均值求出的分通道增益会把这两类像素推向两边。单侧色相段 [{hue_bands}] 没有否决它，因为它的色相和强度是从这些色段两侧的配对像素一起读出的；它和所有颜色调整一样通过了画质、验收与边界门，并因逐像素更接近目标而取代了普通的颜色求解。"),
+        " 分区 {label} 向 {hue}° 做颜色染色，强度 {amount}：由 {n} 个配对像素读出，其中 {neutral} 个是中性像素，云和天空一起读——把每个像素的色度向同一色相推一次，中间调推得最多、明暗不动，让分区里中性与有色像素一起落到目标上，而按分区均值求出的分通道增益会把这两类像素推向两边。单侧色相段 [{hue_bands}] 没有否决它，因为它的色相和强度是从这些色段两侧的配对像素一起读出的；它和所有颜色调整一样通过了画质、验收与边界门，并因逐像素更接近目标而取代了普通的颜色求解。"),
     (" Zoned {label} colour controls shipped on PAIRED evidence through one-sided hue bands [{hue_bands}]: this region's pixels are each other's counterparts, and each moved pixel was individually vouched (robust weight) and moved toward its own paired target pixel; unvouched pixels kept the veto.",
         " 分区 {label} 的色彩控件按配对证据发布，穿过单侧色相带 [{hue_bands}]：该区域的像素与目标像素逐一对应，每个被移动的像素都逐一获得担保（稳健权重），并向其自身的配对目标像素靠近；未获担保的像素维持否决。"),
     (" Zoned {label} tone was solved at CELL scale: this zone's own structural reading is {d}, past the {line} pairing line, so its pixels are not each other's counterparts — the tone came from the zone's own luma distribution rather than from a per-pixel regression, which reads a re-synthesised texture's contrast low.",
