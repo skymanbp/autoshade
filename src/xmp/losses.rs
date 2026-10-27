@@ -464,10 +464,14 @@ pub fn import_losses_for_photo(xmp: &str, photo: &std::path::Path) -> Vec<MaskIm
 /// where that distinction is recorded, and
 /// [`crate::pipeline::fresh_lens_profile_for_sidecar`] is what applies it.
 ///
-/// This does NOT touch what this engine renders. AutoShade's own geometry stage
-/// is driven by the photographer's `lens_profile` toggles, which are theirs to
-/// set; reading Lightroom's switch as an instruction would silently overwrite
-/// them from a file they may have imported only for its masks.
+/// It ALSO reaches what this engine renders, through that same function: the
+/// importers that build a recipe from a sidecar take its lens profile from
+/// `fresh_lens_profile_for_sidecar`, and a `"0"` there switches the profile's
+/// vignette, distortion and CA components off (`obey_disabled_profile_switch`),
+/// so the vignette stage (`render/develop.rs`) and the geometry stage
+/// (`render/geometry.rs`) draw no profile correction where Lightroom drew
+/// none. The manual Distortion/Vignette sliders and the manual CA pair are
+/// not the profile and stay as the file set them.
 ///
 /// Adobe writes `"0"` / `"1"`; `"False"` / `"True"` are accepted too because
 /// the surrounding boolean keys in the same namespace use that spelling and a
