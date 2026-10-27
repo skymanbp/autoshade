@@ -1087,3 +1087,48 @@ fn a_passthrough_value_is_never_called_unparsable() {
     );
     assert_eq!(r.passthrough.get("UprightVersion").map(String::as_str), Some("151388160"));
 }
+
+
+/// v1.17.0: a recipe that develops through a creative profile carries it to
+/// Lightroom. A FRESH document writes the Look Lightroom's way and reads back
+/// as the same Look; a merge into a base WITHOUT a Look adds it; a base WITH
+/// one keeps its own, once.
+///
+/// MUTATION: drop `look_elem` from the fresh document; append it in a merge
+/// whatever the base holds.
+#[test]
+fn a_creative_look_reaches_lightroom_from_a_fresh_document_and_a_lookless_merge() {
+    let look = crate::xmp::canvas_look();
+    assert_eq!(look.name, "Adobe Color");
+    assert_eq!(look.table, "E1095149FDB39D7A057BAB208837E2E1");
+    assert_eq!(look.tone_curve.len(), 7, "{:?}", look.tone_curve);
+    let r = EditRecipe {
+        camera_profile: "Adobe Standard".into(),
+        look: Some(look.clone()),
+        ..Default::default()
+    };
+    let doc = recipe_to_xmp(&r);
+    assert_eq!(doc.matches("<crs:Look>").count(), 1, "{doc}");
+    let back = xmp_to_recipe(&doc);
+    let got = back.look.as_ref().expect("the Look reads back");
+    assert_eq!((&got.name, got.amount, &got.base_profile, &got.table), (&look.name, look.amount, &look.base_profile, &look.table));
+    assert_eq!(got.tone_curve, look.tone_curve);
+    assert_eq!((&got.red_curve, &got.green_curve, &got.blue_curve), (&look.red_curve, &look.green_curve, &look.blue_curve));
+    assert_eq!(back.camera_profile, "Adobe Standard");
+    // A Lightroom base with no Look gains this one…
+    let bare = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+         xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+         <rdf:Description rdf:about=\"\" \
+         xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+         crs:ProcessVersion=\"15.4\" crs:Exposure2012=\"+0.50\"/>\
+         </rdf:RDF></x:xmpmeta>";
+    let merged = crate::xmp::merge_recipe_into_xmp(bare, &r).expect("merges").doc;
+    assert_eq!(merged.matches("<crs:Look>").count(), 1, "{merged}");
+    assert_eq!(xmp_to_recipe(&merged).look.map(|l| l.table), Some(look.table.clone()));
+    // …and one that has its own keeps it, verbatim and alone.
+    let merged = crate::xmp::merge_recipe_into_xmp(LOOK_DOC, &r).expect("merges").doc;
+    assert_eq!(merged.matches("<crs:Look>").count(), 1, "{merged}");
+    assert_eq!(xmp_to_recipe(&merged).look.map(|l| l.name), Some("Adobe Landscape".to_string()));
+    // No Look, no element.
+    assert!(!recipe_to_xmp(&EditRecipe::default()).contains("<crs:Look>"));
+}

@@ -1561,3 +1561,45 @@ fn calibration_a_flat_sidecar_renders_where_lightroom_starts() {
         assert!(warm_b.abs() <= 1.5, "warm Δb {warm_b:+.2} (bound ±1.5)");
     }
 }
+
+
+/// v1.17.0 step 2's contract, ahead of the canvas switch: the canvas start —
+/// 「Adobe Standard」 with the 「Adobe Color」 Look, [`crate::xmp::canvas_look`]
+/// — is the SAME recipe as an all-zero Lightroom sidecar that names Adobe
+/// Color, and renders the same pixels, byte for byte. Env-gated on the corpus
+/// (`p39.arw`); passes without it after saying so.
+///
+/// MUTATION: change any knot of `CANVAS_LOOK_XMP`'s curve, or its table id.
+#[test]
+fn a_fresh_canvas_renders_like_a_sidecar_that_names_adobe_color() {
+    let Some(dir) = crate::config::live_env_os("AUTOSHADE_FIT_CALIBRATION_DIR").map(std::path::PathBuf::from)
+    else {
+        crate::test_skipped("canvas start identity", "AUTOSHADE_FIT_CALIBRATION_DIR is unset");
+        return;
+    };
+    let raw = dir.join("p39.arw");
+    if !raw.is_file() {
+        crate::test_skipped("canvas start identity", "the corpus lacks its RAW");
+        return;
+    }
+    let xmp = format!(
+        r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+ crs:Version="18.4" crs:ProcessVersion="15.4" crs:CameraProfile="Adobe Standard" crs:HasSettings="True">
+{}
+</rdf:Description></rdf:RDF></x:xmpmeta>"#,
+        crate::xmp::CANVAS_LOOK_XMP
+    );
+    let sidecar = crate::xmp::xmp_to_recipe(&xmp);
+    let canvas = EditRecipe {
+        camera_profile: "Adobe Standard".into(),
+        look: Some(crate::xmp::canvas_look()),
+        ..Default::default()
+    };
+    assert_eq!(sidecar.look, canvas.look, "one Look");
+    assert_eq!(sidecar.camera_profile, canvas.camera_profile);
+    let a = render_to_image(&raw, &canvas, None, Some(600)).expect("canvas").to_rgb16();
+    let b = render_to_image(&raw, &sidecar, None, Some(600)).expect("sidecar").to_rgb16();
+    assert_eq!(a.dimensions(), b.dimensions());
+    assert!(a.as_raw() == b.as_raw(), "the canvas start and the sidecar render different pixels");
+}
