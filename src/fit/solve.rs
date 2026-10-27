@@ -111,7 +111,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     let s_base = render::develop_preview(&s_img, base);
     let sp = pixels_of(&s_base);
     let tp = pixels_of(&t_img);
-    let evidence = evidence_model_for(&sp, &tp, s_img.width(), s_img.height());
+    let evidence =
+        evidence_model_paired(&sp, &tp, presence_of(&t_img).as_deref(), s_img.width(), s_img.height());
     let err_before = look_err_with_evidence(&sp, &tp, &evidence);
     // The paired-CELL instrument, built once off the frozen evidence model and
     // the target raster: every admission below asks the SAME cells, so two

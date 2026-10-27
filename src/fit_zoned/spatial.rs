@@ -192,15 +192,18 @@ fn tile_evidence(
     // keeps the evidence that a replaced sky's identical luma bins withheld
     // frame-wide.
     let scoped = scoped_mask_evidence(target, evidence, &geometry);
+    // The tile's structure is read over the pixels it can pair: a corner
+    // tile of a target moved into the sensor frame holds part of the ring.
+    let paired = evidence.present_weights(&geometry);
     let divergence = fit::structure_divergence(
         &evidence.source_pixels[..n.min(evidence.source_pixels.len())],
         &target[..n],
         evidence.width,
         evidence.height,
-        &geometry,
+        &paired,
     );
     let entry = std::rc::Rc::new(TileEvidence {
-        pixels: geometry.iter().filter(|value| **value > 0.0).count(),
+        pixels: paired.iter().filter(|value| **value > 0.0).count(),
         scoped,
         divergence,
     });
@@ -628,6 +631,7 @@ pub(super) fn enforce_bitmap_boundary(
     input: BitmapBoundaryInput<'_>,
 ) -> Result<BitmapBoundaryAccepted, BitmapBoundaryRefusal> {
     let BitmapBoundaryInput { ruler, target_boundary, initial_px, frame_before, frame_tol } = input;
+    let presence = report.evidence.presence.clone();
     let measure = |rendered: &[[f32; 3]]| match ruler {
         BoundaryRuler::TransitionBand { weights, reference } => {
             // `initial_px` is this gate's k=1 candidate, so BOTH rulers read
@@ -640,6 +644,7 @@ pub(super) fn enforce_bitmap_boundary(
                 weights,
                 s_img.width(),
                 s_img.height(),
+                presence.as_deref(),
             )
         }
         BoundaryRuler::CrossBoundaryStep { geometry, reference } => {
@@ -651,6 +656,7 @@ pub(super) fn enforce_bitmap_boundary(
                 geometry,
                 s_img.width(),
                 s_img.height(),
+                presence.as_deref(),
             )
         }
     };
@@ -1231,7 +1237,7 @@ mod tests {
         );
         let read = |cov: &image::GrayImage| {
             let weights: Vec<f32> = cov.as_raw().iter().map(|v| *v as f32 / 255.0).collect();
-            crate::fit_zoned::boundary_step_toward(None, &reference, &rendered, &rendered, &weights, w, h).rim
+            crate::fit_zoned::boundary_step_toward(None, &reference, &rendered, &rendered, &weights, w, h, None).rim
         };
         let (on_stored, on_preview) = (read(&stored), read(&preview));
         assert!(on_preview > 0.1, "the preview-frame ruler reads the seam ({:.1} codes)", on_preview * 255.0);
@@ -2364,7 +2370,7 @@ mod tests {
         let candidate = render_at(EV);
         let geometry = mask_weights(&mask, EDGE, EDGE);
         let against = |target: Option<&[[f32; 3]]>| {
-            boundary_step_toward(target, &reference, &candidate, &candidate, &geometry, EDGE, EDGE)
+            boundary_step_toward(target, &reference, &candidate, &candidate, &geometry, EDGE, EDGE, None)
         };
         let none = against(None);
         assert!(

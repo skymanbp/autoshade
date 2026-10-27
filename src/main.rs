@@ -1229,7 +1229,14 @@ fn read_recipe_at(recipe_path: &Path, raw: &Path) -> Result<EditRecipe> {
     let text = autoshade::store::read_text_capped(recipe_path, autoshade::store::MAX_STORE_JSON)
         .with_context(|| format!("read recipe {}", recipe_path.display()))?;
     if recipe_path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xmp")) {
-        return Ok(autoshade::xmp::xmp_to_recipe_for_photo(&text, raw));
+        let mut r = autoshade::xmp::xmp_to_recipe_for_photo(&text, raw);
+        // The photograph's lens profile, read through the document's own
+        // switch — the stamp the desktop app makes when it opens this photo
+        // with this sidecar. Without it a `LensProfileEnable="1"` document
+        // rendered here in the uncorrected frame while the app and Lightroom
+        // rendered it corrected: one sidecar, two geometries.
+        r.lens_profile = pipeline::fresh_lens_profile_for_sidecar(raw, Some(&text));
+        return Ok(r);
     }
     serde_json::from_str(&text).with_context(|| format!("parse recipe {}", recipe_path.display()))
 }
@@ -1751,6 +1758,13 @@ fn match_cmd(
             target.display()
         );
     }
+    // The target in the fit's own frame (`pipeline::fit_target`): measured
+    // against the source as shot and as its lens profile corrects it, and
+    // brought into the sensor frame when it was exported corrected. The judge
+    // and the style describer below read the target as it was exported.
+    let mut fit_base = fit_base;
+    let fitted_target = pipeline::fit_target(&src, &tgt, &mut fit_base);
+    let fit_tgt = &fitted_target.image;
     println!("reverse-fitting {} onto the look of {} …", raw.display(), target.display());
     // 完全自动 (user ruling 2026-08-26): every fit may consult the local DIFT
     // sidecar — the fit's own D gate decides IF (content-divergent pairs
@@ -1785,7 +1799,7 @@ fn match_cmd(
         );
         autoshade::fit_zoned::fit_recipe_zoned_with_regions(
             &src,
-            &tgt,
+            fit_tgt,
             &seg,
             &mask,
             &fit_base,
@@ -1793,7 +1807,11 @@ fn match_cmd(
             regions.min(autoshade::fit_zoned::semantic::MAX_SEMANTIC_REGIONS),
         )
         } else {
-            fit::fit_recipe_from_with(&src, &tgt, &fit_base, fit_options)
+            fit::fit_recipe_from_with(&src, fit_tgt, &fit_base, fit_options)
+        })
+        .map(|mut r| {
+            pipeline::note_target_geometry(&mut r, fitted_target.geometry);
+            r
         })
     };
     let mut rep = run_fit(zoned)?;
@@ -1875,7 +1893,7 @@ fn match_cmd(
                         // step, and this one is persisted into recipe.json.
                         (r.saturation != rep.recipe.saturation)
                             .then(|| {
-                                fit::rescore_report(&src, &tgt, &r, &fit_base, rep.err_before, &rep.notes)
+                                fit::rescore_report(&src, fit_tgt, &r, &fit_base, rep.err_before, &rep.notes)
                             })
                     }
                     autoshade::advisor::FitAction::None => None,
@@ -3311,6 +3329,76 @@ mod tests {
         let neutral = read_recipe_at(&junk, &photo).expect("an unreadable sidecar is not an error");
         assert_eq!(neutral.exposure_ev, EditRecipe::default().exposure_ev);
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A sidecar read by `apply` carries the lens profile the desktop app
+    /// stamps when it opens the same photo with the same document
+    /// (`pipeline::fresh_lens_profile_for_sidecar`), so the switch decides the
+    /// GEOMETRY of the render here as it does there. `apply` used to render a
+    /// `LensProfileEnable="1"` sidecar with no profile at all — up to ±10 px
+    /// off the Lightroom export at 1000 px on a calibration pair.
+    ///
+    /// Needs a real negative, because with no RAW on disk every toggle is
+    /// already off and the stamp would pass whatever it did. Env-gated on the
+    /// calibration corpus like every other test of that kind; a JSON recipe
+    /// that already carries a profile is read back untouched either way.
+    #[test]
+    fn apply_stamps_the_sidecar_lens_profile_the_desktop_app_stamps() {
+        let root = std::env::temp_dir()
+            .join(format!("autoshade-cli-xmp-lens-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let doc = |enable: &str| {
+            format!(
+                "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">                 <rdf:Description rdf:about=\"\" xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"                  crs:Version=\"15.5.1\" crs:ProcessVersion=\"15.4\" crs:LensProfileEnable=\"{enable}\"                  crs:HasSettings=\"True\"/></rdf:RDF></x:xmpmeta>"
+            )
+        };
+
+        // The JSON arm: a stamped profile arrives exactly as written.
+        let stamped = autoshade::recipe::LensProfile {
+            distortion: vec![1.0, 1.01, 1.03],
+            distortion_on: true,
+            ..Default::default()
+        };
+        let js = root.join("recipe.json");
+        let carried = EditRecipe { lens_profile: stamped.clone(), ..Default::default() };
+        std::fs::write(&js, serde_json::to_string(&carried).unwrap()).unwrap();
+        let back = read_recipe_at(&js, &root.join("photo.ARW")).expect("the JSON arm reads");
+        assert_eq!(back.lens_profile, stamped, "a JSON recipe's own profile is not re-stamped");
+
+        let Some(dir) = autoshade::config::live_env_os("AUTOSHADE_FIT_CALIBRATION_DIR") else {
+            eprintln!("skipped: sidecar lens stamp needs AUTOSHADE_FIT_CALIBRATION_DIR");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        };
+        let raw = std::path::PathBuf::from(dir).join("source.arw");
+        if !raw.is_file() {
+            eprintln!("skipped: sidecar lens stamp: corpus has no source.arw");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        let fresh = pipeline::fresh_lens_profile(&raw);
+        assert!(
+            fresh.distortion_on && fresh.geometry_active(),
+            "premise: the corpus negative carries distortion knots, or the ON arm proves nothing"
+        );
+        for enable in ["1", "0"] {
+            let text = doc(enable);
+            let side = root.join(format!("edit-{enable}.xmp"));
+            std::fs::write(&side, &text).unwrap();
+            let r = read_recipe_at(&side, &raw).expect("a sidecar is a recipe file");
+            assert_eq!(
+                r.lens_profile,
+                pipeline::fresh_lens_profile_for_sidecar(&raw, Some(&text)),
+                "LensProfileEnable=\"{enable}\": apply must stamp what the app's open path stamps"
+            );
+            assert_eq!(
+                r.lens_profile.geometry_active(),
+                enable == "1",
+                "LensProfileEnable=\"{enable}\" decides whether the render is lens-corrected"
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

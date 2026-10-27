@@ -117,7 +117,7 @@ use export::{ADOBE_PRIM, D65_XY, P3_PRIM, SRGB_PRIM, inv3, mat_mul3, mat_vec3, r
 use export::{ADOBE_RGB_ICC, DISPLAY_P3_ICC, srgb_to_space_matrix, transcode_srgb_trc_to_adobe};
 pub use geometry::{
     MANUAL_CA_PER_UNIT, apply_lens_distortion, apply_lens_geometry, apply_lens_geometry_rgba,
-    distort_norm, geometry_moves_frame, geometry_profile, lens_geom_norm, lens_ungeom_norm,
+    corrected_to_sensor_frame, distort_norm, geometry_moves_frame, geometry_profile, lens_geom_norm, lens_ungeom_norm,
     rotate_straighten_rgba, undistort_norm,
 };
 pub(crate) use geometry::{profile_knot_interp};

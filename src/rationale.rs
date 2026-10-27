@@ -838,6 +838,23 @@ pub mod keys {
          render additionally applies this photo's own calibration ({what}), so \
          it is a different frame — closer to the target in luma, and differing \
          in chroma, because the camera curve is matched on luma alone.";
+    /// [`crate::pipeline::TargetGeometry::Corrected`]: the two readings are the
+    /// mean alignment peaks of the target against the source frame as
+    /// corrected and as shot.
+    pub const TARGET_GEOMETRY_CORRECTED: &str =
+        " Target geometry: lens-corrected (alignment {corrected} corrected vs \
+         {as_shot} as shot); the target was brought into the sensor frame for \
+         evidence, {absent}% of sensor pixels lie outside its field and carried \
+         no evidence.";
+    pub const TARGET_GEOMETRY_AS_SHOT: &str =
+        " Target geometry: as shot (alignment {corrected} corrected vs {as_shot} \
+         as shot); the target was paired as it stands and the lens profile's \
+         distortion and chromatic-aberration corrections were switched off, so \
+         the render keeps the geometry the target was exported with.";
+    pub const TARGET_GEOMETRY_AMBIGUOUS: &str =
+        " Target geometry: undecided (alignment {corrected} corrected vs \
+         {as_shot} as shot, no clear margin); the target was paired as it \
+         stands and the lens profile was left as it was.";
     pub const ZONE_ALREADY_MATCHED: &str =
         " The {label} zone already matches the target (zone residual \
          {before}) — no correction needed.";

@@ -62,11 +62,11 @@ pub(super) fn measure_zone_divergence(
     base: &crate::recipe::EditRecipe,
     src_mask: &GrayImage,
 ) -> ZoneDivergences {
-    let (sp, tp, w, h) = fit::divergence_raster(src, target, base);
+    let fit::DivergenceRaster { source: sp, target: tp, width: w, height: h, presence } = fit::divergence_raster(src, target, base);
     let sky_weights = mask_weights(src_mask, w, h);
     let land_weights: Vec<f32> = sky_weights.iter().map(|v| 1.0 - v).collect();
     let measured = |weights: &[f32]| ZoneDivergence {
-        divergence: fit::structure_divergence(&sp, &tp, w, h, weights),
+        divergence: fit::structure_divergence(&sp, &tp, w, h, &fit::with_presence(weights, presence.as_deref())),
         share: weights.iter().sum::<f32>() / weights.len().max(1) as f32,
     };
     ZoneDivergences { sky: measured(&sky_weights), land: measured(&land_weights) }
@@ -234,8 +234,9 @@ pub(super) fn attach_zones_with_divergence(
     let sw = mask_weights(src_mask, aw, ah);
     let tw = mask_weights(tgt_mask, t_img.width(), t_img.height());
     // Partition validity — judged on the raw mask shares (Σw/n), before any
-    // zone-specific gating.
-    let share = |w: &[f32]| w.iter().sum::<f32>() / w.len().max(1) as f32;
+    // zone-specific gating, over the pixels the target can pair.
+    let present = report.evidence.present_weights(&vec![1.0; sw.len()]).iter().sum::<f32>();
+    let share = |w: &[f32]| report.evidence.present_weights(w).iter().sum::<f32>() / present.max(1.0);
     let (s_share, t_share) = (share(&sw), share(&tw));
     if !(MIN_ZONE_SHARE..=1.0 - MIN_ZONE_SHARE).contains(&s_share)
         || !(MIN_ZONE_SHARE..=1.0 - MIN_ZONE_SHARE).contains(&t_share)

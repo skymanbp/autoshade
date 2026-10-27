@@ -278,9 +278,10 @@ pub(super) fn enforce_boundary_gates_with_shrink(
     (reference_px, initial_px): (&[[f32; 3]], Vec<[f32; 3]>),
     shrink: impl Fn(&mut [LocalAdjustment], &[LocalAdjustment], &[f32], f32),
 ) -> BoundaryGateResult {
+    let presence = report.evidence.presence.clone();
     let read = |pixels: &[[f32; 3]], frozen: &[[f32; 3]]| {
         boundaries.iter().fold(BoundaryReading::nothing_measured(), |mut all, weights| {
-            let next = boundary_rim_toward(target, reference_px, pixels, frozen, weights, s_img.width(), s_img.height());
+            let next = boundary_rim_toward(target, reference_px, pixels, frozen, weights, s_img.width(), s_img.height(), presence.as_deref());
             all.rim = all.rim.max(next.rim);
             all.charged = all.charged.max(next.charged);
             all.colour = all.colour.max(next.colour);

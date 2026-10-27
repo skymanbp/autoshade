@@ -227,7 +227,7 @@ impl LocalField {
         // evidence model is the fit's own; this module never builds a second one.
         let support = opts
             .local_support
-            .then(|| local_support(current, target, width, height));
+            .then(|| local_support_present(current, target, width, height, evidence.presence.as_deref()));
         let mut fit_weight = vec![0.0f32; n];
         let mut mass = 0.0f64;
         for (i, weight) in fit_weight.iter_mut().enumerate() {
@@ -317,8 +317,18 @@ impl LocalField {
 /// starve a fit nothing measured, so the term is dropped wholesale (uniform
 /// 1.0) instead — the pre-v1.2.4 reading for that case, and the same "may
 /// refuse to help, never starve" stance the correspondence field takes.
+#[cfg(test)]
 pub(crate) fn local_support(
     current: &[[f32; 3]], target: &[[f32; 3]], width: u32, height: u32,
+) -> Vec<f32> {
+    local_support_present(current, target, width, height, None)
+}
+
+/// [`local_support`] over the pixels the target can pair: a cell's reading
+/// takes no absent pixel (`fit::presence_of`) into its structure.
+pub(crate) fn local_support_present(
+    current: &[[f32; 3]], target: &[[f32; 3]], width: u32, height: u32,
+    presence: Option<&[f32]>,
 ) -> Vec<f32> {
     let n = width as usize * height as usize;
     let mut support = vec![0.0f32; n];
@@ -332,6 +342,7 @@ pub(crate) fn local_support(
                     let (x, y) = (i as u32 % width, i as u32 / width);
                     f32::from(x * FIELD_X as u32 / width == cell_x
                         && y * CELL_ROWS as u32 / height == cell_y)
+                        * presence.map_or(1.0, |p| p.get(i).copied().unwrap_or(0.0))
                 })
                 .collect::<Vec<_>>();
             fit::structure_divergence(current, target, width, height, &mask)

@@ -843,7 +843,7 @@ pub fn rescore_report(
     let tp = pixels_of(&t);
     let after_px = pixels_of(&render::develop_preview(&s, recipe));
     let base_px = pixels_of(&render::develop_preview(&s, base));
-    let structural = evidence_model_for(&base_px, &tp, s.width(), s.height());
+    let structural = evidence_model_paired(&base_px, &tp, presence_of(&t).as_deref(), s.width(), s.height());
     let carried = |k: &str| prior.iter().any(|n| n.key == k);
     let carried_arg = |note_key: &str, arg_key: &str| {
         prior

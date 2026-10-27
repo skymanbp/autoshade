@@ -1558,7 +1558,7 @@ fn zone_divergence_uses_the_same_source_mask_on_both_sides() {
         &crate::recipe::EditRecipe::default(),
         &source_mask,
     );
-    let (sp, tp, w, h) =
+    let fit::DivergenceRaster { source: sp, target: tp, width: w, height: h, .. } =
         fit::divergence_raster(&src, &tgt, &crate::recipe::EditRecipe::default());
     let source_weights = mask_weights(&source_mask, w, h);
     let direct = fit::structure_divergence(&sp, &tp, w, h, &source_weights);
@@ -3032,7 +3032,7 @@ fn a_step_the_target_itself_carries_is_not_charged_as_a_seam() {
     let (source, _, weights, reference, candidate, path, _) =
         hazy_feather("r37-soft-asked", 3.0, 0.30, None, false);
     let against = |target: Option<&[[f32; 3]]>| {
-        boundary_rim_toward(target, &reference, &candidate, &candidate, &weights, HAZY.0, HAZY.1)
+        boundary_rim_toward(target, &reference, &candidate, &candidate, &weights, HAZY.0, HAZY.1, None)
     };
     let none = against(None);
     assert!(
@@ -3254,7 +3254,7 @@ fn a_cell_share_is_read_from_footed_transitions_only() {
         .map(|i| if footed(i / w) { candidate[i] } else if weights[i] > 0.0 { [0.4 + d; 3] } else { [0.4; 3] })
         .collect();
     let reading =
-        boundary_rim_toward(Some(&target), &reference, &candidate, &candidate, &weights, w as u32, h as u32);
+        boundary_rim_toward(Some(&target), &reference, &candidate, &candidate, &weights, w as u32, h as u32, None);
     assert!(
         (reading.asked - 0.4 * d).abs() <= 1e-4,
         "the target's own step is asked once the dips stop diluting the cell: {reading:?}"
@@ -3290,10 +3290,10 @@ fn a_target_referenced_cell_gap_reads_the_band_shape_not_the_texture() {
         .collect();
     let (wu, hu) = (w as u32, h as u32);
     let worst = |gaps: &[[f32; 3]]| gaps.iter().fold(0.0f32, |m, g| m.max(g[0]).max(g[1]));
-    let clean = (rim_cell_gaps(&flat, &flat, &ramp, wu, hu), step_cell_gaps(&flat, &flat, &ramp, wu, hu));
+    let clean = (rim_cell_gaps(&flat, &flat, &ramp, wu, hu, None), step_cell_gaps(&flat, &flat, &ramp, wu, hu, None));
     assert_eq!(clean.0.len(), crate::fit_cells::CELLS_X * crate::fit_cells::CELLS_Y);
     assert_eq!((worst(&clean.0), worst(&clean.1)), (0.0, 0.0), "the render IS the target");
-    let twin = (rim_cell_gaps(&noisy, &flat, &ramp, wu, hu), step_cell_gaps(&noisy, &flat, &ramp, wu, hu));
+    let twin = (rim_cell_gaps(&noisy, &flat, &ramp, wu, hu, None), step_cell_gaps(&noisy, &flat, &ramp, wu, hu, None));
     assert!(
         worst(&twin.0) < BOUNDARY_STEP_FLOOR && worst(&twin.1) < BOUNDARY_STEP_FLOOR,
         "against its re-synthesised twin the gap is the noise's mean, under a code: {:?} {:?}",
@@ -3309,8 +3309,8 @@ fn a_target_referenced_cell_gap_reads_the_band_shape_not_the_texture() {
             .map(|(i, p)| if rows.contains(&(i / w)) { p.map(|c| c + 4.0 / 255.0) } else { *p })
             .collect()
     };
-    let band = rim_cell_gaps(&noisy, &lifted(h / 2 - 4..h / 2), &ramp, wu, hu);
-    let side = step_cell_gaps(&noisy, &lifted(0..h / 2), &ramp, wu, hu);
+    let band = rim_cell_gaps(&noisy, &lifted(h / 2 - 4..h / 2), &ramp, wu, hu, None);
+    let side = step_cell_gaps(&noisy, &lifted(0..h / 2), &ramp, wu, hu, None);
     for (name, gaps) in [("band", &band), ("side", &side)] {
         let read: Vec<f32> = gaps.iter().map(|g| g[0]).filter(|v| *v > 0.0).collect();
         assert_eq!(read.len(), crate::fit_cells::CELLS_X, "{name}: one horizon cell per column");

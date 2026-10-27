@@ -644,3 +644,49 @@ pub fn apply_lens_geometry(
     });
     DynamicImage::ImageRgb16(out)
 }
+
+/// A lens-CORRECTED raster in the SENSOR frame: every sensor pixel takes the
+/// corrected pixel the geometry stage would put it at. The map is the engine's
+/// own inverse ([`lens_ungeom_norm`], through the [`MaskUnwarp`] table the mask
+/// chain samples it with) — the same map, run the other way, never a second
+/// model of the lens.
+///
+/// The alpha is the answer to "is there a corrected pixel here at all": opaque
+/// inside the corrected field, clear for the sensor pixels the correction
+/// crops away, whose colour is the field's clamped edge so a reader that
+/// ignores alpha sees a plausible picture. `None` when the map moves nothing.
+/// The second value is the clear share of the frame.
+pub fn corrected_to_sensor_frame(
+    img: &DynamicImage,
+    profile: &crate::recipe::LensProfile,
+    amount: f32,
+) -> Option<(DynamicImage, f32)> {
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let (wf, hf) = (w as f32, h as f32);
+    let unwarp = MaskUnwarp::new(profile, amount, (wf, hf))?;
+    let src = rgb16_source(img);
+    let src = &*src;
+    let mut out = image::RgbaImage::new(w, h);
+    let obuf: &mut [u8] = &mut out;
+    let absent: usize = obuf
+        .par_chunks_mut(w as usize * 4)
+        .enumerate()
+        .map(|(y, orow)| {
+            let mut clear = 0usize;
+            for x in 0..w as usize {
+                let (qx, qy) = unwarp.engine_at((x as f32 + 0.5) / wf, (y as f32 + 0.5) / hf);
+                let (sx, sy) = (qx * wf - 0.5, qy * hf - 0.5);
+                let inside = (0.0..=wf - 1.0).contains(&sx) && (0.0..=hf - 1.0).contains(&sy);
+                let p = sample_bilinear_rgb16(src, sx, sy);
+                let to8 = |v: u16| (v as f32 / 257.0).round().clamp(0.0, 255.0) as u8;
+                orow[x * 4..x * 4 + 4].copy_from_slice(&[to8(p[0]), to8(p[1]), to8(p[2]), if inside { 255 } else { 0 }]);
+                clear += usize::from(!inside);
+            }
+            clear
+        })
+        .sum();
+    Some((DynamicImage::ImageRgba8(out), absent as f32 / (w as f32 * h as f32)))
+}

@@ -309,10 +309,12 @@ fn paired_layout(
 ) -> Vec<f32> {
     let (s_img, t_img) = fit::analysis_pair(src, target);
     let (w, h) = (s_img.width(), s_img.height());
+    let presence = fit::presence_of(&t_img);
     let mut out = vec![0.0f32; w as usize * h as usize];
     for (source, tgt) in pairs {
         let sw = mask_weights(source, w, h);
         let tw = mask_weights(tgt, t_img.width(), t_img.height());
+        let tw = fit::with_presence(&tw, presence.as_deref()).into_owned();
         for ((o, s), t) in out.iter_mut().zip(&sw).zip(&tw) {
             *o = o.max(s * t);
         }
@@ -496,10 +498,10 @@ fn fit_recipe_zoned_multi_inner(
     // and the regions as the detail stage reads them (every resolved class
     // on its own raster, source and target membership both).
     let (mut report, field, first_producer, layout, zones) = {
-        let (sp, tp, w, h) = fit::divergence_raster(src, target, base);
+        let fit::DivergenceRaster { source: sp, target: tp, width: w, height: h, presence } = fit::divergence_raster(src, target, base);
         let divergences = regions.iter().map(|r| {
             let weights = mask_weights(&r.source, w, h);
-            ZoneDivergence { divergence: fit::structure_divergence(&sp, &tp, w, h, &weights), share: weights.iter().sum::<f32>() / weights.len().max(1) as f32 }
+            ZoneDivergence { divergence: fit::structure_divergence(&sp, &tp, w, h, &fit::with_presence(&weights, presence.as_deref())), share: weights.iter().sum::<f32>() / weights.len().max(1) as f32 }
         }).collect::<Vec<_>>();
         // Promotion is the claim that the structure was REPLACED over this much
         // of the frame, so a region the instrument could not read contributes

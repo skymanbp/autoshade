@@ -487,16 +487,16 @@ fn band_attachment(
 /// and every worst seam and target step, for "regressing" one cell by that
 /// noise. One entry per cell of every rim, 0 where a rim has no band pixel
 /// in a cell, so two readings of the same rims compare positionally.
-fn seams(target: &[[f32; 3]], pixels: &[[f32; 3]], rims: &[Vec<f32>], size: (u32, u32)) -> Vec<[f32; 3]> {
-    rims.iter().flat_map(|weights| rim_cell_gaps(target, pixels, weights, size.0, size.1)).collect()
+fn seams(target: &[[f32; 3]], pixels: &[[f32; 3]], rims: &[Vec<f32>], size: (u32, u32), presence: Option<&[f32]>) -> Vec<[f32; 3]> {
+    rims.iter().flat_map(|weights| rim_cell_gaps(target, pixels, weights, size.0, size.1, presence)).collect()
 }
 
 /// The same gap across each rim's 50% contour ([`step_cell_gaps`]): a hard
 /// boundary has no transition band to read into, and the soft ruler's
 /// transported bow is not the target's own cross-boundary step. Cells stay
 /// separate: a quiet hazy segment must not disappear into a whole horizon.
-fn target_steps(target: &[[f32; 3]], pixels: &[[f32; 3]], rims: &[Vec<f32>], size: (u32, u32)) -> Vec<[f32; 3]> {
-    rims.iter().flat_map(|weights| step_cell_gaps(target, pixels, weights, size.0, size.1)).collect()
+fn target_steps(target: &[[f32; 3]], pixels: &[[f32; 3]], rims: &[Vec<f32>], size: (u32, u32), presence: Option<&[f32]>) -> Vec<[f32; 3]> {
+    rims.iter().flat_map(|weights| step_cell_gaps(target, pixels, weights, size.0, size.1, presence)).collect()
 }
 
 /// A band set does not regress the zone's boundary when, on average over the
@@ -699,6 +699,17 @@ pub(super) fn replace_zone(
     let parent_index = report.recipe.masks.iter().position(|m|
         m.role == parent.role && m.components.is_empty()
     );
+    // The parent's statistics are read over the pixels the target can pair;
+    // its rim stays the raw mask, whose crossings the seam rulers skip where
+    // the target is absent.
+    let rim = parent.source_weights.clone();
+    let presence = report.evidence.presence.clone();
+    let paired = ZoneAttachment {
+        source_weights: report.evidence.present_weights(&parent.source_weights).into_owned(),
+        target_weights: report.evidence.present_weights(&parent.target_weights).into_owned(),
+        ..parent.clone()
+    };
+    let parent = &paired;
     let single_px = fit::pixels_of(&render::develop_preview(image, &report.recipe));
     let (r2, models) = residual_models(&single_px, target, &parent.source_weights, image.width(), image.height());
     if models.is_empty() {
@@ -742,7 +753,7 @@ pub(super) fn replace_zone(
         // charged for falling short of the band's settled treatment, which a
         // ramp does by construction: on the night pair (2026-10-20) that held
         // every narrow-ramp sky trial at k 0.03-0.09.
-        let rims = vec![parent.source_weights.clone()];
+        let rims = vec![rim.clone()];
         let mut solved = true;
         for (attachment, lift) in &attachments {
             if attach_one_zone(image, target, report, &mut frame_error, attachment, divergence, correspondence.as_ref()).is_none() {
@@ -789,10 +800,10 @@ pub(super) fn replace_zone(
         }
         let after = delta_e(&pixels, target, &parent.source_weights);
         let size = (image.width(), image.height());
-        let seam_before = seams(target, &single_px, &rims, size);
-        let seam_after = seams(target, &pixels, &rims, size);
-        let step_before = target_steps(target, &single_px, &rims, size);
-        let step_after = target_steps(target, &pixels, &rims, size);
+        let seam_before = seams(target, &single_px, &rims, size, presence.as_deref());
+        let seam_after = seams(target, &pixels, &rims, size, presence.as_deref());
+        let step_before = target_steps(target, &single_px, &rims, size, presence.as_deref());
+        let step_after = target_steps(target, &pixels, &rims, size, presence.as_deref());
         let no_seam_regression = boundary_does_not_regress(&seam_before, &seam_after)
             && boundary_does_not_regress(&step_before, &step_after);
         let ramp_before = ramp_excess(target, &single_px, &parent.source_weights, size);
@@ -1161,10 +1172,10 @@ mod tests {
         let after: Vec<_> = (0..w*h).map(|i| if i/w < h/2 { [0.36; 3] } else { [0.2; 3] }).collect();
         let rims = vec![weights];
         let size = (w as u32, h as u32);
-        assert!(boundary_does_not_regress(&seams(&target, &before, &rims, size),
-            &seams(&target, &after, &rims, size)), "a hard edge has no soft-rim samples");
-        assert!(!boundary_does_not_regress(&target_steps(&target, &before, &rims, size),
-            &target_steps(&target, &after, &rims, size)), "the target step still got worse");
+        assert!(boundary_does_not_regress(&seams(&target, &before, &rims, size, None),
+            &seams(&target, &after, &rims, size, None)), "a hard edge has no soft-rim samples");
+        assert!(!boundary_does_not_regress(&target_steps(&target, &before, &rims, size, None),
+            &target_steps(&target, &after, &rims, size, None)), "the target step still got worse");
     }
 
     #[test]
@@ -1206,7 +1217,7 @@ mod tests {
         let weights = (0..w*h).map(|i| if i/w < h/2 { 1.0 } else { 0.0 }).collect();
         let rims = vec![weights];
         let size = (w as u32, h as u32);
-        let steps = |pixels: &[[f32; 3]]| target_steps(&target, pixels, &rims, size);
+        let steps = |pixels: &[[f32; 3]]| target_steps(&target, pixels, &rims, size, None);
         assert!(boundary_does_not_regress(&steps(&before), &steps(&after(0.47))),
             "one column past the old per-cell ceiling while eleven land is a better contour");
         assert!(boundary_does_not_regress(&steps(&before), &steps(&target)));

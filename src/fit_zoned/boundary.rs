@@ -157,6 +157,17 @@ struct StepFrames<'a> {
     /// step, which is the rule as it stood — what the fixtures pinned on the
     /// context budget alone still measure.
     target: Option<&'a [[f32; 3]]>,
+    /// The paired target's presence ([`crate::fit::presence_of`]). A crossing
+    /// whose pixels the target has no counterpart for is not read: the ring a
+    /// lens-corrected target leaves in the sensor frame is cropped from the
+    /// delivered render, and a step measured there is a step nobody sees.
+    presence: Option<&'a [f32]>,
+}
+
+impl StepFrames<'_> {
+    fn present(&self, i: usize) -> bool {
+        self.presence.is_none_or(|p| p.get(i).copied().unwrap_or(0.0) > 0.0)
+    }
 }
 
 /// One scan line's addressing: `(start, step, len)`, exactly the triple both
@@ -465,6 +476,7 @@ fn crossing_slope(
     channel: Option<usize>,
 ) -> f32 {
     let StepFrames { reference, rendered, frozen, .. } = frames;
+    let present = |i: usize| frames.present(i);
     let (start, step, len) = line;
     let (far_in, far_out) = feet;
     let read = |p: &[f32; 3]| match channel {
@@ -473,7 +485,7 @@ fn crossing_slope(
     };
     let index = |p: usize| -> Option<usize> {
         let i = start + p * step;
-        (i < alpha.len() && i < rendered.len() && i < reference.len() && i < frozen.len())
+        (i < alpha.len() && i < rendered.len() && i < reference.len() && i < frozen.len() && present(i))
             .then_some(i)
     };
     let inside = |i: usize| alpha[i] >= ZONE_BOUNDARY_MID;
@@ -704,12 +716,12 @@ fn boundary_line_rims(
     out: &mut Vec<CrossingSample>,
     cells: &mut [CellSums],
 ) {
-    let StepFrames { reference, rendered, frozen, target } = frames;
+    let StepFrames { reference, rendered, frozen, target, .. } = frames;
     let ScanLine { start, step, len, grid } = line;
     let luma = |p: &[f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
     let index = |p: usize| -> Option<usize> {
         let i = start + p * step;
-        (i < rendered.len() && i < reference.len() && i < frozen.len() && i < weights.len())
+        (i < rendered.len() && i < reference.len() && i < frozen.len() && i < weights.len() && frames.present(i))
             .then_some(i)
     };
     let mut sky_index = Vec::new();
@@ -992,13 +1004,14 @@ pub(super) fn boundary_rim(
     width: u32,
     height: u32,
 ) -> BoundaryReading {
-    boundary_rim_toward(None, reference, rendered, frozen, weights, width, height)
+    boundary_rim_toward(None, reference, rendered, frozen, weights, width, height, None)
 }
 
 /// [`boundary_rim`] read toward a paired `target` at the same geometry (R37):
 /// what the target itself does at each transition is pooled per evidence
 /// cell and the correction is charged only for what it introduces beyond
 /// that ([`unasked`], [`cell_share`]). `None` is the rule as it stood.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn boundary_rim_toward(
     target: Option<&[[f32; 3]]>,
     reference: &[[f32; 3]],
@@ -1007,10 +1020,11 @@ pub(super) fn boundary_rim_toward(
     weights: &[f32],
     width: u32,
     height: u32,
+    presence: Option<&[f32]>,
 ) -> BoundaryReading {
     let (w, h) = (width as usize, height as usize);
     debug_assert!(target.is_none_or(|t| t.len() == rendered.len()), "one geometry");
-    let frames = StepFrames { reference, rendered, frozen, target };
+    let frames = StepFrames { reference, rendered, frozen, target, presence };
     let (rims, cells) = rim_samples(frames, weights, (w, h));
     reading_of(&rims, &cells, ZONE_BOUNDARY_RIM_MAX)
 }
@@ -1146,12 +1160,12 @@ fn boundary_line_steps(
     out: &mut Vec<CrossingSample>,
     cells: &mut [CellSums],
 ) {
-    let StepFrames { reference, rendered, frozen, target } = frames;
+    let StepFrames { reference, rendered, frozen, target, .. } = frames;
     let ScanLine { start, step, len, grid } = line;
     let luma = |p: &[f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
     let index = |p: usize| -> Option<usize> {
         let i = start + p * step;
-        (i < geometry.len() && i < rendered.len() && i < reference.len() && i < frozen.len())
+        (i < geometry.len() && i < rendered.len() && i < reference.len() && i < frozen.len() && frames.present(i))
             .then_some(i)
     };
     let stand_off = ZONE_STEP_OFFSET.saturating_sub(1);
@@ -1283,11 +1297,12 @@ pub(super) fn boundary_step(
     width: u32,
     height: u32,
 ) -> BoundaryReading {
-    boundary_step_toward(None, reference, rendered, frozen, geometry, width, height)
+    boundary_step_toward(None, reference, rendered, frozen, geometry, width, height, None)
 }
 
 /// [`boundary_step`] read toward a paired `target` (R37) — see
 /// [`boundary_rim_toward`]; the same allowance, pooled on the same cells.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn boundary_step_toward(
     target: Option<&[[f32; 3]]>,
     reference: &[[f32; 3]],
@@ -1296,10 +1311,11 @@ pub(super) fn boundary_step_toward(
     geometry: &[f32],
     width: u32,
     height: u32,
+    presence: Option<&[f32]>,
 ) -> BoundaryReading {
     let (w, h) = (width as usize, height as usize);
     debug_assert!(target.is_none_or(|t| t.len() == rendered.len()), "one geometry");
-    let frames = StepFrames { reference, rendered, frozen, target };
+    let frames = StepFrames { reference, rendered, frozen, target, presence };
     let (mut steps, mut cells) = (Vec::new(), cells_grid());
     for y in 0..h {
         boundary_line_steps(frames, geometry, ScanLine::row(y, (w, h)), &mut steps, &mut cells);
@@ -1323,9 +1339,10 @@ pub(crate) fn rim_cell_gaps(
     weights: &[f32],
     width: u32,
     height: u32,
+    presence: Option<&[f32]>,
 ) -> Vec<[f32; 3]> {
     let (w, h) = (width as usize, height as usize);
-    let frames = StepFrames { reference, rendered, frozen: rendered, target: None };
+    let frames = StepFrames { reference, rendered, frozen: rendered, target: None, presence };
     let (_, cells) = rim_samples(frames, weights, (w, h));
     cell_gaps(&cells)
 }
@@ -1338,9 +1355,10 @@ pub(crate) fn step_cell_gaps(
     geometry: &[f32],
     width: u32,
     height: u32,
+    presence: Option<&[f32]>,
 ) -> Vec<[f32; 3]> {
     let (w, h) = (width as usize, height as usize);
-    let frames = StepFrames { reference, rendered, frozen: rendered, target: None };
+    let frames = StepFrames { reference, rendered, frozen: rendered, target: None, presence };
     let (mut steps, mut cells) = (Vec::new(), cells_grid());
     for y in 0..h {
         boundary_line_steps(frames, geometry, ScanLine::row(y, (w, h)), &mut steps, &mut cells);

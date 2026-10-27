@@ -381,6 +381,7 @@ pub(super) fn attach_zone_detail(
     let big = src.thumbnail(DETAIL_EDGE, DETAIL_EDGE);
     let big_t = target.thumbnail_exact(big.width(), big.height());
     let tgt_px = fit::pixels_of(&big_t);
+    let presence = fit::presence_of(&big_t);
     let (w, h) = (big.width(), big.height());
     // The frame ruler lives at analysis size: the evidence model was built
     // there and is read there.
@@ -400,6 +401,8 @@ pub(super) fn attach_zone_detail(
     let two = |v: f32| format!("{v:.2}");
     for zone in zones {
         let (coverage, paired_weights) = zone_weights(zone, w, h);
+        // Paired only where the target has a pixel to pair.
+        let paired_weights = fit::with_presence(&paired_weights, presence.as_deref()).into_owned();
         let share = |weights: &[f32]| weights.iter().sum::<f32>() / weights.len().max(1) as f32;
         if share(&coverage) < MIN_ZONE_SHARE || share(&paired_weights) < MIN_ZONE_SHARE {
             // The tone stage already said this zone is too small; nothing

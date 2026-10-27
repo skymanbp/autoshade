@@ -32,10 +32,13 @@ pub(super) fn attach_one_zone(
     // `label` drives the rationale prose; it's the zone's stable ASCII tag, so
     // the text stays English/identical regardless of the GUI's display language.
     let label = attachment.label.as_str();
+    // Every producer's pair weights meet the target's presence HERE, once: a
+    // sensor pixel the target has no counterpart for is a member of no zone.
     let (sw, tw) = (
-        attachment.source_weights.as_slice(),
-        attachment.target_weights.as_slice(),
+        report.evidence.present_weights(&attachment.source_weights),
+        report.evidence.present_weights(&attachment.target_weights),
     );
+    let (sw, tw) = (&*sw, &*tw);
     let cur_px = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
     // Mode is derived FIRST since step 7b: the correspondence composes only
     // into a FULL zone's estimators. An Atmosphere zone is fitted as a
@@ -509,8 +512,11 @@ pub(super) fn attach_one_zone(
     // evidence in an Atmosphere report). Full zones retain structural survival,
     // so inside an Atmosphere frame they scope the separately carried structural
     // model. This single branch covers semantic zones, ranges and tiles.
-    let (moved_source, moved_target) = match &attachment.coverage {
-        Some(coverage) => (coverage.source.as_slice(), coverage.target.as_slice()),
+    let coverage = attachment.coverage.as_ref().map(|c| {
+        (report.evidence.present_weights(&c.source), report.evidence.present_weights(&c.target))
+    });
+    let (moved_source, moved_target) = match &coverage {
+        Some((source, target)) => (&**source, &**target),
         None => (sw, tw),
     };
     let frame_evidence = match mode {

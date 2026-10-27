@@ -72,9 +72,29 @@ pub struct EvidenceModel {
     /// so a half-withheld 6% tile is a region of its own population, not a
     /// 3% speckle of the frame.
     pub population: f32,
+    /// Where the paired target HAS a pixel ([`super::presence_of`]): `None`
+    /// when it has one everywhere, else 1.0 / 0.0 per aligned pixel. A target
+    /// brought into the sensor frame leaves the sensor pixels outside its
+    /// field with nothing to pair against, and an absent pixel is not
+    /// evidence of anything — not support, not withholding — so it is a
+    /// member of no population built from this model, the frame's or a
+    /// zone's.
+    pub presence: Option<Vec<f32>>,
 }
 
 impl EvidenceModel {
+    /// Does pixel `i` have no target counterpart?
+    pub fn is_absent(&self, i: usize) -> bool {
+        self.presence.as_ref().is_some_and(|p| p.get(i).copied().unwrap_or(0.0) <= 0.0)
+    }
+
+    /// `weights` with every absent pixel's weight taken to zero — THE
+    /// population rule for a zone's pair weights. Borrowed when every pixel
+    /// is present, so a pair with nothing absent runs on its own bytes.
+    pub fn present_weights<'w>(&self, weights: &'w [f32]) -> std::borrow::Cow<'w, [f32]> {
+        super::with_presence(weights, self.presence.as_deref())
+    }
+
     /// This model's range verdicts re-aggregated over ONE zone: `source_zone`
     /// / `target_zone` are the zone's soft memberships on the analysis
     /// rasters, `tp` the target's analysis pixels. Evidence verdicts follow
@@ -89,11 +109,12 @@ impl EvidenceModel {
     /// construction ([`analysis_pair`]); the aligned-prefix arithmetic below
     /// is the defensive form of that contract.
     pub fn scoped(&self, tp: &[[f32; 3]], source_zone: &[f32], target_zone: &[f32]) -> EvidenceModel {
+        let (source_zone, target_zone) = (self.present_weights(source_zone), self.present_weights(target_zone));
         let ranges = aggregate_ranges(
             &self.source_pixels,
             tp,
-            source_zone,
-            target_zone,
+            &source_zone,
+            &target_zone,
             SupportField {
                 spatial_weights: &self.spatial_weights,
                 spatial_divergence: &self.spatial_divergence,
@@ -120,6 +141,7 @@ impl EvidenceModel {
             spatial_divergence: self.spatial_divergence.clone(),
             globally_same_content: self.globally_same_content,
             population: ranges.population,
+            presence: self.presence.clone(),
         }
     }
 
@@ -462,6 +484,7 @@ fn spatial_evidence(
     tp: &[[f32; 3]],
     w: u32,
     h: u32,
+    presence: Option<&[f32]>,
 ) -> (Vec<f32>, Vec<f32>) {
     const COLS: u32 = 3;
     const ROWS: u32 = 3;
@@ -470,11 +493,13 @@ fn spatial_evidence(
     let sh = h.div_ceil(scale);
     let mut ss = Vec::with_capacity((sw * sh) as usize);
     let mut tt = Vec::with_capacity((sw * sh) as usize);
+    let mut present = Vec::with_capacity((sw * sh) as usize);
     for y in (0..h).step_by(scale as usize) {
         for x in (0..w).step_by(scale as usize) {
             let i = (y * w + x) as usize;
             ss.push(sp[i]);
             tt.push(tp[i]);
+            present.push(presence.map_or(1.0, |p| p.get(i).copied().unwrap_or(0.0)));
         }
     }
     let mut weights = vec![0.0f32; sp.len().min(tp.len())];
@@ -486,7 +511,7 @@ fn spatial_evidence(
             for y in 0..sh {
                 for x in 0..sw {
                     if x * COLS / sw.max(1) == col && y * ROWS / sh.max(1) == row {
-                        mask[(y * sw + x) as usize] = 1.0;
+                        mask[(y * sw + x) as usize] = present[(y * sw + x) as usize];
                     }
                 }
             }
@@ -537,20 +562,41 @@ fn inferred_geometry(n: usize) -> (u32, u32) {
     }
 }
 
+/// The evidence model of a pair whose target is present everywhere — the
+/// fixtures' form. Production pairs come through [`evidence_model_paired`]
+/// with the presence their target carries, so no fit can build an
+/// all-present model of a target that is not.
+#[cfg(test)]
 pub fn evidence_model_for(
     sp: &[[f32; 3]],
     tp: &[[f32; 3]],
     width: u32,
     height: u32,
 ) -> EvidenceModel {
+    evidence_model_paired(sp, tp, None, width, height)
+}
+
+/// THE evidence model of one aligned pair. `presence` is the target's
+/// ([`super::presence_of`]); an absent pixel is taken out of the frame
+/// population, out of every structural reading and out of every support
+/// verdict, so the ring a lens-corrected target leaves in the sensor frame
+/// reads as nothing rather than as an edge smeared into refusers.
+pub fn evidence_model_paired(
+    sp: &[[f32; 3]],
+    tp: &[[f32; 3]],
+    presence: Option<&[f32]>,
+    width: u32,
+    height: u32,
+) -> EvidenceModel {
     let n = sp.len().min(tp.len());
+    let presence = presence.filter(|p| p.len() >= n && p[..n].iter().any(|v| *v <= 0.0));
     let (w, h) = if width as usize * height as usize == n {
         (width, height)
     } else {
         inferred_geometry(n)
     };
-    let (spatial_weights, spatial_divergence) = spatial_evidence(sp, tp, w, h);
-    let all_spatial = vec![1.0f32; n];
+    let (mut spatial_weights, spatial_divergence) = spatial_evidence(sp, tp, w, h, presence);
+    let all_spatial = presence.map_or_else(|| vec![1.0f32; n], |p| p[..n].to_vec());
     // The frame-wide reading carries the same wholesale rule: its mask is
     // all-ones, so no cell mask can resolve where this one abstains, and an
     // abstention here means the frame itself is under the instrument's
@@ -558,11 +604,17 @@ pub fn evidence_model_for(
     // withhold every range's evidence.
     let global_reading = structure_divergence(sp, tp, w, h, &all_spatial);
     let globally_same_content = global_reading.is_none_or(|r| r.d < DIVERGENCE_GLOBAL);
-    let spatial_supported = spatial_divergence
+    let mut spatial_supported = spatial_divergence
         .iter()
         .map(|&divergence| globally_same_content || divergence < DIVERGENCE_ZONE)
         .collect::<Vec<_>>();
-    let frame = vec![1.0f32; n];
+    let frame = all_spatial.clone();
+    if let Some(p) = presence {
+        for i in (0..n).filter(|&i| p[i] <= 0.0) {
+            spatial_supported[i] = false;
+            spatial_weights[i] = 0.0;
+        }
+    }
     let ranges = aggregate_ranges(
         sp,
         tp,
@@ -597,6 +649,7 @@ pub fn evidence_model_for(
         spatial_divergence,
         globally_same_content,
         population: ranges.population,
+        presence: presence.map(|p| p[..n].to_vec()),
     }
 }
 
@@ -608,7 +661,12 @@ pub(crate) fn evidence_model(sp: &[[f32; 3]], tp: &[[f32; 3]]) -> EvidenceModel 
 
 pub(super) fn movement_identifiability(after: &[[f32; 3]], evidence: &EvidenceModel) -> f32 {
     let mut unsupported = 0.0f32;
+    let mut present = 0usize;
     for (i, (before, after)) in evidence.source_pixels.iter().zip(after).enumerate() {
+        if evidence.is_absent(i) {
+            continue;
+        }
+        present += 1;
         let movement = (0..3).map(|ch| (after[ch] - before[ch]).abs()).sum::<f32>() / 3.0;
         let unsupported_luma = source_luma_is_withheld(i, evidence);
         let unsupported_hue = evidence_hue_band(before).is_some()
@@ -617,7 +675,7 @@ pub(super) fn movement_identifiability(after: &[[f32; 3]], evidence: &EvidenceMo
             unsupported += movement;
         }
     }
-    let mean_unsupported = unsupported / evidence.source_pixels.len().max(1) as f32;
+    let mean_unsupported = unsupported / present.max(1) as f32;
     (-UNSUPPORTED_MOVEMENT_CONFIDENCE_SLOPE * mean_unsupported)
         .exp()
         .clamp(0.0, 1.0)
@@ -625,6 +683,9 @@ pub(super) fn movement_identifiability(after: &[[f32; 3]], evidence: &EvidenceMo
 
 pub(super) fn source_luma_is_withheld(index: usize, evidence: &EvidenceModel) -> bool {
     let Some(pixel) = evidence.source_pixels.get(index) else { return false };
+    if evidence.is_absent(index) {
+        return false;
+    }
     let range = &evidence.luma[evidence_luma_bin(luma601(pixel))];
     range.source_populated
         && (range.weight <= 0.0
@@ -633,6 +694,9 @@ pub(super) fn source_luma_is_withheld(index: usize, evidence: &EvidenceModel) ->
 
 pub(super) fn source_hue_is_withheld(index: usize, evidence: &EvidenceModel) -> bool {
     let Some(pixel) = evidence.source_pixels.get(index) else { return false };
+    if evidence.is_absent(index) {
+        return false;
+    }
     let Some(band) = evidence_hue_band(pixel) else { return false };
     let range = &evidence.hue[band];
     range.source_populated
@@ -656,7 +720,7 @@ fn withheld_range_hits(evidence: &EvidenceModel) -> (Vec<bool>, Vec<bool>) {
         .map(range_is_withheld)
         .collect::<Vec<_>>();
     for (index, pixel) in evidence.source_pixels.iter().enumerate() {
-        if !evidence.spatial_supported.get(index).copied().unwrap_or(false) {
+        if !evidence.is_absent(index) && !evidence.spatial_supported.get(index).copied().unwrap_or(false) {
             luma[evidence_luma_bin(luma601(pixel))] = true;
             if let Some(band) = evidence_hue_band(pixel) {
                 hue[band] = true;

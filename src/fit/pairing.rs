@@ -67,10 +67,53 @@ pub fn same_frame_plausible_dims(a: (u32, u32), b: (u32, u32)) -> bool {
 /// pair (a 1536x1027 preview against its 9504x6336 develop) that asymmetry
 /// alone moved the fit from 0.092 -> 0.019 / conf 0.68 to 0.107 -> 0.034 /
 /// conf 0.54 with no range withheld on either arm.
+///
+/// The target's PRESENCE rides with it: a target brought into the sensor
+/// frame (`pipeline::fit_target`) carries an alpha that is opaque inside its
+/// field and clear outside, and the same box filter carries it onto the
+/// analysis grid, where [`presence_of`] reads it.
 pub(crate) fn analysis_pair(src: &DynamicImage, target: &DynamicImage) -> (DynamicImage, DynamicImage) {
     let s_img = src.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
     let t_img = target.thumbnail_exact(s_img.width(), s_img.height());
     (s_img, t_img)
+}
+
+/// Per-pixel presence of a paired target on its own grid: 1.0 where every
+/// full-resolution pixel the cell averages lies inside the target's field,
+/// 0.0 where any does not. `None` — present everywhere — for a target with no
+/// alpha or a fully opaque one, which is every target that was not moved into
+/// the sensor frame; that is what keeps those pairs on today's bytes.
+///
+/// Strict at the edge on purpose: a cell that is part field and part ring
+/// averages real pixels with the edge values the ring holds, and pairing it
+/// would be pairing a smear.
+pub(crate) fn presence_of(target: &DynamicImage) -> Option<Vec<f32>> {
+    if !target.color().has_alpha() {
+        return None;
+    }
+    let alpha: Vec<f32> = match target {
+        DynamicImage::ImageRgba8(t) => {
+            t.pixels().map(|p| if p[3] == u8::MAX { 1.0 } else { 0.0 }).collect()
+        }
+        other => other
+            .to_rgba16()
+            .pixels()
+            .map(|p| if p[3] >= u16::MAX - u16::MAX / 1000 { 1.0 } else { 0.0 })
+            .collect(),
+    };
+    alpha.iter().any(|a| *a <= 0.0).then_some(alpha)
+}
+
+/// `weights` with every absent pixel's weight taken to zero — THE population
+/// rule wherever a weight meets a target that carries presence. Borrowed when
+/// every pixel is present, so such a pair runs on its own bytes.
+pub(crate) fn with_presence<'w>(weights: &'w [f32], presence: Option<&[f32]>) -> Cow<'w, [f32]> {
+    match presence {
+        None => Cow::Borrowed(weights),
+        Some(p) => Cow::Owned(
+            weights.iter().enumerate().map(|(i, w)| w * p.get(i).copied().unwrap_or(0.0)).collect(),
+        ),
+    }
 }
 
 /// The most a fit may claim once [`same_frame_plausible`] has said no (R24

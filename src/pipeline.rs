@@ -2826,6 +2826,272 @@ pub fn calibration_recipe(cal: PhotoCalibration) -> crate::recipe::EditRecipe {
     }
 }
 
+/// What the reverse fit measured about its TARGET's lens geometry, before any
+/// pixel was paired.
+///
+/// The fit's whole domain is the sensor frame: the source is a neutral develop
+/// that runs no geometry stage, and its masks and recipes are written in that
+/// frame. A Lightroom export made with the lens profile on is not — its pixels
+/// sit where the correction moved them (on one calibration pair, ±10 px at the
+/// corners of a 1000-px frame), so pairing it as it stands pairs every pixel
+/// with a neighbour. The fit cannot read the answer off a sidecar (it is never
+/// handed one, and one of the calibration targets was exported with the
+/// profile off), so it MEASURES it: the target against the source frame as
+/// shot and as the profile would correct it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TargetGeometry {
+    /// The calibration moves no pixel (no distortion knots, no CA overshoot,
+    /// no source with a lens): there is no question to ask, and the target is
+    /// paired as it always was.
+    Unmoved,
+    /// The target was lens-corrected. It is brought into the sensor frame for
+    /// evidence; `absent` is the share of sensor pixels outside its field.
+    Corrected { corrected: f32, as_shot: f32, absent: f32 },
+    /// The target keeps the uncorrected geometry: it is paired as it stands
+    /// and the recipe draws no profile distortion or CA, so the render keeps
+    /// the geometry the target was exported with.
+    AsShot { corrected: f32, as_shot: f32 },
+    /// Neither frame won by [`GEOMETRY_WIN_RATIO`] and [`GEOMETRY_WIN_MARGIN`]:
+    /// paired as it stands, the profile left as it was, and said so.
+    Ambiguous { corrected: f32, as_shot: f32 },
+}
+
+/// The fit's target after [`fit_target`]: in the sensor frame, with its
+/// presence in the alpha when it was moved there (`fit::presence_of`).
+pub struct FitTarget {
+    pub image: image::DynamicImage,
+    pub geometry: TargetGeometry,
+}
+
+/// Long edge the geometry probe reads at — the size the alignment instrument
+/// was calibrated on: on a lens-corrected calibration target the fit's own
+/// final render read peaks 0.48–0.81 and its uncorrected reference frame
+/// 0.06–0.17.
+const GEOMETRY_PROBE_EDGE: u32 = 1000;
+/// Side of one probe patch (a power of two, for the transform).
+const GEOMETRY_PATCH: usize = 256;
+/// Patch centres as fractions of the frame: the four corner regions and the
+/// top centre, where a lens profile moves most, and the centre, where it moves
+/// least.
+const GEOMETRY_PATCH_CENTRES: [(f32, f32); 6] =
+    [(0.14, 0.18), (0.50, 0.20), (0.86, 0.18), (0.14, 0.82), (0.86, 0.82), (0.50, 0.52)];
+/// A frame is the target's when its mean peak is at least this multiple of
+/// the other's…
+pub const GEOMETRY_WIN_RATIO: f32 = 2.0;
+/// …and at least this far above it, so two weak readings cannot decide.
+pub const GEOMETRY_WIN_MARGIN: f32 = 0.10;
+
+/// Measure the target's geometry against the fit's source frame and hand the
+/// fit a target in the sensor frame — see [`TargetGeometry`]. `base` is the
+/// calibration the fit composes; on an as-shot target its profile distortion
+/// and CA come off, because the recipe inherits them from it.
+pub fn fit_target(
+    src: &image::DynamicImage,
+    target: &image::DynamicImage,
+    base: &mut EditRecipe,
+) -> FitTarget {
+    let geom = crate::render::geometry_profile(base).into_owned();
+    let amount = base.lens_distortion;
+    if !crate::render::geometry_moves_frame(&geom, amount) {
+        return FitTarget { image: target.clone(), geometry: TargetGeometry::Unmoved };
+    }
+    let (corrected, as_shot) = target_alignment(src, target, base, &geom, amount);
+    let wins = |a: f32, b: f32| a >= GEOMETRY_WIN_RATIO * b && a - b >= GEOMETRY_WIN_MARGIN;
+    if wins(corrected, as_shot) {
+        if let Some((image, absent)) = crate::render::corrected_to_sensor_frame(target, &geom, amount) {
+            return FitTarget { image, geometry: TargetGeometry::Corrected { corrected, as_shot, absent } };
+        }
+    } else if wins(as_shot, corrected) {
+        base.lens_profile.distortion_on = false;
+        base.lens_profile.ca_on = false;
+        return FitTarget { image: target.clone(), geometry: TargetGeometry::AsShot { corrected, as_shot } };
+    }
+    FitTarget { image: target.clone(), geometry: TargetGeometry::Ambiguous { corrected, as_shot } }
+}
+
+/// The verdict, said once per fit in the rationale.
+pub fn note_target_geometry(report: &mut crate::fit::FitReport, geometry: TargetGeometry) {
+    use crate::rationale::{Note, keys};
+    let two = |v: f32| format!("{v:.2}");
+    let note = match geometry {
+        TargetGeometry::Unmoved => return,
+        TargetGeometry::Corrected { corrected, as_shot, absent } => Note::new(
+            keys::TARGET_GEOMETRY_CORRECTED,
+            vec![("corrected", two(corrected)), ("as_shot", two(as_shot)), ("absent", format!("{:.1}", absent * 100.0))],
+        ),
+        TargetGeometry::AsShot { corrected, as_shot } => Note::new(
+            keys::TARGET_GEOMETRY_AS_SHOT,
+            vec![("corrected", two(corrected)), ("as_shot", two(as_shot))],
+        ),
+        TargetGeometry::Ambiguous { corrected, as_shot } => Note::new(
+            keys::TARGET_GEOMETRY_AMBIGUOUS,
+            vec![("corrected", two(corrected)), ("as_shot", two(as_shot))],
+        ),
+    };
+    crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes, note);
+}
+
+/// Mean phase-correlation peak of the target against the source frame as shot
+/// and as corrected, over [`GEOMETRY_PATCH_CENTRES`] at
+/// [`GEOMETRY_PROBE_EDGE`]. The source is rendered under the calibration so the
+/// two sides share a tone; each patch is high-passed (a 9-px box removed) so
+/// the reading is about edges, not brightness.
+fn target_alignment(
+    src: &image::DynamicImage,
+    target: &image::DynamicImage,
+    base: &EditRecipe,
+    geom: &crate::recipe::LensProfile,
+    amount: f32,
+) -> (f32, f32) {
+    let (sw, sh) = (src.width().max(1) as f32, src.height().max(1) as f32);
+    let scale = GEOMETRY_PROBE_EDGE as f32 / sw.max(sh);
+    let (w, h) = (((sw * scale).round() as u32).max(1), ((sh * scale).round() as u32).max(1));
+    if (w as usize) < GEOMETRY_PATCH || (h as usize) < GEOMETRY_PATCH {
+        return (0.0, 0.0);
+    }
+    let filter = image::imageops::FilterType::Lanczos3;
+    let shot = crate::render::develop_preview(&src.resize_exact(w, h, filter), base);
+    let corrected = crate::render::apply_lens_geometry(&shot, geom, amount);
+    let t = target.resize_exact(w, h, filter);
+    let mean = |readings: Vec<(f32, i32, i32)>| {
+        readings.iter().map(|r| r.0).sum::<f32>() / readings.len().max(1) as f32
+    };
+    (mean(patch_alignment(&t, &corrected)), mean(patch_alignment(&t, &shot)))
+}
+
+/// `(peak, dy, dx)` of `b` against `a` on each of [`GEOMETRY_PATCH_CENTRES`];
+/// the two rasters share one size of at least [`GEOMETRY_PATCH`] a side.
+fn patch_alignment(a: &image::DynamicImage, b: &image::DynamicImage) -> Vec<(f32, i32, i32)> {
+    let (w, h) = (a.width() as usize, a.height() as usize);
+    let n = GEOMETRY_PATCH;
+    let luma = |img: &image::DynamicImage| -> Vec<f32> {
+        img.to_rgb8().pixels().map(|p| 0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32).collect()
+    };
+    let (la, lb) = (luma(a), luma(b));
+    GEOMETRY_PATCH_CENTRES
+        .iter()
+        .map(|&(fx, fy)| {
+            let x0 = ((fx * w as f32) as usize).saturating_sub(n / 2).min(w - n);
+            let y0 = ((fy * h as f32) as usize).saturating_sub(n / 2).min(h - n);
+            let patch = |plane: &[f32]| -> Vec<f32> {
+                let mut p = Vec::with_capacity(n * n);
+                for y in y0..y0 + n {
+                    p.extend_from_slice(&plane[y * w + x0..y * w + x0 + n]);
+                }
+                high_pass_9(&p, n)
+            };
+            phase_correlation(&patch(&la), &patch(&lb), n)
+        })
+        .collect()
+}
+
+/// `p` less its 9×9 box mean, the box mirrored at the patch edge.
+fn high_pass_9(p: &[f32], n: usize) -> Vec<f32> {
+    let mirror = |i: isize| -> usize {
+        let m = n as isize;
+        let i = if i < 0 { -i - 1 } else if i >= m { 2 * m - i - 1 } else { i };
+        i.clamp(0, m - 1) as usize
+    };
+    let mut rows = vec![0.0f32; n * n];
+    for y in 0..n {
+        for x in 0..n {
+            rows[y * n + x] = (-4..=4).map(|d| p[y * n + mirror(x as isize + d)]).sum::<f32>() / 9.0;
+        }
+    }
+    let mut out = vec![0.0f32; n * n];
+    for y in 0..n {
+        for x in 0..n {
+            let mean = (-4..=4).map(|d| rows[mirror(y as isize + d) * n + x]).sum::<f32>() / 9.0;
+            out[y * n + x] = p[y * n + x] - mean;
+        }
+    }
+    out
+}
+
+/// The phase-correlation peak of two `n`×`n` patches and where it sits:
+/// height 1.0 for a pure translation of one picture, falling toward 0 as the
+/// second stops being a shifted copy of the first; `(dy, dx)` the shift.
+fn phase_correlation(a: &[f32], b: &[f32], n: usize) -> (f32, i32, i32) {
+    let mut fa: Vec<(f64, f64)> = a.iter().map(|v| (*v as f64, 0.0)).collect();
+    let mut fb: Vec<(f64, f64)> = b.iter().map(|v| (*v as f64, 0.0)).collect();
+    fft2(&mut fa, n, false);
+    fft2(&mut fb, n, false);
+    let mut r: Vec<(f64, f64)> = fa
+        .iter()
+        .zip(&fb)
+        .map(|(&(ar, ai), &(br, bi))| {
+            let (re, im) = (ar * br + ai * bi, ai * br - ar * bi);
+            let m = (re * re + im * im).sqrt() + 1e-9;
+            (re / m, im / m)
+        })
+        .collect();
+    fft2(&mut r, n, true);
+    let (at, peak) = r
+        .iter()
+        .enumerate()
+        .fold((0, f64::MIN), |best, (i, v)| if v.0 > best.1 { (i, v.0) } else { best });
+    let wrap = |v: usize| if v < n / 2 { v as i32 } else { v as i32 - n as i32 };
+    (peak as f32, wrap(at / n), wrap(at % n))
+}
+
+/// In-place 2-D transform of an `n`×`n` row-major grid (`n` a power of two);
+/// `inverse` includes the 1/n² scale.
+fn fft2(data: &mut [(f64, f64)], n: usize, inverse: bool) {
+    let mut line = vec![(0.0, 0.0); n];
+    for y in 0..n {
+        line.copy_from_slice(&data[y * n..(y + 1) * n]);
+        fft1(&mut line, inverse);
+        data[y * n..(y + 1) * n].copy_from_slice(&line);
+    }
+    for x in 0..n {
+        for y in 0..n {
+            line[y] = data[y * n + x];
+        }
+        fft1(&mut line, inverse);
+        for y in 0..n {
+            data[y * n + x] = line[y];
+        }
+    }
+    if inverse {
+        let s = 1.0 / (n * n) as f64;
+        data.iter_mut().for_each(|v| *v = (v.0 * s, v.1 * s));
+    }
+}
+
+/// Iterative radix-2 Cooley–Tukey, unscaled.
+fn fft1(a: &mut [(f64, f64)], inverse: bool) {
+    let n = a.len();
+    let mut j = 0;
+    for i in 1..n {
+        let mut bit = n >> 1;
+        while j & bit != 0 {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j |= bit;
+        if i < j {
+            a.swap(i, j);
+        }
+    }
+    let mut len = 2;
+    while len <= n {
+        let ang = 2.0 * std::f64::consts::PI / len as f64 * if inverse { 1.0 } else { -1.0 };
+        let (wr, wi) = (ang.cos(), ang.sin());
+        for start in (0..n).step_by(len) {
+            let (mut cr, mut ci) = (1.0, 0.0);
+            for k in 0..len / 2 {
+                let (ur, ui) = a[start + k];
+                let (xr, xi) = a[start + k + len / 2];
+                let (vr, vi) = (xr * cr - xi * ci, xr * ci + xi * cr);
+                a[start + k] = (ur + vr, ui + vi);
+                a[start + k + len / 2] = (ur - vr, ui - vi);
+                (cr, ci) = (cr * wr - ci * wi, cr * wi + ci * wr);
+            }
+        }
+        len <<= 1;
+    }
+}
+
 /// Fresh in-camera lens profile for `raw`, stamped "all available components
 /// on" (the user's chosen default). What the camera's own rendition shows of
 /// them is a separate question, and a measured one: none of ten ILCE-7RM4A
@@ -5967,6 +6233,235 @@ mod tests {
             );
         }
         assert_eq!(FIT_SOURCE_EDGE, 2048, "the working edge both entries quote");
+    }
+
+    /// A sensor-frame picture with structure at every scale the geometry
+    /// probe reads: random blocks of three sizes, deterministic per `seed`.
+    fn sensor_texture(w: u32, h: u32, seed: u64) -> image::DynamicImage {
+        let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let mut next = move || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((s >> 33) as f32) / (1u64 << 31) as f32
+        };
+        let grids: Vec<(u32, Vec<f32>)> = [7u32, 19, 53]
+            .iter()
+            .map(|&b| (b, (0..(w / b + 1) * (h / b + 1) * 3).map(|_| next()).collect()))
+            .collect();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| {
+            let mut px = [0.0f32; 3];
+            for (b, cells) in &grids {
+                let i = ((y / b) * (w / b + 1) + x / b) as usize * 3;
+                for c in 0..3 {
+                    px[c] += cells[i + c] / 3.0;
+                }
+            }
+            image::Rgb(px.map(|v| (40.0 + 180.0 * v).round() as u8))
+        }))
+    }
+
+    /// The calibration of a lens whose profile moves the frame as much as the
+    /// calibration pair that exposed the misalignment (its in-camera knots).
+    fn distorting_base() -> EditRecipe {
+        EditRecipe {
+            lens_profile: crate::recipe::LensProfile {
+                distortion: vec![
+                    1.0, 1.0002441, 1.0008545, 1.0019531, 1.00354, 1.0054932, 1.0078735, 1.0108643,
+                    1.0143433, 1.0183105, 1.0228271, 1.027832, 1.0335693, 1.0397949, 1.0466919,
+                    1.0542603,
+                ],
+                distortion_on: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// A Lightroom-style export of `src` made WITH the profile on: the same
+    /// look, moved through the geometry stage the final render runs.
+    fn corrected_export(src: &image::DynamicImage, base: &EditRecipe) -> image::DynamicImage {
+        let look = crate::render::develop_preview(src, base);
+        image::DynamicImage::ImageRgb8(
+            crate::render::apply_lens_geometry(&look, &crate::render::geometry_profile(base), 0.0).to_rgb8(),
+        )
+    }
+
+    /// THE defect: the fit paired a lens-corrected target with its
+    /// uncorrected sensor frame, every pixel with a neighbour (on the
+    /// calibration pair ±10 px at the corners of 1000 px, alignment peaks
+    /// 0.06–0.17). After `fit_target` the target the fit pairs IS in the
+    /// sensor frame: every probe patch sits at shift 0 with a high peak, and
+    /// the structural reading the fit takes of the pair falls with it.
+    #[test]
+    fn a_lens_corrected_target_is_paired_in_the_sensor_frame() {
+        let src = sensor_texture(1200, 800, 39);
+        let mut base = distorting_base();
+        let target = corrected_export(&src, &base);
+        let shot = |img: &image::DynamicImage| img.resize_exact(1000, 667, image::imageops::FilterType::Lanczos3);
+        let look = crate::render::develop_preview(&shot(&src), &base);
+        let before = patch_alignment(&shot(&target), &look);
+        assert!(
+            before.iter().any(|r| (r.1, r.2) != (0, 0)),
+            "premise: as exported the target is off the sensor frame: {before:?}"
+        );
+        let fitted = fit_target(&src, &target, &mut base);
+        let TargetGeometry::Corrected { corrected, as_shot, absent } = fitted.geometry else {
+            panic!("a corrected export reads corrected: {:?}", fitted.geometry)
+        };
+        assert!(corrected >= GEOMETRY_WIN_RATIO * as_shot, "{corrected} vs {as_shot}");
+        assert!((0.005..0.08).contains(&absent), "the ring is a few per cent of the frame: {absent}");
+        assert!(base.lens_profile.distortion_on, "the recipe keeps the correction the target was made with");
+        let after = patch_alignment(&shot(&fitted.image), &look);
+        for (peak, dy, dx) in &after {
+            assert_eq!((*dy, *dx), (0, 0), "every patch aligned: {after:?}");
+            assert!(*peak > 0.3, "and by a clear peak: {after:?}");
+        }
+        let (raw, moved) = (
+            crate::fit::fit_recipe_from(&src, &target, &base),
+            crate::fit::fit_recipe_from(&src, &fitted.image, &base),
+        );
+        let d = |r: &crate::fit::FitReport| r.divergence.map_or(f32::NAN, |d| d.d);
+        assert!(
+            d(&moved) < d(&raw),
+            "the pair the fit reads is structurally closer once aligned: {} -> {}",
+            d(&raw),
+            d(&moved)
+        );
+    }
+
+    /// The other answer: a target exported with the profile OFF keeps the
+    /// sensor geometry. It is paired byte-for-byte as it stands — no alpha,
+    /// so the fit's evidence is the evidence it always was — and the recipe
+    /// stops drawing the profile's distortion and CA, so the render keeps the
+    /// geometry the target has.
+    #[test]
+    fn an_uncorrected_target_keeps_its_evidence_and_drops_the_profile_geometry() {
+        let src = sensor_texture(1200, 800, 41);
+        let mut base = distorting_base();
+        base.lens_profile.ca_r = vec![1.0, 1.0002];
+        base.lens_profile.ca_b = vec![1.0, 0.9998];
+        base.lens_profile.ca_on = true;
+        let before_base = base.clone();
+        let target = crate::render::develop_preview(&src, &base);
+        let fitted = fit_target(&src, &target, &mut base);
+        assert!(
+            matches!(fitted.geometry, TargetGeometry::AsShot { .. }),
+            "an as-shot export reads as shot: {:?}",
+            fitted.geometry
+        );
+        assert_eq!(fitted.image.as_bytes(), target.as_bytes(), "paired as it stands");
+        assert!(crate::fit::presence_of(&fitted.image).is_none(), "present everywhere");
+        assert!(!base.lens_profile.distortion_on && !base.lens_profile.ca_on);
+        assert_eq!(
+            EditRecipe { lens_profile: before_base.lens_profile.clone(), ..base.clone() },
+            before_base,
+            "nothing but the two geometry switches moved"
+        );
+        assert_eq!(base.lens_profile.vignette_on, before_base.lens_profile.vignette_on);
+        let (was, now) = (
+            crate::fit::fit_recipe_from(&src, &target, &before_base),
+            crate::fit::fit_recipe_from(&src, &fitted.image, &base),
+        );
+        assert_eq!(was.err_before.to_bits(), now.err_before.to_bits(), "the same evidence, to the bit");
+        assert_eq!(was.divergence, now.divergence);
+    }
+
+    /// A calibration that moves no pixel asks no question: the target is the
+    /// one the fit always had and the base is untouched — the path every RAW
+    /// with no distortion knots, and every bare raster, runs.
+    #[test]
+    fn a_calibration_with_no_geometry_leaves_the_pair_as_it_was() {
+        let src = sensor_texture(600, 400, 7);
+        let target = sensor_texture(600, 400, 8);
+        for lens_profile in [
+            crate::recipe::LensProfile::default(),
+            crate::recipe::LensProfile { vignette: vec![1.0, 1.2], vignette_on: true, ..Default::default() },
+        ] {
+            let mut base = EditRecipe { lens_profile, ..Default::default() };
+            let was = base.clone();
+            let fitted = fit_target(&src, &target, &mut base);
+            assert_eq!(fitted.geometry, TargetGeometry::Unmoved);
+            assert_eq!(fitted.image.as_bytes(), target.as_bytes());
+            assert_eq!(base, was);
+        }
+    }
+
+    /// The ring a corrected target leaves in the sensor frame carries no
+    /// evidence. Fill it with a colour the source never has, then with
+    /// another: the blind-move audit reads the same either way once presence
+    /// rides with the target — and reads the ring as refusers when it does
+    /// not.
+    #[test]
+    fn the_ring_outside_a_moved_target_is_absent_not_a_refuser() {
+        let (w, h) = (384u32, 256u32);
+        let src = sensor_texture(w, h, 3);
+        let ring = |x: u32, y: u32| x < 32 || y < 32 || x >= w - 32 || y >= h - 32;
+        let with_ring = |fill: [u8; 3]| {
+            let s = src.to_rgb8();
+            image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(w, h, |x, y| {
+                let p = s.get_pixel(x, y).0;
+                if ring(x, y) { image::Rgba([fill[0], fill[1], fill[2], 0]) } else { image::Rgba([p[0], p[1], p[2], 255]) }
+            }))
+        };
+        let (a, b) = (with_ring([255, 0, 255]), with_ring([0, 255, 0]));
+        let sp = crate::fit::pixels_of(&src);
+        let lifted: Vec<[f32; 3]> = sp.iter().map(|p| p.map(|v| (v + 0.08).min(1.0))).collect();
+        let model = |t: &image::DynamicImage, present: bool| {
+            let p = if present { crate::fit::presence_of(t) } else { None };
+            crate::fit::evidence_model_paired(&sp, &crate::fit::pixels_of(t), p.as_deref(), w, h)
+        };
+        let (ea, eb) = (model(&a, true), model(&b, true));
+        assert!(ea.presence.is_some(), "premise: the ring is absent");
+        let audit = |e: &crate::fit::EvidenceModel| {
+            (
+                crate::fit::moved_unsupported_luma_range_names(&sp, &lifted, e),
+                crate::fit::moved_unsupported_hue_range_names(&sp, &lifted, e),
+                crate::fit::withheld_range_names(e),
+            )
+        };
+        assert_eq!(audit(&ea), audit(&eb), "whatever the ring holds, the audit reads the same");
+        assert_eq!((audit(&ea).0, audit(&ea).1), (None, None), "and the field the target has pairs: nothing it moves is blind");
+        let (na, nb) = (model(&a, false), model(&b, false));
+        assert!(
+            audit(&na) != audit(&ea) || audit(&nb) != audit(&eb),
+            "premise: read as pixels, the ring is evidence — refusers or withheld ranges: {:?} / {:?}",
+            audit(&na),
+            audit(&nb)
+        );
+    }
+
+    /// No zone may weigh a pixel the target has no counterpart for: scoped
+    /// views of a model with presence give an absent pixel zero membership
+    /// and zero weight, and the one place every producer's pair weights enter
+    /// a zone's solve reads them through that rule.
+    #[test]
+    fn no_zone_pair_weight_survives_where_the_target_is_absent() {
+        let (w, h) = (96u32, 64u32);
+        let src = sensor_texture(w, h, 5);
+        let sp = crate::fit::pixels_of(&src);
+        let presence: Vec<f32> = (0..w * h).map(|i| f32::from(i % w >= 8)).collect();
+        let e = crate::fit::evidence_model_paired(&sp, &sp, Some(&presence), w, h);
+        let zone = vec![1.0f32; sp.len()];
+        let scoped = e.scoped(&sp, &zone, &zone);
+        for (i, p) in presence.iter().enumerate() {
+            if *p == 0.0 {
+                assert_eq!(scoped.source_membership[i], 0.0);
+                assert_eq!(scoped.source_weights[i], 0.0);
+                assert_eq!(scoped.target_weights[i], 0.0);
+                assert_eq!(e.present_weights(&zone)[i], 0.0);
+            }
+        }
+        let one_zone = production_text("src/fit_zoned/one_zone.rs");
+        assert!(
+            one_zone.contains("report.evidence.present_weights(&attachment.source_weights)")
+                && one_zone.contains("report.evidence.present_weights(&attachment.target_weights)")
+                && one_zone.contains("report.evidence.present_weights(&c.source)"),
+            "attach_one_zone takes every pair weight through the presence rule"
+        );
+        assert_eq!(
+            one_zone.matches("attachment.target_weights").count(),
+            1,
+            "…and reads the raw target weights nowhere else"
+        );
     }
 
     /// …and what `fit_source` actually returns, where a RAW is available.

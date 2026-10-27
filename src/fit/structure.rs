@@ -367,20 +367,39 @@ impl PairingScale {
     }
 }
 
+/// One pair on the common analysis grid, as every structure reading takes it.
+pub(crate) struct DivergenceRaster {
+    /// The source, developed under the base recipe, row-major.
+    pub source: Vec<[f32; 3]>,
+    /// The target as it was handed in, row-major on the same grid.
+    pub target: Vec<[f32; 3]>,
+    pub width: u32,
+    pub height: u32,
+    /// Which cells the target's field covers ([`presence_of`]); `None` when the
+    /// target carries no alpha, i.e. it is present everywhere.
+    pub presence: Option<Vec<f32>>,
+}
+
 /// The common, pixel-aligned 384×256 analysis raster used by both scopes and
 /// by the calibration prototype. Both sides are Lanczos-resampled onto that
 /// one grid and the source is placed in the calibration/base domain before
 /// ranks are measured.
+///
+/// Presence is read off a BOX thumbnail of the target rather than the Lanczos
+/// grid: the kernel's lobes would carry the clear ring a pixel or two into the
+/// field and back out, and presence is a fact about which cells the field
+/// covers.
 pub(crate) fn divergence_raster(
     src: &DynamicImage,
     target: &DynamicImage,
     base: &EditRecipe,
-) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, u32, u32) {
+) -> DivergenceRaster {
     let (w, h) = (ANALYZE_EDGE, ANALYZE_EDGE * 2 / 3);
     let src_grid = src.resize_exact(w, h, image::imageops::FilterType::Lanczos3);
     let tgt_grid = target.resize_exact(w, h, image::imageops::FilterType::Lanczos3);
     let src_base = render::develop_preview(&src_grid, base);
-    (pixels_of(&src_base), pixels_of(&tgt_grid), w, h)
+    let presence = target.color().has_alpha().then(|| presence_of(&target.thumbnail_exact(w, h))).flatten();
+    DivergenceRaster { source: pixels_of(&src_base), target: pixels_of(&tgt_grid), width: w, height: h, presence }
 }
 
 /// [`structure_divergence`] over the pair's own analysis raster, carrying that
@@ -391,7 +410,7 @@ pub(crate) fn structure_divergence_for(
     base: &EditRecipe,
     weights: Option<&[f32]>,
 ) -> Option<Divergence> {
-    let (sp, tp, w, h) = divergence_raster(src, target, base);
+    let DivergenceRaster { source: sp, target: tp, width: w, height: h, presence } = divergence_raster(src, target, base);
     let all;
     let weights = match weights {
         Some(v) => v,
@@ -400,7 +419,7 @@ pub(crate) fn structure_divergence_for(
             &all
         }
     };
-    structure_divergence(&sp, &tp, w, h, weights)
+    structure_divergence(&sp, &tp, w, h, &with_presence(weights, presence.as_deref()))
 }
 
 /// Both readings of one pair off ONE [`divergence_raster`] build.
@@ -409,8 +428,8 @@ pub(crate) fn divergence_pair_for(
     target: &DynamicImage,
     base: &EditRecipe,
 ) -> DivergencePair {
-    let (sp, tp, w, h) = divergence_raster(src, target, base);
-    let weights = vec![1.0; sp.len()];
+    let DivergenceRaster { source: sp, target: tp, width: w, height: h, presence } = divergence_raster(src, target, base);
+    let weights = presence.unwrap_or_else(|| vec![1.0; sp.len()]);
     DivergencePair {
         fine: structure_divergence(&sp, &tp, w, h, &weights),
         coarse: structure_divergence_coarse(&sp, &tp, w, h, &weights),

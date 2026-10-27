@@ -241,7 +241,7 @@ fn search_free_masks(
         // "the structure survived", and until v1.2.4 an abstention arrived here
         // as `Divergence::matched()` and cleared it for free.
         let Some(divergence) = fit::structure_divergence(
-            src_px, tgt_px, field.width, field.height, &geometry,
+            src_px, tgt_px, field.width, field.height, &evidence.present_weights(&geometry),
         ) else {
             refusals
                 .push(FreeMaskRefusal { n: number, why: FreeMaskWhy::StructureUnmeasured });

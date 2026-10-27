@@ -141,8 +141,10 @@ use detail::{detail_regression_is_bounded, fit_detail_stage, only_detail_and_qua
 use detail::{DETAIL_CONTROL_LIMIT, detail_residual};
 pub use evidence::{
     Divergence, EvidenceModel, EvidenceRange, FitMode, evidence_hue_band, evidence_luma_bin,
-    evidence_model_for,
+    evidence_model_paired,
 };
+#[cfg(test)]
+pub use evidence::{evidence_model_for};
 pub(crate) use evidence::{
     UNSUPPORTED_RANGE_MOVE, evidence_has_one_sided, luma_evidence_for_bins, withheld_range_names,
 };
@@ -192,7 +194,7 @@ pub use pairing::{
 };
 pub(crate) use pairing::{
     AtmosphereReference, CONFIDENT_MATCH, PairCorrespondence, SHARED_POPULATION_MIN_RETENTION,
-    SharedPopulation, analysis_pair, correspondence_for_pair,
+    SharedPopulation, analysis_pair, correspondence_for_pair, presence_of, with_presence,
 };
 use pairing::{NOT_SAME_FRAME_CONFIDENCE_CAP, shared_content_population};
 pub use pixels::{luma601, pixels_of};
@@ -212,7 +214,7 @@ pub(crate) use solve::{fit_recipe_from_promoted_with_disclosure_opts};
 #[cfg(test)]
 pub(crate) use solve::{fit_recipe_from_promoted, fit_recipe_from_promoted_with_disclosure};
 pub use structure::{DivergencePair, PairingScale, STRUCTURE_MIN_CORE_PX, structure_divergence};
-pub(crate) use structure::{divergence_pair_for, divergence_raster, structure_divergence_for};
+pub(crate) use structure::{divergence_pair_for, divergence_raster, structure_divergence_for, DivergenceRaster};
 pub(crate) use tone::{
     PairedRobustTone, ROBUST_REJECT_DISCLOSE_MIN, SUPPORT_MIN_PIXELS, fit_tone_sliders_supported,
     knot_support_for, paired_robust_tone, refine_tone_sliders_on, sample_tone_points,

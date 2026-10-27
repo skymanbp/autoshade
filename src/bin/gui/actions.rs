@@ -3539,6 +3539,13 @@ impl AutoShadeApp {
                                 .unwrap_or_default(),
                         ),
                     };
+                    // The target in the fit's own frame — the CLI's rule
+                    // (`pipeline::fit_target`). The judge below reads the
+                    // reference as it was exported.
+                    let mut fit_base = fit_base;
+                    let fitted_target =
+                        autoshade::pipeline::fit_target(&base, &target, &mut fit_base);
+                    let fit_target = &fitted_target.image;
                     // ONE judge call site for both orderings (R23-6): the
                     // default path reviews AFTER the persist, the deep path
                     // reviews BEFORE it and again after its retry, and a
@@ -3605,7 +3612,7 @@ impl AutoShadeApp {
                                     autoshade::store::OwnedRaster::claim(p, "mask-zone-sky")?;
                                 let rep = autoshade::fit_zoned::fit_recipe_zoned_with_regions(
                                     &base,
-                                    &target,
+                                    fit_target,
                                     &seg,
                                     &mask,
                                     &fit_base,
@@ -3620,7 +3627,7 @@ impl AutoShadeApp {
                             _ => (
                                 autoshade::fit::fit_recipe_from_with(
                                     &base,
-                                    &target,
+                                    fit_target,
                                     &fit_base,
                                     autoshade::fit::FitOptions {
                                         strength: fit_strength,
@@ -3637,6 +3644,7 @@ impl AutoShadeApp {
                     // was NOT zoned (`hint_action`'s `zoned_used` fact), i.e.
                     // when it claimed nothing at all.
                     let (mut rep, _first_claim) = run_zoned(zoned)?;
+                    autoshade::pipeline::note_target_geometry(&mut rep, fitted_target.geometry);
                     // FACTS, not prose (L12#4): the landing renders these
                     // with the language live when the result LANDS — the old
                     // trf calls here used the language captured at spawn,
@@ -3690,7 +3698,10 @@ impl AutoShadeApp {
                                     // again. A claim/segmentation failure is
                                     // not an error here: the plain solve in
                                     // hand is already a valid result.
-                                    FitAction::Zoned => run_zoned(true).ok(),
+                                    FitAction::Zoned => run_zoned(true).ok().map(|(mut r, claim)| {
+                                        autoshade::pipeline::note_target_geometry(&mut r, fitted_target.geometry);
+                                        (r, claim)
+                                    }),
                                     FitAction::Saturation(d) => {
                                         let mut r = rep.recipe.clone();
                                         r.saturation += d;
@@ -3711,7 +3722,7 @@ impl AutoShadeApp {
                                             (
                                                 autoshade::fit::rescore_report(
                                                     &base,
-                                                    &target,
+                                                    fit_target,
                                                     &r,
                                                     &fit_base,
                                                     rep.err_before,
