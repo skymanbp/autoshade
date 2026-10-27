@@ -4639,17 +4639,24 @@ fit's own global stage leaves its sky 35 b* warmer than the target, read first
 the tint swallowed that cast and stopped at Lightroom's end stop (1.00) with
 weaker gains behind it, and the finished sky and clouds both landed further
 from the target than the plain solve's; read on the gains it came out at 0.50
-and the frame, the sky and the clouds all landed closer. Each trial runs
+and the frame, the sky and the clouds all landed closer. On-gains runs only
+when the tint-first read sits at that end stop — the sign that one tint
+cannot explain the gap; below it, a tint read on what plain gains leave
+chases a residual, and small tints of that kind beat the margin on
+gains-shaped zones. Each trial runs
 through `attach_one_zone` itself, so the same probes, voucher, quality,
-acceptance and boundary gates judge it; the one-sided band veto alone does not
-apply, because the tint was read from the pairs on both sides of every band.
+acceptance and boundary gates judge it; the one-sided band veto judges the
+trial's gains and saturation exactly as the plain solve's and does not judge
+the tint, because the tint was read from the pairs on both sides of every band.
 A trial counts only when it shipped a tint, lands the zone's mean ΔE lower
 than the plain solve by `ZONE_GLOBAL_REGRESSION_TOL` and leaves the frame
 within the zone's own regression tolerance — the subzone bands' replacement
 rule — and the counting trial with the lower zone ΔE replaces the plain
-solve; when none counts, the plain solve stands to the byte. That margin is
-also why a gains-shaped gap never comes back as a tint. The shipped tint says
-so (`ZONE_TINTED`).
+solve; when none counts, the plain solve stands to the byte. On a
+gains-shaped gap a trial keeps or re-solves the same gains and can add only a
+residual tint that lands the zone closer (on the pinned warm-recolour zone,
+0.03 on the plain gains, zone ΔE 4.42 → 4.17). The shipped tint says so
+(`ZONE_TINTED`).
 
 SCOPE is the other half of the instrument, and it is not the same at every
 site. Lifting a REGIONAL veto takes a REGIONAL verdict: a veto that is a SHARE

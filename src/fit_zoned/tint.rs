@@ -138,7 +138,11 @@ pub(super) fn read_zone_tint(
 ///   Lightroom's end stop (amount 1.00) with weaker gains behind it, and the
 ///   finished sky and clouds both landed further from the target than the
 ///   plain solve's; read after the gains it came out at 0.50 and the frame,
-///   the sky and the clouds all landed closer.
+///   the sky and the clouds all landed closer. It runs ONLY when the
+///   tint-first read is at that end stop, which is what says one tint cannot
+///   explain the gap; below it, a tint read on what plain gains leave is a
+///   residual chase that beat the margin with small tints on gains-shaped
+///   zones (three of the pinned zone fixtures, 2026-10-27).
 ///
 /// Each trial goes through the very same function as the plain solve, so the
 /// same probes, voucher, quality, acceptance and frame gates judge it. A
@@ -148,9 +152,14 @@ pub(super) fn read_zone_tint(
 /// regression tolerance of what the plain solve left. Of the trials that
 /// count, the one with the lower zone ΔE replaces the plain solve; when none
 /// does, the plain solve stands exactly as it would have without them — its
-/// recipe, notes and running frame error are restored to the byte. The
-/// margin is also why the tint cannot absorb what gains explain: on a
-/// gains-shaped gap neither trial lands closer than the plain solve does.
+/// recipe, notes and running frame error are restored to the byte. The tint
+/// cannot take what the gains explain: tint-first re-solves the gains under
+/// it and on-gains keeps them, and in both the band veto still judges the
+/// gains exactly as on the plain solve. What a trial can add on a
+/// gains-shaped gap is a residual tint on top of the same gains, and only
+/// where it lands the zone closer: measured on the pinned warm-recolour zone
+/// (2026-10-27), on-gains shipped the plain gains plus a 0.03 tint, zone ΔE
+/// 4.42 → 4.17.
 pub(super) fn attach_zone_tint_or_plain(
     s_img: &DynamicImage,
     tgt_px: &[[f32; 3]],
@@ -170,9 +179,20 @@ pub(super) fn attach_zone_tint_or_plain(
     let plain_de = subzones::delta_e(plain.as_ref().map_or(&entry_px, |z| &z.rendered), tgt_px, &sw);
     type Trial = (f32, Option<AcceptedZone>, (crate::recipe::EditRecipe, Vec<crate::rationale::Note>, f32));
     let mut best: Option<Trial> = None;
+    // On-gains runs only when the tint-first read hit Lightroom's end stop:
+    // a tint alone that cannot explain the gap within the slider's travel is
+    // a cast plus a tint, and the cast is the gains' to take. Below the stop
+    // the tint-first read already explains the gap, and an on-gains read of
+    // what plain gains leave is a residual chase — small tints that beat the
+    // margin on gains-shaped zones and replace a solve that was right.
+    let mut tint_first_read = None;
     for colour in [ZoneColour::Tint, ZoneColour::TintOnGains] {
+        if colour == ZoneColour::TintOnGains && tint_first_read.is_none_or(|a: f32| a < 1.0) {
+            break;
+        }
         (report.recipe, report.notes, *frame_err) = entry.clone();
-        let tinted = attach_one_zone_as(s_img, tgt_px, report, frame_err, attachment, divergence, corr, colour);
+        let read_out = if colour == ZoneColour::Tint { &mut tint_first_read } else { &mut None };
+        let tinted = attach_one_zone_as(s_img, tgt_px, report, frame_err, attachment, divergence, corr, colour, read_out);
         let Some(zone) = tinted.as_ref() else { continue };
         let de = subzones::delta_e(&zone.rendered, tgt_px, &sw);
         let counts = report.recipe.masks[zone.mask_index].toning_amount > 0.0

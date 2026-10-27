@@ -29,7 +29,7 @@ pub(super) fn attach_one_zone(
     divergence: Option<fit::Divergence>,
     corr: Option<&fit::PairCorrespondence>,
 ) -> Option<AcceptedZone> {
-    attach_one_zone_as(s_img, tgt_px, report, frame_err, attachment, divergence, corr, ZoneColour::Gains)
+    attach_one_zone_as(s_img, tgt_px, report, frame_err, attachment, divergence, corr, ZoneColour::Gains, &mut None)
 }
 
 /// The colour move a zone solve makes. `Gains` is the per-channel recolour
@@ -46,8 +46,10 @@ pub(super) enum ZoneColour {
     TintOnGains,
 }
 
-/// [`attach_one_zone`] with its colour model named.
-#[allow(clippy::too_many_arguments)] // `attach_one_zone`'s seven plus the colour model
+/// [`attach_one_zone`] with its colour model named. `tint_read` receives the
+/// amount (0..1) the tint read returned, before any gate touched it, when
+/// the colour model read one.
+#[allow(clippy::too_many_arguments)] // `attach_one_zone`'s seven plus the colour model and its read
 pub(super) fn attach_one_zone_as(
     s_img: &DynamicImage,
     tgt_px: &[[f32; 3]],
@@ -57,6 +59,7 @@ pub(super) fn attach_one_zone_as(
     divergence: Option<fit::Divergence>,
     corr: Option<&fit::PairCorrespondence>,
     colour: ZoneColour,
+    tint_read_out: &mut Option<f32>,
 ) -> Option<AcceptedZone> {
     // `label` drives the rationale prose; it's the zone's stable ASCII tag, so
     // the text stays English/identical regardless of the GUI's display language.
@@ -553,6 +556,7 @@ pub(super) fn attach_one_zone_as(
         let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
         m.toning_hue = round1(tint.hue);
         m.toning_amount = round1(tint.amount * 100.0);
+        *tint_read_out = Some(tint.amount);
         tint_read = Some(tint);
         // Tint first: the gains on the TINTED candidate — the zone-mean
         // recolour the plain solve makes, asked of what the tint left rather
@@ -621,6 +625,14 @@ pub(super) fn attach_one_zone_as(
         m.whites = 0.0;
         m.blacks = 0.0;
     }
+    // The tint rides outside the colour probe: the band veto below judges the
+    // gains and the saturation, the moves it exists to judge, the same way on
+    // every trial as on the plain solve; the tint is not its to judge (see
+    // `tint_bands`). A trial whose gains the veto refuses loses its tint with
+    // them and does not count.
+    let tint_probe_px = (colour != ZoneColour::Gains)
+        .then(|| fit::pixels_of(&render::develop_preview(s_img, &chroma_probe)));
+    chroma_probe.masks.last_mut().expect("zone mask just pushed").toning_amount = 0.0;
     let chroma_probe_px = fit::pixels_of(&render::develop_preview(s_img, &chroma_probe));
     // 2026-10-21 (user ruling). The zone's colour probe hands the hue guard
     // the same per-pixel voucher the global end-state guard has carried since
@@ -644,14 +656,14 @@ pub(super) fn attach_one_zone_as(
     let hue_vouch = (pairing == fit::PairingScale::Pixel)
         .then(|| zone_robust.as_ref().map(|r| (r.weights.as_slice(), tgt_eff, MoveAxis::Colour)))
         .flatten();
-    let mut hue_bands = fit::moved_unsupported_hue_range_names_vouched(
+    let hue_bands = fit::moved_unsupported_hue_range_names_vouched(
         &cur_px,
         &chroma_probe_px,
         &zone_evidence,
         hue_vouch,
         None,
     );
-    let mut hue_vouched_bands = hue_vouch.and_then(|_| {
+    let hue_vouched_bands = hue_vouch.and_then(|_| {
         fit::vouched_hue_band_names(&cur_px, &chroma_probe_px, &zone_evidence, hue_vouch, None)
     });
     // The one-sided band veto does not judge the tint. The veto exists because
@@ -661,13 +673,13 @@ pub(super) fn attach_one_zone_as(
     // lack of evidence about it. What admits it instead is the trial's own
     // pixel-by-pixel landing (`tint::attach_zone_tint_or_plain`) and the
     // quality, acceptance and boundary gates below, which it meets exactly as
-    // the gains do. The bands it moved through are named in its sentence.
-    let tint_bands = if colour != ZoneColour::Gains {
-        hue_vouched_bands = None;
-        hue_bands.take()
-    } else {
-        None
-    };
+    // the gains do. The bands the whole colour move (gains and tint) moved
+    // through are named in its sentence. Until 2026-10-27 the veto was lifted
+    // for the whole trial, gains included, which let a trial ship gains the
+    // plain solve's own veto would have judged.
+    let tint_bands = tint_probe_px.as_ref().and_then(|px| {
+        fit::moved_unsupported_hue_range_names_vouched(&cur_px, px, &zone_evidence, hue_vouch, None)
+    });
     // R34 §D2. THE admission gate for a region whose PIXELS cannot pair.
     //
     // R33 §F refused to consult `fit_cells` here, on the ground that
