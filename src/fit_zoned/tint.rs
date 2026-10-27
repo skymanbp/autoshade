@@ -10,9 +10,6 @@ use super::one_zone::{ZoneColour, attach_one_zone_as};
 pub(super) struct ZoneTint {
     pub(super) hue: f32,
     pub(super) amount: f32,
-    /// The Oklab hue angle (radians) the pairs pushed along — the quantity
-    /// the read actually measures; `hue` is the wheel position that renders it.
-    pub(super) direction: f32,
     pub(super) pairs: usize,
     pub(super) neutral: usize,
 }
@@ -53,7 +50,7 @@ const TINT_MAX_PAIRS: usize = 40_000;
 /// every pair that fits the model at full weight; three passes settle it.
 ///
 /// The direction goes back to Lightroom's wheel through
-/// [`lightroom_hue_of`], and the length through `render::TINT_OKLAB_PER_UNIT`.
+/// `render::tint_hue_of`, and the length through `render::TINT_OKLAB_PER_UNIT`.
 pub(super) fn read_zone_tint(
     rendered: &[[f32; 3]],
     target: &[[f32; 3]],
@@ -113,54 +110,47 @@ pub(super) fn read_zone_tint(
         v = solve(&rw);
     }
     let amount = (v[0].hypot(v[1]) / render::TINT_OKLAB_PER_UNIT).min(1.0);
-    let direction = v[1].atan2(v[0]);
     (amount >= TINT_MIN_AMOUNT).then_some(ZoneTint {
-        hue: lightroom_hue_of(direction),
+        hue: render::tint_hue_of(v[1].atan2(v[0])),
         amount,
-        direction,
         pairs: samples.len() * stride,
         neutral: neutral * stride,
     })
 }
 
-/// The Lightroom hue (0..360, a tenth of a degree) whose swatch pushes along
-/// Oklab hue angle `theta` (radians): the render's own wheel
-/// (`render::tint_direction`) read backwards on a 3600-entry table, nearest
-/// angle wins. A table rather than a bisection because the wheel is not
-/// monotone in Oklab — pure blue's neighbourhood folds back by 0.15° between
-/// HSV 232° and 240° — and on that plateau (HSV 222–242° within 1°) any
-/// entry renders the same push.
-pub(super) fn lightroom_hue_of(theta: f32) -> f32 {
-    let mut best = (f32::INFINITY, 0.0f32);
-    for i in 0..3600 {
-        let hue = i as f32 / 10.0;
-        let d = render::tint_direction(hue);
-        let off = (d[1].atan2(d[0]) - theta + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
-            - std::f32::consts::PI;
-        if off.abs() < best.0 {
-            best = (off.abs(), hue);
-        }
-    }
-    best.1
-}
-
-/// A semantic zone's colour, solved two ways and kept the better.
+/// A semantic zone's colour, solved three ways and kept the best.
 ///
 /// The PLAIN solve is [`attach_one_zone`]'s per-channel gains and saturation
-/// chase. The TINT trial reads one mask Color tint from every paired pixel
-/// after the tone solve ([`read_zone_tint`]), then solves the gains and the
-/// saturation on the TINTED candidate — what is left after the tint, not
-/// the whole gap — and goes through the very same function, so the same
-/// probes, voucher, quality, acceptance and frame gates judge it. That order
-/// is also why the tint cannot absorb what gains explain: on a gains-shaped
-/// gap the tinted solve lands where the plain one does at best, and the
-/// margin below keeps the plain one. It REPLACES the plain solve only when it shipped
-/// a tint and passes the subzone bands' own replacement rule against the
-/// plain solve: the zone's mean ΔE to its target lower by their margin, and
-/// the frame within the zone's own regression tolerance of what the plain
-/// solve left. Otherwise the plain solve stands exactly as
-/// it would have without the trial: its recipe, notes and running frame
-/// error are restored to the byte.
+/// chase. Two TINT trials read one mask Color tint from every paired pixel
+/// after the tone solve ([`read_zone_tint`]) and differ only in what the
+/// zone-mean gains are asked:
+///
+/// * [`ZoneColour::Tint`] reads the tint FIRST, on the zone as its tone left
+///   it, and then solves the gains and the saturation on the TINTED
+///   candidate — the order for a gap that is a tint and nothing else, where
+///   gains solved first would take the mean of it and leave the tint only
+///   the difference between the two populations;
+/// * [`ZoneColour::TintOnGains`] keeps the plain solve's gains, read before
+///   the tone as always, and reads the tint on what THEY leave — the order
+///   for a gap that is a cast plus a tint. Measured on the seaside street
+///   (2026-10-27): the fit's own global stage leaves that sky 35 b* warmer
+///   than its target, read first the tint swallowed the cast and stopped at
+///   Lightroom's end stop (amount 1.00) with weaker gains behind it, and the
+///   finished sky and clouds both landed further from the target than the
+///   plain solve's; read after the gains it came out at 0.50 and the frame,
+///   the sky and the clouds all landed closer.
+///
+/// Each trial goes through the very same function as the plain solve, so the
+/// same probes, voucher, quality, acceptance and frame gates judge it. A
+/// trial counts only when it shipped a tint and passes the subzone bands'
+/// own replacement rule against the plain solve: the zone's mean ΔE to its
+/// target lower by their margin, and the frame within the zone's own
+/// regression tolerance of what the plain solve left. Of the trials that
+/// count, the one with the lower zone ΔE replaces the plain solve; when none
+/// does, the plain solve stands exactly as it would have without them — its
+/// recipe, notes and running frame error are restored to the byte. The
+/// margin is also why the tint cannot absorb what gains explain: on a
+/// gains-shaped gap neither trial lands closer than the plain solve does.
 pub(super) fn attach_zone_tint_or_plain(
     s_img: &DynamicImage,
     tgt_px: &[[f32; 3]],
@@ -174,22 +164,27 @@ pub(super) fn attach_zone_tint_or_plain(
     let entry_px = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
     let plain = attach_one_zone(s_img, tgt_px, report, frame_err, attachment, divergence, corr);
     let plain_exit = (report.recipe.clone(), report.notes.clone(), *frame_err);
-    (report.recipe, report.notes, *frame_err) = entry;
-    let tinted = attach_one_zone_as(
-        s_img, tgt_px, report, frame_err, attachment, divergence, corr, ZoneColour::Tint,
-    );
     // The zone's own pixels as `attach_one_zone` reads them: its weights
-    // where the target can pair (the v1.16.0 presence), nowhere else.
-    let sw = report.evidence.present_weights(&attachment.source_weights);
-    let sw = &*sw;
-    let plain_de = subzones::delta_e(plain.as_ref().map_or(&entry_px, |z| &z.rendered), tgt_px, sw);
-    let wins = tinted.as_ref().is_some_and(|zone| {
-        report.recipe.masks[zone.mask_index].toning_amount > 0.0
-            && subzones::delta_e(&zone.rendered, tgt_px, sw) < plain_de - ZONE_GLOBAL_REGRESSION_TOL
-            && *frame_err <= plain_exit.2 + attachment.frame_regression_tol
-    });
-    if wins {
-        return tinted;
+    // where the target can pair, nowhere else.
+    let sw = report.evidence.present_weights(&attachment.source_weights).into_owned();
+    let plain_de = subzones::delta_e(plain.as_ref().map_or(&entry_px, |z| &z.rendered), tgt_px, &sw);
+    type Trial = (f32, Option<AcceptedZone>, (crate::recipe::EditRecipe, Vec<crate::rationale::Note>, f32));
+    let mut best: Option<Trial> = None;
+    for colour in [ZoneColour::Tint, ZoneColour::TintOnGains] {
+        (report.recipe, report.notes, *frame_err) = entry.clone();
+        let tinted = attach_one_zone_as(s_img, tgt_px, report, frame_err, attachment, divergence, corr, colour);
+        let Some(zone) = tinted.as_ref() else { continue };
+        let de = subzones::delta_e(&zone.rendered, tgt_px, &sw);
+        let counts = report.recipe.masks[zone.mask_index].toning_amount > 0.0
+            && de < plain_de - ZONE_GLOBAL_REGRESSION_TOL
+            && *frame_err <= plain_exit.2 + attachment.frame_regression_tol;
+        if counts && best.as_ref().is_none_or(|b| de < b.0) {
+            best = Some((de, tinted, (report.recipe.clone(), report.notes.clone(), *frame_err)));
+        }
+    }
+    if let Some((_, zone, state)) = best {
+        (report.recipe, report.notes, *frame_err) = state;
+        return zone;
     }
     (report.recipe, report.notes, *frame_err) = plain_exit;
     plain

@@ -35,12 +35,15 @@ pub(super) fn attach_one_zone(
 /// The colour move a zone solve makes. `Gains` is the per-channel recolour
 /// every zone has always solved; `Tint` reads ONE mask Color tint from the
 /// zone's paired pixels first (`tint::read_zone_tint`) and solves the gains
-/// on what it leaves. It is only ever run as a trial beside the plain solve
-/// (`tint::attach_zone_tint_or_plain`), never on its own.
+/// on what it leaves; `TintOnGains` keeps the plain gains and reads the tint
+/// on what THEY leave. The two tint models are only ever run as trials beside
+/// the plain solve (`tint::attach_zone_tint_or_plain`, which says when each
+/// order is the right one), never on their own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ZoneColour {
     Gains,
     Tint,
+    TintOnGains,
 }
 
 /// [`attach_one_zone`] with its colour model named.
@@ -95,7 +98,7 @@ pub(super) fn attach_one_zone_as(
     // The tint is read from PAIRED pixels, so the trial exists only where a
     // Full zone's pixels pair one to one; anywhere else the plain solve is
     // the only one there is, and the trial says nothing.
-    if colour == ZoneColour::Tint && (mode != ZoneMode::Full || pairing != fit::PairingScale::Pixel) {
+    if colour != ZoneColour::Gains && (mode != ZoneMode::Full || pairing != fit::PairingScale::Pixel) {
         return None;
     }
     // R34 §D2. The REGION's own 12x8 cells, the instrument that can admit a
@@ -319,8 +322,8 @@ pub(super) fn attach_one_zone_as(
         inverted: attachment.inverted,
         color_gains: Some(
             match mode {
-                // The tint trial's colour is the tint, read below on the
-                // zone as its tone leaves it; its gains come after the tint.
+                // The tint-first trial's colour is the tint, read below on
+                // the zone as its tone leaves it; its gains come after it.
                 ZoneMode::Full if colour == ZoneColour::Tint => [1.0; 3],
                 ZoneMode::Full => d.color_gains,
                 ZoneMode::Atmosphere => shrink_atmosphere_gains_in(
@@ -535,7 +538,7 @@ pub(super) fn attach_one_zone_as(
     // the tint then misreads): every paired pixel, neutral and coloured
     // alike, under the same robust pairing weights the tone solve used.
     let mut tint_read = None;
-    if colour == ZoneColour::Tint {
+    if colour != ZoneColour::Gains {
         let rp = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
         let pair_weight = |i: usize| {
             zw_source.get(i).copied().unwrap_or(0.0).min(zw_target.get(i).copied().unwrap_or(0.0))
@@ -550,14 +553,17 @@ pub(super) fn attach_one_zone_as(
         let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
         m.toning_hue = round1(tint.hue);
         m.toning_amount = round1(tint.amount * 100.0);
-        // The gains on the TINTED candidate: the zone-mean recolour the
-        // plain solve makes, asked of what the tint left rather than of the
-        // whole gap, on the same populations and the same estimator.
-        let tinted_px = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
-        let gains = fit_zone_dials(&zone_moments(&tinted_px, &zw_source), &mt).color_gains;
-        let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
-        m.color_gains = Some(gains.map(round2));
         tint_read = Some(tint);
+        // Tint first: the gains on the TINTED candidate — the zone-mean
+        // recolour the plain solve makes, asked of what the tint left rather
+        // than of the whole gap, on the same populations and the same
+        // estimator. (On gains: the plain gains already stand under the read.)
+        if colour == ZoneColour::Tint {
+            let tinted_px = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
+            let gains = fit_zone_dials(&zone_moments(&tinted_px, &zw_source), &mt).color_gains;
+            let m = report.recipe.masks.last_mut().expect("zone mask just pushed");
+            m.color_gains = Some(gains.map(round2));
+        }
     }
     // Closed-loop zone saturation on real renders (the gains change chroma
     // by themselves — only a render knows where the zone landed).
@@ -656,7 +662,7 @@ pub(super) fn attach_one_zone_as(
     // pixel-by-pixel landing (`tint::attach_zone_tint_or_plain`) and the
     // quality, acceptance and boundary gates below, which it meets exactly as
     // the gains do. The bands it moved through are named in its sentence.
-    let tint_bands = if colour == ZoneColour::Tint {
+    let tint_bands = if colour != ZoneColour::Gains {
         hue_vouched_bands = None;
         hue_bands.take()
     } else {
