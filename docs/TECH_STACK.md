@@ -1642,10 +1642,13 @@ background mask is the BiRefNet subject matte inverted.
 `lcp.rs` reads Adobe rectilinear `.lcp` perspective polynomials and numerically
 inverts the radial mapping with guarded Newton iterations; a fold is rejected,
 and fisheye-only entries are named refusals rather than forced through a
-rectilinear approximation. Sony maker-note tag `0x7037` supplies 16 distortion
-samples at native radii `(i+1)/16`. The image renderer uses its calibrated knot
-convention, while the Lightroom mask solve first resamples the camera law onto
-2048 canonical nodes and persists a bounded 64-knot inverse transport.
+rectilinear approximation. Sony tag `0x7037` supplies 16 distortion knots. The
+image renderer reads them the way Camera Raw does, measured through Adobe DNG
+Converter's LensDistortInfo polynomial: knot i at i/(n−1) of the sensor
+half-diagonal, a least-squares odd polynomial through the radius map t·K(t),
+evaluated at the zoomed output radius and resampled onto 32 canonical nodes;
+the Lightroom mask solve keeps its native `(i+1)/16` reading, resampled onto
+2048 canonical nodes, and persists a bounded 64-knot inverse transport.
 
 The radial mask solve is zero-parameter: its centre is
 `raw_full_dims/2 − DefaultCropOrigin`, and on the A7R IVA fixture,
