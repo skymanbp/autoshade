@@ -146,7 +146,7 @@ Six techniques you will not find in another RAW developer. Each is written up in
 | Reverse-fit, stone viaduct | look error 0.161 → 0.023 at confidence 0.63 |
 | Reverse-fit, desert canyon | look error 0.129 → 0.048 · sky ΔE 3.8 |
 | Faint stars kept, vs Lightroom Denoise 50 | 98.70 % vs 98.80 % of 17,817 stars |
-| Lightroom Sharpening fit | per-pixel R² 0.93 (0.62 for plain unsharp mask) |
+| Lightroom Sharpening fit | per-pixel R² 0.97 / 0.94 at Amount 40 / 80 against Camera Raw's own renders (0.62 for plain unsharp mask) |
 | Brush geometry vs Lightroom | error 874 px → 9.8 px |
 
 <sub>The full table — 20+ rows with conditions and sources — is in [AutoShade in depth](docs/DEEP_DIVE.md#measured-numbers); [`scripts/check_docs.py`](scripts/check_docs.py) re-derives the pinned claims.</sub>
