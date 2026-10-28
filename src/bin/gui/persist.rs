@@ -715,6 +715,9 @@ pub(crate) fn stamp_calibration(
         recipe.as_shot_k = Some(k);
         recipe.as_shot_tint = Some(t);
     }
+    // …and an untouched white balance opens at As Shot, where Lightroom
+    // opens it (`EditRecipe::open_white_balance_at_as_shot`).
+    recipe.open_white_balance_at_as_shot();
 }
 
 /// Reconcile a LOADED SNAPSHOT's calibration with the card it lands on

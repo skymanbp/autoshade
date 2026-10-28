@@ -2045,9 +2045,10 @@ pub const LOCAL_CONTROLS: [Control; 30] = [
         engine_only: false,
         crs: CrsKey::Family("LocalHue"),
         tier: Some(Tier::Rendered),
-        purpose: "local HUE ROTATION of every colour inside the mask (±100 = ±30°, the same scale \
-                  as the global mixer's hue axis) — for turning one region's colour without \
-                  touching the same colour elsewhere in the frame",
+        purpose: "local HUE ROTATION of every colour inside the mask (on a camera-profile start the \
+                  value is the angle in degrees, as in Lightroom; otherwise ±100 = ±30°) — for \
+                  turning one region's colour without touching the same colour elsewhere in the \
+                  frame",
     },
     Control {
         name: "temperature",
@@ -2784,6 +2785,11 @@ pub const DOT_EXEMPT: &[(&str, &str)] = &[
 /// stored number says: that 0 renders differently from the default recipe's
 /// absent one, which inequality on the number alone cannot see.
 pub fn family_is_active(f: &Family, r: &EditRecipe) -> bool {
+    // A white balance at As Shot is where a camera-profile start opens
+    // (`EditRecipe::open_white_balance_at_as_shot`), not an edit.
+    if f.name == "white_balance" && r.white_balance_is_as_shot() {
+        return false;
+    }
     let neutral = EditRecipe::default();
     f.members.iter().filter(|m| !DOT_EXEMPT.iter().any(|(n, _)| n == *m)).any(|m| {
         r.explicit_zero.iter().any(|e| e == m)

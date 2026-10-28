@@ -679,8 +679,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Sharpens inside the mask when positive and SOFTENS when negative (the global 「Sharpening」 has no negative half). Same radius as the global one.",
         "正值在蒙版内锐化，负值柔化（全局「锐化」没有负值一半）。半径与全局一致。"),
     ("Hue shift", "色相旋转"),
-    ("Rotates every colour inside the mask (±100 = ±30°) — unlike the global color mixer, which moves one color band across the whole frame.",
-        "旋转蒙版内的所有颜色（±100 = ±30°）——不同于全局颜色混合器：那个是把某一色段在整幅画面上移动。"),
+    ("Rotates every colour inside the mask, by the value in degrees on a camera-profile start as Lightroom does (otherwise ±100 = ±30°) — unlike the global color mixer, which moves one color band across the whole frame.",
+        "旋转蒙版内的所有颜色：用相机配置文件起步时按数值的度数转，与 Lightroom 一致（否则 ±100 = ±30°）——不同于全局颜色混合器：那个是把某一色段在整幅画面上移动。"),
     // The mask Color swatch (crs:LocalToningHue / LocalToningSaturation) —
     // Lightroom's mask panel calls it 「颜色」; 「颜色染色」 keeps it apart from
     // the 「颜色」 group caption it sits under.

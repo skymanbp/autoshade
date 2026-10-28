@@ -409,7 +409,17 @@ pub(super) fn owned_attrs(r: &EditRecipe, frame: Option<FrameAspect>) -> String 
     // plus the tint, still disclosed as lossy; recipe.json carries the tint
     // losslessly either way.
     let wb_kelvin = r.temperature_k.or(if r.tint != 0.0 { r.as_shot_k } else { None });
-    if let Some(k) = wb_kelvin {
+    // v1.17.0: a camera-profile start opens AT As Shot
+    // (`EditRecipe::open_white_balance_at_as_shot`); while the pair is still
+    // there it is Lightroom's "As Shot" with the values Lightroom shows for
+    // it, not a Custom white balance that happens to equal it.
+    if r.white_balance_is_as_shot()
+        && let Some(k) = r.temperature_k
+    {
+        attr(&mut a, "WhiteBalance", "As Shot");
+        attr(&mut a, "Temperature", &(k.round() as i64).to_string());
+        attr(&mut a, "Tint", &signed(r.tint));
+    } else if let Some(k) = wb_kelvin {
         attr(&mut a, "WhiteBalance", "Custom");
         attr(&mut a, "Temperature", &(k.round() as i64).to_string());
         attr(&mut a, "Tint", &signed(r.tint));

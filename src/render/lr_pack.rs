@@ -94,6 +94,7 @@ pub(super) fn import(xmp: &str, base: &Path, calibration: &Calibration) -> EditR
     calibration.start.stamp_import(&mut r);
     r.as_shot_k = calibration.as_shot_k;
     r.as_shot_tint = calibration.as_shot_tint;
+    r.open_white_balance_at_as_shot();
     r.lens_profile = crate::pipeline::fresh_lens_profile_for_sidecar(base, Some(xmp));
     r
 }

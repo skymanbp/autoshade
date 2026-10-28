@@ -1215,6 +1215,7 @@ impl AutoShadeApp {
                         };
                         let start: autoshade::pipeline::CanvasStart = start;
                         start.stamp(&mut fresh);
+                        fresh.open_white_balance_at_as_shot();
                         self.recipe = fresh;
                         self.region = None;
                         self.dirty = true;

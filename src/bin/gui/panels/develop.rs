@@ -893,19 +893,29 @@ impl AutoShadeApp {
                     // uncheck-zeroes-tint fix can carry one with no Temp) —
                     // showing "off = as-shot" over an active tint, with its
                     // slider disabled, was a lie with no way out.
-                    let mut custom_wb =
-                        self.recipe.temperature_k.is_some() || self.recipe.tint != 0.0;
+                    // v1.17.0: a camera-profile start opens its sliders AT
+                    // As Shot (`EditRecipe::open_white_balance_at_as_shot`);
+                    // there the box reads off — As Shot is no custom white
+                    // balance — while the two sliders show the as-shot pair.
+                    let mut custom_wb = (self.recipe.temperature_k.is_some() || self.recipe.tint != 0.0)
+                        && !self.recipe.white_balance_is_as_shot();
                     if ui.checkbox(&mut custom_wb, tr(lang, "Custom white balance (off = as-shot)")).changed() {
                         // Arm AT the as-shot anchor when stamped: checking
                         // the box must not shift the image — the slider then
                         // starts from the camera's real Kelvin, not 5500.
                         self.recipe.temperature_k =
                             if custom_wb { Some(self.recipe.as_shot_k.unwrap_or(5500.0)) } else { None };
-                        if !custom_wb {
+                        if !custom_wb || self.recipe.names_profile() {
                             // "As-shot" is the WHOLE white balance: a custom
                             // Tint surviving the un-check kept a WB edit
                             // active behind a label claiming there was none.
+                            // On a camera-profile start Tint is absolute, so
+                            // both directions land on the as-shot tint.
                             self.recipe.tint = 0.0;
+                            if self.recipe.names_profile() {
+                                self.recipe.temperature_k = None;
+                                self.recipe.open_white_balance_at_as_shot();
+                            }
                         }
                         changed = true;
                     }
@@ -952,8 +962,10 @@ impl AutoShadeApp {
                 // checkbox's "off = as-shot" promise. A legacy tint-only
                 // recipe counts as Custom (see the checkbox above) so its
                 // slider stays reachable.
+                // Its reset is the as-shot tint where Tint is absolute.
+                let tint_reset = if r.names_profile() { r.as_shot_tint.unwrap_or(0.0) } else { 0.0 };
                 ui.add_enabled_ui(custom_wb, |ui| {
-                    changed |= Self::slider(ui, lang, tr(lang, "Tint"), &mut r.tint, -100.0, 100.0, 0.0);
+                    changed |= Self::slider(ui, lang, tr(lang, "Tint"), &mut r.tint, -100.0, 100.0, tint_reset);
                 });
                 changed |= Self::slider(ui, lang, tr(lang, "Exposure"), &mut r.exposure_ev, -5.0, 5.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Contrast"), &mut r.contrast, -100.0, 100.0, 0.0);
@@ -3083,7 +3095,7 @@ impl AutoShadeApp {
                     -100.0,
                     100.0,
                     0.0,
-                    tr(lang, "Rotates every colour inside the mask (±100 = ±30°) — unlike the global color mixer, which moves one color band across the whole frame."),
+                    tr(lang, "Rotates every colour inside the mask, by the value in degrees on a camera-profile start as Lightroom does (otherwise ±100 = ±30°) — unlike the global color mixer, which moves one color band across the whole frame."),
                 );
                 // Engine-rendered since batch #2-B (render.rs apply_masks
                 // mirrors the global WB model inside the mask) — live in the

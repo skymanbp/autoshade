@@ -115,6 +115,7 @@ fn sidecar_recipe(raw: &Path, xmp_text: &str) -> EditRecipe {
     let (k, t) = crate::pipeline::fresh_as_shot_wb(raw);
     r.as_shot_k = r.as_shot_k.or(k);
     r.as_shot_tint = r.as_shot_tint.or(t);
+    r.open_white_balance_at_as_shot();
     r
 }
 

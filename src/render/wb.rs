@@ -171,7 +171,14 @@ pub(super) fn apply_recipe_wb_in(data: &mut [[f32; 3]], r: &EditRecipe, space: E
         let anchor = r.as_shot_k.unwrap_or(5500.0);
         if SliderLaw::of(r) == SliderLaw::CameraRaw {
             let target = (r.temperature_k.unwrap_or(anchor), r.tint);
-            let m = camera_raw_wb(target, (anchor, r.as_shot_tint.unwrap_or(0.0)));
+            let as_shot = (anchor, r.as_shot_tint.unwrap_or(0.0));
+            // As Shot is no move: a fresh develop opens there
+            // (`EditRecipe::open_white_balance_at_as_shot`), and rendering it
+            // must be what the unstamped recipe rendered.
+            if target == as_shot {
+                return;
+            }
+            let m = camera_raw_wb(target, as_shot);
             apply_camera_raw_wb(data, &m, &profile::UnderTone::new(space));
             return;
         }

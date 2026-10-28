@@ -990,6 +990,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                     r.as_shot_k = ask;
                     r.as_shot_tint = ast;
                 }
+                r.open_white_balance_at_as_shot();
                 let h = Header::from_bytes(&b"X-Recipe-Source"[..], &b"lightroom-sidecar"[..])
                     .expect("static ASCII header");
                 let mut resp = json_text(serde_json::to_string(&r)?).with_header(h);
@@ -1197,6 +1198,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                     r.as_shot_k = ask;
                     r.as_shot_tint = ast;
                 }
+                r.open_white_balance_at_as_shot();
                 let mut resp = json_text(serde_json::to_string(&r)?);
                 // A corrupt recipe.json used to fall through to THIS lossy
                 // XMP answer SILENTLY — the authoritative save (bitmap
@@ -1252,6 +1254,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                     r.as_shot_k = ask;
                     r.as_shot_tint = ast;
                 }
+                r.open_white_balance_at_as_shot();
                 let h = Header::from_bytes(&b"X-Recipe-Source"[..], &b"embedded-xmp"[..])
                     .expect("static ASCII header");
                 let mut resp = json_text(serde_json::to_string(&r)?).with_header(h);

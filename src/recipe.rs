@@ -1386,6 +1386,39 @@ impl EditRecipe {
             || self.look.as_ref().is_some_and(|l| !l.base_profile.is_empty())
     }
 
+    /// Open the white balance where Lightroom opens it (v1.17.0): on a recipe
+    /// that names a camera profile and carries the photo's as-shot anchor,
+    /// an untouched white balance — no Temperature, and a Tint of 0 or the
+    /// as-shot one — is stamped AT As Shot: `temperature_k` the as-shot
+    /// Kelvin and `tint` the as-shot tint, the values Lightroom's sliders show
+    /// on open. On that law Tint is Camera Raw's absolute tint
+    /// (`render::camera_raw_wb`), so a Tint left at 0 is a move to 0: the
+    /// first drag of Temperature then also took the as-shot tint away (−14 on
+    /// a +14 frame). The stamp renders exactly what the unstamped recipe
+    /// rendered (the white balance stage skips a target equal to As Shot).
+    /// Every other recipe is left as it is, byte for byte.
+    pub fn open_white_balance_at_as_shot(&mut self) {
+        let (Some(k), true) = (self.as_shot_k, self.names_profile()) else {
+            return;
+        };
+        let t = self.as_shot_tint.unwrap_or(0.0);
+        if self.temperature_k.is_none() && (self.tint == 0.0 || self.tint == t) {
+            self.temperature_k = Some(k);
+            self.tint = t;
+        }
+    }
+
+    /// The white balance sits at As Shot: a recipe that names a camera
+    /// profile, with Temperature and Tint at the stamped as-shot pair — what
+    /// [`EditRecipe::open_white_balance_at_as_shot`] opens at, and what the
+    /// XMP writer then writes as Lightroom's `WhiteBalance="As Shot"`.
+    pub fn white_balance_is_as_shot(&self) -> bool {
+        self.names_profile()
+            && self.as_shot_k.is_some()
+            && self.temperature_k == self.as_shot_k
+            && self.tint == self.as_shot_tint.unwrap_or(0.0)
+    }
+
     /// The camera base curve this recipe renders (v1.17.0): `base_curve`,
     /// unless the recipe names a camera profile — exactly ONE starting tone.
     /// Lightroom's order is profile → the Look's baked curve → the sliders, so
@@ -2195,8 +2228,10 @@ pub struct LocalAdjustment {
     /// in this app.
     pub sharpness: f32,
     pub saturation: f32,
-    /// Local HUE ROTATION → `crs:LocalHue`, -100..=100 mapped to ±30° (the
-    /// same scale as the global 8-band mixer's hue axis, `render::apply_hsl`).
+    /// Local HUE ROTATION → `crs:LocalHue`, -100..=100. On a camera-profile
+    /// start the value is the angle in degrees, as Camera Raw renders it
+    /// (`render::mask_cr::hue_px`, v1.17.0); otherwise ±100 maps to ±30°
+    /// (the global 8-band mixer's hue axis, `render::apply_hsl`).
     /// Rotates every hue inside the mask instead of one band across the whole
     /// frame — the one shape of colour move a global mixer cannot make. Added
     /// in R23-1b beside `sharpness`, for the same reason.

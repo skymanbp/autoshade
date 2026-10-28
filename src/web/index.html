@@ -803,20 +803,21 @@ function buildWb(panel) {
   const temp = row.querySelector(".wb-temp"), on = chk.querySelector(".wb-custom-on");
   const num = row.querySelector(".wb-temp-val");
   temp.oninput = () => {
-    if (!on.checked) return;
+    if (state.recipe.temperature_k == null) return;
     state.recipe.temperature_k = posToK(temp.value);
     num.value = state.recipe.temperature_k;
+    on.checked = !wbAtAsShot(state.recipe);
     scheduleAfter();
   };
   temp.onchange = () => pushHistory(state.recipe);
   // Double-click = back to the as-shot anchor (the GUI slider's default).
   temp.ondblclick = () => {
-    if (!on.checked) return;
+    if (state.recipe.temperature_k == null) return;
     state.recipe.temperature_k = Math.round(state.recipe.as_shot_k || 5500);
     syncWb(); pushHistory(state.recipe); scheduleAfter();
   };
   num.onchange = () => {
-    if (!on.checked) return;
+    if (state.recipe.temperature_k == null) return;
     const k = clampv(Math.round(+num.value || 0), 2000, 40000);
     state.recipe.temperature_k = k;
     syncWb(); pushHistory(state.recipe); scheduleAfter();
@@ -828,15 +829,30 @@ function buildWb(panel) {
     } else {
       state.recipe.temperature_k = null;
     }
-    syncWb(); scheduleAfter(); pushHistory(state.recipe);
+    // A camera-profile start: Tint is absolute, so either way the white
+    // balance lands on the as-shot pair (the server's
+    // EditRecipe::open_white_balance_at_as_shot).
+    if (namesProfile(state.recipe)) { state.recipe.temperature_k = null; state.recipe.tint = 0; openWbAtAsShot(state.recipe); }
+    syncWb(); syncSliders(); scheduleAfter(); pushHistory(state.recipe);
   };
 }
+// v1.17.0 — EditRecipe::names_profile / open_white_balance_at_as_shot /
+// white_balance_is_as_shot, mirrored: a camera-profile start opens its white
+// balance AT As Shot, the values Lightroom shows on open.
+const namesProfile = r => !!(r.camera_profile || (r.look && r.look.base_profile));
+function openWbAtAsShot(r) {
+  if (r.as_shot_k == null || !namesProfile(r)) return;
+  const t = r.as_shot_tint != null ? r.as_shot_tint : 0;
+  if (r.temperature_k == null && (!r.tint || r.tint === t)) { r.temperature_k = r.as_shot_k; r.tint = t; }
+}
+const wbAtAsShot = r => namesProfile(r) && r.as_shot_k != null && r.temperature_k === r.as_shot_k
+  && r.tint === (r.as_shot_tint != null ? r.as_shot_tint : 0);
 function syncWb() {
   const temp = document.querySelector(".wb-temp"), on = document.querySelector(".wb-custom-on");
   if (!temp || !on) return;
   const num = document.querySelector(".wb-temp-val");
   const k = state.recipe.temperature_k;
-  on.checked = k != null;
+  on.checked = k != null && !wbAtAsShot(state.recipe);
   temp.disabled = k == null;
   num.disabled = k == null;
   temp.value = kToPos(k != null ? k : (state.recipe.as_shot_k || 5500));
@@ -1113,6 +1129,7 @@ async function selectPhoto(id, stem, el) {
     if (freshStart) { state.recipe.camera_profile = freshStart.camera_profile; state.recipe.look = structuredClone(freshStart.look); }
     if (freshLens) state.recipe.lens_profile = freshLens;
     if (freshAsShot) { state.recipe.as_shot_k = freshAsShot.k; state.recipe.as_shot_tint = freshAsShot.t; }
+    openWbAtAsShot(state.recipe);
     // AFTER the calibration stamps: a baseline snapshotted before them
     // differed from the canvas immediately, so a fresh, untouched photo
     // already raised the unsaved-edits confirm.
@@ -1262,7 +1279,7 @@ async function selectPhoto(id, stem, el) {
   // fallback curve may be an era-1 save that was momentarily unrepairable —
   // posting it stampless would launder it to era-2 and disable the repair
   // forever.
-  main.querySelector(".reset").onclick = ()=>{ const cur = state.recipe && state.recipe.base_curve; const curVer = state.recipe ? state.recipe.version : null; const usedFresh = !!(state.freshCurve && state.freshCurve.length); const bc = usedFresh ? state.freshCurve : cur; const curLens = state.recipe && state.recipe.lens_profile; const lp = state.freshLens || curLens; const curAs = (state.recipe && state.recipe.as_shot_k != null) ? { k: state.recipe.as_shot_k, t: state.recipe.as_shot_tint } : null; const as = state.freshAsShot || curAs; state.recipe = structuredClone(DEFAULT_RECIPE); if (bc && bc.length) state.recipe.base_curve = structuredClone(bc); if (!usedFresh && bc && bc.length && curVer != null) state.recipe.version = curVer; if (state.freshStart) { state.recipe.camera_profile = state.freshStart.camera_profile; state.recipe.look = structuredClone(state.freshStart.look); } if (lp) state.recipe.lens_profile = structuredClone(lp); if (as) { state.recipe.as_shot_k = as.k; state.recipe.as_shot_tint = (as.t != null ? as.t : null); } state.region = null; selBox.hidden = true; state.sessionMaster = null; syncSliders(); pushHistory(state.recipe); renderAfter(); };
+  main.querySelector(".reset").onclick = ()=>{ const cur = state.recipe && state.recipe.base_curve; const curVer = state.recipe ? state.recipe.version : null; const usedFresh = !!(state.freshCurve && state.freshCurve.length); const bc = usedFresh ? state.freshCurve : cur; const curLens = state.recipe && state.recipe.lens_profile; const lp = state.freshLens || curLens; const curAs = (state.recipe && state.recipe.as_shot_k != null) ? { k: state.recipe.as_shot_k, t: state.recipe.as_shot_tint } : null; const as = state.freshAsShot || curAs; state.recipe = structuredClone(DEFAULT_RECIPE); if (bc && bc.length) state.recipe.base_curve = structuredClone(bc); if (!usedFresh && bc && bc.length && curVer != null) state.recipe.version = curVer; if (state.freshStart) { state.recipe.camera_profile = state.freshStart.camera_profile; state.recipe.look = structuredClone(state.freshStart.look); } if (lp) state.recipe.lens_profile = structuredClone(lp); if (as) { state.recipe.as_shot_k = as.k; state.recipe.as_shot_tint = (as.t != null ? as.t : null); } openWbAtAsShot(state.recipe); state.region = null; selBox.hidden = true; state.sessionMaster = null; syncSliders(); pushHistory(state.recipe); renderAfter(); };
   main.querySelector(".savexmp").onclick = saveXmp;
   main.querySelector(".export").onclick = exportFull;
   main.querySelector(".download").onclick = downloadFull;
