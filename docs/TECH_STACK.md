@@ -1387,8 +1387,10 @@ and `src/recipe.rs` for the module name.
   ceiling by evidence (`pushed_past_evidence`: a paired band may rise to the
   target's, an unpaired band not at all — the night sky's unpaired fine band
   rose 0.38 → 0.52 under clarity +53 and the frame's ΔE 5.22 → 8.05 before
-  it), frame drift ≤
-  `ZONE_GLOBAL_REGRESSION_TOL`. Solves texture and clarity only — capture
+  it), frame do-no-harm ≤ `FIT_QUANT` (1.8e-3; the zones' 0.02
+  `ZONE_GLOBAL_REGRESSION_TOL` until v1.17.0, which let a land zone's clarity
+  take p39's frame from 0.0108 to 0.0260 under Camera Raw's mask-Clarity law).
+  Solves texture and clarity only — capture
   sharpening's radius is in film pixels and is not a quantity a 768-px reading
   measures. Night pair, fine / mid band: sky r 0.03 / 0.65 at the target's
   1.5× — a slope of 0.98, nothing asked, nothing ships (the target's

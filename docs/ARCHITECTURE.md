@@ -6553,8 +6553,15 @@ at all — the target's energy there is drawn, so it is no ceiling, and what a
 clarity move adds there is leak: the night pair's sky took clarity +53 for a
 mid band paired at 0.62, its unpaired fine band rose 0.38 → 0.52 of the
 target's, and the frame's ΔE went 5.22 → 8.05 with every gate passing until
-this one) and the frame's drift budget
-(`ZONE_GLOBAL_REGRESSION_TOL`) — with the tone ladder's shrink
+this one) and the frame's do-no-harm — since v1.17.0 the fit's own
+quantisation (`FIT_QUANT`, 1.8e-3), not the zones' drift budget
+`ZONE_GLOBAL_REGRESSION_TOL` (0.02, sized for a mask that cannot touch pixels
+outside its raster): under Camera Raw's law a mask's Clarity lifts the zone's
+midtones, so a land zone's clarity moved the whole frame's tone and 0.02 let
+it ship — p39 at 0.65 frame 0.0108 → 0.0260 at half the solved clarity, the
+fit ending worse than its own start (0.024 → 0.026), p40 at 0.85 0.0199 →
+0.0322 at a quarter; with the quantisation bound both lands are refused and
+the fits end at 0.011 and 0.020 — with the tone ladder's shrink
 (`DETAIL_SHRINK_LADDER = [0.75, 0.5, 0.25]`) before a refusal. Before those
 three, a reach rule with no ladder: a slider that ran to its stop in the
 direction it was still asked, with the band outside the matched window, is
