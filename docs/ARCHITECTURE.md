@@ -2847,7 +2847,7 @@ all five calibration pairs (four 24–105 mm frames with the lens on, the
 lens, not a constant: +0.26 % at 73 and 80 mm, +0.08 to +0.16 % at 105 mm,
 +0.03 to +0.06 % at 45 mm, and none at all (|Δ| ≤ 0.006 %) on the 14–24 mm
 frame, although the 24–105 mm `.lcp` also defers to the camera's distortion
-data (`PreferMetadataDistort`). A knot placement does not explain it: (i+1)/(n−1) fits the 80 mm frame
+data (the profile's PreferMetadataDistort flag, an attribute of the .lcp file, not an engine symbol). A knot placement does not explain it: (i+1)/(n−1) fits the 80 mm frame
 but makes the 45 mm one three times worse and breaks the 14–24 mm agreement
 (rms 0.04 → 0.55 × 10⁻³), and no (i+b)·u grid, cubic or polynomial
 interpolation, or the `.lcp` polynomial closes all five. The magnification is
