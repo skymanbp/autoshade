@@ -1754,7 +1754,10 @@ readers, never by the silent probes.
 - `LocalExposure2012`: file value `= EV/4`; importer multiplies by `4`
   (**measured scale**).
 - `LocalHue`: file value `= degrees/180`; importer multiplies by `180`
-  (**measured scale**).
+  (**measured scale**); range ±1.0 = ±180°, Camera Raw's own (**measured**,
+  v1.17.0, camera-profile start: 0.25 / 0.5 / 0.75 / 1.0 turn the Lab hue by
+  54.7° / 81.9° / 112.9° / 173.5° against the degrees law's 56.8° / 85.8° /
+  118.7° / 165.7°, and −1.0 renders as +1.0, the same half turn).
 - The `/100` local family is contrast, highlights, shadows, whites, blacks,
   clarity, dehaze, texture, saturation, temperature, tint, local sharpness,
   and luminance noise reduction (**measured file-to-UI scale; saturation and

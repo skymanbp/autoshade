@@ -7,11 +7,13 @@
 /// 27.8 and ÷360 would read 100.
 ///
 /// The gate moves with the reader: at the old 100 scale a slider past
-/// ±55.6 refused the WHOLE correction as out of model.
+/// ±55.6 refused the WHOLE correction as out of model. Its end stop is the
+/// file's ±1.0 (v1.17.0): Camera Raw renders `LocalHue="1.0"` as a half
+/// turn, so ±180 is inside the model and only past it is refused.
 ///
 /// MUTATION THIS CATCHES: put `q100("LocalHue")` back and the anchor reads
 /// 27.7778; leave the domain gate on the 100 scale and the ±100 row
-/// refuses.
+/// refuses; put the old ±100 stop back and the ±1.0 row refuses.
 #[test]
 fn local_hue_rides_the_measured_180_scale() {
     let doc = lr_doc(&lr_correction("Hue", "", &lr_radial("0", "0")))
@@ -19,22 +21,19 @@ fn local_hue_rides_the_measured_180_scale() {
     let r = xmp_to_recipe(&doc);
     assert_eq!(r.masks.len(), 1, "the correction imports");
     assert!((r.masks[0].hue - 50.0).abs() < 1e-3, "UI +50 ⇒ {}", r.masks[0].hue);
-    // The whole ±100 slider is inside the model — including its end
-    // stops, which land on ±0.555556 and read back as ±100.00008 through
-    // the wire's six decimals.
-    for (text, want) in [("0.555556", 100.0), ("-0.555556", -100.0)] {
+    // The old ±100 stops (±0.555556, ±100.00008 through the wire's six
+    // decimals) and the file's own ±1.0, a half turn, are inside the model.
+    for (text, want) in [("0.555556", 100.0), ("-0.555556", -100.0), ("0.7", 126.0), ("1.0", 180.0), ("-1", -180.0)] {
         let doc = lr_doc(&lr_correction("Hue", "", &lr_radial("0", "0")))
             .replace("crs:LocalHue=\"0\"", &format!("crs:LocalHue=\"{text}\""));
         let r = xmp_to_recipe(&doc);
         assert_eq!(r.masks.len(), 1, "{text} is inside Lightroom's own slider");
         assert!((r.masks[0].hue - want).abs() < 1e-2, "{text} ⇒ {}", r.masks[0].hue);
     }
-    // …and a value PAST it is out of model and refused, which is the half
-    // the gate exists for: 0.7 is a hue of 126, half a turn's worth beyond
-    // the slider. On the old 100 scale the same file read 70 and sailed
-    // through.
+    // …and a value PAST the half turn is out of model and refused, which is
+    // the half the gate exists for.
     let doc = lr_doc(&lr_correction("Hue", "", &lr_radial("0", "0")))
-        .replace("crs:LocalHue=\"0\"", "crs:LocalHue=\"0.7\"");
+        .replace("crs:LocalHue=\"0\"", "crs:LocalHue=\"1.01\"");
     assert!(xmp_to_recipe(&doc).masks.is_empty(), "a hue past the slider is out of model");
     assert_eq!(
         import_losses(&doc),

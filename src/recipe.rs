@@ -1501,6 +1501,12 @@ impl CreativeLook {
 /// now publish the same dense canonical table.
 pub const MASK_WARP_KNOTS: usize = 64;
 
+/// The local Hue's end stop, either way: [`LocalAdjustment::hue`] runs
+/// ±180, the half turn Camera Raw accepts and renders (`crs:LocalHue`
+/// ±1.0). The user's own Lightroom sidecars never went past 0.264 (47.5°),
+/// so the file range, not a census, sets the stop.
+pub const LOCAL_HUE_MAX_DEG: f32 = 180.0;
+
 /// Where [`LensProfile::mask_warp`] came from — or, when it is empty, WHY.
 ///
 /// A typed answer rather than an empty vector, for the reason every disclosure
@@ -2228,10 +2234,13 @@ pub struct LocalAdjustment {
     /// in this app.
     pub sharpness: f32,
     pub saturation: f32,
-    /// Local HUE ROTATION → `crs:LocalHue`, -100..=100. On a camera-profile
-    /// start the value is the angle in degrees, as Camera Raw renders it
-    /// (`render::mask_cr::hue_px`, v1.17.0); otherwise ±100 maps to ±30°
-    /// (the global 8-band mixer's hue axis, `render::apply_hsl`).
+    /// Local HUE ROTATION → `crs:LocalHue` (the file holds degrees ÷ 180),
+    /// ±[`LOCAL_HUE_MAX_DEG`]. On a camera-profile start the value is the
+    /// angle in degrees, as Camera Raw renders it (`render::mask_cr::hue_px`,
+    /// v1.17.0: file values 0.25 / 0.5 / 0.75 / 1.0 turn the Lab hue by
+    /// 54.7° / 81.9° / 112.9° / 173.5°, every L band within 2.01 L / 1.20 ab
+    /// of this law, ±1.0 the same half turn); otherwise ±100 maps to ±30° (the
+    /// global 8-band mixer's hue axis, `render::apply_hsl`).
     /// Rotates every hue inside the mask instead of one band across the whole
     /// frame — the one shape of colour move a global mixer cannot make. Added
     /// in R23-1b beside `sharpness`, for the same reason.
@@ -4225,11 +4234,13 @@ impl EditRecipe {
             for v in [
                 &mut m.contrast, &mut m.highlights, &mut m.shadows, &mut m.whites,
                 &mut m.blacks, &mut m.clarity, &mut m.dehaze, &mut m.texture,
-                &mut m.sharpness, &mut m.saturation, &mut m.hue,
+                &mut m.sharpness, &mut m.saturation,
                 &mut m.temperature, &mut m.tint,
             ] {
                 *v = c(*v, -100.0, 100.0);
             }
+            // The local Hue's own travel: Lightroom's half turn either way.
+            m.hue = c(m.hue, -LOCAL_HUE_MAX_DEG, LOCAL_HUE_MAX_DEG);
             m.noise_reduction = c(m.noise_reduction, 0.0, 100.0);
             m.toning_amount = c(m.toning_amount, 0.0, 100.0);
             // The tint's hue CLAMPS to the 0..=360 band the advisor registry

@@ -1072,9 +1072,9 @@ fn parse_one_correction_with_reader(
         // Lightroom export put the mask Hue slider at +50 and the sidecar came
         // back `crs:LocalHue="0.277778"` (`P14.xmp`, verbatim), and
         // 0.277778 × 180 = 50.00004 — no other simple scale lands on it (÷100
-        // would read 27.8, ÷360 would read 100). The recipe's own domain is
-        // unchanged at ±100 (`LocalAdjustment::hue`), so this is a boundary
-        // conversion exactly like `crs:Feather`'s, not a widening.
+        // would read 27.8, ÷360 would read 100). The recipe's domain is the
+        // file's ±1.0 on that scale, ±180 (`recipe::LOCAL_HUE_MAX_DEG`,
+        // v1.17.0), so this is a boundary conversion like `crs:Feather`'s.
         //
         // What is measured here is the SCALE. The meaning was measured in
         // v1.17.0: on a camera-profile start Camera Raw turns the hue by the

@@ -543,8 +543,8 @@ A selected mask's sliders come in Lightroom's groups — **Tone**, **Detail**,
 a mask's Exposure, Contrast, Highlights, Shadows, Whites, Blacks, Dehaze,
 Clarity, Texture and its **Temp shift** / **Tint shift** move the picture the
 way Lightroom's mask sliders do — measured one by one against Camera Raw —
-and **Hue shift** turns colours by its value in degrees, as Lightroom's does
-(on any other start ±100 is ±30°). A mask's Sharpness, Noise and Saturation
+and **Hue shift** turns colours by its value in degrees, up to ±180° as
+Lightroom's does (on any other start ±100 is ±30°). A mask's Sharpness, Noise and Saturation
 keep the engine's own model there, and Moiré and Defringe are not rendered.
 The **Color** group holds
 **Saturation**, **Hue shift**, **Temp shift**, **Tint shift** and, since

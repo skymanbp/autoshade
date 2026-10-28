@@ -523,18 +523,14 @@ pub(super) fn correction_value_reasons(own: Scope<'_>) -> Result<Vec<MaskImportR
         }
     }
     // `LocalHue` left the loop above in v0.32.0: its file scale is 180, not
-    // 100 (`parse_one_correction`'s `q180`). The gate has to move WITH the
-    // reader or it stops meaning "inside Lightroom's own slider": at scale 100
-    // the band admitted a file value up to 1.0, which on the measured scale is
-    // a hue of 180 — half a turn past the slider's end stop, and a number the
-    // reader would hand on for the recipe clamp to crush in silence.
-    // (The old pairing was self-consistent, so this is not a refusal the old
-    // build made wrongly — it is the one it failed to make.)
-    // ±100.001, not ±100: Lightroom writes this key at SIX decimals, and the
-    // slider's own end stop ±100 is `±0.555556` there, which reads back as
-    // ±100.00008. Gating at exactly 100 would refuse a mask for the wire
-    // format's rounding — the band is one wire step wide and nothing else.
-    if !optional_scaled_number_in(own, "LocalHue", 180.0, -100.001, 100.001) {
+    // 100 (`parse_one_correction`'s `q180`). The gate moves WITH the reader.
+    // Its end stop is the file's ±1.0, a half turn (v1.17.0, measured):
+    // Camera Raw renders 0.25 / 0.5 / 0.75 / 1.0 as turns that grow with the
+    // value and ±1.0 as the same 180° turn, so ±1.0 is a hue Lightroom's
+    // engine draws, and the old ±100 (±0.555556) stop refused it. Plus one
+    // wire step: the key is written at six decimals.
+    let hue_stop = crate::recipe::LOCAL_HUE_MAX_DEG + 0.001;
+    if !optional_scaled_number_in(own, "LocalHue", 180.0, -hue_stop, hue_stop) {
         return Err(MaskImportReason::OutOfModel);
     }
     // The Color swatch's own ranges: a hue in degrees around the wheel and a

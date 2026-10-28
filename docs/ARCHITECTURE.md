@@ -3939,6 +3939,12 @@ experiment:
   reports these sections cite.)
 * **`crs:LocalHue`'s scale is 180, not 100.** A controlled export with the mask
   Hue slider at +50 wrote `crs:LocalHue="0.277778"`; 0.277778 × 180 = 50.00004.
+  Its range is the file's ±1.0, a half turn (v1.17.0): Camera Raw renders
+  0.25 / 0.5 / 0.75 / 1.0 / −0.5 as Lab hue turns of 54.7° / 81.9° / 112.9° /
+  173.5° / −98.0° on the reference frame and ±1.0 identically; the engine's
+  degrees law reads 56.8° / 85.8° / 118.7° / 165.7° / −94.1°, every L band
+  within 2.01 L / 1.20 ab. The importer admits ±1.0 (`LOCAL_HUE_MAX_DEG`);
+  the user's own sidecars never wrote past 0.264.
 * **`crs:LocalToningHue` is degrees, unscaled; `LocalToningSaturation` is
   0..1** (v1.17.0). The reference sidecar's sky mask reads `231` / `0.73`, its
   street `43` / `0.24`; the recipe stores the hue as written and the amount

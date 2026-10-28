@@ -2040,13 +2040,13 @@ pub const LOCAL_CONTROLS: [Control; 30] = [
     Control {
         name: "hue",
         shape: Shape::Number,
-        range: Some((-100.0, 100.0)),
+        range: Some((-180.0, 180.0)),
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Family("LocalHue"),
         tier: Some(Tier::Rendered),
         purpose: "local HUE ROTATION of every colour inside the mask (on a camera-profile start the \
-                  value is the angle in degrees, as in Lightroom; otherwise ±100 = ±30°) — for \
+                  value is the angle in degrees, ±180 as in Lightroom; otherwise ±100 = ±30°) — for \
                   turning one region's colour without touching the same colour elsewhere in the \
                   frame",
     },

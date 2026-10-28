@@ -3033,6 +3033,10 @@ impl AutoShadeApp {
                         }
                     }
                 }
+                // The local Hue's travel follows the law it renders through
+                // (`render::mask_cr::hue_px`): Lightroom's ±180° on a
+                // camera-profile start, the engine's ±100 (= ±30°) otherwise.
+                let hue_travel = if self.recipe.names_profile() { autoshade::recipe::LOCAL_HUE_MAX_DEG } else { 100.0 };
                 let m = &mut self.recipe.masks[i];
                 // LR's 0..100 display track (storage stays 0..1 — slider_pct).
                 changed |= Self::slider_pct(ui, lang, tr(lang, "Amount"), &mut m.amount, 1.0, 1.0);
@@ -3092,10 +3096,10 @@ impl AutoShadeApp {
                     lang,
                     tr(lang, "Hue shift"),
                     &mut m.hue,
-                    -100.0,
-                    100.0,
+                    -hue_travel,
+                    hue_travel,
                     0.0,
-                    tr(lang, "Rotates every colour inside the mask, by the value in degrees on a camera-profile start as Lightroom does (otherwise ±100 = ±30°) — unlike the global color mixer, which moves one color band across the whole frame."),
+                    tr(lang, "Rotates every colour inside the mask: on a camera-profile start by the value in degrees, ±180° as in Lightroom; otherwise ±100 = ±30° — unlike the global color mixer, which moves one color band across the whole frame."),
                 );
                 // Engine-rendered since batch #2-B (render.rs apply_masks
                 // mirrors the global WB model inside the mask) — live in the
