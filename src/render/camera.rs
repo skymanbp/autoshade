@@ -1,4 +1,4 @@
-//! The camera's own numbers: its colour matrix, as-shot white balance, calibration and profile, and the calibrated camera-native buffer.
+//! The camera's own numbers: its colour matrix, calibration and profile, and the calibrated camera-native buffer.
 
 use super::*;
 
@@ -121,41 +121,6 @@ pub(super) fn space_primaries(space: ExportColorSpace) -> [[f32; 2]; 3] {
     }
 }
 
-/// The camera's AS-SHOT white balance as absolute chromaticity: (CCT Kelvin,
-/// tint in the recipe's ±100 scale). Metadata-only rawler decode (`dummy` —
-/// no pixel data, no demosaic; wb_coeffs and the colour matrix come from the
-/// file/camera definition either way, verified in rawler 0.7.2 arw.rs:184 +
-/// rawimage.rs:390), then [`wb_to_kelvin_tint`]. `None` when the file is not
-/// a RAW, has no colour matrix, or carries damaged coefficients — callers
-/// keep the engine's historical 5500 K anchor.
-pub fn as_shot_wb(raw_path: &Path) -> Option<(f32, f32)> {
-    if !crate::decode::is_raw(raw_path) {
-        return None;
-    }
-    // A cyclic-IFD file degrades to None here — the documented
-    // no-metadata path (callers keep the historical 5500 K anchor).
-    crate::decode::guard_tiff_chain(raw_path).ok()?;
-    // Same degradation as the line above, for the same documented reason:
-    // an over-ceiling frame has no WB to offer and the caller keeps the
-    // historical 5500 K anchor. The refusal a person reads comes from the
-    // develop funnel, which cannot degrade.
-    crate::decode::guard_raw_plane_extent(raw_path).ok()?;
-    let src = RawSource::new(raw_path).ok()?;
-    let decoder = get_decoder(&src).ok()?;
-    // A6: the last `get_decoder` caller in the crate, and the one that can
-    // least afford to abort — it is consulted on OPEN, for the WB anchor, and
-    // its whole contract is already "None on any trouble".
-    let rawimage = crate::decode::guard_parser_panic(raw_path, "as-shot WB", || {
-        decoder
-            .raw_image(&src, &RawDecodeParams { image_index: 0 }, true)
-            .map_err(|e| anyhow!("raw_image(dummy): {e}"))
-    })
-    .ok()?;
-    let xyz2cam = camera_matrix(&rawimage).ok()?;
-    let wb = rawimage.wb_coeffs;
-    wb_to_kelvin_tint(&xyz2cam, [wb[0], wb[1], wb[2]])
-}
-
 /// (CCT, tint) of the scene illuminant implied by camera WB gains. The gains
 /// NEUTRALISE the illuminant, so the illuminant's camera-space colour is
 /// their reciprocal; through the camera matrix that becomes XYZ → (x, y) →
@@ -167,8 +132,9 @@ pub fn as_shot_wb(raw_path: &Path) -> Option<(f32, f32)> {
 /// Duv — the scale that lands D65 (Duv ≈ +0.0032) on ≈ +10, ACR's own
 /// Daylight-preset tint, which pins both sign and magnitude. ACR's exact
 /// model is proprietary — this is a documented approximation (the
-/// `local_temp_to_kelvin` stance) used for anchoring and display, never for
-/// pixel math.
+/// `local_temp_to_kelvin` stance), never pixel math. Since v1.17.0 the
+/// as-shot anchor is Camera Raw's own reading ([`super::as_shot_wb`]); this
+/// one is left as the profile stage's fallback temperature.
 pub(crate) fn wb_to_kelvin_tint(xyz2cam: &[[f32; 3]; 3], wb: [f32; 3]) -> Option<(f32, f32)> {
     if wb.iter().any(|c| !c.is_finite() || *c <= 0.0) {
         return None;

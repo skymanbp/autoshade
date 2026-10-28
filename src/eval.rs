@@ -1477,7 +1477,8 @@ mod tests {
     // never checked against anything:
     //
     //   E1  EV-offset       `advisor::HeuristicProposer::ev_offset_estimate`
-    //   E2  as-shot WB      `render::as_shot_wb` (McCamy CCT + Krystek Duv)
+    //   E2  as-shot WB      `render::as_shot_wb` (the DNG SDK's NeutralToXY and
+    //                       Robertson temperature/tint, Camera Raw's grid)
     //   E3  gray-world WB   `render::solve_wb_from_neutral`, fed the frame's
     //                       own mean RGB — the "gray-world-on-neutrals"
     //                       heuristic of the same row, assembled from the
@@ -1742,12 +1743,12 @@ mod tests {
             "stops",
         );
         wb_k.report(
-            "E2 as-shot Kelvin — render::as_shot_wb (McCamy CCT)",
+            "E2 as-shot Kelvin — render::as_shot_wb (DNG SDK NeutralToXY, Robertson)",
             "crs:Temperature under WhiteBalance=\"As Shot\" (Adobe's own reading — a MEASUREMENT)",
             "K",
         );
         wb_t.report(
-            "E2 as-shot tint — render::as_shot_wb (Krystek Duv × 3000)",
+            "E2 as-shot tint — render::as_shot_wb (Robertson isotherm × −3000)",
             "crs:Tint under WhiteBalance=\"As Shot\" (Adobe's own reading — a MEASUREMENT)",
             "tint units",
         );
