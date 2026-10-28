@@ -527,7 +527,18 @@ supposed to remove.
   curve's slope there, pixels clipped at white in both renders left out. The
   five act on the EXPOSED value (composing Exposure ∓1 with Blacks ±40
   predicts the toe within 3.0 L, adding them on the original axis is 6.1 L
-  off). A local slope floor (1 % of the exposed curve's rise) keeps the
+  off). **Measured since, not modelled (v1.17.0 carry ablation):** composing
+  Camera Raw's own pointwise maps, Contrast, Whites and Blacks act on the
+  exposed value (mean |ΔL| 0.14–0.25 L that way, 0.51–2.88 the other), but
+  Highlights and Shadows act BEFORE Exposure (0.23–0.43 L before, 1.54–4.79
+  after, on the flat frame and the night pair), and both are image-adaptive:
+  on the bare packets of seven frames Highlights −70 at x 0.55–0.65 moves
+  the value 0.110–0.353 and Shadows +69 at x 0.05–0.15 0.007–0.109, with no
+  single frame statistic (mean, median, log-average, rank) ordering both.
+  Reordering alone, with the one-frame tables, moved the carry p36 6.72 →
+  5.91 but p41 10.41 → 15.02, so the engine keeps one order until the
+  adaptive law is measured.
+  A local slope floor (1 % of the exposed curve's rise) keeps the
   result monotone where two pushes overlap. The reverse fit holds each row at
   the previous pass's magnitude and re-solves until the answer stops moving.
 
