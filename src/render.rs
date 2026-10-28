@@ -219,7 +219,7 @@ pub(crate) use tone_cr::{
 };
 use tone_cr::{
     camera_raw_after_lut, camera_raw_channels, camera_raw_exposure_lut, camera_raw_slider_lut, camera_raw_slider_pixel,
-    camera_raw_tone_lut,
+    camera_raw_tone_lut, SliderPass,
 };
 #[cfg(test)]
 pub(crate) use tone::{limit_tone_sliders, parametric_lut};

@@ -295,7 +295,10 @@ pub(super) fn apply_develop_with_rasters(
     //    pinned-white tone LUT afterwards cannot blow what dehaze protected,
     //    and saturation/vibrance stay downstream so the user can trim dehaze's
     //    chroma restoration.
-    if r.dehaze != 0.0 {
+    // v1.17.0: on a camera-profile start Dehaze follows Camera Raw's
+    // measured law instead, in the slider pass below (`tone_cr`).
+    let camera_raw = SliderLaw::of(r) == SliderLaw::CameraRaw;
+    if r.dehaze != 0.0 && !camera_raw {
         apply_dehaze(data, w, r.dehaze);
     }
     // 1) tonal ops via the LUT (exposure/contrast/whites/blacks/highlights/
@@ -315,13 +318,13 @@ pub(super) fn apply_develop_with_rasters(
     //    recipe (`EditRecipe::has_tone_work`), against the same inputs
     //    `build_tone_lut` reads: this condition listing its own copy of them is
     //    exactly how the profile came to render nothing.
-    let tone_neutral = !r.has_tone_work();
+    let tone_neutral = !r.has_tone_work() && (!camera_raw || r.dehaze == 0.0);
     if !tone_neutral {
         // v1.17.0: on a camera-profile start, exposure first, per channel by
         // Adobe's rule; then the five sliders with Adobe's hue and the luma's
         // lightness (`tone_cr::camera_raw_slider_pixel`); the Look's curve by
         // the luma ratio; the photographer's curves by Adobe's rule (`tone_cr`).
-        if SliderLaw::of(r) == SliderLaw::CameraRaw {
+        if camera_raw {
             if let Some(e) = camera_raw_exposure_lut(r.exposure_ev) {
                 data.par_iter_mut().for_each(|px| *px = camera_raw_channels(*px, &e));
             }

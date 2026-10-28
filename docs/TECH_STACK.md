@@ -535,7 +535,15 @@ supposed to remove.
   **calibrated against measured Lightroom exports**.
 - Dehaze: `A` is the P99 of the minimum RGB channel in linear light,
   `t = max(1 − 0.75·s·min(R,G,B)/A, 0.30)` for positive dehaze
-  (**designed atmospheric approximation**, not an Adobe fit).
+  (**designed atmospheric approximation**, not an Adobe fit). On a recipe
+  that names a camera profile (v1.17.0) Dehaze follows Camera Raw's law
+  instead (**measured**, `render/tone_cr.rs`, Dehaze +40/+80/−30 on the same
+  flat packet as the tone sliders): a response table over `u` in the slider
+  pass, as the five's, and a chroma gain `exp(d·G(u))` about the luma, `G`
+  per unit slider ≈ +0.3 at L 10–30, ≈ 0 at L 40–70, up to +1.8 at L 90–100
+  — Camera Raw deepens the sky's blue as it removes haze and pales it as it
+  adds haze. Like the engine law's stage it is no part of the tone the
+  reverse fit solves.
 - Clarity radius: `max(round(0.02·min(width,height)), 8)`
   (**designed resolution scaling**).
 - Negative Texture arm 1: amplitude `A1 = 0.172443`,
@@ -673,6 +681,16 @@ supposed to remove.
   in the acceptance set Highlights −100 3.14 L / 3.47 b*, Exposure −2 3.19 L
   and −3 2.69 L (L 90–100). The flat sidecar against Camera Raw: ΔE76 3.04 →
   2.56, L 0–30 +1.2…+1.6 → +0.1…+0.2.
+- Dehaze on a camera-profile start (v1.17.0), worst moving band |ΔL| /
+  |Δa|,|Δb| before (the airlight stage) → after: +40 4.31/1.68 → 0.97/1.32,
+  −30 48.16/1.71 → 1.58/0.52 (the airlight stage's negative branch veiled the
+  shadows toward the airlight, +46 L at L 0–10, where Camera Raw lifts them
+  +3.3 L); +80 8.68/5.01 → 1.85/2.37 (L 80–90 b*, outside the line). Camera
+  Raw's Dehaze is local (a pixel's own L explains R² 0.42 of its move) and
+  estimates each frame's haze; the law is its band-mean response on one
+  frame. Carry (sidecars with Dehaze: p36 +10, p40 +16, p41 +7), the tone law
+  → with this: p36 8.52 → 8.70, p40 8.18 → 7.59, p41 10.96 → 10.52; p36 with
+  its Highlights at 0, 5.91 → 6.11.
 - Camera Raw's Highlights is image-adaptive, and the tables are one frame's.
   On a second frame's bare packet Camera Raw's Highlights −44 darkens L 80–100
   by 4.0–8.3 L where the tables, which reproduce the first frame's −30/−60,

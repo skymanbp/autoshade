@@ -186,6 +186,31 @@ const FALL_Q: [[f32; TABLE_N]; 5] = [
     [-0.1126, -0.0703, -0.0336, 0.0053, 0.0847, 0.1408, 0.1208, 0.0910, 0.0801, 0.0701, 0.0592, 0.0508, 0.0457, 0.0420, 0.0389, 0.0363, 0.0343, 0.0328, 0.0305, 0.0269, 0.0238, 0.0225, 0.0206, 0.0168, 0.0153, 0.0144, 0.0127, 0.0147, 0.0152, 0.0104, 0.0070, 0.0143, 0.0363],
 ];
 
+/// Dehaze's response over `u`, as the five's: a slider at `d ∈ [−1, 1]`
+/// moves the value by `d · (T(u) + |d| · Q(u))`, `T`/`Q` the RISE pair for a
+/// positive slider and the FALL pair for a negative one. Fitted like the five
+/// (module head) from Dehaze +40/+80/−30; one negative magnitude, so
+/// [`DEHAZE_FALL_Q`] is zero.
+const DEHAZE_RISE: [f32; TABLE_N] = [-0.0201, -0.0298, -0.0361, -0.0363, -0.0376, -0.0449, -0.0538, -0.0612, -0.0667, -0.0672, -0.0639, -0.0606, -0.0545, -0.0451, -0.0389, -0.0399, -0.0453, -0.0495, -0.0535, -0.0587, -0.0610, -0.0783, -0.1257, -0.1594, -0.1491, -0.1357, -0.1419, -0.1297, -0.0853, -0.0426, -0.0281, -0.0502, -0.1007];
+const DEHAZE_RISE_Q: [f32; TABLE_N] = [0.0014, 0.0009, 0.0019, 0.0041, 0.0052, 0.0037, -0.0006, -0.0068, -0.0121, -0.0136, -0.0121, -0.0107, -0.0092, -0.0071, -0.0059, -0.0062, -0.0074, -0.0077, -0.0076, -0.0082, -0.0090, -0.0249, -0.0796, -0.1277, -0.1155, -0.0913, -0.0899, -0.0769, -0.0422, -0.0139, -0.0094, -0.0238, -0.0457];
+const DEHAZE_FALL: [f32; TABLE_N] = [-0.0794, -0.1223, -0.1613, -0.1608, -0.1357, -0.1274, -0.1350, -0.1464, -0.1563, -0.1585, -0.1536, -0.1454, -0.1313, -0.1138, -0.1039, -0.1066, -0.1156, -0.1228, -0.1310, -0.1400, -0.1421, -0.1487, -0.1659, -0.1684, -0.1513, -0.1453, -0.1540, -0.1413, -0.1015, -0.0641, -0.0500, -0.0852, -0.1799];
+const DEHAZE_FALL_Q: [f32; TABLE_N] = [-0.0000, -0.0000, -0.0000, -0.0000, 0.0000, -0.0000, -0.0000, -0.0000, -0.0000, 0.0000, 0.0000, -0.0000, -0.0000, -0.0000, 0.0000, 0.0000, 0.0000, -0.0000, -0.0000, -0.0000, -0.0000, -0.0000, -0.0000, 0.0000, 0.0000, 0.0000, 0.0000, -0.0000, -0.0000, -0.0000, -0.0000, -0.0000, -0.0000];
+
+/// Dehaze's colour: Camera Raw deepens colour as it removes haze and pales it
+/// as it adds haze, most in the bright range (the sky). The pixel's chroma is
+/// scaled by `exp(d · DEHAZE_CHROMA(u))` about its luma, `u` the pixel's
+/// own place before the sliders. Fitted like the tables, on the median
+/// log-chroma change of coloured pixels (C* > 5) per bin of `u`: per unit
+/// slider +0.3 (L 10–30), ≈ 0 (L 40–70), +0.8 (L 80–90), +1.7…2.2
+/// (L 90–100), the same for +40, +80 and −30.
+const DEHAZE_CHROMA: [f32; TABLE_N] = [0.2942, 0.2942, 0.2427, 0.1092, 0.1802, 0.5409, 0.7253, 0.6303, 0.4594, 0.2431, 0.0317, -0.1653, -0.3211, -0.3277, -0.1799, 0.0185, 0.1835, 0.3382, 0.6228, 1.0963, 1.5320, 1.6586, 1.7833, 1.7908, 1.1677, 0.5824, 0.4696, 0.4696, 0.4696, 0.4696, 0.4696, 0.4696, 0.4696];
+
+/// Dehaze's push per unit slider at the exposed value `y` for a slider at `d`.
+fn dehaze_row(d: f32, y: f32) -> f32 {
+    let (t, q) = if d < 0.0 { (&DEHAZE_FALL, &DEHAZE_FALL_Q) } else { (&DEHAZE_RISE, &DEHAZE_RISE_Q) };
+    table_at(t, y) + d.abs() * table_at(q, y)
+}
+
 fn table_at(t: &[f32; TABLE_N], u: f32) -> f32 {
     let p = u.clamp(0.0, 1.0) * (TABLE_N - 1) as f32;
     let i = (p.floor() as usize).min(TABLE_N - 2);
@@ -229,13 +254,14 @@ pub(crate) fn camera_raw_response(ev: f32, s: [f32; 5], u: f32) -> f32 {
 /// open would scale every slider in the frame down with it, measured: −60
 /// rendered at 0.38 of its strength), so the guard only stops the curve
 /// turning back where two pushes overlap.
-fn camera_raw_tone(ev: f32, s: [f32; 5]) -> Vec<f32> {
+fn camera_raw_tone(ev: f32, s: [f32; 5], dehaze: f32) -> Vec<f32> {
     const KEEP: f32 = 0.01;
     let mut out = Vec::with_capacity(LUT_N);
     let (mut prev_y, mut prev) = (0.0f32, 0.0f32);
     for i in 0..LUT_N {
         let y = camera_raw_exposure(i as f32 / (LUT_N - 1) as f32, ev);
-        let push: f32 = (0..5).map(|k| s[k] * camera_raw_row(k, s[k], y)).sum();
+        let push: f32 =
+            (0..5).map(|k| s[k] * camera_raw_row(k, s[k], y)).sum::<f32>() + dehaze * dehaze_row(dehaze, y);
         let mut v = (y + push).clamp(0.0, 1.0);
         if i > 0 {
             v = v.max((prev + KEEP * (y - prev_y)).min(1.0));
@@ -280,15 +306,24 @@ pub(super) fn camera_raw_channels(rgb: [f32; 3], lut: &[f32]) -> [f32; 3] {
 /// ratio alone left the bright sky's b* 5.3 short of Camera Raw's (Camera Raw
 /// deepens the blue as it darkens), the channel rule alone left L 90–100
 /// 4.1 L bright; this leaves 1.0 L and 2.3 b*.
-pub(super) fn camera_raw_slider_pixel(rgb: [f32; 3], lut: &[f32]) -> [f32; 3] {
-    let a = camera_raw_channels(rgb, lut);
-    let target = sample_lut(lut, luma601(&rgb));
+pub(super) fn camera_raw_slider_pixel(rgb: [f32; 3], pass: &SliderPass) -> [f32; 3] {
+    let l_in = luma601(&rgb);
+    let a = camera_raw_channels(rgb, &pass.lut);
+    let target = sample_lut(&pass.lut, l_in);
     let la = luma601(&a);
     if la <= 1e-6 {
         return [target; 3];
     }
     let k = target / la;
-    [(a[0] * k).clamp(0.0, 1.0), (a[1] * k).clamp(0.0, 1.0), (a[2] * k).clamp(0.0, 1.0)]
+    let mut out = [a[0] * k, a[1] * k, a[2] * k];
+    if let Some(c) = &pass.chroma {
+        // Dehaze's chroma, about the luma so the lightness stays the tone's.
+        let g = sample_lut(c, l_in);
+        for v in &mut out {
+            *v = target + (*v - target) * g;
+        }
+    }
+    out.map(|v| v.clamp(0.0, 1.0))
 }
 
 /// Adobe's default curve under the sRGB transfer, `u → x`, as a [`LUT_N`]
@@ -337,16 +372,34 @@ pub(crate) fn camera_raw_exposure_lut(ev: f32) -> Option<Vec<f32>> {
     })
 }
 
-/// The five sliders alone over the profile stage's output, `x → u → the
-/// sliders → x`, at 0 EV (the develop applies exposure before it): `None`
-/// when all five are 0.
-pub(super) fn camera_raw_slider_lut(sliders: [f32; 5]) -> Option<Vec<f32>> {
-    sliders.iter().any(|&v| v != 0.0).then(|| {
-        let tone = camera_raw_tone(0.0, sliders);
-        (0..LUT_N)
+/// The five sliders and Dehaze (`dehaze` in −1..1) alone over the profile
+/// stage's output, `x → u → the sliders → x`, at 0 EV (the develop applies
+/// exposure before it): `None` when all six are 0. Dehaze rides here, not in
+/// [`camera_raw_tone_lut`]: like the engine law's dehaze stage it is no part
+/// of the tone the reverse fit solves.
+pub(super) fn camera_raw_slider_lut(sliders: [f32; 5], dehaze: f32) -> Option<SliderPass> {
+    (dehaze != 0.0 || sliders.iter().any(|&v| v != 0.0)).then(|| {
+        let tone = camera_raw_tone(0.0, sliders, dehaze);
+        let lut = (0..LUT_N)
             .map(|i| camera_raw_start(sample_lut(&tone, camera_raw_unstart(i as f32 / (LUT_N - 1) as f32))))
-            .collect()
+            .collect();
+        let chroma = (dehaze != 0.0).then(|| {
+            (0..LUT_N)
+                .map(|i| {
+                    let u = camera_raw_unstart(i as f32 / (LUT_N - 1) as f32);
+                    (dehaze * table_at(&DEHAZE_CHROMA, u)).exp()
+                })
+                .collect()
+        });
+        SliderPass { lut, chroma }
     })
+}
+
+/// The slider pass: the tone LUT over the profile stage's output and, under
+/// Dehaze, the chroma gain over the same axis (`None` without Dehaze).
+pub(crate) struct SliderPass {
+    pub(crate) lut: Vec<f32>,
+    pub(crate) chroma: Option<Vec<f32>>,
 }
 
 /// What follows the sliders, as a [`LUT_N`] table: the Look's baked curve
@@ -373,7 +426,7 @@ pub(super) fn camera_raw_tone_lut(
     parametric: Option<&[f32]>,
     curve: &[f32],
 ) -> Vec<f32> {
-    let tone = camera_raw_tone(ev, sliders);
+    let tone = camera_raw_tone(ev, sliders, 0.0);
     (0..LUT_N)
         .map(|i| {
             let x = i as f32 / (LUT_N - 1) as f32;
@@ -452,7 +505,7 @@ mod tests {
         }
         for ev in [-3.0f32, 0.0, 2.0] {
             for s in &cases {
-                let t = camera_raw_tone(ev, *s);
+                let t = camera_raw_tone(ev, *s, 0.0);
                 assert!(t.windows(2).all(|w| w[1] >= w[0]), "monotone at ev {ev} {s:?}");
                 assert!(t.iter().all(|v| (0.0..=1.0).contains(v)), "in range at ev {ev} {s:?}");
             }
@@ -465,17 +518,29 @@ mod tests {
         assert!(camera_raw_exposure_lut(0.0).is_none());
     }
 
+    /// Dehaze alone makes a slider pass with a chroma gain; at 0 there is no
+    /// pass at all.
+    #[test]
+    fn dehaze_alone_makes_a_slider_pass() {
+        assert!(camera_raw_slider_lut([0.0; 5], 0.0).is_none());
+        let pass = camera_raw_slider_lut([0.0; 5], 0.4).expect("Dehaze is a pass");
+        assert!(pass.chroma.is_some(), "with its colour");
+        assert!(camera_raw_slider_lut([0.2, 0.0, 0.0, 0.0, 0.0], 0.0).is_some_and(|p| p.chroma.is_none()));
+        let mid = LUT_N / 2;
+        assert!(pass.lut[mid] < mid as f32 / (LUT_N - 1) as f32, "+40 darkens the midtones");
+    }
+
     /// The slider pixel gives a grey the luma rule's value and keeps a
     /// colour's lightness at the luma rule's while taking the channel rule's
     /// hue.
     #[test]
     fn the_slider_pixel_takes_the_luma_lightness_and_the_channel_hue() {
         let lut: Vec<f32> = (0..LUT_N).map(|i| (i as f32 / (LUT_N - 1) as f32).powf(1.4)).collect();
-        let g = camera_raw_slider_pixel([0.5; 3], &lut);
+        let g = camera_raw_slider_pixel([0.5; 3], &SliderPass { lut: lut.clone(), chroma: None });
         let want = sample_lut(&lut, 0.5);
         assert!(g.iter().all(|&c| (c - want).abs() < 1e-5), "a grey: {g:?} vs {want}");
         let px = [0.7f32, 0.45, 0.2];
-        let out = camera_raw_slider_pixel(px, &lut);
+        let out = camera_raw_slider_pixel(px, &SliderPass { lut: lut.clone(), chroma: None });
         assert!((luma601(&out) - sample_lut(&lut, luma601(&px))).abs() < 1e-4, "lightness by luma");
         let a = camera_raw_channels(px, &lut);
         let ratio = |p: [f32; 3]| [p[0] / p[1], p[2] / p[1]];

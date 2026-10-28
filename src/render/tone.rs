@@ -277,7 +277,7 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
 }
 
 /// The tone of a Camera Raw recipe after its exposure, as the develop applies
-/// it, in Lightroom's order: the five sliders' LUT, which the develop puts
+/// it, in Lightroom's order: the five sliders' and Dehaze's LUT, which the develop puts
 /// through `tone_cr::camera_raw_slider_pixel`; the Look's baked curve, through
 /// the luma ratio (the canvas start was calibrated that way, v1.17.0 step 3);
 /// the parametric and point curves, through Adobe's channel rule
@@ -285,7 +285,7 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
 /// With exposure (`tone_cr::camera_raw_exposure_lut`) the passes compose to
 /// [`build_tone_lut`] up to the colour rule.
 pub(crate) struct CameraRawTone {
-    pub(crate) sliders: Option<Vec<f32>>,
+    pub(crate) sliders: Option<SliderPass>,
     pub(crate) look: Option<Vec<f32>>,
     pub(crate) curves: Option<Vec<f32>>,
 }
@@ -295,7 +295,7 @@ pub(crate) fn camera_raw_tone_passes(r: &EditRecipe) -> CameraRawTone {
     let curves = (parametric.is_some() || !curve_is_identity(&r.tone_curve))
         .then(|| camera_raw_after_lut(None, parametric.as_deref(), &curve_lut(&r.tone_curve)));
     CameraRawTone {
-        sliders: camera_raw_slider_lut(tone_sliders(r)),
+        sliders: camera_raw_slider_lut(tone_sliders(r), (r.dehaze / 100.0).clamp(-1.0, 1.0)),
         look: r.baked_tone_curve().map(|l| look_curve_lut(&l.tone_curve, l.amount)),
         curves,
     }
