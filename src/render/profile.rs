@@ -502,10 +502,20 @@ impl UnderTone {
 /// Correlated colour temperature of a chromaticity by Robertson's method —
 /// `dng_temperature::Set_xy_coord`.
 fn xy_to_kelvin(xy: [f64; 2]) -> f64 {
+    xy_to_temp_tint(xy).0
+}
+
+/// The temperature and tint of a chromaticity, `dng_temperature::Set_xy_coord`
+/// — [`temp_tint_to_xy`] the other way: the temperature by Robertson's
+/// isotherms, the tint as the signed distance from the blackbody along the
+/// interpolated isotherm (`kTintScale`, −3000 tint units per unit of uv).
+/// The SDK's pair is inverse to within 0.03 mired and 0.002 tint units over
+/// 2000–15000 K and ±100 tint, not to the bit (pinned by test).
+pub(crate) fn xy_to_temp_tint(xy: [f64; 2]) -> (f64, f64) {
     const TABLE: [[f64; 4]; 31] = ROBERTSON;
     let den = 1.5 - xy[0] + 6.0 * xy[1];
     let (u, v) = (2.0 * xy[0] / den, 3.0 * xy[1] / den);
-    let mut last_dt = 0.0;
+    let (mut last_dt, mut last_du, mut last_dv) = (0.0, 0.0, 0.0);
     for i in 1..TABLE.len() {
         let len = (1.0 + TABLE[i][3] * TABLE[i][3]).sqrt();
         let (du, dv) = (1.0 / len, TABLE[i][3] / len);
@@ -513,9 +523,14 @@ fn xy_to_kelvin(xy: [f64; 2]) -> f64 {
         if dt <= 0.0 || i == TABLE.len() - 1 {
             let dt = -dt.min(0.0);
             let f = if i == 1 { 0.0 } else { dt / (last_dt + dt) };
-            return 1.0e6 / (TABLE[i - 1][0] * f + TABLE[i][0] * (1.0 - f));
+            let kelvin = 1.0e6 / (TABLE[i - 1][0] * f + TABLE[i][0] * (1.0 - f));
+            let uu = u - (TABLE[i - 1][1] * f + TABLE[i][1] * (1.0 - f));
+            let vv = v - (TABLE[i - 1][2] * f + TABLE[i][2] * (1.0 - f));
+            let (du, dv) = (du * (1.0 - f) + last_du * f, dv * (1.0 - f) + last_dv * f);
+            let len = (du * du + dv * dv).sqrt();
+            return (kelvin, (uu * du + vv * dv) / len * -3000.0);
         }
-        last_dt = dt;
+        (last_dt, last_du, last_dv) = (dt, du, dv);
     }
     unreachable!("the loop returns on its last row")
 }
@@ -545,10 +560,23 @@ pub(crate) fn white_temperature(profile: &Profile, neutral: [f32; 3]) -> Option<
     if neutral.iter().any(|v| !v.is_finite() || *v <= 0.0) {
         return None;
     }
-    let n = neutral.map(f64::from);
+    let xy = neutral_to_xy(neutral.map(f64::from), |k| color_matrix_at(profile, k))?;
+    let k = xy_to_kelvin(xy);
+    k.is_finite().then_some(k as f32)
+}
+
+/// The chromaticity of the white a camera `neutral` stands for, the DNG
+/// SDK's `NeutralToXY`, with the XYZ → camera matrix at a temperature from
+/// `matrix_at`: [`white_temperature`]'s iteration, and the as-shot reader's
+/// (`camera_raw_as_shot`). `None` when there is no matrix or the neutral maps
+/// to no colour.
+pub(crate) fn neutral_to_xy(
+    n: [f64; 3],
+    matrix_at: impl Fn(f64) -> Option<[[f64; 3]; 3]>,
+) -> Option<[f64; 2]> {
     let mut last = D50_XY;
     for pass in 0..30 {
-        let cm = color_matrix_at(profile, xy_to_kelvin(last))?;
+        let cm = matrix_at(xy_to_kelvin(last))?;
         let xyz = vec64(&inv64(&cm)?, n);
         let s = xyz[0] + xyz[1] + xyz[2];
         if !s.is_finite() || s <= 0.0 {
@@ -564,8 +592,7 @@ pub(crate) fn white_temperature(profile: &Profile, neutral: [f32; 3]) -> Option<
         }
         last = next;
     }
-    let k = xy_to_kelvin(last);
-    k.is_finite().then_some(k as f32)
+    Some(last)
 }
 
 /// The `ForwardMatrix` for this temperature, normalised so camera white maps
@@ -663,7 +690,7 @@ fn illuminant_weight(profile: &Profile, kelvin: Option<f32>) -> f32 {
 /// The daylight family is included because it costs nothing and a third-party
 /// profile may state it; a code outside the list answers `None` and the frame
 /// takes the first calibration rather than a guessed temperature.
-fn illuminant_kelvin(code: u16) -> Option<f32> {
+pub(crate) fn illuminant_kelvin(code: u16) -> Option<f32> {
     Some(match code {
         1 | 4 | 9 => 5500.0,  // Daylight, Flash, Fine weather
         3 | 17 => 2856.0,     // Tungsten, Standard light A

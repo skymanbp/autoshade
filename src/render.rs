@@ -47,6 +47,7 @@ mod perspective;
 mod profile;
 mod base_look;
 mod brush;
+mod as_shot;
 mod camera;
 mod canvas;
 mod colour;
@@ -83,7 +84,9 @@ use brush::{
     BRUSH_RASTER_MAX_WORK, BRUSH_RASTER_MIN_EDGE, brush_flow_deposit, brush_kernel,
     brush_kernel_exponents, brush_raster_dims,
 };
-pub use camera::{as_shot_wb};
+pub use as_shot::as_shot_wb;
+#[cfg(test)]
+use as_shot::{camera_raw_as_shot, sony_daylight_preset, sony_decrypt};
 use camera::{
     calibrate_camera_buffer, camera_matrix, normalise_wb, resolve_camera_profile, space_primaries,
     validate_calibration,
@@ -236,7 +239,8 @@ use wb::{kelvin_to_rgb};
 /// own test modules and nowhere else). Test-only: nothing here is compiled into a
 /// shipped binary.
 #[cfg(test)]
-pub(crate) const SOURCE_FILES: [(&str, &str); 19] = [
+pub(crate) const SOURCE_FILES: [(&str, &str); 20] = [
+    ("src/render/as_shot.rs", include_str!("render/as_shot.rs")),
     ("src/render/base_look.rs", include_str!("render/base_look.rs")),
     ("src/render/brush.rs", include_str!("render/brush.rs")),
     ("src/render/camera.rs", include_str!("render/camera.rs")),

@@ -22,3 +22,4 @@ include!("tests/lens_blur.rs");
 include!("tests/canvas_start.rs");
 include!("tests/camera_raw_wb.rs");
 include!("tests/mask_camera_raw.rs");
+include!("tests/as_shot.rs");

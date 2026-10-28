@@ -589,6 +589,32 @@ fn a_temperature_and_tint_name_a_white_on_its_isotherm() {
     assert!(temp_tint_to_xy(5400.0, 30.0)[1] > temp_tint_to_xy(5400.0, 0.0)[1]);
 }
 
+/// `Set_xy_coord` with its tint is `Get_xy_coord` the other way: a white
+/// named by a temperature and a tint reads back as that temperature and tint
+/// to within 0.03 mired and 0.002 tint units (the SDK's pair is not inverse
+/// to the bit: one interpolates in reciprocal temperature, the other in the
+/// isotherms' distances), so every point of Camera Raw's 50 K / whole-tint
+/// grid reads back as itself after rounding.
+///
+/// MUTATION: interpolate the isotherm direction with the wrong weight, or
+/// read the tint with the wrong sign or scale.
+#[test]
+fn a_white_named_by_temperature_and_tint_reads_back_as_them() {
+    let (mut worst_mired, mut worst_tint) = (0.0f64, 0.0f64);
+    for i in 0..=260 {
+        let k = 2000.0 + 50.0 * f64::from(i);
+        for t in -100..=100 {
+            let t = f64::from(t);
+            let (k2, t2) = xy_to_temp_tint(temp_tint_to_xy(k, t));
+            worst_mired = worst_mired.max((1.0e6 / k2 - 1.0e6 / k).abs());
+            worst_tint = worst_tint.max((t2 - t).abs());
+            assert_eq!(((k2 / 50.0).round() * 50.0, t2.round()), (k, t), "{k} K / {t:+}");
+        }
+    }
+    assert!(worst_mired < 0.03 && worst_tint < 0.002, "{worst_mired} mired, {worst_tint} tint");
+    assert_eq!(xy_to_kelvin(temp_tint_to_xy(5400.0, 14.0)), xy_to_temp_tint(temp_tint_to_xy(5400.0, 14.0)).0);
+}
+
 /// The white shift between one white and itself is the identity, and between
 /// two whites it keeps the working white's luminance.
 ///
