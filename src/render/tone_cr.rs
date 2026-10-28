@@ -59,9 +59,44 @@
 //!   both renders left out; four passes. One table per SIGN:
 //!   Camera Raw is not antisymmetric (Blacks −40 moves the toe 3.7× as far as
 //!   +40, Whites +40 the shoulder 1.7× as far as −40).
-//! * The five act on the EXPOSED value. Exposure −1 with Blacks +40, and +1
-//!   with −40: composing predicts the toe within 3.0 L, adding the two on the
-//!   original axis is 6.1 L off.
+//! * Contrast, Whites and Blacks act on the EXPOSED value. Exposure −1 with
+//!   Blacks +40, and +1 with −40: composing predicts the toe within 3.0 L,
+//!   adding the two on the original axis is 6.1 L off.
+//!
+//! # Highlights and Shadows: before Exposure, local, keyed to the frame
+//!
+//! Measured on seven frames' flat packets (every slider 0, Adobe Color, lens
+//! as each sidecar says), Shadows +30/+60/+100 and Highlights −30/−60/−100
+//! each (6144 px, compared at 768 px in `u`):
+//!
+//! * **Order.** Composing Camera Raw's own pointwise maps on two frames,
+//!   Highlights and Shadows go BEFORE Exposure (mean |ΔL| 0.23–0.42 that way,
+//!   1.17–3.68 the other) and before Contrast and Blacks too (0.11–0.22
+//!   against 0.30–2.48). They are the first pass ([`apply_camera_raw_hs`]).
+//! * **Local.** The push at a pixel follows the region it sits in: one
+//!   frame's lifted foreground is lifted by the same `u` from 0.20 to 0.35
+//!   and its sky at 0.36 by an eighth of that, a step in the pixel's own value
+//!   no pointwise law has; next to a bright edge a dark pixel is lifted less
+//!   over 200–400 film pixels. The push reads an edge-aware base
+//!   ([`bilateral_base`], [`HS_SIGMA_S`] / [`HS_SIGMA_S2`] film pixels,
+//!   [`HS_SIGMA_R`] stops) of `log2` linear luminance.
+//! * **Keyed to the frame.** At one base value the push still differs 6×
+//!   between frames (Highlights −60 at `u` 0.3: 0.022 on a daylight street,
+//!   0.142 on a dark dusk frame); measured relative to the frame's mean
+//!   linear luminance (`z = log2(base) − log2(mean)`) it does not: the mean
+//!   ordered the frames, the median, log-average and high percentiles did
+//!   not. Shadows read `(z, u)` ([`HS_SH`]); Highlights read `z` on the fine
+//!   base plus `z` on the coarse one ([`HS_HL`], [`HS_HL2`]) — a second
+//!   scale raised the held-out R² of the frame it helped most from 0.76 to
+//!   0.94.
+//! * **Colour.** Shadows keep the colour: every channel by one ratio over a
+//!   floor ([`HS_CHROMA_FLOOR`]); per channel left the warm tones 4.75 b*
+//!   short. Highlights take the hue of Adobe's channel rule with the pixel's
+//!   own curve, as the other sliders do (the street's bright band 5.14 →
+//!   0.80 b*).
+//! * Fitted pooled over the seven frames and three magnitudes, then with the
+//!   engine in the loop; the signs not measured across frames (Highlights
+//!   above 0, Shadows below) keep the pointwise tables at the pixel's `u`.
 
 use super::*;
 
@@ -254,13 +289,17 @@ pub(crate) fn camera_raw_exposure(u: f32, ev: f32) -> f32 {
     linear_to_srgb(exposure_ramp(ramp_inverse(srgb_to_linear(u)) * ev.exp2()))
 }
 
-/// The law at one `u` without the band guard [`camera_raw_tone`] adds: the
-/// exposed value plus the five pushes there, clamped to [0, 1]. What the
-/// reverse fit scores a candidate with (it scores the knot model without its
-/// limiter too, `fit::tone`).
-pub(crate) fn camera_raw_response(ev: f32, s: [f32; 5], u: f32) -> f32 {
-    let y = camera_raw_exposure(u, ev);
-    let push: f32 = (0..5).map(|k| s[k] * camera_raw_row(k, s[k], y)).sum();
+/// The law at one `u` without the band guard [`camera_raw_tone`] adds, for a
+/// frame whose key (`log2` of its mean linear luminance) is `key`: Highlights
+/// and Shadows first, on `u`, with the base taken as the pixel itself
+/// ([`HsSite::diagonal`]); then Exposure; then Contrast, Whites and Blacks on
+/// the exposed value; clamped to [0, 1]. What the reverse fit scores a
+/// candidate with (it scores the knot model without its limiter too,
+/// `fit::tone`).
+pub(crate) fn camera_raw_response_keyed(ev: f32, s: [f32; 5], u: f32, key: f32) -> f32 {
+    let u1 = (u + hs_push(s[1], s[2], HsSite::diagonal(u, key), u)).clamp(0.0, 1.0);
+    let y = camera_raw_exposure(u1, ev);
+    let push: f32 = [0usize, 3, 4].iter().map(|&k| s[k] * camera_raw_row(k, s[k], y)).sum();
     (y + push).clamp(0.0, 1.0)
 }
 
@@ -277,17 +316,25 @@ fn camera_raw_tone(ev: f32, s: [f32; 5], local: Local) -> Vec<f32> {
     let mut out = Vec::with_capacity(LUT_N);
     let (mut prev_y, mut prev) = (0.0f32, 0.0f32);
     for i in 0..LUT_N {
-        let y = camera_raw_exposure(i as f32 / (LUT_N - 1) as f32, ev);
+        let u = i as f32 / (LUT_N - 1) as f32;
+        // Highlights and Shadows on `u` before the exposure (module head),
+        // on the diagonal: a LUT has no base layer to read.
+        let u1 = (u + hs_push(s[1], s[2], HsSite::diagonal(u, HS_KEY_NOMINAL), u)).clamp(0.0, 1.0);
+        let y = camera_raw_exposure(u1, ev);
         let push: f32 =
-            (0..5).map(|k| s[k] * camera_raw_row(k, s[k], y)).sum::<f32>()
+            [0usize, 3, 4].iter().map(|&k| s[k] * camera_raw_row(k, s[k], y)).sum::<f32>()
                 + local.dehaze * dehaze_row(local.dehaze, y)
                 + local.clarity * clarity_row(local.clarity, y);
         let mut v = (y + push).clamp(0.0, 1.0);
+        // The floor is a share of the plain exposed curve's rise: Highlights
+        // and Shadows have moved `y` itself, and on the diagonal at their
+        // extremes they can turn it back.
+        let y_ref = camera_raw_exposure(u, ev);
         if i > 0 {
-            v = v.max((prev + KEEP * (y - prev_y)).min(1.0));
+            v = v.max((prev + KEEP * (y_ref - prev_y)).min(1.0));
         }
         out.push(v);
-        (prev_y, prev) = (y, v);
+        (prev_y, prev) = (y_ref, v);
     }
     out
 }
@@ -467,6 +514,291 @@ pub(super) fn camera_raw_tone_lut(
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Highlights and Shadows: Camera Raw's local, frame-keyed law.
+// ---------------------------------------------------------------------------
+
+/// The spatial sigma of the base layer Highlights and Shadows read, in film
+/// pixels (the module head: measured).
+pub(crate) const HS_SIGMA_S: f32 = 400.0;
+
+/// The second, coarser base Highlights reads besides [`HS_SIGMA_S`]'s, in
+/// film pixels (module head).
+pub(crate) const HS_SIGMA_S2: f32 = 1600.0;
+
+/// Both bases' range sigma, in stops: across an edge of more than about this
+/// many stops the two sides keep bases of their own.
+pub(crate) const HS_SIGMA_R: f32 = 1.0;
+
+/// The floor under linear luminance before the log, relative to white.
+const HS_FLOOR: f32 = 1e-4;
+
+/// The key a tone LUT assumes when it has no frame to read (`log2` of the
+/// mean linear luminance): the median of the seven calibration frames'.
+pub(crate) const HS_KEY_NOMINAL: f32 = -3.94;
+
+/// The `z` grid: `HS_Z0 + i · HS_ZSTEP`, `i < HS_ZN`.
+const HS_Z0: f32 = -10.0;
+const HS_ZSTEP: f32 = 0.5;
+const HS_ZN: usize = 29;
+/// The `u` grid of [`HS_SH`]: `j / (HS_UN − 1)`, `j < HS_UN`.
+const HS_UN: usize = 17;
+/// The coarse base's grid of [`HS_HL2`]: `HS_Z0 + i · HS_Z2STEP`, `i < HS_Z2N`.
+const HS_Z2STEP: f32 = 0.4375;
+const HS_Z2N: usize = 33;
+
+/// Shadows' push per unit slider over `(z, u)` (`z = log2(base) − key` on
+/// the [`HS_SIGMA_S`] base, `u` the pixel's own value), row-major in `z`:
+/// `[T, Q]`; a slider at `s > 0` adds `s · (T + s · Q)` to `u`. Fitted
+/// pooled over seven frames at three magnitudes each, then with the engine
+/// in the loop (module head).
+const HS_SH: [[f32; HS_ZN * HS_UN]; 2] = [
+    [-0.03582, 0.07911, 0.19479, 0.30393, 0.39542, 0.46265, 0.50567, 0.52844, 0.53578, 0.53175, 0.51929, 0.50050, 0.47699, 0.45014, 0.42117, 0.39110, 0.36066, -0.03592, 0.08632, 0.20418, 0.30664, 0.38635, 0.44254, 0.47816, 0.49715, 0.50312, 0.49904, 0.48720, 0.46943, 0.44732, 0.42225, 0.39540, 0.36766, 0.33963, -0.03601, 0.09354, 0.21357, 0.30934, 0.37727, 0.42243, 0.45066, 0.46585, 0.47046, 0.46633, 0.45511, 0.43837, 0.41766, 0.39437, 0.36963, 0.34422, 0.31860, -0.03648, 0.10478, 0.22488, 0.30978, 0.36488, 0.40036, 0.42274, 0.43493, 0.43835, 0.43405, 0.42326, 0.40742, 0.38807, 0.36659, 0.34400, 0.32095, 0.29777, -0.03696, 0.11602, 0.23619, 0.31021, 0.35249, 0.37829, 0.39481, 0.40401, 0.40623, 0.40178, 0.39141, 0.37646, 0.35848, 0.33881, 0.31838, 0.29768, 0.27693, -0.03342, 0.13791, 0.24574, 0.30182, 0.33305, 0.35330, 0.36676, 0.37414, 0.37534, 0.37039, 0.36007, 0.34581, 0.32919, 0.31141, 0.29320, 0.27489, 0.25657, -0.02989, 0.15981, 0.25528, 0.29342, 0.31361, 0.32830, 0.33870, 0.34426, 0.34444, 0.33900, 0.32872, 0.31516, 0.29990, 0.28401, 0.26803, 0.25210, 0.23621, -0.01010, 0.18855, 0.24552, 0.26918, 0.28745, 0.30201, 0.31161, 0.31615, 0.31517, 0.30869, 0.29803, 0.28509, 0.27132, 0.25747, 0.24376, 0.23017, 0.21664, 0.00969, 0.21730, 0.23576, 0.24494, 0.26129, 0.27573, 0.28452, 0.28804, 0.28590, 0.27837, 0.26734, 0.25503, 0.24275, 0.23093, 0.21949, 0.20825, 0.19707, 0.02391, 0.16784, 0.18790, 0.21130, 0.23436, 0.25069, 0.25948, 0.26222, 0.25819, 0.24891, 0.23745, 0.22609, 0.21560, 0.20590, 0.19665, 0.18760, 0.17859, 0.03814, 0.11839, 0.14005, 0.17766, 0.20742, 0.22564, 0.23444, 0.23641, 0.23048, 0.21944, 0.20756, 0.19715, 0.18846, 0.18088, 0.17382, 0.16695, 0.16011, 0.03689, 0.10246, 0.11701, 0.15383, 0.18298, 0.20231, 0.21293, 0.21311, 0.20344, 0.19046, 0.17904, 0.17035, 0.16369, 0.15809, 0.15293, 0.14793, 0.14297, 0.03563, 0.08654, 0.09398, 0.13001, 0.15853, 0.17897, 0.19143, 0.18981, 0.17639, 0.16148, 0.15052, 0.14355, 0.13892, 0.13530, 0.13205, 0.12892, 0.12583, 0.02547, 0.07338, 0.09171, 0.12515, 0.13695, 0.15757, 0.17678, 0.16732, 0.14838, 0.13361, 0.12497, 0.12031, 0.11747, 0.11534, 0.11352, 0.11187, 0.11028, 0.01531, 0.06023, 0.08944, 0.12030, 0.11537, 0.13616, 0.16212, 0.14482, 0.12036, 0.10573, 0.09942, 0.09706, 0.09602, 0.09538, 0.09500, 0.09481, 0.09473, 0.02059, 0.04720, 0.07252, 0.10000, 0.09923, 0.12000, 0.15345, 0.11742, 0.09216, 0.08226, 0.07932, 0.07864, 0.07849, 0.07865, 0.07917, 0.08000, 0.08098, 0.02588, 0.03417, 0.05560, 0.07969, 0.08308, 0.10385, 0.14478, 0.09001, 0.06395, 0.05879, 0.05921, 0.06021, 0.06096, 0.06191, 0.06334, 0.06520, 0.06724, 0.00933, 0.02911, 0.04269, 0.05830, 0.05240, 0.07899, 0.09197, 0.06149, 0.04563, 0.04446, 0.04614, 0.04699, 0.04759, 0.04871, 0.05057, 0.05293, 0.05547, -0.00721, 0.02405, 0.02979, 0.03692, 0.02171, 0.05414, 0.03916, 0.03298, 0.02730, 0.03014, 0.03306, 0.03378, 0.03422, 0.03552, 0.03779, 0.04067, 0.04370, -0.00951, 0.01670, 0.02350, 0.02090, 0.01724, 0.02554, 0.02620, 0.02375, 0.02205, 0.02454, 0.02650, 0.02555, 0.02530, 0.02639, 0.02854, 0.03122, 0.03399, -0.01180, 0.00934, 0.01722, 0.00488, 0.01278, -0.00306, 0.01324, 0.01453, 0.01679, 0.01895, 0.01995, 0.01733, 0.01638, 0.01726, 0.01928, 0.02176, 0.02428, -0.01010, 0.00351, 0.00499, 0.00996, 0.02082, 0.01170, 0.01482, 0.01153, 0.01251, 0.01389, 0.01555, 0.01423, 0.01270, 0.01295, 0.01402, 0.01523, 0.01662, -0.00840, -0.00233, -0.00725, 0.01504, 0.02887, 0.02647, 0.01641, 0.00853, 0.00823, 0.00883, 0.01115, 0.01114, 0.00901, 0.00863, 0.00877, 0.00871, 0.00896, -0.00632, -0.00008, 0.00317, 0.02516, 0.02634, 0.02248, 0.01829, 0.01458, 0.01200, 0.01235, 0.00909, 0.01232, 0.01073, 0.00950, 0.00789, 0.00503, 0.00333, -0.00424, 0.00216, 0.01358, 0.03528, 0.02380, 0.01850, 0.02018, 0.02063, 0.01576, 0.01588, 0.00702, 0.01351, 0.01245, 0.01036, 0.00700, 0.00135, -0.00229, 0.00009, 0.00850, 0.02040, 0.03531, 0.02666, 0.02092, 0.01823, 0.01735, 0.01334, 0.01421, 0.01135, 0.01297, 0.00909, 0.00628, 0.00515, -0.00071, -0.00604, 0.00443, 0.01484, 0.02722, 0.03535, 0.02951, 0.02334, 0.01627, 0.01407, 0.01091, 0.01255, 0.01568, 0.01242, 0.00573, 0.00221, 0.00329, -0.00276, -0.00980, 0.01038, 0.02119, 0.03137, 0.03618, 0.03181, 0.02534, 0.01727, 0.01172, 0.00432, 0.00127, 0.00796, 0.00938, 0.00651, 0.00463, 0.00270, -0.00450, -0.01287, 0.01633, 0.02754, 0.03552, 0.03701, 0.03412, 0.02734, 0.01828, 0.00936, -0.00227, -0.01000, 0.00024, 0.00634, 0.00729, 0.00705, 0.00211, -0.00623, -0.01594],
+    [0.04538, 0.06020, 0.07523, 0.08915, 0.09974, 0.10552, 0.10618, 0.10235, 0.09507, 0.08540, 0.07423, 0.06219, 0.04969, 0.03697, 0.02417, 0.01136, -0.00146, 0.04342, 0.06028, 0.07630, 0.08937, 0.09793, 0.10159, 0.10073, 0.09617, 0.08884, 0.07960, 0.06912, 0.05789, 0.04624, 0.03439, 0.02247, 0.01054, -0.00138, 0.04146, 0.06037, 0.07737, 0.08959, 0.09612, 0.09766, 0.09528, 0.08999, 0.08261, 0.07379, 0.06400, 0.05358, 0.04278, 0.03181, 0.02077, 0.00973, -0.00130, 0.03938, 0.06122, 0.07885, 0.08944, 0.09367, 0.09324, 0.08959, 0.08376, 0.07645, 0.06809, 0.05897, 0.04933, 0.03936, 0.02925, 0.01909, 0.00893, -0.00122, 0.03730, 0.06207, 0.08032, 0.08929, 0.09122, 0.08882, 0.08390, 0.07754, 0.07028, 0.06239, 0.05395, 0.04508, 0.03595, 0.02669, 0.01741, 0.00813, -0.00114, 0.03591, 0.06491, 0.08158, 0.08757, 0.08726, 0.08344, 0.07779, 0.07127, 0.06431, 0.05692, 0.04912, 0.04097, 0.03263, 0.02420, 0.01577, 0.00735, -0.00107, 0.03452, 0.06775, 0.08285, 0.08586, 0.08330, 0.07806, 0.07167, 0.06501, 0.05833, 0.05146, 0.04429, 0.03686, 0.02930, 0.02172, 0.01414, 0.00657, -0.00100, 0.03570, 0.07170, 0.08080, 0.08110, 0.07739, 0.07160, 0.06515, 0.05887, 0.05271, 0.04636, 0.03974, 0.03296, 0.02616, 0.01937, 0.01259, 0.00583, -0.00094, 0.03689, 0.07565, 0.07874, 0.07634, 0.07148, 0.06513, 0.05864, 0.05274, 0.04709, 0.04125, 0.03518, 0.02906, 0.02301, 0.01702, 0.01105, 0.00508, -0.00089, 0.02309, 0.06311, 0.07000, 0.06886, 0.06384, 0.05775, 0.05206, 0.04705, 0.04197, 0.03651, 0.03092, 0.02545, 0.02012, 0.01488, 0.00965, 0.00440, -0.00086, 0.00929, 0.05056, 0.06125, 0.06139, 0.05619, 0.05038, 0.04548, 0.04137, 0.03684, 0.03177, 0.02667, 0.02183, 0.01724, 0.01274, 0.00824, 0.00371, -0.00084, -0.01258, 0.04216, 0.05598, 0.05252, 0.04680, 0.04255, 0.03968, 0.03652, 0.03213, 0.02729, 0.02274, 0.01862, 0.01474, 0.01089, 0.00701, 0.00309, -0.00084, -0.03445, 0.03375, 0.05071, 0.04366, 0.03740, 0.03473, 0.03388, 0.03166, 0.02742, 0.02281, 0.01882, 0.01541, 0.01223, 0.00903, 0.00577, 0.00246, -0.00085, -0.01381, 0.02127, 0.04167, 0.03498, 0.02781, 0.02775, 0.03022, 0.02746, 0.02270, 0.01858, 0.01543, 0.01278, 0.01018, 0.00748, 0.00471, 0.00191, -0.00090, 0.00682, 0.00879, 0.03262, 0.02631, 0.01822, 0.02077, 0.02657, 0.02325, 0.01798, 0.01435, 0.01204, 0.01014, 0.00813, 0.00593, 0.00365, 0.00135, -0.00094, 0.02850, -0.00205, 0.02132, 0.01828, 0.01274, 0.01662, 0.02517, 0.01832, 0.01319, 0.01086, 0.00954, 0.00818, 0.00652, 0.00467, 0.00277, 0.00087, -0.00102, 0.05018, -0.01289, 0.01002, 0.01025, 0.00726, 0.01247, 0.02378, 0.01340, 0.00839, 0.00738, 0.00703, 0.00622, 0.00492, 0.00340, 0.00188, 0.00039, -0.00109, 0.03999, -0.00764, 0.00460, 0.00556, 0.00268, 0.00889, 0.01352, 0.00815, 0.00538, 0.00544, 0.00555, 0.00483, 0.00366, 0.00242, 0.00121, 0.00002, -0.00119, 0.02981, -0.00238, -0.00082, 0.00087, -0.00189, 0.00531, 0.00327, 0.00291, 0.00237, 0.00350, 0.00406, 0.00343, 0.00239, 0.00143, 0.00054, -0.00035, -0.00128, 0.02103, -0.00064, -0.00176, -0.00128, -0.00096, 0.00065, 0.00159, 0.00148, 0.00175, 0.00281, 0.00319, 0.00231, 0.00142, 0.00079, 0.00014, -0.00060, -0.00141, 0.01226, 0.00110, -0.00271, -0.00343, -0.00003, -0.00401, -0.00009, 0.00005, 0.00113, 0.00212, 0.00231, 0.00119, 0.00045, 0.00014, -0.00026, -0.00085, -0.00153, 0.00711, 0.00024, -0.00365, -0.00193, 0.00105, -0.00152, -0.00023, -0.00032, 0.00040, 0.00061, 0.00055, 0.00022, -0.00006, -0.00004, -0.00036, -0.00099, -0.00166, 0.00196, -0.00061, -0.00459, -0.00043, 0.00213, 0.00096, -0.00038, -0.00068, -0.00034, -0.00089, -0.00121, -0.00075, -0.00058, -0.00021, -0.00046, -0.00113, -0.00178, -0.00101, -0.00133, -0.00228, 0.00170, 0.00132, 0.00008, -0.00007, 0.00038, 0.00023, -0.00030, -0.00202, -0.00092, -0.00040, -0.00011, -0.00032, -0.00118, -0.00185, -0.00399, -0.00204, 0.00003, 0.00382, 0.00051, -0.00080, 0.00024, 0.00144, 0.00079, 0.00030, -0.00283, -0.00109, -0.00021, -0.00000, -0.00018, -0.00123, -0.00191, -0.00554, -0.00236, 0.00066, 0.00359, 0.00129, 0.00011, 0.00016, 0.00087, 0.00055, 0.00060, -0.00082, -0.00047, -0.00083, -0.00118, -0.00067, -0.00129, -0.00186, -0.00710, -0.00269, 0.00129, 0.00335, 0.00207, 0.00102, 0.00009, 0.00030, 0.00031, 0.00090, 0.00120, 0.00015, -0.00146, -0.00235, -0.00115, -0.00134, -0.00180, -0.00806, -0.00307, 0.00110, 0.00318, 0.00276, 0.00186, 0.00071, 0.00020, -0.00059, -0.00081, 0.00039, 0.00011, -0.00108, -0.00174, -0.00127, -0.00145, -0.00175, -0.00902, -0.00346, 0.00090, 0.00301, 0.00346, 0.00270, 0.00133, 0.00011, -0.00150, -0.00252, -0.00042, 0.00007, -0.00071, -0.00113, -0.00140, -0.00155, -0.00169],
+];
+
+/// Highlights' push per unit slider over the fine base's `z`: `[T, Q]`; a
+/// slider at `s < 0` adds `s · (T + |s| · Q)` to `u`, plus [`HS_HL2`]'s
+/// terms at the coarse base's `z`.
+const HS_HL: [[f32; HS_ZN]; 2] = [
+    [0.01408, 0.01242, 0.01077, 0.00911, 0.00745, 0.00579, 0.00413, 0.00317, 0.00600, 0.00592, 0.00867, 0.00788, 0.00875, 0.00965, 0.01359, 0.01904, 0.02227, 0.02301, 0.03602, 0.06433, 0.09159, 0.09091, 0.10090, 0.11198, 0.16821, 0.20607, 0.34311, 0.46159, 0.58007],
+    [0.00424, 0.00369, 0.00314, 0.00258, 0.00201, 0.00142, 0.00079, 0.00017, 0.00014, -0.00056, -0.00104, -0.00107, -0.00140, -0.00117, -0.00047, -0.00063, -0.00057, -0.00016, -0.00053, -0.00086, -0.00406, -0.00862, -0.00727, -0.00168, -0.00795, -0.04251, -0.10489, -0.20374, -0.30240],
+];
+
+/// Highlights' push per unit slider over the coarse base's `z`
+/// ([`HS_SIGMA_S2`]), `[T, Q]`, added to [`HS_HL`]'s.
+const HS_HL2: [[f32; HS_Z2N]; 2] = [
+    [-0.00439, -0.00431, -0.00423, -0.00415, -0.00407, -0.00399, -0.00392, -0.00384, -0.00376, -0.00368, -0.00360, -0.00222, -0.00436, -0.00404, -0.00319, 0.00006, -0.00000, -0.00237, -0.00504, -0.00799, 0.00033, -0.01812, -0.01410, -0.03288, -0.00990, 0.03956, 0.08245, 0.15571, 0.19379, 0.00607, -0.13470, -0.27547, -0.41625],
+    [-0.00026, -0.00034, -0.00042, -0.00049, -0.00057, -0.00064, -0.00071, -0.00077, -0.00083, -0.00088, -0.00091, -0.00075, 0.00016, 0.00048, 0.00076, 0.00054, -0.00005, -0.00088, -0.00074, -0.00053, -0.00038, -0.00115, -0.00186, -0.00209, 0.00062, -0.00255, -0.01542, -0.02968, -0.00885, 0.02895, 0.26734, 0.50450, 0.74118],
+];
+
+fn line_at(t: &[f32], x: f32, x0: f32, step: f32) -> f32 {
+    let p = ((x - x0) / step).clamp(0.0, (t.len() - 1) as f32);
+    let i = (p.floor() as usize).min(t.len() - 2);
+    t[i] + (t[i + 1] - t[i]) * (p - i as f32)
+}
+
+/// [`HS_SH`] row `r` at `(z, u)`, bilinear, clamped to the grid.
+fn sh_grid(r: usize, z: f32, u: f32) -> f32 {
+    let t = &HS_SH[r];
+    let p = ((z - HS_Z0) / HS_ZSTEP).clamp(0.0, (HS_ZN - 1) as f32);
+    let q = (u * (HS_UN - 1) as f32).clamp(0.0, (HS_UN - 1) as f32);
+    let (i, j) = ((p.floor() as usize).min(HS_ZN - 2), (q.floor() as usize).min(HS_UN - 2));
+    let (fi, fj) = (p - i as f32, q - j as f32);
+    let at = |a: usize, b: usize| t[a * HS_UN + b];
+    let lo = at(i, j) + (at(i, j + 1) - at(i, j)) * fj;
+    let hi = at(i + 1, j) + (at(i + 1, j + 1) - at(i + 1, j)) * fj;
+    lo + (hi - lo) * fi
+}
+
+/// Where a pixel sits for Highlights and Shadows: `z` on the fine base,
+/// `z2` on the coarse one (both `log2(base) − key`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct HsSite {
+    pub(crate) z: f32,
+    pub(crate) z2: f32,
+}
+
+impl HsSite {
+    /// The site a pointwise tone LUT assumes at `u`: both bases are the
+    /// pixel itself, the frame's key `key` ([`HS_KEY_NOMINAL`] without a
+    /// frame).
+    pub(crate) fn diagonal(u: f32, key: f32) -> Self {
+        let z = (srgb_to_linear(u) + HS_FLOOR).log2() - key;
+        Self { z, z2: z }
+    }
+}
+
+/// The push per unit slider of Highlights (`k = 1`) or Shadows (`k = 2`) at
+/// `s`, for a pixel at `u` at `site`: the push is `s · row`. The measured
+/// signs (Highlights below 0, Shadows above) follow the local law; the other
+/// two keep their pointwise tables ([`camera_raw_row`]) at the pixel's own
+/// `u`.
+pub(crate) fn hs_row(k: usize, s: f32, site: HsSite, u: f32) -> f32 {
+    let m = s.abs();
+    if k == 2 && s > 0.0 {
+        sh_grid(0, site.z, u) + m * sh_grid(1, site.z, u)
+    } else if k == 1 && s < 0.0 {
+        line_at(&HS_HL[0], site.z, HS_Z0, HS_ZSTEP)
+            + m * line_at(&HS_HL[1], site.z, HS_Z0, HS_ZSTEP)
+            + line_at(&HS_HL2[0], site.z2, HS_Z0, HS_Z2STEP)
+            + m * line_at(&HS_HL2[1], site.z2, HS_Z0, HS_Z2STEP)
+    } else {
+        camera_raw_row(k, s, u)
+    }
+}
+
+/// Highlights `hl` and Shadows `sh` (each −1..1) at one pixel: how far `u`
+/// moves.
+pub(crate) fn hs_push(hl: f32, sh: f32, site: HsSite, u: f32) -> f32 {
+    let mut p = 0.0;
+    if hl != 0.0 {
+        p += hl * hs_row(1, hl, site, u);
+    }
+    if sh != 0.0 {
+        p += sh * hs_row(2, sh, site, u);
+    }
+    p
+}
+
+/// Every pixel's [`HsSite`] on a profile-stage frame: each base is the
+/// edge-aware ([`bilateral_base`]) smoothing of `log2` linear luminance at
+/// its film-pixel sigma and [`HS_SIGMA_R`] stops, the key `log2` of the
+/// frame's mean linear luminance. `coarse = false` skips the coarse base
+/// (only Highlights reads it) and copies the fine one.
+pub(crate) fn hs_field(data: &[[f32; 3]], w: usize, h: usize, film: FilmScale, coarse: bool) -> Vec<HsSite> {
+    let y: Vec<f32> = data.par_iter().map(|px| srgb_to_linear(camera_raw_unstart(luma601(px)))).collect();
+    let n = y.len().max(1);
+    let mean = y.iter().map(|&v| f64::from(v)).sum::<f64>() / n as f64;
+    let key = (mean as f32).max(HS_FLOOR).log2();
+    let lg: Vec<f32> = y.par_iter().map(|&v| (v + HS_FLOOR).log2()).collect();
+    let fine = bilateral_base(&lg, w, h, film.raster_px(HS_SIGMA_S), HS_SIGMA_R);
+    let wide = coarse.then(|| bilateral_base(&lg, w, h, film.raster_px(HS_SIGMA_S2), HS_SIGMA_R));
+    (0..fine.len())
+        .into_par_iter()
+        .map(|i| HsSite { z: fine[i] - key, z2: wide.as_ref().map_or(fine[i], |c| c[i]) - key })
+        .collect()
+}
+
+/// A piecewise-linear bilateral filter (Durand and Dorsey): the plane
+/// box-averaged onto a grid a third of `sigma_s` apart, one Gaussian-weighted
+/// mean per range level half a `sigma_r` apart, each read back bilinearly and
+/// between the two levels that bracket the pixel's own value.
+pub(crate) fn bilateral_base(i: &[f32], w: usize, h: usize, sigma_s: f32, sigma_r: f32) -> Vec<f32> {
+    if w == 0 || h == 0 || i.len() != w * h {
+        return i.to_vec();
+    }
+    let (lo, hi) = i.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+    if hi - lo < 1e-6 {
+        return i.to_vec();
+    }
+    let f = ((sigma_s / 3.0).floor() as usize).max(1);
+    let (cw, ch) = (w.div_ceil(f), h.div_ceil(f));
+    let mut coarse = vec![0.0f32; cw * ch];
+    let mut count = vec![0.0f32; cw * ch];
+    for y in 0..h {
+        for x in 0..w {
+            let c = (y / f) * cw + x / f;
+            coarse[c] += i[y * w + x];
+            count[c] += 1.0;
+        }
+    }
+    for (c, n) in coarse.iter_mut().zip(&count) {
+        *c /= n.max(1.0);
+    }
+    let levels = (((hi - lo) / (sigma_r * 0.5)).ceil() as usize + 1).clamp(8, 64);
+    let sigma_c = sigma_s / f as f32;
+    let planes: Vec<Vec<f32>> = (0..levels)
+        .into_par_iter()
+        .map(|j| {
+            let k = lo + (hi - lo) * j as f32 / (levels - 1) as f32;
+            let wgt: Vec<f32> = coarse.iter().map(|&v| (-0.5 * ((v - k) / sigma_r).powi(2)).exp()).collect();
+            let num: Vec<f32> = coarse.iter().zip(&wgt).map(|(v, g)| v * g).collect();
+            let num = gauss_blur_plane(&num, cw, ch, sigma_c);
+            let den = gauss_blur_plane(&wgt, cw, ch, sigma_c);
+            num.iter().zip(&den).map(|(a, b)| if *b > 1e-12 { a / b } else { k }).collect()
+        })
+        .collect();
+    let read = |p: &[f32], gx: f32, gy: f32| {
+        let x0 = (gx.floor().max(0.0) as usize).min(cw - 1);
+        let y0 = (gy.floor().max(0.0) as usize).min(ch - 1);
+        let (x1, y1) = ((x0 + 1).min(cw - 1), (y0 + 1).min(ch - 1));
+        let (fx, fy) = ((gx - x0 as f32).clamp(0.0, 1.0), (gy - y0 as f32).clamp(0.0, 1.0));
+        let top = p[y0 * cw + x0] + (p[y0 * cw + x1] - p[y0 * cw + x0]) * fx;
+        let bot = p[y1 * cw + x0] + (p[y1 * cw + x1] - p[y1 * cw + x0]) * fx;
+        top + (bot - top) * fy
+    };
+    let mut out = vec![0.0f32; w * h];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let gy = (y as f32 + 0.5) / f as f32 - 0.5;
+        for (x, o) in row.iter_mut().enumerate() {
+            let gx = (x as f32 + 0.5) / f as f32 - 0.5;
+            let v = i[y * w + x];
+            let t = ((v - lo) / (hi - lo) * (levels - 1) as f32).clamp(0.0, (levels - 1) as f32 - 1e-4);
+            let j = t.floor() as usize;
+            let a = read(&planes[j], gx, gy);
+            let b = read(&planes[j + 1], gx, gy);
+            *o = a + (b - a) * (t - j as f32);
+        }
+    });
+    out
+}
+
+/// The offset under the channels' ratio in [`hs_pixel`], in the profile
+/// stage's encoding: every channel scales as `(c + floor) · k − floor`, so a
+/// near-black pixel's colour is not blown up with its lift. Measured on
+/// Shadows +100 over a frame of large near-black areas: neutral b* 21.8 too
+/// blue with no floor, 3.9 at 0.01, 1.2 at 0.03, 3.5 yellow at 0.06; the
+/// warm tones of a daylight frame within 0.4 b* at all four.
+const HS_CHROMA_FLOOR: f32 = 0.03;
+
+/// One pixel through Highlights and Shadows: its lightness moved by
+/// [`hs_push`] in `u`, its colour kept (every channel scaled by one ratio
+/// over [`HS_CHROMA_FLOOR`]; module head: measured against the per-channel
+/// rule).
+pub(crate) fn hs_pixel(px: [f32; 3], hl: f32, sh: f32, site: HsSite) -> [f32; 3] {
+    hs_pixel_scaled(px, hl, sh, site, [1.0, 1.0])
+}
+
+/// [`hs_pixel`] with each slider's push scaled (`[highlights, shadows]`):
+/// a mask's own Highlights and Shadows (`mask_cr`).
+pub(crate) fn hs_pixel_scaled(px: [f32; 3], hl: f32, sh: f32, site: HsSite, gain: [f32; 2]) -> [f32; 3] {
+    let l = luma601(&px);
+    let u = camera_raw_unstart(l);
+    let mut push = 0.0;
+    if hl != 0.0 {
+        push += gain[0] * hl * hs_row(1, hl, site, u);
+    }
+    if sh != 0.0 {
+        push += gain[1] * sh * hs_row(2, sh, site, u);
+    }
+    let target = camera_raw_start((u + push).clamp(0.0, 1.0));
+    // Highlights shape the hue by Adobe's channel rule (`camera_raw_channels`)
+    // with this pixel's own curve, as the other sliders do; Shadows keep it.
+    let shaped = if hl < 0.0 {
+        let curve = |v: f32| {
+            let uv = camera_raw_unstart(v);
+            camera_raw_start((uv + gain[0] * hl * hs_row(1, hl, site, uv)).clamp(0.0, 1.0))
+        };
+        channel_rule(px, curve)
+    } else {
+        px
+    };
+    let k = (target + HS_CHROMA_FLOOR) / (luma601(&shaped) + HS_CHROMA_FLOOR);
+    shaped.map(|c| ((c + HS_CHROMA_FLOOR) * k - HS_CHROMA_FLOOR).clamp(0.0, 1.0))
+}
+
+/// [`camera_raw_channels`] with a curve given as a function: the brightest
+/// and darkest channels through it, the middle one in proportion.
+fn channel_rule(rgb: [f32; 3], curve: impl Fn(f32) -> f32) -> [f32; 3] {
+    let (mut hi, mut mid, mut lo) = (0usize, 1usize, 2usize);
+    if rgb[hi] < rgb[mid] {
+        std::mem::swap(&mut hi, &mut mid);
+    }
+    if rgb[mid] < rgb[lo] {
+        std::mem::swap(&mut mid, &mut lo);
+    }
+    if rgb[hi] < rgb[mid] {
+        std::mem::swap(&mut hi, &mut mid);
+    }
+    let (a, b) = (curve(rgb[hi]), curve(rgb[lo]));
+    let span = rgb[hi] - rgb[lo];
+    let mut out = [0.0f32; 3];
+    out[hi] = a;
+    out[mid] = if span > 1e-9 { b + (a - b) * (rgb[mid] - rgb[lo]) / span } else { b };
+    out[lo] = b;
+    out
+}
+
+/// Highlights and Shadows over a profile-stage frame whose sites are `field`
+/// ([`hs_field`]), before Exposure (Camera Raw's order, module head).
+pub(crate) fn apply_camera_raw_hs(data: &mut [[f32; 3]], field: &[HsSite], hl: f32, sh: f32) {
+    if hl == 0.0 && sh == 0.0 {
+        return;
+    }
+    data.par_iter_mut().zip(field).for_each(|(px, &site)| *px = hs_pixel(*px, hl, sh, site));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,5 +909,100 @@ mod tests {
         let ratio = |p: [f32; 3]| [p[0] / p[1], p[2] / p[1]];
         let (ro, ra) = (ratio(out), ratio(a));
         assert!((ro[0] - ra[0]).abs() < 1e-4 && (ro[1] - ra[1]).abs() < 1e-4, "hue by channels");
+    }
+
+    /// The base is edge-aware: across a 4-stop step each side keeps its own
+    /// level, inside a side the texture is smoothed away, and a flat plane
+    /// comes back flat.
+    ///
+    /// MUTATION: drop the range weight (a plain Gaussian smears the step), or
+    /// read the levels at the coarse value instead of the pixel's own.
+    #[test]
+    fn the_base_keeps_an_edge_and_smooths_a_side() {
+        let (w, h) = (96usize, 48usize);
+        let plane: Vec<f32> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                let tex = if (x + y) % 2 == 0 { 0.1 } else { -0.1 };
+                if x < w / 2 { tex } else { 4.0 + tex }
+            })
+            .collect();
+        let b = bilateral_base(&plane, w, h, 12.0, 1.0);
+        for y in 0..h {
+            assert!(b[y * w + 2].abs() < 0.05, "dark side at row {y}: {}", b[y * w + 2]);
+            assert!((b[y * w + w - 3] - 4.0).abs() < 0.05, "bright side at row {y}: {}", b[y * w + w - 3]);
+            assert!(b[y * w + w / 2 - 2] < 0.6, "the dark side next to the step: {}", b[y * w + w / 2 - 2]);
+            assert!(b[y * w + w / 2 + 1] > 3.4, "the bright side next to the step: {}", b[y * w + w / 2 + 1]);
+        }
+        let flat = vec![-2.5f32; w * h];
+        assert!(bilateral_base(&flat, w, h, 12.0, 1.0).iter().all(|&v| v == -2.5));
+    }
+
+    /// A frame of one value sits at its own key: every site's `z` is 0.
+    #[test]
+    fn a_uniform_frame_sits_at_its_key() {
+        let data = vec![[0.4f32; 3]; 32 * 24];
+        // Within the floor under the log ([`HS_FLOOR`], 1e-4 of white): a
+        // few thousandths of a stop at this level.
+        for s in hs_field(&data, 32, 24, FilmScale::NATIVE, true) {
+            assert!(s.z.abs() < 0.01 && s.z2.abs() < 0.01, "{s:?}");
+        }
+    }
+
+    /// Highlights and Shadows run before Exposure: the response is the
+    /// exposure of the moved `u`, not a push on the exposed value.
+    ///
+    /// MUTATION: apply the two after `camera_raw_exposure`, as the five
+    /// sliders' first law did.
+    #[test]
+    fn highlights_and_shadows_run_before_the_exposure() {
+        let key = HS_KEY_NOMINAL;
+        for (hl, sh) in [(-0.6f32, 0.0f32), (0.0, 0.6), (-0.4, 0.5)] {
+            for i in 1..20 {
+                let u = i as f32 / 20.0;
+                let site = HsSite::diagonal(u, key);
+                let moved = (u + hs_push(hl, sh, site, u)).clamp(0.0, 1.0);
+                let want = camera_raw_exposure(moved, 1.0);
+                let got = camera_raw_response_keyed(1.0, [0.0, hl, sh, 0.0, 0.0], u, key);
+                assert!((got - want).abs() < 1e-5, "hl {hl} sh {sh} at {u}: {got} vs {want}");
+            }
+        }
+    }
+
+    /// The measured signs push the way Camera Raw does, harder where the frame
+    /// says so: Shadows lift a dark site more than a bright one, Highlights
+    /// pull a bright site down more than a dark one, and the same pixel value
+    /// is pulled harder in a darker frame (the key).
+    #[test]
+    fn the_law_reads_the_site_and_the_key() {
+        let u = 0.3f32;
+        let at = |z: f32| HsSite { z, z2: z };
+        assert!(hs_push(0.0, 0.6, at(-3.0), 0.08) > hs_push(0.0, 0.6, at(1.0), 0.08));
+        assert!(hs_push(-0.6, 0.0, at(1.5), u) < hs_push(-0.6, 0.0, at(-2.0), u));
+        let dark_frame = HsSite::diagonal(u, -5.5);
+        let bright_frame = HsSite::diagonal(u, -2.5);
+        assert!(hs_push(-0.6, 0.0, dark_frame, u) < hs_push(-0.6, 0.0, bright_frame, u));
+    }
+
+    /// A Shadows lift keeps the colour: every channel scales by one ratio
+    /// over the floor, so a warm pixel keeps its channel ratios there, and a
+    /// near-black pixel's colour is not blown up with its lift.
+    ///
+    /// MUTATION: scale by the plain luma ratio (no floor), or move each
+    /// channel through the curve on its own.
+    #[test]
+    fn a_shadow_lift_keeps_the_colour_over_the_floor() {
+        let site = HsSite { z: -3.0, z2: -3.0 };
+        let f = HS_CHROMA_FLOOR;
+        let warm = [0.30f32, 0.18, 0.08];
+        let out = hs_pixel(warm, 0.0, 0.6, site);
+        assert!(luma601(&out) > luma601(&warm) + 0.02, "lifted: {out:?}");
+        let r = |p: [f32; 3]| [(p[0] + f) / (p[1] + f), (p[2] + f) / (p[1] + f)];
+        let (a, b) = (r(warm), r(out));
+        assert!((a[0] - b[0]).abs() < 1e-4 && (a[1] - b[1]).abs() < 1e-4, "{a:?} vs {b:?}");
+        let near_black = [0.004f32, 0.004, 0.012];
+        let lifted = hs_pixel(near_black, 0.0, 1.0, site);
+        let spread = lifted[2] - lifted[0];
+        assert!(spread < 3.0 * (near_black[2] - near_black[0]), "near-black blue grew to {spread}: {lifted:?}");
     }
 }

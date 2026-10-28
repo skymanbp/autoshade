@@ -11,6 +11,13 @@
 //! from a symmetric solve, then re-solves linearly with every row held at the
 //! previous answer until the answer stops moving, and drops a slider whose
 //! answer still contradicts the table it was solved with.
+//!
+//! Highlights and Shadows run BEFORE Exposure on this law and read the
+//! frame's key (`render::tone_cr`); a tone map has no base layer, so the
+//! solve takes the base as the pixel itself (`render::HsSite::diagonal`) and the
+//! key from the score set's own masses (the mass-weighted mean linear value
+//! of its points), [`render::HS_KEY_NOMINAL`] without one — the render's
+//! LUT form ([`render::camera_raw_response_keyed`]) at that key.
 
 use super::tone::{TONE_PRIOR, solve5};
 use super::*;
@@ -45,11 +52,26 @@ pub(crate) fn fit_camera_raw_tone(
     let targets: [f32; 8] = std::array::from_fn(|i| unstart(tone_map(start(knots[i]))));
     let score: Vec<(f32, f32, f32)> =
         score_set.iter().map(|&(x, y, m)| (unstart(x), unstart(y), m)).collect();
+    let key = frame_key(&score);
 
     let mut best = (0.0f32, [0.0f32; 5], f32::INFINITY);
     let mut ev = -3.0f32;
     while ev <= 3.0 + 1e-6 {
         let ys: [f32; 8] = std::array::from_fn(|i| render::camera_raw_exposure(knots[i], ev));
+        // Highlights and Shadows move `u` before the exposure: their row on
+        // the exposed axis is their push times the exposure's slope there.
+        let slope: [f32; 8] = std::array::from_fn(|i| {
+            let d = 2e-3;
+            let (a, b) = ((knots[i] - d).max(0.0), (knots[i] + d).min(1.0));
+            (render::camera_raw_exposure(b, ev) - render::camera_raw_exposure(a, ev)) / (b - a)
+        });
+        let row_at = |k: usize, s: f32, i: usize| {
+            if k == 1 || k == 2 {
+                slope[i] * render::hs_row(k, s, render::HsSite::diagonal(knots[i], key), knots[i])
+            } else {
+                render::camera_raw_row(k, s, ys[i])
+            }
+        };
         // Knot authority as the knot model has it: full while one adjacent
         // interval of the exposed curve is still open by 1 % of the axis.
         let weights: [f32; 8] = std::array::from_fn(|i| {
@@ -58,11 +80,11 @@ pub(crate) fn fit_camera_raw_tone(
             (left.max(right) / 0.01).clamp(0.0, 1.0) * support[i]
         });
         let resid: [f64; 8] = std::array::from_fn(|i| (targets[i] - ys[i]) as f64);
-        let solve = |row: &dyn Fn(usize, f32) -> f32| {
+        let solve = |row: &dyn Fn(usize, usize) -> f32| {
             let mut ata = [[0.0f64; 5]; 5];
             let mut atb = [0.0f64; 5];
             for i in 0..8 {
-                let b: [f64; 5] = std::array::from_fn(|k| (weights[i] * row(k, ys[i])) as f64);
+                let b: [f64; 5] = std::array::from_fn(|k| (weights[i] * row(k, i)) as f64);
                 for p in 0..5 {
                     for q in 0..5 {
                         ata[p][q] += b[p] * b[q];
@@ -76,18 +98,16 @@ pub(crate) fn fit_camera_raw_tone(
             let x = solve5(ata, atb);
             std::array::from_fn::<f32, 5, _>(|k| (x[k] as f32).clamp(-1.0, 1.0))
         };
-        let symmetric = solve(&|k, y| {
-            0.5 * (render::camera_raw_row(k, 1e-6, y) + render::camera_raw_row(k, -1e-6, y))
-        });
+        let symmetric = solve(&|k, i| 0.5 * (row_at(k, 1e-6, i) + row_at(k, -1e-6, i)));
         let mut negative: [bool; 5] = std::array::from_fn(|k| symmetric[k] < 0.0);
         // Each pass holds every row at the previous answer: its sign picks
         // the table, its magnitude the curvature.
         let mut s = symmetric;
         for _ in 0..4 {
             let (signs, at) = (negative, s);
-            s = solve(&|k, y| {
+            s = solve(&|k, i| {
                 let held = at[k].abs().max(1e-6);
-                render::camera_raw_row(k, if signs[k] { -held } else { held }, y)
+                row_at(k, if signs[k] { -held } else { held }, i)
             });
             let again: [bool; 5] = std::array::from_fn(|k| if s[k] == 0.0 { signs[k] } else { s[k] < 0.0 });
             let moved = (0..5).map(|k| (s[k] - at[k]).abs()).fold(0.0f32, f32::max);
@@ -108,7 +128,7 @@ pub(crate) fn fit_camera_raw_tone(
             (0..8)
                 .map(|i| {
                     let d = weights[i] as f64
-                        * (render::camera_raw_response(ev, s, knots[i]) - targets[i]) as f64;
+                        * (render::camera_raw_response_keyed(ev, s, knots[i], key) - targets[i]) as f64;
                     d * d
                 })
                 .sum::<f64>()
@@ -116,7 +136,7 @@ pub(crate) fn fit_camera_raw_tone(
         } else {
             let (mut sse, mut mass) = (0.0f64, 0.0f64);
             for &(x, y, m) in &score {
-                let d = (render::camera_raw_response(ev, s, x) - y) as f64;
+                let d = (render::camera_raw_response_keyed(ev, s, x, key) - y) as f64;
                 sse += m as f64 * d * d;
                 mass += m as f64;
             }
@@ -128,6 +148,22 @@ pub(crate) fn fit_camera_raw_tone(
         ev += 0.05;
     }
     (best.0, best.1)
+}
+
+/// The frame key the solve assumes (`log2` of the mean linear value): the
+/// score set's points weighted by their masses, in `u`; the render's nominal
+/// key without a score set.
+fn frame_key(score: &[(f32, f32, f32)]) -> f32 {
+    let (mut sum, mut mass) = (0.0f64, 0.0f64);
+    for &(u, _, m) in score {
+        sum += f64::from(m) * f64::from(render::srgb_to_linear(u.clamp(0.0, 1.0)));
+        mass += f64::from(m);
+    }
+    if mass > 0.0 && sum > 0.0 {
+        ((sum / mass) as f32).max(1e-4).log2()
+    } else {
+        render::HS_KEY_NOMINAL
+    }
 }
 
 #[cfg(test)]
@@ -157,8 +193,12 @@ mod tests {
             let f = if b > a { ((y - a) / (b - a)).clamp(0.0, 1.0) } else { 0.0 };
             (i as f32 - 1.0 + f) / (N - 1) as f32
         };
+        // The score set below is uniform in `u`: the key the solve reads off
+        // it is the one the map is made at.
+        let key = frame_key(&(1..100).map(|i| (i as f32 / 100.0, 0.0, 1.0)).collect::<Vec<_>>());
+        let response = |ev: f32, s: [f32; 5], u: f32| render::camera_raw_response_keyed(ev, s, u, key);
         for (ev, s) in [(0.5f32, [0.3f32, -0.4, 0.2, 0.0, -0.2]), (-0.7, [-0.3, 0.0, 0.6, 0.4, 0.3])] {
-            let map = |x: f32| d(render::camera_raw_response(ev, s, d_inv(x)));
+            let map = |x: f32| d(response(ev, s, d_inv(x)));
             let score: Vec<(f32, f32, f32)> = (1..100)
                 .map(|i| {
                     let x = d(i as f32 / 100.0);
@@ -169,8 +209,8 @@ mod tests {
             let (mut miss, mut moved) = (0.0f32, 0.0f32);
             for i in 1..100 {
                 let u = i as f32 / 100.0;
-                let want = render::camera_raw_response(ev, s, u);
-                miss += (render::camera_raw_response(fev, fs, u) - want).powi(2);
+                let want = response(ev, s, u);
+                miss += (response(fev, fs, u) - want).powi(2);
                 moved += (want - u).powi(2);
             }
             let (miss, moved) = ((miss / 99.0).sqrt(), (moved / 99.0).sqrt());
@@ -178,6 +218,33 @@ mod tests {
             for k in 0..5 {
                 if s[k].abs() >= 0.25 {
                     assert!(fs[k] * s[k] > 0.0, "slider {k}: {} solved as {}", s[k], fs[k]);
+                }
+            }
+        }
+    }
+
+    /// The solve's Highlights and Shadows rows are the render's law: at every
+    /// knot, the response's change under a small slider move is the row
+    /// times the slider (the row the solve builds from `render::hs_row` and
+    /// the exposure's slope), on both sides of 0 EV — so the fit cannot
+    /// drift from what the develop renders.
+    ///
+    /// MUTATION: build the rows at the exposed value (the first law's
+    /// order), or drop the exposure's slope.
+    #[test]
+    fn the_solve_rows_are_the_render_law() {
+        let key = render::HS_KEY_NOMINAL;
+        for ev in [0.0f32, 0.7, -0.5] {
+            for (k, s) in [(1usize, -0.02f32), (2, 0.02)] {
+                for &u in &render::TONE_KNOTS_X[1..7] {
+                    let mut sl = [0.0f32; 5];
+                    sl[k] = s;
+                    let moved = render::camera_raw_response_keyed(ev, sl, u, key) - render::camera_raw_response_keyed(ev, [0.0; 5], u, key);
+                    let d = 2e-3;
+                    let (a, b) = ((u - d).max(0.0), (u + d).min(1.0));
+                    let slope = (render::camera_raw_exposure(b, ev) - render::camera_raw_exposure(a, ev)) / (b - a);
+                    let row = slope * render::hs_row(k, s, render::HsSite::diagonal(u, key), u);
+                    assert!((moved - s * row).abs() <= 0.1 * (s * row).abs() + 2e-5, "ev {ev} slider {k} at {u}: moved {moved}, row {}", s * row);
                 }
             }
         }

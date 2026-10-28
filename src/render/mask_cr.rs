@@ -15,6 +15,11 @@
 //!   table of the global tables' form ([`L_RISE`] …), fitted with the
 //!   engine in the loop on the local renders at ±30 … ±100, and runs right
 //!   after the global sliders.
+//! - **Highlights below 0 and Shadows above 0** run instead the global law
+//!   (`tone_cr`: local, keyed to the frame, before Exposure) on the frame's
+//!   own bases, the push scaled by [`L_HS_GAIN`] (regressing the local
+//!   renders on the global law: 1.21 for Highlights −60, 1.25 for Shadows
+//!   +60), right after the global pass ([`apply_local_hs`]).
 //! - **Texture** renders exactly as the global Texture and stays where the
 //!   mask stage puts it.
 //! - **Temp and Tint** move the global white ([`local_white`]): a white
@@ -121,8 +126,68 @@ fn local_row(k: usize, s: f32, y: f32) -> f32 {
 }
 
 /// One adjustment's seven table sliders in −1..1, rows as [`ROWS`].
+/// Highlights below 0 and Shadows above 0 are not table sliders on this law:
+/// they run in the pass before Exposure ([`apply_local_hs`]).
 fn table_sliders(m: &crate::recipe::LocalAdjustment) -> [f32; ROWS] {
-    [m.contrast, m.highlights, m.shadows, m.whites, m.blacks, m.dehaze, m.clarity].map(|v| (v / 100.0).clamp(-1.0, 1.0))
+    let [hl, sh] = local_hs(m);
+    let mut s = [m.contrast, m.highlights, m.shadows, m.whites, m.blacks, m.dehaze, m.clarity].map(|v| (v / 100.0).clamp(-1.0, 1.0));
+    if hl != 0.0 {
+        s[1] = 0.0;
+    }
+    if sh != 0.0 {
+        s[2] = 0.0;
+    }
+    s
+}
+
+/// A mask's Highlights (below 0) and Shadows (above 0) in −1..1 — the signs
+/// the local law covers; 0 for the other sign.
+fn local_hs(m: &crate::recipe::LocalAdjustment) -> [f32; 2] {
+    let hl = (m.highlights / 100.0).clamp(-1.0, 1.0);
+    let sh = (m.shadows / 100.0).clamp(-1.0, 1.0);
+    [hl.min(0.0), sh.max(0.0)]
+}
+
+/// How much harder a mask's Highlights and Shadows push than the global
+/// sliders at the same value, on the same base and key (`[highlights,
+/// shadows]`): fitted on the local renders (module head).
+const L_HS_GAIN: [f32; 2] = [1.2, 1.25];
+
+/// Does any drawn adjustment of `r` move Highlights or Shadows on the local law?
+pub(super) fn any_local_hs(r: &EditRecipe) -> bool {
+    r.masks.iter().any(|m| m.enabled && m.amount.clamp(0.0, 1.0) != 0.0 && local_hs(m) != [0.0, 0.0])
+}
+
+/// A mask's Highlights and Shadows: the global law ([`tone_cr::hs_pixel_scaled`])
+/// on the frame's own sites `field`, at [`L_HS_GAIN`], blended by the mask's
+/// weight; right after the global pass, before Exposure.
+#[allow(clippy::too_many_arguments)] // the develop's frame, the recipe and the field
+pub(super) fn apply_local_hs(
+    data: &mut [[f32; 3]],
+    w: usize,
+    h: usize,
+    r: &EditRecipe,
+    rasters: &MaskRasterSnapshot,
+    frame: MaskFrame<'_>,
+    field: &[super::tone_cr::HsSite],
+) {
+    with_covers(r, rasters, frame, (w, h), |m| local_hs(m) != [0.0, 0.0], |covers| {
+        data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            for (x, px) in row.iter_mut().enumerate() {
+                for (m, c) in covers {
+                    let wt = c.at_px(x, y, px);
+                    if wt <= 0.001 {
+                        continue;
+                    }
+                    let [hl, sh] = local_hs(m);
+                    let t = super::tone_cr::hs_pixel_scaled(*px, hl, sh, field[y * w + x], L_HS_GAIN);
+                    for ch in 0..3 {
+                        px[ch] += wt * (t[ch] - px[ch]);
+                    }
+                }
+            }
+        });
+    });
 }
 
 /// The local slider pass over the profile stage's output, `x → u → the
@@ -162,7 +227,7 @@ fn local_slider_lut(s: [f32; ROWS]) -> Option<SliderPass> {
 /// Does `m` move anything the tone stage renders on this law: its Exposure,
 /// a table slider, Dehaze or Clarity's tone?
 pub(super) fn moves_tone(m: &crate::recipe::LocalAdjustment) -> bool {
-    m.exposure_ev != 0.0 || table_sliders(m).iter().any(|&v| v != 0.0)
+    m.exposure_ev != 0.0 || table_sliders(m).iter().any(|&v| v != 0.0) || local_hs(m) != [0.0, 0.0]
 }
 
 /// Does `m` move the white balance?

@@ -327,18 +327,28 @@ pub(super) fn apply_develop_with_rasters(
     let tone_neutral = !r.has_tone_work()
         && (!camera_raw || (r.dehaze == 0.0 && r.clarity == 0.0 && !mask_cr::any_local_tone(r)));
     if !tone_neutral {
-        // v1.17.0: on a camera-profile start, exposure first, per channel by
-        // Adobe's rule; then the five sliders with Adobe's hue and the luma's
+        // v1.17.0: on a camera-profile start, Highlights and Shadows first
+        // (their own pass: a local law, keyed to the frame); exposure, per channel
+        // by Adobe's rule; then Contrast, Whites and Blacks with Adobe's hue and the luma's
         // lightness (`tone_cr::camera_raw_slider_pixel`); the Look's curve by
         // the luma ratio; the photographer's curves by Adobe's rule (`tone_cr`).
         if camera_raw {
+            let tone = camera_raw_tone_passes(r);
+            // Highlights and Shadows FIRST, global then each mask's, on one
+            // base layer (`tone_cr`: Camera Raw applies them before
+            // Exposure, and their push reads the frame's own base).
+            let (hl, sh) = tone.highlights_shadows;
+            if hl != 0.0 || sh != 0.0 || mask_cr::any_local_hs(r) {
+                let field = hs_field(data, w, h, film, true);
+                apply_camera_raw_hs(data, &field, hl, sh);
+                mask_cr::apply_local_hs(data, w, h, r, rasters, frame, &field);
+            }
             if let Some(e) = camera_raw_exposure_lut(r.exposure_ev) {
                 data.par_iter_mut().for_each(|px| *px = camera_raw_channels(*px, &e));
             }
             // A mask's Exposure, then its sliders, each after the global
             // one it adds to (`mask_cr`).
             mask_cr::apply_local_exposure(data, w, h, r, rasters, frame);
-            let tone = camera_raw_tone_passes(r);
             if let Some(s) = &tone.sliders {
                 data.par_iter_mut().for_each(|px| *px = camera_raw_slider_pixel(*px, s));
             }
