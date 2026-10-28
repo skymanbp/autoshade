@@ -361,11 +361,12 @@ fn sony_radius_polynomial(knots: &[f32]) -> Option<[f64; 4]> {
         if a[col][col].abs() < 1e-15 {
             return None;
         }
-        for r in 0..4 {
+        let pivot = a[col];
+        for (r, row) in a.iter_mut().enumerate() {
             if r != col {
-                let f = a[r][col] / a[col][col];
-                for c in col..5 {
-                    a[r][c] -= f * a[col][c];
+                let f = row[col] / pivot[col];
+                for (x, p) in row.iter_mut().zip(pivot.iter()).skip(col) {
+                    *x -= f * p;
                 }
             }
         }
