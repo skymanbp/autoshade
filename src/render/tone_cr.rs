@@ -119,7 +119,7 @@ pub(crate) fn ramp_inverse(r: f32) -> f32 {
 }
 
 /// The samples of the response tables: `u = i / 32`.
-const TABLE_N: usize = 33;
+pub(super) const TABLE_N: usize = 33;
 
 /// Push per unit slider for a POSITIVE slider at `u`, in the knot model's
 /// order `[contrast, highlights, shadows, whites, blacks]`: a slider at
@@ -203,7 +203,7 @@ const DEHAZE_FALL_Q: [f32; TABLE_N] = [-0.0000, -0.0000, -0.0000, -0.0000, 0.000
 /// log-chroma change of coloured pixels (C* > 5) per bin of `u`: per unit
 /// slider +0.3 (L 10–30), ≈ 0 (L 40–70), +0.8 (L 80–90), +1.7…2.2
 /// (L 90–100), the same for +40, +80 and −30.
-const DEHAZE_CHROMA: [f32; TABLE_N] = [0.2942, 0.2942, 0.2427, 0.1092, 0.1802, 0.5409, 0.7253, 0.6303, 0.4594, 0.2431, 0.0317, -0.1653, -0.3211, -0.3277, -0.1799, 0.0185, 0.1835, 0.3382, 0.6228, 1.0963, 1.5320, 1.6586, 1.7833, 1.7908, 1.1677, 0.5824, 0.4696, 0.4696, 0.4696, 0.4696, 0.4696, 0.4696, 0.4696];
+pub(super) const DEHAZE_CHROMA: [f32; TABLE_N] = [0.2942, 0.2942, 0.2427, 0.1092, 0.1802, 0.5409, 0.7253, 0.6303, 0.4594, 0.2431, 0.0317, -0.1653, -0.3211, -0.3277, -0.1799, 0.0185, 0.1835, 0.3382, 0.6228, 1.0963, 1.5320, 1.6586, 1.7833, 1.7908, 1.1677, 0.5824, 0.4696, 0.4696, 0.4696, 0.4696, 0.4696, 0.4696, 0.4696];
 
 /// Clarity's TONE on Camera Raw's law: besides its local contrast (the
 /// develop's clarity stage, unchanged) Camera Raw's Clarity lifts the
@@ -229,7 +229,7 @@ fn dehaze_row(d: f32, y: f32) -> f32 {
     table_at(t, y) + d.abs() * table_at(q, y)
 }
 
-fn table_at(t: &[f32; TABLE_N], u: f32) -> f32 {
+pub(super) fn table_at(t: &[f32; TABLE_N], u: f32) -> f32 {
     let p = u.clamp(0.0, 1.0) * (TABLE_N - 1) as f32;
     let i = (p.floor() as usize).min(TABLE_N - 2);
     let f = p - i as f32;

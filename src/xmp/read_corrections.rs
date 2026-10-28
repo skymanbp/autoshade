@@ -1076,10 +1076,10 @@ fn parse_one_correction_with_reader(
         // unchanged at ±100 (`LocalAdjustment::hue`), so this is a boundary
         // conversion exactly like `crs:Feather`'s, not a widening.
         //
-        // What is measured is the SCALE, not the meaning: what Lightroom does
-        // with a +50 hue is its own model, and this engine keeps rendering the
-        // value through `render::apply_masks`'s ±30° rotation — the same
-        // honest split `texture` and local `sharpness` already carry.
+        // What is measured here is the SCALE. The meaning was measured in
+        // v1.17.0: on a camera-profile start Camera Raw turns the hue by the
+        // value in degrees (`render::mask_cr::hue_px`); every other recipe
+        // keeps `render::apply_masks`'s ±30° rotation.
         hue: q180("LocalHue"),
         temperature: q100("LocalTemperature"),
         tint: q100("LocalTint"),

@@ -154,7 +154,7 @@ fn apply_develop(
     raw_source: bool,
 ) {
     let rasters = best_effort_mask_raster_snapshot(r, diag);
-    apply_develop_with_rasters(data, w, h, r, &rasters, frame, film, raw_source);
+    apply_develop_with_rasters(data, w, h, r, &rasters, frame, film, raw_source, ExportColorSpace::Srgb);
 }
 
 /// [`apply_develop`] on pixels with no owner and no caller to route to — the
@@ -239,6 +239,7 @@ pub(super) fn apply_develop_with_rasters(
     frame: MaskFrame<'_>,
     film: FilmScale,
     raw_source: bool,
+    space: ExportColorSpace,
 ) {
     // 0-) spot removal (v1.5.0 F9) — Lightroom's `crs:RetouchAreas`, which
     //    this engine re-solves from the frame's own pixels. FIRST, for two
@@ -263,6 +264,12 @@ pub(super) fn apply_develop_with_rasters(
     //    rest of the photograph. Unwarping here would apply the field twice.
     if !r.retouch.is_empty() {
         crate::retouch::heal_planar(data, w, h, &retouch_spots(r, w, h));
+    }
+    // 0w) v1.17.0: a mask's Temp and Tint on a camera-profile start, right
+    //    after the global white balance they are a move of (`mask_cr`).
+    let camera_raw = SliderLaw::of(r) == SliderLaw::CameraRaw;
+    if camera_raw {
+        mask_cr::apply_local_white(data, w, h, r, rasters, frame, space);
     }
     // 00) camera calibration (v1.5.0). Lightroom's Calibration panel belongs
     //    to the camera profile, so it is the first thing that happens to the
@@ -297,7 +304,6 @@ pub(super) fn apply_develop_with_rasters(
     //    chroma restoration.
     // v1.17.0: on a camera-profile start Dehaze follows Camera Raw's
     // measured law instead, in the slider pass below (`tone_cr`).
-    let camera_raw = SliderLaw::of(r) == SliderLaw::CameraRaw;
     if r.dehaze != 0.0 && !camera_raw {
         apply_dehaze(data, w, r.dehaze);
     }
@@ -318,7 +324,8 @@ pub(super) fn apply_develop_with_rasters(
     //    recipe (`EditRecipe::has_tone_work`), against the same inputs
     //    `build_tone_lut` reads: this condition listing its own copy of them is
     //    exactly how the profile came to render nothing.
-    let tone_neutral = !r.has_tone_work() && (!camera_raw || (r.dehaze == 0.0 && r.clarity == 0.0));
+    let tone_neutral = !r.has_tone_work()
+        && (!camera_raw || (r.dehaze == 0.0 && r.clarity == 0.0 && !mask_cr::any_local_tone(r)));
     if !tone_neutral {
         // v1.17.0: on a camera-profile start, exposure first, per channel by
         // Adobe's rule; then the five sliders with Adobe's hue and the luma's
@@ -328,10 +335,14 @@ pub(super) fn apply_develop_with_rasters(
             if let Some(e) = camera_raw_exposure_lut(r.exposure_ev) {
                 data.par_iter_mut().for_each(|px| *px = camera_raw_channels(*px, &e));
             }
+            // A mask's Exposure, then its sliders, each after the global
+            // one it adds to (`mask_cr`).
+            mask_cr::apply_local_exposure(data, w, h, r, rasters, frame);
             let tone = camera_raw_tone_passes(r);
             if let Some(s) = &tone.sliders {
                 data.par_iter_mut().for_each(|px| *px = camera_raw_slider_pixel(*px, s));
             }
+            mask_cr::apply_local_sliders(data, w, h, r, rasters, frame);
             if let Some(look) = &tone.look {
                 data.par_iter_mut().for_each(|px| {
                     let l_old = luma601(px);
@@ -426,7 +437,7 @@ pub(super) fn apply_develop_with_rasters(
     }
     // 6) local masked adjustments (linear/radial gradients).
     if !r.masks.is_empty() {
-        apply_masks(data, w, h, r, rasters, frame, film);
+        apply_masks(data, w, h, r, rasters, frame, film, space);
     }
     // 7) the colour field, after the masks on purpose: it is the residual the
     //    mask-shaped controls above could not reach, so it must read the

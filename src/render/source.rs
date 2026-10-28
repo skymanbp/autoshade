@@ -348,7 +348,7 @@ pub fn render_to_image_in(
     let frame = MaskFrame::downstream(&geom, recipe.lens_distortion);
     // A RAW negative: an absent Sharpening amount renders at Lightroom's own
     // RAW default (`EditRecipe::capture_sharpening`, v1.6.0).
-    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, true);
+    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, true, working);
 
     // --- pack to 16-bit (highest precision; JPEG downconverts at encode) ------
     let mut buf: Vec<u16> = vec![0u16; w * h * 3];
@@ -908,7 +908,7 @@ pub fn render_baked_to_image(
     let film = FilmScale::of(film_short, w, h);
     // A baked raster: Lightroom gives a JPEG / TIFF no sharpening by default,
     // so an absent amount renders none (`EditRecipe::capture_sharpening`).
-    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, false);
+    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, false, ExportColorSpace::Srgb);
 
     let mut buf: Vec<u16> = vec![0u16; w * h * 3];
     buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {

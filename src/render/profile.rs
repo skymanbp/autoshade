@@ -471,6 +471,32 @@ impl UnderTone {
         let r = light.map(|c| super::exposure_ramp(c.max(0.0)));
         super::mat_vec3(&self.from_ref, &adobe_tone(r, &acr3_default::ACR3_DEFAULT))
     }
+
+    /// [`UnderTone::undo`] without the ramp: the light after the exposure
+    /// ramp and before Adobe's curve — where a mask's Temp and Tint act
+    /// (`render::mask_cr`).
+    pub(crate) fn undo_curve(&self, lin: [f32; 3]) -> [f32; 3] {
+        let r = super::mat_vec3(&self.to_ref, &lin).map(|c| c.clamp(0.0, 1.0));
+        adobe_tone(r, &self.inverse)
+    }
+
+    /// [`UnderTone::undo_curve`]'s inverse.
+    pub(crate) fn redo_curve(&self, ramped: [f32; 3]) -> [f32; 3] {
+        let r = ramped.map(|c| c.clamp(0.0, 1.0));
+        super::mat_vec3(&self.from_ref, &adobe_tone(r, &acr3_default::ACR3_DEFAULT))
+    }
+
+    /// Linear working RGB in the stage's reference primaries (ProPhoto's at
+    /// the working white), with no tone undone: where a mask's Hue turns a
+    /// colour (`render::mask_cr`).
+    pub(crate) fn to_reference(&self, lin: [f32; 3]) -> [f32; 3] {
+        super::mat_vec3(&self.to_ref, &lin)
+    }
+
+    /// [`UnderTone::to_reference`]'s inverse.
+    pub(crate) fn to_working(&self, r: [f32; 3]) -> [f32; 3] {
+        super::mat_vec3(&self.from_ref, &r)
+    }
 }
 
 /// Correlated colour temperature of a chromaticity by Robertson's method —

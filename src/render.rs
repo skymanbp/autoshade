@@ -60,6 +60,7 @@ mod mask_falloff;
 mod mask_raster;
 mod mask_warp;
 mod mask_weight;
+mod mask_cr;
 mod masks;
 mod orient;
 mod resample;
@@ -187,7 +188,7 @@ pub use masks::{MaskFrame, engine_active};
 pub(crate) use masks::{linear_to_oklab, tint_from_push, tint_luma, tint_window};
 #[cfg(test)]
 pub(crate) use masks::{TINT_WINDOW_CENTRE, oklab_to_linear, tint_push, tint_px};
-use masks::{MaskUnwarp, apply_masks};
+use masks::{Brushes, Cover, MaskUnwarp, apply_masks};
 #[cfg(test)]
 use masks::{LOCAL_NR_GATE, is_lr_post_correction_geometry};
 pub use orient::{

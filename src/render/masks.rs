@@ -62,6 +62,7 @@ use super::*;
 /// its passes — the spatial-pass row of `decode::PIPELINE_BYTES_PER_PIXEL`.
 /// The `!= 0.0` gate on each pass means a mask that does not use an op
 /// allocates nothing for it.
+#[allow(clippy::too_many_arguments)] // the develop's frame, rasters, film scale and working space, as `apply_develop_with_rasters`
 pub(super) fn apply_masks(
     data: &mut [[f32; 3]],
     w: usize,
@@ -70,10 +71,18 @@ pub(super) fn apply_masks(
     rasters: &MaskRasterSnapshot,
     frame: MaskFrame<'_>,
     film: FilmScale,
+    space: ExportColorSpace,
 ) {
     if w == 0 || h == 0 {
         return; // both passes below chunk by w; rayon asserts chunk_size != 0
     }
+    // v1.17.0: on a camera-profile start a mask's Exposure, five tone
+    // sliders, Dehaze, Clarity's tone and Temp/Tint follow Camera Raw's
+    // measured law in the develop's own white-balance and tone stages
+    // (`mask_cr`); this pass keeps the rest, and turns the Hue as Lightroom
+    // does (`mask_cr::hue_px`).
+    let camera_raw = SliderLaw::of(r) == SliderLaw::CameraRaw;
+    let hue_space = camera_raw.then(|| (profile::UnderTone::new(space), transfer_luts()));
     // The frame adaptation, built ONCE per frame rather than per mask or per
     // pixel (see `MaskUnwarp`). `None` whenever nothing downstream moves these
     // pixels, which is what keeps a photo with no active geometry byte-identical
@@ -87,10 +96,8 @@ pub(super) fn apply_masks(
     // ORDER: reordering or toggling masks cannot re-estimate the haze, exactly
     // as dragging Exposure cannot re-estimate the global one. A per-mask
     // estimate would also make two masks disagree about the same sky.
-    let dehaze_a = r
-        .masks
-        .iter()
-        .any(|m| m.enabled && m.amount.clamp(0.0, 1.0) != 0.0 && m.dehaze != 0.0)
+    let dehaze_a = (!camera_raw
+        && r.masks.iter().any(|m| m.enabled && m.amount.clamp(0.0, 1.0) != 0.0 && m.dehaze != 0.0))
         .then(|| dehaze_airlight(data, w));
     for stored_mask in &r.masks {
         // The eye toggle: a disabled mask renders nothing at any Amount —
@@ -104,7 +111,10 @@ pub(super) fn apply_masks(
         let framed_mask =
             frame.linear_handles_to_raw(stored_mask, (w as f32, h as f32));
         let m = framed_mask.as_ref();
-        let local = EditRecipe {
+        let local = if camera_raw {
+            EditRecipe { tone_curve: m.main_curve.clone(), ..EditRecipe::default() }
+        } else {
+            EditRecipe {
             exposure_ev: m.exposure_ev,
             contrast: m.contrast,
             highlights: m.highlights,
@@ -118,6 +128,7 @@ pub(super) fn apply_masks(
             // — it is the SAME builder the global master curve goes through.
             tone_curve: m.main_curve.clone(),
             ..EditRecipe::default()
+            }
         };
         let lut = build_tone_lut(&local);
         // The three per-channel local curves (`crs:{Red,Green,Blue}Curve`),
@@ -147,9 +158,10 @@ pub(super) fn apply_masks(
         // pixel loop): compose Temp/Tint WB with the zoned recolour gains,
         // then compile the exact linear-light formula into channel LUTs.
         // None when neutral, so tone-only masks pay no colour-stage cost.
+        let local_wb = !camera_raw && (m.temperature != 0.0 || m.tint != 0.0);
         let colour_luts =
-            (m.temperature != 0.0 || m.tint != 0.0 || m.color_gains.is_some()).then(|| {
-                let g = wb_gains(5500.0, local_temp_to_kelvin(m.temperature), m.tint);
+            (local_wb || m.color_gains.is_some()).then(|| {
+                let g = if local_wb { wb_gains(5500.0, local_temp_to_kelvin(m.temperature), m.tint) } else { [1.0; 3] };
                 let cg = m.color_gains.unwrap_or([1.0; 3]);
                 colour_gain_luts([g[0] * cg[0], g[1] * cg[1], g[2] * cg[2]])
             });
@@ -166,64 +178,14 @@ pub(super) fn apply_masks(
         if amount == 0.0 {
             continue;
         }
-        // Bitmap geometry: decode each raster ONCE per mask per develop
-        // (never inside the pixel loop); both the tone and the NR pass share
-        // them. Components load alongside the base.
-        //
-        // A BRUSH group arrives through the same slot (R29 Batch-6b). It has
-        // no file, so the snapshot has nothing for it; `brush_raster` stamps
-        // its dab stream instead — once per mask per develop, memoised across
-        // develops, and at THIS frame's size because a dab is a circle in
-        // pixels. The two sources cannot collide: `rasters.get` answers only
-        // for a geometry with a raster PATH (`geometry_raster_path`), which a
-        // brush never has.
-        let brush_base = brush_raster(&m.mask, w as u32, h as u32);
-        let brush_comps: Vec<Option<std::sync::Arc<image::GrayImage>>> =
-            m.components.iter().map(|c| brush_raster(&c.geometry, w as u32, h as u32)).collect();
-        let bmp = rasters.get(&m.mask).or(brush_base.as_deref());
-        let comp_bmps: Vec<Option<&image::GrayImage>> = m
-            .components
-            .iter()
-            .zip(&brush_comps)
-            .map(|(c, brush)| rasters.get(&c.geometry).or(brush.as_deref()))
-            .collect();
-        // An unloadable raster carries NO coverage, so its weight must never
-        // reach the inversion below: 0 with `inverted` would apply this
-        // adjustment to the WHOLE frame at full strength. Skipping the whole
-        // adjustment is the inert contract (recipe.rs `MaskGeometry::Bitmap`)
-        // — and it covers COMPONENTS for the same reason: a lost Subtract
-        // raster contributes 0 and silently WIDENS the effect area.
-        if (bmp.is_none() && is_raster_backed(&m.mask))
-            || m.components
-                .iter()
-                .zip(&comp_bmps)
-                .any(|(c, b)| b.is_none() && is_raster_backed(&c.geometry))
-        {
+        // The coverage every pass below weighs by: the snapshot's rasters
+        // and the brush stamps, loaded once per mask per develop ([`Cover`],
+        // which also owns the inert skip for an unloadable raster).
+        let brushes = Brushes::of(m, w, h);
+        let Some(cover) = Cover::new(m, &brushes, rasters, unwarp, w, h) else {
             continue;
-        }
-        // combined mask coverage × master amount at a pixel (with inversion).
-        //
-        // PIXEL CENTRES, `(x + 0.5)/w` — see `MASK_SAMPLE_CENTRE` for the
-        // measurement, the derivation, and the render-behaviour change.
-        let weight_at = |x: usize, y: usize| -> f32 {
-            let (nx, ny) = (
-                (x as f32 + MASK_SAMPLE_CENTRE) / w as f32,
-                (y as f32 + MASK_SAMPLE_CENTRE) / h as f32,
-            );
-            let mut wgt = combined_mask_weight(
-                m,
-                nx,
-                ny,
-                bmp,
-                &comp_bmps,
-                unwarp,
-                (w as f32, h as f32),
-            );
-            if m.inverted {
-                wgt = 1.0 - wgt;
-            }
-            wgt * amount
         };
+        let weight_at = |x: usize, y: usize| cover.at(x, y);
 
         // --- local dehaze pass (runs FIRST — see the pass-order note on this
         //     function for why, and for the two residues vs the global chain) ---
@@ -264,12 +226,13 @@ pub(super) fn apply_masks(
         // and NR passes below each still run on their own `!= 0.0` gate, so a
         // mask that moves ONLY one of those reaches it (before R22 a
         // clarity-only mask fell through every gate and rendered nothing).
-        let tone_identity = m.exposure_ev == 0.0
-            && m.contrast == 0.0
-            && m.highlights == 0.0
-            && m.shadows == 0.0
-            && m.whites == 0.0
-            && m.blacks == 0.0
+        let tone_identity = (camera_raw
+            || (m.exposure_ev == 0.0
+                && m.contrast == 0.0
+                && m.highlights == 0.0
+                && m.shadows == 0.0
+                && m.whites == 0.0
+                && m.blacks == 0.0))
             && m.saturation == 0.0
             && m.hue == 0.0
             && toning.is_none()
@@ -345,7 +308,9 @@ pub(super) fn apply_masks(
                 // colour this mask's WB/tone/saturation stages produced, which
                 // is the order the sliders read in (Temp shift → Saturation →
                 // Hue). Blended by the same single weight as the rest.
-                if hue_turns != 0.0 {
+                if let (true, Some((under, (dec, enc)))) = (m.hue != 0.0, &hue_space) {
+                    t = mask_cr::hue_px(t, m.hue, under, dec, enc);
+                } else if hue_turns != 0.0 {
                     let (hh, ss, ll) = rgb_to_hsl(t[0], t[1], t[2]);
                     let (r2, g2, b2) = hsl_to_rgb((hh + hue_turns).rem_euclid(1.0), ss, ll);
                     t = [r2, g2, b2];
@@ -427,6 +392,100 @@ pub(super) fn apply_masks(
         if m.noise_reduction > LOCAL_NR_GATE {
             let p = detail::LumaNrParams::at_amount(r, m.noise_reduction);
             detail::luma_nr(data, w, h, &p, film, spatial_weight);
+        }
+    }
+}
+
+/// The brush rasters one adjustment stamps at a frame size (a BRUSH group
+/// arrives through the geometry slot with no file, R29 Batch-6b): stamped
+/// once per mask per develop — memoised across develops, and at THIS frame's
+/// size because a dab is a circle in pixels — and held here so a [`Cover`]
+/// can borrow them.
+pub(super) struct Brushes {
+    base: Option<std::sync::Arc<image::GrayImage>>,
+    comps: Vec<Option<std::sync::Arc<image::GrayImage>>>,
+}
+
+impl Brushes {
+    pub(super) fn of(m: &crate::recipe::LocalAdjustment, w: usize, h: usize) -> Self {
+        Brushes {
+            base: brush_raster(&m.mask, w as u32, h as u32),
+            comps: m.components.iter().map(|c| brush_raster(&c.geometry, w as u32, h as u32)).collect(),
+        }
+    }
+}
+
+/// One adjustment's coverage on a `w × h` frame: the combined geometry, its
+/// inversion and its master amount at a pixel — what every mask pass weighs
+/// its move by (the Range Mask is the pass's own business: it reads the pixel
+/// as that pass finds it).
+pub(super) struct Cover<'a> {
+    m: &'a crate::recipe::LocalAdjustment,
+    bmp: Option<&'a image::GrayImage>,
+    comp_bmps: Vec<Option<&'a image::GrayImage>>,
+    unwarp: Option<&'a MaskUnwarp>,
+    w: usize,
+    h: usize,
+    amount: f32,
+}
+
+impl<'a> Cover<'a> {
+    /// `None` for an adjustment with an unloadable raster. Such a raster
+    /// carries NO coverage, so its weight must never reach the inversion: 0
+    /// with `inverted` would apply the adjustment to the WHOLE frame at full
+    /// strength. Skipping the whole adjustment is the inert contract
+    /// (recipe.rs `MaskGeometry::Bitmap`) — and it covers COMPONENTS for the
+    /// same reason: a lost Subtract raster contributes 0 and silently WIDENS
+    /// the effect area. Bitmap geometry is decoded once per mask per develop
+    /// (the snapshot), never inside the pixel loop.
+    pub(super) fn new(
+        m: &'a crate::recipe::LocalAdjustment,
+        brushes: &'a Brushes,
+        rasters: &'a MaskRasterSnapshot,
+        unwarp: Option<&'a MaskUnwarp>,
+        w: usize,
+        h: usize,
+    ) -> Option<Self> {
+        // The two sources cannot collide: `rasters.get` answers only for a
+        // geometry with a raster PATH (`geometry_raster_path`), which a brush
+        // never has.
+        let bmp = rasters.get(&m.mask).or(brushes.base.as_deref());
+        let comp_bmps: Vec<Option<&image::GrayImage>> = m
+            .components
+            .iter()
+            .zip(&brushes.comps)
+            .map(|(c, brush)| rasters.get(&c.geometry).or(brush.as_deref()))
+            .collect();
+        if (bmp.is_none() && is_raster_backed(&m.mask))
+            || m.components.iter().zip(&comp_bmps).any(|(c, b)| b.is_none() && is_raster_backed(&c.geometry))
+        {
+            return None;
+        }
+        Some(Cover { m, bmp, comp_bmps, unwarp, w, h, amount: m.amount.clamp(0.0, 1.0) })
+    }
+
+    /// The combined mask coverage × master amount at pixel `(x, y)`, with
+    /// inversion. PIXEL CENTRES, `(x + 0.5)/w` — see `MASK_SAMPLE_CENTRE` for
+    /// the measurement, the derivation, and the render-behaviour change.
+    pub(super) fn at(&self, x: usize, y: usize) -> f32 {
+        let (w, h) = (self.w as f32, self.h as f32);
+        let (nx, ny) = ((x as f32 + MASK_SAMPLE_CENTRE) / w, (y as f32 + MASK_SAMPLE_CENTRE) / h);
+        let mut wgt = combined_mask_weight(self.m, nx, ny, self.bmp, &self.comp_bmps, self.unwarp, (w, h));
+        if self.m.inverted {
+            wgt = 1.0 - wgt;
+        }
+        wgt * self.amount
+    }
+
+    /// [`Cover::at`] with the Range Mask read on `px`, the pixel as the
+    /// calling pass finds it (masks stack, so a later mask's range sees the
+    /// earlier masks' output — the documented approximation vs Lightroom's
+    /// fixed reference image).
+    pub(super) fn at_px(&self, x: usize, y: usize, px: &[f32; 3]) -> f32 {
+        let wgt = self.at(x, y);
+        match &self.m.range {
+            Some(rm) if wgt > 0.001 => wgt * range_weight(rm, px),
+            _ => wgt,
         }
     }
 }

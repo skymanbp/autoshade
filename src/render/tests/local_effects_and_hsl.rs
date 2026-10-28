@@ -152,6 +152,7 @@ fn a_local_point_curve_darkens_only_inside_the_mask() {
             &MaskRasterSnapshot::default(),
             MaskFrame::AsRendered,
             FilmScale::NATIVE,
+            ExportColorSpace::Srgb,
         );
         out
     };
@@ -232,6 +233,7 @@ fn local_hue_rotates_and_local_sharpness_signs_both_ways_inside_the_mask() {
             &MaskRasterSnapshot::default(),
             MaskFrame::AsRendered,
             FilmScale::NATIVE,
+            ExportColorSpace::Srgb,
         );
         out
     };
@@ -282,6 +284,7 @@ fn local_hue_rotates_and_local_sharpness_signs_both_ways_inside_the_mask() {
         &MaskRasterSnapshot::default(),
         MaskFrame::AsRendered,
         FilmScale::NATIVE,
+        ExportColorSpace::Srgb,
     );
     let energy = |d: &[[f32; 3]], lo: usize, hi: usize| -> f32 {
         let mut e = 0.0;
@@ -318,6 +321,7 @@ fn local_hue_rotates_and_local_sharpness_signs_both_ways_inside_the_mask() {
         &MaskRasterSnapshot::default(),
         MaskFrame::AsRendered,
         FilmScale::NATIVE,
+        ExportColorSpace::Srgb,
     );
     assert!(
         energy(&softened, 0, ew / 4) < energy(&flat, 0, ew / 4) * 0.99,
@@ -518,6 +522,7 @@ fn tint_masked(base: &[[f32; 3]], w: usize, h: usize, m: LocalAdjustment) -> Vec
         &MaskRasterSnapshot::default(),
         MaskFrame::AsRendered,
         FilmScale::NATIVE,
+        ExportColorSpace::Srgb,
     );
     out
 }
