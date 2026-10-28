@@ -38,8 +38,11 @@ fn the_base_part_is_the_profile_stage_and_nothing_after_it() {
 /// renders BYTE-IDENTICALLY to the build before the canvas switch (the era
 /// rule: a saved develop keeps the start it was tuned on). The digest was
 /// read off this same render (`render_to_image`, 16-bit, 1000 px) at c30a6b5,
-/// the v1.17.0 step-3 commit, before any of the canvas work; this build must
-/// reproduce it. Env-gated on the corpus (`p39.arw`).
+/// the v1.17.0 step-3 commit, before any of the canvas work, and re-read once
+/// on the merge with the v1.17.0 Detail law (47c2674): that law re-tunes the
+/// default capture sharpening every RAW gets, so it moves this render too —
+/// with sharpening explicitly off, the c30a6b5-line build and the merge render
+/// the recipe byte-identically. Env-gated on the corpus (`p39.arw`).
 ///
 /// MUTATION: let `starting_curve` drop a curve on a recipe that names no
 /// profile, or develop a neutral part through anything but the neutral recipe.
@@ -81,7 +84,7 @@ fn fnv1a64_u16(px: &[u16]) -> u64 {
 }
 
 /// The pre-switch digest (see the test above).
-const OLD_RECIPE_P39_1000_DIGEST: u64 = 0x6e65_09a7_6132_1a09;
+const OLD_RECIPE_P39_1000_DIGEST: u64 = 0xca2c_a6d5_5f00_dad9;
 
 /// v1.17.0 step 2's INVARIANT: a fresh canvas is one picture on every surface.
 /// The all-zero fresh recipe (the calibration a fresh open stamps) against the
