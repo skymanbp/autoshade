@@ -1420,7 +1420,10 @@ fn a_named_camera_profile_is_the_only_starting_tone() {
     assert_ne!(build_tone_lut(&stamped), build_tone_lut(&unstamped), "the base curve is tone work");
     let profiled = EditRecipe { camera_profile: "Adobe Standard".into(), ..stamped.clone() };
     assert!(profiled.starting_curve().is_empty(), "a named profile replaces the base curve");
-    assert_eq!(build_tone_lut(&profiled), build_tone_lut(&unstamped), "…and nothing else moved");
+    // The sliders on a named profile follow Camera Raw's law (`tone_cr`), so
+    // the same recipe without the stamped curve is the comparison.
+    let profiled_unstamped = EditRecipe { camera_profile: "Adobe Standard".into(), ..unstamped.clone() };
+    assert_eq!(build_tone_lut(&profiled), build_tone_lut(&profiled_unstamped), "…and nothing else moved");
     // The Look's own base profile names a profile too, and its baked curve is
     // still the start's next step.
     let knot = |input, output| CurvePoint { input, output };

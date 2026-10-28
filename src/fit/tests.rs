@@ -7811,19 +7811,25 @@ fn hsl_band_budget_is_monotone_across_the_three_strength_stops() {
 /// 0.482 (0.489). Neither the fan refusal nor the projection appears on
 /// either pair.
 ///
+/// Re-measured 2026-10-28 for v1.17.0 step 4, the tone sliders on Camera
+/// Raw's law (`render::tone_cr`), which renders both bases and both fits:
+/// `p40` is admitted at 2.9° (3.2°), fit 0.0707 -> 0.0354 (0.0631 ->
+/// 0.0398), confidence 0.599 (0.545); `p41` is still withheld by the re-hue
+/// veto, fit 0.0792 -> 0.0217 (0.0696 -> 0.0219), confidence 0.506 (0.482).
+///
 /// Both pairs are OPTIONAL, like every other corpus pair: absent, the
 /// test says so and passes, and the synthetic two-temperature fixture
 /// carries the refusal side of the same question on its own.
 ///
-/// Mutation: halve [`FAN_DEG`] and `p40` goes from admitted to convicted,
-/// red on the fan-margin assertion.
+/// Mutation: set [`FAN_DEG`] under `p40`'s 2.9° and it goes from admitted
+/// to convicted, red on the fan-margin assertion.
 #[test]
 fn the_fan_gate_costs_a_real_two_temperature_pair_nothing() {
     use crate::rationale::keys;
     let Some(root) = calibration_corpus() else { return };
     for (code, want_fan, want_before, want_after, want_conf) in [
-        ("p40", Some(3.2f32), 0.0631f32, 0.0398f32, 0.545f32),
-        ("p41", None, 0.0696, 0.0219, 0.482),
+        ("p40", Some(2.9f32), 0.0707f32, 0.0354f32, 0.599f32),
+        ("p41", None, 0.0792, 0.0217, 0.506),
     ] {
         let raw = root.join(format!("{code}.arw"));
         let target_path = root.join(format!("{code}-target.jpg"));

@@ -97,6 +97,7 @@ mod report;
 mod solve;
 mod structure;
 mod tone;
+mod tone_cr;
 
 use atmosphere::{
     WB_SHARE_SIZE_EVIDENCE, WB_VOUCH_SHRINK_STEPS, WbCellVerdict, cast_admitted_by_strength,

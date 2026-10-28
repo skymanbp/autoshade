@@ -65,6 +65,7 @@ mod orient;
 mod resample;
 mod source;
 mod tone;
+mod tone_cr;
 mod wb;
 pub use detail::FilmScale;
 pub use finish::{frame_and_finish, CropPolicy};
@@ -208,10 +209,18 @@ use source::{apply_crop, rgb16_source};
 use source::{cfa_needs_geometry_demosaic, cfa_taps, demosaic_over_cfa_geometry, wrap_table};
 pub use tone::{curve_lut};
 pub(crate) use tone::{
-    TONE_KNOTS_X, build_tone_lut, sample_lut, sample_tone_model, tone_exposure_curve,
+    TONE_KNOTS_X, build_tone_lut, camera_raw_tone_passes, sample_lut, sample_tone_model, tone_exposure_curve,
     tone_knot_weights, tone_model_knots, tone_slider_basis,
 };
 use tone::{apply_rgb_curves, hermite_eval};
+pub(crate) use tone_cr::{
+    SliderLaw, camera_raw_exposure, camera_raw_response, camera_raw_row, camera_raw_start,
+    exposure_ramp,
+};
+use tone_cr::{
+    camera_raw_after_lut, camera_raw_channels, camera_raw_exposure_lut, camera_raw_slider_lut, camera_raw_slider_pixel,
+    camera_raw_tone_lut,
+};
 #[cfg(test)]
 pub(crate) use tone::{limit_tone_sliders, parametric_lut};
 pub use wb::{local_temp_to_kelvin, solve_wb_from_neutral};

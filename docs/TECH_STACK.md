@@ -339,7 +339,13 @@ bundled; a machine with no profiles gets a named refusal.
   `render/profile/acr3_default.rs`; RawTherapee's
   `adobe_camera_raw_default_curve` is the same table to the last digit. The
   stage's gain adds the body's `BaselineExposure`, inferred from the body's
-  camera-matching profiles (`dcp::baseline_exposure`).
+  camera-matching profiles (`dcp::baseline_exposure`). After the gain comes
+  Camera Raw's exposure ramp (`render::exposure_ramp`, **measured**): a black
+  of 0.0018 subtracted after the gain, the identity to a knee at 0.15, then an
+  exponential shoulder of unit slope toward 1.2, clipped at white — where the
+  SDK subtracts 0.005 and clips at 1. Clipped, the p39 flat sidecar rendered
+  L 90–100 +2.7 L and L 0–30 1.2–1.6 L bright against Camera Raw; the SDK's
+  0.005 darkens the shadows 2–4 L past it.
 
 - Table entry: `(hue shift in degrees, saturation scale, value scale)`, stored
   `index = (val * hueDivisions + hue) * satDivisions + sat` (**measured** — at
@@ -461,6 +467,21 @@ The RAW render, the baked render, the GUI canvas and the web preview all reach
 it through one function, so the frame a photographer judges and the frame that
 ships cannot part company.
 
+On a recipe that names a camera profile (`render::SliderLaw::CameraRaw`,
+v1.17.0) the Basic panel's tone sliders follow Camera Raw's law instead of the
+knot model (`render/tone_cr.rs`): they act on `u`, the input of Adobe's
+default curve, so the develop undoes the curve, moves `u` and puts the curve
+back. Exposure goes first, a gain through the exposure ramp, per pixel by
+Adobe's channel rule (the brightest and darkest channels through the curve,
+the middle one in proportion); then Contrast, Highlights, Shadows, Whites and
+Blacks as measured response tables over `u`, with each pixel's hue from the
+channel rule and its lightness from the luma ratio; then the Look's baked
+curve by the luma ratio, as the canvas start was calibrated; then the
+parametric and point curves by the channel rule. Every recipe that names no
+profile renders through the knot model below, byte for byte, and the reverse
+fit solves each law against itself (`fit::tone_cr` carries the measured map
+into `u` through the start and inverts the tables).
+
 `build_tone_lut` samples an eight-knot monotone cubic Hermite curve. Its
 `tone_knot_weights` derive each control's influence from adjacent exposure-curve
 gaps, while Fritsch–Carlson slope limiting prevents overshoot and preserves a
@@ -487,7 +508,29 @@ supposed to remove.
   at the Greville abscissae, a region at ±100 moving its centre by ½ × its
   width; composed after the slider model and before the point curve
   (**designed, provisional** until the kit's `PARAM-*` exports).
-- White balance: gains are generated from Kelvin/tint and normalized so green
+- Tone sliders on a camera-profile start (v1.17.0, `render/tone_cr.rs`,
+  **measured against Adobe Camera Raw 18.4**): one frame's exact flat packet
+  (Adobe Color, lens profile on) rendered by script one slider at a time —
+  Exposure −3 … +2 (eight values), Contrast +25/±50/±100, Highlights
+  −30/−60/−100/+60/+100, Shadows +30/+60/+100/−60/−100, Whites and Blacks
+  ±40/±80, and Exposure ∓1 with Blacks ±40 — compared at 1000 px in L bands
+  of the flat render. Exposure is a linear gain before the curve (a pure gain
+  through Adobe's curve predicts every band of the nine renders to rms 1.2 L;
+  with the ramp the engine's renders sit at rms 0.64 L). The other five are
+  response tables over `u` (33 samples), one per sign — Camera Raw is not
+  antisymmetric: Blacks −40 moves the toe 3.7× as far as +40 — each with a
+  curvature table, `push = s·(T(u) + |s|·Q(u))`, because the response is not
+  linear in the magnitude either (Blacks −80 moves L 20–30 2.8× as far as
+  −40; one linear table per sign left −40 2.3 L too dark and −80 1.8 L too
+  light). The tables were fitted with the engine in the loop: each pass
+  renders the 23 cases and moves the tables by the band L error over the
+  curve's slope there, pixels clipped at white in both renders left out. The
+  five act on the EXPOSED value (composing Exposure ∓1 with Blacks ±40
+  predicts the toe within 3.0 L, adding them on the original axis is 6.1 L
+  off). A local slope floor (1 % of the exposed curve's rise) keeps the
+  result monotone where two pushes overlap. The reverse fit holds each row at
+  the previous pass's magnitude and re-solves until the answer stops moving.
+
   is `1`; cool-side coefficients and the 6688 K red plateau were
   **calibrated against measured Lightroom exports**.
 - Dehaze: `A` is the P99 of the minimum RGB channel in linear light,
@@ -616,6 +659,31 @@ supposed to remove.
 - The cool-end calibration also records a 7000 K shift of red `+1.47%` and blue
   `+0.97%`; the 2000 K blue result is `−0.98%`. These measurements constrain
   the implemented fit, not a claim of universal camera-colour equivalence.
+- Tone sliders on a camera-profile start (v1.17.0): worst band of the
+  moving L bands, |ΔL| / worst |Δa|,|Δb|, engine minus Camera Raw, each
+  slider's own change against Camera Raw's, before (the knot model on the
+  same start) → after: Exposure +0.5 3.94/1.63 → 0.97/0.82, +1 5.26/2.32 →
+  1.35/0.77, −1 9.54/4.05 → 1.55/0.75, +2 12.36/3.74 → 0.81/0.84; Contrast
+  +50 3.81/1.19 → 1.03/0.74, −50 5.86/0.66 → 0.97/0.53; Highlights −60
+  16.70/4.29 → 0.92/2.37, +60 5.63/2.18 → 0.84/1.03; Shadows +60 10.30/0.36
+  → 0.34/0.86, −60 10.38/0.95 → 0.58/0.71; Whites +40 2.77/1.71 →
+  0.93/0.91, −40 4.22/0.42 → 0.97/0.62; Blacks +40 9.31/0.42 → 0.16/0.50,
+  −40 6.18/0.62 → 0.57/0.43. Outside the 2 L / 2 ab line: Highlights −60's
+  sky (L 80–90 2.4 b* short of Camera Raw's blue), and at the magnitudes not
+  in the acceptance set Highlights −100 3.14 L / 3.47 b*, Exposure −2 3.19 L
+  and −3 2.69 L (L 90–100). The flat sidecar against Camera Raw: ΔE76 3.04 →
+  2.56, L 0–30 +1.2…+1.6 → +0.1…+0.2.
+- Camera Raw's Highlights is image-adaptive, and the tables are one frame's.
+  On a second frame's bare packet Camera Raw's Highlights −44 darkens L 80–100
+  by 4.0–8.3 L where the tables, which reproduce the first frame's −30/−60,
+  darken it by 9.7–10.8 L; −88 by 9.6–18.1 against 21.7–26.4 L — and
+  Camera Raw deepens the warm sky's colour (b* +5…+11) as it darkens it. A pure
+  blur of `u` as the slider's input does not explain both frames (best σ on
+  one frame is the worst on the other). On the full sidecars of the five
+  carry pairs the engine's render against Camera Raw's, ΔE76 before → after:
+  p36 7.62 → 8.52, p38 8.42 → 8.79, p39 7.47 → 6.89, p40 13.88 → 8.18,
+  p41 14.26 → 10.96 — p36 with its Highlights at 0 (against Camera Raw's own
+  render of that packet) 5.91.
 - Historical tone probes are preserved because they explain the knot weighting:
   Whites −50 compressed input `0.9568…0.9731` from 411 codes to 75, while
   Highlights +60 clipped above `0.8195`, affecting 740 of 4096 inputs (18%).

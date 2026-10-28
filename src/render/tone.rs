@@ -273,9 +273,43 @@ pub(crate) fn limit_tone_sliders(ev: f32, s: [f32; 5]) -> [f32; 5] {
 /// and crush mid-bright water / near-white foam (which had needed ad-hoc
 /// patches).
 pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
-    // Knot OUTPUTS: exposure-mapped identity, then the slider offsets — all from
-    // the shared basis below so the reverse-fit (fit.rs) solves against the SAME
-    // model the engine renders.
+    tone_lut_at(r, r.exposure_ev)
+}
+
+/// The tone of a Camera Raw recipe after its exposure, as the develop applies
+/// it, in Lightroom's order: the five sliders' LUT, which the develop puts
+/// through `tone_cr::camera_raw_slider_pixel`; the Look's baked curve, through
+/// the luma ratio (the canvas start was calibrated that way, v1.17.0 step 3);
+/// the parametric and point curves, through Adobe's channel rule
+/// (`tone_cr::camera_raw_channels`). `None` for a pass with nothing to do.
+/// With exposure (`tone_cr::camera_raw_exposure_lut`) the passes compose to
+/// [`build_tone_lut`] up to the colour rule.
+pub(crate) struct CameraRawTone {
+    pub(crate) sliders: Option<Vec<f32>>,
+    pub(crate) look: Option<Vec<f32>>,
+    pub(crate) curves: Option<Vec<f32>>,
+}
+
+pub(crate) fn camera_raw_tone_passes(r: &EditRecipe) -> CameraRawTone {
+    let parametric = parametric_lut(r);
+    let curves = (parametric.is_some() || !curve_is_identity(&r.tone_curve))
+        .then(|| camera_raw_after_lut(None, parametric.as_deref(), &curve_lut(&r.tone_curve)));
+    CameraRawTone {
+        sliders: camera_raw_slider_lut(tone_sliders(r)),
+        look: r.baked_tone_curve().map(|l| look_curve_lut(&l.tone_curve, l.amount)),
+        curves,
+    }
+}
+
+/// A point curve that leaves every value where it was: empty, or every knot
+/// on the diagonal.
+fn curve_is_identity(points: &[crate::recipe::CurvePoint]) -> bool {
+    points.iter().all(|p| p.input == p.output)
+}
+
+/// The five tone sliders of `r` in −1..1, a creative profile's baked moves
+/// included.
+fn tone_sliders(r: &EditRecipe) -> [f32; 5] {
     let contrast = (r.contrast / 100.0).clamp(-1.0, 1.0);
     // v1.5.0 F7 — a creative profile's BAKED tone moves ride with the
     // photographer's own. "Adobe Landscape" bakes Highlights −12 and Shadows
@@ -285,14 +319,34 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
     let shadows = (r.with_baked(r.shadows, |l| l.shadows) / 100.0).clamp(-1.0, 1.0);
     let whites = (r.whites / 100.0).clamp(-1.0, 1.0);
     let blacks = (r.blacks / 100.0).clamp(-1.0, 1.0);
+    [contrast, highlights, shadows, whites, blacks]
+}
+
+fn tone_lut_at(r: &EditRecipe, exposure_ev: f32) -> Vec<f32> {
+    // Knot OUTPUTS: exposure-mapped identity, then the slider offsets — all from
+    // the shared basis below so the reverse-fit (fit.rs) solves against the SAME
+    // model the engine renders.
+    let [contrast, highlights, shadows, whites, blacks] = tone_sliders(r);
 
     // Saturate the slider vector BEFORE using it, so the knot model below
     // stays exactly what it always was: base + basis·sliders, linear in the
     // sliders. That linearity is load-bearing — `fit_tone_sliders` inverts it
     // analytically — so the limit is applied to the SLIDERS, once, here and in
     // the fit, rather than to the curve afterwards.
+    // v1.17.0: on a camera-profile start the sliders follow Camera Raw's
+    // measured law, in the input of Adobe's curve (`tone_cr`). All at zero,
+    // the start renders exactly as it did: the arm below.
+    if SliderLaw::of(r) == SliderLaw::CameraRaw {
+        let sliders = [contrast, highlights, shadows, whites, blacks];
+        if exposure_ev != 0.0 || sliders.iter().any(|&v| v != 0.0) {
+            let baked = r.baked_tone_curve().map(|l| look_curve_lut(&l.tone_curve, l.amount));
+            let parametric = parametric_lut(r);
+            let curve = curve_lut(&r.tone_curve);
+            return camera_raw_tone_lut(exposure_ev, sliders, baked.as_deref(), parametric.as_deref(), &curve);
+        }
+    }
     let (ys, m) = tone_model_knots(
-        r.exposure_ev,
+        exposure_ev,
         [contrast, highlights, shadows, whites, blacks],
     );
     let curve = curve_lut(&r.tone_curve); // the recipe's own tone_curve, composed on top
@@ -317,22 +371,7 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
     // Exactly one starting tone: `starting_curve` is empty whenever the recipe
     // names a camera profile (v1.17.0), whose own tone is then the start.
     let base = match (r.baked_tone_curve(), r.starting_curve().is_empty()) {
-        (Some(l), _) => {
-            // `curve_lut` is the photographer's own point-curve sampler, and a
-            // Look's `crs:ToneCurvePV2012` is literally that same spelling — so
-            // it is the right sampler, at the wrong RESOLUTION: it returns 256
-            // entries and a base rendition is `LUT_N`. Read it through
-            // `sample_lut`, which interpolates whatever length it is handed,
-            // rather than indexing it with this loop's own counter.
-            let c = curve_lut(&l.tone_curve);
-            let a = l.amount.clamp(0.0, 1.0);
-            (0..LUT_N)
-                .map(|i| {
-                    let x = i as f32 / (LUT_N - 1) as f32;
-                    x + (sample_lut(&c, x) - x) * a
-                })
-                .collect()
-        }
+        (Some(l), _) => look_curve_lut(&l.tone_curve, l.amount),
         (None, true) => return user,
         (None, false) => base_curve_lut(r.starting_curve()),
     };
@@ -340,6 +379,26 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
     // the same profile-then-sliders order Lightroom uses.
     // final(x) = user(base(x)); one LUT, still zero extra per-pixel cost.
     (0..LUT_N).map(|i| sample_lut(&user, base[i])).collect()
+}
+
+/// A creative Look's baked point curve as a [`LUT_N`] table, blended toward
+/// the identity by the Look's `crs:Amount`, as a partial Look means.
+///
+/// `curve_lut` is the photographer's own point-curve sampler, and a Look's
+/// `crs:ToneCurvePV2012` is literally that same spelling — so it is the right
+/// sampler, at the wrong RESOLUTION: it returns 256 entries and a base
+/// rendition is `LUT_N`. Read it through `sample_lut`, which interpolates
+/// whatever length it is handed, rather than indexing it with this loop's own
+/// counter.
+pub(super) fn look_curve_lut(points: &[crate::recipe::CurvePoint], amount: f32) -> Vec<f32> {
+    let c = curve_lut(points);
+    let a = amount.clamp(0.0, 1.0);
+    (0..LUT_N)
+        .map(|i| {
+            let x = i as f32 / (LUT_N - 1) as f32;
+            x + (sample_lut(&c, x) - x) * a
+        })
+        .collect()
 }
 
 /// How far one parametric region slider at ±100 moves its region's control

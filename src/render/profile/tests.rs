@@ -29,6 +29,26 @@ fn flat(delta: [f32; 3]) -> Table {
 
 const SPACE: crate::render::ExportColorSpace = crate::render::ExportColorSpace::Srgb;
 
+/// What the stage's exposure ramp alone does to `px` (v1.17.0): Camera Raw's
+/// ramp (`super::exposure_ramp`) after the gain, per channel in the reference
+/// space. Every stage carries it, so a test about a table, a matrix or a
+/// curve states its expectation through it.
+fn ramped(s: &Stage, px: [f32; 3]) -> [f32; 3] {
+    let r = super::super::mat_vec3(&s.to_ref, &px).map(|c| super::super::exposure_ramp(c.max(0.0) * s.gain));
+    super::super::mat_vec3(&s.from_ref, &r)
+}
+
+/// The grey the ramp takes to `y` (the ramp is strictly increasing below
+/// white): bisection.
+fn unramp(y: f32) -> f32 {
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..60 {
+        let m = 0.5 * (lo + hi);
+        if super::super::exposure_ramp(m) < y { lo = m } else { hi = m }
+    }
+    0.5 * (lo + hi)
+}
+
 /// A profile with nothing to say builds NOTHING, so a photograph developed
 /// through it costs no arithmetic and moves no pixel.
 ///
@@ -56,7 +76,8 @@ fn a_profile_with_no_tables_a_straight_curve_and_no_gain_is_not_a_stage() {
 }
 
 /// The reference round trip is EXACT when no table acts, so the two matrices
-/// really are inverses and the stage cannot tint a picture by existing.
+/// really are inverses and the stage cannot tint a picture by existing: what
+/// comes back is the colour it was given, through the exposure ramp alone.
 ///
 /// What this can and cannot see, stated because the F7 mutation sweep asked:
 /// it sees an ASYMMETRY between the two matrices and nothing else. Building
@@ -79,9 +100,10 @@ fn the_reference_round_trip_returns_the_colour_it_was_given() {
     for px in [[0.2f32, 0.5, 0.8], [1.0, 1.0, 1.0], [0.04, 0.04, 0.04], [0.9, 0.1, 0.3]] {
         let mut got = px;
         s.apply(&mut got);
+        let want = ramped(&s, px);
         for ch in 0..3 {
             assert!(
-                (got[ch] - px[ch]).abs() < 2e-4,
+                (got[ch] - want[ch]).abs() < 2e-4,
                 "an identity table changed {px:?} into {got:?} (channel {ch})"
             );
         }
@@ -100,8 +122,9 @@ fn the_baseline_exposure_offset_is_measured_in_stops() {
     let s = Stage::build(&p, SPACE, None, 0.0).expect("an offset alone makes a stage");
     let mut px = [0.4f32, 0.4, 0.4];
     s.apply(&mut px);
+    let want = super::super::exposure_ramp(0.2);
     for c in px {
-        assert!((c - 0.2).abs() < 1e-3, "−1 stop must halve: {px:?}");
+        assert!((c - want).abs() < 1e-3, "−1 stop must halve before the ramp: {px:?} vs {want}");
     }
 }
 
@@ -327,7 +350,9 @@ fn a_profile_without_a_curve_renders_adobes_default_curve() {
     p.tone_curve = Vec::new();
     let s = Stage::build(&p, SPACE, None, 0.0).expect("the default curve is something to apply");
     for (x, want) in [(0.5f32, 0.80486f32), (0.18, 0.3881)] {
-        let mut grey = [x; 3];
+        assert!((default_curve(x) - want).abs() < 1e-3, "the table at {x}: {}", default_curve(x));
+        // The stage meets the curve after the exposure ramp.
+        let mut grey = [unramp(x); 3];
         s.apply(&mut grey);
         for c in grey {
             assert!((c - want).abs() < 1e-3, "grey {x} through the default curve: {grey:?}");
@@ -337,7 +362,7 @@ fn a_profile_without_a_curve_renders_adobes_default_curve() {
     // a valid curve either — the default renders.
     p.tone_curve = vec![[0.5, 0.7]];
     let s = Stage::build(&p, SPACE, None, 0.0).expect("an unusable curve is no curve");
-    let mut grey = [0.5f32; 3];
+    let mut grey = [unramp(0.5); 3];
     s.apply(&mut grey);
     assert!((grey[0] - 0.80486).abs() < 1e-3, "{grey:?}");
 }
@@ -351,7 +376,7 @@ fn a_profile_with_its_own_curve_keeps_it() {
     let mut p = bare();
     p.tone_curve = vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]];
     let s = Stage::build(&p, SPACE, None, 0.0).expect("a real curve");
-    let mut grey = [0.5f32; 3];
+    let mut grey = [unramp(0.5); 3];
     s.apply(&mut grey);
     assert!(grey.iter().all(|c| (c - 0.62).abs() < 2e-3), "its own curve at its knot: {grey:?}");
 }
@@ -367,29 +392,33 @@ fn the_gain_composes_the_bodys_baseline_with_the_profiles_offset() {
     let s = Stage::build(&p, SPACE, None, 0.5).expect("−0.5 EV in total");
     let mut px = [0.4f32; 3];
     s.apply(&mut px);
-    let want = 0.4 * 2f32.powf(-0.5);
+    let want = super::super::exposure_ramp(0.4 * 2f32.powf(-0.5));
     assert!(px.iter().all(|c| (c - want).abs() < 1e-3), "−1 + 0.5 = −0.5 EV: {px:?}");
     p.baseline_exposure_offset = 0.0;
     let s = Stage::build(&p, SPACE, None, 1.0).expect("+1 EV");
     let mut px = [0.3f32; 3];
     s.apply(&mut px);
-    assert!(px.iter().all(|c| (c - 0.6).abs() < 1e-3), "+1 EV doubles: {px:?}");
+    let want = super::super::exposure_ramp(0.6);
+    assert!(px.iter().all(|c| (c - want).abs() < 1e-3), "+1 EV doubles before the ramp: {px:?}");
 }
 
-/// Light the gain lifts past white is clipped there, before the look table
-/// and the curve — the DNG SDK's exposure ramp (`dng_function_exposure_ramp::
-/// Evaluate`, `Min ((x − black)·slope, 1)`), applied per channel.
+/// Light the gain lifts past white is rolled off under it, before the look
+/// table and the curve — Camera Raw's exposure ramp (v1.17.0, measured; the
+/// DNG SDK's `dng_function_exposure_ramp` clips at 1 instead), applied per
+/// channel; nothing past 1 reaches the curve.
 ///
 /// MUTATION: carry the lifted value into the curve (the chord past 1 would
-/// return 1.6 here).
+/// return 1.6 here), or clip at white again.
 #[test]
-fn light_lifted_past_white_clips_where_the_sdks_exposure_ramp_does() {
+fn light_lifted_past_white_rolls_off_under_camera_raws_exposure_ramp() {
     let mut p = bare();
     p.baseline_exposure_offset = 0.0;
     let s = Stage::build(&p, SPACE, None, 1.0).expect("+1 EV");
     let mut px = [0.8f32; 3];
     s.apply(&mut px);
-    assert!(px.iter().all(|c| (c - 1.0).abs() < 1e-3), "0.8 · 2 clips at white: {px:?}");
+    let want = super::super::exposure_ramp(1.6);
+    assert!(want < 1.0 && want > super::super::exposure_ramp(1.0), "the shoulder is still open at 1.6");
+    assert!(px.iter().all(|c| (c - want).abs() < 1e-3), "0.8 · 2 rolls off to {want}: {px:?}");
 }
 
 
@@ -453,8 +482,9 @@ fn a_profile_with_a_forward_matrix_owns_the_transform_and_keeps_grey_grey() {
     assert!(s.owns_camera());
     for level in [0.02f32, 0.18, 0.6] {
         let out = s.develop_camera([level; 3]);
+        let want = super::super::exposure_ramp(level);
         for c in out {
-            assert!((c - level).abs() < 2e-4, "grey {level} came out {out:?}");
+            assert!((c - want).abs() < 2e-4, "grey {level} came out {out:?}, not {want}");
         }
     }
     // Without a neutral the white cannot be solved, and the stage leaves the
@@ -529,9 +559,9 @@ fn a_creative_table_replaces_the_profiles_look_table() {
     let frame = Frame { creative: Some(flat([0.0, 1.0, 1.0])), ..Frame::default() };
     let s = Stage::build_for(&p, SPACE, frame, 0.0).expect("stage");
     let mut px = [0.4f32, 0.2, 0.1];
-    let before = px;
+    let want = ramped(&s, px);
     s.apply(&mut px);
     for c in 0..3 {
-        assert!((px[c] - before[c]).abs() < 1e-4, "the creative identity table must win: {px:?}");
+        assert!((px[c] - want[c]).abs() < 1e-4, "the creative identity table must win: {px:?}");
     }
 }

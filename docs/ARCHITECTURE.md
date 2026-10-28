@@ -2149,7 +2149,10 @@ lens-profile vignette → manual vignette → **dehaze in linear light**
 dragged) →
 tone LUT (exposure/contrast/whites/blacks/highlights/shadows, the parametric
 curve, the tone curve and the per-photo camera base curve — on a recipe that
-names no camera profile, v1.17.0 — composed into one table) → **the B&W treatment's grey mix** when the photo is black and white
+names no camera profile, v1.17.0 — composed into one table; on a recipe that
+names one, Camera Raw's measured law in four passes, `render/tone_cr.rs`:
+exposure by Adobe's channel rule, the five sliders, the Look's baked curve,
+the parametric and point curves) → **the B&W treatment's grey mix** when the photo is black and white
 (before the channel curves, so a red-channel curve meets the grey the
 photographer mixed) → per-channel RGB
 curves → 8-band HSL and the **point colours**, both skipped in black and white,

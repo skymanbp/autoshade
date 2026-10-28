@@ -21,7 +21,9 @@
 //! file alone does not carry them. The EXPOSURE is the body's
 //! `BaselineExposure` plus the profile's `BaselineExposureOffset` (the body's
 //! number inferred from its camera-matching profiles, [`crate::dcp::Baseline`]);
-//! it is clipped at white where the SDK's exposure ramp clips. The TONE CURVE
+//! it goes through Camera Raw's exposure ramp (a black subtracted after the
+//! gain and a soft shoulder, [`super::exposure_ramp`], measured), where the
+//! SDK's ramp clips at white. The TONE CURVE
 //! is the profile's own when it states one and Adobe's default curve when it
 //! does not — "Adobe Standard" states none. Measured on p39 against
 //! Lightroom's own export with no develop settings: without these two the
@@ -247,19 +249,20 @@ impl Stage {
             r = from_hsv(hsv);
         }
         // The exposure ramp, where the DNG SDK puts it: after the hue/sat map,
-        // before the look table and the curve, per channel, in linear light —
-        // and CLIPPED at white, `Min ((x − black)·slope, 1)` in
-        // `dng_function_exposure_ramp::Evaluate`. So nothing past 1 reaches the
-        // look table or the curve, whatever the gain. (The SDK's ramp also
-        // carries a small default black subtraction, `fShadows = 5` → 0.005;
-        // it is not rendered: with the gain and the default curve the p39 flat
-        // sidecar's shadows (Lightroom L < 35) sit at ΔL +1.66, inside ±2.)
+        // before the look table and the curve, per channel, in linear light.
+        // Camera Raw's, not the SDK's (v1.17.0, measured over nine exposures
+        // of one frame, `tone_cr`): the SDK clips at white,
+        // `Min ((x − black)·slope, 1)`, and subtracts 0.005; Camera Raw
+        // subtracts 0.0018 after the gain and rolls the highlights off to
+        // white. Clipped, the p39 flat sidecar rendered L 90–100 +2.7 L and
+        // L 0–30 1.2–1.6 L too bright; nothing past 1 reaches the look table
+        // or the curve either way.
         // A NEGATIVE total, which only arises when the body's baseline is
         // unknown and a camera-matching profile's offset is left uncancelled,
         // is rendered as the linear gain it states; the SDK instead darkens it
         // through `dng_function_exposure_tone`, which keeps white at white.
         for c in &mut r {
-            *c = (*c * self.gain).min(1.0);
+            *c = super::exposure_ramp(*c * self.gain);
         }
         if let Some(t) = &self.look {
             let mut hsv = to_hsv(r);
@@ -634,10 +637,10 @@ fn adobe_tone(rgb: [f32; 3], lut: &[f32]) -> [f32; 3] {
 /// clipped — a highlight outside the working gamut is exactly what the
 /// wide-gamut path exists to carry — but continued along the chord through
 /// the origin, `lut[n−1]·x`: the identity for a curve ending at (1, 1), so a
-/// value past white passes through untouched. ([`Stage::apply`] clips at white
-/// before the curve since v1.17.0, as the DNG SDK's exposure ramp does, so the
-/// stage no longer hands this arm anything; it stays the answer for a caller
-/// that does.) At and below 0 the answer is the curve's own start
+/// value past white passes through untouched. ([`Stage::apply`] ramps every
+/// channel to at most white before the curve since v1.17.0, so the stage no
+/// longer hands this arm anything; it stays the answer for a caller that
+/// does.) At and below 0 the answer is the curve's own start
 /// — [`Stage::apply`] clamps every channel before the tables, so nothing
 /// below 0 reaches here, and 0 itself is the curve's first sample. Until
 /// 2026-09-24 the bottom read `lut[0]·max(x, 0)`, which can only ever be ±0.
@@ -656,6 +659,13 @@ fn sample(lut: &[f32], x: f32) -> f32 {
     let i = s.floor() as usize;
     let f = s - i as f32;
     lut[i] + (lut[(i + 1).min(n - 1)] - lut[i]) * f
+}
+
+/// Adobe's default curve at `x` (linear in, linear out): what a profile with
+/// no curve of its own renders through. The tone sliders on a profile start
+/// read it to undo and redo the start (`render::tone_cr`).
+pub(crate) fn default_curve(x: f32) -> f32 {
+    sample(&acr3_default::ACR3_DEFAULT, x.clamp(0.0, 1.0))
 }
 
 /// RGB → (hue degrees, saturation, value), the plain HSV the DNG tables index.

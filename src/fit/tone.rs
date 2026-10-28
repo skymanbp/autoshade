@@ -676,7 +676,7 @@ pub(crate) fn refine_tone_sliders_on(
 const REFINE_PASS_CAP: usize = 40;
 
 /// Gaussian elimination with partial pivoting for the 5×5 normal equations.
-fn solve5(mut a: [[f64; 5]; 5], mut b: [f64; 5]) -> [f64; 5] {
+pub(super) fn solve5(mut a: [[f64; 5]; 5], mut b: [f64; 5]) -> [f64; 5] {
     for c in 0..5 {
         let mut p = c;
         for r in c + 1..5 {

@@ -317,12 +317,35 @@ pub(super) fn apply_develop_with_rasters(
     //    exactly how the profile came to render nothing.
     let tone_neutral = !r.has_tone_work();
     if !tone_neutral {
-        let lut = build_tone_lut(r);
-        data.par_iter_mut().for_each(|px| {
-            let l_old = luma601(px);
-            let l_new = sample_lut(&lut, l_old);
-            scale_chroma(px, l_old, l_new);
-        });
+        // v1.17.0: on a camera-profile start, exposure first, per channel by
+        // Adobe's rule; then the five sliders with Adobe's hue and the luma's
+        // lightness (`tone_cr::camera_raw_slider_pixel`); the Look's curve by
+        // the luma ratio; the photographer's curves by Adobe's rule (`tone_cr`).
+        if SliderLaw::of(r) == SliderLaw::CameraRaw {
+            if let Some(e) = camera_raw_exposure_lut(r.exposure_ev) {
+                data.par_iter_mut().for_each(|px| *px = camera_raw_channels(*px, &e));
+            }
+            let tone = camera_raw_tone_passes(r);
+            if let Some(s) = &tone.sliders {
+                data.par_iter_mut().for_each(|px| *px = camera_raw_slider_pixel(*px, s));
+            }
+            if let Some(look) = &tone.look {
+                data.par_iter_mut().for_each(|px| {
+                    let l_old = luma601(px);
+                    scale_chroma(px, l_old, sample_lut(look, l_old));
+                });
+            }
+            if let Some(c) = &tone.curves {
+                data.par_iter_mut().for_each(|px| *px = camera_raw_channels(*px, c));
+            }
+        } else {
+            let lut = build_tone_lut(r);
+            data.par_iter_mut().for_each(|px| {
+                let l_old = luma601(px);
+                let l_new = sample_lut(&lut, l_old);
+                scale_chroma(px, l_old, l_new);
+            });
+        }
     }
     // 1a) the B&W treatment (v1.5.0) replaces the colour mixer, and it runs
     //    BEFORE the per-channel curves: a red-channel curve on a black-and-white

@@ -187,7 +187,10 @@ slider at zero — the picture an all-zero Lightroom sidecar renders, pixel for
 pixel. The canvas, the browser's pane, a heal / clone / fill / denoise / stack
 master and the reverse fit all start from that same picture, and a photo you
 save writes the Adobe Color profile into its `.xmp`, so Lightroom opens it on
-the same start. The profile files are Adobe's, read from the Camera Raw
+the same start. On that start the Basic panel's Exposure, Contrast,
+Highlights, Shadows, Whites and Blacks move the picture the way Lightroom's
+do — measured slider by slider against Camera Raw — so a sidecar's numbers
+mean the same picture in both. The profile files are Adobe's, read from the Camera Raw
 install on this computer (Lightroom and Photoshop put them there); AutoShade
 ships none. Where they are not installed — and for a JPEG or TIFF — the
 develop starts as it did before v1.17.0, from a **camera-matched base look**:

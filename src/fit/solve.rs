@@ -498,10 +498,14 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             .collect(),
         _ => Vec::new(),
     };
-    let (ev, sliders) = if tone_deliverable {
-        fit_tone_sliders_supported(&tone_map, &knot_support, &score_set)
-    } else {
+    // v1.17.0: a recipe on a camera-profile start renders its sliders by
+    // Camera Raw's law (`render::tone_cr`), so it is solved on that law.
+    let (ev, sliders) = if !tone_deliverable {
         (0.0, [0.0; 5])
+    } else if render::SliderLaw::of(base) == render::SliderLaw::CameraRaw {
+        super::tone_cr::fit_camera_raw_tone(base, &tone_map, &luma_supported, &score_set)
+    } else {
+        fit_tone_sliders_supported(&tone_map, &knot_support, &score_set)
     };
     recipe.exposure_ev = round2(ev);
     recipe.contrast = round1(sliders[0] * 100.0);
