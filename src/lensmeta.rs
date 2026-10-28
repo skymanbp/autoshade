@@ -72,12 +72,14 @@ use crate::recipe::{LensProfile, MASK_WARP_KNOTS, MaskWarpCenter, MaskWarpSource
 /// nodes. The contract test records the measured maximum.
 pub(crate) const SONY_DISTORTION_CANONICAL_KNOTS: usize = 2048;
 
-/// Canonical knots the Sony RENDER distortion is resampled onto. The target
-/// is a smooth even polynomial, so linear interpolation on this grid departs
-/// from it by an eighth of its curvature times the node spacing squared; the
-/// contract test (`the_render_resample_is_faithful_to_the_camera_raw_law`)
-/// records the measured maximum on the five fixture lenses.
-pub(crate) const SONY_RENDER_DISTORTION_KNOTS: usize = 128;
+/// Canonical knots the Sony RENDER distortion is resampled onto: the most
+/// [`LensProfile::clamp`] keeps (it truncates every profile spline to 32, and
+/// a longer one would lose its outer half). The target is a smooth even
+/// polynomial, so linear interpolation on this grid departs from it by an
+/// eighth of its curvature times the node spacing squared; the contract test
+/// (`the_render_resample_is_faithful_to_the_camera_raw_law`) records the
+/// measured maximum on the five fixture lenses.
+pub(crate) const SONY_RENDER_DISTORTION_KNOTS: usize = 32;
 
 /// Read the in-camera lens correction profile from a RAW file. Every failure
 /// path returns an EMPTY component (profile with nothing to apply) — absent
@@ -629,8 +631,9 @@ mod tests {
     #[test]
     fn the_render_distortion_is_camera_raws_polynomial_per_case() {
         // In the SENSOR frame (crop = sensor) the engine's map must be the
-        // DNG's polynomial itself. Measured worst 2.6e-5 (the constant-term
-        // margin the doc of `sony_render_distortion` reports); the old reading
+        // DNG's polynomial itself. Measured worst 4.6e-5: the constant-term
+        // margin the doc of `sony_render_distortion` reports plus the 32-node
+        // resample; the old reading
         // missed by 1.9e-3 on the 80 mm frame.
         const SENSOR: (f32, f32) = (9600.0, 6376.0);
         let mut worst = 0.0f32;
@@ -644,7 +647,7 @@ mod tests {
                 let adobe = (k[0] + k[1] * x.powi(2) + k[2] * x.powi(4) + k[3] * x.powi(6)) as f32;
                 let got = engine_factor(&dense, SENSOR, r);
                 worst = worst.max((got - adobe).abs());
-                assert!((got - adobe).abs() < 5e-5, "{name} r={r}: engine {got} vs Camera Raw {adobe}");
+                assert!((got - adobe).abs() < 6e-5, "{name} r={r}: engine {got} vs Camera Raw {adobe}");
             }
         }
         eprintln!("worst |engine − Camera Raw| factor: {worst:e}");
@@ -653,7 +656,8 @@ mod tests {
     #[test]
     fn the_render_resample_is_faithful_to_the_camera_raw_law() {
         // The canonical grid against the polynomial it samples, in the
-        // ILCE-7RM4A's own crop/sensor pair. Measured worst 3.2e-6.
+        // ILCE-7RM4A's own crop/sensor pair. Measured worst 5.3e-5 (0.005 % of
+        // radius), on 32 nodes.
         let (crop, sensor) = ((9504.0, 6336.0), (9600.0, 6376.0));
         let rho = (9504f64.hypot(6336.0)) / 9600f64.hypot(6376.0);
         let rmin = 6336.0 / 9504f64.hypot(6336.0);
@@ -667,10 +671,15 @@ mod tests {
                 let r = i as f64 / 8192.0;
                 let d = (f64::from(crate::render::profile_knot_interp(&dense, r as f32)) - even_poly(&q, z * rho * r)).abs();
                 worst = worst.max(d);
-                assert!(d < 5e-6, "{name} r={r}: resample error {d}");
+                assert!(d < 6e-5, "{name} r={r}: resample error {d}");
             }
         }
         eprintln!("worst canonical resample error: {worst:e}");
+        // The spline must survive the profile's own defensive clamp whole.
+        let dense = sony_render_distortion(&knot_factors(&CAMERA_RAW_CASES[2].1), crop, Some(sensor), SONY_RENDER_DISTORTION_KNOTS);
+        let mut p = LensProfile { distortion: dense.clone(), ..LensProfile::default() };
+        p.clamp();
+        assert_eq!(p.distortion, dense, "clamp must keep the render spline whole");
     }
 
     #[test]
