@@ -471,10 +471,13 @@ On a recipe that names a camera profile (`render::SliderLaw::CameraRaw`,
 v1.17.0) the Basic panel's tone sliders follow Camera Raw's law instead of the
 knot model (`render/tone_cr.rs`): they act on `u`, the input of Adobe's
 default curve, so the develop undoes the curve, moves `u` and puts the curve
-back. Exposure goes first, a gain through the exposure ramp, per pixel by
+back. Highlights and Shadows go first, Camera Raw's order, on a law of their
+own: local (each pixel's push reads an edge-aware base of the frame's
+luminance) and keyed to the frame (the base measured against the frame's
+mean); then Exposure, a gain through the exposure ramp, per pixel by
 Adobe's channel rule (the brightest and darkest channels through the curve,
-the middle one in proportion); then Contrast, Highlights, Shadows, Whites and
-Blacks as measured response tables over `u`, with each pixel's hue from the
+the middle one in proportion); then Contrast, Whites and Blacks as measured
+response tables over the exposed `u`, with each pixel's hue from the
 channel rule and its lightness from the luma ratio; then the Look's baked
 curve by the luma ratio, as the canvas start was calibrated; then the
 parametric and point curves by the channel rule. Every recipe that names no
@@ -524,23 +527,72 @@ supposed to remove.
   −40; one linear table per sign left −40 2.3 L too dark and −80 1.8 L too
   light). The tables were fitted with the engine in the loop: each pass
   renders the 23 cases and moves the tables by the band L error over the
-  curve's slope there, pixels clipped at white in both renders left out. The
-  five act on the EXPOSED value (composing Exposure ∓1 with Blacks ±40
-  predicts the toe within 3.0 L, adding them on the original axis is 6.1 L
-  off). **Measured since, not modelled (v1.17.0 carry ablation):** composing
-  Camera Raw's own pointwise maps, Contrast, Whites and Blacks act on the
-  exposed value (mean |ΔL| 0.14–0.25 L that way, 0.51–2.88 the other), but
-  Highlights and Shadows act BEFORE Exposure (0.23–0.43 L before, 1.54–4.79
-  after, on the flat frame and the night pair), and both are image-adaptive:
-  on the bare packets of seven frames Highlights −70 at x 0.55–0.65 moves
-  the value 0.110–0.353 and Shadows +69 at x 0.05–0.15 0.007–0.109, with no
-  single frame statistic (mean, median, log-average, rank) ordering both.
-  Reordering alone, with the one-frame tables, moved the carry p36 6.72 →
-  5.91 but p41 10.41 → 15.02, so the engine keeps one order until the
-  adaptive law is measured.
-  A local slope floor (1 % of the exposed curve's rise) keeps the
-  result monotone where two pushes overlap. The reverse fit holds each row at
-  the previous pass's magnitude and re-solves until the answer stops moving.
+  curve's slope there, pixels clipped at white in both renders left out.
+  Contrast, Whites and Blacks act on the EXPOSED value (composing Exposure
+  ∓1 with Blacks ±40 predicts the toe within 3.0 L, adding them on the
+  original axis is 6.1 L off; composing Camera Raw's own pointwise maps,
+  mean |ΔL| 0.14–0.25 L that way, 0.51–2.88 the other). A local slope floor
+  (1 % of the exposed curve's rise) keeps the result monotone where two
+  pushes overlap. The reverse fit holds each row at the previous pass's
+  magnitude and re-solves until the answer stops moving; Highlights and
+  Shadows, which run before Exposure on a local law (next item), enter its
+  solve as their push at the pixel's own value times the exposure's slope,
+  at a key read off the score set's masses.
+- Highlights and Shadows on a camera-profile start (v1.17.0,
+  `render/tone_cr.rs`, **measured against Adobe Camera Raw 18.4**): seven
+  frames' flat packets (every slider 0, Adobe Color, As Shot white, lens as
+  each frame's sidecar says), each with Shadows +30/+60/+100 and Highlights
+  −30/−60/−100 (49 renders at 6144 px), compared at 768 px in `u`.
+  **Order:** composing Camera Raw's own pointwise maps on two frames, both
+  run BEFORE Exposure (mean |ΔL| 0.23–0.42 that way, 1.17–3.68 the other)
+  and before Contrast and Blacks (0.11–0.22 against 0.30–2.48), so they are
+  the tone stage's first pass. **Local:** next to a strong tone edge a dark
+  pixel is lifted less by Shadows over 32–64 px at 1536 px (200–400 film
+  pixels), and one frame's foreground is lifted by the same `u` from 0.20 to
+  0.35 while its sky at 0.36 moves an eighth as far — a step in the pixel's
+  own value that only a regional base explains. The base is an edge-aware
+  (bilateral) smoothing of `log2` linear luminance, σ 400 film pixels and
+  1 stop (between σ 200 and 1600 Shadows' held-out R² moved by at most 0.09
+  on six frames; the night frame preferred the smallest);
+  Highlights read a second base at σ 1600 besides it (held-out R² of the
+  frame it helped most 0.76 → 0.94). **Keyed:** at one base value the push
+  still differs 6× between frames (Highlights −60 at `u` 0.3: 0.022 on a
+  daylight street, 0.142 on a dark dusk frame); measured against the
+  frame's mean linear luminance, `z = log2(base) − log2(mean)`, the frames
+  line up — the mean ordered them, the median, log-average and the 90th/99th
+  percentiles did not. The law, per unit slider and per measured sign, is a
+  table over `(z, u)` for Shadows and two tables over the two bases' `z`
+  for Highlights, each with a curvature term in the magnitude, fitted pooled
+  over the seven frames and then with the engine in the loop; the
+  unmeasured signs (Highlights above 0, Shadows below) keep the pointwise
+  tables. Leave-one-frame-out R² of the push (the law fitted on six frames,
+  scored on the seventh, at −0.6 / +0.6): Highlights 0.89, 0.94, 0.94, 0.91,
+  0.94, 0.84 and 0.35 on the night frame (its error 0.98 L rms);
+  Shadows 0.91, 0.75, 0.80, 0.82, 0.76, −0.23 on the dark dusk frame (its
+  lift varies by 0.6 L sd over the frame, the law's error 0.82 L rms) and
+  0.61. The engine's own renders against Camera Raw's, all seven frames in
+  the fit, R² 0.90–0.98 for Highlights and 0.64–0.93 for Shadows.
+  **Colour:** Shadows keep the colour, every channel by one ratio over a
+  floor of 0.03 in the profile stage's encoding (per channel left the warm
+  tones 4.75 b* short; with no floor a large near-black area turned 21.8 b*
+  too blue); Highlights take the channel rule's hue with the pixel's own
+  curve. A mask's Highlights and Shadows run the same law on the same base,
+  ×1.2 and ×1.25 (regression of the local renders on the global law: 1.21,
+  1.25), right after the global pass. **Results** (worst moving L band |ΔL| /
+  |Δa|,|Δb|, before → after): Shadows +30 0.16/0.58 → 0.68/0.41, +60
+  0.34/0.86 → 1.33/0.38, +100 0.72/1.31 → 2.33/0.33; Highlights −30
+  0.93/1.47 → 2.14/0.59, −60 0.92/2.37 → 4.66/0.84, −100 3.14/3.47 →
+  7.92/2.93; local Shadows +60 0.46/0.93 → 0.95/0.35, local Highlights −60
+  1.04/2.54 → 4.69/0.98. **Over the line:** the calibration frame's
+  Highlights (L 70–90 under-darkened 4–8 L — on that frame Camera Raw pushes
+  1.07× the pooled law, on the bright snow frame 0.88×, and no frame
+  statistic tried orders the seven) and Shadows +100's L 10–40 (2.1–2.3 L
+  short). The carry,
+  the point of the law (ΔE76 as measured / lens magnification undone /
+  aligned and σ 2, before → after): p36 6.72 → 3.99 / 4.07 / 3.61 (line 6),
+  p38 6.73 → 5.76 / 5.15 / 4.01 (line 5: over as measured), p39 5.60 →
+  4.48 / 3.42 / 2.55 (5), p40 8.16 → 6.12 / 4.84 / 3.32 (8), p41 10.41 →
+  7.75 / 7.75 / 7.41 (10).
 
   is `1`; cool-side coefficients and the 6688 K red plateau were
   **calibrated against measured Lightroom exports**.
@@ -820,7 +872,8 @@ supposed to remove.
   carry pairs the engine's render against Camera Raw's, ΔE76 before → after:
   p36 7.62 → 8.52, p38 8.42 → 8.79, p39 7.47 → 6.89, p40 13.88 → 8.18,
   p41 14.26 → 10.96 — p36 with its Highlights at 0 (against Camera Raw's own
-  render of that packet) 5.91.
+  render of that packet) 5.91. Since replaced by the local, frame-keyed law
+  above (the step-4 tables stay for the unmeasured signs).
 - Historical tone probes are preserved because they explain the knot weighting:
   Whites −50 compressed input `0.9568…0.9731` from 411 codes to 75, while
   Highlights +60 clipped above `0.8195`, affecting 740 of 4096 inputs (18%).

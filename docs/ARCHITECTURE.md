@@ -2156,9 +2156,11 @@ the tone half of Clarity, whose local stage stays where it is) →
 tone LUT (exposure/contrast/whites/blacks/highlights/shadows, the parametric
 curve, the tone curve and the per-photo camera base curve — on a recipe that
 names no camera profile, v1.17.0 — composed into one table; on a recipe that
-names one, Camera Raw's measured law in four passes, `render/tone_cr.rs`:
-exposure by Adobe's channel rule, the five sliders, the Look's baked curve,
-the parametric and point curves) → **the B&W treatment's grey mix** when the photo is black and white
+names one, Camera Raw's measured law in five passes, `render/tone_cr.rs`:
+Highlights and Shadows first, a local law on two edge-aware bases of the
+frame's luminance keyed to its mean, then exposure by Adobe's channel rule,
+Contrast, Whites and Blacks, the Look's baked curve, the parametric and
+point curves) → **the B&W treatment's grey mix** when the photo is black and white
 (before the channel curves, so a red-channel curve meets the grey the
 photographer mixed) → per-channel RGB
 curves → 8-band HSL and the **point colours**, both skipped in black and white,
@@ -2167,9 +2169,10 @@ clarity → **texture** →
 saturation/vibrance (also skipped in black and white) → the Detail panel
 (colour noise reduction → luminance noise reduction → sharpening) → local
 adjustments (linear/radial/bitmap masks). On a recipe that names a camera
-profile (v1.17.0, `render/mask_cr.rs`) a mask's Exposure, its five tone
-sliders, Dehaze and Clarity's tone run instead right after their global
-twins — Exposure on the same ramp, so the two add in EV; the sliders on
+profile (v1.17.0, `render/mask_cr.rs`) a mask's Highlights and Shadows run
+the global law on the same bases right after the global pass, before
+Exposure, and its Exposure, its other tone sliders, Dehaze and Clarity's tone
+run instead right after their global twins — Exposure on the same ramp, so the two add in EV; the sliders on
 response tables of their own, measured — and its Temp and Tint right after
 the global white balance, as a move of that white in the light between the
 exposure ramp and Adobe's curve; its Hue turns by degrees in the profile
