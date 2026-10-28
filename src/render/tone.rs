@@ -295,7 +295,10 @@ pub(crate) fn camera_raw_tone_passes(r: &EditRecipe) -> CameraRawTone {
     let curves = (parametric.is_some() || !curve_is_identity(&r.tone_curve))
         .then(|| camera_raw_after_lut(None, parametric.as_deref(), &curve_lut(&r.tone_curve)));
     CameraRawTone {
-        sliders: camera_raw_slider_lut(tone_sliders(r), (r.dehaze / 100.0).clamp(-1.0, 1.0)),
+        sliders: camera_raw_slider_lut(
+            tone_sliders(r),
+            Local { dehaze: (r.dehaze / 100.0).clamp(-1.0, 1.0), clarity: (r.clarity / 100.0).clamp(-1.0, 1.0) },
+        ),
         look: r.baked_tone_curve().map(|l| look_curve_lut(&l.tone_curve, l.amount)),
         curves,
     }

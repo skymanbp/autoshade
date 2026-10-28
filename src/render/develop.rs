@@ -318,7 +318,7 @@ pub(super) fn apply_develop_with_rasters(
     //    recipe (`EditRecipe::has_tone_work`), against the same inputs
     //    `build_tone_lut` reads: this condition listing its own copy of them is
     //    exactly how the profile came to render nothing.
-    let tone_neutral = !r.has_tone_work() && (!camera_raw || r.dehaze == 0.0);
+    let tone_neutral = !r.has_tone_work() && (!camera_raw || (r.dehaze == 0.0 && r.clarity == 0.0));
     if !tone_neutral {
         // v1.17.0: on a camera-profile start, exposure first, per channel by
         // Adobe's rule; then the five sliders with Adobe's hue and the luma's
@@ -395,7 +395,7 @@ pub(super) fn apply_develop_with_rasters(
     //     measured two-lowpass mix since R29 B8-2 (`texture_negative_pass`) —
     //     a rendering change for every negative value, here and in the mask.
     if r.texture != 0.0 {
-        texture_pass(data, w, h, r.texture / 100.0, |_, _, _| 1.0);
+        texture_pass(data, w, h, texture_amount(r, r.texture), |_, _, _| 1.0);
     }
     // 3) saturation / vibrance — not in black and white, where the only
     //    colour left is the grade's tint: a Saturation slider that also

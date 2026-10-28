@@ -398,7 +398,7 @@ pub(super) fn apply_masks(
             // Lightroom ladders and carries its own residuals. Same honesty
             // stance as `manual_vignette_lut` either way: the XMP carries the
             // raw slider value, so Lightroom re-renders it with its own model.
-            texture_pass(data, w, h, m.texture / 100.0, spatial_weight);
+            texture_pass(data, w, h, texture_amount(r, m.texture), spatial_weight);
         }
         if m.sharpness != 0.0 {
             // The GLOBAL Detail panel's operator at this mask's own amount

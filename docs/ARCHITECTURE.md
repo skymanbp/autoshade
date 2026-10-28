@@ -2139,7 +2139,10 @@ paths, every non-blank line of the old file lands once in the new ones. The
 tests sit in parts under `tests/`, spliced into `tests.rs` by `include!`, so
 every test keeps its name and its path.
 
-The pixel stage, in this order: anchored white balance →
+The pixel stage, in this order: anchored white balance (on a recipe that
+names a camera profile, v1.17.0, Camera Raw's measured law: a Bradford shift
+between the DNG SDK's whites, under the profile stage's ramp and curve, which
+`render::profile::UnderTone` undoes and redoes around it) →
 **camera calibration** (the Calibration panel's three primaries and shadow
 tint, first because they belong to the camera profile every later stage reads
 through) → **de-fringing** (`render/lens.rs`: the two hue windows, on
@@ -2147,7 +2150,8 @@ high-contrast edges only, before anything moves a pixel radially) →
 lens-profile vignette → manual vignette → **dehaze in linear light**
 (before any tonal work, so the airlight estimate cannot move when Exposure is
 dragged; on a recipe that names a camera profile, v1.17.0, Dehaze rides in
-the tone stage's slider pass instead, Camera Raw's measured law) →
+the tone stage's slider pass instead, Camera Raw's measured law, and so does
+the tone half of Clarity, whose local stage stays where it is) →
 tone LUT (exposure/contrast/whites/blacks/highlights/shadows, the parametric
 curve, the tone curve and the per-photo camera base curve — on a recipe that
 names no camera profile, v1.17.0 — composed into one table; on a recipe that

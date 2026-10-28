@@ -205,6 +205,24 @@ const DEHAZE_FALL_Q: [f32; TABLE_N] = [-0.0000, -0.0000, -0.0000, -0.0000, 0.000
 /// (L 90–100), the same for +40, +80 and −30.
 const DEHAZE_CHROMA: [f32; TABLE_N] = [0.2942, 0.2942, 0.2427, 0.1092, 0.1802, 0.5409, 0.7253, 0.6303, 0.4594, 0.2431, 0.0317, -0.1653, -0.3211, -0.3277, -0.1799, 0.0185, 0.1835, 0.3382, 0.6228, 1.0963, 1.5320, 1.6586, 1.7833, 1.7908, 1.1677, 0.5824, 0.4696, 0.4696, 0.4696, 0.4696, 0.4696, 0.4696, 0.4696];
 
+/// Clarity's TONE on Camera Raw's law: besides its local contrast (the
+/// develop's clarity stage, unchanged) Camera Raw's Clarity lifts the
+/// midtones — measured on the flat packet, +50 raises the band means of
+/// L 10–80 by 6–11 L, where the local stage alone moves them by 1–3. A
+/// response pair over `u` like Dehaze's, fitted the same way with the local
+/// stage in the loop, from Clarity +50/+100/−50 (one negative magnitude, so
+/// [`CLARITY_FALL_Q`] is zero).
+const CLARITY_RISE: [f32; TABLE_N] = [-0.0091, 0.0069, 0.0280, 0.0441, 0.0553, 0.0680, 0.0788, 0.0856, 0.0888, 0.0876, 0.0799, 0.0650, 0.0487, 0.0319, 0.0100, -0.0154, -0.0412, -0.0625, -0.0624, -0.0456, -0.0500, -0.0725, -0.0895, -0.0997, -0.0923, -0.0763, -0.0707, -0.0687, -0.0578, -0.0317, -0.0129, -0.0054, 0.0297];
+const CLARITY_RISE_Q: [f32; TABLE_N] = [0.0040, 0.0052, 0.0048, 0.0051, 0.0043, 0.0011, -0.0036, -0.0087, -0.0134, -0.0160, -0.0141, -0.0089, -0.0016, 0.0075, 0.0154, 0.0211, 0.0276, 0.0381, 0.0450, 0.0369, 0.0272, 0.0242, 0.0146, 0.0036, -0.0016, -0.0048, -0.0038, -0.0019, -0.0077, -0.0227, -0.0406, -0.0672, -0.1205];
+const CLARITY_FALL: [f32; TABLE_N] = [0.0015, 0.0079, 0.0126, 0.0129, 0.0103, 0.0074, 0.0042, -0.0009, -0.0108, -0.0249, -0.0389, -0.0498, -0.0571, -0.0615, -0.0645, -0.0656, -0.0636, -0.0570, -0.0429, -0.0261, -0.0149, -0.0061, -0.0032, -0.0078, -0.0050, 0.0025, 0.0080, 0.0167, 0.0251, 0.0246, 0.0243, 0.0537, 0.1202];
+const CLARITY_FALL_Q: [f32; TABLE_N] = [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000];
+
+/// Clarity's push per unit slider at the exposed value `y` for a slider at `c`.
+fn clarity_row(c: f32, y: f32) -> f32 {
+    let (t, q) = if c < 0.0 { (&CLARITY_FALL, &CLARITY_FALL_Q) } else { (&CLARITY_RISE, &CLARITY_RISE_Q) };
+    table_at(t, y) + c.abs() * table_at(q, y)
+}
+
 /// Dehaze's push per unit slider at the exposed value `y` for a slider at `d`.
 fn dehaze_row(d: f32, y: f32) -> f32 {
     let (t, q) = if d < 0.0 { (&DEHAZE_FALL, &DEHAZE_FALL_Q) } else { (&DEHAZE_RISE, &DEHAZE_RISE_Q) };
@@ -254,14 +272,16 @@ pub(crate) fn camera_raw_response(ev: f32, s: [f32; 5], u: f32) -> f32 {
 /// open would scale every slider in the frame down with it, measured: −60
 /// rendered at 0.38 of its strength), so the guard only stops the curve
 /// turning back where two pushes overlap.
-fn camera_raw_tone(ev: f32, s: [f32; 5], dehaze: f32) -> Vec<f32> {
+fn camera_raw_tone(ev: f32, s: [f32; 5], local: Local) -> Vec<f32> {
     const KEEP: f32 = 0.01;
     let mut out = Vec::with_capacity(LUT_N);
     let (mut prev_y, mut prev) = (0.0f32, 0.0f32);
     for i in 0..LUT_N {
         let y = camera_raw_exposure(i as f32 / (LUT_N - 1) as f32, ev);
         let push: f32 =
-            (0..5).map(|k| s[k] * camera_raw_row(k, s[k], y)).sum::<f32>() + dehaze * dehaze_row(dehaze, y);
+            (0..5).map(|k| s[k] * camera_raw_row(k, s[k], y)).sum::<f32>()
+                + local.dehaze * dehaze_row(local.dehaze, y)
+                + local.clarity * clarity_row(local.clarity, y);
         let mut v = (y + push).clamp(0.0, 1.0);
         if i > 0 {
             v = v.max((prev + KEEP * (y - prev_y)).min(1.0));
@@ -372,14 +392,23 @@ pub(crate) fn camera_raw_exposure_lut(ev: f32) -> Option<Vec<f32>> {
     })
 }
 
-/// The five sliders and Dehaze (`dehaze` in −1..1) alone over the profile
-/// stage's output, `x → u → the sliders → x`, at 0 EV (the develop applies
-/// exposure before it): `None` when all six are 0. Dehaze rides here, not in
-/// [`camera_raw_tone_lut`]: like the engine law's dehaze stage it is no part
-/// of the tone the reverse fit solves.
-pub(super) fn camera_raw_slider_lut(sliders: [f32; 5], dehaze: f32) -> Option<SliderPass> {
-    (dehaze != 0.0 || sliders.iter().any(|&v| v != 0.0)).then(|| {
-        let tone = camera_raw_tone(0.0, sliders, dehaze);
+/// Dehaze and Clarity's tone, each in −1..1: the two sliders that ride the
+/// slider pass besides the five.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Local {
+    pub(crate) dehaze: f32,
+    pub(crate) clarity: f32,
+}
+
+/// The five sliders, Dehaze and Clarity's tone alone over the profile stage's
+/// output, `x → u → the sliders → x`, at 0 EV (the develop applies exposure
+/// before it): `None` when all seven are 0. Dehaze and Clarity ride here, not
+/// in [`camera_raw_tone_lut`]: like the engine law's dehaze and clarity
+/// stages they are no part of the tone the reverse fit solves.
+pub(super) fn camera_raw_slider_lut(sliders: [f32; 5], local: Local) -> Option<SliderPass> {
+    let dehaze = local.dehaze;
+    (dehaze != 0.0 || local.clarity != 0.0 || sliders.iter().any(|&v| v != 0.0)).then(|| {
+        let tone = camera_raw_tone(0.0, sliders, local);
         let lut = (0..LUT_N)
             .map(|i| camera_raw_start(sample_lut(&tone, camera_raw_unstart(i as f32 / (LUT_N - 1) as f32))))
             .collect();
@@ -426,7 +455,7 @@ pub(super) fn camera_raw_tone_lut(
     parametric: Option<&[f32]>,
     curve: &[f32],
 ) -> Vec<f32> {
-    let tone = camera_raw_tone(ev, sliders, 0.0);
+    let tone = camera_raw_tone(ev, sliders, Local::default());
     (0..LUT_N)
         .map(|i| {
             let x = i as f32 / (LUT_N - 1) as f32;
@@ -505,7 +534,7 @@ mod tests {
         }
         for ev in [-3.0f32, 0.0, 2.0] {
             for s in &cases {
-                let t = camera_raw_tone(ev, *s, 0.0);
+                let t = camera_raw_tone(ev, *s, Local::default());
                 assert!(t.windows(2).all(|w| w[1] >= w[0]), "monotone at ev {ev} {s:?}");
                 assert!(t.iter().all(|v| (0.0..=1.0).contains(v)), "in range at ev {ev} {s:?}");
             }
@@ -522,10 +551,12 @@ mod tests {
     /// pass at all.
     #[test]
     fn dehaze_alone_makes_a_slider_pass() {
-        assert!(camera_raw_slider_lut([0.0; 5], 0.0).is_none());
-        let pass = camera_raw_slider_lut([0.0; 5], 0.4).expect("Dehaze is a pass");
+        assert!(camera_raw_slider_lut([0.0; 5], Local::default()).is_none());
+        let pass = camera_raw_slider_lut([0.0; 5], Local { dehaze: 0.4, clarity: 0.0 }).expect("Dehaze is a pass");
         assert!(pass.chroma.is_some(), "with its colour");
-        assert!(camera_raw_slider_lut([0.2, 0.0, 0.0, 0.0, 0.0], 0.0).is_some_and(|p| p.chroma.is_none()));
+        assert!(camera_raw_slider_lut([0.2, 0.0, 0.0, 0.0, 0.0], Local::default()).is_some_and(|p| p.chroma.is_none()));
+        let clarity = camera_raw_slider_lut([0.0; 5], Local { dehaze: 0.0, clarity: 0.5 }).expect("Clarity is a pass");
+        assert!(clarity.chroma.is_none(), "Clarity's tone has no colour of its own");
         let mid = LUT_N / 2;
         assert!(pass.lut[mid] < mid as f32 / (LUT_N - 1) as f32, "+40 darkens the midtones");
     }

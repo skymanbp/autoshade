@@ -691,6 +691,52 @@ supposed to remove.
   frame. Carry (sidecars with Dehaze: p36 +10, p40 +16, p41 +7), the tone law
   → with this: p36 8.52 → 8.70, p40 8.18 → 7.59, p41 10.96 → 10.52; p36 with
   its Highlights at 0, 5.91 → 6.11.
+- Temperature and Tint on a camera-profile start (v1.17.0, `render/wb.rs`,
+  **measured**, Temperature 4000/5000/7500/10000 K and Tint ±30 from the
+  frame's as-shot 5400 K / +14). The engine law's Tanner–Helland gains in the
+  post-curve working space moved b* about a third and a* about a quarter of
+  Camera Raw's and read the sidecar's absolute Tint as a shift from 0. The law:
+  the target white `xy` from (Temperature, Tint) by the DNG SDK's
+  `Get_xy_coord` (Robertson's table, tint/−3000 along the isotherm,
+  `profile::temp_tint_to_xy`), the SDK's Bradford adaptation from it to the
+  as-shot white (`profile::white_shift`, white luminance kept), applied to the
+  light BEFORE the profile stage's exposure ramp and curve
+  (`profile::UnderTone`: `adobe_tone` inverted exactly, the ramp by its
+  inverse). Four constants fitted with the engine in the loop: 1.042 mired of
+  Camera Raw's per slider mired, 0.999 of its tint, −0.078 tint per mired of
+  cooling, 0.099 EV darker per 100 mired of cooling. Worst moving band |ΔL| /
+  |Δa|,|Δb| before → after, with the frame's as-shot white at Lightroom's
+  5400 K / +14: 4000 K 0.76/12.08 → 1.30/1.89, 7500 K 2.22/10.12 →
+  1.28/1.77, Tint −30 2.19/8.44 → 0.90/1.37; outside the acceptance set
+  5000 K 2.29 → 0.67, 10000 K 16.01 → 2.90, Tint +30 2.42 → 0.90 (ab). With
+  the engine's own as-shot reading (5226 K / +14.7, McCamy through the
+  engine's matrix) the same renders read 3.36 / 3.57 / 2.11 ab: every move
+  starts 6 mired off Lightroom's white. The DNG SDK's `NeutralToXY` through
+  the body's Adobe Standard matrices does not close it (5241 K / +18.0 on the
+  same neutral; 5397/+18.1 where Lightroom shows 5550/+13 on a second frame,
+  3823/+0.1 against 3800/−3 on a third): the gap is in the camera neutral the
+  raw decoder reads, not in the conversion, and stays open. The command
+  line's `apply` of an `.xmp` now stamps the photo's as-shot white, as the
+  app's import does; it used to move a sidecar's Temperature from the legacy
+  5500 K anchor.
+- Clarity on a camera-profile start (v1.17.0, `render/tone_cr.rs`,
+  **measured**): Camera Raw's Clarity +50 lifts the band means of L 10–80 by
+  6–11 L, where the engine's midtone-masked unsharp (unchanged; its local
+  detail regresses onto Camera Raw's at 0.52–0.59) moves them by 1–3. Its
+  tone rides the slider pass as a response pair over `u` like Dehaze's,
+  fitted with the local stage in the loop from Clarity +50/+100/−50 (two
+  passes). Worst moving band |ΔL| / |Δa|,|Δb| before → after: +50 8.80/1.04 →
+  1.03/0.81, −50 3.51/0.50 → 0.79/0.90; +100 18.16/2.50 → 2.24/1.23 (outside
+  the set).
+- Texture on a camera-profile start (v1.17.0, `render::texture_amount`,
+  **measured**): positive Texture is the operator at 0.2 of its amount.
+  Camera Raw's +50 moves the 1000 px frame's local detail (the change less
+  its Gaussian blur, σ 1–30 px) by 0.47–0.68 L rms where the full operator
+  moved it by 1.6–3.5 L (regression onto Camera Raw's 0.10–0.14), and leaves
+  the band means within 0.6 L where the operator lifted L 60–80 by 4.7–5.7 L;
+  at 0.2 the worst band reads 0.85 L. Negative Texture, the measured
+  two-lowpass mix, already sat near Camera Raw (local detail 0.75 against
+  0.58 L rms; band means within 0.6 L) and is unchanged.
 - Camera Raw's Highlights is image-adaptive, and the tables are one frame's.
   On a second frame's bare packet Camera Raw's Highlights −44 darkens L 80–100
   by 4.0–8.3 L where the tables, which reproduce the first frame's −30/−60,

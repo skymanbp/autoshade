@@ -131,7 +131,7 @@ pub(crate) use luma::{bilinear_plane, gauss_blur_plane, neighbours4};
 // Clarity passes move, with this engine's own blur and radii.
 pub(crate) use luma::{blur_plane, clarity_radius, texture_radius};
 use luma::{
-    box_blur_h, box_blur_v, scale_chroma, texture_pass, unsharp_luma,
+    box_blur_h, box_blur_v, scale_chroma, texture_amount, texture_pass, unsharp_luma,
     unsharp_luma_weighted, write_luma_weighted,
 };
 #[cfg(test)]
@@ -219,7 +219,7 @@ pub(crate) use tone_cr::{
 };
 use tone_cr::{
     camera_raw_after_lut, camera_raw_channels, camera_raw_exposure_lut, camera_raw_slider_lut, camera_raw_slider_pixel,
-    camera_raw_tone_lut, SliderPass,
+    camera_raw_tone_lut, Local, SliderPass,
 };
 #[cfg(test)]
 pub(crate) use tone::{limit_tone_sliders, parametric_lut};
