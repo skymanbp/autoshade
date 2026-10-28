@@ -303,7 +303,7 @@ impl TerminalHarm {
 /// 0.0010 -> err_after 0.0029 is nearly 3× worse, and no absolute floor below
 /// 0.003 catches it). Scale with the error instead and add the quantisation
 /// budget once.
-pub(super) const FIT_QUANT: f32 = 1.8e-3;
+pub(crate) const FIT_QUANT: f32 = 1.8e-3;
 
 /// The TERMINAL do-no-harm decision, pure so both of its arms are testable
 /// without a fixture that can reach them end to end.
