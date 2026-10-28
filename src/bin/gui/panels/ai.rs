@@ -967,6 +967,16 @@ impl AutoShadeApp {
     /// separator) and left it OPEN by default: the fit and the extract are
     /// local and free, and the one paid switch inside — 「AI review」 — is
     /// what the header's 「AI 打分付费」 half names.
+    /// What the reverse-fit does, in one sentence: the fold's verb says it on
+    /// hover and the fit prompt says it in its body.
+    pub(crate) fn fit_explainer(lang: Lang) -> &'static str {
+        tr(lang,
+            "Statistical fit: reverse the freshly generated look into editable develop params \
+             (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes \
+             into this photo's develop store; hit Export to render the full-resolution result.",
+        )
+    }
+
     fn ai_reverse_fit(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang;
         // Portraits (`mode::Shell::zoned_folded`) folds the local-area switches.
@@ -1002,16 +1012,10 @@ impl AutoShadeApp {
             // fit solves FROM — the ▣ card or any ◈ / ▦ master — named and
             // choosable. Until then the fold showed the target only, and the
             // source was a rule nobody could see (`negative_index`).
-            let card = |i: usize| format!("{} #{}", self.variant_label(i), i + 1);
-            let sources: Vec<(String, String)> = (0..self.variants.len())
-                .filter(|&i| Self::is_fit_source(&self.variants[i]))
-                .map(|i| (self.variants[i].id.clone(), card(i)))
-                .collect();
+            let (auto, sources) = self.fit_source_menu();
             let to = (self.fit_ref.is_none() && self.fit_target().is_some())
-                .then(|| trf(lang, "To: {card}", &[("card", &card(self.active))]));
+                .then(|| trf(lang, "To: {card}", &[("card", &self.numbered_card_label(self.active))]));
             if !sources.is_empty() {
-                let auto = self.negative_index().map(card).unwrap_or_default();
-                let auto = trf(lang, "Automatic · {card}", &[("card", &auto)]);
                 let shown = match self.fit_from.as_deref() {
                     Some(id) => sources.iter().find(|(s, _)| s == id).map(|(_, l)| l.clone()),
                     None => None,
@@ -1146,11 +1150,10 @@ impl AutoShadeApp {
                 let cell = columns(ui, 2);
                 let can = !self.busy && can_fit;
                 if primary_in(ui, cell, can, tr(lang, "Reverse-fit recipe"))
-                    .on_hover_text(tr(lang,
-                        "Statistical fit: reverse the freshly generated look into editable develop params \
-                         (local, no API cost). Sliders update (undoable), and for RAW a Lightroom XMP goes \
-                         into this photo's develop store; hit Export to render the full-resolution result. \
-                         Uses the Reverse-fit strength dial above as its honesty budget.",
+                    .on_hover_text(format!(
+                        "{}{}",
+                        Self::fit_explainer(lang),
+                        tr(lang, " Uses the Reverse-fit strength dial above as its honesty budget."),
                     ))
                     .clicked()
                 {
@@ -1206,6 +1209,12 @@ impl AutoShadeApp {
                         });
                 });
             });
+            // The way back from the fit prompt's 「Don't ask again」 (v1.17.0),
+            // beside the verb it asks about. A preference, so no gate.
+            ui.checkbox(&mut self.ask_fit_after_generate, tr(lang, "Ask after each AI generation"))
+                .on_hover_text(tr(lang,
+                    "When 「AI generate」 lands a new ✨ card, ask whether to reverse-fit it and from which negative (the ▣ original unless you pick another).",
+                ));
             // Migrated from Settings (#4): a switch that only ever changes what
             // the button above does. Same rule as 「AI review」 — a persisted
             // preference, so no can_fit gate (and, as in Settings, no busy gate:

@@ -145,17 +145,17 @@ impl AutoShadeApp {
     /// 0.6–1.4 EV under After's own starting point and every compare
     /// exaggerated the edit. Baked rasters pass an empty curve (their pixels
     /// already carry the look).
-    pub(crate) fn set_before(&mut self, ctx: &egui::Context, base: &image::DynamicImage, curve: &[[f32; 2]]) {
-        let img = if curve.is_empty() {
+    /// The Before pane: `base` under the canvas recipe's START alone
+    /// (`EditRecipe::start_only` — its camera curve, or since v1.17.0 the
+    /// creative Look's baked half on its profile's base), every slider at 0.
+    pub(crate) fn set_before(&mut self, ctx: &egui::Context, base: &image::DynamicImage, start: &EditRecipe) {
+        let img = if start.start_only() == EditRecipe::default() {
             to_color_image(base)
         } else {
-            to_color_image(&autoshade::render::develop_preview(
-                base,
-                &EditRecipe { base_curve: curve.to_vec(), ..Default::default() },
-            ))
+            to_color_image(&autoshade::render::develop_preview(base, &start.start_only()))
         };
         self.before_tex = Some(ctx.load_texture("before", img, egui::TextureOptions::LINEAR));
-        self.before_curve = curve.to_vec();
+        self.before_start = start.start_only();
     }
 
     /// Toggle the clipping layer WITHOUT a full redevelop: the overlay is a

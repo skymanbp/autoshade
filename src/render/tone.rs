@@ -259,25 +259,6 @@ pub(crate) fn limit_tone_sliders(ev: f32, s: [f32; 5]) -> [f32; 5] {
     std::array::from_fn(|k| s[k] * lam[k] * lambda)
 }
 
-/// The recipe the tone stage reads, given whether a camera profile stage is
-/// rendering this photograph (v1.17.0) — exactly ONE starting tone.
-///
-/// Lightroom's order is profile → the Look's baked curve → the sliders. When
-/// the sidecar's camera profile renders ([`super::camera::resolve_camera_profile`]
-/// returned a stage), the profile's tone — its own curve, or Adobe's default
-/// one — IS the start, so the camera-matched `base_curve` the app stamps on
-/// open must not also apply: two renditions of one intent in series. The
-/// Look's baked curve still composes on top, as before. Without a profile
-/// stage the recipe is returned untouched, so a fresh open of a RAW renders
-/// exactly as it did.
-pub(crate) fn one_starting_tone(r: &EditRecipe, profiled: bool) -> std::borrow::Cow<'_, EditRecipe> {
-    if profiled && !r.base_curve.is_empty() {
-        std::borrow::Cow::Owned(EditRecipe { base_curve: Vec::new(), ..r.clone() })
-    } else {
-        std::borrow::Cow::Borrowed(r)
-    }
-}
-
 /// Build the develop tone curve as a [`LUT_N`]-entry LUT over input gamma [0,1].
 ///
 /// It is an 8-knot control-point curve fit by a MONOTONE cubic Hermite spline
@@ -333,7 +314,9 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
     // the same intent in series and darken the picture twice, so the profile's
     // own curve WINS whenever the sidecar carries one. Its `crs:Amount` blends
     // it toward the identity, as a partial Look means.
-    let base = match (r.baked_tone_curve(), r.base_curve.is_empty()) {
+    // Exactly one starting tone: `starting_curve` is empty whenever the recipe
+    // names a camera profile (v1.17.0), whose own tone is then the start.
+    let base = match (r.baked_tone_curve(), r.starting_curve().is_empty()) {
         (Some(l), _) => {
             // `curve_lut` is the photographer's own point-curve sampler, and a
             // Look's `crs:ToneCurvePV2012` is literally that same spelling — so
@@ -351,7 +334,7 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
                 .collect()
         }
         (None, true) => return user,
-        (None, false) => base_curve_lut(&r.base_curve),
+        (None, false) => base_curve_lut(r.starting_curve()),
     };
     // Composed UNDER the user controls — sliders act on the camera-like base,
     // the same profile-then-sliders order Lightroom uses.

@@ -48,6 +48,7 @@ mod profile;
 mod base_look;
 mod brush;
 mod camera;
+mod canvas;
 mod colour;
 mod develop;
 mod export;
@@ -201,6 +202,7 @@ use resample::{
     downscale_f32, flip_h_in_place, orient_f32, sample_bilinear_ch, sample_bilinear_rgb16,
 };
 pub use source::{render_baked_to_image, render_to_image, render_to_image_in, source_pixels};
+pub use canvas::{base_develop, canvas_recipe, canvas_renders, source_pixels_for, BasePart, CANVAS_PROFILE};
 use source::{apply_crop, rgb16_source};
 #[cfg(test)]
 use source::{cfa_needs_geometry_demosaic, cfa_taps, demosaic_over_cfa_geometry, wrap_table};

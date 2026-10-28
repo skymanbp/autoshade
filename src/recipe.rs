@@ -1375,7 +1375,56 @@ impl EditRecipe {
             || !self.tone_curve.is_empty()
             || self.parametric_regions().is_some()
             || self.baked_tone_curve().is_some()
-            || !self.base_curve.is_empty()
+            || !self.starting_curve().is_empty()
+    }
+
+    /// Does this recipe name a camera profile — its own `crs:CameraProfile`,
+    /// or the base profile of its creative Look? The one name
+    /// `render::resolve_camera_profile` resolves, asked in one place.
+    pub fn names_profile(&self) -> bool {
+        !self.camera_profile.is_empty()
+            || self.look.as_ref().is_some_and(|l| !l.base_profile.is_empty())
+    }
+
+    /// The camera base curve this recipe renders (v1.17.0): `base_curve`,
+    /// unless the recipe names a camera profile — exactly ONE starting tone.
+    /// Lightroom's order is profile → the Look's baked curve → the sliders, so
+    /// a profile's tone is the start and the camera-matched estimate must not
+    /// stack under it.
+    ///
+    /// Decided from the recipe ALONE, so the export, the GUI and web previews
+    /// and the reverse fit answer it the same way without asking whether this
+    /// machine's Camera Raw install holds the profile. A named profile that is
+    /// not installed renders without its tables (and says so); it does not
+    /// fall back to the estimate, because the estimate approximates a canvas
+    /// the recipe no longer describes.
+    pub fn starting_curve(&self) -> &[[f32; 2]] {
+        if self.names_profile() { &[] } else { &self.base_curve }
+    }
+
+    /// Just the start this recipe develops from — its camera base curve, or
+    /// the camera profile and creative Look that replace it (v1.17.0) — on
+    /// otherwise neutral sliders: what a Before pane shows.
+    pub fn start_only(&self) -> EditRecipe {
+        EditRecipe {
+            base_curve: self.base_curve.clone(),
+            camera_profile: self.camera_profile.clone(),
+            look: self.look.clone(),
+            ..Default::default()
+        }
+    }
+
+    /// Drop the start a BAKED rendition already carries in its pixels — the
+    /// camera base curve, the camera profile and creative Look it was
+    /// developed through (v1.17.0), and the lens corrections — so rendering
+    /// over it applies none of them twice: a generated master, the camera's
+    /// embedded preview, a baked image. The as-shot anchor is each caller's
+    /// own rule and stays theirs.
+    pub fn strip_baked_start(&mut self) {
+        self.base_curve = Vec::new();
+        self.camera_profile = String::new();
+        self.look = None;
+        self.lens_profile = Default::default();
     }
 
     /// One tone slider, with the Look's baked move added.

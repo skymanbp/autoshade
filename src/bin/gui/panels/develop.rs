@@ -1906,18 +1906,22 @@ impl AutoShadeApp {
                     }
                     if let Some(look) = look.as_ref().filter(|l| !l.name.is_empty()) {
                         pair(ui, tr(lang, "Creative profile").to_string(), &look.name);
-                        // Named, not hidden: the creative colour table is the
-                        // one half of a Look this engine cannot render, and a
-                        // panel that showed the name without saying so would be
-                        // claiming the whole profile.
+                        // Named, not hidden: since v1.17.0 the creative colour
+                        // table renders when Camera Raw's install carries it
+                        // (`dcp::find_look_table`, answered once per process)
+                        // and the Look is at full amount — the render's own two
+                        // conditions — and a panel that showed the name without
+                        // saying which half arrived would be claiming the whole
+                        // profile.
                         if !look.table.is_empty() {
-                            ui.label(
-                                egui::RichText::new(tr(lang,
-                                    "Its baked tone curve and sliders render; its creative colour table does not",
-                                ))
-                                .weak()
-                                .small(),
-                            );
+                            let table_renders = (look.amount - 1.0).abs() <= 1e-3
+                                && autoshade::dcp::find_look_table(&look.table).is_ok();
+                            let line = if table_renders {
+                                tr(lang, "Its baked tone curve, sliders and creative colour table render")
+                            } else {
+                                tr(lang, "Its baked tone curve and sliders render; its creative colour table does not")
+                            };
+                            ui.label(egui::RichText::new(line).weak().small());
                         }
                     }
                 }

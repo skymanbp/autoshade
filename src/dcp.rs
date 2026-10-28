@@ -47,18 +47,30 @@
 //! and the saturation scale over the `sat == 0` plane is EXACTLY 1.0 on 60/60
 //! profiles under the reading above and on 0/60 under either alternative.
 //!
-//! # What this module does NOT do
+//! # The creative profiles' tables (v1.17.0)
 //!
 //! The creative profiles — "Adobe Color", "Adobe Landscape", "Adobe
 //! Monochrome", the ones `crs:Look` names — are not `.dcp` files at all. They
-//! live under `CameraRaw/Settings` as XMP, and their colour table is an opaque
-//! `crs:Table_<HASH>` payload: base85 over an 85-character alphabet (printable
-//! ASCII 33..125 less `"&,;<>\_`) whose entropy is 6.4082 bits per character of
-//! a possible 6.4094 — a compressed or encrypted payload, and it does not
-//! decompress under zlib, raw deflate, gzip, bzip2, xz, lzma, zstd or lz4 at
-//! any byte offset up to 256 under four base85 conventions. Those profiles'
-//! BAKED half — their tone curve and sliders, which the sidecar carries in full
-//! on 161 of 161 — IS rendered; the table is disclosed as unrendered.
+//! live under `CameraRaw/Settings` as XMP, and their colour table is a
+//! `crs:Table_<id>` attribute in the DNG SDK's own "big table" text encoding
+//! (`dng_big_table.cpp`, `DecodeFromString` / `DecodeFromBinary` /
+//! `dng_look_table::GetStream`): a Z85-like base85 whose alphabet swaps the
+//! three XML-unsafe characters, five characters per little-endian `u32` with
+//! the LEAST significant digit first, then a little-endian uncompressed size
+//! and a zlib stream; inside, `btt_LookTable` (0), a version, the three
+//! divisions, the `(hue shift °, sat scale, val scale)` entries in the order
+//! documented above, and the value encoding. The table's `<id>` is the MD5 of
+//! those decompressed bytes (`RecomputeFingerprint`), so a decode is checked
+//! against the name the sidecar uses before it is believed —
+//! [`find_look_table`]. Measured on this machine's install: 330 of 330 tables
+//! decode and match their fingerprint; 24 are look tables (36 × 16 × 16 for
+//! "Adobe Color") and 306 are `btt_RGBTable`s, which the render still
+//! discloses as unrendered. Like the `.dcp` files, the tables are READ from
+//! the user's install and never bundled.
+//!
+//! (Until v1.17.0 this paragraph recorded the payload as undecodable: zlib was
+//! tried, but behind a most-significant-digit-first base85 — the SDK's digit
+//! order is the reverse.)
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -214,6 +226,9 @@ pub enum Refusal {
     NotAProfile(String),
     /// A table's entry count disagrees with its own declared dimensions.
     TableMismatch(String),
+    /// No Camera Raw settings file on this machine carries the creative
+    /// table this id names.
+    NoLookTable,
 }
 
 impl std::fmt::Display for Refusal {
@@ -223,6 +238,9 @@ impl std::fmt::Display for Refusal {
             Self::NotFound => write!(f, "no installed profile matches this camera and name"),
             Self::NotAProfile(why) => write!(f, "not a readable .dcp: {why}"),
             Self::TableMismatch(why) => write!(f, "profile table is inconsistent: {why}"),
+            Self::NoLookTable => {
+                write!(f, "no installed Camera Raw profile carries this colour table")
+            }
         }
     }
 }
@@ -536,6 +554,194 @@ pub fn find(make: &str, model: &str, profile_name: &str) -> Result<(PathBuf, Pro
         }
     }
     Err(last)
+}
+
+// --- the creative profiles' tables ------------------------------------------
+
+/// Where Camera Raw keeps its settings — the creative profiles ("Looks")
+/// among them, as XMP. `%AUTOSHADE_LOOK_DIR%` leads when set.
+pub fn settings_roots() -> Vec<PathBuf> {
+    crate::adobe::camera_raw_roots("AUTOSHADE_LOOK_DIR", "Settings")
+}
+
+/// Every `.xmp` under [`settings_roots`], walked once per process (the same
+/// contract as [`index`]).
+fn settings_index() -> &'static [PathBuf] {
+    static INDEX: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    INDEX.get_or_init(|| {
+        let mut out = crate::adobe::walk_extension(settings_roots(), "xmp", 20_000);
+        out.sort();
+        out
+    })
+}
+
+/// The creative colour table `crs:LookTable` names, read from the Camera Raw
+/// install and checked against its fingerprint — or why not.
+///
+/// Answers are kept for the process (a render asks once per photograph, and
+/// the walk reads up to a few hundred settings files to find the one that
+/// carries the table); refusals are kept too, because the install does not
+/// change under a running process — the same stance as [`index`].
+pub fn find_look_table(id: &str) -> Result<Table, Refusal> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    type Cache = Mutex<HashMap<String, Result<Table, Refusal>>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let key = id.trim().to_ascii_uppercase();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().ok().and_then(|m| m.get(&key).cloned()) {
+        return hit;
+    }
+    let found = look_table_from(settings_index(), &key);
+    if let Ok(mut m) = cache.lock() {
+        m.insert(key, found.clone());
+    }
+    found
+}
+
+/// [`find_look_table`] over an explicit file list.
+fn look_table_from(files: &[PathBuf], id: &str) -> Result<Table, Refusal> {
+    let id = id.trim().to_ascii_uppercase();
+    if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(Refusal::TableMismatch(format!(
+            "look table id \"{id}\" is not a 32-digit fingerprint"
+        )));
+    }
+    if files.is_empty() {
+        return Err(Refusal::NoRoots);
+    }
+    let needle = format!("crs:Table_{id}=\"");
+    for p in files {
+        let Ok(text) = std::fs::read_to_string(p) else { continue };
+        let Some(at) = text.find(&needle) else { continue };
+        let rest = &text[at + needle.len()..];
+        let Some(end) = rest.find('"') else { continue };
+        return decode_look_table(&rest[..end], &id);
+    }
+    Err(Refusal::NoLookTable)
+}
+
+/// A `crs:Table_<id>` payload → the look table it encodes, refused unless the
+/// decompressed bytes' MD5 is `id` (the DNG SDK's own fingerprint of the
+/// table, `dng_big_table::RecomputeFingerprint`).
+pub fn decode_look_table(text: &str, id: &str) -> Result<Table, Refusal> {
+    let bytes = decode_big_table(text)?;
+    let digest = format!("{:X}", md5::compute(&bytes));
+    if !digest.eq_ignore_ascii_case(id.trim()) {
+        return Err(Refusal::TableMismatch(format!(
+            "look table decodes to fingerprint {digest}, not {id}"
+        )));
+    }
+    parse_look_table(&bytes)
+}
+
+/// `dng_big_table::EncodeAsString`'s alphabet, in digit order: Z85 with the
+/// three XML-unsafe characters swapped out.
+const BIG_TABLE_ALPHABET: &[u8; 85] =
+    b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?`'|()[]{}@%$#";
+
+/// The DNG SDK's big-table text encoding → the table's uncompressed bytes.
+///
+/// Transcribed from `dng_big_table::DecodeFromString` and `DecodeFromBinary`:
+/// characters outside the alphabet are skipped, five digits make one
+/// little-endian `u32` LEAST significant digit first, a short final group
+/// yields its leading bytes; the first four bytes are the uncompressed size
+/// and the rest is a zlib stream.
+fn decode_big_table(text: &str) -> Result<Vec<u8>, Refusal> {
+    use std::io::Read;
+    // An installed Look's table is ~110 KB; a size field far past that is a
+    // damaged or crafted file, refused before anything is allocated for it.
+    const MAX_TABLE_BYTES: usize = 16 << 20;
+    let mut digit = [u8::MAX; 128];
+    for (i, c) in BIG_TABLE_ALPHABET.iter().enumerate() {
+        digit[*c as usize] = i as u8;
+    }
+    let mut packed = Vec::with_capacity(text.len() / 5 * 4 + 4);
+    let (mut phase, mut value) = (0u32, 0u64);
+    for c in text.bytes() {
+        let Some(&d) = digit.get(c as usize) else { continue };
+        if d == u8::MAX {
+            continue;
+        }
+        value += u64::from(d) * 85u64.pow(phase);
+        phase += 1;
+        if phase == 5 {
+            packed.extend_from_slice(&(value as u32).to_le_bytes());
+            (phase, value) = (0, 0);
+        }
+    }
+    if phase > 1 {
+        packed.extend_from_slice(&(value as u32).to_le_bytes()[..phase as usize - 1]);
+    }
+    let Some(size) = packed.get(..4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+    else {
+        return Err(Refusal::NotAProfile("look table payload shorter than its size field".into()));
+    };
+    if size > MAX_TABLE_BYTES {
+        return Err(Refusal::NotAProfile(format!("look table states {size} bytes")));
+    }
+    let mut out = Vec::with_capacity(size);
+    flate2::read::ZlibDecoder::new(&packed[4..])
+        .take(size as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| Refusal::NotAProfile(format!("look table does not inflate: {e}")))?;
+    if out.len() != size {
+        return Err(Refusal::NotAProfile(format!(
+            "look table inflates to {} bytes, its header says {size}",
+            out.len()
+        )));
+    }
+    Ok(out)
+}
+
+/// `dng_look_table::GetStream`: the decompressed bytes → a [`Table`].
+fn parse_look_table(b: &[u8]) -> Result<Table, Refusal> {
+    let u32_at = |at: usize| -> Result<u32, Refusal> {
+        b.get(at..at + 4)
+            .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+            .ok_or_else(|| Refusal::NotAProfile("look table ends early".into()))
+    };
+    match u32_at(0)? {
+        0 => {}
+        1 => {
+            return Err(Refusal::TableMismatch(
+                "an RGB table (btt_RGBTable), which this engine does not render".into(),
+            ));
+        }
+        kind => return Err(Refusal::NotAProfile(format!("big table kind {kind}"))),
+    }
+    let version = u32_at(4)?;
+    if version != 1 && version != 2 {
+        return Err(Refusal::NotAProfile(format!("look table version {version}")));
+    }
+    let (hue, sat, val) = (u32_at(8)?, u32_at(12)?, u32_at(16)?);
+    let count = (hue as usize).checked_mul(sat as usize).and_then(|n| n.checked_mul(val as usize));
+    let Some(count) = count.filter(|n| hue >= 1 && sat >= 2 && val >= 1 && *n <= 1 << 20) else {
+        return Err(Refusal::TableMismatch(format!("look table dims {hue}×{sat}×{val}")));
+    };
+    let data_end = 20 + count * 12;
+    let Some(raw) = b.get(20..data_end) else {
+        return Err(Refusal::TableMismatch(format!(
+            "look table holds {} bytes for {count} entries",
+            b.len()
+        )));
+    };
+    let data: Vec<[f32; 3]> = raw
+        .chunks_exact(12)
+        .map(|e| {
+            let f = |i: usize| f32::from_le_bytes([e[i], e[i + 1], e[i + 2], e[i + 3]]);
+            [f(0), f(4), f(8)]
+        })
+        .collect();
+    if !data.iter().flatten().all(|x| x.is_finite()) {
+        return Err(Refusal::TableMismatch("look table holds a non-finite entry".into()));
+    }
+    let srgb_value = match u32_at(data_end)? {
+        0 => false,
+        1 => true,
+        e => return Err(Refusal::NotAProfile(format!("look table encoding {e}"))),
+    };
+    Ok(Table { hue, sat, val, srgb_value, data })
 }
 
 /// Adobe's `BaselineExposure` for a body, as far as the installed pool can say.

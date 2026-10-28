@@ -12,7 +12,9 @@
 //! own curve is valid, so a profile without one is rendered through this.
 
 /// `kTable[i]` is the curve at `i / 1024`; between samples the SDK interpolates
-/// linearly, which is what [`super::sample`] does.
+/// linearly, which is what [`super::sample`] does. Adobe's literals verbatim:
+/// sample 512 is 0.70711, which clippy reads as an approximate 1/√2.
+#[allow(clippy::approx_constant)]
 pub(super) const ACR3_DEFAULT: [f32; 1025] = [
     0.00000, 0.00078, 0.00160, 0.00242, 0.00314, 0.00385, 0.00460, 0.00539,
     0.00623, 0.00712, 0.00806, 0.00906, 0.01012, 0.01122, 0.01238, 0.01359,

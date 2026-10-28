@@ -181,13 +181,27 @@ one AutoShade opens it in, not the camera's original. A turn made here is
 written back into the sidecar, so Lightroom picks it up too. The neutral view
 is AutoShade's own conversion, not the camera JPEG; histogram and clipping
 information are computed from the decoded image and also feed the AI verifier.
-The develop starts from a **camera-matched base look**: a tone curve read off
-the camera's own embedded preview, block by block, so the neutral develop
-looks like the camera's JPEG rather than a flat conversion. Since v1.6.0 that
-estimate is made on block means of the two pictures, and a photo saved by an
-earlier version gets the current estimate the first time it is opened — here,
-in batch export, in the web UI or with `apply` — and a toast says so; a photo
-saved with no base look keeps none.
+The develop starts **where Lightroom starts** (v1.17.0): Adobe's 「Adobe
+Standard」 camera profile under the 「Adobe Color」 creative profile, every
+slider at zero — the picture an all-zero Lightroom sidecar renders, pixel for
+pixel. The canvas, the browser's pane, a heal / clone / fill / denoise / stack
+master and the reverse fit all start from that same picture, and a photo you
+save writes the Adobe Color profile into its `.xmp`, so Lightroom opens it on
+the same start. The profile files are Adobe's, read from the Camera Raw
+install on this computer (Lightroom and Photoshop put them there); AutoShade
+ships none. Where they are not installed — and for a JPEG or TIFF — the
+develop starts as it did before v1.17.0, from a **camera-matched base look**:
+a tone curve read off the camera's own embedded preview, block by block, so
+the neutral develop looks like the camera's JPEG rather than a flat
+conversion; the log says which start a photo got and why.
+
+A photo saved by an earlier version keeps the start it was saved with — its
+camera base look renders exactly as it did — and **Reset** moves it to the new
+start. Since v1.6.0 the base-look estimate is made on block means of the two
+pictures, and a photo saved by an earlier version's estimator gets the current
+estimate the first time it is opened — here, in batch export, in the web UI
+or with `apply` — and a toast says so; a photo saved with no base look keeps
+none.
 
 ## 2. Develop the image
 
@@ -321,12 +335,14 @@ Landscape」, 「Adobe Monochrome」 and the rest if you picked one. Since v1.5.
 AutoShade reads both and develops through them, which is a large part of why a
 photo now opens looking like it did in Lightroom rather than flatter.
 
-Both rows are read-only, and one of them carries a warning worth reading. A
-creative profile has two halves: a baked tone curve with a few baked sliders,
-which AutoShade renders, and a creative colour table, which Adobe stores in a
-form nobody outside Adobe can read. When a profile has one, the fold says so
-under its name rather than letting you assume the whole profile arrived. Colour
-may therefore sit slightly beside Lightroom's on those photos; tone will not.
+Both rows are read-only. A creative profile has two halves: a baked tone
+curve with a few baked sliders, and a creative colour table. Since v1.17.0
+AutoShade renders both — it reads the colour table from Adobe's own Camera Raw
+install on your machine, and checks it against the name the sidecar gives it.
+When a table cannot be rendered (Camera Raw is not installed, the profile scales
+its Look below 100 %, or the table is one of Adobe's RGB tables), the fold says
+so under the profile's name rather than letting you assume the whole profile
+arrived.
 
 The **Curves** fold holds Lightroom's **parametric curve** too since v1.5.0:
 Highlights, Lights, Darks and Shadows sliders (±100) under the point curve, then
@@ -677,7 +693,8 @@ layers stayed behind. Pasting a develop onto another photo leaves the layers
 out (they are this photo's pixels), and turning the photo is off while a card
 holds one. Through v1.6.7 a fill landed as a new **✨ AI generated** card
 instead. The browser's Fill and the CLI's `retouch` still composite onto the
-source's neutral develop.
+source's own develop — since v1.17.0 its base develop, the camera profile and
+Look the photo starts from.
 
 **Adjust generated image** is GUI-only: the browser and CLI retain region
 retouch and have no whole-image adjust entry.
@@ -969,8 +986,12 @@ it opens the photo beside that sidecar, so one sidecar renders one geometry on
 both surfaces. Since v1.17.0 a sidecar renders from where Lightroom starts:
 Adobe's baseline exposure for the body (inferred from the camera profiles
 Adobe installed for it, and said in one line) and, for a profile that states no
-tone curve of its own, such as Adobe Standard, Adobe's default curve. What
-still differs is the creative profile's colour table and Adobe's colour matrix.
+tone curve of its own, such as Adobe Standard, Adobe's default curve; and its
+colour through Adobe's own colour matrix for the profile and the creative
+profile's colour table, both read from your Camera Raw install. On the flat
+reference sidecar the colour now sits within about 1 point of b* of Camera
+Raw's render (sky and warm tones); what still differs is mostly the very
+brightest highlights, which Camera Raw rolls off and AutoShade clips.
 `auto` is `analyze` plus render.
 `batch` analyzes RAWs by default, skips baked photos unless `--include-baked`
 is set (avoiding duplicate analysis and billing for RAW+JPEG pairs), and
@@ -1001,9 +1022,9 @@ they are, and reading it back raises no untagged-16-bit warning.
 
 **`match` on a denoised or stacked master (v1.6.2).** `match` fits what the
 desktop app fits. A RAW is fitted
-on a neutral develop of its sensor frame with the photo's calibration —
-camera base look, lens profile, as-shot white balance — composed into the
-solve. The target's own geometry is read before any pixel is compared
+on the base develop of its sensor frame — the camera profile and Look the
+photo starts from (v1.17.0) — with the photo's calibration (that start, lens
+profile, as-shot white balance) composed into the solve. The target's own geometry is read before any pixel is compared
 (v1.16.0): a target you exported from Lightroom with the lens profile on is
 brought into that sensor frame first, one exported without it is paired as it
 stands and the recipe's distortion and chromatic-aberration corrections are
@@ -1305,6 +1326,16 @@ develop** (Analysis, Adjust the selected variant, Reference library).
   off by default, it buys a second image) regenerates once and keeps the
   closer result. Use **Reverse-fit** or `match` to infer a deterministic recipe
   and apply it to the original RAW at full resolution.
+  After a Reimagine lands, the app asks **Reverse-fit this AI result?** The
+  dialog says what the fit does, repeats the result's **D** reading, and has a
+  **From:** menu with the same cards as the reverse-fit fold's menu. It starts
+  on the **▣ Original** card; **Automatic** is still in the list. A line names
+  the strength and the switches the fit will use; you change those in the fold.
+  **Reverse-fit** (Enter) starts the same fit as the fold's button, and **Not
+  now** (Esc) changes nothing. Tick **Don't ask again after generating** to stop
+  the question; **Ask after each AI generation** in the reverse-fit fold turns
+  it back on. An Adjust or a fill does not ask, and neither does Normal mode,
+  which has no reverse-fit.
 
 - **Adjust generated image · paid API:** the fold directly after Reimagine
   under **AI generation & reverse-fit** edits the selected **✨ AI generated**

@@ -105,12 +105,12 @@ pub(super) fn candidates<'a>(finished: &Path, index: &'a HashMap<String, Vec<Pat
 }
 
 /// The recipe a sidecar develops to here: the import every surface uses, plus
-/// the photo's own calibration (camera base look, lens profile, as-shot WB) —
-/// what the desktop app applies when it opens a RAW with a sidecar.
+/// the photo's own calibration (the import's start, lens profile, as-shot
+/// WB) — what the desktop app applies when it opens a RAW with a sidecar.
 fn sidecar_recipe(raw: &Path, xmp_text: &str) -> EditRecipe {
     let mut r = crate::xmp::xmp_to_recipe_for_photo(xmp_text, raw);
     let quiet = crate::diag::Collector::default();
-    r.base_curve = crate::pipeline::photo_base_knots_in(raw, &crate::diag::Diag::about(&quiet, raw));
+    crate::pipeline::stamp_import_start(raw, &mut r, &crate::diag::Diag::about(&quiet, raw));
     r.lens_profile = crate::pipeline::fresh_lens_profile_for_sidecar(raw, Some(xmp_text));
     let (k, t) = crate::pipeline::fresh_as_shot_wb(raw);
     r.as_shot_k = r.as_shot_k.or(k);

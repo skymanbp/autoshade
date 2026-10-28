@@ -492,3 +492,128 @@ fn a_body_without_camera_profiles_has_no_baseline() {
     assert_eq!(b.ev(), 0.0);
     assert_eq!(baseline_from(&[], "SONY", "TEST-4"), Baseline::NoCameraProfiles);
 }
+
+
+// --- the creative profiles' tables -----------------------------------------
+
+/// `dng_big_table::EncodeAsBinary` + `EncodeAsString`, written out in the test
+/// so the decoder is driven by bytes it did not produce: little-endian
+/// uncompressed size, zlib, then five digits per little-endian `u32`, least
+/// significant digit first, a short final group written as its leading
+/// digits.
+fn encode_big_table(table: &[u8]) -> String {
+    use std::io::Write;
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    z.write_all(table).expect("zlib");
+    let mut packed = (table.len() as u32).to_le_bytes().to_vec();
+    packed.extend(z.finish().expect("zlib"));
+    let mut out = String::new();
+    for chunk in packed.chunks(4) {
+        let mut b = [0u8; 4];
+        b[..chunk.len()].copy_from_slice(chunk);
+        let mut v = u32::from_le_bytes(b) as u64;
+        for _ in 0..chunk.len() + 1 {
+            out.push(BIG_TABLE_ALPHABET[(v % 85) as usize] as char);
+            v /= 85;
+        }
+    }
+    out
+}
+
+/// A look table's decompressed bytes, `dng_look_table::PutStream` order.
+fn look_bytes(dims: [u32; 3], data: &[[f32; 3]], encoding: u32) -> Vec<u8> {
+    let mut b = longs(&[0, 1, dims[0], dims[1], dims[2]]);
+    for e in data {
+        b.extend(floats(e));
+    }
+    b.extend(longs(&[encoding]));
+    b
+}
+
+fn md5_hex(b: &[u8]) -> String {
+    format!("{:X}", md5::compute(b))
+}
+
+/// The SDK's text encoding round-trips to the table it carried, and the
+/// table's id is checked before anything of it is believed.
+///
+/// MUTATION: read the digits most-significant first; drop the fingerprint
+/// check; read the value encoding from the wrong offset.
+#[test]
+fn a_look_table_decodes_from_the_sdks_text_encoding_and_is_checked_by_fingerprint() {
+    let data: Vec<[f32; 3]> =
+        (0..3 * 2 * 2).map(|i| [i as f32 * 1.5 - 4.0, 1.0 + i as f32 / 100.0, 0.98]).collect();
+    let bytes = look_bytes([3, 2, 2], &data, 1);
+    let (text, id) = (encode_big_table(&bytes), md5_hex(&bytes));
+    let t = decode_look_table(&text, &id).expect("decodes");
+    assert_eq!((t.hue, t.sat, t.val), (3, 2, 2));
+    assert!(t.srgb_value, "encoding 1 is the sRGB value axis");
+    assert_eq!(t.data, data);
+    // Lower-case ids are the same id.
+    assert!(decode_look_table(&text, &id.to_ascii_lowercase()).is_ok());
+    // A payload that decodes to some OTHER table is refused by name.
+    let other = md5_hex(&look_bytes([3, 2, 2], &data, 0));
+    assert!(matches!(decode_look_table(&text, &other), Err(Refusal::TableMismatch(_))));
+    // Bytes that are not a zlib stream are refused, not panicked on.
+    assert!(matches!(decode_look_table("0123456789", &id), Err(Refusal::NotAProfile(_))));
+}
+
+/// An RGB table — the other kind of big table the creative profiles carry —
+/// is a named refusal, not a misread look table.
+///
+/// MUTATION: skip the table-kind check.
+#[test]
+fn an_rgb_table_is_refused_by_name() {
+    let mut bytes = look_bytes([2, 2, 1], &[[0.0, 1.0, 1.0]; 4], 0);
+    bytes[0] = 1; // btt_RGBTable
+    let e = decode_look_table(&encode_big_table(&bytes), &md5_hex(&bytes)).unwrap_err();
+    assert!(e.to_string().contains("RGB table"), "{e}");
+}
+
+/// The lookup walks settings files for the `crs:Table_<id>` attribute; an id
+/// no file carries is [`Refusal::NoLookTable`], an empty pool is
+/// [`Refusal::NoRoots`], and a malformed id never reaches the disk.
+///
+/// MUTATION: return the first table found whatever its id.
+#[test]
+fn the_look_table_lookup_finds_its_id_and_says_why_not() {
+    let root = std::env::temp_dir().join(format!("autoshade-look-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("scratch dir");
+    let data = vec![[2.0, 1.1, 1.0]; 4];
+    let bytes = look_bytes([2, 2, 1], &data, 0);
+    let id = md5_hex(&bytes);
+    let decoy = root.join("Decoy.xmp");
+    std::fs::write(&decoy, "<x crs:LookTable=\"00\" crs:Table_00000000000000000000000000000000=\"x\"/>")
+        .expect("write");
+    let look = root.join("Look.xmp");
+    let xmp = format!("<x crs:LookTable=\"{id}\"\n   crs:Table_{id}=\"{}\"/>", encode_big_table(&bytes));
+    std::fs::write(&look, xmp).expect("write");
+    let files = vec![decoy, look];
+    assert_eq!(look_table_from(&files, &id).expect("found").data, data);
+    let absent = md5_hex(b"absent");
+    assert_eq!(look_table_from(&files, &absent), Err(Refusal::NoLookTable));
+    assert_eq!(look_table_from(&[], &id), Err(Refusal::NoRoots));
+    assert!(matches!(look_table_from(&files, "not-an-id"), Err(Refusal::TableMismatch(_))));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// On a machine with Camera Raw, 「Adobe Color」's own table decodes, matches
+/// its fingerprint and has the dimensions the SDK reads for it; without one,
+/// the answer is a named refusal.
+#[test]
+fn the_installed_adobe_color_table_answers_or_says_why_not() {
+    match find_look_table("E1095149FDB39D7A057BAB208837E2E1") {
+        Ok(t) => {
+            assert_eq!((t.hue, t.sat, t.val), (36, 16, 16));
+            assert!(!t.srgb_value, "Adobe Color's table indexes linear value");
+            assert_eq!(t.data.len(), 36 * 16 * 16);
+            // A colour table, not an identity: it turns hue somewhere.
+            assert!(t.data.iter().any(|e| e[0].abs() > 1.0));
+        }
+        Err(e) => assert!(
+            matches!(e, Refusal::NoRoots | Refusal::NoLookTable),
+            "a machine without the table must say which, not {e}"
+        ),
+    }
+}

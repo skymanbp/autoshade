@@ -113,8 +113,9 @@ fn the_export_names_the_globals_the_sidecar_cannot_carry() {
         // because writing it would claim Adobe's key for our own solver's
         // numbers. Registry order, not alphabetical.
         // In registry order, which is the panel's draw order: F7's creative
-    // Look sits between the Upright matrices and the base curve because
-    // that is where its field is declared.
+    // Look sat between the Upright matrices and the base curve until
+    // v1.17.0, when the writer started emitting `<crs:Look>` and it left
+    // this tier for `Rendered`.
     // v1.5.0 F9 adds `retouch`, and it is the one row here whose export
     // story has two halves. A MERGE keeps the photographer's own
     // `crs:RetouchAreas` verbatim (this writer does not own the element,
@@ -123,7 +124,7 @@ fn the_export_names_the_globals_the_sidecar_cannot_carry() {
     // worse half, which is what a disclosure is for. 2026-10-01 adds
     // `pixel_layers`, declared right after it: a generative fill's layer,
     // which no sidecar has an element for on either path.
-    vec!["upright_transform", "look", "base_curve", "lens_profile", "retouch", "pixel_layers", "lens_blur", "colour_field"],
+    vec!["upright_transform", "base_curve", "lens_profile", "retouch", "pixel_layers", "lens_blur", "colour_field"],
     );
 }
 

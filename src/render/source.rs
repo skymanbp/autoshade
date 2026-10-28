@@ -182,11 +182,10 @@ pub fn render_to_image_in(
     // v1.5.0 F7 — the camera profile the sidecar names, resolved against the
     // Adobe profiles installed on THIS machine. `None` is the ordinary case
     // (no profile named, or none installed that matches) and costs nothing.
+    // (Exactly one starting tone — a named profile's tone replaces the
+    // camera-matched base curve — is the recipe's own rule,
+    // `EditRecipe::starting_curve`, so the preview develops obey it too.)
     let profile_stage = resolve_camera_profile(&rawimage, recipe, working, &diag);
-    // v1.17.0 — exactly one starting tone: a rendering profile's tone replaces
-    // the camera-matched base curve rather than stacking under it.
-    let one_tone = super::tone::one_starting_tone(recipe, profile_stage.is_some());
-    let recipe = &*one_tone;
     // A profile is rendered by the engine's OWN calibrate path whatever the
     // export space asked for. The sRGB path normally leaves white balance and
     // calibration to rawler and stays byte-identical to it; that byte identity

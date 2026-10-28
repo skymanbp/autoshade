@@ -351,13 +351,31 @@ bundled; a machine with no profiles gets a named refusal.
   the median is placed proportionally between them. Per channel desaturates.
 - Two calibrations blend in **reciprocal** temperature — the midpoint between
   2856 K and 6504 K is 3969 K, not 4680 K.
-- **Stated deviation**: the profile's colour MATRIX is not adopted. The engine
-  keeps the camera→XYZ transform its calibration lane was measured against, so
-  only the tables and the tone curve render.
-- `crs:LookTable`'s payload is **not decodable**: base85 over a measured
-  85-character alphabet, 6.408 bits/char, no decompression under zlib/deflate/
-  gzip/bzip2/xz/lzma/zstd/lz4 at any offset ≤ 256 under four conventions. It is
-  named in the panel and in `diag.warn` rather than silently dropped.
+- Colour matrix (v1.17.0): a profile with a `ForwardMatrix` owns the camera →
+  working transform, built as the Adobe DNG SDK's `dng_color_spec.cpp` builds it
+  — white solved from the camera neutral (`NeutralToXY`, Robertson temperature
+  from `dng_temperature.cpp`, Wyszecki & Stiles' table), the two calibrations
+  weighted by reciprocal temperature, `ForwardMatrix × diag(1/neutral)` to XYZ
+  D50, the SDK's linearised Bradford (`MapWhiteMatrix`) to D65. © 2006–2019
+  Adobe Systems Incorporated, DNG SDK licence. No `ForwardMatrix`, or no
+  profile: the engine's own D65 matrix, as before.
+- `crs:LookTable` (v1.17.0): the `crs:Table_<id>` payload is the DNG SDK's
+  big-table text encoding (`dng_big_table.cpp` `DecodeFromString` /
+  `DecodeFromBinary` / `dng_look_table::GetStream`: Z85-like base85,
+  least-significant digit first, little-endian size + zlib via `flate2`), checked
+  against its id with `md5` (the SDK's `RecomputeFingerprint`). Read from the
+  user's Camera Raw install, never bundled; RGB tables stay unrendered and named.
+- The canvas start (v1.17.0): a fresh develop of a RAW names 「Adobe Standard」
+  with the 「Adobe Color」 Look (`render::canvas_recipe`, the all-zero sidecar's
+  own `crs:Look` block) when `render::canvas_renders` finds both in the install,
+  and the camera base look below otherwise (`pipeline::fresh_canvas_start_with`,
+  the one decision every fresh-open surface takes). Exactly one starting tone,
+  decided from the recipe alone (`EditRecipe::starting_curve`): a recipe that
+  names a profile renders no camera curve. The profile stage runs inside the RAW
+  develop, so every surface that hands pixels to the preview develop hands it the
+  BASE develop of the recipe's `render::BasePart` (profile + Look table, no baked
+  tone): the GUI and web canvases (keyed and re-developed by part), the
+  heal / clone / fill / denoise / stack masters and `pipeline::fit_source`.
 
 ### Source
 
@@ -607,7 +625,10 @@ supposed to remove.
 **Method.** A neutral develop does not look like the camera's own JPEG; the
 base look is the per-photo tone curve that closes the gap, estimated by
 `render::camera_base_look` from the RAW's embedded preview and stored in the
-recipe. One entry serves the app's open path, the pipeline and the web UI. The
+recipe. Since v1.17.0 it is the fresh start only where Lightroom's canvas
+cannot render (no Camera Raw install, or none for the body), and the
+re-estimate of a curve an earlier era stamped; a saved curve renders as it
+was saved. One entry serves the app's open path, the pipeline and the web UI. The
 neutral develop and the preview are paired at the camera's own framing;
 whether the preview carries the lens profile's corner lift is measured on the
 pair (outer-ring against inner-ring residual, `corner_residual`), and the lift
@@ -1847,7 +1868,8 @@ lossy generated target, negotiates a flexible size and its supported fallback
 (sized from the frame it sends: a RAW sends its sensor frame, never an
 in-camera-cropped embedded preview, since v1.2.2), then can feed that target
 into `match` for an editable full-resolution approximation — `match` in turn
-fits a RAW on a neutral develop of the full sensor frame with the calibration
+fits a RAW on the base develop of the full sensor frame (the calibration's
+camera profile and Look since v1.17.0) with the calibration
 composed (`pipeline::fit_source`, one frame for the CLI and the app since
 v1.3.0; the embedded rendition is never fitted; since v1.16.0 the target's own
 geometry is measured first — `pipeline::fit_target`, six-patch phase correlation

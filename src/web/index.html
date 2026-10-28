@@ -1028,7 +1028,7 @@ async function selectPhoto(id, stem, el) {
   // to the neutral recipe and show the server's reason, instead of throwing out
   // of selectPhoto and leaving an empty control column with no explanation.
   let loaded = null, loadedFrom = null, loadedWarn = null, loadErr = null, freshCurve = null,
-      freshLens = null, freshAsShot = null;
+      freshLens = null, freshAsShot = null, freshStart = null;
   // The fresh-open calibration arrives through two doors (the 404 body below,
   // and /api/fresh-base for a saved recipe) and the server builds ONE payload
   // for both (serve::fresh_base_payload). Read it in one place too, or the two
@@ -1040,6 +1040,10 @@ async function selectPhoto(id, stem, el) {
     if (o.lens_profile) freshLens = o.lens_profile;
     if (o.as_shot_k != null)
       freshAsShot = { k: o.as_shot_k, t: (o.as_shot_tint != null ? o.as_shot_tint : null) };
+    // v1.17.0: the profile and Look a fresh develop starts from (Lightroom's
+    // Adobe Color where this machine's Camera Raw install can render it).
+    if ("camera_profile" in o)
+      freshStart = { camera_profile: o.camera_profile || "", look: (o.look != null ? o.look : null) };
   };
   try {
     const rr = await fetch(`/api/recipe?id=${id}`);
@@ -1106,6 +1110,7 @@ async function selectPhoto(id, stem, el) {
   } else {
     state.recipe = structuredClone(DEFAULT_RECIPE);
     if (freshCurve && freshCurve.length) state.recipe.base_curve = freshCurve;
+    if (freshStart) { state.recipe.camera_profile = freshStart.camera_profile; state.recipe.look = structuredClone(freshStart.look); }
     if (freshLens) state.recipe.lens_profile = freshLens;
     if (freshAsShot) { state.recipe.as_shot_k = freshAsShot.k; state.recipe.as_shot_tint = freshAsShot.t; }
     // AFTER the calibration stamps: a baseline snapshotted before them
@@ -1126,6 +1131,7 @@ async function selectPhoto(id, stem, el) {
   state.freshCurve = (freshCurve && freshCurve.length) ? freshCurve : null;
   state.freshLens = freshLens || null;
   state.freshAsShot = freshAsShot;
+  state.freshStart = freshStart;
   // Build the controls now that state.recipe is known, then populate them.
   buildSliders(main.querySelector(".sliders"));
   buildWb(main.querySelector(".sliders"));
@@ -1256,7 +1262,7 @@ async function selectPhoto(id, stem, el) {
   // fallback curve may be an era-1 save that was momentarily unrepairable —
   // posting it stampless would launder it to era-2 and disable the repair
   // forever.
-  main.querySelector(".reset").onclick = ()=>{ const cur = state.recipe && state.recipe.base_curve; const curVer = state.recipe ? state.recipe.version : null; const usedFresh = !!(state.freshCurve && state.freshCurve.length); const bc = usedFresh ? state.freshCurve : cur; const curLens = state.recipe && state.recipe.lens_profile; const lp = state.freshLens || curLens; const curAs = (state.recipe && state.recipe.as_shot_k != null) ? { k: state.recipe.as_shot_k, t: state.recipe.as_shot_tint } : null; const as = state.freshAsShot || curAs; state.recipe = structuredClone(DEFAULT_RECIPE); if (bc && bc.length) state.recipe.base_curve = structuredClone(bc); if (!usedFresh && bc && bc.length && curVer != null) state.recipe.version = curVer; if (lp) state.recipe.lens_profile = structuredClone(lp); if (as) { state.recipe.as_shot_k = as.k; state.recipe.as_shot_tint = (as.t != null ? as.t : null); } state.region = null; selBox.hidden = true; state.sessionMaster = null; syncSliders(); pushHistory(state.recipe); renderAfter(); };
+  main.querySelector(".reset").onclick = ()=>{ const cur = state.recipe && state.recipe.base_curve; const curVer = state.recipe ? state.recipe.version : null; const usedFresh = !!(state.freshCurve && state.freshCurve.length); const bc = usedFresh ? state.freshCurve : cur; const curLens = state.recipe && state.recipe.lens_profile; const lp = state.freshLens || curLens; const curAs = (state.recipe && state.recipe.as_shot_k != null) ? { k: state.recipe.as_shot_k, t: state.recipe.as_shot_tint } : null; const as = state.freshAsShot || curAs; state.recipe = structuredClone(DEFAULT_RECIPE); if (bc && bc.length) state.recipe.base_curve = structuredClone(bc); if (!usedFresh && bc && bc.length && curVer != null) state.recipe.version = curVer; if (state.freshStart) { state.recipe.camera_profile = state.freshStart.camera_profile; state.recipe.look = structuredClone(state.freshStart.look); } if (lp) state.recipe.lens_profile = structuredClone(lp); if (as) { state.recipe.as_shot_k = as.k; state.recipe.as_shot_tint = (as.t != null ? as.t : null); } state.region = null; selBox.hidden = true; state.sessionMaster = null; syncSliders(); pushHistory(state.recipe); renderAfter(); };
   main.querySelector(".savexmp").onclick = saveXmp;
   main.querySelector(".export").onclick = exportFull;
   main.querySelector(".download").onclick = downloadFull;

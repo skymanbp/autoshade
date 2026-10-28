@@ -951,10 +951,10 @@ const LOOK_RENDERED_CRS: [&str; 7] = [
 ///
 /// Lightroom writes the creative profile's WHOLE baked half into the sidecar —
 /// on 161 of 161 Looks in the library this was measured against — so the file
-/// in front of us is self-sufficient and nothing has to be looked up on disk.
-/// What it does NOT write out is the colour table: that is a 32-hex reference
-/// (`crs:LookTable`), and [`crate::dcp`] records what was measured about the
-/// payload it refers to and why it is not decodable.
+/// in front of us is self-sufficient for the tone. What it does NOT write out
+/// is the colour table: that is a 32-hex reference (`crs:LookTable`), which
+/// the render resolves against Camera Raw's install
+/// ([`crate::dcp::find_look_table`], v1.17.0).
 ///
 /// Read from the `<crs:Look>` element itself rather than through the
 /// Description's scope, which is the whole point: those baked properties LOOK
@@ -987,6 +987,72 @@ pub(super) fn read_creative_look(xmp: &str) -> Option<crate::recipe::CreativeLoo
         blue_curve: curve("ToneCurvePV2012Blue"),
         unrendered: look_unrendered(params),
     })
+}
+
+/// The creative profile a fresh open of a RAW starts from (v1.17.0): 「Adobe
+/// Color」 on 「Adobe Standard」, Lightroom's own default, in the form Lightroom
+/// 9.4 (Camera Raw 18.4) writes it into a sidecar — the user's own flat export
+/// packet of 2026-10-27, minus nothing. Read through [`read_creative_look`],
+/// so a fresh canvas and a sidecar naming the same Look are ONE recipe and
+/// render the same pixels (pinned by
+/// `render::tests::a_fresh_canvas_renders_like_a_sidecar_that_names_adobe_color`).
+pub(crate) const CANVAS_LOOK_XMP: &str = r#"<crs:Look>
+    <rdf:Description
+     crs:Name="Adobe Color"
+     crs:Amount="1"
+     crs:UUID="B952C231111CD8E0ECCF14B86BAA7077"
+     crs:SupportsAmount="false"
+     crs:SupportsMonochrome="false"
+     crs:SupportsOutputReferred="false">
+    <crs:Group>
+     <rdf:Alt>
+      <rdf:li xml:lang="x-default">Profiles</rdf:li>
+     </rdf:Alt>
+    </crs:Group>
+    <crs:Parameters>
+     <rdf:Description
+      crs:Version="18.4"
+      crs:ProcessVersion="15.4"
+      crs:ConvertToGrayscale="False"
+      crs:CameraProfile="Adobe Standard"
+      crs:LookTable="E1095149FDB39D7A057BAB208837E2E1">
+     <crs:ToneCurvePV2012>
+      <rdf:Seq>
+       <rdf:li>0, 0</rdf:li>
+       <rdf:li>22, 16</rdf:li>
+       <rdf:li>40, 35</rdf:li>
+       <rdf:li>127, 127</rdf:li>
+       <rdf:li>224, 230</rdf:li>
+       <rdf:li>240, 246</rdf:li>
+       <rdf:li>255, 255</rdf:li>
+      </rdf:Seq>
+     </crs:ToneCurvePV2012>
+     <crs:ToneCurvePV2012Red>
+      <rdf:Seq>
+       <rdf:li>0, 0</rdf:li>
+       <rdf:li>255, 255</rdf:li>
+      </rdf:Seq>
+     </crs:ToneCurvePV2012Red>
+     <crs:ToneCurvePV2012Green>
+      <rdf:Seq>
+       <rdf:li>0, 0</rdf:li>
+       <rdf:li>255, 255</rdf:li>
+      </rdf:Seq>
+     </crs:ToneCurvePV2012Green>
+     <crs:ToneCurvePV2012Blue>
+      <rdf:Seq>
+       <rdf:li>0, 0</rdf:li>
+       <rdf:li>255, 255</rdf:li>
+      </rdf:Seq>
+     </crs:ToneCurvePV2012Blue>
+     </rdf:Description>
+    </crs:Parameters>
+    </rdf:Description>
+   </crs:Look>"#;
+
+/// [`CANVAS_LOOK_XMP`], read.
+pub fn canvas_look() -> crate::recipe::CreativeLook {
+    read_creative_look(CANVAS_LOOK_XMP).unwrap_or_default()
 }
 
 /// Which of the Look's baked crs properties this engine does not act on, by

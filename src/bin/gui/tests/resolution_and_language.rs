@@ -57,7 +57,7 @@
         app.tx
             .send(Msg::Opened(Box::new(Ok((
                 Arc::new(image::DynamicImage::new_rgb8(8, 6)),
-                Vec::new(),
+                Default::default(),
                 Default::default(),
                 None,
                 None,
@@ -102,7 +102,7 @@
         app.tx
             .send(Msg::Opened(Box::new(Ok((
                 Arc::new(image::DynamicImage::new_rgb8(8, 6)),
-                Vec::new(),
+                Default::default(),
                 Default::default(),
                 None,
                 None,
@@ -438,7 +438,7 @@
             p,
             &(
                 base.clone(),
-                knots.clone(),
+                (autoshade::pipeline::CanvasStart { base_curve: knots.clone(), ..Default::default() }, Default::default()),
                 lens.clone(),
                 Some((4830.0, 6.0)),
                 None,
@@ -449,7 +449,7 @@
         let hit = app.cached_base(p, 2560);
         assert!(hit.is_some(), "same path + the IDENT's edge hits");
         let hit = hit.unwrap();
-        assert_eq!(hit.1, knots, "base-look knots ride the cache entry");
+        assert_eq!(hit.1.0.base_curve, knots, "base-look knots ride the cache entry");
         assert_eq!(hit.2, lens, "the lens profile rides the cache entry too");
         assert_eq!(hit.3, Some((4830.0, 6.0)), "the as-shot anchor rides the cache entry too");
         assert!(
@@ -463,7 +463,7 @@
         for o in &others {
             app.remember_base(
                 o,
-                &(base.clone(), Vec::new(), Default::default(), None, None, (1280, None, None), None),
+                &(base.clone(), Default::default(), Default::default(), None, None, (1280, None, None), None),
             );
         }
         assert!(app.cached_base(p, 2560).is_none(), "least-recent evicted at cap");

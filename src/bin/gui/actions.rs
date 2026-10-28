@@ -102,6 +102,7 @@ impl AutoShadeApp {
         app.fit_ai_judge = prefs.fit_ai_judge;
         app.fit_deep = prefs.fit_deep;
         app.reimagine_retry = prefs.reimagine_retry;
+        app.ask_fit_after_generate = prefs.ask_fit_after_generate;
         app.adjust_quality = prefs.adjust_quality.min(2);
         app.view_mode = prefs.view_mode;
         app.exp_long_edge = prefs.exp_long_edge;
@@ -476,24 +477,26 @@ impl AutoShadeApp {
                     // pixels and knots under its own key, and a popup-driven
                     // px change mid-flight mislabelled the edge.
                     let src_ident = (edge, file_stamp(&path), pixel_identity(&path));
-                    let (thumb, knots, lens, as_shot) = if autoshade::decode::is_raw(&path) {
+                    let (thumb, start, lens, as_shot) = if autoshade::decode::is_raw(&path) {
                         // Identity BEFORE the read: the primed answer below
                         // is filed under the content it was computed FROM —
                         // stat'ing after the multi-second develop filed a
                         // mid-open replacement's NEW identity with the OLD
                         // content's answer.
                         let ident = autoshade::pipeline::curve_ident(&path);
+                        // The BASE part this photo's develop starts from
+                        // (v1.17.0): its saved develop's camera profile and
+                        // Look, else the fresh canvas's. Developed under it so
+                        // the common open pays ONE develop; a canvas recipe
+                        // that settles on another part is re-developed by the
+                        // canvas itself (`ensure_source_part`).
+                        let part = autoshade::pipeline::photo_base_part(&path);
                         // Developed AT the working edge (the cap runs before
                         // tone/geometry): opening a 61 MP RAW no longer keeps
                         // a full-resolution develop resident just to be
                         // thumbnailed — the knots estimate below is CDF
                         // statistics and reads the same at working res.
-                        let full = autoshade::render::render_to_image(
-                            &path,
-                            &EditRecipe::default(),
-                            None,
-                            Some(edge),
-                        )?;
+                        let full = autoshade::render::base_develop(&path, &part, Some(edge))?;
                         // In-camera lens profile (Sony 0x70xx): one cheap TIFF
                         // parse, stamped all-available-on (the user default).
                         let lens = autoshade::pipeline::fresh_lens_profile(&path);
@@ -501,7 +504,10 @@ impl AutoShadeApp {
                         // demosaic) — the Temp slider then speaks absolute
                         // Kelvin for this photo.
                         let as_shot = autoshade::render::as_shot_wb(&path);
-                        // Camera-matched base look: CDF-match the neutral
+                        // The fresh START (v1.17.0): Lightroom's Adobe Color
+                        // canvas where this machine's Camera Raw install can
+                        // render it — no estimate paid. Otherwise the
+                        // camera-matched base look: CDF-match the neutral
                         // develop against the camera's own rendition, paired
                         // like with like by the one entry all three open
                         // paths share — the frame the rendition shows, and
@@ -509,35 +515,61 @@ impl AutoShadeApp {
                         // shows it (render::camera_base_look).
                         // A RAW with no embedded preview (or a decode hiccup)
                         // just opens without a base look — never a failure.
-                        let knots = match autoshade::decode::embedded_preview(&path) {
-                            Ok(Some(cam)) => {
-                                match autoshade::render::camera_base_look(&full, &lens, &cam) {
-                                    // The ANSWER primes the repair memo: the
-                                    // open already paid this develop, and
-                                    // discarding the result made every later
-                                    // repair site (Ctrl+Z, variant switch,
-                                    // Ctrl+S) pay a second full decode on
-                                    // the UI thread. Answers only — an
-                                    // inability stays uncached so the next
-                                    // reader retries.
-                                    Some(k) => {
-                                        autoshade::pipeline::prime_curve_memo(
-                                            &path,
-                                            ident,
-                                            k.clone(),
-                                        );
-                                        k
-                                    }
-                                    // None = could not judge. For an OPEN
-                                    // that is the same as no base look — the
-                                    // repair path is where the distinction
-                                    // decides whether a SAVED curve may be
-                                    // replaced.
-                                    None => Vec::new(),
+                        // The decision is the library's one
+                        // (`pipeline::fresh_canvas_start_with`); the estimate
+                        // below runs only when it is asked for.
+                        let estimate = || -> Vec<[f32; 2]> {
+                            // The estimate needs the NEUTRAL develop. `full` is
+                            // it unless a saved develop names a profile; that
+                            // case pays its own neutral develop, and only here.
+                            let neutral = if part.is_neutral() {
+                                None
+                            } else {
+                                match autoshade::render::render_to_image(
+                                    &path,
+                                    &EditRecipe::default(),
+                                    None,
+                                    Some(edge),
+                                ) {
+                                    Ok(n) => Some(n),
+                                    Err(_) => return Vec::new(),
                                 }
+                            };
+                            match autoshade::decode::embedded_preview(&path) {
+                                Ok(Some(cam)) => {
+                                    match autoshade::render::camera_base_look(neutral.as_ref().unwrap_or(&full), &lens, &cam) {
+                                        // The ANSWER primes the repair memo: the
+                                        // open already paid this develop, and
+                                        // discarding the result made every later
+                                        // repair site (Ctrl+Z, variant switch,
+                                        // Ctrl+S) pay a second full decode on
+                                        // the UI thread. Answers only — an
+                                        // inability stays uncached so the next
+                                        // reader retries.
+                                        Some(k) => {
+                                            autoshade::pipeline::prime_curve_memo(
+                                                &path,
+                                                ident,
+                                                k.clone(),
+                                            );
+                                            k
+                                        }
+                                        // None = could not judge. For an OPEN
+                                        // that is the same as no base look — the
+                                        // repair path is where the distinction
+                                        // decides whether a SAVED curve may be
+                                        // replaced.
+                                        None => Vec::new(),
+                                    }
+                                }
+                                _ => Vec::new(),
                             }
-                            _ => Vec::new(),
                         };
+                        let start = autoshade::pipeline::fresh_canvas_start_with(
+                            &path,
+                            &autoshade::diag::photo(&path),
+                            estimate,
+                        );
                         // render_to_image already developed AT the working edge
                         // — `full` IS the thumb. The unconditional
                         // `full.thumbnail(edge, edge)` here duplicated a
@@ -548,12 +580,12 @@ impl AutoShadeApp {
                         } else {
                             full
                         };
-                        (thumb, knots, lens, as_shot)
+                        (thumb, (start, part), lens, as_shot)
                     } else {
                         (
                             // baked-by-construction: the !is_raw arm of the open (branch above).
                             autoshade::decode::load_image(&path)?.thumbnail(edge, edge),
-                            Vec::new(),
+                            Default::default(),
                             Default::default(),
                             None,
                         )
@@ -588,7 +620,7 @@ impl AutoShadeApp {
                     );
                     // Arc once here so every downstream sharer (variants, the
                     // preview worker) is an O(1) refcount bump, not a deep copy.
-                    Ok((Arc::new(thumb), knots, lens, as_shot, baked, src_ident, baked_note))
+                    Ok((Arc::new(thumb), start, lens, as_shot, baked, src_ident, baked_note))
                 })();
                 Msg::Opened(Box::new(res))
             },
@@ -1094,8 +1126,8 @@ impl AutoShadeApp {
             // healed pixels, not the dark neutral), while a Generated
             // variant's recipe carries an empty curve by construction — the
             // same expression serves both.
-            let curve = self.recipe.base_curve.clone();
-            self.set_before(ctx, &base, &curve);
+            let start = self.recipe.start_only();
+            self.set_before(ctx, &base, &start);
             self.base_preview = Some(base);
             // A fresh transparent paint mask sized to THIS base (a generated
             // raster and the source neutral can differ in dimensions).
@@ -1495,6 +1527,26 @@ impl AutoShadeApp {
     /// and the persisted pixel link all read.
     pub(crate) fn fit_negative(&self) -> Option<PathBuf> {
         self.fit_source_index().and_then(|i| self.variants[i].origin.clone())
+    }
+
+    /// How card `idx` reads in the reverse-fit's rows: its name and its place
+    /// in the strip, so two cards of one kind stay apart.
+    pub(crate) fn numbered_card_label(&self, idx: usize) -> String {
+        format!("{} #{}", self.variant_label(idx), idx + 1)
+    }
+
+    /// The reverse-fit's「From:」menu, spelled once for the two places that
+    /// offer it — the fit fold and the question a generation landing asks
+    /// ([`Self::fit_prompt_layer`]): the Automatic entry's label, which names
+    /// the card [`Self::negative_index`] picks, and every card
+    /// [`Self::is_fit_source`] accepts, as `(id, label)` in strip order.
+    pub(crate) fn fit_source_menu(&self) -> (String, Vec<(String, String)>) {
+        let cards = (0..self.variants.len())
+            .filter(|&i| Self::is_fit_source(&self.variants[i]))
+            .map(|i| (self.variants[i].id.clone(), self.numbered_card_label(i)))
+            .collect();
+        let auto = self.negative_index().map(|i| self.numbered_card_label(i)).unwrap_or_default();
+        (trf(self.lang, "Automatic · {card}", &[("card", &auto)]), cards)
     }
 
     /// R24-3 (#7): copy card `idx`'s develop onto the ▣ Original CARD.
@@ -2088,7 +2140,7 @@ impl AutoShadeApp {
                     || {
                         let (k, t) = autoshade::pipeline::fresh_as_shot_wb(&src);
                         (
-                            autoshade::pipeline::photo_base_knots(&src),
+                            autoshade::pipeline::fresh_canvas_start(&src, &autoshade::diag::photo(&src)),
                             autoshade::pipeline::fresh_lens_profile(&src),
                             k.zip(t),
                         )
@@ -2495,8 +2547,8 @@ impl AutoShadeApp {
             // Same rule as load_active: the canvas recipe's own curve serves
             // every variant (a Generated recipe's curve is empty by
             // construction; an InPlace master is neutral and needs it).
-            let curve = self.recipe.base_curve.clone();
-            self.set_before(ctx, &base, &curve);
+            let start = self.recipe.start_only();
+            self.set_before(ctx, &base, &start);
             self.base_preview = Some(base);
             self.rebind_paint_canvas(mw, mh);
         }
@@ -2663,8 +2715,8 @@ impl AutoShadeApp {
         // wrong coordinates. A live brush session dies with the old frame,
         // disclosed, exactly as at every other replacement door.
         if let Some(b) = self.base_preview.clone() {
-            let curve = self.recipe.base_curve.clone();
-            self.set_before(ctx, &b, &curve);
+            let start = self.recipe.start_only();
+            self.set_before(ctx, &b, &start);
             let (mw, mh) = b.dimensions();
             self.rebind_paint_canvas(mw, mh);
         }
@@ -2688,6 +2740,173 @@ impl AutoShadeApp {
         if let Some(next) = self.redo_stack.pop() {
             self.undo_stack.push(self.committed.clone());
             self.apply_step(next, ctx);
+        }
+    }
+
+    /// A modal layer is up — the quit confirm or the fit prompt — and owns
+    /// the keyboard and the pointer (D13).
+    pub(crate) fn modal_up(&self) -> bool {
+        self.confirm_quit || self.fit_prompt.is_some()
+    }
+
+    /// Raise the fit prompt after a whole-frame reimagine landed and the strip
+    /// switched to its ✨ card. Not over a running job (the answer could not
+    /// start), not once the user said not to ask, not in a workspace without
+    /// the fold the fit lives in (Normal's one-click sidebar), and not without
+    /// the negative's preview [`Self::start_fit`] reads.
+    pub(crate) fn offer_fit_prompt(&mut self, ctx: &egui::Context, divergence: f32) {
+        if self.busy
+            || !self.ask_fit_after_generate
+            || self.mode.shell().one_click_sidebar
+            || self.source_preview.is_none()
+        {
+            return;
+        }
+        let Some(target) = self
+            .active_variant()
+            .filter(|v| v.kind == VariantKind::Generated && v.origin.is_some())
+            .map(|v| v.id.clone())
+        else {
+            return;
+        };
+        // One question at a time: a newer generation takes the open one over
+        // — the strip already stands on its card — and keeps what the user
+        // picked in it.
+        if let Some(p) = &mut self.fit_prompt {
+            p.target = target;
+            p.divergence = divergence;
+            return;
+        }
+        // The ▣ original first (the user's wording: 默认原图), not Automatic,
+        // which solves from a ◈ / ▦ master whenever the strip holds one.
+        let from = self.original_index().map(|i| self.variants[i].id.clone()).filter(|id| !id.is_empty());
+        self.fit_prompt = Some(FitPrompt { target, divergence, from, dont_ask: false });
+        // The layer's Enter waits for "no widget focused" — surrendered now,
+        // as the quit layer does when it opens.
+        if let Some(id) = ctx.memory(|m| m.focused()) {
+            ctx.memory_mut(|m| m.surrender_focus(id));
+        }
+    }
+
+    /// The fit prompt (v1.17.0, user directive): after「AI generate」, ask
+    /// whether to reverse-fit the new ✨ card, and from which negative. It
+    /// only hands over to the fold's own verb — 「Reverse-fit」 sets the
+    /// fold's source and calls [`Self::start_fit`] — so the fit it starts IS
+    /// the panel button's; the strength and the switches stay the fold's
+    /// controls (the AI review is paid, and its cost is named there), and the
+    /// layer only states them.
+    pub(crate) fn fit_prompt_layer(&mut self, ctx: &egui::Context) {
+        let lang = self.lang;
+        let Some(mut prompt) = self.fit_prompt.take() else {
+            return;
+        };
+        let (automatic, sources) = self.fit_source_menu();
+        let to = self
+            .variants
+            .iter()
+            .position(|v| v.id == prompt.target)
+            .map(|i| trf(lang, "To: {card}", &[("card", &self.numbered_card_label(i))]));
+        let fidelity = Self::reimagine_fidelity(lang, prompt.divergence);
+        let on_off = |on: bool| if on { tr(lang, "on") } else { tr(lang, "off") };
+        let in_force = trf(
+            lang,
+            "Reverse-fit strength {pct}% · local areas {zoned} · AI review {review} — set in the AI panel's reverse-fit fold",
+            &[
+                ("pct", &format!("{:.0}", self.fit_strength * 100.0)),
+                ("zoned", on_off(self.zoned_fit)),
+                ("review", on_off(self.fit_ai_judge)),
+            ],
+        );
+        let mut open = true;
+        let mut fit = false;
+        let mut later = false;
+        // The quit layer's keyboard grammar: Esc = the safe escape (nothing
+        // changes), Enter = the primary — unless a control holds focus, which
+        // then owns its own Enter.
+        let widget_focused = ctx.memory(|m| m.focused()).is_some();
+        ctx.input_mut(|i| {
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                later = true;
+            }
+            if !widget_focused && i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
+                fit = true;
+            }
+        });
+        // And the pointer (D13): the strip and the sliders behind it must not
+        // change the card the answer is about.
+        egui::Area::new(egui::Id::new("fit_prompt_scrim"))
+            .order(egui::Order::Middle)
+            .fixed_pos(egui::Pos2::ZERO)
+            .show(ctx, |ui| {
+                let r = ctx.screen_rect();
+                ui.allocate_response(r.size(), egui::Sense::click_and_drag());
+                ui.painter().rect_filled(r, 0.0, egui::Color32::from_black_alpha(96));
+            });
+        egui::Window::new(tr(lang, "Reverse-fit this AI result?"))
+            .id(egui::Id::new("fit_prompt"))
+            .order(egui::Order::Foreground)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(Self::fit_explainer(lang));
+                // The landing's own reading, without its ` · ` joint.
+                ui.label(egui::RichText::new(fidelity.trim_start_matches(" · ")).small().weak());
+                if let Some(to) = &to {
+                    ui.label(egui::RichText::new(to).small().weak());
+                }
+                ui.horizontal(|ui| {
+                    ui.label(tr(lang, "From:"));
+                    let shown = match prompt.from.as_deref() {
+                        Some(id) => sources.iter().find(|(s, _)| s == id).map(|(_, l)| l.clone()),
+                        None => None,
+                    }
+                    .unwrap_or_else(|| automatic.clone());
+                    // The fold's menu, the ▣ original first: Automatic stays
+                    // offered, after the cards it chooses among.
+                    egui::ComboBox::from_id_salt("fit_prompt_from").selected_text(shown).show_ui(ui, |ui| {
+                        for (id, label) in &sources {
+                            let on = prompt.from.as_deref() == Some(id.as_str());
+                            if ui.selectable_label(on, label).clicked() {
+                                prompt.from = Some(id.clone());
+                            }
+                        }
+                        if ui.selectable_label(prompt.from.is_none(), &automatic).clicked() {
+                            prompt.from = None;
+                        }
+                    });
+                });
+                ui.label(egui::RichText::new(&in_force).small().weak());
+                ui.checkbox(&mut prompt.dont_ask, tr(lang, "Don't ask again after generating"))
+                    .on_hover_text(tr(lang, "Turn it back on in the AI panel's reverse-fit fold: 「Ask after each AI generation」"));
+                ui.add_space(SPACE_MD);
+                // The safe answer first, the primary tinted and last — the
+                // quit layer's order.
+                ui.horizontal(|ui| {
+                    later |= action(ui, true, tr(lang, "Not now")).on_hover_text("Esc").clicked();
+                    fit |= primary(ui, true, tr(lang, "Reverse-fit")).on_hover_text("Enter").clicked();
+                });
+            });
+        if !open {
+            later = true;
+        }
+        if !(fit || later) {
+            self.fit_prompt = Some(prompt);
+            return;
+        }
+        if prompt.dont_ask {
+            self.ask_fit_after_generate = false;
+        }
+        // The answer is about the card it asked about; the strip stands on it
+        // (the scrim kept every other click away) unless a landing moved it.
+        if fit && self.active_variant().is_some_and(|v| v.id == prompt.target) {
+            self.fit_from = prompt.from;
+            // A reference file picked in the fold earlier wins `fit_target`
+            // over the active card — the fit would solve toward it, not
+            // toward the result the question named.
+            self.fit_ref = None;
+            self.start_fit();
         }
     }
 
@@ -2909,12 +3128,10 @@ impl AutoShadeApp {
                     // curve (the paste rule): this WRITES recipe.json, and a
                     // canvas-era stamp over a saved era-1 curve would launder
                     // it past every repair.
+                    // Every calibration half, the start (v1.17.0) included,
+                    // through the one stamper.
                     let cal = autoshade::pipeline::photo_calibration(p);
-                    disk.version = cal.version;
-                    disk.base_curve = cal.base_curve;
-                    disk.lens_profile = cal.lens_profile;
-                    disk.as_shot_k = cal.as_shot_k;
-                    disk.as_shot_tint = cal.as_shot_tint;
+                    autoshade::pipeline::stamp_fit_calibration(&mut disk, cal);
                 }
                 // The WRITER's rule (Ctrl+S, api_xmp): a stashed canvas whose
                 // open-time estimate failed still carries the washed pre-era

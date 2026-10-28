@@ -898,6 +898,59 @@ fn point_colors_elem(swatches: &[crate::recipe::PointColor]) -> String {
     format!("\n   <crs:PointColors>\n    <rdf:Seq>\n{items}    </rdf:Seq>\n   </crs:PointColors>")
 }
 
+/// The creative profile (`<crs:Look>`, v1.17.0) as Lightroom writes it: the
+/// name and amount on the Look's own Description, the baked half inside
+/// `crs:Parameters` — the camera profile it sits on, its colour table's id,
+/// the grayscale switch, any baked Clarity/Highlights/Shadows and its four
+/// curves. Nothing for a recipe with no Look.
+///
+/// Written by the FRESH document and by a merge whose base carries no Look of
+/// its own; a base that has one keeps it verbatim (`merge_recipe_into_xmp`),
+/// which is stricter than anything re-serialised here. Without it a recipe
+/// that develops through 「Adobe Color」 reached Lightroom as bare 「Adobe
+/// Standard」 whenever no Lightroom document stood beside the photo.
+pub(super) fn look_elem(r: &EditRecipe) -> String {
+    let Some(l) = r.look.as_ref() else { return String::new() };
+    let curve = |tag: &str, points: &[crate::recipe::CurvePoint]| -> String {
+        if points.is_empty() {
+            return String::new();
+        }
+        let pts: String = points
+            .iter()
+            .map(|p| format!("       <rdf:li>{}, {}</rdf:li>\n", p.input, p.output))
+            .collect();
+        format!("\n     <crs:{tag}>\n      <rdf:Seq>\n{pts}      </rdf:Seq>\n     </crs:{tag}>")
+    };
+    let mut params =
+        format!("\n      crs:ConvertToGrayscale=\"{}\"", if l.grayscale { "True" } else { "False" });
+    for (key, value) in [("CameraProfile", &l.base_profile), ("LookTable", &l.table)] {
+        if !value.is_empty() {
+            params.push_str(&format!("\n      crs:{key}=\"{}\"", xml_attr_escape(value)));
+        }
+    }
+    for (key, value) in
+        [("Clarity2012", l.clarity), ("Highlights2012", l.highlights), ("Shadows2012", l.shadows)]
+    {
+        if value != 0.0 {
+            params.push_str(&format!("\n      crs:{key}=\"{}\"", signed(value)));
+        }
+    }
+    let curves = [
+        curve("ToneCurvePV2012", &l.tone_curve),
+        curve("ToneCurvePV2012Red", &l.red_curve),
+        curve("ToneCurvePV2012Green", &l.green_curve),
+        curve("ToneCurvePV2012Blue", &l.blue_curve),
+    ]
+    .concat();
+    format!(
+        "\n   <crs:Look>\n    <rdf:Description\n     crs:Name=\"{}\"\n     crs:Amount=\"{}\">\n    \
+         <crs:Parameters>\n     <rdf:Description{params}>{curves}\n     </rdf:Description>\n    \
+         </crs:Parameters>\n    </rdf:Description>\n   </crs:Look>",
+        xml_attr_escape(&l.name),
+        l.amount,
+    )
+}
+
 /// The rationale, made safe for an XML comment. XML comments forbid "--"
 /// anywhere inside and "-" as the final char — an AI rationale containing
 /// "--" made the WHOLE sidecar unparsable. Swap ASCII hyphens in those
@@ -1015,10 +1068,11 @@ fn crs_description(
     let desc = format!(
         "<rdf:Description rdf:about=\"\"\n\
     xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"{tiff}{attrs}{payload_attrs}>\
-{children}{payload_children}\n\
+{children}{look}{payload_children}\n\
   </rdf:Description>",
         tiff = frame_declaration(frame),
         attrs = owned_attrs(r, frame),
+        look = look_elem(r),
     );
     (desc, losses)
 }

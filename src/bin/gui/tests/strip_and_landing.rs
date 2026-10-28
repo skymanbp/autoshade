@@ -381,7 +381,7 @@
         app.tx
             .send(Msg::Opened(Box::new(Ok((
                 base.clone(),
-                Vec::new(),
+                Default::default(),
                 Default::default(),
                 None,
                 None,
@@ -398,7 +398,7 @@
         app.tx
             .send(Msg::Opened(Box::new(Ok((
                 base,
-                Vec::new(),
+                Default::default(),
                 Default::default(),
                 None,
                 None,
@@ -419,7 +419,7 @@
         app.tx
             .send(Msg::Opened(Box::new(Ok((
                 Arc::new(image::DynamicImage::new_rgb8(8, 6)),
-                Vec::new(),
+                Default::default(),
                 Default::default(),
                 None,
                 None,
@@ -562,7 +562,7 @@
         app.tx
             .send(Msg::Opened(Box::new(Ok((
                 fresh(),
-                Vec::new(),
+                Default::default(),
                 Default::default(),
                 None,
                 None,
@@ -605,7 +605,7 @@
         app.tx
             .send(Msg::Opened(Box::new(Ok((
                 fresh(),
-                Vec::new(),
+                Default::default(),
                 Default::default(),
                 None,
                 Some((master.clone(), abs, false)),

@@ -276,6 +276,11 @@ pub(crate) struct Prefs {
     /// [`Prefs::default`] gives, so an upgrade never silently starts buying
     /// a second image per reimagine.
     pub(crate) reimagine_retry: bool,
+    /// v1.17.0: ask whether to reverse-fit after a whole-frame「AI generate」
+    /// lands. Routed through [`Prefs::default`] like `fit_strength`: a prefs
+    /// file written before this key existed decodes to `true`, the question
+    /// every user is shown first, never to serde's `false`.
+    pub(crate) ask_fit_after_generate: bool,
     /// The adjust fold's own quality; old prefs default to high (0).
     pub(crate) adjust_quality: usize,
     pub(crate) view_mode: ViewMode,
@@ -335,6 +340,8 @@ impl Default for Prefs {
             fit_deep: false,
             // A second billed generation per diverged reimagine — same rule.
             reimagine_retry: false,
+            // Free to answer, and 「Don't ask again」 is one click inside it.
+            ask_fit_after_generate: true,
             adjust_quality: 0,
             view_mode: ViewMode::SideBySide,
             exp_long_edge: 0,
@@ -530,6 +537,21 @@ pub(crate) enum RetouchNote {
     Reimagined { out: PathBuf, divergence: f32, discarded: Option<f32> },
 }
 
+/// The question a whole-frame「AI generate」landing asks (v1.17.0): reverse-fit
+/// the new ✨ card, and from which negative (`fit_prompt_layer`).
+pub(crate) struct FitPrompt {
+    /// The ✨ card the answer is about, by id — the strip switched to it, and
+    /// a newer generation landing while the question is up takes it over.
+    pub(crate) target: String,
+    /// That generation's structural divergence D, for the fidelity line.
+    pub(crate) divergence: f32,
+    /// The source picked in the prompt's「From:」menu (`None` = Automatic);
+    /// it starts on the ▣ original.
+    pub(crate) from: Option<String>,
+    /// The「Don't ask again」box, written to the pref when the prompt closes.
+    pub(crate) dont_ask: bool,
+}
+
 impl RetouchNote {
     /// The painted area this result consumed, cleared at the landing so the
     /// tool starts clean for its next use; a whole-frame result (reimagine,
@@ -676,10 +698,18 @@ pub(crate) struct OverlayKey {
 /// Messages from worker threads back to the UI. The large payloads are boxed so
 /// the channel message stays small (clippy::large_enum_variant).
 pub(crate) enum Msg {
-    /// Decoded base + the photo's camera-matched base-look knots (empty for
-    /// non-RAW sources, missing embedded previews, or a near-identity map —
-    /// see `render::camera_base_knots`).
+    /// Decoded base + the photo's fresh start and the base part it was
+    /// developed under (see [`OpenedBase`]).
     Opened(Box<anyhow::Result<OpenedBase>>),
+    /// The source base re-developed under another base part (v1.17.0): the
+    /// canvas recipe's camera profile or Look changed under a source-based
+    /// card, and a preview develop cannot add a profile to pixels that lack
+    /// it. Lands only while the photo and the wanted part still match.
+    BaseRedeveloped {
+        path: PathBuf,
+        part: autoshade::render::BasePart,
+        img: Box<anyhow::Result<Arc<image::DynamicImage>>>,
+    },
     // (MasterLoaded carries the SPAWN-time edge and file stamp: the landing
     // used to stat and read preferences at completion time, filing the
     // pixels under an identity they never had — L12-2/L12-6.)
@@ -1651,8 +1681,11 @@ pub(crate) type BaseCacheKey = (PathBuf, u32, FileStamp, PixelIdentity);
 /// rendition (restores as a Generated variant — no parametric XMP).
 pub(crate) type BakedBase = (Arc<image::DynamicImage>, PathBuf, bool);
 
-/// A decoded preview base + the photo's camera-matched base-look knots
-/// (`render::camera_base_knots`; empty = no base look) + its in-camera lens
+/// A decoded preview base + the photo's FRESH start and the base part the
+/// pixels were developed under (v1.17.0: `pipeline::CanvasStart` — Lightroom's
+/// Adobe Color canvas where this machine can render it, else the
+/// camera-matched base curve — and `render::BasePart`, which the canvas
+/// compares against its recipe's own) + its in-camera lens
 /// profile (`pipeline::fresh_lens_profile`; default = none available) + its
 /// as-shot WB anchor (`render::as_shot_wb`; None = unknown → 5500 K).
 /// The sixth element is the decode's IDENTITY, captured in the worker BEFORE
@@ -1661,7 +1694,7 @@ pub(crate) type BakedBase = (Arc<image::DynamicImage>, PathBuf, bool);
 /// state — the curve-memo rule.
 pub(crate) type OpenedBase = (
     Arc<image::DynamicImage>,
-    Vec<[f32; 2]>,
+    (autoshade::pipeline::CanvasStart, autoshade::render::BasePart),
     autoshade::recipe::LensProfile,
     Option<(f32, f32)>,
     Option<BakedBase>,

@@ -391,3 +391,147 @@ fn light_lifted_past_white_clips_where_the_sdks_exposure_ramp_does() {
     s.apply(&mut px);
     assert!(px.iter().all(|c| (c - 1.0).abs() < 1e-3), "0.8 · 2 clips at white: {px:?}");
 }
+
+
+// --- the colour spec (v1.17.0): ForwardMatrix + the dual-illuminant weight ---
+
+/// The DNG SDK's temperature (Robertson's method) puts the two calibration
+/// illuminants where their EXIF codes say they are.
+///
+/// MUTATION: interpolate reciprocal temperature with `f` and `1 − f` swapped.
+#[test]
+fn robertsons_method_reads_illuminant_a_and_d65_at_their_temperatures() {
+    let d65 = xy_to_kelvin([0.3127, 0.3290]);
+    let a = xy_to_kelvin([0.44757, 0.40745]);
+    assert!((d65 - 6504.0).abs() < 15.0, "D65 read as {d65:.1} K");
+    assert!((a - 2856.0).abs() < 10.0, "A read as {a:.1} K");
+    assert!(xy_to_kelvin([0.3457, 0.3585]) > a && xy_to_kelvin([0.3457, 0.3585]) < d65);
+}
+
+/// The SDK's linearised Bradford takes the D50 white to the D65 white.
+///
+/// MUTATION: build the adaptation as `Mb · A · Mb⁻¹`.
+#[test]
+fn the_bradford_adaptation_maps_white_to_white() {
+    let m = map_white(D50_XY, D65_XY64);
+    let w = vec64(&m, xy_to_xyz(D50_XY));
+    let want = xy_to_xyz(D65_XY64);
+    for i in 0..3 {
+        assert!((w[i] - want[i]).abs() < 1e-9, "{w:?} vs {want:?}");
+    }
+}
+
+/// A synthetic two-illuminant profile with ForwardMatrices: the stage owns
+/// the camera transform, and a white-balanced grey (camera 1,1,1 at any
+/// level) comes out as the SAME grey in the working space — the white
+/// preservation the engine's own matrix path has always had.
+fn with_matrices() -> Profile {
+    Profile {
+        color_matrix: [
+            Some([[1.10, -0.35, -0.05], [-0.45, 1.30, 0.15], [-0.05, 0.25, 0.60]]),
+            Some([[0.80, -0.25, -0.05], [-0.40, 1.25, 0.15], [-0.08, 0.20, 0.70]]),
+        ],
+        forward_matrix: [
+            Some([[0.70, 0.15, 0.10], [0.25, 0.80, -0.05], [0.00, -0.10, 0.92]]),
+            Some([[0.75, 0.10, 0.10], [0.30, 0.75, -0.05], [0.02, -0.12, 0.93]]),
+        ],
+        ..bare()
+    }
+}
+
+fn neutral_at(p: &Profile, which: usize, xy: [f64; 2]) -> [f32; 3] {
+    let cm = mat3_f64(&p.color_matrix[which].expect("matrix"));
+    vec64(&cm, xy_to_xyz(xy)).map(|v| v as f32)
+}
+
+/// MUTATION: skip the ForwardMatrix normalisation; drop the Bradford step.
+#[test]
+fn a_profile_with_a_forward_matrix_owns_the_transform_and_keeps_grey_grey() {
+    let p = with_matrices();
+    let frame = Frame { neutral: Some(neutral_at(&p, 1, D65_XY64)), ..Frame::default() };
+    let s = Stage::build_for(&p, SPACE, frame, 0.0).expect("matrices make a stage");
+    assert!(s.owns_camera());
+    for level in [0.02f32, 0.18, 0.6] {
+        let out = s.develop_camera([level; 3]);
+        for c in out {
+            assert!((c - level).abs() < 2e-4, "grey {level} came out {out:?}");
+        }
+    }
+    // Without a neutral the white cannot be solved, and the stage leaves the
+    // matrix to the engine's own path — it does not invent a white.
+    let s = Stage::build_for(&p, SPACE, Frame::default(), 0.0);
+    assert!(s.is_none_or(|s| !s.owns_camera()));
+    // …and a profile with ColorMatrix but no ForwardMatrix keeps that path too.
+    let no_fm = Profile { forward_matrix: [None, None], ..with_matrices() };
+    let frame = Frame { neutral: Some(neutral_at(&no_fm, 1, D65_XY64)), ..Frame::default() };
+    assert!(Stage::build_for(&no_fm, SPACE, frame, 0.0).is_none_or(|s| !s.owns_camera()));
+}
+
+/// The white solved from a camera neutral (the SDK's `NeutralToXY`) lands on
+/// the illuminant whose matrix produced it, and the calibration weight moves
+/// monotonically with temperature between the two.
+///
+/// MUTATION: weight by temperature instead of reciprocal temperature; stop
+/// the white iteration after one pass from D50.
+#[test]
+fn the_white_is_solved_from_the_neutral_and_the_weight_is_monotone_in_temperature() {
+    let p = with_matrices();
+    let t65 = white_temperature(&p, neutral_at(&p, 1, D65_XY64)).expect("D65 white");
+    let ta = white_temperature(&p, neutral_at(&p, 0, [0.44757, 0.40745])).expect("A white");
+    assert!((t65 - 6504.0).abs() < 20.0, "D65 neutral solved to {t65} K");
+    assert!((ta - 2856.0).abs() < 20.0, "A neutral solved to {ta} K");
+    assert!(illuminant_weight(&p, Some(t65)) > 0.99, "a D65 frame takes the D65 calibration");
+    assert!(illuminant_weight(&p, Some(ta)) < 0.01, "an A frame takes the A calibration");
+    let (na, nd) = (neutral_at(&p, 0, [0.44757, 0.40745]), neutral_at(&p, 1, D65_XY64));
+    let mut last = (0.0f32, -1.0f32);
+    for i in 0..=10 {
+        let f = i as f32 / 10.0;
+        let n = [0, 1, 2].map(|c| na[c] + (nd[c] - na[c]) * f);
+        let t = white_temperature(&p, n).expect("white");
+        let w = illuminant_weight(&p, Some(t));
+        assert!(t > last.0 && w >= last.1, "step {i}: {t} K / weight {w} after {last:?}");
+        last = (t, w);
+    }
+    assert_eq!(white_temperature(&p, [0.0, 1.0, 1.0]), None, "a zero neutral is unusable");
+    assert_eq!(white_temperature(&bare(), nd), None, "no ColorMatrix, no white");
+}
+
+/// The body's own Adobe Standard profile, where Camera Raw is installed: a
+/// D65 neutral solves to D65 and weighs (almost) nothing on illuminant A,
+/// and its neutral maps to the working white through the whole stage.
+#[test]
+fn the_installed_profile_solves_a_d65_neutral_and_keeps_it_neutral() {
+    let Ok((_, p)) = crate::dcp::find("Sony", "ILCE-7RM4A", "Adobe Standard") else {
+        return; // no Camera Raw on this machine: the synthetic tests above carry the rule
+    };
+    assert!(p.forward_matrix.iter().all(Option::is_some), "the body's profile carries both");
+    let n = neutral_at(&p, 1, D65_XY64);
+    let t = white_temperature(&p, n).expect("white");
+    assert!((t - 6504.0).abs() < 60.0, "D65 neutral solved to {t} K");
+    assert!(1.0 - illuminant_weight(&p, Some(t)) < 0.02, "weight on A must be ≈ 0");
+    let s = Stage::build_for(&p, SPACE, Frame { neutral: Some(n), ..Frame::default() }, 0.0)
+        .expect("stage");
+    assert!(s.owns_camera());
+    for level in [0.05f32, 0.18, 0.5] {
+        let out = s.develop_camera([level; 3]);
+        let spread = out.iter().copied().fold(f32::MIN, f32::max) - out.iter().copied().fold(f32::MAX, f32::min);
+        assert!(spread < 2e-3, "grey {level} came out {out:?}");
+    }
+}
+
+/// A creative table replaces the profile's own look table (measured against
+/// Camera Raw: see `Stage::build_for`).
+///
+/// MUTATION: apply both tables.
+#[test]
+fn a_creative_table_replaces_the_profiles_look_table() {
+    let p = Profile { look_table: Some(flat([0.0, 0.0, 1.0])), ..bare() };
+    let frame = Frame { creative: Some(flat([0.0, 1.0, 1.0])), ..Frame::default() };
+    let s = Stage::build_for(&p, SPACE, frame, 0.0).expect("stage");
+    let mut px = [0.4f32, 0.2, 0.1];
+    let before = px;
+    s.apply(&mut px);
+    for c in 0..3 {
+        assert!((px[c] - before[c]).abs() < 1e-4, "the creative identity table must win: {px:?}");
+    }
+}

@@ -582,6 +582,13 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
     out.push_str(&new_tag);
     let (children, mut losses) = owned_children(r, !preserve_masks, frame);
     out.push_str(&children);
+    // The creative profile: a base that carries a Look keeps its own verbatim
+    // (the stricter copy); a base without one gets this recipe's, so a Look
+    // the render obeys reaches Lightroom too (`write::look_elem`).
+    let look_name: std::collections::HashSet<String> = ["Look".to_string()].into_iter().collect();
+    if top_level_owned_spans(&body, &look_name).is_some_and(|s| s.is_empty()) {
+        out.push_str(&super::write::look_elem(r));
+    }
     let (rasters, mut raster_losses) = payload::rasters_element(app, &payload_prefix, photo);
     losses.append(&mut raster_losses);
     out.push_str(&rasters);

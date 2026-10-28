@@ -647,7 +647,10 @@ fn main() -> Result<()> {
             require_image_key(&cfg, "retouch")?;
             // No --prompt = remove: the library resolves the blank to its
             // removal instruction (`generative::fill_prompt`).
-            generative::retouch(&cfg, &raw, &mask, prompt.as_deref().unwrap_or(""), &q, full_res, &out)
+            // Composited onto the photo's own base (v1.17.0): the profile its
+            // saved or fresh develop starts from.
+            let part = pipeline::photo_base_part(&raw);
+            generative::retouch(&cfg, &raw, &part, &mask, prompt.as_deref().unwrap_or(""), &q, full_res, &out)
         }
         Command::Heal { src, mask, no_auto, full_res, out } => heal_cmd(&src, mask, no_auto, full_res, out),
         Command::Serve { dir, port } => serve::serve(&dir, port),
@@ -1560,7 +1563,10 @@ fn stack_cmd(
     println!("stacking {} frames ({}) ...", inputs.len(), kind.store_str());
     // The loading, the merge and the master are `stack::stack_files` — the one
     // path the GUI's stack worker takes too. What is left here is the report.
-    let done = autoshade::stack::stack_files(inputs, &opts, long_edge.filter(|e| *e > 0), &out)?;
+    // Every RAW frame through the reference photo's own base (v1.17.0).
+    let part = pipeline::photo_base_part(&inputs[0]);
+    let done =
+        autoshade::stack::stack_files(inputs, &part, &opts, long_edge.filter(|e| *e > 0), &out)?;
     let (merged, w, h) = (&done.merged, done.width, done.height);
     for (k, (ev, px)) in merged.exposures.iter().zip(&merged.travel).enumerate() {
         println!("  frame {}: {ev:+.2} EV, aligned by {px:.1} px", k + 1);
@@ -1622,16 +1628,20 @@ fn denoise_cmd(
         strength.unwrap_or(denoise::default_strength_for(input)),
     );
     if decode::is_raw(input) {
-        println!("denoising RAW {} (on the sensor mosaic, then a neutral develop) ...", input.display());
+        println!("denoising RAW {} (on the sensor mosaic, then its base develop) ...", input.display());
+        // The master is developed through the photo's own base part (v1.17.0,
+        // `render::base_develop`): a card over it runs no profile stage.
+        let part = pipeline::photo_base_part(input);
         let (w, h) =
-            render::render_to_file(input, &EditRecipe::default(), &out, Some(&opts), None, autoshade::diag::stderr())?;
+            render::render_to_file(input, &part.recipe(), &out, Some(&opts), None, autoshade::diag::stderr())?;
         println!("denoised -> {} ({} x {})", out.display(), w, h);
     } else {
         println!("denoising image {} ...", input.display());
         // denoise_active routes baked sources through the oriented
         // load_image working copy — the direct denoise_file path let OpenCV
         // ignore EXIF rotation and drop the tag (permanently sideways out).
-        denoise::denoise_active(&opts, input, &out)?;
+        // A baked source is its own pixels; no base part applies to it.
+        denoise::denoise_active(&opts, input, &render::BasePart::default(), &out)?;
         println!("denoised -> {}", out.display());
     }
     Ok(())
@@ -2145,7 +2155,10 @@ fn heal_cmd(
         if no_auto { "painted mask only" } else { "AI auto-detect" },
         if mask.is_some() && !no_auto { " + painted mask" } else { "" }
     );
-    let report = retouch::heal(&cfg, src, mask.as_deref(), !no_auto, full_res, None, &out)?;
+    // Healed on the photo's own base (v1.17.0): the profile its saved or
+    // fresh develop starts from.
+    let part = pipeline::photo_base_part(src);
+    let report = retouch::heal(&cfg, src, &part, mask.as_deref(), !no_auto, full_res, None, &out)?;
     if !report.rationale.is_empty() {
         println!("  {}", report.rationale);
     }

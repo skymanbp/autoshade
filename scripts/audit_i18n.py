@@ -235,6 +235,7 @@ ALLOWED_BYPASS = {
     "JPEG",       # file-format jargon
     "2560px",     # pixel-size option; its lettered siblings ARE translated
     "Esc",        # keyboard key name (house style, like the shortcut combos)
+    "Enter",      # keyboard key name, the same rule
 }
 
 SRC = {"gui": GUI, "recipe": RECIPE, "advisor": ADVISOR, "rationale": RATIONALE,
