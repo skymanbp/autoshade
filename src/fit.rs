@@ -118,9 +118,9 @@ use budget::{
     ATMOSPHERE_CURVE_SLOPE_MIN, ATMOSPHERE_EV_LIMIT, ATMOSPHERE_WB_GAIN_MAX, ATMOSPHERE_WB_GAIN_MIN,
     ATMOSPHERE_WB_GAIN_RATIO, HSL_BAND_LIMIT_DEFAULT, HSL_BAND_LIMIT_MAX, HSL_BAND_LIMIT_MIN,
 };
-pub(crate) use cast_outcome::{carried_strength_from_notes};
+pub(crate) use cast_outcome::{FIT_QUANT, carried_strength_from_notes};
 use cast_outcome::{
-    CastOutcome, CastProjection, CastReadings, FIT_QUANT, cast_admission_notes,
+    CastOutcome, CastProjection, CastReadings, cast_admission_notes,
     cast_gate_outcome_with_ratio, cast_projection_notes, terminal_harm, unrepresented_note,
 };
 #[cfg(test)]
