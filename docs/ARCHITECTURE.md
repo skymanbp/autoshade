@@ -1534,7 +1534,8 @@ Run `cargo run -- recipe-schema` to print a default `EditRecipe` **instance**
 contract: that is a JSON Schema **generated from the control registry**
 (`advisor::catalogue`, §3), and it deliberately excludes the engine-only fields
 the recipe carries for calibration (`base_curve`, `as_shot_k`/`as_shot_tint`,
-the lens-profile block) — an advisor must never emit those.
+the lens-profile block; the canvas's `camera_profile` and Look are not states
+the advisor emits either) — an advisor must never emit those.
 
 Local masks (`LocalAdjustment`, v0.22): base geometry (linear / rotatable
 radial / bitmap raster) + optional extra **shape components** composed in
@@ -2147,8 +2148,8 @@ lens-profile vignette → manual vignette → **dehaze in linear light**
 (before any tonal work, so the airlight estimate cannot move when Exposure is
 dragged) →
 tone LUT (exposure/contrast/whites/blacks/highlights/shadows, the parametric
-curve, the tone curve and the per-photo camera base curve composed into one
-table) → **the B&W treatment's grey mix** when the photo is black and white
+curve, the tone curve and the per-photo camera base curve — on a recipe that
+names no camera profile, v1.17.0 — composed into one table) → **the B&W treatment's grey mix** when the photo is black and white
 (before the channel curves, so a red-channel curve meets the grey the
 photographer mixed) → per-channel RGB
 curves → 8-band HSL and the **point colours**, both skipped in black and white,
@@ -2834,7 +2835,53 @@ packet (lens-matched, 1000 px, `rel1170/colour/accept3-*.out`): whole-frame ΔE
 not colour: a 0.19 % magnification difference in the lens-corrected geometry
 (undone, ΔE 1.98), the highlights above Lightroom's roll-off (L > 90 ΔL +2.7,
 the engine clips where Camera Raw compresses) and a shadow lift (L < 30 ΔL
-+1.2 to +1.6).
++1.2 to +1.6). The magnification is the lens correction's, not a scale factor:
+with the lens profile off the engine and Camera Raw agree to 1.00000, and with
+it on the difference is radial — +0.27 % near the centre falling to +0.09 % at
+0.85 of the half diagonal (3000 px, tile phase correlation,
+`rel1170/colour/mag/radial.py`), the shape a different placement of the
+distortion knots predicts (knot i at (i+1)/(n−1) instead of RawTherapee's
+(i+0.5)/(n−1) fits it to 0.04 %); the composite CA fill reads exactly 1. It
+is measured on one frame and not changed. The body's Adobe Standard profile
+carries no DefaultBlackRender tag (absent means Auto), so the SDK's render would subtract
+Shadows 5 × 0.001 = 0.005 black; the engine subtracts the sensor's 512 and no
+render black, and the 0.005 tried on p39 overshoots the shadows (ΔL −2 to
+−3.8), which is why the shadow lift above stays open.
+
+**The canvas starts where Lightroom starts (v1.17.0).** A fresh open stamps
+`camera_profile` 「Adobe Standard」 and the 「Adobe Color」 Look
+(`xmp::canvas_look`, `render::canvas_recipe`) and no camera base curve — the
+picture Lightroom shows a RAW it has never edited — whenever
+`render::canvas_renders` finds the body's Adobe Standard DCP and the Look's
+table in the Camera Raw install; otherwise, and for every non-RAW file, it
+keeps the camera-matched curve estimate (`render::camera_base_look`), said once
+in `diag.warn`. The decision is one function, `pipeline::fresh_canvas_start_with`
+(`CanvasStart`), and every fresh-recipe entry calls it: the GUI open worker,
+`serve`'s fresh open, the CLI (`produce_recipe`), the library and backup import
+(`stamp_import_start`), the lr_pack import and the batch export with no saved
+develop. Which start a recipe renders is the recipe's own decision
+(`EditRecipe::starting_curve`): a recipe that names a camera profile renders no
+camera curve, one that names none renders its stamped `base_curve` — so a
+develop saved before v1.17.0 renders byte-identically
+(`render::tests::an_old_recipe_with_a_stamped_base_curve_renders_as_it_did`).
+
+The profile stage runs inside the RAW develop, before the white balance, so
+the canvas's pixels must be developed under it: `render::BasePart` is the part
+of a recipe the RAW develop reads (the camera profile and the Look's table,
+not its baked curve, which the preview develop renders), and
+`render::base_develop` / `source_pixels_for` is the one base for every
+consumer — the GUI and web canvas (re-developed in the background when the
+recipe's part changes, `ensure_source_part`), the Before view, the heal /
+clone / denoise / stack / generative masters and the fill's card pixels, and
+the reverse fit's source (`pipeline::fit_source`, with `fit::solve` rebasing
+on a Look that bakes a curve). `PhotoCalibration` carries the profile and the
+Look. A baked file — a master, an embedded preview, a finished image — already
+carries its start, so `strip_baked_start` clears the curve, profile, Look and
+lens profile before it renders. On p39 at 1000 px against the engine's render
+of the all-zero sidecar naming Adobe Color: the export of the all-zero fresh
+recipe is byte-identical, the canvas reads ΔE76 0.354, a master 0.012, and the
+fit source at its 2048 edge 0.264 against the sidecar at the same edge
+(`render::tests::every_surface_shows_a_fresh_canvas_as_the_export_renders_it`).
 
 The invariant that keeps F7 from changing any existing picture is
 `Stage::build_for` returning `None` when a profile has no tables, no curve and
@@ -3854,7 +3901,7 @@ silently drops what you are looking at」 were both unrepresentable claims.
 | `Rendered` | yes | yes | the ordinary controls — **98 global, 24 local** (counted from the registry 2026-09-18; R25 added global `texture` and the manual CA pair `ca_r`/`ca_b`; per mask, the four point curves; v1.5.0 the Detail panel's eight shaping axes, the parametric curve's seven keys, the Calibration panel's seven, the B&W switch with its eight mixer bands, the Point Color swatch list, F6's Transform panel — seven sliders, its Upright mode and `crop_constrain_to_warp` — F7's `camera_profile`, which arrived by LEAVING `PassThrough` rather than by being invented, and F8's HDR edit mode with its headroom and the seven SDR-rendition controls) | — nothing to disclose |
 | `CarriedOnly` | no | yes | **1**: the mask `name`, a label rather than an operator — the one member that never had an engine stage to wait for. R25 ruled 24 globals into this tier under policy SF4-C; v1.5.0 rendered all of them, batch by batch (the eight Detail axes → `render/detail.rs`, the nine Effects → `render/finish.rs`, the auto-CA switch and the six de-fringe keys → `render/lens.rs`), so **`CARRIED_ONLY_GLOBAL` is now empty**. The list and its gates stay: emptiness is a measurement, and the next carried row discloses itself the day it is added | `xmp::global_render_gaps` → 「carried to Lightroom, not rendered here」, on the control and in the save line |
 | `PassThrough` | no | verbatim | **1 row, 6 keys**: `passthrough`, a `BTreeMap<String,String>` over the named `xmp::PASSTHROUGH_CRS` block — what is left is exactly Lightroom's own Upright SOLVER bookkeeping (`UprightVersion`, `UprightCenterMode`, `UprightCenterNormX/Y`, `UprightFocalMode`, `UprightFocalLength35mm`). (R25 counted 16, the seven `CameraCalibration*` keys included; Lightroom writes no such key, and its Calibration panel renders since v1.5.0. It counted 9 until v1.5.0 F6, when the eight `crs:Perspective*` keys became owned controls, and 7 until F7, when `CameraProfile` became one — the tier shrinking by itself twice, which is what its own note hoped for.) A NAMED key set, deliberately not 「everything unknown」: the merge's strip universe is a static list, so a free-form map would desynchronise from what is actually written. `unmodelled_global_crs` keeps naming the rest — that is the feature, not the omission | the Transform section's read-only tail: values shown, no slider offered, because a slider on something never interpreted would be a lie. The section's own sliders above it are a different matter — those keys render |
-| `RenderedNotExported` | yes | no | **8 global** in registry order: `upright_transform` (F6), `look` (F7), `base_curve`, `lens_profile`, `retouch` (F9), `pixel_layers` (v1.7.0), `lens_blur` (2026-10-13), `colour_field`; per mask `enabled`, `color_gains`. The first four are quiet on save (`catalogue::STAMPED_CALIBRATION`) — nothing the photographer can act on, and for the two Adobe ones the merge preserves the document's own copy anyway — while `retouch`, `pixel_layers`, `lens_blur` and `colour_field` say so out loud. `retouch` is the sharpest illustration of the split: a MERGE keeps the photographer's `crs:RetouchAreas` byte for byte (this writer does not own the element, so it never strips it), and a FRESH `recipe_to_xmp` emits nothing at all for it. The tier names the worse half, because that is the half a disclosure is for | `xmp::global_export_losses` + the mask loss list |
+| `RenderedNotExported` | yes | no | **7 global** in registry order: `upright_transform` (F6), `base_curve`, `lens_profile`, `retouch` (F9), `pixel_layers` (v1.7.0), `lens_blur` (2026-10-13), `colour_field`; per mask `enabled`, `color_gains`. F7's `look` left the tier in v1.17.0, when the writer began emitting `<crs:Look>` (it is `Rendered` now). The first three are quiet on save (`catalogue::STAMPED_CALIBRATION`) — nothing the photographer can act on, and for Adobe's Upright the merge preserves the document's own copy anyway — while `retouch`, `pixel_layers`, `lens_blur` and `colour_field` say so out loud. `retouch` is the sharpest illustration of the split: a MERGE keeps the photographer's `crs:RetouchAreas` byte for byte (this writer does not own the element, so it never strips it), and a FRESH `recipe_to_xmp` emits nothing at all for it. The tier names the worse half, because that is the half a disclosure is for | `xmp::global_export_losses` + the mask loss list |
 | `DerivedWriteOnly` | (yes) | no — only a derived value | `as_shot_k`/`as_shot_tint`, which reach the sidecar as `crs:Temperature`/`Tint` | — |
 
 `Control.tier` is `Option<Tier>`; `None` is not "unclassified" but "not a
@@ -4204,8 +4251,9 @@ sky they excluded; and the writer wrote the geometry's raw bit, so an Invert
 ticked on a brush or AI mask never reached the sidecar.
 
 **The source frame is one function** (R33 §A, v1.3.0):
-`pipeline::fit_source` — a neutral develop of the RAW at
-`FIT_SOURCE_EDGE = 2048` plus the per-photo calibration recipe — and both
+`pipeline::fit_source` — the base develop of the RAW at
+`FIT_SOURCE_EDGE = 2048` under its calibration's camera profile (a neutral
+develop until v1.17.0) plus the per-photo calibration recipe — and both
 entry points, `main.rs`'s `match` and the GUI's `start_fit` worker, call it.
 The CLI used to take the camera's embedded JPEG preview when one existed, and
 the two frames read differently enough to choose different solvers: on the
@@ -4217,7 +4265,7 @@ source-text test that neither entry may reach the frame another way and by a
 fixture test on the geometry.
 
 **The target's geometry is measured, and the pair lives in the sensor frame**
-(v1.16.0). `fit_source` is a neutral develop, which runs no geometry stage, while
+(v1.16.0). `fit_source` is a base develop, which runs no geometry stage, while
 five of the six calibration targets were exported from Lightroom with the lens
 profile on: every pixel pair was off by the distortion (top-centre 5 px, corners
 10 px at 1000 px), and the fit read the misalignment as content — cloud edges
@@ -6653,8 +6701,10 @@ post-stamp it used before put a camera curve under deltas solved
 without one).
 
 **The base look is estimated against the picture the camera drew**
-(2026-09-21). The three open paths — the GUI open worker,
-`pipeline::photo_base_knots*` and `serve`'s fresh open — enter through one
+(2026-09-21). Since v1.17.0 this estimate is the FALLBACK start, used where the
+Lightroom canvas cannot render (above); the open paths that reach it — the GUI
+open worker's estimate, `pipeline::photo_base_knots_checked_in` (the era repair
+and the jobs probe) and `serve`'s fresh open — enter through one
 function, `render::camera_base_look`, which pairs the neutral develop with the
 embedded rendition LIKE WITH LIKE before the CDF match: on the frame the
 rendition shows (until then only the pipeline's path did, so a GUI or web open
