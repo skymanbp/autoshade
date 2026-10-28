@@ -231,6 +231,19 @@
 > symbol, link and tier count the living documents name exists in the tree;
 > CI's `docs` job runs it on every push) — and a gate that exits non-zero
 > fails the battery like a lane.
+> Between the lanes and the script gates sits the round-trip gate
+> (`scripts/roundtrip_gate.py`, v1.17.0), the reverse fit's Lightroom metric
+> since it replaced the hand-exported reference-pair comparison: the release
+> CLI fits p36–p42 at 0.85, and the engine's render of each fitted recipe is
+> compared with Adobe Camera Raw's render of the sidecar the fit wrote
+> (Photoshop's plug-in, Lightroom's own engine, driven through COM by
+> `scripts/acr_render.ps1`) at the same long edge, lens-matched, plain and
+> with the engine's lens magnification undone. It fails the battery by name
+> when a number is worse than `scripts/roundtrip_gate_expected.json` by more
+> than its tolerance or a line that passed there fails; where Photoshop's COM
+> server is not registered (CI, macOS, Linux) it prints its skip line and the
+> battery goes on. The final look at the reference pairs before a tag reads
+> this gate's numbers next to the renders.
 > 1759 library + 26 CLI + 292 GUI + 2+2 contract tests are enumerated in the GUI
 > build; the library result is 1744 pass + 15 `#[ignore]`d forensic probes and
 > the GUI result is 288 pass + four ignored (an explicit scratch-recipe export

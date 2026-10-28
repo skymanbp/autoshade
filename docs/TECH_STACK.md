@@ -2350,6 +2350,36 @@ than the pre-call state; model weights remain outside the repository.
 - `scripts/check_docs.py` re-derives version, extension, camera, dependency,
   toolchain, and test-battery claims from the tree. A moved claim is a failure,
   not a silent skip.
+- The round-trip gate (`scripts/roundtrip_gate.py`, v1.17.0) is the reverse
+  fit's Lightroom metric. The release CLI fits p36–p42 at strength 0.85; each
+  fitted recipe is rendered by the engine and, from the Lightroom sidecar the
+  fit wrote, by Adobe Camera Raw (`scripts/acr_render.ps1`, Photoshop's
+  plug-in, which is Lightroom's engine) at the same long edge, and the two are
+  compared in CIE Lab at a 1000 px long edge — whole frame and in the sky,
+  neutral and warm bands of the Camera Raw render, as rendered and with the
+  engine's lens magnification undone (+0.01 to +0.19 % on p36–p41). Lines
+  per pair: whole-frame ΔE ≤ 3, each band within ±2 L and ±3 a*, b*; p42, the
+  night pair whose target was made in the app, also on its own lines
+  (`scripts/night_pair_measure.py`: ΔE ≤ 5.31 at 480 px, horizon ripple
+  ≤ 0.63, horizon a* not more than 2 below the target's). `release_battery.sh`
+  runs it after its lanes when Photoshop's COM server is registered and prints
+  one skip line otherwise. First run (2026-10-28), aligned whole-frame ΔE:
+  p36 7.08, p37 3.00, p38 10.11, p39 5.83, p40 7.30, p41 5.81, p42 14.15 —
+  p37 alone meets every line, and p42's engine render reads ΔE 15.18 / ripple
+  16.90 / horizon Δa* +4.95 against its target (Camera Raw's render of the
+  same sidecar 18.49 / 21.21 / +5.18). Those numbers and each line's verdict
+  are the gate's expected table (`scripts/roundtrip_gate_expected.json`); a
+  later run fails by name on a number worse than its entry by more than the
+  tolerance (ΔE 0.25, L and a*/b* 0.5) or on a line that passed then and does
+  not now. Where the misses come from, measured on the same sidecars with the
+  local corrections stripped: the global develop alone already differs by
+  whole-frame ΔE 6.21 (p36), 2.95 (p37), 10.29 (p38), 3.30 (p39), 8.59 (p40),
+  5.62 (p41) and 18.53 (p42); the per-channel point curves account for most of
+  p38's (10.30 → 4.35 without them; with only the curves and the white balance
+  on, Camera Raw moves the warm band's a* 33.8 where the engine moves it 8.1),
+  the white balance alone at the fits' strong moves leaves 3.4 (p36) to 7.6
+  (p40, p42), and the masks' engine-only parts (recolour gains, spatial tiles,
+  free masks, which the sidecar does not carry) the rest of p39's.
 - Loopback is a network boundary, not an excuse to trust every browser tab.
   Capability, Host/Origin, cache, and frame protections remain independently
   tested.
