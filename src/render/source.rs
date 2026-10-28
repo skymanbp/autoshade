@@ -330,7 +330,7 @@ pub fn render_to_image_in(
     }
 
     // --- white balance (target Kelvin/tint) in linear light -------------------
-    apply_recipe_wb(&mut data, recipe);
+    apply_recipe_wb_in(&mut data, recipe, working);
 
     // --- 「Remove Chromatic Aberration」 (v1.5.0): an INSTRUCTION, so
     // rendering it means running the solver it names and handing the answer to

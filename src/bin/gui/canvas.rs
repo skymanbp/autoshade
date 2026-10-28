@@ -919,9 +919,9 @@ impl AutoShadeApp {
     }
 
     /// WB eyedropper: click a pixel that SHOULD be neutral and the engine's
-    /// inverse solver (`render::solve_wb_from_neutral` — the same forward
-    /// model the render applies, anchored at this photo's stamped as-shot
-    /// Kelvin, or the legacy 5500 K) turns it into Temp + Tint.
+    /// inverse solver (`render::solve_wb_for` — the same forward model the
+    /// render applies to this recipe, anchored at this photo's stamped
+    /// as-shot white, or the legacy 5500 K) turns it into Temp + Tint.
     /// Samples a 5×5 mean of the BASE plate (`base_preview` — the active
     /// card's own pixel source: the source neutral, or a baked master): WB
     /// runs before develop, so the solve must see pre-develop pixels, not
@@ -947,10 +947,7 @@ impl AutoShadeApp {
             let Some(px) = sample_5x5_mean(base, nx, ny) else { return };
             px
         };
-        let (k, tint) = autoshade::render::solve_wb_from_neutral(
-            px,
-            self.recipe.as_shot_k.unwrap_or(5500.0),
-        );
+        let (k, tint) = autoshade::render::solve_wb_for(px, &self.recipe);
         self.recipe.temperature_k = Some(k);
         self.recipe.tint = tint;
         self.wb_picking = false;

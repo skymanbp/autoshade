@@ -108,7 +108,7 @@ pub(crate) fn exposure_ramp(t: f32) -> f32 {
 
 /// [`exposure_ramp`]'s inverse on `[0, 1]`. A ramped 0 answers 0: whatever
 /// sat at or under the black stays black under the sliders.
-fn ramp_inverse(r: f32) -> f32 {
+pub(crate) fn ramp_inverse(r: f32) -> f32 {
     if r <= 0.0 {
         return 0.0;
     }

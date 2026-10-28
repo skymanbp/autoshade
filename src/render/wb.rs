@@ -161,10 +161,117 @@ fn apply_wb(data: &mut [[f32; 3]], as_shot_k: f32, target_k: f32, tint: f32) {
 /// applies on its own, matching the recipe contract (tint 0 = neutral) and
 /// what the GUI slider promises.
 pub(super) fn apply_recipe_wb(data: &mut [[f32; 3]], r: &EditRecipe) {
+    apply_recipe_wb_in(data, r, ExportColorSpace::Srgb);
+}
+
+/// [`apply_recipe_wb`] on a buffer in the working space `space` — the RAW
+/// render's, whose primaries a recipe on Camera Raw's law is undone from.
+pub(super) fn apply_recipe_wb_in(data: &mut [[f32; 3]], r: &EditRecipe, space: ExportColorSpace) {
     if r.temperature_k.is_some() || r.tint != 0.0 {
         let anchor = r.as_shot_k.unwrap_or(5500.0);
+        if SliderLaw::of(r) == SliderLaw::CameraRaw {
+            let target = (r.temperature_k.unwrap_or(anchor), r.tint);
+            let m = camera_raw_wb(target, (anchor, r.as_shot_tint.unwrap_or(0.0)));
+            apply_camera_raw_wb(data, &m, &profile::UnderTone::new(space));
+            return;
+        }
         apply_wb(data, anchor, r.temperature_k.unwrap_or(anchor), r.tint);
     }
+}
+
+/// Camera Raw's white balance (v1.17.0, measured): the frame is adapted from
+/// the white its Temperature and Tint name to the as-shot white it was
+/// rendered at — the DNG SDK's chromaticity of a temperature and tint
+/// ([`profile::temp_tint_to_xy`]) and its Bradford adaptation
+/// ([`profile::white_shift`]) — on the light the white balance acts on in
+/// Camera Raw: before the exposure ramp and the curve, which the profile
+/// stage had already put on the frame and [`profile::UnderTone`] undoes and
+/// redoes around the shift.
+///
+/// Measured on p39 (Temperature 4000 / 5000 / 7500 / 10000 K and Tint ±30
+/// from its as-shot 5400 K / +14, 1000 px, lens-matched): Camera Raw moves
+/// the white a little MORE than the slider's own mired distance
+/// ([`WB_MIRED_SCALE`]), the tint by its own ([`WB_TINT_SCALE`]), adds green
+/// as it cools and magenta as it warms
+/// ([`WB_TINT_PER_MIRED`]) and darkens as it cools ([`WB_EV_PER_MIRED`]) —
+/// what its profile's temperature-weighted matrices and tables do that one
+/// adaptation does not. The four constants are fitted with the engine in the
+/// loop (Nelder–Mead on the band errors of the six renders, the frame's
+/// as-shot white held at Lightroom's 5400 K / +14).
+///
+/// `target` and `as_shot` are (Kelvin, tint) in Camera Raw's units; the
+/// matrix acts on the profile stage's linear reference RGB.
+pub(super) fn camera_raw_wb(target: (f32, f32), as_shot: (f32, f32)) -> [[f32; 3]; 3] {
+    let m0 = 1e6 / f64::from(as_shot.0);
+    let m1 = (m0 + WB_MIRED_SCALE * (1e6 / f64::from(target.0) - m0)).clamp(1e6 / 40000.0, 1e6 / 2000.0);
+    let shift = m1 - m0;
+    let t0 = f64::from(as_shot.1);
+    let tint = t0 + WB_TINT_SCALE * (f64::from(target.1) - t0) + WB_TINT_PER_MIRED * shift;
+    let from = profile::temp_tint_to_xy(1e6 / m1, tint);
+    let to = profile::temp_tint_to_xy(f64::from(as_shot.0), t0);
+    let k = (-(WB_EV_PER_MIRED * shift / 100.0) as f32).exp2();
+    profile::white_shift(from, to).map(|row| row.map(|v| v * k))
+}
+
+/// Camera Raw's mired distance per mired the Temperature slider asks for.
+const WB_MIRED_SCALE: f64 = 1.042;
+/// …its tint per tint unit the Tint slider asks for.
+const WB_TINT_SCALE: f64 = 0.999;
+/// …the tint it adds per mired of cooling (green; warming adds magenta).
+const WB_TINT_PER_MIRED: f64 = -0.078;
+/// …and the exposure it takes per 100 mired of cooling, in EV.
+const WB_EV_PER_MIRED: f64 = 0.099;
+
+/// [`camera_raw_wb`]'s matrix on every pixel, under the profile stage's tone.
+fn apply_camera_raw_wb(data: &mut [[f32; 3]], m: &[[f32; 3]; 3], under: &profile::UnderTone) {
+    let (dec, enc) = transfer_luts();
+    data.par_iter_mut().for_each(|px| {
+        let lin = px.map(|v| sample_lut(dec, v));
+        let out = under.redo(mat_vec3(m, &under.undo(lin)));
+        *px = out.map(|v| sample_lut(enc, v.clamp(0.0, 1.0)));
+    });
+}
+
+/// The eyedropper's solve for `r`: the (Temperature, Tint) that renders the
+/// base-plate pixel `px` neutral under the law `r` renders by —
+/// [`solve_wb_from_neutral`] on the engine's, a search of [`camera_raw_wb`]
+/// on Camera Raw's (Tint then in Camera Raw's absolute units).
+pub fn solve_wb_for(px: [f32; 3], r: &EditRecipe) -> (f32, f32) {
+    let anchor = r.as_shot_k.unwrap_or(5500.0);
+    if SliderLaw::of(r) != SliderLaw::CameraRaw {
+        return solve_wb_from_neutral(px, anchor);
+    }
+    let as_shot = (anchor, r.as_shot_tint.unwrap_or(0.0));
+    let l = profile::UnderTone::new(ExportColorSpace::Srgb).undo(px.map(srgb_to_linear)).map(|v| v.max(1e-5));
+    // Off-neutral of the shifted pixel (white is equal channels in the
+    // reference RGB): its chroma over its level.
+    let miss = |k: f32, t: f32| {
+        let o = mat_vec3(&camera_raw_wb((k, t), as_shot), &l);
+        let g = o[1].max(1e-6);
+        ((o[0] - g) / g).powi(2) + ((o[2] - g) / g).powi(2)
+    };
+    // A coarse grid over the legal range (mired, tint), then two finer grids
+    // around the best point.
+    let (lo, hi) = (1e6 / 40000.0f32, 1e6 / 2000.0f32);
+    let (mut mired, mut tint) = (0.5 * (lo + hi), 0.0f32);
+    let (mut span_m, mut span_t) = (0.5 * (hi - lo), 100.0f32);
+    for _ in 0..3 {
+        let mut best = (f32::INFINITY, mired, tint);
+        for i in 0..=40 {
+            let mm = (mired + span_m * (i as f32 / 20.0 - 1.0)).clamp(lo, hi);
+            for j in 0..=40 {
+                let tt = (tint + span_t * (j as f32 / 20.0 - 1.0)).clamp(-100.0, 100.0);
+                let e = miss(1e6 / mm, tt);
+                if e < best.0 {
+                    best = (e, mm, tt);
+                }
+            }
+        }
+        (mired, tint) = (best.1, best.2);
+        span_m /= 10.0;
+        span_t /= 10.0;
+    }
+    ((1e6 / mired).round(), tint)
 }
 
 /// Inverse white balance — the WB eyedropper's solver. Given an sRGB pixel the

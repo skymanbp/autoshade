@@ -565,3 +565,65 @@ fn a_creative_table_replaces_the_profiles_look_table() {
         assert!((px[c] - want[c]).abs() < 1e-4, "the creative identity table must win: {px:?}");
     }
 }
+
+/// The DNG SDK's chromaticity of a temperature and tint (`Get_xy_coord`) is
+/// the inverse of its temperature of a chromaticity (`Set_xy_coord`) along
+/// the blackbody locus, and a tint moves the point ALONG the isotherm — the
+/// temperature read back stays the one asked for, while the point moves.
+///
+/// MUTATION: interpolate the table rows the wrong way round, or move the tint
+/// across the isotherm instead of along it.
+#[test]
+fn a_temperature_and_tint_name_a_white_on_its_isotherm() {
+    for k in [2500.0, 3800.0, 5400.0, 6504.0, 9000.0, 20000.0] {
+        let on = temp_tint_to_xy(k, 0.0);
+        assert!((xy_to_kelvin(on) - k).abs() < k * 2e-4, "{k} K reads back {}", xy_to_kelvin(on));
+        for t in [-30.0, 30.0] {
+            let off = temp_tint_to_xy(k, t);
+            assert!((xy_to_kelvin(off) - k).abs() < k * 2e-4, "{k} K tint {t} reads back {}", xy_to_kelvin(off));
+            assert!((off[0] - on[0]).abs() + (off[1] - on[1]).abs() > 5e-3, "tint {t} moves the white");
+        }
+    }
+    // A positive tint names a GREENER white (higher y at daylight) — so the
+    // frame balanced for it renders magenta, Camera Raw's positive tint.
+    assert!(temp_tint_to_xy(5400.0, 30.0)[1] > temp_tint_to_xy(5400.0, 0.0)[1]);
+}
+
+/// The white shift between one white and itself is the identity, and between
+/// two whites it keeps the working white's luminance.
+///
+/// MUTATION: drop the luminance scale, or conjugate the adaptation with the
+/// working primaries instead of the reference ones.
+#[test]
+fn the_white_shift_keeps_white_luminance_and_is_identity_on_one_white() {
+    let w = temp_tint_to_xy(5400.0, 14.0);
+    let id = white_shift(w, w);
+    for (i, row) in id.iter().enumerate() {
+        for (j, v) in row.iter().enumerate() {
+            assert!((v - if i == j { 1.0 } else { 0.0 }).abs() < 1e-5, "{id:?}");
+        }
+    }
+    let m = white_shift(temp_tint_to_xy(4000.0, 14.0), w);
+    let xyz = rgb_to_xyz64(PROPHOTO_PRIM, D65_XY64);
+    let white = vec64(&xyz, vec64(&mat3_f64(&m), [1.0; 3]));
+    assert!((white[1] - 1.0).abs() < 1e-5, "luminance {}", white[1]);
+    // White balanced for a warmer light than the as-shot one: the frame cools.
+    let o = super::super::mat_vec3(&m, &[0.5; 3]);
+    assert!(o[2] > o[0] + 0.02, "{o:?}");
+}
+
+/// Under the stage's tone the undo and the redo are inverses for a colour the
+/// stage could have produced, so a shift that does nothing changes nothing.
+///
+/// MUTATION: undo the curve per channel (it does not invert `adobe_tone` on
+/// a colour), or leave the ramp out of one side.
+#[test]
+fn under_the_stage_tone_undo_and_redo_are_inverses() {
+    let under = UnderTone::new(super::super::ExportColorSpace::Srgb);
+    for px in [[0.05f32, 0.05, 0.05], [0.4, 0.2, 0.1], [0.1, 0.3, 0.6], [0.8, 0.75, 0.7], [0.02, 0.01, 0.03]] {
+        let back = under.redo(under.undo(px));
+        for c in 0..3 {
+            assert!((back[c] - px[c]).abs() < 2e-3, "{px:?} -> {back:?}");
+        }
+    }
+}

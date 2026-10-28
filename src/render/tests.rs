@@ -20,3 +20,4 @@ include!("tests/ai_masks_and_cfa.rs");
 include!("tests/pixel_layers.rs");
 include!("tests/lens_blur.rs");
 include!("tests/canvas_start.rs");
+include!("tests/camera_raw_wb.rs");

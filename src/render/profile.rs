@@ -348,44 +348,135 @@ fn map_white(from: [f64; 2], to: [f64; 2]) -> [[f64; 3]; 3] {
     mul64(&inv, &mul64(&a, &MB))
 }
 
+/// Robertson's isotherms, `dng_temperature`'s table (Wyszecki & Stiles,
+/// *Color Science*, 2nd ed., p. 228: reciprocal megakelvin, u, v, isotherm
+/// slope).
+#[allow(clippy::excessive_precision)]
+const ROBERTSON: [[f64; 4]; 31] = [
+    [0.0, 0.18006, 0.26352, -0.24341],
+    [10.0, 0.18066, 0.26589, -0.25479],
+    [20.0, 0.18133, 0.26846, -0.26876],
+    [30.0, 0.18208, 0.27119, -0.28539],
+    [40.0, 0.18293, 0.27407, -0.30470],
+    [50.0, 0.18388, 0.27709, -0.32675],
+    [60.0, 0.18494, 0.28021, -0.35156],
+    [70.0, 0.18611, 0.28342, -0.37915],
+    [80.0, 0.18740, 0.28668, -0.40955],
+    [90.0, 0.18880, 0.28997, -0.44278],
+    [100.0, 0.19032, 0.29326, -0.47888],
+    [125.0, 0.19462, 0.30141, -0.58204],
+    [150.0, 0.19962, 0.30921, -0.70471],
+    [175.0, 0.20525, 0.31647, -0.84901],
+    [200.0, 0.21142, 0.32312, -1.0182],
+    [225.0, 0.21807, 0.32909, -1.2168],
+    [250.0, 0.22511, 0.33439, -1.4512],
+    [275.0, 0.23247, 0.33904, -1.7298],
+    [300.0, 0.24010, 0.34308, -2.0637],
+    [325.0, 0.24702, 0.34655, -2.4681],
+    [350.0, 0.25591, 0.34951, -2.9641],
+    [375.0, 0.26400, 0.35200, -3.5814],
+    [400.0, 0.27218, 0.35407, -4.3633],
+    [425.0, 0.28039, 0.35577, -5.3762],
+    [450.0, 0.28863, 0.35714, -6.7262],
+    [475.0, 0.29685, 0.35823, -8.5955],
+    [500.0, 0.30505, 0.35907, -11.324],
+    [525.0, 0.31320, 0.35968, -15.628],
+    [550.0, 0.32129, 0.36011, -23.325],
+    [575.0, 0.32931, 0.36038, -40.770],
+    [600.0, 0.33724, 0.36051, -116.45],
+];
+
+/// The chromaticity of a temperature and tint, `dng_temperature::Get_xy_coord`
+/// — the white Camera Raw's Temperature and Tint name: the blackbody point at
+/// the temperature, moved along its isotherm by the tint (`kTintScale`, −3000
+/// tint units per unit of uv).
+pub(crate) fn temp_tint_to_xy(kelvin: f64, tint: f64) -> [f64; 2] {
+    let r = 1.0e6 / kelvin;
+    let offset = tint / -3000.0;
+    let unit = |s: f64| {
+        let len = (1.0 + s * s).sqrt();
+        (1.0 / len, s / len)
+    };
+    let mut i = 0;
+    while i < ROBERTSON.len() - 2 && r >= ROBERTSON[i + 1][0] {
+        i += 1;
+    }
+    let (a, b) = (ROBERTSON[i], ROBERTSON[i + 1]);
+    let f = (b[0] - r) / (b[0] - a[0]);
+    let (u, v) = (a[1] * f + b[1] * (1.0 - f), a[2] * f + b[2] * (1.0 - f));
+    let ((u1, v1), (u2, v2)) = (unit(a[3]), unit(b[3]));
+    let (du, dv) = (u1 * f + u2 * (1.0 - f), v1 * f + v2 * (1.0 - f));
+    let len = (du * du + dv * dv).sqrt();
+    let (u, v) = (u + du / len * offset, v + dv / len * offset);
+    [1.5 * u / (u - 4.0 * v + 2.0), v / (u - 4.0 * v + 2.0)]
+}
+
+/// The SDK's Bradford adaptation [`map_white`] from white `from` to white
+/// `to` as a matrix on the stage's linear reference RGB (ProPhoto's primaries
+/// at the working white, [`UnderTone`]), scaled so the working white keeps
+/// its luminance.
+pub(crate) fn white_shift(from: [f64; 2], to: [f64; 2]) -> [[f32; 3]; 3] {
+    let m = rgb_to_xyz64(PROPHOTO_PRIM, D65_XY64);
+    let inv = inv64(&m).unwrap_or(m);
+    let shift = mul64(&inv, &mul64(&map_white(from, to), &m));
+    let y = vec64(&m, vec64(&shift, [1.0; 3]))[1];
+    mat3_f32(&shift.map(|row| row.map(|v| v / y.max(1e-9))))
+}
+
+/// The profile stage's last two steps — its exposure ramp and Adobe's
+/// default curve put on as [`adobe_tone`] puts them — undone and redone around
+/// a map of the light they acted on, in the stage's own reference RGB: what a
+/// Camera Raw adjustment that acts before the curve (its white balance) needs
+/// on a frame the stage has already rendered. [`adobe_tone`] is exactly
+/// invertible (the brightest and darkest channels through the curve, the
+/// middle one at its relative place between them); the ramp is
+/// [`super::exposure_ramp`] and its inverse. The look table between them is
+/// not undone.
+pub(crate) struct UnderTone {
+    to_ref: [[f32; 3]; 3],
+    from_ref: [[f32; 3]; 3],
+    inverse: Vec<f32>,
+}
+
+impl UnderTone {
+    /// For a frame in the linear working space `space`.
+    pub(crate) fn new(space: super::ExportColorSpace) -> Self {
+        let space_to_xyz = super::rgb_to_xyz(super::space_primaries(space), super::D65_XY);
+        let ref_to_xyz = super::rgb_to_xyz(PROPHOTO_PRIM, super::D65_XY);
+        let to_ref = super::mat_mul3(&super::inv3(&ref_to_xyz), &space_to_xyz);
+        let curve = &acr3_default::ACR3_DEFAULT;
+        // The curve's inverse on the same grid, by its monotone samples.
+        let n = curve.len();
+        let inverse = (0..TONE_LUT)
+            .map(|i| {
+                let y = i as f32 / (TONE_LUT - 1) as f32;
+                let j = curve.partition_point(|&c| c < y).clamp(1, n - 1);
+                let (a, b) = (curve[j - 1], curve[j]);
+                let f = if b > a { ((y - a) / (b - a)).clamp(0.0, 1.0) } else { 0.0 };
+                (j as f32 - 1.0 + f) / (n - 1) as f32
+            })
+            .collect();
+        UnderTone { to_ref, from_ref: super::inv3(&to_ref), inverse }
+    }
+
+    /// Linear working RGB → the stage's light before its ramp and curve.
+    pub(crate) fn undo(&self, lin: [f32; 3]) -> [f32; 3] {
+        let r = super::mat_vec3(&self.to_ref, &lin).map(|c| c.clamp(0.0, 1.0));
+        adobe_tone(r, &self.inverse).map(super::tone_cr::ramp_inverse)
+    }
+
+    /// [`UnderTone::undo`]'s inverse: back through the ramp and the curve to
+    /// linear working RGB.
+    pub(crate) fn redo(&self, light: [f32; 3]) -> [f32; 3] {
+        let r = light.map(|c| super::exposure_ramp(c.max(0.0)));
+        super::mat_vec3(&self.from_ref, &adobe_tone(r, &acr3_default::ACR3_DEFAULT))
+    }
+}
+
 /// Correlated colour temperature of a chromaticity by Robertson's method —
-/// `dng_temperature::Set_xy_coord`, with its table (Wyszecki & Stiles, *Color
-/// Science*, 2nd ed., p. 228: reciprocal megakelvin, u, v, isotherm slope).
+/// `dng_temperature::Set_xy_coord`.
 fn xy_to_kelvin(xy: [f64; 2]) -> f64 {
-    #[allow(clippy::excessive_precision)]
-    const TABLE: [[f64; 4]; 31] = [
-        [0.0, 0.18006, 0.26352, -0.24341],
-        [10.0, 0.18066, 0.26589, -0.25479],
-        [20.0, 0.18133, 0.26846, -0.26876],
-        [30.0, 0.18208, 0.27119, -0.28539],
-        [40.0, 0.18293, 0.27407, -0.30470],
-        [50.0, 0.18388, 0.27709, -0.32675],
-        [60.0, 0.18494, 0.28021, -0.35156],
-        [70.0, 0.18611, 0.28342, -0.37915],
-        [80.0, 0.18740, 0.28668, -0.40955],
-        [90.0, 0.18880, 0.28997, -0.44278],
-        [100.0, 0.19032, 0.29326, -0.47888],
-        [125.0, 0.19462, 0.30141, -0.58204],
-        [150.0, 0.19962, 0.30921, -0.70471],
-        [175.0, 0.20525, 0.31647, -0.84901],
-        [200.0, 0.21142, 0.32312, -1.0182],
-        [225.0, 0.21807, 0.32909, -1.2168],
-        [250.0, 0.22511, 0.33439, -1.4512],
-        [275.0, 0.23247, 0.33904, -1.7298],
-        [300.0, 0.24010, 0.34308, -2.0637],
-        [325.0, 0.24702, 0.34655, -2.4681],
-        [350.0, 0.25591, 0.34951, -2.9641],
-        [375.0, 0.26400, 0.35200, -3.5814],
-        [400.0, 0.27218, 0.35407, -4.3633],
-        [425.0, 0.28039, 0.35577, -5.3762],
-        [450.0, 0.28863, 0.35714, -6.7262],
-        [475.0, 0.29685, 0.35823, -8.5955],
-        [500.0, 0.30505, 0.35907, -11.324],
-        [525.0, 0.31320, 0.35968, -15.628],
-        [550.0, 0.32129, 0.36011, -23.325],
-        [575.0, 0.32931, 0.36038, -40.770],
-        [600.0, 0.33724, 0.36051, -116.45],
-    ];
+    const TABLE: [[f64; 4]; 31] = ROBERTSON;
     let den = 1.5 - xy[0] + 6.0 * xy[1];
     let (u, v) = (2.0 * xy[0] / den, 3.0 * xy[1] / den);
     let mut last_dt = 0.0;

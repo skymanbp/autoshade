@@ -1239,6 +1239,12 @@ fn read_recipe_at(recipe_path: &Path, raw: &Path) -> Result<EditRecipe> {
         // rendered here in the uncorrected frame while the app and Lightroom
         // rendered it corrected: one sidecar, two geometries.
         r.lens_profile = pipeline::fresh_lens_profile_for_sidecar(raw, Some(&text));
+        // …and its as-shot white, the app's import stamp too: a sidecar's
+        // Temperature and Tint are moves from it, and without it this render
+        // moved them from the legacy 5500 K anchor instead.
+        if r.as_shot_k.is_none() {
+            (r.as_shot_k, r.as_shot_tint) = pipeline::fresh_as_shot_wb(raw);
+        }
         return Ok(r);
     }
     serde_json::from_str(&text).with_context(|| format!("parse recipe {}", recipe_path.display()))
