@@ -817,11 +817,23 @@ fn linear_off_path_rendered_boundary_stays_straight_instead_of_h1_bowing() {
     );
 }
 
+/// A radial follows the photograph whatever the sidecar said about
+/// Lightroom's correction: its centre is a point ON the picture (v1.17.0,
+/// Camera Raw: off-centre ellipses move exactly as the content moves there),
+/// so when a downstream geometry does run on a disabled-sidecar profile —
+/// a state the pipeline no longer builds, since `obey_disabled_profile_switch`
+/// turns the components off, but a profile can still be handed in — the
+/// effect lands where that geometry carries its stored centre, and the
+/// retained LINEAR map plays no part. (It used to sit at the stored
+/// coordinates through the empty `mask_warp`, off its own content.)
+///
+/// MUTATION THIS KILLS: route the radial through `linear_handle_warp`, or
+/// back to the stored point on a disabled-sidecar profile.
 #[test]
-fn radial_with_disabled_profile_and_retained_linear_map_stays_at_stored_coordinates() {
+fn radial_with_disabled_profile_and_retained_linear_map_follows_the_photograph() {
     let (_, disabled) = d2_disabled_linear_profile(true);
     assert!(disabled.geometry_active(), "premise: downstream geometry is active");
-    assert!(disabled.mask_warp.is_empty(), "disabled RADIAL path must be identity");
+    assert!(disabled.mask_warp.is_empty(), "the disabled RADIAL spline stays empty");
     assert!(!disabled.linear_handle_warp.is_empty(), "premise: LINEAR map was retained");
 
     let (w, h) = (1920u32, 1280u32);
@@ -834,9 +846,12 @@ fn radial_with_disabled_profile_and_retained_linear_map_stays_at_stored_coordina
     };
     let rendered = apply_lens_geometry(&develop_preview(&base, &recipe), &disabled, 0.0);
     let got = effect_centroid(&rendered);
-    let expected = (cx as f64 * w as f64, cy as f64 * h as f64);
+    let landed = lens_ungeom_norm(cx, cy, (w as f32, h as f32), &disabled, 0.0);
+    let expected = (landed.0 as f64 * w as f64 - 0.5, landed.1 as f64 * h as f64 - 0.5);
+    let moved = (expected.0 - (cx as f64 * w as f64 - 0.5)).hypot(expected.1 - (cy as f64 * h as f64 - 0.5));
     let error = (got.0 - expected.0).hypot(got.1 - expected.1);
-    assert!(error < 1.0, "disabled RADIAL moved {error:.3}px: {got:?} vs {expected:?}");
+    assert!(moved > 2.0, "premise: the geometry moves this centre ({moved:.3}px)");
+    assert!(error < 1.0, "disabled RADIAL off its content by {error:.3}px: {got:?} vs {expected:?}");
 }
 
 #[test]
@@ -974,8 +989,19 @@ fn mask_warp_uses_the_full_raw_centre_in_stored_coordinates() {
     assert_eq!(lr_mask_warp_norm(0.5, 0.5, MASK_WARP_DIMS, &legacy), (0.5, 0.5));
 }
 
+/// RADIAL's sample on an active geometry is the engine map less the
+/// displacement the same map gives the stored centre: a translation of the
+/// ellipse, its radii in the corrected frame, its centre carried with the
+/// photograph (v1.17.0, measured against Camera Raw). A profile whose
+/// Lightroom mask-warp spline differs from its render map is the case that
+/// tells the two transports apart.
+///
+/// MUTATION: sample through the Lightroom inverse pointwise again (the
+/// ellipse dilates by the local magnification), move the centre by the
+/// mask-warp spline, or drop the centre's displacement (off-centre
+/// ellipses stop following the lens).
 #[test]
-fn mask_frame_composes_the_engine_map_with_the_lr_inverse_exactly_once() {
+fn mask_frame_translates_a_radial_by_its_centres_engine_displacement() {
     let profile = crate::recipe::LensProfile {
         distortion: (0..16).map(|i| 1.0 - 0.12 * (i as f32 / 15.0).powi(2)).collect(),
         distortion_on: true,
@@ -990,13 +1016,22 @@ fn mask_frame_composes_the_engine_map_with_the_lr_inverse_exactly_once() {
         ..Default::default()
     };
     let dims = MASK_WARP_DIMS;
-    let u = MaskUnwarp::new(&profile, 0.0, dims).expect("both maps are active");
+    let u = MaskUnwarp::new(&profile, 0.0, dims).expect("the engine map is active");
+    let centre = (0.08f32, 0.12f32);
+    let landed = lens_ungeom_norm(centre.0, centre.1, dims, &profile, 0.0);
+    assert!((landed.0 - centre.0).abs() > 1e-3, "premise: the map moves this centre");
+    let spline = lr_mask_warp_norm(centre.0, centre.1, dims, &profile);
+    assert!((spline.0 - landed.0).abs() > 1e-3, "premise: the mask-warp spline would move it elsewhere");
     for (nx, ny) in [(0.15, 0.2), (0.5, 0.5), (0.82, 0.74)] {
         let engine = lens_ungeom_norm(nx, ny, dims, &profile, 0.0);
-        let expected = lr_mask_unwarp_norm(engine.0, engine.1, dims, &profile);
-        let got = u.at(nx, ny);
-        assert!((got.0 - expected.0).abs() < 2e-5 && (got.1 - expected.1).abs() < 2e-5);
+        let expected = (engine.0 - (landed.0 - centre.0), engine.1 - (landed.1 - centre.1));
+        let got = u.radial_at(nx, ny, centre.0, centre.1);
+        assert!((got.0 - expected.0).abs() < 2e-4 && (got.1 - expected.1).abs() < 2e-4, "{got:?} vs {expected:?}");
     }
+    // The centre itself samples the stored centre: the ellipse is not moved
+    // off its own content.
+    let at_centre = u.radial_at(centre.0, centre.1, centre.0, centre.1);
+    assert!((at_centre.0 - centre.0).abs() < 1e-6 && (at_centre.1 - centre.1).abs() < 1e-6);
 }
 
 /// ACCEPTANCE ⑤. With no solved warp the map is the IDENTITY — bit-for-bit,
@@ -1079,40 +1114,32 @@ fn effect_centroid(img: &DynamicImage) -> (f64, f64) {
 }
 
 
-/// ACCEPTANCE ⑥, REWRITTEN by the 2026-08-20 user ruling — the
-/// PARAMETRIC-LANDS-ON-STORED-COORDINATES property.
+/// ACCEPTANCE ⑥, REWRITTEN twice — the 2026-08-20 user ruling, then
+/// v1.17.0 against Camera Raw: a radial under an active geometry stage
+/// FOLLOWS THE PHOTOGRAPH at its STORED SIZE.
 ///
 /// # What this replaces, and why
 ///
-/// Its predecessor pinned the opposite: that a radial's rendered weight is
-/// computed at its stored coordinates in the PRE-geometry frame and never
-/// touched. That was the shipped behaviour and it was wrong, because this
-/// engine then resampled the whole frame and carried the mask with it —
-/// while Lightroom does not move a parametric shape at all. The `D`
-/// adjudication measured the gap on the 105 mm pair: the PIXELS move
-/// +87.5 px at r ≈ 3250 (the `.lcp` model at 2.69 px rms, 30 NCC points,
-/// tangential rms 1.22 px) while the radial mask measures a similarity of
-/// 0.99956 — the identity to 0.05 %, and **88.7 px away from the pixel
-/// field** (rms; 89.56 px max). That 88.7 px now supports THIS direction.
-///
-/// # The property, end to end
-///
-/// A radial at a known stored centre, developed and then resampled through
-/// an active geometry stage — the real composition, `develop_preview` then
-/// `apply_lens_geometry`, which is the same order `render_to_file` runs —
-/// must put its darkened region back on the STORED centre.
-///
-/// The control in the same test provenances the tolerance: the identical
-/// chain with [`MaskFrame::AsRendered`] (i.e. the behaviour before this
-/// wiring) displaces the effect by the field, and that displacement is
-/// asserted to be an order larger than the tolerance — so a passing test
-/// cannot be a test of nothing.
+/// The 2026-08 version pinned the radial's effect on its STORED centre in
+/// the output, from the `D` adjudication's reading that Lightroom does not
+/// move a parametric shape. Camera Raw, rendering feather-0 ellipses with
+/// the lens correction on and off on four frames (24–105 mm at 45 / 73 /
+/// 105 mm, 14–24 mm at 20 mm), moves an off-centre ellipse's centre exactly
+/// as the frame's own content moves there (0.0286 / 0.0298 of the centre's
+/// offset against the content's 0.029) and keeps its radii at the stored
+/// size (a centred ellipse's edge at 1.0025–1.0055, not the 1.045 a
+/// pointwise transport gives). So the wired chain lands the effect where
+/// the engine's own map carries the stored centre, at the stored area,
+/// while the pointwise control ([`MaskFrame::AsRendered`], the mask drawn
+/// in the sensor frame and warped with it) lands on the same centre but
+/// with its area scaled by the local magnification.
 ///
 /// MUTATION THIS KILLS: dropping or retargeting the explicit RADIAL/LINEAR
-/// arms in `mask_weight_in` so RADIAL no longer uses `MaskUnwarp::at` or
-/// LINEAR no longer uses `MaskUnwarp::engine_at`.
+/// arms in `mask_weight_in` so RADIAL no longer uses `MaskUnwarp::radial_at`
+/// or LINEAR no longer uses `MaskUnwarp::engine_at`; dropping the centre's
+/// displacement in `radial_at` (the effect sits on the stored centre).
 #[test]
-fn a_parametric_mask_lands_on_its_stored_coordinates_under_lens_geometry() {
+fn a_parametric_radial_follows_the_photograph_at_its_stored_size_under_lens_geometry() {
     let (w, h) = (960u32, 640u32);
     let base = DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, image::Rgb([128, 128, 128])));
     // A stronger barrel than `barrel_profile`, so the field is many pixels
@@ -1122,73 +1149,76 @@ fn a_parametric_mask_lands_on_its_stored_coordinates_under_lens_geometry() {
         distortion_on: true,
         ..Default::default()
     };
-    // TWO placements at different radii. The frame centre is a fixed point
-    // of every radial map, so one off-centre mask could pass by accident of
-    // where it sat; two at different radii cannot.
-    //
-    // MEASURED on this fixture (the numbers the tolerances below come from,
-    // scanned over frame size x barrel strength x placement):
-    //
-    //   | stored cx | wired error | UNWIRED drift |
-    //   |-----------|-------------|---------------|
-    //   | 0.10      | 0.30 px     | 23.84 px      |
-    //   | 0.32      | 0.09 px     |  8.39 px      |
-    //
-    // The sub-pixel residue is resampling, not geometry: the effect is a
-    // filled disc whose centroid is recovered from 8-bit thresholded
-    // pixels, and the bilinear resample softens its rim.
-    for (cx, min_drift) in [(0.10f32, 15.0f64), (0.32f32, 5.0f64)] {
-        let cy = 0.5f32;
+    let darkened = |img: &DynamicImage| img.to_rgb8().pixels().filter(|p| p.0[1] < 90).count() as f64;
+    // TWO placements at different radii: the frame centre is a fixed point
+    // of every radial map, so one off-centre mask could pass by accident.
+    for cx in [0.10f32, 0.32f32] {
+        let (cy, r) = (0.5f32, 0.05f32);
         let recipe = EditRecipe {
-            masks: vec![probe_radial(cx, cy, 0.05)],
+            masks: vec![probe_radial(cx, cy, r)],
             lens_profile: profile.clone(),
             ..Default::default()
         };
-        let want = (cx as f64 * w as f64, cy as f64 * h as f64);
-
-        // WIRED: `develop_preview` derives `WarpedDownstream` from the
-        // recipe, exactly as the GUI and web preview surfaces do before
-        // they warp, and the same decision `render_to_file` makes.
+        let landed = lens_ungeom_norm(cx, cy, (w as f32, h as f32), &profile, 0.0);
+        let want = (landed.0 as f64 * w as f64 - 0.5, landed.1 as f64 * h as f64 - 0.5);
+        let moved = (want.0 - (cx as f64 * w as f64 - 0.5)).hypot(want.1 - (cy as f64 * h as f64 - 0.5));
+        let area = std::f64::consts::PI * (r * w as f32) as f64 * (r * h as f32) as f64;
         let wired = apply_lens_geometry(&develop_preview(&base, &recipe), &profile, 0.0);
-        let got = effect_centroid(&wired);
-
-        // CONTROL: the identical chain with the adaptation switched off —
-        // the behaviour before this wiring, and where the tolerance's
-        // provenance comes from.
-        let unwired = apply_lens_geometry(
-            &develop_preview_framed(
-                &base,
-                &recipe,
-                &crate::diag::pixels(),
-                MaskFrame::AsRendered,
-                None,
-                false,
-            ),
+        let control = apply_lens_geometry(
+            &develop_preview_framed(&base, &recipe, &crate::diag::pixels(), MaskFrame::AsRendered, None, false),
             &profile,
             0.0,
         );
-        let drifted = effect_centroid(&unwired);
-
-        let err = ((got.0 - want.0).powi(2) + (got.1 - want.1).powi(2)).sqrt();
-        let drift = ((drifted.0 - want.0).powi(2) + (drifted.1 - want.1).powi(2)).sqrt();
-        // PREMISE: the field really does move this mask, or the assertion
-        // below is satisfied by an identity map and proves nothing.
-        assert!(
-            drift > min_drift,
-            "cx={cx}: the control must displace by the field; it moved \
-             {drift:.2} px (centroid {drifted:?} vs stored {want:?})"
-        );
-        assert!(
-            err < 1.5,
-            "cx={cx}: the wired chain must land on the STORED centre: \
-             {err:.2} px off (centroid {got:?} vs stored {want:?}; \
-             control drifts {drift:.2} px)"
-        );
-        assert!(
-            err * 5.0 < drift,
-            "cx={cx}: the fix must be an order better: {err:.2} vs {drift:.2}"
-        );
+        let got = effect_centroid(&wired);
+        let err = (got.0 - want.0).hypot(got.1 - want.1);
+        let (a_wired, a_control) = (darkened(&wired) / area, darkened(&control) / area);
+        eprintln!("cx={cx}: moved {moved:.2} px, centroid error {err:.2} px, area wired {a_wired:.4} control {a_control:.4}");
+        assert!(moved > 5.0, "premise: the field moves this centre ({moved:.2} px)");
+        assert!(err < 1.5, "cx={cx}: the effect must sit where the photograph carries its centre: {err:.2} px off ({got:?} vs {want:?})");
+        assert!((a_wired - 1.0).abs() < 0.03, "cx={cx}: the stored size, not a warped one: area x{a_wired:.4}");
+        assert!((a_control - 1.0).abs() > 3.0 * (a_wired - 1.0).abs().max(0.01), "premise: the pointwise control changes the size (x{a_control:.4})");
     }
+}
+
+/// The centred feather-0 radial's EDGE under a lens field that magnifies
+/// the frame centre, pinned against Camera Raw (v1.17.0): with the
+/// correction on, a 105 mm frame's centred ellipse ends at 1.0052 of its
+/// stored radius in Camera Raw's render (lens off 1.0003), where the
+/// 2026-08 pointwise transport put it at 1.0449. The wired chain must put
+/// the edge within 0.5 % of Camera Raw's reading — at the stored radius;
+/// the pointwise control dilates it by the centre's magnification.
+///
+/// MUTATION THIS KILLS: sample the ellipse through any pointwise map (the
+/// Lightroom spline or the engine's) instead of translating it.
+#[test]
+fn a_centred_radial_ends_at_camera_raws_edge_under_lens_geometry() {
+    const CAMERA_RAW_EDGE: f64 = 1.0052;
+    let (w, h) = (1200u32, 800u32);
+    let base = DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, image::Rgb([128, 128, 128])));
+    // Pincushion knots: the correction pulls the corners in and the fill
+    // scale magnifies the centre, as at 105 mm.
+    let profile = crate::recipe::LensProfile {
+        distortion: (0..16).map(|i| 1.0 + 0.10 * (i as f32 / 15.0).powi(2)).collect(),
+        distortion_on: true,
+        ..Default::default()
+    };
+    let r = 0.3f32;
+    let recipe = EditRecipe { masks: vec![probe_radial(0.5, 0.5, r)], lens_profile: profile.clone(), ..Default::default() };
+    // The darkened run along the centre row, in units of the stored radius.
+    let edge = |img: &DynamicImage| {
+        let g = img.to_rgb8();
+        let n = (0..w).filter(|&x| g.get_pixel(x, h / 2).0[1] < 90).count() as f64;
+        n / (2.0 * (r * w as f32) as f64)
+    };
+    let wired = edge(&apply_lens_geometry(&develop_preview(&base, &recipe), &profile, 0.0));
+    let control = edge(&apply_lens_geometry(
+        &develop_preview_framed(&base, &recipe, &crate::diag::pixels(), MaskFrame::AsRendered, None, false),
+        &profile,
+        0.0,
+    ));
+    eprintln!("edge: wired {wired:.4}, pointwise control {control:.4}, Camera Raw {CAMERA_RAW_EDGE}");
+    assert!(control > 1.03, "premise: the field magnifies the centre (control edge {control:.4})");
+    assert!((wired - CAMERA_RAW_EDGE).abs() < 0.005 + 1.0 / (2.0 * (r * w as f32) as f64), "edge {wired:.4} vs Camera Raw {CAMERA_RAW_EDGE}");
 }
 
 /// D2 continuation of the wired-centroid test above: when the Lightroom
@@ -1495,7 +1525,7 @@ fn only_lightrooms_post_correction_shapes_are_frame_adapted() {
     // And the adapter honours it: with the SAME unwarp in hand, a brush
     // and a bitmap are asked at the un-adapted point.
     let u = MaskUnwarp::new(&barrel_profile(), 0.0, (480.0, 320.0)).expect("active");
-    let moved = u.at(0.2, 0.5);
+    let moved = u.engine_at(0.2, 0.5);
     assert!((moved.0 - 0.2).abs() > 1e-4, "premise: the map really moves this point");
     // A brush that actually PAINTS at the sample point (R29 Batch-6b). With
     // the empty stroke list this test used to carry, both sides of the
@@ -1506,7 +1536,7 @@ fn only_lightrooms_post_correction_shapes_are_frame_adapted() {
     let brush = probe_brush(&[(1.0, 0.05, 1.0, 1.0, "d 0.2 0.5")]);
     let braster = brush_raster(&brush, 480, 320).expect("one dab");
     let rim = (0.2 + 0.05 * 0.94, 0.5);
-    let rim_moved = u.at(rim.0, rim.1);
+    let rim_moved = u.engine_at(rim.0, rim.1);
     assert!(
         mask_weight(&brush, rim.0, rim.1, Some(&braster)) > 0.2,
         "premise: the brush really paints at the rim sample"

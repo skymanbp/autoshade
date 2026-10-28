@@ -3765,7 +3765,7 @@ experiment:
   | Mask | Downstream geometry | Frame operation |
   |---|---|---|
   | Brush / bitmap / AI | either | identity |
-  | RADIAL | active | sample through `m_lr⁻¹ ∘ T_engine` exactly once |
+  | RADIAL | active | sample at `T_engine(p) − (T_engine(c) − c)`, `c` the stored centre (v1.17.0) |
   | RADIAL | inactive | identity at stored coordinates |
   | LINEAR | active | sample at `T_engine(p)` only; rebuild the straight line in the corrected frame |
   | LINEAR | inactive | map Zero/Full once through `D_fwd`; rebuild one straight line in the raw pixel metric |
@@ -3775,6 +3775,27 @@ experiment:
   sidecar case keeps RADIAL identity in `mask_warp` while retaining LINEAR's
   handle map separately in `linear_handle_warp`; every other solved state uses
   `mask_warp` as the handle source. Pixel loops never call the handle map.
+
+  **v1.17.0, against Camera Raw: a radial is translated, not warped.**
+  Feather-0 ellipses rendered by Camera Raw with the lens correction on and
+  off on four frames (24–105 mm at 45 / 73 / 105 mm, 14–24 mm at 20 mm): a
+  centred one ends at 1.0025–1.0055 of its stored radius (lens off
+  1.0003–1.0015), where the 2026-08 pointwise `m_lr⁻¹ ∘ T_engine` sampler put
+  it at 1.0449 (105 mm); off-centre ones keep their size and move their
+  centre exactly as the frame's content moves there (0.0286 / 0.0298 of the
+  centre's offset against the content's 0.029), which the camera-knot
+  `m_lr` spline overshoots by 8–22 %. `MaskUnwarp::radial_at` therefore
+  shifts the corrected-frame sample by the centre's displacement under the
+  engine's own map. After the change the 105 mm centred edge reads 1.0009 and
+  every quadrant edge of the eight off-centre ellipses lies within 0.0104 of
+  Camera Raw's (before, on the 105 mm frame: up to 0.040); the 0.3–0.5 % by
+  which Camera Raw's lens-on radii exceed the stored ones is not modelled.
+  LINEAR's lens-on shift agrees with Camera Raw's within 0.005 of the frame
+  height on the same frame; its lens-OFF 50 % line sits 0.007–0.018 of the
+  frame height below Camera Raw's on the left half of that frame (0–0.007 on
+  the right), not investigated here.
+  `lr_mask_warp_norm` keeps the 2026-08 fixture below; it no longer routes a
+  radial.
 
   Radial transport closes all 41 measured point vectors to ≤1 px (wall 20/20
   RMS 0.568 px; second set 21/21 RMS 0.243 px). Clean dilation is ≤0.35 pp and

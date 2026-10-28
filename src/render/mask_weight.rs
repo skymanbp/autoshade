@@ -63,12 +63,16 @@ pub(super) fn mask_weight_in(
     unwarp: Option<&MaskUnwarp>,
     dims: (f32, f32),
 ) -> f32 {
-    // The explicit split is the H2 boundary. RADIAL retains the landed
-    // `m_lr^-1 ∘ T_engine` point sampler byte-for-byte. LINEAR uses only
-    // `T_engine`; its corrections-off camera map has already moved the two
-    // handles in `MaskFrame::linear_handles_to_raw`, never this sample.
+    // The explicit split is the H2 boundary. RADIAL samples at `T_engine`
+    // less its centre's displacement under the same map
+    // (`MaskUnwarp::radial_at`, measured against Camera Raw, v1.17.0).
+    // LINEAR uses only `T_engine`;
+    // its corrections-off camera map has already moved the two handles in
+    // `MaskFrame::linear_handles_to_raw`, never this sample.
     let (nx, ny) = match (g, unwarp) {
-        (MaskGeometry::Radial { .. }, Some(u)) => u.at(nx, ny),
+        (MaskGeometry::Radial { top, left, bottom, right, .. }, Some(u)) => {
+            u.radial_at(nx, ny, 0.5 * (left + right), 0.5 * (top + bottom))
+        }
         (MaskGeometry::Linear { .. } | MaskGeometry::Shaped { .. }, Some(u)) => u.engine_at(nx, ny),
         _ => (nx, ny),
     };

@@ -523,9 +523,9 @@ impl<'a> Cover<'a> {
 ///   mapped once by `lr_mask_unwarp_norm` and one straight raw-frame gradient
 ///   is rebuilt in the raw pixel metric.
 ///
-/// RADIAL maps each sample point first through the inverse description of where
-/// engine geometry will put it, then through the inverse Lightroom mask
-/// transport. [`MaskUnwarp::at`] is that exact-once composition. LINEAR uses
+/// RADIAL maps each sample point through the inverse description of where
+/// engine geometry will put it, then translates it back by the displacement
+/// the same map gives its ellipse centre ([`MaskUnwarp::radial_at`]). LINEAR uses
 /// [`MaskUnwarp::engine_at`] for the first half only, or the handle-only path
 /// carried by [`MaskFrame::LinearHandlesToRaw`].
 ///
@@ -656,19 +656,26 @@ fn transport_linear_handles(
 /// whose effect will occupy the right Lightroom export point after this
 /// engine's geometry stage.
 ///
-/// This is the composition `m_lr^-1(T_engine(p))`: first ask where original
-/// pixel `p` will land under the exact downstream engine resample, then pull
-/// that output coordinate back through Lightroom's corrected mask transport.
-/// `T_engine` is built by calling [`lens_ungeom_norm`], not by reimplementing
-/// it. `m_lr^-1` is built by calling [`lr_mask_unwarp_norm`]. Each appears
-/// exactly once; the downstream resample supplies the corresponding one
+/// This is `T_engine(p) − (T_engine(c) − c)`, `c` the ellipse's stored
+/// centre: ask where original pixel `p` will land under the exact
+/// downstream engine resample, then shift that output coordinate back by
+/// how far the same resample carries the CENTRE. `T_engine` is built by
+/// calling [`lens_ungeom_norm`]; the downstream resample supplies the one
 /// `T_engine` application after mask rasterisation.
 ///
-/// **The manual `lens_distortion` amount is covered with no residue** in the
-/// first half. The second half deliberately uses the Lightroom mask map, not
-/// the engine map a second time: D2's 41-vector radial fixture closes this
-/// point law. LINEAR, brush, bitmap and AI never call this full adapter; the
-/// explicit match in `mask_weight_in` is the type boundary.
+/// **Why a translation, and why the engine's own map (v1.17.0, Camera
+/// Raw).** The 2026-08 law sampled the whole ellipse through Lightroom's
+/// mask-warp spline `m_lr⁻¹` pointwise, which dilates it by the local
+/// magnification: a centred feather-0 ellipse on a 105 mm frame had its
+/// edge at 1.045 of the stored radius, where Camera Raw draws it at 1.005
+/// (lens off: both 1.000). Off-centre ellipses showed Camera Raw moving the
+/// centre exactly as the photograph moves there, at an unchanged size — and
+/// the `m_lr` spline moving it 8–22 % further than the pixels on the four
+/// frames measured (`radial_at`). The 2026-08 41-vector fixture on another
+/// body still pins `lr_mask_warp_norm` itself; it no longer routes a
+/// radial. The manual `lens_distortion` amount is covered with no residue.
+/// LINEAR, brush, bitmap and AI never call this adapter; the explicit
+/// match in `mask_weight_in` is the type boundary.
 ///
 /// A LUT because `lens_ungeom_norm` costs a 256-step peak scan plus 40
 /// bisection steps per call, and this is a per-pixel question on frames up to
@@ -679,15 +686,9 @@ pub(super) struct MaskUnwarp {
     /// Factor `r_corrected / r_original` at node `i` = radius `i/(LUT_N−1)` of
     /// the half-diagonal.
     lut: Vec<f32>,
-    /// Factor `r_stored / r_exported` for Lightroom's mask transport, sampled
-    /// about `lr_cx,lr_cy`. `None` is Lightroom identity.
-    lr_lut: Option<Vec<f32>>,
     rr: f32,
     w: f32,
     h: f32,
-    lr_cx: f32,
-    lr_cy: f32,
-    lr_rmax: f32,
 }
 
 impl MaskUnwarp {
@@ -716,38 +717,6 @@ impl MaskUnwarp {
         if lut.len() > 1 {
             lut[0] = lut[1];
         }
-        let [lr_cx, lr_cy] = lr_mask_center_px(dims, profile);
-        let lr_rmax = [
-            lr_cx.hypot(lr_cy),
-            (w - lr_cx).hypot(lr_cy),
-            lr_cx.hypot(h - lr_cy),
-            (w - lr_cx).hypot(h - lr_cy),
-        ]
-        .into_iter()
-        .fold(1.0f32, f32::max)
-            / rr;
-        let lr_lut = if profile.mask_warp.is_empty() {
-            None
-        } else {
-            let mut lr_lut: Vec<f32> = (0..LUT_N)
-                .map(|i| {
-                    let rho = lr_rmax * i as f32 / (LUT_N - 1) as f32;
-                    let dx = rho * rr;
-                    if dx <= 1e-6 {
-                        return f32::NAN;
-                    }
-                    let (sx, _) = lr_mask_unwarp_norm(
-                        (lr_cx + dx) / w,
-                        lr_cy / h,
-                        dims,
-                        profile,
-                    );
-                    (sx * w - lr_cx) / dx
-                })
-                .collect();
-            lr_lut[0] = lr_lut[1];
-            Some(lr_lut)
-        };
         // Identity map = nothing to do, and saying so here is what keeps a
         // distortion-free profile bit-identical rather than merely close.
         //
@@ -762,14 +731,10 @@ impl MaskUnwarp {
         // MUTATION THIS KILLS: dropping this guard makes every coordinate on a
         // distortion-free profile take a float round trip through `at`, and
         // `with_the_geometry_stage_inactive_the_mask_chain_is_untouched` goes red.
-        let engine_identity = lut.iter().all(|f| (f - 1.0).abs() * rr < 0.01);
-        let lr_identity = lr_lut
-            .as_ref()
-            .is_none_or(|v| v.iter().all(|f| (f - 1.0).abs() * rr < 0.01));
-        if engine_identity && lr_identity {
+        if lut.iter().all(|f| (f - 1.0).abs() * rr < 0.01) {
             return None;
         }
-        Some(MaskUnwarp { lut, lr_lut, rr, w, h, lr_cx, lr_cy, lr_rmax })
+        Some(MaskUnwarp { lut, rr, w, h })
     }
 
     /// Exact inverse of the downstream engine geometry, without Lightroom's
@@ -785,28 +750,25 @@ impl MaskUnwarp {
         ((dx * k) / self.w + 0.5, (dy * k) / self.h + 0.5)
     }
 
-    /// The point `(nx, ny)` will occupy after the geometry stage. RADIAL's
-    /// settled point law remains byte-for-byte on this method; LINEAR calls the
-    /// separate engine-only half above.
-    pub(super) fn at(&self, nx: f32, ny: f32) -> (f32, f32) {
-        let (dx, dy) = ((nx - 0.5) * self.w, (ny - 0.5) * self.h);
-        let rho = ((dx * dx + dy * dy).sqrt() / self.rr).clamp(0.0, 1.0);
-        let t = rho * (LUT_N - 1) as f32;
-        let i = (t.floor() as usize).min(LUT_N - 2);
-        let f = t - i as f32;
-        let k = self.lut[i] * (1.0 - f) + self.lut[i + 1] * f;
-        let (nx, ny) = ((dx * k) / self.w + 0.5, (dy * k) / self.h + 0.5);
-        let Some(lr_lut) = &self.lr_lut else { return (nx, ny) };
-        let (dx, dy) = (nx * self.w - self.lr_cx, ny * self.h - self.lr_cy);
-        let rho = ((dx * dx + dy * dy).sqrt() / self.rr).clamp(0.0, self.lr_rmax);
-        let t = rho / self.lr_rmax * (LUT_N - 1) as f32;
-        let i = (t.floor() as usize).min(LUT_N - 2);
-        let f = t - i as f32;
-        let k = lr_lut[i] * (1.0 - f) + lr_lut[i + 1] * f;
-        (
-            (dx * k + self.lr_cx) / self.w,
-            (dy * k + self.lr_cy) / self.h,
-        )
+    /// RADIAL: the stored-frame point whose mask value pixel `(nx, ny)`
+    /// carries, for an ellipse centred at the stored `(cx, cy)`. Camera Raw
+    /// carries the ellipse's CENTRE with the photograph — a sensor-frame
+    /// point, moved by the same lens field as the pixels — and draws its
+    /// radii in the corrected frame. So the sample is the pixel's corrected
+    /// position less the centre's displacement under the SAME map: a
+    /// translation, not a dilation. LINEAR calls the engine-only half above.
+    ///
+    /// Measured against Camera Raw (v1.17.0), feather-0 ellipses with lens
+    /// correction on, on four frames (24–105 mm at 45, 73 and 105 mm; a
+    /// 14–24 mm at 20 mm): a centred one's edge at 1.0025–1.0055 of its
+    /// stored radius where the old pointwise transport put it at 1.045;
+    /// two corner ones' centres displaced by what the frame's own content
+    /// moves there (0.0286 / 0.0298 of the centre's offset against 0.029),
+    /// and the in-camera mask-warp spline moving them 8–22 % further.
+    pub(super) fn radial_at(&self, nx: f32, ny: f32, cx: f32, cy: f32) -> (f32, f32) {
+        let (qx, qy) = self.engine_at(nx, ny);
+        let (lx, ly) = self.engine_at(cx, cy);
+        (qx - (lx - cx), qy - (ly - cy))
     }
 }
 

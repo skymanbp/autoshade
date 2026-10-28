@@ -43,7 +43,7 @@ use super::*;
 //   | mask kind   | downstream geometry | engine frame operation              |
 //   |-------------|---------------------|-------------------------------------|
 //   | brush       | either              | IDENTITY                            |
-//   | radial      | active              | m_lr⁻¹ composed with T_engine      |
+//   | radial      | active              | T_engine less T_engine(centre)−c   |
 //   | radial      | inactive            | IDENTITY (stored coordinates)       |
 //   | linear      | active              | sample at T_engine(p), no m_lr      |
 //   | linear      | inactive            | D_fwd(z), D_fwd(f), rebuild straight|
@@ -58,9 +58,13 @@ use super::*;
 // profile-corrected photo rendered up to 186 px (24 mm) / 88 px (105 mm) away
 // from where Lightroom puts it. `MaskFrame` + `MaskUnwarp` now compose the two
 // independent maps exactly once: `T_engine` cancels the downstream engine
-// resample at rasterisation time, while `m_lr⁻¹` asks the stored Lightroom
-// geometry at the exported point its own model predicts. Omitting either map
-// leaves a whole correction field; repeating either double-counts it.
+// resample at rasterisation time, and the ellipse's CENTRE travels with the
+// photograph. Since v1.17.0 only the centre, and by the engine's own map:
+// Camera Raw keeps a radial's radii in the corrected frame (a pointwise
+// `m_lr⁻¹` dilated a centred 105 mm ellipse to 1.045 of its radius, Camera
+// Raw draws it at 1.005) and moves its centre as the pixels move, which the
+// `m_lr` spline overshoots by 8–22 % on the four frames measured. So the
+// sample is translated, not warped (`MaskUnwarp::radial_at`).
 // The LINEAR rows are H2. Their zero-parameter absolute residual remains
 // 9.748/7.025/6.336 px RMS for the active/stored line and
 // 12.449/9.943/4.979 px for the inactive/transported line. They are topology
