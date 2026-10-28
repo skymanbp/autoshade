@@ -7817,19 +7817,26 @@ fn hsl_band_budget_is_monotone_across_the_three_strength_stops() {
 /// 0.0398), confidence 0.599 (0.545); `p41` is still withheld by the re-hue
 /// veto, fit 0.0792 -> 0.0217 (0.0696 -> 0.0219), confidence 0.506 (0.482).
 ///
+/// Re-measured 2026-10-28 for v1.17.0's Highlights/Shadows law (before
+/// Exposure, local, keyed to the frame: `render::tone_cr`), which renders
+/// both bases and both fits again: `p40` is admitted at 0.7° (2.9°), fit
+/// 0.0707 -> 0.0300 (0.0707 -> 0.0354), confidence 0.625 (0.599); `p41`
+/// is still withheld by the re-hue veto, fit 0.0792 -> 0.0239 (0.0792 ->
+/// 0.0217), confidence 0.501 (0.506).
+///
 /// Both pairs are OPTIONAL, like every other corpus pair: absent, the
 /// test says so and passes, and the synthetic two-temperature fixture
 /// carries the refusal side of the same question on its own.
 ///
-/// Mutation: set [`FAN_DEG`] under `p40`'s 2.9° and it goes from admitted
+/// Mutation: set [`FAN_DEG`] under `p40`'s 0.7° and it goes from admitted
 /// to convicted, red on the fan-margin assertion.
 #[test]
 fn the_fan_gate_costs_a_real_two_temperature_pair_nothing() {
     use crate::rationale::keys;
     let Some(root) = calibration_corpus() else { return };
     for (code, want_fan, want_before, want_after, want_conf) in [
-        ("p40", Some(2.9f32), 0.0707f32, 0.0354f32, 0.599f32),
-        ("p41", None, 0.0792, 0.0217, 0.506),
+        ("p40", Some(0.7f32), 0.0707f32, 0.0300f32, 0.625f32),
+        ("p41", None, 0.0792, 0.0239, 0.501),
     ] {
         let raw = root.join(format!("{code}.arw"));
         let target_path = root.join(format!("{code}-target.jpg"));
