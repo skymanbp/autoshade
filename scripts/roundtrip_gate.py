@@ -111,6 +111,7 @@ def set_attr(text, key, value):
 
 def oracle_render(raw, xmp, case_dir, size="MAXIMUM"):
     """Camera Raw's render of `raw` with the sidecar `xmp`, as a JPEG in case_dir."""
+    case_dir = Path(case_dir).resolve()  # Photoshop resolves a relative path against its own folder
     case_dir.mkdir(parents=True, exist_ok=True)
     # A packet that says crs:AlreadyApplied="True" (one lifted from an export) makes Camera Raw
     # ignore every setting in it and render the RAW at its defaults; a sidecar beside a RAW says
@@ -183,6 +184,8 @@ def look_error(log):
 
 
 def engine_render(cli, raw, recipe, out, long_edge, cwd, data_dir):
+    # apply runs in the develop folder (the recipe's mask bitmaps are relative to it)
+    raw, recipe, out, data_dir = (Path(p).resolve() for p in (raw, recipe, out, data_dir))
     if out.exists():
         out.unlink()  # apply refuses to overwrite, and a stale render would pass for this one
     r = subprocess.run([cli, "apply", str(raw), str(recipe), "--long-edge", str(long_edge), "--out", str(out)],
