@@ -593,6 +593,44 @@ supposed to remove.
   p38 6.73 → 5.76 / 5.15 / 4.01 (line 5: over as measured), p39 5.60 →
   4.48 / 3.42 / 2.55 (5), p40 8.16 → 6.12 / 4.84 / 3.32 (8), p41 10.41 →
   7.75 / 7.75 / 7.41 (10).
+  **Highlights and Shadows: what the synthetic frames showed** (v1.17.0,
+  causal tests, the law above unchanged). Neutral scenes written into a
+  copy of the calibration frame's uncompressed RAW (same body, profile,
+  baseline and lens), each rendered flat, Highlights −60 and Shadows +60
+  by Camera Raw 18.4 and by the engine; the push is `u` after minus `u`
+  flat on the same cells. (1) A uniform frame is not moved at all: 0.0000
+  at every level from `u` 0.13 to 0.78, both sliders (the law at 0.60 and
+  0.78: −0.03 and +0.015). (2) Two levels half and half (`u` 0.13 | 0.70):
+  each half moves as one at every distance from the edge, the bright half −0.208 to −0.238
+  under Highlights, the dark half +0.017 to +0.018 under Shadows (the law:
+  −0.062 to −0.090 and +0.078 to +0.081); with the dark half at 0.37
+  instead the bright half moves −0.11. (3) The frame's mean linear value
+  held, its bright fraction 5 / 14 / 44 %: Highlights at `u` 0.63 −0.065 /
+  −0.072 / −0.116, Shadows at 0.18 +0.102 / +0.098 / +0.044 (the law, whose
+  key is that mean: −0.035 to −0.039 and +0.087 throughout). (4) The same
+  histogram arranged differently (the bright cells interleaved, or in one
+  block): Highlights at 0.48 −0.069 against −0.130, Shadows at 0.18 +0.044
+  against +0.019. (5) A bright square on a uniform surround: −0.339 /
+  −0.163 / −0.078 / −0.079 / −0.117 at surround `u` 0.07 / 0.22 / 0.38 /
+  0.52 / 0.73, and, on a dark surround, from 640 to 2560 film px wide −0.173
+  to −0.187 (no decay with size). (6) Not the cause: the packet's Exposure
+  (at −1 / +1 every push is the exposure ramp's slope times the push at 0,
+  within 0.001 to 0.008) and the Look (off: the same pushes through the
+  Look's own slope). So Camera Raw's Highlights and Shadows move a level
+  by its contrast against the rest of the frame (zero where there is none)
+  and by how much of the frame it covers, over spans the size of the frame
+  (no ramp across 4000 px), with a weaker regional term ((4)). On the
+  real frames the contrast of the `u` 0.55–0.65 band over a 1600–3200 px
+  Gaussian of `log2` luminance orders the six frames' Highlights −60 push
+  exactly (the bright snow frame 0.76–1.36 stops, push −0.061; the calibration
+  frame 2.72–3.31 stops, −0.144). No form tried reproduces all of it, so
+  the law above stays: a table over `u` and one blurred base (Gaussian
+  `log2`, σ 400–6400 px) minus no key, the linear mean, the `log2` mean or
+  the median, leave-one-frame-out over 15 synthetic and 7 real frames,
+  median R² 0.19–0.46; the same over a contrast against a Gaussian
+  context (σ 1600–6400, 23 synthetic frames) 0.00–0.26; a local Laplacian
+  filter with a one-sided remap, below 0 on most frames. The two measured properties are
+  pinned as ignored tests in `render/tone_cr.rs` until a law has them.
 
   is `1`; cool-side coefficients and the 6688 K red plateau were
   **calibrated against measured Lightroom exports**.

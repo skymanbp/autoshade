@@ -949,6 +949,60 @@ mod tests {
         }
     }
 
+    /// Camera Raw's Highlights and Shadows measured on synthetic neutral
+    /// frames (the calibration body's own RAW with its pixels replaced, so
+    /// profile, baseline and lens are the frame's), pinned here until the
+    /// law reproduces them (TECH_STACK, "Highlights and Shadows: what the
+    /// synthetic frames showed"). `u` per pixel before and after one slider.
+    fn hs_moves(levels: &[f32], hl: f32, sh: f32) -> Vec<f32> {
+        let (w, h) = (96usize, 64usize);
+        let film = FilmScale::of(Some(6336), w, h);
+        let mut data: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| [camera_raw_start(levels[(i % w) * levels.len() / w]); 3])
+            .collect();
+        let before: Vec<f32> = data.iter().map(|px| camera_raw_unstart(luma601(px))).collect();
+        let field = hs_field(&data, w, h, film, true);
+        apply_camera_raw_hs(&mut data, &field, hl, sh);
+        data.iter().zip(&before).map(|(px, &u)| camera_raw_unstart(luma601(px)) - u).collect()
+    }
+
+    /// A uniform frame is left alone: Camera Raw 18.4 moved a uniform field
+    /// by 0.0000 in `u` at every level from 0.13 to 0.78 under Highlights −60
+    /// and under Shadows +60; the frame-keyed law moves it −0.03 / +0.015.
+    #[test]
+    #[ignore = "measured Camera Raw behaviour the frame-keyed law does not reproduce yet (TECH_STACK)"]
+    fn a_uniform_frame_is_left_alone_by_highlights_and_shadows() {
+        for u in [0.13f32, 0.26, 0.44, 0.60, 0.78] {
+            for (hl, sh) in [(-0.6f32, 0.0f32), (0.0, 0.6)] {
+                let m = hs_moves(&[u], hl, sh);
+                let worst = m.iter().fold(0.0f32, |a, &d| a.max(d.abs()));
+                assert!(worst < 0.003, "u {u} hl {hl} sh {sh}: moved {worst}");
+            }
+        }
+    }
+
+    /// A frame of two levels, half and half (u 0.13 | u 0.70): Camera Raw
+    /// moves each half as one, at every distance from the edge (Highlights
+    /// −60: the bright half −0.208 at the edge to −0.238 4000 film px away,
+    /// the dark half −0.016 to −0.022; Shadows +60: the dark half +0.017 to
+    /// +0.018, the bright half 0.000). The law: −0.062 to −0.090 and +0.078
+    /// to +0.081.
+    #[test]
+    #[ignore = "measured Camera Raw behaviour the frame-keyed law does not reproduce yet (TECH_STACK)"]
+    fn a_two_level_frame_moves_each_level_as_one() {
+        let (w, h) = (96usize, 64usize);
+        let side = |m: &[f32], bright: bool| {
+            let v: Vec<f32> = (0..w * h).filter(|i| ((i % w) >= w / 2) == bright).map(|i| m[i]).collect();
+            v.iter().sum::<f32>() / v.len() as f32
+        };
+        let hl = hs_moves(&[0.13, 0.70], -0.6, 0.0);
+        let sh = hs_moves(&[0.13, 0.70], 0.0, 0.6);
+        assert!((side(&hl, true) + 0.225).abs() < 0.03, "bright half under Highlights: {}", side(&hl, true));
+        assert!((side(&hl, false) + 0.019).abs() < 0.01, "dark half under Highlights: {}", side(&hl, false));
+        assert!((side(&sh, false) - 0.018).abs() < 0.01, "dark half under Shadows: {}", side(&sh, false));
+        assert!(side(&sh, true).abs() < 0.005, "bright half under Shadows: {}", side(&sh, true));
+    }
+
     /// Highlights and Shadows run before Exposure: the response is the
     /// exposure of the moved `u`, not a push on the exposed value.
     ///
