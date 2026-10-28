@@ -2884,11 +2884,25 @@ all five calibration pairs (four 24–105 mm frames with the lens on, the
 lens, not a constant: +0.26 % at 73 and 80 mm, +0.08 to +0.16 % at 105 mm,
 +0.03 to +0.06 % at 45 mm, and none at all (|Δ| ≤ 0.006 %) on the 14–24 mm
 frame, although the 24–105 mm `.lcp` also defers to the camera's distortion
-data (the profile's PreferMetadataDistort flag, an attribute of the .lcp file, not an engine symbol). A knot placement does not explain it: (i+1)/(n−1) fits the 80 mm frame
-but makes the 45 mm one three times worse and breaks the 14–24 mm agreement
-(rms 0.04 → 0.55 × 10⁻³), and no (i+b)·u grid, cubic or polynomial
-interpolation, or the `.lcp` polynomial closes all five. The magnification is
-measured and left open (`rel1170/geom-fit/`). The body's Adobe Standard profile
+data (the profile's PreferMetadataDistort flag, an attribute of the .lcp file, not an engine symbol). No knot placement explains it, because the engine read
+the knots at the wrong radius, not at the wrong place. Adobe DNG Converter 18.7
+writes Camera Raw's own reading of the knots into the file as the
+LensDistortInfo polynomial, and causal probes through it (knot sets written
+into a copy of a raw) and through Camera Raw renders give the law that
+`lensmeta::sony_render_distortion` now implements: Camera Raw reads the copy of
+the knots in the encrypted SR2 block (editing the plain IFD0 copy changes
+nothing), places knot i at i/(n−1) of the SENSOR half-diagonal, replaces the
+camera's radius map t·K(t) by its least-squares odd polynomial through the
+knots i ≥ 1, and evaluates it at the ZOOMED output radius — output u samples
+Z·u·Q(Z·u), with Z making the frame edge's maximum exactly 1. The engine
+evaluated K at the unzoomed radius and divided afterwards, indexing every knot
+about 5 % too far out on a lens whose map reaches 1.054. The DNG polynomial's
+shape terms are reproduced within 2.1 × 10⁻⁶ on the five frames; after the
+change the five lens-on registrations sit at the lens-off noise, every 0.1
+radius bin from 0.15 to 0.85 within ±0.008 % (2-D rms on the 24–105 frames
+0.03–0.07 px at 3000 px, before 0.35–1.31; the 14–24 frame 0.02 → 0.04). Not carried: Camera Raw centres the map on the sensor,
+16 px right of the default crop's centre on this body, a sub-pixel shift the
+engine's crop-centred map leaves (`rel1170/dngc/`). The body's Adobe Standard profile
 carries no DefaultBlackRender tag (absent means Auto), so the SDK's render would subtract
 Shadows 5 × 0.001 = 0.005 black; the engine subtracts the sensor's 512 and no
 render black, and the 0.005 tried on p39 overshoots the shadows (ΔL −2 to

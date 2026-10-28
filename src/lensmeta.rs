@@ -17,15 +17,20 @@
 //!   the distortion/green map per channel)
 //!
 //! Vignette and CA retain the engine's established canonical knot convention.
-//! D2's paired Lightroom measurements establish a narrower exception for the
-//! Sony distortion array: its sixteen native samples sit at `(i+1)/16`, with
-//! the last sample exactly at the corner. It is resampled here, at the source
-//! boundary, onto a dense canonical `(i+0.5)/(n−1)` grid for the Lightroom
-//! mask-transport solve. The ordinary render spline retains its established
-//! placement because D2's required image-registration gate rejected changing
-//! that path. Each array's FIRST element is the value count; a malformed count
-//! degrades that component to "absent", never an error (a photo without
-//! correction data is a normal photo).
+//! The Sony distortion array is converted here, at the source boundary, twice:
+//!
+//! * for the RENDER, the way Adobe Camera Raw reads it
+//!   ([`sony_render_distortion`]: knots at `i/(n−1)` of the SENSOR
+//!   half-diagonal, a least-squares odd polynomial through the camera's
+//!   radius map, evaluated at the zoomed output radius), resampled onto the
+//!   engine's canonical `(i+0.5)/(n−1)` grid;
+//! * for the Lightroom mask-transport solve, D2's native `(i+1)/16` reading,
+//!   resampled onto the same canonical grid ([`resample_sony_distortion`]) —
+//!   that solve was measured on its own and is left as measured.
+//!
+//! Each array's FIRST element is the value count; a malformed count degrades
+//! that component to "absent", never an error (a photo without correction
+//! data is a normal photo).
 //!
 //! # The MASK WARP, and why it is solved here (R29 Batch-3)
 //!
@@ -66,6 +71,15 @@ use crate::recipe::{LensProfile, MASK_WARP_KNOTS, MaskWarpCenter, MaskWarpSource
 /// error, including the awkward r=1 endpoint between the last two canonical
 /// nodes. The contract test records the measured maximum.
 pub(crate) const SONY_DISTORTION_CANONICAL_KNOTS: usize = 2048;
+
+/// Canonical knots the Sony RENDER distortion is resampled onto: the most
+/// [`LensProfile::clamp`] keeps (it truncates every profile spline to 32, and
+/// a longer one would lose its outer half). The target is a smooth even
+/// polynomial, so linear interpolation on this grid departs from it by an
+/// eighth of its curvature times the node spacing squared; the contract test
+/// (`the_render_resample_is_faithful_to_the_camera_raw_law`) records the
+/// measured maximum on the five fixture lenses.
+pub(crate) const SONY_RENDER_DISTORTION_KNOTS: usize = 32;
 
 /// Read the in-camera lens correction profile from a RAW file. Every failure
 /// path returns an EMPTY component (profile with nothing to apply) — absent
@@ -110,11 +124,19 @@ pub fn read(path: &Path) -> LensProfile {
         .iter()
         .map(|&v| v as f32 * (-14f32).exp2() + 1.0)
         .collect();
-    // Adjudication gate: direct engine-vs-Lightroom image registration rejects
-    // changing the render spline's placement (the edge/corner residual grows).
-    // Keep the established render calibration here; the corrected native
-    // domain is consumed only by Lightroom's mask transport solve below.
-    out.distortion = sony_distortion.clone();
+    // The render spline is Camera Raw's reading of these knots, which needs
+    // the frame (`DefaultCropSize`) and the sensor array it was cut from. A
+    // file that states no frame keeps the knots as they are — the legacy
+    // reading, for a file that is malformed anyway.
+    out.distortion = match frame_dims(root) {
+        Some(crop) if !sony_distortion.is_empty() => sony_render_distortion(
+            &sony_distortion,
+            crop,
+            sensor_dims(root),
+            SONY_RENDER_DISTORTION_KNOTS,
+        ),
+        _ => sony_distortion.clone(),
+    };
     let lr_mask_distortion =
         resample_sony_distortion(&sony_distortion, SONY_DISTORTION_CANONICAL_KNOTS);
     let ca = knots(ExifTag::ChromaticAberrationCorrParams);
@@ -229,6 +251,165 @@ fn frame_dims(root: &rawler::formats::tiff::IFD) -> Option<(f32, f32)> {
         root.get_entry_recursive(ExifTag::ImageWidth)?.value.get_f32(0).ok().flatten(),
         root.get_entry_recursive(ExifTag::ImageHeight)?.value.get_f32(0).ok().flatten(),
     )
+}
+
+/// The raw sensor array the default crop was cut from (`ImageWidth/Length`),
+/// the frame the camera's own lens maps are stated in.
+fn sensor_dims(root: &rawler::formats::tiff::IFD) -> Option<(f32, f32)> {
+    let w = root.get_entry_recursive(ExifTag::ImageWidth)?.value.get_f32(0).ok().flatten()?;
+    let h = root.get_entry_recursive(ExifTag::ImageHeight)?.value.get_f32(0).ok().flatten()?;
+    (w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0).then_some((w, h))
+}
+
+/// Sony `0x7037` distortion knots → the engine's render spline, read the way
+/// Adobe Camera Raw reads them (ledger item 13, 2026-10-28).
+///
+/// The law, from causal probes through Adobe DNG Converter 18.7 (which writes
+/// Camera Raw's own reading of the knots into the file as the LensDistortInfo
+/// polynomial) and through Camera Raw renders — reproduced, not fitted:
+///
+/// * Camera Raw reads the copy of the knots in the encrypted SR2 private
+///   block (tag 0x7982, the same sixteen values as `0x7037`); knot `i` sits at
+///   `t_i = i/(n−1)`, `t` in units of the SENSOR half-diagonal;
+/// * the camera's map is `source = t·K(t)`, and Camera Raw replaces it by the
+///   least-squares odd polynomial `t·Q(t)`, `Q = c₁ + c₃t² + c₅t⁴ + c₇t⁶`,
+///   through the knots `i ≥ 1` (unweighted; the centre knot's row is zero);
+/// * the output is zoomed by `Z` so that no edge pixel samples outside the
+///   frame: output radius `u`, `source = Z·u·Q(Z·u)`, with the maximum of
+///   `Z·Q(Z·u)` over the frame edge equal to 1 — a constant map therefore
+///   renders as the identity, and a barrel map pins the short edge's midpoint
+///   where a pincushion one pins the corner.
+///
+/// Measured: the DNG's polynomial `(Z·c₁, Z³·c₃, Z⁵·c₅, Z⁷·c₇)` for the
+/// sensor frame matches this within 2.1e-6 per coefficient on five real
+/// frames and 1e-5 on fourteen synthetic knot sets (6e-5 on a single-knot
+/// step); its constant term sits 0.5–4.5e-5 below (2.1e-5 above on the
+/// step), as if Adobe's zoom stopped short of the exact root by up to
+/// 1.5·2⁻¹⁵ — 0.005 % of radius, not modelled. A Camera Raw render of a single-knot step shows the polynomial's
+/// ringing, not the knots' step, so the polynomial is what renders.
+///
+/// The old reading evaluated the knots themselves at the UNZOOMED output
+/// radius, `K(u)/max K`: for a map rising to `K = 1.054` at the corner that
+/// indexes every knot about 5 % too far out — the 0.06–0.26 % magnification
+/// the five-frame registration measured on the FE 24–105 frames.
+///
+/// The engine's render spline (`render::profile_knot_interp`: canonical
+/// `(j+0.5)/(N−1)` in DEFAULT-CROP half-diagonals, divided by its own edge
+/// maximum) draws that map when its knots are `k(r) = Q(Z·ρ·r)` with
+/// `ρ = |crop| / |sensor|` and `Z` solved against the crop's edge — the
+/// division by the edge maximum then IS the zoom. What it cannot carry is the
+/// centre: Camera Raw's map is centred on the sensor, which on the ILCE-7RM4A
+/// sits 16 px right of the default crop's centre; that offset moves pixels by
+/// under a pixel and no radius, and is left to the frame-centre work.
+pub(crate) fn sony_render_distortion(
+    native: &[f32],
+    crop: (f32, f32),
+    sensor: Option<(f32, f32)>,
+    n: usize,
+) -> Vec<f32> {
+    if n < 2 {
+        return Vec::new();
+    }
+    let Some(q) = sony_radius_polynomial(native) else {
+        // Too few knots to fit four terms: keep them as they are.
+        return native.to_vec();
+    };
+    let diag = |(w, h): (f32, f32)| f64::from((w * w + h * h).sqrt());
+    // A sensor smaller than the crop is not a sensor; read the crop as the
+    // whole array then (ρ = 1).
+    let rho = sensor
+        .map(|s| diag(crop) / diag(s).max(1e-6))
+        .filter(|r| r.is_finite() && *r > 0.0 && *r <= 1.0)
+        .unwrap_or(1.0);
+    let rmin = (f64::from(crop.0.min(crop.1)) / diag(crop).max(1e-6)).clamp(0.0, 1.0);
+    let z = sony_render_zoom(&q, rho, rmin);
+    (0..n)
+        .map(|j| {
+            let r = (j as f64 + 0.5) / (n - 1) as f64;
+            even_poly(&q, z * rho * r) as f32
+        })
+        .collect()
+}
+
+/// `Q`'s coefficients `(c₁, c₃, c₅, c₇)` of [`sony_render_distortion`]: the
+/// least-squares fit of `t·K_i` by `c₁t + c₃t³ + c₅t⁵ + c₇t⁷` at the knots
+/// `t_i = i/(n−1)`, `i ≥ 1`, solved by the normal equations in f64. `None`
+/// for fewer than five knots (four terms need four points beyond the centre)
+/// or a singular system.
+fn sony_radius_polynomial(knots: &[f32]) -> Option<[f64; 4]> {
+    let n = knots.len();
+    if n < 5 {
+        return None;
+    }
+    let mut a = [[0f64; 5]; 4]; // the normal equations, augmented
+    for (i, k) in knots.iter().enumerate().skip(1) {
+        let t = i as f64 / (n - 1) as f64;
+        let basis = [t, t.powi(3), t.powi(5), t.powi(7)];
+        let y = t * f64::from(*k);
+        for r in 0..4 {
+            for c in 0..4 {
+                a[r][c] += basis[r] * basis[c];
+            }
+            a[r][4] += basis[r] * y;
+        }
+    }
+    // Gauss–Jordan with partial pivoting: a 4×4 system, symmetric positive
+    // definite whenever the points are distinct.
+    for col in 0..4 {
+        let piv = (col..4).max_by(|&x, &y| a[x][col].abs().total_cmp(&a[y][col].abs()))?;
+        a.swap(col, piv);
+        if a[col][col].abs() < 1e-15 {
+            return None;
+        }
+        let pivot = a[col];
+        for (r, row) in a.iter_mut().enumerate() {
+            if r != col {
+                let f = row[col] / pivot[col];
+                for (x, p) in row.iter_mut().zip(pivot.iter()).skip(col) {
+                    *x -= f * p;
+                }
+            }
+        }
+    }
+    let q = [a[0][4] / a[0][0], a[1][4] / a[1][1], a[2][4] / a[2][2], a[3][4] / a[3][3]];
+    q.iter().all(|v| v.is_finite()).then_some(q)
+}
+
+/// `Q(x) = c₁ + c₃x² + c₅x⁴ + c₇x⁶`.
+fn even_poly(q: &[f64; 4], x: f64) -> f64 {
+    let x2 = x * x;
+    q[0] + x2 * (q[1] + x2 * (q[2] + x2 * q[3]))
+}
+
+/// The zoom `Z` of [`sony_render_distortion`]: the root of
+/// `Z · max Q(Z·ρ·r) = 1` over the edge radii `r ∈ [rmin, 1]`, the maximum
+/// taken on a 1024-step sweep (`Q` is a smooth sextic; the sweep's error is
+/// below 1e-9 of a factor). The left side rises with `Z` for every map whose
+/// `t·Q(t)` is itself monotone, so bisection on a wide bracket finds it; a
+/// map with no root in the bracket falls back to `Z = 1 / Q(ρ)`, the zoom
+/// that pins the corner.
+fn sony_render_zoom(q: &[f64; 4], rho: f64, rmin: f64) -> f64 {
+    const SWEEP: usize = 1024;
+    let edge_max = |z: f64| -> f64 {
+        (0..=SWEEP)
+            .map(|i| rmin + (1.0 - rmin) * i as f64 / SWEEP as f64)
+            .map(|r| even_poly(q, z * rho * r))
+            .fold(f64::MIN, f64::max)
+    };
+    let h = |z: f64| z * edge_max(z) - 1.0;
+    let (mut a, mut b) = (0.25f64, 4.0f64);
+    if h(a) > 0.0 || h(b) < 0.0 {
+        return 1.0 / even_poly(q, rho).max(1e-3);
+    }
+    for _ in 0..80 {
+        let m = 0.5 * (a + b);
+        if h(m) < 0.0 {
+            a = m;
+        } else {
+            b = m;
+        }
+    }
+    0.5 * (a + b)
 }
 
 /// Resample the Sony distortion spline from its native `(i+1)/n` radii onto
@@ -412,6 +593,106 @@ mod tests {
         let ca = |v: i16| v as f32 * (-21f32).exp2() + 1.0;
         assert!((ca(1024) - 1.000488).abs() < 1e-6);
         assert!((ca(-256) - 0.999878).abs() < 1e-6);
+    }
+
+    /// Camera Raw's reading of Sony distortion knots, pinned against Adobe's
+    /// own: each case is a knot array (raw `0x7037` integers) and the
+    /// LensDistortInfo numerators (over 2^30) that Adobe DNG Converter 18.7
+    /// wrote for it. Five are real frames (ILCE-7RM4A; FE 24–105 F4 G OSS at
+    /// 45, 105, 80 and 73 mm; Sigma 14–24 F2.8 DG DN at 20 mm); three are
+    /// synthetic knot sets written into a copy of a raw (`K = 1 ± 0.04 t²`,
+    /// `1 + 0.04 t⁴`), the minus one being the barrel case whose zoom pins the
+    /// short edge's midpoint rather than the corner.
+    const CAMERA_RAW_CASES: [(&str, [i16; 16], [i64; 4]); 8] = [
+        ("24-105 @45", [2, 2, 5, 13, 23, 38, 56, 79, 106, 140, 181, 230, 288, 356, 437, 526], [1042950219, 17540105, 14758258, -1524500]),
+        ("24-105 @105", [2, 4, 13, 29, 50, 79, 115, 158, 207, 264, 327, 397, 474, 559, 652, 753], [1030164927, 42426635, 510247, 620176]),
+        ("24-105 @80", [0, 4, 14, 32, 58, 90, 129, 178, 235, 300, 374, 456, 550, 652, 765, 889], [1023657049, 45339227, 5216195, -481157]),
+        ("24-105 @73", [2, 4, 13, 29, 54, 86, 126, 173, 228, 291, 361, 442, 534, 636, 748, 871], [1024629197, 43679741, 5576561, -160897]),
+        ("14-24 @20", [-8, -6, -4, 0, 5, 13, 22, 31, 40, 48, 57, 66, 76, 92, 112, 137], [1064525330, 13991147, -15117750, 10320273]),
+        ("1+0.04t^2", [0, 3, 12, 26, 47, 73, 105, 143, 186, 236, 291, 352, 419, 492, 571, 655], [1035283098, 38195685, 453016, -211779]),
+        ("1+0.04t^4", [0, 0, 0, 1, 3, 8, 17, 31, 53, 85, 129, 190, 268, 370, 497, 655], [1037564924, -35260, 36306855, -101121]),
+        ("1-0.04t^2", [0, -3, -12, -26, -47, -73, -105, -143, -186, -236, -291, -352, -419, -492, -571, -655], [1087307776, -44257680, -579079, 298645]),
+    ];
+
+    fn knot_factors(raw: &[i16; 16]) -> Vec<f32> {
+        raw.iter().map(|&v| v as f32 * (-14f32).exp2() + 1.0).collect()
+    }
+
+    /// The engine's own radial factor `r_src / r_dst` for a canonical spline
+    /// in a frame of `dims`: the knots over their edge maximum, exactly as
+    /// `render::profile_fill_scale` divides them (dense sweep of the edge).
+    fn engine_factor(dense: &[f32], dims: (f32, f32), r: f32) -> f32 {
+        let rmin = dims.0.min(dims.1) / (dims.0 * dims.0 + dims.1 * dims.1).sqrt();
+        let edge = (0..=4096)
+            .map(|i| crate::render::profile_knot_interp(dense, rmin + (1.0 - rmin) * i as f32 / 4096.0))
+            .fold(f32::MIN, f32::max);
+        crate::render::profile_knot_interp(dense, r) / edge
+    }
+
+    #[test]
+    fn the_render_distortion_is_camera_raws_polynomial_per_case() {
+        // In the SENSOR frame (crop = sensor) the engine's map must be the
+        // DNG's polynomial itself. Measured worst 4.6e-5: the constant-term
+        // margin the doc of `sony_render_distortion` reports plus the 32-node
+        // resample; the old reading
+        // missed by 1.9e-3 on the 80 mm frame.
+        const SENSOR: (f32, f32) = (9600.0, 6376.0);
+        let mut worst = 0.0f32;
+        for (name, raw, num) in CAMERA_RAW_CASES {
+            let dense =
+                sony_render_distortion(&knot_factors(&raw), SENSOR, Some(SENSOR), SONY_RENDER_DISTORTION_KNOTS);
+            assert_eq!(dense.len(), SONY_RENDER_DISTORTION_KNOTS);
+            let k: Vec<f64> = num.iter().map(|&n| n as f64 / (1u64 << 30) as f64).collect();
+            for r in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
+                let x = f64::from(r);
+                let adobe = (k[0] + k[1] * x.powi(2) + k[2] * x.powi(4) + k[3] * x.powi(6)) as f32;
+                let got = engine_factor(&dense, SENSOR, r);
+                worst = worst.max((got - adobe).abs());
+                assert!((got - adobe).abs() < 6e-5, "{name} r={r}: engine {got} vs Camera Raw {adobe}");
+            }
+        }
+        eprintln!("worst |engine − Camera Raw| factor: {worst:e}");
+    }
+
+    #[test]
+    fn the_render_resample_is_faithful_to_the_camera_raw_law() {
+        // The canonical grid against the polynomial it samples, in the
+        // ILCE-7RM4A's own crop/sensor pair. Measured worst 5.3e-5 (0.005 % of
+        // radius), on 32 nodes.
+        let (crop, sensor) = ((9504.0, 6336.0), (9600.0, 6376.0));
+        let rho = (9504f64.hypot(6336.0)) / 9600f64.hypot(6376.0);
+        let rmin = 6336.0 / 9504f64.hypot(6336.0);
+        let mut worst = 0.0f64;
+        for (name, raw, _) in CAMERA_RAW_CASES {
+            let knots = knot_factors(&raw);
+            let dense = sony_render_distortion(&knots, crop, Some(sensor), SONY_RENDER_DISTORTION_KNOTS);
+            let q = sony_radius_polynomial(&knots).expect("sixteen knots fit");
+            let z = sony_render_zoom(&q, rho, rmin);
+            for i in 0..=8192 {
+                let r = i as f64 / 8192.0;
+                let d = (f64::from(crate::render::profile_knot_interp(&dense, r as f32)) - even_poly(&q, z * rho * r)).abs();
+                worst = worst.max(d);
+                assert!(d < 6e-5, "{name} r={r}: resample error {d}");
+            }
+        }
+        eprintln!("worst canonical resample error: {worst:e}");
+        // The spline must survive the profile's own defensive clamp whole.
+        let dense = sony_render_distortion(&knot_factors(&CAMERA_RAW_CASES[2].1), crop, Some(sensor), SONY_RENDER_DISTORTION_KNOTS);
+        let mut p = LensProfile { distortion: dense.clone(), ..LensProfile::default() };
+        p.clamp();
+        assert_eq!(p.distortion, dense, "clamp must keep the render spline whole");
+    }
+
+    #[test]
+    fn a_constant_camera_map_renders_as_the_identity() {
+        // The zoom divides a constant map out exactly; the old reading did
+        // too, so this pins the zoom's normalisation, not the change.
+        let dense = sony_render_distortion(&[1.03; 16], (9504.0, 6336.0), Some((9600.0, 6376.0)), 64);
+        for r in [0.0f32, 0.3, 0.7, 1.0] {
+            assert!((engine_factor(&dense, (9504.0, 6336.0), r) - 1.0).abs() < 1e-6);
+        }
+        // Fewer than five knots cannot carry four terms: left as they are.
+        assert_eq!(sony_render_distortion(&[1.0, 1.01, 1.02], (3.0, 2.0), None, 64), vec![1.0, 1.01, 1.02]);
     }
 
     #[test]
