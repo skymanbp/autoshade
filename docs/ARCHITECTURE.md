@@ -2841,10 +2841,17 @@ the engine clips where Camera Raw compresses) and a shadow lift (L < 30 ΔL
 with the lens profile off the engine and Camera Raw agree to 1.00000, and with
 it on the difference is radial — +0.27 % near the centre falling to +0.09 % at
 0.85 of the half diagonal (3000 px, tile phase correlation,
-`rel1170/colour/mag/radial.py`), the shape a different placement of the
-distortion knots predicts (knot i at (i+1)/(n−1) instead of RawTherapee's
-(i+0.5)/(n−1) fits it to 0.04 %); the composite CA fill reads exactly 1. It
-is measured on one frame and not changed. The body's Adobe Standard profile
+`rel1170/colour/mag/radial.py`); the composite CA fill reads exactly 1. On
+all five calibration pairs (four 24–105 mm frames with the lens on, the
+14–24 mm frame with it switched on for the test) the difference follows the
+lens, not a constant: +0.26 % at 73 and 80 mm, +0.08 to +0.16 % at 105 mm,
++0.03 to +0.06 % at 45 mm, and none at all (|Δ| ≤ 0.006 %) on the 14–24 mm
+frame, although the 24–105 mm `.lcp` also defers to the camera's distortion
+data (`PreferMetadataDistort`). A knot placement does not explain it: (i+1)/(n−1) fits the 80 mm frame
+but makes the 45 mm one three times worse and breaks the 14–24 mm agreement
+(rms 0.04 → 0.55 × 10⁻³), and no (i+b)·u grid, cubic or polynomial
+interpolation, or the `.lcp` polynomial closes all five. The magnification is
+measured and left open (`rel1170/geom-fit/`). The body's Adobe Standard profile
 carries no DefaultBlackRender tag (absent means Auto), so the SDK's render would subtract
 Shadows 5 × 0.001 = 0.005 black; the engine subtracts the sensor's 512 and no
 render black, and the 0.005 tried on p39 overshoots the shadows (ΔL −2 to
