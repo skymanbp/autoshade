@@ -2165,7 +2165,19 @@ where Lightroom's panel offers the grey mix in their place → colour grading �
 clarity → **texture** →
 saturation/vibrance (also skipped in black and white) → the Detail panel
 (colour noise reduction → luminance noise reduction → sharpening) → local
-adjustments (linear/radial/bitmap masks).
+adjustments (linear/radial/bitmap masks). On a recipe that names a camera
+profile (v1.17.0, `render/mask_cr.rs`) a mask's Exposure, its five tone
+sliders, Dehaze and Clarity's tone run instead right after their global
+twins — Exposure on the same ramp, so the two add in EV; the sliders on
+response tables of their own, measured — and its Temp and Tint right after
+the global white balance, as a move of that white in the light between the
+exposure ramp and Adobe's curve; its Hue turns by degrees in the profile
+stage's reference primaries, and the mask stage's airlight Dehaze does not
+run. Each reads the mask's coverage the mask stage reads (`masks::Cover`).
+Such a recipe also opens its white balance AT As Shot
+(`EditRecipe::open_white_balance_at_as_shot`, stamped wherever a photo's
+as-shot white is), which the white balance stage renders as no move and the
+XMP writer writes as Lightroom's `WhiteBalance="As Shot"`.
 
 **The Effects panel renders since v1.5.0** (`render/finish.rs`), for the same
 revoked policy as the Detail panel below — and for a second reason of its own:

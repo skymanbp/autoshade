@@ -737,6 +737,46 @@ supposed to remove.
   at 0.2 the worst band reads 0.85 L. Negative Texture, the measured
   two-lowpass mix, already sat near Camera Raw (local detail 0.75 against
   0.58 L rms; band means within 0.6 L) and is unchanged.
+- A mask's local controls on a camera-profile start (v1.17.0,
+  `render/mask_cr.rs`, **measured against Adobe Camera Raw 18.4**): one radial
+  mask over the same frame, each local key alone at two to four values, and
+  five global + local pairs. Camera Raw's local Exposure is its global
+  Exposure (a +1 EV frame under a −0.25 EV mask renders as +0.75) and its
+  local Texture renders as the global one; local Highlights, Shadows and
+  Dehaze push 1.1–1.3× their global twins, and Contrast, Whites, Blacks and
+  Clarity's tone are operators of their own. Each of those seven gets a
+  response table of the global tables' form, fitted with the engine in the
+  loop. Local Temp and Tint move the global white — (mired, tint, EV) per
+  sign, 13 constants fitted per render on ±25 … ±100 — blended in the light
+  between the exposure ramp and Adobe's curve (placing it after the curve
+  measured worse). Local Hue is the slider in degrees, a hue turn in
+  ProPhoto primaries (a +50 turns the frame's hues by 65–113° in Lab, as
+  Camera Raw does). Worst moving band |ΔL| / |Δa|,|Δb|, before (the mask
+  stage's own law) → after: Exposure +1 33.00/5.64 → 0.79/0.83, −1
+  12.50/4.63 → 1.80/0.96; Contrast +50 6.72 → 0.95 L; Highlights −60
+  16.57/5.12 → 1.04/2.54; Shadows +60 7.58 → 0.46 L; Whites +40 8.25/1.69 →
+  0.66 L; Blacks −40 12.36 → 1.44 L, +40 12.65 → 0.99 L; Dehaze +40
+  3.88/2.70 → 0.97/1.99, −30 3.26 → 0.99 L; Clarity +50 10.47 → 1.13 L; Temp
+  +50 13.52 → 2.53 ab, −50 18.47 → 1.46 ab; Tint +50 4.20 → 1.30 ab; Hue +50
+  5.61 → 1.20 ab, −50 5.36 → 0.85 ab. Outside the 2 L / 2 ab line: Exposure
+  −0.5 3.11 L (L 90–100, where the global −2 EV reads 3.19), Highlights −60's
+  sky 2.54 b* (the global's 2.37), Dehaze +80 4.01 L (L 90–100; Camera Raw's
+  Dehaze estimates each frame's haze), Temp +50 2.53 ab and ±100 4.30 / 4.24
+  ab, Tint +100 2.64 ab, and Saturation +100 2.63 L / 2.97 ab (its model is
+  unchanged). The best per-render white move leaves 2.4 ab at Temp ±50 and
+  3.2 at ±100 in this placement: no constant removes it. At full size
+  (6144 px) the high-pass (σ 2 px) rms against no move, Camera Raw → engine:
+  Sharpness +50 1.11 → 1.22 at the frame's centre; Noise +50 0.97 → 0.95 at
+  the centre and 0.82 → 0.55 at a corner; Texture +50 1.10 → 1.09 and 1.32 →
+  1.10 (Sharpness and Noise keep the engine's Detail model). Moiré and
+  Defringe +50 move Camera Raw's high-pass by 4 % or less (0.19–0.32 L rms,
+  beside the JPEG's floor), and the engine renders neither. The mask's edge at
+  Feather 50 and 100 sits within 1 L of Camera Raw's; at Feather 0 with the
+  lens profile on, the engine's radial edge lies at 1.045 of the ellipse and
+  Camera Raw's at 1.005 (both at 1.000 with the profile off) — the mask's
+  transport through the lens correction, outside this stage. Carry, ΔE76
+  before → after: p39 5.91 → 5.33 (4.47 with the lens magnification undone),
+  p41 10.52 → 10.42; p36, p38 and p40 carry no mask (6.63, 6.76, 7.99).
 - Camera Raw's Highlights is image-adaptive, and the tables are one frame's.
   On a second frame's bare packet Camera Raw's Highlights −44 darkens L 80–100
   by 4.0–8.3 L where the tables, which reproduce the first frame's −30/−60,

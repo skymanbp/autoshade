@@ -192,7 +192,11 @@ Highlights, Shadows, Whites and Blacks, Dehaze, Temperature and Tint, Clarity
 and Texture move the picture the way Lightroom's do — measured slider by
 slider against Camera Raw — so a sidecar's numbers mean the same picture in
 both. Tint there is Lightroom's own number: the as-shot tint (a Sony frame's
-+14, say) is no move, and the WB eyedropper answers in the same units. The profile files are Adobe's, read from the Camera Raw
++14, say) is no move, and the WB eyedropper answers in the same units.
+A fresh develop on that start opens Temperature and Tint at the photo's As
+Shot values, as Lightroom's sliders do; the custom white balance box stays
+off until you move one, and a saved `.xmp` writes Lightroom's `As Shot` while
+they are untouched. The profile files are Adobe's, read from the Camera Raw
 install on this computer (Lightroom and Photoshop put them there); AutoShade
 ships none. Where they are not installed — and for a JPEG or TIFF — the
 develop starts as it did before v1.17.0, from a **camera-matched base look**:
@@ -535,7 +539,14 @@ AI mask rasters are cached with backend provenance, so a better backend forces
 an honest re-derivation instead of presenting an older alpha as its result.
 
 A selected mask's sliders come in Lightroom's groups — **Tone**, **Detail**,
-**Color**, then the mask's own **Curve**. The **Color** group holds
+**Color**, then the mask's own **Curve**. On a camera-profile start (above)
+a mask's Exposure, Contrast, Highlights, Shadows, Whites, Blacks, Dehaze,
+Clarity, Texture and its **Temp shift** / **Tint shift** move the picture the
+way Lightroom's mask sliders do — measured one by one against Camera Raw —
+and **Hue shift** turns colours by its value in degrees, as Lightroom's does
+(on any other start ±100 is ±30°). A mask's Sharpness, Noise and Saturation
+keep the engine's own model there, and Moiré and Defringe are not rendered.
+The **Color** group holds
 **Saturation**, **Hue shift**, **Temp shift**, **Tint shift** and, since
 v1.17.0, **Color tint** with its **Color tint hue** (Lightroom's mask
 「颜色」 swatch, 「颜色染色」 in the Chinese interface): it shifts every colour
