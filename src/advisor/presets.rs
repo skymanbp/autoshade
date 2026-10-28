@@ -99,6 +99,34 @@ pub const PORTRAIT: Preset = Preset {
                 convert_to_grayscale false.",
 };
 
+/// The skin guardrail's sentence for a recipe on either law: the hue limit
+/// in the field's own units ([`crate::face::skin_hue_max`]) — degrees on a
+/// camera-profile start, ±100 = ±30° otherwise; 8° of turn either way.
+/// [`SKIN_GUARDRAIL`] is the engine law's.
+pub fn skin_guardrail(camera_profile: bool) -> String {
+    if !camera_profile {
+        return SKIN_GUARDRAIL.to_owned();
+    }
+    let hue = crate::face::skin_hue_max(true).floor();
+    SKIN_GUARDRAIL.replacen(
+        "hue within -26..+26 (8 degrees)",
+        &format!("hue within -{hue}..+{hue} (degrees)"),
+        1,
+    )
+}
+
+/// [`preset_guidance`] for a recipe on a law: the portrait look's guardrail
+/// sentence in that law's hue units ([`skin_guardrail`]); every other preset
+/// as it is.
+pub fn preset_guidance_for(id: &str, camera_profile: bool) -> Option<String> {
+    let direction = preset_guidance(id)?;
+    Some(if id == PORTRAIT.id && camera_profile {
+        direction.replacen(SKIN_GUARDRAIL, &skin_guardrail(true), 1)
+    } else {
+        direction.to_owned()
+    })
+}
+
 /// The preset called `id`: one of the six, or [`PORTRAIT`].
 pub fn preset(id: &str) -> Option<&'static Preset> {
     PRESETS.iter().chain(std::iter::once(&PORTRAIT)).find(|p| p.id == id)
@@ -165,7 +193,8 @@ mod tests {
         assert!(!p.direction.contains("  ") && !SKIN_GUARDRAIL.contains("  "), "one space between words");
         assert!(p.direction.contains(SKIN_GUARDRAIL), "the guardrail rides word for word");
         use crate::face::*;
-        let hue = skin_hue_max().floor();
+        let hue = skin_hue_max(false).floor();
+        assert_eq!(SKIN_GUARDRAIL, skin_guardrail(false));
         for number in [
             format!("+{SKIN_SATURATION_MAX} or below"),
             format!("hue within -{hue}..+{hue} ({SKIN_HUE_MAX_DEG} degrees)"),
@@ -179,6 +208,26 @@ mod tests {
         assert!(SKIN_GUARDRAIL.contains("never pushed orange") && SKIN_GUARDRAIL.contains("black-and-white"));
         assert!(p.direction.ends_with(STAY_IN_COLOUR));
         assert!(p.direction.contains("Do not") || p.direction.contains("do not"));
+    }
+
+    /// On a camera-profile start the portrait direction states the hue limit
+    /// in degrees, the units the model's `hue` then means (v1.17.0); on the
+    /// engine law it is the ±100 sentence word for word, and no other preset
+    /// changes with the law.
+    ///
+    /// MUTATION THIS CATCHES: send the engine law's -26..+26 on a
+    /// camera-profile start (26° of turn), or rewrite another preset.
+    #[test]
+    fn the_portrait_direction_states_the_hue_limit_in_the_recipes_law() {
+        let cr = preset_guidance_for("portrait", true).expect("a preset");
+        assert!(cr.contains("hue within -8..+8 (degrees)"), "{cr}");
+        assert!(!cr.contains("-26..+26"), "{cr}");
+        assert_eq!(cr, PORTRAIT.direction.replacen(SKIN_GUARDRAIL, &skin_guardrail(true), 1));
+        assert_eq!(preset_guidance_for("portrait", false).as_deref(), Some(PORTRAIT.direction));
+        for p in PRESETS {
+            assert_eq!(preset_guidance_for(p.id, true).as_deref(), Some(p.direction), "{}", p.id);
+        }
+        assert_eq!(preset_guidance_for("sepia", true), None);
     }
 
     /// Every control a preset names is a control the model's schema has —

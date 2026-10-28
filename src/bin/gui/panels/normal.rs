@@ -249,7 +249,7 @@ impl AutoShadeApp {
                     adherence: autoshade::recipe::DirectionAdherence::new(PRESET_ADHERENCE),
                     embed: autoshade::library::EmbeddingSwitch::OFF,
                 },
-                autoshade::advisor::presets::preset_guidance(id).map(str::to_owned),
+                autoshade::advisor::presets::preset_guidance_for(id, self.recipe.names_profile()),
             ),
             OneClick::References => (
                 GradeRequest {

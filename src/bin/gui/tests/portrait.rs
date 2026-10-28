@@ -443,7 +443,7 @@
         app.start_portrait_look();
         assert!(app.busy && app.analyze_inflight);
         let (req, guidance, library) = app.normal.last_request.clone().expect("the analysis was asked");
-        assert_eq!(guidance.as_deref(), Some(autoshade::advisor::presets::PORTRAIT.direction));
+        assert_eq!(guidance, autoshade::advisor::presets::preset_guidance_for("portrait", app.recipe.names_profile()));
         assert_eq!(req.guide, autoshade::pipeline::Guide::Direction);
         assert_eq!(req.strength.get(), 0.4, "the look strength");
         assert_eq!(library, autoshade::library::DEFAULT_NAME);
@@ -461,7 +461,7 @@
         // What was WRITTEN is what the panel promises — the masks back, the
         // blur kept, the skin held — on disk, not only on the next frame's
         // screen, and the saved mark is the look on screen.
-        let hue = autoshade::face::skin_hue_max();
+        let hue = autoshade::face::skin_hue_max(app.recipe.names_profile());
         let disk: EditRecipe =
             serde_json::from_str(&std::fs::read_to_string(autoshade::store::recipe_target(&src)).unwrap()).unwrap();
         assert_eq!(disk.masks.iter().map(|m| m.role).collect::<Vec<_>>(), roles, "the masks came back before the write");

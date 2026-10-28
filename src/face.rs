@@ -369,8 +369,9 @@ pub fn background_adjustment(subject_raster: String) -> LocalAdjustment {
 // the recipe while the switch is on — a slider, a paste, an AI landing — so
 // the user's hand and the model's answer meet the same limits at one place.
 
-/// The local hue slider's full travel (±100) in degrees: `render::masks`
-/// rotates every hue inside the mask by `hue / 100 × 30°`.
+/// The engine law's local hue travel (±100) in degrees: `render::masks`
+/// rotates every hue inside the mask by `hue / 100 × 30°`. On a
+/// camera-profile start the field IS degrees (`render::mask_cr::hue_px`).
 pub const LOCAL_HUE_FULL_DEG: f32 = 30.0;
 /// Skin saturation may be lifted by at most this much (fading it is free).
 pub const SKIN_SATURATION_MAX: f32 = 15.0;
@@ -385,9 +386,12 @@ pub const SKIN_CLARITY_MIN: f32 = -40.0;
 /// Skin is never sharpened: local sharpness at most 0 (negative softens).
 pub const SKIN_SHARPNESS_MAX: f32 = 0.0;
 
-/// The local hue limit in the field's own units (±100 = ±30°).
-pub fn skin_hue_max() -> f32 {
-    SKIN_HUE_MAX_DEG / LOCAL_HUE_FULL_DEG * 100.0
+/// The local hue limit in the field's own units, which depend on the law
+/// the recipe renders through: degrees on a camera-profile start
+/// (`camera_profile`, [`crate::recipe::EditRecipe::names_profile`]), ±100 =
+/// ±30° otherwise. Either way the limit is [`SKIN_HUE_MAX_DEG`] of turn.
+pub fn skin_hue_max(camera_profile: bool) -> f32 {
+    if camera_profile { SKIN_HUE_MAX_DEG } else { SKIN_HUE_MAX_DEG / LOCAL_HUE_FULL_DEG * 100.0 }
 }
 
 /// Does "Keep skin natural" hold a mask with this role?
@@ -396,11 +400,11 @@ pub fn guards_skin(role: MaskRole) -> bool {
 }
 
 /// Pull one mask's skin controls back inside the limits; `true` when anything
-/// moved. The role is the caller's question ([`guards_skin`]); this only
-/// clamps.
-pub fn keep_skin_natural(m: &mut LocalAdjustment) -> bool {
+/// moved. The role is the caller's question ([`guards_skin`]), and so is the
+/// law its hue is read in ([`skin_hue_max`]); this only clamps.
+pub fn keep_skin_natural(m: &mut LocalAdjustment, camera_profile: bool) -> bool {
     let before = [m.saturation, m.hue, m.temperature, m.texture, m.clarity, m.sharpness];
-    let hue = skin_hue_max();
+    let hue = skin_hue_max(camera_profile);
     m.saturation = m.saturation.min(SKIN_SATURATION_MAX);
     m.hue = m.hue.clamp(-hue, hue);
     m.temperature = m.temperature.clamp(-SKIN_TEMPERATURE_MAX, SKIN_TEMPERATURE_MAX);
@@ -416,13 +420,14 @@ pub fn keep_skin_natural(m: &mut LocalAdjustment) -> bool {
 /// opens with the switch off, because opening never changes a value.
 pub fn skin_values_beyond(recipe: &crate::recipe::EditRecipe) -> usize {
     let fields = |m: &LocalAdjustment| [m.saturation, m.hue, m.temperature, m.texture, m.clarity, m.sharpness];
+    let camera_profile = recipe.names_profile();
     recipe
         .masks
         .iter()
         .filter(|m| guards_skin(m.role))
         .map(|m| {
             let mut held = m.clone();
-            keep_skin_natural(&mut held);
+            keep_skin_natural(&mut held, camera_profile);
             fields(m).iter().zip(fields(&held)).filter(|(a, b)| *a != b).count()
         })
         .sum()
@@ -431,7 +436,8 @@ pub fn skin_values_beyond(recipe: &crate::recipe::EditRecipe) -> usize {
 /// [`keep_skin_natural`] over every skin-covering mask of `recipe`; `true`
 /// when anything moved.
 pub fn keep_skin_natural_in(recipe: &mut crate::recipe::EditRecipe) -> bool {
-    recipe.masks.iter_mut().filter(|m| guards_skin(m.role)).fold(false, |moved, m| keep_skin_natural(m) | moved)
+    let camera_profile = recipe.names_profile();
+    recipe.masks.iter_mut().filter(|m| guards_skin(m.role)).fold(false, |moved, m| keep_skin_natural(m, camera_profile) | moved)
 }
 
 // ── The face masks a proposal asks for ──────────────────────────────────────
@@ -845,17 +851,26 @@ mod tests {
     ///
     /// MUTATION THIS CATCHES: delete (or loosen) any one of the six clamps in
     /// `keep_skin_natural` and its row fails; clamp a free direction (fading
-    /// saturation, adding texture) and the "inside" column fails.
+    /// saturation, adding texture) and the "inside" column fails; read the
+    /// hue limit in one law's units on both starts and the 8° row fails on
+    /// the other (26.67° on a camera-profile start, 2.4° on the engine's).
     #[test]
     fn the_skin_guardrail_holds_each_limit_and_nothing_else() {
+        assert!((skin_hue_max(false) - 26.666_666).abs() < 1e-3, "8° of the ±100 = ±30° travel: {}", skin_hue_max(false));
+        assert_eq!(skin_hue_max(true), SKIN_HUE_MAX_DEG, "8° on a camera-profile start, where the field is degrees");
+        for camera_profile in [false, true] {
+            the_skin_guardrail_holds_each_limit_on(camera_profile);
+        }
+    }
+
+    fn the_skin_guardrail_holds_each_limit_on(camera_profile: bool) {
         type Field = fn(&mut LocalAdjustment) -> &mut f32;
-        let hue = skin_hue_max();
-        assert!((hue - 26.666_666).abs() < 1e-3, "8° of the ±30° hue travel: {hue}");
+        let hue = skin_hue_max(camera_profile);
         // (field, past the limit → the limit, a value inside that stays)
         let rows: [(&str, Field, f32, f32, f32); 9] = [
             ("saturation up", |m| &mut m.saturation, 60.0, SKIN_SATURATION_MAX, -80.0),
-            ("hue +", |m| &mut m.hue, 100.0, hue, 20.0),
-            ("hue −", |m| &mut m.hue, -100.0, -hue, -20.0),
+            ("hue +", |m| &mut m.hue, 100.0, hue, 0.75 * hue),
+            ("hue −", |m| &mut m.hue, -100.0, -hue, -0.75 * hue),
             ("warmer", |m| &mut m.temperature, 70.0, SKIN_TEMPERATURE_MAX, 15.0),
             ("cooler", |m| &mut m.temperature, -70.0, -SKIN_TEMPERATURE_MAX, -15.0),
             ("texture", |m| &mut m.texture, -100.0, SKIN_TEXTURE_MIN, 40.0),
@@ -866,16 +881,36 @@ mod tests {
         for (what, field, past, limit, inside) in rows {
             let mut m = LocalAdjustment { role: MaskRole::Skin, exposure_ev: 0.3, ..Default::default() };
             *field(&mut m) = past;
-            let moved = keep_skin_natural(&mut m);
+            let moved = keep_skin_natural(&mut m, camera_profile);
             assert_eq!(*field(&mut m), limit, "{what}: past the limit comes back to it");
             assert_eq!(moved, past != limit, "{what}: reports whether it moved");
             let mut expect = LocalAdjustment { role: MaskRole::Skin, exposure_ev: 0.3, ..Default::default() };
             *field(&mut expect) = limit;
             assert_eq!(m, expect, "{what}: no other field moves");
             *field(&mut m) = inside;
-            assert!(!keep_skin_natural(&mut m), "{what}: {inside} is inside");
+            assert!(!keep_skin_natural(&mut m, camera_profile), "{what}: {inside} is inside");
             assert_eq!(*field(&mut m), inside);
         }
+    }
+
+    /// On a camera-profile start the recipe-level guard reads the hue in
+    /// degrees: a face turned 20° comes back to 8°, where the engine law's
+    /// 26.67 (= 8° of its ±30° travel) would have let it through.
+    ///
+    /// MUTATION THIS CATCHES: hand `keep_skin_natural` a fixed law in
+    /// `keep_skin_natural_in` / `skin_values_beyond`.
+    #[test]
+    fn the_skin_guardrail_reads_the_hue_in_the_recipes_own_law() {
+        let face = || LocalAdjustment { role: MaskRole::Face, hue: 20.0, ..Default::default() };
+        let mut cr = crate::recipe::EditRecipe { camera_profile: "Adobe Standard".into(), masks: vec![face()], ..Default::default() };
+        assert!(cr.names_profile());
+        assert_eq!(skin_values_beyond(&cr), 1);
+        assert!(keep_skin_natural_in(&mut cr));
+        assert_eq!(cr.masks[0].hue, SKIN_HUE_MAX_DEG);
+        let mut engine = crate::recipe::EditRecipe { masks: vec![face()], ..Default::default() };
+        assert_eq!(skin_values_beyond(&engine), 0, "20 of ±100 is 6° on the engine law");
+        assert!(!keep_skin_natural_in(&mut engine));
+        assert_eq!(engine.masks[0].hue, 20.0);
     }
 
     /// The guardrail holds the skin and face masks and no other: the eyes
