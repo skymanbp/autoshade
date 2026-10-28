@@ -698,10 +698,18 @@ pub(crate) struct OverlayKey {
 /// Messages from worker threads back to the UI. The large payloads are boxed so
 /// the channel message stays small (clippy::large_enum_variant).
 pub(crate) enum Msg {
-    /// Decoded base + the photo's camera-matched base-look knots (empty for
-    /// non-RAW sources, missing embedded previews, or a near-identity map —
-    /// see `render::camera_base_knots`).
+    /// Decoded base + the photo's fresh start and the base part it was
+    /// developed under (see [`OpenedBase`]).
     Opened(Box<anyhow::Result<OpenedBase>>),
+    /// The source base re-developed under another base part (v1.17.0): the
+    /// canvas recipe's camera profile or Look changed under a source-based
+    /// card, and a preview develop cannot add a profile to pixels that lack
+    /// it. Lands only while the photo and the wanted part still match.
+    BaseRedeveloped {
+        path: PathBuf,
+        part: autoshade::render::BasePart,
+        img: Box<anyhow::Result<Arc<image::DynamicImage>>>,
+    },
     // (MasterLoaded carries the SPAWN-time edge and file stamp: the landing
     // used to stat and read preferences at completion time, filing the
     // pixels under an identity they never had — L12-2/L12-6.)
@@ -1673,8 +1681,11 @@ pub(crate) type BaseCacheKey = (PathBuf, u32, FileStamp, PixelIdentity);
 /// rendition (restores as a Generated variant — no parametric XMP).
 pub(crate) type BakedBase = (Arc<image::DynamicImage>, PathBuf, bool);
 
-/// A decoded preview base + the photo's camera-matched base-look knots
-/// (`render::camera_base_knots`; empty = no base look) + its in-camera lens
+/// A decoded preview base + the photo's FRESH start and the base part the
+/// pixels were developed under (v1.17.0: `pipeline::CanvasStart` — Lightroom's
+/// Adobe Color canvas where this machine can render it, else the
+/// camera-matched base curve — and `render::BasePart`, which the canvas
+/// compares against its recipe's own) + its in-camera lens
 /// profile (`pipeline::fresh_lens_profile`; default = none available) + its
 /// as-shot WB anchor (`render::as_shot_wb`; None = unknown → 5500 K).
 /// The sixth element is the decode's IDENTITY, captured in the worker BEFORE
@@ -1683,7 +1694,7 @@ pub(crate) type BakedBase = (Arc<image::DynamicImage>, PathBuf, bool);
 /// state — the curve-memo rule.
 pub(crate) type OpenedBase = (
     Arc<image::DynamicImage>,
-    Vec<[f32; 2]>,
+    (autoshade::pipeline::CanvasStart, autoshade::render::BasePart),
     autoshade::recipe::LensProfile,
     Option<(f32, f32)>,
     Option<BakedBase>,

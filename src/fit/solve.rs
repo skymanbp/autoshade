@@ -569,13 +569,18 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // is the base curve's output — `tone_map` above maps base-render luma to
     // target luma), but `residual_tone_curve` samples the recipe's FULL LUT,
     // whose input is the NEUTRAL domain. Rebase the map through the base
-    // LUT: full(x) = user_map(base(x)). An EMPTY base curve skips the rebase
+    // LUT: full(x) = user_map(base(x)). A base with no starting tone skips the rebase
     // outright — build_tone_lut's sRGB↔linear round trip is only ~1e-7 from
     // identity, but skipping keeps the default-base wrapper literally
     // bit-for-bit the old fit (review R16 #3).
+    // The base's starting tone is the camera curve — or, since v1.17.0, the
+    // creative Look's baked half on a named profile's start (Adobe Color's
+    // S-curve on every fresh canvas). Either one is a base rendition the
+    // sliders sit on, so either one is rebased through.
+    let base_toned = !base.starting_curve().is_empty() || base.baked_look().is_some();
     let base_lut = render::build_tone_lut(base);
     let full_map = |x: f32| {
-        if base.base_curve.is_empty() { tone_map(x) } else { tone_map(render::sample_lut(&base_lut, x)) }
+        if !base_toned { tone_map(x) } else { tone_map(render::sample_lut(&base_lut, x)) }
     };
     let mut withheld_samples = Vec::new();
     for (bin, range) in evidence.luma.iter().enumerate() {
@@ -585,7 +590,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         let lo = bin as f32 / EVIDENCE_LUMA_BINS as f32;
         let hi = (bin + 1) as f32 / EVIDENCE_LUMA_BINS as f32;
         for level in [lo, 0.5 * (lo + hi), hi] {
-            let raw = if base.base_curve.is_empty() {
+            let raw = if !base_toned {
                 level
             } else {
                 let index = base_lut.partition_point(|&value| value < level).min(base_lut.len() - 1);
@@ -602,7 +607,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // support closes for the sliders.
     let supported_x = |x: f32| {
         let user =
-            if base.base_curve.is_empty() { x } else { render::sample_lut(&base_lut, x) };
+            if !base_toned { x } else { render::sample_lut(&base_lut, x) };
         luma_supported(user)
     };
     recipe.tone_curve = if tone_deliverable {

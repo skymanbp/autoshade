@@ -1435,18 +1435,20 @@ pub const RECIPE_CONTROLS: [Control; 116] = [
                   machine, never from a bundled copy",
     },
     Control {
-        // Read from `<crs:Look>`, rendered, and NOT written: the element keeps
-        // its verbatim merge path, which is stricter than re-serialising it.
+        // Read from `<crs:Look>`, rendered, and — since v1.17.0, when the
+        // fresh canvas starts from 「Adobe Color」 — WRITTEN too: a fresh
+        // document and a merge onto a base without a Look get the element
+        // (`xmp::write::look_elem`); a base's own Look keeps its verbatim
+        // merge path, which is stricter than re-serialising it.
         name: "look",
         shape: Shape::EngineCarrier,
         range: None,
         neutral: "absent = no creative profile",
         engine_only: true,
-        crs: CrsKey::None,
-        tier: Some(Tier::RenderedNotExported),
-        purpose: "the creative profile's BAKED half — its tone curves, its baked slider moves \
-                  and its black-and-white switch (the creative colour table it also names is \
-                  disclosed, not rendered)",
+        crs: CrsKey::Family("<crs:Look> element"),
+        tier: Some(Tier::Rendered),
+        purpose: "the creative profile — its colour table (read from Camera Raw's install), \
+                  its tone curves, its baked slider moves and its black-and-white switch",
     },
     Control {
         name: "base_curve",

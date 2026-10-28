@@ -979,12 +979,14 @@ pub struct NoSpotInsideLimit {
 /// `out`. Non-XMP by nature (pixel edits don't serialise to ACR).
 ///
 /// `full_res` heals the full-sensor develop (e.g. 61 MP) for a RAW; otherwise a
-/// ≤2048px thumbnail of the SAME develop. Both are the engine's own neutral
-/// develop — never the camera's baked 8-bit JPEG preview, which this used to
-/// heal: that swapped the canvas onto camera-curve pixels mid-session (visible
-/// brightness jump) and put every later slider/export on a different tone
-/// chain than before the heal. Detection runs on a downscaled JPEG —
-/// coordinates are normalised, so placement is resolution-independent.
+/// ≤2048px thumbnail of the SAME develop. Both are the engine's own BASE
+/// develop of `part` ([`crate::render::base_develop`], v1.17.0 — the canvas's
+/// profile stage and nothing after it) — never the camera's baked 8-bit JPEG
+/// preview, which this used to heal: that swapped the canvas onto camera-curve
+/// pixels mid-session (visible brightness jump) and put every later
+/// slider/export on a different tone chain than before the heal. Detection
+/// runs on a downscaled JPEG — coordinates are normalised, so placement is
+/// resolution-independent.
 ///
 /// `limit` is an optional mask raster (luma, white = inside) that holds the
 /// heal to one area: every spot found — by the AI or from the painted mask —
@@ -993,9 +995,11 @@ pub struct NoSpotInsideLimit {
 /// at the mask's edge reaches a little past it (cutting the disc at the
 /// edge would leave half a blemish). `None` heals every spot, as before the
 /// limit existed.
+#[allow(clippy::too_many_arguments)] // the heal's own inputs: config, source, its base part, two spot sources, resolution, limit, output
 pub fn heal(
     cfg: &Config,
     src_path: &Path,
+    part: &crate::render::BasePart,
     manual_mask: Option<&Path>,
     auto_detect: bool,
     full_res: bool,
@@ -1023,7 +1027,7 @@ pub fn heal(
     // by the same contract — the flag used to be ignored for baked sources, so
     // a "preview mode" heal still processed (and saved) an entire
     // high-resolution TIFF/JPEG.
-    let base = crate::render::source_pixels(src_path, (!full_res).then_some(2048))?;
+    let base = crate::render::source_pixels_for(src_path, part, (!full_res).then_some(2048))?;
     let (w, h) = (base.width(), base.height());
 
     let mut spots: Vec<HealSpot> = Vec::new();
@@ -1235,6 +1239,7 @@ fn reattach_alpha(healed: DynamicImage, alpha: Option<Vec<u16>>) -> DynamicImage
 /// no AI. Output is the same ./out pixel master as heal (non-XMP by nature).
 pub fn clone_stamp(
     src_path: &Path,
+    part: &crate::render::BasePart,
     mask_path: &Path,
     source_norm: (f32, f32),
     full_res: bool,
@@ -1247,9 +1252,9 @@ pub fn clone_stamp(
     // bytes — is refused by the same guard. No-op for the GUI (unique_out).
     crate::pipeline::preflight_out(out, src_path)?;
     // Same base contract as `heal`, through the same one dispatch: the engine's
-    // OWN neutral develop (full or ≤2048px), never the camera's baked preview —
-    // see the heal doc comment.
-    let base = crate::render::source_pixels(src_path, (!full_res).then_some(2048))?;
+    // OWN base develop of `part` (full or ≤2048px), never the camera's baked
+    // preview — see the heal doc comment.
+    let base = crate::render::source_pixels_for(src_path, part, (!full_res).then_some(2048))?;
     let (w, h) = (base.width(), base.height());
 
     let m = crate::render::open_mask_bounded(mask_path)
@@ -1361,7 +1366,7 @@ mod tests {
         let lib = dir.join("library");
         std::fs::create_dir_all(&lib).unwrap();
         let src = lib.join("photo.arw");
-        let e = match clone_stamp(&src, &lib.join("mask.png"), (0.5, 0.5), false, &lib.join("photo.arw")) {
+        let e = match clone_stamp(&src, &crate::render::BasePart::default(), &lib.join("mask.png"), (0.5, 0.5), false, &lib.join("photo.arw")) {
             Ok(_) => panic!("a library output must refuse"),
             Err(e) => e.to_string(),
         };
@@ -1417,7 +1422,7 @@ mod tests {
         mask.save(&maskp).unwrap();
         let outp = out_dir.join("healed.png");
         let rep =
-            heal(&Config::load(), &srcp, Some(&maskp), false, true, None, &outp).unwrap();
+            heal(&Config::load(), &srcp, &crate::render::BasePart::default(), Some(&maskp), false, true, None, &outp).unwrap();
         assert!(rep.spots >= 1);
         let healed = image::open(&outp).unwrap();
         assert!(
@@ -1637,11 +1642,11 @@ mod tests {
         mask.save(&maskp).unwrap();
         let cfg = crate::config::Config::load();
         let out_small = out_dir.join("small-out.png");
-        heal(&cfg, &src, Some(&maskp), false, false, None, &out_small).unwrap();
+        heal(&cfg, &src, &crate::render::BasePart::default(), Some(&maskp), false, false, None, &out_small).unwrap();
         let d = image::image_dimensions(&out_small).unwrap();
         assert_eq!(d.0.max(d.1), 2048, "without --full-res the saved master IS the 2048px thumbnail");
         let out_full = out_dir.join("full-out.png");
-        heal(&cfg, &src, Some(&maskp), false, true, None, &out_full).unwrap();
+        heal(&cfg, &src, &crate::render::BasePart::default(), Some(&maskp), false, true, None, &out_full).unwrap();
         let d = image::image_dimensions(&out_full).unwrap();
         assert_eq!((d.0, d.1), (3000, 2000), "with --full-res the source resolution survives");
         let _ = std::fs::remove_dir_all(&root);
@@ -1695,7 +1700,7 @@ mod tests {
     fn a_limit_mask_heals_the_spot_inside_it_and_leaves_the_one_outside() {
         let (root, srcp, maskp, limitp, src) = two_defect_fixture("inside");
         let outp = root.join("exports").join("limited.png");
-        let rep = heal(&Config::load(), &srcp, Some(&maskp), false, true, Some(&limitp), &outp).unwrap();
+        let rep = heal(&Config::load(), &srcp, &crate::render::BasePart::default(), Some(&maskp), false, true, Some(&limitp), &outp).unwrap();
         assert_eq!(rep.spots, 1, "one spot inside the limit, one healed");
         let out = image::open(&outp).unwrap().to_rgb8();
         assert!(out.get_pixel(16, 32).0[0] > 150, "the left defect is healed, got {:?}", out.get_pixel(16, 32));
@@ -1707,7 +1712,7 @@ mod tests {
         // A limit that holds none of the spots refuses, typed, and writes nothing.
         let none = root.join("library").join("none.png");
         image::GrayImage::new(8, 8).save(&none).unwrap();
-        let err = heal(&Config::load(), &srcp, Some(&maskp), false, true, Some(&none), &root.join("exports").join("none-out.png"))
+        let err = heal(&Config::load(), &srcp, &crate::render::BasePart::default(), Some(&maskp), false, true, Some(&none), &root.join("exports").join("none-out.png"))
             .err()
             .expect("nothing inside the limit");
         assert_eq!(err.downcast_ref::<NoSpotInsideLimit>().map(|e| e.found), Some(2), "{err:#}");
@@ -1722,7 +1727,7 @@ mod tests {
     fn without_a_limit_the_heal_is_byte_identical_to_the_engine_on_every_planned_spot() {
         let (root, srcp, maskp, _limitp, src) = two_defect_fixture("none");
         let outp = root.join("exports").join("unlimited.png");
-        let rep = heal(&Config::load(), &srcp, Some(&maskp), false, true, None, &outp).unwrap();
+        let rep = heal(&Config::load(), &srcp, &crate::render::BasePart::default(), Some(&maskp), false, true, None, &outp).unwrap();
         let (planned, _) = plan_from_mask(&image::open(&maskp).unwrap().to_rgba8());
         assert_eq!(planned.len(), 2);
         let mut expect = src.clone();
@@ -1733,7 +1738,7 @@ mod tests {
         let whole = root.join("library").join("whole.png");
         image::GrayImage::from_pixel(8, 8, image::Luma([255])).save(&whole).unwrap();
         let outw = root.join("exports").join("whole-out.png");
-        heal(&Config::load(), &srcp, Some(&maskp), false, true, Some(&whole), &outw).unwrap();
+        heal(&Config::load(), &srcp, &crate::render::BasePart::default(), Some(&maskp), false, true, Some(&whole), &outw).unwrap();
         assert_eq!(image::open(&outw).unwrap().to_rgb8(), expect, "a limit over the whole frame is no limit");
         let _ = std::fs::remove_dir_all(&root);
     }

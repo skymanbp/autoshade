@@ -1327,7 +1327,8 @@ fn probe_real_raw_base_look() {
         "embedded_preview: {:?}",
         cam_probe.as_ref().map(|o| o.as_ref().map(|i| (i.width(), i.height())))
     );
-    let knots = crate::pipeline::photo_base_knots(&raw);
+    let knots = crate::pipeline::photo_base_knots_checked_in(&raw, &crate::diag::photo(&raw))
+        .unwrap_or_default();
     println!("knots: {knots:?}");
     // The corner question on this photo, both readings and both answers.
     if let Ok(Some(cam)) = &cam_probe {
@@ -1401,57 +1402,57 @@ fn probe_real_raw_base_look() {
     );
 }
 
-/// v1.17.0 — exactly ONE starting tone. When a camera profile stage renders
-/// the photograph, its tone (own curve or Adobe's default) is the start, so
-/// the camera-matched `base_curve` stamped on open does not ALSO apply; a
-/// creative Look's baked curve still composes on top.
+/// v1.17.0 — exactly ONE starting tone, decided from the recipe
+/// (`EditRecipe::starting_curve`). A recipe that names a camera profile starts
+/// from the profile's tone (own curve or Adobe's default), so a camera-matched
+/// `base_curve` it still carries does not ALSO apply — in the export and in
+/// every preview develop alike; a creative Look's baked curve still composes
+/// on top.
 ///
-/// MUTATION: return the recipe unchanged when profiled, or drop the Look along
-/// with the base curve.
+/// MUTATION: return `base_curve` from `starting_curve` whatever the recipe
+/// names, or drop the Look along with the base curve.
 #[test]
-fn a_rendering_camera_profile_is_the_only_starting_tone() {
+fn a_named_camera_profile_is_the_only_starting_tone() {
     use crate::recipe::{CreativeLook, CurvePoint};
     let lift = vec![[0.0, 0.0], [0.25, 0.4], [0.5, 0.7], [1.0, 1.0]];
-    let stamped = EditRecipe { base_curve: lift, contrast: 20.0, ..Default::default() };
+    let stamped = EditRecipe { base_curve: lift.clone(), contrast: 20.0, ..Default::default() };
     let unstamped = EditRecipe { contrast: 20.0, ..Default::default() };
     assert_ne!(build_tone_lut(&stamped), build_tone_lut(&unstamped), "the base curve is tone work");
-    let one = super::tone::one_starting_tone(&stamped, true);
-    assert!(one.base_curve.is_empty(), "a rendering profile replaces the base curve");
-    assert_eq!(build_tone_lut(&one), build_tone_lut(&unstamped), "…and nothing else moved");
-    // The Look's baked curve is still the start's next step.
+    let profiled = EditRecipe { camera_profile: "Adobe Standard".into(), ..stamped.clone() };
+    assert!(profiled.starting_curve().is_empty(), "a named profile replaces the base curve");
+    assert_eq!(build_tone_lut(&profiled), build_tone_lut(&unstamped), "…and nothing else moved");
+    // The Look's own base profile names a profile too, and its baked curve is
+    // still the start's next step.
     let knot = |input, output| CurvePoint { input, output };
     let look = CreativeLook {
         name: "Adobe Color".to_string(),
         amount: 1.0,
+        base_profile: "Adobe Standard".to_string(),
         tone_curve: vec![knot(0, 0), knot(40, 35), knot(224, 230), knot(255, 255)],
         ..Default::default()
     };
-    let with_look = EditRecipe { look: Some(look.clone()), ..stamped.clone() };
-    let one = super::tone::one_starting_tone(&with_look, true);
-    assert_eq!(one.look, Some(look), "the Look rides through");
+    let with_look = EditRecipe { look: Some(look), ..stamped.clone() };
+    assert!(with_look.starting_curve().is_empty());
     assert_eq!(
-        build_tone_lut(&one),
+        build_tone_lut(&with_look),
         build_tone_lut(&EditRecipe { base_curve: Vec::new(), ..with_look.clone() }),
     );
+    assert_ne!(build_tone_lut(&with_look), build_tone_lut(&unstamped), "the Look's curve renders");
 }
 
-/// Without a profile stage — every fresh open of a RAW with no sidecar, whose
-/// `camera_profile` is empty — the tone stage reads the SAME recipe, so the
-/// render is byte-identical to what it was.
+/// Without a named profile — an old recipe, and every fresh open on a machine
+/// that cannot render Lightroom's canvas — the stamped base curve IS the
+/// start, bit for bit as before v1.17.0.
 ///
-/// MUTATION: clear the base curve whatever `profiled` says.
+/// MUTATION: clear the base curve whatever the recipe names.
 #[test]
-fn without_a_profile_stage_the_recipe_reaches_the_tone_untouched() {
+fn without_a_named_profile_the_base_curve_is_the_start() {
     let lift = vec![[0.0, 0.0], [0.25, 0.4], [0.5, 0.7], [1.0, 1.0]];
-    let fresh = EditRecipe { base_curve: lift, ..Default::default() };
-    assert!(fresh.camera_profile.is_empty());
-    let same = super::tone::one_starting_tone(&fresh, false);
-    assert!(matches!(same, std::borrow::Cow::Borrowed(r) if std::ptr::eq(r, &fresh)), "untouched");
-    let (a, b) = (build_tone_lut(&same), build_tone_lut(&fresh));
-    assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()), "bit for bit");
-    // A profiled recipe with nothing stamped is untouched too.
-    let bare = EditRecipe::default();
-    assert!(matches!(super::tone::one_starting_tone(&bare, true), std::borrow::Cow::Borrowed(_)));
+    let fresh = EditRecipe { base_curve: lift.clone(), ..Default::default() };
+    assert!(!fresh.names_profile());
+    assert_eq!(fresh.starting_curve(), lift.as_slice(), "untouched");
+    assert!(fresh.has_tone_work(), "the curve is tone work");
+    assert_ne!(build_tone_lut(&fresh), build_tone_lut(&EditRecipe::default()));
 }
 
 /// CALIBRATION (env-gated, `AUTOSHADE_FIT_CALIBRATION_DIR`): a sidecar that

@@ -1074,8 +1074,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Open photo…", "打开照片…"),
     ("Ctrl+O · or drag a file into the window", "Ctrl+O · 或直接拖拽进窗口"),
     ("Reset", "重置"),
-    ("Back to this photo's fresh-open look: sliders neutral on the camera's own default colour and tone, like the in-camera JPEG (one undo brings it back)", "回到本照片刚打开的状态：全部滑杆归中性、保留相机自带的默认色调（接近机内 JPEG）（一步撤销可回来）"),
-    ("saved before this version's camera default tone — renders as originally tuned; Reset switches to the camera's own default colour and tone", "此存档保存于相机默认色调功能之前——按原样渲染；「重置」可切换到相机自带的默认色调"),
+    ("Back to this photo's fresh-open look: sliders neutral on its starting look — Lightroom's Adobe Color where Camera Raw is installed, else the camera's own default tone (one undo brings it back)", "回到本照片刚打开的状态：全部滑杆归中性，回到起点外观——装有 Camera Raw 时为 Lightroom 的 Adobe Color，否则为相机自带的默认色调（一步撤销可回来）"),
+    ("saved before this version's starting look — renders as originally tuned; Reset switches to the photo's fresh starting look", "此存档保存于当前起点外观之前——按原样渲染；「重置」可切换到本照片新的起点外观"),
+    ("the canvas could not be developed under this photo's camera profile ({err})", "画布无法按本照片的相机配置文件渲染（{err}）"),
     ("↶ Undo", "↶ 撤销"),
     ("↷ Redo", "↷ 重做"),
 

@@ -53,8 +53,7 @@ pub fn render_source_checked(
     let source = match read_pixel_source(raw) {
         Some((master, generated)) => {
             if generated {
-                recipe.base_curve = Vec::new();
-                recipe.lens_profile = Default::default();
+                recipe.strip_baked_start();
                 // Batch-30 rule, applied where every surface renders: baked
                 // pixels carry their white balance, so the absolute anchor is
                 // stripped — a CLI/web render of a generated master must

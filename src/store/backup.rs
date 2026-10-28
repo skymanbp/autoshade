@@ -354,11 +354,11 @@ fn snapshot_xmp_text(src: &Path, text: String) -> std::io::Result<Option<u32>> {
         eprintln!("⚠ {note}");
     }
     derived.clamp();
-    // Stamp like the GUI's XMP-only RESTORE does (fresh camera knots + the
+    // Stamp like the GUI's XMP-only RESTORE does (the import's start + the
     // in-camera lens profile): a verbatim derived snapshot loaded back would
     // render on the dark base without corrections.
     if derived.base_curve.is_empty() {
-        derived.base_curve = crate::pipeline::photo_base_knots(src);
+        crate::pipeline::stamp_import_start(src, &mut derived, &diag);
     }
     derived.lens_profile = crate::pipeline::fresh_lens_profile(src);
     // Third calibration half: a foreign (Lightroom) Temperature is ABSOLUTE

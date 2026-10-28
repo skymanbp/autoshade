@@ -462,19 +462,26 @@ fn carry_icc_onto_staged(
 
 /// Denoise a source into a full-resolution 16-bit master at `out` (the GUI's
 /// 「AI Denoise now」, which lands the master as a new ◈ card, and the CLI's
-/// baked arm). A RAW goes through the engine's neutral develop with the
+/// baked arm). A RAW goes through the engine's base develop of `part`
+/// (v1.17.0, [`crate::render::base_develop`] — the profile the photograph
+/// starts from, which the card's preview develop cannot add later) with the
 /// denoise on its sensor mosaic ([`denoise_mosaic`], before demosaic) — the
 /// full sensor, always: the ≤2048 px working-copy tier retired on 2026-09-15
 /// (user decision), because a master baked from it capped every later export
 /// of that card at 2048 px. A baked PNG/TIFF/JPEG is denoised as-is through
 /// SCUNet.
-pub fn denoise_active(opts: &DenoiseOpts, input: &Path, out: &Path) -> Result<()> {
+pub fn denoise_active(
+    opts: &DenoiseOpts,
+    input: &Path,
+    part: &crate::render::BasePart,
+    out: &Path,
+) -> Result<()> {
     if crate::decode::is_raw(input) {
         // The only arm that needs no pixels in memory: the full-res develop
         // denoises INSIDE the engine and writes `out` itself (16-bit).
         crate::render::render_to_file(
             input,
-            &crate::recipe::EditRecipe::default(),
+            &part.recipe(),
             out,
             Some(opts),
             None,
@@ -1210,7 +1217,7 @@ mod tests {
             let input = dir.join("in.png");
             img.save(&input).unwrap();
             let out = dir.join("out.png");
-            denoise_active(&opts, &input, &out).expect("the stand-in product is accepted");
+            denoise_active(&opts, &input, &crate::render::BasePart::default(), &out).expect("the stand-in product is accepted");
             assert_eq!(tag_of(&out).as_deref(), want, "{name}: the master's tag");
             let _ = std::fs::remove_dir_all(&dir);
         }
@@ -1310,7 +1317,7 @@ mod tests {
         let out = dir.join("out.png");
 
         // `denoise_active` is what `main::denoise_cmd`'s baked arm calls…
-        let err = denoise_active(&opts, &input, &out).unwrap_err().to_string();
+        let err = denoise_active(&opts, &input, &crate::render::BasePart::default(), &out).unwrap_err().to_string();
         assert!(err.contains("denoise sidecar not found"), "{err}");
         // …and no deliverable may be left behind claiming otherwise.
         assert!(!out.exists(), "a refused denoise must not publish an output");

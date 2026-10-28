@@ -419,7 +419,8 @@ pub fn reimagine(
 /// typed words ride verbatim. The generative result is composited back over
 /// the base so only the masked region is re-rendered.
 ///
-/// For a RAW the base is the engine's OWN neutral develop — a ≤2048px
+/// For a RAW the base is the engine's OWN base develop of `part` (v1.17.0,
+/// [`crate::render::base_develop`]) — a ≤2048px
 /// thumbnail by default, the full sensor (e.g. 61 MP) with `full_res` so the
 /// untouched area keeps native resolution (slow; the regenerated patch is
 /// upscaled). It is deliberately NOT the camera's baked 8-bit preview, which
@@ -429,9 +430,11 @@ pub fn reimagine(
 /// either way, so `full_res` changes nothing. This is the CLI's and the
 /// browser's fill; the GUI hands [`retouch_onto`] the active card's
 /// developed picture instead.
+#[allow(clippy::too_many_arguments)] // the fill's own inputs: config, source, its base part, mask, words, quality, resolution, output
 pub fn retouch(
     cfg: &Config,
     raw_path: &Path,
+    part: &crate::render::BasePart,
     mask_path: &Path,
     prompt: &str,
     quality: &str,
@@ -447,7 +450,7 @@ pub fn retouch(
     retouch_onto(
         cfg,
         raw_path,
-        || crate::render::source_pixels(raw_path, (raw && !full_res).then_some(2048)),
+        || crate::render::source_pixels_for(raw_path, part, (raw && !full_res).then_some(2048)),
         if full_res && raw { "full-res" } else { "preview" },
         &FillJob { mask_path, prompt, quality, out, layer: false },
     )
@@ -3228,11 +3231,11 @@ mod tests {
         ]);
         let cfg = stub_cfg(url);
         let removed = dir.join("exports").join("removed.png");
-        retouch(&cfg, &input, &mask, "   ", "auto", false, &removed)
+        retouch(&cfg, &input, &crate::render::BasePart::default(), &mask, "   ", "auto", false, &removed)
             .expect("the loopback fill with a blank prompt succeeds");
         assert!(removed.is_file(), "the removal composite landed");
         let filled = dir.join("exports").join("filled.png");
-        retouch(&cfg, &input, &mask, "extend the sky", "auto", false, &filled)
+        retouch(&cfg, &input, &crate::render::BasePart::default(), &mask, "extend the sky", "auto", false, &filled)
             .expect("the loopback fill with typed words succeeds");
         bounded_join(handle);
         let bodies = seen.lock().unwrap().clone();
@@ -3882,7 +3885,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("is a directory"), "preflight must answer first: {e}");
-        let e = retouch(&cfg, Path::new("no-such-input.arw"), Path::new("m.png"), "p", "auto", false, &dir)
+        let e = retouch(&cfg, Path::new("no-such-input.arw"), &crate::render::BasePart::default(), Path::new("m.png"), "p", "auto", false, &dir)
             .unwrap_err()
             .to_string();
         assert!(e.contains("is a directory"), "retouch too: {e}");

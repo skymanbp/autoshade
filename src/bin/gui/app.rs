@@ -187,21 +187,30 @@ pub(crate) struct AutoShadeApp {
     // Paste-to-selected wrote the open photo's store: (path, exact recipe
     // written) so Msg::Pasted can advance the ● baseline on full success.
     pub(crate) pasted_open: Option<(PathBuf, EditRecipe)>,
-    // The OPEN photo's fresh camera-matched base-look knots (computed by the
-    // open worker, empty for non-RAW / no preview). Reset re-stamps these so
-    // "reset" always means the fresh-open look — including on a photo whose
-    // legacy save carries no curve and therefore opened dark.
-    pub(crate) photo_knots: Vec<[f32; 2]>,
+    // The OPEN photo's fresh START (computed by the open worker, v1.17.0):
+    // Lightroom's Adobe Color canvas where this machine can render it, else
+    // the camera-matched base-look knots (empty for non-RAW / no preview).
+    // Reset re-stamps it so "reset" always means the fresh-open look —
+    // including on a photo whose legacy save carries no curve and therefore
+    // opened dark.
+    pub(crate) photo_start: autoshade::pipeline::CanvasStart,
+    // The base part `source_preview` was developed under (v1.17.0,
+    // `render::BasePart`): a source-based canvas whose recipe names another
+    // is re-developed before it is shown (`ensure_source_part`).
+    pub(crate) source_part: autoshade::render::BasePart,
+    // The part a source re-develop is in flight for, so a held slider does
+    // not queue a second one.
+    pub(crate) source_part_inflight: Option<autoshade::render::BasePart>,
     // This photo's in-camera lens profile (open worker) — the twin of
-    // photo_knots: Reset re-stamps it, legacy toggles re-enable from it.
+    // photo_start: Reset re-stamps it, legacy toggles re-enable from it.
     pub(crate) photo_lens: autoshade::recipe::LensProfile,
     // This photo's as-shot WB anchor (open worker) — the third calibration
     // half: Reset re-stamps it, the Temp slider and eyedropper anchor on it.
     pub(crate) photo_as_shot: Option<(f32, f32)>,
-    // The base_curve baked into `before_tex`. The Before pane mirrors the
-    // canvas recipe's calibration (Reset / paste / restore can change it), so
-    // a mismatch triggers a cheap rebuild in `update`.
-    pub(crate) before_curve: Vec<[f32; 2]>,
+    // The start baked into `before_tex` (`EditRecipe::start_only`). The Before
+    // pane mirrors the canvas recipe's start (Reset / paste / restore can
+    // change it), so a mismatch triggers a cheap rebuild in `update`.
+    pub(crate) before_start: EditRecipe,
     // The title-bar ✕ was intercepted with unsaved edits: show the in-app
     // save-all / discard / cancel layer until the user decides.
     pub(crate) confirm_quit: bool,
@@ -1169,7 +1178,7 @@ impl AutoShadeApp {
                         self.open_path(path);
                     }
                     if full && action(ui, ready, tr(lang, "Reset"))
-                        .on_hover_text(tr(lang, "Back to this photo's fresh-open look: sliders neutral on the camera's own default colour and tone, like the in-camera JPEG (one undo brings it back)"))
+                        .on_hover_text(tr(lang, "Back to this photo's fresh-open look: sliders neutral on its starting look — Lightroom's Adobe Color where Camera Raw is installed, else the camera's own default tone (one undo brings it back)"))
                         .clicked()
                     {
                         // Reset = the fresh-open look: sliders neutral on this
@@ -1182,8 +1191,10 @@ impl AutoShadeApp {
                         // develop that still needs the calibration on top —
                         // stripping there turned Reset into "go dark".
                         let generated = self.active_on_ai_pixels();
-                        let base_curve =
-                            if generated { Vec::new() } else { self.photo_knots.clone() };
+                        // The fresh START (v1.17.0): the canvas profile and
+                        // Look, or the camera curve where they cannot render.
+                        let start =
+                            if generated { Default::default() } else { self.photo_start.clone() };
                         // The lens profile is the same kind of calibration: Reset
                         // re-stamps the photo's own (a Generated master's pixels
                         // already carry the corrections — none re-applied).
@@ -1196,13 +1207,15 @@ impl AutoShadeApp {
                             Some((k, t)) if !generated => (Some(k), Some(t)),
                             _ => (None, None),
                         };
-                        self.recipe = EditRecipe {
-                            base_curve,
+                        let mut fresh = EditRecipe {
                             lens_profile,
                             as_shot_k,
                             as_shot_tint,
                             ..EditRecipe::default()
                         };
+                        let start: autoshade::pipeline::CanvasStart = start;
+                        start.stamp(&mut fresh);
+                        self.recipe = fresh;
                         self.region = None;
                         self.dirty = true;
                         // The old AI rationale/verdict describe the recipe Reset
@@ -1876,10 +1889,12 @@ impl Default for AutoShadeApp {
             master_cache: Vec::new(),
             open_unresolved: false,
             pasted_open: None,
-            photo_knots: Vec::new(),
+            photo_start: Default::default(),
+            source_part: Default::default(),
+            source_part_inflight: None,
             photo_lens: Default::default(),
             photo_as_shot: None,
-            before_curve: Vec::new(),
+            before_start: EditRecipe::default(),
             confirm_quit: false,
             mask_name_buf: None,
             gallery_scroll_to: None,
@@ -2183,11 +2198,11 @@ impl AutoShadeApp {
             // recipe's curve is empty by construction, so this compare is
             // simply quiet there.
             && !self.active_on_ai_pixels()
-            && self.recipe.base_curve != self.before_curve
+            && self.recipe.start_only() != self.before_start
             && let Some(b) = self.base_preview.clone()
         {
-            let curve = self.recipe.base_curve.clone();
-            self.set_before(ctx, &b, &curve);
+            let start = self.recipe.start_only();
+            self.set_before(ctx, &b, &start);
         }
         // A held-still pointer still needs a repaint to receive the result.
         if self.dirty && !self.develop_inflight {

@@ -792,7 +792,8 @@ mod tests {
         // 2. base-look estimation: `render_to_image` at the 2048 working edge —
         //    the stage that dominated the R27 table.
         let knots = if want("cal") {
-            let k = crate::pipeline::photo_base_knots(&raw);
+            let k = crate::pipeline::photo_base_knots_checked_in(&raw, &crate::diag::photo(&raw))
+                .unwrap_or_default();
             println!("  cal     peak commit {:>6} MB ({} knots)", peak_commit_mb(), k.len());
             k
         } else {

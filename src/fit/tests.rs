@@ -7201,18 +7201,21 @@ fn detail_fit_writes_texture_only_from_two_sided_evidence() {
 fn ground_truth_parameter_recovery_uses_the_evidence_population() {
     let Some(root) = calibration_corpus() else { return };
     let raw = root.join("source.arw");
-    let source = if raw.exists() {
-        render::render_to_image(&raw, &EditRecipe::default(), None, Some(ANALYZE_EDGE))
-            .expect("develop calibration source.arw")
-    } else {
-        image::open(root.join("neutral.jpg")).expect("calibration neutral.jpg")
-    };
-    let source = source.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
     let base = if raw.exists() {
         crate::pipeline::calibration_recipe(crate::pipeline::fit_calibration(&raw))
     } else {
         EditRecipe::default()
     };
+    // v1.17.0: the source is developed under the base's camera profile — the
+    // profile stage runs inside the RAW develop, so a base that names one
+    // composes onto pixels that already carry it (`pipeline::fit_source`).
+    let source = if raw.exists() {
+        render::base_develop(&raw, &render::BasePart::of(&base), Some(ANALYZE_EDGE))
+            .expect("develop calibration source.arw")
+    } else {
+        image::open(root.join("neutral.jpg")).expect("calibration neutral.jpg")
+    };
+    let source = source.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
     let mut truth = base.clone();
     truth.exposure_ev = 0.45;
     truth.contrast = 18.0;
@@ -7796,6 +7799,18 @@ fn hsl_band_budget_is_monotone_across_the_three_strength_stops() {
 /// left less to carry: fan 4.0° (10.2°), fit 0.0800 -> 0.0282 (0.0800 ->
 /// 0.0251), confidence 0.489 (0.496).
 ///
+/// Re-measured 2026-10-27 for v1.17.0's canvas: the fit source is now the
+/// base develop under the photo's camera profile (Adobe Standard with the
+/// Adobe Color look, `pipeline::fit_source`), not a neutral develop under
+/// the camera curve — loaded here exactly as `match` loads it. Both pairs
+/// start nearer their targets. `p40` is admitted at 3.2° (11.4°), fit
+/// 0.0631 -> 0.0398 (0.0676 -> 0.0410), confidence 0.545 (0.556). `p41`'s
+/// curves are withheld again by the pixel-aligned re-hue veto — the
+/// 2026-09-02 outcome — so they never reach the fan gate, which therefore
+/// costs it nothing; fit 0.0696 -> 0.0219 (0.0800 -> 0.0282), confidence
+/// 0.482 (0.489). Neither the fan refusal nor the projection appears on
+/// either pair.
+///
 /// Both pairs are OPTIONAL, like every other corpus pair: absent, the
 /// test says so and passes, and the synthetic two-temperature fixture
 /// carries the refusal side of the same question on its own.
@@ -7807,8 +7822,8 @@ fn the_fan_gate_costs_a_real_two_temperature_pair_nothing() {
     use crate::rationale::keys;
     let Some(root) = calibration_corpus() else { return };
     for (code, want_fan, want_before, want_after, want_conf) in [
-        ("p40", 11.4f32, 0.0676f32, 0.0410f32, 0.556f32),
-        ("p41", 4.0, 0.0800, 0.0282, 0.489),
+        ("p40", Some(3.2f32), 0.0631f32, 0.0398f32, 0.545f32),
+        ("p41", None, 0.0696, 0.0219, 0.482),
     ] {
         let raw = root.join(format!("{code}.arw"));
         let target_path = root.join(format!("{code}-target.jpg"));
@@ -7819,38 +7834,51 @@ fn the_fan_gate_costs_a_real_two_temperature_pair_nothing() {
             );
             continue;
         }
-        // Loaded exactly as CLI `match` loads a RAW: the frame developed
-        // at the default recipe on a 2048 edge, against the calibration
-        // recipe as the base.
-        let src = render::render_to_image(&raw, &EditRecipe::default(), None, Some(2048))
-            .expect("develop the two-temperature RAW");
+        // Loaded exactly as CLI `match` loads a RAW (`pipeline::fit_source`):
+        // the frame developed under the calibration's camera profile on a
+        // 2048 edge, against the calibration recipe as the base.
+        let (src, base) = crate::pipeline::fit_source(&raw).expect("develop the two-temperature RAW");
         let tgt = image::open(target_path).expect("the finished rendition");
-        let base = crate::pipeline::calibration_recipe(crate::pipeline::fit_calibration(&raw));
         let report = fit_recipe_from(&src, &tgt, &base);
-        // The cast SHIPS — which is the whole claim, and what makes the
-        // fan reading below exist: the gate publishes what it passed on
-        // only when it admits.
-        assert!(
-            report.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED),
-            "{code}: this pair's cast is the thing the gate is supposed to cost nothing, and it \
-                 did not ship: {}",
-            report.recipe.rationale
-        );
-        let fan = projection_arg(&report, keys::FIT_NOTE_CAST_ADMITTED_FAN, "fan")
-            .expect("an admitted cast on a two-temperature frame publishes the fan it passed on");
         eprintln!(
-            "TWO_TEMPERATURE {code} gate_fan={fan:.1} err={:.6}->{:.6} conf={:.6}",
-            report.err_before, report.err_after, report.recipe.confidence
+            "TWO_TEMPERATURE {code} err={:.6}->{:.6} conf={:.6} rehue_blocked={}",
+            report.err_before,
+            report.err_after,
+            report.recipe.confidence,
+            report.notes.iter().any(|n| n.key == keys::FIT_NOTE_REHUE_BLOCKED)
         );
-        assert!(
-            (fan - want_fan).abs() <= 0.6,
-            "{code}: the cast's published fan moved off the measured {want_fan}°: {fan:.1}°"
-        );
-        assert!(
-            fan < FAN_DEG,
-            "{code}: the fan gate now convicts a real two-temperature pair ({fan:.1}° \
-                 against {FAN_DEG}°) — that is the cost this test exists to measure"
-        );
+        match want_fan {
+            // The cast SHIPS — which is what makes the fan reading below
+            // exist: the gate publishes what it passed on only when it admits.
+            Some(want_fan) => {
+                assert!(
+                    report.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED),
+                    "{code}: this pair's cast is the thing the gate is supposed to cost nothing, \
+                     and it did not ship: {}",
+                    report.recipe.rationale
+                );
+                let fan = projection_arg(&report, keys::FIT_NOTE_CAST_ADMITTED_FAN, "fan")
+                    .expect("an admitted cast on a two-temperature frame publishes the fan it passed on");
+                eprintln!("TWO_TEMPERATURE {code} gate_fan={fan:.1}");
+                assert!(
+                    (fan - want_fan).abs() <= 0.6,
+                    "{code}: the cast's published fan moved off the measured {want_fan}°: {fan:.1}°"
+                );
+                assert!(
+                    fan < FAN_DEG,
+                    "{code}: the fan gate now convicts a real two-temperature pair ({fan:.1}° \
+                     against {FAN_DEG}°) — that is the cost this test exists to measure"
+                );
+            }
+            // The curves never reach the fan gate: the pixel-aligned re-hue
+            // veto upstream withheld them (the 2026-09-02 record's outcome
+            // for p41). The gate costs this pair nothing because it never ran.
+            None => assert!(
+                report.notes.iter().any(|n| n.key == keys::FIT_NOTE_REHUE_BLOCKED),
+                "{code}: the measured outcome is the re-hue veto withholding the curves: {}",
+                report.recipe.rationale
+            ),
+        }
         assert!(
             !report.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HUE_FANNED
                 || n.key == keys::FIT_NOTE_CAST_PROJECTED),

@@ -405,8 +405,7 @@ pub(crate) fn read_saved_develop_locked(src: &std::path::Path) -> RestoredDevelo
 pub(crate) fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) -> EditRecipe {
     let mut r = pasted.clone();
     if !autoshade::decode::is_raw(target) {
-        r.base_curve = Vec::new();
-        r.lens_profile = Default::default();
+        r.strip_baked_start();
         // A baked image carries no camera WB metadata to anchor on.
         r.as_shot_k = None;
         r.as_shot_tint = None;
@@ -439,6 +438,10 @@ pub(crate) fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) ->
                     let _ = autoshade::pipeline::repair_pre_era_base_curve(target, &mut saved);
                     r.version = saved.version;
                     r.base_curve = saved.base_curve;
+                    // …and the camera profile and Look the curve stands for
+                    // (v1.17.0): the target's start, never the source's.
+                    r.camera_profile = saved.camera_profile;
+                    r.look = saved.look;
                     // A saved develop owns its profile verbatim — including any
                     // user toggle and the legacy default-off.
                     r.lens_profile = saved.lens_profile;
@@ -696,13 +699,15 @@ pub(crate) fn coord_migration_failure_sentence(lang: Lang, err: &str) -> String 
 /// reinterpret the saved look).
 pub(crate) fn stamp_calibration(
     recipe: &mut EditRecipe,
-    knots: &[[f32; 2]],
+    start: &autoshade::pipeline::CanvasStart,
     lens: &autoshade::recipe::LensProfile,
     as_shot: Option<(f32, f32)>,
 ) {
-    if !knots.is_empty() {
-        recipe.base_curve = knots.to_vec();
-    }
+    // v1.17.0: the START — a document that names its own camera profile
+    // starts from it (and so carries no camera curve); one that names none
+    // takes the photo's fresh start, Lightroom's canvas or the camera curve
+    // (`pipeline::CanvasStart::stamp_import`, the library's one rule).
+    start.stamp_import(recipe);
     recipe.lens_profile = lens.clone();
     if recipe.as_shot_k.is_none()
         && let Some((k, t)) = as_shot
@@ -735,11 +740,14 @@ pub(crate) fn stamp_calibration(
 pub(crate) fn reconcile_snapshot_calibration(
     r: &mut EditRecipe,
     onto_pixel_state: bool,
-    calibration: impl FnOnce() -> (Vec<[f32; 2]>, autoshade::recipe::LensProfile, Option<(f32, f32)>),
+    calibration: impl FnOnce() -> (
+        autoshade::pipeline::CanvasStart,
+        autoshade::recipe::LensProfile,
+        Option<(f32, f32)>,
+    ),
 ) -> bool {
     if onto_pixel_state {
-        r.base_curve = Vec::new();
-        r.lens_profile = Default::default();
+        r.strip_baked_start();
         // The anchor too: baked pixels carry a baked white balance, so an
         // absolute-Kelvin claim over them would be false — a generated canvas
         // keeps the relative 5500 model.
@@ -747,12 +755,12 @@ pub(crate) fn reconcile_snapshot_calibration(
         r.as_shot_tint = None;
         return false;
     }
-    if !r.base_curve.is_empty() {
-        return false; // the snapshot brought its own calibration
+    if !r.base_curve.is_empty() || r.names_profile() {
+        return false; // the snapshot brought its own start
     }
-    let (knots, lens, as_shot) = calibration();
-    let stamped = !knots.is_empty();
-    stamp_calibration(r, &knots, &lens, as_shot);
+    let (start, lens, as_shot) = calibration();
+    let stamped = !start.is_empty();
+    stamp_calibration(r, &start, &lens, as_shot);
     if stamped {
         // The era stamp rides WITH the curve — the paste rule every other
         // stamper follows (`pipeline::stamp_fit_calibration`,

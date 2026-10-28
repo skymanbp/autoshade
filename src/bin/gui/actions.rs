@@ -477,24 +477,26 @@ impl AutoShadeApp {
                     // pixels and knots under its own key, and a popup-driven
                     // px change mid-flight mislabelled the edge.
                     let src_ident = (edge, file_stamp(&path), pixel_identity(&path));
-                    let (thumb, knots, lens, as_shot) = if autoshade::decode::is_raw(&path) {
+                    let (thumb, start, lens, as_shot) = if autoshade::decode::is_raw(&path) {
                         // Identity BEFORE the read: the primed answer below
                         // is filed under the content it was computed FROM —
                         // stat'ing after the multi-second develop filed a
                         // mid-open replacement's NEW identity with the OLD
                         // content's answer.
                         let ident = autoshade::pipeline::curve_ident(&path);
+                        // The BASE part this photo's develop starts from
+                        // (v1.17.0): its saved develop's camera profile and
+                        // Look, else the fresh canvas's. Developed under it so
+                        // the common open pays ONE develop; a canvas recipe
+                        // that settles on another part is re-developed by the
+                        // canvas itself (`ensure_source_part`).
+                        let part = autoshade::pipeline::photo_base_part(&path);
                         // Developed AT the working edge (the cap runs before
                         // tone/geometry): opening a 61 MP RAW no longer keeps
                         // a full-resolution develop resident just to be
                         // thumbnailed — the knots estimate below is CDF
                         // statistics and reads the same at working res.
-                        let full = autoshade::render::render_to_image(
-                            &path,
-                            &EditRecipe::default(),
-                            None,
-                            Some(edge),
-                        )?;
+                        let full = autoshade::render::base_develop(&path, &part, Some(edge))?;
                         // In-camera lens profile (Sony 0x70xx): one cheap TIFF
                         // parse, stamped all-available-on (the user default).
                         let lens = autoshade::pipeline::fresh_lens_profile(&path);
@@ -502,7 +504,10 @@ impl AutoShadeApp {
                         // demosaic) — the Temp slider then speaks absolute
                         // Kelvin for this photo.
                         let as_shot = autoshade::render::as_shot_wb(&path);
-                        // Camera-matched base look: CDF-match the neutral
+                        // The fresh START (v1.17.0): Lightroom's Adobe Color
+                        // canvas where this machine's Camera Raw install can
+                        // render it — no estimate paid. Otherwise the
+                        // camera-matched base look: CDF-match the neutral
                         // develop against the camera's own rendition, paired
                         // like with like by the one entry all three open
                         // paths share — the frame the rendition shows, and
@@ -510,35 +515,61 @@ impl AutoShadeApp {
                         // shows it (render::camera_base_look).
                         // A RAW with no embedded preview (or a decode hiccup)
                         // just opens without a base look — never a failure.
-                        let knots = match autoshade::decode::embedded_preview(&path) {
-                            Ok(Some(cam)) => {
-                                match autoshade::render::camera_base_look(&full, &lens, &cam) {
-                                    // The ANSWER primes the repair memo: the
-                                    // open already paid this develop, and
-                                    // discarding the result made every later
-                                    // repair site (Ctrl+Z, variant switch,
-                                    // Ctrl+S) pay a second full decode on
-                                    // the UI thread. Answers only — an
-                                    // inability stays uncached so the next
-                                    // reader retries.
-                                    Some(k) => {
-                                        autoshade::pipeline::prime_curve_memo(
-                                            &path,
-                                            ident,
-                                            k.clone(),
-                                        );
-                                        k
-                                    }
-                                    // None = could not judge. For an OPEN
-                                    // that is the same as no base look — the
-                                    // repair path is where the distinction
-                                    // decides whether a SAVED curve may be
-                                    // replaced.
-                                    None => Vec::new(),
+                        // The decision is the library's one
+                        // (`pipeline::fresh_canvas_start_with`); the estimate
+                        // below runs only when it is asked for.
+                        let estimate = || -> Vec<[f32; 2]> {
+                            // The estimate needs the NEUTRAL develop. `full` is
+                            // it unless a saved develop names a profile; that
+                            // case pays its own neutral develop, and only here.
+                            let neutral = if part.is_neutral() {
+                                None
+                            } else {
+                                match autoshade::render::render_to_image(
+                                    &path,
+                                    &EditRecipe::default(),
+                                    None,
+                                    Some(edge),
+                                ) {
+                                    Ok(n) => Some(n),
+                                    Err(_) => return Vec::new(),
                                 }
+                            };
+                            match autoshade::decode::embedded_preview(&path) {
+                                Ok(Some(cam)) => {
+                                    match autoshade::render::camera_base_look(neutral.as_ref().unwrap_or(&full), &lens, &cam) {
+                                        // The ANSWER primes the repair memo: the
+                                        // open already paid this develop, and
+                                        // discarding the result made every later
+                                        // repair site (Ctrl+Z, variant switch,
+                                        // Ctrl+S) pay a second full decode on
+                                        // the UI thread. Answers only — an
+                                        // inability stays uncached so the next
+                                        // reader retries.
+                                        Some(k) => {
+                                            autoshade::pipeline::prime_curve_memo(
+                                                &path,
+                                                ident,
+                                                k.clone(),
+                                            );
+                                            k
+                                        }
+                                        // None = could not judge. For an OPEN
+                                        // that is the same as no base look — the
+                                        // repair path is where the distinction
+                                        // decides whether a SAVED curve may be
+                                        // replaced.
+                                        None => Vec::new(),
+                                    }
+                                }
+                                _ => Vec::new(),
                             }
-                            _ => Vec::new(),
                         };
+                        let start = autoshade::pipeline::fresh_canvas_start_with(
+                            &path,
+                            &autoshade::diag::photo(&path),
+                            estimate,
+                        );
                         // render_to_image already developed AT the working edge
                         // — `full` IS the thumb. The unconditional
                         // `full.thumbnail(edge, edge)` here duplicated a
@@ -549,12 +580,12 @@ impl AutoShadeApp {
                         } else {
                             full
                         };
-                        (thumb, knots, lens, as_shot)
+                        (thumb, (start, part), lens, as_shot)
                     } else {
                         (
                             // baked-by-construction: the !is_raw arm of the open (branch above).
                             autoshade::decode::load_image(&path)?.thumbnail(edge, edge),
-                            Vec::new(),
+                            Default::default(),
                             Default::default(),
                             None,
                         )
@@ -589,7 +620,7 @@ impl AutoShadeApp {
                     );
                     // Arc once here so every downstream sharer (variants, the
                     // preview worker) is an O(1) refcount bump, not a deep copy.
-                    Ok((Arc::new(thumb), knots, lens, as_shot, baked, src_ident, baked_note))
+                    Ok((Arc::new(thumb), start, lens, as_shot, baked, src_ident, baked_note))
                 })();
                 Msg::Opened(Box::new(res))
             },
@@ -1095,8 +1126,8 @@ impl AutoShadeApp {
             // healed pixels, not the dark neutral), while a Generated
             // variant's recipe carries an empty curve by construction — the
             // same expression serves both.
-            let curve = self.recipe.base_curve.clone();
-            self.set_before(ctx, &base, &curve);
+            let start = self.recipe.start_only();
+            self.set_before(ctx, &base, &start);
             self.base_preview = Some(base);
             // A fresh transparent paint mask sized to THIS base (a generated
             // raster and the source neutral can differ in dimensions).
@@ -2109,7 +2140,7 @@ impl AutoShadeApp {
                     || {
                         let (k, t) = autoshade::pipeline::fresh_as_shot_wb(&src);
                         (
-                            autoshade::pipeline::photo_base_knots(&src),
+                            autoshade::pipeline::fresh_canvas_start(&src, &autoshade::diag::photo(&src)),
                             autoshade::pipeline::fresh_lens_profile(&src),
                             k.zip(t),
                         )
@@ -2516,8 +2547,8 @@ impl AutoShadeApp {
             // Same rule as load_active: the canvas recipe's own curve serves
             // every variant (a Generated recipe's curve is empty by
             // construction; an InPlace master is neutral and needs it).
-            let curve = self.recipe.base_curve.clone();
-            self.set_before(ctx, &base, &curve);
+            let start = self.recipe.start_only();
+            self.set_before(ctx, &base, &start);
             self.base_preview = Some(base);
             self.rebind_paint_canvas(mw, mh);
         }
@@ -2684,8 +2715,8 @@ impl AutoShadeApp {
         // wrong coordinates. A live brush session dies with the old frame,
         // disclosed, exactly as at every other replacement door.
         if let Some(b) = self.base_preview.clone() {
-            let curve = self.recipe.base_curve.clone();
-            self.set_before(ctx, &b, &curve);
+            let start = self.recipe.start_only();
+            self.set_before(ctx, &b, &start);
             let (mw, mh) = b.dimensions();
             self.rebind_paint_canvas(mw, mh);
         }
@@ -3097,12 +3128,10 @@ impl AutoShadeApp {
                     // curve (the paste rule): this WRITES recipe.json, and a
                     // canvas-era stamp over a saved era-1 curve would launder
                     // it past every repair.
+                    // Every calibration half, the start (v1.17.0) included,
+                    // through the one stamper.
                     let cal = autoshade::pipeline::photo_calibration(p);
-                    disk.version = cal.version;
-                    disk.base_curve = cal.base_curve;
-                    disk.lens_profile = cal.lens_profile;
-                    disk.as_shot_k = cal.as_shot_k;
-                    disk.as_shot_tint = cal.as_shot_tint;
+                    autoshade::pipeline::stamp_fit_calibration(&mut disk, cal);
                 }
                 // The WRITER's rule (Ctrl+S, api_xmp): a stashed canvas whose
                 // open-time estimate failed still carries the washed pre-era

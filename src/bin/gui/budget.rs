@@ -255,9 +255,11 @@ mod tests {
                 }
             }
         }
-        // Fourteen wiring points: the v1.5.0 thirteen plus the generated
+        // Fifteen wiring points: the v1.5.0 thirteen plus the generated
         // image adjust worker (2026-09-20). Like fill, it develops the card
         // before the model call and holds a permit for that whole worker.
+        // v1.17.0 adds the canvas re-develop (`ensure_source_part`), a
+        // full-frame RAW develop under the recipe's camera profile.
         // `budget.rs` itself is the definition and its own tests, not a wiring
         // site.
         const CENSUS: [(&str, usize); 5] = [
@@ -265,7 +267,7 @@ mod tests {
             ("export.rs", 2),
             ("masks.rs", 1),
             ("retouch.rs", 7),
-            ("workers.rs", 1),
+            ("workers.rs", 2),
         ];
         let gui_src =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("bin").join("gui");
@@ -298,7 +300,7 @@ mod tests {
             "the budget wiring moved: every heavy full-frame path takes a permit, \
              and this census is where a new one is declared",
         );
-        assert_eq!(found.values().sum::<usize>(), 14, "fourteen wiring points");
+        assert_eq!(found.values().sum::<usize>(), 15, "fifteen wiring points");
     }
 }
 

@@ -11,7 +11,13 @@ fn developed_card_pixels(
     full_res: bool,
 ) -> anyhow::Result<image::DynamicImage> {
     let raw = autoshade::decode::is_raw(path);
-    let base = autoshade::render::source_pixels(path, (raw && !full_res).then_some(2048))?;
+    // The card's own base (v1.17.0): the profile and Look table its recipe
+    // names are in the pixels the preview develop below is handed.
+    let base = autoshade::render::source_pixels_for(
+        path,
+        &autoshade::render::BasePart::of(recipe),
+        (raw && !full_res).then_some(2048),
+    )?;
     Ok(autoshade::render::develop_preview_framed(
         &base,
         recipe,
@@ -479,6 +485,10 @@ impl AutoShadeApp {
         let edge = self.canvas_edge(); // bake at the CANVAS's res (canvas_edge)
         let out_claim = out.clone(); // release the claim on failure (worker tail)
         let out_panic = out.clone(); // …and on a worker panic (see the error closure)
+        // The master is baked over the canvas's own base (v1.17.0): its
+        // recipe's camera profile and Look table, which the card's preview
+        // develop cannot add afterwards.
+        let part = autoshade::render::BasePart::of(&self.recipe);
         let (epoch, _flag) = self.arm_cancel(); // local compute: Cancel = abandon (epoch discard)
         self.spawn_worker(
             move || {
@@ -497,7 +507,7 @@ impl AutoShadeApp {
                     // test stands in for the billed detect + heal.
                     let rep = match runner {
                         Some(run) => run(&path, limit.as_deref(), &out),
-                        None => autoshade::retouch::heal(&cfg, &path, mask_tmp.as_deref(), !use_mask, full_res, limit.as_deref(), &out),
+                        None => autoshade::retouch::heal(&cfg, &path, &part, mask_tmp.as_deref(), !use_mask, full_res, limit.as_deref(), &out),
                     };
                     if let Some(t) = &mask_tmp {
                         let _ = std::fs::remove_file(t);
@@ -570,6 +580,10 @@ impl AutoShadeApp {
         let edge = self.canvas_edge(); // show at the CANVAS's res (canvas_edge)
         let out_claim = out.clone(); // release the claim on failure (worker tail)
         let out_panic = out.clone(); // …and on a worker panic (see the error closure)
+        // The master is baked over the canvas's own base (v1.17.0): its
+        // recipe's camera profile and Look table, which the card's preview
+        // develop cannot add afterwards.
+        let part = autoshade::render::BasePart::of(&self.recipe);
         let (epoch, _flag) = self.arm_cancel(); // sidecar compute: Cancel = abandon (epoch discard)
         self.spawn_worker(
             move || {
@@ -578,7 +592,7 @@ impl AutoShadeApp {
                     let cfg = autoshade::config::Config::load();
                     let opts =
                         autoshade::denoise::DenoiseOpts::from_config(&cfg, None, strength);
-                    autoshade::denoise::denoise_active(&opts, &path, &out)?;
+                    autoshade::denoise::denoise_active(&opts, &path, &part, &out)?;
                     // baked-by-construction: the pixel master this job just wrote.
                     let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
                     // NewDenoised: a new ◈ card hangs off the master.
@@ -635,6 +649,10 @@ impl AutoShadeApp {
         let edge = self.canvas_edge(); // show at the CANVAS's res (canvas_edge)
         let out_claim = out.clone(); // release the claim on failure (worker tail)
         let out_panic = out.clone(); // …and on a worker panic (see the error closure)
+        // The master is baked over the canvas's own base (v1.17.0): its
+        // recipe's camera profile and Look table, which the card's preview
+        // develop cannot add afterwards.
+        let part = autoshade::render::BasePart::of(&self.recipe);
         let (epoch, _flag) = self.arm_cancel(); // local compute: Cancel = abandon (epoch discard)
         self.spawn_worker(
             move || {
@@ -650,7 +668,7 @@ impl AutoShadeApp {
                         // nothing to find and costs a little (`MergeOptions`).
                         align: (!tripod).then_some(autoshade::stack::align::AlignParams::DEFAULT),
                     };
-                    let done = autoshade::stack::stack_files(&inputs, &opts, None, &out)?;
+                    let done = autoshade::stack::stack_files(&inputs, &part, &opts, None, &out)?;
                     // baked-by-construction: the pixel master this job just wrote.
                     let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
                     let m = &done.merged;
@@ -717,6 +735,10 @@ impl AutoShadeApp {
         let edge = self.canvas_edge(); // bake at the CANVAS's res (canvas_edge)
         let out_claim = out.clone(); // release the claim on failure (worker tail)
         let out_panic = out.clone(); // …and on a worker panic (see the error closure)
+        // The master is baked over the canvas's own base (v1.17.0): its
+        // recipe's camera profile and Look table, which the card's preview
+        // develop cannot add afterwards.
+        let part = autoshade::render::BasePart::of(&self.recipe);
         let (epoch, _flag) = self.arm_cancel(); // local compute: Cancel = abandon (epoch discard)
         self.spawn_worker(
             move || {
@@ -724,7 +746,7 @@ impl AutoShadeApp {
                 let res = (|| -> RetouchDone {
                     let mask_tmp = gui_tmp_png("clone");
                     std::fs::write(&mask_tmp, &mask_png)?;
-                    let rep = autoshade::retouch::clone_stamp(&path, &mask_tmp, src_pt, full_res, &out);
+                    let rep = autoshade::retouch::clone_stamp(&path, &part, &mask_tmp, src_pt, full_res, &out);
                     let _ = std::fs::remove_file(&mask_tmp);
                     let rep = rep?;
                     // baked-by-construction: the pixel master this job just wrote.

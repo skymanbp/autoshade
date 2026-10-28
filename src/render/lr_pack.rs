@@ -91,7 +91,7 @@ pub(super) fn codes(root: &Path) -> Vec<String> {
 /// paying a develop per sidecar.
 pub(super) fn import(xmp: &str, base: &Path, calibration: &Calibration) -> EditRecipe {
     let mut r = crate::xmp::xmp_to_recipe_for_photo(xmp, base);
-    r.base_curve = calibration.base_curve.clone();
+    calibration.start.stamp_import(&mut r);
     r.as_shot_k = calibration.as_shot_k;
     r.as_shot_tint = calibration.as_shot_tint;
     r.lens_profile = crate::pipeline::fresh_lens_profile_for_sidecar(base, Some(xmp));
@@ -100,7 +100,7 @@ pub(super) fn import(xmp: &str, base: &Path, calibration: &Calibration) -> EditR
 
 /// The photograph's own calibration — estimated once for the whole pack.
 pub(super) struct Calibration {
-    base_curve: Vec<[f32; 2]>,
+    start: crate::pipeline::CanvasStart,
     as_shot_k: Option<f32>,
     as_shot_tint: Option<f32>,
 }
@@ -108,7 +108,8 @@ pub(super) struct Calibration {
 impl Calibration {
     pub(super) fn of(base: &Path) -> Self {
         let (as_shot_k, as_shot_tint) = crate::pipeline::fresh_as_shot_wb(base);
-        Self { base_curve: crate::pipeline::photo_base_knots(base), as_shot_k, as_shot_tint }
+        let start = crate::pipeline::fresh_canvas_start(base, &crate::diag::photo(base));
+        Self { start, as_shot_k, as_shot_tint }
     }
 }
 

@@ -147,10 +147,9 @@ fn xmp_arm(
         return None;
     }
     clamp_disclosed(&mut r, imported_clamp, warns);
-    let knots = autoshade::pipeline::photo_base_knots(p);
-    if !knots.is_empty() {
-        r.base_curve = knots;
-    }
+    // The import's START (v1.17.0): its own camera profile when it names one,
+    // else the photo's fresh start — the open's rule (`stamp_calibration`).
+    autoshade::pipeline::stamp_import_start(p, &mut r, &autoshade::diag::photo(p));
     // The SIDECAR-aware form (R29 Batch-3): this is the one stamp site that
     // holds the document and the photograph at the same moment, so it is the
     // one that can tell "no warp because Lightroom drew no correction" from
@@ -794,17 +793,26 @@ impl AutoShadeApp {
                                 let recipe = match resolve_snapshot_develop(p, &snap, &mut photo_warns)? {
                                     Some((r, _kind)) => r,
                                     // No saved develop → export what the canvas
-                                    // WOULD show: neutral + the photo's camera-
-                                    // matched base look (one extra develop per
-                                    // photo; without it the batch export of an
-                                    // unedited RAW comes out on the dark base
-                                    // while its open canvas shows the bright
-                                    // one).
-                                    None => EditRecipe {
-                                        base_curve: autoshade::pipeline::photo_base_knots(p),
-                                        lens_profile: autoshade::pipeline::fresh_lens_profile(p),
-                                        ..Default::default()
-                                    },
+                                    // WOULD show: neutral sliders on the
+                                    // photo's fresh start (v1.17.0: Lightroom's
+                                    // canvas, or the camera-matched base look
+                                    // where it cannot render — one extra
+                                    // develop per photo then; without it the
+                                    // batch export of an unedited RAW comes out
+                                    // on the dark base while its open canvas
+                                    // shows the bright one).
+                                    None => {
+                                        let mut fresh = EditRecipe {
+                                            lens_profile: autoshade::pipeline::fresh_lens_profile(p),
+                                            ..Default::default()
+                                        };
+                                        autoshade::pipeline::fresh_canvas_start(
+                                            p,
+                                            &autoshade::diag::photo(p),
+                                        )
+                                        .stamp(&mut fresh);
+                                        fresh
+                                    }
                                 };
                                 // A recorded-but-unhonourable master:
                                 // exporting would silently drop the retouch —
@@ -853,8 +861,7 @@ impl AutoShadeApp {
                                 // for the RAW's own sake, but rendering the
                                 // master through them would cook both twice
                                 // (the same strip rule the canvas applies).
-                                recipe.base_curve = Vec::new();
-                                recipe.lens_profile = Default::default();
+                                recipe.strip_baked_start();
                                 // The anchor follows the strip rule: baked
                                 // pixels carry their WB (relative model).
                                 recipe.as_shot_k = None;
@@ -1243,15 +1250,11 @@ impl AutoShadeApp {
         // a master that later fails to decode falls back to a corrected
         // develop on the negative, not a dark one. Memo-cheap after the open.
         let disk = if generated {
-            let cal = autoshade::pipeline::photo_calibration(&path);
-            EditRecipe {
-                version: cal.version,
-                base_curve: cal.base_curve,
-                lens_profile: cal.lens_profile,
-                as_shot_k: cal.as_shot_k,
-                as_shot_tint: cal.as_shot_tint,
-                ..self.recipe.clone()
-            }
+            // Every calibration half, the start (v1.17.0) included, through
+            // the one stamper.
+            let mut d = self.recipe.clone();
+            autoshade::pipeline::stamp_fit_calibration(&mut d, autoshade::pipeline::photo_calibration(&path));
+            d
         } else {
             self.recipe.clone()
         };
@@ -1574,8 +1577,7 @@ impl AutoShadeApp {
             // open-restore strip rule). The ● baseline (pasted_open) is
             // normalized the same way: canvas coordinates.
             if self.active_on_ai_pixels() {
-                live.base_curve = Vec::new();
-                live.lens_profile = Default::default();
+                live.strip_baked_start();
                 // Anchor follows the strip rule (baked WB → relative model).
                 live.as_shot_k = None;
                 live.as_shot_tint = None;

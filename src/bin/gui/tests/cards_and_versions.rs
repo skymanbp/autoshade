@@ -793,7 +793,7 @@
             distortion_on: true,
             ..Default::default()
         };
-        let cal = || (knots.clone(), lens.clone(), Some((5200.0, 3.0)));
+        let cal = || (autoshade::pipeline::CanvasStart { base_curve: knots.clone(), ..Default::default() }, lens.clone(), Some((5200.0, 3.0)));
 
         // The defect's direction: a snapshot with no calibration, onto the
         // parametric negative.
@@ -851,7 +851,7 @@
         // era claim either.
         let mut none = EditRecipe { version: 1, ..Default::default() };
         assert!(!crate::persist::reconcile_snapshot_calibration(&mut none, false, || (
-            Vec::new(),
+            autoshade::pipeline::CanvasStart::default(),
             autoshade::recipe::LensProfile::default(),
             None
         )));

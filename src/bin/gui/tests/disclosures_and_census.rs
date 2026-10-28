@@ -497,14 +497,15 @@
         // Premise, from the registry rather than from memory. It used to read
         // "every global the export can lose IS engine calibration", and R33 §G
         // ended that: `colour_field` is an unexportable global the USER asked
-        // for. So the premise is now the split itself — eight rows in the
-        // tier since 2026-10-13's lens blur, of which exactly the
+        // for. So the premise is now the split itself — seven rows in the
+        // tier since v1.17.0 (eight from 2026-10-13's lens blur until the
+        // writer began emitting `<crs:Look>`), of which exactly the
         // un-actionable ones are quiet.
         let rows: Vec<_> = RECIPE_CONTROLS
             .iter()
             .filter(|c| c.tier == Some(Tier::RenderedNotExported))
             .collect();
-        assert_eq!(rows.len(), 8, "the tier's membership moved — re-read this test");
+        assert_eq!(rows.len(), 7, "the tier's membership moved — re-read this test");
         assert!(
             rows.iter().all(|c| c.engine_only),
             "premise: no unexportable global is a value the advisor can state"
@@ -518,7 +519,7 @@
         // engine measures for itself.
         assert_eq!(
             calibration,
-            vec!["upright_transform", "look", "base_curve", "lens_profile"],
+            vec!["upright_transform", "base_curve", "lens_profile"],
             "per-photo measurements, whether this engine took them or read Adobe's"
         );
         // v1.5.0 F9 gives this arm its second member, and the contrast with

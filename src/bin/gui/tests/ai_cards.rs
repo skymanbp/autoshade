@@ -1003,7 +1003,7 @@
         let body = &body[..body.find("pub(crate) fn start_clone(").expect("start_clone moved")];
         assert!(body.contains("RetouchKind::NewDenoised))"), "the denoise no longer lands as a new card");
         assert!(!body.contains("RetouchKind::InPlace"), "the denoise went back to an in-place landing");
-        assert!(body.contains("denoise_active(&opts, &path, &out)"), "the denoise no longer runs the full frame");
+        assert!(body.contains("denoise_active(&opts, &path, &part, &out)"), "the denoise no longer runs the full frame");
         assert!(!body.contains("2048"), "the ≤2048 px working-copy tier came back");
         assert!(!body.contains("denoise_fullres"), "the retired Full-res checkbox came back");
         // The worker halves run behind a segmentation call, so they are
@@ -1277,7 +1277,7 @@
             "this card's frame is no longer the stack's reference"
         );
         assert!(
-            body.contains("stack_files(&inputs, &opts, None, &out)"),
+            body.contains("stack_files(&inputs, &part, &opts, None, &out)"),
             "the stack no longer runs on the full frame"
         );
     }

@@ -775,12 +775,17 @@ fn api_upload(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
 // Identity = (mtime, size): mtime alone misses a same-timestamp overwrite on
 // coarse-granularity filesystems (thumb + mask caches carry size for the same
 // reason).
-type BaseCache = Mutex<Vec<(PathBuf, (std::time::SystemTime, u64), Arc<DynamicImage>)>>;
+// The base PART (v1.17.0, `render::BasePart`) is in the key too: one photo
+// develops a different base under a different camera profile, and a pane
+// shown a base of another part shows another picture.
+type BaseCache =
+    Mutex<Vec<(PathBuf, render::BasePart, (std::time::SystemTime, u64), Arc<DynamicImage>)>>;
 
 fn cached_base(
     cache: &BaseCache,
     cap: usize,
     raw: &Path,
+    part: &render::BasePart,
     build: impl FnOnce() -> Result<DynamicImage>,
 ) -> Result<Arc<DynamicImage>> {
     let ident = std::fs::metadata(raw)
@@ -790,18 +795,22 @@ fn cached_base(
         // No user code runs under the lock, so poisoning is not reachable —
         // recover anyway rather than turning a past panic into a new one.
         let list = cache.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some((_, _, img)) = list.iter().find(|(p, ct, _)| *ct == t && p == raw) {
+        if let Some((_, _, _, img)) =
+            list.iter().find(|(p, bp, ct, _)| *ct == t && p == raw && bp == part)
+        {
             return Ok(img.clone());
         }
     }
     let img = Arc::new(build()?);
     if let Some(t) = ident {
         let mut list = cache.lock().unwrap_or_else(|p| p.into_inner());
-        list.retain(|(p, _, _)| p != raw); // a stale-identity entry for this path is dead
+        // A stale-identity entry for this path is dead; another part's entry
+        // of the same file is not.
+        list.retain(|(p, bp, ct, _)| p != raw || (bp != part && *ct == t));
         if list.len() >= cap {
             list.remove(0); // small Vec in insertion order → evict the oldest insert
         }
-        list.push((raw.to_path_buf(), t, img.clone()));
+        list.push((raw.to_path_buf(), part.clone(), t, img.clone()));
     }
     Ok(img)
 }
@@ -811,15 +820,17 @@ fn cached_base(
 /// full demosaic per tile would be unusable (a page shows 200).
 fn thumb_base(raw: &Path) -> Result<Arc<DynamicImage>> {
     static CACHE: OnceLock<BaseCache> = OnceLock::new();
-    cached_base(CACHE.get_or_init(Default::default), 8, raw, || {
+    cached_base(CACHE.get_or_init(Default::default), 8, raw, &render::BasePart::default(), || {
         Ok(decode::preview_only(raw)?
             .resize(PREVIEW_EDGE, PREVIEW_EDGE, image::imageops::FilterType::Triangle))
     })
 }
 
-/// The base BOTH panes of the editor use: the RAW sensor data developed with a
-/// NEUTRAL recipe and downscaled — the same decode `render_to_file` exports from,
-/// and the same base the GUI builds (`gui.rs` `open_path`). This used to develop
+/// The base BOTH panes of the editor use: the RAW sensor data developed through
+/// the recipe's base part (v1.17.0, `render::base_develop` — its camera profile
+/// and Look table, nothing after them) and downscaled — the same decode
+/// `render_to_file` exports from, and the same base the GUI builds
+/// (`gui.rs` `open_path`). This used to develop
 /// the camera's baked 8-bit JPEG instead, which double-processes it: highlights
 /// already clipped to 255 cannot be recovered, so Highlights/Whites (and grain
 /// under clarity/contrast) behaved nothing like the export of the same recipe.
@@ -831,7 +842,7 @@ fn thumb_base(raw: &Path) -> Result<Arc<DynamicImage>> {
 /// so the sliders keep full-frame feedback (see `render::develop_preview`); and
 /// AI denoise is export-only. The tone/colour/WB stages the sliders drive now see
 /// the same signal as the export.
-fn develop_base(raw: &Path) -> Result<Arc<DynamicImage>> {
+fn develop_base(raw: &Path, part: &render::BasePart) -> Result<Arc<DynamicImage>> {
     static CACHE: OnceLock<BaseCache> = OnceLock::new();
     // A full-sensor develop costs seconds and ~1.5 GB of transients. The before
     // pane and the first slider gesture ask for the SAME photo at the same time
@@ -839,14 +850,14 @@ fn develop_base(raw: &Path) -> Result<Arc<DynamicImage>> {
     // and then finds the cache entry the winner just wrote.
     static BUILD: Mutex<()> = Mutex::new(());
     let _serialised = BUILD.lock().unwrap_or_else(|p| p.into_inner());
-    cached_base(CACHE.get_or_init(Default::default), 4, raw, || {
-        // ONE dispatch for both source kinds (`render::source_pixels`): a RAW
+    cached_base(CACHE.get_or_init(Default::default), 4, raw, part, || {
+        // ONE dispatch for both source kinds (`render::source_pixels_for`): a RAW
         // develops AT the preview edge (the cap runs before tone/geometry — the
         // old full-sensor develop existed only to be thumbnailed), a baked
         // source is decoded and `thumbnail`ed to the same edge, only ever DOWN
         // (a source already under it keeps its own pixels; the browser scales
         // the <img> anyway).
-        let fitted = render::source_pixels(raw, Some(PREVIEW_EDGE))?;
+        let fitted = render::source_pixels_for(raw, part, Some(PREVIEW_EDGE))?;
         // Store 8-bit: `develop_preview` and the JPEG encode both work in
         // 8-bit, so keeping the 16-bit buffer would only double the cache and
         // re-convert on every gesture.
@@ -858,8 +869,10 @@ fn api_image(request: &Request, state: &AppState, max_edge: u32) -> Result<Respo
     let raw = raw_for(request, state)?;
     if max_edge >= PREVIEW_EDGE {
         // The "before" pane must show the rendition the "after" is developed
-        // FROM, or the pair compares two different pictures.
-        let base = develop_base(&raw)?;
+        // FROM, or the pair compares two different pictures: the base of the
+        // photo's saved or fresh start (the pane is asked for without a
+        // recipe).
+        let base = develop_base(&raw, &pipeline::photo_base_part(&raw))?;
         jpeg_response(&base)
     } else {
         // Thumbnail: resize DOWN from the cached 1200px base instead of paying a
@@ -869,11 +882,31 @@ fn api_image(request: &Request, state: &AppState, max_edge: u32) -> Result<Respo
     }
 }
 
-/// Fresh camera-matched base-look knots for the web's fresh-open and
-/// XMP-only paths — the SAME develop_base the panes already build (cached,
-/// so selecting a photo costs one demosaic total) CDF-matched against the
-/// camera's own embedded rendition. A saved recipe.json's curve is NEVER
-/// manufactured here: api_recipe serves those verbatim, legacy-empty included.
+/// What a fresh develop of `raw` starts from (v1.17.0,
+/// `pipeline::CanvasStart`): Lightroom's 「Adobe Color」 canvas where this
+/// machine can render it, otherwise the camera-matched base curve — estimated
+/// here on the SAME neutral develop_base the panes then build (cached, so
+/// selecting such a photo still costs one demosaic total) rather than by
+/// `pipeline::fresh_canvas_start`, which would pay a second.
+fn fresh_start(raw: &Path) -> pipeline::CanvasStart {
+    pipeline::fresh_canvas_start_with(raw, &crate::diag::photo(raw), || fresh_base_knots(raw))
+}
+
+/// [`fresh_start`] for a develop imported from a Lightroom document — the
+/// rule of `pipeline::stamp_import_start`, on this module's cached estimate.
+fn stamp_import_start(raw: &Path, r: &mut EditRecipe) {
+    if r.names_profile() {
+        r.base_curve.clear();
+    } else {
+        fresh_start(raw).stamp(r);
+    }
+}
+
+/// Fresh camera-matched base-look knots — [`fresh_start`]'s answer on a
+/// machine that cannot render the canvas — on the SAME neutral develop_base
+/// the panes build, CDF-matched against the camera's own embedded rendition.
+/// A saved recipe.json's curve is NEVER manufactured here: api_recipe serves
+/// those verbatim, legacy-empty included.
 fn fresh_base_knots(raw: &Path) -> Vec<[f32; 2]> {
     if !decode::is_raw(raw) {
         return Vec::new();
@@ -886,7 +919,7 @@ fn fresh_base_knots(raw: &Path) -> Vec<[f32; 2]> {
             return Vec::new();
         }
     };
-    match develop_base(raw) {
+    match develop_base(raw, &render::BasePart::default()) {
         Ok(neutral) => {
             // The one entry the GUI and pipeline estimators share: the pair is
             // made like with like there (render::camera_base_look).
@@ -947,7 +980,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                 r.clamp();
                 // Same stamp rule as the XMP fallback below: Lightroom tuned
                 // this file over its own profile-corrected base.
-                r.base_curve = fresh_base_knots(raw);
+                stamp_import_start(raw, &mut r);
                 r.lens_profile = pipeline::fresh_lens_profile(raw);
                 // Stamp-if-None: an old-era AutoShade projection arrives with
                 // the 5500 anchor PINNED by xmp_to_recipe (its Kelvin was
@@ -1154,7 +1187,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
             }
             if !r.is_noop() {
                 r.clamp();
-                r.base_curve = fresh_base_knots(raw);
+                stamp_import_start(raw, &mut r);
                 // Same stamp rule as the GUI's XMP-only restore: Lightroom
                 // tuned this file over its own profile-corrected base.
                 r.lens_profile = pipeline::fresh_lens_profile(raw);
@@ -1212,7 +1245,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                 r.clamp();
                 // Same stamp rule as the XMP branches above: the packet was
                 // tuned in Lightroom over its own camera-profile base.
-                r.base_curve = fresh_base_knots(raw);
+                stamp_import_start(raw, &mut r);
                 r.lens_profile = pipeline::fresh_lens_profile(raw);
                 if r.as_shot_k.is_none() {
                     let (ask, ast) = pipeline::fresh_as_shot_wb(raw);
@@ -1309,11 +1342,12 @@ fn recipe_warning_header(xmp_text: &str) -> Option<Header> {
     header("X-Recipe-Warning", &msg)
 }
 
-/// The photo's FRESH camera-matched base-look knots, regardless of any saved
-/// recipe — the web client's Reset needs them to mean "the fresh-open look"
-/// (the GUI's `photo_knots` rule): a legacy save deliberately carries an
-/// empty curve, and preserving that on Reset kept the photo dark. Cheap after
-/// the first call — `fresh_base_knots` reuses the cached `develop_base`.
+/// The photo's FRESH start (v1.17.0: its canvas profile and Look, or the
+/// camera-matched base curve where the canvas cannot render), regardless of
+/// any saved recipe — the web client's Reset needs it to mean "the fresh-open
+/// look" (the GUI's `photo_knots` rule): a legacy save deliberately carries
+/// an empty curve, and preserving that on Reset kept the photo dark. Cheap
+/// after the first call — the estimate reuses the cached `develop_base`.
 fn api_fresh_base(request: &Request, state: &AppState) -> Result<ResponseBox> {
     let raw = raw_for(request, state)?;
     Ok(json_text(fresh_base_payload(&raw)))
@@ -1326,8 +1360,11 @@ fn api_fresh_base(request: &Request, state: &AppState) -> Result<ResponseBox> {
 /// differently depending on which door it came through.
 fn fresh_base_payload(raw: &Path) -> String {
     let (as_shot_k, as_shot_tint) = pipeline::fresh_as_shot_wb(raw);
+    let start = fresh_start(raw);
     serde_json::json!({
-        "base_curve": fresh_base_knots(raw),
+        "base_curve": start.base_curve,
+        "camera_profile": start.camera_profile,
+        "look": start.look,
         "lens_profile": pipeline::fresh_lens_profile(raw),
         "as_shot_k": as_shot_k,
         "as_shot_tint": as_shot_tint,
@@ -1780,7 +1817,9 @@ fn unwarp_mask(bytes: &[u8], view: Option<&EditRecipe>, raw: &Path) -> Option<Ve
 /// frame the user pointed at. Baked sources: a header-only dimension read.
 fn source_dims(raw: &Path) -> Option<(f32, f32)> {
     if decode::is_raw(raw) {
-        let img = develop_base(raw).ok()?;
+        // Any part's base has the frame's dims; the photo's own is the one
+        // the panes have most likely cached already.
+        let img = develop_base(raw, &pipeline::photo_base_part(raw)).ok()?;
         Some((img.width() as f32, img.height() as f32))
     } else {
         // ORIENTED dims: load_image applies the EXIF orientation, so the
@@ -2033,8 +2072,7 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     let src = match session_master(req.master.as_deref(), &raw) {
         Ok(Some((p, generated))) => {
             if generated {
-                req.recipe.base_curve = Vec::new();
-                req.recipe.lens_profile = Default::default();
+                req.recipe.strip_baked_start();
                 req.recipe.as_shot_k = None;
                 req.recipe.as_shot_tint = None;
             }
@@ -2079,7 +2117,9 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             None => w,
         });
     }
-    let preview = develop_base(&src)?;
+    // The base of the recipe being shown (v1.17.0): its camera profile and
+    // Look table, which the preview develop below cannot add.
+    let preview = develop_base(&src, &render::BasePart::of(&req.recipe))?;
     // The Detail panel's radii are FILM pixels (v1.5.0): the source's own short
     // edge, from its header, so the web pane shows sharpening and noise
     // reduction the way the export looks downscaled to it — the GUI canvas's
@@ -2341,8 +2381,7 @@ fn deliverable_source(
     let src = match session_master(req.master.as_deref(), raw) {
         Ok(Some((p, generated))) => {
             if generated {
-                req.recipe.base_curve = Vec::new();
-                req.recipe.lens_profile = Default::default();
+                req.recipe.strip_baked_start();
                 req.recipe.as_shot_k = None;
                 req.recipe.as_shot_tint = None;
             }
@@ -2911,8 +2950,24 @@ fn api_retouch(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // multi-minute AI call blocked every settings save until it finished.
     let cfg = state.config().clone();
     let quality = req.quality.unwrap_or_else(|| cfg.openai_image_quality.clone());
-    let result =
-        crate::generative::retouch(&cfg, &src, &mask_tmp, &req.prompt, &quality, req.full_res, &out);
+    // The base the fill composites onto is the canvas's own (v1.17.0): the
+    // recipe the mask was painted over names it, else the photo's saved or
+    // fresh start does.
+    let part = req
+        .view
+        .as_ref()
+        .map(render::BasePart::of)
+        .unwrap_or_else(|| pipeline::photo_base_part(&raw));
+    let result = crate::generative::retouch(
+        &cfg,
+        &src,
+        &part,
+        &mask_tmp,
+        &req.prompt,
+        &quality,
+        req.full_res,
+        &out,
+    );
     let _ = std::fs::remove_file(&mask_tmp);
     match result {
         Ok(()) => {
@@ -3047,7 +3102,14 @@ fn api_heal(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         return Ok(status_response(500, "no free heal output name (999 in the masters folder)"));
     };
     let cfg = state.config().clone();
-    let result = crate::retouch::heal(&cfg, &src, mask_tmp.as_deref(), req.auto, req.full_res, None, &out);
+    // The canvas's own base (v1.17.0) — api_retouch's rule.
+    let part = req
+        .view
+        .as_ref()
+        .map(render::BasePart::of)
+        .unwrap_or_else(|| pipeline::photo_base_part(&raw));
+    let result =
+        crate::retouch::heal(&cfg, &src, &part, mask_tmp.as_deref(), req.auto, req.full_res, None, &out);
     if let Some(t) = &mask_tmp {
         let _ = std::fs::remove_file(t);
     }
@@ -3156,7 +3218,10 @@ fn api_stack(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         kind,
         align: (!req.tripod).then_some(crate::stack::align::AlignParams::DEFAULT),
     };
-    match crate::stack::stack_files(&inputs, &opts, None, &out) {
+    // Every RAW frame is read through the reference photo's base (v1.17.0):
+    // the master lands on ITS canvas.
+    let part = pipeline::photo_base_part(&raws[0]);
+    match crate::stack::stack_files(&inputs, &part, &opts, None, &out) {
         Ok(done) => {
             issue_session_master(&raws[0], &out, first_generated);
             let img =
@@ -4337,8 +4402,8 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["as_shot_k", "as_shot_tint", "base_curve", "lens_profile"],
-            "the fresh-open contract is exactly these four keys"
+            ["as_shot_k", "as_shot_tint", "base_curve", "camera_profile", "lens_profile", "look"],
+            "the fresh-open contract is exactly these six keys"
         );
         // A baked source has no camera rendition and no as-shot reading: the
         // keys are still PRESENT (the client branches on null, not on absence).

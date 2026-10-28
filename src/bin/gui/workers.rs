@@ -272,6 +272,12 @@ impl AutoShadeApp {
         if self.develop_inflight {
             return;
         }
+        // The canvas is only right over pixels that carry its recipe's base
+        // part (v1.17.0): hold the frame until they do.
+        if !self.ensure_source_part() {
+            self.dirty = false;
+            return;
+        }
         let Some(base) = self.base_preview.clone() else {
             self.dirty = false;
             return;
@@ -286,6 +292,100 @@ impl AutoShadeApp {
             move || Msg::Developed(Box::new(Ok(build_preview(base, recipe, show_clipping, film, raw_source)))),
             |e| Msg::Developed(Box::new(Err(e))),
         );
+    }
+
+    /// Is the source base the right one for the canvas recipe — `true` — or is
+    /// a re-develop needed first? (v1.17.0)
+    ///
+    /// A source-based card develops over `source_preview` with the preview
+    /// develop, which runs no profile stage: the camera profile and the Look's
+    /// colour table must already be in those pixels, developed under the
+    /// recipe's own [`autoshade::render::BasePart`]. The open develops the
+    /// part the photo's develop starts from, so this answers `true` on the
+    /// common path; a recipe that names another (an imported sidecar's own
+    /// profile, a paste, an undo across one, a version) re-develops the
+    /// source in the background at the canvas's edge and answers `false`
+    /// until it lands ([`Msg::BaseRedeveloped`]). A baked source, or a card
+    /// on its own pixels, has nothing to re-develop.
+    pub(crate) fn ensure_source_part(&mut self) -> bool {
+        if !self.source_is_raw() || self.active_variant().is_some_and(|v| v.base.is_some()) {
+            return true;
+        }
+        let want = autoshade::render::BasePart::of(&self.recipe);
+        if want == self.source_part {
+            return true;
+        }
+        if self.source_part_inflight.as_ref() == Some(&want) {
+            return false;
+        }
+        let Some(path) = self.src_path.clone() else { return true };
+        let edge = self.preview_edge.clamp(640, 8192);
+        self.source_part_inflight = Some(want.clone());
+        let (p, part) = (path.clone(), want.clone());
+        self.spawn_worker(
+            move || {
+                let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&p)));
+                let img = autoshade::render::base_develop(&p, &part, Some(edge)).map(Arc::new);
+                Msg::BaseRedeveloped { path: p, part, img: Box::new(img) }
+            },
+            move |e| Msg::BaseRedeveloped { path, part: want, img: Box::new(Err(e)) },
+        );
+        false
+    }
+
+    /// Install a re-developed source base ([`Self::ensure_source_part`]),
+    /// when it is still the one wanted: same photo, and the canvas recipe
+    /// still names that part. Turned into the plates' current frame first
+    /// (`sync_base_turns` owns the turn; a fresh develop is in the EXIF frame).
+    pub(crate) fn on_base_redeveloped(
+        &mut self,
+        ctx: &egui::Context,
+        path: PathBuf,
+        part: autoshade::render::BasePart,
+        img: anyhow::Result<Arc<image::DynamicImage>>,
+    ) {
+        if self.source_part_inflight.as_ref() == Some(&part) {
+            self.source_part_inflight = None;
+        }
+        if self.src_path.as_deref() != Some(path.as_path()) {
+            return;
+        }
+        let img = match img {
+            Ok(i) => i,
+            Err(e) => {
+                let t = trf(
+                    self.lang,
+                    "the canvas could not be developed under this photo's camera profile ({err})",
+                    &[("err", &format!("{e:#}"))],
+                );
+                self.toast(ToastKind::Error, t);
+                // Said once, then the canvas shows over the base there is:
+                // asking again on every frame would repeat a develop that
+                // has already failed.
+                self.source_part = part;
+                self.dirty = true;
+                return;
+            }
+        };
+        let turns = self.base_turns % 4;
+        let img = if turns == 0 {
+            img
+        } else {
+            Arc::new(autoshade::render::turn_image((*img).clone(), turns))
+        };
+        self.source_preview = Some(img.clone());
+        self.source_part = part;
+        if self.active_variant().is_none_or(|v| v.base.is_none()) {
+            self.base_preview = Some(img.clone());
+            let start = self.recipe.start_only();
+            self.set_before(ctx, &img, &start);
+            let (mw, mh) = img.dimensions();
+            self.rebind_paint_canvas(mw, mh);
+            self.overlay_ref = None;
+            self.overlay_stale = true;
+            self.last_rgb = None;
+        }
+        self.dirty = true;
     }
 
     /// The full-resolution SHORT EDGE of the active card's pixel source — the
@@ -438,6 +538,9 @@ impl AutoShadeApp {
                     // A Lightroom AI mask arrives without an alpha: cut it
                     // on this computer now, or the canvas skips it.
                     self.start_ai_mask_resolve(lang);
+                }
+                Msg::BaseRedeveloped { path, part, img } => {
+                    self.on_base_redeveloped(ctx, path, part, *img)
                 }
                 Msg::AiMasksResolved(boxed) => self.on_ai_masks_resolved(lang, *boxed),
                 Msg::Developed(boxed) => self.finish_redevelop(ctx, *boxed),
@@ -773,7 +876,7 @@ impl AutoShadeApp {
                     let edge_revert = self.edge_before_flight.take();
                     self.open_in_flight = false; // both arms: the transition ended
                     match *boxed {
-                    Ok((base, knots, lens, as_shot, baked, src_ident, baked_note)) => {
+                    Ok((base, (start, part), lens, as_shot, baked, src_ident, baked_note)) => {
                         self.busy = false;
                         // Surfaced BEFORE anything else can early-return
                         // (L11-3): the worker degraded to the un-retouched
@@ -792,7 +895,7 @@ impl AutoShadeApp {
                                 &p,
                                 &(
                                     base.clone(),
-                                    knots.clone(),
+                                    (start.clone(), part.clone()),
                                     lens.clone(),
                                     as_shot,
                                     baked.clone(),
@@ -831,7 +934,7 @@ impl AutoShadeApp {
                         // edge) while the repair memo pins its FIRST answer
                         // for persistence determinism — the two agree within
                         // the estimator's documented tolerance.
-                        self.photo_knots = knots.clone();
+                        self.photo_start = start.clone();
                         self.photo_lens = lens.clone();
                         self.photo_as_shot = as_shot;
                         if keep {
@@ -938,6 +1041,8 @@ impl AutoShadeApp {
                                 self.toast(ToastKind::Error, t);
                             } else {
                                 self.source_preview = Some(base.clone());
+                                self.source_part = part.clone();
+                                self.source_part_inflight = None;
                                 // Fresh decode = the EXIF display frame,
                                 // i.e. turn 0 (`render_to_image` is given
                                 // a NEUTRAL recipe). Declaring it here is
@@ -946,8 +1051,8 @@ impl AutoShadeApp {
                                 // frame — one mover for every path (R27).
                                 self.base_turns = 0;
                                 if active_source {
-                                    let curve = self.recipe.base_curve.clone();
-                                    self.set_before(ctx, &base, &curve);
+                                    let start = self.recipe.start_only();
+                                    self.set_before(ctx, &base, &start);
                                     self.rebind_paint_canvas(mw, mh);
                                     // The range-mask reference develop was computed
                                     // from the OLD base — recipe-only keying would
@@ -1001,8 +1106,8 @@ impl AutoShadeApp {
                                     // restore path: an InPlace master is NEUTRAL
                                     // (needs the camera curve); a Generated
                                     // canvas recipe carries an empty curve.
-                                    let curve = self.recipe.base_curve.clone();
-                                    self.set_before(ctx, bimg, &curve);
+                                    let start = self.recipe.start_only();
+                                    self.set_before(ctx, bimg, &start);
                                     self.rebind_paint_canvas(bw, bh);
                                     self.overlay_ref = None;
                                     self.overlay_stale = true;
@@ -1027,6 +1132,8 @@ impl AutoShadeApp {
                             // below — the Before pane carries the canvas
                             // recipe's own base_curve.
                             self.source_preview = Some(base.clone());
+                            self.source_part = part.clone();
+                            self.source_part_inflight = None;
                                 // Fresh decode = the EXIF display frame,
                                 // i.e. turn 0 (`render_to_image` is given
                                 // a NEUTRAL recipe). Declaring it here is
@@ -1170,9 +1277,10 @@ impl AutoShadeApp {
                                 open_note = merge_note(open_note, w);
                             }
                             if stamp {
-                                stamp_calibration(&mut recipe, &knots, &lens, as_shot);
+                                stamp_calibration(&mut recipe, &start, &lens, as_shot);
                             } else if recipe.base_curve.is_empty()
-                                && !knots.is_empty()
+                                && !recipe.names_profile()
+                                && !start.is_empty()
                                 && open_note.is_none()
                             {
                                 // A legacy save renders exactly as it was
@@ -1182,7 +1290,7 @@ impl AutoShadeApp {
                                 open_note = Some(
                                     tr(
                                         lang,
-                                        "saved before this version's camera default tone — renders as originally tuned; Reset switches to the camera's own default colour and tone",
+                                        "saved before this version's starting look — renders as originally tuned; Reset switches to the photo's fresh starting look",
                                     )
                                     .into(),
                                 );
@@ -1419,8 +1527,8 @@ impl AutoShadeApp {
                             // fresh opens compare bright, legacy saves compare
                             // as originally tuned.
                             if let Some(b) = self.base_preview.clone() {
-                                let curve = self.recipe.base_curve.clone();
-                                self.set_before(ctx, &b, &curve);
+                                let start = self.recipe.start_only();
+                                self.set_before(ctx, &b, &start);
                             }
                             // A fresh, fully-transparent paint mask sized to the
                             // preview — and a brush session armed on the PREVIOUS
@@ -1461,8 +1569,7 @@ impl AutoShadeApp {
                                     }
                                 }
                                 if generated {
-                                    self.recipe.base_curve = Vec::new();
-                                    self.recipe.lens_profile = Default::default();
+                                    self.recipe.strip_baked_start();
                                     self.recipe.as_shot_k = None;
                                     self.recipe.as_shot_tint = None;
                                     if let Some(v) = self.variants.get_mut(0) {
@@ -1475,8 +1582,7 @@ impl AutoShadeApp {
                                     // canvas against it lit ● on lens_profile
                                     // the instant a clean generated save
                                     // opened.
-                                    self.saved_recipe.base_curve = Vec::new();
-                                    self.saved_recipe.lens_profile = Default::default();
+                                    self.saved_recipe.strip_baked_start();
                                     self.saved_recipe.as_shot_k = None;
                                     self.saved_recipe.as_shot_tint = None;
                                 }
@@ -1486,8 +1592,8 @@ impl AutoShadeApp {
                                 // camera curve for an InPlace master, whose
                                 // pixels are a NEUTRAL develop (an empty curve
                                 // there compared 0.6–1.4 EV dark).
-                                let curve = self.recipe.base_curve.clone();
-                                self.set_before(ctx, &bimg, &curve);
+                                let start = self.recipe.start_only();
+                                self.set_before(ctx, &bimg, &start);
                                 self.base_preview = Some(bimg);
                                 self.rebind_paint_canvas(bw, bh);
                             }
@@ -1677,6 +1783,8 @@ impl AutoShadeApp {
                             self.active = 0;
                             self.base_preview = None;
                             self.source_preview = None;
+                            self.source_part = Default::default();
+                            self.source_part_inflight = None;
                             self.before_tex = None;
                             self.after_tex = None;
                             self.selected = None;
@@ -1778,8 +1886,7 @@ impl AutoShadeApp {
                         }
                         let mut canvas = stamped.clone();
                         if self.active_on_ai_pixels() {
-                            canvas.base_curve = Vec::new();
-                            canvas.lens_profile = Default::default();
+                            canvas.strip_baked_start();
                             // Anchor follows the strip rule (baked WB).
                             canvas.as_shot_k = None;
                             canvas.as_shot_tint = None;
@@ -2769,8 +2876,8 @@ impl AutoShadeApp {
                                 // own camera curve, exactly like the source
                                 // compare; an empty curve here sat 0.6–1.4 EV
                                 // under After's starting point.
-                                let curve = self.recipe.base_curve.clone();
-                                self.set_before(ctx, &img, &curve);
+                                let start = self.recipe.start_only();
+                                self.set_before(ctx, &img, &start);
                                 // New baked base ⇒ the cached masks-cleared
                                 // reference develop no longer matches it.
                                 self.overlay_ref = None;
