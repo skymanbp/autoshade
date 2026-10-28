@@ -709,16 +709,38 @@ supposed to remove.
   5400 K / +14: 4000 K 0.76/12.08 → 1.30/1.89, 7500 K 2.22/10.12 →
   1.28/1.77, Tint −30 2.19/8.44 → 0.90/1.37; outside the acceptance set
   5000 K 2.29 → 0.67, 10000 K 16.01 → 2.90, Tint +30 2.42 → 0.90 (ab). With
-  the engine's own as-shot reading (5226 K / +14.7, McCamy through the
-  engine's matrix) the same renders read 3.36 / 3.57 / 2.11 ab: every move
-  starts 6 mired off Lightroom's white. The DNG SDK's `NeutralToXY` through
-  the body's Adobe Standard matrices does not close it (5241 K / +18.0 on the
-  same neutral; 5397/+18.1 where Lightroom shows 5550/+13 on a second frame,
-  3823/+0.1 against 3800/−3 on a third): the gap is in the camera neutral the
-  raw decoder reads, not in the conversion, and stays open. The command
-  line's `apply` of an `.xmp` now stamps the photo's as-shot white, as the
-  app's import does; it used to move a sidecar's Temperature from the legacy
-  5500 K anchor.
+  the engine's earlier as-shot reading (5226 K / +14.7) the same renders read
+  3.36 / 3.57 / 2.11 ab; with the reading below the engine reads 5400 K / +14
+  itself and they read 1.89 / 1.77 / 1.37. The command line's `apply` of an
+  `.xmp` now stamps the photo's as-shot white, as the app's import does; it
+  used to move a sidecar's Temperature from the legacy 5500 K anchor.
+- The as-shot white (v1.17.0, `render::as_shot_wb`, **measured**). Camera
+  Raw's As Shot render is pixel-identical to a Custom render at one point of
+  its 50 K / whole-tint grid and differs from one 25 K or one tint unit away;
+  by that test the seven corpus frames read p36 4100/+4, p37 5550/+13, p38
+  5950/+13, p39 5400/+14, p40 7650/+16, p41 3800/−3, p42 6450/+11. The
+  engine read them 6 mired and 3–6 tint units off (p39 5226/+14.7, McCamy and
+  Krystek through the D65 matrix), and the DNG SDK's `NeutralToXY` through
+  the body's two matrices with Robertson's temperature and tint
+  (`profile::neutral_to_xy`, `profile::xy_to_temp_tint`) reads the same
+  levels 5241/+18.0. The cause is Sony's: a body folds a colour compensation
+  for the mounted lens into every white balance it records — the As Shot
+  levels and the fourteen preset levels scale together by lens (Daylight R
+  and B at G 1024: 2564/1728 on the FE 24–105 F4, 2596/1688 on the FE 85
+  F1.8, 2668/1664 on the Sigma 14–24) — and Camera Raw takes it back out,
+  reading the As Shot levels relative to the file's Daylight preset (SR2 tag
+  0x7820) and putting that preset at one white per body. One pair of
+  multipliers for the ILCE-7RM4A (R/G 2.5115, B/G 1.6288, the centre of the
+  region that reproduces all seven) lands every frame on Camera Raw's grid
+  point, each within 1 mired and 1 tint unit when left out of the fit; a copy
+  of p39 with only its Daylight preset rewritten to the Sigma's levels moved
+  Camera Raw's As Shot from 5400/+14 to 5100/+12, the reading predicted. A
+  body without measured multipliers reads its levels as they are, on the
+  SDK's conversion and the same grid. The base render already balances with
+  the camera's levels as Camera Raw does — on p39 Camera Raw's own render at
+  5241/+18 sits 1.0 b* cooler in the neutrals than its As Shot, the engine's
+  flat render 0.03 — so only the named white, the point every Temperature and
+  Tint move starts from, changed.
 - Clarity on a camera-profile start (v1.17.0, `render/tone_cr.rs`,
   **measured**): Camera Raw's Clarity +50 lifts the band means of L 10–80 by
   6–11 L, where the engine's midtone-masked unsharp (unchanged; its local

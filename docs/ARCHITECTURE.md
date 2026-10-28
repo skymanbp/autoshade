@@ -2119,7 +2119,8 @@ declarations, two constants and a re-export of every moved item in the
 visibility it had (no `render::` path changed), and the code sits where its
 stage sits: `source.rs` (RAW decode over the sensor's CFA geometry, the
 baked-image door, the develop-to-image entry), `camera.rs` (the camera's colour
-matrix, as-shot white balance, calibration and profile), `wb.rs` (white balance
+matrix, calibration and profile), `as_shot.rs` (the as-shot white balance as
+Camera Raw reads it, Sony's SR2 Daylight preset), `wb.rs` (white balance
 and the transfer curves), `develop.rs` (the pipeline proper: previews, the
 per-pixel and spatial passes, the colour field, vignettes, dehaze), `tone.rs`
 (the tone model and its LUTs), `colour.rs` (saturation and vibrance, HSL,
