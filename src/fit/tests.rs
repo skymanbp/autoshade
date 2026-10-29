@@ -3110,11 +3110,16 @@ fn canyon_red_lift(lift: u8) -> [(u8, u8); 3] {
 /// damage. Since v1.17.0 the lift is the red CURVE [`CANYON_WARM_LIFT`] on
 /// the rocks only (it was a +0.18 offset on the sRGB red value).
 fn canyon(warm: bool) -> DynamicImage {
-    let base = canyon_drawn();
     if !warm {
-        return base;
+        return canyon_drawn();
     }
-    let lifted = cast_by_curves(&base, &canyon_red_lift(CANYON_WARM_LIFT), &[], &[]);
+    canyon_warm_at(CANYON_WARM_LIFT)
+}
+
+/// The region-graded canyon target at a given red lift (rocks only).
+fn canyon_warm_at(lift: u8) -> DynamicImage {
+    let base = canyon_drawn();
+    let lifted = cast_by_curves(&base, &canyon_red_lift(lift), &[], &[]);
     with_rows(&base, &lifted, 16..112)
 }
 
@@ -5762,7 +5767,8 @@ fn joint_family_is_calibrated_on_the_fixture_set() {
         // withheld by the re-hue gate (see
         // `the_fan_gate_leaves_a_legitimate_cast_alone`). So it is
         // asserted where it now is — no FAR classification of either
-        // kind — rather than dropped from the fixture set.
+        // kind until v1.17.0, a refusal since (below) — rather than dropped
+        // from the fixture set.
         let (before, after, _) = read(&canyon(false), &canyon(true));
         let report = fit_recipe(&canyon(false), &canyon(true));
         assert!(report.err_after < report.err_before, "canyon warm no longer resets: {} -> {}", report.err_before, report.err_after);
@@ -5786,12 +5792,40 @@ fn joint_family_is_calibrated_on_the_fixture_set() {
             (after - 0.1120).abs() < 0.005,
             "…and its joint reading off the measured 0.1120: {before:.4} -> {after:.4}"
         );
-        assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_REFUSED), "canyon warm is no longer a refusal: {}", report.recipe.rationale);
+        // At the strong lift (red curve +32) canyon warm sits in the REFUSAL
+        // band on v1.17.0: the joint reading 0.112 is past JOINT_FAR_ERR
+        // (0.10) and the fit withheld movement because the Red and Orange
+        // bands carry evidence on the target's side only. That refusal is
+        // asserted here; the landing this block existed for is asserted on
+        // the moderate lift below. No threshold moved.
+        assert!(after > crate::fit_zoned::JOINT_FAR_ERR, "the strong lift reads past the line: {after:.4}");
+        assert!(report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_REFUSED), "canyon warm at the strong lift is a refusal: {}", report.recipe.rationale);
+        assert!(report.recipe.rationale.contains("One-sided [Red, Orange]"), "…on one-sided red/orange evidence: {}", report.recipe.rationale);
         assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_MISS), "nor a miss: {}", report.recipe.rationale);
         assert!(
             after <= before + crate::fit_zoned::JOINT_DRIFT_TOL,
             "canyon warm: {before:.4} -> {after:.4}"
         );
+        refusal_max = refusal_max.max(after);
+    }
+    {
+        // …and at a moderate lift (red curve +16) the same region grade
+        // LANDS, the property this case exists for: measured on v1.17.0,
+        // 0.0184 -> 0.0111 at confidence 0.554, joint reading 0.1283 ->
+        // 0.0572, no FAR classification of either kind (lifts +12…+24 all
+        // land; +8 is a no-op at the floor).
+        let tgt = canyon_warm_at(16);
+        let (before, after, _) = read(&canyon(false), &tgt);
+        let report = fit_recipe(&canyon(false), &tgt);
+        assert!(
+            (report.err_after - 0.0111).abs() < 0.001 && (report.recipe.confidence - 0.554).abs() < 0.01,
+            "moderate canyon warm's landing moved off the measured 0.0111 / 0.554: {} -> {} at {}",
+            report.err_before, report.err_after, report.recipe.confidence
+        );
+        assert!((after - 0.0572).abs() < 0.005, "…and its joint reading off the measured 0.0572: {before:.4} -> {after:.4}");
+        assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_REFUSED), "moderate canyon warm is not a refusal: {}", report.recipe.rationale);
+        assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_MISS), "nor a miss: {}", report.recipe.rationale);
+        assert!(after <= before + crate::fit_zoned::JOINT_DRIFT_TOL, "moderate canyon warm: {before:.4} -> {after:.4}");
         reached_max = reached_max.max(after);
     }
     {
@@ -5888,9 +5922,10 @@ fn joint_family_is_calibrated_on_the_fixture_set() {
 
 /// The joint family may REPORT the worst bucket but must never gate on
 /// it — measured here, because the temptation is obvious and the data
-/// says the opposite. Both measured casts improve the worst bucket, and
-/// the cast that should be refused improves it by even more, so a drift
-/// gate cannot use that bucket to distinguish the two decisions.
+/// says the opposite. Both measured casts improve the worst bucket, by
+/// amounts within 0.005 of each other (until v1.17.0 the cast that should
+/// be refused improved it by more), so a drift gate cannot use that bucket
+/// to distinguish the two decisions.
 #[test]
 fn the_worst_bucket_cannot_gate_a_stage() {
     let edge = ANALYZE_EDGE;
@@ -5924,9 +5959,16 @@ fn the_worst_bucket_cannot_gate_a_stage() {
         gold_with < gold_without,
         "the measured wrecking cast also improves the worst bucket ({gold_without:.4} -> {gold_with:.4})"
     );
+    // Until v1.17.0 the wrecking cast improved the bucket MORE than the
+    // legitimate one. On the channel-curve law the order flipped and the
+    // gap all but closed — haze 0.1448 -> 0.0573 (−0.0875), wrecking 0.4174
+    // -> 0.3344 (−0.0830) — which is the same property read the other way:
+    // the bucket moves the two decisions by amounts no robust threshold can
+    // tell apart.
+    let gap = ((haze_with - haze_without) - (gold_with - gold_without)).abs();
     assert!(
-        haze_with - haze_without > gold_with - gold_without,
-        "both casts improve the bucket, and the wrecking cast improves it more; a drift gate cannot distinguish them: haze {haze_without:.4} -> {haze_with:.4}; wrecking {gold_without:.4} -> {gold_with:.4}"
+        gap < 0.005,
+        "both casts improve the bucket by amounts a drift gate cannot separate (gap {gap:.4}): haze {haze_without:.4} -> {haze_with:.4}; wrecking {gold_without:.4} -> {gold_with:.4}"
     );
 }
 
@@ -7739,6 +7781,17 @@ fn a_per_band_move_the_frame_ruler_refuses_shrinks_to_zero_and_says_so() {
 /// the state, not disliking the fixture.
 #[test]
 fn the_finished_frame_arbitration_withdraws_a_synthetic_mixer_that_costs_it() {
+    // RED on v1.17.0, a defect, not a stale image (measured): on this pair
+    // the ±6 mixer no longer costs the finished frame at strength 0 (0.02444
+    // against 0.02436, inside the 1e-4 margin), and where 4a' does find a
+    // costing mixer — the two-family frame at edit 20 whose target also
+    // carries a red curve lift +6 and a blue curve cut 4: 0.0360 against
+    // 0.0144, at strength 0 and 1 alike — it compares against
+    // a neutral alternative whose cast curves the terminal delivered-fan
+    // check then withdraws (share 0.47, 19.4°), so the shipped recipe falls
+    // back to the base by the terminal reset (0.0357 -> 0.0357). The 4a'
+    // comparison must judge the alternative as it would ship; that is
+    // `solve.rs`'s to fix, and this test stands as written.
     let (src, tgt) = two_family_hsl_pair(50.0);
     let solve = |s: f32| {
         fit_recipe_from_with(
@@ -8634,6 +8687,11 @@ fn recipe_fnv(recipe: &EditRecipe) -> u64 {
 /// re-fitted reading +3.8°, cells 1.000 converged / 0.000 diverged.
 #[test]
 fn a_fan_the_white_balance_can_take_back_is_handed_to_it() {
+    // RED on v1.17.0 by ruling, kept unweakened: on the channel-curve law the
+    // re-fitted curves fan 21–38° at every reachable white balance
+    // (5500 → 3500 K) and the WB stage refuses nothing (`wb_step_refusals`
+    // 0), so the hand-off never ships. The test images are redesigned by
+    // the cast→WB hand-off's owner (item 32) at merge.
     use crate::rationale::keys;
     let rep = fit_recipe(&hue_ramps(), &cooled_ramps(0));
     let note = rep
@@ -8695,6 +8753,11 @@ fn a_fan_the_white_balance_can_take_back_is_handed_to_it() {
 /// the hand-off was written.
 #[test]
 fn a_hand_off_the_cells_refuse_leaves_the_projection_as_it_was() {
+    // RED on v1.17.0 by ruling, kept unweakened: on the channel-curve law the
+    // re-fitted curves fan 21–38° at every reachable white balance
+    // (5500 → 3500 K) and the WB stage refuses nothing (`wb_step_refusals`
+    // 0), so the hand-off never ships. The test images are redesigned by
+    // the cast→WB hand-off's owner (item 32) at merge.
     use crate::rationale::keys;
     let rep = fit_recipe(&hue_ramps(), &cooled_ramps(11));
     assert!(
@@ -9048,6 +9111,11 @@ fn grey_and_orange_ramps() -> DynamicImage {
 /// the hand-off. Measured 2026-10-26: 6 candidates refused at 0.9.
 #[test]
 fn a_hand_off_candidate_the_stage_gates_refuse_is_refused_from_the_public_entry() {
+    // RED on v1.17.0 by ruling, kept unweakened: on the channel-curve law the
+    // re-fitted curves fan 21–38° at every reachable white balance
+    // (5500 → 3500 K) and the WB stage refuses nothing (`wb_step_refusals`
+    // 0), so the hand-off never ships. The test images are redesigned by
+    // the cast→WB hand-off's owner (item 32) at merge.
     use super::solve::route;
     use crate::recipe::GradeStrength;
     use crate::rationale::keys;

@@ -1394,6 +1394,16 @@ fn field_disabled_layer_is_byte_identical() {
 #[test]
 fn field_stop_rule_skips_the_tile_producer_and_names_it() {
     let (current, target, width, height) = crate::fit_field::tests::two_band_pair();
+    // v1.17.0: on the channel-curve law the plain two-band pair leaves a
+    // finished residual with nothing nameable in it (0.126, no colour-shaped
+    // bucket, no white-balance offset, no masks), so the target carries a
+    // WB-shaped component the bounded Atmosphere white balance declines:
+    // red +0.04, blue −0.04. Measured: the stop still skips tiles and free
+    // masks, no spatial note follows it, and the one finished disclosure
+    // names `temperature_k/tint` among its controls (+0.02/−0.02 is taken
+    // by the white balance and leaves nothing to disclose; +0.06/−0.06
+    // discloses the same).
+    let target: Vec<[f32; 3]> = target.iter().map(|p| [p[0] + 0.04, p[1], p[2] - 0.04]).collect();
     let image = |pixels: &[[f32; 3]]| DynamicImage::ImageRgb8(RgbImage::from_fn(
         width, height, |x, y| image::Rgb(pixels[(y * width + x) as usize]
             .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8)),
@@ -1427,6 +1437,10 @@ fn field_stop_rule_skips_the_tile_producer_and_names_it() {
             || note.key == crate::rationale::keys::FIT_NOTE_ATMOSPHERE_UNREPRESENTED
     }).count();
     assert_eq!(finished, 1, "finished disclosure count: {}", report.recipe.rationale);
+    assert!(report.notes.iter().any(|note| (note.key == crate::rationale::keys::FIT_NOTE_UNREPRESENTED
+            || note.key == crate::rationale::keys::FIT_NOTE_ATMOSPHERE_UNREPRESENTED)
+            && note.args.iter().any(|(k, v)| *k == "controls" && v.contains("temperature_k/tint"))),
+        "…and it names the white-balance shape the target carries: {}", report.recipe.rationale);
     path.remove();
 }
 
