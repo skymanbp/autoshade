@@ -2960,28 +2960,33 @@ v3 files render alike and v1 is 22 % off), and the reader picks the same
 (`lcp::open`). `lcp::LensProfileFile::vignette_gains` implements all of it and
 keeps every node — the close-focus nodes the distortion reader drops as
 duplicates included; a dimension a lens's nodes vary in and the shot leaves
-open is refused, not guessed. The engine applies that gain to a frame the
-profile stage has already rendered, so `develop` takes each pixel back under
-the profile's default curve and exposure ramp (`profile::UnderTone`),
-multiplies there, and puts it back. Measured on flat-field frames (the raw
-data replaced by a uniform field and read against its own raw-gain ladder, so
-no tone curve enters), engine against Camera Raw:
+open is refused, not guessed. The engine applies that gain where Camera Raw
+does: on the sensor's linear light in the RAW develop (`render::source`),
+before calibration and the camera profile stage — the order is lens gain →
+(white balance) → profile — and the preview bases carry it the same way
+(`render::BasePart`), so `develop` leaves the profile's gain out under Camera
+Raw's law. Measured on flat-field frames (the raw data replaced by a uniform
+field and read against its own raw-gain ladder, so no tone curve enters),
+engine against Camera Raw:
 
 | radius / half-diagonal | 0.09 | 0.29 | 0.49 | 0.69 | 0.89 | 0.96 | 0.99 |
 |---|---|---|---|---|---|---|---|
 | 24–105 at 80 mm, before | −0.25 % | −2.58 % | −4.69 % | −4.99 % | −2.68 % | +5.03 % | +7.96 % |
 | 24–105 at 80 mm, now | +0.01 % | +0.04 % | −0.01 % | +0.04 % | +0.09 % | +0.11 % | +0.08 % |
 | 14–24 at 20 mm, before | −0.77 % | −5.31 % | −11.51 % | −18.01 % | −22.54 % | −23.89 % | −24.33 % |
-| 14–24 at 20 mm, now | +0.03 % | +0.21 % | +0.35 % | +0.66 % | +0.88 % | +0.99 % | +0.98 % |
+| 14–24 at 20 mm, gain under the curve only | +0.03 % | +0.21 % | +0.35 % | +0.66 % | +0.88 % | +0.99 % | +0.98 % |
+| 24–105 at 80 mm, now | +0.01 % | +0.03 % | −0.01 % | +0.03 % | +0.06 % | +0.07 % | +0.05 % |
+| 14–24 at 20 mm, now | +0.02 % | +0.12 % | +0.07 % | +0.11 % | +0.07 % | +0.09 % | +0.05 % |
 
 Before, the engine applied the camera's knots, after the profile's default
 curve, which shrank their EV by a fifth to a quarter (reproduced to 0.0002 EV
-from the engine's own ladder). The residual on the 14–24, up to 0.96 % inside
-0.94 of the half-diagonal, is the order against the profile's HueSatMap: this
-body's Adobe Standard map is value-dependent (dimensions 36 × 8 × 16), Camera
-Raw applies the gain before it and the engine after it, and `UnderTone` does
-not undo it. A build that skips the map on both sides leaves +0.02 to +0.32 %;
-the 24–105 frame's gain is too small for the order to show.
+from the engine's own ladder). Taken back under the curve and the ramp alone
+(`profile::UnderTone`, the middle row) the 14–24 still missed by up to
+0.96 % inside 0.94 of the half-diagonal: the gain then met the profile's
+HueSatMap on the wrong side — this body's Adobe Standard map is
+value-dependent (dimensions 36 × 8 × 16) and Camera Raw applies the gain
+before it. A build that skipped the map on both sides left +0.02 to +0.32 %,
+and the gain moved ahead of the profile stage leaves 0.12 % (24–105: 0.08 %).
 
 The two profile strengths, measured the same way (flat fields for the
 vignetting, tile phase correlation on a real 14–24 mm frame for the
@@ -3009,8 +3014,7 @@ at 25 to 200 on the 14–24 mm and 50 to 200 on the 24–105 mm, where the old
 strength scales the map's departure, as the engine already did (displacement
 at 25/50/150/200 is 0.25/0.51/1.50/2.01 of 100's at 0.6–0.7 of the
 half-diagonal). Through the engine at 50, 100 and 150 the 14–24 mm flat field
-is within 0.55, 0.96 and 1.05 % of Camera Raw to 0.94 (0.89 at 150), the
-HueSatMap residual above. The body's Adobe Standard profile
+is within 0.10, 0.12 and 0.13 % of Camera Raw to 0.94 (0.89 at 150). The body's Adobe Standard profile
 carries no DefaultBlackRender tag (absent means Auto), so the SDK's render would subtract
 Shadows 5 × 0.001 = 0.005 black; the engine subtracts the sensor's 512 and no
 render black, and the 0.005 tried on p39 overshoots the shadows (ΔL −2 to
