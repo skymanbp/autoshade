@@ -480,10 +480,13 @@ Adobe's channel rule (the brightest and darkest channels through the curve,
 the middle one in proportion); then Contrast, Whites and Blacks as measured
 response tables over the exposed `u`, with each pixel's hue from the
 channel rule and its lightness from the luma ratio; then the parametric and
-point curves by the channel rule on ProPhoto's channels under the sRGB
-transfer; then the Look's baked curve by the luma ratio, as the canvas start
-was calibrated (Camera Raw puts the photographer's curve before the Look's,
-measured, v1.17.0). Every recipe that names no
+point curves, then the Look's baked curve, both by Camera Raw's measured
+curve rule (`render::tone::camera_raw_rgb_tone`: on linear ProPhoto
+channels, the brightest and darkest through the curve on their sRGB-encoded
+values, the middle one between them — at its LINEAR ratio for the Look's
+curve, the DNG SDK's `RGBTone`, and at its ENCODED ratio for the
+photographer's curve, both measured; Camera Raw puts the photographer's
+curve before the Look's, measured, v1.17.0). Every recipe that names no
 profile renders through the knot model below, byte for byte, and the reverse
 fit solves each law against itself (`fit::tone_cr` carries the measured map
 into `u` through the start and inverts the tables).
@@ -523,7 +526,13 @@ supposed to remove.
   of one frame's flat packet predicted to 0.01–0.53, where the working sRGB
   channels left 2.3–10.7 and ProPhoto under gamma 1.8 or 2.2 0.27–6.5; on a
   camera-profile start the composite curve by the channel rule on the same
-  channels, before the Look's curve (0.13–0.31; after it 0.51–1.48). The
+  channels, before the Look's curve (0.13–0.31; after it 0.51–1.48), and the
+  Look's own curve after it by the same rule (item 35, a bench whose camera
+  space is linear ProPhoto: 149 colours through Adobe Color's Look curve
+  predicted to ΔE median 0.010, max 0.109; the middle channel by its encoded
+  ratio max 2.21, the rule on sRGB channels max 2.56, the luma ratio the
+  engine used before: bench colours ΔE median 2.59, max 11.20, now 0.72 /
+  4.97, the same as with no Look at all). The
   reverse fit matches channel-curve distributions in those channels
   (`render::curve_channels`). ARCHITECTURE, "The point curves".
 - Tone sliders on a camera-profile start (v1.17.0, `render/tone_cr.rs`,

@@ -330,8 +330,8 @@ pub(super) fn apply_develop_with_rasters(
         // v1.17.0: on a camera-profile start, Highlights and Shadows first
         // (their own pass: a local law, keyed to the frame); exposure, per channel
         // by Adobe's rule; then Contrast, Whites and Blacks with Adobe's hue and the luma's
-        // lightness (`tone_cr::camera_raw_slider_pixel`); the Look's curve by
-        // the luma ratio; the photographer's curves by Adobe's rule (`tone_cr`).
+        // lightness (`tone_cr::camera_raw_slider_pixel`); the photographer's
+        // curves, then the Look's, by Camera Raw's measured rule (`tone`).
         if camera_raw {
             let tone = camera_raw_tone_passes(r);
             // Highlights and Shadows FIRST, global then each mask's, on one
@@ -353,17 +353,16 @@ pub(super) fn apply_develop_with_rasters(
                 data.par_iter_mut().for_each(|px| *px = camera_raw_slider_pixel(*px, s));
             }
             mask_cr::apply_local_sliders(data, w, h, r, rasters, frame);
-            // The photographer's parametric and point curves BEFORE the
-            // Look's baked curve, in ProPhoto under the sRGB transfer
-            // (v1.17.0, measured: `tone::apply_camera_raw_curve`).
+            // The photographer's parametric and point curves, then the
+            // Look's baked curve, both by Camera Raw's measured rule on
+            // ProPhoto channels (`tone::apply_camera_raw_curve`; the Look's
+            // curve went by the luma ratio until item 35). The two keep the
+            // middle channel differently, measured (`tone::MiddleRatio`).
             if let Some(c) = &tone.curves {
-                apply_camera_raw_curve(data, c, space);
+                apply_camera_raw_curve(data, c, space, MiddleRatio::Encoded);
             }
             if let Some(look) = &tone.look {
-                data.par_iter_mut().for_each(|px| {
-                    let l_old = luma601(px);
-                    scale_chroma(px, l_old, sample_lut(look, l_old));
-                });
+                apply_camera_raw_curve(data, look, space, MiddleRatio::Linear);
             }
         } else {
             let lut = build_tone_lut(r);

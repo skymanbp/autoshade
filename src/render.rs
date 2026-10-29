@@ -216,7 +216,7 @@ pub(crate) use tone::{
     TONE_KNOTS_X, build_tone_lut, camera_raw_tone_passes, curve_channels, sample_lut, sample_tone_model, tone_exposure_curve,
     tone_knot_weights, tone_model_knots, tone_slider_basis,
 };
-use tone::{CurveSpace, apply_camera_raw_curve, apply_rgb_curves, hermite_eval};
+use tone::{CurveSpace, MiddleRatio, apply_camera_raw_curve, apply_rgb_curves, hermite_eval};
 pub(crate) use tone_cr::{
     HS_KEY_NOMINAL, SliderLaw, camera_raw_exposure, camera_raw_response_keyed,
     camera_raw_row, camera_raw_start, exposure_ramp, hs_row, HsSite,
@@ -227,6 +227,8 @@ use tone_cr::{
 };
 #[cfg(test)]
 pub(crate) use tone::{limit_tone_sliders, parametric_lut};
+#[cfg(test)]
+use tone::{camera_raw_rgb_tone, look_curve_lut};
 pub use wb::{local_temp_to_kelvin, solve_wb_for, solve_wb_from_neutral};
 pub(crate) use wb::{linear_to_srgb, srgb_to_linear, wb_gains};
 use wb::{apply_recipe_wb, apply_recipe_wb_in, colour_gain_luts, ramp, smoothstep, transfer_luts};

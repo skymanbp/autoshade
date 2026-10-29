@@ -2236,7 +2236,23 @@ inside the sRGB gamut of both) decide three things:
   Adobe Color's Look, after it (the place before v1.17.0) leaves 0.51–1.48,
   before it 0.13–0.31, from the flat start and from Exposure +1, Contrast +50,
   Saturation +50 and Vibrance +50 alike; with no Look the composite curve
-  predicts to 0.02–0.21. On p38's real fitted packet (warm, saturated) the
+  predicts to 0.02–0.21. The rule itself (item 35, measured on a bench whose
+  camera space is linear ProPhoto with no tables, `render::tone::
+  camera_raw_rgb_tone`, the one place it lives): the brightest and darkest
+  ProPhoto channels go through the curve on their sRGB-encoded values and,
+  for the Look's curve, the middle one keeps its LINEAR ratio between them —
+  Adobe Color's Look curve on 149 colours predicts Camera Raw to ΔE median
+  0.010, max 0.109, where the middle by its encoded ratio leaves max 2.21 and
+  the same rule on sRGB channels median 0.117, max 2.56. The Look's curve
+  runs after the profile's default curve (greys 0.011 L; before it 0.985) by
+  that rule, where it went by the luma ratio until then; the default curve
+  itself follows it already (`profile.rs`, ProPhoto, middle by linear ratio:
+  0.028 median, 0.066 max). The photographer's composite curve keeps the
+  middle at its ENCODED ratio instead (`tone::MiddleRatio`): predicted from
+  Camera Raw's own p39 renders with the Look, `0,0 / 64,40 / 128,170 /
+  192,200 / 255,255` reads ΔE 0.308 (warm a* +0.12) that way and 0.325
+  (−0.43) by the linear ratio, and the engine moved its warm b* gap on that
+  case from +0.41 to +1.42 when it was switched to the linear ratio. On p38's real fitted packet (warm, saturated) the
   composite curve by the channel rule in ProPhoto before the Look reads 0.26,
   per channel 0.51, in the working channels 0.65–0.85; the three fitted
   channel curves on the measured law 0.10 (warm a* +0.01), on the v1.16.0 law
