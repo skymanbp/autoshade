@@ -3057,13 +3057,69 @@ fn hazy_to_clean_fit_stays_sane() {
     assert!(worst < 15.0, "a band's hue is still {worst:.1}° off after the fit");
 }
 
+/// `src` with the engine's own channel curves on it (knots `(input, output)`,
+/// empty = that channel untouched) — a cast the three channel curves can
+/// express EXACTLY, because it is one. Since v1.17.0 a channel curve moves one
+/// channel of linear ProPhoto under the sRGB transfer, so a per-channel
+/// arithmetic move on the sRGB values (what these fixtures drew until then) is
+/// a move in all three of the curves' channels at once; the casts below are
+/// re-expressed as the curve that carries them.
+fn cast_by_curves(
+    src: &DynamicImage,
+    red: &[(u8, u8)],
+    green: &[(u8, u8)],
+    blue: &[(u8, u8)],
+) -> RgbImage {
+    let curve = |pts: &[(u8, u8)]| -> Vec<CurvePoint> {
+        pts.iter().map(|&(input, output)| CurvePoint { input, output }).collect()
+    };
+    let recipe = EditRecipe {
+        red_curve: curve(red),
+        green_curve: curve(green),
+        blue_curve: curve(blue),
+        ..Default::default()
+    };
+    render::develop_preview(src, &recipe).to_rgb8()
+}
+
+/// `base` with the rows in `rows` taken from `cast` instead.
+fn with_rows(base: &DynamicImage, cast: &RgbImage, rows: std::ops::Range<u32>) -> DynamicImage {
+    let base = base.to_rgb8();
+    DynamicImage::ImageRgb8(RgbImage::from_fn(base.width(), base.height(), |x, y| {
+        if rows.contains(&y) { *cast.get_pixel(x, y) } else { *base.get_pixel(x, y) }
+    }))
+}
+
+/// [`canyon`]'s warm regrade, as a curve: the red channel lifted by a constant
+/// `lift` (of 255) over the rocks' range (red never exceeds 171 there).
+/// `lift` 32 is the sRGB red offset +0.18 these rocks carried until v1.17.0:
+/// measured on the fixture's ramp, that offset is +31.8…+32.2 on the curves'
+/// red channel at every level (and +8.6…+9.6 on green, +2.7 on blue — which
+/// is why it is no longer a pure red move).
+const CANYON_WARM_LIFT: u8 = 32;
+
+fn canyon_red_lift(lift: u8) -> [(u8, u8); 3] {
+    [(0, lift), (171, 171 + lift), (255, 255)]
+}
+
 /// 192×128 canyon: 15.6% neutral ramp (tone evidence — without it the
 /// pale sky is the only `is_neutralish` population and the tone solve
 /// degenerates), 68.8% warm-rock ramp, 15.6% pale-blue sky. `warm` = the
-/// region-graded target: rocks red-lifted (`l^0.7`), ramp + sky IDENTICAL
-/// to the source — the grade a global cast cannot express without
-/// collateral damage.
+/// region-graded target: rocks red-lifted, ramp + sky IDENTICAL to the
+/// source — the grade a global cast cannot express without collateral
+/// damage. Since v1.17.0 the lift is the red CURVE [`CANYON_WARM_LIFT`] on
+/// the rocks only (it was a +0.18 offset on the sRGB red value).
 fn canyon(warm: bool) -> DynamicImage {
+    let base = canyon_drawn();
+    if !warm {
+        return base;
+    }
+    let lifted = cast_by_curves(&base, &canyon_red_lift(CANYON_WARM_LIFT), &[], &[]);
+    with_rows(&base, &lifted, 16..112)
+}
+
+/// The canyon as drawn: neutral ramp, warm rocks, pale-blue sky.
+fn canyon_drawn() -> DynamicImage {
     let (w, h) = (192u32, 128u32);
     let mut img = RgbImage::new(w, h);
     for y in 0..h {
@@ -3072,12 +3128,11 @@ fn canyon(warm: bool) -> DynamicImage {
             let p = if y < 16 {
                 [l, l, l] // neutral ramp
             } else if y < 112 {
-                // Rocks: the warm grade is a pure RED OFFSET — a hue move
-                // toward orange that symmetric chroma expansion (the
+                // Rocks. The warm grade ([`canyon`]) is a pure RED move — a
+                // hue move toward orange that symmetric chroma expansion (the
                 // saturation stage) cannot express, so the residual lands
                 // squarely on the red channel curve, as in the real photo.
-                let r = if warm { (0.85 * l + 0.18).min(1.0) } else { 0.85 * l };
-                [r, 0.52 * l, 0.30 * l]
+                [0.85 * l, 0.52 * l, 0.30 * l]
             } else {
                 [0.64, 0.68, 0.73] // pale blue sky, hue ≈ 213°, chroma 0.09
             };
@@ -3098,30 +3153,20 @@ fn canyon(warm: bool) -> DynamicImage {
 /// warm pair's own +0.18 the rebuilt cast re-hues nothing (share 0.000);
 /// +0.45 is the smallest offset swept (0.18 / 0.24 / 0.30 / 0.36 / 0.45)
 /// whose curves violet the sky.
-fn canyon_warm_luma_kept(offset: f32) -> DynamicImage {
-    let (w, h) = (192u32, 128u32);
-    let mut img = RgbImage::new(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let l = 0.15 + 0.80 * x as f32 / (w - 1) as f32;
-            let p = if y < 16 {
-                [l, l, l]
-            } else if y < 112 {
-                let source = [0.85 * l, 0.52 * l, 0.30 * l];
-                let warm = [(0.85 * l + offset).min(1.0), 0.52 * l, 0.30 * l];
-                let k = luma601(&source) / luma601(&warm);
-                warm.map(|c| c * k)
-            } else {
-                [0.64, 0.68, 0.73]
-            };
-            img.put_pixel(
-                x,
-                y,
-                image::Rgb(p.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8)),
-            );
+fn canyon_warm_luma_kept(lift: u8) -> DynamicImage {
+    let base = canyon_drawn();
+    let lifted = cast_by_curves(&base, &canyon_red_lift(lift), &[], &[]);
+    let source = base.to_rgb8();
+    DynamicImage::ImageRgb8(RgbImage::from_fn(source.width(), source.height(), |x, y| {
+        let s = *source.get_pixel(x, y);
+        if !(16..112).contains(&y) {
+            return s;
         }
-    }
-    DynamicImage::ImageRgb8(img)
+        let unit = |p: image::Rgb<u8>| p.0.map(|c| c as f32 / 255.0);
+        let (src_px, warm) = (unit(s), unit(*lifted.get_pixel(x, y)));
+        let k = luma601(&src_px) / luma601(&warm);
+        image::Rgb(warm.map(|c| ((c * k).clamp(0.0, 1.0) * 255.0).round() as u8))
+    }))
 }
 
 /// R17: the P20 × reimagine murk, distilled — the target re-hues a
@@ -3343,9 +3388,12 @@ fn foreign_hue_veto_measures_real_canyon_reconstruction() {
         "the production evidence-weighted veto must see the supported foreign population ({supported}/512 supported, {supported_total} total)"
     );
 
-    // The real canyon reconstruction is upstream-refused: its rendered
-    // candidate is unchanged and creates zero foreign share. This is a
-    // diagnostic, not the veto acceptance itself.
+    // The real canyon reconstruction stays REFUSED. Until v1.17.0 it was
+    // refused upstream (its rendered candidate was unchanged and created zero
+    // foreign share); with the rocks' warm grade re-drawn as the red curve it
+    // is a real cast, the rebuilt candidate paints the sky rows (0.125 of the
+    // frame) into hues the target holds nowhere, and it is this veto that
+    // refuses it — asserted below, and end to end on the shipped recipe.
     let src = canyon(false);
     let tgt = canyon(true);
     let (s2, t2) = analysis_pair(&src, &tgt);
@@ -3363,13 +3411,19 @@ fn foreign_hue_veto_measures_real_canyon_reconstruction() {
     let cf_real = foreign_hue_bins(&tp2).expect("canyon target has chromatic mass");
     let created_real = foreign_share(&with_real, &cf_real) - foreign_share(&cur_real, &cf_real);
     eprintln!("CANYON_VETO_REAL created={created_real:.6} with_eq_cur={}", with_real == cur_real);
-    assert!(created_real <= VETO_CREATED_SHARE);
-    assert!(!cast_paints_foreign_hues_weighted(
+    assert!(created_real > 2.0 * VETO_CREATED_SHARE, "measured 0.125 on v1.17.0: {created_real:.4}");
+    assert!(cast_paints_foreign_hues_weighted(
         &cur_real,
         &with_real,
         &tp2,
         &evidence_model(&cur_real, &tp2),
     ));
+    let shipped = fit_recipe(&src, &tgt).recipe;
+    assert!(
+        shipped.red_curve.is_empty() && shipped.green_curve.is_empty() && shipped.blue_curve.is_empty(),
+        "the real canyon reconstruction must stay refused: {}",
+        shipped.rationale
+    );
 
     // The inverse case is equally important: a foreign population created
     // only inside a structurally replaced cell is not evidence about a
@@ -3508,6 +3562,9 @@ fn warm_rock_cast_must_not_violet_the_pale_sky() {
 /// — this models the 2026-07-09 real-machine failure #2 (reimagine-5):
 /// the hazy pale sky was rotated ~170° into the target's own orange.
 fn canyon_gold_target() -> DynamicImage {
+    // The rocks carry [`canyon`]'s warm red curve; the sky is a regrade drawn
+    // directly (no curve carries it — that is the point of the pair).
+    let warm = canyon(true).to_rgb8();
     let (w, h) = (192u32, 128u32);
     let mut img = RgbImage::new(w, h);
     for y in 0..h {
@@ -3516,7 +3573,7 @@ fn canyon_gold_target() -> DynamicImage {
             let p = if y < 16 {
                 [l, l, l]
             } else if y < 112 {
-                [(0.85 * l + 0.18).min(1.0), 0.52 * l, 0.30 * l]
+                warm.get_pixel(x, y).0.map(|c| c as f32 / 255.0)
             } else {
                 // PALE gold sky: bright golden-hour skies keep a HIGH blue
                 // channel (b ≈ 0.6) — the demanded blue curve is a gentle
@@ -3664,7 +3721,27 @@ fn vivid_warm_target() -> DynamicImage {
 /// +12.1° end to end and was ADMITTED, so nothing here projected; at
 /// [0.62, 0.78] the candidate reads 36.3°, the stage convicts at 20.7° and
 /// projects (t = 0.429, +5.7°) at both strength stops.
+///
+/// v1.17.0: both halves of the target are casts the channel curves carry.
+/// The target sky [0.62, 0.78, 1.00] × level IS the source sky under three
+/// straight curves (measured: ×0.905 / ×0.916 / ×0.992 on the curves' red,
+/// green and blue at every level, so 255 → 231 / 234 / 253); the ground's
+/// +0.12 sRGB red offset is +20.7…+21.4 on the curves' red (and +5.6 on
+/// green), re-drawn as the red curve +21. Measured on this tree: the
+/// candidate fans 35.3°, re-hues nothing, paints nothing foreign; the stage
+/// projects at t = 0.524 (default) and 0.374 (strength 1.0), +4.5°.
 fn coast(warm: bool) -> DynamicImage {
+    let base = coast_drawn();
+    if !warm {
+        return base;
+    }
+    let sky = cast_by_curves(&base, &[(0, 0), (255, 231)], &[(0, 0), (255, 234)], &[(0, 0), (255, 253)]);
+    let ground = cast_by_curves(&base, &[(0, 21), (152, 173), (255, 255)], &[], &[]);
+    with_rows(&with_rows(&base, &sky, 0..64), &ground, 64..128)
+}
+
+/// The coast as drawn: the single-hued sky ramp over the warm ground ramp.
+fn coast_drawn() -> DynamicImage {
     let (w, h) = (192u32, 128u32);
     let mut img = RgbImage::new(w, h);
     for y in 0..h {
@@ -3672,20 +3749,12 @@ fn coast(warm: bool) -> DynamicImage {
             let p = if y < 64 {
                 // Sky: hue ≈ 214° at every level, luminance 0.22 → 0.90.
                 let level = 0.22 + 0.68 * y as f32 / 63.0;
-                if warm {
-                    [0.62 * level, 0.78 * level, 1.00 * level]
-                } else {
-                    [0.74 * level, 0.85 * level, 1.00 * level]
-                }
+                [0.74 * level, 0.85 * level, 1.00 * level]
             } else {
                 // Ground: a warm ramp the target red-lifts, exactly the
                 // demand the channel-CDF answers with a global cast.
                 let level = 0.15 + 0.70 * x as f32 / (w - 1) as f32;
-                if warm {
-                    [(0.85 * level + 0.12).min(1.0), 0.52 * level, 0.30 * level]
-                } else {
-                    [0.85 * level, 0.52 * level, 0.30 * level]
-                }
+                [0.85 * level, 0.52 * level, 0.30 * level]
             };
             img.put_pixel(
                 x,
@@ -3799,30 +3868,24 @@ fn cast_stage_candidate_from(
 /// for it; and every milder version of those curves reproduces less of
 /// it, so the projection has nothing to trade. This is the pair where
 /// the rescue must give up and the refusal stand.
+///
+/// v1.17.0: until then the sky's green rode its level on the sRGB value
+/// (0.958 at the dark end, hue ≈ 190°, to 0.742 at the bright end, ≈ 240°).
+/// On the curves' channels that sky is the source sky under three monotone
+/// curves, read off the drawn ramp at its dark end, middle and bright end
+/// (red 46→48, 118→118, 188→180; green 48→53, 122→121, 194→172; blue
+/// 55→56, 141→141, 225→223) and extended at the bright end's slope, so the
+/// target is that cast — the same 50° fan, carried by curves. The ground is
+/// the source's.
 fn two_temperature_coast() -> DynamicImage {
-    let (w, h) = (192u32, 128u32);
-    let mut img = RgbImage::new(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let p = if y < 64 {
-                let level = 0.22 + 0.68 * y as f32 / 63.0;
-                // Green rides the level: 0.958 at the dark end (hue
-                // ≈ 190°) to 0.742 at the bright end (≈ 240°), so the
-                // target's own sky carries a 50° fan across luminance.
-                let green = 0.9584 - 0.2167 * (y as f32 / 63.0);
-                [0.74 * level, green * level, 1.00 * level]
-            } else {
-                let level = 0.15 + 0.70 * x as f32 / (w - 1) as f32;
-                [0.85 * level, 0.52 * level, 0.30 * level]
-            };
-            img.put_pixel(
-                x,
-                y,
-                image::Rgb(p.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8)),
-            );
-        }
-    }
-    DynamicImage::ImageRgb8(img)
+    let base = coast_drawn();
+    let sky = cast_by_curves(
+        &base,
+        &[(0, 0), (46, 48), (118, 118), (188, 180), (255, 239)],
+        &[(0, 0), (48, 53), (122, 121), (194, 172), (255, 215)],
+        &[(0, 0), (55, 56), (141, 141), (225, 223), (255, 252)],
+    );
+    with_rows(&base, &sky, 0..64)
 }
 
 /// The projection's readings off a finished report, by note key.
@@ -3983,7 +4046,14 @@ fn a_projection_that_cannot_clear_the_target_leaves_the_refusal_standing() {
     let tgt = two_temperature_coast();
     let c = cast_stage_candidate(&src, &tgt);
     let evidence = evidence_model(&c.cur, &c.tp);
-    assert!(!c.with.red_curve.is_empty(), "premise broken: no cast demanded");
+    // v1.17.0: the premise is that a cast is DEMANDED, on any channel. The
+    // two-temperature sky is a green move (red changes by at most 8 of 255
+    // on the curves' red), so the candidate carries green and blue curves and
+    // no red one; until v1.17.0 the sRGB-drawn sky also asked for red.
+    assert!(
+        !(c.with.red_curve.is_empty() && c.with.green_curve.is_empty() && c.with.blue_curve.is_empty()),
+        "premise broken: no cast demanded"
+    );
     let (_, fan, _) = hue_fan_weighted(&c.cur, &c.with_px, &evidence)
         .expect("premise broken: the two-temperature sky is not a region-sized class");
     assert!(fan >= FAN_DEG, "premise broken: the fitted cast does not fan ({fan:.1}°)");
@@ -4048,14 +4118,26 @@ fn the_projected_fan_grows_with_t() {
             .unwrap_or(0.0);
         seen.push((t, fan));
     }
+    // 0.75°, was 0.5° until v1.17.0. Measured on the re-drawn coast: the
+    // ladder reads 0.0 / 0.1 / 1.4 / 2.1 / 1.5 / 3.7 / 11.0 / 12.9 / 19.4 /
+    // 29.2 / 35.3°, so the one step down is 0.62° at t 0.3 → 0.4, a reading
+    // 5.4° under FAN_PROJECT_DEG where the eight-bit knots of the shrunk
+    // curves are the whole of the move.
     for pair in seen.windows(2) {
         let ((t0, f0), (t1, f1)) = (pair[0], pair[1]);
         assert!(
-            f1 >= f0 - 0.5,
+            f1 >= f0 - 0.75,
             "the fan must not shrink as the cast is restored: \
                  t {t0:.1} → {f0:.1}°, t {t1:.1} → {f1:.1}° (whole ladder {seen:?})"
         );
     }
+    // …and what the bisection actually relies on, read on the same ladder:
+    // below the largest t that clears FAN_PROJECT_DEG, every t clears it.
+    let largest = seen.iter().filter(|(_, f)| *f <= FAN_PROJECT_DEG).map(|(t, _)| *t).fold(0.0f32, f32::max);
+    assert!(
+        seen.iter().filter(|(t, _)| *t <= largest).all(|(_, f)| *f <= FAN_PROJECT_DEG),
+        "the clearing set must be closed downward in t: {seen:?}"
+    );
     let (_, first) = seen[0];
     let (_, last) = seen[seen.len() - 1];
     assert!(
@@ -4686,8 +4768,12 @@ fn the_fan_gate_leaves_a_legitimate_cast_alone() {
     );
     for (name, src, tgt, ceiling) in [
         ("haze", hazed.clone(), clean.clone(), 0.6),
-        ("canyon_gold", canyon(false), canyon_gold_target(), 0.75),
-        ("hazy_vivid", hazy_canyon_source(), vivid_warm_target(), 0.3),
+        // 1.0, was 0.75: measured 14.5° on v1.17.0 (10.1° before) — still
+        // under the line, so the fan gate does not convict a pair the
+        // rotation gate refuses.
+        ("canyon_gold", canyon(false), canyon_gold_target(), 1.0),
+        // 0.45, was 0.3: measured 6.0° on v1.17.0 (2.7° before).
+        ("hazy_vivid", hazy_canyon_source(), vivid_warm_target(), 0.45),
     ] {
         let c = cast_stage_candidate(&src, &tgt);
         let fan = hue_fan_weighted(&c.cur, &c.with_px, &evidence_model(&c.cur, &c.tp))
@@ -4715,25 +4801,29 @@ fn the_fan_gate_leaves_a_legitimate_cast_alone() {
     // 0.0339 and reported confidence 0.4061; re-measured 2026-10-21 with
     // the tone sliders withheld on their own tonal reading, 0.0349 and
     // 0.3889; 2026-10-22 under the ungated tone arm, 0.0365 and 0.3564.
+    // v1.17.0, the rocks' warm grade re-drawn as the red curve
+    // [`CANYON_WARM_LIFT`] (the target moved, so err_before did too):
+    // 0.0256 -> 0.0165 at the 0.25 confidence floor.
     assert!(
-        (warm.err_after - 0.0365).abs() < 0.001,
-        "canyon-warm's landing moved off the measured 0.0365: {} -> {}",
+        (warm.err_after - 0.0165).abs() < 0.001,
+        "canyon-warm's landing moved off the measured 0.0165: {} -> {}",
         warm.err_before,
         warm.err_after
     );
     assert!(
-        (warm.recipe.confidence - 0.356).abs() < 0.01,
-        "…and its reported confidence off the measured 0.356: {}",
+        (warm.recipe.confidence - 0.25).abs() < 0.01,
+        "…and its reported confidence off the measured 0.25: {}",
         warm.recipe.confidence
     );
     let c = cast_stage_candidate(&canyon(false), &canyon(true));
-    let fan = hue_fan_weighted(&c.cur, &c.with_px, &evidence_model(&c.cur, &c.tp))
-        .map(|(_, added, _)| added)
-        .unwrap_or(0.0);
+    let reading = hue_fan_weighted(&c.cur, &c.with_px, &evidence_model(&c.cur, &c.tp));
+    let fan = reading.map(|(_, added, _)| added).unwrap_or(0.0);
     assert!(fan < FAN_DEG, "canyon-warm's candidate is left alone by the fan gate ({fan:.1}°)");
+    // v1.17.0: the census abstains on this candidate (no hue class reaches
+    // the fan gate's share floor); it read 12.1° on 2026-10-22.
     assert!(
-        (fan - 12.1).abs() < 0.2,
-        "canyon-warm's candidate reads {fan:.1}°, not the 12.1° measured on 2026-10-22"
+        reading.is_none(),
+        "canyon-warm's candidate reads {reading:?}, not the abstention measured on v1.17.0"
     );
     use crate::rationale::keys;
     assert!(
@@ -5440,7 +5530,7 @@ fn rotation_gate_separates_regrade_from_haze() {
     // `canyon(true)` the ungated tone arm now fits contrast −21.6 / exposure
     // +0.25 / blacks +14 to the red offset's luma lift, and the cast rebuilt
     // on that recipe re-hues nothing (share 0.000).
-    let (c2, w2, ne2) = stage4(&canyon(false), &canyon_warm_luma_kept(0.45));
+    let (c2, w2, ne2) = stage4(&canyon(false), &canyon_warm_luma_kept(75));
     assert!(ne2, "premise broken: the violet pair no longer provokes cast curves");
     let s2 = rehued_share(&c2, &w2);
     assert!(
@@ -5682,16 +5772,19 @@ fn joint_family_is_calibrated_on_the_fixture_set() {
         // 2026-10-22); 2026-10-21,
         // the tone sliders' own do-no-harm withholding the contrast +3.1
         // the regression asks for: 0.0387 -> 0.0349 at 0.3889; 2026-10-22,
-        // the ungated tone arm: 0.0387 -> 0.0365 at 0.3564).
+        // the ungated tone arm: 0.0387 -> 0.0365 at 0.3564; v1.17.0, the warm
+        // grade re-drawn as the red curve [`CANYON_WARM_LIFT`]: 0.0256 ->
+        // 0.0165 at the 0.25 floor).
         assert!(
-            (report.err_after - 0.0365).abs() < 0.001
-                && (report.recipe.confidence - 0.356).abs() < 0.01,
-            "canyon warm's landing moved off the measured 0.0365 / 0.356: {} -> {} at {}",
+            (report.err_after - 0.0165).abs() < 0.001
+                && (report.recipe.confidence - 0.25).abs() < 0.01,
+            "canyon warm's landing moved off the measured 0.0165 / 0.25: {} -> {} at {}",
             report.err_before, report.err_after, report.recipe.confidence
         );
+        // v1.17.0, the re-drawn warm grade: 0.2540 -> 0.1120 (0.0590 before).
         assert!(
-            (after - 0.0590).abs() < 0.005,
-            "…and its joint reading off the measured 0.0590: {before:.4} -> {after:.4}"
+            (after - 0.1120).abs() < 0.005,
+            "…and its joint reading off the measured 0.1120: {before:.4} -> {after:.4}"
         );
         assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_REFUSED), "canyon warm is no longer a refusal: {}", report.recipe.rationale);
         assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_MISS), "nor a miss: {}", report.recipe.rationale);
@@ -8315,9 +8408,13 @@ fn no_shipped_fit_delivers_a_hue_fan_past_the_limit() {
             worst = worst.max(fan);
         }
     }
+    // v1.17.0 (the channel curves on Camera Raw's law, the fixtures' casts
+    // re-drawn as curves): the worst is now the coast pair's 4.8° (cornwall
+    // panel −2.0°, haze 3.0°, two-family hsl 1.9°, two-temperature coast
+    // 0.4°); it was the cornwall panel's 12.9°.
     assert!(
-        (worst - 12.9).abs() < 0.5,
-        "the worst delivered fan moved off the measured 12.9°: {worst:.1}"
+        (worst - 4.8).abs() < 0.5,
+        "the worst delivered fan moved off the measured 4.8°: {worst:.1}"
     );
 }
 
@@ -8377,9 +8474,10 @@ fn solving_the_bands_takes_the_colour_shape_out_of_the_residual() {
     // rendered farther than the source, neutral recipe (0.0115 → 0.0115),
     // mixer given back — the premise above fails — so the engine-developed
     // pair stays.
+    // v1.17.0: 0.0131 (was 0.0231) — the channel curves on Camera Raw's law.
     assert!(
-        (partial.err_after - 0.0231).abs() < 0.001,
-        "the partial fit's finished residual moved off the measured 0.0231: {}",
+        (partial.err_after - 0.0131).abs() < 0.001,
+        "the partial fit's finished residual moved off the measured 0.0131: {}",
         partial.err_after
     );
     assert!(
@@ -8387,11 +8485,13 @@ fn solving_the_bands_takes_the_colour_shape_out_of_the_residual() {
         "…which is what puts it UNDER the disclosure floor {FIT_QUANT_CLEAN}: {}",
         partial.err_after
     );
+    // v1.17.0: what buys the floor is the projection again (as on
+    // 2026-09-02): the cast the fan gate convicts at 34.1° is shrunk to
+    // t = 0.057 and shipped (look-error ratio 0.840, +1.7°).
     assert!(
-        partial.recipe.exposure_ev < 0.0
-            && partial.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_CAST_HUE_FANNED)
-            && partial.recipe.red_curve.is_empty(),
-        "…and the tone sliders, not a cast the fan gate refused, are what bought that: {}",
+        partial.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_CAST_PROJECTED)
+            && !partial.recipe.red_curve.is_empty(),
+        "…and a projected cast, not the tone sliders alone, is what bought that: {}",
         partial.recipe.rationale
     );
     assert!(
@@ -8402,7 +8502,7 @@ fn solving_the_bands_takes_the_colour_shape_out_of_the_residual() {
 
     // The `hsl` half of the contract, on a gap +/-18 cannot come close to
     // closing: +/-80 demanded. The mixer still attaches, the residual is
-    // still a per-band colour job, and at 0.0601 it is well clear of the
+    // still a per-band colour job, and at 0.0622 it is well clear of the
     // floor — so the sentence that CAST-2's fix-up put back is still
     // asserted in the tree, on the pair that can carry it.
     let (wide_src, wide_tgt) = two_family_hsl_pair(80.0);
@@ -8422,9 +8522,10 @@ fn solving_the_bands_takes_the_colour_shape_out_of_the_residual() {
         wide_s_img.height(),
     );
     assert!(!wide.recipe.hsl.is_neutral(), "premise: the mixer attaches on the wide gap too");
+    // v1.17.0: 0.0622 (was 0.0601) — the channel curves on Camera Raw's law.
     assert!(
-        (wide.err_after - 0.0601).abs() < 0.002,
-        "the wide pair's residual moved off the measured 0.0601: {}",
+        (wide.err_after - 0.0622).abs() < 0.002,
+        "the wide pair's residual moved off the measured 0.0622: {}",
         wide.err_after
     );
     assert!(
@@ -8635,11 +8736,19 @@ fn a_cast_with_no_fan_never_enters_the_hand_off() {
         ..Default::default()
     };
     haze.clamp();
+    super::solve::route::take();
     let rep = fit_recipe(&render::develop_preview(&clean, &haze), &clean);
+    let seen = super::solve::route::take();
     assert!(!rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB));
+    // The property itself, read where it happens: no stage call entered the
+    // rescue (projection or hand-off) on this pair.
+    assert_eq!(seen.hand_off_entered, 0, "the haze cast reached the hand-off: {seen:?}");
+    // By value: read at 9631905 before any of the hand-off was written
+    // (0x732f_f6a1_d6b6_ea19); re-read on v1.17.0's channel-curve law, where
+    // the same path ships a different cast (residual 0.051 → 0.008).
     assert_eq!(
         recipe_fnv(&rep.recipe),
-        0x732f_f6a1_d6b6_ea19,
+        0x8810_e644_1c3e_8f02,
         "a recipe the hand-off never touched moved: {}",
         rep.recipe.rationale
     );
