@@ -353,14 +353,17 @@ pub(super) fn apply_develop_with_rasters(
                 data.par_iter_mut().for_each(|px| *px = camera_raw_slider_pixel(*px, s));
             }
             mask_cr::apply_local_sliders(data, w, h, r, rasters, frame);
+            // The photographer's parametric and point curves BEFORE the
+            // Look's baked curve, in ProPhoto under the sRGB transfer
+            // (v1.17.0, measured: `tone::apply_camera_raw_curve`).
+            if let Some(c) = &tone.curves {
+                apply_camera_raw_curve(data, c, space);
+            }
             if let Some(look) = &tone.look {
                 data.par_iter_mut().for_each(|px| {
                     let l_old = luma601(px);
                     scale_chroma(px, l_old, sample_lut(look, l_old));
                 });
-            }
-            if let Some(c) = &tone.curves {
-                data.par_iter_mut().for_each(|px| *px = camera_raw_channels(*px, c));
             }
         } else {
             let lut = build_tone_lut(r);
@@ -382,8 +385,6 @@ pub(super) fn apply_develop_with_rasters(
     if monochrome {
         apply_gray_mix(data, &r.gray_mixer());
     }
-    // 1b) per-channel RGB curves (red/green/blue), right after the master curve.
-    apply_rgb_curves(data, r);
     // 2) per-colour HSL (the 8 ACR bands): rotate/scale each colour family,
     //    after global tone and before clarity/saturation (ACR ordering) — then
     //    the point colours (v1.5.0), the Color Mixer's other half. Neither has
@@ -428,6 +429,15 @@ pub(super) fn apply_develop_with_rasters(
             *px = apply_sat_vibrance(px[0], px[1], px[2], sat, vib);
         });
     }
+    // 3c) per-channel RGB curves (red/green/blue), on ProPhoto's channels
+    //    (v1.17.0, measured: `tone::apply_rgb_curves`). After the mixer and
+    //    Saturation/Vibrance, Camera Raw's place for them: a red curve
+    //    composed onto Camera Raw's own HSL and Saturation renders predicts
+    //    them to 0.09 and 0.08 ΔE. Still before the colour grade's place in
+    //    Camera Raw would be (after these curves: composing the curve onto
+    //    its grade render is 8.7 ΔE off), which here runs earlier — a known
+    //    difference of the order, ARCHITECTURE.
+    apply_rgb_curves(data, r, space);
     // 4) the Detail panel (v1.5.0, `detail.rs`): colour noise, then luminance
     //    noise, then sharpening. Noise reduction runs BEFORE sharpening (the
     //    order that matters most), and colour before luminance so the

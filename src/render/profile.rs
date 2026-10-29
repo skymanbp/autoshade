@@ -348,6 +348,20 @@ fn map_white(from: [f64; 2], to: [f64; 2]) -> [[f64; 3]; 3] {
     mul64(&inv, &mul64(&a, &MB))
 }
 
+/// Linear working RGB (`space`, D65) → linear ProPhoto RGB at ProPhoto's own
+/// D50 white through the SDK's Bradford ([`map_white`]), and back: the space
+/// Camera Raw's point curves act in, each channel of it under the sRGB
+/// transfer (`render::tone::apply_rgb_curves`, measured v1.17.0). The
+/// Bradford is the measured part: a red-only straight-line curve predicted
+/// through ProPhoto at the WORKING white instead ([`UnderTone`]'s reference)
+/// is 0.28 ΔE off Camera Raw, through this one 0.01.
+pub(crate) fn curve_space(space: super::ExportColorSpace) -> ([[f32; 3]; 3], [[f32; 3]; 3]) {
+    let work = mat3_f64(&super::rgb_to_xyz(super::space_primaries(space), super::D65_XY));
+    let pro = rgb_to_xyz64(PROPHOTO_PRIM, D50_XY);
+    let to = mul64(&inv64(&pro).unwrap_or(pro), &mul64(&map_white(D65_XY64, D50_XY), &work));
+    (mat3_f32(&to), mat3_f32(&inv64(&to).unwrap_or(to)))
+}
+
 /// Robertson's isotherms, `dng_temperature`'s table (Wyszecki & Stiles,
 /// *Color Science*, 2nd ed., p. 228: reciprocal megakelvin, u, v, isotherm
 /// slope).

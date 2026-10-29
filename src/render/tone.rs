@@ -637,7 +637,14 @@ pub(super) fn hermite_eval(xs: &[f32], ys: &[f32], m: &[f32], x: f32) -> f32 {
 /// Curve control points → a 256-entry [0,1]→[0,1] LUT; identity when empty.
 /// The ONE curve sampler shared by the master tone curve, the per-channel RGB
 /// curves, and the GUI curve editor's on-screen preview — public so what the
-/// editor draws is exactly what the engine applies (same sort + linear interp).
+/// editor draws is exactly what the engine applies.
+///
+/// v1.17.0: between the knots it is Camera Raw's own spline
+/// ([`adobe_spline`]), not a straight line. Measured on one frame's flat
+/// packet (`ToneCurvePV2012Red` `0,0 / 128,180 / 255,255`, Camera Raw 16-bit
+/// against a prediction from the flat render, ΔE mean over 0.58 M pixels):
+/// straight lines leave 4.73, the spline 0.08; on a five-knot curve
+/// 3.01 against 0.53.
 pub fn curve_lut(points: &[crate::recipe::CurvePoint]) -> Vec<f32> {
     if points.is_empty() {
         return (0..256).map(|i| i as f32 / 255.0).collect();
@@ -667,30 +674,75 @@ pub fn curve_lut(points: &[crate::recipe::CurvePoint]) -> Vec<f32> {
     if pts[pts.len() - 1].0 < 1.0 {
         pts.push((1.0, 1.0));
     }
-    (0..256).map(|i| interp(&pts, i as f32 / 255.0)).collect()
+    let spline = adobe_spline(&pts);
+    (0..256).map(|i| spline(i as f32 / 255.0).clamp(0.0, 1.0)).collect()
 }
 
-/// Piecewise-linear interpolation over sorted (x,y) control points, clamped at
-/// the ends.
-fn interp(pts: &[(f32, f32)], x: f32) -> f32 {
-    if pts.is_empty() {
-        return x;
-    }
-    if x <= pts[0].0 {
-        return pts[0].1;
-    }
-    if x >= pts[pts.len() - 1].0 {
-        return pts[pts.len() - 1].1;
-    }
-    for w in pts.windows(2) {
-        let (x0, y0) = w[0];
-        let (x1, y1) = w[1];
-        if x >= x0 && x <= x1 {
-            let t = if (x1 - x0).abs() < 1e-6 { 0.0 } else { (x - x0) / (x1 - x0) };
-            return y0 + (y1 - y0) * t;
+/// The DNG SDK's curve spline (`dng_spline_solver`), which Camera Raw puts
+/// through a point curve's knots: a cubic Hermite through every knot whose
+/// slopes start as the chord-length-weighted mean of the two neighbouring
+/// chords (the end ones extrapolated) and are then solved as a tridiagonal
+/// system for a C² curve. Not monotone — a steep knot overshoots between its
+/// neighbours, as it does in Lightroom; the caller clamps to [0, 1]. Two knots
+/// are the straight line through them. `pts` sorted, inputs distinct.
+fn adobe_spline(pts: &[(f32, f32)]) -> impl Fn(f32) -> f32 + '_ {
+    let n = pts.len();
+    let x: Vec<f64> = pts.iter().map(|p| f64::from(p.0)).collect();
+    let y: Vec<f64> = pts.iter().map(|p| f64::from(p.1)).collect();
+    let mut s = vec![0.0f64; n];
+    if n >= 2 {
+        let (mut a, mut b) = (x[1] - x[0], (y[1] - y[0]) / (x[1] - x[0]));
+        s[0] = b;
+        for j in 2..n {
+            let c = x[j] - x[j - 1];
+            let d = (y[j] - y[j - 1]) / c;
+            s[j - 1] = (b * c + d * a) / (a + c);
+            (a, b) = (c, d);
+        }
+        s[n - 1] = 2.0 * b - s[n - 2];
+        s[0] = 2.0 * s[0] - s[1];
+        if n > 2 {
+            let (mut e, mut f, mut g) = (vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n]);
+            f[0] = 0.5;
+            e[n - 1] = 0.5;
+            g[0] = 0.75 * (s[0] + s[1]);
+            g[n - 1] = 0.75 * (s[n - 2] + s[n - 1]);
+            for j in 1..n - 1 {
+                let a = (x[j + 1] - x[j - 1]) * 2.0;
+                e[j] = (x[j + 1] - x[j]) / a;
+                f[j] = (x[j] - x[j - 1]) / a;
+                g[j] = 1.5 * s[j];
+            }
+            for j in 1..n {
+                let a = 1.0 - f[j - 1] * e[j];
+                if j != n - 1 {
+                    f[j] /= a;
+                }
+                g[j] = (g[j] - g[j - 1] * e[j]) / a;
+            }
+            for j in (0..n - 1).rev() {
+                g[j] -= f[j] * g[j + 1];
+            }
+            s = g;
         }
     }
-    x
+    move |v: f32| {
+        let v = f64::from(v);
+        if n == 0 {
+            return v as f32;
+        }
+        if v <= x[0] {
+            return y[0] as f32;
+        }
+        if v >= x[n - 1] {
+            return y[n - 1] as f32;
+        }
+        let j = x.partition_point(|&k| k < v).clamp(1, n - 1);
+        let a = x[j] - x[j - 1];
+        let (b, c) = ((v - x[j - 1]) / a, (x[j] - v) / a);
+        (((y[j - 1] * (2.0 - c + b) + s[j - 1] * a * b) * c * c) + ((y[j] * (2.0 - b + c) - s[j] * a * c) * b * b))
+            as f32
+    }
 }
 
 /// Sample a LUT (any length) at a normalised [0,1] position with linear interp.
@@ -710,7 +762,22 @@ pub(crate) fn sample_lut(lut: &[f32], x: f32) -> f32 {
 
 /// Apply the per-channel RGB curves (red/green/blue) in place — the colour
 /// companion to the master tone curve. No-op when all three are empty.
-pub(super) fn apply_rgb_curves(data: &mut [[f32; 3]], r: &EditRecipe) {
+///
+/// v1.17.0, Camera Raw's law, measured: each curve acts on one channel of
+/// LINEAR ProPhoto RGB (D50, Bradford from the working white —
+/// [`profile::curve_space`]) under the sRGB transfer, never on the working
+/// space's own channels. On one frame's flat packet, curves `0,0 / 128,180 /
+/// 255,255` and `0,0 / 255,200` on each of R, G and B: in that encoding the
+/// other two channels move by 0.0000 and the curved one is a pure function
+/// of itself (scatter 0.0018–0.0039, the render's noise); predicted there
+/// the renders are matched to ΔE 0.01–0.12, where the working sRGB channels
+/// (the engine's place before v1.17.0, with straight lines between knots)
+/// left 2.3–12.0, and ProPhoto linear, under gamma 1.8 or under gamma 2.2,
+/// with the spline, 0.27–8.0.
+/// The caller places this pass after Saturation and Vibrance (`develop`):
+/// a red curve composed onto Camera Raw's own HSL, Contrast +50, Exposure +1,
+/// Saturation +50 and Vibrance +50 renders predicts them to 0.08–0.12.
+pub(super) fn apply_rgb_curves(data: &mut [[f32; 3]], r: &EditRecipe, space: ExportColorSpace) {
     let curves = [&r.red_curve, &r.green_curve, &r.blue_curve];
     // v1.5.0 F7: a creative profile may bake per-channel curves too, and they
     // compose UNDER the photographer's for the same reason the master curve
@@ -747,11 +814,71 @@ pub(super) fn apply_rgb_curves(data: &mut [[f32; 3]], r: &EditRecipe) {
     });
     let active: [bool; 3] =
         std::array::from_fn(|ch| !curves[ch].is_empty() || baked.is_some_and(|b| !b[ch].is_empty()));
-    data.par_iter_mut().for_each(|px| {
+    let space = CurveSpace::new(space);
+    data.par_iter_mut().for_each(|px| *px = space.channel_curves(*px, &luts, active));
+}
+
+/// [`profile::curve_space`] and the sRGB transfer, resolved once per pass:
+/// what a per-channel curve (global or a mask's) is applied through.
+pub(super) struct CurveSpace {
+    to: [[f32; 3]; 3],
+    from: [[f32; 3]; 3],
+    dec: &'static [f32],
+    enc: &'static [f32],
+}
+
+impl CurveSpace {
+    pub(super) fn new(space: ExportColorSpace) -> Self {
+        let (to, from) = profile::curve_space(space);
+        let (dec, enc) = transfer_luts();
+        CurveSpace { to, from, dec, enc }
+    }
+
+    /// One working-space pixel (sRGB-encoded) through the `active` channel
+    /// curves in ProPhoto under the sRGB transfer, back in the working space.
+    pub(super) fn channel_curves(&self, px: [f32; 3], luts: &[Vec<f32>; 3], active: [bool; 3]) -> [f32; 3] {
+        let mut pro = mat_vec3(&self.to, &px.map(|v| sample_lut(self.dec, v)));
         for ch in 0..3 {
             if active[ch] {
-                px[ch] = sample_lut(&luts[ch], px[ch]);
+                let e = sample_lut(self.enc, pro[ch].clamp(0.0, 1.0));
+                pro[ch] = sample_lut(self.dec, sample_lut(&luts[ch], e));
             }
         }
+        mat_vec3(&self.from, &pro).map(|v| sample_lut(self.enc, v.clamp(0.0, 1.0)))
+    }
+}
+
+/// sRGB-encoded pixels (sRGB primaries, the analysis renders') → the
+/// channels [`apply_rgb_curves`] puts a per-channel curve on: ProPhoto RGB
+/// ([`profile::curve_space`]) under the sRGB transfer. What the reverse fit
+/// matches a channel curve's distributions in (`fit::curves`), so the curve
+/// it fits is a curve of the channel the engine and Camera Raw apply it to.
+pub(crate) fn curve_channels(px: &[f32; 3]) -> [f32; 3] {
+    use std::sync::OnceLock;
+    static TO: OnceLock<[[f32; 3]; 3]> = OnceLock::new();
+    let to = TO.get_or_init(|| profile::curve_space(ExportColorSpace::Srgb).0);
+    let (dec, enc) = transfer_luts();
+    mat_vec3(to, &px.map(|v| sample_lut(dec, v))).map(|v| sample_lut(enc, v.clamp(0.0, 1.0)))
+}
+
+/// The photographer's composite point curve (and the parametric curve with
+/// it) on a camera-profile start: Adobe's channel rule
+/// ([`camera_raw_channels`]) on the channels of [`profile::curve_space`]
+/// under the sRGB transfer — the per-channel curves' space. The caller runs
+/// it BEFORE the creative Look's baked curve. Measured on one frame, against
+/// predictions from Camera Raw's own renders without the curve (ΔE mean):
+/// with no Look, `0,0 / 128,180 / 255,255` 0.06, a five-knot curve 0.21,
+/// `0,0 / 255,200` 0.02; with Adobe Color's Look, the curve after the Look's
+/// curve (the order before v1.17.0) leaves 0.51–1.48 and before it
+/// 0.13–0.31, from the flat start and from Exposure +1, Contrast +50,
+/// Saturation +50 and Vibrance +50 alike.
+pub(super) fn apply_camera_raw_curve(data: &mut [[f32; 3]], lut: &[f32], space: ExportColorSpace) {
+    let (to, from) = profile::curve_space(space);
+    let (dec, enc) = transfer_luts();
+    data.par_iter_mut().for_each(|px| {
+        let pro = mat_vec3(&to, &px.map(|v| sample_lut(dec, v)));
+        let e = pro.map(|v| sample_lut(enc, v.clamp(0.0, 1.0)));
+        let c = camera_raw_channels(e, lut).map(|v| sample_lut(dec, v));
+        *px = mat_vec3(&from, &c).map(|v| sample_lut(enc, v.clamp(0.0, 1.0)));
     });
 }

@@ -455,9 +455,10 @@ composed profile/manual vignette and dehaze;
 dehaze inverts the airlight model `I = J·t + A(1−t)`. The tone LUT then combines
 exposure, contrast, whites, blacks, Highlights, shadows, base curve, the
 parametric curve and the master point curve before the B&W grey mix (when the
-photo is black and white), RGB point curves, eight-band HSL and the point
+photo is black and white), eight-band HSL and the point
 colours, colour grading,
-clarity, Texture, saturation/vibrance, noise reduction, sharpening, local
+clarity, Texture, saturation/vibrance, the RGB point curves (v1.17.0: Camera
+Raw's place, measured), noise reduction, sharpening, local
 adjustments, the colour field, the SDR rendition when the photo is in HDR edit
 mode, and last the generative fill's pixel layers. The frame is then resampled — lens geometry, the Transform/Upright projective
 step (`render/perspective.rs`), straighten, crop —
@@ -478,9 +479,11 @@ mean); then Exposure, a gain through the exposure ramp, per pixel by
 Adobe's channel rule (the brightest and darkest channels through the curve,
 the middle one in proportion); then Contrast, Whites and Blacks as measured
 response tables over the exposed `u`, with each pixel's hue from the
-channel rule and its lightness from the luma ratio; then the Look's baked
-curve by the luma ratio, as the canvas start was calibrated; then the
-parametric and point curves by the channel rule. Every recipe that names no
+channel rule and its lightness from the luma ratio; then the parametric and
+point curves by the channel rule on ProPhoto's channels under the sRGB
+transfer; then the Look's baked curve by the luma ratio, as the canvas start
+was calibrated (Camera Raw puts the photographer's curve before the Look's,
+measured, v1.17.0). Every recipe that names no
 profile renders through the knot model below, byte for byte, and the reverse
 fit solves each law against itself (`fit::tone_cr` carries the measured map
 into `u` through the start and inverts the tables).
@@ -511,6 +514,18 @@ supposed to remove.
   at the Greville abscissae, a region at ±100 moving its centre by ½ × its
   width; composed after the slider model and before the point curve
   (**designed, provisional** until the kit's `PARAM-*` exports).
+- Point curves (v1.17.0, `render::tone::{curve_lut, apply_rgb_curves,
+  apply_camera_raw_curve}`, **measured against Adobe Camera Raw**): between
+  the knots the DNG SDK's `dng_spline_solver` (straight lines left 4.73 ΔE on
+  a one-knot curve, the spline 0.08); each per-channel curve on one channel of
+  linear ProPhoto RGB (D50, Bradford, `render::profile::curve_space`) under
+  the sRGB transfer, after Saturation/Vibrance — nine single-channel renders
+  of one frame's flat packet predicted to 0.01–0.53, where the working sRGB
+  channels left 2.3–10.7 and ProPhoto under gamma 1.8 or 2.2 0.27–6.5; on a
+  camera-profile start the composite curve by the channel rule on the same
+  channels, before the Look's curve (0.13–0.31; after it 0.51–1.48). The
+  reverse fit matches channel-curve distributions in those channels
+  (`render::curve_channels`). ARCHITECTURE, "The point curves".
 - Tone sliders on a camera-profile start (v1.17.0, `render/tone_cr.rs`,
   **measured against Adobe Camera Raw 18.4**): one frame's exact flat packet
   (Adobe Color, lens profile on) rendered by script one slider at a time —
