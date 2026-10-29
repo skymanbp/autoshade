@@ -1706,7 +1706,10 @@ The CA pair (`0x7035`) is read by the same fit with no zoom, at the green
 sample's raw-frame radius (DNG Converter's WarpRectilinear red and blue
 planes); the camera's vignette knots (`0x7032`) are not what Camera Raw
 renders — it uses the Adobe profile's VignetteModel, at the raw-frame radius
-and in raw-linear light;
+and in raw-linear light, which the engine reads in `lcp.rs` and applies under
+the profile's default curve and exposure ramp (still after the HueSatMap,
+see ARCHITECTURE); a body with no knots gets its render distortion solved from
+the profile at the 32 knots the lens clamp keeps;
 the Lightroom mask solve keeps its native `(i+1)/16` reading, resampled onto
 2048 canonical nodes, and persists a bounded 64-knot inverse transport.
 
