@@ -3005,17 +3005,28 @@ bytes, and `dcp::find_look_table` refuses a payload whose digest differs.
 Measured on the install: 330 of 330 tables decode and match their id; 24 are
 look tables (「Adobe Color」: 36 × 16 × 16, linear value) and 306 are RGB tables,
 which stay unrendered and are named as such. The table is read from the
-user's Camera Raw install, never bundled. It REPLACES the camera profile's own
-`ProfileLookTableData` rather than stacking after it — on p39 against Camera
-Raw, replacing leaves the sky at Δb +0.22 and the warm tones at Δb −1.13,
-stacking +1.01 and −3.21. (Until v1.17.0 this payload was recorded as
+user's Camera Raw install, never bundled. It goes on AFTER the camera
+profile's own `ProfileLookTableData`, which stays (a Look names its base
+profile, whose maps remain in force). Measured against Camera Raw on a
+synthetic linear-ProPhoto bench whose profile carries 「Adobe Standard」's own
+36 × 8 × 16 look table under the 「Adobe Color」 Look, 4256 nodes, ΔE median /
+p95 / max: creative after the profile's 0.078 / 0.70 / 1.86, the other order
+0.13 / 2.94 / 21.8, the creative replacing the profile's 1.19 / 8.07 / 22.4.
+On p39's flat sidecar (Camera Raw 16-bit, 1536 px) replacing left the warm
+tones at Δb +2.51 and the sky at −0.89, stacking leaves −0.19 and +0.02. An
+earlier reading that preferred replacing (+0.22 / −1.13 against +1.01 /
+−3.21) was taken while the Look's curve went by the luma ratio, whose own
+error (Δb −1.1 on those colours) offset the missing table. (Until v1.17.0 this payload was recorded as
 undecodable: zlib had been tried behind a most-significant-digit-first base85.)
 A Look whose `crs:Amount` is not 1, a table that is not installed, and an RGB
 table are each disclosed by name in `diag.warn` and the develop panel.
 
 Measured on p39's flat sidecar against Camera Raw's render of the identical
 packet (lens-matched, 1000 px, `rel1170/colour/accept3-*.out`): whole-frame ΔE
-3.85 → 3.03, sky-ish Δb −4.99 → +0.22, warm Δb +6.03 → −1.13. What remains is
+3.85 → 3.03, sky-ish Δb −4.99 → +0.22, warm Δb +6.03 → −1.13; with the
+profile's own look table kept under the creative one and the Look's curve by
+Camera Raw's rule, `calibration_a_flat_sidecar_renders_where_lightroom_starts`
+reads sky-ish Δb +0.14 and warm −0.50. What remains is
 not colour: a 0.19 % magnification difference in the lens-corrected geometry
 (undone, ΔE 1.98), the highlights above Lightroom's roll-off (L > 90 ΔL +2.7,
 the engine clips where Camera Raw compresses) and a shadow lift (L < 30 ΔL

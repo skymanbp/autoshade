@@ -702,9 +702,22 @@ fn p36_remainder_is_realised_or_honestly_refused() {
                 .find(|(name, _)| *name == key)
                 .map(|(_, value)| value.parse::<f32>().unwrap())
                 .unwrap();
-            let step = value("step");
+            // The gate's rule (`spatial::enforce_bitmap_boundary`, the
+            // cross-boundary ruler): a step the TARGET's own boundary asks
+            // for is reproduced, not charged; only the unasked part is
+            // charged, and the charge must clear ZONE_BOUNDARY_STEP_MAX. So
+            // the charge is held to the budget, and the raw step to the
+            // target's own edge plus the budget — a mask applied twice would
+            // overshoot that. Since the point curves' channel law
+            // (v1.17.0) mask 2 attaches here: raw step 0.02434, target edge
+            // 0.06542, charged 0.01172, budget 0.012 (before it, both
+            // components were refused and the verdict branch above ran).
+            let (step, asked, charged) = (value("step"), value("asked"), value("charged"));
             assert!(value("err_after") < value("err_before"));
-            assert!(step <= ZONE_BOUNDARY_STEP_MAX, "step {step} exceeded the free mask's own step budget");
+            assert!(charged <= ZONE_BOUNDARY_STEP_MAX,
+                "the unasked part {charged} exceeded the free mask's step budget {ZONE_BOUNDARY_STEP_MAX}");
+            assert!(step <= asked + ZONE_BOUNDARY_STEP_MAX,
+                "step {step} exceeded the target's own edge {asked} plus the budget {ZONE_BOUNDARY_STEP_MAX}");
         }
     }
     cleanup_corpus_run(&report, &live_home);

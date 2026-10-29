@@ -90,7 +90,11 @@ pub(crate) struct Stage {
     /// ProPhoto (D50) → Bradford → the working space.
     camera: Option<[[f32; 3]; 3]>,
     hue_sat: Option<Table>,
+    /// The camera profile's own `ProfileLookTableData`.
     look: Option<Table>,
+    /// The creative Look's colour table, applied AFTER the profile's own
+    /// ([`Stage::build_for`]).
+    creative: Option<Table>,
     tone: Option<Vec<f32>>,
     /// Camera Raw's exposure transfer at the photograph's camera start
     /// ([`super::tone_cr::Ramp`]): the body's baseline plus the profile's
@@ -111,8 +115,9 @@ pub(crate) struct Frame {
     /// lets the profile own the colour transform.
     pub neutral: Option<[f32; 3]>,
     /// The creative profile's own look table (`crs:LookTable`, decoded by
-    /// [`crate::dcp::find_look_table`]). It REPLACES the camera profile's
-    /// `ProfileLookTableData`: see [`Stage::build_for`].
+    /// [`crate::dcp::find_look_table`]). It goes on AFTER the camera
+    /// profile's own `ProfileLookTableData`, which stays: see
+    /// [`Stage::build_for`].
     pub creative: Option<Table>,
     /// The body's `CameraCalibration` diagonal, which the DNG SDK puts in
     /// front of every `ColorMatrix` (`XYZtoCamera = CC · CM`) when it turns
@@ -165,11 +170,20 @@ impl Stage {
     /// camera → working transform ([`Stage::owns_camera`],
     /// [`Stage::develop_camera`]).
     ///
-    /// A creative table REPLACES the profile's own look table rather than
-    /// stacking after it. Measured on p39 against Camera Raw's render of the
-    /// same packet with the 「Adobe Color」 Look (v1.17.0, lens-matched, 1000
-    /// px): replacing leaves the sky at Δb +0.22 and the warm tones at Δb
-    /// −1.13; applying both tables leaves +1.01 and −3.21.
+    /// A creative table goes on AFTER the profile's own look table, which
+    /// stays: a creative Look names its base camera profile and carries its own
+    /// table, and the base profile's maps are still in force under it.
+    /// Measured against Camera Raw (v1.17.0) on a synthetic linear-ProPhoto
+    /// bench whose profile carries 「Adobe Standard」's own 36 × 8 × 16 look
+    /// table, with the 「Adobe Color」 Look (curves the identity), 4256 nodes,
+    /// ΔE median / p95 / max: creative after the profile's 0.078 / 0.70 / 1.86;
+    /// the profile's after the creative 0.13 / 2.94 / 21.8; the creative
+    /// replacing the profile's 1.19 / 8.07 / 22.4. On p39's flat sidecar
+    /// (Camera Raw 16-bit, 1536 px, warm h 20–90° C > 12 and sky-ish h 190–280°
+    /// C > 8, Δb): replacing +2.51 and −0.89, stacking −0.19 and +0.02 (no
+    /// Look −0.20 and +0.04). An earlier reading that preferred replacing was
+    /// taken while the Look's curve went by the luma ratio, whose own error
+    /// (Δb −1.1 on the same colours) offset the missing table.
     pub(crate) fn build_for(
         profile: &Profile,
         space: super::ExportColorSpace,
@@ -179,7 +193,7 @@ impl Stage {
         let white = frame.neutral.and_then(|n| white_temperature_with(profile, n, frame.calibration));
         let kelvin = white.or(frame.kelvin);
         let hue_sat = blend_calibrations(profile, kelvin);
-        let look = frame.creative.or_else(|| profile.look_table.clone());
+        let (look, creative) = (profile.look_table.clone(), frame.creative);
         let tone = if states_a_curve(&profile.tone_curve) {
             tone_lut(&profile.tone_curve)
         } else {
@@ -210,7 +224,7 @@ impl Stage {
         // Camera Raw's transfer is never the identity (its toe acts at 0 EV),
         // so the stage always has work.
         let ramp = super::tone_cr::Ramp::of(camera_start_of(total_ev, frame.neutral));
-        Some(Stage { from_ref, to_ref, camera, hue_sat, look, tone, ramp })
+        Some(Stage { from_ref, to_ref, camera, hue_sat, look, creative, tone, ramp })
     }
 
     /// The camera start this stage rendered at: what the develop's Exposure
@@ -268,7 +282,9 @@ impl Stage {
         // SDK's clip at white, with Camera Raw's channel rule; nothing past
         // white reaches the look table or the curve.
         r = self.ramp.transfer_rgb(r);
-        if let Some(t) = &self.look {
+        // The profile's own look table, then the creative Look's on top
+        // ([`Stage::build_for`]).
+        for t in [&self.look, &self.creative].into_iter().flatten() {
             let mut hsv = to_hsv(r);
             t.apply(&mut hsv);
             r = from_hsv(hsv);

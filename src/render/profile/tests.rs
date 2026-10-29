@@ -541,21 +541,31 @@ fn the_installed_profile_solves_a_d65_neutral_and_keeps_it_neutral() {
     }
 }
 
-/// A creative table replaces the profile's own look table (measured against
-/// Camera Raw: see `Stage::build_for`).
+/// A creative table goes on after the profile's own look table, which stays
+/// (measured against Camera Raw: see `Stage::build_for`). An identity
+/// creative table leaves the profile's table in force (a replacing creative
+/// table would drop its halved saturation), and a creative hue shift still
+/// shows on top. The ORDER of the two is Camera Raw's measured one and is not
+/// pinned here: these flat tables commute.
 ///
-/// MUTATION: apply both tables.
+/// MUTATION: let the creative table replace the profile's.
 #[test]
-fn a_creative_table_replaces_the_profiles_look_table() {
-    let p = Profile { look_table: Some(flat([0.0, 0.0, 1.0])), ..bare() };
-    let frame = Frame { creative: Some(flat([0.0, 1.0, 1.0])), ..Frame::default() };
-    let s = Stage::build_for(&p, SPACE, frame, 0.0).expect("stage");
-    let mut px = [0.4f32, 0.2, 0.1];
-    let want = ramped(&s, px);
+fn a_creative_table_goes_on_after_the_profiles_look_table() {
+    let p = Profile { look_table: Some(flat([0.0, 0.5, 1.0])), ..bare() };
+    let only = Stage::build_for(&p, SPACE, Frame::default(), 0.0).expect("stage");
+    let identity = Frame { creative: Some(flat([0.0, 1.0, 1.0])), ..Frame::default() };
+    let s = Stage::build_for(&p, SPACE, identity, 0.0).expect("stage");
+    let (mut px, mut want) = ([0.4f32, 0.2, 0.1], [0.4f32, 0.2, 0.1]);
     s.apply(&mut px);
+    only.apply(&mut want);
     for c in 0..3 {
-        assert!((px[c] - want[c]).abs() < 1e-4, "the creative identity table must win: {px:?}");
+        assert!((px[c] - want[c]).abs() < 1e-4, "the profile's own table must stay under an identity creative one: {px:?} vs {want:?}");
     }
+    let shifted = Frame { creative: Some(flat([20.0, 1.0, 1.0])), ..Frame::default() };
+    let t = Stage::build_for(&p, SPACE, shifted, 0.0).expect("stage");
+    let mut moved = [0.4f32, 0.2, 0.1];
+    t.apply(&mut moved);
+    assert!((0..3).any(|c| (moved[c] - want[c]).abs() > 1e-3), "the creative hue shift must show on top: {moved:?}");
 }
 
 /// The DNG SDK's chromaticity of a temperature and tint (`Get_xy_coord`) is
