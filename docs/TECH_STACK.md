@@ -745,6 +745,18 @@ supposed to remove.
   reverse fit solves.
 - Clarity radius: `max(round(0.02·min(width,height)), 8)`
   (**designed resolution scaling**).
+- Positive Texture radius: `max(round(0.005·min(width,height)), 2)`
+  (**designed resolution scaling**). Both radii are whole raster pixels with
+  a raster floor, so a reduced develop is not an exact scale of the full one
+  (**measured behaviour**, 2026-10-29): at a 667 px short edge Texture's
+  3.33 px rounds to 3, and below a 375 px (Clarity) / 300 px (Texture) short edge the
+  floor holds the radius, so the operator reaches relatively further. The
+  reduced develop itself is NOT the cause of a preview's tonal offset: the
+  engine's encoded-domain reduction against Camera Raw's own reduced render
+  (`CameraRAWSize.MINIMUM`, 1536 × 1024) reads p39's neutral L40 / L50 / L60
+  at −0.37 / −0.23 / −0.14 L, and reducing in linear light instead moved them
+  to +0.44 / +0.44 / +0.40 with edges +1.2 — so 1000 px acceptances are made
+  against Camera Raw's own reduced render.
 - Negative Texture arm 1: amplitude `A1 = 0.172443`,
   `sigma1 = 0.0031235·short_edge` = `0.31235%` of the short edge
   (**measured Lightroom fit**).
