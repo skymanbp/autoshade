@@ -634,17 +634,36 @@ pub(super) fn manual_vignette_lut(amount: f32, midpoint: f32) -> Vec<f32> {
 /// an Adobe `.lcp` on this machine — not from a slider model.
 ///
 /// `scale` is Lightroom's profile Vignetting strength, 0..200 with 100 = the
-/// profile's own gains. Like the distortion strength in [`geometry_profile`]
-/// it scales the correction's DEPARTURE FROM IDENTITY (`1 + (g − 1)·s`), and
-/// 100 takes the branch that returns the gains untouched, so every render made
-/// before v1.5.0 stays bit-identical.
+/// profile's own gains, applied by [`scaled_profile_gain`]; 100 takes the
+/// branch that returns the gains untouched.
 pub(super) fn profile_vignette_lut(knots: &[f32], scale: f32) -> Vec<f32> {
     let g = |i: usize| profile_knot_interp(knots, i as f32 / (LUT_N - 1) as f32);
     let s = (scale / 100.0).clamp(0.0, 2.0);
     if s == 1.0 {
         return (0..LUT_N).map(g).collect();
     }
-    (0..LUT_N).map(|i| 1.0 + (g(i) - 1.0) * s).collect()
+    (0..LUT_N).map(|i| scaled_profile_gain(g(i), s)).collect()
+}
+
+/// Camera Raw's profile Vignetting strength `s` (0..=2) on a gain `g`: the
+/// gain at the whole strengths is 1, `g` and `1 + 2(g − 1)` (no correction,
+/// the profile's, twice its departure), and between them it runs linearly in
+/// EV. Measured on flat-field frames read against their own raw-gain ladders
+/// (2026-10-28), at 25 to 200 on the 14–24 mm and 50 to 200 on the 24–105 mm:
+/// within 0.22 % of the gain everywhere the ladder reaches. The old reading,
+/// `1 + (g − 1)·s`, is right only at the whole strengths — 7 % too bright in
+/// the 14–24 mm's corner at 50.
+///
+/// A gain under 1 (a profile that darkens, which no Adobe vignette model is,
+/// and which only a hand-edited recipe's clamp admits) has no measurement and
+/// takes the same law on its inverse, so the strength stays a gain above zero.
+fn scaled_profile_gain(g: f32, s: f32) -> f32 {
+    if g < 1.0 {
+        return 1.0 / scaled_profile_gain(1.0 / g, s);
+    }
+    let (ev, ev2) = (g.log2(), (2.0 * g - 1.0).log2());
+    let e = if s <= 1.0 { s * ev } else { ev + (s - 1.0) * (ev2 - ev) };
+    e.exp2()
 }
 
 /// The single radial-gain LUT for whichever vignette stages are active —
