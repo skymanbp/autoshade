@@ -875,9 +875,23 @@ pub(super) fn owned_children(
             .collect();
         format!("\n   <crs:{tag}>\n    <rdf:Seq>\n{pts}    </rdf:Seq>\n   </crs:{tag}>")
     };
+    // Camera Raw IGNORES the three channel curves of a sidecar that has no
+    // `crs:ToneCurvePV2012` element (measured v1.17.0: a fitted recipe's
+    // R/G/B curves rendered byte-identical to none at all, and the same
+    // sidecar with an identity composite block moved 11.9 ΔE — the move
+    // the engine renders). Lightroom always writes the composite, so a
+    // recipe with channel curves and no composite one writes it as the
+    // identity, which reads back empty (`parse_curve_checked`).
+    let identity = [
+        crate::recipe::CurvePoint { input: 0, output: 0 },
+        crate::recipe::CurvePoint { input: 255, output: 255 },
+    ];
+    let has_channel_curve = [&r.red_curve, &r.green_curve, &r.blue_curve].iter().any(|c| !c.is_empty());
+    let composite: &[crate::recipe::CurvePoint] =
+        if r.tone_curve.is_empty() && has_channel_curve { &identity } else { &r.tone_curve };
     let children = format!(
         "{}{}{}{}{}{}",
-        curve_elem("ToneCurvePV2012", &r.tone_curve),
+        curve_elem("ToneCurvePV2012", composite),
         curve_elem("ToneCurvePV2012Red", &r.red_curve),
         curve_elem("ToneCurvePV2012Green", &r.green_curve),
         curve_elem("ToneCurvePV2012Blue", &r.blue_curve),

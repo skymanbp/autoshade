@@ -1049,3 +1049,29 @@ fn the_mask_warp_never_reaches_the_xmp_boundary() {
         }
     }
 }
+
+/// v1.17.0: a recipe with channel curves and no composite curve writes the
+/// composite as the identity. Camera Raw ignores `ToneCurvePV2012Red` /
+/// `Green` / `Blue` in a sidecar with no `ToneCurvePV2012` element — measured
+/// on a fitted recipe: its three curves rendered byte-identical to none, and
+/// with an identity composite block they moved the frame 11.9 ΔE, the move
+/// the engine renders. The identity reads back empty, so the recipe
+/// round-trips unchanged; a recipe with no curve at all still writes none.
+///
+/// MUTATION: write `curve_elem("ToneCurvePV2012", &r.tone_curve)` again.
+#[test]
+fn channel_curves_always_travel_with_a_composite_curve() {
+    use crate::recipe::CurvePoint;
+    let r = EditRecipe {
+        blue_curve: vec![CurvePoint { input: 0, output: 0 }, CurvePoint { input: 128, output: 150 }, CurvePoint { input: 255, output: 255 }],
+        ..Default::default()
+    };
+    let xmp = recipe_to_xmp(&r);
+    let composite = xmp.find("<crs:ToneCurvePV2012>").expect("the composite curve is written");
+    assert!(composite < xmp.find("<crs:ToneCurvePV2012Blue>").expect("the blue curve"), "in Lightroom's order");
+    assert!(xmp.contains("<rdf:li>0, 0</rdf:li>\n     <rdf:li>255, 255</rdf:li>"), "as the identity: {xmp}");
+    let back = xmp_to_recipe(&xmp);
+    assert!(back.tone_curve.is_empty(), "the identity reads back as no curve");
+    assert_eq!(back.blue_curve, r.blue_curve);
+    assert!(!recipe_to_xmp(&EditRecipe::default()).contains("<crs:ToneCurvePV2012>"), "no curve, no element");
+}
