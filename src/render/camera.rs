@@ -233,8 +233,16 @@ pub(super) fn calibrate_camera_buffer(
     profile: Option<&profile::Stage>,
 ) {
     let m = camera_to_space_matrix(xyz2cam, space);
+    // Camera Raw's near-white colour lift (`clip_lift`, measured), on the
+    // white-balanced camera triple keyed to the sensor value — part of Camera
+    // Raw's render, so it runs where a Camera Raw profile stage does and a
+    // render with no profile keeps its pre-v1.17.0 pixels.
+    let lift = profile.and_then(|_| super::clip_lift::ClipLift::for_white(wb));
     data.par_iter_mut().for_each(|px| {
-        let v = [px[0] * wb[0], px[1] * wb[1], px[2] * wb[2]];
+        let mut v = [px[0] * wb[0], px[1] * wb[1], px[2] * wb[2]];
+        if let Some(l) = &lift {
+            v = l.apply(*px, v);
+        }
         // The camera profile acts HERE: linear light, before the transfer
         // encode. Everything downstream — exposure, tone, the mixer, the masks
         // — then sees a frame that already carries the profile, which is the

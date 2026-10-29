@@ -50,6 +50,7 @@ mod brush;
 mod as_shot;
 mod camera;
 mod canvas;
+mod clip_lift;
 mod colour;
 mod develop;
 mod export;
