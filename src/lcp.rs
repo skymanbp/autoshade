@@ -70,7 +70,7 @@
 //! skipped and, when a profile has nothing else, the whole file is refused with
 //! [`Refusal::Fisheye`] — a named degradation, never a silent identity.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// One calibration node's rectilinear distortion model.
@@ -182,6 +182,12 @@ pub struct LensProfileFile {
     /// How many entries were skipped for carrying a `FisheyeModel`. Non-zero
     /// with an empty `nodes` is what [`Refusal::Fisheye`] is made of.
     pub fisheye_entries: usize,
+    /// The profile's own name (`stCamera:ProfileName`), the identity a
+    /// sidecar names it by (crs:LensProfileName). Empty when it states none.
+    pub profile_name: String,
+    /// The file it was read from, by name; empty from [`parse`], set by
+    /// [`open`] and [`open_named`].
+    pub filename: String,
 }
 
 /// Why no `.lcp` map is available — the NAMED half of a named degradation.
@@ -779,6 +785,7 @@ fn vignette_scope(entry: &str) -> Option<&str> {
 pub fn parse(xml: &str) -> Result<LensProfileFile, Refusal> {
     let mut make = String::new();
     let mut lens = String::new();
+    let mut profile_name = String::new();
     let mut nodes: Vec<PerspectiveModel> = Vec::new();
     let mut vignette_nodes: Vec<VignetteNode> = Vec::new();
     let mut fisheye_entries = 0usize;
@@ -801,6 +808,9 @@ pub fn parse(xml: &str) -> Result<LensProfileFile, Refusal> {
         }
         if lens.is_empty() {
             lens = prop(head, "LensPrettyName").or_else(|| prop(head, "Lens")).unwrap_or_default();
+        }
+        if profile_name.is_empty() {
+            profile_name = prop(head, "ProfileName").unwrap_or_default();
         }
         // A fisheye entry is COUNTED and skipped — see the module header. The
         // check comes first: a file carrying both models for one entry would
@@ -860,7 +870,7 @@ pub fn parse(xml: &str) -> Result<LensProfileFile, Refusal> {
             .then(b.focus_distance.unwrap_or(0.0).total_cmp(&a.focus_distance.unwrap_or(0.0)))
     });
     nodes.dedup_by(|a, b| a.focal_mm == b.focal_mm);
-    Ok(LensProfileFile { make, lens, nodes, vignette_nodes, fisheye_entries })
+    Ok(LensProfileFile { make, lens, nodes, vignette_nodes, fisheye_entries, profile_name, filename: String::new() })
 }
 
 // --- discovery -------------------------------------------------------------
@@ -968,6 +978,8 @@ struct Head {
     raw: bool,
     /// The stem's ` vN` revision; 1 when it states none.
     version: u32,
+    /// Folded `stCamera:ProfileName`.
+    name: String,
 }
 
 /// [`Head`] for every file under [`roots`], read once per process (the same
@@ -995,6 +1007,7 @@ fn heads() -> &'static [Head] {
                     lens: fold(&prop(&text, "Lens").unwrap_or_default()),
                     raw: prop(&text, "CameraRawProfile").is_some_and(|v| v.eq_ignore_ascii_case("true")),
                     version: profile_version(&stem_raw),
+                    name: fold(&prop(&text, "ProfileName").unwrap_or_default()),
                 }
             })
             .collect()
@@ -1027,7 +1040,54 @@ fn choose<'a>(cands: impl Iterator<Item = &'a Head>) -> Option<&'a Head> {
 
 /// [`locate`], read (bounded) and [`parse`]d: one profile, whole.
 pub fn open(filename: Option<&str>, make: &str, lens: &str) -> Result<LensProfileFile, Refusal> {
-    let path = locate(filename, make, lens)?;
+    open_path(&locate(filename, make, lens)?)
+}
+
+/// Is there an Adobe profile pool on this machine at all? With none, a
+/// profile a sidecar names is unknown here rather than absent in Camera Raw.
+pub fn pool_present() -> bool {
+    !index().is_empty()
+}
+
+/// The profile a sidecar NAMES — crs:LensProfileName with crs:LensProfileFilename
+/// beside it — resolved the way Camera Raw resolves it. Measured on flat-field
+/// renders of a 14–24 mm frame with the three installed revisions of its
+/// profile (the plain file, v2 and v3, whose vignetting differs by 22 % at the
+/// corner), so which file was taken shows in the render:
+///
+/// * a name with a file name: the FILE, whatever the name says (the plain
+///   file's name with v3's file name renders v3; a name no profile carries
+///   with v3's file name renders v3 too);
+/// * a name alone, or with a file name no profile has: the profile of that
+///   name (the plain file's name renders the plain file, and the 24–105 mm
+///   profile's name renders that profile's vignetting on the 14–24 mm frame —
+///   the name is not checked against the lens);
+/// * no name: nothing, even with a file name — the lookup does not start.
+///
+/// `Err(NotFound)` when it resolves to nothing; what Camera Raw does then
+/// depends on the setup (`pipeline::fresh_lens_profile_for_sidecar`).
+pub fn open_named(name: &str, filename: Option<&str>) -> Result<LensProfileFile, Refusal> {
+    if index().is_empty() {
+        return Err(Refusal::NoRoots);
+    }
+    let path = resolve_named(heads(), name, filename).ok_or(Refusal::NotFound)?;
+    open_path(&path)
+}
+
+/// [`open_named`]'s rule over a given pool.
+fn resolve_named(pool: &[Head], name: &str, filename: Option<&str>) -> Option<PathBuf> {
+    let name = fold(name.trim());
+    if name.is_empty() {
+        return None;
+    }
+    let by_file = filename.map(|f| fold(f.trim())).filter(|f| !f.is_empty()).and_then(|want| {
+        pool.iter().find(|h| h.path.file_name().is_some_and(|n| fold(&n.to_string_lossy()) == want))
+    });
+    by_file.or_else(|| choose(pool.iter().filter(|h| h.name == name))).map(|h| h.path.clone())
+}
+
+/// One profile file, read (bounded) and [`parse`]d, with its file name kept.
+fn open_path(path: &Path) -> Result<LensProfileFile, Refusal> {
     // BOUNDED read (the R28 B2 rule): the pool directory is not this app's to
     // trust — `AUTOSHADE_LCP_DIR` and `%APPDATA%` are user-writable, so a file
     // there can be anything. The largest of the 3,576 profiles in the local
@@ -1035,8 +1095,10 @@ pub fn open(filename: Option<&str>, make: &str, lens: &str) -> Result<LensProfil
     // sidecar-class read in this codebase carries, and an over-cap file is an
     // `Unreadable` refusal — named, like every other degradation on this path.
     const MAX_LCP_BYTES: u64 = 16 * 1024 * 1024;
-    let xml = crate::store::read_text_capped(&path, MAX_LCP_BYTES).map_err(|_| Refusal::Unreadable)?;
-    parse(&xml)
+    let xml = crate::store::read_text_capped(path, MAX_LCP_BYTES).map_err(|_| Refusal::Unreadable)?;
+    let mut file = parse(&xml)?;
+    file.filename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    Ok(file)
 }
 
 /// Everything one `.lcp` node has to say about this frame.
@@ -1448,7 +1510,7 @@ mod tests {
         (
             "24-105 @80 f/4.5",
             true,
-            Shot { focal_mm: Some(80.0), aperture_av: Some(4.339850), focus_distance_m: None },
+            Shot { focal_mm: Some(80.0), aperture_av: Some(4.339_85), focus_distance_m: None },
             [(0.0358, 1.00050), (0.1312, 1.00666), (0.2270, 1.01950), (0.3234, 1.03836), (0.4206, 1.06229), (0.5191, 1.08986), (0.6190, 1.11726), (0.7207, 1.14803), (0.8246, 1.18805), (0.9311, 1.25321)],
         ),
         (
@@ -1528,6 +1590,7 @@ mod tests {
             lens: "1424mmf28dgdnart019".into(),
             raw,
             version: profile_version(stem),
+            name: String::new(),
         };
         assert_eq!(profile_version("SONY (SIGMA 14-24mm F2.8 DG DN A019) v3 - RAW"), 3);
         assert_eq!(profile_version("SONY (SIGMA 14-24mm F2.8 DG DN A019) - RAW"), 1);
@@ -1540,6 +1603,44 @@ mod tests {
         ];
         let pick = choose(pool.iter()).unwrap();
         assert_eq!(pick.version, 3, "the newest RAW profile, over a newer non-RAW one: {}", pick.path.display());
+    }
+
+    #[test]
+    fn a_named_profile_resolves_the_way_camera_raw_resolves_it() {
+        // The three installed revisions of the 14–24 mm profile, by their own
+        // ProfileName, and one profile of another lens (see `open_named`).
+        let head = |stem: &str, name: &str| Head {
+            path: PathBuf::from(format!("{stem}.lcp")),
+            stem: fold(stem),
+            make: "sony".into(),
+            lens: String::new(),
+            raw: true,
+            version: profile_version(stem),
+            name: fold(name),
+        };
+        let pool = [
+            head("SONY (SIGMA 14-24mm F2.8 DG DN A019) - RAW", "Adobe (SIGMA 14-24mm F2.8 DG DN A019)"),
+            head("SONY (SIGMA 14-24mm F2.8 DG DN A019) v2 - RAW", "Adobe (SIGMA 14-24mm F2.8 DG DN A019) v2"),
+            head("SONY (SIGMA 14-24mm F2.8 DG DN A019) v3 - RAW", "Adobe (SIGMA 14-24mm F2.8 DG DN A019, SONY) v3"),
+            head("SONY (Sony FE 24-105mm F4 G OSS) - RAW", "Adobe (Sony FE 24-105mm F4 G OSS)"),
+        ];
+        let stem = |p: Option<PathBuf>| p.map(|p| p.file_stem().unwrap().to_string_lossy().into_owned());
+        let plain = "Adobe (SIGMA 14-24mm F2.8 DG DN A019)";
+        let v3_file = "SONY (SIGMA 14-24mm F2.8 DG DN A019) v3 - RAW.lcp";
+        let v3 = Some("SONY (SIGMA 14-24mm F2.8 DG DN A019) v3 - RAW");
+        assert_eq!(stem(resolve_named(&pool, plain, Some(v3_file))).as_deref(), v3, "the file wins");
+        assert_eq!(stem(resolve_named(&pool, "Adobe (No Such Lens)", Some(v3_file))).as_deref(), v3);
+        assert_eq!(
+            stem(resolve_named(&pool, plain, Some("No Such File.lcp"))).as_deref(),
+            Some("SONY (SIGMA 14-24mm F2.8 DG DN A019) - RAW"),
+            "then the name"
+        );
+        assert_eq!(
+            stem(resolve_named(&pool, "Adobe (Sony FE 24-105mm F4 G OSS)", None)).as_deref(),
+            Some("SONY (Sony FE 24-105mm F4 G OSS) - RAW")
+        );
+        assert_eq!(resolve_named(&pool, "", Some(v3_file)), None, "no name, no lookup");
+        assert_eq!(resolve_named(&pool, "Adobe (No Such Lens)", None), None);
     }
 
     #[test]

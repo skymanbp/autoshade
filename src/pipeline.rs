@@ -3283,14 +3283,30 @@ pub fn fresh_lens_profile_for_sidecar(
     sidecar: Option<&str>,
 ) -> crate::recipe::LensProfile {
     let query = sidecar.map_or_else(Default::default, |x| crate::lensmeta::LensQuery {
-        profile_filename: crate::xmp::lens_profile_filename(x),
+        named: sidecar_named_profile(x),
         focus_distance_m: crate::xmp::approximate_focus_distance(x),
     });
     let mut p = fresh_lens_profile_from(raw, &query);
     if let Some(x) = sidecar {
-        obey_sidecar_lens_switches(&mut p, x);
+        obey_sidecar_lens_switches(&mut p, x, crate::lcp::pool_present());
     }
     p
+}
+
+/// The profile a sidecar names, when its setup makes the name count: any
+/// stated setup with crs:LensProfileName, and Custom even without one (Camera
+/// Raw then resolves nothing). With no setup the name is not read — measured:
+/// a name and a strength of 50 with no setup render at 100.
+fn sidecar_named_profile(x: &str) -> Option<crate::lensmeta::NamedProfile> {
+    use crate::xmp::LensProfileSetup;
+    let setup = crate::xmp::lens_profile_setup(x)?;
+    let name = crate::xmp::lens_profile_name(x);
+    let custom = setup == LensProfileSetup::Custom;
+    (name.is_some() || custom).then(|| crate::lensmeta::NamedProfile {
+        name: name.unwrap_or_default(),
+        filename: crate::xmp::lens_profile_filename(x),
+        custom,
+    })
 }
 
 /// What a sidecar's two lens keys do to the profile's toggles — one function,
@@ -3301,12 +3317,19 @@ pub fn fresh_lens_profile_for_sidecar(
 /// * `crs:LensProfileSetup="Custom"` → no camera CA: Camera Raw does not apply
 ///   the camera's CA knots under a hand-picked profile (measured, see
 ///   [`crate::xmp::LensProfileSetup`]); `LensDefaults`, `Auto` and no setup
-///   leave the camera's CA as it is.
-fn obey_sidecar_lens_switches(p: &mut crate::recipe::LensProfile, sidecar: &str) {
-    if crate::xmp::lens_profile_enabled(sidecar) == Some(false) {
+///   leave the camera's CA as it is;
+/// * Custom naming no profile this machine's pool has (`pool` is
+///   [`crate::lcp::pool_present`]) → no profile correction at all, as with
+///   the switch off: Camera Raw then renders neither the vignetting nor the
+///   distortion (measured: a flat field stays flat and a real frame's geometry
+///   is the switched-off one to 0.01 px). With no pool here the name is
+///   unknown rather than absent, and the camera's correction stays.
+fn obey_sidecar_lens_switches(p: &mut crate::recipe::LensProfile, sidecar: &str, pool: bool) {
+    let custom = crate::xmp::lens_profile_setup(sidecar) == Some(crate::xmp::LensProfileSetup::Custom);
+    if crate::xmp::lens_profile_enabled(sidecar) == Some(false) || (custom && pool && p.adobe.is_none()) {
         obey_disabled_profile_switch(p);
     }
-    if crate::xmp::lens_profile_setup(sidecar) == Some(crate::xmp::LensProfileSetup::Custom) {
+    if custom {
         p.ca_on = false;
     }
 }
@@ -6212,7 +6235,7 @@ mod tests {
             if let Some(x) = sidecar {
                 // The REAL function, not a copy of it — copying it here is what
                 // let a mutation of the engine pass this test.
-                obey_sidecar_lens_switches(&mut p, x);
+                obey_sidecar_lens_switches(&mut p, x, true);
             }
             p
         };
@@ -6240,6 +6263,19 @@ mod tests {
         assert!(stamped(Some(&defaults)).ca_on, "LensDefaults: the camera's CA");
         let custom_off = custom.replace(r#"crs:LensProfileEnable="1""#, r#"crs:LensProfileEnable="0""#);
         assert!(!stamped(Some(&custom_off)).ca_on, "Custom with the profile off: still none");
+        // Custom naming nothing this pool has: no profile correction at all.
+        // The probe photo resolves no Adobe profile, so `adobe` is `None` here.
+        let c = stamped(Some(&custom));
+        assert_eq!((c.vignette_on, c.distortion_on, c.ca_on), (false, false, false), "Custom, unresolved");
+        // Resolved, the profile stays and only the camera's CA goes.
+        let resolved = |pool: bool, adobe: bool| {
+            let mut p = stamped(None);
+            p.adobe = adobe.then(|| crate::recipe::AdobeLensProfile { name: "n".into(), filename: "f.lcp".into() });
+            obey_sidecar_lens_switches(&mut p, &custom, pool);
+            (p.vignette_on, p.distortion_on, p.ca_on)
+        };
+        assert_eq!(resolved(true, true), (true, true, false), "Custom, resolved");
+        assert_eq!(resolved(false, false), (true, true, false), "no pool here: the name is unknown, not absent");
         // The claim, through the real function rather than the sketch above:
         // a document that says nothing, and one that says "1", leave the
         // photograph's own toggles exactly as they were.

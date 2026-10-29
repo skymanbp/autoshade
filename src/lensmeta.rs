@@ -82,12 +82,23 @@ pub(crate) const SONY_DISTORTION_CANONICAL_KNOTS: usize = 2048;
 pub(crate) const SONY_RENDER_DISTORTION_KNOTS: usize = 32;
 
 /// What a sidecar adds to the lens lookup: the Adobe profile Lightroom named
-/// (`crs:LensProfileFilename`) and the focus distance it recorded
-/// (ApproximateFocusDistance). A RAW alone states neither.
+/// and the focus distance it recorded (ApproximateFocusDistance). A RAW alone
+/// states neither.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LensQuery {
-    pub profile_filename: Option<String>,
+    pub named: Option<NamedProfile>,
     pub focus_distance_m: Option<f32>,
+}
+
+/// A profile a sidecar names (`crate::lcp::open_named`). `custom` is
+/// crs:LensProfileSetup="Custom": when the name resolves to nothing Camera Raw
+/// then draws no profile at all, where under LensDefaults or Auto it falls
+/// back to the profile it would choose by itself.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NamedProfile {
+    pub name: String,
+    pub filename: Option<String>,
+    pub custom: bool,
 }
 
 /// Read the in-camera lens correction profile from a RAW file. Every failure
@@ -211,7 +222,18 @@ pub fn read_for(path: &Path, query: &LensQuery) -> LensProfile {
         let m = text(ExifTag::LensModel);
         if m.is_empty() { text(ExifTag::LensMake) } else { m }
     };
-    let adobe = crate::lcp::open(query.profile_filename.as_deref(), &text(ExifTag::Make), &lens);
+    let auto = || crate::lcp::open(None, &text(ExifTag::Make), &lens);
+    let adobe = match &query.named {
+        None => auto(),
+        Some(n) => match crate::lcp::open_named(&n.name, n.filename.as_deref()) {
+            Err(_) if !n.custom => auto(),
+            found => found,
+        },
+    };
+    out.adobe = adobe.as_ref().ok().map(|f| crate::recipe::AdobeLensProfile {
+        name: f.profile_name.clone(),
+        filename: f.filename.clone(),
+    });
     match dims {
         Some(dims) if !lr_mask_distortion.is_empty() => {
             let w = crate::render::mask_warp_from_camera_knots(

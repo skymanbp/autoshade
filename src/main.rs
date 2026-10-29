@@ -3413,11 +3413,14 @@ mod tests {
                 pipeline::fresh_lens_profile_for_sidecar(&raw, Some(&text)),
                 "LensProfileEnable=\"{enable}\": apply must stamp what the app's open path stamps"
             );
+            // The switch decides the profile's distortion; the camera's CA stays
+            // either way, as Camera Raw keeps it with the profile off (2026-10-28).
             assert_eq!(
-                r.lens_profile.geometry_active(),
+                r.lens_profile.distortion_on,
                 enable == "1",
-                "LensProfileEnable=\"{enable}\" decides whether the render is lens-corrected"
+                "LensProfileEnable=\"{enable}\" decides whether the render is distortion-corrected"
             );
+            assert_eq!(r.lens_profile.ca_on, fresh.ca_on, "LensProfileEnable=\"{enable}\" leaves the camera's CA");
         }
         let _ = std::fs::remove_dir_all(&root);
     }
