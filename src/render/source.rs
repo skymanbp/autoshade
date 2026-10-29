@@ -253,11 +253,22 @@ pub fn render_to_image_in(
         println!("mapped {hot_sites} isolated hot pixels stronger than 20 local sigma");
     }
     let grain_weights = denoise_grain::weights(working);
+    // The lens profile's vignetting, where Camera Raw applies it: on the
+    // sensor's own linear light, BEFORE the camera profile stage (order: lens
+    // gain → (WB) → profile). Measured on flat fields: applied after the
+    // profile, the gain met Adobe Standard's value-dependent HueSatMap on the
+    // wrong side and the 14–24 mm corner came out 0.96 % off; skipping the map
+    // on both sides left 0.28 %, which is this order. Under Camera Raw's law
+    // only (`SliderLaw`), which is also when `render::develop` leaves it out —
+    // the preview bases carry it the same way (`BasePart`).
+    let lens_gain = (SliderLaw::of(recipe) == SliderLaw::CameraRaw && recipe.lens_profile.vignette_active())
+        .then(|| profile_vignette_lut(&recipe.lens_profile.vignette, recipe.lens_profile_vignetting_scale));
+    let lens_gain = lens_gain.as_deref();
     let original_y = denoise_grain::capture_original(
         strength,
         crate::denoise::mosaic_args_for(&rawimage).is_ok(),
         grain_weights,
-        || develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref())
+        || develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref(), lens_gain)
             .map(|(rgb, _, _)| rgb),
     )?;
     // --- AI denoise on the MOSAIC (opt-in), BEFORE demosaic (2026-09-15).
@@ -282,7 +293,7 @@ pub fn render_to_image_in(
     }
 
     let (mut data, w, h) =
-        develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref())?;
+        develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref(), lens_gain)?;
     // The clean RGB owns the remaining work. Drop the mosaic before returning
     // grain; the original RGB already died when capture_original kept only Y.
     drop(rawimage);
@@ -383,6 +394,9 @@ pub fn render_to_image_in(
 /// Both original and clean RAW buffers go through this exact develop and
 /// calibration path. Every returned buffer has the sRGB transfer, including
 /// wide working primaries; orientation and recipe work happen afterwards.
+///
+/// `lens_gain` is the lens profile's radial vignetting gain LUT, put on the
+/// sensor's linear light here, before calibration and the profile stage.
 fn develop_raw_buffer(
     rawimage: &rawler::RawImage,
     dev: &RawDevelop,
@@ -390,6 +404,7 @@ fn develop_raw_buffer(
     calibration: Option<([[f32; 3]; 3], [f32; 3])>,
     working: ExportColorSpace,
     profile_stage: Option<&profile::Stage>,
+    lens_gain: Option<&[f32]>,
 ) -> Result<(Vec<[f32; 3]>, usize, usize)> {
     let inter = dev
         .develop_intermediate(rawimage)
@@ -429,6 +444,17 @@ fn develop_raw_buffer(
     // sRGB path: sRGB-gamma ~[0,1] straight from rawler (owned, no copy).
     // Wide path: camera-native LINEAR until the calibrate below.
     let mut data: Vec<[f32; 3]> = rgb.data;
+    if let Some(lut) = lens_gain {
+        if calibration.is_some() || geometry_cfa.is_some() {
+            // Camera-native linear light: the gain is a plain factor, ahead of
+            // everything the profile stage does to the pixel.
+            apply_radial_gain_linear(&mut data, w, h, lut);
+        } else {
+            // rawler's own sRGB develop (no profile stage ran): the gain in its
+            // decoded linear light, which is the same light.
+            apply_radial_gain(&mut data, w, h, lut);
+        }
+    }
     if let Some((xyz2cam, wb)) = calibration {
         calibrate_camera_buffer(&mut data, &xyz2cam, wb, working, profile_stage);
     } else if geometry_cfa.is_some() {

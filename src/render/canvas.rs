@@ -32,10 +32,18 @@ pub const CANVAS_PROFILE: &str = "Adobe Standard";
 /// monochrome switch): those are tone and colour work the preview develop
 /// renders from the full recipe, and baking them into the base would apply
 /// them twice.
+///
+/// The lens profile's VIGNETTING belongs here too (v1.17.0): under a camera
+/// profile it is applied on the sensor's linear light before the profile
+/// stage (`render::source`), so a base without it could not be corrected
+/// later at the right place. Its knots and strength, empty when the recipe
+/// renders none.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BasePart {
     camera_profile: String,
     look: Option<crate::recipe::CreativeLook>,
+    vignette: Vec<f32>,
+    vignette_scale: f32,
 }
 
 impl BasePart {
@@ -46,6 +54,9 @@ impl BasePart {
         if !r.names_profile() {
             return Self::default();
         }
+        let vignette =
+            if r.lens_profile.vignette_active() { r.lens_profile.vignette.clone() } else { Vec::new() };
+        let vignette_scale = if vignette.is_empty() { 0.0 } else { r.lens_profile_vignetting_scale };
         Self {
             camera_profile: r.camera_profile.clone(),
             look: r.look.as_ref().map(|l| crate::recipe::CreativeLook {
@@ -55,6 +66,8 @@ impl BasePart {
                 table: l.table.clone(),
                 ..Default::default()
             }),
+            vignette,
+            vignette_scale,
         }
     }
 
@@ -65,10 +78,21 @@ impl BasePart {
 
     /// The recipe that develops exactly this part and nothing else.
     pub fn recipe(&self) -> EditRecipe {
+        let dflt = EditRecipe::default();
         EditRecipe {
             camera_profile: self.camera_profile.clone(),
             look: self.look.clone(),
-            ..Default::default()
+            lens_profile: crate::recipe::LensProfile {
+                vignette_on: !self.vignette.is_empty(),
+                vignette: self.vignette.clone(),
+                ..Default::default()
+            },
+            lens_profile_vignetting_scale: if self.vignette.is_empty() {
+                dflt.lens_profile_vignetting_scale
+            } else {
+                self.vignette_scale
+            },
+            ..dflt
         }
     }
 }

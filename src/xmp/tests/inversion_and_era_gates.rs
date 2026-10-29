@@ -911,22 +911,25 @@ fn the_era_gate_is_the_twenty_seven_keys_r25_added() {
     // is still silent about is the profile NAME, and for the other reason
     // `unspoken_attr_keys` now carries: an empty name is "not stated", so
     // an ordinary save leaves Lightroom's own profile alone.
+    // The lens profile's identity likewise: written only with a strength
+    // that needs it named, so an ordinary save leaves Lightroom's own alone.
     assert_eq!(
         unspoken_attr_keys(&EditRecipe::default()).into_iter().collect::<Vec<_>>(),
-        vec!["CameraProfile"]
+        vec!["CameraProfile", "LensProfileFilename", "LensProfileName", "LensProfileSetup"]
     );
     assert!(
         unspoken_attr_keys(&EditRecipe {
             camera_profile: "Adobe Standard".to_string(),
             ..Default::default()
         })
-        .is_empty(),
+        .into_iter()
+        .all(|k| k.starts_with("LensProfile")),
         "a recipe that NAMES a profile speaks for the key and owns it"
     );
     let v150 = era_attr_keys(2).len();
     assert_eq!(
         unspoken_attr_keys(&EditRecipe { schema_era: 0, ..Default::default() }).len(),
-        27 + v150,
+        27 + v150 + 3,
         "an untouched v0.30 recipe suppresses all twenty-seven and every later era's"
     );
 }
@@ -1000,7 +1003,12 @@ fn the_era_gate_names_the_keys_v1_5_0_added() {
     let mut gated: Vec<&str> =
         unspoken_attr_keys(&EditRecipe { schema_era: 1, ..Default::default() }).into_iter().collect();
     gated.sort_unstable();
-    assert_eq!(gated, keys, "an untouched v1.4 recipe is gated on v1.5.0's keys and nothing else");
+    // Plus the lens profile's identity, which is not an era's but the same
+    // rule's: unspoken while no strength needs the profile named.
+    let mut want = keys.clone();
+    want.extend(["LensProfileFilename", "LensProfileName", "LensProfileSetup"]);
+    want.sort_unstable();
+    assert_eq!(gated, want, "an untouched v1.4 recipe is gated on v1.5.0's keys and nothing else");
     assert!(era_attr_keys(0).is_empty() && era_attr_keys(crate::recipe::SCHEMA_ERA + 1).is_empty());
 }
 

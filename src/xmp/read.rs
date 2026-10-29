@@ -257,6 +257,10 @@ pub(super) fn read_document(
     // The engine's own neutrals, for the ONE block whose neutral is not zero
     // (de-fringe, R25 B3) — `f`'s zero fallback would invent a hue window.
     let dflt = EditRecipe::default();
+    // Does the document name a lens profile the way Camera Raw needs before it
+    // honours a profile strength? (A setup and a name; see the strengths.)
+    let names_lens_profile = scope.crs_str("LensProfileSetup").is_some()
+        && scope.crs_str("LensProfileName").is_some_and(|n| !n.trim().is_empty());
     // The SOURCE frame this document's coordinates are measured against, and
     // the turn that carries them into the frame this engine displays — read
     // ONCE and served to both geometry decodes (crop and masks), because they
@@ -449,11 +453,19 @@ pub(super) fn read_document(
         // reading an absent key as 0 would import "profile correction off"
         // from a document that never mentioned the profile at all. Same shape
         // as the de-fringe windows below, and for the same reason.
+        //
+        // And a strength counts only for a NAMED profile: Camera Raw renders
+        // one of 50 at 100 when the document states no crs:LensProfileSetup or
+        // no crs:LensProfileName (measured on a flat field and on a real
+        // frame, `EditRecipe::lightroom_named_lens_profile`), so such a
+        // document reads as 100 — what Lightroom draws.
         lens_profile_distortion_scale: scope
             .crs_f32("LensProfileDistortionScale")
+            .filter(|_| names_lens_profile)
             .unwrap_or(dflt.lens_profile_distortion_scale),
         lens_profile_vignetting_scale: scope
             .crs_f32("LensProfileVignettingScale")
+            .filter(|_| names_lens_profile)
             .unwrap_or(dflt.lens_profile_vignetting_scale),
         perspective_vertical: f("PerspectiveVertical"),
         perspective_horizontal: f("PerspectiveHorizontal"),

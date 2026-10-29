@@ -2900,9 +2900,121 @@ about 5 % too far out on a lens whose map reaches 1.054. The DNG polynomial's
 shape terms are reproduced within 2.1 × 10⁻⁶ on the five frames; after the
 change the five lens-on registrations sit at the lens-off noise, every 0.1
 radius bin from 0.15 to 0.85 within ±0.008 % (2-D rms on the 24–105 frames
-0.03–0.07 px at 3000 px, before 0.35–1.31; the 14–24 frame 0.02 → 0.04). Not carried: Camera Raw centres the map on the sensor,
-16 px right of the default crop's centre on this body, a sub-pixel shift the
-engine's crop-centred map leaves (`rel1170/dngc/`). The body's Adobe Standard profile
+0.03–0.07 px at 3000 px, before 0.35–1.31; the 14–24 frame 0.02 → 0.04).
+
+**Known difference: the map's centre.** Camera Raw centres the map on the
+sensor, which on this body sits 16 px right of the default crop's centre
+(sensor 9600 wide, crop 9504 from x = 32); the engine centres it on the crop.
+The two maps then differ by a sideways translation of 16·(1 − f) px, f the
+map's radial factor — largest at the frame centre, where f is the
+polynomial's constant term, and near zero in the corners where f returns to
+about 1. Full size that is 0.46 px (24–105 at 45 mm), 0.65–0.75 px (73–105
+mm) and 0.14 px (14–24 at 20 mm); measured on the 80 mm frame as a 0.44 px
+shift of the centre tile at 6144 px wide (0.68 px full size; predicted 0.75).
+It moves no radius, so the radial bins above cannot see it. Carrying it means
+giving the geometry stage and every map that mirrors it (the mask unwarp, the
+sensor-frame raster) a centre other than the frame's, which is outside the
+lens metadata reader; it is left, and disclosed here.
+
+**Chromatic aberration and vignetting, read the same way (v1.17.0).** The
+Sony CA pair (tag 0x7035, sixteen red and sixteen blue knots) follows the
+distortion knots' convention: DNG Converter writes Camera Raw's reading of it
+as a WarpRectilinear opcode whose red and blue planes are the least-squares
+odd polynomial through t·C(t) at the knots i ≥ 1, knot i at i/(n−1) of the
+sensor half-diagonal, with no zoom and green the identity — reproduced within
+7.6 × 10⁻⁶ of a factor on ten channels of five frames, where the old reading
+missed by up to 1.1 × 10⁻⁴. Its radius is the green sample's raw-frame
+radius, so `lensmeta::sony_render_ca` evaluates the polynomial at the radius
+the distortion map sends each canonical output radius to (a CA spline read
+with the distortion toggled off is then a few per cent of radius off, under
+10⁻⁵ of a factor on these lenses). Two Camera Raw switches were measured
+around it and the engine now obeys both (`pipeline::obey_sidecar_lens_switches`):
+with the profile switched off (LensProfileEnable 0) Camera Raw still applies
+the camera's CA, so the engine turns off only the profile's vignetting and
+distortion; with the setup Custom it ignores the camera's CA (under
+LensDefaults, the setup Lightroom writes, it applies it), so a sidecar that
+says Custom turns the camera's CA off. One measured difference is kept and not
+modelled: Camera Raw warps in the camera's colour space, so a channel's shift
+leaks into the others' output by up to about a sixth (a 4.9 × 10⁻⁴ blue scale
+moves output green by 0.9 × 10⁻⁴), where the engine warps the rendered RGB —
+on real knots at most about 2 × 10⁻⁴ of radius, a fraction of a pixel at the
+frame edge.
+
+The Sony vignette knots (0x7032, and their SR2 copy) are NOT Camera Raw's
+vignetting: knot sets rewritten to constants render bit-identically under the
+setups Custom and LensDefaults and with the profile off, and DNG Converter
+writes no vignette opcode. With the profile on, Camera Raw's gain is the Adobe
+profile's VignetteModel, 1/(1 + a₁x² + a₂x⁴ + a₃x⁶), x the RAW-frame radius
+(before the distortion map) over the node's focal length in pixels
+(FocalLength/36 of the sensor width), the bracketing focal nodes blended in EV;
+the focus distance is the file's ApproximateFocusDistance when it has one
+(written into a test sidecar it moves the gain onto that node's), and the
+closest-focus node when it has none, as these Sony files do. Between nodes the
+gain is blended in EV, linearly in focal length, in APEX aperture value
+2·log₂N and in 1/distance; each of those beat its alternative on flat fields
+written with off-node focal, aperture and distance values (focal 0.08 % against
+0.16 % for 1/f; aperture 0.22 % against 0.63 % for the f-number; distance
+0.18 % against 0.29–0.57 % for metres). Camera Raw takes, for a sidecar that
+names no profile, the newest RAW profile for the lens (on the 14–24 the v2 and
+v3 files render alike and v1 is 22 % off), and the reader picks the same
+(`lcp::open`). `lcp::LensProfileFile::vignette_gains` implements all of it and
+keeps every node — the close-focus nodes the distortion reader drops as
+duplicates included; a dimension a lens's nodes vary in and the shot leaves
+open is refused, not guessed. The engine applies that gain where Camera Raw
+does: on the sensor's linear light in the RAW develop (`render::source`),
+before calibration and the camera profile stage — the order is lens gain →
+(white balance) → profile — and the preview bases carry it the same way
+(`render::BasePart`), so `develop` leaves the profile's gain out under Camera
+Raw's law. Measured on flat-field frames (the raw data replaced by a uniform
+field and read against its own raw-gain ladder, so no tone curve enters),
+engine against Camera Raw:
+
+| radius / half-diagonal | 0.09 | 0.29 | 0.49 | 0.69 | 0.89 | 0.96 | 0.99 |
+|---|---|---|---|---|---|---|---|
+| 24–105 at 80 mm, before | −0.25 % | −2.58 % | −4.69 % | −4.99 % | −2.68 % | +5.03 % | +7.96 % |
+| 24–105 at 80 mm, now | +0.01 % | +0.04 % | −0.01 % | +0.04 % | +0.09 % | +0.11 % | +0.08 % |
+| 14–24 at 20 mm, before | −0.77 % | −5.31 % | −11.51 % | −18.01 % | −22.54 % | −23.89 % | −24.33 % |
+| 14–24 at 20 mm, gain under the curve only | +0.03 % | +0.21 % | +0.35 % | +0.66 % | +0.88 % | +0.99 % | +0.98 % |
+| 24–105 at 80 mm, now | +0.01 % | +0.03 % | −0.01 % | +0.03 % | +0.06 % | +0.07 % | +0.05 % |
+| 14–24 at 20 mm, now | +0.02 % | +0.12 % | +0.07 % | +0.11 % | +0.07 % | +0.09 % | +0.05 % |
+
+Before, the engine applied the camera's knots, after the profile's default
+curve, which shrank their EV by a fifth to a quarter (reproduced to 0.0002 EV
+from the engine's own ladder). Taken back under the curve and the ramp alone
+(`profile::UnderTone`, the middle row) the 14–24 still missed by up to
+0.96 % inside 0.94 of the half-diagonal: the gain then met the profile's
+HueSatMap on the wrong side — this body's Adobe Standard map is
+value-dependent (dimensions 36 × 8 × 16) and Camera Raw applies the gain
+before it. A build that skipped the map on both sides left +0.02 to +0.32 %,
+and the gain moved ahead of the profile stage leaves 0.12 % (24–105: 0.08 %).
+
+The two profile strengths, measured the same way (flat fields for the
+vignetting, tile phase correlation on a real 14–24 mm frame for the
+distortion). Camera Raw honours crs:LensProfileVignettingScale and
+crs:LensProfileDistortionScale only for a profile the sidecar NAMES: a
+strength of 50 renders at 100 with no crs:LensProfileName under LensDefaults,
+Auto or no setup, and at 50 once a setup and the name are there; the digest
+and the file name are not needed. The name resolves the way `lcp::open_named`
+records: a file name beside a name wins, then the name (not checked against
+the lens: a 24–105 mm name renders that profile on a 14–24 mm frame), and no
+name resolves nothing — under Custom that is no profile correction at all
+(flat field flat, geometry the switched-off one to 0.01 px), under the other
+setups Camera Raw's own choice. The export therefore writes the setup, the
+name and the file name whenever a strength is off 100 on a rendering
+component (`EditRecipe::lightroom_named_lens_profile`), and owns the three
+keys only while it writes them. The setup is LensDefaults, which keeps the
+camera's CA as the render does (ruling 2026-10-29), and Custom only when the
+recipe has the camera's CA switched off — the one setup Camera Raw draws none
+under (`EditRecipe::lightroom_lens_setup`). The import reads a strength only
+when the document names a profile. The vignetting strength `s` is not a
+scaling of the gain's departure: the gain at s = 0, 1, 2 is 1, g and
+1 + 2(g − 1), and between those Camera Raw interpolates in EV — within 0.22 %
+at 25 to 200 on the 14–24 mm and 50 to 200 on the 24–105 mm, where the old
+`1 + (g − 1)·s` was 7 % bright in the 14–24 mm corner at 50. The distortion
+strength scales the map's departure, as the engine already did (displacement
+at 25/50/150/200 is 0.25/0.51/1.50/2.01 of 100's at 0.6–0.7 of the
+half-diagonal). Through the engine at 50, 100 and 150 the 14–24 mm flat field
+is within 0.10, 0.12 and 0.13 % of Camera Raw to 0.94 (0.89 at 150). The body's Adobe Standard profile
 carries no DefaultBlackRender tag (absent means Auto), so the SDK's render would subtract
 Shadows 5 × 0.001 = 0.005 black; the engine subtracts the sensor's 512 and no
 render black, and the 0.005 tried on p39 overshoots the shadows (ΔL −2 to

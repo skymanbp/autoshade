@@ -292,8 +292,17 @@ pub(super) fn apply_develop_with_rasters(
     //    that should cancel multiplicatively could not cancel on clipped
     //    pixels (the old "order between them is cosmetic" comment was only
     //    true of un-clamped math — L01-6).
+    //    On a camera-profile start the PROFILE's gain is not here at all: it
+    //    went on the sensor's linear light before the profile stage
+    //    (`render::source`, and the preview bases through `BasePart`), where
+    //    Camera Raw applies it. What is left here is the manual slider, put on
+    //    under the profile's ramp and curve (`apply_radial_gain_under_tone`).
     if let Some(lut) = vignette_gain_lut(r) {
-        apply_radial_gain(data, w, h, &lut);
+        if camera_raw {
+            apply_radial_gain_under_tone(data, w, h, &lut, space);
+        } else {
+            apply_radial_gain(data, w, h, &lut);
+        }
     }
     // 0b) dehaze — pointwise atmospheric-veil removal in LINEAR light, before
     //    any tonal work: the airlight estimate then depends only on the capture
@@ -626,17 +635,36 @@ pub(super) fn manual_vignette_lut(amount: f32, midpoint: f32) -> Vec<f32> {
 /// an Adobe `.lcp` on this machine — not from a slider model.
 ///
 /// `scale` is Lightroom's profile Vignetting strength, 0..200 with 100 = the
-/// profile's own gains. Like the distortion strength in [`geometry_profile`]
-/// it scales the correction's DEPARTURE FROM IDENTITY (`1 + (g − 1)·s`), and
-/// 100 takes the branch that returns the gains untouched, so every render made
-/// before v1.5.0 stays bit-identical.
+/// profile's own gains, applied by [`scaled_profile_gain`]; 100 takes the
+/// branch that returns the gains untouched.
 pub(super) fn profile_vignette_lut(knots: &[f32], scale: f32) -> Vec<f32> {
     let g = |i: usize| profile_knot_interp(knots, i as f32 / (LUT_N - 1) as f32);
     let s = (scale / 100.0).clamp(0.0, 2.0);
     if s == 1.0 {
         return (0..LUT_N).map(g).collect();
     }
-    (0..LUT_N).map(|i| 1.0 + (g(i) - 1.0) * s).collect()
+    (0..LUT_N).map(|i| scaled_profile_gain(g(i), s)).collect()
+}
+
+/// Camera Raw's profile Vignetting strength `s` (0..=2) on a gain `g`: the
+/// gain at the whole strengths is 1, `g` and `1 + 2(g − 1)` (no correction,
+/// the profile's, twice its departure), and between them it runs linearly in
+/// EV. Measured on flat-field frames read against their own raw-gain ladders
+/// (2026-10-28), at 25 to 200 on the 14–24 mm and 50 to 200 on the 24–105 mm:
+/// within 0.22 % of the gain everywhere the ladder reaches. The old reading,
+/// `1 + (g − 1)·s`, is right only at the whole strengths — 7 % too bright in
+/// the 14–24 mm's corner at 50.
+///
+/// A gain under 1 (a profile that darkens, which no Adobe vignette model is,
+/// and which only a hand-edited recipe's clamp admits) has no measurement and
+/// takes the same law on its inverse, so the strength stays a gain above zero.
+fn scaled_profile_gain(g: f32, s: f32) -> f32 {
+    if g < 1.0 {
+        return 1.0 / scaled_profile_gain(1.0 / g, s);
+    }
+    let (ev, ev2) = (g.log2(), (2.0 * g - 1.0).log2());
+    let e = if s <= 1.0 { s * ev } else { ev + (s - 1.0) * (ev2 - ev) };
+    e.exp2()
 }
 
 /// The single radial-gain LUT for whichever vignette stages are active —
@@ -644,9 +672,9 @@ pub(super) fn profile_vignette_lut(knots: &[f32], scale: f32) -> Vec<f32> {
 /// the one clamp in `apply_radial_gain` runs on the true combined gain and
 /// inverse corrections genuinely cancel (L01-6).
 pub(super) fn vignette_gain_lut(r: &EditRecipe) -> Option<Vec<f32>> {
-    let profile = r
-        .lens_profile
-        .vignette_active()
+    // Under Camera Raw's law the profile's gain belongs to the source develop
+    // (`render::source`), not to this stage.
+    let profile = (r.lens_profile.vignette_active() && SliderLaw::of(r) != SliderLaw::CameraRaw)
         .then(|| profile_vignette_lut(&r.lens_profile.vignette, r.lens_profile_vignetting_scale));
     let manual =
         (r.lens_vignette != 0.0).then(|| manual_vignette_lut(r.lens_vignette, r.lens_vignette_mid));
@@ -685,6 +713,55 @@ pub(super) fn apply_radial_gain(data: &mut [[f32; 3]], w: usize, h: usize, gain_
             for c in px.iter_mut() {
                 *c = sample_lut(enc, (sample_lut(dec, *c) * gain).clamp(0.0, 1.0));
             }
+        }
+    });
+}
+
+/// [`apply_radial_gain`] on LINEAR light that no transfer has touched — the
+/// sensor's own, before the camera profile stage (`render::source`). No clamp:
+/// the profile stage and its highlight treatment come after.
+pub(super) fn apply_radial_gain_linear(data: &mut [[f32; 3]], w: usize, h: usize, gain_lut: &[f32]) {
+    if w == 0 || h == 0 {
+        return; // par_chunks_mut(0) asserts even on an empty slice (U14)
+    }
+    let (cx, cy) = ((w as f32 - 1.0) * 0.5, (h as f32 - 1.0) * 0.5);
+    let rmax = (cx * cx + cy * cy).sqrt().max(1.0);
+    data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let dy = y as f32 - cy;
+        for (x, px) in row.iter_mut().enumerate() {
+            let dx = x as f32 - cx;
+            let gain = sample_lut(gain_lut, ((dx * dx + dy * dy).sqrt() / rmax).clamp(0.0, 1.0));
+            *px = px.map(|c| c * gain);
+        }
+    });
+}
+
+/// [`apply_radial_gain`] on a frame the camera-profile stage has rendered: each
+/// pixel's light is taken back under Adobe's default curve and the exposure
+/// ramp ([`profile::UnderTone`]), multiplied there, and put back through them.
+/// Only the MANUAL vignette slider comes here; the profile's own gain goes on
+/// before the profile stage (`render::source`), because taken back under the
+/// curve alone it still met the profile's HueSatMap on the wrong side (up to
+/// 0.96 % off Camera Raw in a 14–24 mm corner, 0.12 % where it is now). Light
+/// the manual slider acts in under Camera Raw's law is not measured.
+fn apply_radial_gain_under_tone(data: &mut [[f32; 3]], w: usize, h: usize, gain_lut: &[f32], space: ExportColorSpace) {
+    if w == 0 || h == 0 {
+        return; // par_chunks_mut(0) asserts even on an empty slice (U14)
+    }
+    let (cx, cy) = ((w as f32 - 1.0) * 0.5, (h as f32 - 1.0) * 0.5);
+    let rmax = (cx * cx + cy * cy).sqrt().max(1.0);
+    let (dec, enc) = transfer_luts();
+    let under = profile::UnderTone::new(space);
+    data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let dy = y as f32 - cy;
+        for (x, px) in row.iter_mut().enumerate() {
+            let dx = x as f32 - cx;
+            let gain = sample_lut(gain_lut, ((dx * dx + dy * dy).sqrt() / rmax).clamp(0.0, 1.0));
+            if (gain - 1.0).abs() < 1e-6 {
+                continue;
+            }
+            let light = under.undo(px.map(|v| sample_lut(dec, v))).map(|c| c * gain);
+            *px = under.redo(light).map(|v| sample_lut(enc, v.clamp(0.0, 1.0)));
         }
     });
 }

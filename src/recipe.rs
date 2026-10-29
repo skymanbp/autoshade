@@ -1301,6 +1301,37 @@ pub struct CreativeLook {
 }
 
 impl EditRecipe {
+    /// The Adobe profile a Lightroom sidecar of this recipe has to NAME, or
+    /// `None` when it need not or cannot.
+    ///
+    /// Camera Raw honours crs:LensProfileVignettingScale and
+    /// crs:LensProfileDistortionScale only for a profile the sidecar names:
+    /// measured on a flat field (vignetting) and on a real frame (distortion),
+    /// a strength of 50 renders at 100 under LensDefaults, Auto or no setup
+    /// with no crs:LensProfileName, and at 50 once the name is there. So the
+    /// export names the profile whenever a strength is off 100 on a component
+    /// that is rendering, under the setup [`Self::lightroom_lens_setup`] says.
+    /// `None` with a strength off 100 and no profile on this machine is an
+    /// export loss (`xmp::global_export_losses`).
+    pub fn lightroom_named_lens_profile(&self) -> Option<&AdobeLensProfile> {
+        let p = &self.lens_profile;
+        let vignette = self.lens_profile_vignetting_scale != 100.0 && p.vignette_active();
+        let distortion = self.lens_profile_distortion_scale != 100.0 && p.distortion_on && !p.distortion.is_empty();
+        if vignette || distortion { p.adobe.as_ref() } else { None }
+    }
+
+    /// The crs:LensProfileSetup a sidecar naming the profile states: the one
+    /// whose camera CA matches this recipe's. LensDefaults (coordinator ruling
+    /// 2026-10-29: the name alone makes Camera Raw honour a strength, and this
+    /// setup keeps the camera's CA, as the render does) — unless the camera's
+    /// CA is there and switched off, which Camera Raw draws only under Custom
+    /// (measured: no camera CA under Custom, the camera's under LensDefaults).
+    pub fn lightroom_lens_setup(&self) -> &'static str {
+        let p = &self.lens_profile;
+        let ca_off = !p.ca_on && !p.ca_r.is_empty() && !p.ca_b.is_empty();
+        if ca_off { "Custom" } else { "LensDefaults" }
+    }
+
     /// Every machine-local raster path this recipe references: each mask's
     /// ([`LocalAdjustment::bitmap_paths_mut`]), the lens blur's depth map and
     /// protect matte, and each pixel layer's patch — the ONE walk the store's
@@ -1668,6 +1699,27 @@ pub struct LensProfile {
     /// forward schema break: an older `deny_unknown_fields` reader refuses a
     /// recipe rather than silently discarding a coordinate-frame fact.
     pub mask_warp_center: Option<MaskWarpCenter>,
+    /// The Adobe lens profile on this machine that Camera Raw takes for this
+    /// photo (`lensmeta::read_for`), by the two names a sidecar gives it.
+    /// `None` when there is none. It is what a Lightroom sidecar must name
+    /// for Lightroom to honour the profile strengths
+    /// ([`EditRecipe::lightroom_named_lens_profile`]).
+    ///
+    /// Absent from `recipe.json` when `None`, so a recipe without one stays
+    /// readable by an older build; one that carries it is the same deliberate
+    /// forward break as `mask_warp_center`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adobe: Option<AdobeLensProfile>,
+}
+
+/// An Adobe lens profile by the names a Lightroom sidecar gives it:
+/// crs:LensProfileName (the file's own `stCamera:ProfileName`) and
+/// crs:LensProfileFilename.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdobeLensProfile {
+    pub name: String,
+    pub filename: String,
 }
 
 /// One stored-coordinate frame fact for Lightroom's radial mask transport.

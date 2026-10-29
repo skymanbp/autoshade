@@ -7824,19 +7824,42 @@ fn hsl_band_budget_is_monotone_across_the_three_strength_stops() {
 /// is still withheld by the re-hue veto, fit 0.0792 -> 0.0239 (0.0792 ->
 /// 0.0217), confidence 0.501 (0.506).
 ///
+/// Re-measured 2026-10-29 for v1.17.0's lens vignetting on Camera Raw's law
+/// (the Adobe profile's model, applied in raw-linear light: `lcp`,
+/// `render::develop`), which brightens the fit source's corners to what the
+/// target's renderer did: `p40` is admitted at 14.2° (0.7°), fit 0.0682 ->
+/// 0.0336 (0.0707 -> 0.0300), confidence 0.606 (0.625). Attributed by
+/// swapping one part back at a time: the camera's knots in place of the
+/// profile's model give 4.1°, and the gain's position alone moves nothing
+/// (14.2° either side of the curve), so the fan follows how much the source's
+/// corners are lifted. That left 0.8° of margin under [`FAN_DEG`]'s 15°:
+/// the source's corners are now as bright as the target's renderer made them
+/// (`p40`'s target was drawn with the profile on); why a truer source fans
+/// the shipped cast more is the fit's question, not measured here.
+///
+/// OPEN (2026-10-29, the vignette gain moved ahead of the profile stage, where
+/// Camera Raw applies it): `p40`'s cast now fans 15.3° and the gate REFUSES
+/// it — fit 0.0684 -> 0.0291, confidence 0.630 — so this test is red on its
+/// own claim until the fit's owner rules. `p41` measured 0.0763 -> 0.0250,
+/// confidence 0.463, still withheld by the re-hue veto. `p41` is still withheld by the re-hue veto, fit
+/// 0.0792 -> 0.0292 (0.0792 -> 0.0239), confidence 0.450 (0.501): its
+/// target was drawn with the lens profile switched off, and the fit source
+/// (developed from the RAW alone, `pipeline::fit_source`) carries the
+/// profile's now-stronger corner lift, which the fit has to take back out.
+///
 /// Both pairs are OPTIONAL, like every other corpus pair: absent, the
 /// test says so and passes, and the synthetic two-temperature fixture
 /// carries the refusal side of the same question on its own.
 ///
-/// Mutation: set [`FAN_DEG`] under `p40`'s 0.7° and it goes from admitted
+/// Mutation: set [`FAN_DEG`] under `p40`'s 14.2° and it goes from admitted
 /// to convicted, red on the fan-margin assertion.
 #[test]
 fn the_fan_gate_costs_a_real_two_temperature_pair_nothing() {
     use crate::rationale::keys;
     let Some(root) = calibration_corpus() else { return };
     for (code, want_fan, want_before, want_after, want_conf) in [
-        ("p40", Some(0.7f32), 0.0707f32, 0.0300f32, 0.625f32),
-        ("p41", None, 0.0792, 0.0239, 0.501),
+        ("p40", Some(14.2f32), 0.0682f32, 0.0336f32, 0.606f32),
+        ("p41", None, 0.0792, 0.0292, 0.450),
     ] {
         let raw = root.join(format!("{code}.arw"));
         let target_path = root.join(format!("{code}-target.jpg"));
