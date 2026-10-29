@@ -929,15 +929,15 @@ pub(super) fn atmosphere_wb_pairing<'a>(
 /// both suburbs 0 (0.36). The size that ships is still the cells' to vouch
 /// (`vouch_along`, then the share search).
 ///
-/// INVERSION. The engine's model (`render::wb_gains`) is `[gr(K), 1 −
-/// 0.2·tint/100, gb(K)]` — green 1 under a pure Kelvin move, only the tint
-/// touching it — so the fit is in that normalisation, in log space, up to
-/// the common scalar: the Kelvin is the red/blue axis alone, and the tint is
-/// the green axis against the red/blue mean of what remains at that Kelvin.
-/// Each is exact for the other inside the domain; at the 40000 K edge the
-/// tint is read against the gains the engine will actually deliver, so an
-/// unreachable remainder of warmth stays warmth and is not booked as green.
-/// The estimator this replaces normalised the ratios by their geometric mean
+/// INVERSION is the render's own law's (`render::WbLaw::invert`, v1.17.0):
+/// the demand goes onto the (Kelvin, tint) pair whose rendered gains match
+/// it, on the law the recipe renders by — the engine's separable one, or
+/// Camera Raw's absolute Temperature and Tint on a camera-profile start —
+/// and "no demand" is that law's As Shot. Until v1.17.0 it was always the
+/// engine's law, with Tint 0 as As Shot: on a camera-profile start every
+/// moved white balance carried a green shift of the as-shot tint, and
+/// Temperature ran to the 40000 K edge (p38 40000 K / −26.2, p40 23500 K /
+/// +75.8 at 0.85). The estimator before the engine-law inversion normalised the ratios by their geometric mean
 /// and read the tint off the resulting green, which is 1 only when the
 /// Kelvin gains' own geometric mean is 1 — it never is — so every warm move
 /// came back green: a pure 40000 K move from a 5768 K anchor read tint
@@ -1050,7 +1050,7 @@ pub(super) fn atmosphere_wb_from_populations(
     sp: &[[f32; 3]],
     pair_tp: &[[f32; 3]],
     pair_w: &[f32],
-    anchor: f32,
+    law: render::WbLaw,
 ) -> (f32, f32, [f32; 3]) {
     let axes = wb_axes_by_range(sp, pair_tp, pair_w);
     let (a, _) = wb_consensus(&axes.kelvin);
@@ -1058,55 +1058,16 @@ pub(super) fn atmosphere_wb_from_populations(
     // Nothing in common is no demand: the anchor itself, at the solve's own
     // quantisation, so the stage can tell "no move" from a small one.
     if a == 0.0 && m == 0.0 {
-        return ((anchor / 50.0).round() * 50.0, 0.0, [1.0; 3]);
+        let (k, tint) = law.as_shot();
+        return ((k / 50.0).round() * 50.0, round1(tint), [1.0; 3]);
     }
     let want_log = [m + 0.5 * a, 0.0, m - 0.5 * a];
     // The normalised demand the callers and tests read: the same chromaticity
     // as gains with unit geometric mean.
     let common = (want_log[0] + want_log[1] + want_log[2]) / 3.0;
     let wanted = want_log.map(|v| (v - common).exp());
-    let (k, tint) = invert_wb_log_gains(anchor, want_log);
+    let (k, tint) = law.invert(want_log, WB_SEARCH_K);
     (k, tint, wanted)
-}
-
-/// A wanted log-gain triple put onto the engine's (Kelvin, tint) manifold
-/// around `anchor`: the Kelvin that minimises the red/blue mismatch over
-/// [`WB_SEARCH_K`] (401 steps in log Kelvin), then the tint as the green
-/// against the red/blue mean of the residual AT THAT KELVIN. The Kelvin
-/// comes back rounded to 50, the tint to 0.1, as the recipe persists them.
-///
-/// One inversion for the estimator and for the budget path (2026-10-22): a
-/// tint is a compensation for the Kelvin it was solved with — at the 2000 K
-/// search bound the engine's red and blue gains do not balance about the
-/// green and the tint carries the difference — so any point between as-shot
-/// and the free fit must be inverted for its own Kelvin, not handed a share
-/// of the far end's tint.
-pub(super) fn invert_wb_log_gains(anchor: f32, want_log: [f32; 3]) -> (f32, f32) {
-    let (lo, hi) = (WB_SEARCH_K.0.ln(), WB_SEARCH_K.1.ln());
-    // The Kelvin search: log residual of the demand against the engine's
-    // Kelvin gains at tint 0, `r = ln(want) − ln(gains(K))`, and the Kelvin
-    // that minimises the red/blue mismatch `(r_R − r_B)²` — the common
-    // brightness scalar cancels in that difference and the green does not
-    // enter it.
-    let log_gains = |k: f32| render::wb_gains(anchor, k, 0.0).map(|v| v.max(1e-5).ln());
-    let mut best = (anchor, f32::INFINITY);
-    for i in 0..=400 {
-        let k = (lo + (hi - lo) * i as f32 / 400.0).exp();
-        let g = log_gains(k);
-        let err = ((want_log[0] - g[0]) - (want_log[2] - g[2])).powi(2);
-        if err < best.1 {
-            best = (k, err);
-        }
-    }
-    // The tint: with the common scalar `s` and the green log-gain `t` free,
-    // the least squares of `(r_R − s, r_G − s − t, r_B − s)` is exact in
-    // `s = (r_R + r_B)/2` and `t = r_G − s` — the green against the red/blue
-    // mean of the residual at the Kelvin the engine will deliver.
-    let g = log_gains(best.0);
-    let r = [want_log[0] - g[0], want_log[1] - g[1], want_log[2] - g[2]];
-    let t = r[1] - 0.5 * (r[0] + r[2]);
-    let tint = ((1.0 - t.exp()) / 0.20 * 100.0).clamp(-100.0, 100.0);
-    ((best.0 / 50.0).round() * 50.0, round1(tint))
 }
 
 pub(super) fn weighted_mean(px: &[[f32; 3]], weights: &[f32], ch: usize) -> Option<f32> {

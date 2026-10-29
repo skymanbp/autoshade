@@ -688,7 +688,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // the whole frame. A cast the cells say took the frame AWAY from its
     // target is returned to as-shot and named, because an edit may not create
     // its own evidence.
-    let anchor = base.as_shot_k.unwrap_or(5500.0);
+    let law = render::WbLaw::of(base);
     let wb_weights: Vec<f32> = {
         let n = sp.len().min(tp.len());
         // At PIXEL scale a pixel's robust tone weight is a statement about its
@@ -718,7 +718,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // below has always read the current render for the same reason.
     let before_wb = pixels_of(&render::develop_preview(&s_img, &recipe));
     let (free_k, free_tint, _wanted) =
-        atmosphere_wb_from_populations(&before_wb, &tp, &wb_weights, anchor);
+        atmosphere_wb_from_populations(&before_wb, &tp, &wb_weights, law);
     let wb_restore = (recipe.temperature_k, recipe.tint);
     let wb_facts = solve_white_balance(
         &s_img,
@@ -727,7 +727,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         base,
         &evidence,
         (free_k, free_tint),
-        anchor,
+        law,
         budget,
         options.strength,
     );
@@ -779,10 +779,10 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         && !full.vouched()
         && full.direction_agrees()
     {
-        let solved = (recipe.temperature_k.unwrap_or(anchor), recipe.tint);
-        let from = (wb_restore.0.unwrap_or(anchor), wb_restore.1);
+        let solved = law.point_of(&recipe);
+        let from = law.point(wb_restore.0, wb_restore.1);
         let at = |share: f32| -> (Option<f32>, f32) {
-            let (k, tint) = wb_path_between(anchor, from, solved, share);
+            let (k, tint) = wb_path_between(law, from, solved, share);
             (Some(k), tint)
         };
         let (mut lo, mut hi, mut best) = (0.0f32, 1.0f32, None);
@@ -1009,12 +1009,12 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 // else falls through to the projection below with `recipe`
                 // untouched — every probe is a clone — so a pair the hand-off
                 // cannot help ships byte for byte what it shipped before.
-                let from = (recipe.temperature_k.unwrap_or(anchor), recipe.tint);
+                let from = law.point_of(&recipe);
                 let err_without = look_err_with_evidence(&cur, &tp, &evidence);
                 let probe_base = recipe.clone();
-                let handed = cast_wb_direction(&cur, &with_px, &wb_weights, anchor).and_then(|direction| {
-                    search_cast_hand_off(anchor, from, direction, err_without, |wb| {
-                        if !wb_gains_fit_budget(render::wb_gains(anchor, wb.0, wb.1), budget) {
+                let handed = cast_wb_direction(&cur, &with_px, &wb_weights, law).and_then(|direction| {
+                    search_cast_hand_off(law, from, direction, err_without, |wb| {
+                        if !wb_gains_fit_budget(law.gains(wb), budget) {
                             return None;
                         }
                         // Above the default strength the white-balance stage
@@ -1102,7 +1102,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                             outcome,
                             vouch,
                             err: look_err_with_evidence(&px, &tp, &evidence),
-                            pull: cast_wb_direction(&under, &px, &wb_weights, anchor).map_or(
+                            pull: cast_wb_direction(&under, &px, &wb_weights, law).map_or(
                                 0.0,
                                 |d| d.iter().map(|v| v * v).sum::<f32>().sqrt(),
                             ),

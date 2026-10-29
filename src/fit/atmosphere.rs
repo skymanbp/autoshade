@@ -112,7 +112,7 @@ pub(super) fn solve_white_balance(
     base: &EditRecipe,
     evidence: &EvidenceModel,
     (wb_k, wb_tint): (f32, f32),
-    anchor: f32,
+    law: render::WbLaw,
     budget: FitBudget,
     strength: crate::recipe::GradeStrength,
 ) -> WbFacts {
@@ -124,15 +124,17 @@ pub(super) fn solve_white_balance(
     // (the seaside street: 5226 K as shot, 5200 K solved, 0.000 converged,
     // "returned to as-shot"). An exact comparison, not a tolerance: the
     // estimator returns exactly this pair and nothing else rounds to it
-    // without being it.
-    if wb_k == (anchor / 50.0).round() * 50.0 && wb_tint == 0.0 {
+    // without being it. "The anchor" is the law's As Shot: on Camera Raw's
+    // law its tint is the stamped as-shot tint, not 0.
+    let as_shot = law.as_shot();
+    if wb_k == (as_shot.0 / 50.0).round() * 50.0 && wb_tint == round1(as_shot.1) {
         return WbFacts::default();
     }
     let wb_search_bound = (strength.get() > crate::recipe::GradeStrength::DEFAULT
         && (wb_k <= WB_SEARCH_K.0 || wb_k >= WB_SEARCH_K.1))
         .then_some(wb_k);
     let before_wb_px = pixels_of(&render::develop_preview(s_img, recipe));
-    let ratio_before = wb_gain_ratio(render::wb_gains(anchor, wb_k, wb_tint));
+    let ratio_before = wb_gain_ratio(law.gains((wb_k, wb_tint)));
     let mut clamped_ratio = ratio_before;
     let mut wb_clamped = false;
     let mut wb_foreign_hue_withheld = false;
@@ -144,7 +146,7 @@ pub(super) fn solve_white_balance(
     if !wb_step_gated(strength) {
         // The shipped default is the pre-F1 path byte-for-byte: an in-budget
         // free WB is persisted, while an out-of-budget demand stays as-shot.
-        if wb_gains_fit_budget(render::wb_gains(anchor, wb_k, wb_tint), budget) {
+        if wb_gains_fit_budget(law.gains((wb_k, wb_tint)), budget) {
             recipe.temperature_k = Some(wb_k);
             recipe.tint = wb_tint;
         }
@@ -153,10 +155,10 @@ pub(super) fn solve_white_balance(
         // persisted WB. Its scalar lambda is then reduced only as far as the
         // rendered foreign-hue and rotation gates require.
         let (_, _, budgeted_clamped, _, budgeted_ratio, initial_lambda) =
-            budgeted_wb(anchor, wb_k, wb_tint, budget);
+            budgeted_wb(law, wb_k, wb_tint, budget);
         let mut lambda = initial_lambda;
         let evaluate = |lambda: f32| {
-            let (k, tint) = wb_path_candidate(anchor, wb_k, wb_tint, lambda);
+            let (k, tint) = wb_path_candidate(law, wb_k, wb_tint, lambda);
             let mut candidate = recipe.clone();
             candidate.temperature_k = Some(k);
             candidate.tint = tint;
@@ -208,14 +210,14 @@ pub(super) fn solve_white_balance(
             recipe.tint = base.tint;
             clamped_ratio = 1.0;
         } else {
-            let (chosen_k, chosen_tint) = wb_path_candidate(anchor, wb_k, wb_tint, lambda);
+            let (chosen_k, chosen_tint) = wb_path_candidate(law, wb_k, wb_tint, lambda);
             recipe.temperature_k = Some(chosen_k);
             recipe.tint = chosen_tint;
             let chosen_px = pixels_of(&render::develop_preview(s_img, recipe));
             rotated = rehued_share_weighted(&before_wb_px, &chosen_px, evidence);
             wb_rotation_coverage = rehued_coverage_weighted(evidence);
             wb_rotated_share = rotated;
-            clamped_ratio = wb_gain_ratio(render::wb_gains(anchor, chosen_k, chosen_tint));
+            clamped_ratio = wb_gain_ratio(law.gains((chosen_k, chosen_tint)));
             wb_clamped = budgeted_clamped || lambda < 1.0 - 1e-6 || rotation_limited;
         }
         // A persisted WB that is free and passes both gates carries no clamp
@@ -361,10 +363,10 @@ pub(super) fn fit_atmosphere_from_parts(
     // population must also choose the pairing, and
     // `atmosphere_wb_from_populations` for why the statistic is a per-pixel
     // median rather than three independent marginal ones.
-    let anchor = base.as_shot_k.unwrap_or(5500.0);
+    let law = render::WbLaw::of(base);
     let (pair_tp, pair_w) = atmosphere_wb_pairing(tp, evidence, correspondence, readable);
     let (wb_k, wb_tint, _wanted) =
-        atmosphere_wb_from_populations(sp, pair_tp, &pair_w, anchor);
+        atmosphere_wb_from_populations(sp, pair_tp, &pair_w, law);
     let mut facts = solve_white_balance(
         s_img,
         tp,
@@ -372,7 +374,7 @@ pub(super) fn fit_atmosphere_from_parts(
         base,
         evidence,
         (wb_k, wb_tint),
-        anchor,
+        law,
         budget,
         strength,
     );

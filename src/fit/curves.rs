@@ -483,9 +483,9 @@ pub(super) fn cast_wb_direction(
     cur: &[[f32; 3]],
     with_px: &[[f32; 3]],
     weights: &[f32],
-    anchor: f32,
+    law: render::WbLaw,
 ) -> Option<[f32; 3]> {
-    let (_, _, wanted) = atmosphere_wb_from_populations(cur, with_px, weights, anchor);
+    let (_, _, wanted) = atmosphere_wb_from_populations(cur, with_px, weights, law);
     let direction = wanted.map(|g| g.max(1e-6).ln());
     (direction.iter().all(|v| v.is_finite()) && direction.iter().any(|v| v.abs() > 1e-4))
         .then_some(direction)
@@ -574,16 +574,16 @@ pub(super) struct HandOffFacts {
 /// 0.43 at 15900 K), finished at 7.52. 25350 K (0.03832) falls just outside
 /// the band.
 pub(super) fn search_cast_hand_off(
-    anchor: f32,
+    law: render::WbLaw,
     from: (f32, f32),
     direction: [f32; 3],
     err_without: f32,
     mut judge: impl FnMut((f32, f32)) -> Option<CastHandOff>,
 ) -> Option<CastHandOff> {
-    let start = render::wb_gains(anchor, from.0, from.1).map(|v| v.max(1e-5).ln());
+    let start = law.log_gains(from);
     let at = |lambda: f32| {
         let want: [f32; 3] = std::array::from_fn(|c| start[c] + lambda * direction[c]);
-        super::evidence::invert_wb_log_gains(anchor, want)
+        law.invert(want, WB_SEARCH_K)
     };
     let on_edge = |(k, _): (f32, f32)| k <= WB_SEARCH_K.0 || k >= WB_SEARCH_K.1;
     let mut reach = 1.0f32;
