@@ -2173,8 +2173,10 @@ tone LUT (exposure/contrast/whites/blacks/highlights/shadows, the parametric
 curve, the tone curve and the per-photo camera base curve — on a recipe that
 names no camera profile, v1.17.0 — composed into one table; on a recipe that
 names one, Camera Raw's measured law in five passes, `render/tone_cr.rs`:
-Highlights and Shadows first, a local law on two edge-aware bases of the
-frame's luminance keyed to its mean, then exposure by Adobe's channel rule,
+Highlights and Shadows first — Highlights a local law on two edge-aware
+bases of the frame's luminance keyed to its mean, Shadows a gain on linear
+luminance set by the frame's spread on a 768-cell map — then exposure by
+Adobe's channel rule,
 Contrast, Whites and Blacks, the Look's baked curve, the parametric and
 point curves) → **the B&W treatment's grey mix** when the photo is black and white
 (before the channel curves, so a red-channel curve meets the grey the
@@ -2186,7 +2188,7 @@ saturation/vibrance (also skipped in black and white) → the Detail panel
 (colour noise reduction → luminance noise reduction → sharpening) → local
 adjustments (linear/radial/bitmap masks). On a recipe that names a camera
 profile (v1.17.0, `render/mask_cr.rs`) a mask's Highlights and Shadows run
-the global law on the same bases right after the global pass, before
+the global law on the same sites right after the global pass, before
 Exposure, and its Exposure, its other tone sliders, Dehaze and Clarity's tone
 run instead right after their global twins — Exposure on the same ramp, so the two add in EV; the sliders on
 response tables of their own, measured — and its Temp and Tint right after

@@ -535,64 +535,76 @@ supposed to remove.
   (1 % of the exposed curve's rise) keeps the result monotone where two
   pushes overlap. The reverse fit holds each row at the previous pass's
   magnitude and re-solves until the answer stops moving; Highlights and
-  Shadows, which run before Exposure on a local law (next item), enter its
-  solve as their push at the pixel's own value times the exposure's slope,
-  at a key read off the score set's masses.
+  Shadows, which run before Exposure (next item), enter its solve as their
+  push at the pixel's own value times the exposure's slope, at frame
+  statistics read off the score set's masses (the mean linear value, the
+  mean and standard deviation of `log2`).
 - Highlights and Shadows on a camera-profile start (v1.17.0,
-  `render/tone_cr.rs`, **measured against Adobe Camera Raw 18.4**): seven
-  frames' flat packets (every slider 0, Adobe Color, As Shot white, lens as
-  each frame's sidecar says), each with Shadows +30/+60/+100 and Highlights
-  −30/−60/−100 (49 renders at 6144 px), compared at 768 px in `u`.
+  `render/tone_cr.rs`, **measured against Adobe Camera Raw 18.4**).
   **Order:** composing Camera Raw's own pointwise maps on two frames, both
   run BEFORE Exposure (mean |ΔL| 0.23–0.42 that way, 1.17–3.68 the other)
   and before Contrast and Blacks (0.11–0.22 against 0.30–2.48), so they are
-  the tone stage's first pass. **Local:** next to a strong tone edge a dark
-  pixel is lifted less by Shadows over 32–64 px at 1536 px (200–400 film
-  pixels), and one frame's foreground is lifted by the same `u` from 0.20 to
-  0.35 while its sky at 0.36 moves an eighth as far — a step in the pixel's
-  own value that only a regional base explains. The base is an edge-aware
-  (bilateral) smoothing of `log2` linear luminance, σ 400 film pixels and
-  1 stop (between σ 200 and 1600 Shadows' held-out R² moved by at most 0.09
-  on six frames; the night frame preferred the smallest);
-  Highlights read a second base at σ 1600 besides it (held-out R² of the
-  frame it helped most 0.76 → 0.94). **Keyed:** at one base value the push
-  still differs 6× between frames (Highlights −60 at `u` 0.3: 0.022 on a
-  daylight street, 0.142 on a dark dusk frame); measured against the
-  frame's mean linear luminance, `z = log2(base) − log2(mean)`, the frames
-  line up — the mean ordered them, the median, log-average and the 90th/99th
-  percentiles did not. The law, per unit slider and per measured sign, is a
-  table over `(z, u)` for Shadows and two tables over the two bases' `z`
-  for Highlights, each with a curvature term in the magnitude, fitted pooled
-  over the seven frames and then with the engine in the loop; the
-  unmeasured signs (Highlights above 0, Shadows below) keep the pointwise
-  tables. Leave-one-frame-out R² of the push (the law fitted on six frames,
-  scored on the seventh, at −0.6 / +0.6): Highlights 0.89, 0.94, 0.94, 0.91,
-  0.94, 0.84 and 0.35 on the night frame (its error 0.98 L rms);
-  Shadows 0.91, 0.75, 0.80, 0.82, 0.76, −0.23 on the dark dusk frame (its
-  lift varies by 0.6 L sd over the frame, the law's error 0.82 L rms) and
-  0.61. The engine's own renders against Camera Raw's, all seven frames in
-  the fit, R² 0.90–0.98 for Highlights and 0.64–0.93 for Shadows.
-  **Colour:** Shadows keep the colour, every channel by one ratio over a
-  floor of 0.03 in the profile stage's encoding (per channel left the warm
-  tones 4.75 b* short; with no floor a large near-black area turned 21.8 b*
-  too blue); Highlights take the channel rule's hue with the pixel's own
-  curve. A mask's Highlights and Shadows run the same law on the same base,
-  ×1.2 and ×1.25 (regression of the local renders on the global law: 1.21,
-  1.25), right after the global pass. **Results** (worst moving L band |ΔL| /
-  |Δa|,|Δb|, before → after): Shadows +30 0.16/0.58 → 0.68/0.41, +60
-  0.34/0.86 → 1.33/0.38, +100 0.72/1.31 → 2.33/0.33; Highlights −30
-  0.93/1.47 → 2.14/0.59, −60 0.92/2.37 → 4.66/0.84, −100 3.14/3.47 →
-  7.92/2.93; local Shadows +60 0.46/0.93 → 0.95/0.35, local Highlights −60
-  1.04/2.54 → 4.69/0.98. **Over the line:** the calibration frame's
-  Highlights (L 70–90 under-darkened 4–8 L — on that frame Camera Raw pushes
-  1.07× the pooled law, on the bright snow frame 0.88×, and no frame
-  statistic tried orders the seven) and Shadows +100's L 10–40 (2.1–2.3 L
-  short). The carry,
-  the point of the law (ΔE76 as measured / lens magnification undone /
-  aligned and σ 2, before → after): p36 6.72 → 3.99 / 4.07 / 3.61 (line 6),
-  p38 6.73 → 5.76 / 5.15 / 4.01 (line 5: over as measured), p39 5.60 →
-  4.48 / 3.42 / 2.55 (5), p40 8.16 → 6.12 / 4.84 / 3.32 (8), p41 10.41 →
-  7.75 / 7.75 / 7.41 (10).
+  the tone stage's first pass.
+  **Shadows** (the real-frame law): 19 frames — the seven calibration frames
+  and twelve census frames of other scenes and bodies — rendered flat and at
+  Shadows +60 at sensor size in 16 bit, read as `log2` linear luminance at
+  the default curve's input on a map 768 cells across the width. The push
+  in stops at a cell is `s · spread · T(b)`: `b` the cell minus the map's
+  mean, `spread` the map's standard deviation, `T` one monotone shape
+  shared by every frame, nothing fitted per frame. Held out one frame at a
+  time it explains 0.86 of the push over all 19 (worst: a portrait-
+  orientation night frame); one shape with a free amplitude per frame
+  reaches 0.93, and that amplitude follows the spread (r 0.95), while no
+  key (mean, median, blurred-base median, dark anchor, percentiles,
+  normalised range) makes it constant (CV 0.26–0.68). A full-depth local
+  Laplacian filter, at any range σ, explains less than nothing on its own
+  (median R² below 0) and adds 0.015 to the tonal term. On two frames at
+  +30/+60/+100 the push is linear in the slider (0.50 : 1 : 1.64, 0.51 :
+  1 : 1.62). Shadows below 0 read their own table, the same form fitted on
+  four frames at −60 (held out 0.62): the signs agree through the middle,
+  and −60 darkens the deepest levels further than +60 lifts them (−2.44
+  against +1.83 stops at six stops under the mean on the calibration
+  frame). What a full-resolution map adds over the per-level law moves
+  1-stop band means by 0.24 L at most (texture, left out). The push is a
+  gain on the pixel's linear luminance read off the map, the colour kept
+  by one ratio over a floor of 0.03 in the profile stage's encoding (per
+  channel left the warm tones 4.75 b* short; with no floor a large
+  near-black area turned 21.8 b* too blue). Measured in 16 bit only: 8-bit
+  renders clip the deepest levels to black: on the calibration frame
+  Shadows −60 reads −5.14 stops four to six stops under the mean from its
+  8-bit render and −2.17 from its 16-bit one.
+  **Highlights** (the engine's earlier law, kept): the push follows an
+  edge-aware (bilateral) base of `log2` linear luminance, σ 400 and 1600
+  film pixels and 1 stop, against the frame's mean linear luminance (`z =
+  log2(base) − log2(mean)`; Highlights −60 at `u` 0.3 is 0.022 on a
+  daylight street, 0.142 on a dark dusk frame), tables over the two bases'
+  `z` fitted on the seven calibration frames at −30/−60/−100 with the
+  engine in the loop; above 0 the pointwise table. On the 19 frames its
+  amplitude has no frame statistic (best held out 0.72, the mean; the
+  night frame −5.0), because dark frames also take a flat offset over
+  their deepest levels (Highlights −60 on the darkest 1 %: −0.27 and −0.30
+  stops on two night frames, −0.20 on a dusk frame, 0.00 to −0.06 on
+  bright ones), which no frame statistic tried predicts (best held out
+  0.43, the coarse minimum). Highlights take the channel rule's hue with
+  the pixel's own curve. A mask's Highlights and Shadows run the same law
+  on the same sites, Highlights' push ×1.2 (the local renders regressed
+  on the global law, 1.21) and Shadows' slider ×1.15 (Camera Raw's own
+  local push in stops over its global one on the same cells, 1.14–1.16 on
+  every two-stop band), right after the global pass.
+  **Results** on the calibration frame (worst moving L band |ΔL| /
+  |Δa|,|Δb| against Camera Raw, the previous Shadows table → this law):
+  Shadows +30 1.84/0.69 → 1.89/0.68, +60 1.49/0.72 → 3.05/0.70, +100
+  2.24/0.77 → 6.11/0.73, −60 2.14/0.61 → 1.53/0.64, −100 2.18/0.61 →
+  3.77/0.64; Highlights, unchanged, −30 4.11/0.63, −60 6.46/0.92, −100
+  9.44/2.15, +60 2.18/1.46, +100 2.10/1.81. The previous table was fitted
+  on this frame; the law holds it out. Read back on the render's own map,
+  the engine's push is the law's within 0.03 stops on every band from four
+  stops under the mean up; the misses are the law's on this frame: +100
+  lifts `b` −2…0 and 0…2 by 1.50 and 0.52 stops where Camera Raw lifts
+  1.81 and 0.82, and −100 darkens `b` +2…+4 by 0.39 where Camera Raw
+  darkens 0.17. The carry (ΔE76 as measured, previous → this law): p36
+  3.70 → 4.09 (line 6), p38 5.65 → 5.32 (line 5: over), p39 3.11 → 3.75
+  (5), p40 5.22 → 4.88 (8), p41 7.73 → 8.20 (10).
   **Highlights and Shadows: what the synthetic frames showed** (v1.17.0,
   causal tests, the law above unchanged). Neutral scenes written into a
   copy of the calibration frame's uncompressed RAW (same body, profile,
@@ -606,9 +618,13 @@ supposed to remove.
   one level moves −0.45 stops on a −5 surround and −0.97 on a −2 surround,
   switching within 96 px of the boundary (no ramp); large regions of one
   level move as one at every distance from an edge (the bright half of
-  `u` 0.13 | 0.70 −0.208 to −0.238 `u` over 4000 px). (3) A whole scene
-  shifted 1.5 stops in exposure gets the same pushes in stops (within
-  0.001–0.09); scaled in contrast (0.6×, 1.25×) it does not scale with it.
+  `u` 0.13 | 0.70 −0.208 to −0.238 `u` over 4000 px). (3) The packet's
+  Exposure slider at ±1 leaves the pushes in stops where they are (within
+  0.001–0.09; this was once read as a whole scene shifted in exposure, and
+  it is not that: uniform surrounds at −6, −4.5 and −3 stops give a tracer
+  2.5 stops above them −0.48, −0.58 and −0.24 under Highlights −60, so the
+  operator sees the scene's absolute level); scaled in contrast (0.6×,
+  1.25×) the scene's pushes do not scale with it.
   (4) It is coupled to the whole frame through its dark population: a
   640 px square at −11 stops in a corner or in the middle multiplies the
   Highlights push of a −3 stop surround 4.3× (−0.030 → −0.130 `u`),
@@ -633,9 +649,27 @@ supposed to remove.
   power means (soft minima) of the block image, the `log2` spread; a
   (`u`, base − statistic) table over 15–23 synthetic and 7 real frames
   reaches a median held-out R² of 0.00–0.46, and a local Laplacian filter
-  with a one-sided remap stays below 0 on most frames. The two measured
-  properties (1) and (2) are pinned as ignored tests in
-  `render/tone_cr.rs` until a law has them.
+  with a one-sided remap stays below 0 on most frames. The Shadows law
+  above against these, as checks (it was not fitted on them): (1) holds
+  for Shadows (a frame with no spread is not moved; pinned as a test) but
+  not for its tracers (48 px squares five stops under the surround at a
+  1 % share: the law lifts them +0.34 stops and the surround +0.11 where
+  Camera Raw lifts them up to +1.6 and the surround 0); (2) the law is
+  regional on a map 768 cells across, not edge-aware, so its two levels
+  move as one only away from the edge; the two-level frame `u` 0.13 | 0.70
+  (spread 2.43 stops) is lifted +0.081 `u` on the dark half and +0.016 on
+  the bright one where Camera Raw lifts +0.018 and 0.000; (3) the law is
+  unmoved by an exposure shift of the whole scene, which Camera Raw is
+  not, and it scales with the scene's contrast, which Camera Raw does not
+  (0.6× and 1.25× move the law's push on a deep square 0.49× and 1.27×);
+  (4) a deep square raises the spread and so every push in the frame, but
+  the law has no size threshold. One caveat on the method: a synthetic
+  linear DNG (its own embedded profile, no lens profile) also lifts a −3
+  stop surround under Shadows when a small deep patch sits in it (+0.20 to
+  +0.45 stops), which the calibration body's own RAW with its pixels
+  replaced does not; only DNG-against-DNG comparisons were read from it.
+  The Highlights half of (1) and the whole of (2) stay pinned as ignored
+  tests in `render/tone_cr.rs`.
 
   is `1`; cool-side coefficients and the 6688 K red plateau were
   **calibrated against measured Lightroom exports**.
