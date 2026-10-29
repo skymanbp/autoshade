@@ -982,6 +982,8 @@ fn heads() -> &'static [Head] {
             .map(|p| {
                 let mut buf = Vec::new();
                 if let Ok(f) = std::fs::File::open(p) {
+                    // Ignored because a short or failed read leaves a head that
+                    // matches no lens, which is the right answer for that file.
                     let _ = f.take(16 * 1024).read_to_end(&mut buf);
                 }
                 let text = String::from_utf8_lossy(&buf);
