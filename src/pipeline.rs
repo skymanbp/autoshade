@@ -458,6 +458,7 @@ pub fn produce_recipe(
             let mut shown = stripped.clone();
             shown.as_shot_k = anchor_k;
             shown.as_shot_tint = anchor_tint;
+            shown.camera_start = if pixels.is_some() { None } else { crate::render::camera_start(raw, &shown) };
             let mut jpeg = Vec::new();
             crate::render::develop_preview(&preview_img, &shown)
                 .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
@@ -763,6 +764,7 @@ pub fn produce_recipe(
             v.strip_baked_start();
             v.as_shot_k = anchor_k;
             v.as_shot_tint = anchor_tint;
+            v.camera_start = if pixels.is_some() { None } else { crate::render::camera_start(raw, &v) };
             v
         };
         let judge_of = |r: &EditRecipe,
@@ -1148,6 +1150,8 @@ pub fn produce_recipe(
     // the anchor it was scored on and the anchor delivered are all one).
     recipe.as_shot_k = anchor_k;
     recipe.as_shot_tint = anchor_tint;
+    // …and the camera start, at the profile the stamp settled on.
+    recipe.camera_start = if pixels.is_some() { None } else { crate::render::camera_start(raw, &recipe) };
     // The stamp is complete, and every number this call produced -- the fit's
     // residual and the judge's score alike -- was read before it existed. Same
     // disclosure as CLI `match`, from the other production stamper.
@@ -2634,6 +2638,10 @@ pub struct PhotoCalibration {
     /// ([`crate::render::BasePart`]) every surface shows, fits and bakes from.
     pub camera_profile: String,
     pub look: Option<crate::recipe::CreativeLook>,
+    /// v1.17.0 — the camera start the profile stage develops the photo at
+    /// under that profile ([`stamp_camera_start`]): read from the RAW for
+    /// both arms, never kept from a save.
+    pub camera_start: Option<crate::recipe::CameraStart>,
 }
 
 impl PhotoCalibration {
@@ -2647,7 +2655,16 @@ impl PhotoCalibration {
             as_shot_tint: r.as_shot_tint,
             camera_profile: r.camera_profile,
             look: r.look,
+            camera_start: None,
         }
+    }
+
+    /// This calibration with the camera start `raw` develops at under its
+    /// profile ([`stamp_camera_start`]).
+    fn started(mut self, raw: &Path) -> Self {
+        let named = EditRecipe { camera_profile: self.camera_profile.clone(), look: self.look.clone(), ..Default::default() };
+        self.camera_start = crate::render::camera_start(raw, &named);
+        self
     }
 }
 
@@ -2770,7 +2787,7 @@ impl CanvasStart {
 /// construction — those estimates come from THIS build's sampler.
 pub fn photo_calibration(raw: &Path) -> PhotoCalibration {
     match saved_recipe_snapshot(raw, &crate::diag::photo(raw)) {
-        Some(r) => PhotoCalibration::of_saved(r),
+        Some(r) => PhotoCalibration::of_saved(r).started(raw),
         None => fresh_photo_calibration(raw),
     }
 }
@@ -2788,7 +2805,9 @@ pub(crate) fn fresh_photo_calibration(raw: &Path) -> PhotoCalibration {
         as_shot_tint,
         camera_profile: start.camera_profile,
         look: start.look,
+        camera_start: None,
     }
+    .started(raw)
 }
 
 /// True when a calibration carries NOTHING the render would act on — no
@@ -2825,7 +2844,7 @@ pub fn fit_calibration(raw: &Path) -> PhotoCalibration {
     match saved_recipe_snapshot(raw, &crate::diag::photo(raw)) {
         Some(r) => {
             let cal = PhotoCalibration::of_saved(r);
-            if calibration_is_neutral(&cal) { fresh_photo_calibration(raw) } else { cal }
+            if calibration_is_neutral(&cal) { fresh_photo_calibration(raw) } else { cal.started(raw) }
         }
         None => fresh_photo_calibration(raw),
     }
@@ -2848,6 +2867,7 @@ pub fn stamp_fit_calibration(recipe: &mut crate::recipe::EditRecipe, cal: PhotoC
     recipe.as_shot_tint = cal.as_shot_tint;
     recipe.camera_profile = cal.camera_profile;
     recipe.look = cal.look;
+    recipe.camera_start = cal.camera_start;
 }
 
 /// What a post-stamp calibration adds to the delivered render, as a phrase --
@@ -2959,6 +2979,7 @@ pub fn calibration_recipe(cal: PhotoCalibration) -> crate::recipe::EditRecipe {
         as_shot_tint: cal.as_shot_tint,
         camera_profile: cal.camera_profile,
         look: cal.look,
+        camera_start: cal.camera_start,
         ..Default::default()
     }
 }
@@ -3235,7 +3256,12 @@ fn fft1(a: &mut [(f64, f64)], inverse: bool) {
 /// embedded previews shows the vignette lift (`render::camera_base_look`).
 /// Cheap — one TIFF metadata parse, no decode.
 pub fn fresh_lens_profile(raw: &Path) -> crate::recipe::LensProfile {
-    let mut p = crate::lensmeta::read(raw);
+    fresh_lens_profile_from(raw, &crate::lensmeta::LensQuery::default())
+}
+
+/// [`fresh_lens_profile`] with what a sidecar adds to the lookup.
+fn fresh_lens_profile_from(raw: &Path, query: &crate::lensmeta::LensQuery) -> crate::recipe::LensProfile {
+    let mut p = crate::lensmeta::read_for(raw, query);
     p.vignette_on = !p.vignette.is_empty();
     p.distortion_on = !p.distortion.is_empty();
     p.ca_on = !p.ca_r.is_empty() && !p.ca_b.is_empty();
@@ -3277,16 +3303,68 @@ pub fn fresh_lens_profile_for_sidecar(
     raw: &Path,
     sidecar: Option<&str>,
 ) -> crate::recipe::LensProfile {
-    let mut p = fresh_lens_profile(raw);
-    if sidecar.and_then(crate::xmp::lens_profile_enabled) == Some(false) {
-        obey_disabled_profile_switch(&mut p);
+    let query = sidecar.map_or_else(Default::default, |x| crate::lensmeta::LensQuery {
+        named: sidecar_named_profile(x),
+        focus_distance_m: crate::xmp::approximate_focus_distance(x),
+    });
+    let mut p = fresh_lens_profile_from(raw, &query);
+    if let Some(x) = sidecar {
+        obey_sidecar_lens_switches(&mut p, x, crate::lcp::pool_present());
     }
     p
 }
 
+/// The profile a sidecar names, when its setup makes the name count: any
+/// stated setup with crs:LensProfileName, and Custom even without one (Camera
+/// Raw then resolves nothing). With no setup the name is not read — measured:
+/// a name and a strength of 50 with no setup render at 100.
+fn sidecar_named_profile(x: &str) -> Option<crate::lensmeta::NamedProfile> {
+    use crate::xmp::LensProfileSetup;
+    let setup = crate::xmp::lens_profile_setup(x)?;
+    let name = crate::xmp::lens_profile_name(x);
+    let custom = setup == LensProfileSetup::Custom;
+    (name.is_some() || custom).then(|| crate::lensmeta::NamedProfile {
+        name: name.unwrap_or_default(),
+        filename: crate::xmp::lens_profile_filename(x),
+        custom,
+    })
+}
+
+/// What a sidecar's two lens keys do to the profile's toggles — one function,
+/// so the test hands it a profile with every component on and reads the real
+/// rule rather than a sketch of it.
+///
+/// * `crs:LensProfileEnable="0"` → [`obey_disabled_profile_switch`];
+/// * `crs:LensProfileSetup="Custom"` → no camera CA: Camera Raw does not apply
+///   the camera's CA knots under a hand-picked profile (measured, see
+///   [`crate::xmp::LensProfileSetup`]); `LensDefaults`, `Auto` and no setup
+///   leave the camera's CA as it is;
+/// * Custom naming no profile this machine's pool has (`pool` is
+///   [`crate::lcp::pool_present`]) → no profile correction at all, as with
+///   the switch off: Camera Raw then renders neither the vignetting nor the
+///   distortion (measured: a flat field stays flat and a real frame's geometry
+///   is the switched-off one to 0.01 px). With no pool here the name is
+///   unknown rather than absent, and the camera's correction stays.
+fn obey_sidecar_lens_switches(p: &mut crate::recipe::LensProfile, sidecar: &str, pool: bool) {
+    let custom = crate::xmp::lens_profile_setup(sidecar) == Some(crate::xmp::LensProfileSetup::Custom);
+    if crate::xmp::lens_profile_enabled(sidecar) == Some(false) || (custom && pool && p.adobe.is_none()) {
+        obey_disabled_profile_switch(p);
+    }
+    if custom {
+        p.ca_on = false;
+    }
+}
+
 /// What `crs:LensProfileEnable="0"` means, as ONE function: Lightroom drew no
-/// profile correction, so neither do we — every component off, and the solved
-/// camera map moved aside for LINEAR's H2 rule with a stamp saying why.
+/// profile correction, so neither do we — vignetting and distortion off, and
+/// the solved camera map moved aside for LINEAR's H2 rule with a stamp saying
+/// why.
+///
+/// The camera's CHROMATIC ABERRATION stays on (2026-10-28): Camera Raw applies
+/// the camera's CA knots with the profile switched off, measured on a raw
+/// whose CA knots were zeroed and quadrupled — red over green moved by the
+/// knots' own polynomial with the switch at "0" exactly as at "1" under
+/// `LensDefaults`. CA moves no green pixel, so the mask frame is unaffected.
 ///
 /// A function rather than four lines inline because the state it acts on cannot
 /// be reached from a test through [`fresh_lens_profile`]: that reads a RAW, and
@@ -3297,7 +3375,6 @@ fn obey_disabled_profile_switch(p: &mut crate::recipe::LensProfile) {
     retain_disabled_linear_handle_warp(p);
     p.vignette_on = false;
     p.distortion_on = false;
-    p.ca_on = false;
 }
 
 /// Preserve the solved camera/LCP map across the disabled-sidecar boundary for
@@ -3318,6 +3395,17 @@ pub fn fresh_as_shot_wb(raw: &Path) -> (Option<f32>, Option<f32>) {
         Some((k, t)) => (Some(k), Some(t)),
         None => (None, None),
     }
+}
+
+/// Stamp `r` with the camera start (v1.17.0, [`crate::recipe::CameraStart`])
+/// its profile stage develops `raw` at — every surface that stamps the
+/// as-shot anchor stamps this beside it, once `r`'s profile is settled. Read
+/// fresh from the RAW every time rather than kept from a save: it is a
+/// function of the file and the profile alone, so a saved copy could only be
+/// the same or stale. `None` for a recipe that names no profile, a baked
+/// image, or a profile not installed.
+pub fn stamp_camera_start(raw: &Path, r: &mut EditRecipe) {
+    r.camera_start = crate::render::camera_start(raw, r);
 }
 
 /// Fresh camera-matched base-look estimate for `raw`: a neutral develop
@@ -4769,9 +4857,12 @@ mod guard_tests {
         // `produce_recipe` for every photo. The other four are probed below.
         // v1.17.0 moved `look` out: the writer emits `<crs:Look>`, so it is
         // an owned row now and `carried_effects_survive_a_refine` probes it.
+        // v1.17.0's `camera_start` is re-stamped by `produce_recipe` for
+        // every photo, as `base_curve` is.
         assert_eq!(
             all,
             [
+                "camera_start",
                 "upright_transform",
                 "explicit_zero",
                 "base_curve",
@@ -6176,10 +6267,10 @@ mod tests {
             p.vignette_on = true;
             p.distortion_on = true;
             p.ca_on = true;
-            if sidecar.and_then(crate::xmp::lens_profile_enabled) == Some(false) {
+            if let Some(x) = sidecar {
                 // The REAL function, not a copy of it — copying it here is what
                 // let a mutation of the engine pass this test.
-                obey_disabled_profile_switch(&mut p);
+                obey_sidecar_lens_switches(&mut p, x, true);
             }
             p
         };
@@ -6191,13 +6282,35 @@ mod tests {
             (true, true, true),
             "premise: the probe profile has every component on before the switch is read"
         );
-        // And the claim: the same profile, through the switch, has them off.
+        // And the claim: the same profile, through the switch, has vignetting
+        // and distortion off — and the camera's CA ON, as Camera Raw keeps it.
         let disabled = stamped(Some(off));
         assert_eq!(
             (disabled.vignette_on, disabled.distortion_on, disabled.ca_on),
-            (false, false, false),
-            "a disabled sidecar switches every profile component off"
+            (false, false, true),
+            "a disabled sidecar switches the profile's light and geometry off, not the camera's CA"
         );
+        // The lens setup: a hand-picked profile (Custom) takes the camera's CA
+        // away, Lightroom's default setup leaves it.
+        let custom = on.replace("crs:Version", r#"crs:LensProfileSetup="Custom" crs:Version"#);
+        let defaults = on.replace("crs:Version", r#"crs:LensProfileSetup="LensDefaults" crs:Version"#);
+        assert!(!stamped(Some(&custom)).ca_on, "Custom: no camera CA");
+        assert!(stamped(Some(&defaults)).ca_on, "LensDefaults: the camera's CA");
+        let custom_off = custom.replace(r#"crs:LensProfileEnable="1""#, r#"crs:LensProfileEnable="0""#);
+        assert!(!stamped(Some(&custom_off)).ca_on, "Custom with the profile off: still none");
+        // Custom naming nothing this pool has: no profile correction at all.
+        // The probe photo resolves no Adobe profile, so `adobe` is `None` here.
+        let c = stamped(Some(&custom));
+        assert_eq!((c.vignette_on, c.distortion_on, c.ca_on), (false, false, false), "Custom, unresolved");
+        // Resolved, the profile stays and only the camera's CA goes.
+        let resolved = |pool: bool, adobe: bool| {
+            let mut p = stamped(None);
+            p.adobe = adobe.then(|| crate::recipe::AdobeLensProfile { name: "n".into(), filename: "f.lcp".into() });
+            obey_sidecar_lens_switches(&mut p, &custom, pool);
+            (p.vignette_on, p.distortion_on, p.ca_on)
+        };
+        assert_eq!(resolved(true, true), (true, true, false), "Custom, resolved");
+        assert_eq!(resolved(false, false), (true, true, false), "no pool here: the name is unknown, not absent");
         // The claim, through the real function rather than the sketch above:
         // a document that says nothing, and one that says "1", leave the
         // photograph's own toggles exactly as they were.
@@ -6221,7 +6334,7 @@ mod tests {
         // geometry to resample, so `MaskFrame::downstream` and the render agree
         // that the stored frame IS the delivered frame.
         let sketch = stamped(Some(off));
-        assert!(!sketch.geometry_active(), "no geometry, so the pixels stay in the stored frame");
+        assert!(!sketch.distortion_on, "no distortion, so the green pixels stay in the stored frame");
         assert!(sketch.mask_warp.is_empty(), "…which is exactly what the empty warp asserts");
         assert_eq!(
             sketch.mask_warp_src,
@@ -8459,6 +8572,7 @@ mod tests {
             as_shot_tint: Some(15.2),
             camera_profile: String::new(),
             look: None,
+            camera_start: None,
         };
         let mut r = EditRecipe::default();
         stamp_fit_calibration(&mut r, cal);
@@ -8485,6 +8599,7 @@ mod tests {
             as_shot_tint: Some(15.2),
             camera_profile: String::new(),
             look: None,
+            camera_start: None,
         };
         let r = calibration_recipe(cal);
         assert_eq!(r.version, 1);
@@ -8531,6 +8646,7 @@ mod tests {
             as_shot_tint: Some(15.2),
             camera_profile: String::new(),
             look: None,
+            camera_start: None,
         });
         let graded = EditRecipe {
             exposure_ev: 0.3,
@@ -8604,6 +8720,7 @@ mod tests {
             as_shot_tint: None,
             camera_profile: String::new(),
             look: None,
+            camera_start: None,
         });
         let rep = crate::fit::fit_recipe_from(&flat, &flat, &base);
         assert_eq!(

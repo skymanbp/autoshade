@@ -1160,6 +1160,45 @@ fn the_channel_curves_run_after_the_mixer_and_saturation() {
     }
 }
 
+/// Camera Raw's rule for a tone curve on a colour (item 35, measured on a
+/// linear-ProPhoto bench): the brightest and darkest ProPhoto channels go
+/// through the curve on their sRGB-encoded values, the middle one keeps its
+/// LINEAR ratio between them. Through Adobe Color's Look curve that predicts
+/// Camera Raw to ΔE max 0.109; the middle by its encoded ratio leaves 2.21.
+///
+/// MUTATION: interpolate the middle channel by its encoded ratio in
+/// `tone::camera_raw_rgb_tone`'s `MiddleRatio::Linear` arm.
+#[test]
+fn a_tone_curve_keeps_the_middle_channel_at_its_linear_ratio() {
+    let look = look_curve_lut(&curve_pts(&[(0, 0), (22, 16), (40, 35), (127, 127), (224, 230), (240, 246), (255, 255)]), 1.0);
+    let (dec, enc) = transfer_luts();
+    let through = |v: f32| sample_lut(dec, sample_lut(&look, sample_lut(enc, v)));
+    for pro in [[0.62f32, 0.18, 0.04], [0.05, 0.30, 0.71], [0.12, 0.02, 0.09], [0.4, 0.4, 0.4]] {
+        let got = camera_raw_rgb_tone(pro, &look, MiddleRatio::Linear);
+        let (hi, lo) = (pro.iter().cloned().fold(f32::MIN, f32::max), pro.iter().cloned().fold(f32::MAX, f32::min));
+        for k in 0..3 {
+            let want = if pro[k] == hi {
+                through(hi)
+            } else if pro[k] == lo {
+                through(lo)
+            } else {
+                through(lo) + (through(hi) - through(lo)) * (pro[k] - lo) / (hi - lo)
+            };
+            assert!((got[k] - want).abs() < 1e-5, "{pro:?}: {got:?}");
+        }
+    }
+    // …and the encoded-ratio reading is a different answer on a real colour.
+    let pro = [0.62f32, 0.18, 0.04];
+    let e = pro.map(|v| sample_lut(enc, v));
+    let t = (e[1] - e[2]) / (e[0] - e[2]);
+    let (a, b) = (sample_lut(&look, e[0]), sample_lut(&look, e[2]));
+    let encoded_mid = sample_lut(dec, b + (a - b) * t);
+    assert!((camera_raw_rgb_tone(pro, &look, MiddleRatio::Linear)[1] - encoded_mid).abs() > 1e-3);
+    // The composite point curve keeps the middle by its ENCODED ratio
+    // (measured on p39's composite cases, `tone::MiddleRatio`).
+    assert!((camera_raw_rgb_tone(pro, &look, MiddleRatio::Encoded)[1] - encoded_mid).abs() < 1e-5);
+}
+
 /// On a camera-profile start the photographer's composite curve runs BEFORE
 /// the creative Look's baked curve, in `profile::curve_space` by Adobe's
 /// channel rule. Measured with Adobe Color's Look: the curve after the Look's
@@ -1180,16 +1219,12 @@ fn the_composite_curve_runs_before_the_looks_curve() {
     r.tone_curve = curve_pts(&[(0, 0), (128, 180), (255, 255)]);
     let tone = camera_raw_tone_passes(&r);
     let (curve, look) = (tone.curves.expect("a curve pass"), tone.look.expect("a look pass"));
-    let look_px = |px: &mut [f32; 3]| {
-        let l = luma601(px);
-        scale_chroma(px, l, sample_lut(&look, l));
-    };
     let mut want = curve_probe_pixels();
-    apply_camera_raw_curve(&mut want, &curve, ExportColorSpace::Srgb);
-    want.iter_mut().for_each(look_px);
+    apply_camera_raw_curve(&mut want, &curve, ExportColorSpace::Srgb, MiddleRatio::Encoded);
+    apply_camera_raw_curve(&mut want, &look, ExportColorSpace::Srgb, MiddleRatio::Linear);
     let mut swapped = curve_probe_pixels();
-    swapped.iter_mut().for_each(look_px);
-    apply_camera_raw_curve(&mut swapped, &curve, ExportColorSpace::Srgb);
+    apply_camera_raw_curve(&mut swapped, &look, ExportColorSpace::Srgb, MiddleRatio::Linear);
+    apply_camera_raw_curve(&mut swapped, &curve, ExportColorSpace::Srgb, MiddleRatio::Encoded);
     let mut got = curve_probe_pixels();
     apply_develop_anon(&mut got, w, h, &r);
     let worst = |a: &[[f32; 3]], b: &[[f32; 3]]| {

@@ -1547,7 +1547,7 @@ Run `cargo run -- recipe-schema` to print a default `EditRecipe` **instance**
 contract: that is a JSON Schema **generated from the control registry**
 (`advisor::catalogue`, §3), and it deliberately excludes the engine-only fields
 the recipe carries for calibration (`base_curve`, `as_shot_k`/`as_shot_tint`,
-the lens-profile block; the canvas's `camera_profile` and Look are not states
+`camera_start`, the lens-profile block; the canvas's `camera_profile` and Look are not states
 the advisor emits either) — an advisor must never emit those.
 
 Local masks (`LocalAdjustment`, v0.22): base geometry (linear / rotatable
@@ -1663,7 +1663,7 @@ this trait.)
 > response stated, `openai::take_opinions` strips the nulls before the parse, and
 > `carry_over_unrepresentable` copies the base's value only where the model said
 > nothing. Still engine-only, each for a stated reason: the engine's own per-photo
-> measurement (`as_shot_k`/`as_shot_tint`, `base_curve`, the lens-profile block),
+> measurement (`as_shot_k`/`as_shot_tint`, `camera_start`, `base_curve`, the lens-profile block),
 > mask state with no ACR spelling (`components`, `color_gains`, `role`, plus the
 > `enabled` eye toggle), the eight detail axes and the CA pair (1–3 px structure
 > the preview cannot show), the parametric curve (the point curve says the same),
@@ -2154,9 +2154,12 @@ tests sit in parts under `tests/`, spliced into `tests.rs` by `include!`, so
 every test keeps its name and its path.
 
 The pixel stage, in this order: anchored white balance (on a recipe that
-names a camera profile, v1.17.0, Camera Raw's measured law: a Bradford shift
+names a camera profile, v1.17.0: in the RAW develop the white is not a stage
+here at all — it is built into the profile stage below, where Camera Raw puts
+it; in the preview develop, Camera Raw's measured law, a Bradford shift
 between the DNG SDK's whites, under the profile stage's ramp and curve, which
-`render::profile::UnderTone` undoes and redoes around it) →
+`render::profile::UnderTone` undoes and redoes around it — the two disagree at
+a moved white, disclosed in TECH_STACK) →
 **camera calibration** (the Calibration panel's three primaries and shadow
 tint, first because they belong to the camera profile every later stage reads
 through) → **de-fringing** (`render/lens.rs`: the two hue windows, on
@@ -2170,8 +2173,10 @@ tone LUT (exposure/contrast/whites/blacks/highlights/shadows, the parametric
 curve, the tone curve and the per-photo camera base curve — on a recipe that
 names no camera profile, v1.17.0 — composed into one table; on a recipe that
 names one, Camera Raw's measured law in five passes, `render/tone_cr.rs`:
-Highlights and Shadows first, a local law on two edge-aware bases of the
-frame's luminance keyed to its mean, then exposure by Adobe's channel rule,
+Highlights and Shadows first — Highlights a local law on two edge-aware
+bases of the frame's luminance keyed to its mean, Shadows a gain on linear
+luminance set by the frame's spread on a 768-cell map — then exposure by
+Adobe's channel rule,
 Contrast, Whites and Blacks, the parametric and point curves, then the
 Look's baked curve) → **the B&W treatment's grey mix** when the photo is black and white
 (before the channel curves, so a red-channel curve meets the grey the
@@ -2183,7 +2188,7 @@ curves (Camera Raw's place since v1.17.0, below) → the Detail panel
 (colour noise reduction → luminance noise reduction → sharpening) → local
 adjustments (linear/radial/bitmap masks). On a recipe that names a camera
 profile (v1.17.0, `render/mask_cr.rs`) a mask's Highlights and Shadows run
-the global law on the same bases right after the global pass, before
+the global law on the same sites right after the global pass, before
 Exposure, and its Exposure, its other tone sliders, Dehaze and Clarity's tone
 run instead right after their global twins — Exposure on the same ramp, so the two add in EV; the sliders on
 response tables of their own, measured — and its Temp and Tint right after
@@ -2236,7 +2241,23 @@ inside the sRGB gamut of both) decide three things:
   Adobe Color's Look, after it (the place before v1.17.0) leaves 0.51–1.48,
   before it 0.13–0.31, from the flat start and from Exposure +1, Contrast +50,
   Saturation +50 and Vibrance +50 alike; with no Look the composite curve
-  predicts to 0.02–0.21. On p38's real fitted packet (warm, saturated) the
+  predicts to 0.02–0.21. The rule itself (item 35, measured on a bench whose
+  camera space is linear ProPhoto with no tables, `render::tone::
+  camera_raw_rgb_tone`, the one place it lives): the brightest and darkest
+  ProPhoto channels go through the curve on their sRGB-encoded values and,
+  for the Look's curve, the middle one keeps its LINEAR ratio between them —
+  Adobe Color's Look curve on 149 colours predicts Camera Raw to ΔE median
+  0.010, max 0.109, where the middle by its encoded ratio leaves max 2.21 and
+  the same rule on sRGB channels median 0.117, max 2.56. The Look's curve
+  runs after the profile's default curve (greys 0.011 L; before it 0.985) by
+  that rule, where it went by the luma ratio until then; the default curve
+  itself follows it already (`profile.rs`, ProPhoto, middle by linear ratio:
+  0.028 median, 0.066 max). The photographer's composite curve keeps the
+  middle at its ENCODED ratio instead (`tone::MiddleRatio`): predicted from
+  Camera Raw's own p39 renders with the Look, `0,0 / 64,40 / 128,170 /
+  192,200 / 255,255` reads ΔE 0.308 (warm a* +0.12) that way and 0.325
+  (−0.43) by the linear ratio, and the engine moved its warm b* gap on that
+  case from +0.41 to +1.42 when it was switched to the linear ratio. On p38's real fitted packet (warm, saturated) the
   composite curve by the channel rule in ProPhoto before the Look reads 0.26,
   per channel 0.51, in the working channels 0.65–0.85; the three fitted
   channel curves on the measured law 0.10 (warm a* +0.01), on the v1.16.0 law
@@ -2250,8 +2271,10 @@ starts were measured); the composite curve's place and space change only on a
 camera-profile start, where the Look exists. Known differences that remain:
 the colour grade runs before the channel curves here and after them in Camera
 Raw (composing a red curve onto Camera Raw's grade render is 8.7 ΔE off); a
-mask's `MainCurve` still goes through the mask's tone table by the luma ratio
-(its gap at full coverage 0.2 L, 1.4 b* in the warm band); where a mask's
+mask's `MainCurve` follows the same curve rule since item 35, the middle
+channel at its encoded ratio (a full-coverage gradient mask, `0,0 / 128,180 /
+255,255` after the Look: ΔE 0.069; the luma ratio it went by before, 0.718);
+where a mask's
 channel curves sit against its local Saturation is not measured; and the
 parametric curve's SHAPE is still the provisional B-spline — Camera Raw's
 `ParametricDarks` +50 lifts the neutral band 4.6 L where the engine lifts it
@@ -2956,7 +2979,15 @@ reciprocal temperature between their illuminants — one weight for the
 matrices and the hue/sat maps — and the white-balanced camera triple goes
 through the interpolated, normalised `ForwardMatrix` to XYZ D50, into ProPhoto,
 and out through the SDK's Bradford adaptation (`MapWhiteMatrix`) to the working
-space (`profile::Stage::build_for`, `develop_camera`). A profile without a
+space (`profile::Stage::build_for`, `develop_camera`). A Custom white (a
+recipe on Camera Raw's law that moves from As Shot) replaces the frame's
+neutral: `profile::camera_neutral_of` is the SDK's `SetWhiteXY`, the body's
+`CameraCalibration` diagonal in front of the `ColorMatrix` at the white's own
+temperature, so the camera triple is balanced to the chosen white and the
+matrices and hue/sat maps blend at it, before the tables, and no adaptation
+follows (`resolve_camera_profile`). For a Sony ARW the calibration is the
+body's reference Daylight multipliers over the file's own preset
+(`as_shot::camera_calibration`), what Camera Raw writes into its DNG. A profile without a
 `ForwardMatrix`, and every render with no profile, keep the engine's own
 D65-only matrix; the no-profile render is byte-identical to v1.16.0. Until
 v1.17.0 the matrix half was a stated deviation: on p39's flat sidecar it left
@@ -2974,17 +3005,28 @@ bytes, and `dcp::find_look_table` refuses a payload whose digest differs.
 Measured on the install: 330 of 330 tables decode and match their id; 24 are
 look tables (「Adobe Color」: 36 × 16 × 16, linear value) and 306 are RGB tables,
 which stay unrendered and are named as such. The table is read from the
-user's Camera Raw install, never bundled. It REPLACES the camera profile's own
-`ProfileLookTableData` rather than stacking after it — on p39 against Camera
-Raw, replacing leaves the sky at Δb +0.22 and the warm tones at Δb −1.13,
-stacking +1.01 and −3.21. (Until v1.17.0 this payload was recorded as
+user's Camera Raw install, never bundled. It goes on AFTER the camera
+profile's own `ProfileLookTableData`, which stays (a Look names its base
+profile, whose maps remain in force). Measured against Camera Raw on a
+synthetic linear-ProPhoto bench whose profile carries 「Adobe Standard」's own
+36 × 8 × 16 look table under the 「Adobe Color」 Look, 4256 nodes, ΔE median /
+p95 / max: creative after the profile's 0.078 / 0.70 / 1.86, the other order
+0.13 / 2.94 / 21.8, the creative replacing the profile's 1.19 / 8.07 / 22.4.
+On p39's flat sidecar (Camera Raw 16-bit, 1536 px) replacing left the warm
+tones at Δb +2.51 and the sky at −0.89, stacking leaves −0.19 and +0.02. An
+earlier reading that preferred replacing (+0.22 / −1.13 against +1.01 /
+−3.21) was taken while the Look's curve went by the luma ratio, whose own
+error (Δb −1.1 on those colours) offset the missing table. (Until v1.17.0 this payload was recorded as
 undecodable: zlib had been tried behind a most-significant-digit-first base85.)
 A Look whose `crs:Amount` is not 1, a table that is not installed, and an RGB
 table are each disclosed by name in `diag.warn` and the develop panel.
 
 Measured on p39's flat sidecar against Camera Raw's render of the identical
 packet (lens-matched, 1000 px, `rel1170/colour/accept3-*.out`): whole-frame ΔE
-3.85 → 3.03, sky-ish Δb −4.99 → +0.22, warm Δb +6.03 → −1.13. What remains is
+3.85 → 3.03, sky-ish Δb −4.99 → +0.22, warm Δb +6.03 → −1.13; with the
+profile's own look table kept under the creative one and the Look's curve by
+Camera Raw's rule, `calibration_a_flat_sidecar_renders_where_lightroom_starts`
+reads sky-ish Δb +0.14 and warm −0.50. What remains is
 not colour: a 0.19 % magnification difference in the lens-corrected geometry
 (undone, ΔE 1.98), the highlights above Lightroom's roll-off (L > 90 ΔL +2.7,
 the engine clips where Camera Raw compresses) and a shadow lift (L < 30 ΔL
@@ -3014,9 +3056,121 @@ about 5 % too far out on a lens whose map reaches 1.054. The DNG polynomial's
 shape terms are reproduced within 2.1 × 10⁻⁶ on the five frames; after the
 change the five lens-on registrations sit at the lens-off noise, every 0.1
 radius bin from 0.15 to 0.85 within ±0.008 % (2-D rms on the 24–105 frames
-0.03–0.07 px at 3000 px, before 0.35–1.31; the 14–24 frame 0.02 → 0.04). Not carried: Camera Raw centres the map on the sensor,
-16 px right of the default crop's centre on this body, a sub-pixel shift the
-engine's crop-centred map leaves (`rel1170/dngc/`). The body's Adobe Standard profile
+0.03–0.07 px at 3000 px, before 0.35–1.31; the 14–24 frame 0.02 → 0.04).
+
+**Known difference: the map's centre.** Camera Raw centres the map on the
+sensor, which on this body sits 16 px right of the default crop's centre
+(sensor 9600 wide, crop 9504 from x = 32); the engine centres it on the crop.
+The two maps then differ by a sideways translation of 16·(1 − f) px, f the
+map's radial factor — largest at the frame centre, where f is the
+polynomial's constant term, and near zero in the corners where f returns to
+about 1. Full size that is 0.46 px (24–105 at 45 mm), 0.65–0.75 px (73–105
+mm) and 0.14 px (14–24 at 20 mm); measured on the 80 mm frame as a 0.44 px
+shift of the centre tile at 6144 px wide (0.68 px full size; predicted 0.75).
+It moves no radius, so the radial bins above cannot see it. Carrying it means
+giving the geometry stage and every map that mirrors it (the mask unwarp, the
+sensor-frame raster) a centre other than the frame's, which is outside the
+lens metadata reader; it is left, and disclosed here.
+
+**Chromatic aberration and vignetting, read the same way (v1.17.0).** The
+Sony CA pair (tag 0x7035, sixteen red and sixteen blue knots) follows the
+distortion knots' convention: DNG Converter writes Camera Raw's reading of it
+as a WarpRectilinear opcode whose red and blue planes are the least-squares
+odd polynomial through t·C(t) at the knots i ≥ 1, knot i at i/(n−1) of the
+sensor half-diagonal, with no zoom and green the identity — reproduced within
+7.6 × 10⁻⁶ of a factor on ten channels of five frames, where the old reading
+missed by up to 1.1 × 10⁻⁴. Its radius is the green sample's raw-frame
+radius, so `lensmeta::sony_render_ca` evaluates the polynomial at the radius
+the distortion map sends each canonical output radius to (a CA spline read
+with the distortion toggled off is then a few per cent of radius off, under
+10⁻⁵ of a factor on these lenses). Two Camera Raw switches were measured
+around it and the engine now obeys both (`pipeline::obey_sidecar_lens_switches`):
+with the profile switched off (LensProfileEnable 0) Camera Raw still applies
+the camera's CA, so the engine turns off only the profile's vignetting and
+distortion; with the setup Custom it ignores the camera's CA (under
+LensDefaults, the setup Lightroom writes, it applies it), so a sidecar that
+says Custom turns the camera's CA off. One measured difference is kept and not
+modelled: Camera Raw warps in the camera's colour space, so a channel's shift
+leaks into the others' output by up to about a sixth (a 4.9 × 10⁻⁴ blue scale
+moves output green by 0.9 × 10⁻⁴), where the engine warps the rendered RGB —
+on real knots at most about 2 × 10⁻⁴ of radius, a fraction of a pixel at the
+frame edge.
+
+The Sony vignette knots (0x7032, and their SR2 copy) are NOT Camera Raw's
+vignetting: knot sets rewritten to constants render bit-identically under the
+setups Custom and LensDefaults and with the profile off, and DNG Converter
+writes no vignette opcode. With the profile on, Camera Raw's gain is the Adobe
+profile's VignetteModel, 1/(1 + a₁x² + a₂x⁴ + a₃x⁶), x the RAW-frame radius
+(before the distortion map) over the node's focal length in pixels
+(FocalLength/36 of the sensor width), the bracketing focal nodes blended in EV;
+the focus distance is the file's ApproximateFocusDistance when it has one
+(written into a test sidecar it moves the gain onto that node's), and the
+closest-focus node when it has none, as these Sony files do. Between nodes the
+gain is blended in EV, linearly in focal length, in APEX aperture value
+2·log₂N and in 1/distance; each of those beat its alternative on flat fields
+written with off-node focal, aperture and distance values (focal 0.08 % against
+0.16 % for 1/f; aperture 0.22 % against 0.63 % for the f-number; distance
+0.18 % against 0.29–0.57 % for metres). Camera Raw takes, for a sidecar that
+names no profile, the newest RAW profile for the lens (on the 14–24 the v2 and
+v3 files render alike and v1 is 22 % off), and the reader picks the same
+(`lcp::open`). `lcp::LensProfileFile::vignette_gains` implements all of it and
+keeps every node — the close-focus nodes the distortion reader drops as
+duplicates included; a dimension a lens's nodes vary in and the shot leaves
+open is refused, not guessed. The engine applies that gain where Camera Raw
+does: on the sensor's linear light in the RAW develop (`render::source`),
+before calibration and the camera profile stage — the order is lens gain →
+(white balance) → profile — and the preview bases carry it the same way
+(`render::BasePart`), so `develop` leaves the profile's gain out under Camera
+Raw's law. Measured on flat-field frames (the raw data replaced by a uniform
+field and read against its own raw-gain ladder, so no tone curve enters),
+engine against Camera Raw:
+
+| radius / half-diagonal | 0.09 | 0.29 | 0.49 | 0.69 | 0.89 | 0.96 | 0.99 |
+|---|---|---|---|---|---|---|---|
+| 24–105 at 80 mm, before | −0.25 % | −2.58 % | −4.69 % | −4.99 % | −2.68 % | +5.03 % | +7.96 % |
+| 24–105 at 80 mm, now | +0.01 % | +0.04 % | −0.01 % | +0.04 % | +0.09 % | +0.11 % | +0.08 % |
+| 14–24 at 20 mm, before | −0.77 % | −5.31 % | −11.51 % | −18.01 % | −22.54 % | −23.89 % | −24.33 % |
+| 14–24 at 20 mm, gain under the curve only | +0.03 % | +0.21 % | +0.35 % | +0.66 % | +0.88 % | +0.99 % | +0.98 % |
+| 24–105 at 80 mm, now | +0.01 % | +0.03 % | −0.01 % | +0.03 % | +0.06 % | +0.07 % | +0.05 % |
+| 14–24 at 20 mm, now | +0.02 % | +0.12 % | +0.07 % | +0.11 % | +0.07 % | +0.09 % | +0.05 % |
+
+Before, the engine applied the camera's knots, after the profile's default
+curve, which shrank their EV by a fifth to a quarter (reproduced to 0.0002 EV
+from the engine's own ladder). Taken back under the curve and the ramp alone
+(`profile::UnderTone`, the middle row) the 14–24 still missed by up to
+0.96 % inside 0.94 of the half-diagonal: the gain then met the profile's
+HueSatMap on the wrong side — this body's Adobe Standard map is
+value-dependent (dimensions 36 × 8 × 16) and Camera Raw applies the gain
+before it. A build that skipped the map on both sides left +0.02 to +0.32 %,
+and the gain moved ahead of the profile stage leaves 0.12 % (24–105: 0.08 %).
+
+The two profile strengths, measured the same way (flat fields for the
+vignetting, tile phase correlation on a real 14–24 mm frame for the
+distortion). Camera Raw honours crs:LensProfileVignettingScale and
+crs:LensProfileDistortionScale only for a profile the sidecar NAMES: a
+strength of 50 renders at 100 with no crs:LensProfileName under LensDefaults,
+Auto or no setup, and at 50 once a setup and the name are there; the digest
+and the file name are not needed. The name resolves the way `lcp::open_named`
+records: a file name beside a name wins, then the name (not checked against
+the lens: a 24–105 mm name renders that profile on a 14–24 mm frame), and no
+name resolves nothing — under Custom that is no profile correction at all
+(flat field flat, geometry the switched-off one to 0.01 px), under the other
+setups Camera Raw's own choice. The export therefore writes the setup, the
+name and the file name whenever a strength is off 100 on a rendering
+component (`EditRecipe::lightroom_named_lens_profile`), and owns the three
+keys only while it writes them. The setup is LensDefaults, which keeps the
+camera's CA as the render does (ruling 2026-10-29), and Custom only when the
+recipe has the camera's CA switched off — the one setup Camera Raw draws none
+under (`EditRecipe::lightroom_lens_setup`). The import reads a strength only
+when the document names a profile. The vignetting strength `s` is not a
+scaling of the gain's departure: the gain at s = 0, 1, 2 is 1, g and
+1 + 2(g − 1), and between those Camera Raw interpolates in EV — within 0.22 %
+at 25 to 200 on the 14–24 mm and 50 to 200 on the 24–105 mm, where the old
+`1 + (g − 1)·s` was 7 % bright in the 14–24 mm corner at 50. The distortion
+strength scales the map's departure, as the engine already did (displacement
+at 25/50/150/200 is 0.25/0.51/1.50/2.01 of 100's at 0.6–0.7 of the
+half-diagonal). Through the engine at 50, 100 and 150 the 14–24 mm flat field
+is within 0.10, 0.12 and 0.13 % of Camera Raw to 0.94 (0.89 at 150). The body's Adobe Standard profile
 carries no DefaultBlackRender tag (absent means Auto), so the SDK's render would subtract
 Shadows 5 × 0.001 = 0.005 black; the engine subtracts the sensor's 512 and no
 render black, and the 0.005 tried on p39 overshoots the shadows (ΔL −2 to
@@ -3057,10 +3211,12 @@ recipe is byte-identical, the canvas reads ΔE76 0.354, a master 0.012, and the
 fit source at its 2048 edge 0.264 against the sidecar at the same edge
 (`render::tests::every_surface_shows_a_fresh_canvas_as_the_export_renders_it`).
 
-The invariant that keeps F7 from changing any existing picture is
-`Stage::build_for` returning `None` when a profile has no tables, no curve and
-no `ForwardMatrix` to own,
-pinned by `render::profile::tests::a_profile_with_no_tables_a_straight_curve_and_no_gain_is_not_a_stage`.
+The invariant that keeps F7 from changing any existing picture is that a
+recipe with no camera profile builds no stage at all. A profile that IS named
+always builds one since v1.17.0, even with no tables, no curve and no
+`ForwardMatrix`, because Camera Raw's exposure transfer acts at 0 EV (its toe)
+and the stage carries it,
+pinned by `render::profile::tests::a_profile_with_nothing_to_say_renders_the_transfer_alone`.
 
 **Lightroom's remaining colour panels render since v1.5.0** — the Calibration
 panel, the Black & White treatment with its eight-band mixer, and Point Color.
@@ -4704,7 +4860,13 @@ both hard-cell residuals. These geometry tiles can be pasted and turned with
 their components; any Bitmap component still belongs to its source photo.
 
 After the single sky/land corrections and their horizon gate,
-`fit_zoned::subzones` reads the zone's ROW PROFILE — the mask-weighted mean
+`fit_zoned::subzones` reads the zone's ROW PROFILE (and since v1.17.0 it does so
+also when no single correction survived — none attached, the horizon gate
+dropped them, or every one was refused after the shared shrink: the bands are
+tried against the refused parent, `attach::finish_with_bands_only`; on the
+night pair's camera-profile start both single zones were refused at k 0.137
+and the bands, and the colour field a tile used to hand back, were never
+tried) — the mask-weighted mean
 signed Lab residual of every analysis row (`residual_models`). Signed a/b
 matters: equal-strength warm and cool residuals have the same unsigned
 deltaE. Two/three-band models are fitted to that profile: every ramp centre
@@ -5653,7 +5815,12 @@ draws its red and its blue from different pixels — the lantern street read tin
 −29 that way and −5 as a chromaticity), and the inversion is in the engine's
 own normalisation, green 1 under a pure Kelvin move: the Kelvin is the red/blue
 axis, the tint the green axis against the red/blue mean of the residual at that
-Kelvin, so a warm move no longer reads as green (the geometric-mean
+Kelvin, so a warm move no longer reads as green. Since v1.17.0 every step of
+the fit's white balance — this inversion, the budget path, the cast hand-off,
+the vouch — asks the law the recipe renders by (`render::WbLaw`): the engine's
+separable law inverts as above; Camera Raw's (a recipe that names a camera
+profile) is inverted jointly on mired × tint, its As Shot is the stamped
+as-shot tint rather than 0, and its gains are what its stage does to mid grey (the geometric-mean
 normalisation it replaces read a pure 40000 K move as tint −19.7). And the
 demand is the CONSENSUS of the brightness ranges: the cloud is read per evidence
 luma range (the 17 ranges and the 1.5% share floor the evidence model already

@@ -132,3 +132,21 @@ fn the_corpus_files_read_camera_raws_as_shot() {
         assert_eq!(as_shot_wb(&raw), Some(want), "{name}");
     }
 }
+
+/// The calibration diagonal Camera Raw writes into the DNG of a Sony ARW is
+/// the body's reference Daylight multipliers over the file's own preset:
+/// Adobe DNG Converter 18.7 wrote `CameraCalibration1/2` = diag(1.0031, 1,
+/// 0.9653) for p39 (FE 24-105 F4 levels) and kept its own As Shot levels as
+/// `AsShotNeutral`. The As Shot reading is that calibration applied to the
+/// levels, so every corpus reading above stands on it.
+///
+/// MUTATION: invert the ratio, or give an unlisted body a calibration.
+#[test]
+fn the_camera_calibration_is_the_bodys_reference_over_the_files_daylight_preset() {
+    let cc = camera_calibration(Some(levels([2564.0, 1728.0])), "ILCE-7RM4A").expect("a listed body");
+    // Within the reference's own measured interval (R/G 2.5098–2.5132, B/G
+    // 1.6274–1.6301: ±7e-4 and ±8e-4 relative), not Adobe's 4-digit print.
+    assert!((cc[0] - 1.0031).abs() < 1e-3 && cc[1] == 1.0 && (cc[2] - 0.9653).abs() < 1e-3, "{cc:?}");
+    assert_eq!(camera_calibration(Some(levels([2564.0, 1728.0])), "ILCE-7M3"), None);
+    assert_eq!(camera_calibration(None, "ILCE-7RM4A"), None);
+}

@@ -105,7 +105,7 @@ pub fn render_to_image_in(
     // buffer-lifetime queue).
     crate::decode::guard_tiff_chain(raw_path)?;
     crate::decode::guard_raw_plane_extent(raw_path)?;
-    let (mut rawimage, orientation) = {
+    let (mut rawimage, orientation, daylight) = {
         let src = RawSource::new(raw_path)
             .with_context(|| format!("open RAW {}", raw_path.display()))?;
         let decoder = crate::decode::decoder_for(raw_path, &src)?;
@@ -175,7 +175,30 @@ pub fn render_to_image_in(
         // rawler 0.7.2 skips this crop on its own. The verdict is disclosed
         // inside (A5) — an out-of-bounds refusal used to be a silent `None`.
         crate::decode::align_default_crop(&mut raw);
-        (raw, orientation)
+        // The raw is scaled by Camera Raw's white level where the body is
+        // measured (`decode::white_level`): rawler's level is the file's
+        // (15360 on a 7RM4A, Camera Raw 16383), and the difference is an
+        // exposure on every pixel (+0.096 EV for that body, v1.17.0).
+        let iso = md.exif.iso_speed_ratings.map(u32::from).or(md.exif.iso_speed);
+        let bits = crate::decode::white_level::raw_bits_per_sample(src.buf());
+        if let Some(crate::decode::white_level::WhiteLevelSource::File { level }) =
+            crate::decode::white_level::use_camera_raw_white_level(&mut raw, iso, bits)
+        {
+            diag.warn(format!(
+                "{} {}: the raw is scaled by the file's white level {level}; Camera Raw's own level \
+                 for this body is not measured, so brightness may differ from Lightroom's",
+                raw.clean_make, raw.clean_model
+            ));
+        }
+        // A Sony file's Daylight preset, read while its bytes are mapped: with
+        // the body's reference it is the calibration Camera Raw puts in front
+        // of the profile's matrices (`as_shot::camera_calibration`).
+        let daylight = if raw.clean_make.eq_ignore_ascii_case("sony") {
+            super::as_shot::sony_daylight_preset(src.buf())
+        } else {
+            None
+        };
+        (raw, orientation, daylight)
     };
 
     let wide = working != ExportColorSpace::Srgb;
@@ -185,7 +208,23 @@ pub fn render_to_image_in(
     // (Exactly one starting tone — a named profile's tone replaces the
     // camera-matched base curve — is the recipe's own rule,
     // `EditRecipe::starting_curve`, so the preview develops obey it too.)
-    let profile_stage = resolve_camera_profile(&rawimage, recipe, working, &diag);
+    let camera_cc = super::as_shot::camera_calibration(daylight, &rawimage.clean_model);
+    let (profile_stage, white_in_camera) = match resolve_camera_profile(&rawimage, recipe, working, &diag, camera_cc) {
+        Some((stage, white)) => (Some(stage), white),
+        None => (None, None),
+    };
+    // The camera start the stage rendered at is this photograph's own, and it
+    // is what the develop's Exposure and every adjustment under the stage's
+    // transfer take the light back under (`EditRecipe::camera_start`),
+    // whatever the recipe was stamped with.
+    let restarted;
+    let recipe = match &profile_stage {
+        Some(s) if recipe.camera_start != Some(s.start()) => {
+            restarted = EditRecipe { camera_start: Some(s.start()), ..recipe.clone() };
+            &restarted
+        }
+        _ => recipe,
+    };
     // A profile is rendered by the engine's OWN calibrate path whatever the
     // export space asked for. The sRGB path normally leaves white balance and
     // calibration to rawler and stays byte-identical to it; that byte identity
@@ -225,7 +264,9 @@ pub fn render_to_image_in(
     let calibration = if own_calibrate {
         let xyz2cam = camera_matrix(&rawimage)?;
         validate_calibration(&xyz2cam, rawimage.wb_coeffs, working, raw_path)?;
-        Some((xyz2cam, normalise_wb(rawimage.wb_coeffs)))
+        // A recipe's own white taken into the camera stage balances the
+        // camera triple to it (`resolve_camera_profile`); As Shot otherwise.
+        Some((xyz2cam, white_in_camera.unwrap_or_else(|| normalise_wb(rawimage.wb_coeffs))))
     } else if rawimage.color_matrix.iter().next().is_some() {
         let xyz2cam = camera_matrix(&rawimage)?;
         // rawler's own develop targets sRGB — validate the matrix it
@@ -253,11 +294,22 @@ pub fn render_to_image_in(
         println!("mapped {hot_sites} isolated hot pixels stronger than 20 local sigma");
     }
     let grain_weights = denoise_grain::weights(working);
+    // The lens profile's vignetting, where Camera Raw applies it: on the
+    // sensor's own linear light, BEFORE the camera profile stage (order: lens
+    // gain → (WB) → profile). Measured on flat fields: applied after the
+    // profile, the gain met Adobe Standard's value-dependent HueSatMap on the
+    // wrong side and the 14–24 mm corner came out 0.96 % off; skipping the map
+    // on both sides left 0.28 %, which is this order. Under Camera Raw's law
+    // only (`SliderLaw`), which is also when `render::develop` leaves it out —
+    // the preview bases carry it the same way (`BasePart`).
+    let lens_gain = (SliderLaw::of(recipe) == SliderLaw::CameraRaw && recipe.lens_profile.vignette_active())
+        .then(|| profile_vignette_lut(&recipe.lens_profile.vignette, recipe.lens_profile_vignetting_scale));
+    let lens_gain = lens_gain.as_deref();
     let original_y = denoise_grain::capture_original(
         strength,
         crate::denoise::mosaic_args_for(&rawimage).is_ok(),
         grain_weights,
-        || develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref())
+        || develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref(), lens_gain)
             .map(|(rgb, _, _)| rgb),
     )?;
     // --- AI denoise on the MOSAIC (opt-in), BEFORE demosaic (2026-09-15).
@@ -282,7 +334,7 @@ pub fn render_to_image_in(
     }
 
     let (mut data, w, h) =
-        develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref())?;
+        develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref(), lens_gain)?;
     // The clean RGB owns the remaining work. Drop the mosaic before returning
     // grain; the original RGB already died when capture_original kept only Y.
     drop(rawimage);
@@ -330,7 +382,11 @@ pub fn render_to_image_in(
     }
 
     // --- white balance (target Kelvin/tint) in linear light -------------------
-    apply_recipe_wb_in(&mut data, recipe, working);
+    // Unless the camera stage already rendered the recipe's white, as Camera
+    // Raw does (`resolve_camera_profile`).
+    if white_in_camera.is_none() {
+        apply_recipe_wb_in(&mut data, recipe, working);
+    }
 
     // --- 「Remove Chromatic Aberration」 (v1.5.0): an INSTRUCTION, so
     // rendering it means running the solver it names and handing the answer to
@@ -383,6 +439,9 @@ pub fn render_to_image_in(
 /// Both original and clean RAW buffers go through this exact develop and
 /// calibration path. Every returned buffer has the sRGB transfer, including
 /// wide working primaries; orientation and recipe work happen afterwards.
+///
+/// `lens_gain` is the lens profile's radial vignetting gain LUT, put on the
+/// sensor's linear light here, before calibration and the profile stage.
 fn develop_raw_buffer(
     rawimage: &rawler::RawImage,
     dev: &RawDevelop,
@@ -390,6 +449,7 @@ fn develop_raw_buffer(
     calibration: Option<([[f32; 3]; 3], [f32; 3])>,
     working: ExportColorSpace,
     profile_stage: Option<&profile::Stage>,
+    lens_gain: Option<&[f32]>,
 ) -> Result<(Vec<[f32; 3]>, usize, usize)> {
     let inter = dev
         .develop_intermediate(rawimage)
@@ -429,6 +489,17 @@ fn develop_raw_buffer(
     // sRGB path: sRGB-gamma ~[0,1] straight from rawler (owned, no copy).
     // Wide path: camera-native LINEAR until the calibrate below.
     let mut data: Vec<[f32; 3]> = rgb.data;
+    if let Some(lut) = lens_gain {
+        if calibration.is_some() || geometry_cfa.is_some() {
+            // Camera-native linear light: the gain is a plain factor, ahead of
+            // everything the profile stage does to the pixel.
+            apply_radial_gain_linear(&mut data, w, h, lut);
+        } else {
+            // rawler's own sRGB develop (no profile stage ran): the gain in its
+            // decoded linear light, which is the same light.
+            apply_radial_gain(&mut data, w, h, lut);
+        }
+    }
     if let Some((xyz2cam, wb)) = calibration {
         calibrate_camera_buffer(&mut data, &xyz2cam, wb, working, profile_stage);
     } else if geometry_cfa.is_some() {

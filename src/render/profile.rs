@@ -21,9 +21,9 @@
 //! file alone does not carry them. The EXPOSURE is the body's
 //! `BaselineExposure` plus the profile's `BaselineExposureOffset` (the body's
 //! number inferred from its camera-matching profiles, [`crate::dcp::Baseline`]);
-//! it goes through Camera Raw's exposure ramp (a black subtracted after the
-//! gain and a soft shoulder, [`super::exposure_ramp`], measured), where the
-//! SDK's ramp clips at white. The TONE CURVE
+//! it goes through Camera Raw's exposure transfer at that total
+//! ([`super::tone_cr::Ramp`], measured), where the SDK's ramp clips at
+//! white. The TONE CURVE
 //! is the profile's own when it states one and Adobe's default curve when it
 //! does not — "Adobe Standard" states none. Measured on p39 against
 //! Lightroom's own export with no develop settings: without these two the
@@ -90,12 +90,17 @@ pub(crate) struct Stage {
     /// ProPhoto (D50) → Bradford → the working space.
     camera: Option<[[f32; 3]; 3]>,
     hue_sat: Option<Table>,
+    /// The camera profile's own `ProfileLookTableData`.
     look: Option<Table>,
+    /// The creative Look's colour table, applied AFTER the profile's own
+    /// ([`Stage::build_for`]).
+    creative: Option<Table>,
     tone: Option<Vec<f32>>,
-    /// `2^(BaselineExposure + BaselineExposureOffset)`, as a linear gain — the
-    /// body's baseline and the profile's offset, Adobe's
-    /// `TotalBaselineExposure`.
-    gain: f32,
+    /// Camera Raw's exposure transfer at the photograph's camera start
+    /// ([`super::tone_cr::Ramp`]): the body's baseline plus the profile's
+    /// offset (Adobe's `TotalBaselineExposure`), with the white balance's
+    /// over-range headroom.
+    ramp: super::tone_cr::Ramp,
 }
 
 /// What one photograph brings to a profile besides the profile itself.
@@ -110,9 +115,18 @@ pub(crate) struct Frame {
     /// lets the profile own the colour transform.
     pub neutral: Option<[f32; 3]>,
     /// The creative profile's own look table (`crs:LookTable`, decoded by
-    /// [`crate::dcp::find_look_table`]). It REPLACES the camera profile's
-    /// `ProfileLookTableData`: see [`Stage::build_for`].
+    /// [`crate::dcp::find_look_table`]). It goes on AFTER the camera
+    /// profile's own `ProfileLookTableData`, which stays: see
+    /// [`Stage::build_for`].
     pub creative: Option<Table>,
+    /// The body's `CameraCalibration` diagonal, which the DNG SDK puts in
+    /// front of every `ColorMatrix` (`XYZtoCamera = CC · CM`) when it turns
+    /// a camera neutral into a white and a white into a neutral. Camera Raw
+    /// writes it into the DNG of a Sony ARW (p39: diag(1.0031, 1, 0.9653),
+    /// Adobe DNG Converter 18.7 — the file's Daylight preset against the
+    /// body's reference, [`super::as_shot::camera_calibration`]). `None` is
+    /// the identity.
+    pub calibration: Option<[f32; 3]>,
 }
 
 impl Stage {
@@ -151,38 +165,42 @@ impl Stage {
     ///
     /// With a camera `neutral` and the profile's two `ColorMatrix`es, the
     /// white and its temperature are solved as the DNG SDK does
-    /// ([`white_temperature`]) and that temperature — not `kelvin` — weights
+    /// ([`white_temperature_with`]) and that temperature — not `kelvin` — weights
     /// the calibrations. With a `ForwardMatrix` as well, the stage owns the
     /// camera → working transform ([`Stage::owns_camera`],
     /// [`Stage::develop_camera`]).
     ///
-    /// A creative table REPLACES the profile's own look table rather than
-    /// stacking after it. Measured on p39 against Camera Raw's render of the
-    /// same packet with the 「Adobe Color」 Look (v1.17.0, lens-matched, 1000
-    /// px): replacing leaves the sky at Δb +0.22 and the warm tones at Δb
-    /// −1.13; applying both tables leaves +1.01 and −3.21.
+    /// A creative table goes on AFTER the profile's own look table, which
+    /// stays: a creative Look names its base camera profile and carries its own
+    /// table, and the base profile's maps are still in force under it.
+    /// Measured against Camera Raw (v1.17.0) on a synthetic linear-ProPhoto
+    /// bench whose profile carries 「Adobe Standard」's own 36 × 8 × 16 look
+    /// table, with the 「Adobe Color」 Look (curves the identity), 4256 nodes,
+    /// ΔE median / p95 / max: creative after the profile's 0.078 / 0.70 / 1.86;
+    /// the profile's after the creative 0.13 / 2.94 / 21.8; the creative
+    /// replacing the profile's 1.19 / 8.07 / 22.4. On p39's flat sidecar
+    /// (Camera Raw 16-bit, 1536 px, warm h 20–90° C > 12 and sky-ish h 190–280°
+    /// C > 8, Δb): replacing +2.51 and −0.89, stacking −0.19 and +0.02 (no
+    /// Look −0.20 and +0.04). An earlier reading that preferred replacing was
+    /// taken while the Look's curve went by the luma ratio, whose own error
+    /// (Δb −1.1 on the same colours) offset the missing table.
     pub(crate) fn build_for(
         profile: &Profile,
         space: super::ExportColorSpace,
         frame: Frame,
         baseline_ev: f32,
     ) -> Option<Self> {
-        let white = frame.neutral.and_then(|n| white_temperature(profile, n));
+        let white = frame.neutral.and_then(|n| white_temperature_with(profile, n, frame.calibration));
         let kelvin = white.or(frame.kelvin);
         let hue_sat = blend_calibrations(profile, kelvin);
-        let look = frame.creative.or_else(|| profile.look_table.clone());
+        let (look, creative) = (profile.look_table.clone(), frame.creative);
         let tone = if states_a_curve(&profile.tone_curve) {
             tone_lut(&profile.tone_curve)
         } else {
             Some(acr3_default::ACR3_DEFAULT.to_vec())
         };
         let total_ev = baseline_ev + profile.baseline_exposure_offset;
-        let gain = if total_ev == 0.0 || !total_ev.is_finite() { 1.0 } else { total_ev.exp2() };
         let camera = white.and_then(|_| forward_matrix(profile, kelvin));
-        if camera.is_none() && hue_sat.is_none() && look.is_none() && tone.is_none() && gain == 1.0
-        {
-            return None;
-        }
         // Working RGB → XYZ (D65-adapted, as the export spaces are) → ProPhoto.
         let space_to_xyz = super::rgb_to_xyz(super::space_primaries(space), super::D65_XY);
         let ref_to_xyz = super::rgb_to_xyz(PROPHOTO_PRIM, super::D65_XY);
@@ -203,7 +221,17 @@ impl Stage {
             }
             None => (None, super::inv3(&to_ref)),
         };
-        Some(Stage { from_ref, to_ref, camera, hue_sat, look, tone, gain })
+        // Camera Raw's transfer is never the identity (its toe acts at 0 EV),
+        // so the stage always has work.
+        let ramp = super::tone_cr::Ramp::of(camera_start_of(total_ev, frame.neutral));
+        Some(Stage { from_ref, to_ref, camera, hue_sat, look, creative, tone, ramp })
+    }
+
+    /// The camera start this stage rendered at: what the develop's Exposure
+    /// and every adjustment under the stage's transfer take the light back
+    /// under ([`UnderTone`]).
+    pub(crate) fn start(&self) -> crate::recipe::CameraStart {
+        self.ramp.start()
     }
 
     /// Does this stage own the camera → working-space transform? Then the
@@ -248,23 +276,15 @@ impl Stage {
             t.apply(&mut hsv);
             r = from_hsv(hsv);
         }
-        // The exposure ramp, where the DNG SDK puts it: after the hue/sat map,
-        // before the look table and the curve, per channel, in linear light.
-        // Camera Raw's, not the SDK's (v1.17.0, measured over nine exposures
-        // of one frame, `tone_cr`): the SDK clips at white,
-        // `Min ((x − black)·slope, 1)`, and subtracts 0.005; Camera Raw
-        // subtracts 0.0018 after the gain and rolls the highlights off to
-        // white. Clipped, the p39 flat sidecar rendered L 90–100 +2.7 L and
-        // L 0–30 1.2–1.6 L too bright; nothing past 1 reaches the look table
-        // or the curve either way.
-        // A NEGATIVE total, which only arises when the body's baseline is
-        // unknown and a camera-matching profile's offset is left uncancelled,
-        // is rendered as the linear gain it states; the SDK instead darkens it
-        // through `dng_function_exposure_tone`, which keeps white at white.
-        for c in &mut r {
-            *c = super::exposure_ramp(*c * self.gain);
-        }
-        if let Some(t) = &self.look {
+        // The exposure, where the DNG SDK puts it: after the hue/sat map,
+        // before the look table and the curve, in linear light. Camera Raw's
+        // measured transfer at the camera start (v1.17.0, `tone_cr`), not the
+        // SDK's clip at white, with Camera Raw's channel rule; nothing past
+        // white reaches the look table or the curve.
+        r = self.ramp.transfer_rgb(r);
+        // The profile's own look table, then the creative Look's on top
+        // ([`Stage::build_for`]).
+        for t in [&self.look, &self.creative].into_iter().flatten() {
             let mut hsv = to_hsv(r);
             t.apply(&mut hsv);
             r = from_hsv(hsv);
@@ -425,6 +445,18 @@ pub(crate) fn temp_tint_to_xy(kelvin: f64, tint: f64) -> [f64; 2] {
     [1.5 * u / (u - 4.0 * v + 2.0), v / (u - 4.0 * v + 2.0)]
 }
 
+/// The camera start a stage renders at (v1.17.0): the total exposure, and the
+/// over-range headroom the frame's white balance keeps above white
+/// (`tone_cr`, measured) — none without a camera neutral. ONE function for the
+/// stage and for the start the open paths stamp (`render::camera_start`), so
+/// the two cannot disagree.
+pub(crate) fn camera_start_of(total_ev: f32, neutral: Option<[f32; 3]>) -> crate::recipe::CameraStart {
+    crate::recipe::CameraStart {
+        ev: if total_ev.is_finite() { total_ev } else { 0.0 },
+        headroom: neutral.map_or(0.0, super::tone_cr::headroom_of),
+    }
+}
+
 /// The SDK's Bradford adaptation [`map_white`] from white `from` to white
 /// `to` as a matrix on the stage's linear reference RGB (ProPhoto's primaries
 /// at the working white, [`UnderTone`]), scaled so the working white keeps
@@ -437,24 +469,26 @@ pub(crate) fn white_shift(from: [f64; 2], to: [f64; 2]) -> [[f32; 3]; 3] {
     mat3_f32(&shift.map(|row| row.map(|v| v / y.max(1e-9))))
 }
 
-/// The profile stage's last two steps — its exposure ramp and Adobe's
+/// The profile stage's last two steps — its exposure transfer and Adobe's
 /// default curve put on as [`adobe_tone`] puts them — undone and redone around
 /// a map of the light they acted on, in the stage's own reference RGB: what a
-/// Camera Raw adjustment that acts before the curve (its white balance) needs
-/// on a frame the stage has already rendered. [`adobe_tone`] is exactly
-/// invertible (the brightest and darkest channels through the curve, the
-/// middle one at its relative place between them); the ramp is
-/// [`super::exposure_ramp`] and its inverse. The look table between them is
-/// not undone.
+/// Camera Raw adjustment that acts before the curve (its white balance, its
+/// Exposure) needs on a frame the stage has already rendered. [`adobe_tone`]
+/// is exactly invertible (the brightest and darkest channels through the
+/// curve, the middle one at its relative place between them), and so is the
+/// transfer below white ([`super::tone_cr::Ramp::input_rgb`]), at the camera
+/// start the stage ran it at. The look table between them is not undone.
 pub(crate) struct UnderTone {
     to_ref: [[f32; 3]; 3],
     from_ref: [[f32; 3]; 3],
     inverse: Vec<f32>,
+    start: super::tone_cr::Ramp,
 }
 
 impl UnderTone {
-    /// For a frame in the linear working space `space`.
-    pub(crate) fn new(space: super::ExportColorSpace) -> Self {
+    /// For a frame in the linear working space `space`, rendered at the
+    /// camera start `start`.
+    pub(crate) fn new(space: super::ExportColorSpace, start: crate::recipe::CameraStart) -> Self {
         let space_to_xyz = super::rgb_to_xyz(super::space_primaries(space), super::D65_XY);
         let ref_to_xyz = super::rgb_to_xyz(PROPHOTO_PRIM, super::D65_XY);
         let to_ref = super::mat_mul3(&super::inv3(&ref_to_xyz), &space_to_xyz);
@@ -470,25 +504,30 @@ impl UnderTone {
                 (j as f32 - 1.0 + f) / (n - 1) as f32
             })
             .collect();
-        UnderTone { to_ref, from_ref: super::inv3(&to_ref), inverse }
+        UnderTone { to_ref, from_ref: super::inv3(&to_ref), inverse, start: super::tone_cr::Ramp::of(start) }
     }
 
-    /// Linear working RGB → the stage's light before its ramp and curve.
+    /// Linear working RGB → the stage's light before its transfer and curve.
     pub(crate) fn undo(&self, lin: [f32; 3]) -> [f32; 3] {
-        let r = super::mat_vec3(&self.to_ref, &lin).map(|c| c.clamp(0.0, 1.0));
-        adobe_tone(r, &self.inverse).map(super::tone_cr::ramp_inverse)
+        self.start.input_rgb(self.undo_curve(lin))
     }
 
-    /// [`UnderTone::undo`]'s inverse: back through the ramp and the curve to
-    /// linear working RGB.
+    /// [`UnderTone::undo`]'s inverse: back through the transfer and the curve
+    /// to linear working RGB.
     pub(crate) fn redo(&self, light: [f32; 3]) -> [f32; 3] {
-        let r = light.map(|c| super::exposure_ramp(c.max(0.0)));
-        super::mat_vec3(&self.from_ref, &adobe_tone(r, &acr3_default::ACR3_DEFAULT))
+        self.redo_curve(self.start.transfer_rgb(light.map(|c| c.max(0.0))))
     }
 
-    /// [`UnderTone::undo`] without the ramp: the light after the exposure
-    /// ramp and before Adobe's curve — where a mask's Temp and Tint act
-    /// (`render::mask_cr`).
+    /// Camera Raw's Exposure ([`super::tone_cr::Exposure`]) on one linear
+    /// working pixel the stage rendered at `e`'s start: the curve undone, the
+    /// exposure in the reference primaries, the curve redone.
+    pub(crate) fn expose(&self, lin: [f32; 3], e: &super::tone_cr::Exposure) -> [f32; 3] {
+        self.redo_curve(e.rgb(self.undo_curve(lin)))
+    }
+
+    /// [`UnderTone::undo`] without the transfer: the light after the
+    /// exposure transfer and before Adobe's curve — where a mask's Temp and
+    /// Tint act (`render::mask_cr`).
     pub(crate) fn undo_curve(&self, lin: [f32; 3]) -> [f32; 3] {
         let r = super::mat_vec3(&self.to_ref, &lin).map(|c| c.clamp(0.0, 1.0));
         adobe_tone(r, &self.inverse)
@@ -570,13 +609,50 @@ fn color_matrix_at(profile: &Profile, kelvin: f64) -> Option<[[f64; 3]; 3]> {
 /// estimate, repeat until the chromaticity stops moving (30 passes at most;
 /// a two-value oscillation is averaged, as the SDK averages it). `None` when
 /// the profile has no `ColorMatrix` or the neutral is unusable.
+#[cfg(test)]
 pub(crate) fn white_temperature(profile: &Profile, neutral: [f32; 3]) -> Option<f32> {
+    white_temperature_with(profile, neutral, None)
+}
+
+/// [`white_temperature`] with the body's `CameraCalibration` diagonal in
+/// front of the matrices ([`Frame::calibration`]).
+pub(crate) fn white_temperature_with(profile: &Profile, neutral: [f32; 3], cc: Option<[f32; 3]>) -> Option<f32> {
     if neutral.iter().any(|v| !v.is_finite() || *v <= 0.0) {
         return None;
     }
-    let xy = neutral_to_xy(neutral.map(f64::from), |k| color_matrix_at(profile, k))?;
+    let xy = neutral_to_xy(neutral.map(f64::from), |k| calibrated_matrix_at(profile, k, cc))?;
     let k = xy_to_kelvin(xy);
     k.is_finite().then_some(k as f32)
+}
+
+/// `CC · ColorMatrix(kelvin)`: the SDK's XYZ → camera with the body's
+/// calibration diagonal on each camera row.
+fn calibrated_matrix_at(profile: &Profile, kelvin: f64, cc: Option<[f32; 3]>) -> Option<[[f64; 3]; 3]> {
+    let m = color_matrix_at(profile, kelvin)?;
+    Some(match cc {
+        Some(c) => [0, 1, 2].map(|i| m[i].map(|v| v * f64::from(c[i]))),
+        None => m,
+    })
+}
+
+/// The camera neutral of the white `xy`, the DNG SDK's `SetWhiteXY`: the
+/// profile's XYZ → camera matrix at the white's own temperature
+/// (`FindXYZtoCamera`, [`color_matrix_at`], behind the body's calibration
+/// diagonal `cc`) applied to the white, scaled so
+/// its largest component is 1 (`fCameraWhite`). This is where Camera Raw puts
+/// a Custom white balance: it fixes the camera multipliers, and through
+/// [`white_temperature_with`] the calibration blend, BEFORE the hue/sat map —
+/// measured with synthetic linear DNGs through Camera Raw (v1.17.0): a
+/// patch the map leaves untouched at As Shot is moved by it once a Custom
+/// white carries the patch into the map's hues (0 → 10 ΔE), and a second
+/// `ColorMatrix` at Standard A changes the render at 2850 K and 4500 K and
+/// not at 6500 K or 10000 K. `None` for a profile with no `ColorMatrix` or a
+/// white that maps to a non-positive camera triple.
+pub(crate) fn camera_neutral_of(profile: &Profile, xy: [f64; 2], cc: Option<[f32; 3]>) -> Option<[f32; 3]> {
+    let cm = calibrated_matrix_at(profile, xy_to_kelvin(xy), cc)?;
+    let n = vec64(&cm, xy_to_xyz(xy));
+    let max = n[0].max(n[1]).max(n[2]);
+    (max.is_finite() && n.iter().all(|v| *v > 0.0)).then(|| n.map(|v| (v / max) as f32))
 }
 
 /// The chromaticity of the white a camera `neutral` stands for, the DNG

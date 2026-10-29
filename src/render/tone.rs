@@ -283,7 +283,7 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
 /// the luma ratio (the canvas start was calibrated that way, v1.17.0 step 3);
 /// the parametric and point curves, through Adobe's channel rule
 /// (`tone_cr::camera_raw_channels`). `None` for a pass with nothing to do.
-/// With exposure (`tone_cr::camera_raw_exposure_lut`) the passes compose to
+/// With exposure (`tone_cr::Exposure`) the passes compose to
 /// [`build_tone_lut`] up to the colour rule.
 pub(crate) struct CameraRawTone {
     pub(crate) sliders: Option<SliderPass>,
@@ -358,7 +358,8 @@ fn tone_lut_at(r: &EditRecipe, exposure_ev: f32) -> Vec<f32> {
             let baked = r.baked_tone_curve().map(|l| look_curve_lut(&l.tone_curve, l.amount));
             let parametric = parametric_lut(r);
             let curve = curve_lut(&r.tone_curve);
-            return camera_raw_tone_lut(exposure_ev, sliders, baked.as_deref(), parametric.as_deref(), &curve);
+            let start = r.camera_start.unwrap_or_default();
+            return camera_raw_tone_lut(start, exposure_ev, sliders, baked.as_deref(), parametric.as_deref(), &curve);
         }
     }
     let (ys, m) = tone_model_knots(
@@ -846,6 +847,14 @@ impl CurveSpace {
         }
         mat_vec3(&self.from, &pro).map(|v| sample_lut(self.enc, v.clamp(0.0, 1.0)))
     }
+
+    /// One working-space pixel through a tone curve by Camera Raw's rule
+    /// ([`camera_raw_rgb_tone`]) on these channels, back in the working space.
+    pub(super) fn tone(&self, px: [f32; 3], lut: &[f32], middle: MiddleRatio) -> [f32; 3] {
+        let pro = mat_vec3(&self.to, &px.map(|v| sample_lut(self.dec, v))).map(|v| v.clamp(0.0, 1.0));
+        let c = camera_raw_rgb_tone(pro, lut, middle);
+        mat_vec3(&self.from, &c).map(|v| sample_lut(self.enc, v.clamp(0.0, 1.0)))
+    }
 }
 
 /// sRGB-encoded pixels (sRGB primaries, the analysis renders') → the
@@ -861,24 +870,94 @@ pub(crate) fn curve_channels(px: &[f32; 3]) -> [f32; 3] {
     mat_vec3(to, &px.map(|v| sample_lut(dec, v))).map(|v| sample_lut(enc, v.clamp(0.0, 1.0)))
 }
 
-/// The photographer's composite point curve (and the parametric curve with
-/// it) on a camera-profile start: Adobe's channel rule
-/// ([`camera_raw_channels`]) on the channels of [`profile::curve_space`]
-/// under the sRGB transfer — the per-channel curves' space. The caller runs
-/// it BEFORE the creative Look's baked curve. Measured on one frame, against
-/// predictions from Camera Raw's own renders without the curve (ΔE mean):
-/// with no Look, `0,0 / 128,180 / 255,255` 0.06, a five-knot curve 0.21,
-/// `0,0 / 255,200` 0.02; with Adobe Color's Look, the curve after the Look's
-/// curve (the order before v1.17.0) leaves 0.51–1.48 and before it
-/// 0.13–0.31, from the flat start and from Exposure +1, Contrast +50,
-/// Saturation +50 and Vibrance +50 alike.
-pub(super) fn apply_camera_raw_curve(data: &mut [[f32; 3]], lut: &[f32], space: ExportColorSpace) {
+/// Where Camera Raw keeps a colour's MIDDLE channel when a tone curve moves
+/// the other two ([`camera_raw_rgb_tone`]). Measured, and the two curves a
+/// camera-profile start carries differ here:
+///
+/// * the creative Look's baked curve keeps it at its LINEAR-light ratio (a
+///   bench whose camera space is linear ProPhoto with no tables, item 35:
+///   149 colours through Adobe Color's Look curve predicted to ΔE median
+///   0.010, max 0.109; by the encoded ratio max 2.21);
+/// * the photographer's composite point curve (with the parametric curve),
+///   and a mask's `MainCurve`, keep it at its ENCODED ratio (p39's packet with Adobe Color's Look, the
+///   four composite cases predicted from Camera Raw's own renders without the
+///   curve: `0,0 / 64,40 / 128,170 / 192,200 / 255,255` ΔE 0.308 and warm
+///   a* +0.12 by the encoded ratio, 0.325 and −0.43 by the linear one; the
+///   other three agree or lean the same way; a full-coverage gradient mask's
+///   `MainCurve` `0,0 / 128,180 / 255,255` on the same packet, applied after
+///   the Look: ΔE 0.069 by the encoded ratio, 0.075 by the linear one, 0.718
+///   by the luma ratio the engine used until item 35).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MiddleRatio {
+    Linear,
+    Encoded,
+}
+
+/// Camera Raw's rule for putting a tone curve on a colour: the channels are
+/// linear ProPhoto (D50); the BRIGHTEST and DARKEST go through the curve on
+/// their sRGB-ENCODED values, and the middle one keeps its place between
+/// them by `middle` — with [`MiddleRatio::Linear`] the DNG SDK's `RGBTone`
+/// with the curve read under the sRGB transfer. On the item-35 bench the same
+/// rule on sRGB channels instead leaves ΔE median 0.117, max 2.56, and each
+/// channel through the curve on its own max 5.44. `lut` is a curve on the
+/// encoded range, sampled by [`sample_lut`].
+pub(super) fn camera_raw_rgb_tone(pro: [f32; 3], lut: &[f32], middle: MiddleRatio) -> [f32; 3] {
+    let (dec, enc) = transfer_luts();
+    let (mut hi, mut mid, mut lo) = (0usize, 1usize, 2usize);
+    if pro[hi] < pro[mid] {
+        std::mem::swap(&mut hi, &mut mid);
+    }
+    if pro[mid] < pro[lo] {
+        std::mem::swap(&mut mid, &mut lo);
+    }
+    if pro[hi] < pro[mid] {
+        std::mem::swap(&mut hi, &mut mid);
+    }
+    let e = pro.map(|v| sample_lut(enc, v.clamp(0.0, 1.0)));
+    let (ea, eb) = (sample_lut(lut, e[hi]), sample_lut(lut, e[lo]));
+    let (a, b) = (sample_lut(dec, ea), sample_lut(dec, eb));
+    let m = match middle {
+        MiddleRatio::Linear => {
+            let span = pro[hi] - pro[lo];
+            if span > 1e-9 { b + (a - b) * (pro[mid] - pro[lo]) / span } else { b }
+        }
+        MiddleRatio::Encoded => {
+            let span = e[hi] - e[lo];
+            sample_lut(dec, if span > 1e-9 { eb + (ea - eb) * (e[mid] - e[lo]) / span } else { eb })
+        }
+    };
+    let mut out = [0.0f32; 3];
+    out[hi] = a;
+    out[mid] = m;
+    out[lo] = b;
+    out
+}
+
+/// A tone curve on a camera-profile start, by Camera Raw's rule
+/// ([`camera_raw_rgb_tone`]) on the channels of [`profile::curve_space`]: the
+/// photographer's composite point curve (with the parametric curve,
+/// [`MiddleRatio::Encoded`]), and the creative Look's baked curve after it
+/// ([`MiddleRatio::Linear`]). The ONE place that rule lives.
+///
+/// Order, measured on one frame against predictions from Camera Raw's own
+/// renders without the curve (ΔE mean): the photographer's curve runs BEFORE
+/// the Look's (after it, the order before v1.17.0, leaves 0.51–1.48, before
+/// it 0.13–0.31, from the flat start and from Exposure +1, Contrast +50,
+/// Saturation +50 and Vibrance +50 alike), and the Look's curve after the
+/// profile's default curve (greys: after 0.011 L, before 0.985 L). With no
+/// Look, `0,0 / 128,180 / 255,255` predicted to 0.06, a five-knot curve 0.21,
+/// `0,0 / 255,200` 0.02.
+pub(super) fn apply_camera_raw_curve(
+    data: &mut [[f32; 3]],
+    lut: &[f32],
+    space: ExportColorSpace,
+    middle: MiddleRatio,
+) {
     let (to, from) = profile::curve_space(space);
     let (dec, enc) = transfer_luts();
     data.par_iter_mut().for_each(|px| {
-        let pro = mat_vec3(&to, &px.map(|v| sample_lut(dec, v)));
-        let e = pro.map(|v| sample_lut(enc, v.clamp(0.0, 1.0)));
-        let c = camera_raw_channels(e, lut).map(|v| sample_lut(dec, v));
+        let pro = mat_vec3(&to, &px.map(|v| sample_lut(dec, v))).map(|v| v.clamp(0.0, 1.0));
+        let c = camera_raw_rgb_tone(pro, lut, middle);
         *px = mat_vec3(&from, &c).map(|v| sample_lut(enc, v.clamp(0.0, 1.0)));
     });
 }

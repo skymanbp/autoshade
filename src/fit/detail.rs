@@ -86,12 +86,8 @@ pub(super) fn detail_regression_is_bounded(
 
 pub(super) fn only_detail_and_quantized_companions(recipe: &EditRecipe, base: &EditRecipe) -> bool {
     let wb_gains_for = |r: &EditRecipe| {
-        if r.temperature_k.is_some() || r.tint != 0.0 {
-            let anchor = r.as_shot_k.unwrap_or(5500.0);
-            render::wb_gains(anchor, r.temperature_k.unwrap_or(anchor), r.tint)
-        } else {
-            [1.0; 3]
-        }
+        let law = render::WbLaw::of(r);
+        law.gains(law.point_of(r))
     };
     let recipe_wb = wb_gains_for(recipe);
     let base_wb = wb_gains_for(base);

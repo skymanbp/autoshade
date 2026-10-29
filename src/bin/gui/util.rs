@@ -560,6 +560,8 @@ pub(crate) fn xmp_loss_line(
             "colour_field" => tr(lang, "colour field").to_string(),
             "pixel_layers" => tr(lang, "fill layers").to_string(),
             "lens_blur" => tr(lang, "lens blur").to_string(),
+            "lens_profile_vignetting_scale" => tr(lang, "profile vignetting amount (no Adobe lens profile here to name)").to_string(),
+            "lens_profile_distortion_scale" => tr(lang, "profile distortion amount (no Adobe lens profile here to name)").to_string(),
             other => other.to_string(),
         });
     }

@@ -5,8 +5,9 @@
 //!
 //! A recipe that names a camera profile ([`EditRecipe::names_profile`]) starts
 //! where Lightroom starts: the profile stage (`render/profile.rs`) has already
-//! put the body's baseline exposure, [`exposure_ramp`] and Adobe's default
-//! curve on the frame. Camera Raw's Exposure, Contrast, Highlights, Shadows,
+//! put the body's baseline exposure (Camera Raw's exposure transfer at the
+//! photograph's camera start, [`Ramp`]) and Adobe's default curve on the
+//! frame. Camera Raw's Exposure, Contrast, Highlights, Shadows,
 //! Whites and Blacks act BEFORE that curve, so on this start the tone LUT
 //! undoes the curve, applies the sliders in the curve's own input (`u`, the
 //! ramped scene value under the sRGB transfer) and puts the curve back; then
@@ -21,17 +22,19 @@
 //! flat packet (Adobe Color, lens profile on; 6144 px, JPEG q12, compared at
 //! 1000 px over near-neutral pixels binned by the flat render's L):
 //!
-//! * **Exposure** is a linear gain before the curve: over ev −3 … +2 (nine
-//!   renders) a pure gain with Adobe's curve predicts every band to rms 1.2 L.
-//!   What is left is a black subtracted after the gain and a shoulder
-//!   ([`exposure_ramp`]); a black subtracted BEFORE the gain fits worse (rms
-//!   0.75 L against 0.40, the +2 EV shadows 2.3 L off). The constants were
-//!   scanned on the engine's own renders (flat and ev −3, −1, +1, +2, ten L
-//!   bands each): rms 0.64 L, worst 2.7 L (ev −3, L 90–100).
-//! * **The channel rule.** Exposure meets a pixel the way Adobe puts a curve
-//!   on a colour ([`camera_raw_channels`]): the brightest and darkest
-//!   channels through it, the middle one in proportion; Camera Raw's gain is
-//!   per channel, before the curve. Measured: the luma ratio the engine law
+//! * **Exposure** is one transfer at the TOTAL exposure, the start's baseline
+//!   plus the slider ([`Exposure`]): the frame's light is taken back under
+//!   the transfer it was started at, multiplied, and put through the
+//!   transfer at the sum. The transfer is measured on Camera Raw's renders
+//!   at 54 total exposures (`tone_cr/exposure.rs`); it is pointwise, and
+//!   BaselineExposure +1 renders exactly as the slider at +1.
+//! * **The channel rule.** Exposure meets a pixel in the profile's reference
+//!   primaries (ProPhoto's), linear: the brightest and darkest channels
+//!   through the transfer, the middle one at its LINEAR place between them
+//!   ([`Ramp::transfer_rgb`]; ΔE median 0.10–0.14 on 288 patches at every
+//!   exposure, against 38–96 for per-channel, by the brightest channel or by
+//!   luminance). The tone curves take the same rule on the encoded values
+//!   ([`camera_raw_channels`]). Measured on the earlier ramp: the luma ratio the engine law
 //!   uses leaves Exposure −1's bright sky 4.3 b* too yellow and +2's warm
 //!   tones 7.9 b* off; this rule leaves 0.4 and 1.9. The other five sliders
 //!   take their hue from this rule and their lightness from the luma ratio
@@ -63,40 +66,51 @@
 //!   Blacks +40, and +1 with −40: composing predicts the toe within 3.0 L,
 //!   adding the two on the original axis is 6.1 L off.
 //!
-//! # Highlights and Shadows: before Exposure, local, keyed to the frame
-//!
-//! Measured on seven frames' flat packets (every slider 0, Adobe Color, lens
-//! as each sidecar says), Shadows +30/+60/+100 and Highlights −30/−60/−100
-//! each (6144 px, compared at 768 px in `u`):
+//! # Highlights and Shadows: before Exposure, keyed to the frame
 //!
 //! * **Order.** Composing Camera Raw's own pointwise maps on two frames,
 //!   Highlights and Shadows go BEFORE Exposure (mean |ΔL| 0.23–0.42 that way,
 //!   1.17–3.68 the other) and before Contrast and Blacks too (0.11–0.22
 //!   against 0.30–2.48). They are the first pass ([`apply_camera_raw_hs`]).
-//! * **Local.** The push at a pixel follows the region it sits in: one
-//!   frame's lifted foreground is lifted by the same `u` from 0.20 to 0.35
-//!   and its sky at 0.36 by an eighth of that, a step in the pixel's own value
-//!   no pointwise law has; next to a bright edge a dark pixel is lifted less
-//!   over 200–400 film pixels. The push reads an edge-aware base
-//!   ([`bilateral_base`], [`HS_SIGMA_S`] / [`HS_SIGMA_S2`] film pixels,
-//!   [`HS_SIGMA_R`] stops) of `log2` linear luminance.
-//! * **Keyed to the frame.** At one base value the push still differs 6×
-//!   between frames (Highlights −60 at `u` 0.3: 0.022 on a daylight street,
-//!   0.142 on a dark dusk frame); measured relative to the frame's mean
-//!   linear luminance (`z = log2(base) − log2(mean)`) it does not: the mean
-//!   ordered the frames, the median, log-average and high percentiles did
-//!   not. Shadows read `(z, u)` ([`HS_SH`]); Highlights read `z` on the fine
-//!   base plus `z` on the coarse one ([`HS_HL`], [`HS_HL2`]) — a second
-//!   scale raised the held-out R² of the frame it helped most from 0.76 to
-//!   0.94.
+//! * **Shadows: a linear-light gain set by the frame's spread.** Measured on
+//!   19 frames (the seven calibration frames and twelve census frames of
+//!   other scenes, each rendered flat and at Shadows +60 by Camera Raw 18.4
+//!   at sensor size, 16 bit, read as `log2` linear luminance at the curve's
+//!   input on a map 768 cells across): the push in stops at a cell is
+//!   `s · spread · T(b)`, `b` the cell minus the map's mean, `spread` the
+//!   map's standard deviation, `T` one monotone shape shared by every frame
+//!   ([`HS_SH_LIFT`]), no constant fitted per frame. Held out one frame at a
+//!   time, the law explains 0.86 of the push over all 19 (the worst a
+//!   portrait-orientation night frame); a shared shape with a free amplitude
+//!   per frame reaches 0.93, and the amplitude follows the spread (r 0.95).
+//!   On two frames rendered at +30/+60/+100 the push is linear in the slider
+//!   (0.50 : 1 : 1.64 and 0.51 : 1 : 1.62). Below 0 the same form reads its
+//!   own table ([`HS_SH_DEEPEN`], four frames at −60, held out 0.62): the
+//!   signs agree through the middle, −60 darkens the deepest levels further
+//!   than +60 lifts them. The residual left at full resolution moves 1-stop
+//!   band means by 0.24 L at most: texture, left out. Measured in stops on
+//!   a map, the law is unmoved by an exposure gain before it (both `b` and
+//!   the spread are differences of `log2`); clipped pixels aside, so is its
+//!   key.
+//! * **Highlights: local, keyed to the mean.** The push at a pixel follows
+//!   the region it sits in, over 200–400 film pixels next to a bright edge;
+//!   it reads an edge-aware base ([`bilateral_base`], [`HS_SIGMA_S`] /
+//!   [`HS_SIGMA_S2`] film pixels, [`HS_SIGMA_R`] stops) of `log2` linear
+//!   luminance against the frame's mean linear luminance (`z = log2(base) −
+//!   log2(mean)`; Highlights −60 at `u` 0.3 is 0.022 on a daylight street,
+//!   0.142 on a dark dusk frame), the fine base plus the coarse one
+//!   ([`HS_HL`], [`HS_HL2`]), fitted pooled over the seven calibration
+//!   frames at −30/−60/−100 (6144 px, 768 px in `u`) with the engine in the
+//!   loop; above 0 it keeps the pointwise table at the pixel's `u`. Its
+//!   amplitude on the 19 frames has no frame statistic (the best, the mean,
+//!   holds out at 0.72): dark frames also take a flat offset over their
+//!   deepest levels (−0.27 stops on a night frame, −0.30 on another, 0 on
+//!   bright frames) that no statistic tried predicts (best held out 0.43).
 //! * **Colour.** Shadows keep the colour: every channel by one ratio over a
 //!   floor ([`HS_CHROMA_FLOOR`]); per channel left the warm tones 4.75 b*
 //!   short. Highlights take the hue of Adobe's channel rule with the pixel's
 //!   own curve, as the other sliders do (the street's bright band 5.14 →
 //!   0.80 b*).
-//! * Fitted pooled over the seven frames and three magnitudes, then with the
-//!   engine in the loop; the signs not measured across frames (Highlights
-//!   above 0, Shadows below) keep the pointwise tables at the pixel's `u`.
 
 use super::*;
 
@@ -117,41 +131,11 @@ impl SliderLaw {
     }
 }
 
-/// The black Camera Raw subtracts after the exposure gain, in linear light
-/// relative to white. The DNG SDK's default, 0.005, darkens the shadows 2–4 L
-/// past Camera Raw's; none at all leaves the flat frame's L 0–30 1.2–1.6 L
-/// bright.
-pub(crate) const RAMP_BLACK: f32 = 0.0018;
-
-/// Where the shoulder starts, in the black-subtracted linear value.
-pub(crate) const RAMP_KNEE: f32 = 0.15;
-
-/// The shoulder's asymptote: above [`RAMP_KNEE`] the value approaches it
-/// exponentially with unit slope at the knee, and white is reached at
-/// v ≈ 2.0 (clipped there).
-pub(crate) const RAMP_SHOULDER: f32 = 1.2;
-
-/// Camera Raw's exposure ramp on one linear channel already multiplied by the
-/// total exposure gain: the black subtracted, then the shoulder, clipped at
-/// white. It replaces the DNG SDK's hard clip at 1 in the profile stage.
-pub(crate) fn exposure_ramp(t: f32) -> f32 {
-    let v = (t - RAMP_BLACK).max(0.0) / (1.0 - RAMP_BLACK);
-    let span = RAMP_SHOULDER - RAMP_KNEE;
-    let r = if v <= RAMP_KNEE { v } else { RAMP_KNEE + span * (1.0 - (-(v - RAMP_KNEE) / span).exp()) };
-    r.min(1.0)
-}
-
-/// [`exposure_ramp`]'s inverse on `[0, 1]`. A ramped 0 answers 0: whatever
-/// sat at or under the black stays black under the sliders.
-pub(crate) fn ramp_inverse(r: f32) -> f32 {
-    if r <= 0.0 {
-        return 0.0;
-    }
-    let r = r.min(1.0);
-    let span = RAMP_SHOULDER - RAMP_KNEE;
-    let v = if r <= RAMP_KNEE { r } else { RAMP_KNEE - span * (1.0 - (r - RAMP_KNEE) / span).ln() };
-    v * (1.0 - RAMP_BLACK) + RAMP_BLACK
-}
+/// Camera Raw's exposure transfer, measured (`tone_cr/exposure.rs`) from the
+/// table of its renders (`tone_cr/ramp_table.rs`).
+mod exposure;
+mod ramp_table;
+pub(crate) use exposure::{headroom_of, Exposure, Ramp};
 
 /// The samples of the response tables: `u = i / 32`.
 pub(super) const TABLE_N: usize = 33;
@@ -281,24 +265,25 @@ pub(crate) fn camera_raw_row(k: usize, s: f32, y: f32) -> f32 {
     table_at(t, y) + s.abs() * table_at(q, y)
 }
 
-/// Exposure on `u`: undo the ramp, multiply, ramp again.
-pub(crate) fn camera_raw_exposure(u: f32, ev: f32) -> f32 {
-    if ev == 0.0 {
-        return u;
+/// Exposure on `u` (a grey after the start's transfer, under the sRGB
+/// transfer): [`Exposure::grey`]; `None` is 0 EV.
+pub(crate) fn camera_raw_exposure(u: f32, e: Option<&Exposure>) -> f32 {
+    match e {
+        Some(e) => linear_to_srgb(e.grey(srgb_to_linear(u))),
+        None => u,
     }
-    linear_to_srgb(exposure_ramp(ramp_inverse(srgb_to_linear(u)) * ev.exp2()))
 }
 
 /// The law at one `u` without the band guard [`camera_raw_tone`] adds, for a
-/// frame whose key (`log2` of its mean linear luminance) is `key`: Highlights
+/// frame whose statistics are `key` ([`HsKey`]): Highlights
 /// and Shadows first, on `u`, with the base taken as the pixel itself
 /// ([`HsSite::diagonal`]); then Exposure; then Contrast, Whites and Blacks on
 /// the exposed value; clamped to [0, 1]. What the reverse fit scores a
 /// candidate with (it scores the knot model without its limiter too,
 /// `fit::tone`).
-pub(crate) fn camera_raw_response_keyed(ev: f32, s: [f32; 5], u: f32, key: f32) -> f32 {
+pub(crate) fn camera_raw_response_keyed(e: Option<&Exposure>, s: [f32; 5], u: f32, key: HsKey) -> f32 {
     let u1 = (u + hs_push(s[1], s[2], HsSite::diagonal(u, key), u)).clamp(0.0, 1.0);
-    let y = camera_raw_exposure(u1, ev);
+    let y = camera_raw_exposure(u1, e);
     let push: f32 = [0usize, 3, 4].iter().map(|&k| s[k] * camera_raw_row(k, s[k], y)).sum();
     (y + push).clamp(0.0, 1.0)
 }
@@ -311,7 +296,7 @@ pub(crate) fn camera_raw_response_keyed(ev: f32, s: [f32; 5], u: f32, key: f32) 
 /// open would scale every slider in the frame down with it, measured: −60
 /// rendered at 0.38 of its strength), so the guard only stops the curve
 /// turning back where two pushes overlap.
-fn camera_raw_tone(ev: f32, s: [f32; 5], local: Local) -> Vec<f32> {
+fn camera_raw_tone(e: Option<&Exposure>, s: [f32; 5], local: Local) -> Vec<f32> {
     const KEEP: f32 = 0.01;
     let mut out = Vec::with_capacity(LUT_N);
     let (mut prev_y, mut prev) = (0.0f32, 0.0f32);
@@ -319,8 +304,8 @@ fn camera_raw_tone(ev: f32, s: [f32; 5], local: Local) -> Vec<f32> {
         let u = i as f32 / (LUT_N - 1) as f32;
         // Highlights and Shadows on `u` before the exposure (module head),
         // on the diagonal: a LUT has no base layer to read.
-        let u1 = (u + hs_push(s[1], s[2], HsSite::diagonal(u, HS_KEY_NOMINAL), u)).clamp(0.0, 1.0);
-        let y = camera_raw_exposure(u1, ev);
+        let u1 = (u + hs_push(s[1], s[2], HsSite::diagonal(u, HsKey::NOMINAL), u)).clamp(0.0, 1.0);
+        let y = camera_raw_exposure(u1, e);
         let push: f32 =
             [0usize, 3, 4].iter().map(|&k| s[k] * camera_raw_row(k, s[k], y)).sum::<f32>()
                 + local.dehaze * dehaze_row(local.dehaze, y)
@@ -329,7 +314,7 @@ fn camera_raw_tone(ev: f32, s: [f32; 5], local: Local) -> Vec<f32> {
         // The floor is a share of the plain exposed curve's rise: Highlights
         // and Shadows have moved `y` itself, and on the diagonal at their
         // extremes they can turn it back.
-        let y_ref = camera_raw_exposure(u, ev);
+        let y_ref = camera_raw_exposure(u, e);
         if i > 0 {
             v = v.max((prev + KEEP * (y_ref - prev_y)).min(1.0));
         }
@@ -342,9 +327,8 @@ fn camera_raw_tone(ev: f32, s: [f32; 5], local: Local) -> Vec<f32> {
 /// One pixel through a tone LUT the way Adobe puts a curve on a colour
 /// (`render/profile.rs`'s `adobe_tone`, on the encoded values): the brightest
 /// and darkest channels go through the curve, the middle one keeps its
-/// relative place between them. The develop's exposure pass and its curve
-/// pass on a Camera Raw recipe ([`camera_raw_exposure_lut`],
-/// [`camera_raw_after_lut`]), and the hue of its slider pass
+/// relative place between them. The develop's curve pass on a Camera Raw
+/// recipe ([`camera_raw_after_lut`]) and the hue of its slider pass
 /// ([`camera_raw_slider_pixel`]).
 pub(super) fn camera_raw_channels(rgb: [f32; 3], lut: &[f32]) -> [f32; 3] {
     let (mut hi, mut mid, mut lo) = (0usize, 1usize, 2usize);
@@ -425,20 +409,6 @@ pub(crate) fn camera_raw_unstart(x: f32) -> f32 {
     (i as f32 - 1.0 + f) / (LUT_N - 1) as f32
 }
 
-/// Exposure alone over the profile stage's output, `x → u → ev → x`: the
-/// pass the develop puts through [`camera_raw_channels`] before the rest of
-/// the tone ([`super::camera_raw_tone_passes`]). `None` at 0 EV.
-pub(crate) fn camera_raw_exposure_lut(ev: f32) -> Option<Vec<f32>> {
-    (ev != 0.0).then(|| {
-        (0..LUT_N)
-            .map(|i| {
-                let u = camera_raw_unstart(i as f32 / (LUT_N - 1) as f32);
-                camera_raw_start(camera_raw_exposure(u, ev))
-            })
-            .collect()
-    })
-}
-
 /// Dehaze and Clarity's tone, each in −1..1: the two sliders that ride the
 /// slider pass besides the five.
 #[derive(Clone, Copy, Default)]
@@ -455,7 +425,7 @@ pub(crate) struct Local {
 pub(super) fn camera_raw_slider_lut(sliders: [f32; 5], local: Local) -> Option<SliderPass> {
     let dehaze = local.dehaze;
     (dehaze != 0.0 || local.clarity != 0.0 || sliders.iter().any(|&v| v != 0.0)).then(|| {
-        let tone = camera_raw_tone(0.0, sliders, local);
+        let tone = camera_raw_tone(None, sliders, local);
         let lut = (0..LUT_N)
             .map(|i| camera_raw_start(sample_lut(&tone, camera_raw_unstart(i as f32 / (LUT_N - 1) as f32))))
             .collect();
@@ -494,15 +464,17 @@ pub(super) fn camera_raw_after_lut(base: Option<&[f32]>, parametric: Option<&[f3
 /// The full tone LUT of a recipe on Camera Raw's law: `x` (the profile
 /// stage's output) → `u` → the sliders → Adobe's curve again → the Look's
 /// baked curve (`base`, when there is one) → the parametric curve → the point
-/// curve. `sliders` are in −1..1 with the Look's baked moves already added.
+/// curve. `sliders` are in −1..1 with the Look's baked moves already added;
+/// `ev` is the Exposure slider on a frame started at `start`.
 pub(super) fn camera_raw_tone_lut(
+    start: crate::recipe::CameraStart,
     ev: f32,
     sliders: [f32; 5],
     base: Option<&[f32]>,
     parametric: Option<&[f32]>,
     curve: &[f32],
 ) -> Vec<f32> {
-    let tone = camera_raw_tone(ev, sliders, Local::default());
+    let tone = camera_raw_tone(Exposure::new(start, ev).as_ref(), sliders, Local::default());
     (0..LUT_N)
         .map(|i| {
             let x = i as f32 / (LUT_N - 1) as f32;
@@ -534,28 +506,66 @@ pub(crate) const HS_SIGMA_R: f32 = 1.0;
 const HS_FLOOR: f32 = 1e-4;
 
 /// The key a tone LUT assumes when it has no frame to read (`log2` of the
-/// mean linear luminance): the median of the seven calibration frames'.
-pub(crate) const HS_KEY_NOMINAL: f32 = -3.94;
+/// mean linear luminance): the median of the seven calibration frames'
+/// ([`HsKey::NOMINAL`]).
+const HS_KEY_NOMINAL: f32 = -3.94;
 
 /// The `z` grid: `HS_Z0 + i · HS_ZSTEP`, `i < HS_ZN`.
 const HS_Z0: f32 = -10.0;
 const HS_ZSTEP: f32 = 0.5;
 const HS_ZN: usize = 29;
-/// The `u` grid of [`HS_SH`]: `j / (HS_UN − 1)`, `j < HS_UN`.
-const HS_UN: usize = 17;
 /// The coarse base's grid of [`HS_HL2`]: `HS_Z0 + i · HS_Z2STEP`, `i < HS_Z2N`.
 const HS_Z2STEP: f32 = 0.4375;
 const HS_Z2N: usize = 33;
 
-/// Shadows' push per unit slider over `(z, u)` (`z = log2(base) − key` on
-/// the [`HS_SIGMA_S`] base, `u` the pixel's own value), row-major in `z`:
-/// `[T, Q]`; a slider at `s > 0` adds `s · (T + s · Q)` to `u`. Fitted
-/// pooled over seven frames at three magnitudes each, then with the engine
-/// in the loop (module head).
-const HS_SH: [[f32; HS_ZN * HS_UN]; 2] = [
-    [-0.03582, 0.07911, 0.19479, 0.30393, 0.39542, 0.46265, 0.50567, 0.52844, 0.53578, 0.53175, 0.51929, 0.50050, 0.47699, 0.45014, 0.42117, 0.39110, 0.36066, -0.03592, 0.08632, 0.20418, 0.30664, 0.38635, 0.44254, 0.47816, 0.49715, 0.50312, 0.49904, 0.48720, 0.46943, 0.44732, 0.42225, 0.39540, 0.36766, 0.33963, -0.03601, 0.09354, 0.21357, 0.30934, 0.37727, 0.42243, 0.45066, 0.46585, 0.47046, 0.46633, 0.45511, 0.43837, 0.41766, 0.39437, 0.36963, 0.34422, 0.31860, -0.03648, 0.10478, 0.22488, 0.30978, 0.36488, 0.40036, 0.42274, 0.43493, 0.43835, 0.43405, 0.42326, 0.40742, 0.38807, 0.36659, 0.34400, 0.32095, 0.29777, -0.03696, 0.11602, 0.23619, 0.31021, 0.35249, 0.37829, 0.39481, 0.40401, 0.40623, 0.40178, 0.39141, 0.37646, 0.35848, 0.33881, 0.31838, 0.29768, 0.27693, -0.03342, 0.13791, 0.24574, 0.30182, 0.33305, 0.35330, 0.36676, 0.37414, 0.37534, 0.37039, 0.36007, 0.34581, 0.32919, 0.31141, 0.29320, 0.27489, 0.25657, -0.02989, 0.15981, 0.25528, 0.29342, 0.31361, 0.32830, 0.33870, 0.34426, 0.34444, 0.33900, 0.32872, 0.31516, 0.29990, 0.28401, 0.26803, 0.25210, 0.23621, -0.01010, 0.18855, 0.24552, 0.26918, 0.28745, 0.30201, 0.31161, 0.31615, 0.31517, 0.30869, 0.29803, 0.28509, 0.27132, 0.25747, 0.24376, 0.23017, 0.21664, 0.00969, 0.21730, 0.23576, 0.24494, 0.26129, 0.27573, 0.28452, 0.28804, 0.28590, 0.27837, 0.26734, 0.25503, 0.24275, 0.23093, 0.21949, 0.20825, 0.19707, 0.02391, 0.16784, 0.18790, 0.21130, 0.23436, 0.25069, 0.25948, 0.26222, 0.25819, 0.24891, 0.23745, 0.22609, 0.21560, 0.20590, 0.19665, 0.18760, 0.17859, 0.03814, 0.11839, 0.14005, 0.17766, 0.20742, 0.22564, 0.23444, 0.23641, 0.23048, 0.21944, 0.20756, 0.19715, 0.18846, 0.18088, 0.17382, 0.16695, 0.16011, 0.03689, 0.10246, 0.11701, 0.15383, 0.18298, 0.20231, 0.21293, 0.21311, 0.20344, 0.19046, 0.17904, 0.17035, 0.16369, 0.15809, 0.15293, 0.14793, 0.14297, 0.03563, 0.08654, 0.09398, 0.13001, 0.15853, 0.17897, 0.19143, 0.18981, 0.17639, 0.16148, 0.15052, 0.14355, 0.13892, 0.13530, 0.13205, 0.12892, 0.12583, 0.02547, 0.07338, 0.09171, 0.12515, 0.13695, 0.15757, 0.17678, 0.16732, 0.14838, 0.13361, 0.12497, 0.12031, 0.11747, 0.11534, 0.11352, 0.11187, 0.11028, 0.01531, 0.06023, 0.08944, 0.12030, 0.11537, 0.13616, 0.16212, 0.14482, 0.12036, 0.10573, 0.09942, 0.09706, 0.09602, 0.09538, 0.09500, 0.09481, 0.09473, 0.02059, 0.04720, 0.07252, 0.10000, 0.09923, 0.12000, 0.15345, 0.11742, 0.09216, 0.08226, 0.07932, 0.07864, 0.07849, 0.07865, 0.07917, 0.08000, 0.08098, 0.02588, 0.03417, 0.05560, 0.07969, 0.08308, 0.10385, 0.14478, 0.09001, 0.06395, 0.05879, 0.05921, 0.06021, 0.06096, 0.06191, 0.06334, 0.06520, 0.06724, 0.00933, 0.02911, 0.04269, 0.05830, 0.05240, 0.07899, 0.09197, 0.06149, 0.04563, 0.04446, 0.04614, 0.04699, 0.04759, 0.04871, 0.05057, 0.05293, 0.05547, -0.00721, 0.02405, 0.02979, 0.03692, 0.02171, 0.05414, 0.03916, 0.03298, 0.02730, 0.03014, 0.03306, 0.03378, 0.03422, 0.03552, 0.03779, 0.04067, 0.04370, -0.00951, 0.01670, 0.02350, 0.02090, 0.01724, 0.02554, 0.02620, 0.02375, 0.02205, 0.02454, 0.02650, 0.02555, 0.02530, 0.02639, 0.02854, 0.03122, 0.03399, -0.01180, 0.00934, 0.01722, 0.00488, 0.01278, -0.00306, 0.01324, 0.01453, 0.01679, 0.01895, 0.01995, 0.01733, 0.01638, 0.01726, 0.01928, 0.02176, 0.02428, -0.01010, 0.00351, 0.00499, 0.00996, 0.02082, 0.01170, 0.01482, 0.01153, 0.01251, 0.01389, 0.01555, 0.01423, 0.01270, 0.01295, 0.01402, 0.01523, 0.01662, -0.00840, -0.00233, -0.00725, 0.01504, 0.02887, 0.02647, 0.01641, 0.00853, 0.00823, 0.00883, 0.01115, 0.01114, 0.00901, 0.00863, 0.00877, 0.00871, 0.00896, -0.00632, -0.00008, 0.00317, 0.02516, 0.02634, 0.02248, 0.01829, 0.01458, 0.01200, 0.01235, 0.00909, 0.01232, 0.01073, 0.00950, 0.00789, 0.00503, 0.00333, -0.00424, 0.00216, 0.01358, 0.03528, 0.02380, 0.01850, 0.02018, 0.02063, 0.01576, 0.01588, 0.00702, 0.01351, 0.01245, 0.01036, 0.00700, 0.00135, -0.00229, 0.00009, 0.00850, 0.02040, 0.03531, 0.02666, 0.02092, 0.01823, 0.01735, 0.01334, 0.01421, 0.01135, 0.01297, 0.00909, 0.00628, 0.00515, -0.00071, -0.00604, 0.00443, 0.01484, 0.02722, 0.03535, 0.02951, 0.02334, 0.01627, 0.01407, 0.01091, 0.01255, 0.01568, 0.01242, 0.00573, 0.00221, 0.00329, -0.00276, -0.00980, 0.01038, 0.02119, 0.03137, 0.03618, 0.03181, 0.02534, 0.01727, 0.01172, 0.00432, 0.00127, 0.00796, 0.00938, 0.00651, 0.00463, 0.00270, -0.00450, -0.01287, 0.01633, 0.02754, 0.03552, 0.03701, 0.03412, 0.02734, 0.01828, 0.00936, -0.00227, -0.01000, 0.00024, 0.00634, 0.00729, 0.00705, 0.00211, -0.00623, -0.01594],
-    [0.04538, 0.06020, 0.07523, 0.08915, 0.09974, 0.10552, 0.10618, 0.10235, 0.09507, 0.08540, 0.07423, 0.06219, 0.04969, 0.03697, 0.02417, 0.01136, -0.00146, 0.04342, 0.06028, 0.07630, 0.08937, 0.09793, 0.10159, 0.10073, 0.09617, 0.08884, 0.07960, 0.06912, 0.05789, 0.04624, 0.03439, 0.02247, 0.01054, -0.00138, 0.04146, 0.06037, 0.07737, 0.08959, 0.09612, 0.09766, 0.09528, 0.08999, 0.08261, 0.07379, 0.06400, 0.05358, 0.04278, 0.03181, 0.02077, 0.00973, -0.00130, 0.03938, 0.06122, 0.07885, 0.08944, 0.09367, 0.09324, 0.08959, 0.08376, 0.07645, 0.06809, 0.05897, 0.04933, 0.03936, 0.02925, 0.01909, 0.00893, -0.00122, 0.03730, 0.06207, 0.08032, 0.08929, 0.09122, 0.08882, 0.08390, 0.07754, 0.07028, 0.06239, 0.05395, 0.04508, 0.03595, 0.02669, 0.01741, 0.00813, -0.00114, 0.03591, 0.06491, 0.08158, 0.08757, 0.08726, 0.08344, 0.07779, 0.07127, 0.06431, 0.05692, 0.04912, 0.04097, 0.03263, 0.02420, 0.01577, 0.00735, -0.00107, 0.03452, 0.06775, 0.08285, 0.08586, 0.08330, 0.07806, 0.07167, 0.06501, 0.05833, 0.05146, 0.04429, 0.03686, 0.02930, 0.02172, 0.01414, 0.00657, -0.00100, 0.03570, 0.07170, 0.08080, 0.08110, 0.07739, 0.07160, 0.06515, 0.05887, 0.05271, 0.04636, 0.03974, 0.03296, 0.02616, 0.01937, 0.01259, 0.00583, -0.00094, 0.03689, 0.07565, 0.07874, 0.07634, 0.07148, 0.06513, 0.05864, 0.05274, 0.04709, 0.04125, 0.03518, 0.02906, 0.02301, 0.01702, 0.01105, 0.00508, -0.00089, 0.02309, 0.06311, 0.07000, 0.06886, 0.06384, 0.05775, 0.05206, 0.04705, 0.04197, 0.03651, 0.03092, 0.02545, 0.02012, 0.01488, 0.00965, 0.00440, -0.00086, 0.00929, 0.05056, 0.06125, 0.06139, 0.05619, 0.05038, 0.04548, 0.04137, 0.03684, 0.03177, 0.02667, 0.02183, 0.01724, 0.01274, 0.00824, 0.00371, -0.00084, -0.01258, 0.04216, 0.05598, 0.05252, 0.04680, 0.04255, 0.03968, 0.03652, 0.03213, 0.02729, 0.02274, 0.01862, 0.01474, 0.01089, 0.00701, 0.00309, -0.00084, -0.03445, 0.03375, 0.05071, 0.04366, 0.03740, 0.03473, 0.03388, 0.03166, 0.02742, 0.02281, 0.01882, 0.01541, 0.01223, 0.00903, 0.00577, 0.00246, -0.00085, -0.01381, 0.02127, 0.04167, 0.03498, 0.02781, 0.02775, 0.03022, 0.02746, 0.02270, 0.01858, 0.01543, 0.01278, 0.01018, 0.00748, 0.00471, 0.00191, -0.00090, 0.00682, 0.00879, 0.03262, 0.02631, 0.01822, 0.02077, 0.02657, 0.02325, 0.01798, 0.01435, 0.01204, 0.01014, 0.00813, 0.00593, 0.00365, 0.00135, -0.00094, 0.02850, -0.00205, 0.02132, 0.01828, 0.01274, 0.01662, 0.02517, 0.01832, 0.01319, 0.01086, 0.00954, 0.00818, 0.00652, 0.00467, 0.00277, 0.00087, -0.00102, 0.05018, -0.01289, 0.01002, 0.01025, 0.00726, 0.01247, 0.02378, 0.01340, 0.00839, 0.00738, 0.00703, 0.00622, 0.00492, 0.00340, 0.00188, 0.00039, -0.00109, 0.03999, -0.00764, 0.00460, 0.00556, 0.00268, 0.00889, 0.01352, 0.00815, 0.00538, 0.00544, 0.00555, 0.00483, 0.00366, 0.00242, 0.00121, 0.00002, -0.00119, 0.02981, -0.00238, -0.00082, 0.00087, -0.00189, 0.00531, 0.00327, 0.00291, 0.00237, 0.00350, 0.00406, 0.00343, 0.00239, 0.00143, 0.00054, -0.00035, -0.00128, 0.02103, -0.00064, -0.00176, -0.00128, -0.00096, 0.00065, 0.00159, 0.00148, 0.00175, 0.00281, 0.00319, 0.00231, 0.00142, 0.00079, 0.00014, -0.00060, -0.00141, 0.01226, 0.00110, -0.00271, -0.00343, -0.00003, -0.00401, -0.00009, 0.00005, 0.00113, 0.00212, 0.00231, 0.00119, 0.00045, 0.00014, -0.00026, -0.00085, -0.00153, 0.00711, 0.00024, -0.00365, -0.00193, 0.00105, -0.00152, -0.00023, -0.00032, 0.00040, 0.00061, 0.00055, 0.00022, -0.00006, -0.00004, -0.00036, -0.00099, -0.00166, 0.00196, -0.00061, -0.00459, -0.00043, 0.00213, 0.00096, -0.00038, -0.00068, -0.00034, -0.00089, -0.00121, -0.00075, -0.00058, -0.00021, -0.00046, -0.00113, -0.00178, -0.00101, -0.00133, -0.00228, 0.00170, 0.00132, 0.00008, -0.00007, 0.00038, 0.00023, -0.00030, -0.00202, -0.00092, -0.00040, -0.00011, -0.00032, -0.00118, -0.00185, -0.00399, -0.00204, 0.00003, 0.00382, 0.00051, -0.00080, 0.00024, 0.00144, 0.00079, 0.00030, -0.00283, -0.00109, -0.00021, -0.00000, -0.00018, -0.00123, -0.00191, -0.00554, -0.00236, 0.00066, 0.00359, 0.00129, 0.00011, 0.00016, 0.00087, 0.00055, 0.00060, -0.00082, -0.00047, -0.00083, -0.00118, -0.00067, -0.00129, -0.00186, -0.00710, -0.00269, 0.00129, 0.00335, 0.00207, 0.00102, 0.00009, 0.00030, 0.00031, 0.00090, 0.00120, 0.00015, -0.00146, -0.00235, -0.00115, -0.00134, -0.00180, -0.00806, -0.00307, 0.00110, 0.00318, 0.00276, 0.00186, 0.00071, 0.00020, -0.00059, -0.00081, 0.00039, 0.00011, -0.00108, -0.00174, -0.00127, -0.00145, -0.00175, -0.00902, -0.00346, 0.00090, 0.00301, 0.00346, 0.00270, 0.00133, 0.00011, -0.00150, -0.00252, -0.00042, 0.00007, -0.00071, -0.00113, -0.00140, -0.00155, -0.00169],
-];
+/// Shadows' map: the frame's `log2` linear luminance block-averaged onto this
+/// many cells across its width (square cells; a frame narrower than this
+/// keeps its pixels). The scale the real-frame law was measured at (module
+/// head); the push reads the map, bilinearly, not the pixel.
+const HS_SH_CELLS: usize = 768;
+
+/// The floor under linear luminance before Shadows' log, relative to white:
+/// the measurement's (a 16-bit render's darkest step is 1.2e-6).
+pub(crate) const HS_SH_FLOOR: f32 = 1e-6;
+
+/// The `b` grid of [`HS_SH_LIFT`] and [`HS_SH_DEEPEN`]: `HS_SH_B0 + i ·
+/// HS_SH_BSTEP`, `i < HS_SH_BN`, clamped at both ends.
+const HS_SH_B0: f32 = -10.0;
+const HS_SH_BSTEP: f32 = 0.25;
+const HS_SH_BN: usize = 69;
+
+/// Shadows above 0: the push in stops of linear luminance per unit slider
+/// and per stop of the frame's spread, over `b` (the map at the pixel minus
+/// the map's mean, [`HsSite`]): a slider at `s > 0` multiplies the pixel's
+/// linear luminance by `2^(s · spread · T(b))`. The monotone shape shared by
+/// the 19 corpus frames at Shadows +60 (isotonic, smoothed over half a stop;
+/// module head), divided by 0.6.
+const HS_SH_LIFT: [f32; HS_SH_BN] = [1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13146, 1.13110, 1.12666, 1.10588, 1.06696, 1.03154, 1.00729, 0.98861, 0.96846, 0.94082, 0.90612, 0.87064, 0.83557, 0.79884, 0.75949, 0.71571, 0.66832, 0.61910, 0.56704, 0.51075, 0.45130, 0.38381, 0.31107, 0.24594, 0.19361, 0.15238, 0.12019, 0.09822, 0.08370, 0.06907, 0.05555, 0.04910, 0.04779, 0.04768, 0.04758, 0.04697, 0.04493, 0.04037, 0.03438, 0.03011, 0.02801, 0.02723, 0.02707, 0.02706, 0.02706, 0.02706, 0.02706, 0.02706, 0.02706, 0.02706];
+
+/// Shadows below 0, the same form ([`HS_SH_LIFT`]) on its own table: the
+/// four frames rendered at Shadows −60, divided by −0.6. The two signs share
+/// the shape through the middle; −60 darkens the deepest levels further than
+/// +60 lifts them (module head).
+const HS_SH_DEEPEN: [f32; HS_SH_BN] = [1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72494, 1.72037, 1.67676, 1.50116, 1.22371, 1.05811, 1.02128, 1.01702, 1.01133, 1.00210, 0.99650, 0.99522, 0.99467, 0.99172, 0.98186, 0.96320, 0.93879, 0.91032, 0.87702, 0.83676, 0.78945, 0.73982, 0.69447, 0.65556, 0.61857, 0.57591, 0.52323, 0.45980, 0.38541, 0.30421, 0.23338, 0.19201, 0.17806, 0.17571, 0.17551, 0.17510, 0.17323, 0.16959, 0.16445, 0.15584, 0.14150, 0.11533, 0.08008, 0.05595, 0.04804, 0.04681, 0.04672, 0.04672, 0.04672, 0.04672, 0.04672, 0.04666, 0.04593, 0.04264, 0.03722];
+
+/// A frame's statistics for Highlights and Shadows, as a tone LUT or the
+/// solve assumes them ([`HsSite::diagonal`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct HsKey {
+    /// `log2` of the mean linear luminance (Highlights' key).
+    pub(crate) key: f32,
+    /// The mean of the Shadows map ([`HS_SH_CELLS`]), in stops.
+    pub(crate) log_mean: f32,
+    /// The standard deviation of the Shadows map, in stops (the spread).
+    pub(crate) spread: f32,
+}
+
+impl HsKey {
+    /// Without a frame: the seven calibration frames' medians, key
+    /// [`HS_KEY_NOMINAL`], map mean −5.88 st, spread 2.31 st (their flat
+    /// renders' maps).
+    pub(crate) const NOMINAL: Self = Self { key: HS_KEY_NOMINAL, log_mean: -5.88, spread: 2.31 };
+}
 
 /// Highlights' push per unit slider over the fine base's `z`: `[T, Q]`; a
 /// slider at `s < 0` adds `s · (T + |s| · Q)` to `u`, plus [`HS_HL2`]'s
@@ -578,46 +588,50 @@ fn line_at(t: &[f32], x: f32, x0: f32, step: f32) -> f32 {
     t[i] + (t[i + 1] - t[i]) * (p - i as f32)
 }
 
-/// [`HS_SH`] row `r` at `(z, u)`, bilinear, clamped to the grid.
-fn sh_grid(r: usize, z: f32, u: f32) -> f32 {
-    let t = &HS_SH[r];
-    let p = ((z - HS_Z0) / HS_ZSTEP).clamp(0.0, (HS_ZN - 1) as f32);
-    let q = (u * (HS_UN - 1) as f32).clamp(0.0, (HS_UN - 1) as f32);
-    let (i, j) = ((p.floor() as usize).min(HS_ZN - 2), (q.floor() as usize).min(HS_UN - 2));
-    let (fi, fj) = (p - i as f32, q - j as f32);
-    let at = |a: usize, b: usize| t[a * HS_UN + b];
-    let lo = at(i, j) + (at(i, j + 1) - at(i, j)) * fj;
-    let hi = at(i + 1, j) + (at(i + 1, j + 1) - at(i + 1, j)) * fj;
-    lo + (hi - lo) * fi
+/// How far `u` moves when its linear luminance is multiplied by `2^stops`,
+/// in `f64` (the solve asks it at a slider of 1e-6).
+fn lift_u(u: f32, stops: f32) -> f32 {
+    let u = f64::from(u.clamp(0.0, 1.0));
+    let lin = if u <= 0.04045 { u / 12.92 } else { ((u + 0.055) / 1.055).powf(2.4) };
+    let y = lin * f64::from(stops).exp2();
+    let back = if y <= 0.0031308 { y * 12.92 } else { 1.055 * y.powf(1.0 / 2.4) - 0.055 };
+    (back - u) as f32
 }
 
 /// Where a pixel sits for Highlights and Shadows: `z` on the fine base,
-/// `z2` on the coarse one (both `log2(base) − key`).
+/// `z2` on the coarse one (both `log2(base) − key`, Highlights); `b` the
+/// Shadows map at the pixel minus the map's mean, `spread` the map's
+/// standard deviation (both in stops, Shadows).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct HsSite {
     pub(crate) z: f32,
     pub(crate) z2: f32,
+    pub(crate) b: f32,
+    pub(crate) spread: f32,
 }
 
 impl HsSite {
-    /// The site a pointwise tone LUT assumes at `u`: both bases are the
-    /// pixel itself, the frame's key `key` ([`HS_KEY_NOMINAL`] without a
-    /// frame).
-    pub(crate) fn diagonal(u: f32, key: f32) -> Self {
-        let z = (srgb_to_linear(u) + HS_FLOOR).log2() - key;
-        Self { z, z2: z }
+    /// The site a pointwise tone LUT assumes at `u`: every base is the
+    /// pixel itself, the frame's statistics `key` ([`HsKey::NOMINAL`]
+    /// without a frame).
+    pub(crate) fn diagonal(u: f32, key: HsKey) -> Self {
+        let y = srgb_to_linear(u);
+        let z = (y + HS_FLOOR).log2() - key.key;
+        Self { z, z2: z, b: (y + HS_SH_FLOOR).log2() - key.log_mean, spread: key.spread }
     }
 }
 
 /// The push per unit slider of Highlights (`k = 1`) or Shadows (`k = 2`) at
-/// `s`, for a pixel at `u` at `site`: the push is `s · row`. The measured
-/// signs (Highlights below 0, Shadows above) follow the local law; the other
-/// two keep their pointwise tables ([`camera_raw_row`]) at the pixel's own
-/// `u`.
+/// `s`, for a pixel at `u` at `site`: the push is `s · row`. Shadows (both
+/// signs) multiply the pixel's linear luminance by `2^(s · spread · T(b))`
+/// ([`HS_SH_LIFT`], [`HS_SH_DEEPEN`]); Highlights below 0 follow the local,
+/// keyed law ([`HS_HL`], [`HS_HL2`]); Highlights above 0 keep the pointwise
+/// table ([`camera_raw_row`]) at the pixel's own `u`.
 pub(crate) fn hs_row(k: usize, s: f32, site: HsSite, u: f32) -> f32 {
     let m = s.abs();
-    if k == 2 && s > 0.0 {
-        sh_grid(0, site.z, u) + m * sh_grid(1, site.z, u)
+    if k == 2 && s != 0.0 {
+        let t = line_at(if s > 0.0 { &HS_SH_LIFT } else { &HS_SH_DEEPEN }, site.b, HS_SH_B0, HS_SH_BSTEP);
+        lift_u(u, s * site.spread * t) / s
     } else if k == 1 && s < 0.0 {
         line_at(&HS_HL[0], site.z, HS_Z0, HS_ZSTEP)
             + m * line_at(&HS_HL[1], site.z, HS_Z0, HS_ZSTEP)
@@ -641,11 +655,58 @@ pub(crate) fn hs_push(hl: f32, sh: f32, site: HsSite, u: f32) -> f32 {
     p
 }
 
-/// Every pixel's [`HsSite`] on a profile-stage frame: each base is the
-/// edge-aware ([`bilateral_base`]) smoothing of `log2` linear luminance at
-/// its film-pixel sigma and [`HS_SIGMA_R`] stops, the key `log2` of the
-/// frame's mean linear luminance. `coarse = false` skips the coarse base
-/// (only Highlights reads it) and copies the fine one.
+/// Shadows' map of a frame of linear luminance `y` ([`HS_SH_CELLS`]): per
+/// pixel the map read bilinearly minus the map's mean, and the map's
+/// standard deviation, in stops.
+fn shadow_map(y: &[f32], w: usize, h: usize) -> (Vec<f32>, f32) {
+    if w == 0 || h == 0 || y.len() != w * h {
+        return (vec![0.0; y.len()], 0.0);
+    }
+    let c = (w as f32 / HS_SH_CELLS as f32).max(1.0);
+    let (mw, mh) = (((w as f32 / c) as usize).max(1), ((h as f32 / c) as usize).max(1));
+    let edge = |k: usize, n: usize| ((k as f32 * c) as usize).min(n);
+    let map: Vec<f32> = (0..mh)
+        .into_par_iter()
+        .flat_map_iter(|i| {
+            let (y0, y1) = (edge(i, h), edge(i + 1, h).max(edge(i, h) + 1).min(h));
+            (0..mw).map(move |j| {
+                let (x0, x1) = (edge(j, w), edge(j + 1, w).max(edge(j, w) + 1).min(w));
+                let mut sum = 0.0f64;
+                for row in y0..y1 {
+                    for v in &y[row * w + x0..row * w + x1] {
+                        sum += f64::from((v.max(0.0) + HS_SH_FLOOR).log2());
+                    }
+                }
+                (sum / ((y1 - y0) * (x1 - x0)).max(1) as f64) as f32
+            })
+        })
+        .collect();
+    let n = map.len() as f64;
+    let mean = map.iter().map(|&v| f64::from(v)).sum::<f64>() / n;
+    let var = map.iter().map(|&v| (f64::from(v) - mean).powi(2)).sum::<f64>() / n;
+    let mean = mean as f32;
+    let mut out = vec![0.0f32; w * h];
+    out.par_chunks_mut(w).enumerate().for_each(|(py, row)| {
+        let gy = ((py as f32 + 0.5) / c - 0.5).clamp(0.0, (mh - 1) as f32);
+        let (r0, fy) = ((gy.floor() as usize).min(mh - 1), gy - gy.floor());
+        let r1 = (r0 + 1).min(mh - 1);
+        for (px, o) in row.iter_mut().enumerate() {
+            let gx = ((px as f32 + 0.5) / c - 0.5).clamp(0.0, (mw - 1) as f32);
+            let (c0, fx) = ((gx.floor() as usize).min(mw - 1), gx - gx.floor());
+            let c1 = (c0 + 1).min(mw - 1);
+            let top = map[r0 * mw + c0] + (map[r0 * mw + c1] - map[r0 * mw + c0]) * fx;
+            let bot = map[r1 * mw + c0] + (map[r1 * mw + c1] - map[r1 * mw + c0]) * fx;
+            *o = top + (bot - top) * fy - mean;
+        }
+    });
+    (out, var.sqrt() as f32)
+}
+
+/// Every pixel's [`HsSite`] on a profile-stage frame. Highlights: each base
+/// is the edge-aware ([`bilateral_base`]) smoothing of `log2` linear
+/// luminance at its film-pixel sigma and [`HS_SIGMA_R`] stops, the key `log2`
+/// of the frame's mean linear luminance; `coarse = false` skips the coarse
+/// base and copies the fine one. Shadows: the frame's map ([`shadow_map`]).
 pub(crate) fn hs_field(data: &[[f32; 3]], w: usize, h: usize, film: FilmScale, coarse: bool) -> Vec<HsSite> {
     let y: Vec<f32> = data.par_iter().map(|px| srgb_to_linear(camera_raw_unstart(luma601(px)))).collect();
     let n = y.len().max(1);
@@ -654,9 +715,15 @@ pub(crate) fn hs_field(data: &[[f32; 3]], w: usize, h: usize, film: FilmScale, c
     let lg: Vec<f32> = y.par_iter().map(|&v| (v + HS_FLOOR).log2()).collect();
     let fine = bilateral_base(&lg, w, h, film.raster_px(HS_SIGMA_S), HS_SIGMA_R);
     let wide = coarse.then(|| bilateral_base(&lg, w, h, film.raster_px(HS_SIGMA_S2), HS_SIGMA_R));
+    let (b, spread) = shadow_map(&y, w, h);
     (0..fine.len())
         .into_par_iter()
-        .map(|i| HsSite { z: fine[i] - key, z2: wide.as_ref().map_or(fine[i], |c| c[i]) - key })
+        .map(|i| HsSite {
+            z: fine[i] - key,
+            z2: wide.as_ref().map_or(fine[i], |c| c[i]) - key,
+            b: b.get(i).copied().unwrap_or(0.0),
+            spread,
+        })
         .collect()
 }
 
@@ -740,8 +807,9 @@ pub(crate) fn hs_pixel(px: [f32; 3], hl: f32, sh: f32, site: HsSite) -> [f32; 3]
     hs_pixel_scaled(px, hl, sh, site, [1.0, 1.0])
 }
 
-/// [`hs_pixel`] with each slider's push scaled (`[highlights, shadows]`):
-/// a mask's own Highlights and Shadows (`mask_cr`).
+/// [`hs_pixel`] with each slider scaled (`[highlights, shadows]`: the
+/// Highlights push in `u`, the Shadows slider): a mask's own Highlights and
+/// Shadows (`mask_cr`).
 pub(crate) fn hs_pixel_scaled(px: [f32; 3], hl: f32, sh: f32, site: HsSite, gain: [f32; 2]) -> [f32; 3] {
     let l = luma601(&px);
     let u = camera_raw_unstart(l);
@@ -750,7 +818,9 @@ pub(crate) fn hs_pixel_scaled(px: [f32; 3], hl: f32, sh: f32, site: HsSite, gain
         push += gain[0] * hl * hs_row(1, hl, site, u);
     }
     if sh != 0.0 {
-        push += gain[1] * sh * hs_row(2, sh, site, u);
+        // Shadows' gain scales the slider: the push is in stops, linear in it.
+        let s = gain[1] * sh;
+        push += s * hs_row(2, s, site, u);
     }
     let target = camera_raw_start((u + push).clamp(0.0, 1.0));
     // Highlights shape the hue by Adobe's channel rule (`camera_raw_channels`)
@@ -803,32 +873,9 @@ pub(crate) fn apply_camera_raw_hs(data: &mut [[f32; 3]], field: &[HsSite], hl: f
 mod tests {
     use super::*;
 
-    /// The ramp is the identity from its black to its knee, rises strictly
-    /// to white, and its inverse undoes it over the open range.
-    ///
-    /// MUTATION: put the black before the gain's subtraction order back the
-    /// other way (`v` from `t / (1 − b)`), or drop the shoulder's unit slope.
-    #[test]
-    fn the_exposure_ramp_is_monotone_and_inverts() {
-        let v = |t: f32| (t - RAMP_BLACK) / (1.0 - RAMP_BLACK);
-        for t in [0.01f32, 0.05, 0.1, 0.15] {
-            assert!((exposure_ramp(t) - v(t)).abs() < 1e-6, "identity below the knee at {t}");
-        }
-        assert_eq!(exposure_ramp(0.0), 0.0);
-        assert_eq!(exposure_ramp(RAMP_BLACK * 0.5), 0.0, "under the black is black");
-        let mut prev = 0.0f32;
-        for i in 1..=400 {
-            let t = i as f32 / 200.0;
-            let r = exposure_ramp(t);
-            assert!(r >= prev && r <= 1.0, "monotone and capped at {t}");
-            if r < 0.999 {
-                assert!(r > prev, "strictly rising below white at {t}");
-                assert!((ramp_inverse(r) - t).abs() < 1e-4, "inverse at {t}: {}", ramp_inverse(r));
-            }
-            prev = r;
-        }
-        assert!(exposure_ramp(1.0) < 1.0, "the shoulder keeps white's neighbourhood open");
-    }
+    /// A camera start the tests develop from: a body's baseline and the
+    /// headroom's full stop, where a daylight frame sits.
+    const START: crate::recipe::CameraStart = crate::recipe::CameraStart { ev: 0.35, headroom: 1.0 };
 
     /// Adobe's curve under the transfer and its inverse compose to the
     /// identity, so a recipe with no slider work leaves `u` where it was.
@@ -853,7 +900,7 @@ mod tests {
     /// every value it can.
     ///
     /// MUTATION: drop the band guard in `camera_raw_tone`, or let the
-    /// exposure LUT read `u` without undoing the start.
+    /// exposure read `u` without undoing the start.
     #[test]
     fn the_slider_tone_stays_monotone_at_every_extreme() {
         let mut cases = vec![[1.0f32, 1.0, 1.0, 1.0, 1.0], [-1.0; 5], [1.0, -1.0, 1.0, -1.0, 1.0], [-1.0, 1.0, -1.0, 1.0, -1.0]];
@@ -865,18 +912,20 @@ mod tests {
             }
         }
         for ev in [-3.0f32, 0.0, 2.0] {
+            let e = Exposure::new(START, ev);
             for s in &cases {
-                let t = camera_raw_tone(ev, *s, Local::default());
+                let t = camera_raw_tone(e.as_ref(), *s, Local::default());
                 assert!(t.windows(2).all(|w| w[1] >= w[0]), "monotone at ev {ev} {s:?}");
                 assert!(t.iter().all(|v| (0.0..=1.0).contains(v)), "in range at ev {ev} {s:?}");
             }
         }
-        let up = camera_raw_exposure_lut(1.0).expect("a non-zero exposure");
-        for (i, &v) in up.iter().enumerate() {
+        let up = Exposure::new(START, 1.0).expect("a non-zero exposure");
+        for i in 0..LUT_N {
             let x = i as f32 / (LUT_N - 1) as f32;
+            let v = camera_raw_exposure(x, Some(&up));
             assert!(v >= x - 1e-4, "+1 EV raises {x}: {v}");
         }
-        assert!(camera_raw_exposure_lut(0.0).is_none());
+        assert!(Exposure::new(START, 0.0).is_none());
     }
 
     /// Dehaze alone makes a slider pass with a chroma gain; at 0 there is no
@@ -938,7 +987,8 @@ mod tests {
         assert!(bilateral_base(&flat, w, h, 12.0, 1.0).iter().all(|&v| v == -2.5));
     }
 
-    /// A frame of one value sits at its own key: every site's `z` is 0.
+    /// A frame of one value sits at its own key: every site's `z` and `b`
+    /// are 0, its spread 0.
     #[test]
     fn a_uniform_frame_sits_at_its_key() {
         let data = vec![[0.4f32; 3]; 32 * 24];
@@ -946,7 +996,116 @@ mod tests {
         // few thousandths of a stop at this level.
         for s in hs_field(&data, 32, 24, FilmScale::NATIVE, true) {
             assert!(s.z.abs() < 0.01 && s.z2.abs() < 0.01, "{s:?}");
+            assert!(s.b.abs() < 1e-4 && s.spread < 1e-4, "{s:?}");
         }
+    }
+
+    /// Shadows' map: a frame of two halves `d` stops apart has
+    /// each half at ±d/2 from the map's mean and a spread of d/2, at any
+    /// width (the map's cells are a share of the width, not pixels).
+    ///
+    /// MUTATION: take the mean of linear luminance instead of `log2`, or
+    /// count the cells in pixels.
+    #[test]
+    fn the_shadow_map_reads_levels_in_stops_against_the_frame() {
+        for w in [96usize, 1600] {
+            let h = w / 2;
+            let (lo, hi) = (0.02f32, 0.32f32); // four stops apart
+            let y: Vec<f32> = (0..w * h).map(|i| if i % w < w / 2 { lo } else { hi }).collect();
+            let (b, spread) = shadow_map(&y, w, h);
+            assert!((spread - 2.0).abs() < 0.01, "w {w}: spread {spread}");
+            assert!((b[h / 2 * w + 2] + 2.0).abs() < 0.01 && (b[h / 2 * w + w - 3] - 2.0).abs() < 0.01, "w {w}");
+        }
+    }
+
+    /// Shadows multiply a pixel's linear luminance by `2^(s · spread · T(b))`,
+    /// each sign on its own table: the push in stops scales with the frame's
+    /// spread and is nothing on a frame without one, and −0.6 darkens a deep
+    /// site further than +0.6 lifts it.
+    ///
+    /// MUTATION: push `u` by the table instead of the luminance, drop the
+    /// spread, or read the lift table for both signs.
+    #[test]
+    fn shadows_scale_linear_light_by_the_frame_spread() {
+        let stops = |s: f32, b: f32, spread: f32, u: f32| {
+            let site = HsSite { z: 0.0, z2: 0.0, b, spread };
+            (srgb_to_linear(u + hs_push(0.0, s, site, u)) / srgb_to_linear(u)).log2()
+        };
+        let t = line_at(&HS_SH_LIFT, -2.0, HS_SH_B0, HS_SH_BSTEP);
+        assert!((stops(0.6, -2.0, 2.0, 0.2) - 0.6 * 2.0 * t).abs() < 1e-3);
+        assert!((stops(0.6, -2.0, 1.0, 0.2) - 0.6 * t).abs() < 1e-3);
+        assert!(stops(0.6, -2.0, 0.0, 0.2).abs() < 1e-5);
+        assert!(stops(0.6, -2.0, 2.0, 0.2) > stops(0.6, 1.0, 2.0, 0.2));
+        assert!(-stops(-0.6, -8.0, 2.0, 0.05) > 1.2 * stops(0.6, -8.0, 2.0, 0.05));
+    }
+
+    /// Camera Raw's Highlights and Shadows measured on synthetic neutral
+    /// frames (the calibration body's own RAW with its pixels replaced, so
+    /// profile, baseline and lens are the frame's), pinned here until the
+    /// law reproduces them (TECH_STACK, "Highlights and Shadows: what the
+    /// synthetic frames showed"). `u` per pixel before and after one slider.
+    fn hs_moves(levels: &[f32], hl: f32, sh: f32) -> Vec<f32> {
+        let (w, h) = (96usize, 64usize);
+        let film = FilmScale::of(Some(6336), w, h);
+        let mut data: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| [camera_raw_start(levels[(i % w) * levels.len() / w]); 3])
+            .collect();
+        let before: Vec<f32> = data.iter().map(|px| camera_raw_unstart(luma601(px))).collect();
+        let field = hs_field(&data, w, h, film, true);
+        apply_camera_raw_hs(&mut data, &field, hl, sh);
+        data.iter().zip(&before).map(|(px, &u)| camera_raw_unstart(luma601(px)) - u).collect()
+    }
+
+    /// A uniform frame is left alone by Shadows: Camera Raw 18.4 moved a
+    /// uniform field by 0.0000 in `u` at every level from 0.13 to 0.78 under
+    /// Shadows +60; the law's push scales with the frame's spread, 0 there.
+    ///
+    /// MUTATION: a fixed spread instead of the frame's.
+    #[test]
+    fn a_uniform_frame_is_left_alone_by_shadows() {
+        for u in [0.13f32, 0.26, 0.44, 0.60, 0.78] {
+            for sh in [0.6f32, -0.6] {
+                let m = hs_moves(&[u], 0.0, sh);
+                let worst = m.iter().fold(0.0f32, |a, &d| a.max(d.abs()));
+                assert!(worst < 1e-4, "u {u} sh {sh}: moved {worst}");
+            }
+        }
+    }
+
+    /// A uniform frame is left alone by Highlights: Camera Raw 18.4 moved a
+    /// uniform field by 0.0000 in `u` at every level from 0.13 to 0.78 under
+    /// Highlights −60; the frame-keyed law moves it −0.03.
+    #[test]
+    #[ignore = "measured Camera Raw behaviour the frame-keyed law does not reproduce yet (TECH_STACK)"]
+    fn a_uniform_frame_is_left_alone_by_highlights() {
+        for u in [0.13f32, 0.26, 0.44, 0.60, 0.78] {
+            let m = hs_moves(&[u], -0.6, 0.0);
+            let worst = m.iter().fold(0.0f32, |a, &d| a.max(d.abs()));
+            assert!(worst < 0.003, "u {u}: moved {worst}");
+        }
+    }
+
+    /// A frame of two levels, half and half (u 0.13 | u 0.70): Camera Raw
+    /// moves each half as one, at every distance from the edge (Highlights
+    /// −60: the bright half −0.208 at the edge to −0.238 4000 film px away,
+    /// the dark half −0.016 to −0.022; Shadows +60: the dark half +0.017 to
+    /// +0.018, the bright half 0.000). The law: −0.062 to −0.090; Shadows
+    /// (the frame's spread 2.43 stops) about +0.081 on the dark half and
+    /// +0.016 on the bright one.
+    #[test]
+    #[ignore = "measured Camera Raw behaviour the frame-keyed law does not reproduce yet (TECH_STACK)"]
+    fn a_two_level_frame_moves_each_level_as_one() {
+        let (w, h) = (96usize, 64usize);
+        let side = |m: &[f32], bright: bool| {
+            let v: Vec<f32> = (0..w * h).filter(|i| ((i % w) >= w / 2) == bright).map(|i| m[i]).collect();
+            v.iter().sum::<f32>() / v.len() as f32
+        };
+        let hl = hs_moves(&[0.13, 0.70], -0.6, 0.0);
+        let sh = hs_moves(&[0.13, 0.70], 0.0, 0.6);
+        assert!((side(&hl, true) + 0.225).abs() < 0.03, "bright half under Highlights: {}", side(&hl, true));
+        assert!((side(&hl, false) + 0.019).abs() < 0.01, "dark half under Highlights: {}", side(&hl, false));
+        assert!((side(&sh, false) - 0.018).abs() < 0.01, "dark half under Shadows: {}", side(&sh, false));
+        assert!(side(&sh, true).abs() < 0.005, "bright half under Shadows: {}", side(&sh, true));
     }
 
     /// Highlights and Shadows run before Exposure: the response is the
@@ -956,14 +1115,15 @@ mod tests {
     /// sliders' first law did.
     #[test]
     fn highlights_and_shadows_run_before_the_exposure() {
-        let key = HS_KEY_NOMINAL;
+        let key = HsKey::NOMINAL;
+        let e = Exposure::new(START, 1.0);
         for (hl, sh) in [(-0.6f32, 0.0f32), (0.0, 0.6), (-0.4, 0.5)] {
             for i in 1..20 {
                 let u = i as f32 / 20.0;
                 let site = HsSite::diagonal(u, key);
                 let moved = (u + hs_push(hl, sh, site, u)).clamp(0.0, 1.0);
-                let want = camera_raw_exposure(moved, 1.0);
-                let got = camera_raw_response_keyed(1.0, [0.0, hl, sh, 0.0, 0.0], u, key);
+                let want = camera_raw_exposure(moved, e.as_ref());
+                let got = camera_raw_response_keyed(e.as_ref(), [0.0, hl, sh, 0.0, 0.0], u, key);
                 assert!((got - want).abs() < 1e-5, "hl {hl} sh {sh} at {u}: {got} vs {want}");
             }
         }
@@ -976,11 +1136,11 @@ mod tests {
     #[test]
     fn the_law_reads_the_site_and_the_key() {
         let u = 0.3f32;
-        let at = |z: f32| HsSite { z, z2: z };
+        let at = |z: f32| HsSite { z, z2: z, b: z, spread: 2.3 };
         assert!(hs_push(0.0, 0.6, at(-3.0), 0.08) > hs_push(0.0, 0.6, at(1.0), 0.08));
         assert!(hs_push(-0.6, 0.0, at(1.5), u) < hs_push(-0.6, 0.0, at(-2.0), u));
-        let dark_frame = HsSite::diagonal(u, -5.5);
-        let bright_frame = HsSite::diagonal(u, -2.5);
+        let dark_frame = HsSite::diagonal(u, HsKey { key: -5.5, ..HsKey::NOMINAL });
+        let bright_frame = HsSite::diagonal(u, HsKey { key: -2.5, ..HsKey::NOMINAL });
         assert!(hs_push(-0.6, 0.0, dark_frame, u) < hs_push(-0.6, 0.0, bright_frame, u));
     }
 
@@ -992,7 +1152,7 @@ mod tests {
     /// channel through the curve on its own.
     #[test]
     fn a_shadow_lift_keeps_the_colour_over_the_floor() {
-        let site = HsSite { z: -3.0, z2: -3.0 };
+        let site = HsSite { z: -3.0, z2: -3.0, b: -3.0, spread: 2.3 };
         let f = HS_CHROMA_FLOOR;
         let warm = [0.30f32, 0.18, 0.08];
         let out = hs_pixel(warm, 0.0, 0.6, site);

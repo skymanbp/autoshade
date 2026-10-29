@@ -586,6 +586,19 @@ pub(super) fn owned_attrs(r: &EditRecipe, frame: Option<FrameAspect>) -> String 
         attr(&mut a, "LensManualDistortionAmount", &signed(r.lens_distortion));
     }
 
+    // The profile a strength needs NAMED (2026-10-28): Camera Raw honours the
+    // two strengths below only for a profile crs:LensProfileName names, and
+    // renders them at 100 otherwise, so the export names it whenever a
+    // strength is off 100 ([`EditRecipe::lightroom_named_lens_profile`], which
+    // with the setup [`EditRecipe::lightroom_lens_setup`]). In Lightroom's own key order. The
+    // three keys are owned only while written (`unspoken_attr_keys`): a
+    // Lightroom file at 100 keeps its own setup, name, file name and digest.
+    if let Some(id) = r.lightroom_named_lens_profile() {
+        attr(&mut a, "LensProfileSetup", r.lightroom_lens_setup());
+        attr(&mut a, "LensProfileName", &id.name);
+        attr(&mut a, "LensProfileFilename", &id.filename);
+    }
+
     // The PROFILE's two strengths (v1.5.0). Written when they say something —
     // which here means "away from 100", not "away from 0": 100 is Lightroom's
     // own neutral and 0 is a real value meaning "switch this component off".
@@ -1315,6 +1328,9 @@ pub(crate) fn owned_attr_keys() -> Vec<String> {
         "VignetteAmount",
         "VignetteMidpoint",
         "LensManualDistortionAmount",
+        "LensProfileSetup",
+        "LensProfileName",
+        "LensProfileFilename",
         "LensProfileDistortionScale",
         "LensProfileVignettingScale",
         // The Transform panel (v1.5.0 F6). Owning them is what moves the eight

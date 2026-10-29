@@ -371,6 +371,7 @@ fn snapshot_xmp_text(src: &Path, text: String) -> std::io::Result<Option<u32>> {
         derived.as_shot_k = ask;
         derived.as_shot_tint = ast;
     }
+    crate::pipeline::stamp_camera_start(src, &mut derived);
     let (n, dst) = claim_version(src)?;
     let xmp_dst = dev.join(format!("v{n}.{stem}.xmp"));
     if let Err(e) = durable_write(&xmp_dst, text.as_bytes()) {
