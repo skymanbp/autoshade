@@ -5511,8 +5511,14 @@ lost (a* +36.45 against the target's +44.80). `search_cast_hand_off` walks
 the white balance from the shipped one along the direction the as-fitted
 curves pull, read by the white-balance stage's own estimator on the curves'
 own move (a mean of linear values read that warm cast as COOLER, measured),
-doubling the walk until it reaches the `WB_SEARCH_K` edge and trying 24
-points on it. At each point saturation is chased again (stage 3 reads mean
+doubling the walk's extent from `λ = 1` until its point reaches a
+`WB_SEARCH_K` edge, leaves the strength budget, or stops moving (twice the
+extent inverts onto the same pair), and trying 24 even points on it. The
+budget and the stopped point ended a defect (2026-10-29, measured on p40): on
+Camera Raw's law the curves' pull pinned the tint at +100 by `λ = 1`, the
+Kelvin settled at 3550 K without meeting an edge, the extent ran to 64, and
+all 24 candidates inverted onto one out-of-budget pair while the budget
+admitted the walk's own points up to `λ ≈ 0.25`. At each point saturation is chased again (stage 3 reads mean
 chroma, and a moved white balance carries a different amount of it) and the
 curves are re-fitted — except on the 4b do-no-harm loop's re-fit
 (`CastRescue::KeepSaturation`), which keeps the saturation the loop is
@@ -5537,8 +5543,11 @@ finished at a mean ΔE of 8.29 against the target while 40000 K, inside the
 band and pulling least (0.24 against 0.43), finished at 7.52. The winner
 ships only when it beats the frame without curves by more than `FIT_QUANT`,
 the projection's own bar; otherwise the projection runs exactly as before,
-on an untouched recipe, and `a_hand_off_the_cells_refuse_leaves_the_projection_as_it_was`
-pins that path by value against the tree before the hand-off. A shipped
+on an untouched recipe. (The synthetic pair that pinned that path by value
+until 2026-10-29 had been refused only at the coarse steps; the finer walk
+reaches a white balance its cells vouch, and
+`the_hand_off_walk_reaches_the_nearer_white_balance_the_cells_vouch` pins
+that.) A shipped
 hand-off says so (`FIT_NOTE_CAST_HANDED_TO_WB`: Kelvin and tint before and
 after, the fan before and after, the cells' shares) and, on the Kelvin
 domain's edge above the default strength, adds the white-balance stage's own
