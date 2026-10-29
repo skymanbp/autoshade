@@ -6,11 +6,12 @@ re-derives the guide and the unclipped mask from the exported pixels, runs
 `grid_experiment.GridSystem` at production's grid and regulariser (the 12x8x8
 experiment refined to 32 vertex rows, tikhonov and smooth rescaled with it, 90
 iterations — `src/fit_field.rs`) on exactly those numbers, with production's
-bound-constrained active-set loop around the experiment's conjugate gradients
-(`System::solve`, 2026-10-19: bounds honoured INSIDE the solve, not clipped
-onto an unconstrained answer) and its per-CELL occupancy floor, and writes the
-NumPy grid and render back for `compare_calibration_field_with_numpy` to score
-with the production objective.
+bounded solve around the experiment's conjugate gradients (`System::solve`,
+v1.17.0: each vertex's colour change — EV and the three gains as one
+per-channel multiplier — limited along its own direction and held, then an
+active-set loop for the slopes alone) and its per-CELL occupancy floor, and
+writes the NumPy grid and render back for `compare_calibration_field_with_numpy`
+to score with the production objective.
 
     python scripts/field_check.py
 """
@@ -80,25 +81,57 @@ def conjugate_gradients(system, rhs, start, free, iterations):
     return vector, {"iterations": used, "relative_residual": (rr / initial) ** 0.5}
 
 
+def limit_all(vector):
+    """`fit_field::limit_colour_change` over every vertex: the slope clamped to
+    its bound; a colour change (m_c = ln2*EV + gain_c) outside its bounds scaled
+    toward none by the largest factor that brings it in and split back with its
+    middle on EV as far as EV reaches. Returns (scaled, slope) flags per vertex."""
+    p = vector.reshape(-1, PARAMS)
+    ev_b, gain, slope_b = float(BOUNDS_HIGH[0]), float(BOUNDS_HIGH[1]), float(BOUNDS_HIGH[4])
+    slope = np.abs(p[:, 4]) >= slope_b
+    p[:, 4] = np.clip(p[:, 4], -slope_b, slope_b)
+    outside = (np.abs(p[:, 0]) > ev_b) | np.any(np.abs(p[:, 1:4]) > gain, axis=1)
+    ln2 = np.log(2.0)
+    m = ln2 * p[:, 0:1].astype(np.float64) + p[:, 1:4].astype(np.float64)
+    hi, lo = m.max(axis=1), m.min(axis=1)
+    mid, half = (hi + lo) / 2.0, (hi - lo) / 2.0
+    reach = ln2 * ev_b
+    scale = np.ones_like(mid)
+    scale = np.where(half > gain, np.minimum(scale, gain / np.maximum(half, 1e-300)), scale)
+    over = np.abs(mid) + half > reach + gain
+    scale = np.where(over, np.minimum(scale, (reach + gain) / np.maximum(np.abs(mid) + half, 1e-300)), scale)
+    ev = np.clip(scale * mid / ln2, -ev_b, ev_b)
+    gains = np.clip(scale[:, None] * m - ln2 * ev[:, None], -gain, gain)
+    p[outside, 0] = ev[outside].astype(np.float32)
+    p[outside, 1:4] = gains[outside].astype(np.float32)
+    return outside & (scale < 1.0), slope
+
+
 def solve_bounded(system):
-    """`System::solve`: the active-set loop. Each pass clamps, pins the parameters
-    sitting on a bound whose gradient points outward, re-solves the free ones with
-    the pinned ones held, and stops when the pinned set repeats with every free
-    parameter strictly inside its bounds."""
+    """`System::solve`: conjugate gradients, every vertex's colour change limited
+    along its own direction and held, then the slopes' active-set loop with the
+    colour held: a slope on its bound with its gradient pointing outward is
+    pinned, re-solved around, released when its gradient turns inward."""
     rhs = system.rhs()
-    low = np.tile(BOUNDS_LOW, grid_experiment.VERTICES).astype(np.float32)
-    high = np.tile(BOUNDS_HIGH, grid_experiment.VERTICES).astype(np.float32)
-    free = np.ones(rhs.shape, dtype=bool)
-    vector, info = conjugate_gradients(system, rhs, np.zeros_like(rhs), free, ITERATIONS)
+    vector, info = conjugate_gradients(system, rhs, np.zeros_like(rhs), np.ones(rhs.shape, dtype=bool), ITERATIONS)
+    _, slope = limit_all(vector)
+    is_slope = (np.arange(rhs.size) % PARAMS) == 4
+    free = is_slope.copy()
     for _ in range(ACTIVE_SET_PASSES):
-        vector = np.clip(vector, low, high)
+        if not slope.any():
+            break
         descent = rhs - system.matvec(vector, TIKHONOV, SMOOTH)
-        pinned = ~(((vector <= low) & (descent < 0.0)) | ((vector >= high) & (descent > 0.0)))
-        if np.array_equal(pinned, free) and np.all(~free | ((low < vector) & (vector < high))):
+        v = vector.reshape(-1, PARAMS)[:, 4]
+        d = descent.reshape(-1, PARAMS)[:, 4]
+        out = slope & (((v < 0.0) & (d < 0.0)) | ((v > 0.0) & (d > 0.0)))
+        pinned = is_slope.copy()
+        pinned.reshape(-1, PARAMS)[:, 4] &= ~out
+        inside = not np.any(slope & free.reshape(-1, PARAMS)[:, 4])
+        if np.array_equal(pinned, free) and inside:
             break
         free = pinned
         vector, info = conjugate_gradients(system, rhs, vector, free, ITERATIONS)
-    vector = np.clip(vector, low, high)
+        _, slope = limit_all(vector)
     return vector.reshape(grid_experiment.VERTICES, PARAMS), info
 
 

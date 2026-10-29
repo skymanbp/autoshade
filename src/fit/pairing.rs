@@ -72,8 +72,13 @@ pub fn same_frame_plausible_dims(a: (u32, u32), b: (u32, u32)) -> bool {
 /// frame (`pipeline::fit_target`) carries an alpha that is opaque inside its
 /// field and clear outside, and the same box filter carries it onto the
 /// analysis grid, where [`presence_of`] reads it.
-pub(crate) fn analysis_pair(src: &DynamicImage, target: &DynamicImage) -> (DynamicImage, DynamicImage) {
-    let s_img = src.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
+///
+/// The source side is a [`crate::render::Plate`] (v1.17.0): thumbnailed from a
+/// fit source developed from its camera frame, it keeps that frame, so a
+/// candidate that moves the white is rendered with the white in the profile
+/// stage, as the export renders it.
+pub(crate) fn analysis_pair(src: &DynamicImage, target: &DynamicImage) -> (crate::render::Plate, DynamicImage) {
+    let s_img = crate::render::Plate::thumbnail_of(src, ANALYZE_EDGE);
     let t_img = target.thumbnail_exact(s_img.width(), s_img.height());
     (s_img, t_img)
 }

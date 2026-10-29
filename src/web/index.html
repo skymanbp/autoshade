@@ -352,7 +352,7 @@ const SLIDERS = [
   ["dehaze","Dehaze",-100,100,1],
   ["vibrance","Vibrance",-100,100,1],
   ["saturation","Saturation",-100,100,1],
-  ["tint","Tint",-100,100,1],
+  ["tint","Tint",-150,150,1],
   ["sharpening","Sharpening",0,150,1],
   ["noise_reduction","Noise Reduction",0,100,1],
 ];
@@ -787,7 +787,7 @@ function syncSliders() {
 // directly; syncWb only ever writes the track, never the recipe), so the
 // quantisation is display-side and a value only changes when the user
 // actually moves the slider (Codex batch-38).
-const K_MIN = 2000, K_MAX = 40000;
+const K_MIN = 2000, K_MAX = 50000;
 const posToK = p => Math.round(K_MIN * Math.pow(K_MAX / K_MIN, (+p || 0) / 1000));
 const kToPos = k => Math.round(1000 * Math.log((+k || K_MIN) / K_MIN) / Math.log(K_MAX / K_MIN));
 function buildWb(panel) {
@@ -795,7 +795,7 @@ function buildWb(panel) {
   row.className = "slider wb-temp-row";
   row.innerHTML = `<label>Temp (K)</label>
     <input type="range" class="wb-temp" aria-label="Temp (K)" min="0" max="1000" step="1"/>
-    <input type="number" class="val wb-temp-val" aria-label="Temp (Kelvin)" min="2000" max="40000" step="10" disabled/>`;
+    <input type="number" class="val wb-temp-val" aria-label="Temp (Kelvin)" min="2000" max="50000" step="10" disabled/>`;
   const chk = document.createElement("label");
   chk.className = "chk wb-custom";
   chk.innerHTML = `<input type="checkbox" class="wb-custom-on"/> Custom white balance (off = as-shot)`;
@@ -818,7 +818,7 @@ function buildWb(panel) {
   };
   num.onchange = () => {
     if (state.recipe.temperature_k == null) return;
-    const k = clampv(Math.round(+num.value || 0), 2000, 40000);
+    const k = clampv(Math.round(+num.value || 0), K_MIN, K_MAX);
     state.recipe.temperature_k = k;
     syncWb(); pushHistory(state.recipe); scheduleAfter();
   };

@@ -186,7 +186,8 @@ pub(crate) struct LocalField {
     /// vertices hold the occupancy-floor policy zero (a missing measurement, not
     /// a measured zero) cannot masquerade as spatial structure.
     pub weight: Vec<f32>,
-    /// Occupancy-supported vertices with at least one parameter on a bound.
+    /// Occupancy-supported vertices whose colour change or slope the bounds
+    /// limited ([`limit_colour_change`]).
     pub saturated: usize,
     pub solve: SolveInfo,
     pub width: u32,
@@ -240,7 +241,7 @@ impl LocalField {
         if !mass.is_finite() || mass <= 0.0 { return None; }
         let guide = smooth_3tap_luma(current, w, h);
         let system = System::new(current, target, &guide, &fit_weight, w, h);
-        let (raw, solve) = system.solve(tikhonov, smooth, iterations, |p| opts.bounds(p));
+        let (raw, solve, limited) = system.solve(tikhonov, smooth, iterations, |p| opts.bounds(p));
         if raw.iter().any(|value| !value.is_finite()) { return None; }
 
         let mut flat = vec![0.0f32; VERTICES * PARAMS];
@@ -249,15 +250,11 @@ impl LocalField {
         let measured = supported(&system.occupancy);
         for (vertex, cell) in grid.iter_mut().enumerate() {
             let supported = measured[vertex];
-            let mut on_bound = false;
             for (p, value) in cell.iter_mut().enumerate() {
-                let (low, high) = opts.bounds(p);
-                let bounded = raw[vertex * PARAMS + p].clamp(low, high);
-                on_bound |= bounded <= low || bounded >= high;
-                *value = if supported { bounded } else { 0.0 };
+                *value = if supported { raw[vertex * PARAMS + p] } else { 0.0 };
                 flat[vertex * PARAMS + p] = *value;
             }
-            saturated += usize::from(supported && on_bound);
+            saturated += usize::from(supported && limited[vertex]);
         }
         let field_render = apply_flat(current, &guide, &system.splat, &flat);
         let ceiling = fit::look_err_with_evidence(&field_render, target, evidence);
@@ -587,50 +584,78 @@ impl<'a> System<'a> {
         out
     }
 
-    /// The bound-constrained least-squares solve: an active-set loop around
-    /// conjugate gradients (f64 dot products, a per-pass step budget, a
-    /// relative-residual stop at 1e-10, the `denominator <= 1e-20` break).
+    /// The bounded least-squares solve: conjugate gradients (f64 dot products,
+    /// a per-pass step budget, a relative-residual stop at 1e-10, the
+    /// `denominator <= 1e-20` break), then every vertex's colour change limited
+    /// to its bounds ALONG ITS OWN DIRECTION ([`limit_colour_change`]) and
+    /// held there, then an active-set loop for the slopes alone. Returns a
+    /// solution inside the bounds, and per vertex whether the bounds limited
+    /// it; occupancy is the caller's.
     ///
-    /// The bounds are honoured INSIDE the solve, not clipped onto an
-    /// unconstrained answer afterwards — and that difference is the whole
-    /// reason this is a loop. A vertex's five parameters act on a pixel
-    /// jointly (EV and the three gains are one per-channel multiplier between
-    /// them; the slope trades against both), so clipping one of them after the
-    /// solve leaves the others balanced for a value it no longer has. Measured
+    /// Why the colour is limited as one change. A vertex's EV and three gains
+    /// act on a pixel as one per-channel multiplier between them, so clipping
+    /// one of them leaves the others balanced for a value it no longer has:
     /// on a night-landscape pair (2026-10-19) whose dark ground the field had
-    /// to lift about 1.8 EV: the clipped field left the ground at a linear-light
-    /// red/green ratio of 3.69 against the target's 3.16 — redder than the 3.46
-    /// it started from — while the constrained solve of the same system reads
-    /// 3.59 end to end. Each pass pins the parameters sitting on a bound whose gradient
-    /// points outward, re-solves the free ones with the pinned ones held, and
-    /// releases any pinned one whose gradient turns inward; it stops when the
-    /// pinned set repeats. Returns a solution inside the bounds; occupancy is
-    /// the caller's.
+    /// to lift about 1.8 EV, the clipped field left the ground at a
+    /// linear-light red/green ratio of 3.69 against the target's 3.16 —
+    /// redder than the 3.46 it started from. The answer until v1.17.0 was a
+    /// per-parameter box honoured inside the solve (3.59 there), which keeps
+    /// each channel's own best value up to its bound — so a demand larger in
+    /// one channel than the bound allows came out with that channel short and
+    /// the others whole, a hue the target never asked for. On the same pair's
+    /// horizon (p42, 0.85) the target lifted green 1.65× and blue 3.6×; blue
+    /// stopped at 2.6× with green at 1.64×, and the horizon rendered green
+    /// (Δa* −5.6). Scaled along its direction, a vertex's change keeps its
+    /// hue and gives up only its size — every pixel it moves moves along the
+    /// line toward its target, never past it and never off it.
+    ///
+    /// Why the limited changes are held and not re-solved. Re-solving the
+    /// free vertices around a limited one lets them make up its shortfall,
+    /// and the cheapest make-up under the regulariser is the common part
+    /// (Tikhonov prices a change through EV below one through three gains):
+    /// on the pure-hue fixture a neighbour re-solved that way turned 6° toward
+    /// grey (cos 0.993 to its own unbounded change). Held, it keeps its own.
+    /// The slope is a contrast, not a colour, and keeps the per-parameter
+    /// active set: pinned on its bound while its gradient points outward,
+    /// released when it turns inward, the colour held throughout.
     fn solve(
         &self, tikhonov: f32, smooth: [f32; 3], iterations: usize, bounds: impl Fn(usize) -> (f32, f32),
-    ) -> (Vec<f32>, SolveInfo) {
+    ) -> (Vec<f32>, SolveInfo, Vec<bool>) {
         let rhs = self.adjoint(&self.weigh(&self.target_delta));
-        let (low, high): (Vec<f32>, Vec<f32>) = (0..rhs.len()).map(|i| bounds(i % PARAMS)).unzip();
-        let mut free = vec![true; rhs.len()];
+        let limits = ChangeLimits::of(&bounds);
+        let all = vec![true; rhs.len()];
         let (mut vector, mut info) =
-            self.conjugate_gradients(&rhs, vec![0.0f32; rhs.len()], &free, tikhonov, smooth, iterations);
+            self.conjugate_gradients(&rhs, vec![0.0f32; rhs.len()], &all, tikhonov, smooth, iterations);
+        let first = limit_all(&mut vector, &limits);
+        let mut limited: Vec<bool> = first.iter().map(|&(scaled, slope)| scaled || slope).collect();
+        // The colour is held from here; only the slopes move.
+        let mut free: Vec<bool> = (0..rhs.len()).map(|i| i % PARAMS == 4).collect();
+        let mut slopes = first;
         for _ in 0..ACTIVE_SET_PASSES {
-            for (i, slot) in vector.iter_mut().enumerate() { *slot = slot.clamp(low[i], high[i]); }
+            if !slopes.iter().any(|&(_, slope)| slope) {
+                break;
+            }
             let product = self.matvec(&vector, tikhonov, smooth);
-            let pinned: Vec<bool> = (0..rhs.len())
-                .map(|i| {
-                    let descent = rhs[i] - product[i];
-                    !((vector[i] <= low[i] && descent < 0.0) || (vector[i] >= high[i] && descent > 0.0))
-                })
-                .collect();
-            if pinned == free && (0..rhs.len()).all(|i| !free[i] || (low[i] < vector[i] && vector[i] < high[i])) {
+            let mut pinned: Vec<bool> = (0..rhs.len()).map(|i| i % PARAMS == 4).collect();
+            for (vertex, &(_, slope)) in slopes.iter().enumerate() {
+                let at = vertex * PARAMS + 4;
+                let (v, descent) = (vector[at], rhs[at] - product[at]);
+                if slope && ((v < 0.0 && descent < 0.0) || (v > 0.0 && descent > 0.0)) {
+                    pinned[at] = false;
+                }
+            }
+            let inside = slopes.iter().enumerate().all(|(vertex, &(_, slope))| !(slope && free[vertex * PARAMS + 4]));
+            if pinned == free && inside {
                 break;
             }
             free = pinned;
             (vector, info) = self.conjugate_gradients(&rhs, vector, &free, tikhonov, smooth, iterations);
+            slopes = limit_all(&mut vector, &limits);
+            for (flag, &(_, slope)) in limited.iter_mut().zip(&slopes) {
+                *flag |= slope;
+            }
         }
-        for (i, slot) in vector.iter_mut().enumerate() { *slot = slot.clamp(low[i], high[i]); }
-        (vector, info)
+        (vector, info, limited)
     }
 
     /// `GridSystem.solve` restricted to the `free` parameters, warm-started
@@ -675,6 +700,80 @@ impl<'a> System<'a> {
         }
         (vector, SolveInfo { iterations: used, relative_residual: (rr / initial).sqrt() as f32 })
     }
+}
+
+/// The bounds one vertex's parameters are held to, read from the solve's
+/// per-parameter pairs (all symmetric about 0): EV, the three gains, the slope.
+#[derive(Clone, Copy, Debug)]
+struct ChangeLimits {
+    ev: f32,
+    gain: f32,
+    slope: f32,
+}
+
+impl ChangeLimits {
+    fn of(bounds: &impl Fn(usize) -> (f32, f32)) -> Self {
+        let half = |p: usize| {
+            let (low, high) = bounds(p);
+            debug_assert!((low + high).abs() <= 1e-6, "the field's bounds are symmetric about 0");
+            high
+        };
+        debug_assert!((2..=3).all(|p| half(p) == half(1)), "one gain bound for the three channels");
+        Self { ev: half(0), gain: half(1), slope: half(4) }
+    }
+}
+
+/// A vertex's per-channel multiplier change, `ln2·EV + gain_c` — what its
+/// colour parameters do to a pixel ([`delta`]; the slope is apart).
+fn multiplier(p: &[f32]) -> [f32; 3] {
+    std::array::from_fn(|c| (LN2 * f64::from(p[0])) as f32 + p[1 + c])
+}
+
+/// Hold one vertex's colour change to its bounds ALONG ITS OWN DIRECTION, and
+/// its slope to its own; returns which of the two was limited.
+///
+/// EV and the gains are one change between them, the per-channel multiplier
+/// `m_c = ln2·EV + gain_c` ([`multiplier`]), and the bounds allow every `m`
+/// whose spread fits the gain bound and whose middle the EV bound can carry:
+/// with `mid = (max m + min m)/2` and `half = (max m − min m)/2`, `half ≤ g`
+/// and `|mid| ≤ ln2·E + g − half`. A change outside that set is scaled toward
+/// none by the largest factor that brings it in — every channel by the same
+/// factor, so the change keeps its direction and only its size gives way —
+/// and split back with the middle on EV as far as EV reaches. A change the
+/// set already holds but whose split sits outside a bound (EV and the gains
+/// trade one for one) is only split back. Inside its bounds a vertex is left
+/// exactly as the solve wrote it.
+///
+/// The first flag: the colour change was scaled back. The second: the slope
+/// was on or past its bound.
+fn limit_colour_change(p: &mut [f32], limits: &ChangeLimits) -> (bool, bool) {
+    let slope = p[4].abs() >= limits.slope;
+    p[4] = p[4].clamp(-limits.slope, limits.slope);
+    if p[0].abs() <= limits.ev && p[1..4].iter().all(|g| g.abs() <= limits.gain) {
+        return (false, slope);
+    }
+    let m = multiplier(p).map(f64::from);
+    let (max, min) = (m[0].max(m[1]).max(m[2]), m[0].min(m[1]).min(m[2]));
+    let (mid, half) = ((max + min) / 2.0, (max - min) / 2.0);
+    let (ev_reach, gain) = (LN2 * f64::from(limits.ev), f64::from(limits.gain));
+    let mut scale = 1.0f64;
+    if half > gain {
+        scale = scale.min(gain / half);
+    }
+    if mid.abs() + half > ev_reach + gain {
+        scale = scale.min((ev_reach + gain) / (mid.abs() + half));
+    }
+    let ev = ((scale * mid) / LN2).clamp(-f64::from(limits.ev), f64::from(limits.ev));
+    p[0] = ev as f32;
+    for c in 0..3 {
+        p[1 + c] = ((scale * m[c] - LN2 * ev) as f32).clamp(-limits.gain, limits.gain);
+    }
+    (scale < 1.0, slope)
+}
+
+/// [`limit_colour_change`] over every vertex of a flat parameter vector.
+fn limit_all(vector: &mut [f32], limits: &ChangeLimits) -> Vec<(bool, bool)> {
+    vector.chunks_exact_mut(PARAMS).map(|p| limit_colour_change(p, limits)).collect()
 }
 
 /// The x/y/b Laplacian of `GridSystem.matvec`: per adjacent pair along an axis,

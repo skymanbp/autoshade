@@ -2154,12 +2154,13 @@ tests sit in parts under `tests/`, spliced into `tests.rs` by `include!`, so
 every test keeps its name and its path.
 
 The pixel stage, in this order: anchored white balance (on a recipe that
-names a camera profile, v1.17.0: in the RAW develop the white is not a stage
-here at all — it is built into the profile stage below, where Camera Raw puts
-it; in the preview develop, Camera Raw's measured law, a Bradford shift
-between the DNG SDK's whites, under the profile stage's ramp and curve, which
-`render::profile::UnderTone` undoes and redoes around it — the two disagree at
-a moved white, disclosed in TECH_STACK) →
+names a camera profile, v1.17.0: the white is not a stage here at all — it is
+built into the profile stage, where Camera Raw puts it; the RAW develop builds
+it there, and the canvas and the reverse fit develop it there from the photo's
+camera base, below; only a baked source — a master, a JPEG — still takes it
+here, by Camera Raw's measured law, a Bradford shift between the DNG SDK's
+whites under the profile stage's ramp and curve, which
+`render::profile::UnderTone` undoes and redoes around it) →
 **camera calibration** (the Calibration panel's three primaries and shadow
 tint, first because they belong to the camera profile every later stage reads
 through) → **de-fringing** (`render/lens.rs`: the two hue windows, on
@@ -2853,7 +2854,46 @@ temperature, so the camera triple is balanced to the chosen white and the
 matrices and hue/sat maps blend at it, before the tables, and no adaptation
 follows (`resolve_camera_profile`). For a Sony ARW the calibration is the
 body's reference Daylight multipliers over the file's own preset
-(`as_shot::camera_calibration`), what Camera Raw writes into its DNG. A profile without a
+(`as_shot::camera_calibration`), what Camera Raw writes into its DNG.
+
+Camera Raw's order, measured with synthetic linear DNGs (`LinearRaw`, camera
+RGB = linear sRGB, an embedded profile, rendered through Photoshop's Camera
+Raw): raw → lens gain → white-balance multipliers → `ForwardMatrix` → tables
+(hue/sat map) → exposure → look table → curves. Two experiments place the
+white. With a hue/sat map that turns hues 120–210° by 30°, a patch the map
+leaves alone at As Shot (0 ΔE) is moved by it once a Custom 3000 K carries it
+into those hues (10 ΔE) — the white is applied BEFORE the tables. With a
+second `ColorMatrix` at Standard A, the render changes by mean ΔE 20.6 at
+2850 K, 5.1 at 4500 K and not at all at 6500 K or above — the matrices are
+blended at the CHOSEN white's temperature, not the shot's. And Camera Raw's
+DNG of a Sony ARW (DNG Converter, p39) carries `CameraCalibration1/2` =
+diag(1.0031, 1, 0.9653), the body's reference Daylight multipliers over the
+file's preset, with `AsShotNeutral` the camera's own levels: the calibration
+is in front of the `ColorMatrix` in the white's camera neutral, which is why
+`camera_neutral_of` takes it. The engine's profile stage runs that order from
+the multipliers on (`profile::Stage::render_ref`: the hue/sat map, the
+exposure ramp, the look table, the tone curve); the lens profile's
+vignetting gain is the vignette stage of the pixel stage above.
+
+**The camera base (v1.17.0, `render/canvas.rs`).** Because the white lives in
+the profile stage, a surface that shows a moved white needs the frame from
+before it. `CameraBase` keeps a RAW's camera-native frame at the working edge
+(demosaiced, default-cropped, oriented, capped in linear light) and the As
+Shot profile stage of the full-resolution frame capped the render's way; a
+white is developed as that As Shot frame plus what the white changes when the
+stage is run on the capped camera frame, so at As Shot the base is the
+render's byte for byte and a moved white carries only the difference of the
+two stagings' block-average error (the stage is not linear: staged on the
+capped frame alone, p39 at 1000 px read 0.42 ΔE76 off the render on average,
+median 0, 99th percentile 5.4). `base_develop` keeps the last two camera bases
+for the process, so a canvas moving its white re-runs the profile stage, not
+the decode; the canvas names the white in its part (`BasePart::of_canvas`) and
+the preview develop, handed a RAW source's base, leaves it out. The reverse
+fit's source is a `Plate`: an image registered with the camera base it came
+from and the chain of thumbnails that made it, for as long as it lives, so the
+preview develop handed exactly those pixels develops each candidate's white
+from the camera frame along the same chain. Masters keep the As Shot part —
+they are rendered later under whatever white the recipe has by then. A profile without a
 `ForwardMatrix`, and every render with no profile, keep the engine's own
 D65-only matrix; the no-profile render is byte-identical to v1.16.0. Until
 v1.17.0 the matrix half was a stated deviation: on p39's flat sidecar it left

@@ -798,14 +798,39 @@ supposed to remove.
   extreme cases of p39 and p42 (grey, sky and warm bands, worst |ΔL| / |Δa|,|Δb|
   of the move): every case with Temperature ≥ 3000 K and |Tint| ≤ 100 within
   2 / 2 (with the fitted adaptation above: up to 3.7 ab at 40000 K and 8.2 at
-  15000 K / +100); outside, Tint ±150 6–13 ab, 2000 K 3.0 L / 4.6 ab, 2500 K
-  2.8 L on the warm band, and 2500 K / +100 out of sRGB's gamut on both sides.
+  15000 K / +100); outside, Tint ±150 6–13 ab on those bands — the recipe
+  held Tint at ±100 and Temperature at 40000 K then, so a sidecar's +130 and
+  +150 rendered as +100; with the recipe on Camera Raw's own ranges (±150,
+  2000–50000 K; within ±100 a render is unchanged) the worst in-gamut band of
+  neutral-grid DNGs at +150 / +130 / −150 / −130 reads 5.73 / 4.93 / 3.16 /
+  2.92 ab (21.86 / 13.46 / 12.30 / 7.42 clamped), the rest from the Adobe
+  Color Look's table, which moves saturated patches 4–13 ab at any white and
+  reads 3.7 / 2.8 ab at ±100 on the grey bands as well — 2000 K 3.0 L / 4.6 ab, 2500 K
+  2.8 L on the warm band, and 2500 K / +100 out of sRGB's gamut on both sides
+  (a gamut limit of the deliverable, identical on every law, not a law
+  difference). Camera Raw holds each component of the camera neutral at no
+  less than 1/16 of the largest (`profile::NEUTRAL_FLOOR`; neutral-grid DNGs
+  read the floor at 0.0624–0.0625 where the formula gives 0.008–0.054), and so
+  does the engine; a white that maps to a NEGATIVE component (p39 at
+  2500 K / +100, blue −0.086) Camera Raw lifts to the floor while moving green
+  1–5.5 %, a rule not measured, so for such a white the engine keeps the
+  profile stage at As Shot and moves the white by the adaptation after it. Camera Raw does not clamp at those edges — neighbouring
+  settings render apart by mean ΔE 6.5 (1900 / 2000 K), 8.2 (2000 / 2200 K),
+  3.4 (2400 / 2500 K), 6.1 (Tint +100 / +130), 4.6 (+130 / +150), 3.6
+  (−100 / −130) and 2.1 (−130 / −150) — so the misses there are the law's.
   The ten luminance bands, which mix the frame's colours, read wider: up to
   1.1 L / 6.0 ab at 25000–50000 K, from colours rather than the white (grey
   within 0.9 ab there).
-  The preview develop still moves the white with the fitted adaptation above,
-  so on a camera-profile start a moved white balance renders on the canvas by
-  that law and on export by this one: **disclosed, pending**.
+  The preview develop and the fit's candidates move it by the same law
+  (v1.17.0, `render::CameraBase`): a camera-profile start keeps its camera
+  frame at the preview's edge and runs the profile stage at the chosen white
+  there, developed as the As Shot render plus the change the white makes at
+  that size, so As Shot stays byte-identical to the render. On p39 at a
+  1000 px edge, over 3500/+14, 4300/+30, 7500/+14 and 9000/−20, the canvas
+  reads mean ΔE76 0.42–0.46 to the export against its own As Shot floor of
+  0.36 (the downscale), and the fit's plate 0.35–0.42; the fitted adaptation
+  the preview used before read 0.89–1.05 and 0.96–1.13
+  (`a_moved_white_shows_on_every_surface_as_the_export_renders_it`).
 - The as-shot white (v1.17.0, `render::as_shot_wb`, **measured**). Camera
   Raw's As Shot render is pixel-identical to a Custom render at one point of
   its 50 K / whole-tint grid and differs from one 25 K or one tint unit away;
@@ -1370,8 +1395,37 @@ and `src/recipe.rs` for the module name.
   waves) reads a spatially UNIFORM two-band edit at at most `9.2/255` in sparse
   bins, spatially structured bins at `21.9-51.8/255`, and the calibration
   pair's re-rendered mid-tones at `28.7-29.1/255`; `15/255` sits in that gap.
+- The field's bounds limit a vertex's colour change ALONG ITS OWN DIRECTION
+  (v1.17.0, `fit_field::limit_colour_change`): EV and the three gains are one
+  per-channel multiplier change, and a change the bounds cannot hold is scaled
+  toward none by the largest factor that brings it inside — every channel by
+  the same factor — and held there while the slopes alone keep their
+  active-set loop. The per-parameter box the solve held them to before kept
+  each channel's own best value up to its bound: on p42's horizon the target
+  lifts green 1.65× and blue 3.6×, blue stopped at 2.6× with green at 1.64×,
+  and the horizon rendered green (Δa* −5.6 from the RAW at 0.85). A pure-hue
+  demand past the bound now keeps its direction at every data-carrying vertex
+  (cos ≥ 0.999 to the unbounded solve; `a_pure_hue_demand_keeps_its_hue_under_the_gain_limit`).
+  The limited changes are held, not re-solved around: the free neighbours'
+  cheapest make-up under the regulariser is the common part (Tikhonov prices a
+  change through EV below one through three gains), which turned a neighbour
+  6° toward grey on that fixture.
+- What the field cannot do on p42's night sky (v1.17.0, **measured**, a
+  limit, not a pending fix): the sky band's per-channel gains land its mean
+  colour on the target's, but the sky's luminance texture lives in red and
+  green (per-channel gradient 0.027 / 0.022 / 0.013), so the gains that make it
+  blue cut that texture by a ratio of 0.58–0.89 while the target's sky carries
+  1.68× MORE of it (stars the app painted). A gain multiplies the texture a
+  channel already has; it cannot add texture the source lacks, so the local
+  quality gate that refuses those bands reads the frame correctly.
 - NumPy cross-check on the calibration pair, on the Rust module's OWN exported
   analysis pixels, guide and fit weight (NumPy 2.3.5 / Python 3.13.3). Re-run
+  2026-10-29 with `scripts/field_check.py` carrying the direction-preserving
+  limit above: NumPy ceiling `0.073202` against the Rust port's `0.073202`,
+  `max |grid_rust - grid_numpy| = 1.0e-5`, 51 CG iterations, `supported
+  748/3072` (the box solve read `0.072526`: holding each channel's own best
+  value up to its bound fits this pair 0.0007 closer by turning the change's
+  hue where the bound binds). Before that, re-run
   2026-10-21 on the refined 12 x 32 x 8 grid, with `scripts/field_check.py`
   carrying production's bound-constrained active-set loop (2026-10-19) and
   per-cell occupancy floor: NumPy ceiling `0.072526` against the Rust port's

@@ -237,6 +237,144 @@ fn every_surface_shows_a_fresh_canvas_as_the_export_renders_it() {
     }
 }
 
+/// A canvas part names the white only when the recipe moves it on Camera
+/// Raw's law; As Shot, the engine's law and the neutral part never carry one,
+/// and the part's own recipe names the white it carries.
+///
+/// MUTATION: let `of_canvas` carry an As Shot white (every canvas re-develops
+/// on open), or leave the white out of `recipe()` (the base is developed at
+/// As Shot and the preview skips the white: no white at all).
+#[test]
+fn a_canvas_part_carries_a_white_only_when_the_recipe_moves_it() {
+    let mut r = canvas_recipe();
+    (r.as_shot_k, r.as_shot_tint) = (Some(5400.0), Some(14.0));
+    assert!(!BasePart::of_canvas(&r).carries_white(), "no Temperature, no Tint: As Shot");
+    (r.temperature_k, r.tint) = (Some(5400.0), 14.0);
+    assert!(!BasePart::of_canvas(&r).carries_white(), "stamped at As Shot");
+    assert_eq!(BasePart::of_canvas(&r), BasePart::of(&r));
+    r.temperature_k = Some(4000.0);
+    let part = BasePart::of_canvas(&r);
+    assert!(part.carries_white() && !BasePart::of(&r).carries_white(), "a moved white rides the canvas part only");
+    let back = part.recipe();
+    assert_eq!(
+        (back.temperature_k, back.tint, back.as_shot_k, back.as_shot_tint),
+        (r.temperature_k, r.tint, r.as_shot_k, r.as_shot_tint)
+    );
+    assert_eq!(super::wb::camera_raw_white(&back), super::wb::camera_raw_white(&r));
+    let mut engine = r.clone();
+    (engine.camera_profile, engine.look) = (String::new(), None);
+    assert!(BasePart::of_canvas(&engine).is_neutral(), "the engine's law has no profile stage to carry it");
+}
+
+/// v1.17.0: a moved white on every surface is the export's. The export puts a
+/// Custom white into the profile stage (`camera::resolve_camera_profile`);
+/// the canvas develops its base AT that white from the photo's camera frame
+/// ([`CameraBase`], [`BasePart::of_canvas`]) and the preview develop leaves
+/// the white out; the reverse fit's plate develops each candidate's white the
+/// same way. Before, both adapted an As Shot base after the profile
+/// (`wb::camera_raw_wb`), which is not where Camera Raw or the export put it.
+///
+/// p39 at 1000 px, four whites around its as-shot 5400 K / +14: the canvas
+/// against the export, and the old route against the export, printed. The
+/// canvas is bounded by the canvas's own As Shot reading plus 0.15 — at As
+/// Shot the base is the render's byte for byte and the reading is the 8-bit
+/// base and the resolution-dependent stages; a moved white adds only what the
+/// white changes in the camera base's block-average error ([`CameraBase`]).
+/// Measured 2026-10-29: As Shot 0.361; the four whites 0.422–0.457 (old route
+/// 0.885–1.054). Then the fit: a candidate rendered on the fit source's 384 px
+/// plate against the export at the fit's edge brought to that plate's grid,
+/// bounded at 0.5 (measured 0.352–0.424; old route 0.960–1.126).
+///
+/// Env-gated on the corpus and on Camera Raw's install.
+///
+/// MUTATION: skip `plate_pixels` (the fit adapts after the profile again), or
+/// let the preview develop apply the white over a canvas that carries it.
+#[test]
+fn a_moved_white_shows_on_every_surface_as_the_export_renders_it() {
+    let Some(dir) = crate::config::live_env_os("AUTOSHADE_FIT_CALIBRATION_DIR").map(std::path::PathBuf::from)
+    else {
+        crate::test_skipped("moved-white invariant", "AUTOSHADE_FIT_CALIBRATION_DIR is unset");
+        return;
+    };
+    let raw = dir.join("p39.arw");
+    if !raw.is_file() {
+        crate::test_skipped("moved-white invariant", "the corpus lacks its RAW");
+        return;
+    }
+    if let Err(why) = canvas_renders(&raw) {
+        crate::test_skipped("moved-white invariant", &format!("the canvas cannot render here: {why}"));
+        return;
+    }
+    const EDGE: u32 = 1000;
+    let fresh = crate::pipeline::calibration_recipe(crate::pipeline::fresh_photo_calibration(&raw));
+    let film = crate::decode::film_short_edge(&raw);
+    let preview = |base: &DynamicImage, r: &EditRecipe| {
+        let after = develop_preview_film(base, r, &crate::diag::pixels(), film, true);
+        let geom = geometry_profile(r);
+        let fs = FilmScale::of(film, after.width() as usize, after.height() as usize);
+        frame_and_finish(after, r, &geom, fs, CropPolicy::Cut)
+    };
+    let as_shot_base = base_develop(&raw, &BasePart::of(&fresh), Some(EDGE)).expect("as-shot base");
+    let floor = mean_de76(
+        &preview(&DynamicImage::ImageRgb8(as_shot_base.to_rgb8()), &fresh),
+        &render_to_image(&raw, &fresh, None, Some(EDGE)).expect("as-shot export"),
+    );
+    // The fit's own source and analysis plate (`pipeline::fit_source`,
+    // `fit::analysis_pair`), and its calibration with the lens geometry off:
+    // the fit's candidates render no geometry stage.
+    let (source, cal) = crate::pipeline::fit_source(&raw).expect("fit source");
+    assert!(source.has_camera(), "a corpus RAW's fit source keeps its camera frame");
+    let plate = Plate::thumbnail_of(&source, crate::fit::ANALYZE_EDGE);
+    assert!(plate.has_camera(), "…and so does its analysis thumbnail");
+    let baked = Plate::baked((*source.shared()).clone());
+    let old_plate = Plate::thumbnail_of(&baked, crate::fit::ANALYZE_EDGE);
+    assert!(!old_plate.has_camera());
+    let mut fit_cal = cal.clone();
+    fit_cal.lens_profile = Default::default();
+    let mut worst = (0.0f64, 0.0f64);
+    for (k, tint) in [(3500.0f32, 14.0f32), (4300.0, 30.0), (7500.0, 14.0), (9000.0, -20.0)] {
+        let mut r = fresh.clone();
+        (r.temperature_k, r.tint) = (Some(k), tint);
+        assert!(BasePart::of_canvas(&r).carries_white());
+        let export = render_to_image(&raw, &r, None, Some(EDGE)).expect("export");
+        let base = base_develop(&raw, &BasePart::of_canvas(&r), Some(EDGE)).expect("canvas base");
+        let canvas = preview(&DynamicImage::ImageRgb8(base.to_rgb8()), &r);
+        // The old route: the As Shot base, the white adapted after the profile.
+        // `raw_source` false keeps the white in this pass; the RAW's
+        // sharpening default is the only other thing it decides, so it is
+        // written into the recipe.
+        let mut old = r.clone();
+        old.sharpening = r.capture_sharpening(true);
+        let old_canvas = {
+            let after = develop_preview_film(&as_shot_base, &old, &crate::diag::pixels(), film, false);
+            let geom = geometry_profile(&r);
+            let fs = FilmScale::of(film, after.width() as usize, after.height() as usize);
+            frame_and_finish(after, &r, &geom, fs, CropPolicy::Cut)
+        };
+        let (de_canvas, de_old) = (mean_de76(&canvas, &export), mean_de76(&old_canvas, &export));
+        // The fit's candidate on its plate, against the export at the fit's
+        // edge thumbnailed by the plate's own operator.
+        let mut c = fit_cal.clone();
+        (c.temperature_k, c.tint) = (Some(k), tint);
+        let fit_export = render_to_image(&raw, &c, None, Some(crate::pipeline::FIT_SOURCE_EDGE))
+            .expect("export at the fit's edge")
+            .thumbnail(crate::fit::ANALYZE_EDGE, crate::fit::ANALYZE_EDGE);
+        let de_fit = mean_de76(&develop_preview(&plate, &c), &fit_export);
+        let de_fit_old = mean_de76(&develop_preview(&old_plate, &c), &fit_export);
+        println!(
+            "moved white {k} K / {tint:+}: canvas ΔE76 {de_canvas:.3} (old route {de_old:.3}); fit              plate ΔE76 {de_fit:.3} (old route {de_fit_old:.3})"
+        );
+        worst = (worst.0.max(de_canvas), worst.1.max(de_fit));
+    }
+    // As Shot on the plate is the plate: no re-develop, no white applied.
+    let at_shot = develop_preview(&plate, &fit_cal);
+    let at_shot_old = develop_preview(&old_plate, &fit_cal);
+    assert!(at_shot.to_rgb8().as_raw() == at_shot_old.to_rgb8().as_raw(), "As Shot renders the plate as it is");
+    println!("moved white: the canvas's As Shot reading {floor:.3}");
+    assert!(worst.0 <= floor + 0.15, "canvas ΔE76 {:.3} (bound {:.3})", worst.0, floor + 0.15);
+    assert!(worst.1 <= 0.5, "fit plate ΔE76 {:.3} (bound 0.5)", worst.1);
+}
+
 /// Mean CIE76 ΔE between two renders, `a` resized onto `b`'s grid when their
 /// sizes differ (sRGB → Lab D65, the measurement scripts' conversion).
 fn mean_de76(a: &DynamicImage, b: &DynamicImage) -> f64 {
@@ -269,3 +407,4 @@ fn mean_de76(a: &DynamicImage, b: &DynamicImage) -> f64 {
         .sum::<f64>()
         / n
 }
+

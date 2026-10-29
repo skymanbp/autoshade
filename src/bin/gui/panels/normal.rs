@@ -225,10 +225,10 @@ pub(crate) fn warmth_of(r: &EditRecipe) -> f32 {
 }
 
 /// The colour temperature for a warmth: the anchor times 2^(warmth/100),
-/// inside the develop panel's 2000–40000 K track. A higher temperature
+/// inside the develop panel's 2000–50000 K track. A higher temperature
 /// renders warmer, as Lightroom's Temp slider does.
 pub(crate) fn kelvin_for_warmth(r: &EditRecipe, warmth: f32) -> f32 {
-    (warmth_anchor(r) * (warmth.clamp(-100.0, 100.0) / 100.0 * WARMTH_OCTAVES).exp2()).clamp(2000.0, 40000.0)
+    (warmth_anchor(r) * (warmth.clamp(-100.0, 100.0) / 100.0 * WARMTH_OCTAVES).exp2()).clamp(2000.0, 50000.0)
 }
 
 impl AutoShadeApp {

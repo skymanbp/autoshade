@@ -175,7 +175,7 @@ impl AutoShadeApp {
     }
 
     /// Log-scaled variant for values whose useful band is a small fraction of
-    /// the range — Temp (K): 2000–40000 linear puts 4000–8000 K (where nearly
+    /// the range — Temp (K): 2000–50000 linear puts 4000–8000 K (where nearly
     /// every photo lives) on ~40 px of a 320 px track, making a routine 100 K
     /// nudge sub-pixel.
     pub(crate) fn slider_log(
@@ -950,7 +950,7 @@ impl AutoShadeApp {
                 // (the honest "no shift" position), 5500 for legacy recipes.
                 let anchor_k = self.recipe.as_shot_k.unwrap_or(5500.0);
                 if let Some(mut k) = self.recipe.temperature_k
-                    && Self::slider_log(ui, lang, tr(lang, "Temp (K)"), &mut k, 2000.0, 40000.0, anchor_k)
+                    && Self::slider_log(ui, lang, tr(lang, "Temp (K)"), &mut k, 2000.0, 50000.0, anchor_k)
                 {
                     self.recipe.temperature_k = Some(k);
                     changed = true;
@@ -965,7 +965,7 @@ impl AutoShadeApp {
                 // Its reset is the as-shot tint where Tint is absolute.
                 let tint_reset = if r.names_profile() { r.as_shot_tint.unwrap_or(0.0) } else { 0.0 };
                 ui.add_enabled_ui(custom_wb, |ui| {
-                    changed |= Self::slider(ui, lang, tr(lang, "Tint"), &mut r.tint, -100.0, 100.0, tint_reset);
+                    changed |= Self::slider(ui, lang, tr(lang, "Tint"), &mut r.tint, -150.0, 150.0, tint_reset);
                 });
                 changed |= Self::slider(ui, lang, tr(lang, "Exposure"), &mut r.exposure_ev, -5.0, 5.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Contrast"), &mut r.contrast, -100.0, 100.0, 0.0);

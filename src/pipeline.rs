@@ -2932,11 +2932,14 @@ pub const FIT_SOURCE_EDGE: u32 = 2048;
 /// [`crate::render::base_develop`]): the solve renders every candidate with
 /// the preview develop over it, which runs no profile stage, so a source
 /// without the profile would be fitted as a different picture from the one
-/// the canvas and the export show.
-pub fn fit_source(raw: &Path) -> Result<(image::DynamicImage, crate::recipe::EditRecipe)> {
+/// the canvas and the export show. It comes as a [`crate::render::Plate`]
+/// that keeps the camera frame it was developed from, so a candidate that
+/// moves the white is rendered with the white in the profile stage
+/// ([`crate::render::source_plate`]).
+pub fn fit_source(raw: &Path) -> Result<(crate::render::Plate, crate::recipe::EditRecipe)> {
     let base = calibration_recipe(fit_calibration(raw));
     let part = crate::render::BasePart::of(&base);
-    Ok((crate::render::base_develop(raw, &part, Some(FIT_SOURCE_EDGE))?, base))
+    Ok((crate::render::source_plate(raw, &part, FIT_SOURCE_EDGE)?, base))
 }
 
 /// A calibration-only [`EditRecipe`] — the `base` the R16 fit composes

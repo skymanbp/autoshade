@@ -373,6 +373,79 @@ fn field_recovers_a_planted_two_band_exposure() {
     }
 }
 
+/// v1.17.0: a demand the gain bound cannot meet keeps its HUE and gives up its
+/// size. The target moves every pixel's hue and not its luma — the per-channel
+/// multiplier change (+0.80, −0.466, +0.30), luma601-neutral, whose spread
+/// (half 0.63) is nearly twice the analysis bound's 0.35. The same system is
+/// solved twice: with the bound, and with the gains unbounded. Limited along
+/// its direction ([`limit_colour_change`]), every data-carrying vertex's
+/// change points where the unbounded solve's points (cos ≥ 0.999) and every
+/// pixel moves along the line from where it is toward its target. Clamped
+/// channel by channel — the box the solve used to hold it to — green and red
+/// stop at their bounds while blue keeps its own, and the change turns.
+///
+/// The reference is the unbounded solve, not the demand itself, because the
+/// regulariser alone turns a weakly measured vertex toward grey (its Tikhonov
+/// term prices a common change through EV below a chromatic one through the
+/// gains — measured here cos 0.985 to the demand at a vertex carrying 8.4 of
+/// mass, bound or no bound); that is not the limit's doing.
+///
+/// MUTATION: clamp each gain to its bound on its own in
+/// `limit_colour_change`, or re-solve the colour of the free vertices around
+/// the limited ones.
+#[test]
+fn a_pure_hue_demand_keeps_its_hue_under_the_gain_limit() {
+    let (w, h) = FIXTURE;
+    let current = ramp(w, h, 0.25, 0.45, 0x5eed_0007);
+    let want = [0.80f32, -(0.299 * 0.80 + 0.114 * 0.30) / 0.587, 0.30];
+    assert!((0.299 * want[0] + 0.587 * want[1] + 0.114 * want[2]).abs() < 1e-6, "premise: a pure hue change");
+    let target: Vec<[f32; 3]> =
+        current.iter().map(|c| std::array::from_fn(|ch| byte_round(c[ch] * (1.0 + want[ch])))).collect();
+    let evidence = fit::evidence_model_for(&current, &target, w as u32, h as u32);
+    let solve = |gain: f32| {
+        LocalField::solve_with(
+            &current, &target, w as u32, h as u32, &evidence, TIKHONOV, SMOOTH, ITERATIONS,
+            FieldSolveOpts { gain, ..FieldSolveOpts::default() },
+        )
+        .expect("solve")
+    };
+    let (field, free) = (solve(default_gain_bound()), solve(10.0));
+    assert!(field.saturated > 0, "premise: the demand is past the bound and the limit binds");
+    assert_eq!(free.saturated, 0, "premise: unbounded, nothing is limited");
+    let cos = |a: [f32; 3], b: [f32; 3]| {
+        let dot: f32 = (0..3).map(|c| a[c] * b[c]).sum();
+        let norm = |v: [f32; 3]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        dot / (norm(a) * norm(b)).max(1e-12)
+    };
+    let measured = supported(&field.occupancy);
+    let mut worst = 1.0f32;
+    for (vertex, (cell, open)) in field.grid.iter().zip(&free.grid).enumerate() {
+        // A vertex carries the demand where the pixels are: one with less than
+        // a cell's floor of mass of its own is the smoother's.
+        if !measured[vertex] || field.occupancy[vertex] < OCCUPANCY_MIN {
+            continue;
+        }
+        let (m, unbounded) = (multiplier(cell), multiplier(open));
+        worst = worst.min(cos(m, unbounded));
+        assert!(
+            cos(m, unbounded) >= 0.999,
+            "vertex {vertex}'s change {m:?} turned from the unbounded solve's {unbounded:?} (cos {:.4})",
+            cos(m, unbounded)
+        );
+        assert!(cell[1..4].iter().all(|g| g.abs() <= default_gain_bound() + 1e-6), "inside the bound");
+    }
+    assert!(worst < 1.0, "premise: data-carrying vertices were read");
+    let render = field.render(&current);
+    let along: f32 = render
+        .iter()
+        .zip(&current)
+        .zip(&target)
+        .map(|((r, c), t)| cos(std::array::from_fn(|ch| r[ch] - c[ch]), std::array::from_fn(|ch| t[ch] - c[ch])))
+        .sum::<f32>()
+        / current.len() as f32;
+    assert!(along >= 0.99, "pixels moved off the line toward their targets: mean cos {along:.4}");
+}
+
 /// The same amplitude arranged spatially instead of by value: every populated bin
 /// must read as spatially structured and its band marginal must be near zero — the
 /// verdict that stops the band producer from rendering something the frame law would
@@ -620,7 +693,17 @@ fn calibration_local_support_is_not_constant() {
 /// The NumPy solver's ceiling on the calibration pair `neutral.jpg -> target.jpg`,
 /// measured on the Rust module's OWN exported analysis pixels, guide and fit weight.
 ///
-/// PROVENANCE — RE-MEASURED 2026-10-21 on the refined grid (12×32×8, 3072
+/// PROVENANCE — RE-MEASURED 2026-10-29 for v1.17.0's direction-preserving
+/// limit (`System::solve`: each vertex's colour change scaled along its own
+/// direction and held, the slopes' active set alone; `scripts/field_check.py`
+/// ported with it), by the three steps below: NumPy ceiling 0.073202 against
+/// the Rust port's 0.073202, on the same global 0.099869, `max |grid_rust -
+/// grid_numpy| = 1.0e-5`, 51 CG iterations, 748 supported vertices. The box
+/// solve read 0.072526: holding each channel's own best value up to its bound
+/// fits this pair 0.0007 closer, by turning the hue of the change where the
+/// bound binds. Below, the earlier provenance as it stood.
+///
+/// RE-MEASURED 2026-10-21 on the refined grid (12×32×8, 3072
 /// vertices; `FIELD_Y_REFINE = 4`, `TIKHONOV = 1/4`, `SMOOTH = (1/4, 1, 1/4)`,
 /// the occupancy floor read per cell) on NumPy 2.3.5 / Python 3.13.3, by the
 /// three documented steps below with `scripts/field_check.py` now carrying
@@ -655,9 +738,9 @@ fn calibration_local_support_is_not_constant() {
 /// 0.070_022_5 before that (2026-08-27, before the mixer). The recon's
 /// published grid figures are NOT reusable here: they were measured on the
 /// RAW-path renders, a different baseline.
-const NUMPY_FIELD_CEILING_CALIBRATION: f32 = 0.072_526_0;
+const NUMPY_FIELD_CEILING_CALIBRATION: f32 = 0.073_202_0;
 /// The largest per-parameter disagreement between the two solvers over all
-/// 3072 vertices: measured 6.0e-7 in the 2026-10-21 run (1.50e-5 at the 8-row
+/// 3072 vertices: measured 1.0e-5 in the 2026-10-29 run, 6.0e-7 in the 2026-10-21 run (1.50e-5 at the 8-row
 /// grid in 2026-08), bounded here at a legible 1e-4.
 const NUMPY_FIELD_GRID_MAX_DELTA: f32 = 1e-4;
 

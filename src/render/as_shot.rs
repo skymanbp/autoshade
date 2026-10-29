@@ -121,7 +121,8 @@ pub(super) fn camera_raw_as_shot(
         return None;
     }
     let kelvin = (kelvin / 50.0).round() * 50.0;
-    Some((kelvin as f32, tint.round().clamp(-100.0, 100.0) as f32))
+    // Camera Raw's Tint scale is ±150 (the recipe's `as_shot_tint` band).
+    Some((kelvin as f32, tint.round().clamp(-150.0, 150.0) as f32))
 }
 
 /// The body's `CameraCalibration` diagonal as Camera Raw derives it for a

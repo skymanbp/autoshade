@@ -98,93 +98,7 @@ pub fn render_to_image_in(
     validated.disclose(&diag);
     let recipe = &*validated;
     let rasters = load_mask_raster_snapshot(recipe, &diag)?;
-    // Decode scope: the RawSource holds the entire RAW file in memory
-    // (~60–120 MB for a 61 MP lossless ARW), and neither it nor the decoder
-    // outlives the sensor read — so the file bytes drop HERE instead of
-    // sitting under the whole ~720 MB-per-plane develop chain below (A7
-    // buffer-lifetime queue).
-    crate::decode::guard_tiff_chain(raw_path)?;
-    crate::decode::guard_raw_plane_extent(raw_path)?;
-    let (mut rawimage, orientation, daylight) = {
-        let src = RawSource::new(raw_path)
-            .with_context(|| format!("open RAW {}", raw_path.display()))?;
-        let decoder = crate::decode::decoder_for(raw_path, &src)?;
-        let params = RawDecodeParams { image_index: 0 };
-        // Which way is up comes from the EXIF metadata, NOT `RawImage
-        // .orientation` — rawler 0.7.2 hard-codes that field to `Normal` for
-        // every decoder but DNG/QTK, which is why every portrait ARW rendered
-        // and exported sideways. See `decode::raw_orientation_of`. Read
-        // INSIDE this scope so the RawSource still lives; metadata only, no
-        // second sensor read.
-        let md = crate::decode::guard_parser_panic(raw_path, "raw_metadata", || {
-            decoder.raw_metadata(&src, &params).map_err(|e| anyhow!("raw_metadata: {e}"))
-        })?;
-        // …composed with the photographer's own quarter turns (R27), so the
-        // whole pipeline still sees ONE orientation and no second rotation
-        // stage exists to disagree with this one.
-        let orientation =
-            compose_orientation(crate::decode::raw_orientation_of(&md), recipe.quarter_turns);
-        // THE PER-FILE MEMORY CEILING, charged BEFORE a single sensor row is
-        // decompressed (R28 Batch-4 4a; adjudication F2's deeper root). The
-        // baked door has refused an over-ceiling file since L02 while this one
-        // — the door every RAW's pixels come through — had no per-file limit
-        // at all. `dummy = true` is the same metadata-only read
-        // `decode::source_frame` takes: dimensions and levels, no
-        // decompression, so the refusal costs a header parse and the admission
-        // costs one too. Gating AFTER the real decode instead would already
-        // have committed the ~2 B/px sensor mosaic, and gating at the top of
-        // the function would have paid a SECOND `RawSource::new` (the whole
-        // file mapped) for dimensions the open decoder can already answer.
-        //
-        // The price is measured, not asserted: `decode::frame_size` on the
-        // same 61 MP ARW — which opens the file, maps it, builds a decoder AND
-        // takes this read — costs 110 ms against a 3.5 s full-resolution
-        // render (`jobs::tests::probe_per_photo_peak_commit`, release). That is
-        // an UPPER BOUND on what this line adds, since the first three of those
-        // four are already paid above.
-        let probe = crate::decode::guard_parser_panic(raw_path, "raw_image(dummy)", || {
-            decoder
-                .raw_image(&src, &params, true)
-                .map_err(|e| anyhow!("raw_image(dummy): {e}"))
-        })?;
-        crate::decode::refuse_raw_develop_over_ceiling_for(raw_path, &probe)?;
-        if denoise.is_some_and(|o| o.strength > 0.0 && o.strength < 1.0)
-            && crate::denoise::mosaic_args_for(&probe).is_ok()
-        {
-            crate::decode::refuse_raw_grain_return_over_ceiling_for(raw_path, &probe)?;
-        }
-        drop(probe);
-        // Full sensor data (dummy = false) → demosaic + colour pipeline → float.
-        let mut raw = crate::decode::guard_parser_panic(raw_path, "raw_image", || {
-            decoder.raw_image(&src, &params, false).map_err(|e| anyhow!("raw_image: {e}"))
-        })?;
-        // A9: the sensor kinds render v1 cannot deliver are refused HERE, off
-        // the decoded RawImage's own declaration, instead of after the whole
-        // demosaic + colour pipeline has run and produced an `Intermediate`
-        // this function then throws away. On a 100 MP achromatic back that
-        // was tens of seconds and a full-frame float buffer spent to reach a
-        // verdict the metadata already contained.
-        refuse_unsupported_sensor(&raw, raw_path)?;
-        // …and for the sensors we DO render, say when the demosaic is only an
-        // approximation of this CFA (R6 — a non-2×2 RGB array, X-Trans today).
-        disclose_approximate_demosaic(&raw, raw_path);
-        // …developed from the frame the camera and Lightroom call the picture,
-        // not from the sensor's top-left corner. v0.32.0 — see
-        // `decode::align_default_crop` for the measurement (every Sony ARW
-        // render sat 32 px right and 20 px down of Lightroom's) and for why
-        // rawler 0.7.2 skips this crop on its own. The verdict is disclosed
-        // inside (A5) — an out-of-bounds refusal used to be a silent `None`.
-        crate::decode::align_default_crop(&mut raw);
-        // A Sony file's Daylight preset, read while its bytes are mapped: with
-        // the body's reference it is the calibration Camera Raw puts in front
-        // of the profile's matrices (`as_shot::camera_calibration`).
-        let daylight = if raw.clean_make.eq_ignore_ascii_case("sony") {
-            super::as_shot::sony_daylight_preset(src.buf())
-        } else {
-            None
-        };
-        (raw, orientation, daylight)
-    };
+    let (mut rawimage, orientation, daylight) = decode_sensor(raw_path, recipe.quarter_turns, denoise)?;
 
     let wide = working != ExportColorSpace::Srgb;
     // v1.5.0 F7 — the camera profile the sidecar names, resolved against the
@@ -193,8 +107,8 @@ pub fn render_to_image_in(
     // (Exactly one starting tone — a named profile's tone replaces the
     // camera-matched base curve — is the recipe's own rule,
     // `EditRecipe::starting_curve`, so the preview develops obey it too.)
-    let camera_cc = super::as_shot::camera_calibration(daylight, &rawimage.clean_model);
-    let (profile_stage, white_in_camera) = match resolve_camera_profile(&rawimage, recipe, working, &diag, camera_cc) {
+    let meta = CameraMeta::of(&rawimage, daylight);
+    let (profile_stage, white_in_camera) = match resolve_camera_profile(&meta, recipe, working, &diag) {
         Some((stage, white)) => (Some(stage), white),
         None => (None, None),
     };
@@ -343,10 +257,130 @@ pub fn render_to_image_in(
         crate::denoise::denoise_buffer(opts, &mut data, w, h).context("AI denoise")?;
     }
 
+    finish_develop(data, w, h, film, recipe, &rasters, white_in_camera.is_some(), working)
+}
+
+/// Open `raw_path` and read its sensor: the guards, the metadata, the per-file
+/// memory ceiling, the full decode and the default crop — everything up to
+/// the develop, shared by [`render_to_image_in`] and
+/// [`super::CameraBase::decode`]. Returns the decoded image, its display
+/// orientation composed with the photographer's `quarter_turns`, and (for a
+/// Sony body) the file's Daylight preset.
+///
+/// The decode scope: the RawSource holds the entire RAW file in memory
+/// (~60–120 MB for a 61 MP lossless ARW), and neither it nor the decoder
+/// outlives the sensor read — so the file bytes drop when this returns
+/// instead of sitting under the whole ~720 MB-per-plane develop chain (A7
+/// buffer-lifetime queue).
+pub(super) fn decode_sensor(
+    raw_path: &Path,
+    quarter_turns: u8,
+    denoise: Option<&crate::denoise::DenoiseOpts>,
+) -> Result<(rawler::RawImage, Orientation, Option<[f32; 3]>)> {
+    crate::decode::guard_tiff_chain(raw_path)?;
+    crate::decode::guard_raw_plane_extent(raw_path)?;
+    let src = RawSource::new(raw_path)
+        .with_context(|| format!("open RAW {}", raw_path.display()))?;
+    let decoder = crate::decode::decoder_for(raw_path, &src)?;
+    let params = RawDecodeParams { image_index: 0 };
+    // Which way is up comes from the EXIF metadata, NOT `RawImage
+    // .orientation` — rawler 0.7.2 hard-codes that field to `Normal` for
+    // every decoder but DNG/QTK, which is why every portrait ARW rendered
+    // and exported sideways. See `decode::raw_orientation_of`. Read
+    // INSIDE this scope so the RawSource still lives; metadata only, no
+    // second sensor read.
+    let md = crate::decode::guard_parser_panic(raw_path, "raw_metadata", || {
+        decoder.raw_metadata(&src, &params).map_err(|e| anyhow!("raw_metadata: {e}"))
+    })?;
+    // …composed with the photographer's own quarter turns (R27), so the
+    // whole pipeline still sees ONE orientation and no second rotation
+    // stage exists to disagree with this one.
+    let orientation =
+        compose_orientation(crate::decode::raw_orientation_of(&md), quarter_turns);
+    // THE PER-FILE MEMORY CEILING, charged BEFORE a single sensor row is
+    // decompressed (R28 Batch-4 4a; adjudication F2's deeper root). The
+    // baked door has refused an over-ceiling file since L02 while this one
+    // — the door every RAW's pixels come through — had no per-file limit
+    // at all. `dummy = true` is the same metadata-only read
+    // `decode::source_frame` takes: dimensions and levels, no
+    // decompression, so the refusal costs a header parse and the admission
+    // costs one too. Gating AFTER the real decode instead would already
+    // have committed the ~2 B/px sensor mosaic, and gating at the top of
+    // the function would have paid a SECOND `RawSource::new` (the whole
+    // file mapped) for dimensions the open decoder can already answer.
+    //
+    // The price is measured, not asserted: `decode::frame_size` on the
+    // same 61 MP ARW — which opens the file, maps it, builds a decoder AND
+    // takes this read — costs 110 ms against a 3.5 s full-resolution
+    // render (`jobs::tests::probe_per_photo_peak_commit`, release). That is
+    // an UPPER BOUND on what this line adds, since the first three of those
+    // four are already paid above.
+    let probe = crate::decode::guard_parser_panic(raw_path, "raw_image(dummy)", || {
+        decoder
+            .raw_image(&src, &params, true)
+            .map_err(|e| anyhow!("raw_image(dummy): {e}"))
+    })?;
+    crate::decode::refuse_raw_develop_over_ceiling_for(raw_path, &probe)?;
+    if denoise.is_some_and(|o| o.strength > 0.0 && o.strength < 1.0)
+        && crate::denoise::mosaic_args_for(&probe).is_ok()
+    {
+        crate::decode::refuse_raw_grain_return_over_ceiling_for(raw_path, &probe)?;
+    }
+    drop(probe);
+    // Full sensor data (dummy = false) → demosaic + colour pipeline → float.
+    let mut raw = crate::decode::guard_parser_panic(raw_path, "raw_image", || {
+        decoder.raw_image(&src, &params, false).map_err(|e| anyhow!("raw_image: {e}"))
+    })?;
+    // A9: the sensor kinds render v1 cannot deliver are refused HERE, off
+    // the decoded RawImage's own declaration, instead of after the whole
+    // demosaic + colour pipeline has run and produced an `Intermediate`
+    // this function then throws away. On a 100 MP achromatic back that
+    // was tens of seconds and a full-frame float buffer spent to reach a
+    // verdict the metadata already contained.
+    refuse_unsupported_sensor(&raw, raw_path)?;
+    // …and for the sensors we DO render, say when the demosaic is only an
+    // approximation of this CFA (R6 — a non-2×2 RGB array, X-Trans today).
+    disclose_approximate_demosaic(&raw, raw_path);
+    // …developed from the frame the camera and Lightroom call the picture,
+    // not from the sensor's top-left corner. v0.32.0 — see
+    // `decode::align_default_crop` for the measurement (every Sony ARW
+    // render sat 32 px right and 20 px down of Lightroom's) and for why
+    // rawler 0.7.2 skips this crop on its own. The verdict is disclosed
+    // inside (A5) — an out-of-bounds refusal used to be a silent `None`.
+    crate::decode::align_default_crop(&mut raw);
+    // A Sony file's Daylight preset, read while its bytes are mapped: with
+    // the body's reference it is the calibration Camera Raw puts in front
+    // of the profile's matrices (`as_shot::camera_calibration`).
+    let daylight = if raw.clean_make.eq_ignore_ascii_case("sony") {
+        super::as_shot::sony_daylight_preset(src.buf())
+    } else {
+        None
+    };
+    Ok((raw, orientation, daylight))
+}
+
+/// The develop after the camera stage, on a frame already oriented, capped and
+/// calibrated (the sRGB transfer, `working`'s primaries): the recipe's white
+/// balance unless the camera stage already rendered it (`white_in_camera`,
+/// [`resolve_camera_profile`]), then the shared tone/colour/detail/mask
+/// develop, the 16-bit pack and the geometry and finishing tail. ONE body for
+/// [`render_to_image_in`] and [`super::CameraBase::develop`], so a base
+/// re-developed from its camera frame cannot drift from the render.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn finish_develop(
+    mut data: Vec<[f32; 3]>,
+    w: usize,
+    h: usize,
+    film: FilmScale,
+    recipe: &EditRecipe,
+    rasters: &MaskRasterSnapshot,
+    white_in_camera: bool,
+    working: ExportColorSpace,
+) -> Result<DynamicImage> {
     // --- white balance (target Kelvin/tint) in linear light -------------------
     // Unless the camera stage already rendered the recipe's white, as Camera
     // Raw does (`resolve_camera_profile`).
-    if white_in_camera.is_none() {
+    if !white_in_camera {
         apply_recipe_wb_in(&mut data, recipe, working);
     }
 
@@ -366,7 +400,7 @@ pub fn render_to_image_in(
     let frame = MaskFrame::downstream(&geom, recipe.lens_distortion);
     // A RAW negative: an absent Sharpening amount renders at Lightroom's own
     // RAW default (`EditRecipe::capture_sharpening`, v1.6.0).
-    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, true, working);
+    apply_develop_with_rasters(&mut data, w, h, recipe, rasters, frame, film, true, working);
 
     // --- pack to 16-bit (highest precision; JPEG downconverts at encode) ------
     let mut buf: Vec<u16> = vec![0u16; w * h * 3];
@@ -401,7 +435,7 @@ pub fn render_to_image_in(
 /// Both original and clean RAW buffers go through this exact develop and
 /// calibration path. Every returned buffer has the sRGB transfer, including
 /// wide working primaries; orientation and recipe work happen afterwards.
-fn develop_raw_buffer(
+pub(super) fn develop_raw_buffer(
     rawimage: &rawler::RawImage,
     dev: &RawDevelop,
     geometry_cfa: Option<&rawler::cfa::CFA>,
@@ -520,7 +554,7 @@ pub(super) fn cfa_needs_geometry_demosaic(cfa: &rawler::cfa::CFA) -> bool {
     cfa.is_rgb() && (cfa.width, cfa.height) != (2, 2)
 }
 
-fn non_bayer_rgb_cfa(raw: &rawler::RawImage) -> Option<&rawler::cfa::CFA> {
+pub(super) fn non_bayer_rgb_cfa(raw: &rawler::RawImage) -> Option<&rawler::cfa::CFA> {
     use rawler::rawimage::RawPhotometricInterpretation as Photo;
     let Photo::Cfa(c) = &raw.photometric else { return None };
     cfa_needs_geometry_demosaic(&c.cfa).then_some(&c.cfa)

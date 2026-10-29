@@ -649,7 +649,7 @@ fn xmp_input_is_bounded_and_numeric_groups_follow_recipe_boundaries() {
     </x:xmpmeta>"#;
 
     let r = xmp_to_recipe(doc);
-    assert_eq!(r.temperature_k, Some(40000.0));
+    assert_eq!(r.temperature_k, Some(50000.0));
     assert_eq!(r.exposure_ev, 5.0);
     assert_eq!(r.contrast, -100.0);
     assert_eq!(r.sharpening, 150.0);

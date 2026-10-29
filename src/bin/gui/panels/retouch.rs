@@ -15,7 +15,7 @@ fn developed_card_pixels(
     // names are in the pixels the preview develop below is handed.
     let base = autoshade::render::source_pixels_for(
         path,
-        &autoshade::render::BasePart::of(recipe),
+        &autoshade::render::BasePart::of_canvas(recipe),
         (raw && !full_res).then_some(2048),
     )?;
     Ok(autoshade::render::develop_preview_framed(

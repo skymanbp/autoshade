@@ -3943,7 +3943,9 @@ impl EditRecipe {
         self.shadows = c(self.shadows, -100.0, 100.0);
         self.whites = c(self.whites, -100.0, 100.0);
         self.blacks = c(self.blacks, -100.0, 100.0);
-        self.tint = c(self.tint, -100.0, 100.0);
+        // Camera Raw's own Tint range (±150): within ±100 a render is what it
+        // was; past it the recipe used to clamp a value Camera Raw renders.
+        self.tint = c(self.tint, -150.0, 150.0);
         self.vibrance = c(self.vibrance, -100.0, 100.0);
         self.saturation = c(self.saturation, -100.0, 100.0);
         self.clarity = c(self.clarity, -100.0, 100.0);
@@ -4116,23 +4118,25 @@ impl EditRecipe {
         self.quarter_turns %= 4;
         self.confidence = c(self.confidence, 0.0, 1.0);
         self.temperature_k = match self.temperature_k {
-            // Ceiling matches the render engine's blackbody fit validity (kelvin_to_rgb
-            // is documented + re-clamped to 1000..40000); keep one source of truth so
-            // the recipe never carries a Kelvin the engine would silently re-clamp.
-            Some(k) if k.is_finite() => Some(k.clamp(2000.0, 40000.0)),
+            // Camera Raw's Temperature range, 2000–50000 K (v1.17.0): its law
+            // renders the whole of it (`wb::camera_raw_white`). The engine's
+            // own law — a recipe with no camera profile — saturates at its
+            // blackbody fit's 40000 K (`wb::kelvin_to_rgb`), so there the top
+            // 10000 K render as 40000 K.
+            Some(k) if k.is_finite() => Some(k.clamp(2000.0, 50000.0)),
             // A non-finite Kelvin cannot fall back to the closure's 0.0 (out
             // of range) — corrupt WB goes back to as-shot.
             _ => None,
         };
-        // The as-shot anchor obeys the same band (one source of truth with
-        // the engine's blackbody fit); corrupt values fall back to "unknown"
+        // The as-shot anchor obeys the same bands as the sliders; corrupt
+        // values fall back to "unknown"
         // = the historical 5500 K anchor, never a nonsense anchor.
         self.as_shot_k = match self.as_shot_k {
-            Some(k) if k.is_finite() => Some(k.clamp(2000.0, 40000.0)),
+            Some(k) if k.is_finite() => Some(k.clamp(2000.0, 50000.0)),
             _ => None,
         };
         self.as_shot_tint = match self.as_shot_tint {
-            Some(t) if t.is_finite() => Some(t.clamp(-100.0, 100.0)),
+            Some(t) if t.is_finite() => Some(t.clamp(-150.0, 150.0)),
             _ => None,
         };
         // Crop is a normalized [0,1] view-frame rectangle; untrusted input
@@ -5311,7 +5315,7 @@ mod tests {
             ..Default::default()
         };
         wild.clamp();
-        assert_eq!((wild.as_shot_k, wild.as_shot_tint), (None, Some(100.0)));
+        assert_eq!((wild.as_shot_k, wild.as_shot_tint), (None, Some(150.0)));
     }
 
     #[test]
