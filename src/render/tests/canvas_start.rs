@@ -46,7 +46,13 @@ fn the_base_part_is_the_profile_stage_and_nothing_after_it() {
 /// (v1.17.0: a measured Sony body now scales its raw by Camera Raw's level,
 /// 16383 not 15360, so every render of it is 0.096 EV darker): the era rule
 /// is about what a saved recipe means, not about the raw's scale, so the
-/// digest follows the decode. Env-gated on the corpus (`p39.arw`).
+/// digest follows the decode. Re-read a third time, on the merge of that
+/// white level with the signed black level (`develop_cfa_signed`, v1.17.0),
+/// which moves this render where the sensor sits near its black and only
+/// there: against the build before it (CLI, 1000 px, 16-bit) 1.77 % of the
+/// pixels change, 70 % of those encoded below 0.02 and 14 % of those in
+/// 0.02–0.05, against 0.002 % above 0.5 (the demosaic's neighbourhood of a
+/// site below the black). Env-gated on the corpus (`p39.arw`).
 ///
 /// MUTATION: let `starting_curve` drop a curve on a recipe that names no
 /// profile, or develop a neutral part through anything but the neutral recipe.
@@ -116,7 +122,7 @@ fn fnv1a64_u16(px: &[u16]) -> u64 {
 }
 
 /// The pre-switch digest (see the test above).
-const OLD_RECIPE_P39_1000_DIGEST: u64 = 0x6bf0_2a54_1c58_ae23;
+const OLD_RECIPE_P39_1000_DIGEST: u64 = 0xcb8b_abcc_4d81_f379;
 
 /// v1.17.0 step 2's INVARIANT: a fresh canvas is one picture on every surface.
 /// The all-zero fresh recipe (the calibration a fresh open stamps) against the
