@@ -147,8 +147,19 @@ pub fn read(path: &Path) -> LensProfile {
     if ca.len() % 2 == 0 && ca.len() >= 8 {
         let half = ca.len() / 2;
         let f = |v: &i16| *v as f32 * (-21f32).exp2() + 1.0;
-        out.ca_r = ca[..half].iter().map(f).collect();
-        out.ca_b = ca[half..].iter().map(f).collect();
+        let (r, b): (Vec<f32>, Vec<f32>) =
+            (ca[..half].iter().map(f).collect(), ca[half..].iter().map(f).collect());
+        // Camera Raw's reading of the pair (see `sony_render_ca`) needs the
+        // frame, like the distortion's; no frame keeps the knots as they are.
+        match frame_dims(root) {
+            Some(crop) => {
+                let sensor = sensor_dims(root);
+                let n = SONY_RENDER_DISTORTION_KNOTS;
+                out.ca_r = sony_render_ca(&r, &sony_distortion, crop, sensor, n);
+                out.ca_b = sony_render_ca(&b, &sony_distortion, crop, sensor, n);
+            }
+            None => (out.ca_r, out.ca_b) = (r, b),
+        }
     }
 
     // --- the mask warp (R29 Batch-3) -------------------------------------
@@ -314,19 +325,82 @@ pub(crate) fn sony_render_distortion(
         // Too few knots to fit four terms: keep them as they are.
         return native.to_vec();
     };
-    let diag = |(w, h): (f32, f32)| f64::from((w * w + h * h).sqrt());
-    // A sensor smaller than the crop is not a sensor; read the crop as the
-    // whole array then (ρ = 1).
-    let rho = sensor
-        .map(|s| diag(crop) / diag(s).max(1e-6))
-        .filter(|r| r.is_finite() && *r > 0.0 && *r <= 1.0)
-        .unwrap_or(1.0);
-    let rmin = (f64::from(crop.0.min(crop.1)) / diag(crop).max(1e-6)).clamp(0.0, 1.0);
+    let (rho, rmin) = crop_in_sensor(crop, sensor);
     let z = sony_render_zoom(&q, rho, rmin);
     (0..n)
         .map(|j| {
             let r = (j as f64 + 0.5) / (n - 1) as f64;
             even_poly(&q, z * rho * r) as f32
+        })
+        .collect()
+}
+
+/// `(ρ, rmin)` for a default crop cut from `sensor`: `ρ = |crop| / |sensor|`,
+/// the crop's half-diagonal in sensor half-diagonals, and `rmin` the crop's
+/// short-edge midpoint in crop half-diagonals. A sensor smaller than the crop
+/// is not a sensor; the crop is read as the whole array then (`ρ = 1`).
+fn crop_in_sensor(crop: (f32, f32), sensor: Option<(f32, f32)>) -> (f64, f64) {
+    let diag = |(w, h): (f32, f32)| f64::from((w * w + h * h).sqrt());
+    let rho = sensor
+        .map(|s| diag(crop) / diag(s).max(1e-6))
+        .filter(|r| r.is_finite() && *r > 0.0 && *r <= 1.0)
+        .unwrap_or(1.0);
+    let rmin = (f64::from(crop.0.min(crop.1)) / diag(crop).max(1e-6)).clamp(0.0, 1.0);
+    (rho, rmin)
+}
+
+/// One channel of the Sony `0x7035` chromatic-aberration pair (red's sixteen
+/// knots, or blue's) → the engine's CA spline, read the way Adobe Camera Raw
+/// reads it (2026-10-28).
+///
+/// The law, from Adobe DNG Converter 18.7, which writes Camera Raw's reading
+/// of the pair into the file as a WarpRectilinear opcode (red and blue planes;
+/// green the identity) centred on the sensor — reproduced, not fitted:
+///
+/// * the knots sit where the distortion knots sit, `t_i = i/(n−1)` of the
+///   SENSOR half-diagonal, and Camera Raw replaces them by the same
+///   least-squares odd polynomial `t·P(t)` through the knots `i ≥ 1` that
+///   [`sony_render_distortion`] fits — no zoom of its own;
+/// * `t` is the radius of the GREEN sample in the raw frame, where the
+///   opcode runs before the distortion map: the red sample for an output
+///   pixel whose green sample lies at `t` lies at `t·P(t)`.
+///
+/// Measured: the polynomial matches the DNG's planes within 7.6e-6 of a
+/// factor over the whole radius on ten channels of five real frames; the old
+/// reading (knots at `(i+0.5)/(n−1)` of the output radius) missed them by
+/// 2.9e-5 to 1.1e-4 — up to 0.1 px at a 61 MP corner, the colour fringe a
+/// registration of Camera Raw's render against the engine's measured.
+///
+/// The engine multiplies its green map by this spline at the OUTPUT radius
+/// (`render::apply_lens_geometry`), so knot `j` is `P` at the green source
+/// radius of canonical output radius `r_j`: `t_j = Z·ρ·r_j·Q(Z·ρ·r_j)` under
+/// Camera Raw's distortion map ([`sony_render_distortion`]'s `Q` and `Z`),
+/// `ρ·r_j` for a frame with no distortion knots. That bakes the distortion
+/// into the CA spline: with the distortion toggled off the spline is read a
+/// few per cent of radius off, which moves `P` by under 1e-5 on these lenses.
+pub(crate) fn sony_render_ca(
+    native: &[f32],
+    distortion: &[f32],
+    crop: (f32, f32),
+    sensor: Option<(f32, f32)>,
+    n: usize,
+) -> Vec<f32> {
+    if n < 2 {
+        return Vec::new();
+    }
+    let Some(p) = sony_radius_polynomial(native) else {
+        return native.to_vec();
+    };
+    let (rho, rmin) = crop_in_sensor(crop, sensor);
+    let green = sony_radius_polynomial(distortion).map(|q| (sony_render_zoom(&q, rho, rmin), q));
+    (0..n)
+        .map(|j| {
+            let u = rho * (j as f64 + 0.5) / (n - 1) as f64;
+            let t = match &green {
+                Some((z, q)) => z * u * even_poly(q, z * u),
+                None => u,
+            };
+            even_poly(&p, t) as f32
         })
         .collect()
 }
@@ -681,6 +755,98 @@ mod tests {
         let mut p = LensProfile { distortion: dense.clone(), ..LensProfile::default() };
         p.clamp();
         assert_eq!(p.distortion, dense, "clamp must keep the render spline whole");
+    }
+
+    /// The `0x7035` pair (red sixteen, then blue) of the five real frames of
+    /// [`CAMERA_RAW_CASES`] (same order), and the WarpRectilinear planes
+    /// `(k₀, k₁, k₂, k₃)` Adobe DNG Converter 18.7 wrote for red and blue.
+    #[allow(clippy::type_complexity)] // because a fixture table reads best inline
+    const CAMERA_RAW_CA: [([i16; 32], [f64; 4], [f64; 4]); 5] = [
+        (
+            [512, 512, 512, 512, 512, 384, 384, 384, 384, 256, 256, 256, 256, 256, 128, 256, 128, 128, 128, 128, 128, 128, 128, 256, 256, 256, 256, 256, 256, 256, 128, 128],
+            [1.0002373637274475, -0.0002489610220068883, -1.3931351906748546e-05, 0.00013816649935449732],
+            [1.0000247510471891, 0.0005173276850358732, -0.0007280815185470857, 0.00024268582135178463],
+        ),
+        (
+            [-512, -384, -384, -384, -384, -384, -512, -512, -512, -512, -640, -640, -640, -640, -640, -512, -256, -256, -256, -256, -256, -256, -256, -256, -256, -256, -128, -128, -128, -128, -128, -128],
+            [0.9998143476247164, -0.000186766565001939, -0.00031572447760730427, 0.00043448191939354786],
+            [0.9998570113717264, 7.52299668462797e-05, 0.0002065587422119819, -0.00020504145854793876],
+        ),
+        (
+            [0, 0, 0, 0, 0, -128, -128, -128, -256, -256, -384, -256, -256, -256, -128, 0, 0, 0, -128, -128, -256, -256, -256, -256, -256, -256, -256, -256, -256, -256, -384, -512],
+            [1.000033724665486, -0.0007488541342031141, 0.0008181476131809973, -0.00010299337092334326],
+            [0.999919657666892, -0.00040201288971175586, 0.0010475621984067374, -0.0008181196924343936],
+        ),
+        (
+            [0, 128, 128, 128, 128, 0, 0, -128, -128, -128, -128, -128, -128, -128, 0, 128, 0, 0, 0, -128, -128, -128, -128, -256, -256, -128, -128, -128, -128, -256, -256, -384],
+            [1.0000600419157486, -0.0005104836951934644, 0.0004398788915498386, 7.17183857474879e-05],
+            [0.9999343369222968, -0.00017514074376112632, 0.0005718846543860678, -0.0005212718110030323],
+        ),
+        (
+            [-384, -256, -256, -256, -128, -128, 0, 0, 0, 0, 0, 0, 0, 0, 0, -128, 512, 512, 512, 512, 512, 384, 384, 256, 256, 256, 256, 256, 256, 256, 256, 384],
+            [0.9999279632473395, 0.00026716644080782004, -0.0001607886339325404, -8.837193737498694e-05],
+            [1.0002391794038092, -0.0004587287110471294, 0.00043332530711559514, -3.484620151539275e-05],
+        ),
+    ];
+
+    fn ca_factors(raw: &[i16]) -> Vec<f32> {
+        raw.iter().map(|&v| v as f32 * (-21f32).exp2() + 1.0).collect()
+    }
+
+    fn plane(k: &[f64; 4], x: f64) -> f64 {
+        k[0] + k[1] * x.powi(2) + k[2] * x.powi(4) + k[3] * x.powi(6)
+    }
+
+    #[test]
+    fn the_render_ca_is_camera_raws_polynomial_per_channel() {
+        // In the sensor frame with no distortion, green's source radius IS the
+        // output radius, so the engine's spline must be the DNG's plane
+        // itself. The old reading missed by up to 1.1e-4.
+        const SENSOR: (f32, f32) = (9600.0, 6376.0);
+        let mut worst = 0.0f64;
+        for (i, (raw, red, blue)) in CAMERA_RAW_CA.iter().enumerate() {
+            for (half, adobe) in [(&raw[..16], red), (&raw[16..], blue)] {
+                let knots = sony_render_ca(&ca_factors(half), &[], SENSOR, Some(SENSOR), SONY_RENDER_DISTORTION_KNOTS);
+                assert_eq!(knots.len(), SONY_RENDER_DISTORTION_KNOTS);
+                for s in 0..=200 {
+                    let r = s as f64 / 200.0;
+                    let d = (f64::from(crate::render::profile_knot_interp(&knots, r as f32)) - plane(adobe, r)).abs();
+                    worst = worst.max(d);
+                    assert!(d < 1e-5, "frame {i} r={r}: engine CA off Camera Raw's by {d}");
+                }
+            }
+        }
+        eprintln!("worst |engine − Camera Raw| CA factor: {worst:e}");
+    }
+
+    #[test]
+    fn the_render_ca_is_read_at_greens_source_radius() {
+        // In the ILCE-7RM4A's crop, under each frame's own distortion: red over
+        // green at output radius r must be the plane at green's raw-frame
+        // radius, as the engine's distortion spline actually draws it.
+        let (crop, sensor) = ((9504.0, 6336.0), (9600.0, 6376.0));
+        let rho = 9504f64.hypot(6336.0) / 9600f64.hypot(6376.0);
+        let mut worst = 0.0f64;
+        for (i, (raw, red, blue)) in CAMERA_RAW_CA.iter().enumerate() {
+            let dist = knot_factors(&CAMERA_RAW_CASES[i].1);
+            let dense = sony_render_distortion(&dist, crop, Some(sensor), SONY_RENDER_DISTORTION_KNOTS);
+            for (half, adobe) in [(&raw[..16], red), (&raw[16..], blue)] {
+                let knots = sony_render_ca(&ca_factors(half), &dist, crop, Some(sensor), SONY_RENDER_DISTORTION_KNOTS);
+                for s in 0..=100 {
+                    let r = s as f32 / 100.0;
+                    let t = rho * f64::from(r * engine_factor(&dense, crop, r));
+                    let d = (f64::from(crate::render::profile_knot_interp(&knots, r)) - plane(adobe, t)).abs();
+                    worst = worst.max(d);
+                    assert!(d < 1e-5, "frame {i} r={r}: CA read at the wrong radius by {d}");
+                }
+            }
+        }
+        eprintln!("worst CA error at green's source radius: {worst:e}");
+        // The defensive clamp keeps the CA spline whole too.
+        let knots = sony_render_ca(&ca_factors(&CAMERA_RAW_CA[0].0[..16]), &[], crop, Some(sensor), SONY_RENDER_DISTORTION_KNOTS);
+        let mut p = LensProfile { ca_r: knots.clone(), ca_b: knots.clone(), ..LensProfile::default() };
+        p.clamp();
+        assert_eq!(p.ca_r, knots, "clamp must keep the CA spline whole");
     }
 
     #[test]
