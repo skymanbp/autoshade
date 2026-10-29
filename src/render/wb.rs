@@ -186,6 +186,26 @@ pub(super) fn apply_recipe_wb_in(data: &mut [[f32; 3]], r: &EditRecipe, space: E
     }
 }
 
+/// The white a recipe on Camera Raw's law names when it moves from As Shot:
+/// `dng_temperature::Get_xy_coord` of its Temperature and Tint, at Camera
+/// Raw's own slider ranges (2000–50000 K, ±150). `None` on the engine's law
+/// and at As Shot. The RAW render puts this white into the camera stage
+/// (`profile::camera_neutral_of`), where Camera Raw puts it.
+pub(super) fn camera_raw_white(r: &EditRecipe) -> Option<[f64; 2]> {
+    if SliderLaw::of(r) != SliderLaw::CameraRaw || (r.temperature_k.is_none() && r.tint == 0.0) {
+        return None;
+    }
+    let anchor = r.as_shot_k.unwrap_or(5500.0);
+    let target = (r.temperature_k.unwrap_or(anchor), r.tint);
+    if target == (anchor, r.as_shot_tint.unwrap_or(0.0)) {
+        return None;
+    }
+    Some(profile::temp_tint_to_xy(
+        f64::from(target.0.clamp(2000.0, 50000.0)),
+        f64::from(target.1.clamp(-150.0, 150.0)),
+    ))
+}
+
 /// Camera Raw's white balance (v1.17.0, measured): the frame is adapted from
 /// the white its Temperature and Tint name to the as-shot white it was
 /// rendered at — the DNG SDK's chromaticity of a temperature and tint

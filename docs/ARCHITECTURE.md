@@ -2154,9 +2154,12 @@ tests sit in parts under `tests/`, spliced into `tests.rs` by `include!`, so
 every test keeps its name and its path.
 
 The pixel stage, in this order: anchored white balance (on a recipe that
-names a camera profile, v1.17.0, Camera Raw's measured law: a Bradford shift
+names a camera profile, v1.17.0: in the RAW develop the white is not a stage
+here at all — it is built into the profile stage below, where Camera Raw puts
+it; in the preview develop, Camera Raw's measured law, a Bradford shift
 between the DNG SDK's whites, under the profile stage's ramp and curve, which
-`render::profile::UnderTone` undoes and redoes around it) →
+`render::profile::UnderTone` undoes and redoes around it — the two disagree at
+a moved white, disclosed in TECH_STACK) →
 **camera calibration** (the Calibration panel's three primaries and shadow
 tint, first because they belong to the camera profile every later stage reads
 through) → **de-fringing** (`render/lens.rs`: the two hue windows, on
@@ -2842,7 +2845,15 @@ reciprocal temperature between their illuminants — one weight for the
 matrices and the hue/sat maps — and the white-balanced camera triple goes
 through the interpolated, normalised `ForwardMatrix` to XYZ D50, into ProPhoto,
 and out through the SDK's Bradford adaptation (`MapWhiteMatrix`) to the working
-space (`profile::Stage::build_for`, `develop_camera`). A profile without a
+space (`profile::Stage::build_for`, `develop_camera`). A Custom white (a
+recipe on Camera Raw's law that moves from As Shot) replaces the frame's
+neutral: `profile::camera_neutral_of` is the SDK's `SetWhiteXY`, the body's
+`CameraCalibration` diagonal in front of the `ColorMatrix` at the white's own
+temperature, so the camera triple is balanced to the chosen white and the
+matrices and hue/sat maps blend at it, before the tables, and no adaptation
+follows (`resolve_camera_profile`). For a Sony ARW the calibration is the
+body's reference Daylight multipliers over the file's own preset
+(`as_shot::camera_calibration`), what Camera Raw writes into its DNG. A profile without a
 `ForwardMatrix`, and every render with no profile, keep the engine's own
 D65-only matrix; the no-profile render is byte-identical to v1.16.0. Until
 v1.17.0 the matrix half was a stated deviation: on p39's flat sidecar it left
@@ -4589,7 +4600,13 @@ both hard-cell residuals. These geometry tiles can be pasted and turned with
 their components; any Bitmap component still belongs to its source photo.
 
 After the single sky/land corrections and their horizon gate,
-`fit_zoned::subzones` reads the zone's ROW PROFILE — the mask-weighted mean
+`fit_zoned::subzones` reads the zone's ROW PROFILE (and since v1.17.0 it does so
+also when no single correction survived — none attached, the horizon gate
+dropped them, or every one was refused after the shared shrink: the bands are
+tried against the refused parent, `attach::finish_with_bands_only`; on the
+night pair's camera-profile start both single zones were refused at k 0.137
+and the bands, and the colour field a tile used to hand back, were never
+tried) — the mask-weighted mean
 signed Lab residual of every analysis row (`residual_models`). Signed a/b
 matters: equal-strength warm and cool residuals have the same unsigned
 deltaE. Two/three-band models are fitted to that profile: every ramp centre
@@ -5538,7 +5555,12 @@ draws its red and its blue from different pixels — the lantern street read tin
 −29 that way and −5 as a chromaticity), and the inversion is in the engine's
 own normalisation, green 1 under a pure Kelvin move: the Kelvin is the red/blue
 axis, the tint the green axis against the red/blue mean of the residual at that
-Kelvin, so a warm move no longer reads as green (the geometric-mean
+Kelvin, so a warm move no longer reads as green. Since v1.17.0 every step of
+the fit's white balance — this inversion, the budget path, the cast hand-off,
+the vouch — asks the law the recipe renders by (`render::WbLaw`): the engine's
+separable law inverts as above; Camera Raw's (a recipe that names a camera
+profile) is inverted jointly on mired × tint, its As Shot is the stamped
+as-shot tint rather than 0, and its gains are what its stage does to mid grey (the geometric-mean
 normalisation it replaces read a pure 40000 K move as tint −19.7). And the
 demand is the CONSENSUS of the brightness ranges: the cloud is read per evidence
 luma range (the 17 ranges and the 1.5% share floor the evidence model already

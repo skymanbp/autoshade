@@ -86,7 +86,7 @@ use brush::{
 };
 pub use as_shot::as_shot_wb;
 #[cfg(test)]
-use as_shot::{camera_raw_as_shot, sony_daylight_preset, sony_decrypt};
+use as_shot::{camera_calibration, camera_raw_as_shot, sony_daylight_preset, sony_decrypt};
 use camera::{
     calibrate_camera_buffer, camera_matrix, normalise_wb, resolve_camera_profile, space_primaries,
     validate_calibration,

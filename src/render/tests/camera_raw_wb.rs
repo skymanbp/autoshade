@@ -140,7 +140,9 @@ fn camera_raws_law_inverts_its_own_white_balance_moves() {
     }
 }
 
-/// CIE Lab (D65) of a linear sRGB triple.
+/// CIE Lab (D65) of a linear sRGB triple. The matrix is IEC 61966-2-1's
+/// published sRGB → XYZ, digits as published.
+#[allow(clippy::excessive_precision)]
 fn lab_of_linear(c: [f32; 3]) -> [f32; 3] {
     let m = [[0.4124564f32, 0.3575761, 0.1804375], [0.2126729, 0.7151522, 0.0721750], [0.0193339, 0.1191920, 0.9503041]];
     let w = [0.95047f32, 1.0, 1.08883];

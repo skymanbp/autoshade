@@ -105,7 +105,7 @@ pub fn render_to_image_in(
     // buffer-lifetime queue).
     crate::decode::guard_tiff_chain(raw_path)?;
     crate::decode::guard_raw_plane_extent(raw_path)?;
-    let (mut rawimage, orientation) = {
+    let (mut rawimage, orientation, daylight) = {
         let src = RawSource::new(raw_path)
             .with_context(|| format!("open RAW {}", raw_path.display()))?;
         let decoder = crate::decode::decoder_for(raw_path, &src)?;
@@ -175,7 +175,15 @@ pub fn render_to_image_in(
         // rawler 0.7.2 skips this crop on its own. The verdict is disclosed
         // inside (A5) — an out-of-bounds refusal used to be a silent `None`.
         crate::decode::align_default_crop(&mut raw);
-        (raw, orientation)
+        // A Sony file's Daylight preset, read while its bytes are mapped: with
+        // the body's reference it is the calibration Camera Raw puts in front
+        // of the profile's matrices (`as_shot::camera_calibration`).
+        let daylight = if raw.clean_make.eq_ignore_ascii_case("sony") {
+            super::as_shot::sony_daylight_preset(src.buf())
+        } else {
+            None
+        };
+        (raw, orientation, daylight)
     };
 
     let wide = working != ExportColorSpace::Srgb;
@@ -185,7 +193,11 @@ pub fn render_to_image_in(
     // (Exactly one starting tone — a named profile's tone replaces the
     // camera-matched base curve — is the recipe's own rule,
     // `EditRecipe::starting_curve`, so the preview develops obey it too.)
-    let profile_stage = resolve_camera_profile(&rawimage, recipe, working, &diag);
+    let camera_cc = super::as_shot::camera_calibration(daylight, &rawimage.clean_model);
+    let (profile_stage, white_in_camera) = match resolve_camera_profile(&rawimage, recipe, working, &diag, camera_cc) {
+        Some((stage, white)) => (Some(stage), white),
+        None => (None, None),
+    };
     // A profile is rendered by the engine's OWN calibrate path whatever the
     // export space asked for. The sRGB path normally leaves white balance and
     // calibration to rawler and stays byte-identical to it; that byte identity
@@ -225,7 +237,9 @@ pub fn render_to_image_in(
     let calibration = if own_calibrate {
         let xyz2cam = camera_matrix(&rawimage)?;
         validate_calibration(&xyz2cam, rawimage.wb_coeffs, working, raw_path)?;
-        Some((xyz2cam, normalise_wb(rawimage.wb_coeffs)))
+        // A recipe's own white taken into the camera stage balances the
+        // camera triple to it (`resolve_camera_profile`); As Shot otherwise.
+        Some((xyz2cam, white_in_camera.unwrap_or_else(|| normalise_wb(rawimage.wb_coeffs))))
     } else if rawimage.color_matrix.iter().next().is_some() {
         let xyz2cam = camera_matrix(&rawimage)?;
         // rawler's own develop targets sRGB — validate the matrix it
@@ -330,7 +344,11 @@ pub fn render_to_image_in(
     }
 
     // --- white balance (target Kelvin/tint) in linear light -------------------
-    apply_recipe_wb_in(&mut data, recipe, working);
+    // Unless the camera stage already rendered the recipe's white, as Camera
+    // Raw does (`resolve_camera_profile`).
+    if white_in_camera.is_none() {
+        apply_recipe_wb_in(&mut data, recipe, working);
+    }
 
     // --- 「Remove Chromatic Aberration」 (v1.5.0): an INSTRUCTION, so
     // rendering it means running the solver it names and handing the answer to

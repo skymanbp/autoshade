@@ -653,3 +653,29 @@ fn under_the_stage_tone_undo_and_redo_are_inverses() {
         }
     }
 }
+
+/// A chosen white goes to a camera neutral the way the DNG SDK's `SetWhiteXY`
+/// does — the calibration diagonal in front of the `ColorMatrix` at the
+/// white's own temperature — and that neutral reads back as the same white
+/// through the same calibrated matrices (v1.17.0, the Custom white balance
+/// Camera Raw puts into the camera stage).
+///
+/// MUTATION: interpolate the matrix at D50 instead of the white's own
+/// temperature; leave the calibration out of either direction; normalise
+/// the neutral by green instead of its largest component.
+#[test]
+fn a_chosen_white_and_its_camera_neutral_read_each_other_back() {
+    let p = with_matrices();
+    let cc = Some([1.0031f32, 1.0, 0.9653]);
+    for (k, tint) in [(2500.0, 0.0), (3200.0, 20.0), (5400.0, 14.0), (9000.0, -30.0), (30000.0, 0.0)] {
+        let xy = temp_tint_to_xy(k, tint);
+        let n = camera_neutral_of(&p, xy, cc).expect("a neutral");
+        assert!((n.iter().cloned().fold(0.0f32, f32::max) - 1.0).abs() < 1e-6, "{n:?}");
+        let back = white_temperature_with(&p, n, cc).expect("a white");
+        assert!((1e6 / f64::from(back) - 1e6 / k).abs() < 0.5, "{k} K read back as {back} K");
+        let plain = camera_neutral_of(&p, xy, None).expect("a neutral");
+        let ratio = [0, 1, 2].map(|c| n[c] / plain[c]);
+        assert!((ratio[0] / ratio[1] - 1.0031).abs() < 1e-4 && (ratio[2] / ratio[1] - 0.9653).abs() < 1e-4, "{ratio:?}");
+    }
+    assert_eq!(camera_neutral_of(&bare(), D65_XY64, None), None, "no ColorMatrix, no neutral");
+}

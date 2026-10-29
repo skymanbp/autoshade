@@ -777,6 +777,35 @@ supposed to remove.
   itself and they read 1.89 / 1.77 / 1.37. The command line's `apply` of an
   `.xmp` now stamps the photo's as-shot white, as the app's import does; it
   used to move a sidecar's Temperature from the legacy 5500 K anchor.
+- Where Camera Raw puts a Custom white balance (v1.17.0, **measured**, synthetic
+  linear DNGs through Camera Raw, `LinearRaw`, camera RGB = linear sRGB, an
+  embedded profile). BEFORE the profile's tables and with the matrices blended
+  at the chosen white's temperature: with a hue/sat map that turns hues
+  120–210° by 30°, a patch the map leaves untouched at As Shot (0 ΔE) is moved
+  by it once a Custom 3000 K carries it into those hues (10 ΔE), which an
+  adaptation after the tables cannot do; with a second `ColorMatrix` at
+  Standard A the render changes by mean ΔE 20.6 at 2850 K and 5.1 at 4500 K
+  and not at all at 6500 K or 10000 K. Camera Raw's DNG of a Sony ARW (Adobe
+  DNG Converter 18.7, p39) keeps the camera's own levels as `AsShotNeutral`
+  and puts the lens compensation into `CameraCalibration1/2` =
+  diag(1.0031, 1, 0.9653), the body's reference Daylight multipliers over the
+  file's preset — the same ratio the as-shot reading below applies. The RAW
+  render therefore builds the profile stage at the chosen white
+  (`profile::camera_neutral_of`, `CameraCalibration · ColorMatrix` at the
+  white's temperature, normalised to its largest component; the camera triple
+  balanced to it; matrices and hue/sat maps blended at it) and runs no
+  adaptation after it. No constant is fitted. Against Camera Raw on the 31
+  extreme cases of p39 and p42 (grey, sky and warm bands, worst |ΔL| / |Δa|,|Δb|
+  of the move): every case with Temperature ≥ 3000 K and |Tint| ≤ 100 within
+  2 / 2 (with the fitted adaptation above: up to 3.7 ab at 40000 K and 8.2 at
+  15000 K / +100); outside, Tint ±150 6–13 ab, 2000 K 3.0 L / 4.6 ab, 2500 K
+  2.8 L on the warm band, and 2500 K / +100 out of sRGB's gamut on both sides.
+  The ten luminance bands, which mix the frame's colours, read wider: up to
+  1.1 L / 6.0 ab at 25000–50000 K, from colours rather than the white (grey
+  within 0.9 ab there).
+  The preview develop still moves the white with the fitted adaptation above,
+  so on a camera-profile start a moved white balance renders on the canvas by
+  that law and on export by this one: **disclosed, pending**.
 - The as-shot white (v1.17.0, `render::as_shot_wb`, **measured**). Camera
   Raw's As Shot render is pixel-identical to a Custom render at one point of
   its 50 K / whole-tint grid and differs from one 25 K or one tint unit away;
