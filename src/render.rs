@@ -84,7 +84,7 @@ use brush::{
     BRUSH_RASTER_MAX_WORK, BRUSH_RASTER_MIN_EDGE, brush_flow_deposit, brush_kernel,
     brush_kernel_exponents, brush_raster_dims,
 };
-pub use as_shot::as_shot_wb;
+pub use as_shot::{as_shot_wb, camera_start};
 #[cfg(test)]
 use as_shot::{camera_calibration, camera_raw_as_shot, sony_daylight_preset, sony_decrypt};
 use camera::{
@@ -217,10 +217,10 @@ pub(crate) use tone::{
 use tone::{apply_rgb_curves, hermite_eval};
 pub(crate) use tone_cr::{
     HS_SH_FLOOR, HsKey, SliderLaw, camera_raw_exposure, camera_raw_response_keyed,
-    camera_raw_row, camera_raw_start, exposure_ramp, hs_row, HsSite,
+    camera_raw_row, camera_raw_start, Exposure, hs_row, HsSite,
 };
 use tone_cr::{
-    apply_camera_raw_hs, camera_raw_after_lut, camera_raw_channels, camera_raw_exposure_lut, camera_raw_slider_lut,
+    apply_camera_raw_hs, camera_raw_after_lut, camera_raw_channels, camera_raw_slider_lut,
     camera_raw_slider_pixel, camera_raw_tone_lut, hs_field, Local, SliderPass,
 };
 #[cfg(test)]

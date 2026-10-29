@@ -990,6 +990,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                     r.as_shot_k = ask;
                     r.as_shot_tint = ast;
                 }
+                pipeline::stamp_camera_start(raw, &mut r);
                 r.open_white_balance_at_as_shot();
                 let h = Header::from_bytes(&b"X-Recipe-Source"[..], &b"lightroom-sidecar"[..])
                     .expect("static ASCII header");
@@ -1198,6 +1199,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                     r.as_shot_k = ask;
                     r.as_shot_tint = ast;
                 }
+                pipeline::stamp_camera_start(raw, &mut r);
                 r.open_white_balance_at_as_shot();
                 let mut resp = json_text(serde_json::to_string(&r)?);
                 // A corrupt recipe.json used to fall through to THIS lossy
@@ -1254,6 +1256,7 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                     r.as_shot_k = ask;
                     r.as_shot_tint = ast;
                 }
+                pipeline::stamp_camera_start(raw, &mut r);
                 r.open_white_balance_at_as_shot();
                 let h = Header::from_bytes(&b"X-Recipe-Source"[..], &b"embedded-xmp"[..])
                     .expect("static ASCII header");
@@ -1364,6 +1367,7 @@ fn api_fresh_base(request: &Request, state: &AppState) -> Result<ResponseBox> {
 fn fresh_base_payload(raw: &Path) -> String {
     let (as_shot_k, as_shot_tint) = pipeline::fresh_as_shot_wb(raw);
     let start = fresh_start(raw);
+    let named = EditRecipe { camera_profile: start.camera_profile.clone(), look: start.look.clone(), ..Default::default() };
     serde_json::json!({
         "base_curve": start.base_curve,
         "camera_profile": start.camera_profile,
@@ -1371,6 +1375,7 @@ fn fresh_base_payload(raw: &Path) -> String {
         "lens_profile": pipeline::fresh_lens_profile(raw),
         "as_shot_k": as_shot_k,
         "as_shot_tint": as_shot_tint,
+        "camera_start": crate::render::camera_start(raw, &named),
     })
     .to_string()
 }
@@ -2059,6 +2064,9 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // thousand-mask body monopolised the render thread).
     req.recipe.clamp();
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
+    // The camera start the base develops at (v1.17.0), stamped on the server
+    // whatever the client sent: a generated master's strip below clears it.
+    pipeline::stamp_camera_start(&raw, &mut req.recipe);
     // Same decode source as `api_export` below — see `develop_base`. A
     // browser-session master (fill/heal chained this session, not yet
     // persisted) overrides the persisted source; whether the calibration
@@ -2381,6 +2389,8 @@ fn deliverable_source(
 ) -> std::result::Result<(PathBuf, Option<String>), ResponseBox> {
     let mut note: Option<String> = None;
     let mut funnel_ran = false;
+    // The camera start, as the preview stamps it (v1.17.0).
+    pipeline::stamp_camera_start(raw, &mut req.recipe);
     let src = match session_master(req.master.as_deref(), raw) {
         Ok(Some((p, generated))) => {
             if generated {
@@ -4405,14 +4415,39 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["as_shot_k", "as_shot_tint", "base_curve", "camera_profile", "lens_profile", "look"],
-            "the fresh-open contract is exactly these six keys"
+            ["as_shot_k", "as_shot_tint", "base_curve", "camera_profile", "camera_start", "lens_profile", "look"],
+            "the fresh-open contract is exactly these seven keys"
         );
         // A baked source has no camera rendition and no as-shot reading: the
         // keys are still PRESENT (the client branches on null, not on absence).
         assert!(v["base_curve"].as_array().expect("an array").is_empty());
         assert!(v["as_shot_k"].is_null() && v["as_shot_tint"].is_null());
+        assert!(v["camera_start"].is_null(), "no profile stage runs on a baked source");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The web door's fresh-open payload carries the photo's camera start
+    /// (v1.17.0) — the same one the desktop open stamps
+    /// (`render::camera_start` at the fresh start's profile). Env-gated on the
+    /// calibration corpus and Camera Raw's install.
+    ///
+    /// MUTATION: drop the key, or read it at no profile.
+    #[test]
+    fn the_fresh_open_payload_carries_the_photos_camera_start() {
+        let Some(dir) = crate::config::live_env_os("AUTOSHADE_FIT_CALIBRATION_DIR").map(std::path::PathBuf::from)
+        else {
+            crate::test_skipped("serve camera start", "AUTOSHADE_FIT_CALIBRATION_DIR is unset");
+            return;
+        };
+        let raw = dir.join("p39.arw");
+        if !raw.is_file() || crate::render::canvas_renders(&raw).is_err() {
+            crate::test_skipped("serve camera start", "no corpus RAW or no canvas here");
+            return;
+        }
+        let v: serde_json::Value = serde_json::from_str(&fresh_base_payload(&raw)).expect("the payload is JSON");
+        let fresh = crate::pipeline::calibration_recipe(crate::pipeline::fresh_photo_calibration(&raw));
+        let want = serde_json::to_value(fresh.camera_start.expect("a fresh open stamps it")).expect("json");
+        assert_eq!(v["camera_start"], want);
     }
 
     /// The A6 rule for DELIVERABLES, now that export and download share one

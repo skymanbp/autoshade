@@ -283,7 +283,7 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
 /// the luma ratio (the canvas start was calibrated that way, v1.17.0 step 3);
 /// the parametric and point curves, through Adobe's channel rule
 /// (`tone_cr::camera_raw_channels`). `None` for a pass with nothing to do.
-/// With exposure (`tone_cr::camera_raw_exposure_lut`) the passes compose to
+/// With exposure (`tone_cr::Exposure`) the passes compose to
 /// [`build_tone_lut`] up to the colour rule.
 pub(crate) struct CameraRawTone {
     pub(crate) sliders: Option<SliderPass>,
@@ -358,7 +358,8 @@ fn tone_lut_at(r: &EditRecipe, exposure_ev: f32) -> Vec<f32> {
             let baked = r.baked_tone_curve().map(|l| look_curve_lut(&l.tone_curve, l.amount));
             let parametric = parametric_lut(r);
             let curve = curve_lut(&r.tone_curve);
-            return camera_raw_tone_lut(exposure_ev, sliders, baked.as_deref(), parametric.as_deref(), &curve);
+            let start = r.camera_start.unwrap_or_default();
+            return camera_raw_tone_lut(start, exposure_ev, sliders, baked.as_deref(), parametric.as_deref(), &curve);
         }
     }
     let (ys, m) = tone_model_knots(

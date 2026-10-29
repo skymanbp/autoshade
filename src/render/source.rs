@@ -213,6 +213,18 @@ pub fn render_to_image_in(
         Some((stage, white)) => (Some(stage), white),
         None => (None, None),
     };
+    // The camera start the stage rendered at is this photograph's own, and it
+    // is what the develop's Exposure and every adjustment under the stage's
+    // transfer take the light back under (`EditRecipe::camera_start`),
+    // whatever the recipe was stamped with.
+    let restarted;
+    let recipe = match &profile_stage {
+        Some(s) if recipe.camera_start != Some(s.start()) => {
+            restarted = EditRecipe { camera_start: Some(s.start()), ..recipe.clone() };
+            &restarted
+        }
+        _ => recipe,
+    };
     // A profile is rendered by the engine's OWN calibrate path whatever the
     // export space asked for. The sRGB path normally leaves white balance and
     // calibration to rawler and stays byte-identical to it; that byte identity

@@ -179,7 +179,7 @@ pub(super) fn apply_recipe_wb_in(data: &mut [[f32; 3]], r: &EditRecipe, space: E
                 return;
             }
             let m = camera_raw_wb(target, as_shot);
-            apply_camera_raw_wb(data, &m, &profile::UnderTone::new(space));
+            apply_camera_raw_wb(data, &m, &profile::UnderTone::new(space, r.camera_start.unwrap_or_default()));
             return;
         }
         apply_wb(data, anchor, r.temperature_k.unwrap_or(anchor), r.tint);
@@ -260,6 +260,9 @@ pub(crate) struct WbLaw {
     camera_raw: bool,
     anchor: f32,
     as_shot_tint: f32,
+    /// The camera start the stage's transfer ran at, under which Camera
+    /// Raw's white balance acts.
+    start: crate::recipe::CameraStart,
 }
 
 /// The post-tone linear level the fit's white-balance gains are read at:
@@ -276,6 +279,7 @@ impl WbLaw {
             camera_raw,
             anchor: r.as_shot_k.unwrap_or(5500.0),
             as_shot_tint: if camera_raw { r.as_shot_tint.unwrap_or(0.0) } else { 0.0 },
+            start: r.camera_start.unwrap_or_default(),
         }
     }
 
@@ -313,7 +317,7 @@ impl WbLaw {
         if wb == self.as_shot() {
             return [1.0; 3];
         }
-        let under = srgb_under_tone();
+        let under = srgb_under_tone(self.start);
         let m = camera_raw_wb(wb, self.as_shot());
         let out = under.redo(mat_vec3(&m, &under.undo([WB_LAW_GREY; 3])));
         let g = out[1].max(1e-6);
@@ -407,12 +411,25 @@ impl WbLaw {
 /// The engine law's green cut at Tint 100 ([`wb_gains`]).
 const ENGINE_TINT_GREEN: f32 = 0.20;
 
-/// The sRGB working space's [`profile::UnderTone`], built once: the fit asks
-/// [`WbLaw::gains`] thousands of times per solve.
-fn srgb_under_tone() -> &'static profile::UnderTone {
-    use std::sync::OnceLock;
-    static UNDER: OnceLock<profile::UnderTone> = OnceLock::new();
-    UNDER.get_or_init(|| profile::UnderTone::new(ExportColorSpace::Srgb))
+/// The sRGB working space's [`profile::UnderTone`] at a camera start, built
+/// once per start: the fit asks [`WbLaw::gains`] thousands of times per
+/// solve, and a process meets a handful of starts (one per body and white
+/// balance headroom).
+fn srgb_under_tone(start: crate::recipe::CameraStart) -> std::sync::Arc<profile::UnderTone> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    type Cache = Mutex<Vec<(crate::recipe::CameraStart, Arc<profile::UnderTone>)>>;
+    static UNDER: OnceLock<Cache> = OnceLock::new();
+    let cache = UNDER.get_or_init(Cache::default);
+    let mut cache = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, u)) = cache.iter().find(|(s, _)| *s == start) {
+        return Arc::clone(u);
+    }
+    let u = Arc::new(profile::UnderTone::new(ExportColorSpace::Srgb, start));
+    if cache.len() >= 16 {
+        cache.remove(0);
+    }
+    cache.push((start, Arc::clone(&u)));
+    u
 }
 
 /// Camera Raw's mired distance per mired the Temperature slider asks for.
@@ -444,7 +461,9 @@ pub fn solve_wb_for(px: [f32; 3], r: &EditRecipe) -> (f32, f32) {
         return solve_wb_from_neutral(px, anchor);
     }
     let as_shot = (anchor, r.as_shot_tint.unwrap_or(0.0));
-    let l = profile::UnderTone::new(ExportColorSpace::Srgb).undo(px.map(srgb_to_linear)).map(|v| v.max(1e-5));
+    let l = profile::UnderTone::new(ExportColorSpace::Srgb, r.camera_start.unwrap_or_default())
+        .undo(px.map(srgb_to_linear))
+        .map(|v| v.max(1e-5));
     // Off-neutral of the shifted pixel (white is equal channels in the
     // reference RGB): its chroma over its level.
     let miss = |k: f32, t: f32| {

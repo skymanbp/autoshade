@@ -29,50 +29,40 @@ fn flat(delta: [f32; 3]) -> Table {
 
 const SPACE: crate::render::ExportColorSpace = crate::render::ExportColorSpace::Srgb;
 
-/// What the stage's exposure ramp alone does to `px` (v1.17.0): Camera Raw's
-/// ramp (`super::exposure_ramp`) after the gain, per channel in the reference
-/// space. Every stage carries it, so a test about a table, a matrix or a
-/// curve states its expectation through it.
+/// What the stage's exposure transfer alone does to `px` (v1.17.0): Camera
+/// Raw's transfer at the stage's camera start, by its channel rule in the
+/// reference space. Every stage carries it, so a test about a table, a
+/// matrix or a curve states its expectation through it.
 fn ramped(s: &Stage, px: [f32; 3]) -> [f32; 3] {
-    let r = super::super::mat_vec3(&s.to_ref, &px).map(|c| super::super::exposure_ramp(c.max(0.0) * s.gain));
+    let r = s.ramp.transfer_rgb(super::super::mat_vec3(&s.to_ref, &px).map(|c| c.max(0.0)));
     super::super::mat_vec3(&s.from_ref, &r)
 }
 
-/// The grey the ramp takes to `y` (the ramp is strictly increasing below
-/// white): bisection.
-fn unramp(y: f32) -> f32 {
-    let (mut lo, mut hi) = (0.0f32, 1.0f32);
-    for _ in 0..60 {
-        let m = 0.5 * (lo + hi);
-        if super::super::exposure_ramp(m) < y { lo = m } else { hi = m }
-    }
-    0.5 * (lo + hi)
+/// The grey the stage's transfer takes to `y`.
+fn unramp(s: &Stage, y: f32) -> f32 {
+    s.ramp.input_of(y)
 }
 
-/// A profile with nothing to say builds NOTHING, so a photograph developed
-/// through it costs no arithmetic and moves no pixel.
+/// A profile with nothing to say — no table, a STATED straight curve, a total
+/// exposure of 0 EV — still renders Camera Raw's exposure transfer, which is
+/// not the identity even at 0 EV (its toe: measured on exactly such a
+/// profile, `tone_cr`), and nothing else. A body baseline that the profile's
+/// offset cancels starts at 0 EV.
 ///
-/// "Nothing to say" is no table, a STATED straight curve and a total exposure
-/// of 0 EV. A profile with no curve at all is not that profile: it renders
-/// through Adobe's default curve
-/// ([`a_profile_without_a_curve_renders_adobes_default_curve`]).
-///
-/// MUTATION: return `Some` unconditionally from `Stage::build`.
+/// MUTATION: skip the stage when no table or curve acts (the transfer would
+/// go missing), or ignore the offset in the start.
 #[test]
-fn a_profile_with_no_tables_a_straight_curve_and_no_gain_is_not_a_stage() {
-    assert!(Stage::build(&bare(), SPACE, Some(5500.0), 0.0).is_none(), "nothing to apply");
-    // A body baseline that the profile's offset cancels is no gain either.
+fn a_profile_with_nothing_to_say_renders_the_transfer_alone() {
+    let s = Stage::build(&bare(), SPACE, Some(5500.0), 0.0).expect("the transfer is always there");
+    let (lo, mut px) = ([0.002f32; 3], [0.002f32; 3]);
+    s.apply(&mut px);
+    assert!(px[0] < lo[0], "the toe at 0 EV: {px:?}");
+    let want = ramped(&s, lo);
+    assert!((px[0] - want[0]).abs() < 1e-6, "{px:?} vs {want:?}");
     let mut cancelled = bare();
     cancelled.baseline_exposure_offset = -0.35;
-    assert!(Stage::build(&cancelled, SPACE, Some(5500.0), 0.35).is_none(), "0 EV in total");
-    // An identity tone curve is nothing to apply either — a profile stating
-    // `0,0 … 1,1` is stating that it does not touch the tone.
-    let mut p = bare();
-    p.tone_curve = vec![[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]];
-    assert!(Stage::build(&p, SPACE, Some(5500.0), 0.0).is_none(), "an identity curve is not a curve");
-    // …but a real one is.
-    p.tone_curve = vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]];
-    assert!(Stage::build(&p, SPACE, Some(5500.0), 0.0).is_some(), "a real curve builds a stage");
+    let s = Stage::build(&cancelled, SPACE, Some(5500.0), 0.35).expect("a stage");
+    assert_eq!(s.start(), crate::recipe::CameraStart { ev: 0.0, headroom: 0.0 }, "0 EV in total");
 }
 
 /// The reference round trip is EXACT when no table acts, so the two matrices
@@ -120,12 +110,15 @@ fn the_baseline_exposure_offset_is_measured_in_stops() {
     let mut p = bare();
     p.baseline_exposure_offset = -1.0;
     let s = Stage::build(&p, SPACE, None, 0.0).expect("an offset alone makes a stage");
+    assert_eq!(s.start().ev, -1.0, "−1 stop");
     let mut px = [0.4f32, 0.4, 0.4];
     s.apply(&mut px);
-    let want = super::super::exposure_ramp(0.2);
+    let want = s.ramp.transfer(0.4);
     for c in px {
-        assert!((c - want).abs() < 1e-3, "−1 stop must halve before the ramp: {px:?} vs {want}");
+        assert!((c - want).abs() < 1e-3, "the transfer at −1 EV: {px:?} vs {want}");
     }
+    // −1 EV darkens a midtone close to the plain halving (the measured row).
+    assert!((want / 0.2 - 1.0).abs() < 0.15, "{want}");
 }
 
 /// A saturation scale from the table really desaturates the PICTURE — the
@@ -288,14 +281,13 @@ fn the_tone_lookup_refuses_a_curve_it_cannot_read() {
         tone_lut(&[[0.0, 0.0], [0.25, 0.25], [0.5, 0.5], [1.0, 1.0]]).is_none(),
         "…nor is a straight line with more points on it"
     );
-    // …and that refusal is what keeps such a profile from becoming a stage.
+    // …and that refusal leaves such a profile's stage with no curve: what it
+    // renders is Camera Raw's exposure transfer alone.
     let mut p = bare();
     p.baseline_exposure_offset = 0.0;
     p.tone_curve = vec![[0.0, 0.0], [1.0, 1.0]];
-    assert!(
-        Stage::build(&p, SPACE, Some(5500.0), 0.0).is_none(),
-        "an identity curve is the whole profile here, so there is nothing to apply"
-    );
+    let s = Stage::build(&p, SPACE, Some(5500.0), 0.0).expect("the transfer");
+    assert!(s.tone.is_none(), "an identity curve is no curve to apply");
 }
 
 /// The tone lookup's two ends: above 1 the curve is continued along the chord
@@ -351,8 +343,8 @@ fn a_profile_without_a_curve_renders_adobes_default_curve() {
     let s = Stage::build(&p, SPACE, None, 0.0).expect("the default curve is something to apply");
     for (x, want) in [(0.5f32, 0.80486f32), (0.18, 0.3881)] {
         assert!((default_curve(x) - want).abs() < 1e-3, "the table at {x}: {}", default_curve(x));
-        // The stage meets the curve after the exposure ramp.
-        let mut grey = [unramp(x); 3];
+        // The stage meets the curve after the exposure transfer.
+        let mut grey = [unramp(&s, x); 3];
         s.apply(&mut grey);
         for c in grey {
             assert!((c - want).abs() < 1e-3, "grey {x} through the default curve: {grey:?}");
@@ -362,7 +354,7 @@ fn a_profile_without_a_curve_renders_adobes_default_curve() {
     // a valid curve either — the default renders.
     p.tone_curve = vec![[0.5, 0.7]];
     let s = Stage::build(&p, SPACE, None, 0.0).expect("an unusable curve is no curve");
-    let mut grey = [unramp(0.5); 3];
+    let mut grey = [unramp(&s, 0.5); 3];
     s.apply(&mut grey);
     assert!((grey[0] - 0.80486).abs() < 1e-3, "{grey:?}");
 }
@@ -376,49 +368,49 @@ fn a_profile_with_its_own_curve_keeps_it() {
     let mut p = bare();
     p.tone_curve = vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]];
     let s = Stage::build(&p, SPACE, None, 0.0).expect("a real curve");
-    let mut grey = [unramp(0.5); 3];
+    let mut grey = [unramp(&s, 0.5); 3];
     s.apply(&mut grey);
     assert!(grey.iter().all(|c| (c - 0.62).abs() < 2e-3), "its own curve at its knot: {grey:?}");
 }
 
-/// The stage's gain is the body's baseline exposure PLUS the profile's offset,
-/// in stops — Adobe's `TotalBaselineExposure`.
+/// The stage's start is the body's baseline exposure PLUS the profile's
+/// offset, in stops — Adobe's `TotalBaselineExposure` — and its transfer is
+/// the measured one at that total.
 ///
 /// MUTATION: ignore the baseline argument, or subtract it.
 #[test]
-fn the_gain_composes_the_bodys_baseline_with_the_profiles_offset() {
+fn the_start_composes_the_bodys_baseline_with_the_profiles_offset() {
     let mut p = bare();
     p.baseline_exposure_offset = -1.0;
     let s = Stage::build(&p, SPACE, None, 0.5).expect("−0.5 EV in total");
+    assert_eq!(s.start().ev, -0.5, "−1 + 0.5");
     let mut px = [0.4f32; 3];
     s.apply(&mut px);
-    let want = super::super::exposure_ramp(0.4 * 2f32.powf(-0.5));
-    assert!(px.iter().all(|c| (c - want).abs() < 1e-3), "−1 + 0.5 = −0.5 EV: {px:?}");
+    let want = super::super::tone_cr::Ramp::of(crate::recipe::CameraStart { ev: -0.5, headroom: 0.0 }).transfer(0.4);
+    assert!(px.iter().all(|c| (c - want).abs() < 1e-3), "−0.5 EV: {px:?} vs {want}");
     p.baseline_exposure_offset = 0.0;
     let s = Stage::build(&p, SPACE, None, 1.0).expect("+1 EV");
-    let mut px = [0.3f32; 3];
-    s.apply(&mut px);
-    let want = super::super::exposure_ramp(0.6);
-    assert!(px.iter().all(|c| (c - want).abs() < 1e-3), "+1 EV doubles before the ramp: {px:?}");
+    assert_eq!(s.start().ev, 1.0);
 }
 
-/// Light the gain lifts past white is rolled off under it, before the look
-/// table and the curve — Camera Raw's exposure ramp (v1.17.0, measured; the
-/// DNG SDK's `dng_function_exposure_ramp` clips at 1 instead), applied per
-/// channel; nothing past 1 reaches the curve.
+/// Light the exposure lifts towards white is rolled off, not clipped, before
+/// the look table and the curve — Camera Raw's transfer (v1.17.0, measured;
+/// the DNG SDK's `dng_function_exposure_ramp` clips at 1 instead); nothing
+/// past 1 reaches the curve.
 ///
-/// MUTATION: carry the lifted value into the curve (the chord past 1 would
-/// return 1.6 here), or clip at white again.
+/// MUTATION: clip at white again (0.8 at +1 EV would land on 1).
 #[test]
-fn light_lifted_past_white_rolls_off_under_camera_raws_exposure_ramp() {
+fn light_lifted_towards_white_rolls_off_under_camera_raws_transfer() {
     let mut p = bare();
     p.baseline_exposure_offset = 0.0;
     let s = Stage::build(&p, SPACE, None, 1.0).expect("+1 EV");
     let mut px = [0.8f32; 3];
     s.apply(&mut px);
-    let want = super::super::exposure_ramp(1.6);
-    assert!(want < 1.0 && want > super::super::exposure_ramp(1.0), "the shoulder is still open at 1.6");
-    assert!(px.iter().all(|c| (c - want).abs() < 1e-3), "0.8 · 2 rolls off to {want}: {px:?}");
+    let open = s.ramp.transfer(0.4);
+    assert!(px.iter().all(|&c| c > open && c < 0.999), "0.8 at +1 EV rolls off below white: {px:?}");
+    let mut past = [1.5f32; 3];
+    s.apply(&mut past);
+    assert!(past.iter().all(|&c| c <= 1.0 + 1e-6), "nothing past white: {past:?}");
 }
 
 
@@ -482,7 +474,7 @@ fn a_profile_with_a_forward_matrix_owns_the_transform_and_keeps_grey_grey() {
     assert!(s.owns_camera());
     for level in [0.02f32, 0.18, 0.6] {
         let out = s.develop_camera([level; 3]);
-        let want = super::super::exposure_ramp(level);
+        let want = s.ramp.transfer(level);
         for c in out {
             assert!((c - want).abs() < 2e-4, "grey {level} came out {out:?}, not {want}");
         }
@@ -642,10 +634,10 @@ fn the_white_shift_keeps_white_luminance_and_is_identity_on_one_white() {
 /// stage could have produced, so a shift that does nothing changes nothing.
 ///
 /// MUTATION: undo the curve per channel (it does not invert `adobe_tone` on
-/// a colour), or leave the ramp out of one side.
+/// a colour), or leave the transfer out of one side.
 #[test]
 fn under_the_stage_tone_undo_and_redo_are_inverses() {
-    let under = UnderTone::new(super::super::ExportColorSpace::Srgb);
+    let under = UnderTone::new(super::super::ExportColorSpace::Srgb, crate::recipe::CameraStart { ev: 0.35, headroom: 1.0 });
     for px in [[0.05f32, 0.05, 0.05], [0.4, 0.2, 0.1], [0.1, 0.3, 0.6], [0.8, 0.75, 0.7], [0.02, 0.01, 0.03]] {
         let back = under.redo(under.undo(px));
         for c in 0..3 {

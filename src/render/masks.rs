@@ -82,7 +82,7 @@ pub(super) fn apply_masks(
     // (`mask_cr`); this pass keeps the rest, and turns the Hue as Lightroom
     // does (`mask_cr::hue_px`).
     let camera_raw = SliderLaw::of(r) == SliderLaw::CameraRaw;
-    let hue_space = camera_raw.then(|| (profile::UnderTone::new(space), transfer_luts()));
+    let hue_space = camera_raw.then(|| (profile::UnderTone::new(space, r.camera_start.unwrap_or_default()), transfer_luts()));
     // The frame adaptation, built ONCE per frame rather than per mask or per
     // pixel (see `MaskUnwarp`). `None` whenever nothing downstream moves these
     // pixels, which is what keeps a photo with no active geometry byte-identical
