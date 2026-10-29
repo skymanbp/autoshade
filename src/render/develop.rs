@@ -292,10 +292,11 @@ pub(super) fn apply_develop_with_rasters(
     //    that should cancel multiplicatively could not cancel on clipped
     //    pixels (the old "order between them is cosmetic" comment was only
     //    true of un-clamped math — L01-6).
-    //    On a camera-profile start the frame has already been through the
-    //    profile's exposure ramp and Adobe's default curve, and Camera Raw's
-    //    vignetting acts BEFORE both, in raw-linear light: the gain goes on
-    //    under them (`apply_radial_gain_under_tone`).
+    //    On a camera-profile start the PROFILE's gain is not here at all: it
+    //    went on the sensor's linear light before the profile stage
+    //    (`render::source`, and the preview bases through `BasePart`), where
+    //    Camera Raw applies it. What is left here is the manual slider, put on
+    //    under the profile's ramp and curve (`apply_radial_gain_under_tone`).
     if let Some(lut) = vignette_gain_lut(r) {
         if camera_raw {
             apply_radial_gain_under_tone(data, w, h, &lut, space);
@@ -671,9 +672,9 @@ fn scaled_profile_gain(g: f32, s: f32) -> f32 {
 /// the one clamp in `apply_radial_gain` runs on the true combined gain and
 /// inverse corrections genuinely cancel (L01-6).
 pub(super) fn vignette_gain_lut(r: &EditRecipe) -> Option<Vec<f32>> {
-    let profile = r
-        .lens_profile
-        .vignette_active()
+    // Under Camera Raw's law the profile's gain belongs to the source develop
+    // (`render::source`), not to this stage.
+    let profile = (r.lens_profile.vignette_active() && SliderLaw::of(r) != SliderLaw::CameraRaw)
         .then(|| profile_vignette_lut(&r.lens_profile.vignette, r.lens_profile_vignetting_scale));
     let manual =
         (r.lens_vignette != 0.0).then(|| manual_vignette_lut(r.lens_vignette, r.lens_vignette_mid));
@@ -716,21 +717,33 @@ pub(super) fn apply_radial_gain(data: &mut [[f32; 3]], w: usize, h: usize, gain_
     });
 }
 
+/// [`apply_radial_gain`] on LINEAR light that no transfer has touched — the
+/// sensor's own, before the camera profile stage (`render::source`). No clamp:
+/// the profile stage and its highlight treatment come after.
+pub(super) fn apply_radial_gain_linear(data: &mut [[f32; 3]], w: usize, h: usize, gain_lut: &[f32]) {
+    if w == 0 || h == 0 {
+        return; // par_chunks_mut(0) asserts even on an empty slice (U14)
+    }
+    let (cx, cy) = ((w as f32 - 1.0) * 0.5, (h as f32 - 1.0) * 0.5);
+    let rmax = (cx * cx + cy * cy).sqrt().max(1.0);
+    data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let dy = y as f32 - cy;
+        for (x, px) in row.iter_mut().enumerate() {
+            let dx = x as f32 - cx;
+            let gain = sample_lut(gain_lut, ((dx * dx + dy * dy).sqrt() / rmax).clamp(0.0, 1.0));
+            *px = px.map(|c| c * gain);
+        }
+    });
+}
+
 /// [`apply_radial_gain`] on a frame the camera-profile stage has rendered: each
 /// pixel's light is taken back under Adobe's default curve and the exposure
 /// ramp ([`profile::UnderTone`]), multiplied there, and put back through them.
-///
-/// Why (2026-10-28): Camera Raw's lens vignetting is a gain in raw-linear
-/// light. Measured on flat-field frames read against their own raw-gain
-/// ladders, its gain is the Adobe profile's model to 0.22 %; the engine's,
-/// applied in the decoded linear light of the curve's OUTPUT, came out at
-/// three quarters to four fifths of its own knots' EV — reproduced to
-/// 0.0002 EV by sending the knots through the engine's own ladder. What this
-/// still does not undo is the profile's HueSatMap, which Camera Raw applies
-/// after the gain and this engine before it: on a value-dependent map (Adobe
-/// Standard for the 7R IV is) a strong corner gain leaves up to about 1 %
-/// (14–24 mm at 20 mm, 0.3 % with the map skipped on both sides), nor the
-/// look table between the ramp and the curve ([`profile::UnderTone`]).
+/// Only the MANUAL vignette slider comes here; the profile's own gain goes on
+/// before the profile stage (`render::source`), because taken back under the
+/// curve alone it still met the profile's HueSatMap on the wrong side (up to
+/// 0.96 % off Camera Raw in a 14–24 mm corner, 0.12 % where it is now). Light
+/// the manual slider acts in under Camera Raw's law is not measured.
 fn apply_radial_gain_under_tone(data: &mut [[f32; 3]], w: usize, h: usize, gain_lut: &[f32], space: ExportColorSpace) {
     if w == 0 || h == 0 {
         return; // par_chunks_mut(0) asserts even on an empty slice (U14)

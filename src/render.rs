@@ -109,11 +109,9 @@ pub use develop::{
 };
 pub(crate) use develop::{apply_colour_field, field_axis, field_guide_luma};
 use develop::{apply_develop_with_rasters, dehaze_airlight, dehaze_px, luma601};
+use develop::{apply_radial_gain, apply_radial_gain_linear, profile_vignette_lut};
 #[cfg(test)]
-use develop::{
-    apply_dehaze, apply_develop_anon, apply_radial_gain, manual_vignette_lut, profile_vignette_lut,
-    vignette_gain_lut,
-};
+use develop::{apply_dehaze, apply_develop_anon, manual_vignette_lut, vignette_gain_lut};
 pub use export::{
     ExportColorSpace, ExportOpts, convert_export_color_space, render_to_file, stage_and_publish,
 };
