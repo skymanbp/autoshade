@@ -289,6 +289,19 @@ fn settle_over_range(t: [f32; 3]) -> [f32; 3] {
     t0.map(|c| (c / max + eucl) / 2.0)
 }
 
+/// The creative Look's colour table `r` renders through (`None`: its Look
+/// names none), or why it cannot — one rule for the render's profile stage and
+/// the open path's camera start (`render::camera_start`).
+pub(super) fn creative_table(r: &EditRecipe) -> Option<std::result::Result<crate::dcp::Table, String>> {
+    let look = r.look.as_ref().filter(|l| !l.table.is_empty())?;
+    // Lightroom scales a Look by its Amount; every Look measured carries
+    // 1, and how a table scales below that is not modelled.
+    if (look.amount - 1.0).abs() > 1e-3 {
+        return Some(Err(format!("its amount is {:.2}, and only 1 is modelled", look.amount)));
+    }
+    Some(crate::dcp::find_look_table(&look.table).map_err(|e| e.to_string()))
+}
+
 /// The camera profile this photograph is developed through, prepared for this
 /// frame — or `None`, with the reason disclosed, when there is not one.
 ///
@@ -328,21 +341,17 @@ pub(super) fn resolve_camera_profile(
     // The creative colour table, read from the Camera Raw install and checked
     // against its fingerprint (`crate::dcp::find_look_table`). Every way it
     // can stay unrendered is named here, where the profile is being applied.
-    let creative = r.look.as_ref().filter(|l| !l.table.is_empty()).and_then(|look| {
-        let not_rendered = |why: String| {
-            diag.warn(format!(
-                "creative profile \"{}\": its colour table ({}) is not rendered ({why}) — the \
-                 rest of the Look is",
-                look.name, look.table
-            ));
-        };
-        // Lightroom scales a Look by its Amount; every Look measured carries
-        // 1, and how a table scales below that is not modelled.
-        if (look.amount - 1.0).abs() > 1e-3 {
-            not_rendered(format!("its amount is {:.2}, and only 1 is modelled", look.amount));
-            return None;
-        }
-        crate::dcp::find_look_table(&look.table).map_err(|e| not_rendered(e.to_string())).ok()
+    let creative = creative_table(r).and_then(|found| {
+        found
+            .map_err(|why| {
+                let look = r.look.as_ref().expect("a creative table answer names a Look");
+                diag.warn(format!(
+                    "creative profile \"{}\": its colour table ({}) is not rendered ({why}) — the \
+                     rest of the Look is",
+                    look.name, look.table
+                ));
+            })
+            .ok()
     });
     let (make, model) = (rawimage.camera.make.as_str(), rawimage.camera.model.as_str());
     let (path, prof) = match crate::dcp::find(make, model, name) {

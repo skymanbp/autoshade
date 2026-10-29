@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn the_solve_rows_are_the_render_law() {
         let key = render::HsKey::NOMINAL;
-        let start = crate::recipe::CameraStart { ev: 0.35, headroom: 1.0 };
+        let start = crate::recipe::CameraStart { ev: 0.35, headroom: 1.0, tables: 0 };
         for ev in [0.0f32, 0.7, -0.5] {
             let exposure = render::Exposure::new(start, ev);
             let e = exposure.as_ref();

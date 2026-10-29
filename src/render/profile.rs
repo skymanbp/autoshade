@@ -179,12 +179,7 @@ impl Stage {
         let white = frame.neutral.and_then(|n| white_temperature_with(profile, n, frame.calibration));
         let kelvin = white.or(frame.kelvin);
         let hue_sat = blend_calibrations(profile, kelvin);
-        let look = frame.creative.or_else(|| profile.look_table.clone());
-        let tone = if states_a_curve(&profile.tone_curve) {
-            tone_lut(&profile.tone_curve)
-        } else {
-            Some(acr3_default::ACR3_DEFAULT.to_vec())
-        };
+        let (look, tone) = stage_tail(profile, frame.creative);
         let total_ev = baseline_ev + profile.baseline_exposure_offset;
         let camera = white.and_then(|_| forward_matrix(profile, kelvin));
         // Working RGB → XYZ (D65-adapted, as the export spaces are) → ProPhoto.
@@ -207,9 +202,10 @@ impl Stage {
             }
             None => (None, super::inv3(&to_ref)),
         };
+        let tables = register_tail(look.as_ref(), tone.as_deref(), camera.is_some());
         // Camera Raw's transfer is never the identity (its toe acts at 0 EV),
         // so the stage always has work.
-        let ramp = super::tone_cr::Ramp::of(camera_start_of(total_ev, frame.neutral));
+        let ramp = super::tone_cr::Ramp::of(camera_start_of(total_ev, frame.neutral, tables));
         Some(Stage { from_ref, to_ref, camera, hue_sat, look, tone, ramp })
     }
 
@@ -420,12 +416,122 @@ pub(crate) fn temp_tint_to_xy(kelvin: f64, tint: f64) -> [f64; 2] {
 /// (`tone_cr`, measured) — none without a camera neutral. ONE function for the
 /// stage and for the start the open paths stamp (`render::camera_start`), so
 /// the two cannot disagree.
-pub(crate) fn camera_start_of(total_ev: f32, neutral: Option<[f32; 3]>) -> crate::recipe::CameraStart {
+pub(crate) fn camera_start_of(total_ev: f32, neutral: Option<[f32; 3]>, tables: u64) -> crate::recipe::CameraStart {
     crate::recipe::CameraStart {
         ev: if total_ev.is_finite() { total_ev } else { 0.0 },
         headroom: neutral.map_or(0.0, super::tone_cr::headroom_of),
+        tables,
     }
 }
+
+/// What a stage built from `profile` puts on after its exposure transfer: the
+/// look table (a creative one REPLACES the profile's own, [`Stage::build_for`])
+/// and the tone curve (the profile's own when it states one — `None` for a
+/// stated identity — else Adobe's default).
+fn stage_tail(profile: &Profile, creative: Option<Table>) -> (Option<Table>, Option<Vec<f32>>) {
+    let look = creative.or_else(|| profile.look_table.clone());
+    let tone = if states_a_curve(&profile.tone_curve) {
+        tone_lut(&profile.tone_curve)
+    } else {
+        Some(acr3_default::ACR3_DEFAULT.to_vec())
+    };
+    (look, tone)
+}
+
+/// The key a camera start names `profile`'s tail by ([`stage_tail`],
+/// [`register_tail`]) for a frame of camera `neutral` — for the open path's
+/// stamp, which reads the profile without building a stage
+/// (`render::camera_start`). The stage owns the camera transform exactly
+/// when [`Stage::build_for`] would: a white solved from the neutral and a
+/// `ForwardMatrix`.
+pub(crate) fn tail_key(profile: &Profile, creative: Option<Table>, neutral: Option<[f32; 3]>) -> u64 {
+    let (look, tone) = stage_tail(profile, creative);
+    let owns = neutral
+        .and_then(|n| white_temperature_with(profile, n, None))
+        .and_then(|k| forward_matrix(profile, Some(k)))
+        .is_some();
+    register_tail(look.as_ref(), tone.as_deref(), owns)
+}
+
+/// A stage's tail as [`UnderTone`] takes it back off: the look table, the
+/// tone curve, and which reference RGB they act in — ProPhoto at D50 behind a
+/// Bradford adaptation when the stage owns the camera transform, ProPhoto's
+/// primaries at the working white otherwise ([`Stage::build_for`]).
+struct Tail {
+    look: Option<Table>,
+    tone: Option<Vec<f32>>,
+    bradford: bool,
+}
+
+type TailRegistry = std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<Tail>>>;
+
+fn tail_registry() -> &'static TailRegistry {
+    static R: std::sync::OnceLock<TailRegistry> = std::sync::OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// Register a stage's tail and answer its key: FNV-1a over the tables' own
+/// numbers, so the same tables answer the same key in every process. 0 is
+/// kept for "Adobe's default curve, no look table" (a camera start written
+/// before the key existed), which these tables never hash to.
+fn register_tail(look: Option<&Table>, tone: Option<&[f32]>, bradford: bool) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    match look {
+        Some(t) => {
+            eat(&[1]);
+            for v in [t.hue, t.sat, t.val, u32::from(t.srgb_value)] {
+                eat(&v.to_le_bytes());
+            }
+            for c in t.data.iter().flatten() {
+                eat(&c.to_bits().to_le_bytes());
+            }
+        }
+        None => eat(&[0]),
+    }
+    match tone {
+        Some(lut) => {
+            eat(&[1]);
+            for v in lut {
+                eat(&v.to_bits().to_le_bytes());
+            }
+        }
+        None => eat(&[0]),
+    }
+    eat(&[u8::from(bradford)]);
+    let key = h.max(1);
+    let mut reg = tail_registry().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    reg.entry(key).or_insert_with(|| std::sync::Arc::new(Tail { look: look.cloned(), tone: tone.map(<[f32]>::to_vec), bradford }));
+    key
+}
+
+/// The look table's inverse on one ProPhoto-linear triple: the input the
+/// table maps to `out`, by fixed-point iteration in HSV (the table is a smooth
+/// map close to the identity; four steps reach 1e-4 on the measured tables).
+fn look_inverse(t: &Table, out: [f32; 3]) -> [f32; 3] {
+    let o = to_hsv(out);
+    let mut x = o;
+    for _ in 0..LOOK_INVERSE_STEPS {
+        let mut y = x;
+        t.apply(&mut y);
+        let dh = (o[0] - y[0] + 540.0).rem_euclid(360.0) - 180.0;
+        let ds = o[1] - y[1];
+        let dv = if y[2] > 1e-9 { o[2] / y[2] } else { 1.0 };
+        x = [(x[0] + dh).rem_euclid(360.0), (x[1] + ds).clamp(0.0, 1.0), (x[2] * dv).max(0.0)];
+        if dh.abs() < 1e-3 && ds.abs() < 1e-5 && (dv - 1.0).abs() < 1e-5 {
+            break;
+        }
+    }
+    from_hsv(x)
+}
+
+/// [`look_inverse`]'s iteration cap.
+const LOOK_INVERSE_STEPS: usize = 12;
 
 /// The SDK's Bradford adaptation [`map_white`] from white `from` to white
 /// `to` as a matrix on the stage's linear reference RGB (ProPhoto's primaries
@@ -439,19 +545,26 @@ pub(crate) fn white_shift(from: [f64; 2], to: [f64; 2]) -> [[f32; 3]; 3] {
     mat3_f32(&shift.map(|row| row.map(|v| v / y.max(1e-9))))
 }
 
-/// The profile stage's last two steps — its exposure transfer and Adobe's
-/// default curve put on as [`adobe_tone`] puts them — undone and redone around
+/// The profile stage's last steps — its exposure transfer, its look table and
+/// its tone curve put on as [`adobe_tone`] puts it — undone and redone around
 /// a map of the light they acted on, in the stage's own reference RGB: what a
-/// Camera Raw adjustment that acts before the curve (its white balance, its
+/// Camera Raw adjustment that acts before them (its white balance, its
 /// Exposure) needs on a frame the stage has already rendered. [`adobe_tone`]
 /// is exactly invertible (the brightest and darkest channels through the
-/// curve, the middle one at its relative place between them), and so is the
-/// transfer below white ([`super::tone_cr::Ramp::input_rgb`]), at the camera
-/// start the stage ran it at. The look table between them is not undone.
+/// curve, the middle one at its relative place between them), the look table
+/// by iteration ([`look_inverse`]), and the transfer below white
+/// ([`super::tone_cr::Ramp::input_rgb`]), at the camera start the stage ran
+/// it at. The look table and curve are the stage's own, named by the start
+/// (`CameraStart::tables`): measured on synthetic warm patches at −1.51 EV
+/// with Adobe Standard's look table, Camera Raw applies the look AFTER the
+/// slider Exposure (median ΔE 4.71 with it before, the order a frame rendered
+/// at its start leaves).
 pub(crate) struct UnderTone {
     to_ref: [[f32; 3]; 3],
     from_ref: [[f32; 3]; 3],
+    curve: Vec<f32>,
     inverse: Vec<f32>,
+    look: Option<Table>,
     start: super::tone_cr::Ramp,
 }
 
@@ -460,9 +573,32 @@ impl UnderTone {
     /// camera start `start`.
     pub(crate) fn new(space: super::ExportColorSpace, start: crate::recipe::CameraStart) -> Self {
         let space_to_xyz = super::rgb_to_xyz(super::space_primaries(space), super::D65_XY);
-        let ref_to_xyz = super::rgb_to_xyz(PROPHOTO_PRIM, super::D65_XY);
-        let to_ref = super::mat_mul3(&super::inv3(&ref_to_xyz), &space_to_xyz);
-        let curve = &acr3_default::ACR3_DEFAULT;
+        // The stage's own tail when the start names one this process has
+        // registered; else (a start written before the key existed) Adobe's
+        // default curve and no look table.
+        let tail = (start.tables != 0)
+            .then(|| tail_registry().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&start.tables).cloned())
+            .flatten();
+        // The stage's reference RGB, exactly ([`Stage::build_for`]): the
+        // channel rules of its transfer and curve are not the same map in
+        // another basis — measured on a ForwardMatrix profile at −1.51 EV,
+        // the working-white ProPhoto basis put warm colours 2–3.5 % off per
+        // channel against the stage rendered at the total.
+        let to_ref = if tail.as_ref().is_some_and(|t| t.bradford) {
+            let pp_to_xyz50 = mat3_f32(&rgb_to_xyz64(PROPHOTO_PRIM, D50_XY));
+            let adapt = mat3_f32(&map_white(D50_XY, D65_XY64));
+            super::inv3(&super::mat_mul3(&super::inv3(&space_to_xyz), &super::mat_mul3(&adapt, &pp_to_xyz50)))
+        } else {
+            let ref_to_xyz = super::rgb_to_xyz(PROPHOTO_PRIM, super::D65_XY);
+            super::mat_mul3(&super::inv3(&ref_to_xyz), &space_to_xyz)
+        };
+        let (curve, look): (Vec<f32>, Option<Table>) = match &tail {
+            Some(t) => (
+                t.tone.clone().unwrap_or_else(|| (0..TONE_LUT).map(|i| i as f32 / (TONE_LUT - 1) as f32).collect()),
+                t.look.clone(),
+            ),
+            None => (acr3_default::ACR3_DEFAULT.to_vec(), None),
+        };
         // The curve's inverse on the same grid, by its monotone samples.
         let n = curve.len();
         let inverse = (0..TONE_LUT)
@@ -474,7 +610,7 @@ impl UnderTone {
                 (j as f32 - 1.0 + f) / (n - 1) as f32
             })
             .collect();
-        UnderTone { to_ref, from_ref: super::inv3(&to_ref), inverse, start: super::tone_cr::Ramp::of(start) }
+        UnderTone { to_ref, from_ref: super::inv3(&to_ref), curve, inverse, look, start: super::tone_cr::Ramp::of(start) }
     }
 
     /// Linear working RGB → the stage's light before its transfer and curve.
@@ -496,17 +632,26 @@ impl UnderTone {
     }
 
     /// [`UnderTone::undo`] without the transfer: the light after the
-    /// exposure transfer and before Adobe's curve — where a mask's Temp and
-    /// Tint act (`render::mask_cr`).
+    /// exposure transfer and before the look table and the curve — where a
+    /// mask's Temp and Tint act (`render::mask_cr`).
     pub(crate) fn undo_curve(&self, lin: [f32; 3]) -> [f32; 3] {
         let r = super::mat_vec3(&self.to_ref, &lin).map(|c| c.clamp(0.0, 1.0));
-        adobe_tone(r, &self.inverse)
+        let r = adobe_tone(r, &self.inverse);
+        match &self.look {
+            Some(t) => look_inverse(t, r),
+            None => r,
+        }
     }
 
     /// [`UnderTone::undo_curve`]'s inverse.
     pub(crate) fn redo_curve(&self, ramped: [f32; 3]) -> [f32; 3] {
-        let r = ramped.map(|c| c.clamp(0.0, 1.0));
-        super::mat_vec3(&self.from_ref, &adobe_tone(r, &acr3_default::ACR3_DEFAULT))
+        let mut r = ramped.map(|c| c.clamp(0.0, 1.0));
+        if let Some(t) = &self.look {
+            let mut hsv = to_hsv(r);
+            t.apply(&mut hsv);
+            r = from_hsv(hsv);
+        }
+        super::mat_vec3(&self.from_ref, &adobe_tone(r, &self.curve))
     }
 
     /// Linear working RGB in the stage's reference primaries (ProPhoto's at

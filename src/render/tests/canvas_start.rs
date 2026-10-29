@@ -311,7 +311,7 @@ fn every_surface_sees_one_camera_start_and_the_sidecar_carries_none() {
     // re-reads the same from the photo, whatever the save held.
     let saved: EditRecipe = serde_json::from_str(&serde_json::to_string(&fresh).expect("json")).expect("reload");
     assert_eq!(saved.camera_start, Some(start), "the save carries it");
-    let mut stale = EditRecipe { camera_start: Some(crate::recipe::CameraStart { ev: -2.0, headroom: 0.0 }), ..saved };
+    let mut stale = EditRecipe { camera_start: Some(crate::recipe::CameraStart { ev: -2.0, headroom: 0.0, tables: 0 }), ..saved };
     crate::pipeline::stamp_camera_start(&raw, &mut stale);
     assert_eq!(stale.camera_start, Some(start), "a reload re-reads the photo's own");
     // The fit.

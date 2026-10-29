@@ -408,6 +408,19 @@ bundled; a machine with no profiles gets a named refusal.
   p36/p38/p39 unchanged, p41 8.56 → 8.69. Light above the profile reference's
   own 1 (ProPhoto) still clips there, under Adobe's curve.
 
+- The profile stage's tail under Camera Raw's adjustments (v1.17.0, `render::profile::UnderTone`,
+  **measured** from Camera Raw renders, 2026-10-29): the stage puts its look table on AFTER the exposure
+  transfer and before its tone curve, so an Exposure (and a mask's Temp/Tint, the vignette under tone, the
+  white balance under tone) undoes the curve AND the look table, acts, and redoes both. The stage's own
+  look table, tone curve and reference basis travel with the photograph's camera start
+  (`CameraStart::tables`, filled where the profile is read; 0 in a recipe written before it = Adobe's
+  default curve, no look table, as before). Synthetic warm patches at −1.51 EV with Adobe Standard's look
+  table: median ΔE 4.71 → 1.25 (worst 10.75 → 1.58), identical to the stage rendered at the total.
+  The extra loss once seen on that detour (no look table: median 1.55 against 1.13) was a basis
+  mismatch, not the inverse: a ForwardMatrix stage works in ProPhoto at D50 behind a Bradford
+  adaptation, and undoing it in ProPhoto's primaries at the working white put warm colours 2–3.5 % off
+  per channel. Carry p36/p38/p39/p40/p41: 4.03/4.52/3.98/4.13/8.69 → 4.09/4.51/4.00/4.09/8.57.
+
 - Table entry: `(hue shift in degrees, saturation scale, value scale)`, stored
   `index = (val * hueDivisions + hue) * satDivisions + sat` (**measured** — at
   saturation index 0 the saturation scale is exactly 1.0 on 60 of the 60

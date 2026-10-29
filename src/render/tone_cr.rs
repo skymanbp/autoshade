@@ -878,7 +878,7 @@ mod tests {
 
     /// A camera start the tests develop from: a body's baseline and the
     /// headroom's full stop, where a daylight frame sits.
-    const START: crate::recipe::CameraStart = crate::recipe::CameraStart { ev: 0.35, headroom: 1.0 };
+    const START: crate::recipe::CameraStart = crate::recipe::CameraStart { ev: 0.35, headroom: 1.0, tables: 0 };
 
     /// Adobe's curve under the transfer and its inverse compose to the
     /// identity, so a recipe with no slider work leaves `u` where it was.
