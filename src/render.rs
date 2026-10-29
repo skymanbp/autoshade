@@ -86,7 +86,7 @@ use brush::{
 };
 pub use as_shot::as_shot_wb;
 #[cfg(test)]
-use as_shot::{camera_raw_as_shot, sony_daylight_preset, sony_decrypt};
+use as_shot::{camera_calibration, camera_raw_as_shot, sony_daylight_preset, sony_decrypt};
 use camera::{
     calibrate_camera_buffer, camera_matrix, normalise_wb, resolve_camera_profile, space_primaries,
     validate_calibration,
@@ -226,7 +226,7 @@ use tone_cr::{
 #[cfg(test)]
 pub(crate) use tone::{limit_tone_sliders, parametric_lut};
 pub use wb::{local_temp_to_kelvin, solve_wb_for, solve_wb_from_neutral};
-pub(crate) use wb::{linear_to_srgb, srgb_to_linear, wb_gains};
+pub(crate) use wb::{WbLaw, linear_to_srgb, srgb_to_linear, wb_gains};
 use wb::{apply_recipe_wb, apply_recipe_wb_in, colour_gain_luts, ramp, smoothstep, transfer_luts};
 #[cfg(test)]
 use wb::{kelvin_to_rgb};

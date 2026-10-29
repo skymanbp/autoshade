@@ -214,8 +214,8 @@ pub(super) fn wb_gains_fit_budget(gains: [f32; 3], budget: FitBudget) -> bool {
         && wb_gain_ratio(gains) <= budget.wb_ratio
 }
 
-pub(super) fn wb_path_candidate(anchor: f32, wb_k: f32, wb_tint: f32, lambda: f32) -> (f32, f32) {
-    wb_path_between(anchor, (anchor, 0.0), (wb_k, wb_tint), lambda)
+pub(super) fn wb_path_candidate(law: render::WbLaw, wb_k: f32, wb_tint: f32, lambda: f32) -> (f32, f32) {
+    wb_path_between(law, law.as_shot(), (wb_k, wb_tint), lambda)
 }
 
 /// The point `lambda` of the way from one white balance to another, walked
@@ -228,30 +228,29 @@ pub(super) fn wb_path_candidate(anchor: f32, wb_k: f32, wb_tint: f32, lambda: f3
 /// far end's Kelvin — to every point between: the night sky's demand hit the
 /// 2000 K bound with tint −100, shrank to 4850 K / −26.8 and the horizon
 /// went green.
-pub(super) fn wb_path_between(anchor: f32, from: (f32, f32), to: (f32, f32), lambda: f32) -> (f32, f32) {
+pub(super) fn wb_path_between(law: render::WbLaw, from: (f32, f32), to: (f32, f32), lambda: f32) -> (f32, f32) {
     if lambda <= 1e-6 {
         return ((from.0 / 50.0).round() * 50.0, round1(from.1));
     }
     if lambda >= 1.0 - 1e-6 {
         return ((to.0 / 50.0).round() * 50.0, round1(to.1));
     }
-    let log = |(k, tint): (f32, f32)| render::wb_gains(anchor, k, tint).map(|v| v.max(1e-5).ln());
-    let (a, b) = (log(from), log(to));
+    let (a, b) = (law.log_gains(from), law.log_gains(to));
     let want: [f32; 3] = std::array::from_fn(|c| a[c] + (b[c] - a[c]) * lambda);
-    super::evidence::invert_wb_log_gains(anchor, want)
+    law.invert(want, WB_SEARCH_K)
 }
 
 /// Keep a fitted white balance on the renderer's Kelvin/tint manifold while
 /// spending no more than the strength budget. The only degree of freedom is
-/// the scalar distance from as-shot `(anchor, 0)` to the free fit, walked in
+/// the scalar distance from the law's as-shot to the free fit, walked in
 /// gain space (`wb_path_between`).
 pub(super) fn budgeted_wb(
-    anchor: f32,
+    law: render::WbLaw,
     wb_k: f32,
     wb_tint: f32,
     budget: FitBudget,
 ) -> (f32, f32, bool, f32, f32, f32) {
-    let free_gains = render::wb_gains(anchor, wb_k, wb_tint);
+    let free_gains = law.gains((wb_k, wb_tint));
     let ratio_before = wb_gain_ratio(free_gains);
     if wb_gains_fit_budget(free_gains, budget) {
         return (wb_k, wb_tint, false, ratio_before, ratio_before, 1.0);
@@ -259,7 +258,7 @@ pub(super) fn budgeted_wb(
 
     // Every point of the path is already a persisted (rounded) pair; the
     // `rounded` flag is kept so the two bisections below read as they did.
-    let candidate = |lambda: f32, _rounded: bool| wb_path_candidate(anchor, wb_k, wb_tint, lambda);
+    let candidate = |lambda: f32, _rounded: bool| wb_path_candidate(law, wb_k, wb_tint, lambda);
 
     // Zero is as-shot and therefore legal. Maintain a legal lower endpoint
     // and find the largest scalar move admitted by both WB constraints.
@@ -267,7 +266,7 @@ pub(super) fn budgeted_wb(
     for _ in 0..32 {
         let middle = (legal + illegal) * 0.5;
         let (k, tint) = candidate(middle, false);
-        if wb_gains_fit_budget(render::wb_gains(anchor, k, tint), budget) {
+        if wb_gains_fit_budget(law.gains((k, tint)), budget) {
             legal = middle;
         } else {
             illegal = middle;
@@ -279,15 +278,12 @@ pub(super) fn budgeted_wb(
     // persisted (rather than merely continuous) WB is legal too.
     let continuous_legal = legal;
     let (mut k, mut tint) = candidate(continuous_legal, true);
-    if !wb_gains_fit_budget(render::wb_gains(anchor, k, tint), budget) {
+    if !wb_gains_fit_budget(law.gains((k, tint)), budget) {
         let (mut rounded_legal, mut rounded_illegal) = (0.0f32, continuous_legal);
         for _ in 0..32 {
             let middle = (rounded_legal + rounded_illegal) * 0.5;
             let (middle_k, middle_tint) = candidate(middle, true);
-            if wb_gains_fit_budget(
-                render::wb_gains(anchor, middle_k, middle_tint),
-                budget,
-            ) {
+            if wb_gains_fit_budget(law.gains((middle_k, middle_tint)), budget) {
                 rounded_legal = middle;
             } else {
                 rounded_illegal = middle;
@@ -297,7 +293,7 @@ pub(super) fn budgeted_wb(
         (k, tint) = candidate(legal, true);
     }
 
-    let ratio_after = wb_gain_ratio(render::wb_gains(anchor, k, tint));
+    let ratio_after = wb_gain_ratio(law.gains((k, tint)));
     (k, tint, true, ratio_before, ratio_after, legal)
 }
 

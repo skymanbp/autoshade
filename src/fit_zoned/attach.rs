@@ -384,15 +384,10 @@ pub(super) fn attach_zones_with_divergence(
     );
     report.correspondence = corr;
     let mut accepted: Vec<AcceptedZone> = [sky, land].into_iter().flatten().collect();
+    let zones = (&sky_attachment, &land_attachment);
+    let divergences = (divergence.sky.divergence, divergence.land.divergence);
     if accepted.is_empty() {
-        mask_path.remove();
-        let finished = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
-        fit::append_finished_disclosure(
-            report,
-            &finished,
-            &tgt_px,
-        );
-        return true;
+        return finish_with_bands_only(&s_img, &tgt_px, report, zones, divergences, mask_path);
     }
     let first_zone = report.recipe.masks.len() - accepted.len();
     debug_assert_eq!(
@@ -431,14 +426,7 @@ pub(super) fn attach_zones_with_divergence(
                 (k, pixels)
             }
             BoundaryGateResult::Dropped => {
-                mask_path.remove();
-                let finished = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
-                fit::append_finished_disclosure(
-                    report,
-                    &finished,
-                    &tgt_px,
-                );
-                return true;
+                return finish_with_bands_only(&s_img, &tgt_px, report, zones, divergences, mask_path);
             }
         };
         let frame_after = fit::look_err_with_evidence(&pixels, &tgt_px, &report.evidence);
@@ -450,14 +438,7 @@ pub(super) fn attach_zones_with_divergence(
         }
         report.recipe.masks.truncate(first_zone);
         if accepted.is_empty() {
-            mask_path.remove();
-            let finished = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
-            fit::append_finished_disclosure(
-                report,
-                &finished,
-                &tgt_px,
-            );
-            return true;
+            return finish_with_bands_only(&s_img, &tgt_px, report, zones, divergences, mask_path);
         }
         report.recipe.masks.extend(originals.iter().cloned());
         for (j, zone) in accepted.iter_mut().enumerate() {
@@ -510,5 +491,40 @@ pub(super) fn attach_zones_with_divergence(
         &final_px,
         &tgt_px,
     );
+    true
+}
+
+/// The zone stage's exit when no SINGLE zone survived — none attached, the
+/// boundary gate dropped the set, or every zone was refused at the shrink
+/// the set negotiated: each zone's band partitions are still tried
+/// ([`subzones::replace_zone`], which already judges a parent the set
+/// refused, against the frame without it), and the anchor raster is removed
+/// only when no band kept it.
+///
+/// Until v1.17.0 these exits returned before the band trials, so whether the
+/// sky got its bands depended on whether the LAND survived the single-zone
+/// negotiation. On the night pair in v1.16.0 the land did (k 0.332) and the
+/// sky shipped as two bands carrying its vertical gradient; on the
+/// camera-profile start both zones were refused at the shared shrink
+/// (k 0.137: the sky's colour move draws a rim at the horizon), the bands
+/// were never tried, the spatial tiles took the sky instead, and the colour
+/// field that carries the horizon glow was handed back by a tile it
+/// overlapped.
+pub(super) fn finish_with_bands_only(
+    s_img: &DynamicImage,
+    tgt_px: &[[f32; 3]],
+    report: &mut FitReport,
+    (sky, land): (&ZoneAttachment, &ZoneAttachment),
+    (sky_divergence, land_divergence): (Option<fit::Divergence>, Option<fit::Divergence>),
+    mask_path: &crate::store::OwnedRaster,
+) -> bool {
+    let before = report.recipe.masks.len();
+    subzones::replace_zone(s_img, tgt_px, report, sky, sky_divergence);
+    subzones::replace_zone(s_img, tgt_px, report, land, land_divergence);
+    if report.recipe.masks.len() == before {
+        mask_path.remove();
+    }
+    let finished = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
+    fit::append_finished_disclosure(report, &finished, tgt_px);
     true
 }

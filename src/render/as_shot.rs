@@ -111,11 +111,9 @@ pub(super) fn camera_raw_as_shot(
         return None;
     }
     let mut mult = wb.map(f64::from);
-    let reference = SONY_DAYLIGHT_REFERENCE.iter().find(|(m, _)| m.eq_ignore_ascii_case(model));
-    let daylight = daylight.filter(|d| d.iter().all(|c| c.is_finite() && *c > 0.0));
-    if let (Some((_, r)), Some(d)) = (reference, daylight) {
-        mult[0] *= f64::from(r[0]) / f64::from(d[0] / d[1]);
-        mult[2] *= f64::from(r[1]) / f64::from(d[2] / d[1]);
+    if let Some(cc) = camera_calibration(daylight, model) {
+        mult[0] *= f64::from(cc[0]);
+        mult[2] *= f64::from(cc[2]);
     }
     let xy = profile::neutral_to_xy(mult.map(|m| 1.0 / m), |k| matrix_at(matrices, k))?;
     let (kelvin, tint) = profile::xy_to_temp_tint(xy);
@@ -124,6 +122,22 @@ pub(super) fn camera_raw_as_shot(
     }
     let kelvin = (kelvin / 50.0).round() * 50.0;
     Some((kelvin as f32, tint.round().clamp(-100.0, 100.0) as f32))
+}
+
+/// The body's `CameraCalibration` diagonal as Camera Raw derives it for a
+/// Sony ARW: the body's reference Daylight multipliers
+/// ([`SONY_DAYLIGHT_REFERENCE`]) over the file's own Daylight preset, red
+/// and blue (green 1). Camera Raw writes exactly this into the DNG it makes
+/// of the file (p39, Adobe DNG Converter 18.7: `CameraCalibration1/2` =
+/// diag(1.0031, 1, 0.9653), against 2.5115 / 2.5039 and 1.6288 / 1.6875
+/// here) and keeps the camera's own levels as `AsShotNeutral`: the lens
+/// compensation lives in the calibration, which turns a neutral into a white
+/// and a white into a neutral, not in the neutral. `None` for a body with no
+/// reference or a file with no preset.
+pub(super) fn camera_calibration(daylight: Option<[f32; 3]>, model: &str) -> Option<[f32; 3]> {
+    let (_, r) = SONY_DAYLIGHT_REFERENCE.iter().find(|(m, _)| m.eq_ignore_ascii_case(model))?;
+    let d = daylight.filter(|d| d.iter().all(|c| c.is_finite() && *c > 0.0))?;
+    Some([r[0] / (d[0] / d[1]), 1.0, r[1] / (d[2] / d[1])])
 }
 
 /// The XYZ → camera matrix at `kelvin`: the two stated either side weighted

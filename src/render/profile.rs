@@ -113,6 +113,14 @@ pub(crate) struct Frame {
     /// [`crate::dcp::find_look_table`]). It REPLACES the camera profile's
     /// `ProfileLookTableData`: see [`Stage::build_for`].
     pub creative: Option<Table>,
+    /// The body's `CameraCalibration` diagonal, which the DNG SDK puts in
+    /// front of every `ColorMatrix` (`XYZtoCamera = CC · CM`) when it turns
+    /// a camera neutral into a white and a white into a neutral. Camera Raw
+    /// writes it into the DNG of a Sony ARW (p39: diag(1.0031, 1, 0.9653),
+    /// Adobe DNG Converter 18.7 — the file's Daylight preset against the
+    /// body's reference, [`super::as_shot::camera_calibration`]). `None` is
+    /// the identity.
+    pub calibration: Option<[f32; 3]>,
 }
 
 impl Stage {
@@ -151,7 +159,7 @@ impl Stage {
     ///
     /// With a camera `neutral` and the profile's two `ColorMatrix`es, the
     /// white and its temperature are solved as the DNG SDK does
-    /// ([`white_temperature`]) and that temperature — not `kelvin` — weights
+    /// ([`white_temperature_with`]) and that temperature — not `kelvin` — weights
     /// the calibrations. With a `ForwardMatrix` as well, the stage owns the
     /// camera → working transform ([`Stage::owns_camera`],
     /// [`Stage::develop_camera`]).
@@ -167,7 +175,7 @@ impl Stage {
         frame: Frame,
         baseline_ev: f32,
     ) -> Option<Self> {
-        let white = frame.neutral.and_then(|n| white_temperature(profile, n));
+        let white = frame.neutral.and_then(|n| white_temperature_with(profile, n, frame.calibration));
         let kelvin = white.or(frame.kelvin);
         let hue_sat = blend_calibrations(profile, kelvin);
         let look = frame.creative.or_else(|| profile.look_table.clone());
@@ -556,13 +564,50 @@ fn color_matrix_at(profile: &Profile, kelvin: f64) -> Option<[[f64; 3]; 3]> {
 /// estimate, repeat until the chromaticity stops moving (30 passes at most;
 /// a two-value oscillation is averaged, as the SDK averages it). `None` when
 /// the profile has no `ColorMatrix` or the neutral is unusable.
+#[cfg(test)]
 pub(crate) fn white_temperature(profile: &Profile, neutral: [f32; 3]) -> Option<f32> {
+    white_temperature_with(profile, neutral, None)
+}
+
+/// [`white_temperature`] with the body's `CameraCalibration` diagonal in
+/// front of the matrices ([`Frame::calibration`]).
+pub(crate) fn white_temperature_with(profile: &Profile, neutral: [f32; 3], cc: Option<[f32; 3]>) -> Option<f32> {
     if neutral.iter().any(|v| !v.is_finite() || *v <= 0.0) {
         return None;
     }
-    let xy = neutral_to_xy(neutral.map(f64::from), |k| color_matrix_at(profile, k))?;
+    let xy = neutral_to_xy(neutral.map(f64::from), |k| calibrated_matrix_at(profile, k, cc))?;
     let k = xy_to_kelvin(xy);
     k.is_finite().then_some(k as f32)
+}
+
+/// `CC · ColorMatrix(kelvin)`: the SDK's XYZ → camera with the body's
+/// calibration diagonal on each camera row.
+fn calibrated_matrix_at(profile: &Profile, kelvin: f64, cc: Option<[f32; 3]>) -> Option<[[f64; 3]; 3]> {
+    let m = color_matrix_at(profile, kelvin)?;
+    Some(match cc {
+        Some(c) => [0, 1, 2].map(|i| m[i].map(|v| v * f64::from(c[i]))),
+        None => m,
+    })
+}
+
+/// The camera neutral of the white `xy`, the DNG SDK's `SetWhiteXY`: the
+/// profile's XYZ → camera matrix at the white's own temperature
+/// (`FindXYZtoCamera`, [`color_matrix_at`], behind the body's calibration
+/// diagonal `cc`) applied to the white, scaled so
+/// its largest component is 1 (`fCameraWhite`). This is where Camera Raw puts
+/// a Custom white balance: it fixes the camera multipliers, and through
+/// [`white_temperature_with`] the calibration blend, BEFORE the hue/sat map —
+/// measured with synthetic linear DNGs through Camera Raw (v1.17.0): a
+/// patch the map leaves untouched at As Shot is moved by it once a Custom
+/// white carries the patch into the map's hues (0 → 10 ΔE), and a second
+/// `ColorMatrix` at Standard A changes the render at 2850 K and 4500 K and
+/// not at 6500 K or 10000 K. `None` for a profile with no `ColorMatrix` or a
+/// white that maps to a non-positive camera triple.
+pub(crate) fn camera_neutral_of(profile: &Profile, xy: [f64; 2], cc: Option<[f32; 3]>) -> Option<[f32; 3]> {
+    let cm = calibrated_matrix_at(profile, xy_to_kelvin(xy), cc)?;
+    let n = vec64(&cm, xy_to_xyz(xy));
+    let max = n[0].max(n[1]).max(n[2]);
+    (max.is_finite() && n.iter().all(|v| *v > 0.0)).then(|| n.map(|v| (v / max) as f32))
 }
 
 /// The chromaticity of the white a camera `neutral` stands for, the DNG

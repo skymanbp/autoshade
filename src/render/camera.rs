@@ -281,12 +281,22 @@ pub(super) fn calibrate_camera_buffer(
 /// Every way this can come up empty is DISCLOSED by name, because "the profile
 /// you named was not applied" is exactly the kind of silence that makes a
 /// render disagree with Lightroom for no visible reason.
+///
+/// The second half of the answer is the white-balance multipliers of the
+/// recipe's own white when the stage took it in (v1.17.0): a recipe on
+/// Camera Raw's law that moves from As Shot names a white
+/// ([`super::wb::camera_raw_white`]), and a stage that owns the camera
+/// transform is built at that white's camera neutral, as Camera Raw builds
+/// its colour spec — the camera triple is balanced to it and the matrices
+/// and hue/sat maps are blended at its temperature. `None` there leaves the
+/// frame at As Shot and the move to the post-profile adaptation.
 pub(super) fn resolve_camera_profile(
     rawimage: &rawler::RawImage,
     r: &EditRecipe,
     space: ExportColorSpace,
     diag: &crate::diag::Diag<'_>,
-) -> Option<profile::Stage> {
+    calibration: Option<[f32; 3]>,
+) -> Option<(profile::Stage, Option<[f32; 3]>)> {
     let name = if !r.camera_profile.is_empty() {
         r.camera_profile.as_str()
     } else {
@@ -338,14 +348,16 @@ pub(super) fn resolve_camera_profile(
     let kelvin = wb_to_kelvin_tint(&matrix, wb).map(|(k, _)| k);
     // The camera neutral is the reciprocal of the white-balance multipliers;
     // with the profile's own matrices it fixes the white the SDK's way.
-    let neutral = wb.iter().all(|c| c.is_finite() && *c > 0.0).then(|| wb.map(|c| 1.0 / c));
+    let as_shot = wb.iter().all(|c| c.is_finite() && *c > 0.0).then(|| wb.map(|c| 1.0 / c));
+    let chosen = super::wb::camera_raw_white(r).and_then(|xy| profile::camera_neutral_of(&prof, xy, calibration));
+    let neutral = chosen.or(as_shot);
     // Adobe's baseline exposure for the body, which its renderer adds to the
     // profile's own offset. Disclosed either way: inferred, it is a number
     // this engine did not read from the photograph; unknown, it is why the
     // render may sit darker than Lightroom's.
     let baseline = crate::dcp::baseline_exposure(make, model);
     diag.warn(baseline_disclosure(make, model, &baseline));
-    let frame = profile::Frame { kelvin, neutral, creative };
+    let frame = profile::Frame { kelvin, neutral, creative: creative.clone(), calibration };
     let stage = profile::Stage::build_for(&prof, space, frame, baseline.ev());
     if stage.is_none() {
         diag.warn(format!(
@@ -353,7 +365,15 @@ pub(super) fn resolve_camera_profile(
             path.display()
         ));
     }
-    stage
+    let stage = stage?;
+    // Only a stage that owns the camera transform balances the camera triple
+    // itself; a profile with no `ForwardMatrix` is rebuilt at As Shot and the
+    // move stays the post-profile adaptation's.
+    if chosen.is_some() && !stage.owns_camera() {
+        let frame = profile::Frame { kelvin, neutral: as_shot, creative, calibration };
+        return profile::Stage::build_for(&prof, space, frame, baseline.ev()).map(|s| (s, None));
+    }
+    Some((stage, chosen.map(|n| n.map(|v| 1.0 / v))))
 }
 
 /// The one line a profiled render says about the body's baseline exposure.
