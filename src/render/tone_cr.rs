@@ -74,21 +74,29 @@
 //!   other scenes, each rendered flat and at Shadows +60 by Camera Raw 18.4
 //!   at sensor size, 16 bit, read as `log2` linear luminance at the curve's
 //!   input on a map 768 cells across): the push in stops at a cell is
-//!   `s · spread · T(b)`, `b` the cell minus the map's mean, `spread` the
-//!   map's standard deviation, `T` one monotone shape shared by every frame
-//!   ([`HS_SH_LIFT`]), no constant fitted per frame. Held out one frame at a
-//!   time, the law explains 0.86 of the push over all 19 (the worst a
-//!   portrait-orientation night frame); a shared shape with a free amplitude
-//!   per frame reaches 0.93, and the amplitude follows the spread (r 0.95).
-//!   On two frames rendered at +30/+60/+100 the push is linear in the slider
+//!   `s · spread · T(b)`, `b` the cell minus the frame's anchor, `spread`
+//!   the map's standard deviation, `T` one monotone shape shared by every
+//!   frame ([`HS_SH_LIFT`]); a cell is `log2` of its mean linear value
+//!   ([`shadow_map`]). The anchor ([`shadows_anchor`]) is a power mean
+//!   of the map's cells ([`HS_SH_GAMMA`]) moved by one constant
+//!   ([`HS_SH_ANCHOR`]): it sits above the map's mean by more the wider the
+//!   frame's levels spread, so a frame with a long dark tail reads its deep
+//!   levels as less deep. Held out one frame at a time, the law explains
+//!   0.89 of the push over all 19 (0.86 with the map's mean as the anchor;
+//!   the worst calibration frame at +60, rms 0.341 → 0.193 stops);
+//!   a free anchor per frame reaches 0.93. The anchor reads the same off
+//!   the 768-cell map as off 8-pixel blocks (held out 0.905 either way). On
+//!   two frames rendered at +30/+60/+100 the push is linear in the slider
 //!   (0.50 : 1 : 1.64 and 0.51 : 1 : 1.62). Below 0 the same form reads its
-//!   own table ([`HS_SH_DEEPEN`], four frames at −60, held out 0.62): the
-//!   signs agree through the middle, −60 darkens the deepest levels further
-//!   than +60 lifts them. The residual left at full resolution moves 1-stop
-//!   band means by 0.24 L at most: texture, left out. Measured in stops on
-//!   a map, the law is unmoved by an exposure gain before it (both `b` and
-//!   the spread are differences of `log2`); clipped pixels aside, so is its
-//!   key.
+//!   own table ([`HS_SH_DEEPEN`], four frames at −60, held out 0.73; 0.62
+//!   at the mean): the signs agree through the middle, −60 darkens the
+//!   deepest levels further than +60 lifts them. The residual left at full
+//!   resolution moves 1-stop band means by 0.24 L at most: texture, left
+//!   out. Measured in stops on a map, the law is unmoved by an exposure gain
+//!   before it (`b` and the spread are differences of `log2`). What it does
+//!   not reproduce: clipped white over 0.5 % and 2 % of a night frame moves
+//!   Camera Raw's anchor +0.80 and +0.10 stops (the law: +0.18, +0.59), and
+//!   lifting that frame's deepest two stops moves it +0.25 (the law: −0.05).
 //! * **Highlights: local, keyed to the mean.** The push at a pixel follows
 //!   the region it sits in, over 200–400 film pixels next to a bright edge;
 //!   it reads an edge-aware base ([`bilateral_base`], [`HS_SIGMA_S`] /
@@ -573,19 +581,32 @@ const HS_SH_B0: f32 = -10.0;
 const HS_SH_BSTEP: f32 = 0.25;
 const HS_SH_BN: usize = 69;
 
+/// The exponent of the power mean that anchors Shadows ([`shadows_anchor`]):
+/// measured from Camera Raw renders (the 19 frames at Shadows +60 and twelve
+/// edited copies of two of them, 2026-10-29). Held out over the 19,
+/// exponents 1.0, 0.75 and 0.5 explain 0.905, 0.905 and 0.901 of the push,
+/// the map's mean (the exponent's limit at 0) 0.881; 0.75 leaves the
+/// frames' own anchors the least spread (0.43 stops).
+const HS_SH_GAMMA: f32 = 0.75;
+
+/// The anchor's offset from that power mean, in stops: the mean over the 19
+/// frames of each frame's own best anchor under the law minus its power mean.
+const HS_SH_ANCHOR: f32 = -1.048;
+
 /// Shadows above 0: the push in stops of linear luminance per unit slider
 /// and per stop of the frame's spread, over `b` (the map at the pixel minus
-/// the map's mean, [`HsSite`]): a slider at `s > 0` multiplies the pixel's
-/// linear luminance by `2^(s · spread · T(b))`. The monotone shape shared by
-/// the 19 corpus frames at Shadows +60 (isotonic, smoothed over half a stop;
-/// module head), divided by 0.6.
-const HS_SH_LIFT: [f32; HS_SH_BN] = [1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13147, 1.13146, 1.13110, 1.12666, 1.10588, 1.06696, 1.03154, 1.00729, 0.98861, 0.96846, 0.94082, 0.90612, 0.87064, 0.83557, 0.79884, 0.75949, 0.71571, 0.66832, 0.61910, 0.56704, 0.51075, 0.45130, 0.38381, 0.31107, 0.24594, 0.19361, 0.15238, 0.12019, 0.09822, 0.08370, 0.06907, 0.05555, 0.04910, 0.04779, 0.04768, 0.04758, 0.04697, 0.04493, 0.04037, 0.03438, 0.03011, 0.02801, 0.02723, 0.02707, 0.02706, 0.02706, 0.02706, 0.02706, 0.02706, 0.02706, 0.02706];
+/// the frame's anchor, [`HsSite`]): a slider at `s > 0` multiplies the
+/// pixel's linear luminance by `2^(s · spread · T(b))`. The monotone shape
+/// shared by the 19 corpus frames at Shadows +60, each at its own anchor
+/// (isotonic, smoothed over half a stop; module head), divided by 0.6.
+const HS_SH_LIFT: [f32; HS_SH_BN] = [1.10965, 1.10965, 1.10965, 1.10965, 1.10965, 1.10965, 1.10965, 1.10965, 1.10965, 1.10965, 1.10965, 1.10965, 1.10965, 1.10965, 1.10965, 1.10965, 1.10965, 1.10965, 1.10965, 1.10947, 1.10725, 1.09648, 1.07431, 1.04900, 1.02356, 0.99754, 0.97356, 0.94916, 0.92018, 0.88675, 0.84823, 0.80712, 0.77052, 0.73846, 0.70478, 0.66708, 0.62811, 0.58941, 0.54652, 0.49700, 0.43974, 0.37535, 0.30783, 0.23665, 0.17446, 0.13085, 0.09803, 0.07074, 0.05048, 0.03844, 0.03385, 0.03300, 0.03293, 0.03293, 0.03293, 0.03293, 0.03292, 0.03276, 0.03204, 0.03085, 0.03013, 0.02997, 0.02995, 0.02995, 0.02995, 0.02990, 0.02930, 0.02661, 0.02216];
 
 /// Shadows below 0, the same form ([`HS_SH_LIFT`]) on its own table: the
-/// four frames rendered at Shadows −60, divided by −0.6. The two signs share
+/// four frames rendered at Shadows −60, each at its own anchor, divided by
+/// −0.6. The two signs share
 /// the shape through the middle; −60 darkens the deepest levels further than
 /// +60 lifts them (module head).
-const HS_SH_DEEPEN: [f32; HS_SH_BN] = [1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72494, 1.72037, 1.67676, 1.50116, 1.22371, 1.05811, 1.02128, 1.01702, 1.01133, 1.00210, 0.99650, 0.99522, 0.99467, 0.99172, 0.98186, 0.96320, 0.93879, 0.91032, 0.87702, 0.83676, 0.78945, 0.73982, 0.69447, 0.65556, 0.61857, 0.57591, 0.52323, 0.45980, 0.38541, 0.30421, 0.23338, 0.19201, 0.17806, 0.17571, 0.17551, 0.17510, 0.17323, 0.16959, 0.16445, 0.15584, 0.14150, 0.11533, 0.08008, 0.05595, 0.04804, 0.04681, 0.04672, 0.04672, 0.04672, 0.04672, 0.04672, 0.04666, 0.04593, 0.04264, 0.03722];
+const HS_SH_DEEPEN: [f32; HS_SH_BN] = [1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72516, 1.72496, 1.72239, 1.70917, 1.67906, 1.64204, 1.60126, 1.53036, 1.39353, 1.21855, 1.08977, 1.01509, 0.98029, 0.96317, 0.94448, 0.93177, 0.92788, 0.92699, 0.92432, 0.91366, 0.88819, 0.84714, 0.79582, 0.74306, 0.69745, 0.66106, 0.63096, 0.60291, 0.57419, 0.54292, 0.50592, 0.45715, 0.39134, 0.31449, 0.23913, 0.17316, 0.12694, 0.10614, 0.10095, 0.10028, 0.10004, 0.09755, 0.08638, 0.06773, 0.05604, 0.05321, 0.05293, 0.05291, 0.05291, 0.05291, 0.05291, 0.05291, 0.05286, 0.05224, 0.04902, 0.04146, 0.03159, 0.02359];
 
 /// A frame's statistics for Highlights and Shadows, as a tone LUT or the
 /// solve assumes them ([`HsSite::diagonal`]).
@@ -593,8 +614,9 @@ const HS_SH_DEEPEN: [f32; HS_SH_BN] = [1.72516, 1.72516, 1.72516, 1.72516, 1.725
 pub(crate) struct HsKey {
     /// `log2` of the mean linear luminance (Highlights' key).
     pub(crate) key: f32,
-    /// The mean of the Shadows map ([`HS_SH_CELLS`]), in stops.
-    pub(crate) log_mean: f32,
+    /// The Shadows map's anchor ([`shadows_anchor`], [`HS_SH_CELLS`]), in
+    /// stops.
+    pub(crate) sh_anchor: f32,
     /// The standard deviation of the Shadows map, in stops (the spread).
     pub(crate) spread: f32,
 }
@@ -602,8 +624,9 @@ pub(crate) struct HsKey {
 impl HsKey {
     /// Without a frame: the seven calibration frames' medians, key
     /// [`HS_KEY_NOMINAL`], map mean −5.88 st, spread 2.31 st (their flat
-    /// renders' maps).
-    pub(crate) const NOMINAL: Self = Self { key: HS_KEY_NOMINAL, log_mean: -5.88, spread: 2.31 };
+    /// renders' maps), and the anchor of a log-normal map at those two
+    /// (−5.88 + 0.75 · ln 2 · 2.31² / 2 + [`HS_SH_ANCHOR`]).
+    pub(crate) const NOMINAL: Self = Self { key: HS_KEY_NOMINAL, sh_anchor: -5.54, spread: 2.31 };
 }
 
 /// Highlights' push per unit slider over the fine base's `z`: `[T, Q]`; a
@@ -656,7 +679,7 @@ impl HsSite {
     pub(crate) fn diagonal(u: f32, key: HsKey) -> Self {
         let y = srgb_to_linear(u);
         let z = (y + HS_FLOOR).log2() - key.key;
-        Self { z, z2: z, b: (y + HS_SH_FLOOR).log2() - key.log_mean, spread: key.spread }
+        Self { z, z2: z, b: (y + HS_SH_FLOOR).log2() - key.sh_anchor, spread: key.spread }
     }
 }
 
@@ -694,12 +717,38 @@ pub(crate) fn hs_push(hl: f32, sh: f32, site: HsSite, u: f32) -> f32 {
     p
 }
 
+/// Shadows' anchor over `log2` levels with their weights (the map's cells,
+/// or the solve's points and masses): `log2` of the weighted mean of
+/// `2^(γ · level)`, over γ ([`HS_SH_GAMMA`]), plus [`HS_SH_ANCHOR`];
+/// [`HsKey::NOMINAL`]'s without weight.
+pub(crate) fn shadows_anchor(levels: impl IntoIterator<Item = (f64, f64)>) -> f32 {
+    let g = f64::from(HS_SH_GAMMA);
+    let (mut sum, mut mass) = (0.0f64, 0.0f64);
+    for (l, m) in levels {
+        sum += m * (g * l).exp2();
+        mass += m;
+    }
+    if mass > 0.0 && sum > 0.0 { ((sum / mass).log2() / g) as f32 + HS_SH_ANCHOR } else { HsKey::NOMINAL.sh_anchor }
+}
+
 /// Shadows' map of a frame of linear luminance `y` ([`HS_SH_CELLS`]): per
-/// pixel the map read bilinearly minus the map's mean, and the map's
-/// standard deviation, in stops.
-fn shadow_map(y: &[f32], w: usize, h: usize) -> (Vec<f32>, f32) {
+/// pixel the map read bilinearly minus the frame's anchor
+/// ([`shadows_anchor`] over the cells), the map's standard deviation, and
+/// the anchor, in stops. A cell is `log2` of its MEAN linear value, not the
+/// mean of its pixels' `log2`: the law was identified on Camera Raw's
+/// output maps, while here, before Exposure, a night frame's deepest cells
+/// are largely pixels at or below 0, which the mean of `log2` reads at the
+/// floor. Measured with the cells dumped at this stage: pixels at or below 0
+/// are 60 % and 30 % of the cells at −14…−12 and −12…−10 stops on one night
+/// frame, 65 % and 35 % at −16…−14 and −14…−12 on another, 11 % at −10…−8
+/// on a third (2–5 % of each frame). The mean of `log2` put the map's spread
+/// 0.55–0.75 stops above the output map's on those three (3.35 / 3.41 /
+/// 1.70 against 2.63 / 2.66 / 1.15); `log2` of the mean is within 0.07
+/// (2.56 / 2.70 / 1.08), its low quantiles within 0.2 stops, and on a
+/// daylight frame both read alike (2.70 / 2.59 against 2.59).
+fn shadow_map(y: &[f32], w: usize, h: usize) -> (Vec<f32>, f32, f32) {
     if w == 0 || h == 0 || y.len() != w * h {
-        return (vec![0.0; y.len()], 0.0);
+        return (vec![0.0; y.len()], 0.0, HsKey::NOMINAL.sh_anchor);
     }
     let c = (w as f32 / HS_SH_CELLS as f32).max(1.0);
     let (mw, mh) = (((w as f32 / c) as usize).max(1), ((h as f32 / c) as usize).max(1));
@@ -713,17 +762,17 @@ fn shadow_map(y: &[f32], w: usize, h: usize) -> (Vec<f32>, f32) {
                 let mut sum = 0.0f64;
                 for row in y0..y1 {
                     for v in &y[row * w + x0..row * w + x1] {
-                        sum += f64::from((v.max(0.0) + HS_SH_FLOOR).log2());
+                        sum += f64::from(v.max(0.0));
                     }
                 }
-                (sum / ((y1 - y0) * (x1 - x0)).max(1) as f64) as f32
+                ((sum / ((y1 - y0) * (x1 - x0)).max(1) as f64 + f64::from(HS_SH_FLOOR)).log2()) as f32
             })
         })
         .collect();
     let n = map.len() as f64;
     let mean = map.iter().map(|&v| f64::from(v)).sum::<f64>() / n;
     let var = map.iter().map(|&v| (f64::from(v) - mean).powi(2)).sum::<f64>() / n;
-    let mean = mean as f32;
+    let anchor = shadows_anchor(map.iter().map(|&v| (f64::from(v), 1.0)));
     let mut out = vec![0.0f32; w * h];
     out.par_chunks_mut(w).enumerate().for_each(|(py, row)| {
         let gy = ((py as f32 + 0.5) / c - 0.5).clamp(0.0, (mh - 1) as f32);
@@ -735,10 +784,10 @@ fn shadow_map(y: &[f32], w: usize, h: usize) -> (Vec<f32>, f32) {
             let c1 = (c0 + 1).min(mw - 1);
             let top = map[r0 * mw + c0] + (map[r0 * mw + c1] - map[r0 * mw + c0]) * fx;
             let bot = map[r1 * mw + c0] + (map[r1 * mw + c1] - map[r1 * mw + c0]) * fx;
-            *o = top + (bot - top) * fy - mean;
+            *o = top + (bot - top) * fy - anchor;
         }
     });
-    (out, var.sqrt() as f32)
+    (out, var.sqrt() as f32, anchor)
 }
 
 /// Every pixel's [`HsSite`] on a profile-stage frame. Highlights: each base
@@ -754,7 +803,7 @@ pub(crate) fn hs_field(data: &[[f32; 3]], w: usize, h: usize, film: FilmScale, c
     let lg: Vec<f32> = y.par_iter().map(|&v| (v + HS_FLOOR).log2()).collect();
     let fine = bilateral_base(&lg, w, h, film.raster_px(HS_SIGMA_S), HS_SIGMA_R);
     let wide = coarse.then(|| bilateral_base(&lg, w, h, film.raster_px(HS_SIGMA_S2), HS_SIGMA_R));
-    let (b, spread) = shadow_map(&y, w, h);
+    let (b, spread, _) = shadow_map(&y, w, h);
     (0..fine.len())
         .into_par_iter()
         .map(|i| HsSite {
@@ -1047,8 +1096,9 @@ mod tests {
         assert!(bilateral_base(&flat, w, h, 12.0, 1.0).iter().all(|&v| v == -2.5));
     }
 
-    /// A frame of one value sits at its own key: every site's `z` and `b`
-    /// are 0, its spread 0.
+    /// A frame of one value sits at its own key: every site's `z` is 0, its
+    /// `b` the anchor's offset from the frame's level (`-HS_SH_ANCHOR`; the
+    /// power mean of one level is that level), its spread 0.
     #[test]
     fn a_uniform_frame_sits_at_its_key() {
         let data = vec![[0.4f32; 3]; 32 * 24];
@@ -1056,12 +1106,12 @@ mod tests {
         // few thousandths of a stop at this level.
         for s in hs_field(&data, 32, 24, FilmScale::NATIVE, true) {
             assert!(s.z.abs() < 0.01 && s.z2.abs() < 0.01, "{s:?}");
-            assert!(s.b.abs() < 1e-4 && s.spread < 1e-4, "{s:?}");
+            assert!((s.b + HS_SH_ANCHOR).abs() < 1e-4 && s.spread < 1e-4, "{s:?}");
         }
     }
 
-    /// Shadows' map: a frame of two halves `d` stops apart has
-    /// each half at ±d/2 from the map's mean and a spread of d/2, at any
+    /// Shadows' map: a frame of two halves `d` stops apart has each half at
+    /// its own level minus the frame's anchor and a spread of d/2, at any
     /// width (the map's cells are a share of the width, not pixels).
     ///
     /// MUTATION: take the mean of linear luminance instead of `log2`, or
@@ -1072,9 +1122,81 @@ mod tests {
             let h = w / 2;
             let (lo, hi) = (0.02f32, 0.32f32); // four stops apart
             let y: Vec<f32> = (0..w * h).map(|i| if i % w < w / 2 { lo } else { hi }).collect();
-            let (b, spread) = shadow_map(&y, w, h);
+            let (b, spread, anchor) = shadow_map(&y, w, h);
             assert!((spread - 2.0).abs() < 0.01, "w {w}: spread {spread}");
-            assert!((b[h / 2 * w + 2] + 2.0).abs() < 0.01 && (b[h / 2 * w + w - 3] - 2.0).abs() < 0.01, "w {w}");
+            let (l0, l1) = (lo.log2(), hi.log2());
+            assert!((b[h / 2 * w + 2] - (l0 - anchor)).abs() < 0.01 && (b[h / 2 * w + w - 3] - (l1 - anchor)).abs() < 0.01, "w {w}");
+        }
+    }
+
+    /// A Shadows cell is `log2` of its mean linear value: a cell of pixels at
+    /// 0 and at `v` in equal numbers (four by four pixels to a cell here)
+    /// reads `log2(v / 2)`, not the floor-dragged mean of `log2` (measured:
+    /// before Exposure 30–65 % of a night frame's deepest cells are pixels at
+    /// or below 0, and the mean of `log2` widened the spread 0.55–0.75 stops
+    /// past the output map's).
+    ///
+    /// MUTATION: average the pixels' `log2` per cell again.
+    #[test]
+    fn a_shadow_cell_reads_the_log_of_its_mean() {
+        let (w, h) = (3072usize, 16usize);
+        let v = 2.0f32.powi(-8);
+        let y: Vec<f32> = (0..w * h).map(|i| if (i % w + i / w) % 2 == 0 { 0.0 } else { v }).collect();
+        let (b, spread, anchor) = shadow_map(&y, w, h);
+        let cell = b[w + w / 2] + anchor;
+        assert!((cell - (-9.0)).abs() < 0.01, "cell {cell}, want -9 (log2 of the mean)");
+        assert!(spread < 0.01, "a uniform mix has no spread: {spread}");
+    }
+
+    /// Shadows' anchor sits above the map's mean by more the wider the
+    /// frame's levels spread: two halves `d` stops apart about a mean `m`
+    /// anchor at `m + log2(cosh(γ · d · ln 2 / 2)) / γ` plus
+    /// [`HS_SH_ANCHOR`]. Measured: with the map's mean as the anchor, the
+    /// worst calibration frame at Shadows +60 misses Camera Raw by 0.341
+    /// stops rms over its cells, at this anchor by 0.193.
+    ///
+    /// MUTATION: anchor at the map's mean (γ toward 0), or drop
+    /// [`HS_SH_ANCHOR`].
+    #[test]
+    fn the_shadow_anchor_rises_above_the_mean_with_the_spread() {
+        let (w, h) = (96usize, 48usize);
+        let g = f64::from(HS_SH_GAMMA);
+        let mut above = Vec::new();
+        for d in [2.0f64, 8.0] {
+            let (lo, hi) = (-6.0 - d / 2.0, -6.0 + d / 2.0);
+            let y: Vec<f32> = (0..w * h).map(|i| (if i % w < w / 2 { lo } else { hi }).exp2() as f32).collect();
+            let (_, _, anchor) = shadow_map(&y, w, h);
+            let want = -6.0 + (g * d * std::f64::consts::LN_2 / 2.0).cosh().log2() / g + f64::from(HS_SH_ANCHOR);
+            assert!((f64::from(anchor) - want).abs() < 0.02, "d {d}: anchor {anchor} vs {want}");
+            above.push(f64::from(anchor) + 6.0);
+        }
+        assert!(above[1] - above[0] > 2.0, "the anchor rises with the spread: {above:?}");
+    }
+
+    /// Shadows' anchor reads the frame, not its pixel count: the same smooth
+    /// scene at 3072, 1536 and 768 px wide anchors within 0.01 stops (on the
+    /// 19 Camera Raw frames the 768-cell map and 8-pixel blocks give the
+    /// law the same held-out score, 0.905), so a preview and a full-size
+    /// export agree.
+    ///
+    /// MUTATION: average a fixed number of pixels per cell, or take the
+    /// power mean over pixels instead of the map's cells.
+    #[test]
+    fn the_shadow_anchor_reads_the_same_at_any_size() {
+        let anchor = |w: usize| {
+            let h = w * 2 / 3;
+            let y: Vec<f32> = (0..w * h)
+                .map(|i| {
+                    let (x, v) = ((i % w) as f32 / w as f32, (i / w) as f32 / h as f32);
+                    (-7.0 + 6.0 * x + 1.5 * (std::f32::consts::TAU * v).sin()).exp2()
+                })
+                .collect();
+            shadow_map(&y, w, h).2
+        };
+        let full = anchor(3072);
+        for w in [1536usize, 768] {
+            let a = anchor(w);
+            assert!((a - full).abs() < 0.01, "w {w}: anchor {a} vs {full} at 3072");
         }
     }
 

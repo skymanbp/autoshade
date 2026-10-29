@@ -16,8 +16,8 @@
 //! frame's statistics (`render::tone_cr`); a tone map has no base layer, so
 //! the solve takes every base as the pixel itself (`render::HsSite::diagonal`)
 //! and the statistics from the score set's own masses (the mass-weighted
-//! mean linear value of its points, and the mean and standard deviation of
-//! their `log2`), [`render::HsKey::NOMINAL`] without one — the render's LUT
+//! mean linear value of its points, the Shadows anchor and the standard
+//! deviation of their `log2`), [`render::HsKey::NOMINAL`] without one — the render's LUT
 //! form ([`render::camera_raw_response_keyed`]) at those statistics.
 
 use super::tone::{TONE_PRIOR, solve5};
@@ -152,9 +152,10 @@ pub(crate) fn fit_camera_raw_tone(
 }
 
 /// The frame statistics the solve assumes ([`render::HsKey`]): `log2` of
-/// the mean linear value, and the mean and standard deviation of `log2`
-/// linear value, over the score set's points weighted by their masses, in
-/// `u`; the render's nominal frame without a score set.
+/// the mean linear value, the Shadows anchor ([`render::shadows_anchor`])
+/// and the standard deviation of `log2` linear value, over the score set's
+/// points weighted by their masses, in `u`; the render's nominal frame
+/// without a score set.
 fn frame_key(score: &[(f32, f32, f32)]) -> render::HsKey {
     let (mut sum, mut lg, mut lg2, mut mass) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     for &(u, _, m) in score {
@@ -168,9 +169,10 @@ fn frame_key(score: &[(f32, f32, f32)]) -> render::HsKey {
     }
     if mass > 0.0 && sum > 0.0 {
         let mean = lg / mass;
+        let level = |u: f32| (f64::from(render::srgb_to_linear(u.clamp(0.0, 1.0))) + f64::from(render::HS_SH_FLOOR)).log2();
         render::HsKey {
             key: ((sum / mass) as f32).max(1e-4).log2(),
-            log_mean: mean as f32,
+            sh_anchor: render::shadows_anchor(score.iter().map(|&(u, _, m)| (level(u), f64::from(m)))),
             spread: (lg2 / mass - mean * mean).max(0.0).sqrt() as f32,
         }
     } else {

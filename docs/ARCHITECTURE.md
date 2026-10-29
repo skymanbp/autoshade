@@ -2176,7 +2176,8 @@ names no camera profile, v1.17.0 — composed into one table; on a recipe that
 names one, Camera Raw's measured law in five passes, `render/tone_cr.rs`:
 Highlights and Shadows first — Highlights a local law on two edge-aware
 bases of the frame's luminance keyed to its mean, Shadows a gain on linear
-luminance set by the frame's spread on a 768-cell map — then exposure by
+luminance set by the frame's spread on a 768-cell map, against an anchor
+that a power mean of the map puts above its mean — then exposure by
 Adobe's channel rule,
 Contrast, Whites and Blacks, the Look's baked curve, the parametric and
 point curves) → **the B&W treatment's grey mix** when the photo is black and white

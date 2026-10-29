@@ -216,7 +216,7 @@ pub(crate) use tone::{
 };
 use tone::{apply_rgb_curves, hermite_eval};
 pub(crate) use tone_cr::{
-    HS_SH_FLOOR, HsKey, SliderLaw, camera_raw_exposure, camera_raw_response_keyed,
+    HS_SH_FLOOR, HsKey, SliderLaw, camera_raw_exposure, camera_raw_response_keyed, shadows_anchor,
     camera_raw_row, camera_raw_start, exposure_ramp, hs_row, HsSite,
 };
 use tone_cr::{
