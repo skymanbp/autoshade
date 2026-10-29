@@ -596,41 +596,46 @@ supposed to remove.
   **Highlights and Shadows: what the synthetic frames showed** (v1.17.0,
   causal tests, the law above unchanged). Neutral scenes written into a
   copy of the calibration frame's uncompressed RAW (same body, profile,
-  baseline and lens), each rendered flat, Highlights −60 and Shadows +60
-  by Camera Raw 18.4 and by the engine; the push is `u` after minus `u`
-  flat on the same cells. (1) A uniform frame is not moved at all: 0.0000
-  at every level from `u` 0.13 to 0.78, both sliders (the law at 0.60 and
-  0.78: −0.03 and +0.015). (2) Two levels half and half (`u` 0.13 | 0.70):
-  each half moves as one at every distance from the edge, the bright half −0.208 to −0.238
-  under Highlights, the dark half +0.017 to +0.018 under Shadows (the law:
-  −0.062 to −0.090 and +0.078 to +0.081); with the dark half at 0.37
-  instead the bright half moves −0.11. (3) The frame's mean linear value
-  held, its bright fraction 5 / 14 / 44 %: Highlights at `u` 0.63 −0.065 /
-  −0.072 / −0.116, Shadows at 0.18 +0.102 / +0.098 / +0.044 (the law, whose
-  key is that mean: −0.035 to −0.039 and +0.087 throughout). (4) The same
-  histogram arranged differently (the bright cells interleaved, or in one
-  block): Highlights at 0.48 −0.069 against −0.130, Shadows at 0.18 +0.044
-  against +0.019. (5) A bright square on a uniform surround: −0.339 /
-  −0.163 / −0.078 / −0.079 / −0.117 at surround `u` 0.07 / 0.22 / 0.38 /
-  0.52 / 0.73, and, on a dark surround, from 640 to 2560 film px wide −0.173
-  to −0.187 (no decay with size). (6) Not the cause: the packet's Exposure
-  (at −1 / +1 every push is the exposure ramp's slope times the push at 0,
-  within 0.001 to 0.008) and the Look (off: the same pushes through the
-  Look's own slope). So Camera Raw's Highlights and Shadows move a level
-  by its contrast against the rest of the frame (zero where there is none)
-  and by how much of the frame it covers, over spans the size of the frame
-  (no ramp across 4000 px), with a weaker regional term ((4)). On the
-  real frames the contrast of the `u` 0.55–0.65 band over a 1600–3200 px
-  Gaussian of `log2` luminance orders the six frames' Highlights −60 push
-  exactly (the bright snow frame 0.76–1.36 stops, push −0.061; the calibration
-  frame 2.72–3.31 stops, −0.144). No form tried reproduces all of it, so
-  the law above stays: a table over `u` and one blurred base (Gaussian
-  `log2`, σ 400–6400 px) minus no key, the linear mean, the `log2` mean or
-  the median, leave-one-frame-out over 15 synthetic and 7 real frames,
-  median R² 0.19–0.46; the same over a contrast against a Gaussian
-  context (σ 1600–6400, 23 synthetic frames) 0.00–0.26; a local Laplacian
-  filter with a one-sided remap, below 0 on most frames. The two measured properties are
-  pinned as ignored tests in `render/tone_cr.rs` until a law has them.
+  baseline and lens), rendered flat, Highlights −60 and Shadows +60 by
+  Camera Raw 18.4; pushes are `log2` luminance (or `u`) after minus flat.
+  Measured: (1) a uniform frame is not moved at all (0.0000 in `u` from
+  0.13 to 0.78, both sliders; the law: −0.03 / +0.015 at 0.60 and 0.78),
+  yet 48 px tracer squares on that frame are moved by their offset from it
+  (Highlights up to −1.07 stops 5 stops above, Shadows up to +1.6 stops
+  5 stops below). (2) The operator is local and edge-aware: a tracer at
+  one level moves −0.45 stops on a −5 surround and −0.97 on a −2 surround,
+  switching within 96 px of the boundary (no ramp); large regions of one
+  level move as one at every distance from an edge (the bright half of
+  `u` 0.13 | 0.70 −0.208 to −0.238 `u` over 4000 px). (3) A whole scene
+  shifted 1.5 stops in exposure gets the same pushes in stops (within
+  0.001–0.09); scaled in contrast (0.6×, 1.25×) it does not scale with it.
+  (4) It is coupled to the whole frame through its dark population: a
+  640 px square at −11 stops in a corner or in the middle multiplies the
+  Highlights push of a −3 stop surround 4.3× (−0.030 → −0.130 `u`),
+  graded by its depth (−6 / −8 / −11 / −14: −0.058 / −0.086 / −0.130 /
+  −0.162) and its size (64 / 144 / 208 / 400 / 640 px: −0.020 / −0.075 /
+  −0.087 / −0.104 / −0.130; squares under ~100 px do not count), a 2 %
+  strip at depth `d` stops below the surround by about −0.12 stop per stop
+  beyond the first, a 30 % strip at −11 a −4 stop tracer −3.9 stops (−0.04
+  without); the same squares
+  raise Shadows when small and deep and lower it when large. (5) Not the
+  cause: the packet's Exposure (at −1 / +1 each push is the exposure
+  ramp's slope times the push at 0, within 0.001–0.008) and the Look. On
+  real frames: the same 640 px −12 stop square added to the bright snow
+  frame (whose 300 px-block minimum is −6.6 stops, against −9.3 to −12.6
+  on the six others) raises its Highlights −60 push 1.39× and its
+  Shadows +60 push 1.42× over the rest of the frame; added to the
+  calibration frame it changes nothing (1.01×, 1.01×). So the snow frame's
+  weak response (0.88× the pooled law) is caused by its missing dark
+  population, which the law's key (the frame's mean linear value) cannot
+  see. No single frame statistic tried carries (4) — the mean, the `log2`
+  mean, the median, block minima and low percentiles (150–600 px blocks),
+  power means (soft minima) of the block image, the `log2` spread; a
+  (`u`, base − statistic) table over 15–23 synthetic and 7 real frames
+  reaches a median held-out R² of 0.00–0.46, and a local Laplacian filter
+  with a one-sided remap stays below 0 on most frames. The two measured
+  properties (1) and (2) are pinned as ignored tests in
+  `render/tone_cr.rs` until a law has them.
 
   is `1`; cool-side coefficients and the 6688 K red plateau were
   **calibrated against measured Lightroom exports**.
