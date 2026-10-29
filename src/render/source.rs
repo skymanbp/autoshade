@@ -175,6 +175,21 @@ pub fn render_to_image_in(
         // rawler 0.7.2 skips this crop on its own. The verdict is disclosed
         // inside (A5) — an out-of-bounds refusal used to be a silent `None`.
         crate::decode::align_default_crop(&mut raw);
+        // The raw is scaled by Camera Raw's white level where the body is
+        // measured (`decode::white_level`): rawler's level is the file's
+        // (15360 on a 7RM4A, Camera Raw 16383), and the difference is an
+        // exposure on every pixel (+0.096 EV for that body, v1.17.0).
+        let iso = md.exif.iso_speed_ratings.map(u32::from).or(md.exif.iso_speed);
+        let bits = crate::decode::white_level::raw_bits_per_sample(src.buf());
+        if let Some(crate::decode::white_level::WhiteLevelSource::File { level }) =
+            crate::decode::white_level::use_camera_raw_white_level(&mut raw, iso, bits)
+        {
+            diag.warn(format!(
+                "{} {}: the raw is scaled by the file's white level {level}; Camera Raw's own level \
+                 for this body is not measured, so brightness may differ from Lightroom's",
+                raw.clean_make, raw.clean_model
+            ));
+        }
         // A Sony file's Daylight preset, read while its bytes are mapped: with
         // the body's reference it is the calibration Camera Raw puts in front
         // of the profile's matrices (`as_shot::camera_calibration`).
