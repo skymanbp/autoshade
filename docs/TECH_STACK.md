@@ -399,6 +399,15 @@ bundled; a machine with no profiles gets a named refusal.
   Raw on the grey-neutral lattice's bright in-gamut colours, max ΔE 16.65 →
   0.92. Real frames barely reach it (p39/p40 carry and +2 EV hue unchanged).
 
+- Over-range light (v1.17.0, `render::camera` / `render::develop`, **measured** from
+  Camera Raw renders, 2026-10-29): a colour the camera stage puts above the
+  working space's 1 is kept, encoded exactly, through Highlights/Shadows and
+  the slider Exposure, and each component clips at 1 after the Exposure (no
+  blown-pixel desaturation on this path). Warm patches beyond sRGB at −1.51 EV:
+  worst ΔE 39.8 → 3.3; at 0 EV 34.9 → 10.9; carry p40 (+0.7 EV) 4.80 → 4.13,
+  p36/p38/p39 unchanged, p41 8.56 → 8.69. Light above the profile reference's
+  own 1 (ProPhoto) still clips there, under Adobe's curve.
+
 - Table entry: `(hue shift in degrees, saturation scale, value scale)`, stored
   `index = (val * hueDivisions + hue) * satDivisions + sat` (**measured** — at
   saturation index 0 the saturation scale is exactly 1.0 on 60 of the 60

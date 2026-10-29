@@ -25,6 +25,18 @@ pub(super) fn transfer_luts() -> &'static ([f32; LUT_N], [f32; LUT_N]) {
     })
 }
 
+/// Decode one working-space value to linear light — the LUT inside 0..1, the
+/// exact transfer outside it, so a wide-gamut develop's negative or >1
+/// component survives a linear-light stage instead of being clipped by it.
+pub(super) fn decode_wide(dec: &[f32], c: f32) -> f32 {
+    if (0.0..=1.0).contains(&c) { sample_lut(dec, c) } else { srgb_to_linear(c) }
+}
+
+/// [`decode_wide`]'s inverse.
+pub(super) fn encode_wide(enc: &[f32], c: f32) -> f32 {
+    if (0.0..=1.0).contains(&c) { sample_lut(enc, c) } else { linear_to_srgb(c) }
+}
+
 /// Blackbody colour at temperature `k` Kelvin as RGB in [0,1].
 /// Tanner-Helland piecewise fit [verified: tannerhelland.com/2012/09/18,
 /// R²>0.987], with the cool-side branches RESCALED so every branch seam is

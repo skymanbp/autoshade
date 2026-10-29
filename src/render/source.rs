@@ -305,11 +305,14 @@ pub fn render_to_image_in(
     let lens_gain = (SliderLaw::of(recipe) == SliderLaw::CameraRaw && recipe.lens_profile.vignette_active())
         .then(|| profile_vignette_lut(&recipe.lens_profile.vignette, recipe.lens_profile_vignetting_scale));
     let lens_gain = lens_gain.as_deref();
+    // Under Camera Raw's law the frame keeps its over-range light to the
+    // slider Exposure, which settles it (`calibrate_camera_buffer`).
+    let defer_over_range = SliderLaw::of(recipe) == SliderLaw::CameraRaw;
     let original_y = denoise_grain::capture_original(
         strength,
         crate::denoise::mosaic_args_for(&rawimage).is_ok(),
         grain_weights,
-        || develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref(), lens_gain)
+        || develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref(), lens_gain, defer_over_range)
             .map(|(rgb, _, _)| rgb),
     )?;
     // --- AI denoise on the MOSAIC (opt-in), BEFORE demosaic (2026-09-15).
@@ -334,7 +337,7 @@ pub fn render_to_image_in(
     }
 
     let (mut data, w, h) =
-        develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref(), lens_gain)?;
+        develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref(), lens_gain, defer_over_range)?;
     // The clean RGB owns the remaining work. Drop the mosaic before returning
     // grain; the original RGB already died when capture_original kept only Y.
     drop(rawimage);
@@ -442,6 +445,8 @@ pub fn render_to_image_in(
 ///
 /// `lens_gain` is the lens profile's radial vignetting gain LUT, put on the
 /// sensor's linear light here, before calibration and the profile stage.
+/// `defer_over_range` is [`calibrate_camera_buffer`]'s.
+#[allow(clippy::too_many_arguments)] // one value each of the develop: the frame, its demosaic and geometry, its calibration, space, profile, lens gain and over-range rule
 fn develop_raw_buffer(
     rawimage: &rawler::RawImage,
     dev: &RawDevelop,
@@ -450,6 +455,7 @@ fn develop_raw_buffer(
     working: ExportColorSpace,
     profile_stage: Option<&profile::Stage>,
     lens_gain: Option<&[f32]>,
+    defer_over_range: bool,
 ) -> Result<(Vec<[f32; 3]>, usize, usize)> {
     let inter = dev
         .develop_intermediate(rawimage)
@@ -501,7 +507,7 @@ fn develop_raw_buffer(
         }
     }
     if let Some((xyz2cam, wb)) = calibration {
-        calibrate_camera_buffer(&mut data, &xyz2cam, wb, working, profile_stage);
+        calibrate_camera_buffer(&mut data, &xyz2cam, wb, working, profile_stage, defer_over_range);
     } else if geometry_cfa.is_some() {
         // A camera with no colour matrix at all: rawler skips its `Calibrate`
         // step there but still applies `SRgb` (`imgop/develop.rs:199-233`).

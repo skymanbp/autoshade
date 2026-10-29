@@ -228,7 +228,9 @@ use tone_cr::{
 pub(crate) use tone::{limit_tone_sliders, parametric_lut};
 pub use wb::{local_temp_to_kelvin, solve_wb_for, solve_wb_from_neutral};
 pub(crate) use wb::{WbLaw, linear_to_srgb, srgb_to_linear, wb_gains};
-use wb::{apply_recipe_wb, apply_recipe_wb_in, colour_gain_luts, ramp, smoothstep, transfer_luts};
+use wb::{
+    apply_recipe_wb, apply_recipe_wb_in, colour_gain_luts, decode_wide, encode_wide, ramp, smoothstep, transfer_luts,
+};
 #[cfg(test)]
 use wb::{kelvin_to_rgb};
 

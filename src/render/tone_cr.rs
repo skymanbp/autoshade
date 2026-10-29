@@ -822,20 +822,23 @@ pub(crate) fn hs_pixel_scaled(px: [f32; 3], hl: f32, sh: f32, site: HsSite, gain
         let s = gain[1] * sh;
         push += s * hs_row(2, s, site, u);
     }
-    let target = camera_raw_start((u + push).clamp(0.0, 1.0));
+    // A value above the curve's top (over-range light the camera stage left
+    // for the slider Exposure, `calibrate_camera_buffer`) moves as the top
+    // does, in proportion: the push read at u = 1 and the light kept.
+    let target = l.max(1.0) * camera_raw_start((u + push).clamp(0.0, 1.0));
     // Highlights shape the hue by Adobe's channel rule (`camera_raw_channels`)
     // with this pixel's own curve, as the other sliders do; Shadows keep it.
     let shaped = if hl < 0.0 {
         let curve = |v: f32| {
             let uv = camera_raw_unstart(v);
-            camera_raw_start((uv + gain[0] * hl * hs_row(1, hl, site, uv)).clamp(0.0, 1.0))
+            v.max(1.0) * camera_raw_start((uv + gain[0] * hl * hs_row(1, hl, site, uv)).clamp(0.0, 1.0))
         };
         channel_rule(px, curve)
     } else {
         px
     };
     let k = (target + HS_CHROMA_FLOOR) / (luma601(&shaped) + HS_CHROMA_FLOOR);
-    shaped.map(|c| ((c + HS_CHROMA_FLOOR) * k - HS_CHROMA_FLOOR).clamp(0.0, 1.0))
+    shaped.map(|c| ((c + HS_CHROMA_FLOOR) * k - HS_CHROMA_FLOOR).max(0.0))
 }
 
 /// [`camera_raw_channels`] with a curve given as a function: the brightest

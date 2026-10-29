@@ -222,15 +222,19 @@ pub(super) fn camera_to_space_matrix(xyz2cam: &[[f32; 3]; 3], space: ExportColor
 /// export exists to carry (rawler's own calibrate kills it). Components
 /// outside the DELIVERY gamut go negative here and clip at the final
 /// 16-bit pack. Highlights (any component > 1 after white balance) get the
-/// same desaturating treatment rawler's develop applies — scale-to-max
-/// averaged with the euclidean norm — so wide and sRGB renders treat blown
-/// areas alike. The transfer's linear segment covers negatives (no NaN).
+/// same desaturating treatment rawler's develop applies ([`settle_over_range`])
+/// so wide and sRGB renders treat blown areas alike — unless
+/// `defer_over_range` (Camera Raw's law): then the frame keeps its over-range
+/// components, encoded exactly above 1, and they end after the slider
+/// Exposure (`render::develop`), where Camera Raw's renders put them. The
+/// transfer's linear segment covers negatives (no NaN).
 pub(super) fn calibrate_camera_buffer(
     data: &mut [[f32; 3]],
     xyz2cam: &[[f32; 3]; 3],
     wb: [f32; 3],
     space: ExportColorSpace,
     profile: Option<&profile::Stage>,
+    defer_over_range: bool,
 ) {
     let m = camera_to_space_matrix(xyz2cam, space);
     // Camera Raw's near-white colour lift (`clip_lift`, measured), on the
@@ -261,20 +265,28 @@ pub(super) fn calibrate_camera_buffer(
             }
             None => mat_vec3(&m, &v),
         };
-        let max = t[0].max(t[1]).max(t[2]);
-        if max > 1.0 {
-            // Blown pixels take EXACTLY rawler's treatment, including its
-            // negative pre-clip: keeping negatives inside this formula let
-            // the positive euclidean term drag an out-of-gamut component
-            // back into gamut with a hue shift. Unblown pixels (the branch
-            // NOT taken) keep their negatives — the wide-gamut win lives
-            // there.
-            let t0 = t.map(|c| c.max(0.0));
-            let eucl = ((t0[0] * t0[0] + t0[1] * t0[1] + t0[2] * t0[2]) / 3.0).sqrt();
-            t = t0.map(|c| (c / max + eucl) / 2.0);
+        if !defer_over_range {
+            t = settle_over_range(t);
         }
         *px = [linear_to_srgb(t[0]), linear_to_srgb(t[1]), linear_to_srgb(t[2])];
     });
+}
+
+/// rawler's develop's treatment of a blown pixel (any linear component above
+/// 1): scale-to-max averaged with the euclidean norm; a pixel inside 1 comes
+/// back as it went in. Blown pixels take EXACTLY rawler's formula, including
+/// its negative pre-clip: keeping negatives inside it let the positive
+/// euclidean term drag an out-of-gamut component back into gamut with a hue
+/// shift. Unblown pixels keep their negatives — the wide-gamut win lives
+/// there.
+fn settle_over_range(t: [f32; 3]) -> [f32; 3] {
+    let max = t[0].max(t[1]).max(t[2]);
+    if max <= 1.0 || max.is_nan() {
+        return t;
+    }
+    let t0 = t.map(|c| c.max(0.0));
+    let eucl = ((t0[0] * t0[0] + t0[1] * t0[1] + t0[2] * t0[2]) / 3.0).sqrt();
+    t0.map(|c| (c / max + eucl) / 2.0)
 }
 
 /// The camera profile this photograph is developed through, prepared for this

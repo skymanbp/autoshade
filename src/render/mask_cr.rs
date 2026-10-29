@@ -318,7 +318,7 @@ pub(super) fn apply_local_exposure(
         let under = profile::UnderTone::new(space, exposed);
         let (dec, enc) = transfer_luts();
         blend_each(data, w, covers, &passes, |e, px| {
-            under.expose(px.map(|v| sample_lut(dec, v)), e).map(|v| sample_lut(enc, v.clamp(0.0, 1.0)))
+            under.expose(px.map(|v| decode_wide(dec, v)), e).map(|v| encode_wide(enc, v.max(0.0)))
         });
     });
 }
@@ -428,14 +428,14 @@ pub(super) fn apply_local_white(
                     if wt <= 0.001 {
                         continue;
                     }
-                    let l = light.get_or_insert_with(|| under.undo_curve(px.map(|v| sample_lut(dec, v))));
+                    let l = light.get_or_insert_with(|| under.undo_curve(px.map(|v| decode_wide(dec, v))));
                     let t = mat_vec3(mv, l);
                     for ch in 0..3 {
                         l[ch] += wt * (t[ch] - l[ch]);
                     }
                 }
                 if let Some(l) = light {
-                    *px = under.redo_curve(l).map(|v| sample_lut(enc, v.clamp(0.0, 1.0)));
+                    *px = under.redo_curve(l).map(|v| encode_wide(enc, v.max(0.0)));
                 }
             }
         });
