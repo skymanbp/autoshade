@@ -17,9 +17,10 @@
 //!   after the global sliders.
 //! - **Highlights below 0 and Shadows above 0** run instead the global law
 //!   (`tone_cr`: local, keyed to the frame, before Exposure) on the frame's
-//!   own bases, the push scaled by [`L_HS_GAIN`] (regressing the local
-//!   renders on the global law: 1.21 for Highlights −60, 1.25 for Shadows
-//!   +60), right after the global pass ([`apply_local_hs`]).
+//!   own sites, scaled by [`L_HS_GAIN`] (Highlights −60: the local renders
+//!   regressed on the global law, 1.21; Shadows +60: Camera Raw's local push
+//!   in stops over its global one on the same cells, 1.15, 1.14–1.16 on
+//!   every two-stop band), right after the global pass ([`apply_local_hs`]).
 //! - **Texture** renders exactly as the global Texture and stays where the
 //!   mask stage puts it.
 //! - **Temp and Tint** move the global white ([`local_white`]): a white
@@ -149,9 +150,10 @@ fn local_hs(m: &crate::recipe::LocalAdjustment) -> [f32; 2] {
 }
 
 /// How much harder a mask's Highlights and Shadows push than the global
-/// sliders at the same value, on the same base and key (`[highlights,
-/// shadows]`): fitted on the local renders (module head).
-const L_HS_GAIN: [f32; 2] = [1.2, 1.25];
+/// sliders at the same value, on the same sites (`[highlights, shadows]`:
+/// the Highlights push in `u`, the Shadows slider), measured on the local
+/// renders (module head).
+const L_HS_GAIN: [f32; 2] = [1.2, 1.15];
 
 /// Does any drawn adjustment of `r` move Highlights or Shadows on the local law?
 pub(super) fn any_local_hs(r: &EditRecipe) -> bool {
