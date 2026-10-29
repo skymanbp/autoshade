@@ -2994,13 +2994,13 @@ records: a file name beside a name wins, then the name (not checked against
 the lens: a 24–105 mm name renders that profile on a 14–24 mm frame), and no
 name resolves nothing — under Custom that is no profile correction at all
 (flat field flat, geometry the switched-off one to 0.01 px), under the other
-setups Camera Raw's own choice. The export therefore writes Custom, the name
-and the file name whenever a strength is off 100 on a rendering component
-(`EditRecipe::lightroom_named_lens_profile`; the setup is Custom by user
-ruling 2026-10-28 — LensDefaults with the name is honoured too and would keep
-the camera's CA), owns the
-three keys only while it writes them, and the render drops the camera's CA in
-that state as Camera Raw does under Custom. The import reads a strength only
+setups Camera Raw's own choice. The export therefore writes the setup, the
+name and the file name whenever a strength is off 100 on a rendering
+component (`EditRecipe::lightroom_named_lens_profile`), and owns the three
+keys only while it writes them. The setup is LensDefaults, which keeps the
+camera's CA as the render does (ruling 2026-10-29), and Custom only when the
+recipe has the camera's CA switched off — the one setup Camera Raw draws none
+under (`EditRecipe::lightroom_lens_setup`). The import reads a strength only
 when the document names a profile. The vignetting strength `s` is not a
 scaling of the gain's departure: the gain at s = 0, 1, 2 is 1, g and
 1 + 2(g − 1), and between those Camera Raw interpolates in EV — within 0.22 %

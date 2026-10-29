@@ -291,9 +291,11 @@ not the profile and are never touched by that switch.
 
 A strength set away from 100 changes what the sidecar says about the profile
 (v1.17.0): Lightroom only honours a strength for a profile the sidecar names,
-so the export names the installed Adobe profile and sets Lightroom's lens
-setup to Custom. Lightroom then drops the camera's chromatic-aberration correction, and so does
-AutoShade's canvas while a strength is off 100. Back at 100 nothing about the
+so the export names the installed Adobe profile (crs:LensProfileName and its
+file name) under Lightroom's default lens setup, which keeps the camera's
+chromatic-aberration correction as the canvas does. Only when that correction
+is switched off in AutoShade does the export say Custom, the setup under which
+Lightroom draws none. Back at 100 nothing about the
 profile is written and a Lightroom sidecar keeps its own setup. With no Adobe
 profile for the lens on this computer there is nothing to name; the save then
 says the strength is not carried, because Lightroom would draw it at 100.

@@ -60,16 +60,11 @@ pub const MANUAL_CA_PER_UNIT: f32 = 2.0e-5;
 /// knots are DROPPED rather than flattened to ones: an identity spline still
 /// satisfies `geometry_active()`, and the resample it would then run is not
 /// free (it promotes an 8-bit preview to 16-bit on the way through).
-///
-/// And the camera's CA goes when the export names the profile under Custom
-/// for a strength off 100 ([`EditRecipe::lightroom_named_lens_profile`]):
-/// Camera Raw draws no camera CA under that setup, so neither does the render.
 pub fn geometry_profile(r: &EditRecipe) -> Cow<'_, crate::recipe::LensProfile> {
     let ca_moved = r.ca_r != 0.0 || r.ca_b != 0.0;
     let dist_scale = (r.lens_profile_distortion_scale / 100.0).clamp(0.0, 2.0);
     let dist_moved = dist_scale != 1.0 && !r.lens_profile.distortion.is_empty();
-    let ca_dropped = r.lens_profile.ca_on && r.lightroom_named_lens_profile().is_some();
-    if !ca_moved && !dist_moved && !ca_dropped {
+    if !ca_moved && !dist_moved {
         return Cow::Borrowed(&r.lens_profile);
     }
     let p = &r.lens_profile;
@@ -81,9 +76,9 @@ pub fn geometry_profile(r: &EditRecipe) -> Cow<'_, crate::recipe::LensProfile> {
         p.distortion.iter().map(|k| 1.0 + (k - 1.0) * dist_scale).collect()
     };
     if !ca_moved {
-        return Cow::Owned(crate::recipe::LensProfile { distortion, ca_on: p.ca_on && !ca_dropped, ..p.clone() });
+        return Cow::Owned(crate::recipe::LensProfile { distortion, ..p.clone() });
     }
-    let profile_ca_on = p.ca_on && !ca_dropped && !p.ca_r.is_empty() && !p.ca_b.is_empty();
+    let profile_ca_on = p.ca_on && !p.ca_r.is_empty() && !p.ca_b.is_empty();
     let fold = |knots: &[f32], slider: f32| -> Vec<f32> {
         let f = 1.0 + slider * MANUAL_CA_PER_UNIT;
         if profile_ca_on { knots.iter().map(|k| k * f).collect() } else { vec![f] }

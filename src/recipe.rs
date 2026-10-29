@@ -1301,8 +1301,8 @@ pub struct CreativeLook {
 }
 
 impl EditRecipe {
-    /// The Adobe profile a Lightroom sidecar of this recipe has to NAME, under
-    /// crs:LensProfileSetup="Custom", or `None` when it need not or cannot.
+    /// The Adobe profile a Lightroom sidecar of this recipe has to NAME, or
+    /// `None` when it need not or cannot.
     ///
     /// Camera Raw honours crs:LensProfileVignettingScale and
     /// crs:LensProfileDistortionScale only for a profile the sidecar names:
@@ -1310,17 +1310,26 @@ impl EditRecipe {
     /// a strength of 50 renders at 100 under LensDefaults, Auto or no setup
     /// with no crs:LensProfileName, and at 50 once the name is there. So the
     /// export names the profile whenever a strength is off 100 on a component
-    /// that is rendering. The setup it writes is Custom (user ruling
-    /// 2026-10-28; LensDefaults with the name is honoured too), and Camera Raw draws
-    /// no camera CA under Custom, so neither does the render while this is
-    /// `Some` (`render::geometry_profile`). `None` with a strength off 100 and
-    /// no profile on this machine is an export loss
-    /// (`xmp::global_export_losses`).
+    /// that is rendering, under the setup [`Self::lightroom_lens_setup`] says.
+    /// `None` with a strength off 100 and no profile on this machine is an
+    /// export loss (`xmp::global_export_losses`).
     pub fn lightroom_named_lens_profile(&self) -> Option<&AdobeLensProfile> {
         let p = &self.lens_profile;
         let vignette = self.lens_profile_vignetting_scale != 100.0 && p.vignette_active();
         let distortion = self.lens_profile_distortion_scale != 100.0 && p.distortion_on && !p.distortion.is_empty();
         if vignette || distortion { p.adobe.as_ref() } else { None }
+    }
+
+    /// The crs:LensProfileSetup a sidecar naming the profile states: the one
+    /// whose camera CA matches this recipe's. LensDefaults (coordinator ruling
+    /// 2026-10-29: the name alone makes Camera Raw honour a strength, and this
+    /// setup keeps the camera's CA, as the render does) — unless the camera's
+    /// CA is there and switched off, which Camera Raw draws only under Custom
+    /// (measured: no camera CA under Custom, the camera's under LensDefaults).
+    pub fn lightroom_lens_setup(&self) -> &'static str {
+        let p = &self.lens_profile;
+        let ca_off = !p.ca_on && !p.ca_r.is_empty() && !p.ca_b.is_empty();
+        if ca_off { "Custom" } else { "LensDefaults" }
     }
 
     /// Every machine-local raster path this recipe references: each mask's

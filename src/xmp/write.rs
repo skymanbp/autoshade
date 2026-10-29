@@ -590,11 +590,11 @@ pub(super) fn owned_attrs(r: &EditRecipe, frame: Option<FrameAspect>) -> String 
     // two strengths below only for a profile crs:LensProfileName names, and
     // renders them at 100 otherwise, so the export names it whenever a
     // strength is off 100 ([`EditRecipe::lightroom_named_lens_profile`], which
-    // also says why the setup is Custom). In Lightroom's own key order. The
+    // with the setup [`EditRecipe::lightroom_lens_setup`]). In Lightroom's own key order. The
     // three keys are owned only while written (`unspoken_attr_keys`): a
     // Lightroom file at 100 keeps its own setup, name, file name and digest.
     if let Some(id) = r.lightroom_named_lens_profile() {
-        attr(&mut a, "LensProfileSetup", "Custom");
+        attr(&mut a, "LensProfileSetup", r.lightroom_lens_setup());
         attr(&mut a, "LensProfileName", &id.name);
         attr(&mut a, "LensProfileFilename", &id.filename);
     }

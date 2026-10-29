@@ -735,7 +735,7 @@ const LR_AI_PROVENANCE: &str = "\n         crs:InputDigest=\"D0DAC04EB58F013F49D
 \n         crs:Origin=\"0,0\"\
 \n         crs:ModelVersion=\"234881976\"";
 
-/// A profile strength off 100 goes out with the profile NAMED under Custom —
+/// A profile strength off 100 goes out with the profile NAMED (LensDefaults) —
 /// the only form Camera Raw honours it in (`EditRecipe::lightroom_named_lens_profile`)
 /// — and comes back; at 100 nothing about the profile's identity is written,
 /// and a merge leaves Lightroom's own setup, name, file name and digest alone.
@@ -757,7 +757,14 @@ fn a_profile_strength_goes_out_with_the_profile_named_and_comes_back() {
     };
     // Written, and read back: the setup, the name, the file name, the strength.
     let doc = recipe_to_xmp(&at(50.0));
-    assert_eq!(lens_profile_setup(&doc), Some(LensProfileSetup::Custom), "{doc}");
+    assert_eq!(lens_profile_setup(&doc), Some(LensProfileSetup::LensDefaults), "{doc}");
+    // The camera's CA switched off is a state only Custom draws.
+    let mut ca_off = at(50.0);
+    ca_off.lens_profile.ca_r = vec![1.0; 4];
+    ca_off.lens_profile.ca_b = vec![1.0; 4];
+    assert_eq!(lens_profile_setup(&recipe_to_xmp(&ca_off)), Some(LensProfileSetup::Custom));
+    ca_off.lens_profile.ca_on = true;
+    assert_eq!(lens_profile_setup(&recipe_to_xmp(&ca_off)), Some(LensProfileSetup::LensDefaults));
     assert_eq!(lens_profile_name(&doc).as_deref(), Some(id.name.as_str()));
     assert_eq!(lens_profile_filename(&doc).as_deref(), Some(id.filename.as_str()));
     assert_eq!(xmp_to_recipe(&doc).lens_profile_vignetting_scale, 50.0);
@@ -782,7 +789,7 @@ fn a_profile_strength_goes_out_with_the_profile_named_and_comes_back() {
     for key in ["LensProfileSetup", "LensProfileName", "LensProfileFilename", "LensProfileVignettingScale"] {
         assert_eq!(merged.matches(&format!("crs:{key}=")).count(), 1, "{key} once: {merged}");
     }
-    assert_eq!(lens_profile_setup(&merged), Some(LensProfileSetup::Custom));
+    assert_eq!(lens_profile_setup(&merged), Some(LensProfileSetup::LensDefaults));
     assert!(merged.contains("crs:LensProfileDigest=\"0123456789ABCDEF0123456789ABCDEF\""), "the digest stays");
     assert_eq!(xmp_to_recipe(&merged).lens_profile_vignetting_scale, 50.0);
     let kept = merged_doc(lr, &at(100.0)).expect("mergeable");

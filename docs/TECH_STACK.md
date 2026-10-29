@@ -1711,9 +1711,10 @@ the profile's default curve and exposure ramp (still after the HueSatMap,
 see ARCHITECTURE); a body with no knots gets its render distortion solved from
 the profile at the 32 knots the lens clamp keeps; the Vignetting strength is
 Camera Raw's EV-piecewise law (`render::develop`), and a strength off 100 is
-exported with the profile named under the Custom setup (crs:LensProfileName and
+exported with the profile named (crs:LensProfileName and
 crs:LensProfileFilename, `EditRecipe::lightroom_named_lens_profile`), the only
-form Camera Raw honours it in;
+form Camera Raw honours it in, under LensDefaults unless the camera's CA is
+switched off (`EditRecipe::lightroom_lens_setup`);
 the Lightroom mask solve keeps its native `(i+1)/16` reading, resampled onto
 2048 canonical nodes, and persists a bounded 64-knot inverse transport.
 
