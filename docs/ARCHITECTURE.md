@@ -2255,9 +2255,37 @@ mask's `MainCurve` still goes through the mask's tone table by the luma ratio
 channel curves sit against its local Saturation is not measured; and the
 parametric curve's SHAPE is still the provisional B-spline — Camera Raw's
 `ParametricDarks` +50 lifts the neutral band 4.6 L where the engine lifts it
-about 1.1 L (the gap is the region's reach and spread, not the encoding: on
-that frame every encoding predicts Camera Raw's bump from its own neutrals to
-0.07–0.10).
+about 1.1 L. On p39's flat packet the encodings could not be told apart from
+the neutral band's bump alone (all predict it to 0.07–0.10); renders at
+±25/±50/±75/±100 per slider and at moved splits then showed what the shape is
+NOT, and the mechanism is still unknown:
+
+* its domain has no sRGB toe: Darks +100 is a pure linear-light gain of
+  3.000× from linear 0.0002 to 0.03 (Shadows +100 2.998×), where a point curve
+  shows the toe (0.78× at linear 0.003, then falling) — so the parametric and
+  the point curve do not share an encoding;
+* Shadows acts exactly on [0, MidtoneSplit] and Highlights on
+  [MidtoneSplit, 1], Darks and Lights over the whole range; ShadowSplit moves
+  only Shadows, HighlightSplit only Highlights, MidtoneSplit moves Darks;
+* the amount response is neither linear nor sign-symmetric: Darks at sRGB
+  0.30 moves 10.65 / 22.38 / 35.40 / 50.04 (of 255) at +25 / +50 / +75 / +100
+  and −16.63 at −25; the directions that push toward a clip (Lights +,
+  Highlights +, Darks −, Shadows −) kink at |amount| 50, where the end slope
+  reaches about 0; and at ±10 the clip-ward side is the stronger one by 5:3;
+* pure-power, log, log(x + ε) and logit conjugations, a free 16-knot
+  monotone conjugation (6 % rms at best), f50∘f50 = f100, +a as the inverse
+  of −a, a power remap or piecewise-linear warp of the splits, and one natural
+  spline through the split points were all tried and all fail.
+
+**The writer always pairs channel curves with a composite curve since
+v1.17.0** (`xmp::write`). Camera Raw IGNORES `crs:ToneCurvePV2012Red` /
+`Green` / `Blue` in a sidecar with no `crs:ToneCurvePV2012` element: a fitted
+recipe's three channel curves rendered byte-identical to no curves at all, and
+the same sidecar with an identity composite block added moved 11.9 ΔE — the
+move the engine renders. Lightroom always writes the composite, so a recipe
+with channel curves and no composite one now writes the identity
+`0,0 / 255,255`, which reads back as no composite curve
+(`channel_curves_always_travel_with_a_composite_curve`).
 
 **The Effects panel renders since v1.5.0** (`render/finish.rs`), for the same
 revoked policy as the Detail panel below — and for a second reason of its own:
