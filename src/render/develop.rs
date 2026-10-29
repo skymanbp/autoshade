@@ -292,8 +292,16 @@ pub(super) fn apply_develop_with_rasters(
     //    that should cancel multiplicatively could not cancel on clipped
     //    pixels (the old "order between them is cosmetic" comment was only
     //    true of un-clamped math — L01-6).
+    //    On a camera-profile start the frame has already been through the
+    //    profile's exposure ramp and Adobe's default curve, and Camera Raw's
+    //    vignetting acts BEFORE both, in raw-linear light: the gain goes on
+    //    under them (`apply_radial_gain_under_tone`).
     if let Some(lut) = vignette_gain_lut(r) {
-        apply_radial_gain(data, w, h, &lut);
+        if camera_raw {
+            apply_radial_gain_under_tone(data, w, h, &lut, space);
+        } else {
+            apply_radial_gain(data, w, h, &lut);
+        }
     }
     // 0b) dehaze — pointwise atmospheric-veil removal in LINEAR light, before
     //    any tonal work: the airlight estimate then depends only on the capture
@@ -685,6 +693,43 @@ pub(super) fn apply_radial_gain(data: &mut [[f32; 3]], w: usize, h: usize, gain_
             for c in px.iter_mut() {
                 *c = sample_lut(enc, (sample_lut(dec, *c) * gain).clamp(0.0, 1.0));
             }
+        }
+    });
+}
+
+/// [`apply_radial_gain`] on a frame the camera-profile stage has rendered: each
+/// pixel's light is taken back under Adobe's default curve and the exposure
+/// ramp ([`profile::UnderTone`]), multiplied there, and put back through them.
+///
+/// Why (2026-10-28): Camera Raw's lens vignetting is a gain in raw-linear
+/// light. Measured on flat-field frames read against their own raw-gain
+/// ladders, its gain is the Adobe profile's model to 0.22 %; the engine's,
+/// applied in the decoded linear light of the curve's OUTPUT, came out at
+/// three quarters to four fifths of its own knots' EV — reproduced to
+/// 0.0002 EV by sending the knots through the engine's own ladder. What this
+/// still does not undo is the profile's HueSatMap, which Camera Raw applies
+/// after the gain and this engine before it: on a value-dependent map (Adobe
+/// Standard for the 7R IV is) a strong corner gain leaves up to about 1 %
+/// (14–24 mm at 20 mm, 0.3 % with the map skipped on both sides), nor the
+/// look table between the ramp and the curve ([`profile::UnderTone`]).
+fn apply_radial_gain_under_tone(data: &mut [[f32; 3]], w: usize, h: usize, gain_lut: &[f32], space: ExportColorSpace) {
+    if w == 0 || h == 0 {
+        return; // par_chunks_mut(0) asserts even on an empty slice (U14)
+    }
+    let (cx, cy) = ((w as f32 - 1.0) * 0.5, (h as f32 - 1.0) * 0.5);
+    let rmax = (cx * cx + cy * cy).sqrt().max(1.0);
+    let (dec, enc) = transfer_luts();
+    let under = profile::UnderTone::new(space);
+    data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let dy = y as f32 - cy;
+        for (x, px) in row.iter_mut().enumerate() {
+            let dx = x as f32 - cx;
+            let gain = sample_lut(gain_lut, ((dx * dx + dy * dy).sqrt() / rmax).clamp(0.0, 1.0));
+            if (gain - 1.0).abs() < 1e-6 {
+                continue;
+            }
+            let light = under.undo(px.map(|v| sample_lut(dec, v))).map(|c| c * gain);
+            *px = under.redo(light).map(|v| sample_lut(enc, v.clamp(0.0, 1.0)));
         }
     });
 }
