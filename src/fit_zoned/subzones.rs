@@ -1297,6 +1297,47 @@ mod tests {
         assert!(models.iter().all(|m| m.r2 > SUBZONE_R2_MIN));
     }
 
+    /// Both single zones refused (no zone mask left in the recipe): the
+    /// zone stage's exit still tries the bands, keeps the zone raster while a
+    /// band references it, and releases it when none was earned.
+    #[test]
+    fn bands_are_still_tried_when_both_single_zones_were_refused() {
+        for split in [true, false] {
+            let (source, target, parent, mut report) = fixture(split);
+            report.recipe.masks.retain(|m| m.role != parent.role);
+            let target = fit::pixels_of(&target);
+            report.err_after = fit::look_err_with_evidence(
+                &fit::pixels_of(&render::develop_preview(&source, &report.recipe)), &target, &report.evidence,
+            );
+            let land = ZoneAttachment {
+                source_weights: vec![0.0; parent.source_weights.len()],
+                target_weights: vec![0.0; parent.target_weights.len()],
+                role: MaskRole::ZoneLand, label: "land".into(), ..parent.clone()
+            };
+            let root = std::env::var_os("CARGO_TARGET_DIR").map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target"))
+                .join("test-rasters");
+            let owned = root.join(format!("bands-exit-{}-{split}.png", std::process::id()));
+            std::fs::write(&owned, b"").unwrap();
+            let raster = crate::store::OwnedRaster::scratch(owned.clone());
+            assert!(super::super::attach::finish_with_bands_only(
+                &source, &target, &mut report, (&parent, &land), (None, None), &raster,
+            ));
+            let bands = report.recipe.masks.iter()
+                .filter(|m| m.role == MaskRole::ZoneSky && !m.components.is_empty()).count();
+            if split {
+                assert!(report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_SUBZONES_ATTACHED),
+                    "{}", report.recipe.rationale);
+                assert!(bands >= 2, "{bands} bands");
+                assert!(owned.exists(), "a raster a band references must stay");
+                std::fs::remove_file(&owned).unwrap();
+            } else {
+                assert_eq!(bands, 0);
+                assert!(!owned.exists(), "an unreferenced zone raster is released");
+            }
+        }
+    }
+
     #[test]
     fn a_vertical_warm_cool_sky_earns_bands_that_replace_the_single_correction() {
         let (source, target, parent, mut report) = fixture(true);

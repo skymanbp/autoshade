@@ -300,6 +300,18 @@ impl WbLaw {
         out.map(|v| v.max(1e-6) / g)
     }
 
+    /// The (Temperature, Tint) `r` renders at on the ABSOLUTE scale a
+    /// sidecar's `crs:Temperature` / `crs:Tint` carry. Camera Raw's law reads
+    /// the recipe's Tint as absolute already; the engine's reads it as a delta
+    /// from the as-shot green, so there the photo's as-shot tint is added
+    /// back. Comparing a recipe against a sidecar must go through this, or a
+    /// Camera Raw recipe's tint counts its as-shot twice.
+    pub(crate) fn absolute_point_of(r: &EditRecipe) -> (f32, f32) {
+        let law = WbLaw::of(r);
+        let (k, t) = law.point_of(r);
+        if law.camera_raw { (k, t) } else { (k, r.as_shot_tint.unwrap_or(0.0) + t) }
+    }
+
     /// [`WbLaw::gains`] as natural logs.
     pub(crate) fn log_gains(&self, wb: (f32, f32)) -> [f32; 3] {
         self.gains(wb).map(|v| v.max(1e-5).ln())

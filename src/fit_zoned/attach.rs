@@ -510,7 +510,7 @@ pub(super) fn attach_zones_with_divergence(
 /// were never tried, the spatial tiles took the sky instead, and the colour
 /// field that carries the horizon glow was handed back by a tile it
 /// overlapped.
-fn finish_with_bands_only(
+pub(super) fn finish_with_bands_only(
     s_img: &DynamicImage,
     tgt_px: &[[f32; 3]],
     report: &mut FitReport,
