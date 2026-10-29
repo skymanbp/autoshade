@@ -2981,7 +2981,36 @@ from the engine's own ladder). The residual on the 14–24, up to 0.96 % inside
 body's Adobe Standard map is value-dependent (dimensions 36 × 8 × 16), Camera
 Raw applies the gain before it and the engine after it, and `UnderTone` does
 not undo it. A build that skips the map on both sides leaves +0.02 to +0.32 %;
-the 24–105 frame's gain is too small for the order to show. The body's Adobe Standard profile
+the 24–105 frame's gain is too small for the order to show.
+
+The two profile strengths, measured the same way (flat fields for the
+vignetting, tile phase correlation on a real 14–24 mm frame for the
+distortion). Camera Raw honours crs:LensProfileVignettingScale and
+crs:LensProfileDistortionScale only for a profile the sidecar NAMES: a
+strength of 50 renders at 100 with no crs:LensProfileName under LensDefaults,
+Auto or no setup, and at 50 once a setup and the name are there; the digest
+and the file name are not needed. The name resolves the way `lcp::open_named`
+records: a file name beside a name wins, then the name (not checked against
+the lens: a 24–105 mm name renders that profile on a 14–24 mm frame), and no
+name resolves nothing — under Custom that is no profile correction at all
+(flat field flat, geometry the switched-off one to 0.01 px), under the other
+setups Camera Raw's own choice. The export therefore writes Custom, the name
+and the file name whenever a strength is off 100 on a rendering component
+(`EditRecipe::lightroom_named_lens_profile`; the setup is Custom by user
+ruling 2026-10-28 — LensDefaults with the name is honoured too and would keep
+the camera's CA), owns the
+three keys only while it writes them, and the render drops the camera's CA in
+that state as Camera Raw does under Custom. The import reads a strength only
+when the document names a profile. The vignetting strength `s` is not a
+scaling of the gain's departure: the gain at s = 0, 1, 2 is 1, g and
+1 + 2(g − 1), and between those Camera Raw interpolates in EV — within 0.22 %
+at 25 to 200 on the 14–24 mm and 50 to 200 on the 24–105 mm, where the old
+`1 + (g − 1)·s` was 7 % bright in the 14–24 mm corner at 50. The distortion
+strength scales the map's departure, as the engine already did (displacement
+at 25/50/150/200 is 0.25/0.51/1.50/2.01 of 100's at 0.6–0.7 of the
+half-diagonal). Through the engine at 50, 100 and 150 the 14–24 mm flat field
+is within 0.55, 0.96 and 1.05 % of Camera Raw to 0.94 (0.89 at 150), the
+HueSatMap residual above. The body's Adobe Standard profile
 carries no DefaultBlackRender tag (absent means Auto), so the SDK's render would subtract
 Shadows 5 × 0.001 = 0.005 black; the engine subtracts the sensor's 512 and no
 render black, and the 0.005 tried on p39 overshoots the shadows (ΔL −2 to

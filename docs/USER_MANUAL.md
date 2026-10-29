@@ -282,11 +282,23 @@ carries no correction data of its own. AutoShade never bundles or redistributes
 Adobe's profiles; it reads the ones already on the computer, and a camera's own
 in-RAW measurement always outranks a profile-database average. A body with
 neither renders with no profile correction, exactly as before. If a Lightroom
-sidecar says the lens correction was switched off, AutoShade switches it off
-too — including the camera's own — so the canvas and Lightroom agree, and so
-masks and the pixels beside them are in the same frame. The manual Distortion,
-Vignetting and CA sliders are not the profile and are never touched by that
-switch.
+sidecar says the lens correction was switched off, AutoShade switches the
+profile's vignetting and distortion off too, so the canvas and Lightroom agree,
+and so masks and the pixels beside them are in the same frame; the camera's own
+chromatic-aberration correction stays on, because Lightroom keeps it on with
+the profile off (v1.17.0). The manual Distortion, Vignetting and CA sliders are
+not the profile and are never touched by that switch.
+
+A strength set away from 100 changes what the sidecar says about the profile
+(v1.17.0): Lightroom only honours a strength for a profile the sidecar names,
+so the export names the installed Adobe profile and sets Lightroom's lens
+setup to Custom. Lightroom then drops the camera's chromatic-aberration correction, and so does
+AutoShade's canvas while a strength is off 100. Back at 100 nothing about the
+profile is written and a Lightroom sidecar keeps its own setup. With no Adobe
+profile for the lens on this computer there is nothing to name; the save then
+says the strength is not carried, because Lightroom would draw it at 100.
+Opening a sidecar follows the same rule: a strength in a document that names no
+profile is read as 100, which is what Lightroom draws from it.
 
 The Lens header's ● stays unlit for both profiles enabled from the camera's
 calibration and profiles switched off by the imported Lightroom sidecar.
