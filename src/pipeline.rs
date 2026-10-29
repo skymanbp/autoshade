@@ -3235,7 +3235,12 @@ fn fft1(a: &mut [(f64, f64)], inverse: bool) {
 /// embedded previews shows the vignette lift (`render::camera_base_look`).
 /// Cheap — one TIFF metadata parse, no decode.
 pub fn fresh_lens_profile(raw: &Path) -> crate::recipe::LensProfile {
-    let mut p = crate::lensmeta::read(raw);
+    fresh_lens_profile_from(raw, &crate::lensmeta::LensQuery::default())
+}
+
+/// [`fresh_lens_profile`] with what a sidecar adds to the lookup.
+fn fresh_lens_profile_from(raw: &Path, query: &crate::lensmeta::LensQuery) -> crate::recipe::LensProfile {
+    let mut p = crate::lensmeta::read_for(raw, query);
     p.vignette_on = !p.vignette.is_empty();
     p.distortion_on = !p.distortion.is_empty();
     p.ca_on = !p.ca_r.is_empty() && !p.ca_b.is_empty();
@@ -3277,16 +3282,45 @@ pub fn fresh_lens_profile_for_sidecar(
     raw: &Path,
     sidecar: Option<&str>,
 ) -> crate::recipe::LensProfile {
-    let mut p = fresh_lens_profile(raw);
-    if sidecar.and_then(crate::xmp::lens_profile_enabled) == Some(false) {
-        obey_disabled_profile_switch(&mut p);
+    let query = sidecar.map_or_else(Default::default, |x| crate::lensmeta::LensQuery {
+        profile_filename: crate::xmp::lens_profile_filename(x),
+        focus_distance_m: crate::xmp::approximate_focus_distance(x),
+    });
+    let mut p = fresh_lens_profile_from(raw, &query);
+    if let Some(x) = sidecar {
+        obey_sidecar_lens_switches(&mut p, x);
     }
     p
 }
 
+/// What a sidecar's two lens keys do to the profile's toggles — one function,
+/// so the test hands it a profile with every component on and reads the real
+/// rule rather than a sketch of it.
+///
+/// * `crs:LensProfileEnable="0"` → [`obey_disabled_profile_switch`];
+/// * `crs:LensProfileSetup="Custom"` → no camera CA: Camera Raw does not apply
+///   the camera's CA knots under a hand-picked profile (measured, see
+///   [`crate::xmp::LensProfileSetup`]); `LensDefaults`, `Auto` and no setup
+///   leave the camera's CA as it is.
+fn obey_sidecar_lens_switches(p: &mut crate::recipe::LensProfile, sidecar: &str) {
+    if crate::xmp::lens_profile_enabled(sidecar) == Some(false) {
+        obey_disabled_profile_switch(p);
+    }
+    if crate::xmp::lens_profile_setup(sidecar) == Some(crate::xmp::LensProfileSetup::Custom) {
+        p.ca_on = false;
+    }
+}
+
 /// What `crs:LensProfileEnable="0"` means, as ONE function: Lightroom drew no
-/// profile correction, so neither do we — every component off, and the solved
-/// camera map moved aside for LINEAR's H2 rule with a stamp saying why.
+/// profile correction, so neither do we — vignetting and distortion off, and
+/// the solved camera map moved aside for LINEAR's H2 rule with a stamp saying
+/// why.
+///
+/// The camera's CHROMATIC ABERRATION stays on (2026-10-28): Camera Raw applies
+/// the camera's CA knots with the profile switched off, measured on a raw
+/// whose CA knots were zeroed and quadrupled — red over green moved by the
+/// knots' own polynomial with the switch at "0" exactly as at "1" under
+/// `LensDefaults`. CA moves no green pixel, so the mask frame is unaffected.
 ///
 /// A function rather than four lines inline because the state it acts on cannot
 /// be reached from a test through [`fresh_lens_profile`]: that reads a RAW, and
@@ -3297,7 +3331,6 @@ fn obey_disabled_profile_switch(p: &mut crate::recipe::LensProfile) {
     retain_disabled_linear_handle_warp(p);
     p.vignette_on = false;
     p.distortion_on = false;
-    p.ca_on = false;
 }
 
 /// Preserve the solved camera/LCP map across the disabled-sidecar boundary for
@@ -6176,10 +6209,10 @@ mod tests {
             p.vignette_on = true;
             p.distortion_on = true;
             p.ca_on = true;
-            if sidecar.and_then(crate::xmp::lens_profile_enabled) == Some(false) {
+            if let Some(x) = sidecar {
                 // The REAL function, not a copy of it — copying it here is what
                 // let a mutation of the engine pass this test.
-                obey_disabled_profile_switch(&mut p);
+                obey_sidecar_lens_switches(&mut p, x);
             }
             p
         };
@@ -6191,13 +6224,22 @@ mod tests {
             (true, true, true),
             "premise: the probe profile has every component on before the switch is read"
         );
-        // And the claim: the same profile, through the switch, has them off.
+        // And the claim: the same profile, through the switch, has vignetting
+        // and distortion off — and the camera's CA ON, as Camera Raw keeps it.
         let disabled = stamped(Some(off));
         assert_eq!(
             (disabled.vignette_on, disabled.distortion_on, disabled.ca_on),
-            (false, false, false),
-            "a disabled sidecar switches every profile component off"
+            (false, false, true),
+            "a disabled sidecar switches the profile's light and geometry off, not the camera's CA"
         );
+        // The lens setup: a hand-picked profile (Custom) takes the camera's CA
+        // away, Lightroom's default setup leaves it.
+        let custom = on.replace("crs:Version", r#"crs:LensProfileSetup="Custom" crs:Version"#);
+        let defaults = on.replace("crs:Version", r#"crs:LensProfileSetup="LensDefaults" crs:Version"#);
+        assert!(!stamped(Some(&custom)).ca_on, "Custom: no camera CA");
+        assert!(stamped(Some(&defaults)).ca_on, "LensDefaults: the camera's CA");
+        let custom_off = custom.replace(r#"crs:LensProfileEnable="1""#, r#"crs:LensProfileEnable="0""#);
+        assert!(!stamped(Some(&custom_off)).ca_on, "Custom with the profile off: still none");
         // The claim, through the real function rather than the sketch above:
         // a document that says nothing, and one that says "1", leave the
         // photograph's own toggles exactly as they were.
@@ -6221,7 +6263,7 @@ mod tests {
         // geometry to resample, so `MaskFrame::downstream` and the render agree
         // that the stored frame IS the delivered frame.
         let sketch = stamped(Some(off));
-        assert!(!sketch.geometry_active(), "no geometry, so the pixels stay in the stored frame");
+        assert!(!sketch.distortion_on, "no distortion, so the green pixels stay in the stored frame");
         assert!(sketch.mask_warp.is_empty(), "…which is exactly what the empty warp asserts");
         assert_eq!(
             sketch.mask_warp_src,

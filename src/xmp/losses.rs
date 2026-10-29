@@ -490,6 +490,71 @@ pub fn lens_profile_enabled(xmp: &str) -> Option<bool> {
     }
 }
 
+/// `crs:LensProfileSetup`: how the lens profile was chosen.
+///
+/// It decides Camera Raw's chromatic-aberration source, measured
+/// (2026-10-28, a raw whose camera CA knots were zeroed and quadrupled):
+/// under `LensDefaults` — what Lightroom writes — and with the profile
+/// switched off, Camera Raw applies the camera's CA; under `Custom` it does
+/// not (the profile picked by hand supplies its own CA model, which the FE
+/// 24–105 and Sigma 14–24 mm profiles do not carry). `Auto` was not measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LensProfileSetup {
+    LensDefaults,
+    Auto,
+    Custom,
+}
+
+/// The sidecar's [`LensProfileSetup`], `None` when it states none or a value
+/// Camera Raw does not write.
+pub fn lens_profile_setup(xmp: &str) -> Option<LensProfileSetup> {
+    let scope = crs_own_scope(xmp);
+    let raw = Scope::new(scope.as_ref()).crs_str("LensProfileSetup")?;
+    match raw.trim() {
+        "LensDefaults" => Some(LensProfileSetup::LensDefaults),
+        "Auto" => Some(LensProfileSetup::Auto),
+        "Custom" => Some(LensProfileSetup::Custom),
+        _ => None,
+    }
+}
+
+/// `crs:LensProfileFilename`: the Adobe profile file Lightroom used, by name.
+pub fn lens_profile_filename(xmp: &str) -> Option<String> {
+    let scope = crs_own_scope(xmp);
+    let raw = Scope::new(scope.as_ref()).crs_str("LensProfileFilename")?;
+    let name = raw.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// The sidecar's ApproximateFocusDistance (the EXIF aux namespace), metres: a
+/// rational `n/d` or a decimal. `4294967295/1`, EXIF's infinity, reads as
+/// infinite. Camera Raw interpolates a lens profile's vignetting by it; a Sony
+/// ARW states none of its own.
+pub fn approximate_focus_distance(xmp: &str) -> Option<f32> {
+    if xmp.len() > MAX_XMP_BYTES {
+        return None;
+    }
+    let mut from = 0;
+    while let Some((start, end, _)) = next_xml_tag(xmp, from) {
+        let tag = &xmp[start..=end];
+        from = end + 1;
+        if tag.starts_with("</") {
+            continue;
+        }
+        let Some((_, raw)) = xml_attribute_raw(tag, "aux:ApproximateFocusDistance") else { continue };
+        let raw = raw.trim();
+        let v = match raw.split_once('/') {
+            Some((n, d)) => {
+                let (n, d) = (n.trim().parse::<f64>().ok()?, d.trim().parse::<f64>().ok()?);
+                if n >= 4294967295.0 { f64::INFINITY } else if d > 0.0 { n / d } else { return None }
+            }
+            None => raw.parse::<f64>().ok()?,
+        };
+        return (v > 0.0 && !v.is_nan()).then_some(v as f32);
+    }
+    None
+}
+
 /// One English sentence for what an import carried and what it left behind, or
 /// `None` when the sidecar's masks arrived whole. Groups by reason in
 /// [`MaskImportReason::ALL`] order and names the corrections, so the line is

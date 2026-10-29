@@ -81,10 +81,34 @@ pub(crate) const SONY_DISTORTION_CANONICAL_KNOTS: usize = 2048;
 /// measured maximum on the five fixture lenses.
 pub(crate) const SONY_RENDER_DISTORTION_KNOTS: usize = 32;
 
+/// What a sidecar adds to the lens lookup: the Adobe profile Lightroom named
+/// (`crs:LensProfileFilename`) and the focus distance it recorded
+/// (ApproximateFocusDistance). A RAW alone states neither.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LensQuery {
+    pub profile_filename: Option<String>,
+    pub focus_distance_m: Option<f32>,
+}
+
 /// Read the in-camera lens correction profile from a RAW file. Every failure
 /// path returns an EMPTY component (profile with nothing to apply) — absent
 /// metadata is the common case for non-Sony files, not an error.
 pub fn read(path: &Path) -> LensProfile {
+    read_for(path, &LensQuery::default())
+}
+
+/// [`read`] with what a sidecar adds ([`LensQuery`]).
+///
+/// The VIGNETTING is the Adobe profile's whenever this machine has one for the
+/// lens (`lcp::LensProfileFile::vignette_gains`), and the camera's own knots
+/// only when it has none. Camera Raw never renders the camera's vignette knots
+/// (tag 0x7032 and its SR2 copy rewritten to constants render bit-identically
+/// under every lens setup, with the profile on or off, and DNG Converter writes
+/// no vignette opcode); with the profile on, its gain is the profile's
+/// VignetteModel. The camera's knots stay as the fallback because a machine
+/// with no Adobe profile has no Camera Raw reading to follow, and they are the
+/// maker's own correction for the shot.
+pub fn read_for(path: &Path, query: &LensQuery) -> LensProfile {
     let mut out = LensProfile::default();
     if !crate::decode::is_raw(path) {
         return out;
@@ -181,6 +205,13 @@ pub fn read(path: &Path) -> LensProfile {
     // the second-best shape, not an equal one.
     let dims = frame_dims(root);
     out.mask_warp_center = mask_warp_center(root, dims);
+    // The Adobe profile for this lens, looked up once: source B of the mask
+    // warp for a body with no knots, and the vignetting for every body.
+    let lens = {
+        let m = text(ExifTag::LensModel);
+        if m.is_empty() { text(ExifTag::LensMake) } else { m }
+    };
+    let adobe = crate::lcp::open(query.profile_filename.as_deref(), &text(ExifTag::Make), &lens);
     match dims {
         Some(dims) if !lr_mask_distortion.is_empty() => {
             let w = crate::render::mask_warp_from_camera_knots(
@@ -199,18 +230,8 @@ pub fn read(path: &Path) -> LensProfile {
         }
         Some(dims) => {
             // No in-camera knots: this is exactly the body source B exists for.
-            let lens = {
-                let m = text(ExifTag::LensModel);
-                if m.is_empty() { text(ExifTag::LensMake) } else { m }
-            };
-            match crate::lcp::solve(
-                None,
-                &text(ExifTag::Make),
-                &lens,
-                number(ExifTag::FocalLength),
-                dims,
-                MASK_WARP_KNOTS,
-            ) {
+            let focal = number(ExifTag::FocalLength);
+            match adobe.as_ref().map_err(|r| *r).and_then(|f| crate::lcp::solve_in(f, focal, dims, MASK_WARP_KNOTS)) {
                 Ok(maps) => {
                     out.mask_warp = maps.mask_warp;
                     out.mask_warp_src = MaskWarpSource::Lcp;
@@ -223,11 +244,20 @@ pub fn read(path: &Path) -> LensProfile {
                     // rendered one; that was the gap, and it closes here rather
                     // than at a render surface, because every surface already
                     // reads these two fields.
-                    if out.distortion.is_empty() && !maps.distortion.is_empty() {
-                        out.distortion = maps.distortion;
-                    }
-                    if out.vignette.is_empty() && !maps.vignette.is_empty() {
-                        out.vignette = maps.vignette;
+                    //
+                    // The RENDER spline is solved at the clamp's 32 knots, not
+                    // the mask warp's 64: `LensProfile::clamp` keeps 32, and a
+                    // 64-knot spline lost its outer half there — the map then
+                    // held its mid-frame value out to the corner.
+                    let render = adobe
+                        .as_ref()
+                        .ok()
+                        .and_then(|f| f.model_at(focal).ok())
+                        .and_then(|m| m.distortion_knots(dims, SONY_RENDER_DISTORTION_KNOTS));
+                    if out.distortion.is_empty()
+                        && let Some(d) = render
+                    {
+                        out.distortion = d;
                     }
                 }
                 Err(r) => out.mask_warp_src = r.into(),
@@ -236,6 +266,22 @@ pub fn read(path: &Path) -> LensProfile {
         // A file that declares no frame declares no aspect, and the map is a
         // function of the aspect. Refusing beats guessing 3:2.
         None => out.mask_warp_src = MaskWarpSource::Absent,
+    }
+
+    // --- the vignetting (see `read_for`) ----------------------------------
+    // Gains over the default crop, in the frame before the lens geometry —
+    // the frame `render::develop` applies them in — normalised by the SENSOR
+    // width, which is what Camera Raw's reading of the profile measures.
+    let shot = crate::lcp::Shot {
+        focal_mm: number(ExifTag::FocalLength),
+        aperture_av: number(ExifTag::FNumber).and_then(crate::lcp::Shot::av_of_f_number),
+        focus_distance_m: query.focus_distance_m,
+    };
+    if let (Ok(file), Some(crop)) = (&adobe, dims) {
+        let sensor_width = sensor_dims(root).map_or(crop.0, |s| s.0);
+        if let Some(g) = file.vignette_gains(shot, crop, sensor_width, SONY_RENDER_DISTORTION_KNOTS) {
+            out.vignette = g;
+        }
     }
 
     out.clamp(); // same defensive ranges as a hand-edited recipe

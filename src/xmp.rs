@@ -58,6 +58,7 @@ pub use losses::{
     describe_global_losses, describe_import_losses, describe_mask_losses, global_export_losses,
     global_render_gaps,
     import_losses, import_losses_for_photo, lens_profile_enabled, mask_export_losses,
+    LensProfileSetup, approximate_focus_distance, lens_profile_filename, lens_profile_setup,
     unmodelled_global_crs,
 };
 pub(crate) use losses::{CALIBRATION_CRS, OWNED_ELEMENT_ONLY, SDR_CRS};

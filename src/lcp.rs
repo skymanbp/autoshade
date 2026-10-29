@@ -123,6 +123,44 @@ pub struct VignetteModel {
     pub focal_x: Option<f32>,
 }
 
+/// One `VignetteModel` with the shot it was calibrated at — EVERY entry that
+/// carries one, whatever its focus distance and aperture.
+///
+/// Separate from [`LensProfileFile::nodes`] because the two are chosen by
+/// different rules. The distortion nodes are one per focal (the calibrated
+/// Sony file states identical distortion at every aperture), but vignetting is
+/// a function of the aperture and the focus distance as well, and the
+/// calibrated FE 24–105 file states it ONLY in its close-focus block: keeping
+/// one node per focal dropped every vignette model that file has.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VignetteNode {
+    pub focal_mm: Option<f32>,
+    /// `stCamera:FocusDistance`, metres.
+    pub focus_distance: Option<f32>,
+    /// `stCamera:ApertureValue`, APEX: `Av = 2·log2(N)`.
+    pub aperture_av: Option<f32>,
+    pub sensor_format_factor: f32,
+    pub model: VignetteModel,
+}
+
+/// What a profile's vignetting is interpolated by: the shot's focal length,
+/// aperture and focus distance.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Shot {
+    pub focal_mm: Option<f32>,
+    /// APEX aperture value, `2·log2(N)`.
+    pub aperture_av: Option<f32>,
+    /// Metres. Sony ARWs state none; a sidecar's ApproximateFocusDistance can.
+    pub focus_distance_m: Option<f32>,
+}
+
+impl Shot {
+    /// The APEX value of an f-number, `None` for anything that is not one.
+    pub fn av_of_f_number(n: f32) -> Option<f32> {
+        (n.is_finite() && n > 0.0).then(|| 2.0 * n.log2())
+    }
+}
+
 /// One parsed `.lcp`: the nodes it holds and who it is for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LensProfileFile {
@@ -138,6 +176,9 @@ pub struct LensProfileFile {
     /// the close-focus model for a focal that also has an infinity one; the
     /// tie-break makes the choice a stated rule instead of an accident.
     pub nodes: Vec<PerspectiveModel>,
+    /// Every vignette model the file states ([`VignetteNode`]), in document
+    /// order — read by [`LensProfileFile::vignette_gains`].
+    pub vignette_nodes: Vec<VignetteNode>,
     /// How many entries were skipped for carrying a `FisheyeModel`. Non-zero
     /// with an empty `nodes` is what [`Refusal::Fisheye`] is made of.
     pub fisheye_entries: usize,
@@ -377,47 +418,6 @@ impl PerspectiveModel {
         Some(out)
     }
 
-    /// The RENDER vignetting knots for a `dims` frame: the linear-light GAIN
-    /// this engine multiplies a pixel by at each knot radius, `1 / V(rho)`.
-    ///
-    /// `None` when the node states no vignette model, states no reference
-    /// length for it, or its polynomial leaves the plausible band anywhere on
-    /// the frame — the pool's tail holds nodes whose coefficients run to 1e12,
-    /// and a gain solved from one of those is not a lens correction.
-    pub fn vignette_knots(&self, dims: (f32, f32), n: usize) -> Option<Vec<f32>> {
-        if n < 2 {
-            return None;
-        }
-        let v = self.vignette?;
-        let (w, h) = dims;
-        if !(w > 0.0 && h > 0.0) {
-            return None;
-        }
-        // The vignette block's own reference length when it states one, else
-        // this node's — the same quantity, measured by the same file.
-        let d = match v.focal_x {
-            Some(fx) if fx > 0.0 && (fx * w).is_finite() => fx * w,
-            _ => self.reference_px(w)?,
-        } as f64;
-        if !d.is_finite() || d <= 0.0 {
-            return None;
-        }
-        let a = [v.a[0] as f64, v.a[1] as f64, v.a[2] as f64];
-        let half_diag = 0.5 * ((w as f64).hypot(h as f64));
-        let mut out = Vec::with_capacity(n);
-        for i in 0..n {
-            let rho = (i as f64 + 0.5) / (n - 1) as f64 * half_diag / d;
-            let (r2, r4) = (rho * rho, rho * rho * rho * rho);
-            let falloff = 1.0 + a[0] * r2 + a[1] * r4 + a[2] * r4 * r2;
-            // The same band the survey used to tell a lens from a junk node.
-            if !falloff.is_finite() || !(0.05..=20.0).contains(&falloff) {
-                return None;
-            }
-            out.push((1.0 / falloff) as f32);
-        }
-        Some(out)
-    }
-
     /// The MASK WARP knots for a `dims` frame: `m(r) = r_export / r_stored` at
     /// the `n` radii [`crate::recipe::LensProfile`] places its knots on —
     /// `rho_i = (i + 0.5)/(n − 1)` of the HALF-DIAGONAL, RawTherapee's
@@ -529,6 +529,143 @@ impl LensProfileFile {
             },
         })
     }
+}
+
+impl LensProfileFile {
+    /// The render VIGNETTE GAINS for a shot, read the way Adobe Camera Raw
+    /// reads the profile (2026-10-28) — `n` gains at radii `(i+0.5)/(n−1)` of
+    /// the `crop` frame's half-diagonal, in the frame BEFORE the lens geometry
+    /// (where `render::develop` applies them), each `1 / V(x)`.
+    ///
+    /// The law, measured on flat-field frames (the raw data replaced by a
+    /// uniform field and read against its own raw-gain ladder, so no tone
+    /// curve enters) through Camera Raw, every reading below chosen among its
+    /// alternatives by those renders:
+    ///
+    /// * `x` is the RAW-frame radius over the node's focal length in pixels,
+    ///   `FocalLength · SensorFormatFactor / 36` of the SENSOR's width
+    ///   (`sensor_width`; the default crop's width read 1.5 % worse), or the
+    ///   block's own `FocalLengthX` of that width when it states one;
+    /// * nodes are blended in EV (`log2` of the gain), never in coefficients:
+    ///   linearly in focal length between the bracketing focal nodes (at 60
+    ///   mm between 51 and 70 the linear weight fits within 0.08 %, the
+    ///   reciprocal 0.16 %), linearly in the APEX aperture between the
+    ///   bracketing apertures (f/4.5 between f/4 and f/5.6: 0.22 %, linear in
+    ///   the f-number 0.63 %), and linearly in the reciprocal focus distance
+    ///   between the bracketing distances (3 m and 30 m between 1.4 m and
+    ///   infinity: 0.18 %, linear in metres 0.29 % and 0.57 %);
+    /// * with no focus distance — every Sony ARW measured, which states none
+    ///   — the closest-focus distance the profile has; a sidecar's
+    ///   ApproximateFocusDistance moved Camera Raw onto that distance's
+    ///   nodes;
+    /// * outside the range of any dimension the nearest end (not measured,
+    ///   and the only reading that invents nothing).
+    ///
+    /// Measured agreement on an FE 24–105 frame (80 mm f/4, and the probes at
+    /// 60 mm and at f/4.5) and a 14–24 mm frame (20.1 mm f/2.8, with no
+    /// distance and at 3 m): within 0.22 % of Camera Raw's gain out to 0.94 of
+    /// the half-diagonal, 0.5–0.6 % in the extreme corner.
+    ///
+    /// `None` when the file states no vignetting, when the shot leaves a
+    /// dimension the file varies unanswered (two focal or aperture nodes and
+    /// no focal or aperture to choose between them), or when a model leaves
+    /// the plausible band anywhere on the frame — the pool's tail holds nodes
+    /// whose coefficients run to 1e12.
+    pub fn vignette_gains(&self, shot: Shot, crop: (f32, f32), sensor_width: f32, n: usize) -> Option<Vec<f32>> {
+        let (w, h) = crop;
+        if n < 2 || !(w > 0.0 && h > 0.0 && sensor_width > 0.0 && sensor_width.is_finite()) {
+            return None;
+        }
+        let nodes = &self.vignette_nodes;
+        if nodes.is_empty() {
+            return None;
+        }
+        let half_diag = 0.5 * f64::from(w).hypot(f64::from(h));
+        let radii: Vec<f64> = (0..n).map(|i| (i as f64 + 0.5) / (n - 1) as f64 * half_diag).collect();
+        // One node's EV at every radius.
+        let ev = |v: &VignetteNode| -> Option<Vec<f64>> {
+            let d = match v.model.focal_x {
+                Some(fx) if fx > 0.0 => f64::from(fx) * f64::from(sensor_width),
+                _ => f64::from(v.focal_mm?) * f64::from(v.sensor_format_factor) / 36.0 * f64::from(sensor_width),
+            };
+            if !(d.is_finite() && d > 0.0) {
+                return None;
+            }
+            let a = v.model.a.map(f64::from);
+            radii
+                .iter()
+                .map(|r| {
+                    let x2 = (r / d) * (r / d);
+                    let falloff = 1.0 + x2 * (a[0] + x2 * (a[1] + x2 * a[2]));
+                    (falloff.is_finite() && (0.05..=20.0).contains(&falloff)).then(|| -falloff.log2())
+                })
+                .collect()
+        };
+        // Focus distance: the reciprocal blend, or the closest focus.
+        let mut fds: Vec<f32> = nodes.iter().map(|v| v.focus_distance.unwrap_or(f32::INFINITY)).collect();
+        fds.sort_by(f32::total_cmp);
+        fds.dedup();
+        let fd_set = match shot.focus_distance_m.filter(|d| d.is_finite() && *d > 0.0) {
+            Some(d) => bracket(&fds, d, |x| if x.is_finite() { 1.0 / f64::from(x) } else { 0.0 }),
+            None => vec![(fds[0], 1.0)],
+        };
+        let mut total = vec![0f64; n];
+        for (fd, wd) in fd_set {
+            let at_fd: Vec<&VignetteNode> =
+                nodes.iter().filter(|v| v.focus_distance.unwrap_or(f32::INFINITY) == fd).collect();
+            let mut focals: Vec<f32> = at_fd.iter().map(|v| v.focal_mm.unwrap_or(0.0)).collect();
+            focals.sort_by(f32::total_cmp);
+            focals.dedup();
+            let f_set = match (focals.len(), shot.focal_mm.filter(|f| f.is_finite() && *f > 0.0)) {
+                (1, _) => vec![(focals[0], 1.0)],
+                (_, Some(f)) => bracket(&focals, f, f64::from),
+                (_, None) => return None,
+            };
+            for (f, wf) in f_set {
+                let at_f: Vec<&&VignetteNode> = at_fd.iter().filter(|v| v.focal_mm.unwrap_or(0.0) == f).collect();
+                let mut avs: Vec<f32> = at_f.iter().map(|v| v.aperture_av.unwrap_or(0.0)).collect();
+                avs.sort_by(f32::total_cmp);
+                avs.dedup();
+                let a_set = match (avs.len(), shot.aperture_av.filter(|a| a.is_finite())) {
+                    (1, _) => vec![(avs[0], 1.0)],
+                    (_, Some(a)) => bracket(&avs, a, f64::from),
+                    (_, None) => return None,
+                };
+                for (av, wa) in a_set {
+                    let node = at_f.iter().find(|v| v.aperture_av.unwrap_or(0.0) == av)?;
+                    let e = ev(node)?;
+                    let wt = wd * wf * wa;
+                    for (t, x) in total.iter_mut().zip(&e) {
+                        *t += wt * x;
+                    }
+                }
+            }
+        }
+        Some(total.iter().map(|e| e.exp2() as f32).collect())
+    }
+}
+
+/// The bracketing pair of `x` in the sorted, distinct `vals` with its weights,
+/// linear in `key(value)`; a value outside the range is the nearest end, and a
+/// value on a node is that node alone.
+fn bracket(vals: &[f32], x: f32, key: impl Fn(f32) -> f64) -> Vec<(f32, f64)> {
+    let (first, last) = (vals[0], vals[vals.len() - 1]);
+    if x <= first {
+        return vec![(first, 1.0)];
+    }
+    if x >= last {
+        return vec![(last, 1.0)];
+    }
+    let hi = vals.partition_point(|v| *v < x);
+    let (a, b) = (vals[hi - 1], vals[hi]);
+    if b == x {
+        return vec![(b, 1.0)];
+    }
+    let t = (key(x) - key(a)) / (key(b) - key(a));
+    if !t.is_finite() {
+        return vec![(a, 1.0)];
+    }
+    vec![(a, 1.0 - t), (b, t)]
 }
 
 // --- parsing ---------------------------------------------------------------
@@ -643,6 +780,7 @@ pub fn parse(xml: &str) -> Result<LensProfileFile, Refusal> {
     let mut make = String::new();
     let mut lens = String::new();
     let mut nodes: Vec<PerspectiveModel> = Vec::new();
+    let mut vignette_nodes: Vec<VignetteNode> = Vec::new();
     let mut fisheye_entries = 0usize;
     let mut from = 0usize;
     while let Some(i) = xml[from..].find("<rdf:li") {
@@ -685,6 +823,16 @@ pub fn parse(xml: &str) -> Result<LensProfileFile, Refusal> {
                 focal_x: prop_f32(v, "FocalLengthX").filter(|x| *x > 0.0),
             })
         });
+        let sensor_format_factor = prop_f32(head, "SensorFormatFactor").filter(|v| *v > 0.0).unwrap_or(1.0);
+        if let Some(model) = vignette {
+            vignette_nodes.push(VignetteNode {
+                focal_mm: prop_f32(head, "FocalLength").filter(|v| *v > 0.0),
+                focus_distance: prop_f32(head, "FocusDistance").filter(|v| *v > 0.0),
+                aperture_av: prop_f32(head, "ApertureValue"),
+                sensor_format_factor,
+                model,
+            });
+        }
         // No `k1` at all = no distortion model in this entry (a vignette-only
         // node). Not a refusal by itself; the file may hold others.
         let Some(k1) = prop_f32(scope, "RadialDistortParam1") else { continue };
@@ -694,13 +842,13 @@ pub fn parse(xml: &str) -> Result<LensProfileFile, Refusal> {
             scale: prop_f32(scope, "ScaleFactor").filter(|v| *v > 0.0).unwrap_or(1.0),
             k: [k1, prop_f32(scope, "RadialDistortParam2").unwrap_or(0.0), prop_f32(scope, "RadialDistortParam3").unwrap_or(0.0)],
             focal_x: prop_f32(scope, "FocalLengthX").filter(|v| *v > 0.0),
-            sensor_format_factor: prop_f32(head, "SensorFormatFactor")
-                .filter(|v| *v > 0.0)
-                .unwrap_or(1.0),
+            sensor_format_factor,
             vignette,
         });
     }
-    if nodes.is_empty() {
+    // A file with vignette models and no distortion one still renders its
+    // vignetting; `model_at` refuses its distortion by name.
+    if nodes.is_empty() && vignette_nodes.is_empty() {
         return Err(if fisheye_entries > 0 { Refusal::Fisheye } else { Refusal::NoPerspectiveModel });
     }
     // One node per focal, largest focus distance wins (see `nodes`). Sorted by
@@ -712,7 +860,7 @@ pub fn parse(xml: &str) -> Result<LensProfileFile, Refusal> {
             .then(b.focus_distance.unwrap_or(0.0).total_cmp(&a.focus_distance.unwrap_or(0.0)))
     });
     nodes.dedup_by(|a, b| a.focal_mm == b.focal_mm);
-    Ok(LensProfileFile { make, lens, nodes, fisheye_entries })
+    Ok(LensProfileFile { make, lens, nodes, vignette_nodes, fisheye_entries })
 }
 
 // --- discovery -------------------------------------------------------------
@@ -794,17 +942,99 @@ pub fn locate(filename: Option<&str>, make: &str, lens: &str) -> Result<PathBuf,
     if fl.is_empty() {
         return Err(Refusal::NotFound);
     }
-    let mut best: Option<(usize, &PathBuf)> = None;
-    for p in files {
-        let stem = fold(&p.file_stem().unwrap_or_default().to_string_lossy());
-        if !stem.contains(&fl) || (!fm.is_empty() && !stem.contains(&fm)) {
-            continue;
-        }
-        if best.is_none_or(|(len, _)| stem.len() < len) {
-            best = Some((stem.len(), p));
-        }
+    // The profile's own lens identity first: `stCamera:Lens` is the EXIF lens
+    // model the profile was made for, verbatim (the Sigma 14–24 mm's is
+    // "14-24mm F2.8 DG DN | Art 019", which no FILE NAME contains — its stems
+    // spell the lens "SIGMA 14-24mm F2.8 DG DN A019").
+    let by_identity = choose(heads().iter().filter(|h| h.lens == fl && (fm.is_empty() || h.make.contains(&fm))));
+    if let Some(h) = by_identity {
+        return Ok(h.path.clone());
     }
-    best.map(|(_, p)| p.clone()).ok_or(Refusal::NotFound)
+    choose(heads().iter().filter(|h| h.stem.contains(&fl) && (fm.is_empty() || h.stem.contains(&fm))))
+        .map(|h| h.path.clone())
+        .ok_or(Refusal::NotFound)
+}
+
+/// What [`locate`] knows of one installed profile without parsing it: read
+/// from the file's first 16 KiB, where the first entry states it.
+struct Head {
+    path: PathBuf,
+    /// Folded file stem.
+    stem: String,
+    /// Folded `stCamera:Make` and `stCamera:Lens`.
+    make: String,
+    lens: String,
+    /// `stCamera:CameraRawProfile="True"`: made from raw captures.
+    raw: bool,
+    /// The stem's ` vN` revision; 1 when it states none.
+    version: u32,
+}
+
+/// [`Head`] for every file under [`roots`], read once per process (the same
+/// stance as [`index`]). 3,576 files × 16 KiB is about 57 MiB of reading, paid
+/// only by the first lookup that needs it.
+fn heads() -> &'static [Head] {
+    static HEADS: OnceLock<Vec<Head>> = OnceLock::new();
+    HEADS.get_or_init(|| {
+        use std::io::Read;
+        index()
+            .iter()
+            .map(|p| {
+                let mut buf = Vec::new();
+                if let Ok(f) = std::fs::File::open(p) {
+                    let _ = f.take(16 * 1024).read_to_end(&mut buf);
+                }
+                let text = String::from_utf8_lossy(&buf);
+                let stem_raw = p.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                Head {
+                    path: p.clone(),
+                    stem: fold(&stem_raw),
+                    make: fold(&prop(&text, "Make").unwrap_or_default()),
+                    lens: fold(&prop(&text, "Lens").unwrap_or_default()),
+                    raw: prop(&text, "CameraRawProfile").is_some_and(|v| v.eq_ignore_ascii_case("true")),
+                    version: profile_version(&stem_raw),
+                }
+            })
+            .collect()
+    })
+}
+
+/// The revision a profile's FILE NAME states — `"SONY (SIGMA 14-24mm F2.8 DG
+/// DN A019) v3 - RAW"` is 3 — or 1 when it states none.
+fn profile_version(stem: &str) -> u32 {
+    stem.split(|c: char| c.is_whitespace() || c == '-' || c == ')')
+        .filter_map(|t| t.strip_prefix('v').or_else(|| t.strip_prefix('V')))
+        .filter_map(|d| d.parse::<u32>().ok())
+        .max()
+        .unwrap_or(1)
+}
+
+/// The profile Camera Raw takes among several for one lens: a RAW profile
+/// over a non-RAW one, then the NEWEST revision, then the shortest (least
+/// qualified) name. Measured on the Sigma 14–24 mm, installed as the plain
+/// file, v2 and v3: with no profile named, Camera Raw's vignetting is v2's
+/// and v3's (they agree) and 22 % off the plain file's at the corner.
+fn choose<'a>(cands: impl Iterator<Item = &'a Head>) -> Option<&'a Head> {
+    cands.max_by(|a, b| {
+        a.raw
+            .cmp(&b.raw)
+            .then(a.version.cmp(&b.version))
+            .then(b.stem.len().cmp(&a.stem.len()))
+    })
+}
+
+/// [`locate`], read (bounded) and [`parse`]d: one profile, whole.
+pub fn open(filename: Option<&str>, make: &str, lens: &str) -> Result<LensProfileFile, Refusal> {
+    let path = locate(filename, make, lens)?;
+    // BOUNDED read (the R28 B2 rule): the pool directory is not this app's to
+    // trust — `AUTOSHADE_LCP_DIR` and `%APPDATA%` are user-writable, so a file
+    // there can be anything. The largest of the 3,576 profiles in the local
+    // Adobe pool measures 4.3 MiB; 16 MiB is the same ceiling every
+    // sidecar-class read in this codebase carries, and an over-cap file is an
+    // `Unreadable` refusal — named, like every other degradation on this path.
+    const MAX_LCP_BYTES: u64 = 16 * 1024 * 1024;
+    let xml = crate::store::read_text_capped(&path, MAX_LCP_BYTES).map_err(|_| Refusal::Unreadable)?;
+    parse(&xml)
 }
 
 /// Everything one `.lcp` node has to say about this frame.
@@ -822,7 +1052,6 @@ pub fn locate(filename: Option<&str>, make: &str, lens: &str) -> Result<PathBuf,
 pub struct Maps {
     pub mask_warp: Vec<f32>,
     pub distortion: Vec<f32>,
-    pub vignette: Vec<f32>,
 }
 
 /// The whole source-B path: find the profile, pick the node, solve the knots.
@@ -839,17 +1068,13 @@ pub fn solve(
     dims: (f32, f32),
     n: usize,
 ) -> Result<Maps, Refusal> {
-    let path = locate(filename, make, lens)?;
-    // BOUNDED read (the R28 B2 rule): the pool directory is not this app's to
-    // trust — `AUTOSHADE_LCP_DIR` and `%APPDATA%` are user-writable, so a file
-    // there can be anything. The largest of the 3,576 profiles in the local
-    // Adobe pool measures 4.3 MiB; 16 MiB is the same ceiling every
-    // sidecar-class read in this codebase carries, and an over-cap file is an
-    // `Unreadable` refusal — named, like every other degradation on this path.
-    const MAX_LCP_BYTES: u64 = 16 * 1024 * 1024;
-    let xml = crate::store::read_text_capped(&path, MAX_LCP_BYTES)
-        .map_err(|_| Refusal::Unreadable)?;
-    let profile = parse(&xml)?;
+    solve_in(&open(filename, make, lens)?, focal_mm, dims, n)
+}
+
+/// [`solve`] on a profile already [`open`]ed — the form a caller that also
+/// reads the file's vignetting ([`LensProfileFile::vignette_gains`]) uses, so
+/// one lookup reads the file once.
+pub fn solve_in(profile: &LensProfileFile, focal_mm: Option<f32>, dims: (f32, f32), n: usize) -> Result<Maps, Refusal> {
     let model = profile.model_at(focal_mm)?;
     Ok(Maps {
         // The mask warp is the one that can REFUSE: it is the quantity every
@@ -857,7 +1082,6 @@ pub fn solve(
         // a named degradation. The two render maps are optional by nature.
         mask_warp: model.mask_warp_knots(dims, n).ok_or(Refusal::Unsolvable)?,
         distortion: model.distortion_knots(dims, n).unwrap_or_default(),
-        vignette: model.vignette_knots(dims, n).unwrap_or_default(),
     })
 }
 
@@ -1060,7 +1284,12 @@ mod tests {
         let v = m.vignette.expect("the block is parsed, self-closing form and all");
         assert_eq!(v.a, [-0.387264, 0.150392, -0.042729]);
         assert_eq!(v.focal_x, Some(0.399824), "the block's OWN reference length");
-        let g = m.vignette_knots(BOWER_DIMS, crate::recipe::MASK_WARP_KNOTS).expect("solves");
+        // A single-node file: no dimension to choose along, so an empty shot
+        // answers. The sensor here IS the profile's own frame.
+        let p = parse(VIGNETTE_FIXTURE).expect("parses");
+        let g = p
+            .vignette_gains(Shot::default(), BOWER_DIMS, BOWER_DIMS.0, crate::recipe::MASK_WARP_KNOTS)
+            .expect("solves");
         // THE SIGN, which is the whole question this operator turns on: a lens
         // is darker in the corner, so the correction LIFTS it. Reading the
         // polynomial as the gain instead would darken this corner to 0.388 —
@@ -1121,7 +1350,9 @@ mod tests {
         let p = parse(FIXTURE).expect("parses");
         let n = node(&p, 24.0);
         assert!(n.vignette.is_none(), "the calibrated file is distortion-only");
-        assert!(n.vignette_knots(DIMS, crate::recipe::MASK_WARP_KNOTS).is_none());
+        assert!(p.vignette_nodes.is_empty());
+        let shot = Shot { focal_mm: Some(24.0), aperture_av: Some(4.0), focus_distance_m: None };
+        assert!(p.vignette_gains(shot, DIMS, 9600.0, 32).is_none());
         // …and a fisheye entry's vignette block is never adopted, because the
         // entry is skipped WHOLE before the vignette is read. The fisheye
         // fixture is the case: it carries a `VignetteModelParam1` and nothing
@@ -1140,7 +1371,7 @@ mod tests {
         let broken = VIGNETTE_FIXTURE.replace("-0.042729", "-1200841162752.0");
         let m = parse(&broken).expect("it still parses — the numbers are legal XML");
         assert!(
-            m.nodes[0].vignette_knots(BOWER_DIMS, crate::recipe::MASK_WARP_KNOTS).is_none(),
+            m.vignette_gains(Shot::default(), BOWER_DIMS, BOWER_DIMS.0, crate::recipe::MASK_WARP_KNOTS).is_none(),
             "a runaway polynomial must be refused"
         );
         // The DISTORTION half refuses on its own terms: a factor at or below
@@ -1148,6 +1379,165 @@ mod tests {
         let folded = VIGNETTE_FIXTURE.replace("-0.095549", "-90.0");
         let m = parse(&folded).expect("parses");
         assert!(m.nodes[0].distortion_knots(BOWER_DIMS, 16).is_none(), "a folded map is refused");
+    }
+
+    /// A profile document of vignette nodes `(FocalLength, FocusDistance,
+    /// ApertureValue, [VignetteModelParam1..3])`, the numbers as the installed
+    /// file writes them, in the attribute spelling with a neutral distortion
+    /// model beside each (an entry needs one to parse).
+    fn vignette_doc(nodes: &[(&str, &str, &str, [&str; 3])]) -> String {
+        let mut x = String::from(
+            r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:stCamera="http://ns.adobe.com/photoshop/1.0/camera-profile"><photoshop:CameraProfiles><rdf:Seq>"#,
+        );
+        for (f, d, a, v) in nodes {
+            x += &format!(
+                r#"<rdf:li><rdf:Description stCamera:Make="SONY" stCamera:SensorFormatFactor="1" stCamera:FocalLength="{f}" stCamera:FocusDistance="{d}" stCamera:ApertureValue="{a}"><stCamera:PerspectiveModel><rdf:Description stCamera:Version="2" stCamera:RadialDistortParam1="0"><stCamera:VignetteModel stCamera:VignetteModelParam1="{}" stCamera:VignetteModelParam2="{}" stCamera:VignetteModelParam3="{}"/></rdf:Description></stCamera:PerspectiveModel></rdf:Description></rdf:li>"#,
+                v[0], v[1], v[2]
+            );
+        }
+        x + "</rdf:Seq></photoshop:CameraProfiles></rdf:Description></rdf:RDF></x:xmpmeta>"
+    }
+
+    /// The FE 24–105 profile's close-focus vignette nodes at 51, 70 and 105 mm,
+    /// f/4 and f/5.6 (`SONY (Sony FE 24-105mm F4 G OSS) - RAW.lcp`, verbatim).
+    const FE24105: [(&str, &str, &str, [&str; 3]); 6] = [
+        ("51", "3", "4", ["-2.812807", "19.937412", "-71.898971"]),
+        ("51", "3", "4.970854", ["-1.853368", "10.030149", "-33.688359"]),
+        ("70", "3", "4", ["-4.506852", "53.954242", "-403.550697"]),
+        ("70", "3", "4.970854", ["-3.897678", "66.952512", "-502.885059"]),
+        ("105", "3", "4", ["-12.371613", "232.548261", "-2298.190088"]),
+        ("105", "3", "4.970854", ["-5.475652", "105.972329", "-1914.398448"]),
+    ];
+
+    /// The Sigma 14–24 mm v3 profile's f/2.8 nodes at 20 and 24 mm, three of
+    /// its focus distances (verbatim).
+    const SIGMA1424: [(&str, &str, &str, [&str; 3]); 6] = [
+        ("20", "10000", "2.970854", ["-0.894234", "0.442888", "-0.080398"]),
+        ("20", "1.4", "2.970854", ["-0.893823", "0.453853", "-0.088451"]),
+        ("20", "0.28", "2.970854", ["-0.894199", "0.524846", "-0.139756"]),
+        ("24", "10000", "2.970854", ["-1.917428", "2.998068", "-1.840874"]),
+        ("24", "1.4", "2.970854", ["-1.929035", "3.05979", "-1.897088"]),
+        ("24", "0.28", "2.970854", ["-1.531379", "2.087473", "-1.224773"]),
+    ];
+
+    /// Camera Raw's vignetting gain on flat-field frames (raw data replaced by
+    /// a uniform field, each gain read against the frame's own raw-gain
+    /// ladder), at the RAW-frame radius in default-crop half-diagonals — the
+    /// output radius sent through the frame's DNG Converter LensDistortInfo.
+    /// Five cases: an FE 24–105 frame at 80 mm f/4, the same raw with its
+    /// EXIF focal set to 60 mm and, separately, its f-number to 4.5; a
+    /// 14–24 mm frame at 20.1 mm f/2.8 with no focus distance and with a
+    /// sidecar ApproximateFocusDistance of 3 m. Radii out to 0.94 of the
+    /// half-diagonal; the corner is reported in ARCHITECTURE, not pinned.
+    #[allow(clippy::type_complexity)] // because a measurement table reads best inline
+    const CAMERA_RAW_FLAT_FIELD: [(&str, bool, Shot, [(f32, f32); 10]); 5] = [
+        (
+            "24-105 @80 f/4",
+            true,
+            Shot { focal_mm: Some(80.0), aperture_av: Some(4.0), focus_distance_m: None },
+            [(0.0358, 1.00054), (0.1312, 1.00740), (0.2270, 1.02180), (0.3234, 1.04334), (0.4206, 1.07142), (0.5191, 1.10360), (0.6190, 1.13803), (0.7207, 1.17775), (0.8246, 1.22611), (0.9311, 1.30370)],
+        ),
+        (
+            "24-105 @60 f/4",
+            true,
+            Shot { focal_mm: Some(60.0), aperture_av: Some(4.0), focus_distance_m: None },
+            [(0.0358, 1.00062), (0.1312, 1.00757), (0.2270, 1.02216), (0.3234, 1.04368), (0.4206, 1.07093), (0.5191, 1.10106), (0.6190, 1.13157), (0.7207, 1.16573), (0.8246, 1.20968), (0.9311, 1.28686)],
+        ),
+        (
+            "24-105 @80 f/4.5",
+            true,
+            Shot { focal_mm: Some(80.0), aperture_av: Some(4.339850), focus_distance_m: None },
+            [(0.0358, 1.00050), (0.1312, 1.00666), (0.2270, 1.01950), (0.3234, 1.03836), (0.4206, 1.06229), (0.5191, 1.08986), (0.6190, 1.11726), (0.7207, 1.14803), (0.8246, 1.18805), (0.9311, 1.25321)],
+        ),
+        (
+            "14-24 @20.1 f/2.8, no distance",
+            false,
+            Shot { focal_mm: Some(20.1), aperture_av: Some(2.970854), focus_distance_m: None },
+            [(0.0372, 1.00157), (0.1364, 1.01902), (0.2356, 1.05773), (0.3350, 1.11972), (0.4346, 1.20697), (0.5344, 1.32011), (0.6343, 1.45953), (0.7344, 1.62696), (0.8349, 1.81542), (0.9360, 2.03545)],
+        ),
+        (
+            "14-24 @20.1 f/2.8, 3 m",
+            false,
+            Shot { focal_mm: Some(20.1), aperture_av: Some(2.970854), focus_distance_m: Some(3.0) },
+            [(0.0372, 1.00157), (0.1364, 1.01905), (0.2356, 1.05805), (0.3350, 1.12115), (0.4346, 1.21135), (0.5344, 1.33092), (0.6343, 1.48313), (0.7344, 1.67176), (0.8349, 1.88624), (0.9360, 2.12652)],
+        ),
+    ];
+
+    #[test]
+    fn the_vignette_gains_are_camera_raws_on_five_flat_fields() {
+        // Measured worst 0.22 % (the f/4.5 probe); the bound leaves the
+        // flat-field read's own noise.
+        let (crop, sensor_width) = ((9504.0, 6336.0), 9600.0);
+        let (fe, sigma) = (parse(&vignette_doc(&FE24105)).unwrap(), parse(&vignette_doc(&SIGMA1424)).unwrap());
+        let mut worst = 0.0f32;
+        for (name, is_fe, shot, table) in CAMERA_RAW_FLAT_FIELD {
+            let file = if is_fe { &fe } else { &sigma };
+            let g = file.vignette_gains(shot, crop, sensor_width, 32).expect("solves");
+            for (r, adobe) in table {
+                let got = crate::render::profile_knot_interp(&g, r);
+                let e = (got / adobe - 1.0).abs();
+                worst = worst.max(e);
+                assert!(e < 3e-3, "{name} r={r}: engine gain {got} vs Camera Raw {adobe}");
+            }
+        }
+        eprintln!("worst |engine/Camera Raw − 1|: {:.3} %", worst * 100.0);
+    }
+
+    #[test]
+    fn the_close_focus_vignette_nodes_survive_the_distortion_dedup() {
+        // The real file's shape: per focal, an infinity entry with distortion
+        // and no vignetting, and close-focus entries that carry both. One node
+        // per focal (the infinity one) for the distortion; every vignette
+        // model kept. Until 2026-10-28 the dedup threw the vignetting away.
+        let mut nodes = FE24105.to_vec();
+        nodes.truncate(4);
+        let mut doc = vignette_doc(&nodes);
+        let infinity = r#"<rdf:li><rdf:Description stCamera:Make="SONY" stCamera:FocalLength="70" stCamera:FocusDistance="10000" stCamera:ApertureValue="6"><stCamera:PerspectiveModel stCamera:Version="2" stCamera:RadialDistortParam1="0.426013"/></rdf:Description></rdf:li>"#;
+        doc = doc.replace("<rdf:Seq>", &format!("<rdf:Seq>{infinity}"));
+        let p = parse(&doc).unwrap();
+        let n70 = p.nodes.iter().find(|n| n.focal_mm == Some(70.0)).expect("a 70 mm node");
+        assert_eq!(n70.focus_distance, Some(10000.0), "the distortion keeps the infinity node");
+        assert_eq!(p.vignette_nodes.len(), 4, "every vignette model survives");
+        let shot = Shot { focal_mm: Some(70.0), aperture_av: Some(4.0), focus_distance_m: None };
+        assert!(p.vignette_gains(shot, (9504.0, 6336.0), 9600.0, 32).is_some_and(|g| g[31] > 1.1));
+    }
+
+    #[test]
+    fn a_dimension_the_shot_leaves_open_is_refused_not_guessed() {
+        let fe = parse(&vignette_doc(&FE24105)).unwrap();
+        let no_aperture = Shot { focal_mm: Some(80.0), aperture_av: None, focus_distance_m: None };
+        let no_focal = Shot { focal_mm: None, aperture_av: Some(4.0), focus_distance_m: None };
+        assert!(fe.vignette_gains(no_aperture, (9504.0, 6336.0), 9600.0, 32).is_none());
+        assert!(fe.vignette_gains(no_focal, (9504.0, 6336.0), 9600.0, 32).is_none());
+        // On a node, exactly that node: 70 mm f/4 is the 70 mm f/4 model alone.
+        let on = Shot { focal_mm: Some(70.0), aperture_av: Some(4.0), focus_distance_m: None };
+        let g = fe.vignette_gains(on, (9504.0, 6336.0), 9600.0, 32).unwrap();
+        let x = (31.5f64 / 31.0) * 0.5 * 9504f64.hypot(6336.0) / (70.0 / 36.0 * 9600.0);
+        let v = 1.0 - 4.506852 * x * x + 53.954242 * x.powi(4) - 403.550697 * x.powi(6);
+        assert!((f64::from(g[31]) - 1.0 / v).abs() < 1e-5, "{} vs {}", g[31], 1.0 / v);
+    }
+
+    #[test]
+    fn the_profile_camera_raw_takes_is_the_newest_raw_one() {
+        let head = |stem: &str, raw: bool| Head {
+            path: PathBuf::from(format!("{stem}.lcp")),
+            stem: fold(stem),
+            make: "sony".into(),
+            lens: "1424mmf28dgdnart019".into(),
+            raw,
+            version: profile_version(stem),
+        };
+        assert_eq!(profile_version("SONY (SIGMA 14-24mm F2.8 DG DN A019) v3 - RAW"), 3);
+        assert_eq!(profile_version("SONY (SIGMA 14-24mm F2.8 DG DN A019) - RAW"), 1);
+        assert_eq!(profile_version("SONY (Sony FE 24-105mm F4 G OSS) - RAW"), 1);
+        let pool = [
+            head("SONY (SIGMA 14-24mm F2.8 DG DN A019) - RAW", true),
+            head("SONY (SIGMA 14-24mm F2.8 DG DN A019) v3 - RAW", true),
+            head("SONY (SIGMA 14-24mm F2.8 DG DN A019) v2 - RAW", true),
+            head("SONY (SIGMA 14-24mm F2.8 DG DN A019) v4", false),
+        ];
+        let pick = choose(pool.iter()).unwrap();
+        assert_eq!(pick.version, 3, "the newest RAW profile, over a newer non-RAW one: {}", pick.path.display());
     }
 
     #[test]
