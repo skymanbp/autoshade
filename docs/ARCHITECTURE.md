@@ -2277,6 +2277,29 @@ NOT, and the mechanism is still unknown:
   of −a, a power remap or piecewise-linear warp of the splits, and one natural
   spline through the split points were all tried and all fail.
 
+On the round trip (`scripts/roundtrip_gate.py`, strength 0.85, the engine's
+render against Camera Raw's render of the written sidecar; ΔE whole frame
+after alignment, warm band dL / da / db) the law moves the six usable pairs as
+follows, the c435fa6 tree against this one:
+
+| pair | whole ΔE | warm dL / da / db | look error |
+|---|---|---|---|
+| p36 | 6.31 → 5.71 | −2.52 / +3.69 / −4.85 → −3.18 / +0.74 / −0.10 | 0.008 → 0.007 |
+| p37 | 2.86 → 3.97 | +2.29 / +0.39 / +1.01 → +6.32 / +0.18 / +2.19 | 0.133 → 0.132 |
+| p38 | 7.41 → 7.88 | −0.81 / +7.57 / +4.17 → −3.38 / +4.40 / +9.65 | 0.010 → 0.011 |
+| p39 | 6.45 → 3.41 | −1.17 / +4.54 / +9.49 → +0.15 / +0.14 / +0.32 | 0.011 → 0.014 |
+| p40 | 9.17 → 8.58 | −3.11 / −4.74 / +3.93 → −4.74 / −0.89 / +2.87 | 0.016 → 0.015 |
+| p41 | 6.28 → 5.79 | +13.18 / +14.91 / +19.36 → −3.21 / +10.07 / +10.62 | 0.023 → 0.016 |
+
+The warm band's a* gap — the channel curves' own signature — shrinks on p36,
+p38, p39, p40 and p41. Whole-frame ΔE grows on p37 (warm dL +2.29 → +6.32)
+and p38 (warm b* +4.17 → +9.65), and the p39 sky band moves b* −5.82 →
+−11.03 (31 k pixels). On p38 the fitted recipe's three curves alone render on
+the measured law to ΔE 0.10 against Camera Raw, so its b* gap comes from
+another control; the p37 and p39 movements are not attributed yet. The
+pairs' fits also change with the law (the fit mirrors it), so each row
+compares two different recipes, not one recipe under two renderers.
+
 **The writer always pairs channel curves with a composite curve since
 v1.17.0** (`xmp::write`). Camera Raw IGNORES `crs:ToneCurvePV2012Red` /
 `Green` / `Blue` in a sidecar with no `crs:ToneCurvePV2012` element: a fitted
