@@ -30,7 +30,13 @@ is a hard error). The engine's own sRGB profile, the tag on the app's sRGB
 exports and its masters (as JPEG, TIFF or PNG, the formats that hold one),
 names the working space and is read with no transform (since v1.6.3); a 16-bit
 image goes through a 52³ lattice of qcms's 8-bit transform whose nodes sit on
-exact codes. Bayer data uses rawler's normal demosaic path, while a
+exact codes. Bayer data takes rawler's PPG demosaic with the black level
+subtracted signed (v1.17.0, `render::develop_cfa_signed`): rawler 0.7.2
+clips every value below the black to 0 first, a positive bias on the
+zero-mean read noise of a dark frame (the night pair's darkest band read
+u/v +1.606/−0.288 against Camera Raw's +1.261/−0.405; signed +1.486/−0.405),
+and the first clamp now sits where a stage needs non-negative input — after
+the matrix in rawler's calibrate, or before the profile's hue/sat tables. A
 non-2×2 three-colour CFA takes AutoShade's geometry-driven X-Trans path: for
 each missing colour at a pixel it fits a plane to matching photosites in a
 5×5 neighbourhood, then evaluates that plane at the target while retaining

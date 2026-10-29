@@ -389,6 +389,13 @@ fn develop_peak_bytes(
 /// REFUSAL, and rounding a peak DOWN is how a file that really does blow the
 /// ceiling gets admitted.
 ///
+/// v1.17.0's signed-black Bayer develop (`render::develop_cfa_signed`) no
+/// longer goes through rawler's input clone: the same probe on a 60.2 MP
+/// ILCE-7RM4A frame reads 1,394 MB = 24.3 B/px, against 1,745 MB = 30.4 B/px
+/// before the change on that frame. The constant keeps the older, larger
+/// reading; lowering it would admit files, which is a decision, not a
+/// measurement.
+///
 /// It is the WHOLE develop's peak, not one buffer's width. The demosaiced f32
 /// frame (`Vec<[f32; 3]>`, 12 B/px) is only its largest single term; rawler's
 /// own sensor buffers, the mapped file, the orientation transient and the

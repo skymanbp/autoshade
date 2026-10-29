@@ -443,9 +443,10 @@ pub(super) fn develop_raw_buffer(
     working: ExportColorSpace,
     profile_stage: Option<&profile::Stage>,
 ) -> Result<(Vec<[f32; 3]>, usize, usize)> {
-    let inter = dev
-        .develop_intermediate(rawimage)
-        .map_err(|e| anyhow!("develop: {e}"))?;
+    let inter = match develop_cfa_signed(rawimage, dev) {
+        Some(inter) => inter,
+        None => dev.develop_intermediate(rawimage).map_err(|e| anyhow!("develop: {e}"))?,
+    };
     let inter = match (geometry_cfa, inter) {
         (Some(cfa), Intermediate::Monochrome(plane)) => {
             let roi = rawimage.active_area.unwrap_or_else(|| plane.rect());
@@ -493,6 +494,112 @@ pub(super) fn develop_raw_buffer(
         });
     }
     Ok((data, w, h))
+}
+
+/// rawler's `develop_intermediate` for a CFA mosaic with the black subtracted
+/// SIGNED (v1.17.0). rawler 0.7.2 clips every value below the black to 0
+/// before the demosaic (`imgop/raw.rs`, `correct_blacklevel_cfa`), which turns
+/// the zero-mean read noise of a dark frame into a positive bias: on the night
+/// pair the sensor noise sd is about 40 DN on a signal of 10–50 DN, the
+/// darkest band's colour read u/v = +1.606/−0.288 against Camera Raw's
+/// +1.261/−0.405 (+1.486/−0.405 signed). Here the values stay signed through
+/// the demosaic (PPG and [`demosaic_over_cfa_geometry`] are differences and
+/// weighted means, no clamp) and the white balance; the first clamp is where a
+/// stage needs non-negative input: rawler's calibrate rule
+/// (`clip_euclidean_norm_avg`, after the white balance and the matrix) on the
+/// plain sRGB develop, the profile stage's guard before its hue/sat tables
+/// (`profile::Stage::render_ref`, after the camera matrix) on a profiled one,
+/// and the final pack otherwise.
+///
+/// Everything else is rawler's, step for step and in its order: the rescale
+/// `(v − black) / (white − black)` per 2×2 site in its pairing of lines (a
+/// value above the black is bit-identical), PPG over the active area, the
+/// calibrate (matrix choice, white balance, `normalize`/`pseudo_inverse`), the
+/// default crop and the sRGB transfer, all from rawler's public pieces. It is
+/// done here rather than by handing rawler a pre-scaled mosaic because rawler
+/// clones its input: a float mosaic beside the clone cost 3.9 B per source
+/// pixel of peak commit (1745 → 1979 MB on a 60 MP frame). `None` — rawler's own
+/// develop — when the develop does not rescale, the frame is not a CFA
+/// mosaic, or rawler would demosaic it as four colours.
+fn develop_cfa_signed(raw: &rawler::RawImage, dev: &RawDevelop) -> Option<Intermediate> {
+    use rawler::imgop::sensor::bayer::{ppg::PPGDemosaic, Demosaic};
+    use rawler::pixarray::PixF32;
+    use rawler::rawimage::RawPhotometricInterpretation as Photo;
+    let Photo::Cfa(config) = &raw.photometric else { return None };
+    let demosaic = dev.steps.contains(&ProcessingStep::Demosaic);
+    if !dev.steps.contains(&ProcessingStep::Rescale) || raw.cpp != 1 || (demosaic && !config.cfa.is_rgb()) {
+        return None;
+    }
+    let black = raw.blacklevel.as_bayer_array();
+    let white = raw.whitelevel.as_bayer_array();
+    let max: [f32; 4] = std::array::from_fn(|i| white[i] - black[i]);
+    let mut v = raw.data.as_f32().into_owned();
+    let width = raw.width;
+    v.par_chunks_exact_mut(width * 2).for_each(|lines| {
+        let (line0, line1) = lines.split_at_mut(width);
+        line0.chunks_exact_mut(2).zip(line1.chunks_exact_mut(2)).for_each(|(a, b)| {
+            a[0] = (a[0] - black[0]) / max[0];
+            a[1] = (a[1] - black[1]) / max[1];
+            b[0] = (b[0] - black[2]) / max[2];
+            b[1] = (b[1] - black[3]) / max[3];
+        });
+    });
+    let pixels = PixF32::new_with(v, raw.width, raw.height);
+    if !demosaic {
+        return Some(Intermediate::Monochrome(pixels));
+    }
+    let crop_active = dev.steps.contains(&ProcessingStep::CropActiveArea);
+    let roi = if crop_active { raw.active_area.unwrap_or(pixels.rect()) } else { pixels.rect() };
+    let mut rgb = PPGDemosaic::new().demosaic(&pixels, &config.cfa, &config.colors, roi);
+    drop(pixels);
+    if dev.steps.contains(&ProcessingStep::Calibrate) {
+        use rawler::imgop::matrix::{multiply, normalize, pseudo_inverse};
+        let found = raw
+            .color_matrix
+            .iter()
+            .find(|(illuminant, _)| **illuminant == rawler::imgop::xyz::Illuminant::D65)
+            .or_else(|| raw.color_matrix.iter().next());
+        if let Some((_, m)) = found.filter(|(_, m)| m.len() % 3 == 0) {
+            let mut xyz2cam = [[0.0f32; 3]; 4];
+            for i in 0..m.len() / 3 {
+                for j in 0..3 {
+                    xyz2cam[i][j] = m[i * 3 + j];
+                }
+            }
+            let wb = if raw.wb_coeffs[0].is_nan() || !dev.steps.contains(&ProcessingStep::WhiteBalance) {
+                [1.0f32; 4]
+            } else {
+                raw.wb_coeffs
+            };
+            let cam2rgb = pseudo_inverse(normalize(multiply(&xyz2cam, &rawler::imgop::xyz::SRGB_TO_XYZ_D65)));
+            rgb.data.par_iter_mut().for_each(|px| {
+                let (r, g, b) = (px[0] * wb[0], px[1] * wb[1], px[2] * wb[2]);
+                let out = [
+                    cam2rgb[0][0] * r + cam2rgb[0][1] * g + cam2rgb[0][2] * b,
+                    cam2rgb[1][0] * r + cam2rgb[1][1] * g + cam2rgb[1][2] * b,
+                    cam2rgb[2][0] * r + cam2rgb[2][1] * g + cam2rgb[2][2] * b,
+                ];
+                *px = rawler::imgop::raw::clip_euclidean_norm_avg(&out);
+            });
+        }
+    }
+    if dev.steps.contains(&ProcessingStep::CropDefault)
+        && let Some(mut crop) = raw.crop_area.or(raw.active_area)
+    {
+        if crop_active {
+            crop = crop.adapt(&raw.active_area.unwrap_or(crop));
+        }
+        if rgb.dim().w == raw.active_area.map(|area| area.d).unwrap_or(raw.dim()).w / 2 {
+            crop.scale(0.5);
+        }
+        if crop.d != rgb.dim() {
+            rgb = rgb.crop(crop);
+        }
+    }
+    if dev.steps.contains(&ProcessingStep::SRgb) {
+        rgb.for_each(rawler::imgop::srgb::srgb_apply_gamma_n);
+    }
+    Some(Intermediate::ThreeColor(rgb))
 }
 
 /// What `RawDevelop::default().develop_intermediate` WILL produce for this

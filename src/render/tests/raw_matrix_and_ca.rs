@@ -488,3 +488,63 @@ fn ca_fill_keeps_the_gui_map_in_step_with_the_render() {
         "CA-only roundtrip ({ux},{uy})"
     );
 }
+
+/// The black is subtracted signed (v1.17.0): a mosaic whose sites sit at the
+/// black plus and minus the same read noise develops to a mean of zero, not
+/// to the positive bias rawler's clip at 0 leaves (`imgop/raw.rs`,
+/// `correct_blacklevel_cfa`). A site above the black keeps rawler's own value
+/// to the bit, through the same demosaic.
+///
+/// MUTATION: clip the subtraction at 0 again, or leave rawler's `Rescale` in.
+#[test]
+fn the_black_is_subtracted_signed_through_the_demosaic() {
+    use rawler::cfa::{PlaneColor, CFA};
+    use rawler::decoders::Camera;
+    use rawler::imgop::develop::{ProcessingStep, RawDevelop};
+    use rawler::rawimage::{BlackLevel, CFAConfig, RawImageData, RawPhotometricInterpretation, WhiteLevel};
+    let (w, h) = (16usize, 16usize);
+    let mosaic = |values: Vec<u16>| {
+        rawler::RawImage::new_with_data(
+            Camera::new(),
+            RawImageData::Integer(values),
+            w,
+            h,
+            1,
+            [1.0, 1.0, 1.0, f32::NAN],
+            RawPhotometricInterpretation::Cfa(CFAConfig::new(&CFA::new("RGGB"), &PlaneColor::new("RGB"))),
+            Some(BlackLevel::new(&[512u16], 1, 1, 1)),
+            Some(WhiteLevel::new(vec![16383])),
+            false,
+        )
+    };
+    let mut dev = RawDevelop::default();
+    dev.steps.retain(|s| !matches!(s, ProcessingStep::WhiteBalance | ProcessingStep::Calibrate | ProcessingStep::SRgb));
+    let develop = |raw: &rawler::RawImage| source::develop_raw_buffer(raw, &dev, None, None, ExportColorSpace::Srgb, None).unwrap().0;
+    let mean = |px: &[[f32; 3]]| px.iter().map(|p| f64::from(p[0] + p[1] + p[2]) / 3.0).sum::<f64>() / px.len() as f64;
+    // Black ± 40 DN in a checkerboard of 2×2 cells: every channel sees both signs.
+    let noisy: Vec<u16> = (0..w * h).map(|i| if ((i % w) / 2 + (i / w) / 2) % 2 == 0 { 552 } else { 472 }).collect();
+    let signed = develop(&mosaic(noisy.clone()));
+    let clipped = {
+        let mut raw = mosaic(noisy);
+        raw.apply_scaling().unwrap();
+        let mut d = dev.clone();
+        d.steps.retain(|s| *s != ProcessingStep::Rescale);
+        d.develop_intermediate(&raw).unwrap()
+    };
+    let rawler::imgop::develop::Intermediate::ThreeColor(clipped) = clipped else { panic!("three-colour develop") };
+    let (m_signed, m_clipped) = (mean(&signed), mean(&clipped.data));
+    let unit = 40.0 / (16383.0 - 512.0);
+    assert!(m_signed.abs() < 0.05 * unit, "signed mean {m_signed:e} (one noise unit {unit:e})");
+    assert!(m_clipped > 0.4 * unit, "rawler's clip leaves a positive bias: {m_clipped:e}");
+    // Above the black the two paths agree to the bit.
+    let bright: Vec<u16> = (0..w * h).map(|i| 1000 + (i as u16 * 37) % 900).collect();
+    let ours = develop(&mosaic(bright.clone()));
+    let mut raw = mosaic(bright);
+    raw.apply_scaling().unwrap();
+    let mut d = dev.clone();
+    d.steps.retain(|s| *s != ProcessingStep::Rescale);
+    let rawler::imgop::develop::Intermediate::ThreeColor(theirs) = d.develop_intermediate(&raw).unwrap() else {
+        panic!("three-colour develop")
+    };
+    assert_eq!(ours, theirs.data, "above the black the signed subtraction is rawler's own");
+}

@@ -42,7 +42,13 @@ fn the_base_part_is_the_profile_stage_and_nothing_after_it() {
 /// on the merge with the v1.17.0 Detail law (47c2674): that law re-tunes the
 /// default capture sharpening every RAW gets, so it moves this render too —
 /// with sharpening explicitly off, the c30a6b5-line build and the merge render
-/// the recipe byte-identically. Env-gated on the corpus (`p39.arw`).
+/// the recipe byte-identically. Re-read a second time for the signed black
+/// level (`develop_cfa_signed`, v1.17.0), which moves this render where the
+/// sensor sits near its black and only there: against the build before it
+/// (CLI, 1000 px, 16-bit) 1.77 % of the pixels change, 70 % of those encoded
+/// below 0.02 and 14 % of those in 0.02–0.05, against 0.002 % above 0.5 (the
+/// demosaic's neighbourhood of a site below the black). Env-gated on the
+/// corpus (`p39.arw`).
 ///
 /// MUTATION: let `starting_curve` drop a curve on a recipe that names no
 /// profile, or develop a neutral part through anything but the neutral recipe.
@@ -112,7 +118,7 @@ fn fnv1a64_u16(px: &[u16]) -> u64 {
 }
 
 /// The pre-switch digest (see the test above).
-const OLD_RECIPE_P39_1000_DIGEST: u64 = 0xca2c_a6d5_5f00_dad9;
+const OLD_RECIPE_P39_1000_DIGEST: u64 = 0x7d14_a1f9_9e64_43ba;
 
 /// v1.17.0 step 2's INVARIANT: a fresh canvas is one picture on every surface.
 /// The all-zero fresh recipe (the calibration a fresh open stamps) against the
