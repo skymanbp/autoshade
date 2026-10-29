@@ -1009,7 +1009,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 // else falls through to the projection below with `recipe`
                 // untouched — every probe is a clone — so a pair the hand-off
                 // cannot help ships byte for byte what it shipped before.
-                let from = law.point_of(&recipe);
+                let from = law.point_of(recipe);
                 let err_without = look_err_with_evidence(&cur, &tp, &evidence);
                 let probe_base = recipe.clone();
                 let handed = cast_wb_direction(&cur, &with_px, &wb_weights, law).and_then(|direction| {

@@ -7824,18 +7824,26 @@ fn hsl_band_budget_is_monotone_across_the_three_strength_stops() {
 /// is still withheld by the re-hue veto, fit 0.0792 -> 0.0239 (0.0792 ->
 /// 0.0217), confidence 0.501 (0.506).
 ///
+/// Re-measured 2026-10-29 for v1.17.0's white balance on the render's own
+/// law (`render::WbLaw`): on a camera-profile start the fit used to invert
+/// its demand on the engine's Tanner–Helland law and read As Shot's tint as
+/// 0; asked on Camera Raw's law the white balance moves the light by a
+/// different amount, and the cast the curves carry for what is left fans
+/// 3.8° (0.7°), still admitted; fit 0.0707 -> 0.0311 (0.0707 ->
+/// 0.0300), confidence 0.620 (0.625).
+///
 /// Both pairs are OPTIONAL, like every other corpus pair: absent, the
 /// test says so and passes, and the synthetic two-temperature fixture
 /// carries the refusal side of the same question on its own.
 ///
-/// Mutation: set [`FAN_DEG`] under `p40`'s 0.7° and it goes from admitted
+/// Mutation: set [`FAN_DEG`] under `p40`'s 3.8° and it goes from admitted
 /// to convicted, red on the fan-margin assertion.
 #[test]
 fn the_fan_gate_costs_a_real_two_temperature_pair_nothing() {
     use crate::rationale::keys;
     let Some(root) = calibration_corpus() else { return };
     for (code, want_fan, want_before, want_after, want_conf) in [
-        ("p40", Some(0.7f32), 0.0707f32, 0.0300f32, 0.625f32),
+        ("p40", Some(3.8f32), 0.0707f32, 0.0311f32, 0.620f32),
         ("p41", None, 0.0792, 0.0239, 0.501),
     ] {
         let raw = root.join(format!("{code}.arw"));
