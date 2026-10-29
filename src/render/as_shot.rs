@@ -10,6 +10,67 @@ use super::*;
 /// matrix, or carries damaged coefficients — callers keep the engine's
 /// historical 5500 K anchor.
 pub fn as_shot_wb(raw_path: &Path) -> Option<(f32, f32)> {
+    let (src, rawimage) = metadata(raw_path, "as-shot WB")?;
+    let matrices = calibration_matrices(&rawimage)?;
+    let wb = rawimage.wb_coeffs;
+    let daylight = if rawimage.clean_make.eq_ignore_ascii_case("sony") {
+        sony_daylight_preset(src.buf())
+    } else {
+        None
+    };
+    camera_raw_as_shot([wb[0], wb[1], wb[2]], daylight, &rawimage.clean_model, &matrices)
+}
+
+/// The camera start (v1.17.0, [`crate::recipe::CameraStart`]) the profile
+/// stage renders `raw_path` at under `r`'s camera profile and the As Shot
+/// white: the body's baseline plus the profile's offset, and the As Shot
+/// neutral's headroom — what a base develop of the photograph renders at, and
+/// what every surface that develops from that base stamps. Metadata-only, as
+/// [`as_shot_wb`]. `None` when the recipe names no profile, the file is not a
+/// RAW, or the profile is not installed (no stage runs then).
+pub fn camera_start(raw_path: &Path, r: &EditRecipe) -> Option<crate::recipe::CameraStart> {
+    let name = if !r.camera_profile.is_empty() {
+        r.camera_profile.as_str()
+    } else {
+        r.look.as_ref().map(|l| l.base_profile.as_str()).unwrap_or("")
+    };
+    if name.is_empty() {
+        return None;
+    }
+    // Every develop request of the web canvas stamps it, so the answer is
+    // kept per file (and its modification time) and profile.
+    type Key = (std::path::PathBuf, Option<std::time::SystemTime>, String);
+    type Cache = std::sync::Mutex<Vec<(Key, Option<crate::recipe::CameraStart>)>>;
+    static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+    let key: Key = (raw_path.to_path_buf(), std::fs::metadata(raw_path).and_then(|m| m.modified()).ok(), name.to_string());
+    let cache = CACHE.get_or_init(Cache::default);
+    if let Some((_, s)) = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|(k, _)| *k == key) {
+        return *s;
+    }
+    let s = camera_start_uncached(raw_path, name);
+    let mut c = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if c.len() >= 64 {
+        c.remove(0);
+    }
+    c.push((key, s));
+    s
+}
+
+/// [`camera_start`] read from the file, for profile `name`.
+fn camera_start_uncached(raw_path: &Path, name: &str) -> Option<crate::recipe::CameraStart> {
+    let (_, rawimage) = metadata(raw_path, "camera start")?;
+    let (make, model) = (rawimage.camera.make.as_str(), rawimage.camera.model.as_str());
+    let (_, prof) = crate::dcp::find(make, model, name).ok()?;
+    let total = crate::dcp::baseline_exposure(make, model).ev() + prof.baseline_exposure_offset;
+    let wb = normalise_wb(rawimage.wb_coeffs);
+    let neutral = wb.iter().all(|c| c.is_finite() && *c > 0.0).then(|| wb.map(|c| 1.0 / c));
+    Some(profile::camera_start_of(total, neutral))
+}
+
+/// A RAW's metadata-only decode (`dummy`: no pixel data, no demosaic), with
+/// every guard the open path needs and `None` on any trouble; `what` names
+/// the caller for the parser-panic guard.
+fn metadata(raw_path: &Path, what: &str) -> Option<(RawSource, rawler::RawImage)> {
     if !crate::decode::is_raw(raw_path) {
         return None;
     }
@@ -26,20 +87,13 @@ pub fn as_shot_wb(raw_path: &Path) -> Option<(f32, f32)> {
     // A6: the last `get_decoder` caller in the crate, and the one that can
     // least afford to abort — it is consulted on OPEN, for the WB anchor, and
     // its whole contract is already "None on any trouble".
-    let rawimage = crate::decode::guard_parser_panic(raw_path, "as-shot WB", || {
+    let rawimage = crate::decode::guard_parser_panic(raw_path, what, || {
         decoder
             .raw_image(&src, &RawDecodeParams { image_index: 0 }, true)
             .map_err(|e| anyhow!("raw_image(dummy): {e}"))
     })
     .ok()?;
-    let matrices = calibration_matrices(&rawimage)?;
-    let wb = rawimage.wb_coeffs;
-    let daylight = if rawimage.clean_make.eq_ignore_ascii_case("sony") {
-        sony_daylight_preset(src.buf())
-    } else {
-        None
-    };
-    camera_raw_as_shot([wb[0], wb[1], wb[2]], daylight, &rawimage.clean_model, &matrices)
+    Some((src, rawimage))
 }
 
 /// The camera's XYZ → camera matrices with the colour temperature each is
@@ -111,11 +165,9 @@ pub(super) fn camera_raw_as_shot(
         return None;
     }
     let mut mult = wb.map(f64::from);
-    let reference = SONY_DAYLIGHT_REFERENCE.iter().find(|(m, _)| m.eq_ignore_ascii_case(model));
-    let daylight = daylight.filter(|d| d.iter().all(|c| c.is_finite() && *c > 0.0));
-    if let (Some((_, r)), Some(d)) = (reference, daylight) {
-        mult[0] *= f64::from(r[0]) / f64::from(d[0] / d[1]);
-        mult[2] *= f64::from(r[1]) / f64::from(d[2] / d[1]);
+    if let Some(cc) = camera_calibration(daylight, model) {
+        mult[0] *= f64::from(cc[0]);
+        mult[2] *= f64::from(cc[2]);
     }
     let xy = profile::neutral_to_xy(mult.map(|m| 1.0 / m), |k| matrix_at(matrices, k))?;
     let (kelvin, tint) = profile::xy_to_temp_tint(xy);
@@ -124,6 +176,22 @@ pub(super) fn camera_raw_as_shot(
     }
     let kelvin = (kelvin / 50.0).round() * 50.0;
     Some((kelvin as f32, tint.round().clamp(-100.0, 100.0) as f32))
+}
+
+/// The body's `CameraCalibration` diagonal as Camera Raw derives it for a
+/// Sony ARW: the body's reference Daylight multipliers
+/// ([`SONY_DAYLIGHT_REFERENCE`]) over the file's own Daylight preset, red
+/// and blue (green 1). Camera Raw writes exactly this into the DNG it makes
+/// of the file (p39, Adobe DNG Converter 18.7: `CameraCalibration1/2` =
+/// diag(1.0031, 1, 0.9653), against 2.5115 / 2.5039 and 1.6288 / 1.6875
+/// here) and keeps the camera's own levels as `AsShotNeutral`: the lens
+/// compensation lives in the calibration, which turns a neutral into a white
+/// and a white into a neutral, not in the neutral. `None` for a body with no
+/// reference or a file with no preset.
+pub(super) fn camera_calibration(daylight: Option<[f32; 3]>, model: &str) -> Option<[f32; 3]> {
+    let (_, r) = SONY_DAYLIGHT_REFERENCE.iter().find(|(m, _)| m.eq_ignore_ascii_case(model))?;
+    let d = daylight.filter(|d| d.iter().all(|c| c.is_finite() && *c > 0.0))?;
+    Some([r[0] / (d[0] / d[1]), 1.0, r[1] / (d[2] / d[1])])
 }
 
 /// The XYZ → camera matrix at `kelvin`: the two stated either side weighted

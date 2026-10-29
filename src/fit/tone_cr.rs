@@ -13,11 +13,12 @@
 //! answer still contradicts the table it was solved with.
 //!
 //! Highlights and Shadows run BEFORE Exposure on this law and read the
-//! frame's key (`render::tone_cr`); a tone map has no base layer, so the
-//! solve takes the base as the pixel itself (`render::HsSite::diagonal`) and the
-//! key from the score set's own masses (the mass-weighted mean linear value
-//! of its points), [`render::HS_KEY_NOMINAL`] without one — the render's
-//! LUT form ([`render::camera_raw_response_keyed`]) at that key.
+//! frame's statistics (`render::tone_cr`); a tone map has no base layer, so
+//! the solve takes every base as the pixel itself (`render::HsSite::diagonal`)
+//! and the statistics from the score set's own masses (the mass-weighted
+//! mean linear value of its points, and the mean and standard deviation of
+//! their `log2`), [`render::HsKey::NOMINAL`] without one — the render's LUT
+//! form ([`render::camera_raw_response_keyed`]) at those statistics.
 
 use super::tone::{TONE_PRIOR, solve5};
 use super::*;
@@ -54,16 +55,20 @@ pub(crate) fn fit_camera_raw_tone(
         score_set.iter().map(|&(x, y, m)| (unstart(x), unstart(y), m)).collect();
     let key = frame_key(&score);
 
+    // The exposure at each candidate, on the frame's own camera start.
+    let start = base.camera_start.unwrap_or_default();
     let mut best = (0.0f32, [0.0f32; 5], f32::INFINITY);
     let mut ev = -3.0f32;
     while ev <= 3.0 + 1e-6 {
-        let ys: [f32; 8] = std::array::from_fn(|i| render::camera_raw_exposure(knots[i], ev));
+        let exposure = render::Exposure::new(start, ev);
+        let e = exposure.as_ref();
+        let ys: [f32; 8] = std::array::from_fn(|i| render::camera_raw_exposure(knots[i], e));
         // Highlights and Shadows move `u` before the exposure: their row on
         // the exposed axis is their push times the exposure's slope there.
         let slope: [f32; 8] = std::array::from_fn(|i| {
             let d = 2e-3;
             let (a, b) = ((knots[i] - d).max(0.0), (knots[i] + d).min(1.0));
-            (render::camera_raw_exposure(b, ev) - render::camera_raw_exposure(a, ev)) / (b - a)
+            (render::camera_raw_exposure(b, e) - render::camera_raw_exposure(a, e)) / (b - a)
         });
         let row_at = |k: usize, s: f32, i: usize| {
             if k == 1 || k == 2 {
@@ -128,7 +133,7 @@ pub(crate) fn fit_camera_raw_tone(
             (0..8)
                 .map(|i| {
                     let d = weights[i] as f64
-                        * (render::camera_raw_response_keyed(ev, s, knots[i], key) - targets[i]) as f64;
+                        * (render::camera_raw_response_keyed(e, s, knots[i], key) - targets[i]) as f64;
                     d * d
                 })
                 .sum::<f64>()
@@ -136,7 +141,7 @@ pub(crate) fn fit_camera_raw_tone(
         } else {
             let (mut sse, mut mass) = (0.0f64, 0.0f64);
             for &(x, y, m) in &score {
-                let d = (render::camera_raw_response_keyed(ev, s, x, key) - y) as f64;
+                let d = (render::camera_raw_response_keyed(e, s, x, key) - y) as f64;
                 sse += m as f64 * d * d;
                 mass += m as f64;
             }
@@ -150,19 +155,30 @@ pub(crate) fn fit_camera_raw_tone(
     (best.0, best.1)
 }
 
-/// The frame key the solve assumes (`log2` of the mean linear value): the
-/// score set's points weighted by their masses, in `u`; the render's nominal
-/// key without a score set.
-fn frame_key(score: &[(f32, f32, f32)]) -> f32 {
-    let (mut sum, mut mass) = (0.0f64, 0.0f64);
+/// The frame statistics the solve assumes ([`render::HsKey`]): `log2` of
+/// the mean linear value, and the mean and standard deviation of `log2`
+/// linear value, over the score set's points weighted by their masses, in
+/// `u`; the render's nominal frame without a score set.
+fn frame_key(score: &[(f32, f32, f32)]) -> render::HsKey {
+    let (mut sum, mut lg, mut lg2, mut mass) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     for &(u, _, m) in score {
-        sum += f64::from(m) * f64::from(render::srgb_to_linear(u.clamp(0.0, 1.0)));
-        mass += f64::from(m);
+        let y = f64::from(render::srgb_to_linear(u.clamp(0.0, 1.0)));
+        let l = (y + f64::from(render::HS_SH_FLOOR)).log2();
+        let m = f64::from(m);
+        sum += m * y;
+        lg += m * l;
+        lg2 += m * l * l;
+        mass += m;
     }
     if mass > 0.0 && sum > 0.0 {
-        ((sum / mass) as f32).max(1e-4).log2()
+        let mean = lg / mass;
+        render::HsKey {
+            key: ((sum / mass) as f32).max(1e-4).log2(),
+            log_mean: mean as f32,
+            spread: (lg2 / mass - mean * mean).max(0.0).sqrt() as f32,
+        }
     } else {
-        render::HS_KEY_NOMINAL
+        render::HsKey::NOMINAL
     }
 }
 
@@ -196,7 +212,8 @@ mod tests {
         // The score set below is uniform in `u`: the key the solve reads off
         // it is the one the map is made at.
         let key = frame_key(&(1..100).map(|i| (i as f32 / 100.0, 0.0, 1.0)).collect::<Vec<_>>());
-        let response = |ev: f32, s: [f32; 5], u: f32| render::camera_raw_response_keyed(ev, s, u, key);
+        let response =
+            |ev: f32, s: [f32; 5], u: f32| render::camera_raw_response_keyed(render::Exposure::new(Default::default(), ev).as_ref(), s, u, key);
         for (ev, s) in [(0.5f32, [0.3f32, -0.4, 0.2, 0.0, -0.2]), (-0.7, [-0.3, 0.0, 0.6, 0.4, 0.3])] {
             let map = |x: f32| d(response(ev, s, d_inv(x)));
             let score: Vec<(f32, f32, f32)> = (1..100)
@@ -233,16 +250,19 @@ mod tests {
     /// order), or drop the exposure's slope.
     #[test]
     fn the_solve_rows_are_the_render_law() {
-        let key = render::HS_KEY_NOMINAL;
+        let key = render::HsKey::NOMINAL;
+        let start = crate::recipe::CameraStart { ev: 0.35, headroom: 1.0 };
         for ev in [0.0f32, 0.7, -0.5] {
+            let exposure = render::Exposure::new(start, ev);
+            let e = exposure.as_ref();
             for (k, s) in [(1usize, -0.02f32), (2, 0.02)] {
                 for &u in &render::TONE_KNOTS_X[1..7] {
                     let mut sl = [0.0f32; 5];
                     sl[k] = s;
-                    let moved = render::camera_raw_response_keyed(ev, sl, u, key) - render::camera_raw_response_keyed(ev, [0.0; 5], u, key);
+                    let moved = render::camera_raw_response_keyed(e, sl, u, key) - render::camera_raw_response_keyed(e, [0.0; 5], u, key);
                     let d = 2e-3;
                     let (a, b) = ((u - d).max(0.0), (u + d).min(1.0));
-                    let slope = (render::camera_raw_exposure(b, ev) - render::camera_raw_exposure(a, ev)) / (b - a);
+                    let slope = (render::camera_raw_exposure(b, e) - render::camera_raw_exposure(a, e)) / (b - a);
                     let row = slope * render::hs_row(k, s, render::HsSite::diagonal(u, key), u);
                     assert!((moved - s * row).abs() <= 0.1 * (s * row).abs() + 2e-5, "ev {ev} slider {k} at {u}: moved {moved}, row {}", s * row);
                 }

@@ -82,7 +82,7 @@ pub(super) fn apply_masks(
     // (`mask_cr`); this pass keeps the rest, and turns the Hue as Lightroom
     // does (`mask_cr::hue_px`).
     let camera_raw = SliderLaw::of(r) == SliderLaw::CameraRaw;
-    let hue_space = camera_raw.then(|| (profile::UnderTone::new(space), transfer_luts()));
+    let hue_space = camera_raw.then(|| (profile::UnderTone::new(space, r.camera_start.unwrap_or_default()), transfer_luts()));
     // The frame adaptation, built ONCE per frame rather than per mask or per
     // pixel (see `MaskUnwarp`). `None` whenever nothing downstream moves these
     // pixels, which is what keeps a photo with no active geometry byte-identical
@@ -131,6 +131,10 @@ pub(super) fn apply_masks(
             }
         };
         let lut = build_tone_lut(&local);
+        // On a camera-profile start the mask's `MainCurve` follows Camera
+        // Raw's measured curve rule (`tone::camera_raw_rgb_tone`, middle by
+        // its encoded ratio — item 35) instead of the luma ratio below.
+        let main_lut = (camera_raw && !m.main_curve.is_empty()).then(|| curve_lut(&m.main_curve));
         // The three per-channel local curves (`crs:{Red,Green,Blue}Curve`),
         // compiled ONCE per mask like `colour_luts` below and applied inside
         // the fused pixel loop right after the master curve. (The global
@@ -282,9 +286,13 @@ pub(super) fn apply_masks(
                         t[c] = sample_lut(&luts[c], t[c]);
                     }
                 }
-                let l_old = luma601(&t);
-                let l_new = sample_lut(&lut, l_old);
-                scale_chroma(&mut t, l_old, l_new);
+                if let Some(ml) = &main_lut {
+                    t = curve_space.tone(t, ml, MiddleRatio::Encoded);
+                } else {
+                    let l_old = luma601(&t);
+                    let l_new = sample_lut(&lut, l_old);
+                    scale_chroma(&mut t, l_old, l_new);
+                }
                 // Per-channel curves right after the master one, before
                 // saturation — `apply_develop`'s stage 1 → 1b → 3 order, so a
                 // full-coverage mask carrying a curve lands where the same

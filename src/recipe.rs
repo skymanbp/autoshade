@@ -99,6 +99,15 @@ pub struct EditRecipe {
     /// (display + XMP honesty only — `tint` stays a RELATIVE shift from
     /// as-shot, so the engine never feeds this to `wb_gains`).
     pub as_shot_tint: Option<f32>,
+    /// ENGINE-ONLY camera start (v1.17.0, never in XMP): the total exposure
+    /// and the white balance's over-range headroom the camera-profile stage
+    /// rendered this photograph's base at ([`CameraStart`]). Stamped with
+    /// the as-shot anchor above, from the RAW, and read by the develop's
+    /// Exposure and by every adjustment that acts under the stage's exposure
+    /// transfer (`render::profile::UnderTone`). `None` = unknown → 0 EV and no
+    /// headroom; only a recipe that names a camera profile reads it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub camera_start: Option<CameraStart>,
 
     // --- Colour / presence --------------------------------------------------
     /// -100..=100, protects already-saturated colours.
@@ -764,6 +773,23 @@ pub struct EditRecipe {
     pub confidence: f32,
 }
 
+/// Where the camera-profile stage started a photograph (v1.17.0): the TOTAL
+/// exposure its transfer ran at — the body's `BaselineExposure` plus the
+/// profile's `BaselineExposureOffset` — and the white balance's over-range
+/// headroom in stops (measured against the camera neutral's max over min,
+/// `render::tone_cr`). The develop's Exposure takes
+/// the light back under this start and puts it through the transfer at the
+/// start plus the slider, which is how Camera Raw's Exposure meets its
+/// baseline: one transfer at their sum.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct CameraStart {
+    /// The total exposure, in EV.
+    pub ev: f32,
+    /// The over-range headroom, in stops (0..=1).
+    pub headroom: f32,
+}
+
 /// One smooth field of local colour and tone, on the same bilateral grid the
 /// reverse fit analyses with ([`crate::fit_field`]): `x` × `y` spatial cells
 /// × `b` luma bins, five parameters per vertex, read trilinearly per pixel.
@@ -1128,6 +1154,7 @@ impl Default for EditRecipe {
             tint: 0.0,
             as_shot_k: None,
             as_shot_tint: None,
+            camera_start: None,
             vibrance: 0.0,
             saturation: 0.0,
             clarity: 0.0,
@@ -1301,6 +1328,37 @@ pub struct CreativeLook {
 }
 
 impl EditRecipe {
+    /// The Adobe profile a Lightroom sidecar of this recipe has to NAME, or
+    /// `None` when it need not or cannot.
+    ///
+    /// Camera Raw honours crs:LensProfileVignettingScale and
+    /// crs:LensProfileDistortionScale only for a profile the sidecar names:
+    /// measured on a flat field (vignetting) and on a real frame (distortion),
+    /// a strength of 50 renders at 100 under LensDefaults, Auto or no setup
+    /// with no crs:LensProfileName, and at 50 once the name is there. So the
+    /// export names the profile whenever a strength is off 100 on a component
+    /// that is rendering, under the setup [`Self::lightroom_lens_setup`] says.
+    /// `None` with a strength off 100 and no profile on this machine is an
+    /// export loss (`xmp::global_export_losses`).
+    pub fn lightroom_named_lens_profile(&self) -> Option<&AdobeLensProfile> {
+        let p = &self.lens_profile;
+        let vignette = self.lens_profile_vignetting_scale != 100.0 && p.vignette_active();
+        let distortion = self.lens_profile_distortion_scale != 100.0 && p.distortion_on && !p.distortion.is_empty();
+        if vignette || distortion { p.adobe.as_ref() } else { None }
+    }
+
+    /// The crs:LensProfileSetup a sidecar naming the profile states: the one
+    /// whose camera CA matches this recipe's. LensDefaults (coordinator ruling
+    /// 2026-10-29: the name alone makes Camera Raw honour a strength, and this
+    /// setup keeps the camera's CA, as the render does) — unless the camera's
+    /// CA is there and switched off, which Camera Raw draws only under Custom
+    /// (measured: no camera CA under Custom, the camera's under LensDefaults).
+    pub fn lightroom_lens_setup(&self) -> &'static str {
+        let p = &self.lens_profile;
+        let ca_off = !p.ca_on && !p.ca_r.is_empty() && !p.ca_b.is_empty();
+        if ca_off { "Custom" } else { "LensDefaults" }
+    }
+
     /// Every machine-local raster path this recipe references: each mask's
     /// ([`LocalAdjustment::bitmap_paths_mut`]), the lens blur's depth map and
     /// protect matte, and each pixel layer's patch — the ONE walk the store's
@@ -1458,6 +1516,9 @@ impl EditRecipe {
         self.camera_profile = String::new();
         self.look = None;
         self.lens_profile = Default::default();
+        // …and the camera start the profile stage rendered at: baked pixels
+        // went through no stage here.
+        self.camera_start = None;
     }
 
     /// One tone slider, with the Look's baked move added.
@@ -1668,6 +1729,27 @@ pub struct LensProfile {
     /// forward schema break: an older `deny_unknown_fields` reader refuses a
     /// recipe rather than silently discarding a coordinate-frame fact.
     pub mask_warp_center: Option<MaskWarpCenter>,
+    /// The Adobe lens profile on this machine that Camera Raw takes for this
+    /// photo (`lensmeta::read_for`), by the two names a sidecar gives it.
+    /// `None` when there is none. It is what a Lightroom sidecar must name
+    /// for Lightroom to honour the profile strengths
+    /// ([`EditRecipe::lightroom_named_lens_profile`]).
+    ///
+    /// Absent from `recipe.json` when `None`, so a recipe without one stays
+    /// readable by an older build; one that carries it is the same deliberate
+    /// forward break as `mask_warp_center`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adobe: Option<AdobeLensProfile>,
+}
+
+/// An Adobe lens profile by the names a Lightroom sidecar gives it:
+/// crs:LensProfileName (the file's own `stCamera:ProfileName`) and
+/// crs:LensProfileFilename.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdobeLensProfile {
+    pub name: String,
+    pub filename: String,
 }
 
 /// One stored-coordinate frame fact for Lightroom's radial mask transport.
@@ -4135,6 +4217,12 @@ impl EditRecipe {
             Some(t) if t.is_finite() => Some(t.clamp(-100.0, 100.0)),
             _ => None,
         };
+        // The camera start: Camera Raw's exposure slider range and the
+        // headroom's one stop; a corrupt one is "unknown".
+        self.camera_start = self.camera_start.filter(|c| c.ev.is_finite() && c.headroom.is_finite()).map(|c| CameraStart {
+            ev: c.ev.clamp(-10.0, 10.0),
+            headroom: c.headroom.clamp(0.0, 1.0),
+        });
         // Crop is a normalized [0,1] view-frame rectangle; untrusted input
         // (AI JSON, foreign XMP, a hand-edited recipe) can carry values
         // outside the frame or an inverted/empty rectangle. Clamp into the
@@ -4600,6 +4688,7 @@ impl EditRecipe {
                 // calibration — a fresh-open stamp must still count as no-op.
                 as_shot_k: None,
                 as_shot_tint: None,
+                camera_start: None,
                 lens_profile: if self.lens_profile.is_as_stamped() {
                     LensProfile::default()
                 } else {

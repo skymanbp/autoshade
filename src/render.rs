@@ -84,9 +84,9 @@ use brush::{
     BRUSH_RASTER_MAX_WORK, BRUSH_RASTER_MIN_EDGE, brush_flow_deposit, brush_kernel,
     brush_kernel_exponents, brush_raster_dims,
 };
-pub use as_shot::as_shot_wb;
+pub use as_shot::{as_shot_wb, camera_start};
 #[cfg(test)]
-use as_shot::{camera_raw_as_shot, sony_daylight_preset, sony_decrypt};
+use as_shot::{camera_calibration, camera_raw_as_shot, sony_daylight_preset, sony_decrypt};
 use camera::{
     calibrate_camera_buffer, camera_matrix, normalise_wb, resolve_camera_profile, space_primaries,
     validate_calibration,
@@ -109,11 +109,9 @@ pub use develop::{
 };
 pub(crate) use develop::{apply_colour_field, field_axis, field_guide_luma};
 use develop::{apply_develop_with_rasters, dehaze_airlight, dehaze_px, luma601};
+use develop::{apply_radial_gain, apply_radial_gain_linear, profile_vignette_lut};
 #[cfg(test)]
-use develop::{
-    apply_dehaze, apply_develop_anon, apply_radial_gain, manual_vignette_lut, profile_vignette_lut,
-    vignette_gain_lut,
-};
+use develop::{apply_dehaze, apply_develop_anon, manual_vignette_lut, vignette_gain_lut};
 pub use export::{
     ExportColorSpace, ExportOpts, convert_export_color_space, render_to_file, stage_and_publish,
 };
@@ -218,11 +216,11 @@ pub(crate) use tone::{
 };
 use tone::{CurveSpace, MiddleRatio, apply_camera_raw_curve, apply_rgb_curves, hermite_eval};
 pub(crate) use tone_cr::{
-    HS_KEY_NOMINAL, SliderLaw, camera_raw_exposure, camera_raw_response_keyed,
-    camera_raw_row, camera_raw_start, exposure_ramp, hs_row, HsSite,
+    HS_SH_FLOOR, HsKey, SliderLaw, camera_raw_exposure, camera_raw_response_keyed,
+    camera_raw_row, camera_raw_start, Exposure, hs_row, HsSite,
 };
 use tone_cr::{
-    apply_camera_raw_hs, camera_raw_after_lut, camera_raw_channels, camera_raw_exposure_lut, camera_raw_slider_lut,
+    apply_camera_raw_hs, camera_raw_after_lut, camera_raw_slider_lut,
     camera_raw_slider_pixel, camera_raw_tone_lut, hs_field, Local, SliderPass,
 };
 #[cfg(test)]
@@ -230,7 +228,7 @@ pub(crate) use tone::{limit_tone_sliders, parametric_lut};
 #[cfg(test)]
 use tone::{camera_raw_rgb_tone, look_curve_lut};
 pub use wb::{local_temp_to_kelvin, solve_wb_for, solve_wb_from_neutral};
-pub(crate) use wb::{linear_to_srgb, srgb_to_linear, wb_gains};
+pub(crate) use wb::{WbLaw, linear_to_srgb, srgb_to_linear, wb_gains};
 use wb::{apply_recipe_wb, apply_recipe_wb_in, colour_gain_luts, ramp, smoothstep, transfer_luts};
 #[cfg(test)]
 use wb::{kelvin_to_rgb};

@@ -673,7 +673,7 @@ fn a_readable_field_chooses_the_pairing_and_not_only_the_population() {
         paired.kelvin
     );
     let (_, _, wanted) =
-        atmosphere_wb_from_populations(&sp, pair_tp, &pair_w, 5500.0);
+        atmosphere_wb_from_populations(&sp, pair_tp, &pair_w, render::WbLaw::of(&EditRecipe::default()));
     assert!(
         (wanted[0] / wanted[2] - 1.0).abs() <= 0.02,
         "…and the solved gains say the same: {wanted:?}"
@@ -5150,7 +5150,7 @@ fn free_atmosphere_wb_for_pair(
     let anchor = base.as_shot_k.unwrap_or(5500.0);
     let (pair_tp, pair_w) = atmosphere_wb_pairing(&tp, &evidence, None, None);
     let (wb_k, wb_tint, _) =
-        atmosphere_wb_from_populations(&sp, pair_tp, &pair_w, anchor);
+        atmosphere_wb_from_populations(&sp, pair_tp, &pair_w, render::WbLaw::of(&base));
     (anchor, wb_k, wb_tint)
 }
 
@@ -5187,7 +5187,7 @@ fn wb_clamp_stays_on_the_manifold_and_never_invents_tint() {
     let strength = crate::recipe::GradeStrength::new(0.85);
     let budget = FitBudget::for_strength(strength);
     let (clamped_k, clamped_tint, clamped, before, after, lambda) =
-        budgeted_wb(anchor, free_k, free_tint, budget);
+        budgeted_wb(render::WbLaw::of(&EditRecipe::default()), free_k, free_tint, budget);
     if clamped {
         assert!(before > budget.wb_ratio && after <= budget.wb_ratio);
     } else {
@@ -5251,7 +5251,7 @@ fn wb_lambda_shrinks_at_high_strength() {
     let (anchor, probe_k, probe_tint) =
         free_atmosphere_wb_for_pair(&probe_source, &probe_target);
     let (probe_chosen_k, probe_chosen_tint, _, _, _, _) = budgeted_wb(
-        anchor,
+        render::WbLaw::of(&EditRecipe::default()),
         probe_k,
         probe_tint,
         FitBudget::for_strength(crate::recipe::GradeStrength::new(0.85)),
@@ -5314,9 +5314,9 @@ fn wb_lambda_shrinks_at_high_strength() {
     }
     let blue_band = blue_band.expect("a retained blue band exposes the warm WB damage");
     let (source, target) = pair_with_blue_band(blue_band);
-    let (anchor, free_k, free_tint) = free_atmosphere_wb_for_pair(&source, &target);
+    let (_, free_k, free_tint) = free_atmosphere_wb_for_pair(&source, &target);
     let (chosen_k, chosen_tint, _, _, _, _) = budgeted_wb(
-        anchor,
+        render::WbLaw::of(&EditRecipe::default()),
         free_k,
         free_tint,
         FitBudget::for_strength(crate::recipe::GradeStrength::new(0.85)),
@@ -7970,19 +7970,50 @@ fn hsl_band_budget_is_monotone_across_the_three_strength_stops() {
 /// is still withheld by the re-hue veto, fit 0.0792 -> 0.0239 (0.0792 ->
 /// 0.0217), confidence 0.501 (0.506).
 ///
+/// Re-measured 2026-10-29 for v1.17.0's lens vignetting on Camera Raw's law
+/// (the Adobe profile's model, applied in raw-linear light: `lcp`,
+/// `render::develop`), which brightens the fit source's corners to what the
+/// target's renderer did: `p40` is admitted at 14.2° (0.7°), fit 0.0682 ->
+/// 0.0336 (0.0707 -> 0.0300), confidence 0.606 (0.625). Attributed by
+/// swapping one part back at a time: the camera's knots in place of the
+/// profile's model give 4.1°, and the gain's position alone moves nothing
+/// (14.2° either side of the curve), so the fan follows how much the source's
+/// corners are lifted. That left 0.8° of margin under [`FAN_DEG`]'s 15°:
+/// the source's corners are now as bright as the target's renderer made them
+/// (`p40`'s target was drawn with the profile on); why a truer source fans
+/// the shipped cast more is the fit's question, not measured here.
+///
+/// OPEN (2026-10-29, the vignette gain moved ahead of the profile stage, where
+/// Camera Raw applies it): `p40`'s cast now fans 15.3° and the gate REFUSES
+/// it — fit 0.0684 -> 0.0291, confidence 0.630 — so this test is red on its
+/// own claim until the fit's owner rules. `p41` measured 0.0763 -> 0.0250,
+/// confidence 0.463, still withheld by the re-hue veto. `p41` is still withheld by the re-hue veto, fit
+/// 0.0792 -> 0.0292 (0.0792 -> 0.0239), confidence 0.450 (0.501): its
+/// target was drawn with the lens profile switched off, and the fit source
+/// (developed from the RAW alone, `pipeline::fit_source`) carries the
+/// profile's now-stronger corner lift, which the fit has to take back out.
+///
+/// Re-measured 2026-10-29 for v1.17.0's white balance on the render's own
+/// law (`render::WbLaw`): on a camera-profile start the fit used to invert
+/// its demand on the engine's Tanner–Helland law and read As Shot's tint as
+/// 0; asked on Camera Raw's law the white balance moves the light by a
+/// different amount, and the cast the curves carry for what is left fans
+/// 3.8° (0.7°), still admitted; fit 0.0707 -> 0.0311 (0.0707 ->
+/// 0.0300), confidence 0.620 (0.625).
+///
 /// Both pairs are OPTIONAL, like every other corpus pair: absent, the
 /// test says so and passes, and the synthetic two-temperature fixture
 /// carries the refusal side of the same question on its own.
 ///
-/// Mutation: set [`FAN_DEG`] under `p40`'s 0.7° and it goes from admitted
+/// Mutation: set [`FAN_DEG`] under `p40`'s 14.2° and it goes from admitted
 /// to convicted, red on the fan-margin assertion.
 #[test]
 fn the_fan_gate_costs_a_real_two_temperature_pair_nothing() {
     use crate::rationale::keys;
     let Some(root) = calibration_corpus() else { return };
     for (code, want_fan, want_before, want_after, want_conf) in [
-        ("p40", Some(0.7f32), 0.0707f32, 0.0300f32, 0.625f32),
-        ("p41", None, 0.0792, 0.0239, 0.501),
+        ("p40", Some(14.2f32), 0.0682f32, 0.0336f32, 0.606f32),
+        ("p41", None, 0.0792, 0.0292, 0.450),
     ] {
         let raw = root.join(format!("{code}.arw"));
         let target_path = root.join(format!("{code}-target.jpg"));
@@ -8834,7 +8865,7 @@ fn the_hand_offs_pull_reads_a_white_balance_move_and_nothing_else() {
         })
         .collect();
     let weights = vec![1.0f32; cur.len()];
-    assert_eq!(cast_wb_direction(&cur, &cur, &weights, 5500.0), None, "no move, no pull");
+    assert_eq!(cast_wb_direction(&cur, &cur, &weights, render::WbLaw::of(&EditRecipe::default())), None, "no move, no pull");
     // Linear gains R 1.2, B 0.8: a warm white balance.
     let gain = [1.2f32, 1.0, 0.8];
     let warmed: Vec<[f32; 3]> = cur
@@ -8845,7 +8876,7 @@ fn the_hand_offs_pull_reads_a_white_balance_move_and_nothing_else() {
             })
         })
         .collect();
-    let d = cast_wb_direction(&cur, &warmed, &weights, 5500.0).expect("a gain is a direction");
+    let d = cast_wb_direction(&cur, &warmed, &weights, render::WbLaw::of(&EditRecipe::default())).expect("a gain is a direction");
     let red_blue = d[0] - d[2];
     assert!(
         (red_blue - (1.2f32 / 0.8).ln()).abs() < 0.05,
@@ -9002,7 +9033,7 @@ fn a_hand_off_white_balance_the_stage_would_shrink_is_refused_above_default() {
         &wb_stage,
         &evidence,
         warm,
-        5500.0,
+        render::WbLaw::of(&EditRecipe::default()),
         budget,
         strong,
     );
@@ -9138,4 +9169,68 @@ fn a_hand_off_candidate_the_stage_gates_refuse_is_refused_from_the_public_entry(
         "nothing ships through the hand-off: {}",
         rep.recipe.rationale
     );
+}
+
+/// A camera-profile base (Camera Raw's law, as shot 5950 K / +13).
+fn camera_raw_law_base() -> EditRecipe {
+    EditRecipe {
+        camera_profile: "Adobe Standard".into(),
+        as_shot_k: Some(5950.0),
+        as_shot_tint: Some(13.0),
+        ..EditRecipe::default()
+    }
+}
+
+/// The white-balance estimator on Camera Raw's law (v1.17.0): shown a frame
+/// moved by a Camera Raw white balance, it reads back that white balance in
+/// Camera Raw's ABSOLUTE tint; shown no move, it answers the law's As Shot —
+/// the stamped as-shot tint, not 0 — and the stage then does nothing.
+///
+/// Until v1.17.0 the fit inverted every demand on the engine's law, where
+/// Tint is a shift from 0, and wrote the answer into a recipe that renders
+/// Tint as absolute: p38 fitted 40000 K / −26.2 from as shot 5950 K / +13
+/// (a green cast of the as-shot tint plus a Temperature run to the edge to
+/// make up the engine law's weaker Kelvin), and the same pair now fits
+/// 8800 K / +16.6 at look error 0.005 against 0.011.
+///
+/// MUTATION: invert on `render::wb_gains` (the engine's law) whatever the
+/// base, or answer `(anchor, 0)` for "no demand".
+#[test]
+fn the_estimator_reads_a_camera_raw_white_balance_in_its_absolute_tint() {
+    let base = camera_raw_law_base();
+    let law = render::WbLaw::of(&base);
+    let sp: Vec<[f32; 3]> = (0..600)
+        .map(|i| {
+            let f = i as f32 / 600.0;
+            [0.40 + 0.10 * f, 0.42 + 0.05 * (1.0 - f), 0.38 + 0.08 * (f * 7.0).sin().abs()]
+        })
+        .collect();
+    let weights = vec![1.0f32; sp.len()];
+    let (k0, t0, _) = atmosphere_wb_from_populations(&sp, &sp, &weights, law);
+    assert_eq!((k0, t0), (5950.0, 13.0), "no move is Camera Raw's As Shot, its tint included");
+    for wb in [(8800.0f32, 16.6f32), (4300.0, 13.0), (7000.0, 40.0)] {
+        let g = law.gains(wb);
+        let tp: Vec<[f32; 3]> = sp
+            .iter()
+            .map(|p| std::array::from_fn(|c| render::linear_to_srgb(render::srgb_to_linear(p[c]) * g[c])))
+            .collect();
+        let (k, t, _) = atmosphere_wb_from_populations(&sp, &tp, &weights, law);
+        assert!((1e6 / k - 1e6 / wb.0).abs() <= 2.0, "{wb:?} read back as {k} K / {t:+}");
+        assert!((t - wb.1).abs() <= 1.0, "{wb:?} read back as {k} K / {t:+}");
+    }
+}
+
+/// The share search walks from the law's As Shot: on Camera Raw's law the
+/// zero end of the path is the stamped as-shot pair and the far end the
+/// free fit, and every point between renders between them.
+///
+/// MUTATION: start `wb_path_candidate` at `(anchor, 0)`.
+#[test]
+fn the_white_balance_path_starts_at_camera_raws_as_shot() {
+    let law = render::WbLaw::of(&camera_raw_law_base());
+    assert_eq!(wb_path_candidate(law, 8800.0, 16.6, 0.0), (5950.0, 13.0));
+    assert_eq!(wb_path_candidate(law, 8800.0, 16.6, 1.0), (8800.0, 16.6));
+    let (k, t) = wb_path_candidate(law, 8800.0, 16.6, 0.5);
+    assert!(k > 5950.0 && k < 8800.0, "half way is between in Kelvin: {k}");
+    assert!(t > 12.0 && t < 17.6, "and in tint: {t}");
 }

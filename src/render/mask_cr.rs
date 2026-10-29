@@ -5,7 +5,7 @@
 //! local key set alone (and a few paired with its global twin):
 //!
 //! - **Exposure** is the global Exposure: the same ramp
-//!   (`tone_cr::camera_raw_exposure_lut`), and a mask's EV adds to the
+//!   (`tone_cr::Exposure`), and a mask's EV adds to the
 //!   global one (a +1 EV frame under a −0.25 EV mask renders as +0.75).
 //!   It runs right after the global Exposure.
 //! - **Contrast, Highlights, Shadows, Whites, Blacks, Dehaze** and
@@ -17,9 +17,10 @@
 //!   after the global sliders.
 //! - **Highlights below 0 and Shadows above 0** run instead the global law
 //!   (`tone_cr`: local, keyed to the frame, before Exposure) on the frame's
-//!   own bases, the push scaled by [`L_HS_GAIN`] (regressing the local
-//!   renders on the global law: 1.21 for Highlights −60, 1.25 for Shadows
-//!   +60), right after the global pass ([`apply_local_hs`]).
+//!   own sites, scaled by [`L_HS_GAIN`] (Highlights −60: the local renders
+//!   regressed on the global law, 1.21; Shadows +60: Camera Raw's local push
+//!   in stops over its global one on the same cells, 1.15, 1.14–1.16 on
+//!   every two-stop band), right after the global pass ([`apply_local_hs`]).
 //! - **Texture** renders exactly as the global Texture and stays where the
 //!   mask stage puts it.
 //! - **Temp and Tint** move the global white ([`local_white`]): a white
@@ -149,9 +150,10 @@ fn local_hs(m: &crate::recipe::LocalAdjustment) -> [f32; 2] {
 }
 
 /// How much harder a mask's Highlights and Shadows push than the global
-/// sliders at the same value, on the same base and key (`[highlights,
-/// shadows]`): fitted on the local renders (module head).
-const L_HS_GAIN: [f32; 2] = [1.2, 1.25];
+/// sliders at the same value, on the same sites (`[highlights, shadows]`:
+/// the Highlights push in `u`, the Shadows slider), measured on the local
+/// renders (module head).
+const L_HS_GAIN: [f32; 2] = [1.2, 1.15];
 
 /// Does any drawn adjustment of `r` move Highlights or Shadows on the local law?
 pub(super) fn any_local_hs(r: &EditRecipe) -> bool {
@@ -296,9 +298,11 @@ fn blend_each<T: Sync>(
     });
 }
 
-/// Local Exposure on this law: the global stage's ramp at the mask's EV
-/// (`tone_cr::camera_raw_exposure_lut`, Adobe's channel rule), after the
-/// global Exposure and before the five sliders, so the two add in EV.
+/// Local Exposure on this law: the global Exposure's transfer
+/// (`tone_cr::Exposure`) at the mask's EV on the frame the global one left at
+/// `exposed`, after the global Exposure and before the five sliders, so the
+/// two add in EV.
+#[allow(clippy::too_many_arguments)] // the develop's frame, its working space and the start the global Exposure left
 pub(super) fn apply_local_exposure(
     data: &mut [[f32; 3]],
     w: usize,
@@ -306,10 +310,16 @@ pub(super) fn apply_local_exposure(
     r: &EditRecipe,
     rasters: &MaskRasterSnapshot,
     frame: MaskFrame<'_>,
+    space: ExportColorSpace,
+    exposed: crate::recipe::CameraStart,
 ) {
     with_covers(r, rasters, frame, (w, h), |m| m.exposure_ev != 0.0, |covers| {
-        let luts: Vec<Vec<f32>> = covers.iter().filter_map(|(m, _)| camera_raw_exposure_lut(m.exposure_ev)).collect();
-        blend_each(data, w, covers, &luts, |lut, px| camera_raw_channels(px, lut));
+        let passes: Vec<Exposure> = covers.iter().filter_map(|(m, _)| Exposure::new(exposed, m.exposure_ev)).collect();
+        let under = profile::UnderTone::new(space, exposed);
+        let (dec, enc) = transfer_luts();
+        blend_each(data, w, covers, &passes, |e, px| {
+            under.expose(px.map(|v| sample_lut(dec, v)), e).map(|v| sample_lut(enc, v.clamp(0.0, 1.0)))
+        });
     });
 }
 
@@ -383,7 +393,7 @@ fn global_white(r: &EditRecipe) -> ((f32, f32), (f32, f32)) {
 /// Local Temp and Tint on this law: the global white balance's adaptation
 /// (`wb::camera_raw_wb`) to the white the mask moves the global one to,
 /// relative to the global one, blended by the mask's weight in the light
-/// after the profile stage's exposure ramp and before Adobe's curve
+/// after the profile stage's exposure transfer and before Adobe's curve
 /// (`profile::UnderTone::undo_curve`). Runs right after the global white
 /// balance, before the tone.
 pub(super) fn apply_local_white(
@@ -408,7 +418,7 @@ pub(super) fn apply_local_white(
                 mat_mul3(&super::wb::camera_raw_wb(to, as_shot), &back).map(|row| row.map(|v| v * k))
             })
             .collect();
-        let under = profile::UnderTone::new(space);
+        let under = profile::UnderTone::new(space, r.camera_start.unwrap_or_default());
         let (dec, enc) = transfer_luts();
         data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
             for (x, px) in row.iter_mut().enumerate() {
@@ -503,7 +513,7 @@ mod tests {
     /// working primaries instead of the reference ones.
     #[test]
     fn the_local_hue_turns_by_degrees_in_the_reference_primaries() {
-        let under = profile::UnderTone::new(ExportColorSpace::Srgb);
+        let under = profile::UnderTone::new(ExportColorSpace::Srgb, crate::recipe::CameraStart::default());
         let (dec, enc) = transfer_luts();
         let red = [0.70f32, 0.30, 0.25];
         for deg in [0.0f32, 360.0] {

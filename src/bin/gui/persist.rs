@@ -449,6 +449,7 @@ pub(crate) fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) ->
                     // the SOURCE photo's anchor is a different exposure.
                     r.as_shot_k = saved.as_shot_k;
                     r.as_shot_tint = saved.as_shot_tint;
+                    autoshade::pipeline::stamp_camera_start(target, &mut r);
                     return r;
                 }
                 // The file that answered is DAMAGED: stop here and fall to the
@@ -468,6 +469,7 @@ pub(crate) fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) ->
     let (ask, ast) = autoshade::pipeline::fresh_as_shot_wb(target);
     r.as_shot_k = ask;
     r.as_shot_tint = ast;
+    autoshade::pipeline::stamp_camera_start(target, &mut r);
     r
 }
 

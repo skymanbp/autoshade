@@ -225,10 +225,11 @@ fn the_profile_strengths_scale_the_correction_and_100_changes_nothing() {
     assert!(none < half && half < full && full < double, "{none} {half} {full} {double}");
     assert_eq!(none, 100.0, "0 is exactly no profile vignetting, so the corner is untouched");
     // HOW FAR is asserted on the gain LUT rather than on the rendered byte.
-    // The claim is exact — half the slider, half the departure from 1 — and
-    // an 8-bit corner cannot witness it: the byte is rounded, the transfer
-    // pair is itself a LUT, and the two errors bias a RATIO of small
-    // numbers by a couple of percent (measured: 0.477 where 0.5 is meant).
+    // The claim is exact — Camera Raw's law: half the slider, half the EV;
+    // 200, twice the departure from 1 — and an 8-bit corner cannot witness
+    // it: the byte is rounded and the transfer pair is itself a LUT. The law
+    // against Camera Raw's own renders is
+    // `the_vignetting_strength_is_camera_raws_on_two_flat_fields`.
     // Ordering and the two endpoints above are exact and stay where the
     // photographer sees them; the arithmetic is checked where it lives.
     let gains = |s: f32| profile_vignette_lut(&profile.vignette, s);
@@ -242,8 +243,8 @@ fn the_profile_strengths_scale_the_correction_and_100_changes_nothing() {
     );
     for i in 0..LUT_N {
         assert!(
-            ((g50[i] - 1.0) - (g100[i] - 1.0) * 0.5).abs() < 1e-6,
-            "gain {i}: 50 must halve the lift, {} vs {}",
+            (g50[i] - g100[i].sqrt()).abs() < 1e-5,
+            "gain {i}: 50 must halve the lift in EV, {} vs {}",
             g50[i],
             g100[i]
         );
@@ -1693,4 +1694,30 @@ fn apply_lens_distortion_fills_the_frame_and_moves_content_radially() {
         moved.get_pixel(bright_x, 40)[0] > 30000 && bright_x <= 29,
         "barrel fix must move the dot outward (x<30), got x={bright_x}"
     );
+}
+
+/// The profile Vignetting strength against Camera Raw (2026-10-28): flat-field
+/// frames rendered at each strength and read against their own raw-gain
+/// ladders, so each number is the EV of the gain Camera Raw applied at that
+/// radius. Rows are (EV at 100, then at 25, 50, 150 and 200); 14–24 mm at
+/// 20 mm, radius 0.26, 0.51 and 0.71 of the half-diagonal, then 24–105 mm at
+/// 80 mm, 0.51 and 0.91 (no 25 rendered there). The old reading,
+/// `1 + (g − 1)·s`, misses the 14–24 mm's 0.71 row at 50 by 0.039 EV.
+#[test]
+fn the_vignetting_strength_is_camera_raws_on_two_flat_fields() {
+    const MEASURED: [(f32, [Option<f32>; 4]); 5] = [
+        (0.0992, [Some(0.0244), Some(0.0490), Some(0.1461), Some(0.1931)]),
+        (0.3671, [Some(0.0904), Some(0.1821), Some(0.5126), Some(0.6596)]),
+        (0.6624, [Some(0.1640), Some(0.3304), Some(0.8891), Some(1.1160)]),
+        (0.1317, [None, Some(0.0643), Some(0.1909), Some(0.2519)]),
+        (0.3562, [None, Some(0.1780), Some(0.4994), Some(0.6426)]),
+    ];
+    for (ev100, at) in MEASURED {
+        let knots = vec![ev100.exp2(); 4];
+        for (scale, want) in [25.0f32, 50.0, 150.0, 200.0].into_iter().zip(at) {
+            let Some(want) = want else { continue };
+            let got = profile_vignette_lut(&knots, scale)[0].log2();
+            assert!((got - want).abs() < 0.004, "EV {ev100} at {scale}: {got:.4} against Camera Raw's {want}");
+        }
+    }
 }

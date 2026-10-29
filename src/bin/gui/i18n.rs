@@ -1422,6 +1422,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("colour field", "颜色场"),
     ("fill layers", "填充图层"),
     ("lens profile correction", "镜头配置文件校正"),
+    ("profile vignetting amount (no Adobe lens profile here to name)", "配置文件暗角强度（本机没有可指名的 Adobe 镜头配置文件）"),
+    ("profile distortion amount (no Adobe lens profile here to name)", "配置文件畸变强度（本机没有可指名的 Adobe 镜头配置文件）"),
     // The import direction of the same fact (workers.rs, the Opened handler).
     ("this Lightroom sidecar carries {n} global setting(s) the engine does not render (a save keeps them untouched): {list}",
         "这份 Lightroom sidecar 里有 {n} 项本引擎不渲染的全局设置（保存时会原样保留）：{list}"),
