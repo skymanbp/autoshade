@@ -179,6 +179,11 @@ pub(super) fn unspoken_attr_keys(r: &EditRecipe) -> std::collections::BTreeSet<&
     if r.camera_profile.is_empty() {
         out.insert("CameraProfile");
     }
+    // The lens profile's identity is written only with a strength that needs
+    // it (`owned_attrs`); otherwise the document's own stays.
+    if r.lightroom_named_lens_profile().is_none() {
+        out.extend(["LensProfileSetup", "LensProfileName", "LensProfileFilename"]);
+    }
     if r.schema_era >= crate::recipe::SCHEMA_ERA {
         return out;
     }

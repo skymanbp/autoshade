@@ -518,6 +518,16 @@ pub fn lens_profile_setup(xmp: &str) -> Option<LensProfileSetup> {
     }
 }
 
+/// `crs:LensProfileName`: the Adobe profile Lightroom used, by the profile's
+/// own name — the key Camera Raw resolves a named profile by
+/// (`crate::lcp::open_named`).
+pub fn lens_profile_name(xmp: &str) -> Option<String> {
+    let scope = crs_own_scope(xmp);
+    let raw = Scope::new(scope.as_ref()).crs_str("LensProfileName")?;
+    let name = raw.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 /// `crs:LensProfileFilename`: the Adobe profile file Lightroom used, by name.
 pub fn lens_profile_filename(xmp: &str) -> Option<String> {
     let scope = crs_own_scope(xmp);
@@ -676,6 +686,10 @@ pub fn describe_mask_losses(losses: &[MaskLoss]) -> Option<String> {
 /// comparison against a default recipe — so moving a control between tiers
 /// (the B2–B5 batches) updates this disclosure by itself, and a new
 /// unexportable control cannot be added without appearing here.
+///
+/// One member is not a tier's: a profile strength off 100 on a rendering
+/// component with no Adobe profile on this machine to name. Lightroom renders
+/// such a strength at 100 ([`EditRecipe::lightroom_named_lens_profile`]).
 pub fn global_export_losses(r: &EditRecipe) -> Vec<&'static str> {
     use crate::advisor::catalogue::{Tier, RECIPE_CONTROLS};
     let (Ok(live), Ok(neutral)) =
@@ -683,12 +697,25 @@ pub fn global_export_losses(r: &EditRecipe) -> Vec<&'static str> {
     else {
         return Vec::new();
     };
-    RECIPE_CONTROLS
+    let mut out: Vec<&'static str> = RECIPE_CONTROLS
         .iter()
         .filter(|c| c.tier == Some(Tier::RenderedNotExported))
         .filter(|c| live.get(c.name) != neutral.get(c.name))
         .map(|c| c.name)
-        .collect()
+        .collect();
+    let p = &r.lens_profile;
+    for (name, moved) in [
+        ("lens_profile_vignetting_scale", r.lens_profile_vignetting_scale != 100.0 && p.vignette_active()),
+        (
+            "lens_profile_distortion_scale",
+            r.lens_profile_distortion_scale != 100.0 && p.distortion_on && !p.distortion.is_empty(),
+        ),
+    ] {
+        if moved && p.adobe.is_none() {
+            out.push(name);
+        }
+    }
+    out
 }
 
 /// One English sentence naming the GLOBAL controls in `globals` (what
@@ -709,6 +736,8 @@ pub fn describe_global_losses(globals: &[&str]) -> Option<String> {
             "pixel_layers" => "fill layers",
             "lens_blur" => "lens blur",
             "retouch" => "spot removal",
+            "lens_profile_vignetting_scale" => "profile vignetting amount (no Adobe lens profile here to name)",
+            "lens_profile_distortion_scale" => "profile distortion amount (no Adobe lens profile here to name)",
             other => other,
         })
         .collect();

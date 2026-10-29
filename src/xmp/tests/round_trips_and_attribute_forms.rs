@@ -734,3 +734,80 @@ const LR_AI_PROVENANCE: &str = "\n         crs:InputDigest=\"D0DAC04EB58F013F49D
 \n         crs:WholeImageArea=\"0/1,0/1,1920/1,2880/1\"\
 \n         crs:Origin=\"0,0\"\
 \n         crs:ModelVersion=\"234881976\"";
+
+/// A profile strength off 100 goes out with the profile NAMED under Custom —
+/// the only form Camera Raw honours it in (`EditRecipe::lightroom_named_lens_profile`)
+/// — and comes back; at 100 nothing about the profile's identity is written,
+/// and a merge leaves Lightroom's own setup, name, file name and digest alone.
+#[test]
+fn a_profile_strength_goes_out_with_the_profile_named_and_comes_back() {
+    let id = crate::recipe::AdobeLensProfile {
+        name: "Adobe (SIGMA 14-24mm F2.8 DG DN A019, SONY) v3".into(),
+        filename: "SONY (SIGMA 14-24mm F2.8 DG DN A019) v3 - RAW.lcp".into(),
+    };
+    let at = |vig: f32| EditRecipe {
+        lens_profile: crate::recipe::LensProfile {
+            vignette: vec![1.0, 1.5],
+            vignette_on: true,
+            adobe: Some(id.clone()),
+            ..Default::default()
+        },
+        lens_profile_vignetting_scale: vig,
+        ..Default::default()
+    };
+    // Written, and read back: the setup, the name, the file name, the strength.
+    let doc = recipe_to_xmp(&at(50.0));
+    assert_eq!(lens_profile_setup(&doc), Some(LensProfileSetup::Custom), "{doc}");
+    assert_eq!(lens_profile_name(&doc).as_deref(), Some(id.name.as_str()));
+    assert_eq!(lens_profile_filename(&doc).as_deref(), Some(id.filename.as_str()));
+    assert_eq!(xmp_to_recipe(&doc).lens_profile_vignetting_scale, 50.0);
+    // At 100 there is nothing to name.
+    let plain = recipe_to_xmp(&at(100.0));
+    assert_eq!(lens_profile_setup(&plain), None, "{plain}");
+    assert_eq!(lens_profile_name(&plain), None);
+    // No profile on this machine to name: the strength is written but cannot
+    // be honoured (Lightroom draws it at 100, read side below), so it is a
+    // stated loss. (Read back here it is 50 — from our own payload, which is
+    // the recipe, not what Lightroom draws.)
+    let mut unnamed = at(50.0);
+    unnamed.lens_profile.adobe = None;
+    let doc = recipe_to_xmp(&unnamed);
+    assert_eq!((lens_profile_setup(&doc), lens_profile_name(&doc)), (None, None), "{doc}");
+    assert!(global_export_losses(&unnamed).contains(&"lens_profile_vignetting_scale"));
+    assert!(!global_export_losses(&at(50.0)).contains(&"lens_profile_vignetting_scale"));
+
+    // Merged onto Lightroom's own sidecar (LensDefaults, its digest beside).
+    let lr = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  <rdf:Description rdf:about=\"\"\n    xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\"\n    crs:Version=\"15.5.1\"\n    crs:ProcessVersion=\"15.4\"\n    crs:LensProfileEnable=\"1\"\n    crs:LensProfileSetup=\"LensDefaults\"\n    crs:LensProfileName=\"Adobe (SIGMA 14-24mm F2.8 DG DN A019, SONY) v3\"\n    crs:LensProfileFilename=\"SONY (SIGMA 14-24mm F2.8 DG DN A019) v3 - RAW.lcp\"\n    crs:LensProfileDigest=\"0123456789ABCDEF0123456789ABCDEF\"\n    crs:LensProfileDistortionScale=\"100\"\n    crs:LensProfileVignettingScale=\"100\"\n    crs:HasSettings=\"True\">\n  </rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>\n";
+    let merged = merged_doc(lr, &at(50.0)).expect("mergeable");
+    for key in ["LensProfileSetup", "LensProfileName", "LensProfileFilename", "LensProfileVignettingScale"] {
+        assert_eq!(merged.matches(&format!("crs:{key}=")).count(), 1, "{key} once: {merged}");
+    }
+    assert_eq!(lens_profile_setup(&merged), Some(LensProfileSetup::Custom));
+    assert!(merged.contains("crs:LensProfileDigest=\"0123456789ABCDEF0123456789ABCDEF\""), "the digest stays");
+    assert_eq!(xmp_to_recipe(&merged).lens_profile_vignetting_scale, 50.0);
+    let kept = merged_doc(lr, &at(100.0)).expect("mergeable");
+    assert_eq!(lens_profile_setup(&kept), Some(LensProfileSetup::LensDefaults), "at 100 Lightroom's own setup stays");
+    assert_eq!(kept.matches("crs:LensProfileName=").count(), 1);
+}
+
+/// A strength counts only where Camera Raw counts it: with a stated setup and
+/// a profile name. Measured: 50 with no setup, or with no name, renders at 100.
+#[test]
+fn a_profile_strength_without_a_named_profile_reads_as_lightroom_draws_it() {
+    let doc = |extra: &str| {
+        format!(
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description rdf:about=\"\" xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" crs:Version=\"15.5.1\" crs:LensProfileEnable=\"1\" {extra} crs:LensProfileVignettingScale=\"50\" crs:LensProfileDistortionScale=\"50\"></rdf:Description></rdf:RDF></x:xmpmeta>"
+        )
+    };
+    let name = "crs:LensProfileName=\"Adobe (Sony FE 24-105mm F4 G OSS)\"";
+    for (extra, want) in [
+        (String::new(), 100.0),
+        ("crs:LensProfileSetup=\"LensDefaults\"".to_string(), 100.0),
+        (name.to_string(), 100.0),
+        (format!("crs:LensProfileSetup=\"LensDefaults\" {name}"), 50.0),
+        (format!("crs:LensProfileSetup=\"Custom\" {name}"), 50.0),
+    ] {
+        let r = xmp_to_recipe(&doc(&extra));
+        assert_eq!((r.lens_profile_vignetting_scale, r.lens_profile_distortion_scale), (want, want), "{extra}");
+    }
+}
