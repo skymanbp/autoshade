@@ -42,7 +42,11 @@ fn the_base_part_is_the_profile_stage_and_nothing_after_it() {
 /// on the merge with the v1.17.0 Detail law (47c2674): that law re-tunes the
 /// default capture sharpening every RAW gets, so it moves this render too —
 /// with sharpening explicitly off, the c30a6b5-line build and the merge render
-/// the recipe byte-identically. Env-gated on the corpus (`p39.arw`).
+/// the recipe byte-identically. Re-read once more on the raw white level
+/// (v1.17.0: a measured Sony body now scales its raw by Camera Raw's level,
+/// 16383 not 15360, so every render of it is 0.096 EV darker): the era rule
+/// is about what a saved recipe means, not about the raw's scale, so the
+/// digest follows the decode. Env-gated on the corpus (`p39.arw`).
 ///
 /// MUTATION: let `starting_curve` drop a curve on a recipe that names no
 /// profile, or develop a neutral part through anything but the neutral recipe.
@@ -112,7 +116,7 @@ fn fnv1a64_u16(px: &[u16]) -> u64 {
 }
 
 /// The pre-switch digest (see the test above).
-const OLD_RECIPE_P39_1000_DIGEST: u64 = 0xca2c_a6d5_5f00_dad9;
+const OLD_RECIPE_P39_1000_DIGEST: u64 = 0x6bf0_2a54_1c58_ae23;
 
 /// v1.17.0 step 2's INVARIANT: a fresh canvas is one picture on every surface.
 /// The all-zero fresh recipe (the calibration a fresh open stamps) against the

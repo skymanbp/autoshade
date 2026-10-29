@@ -66,6 +66,11 @@ coercing either to RGB would invent a colour model.
   N − 1 must divide 255, so every node input is an exact code).
 - RAW memory admission: refuse an estimated decode above 4 GiB, using the
   measured 31 B/pixel envelope, or 138,547,333 pixels (**measured gate**).
+- Raw white level (v1.17.0): Camera Raw's own per measured body
+  (`decode::white_level::camera_raw_white_level`, **measured** from the
+  WhiteLevel Adobe DNG Converter 18.7 writes): ILCE-7RM4A / ILCE-7RM4 16383 at
+  14 bits, 15000 at ISO 160, 16380 at 12 bits; ILCE-7M3 16300; Canon EOS R6
+  16384. Any other body keeps the file's level (rawler's), disclosed per render.
 
 ### Measured results & disclosures
 
@@ -91,6 +96,25 @@ coercing either to RGB would invent a colour model.
   50,331,648 samples by up to 2 codes; and the stack, heal and clone masters
   were written untagged, so a 16-bit one re-read with the untagged-input
   warning.
+- The raw white level is an exposure (`(value − black) / (white − black)`), and
+  until v1.17.0 the engine took rawler's, the file's own: 15360 on every Sony
+  file read (the SR2 tag 0x787F), 14008 on the R6. Camera Raw's DNG of the same
+  files says otherwise, so every Sony render sat log2(15871 / 14848) = +0.096 EV
+  brighter than Camera Raw's before any slider (R6 +0.234 EV less a −0.02 EV
+  baseline difference), lens correction on or off alike. The rule was pinned on
+  a census of 50 files (42 ILCE-7RM4A, 8 ILCE-7RM4; ISO 50–25600, 1/4000–25 s)
+  plus three corpus frames: 12-bit files 16380 and 14-bit files 16383, except
+  ISO 160, where all 8 files say 15000. It is not the data maximum, not the
+  vendor tag and not a linearization table (none is written). From v1.17.0
+  every render of those bodies is darker by that amount (−0.096 EV for the Sony
+  bodies) — a deliberate change, named in the release notes. It is the raw's
+  scale, not recipe semantics, so the stamped-curve era rule does not apply.
+  Measured after the change on lens-off flat renders (engine − Camera Raw, median
+  log2 Y): 7RM4A −0.08 to −0.01 (was +0.07 to +0.11), 7M3 −0.06 to +0.02 in the
+  midtones, R6 −0.01 to +0.03 (was +0.22 to +0.39); the D700, whose levels agree,
+  renders byte-identically. What is left — one corpus frame's neutral L 40–60 −1.06 L, another's −0.19 L — is
+  the exposure ramp's black and shoulder, which were scanned on renders made at
+  the old, too-bright scale.
 
 ### RAW denoise
 
@@ -371,6 +395,13 @@ bundled; a machine with no profiles gets a named refusal.
   least-significant digit first, little-endian size + zlib via `flate2`), checked
   against its id with `md5` (the SDK's `RecomputeFingerprint`). Read from the
   user's Camera Raw install, never bundled; RGB tables stay unrendered and named.
+  Decode and application measured against Camera Raw (v1.17.0) on a synthetic
+  linear-ProPhoto bench at 6048 nodes of the 「Adobe Color」 table (36 hue × 16
+  saturation × 16 value, version 1, linear value axis): measured − decoded entry,
+  median 0.011° hue (max 2.44), 0.0004 saturation scale, 0.0003 value scale; the
+  table interpolated as the engine does at each measured input predicts Camera
+  Raw's colour to ΔE median 0.012, max 1.21, where the table itself moves
+  colours by up to 61.
 - The canvas start (v1.17.0): a fresh develop of a RAW names 「Adobe Standard」
   with the 「Adobe Color」 Look (`render::canvas_recipe`, the all-zero sidecar's
   own `crs:Look` block) when `render::canvas_renders` finds both in the install,
