@@ -2900,9 +2900,63 @@ about 5 % too far out on a lens whose map reaches 1.054. The DNG polynomial's
 shape terms are reproduced within 2.1 × 10⁻⁶ on the five frames; after the
 change the five lens-on registrations sit at the lens-off noise, every 0.1
 radius bin from 0.15 to 0.85 within ±0.008 % (2-D rms on the 24–105 frames
-0.03–0.07 px at 3000 px, before 0.35–1.31; the 14–24 frame 0.02 → 0.04). Not carried: Camera Raw centres the map on the sensor,
-16 px right of the default crop's centre on this body, a sub-pixel shift the
-engine's crop-centred map leaves (`rel1170/dngc/`). The body's Adobe Standard profile
+0.03–0.07 px at 3000 px, before 0.35–1.31; the 14–24 frame 0.02 → 0.04).
+
+**Known difference: the map's centre.** Camera Raw centres the map on the
+sensor, which on this body sits 16 px right of the default crop's centre
+(sensor 9600 wide, crop 9504 from x = 32); the engine centres it on the crop.
+The two maps then differ by a sideways translation of 16·(1 − f) px, f the
+map's radial factor — largest at the frame centre, where f is the
+polynomial's constant term, and near zero in the corners where f returns to
+about 1. Full size that is 0.46 px (24–105 at 45 mm), 0.65–0.75 px (73–105
+mm) and 0.14 px (14–24 at 20 mm); measured on the 80 mm frame as a 0.44 px
+shift of the centre tile at 6144 px wide (0.68 px full size; predicted 0.75).
+It moves no radius, so the radial bins above cannot see it. Carrying it means
+giving the geometry stage and every map that mirrors it (the mask unwarp, the
+sensor-frame raster) a centre other than the frame's, which is outside the
+lens metadata reader; it is left, and disclosed here.
+
+**Chromatic aberration and vignetting, read the same way (v1.17.0).** The
+Sony CA pair (tag 0x7035, sixteen red and sixteen blue knots) follows the
+distortion knots' convention: DNG Converter writes Camera Raw's reading of it
+as a WarpRectilinear opcode whose red and blue planes are the least-squares
+odd polynomial through t·C(t) at the knots i ≥ 1, knot i at i/(n−1) of the
+sensor half-diagonal, with no zoom and green the identity — reproduced within
+7.6 × 10⁻⁶ of a factor on ten channels of five frames, where the old reading
+missed by up to 1.1 × 10⁻⁴. Its radius is the green sample's raw-frame
+radius, so `lensmeta::sony_render_ca` evaluates the polynomial at the radius
+the distortion map sends each canonical output radius to (a CA spline read
+with the distortion toggled off is then a few per cent of radius off, under
+10⁻⁵ of a factor on these lenses). Three Camera Raw behaviours were measured
+around it and are not the engine's: with the profile switched off
+(LensProfileEnable 0) Camera Raw still applies the camera's CA, where the
+engine turns CA off with the profile; with the setup Custom it ignores the
+camera's CA (under LensDefaults, the setup Lightroom writes, it applies it);
+and it warps in the camera's colour space, so a channel's shift leaks into the
+others' output by up to about a sixth (a 4.9 × 10⁻⁴ blue scale moves output
+green by 0.9 × 10⁻⁴), where the engine warps the rendered RGB. On real knots
+each is at most about 2 × 10⁻⁴ of radius.
+
+The Sony vignette knots (0x7032, and their SR2 copy) are NOT Camera Raw's
+vignetting: knot sets rewritten to constants render bit-identically under the
+setups Custom and LensDefaults and with the profile off, and DNG Converter
+writes no vignette opcode. With the profile on, Camera Raw's gain is the Adobe
+profile's VignetteModel, 1/(1 + a₁x² + a₂x⁴ + a₃x⁶), x the RAW-frame radius
+(before the distortion map) over the node's focal length in pixels
+(FocalLength/36 of the sensor width), the bracketing focal nodes blended in EV;
+the focus distance is the file's ApproximateFocusDistance when it has one
+(written into a test sidecar it moves the gain onto that node's), and the
+closest-focus node when it has none, as these Sony files do. Measured on
+flat-field frames (the raw data replaced by a uniform field and read against
+its own raw-gain ladder, so no tone curve enters): within 0.2 % of the gain to
+0.94 of the half-diagonal on the 80 mm 24–105 frame and the 20 mm 14–24
+frame, 0.5–0.6 % in the extreme corner. The engine is off this in two ways,
+both outside the lens metadata reader: it applies the camera's knots, and it
+applies them after the profile's default curve rather than in raw-linear
+light, which shrinks their EV by a fifth to a quarter (reproduced to 0.0002 EV
+from the engine's own ladder). Before: engine gain against Camera Raw's −0.3
+to −5.3 % across the 24–105 frame (+8.0 % at the corner) and −0.8 to −24.3 %
+across the 14–24 frame (`rel1170/vigca/`). The body's Adobe Standard profile
 carries no DefaultBlackRender tag (absent means Auto), so the SDK's render would subtract
 Shadows 5 × 0.001 = 0.005 black; the engine subtracts the sensor's 512 and no
 render black, and the 0.005 tried on p39 overshoots the shadows (ΔL −2 to

@@ -1701,7 +1701,12 @@ rectilinear approximation. Sony tag `0x7037` supplies 16 distortion knots. The
 image renderer reads them the way Camera Raw does, measured through Adobe DNG
 Converter's LensDistortInfo polynomial: knot i at i/(n−1) of the sensor
 half-diagonal, a least-squares odd polynomial through the radius map t·K(t),
-evaluated at the zoomed output radius and resampled onto 32 canonical nodes;
+evaluated at the zoomed output radius and resampled onto 32 canonical nodes.
+The CA pair (`0x7035`) is read by the same fit with no zoom, at the green
+sample's raw-frame radius (DNG Converter's WarpRectilinear red and blue
+planes); the camera's vignette knots (`0x7032`) are not what Camera Raw
+renders — it uses the Adobe profile's VignetteModel, at the raw-frame radius
+and in raw-linear light;
 the Lightroom mask solve keeps its native `(i+1)/16` reading, resampled onto
 2048 canonical nodes, and persists a bounded 64-knot inverse transport.
 
