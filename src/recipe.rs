@@ -788,6 +788,12 @@ pub struct CameraStart {
     pub ev: f32,
     /// The over-range headroom, in stops (0..=1).
     pub headroom: f32,
+    /// The profile stage's look table and tone curve — what it puts on after
+    /// its exposure transfer — by the key the stage registered them under
+    /// (`render::profile::register_tail`), filled in the same step that reads
+    /// the profile. 0, the default (every recipe written before the key
+    /// existed): Adobe's default curve and no look table.
+    pub tables: u64,
 }
 
 /// One smooth field of local colour and tone, on the same bilateral grid the
@@ -4222,6 +4228,7 @@ impl EditRecipe {
         self.camera_start = self.camera_start.filter(|c| c.ev.is_finite() && c.headroom.is_finite()).map(|c| CameraStart {
             ev: c.ev.clamp(-10.0, 10.0),
             headroom: c.headroom.clamp(0.0, 1.0),
+            tables: c.tables,
         });
         // Crop is a normalized [0,1] view-frame rectangle; untrusted input
         // (AI JSON, foreign XMP, a hand-edited recipe) can carry values
@@ -5349,6 +5356,22 @@ mod tests {
         stub.clamp();
         assert!(stub.mask_warp.is_empty());
         assert_eq!(stub.mask_warp_src, MaskWarpSource::Unparseable);
+    }
+
+    /// A camera start written before the stage's tail key existed loads with
+    /// key 0 — Adobe's default curve and no look table, what it rendered under
+    /// — and a stamped key survives the JSON round trip.
+    #[test]
+    fn a_camera_start_without_its_tail_key_loads_as_the_default_tail() {
+        let legacy: EditRecipe =
+            serde_json::from_str(r#"{"camera_start":{"ev":0.35,"headroom":0.995}}"#).unwrap();
+        assert_eq!(legacy.camera_start, Some(CameraStart { ev: 0.35, headroom: 0.995, tables: 0 }));
+        let stamped = EditRecipe {
+            camera_start: Some(CameraStart { ev: 0.35, headroom: 1.0, tables: 0x1234_5678_9abc_def0 }),
+            ..Default::default()
+        };
+        let back: EditRecipe = serde_json::from_str(&serde_json::to_string(&stamped).unwrap()).unwrap();
+        assert_eq!(back.camera_start, stamped.camera_start);
     }
 
     #[test]

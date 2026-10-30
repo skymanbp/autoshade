@@ -50,6 +50,7 @@ mod brush;
 mod as_shot;
 mod camera;
 mod canvas;
+mod clip_lift;
 mod colour;
 mod develop;
 mod export;
@@ -108,7 +109,7 @@ pub use develop::{
     retouch_spots,
 };
 pub(crate) use develop::{apply_colour_field, field_axis, field_guide_luma};
-use develop::{apply_develop_with_rasters, dehaze_airlight, dehaze_px, luma601};
+use develop::{apply_develop_with_rasters, dehaze_airlight, dehaze_px, luma601, OverRange};
 use develop::{apply_radial_gain, apply_radial_gain_linear, profile_vignette_lut};
 #[cfg(test)]
 use develop::{apply_dehaze, apply_develop_anon, manual_vignette_lut, vignette_gain_lut};
@@ -200,13 +201,16 @@ pub use orient::{
 pub(crate) use orient::{oriented};
 #[cfg(test)]
 use orient::{orientation_mirrors};
-pub use resample::{inscribed_dims, rotate_straighten};
+pub use resample::{inscribed_dims, rotate_straighten, thumbnail, thumbnail_exact};
 use resample::{
     downscale_f32, flip_h_in_place, orient_f32, sample_bilinear_ch, sample_bilinear_rgb16,
 };
 pub use source::{render_baked_to_image, render_to_image, render_to_image_in, source_pixels};
-pub use canvas::{base_develop, canvas_recipe, canvas_renders, source_pixels_for, BasePart, CANVAS_PROFILE};
-use source::{apply_crop, rgb16_source};
+pub use canvas::{
+    base_develop, canvas_recipe, canvas_renders, master_develop, master_pixels_for, source_pixels_for, BasePart,
+    CANVAS_PROFILE,
+};
+use source::{apply_crop, render_frame, rgb16_source};
 #[cfg(test)]
 use source::{cfa_needs_geometry_demosaic, cfa_taps, demosaic_over_cfa_geometry, wrap_table};
 pub use tone::{curve_lut};
@@ -216,7 +220,7 @@ pub(crate) use tone::{
 };
 use tone::{CurveSpace, MiddleRatio, apply_camera_raw_curve, apply_rgb_curves, hermite_eval};
 pub(crate) use tone_cr::{
-    HS_SH_FLOOR, HsKey, SliderLaw, camera_raw_exposure, camera_raw_response_keyed,
+    HS_SH_FLOOR, HsKey, SliderLaw, camera_raw_exposure, camera_raw_response_keyed, shadows_anchor,
     camera_raw_row, camera_raw_start, Exposure, hs_row, HsSite,
 };
 use tone_cr::{
@@ -229,7 +233,9 @@ pub(crate) use tone::{limit_tone_sliders, parametric_lut};
 use tone::{camera_raw_rgb_tone, look_curve_lut};
 pub use wb::{local_temp_to_kelvin, solve_wb_for, solve_wb_from_neutral};
 pub(crate) use wb::{WbLaw, linear_to_srgb, srgb_to_linear, wb_gains};
-use wb::{apply_recipe_wb, apply_recipe_wb_in, colour_gain_luts, ramp, smoothstep, transfer_luts};
+use wb::{
+    apply_recipe_wb, apply_recipe_wb_in, colour_gain_luts, decode_wide, encode_wide, ramp, smoothstep, transfer_luts,
+};
 #[cfg(test)]
 use wb::{kelvin_to_rgb};
 

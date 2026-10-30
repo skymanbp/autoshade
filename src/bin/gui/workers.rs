@@ -113,7 +113,7 @@ impl AutoShadeApp {
                     // GUARDED shrink: plain `thumbnail` UPSCALES, which would
                     // inflate a small master instead of bounding a large one.
                     if im.width().max(im.height()) > edge {
-                        im.thumbnail(edge, edge)
+                        autoshade::render::thumbnail(&im, edge, edge)
                     } else {
                         im
                     }
@@ -248,11 +248,11 @@ impl AutoShadeApp {
                     // the export. The same number keys the cache file above —
                     // read once here rather than threaded from it, because the
                     // cache may legitimately be absent (unstattable source).
-                    let thumb = autoshade::decode::preview_only_turned(
-                        &path,
-                        autoshade::store::saved_quarter_turns(&path),
-                    )?
-                    .thumbnail(THUMB_EDGE, THUMB_EDGE);
+                    let thumb = autoshade::render::thumbnail(
+                        &autoshade::decode::preview_only_turned(&path, autoshade::store::saved_quarter_turns(&path))?,
+                        THUMB_EDGE,
+                        THUMB_EDGE,
+                    );
                     if let Some(p) = &cache {
                         save_thumb_cache(p, &thumb); // best-effort write-through
                     }

@@ -182,7 +182,7 @@ pub fn fit_provider(
         // staging the full frame would spend more on the PNG encode than on
         // the model.
         let stage = |img: &image::DynamicImage, p: &std::path::Path| -> Result<()> {
-            img.thumbnail(1024, 1024)
+            crate::render::thumbnail(img, 1024, 1024)
                 .save(p)
                 .with_context(|| format!("stage {} for the correspondence sidecar", p.display()))
         };

@@ -222,19 +222,31 @@ pub(super) fn camera_to_space_matrix(xyz2cam: &[[f32; 3]; 3], space: ExportColor
 /// export exists to carry (rawler's own calibrate kills it). Components
 /// outside the DELIVERY gamut go negative here and clip at the final
 /// 16-bit pack. Highlights (any component > 1 after white balance) get the
-/// same desaturating treatment rawler's develop applies — scale-to-max
-/// averaged with the euclidean norm — so wide and sRGB renders treat blown
-/// areas alike. The transfer's linear segment covers negatives (no NaN).
+/// same desaturating treatment rawler's develop applies ([`settle_over_range`])
+/// so wide and sRGB renders treat blown areas alike — unless
+/// `defer_over_range` (Camera Raw's law): then the frame keeps its over-range
+/// components, encoded exactly above 1, and they end after the slider
+/// Exposure (`render::develop`), where Camera Raw's renders put them. The
+/// transfer's linear segment covers negatives (no NaN).
 pub(super) fn calibrate_camera_buffer(
     data: &mut [[f32; 3]],
     xyz2cam: &[[f32; 3]; 3],
     wb: [f32; 3],
     space: ExportColorSpace,
     profile: Option<&profile::Stage>,
+    defer_over_range: bool,
 ) {
     let m = camera_to_space_matrix(xyz2cam, space);
+    // Camera Raw's near-white colour lift (`clip_lift`, measured), on the
+    // white-balanced camera triple keyed to the sensor value — part of Camera
+    // Raw's render, so it runs where a Camera Raw profile stage does and a
+    // render with no profile keeps its pre-v1.17.0 pixels.
+    let lift = profile.and_then(|_| super::clip_lift::ClipLift::for_white(wb));
     data.par_iter_mut().for_each(|px| {
-        let v = [px[0] * wb[0], px[1] * wb[1], px[2] * wb[2]];
+        let mut v = [px[0] * wb[0], px[1] * wb[1], px[2] * wb[2]];
+        if let Some(l) = &lift {
+            v = l.apply(*px, v);
+        }
         // The camera profile acts HERE: linear light, before the transfer
         // encode. Everything downstream — exposure, tone, the mixer, the masks
         // — then sees a frame that already carries the profile, which is the
@@ -253,20 +265,41 @@ pub(super) fn calibrate_camera_buffer(
             }
             None => mat_vec3(&m, &v),
         };
-        let max = t[0].max(t[1]).max(t[2]);
-        if max > 1.0 {
-            // Blown pixels take EXACTLY rawler's treatment, including its
-            // negative pre-clip: keeping negatives inside this formula let
-            // the positive euclidean term drag an out-of-gamut component
-            // back into gamut with a hue shift. Unblown pixels (the branch
-            // NOT taken) keep their negatives — the wide-gamut win lives
-            // there.
-            let t0 = t.map(|c| c.max(0.0));
-            let eucl = ((t0[0] * t0[0] + t0[1] * t0[1] + t0[2] * t0[2]) / 3.0).sqrt();
-            t = t0.map(|c| (c / max + eucl) / 2.0);
+        if !defer_over_range {
+            t = settle_over_range(t);
         }
         *px = [linear_to_srgb(t[0]), linear_to_srgb(t[1]), linear_to_srgb(t[2])];
     });
+}
+
+/// rawler's develop's treatment of a blown pixel (any linear component above
+/// 1): scale-to-max averaged with the euclidean norm; a pixel inside 1 comes
+/// back as it went in. Blown pixels take EXACTLY rawler's formula, including
+/// its negative pre-clip: keeping negatives inside it let the positive
+/// euclidean term drag an out-of-gamut component back into gamut with a hue
+/// shift. Unblown pixels keep their negatives — the wide-gamut win lives
+/// there.
+fn settle_over_range(t: [f32; 3]) -> [f32; 3] {
+    let max = t[0].max(t[1]).max(t[2]);
+    if max <= 1.0 || max.is_nan() {
+        return t;
+    }
+    let t0 = t.map(|c| c.max(0.0));
+    let eucl = ((t0[0] * t0[0] + t0[1] * t0[1] + t0[2] * t0[2]) / 3.0).sqrt();
+    t0.map(|c| (c / max + eucl) / 2.0)
+}
+
+/// The creative Look's colour table `r` renders through (`None`: its Look
+/// names none), or why it cannot — one rule for the render's profile stage and
+/// the open path's camera start (`render::camera_start`).
+pub(super) fn creative_table(r: &EditRecipe) -> Option<std::result::Result<crate::dcp::Table, String>> {
+    let look = r.look.as_ref().filter(|l| !l.table.is_empty())?;
+    // Lightroom scales a Look by its Amount; every Look measured carries
+    // 1, and how a table scales below that is not modelled.
+    if (look.amount - 1.0).abs() > 1e-3 {
+        return Some(Err(format!("its amount is {:.2}, and only 1 is modelled", look.amount)));
+    }
+    Some(crate::dcp::find_look_table(&look.table).map_err(|e| e.to_string()))
 }
 
 /// The camera profile this photograph is developed through, prepared for this
@@ -308,21 +341,17 @@ pub(super) fn resolve_camera_profile(
     // The creative colour table, read from the Camera Raw install and checked
     // against its fingerprint (`crate::dcp::find_look_table`). Every way it
     // can stay unrendered is named here, where the profile is being applied.
-    let creative = r.look.as_ref().filter(|l| !l.table.is_empty()).and_then(|look| {
-        let not_rendered = |why: String| {
-            diag.warn(format!(
-                "creative profile \"{}\": its colour table ({}) is not rendered ({why}) — the \
-                 rest of the Look is",
-                look.name, look.table
-            ));
-        };
-        // Lightroom scales a Look by its Amount; every Look measured carries
-        // 1, and how a table scales below that is not modelled.
-        if (look.amount - 1.0).abs() > 1e-3 {
-            not_rendered(format!("its amount is {:.2}, and only 1 is modelled", look.amount));
-            return None;
-        }
-        crate::dcp::find_look_table(&look.table).map_err(|e| not_rendered(e.to_string())).ok()
+    let creative = creative_table(r).and_then(|found| {
+        found
+            .map_err(|why| {
+                let look = r.look.as_ref().expect("a creative table answer names a Look");
+                diag.warn(format!(
+                    "creative profile \"{}\": its colour table ({}) is not rendered ({why}) — the \
+                     rest of the Look is",
+                    look.name, look.table
+                ));
+            })
+            .ok()
     });
     let (make, model) = (rawimage.camera.make.as_str(), rawimage.camera.model.as_str());
     let (path, prof) = match crate::dcp::find(make, model, name) {

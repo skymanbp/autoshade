@@ -398,7 +398,7 @@ pub(crate) fn divergence_raster(
     let src_grid = src.resize_exact(w, h, image::imageops::FilterType::Lanczos3);
     let tgt_grid = target.resize_exact(w, h, image::imageops::FilterType::Lanczos3);
     let src_base = render::develop_preview(&src_grid, base);
-    let presence = target.color().has_alpha().then(|| presence_of(&target.thumbnail_exact(w, h))).flatten();
+    let presence = target.color().has_alpha().then(|| presence_of(&crate::render::thumbnail_exact(target, w, h))).flatten();
     DivergenceRaster { source: pixels_of(&src_base), target: pixels_of(&tgt_grid), width: w, height: h, presence }
 }
 

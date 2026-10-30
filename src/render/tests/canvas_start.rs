@@ -4,10 +4,11 @@
 /// profile and the Look's identity and table — and nothing of the Look's
 /// baked half, which the preview develop renders from the full recipe; a
 /// recipe that names no profile has the neutral part, whose base is the
-/// neutral develop every base was before v1.17.0.
+/// neutral develop every base was before v1.17.0, unsharpened.
 ///
 /// MUTATION: keep the Look's tone curve in the part (it would render twice),
-/// or give a profile-less Look a non-neutral part (a needless re-develop).
+/// give a profile-less Look a non-neutral part (a needless re-develop), or
+/// let a base take the RAW default sharpening (it would be sharpened twice).
 #[test]
 fn the_base_part_is_the_profile_stage_and_nothing_after_it() {
     let canvas = canvas_recipe();
@@ -31,7 +32,10 @@ fn the_base_part_is_the_profile_stage_and_nothing_after_it() {
         ..Default::default()
     };
     assert!(BasePart::of(&unnamed).is_neutral());
-    assert_eq!(BasePart::default().recipe(), EditRecipe::default(), "the neutral develop's recipe");
+    let mut unsharpened = EditRecipe::default();
+    unsharpened.set_resolved("sharpening", 0.0);
+    assert_eq!(BasePart::default().recipe(), unsharpened, "the neutral develop's recipe, unsharpened");
+    assert_eq!(base.capture_sharpening(true), 0.0, "no base is sharpened: the display and the export sharpen once");
 }
 
 /// A recipe saved before v1.17.0 — a stamped camera base curve, no profile —
@@ -46,7 +50,15 @@ fn the_base_part_is_the_profile_stage_and_nothing_after_it() {
 /// (v1.17.0: a measured Sony body now scales its raw by Camera Raw's level,
 /// 16383 not 15360, so every render of it is 0.096 EV darker): the era rule
 /// is about what a saved recipe means, not about the raw's scale, so the
-/// digest follows the decode. Env-gated on the corpus (`p39.arw`).
+/// digest follows the decode. Re-read a third time, on the merge of that
+/// white level with the signed black level (`develop_cfa_signed`, v1.17.0),
+/// which moves this render where the sensor sits near its black and only
+/// there: against the build before it (CLI, 1000 px, 16-bit) 1.77 % of the
+/// pixels change, 70 % of those encoded below 0.02 and 14 % of those in
+/// 0.02–0.05, against 0.002 % above 0.5 (the demosaic's neighbourhood of a
+/// site below the black). Unchanged by the merge of rel1170-vigca (the
+/// measured exposure transfer, `CameraStart`, `UnderTone`): this recipe names
+/// no profile, so no profile stage runs. Env-gated on the corpus (`p39.arw`).
 ///
 /// MUTATION: let `starting_curve` drop a curve on a recipe that names no
 /// profile, or develop a neutral part through anything but the neutral recipe.
@@ -116,7 +128,7 @@ fn fnv1a64_u16(px: &[u16]) -> u64 {
 }
 
 /// The pre-switch digest (see the test above).
-const OLD_RECIPE_P39_1000_DIGEST: u64 = 0x6bf0_2a54_1c58_ae23;
+const OLD_RECIPE_P39_1000_DIGEST: u64 = 0xcb8b_abcc_4d81_f379;
 
 /// v1.17.0 step 2's INVARIANT: a fresh canvas is one picture on every surface.
 /// The all-zero fresh recipe (the calibration a fresh open stamps) against the
@@ -125,7 +137,7 @@ const OLD_RECIPE_P39_1000_DIGEST: u64 = 0x6bf0_2a54_1c58_ae23;
 ///
 /// * the EXPORT of the fresh recipe — the same code path — byte-identical;
 /// * the GUI and web canvas — the preview develop over the base develop
-///   ([`base_develop`], 8-bit, then the engine's finishing tail) — ΔE76 ≤ 0.5;
+///   ([`base_develop`], as the GUI holds it, then the engine's finishing tail) — ΔE76 ≤ 0.5;
 /// * a MASTER baked from that base (a heal / denoise / stack writes the base
 ///   develop's pixels) rendered under the recipe — ΔE76 ≤ 0.5;
 /// * the reverse fit's SOURCE ([`crate::pipeline::fit_source`], the base
@@ -196,7 +208,7 @@ fn every_surface_shows_a_fresh_canvas_as_the_export_renders_it() {
     // 2. The canvas: the preview develop over the base develop, then the
     // engine's tail — `bin/gui/util.rs`'s `build_preview` and the web pane.
     let part = BasePart::of(&fresh);
-    let base = DynamicImage::ImageRgb8(base_develop(&raw, &part, Some(EDGE)).expect("base").to_rgb8());
+    let base = base_develop(&raw, &part, Some(EDGE)).expect("base");
     let film = crate::decode::film_short_edge(&raw);
     let preview = |base: &DynamicImage, r: &EditRecipe| {
         let after = develop_preview_film(base, r, &crate::diag::pixels(), film, true);
@@ -209,7 +221,7 @@ fn every_surface_shows_a_fresh_canvas_as_the_export_renders_it() {
 
     // 3. A master baked from the base and rendered under the recipe — the
     // baked door every master export takes.
-    let master = base_develop(&raw, &part, Some(EDGE)).expect("master");
+    let master = master_develop(&raw, &part, Some(EDGE)).expect("master");
     let from_master =
         render_baked_to_image(&master, &fresh, None, None, &crate::diag::pixels()).expect("master render");
     let de_master = mean_de76(&from_master, &reference);
@@ -239,6 +251,82 @@ fn every_surface_shows_a_fresh_canvas_as_the_export_renders_it() {
     if fit_has_canvas {
         assert!(de_fit <= 0.5, "fit source ΔE76 {de_fit:.3} (bound 0.5)");
     }
+}
+
+/// The canvas's float base (v1.17.0): a frame whose camera stage puts warm
+/// light above the working space's 1 keeps it in the base, so the canvas's
+/// negative Exposure brings it back as the export does. p37 (a warm frame) at
+/// its fitted −1.86 EV over the fresh canvas, 1000 px: the canvas over the
+/// float base against the export, bounded ΔE76 ≤ 0.5, and the same canvas
+/// over that base cut to 8 bits printed beside it.
+///
+/// A float base (one that keeps its over-range light) thumbnails to the same
+/// size and the same windows as `image`'s own thumbnail, with the plain mean:
+/// `image` adds `n/2` before its division, so its f32 thumbnail is every
+/// channel + 0.5. Downscale (block windows), 1:1 and the fractional upscale
+/// cases, against a 16-bit copy of the same frame and against the exact mean.
+///
+/// MUTATION: send a float frame to `DynamicImage::thumbnail`.
+#[test]
+fn a_float_base_thumbnails_without_the_half_unit_bias() {
+    let (w, h) = (37u32, 23u32);
+    let at = |x: u32, y: u32, c: u32| ((x * 7 + y * 13 + c * 5) % 64) as f32 * 1024.0 / 65535.0;
+    let f = DynamicImage::ImageRgb32F(ImageBuffer::from_fn(w, h, |x, y| Rgb([at(x, y, 0), at(x, y, 1), at(x, y, 2)])));
+    let i = DynamicImage::ImageRgb16(ImageBuffer::from_fn(w, h, |x, y| {
+        Rgb([0, 1, 2].map(|c| (at(x, y, c) * 65535.0).round() as u16))
+    }));
+    for (nw, nh) in [(9u32, 9u32), (37, 23), (50, 50), (20, 40)] {
+        let (a, b) = (super::thumbnail(&f, nw, nh), i.thumbnail(nw, nh));
+        assert_eq!((a.width(), a.height()), (b.width(), b.height()), "{nw}x{nh}: the size is image's");
+        let (a, b) = (a.to_rgb32f(), b.to_rgb32f());
+        let worst = a.as_raw().iter().zip(b.as_raw()).map(|(p, q)| (p - q).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1.0 / 65535.0, "{nw}x{nh}: float vs 16-bit thumbnail off by {worst}");
+    }
+    // A 2x2 block: the plain mean, not the mean + 0.5 image's f32 path gives.
+    let tiny = DynamicImage::ImageRgb32F(ImageBuffer::from_fn(2, 2, |x, y| Rgb([(x + 2 * y) as f32 * 0.25, 1.5, -0.25])));
+    let one = super::thumbnail_exact(&tiny, 1, 1).to_rgb32f();
+    assert_eq!(one.get_pixel(0, 0).0, [0.375, 1.5, -0.25]);
+    assert!((tiny.thumbnail_exact(1, 1).to_rgb32f().get_pixel(0, 0)[0] - 0.875).abs() < 1e-6, "premise: image's own is +0.5");
+}
+
+/// MUTATION: clip the base at 1 (`OverRange::Clip` in `base_develop`), or
+/// read the preview's base through 8 bits.
+#[test]
+fn the_canvas_brings_back_over_range_light_as_the_export_does() {
+    let Some(dir) = crate::config::live_env_os("AUTOSHADE_FIT_CALIBRATION_DIR").map(std::path::PathBuf::from)
+    else {
+        crate::test_skipped("canvas over-range", "AUTOSHADE_FIT_CALIBRATION_DIR is unset");
+        return;
+    };
+    let raw = dir.join("p37.arw");
+    if !raw.is_file() {
+        crate::test_skipped("canvas over-range", "the corpus lacks its RAW");
+        return;
+    }
+    if let Err(why) = canvas_renders(&raw) {
+        crate::test_skipped("canvas over-range", &format!("the canvas cannot render here: {why}"));
+        return;
+    }
+    const EDGE: u32 = 1000;
+    let mut r = crate::pipeline::calibration_recipe(crate::pipeline::fresh_photo_calibration(&raw));
+    r.exposure_ev = -1.86;
+    let export = render_to_image(&raw, &r, None, Some(EDGE)).expect("export");
+    let base = base_develop(&raw, &BasePart::of(&r), Some(EDGE)).expect("base");
+    assert!(base.as_rgb32f().is_some(), "a profile part's base is a float frame");
+    let over = base.as_rgb32f().map_or(0, |f| f.as_raw().iter().filter(|&&v| v > 1.0).count());
+    let film = crate::decode::film_short_edge(&raw);
+    let canvas = |base: &DynamicImage| {
+        let after = develop_preview_film(base, &r, &crate::diag::pixels(), film, true);
+        let geom = geometry_profile(&r);
+        let fs = FilmScale::of(film, after.width() as usize, after.height() as usize);
+        frame_and_finish(after, &r, &geom, fs, CropPolicy::Cut)
+    };
+    let de_float = mean_de76(&canvas(&base), &export);
+    let de_8bit = mean_de76(&canvas(&DynamicImage::ImageRgb8(base.to_rgb8())), &export);
+    println!(
+        "canvas over-range @{EDGE}, -1.86 EV: {over} base components above 1; canvas ΔE76 over the float          base {de_float:.3}, over the base cut to 8 bits {de_8bit:.3}"
+    );
+    assert!(de_float <= 0.5, "canvas ΔE76 {de_float:.3} (bound 0.5)");
 }
 
 /// Mean CIE76 ΔE between two renders, `a` resized onto `b`'s grid when their
@@ -311,7 +399,7 @@ fn every_surface_sees_one_camera_start_and_the_sidecar_carries_none() {
     // re-reads the same from the photo, whatever the save held.
     let saved: EditRecipe = serde_json::from_str(&serde_json::to_string(&fresh).expect("json")).expect("reload");
     assert_eq!(saved.camera_start, Some(start), "the save carries it");
-    let mut stale = EditRecipe { camera_start: Some(crate::recipe::CameraStart { ev: -2.0, headroom: 0.0 }), ..saved };
+    let mut stale = EditRecipe { camera_start: Some(crate::recipe::CameraStart { ev: -2.0, headroom: 0.0, tables: 0 }), ..saved };
     crate::pipeline::stamp_camera_start(&raw, &mut stale);
     assert_eq!(stale.camera_start, Some(start), "a reload re-reads the photo's own");
     // The fit.
@@ -349,4 +437,3 @@ fn every_surface_sees_one_camera_start_and_the_sidecar_carries_none() {
     let xmp = crate::xmp::recipe_to_xmp(&fresh);
     assert!(!xmp.contains("camera_start"), "the sidecar carries no camera start");
 }
-

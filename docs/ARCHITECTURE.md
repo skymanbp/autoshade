@@ -1828,6 +1828,7 @@ line is whether the NUMBERS are wrong or only the fine detail:
 | Non-Bayer CFA (X-Trans) | **Demosaic in-tree over the array's own geometry** (v0.34.0, `render::demosaic_over_cfa_geometry`) + disclose per render | rawler's `PPGDemosaic` is Bayer-only and its guard (`CFA::is_rgb`) checks the pattern's NAME, not its geometry; through v0.33.0 its chroma pass left R unwritten at 8 of the 36 photosites per tile and B at a different 8 — the measured green-dark cast. Now every channel interpolates only from photosites that measured it: colour/tone/framing correct, fine detail approximate and disclosed |
 | An ordinary RAW develop whose peak would exceed **4 GiB** — 138,547,333 px and up, at the measured 31 B/px (a 150 MP back; a 102 MP GFX is well clear) | **Refuse**, naming the estimate and its per-pixel basis (v0.34.0, `decode::refuse_raw_develop_over_ceiling`, charged in `render::render_to_image_in` before the sensor is decompressed) | The baked door has refused an over-ceiling file since L02 while the RAW door had NO per-file limit at all, so a ~150 MP back on the default `batch --jobs 3` was the worse instance of the same defect with nothing opt-in about it. The ceiling is the SAME 4 GiB, and the message says outright that `--jobs 1` is not the answer — a single file's peak is not a concurrency budget. This IS a behaviour change: such a file used to be attempted, and would page |
 | A RAW whose **sensor plane is over the decoder's OWN allocator ceiling** — after the tile round-up, `width × cpp > 50 000`, `height > 50 000`, or `width × cpp × height > 500 M` | **Refuse**, naming the frame the file declares, the allocation it becomes and the workflow that does work (`decode::guard_raw_plane_extent`, at all four `raw_image` doors; `every_raw_image_door_measures_the_plane_first` is the sweep) | rawler's `alloc_image_plain!` (`pixarray.rs:546-556`) PANICS at that ceiling and checks it BEFORE the `dummy` short-circuit, so the 4 GiB refusal above — charged against a pixel count only the dummy probe can produce — was UNREACHABLE for every frame between the two ceilings, and a third-party panic escaped in its place, reported as "a defect in the third-party decoder" when nothing was defective. `plain_image_from_ifd` (`decoders/mod.rs:598`) charges the ceiling with `decode_width * cpp` as the WIDTH, so a three-sample LinearRaw frame reaches it at a third of the pixel count a Bayer frame would: an upscaler's 19008×12672 DNG in 416×416 tiles asks for 57408 × 12896 and trips both limits at once, while the same run's un-upscaled 9504×6336 pass computes 28704 × 6400 and still opens. Rejects ONLY on proof, like the cyclic-chain guard — an IFD that does not declare itself CFA or LinearRaw is a preview and passes through, so no file that decodes today changes |
+| Sensor values below the black level (read noise on a dark frame) | **Keep them signed** through the demosaic and the white balance (v1.17.0, `render::develop_cfa_signed`); the first clamp is rawler's calibrate rule after its matrix on the plain sRGB develop, the profile stage's guard before its hue/sat tables on a profiled one | rawler 0.7.2's rescale clips them to 0 before the demosaic (`correct_blacklevel_cfa`), a positive bias on zero-mean noise: on the night pair (noise sd ≈ 40 DN on a 10–50 DN signal) the darkest band read u/v +1.606/−0.288 against Camera Raw's +1.261/−0.405, +1.486/−0.405 signed. Done from rawler's public pieces in its own step order (a value above the black is bit-identical) rather than by handing rawler a pre-scaled mosaic, which it clones: that cost 3.9 B/px of peak commit, and this form measures 24.3 B/px against 30.4 before on a 60 MP frame |
 | DefaultCrop rectangle off the sensor | **Disclose** and develop un-aligned | Was a silent `None` until R27 — any diagnosis of a misplaced mask started with zero telemetry |
 | Untagged **16-bit** baked input | **Disclose** | It is read as sRGB. Right for 8-bit JPEG (web convention); often wrong for 16-bit, which is what an editor produces — LR's "Edit in…" exports ProPhoto. Warning on every untagged JPEG would be a warning nobody reads |
 
@@ -2175,7 +2176,8 @@ names no camera profile, v1.17.0 — composed into one table; on a recipe that
 names one, Camera Raw's measured law in five passes, `render/tone_cr.rs`:
 Highlights and Shadows first — Highlights a local law on two edge-aware
 bases of the frame's luminance keyed to its mean, Shadows a gain on linear
-luminance set by the frame's spread on a 768-cell map — then exposure by
+luminance set by the frame's spread on a 768-cell map, against an anchor
+that a power mean of the map puts above its mean — then exposure by
 Adobe's channel rule,
 Contrast, Whites and Blacks, the parametric and point curves, then the
 Look's baked curve — the last three by Camera Raw's measured curve rule on
@@ -3201,17 +3203,30 @@ the canvas's pixels must be developed under it: `render::BasePart` is the part
 of a recipe the RAW develop reads (the camera profile and the Look's table,
 not its baked curve, which the preview develop renders), and
 `render::base_develop` / `source_pixels_for` is the one base for every
-consumer — the GUI and web canvas (re-developed in the background when the
-recipe's part changes, `ensure_source_part`), the Before view, the heal /
-clone / denoise / stack / generative masters and the fill's card pixels, and
-the reverse fit's source (`pipeline::fit_source`, with `fit::solve` rebasing
-on a Look that bakes a curve). `PhotoCalibration` carries the profile and the
+surface that develops over it — the GUI and web canvas (re-developed in the
+background when the recipe's part changes, `ensure_source_part`), the Before
+view, the fill's card pixels, and the reverse fit's source
+(`pipeline::fit_source`, with `fit::solve` rebasing on a Look that bakes a
+curve). That base is UNSHARPENED (the display and the export sharpen once, over
+it) and, for a part that names a profile, a 32-bit float frame that keeps the
+camera stage's over-range light for the canvas's Exposure (×2 the 16-bit
+frame's memory: a 4096 px base measured 128.3 MB against 64.1 MB, a
+process committing 146 MB after it against 82 MB; the peak, 1059 MB on a 61 MP
+frame, is the full-frame develop's either way). Every surface that shrinks a
+frame goes through `render::thumbnail` / `thumbnail_exact`: `image`'s own block
+average is `(sum + n/2) / n`, which on an f32 frame is the mean + 0.5, so a
+float base sent to it came back washed out (the fit then refused it as
+toneless). The heal /
+clone / denoise / stack / generative MASTERS bake through `render::master_develop`
+/ `master_pixels_for` instead: the same part with the RAW default sharpening,
+16-bit, because a master is a baked file and a baked file renders with no
+default sharpening. `PhotoCalibration` carries the profile and the
 Look. A baked file — a master, an embedded preview, a finished image — already
 carries its start, so `strip_baked_start` clears the curve, profile, Look and
 lens profile before it renders. On p39 at 1000 px against the engine's render
 of the all-zero sidecar naming Adobe Color: the export of the all-zero fresh
-recipe is byte-identical, the canvas reads ΔE76 0.354, a master 0.012, and the
-fit source at its 2048 edge 0.264 against the sidecar at the same edge
+recipe is byte-identical, the canvas reads ΔE76 0.219, a master 0.017, and the
+fit source at its 2048 edge 0.187 against the sidecar at the same edge
 (`render::tests::every_surface_shows_a_fresh_canvas_as_the_export_renders_it`).
 
 The invariant that keeps F7 from changing any existing picture is that a

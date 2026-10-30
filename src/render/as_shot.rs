@@ -39,15 +39,17 @@ pub fn camera_start(raw_path: &Path, r: &EditRecipe) -> Option<crate::recipe::Ca
     }
     // Every develop request of the web canvas stamps it, so the answer is
     // kept per file (and its modification time) and profile.
-    type Key = (std::path::PathBuf, Option<std::time::SystemTime>, String);
+    type Key = (std::path::PathBuf, Option<std::time::SystemTime>, String, String);
     type Cache = std::sync::Mutex<Vec<(Key, Option<crate::recipe::CameraStart>)>>;
     static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
-    let key: Key = (raw_path.to_path_buf(), std::fs::metadata(raw_path).and_then(|m| m.modified()).ok(), name.to_string());
+    // The Look's table is part of the key: it is part of the start's tail.
+    let look = r.look.as_ref().map(|l| format!("{}@{}", l.table, l.amount)).unwrap_or_default();
+    let key: Key = (raw_path.to_path_buf(), std::fs::metadata(raw_path).and_then(|m| m.modified()).ok(), name.to_string(), look);
     let cache = CACHE.get_or_init(Cache::default);
     if let Some((_, s)) = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|(k, _)| *k == key) {
         return *s;
     }
-    let s = camera_start_uncached(raw_path, name);
+    let s = camera_start_uncached(raw_path, name, r);
     let mut c = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if c.len() >= 64 {
         c.remove(0);
@@ -57,14 +59,17 @@ pub fn camera_start(raw_path: &Path, r: &EditRecipe) -> Option<crate::recipe::Ca
 }
 
 /// [`camera_start`] read from the file, for profile `name`.
-fn camera_start_uncached(raw_path: &Path, name: &str) -> Option<crate::recipe::CameraStart> {
+fn camera_start_uncached(raw_path: &Path, name: &str, r: &EditRecipe) -> Option<crate::recipe::CameraStart> {
     let (_, rawimage) = metadata(raw_path, "camera start")?;
     let (make, model) = (rawimage.camera.make.as_str(), rawimage.camera.model.as_str());
     let (_, prof) = crate::dcp::find(make, model, name).ok()?;
     let total = crate::dcp::baseline_exposure(make, model).ev() + prof.baseline_exposure_offset;
     let wb = normalise_wb(rawimage.wb_coeffs);
     let neutral = wb.iter().all(|c| c.is_finite() && *c > 0.0).then(|| wb.map(|c| 1.0 / c));
-    Some(profile::camera_start_of(total, neutral))
+    // The tail the render's stage will put on — the same creative-table rule
+    // (`creative_table`), the same key (`profile::tail_key`).
+    let tables = profile::tail_key(&prof, super::camera::creative_table(r).and_then(Result::ok), neutral);
+    Some(profile::camera_start_of(total, neutral, tables))
 }
 
 /// A RAW's metadata-only decode (`dummy`: no pixel data, no demosaic), with

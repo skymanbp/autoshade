@@ -5711,8 +5711,8 @@ fn haze_pair() -> (DynamicImage, DynamicImage) {
 fn joint_family_is_calibrated_on_the_fixture_set() {
     let edge = ANALYZE_EDGE;
     let read = |src: &DynamicImage, tgt: &DynamicImage| -> (f32, f32, f32) {
-        let s2 = src.thumbnail(edge, edge);
-        let tp2 = pixels_of(&tgt.thumbnail(edge, edge));
+        let s2 = crate::render::thumbnail(src, edge, edge);
+        let tp2 = pixels_of(&crate::render::thumbnail(tgt, edge, edge));
         let rep = fit_recipe(src, tgt);
         let base_px = pixels_of(&render::develop_preview(&s2, &EditRecipe::default()));
         let fit_px = pixels_of(&render::develop_preview(&s2, &rep.recipe));
@@ -5930,8 +5930,8 @@ fn joint_family_is_calibrated_on_the_fixture_set() {
 fn the_worst_bucket_cannot_gate_a_stage() {
     let edge = ANALYZE_EDGE;
     let cast_pair = |src: &DynamicImage, tgt: &DynamicImage| -> (f32, f32) {
-        let s2 = src.thumbnail(edge, edge);
-        let tp2 = pixels_of(&tgt.thumbnail(edge, edge));
+        let s2 = crate::render::thumbnail(src, edge, edge);
+        let tp2 = pixels_of(&crate::render::thumbnail(tgt, edge, edge));
         let rep = fit_recipe(src, tgt);
         let mut pre = rep.recipe.clone();
         pre.red_curve = Vec::new();
@@ -6163,7 +6163,7 @@ fn a_differently_shaped_reference_is_warned_about_not_refused() {
     assert!(same_frame_plausible(&src, &synth()));
     // A resize of the SAME frame must not trip it: aspect survives
     // `thumbnail`, and its integer rounding is what the tolerance is for.
-    assert!(same_frame_plausible(&src, &synth().thumbnail(97, 97)));
+    assert!(same_frame_plausible(&src, &crate::render::thumbnail(&synth(), 97, 97)));
     let rep = fit_recipe(&src, &tall);
     assert!(
         rep.notes
@@ -6682,7 +6682,7 @@ fn analysis_pair_puts_a_one_row_taller_target_in_the_source_geometry() {
     let src = textured(1600, 1067, 0);
     let tgt = textured(1600, 1069, 0);
     assert_eq!(
-        (tgt.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE).height(), src.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE).height()),
+        (crate::render::thumbnail(&tgt, ANALYZE_EDGE, ANALYZE_EDGE).height(), crate::render::thumbnail(&src, ANALYZE_EDGE, ANALYZE_EDGE).height()),
         (257, 256),
         "premise: independent thumbnails disagree by one row"
     );
@@ -6692,7 +6692,7 @@ fn analysis_pair_puts_a_one_row_taller_target_in_the_source_geometry() {
     // The target goes through the source's operator (box filter, rows
     // forced), not a different resampling kernel: a Lanczos3 arm here
     // changed a same-scene fit's residual by 1.8x on its own.
-    assert_eq!(t.as_bytes(), tgt.thumbnail_exact(384, 256).as_bytes());
+    assert_eq!(t.as_bytes(), crate::render::thumbnail_exact(&tgt, 384, 256).as_bytes());
     assert_ne!(
         t.as_bytes(),
         tgt.resize_exact(384, 256, image::imageops::FilterType::Lanczos3).as_bytes(),
@@ -6701,8 +6701,8 @@ fn analysis_pair_puts_a_one_row_taller_target_in_the_source_geometry() {
     // An equal-shape pair is byte-for-byte the two thumbnails it always was.
     let same = textured(1600, 1067, 1);
     let (s2, t2) = analysis_pair(&src, &same);
-    assert_eq!(s2.as_bytes(), src.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE).as_bytes());
-    assert_eq!(t2.as_bytes(), same.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE).as_bytes());
+    assert_eq!(s2.as_bytes(), crate::render::thumbnail(&src, ANALYZE_EDGE, ANALYZE_EDGE).as_bytes());
+    assert_eq!(t2.as_bytes(), crate::render::thumbnail(&same, ANALYZE_EDGE, ANALYZE_EDGE).as_bytes());
 }
 
 /// End to end: a target from the other texture family shares the
@@ -7350,7 +7350,7 @@ fn ground_truth_parameter_recovery_uses_the_evidence_population() {
     } else {
         image::open(root.join("neutral.jpg")).expect("calibration neutral.jpg")
     };
-    let source = source.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
+    let source = crate::render::thumbnail(&source, ANALYZE_EDGE, ANALYZE_EDGE);
     let mut truth = base.clone();
     truth.exposure_ev = 0.45;
     truth.contrast = 18.0;

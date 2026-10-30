@@ -76,8 +76,23 @@ impl BasePart {
         *self == Self::default()
     }
 
-    /// The recipe that develops exactly this part and nothing else.
+    /// The recipe that develops exactly this part and nothing else — with
+    /// Sharpening at an explicit 0: the RAW default capture sharpening belongs
+    /// to the display and the export, which run it over the base (a base
+    /// sharpened too was sharpened twice, and the pass clipped the over-range
+    /// light the float base keeps).
     pub fn recipe(&self) -> EditRecipe {
+        let mut r = self.master_recipe();
+        r.set_resolved("sharpening", 0.0);
+        r
+    }
+
+    /// The recipe a MASTER of this part is baked through ([`master_develop`]):
+    /// [`BasePart::recipe`] with the RAW default capture sharpening kept. A
+    /// master is a baked file, and a baked file is rendered with no default
+    /// sharpening (`EditRecipe::capture_sharpening`), so the master carries the
+    /// one sharpening its RAW is owed.
+    pub fn master_recipe(&self) -> EditRecipe {
         let dflt = EditRecipe::default();
         EditRecipe {
             camera_profile: self.camera_profile.clone(),
@@ -99,10 +114,30 @@ impl BasePart {
 
 /// Develop `raw`'s base for `part` — the profile stage and the neutral rest —
 /// at `max_edge` (the cap runs right after demosaic, as in
-/// [`render_to_image`]). The neutral part is byte-identical to the neutral
-/// develop every base was before v1.17.0.
+/// [`render_to_image`]). The neutral part is the neutral develop every base
+/// was before v1.17.0, unsharpened ([`BasePart::recipe`]). A part that names a profile is a
+/// 32-bit float frame that keeps its over-range light ([`OverRange::Keep`]),
+/// so the canvas's Exposure brings it back as the export's does; a surface
+/// that converts it to 8 or 16 bits clips it there.
 pub fn base_develop(raw: &Path, part: &BasePart, max_edge: Option<u32>) -> Result<DynamicImage> {
-    render_to_image(raw, &part.recipe(), None, max_edge)
+    let over_range = if part.is_neutral() { OverRange::Clip } else { OverRange::Keep };
+    render_frame(raw, &part.recipe(), None, max_edge, ExportColorSpace::Srgb, crate::diag::stderr(), over_range)
+}
+
+/// A master's pixels for `part` (a heal, a fill, a denoise): the base part
+/// developed with the RAW default sharpening a baked master is owed
+/// ([`BasePart::master_recipe`]), 16-bit as the master file is.
+pub fn master_develop(raw: &Path, part: &BasePart, max_edge: Option<u32>) -> Result<DynamicImage> {
+    render_to_image(raw, &part.master_recipe(), None, max_edge)
+}
+
+/// [`source_pixels_for`] for a master: a RAW through [`master_develop`], a
+/// baked source its own pixels.
+pub fn master_pixels_for(path: &Path, part: &BasePart, cap: Option<u32>) -> Result<DynamicImage> {
+    if crate::decode::is_raw(path) {
+        return master_develop(path, part, cap);
+    }
+    source_pixels(path, cap)
 }
 
 /// [`source_pixels`] for a recipe's base part: a RAW develops through

@@ -62,7 +62,7 @@ fn a_profile_with_nothing_to_say_renders_the_transfer_alone() {
     let mut cancelled = bare();
     cancelled.baseline_exposure_offset = -0.35;
     let s = Stage::build(&cancelled, SPACE, Some(5500.0), 0.35).expect("a stage");
-    assert_eq!(s.start(), crate::recipe::CameraStart { ev: 0.0, headroom: 0.0 }, "0 EV in total");
+    assert_eq!(s.start(), crate::recipe::CameraStart { ev: 0.0, headroom: 0.0, tables: s.start().tables }, "0 EV in total");
 }
 
 /// The reference round trip is EXACT when no table acts, so the two matrices
@@ -386,7 +386,7 @@ fn the_start_composes_the_bodys_baseline_with_the_profiles_offset() {
     assert_eq!(s.start().ev, -0.5, "−1 + 0.5");
     let mut px = [0.4f32; 3];
     s.apply(&mut px);
-    let want = super::super::tone_cr::Ramp::of(crate::recipe::CameraStart { ev: -0.5, headroom: 0.0 }).transfer(0.4);
+    let want = super::super::tone_cr::Ramp::of(crate::recipe::CameraStart { ev: -0.5, headroom: 0.0, tables: 0 }).transfer(0.4);
     assert!(px.iter().all(|c| (c - want).abs() < 1e-3), "−0.5 EV: {px:?} vs {want}");
     p.baseline_exposure_offset = 0.0;
     let s = Stage::build(&p, SPACE, None, 1.0).expect("+1 EV");
@@ -640,6 +640,54 @@ fn the_white_shift_keeps_white_luminance_and_is_identity_on_one_white() {
     assert!(o[2] > o[0] + 0.02, "{o:?}");
 }
 
+/// Camera Raw's Exposure under a stage that owns the camera transform and
+/// carries a look table is the stage rendered at the total: the look table
+/// AFTER the exposure, in the stage's own reference RGB (v1.17.0,
+/// [`UnderTone`]). Without the stage's tail named by the start, the same
+/// exposure under Adobe's default curve, no look table and the working-white
+/// basis misses by more than a percent.
+///
+/// MUTATION: leave the look table out of the undo or the redo; build the
+/// reference from ProPhoto's primaries at the working white for a
+/// ForwardMatrix stage.
+#[test]
+fn an_exposure_under_the_stage_is_the_stage_at_the_total() {
+    let mut p = with_matrices();
+    p.tone_curve = vec![];
+    let mut data = Vec::new();
+    for v in 0..3 {
+        for h in 0..6 {
+            for s in 0..3 {
+                let hue = 4.0 * ((h as f32) * 1.1).sin() + v as f32;
+                data.push([hue, 1.0 + 0.08 * s as f32 - 0.03 * v as f32, 1.0 - 0.04 * v as f32 + 0.02 * s as f32]);
+            }
+        }
+    }
+    p.look_table = Some(Table { hue: 6, sat: 3, val: 3, srgb_value: true, data });
+    let n = neutral_at(&p, 1, D65_XY64);
+    let at = |ev: f32| Stage::build_for(&p, SPACE, Frame { neutral: Some(n), ..Frame::default() }, ev).expect("a stage");
+    let (s0, s1) = (at(0.35), at(0.35 - 1.51));
+    assert!(s0.owns_camera() && s0.start().tables != 0);
+    let e = super::super::tone_cr::Exposure::new(s0.start(), -1.51).expect("an exposure");
+    let under = UnderTone::new(SPACE, s0.start());
+    let legacy = UnderTone::new(SPACE, crate::recipe::CameraStart { tables: 0, ..s0.start() });
+    let mut worst_legacy = 0.0f32;
+    for cam in [[0.42f32, 0.21, 0.105], [0.3, 0.15, 0.075], [0.5, 0.4, 0.2], [0.2, 0.2, 0.2], [0.1, 0.25, 0.4], [0.05, 0.04, 0.02]] {
+        let (a, want) = (s0.develop_camera(cam), s1.develop_camera(cam));
+        let got = under.expose(a, &e);
+        let old = legacy.expose(a, &e);
+        for c in 0..3 {
+            assert!((got[c] / want[c] - 1.0).abs() < 2e-3, "{cam:?}: {got:?} vs {want:?}");
+            worst_legacy = worst_legacy.max((old[c] / want[c] - 1.0).abs());
+        }
+        let back = under.redo_curve(under.undo_curve(a));
+        for c in 0..3 {
+            assert!((back[c] / a[c] - 1.0).abs() < 2e-3, "round trip {cam:?}: {back:?} vs {a:?}");
+        }
+    }
+    assert!(worst_legacy > 0.01, "the default tail would miss: worst {worst_legacy}");
+}
+
 /// Under the stage's tone the undo and the redo are inverses for a colour the
 /// stage could have produced, so a shift that does nothing changes nothing.
 ///
@@ -647,7 +695,7 @@ fn the_white_shift_keeps_white_luminance_and_is_identity_on_one_white() {
 /// a colour), or leave the transfer out of one side.
 #[test]
 fn under_the_stage_tone_undo_and_redo_are_inverses() {
-    let under = UnderTone::new(super::super::ExportColorSpace::Srgb, crate::recipe::CameraStart { ev: 0.35, headroom: 1.0 });
+    let under = UnderTone::new(super::super::ExportColorSpace::Srgb, crate::recipe::CameraStart { ev: 0.35, headroom: 1.0, tables: 0 });
     for px in [[0.05f32, 0.05, 0.05], [0.4, 0.2, 0.1], [0.1, 0.3, 0.6], [0.8, 0.75, 0.7], [0.02, 0.01, 0.03]] {
         let back = under.redo(under.undo(px));
         for c in 0..3 {

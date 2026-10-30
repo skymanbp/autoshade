@@ -59,6 +59,115 @@ pub(super) fn orient_f32(
     (data, ow as usize, oh as usize)
 }
 
+/// `DynamicImage::thumbnail` without its float bias: the same output size
+/// (`image`'s own aspect rule, replicated in [`thumbnail_dims`]) and the same
+/// sampling as [`thumbnail_exact`].
+pub fn thumbnail(img: &DynamicImage, nwidth: u32, nheight: u32) -> DynamicImage {
+    let (w, h) = thumbnail_dims(img.width(), img.height(), nwidth, nheight);
+    thumbnail_exact(img, w, h)
+}
+
+/// `DynamicImage::thumbnail_exact` without its float bias. `image`'s block
+/// average is `(sum + n/2) / n`, round-to-nearest for an integer sample but
+/// `mean + 0.5` for an f32 one ([`downscale_f32`]'s note), so every float
+/// frame it thumbnails comes back half a unit too bright. A float frame — a
+/// base that keeps its over-range light (`render::base_develop`) — is
+/// sampled here by the same windows with the plain mean; every integer frame
+/// goes to `image` unchanged.
+pub fn thumbnail_exact(img: &DynamicImage, nwidth: u32, nheight: u32) -> DynamicImage {
+    match img {
+        DynamicImage::ImageRgb32F(b) => {
+            let (w, h) = b.dimensions();
+            let out = thumbnail_f32::<3>(b.as_raw(), w, h, nwidth, nheight);
+            DynamicImage::ImageRgb32F(ImageBuffer::from_raw(nwidth, nheight, out).expect("thumbnail size"))
+        }
+        DynamicImage::ImageRgba32F(b) => {
+            let (w, h) = b.dimensions();
+            let out = thumbnail_f32::<4>(b.as_raw(), w, h, nwidth, nheight);
+            DynamicImage::ImageRgba32F(ImageBuffer::from_raw(nwidth, nheight, out).expect("thumbnail size"))
+        }
+        other => other.thumbnail_exact(nwidth, nheight),
+    }
+}
+
+/// `image`'s `resize_dimensions(.., fill = false)`: the largest size of the
+/// frame's aspect inside the box, each side at least 1.
+fn thumbnail_dims(width: u32, height: u32, nwidth: u32, nheight: u32) -> (u32, u32) {
+    let ratio = (f64::from(nwidth) / f64::from(width)).min(f64::from(nheight) / f64::from(height));
+    let side = |v: u32| ((f64::from(v) * ratio).round() as u64).clamp(1, u64::from(u32::MAX)) as u32;
+    (side(width), side(height))
+}
+
+/// `image::imageops::thumbnail` on an interleaved f32 frame of `C` channels:
+/// its windows and its three fractional cases exactly, its block case with
+/// the plain mean (f64 accumulation, as [`downscale_f32`]).
+fn thumbnail_f32<const C: usize>(src: &[f32], width: u32, height: u32, nw: u32, nh: u32) -> Vec<f32> {
+    let mut out = vec![0.0f32; nw as usize * nh as usize * C];
+    if width == 0 || height == 0 {
+        return out;
+    }
+    let px = |x: u32, y: u32| &src[(y as usize * width as usize + x as usize) * C..][..C];
+    let (x_ratio, y_ratio) = (width as f32 / nw as f32, height as f32 / nh as f32);
+    out.par_chunks_mut(nw as usize * C).enumerate().for_each(|(outy, row)| {
+        let bottomf = outy as f32 * y_ratio;
+        let topf = bottomf + y_ratio;
+        let bottom = (bottomf.ceil() as u32).clamp(0, height - 1);
+        let top = (topf.ceil() as u32).clamp(bottom, height);
+        for outx in 0..nw {
+            let leftf = outx as f32 * x_ratio;
+            let rightf = leftf + x_ratio;
+            let left = (leftf.ceil() as u32).clamp(0, width - 1);
+            let right = (rightf.ceil() as u32).clamp(left, width);
+            let o = &mut row[outx as usize * C..][..C];
+            if bottom != top && left != right {
+                let mut sum = [0.0f64; C];
+                for y in bottom..top {
+                    for x in left..right {
+                        for (s, v) in sum.iter_mut().zip(px(x, y)) {
+                            *s += f64::from(*v);
+                        }
+                    }
+                }
+                let n = f64::from((right - left) * (top - bottom));
+                for (o, s) in o.iter_mut().zip(sum) {
+                    *o = (s / n) as f32;
+                }
+            } else if bottom != top {
+                let fract = (leftf.fract() + rightf.fract()) / 2.0;
+                let (l, n) = (right - 1, (top - bottom) as f32);
+                for (c, o) in o.iter_mut().enumerate() {
+                    let (mut a, mut b) = (0.0f32, 0.0f32);
+                    for y in bottom..top {
+                        a += px(l, y)[c];
+                        b += px(l + 1, y)[c];
+                    }
+                    *o = (1.0 - fract) / n * a + fract / n * b;
+                }
+            } else if left != right {
+                let fract = (topf.fract() + bottomf.fract()) / 2.0;
+                let (t, n) = (top - 1, (right - left) as f32);
+                for (c, o) in o.iter_mut().enumerate() {
+                    let (mut a, mut b) = (0.0f32, 0.0f32);
+                    for x in left..right {
+                        a += px(x, t)[c];
+                        b += px(x, t + 1)[c];
+                    }
+                    *o = (1.0 - fract) / n * a + fract / n * b;
+                }
+            } else {
+                let fv = (topf.fract() + bottomf.fract()) / 2.0;
+                let fh = (leftf.fract() + rightf.fract()) / 2.0;
+                let (l, b) = (right - 1, top - 1);
+                for (c, o) in o.iter_mut().enumerate() {
+                    let (bl, tl, br, tr) = (px(l, b)[c], px(l, b + 1)[c], px(l + 1, b)[c], px(l + 1, b + 1)[c]);
+                    *o = (1.0 - fv) * fh * br + fv * fh * tr + (1.0 - fv) * (1.0 - fh) * bl + fv * (1.0 - fh) * tl;
+                }
+            }
+        }
+    });
+    out
+}
+
 /// Downscale the oriented f32 buffer to fit `max_edge` (aspect preserved).
 /// The averaging is hand-rolled — a fresh `Vec<[f32; 3]>` filled through an
 /// f64 accumulator, NOT a cast-and-delegate — for the bias reason spelled out

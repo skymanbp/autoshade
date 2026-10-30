@@ -11,7 +11,7 @@ fn camera_raw_wb_recipe(kelvin: f32, tint: f32) -> EditRecipe {
         // The measured frame's own start: its body's +0.35 EV baseline
         // ("Adobe Standard" offsets nothing) and its As Shot neutral's full
         // stop of headroom.
-        camera_start: Some(crate::recipe::CameraStart { ev: 0.35, headroom: 1.0 }),
+        camera_start: Some(crate::recipe::CameraStart { ev: 0.35, headroom: 1.0, tables: 0 }),
         ..Default::default()
     }
 }

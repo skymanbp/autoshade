@@ -25,7 +25,7 @@ pub fn source_pixels(path: &Path, cap: Option<u32>) -> Result<DynamicImage> {
     // baked-by-construction: the !is_raw arm of THE dispatch itself.
     let img = crate::decode::load_image(path)?;
     match cap {
-        Some(edge) if img.width().max(img.height()) > edge => Ok(img.thumbnail(edge, edge)),
+        Some(edge) if img.width().max(img.height()) > edge => Ok(super::thumbnail(&img, edge, edge)),
         _ => Ok(img),
     }
 }
@@ -89,6 +89,22 @@ pub fn render_to_image_in(
     max_edge: Option<u32>,
     working: ExportColorSpace,
     sink: &dyn crate::diag::Sink,
+) -> Result<DynamicImage> {
+    render_frame(raw_path, recipe, denoise, max_edge, working, sink, OverRange::Clip)
+}
+
+/// [`render_to_image_in`] with the develop's [`OverRange`]: `Clip` packs the
+/// 16-bit frame every render delivers; `Keep` (the canvas's base,
+/// `render::canvas`) packs 32-bit float with a Camera Raw frame's over-range
+/// light still above 1.
+pub(super) fn render_frame(
+    raw_path: &Path,
+    recipe: &EditRecipe,
+    denoise: Option<&crate::denoise::DenoiseOpts>,
+    max_edge: Option<u32>,
+    working: ExportColorSpace,
+    sink: &dyn crate::diag::Sink,
+    over_range: OverRange,
 ) -> Result<DynamicImage> {
     let diag = crate::diag::Diag::about(sink, raw_path);
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
@@ -305,11 +321,14 @@ pub fn render_to_image_in(
     let lens_gain = (SliderLaw::of(recipe) == SliderLaw::CameraRaw && recipe.lens_profile.vignette_active())
         .then(|| profile_vignette_lut(&recipe.lens_profile.vignette, recipe.lens_profile_vignetting_scale));
     let lens_gain = lens_gain.as_deref();
+    // Under Camera Raw's law the frame keeps its over-range light to the
+    // slider Exposure, which settles it (`calibrate_camera_buffer`).
+    let defer_over_range = SliderLaw::of(recipe) == SliderLaw::CameraRaw;
     let original_y = denoise_grain::capture_original(
         strength,
         crate::denoise::mosaic_args_for(&rawimage).is_ok(),
         grain_weights,
-        || develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref(), lens_gain)
+        || develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref(), lens_gain, defer_over_range)
             .map(|(rgb, _, _)| rgb),
     )?;
     // --- AI denoise on the MOSAIC (opt-in), BEFORE demosaic (2026-09-15).
@@ -334,7 +353,7 @@ pub fn render_to_image_in(
     }
 
     let (mut data, w, h) =
-        develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref(), lens_gain)?;
+        develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref(), lens_gain, defer_over_range)?;
     // The clean RGB owns the remaining work. Drop the mosaic before returning
     // grain; the original RGB already died when capture_original kept only Y.
     drop(rawimage);
@@ -404,20 +423,28 @@ pub fn render_to_image_in(
     let frame = MaskFrame::downstream(&geom, recipe.lens_distortion);
     // A RAW negative: an absent Sharpening amount renders at Lightroom's own
     // RAW default (`EditRecipe::capture_sharpening`, v1.6.0).
-    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, true, working);
+    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, true, working, over_range);
 
-    // --- pack to 16-bit (highest precision; JPEG downconverts at encode) ------
-    let mut buf: Vec<u16> = vec![0u16; w * h * 3];
-    buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
-        o[0] = to_u16(px[0]);
-        o[1] = to_u16(px[1]);
-        o[2] = to_u16(px[2]);
-    });
-    let img: ImageBuffer<Rgb<u16>, _> = ImageBuffer::from_raw(w as u32, h as u32, buf)
-        .ok_or_else(|| anyhow!("pixel buffer size mismatch"))?;
-    // Orientation was applied BEFORE develop (see orient_f32 above), so the
-    // buffer is already in the display frame — no tail rotation.
-    let dynimg = DynamicImage::ImageRgb16(img);
+    // --- pack to 16-bit (highest precision; JPEG downconverts at encode), or
+    // to 32-bit float for a base that keeps its over-range light. Orientation
+    // was applied BEFORE develop (see orient_f32 above), so the buffer is
+    // already in the display frame — no tail rotation.
+    let dynimg = if over_range == OverRange::Keep {
+        let flat: Vec<f32> = data.iter().flatten().copied().collect();
+        let img: ImageBuffer<Rgb<f32>, _> = ImageBuffer::from_raw(w as u32, h as u32, flat)
+            .ok_or_else(|| anyhow!("pixel buffer size mismatch"))?;
+        DynamicImage::ImageRgb32F(img)
+    } else {
+        let mut buf: Vec<u16> = vec![0u16; w * h * 3];
+        buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
+            o[0] = to_u16(px[0]);
+            o[1] = to_u16(px[1]);
+            o[2] = to_u16(px[2]);
+        });
+        let img: ImageBuffer<Rgb<u16>, _> = ImageBuffer::from_raw(w as u32, h as u32, buf)
+            .ok_or_else(|| anyhow!("pixel buffer size mismatch"))?;
+        DynamicImage::ImageRgb16(img)
+    };
 
     // --- lens geometry → straighten → crop → the finishing pass, all four in
     // `frame_and_finish` (`render/finish.rs`) because they are ONE order and
@@ -442,7 +469,9 @@ pub fn render_to_image_in(
 ///
 /// `lens_gain` is the lens profile's radial vignetting gain LUT, put on the
 /// sensor's linear light here, before calibration and the profile stage.
-fn develop_raw_buffer(
+/// `defer_over_range` is [`calibrate_camera_buffer`]'s.
+#[allow(clippy::too_many_arguments)] // one value each of the develop: the frame, its demosaic and geometry, its calibration, space, profile, lens gain and over-range rule
+pub(super) fn develop_raw_buffer(
     rawimage: &rawler::RawImage,
     dev: &RawDevelop,
     geometry_cfa: Option<&rawler::cfa::CFA>,
@@ -450,10 +479,12 @@ fn develop_raw_buffer(
     working: ExportColorSpace,
     profile_stage: Option<&profile::Stage>,
     lens_gain: Option<&[f32]>,
+    defer_over_range: bool,
 ) -> Result<(Vec<[f32; 3]>, usize, usize)> {
-    let inter = dev
-        .develop_intermediate(rawimage)
-        .map_err(|e| anyhow!("develop: {e}"))?;
+    let inter = match develop_cfa_signed(rawimage, dev) {
+        Some(inter) => inter,
+        None => dev.develop_intermediate(rawimage).map_err(|e| anyhow!("develop: {e}"))?,
+    };
     let inter = match (geometry_cfa, inter) {
         (Some(cfa), Intermediate::Monochrome(plane)) => {
             let roi = rawimage.active_area.unwrap_or_else(|| plane.rect());
@@ -501,7 +532,7 @@ fn develop_raw_buffer(
         }
     }
     if let Some((xyz2cam, wb)) = calibration {
-        calibrate_camera_buffer(&mut data, &xyz2cam, wb, working, profile_stage);
+        calibrate_camera_buffer(&mut data, &xyz2cam, wb, working, profile_stage, defer_over_range);
     } else if geometry_cfa.is_some() {
         // A camera with no colour matrix at all: rawler skips its `Calibrate`
         // step there but still applies `SRgb` (`imgop/develop.rs:199-233`).
@@ -512,6 +543,112 @@ fn develop_raw_buffer(
         });
     }
     Ok((data, w, h))
+}
+
+/// rawler's `develop_intermediate` for a CFA mosaic with the black subtracted
+/// SIGNED (v1.17.0). rawler 0.7.2 clips every value below the black to 0
+/// before the demosaic (`imgop/raw.rs`, `correct_blacklevel_cfa`), which turns
+/// the zero-mean read noise of a dark frame into a positive bias: on the night
+/// pair the sensor noise sd is about 40 DN on a signal of 10–50 DN, the
+/// darkest band's colour read u/v = +1.606/−0.288 against Camera Raw's
+/// +1.261/−0.405 (+1.486/−0.405 signed). Here the values stay signed through
+/// the demosaic (PPG and [`demosaic_over_cfa_geometry`] are differences and
+/// weighted means, no clamp) and the white balance; the first clamp is where a
+/// stage needs non-negative input: rawler's calibrate rule
+/// (`clip_euclidean_norm_avg`, after the white balance and the matrix) on the
+/// plain sRGB develop, the profile stage's guard before its hue/sat tables
+/// (`profile::Stage::render_ref`, after the camera matrix) on a profiled one,
+/// and the final pack otherwise.
+///
+/// Everything else is rawler's, step for step and in its order: the rescale
+/// `(v − black) / (white − black)` per 2×2 site in its pairing of lines (a
+/// value above the black is bit-identical), PPG over the active area, the
+/// calibrate (matrix choice, white balance, `normalize`/`pseudo_inverse`), the
+/// default crop and the sRGB transfer, all from rawler's public pieces. It is
+/// done here rather than by handing rawler a pre-scaled mosaic because rawler
+/// clones its input: a float mosaic beside the clone cost 3.9 B per source
+/// pixel of peak commit (1745 → 1979 MB on a 60 MP frame). `None` — rawler's own
+/// develop — when the develop does not rescale, the frame is not a CFA
+/// mosaic, or rawler would demosaic it as four colours.
+fn develop_cfa_signed(raw: &rawler::RawImage, dev: &RawDevelop) -> Option<Intermediate> {
+    use rawler::imgop::sensor::bayer::{ppg::PPGDemosaic, Demosaic};
+    use rawler::pixarray::PixF32;
+    use rawler::rawimage::RawPhotometricInterpretation as Photo;
+    let Photo::Cfa(config) = &raw.photometric else { return None };
+    let demosaic = dev.steps.contains(&ProcessingStep::Demosaic);
+    if !dev.steps.contains(&ProcessingStep::Rescale) || raw.cpp != 1 || (demosaic && !config.cfa.is_rgb()) {
+        return None;
+    }
+    let black = raw.blacklevel.as_bayer_array();
+    let white = raw.whitelevel.as_bayer_array();
+    let max: [f32; 4] = std::array::from_fn(|i| white[i] - black[i]);
+    let mut v = raw.data.as_f32().into_owned();
+    let width = raw.width;
+    v.par_chunks_exact_mut(width * 2).for_each(|lines| {
+        let (line0, line1) = lines.split_at_mut(width);
+        line0.chunks_exact_mut(2).zip(line1.chunks_exact_mut(2)).for_each(|(a, b)| {
+            a[0] = (a[0] - black[0]) / max[0];
+            a[1] = (a[1] - black[1]) / max[1];
+            b[0] = (b[0] - black[2]) / max[2];
+            b[1] = (b[1] - black[3]) / max[3];
+        });
+    });
+    let pixels = PixF32::new_with(v, raw.width, raw.height);
+    if !demosaic {
+        return Some(Intermediate::Monochrome(pixels));
+    }
+    let crop_active = dev.steps.contains(&ProcessingStep::CropActiveArea);
+    let roi = if crop_active { raw.active_area.unwrap_or(pixels.rect()) } else { pixels.rect() };
+    let mut rgb = PPGDemosaic::new().demosaic(&pixels, &config.cfa, &config.colors, roi);
+    drop(pixels);
+    if dev.steps.contains(&ProcessingStep::Calibrate) {
+        use rawler::imgop::matrix::{multiply, normalize, pseudo_inverse};
+        let found = raw
+            .color_matrix
+            .iter()
+            .find(|(illuminant, _)| **illuminant == rawler::imgop::xyz::Illuminant::D65)
+            .or_else(|| raw.color_matrix.iter().next());
+        if let Some((_, m)) = found.filter(|(_, m)| m.len() % 3 == 0) {
+            let mut xyz2cam = [[0.0f32; 3]; 4];
+            for i in 0..m.len() / 3 {
+                for j in 0..3 {
+                    xyz2cam[i][j] = m[i * 3 + j];
+                }
+            }
+            let wb = if raw.wb_coeffs[0].is_nan() || !dev.steps.contains(&ProcessingStep::WhiteBalance) {
+                [1.0f32; 4]
+            } else {
+                raw.wb_coeffs
+            };
+            let cam2rgb = pseudo_inverse(normalize(multiply(&xyz2cam, &rawler::imgop::xyz::SRGB_TO_XYZ_D65)));
+            rgb.data.par_iter_mut().for_each(|px| {
+                let (r, g, b) = (px[0] * wb[0], px[1] * wb[1], px[2] * wb[2]);
+                let out = [
+                    cam2rgb[0][0] * r + cam2rgb[0][1] * g + cam2rgb[0][2] * b,
+                    cam2rgb[1][0] * r + cam2rgb[1][1] * g + cam2rgb[1][2] * b,
+                    cam2rgb[2][0] * r + cam2rgb[2][1] * g + cam2rgb[2][2] * b,
+                ];
+                *px = rawler::imgop::raw::clip_euclidean_norm_avg(&out);
+            });
+        }
+    }
+    if dev.steps.contains(&ProcessingStep::CropDefault)
+        && let Some(mut crop) = raw.crop_area.or(raw.active_area)
+    {
+        if crop_active {
+            crop = crop.adapt(&raw.active_area.unwrap_or(crop));
+        }
+        if rgb.dim().w == raw.active_area.map(|area| area.d).unwrap_or(raw.dim()).w / 2 {
+            crop.scale(0.5);
+        }
+        if crop.d != rgb.dim() {
+            rgb = rgb.crop(crop);
+        }
+    }
+    if dev.steps.contains(&ProcessingStep::SRgb) {
+        rgb.for_each(rawler::imgop::srgb::srgb_apply_gamma_n);
+    }
+    Some(Intermediate::ThreeColor(rgb))
 }
 
 /// What `RawDevelop::default().develop_intermediate` WILL produce for this
@@ -946,7 +1083,7 @@ pub fn render_baked_to_image(
     // uncapped path (every shipped export) still borrows and copies nothing.
     let capped: Cow<'_, DynamicImage> = match max_edge {
         Some(edge) if img.width().max(img.height()) > edge => {
-            Cow::Owned(img.thumbnail(edge, edge))
+            Cow::Owned(super::thumbnail(img, edge, edge))
         }
         _ => Cow::Borrowed(img),
     };
@@ -979,7 +1116,7 @@ pub fn render_baked_to_image(
     let film = FilmScale::of(film_short, w, h);
     // A baked raster: Lightroom gives a JPEG / TIFF no sharpening by default,
     // so an absent amount renders none (`EditRecipe::capture_sharpening`).
-    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, false, ExportColorSpace::Srgb);
+    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, false, ExportColorSpace::Srgb, OverRange::Clip);
 
     let mut buf: Vec<u16> = vec![0u16; w * h * 3];
     buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {

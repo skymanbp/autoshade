@@ -481,7 +481,7 @@ pub fn denoise_active(
         // denoises INSIDE the engine and writes `out` itself (16-bit).
         crate::render::render_to_file(
             input,
-            &part.recipe(),
+            &part.master_recipe(),
             out,
             Some(opts),
             None,

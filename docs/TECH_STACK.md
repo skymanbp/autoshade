@@ -30,7 +30,13 @@ is a hard error). The engine's own sRGB profile, the tag on the app's sRGB
 exports and its masters (as JPEG, TIFF or PNG, the formats that hold one),
 names the working space and is read with no transform (since v1.6.3); a 16-bit
 image goes through a 52³ lattice of qcms's 8-bit transform whose nodes sit on
-exact codes. Bayer data uses rawler's normal demosaic path, while a
+exact codes. Bayer data takes rawler's PPG demosaic with the black level
+subtracted signed (v1.17.0, `render::develop_cfa_signed`): rawler 0.7.2
+clips every value below the black to 0 first, a positive bias on the
+zero-mean read noise of a dark frame (the night pair's darkest band read
+u/v +1.606/−0.288 against Camera Raw's +1.261/−0.405; signed +1.486/−0.405),
+and the first clamp now sits where a stage needs non-negative input — after
+the matrix in rawler's calibrate, or before the profile's hue/sat tables. A
 non-2×2 three-colour CFA takes AutoShade's geometry-driven X-Trans path: for
 each missing colour at a pixel it fits a plane to matching photosites in a
 5×5 neighbourhood, then evaluates that plane at the target while retaining
@@ -373,13 +379,53 @@ bundled; a machine with no profiles gets a named refusal.
   the transfer sits higher: the row at `E + h` on the input over `2^h`, with
   `h` read from a table over the neutral's largest/smallest channel
   (measured from Camera Raw renders, 12 points, 2026-10-29: 0 at 1, 0.185 at
-  1.15, 0.36 at 1.3, 0.525 at 1.45, 0.835 at 1.8, 0.995 from 2 on). The pair
+  1.15, 0.36 at 1.3, 0.525 at 1.45, 0.835 at 1.8, 0.995 from 2 on). SCOPE:
+  those renders were frames of grey patches alone, and Camera Raw's headroom
+  is a FRAME-LEVEL reading, not a pointwise one — the same neutral and the
+  same greys render white at L 89.5 alone, 93.2 beside a colour lattice and
+  98.5 beside a dark-grey population — so the table is the grey frame's
+  reading until the adaptive law is measured. The pair
   is stamped per photo as `EditRecipe::camera_start` (`render::camera_start`),
   so the canvas's Exposure (applied over the base develop by
   `render::Exposure`) reads its light back at the start the export's stage
   renders at; the sidecar never carries it. Exposure singles on p39 against
   Camera Raw, worst moving band |ΔL| / |Δa|,|Δb|: −1 EV 0.72/0.56, +0.5
   0.91/0.96, +1 0.84/0.89, +2 0.72/0.94.
+
+- Near-white colour lift (v1.17.0, `render/clip_lift.rs`, **measured** from
+  11 Camera Raw renders of synthetic DNGs, 2026-10-29): before the camera
+  matrix, in white-balanced camera RGB, Camera Raw raises a colour's lower
+  channels toward its higher ones as their SENSOR values near the white level.
+  The channel with the largest camera neutral (green on a Bayer body) anchors;
+  each of the other two rises toward the other by `k(raw) · (difference)`,
+  then the anchor rises toward their mean; `k` is a table by sensor value
+  (0 below 0.28, 0.11 at 0.5, 0.53 at 0.8, 1 at white). Independent of
+  exposure and of the camera's primaries. Seven 1728-patch lattices across
+  neutrals: worst 0.0035 of white (0.107 without it); engine against Camera
+  Raw on the grey-neutral lattice's bright in-gamut colours, max ΔE 16.65 →
+  0.92. Real frames barely reach it (p39/p40 carry and +2 EV hue unchanged).
+
+- Over-range light (v1.17.0, `render::camera` / `render::develop`, **measured** from
+  Camera Raw renders, 2026-10-29): a colour the camera stage puts above the
+  working space's 1 is kept, encoded exactly, through Highlights/Shadows and
+  the slider Exposure, and each component clips at 1 after the Exposure (no
+  blown-pixel desaturation on this path). Warm patches beyond sRGB at −1.51 EV:
+  worst ΔE 39.8 → 3.3; at 0 EV 34.9 → 10.9; carry p40 (+0.7 EV) 4.80 → 4.13,
+  p36/p38/p39 unchanged, p41 8.56 → 8.69. Light above the profile reference's
+  own 1 (ProPhoto) still clips there, under Adobe's curve.
+
+- The profile stage's tail under Camera Raw's adjustments (v1.17.0, `render::profile::UnderTone`,
+  **measured** from Camera Raw renders, 2026-10-29): the stage puts its look table on AFTER the exposure
+  transfer and before its tone curve, so an Exposure (and a mask's Temp/Tint, the vignette under tone, the
+  white balance under tone) undoes the curve AND the look table, acts, and redoes both. The stage's own
+  look table, tone curve and reference basis travel with the photograph's camera start
+  (`CameraStart::tables`, filled where the profile is read; 0 in a recipe written before it = Adobe's
+  default curve, no look table, as before). Synthetic warm patches at −1.51 EV with Adobe Standard's look
+  table: median ΔE 4.71 → 1.25 (worst 10.75 → 1.58), identical to the stage rendered at the total.
+  The extra loss once seen on that detour (no look table: median 1.55 against 1.13) was a basis
+  mismatch, not the inverse: a ForwardMatrix stage works in ProPhoto at D50 behind a Bradford
+  adaptation, and undoing it in ProPhoto's primaries at the working white put warm colours 2–3.5 % off
+  per channel. Carry p36/p38/p39/p40/p41: 4.03/4.52/3.98/4.13/8.69 → 4.09/4.51/4.00/4.09/8.57.
 
 - Table entry: `(hue shift in degrees, saturation scale, value scale)`, stored
   `index = (val * hueDivisions + hue) * satDivisions + sat` (**measured** — at
@@ -421,8 +467,12 @@ bundled; a machine with no profiles gets a named refusal.
   names a profile renders no camera curve. The profile stage runs inside the RAW
   develop, so every surface that hands pixels to the preview develop hands it the
   BASE develop of the recipe's `render::BasePart` (profile + Look table, no baked
-  tone): the GUI and web canvases (keyed and re-developed by part), the
-  heal / clone / fill / denoise / stack masters and `pipeline::fit_source`.
+  tone, no sharpening; float with the over-range light kept under a profile):
+  the GUI and web canvases (keyed and re-developed by part) and
+  `pipeline::fit_source`; the heal / clone / fill / denoise / stack masters bake
+  the same part with the RAW default sharpening (`render::master_develop`).
+  Every downscale of a frame uses `render::thumbnail` (`image`'s f32 thumbnail
+  adds 0.5 to every channel).
 
 ### Source
 
@@ -614,22 +664,40 @@ supposed to remove.
   and twelve census frames of other scenes and bodies — rendered flat and at
   Shadows +60 at sensor size in 16 bit, read as `log2` linear luminance at
   the default curve's input on a map 768 cells across the width. The push
-  in stops at a cell is `s · spread · T(b)`: `b` the cell minus the map's
-  mean, `spread` the map's standard deviation, `T` one monotone shape
-  shared by every frame, nothing fitted per frame. Held out one frame at a
-  time it explains 0.86 of the push over all 19 (worst: a portrait-
-  orientation night frame); one shape with a free amplitude per frame
-  reaches 0.93, and that amplitude follows the spread (r 0.95), while no
+  in stops at a cell is `s · spread · T(b)`: `b` the cell minus the
+  frame's anchor, `spread` the map's standard deviation, `T` one monotone
+  shape shared by every frame, nothing fitted per frame. A cell of the
+  engine's map is `log2` of the cell's mean linear luminance, not the mean
+  of its pixels' `log2`: before Exposure a night frame's deepest cells
+  hold 9–14 % pixels at or below 0 (9 / 1 % at −12…−8 stops on one frame,
+  14 / 2 % at −14…−10 on another, 11 % at −10…−8 on a third), which the
+  mean of `log2` reads at the floor, putting the spread 0.14–0.54 stops
+  above the output map's on those three (2.44 / 2.16 / 1.61 against
+  2.29 / 2.02 / 1.07; `log2` of the mean 2.22 / 2.02 / 0.99). The anchor is a
+  power mean of the map's cells (exponent 0.75, over `2^cell`) moved down
+  1.048 stops: it sits above the map's mean by more the wider the frame's
+  levels spread. Held out one frame at a time it explains 0.89 of the push
+  over all 19 (0.86 with the map's mean as the anchor; the worst
+  calibration frame at +60, rms 0.341 → 0.193 stops), and the anchor
+  reads the same off the 768-cell map as off 8-pixel blocks (0.905 held
+  out either way), so a preview and a full-size export agree. Exponents
+  1.0 and 0.5 hold out at 0.905 and 0.901, the mean (exponent → 0) at
+  0.881. One shape with a free amplitude per frame reaches 0.93, and that
+  amplitude follows the spread (r 0.95), while no
   key (mean, median, blurred-base median, dark anchor, percentiles,
   normalised range) makes it constant (CV 0.26–0.68). A full-depth local
   Laplacian filter, at any range σ, explains less than nothing on its own
   (median R² below 0) and adds 0.015 to the tonal term. On two frames at
   +30/+60/+100 the push is linear in the slider (0.50 : 1 : 1.64, 0.51 :
   1 : 1.62). Shadows below 0 read their own table, the same form fitted on
-  four frames at −60 (held out 0.62): the signs agree through the middle,
+  four frames at −60 at their anchors (held out 0.73; 0.62 at the mean):
+  the signs agree through the middle,
   and −60 darkens the deepest levels further than +60 lifts them (−2.44
   against +1.83 stops at six stops under the mean on the calibration
-  frame). What a full-resolution map adds over the per-level law moves
+  frame). What the law does not reproduce: clipped white written over
+  0.5 % and 2 % of a night frame moves Camera Raw's anchor +0.80 and
+  +0.10 stops (the law +0.18 and +0.59), and lifting that frame's deepest
+  two stops moves it +0.25 (the law −0.05). What a full-resolution map adds over the per-level law moves
   1-stop band means by 0.24 L at most (texture, left out). The push is a
   gain on the pixel's linear luminance read off the map, the colour kept
   by one ratio over a floor of 0.03 in the profile stage's encoding (per
@@ -650,26 +718,65 @@ supposed to remove.
   their deepest levels (Highlights −60 on the darkest 1 %: −0.27 and −0.30
   stops on two night frames, −0.20 on a dusk frame, 0.00 to −0.06 on
   bright ones), which no frame statistic tried predicts (best held out
-  0.43, the coarse minimum). Highlights take the channel rule's hue with
+  0.43, the coarse minimum). Camera Raw's own per-frame Highlights
+  statistic was not identified (2026-10-29, the 19 frames and twelve edited
+  copies of two of them): with each frame's offset known the shared shape
+  holds out at 0.917, and no frame statistic recovers the offset — log,
+  linear and power means (best 0.744 held out), tail bands (0.78),
+  output-image statistics (0.35 on the offset), capture metadata
+  (BrightnessValue 0.72 on the offset, but swapping the tag leaves Camera
+  Raw's render byte-identical), colour (0.08 of the residual within a
+  frame), the spread as a width (0.748), a floor in the key (0.62), noise
+  (0.825), raw over-range and cell-grid ends (0.80, 0.43), percentile
+  differences and a 256-bin log histogram (0.857, 0.866, each failing the
+  gain, clipped-white and composite facts) — so the engine keeps its
+  linear-mean key on local bases, which at −60 on the seven calibration
+  frames leaves rms 0.07–0.29 stops where a log-mean shift leaves
+  0.09–0.23 (better on six of the seven). Also tried on the 19 frames and
+  on 206 synthetic frames: trimmed extremes of a bilateral base (push held
+  out 0.782, the clipped-white copies predicted with the wrong sign), a
+  range-normalised position (rms 0.602 on the synthetic pushes against
+  their 0.856 spread), hard extremes of a blurred log image with mirrored
+  or constant borders (synthetic 0.417–0.71 against 0.911; on the 19
+  frames K held out R² −0.098), and tiled statistics with a median,
+  percentile, minimum or mean per tile (none of 192 grids, phases and reductions reproduces the
+  position facts below). What is measured: the key is relative to the
+  frame (a raw gain of ±1 stop moves it at most 0.10), deaf to added deep
+  squares of 0.21–2 % on a real frame (0.05), moved by clipped white on a
+  night frame (+0.70 and +1.75 stops at 0.5 % and 2 %) and by lifting its
+  deepest two stops (−0.35). On the synthetic frames the bulk's push
+  depends on where a dark block sits, not only on its area: one −8 stop
+  block at 0.55 % of the rendered frame gives −0.563 in the interior and
+  −0.248 in a corner, at 0.70 % −0.666 in the interior, −0.863 at a long
+  edge's midpoint and −1.014 in a corner. The per-frame statistic is
+  unidentified. Highlights take the channel rule's hue with
   the pixel's own curve. A mask's Highlights and Shadows run the same law
   on the same sites, Highlights' push ×1.2 (the local renders regressed
   on the global law, 1.21) and Shadows' slider ×1.15 (Camera Raw's own
   local push in stops over its global one on the same cells, 1.14–1.16 on
   every two-stop band), right after the global pass.
   **Results** on the calibration frame (worst moving L band |ΔL| /
-  |Δa|,|Δb| against Camera Raw, the previous Shadows table → this law):
-  Shadows +30 1.84/0.69 → 1.89/0.68, +60 1.49/0.72 → 3.05/0.70, +100
-  2.24/0.77 → 6.11/0.73, −60 2.14/0.61 → 1.53/0.64, −100 2.18/0.61 →
-  3.77/0.64; Highlights, unchanged, −30 4.11/0.63, −60 6.46/0.92, −100
-  9.44/2.15, +60 2.18/1.46, +100 2.10/1.81. The previous table was fitted
-  on this frame; the law holds it out. Read back on the render's own map,
-  the engine's push is the law's within 0.03 stops on every band from four
-  stops under the mean up; the misses are the law's on this frame: +100
-  lifts `b` −2…0 and 0…2 by 1.50 and 0.52 stops where Camera Raw lifts
-  1.81 and 0.82, and −100 darkens `b` +2…+4 by 0.39 where Camera Raw
-  darkens 0.17. The carry (ΔE76 as measured, previous → this law): p36
-  3.70 → 4.09 (line 6), p38 5.65 → 5.32 (line 5: over), p39 3.11 → 3.75
-  (5), p40 5.22 → 4.88 (8), p41 7.73 → 8.20 (10).
+  |Δa|,|Δb| against Camera Raw, 1000 px; the previous Shadows law, map
+  mean of `log2` keyed at its mean → this law): Shadows +30 2.50/0.67 →
+  0.51/0.68, +60 4.62/0.70 → 0.93/0.69, +100 7.82/0.72 → 2.62/0.70, −60
+  3.44/0.64 → 4.84/0.61, −100 5.92/0.65 → 6.97/0.60; Highlights,
+  unchanged, −30 2.21/0.58, −60 4.39/0.79, −100 7.15/2.71, +60 0.83/1.64,
+  +100 0.93/1.79. At sensor size in 16 bit, Shadows +60 against Camera
+  Raw's map (rms stops, previous → this law): p36 0.154 → 0.212, p37 0.103
+  → 0.090, p38 0.208 → 0.232, p39 0.198 → 0.142, p40 0.280 → 0.168, p41
+  0.334 → 0.160, p42 0.155 → 0.360; Shadows −60 p39 0.220 → 0.235, p42
+  0.186 → 0.308. The engine delivers its own law on its own map (rms 0.058
+  on p36, 0.051 on p42); on p40 and p41 it falls short below −10 stops
+  (+0.5…+1.05 where the law asks +1.75), where 30–65 % of the pixels are
+  at or below 0 before the push and a gain cannot lift them. p38 and p42
+  differ from Camera Raw already in the flat render's deepest cells (map
+  spread 2.768 against 2.309 and 1.182 against 2.061; on p38 84 % of the
+  extra variance sits in cells Camera Raw reads −14…−8 stops, which the
+  engine reads 0.6–6.1 stops deeper, most of them in the right half), so
+  those two frames wait on that deep-tail fix. The carry (ΔE76, previous
+  → this law, line): p36 4.18 → 4.68 (6), p38 4.99 → 6.18 (5: over,
+  dependent on the deep-tail fix, not accepted), p39 3.91 → 3.25 (5), p40
+  4.83 → 4.80 (8), p41 9.14 → 7.27 (10).
   **Highlights and Shadows: what the synthetic frames showed** (v1.17.0,
   causal tests, the law above unchanged). Neutral scenes written into a
   copy of the calibration frame's uncompressed RAW (same body, profile,
@@ -751,6 +858,18 @@ supposed to remove.
   reverse fit solves.
 - Clarity radius: `max(round(0.02·min(width,height)), 8)`
   (**designed resolution scaling**).
+- Positive Texture radius: `max(round(0.005·min(width,height)), 2)`
+  (**designed resolution scaling**). Both radii are whole raster pixels with
+  a raster floor, so a reduced develop is not an exact scale of the full one
+  (**measured behaviour**, 2026-10-29): at a 667 px short edge Texture's
+  3.33 px rounds to 3, and below a 375 px (Clarity) / 300 px (Texture) short edge the
+  floor holds the radius, so the operator reaches relatively further. The
+  reduced develop itself is NOT the cause of a preview's tonal offset: the
+  engine's encoded-domain reduction against Camera Raw's own reduced render
+  (`CameraRAWSize.MINIMUM`, 1536 × 1024) reads p39's neutral L40 / L50 / L60
+  at −0.37 / −0.23 / −0.14 L, and reducing in linear light instead moved them
+  to +0.44 / +0.44 / +0.40 with edges +1.2 — so 1000 px acceptances are made
+  against Camera Raw's own reduced render.
 - Negative Texture arm 1: amplitude `A1 = 0.172443`,
   `sigma1 = 0.0031235·short_edge` = `0.31235%` of the short edge
   (**measured Lightroom fit**).

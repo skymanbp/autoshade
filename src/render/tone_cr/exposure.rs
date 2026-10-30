@@ -116,7 +116,7 @@ impl Ramp {
             y[i] = y[i].max(y[i - 1]);
         }
         let under = if total < RAMP_E[0] { (total - RAMP_E[0]).exp2() } else { 1.0 };
-        Ramp { start: CameraStart { ev, headroom: h }, under, pre: (-h).exp2(), y }
+        Ramp { start: CameraStart { ev, headroom: h, tables: start.tables }, under, pre: (-h).exp2(), y }
     }
 
     /// The camera start this transfer is.
@@ -253,13 +253,13 @@ mod tests {
     #[test]
     fn the_transfer_is_the_measured_row() {
         let j = RAMP_E.iter().position(|&e| e == 1.0).expect("a +1 row");
-        let r = Ramp::of(CameraStart { ev: 1.0, headroom: 0.0 });
+        let r = Ramp::of(CameraStart { ev: 1.0, headroom: 0.0, tables: 0 });
         for i in (10..RAMP_N).step_by(7) {
             let x = RAMP_LOG2X[i].exp2();
             let want = RAMP_RATIO[j][i] * x * 2.0;
             assert!((r.transfer(x) - want).abs() <= 1e-5 * want.max(1e-3), "x {x}: {} vs {want}", r.transfer(x));
         }
-        let up = Ramp::of(CameraStart { ev: 0.5, headroom: 0.5 });
+        let up = Ramp::of(CameraStart { ev: 0.5, headroom: 0.5, tables: 0 });
         for &x in &[0.01f32, 0.1, 0.5, 1.5] {
             assert!((up.transfer(x) - r.transfer(x * 0.5f32.sqrt())).abs() < 1e-6, "headroom at {x}");
         }
@@ -278,7 +278,7 @@ mod tests {
     /// MUTATION: multiply the light by `2^ev` before the exposed transfer.
     #[test]
     fn the_triple_inverts_and_exposures_add() {
-        let start = CameraStart { ev: 0.35, headroom: 1.0 };
+        let start = CameraStart { ev: 0.35, headroom: 1.0, tables: 0 };
         let r = Ramp::of(start);
         let px = [0.30f32, 0.12, 0.05];
         let out = r.transfer_rgb(px);
