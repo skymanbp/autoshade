@@ -698,15 +698,15 @@ pub(crate) fn shadows_anchor(levels: impl IntoIterator<Item = (f64, f64)>) -> f3
 /// the anchor, in stops. A cell is `log2` of its MEAN linear value, not the
 /// mean of its pixels' `log2`: the law was identified on Camera Raw's
 /// output maps, while here, before Exposure, a night frame's deepest cells
-/// are largely pixels at or below 0, which the mean of `log2` reads at the
-/// floor. Measured with the cells dumped at this stage: pixels at or below 0
-/// are 60 % and 30 % of the cells at −14…−12 and −12…−10 stops on one night
-/// frame, 65 % and 35 % at −16…−14 and −14…−12 on another, 11 % at −10…−8
-/// on a third (2–5 % of each frame). The mean of `log2` put the map's spread
-/// 0.55–0.75 stops above the output map's on those three (3.35 / 3.41 /
-/// 1.70 against 2.63 / 2.66 / 1.15); `log2` of the mean is within 0.07
-/// (2.56 / 2.70 / 1.08), its low quantiles within 0.2 stops, and on a
-/// daylight frame both read alike (2.70 / 2.59 against 2.59).
+/// hold pixels at or below 0, which the mean of `log2` reads at the floor.
+/// Measured with the cells dumped at this stage: pixels at or below 0 are
+/// 9 % and 1 % of the cells at −12…−10 and −10…−8 stops on one night frame,
+/// 14 % and 2 % at −14…−12 and −12…−10 on another, 11 % at −10…−8 on a
+/// third (0.3–2 % of each frame). The mean of `log2` put the map's spread
+/// 0.14–0.54 stops above the output map's on those three (2.44 / 2.16 /
+/// 1.61 against 2.29 / 2.02 / 1.07); `log2` of the mean is within 0.08
+/// (2.22 / 2.02 / 0.99), its low quantiles within 0.25 stops, and on a
+/// daylight frame both read alike (2.34 / 2.33 against 2.33).
 fn shadow_map(y: &[f32], w: usize, h: usize) -> (Vec<f32>, f32, f32) {
     if w == 0 || h == 0 || y.len() != w * h {
         return (vec![0.0; y.len()], 0.0, HsKey::NOMINAL.sh_anchor);
@@ -1075,8 +1075,8 @@ mod tests {
     /// A Shadows cell is `log2` of its mean linear value: a cell of pixels at
     /// 0 and at `v` in equal numbers (four by four pixels to a cell here)
     /// reads `log2(v / 2)`, not the floor-dragged mean of `log2` (measured:
-    /// before Exposure 30–65 % of a night frame's deepest cells are pixels at
-    /// or below 0, and the mean of `log2` widened the spread 0.55–0.75 stops
+    /// before Exposure 9–14 % of a night frame's deepest cells are pixels at
+    /// or below 0, and the mean of `log2` widened the spread 0.14–0.54 stops
     /// past the output map's).
     ///
     /// MUTATION: average the pixels' `log2` per cell again.

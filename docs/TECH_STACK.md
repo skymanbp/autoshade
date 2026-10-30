@@ -640,12 +640,12 @@ supposed to remove.
   frame's anchor, `spread` the map's standard deviation, `T` one monotone
   shape shared by every frame, nothing fitted per frame. A cell of the
   engine's map is `log2` of the cell's mean linear luminance, not the mean
-  of its pixels' `log2`: before Exposure a night frame's deepest cells are
-  30–65 % pixels at or below 0 (60 / 30 % at −14…−10 stops on one frame,
-  65 / 35 % at −16…−12 on another), which the mean of `log2` reads at the
-  floor, putting the spread 0.55–0.75 stops above the output map's on
-  three night frames (3.35 / 3.41 / 1.70 against 2.63 / 2.66 / 1.15;
-  `log2` of the mean 2.56 / 2.70 / 1.08). The anchor is a
+  of its pixels' `log2`: before Exposure a night frame's deepest cells
+  hold 9–14 % pixels at or below 0 (9 / 1 % at −12…−8 stops on one frame,
+  14 / 2 % at −14…−10 on another, 11 % at −10…−8 on a third), which the
+  mean of `log2` reads at the floor, putting the spread 0.14–0.54 stops
+  above the output map's on those three (2.44 / 2.16 / 1.61 against
+  2.29 / 2.02 / 1.07; `log2` of the mean 2.22 / 2.02 / 0.99). The anchor is a
   power mean of the map's cells (exponent 0.75, over `2^cell`) moved down
   1.048 stops: it sits above the map's mean by more the wider the frame's
   levels spread. Held out one frame at a time it explains 0.89 of the push
