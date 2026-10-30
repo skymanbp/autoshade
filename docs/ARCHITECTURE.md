@@ -2322,7 +2322,9 @@ amplifies what the smoothers were asked to remove:
   `B − Y` from a luma-guided fast guided filter (He & Sun 2015) on a subsampled
   grid, assembled against full-resolution luma so colour stops at the edges
   luma draws; **Detail** tightens that edge threshold, **Smoothness** widens
-  the offset term that carries low-frequency mottling. Luma is untouched.
+  the offset term that carries low-frequency mottling. Luma is untouched,
+  exactly: a rebuilt pixel outside `[0, 1]` has its colour difference scaled
+  toward its luma rather than each channel clamped, so a pure black stays 0.
   Measured against Camera Raw at Color 25 / 100 with its constants as they
   were: R² 0.95–0.97 on the colour-difference move.
 

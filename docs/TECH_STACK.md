@@ -748,11 +748,27 @@ supposed to remove.
   differ from Camera Raw already in the flat render's deepest cells (map
   spread 2.768 against 2.309 and 1.182 against 2.061; on p38 84 % of the
   extra variance sits in cells Camera Raw reads −14…−8 stops, which the
-  engine reads 0.6–6.1 stops deeper, most of them in the right half), so
-  those two frames wait on that deep-tail fix. The carry (ΔE76, previous
-  → this law, line): p36 4.18 → 4.68 (6), p38 4.99 → 6.18 (5: over,
-  dependent on the deep-tail fix, not accepted), p39 3.91 → 3.25 (5), p40
-  4.83 → 4.80 (8), p41 9.14 → 7.27 (10).
+  engine reads 0.6–6.1 stops deeper), so those two frames wait on that
+  deep-tail fix. The carry (ΔE76, previous → this law, line): p36 4.18 →
+  4.68 (6), p38 4.99 → 6.18 (5: over, dependent on the deep-tail fix, not
+  accepted), p39 3.91 → 3.25 (5), p40 4.83 → 4.80 (8), p41 9.14 → 7.27
+  (10).
+  **Post-merge readings; tail fixes pending, not accepted** (the measured
+  exposure transfer in place of the fixed ramp black, colour NR keeping
+  luma; the law's constants unchanged). Shadows +60 rms: p36 0.225, p37
+  0.090, p38 0.187, p39 0.195, p40 0.220, p41 0.304, p42 0.375; −60 p39
+  0.264, p42 0.321. The engine's push falls short of Camera Raw's (mean
+  +0.76 / +0.70 / +0.63 against +0.86 / +0.85 / +0.89 on p39 / p40 /
+  p41) because its map, read correctly, is narrower than Camera Raw's:
+  spread at the HS stage p40 2.22, p41 2.02, p42 0.99, the engine's flat
+  map 2.32 / 2.04 / 1.14, Camera Raw's 2.66 / 2.24 / 2.06. The flat
+  render's deep tail is lifted downstream by the lens geometry resample
+  (p42's share at linear Y < 0.5/65535 2.198 → 0.152 % across it). The
+  constants are judged again once that tail matches.
+  Calibration frame: Shadows +30 0.91/0.68, +60 1.17/0.70, +100
+  2.56/0.72, −60 4.10/0.60, −100 5.80/0.59; Highlights −30 2.38/0.61, −60
+  4.60/0.89, −100 7.41/2.11, +60 1.02/1.42, +100 1.13/1.30. Carry p36
+  4.37, p38 4.68, p39 3.23, p40 4.05, p41 7.63.
   **Highlights and Shadows: what the synthetic frames showed** (v1.17.0,
   causal tests, the law above unchanged). Neutral scenes written into a
   copy of the calibration frame's uncompressed RAW (same body, profile,
@@ -946,7 +962,12 @@ supposed to remove.
   Detail and Smoothness **designed**: only 50 / 50 rendered). Camera Raw's
   Color 25 and 100 differ little (a × 0.06 / 0.05, b × 0.39 / 0.40 of the flat
   sky's chroma noise), and it also takes luma noise to × 0.92, which this
-  operator, leaving luma alone, does not.
+  operator, leaving luma alone, does not. A rebuilt pixel outside `[0, 1]`
+  has its colour difference scaled toward its own luma until it fits, so
+  luma is kept exactly and a pure black stays 0 (Camera Raw keeps it at
+  Color 25): clamping each channel had lifted every luma-0 pixel off 0 —
+  on a night frame the share at linear Y < 0.5/65535 went 2.190 → 0.000 %
+  through colour NR, 2.190 → 2.194 % now.
 - Memory: no Detail pass holds more than three f32 planes beside the frame
   (colour NR: eight planes at `1/s²`), the spatial-pass row of
   `decode::PIPELINE_BYTES_PER_PIXEL`.
