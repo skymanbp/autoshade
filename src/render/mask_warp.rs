@@ -260,22 +260,6 @@ fn unwarp_norm_over(
     ((dx * f + cx) / w.max(1e-6), (dy * f + cy) / h.max(1e-6))
 }
 
-/// LINEAR handle-only numeric inverse over the RETAINED camera spline.
-///
-/// Separate from the radial arm by its knot SOURCE, not by a copy: both go
-/// through [`unwarp_norm_over`], so centre, radius, fold guard and bisection
-/// law cannot drift apart. What stays distinct is which spline a handle is
-/// transported over — the whole point of D2's H2 rule.
-pub(super) fn linear_handle_unwarp_norm(
-    nx: f32,
-    ny: f32,
-    dims: (f32, f32),
-    profile: &crate::recipe::LensProfile,
-    knots: &[f32],
-) -> (f32, f32) {
-    unwarp_norm_over(nx, ny, dims, profile, knots)
-}
-
 /// Lightroom's full-raw centre in the dimensions currently being rendered.
 /// Legacy recipes carry no frame fact and retain stored-frame-centre behaviour.
 pub(super) fn lr_mask_center_px(

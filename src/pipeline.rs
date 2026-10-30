@@ -3348,11 +3348,10 @@ fn fresh_lens_profile_from(raw: &Path, query: &crate::lensmeta::LensQuery) -> cr
 /// only form that can answer the mask-warp question correctly (R29 Batch-3).
 ///
 /// `crs:LensProfileEnable="0"` says Lightroom applied no lens correction, so
-/// RADIAL geometry stays in its stored frame. LINEAR is different: Lightroom
-/// transports its two corrected-frame handles through the available camera map
-/// and reconstructs a straight gradient in the raw frame. The ordinary
-/// `mask_warp` therefore remains identity for RADIAL while the same solved map
-/// moves once into `linear_handle_warp` for that LINEAR-only operation.
+/// RADIAL geometry stays in its stored frame, and so does LINEAR (v1.17.0,
+/// Camera Raw; the 2026-08 H2 rule moved its handles through the camera map).
+/// The ordinary `mask_warp` therefore remains identity, and the solved map is
+/// set aside in `linear_handle_warp`, which no render path reads.
 ///
 /// **The switch is obeyed** (user ruling 2026-09-17, reversing R29's): a
 /// document that says `crs:LensProfileEnable="0"` is a document Lightroom drew
@@ -3453,10 +3452,10 @@ fn obey_disabled_profile_switch(p: &mut crate::recipe::LensProfile) {
     p.distortion_on = false;
 }
 
-/// Preserve the solved camera/LCP map across the disabled-sidecar boundary for
-/// LINEAR H2 without exposing it to RADIAL's `mask_warp` path. Kept at this
-/// upstream boundary so every importer and render surface receives one coherent
-/// frame fact rather than reconstructing it at individual call sites.
+/// Set the solved camera/LCP map aside across the disabled-sidecar boundary
+/// (it was LINEAR H2's; no render path reads it since v1.17.0) so RADIAL's
+/// `mask_warp` stays empty. Kept at this upstream boundary so every importer
+/// and render surface receives one coherent frame fact.
 fn retain_disabled_linear_handle_warp(p: &mut crate::recipe::LensProfile) {
     p.linear_handle_warp = std::mem::take(&mut p.mask_warp);
     p.mask_warp_src = crate::recipe::MaskWarpSource::DisabledInSidecar;
@@ -9474,6 +9473,11 @@ mod develop_surface_tests {
     /// is where `./out` resolves.
     #[test]
     fn a_relative_out_inside_the_photos_own_folder_is_refused() {
+        // The default delivery folder and a private store, never this machine's
+        // settings: `guard_readonly` reads the configured delivery folder, and a
+        // configured one changes the very hint this test pins.
+        let store = std::env::temp_dir().join(format!("_guard_h_store_{}", std::process::id()));
+        let guard_readonly = |out: &Path, raw: &Path| guard_readonly_in(out, raw, &store, Path::new("out"));
         let cwd = std::env::current_dir().unwrap();
         let photo = cwd.join("_guard_h_photo.png");
         let err = guard_readonly(Path::new("out/_guard_h_photo.developed.tif"), &photo)

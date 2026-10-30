@@ -2076,12 +2076,16 @@ all edge samples inside. A radial sample crosses the boundary exactly once as
 `m_lr^-1 ∘ T_engine`: first map the engine's evaluation point to the relevant
 stored/output frame, then invert Lightroom's stored-to-exported mask map.
 
-Linear gradients obey the measured H2 topology rather than bending a line per
-pixel: with correction ON, Zero and Full are corrected-frame handles and the
-straight line is evaluated after `T_engine`; with correction OFF, both handles
-are sent once through `D_fwd` and a new straight line is built in the raw pixel
-metric, while brushes, bitmap masks, and AI alpha remain in the raw/pre-lens
-frame.
+Linear gradients follow the photograph rather than bending a line per pixel
+(v1.17.0, measured against Camera Raw): with correction ON, Zero and Full are
+sensor-frame points carried once by the engine's own map (`T_engine`, the carry
+a radial centre takes) and the straight line between them is evaluated after
+`T_engine`; with correction OFF nothing moves the photograph, so the handles stay
+where they are stored. Brushes, bitmap masks, and AI alpha remain in the
+raw/pre-lens frame. This supersedes the 2026-08 D2 "H2" rule (stored handles
+read as corrected-frame points; correction OFF sent them through `D_fwd`),
+whose three Lightroom wall exports are not in the fixtures and cannot be
+re-checked.
 
 ### Parameters
 
@@ -2096,9 +2100,8 @@ frame.
   implementation of the measured camera law**).
 - Radial composition: `m_lr^-1 o T_engine`, exact once and with no fitted mask
   scale (**measured zero-parameter topology**).
-- Linear H2 ON: corrected-frame handles, straight after `T_engine`;
-  H2 OFF: `D_fwd(Zero)` and `D_fwd(Full)`, then straight
-  (**measured topology**).
+- Linear ON: `T_engine(Zero)` and `T_engine(Full)`, straight after `T_engine`;
+  OFF: the stored handles, straight (**measured against Camera Raw**, v1.17.0).
 - `LR_MASK_FRAME_SCALE = 1.0` (**measured decision**); the older `1.032`
   concentric-frame hypothesis was rejected.
 
@@ -2107,9 +2110,12 @@ frame.
 - Radial transport closes all `41/41` vectors to at most `1 px`.
   The first wall contributes `20/20` points at `0.568 px RMS`; the independent
   DSC set contributes `21/21` at `0.243 px RMS`.
-- Linear H2 is explicitly **not 1 px-closed**. Correction ON gives
-  `9.748 / 7.025 / 6.336 px RMS`; correction OFF gives
-  `12.449 / 9.943 / 4.979 px RMS` on the three reference frames.
+- Linear, against Camera Raw's weight maps at 0.25 EV local exposure (IoU at
+  ½): correction ON, p39 `0.9942` (the H2 render `0.9891`), p38 `0.9957` /
+  `0.9823` (`0.9900` / `0.9820`); the carried line's direction is Camera Raw's
+  to 0.1°. Correction OFF, the stored handles score `0.9983` / `0.9905` (p38) and
+  `0.9967` (p39) where H2's `D_fwd` scored `0.9956` / `0.9810` / `0.9944`. The
+  rest of the ON gap is the mask blend, not the line.
 - The falsified H1 hypothesis predicted line sag
   `−22.8 / +24.4 / −10.8 px`; Lightroom measured
   `+0.6 / −2.9 / −0.5 px`. The sign is opposite and the magnitude is
@@ -2149,7 +2155,8 @@ frame.
 - `src/lensmeta.rs` — Sony `0x7037`, native sample placement, and canonical
   resampling.
 - `src/render/mask_warp.rs` — half-diagonal normalization, `s_p`, image
-  geometry, `lr_mask_warp_norm`, inverse mask map, and H2 evaluation.
+  geometry, `lr_mask_warp_norm` and the inverse mask map; `src/render/masks.rs`
+  carries a linear's handles (`MaskFrame::prepare_linear_handles`).
 - `src/recipe.rs`, `src/xmp/geometry.rs`, `src/xmp/mask_xml.rs` and
   `src/xmp/read_corrections.rs` — stored centre, linear handle warp, schema
   gates, and Lightroom import/export.

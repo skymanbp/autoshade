@@ -3651,7 +3651,7 @@ through repeated frames, taps/drags, erasure, card switches and rebinding.
 
 `start_adjust` snapshots the live recipe and `active_source_path()` at the
 click. `developed_card_pixels`, extracted from `start_fill`, develops that
-raster at its film edge with `MaskFrame::without_downstream`; both verbs call
+raster at its film edge with `MaskFrame::AsRendered`; both verbs call
 the same helper. A painted mask takes `generative::retouch_onto` with `FillJob`
 (blank = `fill_prompt`'s removal instruction); no mask takes the new
 `generative::adjust_onto` with `AdjustJob { prompt, quality, out }`, which refuses
@@ -4110,11 +4110,11 @@ experiment:
   | Brush / bitmap / AI | either | identity |
   | RADIAL | active | sample at `T_engine(p) − (T_engine(c) − c)`, `c` the stored centre (v1.17.0) |
   | RADIAL | inactive | identity at stored coordinates |
-  | LINEAR | active | sample at `T_engine(p)` only; rebuild the straight line in the corrected frame |
-  | LINEAR | inactive | map Zero/Full once through `D_fwd`; rebuild one straight line in the raw pixel metric |
+  | LINEAR | active | carry Zero/Full once to `T_engine(Zero)`/`T_engine(Full)`, sample at `T_engine(p)`: the straight line between the carried handles in the corrected frame (v1.17.0) |
+  | LINEAR | inactive | identity at stored coordinates (v1.17.0; H2 mapped Zero/Full through `D_fwd`) |
 
-  `MaskFrame` makes the caller's downstream fact explicit with four states:
-  `WarpedDownstream`, `LinearHandlesToRaw`, `AsRendered`, and (v1.17.0)
+  `MaskFrame` makes the caller's downstream fact explicit with three states:
+  `WarpedDownstream`, `AsRendered`, and (v1.17.0)
   `Corrected` — pixels the camera stage already lens-corrected, where each
   pixel first finds its original-frame point through the resample's own green
   map (`MaskUnwarp::source_point`) and is then evaluated as `WarpedDownstream`
@@ -4164,12 +4164,13 @@ experiment:
   Lightroom's `.lcp` pool is the measured alternative for that map, not a
   better one: rendering group A through `lcp::solve` instead of the
   in-camera knots moves the residuals to −24.17 / −46.34 / −73.22 px.
-  LINEAR H2 is intentionally not described as 1 px-closed: ON residuals are
-  9.748/7.025/6.336 px RMS and OFF residuals are 12.449/9.943/4.979 px RMS.
-  A fitted anisotropic-aspect candidate is diagnostic only and is not shipped.
+  LINEAR follows the photograph (v1.17.0, Camera Raw): correction ON carries
+  both handles by the engine's own map and draws the line straight between
+  them in the corrected frame; correction OFF keeps the stored handles. The
+  2026-08 H2 rule (and its 4.979–12.449 px wall residuals) is superseded.
 
   Linear coverage has one engine law, `linear_coverage(t, profile)`, applied
-  after the existing H2 handle transport and pixel/aspect projection. The
+  after the handle carry and pixel/aspect projection. The
   shipped `LINEAR_FALLOFF` is `Measured`: the C1 Hermite smoothstep on the
   abscissa `t^1.124`. `Eased` — the same smoothstep unwarped — held that slot
   until me6-2026-09 group B, and the reason it looked right is that the fit

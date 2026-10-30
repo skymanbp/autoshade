@@ -83,9 +83,8 @@ pub(super) fn mask_weight_in(
     // The explicit split is the H2 boundary. RADIAL samples at `T_engine`
     // less its centre's displacement under the same map
     // (`MaskUnwarp::radial_at`, measured against Camera Raw, v1.17.0).
-    // LINEAR uses only `T_engine`;
-    // its corrections-off camera map has already moved the two handles in
-    // `MaskFrame::linear_handles_to_raw`, never this sample.
+    // LINEAR samples at `T_engine` only: its two handles were already carried
+    // by the same map, once, in `MaskFrame::prepare_linear_handles`.
     let (nx, ny) = match (g, unwarp) {
         (MaskGeometry::Radial { top, left, bottom, right, .. }, Some(u)) => {
             u.radial_at(nx, ny, 0.5 * (left + right), 0.5 * (top + bottom))
@@ -529,7 +528,7 @@ pub fn mask_coverage(
     }
     // Same one-time H2 preparation as `apply_masks`; keeping it above the
     // pixel loop makes the overlay and render share both topology and metric.
-    let framed_mask = frame.linear_handles_to_raw(m, (w as f32, h as f32));
+    let framed_mask = frame.prepare_linear_handles(m, (w as f32, h as f32));
     let m = framed_mask.as_ref();
     let unwarp = frame.unwarp((w as f32, h as f32));
     let unwarp = unwarp.as_ref();

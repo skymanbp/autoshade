@@ -135,7 +135,7 @@ fn alpha_raster(
     // LINEAR's corrections-off handle transport happens once, above the pixel
     // loop, never per sample.
     let prepared: Vec<_> =
-        recipe.masks.iter().map(|m| frame.linear_handles_to_raw(m, fdims)).collect();
+        recipe.masks.iter().map(|m| frame.prepare_linear_handles(m, fdims)).collect();
     let unwarp = frame.unwarp(fdims);
     let unwarp = unwarp.as_ref();
     for (x, y, px) in out.enumerate_pixels_mut() {

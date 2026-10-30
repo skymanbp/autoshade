@@ -31,8 +31,8 @@ pub fn develop_preview(preview: &DynamicImage, recipe: &EditRecipe) -> DynamicIm
 /// Color eyedropper develop a recipe that still carries a lens profile and
 /// then apply NO geometry, because they exist to sample pixel VALUES rather
 /// than to be looked at. They pass
-/// [`MaskFrame::without_downstream`] so LINEAR still receives its handle-only
-/// raw-frame rule.
+/// [`MaskFrame::AsRendered`], so every mask is evaluated at its stored
+/// coordinates.
 ///
 /// `film_short_edge` is [`develop_preview_film`]'s: a caller reproducing what
 /// the canvas shows (the GUI's Range-mask references and Point Color samples,

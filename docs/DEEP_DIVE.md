@@ -499,8 +499,9 @@ provenance-keyed caches, local re-creations rather than Adobe's mask pixels.
 Sony 0x7037's 16 native
 `(i+1)/16` samples, a 2048-node/64-knot mask solve and guarded Newton
 inversion for rectilinear `.lcp` profiles (fisheye-only entries refused);
-radials use exact-once `m_lr^-1 ∘ T_engine` transport, linear H2 is openly
-not pixel-closed, brushes stay in the raw frame.
+radials use exact-once `m_lr^-1 ∘ T_engine` transport, a linear's two handles
+move with the photograph and its line is straight in the frame it is shown
+in, brushes stay in the raw frame.
 
 ### XMP and Lightroom interoperability
 

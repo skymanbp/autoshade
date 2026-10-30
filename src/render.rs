@@ -180,7 +180,6 @@ pub use mask_warp::{
     lr_mask_unwarp_norm, lr_mask_warp_norm, mask_warp_factor, mask_warp_from_camera_knots,
     original_to_view_norm, view_to_original_norm,
 };
-use mask_warp::linear_handle_unwarp_norm;
 pub use mask_weight::{
     chromaticity_distance, colour_range_amount, colour_range_tolerance, mask_coverage,
     preview_mask_coverage, range_weight,

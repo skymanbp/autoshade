@@ -258,7 +258,7 @@ fn with_covers<R>(
         .masks
         .iter()
         .filter(|m| m.enabled && m.amount.clamp(0.0, 1.0) != 0.0 && acts(m))
-        .map(|m| frame.linear_handles_to_raw(m, dims))
+        .map(|m| frame.prepare_linear_handles(m, dims))
         .collect();
     if picked.is_empty() {
         return None;

@@ -1707,16 +1707,13 @@ pub struct LensProfile {
     /// coordinates verbatim — `xmp::lr_to_engine` / `engine_to_lr` stay exact
     /// inverses of each other and this field is not part of that boundary.
     pub mask_warp: Vec<f32>,
-    /// The camera map retained solely for LINEAR handle transport when the
-    /// sidecar disabled lens correction. In that state [`Self::mask_warp`]
-    /// remains empty, preserving RADIAL's measured stored-coordinate identity,
-    /// while render maps a LINEAR component's two handles through this spline
-    /// once and reconstructs one straight gradient in the raw pixel metric.
-    ///
-    /// Empty in every other state: when correction was not explicitly disabled,
-    /// an inactive downstream geometry stage can use `mask_warp` itself for the
-    /// same handle-only operation. Persisted because the camera/LCP solve may
-    /// not be reproducible on the machine that later opens `recipe.json`.
+    /// The camera map set aside when the sidecar disabled lens correction, so
+    /// that [`Self::mask_warp`] stays empty in that state (RADIAL's measured
+    /// stored-coordinate identity). Written for the 2026-08 D2 "H2" LINEAR
+    /// rule, which sent a LINEAR's handles through it; **the render no longer
+    /// reads it** (v1.17.0: Camera Raw keeps the handles where they are stored
+    /// when correction is off, `render::MaskFrame`). Kept so `recipe.json`
+    /// files that carry it still read and write unchanged.
     /// Never written to XMP.
     pub linear_handle_warp: Vec<f32>,
     /// Where `mask_warp` came from, or why there is none. See
@@ -1769,9 +1766,9 @@ pub struct MaskWarpCenter {
 }
 
 impl LensProfile {
-    /// Camera map available for LINEAR's corrections-off handle transport.
-    /// The dedicated field wins only for the disabled-sidecar state; otherwise
-    /// the ordinary solved map supplies the same forward transform.
+    /// The camera map the 2026-08 H2 rule moved a LINEAR's handles through with
+    /// correction off: the dedicated field in the disabled-sidecar state, else
+    /// the ordinary solved map. No render path reads it since v1.17.0.
     pub fn linear_handle_warp(&self) -> &[f32] {
         if self.mask_warp_src == MaskWarpSource::DisabledInSidecar {
             &self.linear_handle_warp

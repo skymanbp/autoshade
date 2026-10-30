@@ -310,7 +310,7 @@ pub fn skin_seed(reference: &image::RgbImage, face: &GrayImage) -> Option<([f32;
 /// before it (`render::apply_masks` stacks them) — so the seed must come from
 /// those same pixels, which is the eyedropper's convention
 /// ([`crate::render::develop_preview_framed`] with
-/// [`crate::render::MaskFrame::without_downstream`]; the GUI's
+/// [`crate::render::MaskFrame::AsRendered`]; the GUI's
 /// `range_reference_recipe`). Seeded from the undeveloped frame (until
 /// 2026-10-26), a recipe that moved the white balance seeded a colour no skin
 /// pixel of the render carries. `film_short_edge` / `raw_source` are
@@ -332,7 +332,7 @@ pub fn skin_seed_reference(
     pre.crop = None;
     let mask_frame = match lens {
         Some(profile) => crate::render::MaskFrame::Corrected { profile },
-        None => crate::render::MaskFrame::without_downstream(&pre.lens_profile),
+        None => crate::render::MaskFrame::AsRendered,
     };
     crate::render::develop_preview_framed(frame, &pre, &crate::diag::pixels(), mask_frame, film_short_edge, raw_source)
         .to_rgb8()
@@ -1102,7 +1102,7 @@ mod tests {
             &frame,
             &pre,
             &crate::diag::pixels(),
-            crate::render::MaskFrame::without_downstream(&pre.lens_profile),
+            crate::render::MaskFrame::AsRendered,
             crate::decode::film_short_edge(&src),
             false,
         )

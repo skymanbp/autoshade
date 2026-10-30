@@ -1191,12 +1191,19 @@ mod tests {
     /// step there, while the one undisplaced edge ran over dark land: the
     /// shipped fit carried a 27-code seam the gate had read as 5 codes. The
     /// contour must be the preview's own ([`render::preview_mask_coverage`]).
-    /// This scene — bright only in a band around the displaced edge, black
-    /// elsewhere — is that misread made deterministic: the preview-frame
-    /// ruler reads the whole 31-code seam. Before R40 the stored-frame ruler
-    /// passed it outright; since R40 its flanks (six pixels past each far
-    /// foot) reach the painted edge and it reads a fraction of the seam,
-    /// 7.7 codes — still under half of what the preview frame reads.
+    /// This scene — bright only in a band around the edge, black elsewhere —
+    /// is that reading made deterministic: the preview-frame ruler reads the
+    /// whole 31-code seam.
+    ///
+    /// v1.17.0: the three-to-four-pixel displacement came from the LINEAR
+    /// frame rule (stored handles read as corrected-frame points). With the
+    /// handles carried with the photograph (`MaskFrame::prepare_linear_handles`)
+    /// the edge paints on its own content, so on this profile the stored and
+    /// preview contours agree on every row of the tile, and the stored-frame
+    /// ruler's 7.7-code misread is gone at its cause. The gate still reads the
+    /// preview's contour; this pins that it is the painted edge row by row, and
+    /// that the carry keeps the edge on its content (a regressed carry parts
+    /// the two again).
     #[test]
     fn the_native_trial_gate_reads_the_edge_the_preview_paints() {
         use crate::recipe::{EditRecipe, LensProfile, LocalAdjustment};
@@ -1224,17 +1231,18 @@ mod tests {
         let painted = (86..106).rev().find(|&x| lift(x, 100) > seam * 0.5).expect("the lifted edge") as u32;
         let stored = render::mask_coverage(&tile, &scene, render::MaskFrame::AsRendered);
         let preview = render::preview_mask_coverage(&tile, &scene, &recipe);
-        let right = |cov: &image::GrayImage| (0..w).rev().find(|&x| cov.get_pixel(x, 100)[0] >= 128).expect("coverage");
-        assert!(
-            right(&stored).abs_diff(painted) >= 3,
-            "premise: the profile paints the edge at {painted}, off the stored column {}",
-            right(&stored)
-        );
-        assert!(
-            right(&preview).abs_diff(painted) <= 1,
-            "the preview-frame contour ({}) is the painted edge ({painted})",
-            right(&preview)
-        );
+        let right = |cov: &image::GrayImage, y: u32| (0..w).rev().find(|&x| cov.get_pixel(x, y)[0] >= 128);
+        // The rows the tile covers fully just inside its right edge (its top
+        // and bottom edges feather the lift away).
+        let rows: Vec<u32> = (0..h).filter(|&y| preview.get_pixel(92, y)[0] >= 250).collect();
+        assert!(rows.len() > 40 && rows.contains(&100), "premise: the tile covers rows {rows:?}");
+        for &y in &rows {
+            let painted = (60..140).rev().find(|&x| lift(x, y as usize) > seam * 0.5).expect("the lifted edge") as u32;
+            let (on_preview, on_stored) = (right(&preview, y).unwrap(), right(&stored, y).expect("coverage"));
+            assert!(on_preview.abs_diff(painted) <= 1, "row {y}: the preview-frame contour ({on_preview}) is the painted edge ({painted})");
+            assert!(on_stored.abs_diff(painted) <= 1, "row {y}: the edge left its content: painted {painted}, stored column {on_stored}");
+        }
+        assert_eq!(right(&preview, 100), Some(painted), "row 100");
         let read = |cov: &image::GrayImage| {
             let weights: Vec<f32> = cov.as_raw().iter().map(|v| *v as f32 / 255.0).collect();
             crate::fit_zoned::boundary_step_toward(None, &reference, &rendered, &rendered, &weights, w, h, None).rim
@@ -1242,8 +1250,8 @@ mod tests {
         let (on_stored, on_preview) = (read(&stored), read(&preview));
         assert!(on_preview > 0.1, "the preview-frame ruler reads the seam ({:.1} codes)", on_preview * 255.0);
         assert!(
-            on_stored < 0.5 * on_preview,
-            "the misread this pins: the stored-frame ruler reads under half the seam ({:.1} of {:.1} codes)",
+            (on_stored - on_preview).abs() < 0.1 * on_preview,
+            "the two frames agree, so the two rulers do ({:.1} vs {:.1} codes)",
             on_stored * 255.0,
             on_preview * 255.0
         );

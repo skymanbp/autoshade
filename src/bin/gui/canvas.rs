@@ -302,7 +302,7 @@ impl AutoShadeApp {
                     &base,
                     &pre,
                     &autoshade::diag::pixels(),
-                    self.sampled_frame(&composed, &pre.lens_profile),
+                    self.sampled_frame(&composed),
                     film,
                     raw_source,
                 );
@@ -949,17 +949,13 @@ impl AutoShadeApp {
     }
 
     /// The mask frame of a SAMPLED develop over the canvas base (no geometry
-    /// stage follows): `MaskFrame::Corrected` on a corrected base, else the
-    /// no-downstream frame of `profile`, the reference recipe's own.
-    fn sampled_frame<'a>(
-        &self,
-        composed: &'a autoshade::recipe::LensProfile,
-        profile: &'a autoshade::recipe::LensProfile,
-    ) -> autoshade::render::MaskFrame<'a> {
+    /// stage follows): `MaskFrame::Corrected` on a corrected base, else
+    /// `MaskFrame::AsRendered`.
+    fn sampled_frame<'a>(&self, composed: &'a autoshade::recipe::LensProfile) -> autoshade::render::MaskFrame<'a> {
         if self.base_corrected() {
             autoshade::render::MaskFrame::Corrected { profile: composed }
         } else {
-            autoshade::render::MaskFrame::without_downstream(profile)
+            autoshade::render::MaskFrame::AsRendered
         }
     }
 
@@ -1051,7 +1047,7 @@ impl AutoShadeApp {
                     &base,
                     &pre,
                     &autoshade::diag::pixels(),
-                    self.sampled_frame(&composed, &pre.lens_profile),
+                    self.sampled_frame(&composed),
                     film,
                     raw_source,
                 );
@@ -1101,7 +1097,7 @@ impl AutoShadeApp {
                 &base,
                 &reference,
                 &autoshade::diag::pixels(),
-                self.sampled_frame(&composed, &reference.lens_profile),
+                self.sampled_frame(&composed),
                 film,
                 raw_source,
             );

@@ -629,24 +629,46 @@ fn d2_rgb16_crossing_x_at(image: &DynamicImage, y: u32, target: f32) -> f32 {
     panic!("coverage row {y} range {range:?} never crossed target {target}")
 }
 
+/// LINEAR under an active lens geometry (v1.17.0, Camera Raw): both handles
+/// are sensor-frame points carried with the photograph by the engine's own
+/// map, and the gradient is a straight line between the carried handles in
+/// the corrected output. Camera Raw at 0.25 EV on p39 and p38 (three
+/// gradients): this rule's weight map against Camera Raw's own scores IoU½
+/// 0.9962 / 0.9980 / 0.9902 where the stored-handles line scored 0.9891 (the
+/// engine then) / 0.9918 / 0.9815.
+///
+/// MUTATION THIS KILLS: drop the handle carry in
+/// `MaskFrame::prepare_linear_handles` (the line lands on the stored handles,
+/// `moved` px off), or carry the handles without sampling through
+/// `MaskUnwarp::engine_at` (the line lands at the carried handles carried
+/// twice).
 #[test]
-fn linear_with_active_camera_profile_lands_on_the_stored_corrected_frame_line() {
+fn linear_with_active_camera_profile_lands_on_the_line_through_its_carried_handles() {
     let (w, h) = (1920u32, 1280u32);
     let dims = (w as f32, h as f32);
     let mut profile = d2_camera_profile(&d2_linear_wall_native());
     profile.distortion = d2_linear_wall_native().to_vec();
     profile.distortion_on = true;
-    let mut mask = d2_linear_probe((0.33, 0.5), (0.27, 0.5));
+    let (zero, full) = ((0.33f32, 0.5f32), (0.27f32, 0.5f32));
+    let mut mask = d2_linear_probe(zero, full);
     mask.exposure_ev = -4.0;
     let frame = MaskFrame::downstream(&profile, 0.0);
     assert!(frame.warps(), "premise: camera geometry must be active");
 
+    // Where the photograph carries each handle, and the output midline q
+    // between them (both handles sit on the centre row, which the radial map
+    // keeps, so q is on that row too).
+    let carried = [zero, full].map(|(x, y)| lens_ungeom_norm(x, y, dims, &profile, 0.0));
+    let q = (0.5 * (carried[0].0 + carried[1].0), 0.5f32);
+    let moved = (q.0 - 0.5 * (zero.0 + full.0)).abs() * dims.0;
+    assert!(moved > 2.0, "premise: the photograph carries the midline only {moved:.3}px");
+
     // Engine-math pin: the output midline q asks the pre-geometry coverage
-    // at its source p, and LINEAR's adapter must return q with no LR half.
-    let q = (0.30f32, 0.50f32);
+    // at its source p, through the prepared (carried) handles.
     let p = lens_geom_norm(q.0, q.1, dims, &profile, 0.0);
     let unwarp = frame.unwarp(dims).expect("active non-identity engine map");
-    let weight = mask_weight_in(&mask.mask, p.0, p.1, None, Some(&unwarp), dims);
+    let prepared = frame.prepare_linear_handles(&mask, dims);
+    let weight = mask_weight_in(&prepared.mask, p.0, p.1, None, Some(&unwarp), dims);
     // The midline's coverage is `d2_midline_coverage()`, not 0.5: the
     // shipped profile is eased on a warped abscissa. Dividing the coverage
     // error by the span rather than by the profile's own slope (1.535 at
@@ -667,7 +689,7 @@ fn linear_with_active_camera_profile_lands_on_the_stored_corrected_frame_line() 
     // The public coverage raster is 8-bit, so its rounded midline code adds
     // a measured sub-0.2 px crossing bias; the float engine-law assertion
     // above is the sub-0.1 px contract, while this pins end-to-end wiring.
-    assert!((got - expected).abs() < 0.3, "rendered {got:.4}px vs stored {expected:.4}px");
+    assert!((got - expected).abs() < 0.3, "rendered {got:.4}px vs carried {expected:.4}px");
 
     // The actual local-adjustment renderer uses the same frame preparation,
     // independently of the coverage-overlay entry point above.
@@ -692,20 +714,26 @@ fn linear_with_active_camera_profile_lands_on_the_stored_corrected_frame_line() 
     let effect_crossing = d2_rgb16_crossing_x_at(&effect, h / 2, target);
     assert!(
         (effect_crossing - expected).abs() < 0.35,
-        "active render {effect_crossing:.4}px vs stored {expected:.4}px"
+        "active render {effect_crossing:.4}px vs carried {expected:.4}px"
     );
 }
 
+/// The twin with the correction OFF (a sidecar that says
+/// `crs:LensProfileEnable="0"`): nothing moves the photograph, so nothing
+/// moves the handles — the gradient sits on its STORED line, even though the
+/// profile still holds the camera map the 2026-08 H2 rule sent the handles
+/// through (`D_fwd`, about 30 px on these three wall fixtures). Camera Raw at
+/// 0.25 EV, correction off, stored handles against `D_fwd`: IoU½ 0.9983 vs
+/// 0.9956 and 0.9905 vs 0.9810 (p38), 0.9967 vs 0.9944 (p39).
+///
+/// MUTATION THIS KILLS: any transport of the handles when no geometry follows.
 #[test]
-fn linear_without_downstream_geometry_transports_all_wall_handle_pairs_forward() {
+fn linear_with_correction_off_stays_on_its_stored_handles() {
     let (camera, disabled) = d2_disabled_linear_profile(false);
-    let (_, active_but_omitted) = d2_disabled_linear_profile(true);
     assert!(disabled.mask_warp.is_empty(), "RADIAL map must be disabled");
-    assert_eq!(disabled.linear_handle_warp, camera.mask_warp);
+    assert_eq!(disabled.linear_handle_warp, camera.mask_warp, "premise: the camera map is still held");
     let frame = MaskFrame::downstream(&disabled, 0.0);
-    let omitted_frame = MaskFrame::without_downstream(&active_but_omitted);
     assert!(!frame.warps(), "corrections-off fixture must have no downstream geometry");
-    assert!(!omitted_frame.warps(), "the caller explicitly omitted downstream geometry");
 
     let fixtures = [
         ("L1", (0.33, 0.50), (0.27, 0.50), true, 3168.0),
@@ -714,48 +742,28 @@ fn linear_without_downstream_geometry_transports_all_wall_handle_pairs_forward()
     ];
     for (name, zero, full, vertical, along) in fixtures {
         let stored = d2_linear_probe(zero, full);
-        let rendered = frame.linear_handles_to_raw(&stored, MASK_WARP_DIMS);
-        let got_handles = d2_linear_handles(rendered.as_ref());
-        let omitted = omitted_frame.linear_handles_to_raw(&stored, MASK_WARP_DIMS);
-        assert_eq!(
-            d2_linear_handles(omitted.as_ref()),
-            got_handles,
-            "{name}: explicit no-downstream path disagrees with inactive profile"
-        );
-        let expected_handles = [zero, full].map(|(x, y)| {
-            lr_mask_unwarp_norm(x, y, MASK_WARP_DIMS, &camera)
-        });
-        for (which, (got, expected)) in got_handles.iter().zip(expected_handles).enumerate() {
-            let error = ((got.0 - expected.0) * MASK_WARP_DIMS.0)
-                .hypot((got.1 - expected.1) * MASK_WARP_DIMS.1);
-            assert!(error < 0.01, "{name} handle {which} is {error:.5}px off D_fwd");
-        }
-
-        let (got, expected, stored_midline) = if vertical {
+        let rendered = frame.prepare_linear_handles(&stored, MASK_WARP_DIMS);
+        assert_eq!(d2_linear_handles(rendered.as_ref()), [zero, full], "{name}: the handles moved");
+        let (got, expected) = if vertical {
             (
                 d2_coverage_crossing_x(rendered.as_ref(), along, MASK_WARP_DIMS),
-                d2_midline_x_at_y(expected_handles, along, MASK_WARP_DIMS),
-                (zero.0 + full.0) * 0.5 * MASK_WARP_DIMS.0,
+                d2_midline_x_at_y([zero, full], along, MASK_WARP_DIMS),
             )
         } else {
             (
                 d2_coverage_crossing_y(rendered.as_ref(), along, MASK_WARP_DIMS),
-                d2_midline_y_at_x(expected_handles, along, MASK_WARP_DIMS),
-                (zero.1 + full.1) * 0.5 * MASK_WARP_DIMS.1,
+                d2_midline_y_at_x([zero, full], along, MASK_WARP_DIMS),
             )
         };
-        assert!((got - expected).abs() < 0.1, "{name}: render {got:.4}px vs H2 {expected:.4}px");
-        let delta = got - stored_midline;
-        let expected_delta = match name {
-            "L1" => -29.882,
-            "L2" => 28.743,
-            "L3" => -30.713,
-            _ => unreachable!(),
+        assert!((got - expected).abs() < 0.1, "{name}: render {got:.4}px vs stored {expected:.4}px");
+        // PREMISE: the old rule really would have moved this one.
+        let d_fwd = [zero, full].map(|(x, y)| lr_mask_unwarp_norm(x, y, MASK_WARP_DIMS, &camera));
+        let h2 = if vertical {
+            d2_midline_x_at_y(d_fwd, along, MASK_WARP_DIMS)
+        } else {
+            d2_midline_y_at_x(d_fwd, along, MASK_WARP_DIMS)
         };
-        assert!(
-            (delta - expected_delta).abs() < 1.5,
-            "{name}: displacement {delta:.3}px, expected {expected_delta:.3}±1.5px"
-        );
+        assert!((h2 - expected).abs() > 20.0, "premise: D_fwd moves {name} only {:.3}px", h2 - expected);
     }
 }
 
@@ -771,7 +779,7 @@ fn linear_off_path_rendered_boundary_stays_straight_instead_of_h1_bowing() {
     let rows = [h / 10, h / 2, h - h / 10 - 1];
     let crossings = rows.map(|y| d2_gray_crossing_x(&coverage, y));
     let sag = crossings[1] - 0.5 * (crossings[0] + crossings[2]);
-    assert!(sag.abs() < 0.5, "H2 rendered boundary sagged {sag:.3}px: {crossings:?}");
+    assert!(sag.abs() < 0.5, "correction-off rendered boundary sagged {sag:.3}px: {crossings:?}");
 
     let base = DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, image::Rgb([128, 128, 128])));
     let recipe = EditRecipe {
@@ -1366,10 +1374,11 @@ fn with_the_geometry_stage_inactive_the_mask_chain_is_untouched() {
 /// R38: the fit's rulers judge `develop_preview`'s pixels, so the contour
 /// they build must be the one that develop evaluates — the clamped
 /// recipe's composed profile and manual amount, exactly as
-/// `develop_preview_inner` decides them. Under a barrel profile the
-/// stored-frame contour of a linear edge is not where the preview paints
-/// it (LINEAR samples through `MaskUnwarp::engine_at`); with no geometry
-/// to follow the two frames are one.
+/// `develop_preview_inner` decides them. Under a barrel profile a linear
+/// edge is painted where the geometry stage carries its stored handles'
+/// content (v1.17.0, Camera Raw), and the stored-frame contour leaves it on
+/// the rows away from the handles, where the corrected-frame line and the
+/// carried content part; with no geometry to follow the two frames are one.
 #[test]
 fn preview_mask_coverage_is_the_frame_the_preview_develops_in() {
     let (w, h) = (480u32, 320u32);
@@ -1404,22 +1413,38 @@ fn preview_mask_coverage_is_the_frame_the_preview_develops_in() {
     let lift = |x: u32, y: u32| rendered.get_pixel(x, y)[1] as i32 - plain.get_pixel(x, y)[1] as i32;
     let full = lift(8, 160);
     assert!(full > 20, "premise: the edge lifts its side by {full} codes");
+    // `develop_preview` paints in the pre-geometry (sensor) frame. The edge's
+    // stored handles are carried by the geometry stage's map to a vertical
+    // line in the corrected frame; on row y the edge is the sensor column the
+    // same map puts on that line — the stored column on the handles' own row.
+    let (dims, lens) = ((w as f32, h as f32), geometry_profile(&validated));
+    let to_corrected = |x: f32, y: f32| lens_ungeom_norm(x / dims.0, y / dims.1, dims, &lens, validated.lens_distortion).0;
+    let line = to_corrected((0.35 + 0.25 / w as f32) * dims.0, 0.5 * dims.1);
+    let mut parted = 0;
     for y in [60u32, 160, 260] {
         let painted = (0..w).rev().find(|&x| lift(x, y) * 2 > full).expect("a lifted pixel");
-        let contour = |cov: &image::GrayImage| (0..w).rev().find(|&x| cov.get_pixel(x, y)[0] >= 128).expect("coverage");
+        let edge = (0..w).rev().find(|&x| to_corrected(x as f32 + 0.5, y as f32 + 0.5) <= line).expect("edge column");
         assert!(
-            contour(&stored).abs_diff(painted) >= 2,
-            "row {y}: premise — the barrel paints the edge at {painted}, off the stored column {}",
-            contour(&stored)
+            edge.abs_diff(painted) <= 1,
+            "row {y}: the edge ({painted}) is not the column carried onto the handles' line ({edge})"
         );
         assert!(
-            contour(&got).abs_diff(painted) <= 1,
+            contour_column(&got, y).abs_diff(painted) <= 1,
             "row {y}: the preview-frame contour ({}) is where the develop paints the edge ({painted})",
-            contour(&got)
+            contour_column(&got, y)
         );
+        if contour_column(&stored, y).abs_diff(painted) >= 2 {
+            parted += 1;
+        }
     }
+    assert!(parted > 0, "premise: on some row the stored-frame contour is not where the develop paints");
     let flat = EditRecipe { masks: vec![edge.clone()], ..Default::default() };
     assert_eq!(preview_mask_coverage(&edge, &base, &flat).as_raw(), stored.as_raw(), "no geometry: one frame");
+}
+
+/// The last column of row `y` that a coverage raster calls covered.
+fn contour_column(cov: &image::GrayImage, y: u32) -> u32 {
+    (0..cov.width()).rev().find(|&x| cov.get_pixel(x, y)[0] >= 128).expect("coverage")
 }
 
 /// The GUI's red coverage wash must advertise exactly what the render

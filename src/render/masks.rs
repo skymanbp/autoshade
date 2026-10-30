@@ -105,11 +105,12 @@ pub(super) fn apply_masks(
         if !stored_mask.enabled {
             continue;
         }
-        // H2's only geometry rewrite happens here, once for the base plus once
-        // per LINEAR component. The pixel closures below see one reconstructed
-        // straight raw-frame gradient and never call the camera map.
+        // LINEAR's only geometry rewrite happens here, once for the base plus
+        // once per LINEAR component: its two handles move with the frame
+        // (`MaskFrame::prepare_linear_handles`), and the pixel closures below
+        // see one straight gradient between them.
         let framed_mask =
-            frame.linear_handles_to_raw(stored_mask, (w as f32, h as f32));
+            frame.prepare_linear_handles(stored_mask, (w as f32, h as f32));
         let m = framed_mask.as_ref();
         let local = if camera_raw {
             EditRecipe { tone_curve: m.main_curve.clone(), ..EditRecipe::default() }
@@ -495,11 +496,10 @@ impl<'a> Cover<'a> {
 ///
 /// # The defect this closes (R29 Batch-3, user ruling 2026-08-20)
 ///
-/// Lightroom stores mask geometry in different frames and, for LINEAR, uses a
-/// different transport topology. Brush dabs live PRE-lens-correction. RADIAL
-/// points live POST-correction. LINEAR stores two corrected-frame handles, then
-/// either evaluates the reconstructed straight gradient in that corrected frame
-/// or transports only those handles to the raw frame and reconstructs it there.
+/// Lightroom stores mask geometry in different frames. Brush dabs live
+/// PRE-lens-correction. RADIAL points live POST-correction. LINEAR stores two
+/// sensor-frame handles that move with the photograph, and draws a straight
+/// gradient between them in whatever frame the photograph is shown in.
 /// The `D` adjudication measured the RADIAL frame at pixel level on the 105 mm pair: the
 /// PIXELS move +87.5 px at r ≈ 3250 (the `.lcp` model at 2.69 px rms over 30
 /// NCC points, tangential rms 1.22 px) while the radial mask itself measures a
@@ -518,22 +518,27 @@ impl<'a> Cover<'a> {
 /// * a RADIAL was **wrong by the whole field** — up to 186 px at 24 mm and
 ///   88 px at 105 mm — because Lightroom does not move it and this engine did.
 /// * a LINEAR needs neither RADIAL's pointwise Lightroom inverse nor a
-///   pointwise forward warp. With downstream geometry it is sampled only at
-///   `lens_ungeom_norm(p)`; without downstream geometry its two handles are
-///   mapped once by `lr_mask_unwarp_norm` and one straight raw-frame gradient
-///   is rebuilt in the raw pixel metric.
+///   pointwise forward warp. With downstream geometry its two handles are
+///   carried once by `lens_ungeom_norm` (with the photograph) and it is
+///   sampled at `lens_ungeom_norm(p)`, a straight line in the corrected frame
+///   (v1.17.0, Camera Raw); without downstream geometry nothing moves the
+///   photograph, so nothing moves its handles: it is evaluated at its stored
+///   coordinates.
 ///
 /// RADIAL maps each sample point through the inverse description of where
 /// engine geometry will put it, then translates it back by the displacement
-/// the same map gives its ellipse centre ([`MaskUnwarp::radial_at`]). LINEAR uses
-/// [`MaskUnwarp::engine_at`] for the first half only, or the handle-only path
-/// carried by [`MaskFrame::LinearHandlesToRaw`].
+/// the same map gives its ellipse centre ([`MaskUnwarp::radial_at`]). LINEAR
+/// samples at [`MaskUnwarp::engine_at`] with both handles carried by it
+/// ([`MaskFrame::prepare_linear_handles`]).
 ///
-/// **Precision disclosure (D2 LINEAR, 2026-08-24): this is not 1 px closed.**
-/// Against the three wall contours, the active/corrected arm's stored-line RMS
-/// residual is 9.748/7.025/6.336 px; the inactive/raw H2 arm's absolute RMS is
-/// 12.449/9.943/4.979 px. A fitted anisotropic aspect term is diagnostic only
-/// and is deliberately not implemented here.
+/// **The 2026-08 D2 "H2" LINEAR rule is superseded (v1.17.0).** It read the
+/// handles as corrected-frame points with correction on, and with correction
+/// off sent them through the in-camera map (`D_fwd`), fitted to three
+/// Lightroom wall exports at 4.979–12.449 px rms that are not in the fixtures
+/// and cannot be re-checked. Camera Raw renders of two frames (p38, p39) at
+/// 0.25 EV now measure both arms: correction off, the stored handles score
+/// IoU½ 0.9983 / 0.9905 / 0.9967 against `D_fwd`'s 0.9956 / 0.9810 / 0.9944;
+/// correction on, see [`MaskFrame::prepare_linear_handles`].
 ///
 /// # Why this is a parameter and not derived from the recipe
 ///
@@ -544,23 +549,18 @@ impl<'a> Cover<'a> {
 /// (`canvas.rs`) deliberately develop a recipe that still carries a lens
 /// profile and then apply NO geometry, because they exist to sample pixel
 /// values, not to be looked at. They state that with
-/// [`MaskFrame::without_downstream`], which keeps RADIAL off the engine sampler
-/// while still carrying LINEAR's separate handle fact.
+/// [`MaskFrame::AsRendered`], which keeps every geometry at its stored
+/// coordinates.
 ///
 /// So the invariant is stated as a value: **whoever runs the geometry stage
 /// builds this from the same profile and amount it will pass to
 /// [`apply_lens_geometry`], and uses [`MaskFrame::warps`] to decide whether to
-/// run it at all; whoever omits it passes the profile to
-/// [`MaskFrame::without_downstream`].**
+/// run it at all; whoever omits it passes [`MaskFrame::AsRendered`].**
 #[derive(Clone, Copy, Debug)]
 pub enum MaskFrame<'a> {
     /// The caller WILL resample this buffer through [`apply_lens_geometry`]
     /// with exactly this profile and manual amount.
     WarpedDownstream { profile: &'a crate::recipe::LensProfile, amount: f32 },
-    /// No geometry resample follows, but a camera map is available for LINEAR's
-    /// corrections-off rule. Only its two handles take this map; RADIAL and all
-    /// raster geometry remain at stored coordinates.
-    LinearHandlesToRaw { profile: &'a crate::recipe::LensProfile },
     /// Nothing downstream moves these pixels: the mask chain's output IS what
     /// will be looked at, so every geometry is evaluated at its stored
     /// coordinates.
@@ -578,14 +578,13 @@ pub enum MaskFrame<'a> {
 impl<'a> MaskFrame<'a> {
     /// What a caller that runs the geometry stage passes.
     ///
-    /// Answers [`MaskFrame::LinearHandlesToRaw`] when no resample follows but a
-    /// camera map is available, and [`MaskFrame::AsRendered`] when neither fact
-    /// exists. The SAME geometry condition gates `apply_lens_geometry`.
+    /// Answers [`MaskFrame::AsRendered`] when no resample follows. The SAME
+    /// geometry condition gates `apply_lens_geometry`.
     pub fn downstream(profile: &'a crate::recipe::LensProfile, amount: f32) -> Self {
         if profile.geometry_active() || amount != 0.0 {
             MaskFrame::WarpedDownstream { profile, amount }
         } else {
-            Self::without_downstream(profile)
+            MaskFrame::AsRendered
         }
     }
 
@@ -598,20 +597,9 @@ impl<'a> MaskFrame<'a> {
 
     /// The frame for a SAMPLED develop (no geometry stage follows) of a base
     /// that is (`corrected`) or is not already lens-corrected:
-    /// [`MaskFrame::Corrected`], or [`MaskFrame::without_downstream`].
+    /// [`MaskFrame::Corrected`], or [`MaskFrame::AsRendered`].
     pub fn sampled(profile: &'a crate::recipe::LensProfile, corrected: bool) -> Self {
-        if corrected { MaskFrame::Corrected { profile } } else { Self::without_downstream(profile) }
-    }
-
-    /// What a caller that deliberately omits the geometry stage passes. RADIAL
-    /// and raster geometry stay stored; LINEAR retains its H2 handle transport
-    /// whenever the profile carries a solved camera map.
-    pub fn without_downstream(profile: &'a crate::recipe::LensProfile) -> Self {
-        if profile.linear_handle_warp().len() >= 2 {
-            MaskFrame::LinearHandlesToRaw { profile }
-        } else {
-            MaskFrame::AsRendered
-        }
+        if corrected { MaskFrame::Corrected { profile } } else { MaskFrame::AsRendered }
     }
 
     /// Will the geometry stage run? The caller's gate, so that the gate and the
@@ -627,30 +615,40 @@ impl<'a> MaskFrame<'a> {
                 MaskUnwarp::new(profile, amount, dims)
             }
             MaskFrame::Corrected { profile } => MaskUnwarp::corrected(profile, dims),
-            MaskFrame::LinearHandlesToRaw { .. } | MaskFrame::AsRendered => None,
+            MaskFrame::AsRendered => None,
         }
     }
 
-    /// Apply LINEAR's corrections-off H2 rule once per local adjustment. The
-    /// returned owned value exists only when at least one base/component LINEAR
-    /// geometry was transported; every pixel then evaluates the resulting
-    /// straight gradient with no camera map in its sample path.
-    pub(super) fn linear_handles_to_raw<'b>(
+    /// Move LINEAR's two handles once per local adjustment, for the frame the
+    /// pixels are evaluated in. The returned owned value exists only when at
+    /// least one base/component LINEAR geometry moved; every pixel then
+    /// evaluates one straight gradient between the moved handles.
+    ///
+    /// * Lens geometry in the frame ([`MaskFrame::WarpedDownstream`],
+    ///   [`MaskFrame::Corrected`]): each handle is a sensor-frame point carried
+    ///   with the photograph by the engine's own map ([`MaskUnwarp::engine_at`],
+    ///   the carry [`MaskUnwarp::radial_at`] gives a RADIAL centre), and the
+    ///   pixel loop draws the line straight in the corrected frame between the
+    ///   carried handles. **Measured against Camera Raw (v1.17.0)**, 0.25 EV
+    ///   local exposure, weight maps against Camera Raw's own at IoU½: p39 one
+    ///   gradient 0.9891 → 0.9962 (rms 0.093 → 0.032) predicted from Camera
+    ///   Raw's content displacement at the handles; p38 two gradients in
+    ///   opposite corners 0.9900 → 0.9980 and 0.9820 → 0.9902. The handles
+    ///   uncarried (the 2026-08 H2 "corrected-frame handles" reading) scored
+    ///   0.9918 / 0.9815 on p38.
+    /// * No lens geometry ([`MaskFrame::AsRendered`]): the stored handles,
+    ///   untouched. A disabled profile used to send them through the in-camera
+    ///   map (H2's `D_fwd`); Camera Raw does not (see [`MaskFrame`]).
+    pub(super) fn prepare_linear_handles<'b>(
         self,
         mask: &'b crate::recipe::LocalAdjustment,
         dims: (f32, f32),
     ) -> Cow<'b, crate::recipe::LocalAdjustment> {
-        let MaskFrame::LinearHandlesToRaw { profile } = self else {
-            return Cow::Borrowed(mask);
-        };
-        let knots = profile.linear_handle_warp();
-        if knots.len() < 2 {
-            return Cow::Borrowed(mask);
-        }
+        let Some(u) = self.unwarp(dims) else { return Cow::Borrowed(mask) };
         let mut out = mask.clone();
-        let mut moved = transport_linear_handles(&mut out.mask, dims, profile, knots);
+        let mut moved = carry_linear_handles(&mut out.mask, &u);
         for component in &mut out.components {
-            moved |= transport_linear_handles(&mut component.geometry, dims, profile, knots);
+            moved |= carry_linear_handles(&mut component.geometry, &u);
         }
         if moved { Cow::Owned(out) } else { Cow::Borrowed(mask) }
     }
@@ -713,22 +711,18 @@ pub(super) fn raster_through(alpha: &image::GrayImage, u: &MaskUnwarp) -> image:
     })
 }
 
-/// Map a LINEAR component's two handles in the camera map's forward direction
-/// (`D_fwd` / `lr_mask_unwarp_norm`) and nothing else. Returning `true` lets the
-/// caller avoid cloning adjustments with no LINEAR geometry.
-fn transport_linear_handles(
-    geometry: &mut MaskGeometry,
-    dims: (f32, f32),
-    profile: &crate::recipe::LensProfile,
-    knots: &[f32],
-) -> bool {
+/// Carry a LINEAR component's two handles with the photograph: each stored
+/// (sensor-frame) handle goes where the engine's lens map puts that point.
+/// Returning `true` lets the caller avoid cloning adjustments with no LINEAR
+/// geometry.
+fn carry_linear_handles(geometry: &mut MaskGeometry, u: &MaskUnwarp) -> bool {
     let (MaskGeometry::Linear { zero_x, zero_y, full_x, full_y }
         | MaskGeometry::Shaped { zero_x, zero_y, full_x, full_y, .. }) = geometry
     else {
         return false;
     };
-    (*zero_x, *zero_y) = linear_handle_unwarp_norm(*zero_x, *zero_y, dims, profile, knots);
-    (*full_x, *full_y) = linear_handle_unwarp_norm(*full_x, *full_y, dims, profile, knots);
+    (*zero_x, *zero_y) = u.engine_at(*zero_x, *zero_y);
+    (*full_x, *full_y) = u.engine_at(*full_x, *full_y);
     true
 }
 
@@ -844,8 +838,10 @@ impl MaskUnwarp {
     }
 
     /// Exact inverse of the downstream engine geometry, without Lightroom's
-    /// point-transport half. LINEAR uses this arm so its stored straight line
-    /// lands in the corrected output frame without acquiring RADIAL's map.
+    /// point-transport half: where the photograph carries a sensor-frame
+    /// point. LINEAR samples through it and carries its two handles by it, so
+    /// its straight line lands in the corrected output frame without
+    /// acquiring RADIAL's map.
     pub(super) fn engine_at(&self, nx: f32, ny: f32) -> (f32, f32) {
         let (dx, dy) = ((nx - 0.5) * self.w, (ny - 0.5) * self.h);
         let rho = ((dx * dx + dy * dy).sqrt() / self.rr).clamp(0.0, 1.0);
