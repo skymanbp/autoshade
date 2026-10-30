@@ -2179,7 +2179,9 @@ luminance set by the frame's spread on a 768-cell map — then exposure by
 Adobe's channel rule,
 Contrast, Whites and Blacks, the parametric and point curves, then the
 Look's baked curve — the last three by Camera Raw's measured curve rule on
-ProPhoto channels, `render::tone::camera_raw_rgb_tone`) → **the B&W treatment's grey mix** when the photo is black and white
+ProPhoto channels, `render::tone::camera_raw_rgb_tone`, except a negative
+Blacks, which runs as its own pass through each ProPhoto channel on its own,
+measured) → **the B&W treatment's grey mix** when the photo is black and white
 (before the channel curves, so a red-channel curve meets the grey the
 photographer mixed) → 8-band HSL and the **point colours**, both skipped in black and white,
 where Lightroom's panel offers the grey mix in their place → colour grading →

@@ -392,6 +392,13 @@ pub(super) fn apply_develop_with_rasters(
                     data.par_iter_mut().for_each(|px| *px = camera_raw_slider_pixel(*px, s));
                 }
             }
+            // A negative Blacks: each ProPhoto channel through its curve on
+            // its own (`tone::CameraRawTone::blacks_down`, measured).
+            if let Some(lut) = &tone.blacks_down {
+                let cs = CurveSpace::new(space);
+                let luts = [lut.clone(), lut.clone(), lut.clone()];
+                data.par_iter_mut().for_each(|px| *px = cs.channel_curves(*px, &luts, [true; 3]));
+            }
             mask_cr::apply_local_sliders(data, w, h, r, rasters, frame);
             // The photographer's parametric and point curves, then the
             // Look's baked curve, both by Camera Raw's measured rule on

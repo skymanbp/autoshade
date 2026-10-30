@@ -287,6 +287,16 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
 /// [`build_tone_lut`] up to the colour rule.
 pub(crate) struct CameraRawTone {
     pub(crate) sliders: Option<SliderPass>,
+    /// A NEGATIVE Blacks alone, as its own LUT: the develop puts it through
+    /// each ProPhoto channel on its own, after `sliders` (which then carries
+    /// no Blacks). Measured against Camera Raw on a synthetic colour grid
+    /// (408 patches, Blacks −80): each channel through the grey curve leaves
+    /// a mean channel-multiplier error of 0.001, the luminance gain 0.207, the
+    /// brightest channel's gain 0.277, the curve rule (encoded middle) dE
+    /// 1.34 against 0.77; on p39 Blacks −40 / −80 (coloured |Δab|) 1.18 /
+    /// 2.41 against the curve rule's 1.19 / 2.54. A positive Blacks stays in
+    /// `sliders`: no rule measured for it.
+    pub(crate) blacks_down: Option<Vec<f32>>,
     /// Highlights and Shadows in −1..1, a creative profile's baked moves
     /// included: the pass before Exposure (`tone_cr::apply_camera_raw_hs`).
     pub(crate) highlights_shadows: (f32, f32),
@@ -298,16 +308,23 @@ pub(crate) fn camera_raw_tone_passes(r: &EditRecipe) -> CameraRawTone {
     let parametric = parametric_lut(r);
     let curves = (parametric.is_some() || !curve_is_identity(&r.tone_curve))
         .then(|| camera_raw_after_lut(None, parametric.as_deref(), &curve_lut(&r.tone_curve)));
+    let bl = tone_sliders(r)[4];
     CameraRawTone {
         sliders: camera_raw_slider_lut(
             {
                 // Highlights and Shadows run before Exposure, as a pass of
-                // their own (`tone_cr::apply_camera_raw_hs`).
-                let [c, _, _, wh, bl] = tone_sliders(r);
-                [c, 0.0, 0.0, wh, bl]
+                // their own (`tone_cr::apply_camera_raw_hs`); a negative
+                // Blacks runs as its own pass (`blacks_down`).
+                let [c, _, _, wh, _] = tone_sliders(r);
+                [c, 0.0, 0.0, wh, bl.max(0.0)]
             },
             Local { dehaze: (r.dehaze / 100.0).clamp(-1.0, 1.0), clarity: (r.clarity / 100.0).clamp(-1.0, 1.0) },
         ),
+        blacks_down: if bl < 0.0 {
+            camera_raw_slider_lut([0.0, 0.0, 0.0, 0.0, bl], Local::default()).map(|p| p.lut)
+        } else {
+            None
+        },
         look: r.baked_tone_curve().map(|l| look_curve_lut(&l.tone_curve, l.amount)),
         highlights_shadows: {
             let s = tone_sliders(r);
