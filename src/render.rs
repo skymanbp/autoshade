@@ -91,7 +91,7 @@ pub use as_shot::{as_shot_wb, camera_start};
 use as_shot::{camera_calibration, camera_raw_as_shot, sony_daylight_preset, sony_decrypt};
 use camera::{
     calibrate_camera_buffer, camera_matrix, normalise_wb, resolve_camera_profile, space_primaries,
-    validate_calibration,
+    validate_calibration, CameraMeta,
 };
 #[cfg(test)]
 pub(crate) use camera::{wb_to_kelvin_tint};
@@ -210,8 +210,8 @@ use resample::{
 };
 pub use source::{render_baked_to_image, render_to_image, render_to_image_in, source_pixels};
 pub use canvas::{
-    base_develop, canvas_recipe, canvas_renders, master_develop, master_pixels_for, source_pixels_for, BasePart,
-    Master, CANVAS_PROFILE,
+    base_develop, canvas_recipe, canvas_renders, master_develop, master_pixels_for, source_pixels_for, source_plate,
+    BasePart, CameraBase, Master, Plate, CANVAS_PROFILE,
 };
 pub use baked::{
     carry_baked_geometry, read_baked_geometry, stamp_baked_geometry, BakedGeometry, SourceFrame,
@@ -226,6 +226,7 @@ pub(crate) use tone::{
     tone_knot_weights, tone_model_knots, tone_slider_basis,
 };
 use tone::{apply_rgb_curves, hermite_eval};
+pub(crate) use mask_cr::LocalGreyLaw;
 pub(crate) use tone_cr::{
     HS_SH_FLOOR, HsKey, SliderLaw, camera_raw_exposure, camera_raw_response_keyed, shadows_anchor,
     camera_raw_row, camera_raw_start, Exposure, hs_row, HsSite,

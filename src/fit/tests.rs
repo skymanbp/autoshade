@@ -8616,34 +8616,33 @@ fn a_fan_the_white_balance_can_take_back_is_handed_to_it() {
     assert!(rep.err_after < rep.err_before, "{} -> {}", rep.err_before, rep.err_after);
 }
 
-/// The same frame with eleven rows of its grey band warmed instead: every
-/// white balance the hand-off can reach inside the budget clears all four
-/// cast gates, and the target's own cells refuse each of them (measured
-/// 2026-10-23: 0.111 and 0.122 of the frame moved away, the line is 0.10),
-/// so the stage projects exactly as it did before the hand-off existed.
-/// Pinned BY VALUE: the recipe's JSON hash, read at 9631905 before any of
-/// the hand-off was written.
+/// The same frame with eleven rows of its grey band warmed instead. Until
+/// 2026-10-29 this pair pinned the PROJECTION: the walk's extent was found
+/// by doubling to a Kelvin edge alone, so its 24 even steps were coarse and
+/// the two in-budget white balances it judged were refused by the target's
+/// cells (0.111 and 0.122 of the frame moved away, the line is 0.10). With the
+/// extent ending where the walk leaves the strength budget
+/// (`search_cast_hand_off`), the steps are fine enough to reach a nearer white
+/// balance the cells vouch, and the hand-off ships it: 5500 K / 0 →
+/// 4800 K / +15.5, fan 15.4° → +4.5°, cells 0.825 converged / 0.087 diverged,
+/// look error 0.0156 → 0.0089 (measured 2026-10-29).
 #[test]
-fn a_hand_off_the_cells_refuse_leaves_the_projection_as_it_was() {
+fn the_hand_off_walk_reaches_the_nearer_white_balance_the_cells_vouch() {
     use crate::rationale::keys;
     let rep = fit_recipe(&hue_ramps(), &cooled_ramps(11));
-    assert!(
-        !rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB),
-        "the cells refused it: {}",
-        rep.recipe.rationale
-    );
-    assert!(
-        rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_PROJECTED),
-        "premise: this pair is on the projection path: {}",
-        rep.recipe.rationale
-    );
-    assert_eq!(rep.recipe.temperature_k, None, "the white balance stays as-shot");
-    assert_eq!(
-        recipe_fnv(&rep.recipe),
-        0x1fb7_ceb6_9005_bd5d,
-        "the projection path's recipe moved: {}",
-        rep.recipe.rationale
-    );
+    let note = rep
+        .notes
+        .iter()
+        .find(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB)
+        .unwrap_or_else(|| panic!("the hand-off ships: {}", rep.recipe.rationale));
+    let arg = |name: &str| -> f32 {
+        note.args.iter().find(|(k, _)| *k == name).map(|(_, v)| v.parse().expect("a number")).expect(name)
+    };
+    assert!(arg("fan_before") >= FAN_DEG && arg("fan_after").abs() < FAN_DEG);
+    assert!(arg("diverged") <= 0.10 && arg("converged") >= 0.70, "the cells vouch it");
+    assert_eq!((rep.recipe.temperature_k, rep.recipe.tint), (Some(4800.0), 15.5));
+    assert!(!rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_PROJECTED));
+    assert!(rep.err_after < rep.err_before, "{} -> {}", rep.err_before, rep.err_after);
 }
 
 /// A cast the fan gate never convicts never reaches the hand-off: the haze
@@ -8743,6 +8742,40 @@ fn the_hand_off_breaks_look_error_ties_by_pull_and_keeps_the_gain_bar() {
     // The gain bar is on the PICK, not on the best error.
     assert!(pick_cast_hand_off(walk(), 0.0100 + 1.5 * FIT_QUANT).is_none());
     assert!(pick_cast_hand_off(Vec::new(), 1.0).is_none(), "nothing admitted, nothing handed");
+}
+
+/// The hand-off walk reaches the white balances the strength budget admits.
+/// On Camera Raw's law the two-temperature pair's curves pull a direction
+/// whose green part pins the tint at +100 by `λ = 1`; the Kelvin then settles
+/// and never meets an edge, so a walk extended only to a Kelvin edge ran to
+/// `λ = 64` and judged 24 copies of one out-of-budget pair (measured on p40,
+/// 2026-10-29, direction and anchor below). The extent now ends where the
+/// point leaves the budget or stops moving, so in-budget candidates are judged.
+///
+/// MUTATION: drop `!in_budget(here)` and `at(2.0 * reach) == here` from the
+/// extent loop — the judge sees no in-budget candidate.
+#[test]
+fn the_hand_off_walk_reaches_the_white_balances_the_budget_admits() {
+    let law = render::WbLaw::of(&EditRecipe {
+        camera_profile: "Adobe Standard".into(),
+        as_shot_k: Some(7650.0),
+        as_shot_tint: Some(16.0),
+        ..EditRecipe::default()
+    });
+    let budget = FitBudget::for_strength(crate::recipe::GradeStrength::new(0.65));
+    let in_budget = |wb: (f32, f32)| wb_gains_fit_budget(law.gains(wb), budget);
+    let direction = [0.068, -0.444, 0.376];
+    let mut judged = Vec::new();
+    let handed = search_cast_hand_off(law, law.as_shot(), direction, 1.0, in_budget, |wb| {
+        judged.push(wb);
+        None
+    });
+    assert!(handed.is_none(), "the judge admits nothing here");
+    let admitted: Vec<_> = judged.iter().copied().filter(|wb| in_budget(*wb)).collect();
+    assert!(admitted.len() >= 3, "in-budget candidates judged: {admitted:?} of {judged:?}");
+    // The extent ends at the first point outside the budget, so the walk's
+    // last steps sit past it.
+    assert!(judged.iter().any(|wb| !in_budget(*wb)), "{judged:?}");
 }
 
 // --- 4b termination and the hand-off's white-balance gates (2026-10-26) ---

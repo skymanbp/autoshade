@@ -108,19 +108,33 @@ fn develop_preview_inner(
     let validated = crate::recipe::ValidatedRecipe::new(recipe);
     validated.disclose(diag);
     let recipe = &*validated;
+    // Where the white balance is (v1.17.0). A reverse fit's plate re-develops
+    // the recipe's white from its camera frame (`canvas::plate_pixels`); a RAW
+    // source's canvas hands the base of the recipe's own canvas part, which is
+    // developed at that white (`BasePart::of_canvas`). Either way the white is
+    // in the pixels and this pass leaves it out; any other pixels arrive at As
+    // Shot and take it here.
+    let plated = super::canvas::plate_pixels(preview, recipe, diag);
+    let (pixels, white_in_pixels) = match &plated {
+        Some((Some(img), white)) => (&**img, *white),
+        Some((None, white)) => (preview, *white),
+        None => (preview, raw_source && BasePart::of_canvas(recipe).carries_white()),
+    };
     // A float base (`render::canvas`) is read as it is, over-range light and
     // all; every other preview at 8 bits, as before.
-    let (w, h) = (preview.width(), preview.height());
-    let mut data: Vec<[f32; 3]> = match preview.as_rgb32f() {
+    let (w, h) = (pixels.width(), pixels.height());
+    let mut data: Vec<[f32; 3]> = match pixels.as_rgb32f() {
         Some(f) => f.as_raw().par_chunks(3).map(|p| [p[0], p[1], p[2]]).collect(),
-        None => preview
+        None => pixels
             .to_rgb8()
             .as_raw()
             .par_chunks(3)
             .map(|p| [p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0])
             .collect(),
     };
-    apply_recipe_wb(&mut data, recipe);
+    if !white_in_pixels {
+        apply_recipe_wb(&mut data, recipe);
+    }
     // The pixels come first here (they used to come after the profile) for one
     // reason: the auto-CA solver reads them, and `geometry_profile` below must
     // already carry its answer — on this raster as on the export's, because the

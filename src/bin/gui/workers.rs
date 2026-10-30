@@ -322,7 +322,7 @@ impl AutoShadeApp {
         if !self.source_is_raw() || self.active_variant().is_some_and(|v| v.base.is_some()) {
             return true;
         }
-        let want = autoshade::render::BasePart::of(&self.recipe);
+        let want = autoshade::render::BasePart::of_canvas(&self.recipe);
         if want == self.source_part {
             return true;
         }

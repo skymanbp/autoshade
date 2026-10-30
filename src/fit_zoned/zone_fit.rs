@@ -193,7 +193,8 @@ pub(crate) struct ZoneDials {
 
 /// Solve the dials that move the source zone's moments onto the target
 /// zone's. Pure moment math, no renders, and EXACT for the moments by
-/// construction:
+/// construction on the engine's mask law (a mask on Camera Raw's law is
+/// solved by [`fit_zone_dials_on`]):
 ///
 /// * **exposure** — linear-luma ratio in EV. Brightness rides the local tone
 ///   LUT (soft shoulder) instead of a raw gain, so bright zone texture rolls
@@ -214,6 +215,220 @@ pub(crate) fn fit_zone_dials(src: &ZoneMoments, tgt: &ZoneMoments) -> ZoneDials 
         *gain = (want / bright).clamp(0.05, 8.0);
     }
     ZoneDials { exposure_ev, color_gains }
+}
+
+/// [`fit_zone_dials`] on the develop's mask law (v1.17.0). On Camera Raw's
+/// law (`law` is `Some`) a mask's Exposure is not a gain on the rendered
+/// value: it rides the exposure ramp before the global sliders and Adobe's
+/// curves, so the moment EV the engine's law solves exactly renders 1.3–1.5×
+/// as far in a night zone ([`render::LocalGreyLaw`]). Here the EV is the one
+/// whose render of the zone — every zone pixel moved by the law at its mask
+/// alpha `cover`, weighed by `weights` — lands the zone's linear luma on the
+/// target's, found by bisection (the delivered luma rises with the EV), and
+/// the gains are the per-channel ratios left on that predicted render, the
+/// ones the mask stage multiplies in after the tone. `None` (the engine's
+/// law) is [`fit_zone_dials`] itself.
+pub(crate) fn fit_zone_dials_on(
+    law: Option<&render::LocalGreyLaw>,
+    px: &[[f32; 3]],
+    cover: &[f32],
+    weights: &[f32],
+    src: &ZoneMoments,
+    tgt: &ZoneMoments,
+) -> ZoneDials {
+    let Some(law) = law else { return fit_zone_dials(src, tgt) };
+    let zone: Vec<usize> = (0..px.len()).filter(|&i| weights.get(i).is_some_and(|&w| w > 0.0)).collect();
+    let w: Vec<f32> = zone.iter().map(|&i| weights[i]).collect();
+    let moments_at = |ev: f32| {
+        let lut = law.response_lut(&LocalAdjustment { exposure_ev: ev, ..Default::default() });
+        let moved: Vec<[f32; 3]> = zone
+            .iter()
+            .map(|&i| render::LocalGreyLaw::pixel(px[i], &lut, cover.get(i).copied().unwrap_or(0.0)))
+            .collect();
+        zone_moments(&moved, &w)
+    };
+    let want = tgt.luma_lin.max(1e-5);
+    let (mut lo, mut hi) = (-ZONE_EV_LIMIT, ZONE_EV_LIMIT);
+    let exposure_ev = if moments_at(hi).luma_lin <= want {
+        hi
+    } else if moments_at(lo).luma_lin >= want {
+        lo
+    } else {
+        // 0.001 EV: far under the 0.01 EV the recipe rounds the dial to.
+        while hi - lo > 1e-3 {
+            let mid = 0.5 * (lo + hi);
+            if moments_at(mid).luma_lin < want {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        0.5 * (lo + hi)
+    };
+    let landed = moments_at(exposure_ev);
+    let color_gains = std::array::from_fn(|c| {
+        (tgt.mean_lin[c].max(1e-5) / landed.mean_lin[c].max(1e-5)).clamp(0.05, 8.0)
+    });
+    ZoneDials { exposure_ev, color_gains }
+}
+
+/// The zone's tone sliders on the develop's mask law (v1.17.0): the
+/// counterpart of [`fit::fit_tone_sliders_supported`] (followed by
+/// [`fit::refine_tone_sliders_on`] when `refine`) for a zone whose mask
+/// renders on Camera Raw's law. Same data, prior and selection rule —
+/// `score_set` when it has points, else the eight knots at their `support`
+/// with the map's clamped targets — with the response read from
+/// [`render::LocalGreyLaw::response`], the develop's own tone stage, instead
+/// of the engine's knot model. The law is not linear in the sliders (its
+/// table rows change with a slider's sign and every push goes through the
+/// exposure ramp and the curves), so each scanned EV solves the five
+/// sliders by damped Gauss–Newton on the same ridge: Jacobian columns by
+/// central difference at zero, then one-sided on each slider's own sign; a
+/// step is kept only when the penalised score falls. EV is scanned in 0.05
+/// steps inside [`ZONE_EV_LIMIT`], the dial's legal range.
+pub(crate) fn fit_zone_tone_on(
+    law: &render::LocalGreyLaw,
+    tone_map: &impl Fn(f32) -> f32,
+    support: &[f32; 8],
+    score_set: &[(f32, f32, f32)],
+    refine: bool,
+) -> (f32, [f32; 5]) {
+    if support.iter().filter(|&&s| s > 0.0).count() < 2 {
+        return (0.0, [0.0; 5]);
+    }
+    let pts: Vec<(f32, f32, f32)> = if score_set.is_empty() {
+        render::TONE_KNOTS_X
+            .iter()
+            .zip(support)
+            .map(|(&x, &w)| (x, tone_map(x).clamp(0.0, 1.0), w))
+            .collect()
+    } else {
+        score_set.iter().map(|&(x, y, m)| (x, y.clamp(0.0, 1.0), m)).collect()
+    };
+    let mass: f64 = pts.iter().map(|p| f64::from(p.2)).sum();
+    if mass <= 0.0 {
+        return (0.0, [0.0; 5]);
+    }
+    let out = |ev: f32, s: [f32; 5]| -> Vec<f32> {
+        let m = LocalAdjustment {
+            exposure_ev: ev,
+            contrast: s[0] * 100.0,
+            highlights: s[1] * 100.0,
+            shadows: s[2] * 100.0,
+            whites: s[3] * 100.0,
+            blacks: s[4] * 100.0,
+            ..Default::default()
+        };
+        pts.iter().map(|p| law.response(p.0, &m)).collect()
+    };
+    let score = |ev: f32, s: [f32; 5]| -> f64 {
+        let sse: f64 =
+            out(ev, s).iter().zip(&pts).map(|(&r, p)| f64::from(p.2) * f64::from(r - p.1).powi(2)).sum();
+        let penalty: f64 = s.iter().map(|&v| fit::TONE_PRIOR * f64::from(v) * f64::from(v)).sum();
+        8.0 * sse / mass + penalty
+    };
+    const H: f32 = 0.05;
+    let solve_at = |ev: f32| -> ([f32; 5], f64) {
+        let mut s = [0.0f32; 5];
+        let mut best = score(ev, s);
+        for _ in 0..6 {
+            let base = out(ev, s);
+            let cols: Vec<Vec<f32>> = (0..5)
+                .map(|k| {
+                    let shifted = |d: f32| {
+                        let mut t = s;
+                        t[k] = (t[k] + d).clamp(-1.0, 1.0);
+                        (out(ev, t), t[k] - s[k])
+                    };
+                    let (up, du) = shifted(if s[k] < 0.0 { -H } else { H });
+                    if s[k] == 0.0 {
+                        let (dn, dd) = shifted(-H);
+                        up.iter().zip(&dn).map(|(a, b)| (a - b) / (du - dd)).collect()
+                    } else {
+                        up.iter().zip(&base).map(|(a, b)| (a - b) / du).collect()
+                    }
+                })
+                .collect();
+            // Ridge normal equations on the step d: (JᵀWJ + λI)d = JᵀW·r − λ·s,
+            // the prior on the slider value s + d, as the engine's ridge.
+            let mut ata = [[0.0f64; 5]; 5];
+            let mut atb = [0.0f64; 5];
+            for (j, p) in pts.iter().enumerate() {
+                let w = 8.0 * f64::from(p.2) / mass;
+                let r = f64::from(p.1 - base[j]);
+                for a in 0..5 {
+                    let ja = f64::from(cols[a][j]);
+                    atb[a] += w * ja * r;
+                    for b in 0..5 {
+                        ata[a][b] += w * ja * f64::from(cols[b][j]);
+                    }
+                }
+            }
+            for (a, row) in ata.iter_mut().enumerate() {
+                row[a] += fit::TONE_PRIOR;
+                atb[a] -= fit::TONE_PRIOR * f64::from(s[a]);
+            }
+            let step = fit::solve5(ata, atb);
+            let mut damp = 1.0f32;
+            let mut moved = false;
+            while damp >= 0.125 {
+                let t: [f32; 5] = std::array::from_fn(|k| (s[k] + damp * step[k] as f32).clamp(-1.0, 1.0));
+                let sc = score(ev, t);
+                if sc < best {
+                    (s, best, moved) = (t, sc, true);
+                    break;
+                }
+                damp *= 0.5;
+            }
+            if !moved {
+                break;
+            }
+        }
+        (s, best)
+    };
+    let mut best = (0.0f32, [0.0f32; 5], f64::INFINITY);
+    let steps = (2.0 * ZONE_EV_LIMIT / 0.05).round() as i32;
+    for k in 0..=steps {
+        let ev = -ZONE_EV_LIMIT + k as f32 * 0.05;
+        let (s, sc) = solve_at(ev);
+        if sc < best.2 {
+            best = (ev, s, sc);
+        }
+    }
+    if !refine {
+        return (best.0, best.1);
+    }
+    // `fit::refine_tone_sliders_on`'s coordinate descent, on the law's score.
+    let mut x = [best.0, best.1[0], best.1[1], best.1[2], best.1[3], best.1[4]];
+    let split = |x: &[f32; 6]| (x[0], [x[1], x[2], x[3], x[4], x[5]]);
+    let mut cur = best.2;
+    let mut step = 0.25f32;
+    for _ in 0..40 {
+        if step < 1e-3 {
+            break;
+        }
+        let mut accepted = false;
+        'coords: for c in 0..6 {
+            let limit = if c == 0 { ZONE_EV_LIMIT } else { 1.0 };
+            for dir in [1.0f32, -1.0] {
+                let mut t = x;
+                t[c] = (x[c] + dir * step).clamp(-limit, limit);
+                if t[c] == x[c] {
+                    continue;
+                }
+                let (e, s) = split(&t);
+                let sc = score(e, s);
+                if sc < cur {
+                    (cur, x, accepted) = (sc, t, true);
+                    break 'coords;
+                }
+            }
+        }
+        if !accepted {
+            step *= 0.5;
+        }
+    }
+    split(&x)
 }
 
 /// One closed-loop saturation step: the same mean-chroma chase as the global

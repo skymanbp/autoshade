@@ -3743,7 +3743,11 @@ impl AutoShadeApp {
                     // by the same area average the RAW arm downscales with),
                     // with the photo's calibration composing on top exactly
                     // as the ▣ card renders it — the master carries none.
-                    let (base, fit_base) = match (src_path.as_deref(), negative.as_deref()) {
+                    // The RAW's fit source keeps its camera frame while this
+                    // fit runs (`_plate`, a `render::Plate`): the candidates
+                    // that move the white are rendered with it in the profile
+                    // stage.
+                    let (base, fit_base, _plate) = match (src_path.as_deref(), negative.as_deref()) {
                         (Some(p), Some(master)) => (
                             std::sync::Arc::new(autoshade::render::source_pixels(
                                 master,
@@ -3752,10 +3756,11 @@ impl AutoShadeApp {
                             autoshade::pipeline::calibration_recipe(
                                 autoshade::pipeline::fit_calibration(p),
                             ),
+                            None,
                         ),
                         (Some(p), None) if autoshade::decode::is_raw(p) => {
                             let (frame, cal) = autoshade::pipeline::fit_source(p)?;
-                            (std::sync::Arc::new(frame), cal)
+                            (frame.shared(), cal, Some(frame))
                         }
                         (other, _) => (
                             base,
@@ -3766,6 +3771,7 @@ impl AutoShadeApp {
                                     )
                                 })
                                 .unwrap_or_default(),
+                            None,
                         ),
                     };
                     // The target in the fit's own frame — the CLI's rule
@@ -3798,7 +3804,7 @@ impl AutoShadeApp {
                             Ok(j)
                         };
                         let fitted = autoshade::render::develop_preview(
-                            &autoshade::render::thumbnail(&base, JUDGE_EDGE, JUDGE_EDGE),
+                            &autoshade::render::Plate::thumbnail_of(&base, JUDGE_EDGE),
                             recipe,
                         );
                         let t_jpeg = enc(&autoshade::render::thumbnail(&target, JUDGE_EDGE, JUDGE_EDGE))?;

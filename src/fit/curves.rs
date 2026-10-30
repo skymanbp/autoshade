@@ -447,17 +447,29 @@ pub(super) fn search_cast_projection(
 
 /// How many white balances the cast→WB hand-off tries, and the farthest
 /// along the curves' direction it may look. The walk's EXTENT is found first:
-/// `λ` doubles from 1 until the point it names inverts onto an edge of the
-/// Kelvin domain ([`WB_SEARCH_K`]) or reaches [`HANDOFF_REACH_MAX`], and the
-/// candidates are then `HANDOFF_STEPS` even steps of that extent. Doubling to
+/// `λ` doubles from 1 while the point it names is still a candidate the walk
+/// could ship and still a new one — it stops at the first `λ` whose point
+/// inverts onto an edge of the Kelvin domain ([`WB_SEARCH_K`]), falls outside
+/// the strength budget (`in_budget`, the same check the caller puts on every
+/// candidate), or inverts onto the same `(K, tint)` as twice that `λ` (the
+/// point has stopped moving: on Camera Raw's law a demand with a strong green
+/// component pins the tint, and past where the Kelvin also settles every
+/// farther `λ` names the same pair) — or at [`HANDOFF_REACH_MAX`]; the
+/// candidates are then `HANDOFF_STEPS` even steps of that extent. Measured on
+/// the two-temperature pair p40 (2026-10-29), before the budget and the
+/// stopped point ended the doubling: the tint reached +100 at `λ = 1`, the
+/// Kelvin settled at 3550 K, no edge was ever met, the extent ran to 64, and
+/// all 24 candidates (from `λ = 2.67`) inverted onto (3550 K, +100), gains
+/// `[0.95, 1, 11.5]`, refused by the budget — while the budget admits the
+/// walk's own points up to `λ ≈ 0.25` (`λ = 0.2`: 7300 K / +32.8, gains
+/// `[1.11, 1, 1.18]`), none of which was tried. Doubling to
 /// the domain rather than stopping at a fixed `λ` is measured, not assumed:
 /// on the neon street pair the estimator reads the curves' pull as mostly
 /// "less green", the tint is already at +100 there, so only the red/blue part
 /// moves the Kelvin — `λ = 2` reached 13900 K where the cast it was asked to
-/// take back wants the domain's 40000 K edge. The strength budget, checked by
-/// the caller on every candidate, stops the walk earlier on a frame whose
-/// budget is tighter than the domain. Candidates that invert onto the same
-/// `(K, tint)` are judged once.
+/// take back wants the domain's 40000 K edge — the tint there is pinned while
+/// the Kelvin still moves, which is why a pinned tint alone does not end the
+/// doubling. Candidates that invert onto the same `(K, tint)` are judged once.
 pub(super) const HANDOFF_STEPS: usize = 24;
 pub(super) const HANDOFF_REACH_MAX: f32 = 64.0;
 
@@ -578,6 +590,7 @@ pub(super) fn search_cast_hand_off(
     from: (f32, f32),
     direction: [f32; 3],
     err_without: f32,
+    in_budget: impl Fn((f32, f32)) -> bool,
     mut judge: impl FnMut((f32, f32)) -> Option<CastHandOff>,
 ) -> Option<CastHandOff> {
     let start = law.log_gains(from);
@@ -587,7 +600,11 @@ pub(super) fn search_cast_hand_off(
     };
     let on_edge = |(k, _): (f32, f32)| k <= WB_SEARCH_K.0 || k >= WB_SEARCH_K.1;
     let mut reach = 1.0f32;
-    while reach < HANDOFF_REACH_MAX && !on_edge(at(reach)) {
+    while reach < HANDOFF_REACH_MAX {
+        let here = at(reach);
+        if on_edge(here) || !in_budget(here) || at(2.0 * reach) == here {
+            break;
+        }
         reach *= 2.0;
     }
     let mut tried: Vec<(f32, f32)> = vec![from];

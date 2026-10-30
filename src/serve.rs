@@ -2135,7 +2135,7 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     };
     // The base of the recipe being shown (v1.17.0): its camera profile and
     // Look table, which the preview develop below cannot add.
-    let preview = develop_base(&src, &render::BasePart::of(&req.recipe))?;
+    let preview = develop_base(&src, &render::BasePart::of_canvas(&req.recipe))?;
     // The Detail panel's radii are FILM pixels (v1.5.0): the source's own short
     // edge, from its header, so the web pane shows sharpening and noise
     // reduction the way the export looks downscaled to it — the GUI canvas's

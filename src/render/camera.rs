@@ -164,12 +164,12 @@ pub(crate) fn wb_to_kelvin_tint(xyz2cam: &[[f32; 3]; 3], wb: [f32; 3]) -> Option
     let (up, vp) = planck_uv1960(cct);
     let dist = ((u - up).powi(2) + (v - vp).powi(2)).sqrt();
     let duv = if v >= vp { dist } else { -dist };
-    let tint = (duv * 3000.0).clamp(-100.0, 100.0);
+    let tint = (duv * 3000.0).clamp(-150.0, 150.0);
     // Whole-Kelvin quantisation AT THE SOURCE: the XMP serialises integer
     // Kelvin, so a fractional anchor would round-trip as a target a fraction
     // off the anchor — a shift where none was intended (and below ~2500 K
     // one that escapes apply_wb's 1e-3 neutral short-circuit).
-    Some((cct.clamp(2000.0, 40000.0).round(), tint))
+    Some((cct.clamp(2000.0, 50000.0).round(), tint))
 }
 
 /// CIE 1960 (u, v) from chromaticity (x, y) — the space Duv is defined in.
@@ -302,6 +302,36 @@ pub(super) fn creative_table(r: &EditRecipe) -> Option<std::result::Result<crate
     Some(crate::dcp::find_look_table(&look.table).map_err(|e| e.to_string()))
 }
 
+/// What the profile stage reads from a decoded RAW besides its pixels: the
+/// body's names (which profile file), its colour matrix and as-shot levels
+/// (which white), and the calibration Camera Raw puts in front of the
+/// profile's matrices ([`super::as_shot::camera_calibration`]). Kept apart
+/// from the `RawImage` so a [`super::CameraBase`] can rebuild the stage at
+/// another white long after the file's bytes are gone.
+#[derive(Clone, Debug)]
+pub(super) struct CameraMeta {
+    pub(super) make: String,
+    pub(super) model: String,
+    /// The xyz→cam matrix ([`camera_matrix`]), or why there is none.
+    pub(super) matrix: std::result::Result<[[f32; 3]; 3], String>,
+    pub(super) wb_coeffs: [f32; 4],
+    pub(super) calibration: Option<[f32; 3]>,
+}
+
+impl CameraMeta {
+    /// `daylight` is the file's Daylight preset, read while its bytes were
+    /// mapped (`as_shot::sony_daylight_preset`).
+    pub(super) fn of(raw: &rawler::RawImage, daylight: Option<[f32; 3]>) -> Self {
+        Self {
+            make: raw.camera.make.clone(),
+            model: raw.camera.model.clone(),
+            matrix: camera_matrix(raw).map_err(|e| e.to_string()),
+            wb_coeffs: raw.wb_coeffs,
+            calibration: super::as_shot::camera_calibration(daylight, &raw.clean_model),
+        }
+    }
+}
+
 /// The camera profile this photograph is developed through, prepared for this
 /// frame — or `None`, with the reason disclosed, when there is not one.
 ///
@@ -324,12 +354,12 @@ pub(super) fn creative_table(r: &EditRecipe) -> Option<std::result::Result<crate
 /// and hue/sat maps are blended at its temperature. `None` there leaves the
 /// frame at As Shot and the move to the post-profile adaptation.
 pub(super) fn resolve_camera_profile(
-    rawimage: &rawler::RawImage,
+    meta: &CameraMeta,
     r: &EditRecipe,
     space: ExportColorSpace,
     diag: &crate::diag::Diag<'_>,
-    calibration: Option<[f32; 3]>,
 ) -> Option<(profile::Stage, Option<[f32; 3]>)> {
+    let calibration = meta.calibration;
     let name = if !r.camera_profile.is_empty() {
         r.camera_profile.as_str()
     } else {
@@ -353,7 +383,7 @@ pub(super) fn resolve_camera_profile(
             })
             .ok()
     });
-    let (make, model) = (rawimage.camera.make.as_str(), rawimage.camera.model.as_str());
+    let (make, model) = (meta.make.as_str(), meta.model.as_str());
     let (path, prof) = match crate::dcp::find(make, model, name) {
         Ok(found) => found,
         Err(e) => {
@@ -366,14 +396,14 @@ pub(super) fn resolve_camera_profile(
             "camera profile \"{name}\" states three calibration illuminants; rendering with two"
         ));
     }
-    let matrix = match camera_matrix(rawimage) {
-        Ok(m) => m,
+    let matrix = match &meta.matrix {
+        Ok(m) => *m,
         Err(e) => {
             diag.warn(format!("camera profile \"{name}\" is not rendered: {e}"));
             return None;
         }
     };
-    let wb = normalise_wb(rawimage.wb_coeffs);
+    let wb = normalise_wb(meta.wb_coeffs);
     let kelvin = wb_to_kelvin_tint(&matrix, wb).map(|(k, _)| k);
     // The camera neutral is the reciprocal of the white-balance multipliers;
     // with the profile's own matrices it fixes the white the SDK's way.

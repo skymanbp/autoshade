@@ -761,14 +761,25 @@ fn calibrated_matrix_at(profile: &Profile, kelvin: f64, cc: Option<[f32; 3]>) ->
 /// patch the map leaves untouched at As Shot is moved by it once a Custom
 /// white carries the patch into the map's hues (0 → 10 ΔE), and a second
 /// `ColorMatrix` at Standard A changes the render at 2850 K and 4500 K and
-/// not at 6500 K or 10000 K. `None` for a profile with no `ColorMatrix` or a
-/// white that maps to a non-positive camera triple.
+/// not at 6500 K or 10000 K. Each component is held at no less than
+/// [`NEUTRAL_FLOOR`] of the largest, as Camera Raw holds it. `None` for a
+/// profile with no `ColorMatrix` or a white that maps to a non-positive
+/// camera triple (where Camera Raw does something this engine has not
+/// measured a rule for: it lifts the negative component to the floor and
+/// moves another 1–5.5 %).
 pub(crate) fn camera_neutral_of(profile: &Profile, xy: [f64; 2], cc: Option<[f32; 3]>) -> Option<[f32; 3]> {
     let cm = calibrated_matrix_at(profile, xy_to_kelvin(xy), cc)?;
     let n = vec64(&cm, xy_to_xyz(xy));
     let max = n[0].max(n[1]).max(n[2]);
-    (max.is_finite() && n.iter().all(|v| *v > 0.0)).then(|| n.map(|v| (v / max) as f32))
+    (max.is_finite() && n.iter().all(|v| *v > 0.0)).then(|| n.map(|v| ((v / max) as f32).max(NEUTRAL_FLOOR)))
 }
+
+/// The smallest a camera-neutral component may be, relative to the largest
+/// (v1.17.0, **measured**): synthetic neutral-grid DNGs through Camera Raw
+/// whose white puts a component under it render as if it were 1/16 — the
+/// scan's floor reads 0.0624–0.0625 where the formula gives 0.008–0.054.
+/// p39 never reaches it (its smallest component at 2000 K is 0.136).
+pub(crate) const NEUTRAL_FLOOR: f32 = 1.0 / 16.0;
 
 /// The chromaticity of the white a camera `neutral` stands for, the DNG
 /// SDK's `NeutralToXY`, with the XYZ → camera matrix at a temperature from

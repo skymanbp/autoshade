@@ -1013,8 +1013,9 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 let err_without = look_err_with_evidence(&cur, &tp, &evidence);
                 let probe_base = recipe.clone();
                 let handed = cast_wb_direction(&cur, &with_px, &wb_weights, law).and_then(|direction| {
-                    search_cast_hand_off(law, from, direction, err_without, |wb| {
-                        if !wb_gains_fit_budget(law.gains(wb), budget) {
+                    let in_budget = |wb: (f32, f32)| wb_gains_fit_budget(law.gains(wb), budget);
+                    search_cast_hand_off(law, from, direction, err_without, in_budget, |wb| {
+                        if !in_budget(wb) {
                             return None;
                         }
                         // Above the default strength the white-balance stage

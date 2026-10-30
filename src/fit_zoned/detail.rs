@@ -379,7 +379,7 @@ pub(super) fn attach_zone_detail(
     if zones.is_empty() {
         return;
     }
-    let big = crate::render::thumbnail(src, DETAIL_EDGE, DETAIL_EDGE);
+    let big = crate::render::Plate::thumbnail_of(src, DETAIL_EDGE);
     let big_t = crate::render::thumbnail_exact(target, big.width(), big.height());
     let tgt_px = fit::pixels_of(&big_t);
     let presence = fit::presence_of(&big_t);

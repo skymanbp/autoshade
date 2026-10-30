@@ -719,3 +719,21 @@ fn a_chosen_white_and_its_camera_neutral_read_each_other_back() {
     }
     assert_eq!(camera_neutral_of(&bare(), D65_XY64, None), None, "no ColorMatrix, no neutral");
 }
+
+/// Camera Raw holds each camera-neutral component at no less than 1/16 of the
+/// largest; a white whose blue component falls under it (a calibration that
+/// cuts blue 100-fold) renders at the floor, and the other two keep their
+/// ratio. A neutral above the floor is untouched.
+///
+/// MUTATION: drop the `.max(NEUTRAL_FLOOR)`.
+#[test]
+fn a_camera_neutral_component_is_held_at_a_sixteenth_of_the_largest() {
+    let p = with_matrices();
+    let xy = temp_tint_to_xy(5400.0, 0.0);
+    let plain = camera_neutral_of(&p, xy, None).expect("a neutral");
+    assert!(plain.iter().all(|c| *c > NEUTRAL_FLOOR), "premise: this white is above the floor: {plain:?}");
+    let cut = camera_neutral_of(&p, xy, Some([1.0, 1.0, 0.01])).expect("a neutral");
+    assert!(plain[2] * 0.01 < NEUTRAL_FLOOR, "premise: the cut puts blue under the floor");
+    assert_eq!(cut[2], NEUTRAL_FLOOR, "{cut:?}");
+    assert!((cut[0] / cut[1] - plain[0] / plain[1]).abs() < 1e-6, "red and green keep their ratio: {cut:?}");
+}

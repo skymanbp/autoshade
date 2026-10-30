@@ -119,7 +119,7 @@ pub(in crate::fit_zoned) fn attach_free_masks(
                 continue;
             }
         };
-        let guide = crate::render::thumbnail(src, spatial::TILE_RASTER_EDGE, spatial::TILE_RASTER_EDGE);
+        let guide = crate::render::Plate::thumbnail_of(src, spatial::TILE_RASTER_EDGE);
         let raw_mask = image::imageops::resize(
             &proposal.mask, guide.width(), guide.height(), FilterType::Nearest,
         );

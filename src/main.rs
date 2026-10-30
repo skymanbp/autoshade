@@ -1684,7 +1684,7 @@ fn denoise_cmd(
 ///   master without the flag shipped a camera curve its solve had never seen,
 ///   and on a real three-frame stack the render came out 50–60 codes per
 ///   channel brighter than the target.
-fn match_source(raw: &Path, negative: Option<&Path>) -> Result<(image::DynamicImage, EditRecipe)> {
+fn match_source(raw: &Path, negative: Option<&Path>) -> Result<(render::Plate, EditRecipe)> {
     if decode::is_raw(raw) {
         if let Some(n) = negative {
             anyhow::bail!(
@@ -1704,11 +1704,14 @@ fn match_source(raw: &Path, negative: Option<&Path>) -> Result<(image::DynamicIm
         }
         println!("  (a master of {}: its calibration composes into the solve)", neg.display());
         return Ok((
-            render::source_pixels(raw, Some(pipeline::FIT_SOURCE_EDGE))?,
+            render::Plate::baked(render::source_pixels(raw, Some(pipeline::FIT_SOURCE_EDGE))?),
             pipeline::calibration_recipe(pipeline::fit_calibration(neg)),
         ));
     }
-    Ok((decode::preview_only(raw)?, pipeline::calibration_recipe(pipeline::fit_calibration(raw))))
+    Ok((
+        render::Plate::baked(decode::preview_only(raw)?),
+        pipeline::calibration_recipe(pipeline::fit_calibration(raw)),
+    ))
 }
 
 /// Reverse-fit: solve for the EditRecipe that maps `raw`'s look onto `target`'s
@@ -1863,7 +1866,7 @@ fn match_cmd(
             Ok(j)
         };
         let fitted =
-            autoshade::render::develop_preview(&autoshade::render::thumbnail(&src, JUDGE_EDGE, JUDGE_EDGE), recipe);
+            autoshade::render::develop_preview(&autoshade::render::Plate::thumbnail_of(&src, JUDGE_EDGE), recipe);
         let t = enc(&autoshade::render::thumbnail(&tgt, JUDGE_EDGE, JUDGE_EDGE))?;
         let f = enc(&fitted)?;
         Ok(autoshade::advisor::judge_pair(

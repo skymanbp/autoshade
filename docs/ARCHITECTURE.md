@@ -2188,12 +2188,13 @@ tests sit in parts under `tests/`, spliced into `tests.rs` by `include!`, so
 every test keeps its name and its path.
 
 The pixel stage, in this order: anchored white balance (on a recipe that
-names a camera profile, v1.17.0: in the RAW develop the white is not a stage
-here at all — it is built into the profile stage below, where Camera Raw puts
-it; in the preview develop, Camera Raw's measured law, a Bradford shift
-between the DNG SDK's whites, under the profile stage's ramp and curve, which
-`render::profile::UnderTone` undoes and redoes around it — the two disagree at
-a moved white, disclosed in TECH_STACK) →
+names a camera profile, v1.17.0: the white is not a stage here at all — it is
+built into the profile stage, where Camera Raw puts it; the RAW develop builds
+it there, and the canvas and the reverse fit develop it there from the photo's
+camera base, below; only a baked source — a master, a JPEG — still takes it
+here, by Camera Raw's measured law, a Bradford shift between the DNG SDK's
+whites under the profile stage's ramp and curve, which
+`render::profile::UnderTone` undoes and redoes around it) →
 **camera calibration** (the Calibration panel's three primaries and shadow
 tint, first because they belong to the camera profile every later stage reads
 through) → **de-fringing** (`render/lens.rs`: the two hue windows, on
@@ -2231,6 +2232,18 @@ the global white balance, as a move of that white in the light between the
 exposure ramp and Adobe's curve; its Hue turns by degrees in the profile
 stage's reference primaries, and the mask stage's airlight Dehaze does not
 run. Each reads the mask's coverage the mask stage reads (`masks::Cover`).
+The zoned reverse fit solves a zone's Exposure, tone sliders and colour gains
+on that same law (`render::LocalGreyLaw`, the develop's own tone stage read on
+a grey; `fit_zoned::fit_zone_dials_on` / `fit_zone_tone_on`): the engine's
+moment solve took a mask's EV as a gain on the rendered value, and on this
+law (the measured exposure transfer at the camera start, under the profile
+stage's curve, the mask's on the start the global one left; Highlights and
+Shadows at the frame's `HsKey`) EV +0.62 renders +0.82 … +0.96 at linear
+0.005 … 0.04, so every night
+zone overshot 1.3–1.5× by an amount that changes with the level. The law is
+held to the render within the preview's two 8-bit steps at linear 0.03 and up,
+and Highlights below 0 / Shadows above 0 within 0.25 EV (it reads a grey's
+site on the diagonal, the render the base of its neighbourhood).
 Such a recipe also opens its white balance AT As Shot
 (`EditRecipe::open_white_balance_at_as_shot`, stamped wherever a photo's
 as-shot white is), which the white balance stage renders as no move and the
@@ -2892,7 +2905,51 @@ temperature, so the camera triple is balanced to the chosen white and the
 matrices and hue/sat maps blend at it, before the tables, and no adaptation
 follows (`resolve_camera_profile`). For a Sony ARW the calibration is the
 body's reference Daylight multipliers over the file's own preset
-(`as_shot::camera_calibration`), what Camera Raw writes into its DNG. A profile without a
+(`as_shot::camera_calibration`), what Camera Raw writes into its DNG.
+
+Camera Raw's order, measured with synthetic linear DNGs (`LinearRaw`, camera
+RGB = linear sRGB, an embedded profile, rendered through Photoshop's Camera
+Raw): raw → lens gain → white-balance multipliers → `ForwardMatrix` → tables
+(hue/sat map) → exposure → look table → curves. Two experiments place the
+white. With a hue/sat map that turns hues 120–210° by 30°, a patch the map
+leaves alone at As Shot (0 ΔE) is moved by it once a Custom 3000 K carries it
+into those hues (10 ΔE) — the white is applied BEFORE the tables. With a
+second `ColorMatrix` at Standard A, the render changes by mean ΔE 20.6 at
+2850 K, 5.1 at 4500 K and not at all at 6500 K or above — the matrices are
+blended at the CHOSEN white's temperature, not the shot's. And Camera Raw's
+DNG of a Sony ARW (DNG Converter, p39) carries `CameraCalibration1/2` =
+diag(1.0031, 1, 0.9653), the body's reference Daylight multipliers over the
+file's preset, with `AsShotNeutral` the camera's own levels: the calibration
+is in front of the `ColorMatrix` in the white's camera neutral, which is why
+`camera_neutral_of` takes it. The engine's profile stage runs that order from
+the multipliers on (`profile::Stage::render_ref`: the hue/sat map, the
+exposure ramp, the look table, the tone curve); the lens profile's
+vignetting gain is the vignette stage of the pixel stage above.
+
+**The camera base (v1.17.0, `render/canvas.rs`).** Because the white lives in
+the profile stage, a surface that shows a moved white needs the frame from
+before it. `CameraBase` keeps a RAW's camera-native frame at the working edge
+(demosaiced, default-cropped, through the camera stage's lens work — the
+vignetting gain and, under Camera Raw's law, the lens resample
+(`source::camera_stage_lens`, one rule with the render) — oriented, capped in
+linear light) and the As Shot profile stage of the full-resolution frame
+capped the render's way, its over-range light kept as the float base keeps it; a
+white is developed as that As Shot frame plus what the white changes when the
+stage is run on the capped camera frame, so at As Shot the base is the
+render's byte for byte and a moved white carries only the difference of the
+two stagings' block-average error (the stage is not linear: staged on the
+capped frame alone, p39 at 1000 px read 0.42 ΔE76 off the render on average,
+median 0, 99th percentile 5.4). `base_develop` keeps the last two camera bases
+for the process, so a canvas moving its white re-runs the profile stage, not
+the decode; the canvas names the white in its part (`BasePart::of_canvas`) and
+the preview develop, handed a RAW source's base, leaves it out. The reverse
+fit's source is a `Plate`: an image registered with the camera base it came
+from and the chain of thumbnails that made it, for as long as it lives, so the
+preview develop handed exactly those pixels develops each candidate's white
+from the camera frame along the same chain; a plate in the sensor frame
+(the fit's source, `BasePart::without_lens`) compares a candidate's part in
+that frame. Masters keep the As Shot part —
+they are rendered later under whatever white the recipe has by then. A profile without a
 `ForwardMatrix`, and every render with no profile, keep the engine's own
 D65-only matrix; the no-profile render is byte-identical to v1.16.0. Until
 v1.17.0 the matrix half was a stated deviation: on p39's flat sidecar it left
@@ -5682,8 +5739,14 @@ lost (a* +36.45 against the target's +44.80). `search_cast_hand_off` walks
 the white balance from the shipped one along the direction the as-fitted
 curves pull, read by the white-balance stage's own estimator on the curves'
 own move (a mean of linear values read that warm cast as COOLER, measured),
-doubling the walk until it reaches the `WB_SEARCH_K` edge and trying 24
-points on it. At each point saturation is chased again (stage 3 reads mean
+doubling the walk's extent from `λ = 1` until its point reaches a
+`WB_SEARCH_K` edge, leaves the strength budget, or stops moving (twice the
+extent inverts onto the same pair), and trying 24 even points on it. The
+budget and the stopped point ended a defect (2026-10-29, measured on p40): on
+Camera Raw's law the curves' pull pinned the tint at +100 by `λ = 1`, the
+Kelvin settled at 3550 K without meeting an edge, the extent ran to 64, and
+all 24 candidates inverted onto one out-of-budget pair while the budget
+admitted the walk's own points up to `λ ≈ 0.25`. At each point saturation is chased again (stage 3 reads mean
 chroma, and a moved white balance carries a different amount of it) and the
 curves are re-fitted — except on the 4b do-no-harm loop's re-fit
 (`CastRescue::KeepSaturation`), which keeps the saturation the loop is
@@ -5708,8 +5771,11 @@ finished at a mean ΔE of 8.29 against the target while 40000 K, inside the
 band and pulling least (0.24 against 0.43), finished at 7.52. The winner
 ships only when it beats the frame without curves by more than `FIT_QUANT`,
 the projection's own bar; otherwise the projection runs exactly as before,
-on an untouched recipe, and `a_hand_off_the_cells_refuse_leaves_the_projection_as_it_was`
-pins that path by value against the tree before the hand-off. A shipped
+on an untouched recipe. (The synthetic pair that pinned that path by value
+until 2026-10-29 had been refused only at the coarse steps; the finer walk
+reaches a white balance its cells vouch, and
+`the_hand_off_walk_reaches_the_nearer_white_balance_the_cells_vouch` pins
+that.) A shipped
 hand-off says so (`FIT_NOTE_CAST_HANDED_TO_WB`: Kelvin and tint before and
 after, the fan before and after, the cells' shares) and, on the Kelvin
 domain's edge above the default strength, adds the white-balance stage's own

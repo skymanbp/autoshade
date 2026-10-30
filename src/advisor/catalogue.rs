@@ -492,7 +492,7 @@ pub const RECIPE_CONTROLS: [Control; 117] = [
     Control {
         name: "temperature_k",
         shape: Shape::NullableNumber,
-        range: Some((2000.0, 40000.0)),
+        range: Some((2000.0, 50000.0)),
         neutral: "null = keep as-shot",
         engine_only: false,
         crs: CrsKey::Attr("Temperature"),
@@ -504,7 +504,7 @@ pub const RECIPE_CONTROLS: [Control; 117] = [
     Control {
         name: "tint",
         shape: Shape::Number,
-        range: Some((-100.0, 100.0)),
+        range: Some((-150.0, 150.0)),
         neutral: "0",
         engine_only: false,
         crs: CrsKey::Attr("Tint"),
@@ -515,7 +515,7 @@ pub const RECIPE_CONTROLS: [Control; 117] = [
     Control {
         name: "as_shot_k",
         shape: Shape::NullableNumber,
-        range: Some((2000.0, 40000.0)),
+        range: Some((2000.0, 50000.0)),
         neutral: "null = unknown",
         engine_only: true,
         crs: CrsKey::None,
@@ -526,7 +526,7 @@ pub const RECIPE_CONTROLS: [Control; 117] = [
     Control {
         name: "as_shot_tint",
         shape: Shape::NullableNumber,
-        range: Some((-100.0, 100.0)),
+        range: Some((-150.0, 150.0)),
         neutral: "null = unknown",
         engine_only: true,
         crs: CrsKey::None,
@@ -4284,7 +4284,7 @@ mod tests {
         for c in RECIPE_CONTROLS.iter().filter(|c| c.shape.is_scalar()) {
             let (lo, hi) = c.range.unwrap_or_else(|| panic!("{} has no stated range", c.name));
             // A full span OUTSIDE each end (not a multiple of the bound: for a
-            // 2000..40000 band, `lo * 10` lands INSIDE the range).
+            // 2000..50000 band, `lo * 10` lands INSIDE the range).
             let span = hi - lo;
             for (probe, want) in [(hi + span + 1.0, hi), (lo - span - 1.0, lo)] {
                 let json = format!("{{\"{}\": {probe}}}", c.name);
@@ -4304,7 +4304,7 @@ mod tests {
         for c in LOCAL_CONTROLS.iter().filter(|c| c.shape.is_scalar()) {
             let (lo, hi) = c.range.unwrap_or_else(|| panic!("{} has no stated range", c.name));
             // A full span OUTSIDE each end (not a multiple of the bound: for a
-            // 2000..40000 band, `lo * 10` lands INSIDE the range).
+            // 2000..50000 band, `lo * 10` lands INSIDE the range).
             let span = hi - lo;
             for (probe, want) in [(hi + span + 1.0, hi), (lo - span - 1.0, lo)] {
                 let json = format!("{{\"masks\": [{{\"{}\": {probe}}}]}}", c.name);
