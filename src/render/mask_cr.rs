@@ -8,19 +8,21 @@
 //!   (`tone_cr::Exposure`), and a mask's EV adds to the
 //!   global one (a +1 EV frame under a −0.25 EV mask renders as +0.75).
 //!   It runs right after the global Exposure.
-//! - **Contrast, Highlights, Shadows, Whites, Blacks, Dehaze** and
-//!   **Clarity's tone** are operators of their own: local Highlights,
-//!   Shadows and Dehaze push 1.1–1.3× their global twins, and local
+//! - **Contrast, Highlights (above 0), Whites, Blacks, Dehaze** and
+//!   **Clarity's tone** are operators of their own: local Highlights
+//!   and Dehaze push 1.1–1.3× their global twins, and local
 //!   Contrast, Whites and Blacks move other bands. Each gets a response
 //!   table of the global tables' form ([`L_RISE`] …), fitted with the
 //!   engine in the loop on the local renders at ±30 … ±100, and runs right
 //!   after the global sliders.
-//! - **Highlights below 0 and Shadows above 0** run instead the global law
+//! - **Highlights below 0 and Shadows of either sign** run instead the global law
 //!   (`tone_cr`: local, keyed to the frame, before Exposure) on the frame's
 //!   own sites, Highlights scaled by [`L_HL_GAIN`] (Highlights −60: the
-//!   local renders regressed on the global law, 1.21) and Shadows read as a
-//!   larger global slider that falls with the value ([`L_SH_GAIN`]: 1.32 at
-//!   +25 down to 1.05 at +100), right after the global pass ([`apply_local_hs`]).
+//!   local renders regressed on the global law, 1.21) and Shadows read as
+//!   a global slider scaled by a gain that falls with the value
+//!   ([`L_SH_GAIN`]: 1.32 at +25 down to 1.05 at +100; [`L_SHN_GAIN`]: 1.16
+//!   at −25 down to 0.85 at −100), right after the global pass
+//!   ([`apply_local_hs`]).
 //! - **Texture** renders exactly as the global Texture and stays where the
 //!   mask stage puts it.
 //! - **Temp and Tint** move the global white ([`local_white`]): a white
@@ -41,9 +43,11 @@
 use super::*;
 use super::tone_cr::{camera_raw_unstart, table_at, DEHAZE_CHROMA, TABLE_N};
 
-/// Rows of the local response tables: the five tone sliders in the knot
-/// model's order, then Dehaze and Clarity's tone.
-const ROWS: usize = 7;
+/// Rows of the local response tables: Contrast, Highlights (above 0), Whites
+/// and Blacks in the knot model's order, then Dehaze and Clarity's tone. A
+/// mask's Shadows run on the global law at either sign ([`apply_local_hs`]),
+/// so they have no row.
+const ROWS: usize = 6;
 
 /// Push per unit slider for a POSITIVE local slider at `u`, rows as
 /// [`ROWS`]: a slider at `s ∈ (0, 1]` moves the value by
@@ -60,8 +64,6 @@ const L_RISE: [[f32; TABLE_N]; ROWS] = [
     [-0.0234, 0.0005, -0.0302, -0.0484, -0.0395, -0.0454, -0.0554, -0.0581, -0.0582, -0.0562, -0.0527, -0.0492, -0.0445, -0.0374, -0.0308, -0.0223, -0.0094, 0.0029, 0.0171, 0.0342, 0.0405, 0.0526, 0.0757, 0.0664, 0.0508, 0.0838, 0.1101, 0.0576, -0.0361, -0.1092, -0.0197, 0.1913, 0.2200],
     // highlights
     [0.0016, 0.0066, 0.0112, 0.0134, 0.0157, 0.0199, 0.0246, 0.0301, 0.0363, 0.0413, 0.0493, 0.0649, 0.0842, 0.1016, 0.1240, 0.1593, 0.2008, 0.2393, 0.2835, 0.3304, 0.3320, 0.3482, 0.4482, 0.5728, 0.7093, 0.8822, 0.9978, 0.8602, 0.5672, 0.4069, 0.3909, 0.4310, 0.5158],
-    // shadows
-    [0.0539, 0.1191, 0.1405, 0.1294, 0.1251, 0.1266, 0.1176, 0.1005, 0.0817, 0.0715, 0.0682, 0.0577, 0.0436, 0.0366, 0.0363, 0.0368, 0.0356, 0.0342, 0.0321, 0.0290, 0.0297, 0.0283, 0.0211, 0.0180, 0.0156, 0.0137, 0.0173, 0.0182, 0.0116, 0.0046, 0.0045, 0.0303, 0.0987],
     // whites
     [0.0063, 0.0144, 0.0209, 0.0216, 0.0218, 0.0273, 0.0358, 0.0449, 0.0526, 0.0589, 0.0654, 0.0720, 0.0819, 0.0974, 0.1143, 0.1328, 0.1544, 0.1744, 0.1935, 0.2241, 0.2768, 0.4232, 0.6216, 0.7148, 0.7996, 0.9076, 0.9032, 0.7993, 0.6060, 0.4381, 0.4401, 0.5327, 0.6317],
     // blacks
@@ -79,8 +81,6 @@ const L_FALL: [[f32; TABLE_N]; ROWS] = [
     [0.0125, -0.0213, -0.0364, -0.0328, -0.0325, -0.0391, -0.0445, -0.0476, -0.0482, -0.0478, -0.0459, -0.0435, -0.0398, -0.0341, -0.0288, -0.0213, -0.0096, 0.0024, 0.0153, 0.0311, 0.0380, 0.0417, 0.0555, 0.0633, 0.0641, 0.0623, 0.0715, 0.0982, 0.0868, 0.0436, 0.0427, 0.0727, 0.0822],
     // highlights
     [0.0035, 0.0074, 0.0117, 0.0141, 0.0163, 0.0205, 0.0253, 0.0310, 0.0373, 0.0426, 0.0505, 0.0658, 0.0850, 0.1020, 0.1226, 0.1551, 0.1974, 0.2407, 0.2888, 0.3401, 0.3405, 0.3407, 0.4210, 0.4740, 0.4913, 0.5433, 0.5758, 0.5652, 0.5251, 0.4834, 0.4265, 0.3769, 0.4409],
-    // shadows
-    [0.1309, 0.0958, 0.1194, 0.1422, 0.1274, 0.1156, 0.1121, 0.0990, 0.0811, 0.0700, 0.0660, 0.0560, 0.0428, 0.0363, 0.0357, 0.0362, 0.0353, 0.0340, 0.0320, 0.0292, 0.0288, 0.0271, 0.0217, 0.0182, 0.0154, 0.0140, 0.0176, 0.0151, 0.0050, 0.0026, 0.0079, 0.0279, 0.0761],
     // whites
     [0.0069, 0.0141, 0.0215, 0.0228, 0.0217, 0.0267, 0.0355, 0.0449, 0.0528, 0.0593, 0.0666, 0.0733, 0.0824, 0.0967, 0.1133, 0.1314, 0.1522, 0.1739, 0.2000, 0.2324, 0.2579, 0.2870, 0.3331, 0.3768, 0.4251, 0.4769, 0.5275, 0.6287, 0.8327, 1.0980, 1.3757, 1.6200, 1.7363],
     // blacks
@@ -97,8 +97,6 @@ const L_RISE_Q: [[f32; TABLE_N]; ROWS] = [
     [-0.0956, -0.0701, -0.0113, 0.0033, -0.0128, -0.0060, -0.0010, -0.0049, -0.0071, -0.0080, -0.0071, -0.0063, -0.0066, -0.0076, -0.0084, -0.0079, -0.0050, -0.0012, 0.0018, 0.0075, 0.0112, 0.0003, -0.0069, 0.0148, 0.0410, 0.0347, 0.0295, 0.1027, 0.2247, 0.3634, 0.3880, 0.1899, 0.0157],
     // highlights
     [0.0001, -0.0001, -0.0012, -0.0019, -0.0019, -0.0020, -0.0026, -0.0034, -0.0042, -0.0046, -0.0051, -0.0056, -0.0055, -0.0058, -0.0076, -0.0115, -0.0155, -0.0169, -0.0173, -0.0045, 0.0494, 0.1220, 0.1589, 0.1144, 0.0010, -0.1675, -0.3135, -0.2467, -0.0858, -0.0477, -0.0795, -0.1149, -0.1544],
-    // shadows
-    [0.0817, 0.0153, -0.0087, 0.0042, 0.0092, 0.0007, -0.0067, -0.0106, -0.0103, -0.0090, -0.0085, -0.0079, -0.0071, -0.0061, -0.0055, -0.0052, -0.0054, -0.0054, -0.0053, -0.0050, -0.0041, -0.0032, -0.0036, -0.0045, -0.0036, -0.0028, -0.0040, -0.0054, -0.0048, -0.0017, 0.0030, 0.0118, 0.0254],
     // whites
     [-0.0009, -0.0010, -0.0020, -0.0028, -0.0022, -0.0014, -0.0010, -0.0014, -0.0022, -0.0024, -0.0009, 0.0030, 0.0090, 0.0160, 0.0245, 0.0371, 0.0563, 0.0887, 0.1505, 0.2233, 0.2480, 0.1931, 0.1431, 0.1767, 0.1565, 0.0188, -0.0572, 0.0525, 0.1982, 0.1491, -0.0299, -0.1577, -0.2184],
     // blacks
@@ -115,8 +113,6 @@ const L_FALL_Q: [[f32; TABLE_N]; ROWS] = [
     [-0.0161, -0.0009, 0.0108, 0.0101, 0.0070, 0.0081, 0.0099, 0.0115, 0.0114, 0.0105, 0.0095, 0.0082, 0.0069, 0.0060, 0.0051, 0.0039, 0.0021, -0.0002, -0.0024, -0.0048, -0.0068, -0.0080, -0.0110, -0.0136, -0.0128, -0.0083, -0.0162, -0.0365, -0.0252, 0.0036, -0.0069, -0.0390, -0.0510],
     // highlights
     [-0.0015, -0.0026, -0.0031, -0.0029, -0.0038, -0.0050, -0.0061, -0.0075, -0.0086, -0.0102, -0.0131, -0.0181, -0.0247, -0.0312, -0.0386, -0.0496, -0.0662, -0.0859, -0.1055, -0.1226, -0.1177, -0.0412, 0.1026, 0.1573, 0.0159, -0.1559, -0.1980, -0.1702, -0.1438, -0.1287, -0.0877, -0.0256, -0.0263],
-    // shadows
-    [-0.0020, -0.0106, -0.0558, -0.0657, -0.0441, -0.0407, -0.0391, -0.0285, -0.0201, -0.0163, -0.0150, -0.0130, -0.0103, -0.0086, -0.0081, -0.0081, -0.0077, -0.0072, -0.0067, -0.0062, -0.0062, -0.0055, -0.0043, -0.0038, -0.0029, -0.0036, -0.0054, -0.0023, 0.0012, -0.0005, -0.0039, -0.0051, -0.0040],
     // whites
     [-0.0019, -0.0035, -0.0047, -0.0040, -0.0041, -0.0061, -0.0087, -0.0110, -0.0127, -0.0140, -0.0158, -0.0181, -0.0219, -0.0283, -0.0355, -0.0430, -0.0512, -0.0609, -0.0724, -0.0859, -0.1005, -0.1175, -0.1381, -0.1625, -0.1957, -0.2285, -0.2572, -0.3309, -0.5189, -0.7557, -0.9059, -1.0348, -1.2463],
     // blacks
@@ -136,27 +132,24 @@ fn local_row(k: usize, s: f32, y: f32) -> f32 {
     table_at(t, y) + s.abs() * table_at(q, y)
 }
 
-/// One adjustment's seven table sliders in −1..1, rows as [`ROWS`].
-/// Highlights below 0 and Shadows above 0 are not table sliders on this law:
-/// they run in the pass before Exposure ([`apply_local_hs`]).
+/// One adjustment's six table sliders in −1..1, rows as [`ROWS`].
+/// Highlights below 0 are not a table slider on this law: they run in the
+/// pass before Exposure ([`apply_local_hs`]), as Shadows do.
 fn table_sliders(m: &crate::recipe::LocalAdjustment) -> [f32; ROWS] {
-    let [hl, sh] = local_hs(m);
-    let mut s = [m.contrast, m.highlights, m.shadows, m.whites, m.blacks, m.dehaze, m.clarity].map(|v| (v / 100.0).clamp(-1.0, 1.0));
+    let [hl, _] = local_hs(m);
+    let mut s = [m.contrast, m.highlights, m.whites, m.blacks, m.dehaze, m.clarity].map(|v| (v / 100.0).clamp(-1.0, 1.0));
     if hl != 0.0 {
         s[1] = 0.0;
-    }
-    if sh != 0.0 {
-        s[2] = 0.0;
     }
     s
 }
 
-/// A mask's Highlights (below 0) and Shadows (above 0) in −1..1 — the signs
-/// the local law covers; 0 for the other sign.
+/// A mask's Highlights (below 0) and Shadows (either sign) in −1..1 — what
+/// the local law covers; 0 for a positive Highlights.
 fn local_hs(m: &crate::recipe::LocalAdjustment) -> [f32; 2] {
     let hl = (m.highlights / 100.0).clamp(-1.0, 1.0);
     let sh = (m.shadows / 100.0).clamp(-1.0, 1.0);
-    [hl.min(0.0), sh.max(0.0)]
+    [hl.min(0.0), sh]
 }
 
 /// How much harder a mask's Highlights push than the global slider at the
@@ -174,10 +167,25 @@ const L_HL_GAIN: f32 = 1.2;
 const L_SH_GAIN: f32 = 1.4065;
 const L_SH_GAIN_SLOPE: f32 = 0.3532;
 
+/// A NEGATIVE mask Shadows `s` (−1..0) acts as the global Shadows slider at
+/// `s · (L_SHN_GAIN − L_SHN_GAIN_SLOPE · |s|)`. Camera Raw's local −100 is its
+/// global −100 band for band, lightness and chroma (p39 mask core, every band
+/// within 0.2 L / 0.03 C), so a negative mask Shadows is the global law too —
+/// not the response table, whose luma rule kept half the chroma Camera Raw
+/// takes out of a darkened shadow (core a* +0.27 … +0.46). Engine in the
+/// loop at −25 / −30 / −50 / −60 / −75 / −100: gain 1.156 / 1.132 / 1.041 /
+/// 0.999 / 0.940 / 0.850, on this line to 0.009.
+const L_SHN_GAIN: f32 = 1.2523;
+const L_SHN_GAIN_SLOPE: f32 = 0.4103;
+
 /// The `[highlights, shadows]` gains [`tone_cr::hs_pixel_scaled`] takes for
-/// a mask's Shadows at `sh` (0..1).
+/// a mask's Shadows at `sh` (−1..1).
 fn local_hs_gain(sh: f32) -> [f32; 2] {
-    [L_HL_GAIN, L_SH_GAIN - L_SH_GAIN_SLOPE * sh]
+    if sh < 0.0 {
+        [L_HL_GAIN, L_SHN_GAIN - L_SHN_GAIN_SLOPE * sh.abs()]
+    } else {
+        [L_HL_GAIN, L_SH_GAIN - L_SH_GAIN_SLOPE * sh]
+    }
 }
 
 /// Does any drawn adjustment of `r` move Highlights or Shadows on the local law?
@@ -238,7 +246,7 @@ fn local_slider_lut(s: [f32; ROWS]) -> Option<SliderPass> {
         let lut = (0..LUT_N)
             .map(|i| camera_raw_start(sample_lut(&tone, camera_raw_unstart(i as f32 / (LUT_N - 1) as f32))))
             .collect();
-        let d = s[5];
+        let d = s[4];
         let chroma = (d != 0.0).then(|| {
             (0..LUT_N)
                 .map(|i| {
@@ -566,15 +574,15 @@ mod tests {
             let p = local_slider_lut(*s).expect("a moving slider is a pass");
             assert!(p.lut.windows(2).all(|w| w[1] >= w[0]), "monotone at {s:?}");
             assert!(p.lut.iter().all(|v| (0.0..=1.0).contains(v)), "in range at {s:?}");
-            assert_eq!(p.chroma.is_some(), s[5] != 0.0, "chroma only under Dehaze at {s:?}");
+            assert_eq!(p.chroma.is_some(), s[4] != 0.0, "chroma only under Dehaze at {s:?}");
         }
         let mid = LUT_N / 2;
         let x = mid as f32 / (LUT_N - 1) as f32;
-        let shadows_up = local_slider_lut([0.0, 0.0, 0.6, 0.0, 0.0, 0.0, 0.0]).expect("a pass");
-        assert!(shadows_up.lut[LUT_N / 8] > (LUT_N / 8) as f32 / (LUT_N - 1) as f32, "+60 Shadows lifts the shadows");
-        let blacks_down = local_slider_lut([0.0, 0.0, 0.0, 0.0, -0.4, 0.0, 0.0]).expect("a pass");
+        let blacks_up = local_slider_lut([0.0, 0.0, 0.0, 0.4, 0.0, 0.0]).expect("a pass");
+        assert!(blacks_up.lut[LUT_N / 8] > (LUT_N / 8) as f32 / (LUT_N - 1) as f32, "+40 Blacks lifts the shadows");
+        let blacks_down = local_slider_lut([0.0, 0.0, 0.0, -0.4, 0.0, 0.0]).expect("a pass");
         assert!(blacks_down.lut[LUT_N / 16] < (LUT_N / 16) as f32 / (LUT_N - 1) as f32, "−40 Blacks deepens them");
-        assert!((shadows_up.lut[LUT_N - 1] - 1.0).abs() < 1e-3 && shadows_up.lut[mid] >= x - 1e-3, "white stays white");
+        assert!((blacks_up.lut[LUT_N - 1] - 1.0).abs() < 1e-3 && blacks_up.lut[mid] >= x - 1e-3, "white stays white");
     }
 
     /// A mask's white move is nothing at Temp and Tint 0; warming lowers the
