@@ -315,7 +315,14 @@ pub(super) fn apply_masks(
                 if let Some((luts, active)) = &rgb_curve_luts {
                     t = curve_space.channel_curves(t, luts, *active);
                 }
-                let mut t = apply_sat_vibrance(t[0], t[1], t[2], sat, 0.0);
+                // v1.17.0: a positive Saturation on Camera Raw's law scales the
+                // HSV saturation in the reference primaries with V held
+                // (`mask_cr::saturate_px`); a negative one is the chroma scale
+                // about the luma below, which Camera Raw's renders match.
+                let mut t = match &hue_space {
+                    Some((under, (dec, enc))) if sat > 0.0 => mask_cr::saturate_px(t, sat, under, dec, enc),
+                    _ => apply_sat_vibrance(t[0], t[1], t[2], sat, 0.0),
+                };
                 // Local hue rotation, LAST in the fused transform: it turns the
                 // colour this mask's WB/tone/saturation stages produced, which
                 // is the order the sliders read in (Temp shift → Saturation →

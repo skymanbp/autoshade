@@ -31,8 +31,12 @@
 //!   no mean Lab bias in the mask's core, then one form per sign).
 //! - **Hue** turns hues by the slider value in degrees, in the profile
 //!   stage's reference primaries ([`hue_px`]).
-//! - Saturation, the curves and the colour gains keep the mask stage's
-//!   model; the airlight Dehaze of that stage does not run on this law.
+//! - **Saturation** above 0 scales the HSV saturation in the reference
+//!   primaries with V held ([`saturate_px`]); below 0, the curves and the
+//!   colour gains keep the mask stage's model (a negative Saturation's chroma
+//!   scale about the luma is Camera Raw's, measured: factor 0.508 at −50,
+//!   0.002 at −100). The airlight Dehaze of that stage does not run on this
+//!   law.
 
 use super::*;
 use super::tone_cr::{camera_raw_unstart, table_at, DEHAZE_CHROMA, TABLE_N};
@@ -471,6 +475,32 @@ pub(super) fn apply_local_white(
             }
         });
     });
+}
+
+/// A positive local Saturation's factor on the HSV saturation, `1 + a·s + b·s²`
+/// for the slider `s` in 0..1. Measured on the p39 radial mask's renders at
+/// +25 / +50 / +75 / +100: the factor that predicts Camera Raw's mask core
+/// best from its own no-change render is 1.074 / 1.189 / 1.317 / 1.455 (this
+/// form within 0.009).
+const L_SAT_A: f32 = 0.288;
+const L_SAT_B: f32 = 0.1701;
+
+/// A positive local Saturation `s` (0..1) on this law: the HSV saturation of
+/// the colour in the profile stage's reference primaries (ProPhoto's), linear
+/// light, scaled by [`L_SAT_A`]'s form with V (the largest channel) held —
+/// the HSV the camera profile's own tables use. Measured against the chroma
+/// scale about the luma (the negative side's law, and this stage's before):
+/// that one keeps the lightness, Camera Raw's positive Saturation does not
+/// (core dL* −0.10 / −0.23 / −0.41 / −0.70 at +25 … +100, a blue sky's red
+/// and green falling under a held blue); predicted from Camera Raw's own
+/// no-change render, mask core ΔE / mean dL* at +100 are 1.55 / +0.19 this
+/// way, 1.78 / +0.71 the other.
+pub(super) fn saturate_px(px: [f32; 3], s: f32, under: &profile::UnderTone, dec: &[f32], enc: &[f32]) -> [f32; 3] {
+    let p = under.to_reference(px.map(|v| sample_lut(dec, v))).map(|v| v.clamp(0.0, 1.0));
+    let f = 1.0 + s * (L_SAT_A + L_SAT_B * s);
+    let v = p[0].max(p[1]).max(p[2]);
+    let q = p.map(|c| (v - (v - c) * f).max(0.0));
+    under.to_working(q).map(|c| sample_lut(enc, c.clamp(0.0, 1.0)))
 }
 
 /// Local Hue on this law: Lightroom's slider is the angle itself, in degrees
