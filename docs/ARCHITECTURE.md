@@ -2196,6 +2196,15 @@ the global white balance, as a move of that white in the light between the
 exposure ramp and Adobe's curve; its Hue turns by degrees in the profile
 stage's reference primaries, and the mask stage's airlight Dehaze does not
 run. Each reads the mask's coverage the mask stage reads (`masks::Cover`).
+The zoned reverse fit solves a zone's Exposure, tone sliders and colour gains
+on that same law (`render::LocalGreyLaw`, the develop's own tone stage read on
+a grey; `fit_zoned::fit_zone_dials_on` / `fit_zone_tone_on`): the engine's
+moment solve took a mask's EV as a gain on the rendered value, and on this
+law EV +0.62 renders +0.82 … +0.96 at linear 0.005 … 0.04, so every night
+zone overshot 1.3–1.5× by an amount that changes with the level. The law is
+held to the render within the preview's two 8-bit steps at linear 0.03 and up,
+and Highlights below 0 / Shadows above 0 within 0.25 EV (it reads a grey's
+site on the diagonal, the render the base of its neighbourhood).
 Such a recipe also opens its white balance AT As Shot
 (`EditRecipe::open_white_balance_at_as_shot`, stamped wherever a photo's
 as-shot white is), which the white balance stage renders as no move and the

@@ -442,6 +442,133 @@ pub(super) fn hue_px(px: [f32; 3], degrees: f32, under: &profile::UnderTone, dec
     under.to_working([r2, g2, b2]).map(|v| sample_lut(enc, v.clamp(0.0, 1.0)))
 }
 
+/// A mask's tone on this law, read on a grey (v1.17.0): what the develop's
+/// tone stage does to a grey under one adjustment at full weight, stated in
+/// the RENDERED value of the frame without the mask. The reverse fit's zone
+/// solve asks this instead of solving on the engine's mask model (`fit_zoned`):
+/// on this law a mask's Exposure rides the exposure ramp before the global
+/// sliders and Adobe's curves, so EV +0.62 asked renders +0.82 … +0.96 at
+/// linear 0.005 … 0.04 and +0.59 at 0.32 (EV +2.5: +3.72 … +1.51), and a fit
+/// that read EV as a gain on the rendered value overshot every zone 1.3–1.5×
+/// by an amount that changes with the level.
+///
+/// It is the develop's own stages on one grey, in the develop's order
+/// (`apply_develop`'s tone stage): the global Highlights and Shadows have run
+/// (they are in the base's rendered value and cancel), the mask's Highlights
+/// below 0 and Shadows above 0 ([`super::tone_cr::hs_pixel_scaled`] at
+/// [`L_HS_GAIN`], on the diagonal site a grey has, at the frame's `key`),
+/// the global Exposure, the mask's Exposure, the global slider pass, the
+/// mask's table sliders ([`local_row`]), the Look's curve and the point and
+/// parametric curves. What it cannot see: a pixel's own neighbourhood (the
+/// Highlights/Shadows base, Clarity, Texture), the stages after the tone
+/// (the per-channel cast curves, the mixer, saturation, the mask stage's
+/// colour gains), and other masks. The fit re-renders whatever it ships.
+pub(crate) struct LocalGreyLaw {
+    /// The base's tone stage over its input `x` on [`LUT_N`] points:
+    /// rendered value without the mask. Monotone.
+    base_out: Vec<f32>,
+    exposure: Option<Vec<f32>>,
+    tone: super::tone::CameraRawTone,
+    key: f32,
+}
+
+impl LocalGreyLaw {
+    /// The law for masks on `base`, `None` on the engine's law (whose mask
+    /// stage multiplies the rendered value, which the fit solves directly).
+    /// `key` is the frame's Highlights/Shadows key (`log2` of its mean linear
+    /// luminance before the curve); [`super::tone_cr::HS_KEY_NOMINAL`] without a frame.
+    pub(crate) fn of(base: &EditRecipe, key: f32) -> Option<Self> {
+        if SliderLaw::of(base) != SliderLaw::CameraRaw {
+            return None;
+        }
+        let mut law = Self {
+            base_out: Vec::new(),
+            exposure: camera_raw_exposure_lut(base.exposure_ev),
+            tone: camera_raw_tone_passes(base),
+            key,
+        };
+        law.base_out = (0..LUT_N)
+            .map(|i| law.after_local_exposure(law.exposed(i as f32 / (LUT_N - 1) as f32), [0.0; ROWS]))
+            .collect();
+        Some(law)
+    }
+
+    /// The frame's key as the develop reads it, from a render of `base`
+    /// (`pixels`, sRGB-encoded): each pixel's luma taken back through the
+    /// base's tone stage to its input, then [`super::tone_cr::hs_field`]'s mean.
+    pub(crate) fn frame_key(base: &EditRecipe, pixels: &[[f32; 3]]) -> f32 {
+        let Some(law) = Self::of(base, HS_KEY_NOMINAL) else { return HS_KEY_NOMINAL };
+        let n = pixels.len().max(1);
+        let mean = pixels
+            .iter()
+            .map(|p| f64::from(srgb_to_linear(camera_raw_unstart(law.input_of(luma601(p))))))
+            .sum::<f64>()
+            / n as f64;
+        (mean as f32).max(1e-6).log2()
+    }
+
+    fn exposed(&self, x: f32) -> f32 {
+        self.exposure.as_ref().map_or(x, |e| sample_lut(e, x))
+    }
+
+    /// From after both exposures to the end of the tone stage, with the
+    /// mask's table sliders `s` (rows as [`ROWS`]).
+    fn after_local_exposure(&self, x: f32, s: [f32; ROWS]) -> f32 {
+        let mut v = self.tone.sliders.as_ref().map_or(x, |p| sample_lut(&p.lut, x));
+        if s.iter().any(|&k| k != 0.0) {
+            let u = camera_raw_unstart(v);
+            let push: f32 = (0..ROWS).map(|k| s[k] * local_row(k, s[k], u)).sum();
+            v = camera_raw_start((u + push).clamp(0.0, 1.0));
+        }
+        if let Some(look) = &self.tone.look {
+            v = sample_lut(look, v);
+        }
+        if let Some(c) = &self.tone.curves {
+            v = sample_lut(c, v);
+        }
+        v
+    }
+
+    /// The tone stage's input that renders `y` without the mask.
+    fn input_of(&self, y: f32) -> f32 {
+        let t = &self.base_out;
+        let i = t.partition_point(|&v| v < y).clamp(1, LUT_N - 1);
+        let (a, b) = (t[i - 1], t[i]);
+        let f = if b > a { ((y - a) / (b - a)).clamp(0.0, 1.0) } else { 0.0 };
+        (i as f32 - 1.0 + f) / (LUT_N - 1) as f32
+    }
+
+    /// The value a grey rendered at `y` without the mask renders at under
+    /// `m` at full weight.
+    pub(crate) fn response(&self, y: f32, m: &crate::recipe::LocalAdjustment) -> f32 {
+        let mut x = self.input_of(y.clamp(0.0, 1.0));
+        let [hl, sh] = local_hs(m);
+        if hl != 0.0 || sh != 0.0 {
+            let site = super::tone_cr::HsSite::diagonal(camera_raw_unstart(x), self.key);
+            x = super::tone_cr::hs_pixel_scaled([x; 3], hl, sh, site, L_HS_GAIN)[0];
+        }
+        x = self.exposed(x);
+        if m.exposure_ev != 0.0 {
+            x = camera_raw_start(camera_raw_exposure(camera_raw_unstart(x), m.exposure_ev));
+        }
+        self.after_local_exposure(x, table_sliders(m))
+    }
+
+    /// [`LocalGreyLaw::response`] as a [`LUT_N`] table over `y`, for
+    /// putting on a colour by Adobe's channel rule ([`LocalGreyLaw::pixel`]).
+    pub(crate) fn response_lut(&self, m: &crate::recipe::LocalAdjustment) -> Vec<f32> {
+        (0..LUT_N).map(|i| self.response(i as f32 / (LUT_N - 1) as f32, m)).collect()
+    }
+
+    /// A rendered colour under the mask at weight `w`, by Adobe's channel
+    /// rule on `lut` ([`LocalGreyLaw::response_lut`]), as the develop puts its
+    /// exposure on a colour.
+    pub(crate) fn pixel(px: [f32; 3], lut: &[f32], w: f32) -> [f32; 3] {
+        let t = camera_raw_channels(px, lut);
+        std::array::from_fn(|c| px[c] + w * (t[c] - px[c]))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,5 +641,83 @@ mod tests {
         assert!(grey.iter().all(|&c| (c - 0.4).abs() < 4e-3), "a grey: {grey:?}");
         let turned = hue_px(red, 120.0, &under, dec, enc);
         assert!(turned[1] > turned[0], "+120° takes red toward green: {turned:?}");
+    }
+
+    /// The law the zone fit solves on ([`LocalGreyLaw`]) is the render's: a
+    /// 16-bit grey ramp under a full-coverage mask, every grey's delivered EV
+    /// against the law's, on two bases and ten masks. Tolerance: the preview's
+    /// 8-bit input and output steps at that grey (two steps, 0.11 EV at
+    /// linear 0.03, 0.04 EV at 0.3), at linear 0.03 and up and below the clip.
+    /// Measured worst: 0.064 EV (whites +20 / blacks −20 on the second base,
+    /// at linear 0.036, under its 0.10). The two Highlights/Shadows signs the
+    /// local law moves (Highlights below 0, Shadows above 0) are held to
+    /// 0.25 EV: the law reads a grey's site on the diagonal, the render the
+    /// Highlights/Shadows base of its neighbourhood, and the two part by
+    /// 0.17–0.21 EV on this ramp (measured; not closed by the law).
+    #[test]
+    fn the_local_grey_law_is_the_renders_mask_tone_on_a_grey() {
+        use crate::recipe::{LocalAdjustment, MaskGeometry};
+        let n = 512u32;
+        let img = image::DynamicImage::ImageRgb16(image::ImageBuffer::from_fn(n, 4, |x, _| {
+            let v = (x as f32 / (n - 1) as f32 * 65535.0).round() as u16;
+            image::Rgb([v, v, v])
+        }));
+        let full = |m: LocalAdjustment| LocalAdjustment {
+            mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.5, full_x: 0.5, full_y: 0.5 },
+            amount: 1.0,
+            ..m
+        };
+        let bases = [
+            EditRecipe { camera_profile: "Adobe Standard".into(), ..Default::default() },
+            EditRecipe {
+                camera_profile: "Adobe Standard".into(),
+                exposure_ev: 0.4,
+                contrast: 20.0,
+                whites: -10.0,
+                ..Default::default()
+            },
+        ];
+        let masks = [
+            LocalAdjustment { exposure_ev: 0.62, ..Default::default() },
+            LocalAdjustment { exposure_ev: 1.0, ..Default::default() },
+            LocalAdjustment { exposure_ev: 2.5, ..Default::default() },
+            LocalAdjustment { exposure_ev: -1.0, ..Default::default() },
+            LocalAdjustment { contrast: 30.0, ..Default::default() },
+            LocalAdjustment { highlights: 30.0, shadows: -40.0, ..Default::default() },
+            LocalAdjustment { whites: 20.0, blacks: -20.0, ..Default::default() },
+            LocalAdjustment { exposure_ev: 0.62, contrast: 20.0, ..Default::default() },
+            LocalAdjustment { shadows: 40.0, ..Default::default() },
+            LocalAdjustment { highlights: -40.0, ..Default::default() },
+        ];
+        let px = |r: &EditRecipe| -> Vec<f32> {
+            let out = develop_preview(&img, r).to_rgb32f();
+            (0..n).map(|x| out.get_pixel(x, 2)[1]).collect()
+        };
+        // One 8-bit step at the encoded value `y`, in EV.
+        let step = |y: f32| (srgb_to_linear((y + 1.0 / 255.0).min(1.0)) / srgb_to_linear(y).max(1e-6)).log2();
+        for base in &bases {
+            let y0 = px(base);
+            let frame: Vec<[f32; 3]> = y0.iter().map(|&v| [v; 3]).collect();
+            let law = LocalGreyLaw::of(base, LocalGreyLaw::frame_key(base, &frame)).expect("a camera-profile start");
+            for m in &masks {
+                let hs = local_hs(m) != [0.0, 0.0];
+                let y1 = px(&EditRecipe { masks: vec![full(m.clone())], ..base.clone() });
+                for i in 0..n as usize {
+                    let l0 = srgb_to_linear(y0[i]);
+                    if l0 < 0.03 || y1[i] >= 0.999 || y0[i] >= 0.999 {
+                        continue;
+                    }
+                    let got = (srgb_to_linear(y1[i]) / l0).log2();
+                    let want = (srgb_to_linear(law.response(y0[i], m)) / l0).log2();
+                    let tol = if hs { 0.25 } else { step(y0[i]) + step(y1[i]) };
+                    assert!(
+                        (got - want).abs() <= tol,
+                        "base EV {} mask {:?}: grey at linear {l0:.3} rendered {got:+.3} EV, the law {want:+.3} (tolerance {tol:.3})",
+                        base.exposure_ev,
+                        [m.exposure_ev, m.contrast, m.highlights, m.shadows, m.whites, m.blacks],
+                    );
+                }
+            }
+        }
     }
 }
