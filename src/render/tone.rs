@@ -279,10 +279,10 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
 /// The tone of a Camera Raw recipe after its exposure, as the develop applies
 /// it, in Lightroom's order: Contrast, Whites, Blacks' and Dehaze's LUT
 /// (Highlights and Shadows run before Exposure, `highlights_shadows`), which the develop puts
-/// through `tone_cr::camera_raw_slider_pixel`; the Look's baked curve, through
-/// the luma ratio (the canvas start was calibrated that way, v1.17.0 step 3);
-/// the parametric and point curves, through Adobe's channel rule
-/// (`tone_cr::camera_raw_channels`). `None` for a pass with nothing to do.
+/// through Camera Raw's curve rule ([`apply_camera_raw_curve`], the middle by
+/// its encoded ratio; with Clarity or Dehaze `tone_cr::camera_raw_slider_pixel`); the
+/// parametric and point curves, by the same rule; the Look's baked curve, by
+/// it with the middle at its linear ratio. `None` for a pass with nothing to do.
 /// With exposure (`tone_cr::Exposure`) the passes compose to
 /// [`build_tone_lut`] up to the colour rule.
 pub(crate) struct CameraRawTone {

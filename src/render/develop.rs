@@ -338,9 +338,10 @@ pub(super) fn apply_develop_with_rasters(
     if !tone_neutral {
         // v1.17.0: on a camera-profile start, Highlights and Shadows first
         // (their own pass: a local law, keyed to the frame); exposure, per channel
-        // by Adobe's rule; then Contrast, Whites and Blacks with Adobe's hue and the luma's
-        // lightness (`tone_cr::camera_raw_slider_pixel`); the photographer's
-        // curves, then the Look's, by Camera Raw's measured rule (`tone`).
+        // by Adobe's rule; then Contrast, Whites and Blacks by Camera Raw's
+        // measured curve rule (`tone::apply_camera_raw_curve`, the middle by
+        // its encoded ratio, as the composite curve); the photographer's
+        // curves, then the Look's, by the same rule (`tone`).
         if camera_raw {
             let tone = camera_raw_tone_passes(r);
             // Highlights and Shadows FIRST, global then each mask's, on one
@@ -368,8 +369,28 @@ pub(super) fn apply_develop_with_rasters(
             // one it adds to (`mask_cr`).
             let exposed = exposure.as_ref().map_or(start, Exposure::exposed);
             mask_cr::apply_local_exposure(data, w, h, r, rasters, frame, space, exposed);
+            // Contrast, Whites and Blacks (with the Look's baked moves and
+            // Clarity's tone) go on like a point curve: ProPhoto channels, the
+            // extremes through the LUT on sRGB-encoded values, the middle at its
+            // encoded ratio. Measured against Camera Raw on p39 (v1.17.0, the
+            // stacked look tables, 12 single-slider renders: Contrast ±50 ±100,
+            // Whites ±40 ±80, Blacks ±40 ±80, against the flat render; chroma
+            // > 15, mean |Δab| of the double difference): this rule 1.33, the
+            // middle at its linear ratio 1.45, each channel on its own 1.65, the
+            // channel rule on the working channels 1.75, the rule's hue with the
+            // luma's lightness (until item 35) 2.17, the luma ratio 4.45.
+            // Lightness is the LUT's under every rule (ΔL by band within 0.1).
+            // A pass that also carries Clarity's tone or Dehaze keeps the
+            // earlier pixel rule (`tone_cr::camera_raw_slider_pixel`): on
+            // Clarity +50, +100 and −50 that rule leaves 2.30 / 4.21 / 2.90,
+            // this one 2.55 / 4.52 / 3.58 (Clarity is local in Camera Raw, its
+            // tone half here only a global stand-in); Dehaze is not measured.
             if let Some(s) = &tone.sliders {
-                data.par_iter_mut().for_each(|px| *px = camera_raw_slider_pixel(*px, s));
+                if s.chroma.is_none() && r.clarity == 0.0 {
+                    apply_camera_raw_curve(data, &s.lut, space, MiddleRatio::Encoded);
+                } else {
+                    data.par_iter_mut().for_each(|px| *px = camera_raw_slider_pixel(*px, s));
+                }
             }
             mask_cr::apply_local_sliders(data, w, h, r, rasters, frame);
             // The photographer's parametric and point curves, then the
