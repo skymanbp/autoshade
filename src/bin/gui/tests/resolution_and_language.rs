@@ -822,12 +822,13 @@
             gallery: vec![std::path::PathBuf::from(format!("DSC_{thai}_01.arw"))],
             ..Default::default()
         };
-        // No fonts installed in a test process ⇒ installed_scripts() is
-        // empty or CJK-only; thai is never in it, so the disclosure fires.
-        app.disclose_undrawable_names();
+        // The installed set is this test's own: the session's is
+        // process-wide, and a test that ran `install_fonts` first (any
+        // window-drawing test) leaves Thai in it on a machine with Tahoma.
+        app.disclose_undrawable_names_given(&[]);
         let after_first = app.toasts.len();
         assert_eq!(after_first, 1, "one script, one toast");
-        app.disclose_undrawable_names();
+        app.disclose_undrawable_names_given(&[]);
         assert_eq!(app.toasts.len(), after_first, "the second open stays silent");
         assert!(app.disclosed_scripts.contains("thai"));
     }
