@@ -183,6 +183,9 @@ pub(super) struct DetailZone {
     pub(super) inverted: bool,
     pub(super) source: GrayImage,
     pub(super) target: GrayImage,
+    /// The frame `source` is drawn in (its raster's marker, v1.17.0), for a
+    /// raster restored from it.
+    pub(super) frame: Option<crate::render::BakedGeometry>,
 }
 
 /// The two-region route's zones: the sky on the Select Sky component, the
@@ -205,6 +208,7 @@ pub(super) fn sky_land_zones(
             inverted,
             source: src_mask.clone(),
             target: tgt_mask.clone(),
+            frame: mask_path.marker().cloned(),
         })
         .collect()
 }
@@ -226,6 +230,7 @@ pub(super) fn region_zones(
             inverted: false,
             source: region.source.clone(),
             target: region.target.clone(),
+            frame: raster.marker().cloned(),
         })
         .collect()
 }
@@ -462,7 +467,7 @@ pub(super) fn attach_zone_detail(
         // again below if nothing ends up referencing it.
         let restored = match render::geometry_raster_path(&zone.mask) {
             Some(path) if !std::path::Path::new(path).exists() => {
-                if zone.source.save(path).is_err() {
+                if render::save_mask_raster(&zone.source, std::path::Path::new(path), zone.frame.as_ref()).is_err() {
                     continue;
                 }
                 Some(path.to_string())

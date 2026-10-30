@@ -1703,15 +1703,12 @@ fn match_source(raw: &Path, negative: Option<&Path>) -> Result<(render::Plate, E
             );
         }
         println!("  (a master of {}: its calibration composes into the solve)", neg.display());
-        return Ok((
-            render::Plate::baked(render::source_pixels(raw, Some(pipeline::FIT_SOURCE_EDGE))?),
-            pipeline::calibration_recipe(pipeline::fit_calibration(neg)),
-        ));
+        let base = pipeline::calibration_recipe(pipeline::fit_calibration(neg));
+        let pixels = render::source_pixels(raw, Some(pipeline::FIT_SOURCE_EDGE))?;
+        return Ok((pipeline::fit_source_baked(raw, pixels, &base)?, base));
     }
-    Ok((
-        render::Plate::baked(decode::preview_only(raw)?),
-        pipeline::calibration_recipe(pipeline::fit_calibration(raw)),
-    ))
+    let base = pipeline::calibration_recipe(pipeline::fit_calibration(raw));
+    Ok((pipeline::fit_source_baked(raw, decode::preview_only(raw)?, &base)?, base))
 }
 
 /// Reverse-fit: solve for the EditRecipe that maps `raw`'s look onto `target`'s
@@ -1756,7 +1753,7 @@ fn match_cmd(
     }
     // The source frame and the calibration composed into the solve — one
     // rule with the desktop app's fit (`match_source`).
-    let (src, fit_base) = match_source(raw, negative.as_deref())?;
+    let (mut src, fit_base) = match_source(raw, negative.as_deref())?;
     // THE raw-vs-baked dispatch (R22-1). The target is a finished rendition
     // of this frame — usually a baked file, but "another RAW you developed
     // elsewhere" is a legitimate reference and `decode::load_image` refuses a
@@ -1778,12 +1775,13 @@ fn match_cmd(
             target.display()
         );
     }
-    // The target in the fit's own frame (`pipeline::fit_target`): measured
-    // against the source as shot and as its lens profile corrects it, and
-    // brought into the sensor frame when it was exported corrected. The judge
-    // and the style describer below read the target as it was exported.
+    // The source in the target's frame (`pipeline::fit_target`): the target
+    // measured against the source as shot and as its lens profile corrects
+    // it, and the source put in the frame the target was exported in. The
+    // target itself is paired, judged and described as it was exported.
     let mut fit_base = fit_base;
-    let fitted_target = pipeline::fit_target(&src, &tgt, &mut fit_base);
+    let fitted_target =
+        pipeline::fit_target(&mut src, decode::is_raw(raw).then_some(raw), &tgt, &mut fit_base)?;
     let fit_tgt = &fitted_target.image;
     println!("reverse-fitting {} onto the look of {} …", raw.display(), target.display());
     // 完全自动 (user ruling 2026-08-26): every fit may consult the local DIFT
@@ -1812,7 +1810,9 @@ fn match_cmd(
         // before the write left a race window — a save landing during the
         // segmentation was then overwritten unversioned. The canonical write
         // below gates for the zoned path too, immediately before writing.
-        let mask = autoshade::store::OwnedRaster::claim(raw, "mask-zone-sky")?;
+        // Drawn in the source's frame, and marked so (`render::fit_raster_frame`).
+        let mask = autoshade::store::OwnedRaster::claim(raw, "mask-zone-sky")?
+            .with_frame(render::fit_raster_frame(&src, &fit_base));
         pipeline::guard_readonly(mask.path(), raw)?;
         println!(
             "  zoned: global -> semantic regions or native luminance ranges -> spatial tiles"
@@ -2150,7 +2150,7 @@ fn heal_cmd(
     // will be decoded anyway; paying its bounded decode up front converts a
     // certain post-pay failure into a free refusal.
     if let Some(m) = &mask {
-        autoshade::render::open_mask_bounded(m).with_context(|| {
+        autoshade::render::open_mask_raster(m).with_context(|| {
             format!("--mask {} cannot be used — checked before the paid auto-detect", m.display())
         })?;
     }

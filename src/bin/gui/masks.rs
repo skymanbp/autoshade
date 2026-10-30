@@ -372,10 +372,13 @@ impl AutoShadeApp {
             && let Some(path) =
                 self.recipe.masks.get(i).and_then(|m| autoshade::render::geometry_raster_path(&m.mask))
         {
-            match autoshade::render::open_mask_bounded(std::path::Path::new(path)) {
+            // Through THE raster entry, in the sensor frame this canvas
+            // paints in (a reverse-fit zone may be drawn lens-corrected).
+            let at = std::path::Path::new(path);
+            match autoshade::render::open_mask_raster(at).and_then(|r| r.into_sensor_gray(&self.recipe, at)) {
                 Ok(img) => {
                     let g = image::imageops::resize(
-                        &img.to_luma8(),
+                        &img,
                         mw,
                         mh,
                         image::imageops::FilterType::Triangle,
@@ -513,8 +516,12 @@ impl AutoShadeApp {
             return;
         };
         let lang = self.lang;
-        let done = autoshade::render::open_mask_bounded(std::path::Path::new(&path))
-            .map(|img| op(&img.to_luma8()))
+        // Through THE raster entry, baked in the sensor frame the result is
+        // written in (unmarked).
+        let at = std::path::Path::new(&path);
+        let done = autoshade::render::open_mask_raster(at)
+            .and_then(|r| r.into_sensor_gray(&self.recipe, at))
+            .map(|img| op(&img))
             .and_then(|g| {
                 let p = autoshade::store::claim_raster(&src, tag).map_err(anyhow::Error::from)?;
                 g.save(&p).map_err(anyhow::Error::from)?;
@@ -603,9 +610,12 @@ impl AutoShadeApp {
                 // every taker of both follows (budget.rs).
                 let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&guide_src)));
                 let res = (|| -> anyhow::Result<MaskRefineOutcome> {
-                    let mask = autoshade::render::open_mask_bounded(std::path::Path::new(&path))
-                        .map_err(|e| anyhow::anyhow!("load mask raster {path}: {e}"))?
-                        .to_luma8();
+                    // Through THE raster entry, refined in the sensor frame
+                    // the full-resolution guide is in (written unmarked).
+                    let at = std::path::Path::new(&path);
+                    let mask = autoshade::render::open_mask_raster(at)
+                        .and_then(|r| r.into_sensor_gray(&recipe_at_spawn, at))
+                        .map_err(|e| anyhow::anyhow!("load mask raster {path}: {e:#}"))?;
                     // The same process-wide permit the master/thumb decodes
                     // take: this arm is a FULL-resolution develop or decode by
                     // definition (no cap — full-resolution edges are the whole

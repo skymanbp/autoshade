@@ -57,7 +57,7 @@ pub(super) fn segment_multiclass_both(
         // Keep the historical anchor valid for the seeded legacy run. The
         // legacy path may abstain from refinement and still reference this
         // raster, so it must be materialised before returning the pair.
-        source_sky.save(mask_path.path()).context("save seeded legacy sky mask")?;
+        mask_path.save_mask(&source_sky).context("save seeded legacy sky mask")?;
         let source_dims = (sm.width, sm.height);
         let mut source = sm.planes.into_iter().map(|p| semantic::ClassPlane {
             class_id: p.class_id, label: p.label, mean_confidence: p.mean_confidence, mask: p.mask,
@@ -148,7 +148,7 @@ pub(super) fn segment_multiclass_both(
                     return Err(e).with_context(|| format!("claim semantic region {}", region.class_id));
                 }
             };
-            if let Err(e) = region.source.save(raster.path()) {
+            if let Err(e) = raster.save_mask(&region.source) {
                 rasters.push(raster);
                 for claimed in rasters { claimed.remove(); }
                 return Err(e).with_context(|| format!("write semantic region {}", region.class_id));

@@ -128,6 +128,9 @@ pub(super) fn segment_both(
         src.to_rgb8().save(&tmp_src).context("write segmentation input (source)")?;
         target.to_rgb8().save(&tmp_tgt).context("write segmentation input (target)")?;
         segment_file(seg, &tmp_src, mask_path.path()).context("segment source sky")?;
+        // The sidecar segmented the fit's source, so its mask is drawn in the
+        // source's frame; the file says so (`OwnedRaster::stamp`).
+        mask_path.stamp().context("mark source sky mask with its frame")?;
         segment_file(seg, &tmp_tgt, &tmp_tgt_mask).context("segment target sky")?;
         let sm = crate::render::open_mask_bounded(mask_path.path())
             .context("read source sky mask")?
@@ -163,6 +166,13 @@ pub(super) fn sky_land_geometry(
 ) -> MaskGeometry {
     let zone_raster = mask_path.path().to_string_lossy().into_owned();
     let (ref_x, ref_y) = raster_centroid(src_mask);
+    // The reference point keeps the sensor-frame convention whatever frame
+    // the raster is drawn in: a sidecar's mask coordinates have one convention
+    // (v1.17.0, `render::RasterFrame::sensor_point`).
+    let (ref_x, ref_y) = match mask_path.frame() {
+        Some(f) => f.sensor_point((ref_x, ref_y), (src_mask.width() as f32, src_mask.height() as f32)),
+        None => (ref_x, ref_y),
+    };
     MaskGeometry::select_sky(ref_x, ref_y, false, zone_raster)
 }
 

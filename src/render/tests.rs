@@ -25,3 +25,4 @@ include!("tests/mask_camera_raw.rs");
 include!("tests/as_shot.rs");
 include!("tests/camera_stage_lens.rs");
 include!("tests/baked_masters.rs");
+include!("tests/mask_raster_frame.rs");

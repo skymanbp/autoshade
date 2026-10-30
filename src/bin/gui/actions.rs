@@ -3743,43 +3743,41 @@ impl AutoShadeApp {
                     // by the same area average the RAW arm downscales with),
                     // with the photo's calibration composing on top exactly
                     // as the ▣ card renders it — the master carries none.
-                    // The RAW's fit source keeps its camera frame while this
-                    // fit runs (`_plate`, a `render::Plate`): the candidates
-                    // that move the white are rendered with it in the profile
-                    // stage.
-                    let (base, fit_base, _plate) = match (src_path.as_deref(), negative.as_deref()) {
-                        (Some(p), Some(master)) => (
-                            std::sync::Arc::new(autoshade::render::source_pixels(
+                    // The fit source is a `render::Plate` held while this fit
+                    // runs (`plate`): a RAW's keeps its camera frame, so the
+                    // candidates that move the white are rendered with it in
+                    // the profile stage, and every plate says which frame its
+                    // pixels are in (a master's marker, v1.17.0).
+                    let (mut plate, fit_base, raw_source) = match (src_path.as_deref(), negative.as_deref()) {
+                        (Some(p), Some(master)) => {
+                            let cal = autoshade::pipeline::calibration_recipe(
+                                autoshade::pipeline::fit_calibration(p),
+                            );
+                            let pixels = autoshade::render::source_pixels(
                                 master,
                                 Some(autoshade::pipeline::FIT_SOURCE_EDGE),
-                            )?),
-                            autoshade::pipeline::calibration_recipe(
-                                autoshade::pipeline::fit_calibration(p),
-                            ),
-                            None,
-                        ),
+                            )?;
+                            (autoshade::pipeline::fit_source_baked(master, pixels, &cal)?, cal, None)
+                        }
                         (Some(p), None) if autoshade::decode::is_raw(p) => {
                             let (frame, cal) = autoshade::pipeline::fit_source(p)?;
-                            (frame.shared(), cal, Some(frame))
+                            (frame, cal, Some(p))
                         }
-                        (other, _) => (
-                            base,
-                            other
-                                .map(|p| {
-                                    autoshade::pipeline::calibration_recipe(
-                                        autoshade::pipeline::fit_calibration(p),
-                                    )
-                                })
-                                .unwrap_or_default(),
-                            None,
-                        ),
+                        (Some(p), _) => {
+                            let cal = autoshade::pipeline::calibration_recipe(
+                                autoshade::pipeline::fit_calibration(p),
+                            );
+                            (autoshade::pipeline::fit_source_baked(p, (*base).clone(), &cal)?, cal, None)
+                        }
+                        (None, _) => (autoshade::render::Plate::baked((*base).clone()), Default::default(), None),
                     };
-                    // The target in the fit's own frame — the CLI's rule
-                    // (`pipeline::fit_target`). The judge below reads the
-                    // reference as it was exported.
+                    // The source in the target's frame — the CLI's rule
+                    // (`pipeline::fit_target`). The target is paired and
+                    // judged as it was exported.
                     let mut fit_base = fit_base;
                     let fitted_target =
-                        autoshade::pipeline::fit_target(&base, &target, &mut fit_base);
+                        autoshade::pipeline::fit_target(&mut plate, raw_source, &target, &mut fit_base)?;
+                    let base = plate.shared();
                     let fit_target = &fitted_target.image;
                     // ONE judge call site for both orderings (R23-6): the
                     // default path reviews AFTER the persist, the deep path
@@ -3843,8 +3841,9 @@ impl AutoShadeApp {
                                 let cfg = autoshade::config::Config::load();
                                 let seg =
                                     autoshade::segment::SegmentOpts::from_config(&cfg, "sky");
-                                let mask =
-                                    autoshade::store::OwnedRaster::claim(p, "mask-zone-sky")?;
+                                // Drawn in the source's frame, and marked so.
+                                let mask = autoshade::store::OwnedRaster::claim(p, "mask-zone-sky")?
+                                    .with_frame(autoshade::render::fit_raster_frame(&base, &fit_base));
                                 let rep = autoshade::fit_zoned::fit_recipe_zoned_with_regions(
                                     &base,
                                     fit_target,

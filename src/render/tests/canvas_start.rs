@@ -235,11 +235,18 @@ fn every_surface_shows_a_fresh_canvas_as_the_export_renders_it() {
     let de_master = mean_de76(&from_master, &reference);
 
     // 4. The reverse fit's source under its calibration, at the fit's edge,
-    // through the canvas's own tail (the fit source is the uncorrected
-    // sensor frame; the lens geometry is the tail's).
+    // through the canvas's own tail. The fit source is the base develop of the
+    // calibration's part, in that base's frame (lens-corrected when the camera
+    // stage resamples the lens, v1.17.0), so it is read as a master of the
+    // part is: the tail resamples no geometry the camera stage already did.
     let (source, cal) = crate::pipeline::fit_source(&raw).expect("fit source");
     let fit_has_canvas = BasePart::of(&cal) == part;
-    let fitted = preview(&DynamicImage::ImageRgb8(source.to_rgb8()), &cal, &SourceFrame::Baked(None));
+    assert_eq!(source.corrected(), BasePart::of(&cal).corrects_lens(), "the source is in its base's frame");
+    let fitted = preview(
+        &DynamicImage::ImageRgb8(source.to_rgb8()),
+        &cal,
+        &SourceFrame::Baked(BasePart::of(&cal).baked_geometry()),
+    );
     let at_fit_edge = render_to_image(&raw, &sidecar, None, Some(crate::pipeline::FIT_SOURCE_EDGE))
         .expect("sidecar render at the fit's edge");
     let to_grid = |im: &DynamicImage| {
@@ -332,7 +339,8 @@ fn the_canvas_brings_back_over_range_light_as_the_export_does() {
     let de_float = mean_de76(&canvas(&base), &export);
     let de_8bit = mean_de76(&canvas(&DynamicImage::ImageRgb8(base.to_rgb8())), &export);
     println!(
-        "canvas over-range @{EDGE}, -1.86 EV: {over} base components above 1; canvas ΔE76 over the float          base {de_float:.3}, over the base cut to 8 bits {de_8bit:.3}"
+        "canvas over-range @{EDGE}, -1.86 EV: {over} base components above 1; canvas ΔE76 over the float \
+         base {de_float:.3}, over the base cut to 8 bits {de_8bit:.3}"
     );
     assert!(de_float <= 0.5, "canvas ΔE76 {de_float:.3} (bound 0.5)");
 }
@@ -424,9 +432,11 @@ fn a_moved_white_shows_on_every_surface_as_the_export_renders_it() {
         &render_to_image(&raw, &fresh, None, Some(EDGE)).expect("as-shot export"),
     );
     // The fit's own source and analysis plate (`pipeline::fit_source`,
-    // `fit::analysis_pair`), and its calibration with the lens geometry off
-    // (the vignetting kept, as the source keeps it): the fit's candidates
-    // render no geometry stage.
+    // `fit::analysis_pair`), and its calibration in the source's frame: as it
+    // is when the source is lens-corrected (the camera stage resamples the
+    // lens, v1.17.0), with the lens geometry off when it is not (the
+    // vignetting kept, as the source keeps it) — so the export the candidate
+    // is judged against is in the frame the plate is.
     let (source, cal) = crate::pipeline::fit_source(&raw).expect("fit source");
     assert!(source.has_camera(), "a corpus RAW's fit source keeps its camera frame");
     let plate = Plate::thumbnail_of(&source, crate::fit::ANALYZE_EDGE);
@@ -435,7 +445,9 @@ fn a_moved_white_shows_on_every_surface_as_the_export_renders_it() {
     let old_plate = Plate::thumbnail_of(&baked, crate::fit::ANALYZE_EDGE);
     assert!(!old_plate.has_camera());
     let mut fit_cal = cal.clone();
-    (fit_cal.lens_profile.distortion_on, fit_cal.lens_profile.ca_on) = (false, false);
+    if !source.corrected() {
+        (fit_cal.lens_profile.distortion_on, fit_cal.lens_profile.ca_on) = (false, false);
+    }
     let mut worst = (0.0f64, 0.0f64);
     for (k, tint) in [(3500.0f32, 14.0f32), (4300.0, 30.0), (7500.0, 14.0), (9000.0, -20.0)] {
         let mut r = fresh.clone();
@@ -468,7 +480,8 @@ fn a_moved_white_shows_on_every_surface_as_the_export_renders_it() {
         let de_fit = mean_de76(&develop_preview(&plate, &c), &fit_export);
         let de_fit_old = mean_de76(&develop_preview(&old_plate, &c), &fit_export);
         println!(
-            "moved white {k} K / {tint:+}: canvas ΔE76 {de_canvas:.3} (old route {de_old:.3}); fit              plate ΔE76 {de_fit:.3} (old route {de_fit_old:.3})"
+            "moved white {k} K / {tint:+}: canvas ΔE76 {de_canvas:.3} (old route {de_old:.3}); fit \
+             plate ΔE76 {de_fit:.3} (old route {de_fit_old:.3})"
         );
         worst = (worst.0.max(de_canvas), worst.1.max(de_fit));
     }

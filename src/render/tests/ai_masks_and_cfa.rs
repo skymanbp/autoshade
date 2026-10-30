@@ -120,7 +120,8 @@ fn an_unresolved_ai_mask_skips_its_adjustment_instead_of_covering_the_frame() {
         "the resolved alpha is the geometry's raster"
     );
     let bmp = load_mask_bitmap(&resolved.mask, &crate::diag::pixels()).expect("the alpha must load");
-    assert_eq!(mask_weight(&resolved.mask, 0.5, 0.5, Some(&bmp)), 1.0);
+    assert_eq!(bmp.frame, None, "a segmentation alpha is drawn in the sensor frame");
+    assert_eq!(mask_weight(&resolved.mask, 0.5, 0.5, Some(&bmp.gray)), 1.0);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -353,7 +354,7 @@ fn ai_mask_import_preserves_authored_inversion_and_native_edits_win() {
             assert_eq!(mask_weight(&g, nx, ny, Some(&bmp)),
                 if want_component { 1.0 - upright } else { upright },
                 "{attr}: the geometry honours its own bit exactly once");
-            let composed = combined_mask_weight(m, nx, ny, Some(&bmp), &[], None, (8.0, 8.0));
+            let composed = combined_mask_weight(m, nx, ny, Some(Bmp::sensor(&bmp)), &[], None, (8.0, 8.0));
             assert_eq!(
                 if m.inverted { 1.0 - composed } else { composed },
                 want,

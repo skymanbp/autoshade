@@ -2946,9 +2946,16 @@ the preview develop, handed a RAW source's base, leaves it out. The reverse
 fit's source is a `Plate`: an image registered with the camera base it came
 from and the chain of thumbnails that made it, for as long as it lives, so the
 preview develop handed exactly those pixels develops each candidate's white
-from the camera frame along the same chain; a plate in the sensor frame
-(the fit's source, `BasePart::without_lens`) compares a candidate's part in
-that frame. Masters keep the As Shot part —
+from the camera frame along the same chain, in the plate's frame: a plate
+in the sensor frame compares a candidate's part without the lens geometry, a
+lens-corrected one with it, and a candidate that switches the profile off is
+developed — and read — in the sensor frame (`canvas::plate_pixels` answers the
+frame with the pixels). A plate also says which frame its pixels are in
+(`Plate::corrected`, `render::plate_corrected`): the preview develop and the
+fit's rulers (`preview_mask_coverage`) read masks over a corrected plate in
+the corrected frame (`MaskFrame::Corrected`), and a corrected baked source (a
+master whose marker says so) is registered as such with no camera behind it
+(`Plate::baked_in`). Masters keep the As Shot part —
 they are rendered later under whatever white the recipe has by then. A profile without a
 `ForwardMatrix`, and every render with no profile, keep the engine's own
 D65-only matrix; the no-profile render is byte-identical to v1.16.0. Until
@@ -3167,8 +3174,8 @@ before the cap, with the mosaic already dropped (the export's peak with it,
 p42 61 MP: 1399 MB, under `PER_PHOTO_PEAK_COMMIT_MB`). The GUI samples such a
 base at the corrected point of a click (`orig_to_base_norm`), and hands its
 segmentation, depth and face helpers the base mapped back to the original
-frame (`original_frame_base`). The reverse fit's source stays in the sensor
-frame (`BasePart::without_lens`). Every surface that shrinks a
+frame (`original_frame_base`). The reverse fit's source is in the same frame
+as its base (v1.17.0, below). Every surface that shrinks a
 frame goes through `render::thumbnail` / `thumbnail_exact`: `image`'s own block
 average is `(sum + n/2) / n`, which on an f32 frame is the mean + 0.5, so a
 float base sent to it came back washed out (the fit then refused it as
@@ -3201,6 +3208,40 @@ on a corrected master (`render::Master`), the painted masks and the clone
 point, stored in the sensor frame, are mapped onto it through the same map the
 mask chain reads it with; the GUI fill's card picture is the corrected one, and
 a layer made over it is marked and composited as it is (`layers::LayerMap`).
+
+**A mask raster carries the frame it is drawn in, the same way** (v1.17.0,
+`render::MaskRaster`). The reverse fit draws its zone rasters (the Select Sky
+anchor, the semantic regions, the tiles, the field masks) on its source, which
+is now in the lens-corrected frame when the calibration's camera stage
+resamples the lens; such a raster carries the same key in its PNG
+(`autoshade:baked-geometry`), naming the geometry that moves a MASK — the
+composed profile distortion and the manual amount, digested; CA and
+vignetting move no mask and are not in it (`BakedGeometry::frame_of`). One
+write (`render::save_mask_raster`; `store::OwnedRaster::save_mask` /
+`stamp`, which every fit raster and every sibling claimed beside it goes
+through with the frame `render::fit_raster_frame` names) and one read
+(`render::open_mask_raster`, which returns the frame). A raster with no marker
+is in the sensor frame — every brush, segmentation, GUI bake and raster
+written before v1.17.0 — and reads exactly as before. Sampling honours the
+frame and resamples nothing: a corrected raster is read where a LINEAR's
+handles are, through the engine's own map (`MaskUnwarp::engine_at`, the
+`Bmp::corrected` arm of `mask_weight_in`), so on a corrected base and on a
+sensor-frame one the tail resamples it covers what its sensor-frame twin
+covers. A marked raster read under another lens geometry is refused, both
+geometries named (`baked::check_mask_frame`): the export's strict loader
+bails, the preview leaves the mask inert and says why. Surfaces that draw in
+the sensor frame take the raster through the same entry: the GUI's raster
+edits read it back into the sensor frame (`MaskRaster::into_sensor_gray`) and
+write the result unmarked; a heal, clone or fill reads its painted mask
+through `Master::rgba_mask_to_frame` / `gray_mask_to_frame`, which take a
+marked raster as it is when it is the master's frame and refuse it when it is
+not; the coordinate-era shift and the photo turn carry the marker to the
+rewritten file. The sidecar does not change with the frame: the `crs:` mask
+XML never reads the raster, and the Select Sky reference point keeps the
+sensor-frame convention (`RasterFrame::sensor_point`), so one mask exports
+one sidecar whatever frame its raster is in; the payload carries the raster
+bytes, marker and all.
+
 A GENERATED master (reimagine, the whole-image adjust) is made from an
 unmarked picture and stays unmarked: its card strips the start it carries
 (`strip_baked_start`). `PhotoCalibration` carries the profile and the
@@ -4695,6 +4736,23 @@ the desktop app stamps, so one sidecar renders one geometry everywhere. On the
 calibration pairs the look error after the fit fell to 0.009 / 0.006 / 0.011 /
 0.013 from 0.023 / 0.025 / 0.034 / 0.035; the pair exported without the profile
 and the two generated references read undecided and render the same pixels.
+
+**…and since v1.17.0 the pair lives in the target's frame, not the sensor
+frame.** Under Camera Raw's law the calibration's camera stage resamples the
+lens, so `fit_source` is the base develop in the lens-corrected frame — the
+frame the canvas, the export and a profile-on Lightroom export are in — and
+the fit pairs a corrected target as it stands: the target is never resampled
+and carries no absent ring. The probe applies the profile to whichever side is
+in the sensor frame (the source's render, or the target when the source is
+already corrected). A sensor-frame source with a corrected target (a
+calibration whose tail resamples the lens, an unmarked master) is moved into
+the corrected frame by the engine's own geometry stage; an as-shot target over
+a corrected RAW source develops the source again with the geometry off; over a
+corrected master, which has no such develop, it reads undecided. The fit's
+zone rasters are drawn in the source's frame and marked (above), so neither
+the target nor a mask is mapped from one frame into the other on the way;
+`render::corrected_to_sensor_frame` is left to the GUI's segmentation, depth
+and face helpers, which draw on the sensor frame.
 
 The method is deliberately **distribution-level, not per-pixel regression** — a
 generative target is not pixel-aligned with its source, so only statistics are

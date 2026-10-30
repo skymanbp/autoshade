@@ -1543,12 +1543,12 @@ fn only_lightrooms_post_correction_shapes_are_frame_adapted() {
         "premise: the brush really paints at the rim sample"
     );
     assert_eq!(
-        mask_weight_in(&brush, rim.0, rim.1, Some(&braster), Some(&u), (480.0, 320.0)),
+        mask_weight_in(&brush, rim.0, rim.1, Some(Bmp::sensor(&braster)), Some(&u), (480.0, 320.0)),
         mask_weight(&brush, rim.0, rim.1, Some(&braster)),
         "a brush must not be frame-adapted"
     );
     assert!(
-        (mask_weight_in(&brush, rim.0, rim.1, Some(&braster), Some(&u), (480.0, 320.0))
+        (mask_weight_in(&brush, rim.0, rim.1, Some(Bmp::sensor(&braster)), Some(&u), (480.0, 320.0))
             - mask_weight(&brush, rim_moved.0, rim_moved.1, Some(&braster)))
         .abs()
             > 1e-3,

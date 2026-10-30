@@ -141,6 +141,7 @@ fn whole_frame_zone(name: &str, w: u32, h: u32) -> (DetailZone, crate::store::Ow
         inverted: false,
         source: mask.clone(),
         target: mask,
+        frame: None,
     };
     (zone, raster)
 }

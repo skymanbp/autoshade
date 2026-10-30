@@ -294,7 +294,8 @@ impl Master {
                 if wanted.as_ref() != Some(g) {
                     let w = wanted.map_or_else(|| "no lens profile".to_string(), |w| w.to_string());
                     bail!(
-                        "this master has {g} in its pixels, but the develop asks for {w} — bake                          the master again from the RAW, or set the lens corrections back"
+                        "this master has {g} in its pixels, but the develop asks for {w} — bake \
+                         the master again from the RAW, or set the lens corrections back"
                     );
                 }
                 Some(g.clone())
@@ -310,6 +311,42 @@ impl Master {
     /// Are the pixels lens-corrected?
     pub fn corrected(&self) -> bool {
         self.frame_lens.is_some()
+    }
+
+    /// The mask-frame marker of these pixels' frame ([`BakedGeometry::frame_of`]'s
+    /// form): `None` in the sensor frame.
+    fn frame_marker(&self) -> Option<BakedGeometry> {
+        let p = self.frame_lens.as_ref()?;
+        BakedGeometry::frame_marker(p, 0.0, self.baked.as_ref().map_or_else(String::new, |b| b.lens_profile.clone()))
+    }
+
+    /// Is `raster` (read at `path` through [`open_mask_raster`]) already in
+    /// these pixels' frame? A sensor-frame raster is not, and is mapped; one
+    /// drawn in a corrected frame is when that frame is these pixels', and is
+    /// refused when it is not — never read a lens field away from where it was
+    /// drawn.
+    fn mask_in_frame(&self, raster: &MaskRaster, path: &Path) -> Result<bool> {
+        let Some(g) = &raster.frame else { return Ok(false) };
+        let mine = self.frame_marker();
+        if mine.as_ref() == Some(g) {
+            return Ok(true);
+        }
+        let mine = mine.map_or_else(|| "the sensor frame".to_string(), |m| format!("the frame of {m}"));
+        bail!("the mask raster {} is drawn in the frame of {g}, but these pixels are in {mine}", path.display())
+    }
+
+    /// An RGBA mask raster (a painted heal or fill mask) read through THE
+    /// entry and put in these pixels' frame ([`Master::rgba_to_frame`] for a
+    /// sensor-frame one).
+    pub fn rgba_mask_to_frame(&self, raster: &MaskRaster, path: &Path) -> Result<image::RgbaImage> {
+        let rgba = raster.image.to_rgba8();
+        Ok(if self.mask_in_frame(raster, path)? { rgba } else { self.rgba_to_frame(&rgba) })
+    }
+
+    /// [`Master::rgba_mask_to_frame`] for a grey raster (a limit mask).
+    pub fn gray_mask_to_frame(&self, raster: &MaskRaster, path: &Path) -> Result<image::GrayImage> {
+        let gray = raster.image.to_luma8();
+        Ok(if self.mask_in_frame(raster, path)? { gray } else { self.gray_to_frame(&gray) })
     }
 
     /// A SENSOR-frame RGBA raster (a painted heal or fill mask) mapped onto
@@ -668,18 +705,27 @@ impl CameraBase {
 /// registered for as long as it lives: the preview develop handed exactly its
 /// pixels develops the candidate's white from the camera frame instead, along
 /// the same chain of thumbnails the plate took, and leaves the white out of
-/// its own pass. Any other pixels — a plate of a baked source, a copy, a crop
-/// — are what they always were.
+/// its own pass. Any other pixels — a copy, a crop — are what they always were.
+///
+/// A plate also says which FRAME its pixels are in (v1.17.0): the reverse fit
+/// works in the lens-corrected frame when the calibration's camera stage
+/// resamples the lens ([`lens_in_camera`]), and a master can be baked in it
+/// ([`SourceFrame`]). The preview develop handed a corrected plate's pixels
+/// reads its masks in that frame ([`MaskFrame::Corrected`]), as the canvas
+/// over the same base does — so a plate of a corrected baked source is
+/// registered too, with no camera behind it.
 pub struct Plate {
     image: Arc<DynamicImage>,
     registered: bool,
+    camera: bool,
 }
 
 struct PlateEntry {
     at: (usize, usize),
-    camera: Arc<CameraBase>,
+    camera: Option<Arc<CameraBase>>,
     part: BasePart,
     thumbs: Vec<u32>,
+    corrected: bool,
 }
 
 fn plates() -> &'static Mutex<Vec<PlateEntry>> {
@@ -694,19 +740,37 @@ fn pixels_at(img: &DynamicImage) -> (usize, usize) {
 }
 
 impl Plate {
-    /// Pixels with no camera base behind them (a baked source, a master).
+    /// Pixels in the sensor frame with no camera base behind them (a baked
+    /// source, a master).
     pub fn baked(image: DynamicImage) -> Self {
-        Self { image: Arc::new(image), registered: false }
+        Self { image: Arc::new(image), registered: false, camera: false }
     }
 
-    fn register(image: Arc<DynamicImage>, camera: Arc<CameraBase>, part: BasePart, thumbs: Vec<u32>) -> Self {
+    /// Pixels with no camera base behind them, in the lens-corrected frame
+    /// when `corrected` (a master whose marker says so, [`SourceFrame::corrected`]).
+    pub fn baked_in(image: DynamicImage, corrected: bool) -> Self {
+        if !corrected {
+            return Self::baked(image);
+        }
+        Self::register(Arc::new(image), None, BasePart::default(), Vec::new(), true)
+    }
+
+    fn register(
+        image: Arc<DynamicImage>,
+        camera: Option<Arc<CameraBase>>,
+        part: BasePart,
+        thumbs: Vec<u32>,
+        corrected: bool,
+    ) -> Self {
+        let has_camera = camera.is_some();
         plates().lock().unwrap_or_else(|p| p.into_inner()).push(PlateEntry {
             at: pixels_at(&image),
             camera,
             part,
             thumbs,
+            corrected,
         });
-        Self { image, registered: true }
+        Self { image, registered: true, camera: has_camera }
     }
 
     /// [`thumbnail`]`(src, edge, edge)` — and, when `src` is a registered
@@ -719,12 +783,12 @@ impl Plate {
             plates.iter().find(|e| e.at == pixels_at(src)).map(|e| {
                 let mut thumbs = e.thumbs.clone();
                 thumbs.push(edge);
-                (e.camera.clone(), e.part.clone(), thumbs)
+                (e.camera.clone(), e.part.clone(), thumbs, e.corrected)
             })
         };
         match parent {
-            Some((camera, part, thumbs)) => Self::register(image, camera, part, thumbs),
-            None => Self { image, registered: false },
+            Some((camera, part, thumbs, corrected)) => Self::register(image, camera, part, thumbs, corrected),
+            None => Self { image, registered: false, camera: false },
         }
     }
 
@@ -735,8 +799,21 @@ impl Plate {
 
     /// Does a camera base stand behind these pixels?
     pub fn has_camera(&self) -> bool {
-        self.registered
+        self.camera
     }
+
+    /// Are these pixels in the lens-corrected frame?
+    pub fn corrected(&self) -> bool {
+        plate_corrected(&self.image)
+    }
+}
+
+/// Are `img`'s pixels a registered plate's in the lens-corrected frame? Any
+/// pixels that are not a plate's answer `false`, the sensor frame they were
+/// always read in.
+pub fn plate_corrected(img: &DynamicImage) -> bool {
+    let plates = plates().lock().unwrap_or_else(|p| p.into_inner());
+    plates.iter().find(|e| e.at == pixels_at(img)).is_some_and(|e| e.corrected)
 }
 
 impl std::ops::Deref for Plate {
@@ -764,42 +841,49 @@ pub fn source_plate(raw: &Path, part: &BasePart, edge: u32) -> Result<Plate> {
     if let Some(camera) = camera_base_of(raw, part, Some(edge))?
         && let Some(img) = camera.develop(part, &[])?
     {
-        return Ok(Plate::register(img, camera, part.clone(), Vec::new()));
+        return Ok(Plate::register(img, Some(camera), part.clone(), Vec::new(), part.corrects_lens()));
     }
-    Ok(Plate::baked(render_base(raw, part, Some(edge))?))
+    Ok(Plate::baked_in(render_base(raw, part, Some(edge))?, part.corrects_lens()))
 }
 
 /// What the preview develop renders `recipe` from when it is handed
-/// `preview`: `Some((pixels, white_in_pixels))` when `preview` is a registered
-/// plate's — `None` for the plate itself when the recipe's canvas part is the
-/// plate's own, else that part developed from the camera base along the
-/// plate's chain — and `None` for any other pixels.
+/// `preview`: `Some((pixels, white_in_pixels, corrected))` when `preview` is a
+/// registered plate's — `None` for the plate itself when the recipe's canvas
+/// part is the plate's own (or no camera base stands behind it), else that
+/// part developed from the camera base along the plate's chain, with whether
+/// those pixels are lens-corrected — and `None` for any other pixels.
 pub(super) fn plate_pixels(
     preview: &DynamicImage,
     recipe: &EditRecipe,
     diag: &crate::diag::Diag<'_>,
-) -> Option<(Option<Arc<DynamicImage>>, bool)> {
-    let (camera, own, thumbs) = {
+) -> Option<(Option<Arc<DynamicImage>>, bool, bool)> {
+    let (camera, own, thumbs, corrected) = {
         let plates = plates().lock().unwrap_or_else(|p| p.into_inner());
         let e = plates.iter().find(|e| e.at == pixels_at(preview))?;
-        (e.camera.clone(), e.part.clone(), e.thumbs.clone())
+        (e.camera.clone(), e.part.clone(), e.thumbs.clone(), e.corrected)
     };
-    // In the plate's own frame: a source the fit keeps in the sensor frame
-    // (`pipeline::fit_source`, `BasePart::without_lens`) re-develops a
-    // candidate's white in that frame too.
+    let Some(camera) = camera else { return Some((None, false, corrected)) };
+    // In the plate's own frame: a source developed in the sensor frame (a
+    // calibration whose lens the tail resamples) re-develops a candidate's
+    // white in that frame too; a source in the corrected frame keeps the
+    // candidate's own lens geometry, so a candidate that switches the profile
+    // off is developed in the sensor frame and read there.
     let want = BasePart::of_canvas(recipe);
     let want = if own.corrects_lens() { want } else { want.without_lens() };
     if want == own {
-        return Some((None, own.carries_white()));
+        return Some((None, own.carries_white(), corrected));
     }
     match camera.develop(&want, &thumbs) {
-        Ok(Some(img)) => Some((Some(img), want.carries_white())),
-        Ok(None) => None,
+        Ok(Some(img)) => Some((Some(img), want.carries_white(), want.corrects_lens())),
+        // The plate's own pixels, the white adapted after the profile — in
+        // the frame they are in.
+        Ok(None) => Some((None, false, corrected)),
         Err(e) => {
             diag.warn(format!(
-                "the camera stage could not re-develop this source ({e:#}); its white balance is                  adapted after the profile instead"
+                "the camera stage could not re-develop this source ({e:#}); its white balance is \
+                 adapted after the profile instead"
             ));
-            None
+            Some((None, false, corrected))
         }
     }
 }

@@ -853,9 +853,8 @@ pub mod keys {
     /// corrected and as shot.
     pub const TARGET_GEOMETRY_CORRECTED: &str =
         " Target geometry: lens-corrected (alignment {corrected} corrected vs \
-         {as_shot} as shot); the target was brought into the sensor frame for \
-         evidence, {absent}% of sensor pixels lie outside its field and carried \
-         no evidence.";
+         {as_shot} as shot); the target was paired as it stands, in the \
+         lens-corrected frame the fit's source and masks are in.";
     pub const TARGET_GEOMETRY_AS_SHOT: &str =
         " Target geometry: as shot (alignment {corrected} corrected vs {as_shot} \
          as shot); the target was paired as it stands and the lens profile's \

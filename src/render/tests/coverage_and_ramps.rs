@@ -432,7 +432,7 @@ fn bitmap_mask_renders_byte_identical_to_the_clamped_baseline() {
     let want = image::GrayImage::from_fn(w, h, |x, y| {
         let nx = (x as f32 + MASK_SAMPLE_CENTRE) / w as f32;
         let ny = (y as f32 + MASK_SAMPLE_CENTRE) / h as f32;
-        let mut weight = mask_weight(&mask.mask, nx, ny, bmp.as_deref());
+        let mut weight = mask_weight(&mask.mask, nx, ny, bmp.as_deref().map(|b| &b.gray));
         if mask.inverted {
             weight = 1.0 - weight;
         }

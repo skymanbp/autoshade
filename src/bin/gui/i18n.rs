@@ -2641,8 +2641,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       it is a different frame — closer to the target in luma, and differing \
       in chroma, because the camera curve is matched on luma alone.",
         " 上述残差是在本相机的嵌入渲染上测得的，那正是拟合与复查共同依据的画面。交付渲染还会额外应用这张照片自己的校准（{what}），因此那是另一幅画面——在亮度上更接近目标，在色度上则有所不同，因为相机曲线只按亮度匹配。"),
-    (" Target geometry: lens-corrected (alignment {corrected} corrected vs {as_shot} as shot); the target was brought into the sensor frame for evidence, {absent}% of sensor pixels lie outside its field and carried no evidence.",
-        " 目标几何：已做镜头校正（对齐读数：校正后 {corrected}，按拍摄 {as_shot}）；目标已回到传感器画幅参与比对，{absent}% 的传感器像素落在它的视场之外，不计证据。"),
+    (" Target geometry: lens-corrected (alignment {corrected} corrected vs {as_shot} as shot); the target was paired as it stands, in the lens-corrected frame the fit's source and masks are in.",
+        " 目标几何：已做镜头校正（对齐读数：校正后 {corrected}，按拍摄 {as_shot}）；目标按原样配对，拟合源与蒙版都在这个镜头校正后的画幅里。"),
     (" Target geometry: as shot (alignment {corrected} corrected vs {as_shot} as shot); the target was paired as it stands and the lens profile's distortion and chromatic-aberration corrections were switched off, so the render keeps the geometry the target was exported with.",
         " 目标几何：按拍摄（对齐读数：校正后 {corrected}，按拍摄 {as_shot}）；目标按原样配对，镜头档的畸变与色差校正已关闭，渲染保持目标导出时的几何。"),
     (" Target geometry: undecided (alignment {corrected} corrected vs {as_shot} as shot, no clear margin); the target was paired as it stands and the lens profile was left as it was.",

@@ -421,8 +421,8 @@ impl Brushes {
 /// as that pass finds it).
 pub(super) struct Cover<'a> {
     m: &'a crate::recipe::LocalAdjustment,
-    bmp: Option<&'a image::GrayImage>,
-    comp_bmps: Vec<Option<&'a image::GrayImage>>,
+    bmp: Option<Bmp<'a>>,
+    comp_bmps: Vec<Option<Bmp<'a>>>,
     unwarp: Option<&'a MaskUnwarp>,
     w: usize,
     h: usize,
@@ -449,12 +449,12 @@ impl<'a> Cover<'a> {
         // The two sources cannot collide: `rasters.get` answers only for a
         // geometry with a raster PATH (`geometry_raster_path`), which a brush
         // never has.
-        let bmp = rasters.get(&m.mask).or(brushes.base.as_deref());
-        let comp_bmps: Vec<Option<&image::GrayImage>> = m
+        let bmp = rasters.get(&m.mask).or(brushes.base.as_deref().map(Bmp::sensor));
+        let comp_bmps: Vec<Option<Bmp<'_>>> = m
             .components
             .iter()
             .zip(&brushes.comps)
-            .map(|(c, brush)| rasters.get(&c.geometry).or(brush.as_deref()))
+            .map(|(c, brush)| rasters.get(&c.geometry).or(brush.as_deref().map(Bmp::sensor)))
             .collect();
         if (bmp.is_none() && is_raster_backed(&m.mask))
             || m.components.iter().zip(&comp_bmps).any(|(c, b)| b.is_none() && is_raster_backed(&c.geometry))
@@ -668,6 +668,21 @@ pub fn sensor_raster_to_corrected(mask: &image::GrayImage, profile: &crate::reci
         Some(u) => raster_through(mask, &u),
         None => mask.clone(),
     }
+}
+
+/// [`sensor_raster_to_corrected`]'s inverse, for a raster drawn in the
+/// lens-CORRECTED frame of `profile` and `amount` (a reverse-fit zone, marked
+/// so, `render::MaskRaster`) read into the sensor frame: every sensor pixel
+/// takes the corrected point the engine's geometry puts it at
+/// ([`MaskUnwarp::engine_at`], the map a LINEAR mask is read through). A copy
+/// when the profile moves nothing.
+pub fn corrected_raster_to_sensor(mask: &image::GrayImage, profile: &crate::recipe::LensProfile, amount: f32) -> image::GrayImage {
+    let (w, h) = (mask.width() as f32, mask.height() as f32);
+    let Some(u) = MaskUnwarp::new(profile, amount, (w, h)) else { return mask.clone() };
+    image::GrayImage::from_fn(mask.width(), mask.height(), |x, y| {
+        let (qx, qy) = u.engine_at((x as f32 + 0.5) / w, (y as f32 + 0.5) / h);
+        image::Luma([(sample_gray_norm(mask, qx, qy) * 255.0).round().clamp(0.0, 255.0) as u8])
+    })
 }
 
 /// [`sensor_raster_to_corrected`] for an RGBA raster (a painted heal or fill

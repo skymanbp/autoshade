@@ -21,6 +21,17 @@
 //! rather than corrected twice or not at all. A file with no marker is in the
 //! sensor frame — every master written before v1.17.0, and every baked photo
 //! that is not a master.
+//!
+//! A MASK raster carries the same marker for the same reason (v1.17.0): the
+//! reverse fit draws its zone rasters on a source in the lens-corrected frame
+//! (`pipeline::fit_source`), and a raster says which frame it is drawn in
+//! rather than being resampled into another one. The marker names the lens
+//! geometry whose corrected frame it is ([`BakedGeometry::frame_of`]); a
+//! raster with none is in the sensor frame, as every brush, segmentation and
+//! raster written before v1.17.0 is. One entry reads a raster with its frame
+//! ([`open_mask_raster`]), one writes it ([`save_mask_raster`]), and a raster
+//! read under a recipe whose lens geometry is not the one it was drawn under
+//! is refused ([`MaskRaster::check`]), never sampled in the wrong frame.
 
 use super::*;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -105,6 +116,44 @@ impl BakedGeometry {
     /// Vignetting alone moves no pixel.
     pub fn corrects_frame(&self) -> bool {
         self.distortion || self.ca || self.manual_distortion != 0.0
+    }
+
+    /// The lens geometry that moves `r`'s SHARED frame — the green map a mask
+    /// is read through: the composed profile distortion ([`geometry_profile`])
+    /// and the manual Distortion amount, whether the camera stage or the tail
+    /// resamples it ([`geometry_moves_frame`]). Chromatic aberration and
+    /// vignetting move no mask, so they are not part of it: the frame a mask
+    /// raster drawn on `r`'s corrected picture is in. `None` when `r` moves
+    /// no mask.
+    pub fn frame_of(r: &EditRecipe) -> Option<Self> {
+        let lens_profile = match &r.lens_profile.adobe {
+            Some(a) => format!("adobe:{}", a.name),
+            None => "camera".to_string(),
+        };
+        Self::frame_marker(&geometry_profile(r), r.lens_distortion, lens_profile)
+    }
+
+    /// [`BakedGeometry::frame_of`] of a composed profile `geom` at the manual
+    /// amount `amount`, named `lens_profile`.
+    pub(super) fn frame_marker(geom: &crate::recipe::LensProfile, amount: f32, lens_profile: String) -> Option<Self> {
+        if !geometry_moves_frame(geom, amount) {
+            return None;
+        }
+        let distortion = geom.distortion_on && !geom.distortion.is_empty();
+        let mut h = Fnv::default();
+        h.u32(if distortion { geom.distortion.len() as u32 } else { 0 });
+        if distortion {
+            geom.distortion.iter().for_each(|k| h.u32(k.to_bits()));
+        }
+        Some(Self {
+            version: VERSION,
+            lens_profile,
+            distortion,
+            ca: false,
+            vignette: false,
+            manual_distortion: amount,
+            knots: format!("fnv1a64:{:016x}", h.0),
+        })
     }
 }
 
@@ -328,6 +377,122 @@ pub fn stamp_baked_geometry(path: &Path, g: &BakedGeometry) -> Result<()> {
 pub fn carry_baked_geometry(from: &Path, to: &Path) -> Result<()> {
     match read_baked_geometry(from)? {
         Some(g) => stamp_baked_geometry(to, &g),
+        None => Ok(()),
+    }
+}
+
+// --- mask rasters ------------------------------------------------------------
+
+/// A mask raster with the frame it is drawn in (see the module docs).
+pub struct MaskRaster {
+    /// The pixels, as decoded.
+    pub image: DynamicImage,
+    /// The lens geometry whose CORRECTED frame the pixels are drawn in;
+    /// `None` is the sensor frame.
+    pub frame: Option<BakedGeometry>,
+}
+
+impl MaskRaster {
+    /// Refuse `r` on a raster drawn under another lens geometry than the one
+    /// `r` corrects: sampled anyway, the mask would land a lens field away
+    /// from where it was drawn. A sensor-frame raster suits every recipe.
+    pub fn check(&self, r: &EditRecipe, path: &Path) -> Result<()> {
+        check_mask_frame(self.frame.as_ref(), r, path)
+    }
+
+    /// The raster in the SENSOR frame, for a surface that draws there (the
+    /// GUI's raster edits): itself, or a drawn-corrected raster read back
+    /// through the engine's own map of `r`'s geometry ([`MaskRaster::check`]
+    /// first), each sensor pixel taking the corrected point it lands on.
+    pub fn into_sensor_gray(self, r: &EditRecipe, path: &Path) -> Result<image::GrayImage> {
+        self.check(r, path)?;
+        let gray = self.image.to_luma8();
+        Ok(match self.frame {
+            Some(_) => corrected_raster_to_sensor(&gray, &geometry_profile(r), r.lens_distortion),
+            None => gray,
+        })
+    }
+}
+
+/// The lens-corrected frame a reverse fit draws its zone rasters in: the
+/// marker its files carry ([`BakedGeometry::frame_of`]) and the map back to
+/// the sensor frame, for the one coordinate the fit stores beside a raster
+/// (a Select Sky component's reference point, which keeps the sensor-frame
+/// convention every sidecar has carried).
+#[derive(Clone, Debug)]
+pub struct RasterFrame {
+    marker: BakedGeometry,
+    profile: crate::recipe::LensProfile,
+    amount: f32,
+}
+
+impl RasterFrame {
+    /// The corrected frame of `r`'s lens geometry; `None` when it moves no mask.
+    pub fn of(r: &EditRecipe) -> Option<Self> {
+        Some(Self {
+            marker: BakedGeometry::frame_of(r)?,
+            profile: geometry_profile(r).into_owned(),
+            amount: r.lens_distortion,
+        })
+    }
+
+    /// The marker a raster drawn in this frame carries.
+    pub fn marker(&self) -> &BakedGeometry {
+        &self.marker
+    }
+
+    /// The SENSOR-frame normalised point a normalised point of a `dims`
+    /// raster in this frame shows ([`lens_geom_norm`], the map the resample
+    /// reads the sensor frame through).
+    pub fn sensor_point(&self, (nx, ny): (f32, f32), dims: (f32, f32)) -> (f32, f32) {
+        lens_geom_norm(nx, ny, dims, &self.profile, self.amount)
+    }
+}
+
+/// The frame a reverse fit on `src` under the calibration `base` draws its
+/// rasters in: `base`'s corrected frame when `src` is a plate in the
+/// lens-corrected frame ([`super::plate_corrected`]), else the sensor frame.
+pub fn fit_raster_frame(src: &DynamicImage, base: &EditRecipe) -> Option<RasterFrame> {
+    if super::plate_corrected(src) { RasterFrame::of(base) } else { None }
+}
+
+/// [`MaskRaster::check`] on a frame alone.
+pub(super) fn check_mask_frame(frame: Option<&BakedGeometry>, r: &EditRecipe, path: &Path) -> Result<()> {
+    let Some(g) = frame else { return Ok(()) };
+    let wanted = BakedGeometry::frame_of(r);
+    if wanted.as_ref() != Some(g) {
+        let w = wanted.map_or_else(|| "no lens geometry".to_string(), |w| w.to_string());
+        bail!(
+            "the mask raster {} is drawn in the frame of {g}, but the develop corrects {w} — redraw the mask, \
+             or set the lens corrections back",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// THE read of a mask raster: its pixels (bounded, [`open_mask_bounded`]) and
+/// the frame its marker names. A marker that moves no pixel reads as the
+/// sensor frame.
+pub fn open_mask_raster(path: &Path) -> Result<MaskRaster> {
+    let image = open_mask_bounded(path)?;
+    let frame = read_baked_geometry(path)?.filter(BakedGeometry::corrects_frame);
+    Ok(MaskRaster { image, frame })
+}
+
+/// THE write of a mask raster drawn in `frame` (`None`: the sensor frame) —
+/// a PNG, marked when the frame is a corrected one, so the file says which
+/// frame its pixels are in.
+pub fn save_mask_raster(mask: &image::GrayImage, path: &Path, frame: Option<&BakedGeometry>) -> Result<()> {
+    mask.save(path).with_context(|| format!("write {}", path.display()))?;
+    stamp_mask_frame(path, frame)
+}
+
+/// Mark the raster file at `path` (written by someone else — a segmentation
+/// sidecar) as drawn in `frame`; nothing for the sensor frame.
+pub fn stamp_mask_frame(path: &Path, frame: Option<&BakedGeometry>) -> Result<()> {
+    match frame.filter(|g| g.corrects_frame()) {
+        Some(g) => stamp_baked_geometry(path, g),
         None => Ok(()),
     }
 }

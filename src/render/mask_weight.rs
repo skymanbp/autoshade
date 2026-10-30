@@ -47,6 +47,23 @@ use super::*;
 /// that a mutation of any one of them is a mutation of a shared constant.
 pub(crate) const MASK_SAMPLE_CENTRE: f32 = 0.5;
 
+/// A raster a mask samples, and whether it is drawn in the lens-CORRECTED
+/// frame (a reverse-fit zone raster whose file says so, v1.17.0,
+/// [`super::MaskRaster`]) rather than the sensor frame every other raster —
+/// a brush, a segmentation, a GUI bake — is drawn in.
+#[derive(Clone, Copy)]
+pub(crate) struct Bmp<'a> {
+    pub(crate) img: &'a image::GrayImage,
+    pub(crate) corrected: bool,
+}
+
+impl<'a> Bmp<'a> {
+    /// A raster drawn in the sensor frame.
+    pub(crate) fn sensor(img: &'a image::GrayImage) -> Self {
+        Self { img, corrected: false }
+    }
+}
+
 /// [`mask_weight`] with the frame adaptation applied — the ONE place a stored
 /// coordinate becomes the coordinate this engine's pre-geometry rasteriser
 /// should be asked about.
@@ -59,7 +76,7 @@ pub(super) fn mask_weight_in(
     g: &MaskGeometry,
     nx: f32,
     ny: f32,
-    bmp: Option<&image::GrayImage>,
+    bmp: Option<Bmp<'_>>,
     unwarp: Option<&MaskUnwarp>,
     dims: (f32, f32),
 ) -> f32 {
@@ -74,9 +91,15 @@ pub(super) fn mask_weight_in(
             u.radial_at(nx, ny, 0.5 * (left + right), 0.5 * (top + bottom))
         }
         (MaskGeometry::Linear { .. } | MaskGeometry::Shaped { .. }, Some(u)) => u.engine_at(nx, ny),
+        // A raster drawn in the corrected frame is stored where a LINEAR's
+        // handles are, and is read through the same map; every other raster
+        // is stored in the frame the pixel loop walks.
+        (MaskGeometry::Bitmap { .. } | MaskGeometry::AiMask { .. }, Some(u)) if bmp.is_some_and(|b| b.corrected) => {
+            u.engine_at(nx, ny)
+        }
         _ => (nx, ny),
     };
-    mask_weight_metric(g, nx, ny, bmp, dims)
+    mask_weight_metric(g, nx, ny, bmp.map(|b| b.img), dims)
 }
 
 /// Evaluate a geometry using the metric Lightroom uses for its stored frame.
@@ -443,8 +466,8 @@ pub(super) fn combined_mask_weight(
     m: &crate::recipe::LocalAdjustment,
     nx: f32,
     ny: f32,
-    base: Option<&image::GrayImage>,
-    comp_bmps: &[Option<&image::GrayImage>],
+    base: Option<Bmp<'_>>,
+    comp_bmps: &[Option<Bmp<'_>>],
     unwarp: Option<&MaskUnwarp>,
     dims: (f32, f32),
 ) -> f32 {
@@ -522,12 +545,12 @@ pub fn mask_coverage(
     // caller will paint this overlay over, so the wash is the weight the
     // render applies — which is what
     // `the_gui_coverage_overlay_matches_what_the_render_applies` asserts.
-    let bmp = load_mask_bitmap(&m.mask, &probe).or_else(|| brush_raster(&m.mask, w, h));
-    let comp_bmps: Vec<Option<std::sync::Arc<image::GrayImage>>> = m
-        .components
-        .iter()
-        .map(|c| load_mask_bitmap(&c.geometry, &probe).or_else(|| brush_raster(&c.geometry, w, h)))
-        .collect();
+    let held = |g: &MaskGeometry| match load_mask_bitmap(g, &probe) {
+        Some(b) => Some(Held::Raster(b)),
+        None => brush_raster(g, w, h).map(Held::Brush),
+    };
+    let bmp = held(&m.mask);
+    let comp_bmps: Vec<Option<Held>> = m.components.iter().map(|c| held(&c.geometry)).collect();
     // Same load-failure contract as `apply_masks` (inert, inversion included,
     // components included), so the overlay never advertises coverage the
     // render will not apply.
@@ -539,8 +562,7 @@ pub fn mask_coverage(
     {
         return image::GrayImage::new(w, h);
     }
-    let comp_refs: Vec<Option<&image::GrayImage>> =
-        comp_bmps.iter().map(|bmp| bmp.as_deref()).collect();
+    let comp_refs: Vec<Option<Bmp<'_>>> = comp_bmps.iter().map(|b| b.as_ref().map(Held::bmp)).collect();
     let amount = m.amount.clamp(0.0, 1.0);
     let mut out = image::GrayImage::new(w, h);
     for (x, y, px) in out.enumerate_pixels_mut() {
@@ -551,7 +573,7 @@ pub fn mask_coverage(
             m,
             (x as f32 + MASK_SAMPLE_CENTRE) / w as f32,
             (y as f32 + MASK_SAMPLE_CENTRE) / h as f32,
-            bmp.as_deref(),
+            bmp.as_ref().map(Held::bmp),
             &comp_refs,
             unwarp,
             (w as f32, h as f32),
@@ -572,6 +594,22 @@ pub fn mask_coverage(
         *px = image::Luma([(wgt.clamp(0.0, 1.0) * 255.0).round() as u8]);
     }
     out
+}
+
+/// A raster [`mask_coverage`] holds for one geometry: a file's (with its
+/// frame) or a brush group's (the sensor frame).
+enum Held {
+    Raster(std::sync::Arc<MaskBitmap>),
+    Brush(std::sync::Arc<image::GrayImage>),
+}
+
+impl Held {
+    fn bmp(&self) -> Bmp<'_> {
+        match self {
+            Held::Raster(b) => b.bmp(),
+            Held::Brush(g) => Bmp::sensor(g),
+        }
+    }
 }
 
 /// [`mask_coverage`] in the frame [`develop_preview`] evaluates the mask in,
@@ -597,7 +635,11 @@ pub fn preview_mask_coverage(
 ) -> image::GrayImage {
     let validated = crate::recipe::ValidatedRecipe::new(recipe);
     let geom = geometry_profile(&validated);
-    mask_coverage(m, reference, MaskFrame::downstream(&geom, validated.lens_distortion))
+    // The frame the preview develop reads the mask in over these pixels: a
+    // reverse fit's source plate says whether it is lens-corrected
+    // (`canvas::plate_corrected`), as `develop_preview_inner` reads it.
+    let corrected = super::canvas::plate_corrected(reference);
+    mask_coverage(m, reference, MaskFrame::of_base(&geom, validated.lens_distortion, corrected))
 }
 
 /// The brightness-independent colour distance a [`RangeMask::Color`]

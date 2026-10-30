@@ -883,7 +883,7 @@ pub(super) fn attach_tiles(
         } else {
             (raw_mask, false)
         };
-        if let Err(e) = mask.save(owned.path()) {
+        if let Err(e) = owned.save_mask(&mask) {
             owned.remove();
             push_abstention(
                 report,

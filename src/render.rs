@@ -169,7 +169,7 @@ pub(crate) use mask_raster::{sample_gray_norm};
 pub use layers::PixelLayer;
 pub use lens_blur::LensBlur;
 use mask_raster::{
-    MaskRasterSnapshot, best_effort_mask_raster_snapshot, load_mask_bitmap,
+    MaskBitmap, MaskRasterSnapshot, best_effort_mask_raster_snapshot, load_mask_bitmap,
     load_mask_raster_snapshot,
 };
 #[cfg(test)]
@@ -186,10 +186,10 @@ pub use mask_weight::{
     preview_mask_coverage, range_weight,
 };
 pub(crate) use mask_weight::{MASK_SAMPLE_CENTRE};
-use mask_weight::{combined_mask_weight};
+use mask_weight::{Bmp, combined_mask_weight};
 #[cfg(test)]
 use mask_weight::{mask_weight, mask_weight_in};
-pub use masks::{MaskFrame, engine_active, sensor_raster_to_corrected, sensor_rgba_to_corrected};
+pub use masks::{MaskFrame, corrected_raster_to_sensor, engine_active, sensor_raster_to_corrected, sensor_rgba_to_corrected};
 pub(crate) use masks::{linear_to_oklab, tint_from_push, tint_luma, tint_window};
 #[cfg(test)]
 pub(crate) use masks::{TINT_WINDOW_CENTRE, oklab_to_linear, tint_push, tint_px};
@@ -211,10 +211,11 @@ use resample::{
 pub use source::{render_baked_to_image, render_to_image, render_to_image_in, source_pixels};
 pub use canvas::{
     base_develop, canvas_recipe, canvas_renders, master_develop, master_pixels_for, source_pixels_for, source_plate,
-    BasePart, CameraBase, Master, Plate, CANVAS_PROFILE,
+    plate_corrected, BasePart, CameraBase, Master, Plate, CANVAS_PROFILE,
 };
 pub use baked::{
-    carry_baked_geometry, read_baked_geometry, stamp_baked_geometry, BakedGeometry, SourceFrame,
+    carry_baked_geometry, fit_raster_frame, open_mask_raster, read_baked_geometry, save_mask_raster,
+    stamp_baked_geometry, stamp_mask_frame, BakedGeometry, MaskRaster, RasterFrame, SourceFrame,
     BAKED_GEOMETRY_KEY, BAKED_GEOMETRY_TIFF_TAG,
 };
 use source::{apply_crop, render_frame, rgb16_source};

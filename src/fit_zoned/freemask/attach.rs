@@ -150,7 +150,7 @@ pub(in crate::fit_zoned) fn attach_free_masks(
             disclosed += 1;
             continue;
         }
-        if mask.save(owned.path()).is_err() {
+        if owned.save_mask(&mask).is_err() {
             owned.remove();
             report.recipe.rationale.truncate(rationale_before_attach);
             report.notes.truncate(notes_before_attach);

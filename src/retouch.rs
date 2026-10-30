@@ -1014,11 +1014,10 @@ pub fn heal(
     // The limit is read before the billed detect call too: an unreadable
     // limit mask is a certain failure, and it must not cost a model call.
     let limit = match limit {
-        Some(p) => Some(
-            crate::render::open_mask_bounded(p)
-                .with_context(|| format!("open limit mask {}", p.display()))?
-                .to_luma8(),
-        ),
+        Some(p) => Some((
+            crate::render::open_mask_raster(p).with_context(|| format!("open limit mask {}", p.display()))?,
+            p,
+        )),
         None => None,
     };
     // ONE dispatch for both source kinds (`render::source_pixels`): preview
@@ -1031,7 +1030,7 @@ pub fn heal(
     // Raw's law, so the painted masks — stored in the SENSOR frame — are
     // mapped onto it before they are read.
     let master = crate::render::master_pixels_for(src_path, part, (!full_res).then_some(2048))?;
-    let limit = limit.map(|l| master.gray_to_frame(&l));
+    let limit = limit.map(|(l, p)| master.gray_mask_to_frame(&l, p)).transpose()?;
     let (w, h) = (master.image.width(), master.image.height());
 
     let mut spots: Vec<HealSpot> = Vec::new();
@@ -1078,11 +1077,10 @@ pub fn heal(
         }
     }
     if let Some(mp) = manual_mask {
-        let m = master.rgba_to_frame(
-            &crate::render::open_mask_bounded(mp)
-                .with_context(|| format!("open mask {}", mp.display()))?
-                .to_rgba8(),
-        );
+        let m = master.rgba_mask_to_frame(
+            &crate::render::open_mask_raster(mp).with_context(|| format!("open mask {}", mp.display()))?,
+            mp,
+        )?;
         let (planned, note) = plan_from_mask(&m);
         spots.extend(planned);
         if let Some(n) = note {
@@ -1265,11 +1263,10 @@ pub fn clone_stamp(
     let master = crate::render::master_pixels_for(src_path, part, (!full_res).then_some(2048))?;
     let (w, h) = (master.image.width(), master.image.height());
 
-    let m = master.rgba_to_frame(
-        &crate::render::open_mask_bounded(mask_path)
-            .with_context(|| format!("open mask {}", mask_path.display()))?
-            .to_rgba8(),
-    );
+    let m = master.rgba_mask_to_frame(
+        &crate::render::open_mask_raster(mask_path).with_context(|| format!("open mask {}", mask_path.display()))?,
+        mask_path,
+    )?;
     let source_norm = master.point_to_frame(source_norm);
     let (mut spots, budget_note) = plan_from_mask(&m);
     if spots.is_empty() {

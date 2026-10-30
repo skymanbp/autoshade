@@ -319,13 +319,46 @@ pub fn claim_raster(src: &Path, prefix: &str) -> std::io::Result<PathBuf> {
 /// invisible at the call site. It now lives in the type: the only ways to
 /// build one are a fresh [`claim_raster`] name and, in tests, an explicit
 /// scratch path, so a borrowed user path cannot reach a deletion.
+///
+/// It also knows the FRAME the reverse fit draws in (v1.17.0,
+/// [`crate::render::RasterFrame`]): every raster written through it — and
+/// every sibling claimed beside it — is marked with that frame
+/// ([`OwnedRaster::save_mask`]), so the file says which frame its pixels are
+/// in. `None` is the sensor frame, and writes no marker.
 #[derive(Debug)]
-pub struct OwnedRaster(PathBuf);
+pub struct OwnedRaster(PathBuf, Option<crate::render::RasterFrame>);
 
 impl OwnedRaster {
     /// Claim a fresh raster name in the photo's develop dir and own it.
     pub fn claim(src: &Path, prefix: &str) -> std::io::Result<Self> {
-        claim_raster(src, prefix).map(Self)
+        claim_raster(src, prefix).map(|p| Self(p, None))
+    }
+
+    /// This raster, drawn in `frame` ([`crate::render::fit_raster_frame`]).
+    pub fn with_frame(self, frame: Option<crate::render::RasterFrame>) -> Self {
+        Self(self.0, frame)
+    }
+
+    /// The frame rasters written through this one are drawn in.
+    pub fn frame(&self) -> Option<&crate::render::RasterFrame> {
+        self.1.as_ref()
+    }
+
+    /// The marker of that frame, `None` for the sensor frame.
+    pub fn marker(&self) -> Option<&crate::render::BakedGeometry> {
+        self.1.as_ref().map(crate::render::RasterFrame::marker)
+    }
+
+    /// Write `mask` here, marked with this raster's frame — THE write of a
+    /// reverse-fit raster ([`crate::render::save_mask_raster`]).
+    pub fn save_mask(&self, mask: &image::GrayImage) -> anyhow::Result<()> {
+        crate::render::save_mask_raster(mask, &self.0, self.marker())
+    }
+
+    /// Mark the file a segmentation sidecar wrote here with this raster's frame
+    /// (the sidecar segmented the fit's source, so its mask is in that frame).
+    pub fn stamp(&self) -> anyhow::Result<()> {
+        crate::render::stamp_mask_frame(&self.0, self.marker())
     }
 
     /// Atomically claim another owned raster beside this one.
@@ -355,7 +388,7 @@ impl OwnedRaster {
             };
             let candidate = parent.join(name);
             match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
-                Ok(_) => return Ok(Self(candidate)),
+                Ok(_) => return Ok(Self(candidate, self.1.clone())),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(e),
             }
@@ -378,7 +411,7 @@ impl OwnedRaster {
             "refusing to own a calibration-corpus file: {}",
             path.display()
         );
-        Self(path)
+        Self(path, None)
     }
 
     pub fn path(&self) -> &Path {

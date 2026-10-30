@@ -133,7 +133,7 @@ fn fit_recipe_zoned_inner_seeded(
                 let mut readings = Vec::new();
                 match source_refinement {
                     crate::mask_refine::RefineOutcome::Kept { mask, reading } => {
-                        if mask.save(mask_path.path()).is_ok() {
+                        if mask_path.save_mask(&mask).is_ok() {
                             src_mask = mask;
                             readings.push(("semantic source", true, reading));
                         } else {
@@ -161,7 +161,7 @@ fn fit_recipe_zoned_inner_seeded(
                 // is rewritten so the gate measures the alpha that renders.
                 let mattes = vec![matte_source_edge(src, &mut src_mask, "semantic source")];
                 if mattes.iter().any(|(_, matted, _, holes)| *matted || holes.is_some())
-                    && src_mask.save(mask_path.path()).is_err()
+                    && mask_path.save_mask(&src_mask).is_err()
                 {
                     src_mask = image::open(mask_path.path()).map(|i| i.to_luma8()).unwrap_or(src_mask);
                 }
@@ -765,7 +765,7 @@ fn widen_source_feather(
 ) -> FeatherWidening {
     match crate::mask_refine::widen_smooth_feather(guide, mask) {
         crate::mask_refine::WidenOutcome::Widened { mask: widened, reading } => {
-            if widened.save(raster.path()).is_ok() {
+            if raster.save_mask(&widened).is_ok() {
                 *mask = widened;
                 (label.to_string(), true, reading)
             } else {

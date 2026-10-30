@@ -2242,9 +2242,12 @@ fn migrate_raster_file(
     if std::fs::metadata(&target).is_ok_and(|m| m.len() > 0) {
         return Ok(stored);
     }
-    let img = crate::render::open_mask_bounded(&from_path).map_err(|e| {
+    // Through THE raster entry: the frame its marker names rides to the
+    // rewritten file (`render::stamp_mask_frame` below).
+    let raster = crate::render::open_mask_raster(&from_path).map_err(|e| {
         std::io::Error::other(format!("re-write the mask raster {}: {e:#}", from_path.display()))
     })?;
+    let (img, frame) = (raster.image, raster.frame);
     let img = match turn {
         Some(o) => crate::render::oriented(img, o),
         None => img,
@@ -2270,6 +2273,10 @@ fn migrate_raster_file(
     if let Err(e) = moved.save_with_format(&part, image::ImageFormat::Png) {
         let _ = std::fs::remove_file(&part);
         return Err(std::io::Error::other(format!("write {}: {e}", part.display())));
+    }
+    if let Err(e) = crate::render::stamp_mask_frame(&part, frame.as_ref()) {
+        let _ = std::fs::remove_file(&part);
+        return Err(std::io::Error::other(format!("mark {}: {e:#}", part.display())));
     }
     std::fs::rename(&part, &target)?;
     Ok(stored)
@@ -2536,10 +2543,13 @@ fn turn_raster_file(
     src: &Path,
     o: rawler::Orientation,
 ) -> std::io::Result<String> {
-    let img = crate::render::open_mask_bounded(from).map_err(|e| {
+    // Through THE raster entry: a quarter turn keeps a lens-corrected raster
+    // in its frame (the lens map is radial about the centre, its radius the
+    // half-diagonal), so the marker rides to the turned file.
+    let raster = crate::render::open_mask_raster(from).map_err(|e| {
         std::io::Error::other(format!("turn the mask raster {}: {e:#}", from.display()))
     })?;
-    let turned = crate::render::oriented(img, o);
+    let turned = crate::render::oriented(raster.image, o);
     let stem = from.file_stem().and_then(|s| s.to_str()).unwrap_or("mask");
     let prefix = stem.rsplit_once('-').filter(|(_, n)| n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty()).map_or(stem, |(head, _)| head);
     let target = crate::store::claim_raster(src, prefix)?;
@@ -2552,6 +2562,10 @@ fn turn_raster_file(
         // it is what lets `rotate_recipe`'s caller be told nothing changed.
         let _ = std::fs::remove_file(&target);
         return Err(std::io::Error::other(format!("write {}: {e}", target.display())));
+    }
+    if let Err(e) = crate::render::stamp_mask_frame(&target, raster.frame.as_ref()) {
+        let _ = std::fs::remove_file(&target);
+        return Err(std::io::Error::other(format!("mark {}: {e:#}", target.display())));
     }
     Ok(target.to_string_lossy().into_owned())
 }
@@ -2956,12 +2970,31 @@ pub const FIT_SOURCE_EDGE: u32 = 2048;
 /// that keeps the camera frame it was developed from, so a candidate that
 /// moves the white is rendered with the white in the profile stage
 /// ([`crate::render::source_plate`]).
+///
+/// And in the FRAME that base develop is in (v1.17.0): lens-corrected when
+/// the calibration's camera stage resamples the lens
+/// ([`crate::render::lens_in_camera`]), as the canvas and the export are and
+/// as a Lightroom export made with the profile on is. The fit draws its zone
+/// rasters in that frame and they say so ([`crate::render::fit_raster_frame`]),
+/// so neither the target nor a mask is resampled from one frame into the
+/// other on the way.
 pub fn fit_source(raw: &Path) -> Result<(crate::render::Plate, crate::recipe::EditRecipe)> {
     let base = calibration_recipe(fit_calibration(raw));
-    // The SENSOR frame (`without_lens`): the pairing below measures the
-    // target's geometry against it (`fit_target`).
-    let part = crate::render::BasePart::of(&base).without_lens();
-    Ok((crate::render::source_plate(raw, &part, FIT_SOURCE_EDGE)?, base))
+    Ok((fit_source_of(raw, &base)?, base))
+}
+
+/// [`fit_source`]'s plate of `raw` under `base`.
+fn fit_source_of(raw: &Path, base: &EditRecipe) -> Result<crate::render::Plate> {
+    crate::render::source_plate(raw, &crate::render::BasePart::of(base), FIT_SOURCE_EDGE)
+}
+
+/// The fit source of a BAKED file (a master, a bare raster) whose pixels are
+/// `image`: a plate in the frame the file's marker says its pixels are in
+/// ([`crate::render::SourceFrame::corrected`]), so its candidates read their
+/// masks where the pixels are.
+pub fn fit_source_baked(path: &Path, image: image::DynamicImage, base: &EditRecipe) -> Result<crate::render::Plate> {
+    let corrected = crate::render::SourceFrame::of(path)?.corrected(base);
+    Ok(crate::render::Plate::baked_in(image, corrected))
 }
 
 /// A calibration-only [`EditRecipe`] — the `base` the R16 fit composes
@@ -2992,35 +3025,40 @@ pub fn calibration_recipe(cal: PhotoCalibration) -> crate::recipe::EditRecipe {
 /// What the reverse fit measured about its TARGET's lens geometry, before any
 /// pixel was paired.
 ///
-/// The fit's whole domain is the sensor frame: the source is a neutral develop
-/// that runs no geometry stage, and its masks and recipes are written in that
-/// frame. A Lightroom export made with the lens profile on is not — its pixels
-/// sit where the correction moved them (on one calibration pair, ±10 px at the
-/// corners of a 1000-px frame), so pairing it as it stands pairs every pixel
-/// with a neighbour. The fit cannot read the answer off a sidecar (it is never
-/// handed one, and one of the calibration targets was exported with the
-/// profile off), so it MEASURES it: the target against the source frame as
-/// shot and as the profile would correct it.
+/// The fit pairs its source with the target pixel for pixel, so the two must
+/// be in one frame. The source is in the frame of the calibration's base
+/// develop — lens-corrected when the camera stage resamples the lens
+/// ([`fit_source`]) — and a Lightroom export is in whichever frame it was
+/// exported with: the profile on moves its pixels (on one calibration pair,
+/// ±10 px at the corners of a 1000-px frame). The fit cannot read the answer
+/// off a sidecar (it is never handed one, and one of the calibration targets
+/// was exported with the profile off), so it MEASURES it: the target against
+/// the source frame as shot and as the profile corrects it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TargetGeometry {
     /// The calibration moves no pixel (no distortion knots, no CA overshoot,
     /// no source with a lens): there is no question to ask, and the target is
     /// paired as it always was.
     Unmoved,
-    /// The target was lens-corrected. It is brought into the sensor frame for
-    /// evidence; `absent` is the share of sensor pixels outside its field.
-    Corrected { corrected: f32, as_shot: f32, absent: f32 },
+    /// The target was lens-corrected. It is paired as it stands, with the
+    /// source in the lens-corrected frame (a source developed in the sensor
+    /// frame is moved there by the engine's own geometry stage).
+    Corrected { corrected: f32, as_shot: f32 },
     /// The target keeps the uncorrected geometry: it is paired as it stands
-    /// and the recipe draws no profile distortion or CA, so the render keeps
-    /// the geometry the target was exported with.
+    /// with the source in the sensor frame (a corrected RAW source is
+    /// developed again without the geometry), and the recipe draws no profile
+    /// distortion or CA, so the render keeps the geometry the target was
+    /// exported with.
     AsShot { corrected: f32, as_shot: f32 },
-    /// Neither frame won by [`GEOMETRY_WIN_RATIO`] and [`GEOMETRY_WIN_MARGIN`]:
-    /// paired as it stands, the profile left as it was, and said so.
+    /// Neither frame won by [`GEOMETRY_WIN_RATIO`] and [`GEOMETRY_WIN_MARGIN`]
+    /// — or the target reads as shot over a lens-corrected MASTER, which has
+    /// no sensor-frame develop to go back to: paired as it stands, the
+    /// profile left as it was, and said so.
     Ambiguous { corrected: f32, as_shot: f32 },
 }
 
-/// The fit's target after [`fit_target`]: in the sensor frame, with its
-/// presence in the alpha when it was moved there (`fit::presence_of`).
+/// The fit's target after [`fit_target`]: the target as it was exported, in
+/// the frame the fit's source now is.
 pub struct FitTarget {
     pub image: image::DynamicImage,
     pub geometry: TargetGeometry,
@@ -3044,32 +3082,54 @@ pub const GEOMETRY_WIN_RATIO: f32 = 2.0;
 /// …and at least this far above it, so two weak readings cannot decide.
 pub const GEOMETRY_WIN_MARGIN: f32 = 0.10;
 
-/// Measure the target's geometry against the fit's source frame and hand the
-/// fit a target in the sensor frame — see [`TargetGeometry`]. `base` is the
+/// Measure the target's geometry against the fit's source frame and put the
+/// SOURCE in the target's frame — see [`TargetGeometry`]. The target is never
+/// resampled. `src` is the fit's source plate ([`fit_source`],
+/// [`fit_source_baked`]); `raw` the RAW it was developed from, when it was, so
+/// a corrected source can be developed again in the sensor frame. `base` is the
 /// calibration the fit composes; on an as-shot target its profile distortion
 /// and CA come off, because the recipe inherits them from it.
 pub fn fit_target(
-    src: &image::DynamicImage,
+    src: &mut crate::render::Plate,
+    raw: Option<&Path>,
     target: &image::DynamicImage,
     base: &mut EditRecipe,
-) -> FitTarget {
+) -> Result<FitTarget> {
     let geom = crate::render::geometry_profile(base).into_owned();
     let amount = base.lens_distortion;
+    let as_exported = |geometry| Ok(FitTarget { image: target.clone(), geometry });
     if !crate::render::geometry_moves_frame(&geom, amount) {
-        return FitTarget { image: target.clone(), geometry: TargetGeometry::Unmoved };
+        return as_exported(TargetGeometry::Unmoved);
     }
-    let (corrected, as_shot) = target_alignment(src, target, base, &geom, amount);
+    let src_corrected = src.corrected();
+    let (corrected, as_shot) = target_alignment(src, src_corrected, target, base, &geom, amount);
     let wins = |a: f32, b: f32| a >= GEOMETRY_WIN_RATIO * b && a - b >= GEOMETRY_WIN_MARGIN;
     if wins(corrected, as_shot) {
-        if let Some((image, absent)) = crate::render::corrected_to_sensor_frame(target, &geom, amount) {
-            return FitTarget { image, geometry: TargetGeometry::Corrected { corrected, as_shot, absent } };
+        if !src_corrected {
+            // A source developed in the sensor frame (the tail resamples this
+            // calibration's lens, or an unmarked master): the engine's own
+            // geometry stage moves it into the frame the target was exported
+            // in, as the export moves the same pixels.
+            let moved = crate::render::apply_lens_geometry(src, &geom, amount);
+            *src = crate::render::Plate::baked_in(moved, true);
         }
-    } else if wins(as_shot, corrected) {
+        return as_exported(TargetGeometry::Corrected { corrected, as_shot });
+    }
+    if wins(as_shot, corrected) {
+        if src_corrected {
+            // The source must be in the sensor frame too: a RAW develops again
+            // with the geometry off; a corrected master has no such develop.
+            let Some(raw) = raw else { return as_exported(TargetGeometry::Ambiguous { corrected, as_shot }) };
+            let mut flat = base.clone();
+            flat.lens_profile.distortion_on = false;
+            flat.lens_profile.ca_on = false;
+            *src = fit_source_of(raw, &flat)?;
+        }
         base.lens_profile.distortion_on = false;
         base.lens_profile.ca_on = false;
-        return FitTarget { image: target.clone(), geometry: TargetGeometry::AsShot { corrected, as_shot } };
+        return as_exported(TargetGeometry::AsShot { corrected, as_shot });
     }
-    FitTarget { image: target.clone(), geometry: TargetGeometry::Ambiguous { corrected, as_shot } }
+    as_exported(TargetGeometry::Ambiguous { corrected, as_shot })
 }
 
 /// The verdict, said once per fit in the rationale.
@@ -3078,9 +3138,9 @@ pub fn note_target_geometry(report: &mut crate::fit::FitReport, geometry: Target
     let two = |v: f32| format!("{v:.2}");
     let note = match geometry {
         TargetGeometry::Unmoved => return,
-        TargetGeometry::Corrected { corrected, as_shot, absent } => Note::new(
+        TargetGeometry::Corrected { corrected, as_shot } => Note::new(
             keys::TARGET_GEOMETRY_CORRECTED,
-            vec![("corrected", two(corrected)), ("as_shot", two(as_shot)), ("absent", format!("{:.1}", absent * 100.0))],
+            vec![("corrected", two(corrected)), ("as_shot", two(as_shot))],
         ),
         TargetGeometry::AsShot { corrected, as_shot } => Note::new(
             keys::TARGET_GEOMETRY_AS_SHOT,
@@ -3094,13 +3154,20 @@ pub fn note_target_geometry(report: &mut crate::fit::FitReport, geometry: Target
     crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes, note);
 }
 
-/// Mean phase-correlation peak of the target against the source frame as shot
-/// and as corrected, over [`GEOMETRY_PATCH_CENTRES`] at
-/// [`GEOMETRY_PROBE_EDGE`]. The source is rendered under the calibration so the
-/// two sides share a tone; each patch is high-passed (a 9-px box removed) so
-/// the reading is about edges, not brightness.
+/// Mean phase-correlation peaks `(corrected, as_shot)` of the target against
+/// the source frame as corrected and as shot, over [`GEOMETRY_PATCH_CENTRES`]
+/// at [`GEOMETRY_PROBE_EDGE`]. The source is rendered under the calibration so
+/// the two sides share a tone; each patch is high-passed (a 9-px box removed)
+/// so the reading is about edges, not brightness.
+///
+/// The profile is applied to whichever side is in the sensor frame: to the
+/// source's render when it is (`src_corrected` false), and to the TARGET when
+/// the source is already corrected — the as-shot hypothesis is then that the
+/// correction takes the target onto the source. Either way the reading is of
+/// an image the geometry stage moved against one it did not.
 fn target_alignment(
     src: &image::DynamicImage,
+    src_corrected: bool,
     target: &image::DynamicImage,
     base: &EditRecipe,
     geom: &crate::recipe::LensProfile,
@@ -3113,13 +3180,17 @@ fn target_alignment(
         return (0.0, 0.0);
     }
     let filter = image::imageops::FilterType::Lanczos3;
-    let shot = crate::render::develop_preview(&src.resize_exact(w, h, filter), base);
-    let corrected = crate::render::apply_lens_geometry(&shot, geom, amount);
+    let look = crate::render::develop_preview(&src.resize_exact(w, h, filter), base);
     let t = target.resize_exact(w, h, filter);
     let mean = |readings: Vec<(f32, i32, i32)>| {
         readings.iter().map(|r| r.0).sum::<f32>() / readings.len().max(1) as f32
     };
-    (mean(patch_alignment(&t, &corrected)), mean(patch_alignment(&t, &shot)))
+    if src_corrected {
+        let t_corrected = crate::render::apply_lens_geometry(&t, geom, amount);
+        return (mean(patch_alignment(&t, &look)), mean(patch_alignment(&t_corrected, &look)));
+    }
+    let corrected = crate::render::apply_lens_geometry(&look, geom, amount);
+    (mean(patch_alignment(&t, &corrected)), mean(patch_alignment(&t, &look)))
 }
 
 /// `(peak, dy, dx)` of `b` against `a` on each of [`GEOMETRY_PATCH_CENTRES`];
@@ -6493,7 +6564,7 @@ mod tests {
         // frame is `fit_source`'s, and `match_cmd` takes its pair from there.
         assert!(
             cli.contains("return pipeline::fit_source(raw);")
-                && cli.contains("let (src, fit_base) = match_source(raw, negative.as_deref())?;"),
+                && cli.contains("let (mut src, fit_base) = match_source(raw, negative.as_deref())?;"),
             "the CLI match command must take its source frame from pipeline::fit_source"
         );
         assert!(
@@ -6562,36 +6633,41 @@ mod tests {
     /// THE defect: the fit paired a lens-corrected target with its
     /// uncorrected sensor frame, every pixel with a neighbour (on the
     /// calibration pair ±10 px at the corners of 1000 px, alignment peaks
-    /// 0.06–0.17). After `fit_target` the target the fit pairs IS in the
-    /// sensor frame: every probe patch sits at shift 0 with a high peak, and
-    /// the structural reading the fit takes of the pair falls with it.
+    /// 0.06–0.17). After `fit_target` the SOURCE the fit pairs is in the
+    /// target's lens-corrected frame — moved there by the engine's own
+    /// geometry stage, the target untouched: every probe patch sits at shift 0
+    /// with a high peak, and the structural reading of the pair falls with it.
     #[test]
-    fn a_lens_corrected_target_is_paired_in_the_sensor_frame() {
-        let src = sensor_texture(1200, 800, 39);
+    fn a_lens_corrected_target_is_paired_in_the_corrected_frame() {
+        let pixels = sensor_texture(1200, 800, 39);
         let mut base = distorting_base();
-        let target = corrected_export(&src, &base);
+        let target = corrected_export(&pixels, &base);
         let shot = |img: &image::DynamicImage| img.resize_exact(1000, 667, image::imageops::FilterType::Lanczos3);
-        let look = crate::render::develop_preview(&shot(&src), &base);
-        let before = patch_alignment(&shot(&target), &look);
+        let look_base = base.clone();
+        let look = |img: &image::DynamicImage| crate::render::develop_preview(&shot(img), &look_base);
+        let before = patch_alignment(&shot(&target), &look(&pixels));
         assert!(
             before.iter().any(|r| (r.1, r.2) != (0, 0)),
             "premise: as exported the target is off the sensor frame: {before:?}"
         );
-        let fitted = fit_target(&src, &target, &mut base);
-        let TargetGeometry::Corrected { corrected, as_shot, absent } = fitted.geometry else {
+        let mut src = crate::render::Plate::baked(pixels.clone());
+        assert!(!src.corrected(), "premise: a sensor-frame source");
+        let fitted = fit_target(&mut src, None, &target, &mut base).expect("no RAW to develop");
+        let TargetGeometry::Corrected { corrected, as_shot } = fitted.geometry else {
             panic!("a corrected export reads corrected: {:?}", fitted.geometry)
         };
         assert!(corrected >= GEOMETRY_WIN_RATIO * as_shot, "{corrected} vs {as_shot}");
-        assert!((0.005..0.08).contains(&absent), "the ring is a few per cent of the frame: {absent}");
         assert!(base.lens_profile.distortion_on, "the recipe keeps the correction the target was made with");
-        let after = patch_alignment(&shot(&fitted.image), &look);
+        assert_eq!(fitted.image.as_bytes(), target.as_bytes(), "the target is paired as it was exported");
+        assert!(src.corrected(), "the source now says it is in the corrected frame");
+        let after = patch_alignment(&shot(&target), &look(&src));
         for (peak, dy, dx) in &after {
             assert_eq!((*dy, *dx), (0, 0), "every patch aligned: {after:?}");
             assert!(*peak > 0.3, "and by a clear peak: {after:?}");
         }
         let (raw, moved) = (
+            crate::fit::fit_recipe_from(&pixels, &target, &base),
             crate::fit::fit_recipe_from(&src, &target, &base),
-            crate::fit::fit_recipe_from(&src, &fitted.image, &base),
         );
         let d = |r: &crate::fit::FitReport| r.divergence.map_or(f32::NAN, |d| d.d);
         assert!(
@@ -6600,6 +6676,43 @@ mod tests {
             d(&raw),
             d(&moved)
         );
+    }
+
+    /// A source ALREADY in the corrected frame (a RAW whose camera stage
+    /// resamples the lens, a master marked so) is paired with a corrected
+    /// export as both stand: nothing is moved on either side.
+    #[test]
+    fn a_corrected_source_pairs_a_corrected_target_as_both_stand() {
+        let pixels = sensor_texture(1200, 800, 43);
+        let mut base = distorting_base();
+        let target = corrected_export(&pixels, &base);
+        let corrected_pixels = crate::render::apply_lens_geometry(&pixels, &crate::render::geometry_profile(&base), 0.0);
+        let mut src = crate::render::Plate::baked_in(corrected_pixels.clone(), true);
+        let fitted = fit_target(&mut src, None, &target, &mut base).expect("no RAW to develop");
+        assert!(matches!(fitted.geometry, TargetGeometry::Corrected { .. }), "{:?}", fitted.geometry);
+        assert!(src.corrected());
+        assert_eq!(src.as_bytes(), corrected_pixels.as_bytes(), "the source is not moved again");
+        assert_eq!(fitted.image.as_bytes(), target.as_bytes(), "nor is the target");
+        assert!(base.lens_profile.distortion_on);
+    }
+
+    /// …and an export made with the profile OFF over a corrected MASTER, which
+    /// has no sensor-frame develop to go back to, is said to be undecided
+    /// rather than paired a lens field off with the profile switched off.
+    #[test]
+    fn an_uncorrected_target_over_a_corrected_master_is_undecided() {
+        let pixels = sensor_texture(1200, 800, 45);
+        let mut base = distorting_base();
+        let target = crate::render::develop_preview(&pixels, &base);
+        let corrected_pixels = crate::render::apply_lens_geometry(&pixels, &crate::render::geometry_profile(&base), 0.0);
+        let mut src = crate::render::Plate::baked_in(corrected_pixels, true);
+        let was = base.clone();
+        let fitted = fit_target(&mut src, None, &target, &mut base).expect("no RAW to develop");
+        let TargetGeometry::Ambiguous { corrected, as_shot } = fitted.geometry else {
+            panic!("an as-shot export over a corrected master: {:?}", fitted.geometry)
+        };
+        assert!(as_shot >= GEOMETRY_WIN_RATIO * corrected, "it does read as shot: {as_shot} vs {corrected}");
+        assert_eq!(base, was, "the profile is left as it was");
     }
 
     /// The other answer: a target exported with the profile OFF keeps the
@@ -6616,7 +6729,8 @@ mod tests {
         base.lens_profile.ca_on = true;
         let before_base = base.clone();
         let target = crate::render::develop_preview(&src, &base);
-        let fitted = fit_target(&src, &target, &mut base);
+        let mut src = crate::render::Plate::baked(src);
+        let fitted = fit_target(&mut src, None, &target, &mut base).expect("no RAW to develop");
         assert!(
             matches!(fitted.geometry, TargetGeometry::AsShot { .. }),
             "an as-shot export reads as shot: {:?}",
@@ -6644,7 +6758,7 @@ mod tests {
     /// with no distortion knots, and every bare raster, runs.
     #[test]
     fn a_calibration_with_no_geometry_leaves_the_pair_as_it_was() {
-        let src = sensor_texture(600, 400, 7);
+        let mut src = crate::render::Plate::baked(sensor_texture(600, 400, 7));
         let target = sensor_texture(600, 400, 8);
         for lens_profile in [
             crate::recipe::LensProfile::default(),
@@ -6652,7 +6766,7 @@ mod tests {
         ] {
             let mut base = EditRecipe { lens_profile, ..Default::default() };
             let was = base.clone();
-            let fitted = fit_target(&src, &target, &mut base);
+            let fitted = fit_target(&mut src, None, &target, &mut base).expect("no RAW to develop");
             assert_eq!(fitted.geometry, TargetGeometry::Unmoved);
             assert_eq!(fitted.image.as_bytes(), target.as_bytes());
             assert_eq!(base, was);
@@ -6738,11 +6852,12 @@ mod tests {
         );
     }
 
-    /// …and what `fit_source` actually returns, where a RAW is available.
+    /// …and what `fit_source` actually returns, where a RAW is available: the
+    /// whole frame at the working edge, in the frame its base develop is in.
     /// Env-gated on the private calibration corpus like every other test that
     /// needs a real negative; it prints its reason and passes when unset.
     #[test]
-    fn the_fit_source_frame_is_the_sensor_frame_at_the_working_edge() {
+    fn the_fit_source_is_the_whole_frame_at_the_working_edge() {
         let Some(root) = crate::fit::calibration_corpus() else { return };
         let raw = root.join("source.arw");
         if !raw.is_file() {
@@ -6761,7 +6876,12 @@ mod tests {
                 (frame.width(), frame.height()),
                 (sensor.0 as u32, sensor.1 as u32)
             ),
-            "the fit source IS the sensor frame, not an in-camera crop of it"
+            "the fit source IS the whole frame, not an in-camera crop of it"
+        );
+        assert_eq!(
+            frame.corrected(),
+            crate::render::lens_in_camera(&base),
+            "lens-corrected exactly when the calibration's camera stage resamples the lens"
         );
         assert_eq!(
             base,

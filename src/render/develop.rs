@@ -114,11 +114,14 @@ fn develop_preview_inner(
     // developed at that white (`BasePart::of_canvas`). Either way the white is
     // in the pixels and this pass leaves it out; any other pixels arrive at As
     // Shot and take it here.
+    //
+    // And the frame the pixels are in: a plate says it of its own pixels (the
+    // reverse fit's source, v1.17.0), any other pixels take the caller's word.
     let plated = super::canvas::plate_pixels(preview, recipe, diag);
-    let (pixels, white_in_pixels) = match &plated {
-        Some((Some(img), white)) => (&**img, *white),
-        Some((None, white)) => (preview, *white),
-        None => (preview, raw_source && BasePart::of_canvas(recipe).carries_white()),
+    let (pixels, white_in_pixels, corrected) = match &plated {
+        Some((Some(img), white, c)) => (&**img, *white, *c),
+        Some((None, white, c)) => (preview, *white, *c),
+        None => (preview, raw_source && BasePart::of_canvas(recipe).carries_white(), corrected),
     };
     // A float base (`render::canvas`) is read as it is, over-range light and
     // all; every other preview at 8 bits, as before.

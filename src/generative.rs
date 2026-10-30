@@ -649,11 +649,10 @@ fn edit_onto(
     // (v1.17.0), so the mask is read in the base's frame.
     let mask_img = match keep {
         Keep::Painted(path) => Some(DynamicImage::ImageRgba8(
-            master.rgba_to_frame(
-                &crate::render::open_mask_bounded(path)
-                    .with_context(|| format!("open mask {}", path.display()))?
-                    .to_rgba8(),
-            ),
+            master.rgba_mask_to_frame(
+                &crate::render::open_mask_raster(path).with_context(|| format!("open mask {}", path.display()))?,
+                path,
+            )?,
         )),
         Keep::Found | Keep::Whole => None,
     };

@@ -192,9 +192,25 @@ pub(super) fn refine_mask_guided_tiled(
     out
 }
 
+/// A decoded mask raster, greyscale, with the frame its file says it is drawn
+/// in ([`super::open_mask_raster`]).
+#[derive(Debug)]
+pub(crate) struct MaskBitmap {
+    pub(crate) gray: image::GrayImage,
+    /// The lens geometry whose corrected frame it is drawn in; `None` is the
+    /// sensor frame.
+    pub(crate) frame: Option<BakedGeometry>,
+}
+
+impl MaskBitmap {
+    pub(crate) fn bmp(&self) -> Bmp<'_> {
+        Bmp { img: &self.gray, corrected: self.frame.is_some() }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct MaskRasterSnapshot {
-    images: std::collections::HashMap<String, std::sync::Arc<image::GrayImage>>,
+    images: std::collections::HashMap<String, std::sync::Arc<MaskBitmap>>,
     /// The recipe's drawing pixel layers (`layers.rs`), under the same budget,
     /// each with whether it is lens-corrected (its file's marker, v1.17.0).
     layers: std::collections::HashMap<String, (std::sync::Arc<image::RgbaImage>, bool)>,
@@ -205,8 +221,8 @@ pub(super) struct MaskRasterSnapshot {
 }
 
 impl MaskRasterSnapshot {
-    pub(super) fn get(&self, geometry: &MaskGeometry) -> Option<&image::GrayImage> {
-        self.images.get(geometry_raster_path(geometry)?).map(std::sync::Arc::as_ref)
+    pub(super) fn get(&self, geometry: &MaskGeometry) -> Option<Bmp<'_>> {
+        self.images.get(geometry_raster_path(geometry)?).map(|b| b.bmp())
     }
 
     /// A drawing layer's pixels, and whether they are lens-corrected.
@@ -520,7 +536,17 @@ pub(super) fn load_mask_raster_snapshot_with_budget(
             }
             continue;
         };
-        let incoming = bitmap.as_raw().len();
+        // A raster drawn in a lens-corrected frame is read only under the
+        // geometry it was drawn under (`baked::check_mask_frame`), never a
+        // lens field away from where it was drawn.
+        if let Err(e) = super::baked::check_mask_frame(bitmap.frame.as_ref(), recipe, std::path::Path::new(path)) {
+            if strict {
+                return Err(e.context(format!("mask '{label}' — no pixels were rendered")));
+            }
+            diag.warn(format!("{e:#} — mask '{label}' is inert"));
+            continue;
+        }
+        let incoming = bitmap.gray.as_raw().len();
         let Some(next_bytes) = held_bytes.checked_add(incoming) else {
             if strict {
                 bail!(
@@ -586,10 +612,13 @@ pub(super) fn load_mask_raster_snapshot_with_budget(
 /// trade — the alternative (warn per call) is the per-tick flood this cache
 /// exists to stop, and the surface that suppressed it is the surface that
 /// already shows the fact.
+///
+/// The file is read through THE mask-raster entry ([`super::open_mask_raster`]),
+/// so the bitmap carries the frame its marker names (v1.17.0).
 pub(super) fn load_mask_bitmap(
     g: &MaskGeometry,
     diag: &crate::diag::Diag<'_>,
-) -> Option<std::sync::Arc<image::GrayImage>> {
+) -> Option<std::sync::Arc<MaskBitmap>> {
     use std::sync::{Arc, Mutex, OnceLock};
     // Keyed by Option<(mtime, size)>: mtime alone misses a same-length-of-
     // time overwrite on coarse-timestamp filesystems (the thumb cache already
@@ -604,7 +633,7 @@ pub(super) fn load_mask_bitmap(
     // made a formerly missing mask that appears mtime-less keep hitting the
     // cached negative forever).
     type Key = Option<(Option<std::time::SystemTime>, u64)>;
-    type Cache = Mutex<std::collections::HashMap<String, (Key, Option<Arc<image::GrayImage>>)>>;
+    type Cache = Mutex<std::collections::HashMap<String, (Key, Option<Arc<MaskBitmap>>)>>;
     static CACHE: OnceLock<Cache> = OnceLock::new();
     let path = geometry_raster_path(g)?;
     let cache = CACHE.get_or_init(Default::default);
@@ -639,8 +668,8 @@ pub(super) fn load_mask_bitmap(
         ));
         None
     } else {
-        match image::open(path) {
-            Ok(img) => Some(Arc::new(img.to_luma8())),
+        match super::open_mask_raster(std::path::Path::new(path)) {
+            Ok(r) => Some(Arc::new(MaskBitmap { gray: r.image.to_luma8(), frame: r.frame })),
             Err(e) => {
                 diag.warn(format!(
                     "bitmap mask '{path}' could not be loaded ({e}) — mask is inert"
@@ -656,8 +685,8 @@ pub(super) fn load_mask_bitmap(
         // as entries: sixteen full-res 61 MP rasters would otherwise
         // pin ~1 GB for the life of the process.
         let held: usize =
-            map.values().filter_map(|(_, i)| i.as_ref()).map(|i| i.as_raw().len()).sum();
-        let incoming = decoded.as_ref().map_or(0, |i| i.as_raw().len());
+            map.values().filter_map(|(_, i)| i.as_ref()).map(|i| i.gray.as_raw().len()).sum();
+        let incoming = decoded.as_ref().map_or(0, |i| i.gray.as_raw().len());
         if incoming <= MASK_RASTER_BUDGET_BYTES {
             if map.len() > 16
                 || held.saturating_add(incoming) > MASK_RASTER_BUDGET_BYTES
