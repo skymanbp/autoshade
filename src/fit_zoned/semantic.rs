@@ -402,6 +402,24 @@ mod tests {
             2,
         );
 
+        // Both runs must have segmented. A sidecar that fails in one of them
+        // (a full temp drive refusing its input PNG, a crashed interpreter)
+        // sends that run down the luminance-range fallback, a different
+        // producer with a different error; the comparison below would then
+        // report a bitwise mismatch between two routes that never met (the
+        // way a 2026-10-30 gate run went red: its reference run's sidecar
+        // failed, its scratch on a system drive that was filling up).
+        for (run, report) in [("four-region", &four), ("two-region", &two)] {
+            if let Some(note) = report.notes.iter().find(|note| {
+                note.key == crate::rationale::keys::ZONED_UNAVAILABLE
+                    || note.key == crate::rationale::keys::SEMANTIC_REGIONS_UNAVAILABLE
+            }) {
+                panic!(
+                    "the {run} run could not segment, so the two routes are not comparable: {}",
+                    crate::rationale::render_one(note)
+                );
+            }
+        }
         let mode_keys = [
             crate::rationale::keys::ZONE_MODE_FULL,
             crate::rationale::keys::ZONE_MODE_ATMOSPHERE,

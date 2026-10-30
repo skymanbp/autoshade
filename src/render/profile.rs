@@ -90,7 +90,9 @@ pub(crate) struct Stage {
     /// ProPhoto (D50) → Bradford → the working space.
     camera: Option<[[f32; 3]; 3]>,
     hue_sat: Option<Table>,
-    look: Option<Table>,
+    /// The look tables, in the order they go on: the camera profile's own
+    /// `ProfileLookTableData`, then the creative Look's ([`Stage::build_for`]).
+    looks: Vec<Table>,
     tone: Option<Vec<f32>>,
     /// Camera Raw's exposure transfer at the photograph's camera start
     /// ([`super::tone_cr::Ramp`]): the body's baseline plus the profile's
@@ -111,8 +113,9 @@ pub(crate) struct Frame {
     /// lets the profile own the colour transform.
     pub neutral: Option<[f32; 3]>,
     /// The creative profile's own look table (`crs:LookTable`, decoded by
-    /// [`crate::dcp::find_look_table`]). It REPLACES the camera profile's
-    /// `ProfileLookTableData`: see [`Stage::build_for`].
+    /// [`crate::dcp::find_look_table`]). It goes on AFTER the camera
+    /// profile's own `ProfileLookTableData`, which stays: see
+    /// [`Stage::build_for`].
     pub creative: Option<Table>,
     /// The body's `CameraCalibration` diagonal, which the DNG SDK puts in
     /// front of every `ColorMatrix` (`XYZtoCamera = CC · CM`) when it turns
@@ -165,11 +168,20 @@ impl Stage {
     /// camera → working transform ([`Stage::owns_camera`],
     /// [`Stage::develop_camera`]).
     ///
-    /// A creative table REPLACES the profile's own look table rather than
-    /// stacking after it. Measured on p39 against Camera Raw's render of the
-    /// same packet with the 「Adobe Color」 Look (v1.17.0, lens-matched, 1000
-    /// px): replacing leaves the sky at Δb +0.22 and the warm tones at Δb
-    /// −1.13; applying both tables leaves +1.01 and −3.21.
+    /// A creative table goes on AFTER the profile's own look table, which
+    /// stays: a creative Look names its base camera profile and carries its own
+    /// table, and the base profile's maps are still in force under it.
+    /// Measured against Camera Raw (v1.17.0) on a synthetic linear-ProPhoto
+    /// bench whose profile carries 「Adobe Standard」's own 36 × 8 × 16 look
+    /// table, with the 「Adobe Color」 Look (curves the identity), 4256 nodes,
+    /// ΔE median / p95 / max: creative after the profile's 0.078 / 0.70 / 1.86;
+    /// the profile's after the creative 0.13 / 2.94 / 21.8; the creative
+    /// replacing the profile's 1.19 / 8.07 / 22.4. On p39's flat sidecar
+    /// (Camera Raw 16-bit, 1536 px, warm h 20–90° C > 12 and sky-ish h 190–280°
+    /// C > 8, Δb): replacing +2.51 and −0.89, stacking −0.19 and +0.02 (no
+    /// Look −0.20 and +0.04). An earlier reading that preferred replacing was
+    /// taken while the Look's curve went by the luma ratio, whose own error
+    /// (Δb −1.1 on the same colours) offset the missing table.
     pub(crate) fn build_for(
         profile: &Profile,
         space: super::ExportColorSpace,
@@ -179,7 +191,7 @@ impl Stage {
         let white = frame.neutral.and_then(|n| white_temperature_with(profile, n, frame.calibration));
         let kelvin = white.or(frame.kelvin);
         let hue_sat = blend_calibrations(profile, kelvin);
-        let (look, tone) = stage_tail(profile, frame.creative);
+        let (looks, tone) = stage_tail(profile, frame.creative);
         let total_ev = baseline_ev + profile.baseline_exposure_offset;
         let camera = white.and_then(|_| forward_matrix(profile, kelvin));
         // Working RGB → XYZ (D65-adapted, as the export spaces are) → ProPhoto.
@@ -202,11 +214,11 @@ impl Stage {
             }
             None => (None, super::inv3(&to_ref)),
         };
-        let tables = register_tail(look.as_ref(), tone.as_deref(), camera.is_some());
+        let tables = register_tail(&looks, tone.as_deref(), camera.is_some());
         // Camera Raw's transfer is never the identity (its toe acts at 0 EV),
         // so the stage always has work.
         let ramp = super::tone_cr::Ramp::of(camera_start_of(total_ev, frame.neutral, tables));
-        Some(Stage { from_ref, to_ref, camera, hue_sat, look, tone, ramp })
+        Some(Stage { from_ref, to_ref, camera, hue_sat, looks, tone, ramp })
     }
 
     /// The camera start this stage rendered at: what the develop's Exposure
@@ -264,7 +276,9 @@ impl Stage {
         // SDK's clip at white, with Camera Raw's channel rule; nothing past
         // white reaches the look table or the curve.
         r = self.ramp.transfer_rgb(r);
-        if let Some(t) = &self.look {
+        // The profile's own look table, then the creative Look's on top
+        // ([`Stage::build_for`]).
+        for t in &self.looks {
             let mut hsv = to_hsv(r);
             t.apply(&mut hsv);
             r = from_hsv(hsv);
@@ -348,6 +362,20 @@ fn map_white(from: [f64; 2], to: [f64; 2]) -> [[f64; 3]; 3] {
     mul64(&inv, &mul64(&a, &MB))
 }
 
+/// Linear working RGB (`space`, D65) → linear ProPhoto RGB at ProPhoto's own
+/// D50 white through the SDK's Bradford ([`map_white`]), and back: the space
+/// Camera Raw's point curves act in, each channel of it under the sRGB
+/// transfer (`render::tone::apply_rgb_curves`, measured v1.17.0). The
+/// Bradford is the measured part: a red-only straight-line curve predicted
+/// through ProPhoto at the WORKING white instead ([`UnderTone`]'s reference)
+/// is 0.28 ΔE off Camera Raw, through this one 0.01.
+pub(crate) fn curve_space(space: super::ExportColorSpace) -> ([[f32; 3]; 3], [[f32; 3]; 3]) {
+    let work = mat3_f64(&super::rgb_to_xyz(super::space_primaries(space), super::D65_XY));
+    let pro = rgb_to_xyz64(PROPHOTO_PRIM, D50_XY);
+    let to = mul64(&inv64(&pro).unwrap_or(pro), &mul64(&map_white(D65_XY64, D50_XY), &work));
+    (mat3_f32(&to), mat3_f32(&inv64(&to).unwrap_or(to)))
+}
+
 /// Robertson's isotherms, `dng_temperature`'s table (Wyszecki & Stiles,
 /// *Color Science*, 2nd ed., p. 228: reciprocal megakelvin, u, v, isotherm
 /// slope).
@@ -425,11 +453,11 @@ pub(crate) fn camera_start_of(total_ev: f32, neutral: Option<[f32; 3]>, tables: 
 }
 
 /// What a stage built from `profile` puts on after its exposure transfer: the
-/// look table (a creative one REPLACES the profile's own, [`Stage::build_for`])
-/// and the tone curve (the profile's own when it states one — `None` for a
-/// stated identity — else Adobe's default).
-fn stage_tail(profile: &Profile, creative: Option<Table>) -> (Option<Table>, Option<Vec<f32>>) {
-    let look = creative.or_else(|| profile.look_table.clone());
+/// look tables in order (the profile's own, then a creative one on top,
+/// [`Stage::build_for`]) and the tone curve (the profile's own when it states
+/// one — `None` for a stated identity — else Adobe's default).
+fn stage_tail(profile: &Profile, creative: Option<Table>) -> (Vec<Table>, Option<Vec<f32>>) {
+    let look: Vec<Table> = profile.look_table.clone().into_iter().chain(creative).collect();
     let tone = if states_a_curve(&profile.tone_curve) {
         tone_lut(&profile.tone_curve)
     } else {
@@ -445,12 +473,12 @@ fn stage_tail(profile: &Profile, creative: Option<Table>) -> (Option<Table>, Opt
 /// when [`Stage::build_for`] would: a white solved from the neutral and a
 /// `ForwardMatrix`.
 pub(crate) fn tail_key(profile: &Profile, creative: Option<Table>, neutral: Option<[f32; 3]>) -> u64 {
-    let (look, tone) = stage_tail(profile, creative);
+    let (looks, tone) = stage_tail(profile, creative);
     let owns = neutral
         .and_then(|n| white_temperature_with(profile, n, None))
         .and_then(|k| forward_matrix(profile, Some(k)))
         .is_some();
-    register_tail(look.as_ref(), tone.as_deref(), owns)
+    register_tail(&looks, tone.as_deref(), owns)
 }
 
 /// A stage's tail as [`UnderTone`] takes it back off: the look table, the
@@ -458,7 +486,7 @@ pub(crate) fn tail_key(profile: &Profile, creative: Option<Table>, neutral: Opti
 /// Bradford adaptation when the stage owns the camera transform, ProPhoto's
 /// primaries at the working white otherwise ([`Stage::build_for`]).
 struct Tail {
-    look: Option<Table>,
+    looks: Vec<Table>,
     tone: Option<Vec<f32>>,
     bradford: bool,
 }
@@ -471,10 +499,11 @@ fn tail_registry() -> &'static TailRegistry {
 }
 
 /// Register a stage's tail and answer its key: FNV-1a over the tables' own
-/// numbers, so the same tables answer the same key in every process. 0 is
+/// numbers, so the same tables answer the same key in every process (one
+/// look table hashes as it did before the creative table stacked). 0 is
 /// kept for "Adobe's default curve, no look table" (a camera start written
 /// before the key existed), which these tables never hash to.
-fn register_tail(look: Option<&Table>, tone: Option<&[f32]>, bradford: bool) -> u64 {
+fn register_tail(looks: &[Table], tone: Option<&[f32]>, bradford: bool) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut eat = |bytes: &[u8]| {
         for &b in bytes {
@@ -482,17 +511,17 @@ fn register_tail(look: Option<&Table>, tone: Option<&[f32]>, bradford: bool) -> 
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
         }
     };
-    match look {
-        Some(t) => {
-            eat(&[1]);
-            for v in [t.hue, t.sat, t.val, u32::from(t.srgb_value)] {
-                eat(&v.to_le_bytes());
-            }
-            for c in t.data.iter().flatten() {
-                eat(&c.to_bits().to_le_bytes());
-            }
+    if looks.is_empty() {
+        eat(&[0]);
+    }
+    for t in looks {
+        eat(&[1]);
+        for v in [t.hue, t.sat, t.val, u32::from(t.srgb_value)] {
+            eat(&v.to_le_bytes());
         }
-        None => eat(&[0]),
+        for c in t.data.iter().flatten() {
+            eat(&c.to_bits().to_le_bytes());
+        }
     }
     match tone {
         Some(lut) => {
@@ -506,7 +535,7 @@ fn register_tail(look: Option<&Table>, tone: Option<&[f32]>, bradford: bool) -> 
     eat(&[u8::from(bradford)]);
     let key = h.max(1);
     let mut reg = tail_registry().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reg.entry(key).or_insert_with(|| std::sync::Arc::new(Tail { look: look.cloned(), tone: tone.map(<[f32]>::to_vec), bradford }));
+    reg.entry(key).or_insert_with(|| std::sync::Arc::new(Tail { looks: looks.to_vec(), tone: tone.map(<[f32]>::to_vec), bradford }));
     key
 }
 
@@ -545,7 +574,7 @@ pub(crate) fn white_shift(from: [f64; 2], to: [f64; 2]) -> [[f32; 3]; 3] {
     mat3_f32(&shift.map(|row| row.map(|v| v / y.max(1e-9))))
 }
 
-/// The profile stage's last steps — its exposure transfer, its look table and
+/// The profile stage's last steps — its exposure transfer, its look tables and
 /// its tone curve put on as [`adobe_tone`] puts it — undone and redone around
 /// a map of the light they acted on, in the stage's own reference RGB: what a
 /// Camera Raw adjustment that acts before them (its white balance, its
@@ -554,7 +583,7 @@ pub(crate) fn white_shift(from: [f64; 2], to: [f64; 2]) -> [[f32; 3]; 3] {
 /// curve, the middle one at its relative place between them), the look table
 /// by iteration ([`look_inverse`]), and the transfer below white
 /// ([`super::tone_cr::Ramp::input_rgb`]), at the camera start the stage ran
-/// it at. The look table and curve are the stage's own, named by the start
+/// it at. The look tables and curve are the stage's own, named by the start
 /// (`CameraStart::tables`): measured on synthetic warm patches at −1.51 EV
 /// with Adobe Standard's look table, Camera Raw applies the look AFTER the
 /// slider Exposure (median ΔE 4.71 with it before, the order a frame rendered
@@ -564,7 +593,7 @@ pub(crate) struct UnderTone {
     from_ref: [[f32; 3]; 3],
     curve: Vec<f32>,
     inverse: Vec<f32>,
-    look: Option<Table>,
+    looks: Vec<Table>,
     start: super::tone_cr::Ramp,
 }
 
@@ -592,12 +621,12 @@ impl UnderTone {
             let ref_to_xyz = super::rgb_to_xyz(PROPHOTO_PRIM, super::D65_XY);
             super::mat_mul3(&super::inv3(&ref_to_xyz), &space_to_xyz)
         };
-        let (curve, look): (Vec<f32>, Option<Table>) = match &tail {
+        let (curve, looks): (Vec<f32>, Vec<Table>) = match &tail {
             Some(t) => (
                 t.tone.clone().unwrap_or_else(|| (0..TONE_LUT).map(|i| i as f32 / (TONE_LUT - 1) as f32).collect()),
-                t.look.clone(),
+                t.looks.clone(),
             ),
-            None => (acr3_default::ACR3_DEFAULT.to_vec(), None),
+            None => (acr3_default::ACR3_DEFAULT.to_vec(), Vec::new()),
         };
         // The curve's inverse on the same grid, by its monotone samples.
         let n = curve.len();
@@ -610,7 +639,7 @@ impl UnderTone {
                 (j as f32 - 1.0 + f) / (n - 1) as f32
             })
             .collect();
-        UnderTone { to_ref, from_ref: super::inv3(&to_ref), curve, inverse, look, start: super::tone_cr::Ramp::of(start) }
+        UnderTone { to_ref, from_ref: super::inv3(&to_ref), curve, inverse, looks, start: super::tone_cr::Ramp::of(start) }
     }
 
     /// Linear working RGB → the stage's light before its transfer and curve.
@@ -636,17 +665,14 @@ impl UnderTone {
     /// mask's Temp and Tint act (`render::mask_cr`).
     pub(crate) fn undo_curve(&self, lin: [f32; 3]) -> [f32; 3] {
         let r = super::mat_vec3(&self.to_ref, &lin).map(|c| c.clamp(0.0, 1.0));
-        let r = adobe_tone(r, &self.inverse);
-        match &self.look {
-            Some(t) => look_inverse(t, r),
-            None => r,
-        }
+        // The look tables come off in the reverse of the order they went on.
+        self.looks.iter().rev().fold(adobe_tone(r, &self.inverse), |r, t| look_inverse(t, r))
     }
 
     /// [`UnderTone::undo_curve`]'s inverse.
     pub(crate) fn redo_curve(&self, ramped: [f32; 3]) -> [f32; 3] {
         let mut r = ramped.map(|c| c.clamp(0.0, 1.0));
-        if let Some(t) = &self.look {
+        for t in &self.looks {
             let mut hsv = to_hsv(r);
             t.apply(&mut hsv);
             r = from_hsv(hsv);

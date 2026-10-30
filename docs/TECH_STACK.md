@@ -551,9 +551,10 @@ composed profile/manual vignette and dehaze;
 dehaze inverts the airlight model `I = J·t + A(1−t)`. The tone LUT then combines
 exposure, contrast, whites, blacks, Highlights, shadows, base curve, the
 parametric curve and the master point curve before the B&W grey mix (when the
-photo is black and white), RGB point curves, eight-band HSL and the point
+photo is black and white), eight-band HSL and the point
 colours, colour grading,
-clarity, Texture, saturation/vibrance, noise reduction, sharpening, local
+clarity, Texture, saturation/vibrance, the RGB point curves (v1.17.0: Camera
+Raw's place, measured), noise reduction, sharpening, local
 adjustments, the colour field, the SDR rendition when the photo is in HDR edit
 mode, and last the generative fill's pixel layers. The frame is then resampled — lens geometry (unless the camera stage already
 resampled it: under a camera profile with the Distortion slider at 0 and Remove Chromatic Aberration off, the profile's distortion
@@ -576,9 +577,14 @@ mean); then Exposure, a gain through the exposure ramp, per pixel by
 Adobe's channel rule (the brightest and darkest channels through the curve,
 the middle one in proportion); then Contrast, Whites and Blacks as measured
 response tables over the exposed `u`, with each pixel's hue from the
-channel rule and its lightness from the luma ratio; then the Look's baked
-curve by the luma ratio, as the canvas start was calibrated; then the
-parametric and point curves by the channel rule. Every recipe that names no
+channel rule and its lightness from the luma ratio; then the parametric and
+point curves, then the Look's baked curve, both by Camera Raw's measured
+curve rule (`render::tone::camera_raw_rgb_tone`: on linear ProPhoto
+channels, the brightest and darkest through the curve on their sRGB-encoded
+values, the middle one between them — at its LINEAR ratio for the Look's
+curve, the DNG SDK's `RGBTone`, and at its ENCODED ratio for the
+photographer's curve, both measured; Camera Raw puts the photographer's
+curve before the Look's, measured, v1.17.0). Every recipe that names no
 profile renders through the knot model below, byte for byte, and the reverse
 fit solves each law against itself (`fit::tone_cr` carries the measured map
 into `u` through the start and inverts the tables).
@@ -609,6 +615,24 @@ supposed to remove.
   at the Greville abscissae, a region at ±100 moving its centre by ½ × its
   width; composed after the slider model and before the point curve
   (**designed, provisional** until the kit's `PARAM-*` exports).
+- Point curves (v1.17.0, `render::tone::{curve_lut, apply_rgb_curves,
+  apply_camera_raw_curve}`, **measured against Adobe Camera Raw**): between
+  the knots the DNG SDK's `dng_spline_solver` (straight lines left 4.73 ΔE on
+  a one-knot curve, the spline 0.08); each per-channel curve on one channel of
+  linear ProPhoto RGB (D50, Bradford, `render::profile::curve_space`) under
+  the sRGB transfer, after Saturation/Vibrance — nine single-channel renders
+  of one frame's flat packet predicted to 0.01–0.53, where the working sRGB
+  channels left 2.3–10.7 and ProPhoto under gamma 1.8 or 2.2 0.27–6.5; on a
+  camera-profile start the composite curve by the channel rule on the same
+  channels, before the Look's curve (0.13–0.31; after it 0.51–1.48), and the
+  Look's own curve after it by the same rule (item 35, a bench whose camera
+  space is linear ProPhoto: 149 colours through Adobe Color's Look curve
+  predicted to ΔE median 0.010, max 0.109; the middle channel by its encoded
+  ratio max 2.21, the rule on sRGB channels max 2.56, the luma ratio the
+  engine used before: bench colours ΔE median 2.59, max 11.20, now 0.72 /
+  4.97, the same as with no Look at all). The
+  reverse fit matches channel-curve distributions in those channels
+  (`render::curve_channels`). ARCHITECTURE, "The point curves".
 - Tone sliders on a camera-profile start (v1.17.0, `render/tone_cr.rs`,
   **measured against Adobe Camera Raw 18.4**): one frame's exact flat packet
   (Adobe Color, lens profile on) rendered by script one slider at a time —
@@ -848,13 +872,18 @@ supposed to remove.
   `t = max(1 − 0.75·s·min(R,G,B)/A, 0.30)` for positive dehaze
   (**designed atmospheric approximation**, not an Adobe fit). On a recipe
   that names a camera profile (v1.17.0) Dehaze follows Camera Raw's law
-  instead (**measured**, `render/tone_cr.rs`, Dehaze +40/+80/−30 on the same
-  flat packet as the tone sliders): a response table over `u` in the slider
-  pass, as the five's, and a chroma gain `exp(d·G(u))` about the luma, `G`
-  per unit slider ≈ +0.3 at L 10–30, ≈ 0 at L 40–70, up to +1.8 at L 90–100
-  — Camera Raw deepens the sky's blue as it removes haze and pales it as it
-  adds haze. Like the engine law's stage it is no part of the tone the
-  reverse fit solves.
+  instead (**measured**, `render/dehaze_cr.rs`, flat renders of six frames at
+  +20 … +100 and −30 … −100): a dark-channel scattering inversion
+  `J = (I − A)/t + A` per channel, in the light under Adobe's curve,
+  sRGB-encoded; `A` the mean of the top 0.1 % of the dark channel (min filter
+  1.46 % of the short edge), `t = 1 − ω·S`, `S` the dark channel of `I/A`
+  under a box of 12.5 % of the short edge, both read on the frame boxed to a
+  1536 long edge; `ω = 0.896·s` above 0, `s·(1.698 + 2.802·|s|)` below. It
+  runs after Highlights/Shadows and Exposure and before Contrast (measured
+  with one other control at a time). Per frame the positive `ω/s` spreads
+  0.60 … 1.13 about the law (the star frame lowest), which the law does not
+  carry. Like the engine law's stage it is no part of the tone the reverse
+  fit solves.
 - Clarity radius: `max(round(0.02·min(width,height)), 8)`
   (**designed resolution scaling**).
 - Positive Texture radius: `max(round(0.005·min(width,height)), 2)`
@@ -1009,14 +1038,14 @@ supposed to remove.
   in the acceptance set Highlights −100 3.14 L / 3.47 b*, Exposure −2 3.19 L
   and −3 2.69 L (L 90–100). The flat sidecar against Camera Raw: ΔE76 3.04 →
   2.56, L 0–30 +1.2…+1.6 → +0.1…+0.2.
-- Dehaze on a camera-profile start (v1.17.0), worst moving band |ΔL| /
-  |Δa|,|Δb| before (the airlight stage) → after: +40 4.31/1.68 → 0.97/1.32,
-  −30 48.16/1.71 → 1.58/0.52 (the airlight stage's negative branch veiled the
-  shadows toward the airlight, +46 L at L 0–10, where Camera Raw lifts them
-  +3.3 L); +80 8.68/5.01 → 1.85/2.37 (L 80–90 b*, outside the line). Camera
-  Raw's Dehaze is local (a pixel's own L explains R² 0.42 of its move) and
-  estimates each frame's haze; the law is its band-mean response on one
-  frame. Carry (sidecars with Dehaze: p36 +10, p40 +16, p41 +7), the tone law
+- Dehaze on a camera-profile start (v1.17.0), the engine against Camera Raw
+  as a double difference against the flat pair, mean ΔE76 whole frame, the
+  slider-pass table → the spatial pass: p39 +40 1.83 → 1.39, +80 3.90 → 2.51,
+  −30 2.29 → 1.76, −60 4.63 → 3.12; the star frame p42 +40 2.93 → 0.73,
+  +80 5.07 → 1.27, −30 6.77 → 0.82, −60 13.86 → 1.21 (Camera Raw's own move
+  there 0.78 / 1.23 / 1.13 / 2.18: at +80 the law is too strong on that frame
+  by its `ω/s`, above). The earlier table was Camera Raw's band-mean response
+  on one frame. Carry (sidecars with Dehaze: p36 +10, p40 +16, p41 +7), the tone law
   → with this: p36 8.52 → 8.70, p40 8.18 → 7.59, p41 10.96 → 10.52; p36 with
   its Highlights at 0, 5.91 → 6.11.
 - Temperature and Tint on a camera-profile start (v1.17.0, `render/wb.rs`,

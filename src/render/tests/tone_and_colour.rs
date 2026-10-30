@@ -1036,3 +1036,200 @@ fn aggressive_highlights_keep_saturated_water_from_greying() {
     let spread = rr.max(gg).max(bb) - rr.min(gg).min(bb);
     assert!(spread > 0.12, "channels converged toward grey: spread {spread}");
 }
+
+/// The v1.17.0 point-curve law, a test of each of its three measured parts.
+fn curve_pts(pts: &[(u8, u8)]) -> Vec<crate::recipe::CurvePoint> {
+    pts.iter().map(|&(input, output)| crate::recipe::CurvePoint { input, output }).collect()
+}
+
+/// A colour in each corner of the working gamut a curve can meet, plus greys.
+fn curve_probe_pixels() -> Vec<[f32; 3]> {
+    vec![
+        [0.85, 0.45, 0.20],
+        [0.25, 0.45, 0.80],
+        [0.30, 0.70, 0.35],
+        [0.70, 0.30, 0.60],
+        [0.50, 0.50, 0.50],
+        [0.15, 0.12, 0.10],
+        [0.95, 0.90, 0.80],
+    ]
+}
+
+/// Between the knots a point curve is Camera Raw's spline
+/// (`dng_spline_solver`), not straight lines. The values are the spline's
+/// own, from the reference implementation that predicted Camera Raw's renders
+/// of these two curves to ΔE 0.08 and 0.53 (straight lines: 4.73 and 3.01).
+///
+/// MUTATION: go back to straight lines between the knots in `curve_lut` —
+/// 128,180 then reads 90/255 = 0.353 at 64, not 0.391.
+#[test]
+fn a_point_curve_is_camera_raws_spline_between_its_knots() {
+    let one = curve_lut(&curve_pts(&[(0, 0), (128, 180), (255, 255)]));
+    assert!((one[64] - 0.39148).abs() < 1e-3, "{}", one[64]);
+    assert!((one[192] - 0.89193).abs() < 1e-3, "{}", one[192]);
+    let five = curve_lut(&curve_pts(&[(0, 0), (64, 40), (128, 170), (192, 200), (255, 255)]));
+    for (i, want) in [(32, 0.03178), (96, 0.41936), (160, 0.75648), (224, 0.87146)] {
+        assert!((five[i] - want).abs() < 1e-3, "at {i}: {} vs {want}", five[i]);
+    }
+    // Two knots: the straight line through them, exactly as before.
+    let line = curve_lut(&curve_pts(&[(0, 0), (255, 200)]));
+    for (i, v) in line.iter().enumerate() {
+        assert!((v - i as f32 / 255.0 * 200.0 / 255.0).abs() < 1e-5, "at {i}");
+    }
+    // An overshooting spline stays inside [0, 1].
+    let steep = curve_lut(&curve_pts(&[(0, 0), (64, 250), (128, 255), (255, 255)]));
+    assert!(steep.iter().all(|v| (0.0..=1.0).contains(v)));
+}
+
+/// A per-channel curve acts on ONE channel of linear ProPhoto RGB (D50,
+/// Bradford) under the sRGB transfer: in that encoding the other two
+/// channels do not move and the curved one is the curve of itself. Measured
+/// on Camera Raw: those other channels moved 0.0000 there, while in the
+/// working sRGB channels they moved 0.006–0.048.
+///
+/// MUTATION: apply the curve to the working channels (the pre-v1.17.0 law),
+/// or build `curve_space` at the working white instead of the Bradford to D50.
+#[test]
+fn a_channel_curve_moves_only_its_own_prophoto_channel() {
+    // The Bradford to ProPhoto's D50, not ProPhoto's primaries at D65.
+    let (to, _) = profile::curve_space(ExportColorSpace::Srgb);
+    for (got, want) in to[0].iter().zip([0.52928, 0.33015, 0.14057]) {
+        assert!((got - want).abs() < 1e-4, "{:?}", to[0]);
+    }
+    let lut = curve_lut(&curve_pts(&[(0, 0), (128, 180), (255, 255)]));
+    for (ch, name) in [(0usize, "red"), (2, "blue")] {
+        let mut r = EditRecipe::default();
+        let pts = curve_pts(&[(0, 0), (128, 180), (255, 255)]);
+        if ch == 0 {
+            r.red_curve = pts;
+        } else {
+            r.blue_curve = pts;
+        }
+        let input = curve_probe_pixels();
+        let mut out = input.clone();
+        apply_rgb_curves(&mut out, &r, ExportColorSpace::Srgb);
+        let (mut working_moved, mut checked) = (0.0f32, 0usize);
+        for (a, b) in input.iter().zip(&out) {
+            // A result the working gamut clips (a lifted red past sRGB's
+            // red) moves every channel there; Camera Raw's clips at its
+            // output instead. Those pixels say nothing about the space.
+            if b.iter().any(|v| *v >= 0.999 || *v <= 0.001) {
+                continue;
+            }
+            let (pa, pb) = (curve_channels(a), curve_channels(b));
+            for k in (0..3).filter(|&k| k != ch) {
+                assert!((pa[k] - pb[k]).abs() < 2e-3, "{name}: ProPhoto channel {k} moved {a:?} → {b:?}");
+                working_moved = working_moved.max((a[k] - b[k]).abs());
+            }
+            let want = sample_lut(&lut, pa[ch]);
+            assert!((pb[ch] - want).abs() < 3e-3, "{name}: {} vs {want} at {a:?}", pb[ch]);
+            checked += 1;
+        }
+        assert!(checked >= 4, "{name}: only {checked} of the probes stayed in gamut");
+        // …which is not the same thing as leaving the working channels alone.
+        assert!(working_moved > 0.01, "{name}: the working channels never moved ({working_moved})");
+    }
+}
+
+/// The per-channel curves run after the Color Mixer and Saturation /
+/// Vibrance, Camera Raw's place for them (a red curve composed onto Camera
+/// Raw's own HSL, Saturation +50 and Vibrance +50 renders predicts them to
+/// 0.08–0.09 ΔE), so the develop with the curves is the develop without them,
+/// then the curves.
+///
+/// MUTATION: call `apply_rgb_curves` back at step 1b, before the mixer.
+#[test]
+fn the_channel_curves_run_after_the_mixer_and_saturation() {
+    let (w, h) = (7usize, 1usize);
+    let mut base = EditRecipe { saturation: 50.0, vibrance: 30.0, ..EditRecipe::default() };
+    base.hsl.saturation[1] = 60.0;
+    base.hsl.hue[5] = 40.0;
+    let mut curved = base.clone();
+    curved.red_curve = curve_pts(&[(0, 0), (128, 180), (255, 255)]);
+    curved.blue_curve = curve_pts(&[(0, 0), (128, 80), (255, 255)]);
+    let mut without = curve_probe_pixels();
+    apply_develop_anon(&mut without, w, h, &base);
+    let mut want = without.clone();
+    apply_rgb_curves(&mut want, &curved, ExportColorSpace::Srgb);
+    let mut got = curve_probe_pixels();
+    apply_develop_anon(&mut got, w, h, &curved);
+    for (g, e) in got.iter().zip(&want) {
+        for k in 0..3 {
+            assert!((g[k] - e[k]).abs() < 1e-5, "{got:?} vs {want:?}");
+        }
+    }
+}
+
+/// Camera Raw's rule for a tone curve on a colour (item 35, measured on a
+/// linear-ProPhoto bench): the brightest and darkest ProPhoto channels go
+/// through the curve on their sRGB-encoded values, the middle one keeps its
+/// LINEAR ratio between them. Through Adobe Color's Look curve that predicts
+/// Camera Raw to ΔE max 0.109; the middle by its encoded ratio leaves 2.21.
+///
+/// MUTATION: interpolate the middle channel by its encoded ratio in
+/// `tone::camera_raw_rgb_tone`'s `MiddleRatio::Linear` arm.
+#[test]
+fn a_tone_curve_keeps_the_middle_channel_at_its_linear_ratio() {
+    let look = look_curve_lut(&curve_pts(&[(0, 0), (22, 16), (40, 35), (127, 127), (224, 230), (240, 246), (255, 255)]), 1.0);
+    let (dec, enc) = transfer_luts();
+    let through = |v: f32| sample_lut(dec, sample_lut(&look, sample_lut(enc, v)));
+    for pro in [[0.62f32, 0.18, 0.04], [0.05, 0.30, 0.71], [0.12, 0.02, 0.09], [0.4, 0.4, 0.4]] {
+        let got = camera_raw_rgb_tone(pro, &look, MiddleRatio::Linear);
+        let (hi, lo) = (pro.iter().cloned().fold(f32::MIN, f32::max), pro.iter().cloned().fold(f32::MAX, f32::min));
+        for k in 0..3 {
+            let want = if pro[k] == hi {
+                through(hi)
+            } else if pro[k] == lo {
+                through(lo)
+            } else {
+                through(lo) + (through(hi) - through(lo)) * (pro[k] - lo) / (hi - lo)
+            };
+            assert!((got[k] - want).abs() < 1e-5, "{pro:?}: {got:?}");
+        }
+    }
+    // …and the encoded-ratio reading is a different answer on a real colour.
+    let pro = [0.62f32, 0.18, 0.04];
+    let e = pro.map(|v| sample_lut(enc, v));
+    let t = (e[1] - e[2]) / (e[0] - e[2]);
+    let (a, b) = (sample_lut(&look, e[0]), sample_lut(&look, e[2]));
+    let encoded_mid = sample_lut(dec, b + (a - b) * t);
+    assert!((camera_raw_rgb_tone(pro, &look, MiddleRatio::Linear)[1] - encoded_mid).abs() > 1e-3);
+    // The composite point curve keeps the middle by its ENCODED ratio
+    // (measured on p39's composite cases, `tone::MiddleRatio`).
+    assert!((camera_raw_rgb_tone(pro, &look, MiddleRatio::Encoded)[1] - encoded_mid).abs() < 1e-5);
+}
+
+/// On a camera-profile start the photographer's composite curve runs BEFORE
+/// the creative Look's baked curve, in `profile::curve_space` by Adobe's
+/// channel rule. Measured with Adobe Color's Look: the curve after the Look's
+/// curve leaves 0.51–1.48 ΔE against Camera Raw, before it 0.13–0.31.
+///
+/// MUTATION: put the `tone.curves` pass back after `tone.look` in `develop`.
+#[test]
+fn the_composite_curve_runs_before_the_looks_curve() {
+    let (w, h) = (7usize, 1usize);
+    let mut r = EditRecipe { camera_profile: "Adobe Standard".into(), ..EditRecipe::default() };
+    r.look = Some(crate::recipe::CreativeLook {
+        name: "Adobe Color".into(),
+        amount: 1.0,
+        base_profile: "Adobe Standard".into(),
+        tone_curve: curve_pts(&[(0, 0), (22, 16), (40, 35), (127, 127), (224, 230), (240, 246), (255, 255)]),
+        ..Default::default()
+    });
+    r.tone_curve = curve_pts(&[(0, 0), (128, 180), (255, 255)]);
+    let tone = camera_raw_tone_passes(&r);
+    let (curve, look) = (tone.curves.expect("a curve pass"), tone.look.expect("a look pass"));
+    let mut want = curve_probe_pixels();
+    apply_camera_raw_curve(&mut want, &curve, ExportColorSpace::Srgb, MiddleRatio::Encoded);
+    apply_camera_raw_curve(&mut want, &look, ExportColorSpace::Srgb, MiddleRatio::Linear);
+    let mut swapped = curve_probe_pixels();
+    apply_camera_raw_curve(&mut swapped, &look, ExportColorSpace::Srgb, MiddleRatio::Linear);
+    apply_camera_raw_curve(&mut swapped, &curve, ExportColorSpace::Srgb, MiddleRatio::Encoded);
+    let mut got = curve_probe_pixels();
+    apply_develop_anon(&mut got, w, h, &r);
+    let worst = |a: &[[f32; 3]], b: &[[f32; 3]]| {
+        a.iter().zip(b).flat_map(|(x, y)| (0..3).map(move |k| (x[k] - y[k]).abs())).fold(0.0f32, f32::max)
+    };
+    assert!(worst(&got, &want) < 1e-5, "{got:?} vs {want:?}");
+    assert!(worst(&swapped, &want) > 5e-3, "the two orders must differ for this to pin one");
+}

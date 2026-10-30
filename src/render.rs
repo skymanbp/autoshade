@@ -53,6 +53,7 @@ mod camera;
 mod canvas;
 mod clip_lift;
 mod colour;
+mod dehaze_cr;
 mod develop;
 mod export;
 mod geometry;
@@ -222,21 +223,23 @@ use source::{apply_crop, render_frame, rgb16_source};
 use source::{cfa_needs_geometry_demosaic, cfa_taps, demosaic_over_cfa_geometry, wrap_table};
 pub use tone::{curve_lut};
 pub(crate) use tone::{
-    TONE_KNOTS_X, build_tone_lut, camera_raw_tone_passes, sample_lut, sample_tone_model, tone_exposure_curve,
+    TONE_KNOTS_X, build_tone_lut, camera_raw_tone_passes, curve_channels, sample_lut, sample_tone_model, tone_exposure_curve,
     tone_knot_weights, tone_model_knots, tone_slider_basis,
 };
-use tone::{apply_rgb_curves, hermite_eval};
+use tone::{CurveSpace, MiddleRatio, apply_camera_raw_curve, apply_rgb_curves, hermite_eval};
 pub(crate) use mask_cr::LocalGreyLaw;
 pub(crate) use tone_cr::{
     HS_SH_FLOOR, HsKey, SliderLaw, camera_raw_exposure, camera_raw_response_keyed, shadows_anchor,
     camera_raw_row, camera_raw_start, Exposure, hs_row, HsSite,
 };
 use tone_cr::{
-    apply_camera_raw_hs, camera_raw_after_lut, camera_raw_channels, camera_raw_slider_lut,
+    apply_camera_raw_hs, camera_raw_after_lut, camera_raw_slider_lut,
     camera_raw_slider_pixel, camera_raw_tone_lut, hs_field, Local, SliderPass,
 };
 #[cfg(test)]
 pub(crate) use tone::{limit_tone_sliders, parametric_lut};
+#[cfg(test)]
+use tone::{camera_raw_rgb_tone, look_curve_lut};
 pub use wb::{local_temp_to_kelvin, solve_wb_for, solve_wb_from_neutral};
 pub(crate) use wb::{WbLaw, linear_to_srgb, srgb_to_linear, wb_gains};
 use wb::{

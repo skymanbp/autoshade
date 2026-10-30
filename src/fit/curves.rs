@@ -104,8 +104,12 @@ pub(super) fn residual_channel_curve_weighted(
     cur_weights: &[f32],
     tgt_weights: &[f32],
 ) -> Vec<CurvePoint> {
-    let c_cdf = weighted_cdf(cur, cur_weights, |p| p[ch]);
-    let t_cdf = weighted_cdf(tgt, tgt_weights, |p| p[ch]);
+    // v1.17.0: in the channels the curve is APPLIED to — ProPhoto's, under
+    // the sRGB transfer (`render::curve_channels`, Camera Raw's law, measured)
+    // — not the render's sRGB ones: a CDF matched in one space and applied in
+    // another is a different curve.
+    let c_cdf = weighted_cdf(cur, cur_weights, |p| render::curve_channels(p)[ch]);
+    let t_cdf = weighted_cdf(tgt, tgt_weights, |p| render::curve_channels(p)[ch]);
     if c_cdf.iter().all(|&v| v <= 0.0) || t_cdf.iter().all(|&v| v <= 0.0) {
         return Vec::new();
     }

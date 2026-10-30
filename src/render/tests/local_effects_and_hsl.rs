@@ -127,6 +127,44 @@ fn engine_active_counts_local_point_curves() {
     }
 }
 
+/// Item 35: on a camera-profile start a mask's `MainCurve` follows Camera
+/// Raw's curve rule on ProPhoto channels, the middle channel at its encoded
+/// ratio — measured on a full-coverage gradient mask, `0,0 / 128,180 /
+/// 255,255` after the Look: ΔE 0.069 that way, 0.718 by the luma ratio.
+///
+/// MUTATION: put the camera-profile arm in `masks::apply_masks` back on the
+/// luma ratio.
+#[test]
+fn a_masks_main_curve_follows_camera_raws_curve_rule() {
+    use crate::recipe::CurvePoint;
+    let (w, h) = (8usize, 2usize);
+    let base: Vec<[f32; 3]> = (0..w * h).map(|_| [0.62, 0.41, 0.22]).collect();
+    let curve = vec![
+        CurvePoint { input: 0, output: 0 },
+        CurvePoint { input: 128, output: 180 },
+        CurvePoint { input: 255, output: 255 },
+    ];
+    let m = LocalAdjustment {
+        mask: MaskGeometry::Linear { zero_x: 2.0, zero_y: 0.0, full_x: 1.5, full_y: 0.0 },
+        amount: 1.0,
+        main_curve: curve.clone(),
+        ..Default::default()
+    };
+    let r = EditRecipe { camera_profile: "Adobe Standard".into(), masks: vec![m], ..Default::default() };
+    let mut out = base.clone();
+    apply_masks(&mut out, w, h, &r, &MaskRasterSnapshot::default(), MaskFrame::AsRendered, FilmScale::NATIVE, ExportColorSpace::Srgb);
+    let want = CurveSpace::new(ExportColorSpace::Srgb).tone(base[0], &curve_lut(&curve), MiddleRatio::Encoded);
+    for (x, px) in out.iter().enumerate() {
+        for k in 0..3 {
+            assert!((px[k] - want[k]).abs() < 1e-5, "x {x}: {px:?} vs {want:?}");
+        }
+    }
+    let mut luma = base[0];
+    let l = luma601(&luma);
+    scale_chroma(&mut luma, l, sample_lut(&curve_lut(&curve), l));
+    assert!((0..3).any(|k| (luma[k] - want[k]).abs() > 5e-3), "the luma ratio must be a different answer: {luma:?} vs {want:?}");
+}
+
 /// R25 P6, the render half: a mask whose ONLY move is a point curve must
 /// move the pixels it covers and leave every other pixel BIT-IDENTICAL.
 ///
@@ -192,15 +230,17 @@ fn a_local_point_curve_darkens_only_inside_the_mask() {
         ..Default::default()
     });
     assert!(out[0][0] > base[0][0] + 0.05, "red must lift: {:?} → {:?}", base[0], out[0]);
-    // Green and blue keep their value to within LUT-sampling rounding.
-    // Not `==`: the fused pass runs the identity master curve through
-    // `sample_lut` + `scale_chroma` for every covered pixel, which is a
-    // ~1e-7 round trip on ANY active mask (it predates this batch). The
-    // claim being made is "the red curve touched one channel", and 1e-5 is
-    // four orders below the 0.05 swing above.
+    // Green and blue keep their value — ProPhoto's green and blue, the
+    // channels a curve acts on since v1.17.0 (`tone::apply_rgb_curves`,
+    // measured: Camera Raw's mask curves too) — to within the transfer
+    // LUTs' round trip (the working sRGB green and blue move with a
+    // ProPhoto red, as they do in Camera Raw). The claim being made is
+    // "the red curve touched one channel", and 2e-3 is 25× below the 0.05
+    // swing above.
+    let (pb, po) = (curve_channels(&base[0]), curve_channels(&out[0]));
     for (ch, name) in [(1usize, "green"), (2, "blue")] {
         assert!(
-            (out[0][ch] - base[0][ch]).abs() < 1e-5,
+            (po[ch] - pb[ch]).abs() < 2e-3,
             "a red curve must leave {name} untouched: {:?} → {:?}",
             base[0],
             out[0]

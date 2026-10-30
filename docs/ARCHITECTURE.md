@@ -2201,9 +2201,11 @@ through) → **de-fringing** (`render/lens.rs`: the two hue windows, on
 high-contrast edges only, before anything moves a pixel radially) →
 lens-profile vignette → manual vignette → **dehaze in linear light**
 (before any tonal work, so the airlight estimate cannot move when Exposure is
-dragged; on a recipe that names a camera profile, v1.17.0, Dehaze rides in
-the tone stage's slider pass instead, Camera Raw's measured law, and so does
-the tone half of Clarity, whose local stage stays where it is) →
+dragged; on a recipe that names a camera profile, v1.17.0, Dehaze is a
+spatial pass inside the tone stage instead, after Highlights/Shadows and
+Exposure and before Contrast, `render/dehaze_cr.rs`, Camera Raw's measured
+law, and the tone half of Clarity rides the slider pass, its local stage
+staying where it is) →
 tone LUT (exposure/contrast/whites/blacks/highlights/shadows, the parametric
 curve, the tone curve and the per-photo camera base curve — on a recipe that
 names no camera profile, v1.17.0 — composed into one table; on a recipe that
@@ -2213,14 +2215,17 @@ bases of the frame's luminance keyed to its mean, Shadows a gain on linear
 luminance set by the frame's spread on a 768-cell map, against an anchor
 that a power mean of the map puts above its mean — then exposure by
 Adobe's channel rule,
-Contrast, Whites and Blacks, the Look's baked curve, the parametric and
-point curves) → **the B&W treatment's grey mix** when the photo is black and white
+Contrast, Whites and Blacks, the parametric and point curves, then the
+Look's baked curve — the last three by Camera Raw's measured curve rule on
+ProPhoto channels, `render::tone::camera_raw_rgb_tone`, except a negative
+Blacks, which runs as its own pass through each ProPhoto channel on its own,
+measured) → **the B&W treatment's grey mix** when the photo is black and white
 (before the channel curves, so a red-channel curve meets the grey the
-photographer mixed) → per-channel RGB
-curves → 8-band HSL and the **point colours**, both skipped in black and white,
+photographer mixed) → 8-band HSL and the **point colours**, both skipped in black and white,
 where Lightroom's panel offers the grey mix in their place → colour grading →
 clarity → **texture** →
-saturation/vibrance (also skipped in black and white) → the Detail panel
+saturation/vibrance (also skipped in black and white) → per-channel RGB
+curves (Camera Raw's place since v1.17.0, below) → the Detail panel
 (colour noise reduction → luminance noise reduction → sharpening) → local
 adjustments (linear/radial/bitmap masks). On a recipe that names a camera
 profile (v1.17.0, `render/mask_cr.rs`) a mask's Highlights and Shadows run
@@ -2252,6 +2257,138 @@ Such a recipe also opens its white balance AT As Shot
 (`EditRecipe::open_white_balance_at_as_shot`, stamped wherever a photo's
 as-shot white is), which the white balance stage renders as no move and the
 XMP writer writes as Lightroom's `WhiteBalance="As Shot"`.
+
+**The point curves follow Camera Raw's law since v1.17.0, measured**
+(`render::tone::{curve_lut, apply_rgb_curves, apply_camera_raw_curve}`,
+`render::profile::curve_space`). Until v1.17.0 a per-channel curve
+(`crs:ToneCurvePV2012Red` / `Green` / `Blue`) moved the working space's own
+sRGB channel, with straight lines between the knots, right after the master
+curve; on p38's fitted recipe that left Camera Raw's warm band 6.95 a* redder
+than the engine (the round trip's worst usable pair). Camera Raw renders by
+script (one frame's exact flat packet, 16-bit at 3072 px, one curve per render,
+predicted from the render without the curve, ΔE mean over 0.15–0.69 M pixels
+inside the sRGB gamut of both) decide three things:
+
+* **The channels.** A curve acts on one channel of LINEAR ProPhoto RGB (D50,
+  the SDK's Bradford from the working white) under the sRGB transfer. In that
+  encoding a red, green or blue curve leaves the other two channels where they
+  were (moved 0.0000; in the working sRGB channels they move 0.005–0.048)
+  and the curved channel is a pure function of itself; predicted there,
+  nine single-channel renders match to ΔE 0.01–0.12 (one- and two-knot
+  curves) and 0.53 (a five-knot one). With the same spline the alternatives
+  leave: the working sRGB channels 2.3–10.7, ProPhoto linear 0.76–17.3,
+  ProPhoto under gamma 1.8 0.41–6.5 and under gamma 2.2 0.27–5.0, ProPhoto at
+  the working white instead of D50 0.26–0.99 — worse on every one of the
+  nine. A mask's own `RedCurve` at full
+  coverage follows the same law (0.09; the working channels 9.5).
+* **The interpolation.** Between the knots the curve is the DNG SDK's
+  `dng_spline_solver` (`curve_lut`): straight lines leave 4.73 on
+  `0,0 / 128,180 / 255,255` and 3.01 on a five-knot curve, the spline 0.08 and
+  0.53. It is not monotone; values are clamped to [0, 1]. Not explained: on
+  the five-knot curve Camera Raw passes up to 0.010 of the encoded range
+  (2.6/255) BELOW the spline around its steepest knot, and on the three-knot
+  one 0.002 — not a coarse table of the spline in linear, encoded, square-
+  or cube-root light (tried, 9 to 4097 samples: none lowers the residual).
+* **The place.** The per-channel curves run after the Color Mixer and
+  Saturation / Vibrance: a red curve composed onto Camera Raw's own HSL,
+  Contrast +50, Exposure +1, Saturation +50 and Vibrance +50 renders predicts
+  each to 0.08–0.12. On a camera-profile start the photographer's composite
+  `ToneCurvePV2012` (with the parametric curve) runs BEFORE the creative Look's
+  baked curve, by Adobe's channel rule on the same ProPhoto channels: with
+  Adobe Color's Look, after it (the place before v1.17.0) leaves 0.51–1.48,
+  before it 0.13–0.31, from the flat start and from Exposure +1, Contrast +50,
+  Saturation +50 and Vibrance +50 alike; with no Look the composite curve
+  predicts to 0.02–0.21. The rule itself (item 35, measured on a bench whose
+  camera space is linear ProPhoto with no tables, `render::tone::
+  camera_raw_rgb_tone`, the one place it lives): the brightest and darkest
+  ProPhoto channels go through the curve on their sRGB-encoded values and,
+  for the Look's curve, the middle one keeps its LINEAR ratio between them —
+  Adobe Color's Look curve on 149 colours predicts Camera Raw to ΔE median
+  0.010, max 0.109, where the middle by its encoded ratio leaves max 2.21 and
+  the same rule on sRGB channels median 0.117, max 2.56. The Look's curve
+  runs after the profile's default curve (greys 0.011 L; before it 0.985) by
+  that rule, where it went by the luma ratio until then; the default curve
+  itself follows it already (`profile.rs`, ProPhoto, middle by linear ratio:
+  0.028 median, 0.066 max). The photographer's composite curve keeps the
+  middle at its ENCODED ratio instead (`tone::MiddleRatio`): predicted from
+  Camera Raw's own p39 renders with the Look, `0,0 / 64,40 / 128,170 /
+  192,200 / 255,255` reads ΔE 0.308 (warm a* +0.12) that way and 0.325
+  (−0.43) by the linear ratio, and the engine moved its warm b* gap on that
+  case from +0.41 to +1.42 when it was switched to the linear ratio. On p38's real fitted packet (warm, saturated) the
+  composite curve by the channel rule in ProPhoto before the Look reads 0.26,
+  per channel 0.51, in the working channels 0.65–0.85; the three fitted
+  channel curves on the measured law 0.10 (warm a* +0.01), on the v1.16.0 law
+  6.64 (warm a* −6.95).
+
+The reverse fit matches each channel curve's distributions in the same
+channels (`render::curve_channels`, `fit::curves`), so the curve it fits is a
+curve of the channel it is applied to. Every recipe renders its channel
+curves this way, a JPEG start included (Camera Raw has one pipeline; only RAW
+starts were measured); the composite curve's place and space change only on a
+camera-profile start, where the Look exists. Known differences that remain:
+the colour grade runs before the channel curves here and after them in Camera
+Raw (composing a red curve onto Camera Raw's grade render is 8.7 ΔE off); a
+mask's `MainCurve` follows the same curve rule since item 35, the middle
+channel at its encoded ratio (a full-coverage gradient mask, `0,0 / 128,180 /
+255,255` after the Look: ΔE 0.069; the luma ratio it went by before, 0.718);
+where a mask's
+channel curves sit against its local Saturation is not measured; and the
+parametric curve's SHAPE is still the provisional B-spline — Camera Raw's
+`ParametricDarks` +50 lifts the neutral band 4.6 L where the engine lifts it
+about 1.1 L. On p39's flat packet the encodings could not be told apart from
+the neutral band's bump alone (all predict it to 0.07–0.10); renders at
+±25/±50/±75/±100 per slider and at moved splits then showed what the shape is
+NOT, and the mechanism is still unknown:
+
+* its domain has no sRGB toe: Darks +100 is a pure linear-light gain of
+  3.000× from linear 0.0002 to 0.03 (Shadows +100 2.998×), where a point curve
+  shows the toe (0.78× at linear 0.003, then falling) — so the parametric and
+  the point curve do not share an encoding;
+* Shadows acts exactly on [0, MidtoneSplit] and Highlights on
+  [MidtoneSplit, 1], Darks and Lights over the whole range; ShadowSplit moves
+  only Shadows, HighlightSplit only Highlights, MidtoneSplit moves Darks;
+* the amount response is neither linear nor sign-symmetric: Darks at sRGB
+  0.30 moves 10.65 / 22.38 / 35.40 / 50.04 (of 255) at +25 / +50 / +75 / +100
+  and −16.63 at −25; the directions that push toward a clip (Lights +,
+  Highlights +, Darks −, Shadows −) kink at |amount| 50, where the end slope
+  reaches about 0; and at ±10 the clip-ward side is the stronger one by 5:3;
+* pure-power, log, log(x + ε) and logit conjugations, a free 16-knot
+  monotone conjugation (6 % rms at best), f50∘f50 = f100, +a as the inverse
+  of −a, a power remap or piecewise-linear warp of the splits, and one natural
+  spline through the split points were all tried and all fail.
+
+On the round trip (`scripts/roundtrip_gate.py`, strength 0.85, the engine's
+render against Camera Raw's render of the written sidecar; ΔE whole frame
+after alignment, warm band dL / da / db) the law moves the six usable pairs as
+follows, the c435fa6 tree against this one:
+
+| pair | whole ΔE | warm dL / da / db | look error |
+|---|---|---|---|
+| p36 | 6.31 → 5.71 | −2.52 / +3.69 / −4.85 → −3.18 / +0.74 / −0.10 | 0.008 → 0.007 |
+| p37 | 2.86 → 3.97 | +2.29 / +0.39 / +1.01 → +6.32 / +0.18 / +2.19 | 0.133 → 0.132 |
+| p38 | 7.41 → 7.88 | −0.81 / +7.57 / +4.17 → −3.38 / +4.40 / +9.65 | 0.010 → 0.011 |
+| p39 | 6.45 → 3.41 | −1.17 / +4.54 / +9.49 → +0.15 / +0.14 / +0.32 | 0.011 → 0.014 |
+| p40 | 9.17 → 8.58 | −3.11 / −4.74 / +3.93 → −4.74 / −0.89 / +2.87 | 0.016 → 0.015 |
+| p41 | 6.28 → 5.79 | +13.18 / +14.91 / +19.36 → −3.21 / +10.07 / +10.62 | 0.023 → 0.016 |
+
+The warm band's a* gap — the channel curves' own signature — shrinks on p36,
+p38, p39, p40 and p41. Whole-frame ΔE grows on p37 (warm dL +2.29 → +6.32)
+and p38 (warm b* +4.17 → +9.65), and the p39 sky band moves b* −5.82 →
+−11.03 (31 k pixels). On p38 the fitted recipe's three curves alone render on
+the measured law to ΔE 0.10 against Camera Raw, so its b* gap comes from
+another control; the p37 and p39 movements are not attributed yet. The
+pairs' fits also change with the law (the fit mirrors it), so each row
+compares two different recipes, not one recipe under two renderers.
+
+**The writer always pairs channel curves with a composite curve since
+v1.17.0** (`xmp::write`). Camera Raw IGNORES `crs:ToneCurvePV2012Red` /
+`Green` / `Blue` in a sidecar with no `crs:ToneCurvePV2012` element: a fitted
+recipe's three channel curves rendered byte-identical to no curves at all, and
+the same sidecar with an identity composite block added moved 11.9 ΔE — the
+move the engine renders. Lightroom always writes the composite, so a recipe
+with channel curves and no composite one now writes the identity
+`0,0 / 255,255`, which reads back as no composite curve
+(`channel_curves_always_travel_with_a_composite_curve`).
 
 **The Effects panel renders since v1.5.0** (`render/finish.rs`), for the same
 revoked policy as the Detail panel below — and for a second reason of its own:
@@ -2978,17 +3115,28 @@ bytes, and `dcp::find_look_table` refuses a payload whose digest differs.
 Measured on the install: 330 of 330 tables decode and match their id; 24 are
 look tables (「Adobe Color」: 36 × 16 × 16, linear value) and 306 are RGB tables,
 which stay unrendered and are named as such. The table is read from the
-user's Camera Raw install, never bundled. It REPLACES the camera profile's own
-`ProfileLookTableData` rather than stacking after it — on p39 against Camera
-Raw, replacing leaves the sky at Δb +0.22 and the warm tones at Δb −1.13,
-stacking +1.01 and −3.21. (Until v1.17.0 this payload was recorded as
+user's Camera Raw install, never bundled. It goes on AFTER the camera
+profile's own `ProfileLookTableData`, which stays (a Look names its base
+profile, whose maps remain in force). Measured against Camera Raw on a
+synthetic linear-ProPhoto bench whose profile carries 「Adobe Standard」's own
+36 × 8 × 16 look table under the 「Adobe Color」 Look, 4256 nodes, ΔE median /
+p95 / max: creative after the profile's 0.078 / 0.70 / 1.86, the other order
+0.13 / 2.94 / 21.8, the creative replacing the profile's 1.19 / 8.07 / 22.4.
+On p39's flat sidecar (Camera Raw 16-bit, 1536 px) replacing left the warm
+tones at Δb +2.51 and the sky at −0.89, stacking leaves −0.19 and +0.02. An
+earlier reading that preferred replacing (+0.22 / −1.13 against +1.01 /
+−3.21) was taken while the Look's curve went by the luma ratio, whose own
+error (Δb −1.1 on those colours) offset the missing table. (Until v1.17.0 this payload was recorded as
 undecodable: zlib had been tried behind a most-significant-digit-first base85.)
 A Look whose `crs:Amount` is not 1, a table that is not installed, and an RGB
 table are each disclosed by name in `diag.warn` and the develop panel.
 
 Measured on p39's flat sidecar against Camera Raw's render of the identical
 packet (lens-matched, 1000 px, `rel1170/colour/accept3-*.out`): whole-frame ΔE
-3.85 → 3.03, sky-ish Δb −4.99 → +0.22, warm Δb +6.03 → −1.13. What remains is
+3.85 → 3.03, sky-ish Δb −4.99 → +0.22, warm Δb +6.03 → −1.13; with the
+profile's own look table kept under the creative one and the Look's curve by
+Camera Raw's rule, `calibration_a_flat_sidecar_renders_where_lightroom_starts`
+reads sky-ish Δb +0.14 and warm −0.50. What remains is
 not colour: a 0.19 % magnification difference in the lens-corrected geometry
 (undone, ΔE 1.98), the highlights above Lightroom's roll-off (L > 90 ΔL +2.7,
 the engine clips where Camera Raw compresses) and a shadow lift (L < 30 ΔL
@@ -3324,8 +3472,9 @@ capture-sharpening operator on the recipe's Radius/Detail/Masking) → **noise
 reduction** (the global luminance operator on its Detail/Contrast). The mask's own **point curves** (R25) live inside that fused pass
 and cost no extra one: `main_curve` is handed to the same `build_tone_lut` that
 already composes the mask's synthesized tone recipe, and the three RGB curves
-are compiled once per mask and applied right after it — the global chain's
-1 → 1b → 3 order mirrored locally. Splitting them out into a pass of their own
+are compiled once per mask and applied right after it, on ProPhoto's channels
+under the sRGB transfer since v1.17.0 (the global curves' measured law, see
+"The point curves"; the global chain itself runs them after Saturation now). Splitting them out into a pass of their own
 would have changed the output of every existing partial-weight mask, the same
 reason R22 gave for not splitting the blend.
 Clarity/dehaze/texture became engine-rendered in R22 (feedback

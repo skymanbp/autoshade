@@ -3,7 +3,7 @@
 //!
 //! A recipe renders in two halves. The PROFILE STAGE — the camera profile's
 //! matrices, hue/sat maps, look table, tone and baseline exposure, with the
-//! creative Look's colour table in place of the profile's own (`profile::Stage`)
+//! creative Look's colour table on top of the profile's own (`profile::Stage`)
 //! — runs INSIDE the RAW develop, on camera-space pixels, before the white
 //! balance. Everything after it (white balance, tone, colour, detail, masks,
 //! geometry) runs on the developed frame, and the preview develop

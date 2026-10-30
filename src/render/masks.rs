@@ -132,11 +132,18 @@ pub(super) fn apply_masks(
             }
         };
         let lut = build_tone_lut(&local);
+        // On a camera-profile start the mask's `MainCurve` follows Camera
+        // Raw's measured curve rule (`tone::camera_raw_rgb_tone`, middle by
+        // its encoded ratio — item 35) instead of the luma ratio below.
+        let main_lut = (camera_raw && !m.main_curve.is_empty()).then(|| curve_lut(&m.main_curve));
         // The three per-channel local curves (`crs:{Red,Green,Blue}Curve`),
         // compiled ONCE per mask like `colour_luts` below and applied inside
-        // the fused pixel loop right after the master curve — the global
-        // chain's own order (`apply_develop` stage 1 then 1b). `None` when all
-        // three are empty, so a curve-free mask pays nothing.
+        // the fused pixel loop right after the master curve. (The global
+        // chain puts its own after Saturation since v1.17.0, Camera Raw's
+        // measured place; where a mask's sit against its local Saturation is
+        // not measured, so this order stays.) `None` when all three are
+        // empty, so a curve-free mask pays nothing.
+        let curve_space = CurveSpace::new(space);
         let rgb_curve_luts = (!m.red_curve.is_empty()
             || !m.green_curve.is_empty()
             || !m.blue_curve.is_empty())
@@ -280,9 +287,13 @@ pub(super) fn apply_masks(
                         t[c] = sample_lut(&luts[c], t[c]);
                     }
                 }
-                let l_old = luma601(&t);
-                let l_new = sample_lut(&lut, l_old);
-                scale_chroma(&mut t, l_old, l_new);
+                if let Some(ml) = &main_lut {
+                    t = curve_space.tone(t, ml, MiddleRatio::Encoded);
+                } else {
+                    let l_old = luma601(&t);
+                    let l_new = sample_lut(&lut, l_old);
+                    scale_chroma(&mut t, l_old, l_new);
+                }
                 // Per-channel curves right after the master one, before
                 // saturation — `apply_develop`'s stage 1 → 1b → 3 order, so a
                 // full-coverage mask carrying a curve lands where the same
@@ -297,14 +308,21 @@ pub(super) fn apply_masks(
                 // within_one_code`, which owns the tolerance). The clarity and
                 // texture twins ARE bit-exact; this one is not, and the
                 // sentence used to claim it was.
+                // v1.17.0: on ProPhoto's channels under the sRGB transfer,
+                // the global curves' measured law (`tone::apply_rgb_curves`);
+                // measured for a mask too — a full-coverage linear mask's
+                // `RedCurve` on Camera Raw is predicted by it to 0.09 ΔE, by
+                // the working sRGB channels to 9.5.
                 if let Some((luts, active)) = &rgb_curve_luts {
-                    for ch in 0..3 {
-                        if active[ch] {
-                            t[ch] = sample_lut(&luts[ch], t[ch]);
-                        }
-                    }
+                    t = curve_space.channel_curves(t, luts, *active);
                 }
-                let mut t = apply_sat_vibrance(t[0], t[1], t[2], sat, 0.0);
+                // v1.17.0: a Saturation on Camera Raw's law moves the colour
+                // in the reference primaries about V (above 0) or the HSL
+                // lightness (below 0), measured (`mask_cr::saturate_px`).
+                let mut t = match &hue_space {
+                    Some((under, (dec, enc))) if sat != 0.0 => mask_cr::saturate_px(t, sat, under, dec, enc),
+                    _ => apply_sat_vibrance(t[0], t[1], t[2], sat, 0.0),
+                };
                 // Local hue rotation, LAST in the fused transform: it turns the
                 // colour this mask's WB/tone/saturation stages produced, which
                 // is the order the sliders read in (Temp shift → Saturation →

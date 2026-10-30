@@ -391,7 +391,7 @@ pub(super) fn apply_develop_with_rasters(
     //    and saturation/vibrance stay downstream so the user can trim dehaze's
     //    chroma restoration.
     // v1.17.0: on a camera-profile start Dehaze follows Camera Raw's
-    // measured law instead, in the slider pass below (`tone_cr`).
+    // measured law instead, after the exposure below (`dehaze_cr`).
     if r.dehaze != 0.0 && !camera_raw {
         apply_dehaze(data, w, r.dehaze);
     }
@@ -423,9 +423,10 @@ pub(super) fn apply_develop_with_rasters(
     if !tone_neutral {
         // v1.17.0: on a camera-profile start, Highlights and Shadows first
         // (their own pass: a local law, keyed to the frame); exposure, per channel
-        // by Adobe's rule; then Contrast, Whites and Blacks with Adobe's hue and the luma's
-        // lightness (`tone_cr::camera_raw_slider_pixel`); the Look's curve by
-        // the luma ratio; the photographer's curves by Adobe's rule (`tone_cr`).
+        // by Adobe's rule; then Contrast, Whites and Blacks by Camera Raw's
+        // measured curve rule (`tone::apply_camera_raw_curve`, the middle by
+        // its encoded ratio, as the composite curve); the photographer's
+        // curves, then the Look's, by the same rule (`tone`).
         if camera_raw {
             let tone = camera_raw_tone_passes(r);
             // Highlights and Shadows FIRST, global then each mask's, on one
@@ -456,18 +457,53 @@ pub(super) fn apply_develop_with_rasters(
             if over_range == OverRange::Clip {
                 clip_over_range(data);
             }
+            // Dehaze: after Highlights/Shadows and Exposure, before Contrast,
+            // Whites, Blacks and the curves, a spatial scattering inversion
+            // under Adobe's curve (`dehaze_cr`, where it sits measured).
+            if r.dehaze != 0.0 {
+                dehaze_cr::apply_camera_raw_dehaze(data, w, h, r.dehaze, &profile::UnderTone::new(space, exposed));
+            }
+            // Contrast, Whites and Blacks (with the Look's baked moves and
+            // Clarity's tone) go on like a point curve: ProPhoto channels, the
+            // extremes through the LUT on sRGB-encoded values, the middle at its
+            // encoded ratio. Measured against Camera Raw on p39 (v1.17.0, the
+            // stacked look tables, 12 single-slider renders: Contrast ±50 ±100,
+            // Whites ±40 ±80, Blacks ±40 ±80, against the flat render; chroma
+            // > 15, mean |Δab| of the double difference): this rule 1.33, the
+            // middle at its linear ratio 1.45, each channel on its own 1.65, the
+            // channel rule on the working channels 1.75, the rule's hue with the
+            // luma's lightness (until item 35) 2.17, the luma ratio 4.45.
+            // Lightness is the LUT's under every rule (ΔL by band within 0.1).
+            // A pass that also carries Clarity's tone keeps the earlier pixel
+            // rule (`tone_cr::camera_raw_slider_pixel`): on Clarity +50, +100
+            // and −50 that rule leaves 2.30 / 4.21 / 2.90, this one 2.55 /
+            // 4.52 / 3.58 (Clarity is local in Camera Raw, its tone half here
+            // only a global stand-in).
             if let Some(s) = &tone.sliders {
-                data.par_iter_mut().for_each(|px| *px = camera_raw_slider_pixel(*px, s));
+                if r.clarity == 0.0 {
+                    apply_camera_raw_curve(data, &s.lut, space, MiddleRatio::Encoded);
+                } else {
+                    data.par_iter_mut().for_each(|px| *px = camera_raw_slider_pixel(*px, s));
+                }
+            }
+            // A negative Blacks: each ProPhoto channel through its curve on
+            // its own (`tone::CameraRawTone::blacks_down`, measured).
+            if let Some(lut) = &tone.blacks_down {
+                let cs = CurveSpace::new(space);
+                let luts = [lut.clone(), lut.clone(), lut.clone()];
+                data.par_iter_mut().for_each(|px| *px = cs.channel_curves(*px, &luts, [true; 3]));
             }
             mask_cr::apply_local_sliders(data, w, h, r, rasters, frame);
-            if let Some(look) = &tone.look {
-                data.par_iter_mut().for_each(|px| {
-                    let l_old = luma601(px);
-                    scale_chroma(px, l_old, sample_lut(look, l_old));
-                });
-            }
+            // The photographer's parametric and point curves, then the
+            // Look's baked curve, both by Camera Raw's measured rule on
+            // ProPhoto channels (`tone::apply_camera_raw_curve`; the Look's
+            // curve went by the luma ratio until item 35). The two keep the
+            // middle channel differently, measured (`tone::MiddleRatio`).
             if let Some(c) = &tone.curves {
-                data.par_iter_mut().for_each(|px| *px = camera_raw_channels(*px, c));
+                apply_camera_raw_curve(data, c, space, MiddleRatio::Encoded);
+            }
+            if let Some(look) = &tone.look {
+                apply_camera_raw_curve(data, look, space, MiddleRatio::Linear);
             }
         } else {
             let lut = build_tone_lut(r);
@@ -489,8 +525,6 @@ pub(super) fn apply_develop_with_rasters(
     if monochrome {
         apply_gray_mix(data, &r.gray_mixer());
     }
-    // 1b) per-channel RGB curves (red/green/blue), right after the master curve.
-    apply_rgb_curves(data, r);
     // 2) per-colour HSL (the 8 ACR bands): rotate/scale each colour family,
     //    after global tone and before clarity/saturation (ACR ordering) — then
     //    the point colours (v1.5.0), the Color Mixer's other half. Neither has
@@ -535,6 +569,15 @@ pub(super) fn apply_develop_with_rasters(
             *px = apply_sat_vibrance(px[0], px[1], px[2], sat, vib);
         });
     }
+    // 3c) per-channel RGB curves (red/green/blue), on ProPhoto's channels
+    //    (v1.17.0, measured: `tone::apply_rgb_curves`). After the mixer and
+    //    Saturation/Vibrance, Camera Raw's place for them: a red curve
+    //    composed onto Camera Raw's own HSL and Saturation renders predicts
+    //    them to 0.09 and 0.08 ΔE. Still before the colour grade's place in
+    //    Camera Raw would be (after these curves: composing the curve onto
+    //    its grade render is 8.7 ΔE off), which here runs earlier — a known
+    //    difference of the order, ARCHITECTURE.
+    apply_rgb_curves(data, r, space);
     // 4) the Detail panel (v1.5.0, `detail.rs`): colour noise, then luminance
     //    noise, then sharpening. Noise reduction runs BEFORE sharpening (the
     //    order that matters most), and colour before luminance so the
