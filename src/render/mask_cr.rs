@@ -26,9 +26,9 @@
 //! - **Temp and Tint** move the global white ([`local_white`]): a white
 //!   balance adaptation from the global white to the moved one, blended by
 //!   the mask's weight in the light between the exposure ramp and Adobe's
-//!   curve, right after the global white balance. Fitted per sign on
-//!   ±25 … ±100; at ±100 the fit leaves 4.3 ab, which no constant of this
-//!   placement removes.
+//!   curve, right after the global white balance. Measured per sign on
+//!   ±25 … ±100 with the engine in the loop (one move per render that leaves
+//!   no mean Lab bias in the mask's core, then one form per sign).
 //! - **Hue** turns hues by the slider value in degrees, in the profile
 //!   stage's reference primaries ([`hue_px`]).
 //! - Saturation, the curves and the colour gains keep the mask stage's
@@ -342,38 +342,54 @@ pub(super) fn apply_local_sliders(
 }
 
 /// The white a mask's Temp and Tint (each −1..1) name, as a move of the
-/// global white: mired (positive = cooler), tint units, and EV. Fitted on
-/// the local renders, one (mired, tint, EV) per render, then one form per
-/// sign across the magnitudes (module head).
+/// global white: mired (positive = cooler), tint units, and EV. Measured
+/// with the engine in the loop on the local renders at Temp ±25 / ±50 / ±75
+/// / ±100: one (mired, tint, EV) per render that leaves no mean Lab bias in
+/// the mask's core (weight > 0.9), then one form per sign across the
+/// magnitudes (module head).
 fn local_white(temp: f32, tint: f32) -> (f64, f64, f32) {
     let (t, n) = (f64::from(temp), f64::from(tint));
-    let (ma, mb, ea, eb) = if t < 0.0 {
-        (LWB_MIRED_FALL, LWB_MIRED_FALL_Q, LWB_EV_FALL, LWB_EV_FALL_Q)
+    let (ma, mb, ea, eb, ta, tb) = if t < 0.0 {
+        (LWB_MIRED_FALL, LWB_MIRED_FALL_Q, LWB_EV_FALL, LWB_EV_FALL_Q, LWB_TINT_PER_COOL, LWB_TINT_PER_COOL_Q)
     } else {
-        (LWB_MIRED_RISE, LWB_MIRED_RISE_Q, LWB_EV_RISE, LWB_EV_RISE_Q)
+        (LWB_MIRED_RISE, LWB_MIRED_RISE_Q, LWB_EV_RISE, LWB_EV_RISE_Q, LWB_TINT_PER_WARM, LWB_TINT_PER_WARM_Q)
     };
     let mired = -t * (ma + t.abs() * mb) + LWB_MIRED_PER_TINT * n;
-    let tint_units = n * if n < 0.0 { LWB_TINT_FALL } else { LWB_TINT_RISE } + LWB_TINT_PER_TEMP * t.abs();
+    let tint_units = n * if n < 0.0 { LWB_TINT_FALL } else { LWB_TINT_RISE } + t.abs() * (ta + t.abs() * tb);
     let ev = t * (ea + t.abs() * eb) + LWB_EV_PER_TINT * n;
     (mired, tint_units, ev as f32)
 }
 
 /// Mired of warming per unit Temp at small magnitudes, and its curvature.
-const LWB_MIRED_RISE: f64 = 142.2;
-const LWB_MIRED_RISE_Q: f64 = -49.84;
-/// …of cooling, for a negative Temp.
-const LWB_MIRED_FALL: f64 = 149.8;
-const LWB_MIRED_FALL_Q: f64 = -28.88;
-/// EV per unit Temp (brighter as it warms) and its curvature, per sign.
-const LWB_EV_RISE: f64 = 0.162;
-const LWB_EV_RISE_Q: f64 = -0.048;
-const LWB_EV_FALL: f64 = 0.093;
-const LWB_EV_FALL_Q: f64 = 0.126;
+/// Per render (engine in the loop, core mean bias 0): +25 −37.9, +50 −65.8,
+/// +75 −86.9, +100 −102.6 mired; the form `−t·(a + |t|·b)` holds them to 1.2.
+/// The constants before (142.2 / −49.84, fitted on an earlier engine) left
+/// warming 11–14 % short: core a / b −0.83 / −0.78 at +50.
+const LWB_MIRED_RISE: f64 = 161.81;
+const LWB_MIRED_RISE_Q: f64 = -59.68;
+/// …of cooling, for a negative Temp: −25 +39.9, −50 +84.1, −75 +126.7,
+/// −100 +161.9 mired (form within 2.7). Before (149.8 / −28.88) cooling fell
+/// short by up to 2.7 b at −100.
+const LWB_MIRED_FALL: f64 = 172.72;
+const LWB_MIRED_FALL_Q: f64 = -9.524;
+/// EV per unit Temp (brighter as it warms) and its curvature, per sign:
+/// +25…+100 0.037 / 0.068 / 0.089 / 0.104, −25…−100 −0.058 / −0.138 /
+/// −0.217 / −0.306 EV.
+const LWB_EV_RISE: f64 = 0.1655;
+const LWB_EV_RISE_Q: f64 = -0.0617;
+const LWB_EV_FALL: f64 = 0.2335;
+const LWB_EV_FALL_Q: f64 = 0.0732;
 /// Tint units per unit Tint, per sign.
 const LWB_TINT_RISE: f64 = 63.86;
 const LWB_TINT_FALL: f64 = 51.08;
-/// Magenta per unit Temp magnitude, either way.
-const LWB_TINT_PER_TEMP: f64 = 11.05;
+/// Tint units a warming Temp brings, `|t|·(a + |t|·b)`: +25…+100 6.7 / 10.2 /
+/// 12.1 / 13.4 (magenta).
+const LWB_TINT_PER_WARM: f64 = 28.0;
+const LWB_TINT_PER_WARM_Q: f64 = -14.91;
+/// …and a cooling one: −25…−100 −0.9 / −1.3 / −0.2 / +3.0 (it was one
+/// constant, 11.05 per unit either way, which put magenta on a cooled sky).
+const LWB_TINT_PER_COOL: f64 = -7.767;
+const LWB_TINT_PER_COOL_Q: f64 = 10.60;
 /// Mired and EV per unit Tint.
 const LWB_MIRED_PER_TINT: f64 = -6.03;
 const LWB_EV_PER_TINT: f64 = -0.165;
