@@ -379,9 +379,14 @@ fn local_white(temp: f32, tint: f32) -> (f64, f64, f32) {
     } else {
         (LWB_MIRED_RISE, LWB_MIRED_RISE_Q, LWB_EV_RISE, LWB_EV_RISE_Q, LWB_TINT_PER_WARM, LWB_TINT_PER_WARM_Q)
     };
-    let mired = -t * (ma + t.abs() * mb) + LWB_MIRED_PER_TINT * n;
-    let tint_units = n * if n < 0.0 { LWB_TINT_FALL } else { LWB_TINT_RISE } + t.abs() * (ta + t.abs() * tb);
-    let ev = t * (ea + t.abs() * eb) + LWB_EV_PER_TINT * n;
+    let (nm, nmq, nt, ntq, ne, neq) = if n < 0.0 {
+        (LWB_MIRED_PER_GREEN, LWB_MIRED_PER_GREEN_Q, LWB_TINT_FALL, LWB_TINT_FALL_Q, LWB_EV_PER_GREEN, LWB_EV_PER_GREEN_Q)
+    } else {
+        (LWB_MIRED_PER_MAGENTA, LWB_MIRED_PER_MAGENTA_Q, LWB_TINT_RISE, LWB_TINT_RISE_Q, LWB_EV_PER_MAGENTA, LWB_EV_PER_MAGENTA_Q)
+    };
+    let mired = -t * (ma + t.abs() * mb) + n.abs() * (nm + n.abs() * nmq);
+    let tint_units = n * (nt + n.abs() * ntq) + t.abs() * (ta + t.abs() * tb);
+    let ev = t * (ea + t.abs() * eb) + n * (ne + n.abs() * neq);
     (mired, tint_units, ev as f32)
 }
 
@@ -404,9 +409,14 @@ const LWB_EV_RISE: f64 = 0.1655;
 const LWB_EV_RISE_Q: f64 = -0.0617;
 const LWB_EV_FALL: f64 = 0.2335;
 const LWB_EV_FALL_Q: f64 = 0.0732;
-/// Tint units per unit Tint, per sign.
-const LWB_TINT_RISE: f64 = 63.86;
-const LWB_TINT_FALL: f64 = 51.08;
+/// Tint units per unit Tint and their curvature, per sign, `n·(a + |n|·b)`.
+/// Engine in the loop on the renders at Tint ±25 / ±50 / ±75 / ±100 (one move
+/// per render that leaves no mean Lab bias in the mask's core): +25…+100 13.2
+/// / 32.5 / 51.9 / 69.4, −25…−100 −11.3 / −25.4 / −39.4 / −51.5.
+const LWB_TINT_RISE: f64 = 58.03;
+const LWB_TINT_RISE_Q: f64 = 12.19;
+const LWB_TINT_FALL: f64 = 49.03;
+const LWB_TINT_FALL_Q: f64 = 2.926;
 /// Tint units a warming Temp brings, `|t|·(a + |t|·b)`: +25…+100 6.7 / 10.2 /
 /// 12.1 / 13.4 (magenta).
 const LWB_TINT_PER_WARM: f64 = 28.0;
@@ -415,9 +425,21 @@ const LWB_TINT_PER_WARM_Q: f64 = -14.91;
 /// constant, 11.05 per unit either way, which put magenta on a cooled sky).
 const LWB_TINT_PER_COOL: f64 = -7.767;
 const LWB_TINT_PER_COOL_Q: f64 = 10.60;
-/// Mired and EV per unit Tint.
-const LWB_MIRED_PER_TINT: f64 = -6.03;
-const LWB_EV_PER_TINT: f64 = -0.165;
+/// Mired a Tint brings, `|n|·(a + |n|·b)`: warmer EITHER way — +25…+100
+/// −0.0 / −1.6 / −3.0 / −4.9, −25…−100 −1.4 / −3.3 / −4.8 / −6.9 mired. Camera
+/// Raw's tint axis is not orthogonal to its temperature axis in the move this
+/// placement makes; one signed constant (−6.03 per unit) cooled a green Tint
+/// and left the core b* −0.74 at −50, +0.80 at +100.
+const LWB_MIRED_PER_MAGENTA: f64 = -0.5243;
+const LWB_MIRED_PER_MAGENTA_Q: f64 = -4.447;
+const LWB_MIRED_PER_GREEN: f64 = -5.799;
+const LWB_MIRED_PER_GREEN_Q: f64 = -1.051;
+/// EV per unit Tint, `n·(a + |n|·b)`: darker toward magenta, brighter toward
+/// green (+100 −0.223, −100 +0.162).
+const LWB_EV_PER_MAGENTA: f64 = -0.1894;
+const LWB_EV_PER_MAGENTA_Q: f64 = -0.0364;
+const LWB_EV_PER_GREEN: f64 = -0.1637;
+const LWB_EV_PER_GREEN_Q: f64 = 0.0002;
 
 /// The global white `r` renders at, (Kelvin, tint) in Camera Raw's units, and
 /// the as-shot white it is a move from.
