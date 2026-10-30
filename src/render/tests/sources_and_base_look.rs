@@ -1109,7 +1109,7 @@ fn the_base_look_is_estimated_on_the_frame_the_camera_shows() {
         camera_base_knots(&paired, &camera).expect("judgeable").is_empty(),
         "paired on the frame the camera shows, an identical crop is the identity"
     );
-    let same = camera_frame_of(&neutral, &neutral.thumbnail(150, 100));
+    let same = camera_frame_of(&neutral, &super::thumbnail(&neutral, 150, 100));
     assert_eq!((same.width(), same.height()), (300, 200), "a same-frame pair is untouched");
 }
 
@@ -1248,7 +1248,7 @@ fn a_pair_that_cannot_say_keeps_the_picture_the_sensor_saw() {
         estimation_base(&neutral, &lens, &blown).to_rgb8().into_raw(),
         neutral.to_rgb8().into_raw()
     );
-    let tiny = neutral.thumbnail(48, 32);
+    let tiny = super::thumbnail(&neutral, 48, 32);
     assert!(corner_residual(&tiny, &tiny).is_none(), "smaller than the grid");
 }
 
@@ -1335,7 +1335,7 @@ fn probe_real_raw_base_look() {
         let lens = crate::pipeline::fresh_lens_profile(&raw);
         let working =
             render_to_image(&raw, &EditRecipe::default(), None, Some(2048)).unwrap();
-        let small = working.thumbnail(1024, 1024);
+        let small = super::thumbnail(&working, 1024, 1024);
         let plain = camera_frame_of(&small, cam);
         println!("profile corner gain: {:?}", lens.vignette.last());
         println!("corner residual as the sensor saw it: {:?}", corner_residual(&plain, cam));
@@ -1378,7 +1378,7 @@ fn probe_real_raw_base_look() {
     }
     assert!(!knots.is_empty(), "expected a base look on a camera RAW");
     let neutral =
-        render_to_image(&raw, &EditRecipe::default(), None, None).unwrap().thumbnail(1536, 1536);
+        super::thumbnail(&render_to_image(&raw, &EditRecipe::default(), None, None).unwrap(), 1536, 1536);
     let based = develop_preview(
         &neutral,
         &EditRecipe { base_curve: knots, ..Default::default() },

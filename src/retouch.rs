@@ -1027,7 +1027,7 @@ pub fn heal(
     // by the same contract — the flag used to be ignored for baked sources, so
     // a "preview mode" heal still processed (and saved) an entire
     // high-resolution TIFF/JPEG.
-    let base = crate::render::source_pixels_for(src_path, part, (!full_res).then_some(2048))?;
+    let base = crate::render::master_pixels_for(src_path, part, (!full_res).then_some(2048))?;
     let (w, h) = (base.width(), base.height());
 
     let mut spots: Vec<HealSpot> = Vec::new();
@@ -1254,7 +1254,7 @@ pub fn clone_stamp(
     // Same base contract as `heal`, through the same one dispatch: the engine's
     // OWN base develop of `part` (full or ≤2048px), never the camera's baked
     // preview — see the heal doc comment.
-    let base = crate::render::source_pixels_for(src_path, part, (!full_res).then_some(2048))?;
+    let base = crate::render::master_pixels_for(src_path, part, (!full_res).then_some(2048))?;
     let (w, h) = (base.width(), base.height());
 
     let m = crate::render::open_mask_bounded(mask_path)

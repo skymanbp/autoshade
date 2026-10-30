@@ -190,8 +190,8 @@ fn the_detail_stage_solves_both_directions_on_real_renders() {
         }
         // Re-read what shipped: the asked band sits at the target's within
         // the matched window, and no band was pushed past the target.
-        let big = src.thumbnail(DETAIL_EDGE, DETAIL_EDGE);
-        let big_t = tgt.thumbnail_exact(big.width(), big.height());
+        let big = crate::render::thumbnail(&src, DETAIL_EDGE, DETAIL_EDGE);
+        let big_t = crate::render::thumbnail_exact(&tgt, big.width(), big.height());
         let px = fit::pixels_of(&render::develop_preview(&big, &report.recipe));
         let weights = vec![1.0f32; px.len()];
         let after = band_readings(&px, &fit::pixels_of(&big_t), &weights, big.width(), big.height());

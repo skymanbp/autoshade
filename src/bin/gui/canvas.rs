@@ -318,7 +318,7 @@ impl AutoShadeApp {
         // same pixels box-filtered, indistinguishable for an overlay.
         let small;
         let cov_ref: &image::DynamicImage = if reference.width().max(reference.height()) > 1024 {
-            small = reference.thumbnail(1024, 1024);
+            small = autoshade::render::thumbnail(reference, 1024, 1024);
             &small
         } else {
             reference

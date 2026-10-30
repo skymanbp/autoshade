@@ -282,7 +282,7 @@ fn reading_args(
 }
 
 fn tile_mask(src: &DynamicImage, id: TileId) -> (DynamicImage, GrayImage) {
-    let guide = src.thumbnail(TILE_RASTER_EDGE, TILE_RASTER_EDGE);
+    let guide = crate::render::thumbnail(src, TILE_RASTER_EDGE, TILE_RASTER_EDGE);
     let mut mask = GrayImage::new(guide.width(), guide.height());
     for y in 0..mask.height() {
         for x in 0..mask.width() {

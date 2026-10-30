@@ -1641,7 +1641,7 @@ fn denoise_cmd(
         // `render::base_develop`): a card over it runs no profile stage.
         let part = pipeline::photo_base_part(input);
         let (w, h) =
-            render::render_to_file(input, &part.recipe(), &out, Some(&opts), None, autoshade::diag::stderr())?;
+            render::render_to_file(input, &part.master_recipe(), &out, Some(&opts), None, autoshade::diag::stderr())?;
         println!("denoised -> {} ({} x {})", out.display(), w, h);
     } else {
         println!("denoising image {} ...", input.display());
@@ -1864,8 +1864,8 @@ fn match_cmd(
             Ok(j)
         };
         let fitted =
-            autoshade::render::develop_preview(&src.thumbnail(JUDGE_EDGE, JUDGE_EDGE), recipe);
-        let t = enc(&tgt.thumbnail(JUDGE_EDGE, JUDGE_EDGE))?;
+            autoshade::render::develop_preview(&autoshade::render::thumbnail(&src, JUDGE_EDGE, JUDGE_EDGE), recipe);
+        let t = enc(&autoshade::render::thumbnail(&tgt, JUDGE_EDGE, JUDGE_EDGE))?;
         let f = enc(&fitted)?;
         Ok(autoshade::advisor::judge_pair(
             &cfg,
@@ -2107,7 +2107,7 @@ fn match_cmd(
         // Small uploads are plenty for a style read (and cheap): ~0.5 MP each.
         let jpg = |img: &image::DynamicImage| -> Result<Vec<u8>> {
             let mut buf = Vec::new();
-            image::DynamicImage::ImageRgb8(img.thumbnail(768, 768).to_rgb8())
+            image::DynamicImage::ImageRgb8(autoshade::render::thumbnail(img, 768, 768).to_rgb8())
                 .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Jpeg)
                 .context("encode style-prompt jpeg")?;
             Ok(buf)

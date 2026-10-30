@@ -46,7 +46,7 @@ pub struct Stacked {
 /// the denoise landing made before 2026-09-15.
 ///
 /// `part` is the base develop every RAW frame is read through (v1.17.0,
-/// [`crate::render::base_develop`]): the stack becomes a master the canvas
+/// [`crate::render::master_develop`], a master's sharpened form): the stack becomes a master the canvas
 /// develops over with the preview develop, which runs no profile stage, so
 /// the profile the photograph starts from must already be in its pixels.
 pub fn stack_files(
@@ -59,7 +59,7 @@ pub fn stack_files(
     let (mut w, mut h) = (0usize, 0usize);
     let mut frames: Vec<Vec<[f32; 3]>> = Vec::with_capacity(inputs.len());
     for (k, f) in inputs.iter().enumerate() {
-        let img = crate::render::source_pixels_for(f, part, cap)
+        let img = crate::render::master_pixels_for(f, part, cap)
             .with_context(|| format!("read frame {} ({})", k + 1, f.display()))?;
         let (fw, fh) = (img.width() as usize, img.height() as usize);
         if k == 0 {

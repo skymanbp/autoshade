@@ -860,8 +860,10 @@ fn develop_base(raw: &Path, part: &render::BasePart) -> Result<Arc<DynamicImage>
         let fitted = render::source_pixels_for(raw, part, Some(PREVIEW_EDGE))?;
         // Store 8-bit: `develop_preview` and the JPEG encode both work in
         // 8-bit, so keeping the 16-bit buffer would only double the cache and
-        // re-convert on every gesture.
-        Ok(DynamicImage::ImageRgb8(fitted.to_rgb8()))
+        // re-convert on every gesture. A float base (a part that names a
+        // profile, `render::base_develop`) stays float: its over-range light
+        // is what the canvas's Exposure brings back.
+        Ok(if fitted.as_rgb32f().is_some() { fitted } else { DynamicImage::ImageRgb8(fitted.to_rgb8()) })
     })
 }
 

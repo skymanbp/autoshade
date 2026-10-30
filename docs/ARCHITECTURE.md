@@ -3057,17 +3057,30 @@ the canvas's pixels must be developed under it: `render::BasePart` is the part
 of a recipe the RAW develop reads (the camera profile and the Look's table,
 not its baked curve, which the preview develop renders), and
 `render::base_develop` / `source_pixels_for` is the one base for every
-consumer — the GUI and web canvas (re-developed in the background when the
-recipe's part changes, `ensure_source_part`), the Before view, the heal /
-clone / denoise / stack / generative masters and the fill's card pixels, and
-the reverse fit's source (`pipeline::fit_source`, with `fit::solve` rebasing
-on a Look that bakes a curve). `PhotoCalibration` carries the profile and the
+surface that develops over it — the GUI and web canvas (re-developed in the
+background when the recipe's part changes, `ensure_source_part`), the Before
+view, the fill's card pixels, and the reverse fit's source
+(`pipeline::fit_source`, with `fit::solve` rebasing on a Look that bakes a
+curve). That base is UNSHARPENED (the display and the export sharpen once, over
+it) and, for a part that names a profile, a 32-bit float frame that keeps the
+camera stage's over-range light for the canvas's Exposure (×2 the 16-bit
+frame's memory: a 4096 px base measured 128.3 MB against 64.1 MB, a
+process committing 146 MB after it against 82 MB; the peak, 1059 MB on a 61 MP
+frame, is the full-frame develop's either way). Every surface that shrinks a
+frame goes through `render::thumbnail` / `thumbnail_exact`: `image`'s own block
+average is `(sum + n/2) / n`, which on an f32 frame is the mean + 0.5, so a
+float base sent to it came back washed out (the fit then refused it as
+toneless). The heal /
+clone / denoise / stack / generative MASTERS bake through `render::master_develop`
+/ `master_pixels_for` instead: the same part with the RAW default sharpening,
+16-bit, because a master is a baked file and a baked file renders with no
+default sharpening. `PhotoCalibration` carries the profile and the
 Look. A baked file — a master, an embedded preview, a finished image — already
 carries its start, so `strip_baked_start` clears the curve, profile, Look and
 lens profile before it renders. On p39 at 1000 px against the engine's render
 of the all-zero sidecar naming Adobe Color: the export of the all-zero fresh
-recipe is byte-identical, the canvas reads ΔE76 0.354, a master 0.012, and the
-fit source at its 2048 edge 0.264 against the sidecar at the same edge
+recipe is byte-identical, the canvas reads ΔE76 0.219, a master 0.017, and the
+fit source at its 2048 edge 0.187 against the sidecar at the same edge
 (`render::tests::every_surface_shows_a_fresh_canvas_as_the_export_renders_it`).
 
 The invariant that keeps F7 from changing any existing picture is that a

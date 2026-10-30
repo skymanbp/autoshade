@@ -25,7 +25,7 @@ pub fn source_pixels(path: &Path, cap: Option<u32>) -> Result<DynamicImage> {
     // baked-by-construction: the !is_raw arm of THE dispatch itself.
     let img = crate::decode::load_image(path)?;
     match cap {
-        Some(edge) if img.width().max(img.height()) > edge => Ok(img.thumbnail(edge, edge)),
+        Some(edge) if img.width().max(img.height()) > edge => Ok(super::thumbnail(&img, edge, edge)),
         _ => Ok(img),
     }
 }
@@ -89,6 +89,22 @@ pub fn render_to_image_in(
     max_edge: Option<u32>,
     working: ExportColorSpace,
     sink: &dyn crate::diag::Sink,
+) -> Result<DynamicImage> {
+    render_frame(raw_path, recipe, denoise, max_edge, working, sink, OverRange::Clip)
+}
+
+/// [`render_to_image_in`] with the develop's [`OverRange`]: `Clip` packs the
+/// 16-bit frame every render delivers; `Keep` (the canvas's base,
+/// `render::canvas`) packs 32-bit float with a Camera Raw frame's over-range
+/// light still above 1.
+pub(super) fn render_frame(
+    raw_path: &Path,
+    recipe: &EditRecipe,
+    denoise: Option<&crate::denoise::DenoiseOpts>,
+    max_edge: Option<u32>,
+    working: ExportColorSpace,
+    sink: &dyn crate::diag::Sink,
+    over_range: OverRange,
 ) -> Result<DynamicImage> {
     let diag = crate::diag::Diag::about(sink, raw_path);
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
@@ -407,20 +423,28 @@ pub fn render_to_image_in(
     let frame = MaskFrame::downstream(&geom, recipe.lens_distortion);
     // A RAW negative: an absent Sharpening amount renders at Lightroom's own
     // RAW default (`EditRecipe::capture_sharpening`, v1.6.0).
-    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, true, working);
+    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, true, working, over_range);
 
-    // --- pack to 16-bit (highest precision; JPEG downconverts at encode) ------
-    let mut buf: Vec<u16> = vec![0u16; w * h * 3];
-    buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
-        o[0] = to_u16(px[0]);
-        o[1] = to_u16(px[1]);
-        o[2] = to_u16(px[2]);
-    });
-    let img: ImageBuffer<Rgb<u16>, _> = ImageBuffer::from_raw(w as u32, h as u32, buf)
-        .ok_or_else(|| anyhow!("pixel buffer size mismatch"))?;
-    // Orientation was applied BEFORE develop (see orient_f32 above), so the
-    // buffer is already in the display frame — no tail rotation.
-    let dynimg = DynamicImage::ImageRgb16(img);
+    // --- pack to 16-bit (highest precision; JPEG downconverts at encode), or
+    // to 32-bit float for a base that keeps its over-range light. Orientation
+    // was applied BEFORE develop (see orient_f32 above), so the buffer is
+    // already in the display frame — no tail rotation.
+    let dynimg = if over_range == OverRange::Keep {
+        let flat: Vec<f32> = data.iter().flatten().copied().collect();
+        let img: ImageBuffer<Rgb<f32>, _> = ImageBuffer::from_raw(w as u32, h as u32, flat)
+            .ok_or_else(|| anyhow!("pixel buffer size mismatch"))?;
+        DynamicImage::ImageRgb32F(img)
+    } else {
+        let mut buf: Vec<u16> = vec![0u16; w * h * 3];
+        buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
+            o[0] = to_u16(px[0]);
+            o[1] = to_u16(px[1]);
+            o[2] = to_u16(px[2]);
+        });
+        let img: ImageBuffer<Rgb<u16>, _> = ImageBuffer::from_raw(w as u32, h as u32, buf)
+            .ok_or_else(|| anyhow!("pixel buffer size mismatch"))?;
+        DynamicImage::ImageRgb16(img)
+    };
 
     // --- lens geometry → straighten → crop → the finishing pass, all four in
     // `frame_and_finish` (`render/finish.rs`) because they are ONE order and
@@ -1059,7 +1083,7 @@ pub fn render_baked_to_image(
     // uncapped path (every shipped export) still borrows and copies nothing.
     let capped: Cow<'_, DynamicImage> = match max_edge {
         Some(edge) if img.width().max(img.height()) > edge => {
-            Cow::Owned(img.thumbnail(edge, edge))
+            Cow::Owned(super::thumbnail(img, edge, edge))
         }
         _ => Cow::Borrowed(img),
     };
@@ -1092,7 +1116,7 @@ pub fn render_baked_to_image(
     let film = FilmScale::of(film_short, w, h);
     // A baked raster: Lightroom gives a JPEG / TIFF no sharpening by default,
     // so an absent amount renders none (`EditRecipe::capture_sharpening`).
-    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, false, ExportColorSpace::Srgb);
+    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, false, ExportColorSpace::Srgb, OverRange::Clip);
 
     let mut buf: Vec<u16> = vec![0u16; w * h * 3];
     buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
