@@ -38,12 +38,20 @@ pub const CANVAS_PROFILE: &str = "Adobe Standard";
 /// stage (`render::source`), so a base without it could not be corrected
 /// later at the right place. Its knots and strength, empty when the recipe
 /// renders none.
+///
+/// So does the lens profile's GEOMETRY when the camera stage resamples it
+/// (v1.17.0, [`lens_in_camera`]): the composed distortion and CA, with the
+/// vignetting left to the two fields above. A base of such a part is in the
+/// lens-CORRECTED frame, and switching the profile's corrections re-develops
+/// it as switching the camera profile does. A master is baked in the sensor
+/// frame still ([`BasePart::master_recipe`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BasePart {
     camera_profile: String,
     look: Option<crate::recipe::CreativeLook>,
     vignette: Vec<f32>,
     vignette_scale: f32,
+    lens: Option<Box<crate::recipe::LensProfile>>,
 }
 
 impl BasePart {
@@ -57,6 +65,13 @@ impl BasePart {
         let vignette =
             if r.lens_profile.vignette_active() { r.lens_profile.vignette.clone() } else { Vec::new() };
         let vignette_scale = if vignette.is_empty() { 0.0 } else { r.lens_profile_vignetting_scale };
+        let lens = lens_in_camera(r).then(|| {
+            Box::new(crate::recipe::LensProfile {
+                vignette_on: false,
+                vignette: Vec::new(),
+                ..geometry_profile(r).into_owned()
+            })
+        });
         Self {
             camera_profile: r.camera_profile.clone(),
             look: r.look.as_ref().map(|l| crate::recipe::CreativeLook {
@@ -68,7 +83,20 @@ impl BasePart {
             }),
             vignette,
             vignette_scale,
+            lens,
         }
+    }
+
+    /// This part with the lens geometry left to the tail: a base in the SENSOR
+    /// frame, for the surfaces that still work there (the reverse fit's
+    /// source, the retouch pictures).
+    pub fn without_lens(&self) -> Self {
+        Self { lens: None, ..self.clone() }
+    }
+
+    /// Is a base of this part in the lens-corrected frame?
+    pub fn corrects_lens(&self) -> bool {
+        self.lens.is_some()
     }
 
     /// The neutral develop: no profile named.
@@ -81,8 +109,19 @@ impl BasePart {
     /// to the display and the export, which run it over the base (a base
     /// sharpened too was sharpened twice, and the pass clipped the over-range
     /// light the float base keeps).
+    ///
+    /// The part's lens geometry too, which a master leaves out: the composed
+    /// profile as it is, so `geometry_profile` reads it back unchanged (no
+    /// manual pair, Distortion strength 100).
     pub fn recipe(&self) -> EditRecipe {
         let mut r = self.master_recipe();
+        if let Some(lens) = &self.lens {
+            r.lens_profile = crate::recipe::LensProfile {
+                vignette_on: r.lens_profile.vignette_on,
+                vignette: std::mem::take(&mut r.lens_profile.vignette),
+                ..(**lens).clone()
+            };
+        }
         r.set_resolved("sharpening", 0.0);
         r
     }
@@ -91,7 +130,9 @@ impl BasePart {
     /// [`BasePart::recipe`] with the RAW default capture sharpening kept. A
     /// master is a baked file, and a baked file is rendered with no default
     /// sharpening (`EditRecipe::capture_sharpening`), so the master carries the
-    /// one sharpening its RAW is owed.
+    /// one sharpening its RAW is owed. In the SENSOR frame: the part's lens
+    /// geometry is not in it, and the card over the master resamples it in the
+    /// tail as before v1.17.0.
     pub fn master_recipe(&self) -> EditRecipe {
         let dflt = EditRecipe::default();
         EditRecipe {

@@ -48,12 +48,12 @@ fn the_blur_follows_distance_from_the_focus() {
     let sharp = texture(&checker, w, near.clone());
 
     let mut on_near = checker.clone();
-    lens_blur::apply(&mut on_near, w, h, &blur_at([0.25, 0.5]), &depth, None);
+    lens_blur::apply(&mut on_near, w, h, &blur_at([0.25, 0.5]), &depth, None, None);
     assert!((texture(&on_near, w, near.clone()) - sharp).abs() < 1e-4, "the focused half keeps its texture");
     assert!(texture(&on_near, w, far.clone()) < sharp * 0.2, "the far half blurs");
 
     let mut on_far = checker.clone();
-    lens_blur::apply(&mut on_far, w, h, &blur_at([0.75, 0.5]), &depth, None);
+    lens_blur::apply(&mut on_far, w, h, &blur_at([0.75, 0.5]), &depth, None, None);
     assert!(texture(&on_far, w, near) < sharp * 0.2, "the foreground blurs too, by the same law");
     assert!((texture(&on_far, w, far) - sharp).abs() < 1e-4);
 
@@ -64,7 +64,7 @@ fn the_blur_follows_distance_from_the_focus() {
         LensBlur { depth_map: String::new(), ..lb.clone() },
     ] {
         let mut same = checker.clone();
-        lens_blur::apply(&mut same, w, h, &idle, &depth, None);
+        lens_blur::apply(&mut same, w, h, &idle, &depth, None, None);
         assert_eq!(same, checker, "{idle:?} must not change a pixel");
     }
 }
@@ -79,7 +79,7 @@ fn the_blur_follows_distance_from_the_focus() {
 fn an_in_focus_subject_leaves_no_halo_in_the_blurred_background() {
     let (w, h) = (128usize, 16usize);
     let mut out = frame_of(w, h, |x, _| if x < w / 2 { 1.0 } else { 0.0 });
-    lens_blur::apply(&mut out, w, h, &blur_at([0.25, 0.5]), &split_depth(w as u32, h as u32, w as u32 / 2), None);
+    lens_blur::apply(&mut out, w, h, &blur_at([0.25, 0.5]), &split_depth(w as u32, h as u32, w as u32 / 2), None, None);
     let row = (h / 2) * w;
     let beside = out[row + w / 2 + 1][0];
     assert!(beside < 0.05, "the background beside the subject took {beside} of its light");
@@ -95,7 +95,7 @@ fn an_in_focus_subject_leaves_no_halo_in_the_blurred_background() {
 fn a_larger_render_blurs_the_same_picture() {
     let render = |w: usize, h: usize| {
         let mut out = frame_of(w, h, |x, _| if (x * 16 / w).is_multiple_of(2) { 0.7 } else { 0.3 });
-        lens_blur::apply(&mut out, w, h, &blur_at([0.1, 0.5]), &split_depth(64, 32, 24), None);
+        lens_blur::apply(&mut out, w, h, &blur_at([0.1, 0.5]), &split_depth(64, 32, 24), None, None);
         out
     };
     let (w, h) = (512usize, 256usize);
@@ -167,7 +167,7 @@ fn synthetic_render(protect: Option<&image::GrayImage>) -> (Vec<[f32; 3]>, Vec<[
     let depth: lens_blur::DepthImage =
         image::ImageBuffer::from_fn(w as u32, h as u32, |x, _| image::Luma([(x * 65535 / (w as u32 - 1)) as u16]));
     let mut out = source.clone();
-    lens_blur::apply(&mut out, w, h, &blur_at([0.1, 0.5]), &depth, protect);
+    lens_blur::apply(&mut out, w, h, &blur_at([0.1, 0.5]), &depth, protect, None);
     (source, out)
 }
 
@@ -227,10 +227,10 @@ fn a_protect_mask_keeps_its_white_sharp_and_leaves_the_rest_as_it_was() {
     let sharp = texture(&checker, w, 84..108);
 
     let mut plain = checker.clone();
-    lens_blur::apply(&mut plain, w, h, &lb, &depth, None);
+    lens_blur::apply(&mut plain, w, h, &lb, &depth, None, None);
     let mut kept = checker.clone();
     let mask = protect_cols(w as u32, h as u32, 80..112, 255);
-    lens_blur::apply(&mut kept, w, h, &lb, &depth, Some(&mask));
+    lens_blur::apply(&mut kept, w, h, &lb, &depth, Some(&mask), None);
 
     assert!(texture(&plain, w, 84..108) < sharp * 0.2, "unprotected, that band blurs");
     assert!((texture(&kept, w, 84..108) - sharp).abs() < 1e-4, "protected, it keeps the source's texture");
@@ -255,8 +255,8 @@ fn a_protect_mask_keeps_its_white_sharp_and_leaves_the_rest_as_it_was() {
     let depth = split_depth(w as u32, h as u32, w as u32 / 2);
     let stripes = frame_of(w, h, |x, _| if (x / 8) % 2 == 0 { 0.8 } else { 0.2 });
     let (mut full, mut half) = (stripes.clone(), stripes.clone());
-    lens_blur::apply(&mut full, w, h, &lb, &depth, None);
-    lens_blur::apply(&mut half, w, h, &lb, &depth, Some(&protect_cols(w as u32, h as u32, 256..512, 128)));
+    lens_blur::apply(&mut full, w, h, &lb, &depth, None, None);
+    lens_blur::apply(&mut half, w, h, &lb, &depth, Some(&protect_cols(w as u32, h as u32, 256..512, 128)), None);
     let (t_sharp, t_half, t_full) =
         (texture(&stripes, w, 330..440), texture(&half, w, 330..440), texture(&full, w, 330..440));
     assert!(

@@ -297,11 +297,12 @@ impl AutoShadeApp {
                 // mask on the canvas, at that scale, so the range must too.
                 let film = self.film_short_edge();
                 let raw_source = self.source_is_raw();
+                let composed = autoshade::render::geometry_profile(&self.recipe);
                 let img = autoshade::render::develop_preview_framed(
                     &base,
                     &pre,
                     &autoshade::diag::pixels(),
-                    autoshade::render::MaskFrame::without_downstream(&pre.lens_profile),
+                    self.sampled_frame(&composed, &pre.lens_profile),
                     film,
                     raw_source,
                 );
@@ -330,9 +331,11 @@ impl AutoShadeApp {
         // stored in Lightroom's post-correction frame and the render now puts
         // it back there; an overlay that skipped the adaptation would advertise
         // coverage the render does not apply, by the whole field.
+        // On a corrected base (v1.17.0) the coverage is evaluated in that frame
+        // and needs no warp, as the canvas's own pixels need none.
         let cov_geom = autoshade::render::geometry_profile(&self.recipe);
         let cov_frame =
-            autoshade::render::MaskFrame::downstream(&cov_geom, self.recipe.lens_distortion);
+            autoshade::render::MaskFrame::of_base(&cov_geom, self.recipe.lens_distortion, self.base_corrected());
         let mut cov = image::DynamicImage::ImageLuma8(autoshade::render::mask_coverage(
             &mask, cov_ref, cov_frame,
         ));
@@ -926,10 +929,60 @@ impl AutoShadeApp {
     /// card's own pixel source: the source neutral, or a baked master): WB
     /// runs before develop, so the solve must see pre-develop pixels, not
     /// the current edit.
+    /// Is the canvas base in the lens-CORRECTED frame (v1.17.0)? A RAW source's
+    /// base is, when the recipe's camera stage resamples the lens
+    /// (`render::lens_in_camera`, which `render::BasePart` follows); a baked
+    /// source or a card on its own pixels never is.
+    pub(crate) fn base_corrected(&self) -> bool {
+        self.source_is_raw() && autoshade::render::lens_in_camera(&self.recipe)
+    }
+
+    /// An ORIGINAL-frame point → the point on the canvas base that shows the
+    /// same content: itself, or where the lens correction put it.
+    pub(crate) fn orig_to_base_norm(&self, (nx, ny): (f32, f32)) -> (f32, f32) {
+        if !self.base_corrected() {
+            return (nx, ny);
+        }
+        let (dims, _, dist) = self.geom_ctx();
+        autoshade::render::lens_ungeom_norm(nx, ny, dims, &dist.profile, dist.amount)
+    }
+
+    /// The mask frame of a SAMPLED develop over the canvas base (no geometry
+    /// stage follows): `MaskFrame::Corrected` on a corrected base, else the
+    /// no-downstream frame of `profile`, the reference recipe's own.
+    fn sampled_frame<'a>(
+        &self,
+        composed: &'a autoshade::recipe::LensProfile,
+        profile: &'a autoshade::recipe::LensProfile,
+    ) -> autoshade::render::MaskFrame<'a> {
+        if self.base_corrected() {
+            autoshade::render::MaskFrame::Corrected { profile: composed }
+        } else {
+            autoshade::render::MaskFrame::without_downstream(profile)
+        }
+    }
+
+    /// The canvas base in the ORIGINAL frame, for the helpers that draw a
+    /// raster the recipe stores there (segmentation, depth, the face find): a
+    /// corrected base mapped back through the engine's own inverse
+    /// (`render::corrected_to_sensor_frame`), otherwise the base itself.
+    pub(crate) fn original_frame_base(&self) -> Option<Arc<image::DynamicImage>> {
+        let base = self.base_preview.clone()?;
+        if !self.base_corrected() {
+            return Some(base);
+        }
+        let geom = autoshade::render::geometry_profile(&self.recipe);
+        Some(match autoshade::render::corrected_to_sensor_frame(&base, &geom, 0.0) {
+            Some((img, _)) => Arc::new(image::DynamicImage::ImageRgb8(img.to_rgb8())),
+            None => base,
+        })
+    }
+
     /// The one door every click-on-the-photo tool shares: a crosshair while
     /// armed, and on a click the point in the ORIGINAL frame (the frame
-    /// `base_preview`, the develop and every raster live in), mapped out of
-    /// the transformed view. `None` until the click.
+    /// the develop and every raster live in), mapped out of the transformed
+    /// view. `None` until the click. A tool that samples the canvas base reads
+    /// it at [`Self::orig_to_base_norm`] of this point.
     pub(crate) fn clicked_orig_norm(&self, ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) -> Option<(f32, f32)> {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         if !resp.clicked() {
@@ -941,7 +994,8 @@ impl AutoShadeApp {
     }
 
     pub(crate) fn handle_wb_pick(&mut self, ui: &egui::Ui, resp: &egui::Response, xf: ViewXform) {
-        let Some((nx, ny)) = self.clicked_orig_norm(ui, resp, xf) else { return };
+        let Some(orig) = self.clicked_orig_norm(ui, resp, xf) else { return };
+        let (nx, ny) = self.orig_to_base_norm(orig);
         let px = {
             let Some(base) = &self.base_preview else { return };
             let Some(px) = sample_5x5_mean(base, nx, ny) else { return };
@@ -991,18 +1045,20 @@ impl AutoShadeApp {
                 // they share cache.
                 let film = self.film_short_edge();
                 let raw_source = self.source_is_raw();
+                let composed = autoshade::render::geometry_profile(&self.recipe);
                 let img = autoshade::render::develop_preview_framed(
                     &base,
                     &pre,
                     &autoshade::diag::pixels(),
-                    autoshade::render::MaskFrame::without_downstream(&pre.lens_profile),
+                    self.sampled_frame(&composed, &pre.lens_profile),
                     film,
                     raw_source,
                 );
                 self.overlay_ref = Some((pre, img));
             }
+            let (bx, by) = self.orig_to_base_norm((nx, ny));
             let reference = &self.overlay_ref.as_ref().expect("range reference cached").1;
-            let Some(smp) = sample_5x5_mean(reference, nx, ny) else { return };
+            let Some(smp) = sample_5x5_mean(reference, bx, by) else { return };
             smp
         };
         // Keep the tolerance the user already dialled in; only re-key the colour.
@@ -1039,15 +1095,17 @@ impl AutoShadeApp {
             let reference = autoshade::render::point_color_sampling_recipe(&self.recipe);
             let film = self.film_short_edge();
             let raw_source = self.source_is_raw();
+            let composed = autoshade::render::geometry_profile(&self.recipe);
             let img = autoshade::render::develop_preview_framed(
                 &base,
                 &reference,
                 &autoshade::diag::pixels(),
-                autoshade::render::MaskFrame::without_downstream(&reference.lens_profile),
+                self.sampled_frame(&composed, &reference.lens_profile),
                 film,
                 raw_source,
             );
-            let Some(px) = sample_5x5_mean(&img, nx, ny) else { return };
+            let (bx, by) = self.orig_to_base_norm((nx, ny));
+            let Some(px) = sample_5x5_mean(&img, bx, by) else { return };
             px
         };
         self.pick_point_color(px);

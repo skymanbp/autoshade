@@ -321,6 +321,12 @@ pub(super) fn render_frame(
     let lens_gain = (SliderLaw::of(recipe) == SliderLaw::CameraRaw && recipe.lens_profile.vignette_active())
         .then(|| profile_vignette_lut(&recipe.lens_profile.vignette, recipe.lens_profile_vignetting_scale));
     let lens_gain = lens_gain.as_deref();
+    // The lens profile's distortion and CA where Camera Raw resamples them
+    // (v1.17.0, [`lens_in_camera`]): on the demosaiced linear frame, before the
+    // profile stage's clip at black. The composed profile, which the tail and
+    // the mask chain read too; `None` keeps the whole geometry in the tail.
+    let lens_geom = lens_in_camera(recipe).then(|| geometry_profile(recipe));
+    let lens = lens_geom.as_deref();
     // Under Camera Raw's law the frame keeps its over-range light to the
     // slider Exposure, which settles it (`calibrate_camera_buffer`).
     let defer_over_range = SliderLaw::of(recipe) == SliderLaw::CameraRaw;
@@ -328,7 +334,7 @@ pub(super) fn render_frame(
         strength,
         crate::denoise::mosaic_args_for(&rawimage).is_ok(),
         grain_weights,
-        || develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref(), lens_gain, defer_over_range)
+        || develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref(), lens_gain, lens, defer_over_range)
             .map(|(rgb, _, _)| rgb),
     )?;
     // --- AI denoise on the MOSAIC (opt-in), BEFORE demosaic (2026-09-15).
@@ -352,11 +358,15 @@ pub(super) fn render_frame(
         }
     }
 
-    let (mut data, w, h) =
-        develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref(), lens_gain, defer_over_range)?;
+    // The develop in its two halves with the mosaic dropped between them: the
+    // lens resample holds a second full frame, and it is not paid on top of
+    // the mosaic (`develop_raw_buffer` is the same two halves back to back).
+    let (data, w, h) = develop_raw_linear(&rawimage, &dev, geometry_cfa.as_ref(), calibration.is_some(), lens_gain)?;
     // The clean RGB owns the remaining work. Drop the mosaic before returning
     // grain; the original RGB already died when capture_original kept only Y.
     drop(rawimage);
+    let mut data =
+        settle_camera_buffer(data, w, h, calibration, geometry_cfa.is_some(), working, profile_stage.as_ref(), lens, defer_over_range);
     if let Some(original_y) = original_y {
         denoise_grain::return_luminance(&mut data, &original_y, 1.0 - strength, grain_weights);
     }
@@ -420,7 +430,7 @@ pub(super) fn render_frame(
     // Lightroom/engine composition. LINEAR uses only the engine inverse when
     // geometry follows, or transports its two handles once when none follows.
     let geom = geometry_profile(recipe);
-    let frame = MaskFrame::downstream(&geom, recipe.lens_distortion);
+    let frame = MaskFrame::of_base(&geom, recipe.lens_distortion, lens.is_some());
     // A RAW negative: an absent Sharpening amount renders at Lightroom's own
     // RAW default (`EditRecipe::capture_sharpening`, v1.6.0).
     apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, true, working, over_range);
@@ -459,8 +469,10 @@ pub(super) fn render_frame(
     // develop so the mask chain and this resample are ONE decision — the gate
     // inside is the one `frame.warps()` answers with.
     //
-    // Orientation was applied BEFORE the develop, so no tail rotation.
-    Ok(frame_and_finish(dynimg, recipe, &geom, film, CropPolicy::Cut))
+    // Orientation was applied BEFORE the develop, so no tail rotation. A frame
+    // the camera stage already corrected takes no second lens resample
+    // ([`tail_lens`]).
+    Ok(frame_and_finish(dynimg, recipe, tail_lens(&geom, lens.is_some()), film, CropPolicy::Cut))
 }
 
 /// Both original and clean RAW buffers go through this exact develop and
@@ -469,8 +481,13 @@ pub(super) fn render_frame(
 ///
 /// `lens_gain` is the lens profile's radial vignetting gain LUT, put on the
 /// sensor's linear light here, before calibration and the profile stage.
+/// `lens` is the composed lens profile the camera stage resamples the frame
+/// through ([`lens_in_camera`]), after that gain and before calibration.
 /// `defer_over_range` is [`calibrate_camera_buffer`]'s.
-#[allow(clippy::too_many_arguments)] // one value each of the develop: the frame, its demosaic and geometry, its calibration, space, profile, lens gain and over-range rule
+///
+/// The two halves, [`develop_raw_linear`] then [`settle_camera_buffer`], back
+/// to back: `render_frame` calls them itself with the mosaic dropped between.
+#[allow(clippy::too_many_arguments)] // one value each of the develop: the frame, its demosaic and geometry, its calibration, space, profile, lens gain, lens geometry and over-range rule
 pub(super) fn develop_raw_buffer(
     rawimage: &rawler::RawImage,
     dev: &RawDevelop,
@@ -479,7 +496,25 @@ pub(super) fn develop_raw_buffer(
     working: ExportColorSpace,
     profile_stage: Option<&profile::Stage>,
     lens_gain: Option<&[f32]>,
+    lens: Option<&crate::recipe::LensProfile>,
     defer_over_range: bool,
+) -> Result<(Vec<[f32; 3]>, usize, usize)> {
+    let (data, w, h) = develop_raw_linear(rawimage, dev, geometry_cfa, calibration.is_some(), lens_gain)?;
+    let data =
+        settle_camera_buffer(data, w, h, calibration, geometry_cfa.is_some(), working, profile_stage, lens, defer_over_range);
+    Ok((data, w, h))
+}
+
+/// The develop's first half: the demosaic (with its default crop) and the lens
+/// profile's vignetting gain, on camera-native LINEAR light when the engine
+/// calibrates (`calibrated`) or demosaiced the CFA itself, and on rawler's own
+/// sRGB develop otherwise.
+pub(super) fn develop_raw_linear(
+    rawimage: &rawler::RawImage,
+    dev: &RawDevelop,
+    geometry_cfa: Option<&rawler::cfa::CFA>,
+    calibrated: bool,
+    lens_gain: Option<&[f32]>,
 ) -> Result<(Vec<[f32; 3]>, usize, usize)> {
     let inter = match develop_cfa_signed(rawimage, dev) {
         Some(inter) => inter,
@@ -521,7 +556,7 @@ pub(super) fn develop_raw_buffer(
     // Wide path: camera-native LINEAR until the calibrate below.
     let mut data: Vec<[f32; 3]> = rgb.data;
     if let Some(lut) = lens_gain {
-        if calibration.is_some() || geometry_cfa.is_some() {
+        if calibrated || geometry_cfa.is_some() {
             // Camera-native linear light: the gain is a plain factor, ahead of
             // everything the profile stage does to the pixel.
             apply_radial_gain_linear(&mut data, w, h, lut);
@@ -531,9 +566,42 @@ pub(super) fn develop_raw_buffer(
             apply_radial_gain(&mut data, w, h, lut);
         }
     }
+    Ok((data, w, h))
+}
+
+/// The develop's second half: the lens resample ([`apply_lens_geometry_linear`],
+/// when `lens` is given), then the white balance, calibration and profile
+/// stage ([`calibrate_camera_buffer`]) — or, with no calibration, the sRGB
+/// transfer a CFA the engine demosaiced still needs (`own_cfa`).
+///
+/// The resample comes AFTER the vignetting gain, which is a function of the
+/// SENSOR position and rides the resample with the light it lit — Camera
+/// Raw's order, measured on the 24–105's flat field against the frame's own
+/// gain ladder: gain then resample renders within ±0.15 % of Camera Raw from
+/// the centre to r 0.94, the resample first +0.2 to +0.65 % off over r 0.26–0.94.
+/// And BEFORE everything that clips: its samples keep their signed black into
+/// the profile stage's own `max(0)`. On rawler's sRGB develop (no
+/// calibration; no profile stage ran) it resamples that develop's encoded
+/// values, the frame the tail resampled before v1.17.0.
+#[allow(clippy::too_many_arguments)] // `develop_raw_buffer`'s second half: the frame, its calibration, space, profile, lens geometry and over-range rule
+pub(super) fn settle_camera_buffer(
+    data: Vec<[f32; 3]>,
+    w: usize,
+    h: usize,
+    calibration: Option<([[f32; 3]; 3], [f32; 3])>,
+    own_cfa: bool,
+    working: ExportColorSpace,
+    profile_stage: Option<&profile::Stage>,
+    lens: Option<&crate::recipe::LensProfile>,
+    defer_over_range: bool,
+) -> Vec<[f32; 3]> {
+    let mut data = match lens {
+        Some(p) => apply_lens_geometry_linear(data, w, h, p),
+        None => data,
+    };
     if let Some((xyz2cam, wb)) = calibration {
         calibrate_camera_buffer(&mut data, &xyz2cam, wb, working, profile_stage, defer_over_range);
-    } else if geometry_cfa.is_some() {
+    } else if own_cfa {
         // A camera with no colour matrix at all: rawler skips its `Calibrate`
         // step there but still applies `SRgb` (`imgop/develop.rs:199-233`).
         // This path stripped both, so the working encoding is applied here or
@@ -542,7 +610,7 @@ pub(super) fn develop_raw_buffer(
             *px = [linear_to_srgb(px[0]), linear_to_srgb(px[1]), linear_to_srgb(px[2])];
         });
     }
-    Ok((data, w, h))
+    data
 }
 
 /// rawler's `develop_intermediate` for a CFA mosaic with the black subtracted

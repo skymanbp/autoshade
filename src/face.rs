@@ -299,7 +299,11 @@ pub fn skin_seed(reference: &image::RgbImage, face: &GrayImage) -> Option<([f32;
 
 /// The pixels a skin seed is SAMPLED from: `frame` (the photo's neutral frame —
 /// a RAW's sensor develop, a baked source's own pixels) developed with
-/// `recipe`'s masks BEFORE index `before` and no geometry stage.
+/// `recipe`'s masks BEFORE index `before` and no geometry stage. `lens` is the
+/// composed lens profile when `frame` is already lens-corrected through it
+/// (the canvas's base under a camera stage that resamples the lens, v1.17.0),
+/// so the masks before the skin mask are sampled in that frame
+/// (`MaskFrame::Corrected`); `None` for a sensor-frame picture.
 ///
 /// A Range Mask is matched on the pixel as it stands when its mask runs —
 /// after the global white balance, tone and colour, and after the masks
@@ -317,6 +321,7 @@ pub fn skin_seed_reference(
     before: usize,
     film_short_edge: Option<u32>,
     raw_source: bool,
+    lens: Option<&crate::recipe::LensProfile>,
 ) -> image::RgbImage {
     let mut pre = recipe.clone();
     pre.masks.truncate(before);
@@ -325,15 +330,12 @@ pub fn skin_seed_reference(
     pre.ca_r = 0.0;
     pre.ca_b = 0.0;
     pre.crop = None;
-    crate::render::develop_preview_framed(
-        frame,
-        &pre,
-        &crate::diag::pixels(),
-        crate::render::MaskFrame::without_downstream(&pre.lens_profile),
-        film_short_edge,
-        raw_source,
-    )
-    .to_rgb8()
+    let mask_frame = match lens {
+        Some(profile) => crate::render::MaskFrame::Corrected { profile },
+        None => crate::render::MaskFrame::without_downstream(&pre.lens_profile),
+    };
+    crate::render::develop_preview_framed(frame, &pre, &crate::diag::pixels(), mask_frame, film_short_edge, raw_source)
+        .to_rgb8()
 }
 
 /// A bitmap mask over `raster` carrying `role` — the FACE and EYES masks. The
@@ -642,6 +644,8 @@ fn resolve_face_masks_with(
                     *at,
                     crate::decode::film_short_edge(src),
                     crate::decode::is_raw(src),
+                    // The sensor-frame picture the face was found on.
+                    None,
                 );
                 skin_seed(&developed, &face)
             });

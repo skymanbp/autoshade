@@ -91,7 +91,9 @@ impl AutoShadeApp {
         if self.busy {
             return;
         }
-        let Some(base) = self.base_preview.clone() else { return };
+        // The ORIGINAL frame the depth map is stored in (v1.17.0: a corrected
+        // base is mapped back first).
+        let Some(base) = self.original_frame_base() else { return };
         let Some(src) = self.src_path.clone() else { return };
         self.busy = true;
         self.status = tr(self.lang, "AI estimating depth… (the first run downloads the model)").into();

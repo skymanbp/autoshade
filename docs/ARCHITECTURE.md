@@ -2126,6 +2126,35 @@ they cannot drift; the two previews pass `CropPolicy::Keep`, which positions
 the finishing pass on the crop rectangle while leaving the frame whole for
 slider feedback.
 
+**v1.17.0: under Camera Raw's law the lens resample is in the camera stage.**
+Camera Raw resamples the photograph through its lens profile before it clips at
+black; this engine's tail resampled the 16-bit ENCODED frame after the clip, so
+every zero pixel with a lit neighbour came out non-zero (p42 flat: 2.04 % of
+the frame zero before the resample, 0.11 % after it; Camera Raw 2.06 %). When
+`render::lens_in_camera` holds — a camera profile named, the manual Distortion
+slider at 0, Remove Chromatic Aberration off, a profile distortion or CA active
+— `render::source` resamples the demosaiced camera-native LINEAR frame
+(`apply_lens_geometry_linear`: the same map and clamped bilinear windows, in
+f32, no clamp) after the profile's vignetting gain and before calibration, and
+the tail takes no lens resample (`render::tail_lens`). The order against the
+gain is Camera Raw's, measured on the 24–105's flat field against its own gain
+ladder: gain then resample within ±0.15 % of Camera Raw to r 0.94, the resample
+first +0.2 to +0.65 % off. CA is resampled on the SENSOR's red and blue: on p41
+(CA only) the camera-space resample matches Camera Raw's edges as well as or
+better than one in the working primaries on 12 of 15 corner × channel
+residuals (the other three within 1×10⁻⁴ of full scale), and Camera Raw's output green gains high-frequency noise towards the
+corners (+13 % from centre to corner, the camera-space resample +10 %, a
+working-space one +0 %), the mark of a sensor-blue shift mixed into green by
+the matrix. The mask chain then samples in the corrected frame
+(`MaskFrame::Corrected`, below), and so do the other passes that read a stored
+position — retouch areas (centre and donor mapped forward, radius by the local
+scale, brush areas read through the map), the colour field's grid, pixel layers
+and the lens blur's depth, protect mask and focus. The two other cases keep
+the whole geometry in the tail (named leftovers): a moved Distortion slider (a
+drag would re-develop the base on every step) and Remove Chromatic Aberration
+(its solver reads the developed pixels). Transform/Upright still resamples the
+encoded frame in the tail.
+
 The engine's source is `src/render.rs` and the files under `src/render/`.
 Through v1.6.5 the root was one file of 21,842 lines holding everything that was
 not already a named sub-module; it is now the module doc, the imports, the `mod`
@@ -3065,7 +3094,16 @@ it) and, for a part that names a profile, a 32-bit float frame that keeps the
 camera stage's over-range light for the canvas's Exposure (×2 the 16-bit
 frame's memory: a 4096 px base measured 128.3 MB against 64.1 MB, a
 process committing 146 MB after it against 82 MB; the peak, 1059 MB on a 61 MP
-frame, is the full-frame develop's either way). Every surface that shrinks a
+frame, is the full-frame develop's either way). A part whose camera stage
+resamples the lens (`render::lens_in_camera`) carries the composed lens
+geometry too, so its base is in the lens-CORRECTED frame and switching the
+profile's corrections re-develops it; the resample runs at full resolution
+before the cap, with the mosaic already dropped (the export's peak with it,
+p42 61 MP: 1399 MB, under `PER_PHOTO_PEAK_COMMIT_MB`). The GUI samples such a
+base at the corrected point of a click (`orig_to_base_norm`), and hands its
+segmentation, depth and face helpers the base mapped back to the original
+frame (`original_frame_base`). The reverse fit's source and the retouch
+pictures stay in the sensor frame (`BasePart::without_lens`). Every surface that shrinks a
 frame goes through `render::thumbnail` / `thumbnail_exact`: `image`'s own block
 average is `(sum + n/2) / n`, which on an f32 frame is the mean + 0.5, so a
 float base sent to it came back washed out (the fit then refused it as
@@ -3073,7 +3111,8 @@ toneless). The heal /
 clone / denoise / stack / generative MASTERS bake through `render::master_develop`
 / `master_pixels_for` instead: the same part with the RAW default sharpening,
 16-bit, because a master is a baked file and a baked file renders with no
-default sharpening. `PhotoCalibration` carries the profile and the
+default sharpening, and in the SENSOR frame, the card over it resampling the
+lens in the tail. `PhotoCalibration` carries the profile and the
 Look. A baked file — a master, an embedded preview, a finished image — already
 carries its start, so `strip_baked_start` clears the curve, profile, Look and
 lens profile before it renders. On p39 at 1000 px against the engine's render
@@ -3941,8 +3980,15 @@ experiment:
   | LINEAR | active | sample at `T_engine(p)` only; rebuild the straight line in the corrected frame |
   | LINEAR | inactive | map Zero/Full once through `D_fwd`; rebuild one straight line in the raw pixel metric |
 
-  `MaskFrame` makes the caller's downstream fact explicit with three states:
-  `WarpedDownstream`, `LinearHandlesToRaw`, and `AsRendered`. The disabled-
+  `MaskFrame` makes the caller's downstream fact explicit with four states:
+  `WarpedDownstream`, `LinearHandlesToRaw`, `AsRendered`, and (v1.17.0)
+  `Corrected` — pixels the camera stage already lens-corrected, where each
+  pixel first finds its original-frame point through the resample's own green
+  map (`MaskUnwarp::source_point`) and is then evaluated as `WarpedDownstream`
+  evaluates it. On p39 against Camera Raw the radial, linear and brush masks
+  render with the same IoU from the corrected frame as from the tail (radial
+  0.9911, linear 0.9884, brush 0.7574 at α ½ — the brush gap is its deposit
+  density, not its place). The disabled-
   sidecar case keeps RADIAL identity in `mask_warp` while retaining LINEAR's
   handle map separately in `linear_handle_warp`; every other solved state uses
   `mask_warp` as the handle source. Pixel loops never call the handle map.

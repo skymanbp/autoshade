@@ -13,9 +13,11 @@ fn developed_card_pixels(
     let raw = autoshade::decode::is_raw(path);
     // The card's own base (v1.17.0): the profile and Look table its recipe
     // names are in the pixels the preview develop below is handed.
+    // In the SENSOR frame (`without_lens`, v1.17.0): the brush mask this
+    // picture is paired with is stored there, and nothing below resamples it.
     let base = autoshade::render::source_pixels_for(
         path,
-        &autoshade::render::BasePart::of(recipe),
+        &autoshade::render::BasePart::of(recipe).without_lens(),
         (raw && !full_res).then_some(2048),
     )?;
     Ok(autoshade::render::develop_preview_framed(

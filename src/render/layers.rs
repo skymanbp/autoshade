@@ -180,7 +180,18 @@ pub(super) fn load_layers(
 /// any other size bilinearly at texel centres (the mask rasters' convention,
 /// [`sample_gray_norm`]), so a 2048 px fill lands where it was painted on a
 /// full-resolution export too.
-pub(super) fn composite(data: &mut [[f32; 3]], w: usize, h: usize, layer: &image::RgbaImage, opacity: f32) {
+///
+/// `corrected` (v1.17.0, `MaskFrame::Corrected`): the frame is lens-corrected
+/// and the layer is stored in the original frame, so each pixel reads the
+/// layer bilinearly at the original-frame point it shows.
+pub(super) fn composite(
+    data: &mut [[f32; 3]],
+    w: usize,
+    h: usize,
+    layer: &image::RgbaImage,
+    opacity: f32,
+    corrected: Option<&super::masks::MaskUnwarp>,
+) {
     let (lw, lh) = (layer.width() as usize, layer.height() as usize);
     if lw == 0 || lh == 0 || w == 0 || h == 0 {
         return;
@@ -195,10 +206,24 @@ pub(super) fn composite(data: &mut [[f32; 3]], w: usize, h: usize, layer: &image
         let i0 = s.floor() as usize;
         (i0, (i0 + 1).min(ln - 1), s - i0 as f32)
     };
+    // The same texel-centre read at a continuous normalised point.
+    let at_norm = |nx: f32, ny: f32| -> [f32; 4] {
+        let s = |n: f32, ln: usize| {
+            let s = (n * ln as f32 - MASK_SAMPLE_CENTRE).clamp(0.0, (ln - 1) as f32);
+            let i0 = s.floor() as usize;
+            (i0, (i0 + 1).min(ln - 1), s - i0 as f32)
+        };
+        let ((x0, x1, fx), (y0, y1, fy)) = (s(nx, lw), s(ny, lh));
+        let (a, b, c, d) = (texel(x0, y0), texel(x1, y0), texel(x0, y1), texel(x1, y1));
+        std::array::from_fn(|k| (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy)
+    };
     data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         let (y0, y1, fy) = if same { (y, y, 0.0) } else { axis(y, h, lh) };
         for (x, px) in row.iter_mut().enumerate() {
-            let v = if same {
+            let v = if let Some(u) = corrected {
+                let (sx, sy) = u.source_point((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+                at_norm(sx, sy)
+            } else if same {
                 texel(x, y)
             } else {
                 let (x0, x1, fx) = axis(x, w, lw);

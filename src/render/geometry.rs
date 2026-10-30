@@ -568,6 +568,127 @@ pub fn lens_ungeom_norm(
 /// (+ per-channel CA) and the manual amount in one bilinear pass. Identity →
 /// clone. Same 16-bit precision policy as [`apply_lens_distortion`], which
 /// remains as the manual-only special case this generalises.
+/// The composed map's per-channel radial factor LUTs over `rn ∈ [0, 1]` (red,
+/// green, blue): the corrected pixel at radius `rn` samples its channel at
+/// `centre + offset · factor`. One lookup per channel per pixel instead of
+/// spline walks; CA multiplies the green map. Shared by the encoded resample
+/// ([`apply_lens_geometry`]), the camera stage's linear one
+/// ([`apply_lens_geometry_linear`]) and the mask frame that reads a corrected
+/// frame (`MaskFrame::Corrected`).
+pub(super) fn channel_luts(profile: &crate::recipe::LensProfile, amount: f32, dims: (f32, f32)) -> [Vec<f32>; 3] {
+    let dist_on = profile.distortion_on && !profile.distortion.is_empty();
+    let ca_on = profile.ca_on && !profile.ca_r.is_empty() && !profile.ca_b.is_empty();
+    let (k, s) = if amount.abs() < 1e-3 { (0.0, 1.0) } else { distort_params(amount) };
+    let dist_knots: &[f32] = if dist_on { &profile.distortion } else { &[] };
+    let s_p = if dist_on { profile_fill_scale(&profile.distortion, dims) } else { 1.0 };
+    // Composite CA fill (L04-2): every channel's LUT divides by ONE scalar
+    // (≥ 1; exactly 1 when no channel overshoots, keeping those paths
+    // bit-identical), so a ca knot above 1 zooms the whole frame in by up
+    // to that knot instead of sending red/blue edge samples outside the
+    // source, where the clamping sampler smeared them into a radial band.
+    // Per-channel renormalisation is NOT an option — dividing ca_r by its
+    // own max would cancel the near-constant correction it encodes.
+    let fill = geometry_fill_scale(profile, amount, dims);
+    let base: Vec<f32> =
+        (0..LUT_N).map(|i| lens_geom_factor(i as f32 / (LUT_N - 1) as f32, dist_knots, s_p, k, s)).collect();
+    let chan = |knots: &[f32]| -> Vec<f32> {
+        if !ca_on || knots.is_empty() {
+            return base.iter().map(|f| f / fill).collect();
+        }
+        (0..LUT_N)
+            .map(|i| {
+                let rn = i as f32 / (LUT_N - 1) as f32;
+                base[i] * profile_knot_interp(knots, rn) / fill
+            })
+            .collect()
+    };
+    [chan(&profile.ca_r), chan(&[]), chan(&profile.ca_b)]
+}
+
+/// Does the lens geometry run in the CAMERA STAGE for `r` (v1.17.0)? Camera
+/// Raw resamples the photograph through its lens profile before it clips at
+/// black, in signed linear light; this engine's encoded resample after the
+/// clip turned every zero pixel with a lit neighbour into a non-zero one
+/// (p42 flat: 2.04 % of the frame zero before the resample, 0.11 % after it,
+/// Camera Raw 2.06 %). So under Camera Raw's law the profile distortion and
+/// CA are resampled on the demosaiced linear frame
+/// ([`apply_lens_geometry_linear`], `render::source`) and the tail skips them.
+///
+/// Not when the manual Distortion slider moves (`lens_distortion`): it is
+/// composed into the same single resample and a slider drag would
+/// re-develop the base on every step, so that recipe keeps the whole geometry
+/// in the tail. Not when Remove Chromatic Aberration is on: its solver reads
+/// the developed pixels the geometry would already have moved. Both stay
+/// where they were (named leftovers, `docs/TECH_STACK.md`).
+pub fn lens_in_camera(r: &EditRecipe) -> bool {
+    SliderLaw::of(r) == SliderLaw::CameraRaw
+        && r.lens_distortion == 0.0
+        && !r.auto_lateral_ca
+        && geometry_profile(r).geometry_active()
+}
+
+/// The lens profile the TAIL resamples with (`frame_and_finish`): `geom`, or
+/// none at all when the frame in hand was developed with the lens in the
+/// camera stage (`corrected`, [`lens_in_camera`]) — a second resample would
+/// correct it twice. [`MaskFrame::of_base`] is the mask chain's half of the
+/// same decision.
+pub fn tail_lens(geom: &crate::recipe::LensProfile, corrected: bool) -> &crate::recipe::LensProfile {
+    static NONE: std::sync::LazyLock<crate::recipe::LensProfile> =
+        std::sync::LazyLock::new(crate::recipe::LensProfile::default);
+    if corrected { &NONE } else { geom }
+}
+
+/// [`apply_lens_geometry`] on the camera stage's frame (v1.17.0,
+/// [`lens_in_camera`]): the demosaiced, white-level-scaled LINEAR light with
+/// its signed black, before the profile stage clips at zero. The same map
+/// ([`channel_luts`], the manual amount 0) and the same clamped bilinear
+/// windows, in f32, with no clamp and no rounding: a sample below the black
+/// stays below it, and the clip it meets is the profile stage's own.
+pub(super) fn apply_lens_geometry_linear(
+    data: Vec<[f32; 3]>,
+    w: usize,
+    h: usize,
+    profile: &crate::recipe::LensProfile,
+) -> Vec<[f32; 3]> {
+    if w == 0 || h == 0 || !profile.geometry_active() {
+        return data;
+    }
+    let ca_on = profile.ca_on && !profile.ca_r.is_empty() && !profile.ca_b.is_empty();
+    let (wf, hf) = (w as f32, h as f32);
+    let luts = channel_luts(profile, 0.0, (wf, hf));
+    let rr = (0.5 * (wf * wf + hf * hf).sqrt()).max(1e-6);
+    let (cx, cy) = ((wf - 1.0) * 0.5, (hf - 1.0) * 0.5);
+    let sample = |sx: f32, sy: f32, c: usize| -> f32 {
+        let x0 = sx.floor().clamp(0.0, wf - 1.0);
+        let y0 = sy.floor().clamp(0.0, hf - 1.0);
+        let x1 = (x0 + 1.0).min(wf - 1.0);
+        let y1 = (y0 + 1.0).min(hf - 1.0);
+        let (fx, fy) = ((sx - x0).clamp(0.0, 1.0), (sy - y0).clamp(0.0, 1.0));
+        let at = |x: f32, y: f32| data[y as usize * w + x as usize][c];
+        let top = at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx;
+        let bot = at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx;
+        top * (1.0 - fy) + bot * fy
+    };
+    let mut out = vec![[0.0f32; 3]; w * h];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let dy = y as f32 - cy;
+        for (x, px) in row.iter_mut().enumerate() {
+            let dx = x as f32 - cx;
+            let rn = ((dx * dx + dy * dy).sqrt() / rr).clamp(0.0, 1.0);
+            if ca_on {
+                for (c, lut) in luts.iter().enumerate() {
+                    let f = sample_lut(lut, rn);
+                    px[c] = sample(cx + dx * f, cy + dy * f, c);
+                }
+            } else {
+                let f = sample_lut(&luts[1], rn);
+                *px = [0, 1, 2].map(|c| sample(cx + dx * f, cy + dy * f, c));
+            }
+        }
+    });
+    out
+}
+
 pub fn apply_lens_geometry(
     img: &DynamicImage,
     profile: &crate::recipe::LensProfile,
@@ -586,36 +707,7 @@ pub fn apply_lens_geometry(
     let src = rgb16_source(img);
     let src = &*src; // the samplers take a plain &ImageBuffer
     let (w, h) = (src.width() as f32, src.height() as f32);
-    let (k, s) = if amount.abs() < 1e-3 { (0.0, 1.0) } else { distort_params(amount) };
-    let dist_knots: &[f32] = if dist_on { &profile.distortion } else { &[] };
-    let s_p = if dist_on { profile_fill_scale(&profile.distortion, (w, h)) } else { 1.0 };
-    // Composite CA fill (L04-2): every channel's LUT divides by ONE scalar
-    // (≥ 1; exactly 1 when no channel overshoots, keeping those paths
-    // bit-identical), so a ca knot above 1 zooms the whole frame in by up
-    // to that knot instead of sending red/blue edge samples outside the
-    // source, where the clamping sampler smeared them into a radial band.
-    // Per-channel renormalisation is NOT an option — dividing ca_r by its
-    // own max would cancel the near-constant correction it encodes.
-    let fill = geometry_fill_scale(profile, amount, (w, h));
-    // Per-channel radial factor LUTs over rn ∈ [0,1]: one lookup per channel
-    // per pixel instead of spline walks. CA multiplies the green map.
-    let luts: [Vec<f32>; 3] = {
-        let base: Vec<f32> = (0..LUT_N)
-            .map(|i| lens_geom_factor(i as f32 / (LUT_N - 1) as f32, dist_knots, s_p, k, s))
-            .collect();
-        let chan = |knots: &[f32]| -> Vec<f32> {
-            if !ca_on || knots.is_empty() {
-                return base.iter().map(|f| f / fill).collect();
-            }
-            (0..LUT_N)
-                .map(|i| {
-                    let rn = i as f32 / (LUT_N - 1) as f32;
-                    base[i] * profile_knot_interp(knots, rn) / fill
-                })
-                .collect()
-        };
-        [chan(&profile.ca_r), chan(&[]), chan(&profile.ca_b)]
-    };
+    let luts = channel_luts(profile, amount, (w, h));
     let rr = (0.5 * (w * w + h * h).sqrt()).max(1e-6);
     let (cx, cy) = ((w - 1.0) * 0.5, (h - 1.0) * 0.5);
     let ow = src.width() as usize;

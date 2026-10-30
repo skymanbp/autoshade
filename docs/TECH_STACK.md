@@ -467,7 +467,8 @@ bundled; a machine with no profiles gets a named refusal.
   names a profile renders no camera curve. The profile stage runs inside the RAW
   develop, so every surface that hands pixels to the preview develop hands it the
   BASE develop of the recipe's `render::BasePart` (profile + Look table, no baked
-  tone, no sharpening; float with the over-range light kept under a profile):
+  tone, no sharpening; float with the over-range light kept under a profile;
+  lens-corrected when the camera stage resamples the lens):
   the GUI and web canvases (keyed and re-developed by part) and
   `pipeline::fit_source`; the heal / clone / fill / denoise / stack masters bake
   the same part with the RAW default sharpening (`render::master_develop`).
@@ -550,7 +551,9 @@ photo is black and white), RGB point curves, eight-band HSL and the point
 colours, colour grading,
 clarity, Texture, saturation/vibrance, noise reduction, sharpening, local
 adjustments, the colour field, the SDR rendition when the photo is in HDR edit
-mode, and last the generative fill's pixel layers. The frame is then resampled — lens geometry, the Transform/Upright projective
+mode, and last the generative fill's pixel layers. The frame is then resampled — lens geometry (unless the camera stage already
+resampled it: under a camera profile with the Distortion slider at 0 and Remove Chromatic Aberration off, the profile's distortion
+and CA are resampled on the demosaiced linear frame, after the vignetting gain and before the black clip, `render::lens_in_camera`), the Transform/Upright projective
 step (`render/perspective.rs`), straighten, crop —
 and only after that does the **finishing pass** run: the post-crop vignette and
 film grain, whose whole definition is "after the crop" (`render/finish.rs`).
@@ -1984,6 +1987,15 @@ frame.
   frame facts they cannot apply safely.
 - Seventy-three fisheye-only LCP entries are refused; no rectilinear Newton
   result is claimed for them.
+- The camera-stage lens resample (v1.17.0, `render::lens_in_camera`), engine
+  − Camera Raw on 16-bit flat renders (colour noise reduction 0 on both), per
+  band of Camera Raw's own log2 map: p42 [−12, −10) +1.83 → +0.96 st, zero
+  pixels 0.75 → 7.50 % (Camera Raw 13.72 %); p41 (CA only) +0.33 → +0.28 st,
+  zero pixels 0.05 → 0.76 % (0.77 %), and 0.67 → 4.97 % (5.27 %), 4.38 →
+  17.45 % (18.13 %) in the two bands below. Not closed: p42's CA knots pass 1,
+  and the composite CA fill zooms all three channels by up to 0.9 px at the
+  corners where Camera Raw moves only blue (green and red in place to 0.03 px);
+  the remaining p41 lift is not the kernel (bicubic +0.27, Lanczos-3 +0.26 st).
 
 ### Source
 

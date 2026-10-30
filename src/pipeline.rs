@@ -2955,7 +2955,9 @@ pub const FIT_SOURCE_EDGE: u32 = 2048;
 /// the canvas and the export show.
 pub fn fit_source(raw: &Path) -> Result<(image::DynamicImage, crate::recipe::EditRecipe)> {
     let base = calibration_recipe(fit_calibration(raw));
-    let part = crate::render::BasePart::of(&base);
+    // The SENSOR frame (`without_lens`): the pairing below measures the
+    // target's geometry against it (`fit_target`).
+    let part = crate::render::BasePart::of(&base).without_lens();
     Ok((crate::render::base_develop(raw, &part, Some(FIT_SOURCE_EDGE))?, base))
 }
 

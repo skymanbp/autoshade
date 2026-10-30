@@ -565,6 +565,14 @@ pub enum MaskFrame<'a> {
     /// will be looked at, so every geometry is evaluated at its stored
     /// coordinates.
     AsRendered,
+    /// The pixels are ALREADY lens-corrected through exactly this profile (the
+    /// camera stage resampled them, v1.17.0, `lens_in_camera`) and nothing
+    /// downstream moves them. Every geometry is stored in the original frame,
+    /// so each corrected pixel first finds its original-frame point through the
+    /// resample's own map (the green channel's) and is then evaluated there
+    /// exactly as [`MaskFrame::WarpedDownstream`] evaluates it: the same mask
+    /// at the same place as when the tail resampled the masked frame.
+    Corrected { profile: &'a crate::recipe::LensProfile },
 }
 
 impl<'a> MaskFrame<'a> {
@@ -579,6 +587,20 @@ impl<'a> MaskFrame<'a> {
         } else {
             Self::without_downstream(profile)
         }
+    }
+
+    /// The frame for pixels developed from a base that is (`corrected`) or is
+    /// not already lens-corrected: [`MaskFrame::Corrected`], or what
+    /// [`MaskFrame::downstream`] answers for a tail that will run the geometry.
+    pub fn of_base(profile: &'a crate::recipe::LensProfile, amount: f32, corrected: bool) -> Self {
+        if corrected { MaskFrame::Corrected { profile } } else { Self::downstream(profile, amount) }
+    }
+
+    /// The frame for a SAMPLED develop (no geometry stage follows) of a base
+    /// that is (`corrected`) or is not already lens-corrected:
+    /// [`MaskFrame::Corrected`], or [`MaskFrame::without_downstream`].
+    pub fn sampled(profile: &'a crate::recipe::LensProfile, corrected: bool) -> Self {
+        if corrected { MaskFrame::Corrected { profile } } else { Self::without_downstream(profile) }
     }
 
     /// What a caller that deliberately omits the geometry stage passes. RADIAL
@@ -604,6 +626,7 @@ impl<'a> MaskFrame<'a> {
             MaskFrame::WarpedDownstream { profile, amount } => {
                 MaskUnwarp::new(profile, amount, dims)
             }
+            MaskFrame::Corrected { profile } => MaskUnwarp::corrected(profile, dims),
             MaskFrame::LinearHandlesToRaw { .. } | MaskFrame::AsRendered => None,
         }
     }
@@ -631,6 +654,30 @@ impl<'a> MaskFrame<'a> {
         }
         if moved { Cow::Owned(out) } else { Cow::Borrowed(mask) }
     }
+}
+
+/// A raster drawn in the ORIGINAL frame (a brush, a face the detector found on
+/// the sensor-frame picture), read into the lens-CORRECTED frame a base is
+/// developed in when the camera stage resamples the lens (v1.17.0,
+/// [`super::lens_in_camera`]): every corrected pixel takes the original-frame
+/// point it shows, through the map [`MaskFrame::Corrected`] samples masks
+/// with. A copy when the profile moves nothing.
+pub fn sensor_raster_to_corrected(mask: &image::GrayImage, profile: &crate::recipe::LensProfile) -> image::GrayImage {
+    let dims = (mask.width() as f32, mask.height() as f32);
+    match MaskUnwarp::corrected(profile, dims) {
+        Some(u) => raster_through(mask, &u),
+        None => mask.clone(),
+    }
+}
+
+/// `alpha` read through `u`'s corrected-frame map ([`MaskUnwarp::source_point`]),
+/// bilinearly at texel centres, at `alpha`'s own size.
+pub(super) fn raster_through(alpha: &image::GrayImage, u: &MaskUnwarp) -> image::GrayImage {
+    let (w, h) = (alpha.width() as f32, alpha.height() as f32);
+    image::GrayImage::from_fn(alpha.width(), alpha.height(), |x, y| {
+        let (sx, sy) = u.source_point((x as f32 + 0.5) / w, (y as f32 + 0.5) / h);
+        image::Luma([(sample_gray_norm(alpha, sx, sy) * 255.0).round().clamp(0.0, 255.0) as u8])
+    })
 }
 
 /// Map a LINEAR component's two handles in the camera map's forward direction
@@ -686,6 +733,11 @@ pub(super) struct MaskUnwarp {
     /// Factor `r_corrected / r_original` at node `i` = radius `i/(LUT_N−1)` of
     /// the half-diagonal.
     lut: Vec<f32>,
+    /// [`MaskFrame::Corrected`] only: the resample's own green-channel factor
+    /// `r_original / r_corrected` over the corrected radius
+    /// ([`super::channel_luts`]), which takes a corrected pixel to the
+    /// original-frame point it was resampled from ([`MaskUnwarp::source_point`]).
+    pre: Option<Vec<f32>>,
     rr: f32,
     w: f32,
     h: f32,
@@ -734,7 +786,28 @@ impl MaskUnwarp {
         if lut.iter().all(|f| (f - 1.0).abs() * rr < 0.01) {
             return None;
         }
-        Some(MaskUnwarp { lut, rr, w, h })
+        Some(MaskUnwarp { lut, pre: None, rr, w, h })
+    }
+
+    /// [`MaskFrame::Corrected`]'s map: [`MaskUnwarp::new`]'s, with the camera
+    /// stage's resample in front of it. `None` when the profile moves nothing.
+    pub(super) fn corrected(profile: &crate::recipe::LensProfile, dims: (f32, f32)) -> Option<Self> {
+        let mut u = Self::new(profile, 0.0, dims)?;
+        let [_, green, _] = super::channel_luts(profile, 0.0, dims);
+        u.pre = Some(green);
+        Some(u)
+    }
+
+    /// The ORIGINAL-frame point the pixel at `(nx, ny)` shows: itself, or, for
+    /// a corrected frame, where the camera stage's resample read it from — the
+    /// same radius, centre and factor table `apply_lens_geometry_linear` uses
+    /// (pixel centres: `(nx − 0.5)·w` is its `x − (w − 1)/2`).
+    pub(super) fn source_point(&self, nx: f32, ny: f32) -> (f32, f32) {
+        let Some(pre) = &self.pre else { return (nx, ny) };
+        let (dx, dy) = ((nx - 0.5) * self.w, (ny - 0.5) * self.h);
+        let rn = ((dx * dx + dy * dy).sqrt() / self.rr).clamp(0.0, 1.0);
+        let f = super::sample_lut(pre, rn);
+        ((dx * f) / self.w + 0.5, (dy * f) / self.h + 0.5)
     }
 
     /// Exact inverse of the downstream engine geometry, without Lightroom's

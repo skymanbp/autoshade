@@ -24,7 +24,9 @@ impl AutoShadeApp {
         // survive a language switch (a translated name baked into the sidecar
         // can never be matched or re-keyed again).
         let disp = tr(lang, label).to_string();
-        let Some(base) = self.base_preview.clone() else { return };
+        // The ORIGINAL frame the recipe stores the mask in (v1.17.0: a
+        // corrected base is mapped back first).
+        let Some(base) = self.original_frame_base() else { return };
         let Some(src) = self.src_path.clone() else { return };
         self.busy = true;
         self.status = trf(

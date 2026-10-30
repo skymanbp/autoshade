@@ -519,7 +519,7 @@ fn the_black_is_subtracted_signed_through_the_demosaic() {
     };
     let mut dev = RawDevelop::default();
     dev.steps.retain(|s| !matches!(s, ProcessingStep::WhiteBalance | ProcessingStep::Calibrate | ProcessingStep::SRgb));
-    let develop = |raw: &rawler::RawImage| source::develop_raw_buffer(raw, &dev, None, None, ExportColorSpace::Srgb, None, None, false).unwrap().0;
+    let develop = |raw: &rawler::RawImage| source::develop_raw_buffer(raw, &dev, None, None, ExportColorSpace::Srgb, None, None, None, false).unwrap().0;
     let mean = |px: &[[f32; 3]]| px.iter().map(|p| f64::from(p[0] + p[1] + p[2]) / 3.0).sum::<f64>() / px.len() as f64;
     // Black ± 40 DN in a checkerboard of 2×2 cells: every channel sees both signs.
     let noisy: Vec<u16> = (0..w * h).map(|i| if ((i % w) / 2 + (i / w) / 2) % 2 == 0 { 552 } else { 472 }).collect();

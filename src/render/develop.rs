@@ -127,7 +127,10 @@ fn develop_preview_inner(
     // preview surfaces hand `apply_lens_geometry` — `geometry_profile`, not the
     // raw one, because the manual CA pair rides those knots (R25 B3).
     let geom = geometry_profile(recipe);
-    let frame = frame.unwrap_or_else(|| MaskFrame::downstream(&geom, recipe.lens_distortion));
+    // A RAW's base carries the lens when the recipe's camera stage resamples
+    // it (`BasePart`, v1.17.0); a baked source never does.
+    let corrected = raw_source && lens_in_camera(recipe);
+    let frame = frame.unwrap_or_else(|| MaskFrame::of_base(&geom, recipe.lens_distortion, corrected));
     let film = FilmScale::of(film_short_edge, w as usize, h as usize);
     apply_develop(&mut data, w as usize, h as usize, recipe, diag, frame, film, raw_source);
     let mut buf = vec![0u8; (w * h * 3) as usize];
@@ -196,10 +199,29 @@ pub(super) fn apply_develop_anon(data: &mut [[f32; 3]], w: usize, h: usize, r: &
 ///
 /// [`HealSpot`]: crate::retouch::HealSpot
 pub fn retouch_spots(r: &EditRecipe, w: usize, h: usize) -> Vec<crate::retouch::HealSpot> {
+    retouch_spots_in(r, w, h, None)
+}
+
+/// [`retouch_spots`] on a frame `corrected` maps (`MaskFrame::Corrected`,
+/// v1.17.0): the areas are stored in the ORIGINAL frame, so an ellipse's
+/// centre and donor move where the lens resample put them and its radius takes
+/// the local scale there (the mean of the two axes' mapped extents), and a
+/// brush area is rasterised in the original frame and read through the
+/// resample's own map before it is planned. `None` is the stored frame.
+pub(super) fn retouch_spots_in(
+    r: &EditRecipe,
+    w: usize,
+    h: usize,
+    corrected: Option<&MaskUnwarp>,
+) -> Vec<crate::retouch::HealSpot> {
     use crate::retouch::{HealSpot, RetouchShape};
     if r.retouch.is_empty() || w == 0 || h == 0 {
         return Vec::new();
     }
+    let (wf, hf) = (w as f32, h as f32);
+    let short = wf.min(hf);
+    // Original-frame normalised point → where it is in this frame.
+    let to_frame = |x: f32, y: f32| corrected.map_or((x, y), |u| u.engine_at(x, y));
     let to_short = w as f32 / w.min(h) as f32;
     let mut out = Vec::new();
     for a in &r.retouch {
@@ -211,18 +233,37 @@ pub fn retouch_spots(r: &EditRecipe, w: usize, h: usize) -> Vec<crate::retouch::
             ..Default::default()
         };
         match &a.shape {
-            RetouchShape::Ellipse { cx, cy, size_x, size_y } => out.push(HealSpot {
-                cx: *cx,
-                cy: *cy,
+            RetouchShape::Ellipse { cx, cy, size_x, size_y } => {
                 // `max`, although all 84 measured ellipses are circles: the
                 // larger half-extent is the one that must be covered, and a
                 // file that ever states two is not a reason to under-heal.
-                radius: size_x.max(*size_y) * to_short,
-                source: a.donor.map(|[dx, dy]| [dx - *cx, dy - *cy]),
-                ..template
-            }),
+                let radius = size_x.max(*size_y) * to_short;
+                let (mx, my) = to_frame(*cx, *cy);
+                let radius = match corrected {
+                    None => radius,
+                    Some(_) => {
+                        let rp = radius * short;
+                        let px = |(x, y): (f32, f32)| ((x - mx) * wf).hypot((y - my) * hf);
+                        0.5 * (px(to_frame(cx + rp / wf, *cy)) + px(to_frame(*cx, cy + rp / hf))) / short
+                    }
+                };
+                out.push(HealSpot {
+                    cx: mx,
+                    cy: my,
+                    radius,
+                    source: a.donor.map(|[dx, dy]| {
+                        let (qx, qy) = to_frame(dx, dy);
+                        [qx - mx, qy - my]
+                    }),
+                    ..template
+                })
+            }
             RetouchShape::Brush(strokes) => {
-                if let Some(alpha) = rasterise_brush_group(strokes, w as u32, h as u32) {
+                let alpha = rasterise_brush_group(strokes, w as u32, h as u32).map(|alpha| match corrected {
+                    None => alpha,
+                    Some(u) => masks::raster_through(&alpha, u),
+                });
+                if let Some(alpha) = alpha {
                     // 127: a dab-stamped alpha is 0..255 and this is the
                     // half-way mark, the same place `plan_from_mask`'s own
                     // `< 128` brush convention puts it.
@@ -268,8 +309,19 @@ pub(super) fn apply_develop_with_rasters(
     //    pre-correction, the same frame `render`'s own measurement puts brush
     //    dabs in, and the repaired pixels ride the geometry resample with the
     //    rest of the photograph. Unwarping here would apply the field twice.
+    //
+    //    v1.17.0: on a frame the camera stage already corrected
+    //    (`MaskFrame::Corrected`) there is no resample left to carry them, so
+    //    the stored areas are mapped into it instead ([`retouch_spots_in`]) —
+    //    and so are the other passes below that read a stored POSITION: the
+    //    colour field's grid, the pixel layers and the lens blur's rasters.
+    let corrected = match frame {
+        MaskFrame::Corrected { .. } => frame.unwarp((w as f32, h as f32)),
+        _ => None,
+    };
+    let corrected = corrected.as_ref();
     if !r.retouch.is_empty() {
-        crate::retouch::heal_planar(data, w, h, &retouch_spots(r, w, h));
+        crate::retouch::heal_planar(data, w, h, &retouch_spots_in(r, w, h, corrected));
     }
     // 0w) v1.17.0: a mask's Temp and Tint on a camera-profile start, right
     //    after the global white balance they are a move of (`mask_cr`).
@@ -488,7 +540,7 @@ pub(super) fn apply_develop_with_rasters(
     //    frame they produced. Its guide is the render's own smoothed luma at
     //    the render's own resolution, which is what makes it a pure function
     //    of the pixels in front of it at any size.
-    apply_colour_field(data, w, h, r.colour_field.as_ref());
+    apply_colour_field_in(data, w, h, r.colour_field.as_ref(), corrected);
     // 8) the SDR rendition (v1.5.0 F8), the last EDIT because that is what it is: not
     //    another edit but the mapping of the finished edit into the range this
     //    engine can publish. Lightroom derives it from the completed HDR
@@ -506,7 +558,7 @@ pub(super) fn apply_develop_with_rasters(
     //    areas above: the geometry stage that follows carries them.
     for layer in r.pixel_layers.iter().filter(|l| l.draws()) {
         if let Some(img) = rasters.layer(&layer.path) {
-            layers::composite(data, w, h, img, layer.opacity);
+            layers::composite(data, w, h, img, layer.opacity, corrected);
         }
     }
     // 10) the AI lens blur (2026-10-13, `lens_blur.rs`), last of all: a lens
@@ -518,7 +570,7 @@ pub(super) fn apply_develop_with_rasters(
     if let (Some(lb), Some(depth)) = (r.lens_blur.as_ref().filter(|l| l.draws()), rasters.depth()) {
         let protect = rasters.blur_protect();
         if lb.protect.is_none() || protect.is_some() {
-            lens_blur::apply(data, w, h, lb, depth, protect);
+            lens_blur::apply(data, w, h, lb, depth, protect, corrected);
         }
     }
 }
@@ -553,19 +605,41 @@ pub(crate) fn apply_colour_field(
     h: usize,
     field: Option<&crate::recipe::ColourField>,
 ) {
+    apply_colour_field_in(data, w, h, field, None);
+}
+
+/// [`apply_colour_field`] on a frame `corrected` maps (`MaskFrame::Corrected`,
+/// v1.17.0): the grid is solved on the original frame, so each corrected pixel
+/// reads it at the original-frame point it shows, on the same axis law
+/// (pixel `i` of `n` at grid coordinate `i·(limit − 1)/(n − 1)`). `None` reads
+/// it at the pixel's own place, bit-identically to before.
+fn apply_colour_field_in(
+    data: &mut [[f32; 3]],
+    w: usize,
+    h: usize,
+    field: Option<&crate::recipe::ColourField>,
+    corrected: Option<&MaskUnwarp>,
+) {
     let Some(field) = field.filter(|f| f.renderable()) else { return };
     if w == 0 || h == 0 || data.len() != w * h {
         return;
     }
     let guide = field_guide_luma(data, w, h);
     let (xs, ys) = (field_axis(w, field.x), field_axis(h, field.y));
+    // Pixel position `p` (continuous, `p = i` at a pixel centre) on the axis.
+    let on_axis = |p: f32, n: usize, limit: usize| {
+        if n <= 1 { 0.0 } else { (p * (limit - 1) as f32 / (n - 1) as f32).clamp(0.0, (limit - 1) as f32) }
+    };
     let amount = field.amount.clamp(0.0, 1.0);
     for (i, c) in data.iter_mut().enumerate() {
-        let coords = [
-            xs[i % w],
-            ys[i / w],
-            guide[i].clamp(0.0, 1.0) * (field.b - 1) as f32,
-        ];
+        let (gx, gy) = match corrected {
+            None => (xs[i % w], ys[i / w]),
+            Some(u) => {
+                let (sx, sy) = u.source_point(((i % w) as f32 + 0.5) / w as f32, ((i / w) as f32 + 0.5) / h as f32);
+                (on_axis(sx * w as f32 - 0.5, w, field.x), on_axis(sy * h as f32 - 0.5, h, field.y))
+            }
+        };
+        let coords = [gx, gy, guide[i].clamp(0.0, 1.0) * (field.b - 1) as f32];
         let limits = [field.x, field.y, field.b];
         let (mut low, mut high, mut frac) = ([0usize; 3], [0usize; 3], [0.0f32; 3]);
         for (axis, &limit) in limits.iter().enumerate() {

@@ -602,7 +602,8 @@
     fn the_canvas_preview_finishes_through_the_engines_own_tail() {
         let src = include_str!("../util.rs");
         let head = src.find("pub(crate) fn build_preview(").expect("build_preview moved");
-        let body = &src[head..head + 2000];
+        // The body to the call's close (v1.17.0 grew it by the lens rule).
+        let body = &src[head..head + 2400];
         assert!(
             body.contains("autoshade::render::frame_and_finish("),
             "the canvas preview no longer runs the engine's tail"

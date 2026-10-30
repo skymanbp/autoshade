@@ -158,16 +158,27 @@ pub(super) fn load_protect(
 /// The depth map's nearness (0..=1) resampled to `w`×`h` at pixel centres,
 /// through the mask rasters' texel-centre reading — a 1536 px map lands where
 /// it was estimated on a full-resolution export too.
-fn nearness_at(depth: &DepthImage, w: usize, h: usize) -> Vec<f32> {
+///
+/// `corrected` (v1.17.0, `MaskFrame::Corrected`): a lens-corrected frame reads
+/// the map, estimated on the original frame, at the original-frame point each
+/// pixel shows.
+fn nearness_at(depth: &DepthImage, w: usize, h: usize, corrected: Option<&MaskUnwarp>) -> Vec<f32> {
     let texel = |x: u32, y: u32| depth.get_pixel(x, y)[0] as f32 / 65535.0;
     let mut out = vec![0f32; w * h];
     out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         let ny = (y as f32 + 0.5) / h as f32;
         for (x, o) in row.iter_mut().enumerate() {
-            *o = sample_texels_norm(depth.width(), depth.height(), (x as f32 + 0.5) / w as f32, ny, texel);
+            let (sx, sy) = at_source(corrected, (x as f32 + 0.5) / w as f32, ny);
+            *o = sample_texels_norm(depth.width(), depth.height(), sx, sy, texel);
         }
     });
     out
+}
+
+/// The original-frame point a pixel at `(nx, ny)` shows: itself, or through a
+/// corrected frame's map.
+fn at_source(corrected: Option<&MaskUnwarp>, nx: f32, ny: f32) -> (f32, f32) {
+    corrected.map_or((nx, ny), |u| u.source_point(nx, ny))
 }
 
 /// The focus point's nearness: the median over a small window round it, so a
@@ -190,9 +201,24 @@ pub(super) fn focus_nearness(near: &[f32], w: usize, h: usize, focus: [f32; 2]) 
 /// With a protect mask every radius is scaled by `1 − alpha` there (the mask
 /// read at pixel centres in normalised coordinates, as every mask raster is);
 /// without one the field is exactly the depth law's.
-fn radii(lb: &LensBlur, near: &[f32], w: usize, h: usize, protect: Option<&image::GrayImage>) -> (Vec<f32>, f32) {
+///
+/// `corrected` as [`nearness_at`]'s: the protect mask is read at each pixel's
+/// original-frame point, and the focus, stored in the original frame, is
+/// looked up where the correction put it.
+fn radii(
+    lb: &LensBlur,
+    near: &[f32],
+    w: usize,
+    h: usize,
+    protect: Option<&image::GrayImage>,
+    corrected: Option<&MaskUnwarp>,
+) -> (Vec<f32>, f32) {
     let max_r = lb.amount / 100.0 * MAX_RADIUS_SHARE * w.max(h) as f32;
-    let nf = focus_nearness(near, w, h, lb.focus);
+    let focus = corrected.map_or(lb.focus, |u| {
+        let (fx, fy) = u.engine_at(lb.focus[0], lb.focus[1]);
+        [fx, fy]
+    });
+    let nf = focus_nearness(near, w, h, focus);
     let band = lb.range / 100.0 * BAND_AT_FULL_RANGE;
     let mut r: Vec<f32> =
         near.par_iter().map(|n| ((n - nf).abs() - band).clamp(0.0, RAMP) / RAMP * max_r).collect();
@@ -200,7 +226,8 @@ fn radii(lb: &LensBlur, near: &[f32], w: usize, h: usize, protect: Option<&image
         r.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
             let ny = (y as f32 + 0.5) / h as f32;
             for (x, v) in row.iter_mut().enumerate() {
-                let alpha = sample_gray_norm(mask, (x as f32 + 0.5) / w as f32, ny).clamp(0.0, 1.0);
+                let (sx, sy) = at_source(corrected, (x as f32 + 0.5) / w as f32, ny);
+                let alpha = sample_gray_norm(mask, sx, sy).clamp(0.0, 1.0);
                 *v *= 1.0 - alpha;
             }
         });
@@ -255,7 +282,8 @@ fn gaussian(buf: &mut Vec<[f32; 4]>, w: usize, h: usize, sigma: f32) {
 }
 
 /// Blur `data` (the develop's sRGB-gamma [0, 1] frame) by depth, in place,
-/// keeping `protect`'s white sharp when one is given.
+/// keeping `protect`'s white sharp when one is given. `corrected` is
+/// [`nearness_at`]'s.
 pub(super) fn apply(
     data: &mut [[f32; 3]],
     w: usize,
@@ -263,12 +291,13 @@ pub(super) fn apply(
     lb: &LensBlur,
     depth: &DepthImage,
     protect: Option<&image::GrayImage>,
+    corrected: Option<&MaskUnwarp>,
 ) {
     if w == 0 || h == 0 || !lb.draws() {
         return;
     }
-    let near = nearness_at(depth, w, h);
-    let (radius, max_r) = radii(lb, &near, w, h, protect);
+    let near = nearness_at(depth, w, h, corrected);
+    let (radius, max_r) = radii(lb, &near, w, h, protect, corrected);
     if max_r < 0.5 {
         return;
     }

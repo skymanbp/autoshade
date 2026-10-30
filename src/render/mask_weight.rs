@@ -448,6 +448,10 @@ pub(super) fn combined_mask_weight(
     unwarp: Option<&MaskUnwarp>,
     dims: (f32, f32),
 ) -> f32 {
+    // A corrected frame's pixel asks about the original-frame point it shows
+    // (`MaskFrame::Corrected`); every geometry, raster and brush included, is
+    // stored in that frame.
+    let (nx, ny) = unwarp.map_or((nx, ny), |u| u.source_point(nx, ny));
     let mut w = mask_weight_in(&m.mask, nx, ny, base, unwarp, dims);
     for (c, bmp) in m.components.iter().zip(comp_bmps) {
         // A raster-backed component with NO raster carries no coverage, and

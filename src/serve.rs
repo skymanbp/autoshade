@@ -2152,13 +2152,16 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // for whole-frame slider feedback, same policy). The web pane previously
     // skipped ALL of it — a recipe with distortion or straighten previewed one
     // framing and exported another.
+    // A base whose camera stage resampled the lens (v1.17.0) takes no second
+    // resample (`render::tail_lens`).
     let geom = render::geometry_profile(&req.recipe);
+    let corrected = decode::is_raw(&src) && render::lens_in_camera(&req.recipe);
     let film_scale =
         render::FilmScale::of(film, after.width() as usize, after.height() as usize);
     after = render::frame_and_finish(
         after,
         &req.recipe,
-        &geom,
+        render::tail_lens(&geom, corrected),
         film_scale,
         render::CropPolicy::Keep,
     );

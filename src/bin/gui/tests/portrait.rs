@@ -836,8 +836,8 @@
         let face = image::GrayImage::from_pixel(32, 24, image::Luma([255]));
         let mut recipe = EditRecipe { temperature_k: Some(3200.0), tint: 80.0, ..Default::default() };
         recipe.masks.push(found_masks()[2].clone());
-        let seed = crate::panels::portrait::panel_skin_seed(&base, &face, &recipe, None, false).expect("a seed");
-        let reference = autoshade::face::skin_seed_reference(&base, &recipe, 0, None, false);
+        let seed = crate::panels::portrait::panel_skin_seed(&base, &face, &recipe, None, false, None).expect("a seed");
+        let reference = autoshade::face::skin_seed_reference(&base, &recipe, 0, None, false, None);
         assert_eq!(Some(seed), autoshade::face::skin_seed(&reference, &face), "seeded from the developed reference");
         let neutral = autoshade::face::skin_seed(&base.to_rgb8(), &face).unwrap();
         let moved = (0..3).map(|c| (seed.0[c] - neutral.0[c]).abs()).fold(0.0f32, f32::max);

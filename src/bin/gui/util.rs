@@ -1578,7 +1578,8 @@ pub(crate) fn build_preview(
         autoshade::render::frame_and_finish(
             after,
             &recipe,
-            &geom,
+            // A lens-corrected base (v1.17.0) takes no second resample.
+            autoshade::render::tail_lens(&geom, raw_source && autoshade::render::lens_in_camera(&recipe)),
             film,
             autoshade::render::CropPolicy::Keep,
         )
