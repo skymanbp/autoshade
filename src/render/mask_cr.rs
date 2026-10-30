@@ -17,10 +17,10 @@
 //!   after the global sliders.
 //! - **Highlights below 0 and Shadows above 0** run instead the global law
 //!   (`tone_cr`: local, keyed to the frame, before Exposure) on the frame's
-//!   own sites, scaled by [`L_HS_GAIN`] (Highlights −60: the local renders
-//!   regressed on the global law, 1.21; Shadows +60: Camera Raw's local push
-//!   in stops over its global one on the same cells, 1.15, 1.14–1.16 on
-//!   every two-stop band), right after the global pass ([`apply_local_hs`]).
+//!   own sites, Highlights scaled by [`L_HL_GAIN`] (Highlights −60: the
+//!   local renders regressed on the global law, 1.21) and Shadows read as a
+//!   larger global slider that falls with the value ([`L_SH_GAIN`]: 1.32 at
+//!   +25 down to 1.05 at +100), right after the global pass ([`apply_local_hs`]).
 //! - **Texture** renders exactly as the global Texture and stays where the
 //!   mask stage puts it.
 //! - **Temp and Tint** move the global white ([`local_white`]): a white
@@ -149,11 +149,26 @@ fn local_hs(m: &crate::recipe::LocalAdjustment) -> [f32; 2] {
     [hl.min(0.0), sh.max(0.0)]
 }
 
-/// How much harder a mask's Highlights and Shadows push than the global
-/// sliders at the same value, on the same sites (`[highlights, shadows]`:
-/// the Highlights push in `u`, the Shadows slider), measured on the local
+/// How much harder a mask's Highlights push than the global slider at the
+/// same value, on the same sites (the push in `u`), measured on the local
 /// renders (module head).
-const L_HS_GAIN: [f32; 2] = [1.2, 1.15];
+const L_HL_GAIN: f32 = 1.2;
+
+/// The global Shadows slider a mask's Shadows `s` (0..1) acts as, on the
+/// same sites: `s · (L_SH_GAIN − L_SH_GAIN_SLOPE · s)`. Measured with the
+/// engine in the loop on the local renders at +25 / +30 / +50 / +60 / +75 /
+/// +100: the gain that leaves no mean Lab bias in the mask's core is 1.318 /
+/// 1.300 / 1.230 / 1.195 / 1.142 / 1.053, on this line to 0.001. One gain
+/// for every value (1.15 before) left +25…+60 0.6–0.9 L dark and +100
+/// 2.3 L bright.
+const L_SH_GAIN: f32 = 1.4065;
+const L_SH_GAIN_SLOPE: f32 = 0.3532;
+
+/// The `[highlights, shadows]` gains [`tone_cr::hs_pixel_scaled`] takes for
+/// a mask's Shadows at `sh` (0..1).
+fn local_hs_gain(sh: f32) -> [f32; 2] {
+    [L_HL_GAIN, L_SH_GAIN - L_SH_GAIN_SLOPE * sh]
+}
 
 /// Does any drawn adjustment of `r` move Highlights or Shadows on the local law?
 pub(super) fn any_local_hs(r: &EditRecipe) -> bool {
@@ -161,7 +176,7 @@ pub(super) fn any_local_hs(r: &EditRecipe) -> bool {
 }
 
 /// A mask's Highlights and Shadows: the global law ([`tone_cr::hs_pixel_scaled`])
-/// on the frame's own sites `field`, at [`L_HS_GAIN`], blended by the mask's
+/// on the frame's own sites `field`, at [`local_hs_gain`], blended by the mask's
 /// weight; right after the global pass, before Exposure.
 #[allow(clippy::too_many_arguments)] // the develop's frame, the recipe and the field
 pub(super) fn apply_local_hs(
@@ -182,7 +197,7 @@ pub(super) fn apply_local_hs(
                         continue;
                     }
                     let [hl, sh] = local_hs(m);
-                    let t = super::tone_cr::hs_pixel_scaled(*px, hl, sh, field[y * w + x], L_HS_GAIN);
+                    let t = super::tone_cr::hs_pixel_scaled(*px, hl, sh, field[y * w + x], local_hs_gain(sh));
                     for ch in 0..3 {
                         px[ch] += wt * (t[ch] - px[ch]);
                     }
