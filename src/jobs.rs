@@ -808,6 +808,17 @@ mod tests {
         //    stages actually switched ON — a default recipe skips clarity /
         //    texture / sharpen / NR entirely, so measuring one would report a
         //    floor and call it a peak.
+        //
+        //    On the fresh canvas's start (v1.17.0) with the photo's own lens
+        //    profile: a NAMED camera profile (`render::canvas_recipe`) runs the
+        //    profile stage and Camera Raw's law, and with the lens profile on
+        //    that law resamples the lens in the camera stage
+        //    (`render::lens_in_camera`, printed below) — a full-frame f32
+        //    source and output side by side, the largest buffers the render
+        //    holds. The default recipe this used before took neither path, so it
+        //    measured a render no fresh photo gets. Every peak measurement goes
+        //    through this recipe; measured 2026-10-30 on the p42 frame (61 MP):
+        //    render stage alone 1399 MB, under `PER_PHOTO_PEAK_COMMIT_MB`.
         if want("render") {
             let recipe = crate::recipe::EditRecipe {
                 base_curve: knots,
@@ -815,8 +826,10 @@ mod tests {
                 texture: 20.0,
                 sharpening: 40.0,
                 noise_reduction: 25.0,
-                ..Default::default()
+                lens_profile: crate::pipeline::fresh_lens_profile(&raw),
+                ..crate::render::canvas_recipe()
             };
+            println!("  lens resampled in the camera stage: {}", crate::render::lens_in_camera(&recipe));
             let out = out_dir.join("autoshade-peak-probe.tif");
             // Optional denoise uses the same probe and can point at a captured
             // clean-mosaic stub: memory measurement does not require a GPU.
