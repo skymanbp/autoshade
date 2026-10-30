@@ -5,8 +5,9 @@
 //!
 //! A recipe that names a camera profile ([`EditRecipe::names_profile`]) starts
 //! where Lightroom starts: the profile stage (`render/profile.rs`) has already
-//! put the body's baseline exposure, [`exposure_ramp`] and Adobe's default
-//! curve on the frame. Camera Raw's Exposure, Contrast, Highlights, Shadows,
+//! put the body's baseline exposure (Camera Raw's exposure transfer at the
+//! photograph's camera start, [`Ramp`]) and Adobe's default curve on the
+//! frame. Camera Raw's Exposure, Contrast, Highlights, Shadows,
 //! Whites and Blacks act BEFORE that curve, so on this start the tone LUT
 //! undoes the curve, applies the sliders in the curve's own input (`u`, the
 //! ramped scene value under the sRGB transfer) and puts the curve back; then
@@ -21,17 +22,19 @@
 //! flat packet (Adobe Color, lens profile on; 6144 px, JPEG q12, compared at
 //! 1000 px over near-neutral pixels binned by the flat render's L):
 //!
-//! * **Exposure** is a linear gain before the curve: over ev −3 … +2 (nine
-//!   renders) a pure gain with Adobe's curve predicts every band to rms 1.2 L.
-//!   What is left is a black subtracted after the gain and a shoulder
-//!   ([`exposure_ramp`]); a black subtracted BEFORE the gain fits worse (rms
-//!   0.75 L against 0.40, the +2 EV shadows 2.3 L off). The constants were
-//!   scanned on the engine's own renders (flat and ev −3, −1, +1, +2, ten L
-//!   bands each): rms 0.64 L, worst 2.7 L (ev −3, L 90–100).
-//! * **The channel rule.** Exposure meets a pixel the way Adobe puts a curve
-//!   on a colour ([`camera_raw_channels`]): the brightest and darkest
-//!   channels through it, the middle one in proportion; Camera Raw's gain is
-//!   per channel, before the curve. Measured: the luma ratio the engine law
+//! * **Exposure** is one transfer at the TOTAL exposure, the start's baseline
+//!   plus the slider ([`Exposure`]): the frame's light is taken back under
+//!   the transfer it was started at, multiplied, and put through the
+//!   transfer at the sum. The transfer is measured on Camera Raw's renders
+//!   at 54 total exposures (`tone_cr/exposure.rs`); it is pointwise, and
+//!   BaselineExposure +1 renders exactly as the slider at +1.
+//! * **The channel rule.** Exposure meets a pixel in the profile's reference
+//!   primaries (ProPhoto's), linear: the brightest and darkest channels
+//!   through the transfer, the middle one at its LINEAR place between them
+//!   ([`Ramp::transfer_rgb`]; ΔE median 0.10–0.14 on 288 patches at every
+//!   exposure, against 38–96 for per-channel, by the brightest channel or by
+//!   luminance). The tone curves take the same rule on the encoded values
+//!   ([`camera_raw_channels`]). Measured on the earlier ramp: the luma ratio the engine law
 //!   uses leaves Exposure −1's bright sky 4.3 b* too yellow and +2's warm
 //!   tones 7.9 b* off; this rule leaves 0.4 and 1.9. The other five sliders
 //!   take their hue from this rule and their lightness from the luma ratio
@@ -136,41 +139,11 @@ impl SliderLaw {
     }
 }
 
-/// The black Camera Raw subtracts after the exposure gain, in linear light
-/// relative to white. The DNG SDK's default, 0.005, darkens the shadows 2–4 L
-/// past Camera Raw's; none at all leaves the flat frame's L 0–30 1.2–1.6 L
-/// bright.
-pub(crate) const RAMP_BLACK: f32 = 0.0018;
-
-/// Where the shoulder starts, in the black-subtracted linear value.
-pub(crate) const RAMP_KNEE: f32 = 0.15;
-
-/// The shoulder's asymptote: above [`RAMP_KNEE`] the value approaches it
-/// exponentially with unit slope at the knee, and white is reached at
-/// v ≈ 2.0 (clipped there).
-pub(crate) const RAMP_SHOULDER: f32 = 1.2;
-
-/// Camera Raw's exposure ramp on one linear channel already multiplied by the
-/// total exposure gain: the black subtracted, then the shoulder, clipped at
-/// white. It replaces the DNG SDK's hard clip at 1 in the profile stage.
-pub(crate) fn exposure_ramp(t: f32) -> f32 {
-    let v = (t - RAMP_BLACK).max(0.0) / (1.0 - RAMP_BLACK);
-    let span = RAMP_SHOULDER - RAMP_KNEE;
-    let r = if v <= RAMP_KNEE { v } else { RAMP_KNEE + span * (1.0 - (-(v - RAMP_KNEE) / span).exp()) };
-    r.min(1.0)
-}
-
-/// [`exposure_ramp`]'s inverse on `[0, 1]`. A ramped 0 answers 0: whatever
-/// sat at or under the black stays black under the sliders.
-pub(crate) fn ramp_inverse(r: f32) -> f32 {
-    if r <= 0.0 {
-        return 0.0;
-    }
-    let r = r.min(1.0);
-    let span = RAMP_SHOULDER - RAMP_KNEE;
-    let v = if r <= RAMP_KNEE { r } else { RAMP_KNEE - span * (1.0 - (r - RAMP_KNEE) / span).ln() };
-    v * (1.0 - RAMP_BLACK) + RAMP_BLACK
-}
+/// Camera Raw's exposure transfer, measured (`tone_cr/exposure.rs`) from the
+/// table of its renders (`tone_cr/ramp_table.rs`).
+mod exposure;
+mod ramp_table;
+pub(crate) use exposure::{headroom_of, Exposure, Ramp};
 
 /// The samples of the response tables: `u = i / 32`.
 pub(super) const TABLE_N: usize = 33;
@@ -300,12 +273,13 @@ pub(crate) fn camera_raw_row(k: usize, s: f32, y: f32) -> f32 {
     table_at(t, y) + s.abs() * table_at(q, y)
 }
 
-/// Exposure on `u`: undo the ramp, multiply, ramp again.
-pub(crate) fn camera_raw_exposure(u: f32, ev: f32) -> f32 {
-    if ev == 0.0 {
-        return u;
+/// Exposure on `u` (a grey after the start's transfer, under the sRGB
+/// transfer): [`Exposure::grey`]; `None` is 0 EV.
+pub(crate) fn camera_raw_exposure(u: f32, e: Option<&Exposure>) -> f32 {
+    match e {
+        Some(e) => linear_to_srgb(e.grey(srgb_to_linear(u))),
+        None => u,
     }
-    linear_to_srgb(exposure_ramp(ramp_inverse(srgb_to_linear(u)) * ev.exp2()))
 }
 
 /// The law at one `u` without the band guard [`camera_raw_tone`] adds, for a
@@ -315,9 +289,9 @@ pub(crate) fn camera_raw_exposure(u: f32, ev: f32) -> f32 {
 /// the exposed value; clamped to [0, 1]. What the reverse fit scores a
 /// candidate with (it scores the knot model without its limiter too,
 /// `fit::tone`).
-pub(crate) fn camera_raw_response_keyed(ev: f32, s: [f32; 5], u: f32, key: HsKey) -> f32 {
+pub(crate) fn camera_raw_response_keyed(e: Option<&Exposure>, s: [f32; 5], u: f32, key: HsKey) -> f32 {
     let u1 = (u + hs_push(s[1], s[2], HsSite::diagonal(u, key), u)).clamp(0.0, 1.0);
-    let y = camera_raw_exposure(u1, ev);
+    let y = camera_raw_exposure(u1, e);
     let push: f32 = [0usize, 3, 4].iter().map(|&k| s[k] * camera_raw_row(k, s[k], y)).sum();
     (y + push).clamp(0.0, 1.0)
 }
@@ -330,7 +304,7 @@ pub(crate) fn camera_raw_response_keyed(ev: f32, s: [f32; 5], u: f32, key: HsKey
 /// open would scale every slider in the frame down with it, measured: −60
 /// rendered at 0.38 of its strength), so the guard only stops the curve
 /// turning back where two pushes overlap.
-fn camera_raw_tone(ev: f32, s: [f32; 5], local: Local) -> Vec<f32> {
+fn camera_raw_tone(e: Option<&Exposure>, s: [f32; 5], local: Local) -> Vec<f32> {
     const KEEP: f32 = 0.01;
     let mut out = Vec::with_capacity(LUT_N);
     let (mut prev_y, mut prev) = (0.0f32, 0.0f32);
@@ -339,7 +313,7 @@ fn camera_raw_tone(ev: f32, s: [f32; 5], local: Local) -> Vec<f32> {
         // Highlights and Shadows on `u` before the exposure (module head),
         // on the diagonal: a LUT has no base layer to read.
         let u1 = (u + hs_push(s[1], s[2], HsSite::diagonal(u, HsKey::NOMINAL), u)).clamp(0.0, 1.0);
-        let y = camera_raw_exposure(u1, ev);
+        let y = camera_raw_exposure(u1, e);
         let push: f32 =
             [0usize, 3, 4].iter().map(|&k| s[k] * camera_raw_row(k, s[k], y)).sum::<f32>()
                 + local.dehaze * dehaze_row(local.dehaze, y)
@@ -348,7 +322,7 @@ fn camera_raw_tone(ev: f32, s: [f32; 5], local: Local) -> Vec<f32> {
         // The floor is a share of the plain exposed curve's rise: Highlights
         // and Shadows have moved `y` itself, and on the diagonal at their
         // extremes they can turn it back.
-        let y_ref = camera_raw_exposure(u, ev);
+        let y_ref = camera_raw_exposure(u, e);
         if i > 0 {
             v = v.max((prev + KEEP * (y_ref - prev_y)).min(1.0));
         }
@@ -361,9 +335,8 @@ fn camera_raw_tone(ev: f32, s: [f32; 5], local: Local) -> Vec<f32> {
 /// One pixel through a tone LUT the way Adobe puts a curve on a colour
 /// (`render/profile.rs`'s `adobe_tone`, on the encoded values): the brightest
 /// and darkest channels go through the curve, the middle one keeps its
-/// relative place between them. The develop's exposure pass and its curve
-/// pass on a Camera Raw recipe ([`camera_raw_exposure_lut`],
-/// [`camera_raw_after_lut`]), and the hue of its slider pass
+/// relative place between them. The develop's curve pass on a Camera Raw
+/// recipe ([`camera_raw_after_lut`]) and the hue of its slider pass
 /// ([`camera_raw_slider_pixel`]).
 pub(super) fn camera_raw_channels(rgb: [f32; 3], lut: &[f32]) -> [f32; 3] {
     let (mut hi, mut mid, mut lo) = (0usize, 1usize, 2usize);
@@ -444,20 +417,6 @@ pub(crate) fn camera_raw_unstart(x: f32) -> f32 {
     (i as f32 - 1.0 + f) / (LUT_N - 1) as f32
 }
 
-/// Exposure alone over the profile stage's output, `x → u → ev → x`: the
-/// pass the develop puts through [`camera_raw_channels`] before the rest of
-/// the tone ([`super::camera_raw_tone_passes`]). `None` at 0 EV.
-pub(crate) fn camera_raw_exposure_lut(ev: f32) -> Option<Vec<f32>> {
-    (ev != 0.0).then(|| {
-        (0..LUT_N)
-            .map(|i| {
-                let u = camera_raw_unstart(i as f32 / (LUT_N - 1) as f32);
-                camera_raw_start(camera_raw_exposure(u, ev))
-            })
-            .collect()
-    })
-}
-
 /// Dehaze and Clarity's tone, each in −1..1: the two sliders that ride the
 /// slider pass besides the five.
 #[derive(Clone, Copy, Default)]
@@ -474,7 +433,7 @@ pub(crate) struct Local {
 pub(super) fn camera_raw_slider_lut(sliders: [f32; 5], local: Local) -> Option<SliderPass> {
     let dehaze = local.dehaze;
     (dehaze != 0.0 || local.clarity != 0.0 || sliders.iter().any(|&v| v != 0.0)).then(|| {
-        let tone = camera_raw_tone(0.0, sliders, local);
+        let tone = camera_raw_tone(None, sliders, local);
         let lut = (0..LUT_N)
             .map(|i| camera_raw_start(sample_lut(&tone, camera_raw_unstart(i as f32 / (LUT_N - 1) as f32))))
             .collect();
@@ -513,15 +472,17 @@ pub(super) fn camera_raw_after_lut(base: Option<&[f32]>, parametric: Option<&[f3
 /// The full tone LUT of a recipe on Camera Raw's law: `x` (the profile
 /// stage's output) → `u` → the sliders → Adobe's curve again → the Look's
 /// baked curve (`base`, when there is one) → the parametric curve → the point
-/// curve. `sliders` are in −1..1 with the Look's baked moves already added.
+/// curve. `sliders` are in −1..1 with the Look's baked moves already added;
+/// `ev` is the Exposure slider on a frame started at `start`.
 pub(super) fn camera_raw_tone_lut(
+    start: crate::recipe::CameraStart,
     ev: f32,
     sliders: [f32; 5],
     base: Option<&[f32]>,
     parametric: Option<&[f32]>,
     curve: &[f32],
 ) -> Vec<f32> {
-    let tone = camera_raw_tone(ev, sliders, Local::default());
+    let tone = camera_raw_tone(Exposure::new(start, ev).as_ref(), sliders, Local::default());
     (0..LUT_N)
         .map(|i| {
             let x = i as f32 / (LUT_N - 1) as f32;
@@ -910,20 +871,23 @@ pub(crate) fn hs_pixel_scaled(px: [f32; 3], hl: f32, sh: f32, site: HsSite, gain
         let s = gain[1] * sh;
         push += s * hs_row(2, s, site, u);
     }
-    let target = camera_raw_start((u + push).clamp(0.0, 1.0));
+    // A value above the curve's top (over-range light the camera stage left
+    // for the slider Exposure, `calibrate_camera_buffer`) moves as the top
+    // does, in proportion: the push read at u = 1 and the light kept.
+    let target = l.max(1.0) * camera_raw_start((u + push).clamp(0.0, 1.0));
     // Highlights shape the hue by Adobe's channel rule (`camera_raw_channels`)
     // with this pixel's own curve, as the other sliders do; Shadows keep it.
     let shaped = if hl < 0.0 {
         let curve = |v: f32| {
             let uv = camera_raw_unstart(v);
-            camera_raw_start((uv + gain[0] * hl * hs_row(1, hl, site, uv)).clamp(0.0, 1.0))
+            v.max(1.0) * camera_raw_start((uv + gain[0] * hl * hs_row(1, hl, site, uv)).clamp(0.0, 1.0))
         };
         channel_rule(px, curve)
     } else {
         px
     };
     let k = (target + HS_CHROMA_FLOOR) / (luma601(&shaped) + HS_CHROMA_FLOOR);
-    shaped.map(|c| ((c + HS_CHROMA_FLOOR) * k - HS_CHROMA_FLOOR).clamp(0.0, 1.0))
+    shaped.map(|c| ((c + HS_CHROMA_FLOOR) * k - HS_CHROMA_FLOOR).max(0.0))
 }
 
 /// [`camera_raw_channels`] with a curve given as a function: the brightest
@@ -961,32 +925,9 @@ pub(crate) fn apply_camera_raw_hs(data: &mut [[f32; 3]], field: &[HsSite], hl: f
 mod tests {
     use super::*;
 
-    /// The ramp is the identity from its black to its knee, rises strictly
-    /// to white, and its inverse undoes it over the open range.
-    ///
-    /// MUTATION: put the black before the gain's subtraction order back the
-    /// other way (`v` from `t / (1 − b)`), or drop the shoulder's unit slope.
-    #[test]
-    fn the_exposure_ramp_is_monotone_and_inverts() {
-        let v = |t: f32| (t - RAMP_BLACK) / (1.0 - RAMP_BLACK);
-        for t in [0.01f32, 0.05, 0.1, 0.15] {
-            assert!((exposure_ramp(t) - v(t)).abs() < 1e-6, "identity below the knee at {t}");
-        }
-        assert_eq!(exposure_ramp(0.0), 0.0);
-        assert_eq!(exposure_ramp(RAMP_BLACK * 0.5), 0.0, "under the black is black");
-        let mut prev = 0.0f32;
-        for i in 1..=400 {
-            let t = i as f32 / 200.0;
-            let r = exposure_ramp(t);
-            assert!(r >= prev && r <= 1.0, "monotone and capped at {t}");
-            if r < 0.999 {
-                assert!(r > prev, "strictly rising below white at {t}");
-                assert!((ramp_inverse(r) - t).abs() < 1e-4, "inverse at {t}: {}", ramp_inverse(r));
-            }
-            prev = r;
-        }
-        assert!(exposure_ramp(1.0) < 1.0, "the shoulder keeps white's neighbourhood open");
-    }
+    /// A camera start the tests develop from: a body's baseline and the
+    /// headroom's full stop, where a daylight frame sits.
+    const START: crate::recipe::CameraStart = crate::recipe::CameraStart { ev: 0.35, headroom: 1.0, tables: 0 };
 
     /// Adobe's curve under the transfer and its inverse compose to the
     /// identity, so a recipe with no slider work leaves `u` where it was.
@@ -1011,7 +952,7 @@ mod tests {
     /// every value it can.
     ///
     /// MUTATION: drop the band guard in `camera_raw_tone`, or let the
-    /// exposure LUT read `u` without undoing the start.
+    /// exposure read `u` without undoing the start.
     #[test]
     fn the_slider_tone_stays_monotone_at_every_extreme() {
         let mut cases = vec![[1.0f32, 1.0, 1.0, 1.0, 1.0], [-1.0; 5], [1.0, -1.0, 1.0, -1.0, 1.0], [-1.0, 1.0, -1.0, 1.0, -1.0]];
@@ -1023,18 +964,20 @@ mod tests {
             }
         }
         for ev in [-3.0f32, 0.0, 2.0] {
+            let e = Exposure::new(START, ev);
             for s in &cases {
-                let t = camera_raw_tone(ev, *s, Local::default());
+                let t = camera_raw_tone(e.as_ref(), *s, Local::default());
                 assert!(t.windows(2).all(|w| w[1] >= w[0]), "monotone at ev {ev} {s:?}");
                 assert!(t.iter().all(|v| (0.0..=1.0).contains(v)), "in range at ev {ev} {s:?}");
             }
         }
-        let up = camera_raw_exposure_lut(1.0).expect("a non-zero exposure");
-        for (i, &v) in up.iter().enumerate() {
+        let up = Exposure::new(START, 1.0).expect("a non-zero exposure");
+        for i in 0..LUT_N {
             let x = i as f32 / (LUT_N - 1) as f32;
+            let v = camera_raw_exposure(x, Some(&up));
             assert!(v >= x - 1e-4, "+1 EV raises {x}: {v}");
         }
-        assert!(camera_raw_exposure_lut(0.0).is_none());
+        assert!(Exposure::new(START, 0.0).is_none());
     }
 
     /// Dehaze alone makes a slider pass with a chroma gain; at 0 there is no
@@ -1298,13 +1241,14 @@ mod tests {
     #[test]
     fn highlights_and_shadows_run_before_the_exposure() {
         let key = HsKey::NOMINAL;
+        let e = Exposure::new(START, 1.0);
         for (hl, sh) in [(-0.6f32, 0.0f32), (0.0, 0.6), (-0.4, 0.5)] {
             for i in 1..20 {
                 let u = i as f32 / 20.0;
                 let site = HsSite::diagonal(u, key);
                 let moved = (u + hs_push(hl, sh, site, u)).clamp(0.0, 1.0);
-                let want = camera_raw_exposure(moved, 1.0);
-                let got = camera_raw_response_keyed(1.0, [0.0, hl, sh, 0.0, 0.0], u, key);
+                let want = camera_raw_exposure(moved, e.as_ref());
+                let got = camera_raw_response_keyed(e.as_ref(), [0.0, hl, sh, 0.0, 0.0], u, key);
                 assert!((got - want).abs() < 1e-5, "hl {hl} sh {sh} at {u}: {got} vs {want}");
             }
         }

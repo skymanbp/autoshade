@@ -1295,6 +1295,13 @@ impl AutoShadeApp {
                                     .into(),
                                 );
                             }
+                            // The camera start (v1.17.0) at whatever profile
+                            // the open settled on — a stamped fresh start and a
+                            // saved develop alike (`pipeline::stamp_camera_start`);
+                            // a generated master's strip below clears it.
+                            if let Some(p) = self.src_path.as_deref() {
+                                autoshade::pipeline::stamp_camera_start(p, &mut recipe);
+                            }
                             // The saved develop is the ● baseline; a canvas
                             // stashed when the user navigated away THIS session
                             // outranks it — that stash is their newest work.

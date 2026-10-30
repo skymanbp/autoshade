@@ -2146,6 +2146,11 @@ impl AutoShadeApp {
                         )
                     },
                 );
+                // The camera start (v1.17.0) at the profile the snapshot now
+                // names, read from the photo — never the snapshot's own.
+                if !self.active_on_ai_pixels() {
+                    autoshade::pipeline::stamp_camera_start(&src, &mut r);
+                }
                 // A version snapshot is a saved recipe like any other, and
                 // it predates the era stamp by definition — loading one put
                 // an unrepaired washed curve straight onto the canvas and

@@ -52,7 +52,9 @@ fn the_base_part_is_the_profile_stage_and_nothing_after_it() {
 /// there: against the build before it (CLI, 1000 px, 16-bit) 1.77 % of the
 /// pixels change, 70 % of those encoded below 0.02 and 14 % of those in
 /// 0.02–0.05, against 0.002 % above 0.5 (the demosaic's neighbourhood of a
-/// site below the black). Env-gated on the corpus (`p39.arw`).
+/// site below the black). Unchanged by the merge of rel1170-vigca (the
+/// measured exposure transfer, `CameraStart`, `UnderTone`): this recipe names
+/// no profile, so no profile stage runs. Env-gated on the corpus (`p39.arw`).
 ///
 /// MUTATION: let `starting_curve` drop a curve on a recipe that names no
 /// profile, or develop a neutral part through anything but the neutral recipe.
@@ -279,3 +281,80 @@ fn mean_de76(a: &DynamicImage, b: &DynamicImage) -> f64 {
         .sum::<f64>()
         / n
 }
+
+/// The camera start (v1.17.0, `EditRecipe::camera_start`) is ONE value for a
+/// photograph under its profile: the fresh open stamps it, a saved develop
+/// reloaded is stamped with the same, the fit's calibration carries it, and it
+/// is the start the profile stage itself renders at — so the canvas at +1 EV
+/// (the develop's Exposure over the base, which reads the stamp) shows what
+/// the export at +1 EV renders (whose stage knows its own start). The sidecar
+/// never carries it.
+///
+/// Env-gated on the corpus and on Camera Raw's install.
+///
+/// MUTATION: stamp a start without the headroom (or without the profile's
+/// offset), keep a saved recipe's start instead of the photo's, or let the
+/// XMP payload carry the field.
+#[test]
+fn every_surface_sees_one_camera_start_and_the_sidecar_carries_none() {
+    let Some(dir) = crate::config::live_env_os("AUTOSHADE_FIT_CALIBRATION_DIR").map(std::path::PathBuf::from)
+    else {
+        crate::test_skipped("camera start", "AUTOSHADE_FIT_CALIBRATION_DIR is unset");
+        return;
+    };
+    let raw = dir.join("p39.arw");
+    if !raw.is_file() {
+        crate::test_skipped("camera start", "the corpus lacks its RAW");
+        return;
+    }
+    if let Err(why) = canvas_renders(&raw) {
+        crate::test_skipped("camera start", &format!("the canvas cannot render here: {why}"));
+        return;
+    }
+    // The fresh open.
+    let fresh = crate::pipeline::calibration_recipe(crate::pipeline::fresh_photo_calibration(&raw));
+    let start = fresh.camera_start.expect("a fresh open stamps the start");
+    assert!(start.ev > 0.0 && start.headroom > 0.9, "the body's baseline and a daylight neutral's headroom: {start:?}");
+    // A saved develop reloaded: the stamp rides the JSON and the reload
+    // re-reads the same from the photo, whatever the save held.
+    let saved: EditRecipe = serde_json::from_str(&serde_json::to_string(&fresh).expect("json")).expect("reload");
+    assert_eq!(saved.camera_start, Some(start), "the save carries it");
+    let mut stale = EditRecipe { camera_start: Some(crate::recipe::CameraStart { ev: -2.0, headroom: 0.0, tables: 0 }), ..saved };
+    crate::pipeline::stamp_camera_start(&raw, &mut stale);
+    assert_eq!(stale.camera_start, Some(start), "a reload re-reads the photo's own");
+    // The fit.
+    let (_, cal) = crate::pipeline::fit_source(&raw).expect("fit source");
+    if BasePart::of(&cal) == BasePart::of(&fresh) {
+        assert_eq!(cal.camera_start, Some(start), "the fit's calibration carries the same start");
+    }
+    // The stage's own: the canvas at +1 EV shows the export at +1 EV.
+    const EDGE: u32 = 1000;
+    let up = EditRecipe { exposure_ev: 1.0, ..fresh.clone() };
+    let export = render_to_image(&raw, &up, None, Some(EDGE)).expect("export");
+    let base = DynamicImage::ImageRgb8(base_develop(&raw, &BasePart::of(&up), Some(EDGE)).expect("base").to_rgb8());
+    let film = crate::decode::film_short_edge(&raw);
+    let canvas = {
+        let after = develop_preview_film(&base, &up, &crate::diag::pixels(), film, true);
+        let geom = geometry_profile(&up);
+        let fs = FilmScale::of(film, after.width() as usize, after.height() as usize);
+        frame_and_finish(after, &up, &geom, fs, CropPolicy::Cut)
+    };
+    let de = mean_de76(&canvas, &export);
+    // …and without the stamp the canvas would read the light back under 0 EV
+    // and no headroom.
+    let unstamped = EditRecipe { camera_start: None, ..up.clone() };
+    let wrong = {
+        let after = develop_preview_film(&base, &unstamped, &crate::diag::pixels(), film, true);
+        let geom = geometry_profile(&unstamped);
+        let fs = FilmScale::of(film, after.width() as usize, after.height() as usize);
+        frame_and_finish(after, &unstamped, &geom, fs, CropPolicy::Cut)
+    };
+    let de_wrong = mean_de76(&wrong, &export);
+    println!("camera start {start:?}: canvas +1 EV vs export ΔE76 {de:.3}; unstamped {de_wrong:.3}");
+    assert!(de <= 0.5, "canvas +1 EV ΔE76 {de:.3} (bound 0.5)");
+    assert!(de_wrong > de, "the stamp is what makes the canvas right");
+    // The sidecar never carries it.
+    let xmp = crate::xmp::recipe_to_xmp(&fresh);
+    assert!(!xmp.contains("camera_start"), "the sidecar carries no camera start");
+}
+

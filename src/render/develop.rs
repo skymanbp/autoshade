@@ -299,7 +299,7 @@ pub(super) fn apply_develop_with_rasters(
     //    under the profile's ramp and curve (`apply_radial_gain_under_tone`).
     if let Some(lut) = vignette_gain_lut(r) {
         if camera_raw {
-            apply_radial_gain_under_tone(data, w, h, &lut, space);
+            apply_radial_gain_under_tone(data, w, h, &lut, space, r.camera_start.unwrap_or_default());
         } else {
             apply_radial_gain(data, w, h, &lut);
         }
@@ -335,6 +335,12 @@ pub(super) fn apply_develop_with_rasters(
     //    exactly how the profile came to render nothing.
     let tone_neutral = !r.has_tone_work()
         && (!camera_raw || (r.dehaze == 0.0 && r.clarity == 0.0 && !mask_cr::any_local_tone(r)));
+    // The camera stage kept a Camera Raw frame's over-range light for the
+    // slider Exposure (`calibrate_camera_buffer`); with no tone pass to carry
+    // it there, it ends here.
+    if camera_raw && tone_neutral {
+        clip_over_range(data);
+    }
     if !tone_neutral {
         // v1.17.0: on a camera-profile start, Highlights and Shadows first
         // (their own pass: a local law, keyed to the frame); exposure, per channel
@@ -352,12 +358,23 @@ pub(super) fn apply_develop_with_rasters(
                 apply_camera_raw_hs(data, &field, hl, sh);
                 mask_cr::apply_local_hs(data, w, h, r, rasters, frame, &field);
             }
-            if let Some(e) = camera_raw_exposure_lut(r.exposure_ev) {
-                data.par_iter_mut().for_each(|px| *px = camera_raw_channels(*px, &e));
+            // Exposure: one transfer at the camera start plus the slider, in
+            // the profile's reference primaries under Adobe's curve
+            // (`tone_cr::Exposure`).
+            let start = r.camera_start.unwrap_or_default();
+            let exposure = Exposure::new(start, r.exposure_ev);
+            if let Some(e) = &exposure {
+                let under = profile::UnderTone::new(space, start);
+                let (dec, enc) = transfer_luts();
+                data.par_iter_mut().for_each(|px| {
+                    *px = under.expose(px.map(|v| decode_wide(dec, v)), e).map(|v| encode_wide(enc, v.max(0.0)));
+                });
             }
             // A mask's Exposure, then its sliders, each after the global
             // one it adds to (`mask_cr`).
-            mask_cr::apply_local_exposure(data, w, h, r, rasters, frame);
+            let exposed = exposure.as_ref().map_or(start, Exposure::exposed);
+            mask_cr::apply_local_exposure(data, w, h, r, rasters, frame, space, exposed);
+            clip_over_range(data);
             if let Some(s) = &tone.sliders {
                 data.par_iter_mut().for_each(|px| *px = camera_raw_slider_pixel(*px, s));
             }
@@ -738,20 +755,39 @@ pub(super) fn apply_radial_gain_linear(data: &mut [[f32; 3]], w: usize, h: usize
 
 /// [`apply_radial_gain`] on a frame the camera-profile stage has rendered: each
 /// pixel's light is taken back under Adobe's default curve and the exposure
-/// ramp ([`profile::UnderTone`]), multiplied there, and put back through them.
+/// transfer ([`profile::UnderTone`]), multiplied there, and put back through them.
 /// Only the MANUAL vignette slider comes here; the profile's own gain goes on
 /// before the profile stage (`render::source`), because taken back under the
 /// curve alone it still met the profile's HueSatMap on the wrong side (up to
 /// 0.96 % off Camera Raw in a 14–24 mm corner, 0.12 % where it is now). Light
 /// the manual slider acts in under Camera Raw's law is not measured.
-fn apply_radial_gain_under_tone(data: &mut [[f32; 3]], w: usize, h: usize, gain_lut: &[f32], space: ExportColorSpace) {
+/// A Camera Raw frame's over-range light, which the camera stage kept
+/// ([`calibrate_camera_buffer`]), ends after the slider Exposure: each
+/// component clips at the working space's 1, with no desaturation. Measured
+/// against Camera Raw's renders: warm patches beyond sRGB at −1.51 EV come back
+/// with their hue only when the light is kept to the Exposure (worst ΔE 39.8 →
+/// 3.3), and at 0 EV and on the five carry pairs rawler's blown-pixel
+/// desaturation in this place reads worse than the clip (synthetic worst ΔE
+/// 34.9 → 10.9; p40 +0.7 EV 4.80 → 4.13).
+fn clip_over_range(data: &mut [[f32; 3]]) {
+    data.par_iter_mut().for_each(|px| *px = px.map(|c| c.min(1.0)));
+}
+
+fn apply_radial_gain_under_tone(
+    data: &mut [[f32; 3]],
+    w: usize,
+    h: usize,
+    gain_lut: &[f32],
+    space: ExportColorSpace,
+    start: crate::recipe::CameraStart,
+) {
     if w == 0 || h == 0 {
         return; // par_chunks_mut(0) asserts even on an empty slice (U14)
     }
     let (cx, cy) = ((w as f32 - 1.0) * 0.5, (h as f32 - 1.0) * 0.5);
     let rmax = (cx * cx + cy * cy).sqrt().max(1.0);
     let (dec, enc) = transfer_luts();
-    let under = profile::UnderTone::new(space);
+    let under = profile::UnderTone::new(space, start);
     data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         let dy = y as f32 - cy;
         for (x, px) in row.iter_mut().enumerate() {
@@ -760,8 +796,8 @@ fn apply_radial_gain_under_tone(data: &mut [[f32; 3]], w: usize, h: usize, gain_
             if (gain - 1.0).abs() < 1e-6 {
                 continue;
             }
-            let light = under.undo(px.map(|v| sample_lut(dec, v))).map(|c| c * gain);
-            *px = under.redo(light).map(|v| sample_lut(enc, v.clamp(0.0, 1.0)));
+            let light = under.undo(px.map(|v| decode_wide(dec, v))).map(|c| c * gain);
+            *px = under.redo(light).map(|v| encode_wide(enc, v.max(0.0)));
         }
     });
 }

@@ -50,6 +50,7 @@ mod brush;
 mod as_shot;
 mod camera;
 mod canvas;
+mod clip_lift;
 mod colour;
 mod develop;
 mod export;
@@ -84,7 +85,7 @@ use brush::{
     BRUSH_RASTER_MAX_WORK, BRUSH_RASTER_MIN_EDGE, brush_flow_deposit, brush_kernel,
     brush_kernel_exponents, brush_raster_dims,
 };
-pub use as_shot::as_shot_wb;
+pub use as_shot::{as_shot_wb, camera_start};
 #[cfg(test)]
 use as_shot::{camera_calibration, camera_raw_as_shot, sony_daylight_preset, sony_decrypt};
 use camera::{
@@ -217,17 +218,19 @@ pub(crate) use tone::{
 use tone::{apply_rgb_curves, hermite_eval};
 pub(crate) use tone_cr::{
     HS_SH_FLOOR, HsKey, SliderLaw, camera_raw_exposure, camera_raw_response_keyed, shadows_anchor,
-    camera_raw_row, camera_raw_start, exposure_ramp, hs_row, HsSite,
+    camera_raw_row, camera_raw_start, Exposure, hs_row, HsSite,
 };
 use tone_cr::{
-    apply_camera_raw_hs, camera_raw_after_lut, camera_raw_channels, camera_raw_exposure_lut, camera_raw_slider_lut,
+    apply_camera_raw_hs, camera_raw_after_lut, camera_raw_channels, camera_raw_slider_lut,
     camera_raw_slider_pixel, camera_raw_tone_lut, hs_field, Local, SliderPass,
 };
 #[cfg(test)]
 pub(crate) use tone::{limit_tone_sliders, parametric_lut};
 pub use wb::{local_temp_to_kelvin, solve_wb_for, solve_wb_from_neutral};
 pub(crate) use wb::{WbLaw, linear_to_srgb, srgb_to_linear, wb_gains};
-use wb::{apply_recipe_wb, apply_recipe_wb_in, colour_gain_luts, ramp, smoothstep, transfer_luts};
+use wb::{
+    apply_recipe_wb, apply_recipe_wb_in, colour_gain_luts, decode_wide, encode_wide, ramp, smoothstep, transfer_luts,
+};
 #[cfg(test)]
 use wb::{kelvin_to_rgb};
 

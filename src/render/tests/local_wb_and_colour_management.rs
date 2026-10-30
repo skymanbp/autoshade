@@ -461,7 +461,7 @@ fn wide_develop_keeps_out_of_srgb_camera_colors_and_neutral_parity() {
     // — the colour the old clip-at-sRGB pipeline destroyed.
     let xyz2cam = inv3(&rgb_to_xyz(P3_PRIM, D65_XY));
     let mut px = [[1.0f32, 0.0, 0.0]];
-    calibrate_camera_buffer(&mut px, &xyz2cam, [1.0, 1.0, 1.0], ExportColorSpace::DisplayP3, None);
+    calibrate_camera_buffer(&mut px, &xyz2cam, [1.0, 1.0, 1.0], ExportColorSpace::DisplayP3, None, false);
     let p = px[0];
     assert!(
         p[0] > 0.99 && p[1].abs() < 0.02 && p[2].abs() < 0.02,
@@ -473,7 +473,7 @@ fn wide_develop_keeps_out_of_srgb_camera_colors_and_neutral_parity() {
     // NEGATIVE component must reach the caller (the final pack clips it
     // — not the decode).
     let mut px = [[0.8f32, 0.0, 0.0]];
-    calibrate_camera_buffer(&mut px, &xyz2cam, [1.0, 1.0, 1.0], ExportColorSpace::Srgb, None);
+    calibrate_camera_buffer(&mut px, &xyz2cam, [1.0, 1.0, 1.0], ExportColorSpace::Srgb, None, false);
     assert!(
         px[0][1] < -0.001 || px[0][2] < -0.001,
         "out-of-gamut components must SURVIVE to the pack, got {:?}",
@@ -491,7 +491,7 @@ fn wide_develop_keeps_out_of_srgb_camera_colors_and_neutral_parity() {
             .enumerate()
     {
         let mut px = grey_cam;
-        calibrate_camera_buffer(&mut px, &xyz2cam, wb, space, None);
+        calibrate_camera_buffer(&mut px, &xyz2cam, wb, space, None, false);
         out[i] = px[0];
     }
     let want = linear_to_srgb(0.4);

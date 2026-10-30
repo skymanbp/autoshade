@@ -300,18 +300,6 @@ impl Calibration {
     }
 }
 
-/// Decode one working-space value to linear light — the LUT inside 0..1, the
-/// exact transfer outside it, so a wide-gamut develop's negative or >1
-/// component survives a linear-light stage instead of being clipped by it.
-fn decode_wide(dec: &[f32], c: f32) -> f32 {
-    if (0.0..=1.0).contains(&c) { sample_lut(dec, c) } else { srgb_to_linear(c) }
-}
-
-/// [`decode_wide`]'s inverse.
-fn encode_wide(enc: &[f32], c: f32) -> f32 {
-    if (0.0..=1.0).contains(&c) { sample_lut(enc, c) } else { linear_to_srgb(c) }
-}
-
 /// The Calibration panel over a frame, in place — nothing at all while every
 /// slider is 0 (see [`Calibration`]).
 pub(super) fn apply_calibration(data: &mut [[f32; 3]], r: &EditRecipe) {

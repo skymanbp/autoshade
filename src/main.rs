@@ -1245,6 +1245,7 @@ fn read_recipe_at(recipe_path: &Path, raw: &Path) -> Result<EditRecipe> {
         if r.as_shot_k.is_none() {
             (r.as_shot_k, r.as_shot_tint) = pipeline::fresh_as_shot_wb(raw);
         }
+        pipeline::stamp_camera_start(raw, &mut r);
         r.open_white_balance_at_as_shot();
         return Ok(r);
     }

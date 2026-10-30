@@ -99,6 +99,15 @@ pub struct EditRecipe {
     /// (display + XMP honesty only — `tint` stays a RELATIVE shift from
     /// as-shot, so the engine never feeds this to `wb_gains`).
     pub as_shot_tint: Option<f32>,
+    /// ENGINE-ONLY camera start (v1.17.0, never in XMP): the total exposure
+    /// and the white balance's over-range headroom the camera-profile stage
+    /// rendered this photograph's base at ([`CameraStart`]). Stamped with
+    /// the as-shot anchor above, from the RAW, and read by the develop's
+    /// Exposure and by every adjustment that acts under the stage's exposure
+    /// transfer (`render::profile::UnderTone`). `None` = unknown → 0 EV and no
+    /// headroom; only a recipe that names a camera profile reads it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub camera_start: Option<CameraStart>,
 
     // --- Colour / presence --------------------------------------------------
     /// -100..=100, protects already-saturated colours.
@@ -764,6 +773,29 @@ pub struct EditRecipe {
     pub confidence: f32,
 }
 
+/// Where the camera-profile stage started a photograph (v1.17.0): the TOTAL
+/// exposure its transfer ran at — the body's `BaselineExposure` plus the
+/// profile's `BaselineExposureOffset` — and the white balance's over-range
+/// headroom in stops (measured against the camera neutral's max over min,
+/// `render::tone_cr`). The develop's Exposure takes
+/// the light back under this start and puts it through the transfer at the
+/// start plus the slider, which is how Camera Raw's Exposure meets its
+/// baseline: one transfer at their sum.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct CameraStart {
+    /// The total exposure, in EV.
+    pub ev: f32,
+    /// The over-range headroom, in stops (0..=1).
+    pub headroom: f32,
+    /// The profile stage's look table and tone curve — what it puts on after
+    /// its exposure transfer — by the key the stage registered them under
+    /// (`render::profile::register_tail`), filled in the same step that reads
+    /// the profile. 0, the default (every recipe written before the key
+    /// existed): Adobe's default curve and no look table.
+    pub tables: u64,
+}
+
 /// One smooth field of local colour and tone, on the same bilateral grid the
 /// reverse fit analyses with ([`crate::fit_field`]): `x` × `y` spatial cells
 /// × `b` luma bins, five parameters per vertex, read trilinearly per pixel.
@@ -1128,6 +1160,7 @@ impl Default for EditRecipe {
             tint: 0.0,
             as_shot_k: None,
             as_shot_tint: None,
+            camera_start: None,
             vibrance: 0.0,
             saturation: 0.0,
             clarity: 0.0,
@@ -1489,6 +1522,9 @@ impl EditRecipe {
         self.camera_profile = String::new();
         self.look = None;
         self.lens_profile = Default::default();
+        // …and the camera start the profile stage rendered at: baked pixels
+        // went through no stage here.
+        self.camera_start = None;
     }
 
     /// One tone slider, with the Look's baked move added.
@@ -4187,6 +4223,13 @@ impl EditRecipe {
             Some(t) if t.is_finite() => Some(t.clamp(-100.0, 100.0)),
             _ => None,
         };
+        // The camera start: Camera Raw's exposure slider range and the
+        // headroom's one stop; a corrupt one is "unknown".
+        self.camera_start = self.camera_start.filter(|c| c.ev.is_finite() && c.headroom.is_finite()).map(|c| CameraStart {
+            ev: c.ev.clamp(-10.0, 10.0),
+            headroom: c.headroom.clamp(0.0, 1.0),
+            tables: c.tables,
+        });
         // Crop is a normalized [0,1] view-frame rectangle; untrusted input
         // (AI JSON, foreign XMP, a hand-edited recipe) can carry values
         // outside the frame or an inverted/empty rectangle. Clamp into the
@@ -4652,6 +4695,7 @@ impl EditRecipe {
                 // calibration — a fresh-open stamp must still count as no-op.
                 as_shot_k: None,
                 as_shot_tint: None,
+                camera_start: None,
                 lens_profile: if self.lens_profile.is_as_stamped() {
                     LensProfile::default()
                 } else {
@@ -5312,6 +5356,22 @@ mod tests {
         stub.clamp();
         assert!(stub.mask_warp.is_empty());
         assert_eq!(stub.mask_warp_src, MaskWarpSource::Unparseable);
+    }
+
+    /// A camera start written before the stage's tail key existed loads with
+    /// key 0 — Adobe's default curve and no look table, what it rendered under
+    /// — and a stamped key survives the JSON round trip.
+    #[test]
+    fn a_camera_start_without_its_tail_key_loads_as_the_default_tail() {
+        let legacy: EditRecipe =
+            serde_json::from_str(r#"{"camera_start":{"ev":0.35,"headroom":0.995}}"#).unwrap();
+        assert_eq!(legacy.camera_start, Some(CameraStart { ev: 0.35, headroom: 0.995, tables: 0 }));
+        let stamped = EditRecipe {
+            camera_start: Some(CameraStart { ev: 0.35, headroom: 1.0, tables: 0x1234_5678_9abc_def0 }),
+            ..Default::default()
+        };
+        let back: EditRecipe = serde_json::from_str(&serde_json::to_string(&stamped).unwrap()).unwrap();
+        assert_eq!(back.camera_start, stamped.camera_start);
     }
 
     #[test]

@@ -1547,7 +1547,7 @@ Run `cargo run -- recipe-schema` to print a default `EditRecipe` **instance**
 contract: that is a JSON Schema **generated from the control registry**
 (`advisor::catalogue`, §3), and it deliberately excludes the engine-only fields
 the recipe carries for calibration (`base_curve`, `as_shot_k`/`as_shot_tint`,
-the lens-profile block; the canvas's `camera_profile` and Look are not states
+`camera_start`, the lens-profile block; the canvas's `camera_profile` and Look are not states
 the advisor emits either) — an advisor must never emit those.
 
 Local masks (`LocalAdjustment`, v0.22): base geometry (linear / rotatable
@@ -1663,7 +1663,7 @@ this trait.)
 > response stated, `openai::take_opinions` strips the nulls before the parse, and
 > `carry_over_unrepresentable` copies the base's value only where the model said
 > nothing. Still engine-only, each for a stated reason: the engine's own per-photo
-> measurement (`as_shot_k`/`as_shot_tint`, `base_curve`, the lens-profile block),
+> measurement (`as_shot_k`/`as_shot_tint`, `camera_start`, `base_curve`, the lens-profile block),
 > mask state with no ACR spelling (`components`, `color_gains`, `role`, plus the
 > `enabled` eye toggle), the eight detail axes and the CA pair (1–3 px structure
 > the preview cannot show), the parametric curve (the point curve says the same),
@@ -3070,10 +3070,12 @@ recipe is byte-identical, the canvas reads ΔE76 0.354, a master 0.012, and the
 fit source at its 2048 edge 0.264 against the sidecar at the same edge
 (`render::tests::every_surface_shows_a_fresh_canvas_as_the_export_renders_it`).
 
-The invariant that keeps F7 from changing any existing picture is
-`Stage::build_for` returning `None` when a profile has no tables, no curve and
-no `ForwardMatrix` to own,
-pinned by `render::profile::tests::a_profile_with_no_tables_a_straight_curve_and_no_gain_is_not_a_stage`.
+The invariant that keeps F7 from changing any existing picture is that a
+recipe with no camera profile builds no stage at all. A profile that IS named
+always builds one since v1.17.0, even with no tables, no curve and no
+`ForwardMatrix`, because Camera Raw's exposure transfer acts at 0 EV (its toe)
+and the stage carries it,
+pinned by `render::profile::tests::a_profile_with_nothing_to_say_renders_the_transfer_alone`.
 
 **Lightroom's remaining colour panels render since v1.5.0** — the Calibration
 panel, the Black & White treatment with its eight-band mixer, and Point Color.

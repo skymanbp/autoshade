@@ -368,14 +368,64 @@ bundled; a machine with no profiles gets a named refusal.
   SDK licence (which permits use, modification and distribution). Embedded in
   `render/profile/acr3_default.rs`; RawTherapee's
   `adobe_camera_raw_default_curve` is the same table to the last digit. The
-  stage's gain adds the body's `BaselineExposure`, inferred from the body's
-  camera-matching profiles (`dcp::baseline_exposure`). After the gain comes
-  Camera Raw's exposure ramp (`render::exposure_ramp`, **measured**): a black
-  of 0.0018 subtracted after the gain, the identity to a knee at 0.15, then an
-  exponential shoulder of unit slope toward 1.2, clipped at white — where the
-  SDK subtracts 0.005 and clips at 1. Clipped, the p39 flat sidecar rendered
-  L 90–100 +2.7 L and L 0–30 1.2–1.6 L bright against Camera Raw; the SDK's
-  0.005 darkens the shadows 2–4 L past it.
+  stage's exposure is the body's `BaselineExposure`, inferred from the body's
+  camera-matching profiles (`dcp::baseline_exposure`), plus the profile's
+  offset. It renders through Camera Raw's exposure transfer
+  (`render::tone_cr::Ramp`, **measured**, `tone_cr/ramp_table.rs`): the
+  transfer of a grey over 54 total exposures −5…+6 EV × 110 inputs, read from
+  Camera Raw renders of synthetic linear DNGs, blended between rows in EV;
+  the brightest and darkest channels go through it and the middle one keeps
+  its linear ratio. Under an As Shot white whose camera neutral is not grey
+  the transfer sits higher: the row at `E + h` on the input over `2^h`, with
+  `h` read from a table over the neutral's largest/smallest channel
+  (measured from Camera Raw renders, 12 points, 2026-10-29: 0 at 1, 0.185 at
+  1.15, 0.36 at 1.3, 0.525 at 1.45, 0.835 at 1.8, 0.995 from 2 on). SCOPE:
+  those renders were frames of grey patches alone, and Camera Raw's headroom
+  is a FRAME-LEVEL reading, not a pointwise one — the same neutral and the
+  same greys render white at L 89.5 alone, 93.2 beside a colour lattice and
+  98.5 beside a dark-grey population — so the table is the grey frame's
+  reading until the adaptive law is measured. The pair
+  is stamped per photo as `EditRecipe::camera_start` (`render::camera_start`),
+  so the canvas's Exposure (applied over the base develop by
+  `render::Exposure`) reads its light back at the start the export's stage
+  renders at; the sidecar never carries it. Exposure singles on p39 against
+  Camera Raw, worst moving band |ΔL| / |Δa|,|Δb|: −1 EV 0.72/0.56, +0.5
+  0.91/0.96, +1 0.84/0.89, +2 0.72/0.94.
+
+- Near-white colour lift (v1.17.0, `render/clip_lift.rs`, **measured** from
+  11 Camera Raw renders of synthetic DNGs, 2026-10-29): before the camera
+  matrix, in white-balanced camera RGB, Camera Raw raises a colour's lower
+  channels toward its higher ones as their SENSOR values near the white level.
+  The channel with the largest camera neutral (green on a Bayer body) anchors;
+  each of the other two rises toward the other by `k(raw) · (difference)`,
+  then the anchor rises toward their mean; `k` is a table by sensor value
+  (0 below 0.28, 0.11 at 0.5, 0.53 at 0.8, 1 at white). Independent of
+  exposure and of the camera's primaries. Seven 1728-patch lattices across
+  neutrals: worst 0.0035 of white (0.107 without it); engine against Camera
+  Raw on the grey-neutral lattice's bright in-gamut colours, max ΔE 16.65 →
+  0.92. Real frames barely reach it (p39/p40 carry and +2 EV hue unchanged).
+
+- Over-range light (v1.17.0, `render::camera` / `render::develop`, **measured** from
+  Camera Raw renders, 2026-10-29): a colour the camera stage puts above the
+  working space's 1 is kept, encoded exactly, through Highlights/Shadows and
+  the slider Exposure, and each component clips at 1 after the Exposure (no
+  blown-pixel desaturation on this path). Warm patches beyond sRGB at −1.51 EV:
+  worst ΔE 39.8 → 3.3; at 0 EV 34.9 → 10.9; carry p40 (+0.7 EV) 4.80 → 4.13,
+  p36/p38/p39 unchanged, p41 8.56 → 8.69. Light above the profile reference's
+  own 1 (ProPhoto) still clips there, under Adobe's curve.
+
+- The profile stage's tail under Camera Raw's adjustments (v1.17.0, `render::profile::UnderTone`,
+  **measured** from Camera Raw renders, 2026-10-29): the stage puts its look table on AFTER the exposure
+  transfer and before its tone curve, so an Exposure (and a mask's Temp/Tint, the vignette under tone, the
+  white balance under tone) undoes the curve AND the look table, acts, and redoes both. The stage's own
+  look table, tone curve and reference basis travel with the photograph's camera start
+  (`CameraStart::tables`, filled where the profile is read; 0 in a recipe written before it = Adobe's
+  default curve, no look table, as before). Synthetic warm patches at −1.51 EV with Adobe Standard's look
+  table: median ΔE 4.71 → 1.25 (worst 10.75 → 1.58), identical to the stage rendered at the total.
+  The extra loss once seen on that detour (no look table: median 1.55 against 1.13) was a basis
+  mismatch, not the inverse: a ForwardMatrix stage works in ProPhoto at D50 behind a Bradford
+  adaptation, and undoing it in ProPhoto's primaries at the working white put warm colours 2–3.5 % off
+  per channel. Carry p36/p38/p39/p40/p41: 4.03/4.52/3.98/4.13/8.69 → 4.09/4.51/4.00/4.09/8.57.
 
 - Table entry: `(hue shift in degrees, saturation scale, value scale)`, stored
   `index = (val * hueDivisions + hue) * satDivisions + sat` (**measured** — at
@@ -780,6 +830,18 @@ supposed to remove.
   reverse fit solves.
 - Clarity radius: `max(round(0.02·min(width,height)), 8)`
   (**designed resolution scaling**).
+- Positive Texture radius: `max(round(0.005·min(width,height)), 2)`
+  (**designed resolution scaling**). Both radii are whole raster pixels with
+  a raster floor, so a reduced develop is not an exact scale of the full one
+  (**measured behaviour**, 2026-10-29): at a 667 px short edge Texture's
+  3.33 px rounds to 3, and below a 375 px (Clarity) / 300 px (Texture) short edge the
+  floor holds the radius, so the operator reaches relatively further. The
+  reduced develop itself is NOT the cause of a preview's tonal offset: the
+  engine's encoded-domain reduction against Camera Raw's own reduced render
+  (`CameraRAWSize.MINIMUM`, 1536 × 1024) reads p39's neutral L40 / L50 / L60
+  at −0.37 / −0.23 / −0.14 L, and reducing in linear light instead moved them
+  to +0.44 / +0.44 / +0.40 with edges +1.2 — so 1000 px acceptances are made
+  against Camera Raw's own reduced render.
 - Negative Texture arm 1: amplitude `A1 = 0.172443`,
   `sigma1 = 0.0031235·short_edge` = `0.31235%` of the short edge
   (**measured Lightroom fit**).

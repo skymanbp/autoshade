@@ -8,6 +8,10 @@ fn camera_raw_wb_recipe(kelvin: f32, tint: f32) -> EditRecipe {
         tint,
         as_shot_k: Some(5400.0),
         as_shot_tint: Some(14.0),
+        // The measured frame's own start: its body's +0.35 EV baseline
+        // ("Adobe Standard" offsets nothing) and its As Shot neutral's full
+        // stop of headroom.
+        camera_start: Some(crate::recipe::CameraStart { ev: 0.35, headroom: 1.0, tables: 0 }),
         ..Default::default()
     }
 }
@@ -180,10 +184,15 @@ fn lab_of_linear(c: [f32; 3]) -> [f32; 3] {
 #[test]
 fn camera_raws_white_balance_at_the_fits_extremes_is_pinned_to_its_measured_miss() {
     // (Temperature, Tint, Camera Raw's ΔL Δa Δb, the law's miss when measured: engine − Camera Raw)
+    // v1.17.0: the two warmest rows re-read once the white balance acted
+    // under Camera Raw's measured exposure transfer at the frame's own start
+    // (`tone_cr::Ramp`) rather than the earlier fitted ramp: their miss
+    // shrank by 0.6–0.8 (2000 K was −3.97 −10.64 +13.26, 2500 K −1.69 −3.88
+    // +6.13); every other row moved by 0.46 or less (3000 K's b*).
     #[allow(clippy::type_complexity)]
     let measured: [(f32, f32, [f32; 3], [f32; 3]); 16] = [
-        (2000.0, 14.0, [-0.05, 24.41, -72.27], [-3.97, -10.64, 13.26]),
-        (2500.0, 14.0, [-1.92, 10.88, -58.28], [-1.69, -3.88, 6.13]),
+        (2000.0, 14.0, [-0.05, 24.41, -72.27], [-3.87, -9.95, 12.46]),
+        (2500.0, 14.0, [-1.92, 10.88, -58.28], [-1.61, -3.31, 5.43]),
         (3000.0, 14.0, [-1.45, -0.05, -40.82], [-1.62, 0.35, -0.61]),
         (4000.0, 14.0, [-1.12, -1.48, -17.69], [-0.18, -0.26, -2.33]),
         (7500.0, 14.0, [2.13, 3.80, 12.91], [-0.98, -0.85, 2.44]),

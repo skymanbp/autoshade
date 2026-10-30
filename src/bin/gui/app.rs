@@ -1215,6 +1215,10 @@ impl AutoShadeApp {
                         };
                         let start: autoshade::pipeline::CanvasStart = start;
                         start.stamp(&mut fresh);
+                        // …and the camera start at that profile (v1.17.0).
+                        if let (false, Some(p)) = (generated, self.src_path.as_deref()) {
+                            autoshade::pipeline::stamp_camera_start(p, &mut fresh);
+                        }
                         fresh.open_white_balance_at_as_shot();
                         self.recipe = fresh;
                         self.region = None;

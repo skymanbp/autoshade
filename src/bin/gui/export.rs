@@ -162,6 +162,7 @@ fn xmp_arm(
         r.as_shot_k = ask;
         r.as_shot_tint = ast;
     }
+    autoshade::pipeline::stamp_camera_start(p, &mut r);
     Some((r, kind))
 }
 

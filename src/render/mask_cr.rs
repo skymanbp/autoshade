@@ -5,7 +5,7 @@
 //! local key set alone (and a few paired with its global twin):
 //!
 //! - **Exposure** is the global Exposure: the same ramp
-//!   (`tone_cr::camera_raw_exposure_lut`), and a mask's EV adds to the
+//!   (`tone_cr::Exposure`), and a mask's EV adds to the
 //!   global one (a +1 EV frame under a −0.25 EV mask renders as +0.75).
 //!   It runs right after the global Exposure.
 //! - **Contrast, Highlights, Shadows, Whites, Blacks, Dehaze** and
@@ -298,9 +298,11 @@ fn blend_each<T: Sync>(
     });
 }
 
-/// Local Exposure on this law: the global stage's ramp at the mask's EV
-/// (`tone_cr::camera_raw_exposure_lut`, Adobe's channel rule), after the
-/// global Exposure and before the five sliders, so the two add in EV.
+/// Local Exposure on this law: the global Exposure's transfer
+/// (`tone_cr::Exposure`) at the mask's EV on the frame the global one left at
+/// `exposed`, after the global Exposure and before the five sliders, so the
+/// two add in EV.
+#[allow(clippy::too_many_arguments)] // the develop's frame, its working space and the start the global Exposure left
 pub(super) fn apply_local_exposure(
     data: &mut [[f32; 3]],
     w: usize,
@@ -308,10 +310,16 @@ pub(super) fn apply_local_exposure(
     r: &EditRecipe,
     rasters: &MaskRasterSnapshot,
     frame: MaskFrame<'_>,
+    space: ExportColorSpace,
+    exposed: crate::recipe::CameraStart,
 ) {
     with_covers(r, rasters, frame, (w, h), |m| m.exposure_ev != 0.0, |covers| {
-        let luts: Vec<Vec<f32>> = covers.iter().filter_map(|(m, _)| camera_raw_exposure_lut(m.exposure_ev)).collect();
-        blend_each(data, w, covers, &luts, |lut, px| camera_raw_channels(px, lut));
+        let passes: Vec<Exposure> = covers.iter().filter_map(|(m, _)| Exposure::new(exposed, m.exposure_ev)).collect();
+        let under = profile::UnderTone::new(space, exposed);
+        let (dec, enc) = transfer_luts();
+        blend_each(data, w, covers, &passes, |e, px| {
+            under.expose(px.map(|v| decode_wide(dec, v)), e).map(|v| encode_wide(enc, v.max(0.0)))
+        });
     });
 }
 
@@ -385,7 +393,7 @@ fn global_white(r: &EditRecipe) -> ((f32, f32), (f32, f32)) {
 /// Local Temp and Tint on this law: the global white balance's adaptation
 /// (`wb::camera_raw_wb`) to the white the mask moves the global one to,
 /// relative to the global one, blended by the mask's weight in the light
-/// after the profile stage's exposure ramp and before Adobe's curve
+/// after the profile stage's exposure transfer and before Adobe's curve
 /// (`profile::UnderTone::undo_curve`). Runs right after the global white
 /// balance, before the tone.
 pub(super) fn apply_local_white(
@@ -410,7 +418,7 @@ pub(super) fn apply_local_white(
                 mat_mul3(&super::wb::camera_raw_wb(to, as_shot), &back).map(|row| row.map(|v| v * k))
             })
             .collect();
-        let under = profile::UnderTone::new(space);
+        let under = profile::UnderTone::new(space, r.camera_start.unwrap_or_default());
         let (dec, enc) = transfer_luts();
         data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
             for (x, px) in row.iter_mut().enumerate() {
@@ -420,14 +428,14 @@ pub(super) fn apply_local_white(
                     if wt <= 0.001 {
                         continue;
                     }
-                    let l = light.get_or_insert_with(|| under.undo_curve(px.map(|v| sample_lut(dec, v))));
+                    let l = light.get_or_insert_with(|| under.undo_curve(px.map(|v| decode_wide(dec, v))));
                     let t = mat_vec3(mv, l);
                     for ch in 0..3 {
                         l[ch] += wt * (t[ch] - l[ch]);
                     }
                 }
                 if let Some(l) = light {
-                    *px = under.redo_curve(l).map(|v| sample_lut(enc, v.clamp(0.0, 1.0)));
+                    *px = under.redo_curve(l).map(|v| encode_wide(enc, v.max(0.0)));
                 }
             }
         });
@@ -505,7 +513,7 @@ mod tests {
     /// working primaries instead of the reference ones.
     #[test]
     fn the_local_hue_turns_by_degrees_in_the_reference_primaries() {
-        let under = profile::UnderTone::new(ExportColorSpace::Srgb);
+        let under = profile::UnderTone::new(ExportColorSpace::Srgb, crate::recipe::CameraStart::default());
         let (dec, enc) = transfer_luts();
         let red = [0.70f32, 0.30, 0.25];
         for deg in [0.0f32, 360.0] {
