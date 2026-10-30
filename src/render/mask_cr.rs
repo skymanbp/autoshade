@@ -298,10 +298,59 @@ fn blend_each<T: Sync>(
     });
 }
 
+/// Rungs of the ladder a mask's Exposure is put on a pixel through
+/// ([`expose_at_weight`]): rung `k` is the exposure at `k / (EXPOSURE_RUNGS − 1)`
+/// of the mask's EV, rung 0 the pixel as it stands.
+pub(crate) const EXPOSURE_RUNGS: usize = 17;
+
+/// The EV of rung `k` of a mask at `ev` ([`EXPOSURE_RUNGS`]).
+pub(crate) fn rung_ev(ev: f32, k: usize) -> f32 {
+    ev * k as f32 / (EXPOSURE_RUNGS - 1) as f32
+}
+
+/// Where weight `w` sits on the ladder: the rung below it and the fraction
+/// toward the next. [`expose_at_weight`] reads rung `i` alone at fraction 0,
+/// rung `i + 1` alone at 1, both between.
+pub(crate) fn weight_rungs(w: f32) -> (usize, f32) {
+    let x = w.clamp(0.0, 1.0) * (EXPOSURE_RUNGS - 1) as f32;
+    let i = (x.floor() as usize).min(EXPOSURE_RUNGS - 2);
+    (i, x - i as f32)
+}
+
+/// A mask's Exposure on a pixel at mask weight `w` (v1.17.0): the exposure at
+/// `w · ev`. `rung(k, px)` is `px` under rung `k`'s EV ([`rung_ev`]); the
+/// pixel at `w` is the two rungs either side of it, interpolated.
+///
+/// **Why the EV scales, not the result.** The old law exposed the pixel at the
+/// full EV and blended that with the pixel by the weight in display encoding.
+/// A blend of two exposures is not the exposure between them: on a 0.25 EV
+/// linear gradient its log-light response stood +0.044 / +0.054 / +0.049 above
+/// the weight across the ramp (p38, bins 0.2–0.8), predicted bin by bin by the
+/// blend itself (rms 0.0065), where scaling the EV reads −0.003 and Camera
+/// Raw's render +0.000 … +0.016. Between two rungs the interpolation leaves
+/// the same kind of residue over one sixteenth of the EV, which is second
+/// order: a sixteenth of the step, a sixteenth of the bend.
+///
+/// The ONE place a mask's weight meets its Exposure: the render
+/// ([`apply_local_exposure`]) and the zone fit's prediction of it
+/// ([`LocalGreyLaw::exposed_pixel`]) both call it.
+pub(crate) fn expose_at_weight(px: [f32; 3], w: f32, rung: impl Fn(usize, [f32; 3]) -> [f32; 3]) -> [f32; 3] {
+    let (i, f) = weight_rungs(w);
+    let at = |k: usize| if k == 0 { px } else { rung(k, px) };
+    if f <= 0.0 {
+        return at(i);
+    }
+    if f >= 1.0 {
+        return at(i + 1);
+    }
+    let (a, b) = (at(i), at(i + 1));
+    std::array::from_fn(|c| a[c] + f * (b[c] - a[c]))
+}
+
 /// Local Exposure on this law: the global Exposure's transfer
-/// (`tone_cr::Exposure`) at the mask's EV on the frame the global one left at
-/// `exposed`, after the global Exposure and before the five sliders, so the
-/// two add in EV.
+/// (`tone_cr::Exposure`) at the mask's EV times its weight
+/// ([`expose_at_weight`]) on the frame the global one left at `exposed`, after
+/// the global Exposure and before the five sliders, so the two add in EV.
 #[allow(clippy::too_many_arguments)] // the develop's frame, its working space and the start the global Exposure left
 pub(super) fn apply_local_exposure(
     data: &mut [[f32; 3]],
@@ -314,11 +363,27 @@ pub(super) fn apply_local_exposure(
     exposed: crate::recipe::CameraStart,
 ) {
     with_covers(r, rasters, frame, (w, h), |m| m.exposure_ev != 0.0, |covers| {
-        let passes: Vec<Exposure> = covers.iter().filter_map(|(m, _)| Exposure::new(exposed, m.exposure_ev)).collect();
+        // One ladder per cover, index-aligned with `covers` (a rung whose EV
+        // is 0 or not finite is the pixel itself).
+        let ladders: Vec<Vec<Option<Exposure>>> = covers
+            .iter()
+            .map(|(m, _)| (0..EXPOSURE_RUNGS).map(|k| Exposure::new(exposed, rung_ev(m.exposure_ev, k))).collect())
+            .collect();
         let under = profile::UnderTone::new(space, exposed);
         let (dec, enc) = transfer_luts();
-        blend_each(data, w, covers, &passes, |e, px| {
-            under.expose(px.map(|v| decode_wide(dec, v)), e).map(|v| encode_wide(enc, v.max(0.0)))
+        data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            for (x, px) in row.iter_mut().enumerate() {
+                for ((_, c), ladder) in covers.iter().zip(&ladders) {
+                    let wt = c.at_px(x, y, px);
+                    if wt <= 0.001 {
+                        continue;
+                    }
+                    *px = expose_at_weight(*px, wt, |k, p| match &ladder[k] {
+                        Some(e) => under.expose(p.map(|v| decode_wide(dec, v)), e).map(|v| encode_wide(enc, v.max(0.0))),
+                        None => p,
+                    });
+                }
+            }
         });
     });
 }
@@ -597,18 +662,35 @@ impl LocalGreyLaw {
         self.after_local_exposure(x.clamp(0.0, 1.0), table_sliders(m))
     }
 
-    /// [`LocalGreyLaw::response`] as a [`LUT_N`] table over `y`, for
-    /// putting on a colour by Adobe's channel rule ([`LocalGreyLaw::pixel`]).
-    pub(crate) fn response_lut(&self, m: &crate::recipe::LocalAdjustment) -> Vec<f32> {
-        (0..LUT_N).map(|i| self.response(i as f32 / (LUT_N - 1) as f32, m)).collect()
+    /// The rungs an Exposure-only mask at `ev` is put on a pixel through
+    /// ([`expose_at_weight`]), each [`LocalGreyLaw::response`] at that rung's
+    /// EV as a [`LUT_N`] table over `y`. Only the rungs `weights` read
+    /// ([`weight_rungs`]) are built; the rest, and rung 0 (the pixel itself),
+    /// stay empty.
+    pub(crate) fn exposure_ladder(&self, ev: f32, weights: &[f32]) -> Vec<Vec<f32>> {
+        let mut needed = [false; EXPOSURE_RUNGS];
+        for &w in weights {
+            let (i, f) = weight_rungs(w);
+            needed[i] |= f < 1.0;
+            needed[i + 1] |= f > 0.0;
+        }
+        (0..EXPOSURE_RUNGS)
+            .map(|k| {
+                if k == 0 || !needed[k] {
+                    return Vec::new();
+                }
+                let m = crate::recipe::LocalAdjustment { exposure_ev: rung_ev(ev, k), ..Default::default() };
+                (0..LUT_N).map(|i| self.response(i as f32 / (LUT_N - 1) as f32, &m)).collect()
+            })
+            .collect()
     }
 
-    /// A rendered colour under the mask at weight `w`, by Adobe's channel
-    /// rule on `lut` ([`LocalGreyLaw::response_lut`]), as the develop puts its
-    /// exposure on a colour.
-    pub(crate) fn pixel(px: [f32; 3], lut: &[f32], w: f32) -> [f32; 3] {
-        let t = camera_raw_channels(px, lut);
-        std::array::from_fn(|c| px[c] + w * (t[c] - px[c]))
+    /// A rendered colour under an Exposure-only mask at weight `w`, by
+    /// Adobe's channel rule on the ladder ([`LocalGreyLaw::exposure_ladder`],
+    /// built for `w`), as the develop puts the mask's exposure on a colour
+    /// ([`expose_at_weight`]).
+    pub(crate) fn exposed_pixel(px: [f32; 3], ladder: &[Vec<f32>], w: f32) -> [f32; 3] {
+        expose_at_weight(px, w, |k, p| camera_raw_channels(p, &ladder[k]))
     }
 }
 
@@ -684,6 +766,64 @@ mod tests {
         assert!(grey.iter().all(|&c| (c - 0.4).abs() < 4e-3), "a grey: {grey:?}");
         let turned = hue_px(red, 120.0, &under, dec, enc);
         assert!(turned[1] > turned[0], "+120° takes red toward green: {turned:?}");
+    }
+
+    /// A mask's Exposure at weight `w` is the exposure at `w · ev`, not the
+    /// full-EV result blended by `w` ([`expose_at_weight`]): on a 16-bit grey
+    /// ramp, a full-coverage mask at Amount `w` renders as the same mask at
+    /// `w · ev` and Amount 1 — exactly on a rung (`w` = 0.5 is rung 8), within
+    /// the interpolation's residue between rungs (`w` = 0.3) — and the zone
+    /// fit's prediction ([`LocalGreyLaw::exposed_pixel`]) is the same ladder.
+    /// Premise: the old blend misses `w · ev` by more than the tolerance.
+    ///
+    /// MUTATION: blend the full-EV result by the weight again (the render
+    /// misses by the premise's margin), or read the rung below for the rung
+    /// above in `weight_rungs`.
+    #[test]
+    fn a_masks_exposure_at_a_weight_is_the_exposure_at_that_fraction_of_its_ev() {
+        use crate::recipe::{LocalAdjustment, MaskGeometry};
+        let n = 512u32;
+        let img = image::DynamicImage::ImageRgb16(image::ImageBuffer::from_fn(n, 2, |x, _| {
+            let v = (x as f32 / (n - 1) as f32 * 65535.0).round() as u16;
+            image::Rgb([v, v, v])
+        }));
+        let base = EditRecipe { camera_profile: "Adobe Standard".into(), ..Default::default() };
+        let mask = |ev: f32, amount: f32| LocalAdjustment {
+            mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.5, full_x: 0.5, full_y: 0.5 },
+            exposure_ev: ev,
+            amount,
+            ..Default::default()
+        };
+        let row = |r: &EditRecipe| -> Vec<f32> {
+            let out = develop_preview(&img, r).to_rgb32f();
+            (0..n).map(|x| out.get_pixel(x, 1)[1]).collect()
+        };
+        let with = |m: LocalAdjustment| EditRecipe { masks: vec![m], ..base.clone() };
+        let plain = row(&base);
+        let ev = 1.2f32;
+        let full = row(&with(mask(ev, 1.0)));
+        for (w, tol) in [(0.5f32, 1e-4f32), (0.3, 2e-3)] {
+            let weighted = row(&with(mask(ev, w)));
+            let scaled = row(&with(mask(w * ev, 1.0)));
+            let (mut worst, mut blend_worst) = (0.0f32, 0.0f32);
+            for i in 0..n as usize {
+                if plain[i] < 0.03 || full[i] >= 0.999 {
+                    continue;
+                }
+                worst = worst.max((weighted[i] - scaled[i]).abs());
+                let blend = plain[i] + w * (full[i] - plain[i]);
+                blend_worst = blend_worst.max((blend - scaled[i]).abs());
+            }
+            assert!(worst <= tol, "w {w}: the render misses w·EV by {worst:.5}");
+            assert!(blend_worst > 5.0 * tol.max(1e-3), "premise: the old blend misses w·EV by only {blend_worst:.5} at w {w}");
+        }
+        // The fit's prediction is the same ladder: a grey at weight 0.3.
+        let law = LocalGreyLaw::of(&base, super::super::tone_cr::HsKey::NOMINAL).expect("a camera-profile start");
+        let ladder = law.exposure_ladder(ev, &[0.3]);
+        let y = 0.4f32;
+        let at = LocalGreyLaw::exposed_pixel([y; 3], &ladder, 0.3)[1];
+        let direct = law.response(y, &LocalAdjustment { exposure_ev: 0.3 * ev, ..Default::default() });
+        assert!((at - direct).abs() < 2e-3, "the fit's ladder at 0.3: {at:.5} vs the exposure at 0.3·EV {direct:.5}");
     }
 
     /// The law the zone fit solves on ([`LocalGreyLaw`]) is the render's: a

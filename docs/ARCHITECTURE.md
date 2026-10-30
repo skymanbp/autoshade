@@ -2226,7 +2226,11 @@ adjustments (linear/radial/bitmap masks). On a recipe that names a camera
 profile (v1.17.0, `render/mask_cr.rs`) a mask's Highlights and Shadows run
 the global law on the same sites right after the global pass, before
 Exposure, and its Exposure, its other tone sliders, Dehaze and Clarity's tone
-run instead right after their global twins — Exposure on the same ramp, so the two add in EV; the sliders on
+run instead right after their global twins — Exposure on the same ramp, so the two add in EV, and at
+the mask's weight times its EV (`mask_cr::expose_at_weight`: a 17-rung ladder
+of EVs, interpolated between the two rungs either side of the weight), where
+it used to blend the full-EV result by the weight in display encoding, a
+Jensen bias of +0.05 in weight mid-ramp; the sliders on
 response tables of their own, measured — and its Temp and Tint right after
 the global white balance, as a move of that white in the light between the
 exposure ramp and Adobe's curve; its Hue turns by degrees in the profile
@@ -2234,7 +2238,7 @@ stage's reference primaries, and the mask stage's airlight Dehaze does not
 run. Each reads the mask's coverage the mask stage reads (`masks::Cover`).
 The zoned reverse fit solves a zone's Exposure, tone sliders and colour gains
 on that same law (`render::LocalGreyLaw`, the develop's own tone stage read on
-a grey; `fit_zoned::fit_zone_dials_on` / `fit_zone_tone_on`): the engine's
+a grey, put on a zone pixel at its weight through the same ladder; `fit_zoned::fit_zone_dials_on` / `fit_zone_tone_on`): the engine's
 moment solve took a mask's EV as a gain on the rendered value, and on this
 law (the measured exposure transfer at the camera start, under the profile
 stage's curve, the mask's on the start the global one left; Highlights and

@@ -239,12 +239,14 @@ pub(crate) fn fit_zone_dials_on(
     let Some(law) = law else { return fit_zone_dials(src, tgt) };
     let zone: Vec<usize> = (0..px.len()).filter(|&i| weights.get(i).is_some_and(|&w| w > 0.0)).collect();
     let w: Vec<f32> = zone.iter().map(|&i| weights[i]).collect();
+    // Each zone pixel's mask weight: the render puts the mask's Exposure on it
+    // at that fraction of the EV (`render::expose_at_weight`), so the ladder
+    // is built for exactly these weights.
+    let alpha: Vec<f32> = zone.iter().map(|&i| cover.get(i).copied().unwrap_or(0.0)).collect();
     let moments_at = |ev: f32| {
-        let lut = law.response_lut(&LocalAdjustment { exposure_ev: ev, ..Default::default() });
-        let moved: Vec<[f32; 3]> = zone
-            .iter()
-            .map(|&i| render::LocalGreyLaw::pixel(px[i], &lut, cover.get(i).copied().unwrap_or(0.0)))
-            .collect();
+        let ladder = law.exposure_ladder(ev, &alpha);
+        let moved: Vec<[f32; 3]> =
+            zone.iter().zip(&alpha).map(|(&i, &a)| render::LocalGreyLaw::exposed_pixel(px[i], &ladder, a)).collect();
         zone_moments(&moved, &w)
     };
     let want = tgt.luma_lin.max(1e-5);
