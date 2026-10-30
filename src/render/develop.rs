@@ -104,13 +104,18 @@ fn develop_preview_inner(
     let validated = crate::recipe::ValidatedRecipe::new(recipe);
     validated.disclose(diag);
     let recipe = &*validated;
-    let rgb = preview.to_rgb8();
-    let (w, h) = rgb.dimensions();
-    let mut data: Vec<[f32; 3]> = rgb
-        .as_raw()
-        .par_chunks(3)
-        .map(|p| [p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0])
-        .collect();
+    // A float base (`render::canvas`) is read as it is, over-range light and
+    // all; every other preview at 8 bits, as before.
+    let (w, h) = (preview.width(), preview.height());
+    let mut data: Vec<[f32; 3]> = match preview.as_rgb32f() {
+        Some(f) => f.as_raw().par_chunks(3).map(|p| [p[0], p[1], p[2]]).collect(),
+        None => preview
+            .to_rgb8()
+            .as_raw()
+            .par_chunks(3)
+            .map(|p| [p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0])
+            .collect(),
+    };
     apply_recipe_wb(&mut data, recipe);
     // The pixels come first here (they used to come after the profile) for one
     // reason: the auto-CA solver reads them, and `geometry_profile` below must
@@ -154,7 +159,7 @@ fn apply_develop(
     raw_source: bool,
 ) {
     let rasters = best_effort_mask_raster_snapshot(r, diag);
-    apply_develop_with_rasters(data, w, h, r, &rasters, frame, film, raw_source, ExportColorSpace::Srgb);
+    apply_develop_with_rasters(data, w, h, r, &rasters, frame, film, raw_source, ExportColorSpace::Srgb, OverRange::Clip);
 }
 
 /// [`apply_develop`] on pixels with no owner and no caller to route to — the
@@ -240,6 +245,7 @@ pub(super) fn apply_develop_with_rasters(
     film: FilmScale,
     raw_source: bool,
     space: ExportColorSpace,
+    over_range: OverRange,
 ) {
     // 0-) spot removal (v1.5.0 F9) — Lightroom's `crs:RetouchAreas`, which
     //    this engine re-solves from the frame's own pixels. FIRST, for two
@@ -338,7 +344,7 @@ pub(super) fn apply_develop_with_rasters(
     // The camera stage kept a Camera Raw frame's over-range light for the
     // slider Exposure (`calibrate_camera_buffer`); with no tone pass to carry
     // it there, it ends here.
-    if camera_raw && tone_neutral {
+    if camera_raw && tone_neutral && over_range == OverRange::Clip {
         clip_over_range(data);
     }
     if !tone_neutral {
@@ -374,7 +380,9 @@ pub(super) fn apply_develop_with_rasters(
             // one it adds to (`mask_cr`).
             let exposed = exposure.as_ref().map_or(start, Exposure::exposed);
             mask_cr::apply_local_exposure(data, w, h, r, rasters, frame, space, exposed);
-            clip_over_range(data);
+            if over_range == OverRange::Clip {
+                clip_over_range(data);
+            }
             if let Some(s) = &tone.sliders {
                 data.par_iter_mut().for_each(|px| *px = camera_raw_slider_pixel(*px, s));
             }
@@ -761,6 +769,15 @@ pub(super) fn apply_radial_gain_linear(data: &mut [[f32; 3]], w: usize, h: usize
 /// curve alone it still met the profile's HueSatMap on the wrong side (up to
 /// 0.96 % off Camera Raw in a 14–24 mm corner, 0.12 % where it is now). Light
 /// the manual slider acts in under Camera Raw's law is not measured.
+/// What a develop does with a Camera Raw frame's over-range light at the end
+/// of its slider Exposure ([`clip_over_range`]): every render clips it, the
+/// canvas's float base keeps it for the canvas's own Exposure (`render::canvas`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OverRange {
+    Clip,
+    Keep,
+}
+
 /// A Camera Raw frame's over-range light, which the camera stage kept
 /// ([`calibrate_camera_buffer`]), ends after the slider Exposure: each
 /// component clips at the working space's 1, with no desaturation. Measured

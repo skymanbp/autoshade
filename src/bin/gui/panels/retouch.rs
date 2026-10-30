@@ -336,7 +336,7 @@ impl AutoShadeApp {
                         RetouchNote::FoundFilled { out: out.clone(), coverage: report.coverage }
                     };
                     // baked-by-construction: the pixel master this job just wrote.
-                    let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
+                    let img = autoshade::render::thumbnail(&autoshade::decode::load_image(&out)?, edge, edge);
                     // Layer (2026-10-01, user decision): the patch joins this
                     // card's develop (`RetouchKind::Layer`); through v1.6.7 it
                     // landed as a new ✨ card. FACTS, not prose (L12#4): the
@@ -420,7 +420,7 @@ impl AutoShadeApp {
                         Some(report.divergence)
                     };
                     // baked-by-construction: the ./out PNG master this adjust just wrote.
-                    let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
+                    let img = autoshade::render::thumbnail(&autoshade::decode::load_image(&out)?, edge, edge);
                     Ok((img, RetouchNote::Adjusted { out: out.clone(), region, divergence }, out, RetouchKind::NewGenerated))
                 })();
                 if res.is_err() {
@@ -514,7 +514,7 @@ impl AutoShadeApp {
                     }
                     let rep = rep?;
                     // baked-by-construction: the pixel master this job just wrote.
-                    let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
+                    let img = autoshade::render::thumbnail(&autoshade::decode::load_image(&out)?, edge, edge);
                     // The report's rationale (AI-detect fallback, budget
                     // skips) must reach the status — stderr is invisible in
                     // the windowed GUI (L08 rule). Split per the L12#2B
@@ -594,7 +594,7 @@ impl AutoShadeApp {
                         autoshade::denoise::DenoiseOpts::from_config(&cfg, None, strength);
                     autoshade::denoise::denoise_active(&opts, &path, &part, &out)?;
                     // baked-by-construction: the pixel master this job just wrote.
-                    let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
+                    let img = autoshade::render::thumbnail(&autoshade::decode::load_image(&out)?, edge, edge);
                     // NewDenoised: a new ◈ card hangs off the master.
                     Ok((img, RetouchNote::Denoised { out: out.clone(), on_mosaic }, out, RetouchKind::NewDenoised))
                 })();
@@ -670,7 +670,7 @@ impl AutoShadeApp {
                     };
                     let done = autoshade::stack::stack_files(&inputs, &part, &opts, None, &out)?;
                     // baked-by-construction: the pixel master this job just wrote.
-                    let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
+                    let img = autoshade::render::thumbnail(&autoshade::decode::load_image(&out)?, edge, edge);
                     let m = &done.merged;
                     Ok((
                         img,
@@ -750,7 +750,7 @@ impl AutoShadeApp {
                     let _ = std::fs::remove_file(&mask_tmp);
                     let rep = rep?;
                     // baked-by-construction: the pixel master this job just wrote.
-                    let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
+                    let img = autoshade::render::thumbnail(&autoshade::decode::load_image(&out)?, edge, edge);
                     // InPlace: a pixel transplant of the current rendition — bake it
                     // into the active variant's base + repoint origin at the artifact.
                     Ok((
@@ -855,7 +855,7 @@ impl AutoShadeApp {
                         &cfg, &negative, &prompt, "high", &cfg.openai_image_quality, retry, &out,
                     )?;
                     // baked-by-construction: the pixel master this job just wrote.
-                    let img = autoshade::decode::load_image(&out)?.thumbnail(edge, edge);
+                    let img = autoshade::render::thumbnail(&autoshade::decode::load_image(&out)?, edge, edge);
                     // NewGenerated: a whole-frame rendition → a new Generated variant.
                     Ok((
                         img,
@@ -904,7 +904,7 @@ impl AutoShadeApp {
                     let cfg = autoshade::config::Config::load();
                     let jpg = |img: &image::DynamicImage| -> anyhow::Result<Vec<u8>> {
                         let mut buf = Vec::new();
-                        image::DynamicImage::ImageRgb8(img.thumbnail(768, 768).to_rgb8())
+                        image::DynamicImage::ImageRgb8(autoshade::render::thumbnail(img, 768, 768).to_rgb8())
                             .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Jpeg)?;
                         Ok(buf)
                     };

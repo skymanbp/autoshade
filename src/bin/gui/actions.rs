@@ -576,7 +576,7 @@ impl AutoShadeApp {
                         // ~45 MP frame at the 8192 edge just to copy it; the
                         // resize only runs in the defensive off-spec case.
                         let thumb = if full.width().max(full.height()) > edge {
-                            full.thumbnail(edge, edge)
+                            autoshade::render::thumbnail(&full, edge, edge)
                         } else {
                             full
                         };
@@ -584,7 +584,7 @@ impl AutoShadeApp {
                     } else {
                         (
                             // baked-by-construction: the !is_raw arm of the open (branch above).
-                            autoshade::decode::load_image(&path)?.thumbnail(edge, edge),
+                            autoshade::render::thumbnail(&autoshade::decode::load_image(&path)?, edge, edge),
                             Default::default(),
                             Default::default(),
                             None,
@@ -615,7 +615,7 @@ impl AutoShadeApp {
                                     return None;
                                 }
                             };
-                            Some((Arc::new(img.thumbnail(edge, edge)), origin, generated))
+                            Some((Arc::new(autoshade::render::thumbnail(&img, edge, edge)), origin, generated))
                         },
                     );
                     // Arc once here so every downstream sharer (variants, the
@@ -3791,10 +3791,10 @@ impl AutoShadeApp {
                             Ok(j)
                         };
                         let fitted = autoshade::render::develop_preview(
-                            &base.thumbnail(JUDGE_EDGE, JUDGE_EDGE),
+                            &autoshade::render::thumbnail(&base, JUDGE_EDGE, JUDGE_EDGE),
                             recipe,
                         );
-                        let t_jpeg = enc(&target.thumbnail(JUDGE_EDGE, JUDGE_EDGE))?;
+                        let t_jpeg = enc(&autoshade::render::thumbnail(&target, JUDGE_EDGE, JUDGE_EDGE))?;
                         let f_jpeg = enc(&fitted)?;
                         Ok(autoshade::advisor::judge_pair(
                             &cfg,

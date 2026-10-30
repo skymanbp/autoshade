@@ -467,8 +467,12 @@ bundled; a machine with no profiles gets a named refusal.
   names a profile renders no camera curve. The profile stage runs inside the RAW
   develop, so every surface that hands pixels to the preview develop hands it the
   BASE develop of the recipe's `render::BasePart` (profile + Look table, no baked
-  tone): the GUI and web canvases (keyed and re-developed by part), the
-  heal / clone / fill / denoise / stack masters and `pipeline::fit_source`.
+  tone, no sharpening; float with the over-range light kept under a profile):
+  the GUI and web canvases (keyed and re-developed by part) and
+  `pipeline::fit_source`; the heal / clone / fill / denoise / stack masters bake
+  the same part with the RAW default sharpening (`render::master_develop`).
+  Every downscale of a frame uses `render::thumbnail` (`image`'s f32 thumbnail
+  adds 0.5 to every channel).
 
 ### Source
 

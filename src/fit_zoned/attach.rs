@@ -91,7 +91,7 @@ const SEGMENTATION_INPUT_EDGE: u32 = 2048;
 /// run's byte identity rests on.
 pub(super) fn segmentation_input(img: &DynamicImage) -> std::borrow::Cow<'_, DynamicImage> {
     if img.width().max(img.height()) > SEGMENTATION_INPUT_EDGE {
-        std::borrow::Cow::Owned(img.thumbnail(SEGMENTATION_INPUT_EDGE, SEGMENTATION_INPUT_EDGE))
+        std::borrow::Cow::Owned(crate::render::thumbnail(img, SEGMENTATION_INPUT_EDGE, SEGMENTATION_INPUT_EDGE))
     } else {
         std::borrow::Cow::Borrowed(img)
     }

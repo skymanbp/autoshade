@@ -450,7 +450,7 @@ pub fn retouch(
     retouch_onto(
         cfg,
         raw_path,
-        || crate::render::source_pixels_for(raw_path, part, (raw && !full_res).then_some(2048)),
+        || crate::render::master_pixels_for(raw_path, part, (raw && !full_res).then_some(2048)),
         if full_res && raw { "full-res" } else { "preview" },
         &FillJob { mask_path, prompt, quality, out, layer: false },
     )

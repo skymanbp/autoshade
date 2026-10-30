@@ -84,7 +84,7 @@ pub fn camera_base_knots(
     fn blocks(img: &DynamicImage, rows: usize) -> Option<Vec<f32>> {
         let small;
         let img = if img.width().max(img.height()) > EST_EDGE {
-            small = img.thumbnail(EST_EDGE, EST_EDGE);
+            small = super::thumbnail(img, EST_EDGE, EST_EDGE);
             &small
         } else {
             img
@@ -197,7 +197,7 @@ pub(super) fn estimation_base(
     camera: &DynamicImage,
 ) -> DynamicImage {
     let small = if neutral.width().max(neutral.height()) > 1024 {
-        neutral.thumbnail(1024, 1024)
+        super::thumbnail(neutral, 1024, 1024)
     } else {
         neutral.clone()
     };

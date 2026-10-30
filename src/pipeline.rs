@@ -8798,10 +8798,10 @@ mod tests {
         // counterpart per pair so both domains stay measured.
         {
             let edge = crate::fit::ANALYZE_EDGE;
-            let s_base = crate::render::develop_preview(&neutral.thumbnail(edge, edge), &fit_base);
+            let s_base = crate::render::develop_preview(&crate::render::thumbnail(&neutral, edge, edge), &fit_base);
             let m = crate::fit::neutral_gate_misprediction(
                 &crate::fit::pixels_of(&s_base),
-                &crate::fit::pixels_of(&target.thumbnail(edge, edge)),
+                &crate::fit::pixels_of(&crate::render::thumbnail(&target, edge, edge)),
             );
             eprintln!("composed-domain misprediction: {m:.4}");
         }
@@ -8854,9 +8854,9 @@ mod tests {
                 .collect()
         };
         let edge = crate::fit::ANALYZE_EDGE;
-        let fitted = crate::render::develop_preview(&neutral.thumbnail(edge, edge), &new.recipe);
+        let fitted = crate::render::develop_preview(&crate::render::thumbnail(&neutral, edge, edge), &new.recipe);
         let qf = luma_q(&fitted);
-        let qt = luma_q(&target.thumbnail(edge, edge));
+        let qt = luma_q(&crate::render::thumbnail(&target, edge, edge));
         let mean_gap: f32 =
             qf.iter().zip(&qt).map(|(a, b)| (a - b).abs()).sum::<f32>() / qf.len() as f32;
         assert!(
@@ -8876,10 +8876,10 @@ mod tests {
         // (AUTOSHADE_FIT_REPRO_JOINT_MAX=<f32>) — a number invented here
         // would be a guess wearing a test's clothes.
         let src_px = crate::fit::pixels_of(&crate::render::develop_preview(
-            &neutral.thumbnail(edge, edge),
+            &crate::render::thumbnail(&neutral, edge, edge),
             &fit_base,
         ));
-        let tgt_px = crate::fit::pixels_of(&target.thumbnail(edge, edge));
+        let tgt_px = crate::fit::pixels_of(&crate::render::thumbnail(&target, edge, edge));
         let fit_px = crate::fit::pixels_of(&fitted);
         for (side, px) in [("base", &src_px), ("fitted", &fit_px)] {
             for b in crate::fit_zoned::joint_buckets(px, &tgt_px) {

@@ -1373,7 +1373,7 @@ pub(crate) fn mask_source_frame_with(
     }
     let p = crate::decode::decode_any_turned(src, quarter_turns)?.preview;
     // `thumbnail` also ENLARGES a smaller frame to the box; only shrink.
-    Ok(if p.width().max(p.height()) > max_edge { p.thumbnail(max_edge, max_edge) } else { p })
+    Ok(if p.width().max(p.height()) > max_edge { crate::render::thumbnail(&p, max_edge, max_edge) } else { p })
 }
 
 /// The cache key of an alpha cut on `src`'s mask frame. A RAW's frame changed

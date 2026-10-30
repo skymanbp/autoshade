@@ -73,8 +73,8 @@ pub fn same_frame_plausible_dims(a: (u32, u32), b: (u32, u32)) -> bool {
 /// field and clear outside, and the same box filter carries it onto the
 /// analysis grid, where [`presence_of`] reads it.
 pub(crate) fn analysis_pair(src: &DynamicImage, target: &DynamicImage) -> (DynamicImage, DynamicImage) {
-    let s_img = src.thumbnail(ANALYZE_EDGE, ANALYZE_EDGE);
-    let t_img = target.thumbnail_exact(s_img.width(), s_img.height());
+    let s_img = crate::render::thumbnail(src, ANALYZE_EDGE, ANALYZE_EDGE);
+    let t_img = crate::render::thumbnail_exact(target, s_img.width(), s_img.height());
     (s_img, t_img)
 }
 
