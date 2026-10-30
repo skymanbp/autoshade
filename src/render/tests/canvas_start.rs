@@ -88,31 +88,34 @@ fn an_old_recipe_with_a_stamped_base_curve_renders_as_it_did() {
 const OLD_RECIPE_JSON: &str = r#"{"version":3,"base_curve":[[0.0,0.0],[0.1,0.13],[0.25,0.33],[0.5,0.6],[0.75,0.83],[1.0,1.0]],"exposure_ev":0.3,"contrast":12.0,"saturation":8.0}"#;
 
 /// Dehaze ALONE on a recipe that names a camera profile renders through
-/// Camera Raw's measured law (`tone_cr`, v1.17.0): with no other tone work
-/// the develop still runs the slider pass, a hazy pale sky blue darkens and
-/// gains colour, and the engine law's airlight stage does not run as well (on
-/// a uniform frame that stage keeps the darkest channel, the frame's own
-/// airlight, where it is).
+/// Camera Raw's measured law (`dehaze_cr`, v1.17.0): with no other tone work
+/// the develop still runs the tone block, a darker half next to a hazy pale
+/// one darkens under the veil the haze names, the haze itself stays at its
+/// airlight, and a uniform frame has nothing to remove — where the engine
+/// law's pointwise stage (no camera profile) does move it.
 ///
-/// MUTATION: gate the slider pass on `has_tone_work` alone, or run
+/// MUTATION: gate the tone block on `has_tone_work` alone, or run
 /// `apply_dehaze` on a camera-profile recipe too.
 #[test]
 fn dehaze_alone_on_a_camera_profile_follows_camera_raw() {
-    let px = image::Rgb([200u8, 215, 240]);
-    let frame = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(4, 4, px));
+    let (w, h) = (64u32, 48u32);
+    let haze = image::Rgb([215u8, 222, 235]);
+    let dark = image::Rgb([90u8, 80, 70]);
+    let frame = DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, _| if x < w / 2 { haze } else { dark }));
     let named = EditRecipe { camera_profile: "Adobe Standard".into(), dehaze: 40.0, ..Default::default() };
     assert!(!named.has_tone_work(), "Dehaze is not tone work on its own");
-    let got = develop_preview(&frame, &named).to_rgb8().get_pixel(1, 1).0;
+    let got = develop_preview(&frame, &named).to_rgb8();
     let luma = |p: [u8; 3]| 0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32;
-    let spread = |p: [u8; 3]| p[2] as f32 - p[0] as f32;
-    assert!(luma(got) < luma(px.0) - 2.0, "darker: {got:?} from {:?}", px.0);
-    assert!(spread(got) > spread(px.0), "more colourful: {got:?} from {:?}", px.0);
-    // The engine law's airlight stage on the same frame keeps the darkest
-    // channel, its own airlight, where it was; the law above moves it.
+    let near = got.get_pixel(w / 2 + 2, h / 2).0;
+    assert!(luma(near) < luma(dark.0) - 2.0, "the dark side darkens: {near:?} from {:?}", dark.0);
+    let veil = got.get_pixel(2, h / 2).0;
+    assert!((luma(veil) - luma(haze.0)).abs() < 3.0, "the haze stays: {veil:?} from {:?}", haze.0);
+    let flat = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(w, h, haze));
+    let kept = develop_preview(&flat, &named).to_rgb8().get_pixel(5, 5).0;
+    assert!(kept.iter().zip(&haze.0).all(|(a, b)| a.abs_diff(*b) <= 1), "a uniform frame stays: {kept:?}");
     let unnamed = EditRecipe { dehaze: 40.0, ..Default::default() };
-    let engine = develop_preview(&frame, &unnamed).to_rgb8().get_pixel(1, 1).0;
-    assert!(engine[0].abs_diff(px.0[0]) <= 1, "the airlight stage: {engine:?}");
-    assert!(got[0] + 3 < px.0[0], "Camera Raw's law: {got:?}");
+    let engine = develop_preview(&flat, &unnamed).to_rgb8().get_pixel(5, 5).0;
+    assert!(engine.iter().zip(&haze.0).any(|(a, b)| a.abs_diff(*b) > 1), "the engine law's stage moves it: {engine:?}");
 }
 
 /// FNV-1a over the little-endian bytes of a 16-bit buffer.

@@ -52,6 +52,7 @@ mod camera;
 mod canvas;
 mod clip_lift;
 mod colour;
+mod dehaze_cr;
 mod develop;
 mod export;
 mod geometry;

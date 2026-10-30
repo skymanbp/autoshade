@@ -318,7 +318,7 @@ pub(super) fn apply_develop_with_rasters(
     //    and saturation/vibrance stay downstream so the user can trim dehaze's
     //    chroma restoration.
     // v1.17.0: on a camera-profile start Dehaze follows Camera Raw's
-    // measured law instead, in the slider pass below (`tone_cr`).
+    // measured law instead, after the exposure below (`dehaze_cr`).
     if r.dehaze != 0.0 && !camera_raw {
         apply_dehaze(data, w, r.dehaze);
     }
@@ -384,6 +384,12 @@ pub(super) fn apply_develop_with_rasters(
             if over_range == OverRange::Clip {
                 clip_over_range(data);
             }
+            // Dehaze: after Highlights/Shadows and Exposure, before Contrast,
+            // Whites, Blacks and the curves, a spatial scattering inversion
+            // under Adobe's curve (`dehaze_cr`, where it sits measured).
+            if r.dehaze != 0.0 {
+                dehaze_cr::apply_camera_raw_dehaze(data, w, h, r.dehaze, &profile::UnderTone::new(space, exposed));
+            }
             // Contrast, Whites and Blacks (with the Look's baked moves and
             // Clarity's tone) go on like a point curve: ProPhoto channels, the
             // extremes through the LUT on sRGB-encoded values, the middle at its
@@ -395,13 +401,13 @@ pub(super) fn apply_develop_with_rasters(
             // channel rule on the working channels 1.75, the rule's hue with the
             // luma's lightness (until item 35) 2.17, the luma ratio 4.45.
             // Lightness is the LUT's under every rule (ΔL by band within 0.1).
-            // A pass that also carries Clarity's tone or Dehaze keeps the
-            // earlier pixel rule (`tone_cr::camera_raw_slider_pixel`): on
-            // Clarity +50, +100 and −50 that rule leaves 2.30 / 4.21 / 2.90,
-            // this one 2.55 / 4.52 / 3.58 (Clarity is local in Camera Raw, its
-            // tone half here only a global stand-in); Dehaze is not measured.
+            // A pass that also carries Clarity's tone keeps the earlier pixel
+            // rule (`tone_cr::camera_raw_slider_pixel`): on Clarity +50, +100
+            // and −50 that rule leaves 2.30 / 4.21 / 2.90, this one 2.55 /
+            // 4.52 / 3.58 (Clarity is local in Camera Raw, its tone half here
+            // only a global stand-in).
             if let Some(s) = &tone.sliders {
-                if s.chroma.is_none() && r.clarity == 0.0 {
+                if r.clarity == 0.0 {
                     apply_camera_raw_curve(data, &s.lut, space, MiddleRatio::Encoded);
                 } else {
                     data.par_iter_mut().for_each(|px| *px = camera_raw_slider_pixel(*px, s));

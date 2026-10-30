@@ -40,7 +40,7 @@
 //!   Dehaze of the mask stage does not run on this law.
 
 use super::*;
-use super::tone_cr::{camera_raw_unstart, table_at, DEHAZE_CHROMA, TABLE_N};
+use super::tone_cr::{camera_raw_unstart, table_at, TABLE_N};
 
 /// Rows of the local response tables: Contrast, Highlights (above 0), Whites
 /// and Blacks in the knot model's order, then Dehaze and Clarity's tone. A
@@ -131,8 +131,17 @@ const L_FALL_Q: [[f32; TABLE_N]; ROWS] = [
     [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000],
 ];
 
-/// Local Dehaze's colour: the global stage's chroma gain
-/// (`tone_cr::DEHAZE_CHROMA`) at this many times the slider.
+/// A mask's Dehaze colour, measured on the GLOBAL slider's renders (the
+/// global Dehaze is now spatial, `dehaze_cr`): Camera Raw deepens colour as it removes haze and pales it
+/// as it adds haze, most in the bright range (the sky). The pixel's chroma is
+/// scaled by `exp(d · DEHAZE_CHROMA(u))` about its luma, `u` the pixel's
+/// own place before the sliders. Fitted like the tables, on the median
+/// log-chroma change of coloured pixels (C* > 5) per bin of `u`: per unit
+/// slider +0.3 (L 10–30), ≈ 0 (L 40–70), +0.8 (L 80–90), +1.7…2.2
+/// (L 90–100), the same for +40, +80 and −30.
+const DEHAZE_CHROMA: [f32; TABLE_N] = [0.2942, 0.2942, 0.2427, 0.1092, 0.1802, 0.5409, 0.7253, 0.6303, 0.4594, 0.2431, 0.0317, -0.1653, -0.3211, -0.3277, -0.1799, 0.0185, 0.1835, 0.3382, 0.6228, 1.0963, 1.5320, 1.6586, 1.7833, 1.7908, 1.1677, 0.5824, 0.4696, 0.4696, 0.4696, 0.4696, 0.4696, 0.4696, 0.4696];
+
+/// Local Dehaze's colour: [`DEHAZE_CHROMA`] at this many times the slider.
 const L_DEHAZE_CHROMA: f32 = 1.3;
 
 fn local_row(k: usize, s: f32, y: f32) -> f32 {

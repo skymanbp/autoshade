@@ -849,13 +849,18 @@ supposed to remove.
   `t = max(1 − 0.75·s·min(R,G,B)/A, 0.30)` for positive dehaze
   (**designed atmospheric approximation**, not an Adobe fit). On a recipe
   that names a camera profile (v1.17.0) Dehaze follows Camera Raw's law
-  instead (**measured**, `render/tone_cr.rs`, Dehaze +40/+80/−30 on the same
-  flat packet as the tone sliders): a response table over `u` in the slider
-  pass, as the five's, and a chroma gain `exp(d·G(u))` about the luma, `G`
-  per unit slider ≈ +0.3 at L 10–30, ≈ 0 at L 40–70, up to +1.8 at L 90–100
-  — Camera Raw deepens the sky's blue as it removes haze and pales it as it
-  adds haze. Like the engine law's stage it is no part of the tone the
-  reverse fit solves.
+  instead (**measured**, `render/dehaze_cr.rs`, flat renders of six frames at
+  +20 … +100 and −30 … −100): a dark-channel scattering inversion
+  `J = (I − A)/t + A` per channel, in the light under Adobe's curve,
+  sRGB-encoded; `A` the mean of the top 0.1 % of the dark channel (min filter
+  1.46 % of the short edge), `t = 1 − ω·S`, `S` the dark channel of `I/A`
+  under a box of 12.5 % of the short edge, both read on the frame boxed to a
+  1536 long edge; `ω = 0.896·s` above 0, `s·(1.698 + 2.802·|s|)` below. It
+  runs after Highlights/Shadows and Exposure and before Contrast (measured
+  with one other control at a time). Per frame the positive `ω/s` spreads
+  0.60 … 1.13 about the law (the star frame lowest), which the law does not
+  carry. Like the engine law's stage it is no part of the tone the reverse
+  fit solves.
 - Clarity radius: `max(round(0.02·min(width,height)), 8)`
   (**designed resolution scaling**).
 - Positive Texture radius: `max(round(0.005·min(width,height)), 2)`
@@ -1005,14 +1010,14 @@ supposed to remove.
   in the acceptance set Highlights −100 3.14 L / 3.47 b*, Exposure −2 3.19 L
   and −3 2.69 L (L 90–100). The flat sidecar against Camera Raw: ΔE76 3.04 →
   2.56, L 0–30 +1.2…+1.6 → +0.1…+0.2.
-- Dehaze on a camera-profile start (v1.17.0), worst moving band |ΔL| /
-  |Δa|,|Δb| before (the airlight stage) → after: +40 4.31/1.68 → 0.97/1.32,
-  −30 48.16/1.71 → 1.58/0.52 (the airlight stage's negative branch veiled the
-  shadows toward the airlight, +46 L at L 0–10, where Camera Raw lifts them
-  +3.3 L); +80 8.68/5.01 → 1.85/2.37 (L 80–90 b*, outside the line). Camera
-  Raw's Dehaze is local (a pixel's own L explains R² 0.42 of its move) and
-  estimates each frame's haze; the law is its band-mean response on one
-  frame. Carry (sidecars with Dehaze: p36 +10, p40 +16, p41 +7), the tone law
+- Dehaze on a camera-profile start (v1.17.0), the engine against Camera Raw
+  as a double difference against the flat pair, mean ΔE76 whole frame, the
+  slider-pass table → the spatial pass: p39 +40 1.83 → 1.39, +80 3.90 → 2.51,
+  −30 2.29 → 1.76, −60 4.63 → 3.12; the star frame p42 +40 2.93 → 0.73,
+  +80 5.07 → 1.27, −30 6.77 → 0.82, −60 13.86 → 1.21 (Camera Raw's own move
+  there 0.78 / 1.23 / 1.13 / 2.18: at +80 the law is too strong on that frame
+  by its `ω/s`, above). The earlier table was Camera Raw's band-mean response
+  on one frame. Carry (sidecars with Dehaze: p36 +10, p40 +16, p41 +7), the tone law
   → with this: p36 8.52 → 8.70, p40 8.18 → 7.59, p41 10.96 → 10.52; p36 with
   its Highlights at 0, 5.91 → 6.11.
 - Temperature and Tint on a camera-profile start (v1.17.0, `render/wb.rs`,

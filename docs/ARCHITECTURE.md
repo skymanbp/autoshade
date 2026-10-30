@@ -2167,9 +2167,11 @@ through) → **de-fringing** (`render/lens.rs`: the two hue windows, on
 high-contrast edges only, before anything moves a pixel radially) →
 lens-profile vignette → manual vignette → **dehaze in linear light**
 (before any tonal work, so the airlight estimate cannot move when Exposure is
-dragged; on a recipe that names a camera profile, v1.17.0, Dehaze rides in
-the tone stage's slider pass instead, Camera Raw's measured law, and so does
-the tone half of Clarity, whose local stage stays where it is) →
+dragged; on a recipe that names a camera profile, v1.17.0, Dehaze is a
+spatial pass inside the tone stage instead, after Highlights/Shadows and
+Exposure and before Contrast, `render/dehaze_cr.rs`, Camera Raw's measured
+law, and the tone half of Clarity rides the slider pass, its local stage
+staying where it is) →
 tone LUT (exposure/contrast/whites/blacks/highlights/shadows, the parametric
 curve, the tone curve and the per-photo camera base curve — on a recipe that
 names no camera profile, v1.17.0 — composed into one table; on a recipe that

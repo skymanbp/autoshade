@@ -318,7 +318,7 @@ pub(crate) fn camera_raw_tone_passes(r: &EditRecipe) -> CameraRawTone {
                 let [c, _, _, wh, _] = tone_sliders(r);
                 [c, 0.0, 0.0, wh, bl.max(0.0)]
             },
-            Local { dehaze: (r.dehaze / 100.0).clamp(-1.0, 1.0), clarity: (r.clarity / 100.0).clamp(-1.0, 1.0) },
+            Local { clarity: (r.clarity / 100.0).clamp(-1.0, 1.0) },
         ),
         blacks_down: if bl < 0.0 {
             camera_raw_slider_lut([0.0, 0.0, 0.0, 0.0, bl], Local::default()).map(|p| p.lut)
