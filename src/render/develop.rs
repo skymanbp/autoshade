@@ -424,7 +424,7 @@ pub(super) fn apply_develop_with_rasters(
         // v1.17.0: on a camera-profile start, Highlights and Shadows first
         // (their own pass: a local law, keyed to the frame); exposure, per channel
         // by Adobe's rule; then Contrast, Whites and Blacks by Camera Raw's
-        // measured curve rule (`tone::apply_camera_raw_curve`, the middle by
+        // measured curve rule (`tone::CameraRawTone::sliders_px`, the middle by
         // its encoded ratio, as the composite curve); the photographer's
         // curves, then the Look's, by the same rule (`tone`).
         if camera_raw {
@@ -479,31 +479,24 @@ pub(super) fn apply_develop_with_rasters(
             // and −50 that rule leaves 2.30 / 4.21 / 2.90, this one 2.55 /
             // 4.52 / 3.58 (Clarity is local in Camera Raw, its tone half here
             // only a global stand-in).
-            if let Some(s) = &tone.sliders {
-                if r.clarity == 0.0 {
-                    apply_camera_raw_curve(data, &s.lut, space, MiddleRatio::Encoded);
-                } else {
-                    data.par_iter_mut().for_each(|px| *px = camera_raw_slider_pixel(*px, s));
-                }
-            }
-            // A negative Blacks: each ProPhoto channel through its curve on
-            // its own (`tone::CameraRawTone::blacks_down`, measured).
-            if let Some(lut) = &tone.blacks_down {
-                let cs = CurveSpace::new(space);
-                let luts = [lut.clone(), lut.clone(), lut.clone()];
-                data.par_iter_mut().for_each(|px| *px = cs.channel_curves(*px, &luts, [true; 3]));
+            // Then a negative Blacks: each ProPhoto channel through its curve
+            // on its own (`tone::CameraRawTone::blacks_down`, measured). Both
+            // per pixel by `tone::CameraRawTone::sliders_px`, the function the
+            // zone fit's law (`mask_cr::LocalGreyLaw`) calls too.
+            let cs = CurveSpace::new(space);
+            let clarity = r.clarity != 0.0;
+            if tone.sliders.is_some() || tone.blacks_down.is_some() {
+                data.par_iter_mut().for_each(|px| *px = tone.sliders_px(*px, &cs, clarity));
             }
             mask_cr::apply_local_sliders(data, w, h, r, rasters, frame);
             // The photographer's parametric and point curves, then the
             // Look's baked curve, both by Camera Raw's measured rule on
-            // ProPhoto channels (`tone::apply_camera_raw_curve`; the Look's
-            // curve went by the luma ratio until item 35). The two keep the
-            // middle channel differently, measured (`tone::MiddleRatio`).
-            if let Some(c) = &tone.curves {
-                apply_camera_raw_curve(data, c, space, MiddleRatio::Encoded);
-            }
-            if let Some(look) = &tone.look {
-                apply_camera_raw_curve(data, look, space, MiddleRatio::Linear);
+            // ProPhoto channels (`tone::CameraRawTone::curves_px`, shared
+            // with the zone fit's law; the Look's curve went by the luma
+            // ratio until item 35). The two keep the middle channel
+            // differently, measured (`tone::MiddleRatio`).
+            if tone.curves.is_some() || tone.look.is_some() {
+                data.par_iter_mut().for_each(|px| *px = tone.curves_px(*px, &cs));
             }
         } else {
             let lut = build_tone_lut(r);
@@ -941,7 +934,13 @@ pub(super) enum OverRange {
 /// desaturation in this place reads worse than the clip (synthetic worst ΔE
 /// 34.9 → 10.9; p40 +0.7 EV 4.80 → 4.13).
 fn clip_over_range(data: &mut [[f32; 3]]) {
-    data.par_iter_mut().for_each(|px| *px = px.map(|c| c.min(1.0)));
+    data.par_iter_mut().for_each(|px| *px = clip_px(*px));
+}
+
+/// One pixel's over-range light clipped at white, as [`clip_over_range`]
+/// clips the frame (shared with `mask_cr::LocalGreyLaw`).
+pub(super) fn clip_px(px: [f32; 3]) -> [f32; 3] {
+    px.map(|c| c.min(1.0))
 }
 
 fn apply_radial_gain_under_tone(

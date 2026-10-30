@@ -40,7 +40,7 @@
 //!   Dehaze of the mask stage does not run on this law.
 
 use super::*;
-use super::tone_cr::{camera_raw_channels, camera_raw_unstart, table_at, TABLE_N};
+use super::tone_cr::{camera_raw_unstart, table_at, TABLE_N};
 
 /// Rows of the local response tables: Contrast, Highlights (above 0), Whites
 /// and Blacks in the knot model's order, then Dehaze and Clarity's tone. A
@@ -383,7 +383,8 @@ pub(crate) fn weight_rungs(w: f32) -> (usize, f32) {
 ///
 /// The ONE place a mask's weight meets its Exposure: the render
 /// ([`apply_local_exposure`]) and the zone fit's prediction of it
-/// ([`LocalGreyLaw::exposed_pixel`]) both call it.
+/// ([`LocalGreyLaw::exposed_colour`]) both reach it through
+/// [`expose_mask_px`].
 pub(crate) fn expose_at_weight(px: [f32; 3], w: f32, rung: impl Fn(usize, [f32; 3]) -> [f32; 3]) -> [f32; 3] {
     let (i, f) = weight_rungs(w);
     let at = |k: usize| if k == 0 { px } else { rung(k, px) };
@@ -395,6 +396,32 @@ pub(crate) fn expose_at_weight(px: [f32; 3], w: f32, rung: impl Fn(usize, [f32; 
     }
     let (a, b) = (at(i), at(i + 1));
     std::array::from_fn(|c| a[c] + f * (b[c] - a[c]))
+}
+
+/// The rungs a mask's Exposure at `ev` is put on a pixel through, on the
+/// camera start `exposed` the global Exposure left: rung `k` the transfer at
+/// [`rung_ev`] (`None`, the pixel itself, where that EV is 0 or not finite).
+pub(crate) fn exposure_rungs(exposed: crate::recipe::CameraStart, ev: f32) -> Vec<Option<Exposure>> {
+    (0..EXPOSURE_RUNGS).map(|k| Exposure::new(exposed, rung_ev(ev, k))).collect()
+}
+
+/// A mask's Exposure on one pixel (sRGB-encoded, working space) at weight
+/// `w`, over `rungs` ([`exposure_rungs`]) under the profile curve `under`
+/// at the start the global Exposure left: [`expose_at_weight`] with each
+/// rung the measured transfer in linear light. The render
+/// ([`apply_local_exposure`]) and the zone fit's law
+/// ([`LocalGreyLaw::exposed_colour`]) both call it.
+pub(super) fn expose_mask_px(
+    px: [f32; 3],
+    w: f32,
+    rungs: &[Option<Exposure>],
+    under: &profile::UnderTone,
+    (dec, enc): (&[f32], &[f32]),
+) -> [f32; 3] {
+    expose_at_weight(px, w, |k, p| match &rungs[k] {
+        Some(e) => under.expose(p.map(|v| decode_wide(dec, v)), e).map(|v| encode_wide(enc, v.max(0.0))),
+        None => p,
+    })
 }
 
 /// Local Exposure on this law: the global Exposure's transfer
@@ -413,12 +440,8 @@ pub(super) fn apply_local_exposure(
     exposed: crate::recipe::CameraStart,
 ) {
     with_covers(r, rasters, frame, (w, h), |m| m.exposure_ev != 0.0, |covers| {
-        // One ladder per cover, index-aligned with `covers` (a rung whose EV
-        // is 0 or not finite is the pixel itself).
-        let ladders: Vec<Vec<Option<Exposure>>> = covers
-            .iter()
-            .map(|(m, _)| (0..EXPOSURE_RUNGS).map(|k| Exposure::new(exposed, rung_ev(m.exposure_ev, k))).collect())
-            .collect();
+        // One ladder per cover, index-aligned with `covers`.
+        let ladders: Vec<Vec<Option<Exposure>>> = covers.iter().map(|(m, _)| exposure_rungs(exposed, m.exposure_ev)).collect();
         let under = profile::UnderTone::new(space, exposed);
         let (dec, enc) = transfer_luts();
         data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
@@ -428,10 +451,7 @@ pub(super) fn apply_local_exposure(
                     if wt <= 0.001 {
                         continue;
                     }
-                    *px = expose_at_weight(*px, wt, |k, p| match &ladder[k] {
-                        Some(e) => under.expose(p.map(|v| decode_wide(dec, v)), e).map(|v| encode_wide(enc, v.max(0.0))),
-                        None => p,
-                    });
+                    *px = expose_mask_px(*px, wt, ladder, &under, (dec, enc));
                 }
             }
         });
@@ -641,40 +661,56 @@ pub(super) fn hue_px(px: [f32; 3], degrees: f32, under: &profile::UnderTone, dec
     under.to_working([r2, g2, b2]).map(|v| sample_lut(enc, v.clamp(0.0, 1.0)))
 }
 
-/// A mask's tone on this law, read on a grey (v1.17.0): what the develop's
-/// tone stage does to a grey under one adjustment at full weight, stated in
-/// the RENDERED value of the frame without the mask. The reverse fit's zone
-/// solve asks this instead of solving on the engine's mask model (`fit_zoned`):
-/// on this law a mask's Exposure rides the exposure ramp before the global
-/// sliders and Adobe's curves, so EV +0.62 asked renders +0.82 … +0.96 at
-/// linear 0.005 … 0.04 and +0.59 at 0.32 (EV +2.5: +3.72 … +1.51), and a fit
-/// that read EV as a gain on the rendered value overshot every zone 1.3–1.5×
-/// by an amount that changes with the level.
+/// A mask's tone on this law (v1.17.0), stated in the RENDERED value of the
+/// frame without the mask: what the develop's tone stage does to a pixel
+/// under one adjustment. The reverse fit's zone solve asks this instead of
+/// solving on the engine's mask model (`fit_zoned`): on this law a mask's
+/// Exposure rides the exposure ramp before the global sliders and Adobe's
+/// curves, so EV +0.62 asked renders +0.82 … +0.96 at linear 0.005 … 0.04
+/// and +0.59 at 0.32 (EV +2.5: +3.72 … +1.51), and a fit that read EV as a
+/// gain on the rendered value overshot every zone 1.3–1.5× by an amount that
+/// changes with the level.
 ///
-/// It is the develop's own stages on one grey, in the develop's order
-/// (`apply_develop`'s tone stage): the global Highlights and Shadows have run
-/// (they are in the base's rendered value and cancel), the mask's Highlights
-/// below 0 and Shadows of either sign ([`super::tone_cr::hs_pixel_scaled`]
-/// at [`local_hs_gain`], on the diagonal site a grey has, at the frame's `key`),
-/// the global Exposure and the mask's Exposure (each the measured transfer
-/// [`Exposure`] under the profile stage's curve, [`profile::UnderTone`], as
-/// [`apply_local_exposure`] puts it, the mask's on the start the global one
-/// left), the clip at white, the global slider pass, the mask's table sliders
-/// ([`local_slider_lut`]), the Look's curve and the point and parametric
-/// curves. What it cannot see: a pixel's own neighbourhood (the
-/// Highlights/Shadows base, Clarity, Texture), the stages after the tone
-/// (the per-channel cast curves, the mixer, saturation, the mask stage's
-/// colour gains), and other masks. The fit re-renders whatever it ships.
+/// It is the develop's own stages, called, not restated, in the develop's
+/// order (`apply_develop`'s tone stage): the global Highlights and Shadows
+/// have run (they are in the base's rendered value and cancel), the mask's
+/// Highlights below 0 and Shadows of either sign
+/// ([`super::tone_cr::hs_pixel_scaled`] at [`local_hs_gain`], on the
+/// diagonal site a grey has, at the frame's `key`), the global Exposure and
+/// the mask's Exposure (each the measured transfer [`Exposure`] under the
+/// profile stage's curve, [`profile::UnderTone`]; the mask's through
+/// [`expose_mask_px`], on the start the global one left), the clip at white
+/// (`develop::clip_px`), the global slider pass and a negative Blacks
+/// (`tone::CameraRawTone::sliders_px`), the mask's table sliders
+/// ([`local_slider_lut`] by `tone_cr::camera_raw_slider_pixel`), the point
+/// and parametric curves and then the Look's
+/// (`tone::CameraRawTone::curves_px`). A colour is taken back to the tone
+/// stage's input by inverting those same passes
+/// ([`LocalGreyLaw::tone_input`]). What it cannot see: a pixel's own
+/// neighbourhood (the Highlights/Shadows base, Dehaze, Clarity, Texture),
+/// the stages after the tone (the per-channel cast curves, the mixer,
+/// saturation, the mask stage's colour gains), and other masks. The fit
+/// re-renders whatever it ships.
 pub(crate) struct LocalGreyLaw {
-    /// The base's tone stage over its input `x` on [`LUT_N`] points:
-    /// rendered value without the mask. Monotone.
+    /// The base's tone stage over its input `x` on [`LUT_N`] points, on a
+    /// grey: rendered value without the mask. Monotone.
     base_out: Vec<f32>,
+    /// The passes after the exposures and the clip ([`LocalGreyLaw::tail`],
+    /// no mask) over their input on [`LUT_N`] points, on a grey: what
+    /// [`LocalGreyLaw::tone_input`] steers its inversion by.
+    tail_out: Vec<f32>,
     /// The global Exposure on the base's camera start, and the curve it acts
     /// under.
     exposure: Option<(Exposure, profile::UnderTone)>,
-    /// The camera start the global Exposure leaves, where a mask's adds.
+    /// The camera start the global Exposure leaves, where a mask's adds, and
+    /// the curve a mask's Exposure acts under there.
     exposed: crate::recipe::CameraStart,
+    under_exposed: profile::UnderTone,
     tone: super::tone::CameraRawTone,
+    /// Whether the slider pass carries Clarity's tone (the develop's switch
+    /// between its two pixel rules, `tone::CameraRawTone::sliders_px`).
+    clarity: bool,
+    curve_space: CurveSpace,
     key: super::tone_cr::HsKey,
 }
 
@@ -685,6 +721,17 @@ fn expose_grey(x: f32, e: &Exposure, under: &profile::UnderTone) -> f32 {
     let px = under.expose([decode_wide(dec, x); 3], e).map(|v| encode_wide(enc, v.max(0.0)));
     luma601(&px)
 }
+
+/// The input on [`LUT_N`] points that a non-decreasing table `t` maps to `y`.
+fn invert_table(t: &[f32], y: f32) -> f32 {
+    let i = t.partition_point(|&v| v < y).clamp(1, LUT_N - 1);
+    let (a, b) = (t[i - 1], t[i]);
+    let f = if b > a { ((y - a) / (b - a)).clamp(0.0, 1.0) } else { 0.0 };
+    (i as f32 - 1.0 + f) / (LUT_N - 1) as f32
+}
+
+/// Fixed-point steps [`LocalGreyLaw::tone_input`] takes at most.
+const TONE_INPUT_STEPS: usize = 16;
 
 impl LocalGreyLaw {
     /// The law for masks on `base`, `None` on the engine's law (whose mask
@@ -701,11 +748,16 @@ impl LocalGreyLaw {
         let exposed = exposure.as_ref().map_or(start, Exposure::exposed);
         let mut law = Self {
             base_out: Vec::new(),
+            tail_out: Vec::new(),
             exposure: exposure.map(|e| (e, profile::UnderTone::new(ExportColorSpace::Srgb, start))),
             exposed,
+            under_exposed: profile::UnderTone::new(ExportColorSpace::Srgb, exposed),
             tone: camera_raw_tone_passes(base),
+            clarity: base.clarity != 0.0,
+            curve_space: CurveSpace::new(ExportColorSpace::Srgb),
             key,
         };
+        law.tail_out = (0..LUT_N).map(|i| law.after_local_exposure(i as f32 / (LUT_N - 1) as f32, [0.0; ROWS])).collect();
         law.base_out = (0..LUT_N)
             .map(|i| law.after_local_exposure(law.exposed(i as f32 / (LUT_N - 1) as f32), [0.0; ROWS]))
             .collect();
@@ -744,29 +796,25 @@ impl LocalGreyLaw {
         self.exposure.as_ref().map_or(x, |(e, under)| expose_grey(x, e, under)).clamp(0.0, 1.0)
     }
 
-    /// From after both exposures to the end of the tone stage, with the
-    /// mask's table sliders `s` (rows as [`ROWS`]).
-    fn after_local_exposure(&self, x: f32, s: [f32; ROWS]) -> f32 {
-        let mut v = self.tone.sliders.as_ref().map_or(x, |p| sample_lut(&p.lut, x));
+    /// One pixel from after both exposures and the clip to the end of the
+    /// tone stage, with the mask's table sliders `s` (rows as [`ROWS`]) at
+    /// full weight: the develop's own per-pixel passes, in its order.
+    fn tail(&self, px: [f32; 3], s: [f32; ROWS]) -> [f32; 3] {
+        let mut px = self.tone.sliders_px(px, &self.curve_space, self.clarity);
         if let Some(p) = local_slider_lut(s) {
-            v = sample_lut(&p.lut, v);
+            px = camera_raw_slider_pixel(px, &p);
         }
-        if let Some(look) = &self.tone.look {
-            v = sample_lut(look, v);
-        }
-        if let Some(c) = &self.tone.curves {
-            v = sample_lut(c, v);
-        }
-        v
+        self.tone.curves_px(px, &self.curve_space)
+    }
+
+    /// [`LocalGreyLaw::tail`] on a grey `x`, read as its luma.
+    fn after_local_exposure(&self, x: f32, s: [f32; ROWS]) -> f32 {
+        luma601(&self.tail([x; 3], s))
     }
 
     /// The tone stage's input that renders `y` without the mask.
     fn input_of(&self, y: f32) -> f32 {
-        let t = &self.base_out;
-        let i = t.partition_point(|&v| v < y).clamp(1, LUT_N - 1);
-        let (a, b) = (t[i - 1], t[i]);
-        let f = if b > a { ((y - a) / (b - a)).clamp(0.0, 1.0) } else { 0.0 };
-        (i as f32 - 1.0 + f) / (LUT_N - 1) as f32
+        invert_table(&self.base_out, y)
     }
 
     /// The value a grey rendered at `y` without the mask renders at under
@@ -781,40 +829,94 @@ impl LocalGreyLaw {
         // The global Exposure's clip waits for the mask's, as in the develop.
         x = self.exposure.as_ref().map_or(x, |(e, under)| expose_grey(x, e, under));
         if let Some(e) = Exposure::new(self.exposed, m.exposure_ev) {
-            x = expose_grey(x, &e, &profile::UnderTone::new(ExportColorSpace::Srgb, self.exposed));
+            x = expose_grey(x, &e, &self.under_exposed);
         }
         self.after_local_exposure(x.clamp(0.0, 1.0), table_sliders(m))
     }
 
-    /// The rungs an Exposure-only mask at `ev` is put on a pixel through
-    /// ([`expose_at_weight`]), each [`LocalGreyLaw::response`] at that rung's
-    /// EV as a [`LUT_N`] table over `y`. Only the rungs `weights` read
-    /// ([`weight_rungs`]) are built; the rest, and rung 0 (the pixel itself),
-    /// stay empty.
-    pub(crate) fn exposure_ladder(&self, ev: f32, weights: &[f32]) -> Vec<Vec<f32>> {
-        let mut needed = [false; EXPOSURE_RUNGS];
-        for &w in weights {
-            let (i, f) = weight_rungs(w);
-            needed[i] |= f < 1.0;
-            needed[i + 1] |= f > 0.0;
-        }
-        (0..EXPOSURE_RUNGS)
-            .map(|k| {
-                if k == 0 || !needed[k] {
-                    return Vec::new();
+    /// The colour after both exposures and the clip that the base renders as
+    /// `px` (sRGB-encoded): [`LocalGreyLaw::tail`] inverted on the colour on
+    /// the forward passes themselves, by damped least squares
+    /// (Levenberg–Marquardt, the Jacobian by finite differences) from each
+    /// channel through the grey's inverse (`tail_out`). Every input the
+    /// passes read lies in 0..1 (`sample_lut` clamps), so the search does
+    /// too. Exact on a grey; on a colour it stops after [`TONE_INPUT_STEPS`]
+    /// or below a residual of 1e-5. Where the forward passes clip (a channel
+    /// at the gamut's floor or at white) many inputs render alike, and it
+    /// lands on one of them.
+    pub(crate) fn tone_input(&self, px: [f32; 3]) -> [f32; 3] {
+        const H: f32 = 1e-3;
+        let resid = |q: [f32; 3]| -> [f32; 3] {
+            let t = self.tail(q, [0.0; ROWS]);
+            std::array::from_fn(|c| t[c] - px[c])
+        };
+        let norm = |r: &[f32; 3]| r.iter().map(|v| v * v).sum::<f32>();
+        let mut q = px.map(|v| invert_table(&self.tail_out, v));
+        let mut r = resid(q);
+        let mut lambda = 1e-3f32;
+        for _ in 0..TONE_INPUT_STEPS {
+            if r.iter().all(|v| v.abs() < 1e-5) {
+                break;
+            }
+            let mut jac = [[0.0f32; 3]; 3];
+            for c in 0..3 {
+                let h = if q[c] + H <= 1.0 { H } else { -H };
+                let mut qh = q;
+                qh[c] += h;
+                let rh = resid(qh);
+                for k in 0..3 {
+                    jac[k][c] = (rh[k] - r[k]) / h;
                 }
-                let m = crate::recipe::LocalAdjustment { exposure_ev: rung_ev(ev, k), ..Default::default() };
-                (0..LUT_N).map(|i| self.response(i as f32 / (LUT_N - 1) as f32, &m)).collect()
-            })
-            .collect()
+            }
+            // JᵀJ + λ·diag(JᵀJ) (and a floor, for a channel no output reads),
+            // against −Jᵀr.
+            let mut jtj = [[0.0f32; 3]; 3];
+            let mut jtr = [0.0f32; 3];
+            for a in 0..3 {
+                for b in 0..3 {
+                    jtj[a][b] = (0..3).map(|k| jac[k][a] * jac[k][b]).sum();
+                }
+                jtr[a] = -(0..3).map(|k| jac[k][a] * r[k]).sum::<f32>();
+            }
+            let mut moved = false;
+            while lambda < 1e6 {
+                let mut m = jtj;
+                for a in 0..3 {
+                    m[a][a] += lambda * (jtj[a][a] + 1e-4);
+                }
+                let d = mat_vec3(&super::inv3(&m), &jtr);
+                let next: [f32; 3] = std::array::from_fn(|c| (q[c] + d[c]).clamp(0.0, 1.0));
+                let rn = resid(next);
+                if d.iter().all(|v| v.is_finite()) && norm(&rn) < norm(&r) {
+                    (q, r) = (next, rn);
+                    lambda = (lambda * 0.1).max(1e-7);
+                    moved = true;
+                    break;
+                }
+                lambda *= 10.0;
+            }
+            if !moved {
+                break;
+            }
+        }
+        q
     }
 
-    /// A rendered colour under an Exposure-only mask at weight `w`, by
-    /// Adobe's channel rule on the ladder ([`LocalGreyLaw::exposure_ladder`],
-    /// built for `w`), as the develop puts the mask's exposure on a colour
-    /// ([`expose_at_weight`]).
-    pub(crate) fn exposed_pixel(px: [f32; 3], ladder: &[Vec<f32>], w: f32) -> [f32; 3] {
-        expose_at_weight(px, w, |k, p| camera_raw_channels(p, &ladder[k]))
+    /// The rungs an Exposure-only mask at `ev` is put on a pixel through
+    /// ([`exposure_rungs`] at the start the global Exposure left).
+    pub(crate) fn exposure_rungs(&self, ev: f32) -> Vec<Option<Exposure>> {
+        exposure_rungs(self.exposed, ev)
+    }
+
+    /// The rendered colour under an Exposure-only mask at weight `w`, from the
+    /// tone stage's input `q` ([`LocalGreyLaw::tone_input`]): the mask's
+    /// Exposure through [`expose_mask_px`] on `rungs`
+    /// ([`LocalGreyLaw::exposure_rungs`]), the clip, and
+    /// [`LocalGreyLaw::tail`] — the develop's own calls.
+    pub(crate) fn exposed_colour(&self, q: [f32; 3], rungs: &[Option<Exposure>], w: f32) -> [f32; 3] {
+        let (dec, enc) = transfer_luts();
+        let p = expose_mask_px(q, w, rungs, &self.under_exposed, (&dec[..], &enc[..]));
+        self.tail(super::develop::clip_px(p), [0.0; ROWS])
     }
 }
 
@@ -897,7 +999,7 @@ mod tests {
     /// ramp, a full-coverage mask at Amount `w` renders as the same mask at
     /// `w · ev` and Amount 1 — exactly on a rung (`w` = 0.5 is rung 8), within
     /// the interpolation's residue between rungs (`w` = 0.3) — and the zone
-    /// fit's prediction ([`LocalGreyLaw::exposed_pixel`]) is the same ladder.
+    /// fit's prediction ([`LocalGreyLaw::exposed_colour`]) is the same ladder.
     /// Premise: the old blend misses `w · ev` by more than the tolerance.
     ///
     /// MUTATION: blend the full-EV result by the weight again (the render
@@ -943,12 +1045,122 @@ mod tests {
         }
         // The fit's prediction is the same ladder: a grey at weight 0.3.
         let law = LocalGreyLaw::of(&base, super::super::tone_cr::HsKey::NOMINAL).expect("a camera-profile start");
-        let ladder = law.exposure_ladder(ev, &[0.3]);
+        let rungs = law.exposure_rungs(ev);
         let y = 0.4f32;
-        let at = LocalGreyLaw::exposed_pixel([y; 3], &ladder, 0.3)[1];
+        let at = law.exposed_colour(law.tone_input([y; 3]), &rungs, 0.3)[1];
         let direct = law.response(y, &LocalAdjustment { exposure_ev: 0.3 * ev, ..Default::default() });
         assert!((at - direct).abs() < 2e-3, "the fit's ladder at 0.3: {at:.5} vs the exposure at 0.3·EV {direct:.5}");
     }
+
+    /// The zone fit's prediction of a mask's Exposure on a colour
+    /// ([`LocalGreyLaw::tone_input`] then [`LocalGreyLaw::exposed_colour`]) is
+    /// the render's, under a point curve and a negative Blacks: a grey, a warm
+    /// and a cool 16-bit ramp, rendered without the mask and under a
+    /// full-coverage mask at EV +0.8 and Amount 1, 0.5 and 0.3, every channel
+    /// predicted from the 8-bit render without it. Held on the pixels that
+    /// render still describes: no channel at 0 or white, and the law's
+    /// inversion renders the pixel back to within one 8-bit step — where a
+    /// channel is pushed against the gamut's floor, many inputs render the
+    /// same code and the frame no longer says which (counted, and bounded by
+    /// MAX_UNDESCRIBED; a pixel with a channel at 0 is left out uncounted).
+    /// Tolerance [`TOL_PREDICT`]: the 8-bit render the prediction starts
+    /// from. Measured 2026-10-30, worst per Amount 1 / 0.5 / 0.3: 0.0200 /
+    /// 0.0080 / 0.0053; the grey ramp 0.0079 (two codes) at Amount 1, the
+    /// warm ramp's 0.0200 on its blue channel 4–5 codes above the floor,
+    /// where one input code spans about three output codes after +0.8 EV
+    /// (neighbouring codes miss by opposite signs). 31 pixels undescribed.
+    /// Premise: the route the fit took at the merge — the grey ladder put on
+    /// the colour by `tone_cr::camera_raw_channels` — misses the same pixels
+    /// at Amount 1 by 0.47.
+    ///
+    /// MUTATION: put the exposure on the colour by the grey ladder again (the
+    /// premise), leave `curves_px` or the negative Blacks out of
+    /// `LocalGreyLaw::tail`, or skip the clip in `exposed_colour`.
+    #[test]
+    fn the_zone_fits_exposure_prediction_is_the_render_on_a_colour_under_a_point_curve() {
+        use crate::recipe::{CurvePoint, LocalAdjustment, MaskGeometry};
+        let n = 512u32;
+        let tint = [[1.0f32, 1.0, 1.0], [1.0, 0.78, 0.55], [0.55, 0.74, 1.0]];
+        let img = image::DynamicImage::ImageRgb16(image::ImageBuffer::from_fn(n, 3, |x, y| {
+            let v = x as f32 / (n - 1) as f32;
+            image::Rgb(tint[y as usize].map(|t| (v * t * 65535.0).round() as u16))
+        }));
+        let curve = [(0u8, 0u8), (64, 40), (128, 170), (192, 200), (255, 255)];
+        let base = EditRecipe {
+            camera_profile: "Adobe Standard".into(),
+            contrast: 20.0,
+            blacks: -30.0,
+            tone_curve: curve.iter().map(|&(i, o)| CurvePoint { input: i, output: o }).collect(),
+            ..Default::default()
+        };
+        let ev = 0.8f32;
+        let mask = |amount: f32| LocalAdjustment {
+            mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: 0.5, full_x: 0.5, full_y: 0.5 },
+            exposure_ev: ev,
+            amount,
+            ..Default::default()
+        };
+        let rows = |r: &EditRecipe| -> Vec<[f32; 3]> {
+            let out = develop_preview(&img, r).to_rgb32f();
+            (0..3).flat_map(|y| (0..n).map(move |x| (x, y))).map(|(x, y)| out.get_pixel(x, y).0).collect()
+        };
+        let plain = rows(&base);
+        let law = LocalGreyLaw::of(&base, super::super::tone_cr::HsKey::NOMINAL).expect("a camera-profile start");
+        let rungs = law.exposure_rungs(ev);
+        let inputs: Vec<[f32; 3]> = plain.iter().map(|&p| law.tone_input(p)).collect();
+        let step = 1.0 / 255.0;
+        let mut undescribed = 0usize;
+        let described: Vec<bool> = (0..plain.len())
+            .map(|i| {
+                let p = plain[i];
+                if luma601(&p) < 0.03 || p.iter().any(|&c| c >= 0.999) {
+                    return false;
+                }
+                if p.iter().any(|&c| c <= 0.5 * step) {
+                    return false;
+                }
+                let back = law.exposed_colour(inputs[i], &rungs, 0.0);
+                let ok = (0..3).all(|c| (back[c] - p[c]).abs() <= step);
+                undescribed += usize::from(!ok);
+                ok
+            })
+            .collect();
+        let pool = described.iter().filter(|&&d| d).count();
+        eprintln!("described {pool}, undescribed {undescribed}");
+        assert!(undescribed <= MAX_UNDESCRIBED, "{undescribed} pixels the render no longer describes");
+        let ladder: Vec<f32> = (0..LUT_N)
+            .map(|i| law.response(i as f32 / (LUT_N - 1) as f32, &LocalAdjustment { exposure_ev: ev, ..Default::default() }))
+            .collect();
+        for w in [1.0f32, 0.5, 0.3] {
+            let want = rows(&EditRecipe { masks: vec![mask(w)], ..base.clone() });
+            let (mut worst, mut old_worst) = (0.0f32, 0.0f32);
+            let mut by_row = [0.0f32; 3];
+            for i in (0..plain.len()).filter(|&i| described[i] && want[i].iter().all(|&c| c < 0.999)) {
+                let got = law.exposed_colour(inputs[i], &rungs, w);
+                for c in 0..3 {
+                    worst = worst.max((got[c] - want[i][c]).abs());
+                    by_row[i / n as usize] = by_row[i / n as usize].max((got[c] - want[i][c]).abs());
+                }
+                if w == 1.0 && i >= n as usize {
+                    let old = super::super::tone_cr::camera_raw_channels(plain[i], &ladder);
+                    for c in 0..3 {
+                        old_worst = old_worst.max((old[c] - want[i][c]).abs());
+                    }
+                }
+            }
+            eprintln!("w {w}: prediction vs render worst {worst:.5} (rows {by_row:?}); the merge-time route {old_worst:.5}");
+            assert!(worst <= TOL_PREDICT, "w {w}: the fit's prediction misses the render by {worst:.5}");
+            if w == 1.0 {
+                assert!(old_worst > 3.0 * TOL_PREDICT, "premise: the channel rule misses by only {old_worst:.5}");
+            }
+        }
+    }
+
+    /// [`LocalGreyLaw`]'s colour prediction against the render, and how many
+    /// of the 1536 ramp pixels with no channel at 0 the law's inversion may
+    /// leave undescribed (see the test above).
+    const TOL_PREDICT: f32 = 0.025;
+    const MAX_UNDESCRIBED: usize = 40;
 
     /// The law the zone fit solves on ([`LocalGreyLaw`]) is the render's: a
     /// 16-bit grey ramp under a full-coverage mask, every grey's delivered EV

@@ -279,7 +279,7 @@ pub(crate) fn build_tone_lut(r: &EditRecipe) -> Vec<f32> {
 /// The tone of a Camera Raw recipe after its exposure, as the develop applies
 /// it, in Lightroom's order: Contrast, Whites, Blacks' and Dehaze's LUT
 /// (Highlights and Shadows run before Exposure, `highlights_shadows`), which the develop puts
-/// through Camera Raw's curve rule ([`apply_camera_raw_curve`], the middle by
+/// through Camera Raw's curve rule ([`CameraRawTone::sliders_px`], the middle by
 /// its encoded ratio; with Clarity or Dehaze `tone_cr::camera_raw_slider_pixel`); the
 /// parametric and point curves, by the same rule; the Look's baked curve, by
 /// it with the middle at its linear ratio. `None` for a pass with nothing to do.
@@ -331,6 +331,43 @@ pub(crate) fn camera_raw_tone_passes(r: &EditRecipe) -> CameraRawTone {
             (s[1], s[2])
         },
         curves,
+    }
+}
+
+impl CameraRawTone {
+    /// One pixel (sRGB-encoded, working space) through the passes after the
+    /// exposures and before a mask's table sliders, as the develop puts them
+    /// on: Contrast, Whites and a positive Blacks by Camera Raw's curve rule
+    /// ([`CurveSpace::tone`], the middle at its encoded ratio), or by
+    /// `tone_cr::camera_raw_slider_pixel` when the pass carries Clarity's
+    /// tone (`clarity`); then a negative Blacks through each ProPhoto channel
+    /// on its own ([`CurveSpace::each_channel`]). The develop's loop and the
+    /// zone fit's law (`mask_cr::LocalGreyLaw`) both call this.
+    pub(super) fn sliders_px(&self, px: [f32; 3], cs: &CurveSpace, clarity: bool) -> [f32; 3] {
+        let mut px = px;
+        if let Some(s) = &self.sliders {
+            px = if clarity { camera_raw_slider_pixel(px, s) } else { cs.tone(px, &s.lut, MiddleRatio::Encoded) };
+        }
+        if let Some(lut) = &self.blacks_down {
+            px = cs.each_channel(px, lut);
+        }
+        px
+    }
+
+    /// One pixel through the passes after a mask's table sliders: the
+    /// photographer's parametric and point curves, then the Look's baked
+    /// curve, both by Camera Raw's rule ([`CurveSpace::tone`]; the middle at
+    /// its encoded ratio, the Look's at its linear one). Shared as
+    /// [`CameraRawTone::sliders_px`] is.
+    pub(super) fn curves_px(&self, px: [f32; 3], cs: &CurveSpace) -> [f32; 3] {
+        let mut px = px;
+        if let Some(c) = &self.curves {
+            px = cs.tone(px, c, MiddleRatio::Encoded);
+        }
+        if let Some(look) = &self.look {
+            px = cs.tone(px, look, MiddleRatio::Linear);
+        }
+        px
     }
 }
 
@@ -865,6 +902,18 @@ impl CurveSpace {
         mat_vec3(&self.from, &pro).map(|v| sample_lut(self.enc, v.clamp(0.0, 1.0)))
     }
 
+    /// One working-space pixel with every ProPhoto channel through the same
+    /// curve on its own: [`CurveSpace::channel_curves`] with all three
+    /// channels on one table.
+    pub(super) fn each_channel(&self, px: [f32; 3], lut: &[f32]) -> [f32; 3] {
+        let mut pro = mat_vec3(&self.to, &px.map(|v| sample_lut(self.dec, v)));
+        for v in &mut pro {
+            let e = sample_lut(self.enc, v.clamp(0.0, 1.0));
+            *v = sample_lut(self.dec, sample_lut(lut, e));
+        }
+        mat_vec3(&self.from, &pro).map(|v| sample_lut(self.enc, v.clamp(0.0, 1.0)))
+    }
+
     /// One working-space pixel through a tone curve by Camera Raw's rule
     /// ([`camera_raw_rgb_tone`]) on these channels, back in the working space.
     pub(super) fn tone(&self, px: [f32; 3], lut: &[f32], middle: MiddleRatio) -> [f32; 3] {
@@ -954,7 +1003,9 @@ pub(super) fn camera_raw_rgb_tone(pro: [f32; 3], lut: &[f32], middle: MiddleRati
 /// ([`camera_raw_rgb_tone`]) on the channels of [`profile::curve_space`]: the
 /// photographer's composite point curve (with the parametric curve,
 /// [`MiddleRatio::Encoded`]), and the creative Look's baked curve after it
-/// ([`MiddleRatio::Linear`]). The ONE place that rule lives.
+/// ([`MiddleRatio::Linear`]). The develop puts them on per pixel through
+/// [`CameraRawTone::curves_px`]; this whole-frame form is the tests' handle on
+/// the same rule ([`CurveSpace::tone`]).
 ///
 /// Order, measured on one frame against predictions from Camera Raw's own
 /// renders without the curve (ΔE mean): the photographer's curve runs BEFORE
@@ -964,17 +1015,13 @@ pub(super) fn camera_raw_rgb_tone(pro: [f32; 3], lut: &[f32], middle: MiddleRati
 /// profile's default curve (greys: after 0.011 L, before 0.985 L). With no
 /// Look, `0,0 / 128,180 / 255,255` predicted to 0.06, a five-knot curve 0.21,
 /// `0,0 / 255,200` 0.02.
+#[cfg(test)]
 pub(super) fn apply_camera_raw_curve(
     data: &mut [[f32; 3]],
     lut: &[f32],
     space: ExportColorSpace,
     middle: MiddleRatio,
 ) {
-    let (to, from) = profile::curve_space(space);
-    let (dec, enc) = transfer_luts();
-    data.par_iter_mut().for_each(|px| {
-        let pro = mat_vec3(&to, &px.map(|v| sample_lut(dec, v))).map(|v| v.clamp(0.0, 1.0));
-        let c = camera_raw_rgb_tone(pro, lut, middle);
-        *px = mat_vec3(&from, &c).map(|v| sample_lut(enc, v.clamp(0.0, 1.0)));
-    });
+    let cs = CurveSpace::new(space);
+    data.par_iter_mut().for_each(|px| *px = cs.tone(*px, lut, middle));
 }

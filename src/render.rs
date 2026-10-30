@@ -226,7 +226,9 @@ pub(crate) use tone::{
     TONE_KNOTS_X, build_tone_lut, camera_raw_tone_passes, curve_channels, sample_lut, sample_tone_model, tone_exposure_curve,
     tone_knot_weights, tone_model_knots, tone_slider_basis,
 };
-use tone::{CurveSpace, MiddleRatio, apply_camera_raw_curve, apply_rgb_curves, hermite_eval};
+use tone::{CurveSpace, MiddleRatio, apply_rgb_curves, hermite_eval};
+#[cfg(test)]
+use tone::apply_camera_raw_curve;
 pub(crate) use mask_cr::LocalGreyLaw;
 pub(crate) use tone_cr::{
     HS_SH_FLOOR, HsKey, SliderLaw, camera_raw_exposure, camera_raw_response_keyed, shadows_anchor,

@@ -2242,8 +2242,12 @@ exposure ramp and Adobe's curve; its Hue turns by degrees in the profile
 stage's reference primaries, and the mask stage's airlight Dehaze does not
 run. Each reads the mask's coverage the mask stage reads (`masks::Cover`).
 The zoned reverse fit solves a zone's Exposure, tone sliders and colour gains
-on that same law (`render::LocalGreyLaw`, the develop's own tone stage read on
-a grey, put on a zone pixel at its weight through the same ladder; `fit_zoned::fit_zone_dials_on` / `fit_zone_tone_on`): the engine's
+on that same law (`render::LocalGreyLaw`: the develop's own per-pixel tone
+passes, called rather than restated — `CameraRawTone::sliders_px` /
+`curves_px`, `mask_cr::expose_mask_px` — with each zone pixel taken back to
+the tone stage's input by inverting those passes on the colour and the mask's
+Exposure then put on it at its weight as the render puts it;
+`fit_zoned::fit_zone_dials_on` / `fit_zone_tone_on`): the engine's
 moment solve took a mask's EV as a gain on the rendered value, and on this
 law (the measured exposure transfer at the camera start, under the profile
 stage's curve, the mask's on the start the global one left; Highlights and
@@ -2252,14 +2256,18 @@ Shadows at the frame's `HsKey`) EV +0.62 renders +0.82 … +0.96 at linear
 zone overshot 1.3–1.5× by an amount that changes with the level. The law is
 held to the render within the preview's two 8-bit steps at linear 0.03 and up,
 and Highlights below 0 / Shadows above 0 within 0.25 EV (it reads a grey's
-site on the diagonal, the render the base of its neighbourhood).
+site on the diagonal, the render the base of its neighbourhood); on colour
+ramps under a point curve and a negative Blacks, the predicted Exposure is
+held to the render within 0.025 (measured 0.020 / 0.008 / 0.005 at Amount 1 /
+0.5 / 0.3, the 8-bit start's steps), where the grey ladder put on the colour by
+the channel rule (the route until the 1.17.0 merge) missed by 0.47.
 Such a recipe also opens its white balance AT As Shot
 (`EditRecipe::open_white_balance_at_as_shot`, stamped wherever a photo's
 as-shot white is), which the white balance stage renders as no move and the
 XMP writer writes as Lightroom's `WhiteBalance="As Shot"`.
 
 **The point curves follow Camera Raw's law since v1.17.0, measured**
-(`render::tone::{curve_lut, apply_rgb_curves, apply_camera_raw_curve}`,
+(`render::tone::{curve_lut, apply_rgb_curves, CameraRawTone::curves_px}`,
 `render::profile::curve_space`). Until v1.17.0 a per-channel curve
 (`crs:ToneCurvePV2012Red` / `Green` / `Blue`) moved the working space's own
 sRGB channel, with straight lines between the knots, right after the master

@@ -616,7 +616,7 @@ supposed to remove.
   width; composed after the slider model and before the point curve
   (**designed, provisional** until the kit's `PARAM-*` exports).
 - Point curves (v1.17.0, `render::tone::{curve_lut, apply_rgb_curves,
-  apply_camera_raw_curve}`, **measured against Adobe Camera Raw**): between
+  CameraRawTone::curves_px}`, **measured against Adobe Camera Raw**): between
   the knots the DNG SDK's `dng_spline_solver` (straight lines left 4.73 ΔE on
   a one-knot curve, the spline 0.08); each per-channel curve on one channel of
   linear ProPhoto RGB (D50, Bradford, `render::profile::curve_space`) under
