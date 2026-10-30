@@ -7242,3 +7242,99 @@ fn zone_tone_on_camera_raws_law_lands_the_zone_distribution() {
         assert!((a - b).abs() <= 0.01, "p{}: solved {a:.4} vs target {b:.4} (ev {ev}, sliders {s:?})", q * 100.0);
     }
 }
+
+/// The colour field's PINNED path (1.17.0). A settled zone — its render
+/// already the target's — woven through the frame in 8-px stripes, finer than
+/// the field's 12-column grid, and 0.16 darker than its neighbours, close
+/// enough that the two share the field's luma vertices. Every other pixel asks
+/// for +0.10 of light. A field solved for the frame cannot give the stripes a
+/// vertex of their own, so it lifts them with their neighbours and the zone
+/// regresses past the tolerance; pinned — the zone's own render as its target
+/// at full weight, in pass A and in the support-free pass B alike — the
+/// re-solve holds the zone within it and the field still ships.
+#[test]
+fn a_zone_the_colour_field_regresses_is_pinned_and_the_field_still_ships() {
+    pinned_zone_fixture(None);
+}
+
+/// The same zone carrying little frame evidence (weight 0.1, where the night
+/// pair's settled tile sat in content the evidence down-weights). The pin's
+/// full weight must reach the support-free pass B that most cells take, not
+/// pass A alone, or the re-solve hears the zone no better than the first.
+#[test]
+fn a_pinned_zone_is_heard_at_full_weight_by_both_field_solves() {
+    pinned_zone_fixture(Some(0.1));
+}
+
+fn pinned_zone_fixture(zone_evidence: Option<f32>) {
+    let (w, h) = (96u32, 64u32);
+    let in_zone = |x: u32| (32..64).contains(&x) && (x / 8).is_multiple_of(2);
+    let grey = |x: u32, y: u32| {
+        0.40 + if in_zone(x) { -0.16 } else { 0.0 } + 0.03 * ((x * 7 + y * 13) % 5) as f32 / 4.0
+    };
+    let to8 = |p: [f32; 3]| image::Rgb(p.map(|c| (c * 255.0).round() as u8));
+    let src = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| to8([grey(x, y); 3])));
+    let tgt = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+        let v = grey(x, y);
+        to8(if in_zone(x) { [v; 3] } else { [v + 0.10; 3] })
+    }));
+    // One raster per variant: the two run in parallel, and each removes its own.
+    let path = fixture_mask_path(if zone_evidence.is_some() { "field-pin-low" } else { "field-pin" });
+    GrayImage::from_fn(w, h, |x, _| image::Luma([if in_zone(x) { 255u8 } else { 0 }]))
+        .save(path.path())
+        .unwrap();
+    let mut report = neutral_report(&src, &tgt);
+    if let Some(weight) = zone_evidence {
+        // The analysis frame is this fixture scaled; map each of its columns
+        // back to the fixture's own.
+        let stride = report.evidence.width as usize;
+        for (i, w8) in report.evidence.source_weights.iter_mut().enumerate() {
+            if in_zone(((i % stride) * w as usize / stride) as u32) {
+                *w8 = weight;
+            }
+        }
+    }
+    report.recipe.masks.push(crate::recipe::LocalAdjustment {
+        mask: crate::recipe::MaskGeometry::Bitmap { path: path.path().to_string_lossy().into_owned() },
+        name: "settled".into(),
+        amount: 1.0,
+        ..Default::default()
+    });
+    let (s, t) = fit::analysis_pair(&src, &tgt);
+    report.err_after = fit::look_err_with_evidence(
+        &fit::pixels_of(&render::develop_preview(&s, &report.recipe)),
+        &fit::pixels_of(&t),
+        &report.evidence,
+    );
+    super::field::attach_colour_field(
+        &src,
+        &tgt,
+        &mut report,
+        crate::recipe::GradeStrength::new(0.85),
+        &[],
+    );
+    let read = |note: &crate::rationale::Note, key: &str| -> f32 {
+        note.args.iter().find(|(k, _)| *k == key).map(|(_, v)| v.parse().unwrap()).unwrap()
+    };
+    let pinned = report
+        .notes
+        .iter()
+        .find(|n| n.key == crate::rationale::keys::FIELD_ZONE_PINNED)
+        .unwrap_or_else(|| panic!("the field must regress the settled zone and pin it: {}", report.recipe.rationale));
+    let (before, first, after) = (read(pinned, "before"), read(pinned, "first"), read(pinned, "after"));
+    assert!(
+        first > before + ZONE_GLOBAL_REGRESSION_TOL,
+        "premise: the first solve costs the zone past the tolerance ({before} -> {first})"
+    );
+    assert!(
+        after <= before + ZONE_GLOBAL_REGRESSION_TOL,
+        "the re-solved field leaves the zone within the tolerance ({before} -> {after}, first {first})"
+    );
+    assert!(
+        !report.notes.iter().any(|n| n.key == crate::rationale::keys::FIELD_ZONE_REGRESSED),
+        "a pin that held must not give the field back: {}",
+        report.recipe.rationale
+    );
+    assert!(report.recipe.colour_field.is_some(), "the field ships: {}", report.recipe.rationale);
+    std::fs::remove_file(path.path()).ok();
+}

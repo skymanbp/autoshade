@@ -1119,6 +1119,14 @@ pub mod keys {
         " The solved colour field was given back: it improved the frame but moved \
          the {label} zone {before} -> {after}, past the {tol} a zone is ever allowed \
          to cost (per-zone do-no-harm check).";
+    /// v1.17.0. The first half of that check no longer gives the field back on
+    /// its own: the zone is pinned (the solve asked to leave it where the zone
+    /// stage put it) and the field solved again, and the check judges that.
+    pub const FIELD_ZONE_PINNED: &str =
+        " The solved colour field moved the {label} zone {before} -> {first}, past \
+         the {tol} a zone is ever allowed to cost, so that zone was pinned to its own \
+         render and the field solved again around it: with the field it ships the \
+         zone reads {after}.";
     pub const FIELD_REGRESSED: &str =
         " The solved colour field was given back: rendering it moved the frame \
          {before} -> {after}, away from the target rather than toward it \
