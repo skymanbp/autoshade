@@ -381,8 +381,8 @@ fn solve_for_mode(r: &EditRecipe, img: &DynamicImage) -> Option<Homography> {
 /// The frame keeps its dimensions: a Transform is a reframing of the same
 /// picture, and Lightroom's own matrices are pre-scaled to cover it (see the
 /// module header). Where the map pulls from outside the source, the pixel is
-/// [`VOID`] rather than a clamped edge sample — the smear that produced is the
-/// defect `apply_lens_geometry`'s composite fill note describes.
+/// [`VOID`] rather than a clamped edge sample, whose smear across a whole
+/// reframed border would show.
 ///
 /// One 16-bit path, exactly as `rotate_straighten` has: a frame RESAMPLE
 /// promotes, because interpolating between 8-bit samples and rounding back to

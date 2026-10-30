@@ -2145,7 +2145,11 @@ better than one in the working primaries on 12 of 15 corner × channel
 residuals (the other three within 1×10⁻⁴ of full scale), and Camera Raw's output green gains high-frequency noise towards the
 corners (+13 % from centre to corner, the camera-space resample +10 %, a
 working-space one +0 %), the mark of a sensor-blue shift mixed into green by
-the matrix. The mask chain then samples in the corrected frame
+the matrix. Each CA channel moves by its own knots alone (L04-2 as of
+v1.17.0): until v1.16.0 a knot above 1 zoomed all three channels by one
+composite fill scale, up to 0.9 px at p42's corners where Camera Raw moves only
+blue; without it p42's [−12, −10) band goes +0.96 → +0.64 st against Camera
+Raw (`docs/TECH_STACK.md`). The mask chain then samples in the corrected frame
 (`MaskFrame::Corrected`, below), and so do the other passes that read a stored
 position — retouch areas (centre and donor mapped forward, radius by the local
 scale, brush areas read through the map), the colour field's grid, pixel layers
@@ -2921,7 +2925,8 @@ the engine clips where Camera Raw compresses) and a shadow lift (L < 30 ΔL
 with the lens profile off the engine and Camera Raw agree to 1.00000, and with
 it on the difference is radial — +0.27 % near the centre falling to +0.09 % at
 0.85 of the half diagonal (3000 px, tile phase correlation,
-`rel1170/colour/mag/radial.py`); the composite CA fill reads exactly 1. On
+`rel1170/colour/mag/radial.py`); the composite CA fill (retired in v1.17.0)
+read exactly 1. On
 all five calibration pairs (four 24–105 mm frames with the lens on, the
 14–24 mm frame with it switched on for the test) the difference follows the
 lens, not a constant: +0.26 % at 73 and 80 mm, +0.08 to +0.16 % at 105 mm,

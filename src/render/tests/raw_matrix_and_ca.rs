@@ -143,14 +143,17 @@ fn nan_calibration_never_reaches_the_packer() {
     assert_eq!(to_u16(f32::NEG_INFINITY), 0);
 }
 
-/// L04-2: a CA-only profile (ca knots past 1, distortion off) used to
-/// sample red OUTSIDE the frame along the whole border — the clamping
-/// sampler smeared a radial plateau there (red[(0,mid)] == red[(1,mid)]
-/// on any ramp), because the fill scale was hard-wired to 1.0 whenever
-/// distortion was off. The composite fill zooms all channels in by the
-/// overshoot, so every source sample stays inside the frame.
+/// L04-2 (v1.17.0): CA moves each channel by its own knots and nothing
+/// else — Camera Raw's rule, measured on p42, where its render keeps green
+/// and red in place to 0.03 px and moves only blue. Until v1.16.0 a knot
+/// above 1 zoomed all three channels by one composite fill scale. Here a
+/// CA-only profile with red past 1 leaves green byte for byte where it
+/// was, red samples at its own magnified radius, and a red sample past the
+/// edge reads the clamped edge pixel, so a white frame stays white.
+///
+/// MUTATION: divide the channel LUTs by a composite overshoot scale again.
 #[test]
-fn ca_only_profile_never_samples_outside_the_frame() {
+fn ca_moves_each_channel_by_its_own_knots_only() {
     use crate::recipe::LensProfile;
     let profile = LensProfile {
         ca_r: vec![1.02; 16],
@@ -158,57 +161,56 @@ fn ca_only_profile_never_samples_outside_the_frame() {
         ca_on: true,
         ..Default::default()
     };
-    let ramp = DynamicImage::ImageRgb16(ImageBuffer::from_fn(200, 100, |x, _| {
-        Rgb([(x as u16) * 300; 3])
-    }));
-    let out = apply_lens_geometry(&ramp, &profile, 0.0).to_rgb16();
-    let a = out.get_pixel(0, 50).0[0];
-    let b = out.get_pixel(1, 50).0[0];
-    assert_ne!(
-        a, b,
-        "the border red plateau is gone — no clamped out-of-frame samples"
+    let ramp = ImageBuffer::from_fn(200, 100, |x, y| {
+        Rgb([(x as u16) * 300, (x as u16) * 200 + (y as u16) * 7, (y as u16) * 500])
+    });
+    let out = apply_lens_geometry(&DynamicImage::ImageRgb16(ramp.clone()), &profile, 0.0).to_rgb16();
+    assert!(
+        out.pixels().zip(ramp.pixels()).all(|(p, q)| p.0[1] == q.0[1]),
+        "green must not move under a CA-only profile, whatever the red knots ask"
     );
-    // …and the zoom leaves no unfilled pixels: a white frame stays white.
-    let white =
-        DynamicImage::ImageRgb8(RgbImage::from_pixel(201, 101, image::Rgb([255; 3])));
+    // Red at a named pixel on the centre row (dy = 0.5 below the centre
+    // line on an even height, which the vertical ramp-free red ignores):
+    // the source's own lerp at the radius scaled by the red knot.
+    let (cx, x) = (99.5f32, 180u32);
+    let sx = cx + (x as f32 - cx) * 1.02;
+    let i0 = sx.floor() as u32;
+    let frac = sx - sx.floor();
+    let want = ramp.get_pixel(i0, 50).0[0] as f32 * (1.0 - frac) + ramp.get_pixel(i0 + 1, 50).0[0] as f32 * frac;
+    let got = out.get_pixel(x, 50).0[0] as f32;
+    assert!((got - want).abs() <= 1.0, "red at x={x}: got {got}, want the source at {sx} ({want})");
+    // Past the edge red reads the clamped edge pixel: no unfilled pixels.
+    let white = DynamicImage::ImageRgb8(RgbImage::from_pixel(201, 101, image::Rgb([255; 3])));
     let w = apply_lens_geometry(&white, &profile, 0.0).to_rgb16();
     let min = w.pixels().flat_map(|p| p.0).min().unwrap();
-    assert!(min >= 65000, "unfilled pixels through the CA fill: min {min}");
+    assert!(min >= 65000, "unfilled pixels at the edge: min {min}");
 }
 
-/// L04-2: the fill is exactly 1.0 whenever no channel overshoots — real
-/// profiles below unity (and CA-off entirely) cost nothing and stay
-/// bit-identical: the green channel of a sub-unity-CA render equals the
-/// CA-off render byte for byte (base LUT divided by exactly 1.0; the
-/// two pixel branches use samplers with identical math).
+/// L04-2 (v1.17.0): with the profile distortion on, a CA channel past 1
+/// still leaves green byte for byte what the CA-off render draws — the
+/// shared frame is the distortion's alone.
 #[test]
-fn ca_fill_scale_is_identity_when_no_channel_overshoots() {
+fn ca_never_moves_green_even_when_a_channel_overshoots() {
     use crate::recipe::LensProfile;
-    let dims = (1200.0, 800.0);
-    let sub = LensProfile {
-        ca_r: vec![0.999; 16],
-        ca_b: vec![0.998; 16],
-        ca_on: true,
-        ..Default::default()
-    };
-    assert_eq!(geometry_fill_scale(&sub, 0.0, dims), 1.0);
-    assert_eq!(
-        geometry_fill_scale(&LensProfile::default(), 25.0, dims),
-        1.0,
-        "CA off is always exactly 1.0 — the manual path never pays"
-    );
     let dist: Vec<f32> =
         (0..16).map(|i| 1.0008 - 0.02 * (i as f32 / 15.0).powi(2)).collect();
     let with_ca = LensProfile {
         distortion: dist.clone(),
         distortion_on: true,
-        ca_r: vec![0.999; 16],
+        ca_r: vec![1.004; 16],
         ca_b: vec![0.999; 16],
         ca_on: true,
         ..Default::default()
     };
     let no_ca =
         LensProfile { distortion: dist, distortion_on: true, ..Default::default() };
+    assert!(
+        !geometry_moves_frame(
+            &LensProfile { ca_r: vec![1.02; 16], ca_b: vec![1.02; 16], ca_on: true, ..Default::default() },
+            0.0
+        ),
+        "CA alone never moves the shared frame"
+    );
     let ramp = DynamicImage::ImageRgb16(ImageBuffer::from_fn(160, 90, |x, y| {
         Rgb([(x as u16) * 300, (x as u16) * 300 + (y as u16), (y as u16) * 500])
     }));
@@ -216,20 +218,21 @@ fn ca_fill_scale_is_identity_when_no_channel_overshoots() {
     let b = apply_lens_geometry(&ramp, &no_ca, 0.0).to_rgb16();
     assert!(
         a.pixels().zip(b.pixels()).all(|(p, q)| p.0[1] == q.0[1]),
-        "green must be byte-identical when the fill is exactly 1"
+        "green must be byte-identical with and without an overshooting CA"
+    );
+    assert!(
+        a.pixels().zip(b.pixels()).any(|(p, q)| p.0[0] != q.0[0]),
+        "premise: the red knot really moved red"
     );
 }
 
 /// R25 B3: the manual CA pair really moves the red channel's sampling
 /// radius — and moves NOTHING else when it asks for a shrink.
 ///
-/// A NEGATIVE ca_r is the sharp case: every channel factor lands at or
-/// below 1, so [`geometry_fill_scale`] is exactly 1.0 and green and blue
-/// come out byte for byte identical to the CA-off render, leaving red as
-/// the only thing that moved. (The positive direction cannot make that
-/// claim and must not pretend to: an overshooting channel zooms the whole
-/// frame through the composite fill, which is the L04-2 contract, and it
-/// is asserted below rather than dodged.)
+/// Both directions leave green and blue byte for byte identical to the
+/// CA-off render, red the only thing that moved (L04-2 as of v1.17.0: CA
+/// moves each channel by its own knots; until v1.16.0 a magnifying value
+/// zoomed the whole frame through a composite fill scale).
 #[test]
 fn manual_ca_shifts_the_red_channel_radius() {
     // Concentric rings: a pattern that is a function of RADIUS, so a
@@ -286,16 +289,17 @@ fn manual_ca_shifts_the_red_channel_radius() {
         "the probe pixel must sit on a steep part of the ring pattern"
     );
 
-    // The other direction is the documented frame zoom, not a silent one:
-    // an overshooting channel makes `geometry_moves_frame` true, which is
-    // what keeps every coordinate map in step (C2).
+    // The magnifying direction moves red alone too, and neither moves the
+    // shared frame the coordinate maps follow (C2).
+    let grown = apply_lens_geometry(&target, &geometry_profile(&grow), 0.0).to_rgb16();
     assert!(
-        geometry_moves_frame(&geometry_profile(&grow), 0.0),
-        "a magnifying manual CA zooms the frame through the composite fill"
+        grown.pixels().zip(base.pixels()).all(|(p, q)| p.0[1] == q.0[1] && p.0[2] == q.0[2]),
+        "a magnifying manual CA must leave green and blue byte-identical"
     );
     assert!(
-        !geometry_moves_frame(&geometry_profile(&shrink), 0.0),
-        "…and a shrinking one does not move the shared frame at all"
+        !geometry_moves_frame(&geometry_profile(&grow), 0.0)
+            && !geometry_moves_frame(&geometry_profile(&shrink), 0.0),
+        "manual CA in either direction does not move the shared frame"
     );
 }
 
@@ -427,13 +431,13 @@ fn a_tier_that_renders_nothing_renders_nothing() {
     );
 }
 
-/// L04-2: the C2 coordinate contract — the GUI's normalised maps carry
-/// the SAME composite fill as the render, so masks/dropper/clone points
-/// stay on the pixels; the fill-adjusted forward/inverse pair still
-/// round-trips; and a CA-only profile no longer short-circuits the
-/// shared map to the manual path.
+/// L04-2: the C2 coordinate contract — the GUI's normalised maps are the
+/// render's GREEN map, which CA does not touch (v1.17.0: each channel moves
+/// by its own knots), so masks/dropper/clone points stay on the pixels; the
+/// forward/inverse pair round-trips; and a CA-only profile maps every point
+/// to itself.
 #[test]
-fn ca_fill_keeps_the_gui_map_in_step_with_the_render() {
+fn the_gui_map_is_the_renders_green_map() {
     use crate::recipe::LensProfile;
     let profile = LensProfile {
         distortion: (0..16).map(|i| 1.0008 - 0.053 * (i as f32 / 15.0).powi(2)).collect(),
@@ -444,22 +448,20 @@ fn ca_fill_keeps_the_gui_map_in_step_with_the_render() {
         ..Default::default()
     };
     let dims = (1200.0, 800.0);
-    let fill = geometry_fill_scale(&profile, 0.0, dims);
-    assert!(fill > 1.0, "premise: this profile's red channel overshoots");
     // The normalised map's radial factor at an edge point equals the
-    // render's green factor (base / fill) at the same rn.
+    // render's green factor at the same rn — the red knot past 1 adds no
+    // zoom to it.
     let (nx, ny) = (0.98, 0.5);
     let (ox, _) = lens_geom_norm(nx, ny, dims, &profile, 0.0);
     let f_norm = (ox - 0.5) / (nx - 0.5);
     let (w, h) = dims;
     let rn = ((nx - 0.5) * w).abs() / (0.5 * (w * w + h * h).sqrt());
     let s_p = profile_fill_scale(&profile.distortion, dims);
-    let expect = lens_geom_factor(rn, &profile.distortion, s_p, 0.0, 1.0) / fill;
+    let expect = lens_geom_factor(rn, &profile.distortion, s_p, 0.0, 1.0);
     assert!(
         (f_norm - expect).abs() < 1e-4,
         "the GUI map factor {f_norm} drifted from the render's {expect}"
     );
-    // Forward/inverse still round-trip through the fill-adjusted pair.
     for (px, py) in [(0.1, 0.2), (0.9, 0.85), (0.5, 0.05)] {
         let (ax, ay) = lens_geom_norm(px, py, dims, &profile, 12.0);
         let (bx, by) = lens_ungeom_norm(ax, ay, dims, &profile, 12.0);
@@ -468,25 +470,21 @@ fn ca_fill_keeps_the_gui_map_in_step_with_the_render() {
             "roundtrip ({px},{py}) → ({bx},{by})"
         );
     }
-    // Distortion OFF + overshooting CA: the shared map must move (the
-    // old early-return to the manual path skipped the fill entirely).
+    // Distortion OFF + a channel past 1: the shared map stays put.
     let ca_only = LensProfile {
         ca_r: vec![1.02; 16],
         ca_b: vec![0.98; 16],
         ca_on: true,
         ..Default::default()
     };
-    let (mx, _) = lens_geom_norm(0.9, 0.5, dims, &ca_only, 0.0);
-    assert!(
-        (mx - 0.9).abs() > 1e-4,
-        "the composite fill moves the shared map even with distortion off"
-    );
-    let (fx, fy) = lens_geom_norm(0.8, 0.3, dims, &ca_only, 0.0);
-    let (ux, uy) = lens_ungeom_norm(fx, fy, dims, &ca_only, 0.0);
-    assert!(
-        (ux - 0.8).abs() < 2e-3 && (uy - 0.3).abs() < 2e-3,
-        "CA-only roundtrip ({ux},{uy})"
-    );
+    for (px, py) in [(0.9, 0.5), (0.8, 0.3), (0.02, 0.97)] {
+        let (mx, my) = lens_geom_norm(px, py, dims, &ca_only, 0.0);
+        let (ux, uy) = lens_ungeom_norm(px, py, dims, &ca_only, 0.0);
+        assert!(
+            (mx - px).abs() < 1e-6 && (my - py).abs() < 1e-6 && (ux - px).abs() < 1e-6 && (uy - py).abs() < 1e-6,
+            "CA alone moved the shared map: ({px},{py}) → ({mx},{my}) / ({ux},{uy})"
+        );
+    }
 }
 
 /// The black is subtracted signed (v1.17.0): a mosaic whose sites sit at the

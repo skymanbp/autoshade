@@ -936,9 +936,8 @@ pub(crate) fn orig_norm_to_view(nx: f32, ny: f32, dims: (f32, f32), deg: f32, di
 /// bounding box of its transformed corners — display-only, and tight at the
 /// small tilt angles and gentle distortions the sliders allow.
 pub(crate) fn geom_to_view(geom: &MaskGeometry, dims: (f32, f32), deg: f32, dist: &LensArg) -> MaskGeometry {
-    // Off = the composed map moves nothing, INCLUDING the CA composite
-    // fill (L04-2/Codex AL F1): a CA-only overshoot zooms the frame, so
-    // an identity early-out here desynced mask anchors from the pixels.
+    // Off = the composed green map moves nothing (Codex AL F1); CA moves
+    // only red and blue (L04-2), so it never keeps this from short-cutting.
     let geom_off = !autoshade::render::geometry_moves_frame(&dist.profile, dist.amount);
     if deg == 0.0 && geom_off {
         return geom.clone();

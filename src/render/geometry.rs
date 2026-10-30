@@ -3,19 +3,14 @@
 use super::*;
 
 /// Does the composed lens geometry MOVE the shared frame? THE predicate
-/// every geometry consumer must use (Codex AL-review F1): distortion-off +
-/// amount-0 is NOT identity once CA overshoots, because the composite fill
-/// (L04-2) zooms every channel. Dims-free and conservatively OVER-inclusive
-/// (any ca knot above 1 counts, whether or not the band max survives): a
-/// false positive routes through maps that are then identity anyway; a
-/// false negative desyncs masks/overlays/selections from the pixels.
+/// every geometry consumer must use (Codex AL-review F1). The shared frame
+/// is the GREEN map — profile distortion and the manual amount. CA never
+/// moves it: red and blue are resampled by their own knots alone and green
+/// stays where the distortion puts it (L04-2 as of v1.17.0, measured against
+/// Camera Raw — [`channel_luts`]), so a CA-only profile leaves masks,
+/// overlays and selections where they were.
 pub fn geometry_moves_frame(profile: &crate::recipe::LensProfile, amount: f32) -> bool {
-    (profile.distortion_on && !profile.distortion.is_empty())
-        || amount.abs() >= 1e-3
-        || (profile.ca_on
-            && !profile.ca_r.is_empty()
-            && !profile.ca_b.is_empty()
-            && profile.ca_r.iter().chain(&profile.ca_b).any(|k| *k > 1.0))
+    (profile.distortion_on && !profile.distortion.is_empty()) || amount.abs() >= 1e-3
 }
 
 /// Radial scale one unit of `ca_r` / `ca_b` asks for (R25 B3).
@@ -40,10 +35,9 @@ pub const MANUAL_CA_PER_UNIT: f32 = 2.0e-5;
 /// exactly what one knot means to [`profile_knot_interp`]. Folding it in here
 /// rather than threading two more arguments through
 /// [`apply_lens_geometry`] / [`lens_geom_norm`] / [`geometry_moves_frame`] is
-/// what keeps the C2 contract intact for free: every consumer divides by the
-/// SAME composite fill ([`geometry_fill_scale`]), so masks, overlays and the
-/// colour dropper cannot drift against the pixels when a manual value pushes
-/// a channel past 1.
+/// what keeps the C2 contract intact for free: a manual value moves only
+/// the red or blue channel it names, exactly as a profile CA knot does, and
+/// never the green map masks, overlays and the colour dropper follow.
 ///
 /// BORROWED when the pair is at rest — the common case allocates nothing and
 /// renders bit-identically to the pre-B3 engine.
@@ -306,54 +300,6 @@ pub(super) fn lens_geom_factor(rn: f32, dist_knots: &[f32], s_p: f32, k: f32, s:
     f1 * f2
 }
 
-/// Composite fill scale over ALL channels (L04-2): the minimal extra zoom
-/// that keeps every channel's edge source sample inside the frame. The
-/// GREEN map is bounded on the edge band by construction
-/// ([`profile_fill_scale`] divides the spline; the manual term is exactly 1
-/// at r=1), but CA MULTIPLIES red/blue past it — a ca knot above 1 sent
-/// edge samples outside the source, where [`sample_bilinear_ch`] clamps and
-/// smears them into a radial plateau along the border (worst in the CA-only
-/// case, where s_p was hard-wired to 1 and no fill existed at all; present
-/// with distortion ON too, since the fill drives green to exactly 1 at the
-/// worst edge radius and CA multiplies past it).
-///
-/// Evaluated on the SAME [`LUT_N`] node grid the render interpolates over —
-/// the rendered per-channel factor is piecewise linear with node values
-/// `base[i]·ca(rn_i)`, so its band maximum sits AT a node and this bound is
-/// exact for the resampler. Returns ≥ 1.0, and exactly 1.0 whenever CA is
-/// off or no channel overshoots — those paths divide by 1.0 and stay
-/// bit-identical. All four map consumers (RGB render, RGBA overlay,
-/// forward/inverse norm) divide by the SAME value, so masks, the colour
-/// dropper and clone points cannot drift against the pixels (C2).
-pub(super) fn geometry_fill_scale(
-    profile: &crate::recipe::LensProfile,
-    amount: f32,
-    dims: (f32, f32),
-) -> f32 {
-    let ca_on = profile.ca_on && !profile.ca_r.is_empty() && !profile.ca_b.is_empty();
-    if !ca_on {
-        return 1.0;
-    }
-    let dist_on = profile.distortion_on && !profile.distortion.is_empty();
-    let (w, h) = dims;
-    let (k, s) = if amount.abs() < 1e-3 { (0.0, 1.0) } else { distort_params(amount) };
-    let dist_knots: &[f32] = if dist_on { &profile.distortion } else { &[] };
-    let s_p = if dist_on { profile_fill_scale(&profile.distortion, dims) } else { 1.0 };
-    let rmin = (w.min(h) / (w * w + h * h).sqrt().max(1e-6)).clamp(0.0, 1.0);
-    // Start at the last node ≤ rmin: linear interpolation between nodes
-    // means the band maximum is covered by the nodes bracketing it.
-    let start = ((rmin * (LUT_N - 1) as f32).floor() as usize).min(LUT_N - 1);
-    let mut m = 1.0f32;
-    for i in start..LUT_N {
-        let rn = i as f32 / (LUT_N - 1) as f32;
-        let g = lens_geom_factor(rn, dist_knots, s_p, k, s);
-        let ca = profile_knot_interp(&profile.ca_r, rn)
-            .max(profile_knot_interp(&profile.ca_b, rn));
-        m = m.max(g * ca);
-    }
-    m
-}
-
 /// Bilinear sample of an RGBA8 buffer; out-of-frame reads are TRANSPARENT —
 /// an overlay raster must vanish where the remap leaves the source, not
 /// smear its edge pixels (the RGB16 paths clamp instead, correct for photos).
@@ -399,9 +345,8 @@ fn sample_bilinear_rgba8(src: &image::RgbaImage, x: f32, y: f32) -> image::Rgba<
 /// Alpha-preserving twin of [`apply_lens_geometry`] for UI overlay rasters
 /// (the paint canvas): the RGB16 photo path flattens transparency to opaque,
 /// which turned the whole canvas into a red wash the moment any geometry was
-/// active. Green map only — an overlay needs no chromatic refinement, but it
-/// MUST carry the composite CA fill scale (L04-2): the render's green map is
-/// zoomed by 1/fill, and an overlay skipping that drifts off the pixels.
+/// active. Green map only — an overlay needs no chromatic refinement, and CA
+/// does not move the green map (L04-2, [`channel_luts`]).
 pub fn apply_lens_geometry_rgba(
     src: &image::RgbaImage,
     profile: &crate::recipe::LensProfile,
@@ -413,15 +358,10 @@ pub fn apply_lens_geometry_rgba(
     if src.width() == 0 || src.height() == 0 {
         return src.clone();
     }
-    let (w, h) = (src.width() as f32, src.height() as f32);
-    let fill = geometry_fill_scale(profile, amount, (w, h));
-    // fill > 1 means the RGB render moved every pixel even with distortion
-    // off — the overlay must move with it, so the early-out gains the
-    // fill==1 condition.
-    if !dist_on && amount.abs() < 1e-3 && fill == 1.0 {
+    if !dist_on && amount.abs() < 1e-3 {
         return src.clone();
     }
-    let inv_fill = 1.0 / fill;
+    let (w, h) = (src.width() as f32, src.height() as f32);
     let (k, s) = if amount.abs() < 1e-3 { (0.0, 1.0) } else { distort_params(amount) };
     let dist_knots: &[f32] = if dist_on { &profile.distortion } else { &[] };
     let s_p = if dist_on { profile_fill_scale(&profile.distortion, (w, h)) } else { 1.0 };
@@ -435,7 +375,7 @@ pub fn apply_lens_geometry_rgba(
         for x in 0..ow {
             let dx = x as f32 - cx;
             let rn = ((dx * dx + dy * dy).sqrt() / rr).clamp(0.0, 1.0);
-            let f = lens_geom_factor(rn, dist_knots, s_p, k, s) * inv_fill;
+            let f = lens_geom_factor(rn, dist_knots, s_p, k, s);
             orow[x * 4..x * 4 + 4]
                 .copy_from_slice(&sample_bilinear_rgba8(src, cx + dx * f, cy + dy * f).0);
         }
@@ -473,9 +413,8 @@ pub fn rotate_straighten_rgba(src: &image::RgbaImage, deg: f32) -> image::RgbaIm
 
 /// Corrected-frame normalised point → ORIGINAL-frame normalised point through
 /// the COMPOSED geometry (profile distortion + manual amount — the green map).
-/// CA's chromatic split stays render-only, but its composite FILL SCALE moves
-/// the shared map by a scalar (L04-2) — skipping it here drifted masks, the
-/// dropper and clone points off the rendered pixels. Falls back to
+/// CA's chromatic split stays render-only and moves only red and blue
+/// (L04-2, [`channel_luts`]), so this map ignores it. Falls back to
 /// [`distort_norm`]'s exact math when the whole map is the manual one.
 pub fn lens_geom_norm(
     nx: f32,
@@ -485,8 +424,7 @@ pub fn lens_geom_norm(
     amount: f32,
 ) -> (f32, f32) {
     let dist_on = profile.distortion_on && !profile.distortion.is_empty();
-    let fill = geometry_fill_scale(profile, amount, dims);
-    if !dist_on && fill == 1.0 {
+    if !dist_on {
         return distort_norm(nx, ny, dims, amount);
     }
     let (w, h) = dims;
@@ -496,7 +434,7 @@ pub fn lens_geom_norm(
     let rr = (0.5 * (w * w + h * h).sqrt()).max(1e-6);
     let (dx, dy) = ((nx - 0.5) * w, (ny - 0.5) * h);
     let rn = (dx * dx + dy * dy).sqrt() / rr;
-    let f = lens_geom_factor(rn, dist_knots, s_p, k, s) / fill;
+    let f = lens_geom_factor(rn, dist_knots, s_p, k, s);
     ((dx * f) / w.max(1e-6) + 0.5, (dy * f) / h.max(1e-6) + 0.5)
 }
 
@@ -513,10 +451,7 @@ pub fn lens_ungeom_norm(
     amount: f32,
 ) -> (f32, f32) {
     let dist_on = profile.distortion_on && !profile.distortion.is_empty();
-    // Same composite fill as the forward map (L04-2) — inverting a map the
-    // render did not draw would un-roundtrip every C2 consumer.
-    let fill = geometry_fill_scale(profile, amount, dims);
-    if !dist_on && fill == 1.0 {
+    if !dist_on {
         return undistort_norm(nx, ny, dims, amount);
     }
     let (w, h) = dims;
@@ -534,7 +469,7 @@ pub fn lens_ungeom_norm(
     // barrel fix — folds back (the same shape undistort_norm's u_max clamp
     // handles). Scan for the peak first; originals beyond the reachable
     // maximum clamp there and land honestly off-screen, like undistort_norm.
-    let fwd = |rn: f32| rn * lens_geom_factor(rn, dist_knots, s_p, k, s) / fill;
+    let fwd = |rn: f32| rn * lens_geom_factor(rn, dist_knots, s_p, k, s);
     let mut hi = 2.0f32;
     let mut peak = 0.0f32;
     for i in 1..=256 {
@@ -581,24 +516,24 @@ pub(super) fn channel_luts(profile: &crate::recipe::LensProfile, amount: f32, di
     let (k, s) = if amount.abs() < 1e-3 { (0.0, 1.0) } else { distort_params(amount) };
     let dist_knots: &[f32] = if dist_on { &profile.distortion } else { &[] };
     let s_p = if dist_on { profile_fill_scale(&profile.distortion, dims) } else { 1.0 };
-    // Composite CA fill (L04-2): every channel's LUT divides by ONE scalar
-    // (≥ 1; exactly 1 when no channel overshoots, keeping those paths
-    // bit-identical), so a ca knot above 1 zooms the whole frame in by up
-    // to that knot instead of sending red/blue edge samples outside the
-    // source, where the clamping sampler smeared them into a radial band.
-    // Per-channel renormalisation is NOT an option — dividing ca_r by its
-    // own max would cancel the near-constant correction it encodes.
-    let fill = geometry_fill_scale(profile, amount, dims);
+    // L04-2 (v1.17.0): each channel moves by its own knots and nothing else.
+    // Until v1.16.0 a ca knot above 1 zoomed ALL THREE channels by one
+    // composite fill scale so that no red or blue edge sample left the
+    // source. Camera Raw does not: on p42, whose CA knots pass 1, its
+    // render keeps green and red in place to 0.03 px and moves only blue,
+    // while the fill zoomed every channel by up to 0.9 px at the corners;
+    // without the fill the engine lands on Camera Raw's channels to 0.08 px.
+    // A red or blue sample past the edge reads the clamped edge pixel.
     let base: Vec<f32> =
         (0..LUT_N).map(|i| lens_geom_factor(i as f32 / (LUT_N - 1) as f32, dist_knots, s_p, k, s)).collect();
     let chan = |knots: &[f32]| -> Vec<f32> {
         if !ca_on || knots.is_empty() {
-            return base.iter().map(|f| f / fill).collect();
+            return base.clone();
         }
         (0..LUT_N)
             .map(|i| {
                 let rn = i as f32 / (LUT_N - 1) as f32;
-                base[i] * profile_knot_interp(knots, rn) / fill
+                base[i] * profile_knot_interp(knots, rn)
             })
             .collect()
     };

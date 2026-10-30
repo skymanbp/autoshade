@@ -1992,10 +1992,18 @@ frame.
   band of Camera Raw's own log2 map: p42 [−12, −10) +1.83 → +0.96 st, zero
   pixels 0.75 → 7.50 % (Camera Raw 13.72 %); p41 (CA only) +0.33 → +0.28 st,
   zero pixels 0.05 → 0.76 % (0.77 %), and 0.67 → 4.97 % (5.27 %), 4.38 →
-  17.45 % (18.13 %) in the two bands below. Not closed: p42's CA knots pass 1,
-  and the composite CA fill zooms all three channels by up to 0.9 px at the
-  corners where Camera Raw moves only blue (green and red in place to 0.03 px);
-  the remaining p41 lift is not the kernel (bicubic +0.27, Lanczos-3 +0.26 st).
+  17.45 % (18.13 %) in the two bands below. The remaining p41 lift is not the
+  kernel (bicubic +0.27, Lanczos-3 +0.26 st).
+- CA moves each channel by its own knots alone (L04-2, v1.17.0). Until
+  v1.16.0 a CA knot above 1 zoomed all three channels by one composite fill
+  scale so no red or blue edge sample left the frame; on p42, whose CA knots
+  pass 1, that moved every channel by up to 0.9 px at the corners, where Camera
+  Raw moves only blue (green and red in place to 0.03 px). Without it the
+  engine lands on Camera Raw's channels to 0.08 px, and p42 [−12, −10) goes
+  +0.96 → +0.64 st, zero pixels 7.50 → 11.27 % (Camera Raw 13.72 %); [−10, −8)
+  +0.61 → +0.33 st, 2.20 → 4.64 % (4.97 %). A red or blue sample past the edge
+  reads the clamped edge pixel; CA never moves the green map the masks and
+  overlays follow (`render::geometry_moves_frame`).
 
 ### Source
 

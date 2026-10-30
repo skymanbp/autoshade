@@ -862,8 +862,8 @@ impl AutoShadeApp {
             };
             let (dims, deg, dist) = self.geom_ctx();
             let vg = geom_to_view(target, dims, deg, &dist);
-            // Includes the CA composite fill (Codex AL F1): the true
-            // outline must warp whenever the pixels do.
+            // THE shared predicate (Codex AL F1): the true outline must
+            // warp whenever the pixels' green map does.
             let geom_active =
                 autoshade::render::geometry_moves_frame(&dist.profile, dist.amount);
             // `LocalAdjustment::net_inverted` against the geometry actually on
@@ -1947,11 +1947,6 @@ impl AutoShadeApp {
         // never moves an overlay), so it joins the transform key: switching
         // it must re-blit the canvas (knot data only changes per photo, and
         // opening a photo resets the texture anyway).
-        // Profile-side geometry beyond the manual amount: distortion OR
-        // the CA composite fill (Codex AL F1) - a CA-only overshoot moves
-        // the photo, and the paint overlay must ride the SAME map or
-        // strokes drift off the pixels they cover. The bool keys the
-        // cache too, so toggling CA re-blits.
         // BOTH profile toggles key the cache (L13-9): collapsed to one
         // bool, "distortion + CA on → turn one off" still compared equal and
         // the overlay kept the OLD warp — strokes floated off their pixels.

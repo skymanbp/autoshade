@@ -129,7 +129,7 @@ pub(crate) use geometry::{profile_knot_interp};
 use geometry::{apply_lens_geometry_linear, channel_luts};
 use geometry::{profile_fill_scale};
 #[cfg(test)]
-use geometry::{geometry_fill_scale, lens_geom_factor};
+use geometry::{lens_geom_factor};
 pub(crate) use luma::{bilinear_plane, gauss_blur_plane, neighbours4};
 // The zoned fit's detail stage reads the two bands the local Texture and
 // Clarity passes move, with this engine's own blur and radii.

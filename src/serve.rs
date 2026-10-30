@@ -1755,13 +1755,9 @@ fn view_for_mapping(raw: &Path, view: Option<&EditRecipe>) -> Option<EditRecipe>
 /// Does this viewing recipe transform the displayed frame (straighten / lens
 /// geometry)? Crop deliberately excluded — the web preview never crops.
 fn view_geometry_active(rec: &EditRecipe) -> bool {
-    // geometry_moves_frame, not a local distortion check (Codex AL F1):
-    // a CA-only profile with knots above 1 zooms the shared frame by the
-    // composite fill (L04-2), so a browser-painted mask unwarped as
-    // identity would land on the wrong pixels.
-    // The COMPOSED profile (R25 B3): manual CA rides the same per-channel
-    // knots, so a manual value that pushes a channel past 1 zooms the frame
-    // exactly like a profile knot does.
+    // geometry_moves_frame, not a local distortion check (Codex AL F1), on
+    // the COMPOSED profile (R25 B3): one predicate decides for every
+    // consumer whether the shared green map moves.
     rec.straighten_deg != 0.0
         || render::geometry_moves_frame(&render::geometry_profile(rec), rec.lens_distortion)
 }
