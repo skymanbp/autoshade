@@ -50,13 +50,15 @@ fn the_base_part_is_the_profile_stage_and_nothing_after_it() {
 /// (v1.17.0: a measured Sony body now scales its raw by Camera Raw's level,
 /// 16383 not 15360, so every render of it is 0.096 EV darker): the era rule
 /// is about what a saved recipe means, not about the raw's scale, so the
-/// digest follows the decode. Re-read a third time for the signed black
-/// level (`develop_cfa_signed`, v1.17.0), which moves this render where the
-/// sensor sits near its black and only there: against the build before it
-/// (CLI, 1000 px, 16-bit) 1.77 % of the pixels change, 70 % of those encoded
-/// below 0.02 and 14 % of those in 0.02–0.05, against 0.002 % above 0.5 (the
-/// demosaic's neighbourhood of a site below the black). Env-gated on the
-/// corpus (`p39.arw`).
+/// digest follows the decode. Re-read a third time, on the merge of that
+/// white level with the signed black level (`develop_cfa_signed`, v1.17.0),
+/// which moves this render where the sensor sits near its black and only
+/// there: against the build before it (CLI, 1000 px, 16-bit) 1.77 % of the
+/// pixels change, 70 % of those encoded below 0.02 and 14 % of those in
+/// 0.02–0.05, against 0.002 % above 0.5 (the demosaic's neighbourhood of a
+/// site below the black). Unchanged by the merge of rel1170-vigca (the
+/// measured exposure transfer, `CameraStart`, `UnderTone`): this recipe names
+/// no profile, so no profile stage runs. Env-gated on the corpus (`p39.arw`).
 ///
 /// MUTATION: let `starting_curve` drop a curve on a recipe that names no
 /// profile, or develop a neutral part through anything but the neutral recipe.

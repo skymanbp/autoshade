@@ -648,9 +648,30 @@ pub(crate) fn chroma_nr(data: &mut [[f32; 3]], w: usize, h: usize, p: &ChromaNrP
             let r = l + cr + (cr_q - cr) * blend;
             let b = l + cb + (cb_q - cb) * blend;
             let g = (l - 0.299 * r - 0.114 * b) / 0.587;
-            *px = [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)];
+            *px = chroma_into_range(l, [r, g, b]);
         }
     });
+}
+
+/// A rebuilt pixel brought back into `[0, 1]` along its colour difference,
+/// keeping its luma `l`: the chroma `px − l` is scaled by the largest factor
+/// in `[0, 1]` that keeps every channel in range (the grey `[l; 3]` is the
+/// limit). Clamping each channel instead moves the luma — a pure black whose
+/// neighbours lend it colour asks for one negative channel, and cutting only
+/// that one lifts it off 0 (measured on a night frame: all 2.0 % of its
+/// pixels at luma 0 left 0 under the clamp at Color 25).
+fn chroma_into_range(l: f32, px: [f32; 3]) -> [f32; 3] {
+    let l = l.clamp(0.0, 1.0);
+    let mut t = 1.0f32;
+    for v in px {
+        let c = v - l;
+        if v > 1.0 {
+            t = t.min((1.0 - l) / c);
+        } else if v < 0.0 {
+            t = t.min(l / -c);
+        }
+    }
+    px.map(|v| (l + (v - l) * t).clamp(0.0, 1.0))
 }
 
 #[cfg(test)]

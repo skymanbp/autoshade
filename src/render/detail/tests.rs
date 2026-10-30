@@ -214,6 +214,38 @@ fn colour_nr_removes_colour_noise_and_leaves_luma() {
     assert!(drift < 1e-4, "luma is not colour noise: {drift}");
 }
 
+/// Colour NR keeps a pure black black and every pixel's luma, at Lightroom's
+/// default Color 25 and at 100: half the frame exact zeros among dark,
+/// strongly coloured pixels (their neighbours lend a zero colour, which needs
+/// a negative channel) and a band of bright saturated ones (which needs a
+/// channel above 1).
+///
+/// MUTATION: clamp each rebuilt channel to `[0, 1]` again.
+#[test]
+fn colour_nr_keeps_pure_black_and_luma_out_of_range() {
+    for amount in [0.25, 1.0] {
+        let mut d = frame(64, 64, |x, y| {
+            if y >= 48 {
+                [0.98, 0.9 + 0.05 * hashed(41, x, y), 0.2]
+            } else if hashed(31, x, y) > 0.0 {
+                [0.0; 3]
+            } else {
+                [0.06 + 0.03 * hashed(32, x, y), 0.004, 0.08]
+            }
+        });
+        let luma_before: Vec<f32> = d.iter().map(luma601).collect();
+        let zeros = |d: &[[f32; 3]]| d.iter().filter(|p| **p == [0.0; 3]).count();
+        let before = zeros(&d);
+        assert!(before > 64 * 48 / 4, "the fixture holds zeros: {before}");
+        let p = ChromaNrParams { amount, detail: 0.5, smoothness: 0.5 };
+        chroma_nr(&mut d, 64, 64, &p, FilmScale::NATIVE);
+        assert_eq!(zeros(&d), before, "Color {}: a pure black left 0", amount * 100.0);
+        let drift =
+            d.iter().zip(&luma_before).map(|(p, l)| (luma601(p) - l).abs()).fold(0.0, f32::max);
+        assert!(drift < 1e-5, "Color {}: luma moved {drift}", amount * 100.0);
+    }
+}
+
 #[test]
 fn colour_nr_detail_keeps_a_colour_edge_that_a_luma_edge_draws() {
     // Left: dark red; right: light blue. The luma step marks the colour edge.

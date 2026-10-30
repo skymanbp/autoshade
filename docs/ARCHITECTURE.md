@@ -2209,7 +2209,8 @@ names no camera profile, v1.17.0 — composed into one table; on a recipe that
 names one, Camera Raw's measured law in five passes, `render/tone_cr.rs`:
 Highlights and Shadows first — Highlights a local law on two edge-aware
 bases of the frame's luminance keyed to its mean, Shadows a gain on linear
-luminance set by the frame's spread on a 768-cell map — then exposure by
+luminance set by the frame's spread on a 768-cell map, against an anchor
+that a power mean of the map puts above its mean — then exposure by
 Adobe's channel rule,
 Contrast, Whites and Blacks, the Look's baked curve, the parametric and
 point curves) → **the B&W treatment's grey mix** when the photo is black and white
@@ -2354,7 +2355,9 @@ amplifies what the smoothers were asked to remove:
   `B − Y` from a luma-guided fast guided filter (He & Sun 2015) on a subsampled
   grid, assembled against full-resolution luma so colour stops at the edges
   luma draws; **Detail** tightens that edge threshold, **Smoothness** widens
-  the offset term that carries low-frequency mottling. Luma is untouched.
+  the offset term that carries low-frequency mottling. Luma is untouched,
+  exactly: a rebuilt pixel outside `[0, 1]` has its colour difference scaled
+  toward its luma rather than each channel clamped, so a pure black stays 0.
   Measured against Camera Raw at Color 25 / 100 with its constants as they
   were: R² 0.95–0.97 on the colour-difference move.
 

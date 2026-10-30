@@ -224,7 +224,14 @@ impl AutoShadeApp {
     /// draw — once per script per session. Runs over the CURRENT gallery
     /// (folder-open granularity); pure classification, no file I/O.
     pub(crate) fn disclose_undrawable_names(&mut self) {
-        let installed = installed_scripts();
+        self.disclose_undrawable_names_given(installed_scripts());
+    }
+
+    /// [`Self::disclose_undrawable_names`] against an explicit set of
+    /// installed scripts. The session's set is process-wide (filled once by
+    /// `install_fonts`), so a test that reads it sees whatever another test
+    /// in the same process installed; tests pass their own.
+    pub(crate) fn disclose_undrawable_names_given(&mut self, installed: &[&'static str]) {
         let stems: Vec<String> = self
             .gallery
             .iter()
