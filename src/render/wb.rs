@@ -426,21 +426,26 @@ const ENGINE_TINT_GREEN: f32 = 0.20;
 /// The sRGB working space's [`profile::UnderTone`] at a camera start, built
 /// once per start: the fit asks [`WbLaw::gains`] thousands of times per
 /// solve, and a process meets a handful of starts (one per body and white
-/// balance headroom).
+/// balance headroom). What an under-tone holds depends on the start AND on
+/// whether this process has registered the start's tail yet
+/// ([`profile::tail_resolves`]): built before the profile is read, it is the
+/// fallback without the profile's look tables. So that is part of the key —
+/// a fallback is never handed out once the tail is registered.
 fn srgb_under_tone(start: crate::recipe::CameraStart) -> std::sync::Arc<profile::UnderTone> {
     use std::sync::{Arc, Mutex, OnceLock};
-    type Cache = Mutex<Vec<(crate::recipe::CameraStart, Arc<profile::UnderTone>)>>;
+    type Cache = Mutex<Vec<((crate::recipe::CameraStart, bool), Arc<profile::UnderTone>)>>;
     static UNDER: OnceLock<Cache> = OnceLock::new();
+    let key = (start, profile::tail_resolves(start.tables));
     let cache = UNDER.get_or_init(Cache::default);
     let mut cache = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((_, u)) = cache.iter().find(|(s, _)| *s == start) {
+    if let Some((_, u)) = cache.iter().find(|(k, _)| *k == key) {
         return Arc::clone(u);
     }
     let u = Arc::new(profile::UnderTone::new(ExportColorSpace::Srgb, start));
     if cache.len() >= 16 {
         cache.remove(0);
     }
-    cache.push((start, Arc::clone(&u)));
+    cache.push((key, Arc::clone(&u)));
     u
 }
 
@@ -574,5 +579,47 @@ pub(super) fn ramp(e0: f32, e1: f32, x: f32) -> f32 {
         if x < e0 { 0.0 } else { 1.0 }
     } else {
         smoothstep(e0, e1, x)
+    }
+}
+
+#[cfg(test)]
+mod under_tone_cache_tests {
+    use super::*;
+
+    /// [`srgb_under_tone`] asked for a start before the process has
+    /// registered its tail gets the fallback (no look table), and asked again
+    /// after the registration gets the start's own tail, the same as an
+    /// under-tone built fresh — not the fallback it cached first. The profile
+    /// carries a look table that halves saturation, so the two differ on a
+    /// warm colour.
+    ///
+    /// MUTATION: key the cache on the start alone again.
+    #[test]
+    fn the_under_tone_cache_uses_the_look_tables_once_the_profile_is_registered() {
+        let table = crate::dcp::Table { hue: 2, sat: 2, val: 1, srgb_value: false, data: vec![[0.0, 0.5, 1.0]; 4] };
+        let p = crate::dcp::Profile {
+            name: "Cache test".into(),
+            unique_model: "TEST-CACHE".into(),
+            illuminant: [Some(17), Some(21)],
+            color_matrix: [None, None],
+            forward_matrix: [None, None],
+            hue_sat_map: [None, None],
+            look_table: Some(table),
+            // A curve no other test registers, so the key is this test's.
+            tone_curve: vec![[0.0, 0.0], [0.5, 0.4713], [1.0, 1.0]],
+            baseline_exposure_offset: 0.0,
+            has_third_illuminant: false,
+        };
+        let key = profile::tail_key(&p, None, None);
+        profile::forget_tail(key);
+        let start = crate::recipe::CameraStart { ev: 0.0, headroom: 0.0, tables: key };
+        let warm = [0.6f32, 0.3, 0.1];
+        let before = srgb_under_tone(start).undo(warm);
+        assert_eq!(profile::tail_key(&p, None, None), key, "premise: the same profile registers the same key");
+        let after = srgb_under_tone(start).undo(warm);
+        let fresh = profile::UnderTone::new(ExportColorSpace::Srgb, start).undo(warm);
+        assert_eq!(after, fresh, "after the registration the cache hands out the start's own tail");
+        let apart = before.iter().zip(&fresh).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+        assert!(apart > 0.01, "premise: the fallback differs from the tail with its look table ({apart})");
     }
 }

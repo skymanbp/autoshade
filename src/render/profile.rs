@@ -498,6 +498,22 @@ fn tail_registry() -> &'static TailRegistry {
     R.get_or_init(Default::default)
 }
 
+/// Whether an [`UnderTone`] built now for a start keyed `tables` would carry
+/// that start's own tail: 0 (Adobe's default curve, no look table) always
+/// does; any other key only once a stage has registered it in this process.
+/// Until then [`UnderTone::new`] falls back to the default tail, and a cache
+/// of under-tones must not keep that fallback past the registration.
+pub(crate) fn tail_resolves(tables: u64) -> bool {
+    tables == 0 || tail_registry().lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains_key(&tables)
+}
+
+/// Take `key` out of this process's registry, so a test can stand where a
+/// process stands before the profile is read.
+#[cfg(test)]
+pub(crate) fn forget_tail(key: u64) {
+    tail_registry().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
+}
+
 /// Register a stage's tail and answer its key: FNV-1a over the tables' own
 /// numbers, so the same tables answer the same key in every process (one
 /// look table hashes as it did before the creative table stacked). 0 is
