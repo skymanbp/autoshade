@@ -33,12 +33,11 @@
 //!   no mean Lab bias in the mask's core, then one form per sign).
 //! - **Hue** turns hues by the slider value in degrees, in the profile
 //!   stage's reference primaries ([`hue_px`]).
-//! - **Saturation** above 0 scales the HSV saturation in the reference
-//!   primaries with V held ([`saturate_px`]); below 0, the curves and the
-//!   colour gains keep the mask stage's model (a negative Saturation's chroma
-//!   scale about the luma is Camera Raw's, measured: factor 0.508 at −50,
-//!   0.002 at −100). The airlight Dehaze of that stage does not run on this
-//!   law.
+//! - **Saturation** scales the colour about a held quantity in the reference
+//!   primaries, linear light ([`saturate_px`]): above 0 the HSV saturation
+//!   with V (the largest channel) held, below 0 toward the HSL lightness
+//!   (mean of the largest and smallest channel) by `1 + s`. The airlight
+//!   Dehaze of the mask stage does not run on this law.
 
 use super::*;
 use super::tone_cr::{camera_raw_unstart, table_at, DEHAZE_CHROMA, TABLE_N};
@@ -530,21 +529,31 @@ pub(super) fn apply_local_white(
 const L_SAT_A: f32 = 0.288;
 const L_SAT_B: f32 = 0.1701;
 
-/// A positive local Saturation `s` (0..1) on this law: the HSV saturation of
-/// the colour in the profile stage's reference primaries (ProPhoto's), linear
-/// light, scaled by [`L_SAT_A`]'s form with V (the largest channel) held —
-/// the HSV the camera profile's own tables use. Measured against the chroma
-/// scale about the luma (the negative side's law, and this stage's before):
-/// that one keeps the lightness, Camera Raw's positive Saturation does not
-/// (core dL* −0.10 / −0.23 / −0.41 / −0.70 at +25 … +100, a blue sky's red
-/// and green falling under a held blue); predicted from Camera Raw's own
-/// no-change render, mask core ΔE / mean dL* at +100 are 1.55 / +0.19 this
-/// way, 1.78 / +0.71 the other.
+/// A local Saturation `s` (−1..1) on this law, in the profile stage's
+/// reference primaries (ProPhoto's), linear light: each channel moves about a
+/// held value `H` by a factor, `H + (c − H)·f`.
+///
+/// Above 0, `H` is V (the largest channel, the HSV the camera profile's own
+/// tables use) and `f` is [`L_SAT_A`]'s form. Measured against the chroma
+/// scale about the luma: that one keeps the lightness, Camera Raw's positive
+/// Saturation does not (core dL* −0.10 / −0.23 / −0.41 / −0.70 at +25 …
+/// +100, a blue sky's red and green falling under a held blue); predicted
+/// from Camera Raw's own no-change render, mask core ΔE / mean dL* at +100
+/// are 1.55 / +0.19 this way, 1.78 / +0.71 the other.
+///
+/// Below 0, `H` is the HSL lightness, `(max + min) / 2`, and `f = 1 + s`.
+/// Measured the same way on −25 / −50 / −75 / −100 (best factor 0.756 /
+/// 0.504 / 0.251 / 0.000): core ΔE 0.48 / 0.54 / 0.53 / 0.12 and mean dL* of
+/// the warm pixels (hue 20–90°, C* > 8) +0.07 / +0.13 / +0.18 / +0.22; with V
+/// held 0.58 … 1.05 and +0.75 … +3.15, with the luminance held 0.54 … 0.66
+/// and +0.37 … +1.49, the chroma scale about the luma 0.54 … 0.68 and
+/// +0.33 … +1.49 — a desaturated warm colour lands at its HSL lightness,
+/// not at its luma.
 pub(super) fn saturate_px(px: [f32; 3], s: f32, under: &profile::UnderTone, dec: &[f32], enc: &[f32]) -> [f32; 3] {
     let p = under.to_reference(px.map(|v| sample_lut(dec, v))).map(|v| v.clamp(0.0, 1.0));
-    let f = 1.0 + s * (L_SAT_A + L_SAT_B * s);
-    let v = p[0].max(p[1]).max(p[2]);
-    let q = p.map(|c| (v - (v - c) * f).max(0.0));
+    let (mx, mn) = (p[0].max(p[1]).max(p[2]), p[0].min(p[1]).min(p[2]));
+    let (held, f) = if s >= 0.0 { (mx, 1.0 + s * (L_SAT_A + L_SAT_B * s)) } else { (0.5 * (mx + mn), 1.0 + s.max(-1.0)) };
+    let q = p.map(|c| (held + (c - held) * f).max(0.0));
     under.to_working(q).map(|c| sample_lut(enc, c.clamp(0.0, 1.0)))
 }
 
@@ -630,5 +639,38 @@ mod tests {
         assert!(grey.iter().all(|&c| (c - 0.4).abs() < 4e-3), "a grey: {grey:?}");
         let turned = hue_px(red, 120.0, &under, dec, enc);
         assert!(turned[1] > turned[0], "+120° takes red toward green: {turned:?}");
+    }
+    /// A local Saturation keeps its held quantity in the reference primaries,
+    /// linear light: below 0 the HSL lightness `(max + min) / 2`, reached at
+    /// −100 (Camera Raw's best factor on the p39 radial mask: 0.756 / 0.504 /
+    /// 0.251 / 0.000 at −25 … −100, `1 + s` within 0.006); above 0 the
+    /// largest channel, with the measured factor at +100 (1.455, the form
+    /// within 0.009).
+    ///
+    /// MUTATION: hold the luma or V for a negative value, or scale a negative
+    /// one by the positive side's quadratic.
+    #[test]
+    fn the_local_saturation_holds_hsl_lightness_below_zero_and_v_above() {
+        let under = profile::UnderTone::new(ExportColorSpace::Srgb, crate::recipe::CameraStart::default());
+        let (dec, enc) = transfer_luts();
+        let reference = |px: [f32; 3]| under.to_reference(px.map(|v| sample_lut(dec, v)));
+        let warm = [0.62f32, 0.50, 0.38];
+        let p0 = reference(warm);
+        let (mx, mn) = (p0[0].max(p0[1]).max(p0[2]), p0[0].min(p0[1]).min(p0[2]));
+        let grey = reference(saturate_px(warm, -1.0, &under, dec, enc));
+        for c in grey {
+            assert!((c - 0.5 * (mx + mn)).abs() < 3e-3, "−100 lands at the HSL lightness: {grey:?} vs {}", 0.5 * (mx + mn));
+        }
+        for (s, f) in [(-0.25f32, 0.756f32), (-0.5, 0.504), (-0.75, 0.251)] {
+            let q = reference(saturate_px(warm, s, &under, dec, enc));
+            let held = 0.5 * (mx + mn);
+            let got = (q[0] - held) / (p0[0] - held);
+            assert!((got - f).abs() < 0.01, "{s}: factor {got} vs Camera Raw's {f}");
+        }
+        let q = reference(saturate_px(warm, 1.0, &under, dec, enc));
+        let v = q[0].max(q[1]).max(q[2]);
+        assert!((v - mx).abs() < 3e-3, "+100 holds the largest channel: {q:?}");
+        let got = (mx - q[2]) / (mx - p0[2]);
+        assert!((got - 1.455).abs() < 0.01, "+100: factor {got} vs Camera Raw's 1.455");
     }
 }
