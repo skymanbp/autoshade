@@ -372,38 +372,102 @@ pub(super) fn attach_colour_field(
         return;
     }
     let budget = fit::FitBudget::for_strength(strength);
-    let (solved, admitted, read, paired) =
-        admit_cells(&current, &target_pixels, w, h, report, pass_a, budget.field_gain, layout);
-    // Rendered from the field the recipe will CARRY — rounded the way
-    // `ColourField::round` stores it — so the do-no-harm verdicts and
-    // `FIELD_ATTACHED`'s numbers describe the render a reopen produces.
-    let mut field = solved.as_recipe_field();
-    field.round();
-    let after = {
-        let mut out = current.clone();
-        render::apply_colour_field(&mut out, w as usize, h as usize, Some(&field));
-        out
+    // The field runs LAST, on the render every attached zone has already
+    // moved, so it is solved on what those zones left. It is still a smooth
+    // field over the whole frame, and its solve weighs pixels the way the
+    // frame ruler does — not by any zone's own ruler — so it can pay for the
+    // frame inside a zone the zone stage already settled (p42 from RAW: a tile
+    // taken 0.080 -> 0.105, and the whole field given back for it). A zone the
+    // field regresses is therefore PINNED and the field solved again: inside
+    // the zone's coverage the solve's target is the zone's own current render,
+    // at full weight, so the field is asked to leave the settled zone where it
+    // is and to carry the residual around it. The per-zone check then judges
+    // the re-solve exactly as it judged the first; a zone it still regresses
+    // after being pinned gives the field back, as before. One pin per attached
+    // mask at most, so the loop ends.
+    //
+    // Pinned only once a zone regresses, never every zone up front: the field
+    // does real work INSIDE settled zones too. Measured on the night pair from
+    // its master at 0.85, every attached zone pinned before the first solve
+    // reads deltaE 11.15 and ripple 7.40 against 5.11 and 2.45 with no pin,
+    // and the second solve (about double the stage's time) is paid only on the
+    // fits that need it.
+    let n = current.len();
+    let mut pin = vec![0.0f32; n];
+    // (label, the zone before the field, the zone under the first solve)
+    let mut pinned: Vec<(String, f32, f32)> = Vec::new();
+    let mut first = Some(pass_a);
+    let (solved, admitted, read, paired, field, err_with, after) = loop {
+        let solve_target: Vec<[f32; 3]> = (0..n)
+            .map(|i| std::array::from_fn(|c| target_pixels[i][c] + pin[i] * (current[i][c] - target_pixels[i][c])))
+            .collect();
+        // The pinned zone at full weight, for BOTH solves: pass A here and the
+        // support-free pass B `admit_cells` hands most cells to. A pin that
+        // reached pass A only left every admitted cell solved on the zone's
+        // old, low weight, and the re-solve barely moved the zone.
+        let mut evidence = report.evidence.clone();
+        for (weight, p) in evidence.source_weights.iter_mut().zip(&pin) {
+            *weight = weight.max(*p);
+        }
+        let pass = if let Some(pass) = first.take() {
+            pass
+        } else {
+            let Some(pass) = LocalField::solve(&current, &solve_target, w, h, &evidence) else {
+                note(report, crate::rationale::keys::FIELD_UNSOLVED, vec![("stage", "attach".into())]);
+                return;
+            };
+            pass
+        };
+        let (solved, admitted, read, paired) =
+            admit_cells(&current, &solve_target, w, h, &evidence, pass, budget.field_gain, layout);
+        // Rendered from the field the recipe will CARRY — rounded the way
+        // `ColourField::round` stores it — so the do-no-harm verdicts and
+        // `FIELD_ATTACHED`'s numbers describe the render a reopen produces.
+        let mut field = solved.as_recipe_field();
+        field.round();
+        let after = {
+            let mut out = current.clone();
+            render::apply_colour_field(&mut out, w as usize, h as usize, Some(&field));
+            out
+        };
+        let err_with = fit::look_err_with_evidence(&after, &target_pixels, &report.evidence);
+        if err_with >= report.err_after {
+            note(report, crate::rationale::keys::FIELD_REGRESSED, vec![
+                ("before", format!("{:.6}", report.err_after)),
+                ("after", format!("{:.6}", err_with)),
+            ]);
+            return;
+        }
+        // …and the do-no-harm the FRAME ruler cannot do. A field that pays for
+        // the sky out of the land wins on the frame and loses the picture, and
+        // with pass B's wider gains that trade is newly affordable. Every
+        // attached zone is re-measured on its own membership, against the same
+        // tolerance a zone is allowed to cost the frame.
+        match zone_regressed(&s_img, report, &after, &target_pixels) {
+            None => break (solved, admitted, read, paired, field, err_with, after),
+            Some((label, was, now, weights)) => {
+                if pinned.iter().any(|(l, _, _)| *l == label) || pinned.len() >= report.recipe.masks.len() {
+                    note(report, crate::rationale::keys::FIELD_ZONE_REGRESSED, vec![
+                        ("label", label), ("before", format!("{was:.6}")),
+                        ("after", format!("{now:.6}")),
+                        ("tol", format!("{:.4}", super::ZONE_GLOBAL_REGRESSION_TOL)),
+                    ]);
+                    return;
+                }
+                for (p, wgt) in pin.iter_mut().zip(&weights) {
+                    *p = p.max(*wgt);
+                }
+                pinned.push((label, was, now));
+            }
+        }
     };
-    let err_with = fit::look_err_with_evidence(&after, &target_pixels, &report.evidence);
-    if err_with >= report.err_after {
-        note(report, crate::rationale::keys::FIELD_REGRESSED, vec![
-            ("before", format!("{:.6}", report.err_after)),
-            ("after", format!("{:.6}", err_with)),
-        ]);
-        return;
-    }
-    // …and the do-no-harm the FRAME ruler cannot do. A field that pays for the
-    // sky out of the land wins on the frame and loses the picture, and with
-    // pass B's wider gains that trade is newly affordable. Every attached zone
-    // is re-measured on its own membership, against the same tolerance a zone
-    // is allowed to cost the frame.
-    if let Some((label, was, now)) = zone_regressed(&s_img, report, &after, &target_pixels) {
-        note(report, crate::rationale::keys::FIELD_ZONE_REGRESSED, vec![
-            ("label", label), ("before", format!("{was:.6}")),
-            ("after", format!("{now:.6}")),
+    for (label, was, first) in &pinned {
+        let shipped = zone_reading(&s_img, report, label, &after, &target_pixels).unwrap_or(f32::NAN);
+        note(report, crate::rationale::keys::FIELD_ZONE_PINNED, vec![
+            ("label", label.clone()), ("before", format!("{was:.6}")),
+            ("first", format!("{first:.6}")), ("after", format!("{shipped:.6}")),
             ("tol", format!("{:.4}", super::ZONE_GLOBAL_REGRESSION_TOL)),
         ]);
-        return;
     }
     note(report, crate::rationale::keys::FIELD_CELLS_ADMITTED, vec![
         ("admitted", admitted.to_string()), ("read", read.to_string()),
@@ -483,15 +547,15 @@ pub(super) fn attach_colour_field(
 #[allow(clippy::too_many_arguments)]
 fn admit_cells(
     current: &[[f32; 3]], target: &[[f32; 3]], width: u32, height: u32,
-    report: &FitReport, pass_a: LocalField, gain: f32, layout: &[f32],
+    evidence: &fit::EvidenceModel, pass_a: LocalField, gain: f32, layout: &[f32],
 ) -> (LocalField, usize, usize, LayoutAdmission) {
-    let Some(cells) = crate::fit_cells::PairedCells::build(target, width, height, &report.evidence)
+    let Some(cells) = crate::fit_cells::PairedCells::build(target, width, height, evidence)
     else {
         return (pass_a, 0, 0, LayoutAdmission::default());
     };
     let paired = (layout.len() == current.len() && layout.iter().any(|m| *m > 0.0)).then(|| {
-        let blind = report.evidence.structure_blind(target);
-        let mut model = report.evidence.clone();
+        let blind = evidence.structure_blind(target);
+        let mut model = evidence.clone();
         for (i, weight) in model.source_weights.iter_mut().enumerate() {
             let via_layout = blind.source_weights.get(i).copied().unwrap_or(0.0).max(0.0)
                 * layout[i].clamp(0.0, 1.0);
@@ -503,7 +567,7 @@ fn admit_cells(
     });
     let Some(pass_b) = LocalField::solve_with(
         current, target, width, height,
-        paired.as_ref().map_or(&report.evidence, |(model, _)| model),
+        paired.as_ref().map_or(evidence, |(model, _)| model),
         crate::fit_field::TIKHONOV, crate::fit_field::SMOOTH, crate::fit_field::ITERATIONS,
         FieldSolveOpts { gain, local_support: false },
     ) else {
@@ -581,21 +645,41 @@ pub(super) struct LayoutAdmission {
 /// profile exactly as `develop_preview` moves them; R38).
 fn zone_regressed(
     s_img: &DynamicImage, report: &FitReport, after: &[[f32; 3]], target: &[[f32; 3]],
-) -> Option<(String, f32, f32)> {
+) -> Option<(String, f32, f32, Vec<f32>)> {
     let current = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
     report.recipe.masks.iter().find_map(|mask| {
-        let coverage = render::preview_mask_coverage(mask, s_img, &report.recipe);
-        let weights: Vec<f32> =
-            coverage.as_raw().iter().map(|v| *v as f32 / 255.0).collect();
-        if weights.len() != current.len() || weights.iter().sum::<f32>() <= 0.0 {
-            return None;
-        }
+        let (label, weights) = zone_weights(s_img, report, mask, current.len())?;
         let err = |px: &[[f32; 3]]| {
             fit::look_err_with_evidence(px, target, &report.evidence.scoped(target, &weights, &weights))
         };
         let (was, now) = (err(&current), err(after));
-        let label = if mask.name.is_empty() { mask.role.tag().to_string() } else { mask.name.clone() };
-        (now > was + super::ZONE_GLOBAL_REGRESSION_TOL).then_some((label, was, now))
+        (now > was + super::ZONE_GLOBAL_REGRESSION_TOL).then_some((label, was, now, weights))
+    })
+}
+
+/// One attached zone's label and coverage weights at analysis size, the
+/// membership [`zone_regressed`] judges it on; `None` for an empty one.
+fn zone_weights(
+    s_img: &DynamicImage, report: &FitReport, mask: &crate::recipe::LocalAdjustment, n: usize,
+) -> Option<(String, Vec<f32>)> {
+    let coverage = render::preview_mask_coverage(mask, s_img, &report.recipe);
+    let weights: Vec<f32> = coverage.as_raw().iter().map(|v| *v as f32 / 255.0).collect();
+    if weights.len() != n || weights.iter().sum::<f32>() <= 0.0 {
+        return None;
+    }
+    let label = if mask.name.is_empty() { mask.role.tag().to_string() } else { mask.name.clone() };
+    Some((label, weights))
+}
+
+/// The `label` zone's reading on [`zone_regressed`]'s ruler for the render `px`.
+fn zone_reading(
+    s_img: &DynamicImage, report: &FitReport, label: &str, px: &[[f32; 3]], target: &[[f32; 3]],
+) -> Option<f32> {
+    report.recipe.masks.iter().find_map(|mask| {
+        let (l, weights) = zone_weights(s_img, report, mask, px.len())?;
+        (l == label).then(|| {
+            fit::look_err_with_evidence(px, target, &report.evidence.scoped(target, &weights, &weights))
+        })
     })
 }
 

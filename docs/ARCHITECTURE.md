@@ -5266,7 +5266,19 @@ threshold. Four sites consume it:
     check reads every attached mask with coverage — a custom region or a free
     mask included, where it used to read the sky and land roles only; a stage
     whose solver finds nothing to fit says so (`FIELD_UNSOLVED`) instead of
-    attaching nothing in silence.
+    attaching nothing in silence. Since 1.17.0 a zone the per-zone check finds
+    regressed is PINNED rather than the field given back at once: inside that
+    zone's coverage the solve's target becomes the zone's own current render at
+    full evidence weight — in pass A and in the support-free pass B that most
+    cells take, since a pin pass A alone heard barely reached the render — and
+    the field is solved again around it
+    (`FIELD_ZONE_PINNED` names the zone before the field, under the first solve
+    and under the field that ships). The re-solve faces the same two checks; a
+    zone still regressed after its pin gives the field back as before. Zones are
+    pinned only once they regress, because the field does real work inside
+    settled zones: pinning every zone before the first solve took the night
+    pair from its master at 0.85 to deltaE 11.15 and ripple 7.40, against 5.11
+    and 2.45 unpinned.
   * **the zone tone estimator** (R34 §D5). MODE governs the control set, SCALE
     governs the estimator — R33 §D's split, now asked of the ZONE's own reading
     at the frame's own line. A Full zone whose divergence is past

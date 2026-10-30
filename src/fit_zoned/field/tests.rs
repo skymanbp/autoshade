@@ -173,7 +173,7 @@ fn the_cells_of_a_repainted_region_admit_the_support_free_field() {
     let pass_a = LocalField::solve(&current, &target, w, h, &report.evidence)
         .expect("the analysis field solves");
     let (merged, admitted, read, _) =
-        admit_cells(&current, &target, w, h, &report, pass_a.clone(), 0.60, &[]);
+        admit_cells(&current, &target, w, h, &report.evidence, pass_a.clone(), 0.60, &[]);
     assert!(read > 0, "the instrument was consulted: {admitted} of {read}");
     assert!(admitted > 0, "the repainted cells must be admitted: {admitted} of {read}");
     let moved: Vec<usize> = (0..crate::fit_cells::CELLS_X * crate::fit_cells::CELLS_Y)
@@ -211,7 +211,7 @@ fn the_field_do_no_harm_judges_a_custom_region_mask_too() {
             *px = [0.02, 0.02, 0.98];
         }
     }
-    let (label, was, now) = zone_regressed(&s_img, &report, &hurt, &target)
+    let (label, was, now, _) = zone_regressed(&s_img, &report, &hurt, &target)
         .expect("the region mask's own residual grew past the tolerance");
     assert_eq!(label, "region-1");
     assert!(now > was + crate::fit_zoned::ZONE_GLOBAL_REGRESSION_TOL, "{was} -> {now}");
@@ -244,7 +244,7 @@ fn a_field_no_cell_vouches_is_the_support_weighted_field_byte_for_byte() {
         return;
     };
     let (merged, admitted, _, _) =
-        admit_cells(&current, &target, w, h, &report, pass_a.clone(), 0.60, &[]);
+        admit_cells(&current, &target, w, h, &report.evidence, pass_a.clone(), 0.60, &[]);
     assert_eq!(admitted, 0, "a matched pair asks for no recolour");
     assert_eq!(merged.grid, pass_a.grid, "so the shipped grid is the analysis grid");
 }
@@ -348,11 +348,11 @@ fn a_cell_the_pixel_evidence_cannot_read_is_read_on_its_region_pairing() {
         .expect("the analysis field solves");
     let unread = unread_cells(&current, &target, w, h, &report, &pass_a);
     let (without, _, _, none) =
-        admit_cells(&current, &target, w, h, &report, pass_a.clone(), 0.60, &[]);
+        admit_cells(&current, &target, w, h, &report.evidence, pass_a.clone(), 0.60, &[]);
     assert_eq!(none, LayoutAdmission::default(), "no pairing: nothing is read on one");
     let pairing = top_third_pairing(w, h);
     let (merged, _, _, paired) =
-        admit_cells(&current, &target, w, h, &report, pass_a.clone(), 0.60, &pairing);
+        admit_cells(&current, &target, w, h, &report.evidence, pass_a.clone(), 0.60, &pairing);
     assert_eq!(paired.read, unread.len(), "every unread cell inside the pairing was read on it: {paired:?}");
     assert!(paired.admitted > 0, "the smooth recolour is admitted: {paired:?}");
     for cell in &unread {

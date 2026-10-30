@@ -2445,6 +2445,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       the {label} zone {before} -> {after}, past the {tol} a zone is ever allowed \
       to cost (per-zone do-no-harm check).",
         " 已解出的颜色场被退回：它让整幅画面更接近目标，但把 {label} 分区从 {before} 变成 {after}，超出了一个分区所允许付出的 {tol}（逐分区不使画面变差的检查）。"),
+    (" The solved colour field moved the {label} zone {before} -> {first}, past \
+      the {tol} a zone is ever allowed to cost, so that zone was pinned to its own \
+      render and the field solved again around it: with the field it ships the \
+      zone reads {after}.",
+        " 已解出的颜色场把 {label} 分区从 {before} 变成 {first}，超出了一个分区所允许付出的 {tol}，于是把该分区固定在它自己的渲染上，避开它重新求解颜色场：带上最终交付的颜色场，该分区读数为 {after}。"),
     (" The solved colour field was given back: rendering it moved the frame \
       {before} -> {after}, away from the target rather than toward it \
       (do-no-harm check).",
