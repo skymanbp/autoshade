@@ -45,6 +45,7 @@ mod hdr;
 mod lens;
 mod perspective;
 mod profile;
+mod baked;
 mod base_look;
 mod brush;
 mod as_shot;
@@ -114,7 +115,8 @@ use develop::{apply_radial_gain, apply_radial_gain_linear, profile_vignette_lut}
 #[cfg(test)]
 use develop::{apply_dehaze, apply_develop_anon, manual_vignette_lut, retouch_spots_in, vignette_gain_lut};
 pub use export::{
-    ExportColorSpace, ExportOpts, convert_export_color_space, render_to_file, stage_and_publish,
+    ExportColorSpace, ExportOpts, convert_export_color_space, render_master_to_file, render_to_file,
+    stage_and_publish,
 };
 pub(crate) use export::{SRGB_ICC, mat3_from_slice, write_working_space};
 use export::{ADOBE_PRIM, D65_XY, P3_PRIM, SRGB_PRIM, inv3, mat_mul3, mat_vec3, rgb_to_xyz};
@@ -187,7 +189,7 @@ pub(crate) use mask_weight::{MASK_SAMPLE_CENTRE};
 use mask_weight::{combined_mask_weight};
 #[cfg(test)]
 use mask_weight::{mask_weight, mask_weight_in};
-pub use masks::{MaskFrame, engine_active, sensor_raster_to_corrected};
+pub use masks::{MaskFrame, engine_active, sensor_raster_to_corrected, sensor_rgba_to_corrected};
 pub(crate) use masks::{linear_to_oklab, tint_from_push, tint_luma, tint_window};
 #[cfg(test)]
 pub(crate) use masks::{TINT_WINDOW_CENTRE, oklab_to_linear, tint_push, tint_px};
@@ -209,7 +211,11 @@ use resample::{
 pub use source::{render_baked_to_image, render_to_image, render_to_image_in, source_pixels};
 pub use canvas::{
     base_develop, canvas_recipe, canvas_renders, master_develop, master_pixels_for, source_pixels_for, BasePart,
-    CANVAS_PROFILE,
+    Master, CANVAS_PROFILE,
+};
+pub use baked::{
+    carry_baked_geometry, read_baked_geometry, stamp_baked_geometry, BakedGeometry, SourceFrame,
+    BAKED_GEOMETRY_KEY, BAKED_GEOMETRY_TIFF_TAG,
 };
 use source::{apply_crop, render_frame, rgb16_source};
 #[cfg(test)]

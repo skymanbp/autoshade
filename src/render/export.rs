@@ -338,6 +338,35 @@ pub fn render_to_file(
     export: Option<&ExportOpts>,
     sink: &dyn crate::diag::Sink,
 ) -> Result<(u32, u32)> {
+    render_to_file_marked(src_path, recipe, out, denoise, export, sink, None)
+}
+
+/// A MASTER of `raw` for `part`, rendered to `out` through
+/// [`BasePart::master_recipe`] and stamped with the lens geometry in its
+/// pixels before it is published ([`BasePart::baked_geometry`]): the
+/// full-resolution AI denoise's master.
+pub fn render_master_to_file(
+    raw: &Path,
+    part: &BasePart,
+    out: &Path,
+    denoise: Option<&crate::denoise::DenoiseOpts>,
+    sink: &dyn crate::diag::Sink,
+) -> Result<(u32, u32)> {
+    let baked = part.baked_geometry();
+    render_to_file_marked(raw, &part.master_recipe(), out, denoise, None, sink, baked.as_ref())
+}
+
+/// [`render_to_file`], stamping `marker` on the staged file before the
+/// publish when it is given.
+fn render_to_file_marked(
+    src_path: &Path,
+    recipe: &EditRecipe,
+    out: &Path,
+    denoise: Option<&crate::denoise::DenoiseOpts>,
+    export: Option<&ExportOpts>,
+    sink: &dyn crate::diag::Sink,
+    marker: Option<&BakedGeometry>,
+) -> Result<(u32, u32)> {
     let diag = crate::diag::Diag::about(sink, src_path);
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
     // ValidatedRecipe token (arch item c) replaces four hand-rolled
@@ -368,13 +397,18 @@ pub fn render_to_file(
         let working = if native_wide { space } else { ExportColorSpace::Srgb };
         render_to_image_in(src_path, recipe, denoise, None, working, sink)?
     } else {
+        // The frame the file is in (v1.17.0): a master marked lens-corrected
+        // takes no second resample, and a recipe that develops other lens
+        // geometry than the one in its pixels is refused.
+        let frame = SourceFrame::of(src_path)?;
+        frame.check(recipe)?;
         // baked-by-construction: the !is_raw_src arm (decided just above).
         let src = crate::decode::load_image_for_develop(src_path)?;
         // `None`: this is the DELIVERY render. `opts.long_edge` below resizes
         // the finished pixels, which is not the same thing as developing at a
         // bounded working resolution and must not be quietly swapped for it —
         // the RAW arm above passes `None` for exactly the same reason.
-        render_baked_to_image(&src, recipe, denoise, None, &diag)?
+        render_baked_to_image(&src, recipe, denoise, None, frame.baked(), &diag)?
     };
     if let Some(le) = opts.long_edge
         && le > 0
@@ -503,6 +537,7 @@ pub fn render_to_file(
     }
         Ok(())
     })();
+    let encoded = encoded.and_then(|()| marker.map_or(Ok(()), |g| stamp_baked_geometry(&staged, g)));
     publish_staged(out, &staged, encoded)?;
 
     Ok((w, h))

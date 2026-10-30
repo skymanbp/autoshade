@@ -670,6 +670,24 @@ pub fn sensor_raster_to_corrected(mask: &image::GrayImage, profile: &crate::reci
     }
 }
 
+/// [`sensor_raster_to_corrected`] for an RGBA raster (a painted heal or fill
+/// mask): every channel read the same way, so a pixel past the original
+/// frame's edge takes the edge's paint, as a grey mask's does — never
+/// "unpainted", which a fill mask spells as transparent.
+pub fn sensor_rgba_to_corrected(raster: &image::RgbaImage, profile: &crate::recipe::LensProfile) -> image::RgbaImage {
+    let (w, h) = (raster.width() as f32, raster.height() as f32);
+    let Some(u) = MaskUnwarp::corrected(profile, (w, h)) else { return raster.clone() };
+    image::RgbaImage::from_fn(raster.width(), raster.height(), |x, y| {
+        let (sx, sy) = u.source_point((x as f32 + 0.5) / w, (y as f32 + 0.5) / h);
+        image::Rgba(std::array::from_fn(|c| {
+            let v = super::mask_raster::sample_texels_norm(raster.width(), raster.height(), sx, sy, |tx, ty| {
+                raster.get_pixel(tx, ty)[c] as f32
+            });
+            v.round().clamp(0.0, 255.0) as u8
+        }))
+    })
+}
+
 /// `alpha` read through `u`'s corrected-frame map ([`MaskUnwarp::source_point`]),
 /// bilinearly at texel centres, at `alpha`'s own size.
 pub(super) fn raster_through(alpha: &image::GrayImage, u: &MaskUnwarp) -> image::GrayImage {

@@ -58,10 +58,22 @@ pub fn stack_files(
 ) -> Result<Stacked> {
     let (mut w, mut h) = (0usize, 0usize);
     let mut frames: Vec<Vec<[f32; 3]>> = Vec::with_capacity(inputs.len());
+    // The lens geometry in every frame (v1.17.0): one, or the stack would
+    // merge pictures in two frames and stamp one of them on the result.
+    let mut baked: Option<crate::render::BakedGeometry> = None;
     for (k, f) in inputs.iter().enumerate() {
-        let img = crate::render::master_pixels_for(f, part, cap)
+        let master = crate::render::master_pixels_for(f, part, cap)
             .with_context(|| format!("read frame {} ({})", k + 1, f.display()))?;
+        let img = master.image;
         let (fw, fh) = (img.width() as usize, img.height() as usize);
+        if k == 0 {
+            baked = master.baked;
+        } else if master.baked != baked {
+            bail!(
+                "{} is not in the lens frame of the first frame — a stack needs one frame",
+                f.display()
+            );
+        }
         if k == 0 {
             (w, h) = (fw, fh);
         } else if (fw, fh) != (w, h) {
@@ -79,7 +91,7 @@ pub fn stack_files(
     let merged = merge::merge(&frames, w, h, opts)?;
     let img =
         image16(&merged.pixels, w, h).context("the merged frame is too large to pack into an image")?;
-    crate::pipeline::save_master(out, img)?;
+    crate::pipeline::save_master(out, img, baked.as_ref())?;
     Ok(Stacked { merged, width: w, height: h })
 }
 

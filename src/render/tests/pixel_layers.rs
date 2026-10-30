@@ -12,18 +12,18 @@ fn a_layer_replaces_where_it_is_opaque_and_leaves_the_rest() {
         if x < 2 { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 255, 0, 0]) }
     });
     let mut data = vec![grey; 8];
-    layers::composite(&mut data, 4, 2, &layer, 1.0, None);
+    layers::composite(&mut data, 4, 2, &layer, 1.0, layers::LayerMap::Same);
     for (i, px) in data.iter().enumerate() {
         let want = if i % 4 < 2 { [1.0, 0.0, 0.0] } else { grey };
         assert_eq!(*px, want, "pixel {i}");
     }
     let mut half = vec![grey; 8];
-    layers::composite(&mut half, 4, 2, &layer, 0.5, None);
+    layers::composite(&mut half, 4, 2, &layer, 0.5, layers::LayerMap::Same);
     assert!((half[0][0] - 0.6).abs() < 1e-6 && (half[0][1] - 0.1).abs() < 1e-6, "{:?}", half[0]);
     assert_eq!(half[3], grey, "a transparent texel stays transparent at any opacity");
     // Twice the size: the left half is still the opaque half.
     let mut big = vec![grey; 32];
-    layers::composite(&mut big, 8, 4, &layer, 1.0, None);
+    layers::composite(&mut big, 8, 4, &layer, 1.0, layers::LayerMap::Same);
     for y in 0..4 {
         assert_eq!(big[y * 8], [1.0, 0.0, 0.0], "row {y}: the left edge is covered");
         assert_eq!(big[y * 8 + 7], grey, "row {y}: the right edge is not");

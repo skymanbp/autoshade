@@ -25,7 +25,7 @@
         assert!(app.dirty, "the in-flight guard swallows a second dispatch (edit stays armed)");
 
         // A matching frame is accepted and bumps the counter + sets the texture.
-        let good = build_preview(base.clone(), app.recipe.clone(), false, None, false);
+        let good = build_preview(base.clone(), app.recipe.clone(), false, None, autoshade::render::SourceFrame::Baked(None));
         app.finish_redevelop(&ctx, Ok(good));
         assert_eq!(app.develop_count, 1, "matching frame accepted");
         assert!(app.after_tex.is_some(), "after texture set");
@@ -36,7 +36,7 @@
         // AND the pending edit re-armed. `dirty` is cleared first — it was
         // still true from the swallowed dispatch above, so the re-arm
         // assertion used to be vacuously satisfiable (L26).
-        let stale = build_preview(base, app.recipe.clone(), false, None, false);
+        let stale = build_preview(base, app.recipe.clone(), false, None, autoshade::render::SourceFrame::Baked(None));
         app.recipe.masks[0].exposure_ev = 1.9; // user kept dragging
         app.dirty = false;
         app.finish_redevelop(&ctx, Ok(stale));
@@ -59,7 +59,9 @@
         app.src_path.get_or_insert_with(|| PathBuf::from("fade-photo.arw"));
         let ctx = egui::Context::default();
         let base = app.base_preview.clone().unwrap();
-        let frame = |app: &AutoShadeApp| build_preview(base.clone(), app.recipe.clone(), false, None, false);
+        let frame = |app: &AutoShadeApp| {
+            build_preview(base.clone(), app.recipe.clone(), false, None, autoshade::render::SourceFrame::Baked(None))
+        };
 
         app.finish_redevelop(&ctx, Ok(frame(&app)));
         assert!(app.canvas_fade.is_some(), "the first frame fades in from the empty canvas");

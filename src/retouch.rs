@@ -1027,8 +1027,12 @@ pub fn heal(
     // by the same contract — the flag used to be ignored for baked sources, so
     // a "preview mode" heal still processed (and saved) an entire
     // high-resolution TIFF/JPEG.
-    let base = crate::render::master_pixels_for(src_path, part, (!full_res).then_some(2048))?;
-    let (w, h) = (base.width(), base.height());
+    // In the frame the master is in (v1.17.0): lens-corrected under Camera
+    // Raw's law, so the painted masks — stored in the SENSOR frame — are
+    // mapped onto it before they are read.
+    let master = crate::render::master_pixels_for(src_path, part, (!full_res).then_some(2048))?;
+    let limit = limit.map(|l| master.gray_to_frame(&l));
+    let (w, h) = (master.image.width(), master.image.height());
 
     let mut spots: Vec<HealSpot> = Vec::new();
     let mut rationale = String::new();
@@ -1039,9 +1043,9 @@ pub fn heal(
         // (the old path cloned the full frame first); a source already ≤1568
         // clones, which is ≤ ~20 MB.
         let small = if w.max(h) > 1568 {
-            base.resize(1568, 1568, image::imageops::FilterType::Triangle)
+            master.image.resize(1568, 1568, image::imageops::FilterType::Triangle)
         } else {
-            base.clone()
+            master.image.clone()
         };
         let mut jpeg = Vec::new();
         DynamicImage::ImageRgb8(small.into_rgb8())
@@ -1074,9 +1078,11 @@ pub fn heal(
         }
     }
     if let Some(mp) = manual_mask {
-        let m = crate::render::open_mask_bounded(mp)
-            .with_context(|| format!("open mask {}", mp.display()))?
-            .to_rgba8();
+        let m = master.rgba_to_frame(
+            &crate::render::open_mask_bounded(mp)
+                .with_context(|| format!("open mask {}", mp.display()))?
+                .to_rgba8(),
+        );
         let (planned, note) = plan_from_mask(&m);
         spots.extend(planned);
         if let Some(n) = note {
@@ -1121,7 +1127,7 @@ pub fn heal(
     }
 
     let planned = spots.len();
-    let healed = heal_and_save(base, &spots, out)?;
+    let healed = heal_and_save(master, &spots, out)?;
     let skipped = planned - healed;
     if skipped > 0 {
         // A typed note in the report, like every other partial outcome
@@ -1149,13 +1155,14 @@ pub fn heal(
 }
 
 /// Heal at the source's OWN depth, carry alpha through, and stage the result
-/// as the pixel master (U30).
+/// as the pixel master (U30), stamped with the lens geometry in its pixels.
 ///
 /// A 16-bit source must not quantise to 8 bits just to pass the healer, and
 /// transparency is not a defect — the alpha plane rides through untouched.
 /// Shared by `heal` and `clone_stamp`, which differ only in how they build
 /// the spot list.
-fn heal_and_save(base: DynamicImage, spots: &[HealSpot], out: &Path) -> Result<usize> {
+fn heal_and_save(master: crate::render::Master, spots: &[HealSpot], out: &Path) -> Result<usize> {
+    let crate::render::Master { image: base, baked, .. } = master;
     // A17: the LOCAL full-resolution phase, one at a time process-wide
     // (`crate::full_res_slot`). Scoped HERE rather than at `heal`'s entry, and
     // that is the honest boundary: `base` is live from the decode above and
@@ -1176,7 +1183,7 @@ fn heal_and_save(base: DynamicImage, spots: &[HealSpot], out: &Path) -> Result<u
         let n = heal_image(&mut rgb, spots);
         (DynamicImage::ImageRgb8(rgb), n)
     };
-    crate::pipeline::save_master(out, reattach_alpha(healed, alpha))?;
+    crate::pipeline::save_master(out, reattach_alpha(healed, alpha), baked.as_ref())?;
     Ok(n)
 }
 
@@ -1253,13 +1260,17 @@ pub fn clone_stamp(
     crate::pipeline::preflight_out(out, src_path)?;
     // Same base contract as `heal`, through the same one dispatch: the engine's
     // OWN base develop of `part` (full or ≤2048px), never the camera's baked
-    // preview — see the heal doc comment.
-    let base = crate::render::master_pixels_for(src_path, part, (!full_res).then_some(2048))?;
-    let (w, h) = (base.width(), base.height());
+    // preview — see the heal doc comment. The painted targets and the picked
+    // source point are SENSOR-frame, mapped onto the master's frame.
+    let master = crate::render::master_pixels_for(src_path, part, (!full_res).then_some(2048))?;
+    let (w, h) = (master.image.width(), master.image.height());
 
-    let m = crate::render::open_mask_bounded(mask_path)
-        .with_context(|| format!("open mask {}", mask_path.display()))?
-        .to_rgba8();
+    let m = master.rgba_to_frame(
+        &crate::render::open_mask_bounded(mask_path)
+            .with_context(|| format!("open mask {}", mask_path.display()))?
+            .to_rgba8(),
+    );
+    let source_norm = master.point_to_frame(source_norm);
     let (mut spots, budget_note) = plan_from_mask(&m);
     if spots.is_empty() {
         return Err(anyhow!("nothing painted — brush over the target area first"));
@@ -1271,7 +1282,7 @@ pub fn clone_stamp(
         s.label = "clone".into();
     }
     let planned = spots.len();
-    let healed = heal_and_save(base, &spots, out)?;
+    let healed = heal_and_save(master, &spots, out)?;
     let (rationale, notes) = match budget_note {
         Some(note) => (crate::rationale::render_one(&note), vec![note]),
         None => (String::new(), Vec::new()),

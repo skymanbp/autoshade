@@ -2,32 +2,38 @@
 
 use crate::*;
 
-/// The picture the canvas shows, in the original frame of its brush mask.
-/// Shared by fill and adjust so the model sees the card's live recipe at
-/// the source's film edge; downstream crop/straighten stay on the view.
+/// The picture the canvas shows, before straighten and crop. Shared by fill
+/// and adjust so the model sees the card's live recipe at the source's film
+/// edge; downstream crop/straighten stay on the view.
+///
+/// In the frame the card's base is in (v1.17.0): lens-corrected under Camera
+/// Raw's law, so the model is shown the corrected picture the canvas shows.
+/// The brush mask paired with it is stored in the SENSOR frame and is mapped
+/// onto this one by the fill ([`autoshade::render::Master::rgba_to_frame`]),
+/// and the layer or card it makes is stamped with the frame.
 fn developed_card_pixels(
     path: &std::path::Path,
     recipe: &EditRecipe,
     full_res: bool,
-) -> anyhow::Result<image::DynamicImage> {
+) -> anyhow::Result<autoshade::render::Master> {
     let raw = autoshade::decode::is_raw(path);
+    let frame = autoshade::render::SourceFrame::of(path)?;
+    frame.check(recipe)?;
+    let part = autoshade::render::BasePart::of(recipe);
     // The card's own base (v1.17.0): the profile and Look table its recipe
     // names are in the pixels the preview develop below is handed.
-    // In the SENSOR frame (`without_lens`, v1.17.0): the brush mask this
-    // picture is paired with is stored there, and nothing below resamples it.
-    let base = autoshade::render::source_pixels_for(
-        path,
-        &autoshade::render::BasePart::of(recipe).without_lens(),
-        (raw && !full_res).then_some(2048),
-    )?;
-    Ok(autoshade::render::develop_preview_framed(
+    let base = autoshade::render::source_pixels_for(path, &part, (raw && !full_res).then_some(2048))?;
+    let geom = autoshade::render::geometry_profile(recipe);
+    let corrected = frame.corrected(recipe);
+    let image = autoshade::render::develop_preview_framed(
         &base,
         recipe,
         &autoshade::diag::pixels(),
-        autoshade::render::MaskFrame::without_downstream(&recipe.lens_profile),
+        autoshade::render::MaskFrame::sampled(&geom, corrected),
         autoshade::decode::film_short_edge(path),
         raw,
-    ))
+    );
+    autoshade::render::Master::of(image, &frame, &part)
 }
 
 /// The brush radius range, in After-image display px. The ceiling was 80 —

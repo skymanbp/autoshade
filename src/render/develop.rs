@@ -48,7 +48,7 @@ pub fn develop_preview_framed(
     film_short_edge: Option<u32>,
     raw_source: bool,
 ) -> DynamicImage {
-    develop_preview_inner(preview, recipe, diag, Some(frame), film_short_edge, raw_source)
+    develop_preview_inner(preview, recipe, diag, Some(frame), film_short_edge, raw_source, false)
 }
 
 /// [`develop_preview_with`] for a VIEWING surface that knows how large the
@@ -61,19 +61,22 @@ pub fn develop_preview_framed(
 /// surfaces (the reverse fit, the judge) keep the forms above, which treat the
 /// preview itself as the film and compare like with like.
 ///
-/// `raw_source` (v1.6.0) is the KIND of the source (`decode::is_raw`): an
-/// absent Sharpening amount renders at Lightroom's own default for it — 40
-/// on a RAW negative, none on a baked raster
-/// (`EditRecipe::capture_sharpening`). The analysis forms above develop as
-/// baked, which is what they did before the default existed.
+/// `source` is the frame of the source these pixels came from
+/// ([`SourceFrame::of`]). Its KIND (v1.6.0): an absent Sharpening amount
+/// renders at Lightroom's own default for it — 40 on a RAW negative, none on
+/// a baked raster (`EditRecipe::capture_sharpening`); the analysis forms above
+/// develop as baked, which is what they did before the default existed. And
+/// whether the pixels are lens-corrected (v1.17.0,
+/// [`SourceFrame::corrected`]), which decides the frame masks are read in.
 pub fn develop_preview_film(
     preview: &DynamicImage,
     recipe: &EditRecipe,
     diag: &crate::diag::Diag<'_>,
     film_short_edge: Option<u32>,
-    raw_source: bool,
+    source: &SourceFrame,
 ) -> DynamicImage {
-    develop_preview_inner(preview, recipe, diag, None, film_short_edge, raw_source)
+    let corrected = source.corrected(recipe);
+    develop_preview_inner(preview, recipe, diag, None, film_short_edge, source.is_raw(), corrected)
 }
 
 /// [`develop_preview`] with the caller's own diagnostics channel — the injected
@@ -84,7 +87,7 @@ pub fn develop_preview_with(
     recipe: &EditRecipe,
     diag: &crate::diag::Diag<'_>,
 ) -> DynamicImage {
-    develop_preview_inner(preview, recipe, diag, None, None, false)
+    develop_preview_inner(preview, recipe, diag, None, None, false, false)
 }
 
 /// The preview develop. `frame` is `None` for the two entry points that let the
@@ -97,6 +100,7 @@ fn develop_preview_inner(
     frame: Option<MaskFrame<'_>>,
     film_short_edge: Option<u32>,
     raw_source: bool,
+    corrected: bool,
 ) -> DynamicImage {
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
     // ValidatedRecipe token (arch item c) replaces four hand-rolled
@@ -128,8 +132,8 @@ fn develop_preview_inner(
     // raw one, because the manual CA pair rides those knots (R25 B3).
     let geom = geometry_profile(recipe);
     // A RAW's base carries the lens when the recipe's camera stage resamples
-    // it (`BasePart`, v1.17.0); a baked source never does.
-    let corrected = raw_source && lens_in_camera(recipe);
+    // it (`BasePart`, v1.17.0); a baked source when its marker says so
+    // (`SourceFrame::corrected`, decided by the caller).
     let frame = frame.unwrap_or_else(|| MaskFrame::of_base(&geom, recipe.lens_distortion, corrected));
     let film = FilmScale::of(film_short_edge, w as usize, h as usize);
     apply_develop(&mut data, w as usize, h as usize, recipe, diag, frame, film, raw_source);
@@ -556,9 +560,25 @@ pub(super) fn apply_develop_with_rasters(
     //    FINISHED develop — what the model was shown when it made them — in
     //    the order they were added. Stored coordinates, like the retouch
     //    areas above: the geometry stage that follows carries them.
+    //    A layer is in the frame of the base it was made over (its file's
+    //    marker, v1.17.0), which need not be this develop's.
+    let mut to_corrected: Option<Option<MaskUnwarp>> = None;
     for layer in r.pixel_layers.iter().filter(|l| l.draws()) {
-        if let Some(img) = rasters.layer(&layer.path) {
-            layers::composite(data, w, h, img, layer.opacity, corrected);
+        if let Some((img, layer_corrected)) = rasters.layer(&layer.path) {
+            let map = match (layer_corrected, corrected) {
+                (false, Some(u)) => layers::LayerMap::SensorLayer(u),
+                (false, None) | (true, Some(_)) => layers::LayerMap::Same,
+                (true, None) => {
+                    let u = to_corrected.get_or_insert_with(|| {
+                        MaskUnwarp::corrected(&geometry_profile(r), (w as f32, h as f32))
+                    });
+                    match u {
+                        Some(u) => layers::LayerMap::CorrectedLayer(&*u),
+                        None => layers::LayerMap::Same,
+                    }
+                }
+            };
+            layers::composite(data, w, h, img, layer.opacity, map);
         }
     }
     // 10) the AI lens blur (2026-10-13, `lens_blur.rs`), last of all: a lens

@@ -1120,11 +1120,17 @@ pub(super) fn rgb16_source(img: &DynamicImage) -> Cow<'_, ImageBuffer<Rgb<u16>, 
 /// in this comment; `render_to_file`'s baked arm has the path and binds it,
 /// which is what puts the baked half of a parallel `batch` on the same footing
 /// as the RAW half.
+///
+/// `baked` is the lens geometry the pixels carry (v1.17.0, the file's marker,
+/// [`SourceFrame::of`]): a lens-corrected master is masked in the corrected
+/// frame and takes no second resample in the tail. The caller has already
+/// refused a recipe that develops other geometry ([`SourceFrame::check`]).
 pub fn render_baked_to_image(
     img: &DynamicImage,
     recipe: &EditRecipe,
     denoise: Option<&crate::denoise::DenoiseOpts>,
     max_edge: Option<u32>,
+    baked: Option<&BakedGeometry>,
     diag: &crate::diag::Diag<'_>,
 ) -> Result<DynamicImage> {
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
@@ -1180,7 +1186,8 @@ pub fn render_baked_to_image(
     // Same ONE-value rule as the RAW arm above (`MaskFrame`): the mask chain's
     // frame adaptation and the geometry gate below are the same decision.
     let geom = geometry_profile(recipe);
-    let frame = MaskFrame::downstream(&geom, recipe.lens_distortion);
+    let corrected = baked.is_some_and(BakedGeometry::corrects_frame);
+    let frame = MaskFrame::of_base(&geom, recipe.lens_distortion, corrected);
     let film = FilmScale::of(film_short, w, h);
     // A baked raster: Lightroom gives a JPEG / TIFF no sharpening by default,
     // so an absent amount renders none (`EditRecipe::capture_sharpening`).
@@ -1199,6 +1206,7 @@ pub fn render_baked_to_image(
     // The same tail as the RAW arm above, from the same function: lens
     // geometry → straighten → crop → post-crop vignette and grain, with the
     // same composed profile (manual CA included). Orientation is already baked
-    // into the source here.
-    Ok(frame_and_finish(dynimg, recipe, &geom, film, CropPolicy::Cut))
+    // into the source here. A lens-corrected master takes no second resample
+    // ([`tail_lens`]).
+    Ok(frame_and_finish(dynimg, recipe, tail_lens(&geom, corrected), film, CropPolicy::Cut))
 }

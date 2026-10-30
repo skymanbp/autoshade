@@ -43,8 +43,9 @@ pub const CANVAS_PROFILE: &str = "Adobe Standard";
 /// (v1.17.0, [`lens_in_camera`]): the composed distortion and CA, with the
 /// vignetting left to the two fields above. A base of such a part is in the
 /// lens-CORRECTED frame, and switching the profile's corrections re-develops
-/// it as switching the camera profile does. A master is baked in the sensor
-/// frame still ([`BasePart::master_recipe`]).
+/// it as switching the camera profile does. So is a master baked from it
+/// ([`BasePart::master_recipe`]), which carries what it baked in its own file
+/// ([`BakedGeometry`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BasePart {
     camera_profile: String,
@@ -52,6 +53,9 @@ pub struct BasePart {
     vignette: Vec<f32>,
     vignette_scale: f32,
     lens: Option<Box<crate::recipe::LensProfile>>,
+    /// The lens profile the vignetting and geometry above come from
+    /// ([`BakedGeometry::lens_profile`]); empty when there are neither.
+    lens_id: String,
 }
 
 impl BasePart {
@@ -72,6 +76,14 @@ impl BasePart {
                 ..geometry_profile(r).into_owned()
             })
         });
+        let lens_id = if lens.is_none() && vignette.is_empty() {
+            String::new()
+        } else {
+            match &r.lens_profile.adobe {
+                Some(a) => format!("adobe:{}", a.name),
+                None => "camera".to_string(),
+            }
+        };
         Self {
             camera_profile: r.camera_profile.clone(),
             look: r.look.as_ref().map(|l| crate::recipe::CreativeLook {
@@ -84,14 +96,41 @@ impl BasePart {
             vignette,
             vignette_scale,
             lens,
+            lens_id,
         }
     }
 
     /// This part with the lens geometry left to the tail: a base in the SENSOR
-    /// frame, for the surfaces that still work there (the reverse fit's
-    /// source, the retouch pictures).
+    /// frame, for the surface that still works there (the reverse fit's
+    /// source).
     pub fn without_lens(&self) -> Self {
         Self { lens: None, ..self.clone() }
+    }
+
+    /// The composed lens geometry a base of this part is resampled through
+    /// (vignetting cleared), when the camera stage resamples one.
+    pub fn lens(&self) -> Option<&crate::recipe::LensProfile> {
+        self.lens.as_deref()
+    }
+
+    /// The profile vignetting knots a base of this part carries.
+    pub fn vignette(&self) -> &[f32] {
+        &self.vignette
+    }
+
+    /// The vignetting strength those knots are applied at.
+    pub fn vignette_scale(&self) -> f32 {
+        self.vignette_scale
+    }
+
+    /// [`BakedGeometry::lens_profile`] for this part.
+    pub fn lens_id(&self) -> &str {
+        &self.lens_id
+    }
+
+    /// The lens geometry a master of this part has in its pixels.
+    pub fn baked_geometry(&self) -> Option<BakedGeometry> {
+        BakedGeometry::of_part(self)
     }
 
     /// Is a base of this part in the lens-corrected frame?
@@ -110,18 +149,11 @@ impl BasePart {
     /// sharpened too was sharpened twice, and the pass clipped the over-range
     /// light the float base keeps).
     ///
-    /// The part's lens geometry too, which a master leaves out: the composed
-    /// profile as it is, so `geometry_profile` reads it back unchanged (no
-    /// manual pair, Distortion strength 100).
+    /// The part's lens geometry too: the composed profile as it is, so
+    /// `geometry_profile` reads it back unchanged (no manual pair,
+    /// Distortion strength 100).
     pub fn recipe(&self) -> EditRecipe {
         let mut r = self.master_recipe();
-        if let Some(lens) = &self.lens {
-            r.lens_profile = crate::recipe::LensProfile {
-                vignette_on: r.lens_profile.vignette_on,
-                vignette: std::mem::take(&mut r.lens_profile.vignette),
-                ..(**lens).clone()
-            };
-        }
         r.set_resolved("sharpening", 0.0);
         r
     }
@@ -130,25 +162,112 @@ impl BasePart {
     /// [`BasePart::recipe`] with the RAW default capture sharpening kept. A
     /// master is a baked file, and a baked file is rendered with no default
     /// sharpening (`EditRecipe::capture_sharpening`), so the master carries the
-    /// one sharpening its RAW is owed. In the SENSOR frame: the part's lens
-    /// geometry is not in it, and the card over the master resamples it in the
-    /// tail as before v1.17.0.
+    /// one sharpening its RAW is owed. In the frame the base is in: with the
+    /// part's lens geometry, a master is lens-corrected, and its file says so
+    /// ([`BasePart::baked_geometry`], [`stamp_baked_geometry`]).
     pub fn master_recipe(&self) -> EditRecipe {
         let dflt = EditRecipe::default();
+        let mut lens_profile = crate::recipe::LensProfile {
+            vignette_on: !self.vignette.is_empty(),
+            vignette: self.vignette.clone(),
+            ..Default::default()
+        };
+        if let Some(lens) = &self.lens {
+            lens_profile = crate::recipe::LensProfile {
+                vignette_on: lens_profile.vignette_on,
+                vignette: std::mem::take(&mut lens_profile.vignette),
+                ..(**lens).clone()
+            };
+        }
         EditRecipe {
             camera_profile: self.camera_profile.clone(),
             look: self.look.clone(),
-            lens_profile: crate::recipe::LensProfile {
-                vignette_on: !self.vignette.is_empty(),
-                vignette: self.vignette.clone(),
-                ..Default::default()
-            },
+            lens_profile,
             lens_profile_vignetting_scale: if self.vignette.is_empty() {
                 dflt.lens_profile_vignetting_scale
             } else {
                 self.vignette_scale
             },
             ..dflt
+        }
+    }
+}
+
+/// A master's pixels with the frame they are in: what a heal, a clone, a fill
+/// or a stack bakes over, and what it stamps on the file it writes.
+pub struct Master {
+    /// The pixels.
+    pub image: DynamicImage,
+    /// The lens geometry in them, to stamp on a master made from them.
+    pub baked: Option<BakedGeometry>,
+    /// The geometry that maps the SENSOR frame onto them, when they are
+    /// lens-corrected: painted masks, picked points and stored spots live in
+    /// the sensor frame.
+    frame_lens: Option<crate::recipe::LensProfile>,
+}
+
+impl Master {
+    /// Pixels in the sensor frame, carrying no geometry.
+    pub fn sensor(image: DynamicImage) -> Self {
+        Self { image, baked: None, frame_lens: None }
+    }
+
+    /// `image`, a develop of a source whose frame is `frame` under `part`.
+    /// `Err` when a marked source's geometry is not `part`'s
+    /// ([`SourceFrame::check`]'s rule).
+    pub fn of(image: DynamicImage, frame: &SourceFrame, part: &BasePart) -> Result<Self> {
+        let wanted = part.baked_geometry();
+        let baked = match frame {
+            SourceFrame::Raw => wanted.clone(),
+            SourceFrame::Baked(None) => return Ok(Self::sensor(image)),
+            SourceFrame::Baked(Some(g)) => {
+                if wanted.as_ref() != Some(g) {
+                    let w = wanted.map_or_else(|| "no lens profile".to_string(), |w| w.to_string());
+                    bail!(
+                        "this master has {g} in its pixels, but the develop asks for {w} — bake                          the master again from the RAW, or set the lens corrections back"
+                    );
+                }
+                Some(g.clone())
+            }
+        };
+        let frame_lens = baked
+            .as_ref()
+            .filter(|g| g.corrects_frame())
+            .and_then(|_| part.lens().cloned());
+        Ok(Self { image, baked, frame_lens })
+    }
+
+    /// Are the pixels lens-corrected?
+    pub fn corrected(&self) -> bool {
+        self.frame_lens.is_some()
+    }
+
+    /// A SENSOR-frame RGBA raster (a painted heal or fill mask) mapped onto
+    /// these pixels' frame.
+    pub fn rgba_to_frame(&self, raster: &image::RgbaImage) -> image::RgbaImage {
+        match &self.frame_lens {
+            Some(p) => sensor_rgba_to_corrected(raster, p),
+            None => raster.clone(),
+        }
+    }
+
+    /// A SENSOR-frame grey raster (a limit mask) mapped onto these pixels'
+    /// frame.
+    pub fn gray_to_frame(&self, raster: &image::GrayImage) -> image::GrayImage {
+        match &self.frame_lens {
+            Some(p) => sensor_raster_to_corrected(raster, p),
+            None => raster.clone(),
+        }
+    }
+
+    /// A SENSOR-frame normalised point mapped onto these pixels' frame.
+    pub fn point_to_frame(&self, (nx, ny): (f32, f32)) -> (f32, f32) {
+        match &self.frame_lens {
+            Some(p) => {
+                let dims = (self.image.width() as f32, self.image.height() as f32);
+                lens_ungeom_norm(nx, ny, dims, p, 0.0)
+            }
+            None => (nx, ny),
         }
     }
 }
@@ -167,18 +286,18 @@ pub fn base_develop(raw: &Path, part: &BasePart, max_edge: Option<u32>) -> Resul
 
 /// A master's pixels for `part` (a heal, a fill, a denoise): the base part
 /// developed with the RAW default sharpening a baked master is owed
-/// ([`BasePart::master_recipe`]), 16-bit as the master file is.
+/// ([`BasePart::master_recipe`]), 16-bit as the master file is, in the frame
+/// [`BasePart::baked_geometry`] names.
 pub fn master_develop(raw: &Path, part: &BasePart, max_edge: Option<u32>) -> Result<DynamicImage> {
     render_to_image(raw, &part.master_recipe(), None, max_edge)
 }
 
 /// [`source_pixels_for`] for a master: a RAW through [`master_develop`], a
-/// baked source its own pixels.
-pub fn master_pixels_for(path: &Path, part: &BasePart, cap: Option<u32>) -> Result<DynamicImage> {
-    if crate::decode::is_raw(path) {
-        return master_develop(path, part, cap);
-    }
-    source_pixels(path, cap)
+/// baked source its own pixels — each with the frame it is in ([`Master`]).
+pub fn master_pixels_for(path: &Path, part: &BasePart, cap: Option<u32>) -> Result<Master> {
+    let frame = SourceFrame::of(path)?;
+    let image = if frame.is_raw() { master_develop(path, part, cap)? } else { source_pixels(path, cap)? };
+    Master::of(image, &frame, part)
 }
 
 /// [`source_pixels`] for a recipe's base part: a RAW develops through

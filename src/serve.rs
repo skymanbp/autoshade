@@ -2126,6 +2126,13 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
             None => w,
         });
     }
+    // The frame the source is in (v1.17.0): a master marked lens-corrected
+    // takes no second resample, and a recipe that develops other lens
+    // geometry than the one in its pixels is refused, as the export refuses it.
+    let frame = match render::SourceFrame::of(&src).and_then(|f| f.check(&req.recipe).map(|()| f)) {
+        Ok(f) => f,
+        Err(e) => return Ok(status_response(409, &format!("{e:#}"))),
+    };
     // The base of the recipe being shown (v1.17.0): its camera profile and
     // Look table, which the preview develop below cannot add.
     let preview = develop_base(&src, &render::BasePart::of(&req.recipe))?;
@@ -2141,7 +2148,7 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
         &req.recipe,
         &crate::diag::pixels(),
         film,
-        decode::is_raw(&src),
+        &frame,
     );
     // The engine's own tail, mirroring the GUI preview chain (lens geometry →
     // straighten → the post-crop vignette and grain; the frame stays uncropped
@@ -2151,7 +2158,7 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // A base whose camera stage resampled the lens (v1.17.0) takes no second
     // resample (`render::tail_lens`).
     let geom = render::geometry_profile(&req.recipe);
-    let corrected = decode::is_raw(&src) && render::lens_in_camera(&req.recipe);
+    let corrected = frame.corrected(&req.recipe);
     let film_scale =
         render::FilmScale::of(film, after.width() as usize, after.height() as usize);
     after = render::frame_and_finish(

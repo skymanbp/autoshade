@@ -111,7 +111,9 @@ fn a_retouch_area_on_a_corrected_frame_moves_with_the_lens() {
 }
 
 /// The base part carries the lens geometry its camera stage resamples, and
-/// its recipe reads it back unchanged; a master and `without_lens` do not.
+/// its recipe reads it back unchanged, and so does a master's (v1.17.0: a
+/// master is baked in the corrected frame and says so in its file);
+/// `without_lens` does not.
 #[test]
 fn a_base_part_carries_the_lens_its_camera_stage_resamples() {
     let r = EditRecipe {
@@ -128,7 +130,10 @@ fn a_base_part_carries_the_lens_its_camera_stage_resamples() {
     let got = crate::recipe::LensProfile { vignette: Vec::new(), vignette_on: false, ..geometry_profile(&base).into_owned() };
     assert_eq!(got, want, "the base develops the recipe's composed geometry");
     assert!(base.lens_profile.vignette_on, "the vignetting rides along as before");
-    assert!(!lens_in_camera(&part.master_recipe()), "a master stays in the sensor frame");
+    let master = part.master_recipe();
+    assert!(lens_in_camera(&master), "a master is baked in the corrected frame");
+    assert_eq!(geometry_profile(&master).into_owned(), geometry_profile(&base).into_owned(), "…through the base's geometry");
+    assert!(part.baked_geometry().is_some_and(|g| g.distortion && g.ca && g.vignette), "and its marker names all three");
     assert!(!part.without_lens().corrects_lens());
     // The Distortion slider keeps the whole geometry in the tail.
     let slider = EditRecipe { lens_distortion: 10.0, ..r.clone() };

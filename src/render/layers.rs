@@ -149,29 +149,60 @@ pub(super) fn load_budgeted<T>(
     Ok(Some(img))
 }
 
-/// Load every drawing layer of `recipe` into `out` through [`load_budgeted`].
+/// Load every drawing layer of `recipe` into `out` through [`load_budgeted`],
+/// with the frame its file says it is in (v1.17.0, [`SourceFrame`]): a layer
+/// made over a lens-corrected base is lens-corrected itself. A layer whose
+/// baked lens geometry is not the one `recipe` develops is refused like an
+/// unreadable one — on an export outright, on a preview with one line.
 pub(super) fn load_layers(
     recipe: &EditRecipe,
     budget_bytes: usize,
     held: &mut usize,
     strict: bool,
     diag: &crate::diag::Diag<'_>,
-    out: &mut std::collections::HashMap<String, std::sync::Arc<image::RgbaImage>>,
+    out: &mut std::collections::HashMap<String, (std::sync::Arc<image::RgbaImage>, bool)>,
 ) -> Result<()> {
     for layer in recipe.pixel_layers.iter().filter(|l| l.draws()) {
         let path = layer.path.as_str();
         if out.contains_key(path) {
             continue;
         }
+        let frame = SourceFrame::of(std::path::Path::new(path)).and_then(|f| f.check(recipe).map(|()| f));
+        let corrected = match frame {
+            Ok(f) => f.corrected(recipe),
+            Err(e) if strict => {
+                return Err(e.context(format!("{} '{path}' — no pixels were rendered", LAYER.what)));
+            }
+            Err(e) => {
+                diag.warn(format!("{} '{path}' is not drawn: {e:#}", LAYER.what));
+                continue;
+            }
+        };
         let decode = || load_layer_image(path, diag).map(|img| {
             let bytes = img.as_raw().len();
             (img, bytes)
         });
         if let Some(img) = load_budgeted(path, &LAYER, 4, budget_bytes, held, strict, diag, decode)? {
-            out.insert(path.to_owned(), img);
+            out.insert(path.to_owned(), (img, corrected));
         }
     }
     Ok(())
+}
+
+/// How a layer's frame and the develop's differ (v1.17.0): each pixel of
+/// the develop reads the layer at the point that shows the same content.
+#[derive(Clone, Copy)]
+pub(super) enum LayerMap<'a> {
+    /// The same frame: read in place.
+    Same,
+    /// A SENSOR-frame layer over a lens-corrected develop
+    /// (`MaskFrame::Corrected`): read at the original-frame point each pixel
+    /// shows ([`super::masks::MaskUnwarp::source_point`]).
+    SensorLayer(&'a super::masks::MaskUnwarp),
+    /// A lens-corrected layer over a SENSOR-frame develop (an unmarked master
+    /// the tail still corrects): read at the corrected point each pixel will
+    /// land on ([`super::masks::MaskUnwarp::engine_at`]).
+    CorrectedLayer(&'a super::masks::MaskUnwarp),
 }
 
 /// Composite one layer over the develop's `w`×`h` frame, in place, in the
@@ -181,16 +212,14 @@ pub(super) fn load_layers(
 /// [`sample_gray_norm`]), so a 2048 px fill lands where it was painted on a
 /// full-resolution export too.
 ///
-/// `corrected` (v1.17.0, `MaskFrame::Corrected`): the frame is lens-corrected
-/// and the layer is stored in the original frame, so each pixel reads the
-/// layer bilinearly at the original-frame point it shows.
+/// `map` (v1.17.0) is how the develop's frame and the layer's differ ([`LayerMap`]).
 pub(super) fn composite(
     data: &mut [[f32; 3]],
     w: usize,
     h: usize,
     layer: &image::RgbaImage,
     opacity: f32,
-    corrected: Option<&super::masks::MaskUnwarp>,
+    map: LayerMap<'_>,
 ) {
     let (lw, lh) = (layer.width() as usize, layer.height() as usize);
     if lw == 0 || lh == 0 || w == 0 || h == 0 {
@@ -220,8 +249,13 @@ pub(super) fn composite(
     data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         let (y0, y1, fy) = if same { (y, y, 0.0) } else { axis(y, h, lh) };
         for (x, px) in row.iter_mut().enumerate() {
-            let v = if let Some(u) = corrected {
-                let (sx, sy) = u.source_point((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+            let p = ((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+            let mapped = match map {
+                LayerMap::Same => None,
+                LayerMap::SensorLayer(u) => Some(u.source_point(p.0, p.1)),
+                LayerMap::CorrectedLayer(u) => Some(u.engine_at(p.0, p.1)),
+            };
+            let v = if let Some((sx, sy)) = mapped {
                 at_norm(sx, sy)
             } else if same {
                 texel(x, y)

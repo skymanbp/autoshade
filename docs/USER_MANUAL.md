@@ -289,6 +289,15 @@ chromatic-aberration correction stays on, because Lightroom keeps it on with
 the profile off (v1.17.0). The manual Distortion, Vignetting and CA sliders are
 not the profile and are never touched by that switch.
 
+A heal, clone, fill, denoise or stack master made since v1.17.0 has the lens
+profile's corrections already in its pixels, and its file says which ones. A
+card over it is not corrected a second time; if you then switch a profile
+correction off, change its strength or move the manual Distortion slider, the
+canvas and the export refuse that card and say so, rather than correcting the
+master twice or leaving in a correction you switched off — set the lens
+corrections back, or make the master again from the RAW. Masters made before
+v1.17.0 carry no such note and are corrected over as before.
+
 A strength set away from 100 changes what the sidecar says about the profile
 (v1.17.0): Lightroom only honours a strength for a profile the sidecar names,
 so the export names the installed Adobe profile (crs:LensProfileName and its

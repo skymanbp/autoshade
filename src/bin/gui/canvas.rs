@@ -932,9 +932,10 @@ impl AutoShadeApp {
     /// Is the canvas base in the lens-CORRECTED frame (v1.17.0)? A RAW source's
     /// base is, when the recipe's camera stage resamples the lens
     /// (`render::lens_in_camera`, which `render::BasePart` follows); a baked
-    /// source or a card on its own pixels never is.
+    /// master is when its own marker says so (`render::SourceFrame`). A source
+    /// whose frame cannot be read is not drawn at all (`start_redevelop`).
     pub(crate) fn base_corrected(&self) -> bool {
-        self.source_is_raw() && autoshade::render::lens_in_camera(&self.recipe)
+        self.source_frame().is_ok_and(|f| f.corrected(&self.recipe))
     }
 
     /// An ORIGINAL-frame point → the point on the canvas base that shows the

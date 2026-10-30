@@ -707,7 +707,7 @@ pub(crate) enum Msg {
     /// it. Lands only while the photo and the wanted part still match.
     BaseRedeveloped {
         path: PathBuf,
-        part: autoshade::render::BasePart,
+        part: Box<autoshade::render::BasePart>,
         img: Box<anyhow::Result<Arc<image::DynamicImage>>>,
     },
     // (MasterLoaded carries the SPAWN-time edge and file stamp: the landing

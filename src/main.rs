@@ -1640,8 +1640,7 @@ fn denoise_cmd(
         // The master is developed through the photo's own base part (v1.17.0,
         // `render::base_develop`): a card over it runs no profile stage.
         let part = pipeline::photo_base_part(input);
-        let (w, h) =
-            render::render_to_file(input, &part.master_recipe(), &out, Some(&opts), None, autoshade::diag::stderr())?;
+        let (w, h) = render::render_master_to_file(input, &part, &out, Some(&opts), autoshade::diag::stderr())?;
         println!("denoised -> {} ({} x {})", out.display(), w, h);
     } else {
         println!("denoising image {} ...", input.display());

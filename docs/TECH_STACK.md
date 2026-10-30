@@ -471,7 +471,11 @@ bundled; a machine with no profiles gets a named refusal.
   lens-corrected when the camera stage resamples the lens):
   the GUI and web canvases (keyed and re-developed by part) and
   `pipeline::fit_source`; the heal / clone / fill / denoise / stack masters bake
-  the same part with the RAW default sharpening (`render::master_develop`).
+  the same part with the RAW default sharpening (`render::master_develop`), in
+  the same frame, and carry the lens geometry baked into them in their own file
+  (`render::BakedGeometry`: a PNG `iTXt` chunk, TIFF tag 65117 or JPEG comment
+  under `autoshade:baked-geometry`, read through `render::SourceFrame::of`; no
+  marker = the sensor frame; a recipe with other lens geometry is refused).
   Every downscale of a frame uses `render::thumbnail` (`image`'s f32 thumbnail
   adds 0.5 to every channel).
 

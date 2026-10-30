@@ -478,13 +478,13 @@ pub fn denoise_active(
 ) -> Result<()> {
     if crate::decode::is_raw(input) {
         // The only arm that needs no pixels in memory: the full-res develop
-        // denoises INSIDE the engine and writes `out` itself (16-bit).
-        crate::render::render_to_file(
+        // denoises INSIDE the engine and writes `out` itself (16-bit),
+        // stamped with the lens geometry the develop bakes (v1.17.0).
+        crate::render::render_master_to_file(
             input,
-            &part.master_recipe(),
+            part,
             out,
             Some(opts),
-            None,
             // The shipped channel (R29-1): this is the GUI's interactive
             // "denoise now", one photo at a time on a worker thread of its
             // own — there is no pooled transcript for it to be ordered into.
@@ -516,6 +516,10 @@ pub fn denoise_active(
     } else {
         img.save(&tmp).map_err(anyhow::Error::from)
     };
+    // The working copy carries the source's lens-geometry marker (v1.17.0),
+    // which the sidecar's product takes over with its colour profile
+    // (`run_sidecar_carrying`): a denoised master is in its source's frame.
+    let written = written.and_then(|()| crate::render::carry_baked_geometry(input, &tmp));
     if let Err(e) = written {
         // A failed save can still have created a partial file — don't leak it
         // into the temp dir.
@@ -907,6 +911,14 @@ fn run_sidecar_carrying(
         return Err(e.context("denoise product could not carry the source colour profile"));
     }
     drop(decoded);
+    // The lens-geometry marker, on the STAGED file for the same reason
+    // (v1.17.0): a denoise is pixel for pixel in its input's frame, and a
+    // product published without the marker would be read in the sensor frame.
+    if let Err(e) = crate::render::carry_baked_geometry(input, &staged) {
+        discard_failed_output(&staged, before);
+        release_empty_claim(output);
+        return Err(e.context("denoise product could not carry the source's lens geometry"));
+    }
     // Publish: ONE rename moves the finished bytes onto the promised name,
     // replacing the caller's 0-byte claim (or an older deliverable) in a
     // single step — concurrent runs can no longer interleave into the

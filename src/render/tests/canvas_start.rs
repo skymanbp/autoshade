@@ -208,38 +208,36 @@ fn every_surface_shows_a_fresh_canvas_as_the_export_renders_it() {
     let part = BasePart::of(&fresh);
     let base = base_develop(&raw, &part, Some(EDGE)).expect("base");
     let film = crate::decode::film_short_edge(&raw);
-    // `corrected`: the base carries the lens (v1.17.0, `lens_in_camera`), so
-    // the tail resamples none (`tail_lens`); the fit source does not.
-    let preview = |base: &DynamicImage, r: &EditRecipe, corrected: bool| {
-        let after = develop_preview_film(base, r, &crate::diag::pixels(), film, corrected);
+    // `source`: the RAW's base carries the lens (v1.17.0, `lens_in_camera`),
+    // so the tail resamples none (`tail_lens`); the fit source is a sensor-frame
+    // picture.
+    let preview = |base: &DynamicImage, r: &EditRecipe, source: &SourceFrame| {
+        let after = develop_preview_film(base, r, &crate::diag::pixels(), film, source);
         let geom = geometry_profile(r);
         let fs = FilmScale::of(film, after.width() as usize, after.height() as usize);
-        frame_and_finish(after, r, tail_lens(&geom, corrected), fs, CropPolicy::Cut)
+        frame_and_finish(after, r, tail_lens(&geom, source.corrected(r)), fs, CropPolicy::Cut)
     };
-    let canvas = preview(&base, &fresh, part.corrects_lens());
+    assert_eq!(SourceFrame::Raw.corrected(&fresh), part.corrects_lens(), "premise: the base's frame is the part's");
+    let canvas = preview(&base, &fresh, &SourceFrame::Raw);
     let de_canvas = mean_de76(&canvas, &reference);
 
     // 3. A master baked from the base and rendered under the recipe — the
-    // baked door every master export takes.
+    // baked door every master export takes, with the lens geometry its file
+    // would carry (v1.17.0, `BasePart::baked_geometry`). Baked in the
+    // corrected frame, a capped master is resampled before the cap as the
+    // export is, so it is judged pixel for pixel.
     let master = master_develop(&raw, &part, Some(EDGE)).expect("master");
-    let from_master =
-        render_baked_to_image(&master, &fresh, None, None, &crate::diag::pixels()).expect("master render");
+    let baked = part.baked_geometry();
+    let from_master = render_baked_to_image(&master, &fresh, None, None, baked.as_ref(), &crate::diag::pixels())
+        .expect("master render");
     let de_master = mean_de76(&from_master, &reference);
-    // A master is baked in the SENSOR frame (v1.17.0), so a capped one is
-    // lens-resampled after the cap, at this edge, where the export resamples
-    // at full resolution before it: the master is softer, not elsewhere or
-    // another colour. Measured: ΔE76 1.04 as it stands, 1.11 on the central
-    // fifth alone (the resample's fill zooms the whole frame), 0.26 with both
-    // blurred at σ 1.5. So the colour half is judged on the blurred pair; the
-    // sharpness half is the price of a capped sensor-frame master.
-    let de_master_colour = mean_de76(&from_master.blur(1.5), &reference.blur(1.5));
 
     // 4. The reverse fit's source under its calibration, at the fit's edge,
     // through the canvas's own tail (the fit source is the uncorrected
     // sensor frame; the lens geometry is the tail's).
     let (source, cal) = crate::pipeline::fit_source(&raw).expect("fit source");
     let fit_has_canvas = BasePart::of(&cal) == part;
-    let fitted = preview(&DynamicImage::ImageRgb8(source.to_rgb8()), &cal, false);
+    let fitted = preview(&DynamicImage::ImageRgb8(source.to_rgb8()), &cal, &SourceFrame::Baked(None));
     let at_fit_edge = render_to_image(&raw, &sidecar, None, Some(crate::pipeline::FIT_SOURCE_EDGE))
         .expect("sidecar render at the fit's edge");
     let to_grid = |im: &DynamicImage| {
@@ -255,7 +253,7 @@ fn every_surface_shows_a_fresh_canvas_as_the_export_renders_it() {
          change alone {de_edge_alone:.3})"
     );
     assert!(de_canvas <= 0.5, "canvas ΔE76 {de_canvas:.3} (bound 0.5)");
-    assert!(de_master_colour <= 0.5, "master ΔE76 at σ 1.5 {de_master_colour:.3} (bound 0.5; unblurred {de_master:.3})");
+    assert!(de_master <= 0.5, "master ΔE76 {de_master:.3} (bound 0.5)");
     if fit_has_canvas {
         assert!(de_fit <= 0.5, "fit source ΔE76 {de_fit:.3} (bound 0.5)");
     }
@@ -324,7 +322,7 @@ fn the_canvas_brings_back_over_range_light_as_the_export_does() {
     let over = base.as_rgb32f().map_or(0, |f| f.as_raw().iter().filter(|&&v| v > 1.0).count());
     let film = crate::decode::film_short_edge(&raw);
     let canvas = |base: &DynamicImage| {
-        let after = develop_preview_film(base, &r, &crate::diag::pixels(), film, true);
+        let after = develop_preview_film(base, &r, &crate::diag::pixels(), film, &SourceFrame::Raw);
         let geom = geometry_profile(&r);
         let fs = FilmScale::of(film, after.width() as usize, after.height() as usize);
         frame_and_finish(after, &r, tail_lens(&geom, lens_in_camera(&r)), fs, CropPolicy::Cut)
@@ -422,7 +420,7 @@ fn every_surface_sees_one_camera_start_and_the_sidecar_carries_none() {
     let base = DynamicImage::ImageRgb8(base_develop(&raw, &BasePart::of(&up), Some(EDGE)).expect("base").to_rgb8());
     let film = crate::decode::film_short_edge(&raw);
     let canvas = {
-        let after = develop_preview_film(&base, &up, &crate::diag::pixels(), film, true);
+        let after = develop_preview_film(&base, &up, &crate::diag::pixels(), film, &SourceFrame::Raw);
         let geom = geometry_profile(&up);
         let fs = FilmScale::of(film, after.width() as usize, after.height() as usize);
         frame_and_finish(after, &up, tail_lens(&geom, lens_in_camera(&up)), fs, CropPolicy::Cut)
@@ -432,7 +430,7 @@ fn every_surface_sees_one_camera_start_and_the_sidecar_carries_none() {
     // and no headroom.
     let unstamped = EditRecipe { camera_start: None, ..up.clone() };
     let wrong = {
-        let after = develop_preview_film(&base, &unstamped, &crate::diag::pixels(), film, true);
+        let after = develop_preview_film(&base, &unstamped, &crate::diag::pixels(), film, &SourceFrame::Raw);
         let geom = geometry_profile(&unstamped);
         let fs = FilmScale::of(film, after.width() as usize, after.height() as usize);
         frame_and_finish(after, &unstamped, tail_lens(&geom, lens_in_camera(&unstamped)), fs, CropPolicy::Cut)

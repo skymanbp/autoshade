@@ -195,8 +195,9 @@ pub(super) fn refine_mask_guided_tiled(
 #[derive(Debug, Default)]
 pub(super) struct MaskRasterSnapshot {
     images: std::collections::HashMap<String, std::sync::Arc<image::GrayImage>>,
-    /// The recipe's drawing pixel layers (`layers.rs`), under the same budget.
-    layers: std::collections::HashMap<String, std::sync::Arc<image::RgbaImage>>,
+    /// The recipe's drawing pixel layers (`layers.rs`), under the same budget,
+    /// each with whether it is lens-corrected (its file's marker, v1.17.0).
+    layers: std::collections::HashMap<String, (std::sync::Arc<image::RgbaImage>, bool)>,
     /// The lens blur's depth map (`lens_blur.rs`), under the same budget.
     depth: Option<std::sync::Arc<super::lens_blur::DepthImage>>,
     /// The lens blur's protect mask (`LensBlur::protect`), under the same budget.
@@ -208,8 +209,9 @@ impl MaskRasterSnapshot {
         self.images.get(geometry_raster_path(geometry)?).map(std::sync::Arc::as_ref)
     }
 
-    pub(super) fn layer(&self, path: &str) -> Option<&image::RgbaImage> {
-        self.layers.get(path).map(std::sync::Arc::as_ref)
+    /// A drawing layer's pixels, and whether they are lens-corrected.
+    pub(super) fn layer(&self, path: &str) -> Option<(&image::RgbaImage, bool)> {
+        self.layers.get(path).map(|(img, corrected)| (img.as_ref(), *corrected))
     }
 
     pub(super) fn depth(&self) -> Option<&super::lens_blur::DepthImage> {

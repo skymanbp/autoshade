@@ -282,14 +282,25 @@ impl AutoShadeApp {
             self.dirty = false;
             return;
         };
+        // The frame of the pixels (v1.17.0): a master's own marker says
+        // whether it is lens-corrected, and a recipe that develops other lens
+        // geometry than the one baked into it is refused, as the export
+        // refuses it — the canvas keeps its last frame and says why.
+        let source = match self.source_frame().and_then(|f| f.check(&self.recipe).map(|()| f)) {
+            Ok(f) => f,
+            Err(e) => {
+                self.dirty = false;
+                self.status = format!("{}: {e:#}", tr(self.lang, "preview develop failed"));
+                return;
+            }
+        };
         let recipe = self.recipe.clone();
         let show_clipping = self.show_clipping;
         let film = self.film_short_edge();
-        let raw_source = self.source_is_raw();
         self.develop_inflight = true;
         self.dirty = false;
         self.spawn_worker(
-            move || Msg::Developed(Box::new(Ok(build_preview(base, recipe, show_clipping, film, raw_source)))),
+            move || Msg::Developed(Box::new(Ok(build_preview(base, recipe, show_clipping, film, source)))),
             |e| Msg::Developed(Box::new(Err(e))),
         );
     }
@@ -326,9 +337,9 @@ impl AutoShadeApp {
             move || {
                 let _mem = crate::budget::heavy_permit(crate::budget::estimate_mb(Some(&p)));
                 let img = autoshade::render::base_develop(&p, &part, Some(edge)).map(Arc::new);
-                Msg::BaseRedeveloped { path: p, part, img: Box::new(img) }
+                Msg::BaseRedeveloped { path: p, part: Box::new(part), img: Box::new(img) }
             },
-            move |e| Msg::BaseRedeveloped { path, part: want, img: Box::new(Err(e)) },
+            move |e| Msg::BaseRedeveloped { path, part: Box::new(want), img: Box::new(Err(e)) },
         );
         false
     }
@@ -420,6 +431,16 @@ impl AutoShadeApp {
     /// photo is a baked raster: nothing to sharpen by default.
     pub(crate) fn source_is_raw(&self) -> bool {
         self.active_source_path().is_some_and(|p| autoshade::decode::is_raw(&p))
+    }
+
+    /// The frame of the active card's pixel source (v1.17.0): a RAW, or a
+    /// baked file with the lens geometry its own marker says is in it
+    /// (`render::SourceFrame::of`, cached per file for the process).
+    pub(crate) fn source_frame(&self) -> anyhow::Result<autoshade::render::SourceFrame> {
+        match self.active_source_path() {
+            Some(p) => autoshade::render::SourceFrame::of(&p),
+            None => Ok(autoshade::render::SourceFrame::Baked(None)),
+        }
     }
 
     /// Accept one worker-built frame if it still describes the active base +
@@ -540,7 +561,7 @@ impl AutoShadeApp {
                     self.start_ai_mask_resolve(lang);
                 }
                 Msg::BaseRedeveloped { path, part, img } => {
-                    self.on_base_redeveloped(ctx, path, part, *img)
+                    self.on_base_redeveloped(ctx, path, *part, *img)
                 }
                 Msg::AiMasksResolved(boxed) => self.on_ai_masks_resolved(lang, *boxed),
                 Msg::Developed(boxed) => self.finish_redevelop(ctx, *boxed),

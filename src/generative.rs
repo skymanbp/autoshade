@@ -487,11 +487,13 @@ pub struct FillJob<'a> {
 ///
 /// `source` is the photo the output is guarded against (the read-only-library
 /// preflight) and named after; `base_note` is the word the progress line
-/// prints for the base; `job` is the fill itself ([`FillJob`]).
+/// prints for the base; `job` is the fill itself ([`FillJob`]). The base comes
+/// with the frame it is in ([`crate::render::Master`]): the painted mask is
+/// mapped onto it, and the master published is stamped with it.
 pub fn retouch_onto(
     cfg: &Config,
     source: &Path,
-    base: impl FnOnce() -> Result<DynamicImage>,
+    base: impl FnOnce() -> Result<crate::render::Master>,
     base_note: &str,
     job: &FillJob<'_>,
 ) -> Result<()> {
@@ -545,7 +547,7 @@ fn auto_fill_prompt(user: &str) -> String {
 pub fn auto_fill_onto(
     cfg: &Config,
     source: &Path,
-    base: impl FnOnce() -> Result<DynamicImage>,
+    base: impl FnOnce() -> Result<crate::render::Master>,
     base_note: &str,
     job: &AutoFillJob<'_>,
 ) -> Result<AutoFillReport> {
@@ -585,7 +587,7 @@ pub struct AdjustReport {
 pub fn adjust_onto(
     cfg: &Config,
     source: &Path,
-    base: impl FnOnce() -> Result<DynamicImage>,
+    base: impl FnOnce() -> Result<crate::render::Master>,
     base_note: &str,
     job: &AdjustJob<'_>,
 ) -> Result<AdjustReport> {
@@ -631,7 +633,7 @@ struct EditOutcome {
 
 fn edit_onto(
     cfg: &Config,
-    base: impl FnOnce() -> Result<DynamicImage>,
+    base: impl FnOnce() -> Result<crate::render::Master>,
     base_note: &str,
     job: &ImageEditJob<'_>,
 ) -> Result<EditOutcome> {
@@ -642,7 +644,20 @@ fn edit_onto(
     // that hold whole frames — holding an admission slot across a call that
     // runs for minutes would stall every export for that entire time.
     let heavy = crate::full_res_slot();
-    let base = base()?;
+    let master = base()?;
+    // The painted mask is SENSOR-frame; the base may be lens-corrected
+    // (v1.17.0), so the mask is read in the base's frame.
+    let mask_img = match keep {
+        Keep::Painted(path) => Some(DynamicImage::ImageRgba8(
+            master.rgba_to_frame(
+                &crate::render::open_mask_bounded(path)
+                    .with_context(|| format!("open mask {}", path.display()))?
+                    .to_rgba8(),
+            ),
+        )),
+        Keep::Found | Keep::Whole => None,
+    };
+    let crate::render::Master { image: base, baked, .. } = master;
     let (bw, bh) = base.dimensions();
     // A generative tile larger than the base is pointless (it only gets downscaled
     // back onto it) — cap the flexible budget at the base's own pixel count.
@@ -655,12 +670,6 @@ fn edit_onto(
     let small = DynamicImage::ImageRgb8(base.resize_exact(sw, sh, FilterType::Lanczos3).to_rgb8());
     let png = encode_png(&small)?;
     drop(small);
-    let mask_img = match keep {
-        Keep::Painted(path) => Some(
-            crate::render::open_mask_bounded(path).with_context(|| format!("open mask {}", path.display()))?,
-        ),
-        Keep::Found | Keep::Whole => None,
-    };
     let mask_at = |w, h| {
         mask_img.as_ref().map(|m| encode_png(&m.resize_exact(w, h, FilterType::Nearest))).transpose()
     };
@@ -774,7 +783,7 @@ fn edit_onto(
         // No composite and no mask: keep the WHOLE returned frame, at the
         // base's dimensions, using the fill's Lanczos3 filter and RGBA8 writer.
         let whole = answer.resize_exact(bw, bh, FilterType::Lanczos3).to_rgba8();
-        publish_master(&whole, out)?;
+        publish_master(&whole, out, baked.as_ref())?;
         println!("generative {verb} -> {} ({bw}x{bh}, {mode})", out.display());
         return Ok(outcome);
     };
@@ -840,7 +849,7 @@ fn edit_onto(
     if cancelled() {
         return Err(anyhow!("cancelled by user"));
     }
-    publish_master(&composite, out)?;
+    publish_master(&composite, out, baked.as_ref())?;
     println!("generative {verb} -> {} ({bw}x{bh}, {mode})", out.display());
     Ok(outcome)
 }
@@ -848,8 +857,9 @@ fn edit_onto(
 /// Stage + rename over the claimed name — same rule as reimagine. The
 /// staged name cannot carry the real extension, so the format comes from
 /// the TARGET path explicitly (PNG for every claimed pixel master). (Parent
-/// already prepared by the pre-pay preflight, L09#1.)
-fn publish_master(img: &RgbaImage, out: &Path) -> Result<()> {
+/// already prepared by the pre-pay preflight, L09#1.) Stamped with the lens
+/// geometry in the base's pixels before the publish (v1.17.0).
+fn publish_master(img: &RgbaImage, out: &Path, baked: Option<&crate::render::BakedGeometry>) -> Result<()> {
     let tmp = out.with_extension(format!(
         "tmp.{}.{}",
         std::process::id(),
@@ -859,6 +869,12 @@ fn publish_master(img: &RgbaImage, out: &Path) -> Result<()> {
     if let Err(e) = img.save_with_format(&tmp, fmt) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("write {}", tmp.display()));
+    }
+    if let Some(g) = baked
+        && let Err(e) = crate::render::stamp_baked_geometry(&tmp, g)
+    {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
     // durable_replace, not bare rename (L03): the pixel-source JSON that
     // will reference this master commits durably — the payload first.
@@ -3288,7 +3304,7 @@ mod tests {
         retouch_onto(
             &cfg,
             &input,
-            || Ok(DynamicImage::ImageRgb8(RgbImage::from_pixel(256, 256, green))),
+            || Ok(crate::render::Master::sensor(DynamicImage::ImageRgb8(RgbImage::from_pixel(256, 256, green)))),
             "caller",
             &FillJob { mask_path: &mask, prompt: "", quality: "auto", out: &out, layer: false },
         )
@@ -3507,7 +3523,7 @@ mod tests {
         )]);
         let out = dir.join("exports/auto.png");
         let report = auto_fill_onto(
-            &stub_cfg(url.clone()), &input, || Ok(structured_frame(192, 128)), "caller",
+            &stub_cfg(url.clone()), &input, || Ok(crate::render::Master::sensor(structured_frame(192, 128))), "caller",
             &AutoFillJob { prompt: "remove the sign", quality: "high", out: &out },
         ).expect("the loopback maskless edit succeeds");
         bounded_join(handle);
@@ -3547,7 +3563,7 @@ mod tests {
         )]);
         let out = dir.join("exports/adjust.png");
         adjust_onto(
-            &stub_cfg(url), &input, || Ok(structured_frame(192, 128)), "caller",
+            &stub_cfg(url), &input, || Ok(crate::render::Master::sensor(structured_frame(192, 128))), "caller",
             &AdjustJob { prompt: "make the sky bluer", quality: "medium", out: &out },
         ).expect("the loopback whole-image adjust succeeds");
         bounded_join(handle);
@@ -3586,7 +3602,7 @@ mod tests {
         });
         let developed = std::cell::Cell::new(false);
         let err = adjust_onto(
-            &cfg, &input, || { developed.set(true); Ok(structured_frame(64, 64)) }, "caller",
+            &cfg, &input, || { developed.set(true); Ok(crate::render::Master::sensor(structured_frame(64, 64))) }, "caller",
             &AdjustJob { prompt: " \t\n ", quality: "high", out: &out },
         ).unwrap_err();
         bounded_join(handle);
@@ -3622,7 +3638,7 @@ mod tests {
             )]);
             let out = dir.join(format!("exports/adjust-{different}.png"));
             let report = adjust_onto(
-                &stub_cfg(url), &input, || Ok(structured_frame(256, 256)), "caller",
+                &stub_cfg(url), &input, || Ok(crate::render::Master::sensor(structured_frame(256, 256))), "caller",
                 &AdjustJob { prompt: "bluer sky", quality: "high", out: &out },
             ).unwrap();
             bounded_join(handle);

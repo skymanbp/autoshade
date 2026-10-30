@@ -5937,7 +5937,15 @@ impl BatchNames {
 /// pixel master goes out the same door: `retouch`'s heal and clone, and the
 /// stacked master from [`crate::stack`]. A second copy of this would be a
 /// second place for the staging rule to be got wrong.
-pub fn save_master(out: &Path, img: image::DynamicImage) -> Result<()> {
+///
+/// `baked` is the lens geometry in the pixels (v1.17.0,
+/// [`crate::render::BakedGeometry`]): stamped on the STAGED file, so the
+/// master is never published without the frame it is in.
+pub fn save_master(
+    out: &Path,
+    img: image::DynamicImage,
+    baked: Option<&crate::render::BakedGeometry>,
+) -> Result<()> {
     ensure_parent(out)?;
     let ext = out.extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
     let fmt = image::ImageFormat::from_extension(&ext).unwrap_or(image::ImageFormat::Png);
@@ -5954,6 +5962,12 @@ pub fn save_master(out: &Path, img: image::DynamicImage) -> Result<()> {
     if let Err(e) = crate::render::write_working_space(&staged, &img, fmt) {
         let _ = std::fs::remove_file(&staged);
         return Err(e).with_context(|| format!("write {}", staged.display()));
+    }
+    if let Some(g) = baked
+        && let Err(e) = crate::render::stamp_baked_geometry(&staged, g)
+    {
+        let _ = std::fs::remove_file(&staged);
+        return Err(e);
     }
     if let Err(e) = crate::store::durable_replace(&staged, out) {
         let _ = std::fs::remove_file(&staged);
@@ -8273,7 +8287,7 @@ mod tests {
         }));
         for name in ["stack.tif", "heal.png"] {
             let out = dir.join(name);
-            save_master(&out, img.clone()).unwrap();
+            save_master(&out, img.clone(), None).unwrap();
             // The TIFF tag through the `tiff` crate, as the reader asks it
             // (image's TIFF probe folds a limits error into "no profile").
             let profile = if name.ends_with(".tif") {

@@ -3107,8 +3107,8 @@ before the cap, with the mosaic already dropped (the export's peak with it,
 p42 61 MP: 1399 MB, under `PER_PHOTO_PEAK_COMMIT_MB`). The GUI samples such a
 base at the corrected point of a click (`orig_to_base_norm`), and hands its
 segmentation, depth and face helpers the base mapped back to the original
-frame (`original_frame_base`). The reverse fit's source and the retouch
-pictures stay in the sensor frame (`BasePart::without_lens`). Every surface that shrinks a
+frame (`original_frame_base`). The reverse fit's source stays in the sensor
+frame (`BasePart::without_lens`). Every surface that shrinks a
 frame goes through `render::thumbnail` / `thumbnail_exact`: `image`'s own block
 average is `(sum + n/2) / n`, which on an f32 frame is the mean + 0.5, so a
 float base sent to it came back washed out (the fit then refused it as
@@ -3116,14 +3116,41 @@ toneless). The heal /
 clone / denoise / stack / generative MASTERS bake through `render::master_develop`
 / `master_pixels_for` instead: the same part with the RAW default sharpening,
 16-bit, because a master is a baked file and a baked file renders with no
-default sharpening, and in the SENSOR frame, the card over it resampling the
-lens in the tail. `PhotoCalibration` carries the profile and the
+default sharpening — and in the frame the base is in, lens-corrected when the
+camera stage resamples the lens.
+
+**A master carries the lens geometry in its pixels in its own file**
+(v1.17.0, `render::BakedGeometry`): one key, `autoshade:baked-geometry`, in a
+PNG `iTXt` chunk, a TIFF private tag (65117) or a JPEG comment segment, stamped
+on the staged file before the publish (`pipeline::save_master`, the fill's
+`publish_master`, `render::render_master_to_file` for the denoise, carried
+through the denoise sidecar). It names the lens profile, which of distortion,
+CA and vignetting are baked, the manual Distortion amount and an FNV-1a digest
+of the composed knots. Every surface reads it through one door,
+`render::SourceFrame::of` (the export's baked arm, the GUI and web canvases,
+the pixel layers, `master_pixels_for` under a heal, clone, fill or stack), so
+no record beside the file can disagree with the pixels and no caller has to
+hand a flag on: a marked, lens-corrected master is masked in the corrected
+frame and takes no second resample in the tail; a file with no marker is in
+the sensor frame (every master before v1.17.0); and a recipe that develops
+other lens geometry than the one baked in — a correction switched off, the
+manual Distortion slider moved, another strength — is refused at the export,
+the canvases and the master read (`SourceFrame::check`) rather than corrected
+twice or left with a correction it switched off. Under a heal, clone or fill
+on a corrected master (`render::Master`), the painted masks and the clone
+point, stored in the sensor frame, are mapped onto it through the same map the
+mask chain reads it with; the GUI fill's card picture is the corrected one, and
+a layer made over it is marked and composited as it is (`layers::LayerMap`).
+A GENERATED master (reimagine, the whole-image adjust) is made from an
+unmarked picture and stays unmarked: its card strips the start it carries
+(`strip_baked_start`). `PhotoCalibration` carries the profile and the
 Look. A baked file — a master, an embedded preview, a finished image — already
 carries its start, so `strip_baked_start` clears the curve, profile, Look and
 lens profile before it renders. On p39 at 1000 px against the engine's render
 of the all-zero sidecar naming Adobe Color: the export of the all-zero fresh
-recipe is byte-identical, the canvas reads ΔE76 0.219, a master 0.017, and the
-fit source at its 2048 edge 0.187 against the sidecar at the same edge
+recipe is byte-identical, the canvas reads ΔE76 0.000, a master (corrected
+and marked, pixel for pixel) 0.018, and the fit source at its 2048 edge 0.469
+against the sidecar at the same edge
 (`render::tests::every_surface_shows_a_fresh_canvas_as_the_export_renders_it`).
 
 The invariant that keeps F7 from changing any existing picture is that a
