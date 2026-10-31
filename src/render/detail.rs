@@ -15,9 +15,10 @@
 //! moves), in the engine's gamma-encoded working domain, and every free
 //! constant is named: the Lightroom kit's ladders (`SH-*`, `NR-*`, `CNR-*` in
 //! `autoshade-lr-kit-v150/pack-spec.json`) exist to pin them against exported
-//! pixels. Since v1.17.0 all three are measured against Adobe Camera Raw
-//! rendering the star frame by script ([`SHARPEN`], [`LUMA_NR`],
-//! [`CHROMA_NR`] carry their readings).
+//! pixels. Since v1.17.0 the sharpening law is measured against Adobe Camera
+//! Raw rendering the star frame by script ([`SHARPEN`] carries its readings);
+//! the two noise-reduction operators are still first-principles values and
+//! say so.
 //!
 //! # Film pixels
 //!
@@ -382,26 +383,15 @@ fn edge_mask(blur: &[f32], w: usize, h: usize, masking: f32, film: FilmScale) ->
 
 // ── luminance noise reduction ────────────────────────────────────────────────
 
-/// Luminance NR's laws. `radius` and `noise` MEASURED against Adobe Camera Raw
-/// on 2026-10-27 (v1.17.0): the star frame at Luminance 25 / 50 / 100 (Detail
-/// 50, Contrast 0, sharpening off), 16-bit at the sensor's size, fitted
-/// jointly in this filter's own structure on the oracle's own unsmoothed
-/// pixels (`nrjoint.py`). Per-pixel R² of the move 0.805 / 0.833 / 0.860
-/// (the provisional `Ramp(1, 4)` / `Ramp(0.004, 0.054)` read 0.657 / 0.774 /
-/// 0.842). Below the 0.9 the other Detail axes reach, and no structure tried
-/// reached it: a linear 11×11 filter 0.71–0.77, a threshold that follows the
-/// local level 0.84–0.86, Wiener shrinkage of five Gaussian bands 0.79–0.84.
-/// Camera Raw takes the high-pass noise of the flat sky to × 0.62 / 0.49 /
-/// 0.30 and the brightest 2000 star peaks to × 0.93 / 0.90 / 0.85.
+/// Luminance NR's laws, provisional until `NR-50`, `NR-100`, `NR-50-D0`,
+/// `NR-50-D100` and `NR-50-C100` pin them:
 ///
-/// * `radius` — the neighbourhood, in film pixels, over Luminance (5 at every
-///   amount: 4 and 6 read within 0.005);
+/// * `radius` — the neighbourhood, in film pixels, over Luminance;
 /// * `noise` — the luma variation (gamma units, film scale) the smoother
 ///   treats as noise, over Luminance: a guided filter keeps structure whose
 ///   local standard deviation is well above it and flattens what is below;
 /// * `keep` — Detail's multiplier on that threshold (1 at Lightroom's default
 ///   50): higher Detail preserves more, "but may produce noisier results".
-///   Unmeasured, as is Contrast: only Detail 50 / Contrast 0 were rendered.
 struct LumaNrLaw {
     radius: Ramp,
     noise: Ramp,
@@ -409,7 +399,7 @@ struct LumaNrLaw {
 }
 
 const LUMA_NR: LumaNrLaw =
-    LumaNrLaw { radius: Ramp(5.0, 5.0), noise: Ramp(0.0121, 0.0609), keep: Ramp(1.6, 0.4) };
+    LumaNrLaw { radius: Ramp(1.0, 4.0), noise: Ramp(0.004, 0.054), keep: Ramp(1.6, 0.4) };
 
 /// The Luminance NR sliders, resolved to 0..=1.
 #[derive(Debug, Clone, Copy, PartialEq)]
