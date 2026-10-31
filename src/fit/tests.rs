@@ -7810,20 +7810,33 @@ fn hsl_band_budget_is_monotone_across_the_three_strength_stops() {
 /// left less to carry: fan 4.0° (10.2°), fit 0.0800 -> 0.0282 (0.0800 ->
 /// 0.0251), confidence 0.489 (0.496).
 ///
-/// Both pairs are OPTIONAL, like every other corpus pair: absent, the
-/// test says so and passes, and the synthetic two-temperature fixture
-/// carries the refusal side of the same question on its own.
+/// Re-measured 2026-10-31 for v1.17.0, on `p40` alone: the lens profile's
+/// VIGNETTING is now the Adobe profile's model whenever this machine holds
+/// one for the lens ([`crate::lensmeta::read_for`]), the camera's own knots
+/// only when it holds none, and the base this fit composes carries it (the
+/// outermost gain 1.70 -> 1.42 on this lens). On that frame the
+/// white-balance stage's demand, 17300 K / tint +100, comes inside the
+/// budget and the cells vouch it (0.966 converged / 0.024 diverged / 0.988
+/// aligned), so the cast curves are left less to carry: admitted at 6.3°,
+/// fit 0.0673 -> 0.0424, confidence 0.552. The fit code is not what moved:
+/// handed v1.16.0's base (its lens table) and v1.16.0's source frame, this
+/// tree reads 11.4°, 0.067585 -> 0.040963, 0.556034 — v1.16.0's own
+/// figures to the last digit. The pin therefore holds where the pool has
+/// this lens's profile, and the test checks that first. `p41`'s question
+/// changed its answer on the same frame and is asked by
+/// `a_two_temperature_cast_is_withheld_past_the_gate_once_the_cells_keep_its_white_balance_as_shot`.
 ///
-/// Mutation: halve [`FAN_DEG`] and `p40` goes from admitted to convicted,
-/// red on the fan-margin assertion.
+/// The pair is OPTIONAL, like every other corpus pair: absent, the test
+/// says so and passes, and the synthetic two-temperature fixture carries
+/// the refusal side of the same question on its own.
+///
+/// Mutation: lower [`FAN_DEG`] to 6° and `p40` goes from admitted to
+/// convicted, red on the admission assertion.
 #[test]
 fn the_fan_gate_costs_a_real_two_temperature_pair_nothing() {
     use crate::rationale::keys;
     let Some(root) = calibration_corpus() else { return };
-    for (code, want_fan, want_before, want_after, want_conf) in [
-        ("p40", 11.4f32, 0.0676f32, 0.0410f32, 0.556f32),
-        ("p41", 4.0, 0.0800, 0.0282, 0.489),
-    ] {
+    for (code, want_fan, want_before, want_after, want_conf) in [("p40", 6.3f32, 0.0673f32, 0.0424f32, 0.552f32)] {
         let raw = root.join(format!("{code}.arw"));
         let target_path = root.join(format!("{code}-target.jpg"));
         if !raw.is_file() || !target_path.is_file() {
@@ -7840,6 +7853,11 @@ fn the_fan_gate_costs_a_real_two_temperature_pair_nothing() {
             .expect("develop the two-temperature RAW");
         let tgt = image::open(target_path).expect("the finished rendition");
         let base = crate::pipeline::calibration_recipe(crate::pipeline::fit_calibration(&raw));
+        assert!(
+            base.lens_profile.adobe.is_some(),
+            "{code}: the pin is measured with the lens's Adobe profile from this machine's pool, \
+                 and the pool has none for it here"
+        );
         let report = fit_recipe_from(&src, &tgt, &base);
         // The cast SHIPS — which is the whole claim, and what makes the
         // fan reading below exist: the gate publishes what it passed on
@@ -7884,6 +7902,102 @@ fn the_fan_gate_costs_a_real_two_temperature_pair_nothing() {
             report.recipe.confidence
         );
     }
+}
+
+/// The other two-temperature pair, `p41` (a building at twilight: a warm
+/// horizon band, a deep blue sky, a warm lamp), on the frame v1.17.0 reads
+/// it in — the lens profile's vignetting is the Adobe profile's
+/// ([`crate::lensmeta::read_for`]). Until then the fan gate cost it
+/// nothing: the white-balance stage shipped 3800 K / tint -100, the cells
+/// vouched it at 0.755 converged / 0.043 diverged / 0.709 aligned, and the
+/// curves were left a 4.0° fan.
+///
+/// On this frame the stage solves the same 3800 K / -100 and the cells
+/// refuse it on DIRECTION, by their own rule: 0.727 converged and 0.035
+/// diverged clear their lines, 0.673 aligned does not (`VOUCH_MIN_ALIGNED`
+/// 0.70), so it goes back to as-shot and, the direction not agreeing, no
+/// share of it is searched for. The whole frame agrees with the cells: at
+/// the stage the move takes the look error 0.028581 -> 0.028915, worse (it
+/// did on v1.16.0 too, 0.031825 -> 0.034001, where the cells' 0.709 let it
+/// ship). With the white balance at as-shot the channel curves are asked
+/// for the whole cast and fan its widest hue class 15.1° against the 15°
+/// line, so the gate withholds them. That is the gate doing its job on a
+/// cast the target's cells do not ask for, and the fit still ships: 0.0742
+/// -> 0.0283 at confidence 0.480.
+///
+/// OPTIONAL like every corpus pair; the same lens-profile premise as the
+/// pair above.
+#[test]
+fn a_two_temperature_cast_is_withheld_past_the_gate_once_the_cells_keep_its_white_balance_as_shot() {
+    use crate::rationale::keys;
+    let Some(root) = calibration_corpus() else { return };
+    let code = "p41";
+    let raw = root.join(format!("{code}.arw"));
+    let target_path = root.join(format!("{code}-target.jpg"));
+    if !raw.is_file() || !target_path.is_file() {
+        crate::test_skipped(
+            "a_two_temperature_cast_is_withheld_past_the_gate_once_the_cells_keep_its_white_balance_as_shot",
+            &format!("the two-temperature pair {code} is not in this corpus"),
+        );
+        return;
+    }
+    let src = render::render_to_image(&raw, &EditRecipe::default(), None, Some(2048))
+        .expect("develop the two-temperature RAW");
+    let tgt = image::open(target_path).expect("the finished rendition");
+    let base = crate::pipeline::calibration_recipe(crate::pipeline::fit_calibration(&raw));
+    assert!(
+        base.lens_profile.adobe.is_some(),
+        "{code}: the reading is measured with the lens's Adobe profile from this machine's pool, \
+             and the pool has none for it here"
+    );
+    let report = fit_recipe_from(&src, &tgt, &base);
+    let share = |arg: &str| {
+        projection_arg(&report, keys::FIT_NOTE_WB_CELLS_REFUSED, arg).unwrap_or_else(|| {
+            panic!("{code}: the cells' refusal of the white balance: {}", report.recipe.rationale)
+        })
+    };
+    let (converged, diverged, aligned) = (share("converged"), share("diverged"), share("aligned"));
+    eprintln!(
+        "TWO_TEMPERATURE {code} wb_cells={converged:.3}/{diverged:.3}/{aligned:.3} err={:.6}->{:.6} conf={:.6}",
+        report.err_before, report.err_after, report.recipe.confidence
+    );
+    assert!(
+        (converged - 0.727).abs() <= 0.02 && (diverged - 0.035).abs() <= 0.02 && (aligned - 0.673).abs() <= 0.02,
+        "{code}: the cells' shares moved off the measured 0.727 / 0.035 / 0.673: \
+             {converged} / {diverged} / {aligned}"
+    );
+    assert!(
+        converged >= 0.70 && diverged <= 0.10 && aligned < 0.70,
+        "{code}: the refusal is on direction alone, by the cells' own lines"
+    );
+    assert!(
+        report.recipe.temperature_k.is_none() && report.recipe.tint == 0.0,
+        "{code}: the refused white balance went back to as-shot: {:?} / {}",
+        report.recipe.temperature_k,
+        report.recipe.tint
+    );
+    let fan = projection_arg(&report, keys::FIT_NOTE_CAST_HUE_FANNED, "fan")
+        .unwrap_or_else(|| panic!("{code}: the fan gate withholds the curves: {}", report.recipe.rationale));
+    assert!(
+        (fan - 15.1).abs() <= 0.6 && fan > FAN_DEG,
+        "{code}: the withheld curves' fan moved off the measured 15.1°: {fan:.1}°"
+    );
+    assert!(
+        !report.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED),
+        "{code}: a withheld cast is not also admitted: {}",
+        report.recipe.rationale
+    );
+    assert!(
+        (report.err_before - 0.0742).abs() <= 0.002 && (report.err_after - 0.0283).abs() <= 0.002,
+        "{code}: residual moved off the measured 0.0742 -> 0.0283: {:.6} -> {:.6}",
+        report.err_before,
+        report.err_after
+    );
+    assert!(
+        (report.recipe.confidence - 0.480).abs() <= 0.02,
+        "{code}: confidence moved off the measured 0.480: {}",
+        report.recipe.confidence
+    );
 }
 
 /// A frame whose only colour evidence is a per-band HUE gap: one field
