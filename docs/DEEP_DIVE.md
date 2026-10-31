@@ -230,8 +230,8 @@ Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](TECH_STACK.md#ai-adviso
 No slider in AutoShade is a guess at what its number might mean. Each one is
 a closed-form law with named constants: the monotone tone LUT; the two-arm
 Texture model (`A1 = 0.172443`, `A2 = 0.304888`); the 290×11 radial feather
-table; the linear falloff, a smoothstep on the abscissa `t^1.124`; the radial
-boundary, a pure 0.99876 scale of the stored ellipse; the brush law
+table; the linear falloff, a smoothstep on the abscissa `t^1.124`; a radial
+mask drawn on its stored ellipse, unscaled; the brush law
 `(1 − ρ^m)^n` with the flow constant `κ = 0.1284`; the lens mask-frame
 transport built from the profile's own 16 native samples; and the sharpening
 operator — gains close to linear in Amount, a shadow rolloff, and halo limits
