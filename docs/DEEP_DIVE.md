@@ -237,17 +237,15 @@ transport built from the profile's own 16 native samples; and the sharpening
 operator — gains close to linear in Amount, a shadow rolloff, and halo limits
 bounded by each pixel's own luminance, so the dark ring around a bright star
 deepens with the star. In v1.17.0 the same treatment reached a mask's Color
-tint (an Oklab chroma shift under a midtone window), the white level of each
-camera body, exposure as a pointwise transfer, lens distortion, vignette and
-chromatic aberration, the order of the colour tables and the Look, a spatial
-Dehaze, and the local tone and saturation controls.
+tint (an Oklab chroma shift under a midtone window), chromatic aberration
+moved channel by channel, and the order of a camera profile's colour tables
+and a creative Look's. A camera profile is colour data read from the user's
+own Camera Raw install, like a lens profile; it never changes how a control
+behaves.
 
 Each constant was fitted once, on purpose-shot frames at known slider values,
 and is then held by the project's own tests: a unit test pins every law's
-shape and constants, the reverse fit predicts a zone's exposure through the
-very per-pixel tone functions the render runs (a test holds the prediction to
-the render within 0.025), and a release does not ship while any of them is
-red. During development a commercial raw developer's renders served as the
+shape and constants, and a release does not ship while any of them is red. During development a commercial raw developer's renders served as the
 measurement reference for these constants; the shipped engine depends on
 nothing from it. Where a law is incomplete it says so: Sharpening's Masking and
 the rest of its Detail band, and the feathered intersection of masks are not modelled.

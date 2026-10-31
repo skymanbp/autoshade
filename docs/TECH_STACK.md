@@ -72,11 +72,6 @@ coercing either to RGB would invent a colour model.
   N − 1 must divide 255, so every node input is an exact code).
 - RAW memory admission: refuse an estimated decode above 4 GiB, using the
   measured 31 B/pixel envelope, or 138,547,333 pixels (**measured gate**).
-- Raw white level (v1.17.0): a per-body table
-  (`decode::white_level::camera_raw_white_level`, **measured** from the
-  WhiteLevel Adobe DNG Converter 18.7 writes): ILCE-7RM4A / ILCE-7RM4 16383 at
-  14 bits, 15000 at ISO 160, 16380 at 12 bits; ILCE-7M3 16300; Canon EOS R6
-  16384. Any other body keeps the file's level (rawler's), disclosed per render.
 
 ### Measured results & disclosures
 
@@ -102,21 +97,6 @@ coercing either to RGB would invent a colour model.
   50,331,648 samples by up to 2 codes; and the stack, heal and clone masters
   were written untagged, so a 16-bit one re-read with the untagged-input
   warning.
-- The raw white level is an exposure (`(value − black) / (white − black)`), and
-  until v1.17.0 the engine took rawler's, the file's own: 15360 on every Sony
-  file read (the SR2 tag 0x787F), 14008 on the R6. The DNG Adobe's converter writes of the same
-  files says otherwise, so every Sony render sat log2(15871 / 14848) = +0.096 EV
-  too bright before any slider (R6 +0.234 EV less a −0.02 EV
-  baseline difference), lens correction on or off alike. The rule was pinned on
-  a census of 50 files (42 ILCE-7RM4A, 8 ILCE-7RM4; ISO 50–25600, 1/4000–25 s)
-  plus three corpus frames: 12-bit files 16380 and 14-bit files 16383, except
-  ISO 160, where all 8 files say 15000. It is not the data maximum, not the
-  vendor tag and not a linearization table (none is written). From v1.17.0
-  every render of those bodies is darker by that amount (−0.096 EV for the Sony
-  bodies) — a deliberate change, named in the release notes. It is the raw's
-  scale, not recipe semantics, so the stamped-curve era rule does not apply.
-  The D700, whose file level is already the right one, renders
-  byte-identically.
 
 ### RAW denoise
 
@@ -342,56 +322,16 @@ v1.5.0 that name is read rather than carried. `src/dcp.rs` parses the `.dcp`
 Adobe installed (a plain TIFF/IFD, every offset bounds-checked because the file
 is the user's, not ours) and `render/profile.rs` applies it between the camera
 matrix and the working-space encode: reference matrix → HSV → `HueSatMap` →
-RGB → baseline-exposure gain → HSV → `LookTable` → RGB → tone curve, which is
-the order RawTherapee's `rtengine/dcp.cc` documents. Nothing Adobe ships is
-bundled; a machine with no profiles gets a named refusal.
+RGB → HSV → `LookTable` → RGB. Nothing Adobe ships is bundled; a machine with
+no profiles gets a named refusal.
 
-- Default tone curve (v1.17.0): a profile with no `ProfileToneCurve` renders
-  through Adobe's default curve, the 1025-sample `kTable` of
-  `dng_tone_curve_acr3_default::Evaluate` in the Adobe DNG SDK's
-  `dng_render.cpp`, © 2006–2007 Adobe Systems Incorporated, used under the DNG
-  SDK licence (which permits use, modification and distribution). Embedded in
-  `render/profile/acr3_default.rs`; RawTherapee's
-  `adobe_camera_raw_default_curve` is the same table to the last digit. The
-  stage's exposure is the body's `BaselineExposure`, inferred from the body's
-  camera-matching profiles (`dcp::baseline_exposure`), plus the profile's
-  offset. It renders through a measured exposure transfer
-  (`render::tone_cr::Ramp`, **measured**, `tone_cr/ramp_table.rs`): the
-  transfer of a grey over 54 total exposures −5…+6 EV × 110 inputs, read from
-  renders of synthetic linear DNGs, blended between rows in EV;
-  the brightest and darkest channels go through it and the middle one keeps
-  its linear ratio. Under an As Shot white whose camera neutral is not grey
-  the transfer sits higher: the row at `E + h` on the input over `2^h`, with
-  `h` read from a table over the neutral's largest/smallest channel
-  (measured, 12 points, 2026-10-29: 0 at 1, 0.185 at
-  1.15, 0.36 at 1.3, 0.525 at 1.45, 0.835 at 1.8, 0.995 from 2 on). SCOPE:
-  those renders were frames of grey patches alone, and the measured headroom
-  is a FRAME-LEVEL reading, not a pointwise one — the same neutral and the
-  same greys render white at L 89.5 alone, 93.2 beside a colour lattice and
-  98.5 beside a dark-grey population — so the table is the grey frame's
-  reading until the adaptive law is measured. The pair
-  is stamped per photo as `EditRecipe::camera_start` (`render::camera_start`),
-  so the canvas's Exposure (applied over the base develop by
-  `render::Exposure`) reads its light back at the start the export's stage
-  renders at; the sidecar never carries it.
-
-- Over-range light (v1.17.0, `render::camera` / `render::develop`, **measured**,
-  2026-10-29): a colour the camera stage puts above the
-  working space's 1 is kept, encoded exactly, through Highlights/Shadows and
-  the slider Exposure, and each component clips at 1 after the Exposure (no
-  blown-pixel desaturation on this path). Light above the profile reference's
-  own 1 (ProPhoto) still clips there, under Adobe's curve.
-
-- The profile stage's tail under the Basic adjustments (v1.17.0, `render::profile::UnderTone`,
-  **measured**, 2026-10-29): the stage puts its look table on AFTER the exposure
-  transfer and before its tone curve, so an Exposure (and a mask's Temp/Tint, the vignette under tone, the
-  white balance under tone) undoes the curve AND the look table, acts, and redoes both. The stage's own
-  look table, tone curve and reference basis travel with the photograph's camera start
-  (`CameraStart::tables`, filled where the profile is read; 0 in a recipe written before it = Adobe's
-  default curve, no look table, as before). The detour renders as the stage rendered at the total
-  exposure; a loss once seen on it was a basis mismatch, not the inverse: a ForwardMatrix stage works in ProPhoto at D50 behind a Bradford
-  adaptation, and undoing it in ProPhoto's primaries at the working white put warm colours 2–3.5 % off
-  per channel.
+A camera profile is colour data read from the user's own Camera Raw install,
+like a lens profile; it never changes how a control behaves (v1.17.0). The
+stage applies the profile's colour matrices and tables and nothing else: a
+profile's `ProfileToneCurve` and `BaselineExposureOffset` are parsed and not
+rendered, and tone, exposure, curves and masks of a recipe that names a
+profile are exactly those of one that names none — the photo's camera base
+look below included.
 
 - Table entry: `(hue shift in degrees, saturation scale, value scale)`, stored
   `index = (val * hueDivisions + hue) * satDivisions + sat` (**measured** — at
@@ -399,8 +339,6 @@ bundled; a machine with no profiles gets a named refusal.
   three-dimensional tables in the installed pool under this reading and 0 of 60
   under either alternative; the two-dimensional tables Adobe actually ships
   cannot discriminate).
-- Tone curve applied Adobe's way: the curve moves the max and min channels and
-  the median is placed proportionally between them. Per channel desaturates.
 - Two calibrations blend in **reciprocal** temperature — the midpoint between
   2856 K and 6504 K is 3969 K, not 4680 K.
 - Colour matrix (v1.17.0): a profile with a `ForwardMatrix` owns the camera →
@@ -417,26 +355,22 @@ bundled; a machine with no profiles gets a named refusal.
   least-significant digit first, little-endian size + zlib via `flate2`), checked
   against its id with `md5` (the SDK's `RecomputeFingerprint`). Read from the
   user's Camera Raw install, never bundled; RGB tables stay unrendered and named.
-- The canvas start (v1.17.0): a fresh develop of a RAW names 「Adobe Standard」
-  with the 「Adobe Color」 Look (`render::canvas_recipe`, the all-zero sidecar's
-  own `crs:Look` block) when `render::canvas_renders` finds both in the install,
-  and the camera base look below otherwise (`pipeline::fresh_canvas_start_with`,
-  the one decision every fresh-open surface takes). Exactly one starting tone,
-  decided from the recipe alone (`EditRecipe::starting_curve`): a recipe that
-  names a profile renders no camera curve. The profile stage runs inside the RAW
-  develop, so every surface that hands pixels to the preview develop hands it the
-  BASE develop of the recipe's `render::BasePart` (profile + Look table, no baked
-  tone, no sharpening; float with the over-range light kept under a profile;
-  lens-corrected when the camera stage resamples the lens):
-  the GUI and web canvases (keyed and re-developed by part) and
-  `pipeline::fit_source`; the heal / clone / fill / denoise / stack masters bake
-  the same part with the RAW default sharpening (`render::master_develop`), in
-  the same frame, and carry the lens geometry baked into them in their own file
-  (`render::BakedGeometry`: a PNG `iTXt` chunk, TIFF tag 65117 or JPEG comment
-  under `autoshade:baked-geometry`, read through `render::SourceFrame::of`; no
-  marker = the sensor frame; a recipe with other lens geometry is refused).
-  Every downscale of a frame uses `render::thumbnail` (`image`'s f32 thumbnail
-  adds 0.5 to every channel).
+  It goes on after the camera profile's own look table, which stays. A creative
+  Look's baked tone curve and sliders are parsed and not rendered; its
+  black-and-white switch is.
+- The base develop (v1.17.0): the profile stage runs inside the RAW develop,
+  so every surface that hands pixels to the preview develop hands it the BASE
+  develop of the recipe's `render::BasePart` (camera profile + Look table, no
+  tone, no sharpening): the GUI and web canvases (keyed and re-developed by
+  part) and `pipeline::fit_source`; the heal / clone / fill / denoise / stack
+  masters bake the same part with the RAW default sharpening
+  (`render::master_develop`). A file whose own metadata says it carries lens
+  geometry in its pixels (`render::BakedGeometry`: a PNG `iTXt` chunk, TIFF tag
+  65117 or JPEG comment under `autoshade:baked-geometry`, read through
+  `render::SourceFrame::of`) is refused — no develop bakes lens geometry — and
+  a mask raster that says it is drawn in a lens-corrected frame is read in it;
+  no marker = the sensor frame. Every downscale of a frame uses
+  `render::thumbnail` (`image`'s f32 thumbnail adds 0.5 to every channel).
 
 ### Source
 
@@ -510,14 +444,11 @@ composed profile/manual vignette and dehaze;
 dehaze inverts the airlight model `I = J·t + A(1−t)`. The tone LUT then combines
 exposure, contrast, whites, blacks, Highlights, shadows, base curve, the
 parametric curve and the master point curve before the B&W grey mix (when the
-photo is black and white), eight-band HSL and the point
+photo is black and white), RGB point curves, eight-band HSL and the point
 colours, colour grading,
-clarity, Texture, saturation/vibrance, the RGB point curves (v1.17.0: Camera
-Raw's place, measured), noise reduction, sharpening, local
+clarity, Texture, saturation/vibrance, noise reduction, sharpening, local
 adjustments, the colour field, the SDR rendition when the photo is in HDR edit
-mode, and last the generative fill's pixel layers. The frame is then resampled — lens geometry (unless the camera stage already
-resampled it: under a camera profile with the Distortion slider at 0 and Remove Chromatic Aberration off, the profile's distortion
-and CA are resampled on the demosaiced linear frame, after the vignetting gain and before the black clip, `render::lens_in_camera`), the Transform/Upright projective
+mode, and last the generative fill's pixel layers. The frame is then resampled — lens geometry, the Transform/Upright projective
 step (`render/perspective.rs`), straighten, crop —
 and only after that does the **finishing pass** run: the post-crop vignette and
 film grain, whose whole definition is "after the crop" (`render/finish.rs`).
@@ -525,28 +456,8 @@ The RAW render, the baked render, the GUI canvas and the web preview all reach
 it through one function, so the frame a photographer judges and the frame that
 ships cannot part company.
 
-On a recipe that names a camera profile (`render::SliderLaw::CameraRaw`,
-v1.17.0) the Basic panel's tone sliders follow the measured camera-profile law
-instead of the knot model (`render/tone_cr.rs`): they act on `u`, the input of Adobe's
-default curve, so the develop undoes the curve, moves `u` and puts the curve
-back. Highlights and Shadows go first, the measured order, on a law of their
-own: local (each pixel's push reads an edge-aware base of the frame's
-luminance) and keyed to the frame (the base measured against the frame's
-mean); then Exposure, a gain through the exposure ramp, per pixel by
-Adobe's channel rule (the brightest and darkest channels through the curve,
-the middle one in proportion); then Contrast, Whites and Blacks as measured
-response tables over the exposed `u`, with each pixel's hue from the
-channel rule and its lightness from the luma ratio; then the parametric and
-point curves, then the Look's baked curve, both by the measured
-curve rule (`render::tone::camera_raw_rgb_tone`: on linear ProPhoto
-channels, the brightest and darkest through the curve on their sRGB-encoded
-values, the middle one between them — at its LINEAR ratio for the Look's
-curve, the DNG SDK's `RGBTone`, and at its ENCODED ratio for the
-photographer's curve, both measured; the photographer's
-curve runs before the Look's, measured, v1.17.0). Every recipe that names no
-profile renders through the knot model below, byte for byte, and the reverse
-fit solves each law against itself (`fit::tone_cr` carries the measured map
-into `u` through the start and inverts the tables).
+Every recipe develops on this one law (v1.17.0): a camera profile or Look the
+recipe names adds colour tables in the base develop and changes nothing here.
 
 `build_tone_lut` samples an eight-knot monotone cubic Hermite curve. Its
 `tone_knot_weights` derive each control's influence from adjacent exposure-curve
@@ -574,96 +485,16 @@ supposed to remove.
   at the Greville abscissae, a region at ±100 moving its centre by ½ × its
   width; composed after the slider model and before the point curve
   (**designed, provisional** until the kit's `PARAM-*` exports).
-- Point curves (v1.17.0, `render::tone::{curve_lut, apply_rgb_curves,
-  CameraRawTone::curves_px}`, **measured**): between the knots the DNG SDK's
-  `dng_spline_solver`; each per-channel curve on one channel of linear
-  ProPhoto RGB (D50, Bradford, `render::profile::curve_space`) under the sRGB
-  transfer, after Saturation/Vibrance; on a camera-profile start the
-  composite curve by the channel rule on the same channels, before the
-  Look's curve, and the Look's own curve after it by the same rule. The
-  reverse fit matches channel-curve distributions in those channels
-  (`render::curve_channels`). ARCHITECTURE, "The point curves".
-- Tone sliders on a camera-profile start (v1.17.0, `render/tone_cr.rs`,
-  **measured**): calibrated on one frame's exact flat packet
-  (Adobe Color, lens profile on) rendered one slider at a time —
-  Exposure −3 … +2 (eight values), Contrast +25/±50/±100, Highlights
-  −30/−60/−100/+60/+100, Shadows +30/+60/+100/−60/−100, Whites and Blacks
-  ±40/±80, and Exposure ∓1 with Blacks ±40 — read at 1000 px in L bands.
-  Exposure is a linear gain before the curve, through the measured exposure
-  ramp. The other five are response tables over `u` (33 samples), one per
-  sign — the response is not antisymmetric: Blacks −40 moves the toe 3.7×
-  as far as +40 — each with a curvature table,
-  `push = s·(T(u) + |s|·Q(u))`, because the response is not linear in the
-  magnitude either (Blacks −80 moves L 20–30 2.8× as far as −40). The tables were fitted with the engine in the loop: each pass
-  renders the 23 cases and moves the tables by the band L error over the
-  curve's slope there, pixels clipped at white left out. Contrast, Whites
-  and Blacks act on the EXPOSED value. A local slope floor
-  (1 % of the exposed curve's rise) keeps the result monotone where two
-  pushes overlap. The reverse fit holds each row at the previous pass's
-  magnitude and re-solves until the answer stops moving; Highlights and
-  Shadows, which run before Exposure (next item), enter its solve as their
-  push at the pixel's own value times the exposure's slope, at frame
-  statistics read off the score set's masses (the mean linear value, the
-  mean and standard deviation of `log2`).
-- Highlights and Shadows on a camera-profile start (v1.17.0,
-  `render/tone_cr.rs`, **measured**). **Order:** both run BEFORE Exposure and
-  before Contrast and Blacks, so they are the tone stage's first pass.
-  **Shadows**: the push in stops at a cell of a `log2` luminance map 768
-  cells across the width is `s · spread · T(b)` — `b` the cell minus the
-  frame's anchor, `spread` the map's standard deviation, `T` one monotone
-  shape shared by every frame, nothing fitted per frame. A cell is `log2` of
-  the cell's mean linear luminance, not the mean of its pixels' `log2` (before
-  Exposure a night frame's deepest cells hold 9–14 % pixels at or below 0,
-  which the mean of `log2` would read at the floor). The anchor is a power
-  mean of the map's cells (exponent 0.75, over `2^cell`) moved down 1.048
-  stops, and it reads the same off the 768-cell map as off 8-pixel blocks, so
-  a preview and a full-size export agree. Fitted on 19 frames — the seven
-  calibration frames and twelve census frames of other scenes and bodies —
-  at sensor size in 16 bit (8-bit renders clip the deepest levels); held out
-  one frame at a time it explains 0.89 of the push. The push is linear in the
-  slider; Shadows below 0 read their own table of the same form (four frames
-  at −60), and −60 darkens the deepest levels further than +60 lifts them.
-  The push is a gain on the pixel's linear luminance read off the map, the
-  colour kept by one ratio over a floor of 0.03 in the profile stage's
-  encoding. A frame with no spread is not moved (pinned as a test).
-  **Highlights**: the push follows an edge-aware (bilateral) base of `log2`
-  linear luminance, σ 400 and 1600 film pixels and 1 stop, against the
-  frame's mean linear luminance (`z = log2(base) − log2(mean)`), tables over
-  the two bases' `z` fitted on the seven calibration frames at
-  −30/−60/−100 with the engine in the loop; above 0 the pointwise table; the
-  hue from the channel rule with the pixel's own curve. A mask's Highlights
-  and Shadows run the same law on the same sites, Highlights' push ×1.2 and
-  Shadows' slider ×1.15, right after the global pass.
-  **Known limits.** How strongly Highlights acts depends on the frame's dark
-  population — a large deep region strengthens the push across the whole
-  frame, and where it sits matters — and no frame statistic tried on 19 real
-  and 206 synthetic frames (means, medians, percentiles, block minima, power
-  means, histograms, capture metadata, tiled statistics, local Laplacian
-  filters) carries it, so the engine keeps its linear-mean key and the
-  per-frame strength is not modelled. The Shadows law is regional on its
-  map, not edge-aware, and has no size threshold for small deep patches;
-  where 30–65 % of a frame's pixels sit at or below 0 before the push, a
-  gain cannot lift them.
+- Point curves (`render::tone::{curve_lut, apply_rgb_curves}`): straight
+  segments between the knots; each per-channel curve on the working space's
+  own encoded channel, right after the tone stage (**designed**).
 
 - White balance: gains are generated from Kelvin/tint and normalized so green
   is `1`; cool-side coefficients and the 6688 K red plateau were
   **calibrated on measured exports**.
 - Dehaze: `A` is the P99 of the minimum RGB channel in linear light,
   `t = max(1 − 0.75·s·min(R,G,B)/A, 0.30)` for positive dehaze
-  (**designed atmospheric approximation**, not an Adobe fit). On a recipe
-  that names a camera profile (v1.17.0) Dehaze follows a measured spatial law
-  instead (**measured**, `render/dehaze_cr.rs`, six frames at
-  +20 … +100 and −30 … −100): a dark-channel scattering inversion
-  `J = (I − A)/t + A` per channel, in the light under Adobe's curve,
-  sRGB-encoded; `A` the mean of the top 0.1 % of the dark channel (min filter
-  1.46 % of the short edge), `t = 1 − ω·S`, `S` the dark channel of `I/A`
-  under a box of 12.5 % of the short edge, both read on the frame boxed to a
-  1536 long edge; `ω = 0.896·s` above 0, `s·(1.698 + 2.802·|s|)` below. It
-  runs after Highlights/Shadows and Exposure and before Contrast (measured
-  with one other control at a time). How strongly a positive Dehaze acts
-  varies from frame to frame about the law; that per-frame strength is not
-  modelled. Like the engine law's stage it is no part of the tone the reverse
-  fit solves.
+  (**designed atmospheric approximation**, not an Adobe fit).
 - Clarity radius: `max(round(0.02·min(width,height)), 8)`
   (**designed resolution scaling**).
 - Positive Texture radius: `max(round(0.005·min(width,height)), 2)`
@@ -760,39 +591,6 @@ supposed to remove.
 - The cool-end calibration also records a 7000 K shift of red `+1.47%` and blue
   `+0.97%`; the 2000 K blue result is `−0.98%`. These measurements constrain
   the implemented fit, not a claim of universal camera-colour equivalence.
-- Temperature and Tint on a camera-profile start (v1.17.0, `render/wb.rs`,
-  **measured**, Temperature 4000/5000/7500/10000 K and Tint ±30 from the
-  frame's as-shot 5400 K / +14): the target white `xy` from (Temperature,
-  Tint) by the DNG SDK's `Get_xy_coord` (Robertson's table, tint/−3000 along
-  the isotherm, `profile::temp_tint_to_xy`), the SDK's Bradford adaptation
-  from it to the as-shot white (`profile::white_shift`, white luminance
-  kept), applied to the light BEFORE the profile stage's exposure ramp and
-  curve (`profile::UnderTone`: `adobe_tone` inverted exactly, the ramp by its
-  inverse). Four constants fitted with the engine in the loop: 1.042 mired
-  per slider mired, 0.999 of the tint, −0.078 tint per mired of cooling,
-  0.099 EV darker per 100 mired of cooling. The command line's `apply` of an
-  `.xmp` stamps the photo's as-shot white, as the app's import does; it used
-  to move a sidecar's Temperature from the legacy 5500 K anchor.
-- A Custom white balance (v1.17.0, **measured** on synthetic linear DNGs)
-  sits BEFORE the profile's tables, with the matrices blended at the chosen
-  white's temperature: the RAW render builds the profile stage at the
-  chosen white (`profile::camera_neutral_of`, `CameraCalibration ·
-  ColorMatrix` at the white's temperature, normalised to its largest
-  component; the camera triple balanced to it; matrices and hue/sat maps
-  blended at it) and runs no adaptation after it. No constant is fitted.
-  Temperature runs 2000–50000 K and Tint ±150, the sidecar's own ranges.
-  Each component of the camera neutral is held at no less than 1/16 of the
-  largest (`profile::NEUTRAL_FLOOR`); a white that maps to a NEGATIVE
-  component keeps the profile stage at As Shot and moves the white by the
-  adaptation after it. At 2500 K / +100 colours leave sRGB's gamut, a limit
-  of the deliverable. The preview develop and the fit's candidates move it
-  by the same law (`render::CameraBase`): a camera-profile start keeps its
-  camera frame at the preview's edge and runs the profile stage at the
-  chosen white there, developed as the As Shot render plus the change the
-  white makes at that size, so As Shot stays byte-identical to the render;
-  on p39 at a 1000 px edge the canvas reads mean ΔE76 0.22–0.29 to the
-  export
-  (`a_moved_white_shows_on_every_surface_as_the_export_renders_it`).
 - The as-shot white (v1.17.0, `render::as_shot_wb`, **measured**). A Sony
   body folds a colour compensation for the mounted lens into every white
   balance it records — the As Shot levels and the fourteen preset levels
@@ -810,27 +608,6 @@ supposed to remove.
   Only the named white, the point every Temperature and Tint move starts
   from, changed; the base render balances with the camera's levels as
   before.
-- Clarity on a camera-profile start (v1.17.0, `render/tone_cr.rs`,
-  **measured**): the midtone-masked unsharp is unchanged; its tone rides the
-  slider pass as a response pair over `u` like Dehaze's, fitted with the
-  local stage in the loop from Clarity +50/+100/−50 (two passes).
-- Texture on a camera-profile start (v1.17.0, `render::texture_amount`,
-  **measured**): positive Texture is the operator at 0.2 of its amount;
-  negative Texture, the measured two-lowpass mix, is unchanged.
-- A mask's local controls on a camera-profile start (v1.17.0,
-  `render/mask_cr.rs`, **measured**): one radial mask over the same frame,
-  each local key alone at two to four values, and five global + local
-  pairs. A mask's Exposure is the global Exposure law (a +1 EV frame under
-  a −0.25 EV mask renders as +0.75) and its Texture the global one; local
-  Highlights, Shadows and Dehaze push 1.1–1.3× their global twins, and
-  Contrast, Whites, Blacks and Clarity's tone are operators of their own,
-  each with a response table of the global tables' form, fitted with the
-  engine in the loop. Local Temp and Tint move the global white — (mired,
-  tint, EV) per sign, 13 constants fitted on ±25 … ±100 — blended in the
-  light between the exposure ramp and Adobe's curve. Local Hue is the
-  slider in degrees, a hue turn in ProPhoto primaries. Local Sharpness and
-  Noise keep the engine's Detail model, local Saturation its own model;
-  Moiré and Defringe are not rendered.
 - Historical tone probes are preserved because they explain the knot weighting:
   Whites −50 compressed input `0.9568…0.9731` from 411 codes to 75, while
   Highlights +60 clipped above `0.8195`, affecting 740 of 4096 inputs (18%).
@@ -840,9 +617,8 @@ supposed to remove.
 **Method.** A neutral develop does not look like the camera's own JPEG; the
 base look is the per-photo tone curve that closes the gap, estimated by
 `render::camera_base_look` from the RAW's embedded preview and stored in the
-recipe. Since v1.17.0 it is the fresh start only where the Adobe Standard
-canvas cannot render (no Camera Raw install, or none for the body), and the
-re-estimate of a curve an earlier era stamped; a saved curve renders as it
+recipe: the start of every fresh develop and of every imported sidecar, and
+the re-estimate of a curve an earlier era stamped; a saved curve renders as it
 was saved. One entry serves the app's open path, the pipeline and the web UI. The
 neutral develop and the preview are paired at the camera's own framing;
 whether the preview carries the lens profile's corner lift is measured on the
@@ -1416,8 +1192,7 @@ and `src/recipe.rs` for the module name.
   target's, an unpaired band not at all — the night sky's unpaired fine band
   rose 0.38 → 0.52 under clarity +53 and the frame's ΔE 5.22 → 8.05 before
   it), frame do-no-harm ≤ `FIT_QUANT` (1.8e-3; the zones' 0.02
-  `ZONE_GLOBAL_REGRESSION_TOL` until v1.17.0, which let a land zone's clarity
-  take p39's frame from 0.0108 to 0.0260 under the mask-Clarity law).
+  `ZONE_GLOBAL_REGRESSION_TOL` until v1.17.0, twice a finished frame's error).
   Solves texture and clarity only — capture
   sharpening's radius is in film pixels and is not a quantity a 768-px reading
   measures. Night pair, fine / mid band: sky r 0.03 / 0.65 at the target's
@@ -1729,17 +1504,11 @@ re-checked.
   frame facts they cannot apply safely.
 - Seventy-three fisheye-only LCP entries are refused; no rectilinear Newton
   result is claimed for them.
-- The camera-stage lens resample (v1.17.0, `render::lens_in_camera`) runs on
-  the sensor's linear light: on the night frame the deepest band (log2
-  [−12, −10)) keeps its black pixels black (zero pixels 0.75 → 7.50 %)
-  instead of lifting them.
 - CA moves each channel by its own knots alone (L04-2, v1.17.0). Until
   v1.16.0 a CA knot above 1 zoomed all three channels by one composite fill
   scale so no red or blue edge sample left the frame; on p42, whose CA knots
   pass 1, that moved every channel by up to 0.9 px at the corners, where only
-  blue should move. Without it green and red stay in place, and p42's
-  deepest band keeps more of its black pixels (zero pixels in [−12, −10)
-  7.50 → 11.27 %, in [−10, −8) 2.20 → 4.64 %). A red or blue sample past the edge
+  blue should move. Without it green and red stay in place. A red or blue sample past the edge
   reads the clamped edge pixel; CA never moves the green map the masks and
   overlays follow (`render::geometry_moves_frame`).
 
@@ -1804,8 +1573,8 @@ readers, never by the silent probes.
 - `LocalExposure2012`: file value `= EV/4`; importer multiplies by `4`
   (**measured scale**).
 - `LocalHue`: file value `= degrees/180`; importer multiplies by `180`
-  (**measured scale**); range ±1.0 = ±180° (**measured**, v1.17.0,
-  camera-profile start; −1.0 and +1.0 are the same half turn).
+  (**measured scale**); the recipe keeps the file's ±1.0 as ±180 (v1.17.0),
+  and the render turns the hue by 30° per 100.
 - The `/100` local family is contrast, highlights, shadows, whites, blacks,
   clarity, dehaze, texture, saturation, temperature, tint, local sharpness,
   and luminance noise reduction (**measured file-to-UI scale; saturation and

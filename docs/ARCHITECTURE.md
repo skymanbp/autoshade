@@ -1534,8 +1534,7 @@ Run `cargo run -- recipe-schema` to print a default `EditRecipe` **instance**
 contract: that is a JSON Schema **generated from the control registry**
 (`advisor::catalogue`, §3), and it deliberately excludes the engine-only fields
 the recipe carries for calibration (`base_curve`, `as_shot_k`/`as_shot_tint`,
-`camera_start`, the lens-profile block; the canvas's `camera_profile` and Look are not states
-the advisor emits either) — an advisor must never emit those.
+the lens-profile block) — an advisor must never emit those.
 
 Local masks (`LocalAdjustment`, v0.22): base geometry (linear / rotatable
 radial / bitmap raster) + optional extra **shape components** composed in
@@ -1650,7 +1649,7 @@ this trait.)
 > response stated, `openai::take_opinions` strips the nulls before the parse, and
 > `carry_over_unrepresentable` copies the base's value only where the model said
 > nothing. Still engine-only, each for a stated reason: the engine's own per-photo
-> measurement (`as_shot_k`/`as_shot_tint`, `camera_start`, `base_curve`, the lens-profile block),
+> measurement (`as_shot_k`/`as_shot_tint`, `base_curve`, the lens-profile block),
 > mask state with no ACR spelling (`components`, `color_gains`, `role`, plus the
 > `enabled` eye toggle), the eight detail axes and the CA pair (1–3 px structure
 > the preview cannot show), the parametric curve (the point curve says the same),
@@ -2111,31 +2110,10 @@ they cannot drift; the two previews pass `CropPolicy::Keep`, which positions
 the finishing pass on the crop rectangle while leaving the frame whole for
 slider feedback.
 
-**v1.17.0: on a camera-profile start the lens resample is in the camera stage.**
-The tail used to resample the 16-bit ENCODED frame after the black clip, so
-every zero pixel with a lit neighbour came out non-zero (p42 flat: 2.04 % of
-the frame zero before the resample, 0.11 % after it). When
-`render::lens_in_camera` holds — a camera profile named, the manual Distortion
-slider at 0, Remove Chromatic Aberration off, a profile distortion or CA active
-— `render::source` resamples the demosaiced camera-native LINEAR frame
-(`apply_lens_geometry_linear`: the same map and clamped bilinear windows, in
-f32, no clamp) after the profile's vignetting gain and before calibration, and
-the tail takes no lens resample (`render::tail_lens`). The gain comes first and
-the resample second, the order measured on the 24–105's flat field against its
-own gain ladder. CA is resampled on the SENSOR's red and blue, where a lens
-moves them; a resample in the working primaries would mix a sensor-blue shift
-into green through the matrix. Each CA channel moves by its own knots alone
-(L04-2 as of v1.17.0): until v1.16.0 a knot above 1 zoomed all three channels
-by one composite fill scale, up to 0.9 px at p42's corners where only blue
-moves (`docs/TECH_STACK.md`). The mask chain then samples in the corrected frame
-(`MaskFrame::Corrected`, below), and so do the other passes that read a stored
-position — retouch areas (centre and donor mapped forward, radius by the local
-scale, brush areas read through the map), the colour field's grid, pixel layers
-and the lens blur's depth, protect mask and focus. The two other cases keep
-the whole geometry in the tail (named leftovers): a moved Distortion slider (a
-drag would re-develop the base on every step) and Remove Chromatic Aberration
-(its solver reads the developed pixels). Transform/Upright still resamples the
-encoded frame in the tail.
+**v1.17.0: each chromatic-aberration channel moves by its own knots alone**
+(L04-2). Until v1.16.0 a knot above 1 zoomed all three channels by one
+composite fill scale, up to 0.9 px at p42's corners where only blue moves
+(`docs/TECH_STACK.md`). The lens geometry stays in the tail for every recipe.
 
 The engine's source is `src/render.rs` and the files under `src/render/`.
 Through v1.6.5 the root was one file of 21,842 lines holding everything that was
@@ -2165,123 +2143,29 @@ paths, every non-blank line of the old file lands once in the new ones. The
 tests sit in parts under `tests/`, spliced into `tests.rs` by `include!`, so
 every test keeps its name and its path.
 
-The pixel stage, in this order: anchored white balance (on a recipe that
-names a camera profile, v1.17.0: the white is not a stage here at all — it is
-built into the profile stage; the RAW develop builds
-it there, and the canvas and the reverse fit develop it there from the photo's
-camera base, below; only a baked source — a master, a JPEG — still takes it
-here, by the measured law, a Bradford shift between the DNG SDK's
-whites under the profile stage's ramp and curve, which
-`render::profile::UnderTone` undoes and redoes around it) →
+The pixel stage, in this order: anchored white balance →
 **camera calibration** (the Calibration panel's three primaries and shadow
 tint, first because they belong to the camera profile every later stage reads
 through) → **de-fringing** (`render/lens.rs`: the two hue windows, on
 high-contrast edges only, before anything moves a pixel radially) →
 lens-profile vignette → manual vignette → **dehaze in linear light**
 (before any tonal work, so the airlight estimate cannot move when Exposure is
-dragged; on a recipe that names a camera profile, v1.17.0, Dehaze is a
-spatial pass inside the tone stage instead, after Highlights/Shadows and
-Exposure and before Contrast, `render/dehaze_cr.rs`, a measured
-law, and the tone half of Clarity rides the slider pass, its local stage
-staying where it is) →
+dragged) →
 tone LUT (exposure/contrast/whites/blacks/highlights/shadows, the parametric
-curve, the tone curve and the per-photo camera base curve — on a recipe that
-names no camera profile, v1.17.0 — composed into one table; on a recipe that
-names one, the measured law in five passes, `render/tone_cr.rs`:
-Highlights and Shadows first — Highlights a local law on two edge-aware
-bases of the frame's luminance keyed to its mean, Shadows a gain on linear
-luminance set by the frame's spread on a 768-cell map, against an anchor
-that a power mean of the map puts above its mean — then exposure by
-a per-channel rule,
-Contrast, Whites and Blacks, the parametric and point curves, then the
-Look's baked curve — the last three by the measured curve rule on
-ProPhoto channels, `render::tone::camera_raw_rgb_tone`, except a negative
-Blacks, which runs as its own pass through each ProPhoto channel on its own,
-measured) → **the B&W treatment's grey mix** when the photo is black and white
+curve, the tone curve and the per-photo camera base curve composed into one
+table) → **the B&W treatment's grey mix** when the photo is black and white
 (before the channel curves, so a red-channel curve meets the grey the
-photographer mixed) → 8-band HSL and the **point colours**, both skipped in black and white,
+photographer mixed) → per-channel RGB
+curves → 8-band HSL and the **point colours**, both skipped in black and white,
 where Lightroom's panel offers the grey mix in their place → colour grading →
 clarity → **texture** →
-saturation/vibrance (also skipped in black and white) → per-channel RGB
-curves (moved here in v1.17.0, below) → the Detail panel
+saturation/vibrance (also skipped in black and white) → the Detail panel
 (colour noise reduction → luminance noise reduction → sharpening) → local
-adjustments (linear/radial/bitmap masks). On a recipe that names a camera
-profile (v1.17.0, `render/mask_cr.rs`) a mask's Highlights and Shadows run
-the global law on the same sites right after the global pass, before
-Exposure, and its Exposure, its other tone sliders, Dehaze and Clarity's tone
-run instead right after their global twins — Exposure on the same ramp, so the two add in EV, and at
-the mask's weight times its EV (`mask_cr::expose_at_weight`: a 17-rung ladder
-of EVs, interpolated between the two rungs either side of the weight), where
-it used to blend the full-EV result by the weight in display encoding, a
-Jensen bias of +0.05 in weight mid-ramp; the sliders on
-response tables of their own, measured — and its Temp and Tint right after
-the global white balance, as a move of that white in the light between the
-exposure ramp and the profile's default curve; its Hue turns by degrees in the profile
-stage's reference primaries, and the mask stage's airlight Dehaze does not
-run. Each reads the mask's coverage the mask stage reads (`masks::Cover`).
-The zoned reverse fit solves a zone's Exposure, tone sliders and colour gains
-on that same law (`render::LocalGreyLaw`: the develop's own per-pixel tone
-passes, called rather than restated — `CameraRawTone::sliders_px` /
-`curves_px`, `mask_cr::expose_mask_px` — with each zone pixel taken back to
-the tone stage's input by inverting those passes on the colour and the mask's
-Exposure then put on it at its weight as the render puts it;
-`fit_zoned::fit_zone_dials_on` / `fit_zone_tone_on`): the engine's
-moment solve took a mask's EV as a gain on the rendered value, and on this
-law (the measured exposure transfer at the camera start, under the profile
-stage's curve, the mask's on the start the global one left; Highlights and
-Shadows at the frame's `HsKey`) EV +0.62 renders +0.82 … +0.96 at linear
-0.005 … 0.04, so every night
-zone overshot 1.3–1.5× by an amount that changes with the level. The law is
-held to the render within the preview's two 8-bit steps at linear 0.03 and up,
-and Highlights below 0 / Shadows above 0 within 0.25 EV (it reads a grey's
-site on the diagonal, the render the base of its neighbourhood); on colour
-ramps under a point curve and a negative Blacks, the predicted Exposure is
-held to the render within 0.025 (measured 0.020 / 0.008 / 0.005 at Amount 1 /
-0.5 / 0.3, the 8-bit start's steps), where the grey ladder put on the colour by
-the channel rule (the route until the 1.17.0 merge) missed by 0.47.
-Such a recipe also opens its white balance AT As Shot
-(`EditRecipe::open_white_balance_at_as_shot`, stamped wherever a photo's
-as-shot white is), which the white balance stage renders as no move and the
-XMP writer writes as Lightroom's `WhiteBalance="As Shot"`.
-
-**The point curves follow a measured law since v1.17.0**
-(`render::tone::{curve_lut, apply_rgb_curves, CameraRawTone::curves_px}`,
-`render::profile::curve_space`). Until v1.17.0 a per-channel curve
-(`crs:ToneCurvePV2012Red` / `Green` / `Blue`) moved the working space's own
-sRGB channel, with straight lines between the knots, right after the master
-curve. The law fixes three things:
-
-* **The channels.** A curve acts on one channel of LINEAR ProPhoto RGB (D50,
-  the SDK's Bradford from the working white) under the sRGB transfer: a red,
-  green or blue curve leaves the other two channels where they were, and the
-  curved channel is a pure function of itself. A mask's own `RedCurve` at
-  full coverage follows the same law.
-* **The interpolation.** Between the knots the curve is the DNG SDK's
-  `dng_spline_solver` (`curve_lut`). It is not monotone; values are clamped
-  to [0, 1].
-* **The place.** The per-channel curves run after the Color Mixer and
-  Saturation / Vibrance. On a camera-profile start the photographer's
-  composite `ToneCurvePV2012` (with the parametric curve) runs BEFORE the
-  creative Look's baked curve, by one channel rule on the same ProPhoto
-  channels (`render::tone::camera_raw_rgb_tone`, the one place it lives): the
-  brightest and darkest ProPhoto channels go through the curve on their
-  sRGB-encoded values and, for the Look's curve, the middle one keeps its
-  LINEAR ratio between them. The Look's curve runs after the profile's
-  default curve by that rule (`profile.rs`, which follows it already); the
-  photographer's composite curve keeps the middle at its ENCODED ratio
-  instead (`tone::MiddleRatio`).
-
-The reverse fit matches each channel curve's distributions in the same
-channels (`render::curve_channels`, `fit::curves`), so the curve it fits is a
-curve of the channel it is applied to. Every recipe renders its channel
-curves this way, a JPEG start included; the composite curve's place and space
-change only on a camera-profile start, where the Look exists. A mask's
-`MainCurve` follows the same curve rule, the middle channel at its encoded
-ratio. Known limits: the colour grade runs before the channel curves; where a
-mask's channel curves sit against its local Saturation is not modelled; and
-the parametric curve's SHAPE is still the provisional B-spline — its true
-response (no sRGB toe, a kink toward a clip at |amount| 50, a stronger
-clip-ward side) is described in TECH_STACK and not yet modelled.
+adjustments (linear/radial/bitmap masks). This is the one develop law for
+every recipe (v1.17.0): a camera profile or creative Look the recipe names
+adds colour tables in the base develop and changes no stage here. A camera
+profile is colour data read from the user's own Camera Raw install, like a
+lens profile; it never changes how a control behaves.
 
 **The writer always pairs channel curves with a composite curve since
 v1.17.0** (`xmp::write`). Camera Raw IGNORES `crs:ToneCurvePV2012Red` /
@@ -2897,83 +2781,59 @@ is wrong:
   `ProfileHueSatMap` Adobe ships — cannot tell the readings apart, which is
   exactly how the first probe got it backwards.
 * the pipeline ORDER is RawTherapee's (`rtengine/dcp.cc`), fetched and read
-  rather than remembered: reference matrix → HSV → `HueSatMap` → RGB →
-  baseline-exposure scale → HSV → `LookTable` → RGB → tone curve. The tone
-  curve is applied **Adobe's way** (`AdobeToneCurve`): the curve moves the max
-  and min channels and the median is placed back proportionally between them.
-  Per channel is the wrong reading and visibly desaturates.
+  rather than remembered: reference matrix → HSV → `HueSatMap` → RGB → HSV →
+  `LookTable` → RGB.
+
+**A camera profile is colour data (v1.17.0).** A camera profile is colour
+data read from the user's own Camera Raw install, like a lens profile; it
+never changes how a control behaves. The stage applies the profile's colour
+matrices and tables and nothing else: its `ProfileToneCurve` and
+`BaselineExposureOffset` are parsed and not rendered, and every stage after it
+— white balance, tone, curves, colour, detail, masks — is the one develop law
+of a recipe that names no profile, the photo's camera base curve included. A
+profile with no tables and no `ForwardMatrix` builds no stage
+(`render::profile::tests::a_profile_with_no_tables_is_not_a_stage_whatever_tone_it_states`).
 
 **The colour matrix is Adobe's (v1.17.0).** A profile that carries a
 `ForwardMatrix` owns the camera → working transform of its render, built the
 way the DNG SDK's `dng_color_spec.cpp` builds it: the white is solved from the
-frame's camera neutral by iterating the profile's two `ColorMatrix`es
+frame's as-shot camera neutral by iterating the profile's two `ColorMatrix`es
 interpolated at the white's own temperature (`NeutralToXY`; the temperature by
 Robertson's method, `dng_temperature`), the two calibrations are weighted by
 reciprocal temperature between their illuminants — one weight for the
 matrices and the hue/sat maps — and the white-balanced camera triple goes
 through the interpolated, normalised `ForwardMatrix` to XYZ D50, into ProPhoto,
 and out through the SDK's Bradford adaptation (`MapWhiteMatrix`) to the working
-space (`profile::Stage::build_for`, `develop_camera`). A Custom white (a
-recipe on a camera-profile start that moves from As Shot) replaces the frame's
-neutral: `profile::camera_neutral_of` is the SDK's `SetWhiteXY`, the body's
-`CameraCalibration` diagonal in front of the `ColorMatrix` at the white's own
-temperature, so the camera triple is balanced to the chosen white and the
-matrices and hue/sat maps blend at it, before the tables, and no adaptation
-follows (`resolve_camera_profile`). For a Sony ARW the calibration is the
-body's reference Daylight multipliers over the file's own preset
-(`as_shot::camera_calibration`), what Camera Raw writes into its DNG.
+space (`profile::Stage::build_for`, `develop_camera`). For a Sony ARW the
+body's `CameraCalibration` diagonal (its reference Daylight multipliers over
+the file's own preset, `as_shot::camera_calibration`, what Camera Raw writes
+into its DNG) sits in front of the `ColorMatrix` in that neutral. The
+recipe's own white balance is the pixel stage's, after the profile stage, as
+for every recipe.
 
-The order, measured with synthetic linear DNGs (`LinearRaw`, camera RGB =
-linear sRGB, an embedded profile): raw → lens gain → white-balance
-multipliers → `ForwardMatrix` → tables (hue/sat map) → exposure → look table →
-curves. Two experiments place the white. A hue/sat map that turns hues
-120–210° leaves a patch alone at As Shot and moves it once a Custom 3000 K
-carries it into those hues — the white is applied BEFORE the tables. With a
-second `ColorMatrix` at Standard A the result changes with the CHOSEN white's
-temperature, not the shot's — the matrices are blended there. And a DNG of a
-Sony ARW written by Adobe DNG Converter (p39) carries `CameraCalibration1/2` =
-diag(1.0031, 1, 0.9653), the body's reference Daylight multipliers over the
-file's preset, with `AsShotNeutral` the camera's own levels: the calibration
-is in front of the `ColorMatrix` in the white's camera neutral, which is why
-`camera_neutral_of` takes it. The engine's profile stage runs that order from
-the multipliers on (`profile::Stage::render_ref`: the hue/sat map, the
-exposure ramp, the look table, the tone curve); the lens profile's
-vignetting gain is the vignette stage of the pixel stage above.
-
-**The camera base (v1.17.0, `render/canvas.rs`).** Because the white lives in
-the profile stage, a surface that shows a moved white needs the frame from
-before it. `CameraBase` keeps a RAW's camera-native frame at the working edge
-(demosaiced, default-cropped, through the camera stage's lens work — the
-vignetting gain and, on a camera-profile start, the lens resample
-(`source::camera_stage_lens`, one rule with the render) — oriented, capped in
-linear light) and the As Shot profile stage of the full-resolution frame
-capped the render's way, its over-range light kept as the float base keeps it; a
-white is developed as that As Shot frame plus what the white changes when the
-stage is run on the capped camera frame, so at As Shot the base is the
-render's byte for byte and a moved white carries only the difference of the
-two stagings' block-average error (the stage is not linear: staged on the
-capped frame alone, p39 at 1000 px read 0.42 ΔE76 off the render on average,
-median 0, 99th percentile 5.4). `base_develop` keeps the last two camera bases
-for the process, so a canvas moving its white re-runs the profile stage, not
-the decode; the canvas names the white in its part (`BasePart::of_canvas`) and
-the preview develop, handed a RAW source's base, leaves it out. The reverse
-fit's source is a `Plate`: an image registered with the camera base it came
-from and the chain of thumbnails that made it, for as long as it lives, so the
-preview develop handed exactly those pixels develops each candidate's white
-from the camera frame along the same chain, in the plate's frame: a plate
-in the sensor frame compares a candidate's part without the lens geometry, a
-lens-corrected one with it, and a candidate that switches the profile off is
-developed — and read — in the sensor frame (`canvas::plate_pixels` answers the
-frame with the pixels). A plate also says which frame its pixels are in
-(`Plate::corrected`, `render::plate_corrected`): the preview develop and the
-fit's rulers (`preview_mask_coverage`) read masks over a corrected plate in
-the corrected frame (`MaskFrame::Corrected`), and a corrected baked source (a
-master whose marker says so) is registered as such with no camera behind it
-(`Plate::baked_in`). Masters keep the As Shot part —
-they are rendered later under whatever white the recipe has by then. A profile without a
-`ForwardMatrix`, and every render with no profile, keep the engine's own
-D65-only matrix; the no-profile render is byte-identical to v1.16.0. Until
-v1.17.0 the matrix half was a stated deviation.
+**The base develop (v1.17.0, `render/canvas.rs`).** The profile stage runs
+inside the RAW develop, so a surface that hands pixels to the preview develop
+hands it the BASE develop of the recipe's `render::BasePart` — the camera
+profile and the Look's colour table, never the Look's baked tone curve or
+sliders: `render::base_develop` / `source_pixels_for` for the GUI and web
+canvases (re-developed in the background when the recipe's part changes,
+`ensure_source_part`), the Before view, the fill's card pixels and the reverse
+fit's source (`pipeline::fit_source`, a `Plate` in the sensor frame,
+`render::source_plate`). A recipe that names no profile — every fresh
+develop — has the neutral part, which is the v1.16.0 develop. The base is
+UNSHARPENED (the display and the export sharpen once, over it); the heal /
+clone / denoise / stack / generative MASTERS bake through
+`render::master_develop` / `master_pixels_for` instead, the same part with
+the RAW default sharpening, 16-bit, in the sensor frame. A plate also says
+which frame its pixels are in (`render::plate_corrected`): the reverse fit
+moves its source into the lens-corrected frame when the target was exported
+that way (`pipeline`'s target geometry, v1.16.0), and the preview develop and
+the fit's rulers then read masks in that frame (`MaskFrame::Corrected`). Every
+surface that shrinks a frame goes through `render::thumbnail` /
+`thumbnail_exact`: `image`'s own block average is `(sum + n/2) / n`, which on
+an f32 frame is the mean + 0.5. A profile without a `ForwardMatrix`, and
+every render with no profile, keep the engine's own D65-only matrix; the
+no-profile render is byte-identical to v1.16.0 up to the signed black level.
 
 **The creative colour table renders (v1.17.0).** A Look's `crs:LookTable` is
 the id of a `crs:Table_<id>` payload in a Camera Raw settings file, and the
@@ -3058,15 +2918,9 @@ distance values. For a sidecar that names no profile the reader picks the
 newest RAW profile for the lens (`lcp::open`). `lcp::LensProfileFile::vignette_gains` implements all of it and
 keeps every node — the close-focus nodes the distortion reader drops as
 duplicates included; a dimension a lens's nodes vary in and the shot leaves
-open is refused, not guessed. The engine applies that gain on the sensor's linear light in the RAW develop (`render::source`),
-before calibration and the camera profile stage — the order is lens gain →
-(white balance) → profile — and the preview bases carry it the same way
-(`render::BasePart`), so `develop` leaves the profile's gain out on a
-camera-profile start. The gain goes on before the profile's HueSatMap — this
-body's Adobe Standard map is value-dependent (36 × 8 × 16) — and under no
-curve: applied after the profile's default curve, as it was before, it lost
-a fifth to a quarter of its EV (reproduced to 0.0002 EV from the engine's own
-ladder), and inside the tone ramp it met the HueSatMap on the wrong side.
+open is refused, not guessed. The engine applies that gain at the pixel
+stage's lens-profile vignette (`render::develop::profile_vignette_lut`), for
+every recipe.
 
 The two profile strengths, measured the same way (flat fields for the
 vignetting, tile phase correlation on a real 14–24 mm frame for the
@@ -3095,85 +2949,33 @@ Shadows 5 × 0.001 = 0.005 black; the engine subtracts the sensor's 512 and no
 render black, and the 0.005 tried on p39 overshoots the shadows, so it is
 not applied.
 
-**The canvas starts on the camera profile (v1.17.0).** A fresh open stamps
-`camera_profile` 「Adobe Standard」 and the 「Adobe Color」 Look
-(`xmp::canvas_look`, `render::canvas_recipe`) and no camera base curve — the
-start a Lightroom sidecar names for a RAW it has never edited — whenever
-`render::canvas_renders` finds the body's Adobe Standard DCP and the Look's
-table in the Camera Raw install; otherwise, and for every non-RAW file, it
-keeps the camera-matched curve estimate (`render::camera_base_look`), said once
-in `diag.warn`. The decision is one function, `pipeline::fresh_canvas_start_with`
-(`CanvasStart`), and every fresh-recipe entry calls it: the GUI open worker,
-`serve`'s fresh open, the CLI (`produce_recipe`), the library and backup import
-(`stamp_import_start`), the lr_pack import and the batch export with no saved
-develop. Which start a recipe renders is the recipe's own decision
-(`EditRecipe::starting_curve`): a recipe that names a camera profile renders no
-camera curve, one that names none renders its stamped `base_curve` — so a
-develop saved before v1.17.0 renders byte-identically
+**Every develop starts on the camera base curve (v1.17.0).** A fresh open
+stamps the camera-matched curve estimate (`render::camera_base_look`) through
+one function, `pipeline::fresh_canvas_start_with` (`CanvasStart`), which every
+fresh-recipe entry calls: the GUI open worker, `serve`'s fresh open, the CLI
+(`produce_recipe`) and the batch export with no saved develop. A develop
+imported from a Lightroom document — the library and backup import, the
+lr_pack import, an opened sidecar — gets the same start
+(`pipeline::stamp_import_start`); a camera profile or Look the document names
+stays on the recipe as colour data. A develop saved before v1.17.0 renders its
+stamped curve as it was saved
 (`render::tests::an_old_recipe_with_a_stamped_base_curve_renders_as_it_did`).
 
-The profile stage runs inside the RAW develop, before the white balance, so
-the canvas's pixels must be developed under it: `render::BasePart` is the part
-of a recipe the RAW develop reads (the camera profile and the Look's table,
-not its baked curve, which the preview develop renders), and
-`render::base_develop` / `source_pixels_for` is the one base for every
-surface that develops over it — the GUI and web canvas (re-developed in the
-background when the recipe's part changes, `ensure_source_part`), the Before
-view, the fill's card pixels, and the reverse fit's source
-(`pipeline::fit_source`, with `fit::solve` rebasing on a Look that bakes a
-curve). That base is UNSHARPENED (the display and the export sharpen once, over
-it) and, for a part that names a profile, a 32-bit float frame that keeps the
-camera stage's over-range light for the canvas's Exposure (×2 the 16-bit
-frame's memory: a 4096 px base measured 128.3 MB against 64.1 MB, a
-process committing 146 MB after it against 82 MB; the peak, 1059 MB on a 61 MP
-frame, is the full-frame develop's either way). A part whose camera stage
-resamples the lens (`render::lens_in_camera`) carries the composed lens
-geometry too, so its base is in the lens-CORRECTED frame and switching the
-profile's corrections re-develops it; the resample runs at full resolution
-before the cap, with the mosaic already dropped (the export's peak with it,
-p42 61 MP: 1399 MB, under `PER_PHOTO_PEAK_COMMIT_MB`). The GUI samples such a
-base at the corrected point of a click (`orig_to_base_norm`), and hands its
-segmentation, depth and face helpers the base mapped back to the original
-frame (`original_frame_base`). The reverse fit's source is in the same frame
-as its base (v1.17.0, below). Every surface that shrinks a
-frame goes through `render::thumbnail` / `thumbnail_exact`: `image`'s own block
-average is `(sum + n/2) / n`, which on an f32 frame is the mean + 0.5, so a
-float base sent to it came back washed out (the fit then refused it as
-toneless). The heal /
-clone / denoise / stack / generative MASTERS bake through `render::master_develop`
-/ `master_pixels_for` instead: the same part with the RAW default sharpening,
-16-bit, because a master is a baked file and a baked file renders with no
-default sharpening — and in the frame the base is in, lens-corrected when the
-camera stage resamples the lens.
-
-**A master carries the lens geometry in its pixels in its own file**
-(v1.17.0, `render::BakedGeometry`): one key, `autoshade:baked-geometry`, in a
-PNG `iTXt` chunk, a TIFF private tag (65117) or a JPEG comment segment, stamped
-on the staged file before the publish (`pipeline::save_master`, the fill's
-`publish_master`, `render::render_master_to_file` for the denoise, carried
-through the denoise sidecar). It names the lens profile, which of distortion,
-CA and vignetting are baked, the manual Distortion amount and an FNV-1a digest
-of the composed knots. Every surface reads it through one door,
-`render::SourceFrame::of` (the export's baked arm, the GUI and web canvases,
-the pixel layers, `master_pixels_for` under a heal, clone, fill or stack), so
-no record beside the file can disagree with the pixels and no caller has to
-hand a flag on: a marked, lens-corrected master is masked in the corrected
-frame and takes no second resample in the tail; a file with no marker is in
-the sensor frame (every master before v1.17.0); and a recipe that develops
-other lens geometry than the one baked in — a correction switched off, the
-manual Distortion slider moved, another strength — is refused at the export,
-the canvases and the master read (`SourceFrame::check`) rather than corrected
-twice or left with a correction it switched off. Under a heal, clone or fill
-on a corrected master (`render::Master`), the painted masks and the clone
-point, stored in the sensor frame, are mapped onto it through the same map the
-mask chain reads it with; the GUI fill's card picture is the corrected one, and
-a layer made over it is marked and composited as it is (`layers::LayerMap`).
+**A file that says it carries lens geometry is refused** (v1.17.0,
+`render::BakedGeometry`, `render::SourceFrame::of`). The key
+`autoshade:baked-geometry` — a PNG `iTXt` chunk, TIFF tag 65117 or a JPEG
+comment segment — names a lens profile, which of distortion, CA and
+vignetting are in the pixels, the manual Distortion amount and an FNV-1a
+digest of the composed knots. No develop bakes lens geometry into a master,
+so a master carrying the key is refused at the export, the canvases and the
+master read (`SourceFrame::check`) with a line asking for the master to be
+baked again from the RAW; a file with no key is in the sensor frame.
 
 **A mask raster carries the frame it is drawn in, the same way** (v1.17.0,
 `render::MaskRaster`). The reverse fit draws its zone rasters (the Select Sky
 anchor, the semantic regions, the tiles, the field masks) on its source, which
-is now in the lens-corrected frame when the calibration's camera stage
-resamples the lens; such a raster carries the same key in its PNG
+is in the lens-corrected frame when the fit moved it there to meet a target
+exported that way; such a raster carries the same key in its PNG
 (`autoshade:baked-geometry`), naming the geometry that moves a MASK — the
 composed profile distortion and the manual amount, digested; CA and
 vignetting move no mask and are not in it (`BakedGeometry::frame_of`). One
@@ -3203,23 +3005,17 @@ one sidecar whatever frame its raster is in; the payload carries the raster
 bytes, marker and all.
 
 A GENERATED master (reimagine, the whole-image adjust) is made from an
-unmarked picture and stays unmarked: its card strips the start it carries
-(`strip_baked_start`). `PhotoCalibration` carries the profile and the
-Look. A baked file — a master, an embedded preview, a finished image — already
-carries its start, so `strip_baked_start` clears the curve, profile, Look and
-lens profile before it renders. On p39 at 1000 px against the engine's render
-of the all-zero sidecar naming Adobe Color: the export of the all-zero fresh
-recipe is byte-identical, the canvas reads ΔE76 0.000, a master (corrected
-and marked, pixel for pixel) 0.018, and the fit source at its 2048 edge 0.469
-against the sidecar at the same edge
-(`render::tests::every_surface_shows_a_fresh_canvas_as_the_export_renders_it`).
+unmarked picture: its card strips the start it carries
+(`strip_baked_start`). A baked file — a master, an embedded preview, a
+finished image — already carries its start, so `strip_baked_start` clears the
+curve, profile, Look and lens profile before it renders. A profile-naming
+develop shows the same picture on every surface: the canvas, a master and the
+fit source against the export, within ΔE76 0.5
+(`render::tests::every_surface_shows_a_profile_naming_develop_as_the_export_renders_it`).
 
 The invariant that keeps F7 from changing any existing picture is that a
-recipe with no camera profile builds no stage at all. A profile that IS named
-always builds one since v1.17.0, even with no tables, no curve and no
-`ForwardMatrix`, because the measured exposure transfer acts at 0 EV (its toe)
-and the stage carries it,
-pinned by `render::profile::tests::a_profile_with_nothing_to_say_renders_the_transfer_alone`.
+recipe with no camera profile builds no stage at all, and a named profile
+with no tables and no `ForwardMatrix` builds none either.
 
 **Lightroom's remaining colour panels render since v1.5.0** — the Calibration
 panel, the Black & White treatment with its eight-band mixer, and Point Color.
@@ -3280,9 +3076,8 @@ capture-sharpening operator on the recipe's Radius/Detail/Masking) → **noise
 reduction** (the global luminance operator on its Detail/Contrast). The mask's own **point curves** (R25) live inside that fused pass
 and cost no extra one: `main_curve` is handed to the same `build_tone_lut` that
 already composes the mask's synthesized tone recipe, and the three RGB curves
-are compiled once per mask and applied right after it, on ProPhoto's channels
-under the sRGB transfer since v1.17.0 (the global curves' measured law, see
-"The point curves"; the global chain itself runs them after Saturation now). Splitting them out into a pass of their own
+are compiled once per mask and applied right after it — the global chain's
+1 → 1b → 3 order mirrored locally. Splitting them out into a pass of their own
 would have changed the output of every existing partial-weight mask, the same
 reason R22 gave for not splitting the blend.
 Clarity/dehaze/texture became engine-rendered in R22 (feedback
@@ -3937,9 +3732,9 @@ on the mask's `LocalTemperature`/`LocalTint` (v1.17.0,
 `render::gains_as_white`): the Temp, Tint and Exposure offset whose render
 comes nearest, in Oklab, to the mask as the app renders it, read on the
 develop's own output of the recipe for a strip of input greys under the mask
-at full weight — so the move goes through Camera Raw's measured mask white
-law (`render/mask_cr.rs`) and every global stage after it, while the gains
-act in the mask stage. A coarse grid over the law's whole Temp/Tint range
+at full weight — so the move goes through the develop's own mask white
+balance and every global stage after it, while the gains act in the mask
+stage. A coarse grid over the law's whole Temp/Tint range
 seeds a damped Gauss-Newton on all three; about 0.1–0.2 s a mask. Gains
 whose best Temp or Tint sits at the end of its range are the one remaining
 `Recolour` loss. On a re-open the payload reconciles the three keys as ONE
@@ -4032,7 +3827,8 @@ experiment:
 
   `MaskFrame` makes the caller's downstream fact explicit with three states:
   `WarpedDownstream`, `AsRendered`, and (v1.17.0)
-  `Corrected` — pixels the camera stage already lens-corrected, where each
+  `Corrected` — pixels already lens-corrected (a fit plate moved into its
+  target's frame), where each
   pixel first finds its original-frame point through the resample's own green
   map (`MaskUnwarp::source_point`) and is then evaluated as `WarpedDownstream`
   evaluates it. The disabled-
@@ -4626,21 +4422,14 @@ calibration pairs the look error after the fit fell to 0.009 / 0.006 / 0.011 /
 and the two generated references read undecided and render the same pixels.
 
 **…and since v1.17.0 the pair lives in the target's frame, not the sensor
-frame.** On a camera-profile start the calibration's camera stage resamples the
-lens, so `fit_source` is the base develop in the lens-corrected frame — the
-frame the canvas, the export and a profile-on Lightroom export are in — and
-the fit pairs a corrected target as it stands: the target is never resampled
-and carries no absent ring. The probe applies the profile to whichever side is
-in the sensor frame (the source's render, or the target when the source is
-already corrected). A sensor-frame source with a corrected target (a
-calibration whose tail resamples the lens, an unmarked master) is moved into
-the corrected frame by the engine's own geometry stage; an as-shot target over
-a corrected RAW source develops the source again with the geometry off; over a
-corrected master, which has no such develop, it reads undecided. The fit's
-zone rasters are drawn in the source's frame and marked (above), so neither
-the target nor a mask is mapped from one frame into the other on the way;
-`render::corrected_to_sensor_frame` is left to the GUI's segmentation, depth
-and face helpers, which draw on the sensor frame.
+frame.** `fit_source` is the base develop in the sensor frame; when the probe
+finds the target exported with the profile on, the engine's own geometry
+stage moves the source into the corrected frame, and the fit pairs the
+corrected target as it stands: the target is never resampled and carries no
+absent ring. The fit's zone rasters are drawn in the source's frame and
+marked (above), so neither the target nor a mask is mapped from one frame
+into the other on the way; `render::corrected_to_sensor_frame` is left to the
+GUI's segmentation, depth and face helpers, which draw on the sensor frame.
 
 The method is deliberately **distribution-level, not per-pixel regression** — a
 generative target is not pixel-aligned with its source, so only statistics are
@@ -4818,7 +4607,7 @@ After the single sky/land corrections and their horizon gate,
 also when no single correction survived — none attached, the horizon gate
 dropped them, or every one was refused after the shared shrink: the bands are
 tried against the refused parent, `attach::finish_with_bands_only`; on the
-night pair's camera-profile start both single zones were refused at k 0.137
+night pair (measured during v1.17.0's development) both single zones were refused at k 0.137
 and the bands, and the colour field a tile used to hand back, were never
 tried) — the mask-weighted mean
 signed Lab residual of every analysis row (`residual_models`). Signed a/b
@@ -5701,7 +5490,7 @@ doubling the walk's extent from `λ = 1` until its point reaches a
 `WB_SEARCH_K` edge, leaves the strength budget, or stops moving (twice the
 extent inverts onto the same pair), and trying 24 even points on it. The
 budget and the stopped point ended a defect (2026-10-29, measured on p40): on
-a camera-profile start the curves' pull pinned the tint at +100 by `λ = 1`, the
+a start v1.17.0 later removed the curves' pull pinned the tint at +100 by `λ = 1`, the
 Kelvin settled at 3550 K without meeting an edge, the extent ran to 64, and
 all 24 candidates inverted onto one out-of-budget pair while the budget
 admitted the walk's own points up to `λ ≈ 0.25`. At each point saturation is chased again (stage 3 reads mean
@@ -6858,9 +6647,8 @@ target's, and the frame's ΔE went 5.22 → 8.05 with every gate passing until
 this one) and the frame's do-no-harm — since v1.17.0 the fit's own
 quantisation (`FIT_QUANT`, 1.8e-3), not the zones' drift budget
 `ZONE_GLOBAL_REGRESSION_TOL` (0.02, sized for a mask that cannot touch pixels
-outside its raster): on a camera-profile start a mask's Clarity lifts the zone's
-midtones, so a land zone's clarity moved the whole frame's tone and 0.02 let
-it ship — p39 at 0.65 frame 0.0108 → 0.0260 at half the solved clarity, the
+outside its raster): measured under a start v1.17.0 later removed, a land
+zone's clarity moved the whole frame's tone and 0.02 let it ship — p39 at 0.65 frame 0.0108 → 0.0260 at half the solved clarity, the
 fit ending worse than its own start (0.024 → 0.026), p40 at 0.85 0.0199 →
 0.0322 at a quarter; with the quantisation bound both lands are refused and
 the fits end at 0.011 and 0.020 — with the tone ladder's shrink

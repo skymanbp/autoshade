@@ -181,34 +181,16 @@ one AutoShade opens it in, not the camera's original. A turn made here is
 written back into the sidecar, so Lightroom picks it up too. The neutral view
 is AutoShade's own conversion, not the camera JPEG; histogram and clipping
 information are computed from the decoded image and also feed the AI verifier.
-The develop starts **where Lightroom starts** (v1.17.0): Adobe's 「Adobe
-Standard」 camera profile under the 「Adobe Color」 creative profile, every
-slider at zero — the start an all-zero Lightroom sidecar names. The canvas, the browser's pane, a heal / clone / fill / denoise / stack
-master and the reverse fit all start from that same picture, and a photo you
-save writes the Adobe Color profile into its `.xmp`, so Lightroom opens it on
-the same start. On that start the Basic panel's Exposure, Contrast,
-Highlights, Shadows, Whites and Blacks, Dehaze, Temperature and Tint, Clarity
-and Texture each follow a written law in the same units and range as the
-sidecar's number, so a value you set here is the value Lightroom reads. Tint there is Lightroom's own number: the as-shot tint (a Sony frame's
-+14, say) is no move, and the WB eyedropper answers in the same units.
-A fresh develop on that start opens Temperature and Tint at the photo's As
-Shot values, as Lightroom's sliders do; the custom white balance box stays
-off until you move one, and a saved `.xmp` writes Lightroom's `As Shot` while
-they are untouched. The profile files are Adobe's, read from the Camera Raw
-install on this computer (Lightroom and Photoshop put them there); AutoShade
-ships none. Where they are not installed — and for a JPEG or TIFF — the
-develop starts as it did before v1.17.0, from a **camera-matched base look**:
-a tone curve read off the camera's own embedded preview, block by block, so
-the neutral develop looks like the camera's JPEG rather than a flat
-conversion; the log says which start a photo got and why.
-
-A photo saved by an earlier version keeps the start it was saved with — its
-camera base look renders exactly as it did — and **Reset** moves it to the new
-start. Since v1.6.0 the base-look estimate is made on block means of the two
-pictures, and a photo saved by an earlier version's estimator gets the current
-estimate the first time it is opened — here, in batch export, in the web UI
-or with `apply` — and a toast says so; a photo saved with no base look keeps
-none.
+The develop starts from a **camera-matched base look**: a tone curve read off
+the camera's own embedded preview, block by block, so the neutral develop
+looks like the camera's JPEG rather than a flat conversion. Since v1.6.0 that
+estimate is made on block means of the two pictures, and a photo saved by an
+earlier version gets the current estimate the first time it is opened — here,
+in batch export, in the web UI or with `apply` — and a toast says so; a photo
+saved with no base look keeps none. A Lightroom sidecar you open starts from
+the same camera base look; the camera profile it names is colour data, read
+from the Camera Raw install on this computer like a lens profile, and never
+changes how a control behaves (v1.17.0).
 
 ## 2. Develop the image
 
@@ -282,15 +264,6 @@ chromatic-aberration correction stays on, because Lightroom keeps it on with
 the profile off (v1.17.0). The manual Distortion, Vignetting and CA sliders are
 not the profile and are never touched by that switch.
 
-A heal, clone, fill, denoise or stack master made since v1.17.0 has the lens
-profile's corrections already in its pixels, and its file says which ones. A
-card over it is not corrected a second time; if you then switch a profile
-correction off, change its strength or move the manual Distortion slider, the
-canvas and the export refuse that card and say so, rather than correcting the
-master twice or leaving in a correction you switched off — set the lens
-corrections back, or make the master again from the RAW. Masters made before
-v1.17.0 carry no such note and are corrected over as before.
-
 A strength set away from 100 changes what the sidecar says about the profile
 (v1.17.0): Lightroom only honours a strength for a profile the sidecar names,
 so the export names the installed Adobe profile (crs:LensProfileName and its
@@ -357,13 +330,14 @@ AutoShade reads both and develops through them, so a photo opens with the
 profile it was edited under rather than flatter.
 
 Both rows are read-only. A creative profile has two halves: a baked tone
-curve with a few baked sliders, and a creative colour table. Since v1.17.0
-AutoShade renders both — it reads the colour table from Adobe's own Camera Raw
-install on your machine, and checks it against the name the sidecar gives it.
-When a table cannot be rendered (Camera Raw is not installed, the profile scales
-its Look below 100 %, or the table is one of Adobe's RGB tables), the fold says
-so under the profile's name rather than letting you assume the whole profile
-arrived.
+curve with a few baked sliders, and a creative colour table. Since v1.17.0 a
+profile is colour data: AutoShade renders the colour table — read from Adobe's
+own Camera Raw install on your machine, and checked against the name the
+sidecar gives it — and not the baked tone curve and sliders; a monochrome
+profile still renders black and white. The fold says under the profile's name
+which half renders, and says so too when the table cannot be (Camera Raw is not
+installed, the profile scales its Look below 100 %, or the table is one of
+Adobe's RGB tables).
 
 The **Curves** fold holds Lightroom's **parametric curve** too since v1.5.0:
 Highlights, Lights, Darks and Shadows sliders (±100) under the point curve, then
@@ -544,12 +518,8 @@ AI mask rasters are cached with backend provenance, so a better backend forces
 an honest re-derivation instead of presenting an older alpha as its result.
 
 A selected mask's sliders come in Lightroom's groups — **Tone**, **Detail**,
-**Color**, then the mask's own **Curve**. On a camera-profile start (above)
-a mask's Exposure, Contrast, Highlights, Shadows, Whites, Blacks, Dehaze,
-Clarity, Texture and its **Temp shift** / **Tint shift** each follow a
-written law in the sidecar's own units, and **Hue shift** turns colours by its
-value in degrees, up to ±180° (on any other start ±100 is ±30°). A mask's Sharpness, Noise and Saturation
-keep the engine's own model there, and Moiré and Defringe are not rendered.
+**Color**, then the mask's own **Curve**; **Hue shift** turns colours by
+±30° at ±100, and Moiré and Defringe are not rendered.
 The **Color** group holds
 **Saturation**, **Hue shift**, **Temp shift**, **Tint shift** and, since
 v1.17.0, **Color tint** with its **Color tint hue** (Lightroom's mask
@@ -848,7 +818,7 @@ AutoShade's intent attributes did not, and since v1.3.1 the zone roles ride
 in the payload and in the corrections' names instead). AI alpha keeps its
 separate disclosure. A mask's recolour (the fit's per-channel gains) has no
 Lightroom slider; since v1.17.0 the sidecar writes it as that mask's
-Temperature and Tint, the pair whose effect in Camera Raw comes nearest on a
+Temperature and Tint, the pair whose rendered effect comes nearest on a
 range of greys, with the Exposure nudged back by whatever brightness that
 move adds. Only a recolour stronger than Temperature and Tint can reach is
 still named in the save line.
@@ -1005,13 +975,9 @@ sources get recipe JSON but no RAW XMP. `apply` also takes a Lightroom `.xmp`
 sidecar in place of the recipe, and since v1.16.0 it stamps the camera's lens
 profile from the sidecar's own lens switch exactly as the desktop app does when
 it opens the photo beside that sidecar, so one sidecar renders one geometry on
-both surfaces. Since v1.17.0 a sidecar renders from the start it names:
-Adobe's baseline exposure for the body (inferred from the camera profiles
-Adobe installed for it, and said in one line) and, for a profile that states no
-tone curve of its own, such as Adobe Standard, Adobe's default curve; and its
-colour through Adobe's own colour matrix for the profile and the creative
-profile's colour table, both read from your Camera Raw install. The very
-brightest highlights are clipped, not rolled off.
+both surfaces. Since v1.17.0 a sidecar starts from the photo's camera base
+look like any other develop, and a camera profile and creative profile it names
+add only their colour tables, read from your Camera Raw install.
 `auto` is `analyze` plus render.
 `batch` analyzes RAWs by default, skips baked photos unless `--include-baked`
 is set (avoiding duplicate analysis and billing for RAW+JPEG pairs), and
