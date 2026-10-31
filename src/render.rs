@@ -138,7 +138,7 @@ pub(crate) use luma::{bilinear_plane, gauss_blur_plane, neighbours4};
 pub(crate) use luma::{blur_plane, clarity_radius, texture_radius};
 use luma::{
     box_blur_h, box_blur_v, scale_chroma, texture_amount, texture_pass, unsharp_luma,
-    unsharp_luma_weighted, write_luma_weighted,
+    unsharp_luma_weighted, write_luma_additive, write_luma_weighted,
 };
 #[cfg(test)]
 use luma::{TEXTURE_MIN_SIGMA_PX, texture_negative_pass, texture_sigmas};

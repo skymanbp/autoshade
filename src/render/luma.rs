@@ -153,6 +153,41 @@ pub(super) fn write_luma_weighted(
     });
 }
 
+/// [`write_luma_weighted`]'s ADDITIVE twin: the luma move `new_luma(i, l, wgt)
+/// − l` is added to the three channels alike — neutral light put in or taken
+/// out — instead of scaling the pixel's chroma with it. Capture sharpening
+/// (`detail::sharpen`) is the caller since v1.6.5: on the Lightroom exports it
+/// was calibrated against, the sharpening moved R−L and B−L by 0.13 / 0.38 of
+/// the luma move, where the chroma-scaling write reads 0.69 / 0.89 on this
+/// engine's render of the same frame — Lightroom adds light, it does not scale
+/// colour. A channel that runs past 0 or 1 clips on its own, so a saturated
+/// colour keeps its hue and loses a little of the move.
+pub(super) fn write_luma_additive(
+    data: &mut [[f32; 3]],
+    w: usize,
+    weight: impl Fn(usize, usize, &[f32; 3]) -> f32 + Sync,
+    new_luma: impl Fn(usize, f32, f32) -> f32 + Sync,
+) {
+    if w == 0 {
+        return; // par_chunks_mut(0) asserts
+    }
+    data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (x, px) in row.iter_mut().enumerate() {
+            let wgt = weight(x, y, px);
+            if wgt <= 0.001 {
+                continue;
+            }
+            let l = luma601(px);
+            let d = new_luma(y * w + x, l, wgt).clamp(0.0, 1.0) - l;
+            if d != 0.0 {
+                for c in px.iter_mut() {
+                    *c = (*c + d).clamp(0.0, 1.0);
+                }
+            }
+        }
+    });
+}
+
 /// Weight of the COARSE arm in the negative texture mix, and the fraction of
 /// the render raster's short edge its Gaussian σ binds to (B8-2 §6-1, five-step
 /// joint fit, 890 residuals, rms 0.0048).
