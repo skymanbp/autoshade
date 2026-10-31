@@ -249,12 +249,7 @@ frame exported from Lightroom at Sharpness 0 / 40 / 80 (Radius 1.0, Detail
 25, Masking 0), and the operator's gains, its shadow rolloff and its two
 halo limits fitted per pixel to what moved between the exports — R² 0.93 at
 40 and 0.92 at 80 over the frame, 0.95 on the edges and stars one actually
-sees, where the plain unsharp mask it replaced explained 0.62. In v1.17.0
-the law was re-measured against Camera Raw's own 16-bit full-size renders of
-the same frame (Amount 0 / 40 / 80 / 150, Radius 0.5 / 2 / 3, Detail 0 /
-100, Masking 50 / 100): R² 0.97 / 0.94 at Amount 40 / 80, and Radius,
-Detail and Masking each gained a measured term; Detail 0 (0.72) and Amount
-150 (0.87) stay under the 0.9 line and are published as such. Lightroom's
+sees, where the plain unsharp mask it replaced explained 0.62. Lightroom's
 dark ring around a bright star turned out to be bounded by the pixel's own
 luminance rather than by one constant, so the ring digs with the star:
 0.02 / 0.04 / 0.07 for faint / mid / bright stars against Lightroom's
@@ -408,7 +403,6 @@ the tests [`scripts/check_docs.py`](../scripts/check_docs.py) re-derives.
 |---|---|---|
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](../README.md#supported-formats) |
 | Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
-| Lightroom Sharpening parity (v1.17.0; the same star-field frame against Camera Raw's own 16-bit renders: Amount 0 / 40 / 80 / 150, Radius 0.5 / 2 / 3, Detail 0 / 100, Masking 50 / 100) | per-pixel R² of the move 0.966 / 0.944 / 0.865 at Amount 40 / 80 / 150; Radius 0.956 / 0.955 / 0.915; Detail 0.716 / 0.947; Masking 0.961 / 0.957 — Detail 0 and Amount 150 under the 0.9 line, disclosed | [What is new §4](#4-lightroom-parity-is-measured-and-the-residuals-are-published) |
 | Lightroom Sharpening parity (v1.6.5; one star-field frame at Sharpness 0 / 40 / 80, Radius 1.0, Detail 25, Masking 0) | per-pixel R² 0.93 / 0.92 over the frame, 0.95 on the edges and stars; star peaks +0.07 / +0.11 / +0.12 in Lightroom against the law's +0.08 / +0.11 / +0.13; the ring around them 0.02 / 0.04 / 0.08 against 0.02 / 0.04 / 0.07 | [What is new §4](#4-lightroom-parity-is-measured-and-the-residuals-are-published) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
 | Linear mask closure (openly not pixel-closed) | RMS 9.748 / 7.025 / 6.336 px with lens correction on, 12.449 / 9.943 / 4.979 px off | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
