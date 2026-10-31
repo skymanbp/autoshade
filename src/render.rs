@@ -220,17 +220,18 @@ pub use baked::{
 use source::{apply_crop, render_frame, rgb16_source};
 #[cfg(test)]
 use source::{cfa_needs_geometry_demosaic, cfa_taps, demosaic_over_cfa_geometry, wrap_table};
-pub use tone::{curve_lut};
+pub use tone::{curve_lut, curve_lut_for, curve_lut_under};
+pub use tone_cr::SliderLaw;
 pub(crate) use tone::{
-    TONE_KNOTS_X, build_tone_lut, camera_raw_tone_passes, curve_channels, sample_lut, sample_tone_model, tone_exposure_curve,
+    TONE_KNOTS_X, build_tone_lut, camera_raw_tone_passes, curve_channels_under, sample_lut, sample_tone_model, tone_exposure_curve,
     tone_knot_weights, tone_model_knots, tone_slider_basis,
 };
-use tone::{CurveSpace, MiddleRatio, apply_rgb_curves, hermite_eval};
+use tone::{CurveSpace, MiddleRatio, apply_rgb_curves, engine_channel_curves, hermite_eval};
 #[cfg(test)]
-use tone::apply_camera_raw_curve;
+use tone::{apply_camera_raw_curve, curve_channels};
 pub(crate) use mask_cr::LocalGreyLaw;
 pub(crate) use tone_cr::{
-    HS_SH_FLOOR, HsKey, SliderLaw, camera_raw_exposure, camera_raw_response_keyed, shadows_anchor,
+    HS_SH_FLOOR, HsKey, camera_raw_exposure, camera_raw_response_keyed, shadows_anchor,
     camera_raw_row, camera_raw_start, Exposure, hs_row, HsSite,
 };
 use tone_cr::{

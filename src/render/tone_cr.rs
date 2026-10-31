@@ -124,7 +124,7 @@ use super::*;
 
 /// Which law a recipe's tone sliders render through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SliderLaw {
+pub enum SliderLaw {
     /// The engine's own knot model ([`tone_model_knots`]).
     Engine,
     /// Camera Raw's, measured: this module.
@@ -133,8 +133,12 @@ pub(crate) enum SliderLaw {
 
 impl SliderLaw {
     /// The law `r`'s sliders render through: Camera Raw's exactly when the
-    /// recipe starts from a camera profile.
-    pub(crate) fn of(r: &EditRecipe) -> Self {
+    /// recipe starts from a camera profile. The ONE switch for every measured
+    /// Camera Raw law — the sliders, the raw's white level
+    /// (`source::decode_sensor`) and the point curves' spline, channels and
+    /// place (`tone::curve_lut_for`, `tone::apply_rgb_curves`); a recipe
+    /// naming no profile (every fresh develop) renders on the engine's own.
+    pub fn of(r: &EditRecipe) -> Self {
         if r.names_profile() { Self::CameraRaw } else { Self::Engine }
     }
 }

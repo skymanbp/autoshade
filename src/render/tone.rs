@@ -420,7 +420,7 @@ fn tone_lut_at(r: &EditRecipe, exposure_ev: f32) -> Vec<f32> {
         exposure_ev,
         [contrast, highlights, shadows, whites, blacks],
     );
-    let curve = curve_lut(&r.tone_curve); // the recipe's own tone_curve, composed on top
+    let curve = curve_lut_for(r, &r.tone_curve); // the recipe's own tone_curve, composed on top
     let parametric = parametric_lut(r); // …over the parametric curve, over the sliders
     let user: Vec<f32> = (0..LUT_N)
         .map(|i| {
@@ -689,20 +689,78 @@ pub(super) fn hermite_eval(xs: &[f32], ys: &[f32], m: &[f32], x: f32) -> f32 {
     h00 * ys[i] + h10 * h * m[i] + h01 * ys[i + 1] + h11 * h * m[i + 1]
 }
 
-/// Curve control points → a 256-entry [0,1]→[0,1] LUT; identity when empty.
-/// The ONE curve sampler shared by the master tone curve, the per-channel RGB
-/// curves, and the GUI curve editor's on-screen preview — public so what the
-/// editor draws is exactly what the engine applies.
-///
-/// v1.17.0: between the knots it is Camera Raw's own spline
-/// ([`adobe_spline`]), not a straight line. Measured on one frame's flat
-/// packet (`ToneCurvePV2012Red` `0,0 / 128,180 / 255,255`, Camera Raw 16-bit
-/// against a prediction from the flat render, ΔE mean over 0.58 M pixels):
-/// straight lines leave 4.73, the spline 0.08; on a five-knot curve
-/// 3.01 against 0.53.
+/// Curve control points → a 256-entry [0,1]→[0,1] LUT under the law `r`
+/// renders through ([`SliderLaw::of`]): the ONE curve sampler shared by the
+/// master tone curve, the per-channel RGB curves, a mask's curves and the GUI
+/// curve editor's on-screen preview — public so what the editor draws is
+/// exactly what the engine applies. On the engine's own law the knots are
+/// joined by straight lines, as every release before v1.17.0 drew them; on
+/// Camera Raw's law (a recipe naming a camera profile) by its spline
+/// ([`curve_lut`]).
+pub fn curve_lut_for(r: &EditRecipe, points: &[crate::recipe::CurvePoint]) -> Vec<f32> {
+    curve_lut_under(points, SliderLaw::of(r))
+}
+
+/// [`curve_lut_for`] with the law already resolved.
+pub fn curve_lut_under(points: &[crate::recipe::CurvePoint], law: SliderLaw) -> Vec<f32> {
+    match law {
+        SliderLaw::CameraRaw => curve_lut(points),
+        SliderLaw::Engine => match curve_knots(points) {
+            None => identity_curve_lut(),
+            Some(pts) => (0..256).map(|i| interp(&pts, i as f32 / 255.0)).collect(),
+        },
+    }
+}
+
+/// Piecewise-linear interpolation over sorted (x,y) control points, clamped at
+/// the ends: the engine law's point curve.
+fn interp(pts: &[(f32, f32)], x: f32) -> f32 {
+    if pts.is_empty() {
+        return x;
+    }
+    if x <= pts[0].0 {
+        return pts[0].1;
+    }
+    if x >= pts[pts.len() - 1].0 {
+        return pts[pts.len() - 1].1;
+    }
+    for w in pts.windows(2) {
+        let (x0, y0) = w[0];
+        let (x1, y1) = w[1];
+        if x >= x0 && x <= x1 {
+            let t = if (x1 - x0).abs() < 1e-6 { 0.0 } else { (x - x0) / (x1 - x0) };
+            return y0 + (y1 - y0) * t;
+        }
+    }
+    x
+}
+
+fn identity_curve_lut() -> Vec<f32> {
+    (0..256).map(|i| i as f32 / 255.0).collect()
+}
+
+/// Camera Raw's point-curve sampler — the law of a recipe that names a camera
+/// profile ([`curve_lut_for`]): a 256-entry [0,1]→[0,1] LUT, identity when
+/// empty, the knots joined by Camera Raw's own spline ([`adobe_spline`]).
+/// Measured on one frame's flat packet (`ToneCurvePV2012Red` `0,0 / 128,180 /
+/// 255,255`, Camera Raw 16-bit against a prediction from the flat render, ΔE
+/// mean over 0.58 M pixels): straight lines leave 4.73, the spline 0.08; on a
+/// five-knot curve 3.01 against 0.53.
 pub fn curve_lut(points: &[crate::recipe::CurvePoint]) -> Vec<f32> {
+    match curve_knots(points) {
+        None => identity_curve_lut(),
+        Some(pts) => {
+            let spline = adobe_spline(&pts);
+            (0..256).map(|i| spline(i as f32 / 255.0).clamp(0.0, 1.0)).collect()
+        }
+    }
+}
+
+/// A point curve's knots on [0, 1], sorted, twins dropped and the ends
+/// pinned; `None` for an empty curve.
+fn curve_knots(points: &[crate::recipe::CurvePoint]) -> Option<Vec<(f32, f32)>> {
     if points.is_empty() {
-        return (0..256).map(|i| i as f32 / 255.0).collect();
+        return None;
     }
     let mut pts: Vec<(f32, f32)> = points
         .iter()
@@ -729,8 +787,7 @@ pub fn curve_lut(points: &[crate::recipe::CurvePoint]) -> Vec<f32> {
     if pts[pts.len() - 1].0 < 1.0 {
         pts.push((1.0, 1.0));
     }
-    let spline = adobe_spline(&pts);
-    (0..256).map(|i| spline(i as f32 / 255.0).clamp(0.0, 1.0)).collect()
+    Some(pts)
 }
 
 /// The DNG SDK's curve spline (`dng_spline_solver`), which Camera Raw puts
@@ -832,7 +889,14 @@ pub(crate) fn sample_lut(lut: &[f32], x: f32) -> f32 {
 /// The caller places this pass after Saturation and Vibrance (`develop`):
 /// a red curve composed onto Camera Raw's own HSL, Contrast +50, Exposure +1,
 /// Saturation +50 and Vibrance +50 renders predicts them to 0.08–0.12.
+///
+/// All of that is Camera Raw's law, for a recipe that names a camera profile
+/// ([`SliderLaw::of`]). On the engine's own law each curve, straight lines
+/// between its knots ([`curve_lut_for`]), acts on the working space's own
+/// encoded channel, and the develop places the pass right after the tone
+/// stage — what every release before v1.17.0 rendered.
 pub(super) fn apply_rgb_curves(data: &mut [[f32; 3]], r: &EditRecipe, space: ExportColorSpace) {
+    let law = SliderLaw::of(r);
     let curves = [&r.red_curve, &r.green_curve, &r.blue_curve];
     // v1.5.0 F7: a creative profile may bake per-channel curves too, and they
     // compose UNDER the photographer's for the same reason the master curve
@@ -845,7 +909,7 @@ pub(super) fn apply_rgb_curves(data: &mut [[f32; 3]], r: &EditRecipe, space: Exp
         return;
     }
     let luts: [Vec<f32>; 3] = std::array::from_fn(|ch| {
-        let own = curve_lut(curves[ch]);
+        let own = curve_lut_under(curves[ch], law);
         match baked.map(|b| b[ch]).filter(|c| !c.is_empty()) {
             None => own,
             Some(under) => {
@@ -857,7 +921,7 @@ pub(super) fn apply_rgb_curves(data: &mut [[f32; 3]], r: &EditRecipe, space: Exp
                 // of the 161 measured writes the three channels as identity,
                 // which `parse_curve_checked` returns empty, so this arm has
                 // never run on a real file.
-                let base = curve_lut(under);
+                let base = curve_lut_under(under, law);
                 (0..LUT_N)
                     .map(|i| {
                         let x = i as f32 / (LUT_N - 1) as f32;
@@ -869,8 +933,24 @@ pub(super) fn apply_rgb_curves(data: &mut [[f32; 3]], r: &EditRecipe, space: Exp
     });
     let active: [bool; 3] =
         std::array::from_fn(|ch| !curves[ch].is_empty() || baked.is_some_and(|b| !b[ch].is_empty()));
+    if law == SliderLaw::Engine {
+        data.par_iter_mut().for_each(|px| *px = engine_channel_curves(*px, &luts, active));
+        return;
+    }
     let space = CurveSpace::new(space);
     data.par_iter_mut().for_each(|px| *px = space.channel_curves(*px, &luts, active));
+}
+
+/// The engine law's per-channel curves: each `active` channel of the working
+/// space's encoded pixel through its own LUT.
+pub(super) fn engine_channel_curves(px: [f32; 3], luts: &[Vec<f32>; 3], active: [bool; 3]) -> [f32; 3] {
+    let mut px = px;
+    for ch in 0..3 {
+        if active[ch] {
+            px[ch] = sample_lut(&luts[ch], px[ch]);
+        }
+    }
+    px
 }
 
 /// [`profile::curve_space`] and the sRGB transfer, resolved once per pass:
@@ -923,11 +1003,21 @@ impl CurveSpace {
     }
 }
 
+/// The channels a per-channel curve acts on under `law`: ProPhoto under the
+/// sRGB transfer on Camera Raw's ([`curve_channels`]), the pixel's own
+/// working channels on the engine's ([`apply_rgb_curves`]).
+pub(crate) fn curve_channels_under(px: &[f32; 3], law: SliderLaw) -> [f32; 3] {
+    match law {
+        SliderLaw::CameraRaw => curve_channels(px),
+        SliderLaw::Engine => *px,
+    }
+}
+
 /// sRGB-encoded pixels (sRGB primaries, the analysis renders') → the
-/// channels [`apply_rgb_curves`] puts a per-channel curve on: ProPhoto RGB
+/// channels [`apply_rgb_curves`] puts a per-channel curve on under Camera Raw's law: ProPhoto RGB
 /// ([`profile::curve_space`]) under the sRGB transfer. What the reverse fit
 /// matches a channel curve's distributions in (`fit::curves`), so the curve
-/// it fits is a curve of the channel the engine and Camera Raw apply it to.
+/// it fits is a curve of the channel Camera Raw's law applies it to.
 pub(crate) fn curve_channels(px: &[f32; 3]) -> [f32; 3] {
     use std::sync::OnceLock;
     static TO: OnceLock<[[f32; 3]; 3]> = OnceLock::new();

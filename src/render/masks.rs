@@ -81,7 +81,8 @@ pub(super) fn apply_masks(
     // measured law in the develop's own white-balance and tone stages
     // (`mask_cr`); this pass keeps the rest, and turns the Hue as Lightroom
     // does (`mask_cr::hue_px`).
-    let camera_raw = SliderLaw::of(r) == SliderLaw::CameraRaw;
+    let law = SliderLaw::of(r);
+    let camera_raw = law == SliderLaw::CameraRaw;
     let hue_space = camera_raw.then(|| (profile::UnderTone::new(space, r.camera_start.unwrap_or_default()), transfer_luts()));
     // The frame adaptation, built ONCE per frame rather than per mask or per
     // pixel (see `MaskUnwarp`). `None` whenever nothing downstream moves these
@@ -150,9 +151,9 @@ pub(super) fn apply_masks(
         .then(|| {
             (
                 [
-                    curve_lut(&m.red_curve),
-                    curve_lut(&m.green_curve),
-                    curve_lut(&m.blue_curve),
+                    curve_lut_under(&m.red_curve, law),
+                    curve_lut_under(&m.green_curve, law),
+                    curve_lut_under(&m.blue_curve, law),
                 ],
                 [
                     !m.red_curve.is_empty(),
@@ -313,8 +314,15 @@ pub(super) fn apply_masks(
                 // measured for a mask too — a full-coverage linear mask's
                 // `RedCurve` on Camera Raw is predicted by it to 0.09 ΔE, by
                 // the working sRGB channels to 9.5.
+                // On the engine's own law (a recipe naming no camera
+                // profile) each curve acts on the working channel itself,
+                // as before v1.17.0 (`tone::apply_rgb_curves`).
                 if let Some((luts, active)) = &rgb_curve_luts {
-                    t = curve_space.channel_curves(t, luts, *active);
+                    t = if camera_raw {
+                        curve_space.channel_curves(t, luts, *active)
+                    } else {
+                        engine_channel_curves(t, luts, *active)
+                    };
                 }
                 // v1.17.0: a Saturation on Camera Raw's law moves the colour
                 // in the reference primaries about V (above 0) or the HSL

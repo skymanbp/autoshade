@@ -91,8 +91,8 @@ pub(super) fn only_detail_and_quantized_companions(recipe: &EditRecipe, base: &E
     };
     let recipe_wb = wb_gains_for(recipe);
     let base_wb = wb_gains_for(base);
-    let recipe_tone = render::curve_lut(&recipe.tone_curve);
-    let base_tone = render::curve_lut(&base.tone_curve);
+    let recipe_tone = render::curve_lut_for(recipe, &recipe.tone_curve);
+    let base_tone = render::curve_lut_for(base, &base.tone_curve);
     (recipe.exposure_ev - base.exposure_ev).abs() <= 0.02
         && recipe.contrast == base.contrast
         && recipe.highlights == base.highlights

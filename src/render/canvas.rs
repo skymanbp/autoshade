@@ -510,7 +510,9 @@ impl CameraBase {
             return Ok(None);
         }
         let diag = crate::diag::Diag::about(crate::diag::stderr(), raw);
-        let (mut rawimage, orientation, daylight) = source::decode_sensor(raw, 0, None, &diag)?;
+        let recipe = part.recipe();
+        let (mut rawimage, orientation, daylight) =
+            source::decode_sensor(raw, 0, None, SliderLaw::of(&recipe), &diag)?;
         if source::non_bayer_rgb_cfa(&rawimage).is_some() {
             return Ok(None);
         }
@@ -518,7 +520,6 @@ impl CameraBase {
         let Ok(xyz2cam) = meta.matrix.clone() else { return Ok(None) };
         // The render's own order: the stage resolved, the calibration
         // validated, the hot sites mapped before anything reads the mosaic.
-        let recipe = part.recipe();
         let Some((stage, None)) = camera::resolve_camera_profile(&meta, &recipe, ExportColorSpace::Srgb, &diag)
         else {
             return Ok(None);

@@ -263,9 +263,14 @@ impl AutoShadeApp {
 
         // --- interaction (mutates the active channel's control points) --------
         const HIT: f32 = 10.0; // grab radius around a point, screen px
-        let lut_before = autoshade::render::curve_lut(
+        // The recipe's law draws the curve as the engine applies it
+        // (`render::curve_lut_for`): straight lines on the engine's own law,
+        // Camera Raw's spline on a recipe that names a camera profile.
+        let law = autoshade::render::SliderLaw::of(&self.recipe);
+        let lut_before = autoshade::render::curve_lut_under(
             curve_points(&self.recipe, target, self.curve_channel)
                 .expect("the target was validated on entry"),
+            law,
         );
         // The drag belongs to the target it STARTED on: two editors can be
         // laid out in one frame (the global Curves section and a selected
@@ -323,7 +328,7 @@ impl AutoShadeApp {
         }
 
         // Engine-faithful curve line: all 256 samples straight from the shared LUT.
-        let lut = autoshade::render::curve_lut(pts);
+        let lut = autoshade::render::curve_lut_under(pts, law);
         let line: Vec<egui::Pos2> = lut
             .iter()
             .enumerate()

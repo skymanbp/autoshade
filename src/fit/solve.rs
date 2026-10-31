@@ -947,9 +947,9 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         recipe.green_curve = Vec::new();
         recipe.blue_curve = Vec::new();
         let cur = pixels_of(&render::develop_preview(&s_img, recipe));
-        recipe.red_curve = residual_channel_curve_weighted(&cur, &tp, 0, &rw_source, &rw_target);
-        recipe.green_curve = residual_channel_curve_weighted(&cur, &tp, 1, &rw_source, &rw_target);
-        recipe.blue_curve = residual_channel_curve_weighted(&cur, &tp, 2, &rw_source, &rw_target);
+        recipe.red_curve = residual_channel_curve_weighted(&cur, &tp, 0, &rw_source, &rw_target, render::SliderLaw::of(recipe));
+        recipe.green_curve = residual_channel_curve_weighted(&cur, &tp, 1, &rw_source, &rw_target, render::SliderLaw::of(recipe));
+        recipe.blue_curve = residual_channel_curve_weighted(&cur, &tp, 2, &rw_source, &rw_target, render::SliderLaw::of(recipe));
         let mut out = CastOutcome::default();
         if !(recipe.red_curve.is_empty()
             && recipe.green_curve.is_empty()
@@ -1068,11 +1068,11 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                         }
                         let under = pixels_of(&render::develop_preview(&s_img, &probe));
                         probe.red_curve =
-                            residual_channel_curve_weighted(&under, &tp, 0, &rw_source, &rw_target);
+                            residual_channel_curve_weighted(&under, &tp, 0, &rw_source, &rw_target, render::SliderLaw::of(&probe));
                         probe.green_curve =
-                            residual_channel_curve_weighted(&under, &tp, 1, &rw_source, &rw_target);
+                            residual_channel_curve_weighted(&under, &tp, 1, &rw_source, &rw_target, render::SliderLaw::of(&probe));
                         probe.blue_curve =
-                            residual_channel_curve_weighted(&under, &tp, 2, &rw_source, &rw_target);
+                            residual_channel_curve_weighted(&under, &tp, 2, &rw_source, &rw_target, render::SliderLaw::of(&probe));
                         if probe.red_curve.is_empty()
                             && probe.green_curve.is_empty()
                             && probe.blue_curve.is_empty()

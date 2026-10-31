@@ -94,7 +94,7 @@ pub(super) fn band_stats_weighted(px: &[[f32; 3]], weights: &[f32]) -> ([BandSta
 pub(super) fn residual_channel_curve(cur: &[[f32; 3]], tgt: &[[f32; 3]], ch: usize) -> Vec<CurvePoint> {
     let all_a = vec![1.0; cur.len()];
     let all_b = vec![1.0; tgt.len()];
-    residual_channel_curve_weighted(cur, tgt, ch, &all_a, &all_b)
+    residual_channel_curve_weighted(cur, tgt, ch, &all_a, &all_b, render::SliderLaw::Engine)
 }
 
 pub(super) fn residual_channel_curve_weighted(
@@ -103,13 +103,14 @@ pub(super) fn residual_channel_curve_weighted(
     ch: usize,
     cur_weights: &[f32],
     tgt_weights: &[f32],
+    law: render::SliderLaw,
 ) -> Vec<CurvePoint> {
-    // v1.17.0: in the channels the curve is APPLIED to — ProPhoto's, under
-    // the sRGB transfer (`render::curve_channels`, Camera Raw's law, measured)
-    // — not the render's sRGB ones: a CDF matched in one space and applied in
-    // another is a different curve.
-    let c_cdf = weighted_cdf(cur, cur_weights, |p| render::curve_channels(p)[ch]);
-    let t_cdf = weighted_cdf(tgt, tgt_weights, |p| render::curve_channels(p)[ch]);
+    // In the channels the curve is APPLIED to under the recipe's law
+    // (`render::curve_channels_under`): ProPhoto's under the sRGB transfer on
+    // Camera Raw's (v1.17.0, measured), the working channels on the engine's.
+    // A CDF matched in one space and applied in another is a different curve.
+    let c_cdf = weighted_cdf(cur, cur_weights, |p| render::curve_channels_under(p, law)[ch]);
+    let t_cdf = weighted_cdf(tgt, tgt_weights, |p| render::curve_channels_under(p, law)[ch]);
     if c_cdf.iter().all(|&v| v <= 0.0) || t_cdf.iter().all(|&v| v <= 0.0) {
         return Vec::new();
     }

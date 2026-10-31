@@ -2682,17 +2682,16 @@ impl PhotoCalibration {
     }
 }
 
-/// What a fresh develop of a photograph starts from on THIS machine (v1.17.0)
-/// — where Lightroom starts, when it can be rendered.
+/// What a fresh develop of a photograph starts from: the camera-matched base
+/// curve estimated from the embedded preview (empty for a baked image), and
+/// no camera profile — so a fresh develop renders on the engine's own law
+/// (`render::SliderLaw::Engine`), as every release before v1.17.0 did.
 ///
-/// A camera RAW whose body has 「Adobe Standard」 in the Camera Raw install,
-/// with the 「Adobe Color」 colour table beside it, starts from that canvas
-/// ([`crate::render::canvas_recipe`]) and no camera base curve. Anything else
-/// cannot render it — a baked image has no profile stage, and a machine
-/// without Camera Raw has no profile to read (the files are Adobe's and never
-/// bundled) — so it keeps the start it had before v1.17.0: the camera-matched
-/// base curve estimated from the embedded preview (empty for a baked image),
-/// with the reason disclosed for a RAW.
+/// Camera Raw's measured laws apply only to a recipe that names a camera
+/// profile (an imported Lightroom develop, or a refine carrying its base's
+/// profile): `render::SliderLaw::of` is the one switch. A develop the engine
+/// starts itself does not name one, so its look does not depend on whether a
+/// Camera Raw install happens to be on the machine.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CanvasStart {
     pub camera_profile: String,
@@ -2718,9 +2717,6 @@ impl CanvasStart {
 pub fn photo_base_part(raw: &Path) -> crate::render::BasePart {
     match saved_recipe_snapshot(raw, &crate::diag::photo(raw)) {
         Some(r) => crate::render::BasePart::of(&r),
-        None if crate::render::canvas_renders(raw).is_ok() => {
-            crate::render::BasePart::of(&crate::render::canvas_recipe())
-        }
         None => crate::render::BasePart::default(),
     }
 }
@@ -2732,31 +2728,19 @@ pub fn fresh_canvas_start(raw: &Path, d: &crate::diag::Diag) -> CanvasStart {
 
 /// THE one decision of a fresh start, shared by every fresh-open surface —
 /// [`fresh_canvas_start`], the GUI's open worker and the web's fresh payload.
-/// `estimate` is the camera-matched base-curve estimate, asked only when the
-/// canvas cannot render: the two interactive surfaces hand in their own,
-/// made on the neutral develop they already hold, so a fresh open still pays
-/// one demosaic.
+/// `estimate` is the camera-matched base-curve estimate: the two interactive
+/// surfaces hand in their own, made on the neutral develop they already
+/// hold, so a fresh open still pays one demosaic. `_d` keeps the surfaces'
+/// one call shape.
 pub fn fresh_canvas_start_with(
     raw: &Path,
-    d: &crate::diag::Diag,
+    _d: &crate::diag::Diag,
     estimate: impl FnOnce() -> Vec<[f32; 2]>,
 ) -> CanvasStart {
     if !decode::is_raw(raw) {
         return CanvasStart::default();
     }
-    match crate::render::canvas_renders(raw) {
-        Ok(()) => {
-            let c = crate::render::canvas_recipe();
-            CanvasStart { camera_profile: c.camera_profile, look: c.look, base_curve: Vec::new() }
-        }
-        Err(why) => {
-            d.warn(format!(
-                "the canvas starts from the camera-matched base look, not Lightroom's \
-                 \"Adobe Color\": {why}"
-            ));
-            CanvasStart { base_curve: estimate(), ..Default::default() }
-        }
-    }
+    CanvasStart { base_curve: estimate(), ..Default::default() }
 }
 
 /// The start of a develop IMPORTED from a Lightroom document (a sidecar, the

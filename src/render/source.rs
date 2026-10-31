@@ -114,7 +114,7 @@ pub(super) fn render_frame(
     validated.disclose(&diag);
     let recipe = &*validated;
     let rasters = load_mask_raster_snapshot(recipe, &diag)?;
-    let (mut rawimage, orientation, daylight) = decode_sensor(raw_path, recipe.quarter_turns, denoise, &diag)?;
+    let (mut rawimage, orientation, daylight) = decode_sensor(raw_path, recipe.quarter_turns, denoise, SliderLaw::of(recipe), &diag)?;
 
     let wide = working != ExportColorSpace::Srgb;
     // v1.5.0 F7 — the camera profile the sidecar names, resolved against the
@@ -324,11 +324,12 @@ pub(super) fn camera_stage_lens(
 
 /// Open `raw_path` and read its sensor: the guards, the metadata, the per-file
 /// memory ceiling, the full decode and the default crop — everything up to
-/// the develop, and the raw's scale to Camera Raw's white level — shared by
-/// [`render_frame`] and [`super::CameraBase::decode`]. Returns the decoded
-/// image, its display orientation composed with the photographer's
-/// `quarter_turns`, and (for a Sony body) the file's Daylight preset. `diag`
-/// takes the white level's disclosure.
+/// the develop, and, under `law` [`SliderLaw::CameraRaw`], the raw's scale to
+/// Camera Raw's white level — shared by [`render_frame`] and
+/// [`super::CameraBase::decode`]. Returns the decoded image, its display
+/// orientation composed with the photographer's `quarter_turns`, and (for a
+/// Sony body) the file's Daylight preset. `diag` takes the white level's
+/// disclosure.
 ///
 /// The decode scope: the RawSource holds the entire RAW file in memory
 /// (~60–120 MB for a 61 MP lossless ARW), and neither it nor the decoder
@@ -339,6 +340,7 @@ pub(super) fn decode_sensor(
     raw_path: &Path,
     quarter_turns: u8,
     denoise: Option<&crate::denoise::DenoiseOpts>,
+    law: SliderLaw,
     diag: &crate::diag::Diag<'_>,
 ) -> Result<(rawler::RawImage, Orientation, Option<[f32; 3]>)> {
     crate::decode::guard_tiff_chain(raw_path)?;
@@ -412,14 +414,18 @@ pub(super) fn decode_sensor(
     // rawler 0.7.2 skips this crop on its own. The verdict is disclosed
     // inside (A5) — an out-of-bounds refusal used to be a silent `None`.
     crate::decode::align_default_crop(&mut raw);
-    // The raw is scaled by Camera Raw's white level where the body is
-    // measured (`decode::white_level`): rawler's level is the file's
+    // A recipe on Camera Raw's law (it names a camera profile,
+    // `SliderLaw::of`) scales the raw by Camera Raw's white level where the
+    // body is measured (`decode::white_level`): rawler's level is the file's
     // (15360 on a 7RM4A, Camera Raw 16383), and the difference is an
-    // exposure on every pixel (+0.096 EV for that body, v1.17.0).
+    // exposure on every pixel (−0.096 EV for that body, v1.17.0). A recipe
+    // on the engine's own law keeps the file's level, as every release
+    // before v1.17.0 rendered it.
     let iso = md.exif.iso_speed_ratings.map(u32::from).or(md.exif.iso_speed);
     let bits = crate::decode::white_level::raw_bits_per_sample(src.buf());
-    if let Some(crate::decode::white_level::WhiteLevelSource::File { level }) =
-        crate::decode::white_level::use_camera_raw_white_level(&mut raw, iso, bits)
+    if law == SliderLaw::CameraRaw
+        && let Some(crate::decode::white_level::WhiteLevelSource::File { level }) =
+            crate::decode::white_level::use_camera_raw_white_level(&mut raw, iso, bits)
     {
         diag.warn(format!(
             "{} {}: the raw is scaled by the file's white level {level}; Camera Raw's own level \

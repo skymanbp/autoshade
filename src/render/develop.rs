@@ -518,6 +518,13 @@ pub(super) fn apply_develop_with_rasters(
     if monochrome {
         apply_gray_mix(data, &r.gray_mixer());
     }
+    // 1b) per-channel RGB curves (red/green/blue) on the engine's own law,
+    //    right after the master curve, on the working channels — their place
+    //    in every release before v1.17.0. Camera Raw's law puts them after
+    //    Saturation (3c below).
+    if !camera_raw {
+        apply_rgb_curves(data, r, space);
+    }
     // 2) per-colour HSL (the 8 ACR bands): rotate/scale each colour family,
     //    after global tone and before clarity/saturation (ACR ordering) — then
     //    the point colours (v1.5.0), the Color Mixer's other half. Neither has
@@ -569,8 +576,11 @@ pub(super) fn apply_develop_with_rasters(
     //    them to 0.09 and 0.08 ΔE. Still before the colour grade's place in
     //    Camera Raw would be (after these curves: composing the curve onto
     //    its grade render is 8.7 ΔE off), which here runs earlier — a known
-    //    difference of the order, ARCHITECTURE.
-    apply_rgb_curves(data, r, space);
+    //    difference of the order, ARCHITECTURE. Camera Raw's law only (a
+    //    recipe naming a camera profile); the engine's ran at 1b.
+    if camera_raw {
+        apply_rgb_curves(data, r, space);
+    }
     // 4) the Detail panel (v1.5.0, `detail.rs`): colour noise, then luminance
     //    noise, then sharpening. Noise reduction runs BEFORE sharpening (the
     //    order that matters most), and colour before luminance so the
