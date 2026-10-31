@@ -57,15 +57,15 @@ An editable, Lightroom-ready recipe instead of AI pixels.
 <td width="50%" valign="top">
 
 **🌌 A RAW denoiser trained here**<br />
-<sub>Cleans the sensor mosaic before demosaic. Keeps **98.70 %** of 17,817 faint stars against Lightroom Denoise's 98.80 %.</sub>
+<sub>Cleans the sensor mosaic before demosaic. Keeps **98.70 %** of 17,817 faint stars on a real ISO 2500 frame.</sub>
 
 </td>
 </tr>
 <tr>
 <td valign="top">
 
-**📐 Lightroom parity, measured**<br />
-<sub>Texture **45 / 45** anchors within ±0.02, radial masks **41 / 41** within 1 px. Every residual is published.</sub>
+**📐 Every slider is a written law**<br />
+<sub>Tone, Texture, Sharpening, masks and lens geometry are closed-form laws with named constants, each pinned by its own test.</sub>
 
 </td>
 <td valign="top">
@@ -105,9 +105,9 @@ An editable, Lightroom-ready recipe instead of AI pixels.
 
 <br />
 
-<img src="docs/images/showcase-denoise-star-field.jpg" alt="One 1:1 window of a 61 MP star field, four ways: Lightroom's develop with Denoise off and at 50, AutoShade's neutral develop with no denoise and with its own denoiser at the 71 % default" />
+<img src="docs/images/showcase-denoise-star-field.jpg" alt="One 1:1 window of a 61 MP star field, two ways: AutoShade's neutral develop with no denoise and with its own denoiser at the 71 % default" />
 
-<sub><b>ISO 2500 star field, 1:1.</b> Top: Lightroom, Denoise off / 50. Bottom: AutoShade, off / its own denoiser at 71 %. Clean colour, natural grain, faint stars intact.</sub>
+<sub><b>ISO 2500 star field, 1:1.</b> AutoShade with no denoise, then its own denoiser at 71 %. Clean colour, natural grain, faint stars intact.</sub>
 
 <p align="right"><sub>Every number and prompt → <a href="docs/SHOWCASE.md">Showcase</a></sub></p>
 
@@ -120,7 +120,7 @@ Six techniques you will not find in another RAW developer. Each is written up in
 | **1** | [Generate, then reverse-fit](docs/DEEP_DIVE.md#1-whole-image-ai-generation-then-reverse-fit-an-editable-recipe-from-any-finished-look) | An editable recipe from any finished look, solved at the distribution level |
 | **2** | [Evidence-gated local fit](docs/DEEP_DIVE.md#2-how-the-reverse-fit-decides-divergence-evidence-gates-and-a-priced-local-field) | A divergence score `D` picks full solve or bounded mode; every local move must earn its place |
 | **3** | [Style by retrieval](docs/DEEP_DIVE.md#3-style-reference-is-retrieval-over-your-whole-catalogue-not-a-preset) | SigLIP 2 search over your own finished photos, not a preset |
-| **4** | [Measured Lightroom parity](docs/DEEP_DIVE.md#4-lightroom-parity-is-measured-and-the-residuals-are-published) | Tone, Texture, Sharpening, masks and lens geometry fitted to Lightroom exports |
+| **4** | [Every slider is a written law](docs/DEEP_DIVE.md#4-every-develop-control-is-a-written-law-pinned-by-the-projects-own-tests) | Tone, Texture, Sharpening, masks and lens geometry as closed-form laws, each pinned by its own test |
 | **5** | [A denoiser with pre-written pass marks](docs/DEEP_DIVE.md#5-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) | Trained on this project's data; two later runs failed their marks and were refused |
 | **6** | [The camera's own look](docs/DEEP_DIVE.md#6-the-cameras-own-look-is-read-from-the-picture-like-with-like) | A per-photo base curve read from the embedded preview, like with like |
 
@@ -145,9 +145,7 @@ Six techniques you will not find in another RAW developer. Each is written up in
 | RAW coverage | 24 extensions · 725 camera bodies · nine-camera zoo 9/9 |
 | Reverse-fit, stone viaduct | look error 0.161 → 0.023 at confidence 0.63 |
 | Reverse-fit, desert canyon | look error 0.129 → 0.048 · sky ΔE 3.8 |
-| Faint stars kept, vs Lightroom Denoise 50 | 98.70 % vs 98.80 % of 17,817 stars |
-| Lightroom Sharpening fit | per-pixel R² 0.93 (0.62 for plain unsharp mask) |
-| Brush geometry vs Lightroom | error 874 px → 9.8 px |
+| Faint stars kept through the denoiser | 98.70 % of 17,817 stars on an ISO 2500 frame |
 
 <sub>The full table — 20+ rows with conditions and sources — is in [AutoShade in depth](docs/DEEP_DIVE.md#measured-numbers); [`scripts/check_docs.py`](scripts/check_docs.py) re-derives the pinned claims.</sub>
 
@@ -277,8 +275,8 @@ Per-subsystem notes: [In depth → Implementation](docs/DEEP_DIVE.md#implementat
 ## Status and limitations
 
 - **Release gates at v1.16.0** cover the CLI, desktop GUI, sidecar contracts, format fixtures and the deterministic renderer.
-- **Not in scope:** bit-exact Adobe rendering (parity is measured, not identical), an exact X-Trans demosaic, a notarised macOS build, a Linux desktop app.
-- **Honest markers:** AI masks are local re-creations, not Adobe's pixels; linear masks are not pixel-closed (radial closes 41/41 to ≤ 1 px); the macOS app is CI-verified but has no reported interactive users yet.
+- **Not in scope:** Adobe's rendering (AutoShade is its own develop engine; a sidecar carries the same settings to Lightroom, which renders them its own way), an exact X-Trans demosaic, a notarised macOS build, a Linux desktop app.
+- **Honest markers:** AI masks are local re-creations, not Adobe's pixels; the macOS app is CI-verified but has no reported interactive users yet.
 - Release ledger and rulings: [ROADMAP.md](docs/ROADMAP.md).
 
 ## License

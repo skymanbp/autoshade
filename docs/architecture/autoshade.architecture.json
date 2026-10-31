@@ -64,7 +64,7 @@
       "id": "render-engine",
       "type": "backend",
       "label": "Render engine",
-      "sublabel": "render.rs · measured LR parity",
+      "sublabel": "render.rs · measured laws",
       "tag": "byte-identical"
     },
     {
@@ -350,7 +350,7 @@
       "dot": "rose",
       "title": "Measured, local, quarantined",
       "items": [
-        "Lightroom parity by measurement: Texture 45/45 anchors within 0.02, radial 41/41 vectors within 1 px, brush D1 874 -> 9.8 px; linear openly not pixel-closed",
+        "Every slider a written law pinned by a test: two-arm Texture, 290x11 radial feather table, brush (1 - rho^m)^n, lens mask-frame transport",
         "Local models licence-screened and sha256/byte-pinned: BiRefNet, OneFormer ADE20K, SAM 2.1, SigLIP 2, SD 2.1 as DIFT featurizer, SCUNet, DRUNet",
         "Generated pixels (gpt-image-2 reimagine via the Images API, heal, denoise) live on their own cards and are measured with the same D before any fit"
       ]

@@ -183,15 +183,13 @@ is AutoShade's own conversion, not the camera JPEG; histogram and clipping
 information are computed from the decoded image and also feed the AI verifier.
 The develop starts **where Lightroom starts** (v1.17.0): Adobe's 「Adobe
 Standard」 camera profile under the 「Adobe Color」 creative profile, every
-slider at zero — the picture an all-zero Lightroom sidecar renders, pixel for
-pixel. The canvas, the browser's pane, a heal / clone / fill / denoise / stack
+slider at zero — the start an all-zero Lightroom sidecar names. The canvas, the browser's pane, a heal / clone / fill / denoise / stack
 master and the reverse fit all start from that same picture, and a photo you
 save writes the Adobe Color profile into its `.xmp`, so Lightroom opens it on
 the same start. On that start the Basic panel's Exposure, Contrast,
 Highlights, Shadows, Whites and Blacks, Dehaze, Temperature and Tint, Clarity
-and Texture move the picture the way Lightroom's do — measured slider by
-slider against Camera Raw — so a sidecar's numbers mean the same picture in
-both. Tint there is Lightroom's own number: the as-shot tint (a Sony frame's
+and Texture each follow a written law in the same units and range as the
+sidecar's number, so a value you set here is the value Lightroom reads. Tint there is Lightroom's own number: the as-shot tint (a Sony frame's
 +14, say) is no move, and the WB eyedropper answers in the same units.
 A fresh develop on that start opens Temperature and Tint at the photo's As
 Shot values, as Lightroom's sliders do; the custom white balance box stays
@@ -229,8 +227,8 @@ colour), Colour Priority spares them by the pixel's brightness (and cannot),
 Paint Overlay simply mixes toward black or white. Grain is sized in pixels of
 the full-resolution photo like the Detail radii, and it is the same grain every
 time you export — never a fresh sprinkle of random noise. These nine are
-first-principles readings of operators Adobe has not published, so expect a
-family resemblance to Lightroom rather than a pixel match.
+AutoShade's own readings of operators Adobe has not published; Lightroom
+draws its own version of each from the same sidecar values.
 
 Every slider in the **Detail** fold renders since v1.5.0: Sharpening with its
 radius, detail and masking, and both noise reductions with their detail,
@@ -246,12 +244,12 @@ them, with the default Lightroom itself uses for the kind of file — 40 on a
 RAW, 0 on a JPEG or TIFF — so a RAW you never sharpened here is sharpened the
 way Lightroom sharpens it by default, a sidecar that says nothing about the
 amount lets Lightroom keep its own, and dragging the slider to 0 on a RAW is a
-real 0. Since v1.6.5 the Sharpening slider is calibrated against Lightroom's on
-a measured frame: the same number sharpens about the same, light edges and
-star cores lift the way Lightroom's do, the dark ring around a bright star
-digs as deep as Lightroom's and no deeper, and deep shadows are left alone.
-The two noise reductions are AutoShade's own, built from what Adobe documents
-about each slider — close to Lightroom, not identical.
+real 0. Since v1.6.5 the Sharpening slider follows a calibrated law: light
+edges and star cores lift, the dark ring around a bright star deepens with
+the star and no further, and deep shadows are left alone. Radius, Detail and
+Masking beyond their defaults are the law's own extension. The two noise
+reductions are AutoShade's own, built from what Adobe documents about each
+slider.
 
 The **Lens** fold finishes the set since v1.5.0. **Remove chromatic
 aberration** used to be carried to the sidecar and nothing else — it is an
@@ -320,23 +318,19 @@ and brushes stay on what they were painted on. Scale runs from 50 to 150, as
 Lightroom's own slider does; a smaller or larger number in a hand-edited file
 is read as the nearest end of that range.
 
-Adobe has never published what a Transform slider does, so AutoShade measured
-it: fifteen test photographs were edited in Lightroom, one slider at a time, and
-each export compared against its own untouched version to work out the exact
-move Lightroom had made. Scale, Rotate, Aspect and the two Offsets now match to
-better than a percent. The two keystones match in shape, and differ in one way
-worth knowing about — Lightroom also stretches the picture slightly along the
-axis you are correcting, by an amount that depends on the LENS, and the test set
-was not large enough to work out that rule. So a keystone in AutoShade frames a
-little differently from the same keystone in Lightroom: a touch tighter on a
-long lens, a touch looser on a wide one. The shape of the correction itself is
-right.
+Adobe has never published what a Transform slider does, so AutoShade worked
+it out: fifteen test photographs were edited one slider at a time, and each
+compared against its own untouched version. Scale, Rotate, Aspect and the two
+Offsets are exact moves. The two keystones correct the shape; one part is not
+modelled — a slight stretch along the axis you are correcting, whose amount
+depends on the LENS — so the same keystone value opened in Lightroom can frame
+a touch tighter on a long lens and a touch looser on a wide one.
 
 **Upright** is the dropdown above them, and it is the honest half of that
 sentence. Lightroom does not publish how its Upright solver works, but it DOES
 write the answer into the sidecar — one matrix per mode — so on a photo you
-corrected in Lightroom, AutoShade renders Lightroom's own result exactly, to
-the last digit. The panel says so while it is doing it. On a photo Lightroom
+corrected in Lightroom, AutoShade applies the matrix the sidecar stores,
+digit for digit. The panel says so while it is doing it. On a photo Lightroom
 never corrected, picking a mode here runs AutoShade's own solver instead: it
 reads the picture's long straight edges, finds where they would meet, and
 builds the turn that sends them parallel again — Level straightens, Vertical
@@ -359,8 +353,8 @@ through. Lightroom writes two: a camera profile (「Adobe Standard」 and the
 like, a file Adobe installed on your machine) and, above it, a creative profile
 — 「Adobe Color」 on almost every photo Lightroom has touched, or 「Adobe
 Landscape」, 「Adobe Monochrome」 and the rest if you picked one. Since v1.5.0
-AutoShade reads both and develops through them, which is a large part of why a
-photo now opens looking like it did in Lightroom rather than flatter.
+AutoShade reads both and develops through them, so a photo opens with the
+profile it was edited under rather than flatter.
 
 Both rows are read-only. A creative profile has two halves: a baked tone
 curve with a few baked sliders, and a creative colour table. Since v1.17.0
@@ -402,25 +396,19 @@ be shown here without a way to change them.
 The **HDR & SDR** fold sits beside Export, because that is what it governs. If
 a photo was edited in Lightroom's HDR mode, its brightest stops sit ABOVE white
 rather than clipped at it, and **Headroom (stops)** is how many. AutoShade only
-ever writes SDR files, so what it renders is the same thing Lightroom would
-publish: the SDR rendition, shaped by the seven sliders under it — Blend,
+ever writes SDR files, so what it renders is the SDR rendition, shaped by the seven sliders under it — Blend,
 Brightness, Contrast, Highlights, Shadows, Whites, Clarity. **Blend** is how
 much of the headroom reaches that rendition: −100 ignores it entirely, 0 is the
 headroom the sidecar states, +100 is twice as many stops of it.
 
-Those seven only render while **HDR edit mode** is ticked, exactly as in
-Lightroom, where the panel is not there otherwise — so a value left over from
+Those seven only render while **HDR edit mode** is ticked, as the sidecar's
+own switch says (Lightroom shows the panel only then too) — so a value left over from
 an HDR session you later abandoned cannot quietly re-tone the photo. The values
 are still kept, still written back to the sidecar, and the fold still shows its
 ● so nothing a file holds is invisible.
 
-No photo in the reference library ever turned HDR mode on, so this was the one
-part of the develop chain with nothing to check against. A test photograph was
-edited in Lightroom's HDR mode for that purpose, and the shoulder AutoShade
-rolls the headroom off with is now measured against it rather than reasoned
-about: it follows Lightroom's own curve closely at the top of the range, and
-holds back a little in the mid-tones, where Lightroom darkens slightly more
-than AutoShade does.
+The shoulder AutoShade rolls the headroom off with was calibrated on a test
+photograph edited in HDR mode for that purpose, rather than reasoned about.
 
 **🤖 AI Denoise now** in the Detail fold denoises the active card's pixels at
 full resolution and lands the result as a new **◈ Denoised negative** card
@@ -464,8 +452,7 @@ The fold's **AI denoise strength** starts at 71% for a RAW: higher is cleaner,
 lower returns more of the frame's own luminance grain after demosaic, in
 linear light. Every positive strength keeps the clean colour; exactly 0%
 leaves the input untouched without running the model. 100% keeps the network's
-complete output. The reference for the default is Lightroom Denoise
-50, not a promise that different renderers produce identical pixels.
+complete output.
 A baked PNG/TIFF/JPEG still uses SCUNet, its separate default is 50%, and its
 colour-noise removal is complete from 50% up. The Export fold has its own dial;
 both folds remember RAW and baked choices separately. On the first launch in
@@ -559,28 +546,22 @@ an honest re-derivation instead of presenting an older alpha as its result.
 A selected mask's sliders come in Lightroom's groups — **Tone**, **Detail**,
 **Color**, then the mask's own **Curve**. On a camera-profile start (above)
 a mask's Exposure, Contrast, Highlights, Shadows, Whites, Blacks, Dehaze,
-Clarity, Texture and its **Temp shift** / **Tint shift** move the picture the
-way Lightroom's mask sliders do — measured one by one against Camera Raw —
-and **Hue shift** turns colours by its value in degrees, up to ±180° as
-Lightroom's does (on any other start ±100 is ±30°). A mask's Sharpness, Noise and Saturation
+Clarity, Texture and its **Temp shift** / **Tint shift** each follow a
+written law in the sidecar's own units, and **Hue shift** turns colours by its
+value in degrees, up to ±180° (on any other start ±100 is ±30°). A mask's Sharpness, Noise and Saturation
 keep the engine's own model there, and Moiré and Defringe are not rendered.
 The **Color** group holds
 **Saturation**, **Hue shift**, **Temp shift**, **Tint shift** and, since
 v1.17.0, **Color tint** with its **Color tint hue** (Lightroom's mask
 「颜色」 swatch, 「颜色染色」 in the Chinese interface): it shifts every colour
 inside the mask, neutral and coloured alike, toward one hue — most in the
-midtones, never brighter or darker. That is what a Lightroom sky mask with a
-blue swatch does to a sky and its white clouds together, where **Hue shift**
+midtones, never brighter or darker. That is how a sky mask with a
+blue swatch tints a sky and its white clouds together, where **Hue shift**
 turns colours by an angle and the temperature pair warms or cools. The hue is
 on Lightroom's own 0–360 wheel and does nothing while **Color tint** is 0.
-How a hue renders is matched to Lightroom at seven hues around the wheel (0,
-60, 120, 180, 210, 240 and 300); hues between them follow Lightroom's own
-colour wheel but have not been checked one by one.
-The engine's model was measured on Lightroom's own exports of a whole-frame
-swatch (mean colour difference 2.1 and 1.3 at the two strengths exported,
-against 10.4 and 5.4 without the tint) and on Camera Raw renders of the same
-mask at the other six hues (1.5 to 1.8, against 6.9 to 11.7 without), and
-the reverse fit can solve it: a sky whose target was made with a swatch now
+The tint law was calibrated at seven hues around the wheel (0, 60, 120,
+180, 210, 240 and 300); hues between them are interpolated on the same
+wheel. The reverse fit can solve it: a sky whose target was made with a swatch now
 comes back as one tint read from the sky and its clouds at once.
 
 ## 4. Use versions and variants
@@ -1024,15 +1005,13 @@ sources get recipe JSON but no RAW XMP. `apply` also takes a Lightroom `.xmp`
 sidecar in place of the recipe, and since v1.16.0 it stamps the camera's lens
 profile from the sidecar's own lens switch exactly as the desktop app does when
 it opens the photo beside that sidecar, so one sidecar renders one geometry on
-both surfaces. Since v1.17.0 a sidecar renders from where Lightroom starts:
+both surfaces. Since v1.17.0 a sidecar renders from the start it names:
 Adobe's baseline exposure for the body (inferred from the camera profiles
 Adobe installed for it, and said in one line) and, for a profile that states no
 tone curve of its own, such as Adobe Standard, Adobe's default curve; and its
 colour through Adobe's own colour matrix for the profile and the creative
-profile's colour table, both read from your Camera Raw install. On the flat
-reference sidecar the colour now sits within about 1 point of b* of Camera
-Raw's render (sky and warm tones); what still differs is mostly the very
-brightest highlights, which Camera Raw rolls off and AutoShade clips.
+profile's colour table, both read from your Camera Raw install. The very
+brightest highlights are clipped, not rolled off.
 `auto` is `analyze` plus render.
 `batch` analyzes RAWs by default, skips baked photos unless `--include-baked`
 is set (avoiding duplicate analysis and billing for RAW+JPEG pairs), and

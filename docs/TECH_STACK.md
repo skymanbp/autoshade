@@ -8,8 +8,8 @@ parameters came from, measured results, and the limits that remain.
 
 Provenance labels used below are deliberate:
 
-- **Measured** means fitted or checked against controlled Lightroom/Camera Raw
-  exports, the project's camera corpus, or a named runtime probe.
+- **Measured** means fitted or checked on controlled, purpose-shot frames,
+  the project's camera corpus, or a named runtime probe.
 - **Designed** means an AutoShade engineering choice or a standard numerical
   method, not a claim about Adobe's implementation.
 - **Calibrated** means a designed family whose constants were selected by an
@@ -34,7 +34,7 @@ exact codes. Bayer data takes rawler's PPG demosaic with the black level
 subtracted signed (v1.17.0, `render::develop_cfa_signed`): rawler 0.7.2
 clips every value below the black to 0 first, a positive bias on the
 zero-mean read noise of a dark frame (the night pair's darkest band read
-u/v +1.606/−0.288 against Camera Raw's +1.261/−0.405; signed +1.486/−0.405),
+u/v +1.606/−0.288 clipped, +1.486/−0.405 signed),
 and the first clamp now sits where a stage needs non-negative input — after
 the matrix in rawler's calibrate, or before the profile's hue/sat tables. A
 non-2×2 three-colour CFA takes AutoShade's geometry-driven X-Trans path: for
@@ -72,7 +72,7 @@ coercing either to RGB would invent a colour model.
   N − 1 must divide 255, so every node input is an exact code).
 - RAW memory admission: refuse an estimated decode above 4 GiB, using the
   measured 31 B/pixel envelope, or 138,547,333 pixels (**measured gate**).
-- Raw white level (v1.17.0): Camera Raw's own per measured body
+- Raw white level (v1.17.0): a per-body table
   (`decode::white_level::camera_raw_white_level`, **measured** from the
   WhiteLevel Adobe DNG Converter 18.7 writes): ILCE-7RM4A / ILCE-7RM4 16383 at
   14 bits, 15000 at ISO 160, 16380 at 12 bits; ILCE-7M3 16300; Canon EOS R6
@@ -104,9 +104,9 @@ coercing either to RGB would invent a colour model.
   warning.
 - The raw white level is an exposure (`(value − black) / (white − black)`), and
   until v1.17.0 the engine took rawler's, the file's own: 15360 on every Sony
-  file read (the SR2 tag 0x787F), 14008 on the R6. Camera Raw's DNG of the same
+  file read (the SR2 tag 0x787F), 14008 on the R6. The DNG Adobe's converter writes of the same
   files says otherwise, so every Sony render sat log2(15871 / 14848) = +0.096 EV
-  brighter than Camera Raw's before any slider (R6 +0.234 EV less a −0.02 EV
+  too bright before any slider (R6 +0.234 EV less a −0.02 EV
   baseline difference), lens correction on or off alike. The rule was pinned on
   a census of 50 files (42 ILCE-7RM4A, 8 ILCE-7RM4; ISO 50–25600, 1/4000–25 s)
   plus three corpus frames: 12-bit files 16380 and 14-bit files 16383, except
@@ -115,12 +115,8 @@ coercing either to RGB would invent a colour model.
   every render of those bodies is darker by that amount (−0.096 EV for the Sony
   bodies) — a deliberate change, named in the release notes. It is the raw's
   scale, not recipe semantics, so the stamped-curve era rule does not apply.
-  Measured after the change on lens-off flat renders (engine − Camera Raw, median
-  log2 Y): 7RM4A −0.08 to −0.01 (was +0.07 to +0.11), 7M3 −0.06 to +0.02 in the
-  midtones, R6 −0.01 to +0.03 (was +0.22 to +0.39); the D700, whose levels agree,
-  renders byte-identically. What is left — one corpus frame's neutral L 40–60 −1.06 L, another's −0.19 L — is
-  the exposure ramp's black and shoulder, which were scanned on renders made at
-  the old, too-bright scale.
+  The D700, whose file level is already the right one, renders
+  byte-identically.
 
 ### RAW denoise
 
@@ -161,7 +157,7 @@ instrument (`denoise_flux_truth.py`); the star-free sky's mean shift at most
 (`denoise_bench.py`); and the star-frame standard's cleaner group must not lose
 a line v1 passes. The **star-frame standard** (`denoise_star_standard.py`) is
 the release gate whenever the denoiser moves: the operator's ISO-2500 star
-frame against Lightroom's Denoise 50 on the same frame, every render through
+frame, every render through
 the product path, ten lines in two groups — the cleaner group (1c, 2c, 3, 4,
 5c, 6, 7c, 8) decides the exit status; the front-end group (1f, 2f) reads the
 finished develop, which carries the camera base look, and is reported.
@@ -177,7 +173,7 @@ finished develop, which carries the camera base look, and is reported.
   every frame).
 - Luminance grain return: default strength 0.71 on a RAW (**measured**:
   fine-luminance residual 0.3145 / 0.2938 of the input's on two ordinary night
-  frames, beside Lightroom's Denoise 50's 0.28–0.30); baked sources keep SCUNet
+  frames); baked sources keep SCUNet
   at 0.5.
 - Weights `autoshade-raw-denoise-v2.pth`, 130,590,559 bytes, pinned by SHA-256
   in `python/denoise_raw.py`, mirrored at
@@ -189,17 +185,16 @@ finished develop, which carries the camera base look, and is reported.
 - Noise field, star frame F1: per-tile σ after stabilisation, p5–p95, 0.83–1.19
   before (edge tiles up to 1.34) → 0.963–1.031 after; per-tile residual max
   0.508 → 0.070; tile-to-tile width of the fine-luminance ratio on the same
-  develop 0.185 → 0.014 (Lightroom's own 0.011); the ground-truth bench moved
+  develop 0.185 → 0.014; the ground-truth bench moved
   by at most 0.01 dB.
 - Faint stars, synthetic-truth probe on the operator's frame (G1 plane, flux
   kept at 4σ / 6σ / 10σ): v1 0.105 / 0.420 / 0.726; v2, the 50000-step
   checkpoint, 0.541 / 0.835 / 0.918, with 1.5σ noise peaks at 0.045.
 - Star-frame standard on the v1.6.0 build: cleaner group 6 of 8 — 1c 0.2924,
-  2c 0.0116, 3, 4 and 8 pass; 5c 98.70 % of 17,817 true faint stars kept
-  against Lightroom's 98.80 %; 6 reads 0.939 of the input's bright-star peak
-  against Lightroom's 0.953 (limit Lightroom − 0.01: red); 7c's four-plane flux
+  2c 0.0116, 3, 4 and 8 pass; 5c 98.70 % of 17,817 true faint stars kept;
+  6 reads 0.939 of the input's bright-star peak (red); 7c's four-plane flux
   spread 0.0385 (1.033 / 1.012 / 1.011 / 0.995) against 0.02 (red). Front end:
-  1f 0.2922 against Lightroom's 0.2701 (limit ±0.03), 2f 0.0139 (limit 0.0278).
+  1f 0.2922, 2f 0.0139 (limit 0.0278).
   The two red lines are one effect, in the network: on its own output mosaic
   the single-sample peak reads 0.82 of the input's for faint true stars (v1
   0.89) and 0.92 for bright ones (v1 0.97) while the 5×5 aperture reads
@@ -221,9 +216,8 @@ finished develop, which carries the camera base look, and is reported.
   Known limit: a pure-colour point source no wider than one photosite on flat
   dark ground reaches no witness of another colour and is mapped as a defect
   (the red LED dots of one calibration frame).
-- Not matched on the star frame: chroma-to-luma of the fine grain 0.268
-  against Lightroom's 0.152; star widths on two frames +0.285 / +0.325 px
-  against Lightroom's +0.147 / +0.291 px.
+- Star frame, open readings: the fine grain's chroma-to-luma ratio reads
+  0.268, and stars widen by +0.285 / +0.325 px on two frames.
 
 ### Imported spot removal (v1.5.0 F9)
 
@@ -322,7 +316,7 @@ the ghost; the same table read at the two earlier states of the aligner is in
 
 Lightroom's HDR mode moves diffuse white down inside the capture and calls the
 stops above it headroom (`crs:HDRMaxValue`). Every file this engine writes is
-SDR, so what it owes such a photograph is Lightroom's own answer: the SDR
+SDR, so it renders such a photograph's SDR
 rendition, tuned by the seven `crs:SDR*` controls that panel shows only in HDR
 mode. `render/hdr.rs` renders it as the develop's last edit stage (only the
 generative fill's pixel layers are drawn after it) — one tone pass
@@ -361,44 +355,43 @@ bundled; a machine with no profiles gets a named refusal.
   `adobe_camera_raw_default_curve` is the same table to the last digit. The
   stage's exposure is the body's `BaselineExposure`, inferred from the body's
   camera-matching profiles (`dcp::baseline_exposure`), plus the profile's
-  offset. It renders through Camera Raw's exposure transfer
+  offset. It renders through a measured exposure transfer
   (`render::tone_cr::Ramp`, **measured**, `tone_cr/ramp_table.rs`): the
   transfer of a grey over 54 total exposures −5…+6 EV × 110 inputs, read from
-  Camera Raw renders of synthetic linear DNGs, blended between rows in EV;
+  renders of synthetic linear DNGs, blended between rows in EV;
   the brightest and darkest channels go through it and the middle one keeps
   its linear ratio. Under an As Shot white whose camera neutral is not grey
   the transfer sits higher: the row at `E + h` on the input over `2^h`, with
   `h` read from a table over the neutral's largest/smallest channel
-  (measured from Camera Raw renders, 12 points, 2026-10-29: 0 at 1, 0.185 at
-  1.15, 0.36 at 1.3, 0.525 at 1.45, 0.835 at 1.8, 0.995 from 2 on). The pair
+  (measured, 12 points, 2026-10-29: 0 at 1, 0.185 at
+  1.15, 0.36 at 1.3, 0.525 at 1.45, 0.835 at 1.8, 0.995 from 2 on). SCOPE:
+  those renders were frames of grey patches alone, and the measured headroom
+  is a FRAME-LEVEL reading, not a pointwise one — the same neutral and the
+  same greys render white at L 89.5 alone, 93.2 beside a colour lattice and
+  98.5 beside a dark-grey population — so the table is the grey frame's
+  reading until the adaptive law is measured. The pair
   is stamped per photo as `EditRecipe::camera_start` (`render::camera_start`),
   so the canvas's Exposure (applied over the base develop by
   `render::Exposure`) reads its light back at the start the export's stage
-  renders at; the sidecar never carries it. Exposure singles on p39 against
-  Camera Raw, worst moving band |ΔL| / |Δa|,|Δb|: −1 EV 0.72/0.56, +0.5
-  0.91/0.96, +1 0.84/0.89, +2 0.72/0.94.
+  renders at; the sidecar never carries it.
 
-- Over-range light (v1.17.0, `render::camera` / `render::develop`, **measured** from
-  Camera Raw renders, 2026-10-29): a colour the camera stage puts above the
+- Over-range light (v1.17.0, `render::camera` / `render::develop`, **measured**,
+  2026-10-29): a colour the camera stage puts above the
   working space's 1 is kept, encoded exactly, through Highlights/Shadows and
   the slider Exposure, and each component clips at 1 after the Exposure (no
-  blown-pixel desaturation on this path). Warm patches beyond sRGB at −1.51 EV:
-  worst ΔE 39.8 → 3.3; at 0 EV 34.9 → 10.9; carry p40 (+0.7 EV) 4.80 → 4.13,
-  p36/p38/p39 unchanged, p41 8.56 → 8.69. Light above the profile reference's
+  blown-pixel desaturation on this path). Light above the profile reference's
   own 1 (ProPhoto) still clips there, under Adobe's curve.
 
-- The profile stage's tail under Camera Raw's adjustments (v1.17.0, `render::profile::UnderTone`,
-  **measured** from Camera Raw renders, 2026-10-29): the stage puts its look table on AFTER the exposure
+- The profile stage's tail under the Basic adjustments (v1.17.0, `render::profile::UnderTone`,
+  **measured**, 2026-10-29): the stage puts its look table on AFTER the exposure
   transfer and before its tone curve, so an Exposure (and a mask's Temp/Tint, the vignette under tone, the
   white balance under tone) undoes the curve AND the look table, acts, and redoes both. The stage's own
   look table, tone curve and reference basis travel with the photograph's camera start
   (`CameraStart::tables`, filled where the profile is read; 0 in a recipe written before it = Adobe's
-  default curve, no look table, as before). Synthetic warm patches at −1.51 EV with Adobe Standard's look
-  table: median ΔE 4.71 → 1.25 (worst 10.75 → 1.58), identical to the stage rendered at the total.
-  The extra loss once seen on that detour (no look table: median 1.55 against 1.13) was a basis
-  mismatch, not the inverse: a ForwardMatrix stage works in ProPhoto at D50 behind a Bradford
+  default curve, no look table, as before). The detour renders as the stage rendered at the total
+  exposure; a loss once seen on it was a basis mismatch, not the inverse: a ForwardMatrix stage works in ProPhoto at D50 behind a Bradford
   adaptation, and undoing it in ProPhoto's primaries at the working white put warm colours 2–3.5 % off
-  per channel. Carry p36/p38/p39/p40/p41: 4.03/4.52/3.98/4.13/8.69 → 4.09/4.51/4.00/4.09/8.57.
+  per channel.
 
 - Table entry: `(hue shift in degrees, saturation scale, value scale)`, stored
   `index = (val * hueDivisions + hue) * satDivisions + sat` (**measured** — at
@@ -424,13 +417,6 @@ bundled; a machine with no profiles gets a named refusal.
   least-significant digit first, little-endian size + zlib via `flate2`), checked
   against its id with `md5` (the SDK's `RecomputeFingerprint`). Read from the
   user's Camera Raw install, never bundled; RGB tables stay unrendered and named.
-  Decode and application measured against Camera Raw (v1.17.0) on a synthetic
-  linear-ProPhoto bench at 6048 nodes of the 「Adobe Color」 table (36 hue × 16
-  saturation × 16 value, version 1, linear value axis): measured − decoded entry,
-  median 0.011° hue (max 2.44), 0.0004 saturation scale, 0.0003 value scale; the
-  table interpolated as the engine does at each measured input predicts Camera
-  Raw's colour to ΔE median 0.012, max 1.21, where the table itself moves
-  colours by up to 61.
 - The canvas start (v1.17.0): a fresh develop of a RAW names 「Adobe Standard」
   with the 「Adobe Color」 Look (`render::canvas_recipe`, the all-zero sidecar's
   own `crs:Look` block) when `render::canvas_renders` finds both in the install,
@@ -540,10 +526,10 @@ it through one function, so the frame a photographer judges and the frame that
 ships cannot part company.
 
 On a recipe that names a camera profile (`render::SliderLaw::CameraRaw`,
-v1.17.0) the Basic panel's tone sliders follow Camera Raw's law instead of the
-knot model (`render/tone_cr.rs`): they act on `u`, the input of Adobe's
+v1.17.0) the Basic panel's tone sliders follow the measured camera-profile law
+instead of the knot model (`render/tone_cr.rs`): they act on `u`, the input of Adobe's
 default curve, so the develop undoes the curve, moves `u` and puts the curve
-back. Highlights and Shadows go first, Camera Raw's order, on a law of their
+back. Highlights and Shadows go first, the measured order, on a law of their
 own: local (each pixel's push reads an edge-aware base of the frame's
 luminance) and keyed to the frame (the base measured against the frame's
 mean); then Exposure, a gain through the exposure ramp, per pixel by
@@ -551,13 +537,13 @@ Adobe's channel rule (the brightest and darkest channels through the curve,
 the middle one in proportion); then Contrast, Whites and Blacks as measured
 response tables over the exposed `u`, with each pixel's hue from the
 channel rule and its lightness from the luma ratio; then the parametric and
-point curves, then the Look's baked curve, both by Camera Raw's measured
+point curves, then the Look's baked curve, both by the measured
 curve rule (`render::tone::camera_raw_rgb_tone`: on linear ProPhoto
 channels, the brightest and darkest through the curve on their sRGB-encoded
 values, the middle one between them — at its LINEAR ratio for the Look's
 curve, the DNG SDK's `RGBTone`, and at its ENCODED ratio for the
-photographer's curve, both measured; Camera Raw puts the photographer's
-curve before the Look's, measured, v1.17.0). Every recipe that names no
+photographer's curve, both measured; the photographer's
+curve runs before the Look's, measured, v1.17.0). Every recipe that names no
 profile renders through the knot model below, byte for byte, and the reverse
 fit solves each law against itself (`fit::tone_cr` carries the measured map
 into `u` through the start and inverts the tables).
@@ -589,44 +575,29 @@ supposed to remove.
   width; composed after the slider model and before the point curve
   (**designed, provisional** until the kit's `PARAM-*` exports).
 - Point curves (v1.17.0, `render::tone::{curve_lut, apply_rgb_curves,
-  CameraRawTone::curves_px}`, **measured against Adobe Camera Raw**): between
-  the knots the DNG SDK's `dng_spline_solver` (straight lines left 4.73 ΔE on
-  a one-knot curve, the spline 0.08); each per-channel curve on one channel of
-  linear ProPhoto RGB (D50, Bradford, `render::profile::curve_space`) under
-  the sRGB transfer, after Saturation/Vibrance — nine single-channel renders
-  of one frame's flat packet predicted to 0.01–0.53, where the working sRGB
-  channels left 2.3–10.7 and ProPhoto under gamma 1.8 or 2.2 0.27–6.5; on a
-  camera-profile start the composite curve by the channel rule on the same
-  channels, before the Look's curve (0.13–0.31; after it 0.51–1.48), and the
-  Look's own curve after it by the same rule (item 35, a bench whose camera
-  space is linear ProPhoto: 149 colours through Adobe Color's Look curve
-  predicted to ΔE median 0.010, max 0.109; the middle channel by its encoded
-  ratio max 2.21, the rule on sRGB channels max 2.56, the luma ratio the
-  engine used before: bench colours ΔE median 2.59, max 11.20, now 0.72 /
-  4.97, the same as with no Look at all). The
+  CameraRawTone::curves_px}`, **measured**): between the knots the DNG SDK's
+  `dng_spline_solver`; each per-channel curve on one channel of linear
+  ProPhoto RGB (D50, Bradford, `render::profile::curve_space`) under the sRGB
+  transfer, after Saturation/Vibrance; on a camera-profile start the
+  composite curve by the channel rule on the same channels, before the
+  Look's curve, and the Look's own curve after it by the same rule. The
   reverse fit matches channel-curve distributions in those channels
   (`render::curve_channels`). ARCHITECTURE, "The point curves".
 - Tone sliders on a camera-profile start (v1.17.0, `render/tone_cr.rs`,
-  **measured against Adobe Camera Raw 18.4**): one frame's exact flat packet
-  (Adobe Color, lens profile on) rendered by script one slider at a time —
+  **measured**): calibrated on one frame's exact flat packet
+  (Adobe Color, lens profile on) rendered one slider at a time —
   Exposure −3 … +2 (eight values), Contrast +25/±50/±100, Highlights
   −30/−60/−100/+60/+100, Shadows +30/+60/+100/−60/−100, Whites and Blacks
-  ±40/±80, and Exposure ∓1 with Blacks ±40 — compared at 1000 px in L bands
-  of the flat render. Exposure is a linear gain before the curve (a pure gain
-  through Adobe's curve predicts every band of the nine renders to rms 1.2 L;
-  with the ramp the engine's renders sit at rms 0.64 L). The other five are
-  response tables over `u` (33 samples), one per sign — Camera Raw is not
-  antisymmetric: Blacks −40 moves the toe 3.7× as far as +40 — each with a
-  curvature table, `push = s·(T(u) + |s|·Q(u))`, because the response is not
-  linear in the magnitude either (Blacks −80 moves L 20–30 2.8× as far as
-  −40; one linear table per sign left −40 2.3 L too dark and −80 1.8 L too
-  light). The tables were fitted with the engine in the loop: each pass
+  ±40/±80, and Exposure ∓1 with Blacks ±40 — read at 1000 px in L bands.
+  Exposure is a linear gain before the curve, through the measured exposure
+  ramp. The other five are response tables over `u` (33 samples), one per
+  sign — the response is not antisymmetric: Blacks −40 moves the toe 3.7×
+  as far as +40 — each with a curvature table,
+  `push = s·(T(u) + |s|·Q(u))`, because the response is not linear in the
+  magnitude either (Blacks −80 moves L 20–30 2.8× as far as −40). The tables were fitted with the engine in the loop: each pass
   renders the 23 cases and moves the tables by the band L error over the
-  curve's slope there, pixels clipped at white in both renders left out.
-  Contrast, Whites and Blacks act on the EXPOSED value (composing Exposure
-  ∓1 with Blacks ±40 predicts the toe within 3.0 L, adding them on the
-  original axis is 6.1 L off; composing Camera Raw's own pointwise maps,
-  mean |ΔL| 0.14–0.25 L that way, 0.51–2.88 the other). A local slope floor
+  curve's slope there, pixels clipped at white left out. Contrast, Whites
+  and Blacks act on the EXPOSED value. A local slope floor
   (1 % of the exposed curve's rise) keeps the result monotone where two
   pushes overlap. The reverse fit holds each row at the previous pass's
   magnitude and re-solves until the answer stops moving; Highlights and
@@ -635,215 +606,53 @@ supposed to remove.
   statistics read off the score set's masses (the mean linear value, the
   mean and standard deviation of `log2`).
 - Highlights and Shadows on a camera-profile start (v1.17.0,
-  `render/tone_cr.rs`, **measured against Adobe Camera Raw 18.4**).
-  **Order:** composing Camera Raw's own pointwise maps on two frames, both
-  run BEFORE Exposure (mean |ΔL| 0.23–0.42 that way, 1.17–3.68 the other)
-  and before Contrast and Blacks (0.11–0.22 against 0.30–2.48), so they are
-  the tone stage's first pass.
-  **Shadows** (the real-frame law): 19 frames — the seven calibration frames
-  and twelve census frames of other scenes and bodies — rendered flat and at
-  Shadows +60 at sensor size in 16 bit, read as `log2` linear luminance at
-  the default curve's input on a map 768 cells across the width. The push
-  in stops at a cell is `s · spread · T(b)`: `b` the cell minus the
+  `render/tone_cr.rs`, **measured**). **Order:** both run BEFORE Exposure and
+  before Contrast and Blacks, so they are the tone stage's first pass.
+  **Shadows**: the push in stops at a cell of a `log2` luminance map 768
+  cells across the width is `s · spread · T(b)` — `b` the cell minus the
   frame's anchor, `spread` the map's standard deviation, `T` one monotone
-  shape shared by every frame, nothing fitted per frame. A cell of the
-  engine's map is `log2` of the cell's mean linear luminance, not the mean
-  of its pixels' `log2`: before Exposure a night frame's deepest cells
-  hold 9–14 % pixels at or below 0 (9 / 1 % at −12…−8 stops on one frame,
-  14 / 2 % at −14…−10 on another, 11 % at −10…−8 on a third), which the
-  mean of `log2` reads at the floor, putting the spread 0.14–0.54 stops
-  above the output map's on those three (2.44 / 2.16 / 1.61 against
-  2.29 / 2.02 / 1.07; `log2` of the mean 2.22 / 2.02 / 0.99). The anchor is a
-  power mean of the map's cells (exponent 0.75, over `2^cell`) moved down
-  1.048 stops: it sits above the map's mean by more the wider the frame's
-  levels spread. Held out one frame at a time it explains 0.89 of the push
-  over all 19 (0.86 with the map's mean as the anchor; the worst
-  calibration frame at +60, rms 0.341 → 0.193 stops), and the anchor
-  reads the same off the 768-cell map as off 8-pixel blocks (0.905 held
-  out either way), so a preview and a full-size export agree. Exponents
-  1.0 and 0.5 hold out at 0.905 and 0.901, the mean (exponent → 0) at
-  0.881. One shape with a free amplitude per frame reaches 0.93, and that
-  amplitude follows the spread (r 0.95), while no
-  key (mean, median, blurred-base median, dark anchor, percentiles,
-  normalised range) makes it constant (CV 0.26–0.68). A full-depth local
-  Laplacian filter, at any range σ, explains less than nothing on its own
-  (median R² below 0) and adds 0.015 to the tonal term. On two frames at
-  +30/+60/+100 the push is linear in the slider (0.50 : 1 : 1.64, 0.51 :
-  1 : 1.62). Shadows below 0 read their own table, the same form fitted on
-  four frames at −60 at their anchors (held out 0.73; 0.62 at the mean):
-  the signs agree through the middle,
-  and −60 darkens the deepest levels further than +60 lifts them (−2.44
-  against +1.83 stops at six stops under the mean on the calibration
-  frame). What the law does not reproduce: clipped white written over
-  0.5 % and 2 % of a night frame moves Camera Raw's anchor +0.80 and
-  +0.10 stops (the law +0.18 and +0.59), and lifting that frame's deepest
-  two stops moves it +0.25 (the law −0.05). What a full-resolution map adds over the per-level law moves
-  1-stop band means by 0.24 L at most (texture, left out). The push is a
-  gain on the pixel's linear luminance read off the map, the colour kept
-  by one ratio over a floor of 0.03 in the profile stage's encoding (per
-  channel left the warm tones 4.75 b* short; with no floor a large
-  near-black area turned 21.8 b* too blue). Measured in 16 bit only: 8-bit
-  renders clip the deepest levels to black: on the calibration frame
-  Shadows −60 reads −5.14 stops four to six stops under the mean from its
-  8-bit render and −2.17 from its 16-bit one.
-  **Highlights** (the engine's earlier law, kept): the push follows an
-  edge-aware (bilateral) base of `log2` linear luminance, σ 400 and 1600
-  film pixels and 1 stop, against the frame's mean linear luminance (`z =
-  log2(base) − log2(mean)`; Highlights −60 at `u` 0.3 is 0.022 on a
-  daylight street, 0.142 on a dark dusk frame), tables over the two bases'
-  `z` fitted on the seven calibration frames at −30/−60/−100 with the
-  engine in the loop; above 0 the pointwise table. On the 19 frames its
-  amplitude has no frame statistic (best held out 0.72, the mean; the
-  night frame −5.0), because dark frames also take a flat offset over
-  their deepest levels (Highlights −60 on the darkest 1 %: −0.27 and −0.30
-  stops on two night frames, −0.20 on a dusk frame, 0.00 to −0.06 on
-  bright ones), which no frame statistic tried predicts (best held out
-  0.43, the coarse minimum). Camera Raw's own per-frame Highlights
-  statistic was not identified (2026-10-29, the 19 frames and twelve edited
-  copies of two of them): with each frame's offset known the shared shape
-  holds out at 0.917, and no frame statistic recovers the offset — log,
-  linear and power means (best 0.744 held out), tail bands (0.78),
-  output-image statistics (0.35 on the offset), capture metadata
-  (BrightnessValue 0.72 on the offset, but swapping the tag leaves Camera
-  Raw's render byte-identical), colour (0.08 of the residual within a
-  frame), the spread as a width (0.748), a floor in the key (0.62), noise
-  (0.825), raw over-range and cell-grid ends (0.80, 0.43), percentile
-  differences and a 256-bin log histogram (0.857, 0.866, each failing the
-  gain, clipped-white and composite facts) — so the engine keeps its
-  linear-mean key on local bases, which at −60 on the seven calibration
-  frames leaves rms 0.07–0.29 stops where a log-mean shift leaves
-  0.09–0.23 (better on six of the seven). Also tried on the 19 frames and
-  on 206 synthetic frames: trimmed extremes of a bilateral base (push held
-  out 0.782, the clipped-white copies predicted with the wrong sign), a
-  range-normalised position (rms 0.602 on the synthetic pushes against
-  their 0.856 spread), hard extremes of a blurred log image with mirrored
-  or constant borders (synthetic 0.417–0.71 against 0.911; on the 19
-  frames K held out R² −0.098), and tiled statistics with a median,
-  percentile, minimum or mean per tile (none of 192 grids, phases and reductions reproduces the
-  position facts below). What is measured: the key is relative to the
-  frame (a raw gain of ±1 stop moves it at most 0.10), deaf to added deep
-  squares of 0.21–2 % on a real frame (0.05), moved by clipped white on a
-  night frame (+0.70 and +1.75 stops at 0.5 % and 2 %) and by lifting its
-  deepest two stops (−0.35). On the synthetic frames the bulk's push
-  depends on where a dark block sits, not only on its area: one −8 stop
-  block at 0.55 % of the rendered frame gives −0.563 in the interior and
-  −0.248 in a corner, at 0.70 % −0.666 in the interior, −0.863 at a long
-  edge's midpoint and −1.014 in a corner. The per-frame statistic is
-  unidentified. Highlights take the channel rule's hue with
-  the pixel's own curve. A mask's Highlights and Shadows run the same law
-  on the same sites, Highlights' push ×1.2 (the local renders regressed
-  on the global law, 1.21) and Shadows' slider ×1.15 (Camera Raw's own
-  local push in stops over its global one on the same cells, 1.14–1.16 on
-  every two-stop band), right after the global pass.
-  **Results** on the calibration frame (worst moving L band |ΔL| /
-  |Δa|,|Δb| against Camera Raw, 1000 px; the previous Shadows law, map
-  mean of `log2` keyed at its mean → this law): Shadows +30 2.50/0.67 →
-  0.51/0.68, +60 4.62/0.70 → 0.93/0.69, +100 7.82/0.72 → 2.62/0.70, −60
-  3.44/0.64 → 4.84/0.61, −100 5.92/0.65 → 6.97/0.60; Highlights,
-  unchanged, −30 2.21/0.58, −60 4.39/0.79, −100 7.15/2.71, +60 0.83/1.64,
-  +100 0.93/1.79. At sensor size in 16 bit, Shadows +60 against Camera
-  Raw's map (rms stops, previous → this law): p36 0.154 → 0.212, p37 0.103
-  → 0.090, p38 0.208 → 0.232, p39 0.198 → 0.142, p40 0.280 → 0.168, p41
-  0.334 → 0.160, p42 0.155 → 0.360; Shadows −60 p39 0.220 → 0.235, p42
-  0.186 → 0.308. The engine delivers its own law on its own map (rms 0.058
-  on p36, 0.051 on p42); on p40 and p41 it falls short below −10 stops
-  (+0.5…+1.05 where the law asks +1.75), where 30–65 % of the pixels are
-  at or below 0 before the push and a gain cannot lift them. p38 and p42
-  differ from Camera Raw already in the flat render's deepest cells (map
-  spread 2.768 against 2.309 and 1.182 against 2.061; on p38 84 % of the
-  extra variance sits in cells Camera Raw reads −14…−8 stops, which the
-  engine reads 0.6–6.1 stops deeper), so those two frames wait on that
-  deep-tail fix. The carry (ΔE76, previous → this law, line): p36 4.18 →
-  4.68 (6), p38 4.99 → 6.18 (5: over, dependent on the deep-tail fix, not
-  accepted), p39 3.91 → 3.25 (5), p40 4.83 → 4.80 (8), p41 9.14 → 7.27
-  (10).
-  **Post-merge readings; tail fixes pending, not accepted** (the measured
-  exposure transfer in place of the fixed ramp black, colour NR keeping
-  luma; the law's constants unchanged). Shadows +60 rms: p36 0.225, p37
-  0.090, p38 0.187, p39 0.195, p40 0.220, p41 0.304, p42 0.375; −60 p39
-  0.264, p42 0.321. The engine's push falls short of Camera Raw's (mean
-  +0.76 / +0.70 / +0.63 against +0.86 / +0.85 / +0.89 on p39 / p40 /
-  p41) because its map, read correctly, is narrower than Camera Raw's:
-  spread at the HS stage p40 2.22, p41 2.02, p42 0.99, the engine's flat
-  map 2.32 / 2.04 / 1.14, Camera Raw's 2.66 / 2.24 / 2.06. The flat
-  render's deep tail is lifted downstream by the lens geometry resample
-  (p42's share at linear Y < 0.5/65535 2.198 → 0.152 % across it). The
-  constants are judged again once that tail matches.
-  Calibration frame: Shadows +30 0.91/0.68, +60 1.17/0.70, +100
-  2.56/0.72, −60 4.10/0.60, −100 5.80/0.59; Highlights −30 2.38/0.61, −60
-  4.60/0.89, −100 7.41/2.11, +60 1.02/1.42, +100 1.13/1.30. Carry p36
-  4.37, p38 4.68, p39 3.23, p40 4.05, p41 7.63.
-  **Highlights and Shadows: what the synthetic frames showed** (v1.17.0,
-  causal tests, the law above unchanged). Neutral scenes written into a
-  copy of the calibration frame's uncompressed RAW (same body, profile,
-  baseline and lens), rendered flat, Highlights −60 and Shadows +60 by
-  Camera Raw 18.4; pushes are `log2` luminance (or `u`) after minus flat.
-  Measured: (1) a uniform frame is not moved at all (0.0000 in `u` from
-  0.13 to 0.78, both sliders; the law: −0.03 / +0.015 at 0.60 and 0.78),
-  yet 48 px tracer squares on that frame are moved by their offset from it
-  (Highlights up to −1.07 stops 5 stops above, Shadows up to +1.6 stops
-  5 stops below). (2) The operator is local and edge-aware: a tracer at
-  one level moves −0.45 stops on a −5 surround and −0.97 on a −2 surround,
-  switching within 96 px of the boundary (no ramp); large regions of one
-  level move as one at every distance from an edge (the bright half of
-  `u` 0.13 | 0.70 −0.208 to −0.238 `u` over 4000 px). (3) The packet's
-  Exposure slider at ±1 leaves the pushes in stops where they are (within
-  0.001–0.09; this was once read as a whole scene shifted in exposure, and
-  it is not that: uniform surrounds at −6, −4.5 and −3 stops give a tracer
-  2.5 stops above them −0.48, −0.58 and −0.24 under Highlights −60, so the
-  operator sees the scene's absolute level); scaled in contrast (0.6×,
-  1.25×) the scene's pushes do not scale with it.
-  (4) It is coupled to the whole frame through its dark population: a
-  640 px square at −11 stops in a corner or in the middle multiplies the
-  Highlights push of a −3 stop surround 4.3× (−0.030 → −0.130 `u`),
-  graded by its depth (−6 / −8 / −11 / −14: −0.058 / −0.086 / −0.130 /
-  −0.162) and its size (64 / 144 / 208 / 400 / 640 px: −0.020 / −0.075 /
-  −0.087 / −0.104 / −0.130; squares under ~100 px do not count), a 2 %
-  strip at depth `d` stops below the surround by about −0.12 stop per stop
-  beyond the first, a 30 % strip at −11 a −4 stop tracer −3.9 stops (−0.04
-  without); the same squares
-  raise Shadows when small and deep and lower it when large. (5) Not the
-  cause: the packet's Exposure (at −1 / +1 each push is the exposure
-  ramp's slope times the push at 0, within 0.001–0.008) and the Look. On
-  real frames: the same 640 px −12 stop square added to the bright snow
-  frame (whose 300 px-block minimum is −6.6 stops, against −9.3 to −12.6
-  on the six others) raises its Highlights −60 push 1.39× and its
-  Shadows +60 push 1.42× over the rest of the frame; added to the
-  calibration frame it changes nothing (1.01×, 1.01×). So the snow frame's
-  weak response (0.88× the pooled law) is caused by its missing dark
-  population, which the law's key (the frame's mean linear value) cannot
-  see. No single frame statistic tried carries (4) — the mean, the `log2`
-  mean, the median, block minima and low percentiles (150–600 px blocks),
-  power means (soft minima) of the block image, the `log2` spread; a
-  (`u`, base − statistic) table over 15–23 synthetic and 7 real frames
-  reaches a median held-out R² of 0.00–0.46, and a local Laplacian filter
-  with a one-sided remap stays below 0 on most frames. The Shadows law
-  above against these, as checks (it was not fitted on them): (1) holds
-  for Shadows (a frame with no spread is not moved; pinned as a test) but
-  not for its tracers (48 px squares five stops under the surround at a
-  1 % share: the law lifts them +0.34 stops and the surround +0.11 where
-  Camera Raw lifts them up to +1.6 and the surround 0); (2) the law is
-  regional on a map 768 cells across, not edge-aware, so its two levels
-  move as one only away from the edge; the two-level frame `u` 0.13 | 0.70
-  (spread 2.43 stops) is lifted +0.081 `u` on the dark half and +0.016 on
-  the bright one where Camera Raw lifts +0.018 and 0.000; (3) the law is
-  unmoved by an exposure shift of the whole scene, which Camera Raw is
-  not, and it scales with the scene's contrast, which Camera Raw does not
-  (0.6× and 1.25× move the law's push on a deep square 0.49× and 1.27×);
-  (4) a deep square raises the spread and so every push in the frame, but
-  the law has no size threshold. One caveat on the method: a synthetic
-  linear DNG (its own embedded profile, no lens profile) also lifts a −3
-  stop surround under Shadows when a small deep patch sits in it (+0.20 to
-  +0.45 stops), which the calibration body's own RAW with its pixels
-  replaced does not; only DNG-against-DNG comparisons were read from it.
+  shape shared by every frame, nothing fitted per frame. A cell is `log2` of
+  the cell's mean linear luminance, not the mean of its pixels' `log2` (before
+  Exposure a night frame's deepest cells hold 9–14 % pixels at or below 0,
+  which the mean of `log2` would read at the floor). The anchor is a power
+  mean of the map's cells (exponent 0.75, over `2^cell`) moved down 1.048
+  stops, and it reads the same off the 768-cell map as off 8-pixel blocks, so
+  a preview and a full-size export agree. Fitted on 19 frames — the seven
+  calibration frames and twelve census frames of other scenes and bodies —
+  at sensor size in 16 bit (8-bit renders clip the deepest levels); held out
+  one frame at a time it explains 0.89 of the push. The push is linear in the
+  slider; Shadows below 0 read their own table of the same form (four frames
+  at −60), and −60 darkens the deepest levels further than +60 lifts them.
+  The push is a gain on the pixel's linear luminance read off the map, the
+  colour kept by one ratio over a floor of 0.03 in the profile stage's
+  encoding. A frame with no spread is not moved (pinned as a test).
+  **Highlights**: the push follows an edge-aware (bilateral) base of `log2`
+  linear luminance, σ 400 and 1600 film pixels and 1 stop, against the
+  frame's mean linear luminance (`z = log2(base) − log2(mean)`), tables over
+  the two bases' `z` fitted on the seven calibration frames at
+  −30/−60/−100 with the engine in the loop; above 0 the pointwise table; the
+  hue from the channel rule with the pixel's own curve. A mask's Highlights
+  and Shadows run the same law on the same sites, Highlights' push ×1.2 and
+  Shadows' slider ×1.15, right after the global pass.
+  **Known limits.** How strongly Highlights acts depends on the frame's dark
+  population — a large deep region strengthens the push across the whole
+  frame, and where it sits matters — and no frame statistic tried on 19 real
+  and 206 synthetic frames (means, medians, percentiles, block minima, power
+  means, histograms, capture metadata, tiled statistics, local Laplacian
+  filters) carries it, so the engine keeps its linear-mean key and the
+  per-frame strength is not modelled. The Shadows law is regional on its
+  map, not edge-aware, and has no size threshold for small deep patches;
+  where 30–65 % of a frame's pixels sit at or below 0 before the push, a
+  gain cannot lift them.
 
+- White balance: gains are generated from Kelvin/tint and normalized so green
   is `1`; cool-side coefficients and the 6688 K red plateau were
-  **calibrated against measured Lightroom exports**.
+  **calibrated on measured exports**.
 - Dehaze: `A` is the P99 of the minimum RGB channel in linear light,
   `t = max(1 − 0.75·s·min(R,G,B)/A, 0.30)` for positive dehaze
   (**designed atmospheric approximation**, not an Adobe fit). On a recipe
-  that names a camera profile (v1.17.0) Dehaze follows Camera Raw's law
-  instead (**measured**, `render/dehaze_cr.rs`, flat renders of six frames at
+  that names a camera profile (v1.17.0) Dehaze follows a measured spatial law
+  instead (**measured**, `render/dehaze_cr.rs`, six frames at
   +20 … +100 and −30 … −100): a dark-channel scattering inversion
   `J = (I − A)/t + A` per channel, in the light under Adobe's curve,
   sRGB-encoded; `A` the mean of the top 0.1 % of the dark channel (min filter
@@ -851,9 +660,9 @@ supposed to remove.
   under a box of 12.5 % of the short edge, both read on the frame boxed to a
   1536 long edge; `ω = 0.896·s` above 0, `s·(1.698 + 2.802·|s|)` below. It
   runs after Highlights/Shadows and Exposure and before Contrast (measured
-  with one other control at a time). Per frame the positive `ω/s` spreads
-  0.60 … 1.13 about the law (the star frame lowest), which the law does not
-  carry. Like the engine law's stage it is no part of the tone the reverse
+  with one other control at a time). How strongly a positive Dehaze acts
+  varies from frame to frame about the law; that per-frame strength is not
+  modelled. Like the engine law's stage it is no part of the tone the reverse
   fit solves.
 - Clarity radius: `max(round(0.02·min(width,height)), 8)`
   (**designed resolution scaling**).
@@ -862,19 +671,13 @@ supposed to remove.
   a raster floor, so a reduced develop is not an exact scale of the full one
   (**measured behaviour**, 2026-10-29): at a 667 px short edge Texture's
   3.33 px rounds to 3, and below a 375 px (Clarity) / 300 px (Texture) short edge the
-  floor holds the radius, so the operator reaches relatively further. The
-  reduced develop itself is NOT the cause of a preview's tonal offset: the
-  engine's encoded-domain reduction against Camera Raw's own reduced render
-  (`CameraRAWSize.MINIMUM`, 1536 × 1024) reads p39's neutral L40 / L50 / L60
-  at −0.37 / −0.23 / −0.14 L, and reducing in linear light instead moved them
-  to +0.44 / +0.44 / +0.40 with edges +1.2 — so 1000 px acceptances are made
-  against Camera Raw's own reduced render.
+  floor holds the radius, so the operator reaches relatively further.
 - Negative Texture arm 1: amplitude `A1 = 0.172443`,
   `sigma1 = 0.0031235·short_edge` = `0.31235%` of the short edge
-  (**measured Lightroom fit**).
+  (**measured fit**).
 - Negative Texture arm 2: amplitude `A2 = 0.304888`,
   `sigma2 = 0.0002822·short_edge` = `0.02822%` of the short edge
-  (**measured Lightroom fit**).
+  (**measured fit**).
 - Negative Texture depth: `d = 0.558583` in the hyperbolic slider law
   (**calibrated against the −50/−100 depth ratio**).
 - Camera calibration (v1.5.0, `render::Calibration`): a 3×3 built in linear
@@ -900,25 +703,21 @@ supposed to remove.
   (**designed**). This retires the V2 §4c/§4d rules (sharpening σ =
   `clamp(0.0008·short_edge, 0.7, 2.0)` raster px, NR at a raster-pixel radius),
   under which one slider value meant two structures at preview and at export.
-- Sharpening (v1.6.5, **measured against Lightroom 9.4**): unsharp mask on
+- Sharpening (v1.6.5, **measured**): unsharp mask on
   luma, true Gaussian σ = 0.75 × Radius film px (Radius 0.5–3.0; an absent key
-  reads Lightroom's 1.0), sampled no finer than 0.6 raster px with the amount
+  reads the default 1.0), sampled no finer than 0.6 raster px with the amount
   faded by the ratio of the two `1 − Ĝ` transfers at Nyquist. Per pixel, with
-  `s` the unsharp signal, `Y` a luminance in the exports' gamma 2.2 and `ρ` the
+  `s` the unsharp signal, `Y` a luminance in gamma 2.2 and `ρ` the
   shadow rolloff `Y_b^2.78 / (Y_b^2.78 + 0.0139^2.78)` on the blurred luma:
   bright side (`s ≥ 0`) free move `f = 1.892·(Amount/40)^1.124·ρ·s` under the
   cap `0.145·(Amount/40)^0.206`; dark side `f = 2.524·(Amount/40)^1.007·ρ·|s|`
   under the cap `1.107·Y₀ − 0.0707·f` (`Y₀` the pixel's own luminance, floor
   1e-4); the move is `±f / √(1 + (f/cap)²)`, the caps carried across Detail on
   a log ramp over Detail² (no cap at 100); added to R, G, B alike. Fitted per
-  pixel on one 61 MP frame exported at Sharpness 0 / 40 / 80 (Radius 1.0,
-  Detail 25, Masking 0): R² 0.93 / 0.92 over the frame, 0.95 / 0.95 on the
-  pixels with |s| ≥ 0.03, the replaced unsharp mask 0.62; star peaks +0.07 /
-  +0.11 / +0.12 (faint / mid / bright) in Lightroom against +0.08 / +0.11 /
-  +0.13 in the law, ring dips 0.02 / 0.04 / 0.08 against 0.02 / 0.04 / 0.07;
-  the engine reproduces the law on its own renders at R² 0.9997. Masking edge
+  pixel on one 61 MP frame at Sharpness 0 / 40 / 80 (Radius 1.0, Detail 25,
+  Masking 0); the engine reproduces the law on its own renders at R² 0.9997. Masking edge
   gate full at a blurred-luma gradient of `0 → 0.04` per film px
-  (**unmeasured**: every export was at Masking 0); Detail's other values,
+  (**unmeasured**: every measured render was at Masking 0); Detail's other values,
   Radius ≠ 1.0 and Amount past 80 are the law's own extrapolation.
 - Sharpening default (v1.6.0): a recipe that holds no amount renders at
   `LR_RAW_SHARPENING` = 40 on a RAW negative — Lightroom's own default for a
@@ -948,219 +747,90 @@ supposed to remove.
 
 ### Measured results & disclosures
 
-- Negative Texture is pinned by 45 Lightroom anchors: nine spatial periods at
-  five slider depths. Every anchor is within `±0.02`; the recorded worst error
-  is `0.0037`.
+- Negative Texture's two arms were fitted on 45 anchors: nine spatial periods
+  at five slider depths.
 - On a 4160-pixel short edge the two fitted sigmas are about `12.99 px` and
   `1.174 px`; at −100 the combined impulse plateau is
   `1 − (A1 + A2) = 0.522669`.
 - A one-arm band-limited/notch explanation was refuted. The landed two-arm
-  operator is empirical, and Lightroom's amplitude-adaptive behaviour is not
-  modeled beyond the measured grid.
+  operator is empirical, and amplitude-adaptive behaviour is not modelled
+  beyond the measured grid.
 - The recalibrated Kelvin seam reduced the measured 6590/6610 K channel jump
   from red `−0.67%` and blue `−1.11%` to at most `0.10%`.
 - The cool-end calibration also records a 7000 K shift of red `+1.47%` and blue
   `+0.97%`; the 2000 K blue result is `−0.98%`. These measurements constrain
   the implemented fit, not a claim of universal camera-colour equivalence.
-- Tone sliders on a camera-profile start (v1.17.0): worst band of the
-  moving L bands, |ΔL| / worst |Δa|,|Δb|, engine minus Camera Raw, each
-  slider's own change against Camera Raw's, before (the knot model on the
-  same start) → after: Exposure +0.5 3.94/1.63 → 0.97/0.82, +1 5.26/2.32 →
-  1.35/0.77, −1 9.54/4.05 → 1.55/0.75, +2 12.36/3.74 → 0.81/0.84; Contrast
-  +50 3.81/1.19 → 1.03/0.74, −50 5.86/0.66 → 0.97/0.53; Highlights −60
-  16.70/4.29 → 0.92/2.37, +60 5.63/2.18 → 0.84/1.03; Shadows +60 10.30/0.36
-  → 0.34/0.86, −60 10.38/0.95 → 0.58/0.71; Whites +40 2.77/1.71 →
-  0.93/0.91, −40 4.22/0.42 → 0.97/0.62; Blacks +40 9.31/0.42 → 0.16/0.50,
-  −40 6.18/0.62 → 0.57/0.43. Outside the 2 L / 2 ab line: Highlights −60's
-  sky (L 80–90 2.4 b* short of Camera Raw's blue), and at the magnitudes not
-  in the acceptance set Highlights −100 3.14 L / 3.47 b*, Exposure −2 3.19 L
-  and −3 2.69 L (L 90–100). The flat sidecar against Camera Raw: ΔE76 3.04 →
-  2.56, L 0–30 +1.2…+1.6 → +0.1…+0.2.
-- Dehaze on a camera-profile start (v1.17.0), the engine against Camera Raw
-  as a double difference against the flat pair, mean ΔE76 whole frame, the
-  slider-pass table → the spatial pass: p39 +40 1.83 → 1.39, +80 3.90 → 2.51,
-  −30 2.29 → 1.76, −60 4.63 → 3.12; the star frame p42 +40 2.93 → 0.73,
-  +80 5.07 → 1.27, −30 6.77 → 0.82, −60 13.86 → 1.21 (Camera Raw's own move
-  there 0.78 / 1.23 / 1.13 / 2.18: at +80 the law is too strong on that frame
-  by its `ω/s`, above). The earlier table was Camera Raw's band-mean response
-  on one frame. Carry (sidecars with Dehaze: p36 +10, p40 +16, p41 +7), the tone law
-  → with this: p36 8.52 → 8.70, p40 8.18 → 7.59, p41 10.96 → 10.52; p36 with
-  its Highlights at 0, 5.91 → 6.11.
 - Temperature and Tint on a camera-profile start (v1.17.0, `render/wb.rs`,
   **measured**, Temperature 4000/5000/7500/10000 K and Tint ±30 from the
-  frame's as-shot 5400 K / +14). The engine law's Tanner–Helland gains in the
-  post-curve working space moved b* about a third and a* about a quarter of
-  Camera Raw's and read the sidecar's absolute Tint as a shift from 0. The law:
-  the target white `xy` from (Temperature, Tint) by the DNG SDK's
-  `Get_xy_coord` (Robertson's table, tint/−3000 along the isotherm,
-  `profile::temp_tint_to_xy`), the SDK's Bradford adaptation from it to the
-  as-shot white (`profile::white_shift`, white luminance kept), applied to the
-  light BEFORE the profile stage's exposure ramp and curve
-  (`profile::UnderTone`: `adobe_tone` inverted exactly, the ramp by its
-  inverse). Four constants fitted with the engine in the loop: 1.042 mired of
-  Camera Raw's per slider mired, 0.999 of its tint, −0.078 tint per mired of
-  cooling, 0.099 EV darker per 100 mired of cooling. Worst moving band |ΔL| /
-  |Δa|,|Δb| before → after, with the frame's as-shot white at Lightroom's
-  5400 K / +14: 4000 K 0.76/12.08 → 1.30/1.89, 7500 K 2.22/10.12 →
-  1.28/1.77, Tint −30 2.19/8.44 → 0.90/1.37; outside the acceptance set
-  5000 K 2.29 → 0.67, 10000 K 16.01 → 2.90, Tint +30 2.42 → 0.90 (ab). With
-  the engine's earlier as-shot reading (5226 K / +14.7) the same renders read
-  3.36 / 3.57 / 2.11 ab; with the reading below the engine reads 5400 K / +14
-  itself and they read 1.89 / 1.77 / 1.37. The command line's `apply` of an
-  `.xmp` now stamps the photo's as-shot white, as the app's import does; it
-  used to move a sidecar's Temperature from the legacy 5500 K anchor.
-- Where Camera Raw puts a Custom white balance (v1.17.0, **measured**, synthetic
-  linear DNGs through Camera Raw, `LinearRaw`, camera RGB = linear sRGB, an
-  embedded profile). BEFORE the profile's tables and with the matrices blended
-  at the chosen white's temperature: with a hue/sat map that turns hues
-  120–210° by 30°, a patch the map leaves untouched at As Shot (0 ΔE) is moved
-  by it once a Custom 3000 K carries it into those hues (10 ΔE), which an
-  adaptation after the tables cannot do; with a second `ColorMatrix` at
-  Standard A the render changes by mean ΔE 20.6 at 2850 K and 5.1 at 4500 K
-  and not at all at 6500 K or 10000 K. Camera Raw's DNG of a Sony ARW (Adobe
-  DNG Converter 18.7, p39) keeps the camera's own levels as `AsShotNeutral`
-  and puts the lens compensation into `CameraCalibration1/2` =
-  diag(1.0031, 1, 0.9653), the body's reference Daylight multipliers over the
-  file's preset — the same ratio the as-shot reading below applies. The RAW
-  render therefore builds the profile stage at the chosen white
-  (`profile::camera_neutral_of`, `CameraCalibration · ColorMatrix` at the
-  white's temperature, normalised to its largest component; the camera triple
-  balanced to it; matrices and hue/sat maps blended at it) and runs no
-  adaptation after it. No constant is fitted. Against Camera Raw on the 31
-  extreme cases of p39 and p42 (grey, sky and warm bands, worst |ΔL| / |Δa|,|Δb|
-  of the move): every case with Temperature ≥ 3000 K and |Tint| ≤ 100 within
-  2 / 2 (with the fitted adaptation above: up to 3.7 ab at 40000 K and 8.2 at
-  15000 K / +100); outside, Tint ±150 6–13 ab on those bands — the recipe
-  held Tint at ±100 and Temperature at 40000 K then, so a sidecar's +130 and
-  +150 rendered as +100; with the recipe on Camera Raw's own ranges (±150,
-  2000–50000 K; within ±100 a render is unchanged) the worst in-gamut band of
-  neutral-grid DNGs at +150 / +130 / −150 / −130 reads 5.73 / 4.93 / 3.16 /
-  2.92 ab (21.86 / 13.46 / 12.30 / 7.42 clamped), the rest from the Adobe
-  Color Look's table, which moves saturated patches 4–13 ab at any white and
-  reads 3.7 / 2.8 ab at ±100 on the grey bands as well — 2000 K 3.0 L / 4.6 ab, 2500 K
-  2.8 L on the warm band, and 2500 K / +100 out of sRGB's gamut on both sides
-  (a gamut limit of the deliverable, identical on every law, not a law
-  difference). Camera Raw holds each component of the camera neutral at no
-  less than 1/16 of the largest (`profile::NEUTRAL_FLOOR`; neutral-grid DNGs
-  read the floor at 0.0624–0.0625 where the formula gives 0.008–0.054), and so
-  does the engine; a white that maps to a NEGATIVE component (p39 at
-  2500 K / +100, blue −0.086) Camera Raw lifts to the floor while moving green
-  1–5.5 %, a rule not measured, so for such a white the engine keeps the
-  profile stage at As Shot and moves the white by the adaptation after it. Camera Raw does not clamp at those edges — neighbouring
-  settings render apart by mean ΔE 6.5 (1900 / 2000 K), 8.2 (2000 / 2200 K),
-  3.4 (2400 / 2500 K), 6.1 (Tint +100 / +130), 4.6 (+130 / +150), 3.6
-  (−100 / −130) and 2.1 (−130 / −150) — so the misses there are the law's.
-  The ten luminance bands, which mix the frame's colours, read wider: up to
-  1.1 L / 6.0 ab at 25000–50000 K, from colours rather than the white (grey
-  within 0.9 ab there).
-  The preview develop and the fit's candidates move it by the same law
-  (v1.17.0, `render::CameraBase`): a camera-profile start keeps its camera
-  frame at the preview's edge and runs the profile stage at the chosen white
-  there, developed as the As Shot render plus the change the white makes at
-  that size, so As Shot stays byte-identical to the render. On p39 at a
-  1000 px edge, over 3500/+14, 4300/+30, 7500/+14 and 9000/−20, the canvas
-  over its float base reads mean ΔE76 0.22–0.29 to the export against 0.000 at
-  As Shot (over the base cut to 8 bits 0.40–0.48 against 0.32), and the fit's
-  plate 0.22–0.28; the fitted adaptation the preview used before read
-  1.08–1.64 and 1.18–1.75
+  frame's as-shot 5400 K / +14): the target white `xy` from (Temperature,
+  Tint) by the DNG SDK's `Get_xy_coord` (Robertson's table, tint/−3000 along
+  the isotherm, `profile::temp_tint_to_xy`), the SDK's Bradford adaptation
+  from it to the as-shot white (`profile::white_shift`, white luminance
+  kept), applied to the light BEFORE the profile stage's exposure ramp and
+  curve (`profile::UnderTone`: `adobe_tone` inverted exactly, the ramp by its
+  inverse). Four constants fitted with the engine in the loop: 1.042 mired
+  per slider mired, 0.999 of the tint, −0.078 tint per mired of cooling,
+  0.099 EV darker per 100 mired of cooling. The command line's `apply` of an
+  `.xmp` stamps the photo's as-shot white, as the app's import does; it used
+  to move a sidecar's Temperature from the legacy 5500 K anchor.
+- A Custom white balance (v1.17.0, **measured** on synthetic linear DNGs)
+  sits BEFORE the profile's tables, with the matrices blended at the chosen
+  white's temperature: the RAW render builds the profile stage at the
+  chosen white (`profile::camera_neutral_of`, `CameraCalibration ·
+  ColorMatrix` at the white's temperature, normalised to its largest
+  component; the camera triple balanced to it; matrices and hue/sat maps
+  blended at it) and runs no adaptation after it. No constant is fitted.
+  Temperature runs 2000–50000 K and Tint ±150, the sidecar's own ranges.
+  Each component of the camera neutral is held at no less than 1/16 of the
+  largest (`profile::NEUTRAL_FLOOR`); a white that maps to a NEGATIVE
+  component keeps the profile stage at As Shot and moves the white by the
+  adaptation after it. At 2500 K / +100 colours leave sRGB's gamut, a limit
+  of the deliverable. The preview develop and the fit's candidates move it
+  by the same law (`render::CameraBase`): a camera-profile start keeps its
+  camera frame at the preview's edge and runs the profile stage at the
+  chosen white there, developed as the As Shot render plus the change the
+  white makes at that size, so As Shot stays byte-identical to the render;
+  on p39 at a 1000 px edge the canvas reads mean ΔE76 0.22–0.29 to the
+  export
   (`a_moved_white_shows_on_every_surface_as_the_export_renders_it`).
-- The as-shot white (v1.17.0, `render::as_shot_wb`, **measured**). Camera
-  Raw's As Shot render is pixel-identical to a Custom render at one point of
-  its 50 K / whole-tint grid and differs from one 25 K or one tint unit away;
-  by that test the seven corpus frames read p36 4100/+4, p37 5550/+13, p38
-  5950/+13, p39 5400/+14, p40 7650/+16, p41 3800/−3, p42 6450/+11. The
-  engine read them 6 mired and 3–6 tint units off (p39 5226/+14.7, McCamy and
-  Krystek through the D65 matrix), and the DNG SDK's `NeutralToXY` through
-  the body's two matrices with Robertson's temperature and tint
-  (`profile::neutral_to_xy`, `profile::xy_to_temp_tint`) reads the same
-  levels 5241/+18.0. The cause is Sony's: a body folds a colour compensation
-  for the mounted lens into every white balance it records — the As Shot
-  levels and the fourteen preset levels scale together by lens (Daylight R
-  and B at G 1024: 2564/1728 on the FE 24–105 F4, 2596/1688 on the FE 85
-  F1.8, 2668/1664 on the Sigma 14–24) — and Camera Raw takes it back out,
-  reading the As Shot levels relative to the file's Daylight preset (SR2 tag
-  0x7820) and putting that preset at one white per body. One pair of
-  multipliers for the ILCE-7RM4A (R/G 2.5115, B/G 1.6288, the centre of the
-  region that reproduces all seven) lands every frame on Camera Raw's grid
-  point, each within 1 mired and 1 tint unit when left out of the fit; a copy
-  of p39 with only its Daylight preset rewritten to the Sigma's levels moved
-  Camera Raw's As Shot from 5400/+14 to 5100/+12, the reading predicted. A
-  body without measured multipliers reads its levels as they are, on the
-  SDK's conversion and the same grid. The base render already balances with
-  the camera's levels as Camera Raw does — on p39 Camera Raw's own render at
-  5241/+18 sits 1.0 b* cooler in the neutrals than its As Shot, the engine's
-  flat render 0.03 — so only the named white, the point every Temperature and
-  Tint move starts from, changed.
+- The as-shot white (v1.17.0, `render::as_shot_wb`, **measured**). A Sony
+  body folds a colour compensation for the mounted lens into every white
+  balance it records — the As Shot levels and the fourteen preset levels
+  scale together by lens (Daylight R and B at G 1024: 2564/1728 on the FE
+  24–105 F4, 2596/1688 on the FE 85 F1.8, 2668/1664 on the Sigma 14–24). The
+  engine takes it back out, reading the As Shot levels relative to the
+  file's Daylight preset (SR2 tag 0x7820) and putting that preset at one
+  white per body: one pair of multipliers for the ILCE-7RM4A (R/G 2.5115,
+  B/G 1.6288). The named white is read on a 50 K / whole-tint grid; the
+  seven corpus frames read p36 4100/+4, p37 5550/+13, p38 5950/+13, p39
+  5400/+14, p40 7650/+16, p41 3800/−3, p42 6450/+11 (the earlier McCamy and
+  Krystek reading put p39 at 5226/+14.7). A body without measured
+  multipliers reads its levels as they are, on the SDK's conversion
+  (`profile::neutral_to_xy`, `profile::xy_to_temp_tint`) and the same grid.
+  Only the named white, the point every Temperature and Tint move starts
+  from, changed; the base render balances with the camera's levels as
+  before.
 - Clarity on a camera-profile start (v1.17.0, `render/tone_cr.rs`,
-  **measured**): Camera Raw's Clarity +50 lifts the band means of L 10–80 by
-  6–11 L, where the engine's midtone-masked unsharp (unchanged; its local
-  detail regresses onto Camera Raw's at 0.52–0.59) moves them by 1–3. Its
-  tone rides the slider pass as a response pair over `u` like Dehaze's,
-  fitted with the local stage in the loop from Clarity +50/+100/−50 (two
-  passes). Worst moving band |ΔL| / |Δa|,|Δb| before → after: +50 8.80/1.04 →
-  1.03/0.81, −50 3.51/0.50 → 0.79/0.90; +100 18.16/2.50 → 2.24/1.23 (outside
-  the set).
+  **measured**): the midtone-masked unsharp is unchanged; its tone rides the
+  slider pass as a response pair over `u` like Dehaze's, fitted with the
+  local stage in the loop from Clarity +50/+100/−50 (two passes).
 - Texture on a camera-profile start (v1.17.0, `render::texture_amount`,
-  **measured**): positive Texture is the operator at 0.2 of its amount.
-  Camera Raw's +50 moves the 1000 px frame's local detail (the change less
-  its Gaussian blur, σ 1–30 px) by 0.47–0.68 L rms where the full operator
-  moved it by 1.6–3.5 L (regression onto Camera Raw's 0.10–0.14), and leaves
-  the band means within 0.6 L where the operator lifted L 60–80 by 4.7–5.7 L;
-  at 0.2 the worst band reads 0.85 L. Negative Texture, the measured
-  two-lowpass mix, already sat near Camera Raw (local detail 0.75 against
-  0.58 L rms; band means within 0.6 L) and is unchanged.
+  **measured**): positive Texture is the operator at 0.2 of its amount;
+  negative Texture, the measured two-lowpass mix, is unchanged.
 - A mask's local controls on a camera-profile start (v1.17.0,
-  `render/mask_cr.rs`, **measured against Adobe Camera Raw 18.4**): one radial
-  mask over the same frame, each local key alone at two to four values, and
-  five global + local pairs. Camera Raw's local Exposure is its global
-  Exposure (a +1 EV frame under a −0.25 EV mask renders as +0.75) and its
-  local Texture renders as the global one; local Highlights, Shadows and
-  Dehaze push 1.1–1.3× their global twins, and Contrast, Whites, Blacks and
-  Clarity's tone are operators of their own. Each of those seven gets a
-  response table of the global tables' form, fitted with the engine in the
-  loop. Local Temp and Tint move the global white — (mired, tint, EV) per
-  sign, 13 constants fitted per render on ±25 … ±100 — blended in the light
-  between the exposure ramp and Adobe's curve (placing it after the curve
-  measured worse). Local Hue is the slider in degrees, a hue turn in
-  ProPhoto primaries (a +50 turns the frame's hues by 65–113° in Lab, as
-  Camera Raw does). Worst moving band |ΔL| / |Δa|,|Δb|, before (the mask
-  stage's own law) → after: Exposure +1 33.00/5.64 → 0.79/0.83, −1
-  12.50/4.63 → 1.80/0.96; Contrast +50 6.72 → 0.95 L; Highlights −60
-  16.57/5.12 → 1.04/2.54; Shadows +60 7.58 → 0.46 L; Whites +40 8.25/1.69 →
-  0.66 L; Blacks −40 12.36 → 1.44 L, +40 12.65 → 0.99 L; Dehaze +40
-  3.88/2.70 → 0.97/1.99, −30 3.26 → 0.99 L; Clarity +50 10.47 → 1.13 L; Temp
-  +50 13.52 → 2.53 ab, −50 18.47 → 1.46 ab; Tint +50 4.20 → 1.30 ab; Hue +50
-  5.61 → 1.20 ab, −50 5.36 → 0.85 ab. Outside the 2 L / 2 ab line: Exposure
-  −0.5 3.11 L (L 90–100, where the global −2 EV reads 3.19), Highlights −60's
-  sky 2.54 b* (the global's 2.37), Dehaze +80 4.01 L (L 90–100; Camera Raw's
-  Dehaze estimates each frame's haze), Temp +50 2.53 ab and ±100 4.30 / 4.24
-  ab, Tint +100 2.64 ab, and Saturation +100 2.63 L / 2.97 ab (its model is
-  unchanged). The best per-render white move leaves 2.4 ab at Temp ±50 and
-  3.2 at ±100 in this placement: no constant removes it. At full size
-  (6144 px) the high-pass (σ 2 px) rms against no move, Camera Raw → engine:
-  Sharpness +50 1.11 → 1.22 at the frame's centre; Noise +50 0.97 → 0.95 at
-  the centre and 0.82 → 0.55 at a corner; Texture +50 1.10 → 1.09 and 1.32 →
-  1.10 (Sharpness and Noise keep the engine's Detail model). Moiré and
-  Defringe +50 move Camera Raw's high-pass by 4 % or less (0.19–0.32 L rms,
-  beside the JPEG's floor), and the engine renders neither. The mask's edge at
-  Feather 50 and 100 sits within 1 L of Camera Raw's; at Feather 0 with the
-  lens profile on, the engine's radial edge lies at 1.045 of the ellipse and
-  Camera Raw's at 1.005 (both at 1.000 with the profile off) — the mask's
-  transport through the lens correction, outside this stage. Carry, ΔE76
-  before → after: p39 5.91 → 5.33 (4.47 with the lens magnification undone),
-  p41 10.52 → 10.42; p36, p38 and p40 carry no mask (6.63, 6.76, 7.99).
-- Camera Raw's Highlights is image-adaptive, and the tables are one frame's.
-  On a second frame's bare packet Camera Raw's Highlights −44 darkens L 80–100
-  by 4.0–8.3 L where the tables, which reproduce the first frame's −30/−60,
-  darken it by 9.7–10.8 L; −88 by 9.6–18.1 against 21.7–26.4 L — and
-  Camera Raw deepens the warm sky's colour (b* +5…+11) as it darkens it. A pure
-  blur of `u` as the slider's input does not explain both frames (best σ on
-  one frame is the worst on the other). On the full sidecars of the five
-  carry pairs the engine's render against Camera Raw's, ΔE76 before → after:
-  p36 7.62 → 8.52, p38 8.42 → 8.79, p39 7.47 → 6.89, p40 13.88 → 8.18,
-  p41 14.26 → 10.96 — p36 with its Highlights at 0 (against Camera Raw's own
-  render of that packet) 5.91. Since replaced by the local, frame-keyed law
-  above (the step-4 tables stay for the unmeasured signs).
+  `render/mask_cr.rs`, **measured**): one radial mask over the same frame,
+  each local key alone at two to four values, and five global + local
+  pairs. A mask's Exposure is the global Exposure law (a +1 EV frame under
+  a −0.25 EV mask renders as +0.75) and its Texture the global one; local
+  Highlights, Shadows and Dehaze push 1.1–1.3× their global twins, and
+  Contrast, Whites, Blacks and Clarity's tone are operators of their own,
+  each with a response table of the global tables' form, fitted with the
+  engine in the loop. Local Temp and Tint move the global white — (mired,
+  tint, EV) per sign, 13 constants fitted on ±25 … ±100 — blended in the
+  light between the exposure ramp and Adobe's curve. Local Hue is the
+  slider in degrees, a hue turn in ProPhoto primaries. Local Sharpness and
+  Noise keep the engine's Detail model, local Saturation its own model;
+  Moiré and Defringe are not rendered.
 - Historical tone probes are preserved because they explain the knot weighting:
   Whites −50 compressed input `0.9568…0.9731` from 411 codes to 75, while
   Highlights +60 clipped above `0.8195`, affecting 740 of 4096 inputs (18%).
@@ -1170,8 +840,8 @@ supposed to remove.
 **Method.** A neutral develop does not look like the camera's own JPEG; the
 base look is the per-photo tone curve that closes the gap, estimated by
 `render::camera_base_look` from the RAW's embedded preview and stored in the
-recipe. Since v1.17.0 it is the fresh start only where Lightroom's canvas
-cannot render (no Camera Raw install, or none for the body), and the
+recipe. Since v1.17.0 it is the fresh start only where the Adobe Standard
+canvas cannot render (no Camera Raw install, or none for the body), and the
 re-estimate of a curve an earlier era stamped; a saved curve renders as it
 was saved. One entry serves the app's open path, the pipeline and the web UI. The
 neutral develop and the preview are paired at the camera's own framing;
@@ -1211,9 +881,8 @@ keeps none.
   engine, not on the Python simulator, which sat 0.006 above it: pixel-level
   matching with merged knots failed at 0.3234, in-place pairing produced
   plateaus on three other bodies, every block-mean variant passed.
-- Star-frame standard, front-end lines, product path: 1f 0.3075 → 0.2922
-  (Lightroom 0.2701, limit ±0.03); 2f 0.0387 (limit 0.0309) → 0.0139 (limit
-  0.0278).
+- Star-frame standard, front-end lines, product path: 1f 0.3075 → 0.2922;
+  2f 0.0387 → 0.0139 (limit 0.0278).
 - The calibration corpus moved with the curve: the fan gate's two real
   two-temperature pairs read 12.1° / 10.3° (11.9° / 9.0° before), both still
   admitted under the 15° line; the test's pins carry the record.
@@ -1243,7 +912,7 @@ keeps none.
 ### Method
 
 Radial feather samples a measured `alpha(rho, feather)` table rather than
-pretending Lightroom's profile is a closed form. Rows are interpolated in
+pretending the measured profile is a closed form. Rows are interpolated in
 ellipse-normalized radius `rho`, columns are interpolated in Feather, and
 Feather 0 is an analytic hard edge so the family converges correctly as
 `f -> 0`. Brush dabs use the hardness-dependent kernel
@@ -1297,12 +966,9 @@ v1.2.4 it ships `LINEAR_FALLOFF = Measured`: the C1 smoothstep on the warped
 abscissa `t^1.124` (`LINEAR_FALLOFF_WARP`). The `Eased` profile of v1.2.0
 came from `scripts/linear_falloff_probe.py --fit`, which scored against
 exported row luma — the tone curve composed with the mask — and so kept the
-smoothstep's shape while missing where Lightroom's half-coverage sits
-(t = 0.5436 of the span, not ½). Measured against Lightroom's own coverage on
-the 46-export pack (`scripts/lr_mask_parity.py`), the warped smoothstep
-scores rms 0.0064 against 0.0315 for the plain smoothstep and 0.0598 for a
-straight ramp, and the half-coverage contour closes from +34.2/+38.2 px to
-+0.9/+5.0 px. Each of the two changes was a render hard change for linear
+smoothstep's shape while missing where half coverage sits (t = 0.5436 of
+the span, not ½). Coverage is read on the 46-export pack with the tone
+chain inverted (`scripts/lr_mask_parity.py`). Each of the two changes was a render hard change for linear
 masks only; radial and bitmap masks stay byte-identical.
 
 Lightroom brush strokes may arrive indirectly through a sibling
@@ -1315,40 +981,28 @@ shift: `(a, b) += q · m · w(L′) · push(h)`, Oklab L untouched, with `q`
 Lightroom's 0..1 amount, `m` the mask weight, `w` a Gaussian of centre 0.469
 and σ 0.283 in the gamma-encoded Rec.709 luma `L′` of the pixel it receives,
 and `push(h)` the measured wheel (`render::tint_push`), then back to linear
-sRGB clipped at 0 with no gamut mapping. It was fitted (**measured**) in two
-steps. First on the user's own Lightroom 9.4 exports of one frame — flat, and
-one whole-frame mask carrying only the swatch at hue 210 and amounts 0.782609
-/ 0.391304, the exact values the XMP packet in each export records: with the
-amounts free, this model shape read 2.62 on the sky and 1.82 on the neutral
-pixels, against 7.87 on the sky for a luminance-preserving blend toward the
-hue and 3.81 for a linear-light additive model that wins the frame mean (1.47)
-on neutral land. Then across the wheel on Camera Raw renders of the 0.78
-export's own packet, which Camera Raw reproduces to mean ΔE 0.32 / 0.33 (0.31
-untinted): the swatch at hues 0, 60, 120, 180, 240 and 300 at 0.5 and at hue
-210 at 0.25 and 1.0, each against the packet at amount 0. Read one hue at a
-time the push runs along Oklab 12.0°, 100.0°, 155.3°, 190.5°, 217.7°, 276.6°
-and 336.1° (210 in its place) at 0.086–0.158 per unit amount — not uniform in
-Oklab, and not the sRGB HSV wheel (4.5° to 38.9° off). The differential step
-from linear ProPhoto mid grey toward the saturated ProPhoto colour of the hue
-— Lightroom's working space — points within 5.4° of every measured push (rms
-2.7°) and tracks the strength at r = 0.97, so `push` is that step turned and
-scaled to the seven measured nodes exactly, the corrections interpolated
-linearly in hue between them; the in-between hues are not measured. Hue 210's
-four amounts read 0.1011, 0.1051, 0.1074 and 0.1029 per unit one at a time
-(0.25, 0.39, 0.78, 1.0): linear to 6 %. One shared window over all twelve
-pairs (fitted on a 30k-pixel sample at 1200 px): mean ΔE 1.66. The
-calibration test
+sRGB clipped at 0 with no gamut mapping (**measured**). The model shape was
+fitted on the user's own exports of one frame, flat and with one whole-frame
+mask carrying only the swatch at hue 210 and amounts 0.782609 / 0.391304,
+then across the wheel at hues 0, 60, 120, 180, 240 and 300 at 0.5 and at hue
+210 at 0.25 and 1.0. Read one hue at a time the push runs along Oklab 12.0°,
+100.0°, 155.3°, 190.5°, 217.7°, 276.6° and 336.1° (210 in its place) at
+0.086–0.158 per unit amount — not uniform in Oklab, and not the sRGB HSV
+wheel. The differential step from linear ProPhoto mid grey toward the
+saturated ProPhoto colour of the hue tracks those directions and strengths,
+so `push` is that step turned and scaled to the seven measured nodes
+exactly, the corrections interpolated linearly in hue between them; the
+in-between hues are not measured. Hue 210's four amounts are linear to 6 %.
+One shared window serves all twelve pairs. The calibration test
 (`render::tests::the_mask_tint_reproduces_lightroom_s_own_tint_exports`,
 corpus-gated) replays every pair through the mask pass over the whole 1200 px
-frame: 2.11 / 1.31 against the two exports (10.45 / 5.38 untinted), 1.47–1.77
-at the six hues, 1.01 / 2.37 at 0.25 / 1.0. The warm pixels keep the largest
-residual, where the export clips.
+frame.
 
 ### Parameters
 
 - Radial table: 290 radius rows at `rho = 0.0025 + 0.005·i` and 11 measured
   Feather columns `1/5/10/15/25/35/50/65/75/90/100`
-  (**measured against Lightroom exports**).
+  (**measured**).
 - Feather 0: exact `alpha = 1` for `rho <= 1`, else `0`
   (**designed analytic limit**, because the measured edge contains JPEG and
   capture-sharpening blur).
@@ -1368,21 +1022,15 @@ residual, where the export clips.
 
 ### Measured results & disclosures
 
-- Three successive radial closed forms were refuted. No two-parameter family
-  reached the `0.003` measurement floor, so the table is the model.
-- The shipped 290×11 table scores radial `RMS(alpha) = 0.0009` and maximum
-  deviation `0.0031` on a held-out aspect-1.2 export; its alpha=0.5 contour is
-  `+0.04 px` from the reference.
+- Three successive radial closed forms were refuted: no two-parameter family
+  fits the measured edge, so the table is the model.
 - An earlier estimate, `d_out≈1.4335`, was traced to JPEG 8×8 block spill and
   is **not current**. Four later shape-free instruments support `sqrt(2)`;
   this correction is why no 1.4335 constant appears in the renderer.
-- Changing linear-gradient distance from normalized coordinates to the
-  pixel/aspect metric reduced the D1 reference error from `874 px` to
-  `9.8 px`. That is a large improvement, not pixel closure.
-- The brush kernel fit has pooled RMS `0.0102` and held-out RMS `0.0109`.
-  `kappa` measured `0.1284 ± 0.0029` across a three-fold radius/hardness span.
-- The Size coefficient varied only `0.20%`; derived Radius predicted the
-  286–731 px reference strokes with `1.4 px RMS`.
+- Linear-gradient distance is measured in the pixel/aspect metric, not in
+  normalized coordinates.
+- `kappa` measured `0.1284 ± 0.0029` across a three-fold radius/hardness span.
+- The Size coefficient varied only `0.20%` across the measured strokes.
 - `MaskBrushTable` is validated before decompression and parsing. Unsupported
   payloads are refused and disclosed rather than partially drawn.
 
@@ -1769,7 +1417,7 @@ and `src/recipe.rs` for the module name.
   rose 0.38 → 0.52 under clarity +53 and the frame's ΔE 5.22 → 8.05 before
   it), frame do-no-harm ≤ `FIT_QUANT` (1.8e-3; the zones' 0.02
   `ZONE_GLOBAL_REGRESSION_TOL` until v1.17.0, which let a land zone's clarity
-  take p39's frame from 0.0108 to 0.0260 under Camera Raw's mask-Clarity law).
+  take p39's frame from 0.0108 to 0.0260 under the mask-Clarity law).
   Solves texture and clarity only — capture
   sharpening's radius is in film pixels and is not a quantity a 768-px reading
   measures. Night pair, fine / mid band: sky r 0.03 / 0.65 at the target's
@@ -2014,19 +1662,19 @@ background mask is the BiRefNet subject matte inverted.
 inverts the radial mapping with guarded Newton iterations; a fold is rejected,
 and fisheye-only entries are named refusals rather than forced through a
 rectilinear approximation. Sony tag `0x7037` supplies 16 distortion knots. The
-image renderer reads them the way Camera Raw does, measured through Adobe DNG
-Converter's LensDistortInfo polynomial: knot i at i/(n−1) of the sensor
+image renderer reads them as Adobe DNG Converter's LensDistortInfo
+polynomial does: knot i at i/(n−1) of the sensor
 half-diagonal, a least-squares odd polynomial through the radius map t·K(t),
 evaluated at the zoomed output radius and resampled onto 32 canonical nodes.
 The CA pair (`0x7035`) is read by the same fit with no zoom, at the green
 sample's raw-frame radius (DNG Converter's WarpRectilinear red and blue
-planes); the camera's vignette knots (`0x7032`) are not what Camera Raw
-renders — it uses the Adobe profile's VignetteModel, at the raw-frame radius
-and in raw-linear light, which the engine reads in `lcp.rs` and applies on the
+planes); the camera's vignette knots (`0x7032`) are not used — the engine
+renders the Adobe profile's VignetteModel, at the raw-frame radius
+and in raw-linear light, read in `lcp.rs` and applies on the
 sensor's linear light before the camera profile stage (`render::source`; the
 preview bases carry it, `render::BasePart`); a body with no knots gets its render distortion solved from
 the profile at the 32 knots the lens clamp keeps; the Vignetting strength is
-Camera Raw's EV-piecewise law (`render::develop`), and a strength off 100 is
+an EV-piecewise law (`render::develop`), and a strength off 100 is
 exported with the profile named (crs:LensProfileName and
 crs:LensProfileFilename, `EditRecipe::lightroom_named_lens_profile`), the only
 form Camera Raw honours it in, under LensDefaults unless the camera's CA is
@@ -2044,7 +1692,7 @@ all edge samples inside. A radial sample crosses the boundary exactly once as
 stored/output frame, then invert Lightroom's stored-to-exported mask map.
 
 Linear gradients follow the photograph rather than bending a line per pixel
-(v1.17.0, measured against Camera Raw): with correction ON, Zero and Full are
+(v1.17.0, measured): with correction ON, Zero and Full are
 sensor-frame points carried once by the engine's own map (`T_engine`, the carry
 a radial centre takes) and the straight line between them is evaluated after
 `T_engine`; with correction OFF nothing moves the photograph, so the handles stay
@@ -2068,50 +1716,30 @@ re-checked.
 - Radial composition: `m_lr^-1 o T_engine`, exact once and with no fitted mask
   scale (**measured zero-parameter topology**).
 - Linear ON: `T_engine(Zero)` and `T_engine(Full)`, straight after `T_engine`;
-  OFF: the stored handles, straight (**measured against Camera Raw**, v1.17.0).
+  OFF: the stored handles, straight (**measured**, v1.17.0).
 - `LR_MASK_FRAME_SCALE = 1.0` (**measured decision**); the older `1.032`
   concentric-frame hypothesis was rejected.
 
 ### Measured results & disclosures
 
-- Radial transport closes all `41/41` vectors to at most `1 px`.
-  The first wall contributes `20/20` points at `0.568 px RMS`; the independent
-  DSC set contributes `21/21` at `0.243 px RMS`.
-- Linear, against Camera Raw's weight maps at 0.25 EV local exposure (IoU at
-  ½): correction ON, p39 `0.9942` (the H2 render `0.9891`), p38 `0.9957` /
-  `0.9823` (`0.9900` / `0.9820`); the carried line's direction is Camera Raw's
-  to 0.1°. Correction OFF, the stored handles score `0.9983` / `0.9905` (p38) and
-  `0.9967` (p39) where H2's `D_fwd` scored `0.9956` / `0.9810` / `0.9944`. The
-  rest of the ON gap is the mask blend, not the line.
-- The falsified H1 hypothesis predicted line sag
-  `−22.8 / +24.4 / −10.8 px`; Lightroom measured
-  `+0.6 / −2.9 / −0.5 px`. The sign is opposite and the magnitude is
-  `8.5–41x` too large, which is why H1 is not retained as an alternative.
-- The R2 large-mask excess is closed and is not a dilation law: on the
-  46-export pack Lightroom's α = ½ boundary is a pure `0.99876` scale of the
-  stored ellipse (sd 4×10⁻⁵ across masks 0.30/0.50/0.70 of frame), so the
-  `−1.12 / −1.96 / −2.79 px` residual is the ellipse being bigger, and the
-  `LR_MASK_FRAME_SCALE = 1.0` ruling stands.
+- A radial mask is drawn on its stored ellipse (`LR_MASK_FRAME_SCALE = 1.0`);
+  there is no dilation law.
 - `LensProfile.mask_warp_center` and `LensProfile.linear_handle_warp` are two
   intentional forward schema breaks: old binaries must refuse recipes carrying
   frame facts they cannot apply safely.
 - Seventy-three fisheye-only LCP entries are refused; no rectilinear Newton
   result is claimed for them.
-- The camera-stage lens resample (v1.17.0, `render::lens_in_camera`), engine
-  − Camera Raw on 16-bit flat renders (colour noise reduction 0 on both), per
-  band of Camera Raw's own log2 map: p42 [−12, −10) +1.83 → +0.96 st, zero
-  pixels 0.75 → 7.50 % (Camera Raw 13.72 %); p41 (CA only) +0.33 → +0.28 st,
-  zero pixels 0.05 → 0.76 % (0.77 %), and 0.67 → 4.97 % (5.27 %), 4.38 →
-  17.45 % (18.13 %) in the two bands below. The remaining p41 lift is not the
-  kernel (bicubic +0.27, Lanczos-3 +0.26 st).
+- The camera-stage lens resample (v1.17.0, `render::lens_in_camera`) runs on
+  the sensor's linear light: on the night frame the deepest band (log2
+  [−12, −10)) keeps its black pixels black (zero pixels 0.75 → 7.50 %)
+  instead of lifting them.
 - CA moves each channel by its own knots alone (L04-2, v1.17.0). Until
   v1.16.0 a CA knot above 1 zoomed all three channels by one composite fill
   scale so no red or blue edge sample left the frame; on p42, whose CA knots
-  pass 1, that moved every channel by up to 0.9 px at the corners, where Camera
-  Raw moves only blue (green and red in place to 0.03 px). Without it the
-  engine lands on Camera Raw's channels to 0.08 px, and p42 [−12, −10) goes
-  +0.96 → +0.64 st, zero pixels 7.50 → 11.27 % (Camera Raw 13.72 %); [−10, −8)
-  +0.61 → +0.33 st, 2.20 → 4.64 % (4.97 %). A red or blue sample past the edge
+  pass 1, that moved every channel by up to 0.9 px at the corners, where only
+  blue should move. Without it green and red stay in place, and p42's
+  deepest band keeps more of its black pixels (zero pixels in [−12, −10)
+  7.50 → 11.27 %, in [−10, −8) 2.20 → 4.64 %). A red or blue sample past the edge
   reads the clamped edge pixel; CA never moves the green map the masks and
   overlays follow (`render::geometry_moves_frame`).
 
@@ -2172,14 +1800,12 @@ readers, never by the silent probes.
 ### Parameters
 
 - Mask-frame scale: `LR_MASK_FRAME_SCALE = 1.0`
-  (**measured Lightroom decision**, not a tuning knob).
+  (**measured decision**, not a tuning knob).
 - `LocalExposure2012`: file value `= EV/4`; importer multiplies by `4`
   (**measured scale**).
 - `LocalHue`: file value `= degrees/180`; importer multiplies by `180`
-  (**measured scale**); range ±1.0 = ±180°, Camera Raw's own (**measured**,
-  v1.17.0, camera-profile start: 0.25 / 0.5 / 0.75 / 1.0 turn the Lab hue by
-  54.7° / 81.9° / 112.9° / 173.5° against the degrees law's 56.8° / 85.8° /
-  118.7° / 165.7°, and −1.0 renders as +1.0, the same half turn).
+  (**measured scale**); range ±1.0 = ±180° (**measured**, v1.17.0,
+  camera-profile start; −1.0 and +1.0 are the same half turn).
 - The `/100` local family is contrast, highlights, shadows, whites, blacks,
   clarity, dehaze, texture, saturation, temperature, tint, local sharpness,
   and luminance noise reduction (**measured file-to-UI scale; saturation and
@@ -2223,8 +1849,7 @@ readers, never by the silent probes.
   much as `11.2 deg` of rendered tilt over the observed range.
 - `Flipped` and `MaskInverted` were perfectly anti-correlated in a 201/201
   census and in all 23/23 M-B cases. Import now takes polarity from
-  `MaskInverted` alone; the recorded image RMS improved from `0.1099` to
-  `0.0751`, and the blue-channel RMS from `0.1901` to `0.0869`.
+  `MaskInverted` alone.
 - Conservative merge means “round trip” is structural preservation, not a
   promise that every Lightroom correction is rendered by AutoShade. Unsupported
   or carried-only fields remain disclosed.
@@ -2750,8 +2375,8 @@ than the pre-call state; model weights remain outside the repository.
 - The current battery is **1759 library (1744 pass + 15 `#[ignore]`d forensic
   probes) / 26 CLI / 292 GUI / 2+2 contract** tests — the v1.16.0 battery; v1.6.0
   shipped with 1683 library and 215 GUI, and the names added and retired since
-  (the style index's retired with it in v1.9.0) are listed in ARCHITECTURE. Environment-gated real
-  Lightroom, brush-table, and RAW-zoo suites are additional and are not
+  (the style index's retired with it in v1.9.0) are listed in ARCHITECTURE. Environment-gated
+  Lightroom-payload, brush-table, and RAW-zoo suites are additional and are not
   smuggled into the ordinary count.
 - Tests compile at opt-level 2 (`[profile.test]` in Cargo.toml) with debug
   assertions and overflow checks kept on (probed under the profile: a
@@ -2775,35 +2400,10 @@ than the pre-call state; model weights remain outside the repository.
 - `scripts/check_docs.py` re-derives version, extension, camera, dependency,
   toolchain, and test-battery claims from the tree. A moved claim is a failure,
   not a silent skip.
-- The round-trip gate (`scripts/roundtrip_gate.py`, v1.17.0) is the reverse
-  fit's Lightroom metric. The release CLI fits p36–p42 at strength 0.85; each
-  fitted recipe is rendered by the engine and, from the Lightroom sidecar the
-  fit wrote, by Adobe Camera Raw (`scripts/acr_render.ps1`, Photoshop's
-  plug-in, which is Lightroom's engine) at the same long edge, and the two are
-  compared in CIE Lab at a 1000 px long edge — whole frame and in the sky,
-  neutral and warm bands of the Camera Raw render, as rendered and with the
-  engine's lens magnification undone (+0.01 to +0.19 % on p36–p41). Lines
-  per pair: whole-frame ΔE ≤ 3, each band within ±2 L and ±3 a*, b*; p42, the
-  night pair whose target was made in the app, also on its own lines
-  (`scripts/night_pair_measure.py`: ΔE ≤ 5.31 at 480 px, horizon ripple
-  ≤ 0.63, horizon a* not more than 2 below the target's). `release_battery.sh`
-  runs it after its lanes when Photoshop's COM server is registered and prints
-  one skip line otherwise. First run (2026-10-28), aligned whole-frame ΔE:
-  p36 7.08, p37 3.00, p38 10.11, p39 5.83, p40 7.30, p41 5.81, p42 14.15 —
-  p37 alone meets every line, and p42's engine render reads ΔE 15.18 / ripple
-  16.90 / horizon Δa* +4.95 against its target (Camera Raw's render of the
-  same sidecar 18.49 / 21.21 / +5.18). The tree keeps no expected table:
-  the script is a developer instrument that reports its numbers (a table
-  named with `--expected` turns on its regression check). Where the misses come from, measured on the same sidecars with the
-  local corrections stripped: the global develop alone already differs by
-  whole-frame ΔE 6.21 (p36), 2.95 (p37), 10.29 (p38), 3.30 (p39), 8.59 (p40),
-  5.62 (p41) and 18.53 (p42); the per-channel point curves account for most of
-  p38's (10.30 → 4.35 without them; with only the curves and the white balance
-  on, Camera Raw moves the warm band's a* 33.8 where the engine moves it 8.1),
-  the white balance alone at the fits' strong moves leaves 3.4 (p36) to 7.6
-  (p40, p42), and the masks' engine-only parts (recolour gains, spatial tiles,
-  free masks, which the sidecar did not carry then; since v1.17.0 the gains
-  leave as the mask's Temp/Tint) the rest of p39's.
+- `scripts/roundtrip_gate.py` is an optional developer instrument, not part
+  of the release battery: it needs Photoshop with Camera Raw on Windows
+  (driven through `scripts/acr_render.ps1`) and is run by hand during
+  development.
 - Loopback is a network boundary, not an excuse to trust every browser tab.
   Capability, Host/Origin, cache, and frame protections remain independently
   tested.

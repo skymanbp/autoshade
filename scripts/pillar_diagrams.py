@@ -213,10 +213,10 @@ def pillar_lightroom():
         "pillar-lightroom-math",
         "Diagram: a Lightroom sidecar is read by a scoped XML layer, its "
         "slider domains are measured rather than assumed, mask coordinates "
-        "cross measured frame laws, and each result is published with its "
-        "residual",
-        "Pillar 3 — the mathematics of matching Lightroom",
-        "measured against Adobe’s own output, not guessed from documentation")
+        "cross written frame laws, and each law is pinned by its own "
+        "test",
+        "Pillar 3 — every slider is a written law",
+        "closed-form, named constants, each pinned by its own test")
     xmp, rec, eng = s.row(104, [
         dict(rid="xmp", x=28, w=200, accent=True, title="Lightroom .xmp",
              sub="crs: fields, masks, curves"),
@@ -261,7 +261,7 @@ def pillar_lightroom():
                           "write: conservative merge, named losses", "write")
     place_connector_label(c, render, "render", "render")
     place_connector_label(c, law,
-                          "every law is a measured claim with a residual", "laws")
+                          "every law is an equation pinned by a test", "laws")
     return c
 
 

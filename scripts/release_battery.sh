@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # The release battery, as one command: three cargo lanes in parallel, the
-# round-trip gate (when Photoshop is present), the script checks, and the
-# by-name test-set difference against a saved baseline.
+# script checks, and the by-name test-set difference against a saved baseline.
 #
 # It exists because the battery was until now a recipe in prose that each
 # release re-typed by hand, and a lane typed by hand is a lane that can be
@@ -28,11 +27,8 @@
 #   BATTERY_TARGET_ROOT            parent of the three CARGO_TARGET_DIRs
 #   BATTERY_DATA_ROOT              parent of the three AUTOSHADE_DATA_DIRs
 #
-# The round-trip gate (scripts/roundtrip_gate.py) runs after the three lanes:
-# it reverse-fits p36-p42 with the release CLI and compares the engine's render
-# of each fitted recipe with Camera Raw's render of the sidecar the fit wrote.
-# Camera Raw is driven through Photoshop's COM server; where there is none (CI,
-# macOS, Linux) the gate prints its one skip line and the battery goes on.
+# scripts/roundtrip_gate.py is a developer instrument (it needs Photoshop with
+# Camera Raw) and is not part of this battery; run it by hand when wanted.
 #
 # Windows note: Git Bash paths are converted with `cygpath -w` before they are
 # handed to cargo, because cargo.exe reads CARGO_TARGET_DIR as a native path
@@ -204,29 +200,6 @@ RC_DEFAULT=$(rc_of default)
 RC_GUI=$(rc_of gui)
 RC_CALIB=$(rc_of calib)
 
-# ------------------------------------------------------- the round-trip gate
-# After the lanes, alone: its fits load the segmentation model, and Camera Raw
-# is one COM server. `--probe` exits 0 when Photoshop can be driven here and 3
-# (with the gate's skip line, by name and why) when it cannot; a skip is not a
-# failure, any other probe status is.
-RT="$WORK/roundtrip.txt"
-RC_RT=0
-if (cd "$REPO" && python -X utf8 scripts/roundtrip_gate.py --probe) > "$RT" 2>&1; then
-    (
-        export CARGO_TARGET_DIR=$(native "$TARGET_ROOT/default")
-        cd "$REPO" && cargo build --offline --release --bin autoshade 2>&1 | tail -n 1
-    ) >> "$RT"
-    CLI="$TARGET_ROOT/default/release/autoshade"
-    [ -f "$CLI.exe" ] && CLI="$CLI.exe"
-    (cd "$REPO" && python -X utf8 scripts/roundtrip_gate.py --cli "$(native "$CLI")"         --corpus "$(native "$CORPUS")" --work "$(native "$REPO/target/battery/roundtrip")") >> "$RT" 2>&1
-    RC_RT=$?
-    ROUNDTRIP="exit $RC_RT"
-else
-    rc=$?
-    [ "$rc" = 3 ] || RC_RT=$rc
-    ROUNDTRIP="skipped (probe exit $rc)"
-fi
-
 # ----------------------------------------------------- the three script gates
 # (the doc-drift gate since 2026-10-02: every path, symbol, link and tier count
 # the living documents name must exist in the tree). A script gate that exits
@@ -286,7 +259,7 @@ fi
 SKIPS=$({ grep -oE 'SKIPPED [^:]+: ' "$WORK/calib.txt" 2>/dev/null || true; } | wc -l | tr -d ' ')
 [ -z "$SKIPS" ] && SKIPS=0
 FAILED=0
-for rc in "$RC_DEFAULT" "$RC_GUI" "$RC_CALIB" "$RC_RT"; do
+for rc in "$RC_DEFAULT" "$RC_GUI" "$RC_CALIB"; do
     [ "$rc" = 0 ] || FAILED=$((FAILED + 1))
 done
 
@@ -308,9 +281,6 @@ done
     echo "=== test calib ==="
     cat "$WORK/calib.txt"
     echo
-    echo "=== roundtrip ==="
-    cat "$RT"
-    echo
     echo "=== checks ==="
     cat "$CHECKS"
     echo
@@ -322,7 +292,6 @@ done
     echo "lane gui: exit $RC_GUI"
     echo "lane calib: exit $RC_CALIB"
     echo "calib skipped: $SKIPS"
-    echo "roundtrip gate: $ROUNDTRIP"
     echo "test names: $NAME_COUNT (+$ADDED -$REMOVED)"
     echo "lanes failed: $FAILED"
     echo "script gates failed: $CHECKS_FAILED"
