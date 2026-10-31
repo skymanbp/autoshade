@@ -123,7 +123,13 @@ fn recipe_json(r: &EditRecipe) -> Vec<u8> {
 
 /// The root-tag half of the payload, in the writer's `\n    key="value"`
 /// attribute spelling: the namespace binding, the format version, the writer,
-/// the CRC and the recipe itself.
+/// the CRC and the recipe itself — and `NotCarried`, the sentence naming the
+/// global controls the `crs:` settings cannot carry
+/// ([`super::describe_global_losses`]: a colour field, a lens blur …), so the
+/// document itself says what Lightroom will not render, beside the develop
+/// that does. Absent when there are none. Under the payload's prefix, so a
+/// merge strips the old one with the rest ([`strip_root_attrs`]) and no
+/// reader takes it for a setting.
 pub(super) fn root_attrs(r: &EditRecipe, prefix: &str) -> String {
     let json = recipe_json(r);
     if json.is_empty() {
@@ -135,12 +141,15 @@ pub(super) fn root_attrs(r: &EditRecipe, prefix: &str) -> String {
     // is still a document the reader refuses cleanly (CRC mismatch).
     let packed = z.write_all(&json).and_then(|()| z.finish()).unwrap_or_default();
     let b64 = base64::engine::general_purpose::STANDARD.encode(&packed);
+    let not_carried = super::describe_global_losses(&super::global_export_losses(r))
+        .map(|s| format!("\n    {prefix}:NotCarried=\"{}\"", xml_attr_escape(&s)))
+        .unwrap_or_default();
     format!(
         "\n    xmlns:{prefix}=\"{PAYLOAD_URI}\"\
          \n    {prefix}:Payload=\"{PAYLOAD_FORMAT}\"\
          \n    {prefix}:Writer=\"AutoShade {}\"\
          \n    {prefix}:RecipeCrc32=\"{crc:08x}\"\
-         \n    {prefix}:Recipe=\"{b64}\"",
+         \n    {prefix}:Recipe=\"{b64}\"{not_carried}",
         env!("CARGO_PKG_VERSION"),
     )
 }
@@ -840,7 +849,7 @@ fn reconcile_masks(
 /// untouched rewrite moved the home for nothing.
 fn reconcile_mask(p: &serde_json::Value, w: &serde_json::Value, c: &serde_json::Value) -> serde_json::Value {
     use serde_json::Value;
-    let mut out = reconcile(p, w, c, None);
+    let mut out = recolour_carrier(reconcile(p, w, c, None), p, w, c);
     fn kind(m: &Value) -> Option<&str> {
         m.get("mask").and_then(|g| g.get("kind")).and_then(Value::as_str)
     }
@@ -859,6 +868,39 @@ fn reconcile_mask(p: &serde_json::Value, w: &serde_json::Value, c: &serde_json::
         if let Some(Value::Object(g)) = o.get_mut("mask") {
             g.insert(own_key.to_string(), Value::Bool(chosen.1));
         }
+    }
+    out
+}
+
+/// The other unit of [`reconcile_mask`]: a mask's colour gains, which the
+/// writer spells as its Temp, Tint and Exposure (`render::gains_as_white`).
+/// Those three leaves of the document are ONE written value derived from the
+/// payload's gains, so they are reconciled together: handed back as written,
+/// the payload's own Temp, Tint, Exposure and gains stand (the leaf rule has
+/// already chosen them); moved — an edit in Lightroom, or a build whose
+/// develop now projects the gains differently — the document's three stand
+/// and the gains go, since the document's colour already carries them. Leaf
+/// by leaf, a moved Temp would have joined the payload's gains and put the
+/// recolour on twice.
+fn recolour_carrier(
+    mut out: serde_json::Value,
+    p: &serde_json::Value,
+    w: &serde_json::Value,
+    c: &serde_json::Value,
+) -> serde_json::Value {
+    use serde_json::Value;
+    let gains = p.get("color_gains").and_then(Value::as_array);
+    let neutral = gains.is_none_or(|g| g.iter().all(|v| v.as_f64() == Some(1.0)));
+    const CARRIER: [&str; 3] = ["temperature", "tint", "exposure_ev"];
+    let field = |m: &Value, k: &str| m.get(k).cloned().unwrap_or(Value::Null);
+    if neutral || CARRIER.iter().all(|k| approx_eq(&field(w, k), &field(c, k))) {
+        return out;
+    }
+    if let Value::Object(o) = &mut out {
+        for k in CARRIER {
+            o.insert(k.to_string(), field(c, k));
+        }
+        o.remove("color_gains");
     }
     out
 }

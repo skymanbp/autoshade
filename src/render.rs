@@ -220,7 +220,7 @@ pub(crate) use tone::{
     tone_knot_weights, tone_model_knots, tone_slider_basis,
 };
 use tone::{apply_rgb_curves, hermite_eval};
-pub(crate) use mask_cr::LocalGreyLaw;
+pub(crate) use mask_cr::{gains_as_white, LocalGreyLaw};
 pub(crate) use tone_cr::{
     HS_KEY_NOMINAL, SliderLaw, camera_raw_exposure, camera_raw_response_keyed,
     camera_raw_row, camera_raw_start, exposure_ramp, hs_row, HsSite,

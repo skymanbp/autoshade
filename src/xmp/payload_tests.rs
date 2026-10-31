@@ -33,7 +33,8 @@ fn radial() -> MaskGeometry {
 
 /// A develop with everything the `crs:` projection cannot carry: a colour
 /// field, zone roles, an unnamed zone, an Intersect component, a bitmap tile,
-/// a muted mask, a non-round exposure, the calibration anchor.
+/// a muted mask, a non-round exposure, the calibration anchor — and recolour
+/// gains, which the projection carries only as the mask's Temp/Tint.
 fn rich(dir: &Path) -> EditRecipe {
     let zone = raster_file(dir, "mask-zone-sky.png", 7);
     let tile = raster_file(dir, "tile-r3c3.png", 11);
@@ -102,6 +103,7 @@ fn rich(dir: &Path) -> EditRecipe {
                 mask: radial(),
                 name: "spot".to_string(),
                 exposure_ev: 0.25,
+                color_gains: Some([1.18, 0.96, 0.85]),
                 ..Default::default()
             },
         ],
@@ -226,6 +228,21 @@ fn a_fresh_document_carries_the_whole_develop_and_reads_it_back_exactly() {
     // The unnamed zone goes out under its role tag, not the numbered placeholder.
     assert!(doc.contains("crs:CorrectionName=\"sky\""), "{doc}");
     assert!(!doc.contains("crs:CorrectionName=\"AutoShade 1\""), "{doc}");
+    // The document says itself what Lightroom will not render: the colour
+    // field, beside the develop that does.
+    assert!(
+        doc.contains("
+    asr:NotCarried=\"the Lightroom XMP does not carry: colour field"),
+        "{doc}"
+    );
+    // The spot's gains leave as its Temp/Tint, so a foreign reader of the
+    // `crs:` settings alone gets a warm spot and no gains …
+    let spot = |doc: &str| {
+        let r = xmp_to_recipe(&strip_attrs(doc, |a| a == "xmlns:asr" || a.starts_with("asr:")));
+        r.masks.into_iter().find(|m| m.name == "spot").expect("the spot")
+    };
+    let crs_only = spot(&doc);
+    assert!(crs_only.temperature > 0.0 && crs_only.color_gains.is_none(), "{crs_only:?}");
 
     let found = payload::find(&doc).expect("a payload").expect("decodes");
     assert_eq!(found.recipe, payload::portable(&r), "the payload IS the develop, bare names");
@@ -307,6 +324,28 @@ fn a_lightroom_rewrite_keeps_what_it_did_not_touch_and_yields_what_it_did() {
 /// Lightroom's number wins and the zero's mark leaves with the zero — the
 /// list is reconciled as one leaf, never kept beside a value it no longer
 /// describes.
+/// A mask's gains leave as its Temp, Tint and Exposure; a Lightroom edit of
+/// that colour is the colour from then on, and the payload's gains do not
+/// join it (they are already in it).
+///
+/// MUTATION: drop `recolour_carrier` from `reconcile_mask`, and the edited
+/// Temp comes back beside the payload's gains.
+#[test]
+fn an_edited_recolour_carrier_is_lightrooms_and_the_gains_go() {
+    let dir = scratch("carrier");
+    let original = rich(&dir);
+    let mut edited = original.clone();
+    let spot = edited.masks.iter_mut().find(|m| m.name == "spot").unwrap();
+    spot.color_gains = None;
+    spot.temperature = 50.0;
+    let back = load(&lightroom_like(&original, &edited));
+    let spot = back.masks.iter().find(|m| m.name == "spot").expect("the spot");
+    assert_eq!(spot.color_gains, None, "the gains are in the edited colour: {spot:?}");
+    assert!((spot.temperature - 50.0).abs() < 1e-3, "Lightroom's Temp: {}", spot.temperature);
+    assert!((spot.exposure_ev - 0.25).abs() < 1e-3, "…and its Exposure: {}", spot.exposure_ev);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn an_explicit_companion_zero_survives_a_rewrite_and_yields_to_an_edit() {
     let mut original = EditRecipe { sharpening: 40.0, ..Default::default() };

@@ -974,7 +974,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         "相对冷暖偏移（±100），以固定 5500 K 为基准，不是绝对色温：当前值渲染起来约等于 {k} K。全局「色温 (K)」是绝对值、以本张照片的拍摄色温为基准——两者不是同一条轴。"),
     ("A RELATIVE green/magenta shift (±100) inside the mask — positive goes magenta. Unlike the global 「Tint」 it is not solved against the photo's as-shot tint.",
         "蒙版内的相对绿/洋红偏移（±100），正值偏洋红。它不像全局「色调」那样按拍摄色调解算。"),
-    ("carries reverse-fit recolour (not exported to XMP)", "含反推重上色（不写入 XMP）"),
+    ("carries reverse-fit recolour (written to XMP as Temp/Tint)", "含反推重上色（XMP 里写成色温/色调）"),
     ("↺ Clear", "↺ 清除"),
     ("Drop this mask's per-channel recolour gains (one Ctrl+Z to undo)",
         "清除这个蒙版的分通道重上色增益（一步 Ctrl+Z 可撤销）"),
@@ -1403,7 +1403,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // to fold with (`xmp::FrameAspect`).
     ("Rotation {a}° not written to XMP (frame size unknown)",
         "旋转 {a}° 未写入 XMP（画幅尺寸未知）"),
-    ("recolour gains ×{n}", "重上色增益 ×{n}"),
+    ("recolour past Temp/Tint's reach ×{n}", "重上色超出色温/色调范围 ×{n}"),
     // R24-5 M0: the same line NAMES the masks now (「which of my twelve?」 was
     // the half a count could not answer), and grew a GLOBAL bucket beside the
     // mask one — an active control the engine renders that the sidecar has no

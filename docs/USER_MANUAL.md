@@ -846,8 +846,13 @@ Lightroom 9.4 reads the native composition and keeps it through its own
 rewrite of the sidecar (measured 2026-09-12 on the reference pair's sidecars:
 every correction, gradient and Select Sky component came back; only
 AutoShade's intent attributes did not, and since v1.3.1 the zone roles ride
-in the payload and in the corrections' names instead). AI alpha and local
-recolour gains still have their existing separate disclosures.
+in the payload and in the corrections' names instead). AI alpha keeps its
+separate disclosure. A mask's recolour (the fit's per-channel gains) has no
+Lightroom slider; since v1.17.0 the sidecar writes it as that mask's
+Temperature and Tint, the pair whose effect in Camera Raw comes nearest on a
+range of greys, with the Exposure nudged back by whatever brightness that
+move adds. Only a recolour stronger than Temperature and Tint can reach is
+still named in the save line.
 
 **The colour field.** From the 65% default up (never below it), the fit may
 also attach a smooth 12×8×8 local colour/tone field — the residual its masks
@@ -858,9 +863,11 @@ section as its own row, `▦ Colour field · engine-only`, with an eye to mute i
 and an Amount slider; deleting the row removes it. It is the first control in
 this app with **no Lightroom equivalent at all**: classic XMP has no
 coordinate system for a smooth local field, so the save line names it among
-the things Lightroom cannot render; since v1.3.1 the `.xmp` beside your RAW
-still carries it inside AutoShade's own payload, and reopening that sidecar
-restores it. Copy/paste to another photo drops it and tells
+the things Lightroom cannot render, the **Export .xmp beside the photo** note
+names it again, and the `.xmp` itself says so in an `asr:NotCarried` line
+(v1.17.0). Your rendered exports are the faithful delivery of a photo with a
+field. Since v1.3.1 the `.xmp` beside your RAW still carries the field inside
+AutoShade's own payload, and reopening that sidecar restores it. Copy/paste to another photo drops it and tells
 you — its cells are measured on this frame's own geometry and mean nothing on
 someone else's picture. At or below 65% no field is attached and the recipe
 file does not carry the key at all.

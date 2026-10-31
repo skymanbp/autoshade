@@ -33,7 +33,7 @@
                     "muted masks ×1",
                     "bitmap components omitted ×1",
                     "radial rotation ×1",
-                    "recolour gains ×1",
+                    "recolour past Temp/Tint's reach ×1",
                 ],
             ),
             (
@@ -43,7 +43,7 @@
                     "已静音蒙版 ×1",
                     "位图组件未写入 ×1",
                     "径向旋转 ×1",
-                    "重上色增益 ×1",
+                    "重上色超出色温/色调范围 ×1",
                 ],
             ),
         ] {

@@ -2540,7 +2540,8 @@ than the pre-call state; model weights remain outside the repository.
   on, Camera Raw moves the warm band's a* 33.8 where the engine moves it 8.1),
   the white balance alone at the fits' strong moves leaves 3.4 (p36) to 7.6
   (p40, p42), and the masks' engine-only parts (recolour gains, spatial tiles,
-  free masks, which the sidecar does not carry) the rest of p39's.
+  free masks, which the sidecar did not carry then; since v1.17.0 the gains
+  leave as the mask's Temp/Tint) the rest of p39's.
 - Loopback is a network boundary, not an excuse to trust every browser tab.
   Capability, Host/Origin, cache, and frame protections remain independently
   tested.
