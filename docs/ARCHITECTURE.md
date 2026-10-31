@@ -6430,10 +6430,11 @@ producer after the ranges, the tiles and the free masks: it RE-SOLVES the field
 on the current render (every earlier producer applied — the head-of-sequencer
 field measured a frame that no longer exists), renders it, and keeps it only if
 the frame moved toward the target. Three outcomes, one note each:
-`FIELD_ATTACHED`, `FIELD_WITHHELD` (the ceiling was not more than
-`LOCAL_STOP_MARGIN` better than the frame already reached — `stop_verdict` read
-the other way round, one expression so "the fit may stop here" and "the field
-may run here" cannot disagree) and `FIELD_REGRESSED`.
+`FIELD_ATTACHED`, `FIELD_WITHHELD` (the frame the field renders is not more
+than `LOCAL_STOP_MARGIN` better than the frame already reached; since v1.17.0
+read on the field that ships — pass B on its admitted cells — not on pass A's
+ceiling, which the shipped field beats: on p36 a ceiling of 0.0116 withheld a
+field that reaches 0.0090) and `FIELD_REGRESSED`.
 
 The strength gate is the design, not a safety valve: the dial means "how far
 past Lightroom may this fit go", and this is the first control that leaves

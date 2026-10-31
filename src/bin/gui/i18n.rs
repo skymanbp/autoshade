@@ -2427,10 +2427,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       local field, so the Lightroom sidecar carries the rest of this recipe \
       without it.",
         " 已附加颜色场（{x}x{y}x{b} 个顶点）：整幅 {before} -> {after}，上限 {ceiling}，占比 {realized}，饱和顶点 {saturated}。它只在本机引擎中渲染 —— 经典 XMP 无法描述平滑的局部色场，因此 Lightroom 边车文件会带上这份配方的其余部分，但不含它。"),
-    (" No colour field was attached: the field's own ceiling {ceiling} is not \
+    (" No colour field was attached: the frame it renders, {with}, is not \
       more than {margin} better than the frame this fit already reached \
       ({err_after}), so there was nothing left for it to carry.",
-        " 未附加颜色场：色场自身的上限 {ceiling} 相比本次反推已经达到的整幅误差（{err_after}）并没有好过 {margin}，因此它没有还能承担的部分。"),
+        " 未附加颜色场：加上色场后的整幅误差 {with} 相比本次反推已经达到的整幅误差（{err_after}）并没有好过 {margin}，因此它没有还能承担的部分。"),
     (" No colour field was solved at the {stage} stage: the field solver found \
       no evidence to fit, so nothing was measured and nothing attached.",
         " 在 {stage} 阶段没有解出颜色场：色场求解器找不到可拟合的证据，因此什么都没有测量、也没有附加。"),

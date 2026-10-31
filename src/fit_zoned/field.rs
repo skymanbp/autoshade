@@ -325,10 +325,15 @@ pub(super) fn push_realized(report: &mut FitReport, field: &LocalField, producer
 /// default and above": on the reference pair the default fit carried no
 /// field at all, and that was most of the distance between 0.65 and 0.85 the
 /// user saw; the calibration point one click below the default still stays
-/// inside what a sidecar can carry. The second is
-/// the field's own ceiling: it may only run when there is measurably more than
-/// [`LOCAL_STOP_MARGIN`] still on the table, which is the same verdict
-/// [`stop_verdict`] uses to END the sequencer, read the other way round.
+/// inside what a sidecar can carry. The second is the margin: the field ships
+/// only when the frame it RENDERS is more than [`LOCAL_STOP_MARGIN`] closer to
+/// the target than the frame this fit already reached. Until v1.17.0 that was
+/// read off pass A's ceiling before the field was solved for shipping, but
+/// the field that ships is pass B on its admitted cells ([`admit_cells`]),
+/// which beats pass A's ceiling: on p36 at 0.85 the field reached 0.0107
+/// against a ceiling of 0.0116, and when the frame before it moved by 0.001
+/// the ceiling said 0.00185 was left and the field — 0.0135 -> 0.0090 when
+/// shipped — was withheld, the sky ending 2.2 ΔE further from its target.
 ///
 /// The field is RE-SOLVED here rather than reused. The one from the head of
 /// the sequencer measured the producer-free frame; every producer since has
@@ -363,14 +368,6 @@ pub(super) fn attach_colour_field(
         note(report, crate::rationale::keys::FIELD_UNSOLVED, vec![("stage", "attach".into())]);
         return;
     };
-    if !stop_verdict_has_headroom(&pass_a, report.err_after) {
-        note(report, crate::rationale::keys::FIELD_WITHHELD, vec![
-            ("ceiling", format!("{:.6}", pass_a.ceiling)),
-            ("err_after", format!("{:.6}", report.err_after)),
-            ("margin", format!("{LOCAL_STOP_MARGIN:.3}")),
-        ]);
-        return;
-    }
     let budget = fit::FitBudget::for_strength(strength);
     // The field runs LAST, on the render every attached zone has already
     // moved, so it is solved on what those zones left. It is still a smooth
@@ -461,6 +458,14 @@ pub(super) fn attach_colour_field(
             }
         }
     };
+    if report.err_after - err_with <= LOCAL_STOP_MARGIN {
+        note(report, crate::rationale::keys::FIELD_WITHHELD, vec![
+            ("with", format!("{err_with:.6}")),
+            ("err_after", format!("{:.6}", report.err_after)),
+            ("margin", format!("{LOCAL_STOP_MARGIN:.3}")),
+        ]);
+        return;
+    }
     for (label, was, first) in &pinned {
         let shipped = zone_reading(&s_img, report, label, &after, &target_pixels).unwrap_or(f32::NAN);
         note(report, crate::rationale::keys::FIELD_ZONE_PINNED, vec![
@@ -681,13 +686,6 @@ fn zone_reading(
             fit::look_err_with_evidence(px, target, &report.evidence.scoped(target, &weights, &weights))
         })
     })
-}
-
-/// [`stop_verdict`] read the other way: is there still more than the margin on
-/// the table? One expression, two callers, so "the fit may stop here" and "the
-/// field may run here" can never disagree about the same number.
-fn stop_verdict_has_headroom(field: &LocalField, err_after: f32) -> bool {
-    !stop_verdict(field, err_after) && field.ceiling < field.global
 }
 
 pub(super) fn push_stop(report: &mut FitReport, producer: &str, skipped: &str) {

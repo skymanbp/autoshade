@@ -1102,7 +1102,7 @@ pub mod keys {
          were read on that pairing instead, and {admitted} took the support-free \
          solve on the same cell-mean verdict the measured cells take it on.";
     pub const FIELD_WITHHELD: &str =
-        " No colour field was attached: the field's own ceiling {ceiling} is not \
+        " No colour field was attached: the frame it renders, {with}, is not \
          more than {margin} better than the frame this fit already reached \
          ({err_after}), so there was nothing left for it to carry.";
     /// The field SOLVER abstained — no vertex had evidence to fit. Said, at
