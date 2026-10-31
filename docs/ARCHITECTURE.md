@@ -2481,38 +2481,39 @@ colour noise, then luminance noise, then sharpening, so the sharpener never
 amplifies what the smoothers were asked to remove:
 
 - **Sharpening** is an unsharp mask on luma whose law was **measured against
-  Adobe Camera Raw 18.4 (Lightroom 9.4's engine) on 2026-10-27** (v1.17.0,
-  `render/detail.rs::SHARPEN`; the first measurement, v1.6.5, used Lightroom's
-  denoised exports at Amount 0 / 40 / 80 only): the star frame rendered by
-  script at the sensor's size in 16 bits through ten sidecars — Amount 0 / 40
-  / 80 / 150, Radius 0.5 / 2 / 3, Detail 0 / 100, Masking 50 / 100 around 40 /
-  1.0 / 25 / 0 — and the law fitted jointly, per pixel, on Camera Raw's own
-  Amount-0 pixels. Radius 1.0 is a 0.75 px Gaussian at every radius. The gain
-  on the unsharp signal and the soft cap `f / √(1 + (f / cap)²)` on each side
-  are tables over encoded luma (gain over the blurred luma, cap over the
-  pixel's own): Camera Raw sharpens under its tone curve, so deep shadow takes
-  no move and the ring around a star digs with the star (the dark cap 0.0007
-  at luma 0.06, 0.17 at 0.45). The gains grow faster than the slider (× 2.8
-  bright, × 5.4 dark from 40 to 80) and bend past 80; Radius widens the halo
-  and lowers its gain (Radius^−0.88). **Detail** is the gain on the finest
-  signal (× 0.36 / 0.61 at 0, × 2.4 / 4.4 at 100; the caps barely move).
-  **Masking** gates the move by the blurred luma's gradient per film pixel,
-  blurred again 1.5 film px, through a smoothstep from 0 that opens fully at
-  0.034 (Masking 50) / 0.151 (100). The move scales the pixel's colour with
-  its luma, as Camera Raw's channels moved (a ratio explains all but 0.6–0.7 %
-  of them, an equal addition to R, G, B leaves 9.8–11.5 %). Per-pixel R² of
-  the move 0.857–0.966 per case except Detail 0 (0.66–0.72) and Amount 150
-  (0.87–0.88); every number is in TECH_STACK. A mask's signed local Sharpness
-  runs the same operator on the global Radius/Detail/Masking; its negative
-  half is still the plain blur toward the Gaussian.
+  Lightroom 9.4 on 2026-09-27** (v1.6.5, `render/detail.rs::SHARPEN`): one
+  61 MP star-field frame (ILCE-7RM4A, ISO 2500, Lightroom's Denoise 50 on)
+  exported at Sharpness 0 / 40 / 80 with Radius 1.0, Detail 25, Masking 0, and
+  the constants fitted per pixel to what moved between the exports in the
+  exports' gamma-encoded luma — R² 0.93 at 40 and 0.92 at 80 over the frame,
+  0.95 on the pixels whose unsharp signal is past 0.03 (the edges and stars
+  one sees), where the plain unsharp mask this replaced explains 0.62. Radius
+  1.0 is a 0.75 px Gaussian (the limiters broaden the apparent kernel to the
+  1.17 px a plain fit reads off the export). The gain on the unsharp signal
+  is about linear in the slider on both sides of an edge (1.9 per unit on the
+  bright side, 2.5 on the dark side at Amount 40) and rolls off in the
+  shadows (half at a local luminance of 0.014 in gamma 2.2, Hill slope 2.8:
+  the frame's dark ground took 0.03 of the sky's gain, so shadow noise is left
+  alone). Each side is soft-limited, `f / √(1 + (f / cap)²)` on the free move
+  `f`: the bright side at a constant 0.145 (∝ (Amount/40)^0.21), the dark side
+  at `1.1 × Y₀ − 0.07 × f` with `Y₀` the pixel's own luminance — a pixel may
+  lose about its own luminance and no more, so the ring around a star dips
+  with the star (0.02 / 0.04 / 0.08 for faint / mid / bright peaks at 40, the
+  law reading 0.02 / 0.04 / 0.07) and a ring below encoded ~0.15 does not dip
+  at all. The move is added to R, G and B alike (`write_luma_additive`), as
+  the exports moved. **Detail** carries the two caps across its band (no cap
+  at 100, a little tighter than 25 at 0; only Detail 25 was exported).
+  **Masking** gates the move by the blurred luma's gradient (unmeasured: every
+  export was at Masking 0), so a flat sky stays untouched at high Masking. A
+  mask's signed local Sharpness runs the same operator on the global
+  Radius/Detail/Masking; its negative half is still the plain blur toward the
+  Gaussian.
 - **Luminance noise reduction** is a self-guided filter (He et al. 2010) on
   luma: where a neighbourhood's variance is far above the threshold ε a pixel
   keeps its value, far below it takes the neighbourhood mean. Luminance sets
   the neighbourhood and ε, **Detail** lowers ε (more kept), **Contrast** adds
   back the low-frequency part of what the filter removed. A mask's local Noise
-  is the same pass inside the mask. Its radius (5 film px) and threshold are
-  measured against Camera Raw at Luminance 25 / 50 / 100 (R² 0.81–0.86: below
-  the sharpening's, and no structure tried does better — TECH_STACK).
+  is the same pass inside the mask.
 - **Colour noise reduction** rebuilds the colour-difference planes `R − Y` and
   `B − Y` from a luma-guided fast guided filter (He & Sun 2015) on a subsampled
   grid, assembled against full-resolution luma so colour stops at the edges
@@ -2520,8 +2521,6 @@ amplifies what the smoothers were asked to remove:
   the offset term that carries low-frequency mottling. Luma is untouched,
   exactly: a rebuilt pixel outside `[0, 1]` has its colour difference scaled
   toward its luma rather than each channel clamped, so a pure black stays 0.
-  Measured against Camera Raw at Color 25 / 100 with its constants as they
-  were: R² 0.95–0.97 on the colour-difference move.
 
 Every radius is in **film pixels** — Lightroom states them at full resolution
 — and converts through `render::FilmScale`, the full-resolution short edge over
@@ -2535,10 +2534,9 @@ compare like with like. A σ below 0.6 raster px runs at 0.6 with its amount
 faded by the ratio of the two transfers at Nyquist, and the noise thresholds
 divide by the film factor squared, because averaging k × k film pixels already
 cut the noise variance by k². The noise-reduction constants are named `Ramp`s
-over their sliders; since v1.17.0 Luminance and Color are pinned against Camera
-Raw's renders of the star frame, and their Detail / Contrast / Smoothness
-companions (rendered only at Lightroom's defaults) are still first-principles
-values.
+over their sliders: first-principles values until the Lightroom kit's `NR-*`
+and `CNR-*` ladders pin them; the sharpening ladder (`SH-*`) was exported and
+fitted on 2026-09-27, as the bullet above records.
 
 Eleven controls have a non-zero Lightroom default — the Sharpening amount
 (v1.6.0), Radius 1.0, Sharpen Detail 25, the three noise-reduction companions
