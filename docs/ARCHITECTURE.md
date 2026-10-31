@@ -5518,12 +5518,13 @@ finished at a mean ΔE of 8.29 against the target while 40000 K, inside the
 band and pulling least (0.24 against 0.43), finished at 7.52. The winner
 ships only when it beats the frame without curves by more than `FIT_QUANT`,
 the projection's own bar; otherwise the projection runs exactly as before,
-on an untouched recipe. (The synthetic white-balance casts that pinned
-that path until 2026-10-30 fanned only because the cast curves' knots sat
-at fixed inputs and pinned each channel's empty low end to the target's
-quantile; with the knots on the source's own quantiles a white-balance cast
-does not fan and never enters the hand-off, and the walk is pinned on a cast
-that does fan, a luminance split no single white balance takes back.) A shipped
+on an untouched recipe. (The synthetic pair that pinned that path by value
+until 2026-10-29 had been refused only at the coarse steps; the finer walk
+reaches a white balance its cells vouch, and
+`the_hand_off_walk_reaches_the_nearer_white_balance_the_cells_vouch` pins
+that. A luminance split no single white balance takes back enters the walk
+and ships nothing through it,
+`the_hand_off_walk_is_entered_by_a_cast_that_really_fans`.) A shipped
 hand-off says so (`FIT_NOTE_CAST_HANDED_TO_WB`: Kelvin and tint before and
 after, the fan before and after, the cells' shares) and, on the Kelvin
 domain's edge above the default strength, adds the white-balance stage's own

@@ -5682,20 +5682,16 @@ fn joint_family_is_calibrated_on_the_fixture_set() {
         // 2026-10-22); 2026-10-21,
         // the tone sliders' own do-no-harm withholding the contrast +3.1
         // the regression asks for: 0.0387 -> 0.0349 at 0.3889; 2026-10-22,
-        // the ungated tone arm: 0.0387 -> 0.0365 at 0.3564; 2026-10-31, the
-        // cast curves' knots on the source's own quantiles (ae011c1):
-        // 0.0387 -> 0.0337 at 0.4090).
+        // the ungated tone arm: 0.0387 -> 0.0365 at 0.3564).
         assert!(
-            (report.err_after - 0.0337).abs() < 0.001
-                && (report.recipe.confidence - 0.409).abs() < 0.01,
-            "canyon warm's landing moved off the measured 0.0337 / 0.409: {} -> {} at {}",
+            (report.err_after - 0.0365).abs() < 0.001
+                && (report.recipe.confidence - 0.356).abs() < 0.01,
+            "canyon warm's landing moved off the measured 0.0365 / 0.356: {} -> {} at {}",
             report.err_before, report.err_after, report.recipe.confidence
         );
-        // 0.0488 since the cast curves' knots sit on the source's own
-        // quantiles (ae011c1; 0.0590 before).
         assert!(
-            (after - 0.0488).abs() < 0.005,
-            "…and its joint reading off the measured 0.0488: {before:.4} -> {after:.4}"
+            (after - 0.0590).abs() < 0.005,
+            "…and its joint reading off the measured 0.0590: {before:.4} -> {after:.4}"
         );
         assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_REFUSED), "canyon warm is no longer a refusal: {}", report.recipe.rationale);
         assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_MISS), "nor a miss: {}", report.recipe.rationale);
@@ -7814,11 +7810,6 @@ fn hsl_band_budget_is_monotone_across_the_three_strength_stops() {
 /// left less to carry: fan 4.0° (10.2°), fit 0.0800 -> 0.0282 (0.0800 ->
 /// 0.0251), confidence 0.489 (0.496).
 ///
-/// Re-measured 2026-10-31 for the cast curves' knots on the source's own
-/// quantiles (ae011c1, "(Q) knots"): `p40`'s cast is admitted at 2.4°, its
-/// fit 0.0673 -> 0.0387 at confidence 0.573; `p41`'s at 14.9°, its fit
-/// 0.0742 -> 0.0216 at 0.496 — admitted, 0.1° under the line.
-///
 /// Both pairs are OPTIONAL, like every other corpus pair: absent, the
 /// test says so and passes, and the synthetic two-temperature fixture
 /// carries the refusal side of the same question on its own.
@@ -7830,8 +7821,8 @@ fn the_fan_gate_costs_a_real_two_temperature_pair_nothing() {
     use crate::rationale::keys;
     let Some(root) = calibration_corpus() else { return };
     for (code, want_fan, want_before, want_after, want_conf) in [
-        ("p40", 2.4f32, 0.0673f32, 0.0387f32, 0.573f32),
-        ("p41", 14.9, 0.0742, 0.0216, 0.496),
+        ("p40", 11.4f32, 0.0676f32, 0.0410f32, 0.556f32),
+        ("p41", 4.0, 0.0800, 0.0282, 0.489),
     ] {
         let raw = root.join(format!("{code}.arw"));
         let target_path = root.join(format!("{code}-target.jpg"));
@@ -8297,11 +8288,9 @@ fn no_shipped_fit_delivers_a_hue_fan_past_the_limit() {
             worst = worst.max(fan);
         }
     }
-    // 14.5° since the cast curves' knots sit on the source's own quantiles
-    // (ae011c1; 12.9° before), still under the limit.
     assert!(
-        (worst - 14.5).abs() < 0.5,
-        "the worst delivered fan moved off the measured 14.5°: {worst:.1}"
+        (worst - 12.9).abs() < 0.5,
+        "the worst delivered fan moved off the measured 12.9°: {worst:.1}"
     );
 }
 
@@ -8507,55 +8496,103 @@ fn recipe_fnv(recipe: &EditRecipe) -> u64 {
     json.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
 }
 
-/// A white-balance cast does not fan, so it never enters the hand-off.
-/// [`hue_ramps`] against itself under 3500 K: at every white balance the
-/// walk could reach (5500 → 3700 K) the channel curves fitted for what is
-/// left move every hue class alike and fan under [`FAN_DEG`], and end to end
-/// the fit enters no hand-off. Until 2026-10-30 the curves' knots sat at
-/// fixed inputs and pinned each channel's empty low end to the target's
-/// quantile; in the point-curve law's channels that lifted the dark pixels
-/// off the map, the same casts fanned 21–38° (37.1° at 5500 K against a
-/// target 4.4° from the source), and each was handed to the white balance
-/// for a fan the target never had.
-///
-/// MUTATION: put the knots back at inputs 0, ¼, ½, ¾, 1 — the 5500 K curves
-/// fan past the limit.
+/// The hand-off ships. [`cooled_ramps`]`(0)` asks for a 3500 K white
+/// balance against the 5500 K anchor, out of the default budget, so the
+/// white-balance stage leaves as-shot and the three channel curves are asked
+/// for the whole cast — and fan a hue class past the limit, so before the
+/// hand-off the projection shrank them. The hand-off walks the white balance
+/// toward the cast inside the budget and ships the curves re-fitted on it at
+/// full strength. Measured 2026-10-23: 5500 K / 0 → 3900 K / +40.6, curves
+/// re-fitted reading +3.8°, cells 1.000 converged / 0.000 diverged.
 #[test]
-fn a_white_balance_cast_does_not_fan_and_never_enters_the_hand_off() {
-    use super::solve::route;
+fn a_fan_the_white_balance_can_take_back_is_handed_to_it() {
     use crate::rationale::keys;
-    let src = hue_ramps();
-    let tgt = cooled_ramps(0);
-    let tp = pixels_of(&tgt);
-    for k in [5500.0f32, 4700.0, 4200.0, 3900.0, 3700.0] {
-        let mut r = EditRecipe { temperature_k: Some(k), ..Default::default() };
-        let cur = pixels_of(&render::develop_preview(&src, &r));
-        let ev = evidence_model(&cur, &tp);
-        let ones = vec![1.0f32; cur.len()];
-        r.red_curve = residual_channel_curve_weighted(&cur, &tp, 0, &ones, &ones);
-        r.green_curve = residual_channel_curve_weighted(&cur, &tp, 1, &ones, &ones);
-        r.blue_curve = residual_channel_curve_weighted(&cur, &tp, 2, &ones, &ones);
-        let with_px = pixels_of(&render::develop_preview(&src, &r));
-        let fan = hue_fan_weighted(&cur, &with_px, &ev).map_or(0.0, |f| f.1);
-        assert!(fan < FAN_DEG, "{k} K: a white-balance cast fans {fan:.1}° (limit {FAN_DEG}°)");
-    }
-    route::take();
-    let rep = fit_recipe(&src, &tgt);
-    let seen = route::take();
-    assert_eq!(seen.hand_off_entered, 0, "no fan, no hand-off: {seen:?} {}", rep.recipe.rationale);
-    assert!(!rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB));
+    let rep = fit_recipe(&hue_ramps(), &cooled_ramps(0));
+    let note = rep
+        .notes
+        .iter()
+        .find(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB)
+        .unwrap_or_else(|| panic!("the cast must be handed to the white balance: {}", rep.recipe.rationale));
+    let arg = |name: &str| -> f32 {
+        note.args
+            .iter()
+            .find(|(k, _)| *k == name)
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or_else(|| panic!("the note carries {name}"))
+    };
+    // The white balance moved, toward the cast, and the note says from where
+    // to where — the shipped Kelvin, not a probe's.
+    let k = rep.recipe.temperature_k.expect("the hand-off ships a white balance");
+    assert_eq!(arg("k_before"), 5500.0, "it starts from the as-shot anchor");
+    assert_eq!(arg("k_after"), k, "the note names the Kelvin that shipped");
+    assert_eq!(arg("tint_after"), rep.recipe.tint, "…and the tint");
+    assert!(k < 5500.0, "a 3500 K target asks for a cooler white balance ({k} K)");
+    // The conviction it answered, and the reading that let it ship.
+    assert!(arg("fan_before") >= FAN_DEG, "the as-fitted fan convicted ({})", arg("fan_before"));
+    assert!(arg("fan_after").abs() < FAN_DEG, "the re-fitted curves clear the limit ({})", arg("fan_after"));
+    assert_eq!(arg("limit"), FAN_DEG);
+    // `HandOffFacts.share` is the CONVICTED class's share of the census:
+    // region-sized by the fan gate's own floor, and a share.
+    let share = arg("share");
+    assert!((FAN_SHARE..=1.0).contains(&share), "the class share is a fan-gate class ({share})");
+    // The cell verdict it was admitted on is a vouch.
+    assert!(arg("converged") >= 0.70 && arg("diverged") <= 0.10 && arg("aligned") >= 0.70);
+    // Curves at t = 1: they ship as an ADMITTED cast, never a projected one.
+    assert!(
+        !rep.recipe.red_curve.is_empty() || !rep.recipe.blue_curve.is_empty(),
+        "the re-fitted curves ship: {}",
+        rep.recipe.rationale
+    );
+    assert!(
+        !rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_PROJECTED),
+        "a handed cast is not also projected: {}",
+        rep.recipe.rationale
+    );
+    assert!(
+        rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED),
+        "the re-fitted curves go through the ordinary admission: {}",
+        rep.recipe.rationale
+    );
+    // 3900 K sits inside the domain, so no bound sentence.
+    assert!(!rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_WB_SEARCH_BOUND));
+    assert!(rep.err_after < rep.err_before, "{} -> {}", rep.err_before, rep.err_after);
+}
+
+/// The same frame with eleven rows of its grey band warmed instead. Until
+/// 2026-10-29 this pair pinned the PROJECTION: the walk's extent was found
+/// by doubling to a Kelvin edge alone, so its 24 even steps were coarse and
+/// the two in-budget white balances it judged were refused by the target's
+/// cells (0.111 and 0.122 of the frame moved away, the line is 0.10). With the
+/// extent ending where the walk leaves the strength budget
+/// (`search_cast_hand_off`), the steps are fine enough to reach a nearer white
+/// balance the cells vouch, and the hand-off ships it: 5500 K / 0 →
+/// 4800 K / +15.5, fan 15.4° → +4.5°, cells 0.825 converged / 0.087 diverged,
+/// look error 0.0156 → 0.0089 (measured 2026-10-29).
+#[test]
+fn the_hand_off_walk_reaches_the_nearer_white_balance_the_cells_vouch() {
+    use crate::rationale::keys;
+    let rep = fit_recipe(&hue_ramps(), &cooled_ramps(11));
+    let note = rep
+        .notes
+        .iter()
+        .find(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB)
+        .unwrap_or_else(|| panic!("the hand-off ships: {}", rep.recipe.rationale));
+    let arg = |name: &str| -> f32 {
+        note.args.iter().find(|(k, _)| *k == name).map(|(_, v)| v.parse().expect("a number")).expect(name)
+    };
+    assert!(arg("fan_before") >= FAN_DEG && arg("fan_after").abs() < FAN_DEG);
+    assert!(arg("diverged") <= 0.10 && arg("converged") >= 0.70, "the cells vouch it");
+    assert_eq!((rep.recipe.temperature_k, rep.recipe.tint), (Some(4800.0), 15.5));
+    assert!(!rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_PROJECTED));
+    assert!(rep.err_after < rep.err_before, "{} -> {}", rep.err_before, rep.err_after);
 }
 
 /// A cast that is not a white-balance move does fan, and is walked: the
-/// split ramps — the darker half of [`hue_ramps`] under 8000 K, the brighter
-/// half under 2800 K — sort every hue class by luminance by construction, so
+/// split ramps — the darker half of [`hue_ramps`] under 6500 K, the brighter
+/// half under 3000 K — sort every hue class by luminance by construction, so
 /// the fitted curves fan past [`FAN_DEG`] and the fan gate hands the cast to
 /// the white-balance walk. No single white balance takes a luminance split
 /// back, so nothing ships through it, and the fit is no worse for the walk.
-/// Until 2026-10-30 the walk was entered on a white-balance cast
-/// ([`cooled_ramps`]) whose fan came from the cast curves' fixed knots, not
-/// from its target; see
-/// [`a_white_balance_cast_does_not_fan_and_never_enters_the_hand_off`].
 #[test]
 fn the_hand_off_walk_is_entered_by_a_cast_that_really_fans() {
     use super::solve::route;
@@ -8565,11 +8602,7 @@ fn the_hand_off_walk_is_entered_by_a_cast_that_really_fans() {
     let shade = |k: f32| {
         render::develop_preview(&src, &EditRecipe { temperature_k: Some(k), ..Default::default() }).to_rgb8()
     };
-    // 8000 K / 2800 K since the cast curves' knots sit on the source's own
-    // quantiles (ae011c1): at 6500 K / 3000 K the re-fitted curves no longer
-    // fan past the limit, so the split no longer tested the walk; at
-    // 8000 K / 2800 K they open 18.5° and the walk is entered.
-    let (dark, bright) = (shade(8000.0), shade(2800.0));
+    let (dark, bright) = (shade(6500.0), shade(3000.0));
     let tgt = DynamicImage::ImageRgb8(RgbImage::from_fn(192, 160, |x, y| {
         if x < 96 { *dark.get_pixel(x, y) } else { *bright.get_pixel(x, y) }
     }));
@@ -8587,9 +8620,7 @@ fn the_hand_off_walk_is_entered_by_a_cast_that_really_fans() {
 
 /// A cast the fan gate never convicts never reaches the hand-off: the haze
 /// correction, the fan gate's own legitimate case, pinned by value at
-/// 9631905. Re-pinned 2026-10-31 for the cast curves' knots on the source's
-/// own quantiles (ae011c1): the haze cast is re-fitted on the new knots, and
-/// the hand-off is still not entered.
+/// 9631905.
 #[test]
 fn a_cast_with_no_fan_never_enters_the_hand_off() {
     use crate::rationale::keys;
@@ -8611,7 +8642,7 @@ fn a_cast_with_no_fan_never_enters_the_hand_off() {
     assert!(!rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB));
     assert_eq!(
         recipe_fnv(&rep.recipe),
-        0x8096_3c74_770d_45d2,
+        0x732f_f6a1_d6b6_ea19,
         "a recipe the hand-off never touched moved: {}",
         rep.recipe.rationale
     );
