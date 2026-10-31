@@ -111,6 +111,7 @@ pub(super) fn residual_channel_curve_weighted(
     if c_cdf.iter().all(|&v| v <= 0.0) || t_cdf.iter().all(|&v| v <= 0.0) {
         return Vec::new();
     }
+    const XS: [f32; 5] = [0.0, 0.25, 0.50, 0.75, 1.0];
     // The keep/skip decision is judged at the SOURCE DISTRIBUTION's own
     // quantiles — |Q_t(q) − Q_c(q)| — where the pixel mass actually sits.
     // Judging at the fixed intensity knots had two failure modes: identical
@@ -130,28 +131,11 @@ pub(super) fn residual_channel_curve_weighted(
     if max_dev < 0.012 {
         return Vec::new();
     }
-    // The knots sit where the source's pixels are: at its own quantiles
-    // `Q_c(q)`, each carried to the target's `Q_t(q)` — the CDF map
-    // `x → Q_t(F_c(x))` sampled on its support. Knots at FIXED inputs
-    // (0, ¼, ½, ¾, 1) pinned `x = 0` to `Q_t(P_CLIP)` wherever the channel
-    // holds no pixel near 0, and the spline from there to the next knot lifted
-    // every pixel in between off the map. A colourful frame's channel floor
-    // sits well above 0, so that lift was a hue move by luminance (measured
-    // while the curves acted on ProPhoto channels: the hand-off ramps' as-fitted cast fanned 37° where the target differs by
-    // 4°, and raised the look error it was fitted to lower, 0.017 → 0.022).
-    // Past the support the curve continues the map's own offset at each end,
-    // so a lifted black stays lifted and an untouched one stays at 0.
-    let q = |cdf: &[f32], p: f32| quantile(cdf, p).clamp(0.0, 1.0);
-    let (lo_c, lo_t) = (q(&c_cdf, P_CLIP), q(&t_cdf, P_CLIP));
-    let (hi_c, hi_t) = (q(&c_cdf, 1.0 - P_CLIP), q(&t_cdf, 1.0 - P_CLIP));
-    let mut knots: Vec<(f32, f32)> = vec![(0.0, (lo_t - lo_c).clamp(0.0, 1.0))];
-    for &p in &CURVE_QUANTILES {
-        knots.push((q(&c_cdf, p), q(&t_cdf, p)));
-    }
-    knots.push((1.0, (1.0 + hi_t - hi_c).clamp(0.0, 1.0)));
-    let mut pts: Vec<CurvePoint> = Vec::with_capacity(knots.len());
+    let mut pts: Vec<CurvePoint> = Vec::with_capacity(XS.len());
     let (mut prev_in, mut prev_out) = (-1i32, 0i32);
-    for (x, y) in knots {
+    for &x in &XS {
+        let f = cdf_at(&c_cdf, x);
+        let y = quantile(&t_cdf, f.clamp(P_CLIP, 1.0 - P_CLIP)).clamp(0.0, 1.0);
         let input = (x * 255.0).round() as i32;
         let output = ((y * 255.0).round() as i32).max(prev_out);
         if input <= prev_in {
@@ -162,10 +146,6 @@ pub(super) fn residual_channel_curve_weighted(
     }
     pts
 }
-
-/// The source quantiles a cast curve's inner knots sit on: the
-/// [`P_CLIP`] band's two ends and the quartiles.
-const CURVE_QUANTILES: [f32; 5] = [P_CLIP, 0.25, 0.50, 0.75, 1.0 - P_CLIP];
 
 /// Shrink the three fitted channel curves along one continuous path, so a
 /// cast the hue-fan gate convicts can be made milder instead of thrown away.
@@ -226,11 +206,11 @@ pub(super) fn projected_cast_curves(curves: [&[CurvePoint]; 3], t: f32) -> [Vec<
     let mut xs: Vec<u8> = curves.iter().flat_map(|c| c.iter().map(|p| p.input)).collect();
     xs.sort_unstable();
     xs.dedup();
-    // Linear resample onto the union of the three channels' knots: each
-    // channel's knots sit on its own source quantiles
-    // (`residual_channel_curve_weighted`), so the sets differ, and the mean
-    // of three curves is only meaningful knot-by-knot. At `t = 1` this is the
-    // same map on more knots — not the fitted knots byte for byte.
+    // Linear resample onto the shared grid. On every production input this is
+    // a no-op — `residual_channel_curve_weighted` emits the same fixed knots
+    // for every channel it keeps — but the mean of three curves is only
+    // meaningful knot-by-knot, so pairing by INDEX rather than by input would
+    // be a silent bug the day the knot sets ever differ.
     let sample = |c: &[CurvePoint], x: u8| -> f32 {
         let Some(first) = c.first() else { return x as f32 };
         if x <= first.input {
@@ -262,8 +242,8 @@ pub(super) fn projected_cast_curves(curves: [&[CurvePoint]; 3], t: f32) -> [Vec<
         }
     }
     // Per channel: a curve that is the identity at every knot is no curve.
-    // Emitting it EMPTY is what keeps `t = 1` from turning a channel the fit
-    // left empty into an explicit identity curve, and it keeps a
+    // Emitting it EMPTY is what makes `t = 1` reproduce the FITTED curves
+    // byte for byte including the channels the fit left empty, and it keeps a
     // projected recipe free of curves that do nothing.
     for channel in out.iter_mut() {
         if channel.iter().all(|p| p.input == p.output) {
