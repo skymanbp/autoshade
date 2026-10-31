@@ -58,7 +58,15 @@ fn the_base_part_is_the_profile_stage_and_nothing_after_it() {
 /// 0.02–0.05, against 0.002 % above 0.5 (the demosaic's neighbourhood of a
 /// site below the black). Unchanged by the merge of rel1170-vigca (the
 /// measured exposure transfer, `CameraStart`, `UnderTone`): this recipe names
-/// no profile, so no profile stage runs. Env-gated on the corpus (`p39.arw`).
+/// no profile, so no profile stage runs. Re-read a fourth time on
+/// rel1170-final, where the v1.17.0 capture-sharpening and luminance-NR
+/// re-measure was reverted and the raw white level became Camera Raw's law
+/// only (a recipe naming a profile): this recipe is back on v1.16.0's
+/// sharpening and the file's white level, so it renders as v1.16.0 did up to
+/// the signed black level — the CLI at 1000 px against the installed v1.16.0
+/// differs on 0.034 % of the pixels, by at most one 8-bit code, 82 % of them
+/// encoded below 0.05 and none above 0.5 (the merged tree before the gate: 98.7 %, up to 4.3 %).
+/// Env-gated on the corpus (`p39.arw`).
 ///
 /// MUTATION: let `starting_curve` drop a curve on a recipe that names no
 /// profile, or develop a neutral part through anything but the neutral recipe.
@@ -118,6 +126,28 @@ fn dehaze_alone_on_a_camera_profile_follows_camera_raw() {
     assert!(engine.iter().zip(&haze.0).any(|(a, b)| a.abs_diff(*b) > 1), "the engine law's stage moves it: {engine:?}");
 }
 
+/// The develop of `raw` that names the canvas (「Adobe Standard」 with the
+/// 「Adobe Color」 Look, what an all-zero Lightroom sidecar says): the fresh
+/// calibration with the canvas named and the photo's camera start read. A
+/// fresh open names no profile (`pipeline::fresh_canvas_start_with`), so the
+/// tests of the canvas — Camera Raw's law, reached by an imported develop —
+/// build it here.
+fn canvas_named(raw: &std::path::Path) -> EditRecipe {
+    let mut r = crate::pipeline::calibration_recipe(crate::pipeline::fresh_photo_calibration(raw));
+    let c = canvas_recipe();
+    (r.camera_profile, r.look) = (c.camera_profile, c.look);
+    r.base_curve.clear();
+    crate::pipeline::stamp_camera_start(raw, &mut r);
+    r
+}
+
+/// The reverse fit's source of `raw` when its calibration is `cal`
+/// (`pipeline::fit_source` for a photo whose saved develop names the canvas).
+fn canvas_fit_source(raw: &std::path::Path, cal: &EditRecipe) -> (Plate, EditRecipe) {
+    let plate = source_plate(raw, &BasePart::of(cal), crate::pipeline::FIT_SOURCE_EDGE).expect("fit source");
+    (plate, cal.clone())
+}
+
 /// FNV-1a over the little-endian bytes of a 16-bit buffer.
 fn fnv1a64_u16(px: &[u16]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -131,7 +161,7 @@ fn fnv1a64_u16(px: &[u16]) -> u64 {
 }
 
 /// The pre-switch digest (see the test above).
-const OLD_RECIPE_P39_1000_DIGEST: u64 = 0xcb8b_abcc_4d81_f379;
+const OLD_RECIPE_P39_1000_DIGEST: u64 = 0xc5db_fee1_fdbe_f2dd;
 
 /// v1.17.0 step 2's INVARIANT: a fresh canvas is one picture on every surface.
 /// The all-zero fresh recipe (the calibration a fresh open stamps) against the
@@ -174,9 +204,13 @@ fn every_surface_shows_a_fresh_canvas_as_the_export_renders_it() {
         return;
     }
     const EDGE: u32 = 1000;
-    // The fresh recipe a fresh open stamps (no saved develop consulted).
-    let fresh = crate::pipeline::calibration_recipe(crate::pipeline::fresh_photo_calibration(&raw));
-    assert_eq!(fresh.camera_profile, CANVAS_PROFILE, "a fresh open starts from Lightroom's canvas");
+    // A fresh open names no profile (the engine's own law, as before
+    // v1.17.0); the canvas is what a develop naming Adobe Standard with
+    // Adobe Color starts from — an imported all-zero sidecar.
+    let opened = crate::pipeline::calibration_recipe(crate::pipeline::fresh_photo_calibration(&raw));
+    assert!(!opened.names_profile(), "a fresh open starts on the engine's own law");
+    let fresh = canvas_named(&raw);
+    assert_eq!(fresh.camera_profile, CANVAS_PROFILE, "the canvas names Lightroom's profile");
     assert!(fresh.base_curve.is_empty(), "…with no camera curve");
     assert!(
         !crate::xmp::global_export_losses(&fresh).contains(&"base_curve"),
@@ -242,7 +276,7 @@ fn every_surface_shows_a_fresh_canvas_as_the_export_renders_it() {
     // calibration's part, in that base's frame (lens-corrected when the camera
     // stage resamples the lens, v1.17.0), so it is read as a master of the
     // part is: the tail resamples no geometry the camera stage already did.
-    let (source, cal) = crate::pipeline::fit_source(&raw).expect("fit source");
+    let (source, cal) = canvas_fit_source(&raw, &fresh);
     let fit_has_canvas = BasePart::of(&cal) == part;
     assert_eq!(source.corrected(), BasePart::of(&cal).corrects_lens(), "the source is in its base's frame");
     let fitted = preview(
@@ -326,7 +360,7 @@ fn the_canvas_brings_back_over_range_light_as_the_export_does() {
         return;
     }
     const EDGE: u32 = 1000;
-    let mut r = crate::pipeline::calibration_recipe(crate::pipeline::fresh_photo_calibration(&raw));
+    let mut r = canvas_named(&raw);
     r.exposure_ev = -1.86;
     let export = render_to_image(&raw, &r, None, Some(EDGE)).expect("export");
     let base = base_develop(&raw, &BasePart::of(&r), Some(EDGE)).expect("base");
@@ -421,7 +455,7 @@ fn a_moved_white_shows_on_every_surface_as_the_export_renders_it() {
         return;
     }
     const EDGE: u32 = 1000;
-    let fresh = crate::pipeline::calibration_recipe(crate::pipeline::fresh_photo_calibration(&raw));
+    let fresh = canvas_named(&raw);
     let film = crate::decode::film_short_edge(&raw);
     let preview = |base: &DynamicImage, r: &EditRecipe| {
         let after = develop_preview_film(base, r, &crate::diag::pixels(), film, &SourceFrame::Raw);
@@ -440,7 +474,7 @@ fn a_moved_white_shows_on_every_surface_as_the_export_renders_it() {
     // lens, v1.17.0), with the lens geometry off when it is not (the
     // vignetting kept, as the source keeps it) — so the export the candidate
     // is judged against is in the frame the plate is.
-    let (source, cal) = crate::pipeline::fit_source(&raw).expect("fit source");
+    let (source, cal) = canvas_fit_source(&raw, &fresh);
     assert!(source.has_camera(), "a corpus RAW's fit source keeps its camera frame");
     let plate = Plate::thumbnail_of(&source, crate::fit::ANALYZE_EDGE);
     assert!(plate.has_camera(), "…and so does its analysis thumbnail");
@@ -560,9 +594,10 @@ fn every_surface_sees_one_camera_start_and_the_sidecar_carries_none() {
         crate::test_skipped("camera start", &format!("the canvas cannot render here: {why}"));
         return;
     }
-    // The fresh open.
-    let fresh = crate::pipeline::calibration_recipe(crate::pipeline::fresh_photo_calibration(&raw));
-    let start = fresh.camera_start.expect("a fresh open stamps the start");
+    // A develop naming the canvas (an imported all-zero sidecar; a fresh
+    // open names no profile since the gate).
+    let fresh = canvas_named(&raw);
+    let start = fresh.camera_start.expect("a develop naming the canvas carries the start");
     assert!(start.ev > 0.0 && start.headroom > 0.9, "the body's baseline and a daylight neutral's headroom: {start:?}");
     // A saved develop reloaded: the stamp rides the JSON and the reload
     // re-reads the same from the photo, whatever the save held.

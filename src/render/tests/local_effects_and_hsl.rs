@@ -230,17 +230,17 @@ fn a_local_point_curve_darkens_only_inside_the_mask() {
         ..Default::default()
     });
     assert!(out[0][0] > base[0][0] + 0.05, "red must lift: {:?} → {:?}", base[0], out[0]);
-    // Green and blue keep their value — ProPhoto's green and blue, the
-    // channels a curve acts on since v1.17.0 (`tone::apply_rgb_curves`,
-    // measured: Camera Raw's mask curves too) — to within the transfer
-    // LUTs' round trip (the working sRGB green and blue move with a
-    // ProPhoto red, as they do in Camera Raw). The claim being made is
-    // "the red curve touched one channel", and 2e-3 is 25× below the 0.05
-    // swing above.
-    let (pb, po) = (curve_channels(&base[0]), curve_channels(&out[0]));
+    // Green and blue keep their value to within LUT-sampling rounding: the
+    // recipe names no camera profile, so the curve acts on the working
+    // channels (the engine's own law; Camera Raw's law, on a recipe naming a
+    // profile, acts on ProPhoto's, `tone::apply_rgb_curves`). Not `==`: the
+    // fused pass runs the identity master curve through `sample_lut` +
+    // `scale_chroma` for every covered pixel, a ~1e-7 round trip on ANY
+    // active mask. The claim being made is "the red curve touched one
+    // channel", and 1e-5 is four orders below the 0.05 swing above.
     for (ch, name) in [(1usize, "green"), (2, "blue")] {
         assert!(
-            (po[ch] - pb[ch]).abs() < 2e-3,
+            (out[0][ch] - base[0][ch]).abs() < 1e-5,
             "a red curve must leave {name} untouched: {:?} → {:?}",
             base[0],
             out[0]

@@ -1394,16 +1394,6 @@ fn field_disabled_layer_is_byte_identical() {
 #[test]
 fn field_stop_rule_skips_the_tile_producer_and_names_it() {
     let (current, target, width, height) = crate::fit_field::tests::two_band_pair();
-    // v1.17.0: on the channel-curve law the plain two-band pair leaves a
-    // finished residual with nothing nameable in it (0.126, no colour-shaped
-    // bucket, no white-balance offset, no masks), so the target carries a
-    // WB-shaped component the bounded Atmosphere white balance declines:
-    // red +0.04, blue −0.04. Measured: the stop still skips tiles and free
-    // masks, no spatial note follows it, and the one finished disclosure
-    // names `temperature_k/tint` among its controls (+0.02/−0.02 is taken
-    // by the white balance and leaves nothing to disclose; +0.06/−0.06
-    // discloses the same).
-    let target: Vec<[f32; 3]> = target.iter().map(|p| [p[0] + 0.04, p[1], p[2] - 0.04]).collect();
     let image = |pixels: &[[f32; 3]]| DynamicImage::ImageRgb8(RgbImage::from_fn(
         width, height, |x, y| image::Rgb(pixels[(y * width + x) as usize]
             .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8)),
@@ -1437,10 +1427,6 @@ fn field_stop_rule_skips_the_tile_producer_and_names_it() {
             || note.key == crate::rationale::keys::FIT_NOTE_ATMOSPHERE_UNREPRESENTED
     }).count();
     assert_eq!(finished, 1, "finished disclosure count: {}", report.recipe.rationale);
-    assert!(report.notes.iter().any(|note| (note.key == crate::rationale::keys::FIT_NOTE_UNREPRESENTED
-            || note.key == crate::rationale::keys::FIT_NOTE_ATMOSPHERE_UNREPRESENTED)
-            && note.args.iter().any(|(k, v)| *k == "controls" && v.contains("temperature_k/tint"))),
-        "…and it names the white-balance shape the target carries: {}", report.recipe.rationale);
     path.remove();
 }
 
@@ -2272,14 +2258,20 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
 
     let (w, h) = (16u32, 16u32);
     let build = |sky: [f32; 3], rock: [f32; 3]| -> DynamicImage {
-        DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |_, y| {
-            let p = if y >= 12 { sky } else { rock };
+        DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            let p = if y >= 12 {
+                sky
+            } else if x < 6 {
+                [0.63, 0.63, 0.63]
+            } else {
+                rock
+            };
             image::Rgb(p.map(|c| (c * 255.0).round() as u8))
         }))
     };
     let land_src = build([0.60, 0.63, 0.67], [0.45, 0.42, 0.40]);
-    // The land pair of `zoned_orchestration_corrects_the_land_through_the_inverted_raster`
-    // (its grey patch of 2026-10-22 removed on v1.17.0, see there).
+    // The land pair of `zoned_orchestration_corrects_the_land_through_the_inverted_raster`,
+    // grey patch included (2026-10-22).
     let land_tgt = build([0.92, 0.72, 0.48], [0.58, 0.46, 0.37]);
     let land_path = fixture_mask_path("zoned-boundary-calibration-land");
     sky_mask.save(land_path.path()).unwrap();
@@ -2401,14 +2393,7 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
     // the 0.02 drift. The structural term still swings on this toy (the
     // same render reads 0.06889 at k 0.103), so these pins hold the gate's
     // own k, not a smooth frame curve. Colour on the 0.012 ceiling on both.
-    //
-    // RE-DERIVED (v1.17.0) for the channel curves on Camera Raw's law and
-    // the land pair's grey patch removed (see the orchestration test).
-    // Measured: `sky` 0.022 before, 0.008 kept, k 0.401; `sky+land` 0.003
-    // before, 0.003 kept, k 0.294 — its luma rim is already under the
-    // ceiling and the colour rank (0.016 -> 0.012) is what shrinks it.
-    // Colour on the 0.012 ceiling on both, as before.
-    let expected = [0.008f32, 0.008, 0.003, 0.003];
+    let expected = [0.006f32, 0.006, 0.008, 0.008];
     for ((fixture, role, rim), expected) in measured.iter().zip(expected) {
         assert!(
             (*rim - expected).abs() <= 0.002,
@@ -2421,9 +2406,7 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
     // it; per unit of brightness the full tone passes, the candidate carries
     // the whole fitted move (rim 0.0460 -> 0.0660) and the shrink lands it on
     // the SAME kept rim, 0.012, at k 0.244 -> 0.183. `sky+land` is unmoved.
-    // v1.17.0: sky 0.0310 / 0.194 -> 0.0220 / 0.401, sky+land 0.0540 /
-    // 0.165 -> 0.0030 / 0.294 (re-derived above).
-    let expected_candidates = [("sky", 0.0220f32, 0.401f32), ("sky+land", 0.0030, 0.294)];
+    let expected_candidates = [("sky", 0.0310f32, 0.194f32), ("sky+land", 0.0540, 0.165)];
     for ((fixture, before, k), (want_fixture, want_before, want_k)) in
         candidates.iter().zip(expected_candidates)
     {
@@ -6233,20 +6216,15 @@ fn zoned_orchestration_corrects_the_land_through_the_inverted_raster() {
     // 4–8, greys 0.50–0.72, three land targets), three keep the warm sky
     // beside an inverted land zone, and on this one the frame strays least
     // from its entry over k = 0, 0.05 … 1 (at most +0.034, at k 0.80).
-    //
-    // v1.17.0 (the channel curves on Camera Raw's law): the grey patch is
-    // gone again. With it, the global solve's curves (saturation 60) now
-    // carry the land's warmth and the land ships as two NON-inverted land
-    // zones beside the sky. Measured over grey widths 0/4/6/8, greys
-    // 0.50/0.63/0.72 and three land targets (36 variants): without the
-    // patch the global solve stays neutral (no curves, saturation 0) and the
-    // warm sky [1.19, 0.95, 0.79] attaches beside the inverted land zone,
-    // which itself carries the warmth [1.08, 0.97, 0.88] — the design of
-    // 2026-10-21 — the frame 0.0800 -> 0.0521, the land pixel (137, 121,
-    // 110), r − b 27 codes against the 25.5 the render check asks for.
     let build = |sky: [f32; 3], rock: [f32; 3]| -> DynamicImage {
-        let img = RgbImage::from_fn(w, h, |_, y| {
-            let p = if y >= 12 { sky } else { rock };
+        let img = RgbImage::from_fn(w, h, |x, y| {
+            let p = if y >= 12 {
+                sky
+            } else if x < 6 {
+                [0.63, 0.63, 0.63]
+            } else {
+                rock
+            };
             image::Rgb(p.map(|c| (c * 255.0).round() as u8))
         });
         DynamicImage::ImageRgb8(img)

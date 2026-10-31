@@ -925,9 +925,7 @@ fn a_baked_per_channel_curve_reaches_the_pixels_under_the_photographers_own() {
     use crate::recipe::{CreativeLook, CurvePoint};
     let knot = |input, output| CurvePoint { input, output };
     // RED only, so green is an in-frame control for "did this touch the
-    // channels it was not given?" — ProPhoto's green, the channel a curve
-    // leaves alone since v1.17.0 (`apply_rgb_curves`); the working sRGB
-    // green moves with a ProPhoto red, as it does in Camera Raw.
+    // channels it was not given?".
     //
     // The two curves move the SAME input in opposite directions, and they
     // are deliberately NOT each other's inverse. The first draft made them
@@ -945,14 +943,10 @@ fn a_baked_per_channel_curve_reaches_the_pixels_under_the_photographers_own() {
         red_curve: c.to_vec(),
         ..Default::default()
     };
-    // A warm patch whose ProPhoto red sits at the shared knot (127.8/255)
-    // and whose two moves stay inside the sRGB gamut: on a grey, 128→64 on
-    // ProPhoto's red is a cyan sRGB cannot hold (its red goes negative and
-    // clips, which moves every channel).
-    let patch = DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, image::Rgb([158, 77, 74])));
+    let patch = DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, image::Rgb([128; 3])));
     let shot = |r: &EditRecipe| {
         let p = develop_preview(&patch, r).to_rgb8()[(0, 0)];
-        (p[0], curve_channels(&[p[0], p[1], p[2]].map(|v| v as f32 / 255.0))[1])
+        (p[0], p[1])
     };
 
     let (bare_r, bare_g) = shot(&EditRecipe::default());
@@ -962,7 +956,7 @@ fn a_baked_per_channel_curve_reaches_the_pixels_under_the_photographers_own() {
     let (prof_r, prof_g) =
         shot(&EditRecipe { look: Some(baked(&darker)), ..Default::default() });
     assert!(prof_r < bare_r, "a baked 128→64 must darken red: {bare_r} → {prof_r}");
-    assert!((prof_g - bare_g).abs() < 2.0 / 255.0, "…and must leave green alone: {bare_g} → {prof_g}");
+    assert_eq!(prof_g, bare_g, "…and must leave green alone: {bare_g} → {prof_g}");
 
     // 2) The PHOTOGRAPHER's own curve, on its own, the other way.
     let (own_r, _) =
@@ -990,7 +984,7 @@ fn a_baked_per_channel_curve_reaches_the_pixels_under_the_photographers_own() {
         "the photographer's curve reads the profile's OUTPUT, so the pair lands \
          BELOW bare: darker={prof_r}, composed={both_r}, bare={bare_r}, lighter={own_r}"
     );
-    assert!((both_g - bare_g).abs() < 2.0 / 255.0, "green is still untouched: {bare_g} → {both_g}");
+    assert_eq!(both_g, bare_g, "green is still untouched: {bare_g} → {both_g}");
 }
 
 #[test]

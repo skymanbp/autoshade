@@ -4436,10 +4436,12 @@ mod tests {
 
     /// The web door's fresh-open payload carries the photo's camera start
     /// (v1.17.0) — the same one the desktop open stamps
-    /// (`render::camera_start` at the fresh start's profile). Env-gated on the
-    /// calibration corpus and Camera Raw's install.
+    /// (`render::camera_start` at the fresh start's profile): none, since a
+    /// fresh open names no camera profile (the engine's own law,
+    /// `pipeline::fresh_canvas_start_with`), and the key is still present.
+    /// Env-gated on the calibration corpus and Camera Raw's install.
     ///
-    /// MUTATION: drop the key, or read it at no profile.
+    /// MUTATION: drop the key, or stamp a start the desktop open does not.
     #[test]
     fn the_fresh_open_payload_carries_the_photos_camera_start() {
         let Some(dir) = crate::config::live_env_os("AUTOSHADE_FIT_CALIBRATION_DIR").map(std::path::PathBuf::from)
@@ -4454,8 +4456,9 @@ mod tests {
         }
         let v: serde_json::Value = serde_json::from_str(&fresh_base_payload(&raw)).expect("the payload is JSON");
         let fresh = crate::pipeline::calibration_recipe(crate::pipeline::fresh_photo_calibration(&raw));
-        let want = serde_json::to_value(fresh.camera_start.expect("a fresh open stamps it")).expect("json");
-        assert_eq!(v["camera_start"], want);
+        assert!(!fresh.names_profile(), "a fresh open names no camera profile");
+        assert!(v.get("camera_start").is_some(), "the payload carries the key");
+        assert_eq!(v["camera_start"], serde_json::to_value(fresh.camera_start).expect("json"));
     }
 
     /// The A6 rule for DELIVERABLES, now that export and download share one

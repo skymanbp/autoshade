@@ -566,7 +566,7 @@ fn the_parametric_curve_moves_its_own_region_and_stays_monotone() {
         ],
         ..Default::default()
     };
-    let (p, c, lut) = (parametric_lut(&both).expect("moved"), curve_lut(&both.tone_curve), build_tone_lut(&both));
+    let (p, c, lut) = (parametric_lut(&both).expect("moved"), curve_lut_for(&both, &both.tone_curve), build_tone_lut(&both));
     let mut observable = 0.0f32;
     for x in [0.2f32, 0.3, 0.4, 0.5] {
         let want = sample_lut(&c, sample_lut(&p, x));
@@ -1098,7 +1098,8 @@ fn a_channel_curve_moves_only_its_own_prophoto_channel() {
     }
     let lut = curve_lut(&curve_pts(&[(0, 0), (128, 180), (255, 255)]));
     for (ch, name) in [(0usize, "red"), (2, "blue")] {
-        let mut r = EditRecipe::default();
+        // Camera Raw's law: a recipe that names a camera profile.
+        let mut r = EditRecipe { camera_profile: "Adobe Standard".into(), ..EditRecipe::default() };
         let pts = curve_pts(&[(0, 0), (128, 180), (255, 255)]);
         if ch == 0 {
             r.red_curve = pts;
@@ -1141,7 +1142,13 @@ fn a_channel_curve_moves_only_its_own_prophoto_channel() {
 #[test]
 fn the_channel_curves_run_after_the_mixer_and_saturation() {
     let (w, h) = (7usize, 1usize);
-    let mut base = EditRecipe { saturation: 50.0, vibrance: 30.0, ..EditRecipe::default() };
+    // Camera Raw's law (a named profile); the engine's runs them at 1b.
+    let mut base = EditRecipe {
+        camera_profile: "Adobe Standard".into(),
+        saturation: 50.0,
+        vibrance: 30.0,
+        ..EditRecipe::default()
+    };
     base.hsl.saturation[1] = 60.0;
     base.hsl.hue[5] = 40.0;
     let mut curved = base.clone();
@@ -1156,6 +1163,42 @@ fn the_channel_curves_run_after_the_mixer_and_saturation() {
     for (g, e) in got.iter().zip(&want) {
         for k in 0..3 {
             assert!((g[k] - e[k]).abs() < 1e-5, "{got:?} vs {want:?}");
+        }
+    }
+}
+
+/// The point-curve law follows the one switch, `SliderLaw::of`: a recipe that
+/// names no camera profile (every fresh develop) keeps the engine's own law —
+/// straight lines between the knots, each curve on the working space's own
+/// encoded channel, right after the tone stage and before Saturation — and
+/// one that names a profile takes Camera Raw's (spline, ProPhoto channels,
+/// after Saturation). The engine law is what every release before v1.17.0
+/// rendered, so an existing recipe keeps its look.
+///
+/// MUTATION: sample the engine law's curves with the spline, apply them in
+/// ProPhoto, or move them after Saturation; or ignore the profile.
+#[test]
+fn the_point_curve_law_follows_the_profile_switch() {
+    let pts = curve_pts(&[(0, 0), (128, 180), (255, 255)]);
+    let engine = EditRecipe { red_curve: pts.clone(), saturation: 40.0, ..EditRecipe::default() };
+    let named = EditRecipe { camera_profile: "Adobe Standard".into(), ..engine.clone() };
+    // The sampler: straight lines on the engine law, the spline on Camera Raw's.
+    let (le, lc) = (curve_lut_for(&engine, &pts), curve_lut_for(&named, &pts));
+    let x = 64.0f32 / 255.0;
+    assert!((sample_lut(&le, x) - 90.0 / 255.0).abs() < 1e-3, "engine: the chord at 64 ({})", sample_lut(&le, x));
+    assert!((sample_lut(&lc, x) - sample_lut(&le, x)).abs() > 0.01, "Camera Raw: the spline bows off the chord");
+    // The engine law: the working red alone, before Saturation.
+    let (w, h) = (7usize, 1usize);
+    let mut got = curve_probe_pixels();
+    apply_develop_anon(&mut got, w, h, &engine);
+    let mut want = curve_probe_pixels();
+    for px in &mut want {
+        px[0] = sample_lut(&le, px[0]);
+    }
+    apply_develop_anon(&mut want, w, h, &EditRecipe { saturation: 40.0, ..EditRecipe::default() });
+    for (g, e) in got.iter().zip(&want) {
+        for k in 0..3 {
+            assert!((g[k] - e[k]).abs() < 1e-5, "engine law: {got:?} vs {want:?}");
         }
     }
 }
