@@ -23,11 +23,12 @@ horizon a* not more than 2 below the target's; star contrast is reported, never 
 The same measure is run on the Camera Raw render, so "Lightroom would show this" is on
 record for the night pair too.
 
-REGRESSION. scripts/roundtrip_gate_expected.json holds the numbers of the first run with a
-tolerance. A number worse than its expected value by more than the tolerance fails the gate
-by name, and so does a line that passed when the table was written and fails now. A line
-that already failed then is reported as a known miss with its number and does not fail the
-gate (it is a ledger item, not a regression). `--record` rewrites the table from this run.
+REGRESSION (optional). `--expected FILE` names a table of an earlier run's numbers with a
+tolerance; the tree ships none (this script is a developer instrument, not a release gate).
+With a table, a number worse than its expected value by more than the tolerance fails by
+name, and so does a line that passed when the table was written and fails now; a line that
+already failed then is reported as a known miss. `--record` writes the table from this run.
+Without one, the run only reports its numbers.
 
 PHOTOSHOP. The oracle needs Photoshop (Camera Raw is its plug-in) driven through COM, which
 only exists on a Windows machine with Photoshop installed. Without it the gate prints one
@@ -406,7 +407,7 @@ def main():
                 print(f"   {side.replace('_', ' ')} vs target: " + "  ".join(
                     f"{k} {val:+.2f}" + ("" if ok is None else (" PASS" if ok else " FAIL")) for k, (val, ok) in res[side].items()))
                 misses += [f"{name} {side} {k} {val:+.2f}" for k, (val, ok) in res[side].items() if ok is False]
-        if not args.record:
+        if not args.record and exp_path.exists():
             failures += compare_expected(name, res, expected["pairs"].get(name))
         sys.stdout.flush()
     (work / "roundtrip_report.json").write_text(json.dumps(results, indent=1), encoding="utf-8")

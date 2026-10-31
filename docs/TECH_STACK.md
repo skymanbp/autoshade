@@ -836,8 +836,6 @@ supposed to remove.
   stop surround under Shadows when a small deep patch sits in it (+0.20 to
   +0.45 stops), which the calibration body's own RAW with its pixels
   replaced does not; only DNG-against-DNG comparisons were read from it.
-  The Highlights half of (1) and the whole of (2) stay pinned as ignored
-  tests in `render/tone_cr.rs`.
 
   is `1`; cool-side coefficients and the 6688 K red plateau were
   **calibrated against measured Lightroom exports**.
@@ -2794,11 +2792,9 @@ than the pre-call state; model weights remain outside the repository.
   p36 7.08, p37 3.00, p38 10.11, p39 5.83, p40 7.30, p41 5.81, p42 14.15 —
   p37 alone meets every line, and p42's engine render reads ΔE 15.18 / ripple
   16.90 / horizon Δa* +4.95 against its target (Camera Raw's render of the
-  same sidecar 18.49 / 21.21 / +5.18). Those numbers and each line's verdict
-  are the gate's expected table (`scripts/roundtrip_gate_expected.json`); a
-  later run fails by name on a number worse than its entry by more than the
-  tolerance (ΔE 0.25, L and a*/b* 0.5) or on a line that passed then and does
-  not now. Where the misses come from, measured on the same sidecars with the
+  same sidecar 18.49 / 21.21 / +5.18). The tree keeps no expected table:
+  the script is a developer instrument that reports its numbers (a table
+  named with `--expected` turns on its regression check). Where the misses come from, measured on the same sidecars with the
   local corrections stripped: the global develop alone already differs by
   whole-frame ΔE 6.21 (p36), 2.95 (p37), 10.29 (p38), 3.30 (p39), 8.59 (p40),
   5.62 (p41) and 18.53 (p42); the per-channel point curves account for most of

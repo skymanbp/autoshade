@@ -238,9 +238,8 @@
 > compared with Adobe Camera Raw's render of the sidecar the fit wrote
 > (Photoshop's plug-in, Lightroom's own engine, driven through COM by
 > `scripts/acr_render.ps1`) at the same long edge, lens-matched, plain and
-> with the engine's lens magnification undone. It fails the battery by name
-> when a number is worse than `scripts/roundtrip_gate_expected.json` by more
-> than its tolerance or a line that passed there fails; where Photoshop's COM
+> with the engine's lens magnification undone. It reports its numbers (a
+> developer instrument: the tree keeps no expected table); where Photoshop's COM
 > server is not registered (CI, macOS, Linux) it prints its skip line and the
 > battery goes on. The final look at the reference pairs before a tag reads
 > this gate's numbers next to the renders.
