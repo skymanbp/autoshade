@@ -8496,105 +8496,78 @@ fn recipe_fnv(recipe: &EditRecipe) -> u64 {
     json.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
 }
 
-/// The hand-off ships. [`cooled_ramps`]`(0)` asks for a 3500 K white
-/// balance against the 5500 K anchor, out of the default budget, so the
-/// white-balance stage leaves as-shot and the three channel curves are asked
-/// for the whole cast — and fan a hue class past the limit, so before the
-/// hand-off the projection shrank them. The hand-off walks the white balance
-/// toward the cast inside the budget and ships the curves re-fitted on it at
-/// full strength. Measured 2026-10-23: 5500 K / 0 → 3900 K / +40.6, curves
-/// re-fitted reading +3.8°, cells 1.000 converged / 0.000 diverged.
+/// A white-balance cast does not fan, so it never enters the hand-off.
+/// [`hue_ramps`] against itself under 3500 K: at every white balance the
+/// walk could reach (5500 → 3700 K) the channel curves fitted for what is
+/// left move every hue class alike and fan under [`FAN_DEG`], and end to end
+/// the fit enters no hand-off. Until 2026-10-30 the curves' knots sat at
+/// fixed inputs and pinned each channel's empty low end to the target's
+/// quantile; in the point-curve law's channels that lifted the dark pixels
+/// off the map, the same casts fanned 21–38° (37.1° at 5500 K against a
+/// target 4.4° from the source), and each was handed to the white balance
+/// for a fan the target never had.
+///
+/// MUTATION: put the knots back at inputs 0, ¼, ½, ¾, 1 — the 5500 K curves
+/// fan past the limit.
 #[test]
-fn a_fan_the_white_balance_can_take_back_is_handed_to_it() {
-    // RED on v1.17.0 by ruling, kept unweakened: on the channel-curve law the
-    // re-fitted curves fan 21–38° at every reachable white balance
-    // (5500 → 3500 K) and the WB stage refuses nothing (`wb_step_refusals`
-    // 0), so the hand-off never ships. The test images are redesigned by
-    // the cast→WB hand-off's owner (item 32) at merge.
+fn a_white_balance_cast_does_not_fan_and_never_enters_the_hand_off() {
+    use super::solve::route;
     use crate::rationale::keys;
-    let rep = fit_recipe(&hue_ramps(), &cooled_ramps(0));
-    let note = rep
-        .notes
-        .iter()
-        .find(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB)
-        .unwrap_or_else(|| panic!("the cast must be handed to the white balance: {}", rep.recipe.rationale));
-    let arg = |name: &str| -> f32 {
-        note.args
-            .iter()
-            .find(|(k, _)| *k == name)
-            .and_then(|(_, v)| v.parse().ok())
-            .unwrap_or_else(|| panic!("the note carries {name}"))
-    };
-    // The white balance moved, toward the cast, and the note says from where
-    // to where — the shipped Kelvin, not a probe's.
-    let k = rep.recipe.temperature_k.expect("the hand-off ships a white balance");
-    assert_eq!(arg("k_before"), 5500.0, "it starts from the as-shot anchor");
-    assert_eq!(arg("k_after"), k, "the note names the Kelvin that shipped");
-    assert_eq!(arg("tint_after"), rep.recipe.tint, "…and the tint");
-    assert!(k < 5500.0, "a 3500 K target asks for a cooler white balance ({k} K)");
-    // The conviction it answered, and the reading that let it ship.
-    assert!(arg("fan_before") >= FAN_DEG, "the as-fitted fan convicted ({})", arg("fan_before"));
-    assert!(arg("fan_after").abs() < FAN_DEG, "the re-fitted curves clear the limit ({})", arg("fan_after"));
-    assert_eq!(arg("limit"), FAN_DEG);
-    // `HandOffFacts.share` is the CONVICTED class's share of the census:
-    // region-sized by the fan gate's own floor, and a share.
-    let share = arg("share");
-    assert!((FAN_SHARE..=1.0).contains(&share), "the class share is a fan-gate class ({share})");
-    // The cell verdict it was admitted on is a vouch.
-    assert!(arg("converged") >= 0.70 && arg("diverged") <= 0.10 && arg("aligned") >= 0.70);
-    // Curves at t = 1: they ship as an ADMITTED cast, never a projected one.
-    assert!(
-        !rep.recipe.red_curve.is_empty() || !rep.recipe.blue_curve.is_empty(),
-        "the re-fitted curves ship: {}",
-        rep.recipe.rationale
-    );
-    assert!(
-        !rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_PROJECTED),
-        "a handed cast is not also projected: {}",
-        rep.recipe.rationale
-    );
-    assert!(
-        rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED),
-        "the re-fitted curves go through the ordinary admission: {}",
-        rep.recipe.rationale
-    );
-    // 3900 K sits inside the domain, so no bound sentence.
-    assert!(!rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_WB_SEARCH_BOUND));
-    assert!(rep.err_after < rep.err_before, "{} -> {}", rep.err_before, rep.err_after);
+    let src = hue_ramps();
+    let tgt = cooled_ramps(0);
+    let tp = pixels_of(&tgt);
+    for k in [5500.0f32, 4700.0, 4200.0, 3900.0, 3700.0] {
+        let mut r = EditRecipe { temperature_k: Some(k), ..Default::default() };
+        let cur = pixels_of(&render::develop_preview(&src, &r));
+        let ev = evidence_model(&cur, &tp);
+        let ones = vec![1.0f32; cur.len()];
+        r.red_curve = residual_channel_curve_weighted(&cur, &tp, 0, &ones, &ones, render::SliderLaw::of(&r));
+        r.green_curve = residual_channel_curve_weighted(&cur, &tp, 1, &ones, &ones, render::SliderLaw::of(&r));
+        r.blue_curve = residual_channel_curve_weighted(&cur, &tp, 2, &ones, &ones, render::SliderLaw::of(&r));
+        let with_px = pixels_of(&render::develop_preview(&src, &r));
+        let fan = hue_fan_weighted(&cur, &with_px, &ev).map_or(0.0, |f| f.1);
+        assert!(fan < FAN_DEG, "{k} K: a white-balance cast fans {fan:.1}° (limit {FAN_DEG}°)");
+    }
+    route::take();
+    let rep = fit_recipe(&src, &tgt);
+    let seen = route::take();
+    assert_eq!(seen.hand_off_entered, 0, "no fan, no hand-off: {seen:?} {}", rep.recipe.rationale);
+    assert!(!rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB));
 }
 
-/// The same frame with eleven rows of its grey band warmed instead. Until
-/// 2026-10-29 this pair pinned the PROJECTION: the walk's extent was found
-/// by doubling to a Kelvin edge alone, so its 24 even steps were coarse and
-/// the two in-budget white balances it judged were refused by the target's
-/// cells (0.111 and 0.122 of the frame moved away, the line is 0.10). With the
-/// extent ending where the walk leaves the strength budget
-/// (`search_cast_hand_off`), the steps are fine enough to reach a nearer white
-/// balance the cells vouch, and the hand-off ships it: 5500 K / 0 →
-/// 4800 K / +15.5, fan 15.4° → +4.5°, cells 0.825 converged / 0.087 diverged,
-/// look error 0.0156 → 0.0089 (measured 2026-10-29).
+/// A cast that is not a white-balance move does fan, and is walked: the
+/// split ramps — the darker half of [`hue_ramps`] under 6500 K, the brighter
+/// half under 3000 K — sort every hue class by luminance by construction, so
+/// the fitted curves fan past [`FAN_DEG`] and the fan gate hands the cast to
+/// the white-balance walk. No single white balance takes a luminance split
+/// back, so nothing ships through it, and the fit is no worse for the walk.
+/// Until 2026-10-30 the walk was entered on a white-balance cast
+/// ([`cooled_ramps`]) whose fan came from the cast curves' fixed knots, not
+/// from its target; see
+/// [`a_white_balance_cast_does_not_fan_and_never_enters_the_hand_off`].
 #[test]
-fn the_hand_off_walk_reaches_the_nearer_white_balance_the_cells_vouch() {
-    // RED on v1.17.0 by ruling, kept unweakened: on the channel-curve law the
-    // re-fitted curves fan 21–38° at every reachable white balance
-    // (5500 → 3500 K) and the WB stage refuses nothing (`wb_step_refusals`
-    // 0), so the hand-off never ships. The test images are redesigned by
-    // the cast→WB hand-off's owner (item 32) at merge.
+fn the_hand_off_walk_is_entered_by_a_cast_that_really_fans() {
+    use super::solve::route;
     use crate::rationale::keys;
-    let rep = fit_recipe(&hue_ramps(), &cooled_ramps(11));
-    let note = rep
-        .notes
-        .iter()
-        .find(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB)
-        .unwrap_or_else(|| panic!("the hand-off ships: {}", rep.recipe.rationale));
-    let arg = |name: &str| -> f32 {
-        note.args.iter().find(|(k, _)| *k == name).map(|(_, v)| v.parse().expect("a number")).expect(name)
+    use crate::recipe::GradeStrength;
+    let src = hue_ramps();
+    let shade = |k: f32| {
+        render::develop_preview(&src, &EditRecipe { temperature_k: Some(k), ..Default::default() }).to_rgb8()
     };
-    assert!(arg("fan_before") >= FAN_DEG && arg("fan_after").abs() < FAN_DEG);
-    assert!(arg("diverged") <= 0.10 && arg("converged") >= 0.70, "the cells vouch it");
-    assert_eq!((rep.recipe.temperature_k, rep.recipe.tint), (Some(4800.0), 15.5));
-    assert!(!rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_PROJECTED));
-    assert!(rep.err_after < rep.err_before, "{} -> {}", rep.err_before, rep.err_after);
+    let (dark, bright) = (shade(6500.0), shade(3000.0));
+    let tgt = DynamicImage::ImageRgb8(RgbImage::from_fn(192, 160, |x, y| {
+        if x < 96 { *dark.get_pixel(x, y) } else { *bright.get_pixel(x, y) }
+    }));
+    route::take();
+    let rep = fit_recipe_with(&src, &tgt, FitOptions { strength: GradeStrength::new(0.65), provider: None });
+    let seen = route::take();
+    assert!(seen.hand_off_entered >= 1, "a real fan enters the walk: {seen:?}");
+    assert!(
+        !rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB),
+        "no white balance takes a luminance split back: {}",
+        rep.recipe.rationale
+    );
+    assert!(rep.err_after <= rep.err_before, "{} -> {}", rep.err_before, rep.err_after);
 }
 
 /// A cast the fan gate never convicts never reaches the hand-off: the haze
@@ -8934,54 +8907,53 @@ fn the_mixer_against_its_absence_stops_at_its_bound_when_nothing_descends() {
 }
 
 
-// --- the hand-off's white-balance gates, reached from the public entry ---
+// --- the hand-off's white-balance gates, read by the walk -----------------
 
-/// Two bands, grey and orange, each a luminance ramp along x.
-fn grey_and_orange_ramps() -> DynamicImage {
-    let (w, h) = (192u32, 160u32);
-    DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
-        let l = 0.08 + 0.84 * x as f32 / (w - 1) as f32;
-        let c = if y < h / 2 { [0.9, 0.9, 0.9] } else { [1.0, 0.6, 0.25] };
-        image::Rgb(c.map(|c: f32| ((l * c).clamp(0.0, 1.0) * 255.0).round() as u8))
-    }))
-}
-
-/// [`grey_and_orange_ramps`] against itself under a +40 tint, above the
-/// default strength: the white-balance stage leaves the light as shot, the
-/// channel curves are asked for the whole cast and fan, and the cast→WB
-/// hand-off walks white balances the strength budget admits — and the
-/// white-balance stage's own two gates, read on each candidate's step by
-/// `hand_off_wb_step_refused`, refuse some of them. Nothing ships through
-/// the hand-off. Measured 2026-10-26: 6 candidates refused at 0.9.
+/// The walk asks the white-balance stage's own gates of every candidate it
+/// judges: the neutral-and-blue frame of
+/// [`a_hand_off_white_balance_the_stage_would_shrink_is_refused_above_default`],
+/// walked from as shot toward the warm white balance its stage refuses, at
+/// strength 1.0. The candidates the gates refuse are not admitted. Unit level
+/// since 2026-10-30: the end-to-end fixture (grey and orange ramps under a
+/// +40 tint) entered the walk only because the cast curves' fixed knots made
+/// a white-balance cast fan; with the knots on the source's quantiles no
+/// white-balance cast reaches the walk, and the cast that does
+/// ([`the_hand_off_walk_is_entered_by_a_cast_that_really_fans`]) asks for no
+/// white balance the gates refuse.
+///
+/// MUTATION: make `hand_off_wb_step_refused` answer false — no candidate is
+/// refused.
 #[test]
-fn a_hand_off_candidate_the_stage_gates_refuse_is_refused_from_the_public_entry() {
-    // RED on v1.17.0 by ruling, kept unweakened: on the channel-curve law the
-    // re-fitted curves fan 21–38° at every reachable white balance
-    // (5500 → 3500 K) and the WB stage refuses nothing (`wb_step_refusals`
-    // 0), so the hand-off never ships. The test images are redesigned by
-    // the cast→WB hand-off's owner (item 32) at merge.
-    use super::solve::route;
+fn the_hand_off_walk_meets_white_balances_the_stage_gates_refuse() {
+    use super::solve::hand_off_wb_step_refused;
     use crate::recipe::GradeStrength;
-    use crate::rationale::keys;
-    let src = grey_and_orange_ramps();
-    let target = render::develop_preview(
-        &src,
-        &EditRecipe { temperature_k: Some(5500.0), tint: 40.0, ..Default::default() },
-    );
-    route::take();
-    let rep = fit_recipe_with(
-        &src,
-        &target,
-        FitOptions { strength: GradeStrength::new(0.9), provider: None },
-    );
-    let seen = route::take();
-    assert!(seen.hand_off_entered >= 1, "premise: the hand-off is entered: {seen:?}");
-    assert!(seen.wb_step_refusals >= 1, "the stage's gates refuse a candidate: {seen:?}");
-    assert!(
-        !rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB),
-        "nothing ships through the hand-off: {}",
-        rep.recipe.rationale
-    );
+    let (w, h) = (96u32, 64u32);
+    let src = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+        let l = 0.10 + 0.80 * x as f32 / (w - 1) as f32;
+        let p = if y < h / 2 { [l, l, l] } else { [l * 0.3, l * 0.55, l] };
+        image::Rgb(p.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8))
+    }));
+    let target = render::develop_preview(&src, &EditRecipe { temperature_k: Some(4200.0), ..Default::default() });
+    let wb_stage = EditRecipe::default();
+    let before_wb = pixels_of(&render::develop_preview(&src, &wb_stage));
+    let tp = pixels_of(&target);
+    let evidence = evidence_model_for(&before_wb, &tp, w, h);
+    let strong = GradeStrength::new(1.0);
+    let budget = FitBudget::for_strength(strong);
+    let law = render::WbLaw::of(&wb_stage);
+    let from = law.as_shot();
+    let (start, warm) = (law.log_gains(from), law.log_gains((16000.0, 0.0)));
+    let direction: [f32; 3] = std::array::from_fn(|c| (warm[c] - start[c]) / 4.0);
+    let (mut judged, mut refused) = (0u32, 0u32);
+    let handed = search_cast_hand_off(law, from, direction, 1.0, |_| true, |wb| {
+        judged += 1;
+        if hand_off_wb_step_refused(&src, &wb_stage, wb, (&before_wb, &tp, &evidence), budget, strong) {
+            refused += 1;
+        }
+        None
+    });
+    assert!(handed.is_none());
+    assert!(refused >= 1, "the stage's gates refuse a warm candidate the walk judges ({refused} of {judged})");
 }
 
 /// A camera-profile base (Camera Raw's law, as shot 5950 K / +13).

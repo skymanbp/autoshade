@@ -177,7 +177,8 @@ fn an_ai_mask_round_trips_back_into_the_sidecar() {
 /// showed came from OUR render, never Adobe's raster, which is exactly
 /// what `MaskLossReason::AiMaskRecomputed` says — and it REPLACES the
 /// `Bitmap` loss rather than joining it, because nothing was left out.
-/// Recolour gains remain engine-only and keep their own loss.
+/// Recolour gains ride out on the mask's Temp/Tint; only gains past that
+/// reach keep their own loss.
 ///
 /// MUTATION-LINED: put `sky_attachment`/`land_attachment` in `fit_zoned`
 /// back on `MaskGeometry::Bitmap` and the first half fails; drop the
@@ -238,13 +239,28 @@ fn a_reverse_fit_zone_round_trips_select_sky_role_and_inversion_home() {
         "nothing was left out of the sidecar, so there is no bitmap loss: {losses:?}"
     );
 
-    // Recolour gains are still engine-only and keep their own named loss —
-    // the carrier change did not quietly widen what XMP can hold.
-    let recoloured = mask_export_losses(&zone(false, Some([1.18, 0.96, 0.85])));
+    // Recolour gains the white balance reaches ride out as the mask's
+    // Temp/Tint (warm gains, a warm Temp) and lose nothing of their own;
+    // gains past its reach keep their named loss beside the AI one.
+    let warm = zone(false, Some([1.18, 0.96, 0.85]));
+    let (warm_out, recoloured) = recipe_to_xmp_with_losses(&warm);
+    let temp = warm_out
+        .split("crs:LocalTemperature=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .and_then(|v| v.parse::<f32>().ok())
+        .expect("a written Temp");
+    assert!(temp > 0.0, "warm gains, warm Temp: {temp}");
     assert!(
-        recoloured.iter().any(|l| l.reason == MaskLossReason::Recolour)
+        !recoloured.iter().any(|l| l.reason == MaskLossReason::Recolour)
             && recoloured.iter().any(|l| l.reason == MaskLossReason::AiMaskRecomputed),
-        "both sentences, neither swallowing the other: {recoloured:?}"
+        "carried, so only the AI sentence: {recoloured:?}"
+    );
+    let far = mask_export_losses(&zone(false, Some([3.0, 1.0, 0.2])));
+    assert!(
+        far.iter().any(|l| l.reason == MaskLossReason::Recolour)
+            && far.iter().any(|l| l.reason == MaskLossReason::AiMaskRecomputed),
+        "both sentences, neither swallowing the other: {far:?}"
     );
 
     // THE ROUND TRIP, through this app's own reader: the writer must emit

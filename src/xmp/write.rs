@@ -224,12 +224,22 @@ crs:MaskBlendMode=\"{}\" crs:MaskInverted=\"{}\" crs:MaskSyncID=\"{seed}\" crs:M
                 losses.push(MaskLoss { name: name.clone(), reason });
             }
         }
-        // Neutral gains change nothing, so they are no loss — the same
-        // is-it-actually-doing-anything test `render::engine_active` applies
-        // (and what `EditRecipe::clamp` collapses to `None` anyway).
-        if m.color_gains.is_some_and(|g| g != [1.0, 1.0, 1.0]) {
+        // Colour gains have no Lightroom key; the mask's Temp and Tint carry
+        // them: the pair (and an Exposure offset) whose render through the
+        // develop, Camera Raw's measured mask white law included, comes
+        // nearest to the gains on a strip of greys (`render::gains_as_white`). Neutral gains (`None` there) leave
+        // the mask's own Temp, Tint and Exposure as they are. A projection
+        // that sits at the end of Temp's or Tint's range is a recolour the
+        // white balance cannot reach: the sidecar carries the nearest one and
+        // the loss is named.
+        let white = crate::render::gains_as_white(r, m);
+        if white.as_ref().is_some_and(|w| w.clamped) {
             losses.push(MaskLoss { name: name.clone(), reason: MaskLossReason::Recolour });
         }
+        let (temp, tint, exposure_ev) = match &white {
+            Some(w) => (w.temp, w.tint, m.exposure_ev + w.exposure_ev),
+            None => (m.temperature / 100.0, m.tint / 100.0, m.exposure_ev),
+        };
         // R25 P6. Position is Lightroom's own and verified on two of the
         // user's sidecars: AFTER the attribute block closes at
         // `crs:LocalCurveRefineSaturation`, BEFORE `<crs:CorrectionMasks>`.
@@ -297,7 +307,7 @@ crs:MaskBlendMode=\"{}\" crs:MaskInverted=\"{}\" crs:MaskSyncID=\"{seed}\" crs:M
             // the strength /100 like every other 0..1 local key.
             thue = local_fmt(m.toning_hue),
             tsat = local_fmt(m.toning_amount / 100.0),
-            exp = local_fmt(m.exposure_ev / 4.0),
+            exp = local_fmt(exposure_ev / 4.0),
             con = local_fmt(m.contrast / 100.0),
             hi = local_fmt(m.highlights / 100.0),
             sh = local_fmt(m.shadows / 100.0),
@@ -305,8 +315,8 @@ crs:MaskBlendMode=\"{}\" crs:MaskInverted=\"{}\" crs:MaskSyncID=\"{seed}\" crs:M
             bl = local_fmt(m.blacks / 100.0),
             cl = local_fmt(m.clarity / 100.0),
             dh = local_fmt(m.dehaze / 100.0),
-            temp = local_fmt(m.temperature / 100.0),
-            tint = local_fmt(m.tint / 100.0),
+            temp = local_fmt(temp),
+            tint = local_fmt(tint),
             tex = local_fmt(m.texture / 100.0),
             nr = local_fmt(m.noise_reduction / 100.0),
             base_li = base_li,

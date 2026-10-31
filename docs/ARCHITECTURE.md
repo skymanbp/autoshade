@@ -4171,7 +4171,22 @@ Bitmap components are omitted, and Linear/Radial/Brush/AI components export
 their ordered Add/Subtract/Intersect composition. A rotated radial
 exports unrotated **when and only when the document declares no frame** (v0.32.0
 narrowed it from every rotated radial; the note says by how many degrees and
-why), and per-channel recolour gains do not travel. The verdicts are
+why). Per-channel recolour gains have no `crs:` key; the writer carries them
+on the mask's `LocalTemperature`/`LocalTint` (v1.17.0,
+`render::gains_as_white`): the Temp, Tint and Exposure offset whose render
+comes nearest, in Oklab, to the mask as the app renders it, read on the
+develop's own output of the recipe for a strip of input greys under the mask
+at full weight — so the move goes through Camera Raw's measured mask white
+law (`render/mask_cr.rs`) and every global stage after it, while the gains
+act in the mask stage. A coarse grid over the law's whole Temp/Tint range
+seeds a damped Gauss-Newton on all three; about 0.1–0.2 s a mask. Gains
+whose best Temp or Tint sits at the end of its range are the one remaining
+`Recolour` loss. On a re-open the payload reconciles the three keys as ONE
+value (`payload::recolour_carrier`): handed back as written, the exact gains
+and the mask's own Temp, Tint and Exposure are restored; moved (a Lightroom
+edit, or a build whose develop projects the gains differently), the
+document's three stand and the gains go, so the recolour is never applied
+twice. The verdicts are
 the writer's own, produced by the ONE loop that emits the mask block (so the claim
 cannot drift from the file) and handed back with the document itself —
 `xmp::recipe_to_xmp_with_losses` / `MergeOutcome::losses`, one pass per save;
@@ -5191,8 +5206,8 @@ did not change for it: it counts `crs:` control sets, and this adds no key. The 
 fixture requires accepted bands to replace the single correction and improve
 its measured deltaE; a uniform recolour earns no split. The terminal colour field is unchanged and receives the accepted mask
 stack, so it fits only the remainder. Native geometry adds no geometry loss;
-AI recomputation, local recolour gains and any remaining field retain their
-own named disclosures.
+AI recomputation, local recolour gains past Temp/Tint's reach and any
+remaining field retain their own named disclosures.
 
 **The region's cells vouch what its pixels cannot** (R34, v1.3.0). The
 doctrine R34 replaces is one sentence: *`D >= 0.35` in this region, therefore
@@ -6000,11 +6015,12 @@ finished at a mean ΔE of 8.29 against the target while 40000 K, inside the
 band and pulling least (0.24 against 0.43), finished at 7.52. The winner
 ships only when it beats the frame without curves by more than `FIT_QUANT`,
 the projection's own bar; otherwise the projection runs exactly as before,
-on an untouched recipe. (The synthetic pair that pinned that path by value
-until 2026-10-29 had been refused only at the coarse steps; the finer walk
-reaches a white balance its cells vouch, and
-`the_hand_off_walk_reaches_the_nearer_white_balance_the_cells_vouch` pins
-that.) A shipped
+on an untouched recipe. (The synthetic white-balance casts that pinned
+that path until 2026-10-30 fanned only because the cast curves' knots sat
+at fixed inputs and pinned each channel's empty low end to the target's
+quantile; with the knots on the source's own quantiles a white-balance cast
+does not fan and never enters the hand-off, and the walk is pinned on a cast
+that does fan, a luminance split no single white balance takes back.) A shipped
 hand-off says so (`FIT_NOTE_CAST_HANDED_TO_WB`: Kelvin and tint before and
 after, the fan before and after, the cells' shares) and, on the Kelvin
 domain's edge above the default strength, adds the white-balance stage's own

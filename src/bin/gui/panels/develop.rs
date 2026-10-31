@@ -3156,8 +3156,9 @@ impl AutoShadeApp {
                     tr(lang, "The hue (0–360°) 「Color tint」 pushes toward, on Lightroom's own wheel. Does nothing until 「Color tint」 is above 0."),
                 );
                 // Reverse-fit recolour gains: per-channel linear gains no
-                // classic-ACR key can express (recipe.rs `color_gains`), so
-                // they render in-app and vanish from the sidecar. Not a
+                // classic-ACR key can express (recipe.rs `color_gains`); the
+                // sidecar carries them as the mask's Temp/Tint through Camera
+                // Raw's mask white law (`render::gains_as_white`). Not a
                 // slider — a disclosure plus the one action that makes sense
                 // on a value the user never typed.
                 if m.color_gains.is_some() {
@@ -3166,7 +3167,7 @@ impl AutoShadeApp {
                         // it wraps under the note when the note is long (2026-09-27).
                         let cell = columns(ui, 2);
                         ui.label(
-                            egui::RichText::new(tr(lang, "carries reverse-fit recolour (not exported to XMP)"))
+                            egui::RichText::new(tr(lang, "carries reverse-fit recolour (written to XMP as Temp/Tint)"))
                                 .weak()
                                 .small(),
                         );

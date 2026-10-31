@@ -297,10 +297,11 @@ fn the_writer_names_bitmap_components_and_exports_native_components() {
                 name: "combo".into(),
                 ..Default::default()
             },
-            // Emitted as an UNROTATED ellipse, without the recolour.
+            // Emitted as an UNROTATED ellipse, its recolour past what the
+            // mask's Temp/Tint can carry (`render::gains_as_white`).
             LocalAdjustment {
                 mask: radial(-12.0),
-                color_gains: Some([1.2, 0.95, 0.7]),
+                color_gains: Some([3.0, 1.0, 0.2]),
                 name: "gold".into(),
                 ..Default::default()
             },
@@ -344,7 +345,7 @@ fn the_writer_names_bitmap_components_and_exports_native_components() {
         "1 muted mask(s) skipped (parked)",
         "1 bitmap component(s) omitted (combo)",
         "1 radial rotation dropped (gold)",
-        "1 recolour gains dropped (gold)",
+        "1 recolour gains past the reach of Temp/Tint (gold)",
     ] {
         assert!(line.contains(expect), "the line must state {expect:?}: {line}");
     }
