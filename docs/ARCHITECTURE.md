@@ -869,8 +869,7 @@
 >   interior grey band — `contrast: -100` at `+1.5 EV` flattened 197 inputs
 >   at code 56304. Knot authority now follows the base curve's own local
 >   separation (exactly 1 at ev = 0, so those renders are bit-for-bit
->   unchanged); a slider aimed at a clipped region yields honest clipping,
->   Lightroom's own semantics.
+>   unchanged); a slider aimed at a clipped region yields honest clipping.
 >   Measured on the 18-recipe × 15-exposure grid, counting only INTERIOR
 >   plateaus (a run at 0 or 65535 is clipping, which a strong slider on a
 >   bright frame is meant to produce): v0.19.0 shipped 13 of 270 cells over
@@ -2179,21 +2178,20 @@ with channel curves and no composite one now writes the identity
 **The Effects panel renders since v1.5.0** (`render/finish.rs`), for the same
 revoked policy as the Detail panel below — and for a second reason of its own:
 its two operators are *post-crop*, and until v1.5.0 this engine had no stage
-after the crop at all. Both are first-principles approximations of unpublished
-Adobe operators, and every constant is named for the kit ladder that will
-replace it (`PCV-*`, `GRAIN-*`).
+after the crop at all. Both are AutoShade's own first-principles
+operators, every constant named (`PCV-*`, `GRAIN-*`).
 
 - **The post-crop vignette** is an exposure-domain gain on a contour centred on
   the CROP: Midpoint places the falloff between 0.40 and 1.00 of the way to the
   crop's corner, Feather sets its half-width, Roundness runs from a rounded
   rectangle (superellipse exponent 6 at −100) through the inscribed ellipse (2)
   to a circle inscribed in the short edge (+100), and Amount is ±4 stops where
-  the falloff completes. The three **Styles** differ in exactly the way Adobe's
-  own descriptions differ: Highlight Priority computes the Highlights recovery
+  the falloff completes. The three **Styles** differ in
+  how they spare highlights: Highlight Priority computes the Highlights recovery
   per channel (which is what shifts colour), Colour Priority computes it from
   the pixel's luminance (which cannot), and Paint Overlay is a flat mix toward
   black or white in the encoded domain with no recovery at all. Highlights acts
-  only where the vignette darkens, as Adobe states. The contour is sampled at
+  only where the vignette darkens. The contour is sampled at
   the pixel CENTRE, like every other spatial read in the engine
   (`MASK_SAMPLE_CENTRE`); until 2026-09-24 it was sampled at the pixel corner,
   half a pixel up-left of the rectangle it belongs to.
@@ -2207,7 +2205,7 @@ replace it (`PCV-*`, `GRAIN-*`).
 
 Two R25 additions ride existing stages rather than adding one. **Texture**
 (`render::texture_pass`) is a small-radius detail operator placed between
-clarity and saturation for ACR's Basic-panel order and called by the global
+clarity and saturation in the Basic-panel order and called by the global
 stage and the mask arm alike — so 「Texture +30」 means the same structure
 globally and inside a mask. **Its two halves are not the same operator.**
 Positive is the plain `unsharp_luma` of clarity at 0.005·min(w,h) (floor 2),
@@ -2295,8 +2293,8 @@ amplifies what the smoothers were asked to remove:
   exactly: a rebuilt pixel outside `[0, 1]` has its colour difference scaled
   toward its luma rather than each channel clamped, so a pure black stays 0.
 
-Every radius is in **film pixels** — Lightroom states them at full resolution
-— and converts through `render::FilmScale`, the full-resolution short edge over
+Every radius is in **film pixels** — the sidecar states them at full
+resolution — and converts through `render::FilmScale`, the full-resolution short edge over
 the working raster's. An export develops at scale 1; the GUI canvas, its
 Range-mask references, the fill's picture of a card and the web preview pass
 the source's own edge (`decode::film_short_edge`), so they show what the export
@@ -2307,9 +2305,8 @@ compare like with like. A σ below 0.6 raster px runs at 0.6 with its amount
 faded by the ratio of the two transfers at Nyquist, and the noise thresholds
 divide by the film factor squared, because averaging k × k film pixels already
 cut the noise variance by k². The noise-reduction constants are named `Ramp`s
-over their sliders: first-principles values until the Lightroom kit's `NR-*`
-and `CNR-*` ladders pin them; the sharpening ladder (`SH-*`) was exported and
-fitted on 2026-09-27, as the bullet above records.
+over their sliders: AutoShade's own first-principles values; the sharpening law was fitted on
+purpose-shot frames on 2026-09-27, as the bullet above records.
 
 Eleven controls have a non-zero Lightroom default — the Sharpening amount
 (v1.6.0), Radius 1.0, Sharpen Detail 25, the three noise-reduction companions
@@ -2356,13 +2353,13 @@ two consecutive abscissae lie half the two regions' widths apart, so no reach up
 to ½ can reorder the control values, and a B-spline whose control values never
 decrease cannot decrease. `build_tone_lut` composes it between the Basic-panel
 model and the point curve (sliders → parametric → point curve, all over the
-camera base curve), the order of Lightroom's own panel. The splits are clamped
+camera base curve), the order the Tone Curve panel lists them in. The splits are clamped
 field by field to their own bands (10–70, 20–80, 30–90) and ordered only where
 they are used (`EditRecipe::parametric_splits`, a 10-point gap), so a
 hand-edited file's crossed splits cannot hand the curve an empty region. The
 seven fields serialise only when moved, so an untouched recipe's bytes and hash
 are unchanged; the writer emits the block all or none, Lightroom's shape. The
-reach is first-principles until the Lightroom kit's `PARAM-*` exports pin it.
+reach is AutoShade's own first-principles choice.
 
 ### Transform (v1.5.0 F6) — `render/perspective.rs`
 
@@ -2387,8 +2384,8 @@ operator's library (21 sidecars, 13 with a mode actually selected):
   selected matrices and mapping the destination corners back, the worst
   excursion outside the source frame is **+0.000000**, 13 of 13.
 
-So a Lightroom photograph renders Adobe's own numbers to the last digit and
-needs no fill of ours. `render/perspective/upright.rs` is this engine's own
+So a photograph whose sidecar stores an Upright matrix renders that matrix
+digit for digit and needs no fill of ours. `render/perspective/upright.rs` is this engine's own
 solver, reached only by this app's dropdown on a photograph Lightroom never
 solved: no Hough transform, because every edge pixel already states a line
 (`l = (gx, gy, −(gx·x + gy·y))`) and the family's vanishing point is the
@@ -2711,8 +2708,8 @@ for a rendering transform. The shoulder saturated and stopped: at an input of
 0.90 the old model could not get past 0.104 below the diagonal, whatever
 headroom the sidecar stated; the Reinhard shoulder has no such ceiling.
 
-`hdr_edit` is a HARD GATE on all seven, exactly as in Lightroom, where the
-panel exists only in HDR mode. A sidecar can easily carry `crs:SDRBrightness`
+`hdr_edit` is a HARD GATE on all seven: the sidecar's SDR controls describe
+an HDR edit and nothing else. A sidecar can easily carry `crs:SDRBrightness`
 from an HDR session the photographer later left; honouring it on an SDR
 photograph would re-tone a picture whose owner can no longer see the control
 that did it. The values are still stored, still round-tripped, and still light
@@ -2794,9 +2791,9 @@ of a recipe that names no profile, the photo's camera base curve included. A
 profile with no tables and no `ForwardMatrix` builds no stage
 (`render::profile::tests::a_profile_with_no_tables_is_not_a_stage_whatever_tone_it_states`).
 
-**The colour matrix is Adobe's (v1.17.0).** A profile that carries a
-`ForwardMatrix` owns the camera → working transform of its render, built the
-way the DNG SDK's `dng_color_spec.cpp` builds it: the white is solved from the
+**The colour matrix comes from the profile (v1.17.0).** A profile that carries a
+`ForwardMatrix` owns the camera → working transform of its render, built by the
+DNG specification's colour model: the white is solved from the
 frame's as-shot camera neutral by iterating the profile's two `ColorMatrix`es
 interpolated at the white's own temperature (`NeutralToXY`; the temperature by
 Robertson's method, `dng_temperature`), the two calibrations are weighted by
@@ -2943,11 +2940,9 @@ when the document names a profile. The vignetting strength `s` is not a
 scaling of the gain's departure: the gain at s = 0, 1, 2 is 1, g and
 1 + 2(g − 1), and between those the gain is interpolated in EV, where the
 old `1 + (g − 1)·s` scaled the departure linearly. The distortion strength
-scales the map's departure, as the engine already did. The body's Adobe Standard profile
-carries no DefaultBlackRender tag (absent means Auto), so the SDK's render would subtract
-Shadows 5 × 0.001 = 0.005 black; the engine subtracts the sensor's 512 and no
-render black, and the 0.005 tried on p39 overshoots the shadows, so it is
-not applied.
+scales the map's departure, as the engine already did. The engine subtracts the sensor's black level
+(512 on this body) and no further render black: a 0.005 render black, tried on
+p39, overshoots the shadows, so none is applied.
 
 **Every develop starts on the camera base curve (v1.17.0).** A fresh open
 stamps the camera-matched curve estimate (`render::camera_base_look`) through
@@ -3042,7 +3037,7 @@ Point Color stays engine-only (a swatch is picked off the photo, not stated):
   `crs:GrayMixerMagenta`). The frame develops to grey through the eight-band
   mixer, each band lightening or darkening the greys that came from its colour
   by up to `GRAY_MIX_STOPS` (1.5 EV at ±100) with the HSL mixer's own band
-  membership. It runs IN PLACE OF the colour mixer, as Lightroom's panel does,
+  membership. It runs IN PLACE OF the colour mixer,
   and before the per-channel curves; saturation and vibrance are skipped under
   it, while colour grading still tints the grey — which is how a split-toned
   black and white is made. The top-level switch is the photograph's; the one a
@@ -3064,10 +3059,7 @@ Point Color stays engine-only (a swatch is picked off the photo, not stated):
   parse, and replaces the block only when this recipe holds swatches or is new
   enough to have seen the key (`schema_era` 2).
 
-Every constant above is first-principles, within the deviation the user allowed
-on 2026-09-17 ("slight deviation from Lightroom is allowed, compatibility is
-the aim"), until the Lightroom kit's `CAL-*`, `BW-*` and `PC-*` exports pin
-them.
+Every constant above is AutoShade's own first-principles choice.
 
 Each mask runs its own sub-chain, in this order: **dehaze** → the fused
 **WB + tone + curves + saturation (+ local hue)** blend → **clarity** →
@@ -3905,8 +3897,8 @@ experiment:
   and the texture anchors are a spatial filter with no mask coordinate in them.
 * **the falloff** — three successive closed forms, all refuted, now replaced by
   the measurement itself. Since **v0.35.0** the `MaskGeometry::Radial` arm of
-  `mask_weight` calls `render::radial_falloff`, which interpolates Lightroom's
-  measured α(ρ) out of a table: rows are the measurement's own ρ bins
+  `mask_weight` calls `render::radial_falloff`, which interpolates the
+  measured α(ρ) of a stored radial out of a table: rows are the measurement's own ρ bins
   (`0.0025 + 0.005 i`, 290 of them), columns are `Feather` 1 / 5 / 10 / 15 / 25
   / 35 / 50 / 65 / 75 / 90 / 100, and `Feather = 0` is an analytic hard edge
   rather than a measured column. That table and the reasoning behind every
@@ -3965,10 +3957,10 @@ experiment:
   measured at the narrow end: `Feather` 1 / 2 / 3 / 7 score 0.0097 / 0.0115 /
   0.0115 / 0.0083, where `Feather` 1 is one of the table's own columns and 2, 3
   and 7 are interpolated between columns — and the four score alike, so no
-  column is inserted. Adding rungs to a table that already reproduces the
-  pixels to 1.2 % of α would be fitting the instrument, and the exports that
-  would have paid for them do not exist: me6-2026-09 is the last Lightroom
-  ground truth this project collected.
+  column is inserted. Adding rungs to a table that already fits its
+  measurement to 1.2 % of α would be fitting the instrument, and the exports
+  that would have paid for them do not exist: me6-2026-09 is the last
+  measurement set this project collected.
   (`~/.claude/plans/r29-materials/b7-analysis.md`, `…-2.md`, `me3-a-report.md`
   and `me3-b-report.md`; M1_PLAN and V2_PLAN are development ledgers kept
   outside the public tree since 2026-08-20, the same standing as the probe
@@ -6438,8 +6430,8 @@ ceiling, which the shipped field beats: on p36 a ceiling of 0.0116 withheld a
 field that reaches 0.0090) and `FIELD_REGRESSED`.
 
 The strength gate is the design, not a safety valve: the dial means "how far
-past Lightroom may this fit go", and this is the first control that leaves
-Lightroom entirely. Below the default every result is byte-identical to
+past what the sidecar can carry may this fit go", and this is the first control
+the sidecar cannot carry at all. Below the default every result is byte-identical to
 v1.2.6, the stage does not narrate itself, and the recipe writes no key
 (until R41 that read "at or below": on the reference pair the default fit
 carried no field, and that was most of the distance the user saw between 0.65
@@ -6922,8 +6914,8 @@ post-stamp it used before put a camera curve under deltas solved
 without one).
 
 **The base look is estimated against the picture the camera drew**
-(2026-09-21). Since v1.17.0 this estimate is the FALLBACK start, used where the
-Lightroom canvas cannot render (above); the open paths that reach it — the GUI
+(2026-09-21). Since v1.17.0 this estimate is every develop's
+start (below); the open paths that reach it — the GUI
 open worker's estimate, `pipeline::photo_base_knots_checked_in` (the era repair
 and the jobs probe) and `serve`'s fresh open — enter through one
 function, `render::camera_base_look`, which pairs the neutral develop with the

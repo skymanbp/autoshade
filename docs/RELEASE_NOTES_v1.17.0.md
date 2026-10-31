@@ -1,0 +1,127 @@
+# AutoShade v1.17.0 — one develop law
+
+Everything merged into `main` since v1.16.0 ships here. One idea runs
+through this version: every photograph develops on one law, AutoShade's own,
+whatever file it came from or whatever profile its sidecar names. A camera
+profile is colour data read from the user's own Camera Raw install, like a
+lens profile; it never changes how a control behaves. Around that rule this
+release adds a mask Color tint, fixes the reverse fit at the causes found on
+the reference pairs, and keeps dark sensor values signed.
+
+待填_AUTHORSHIP
+
+## The develop
+
+- **Dark sensor values stay signed.** Read noise below the black level is
+  kept through the demosaic and the white balance instead of being cut at
+  zero first, so deep shadows and night skies no longer lift and tint.
+- **A camera profile is colour data.** A named camera profile renders its
+  colour matrix and colour tables and nothing else; its own tone curve and
+  exposure offset are read and not rendered. A profile with a forward matrix
+  owns the camera-to-working transform, built by the DNG specification's
+  colour model.
+- **Colour tables stack in their real order.** A creative Look's colour
+  table sits on top of the camera profile's own table instead of replacing
+  it. The Look's baked tone curve and sliders do not render; its
+  black-and-white switch does.
+- **Colour noise reduction keeps each pixel's brightness.** A rebuilt pixel
+  is brought back into range along its colour difference, so a pure black
+  stays black.
+
+## The lens
+
+- **Each chromatic-aberration channel moves by its own knots.** A red or
+  blue fringe correction no longer zooms all three channels by one shared
+  scale.
+- **The camera's lens metadata is read by one measured convention.** The
+  distortion knots are evaluated at the zoomed output radius and the CA knots
+  by the same convention. The lens vignetting is the installed lens profile's
+  own model, its focal, aperture and distance nodes blended in EV, and the
+  camera's own knots only for a lens no installed profile covers. The two
+  profile strengths run from 0 to 200 % and go to the sidecar with the
+  profile they scale.
+- **A linear mask's handles follow the photograph.** With lens correction on
+  they move with the lens map, with it off they stay where they were drawn;
+  a radial follows the photograph at its stored size.
+
+## Masks
+
+- **A mask's Color tint.** Masks gain **Color tint** and **Color tint hue**:
+  every colour inside the mask, neutral and coloured alike, shifts toward
+  one hue — most in the midtones, never brighter or darker. It is read from
+  and written to the sidecar, set in the mask's Color group, and the reverse
+  fit can solve it from a sky and its clouds at once.
+
+## The reverse fit
+
+- **The cast-to-white-balance hand-off stops where it should.** The walk that
+  hands a colour cast back to the white balance ends when it leaves the
+  strength budget or stops moving.
+- **A zone the colour field regresses is pinned** and the field solved
+  again.
+- **The colour field is judged on the field that ships.** Whether there is
+  enough left for it is now read on the frame it actually renders, not on an
+  earlier estimate it routinely beats.
+- **After 「AI generate」, the app asks** whether to reverse-fit the new card,
+  and from which negative.
+
+## The Lightroom sidecar
+
+- **A zone's colour gains travel as that mask's Temp and Tint.** The colour
+  a zone was given is written into the sidecar as the mask's white-balance
+  shift, with the exposure compensated, so the sidecar shows the zone's
+  colour instead of dropping it.
+- **The smooth colour field is named, not dropped silently.** The sidecar
+  has no place for the frame-wide colour field; the export says so on the
+  command line, in the desktop app's delivery note and in the sidecar's own
+  description. Rendered exports from AutoShade carry it in full.
+- **Channel curves always travel with a composite curve**, which Lightroom
+  needs before it reads them.
+
+## Fixed
+
+- The four-region calibration test names a run whose segmentation could not
+  start instead of reporting a bitwise mismatch.
+
+## Known limits
+
+- **The night reference pair's horizon glow.** On the night pair the horizon
+  band renders even by eye. The frame-wide colour field cannot follow a
+  demand that changes sign within a few rows, so a faint residual stays in
+  the band's numbers.
+- **Strongly saturated sky colour in the sidecar.** A zone's colour carried
+  as Temp and Tint is exact on greys; on a deeply saturated blue band of sky
+  the sidecar's version is less saturated than AutoShade's own export.
+- **Colour noise reduction** leaves a faint colour grain that comes from the
+  demosaic itself.
+
+## Known changes
+
+Every recipe, imported or new, develops on the same AutoShade law; a camera
+profile is colour data only.
+
+- **Creative profiles render their colour, not their tone.** A creative
+  profile's colour table and its black-and-white switch still render; its
+  baked tone curve and baked sliders no longer do.
+- **Imported sidecars start where a new develop starts**, on the photo's
+  camera base look.
+- **A master that says it carries lens corrections is refused.** A heal,
+  clone, fill, denoise or stack file whose own marker says its pixels are
+  already lens-corrected is not opened; the message asks for the master to
+  be made again from the RAW.
+- **Temperature and Tint ranges stay wide**: Tint ±150, Temperature up to
+  50000 K.
+- **Style library matches may shift.** When the library pairs a RAW's own
+  sidecar with its finished photo, it develops that sidecar on the one law,
+  so a sidecar that matched before may no longer match, or the other way
+  round.
+
+## Compatibility
+
+Recipes and sidecars written by earlier versions open. New fields: a mask's
+Color tint and Color tint hue (`crs:LocalToningHue`,
+`crs:LocalToningSaturation`).
+
+## Gates
+
+待填_GATES

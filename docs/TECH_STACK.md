@@ -44,8 +44,7 @@ the sensor's measured channel exactly. `orient_f32` applies the COMPOSED
 orientation — the RAW's EXIF state followed by the photographer's quarter
 turns — immediately after demosaic, before development, masks, straighten, or
 crop; an imported Lightroom sidecar's `tiff:Orientation` is solved for those
-quarter turns (`render::quarter_turns_between`), so the delivered frame is the
-frame Lightroom exports.
+quarter turns (`render::quarter_turns_between`), so the delivered frame is the orientation the sidecar records.
 
 If a RAW has no usable embedded preview, the decoder builds a neutral rendition
 from the sensor mosaic instead of failing the open. Parser panics are contained
@@ -484,7 +483,7 @@ supposed to remove.
   (default 25/50/75 %, bands 10–70/20–80/30–90, 10-point gap), control values
   at the Greville abscissae, a region at ±100 moving its centre by ½ × its
   width; composed after the slider model and before the point curve
-  (**designed, provisional** until the kit's `PARAM-*` exports).
+  (**designed**).
 - Point curves (`render::tone::{curve_lut, apply_rgb_curves}`): straight
   segments between the knots; each per-channel curve on the working space's
   own encoded channel, right after the tone stage (**designed**).
@@ -515,19 +514,17 @@ supposed to remove.
   light from the three primaries — hue rotates a primary's chroma by
   `CAL_HUE_REACH_RAD` (30° at ±100), saturation scales it by `CAL_SAT_REACH`
   (0.5 at ±100) — plus a green–magenta shadow tint of `CAL_SHADOW_TINT_REACH`
-  (0.15 at ±100) under a luminance knee at 0.18 (**designed, provisional**
-  until the kit's `CAL-*` exports).
+  (0.15 at ±100) under a luminance knee at 0.18 (**designed**).
 - B&W mixer (v1.5.0): each band lightens or darkens its own greys by up to
   `GRAY_MIX_STOPS` = 1.5 EV at ±100, over the HSL mixer's band membership and
-  its chroma gate (**designed, provisional** until `BW-*`).
+  its chroma gate (**designed**).
 - Point Color (v1.5.0): membership is the product of the swatch's three stored
   trapezoids; a full hue shift turns `POINT_HUE_SHIFT_TURNS` (30°), a full
   luminance shift scales L by `POINT_LUM_REACH` (±0.5), and the relative hue
   window spans `POINT_HUE_HALF_SPAN` (60°) per half. A sampled swatch
-  materialises Lightroom's own windows (±0.18 full, ±0.73 none, read off two
+  materialises the sidecar format's windows (±0.18 full, ±0.73 none, read off two
   published Lua dumps), and the Range slider scales every half-width by
-  `0.25 + 1.5·range` — 1 at Lightroom's default 0.5 (**designed, provisional**
-  until `PC-*`).
+  `0.25 + 1.5·range` — 1 at the sidecar's default 0.5 (**designed**).
 - Detail panel scale (v1.5.0, `render/detail.rs`): every radius is in
   full-resolution ("film") pixels, converted by `FilmScale` = full short edge ÷
   working-raster short edge; noise thresholds divide by that factor squared
@@ -551,8 +548,8 @@ supposed to remove.
   (**unmeasured**: every measured render was at Masking 0); Detail's other values,
   Radius ≠ 1.0 and Amount past 80 are the law's own extrapolation.
 - Sharpening default (v1.6.0): a recipe that holds no amount renders at
-  `LR_RAW_SHARPENING` = 40 on a RAW negative — Lightroom's own default for a
-  RAW (radius 1.0, detail 25, masking 0) — and at nothing on a baked raster;
+  `LR_RAW_SHARPENING` = 40 on a RAW negative (radius 1.0, detail 25, masking 0),
+  the value a sidecar's absent amount stands for — and at nothing on a baked raster;
   an explicit 0 is a real 0; the sidecar leaves an absent amount out so
   Lightroom applies its own default, and the 40 it writes back reads as a
   materialisation, not an edit (**designed to Lightroom's documented
@@ -562,12 +559,12 @@ supposed to remove.
   `1 → 4` film px and noise threshold `0.004 → 0.054` (gamma units) over
   Luminance, the threshold scaled `1.6 → 0.4` over Detail, ε = threshold²;
   Contrast re-adds the residual box-blurred at twice the radius
-  (**designed, provisional** until `NR-*`).
+  (**designed**).
 - Colour noise reduction: fast guided filter on `R − Y` and `B − Y`,
   subsample `s = max(2, ⌊r/2.5⌋)`, radius `2 → 16` film px over Color, luma
   edge threshold `0.08 → 0.01` over Detail, offset plane smoothed `1× → 3×`
   wider over Smoothness, full replacement from Color 25 up (linear below)
-  (**designed, provisional** until `CNR-*`). A rebuilt pixel outside `[0, 1]`
+  (**designed**). A rebuilt pixel outside `[0, 1]`
   has its colour difference scaled toward its own luma until it fits, so
   luma is kept exactly and a pure black stays 0: clamping each channel had
   lifted every luma-0 pixel off 0 — on a night frame the share at linear
@@ -753,8 +750,7 @@ validates its envelope and bounds, Brotli-decompresses it, then parses the
 `r/f/h/d` state stream without interpolating extra points.
 
 The mask Color tint (v1.17.0, `render::tint_px`) is an additive Oklab chroma
-shift: `(a, b) += q · m · w(L′) · push(h)`, Oklab L untouched, with `q`
-Lightroom's 0..1 amount, `m` the mask weight, `w` a Gaussian of centre 0.469
+shift: `(a, b) += q · m · w(L′) · push(h)`, Oklab L untouched, with `q` the mask's 0..1 tint amount, `m` the mask weight, `w` a Gaussian of centre 0.469
 and σ 0.283 in the gamma-encoded Rec.709 luma `L′` of the pixel it receives,
 and `push(h)` the measured wheel (`render::tint_push`), then back to linear
 sRGB clipped at 0 with no gamut mapping (**measured**). The model shape was
@@ -1437,17 +1433,15 @@ background mask is the BiRefNet subject matte inverted.
 inverts the radial mapping with guarded Newton iterations; a fold is rejected,
 and fisheye-only entries are named refusals rather than forced through a
 rectilinear approximation. Sony tag `0x7037` supplies 16 distortion knots. The
-image renderer reads them as Adobe DNG Converter's LensDistortInfo
-polynomial does: knot i at i/(n−1) of the sensor
+image renderer reads them by one convention, worked out from causal probes
+(ARCHITECTURE, the lens-corrected geometry): knot i at i/(n−1) of the sensor
 half-diagonal, a least-squares odd polynomial through the radius map t·K(t),
 evaluated at the zoomed output radius and resampled onto 32 canonical nodes.
-The CA pair (`0x7035`) is read by the same fit with no zoom, at the green
-sample's raw-frame radius (DNG Converter's WarpRectilinear red and blue
-planes); the camera's vignette knots (`0x7032`) are not used — the engine
-renders the Adobe profile's VignetteModel, at the raw-frame radius
-and in raw-linear light, read in `lcp.rs` and applies on the
-sensor's linear light before the camera profile stage (`render::source`; the
-preview bases carry it, `render::BasePart`); a body with no knots gets its render distortion solved from
+The CA pair (`0x7035`) is read by the same fit with no zoom, at the green sample's raw-frame radius; the vignetting is the installed lens
+profile's VignetteModel at the raw-frame radius, read in `lcp.rs`, and the
+camera's own knots (`0x7032`) only for a lens no installed profile covers
+(`lensmeta::read_for`); the gain goes on in the develop's first pixel pass with
+the manual vignette (`render::vignette_gain_lut`); a body with no knots gets its render distortion solved from
 the profile at the 32 knots the lens clamp keeps; the Vignetting strength is
 an EV-piecewise law (`render::develop`), and a strength off 100 is
 exported with the profile named (crs:LensProfileName and

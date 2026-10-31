@@ -203,7 +203,7 @@ Every slider in the **Effects** fold renders since v1.5.0 too. The post-crop
 vignette is centred on the **crop**, not on the frame — that is the whole point
 of its name — with Midpoint placing the falloff, Feather softening it,
 Roundness running from a rounded rectangle through the crop's own ellipse to a
-circle, and the three Styles behaving the way Lightroom describes them:
+circle, and three Styles:
 Highlight Priority spares bright pixels channel by channel (and can shift their
 colour), Colour Priority spares them by the pixel's brightness (and cannot),
 Paint Overlay simply mixes toward black or white. Grain is sized in pixels of
@@ -215,16 +215,15 @@ draws its own version of each from the same sidecar values.
 Every slider in the **Detail** fold renders since v1.5.0: Sharpening with its
 radius, detail and masking, and both noise reductions with their detail,
 contrast and smoothness (before, eight of them only reached the Lightroom
-sidecar). As in Lightroom, the radii are measured in pixels of the
+sidecar). The radii are measured in pixels of the
 full-resolution photo, so the canvas shows them the way the export looks once
 it is shrunk to the canvas: a 1-pixel sharpening radius on a 61 MP frame is
-subtle on screen and plain in the exported file. A slider whose Lightroom
-default is not zero (radius 1.0, sharpen detail 25, the noise detail and
+subtle on screen and plain in the exported file. A slider whose sidecar default is not zero (radius 1.0, sharpen detail 25, the noise detail and
 smoothness sliders 50) shows that default until you move it; setting it to 0
 writes a real 0 to the sidecar. Since v1.6.0 the Sharpening amount is one of
-them, with the default Lightroom itself uses for the kind of file — 40 on a
-RAW, 0 on a JPEG or TIFF — so a RAW you never sharpened here is sharpened the
-way Lightroom sharpens it by default, a sidecar that says nothing about the
+them, with a default that depends on the kind of file — 40 on a
+RAW, 0 on a JPEG or TIFF, the value a sidecar's missing amount stands for — so
+a RAW you never sharpened here is sharpened at 40, a sidecar that says nothing about the
 amount lets Lightroom keep its own, and dragging the slider to 0 on a RAW is a
 real 0. Since v1.6.5 the Sharpening slider follows a calibrated law: light
 edges and star cores lift, the dark ring around a bright star deepens with
@@ -252,14 +251,15 @@ The same fold gained Lightroom's two **profile correction strengths**
 (Distortion amount and Vignetting amount, 0–200 with 100 meaning "exactly what
 the profile says" and 0 switching that component off). They scale whichever
 profile this photo has — and since v1.5.0 that can be an **Adobe `.lcp`** read
-from the Camera Raw profiles installed on this machine, for bodies whose RAW
-carries no correction data of its own. AutoShade never bundles or redistributes
-Adobe's profiles; it reads the ones already on the computer, and a camera's own
-in-RAW measurement always outranks a profile-database average. A body with
+from the Camera Raw profiles installed on this machine. AutoShade never bundles
+or redistributes Adobe's profiles; it reads the ones already on the computer.
+A camera's own in-RAW distortion and chromatic-aberration data outrank the
+profile's; the vignetting is the installed profile's whenever there is one for
+the lens, and the camera's own only when there is not (v1.17.0). A body with
 neither renders with no profile correction, exactly as before. If a Lightroom
 sidecar says the lens correction was switched off, AutoShade switches the
-profile's vignetting and distortion off too, so the canvas and Lightroom agree,
-and so masks and the pixels beside them are in the same frame; the camera's own
+profile's vignetting and distortion off too, so the canvas draws what the
+sidecar records, and so masks and the pixels beside them are in the same frame; the camera's own
 chromatic-aberration correction stays on, because Lightroom keeps it on with
 the profile off (v1.17.0). The manual Distortion, Vignetting and CA sliders are
 not the profile and are never touched by that switch.
@@ -287,8 +287,7 @@ did not touch them. Since v1.5.0 it moves pixels. Vertical and Horizontal are
 the two keystones — the shape a building takes when the camera is tilted up or
 sideways — with Rotate, Scale, Aspect and the two Offsets beside them, and they
 run as one step after the lens correction and before the straighten, so masks
-and brushes stay on what they were painted on. Scale runs from 50 to 150, as
-Lightroom's own slider does; a smaller or larger number in a hand-edited file
+and brushes stay on what they were painted on. Scale runs from 50 to 150; a smaller or larger number in a hand-edited file
 is read as the nearest end of that range.
 
 Adobe has never published what a Transform slider does, so AutoShade worked
@@ -316,10 +315,11 @@ wrote can be rendered.
 A perspective correction can leave empty corners. Lightroom has a **Constrain
 crop** switch for that, and AutoShade now obeys it: off (which is what every
 Lightroom file in a real library says) the empty corners show and your own crop
-is what removes them, exactly as in Lightroom; on, the crop shrinks about its
+is what removes them; on, the crop shrinks about its
 own centre — keeping its aspect ratio — until it sits inside the corrected
-frame. An Upright correction leaves no corners to fill: Lightroom already
-scales its own answer to cover the frame, and AutoShade's solver does the same.
+frame. An Upright correction leaves no corners to fill: the matrix the sidecar stores
+already covers the frame, and AutoShade's own solver scales its answer to cover
+the frame too.
 
 Under those controls the fold now names the **profile** this photo is developed
 through. Lightroom writes two: a camera profile (「Adobe Standard」 and the
@@ -341,18 +341,17 @@ Adobe's RGB tables).
 
 The **Curves** fold holds Lightroom's **parametric curve** too since v1.5.0:
 Highlights, Lights, Darks and Shadows sliders (±100) under the point curve, then
-the three splits that set where those regions meet. As in Lightroom the point
-curve is applied on top of it, and both go to the sidecar. A split cannot pass
+the three splits that set where those regions meet. The point curve is applied on top of it, and both go to the sidecar. A split cannot pass
 its neighbours, and moving a split changes nothing until a region slider moves.
 
-The **Color Mixer (HSL)** fold holds the whole of Lightroom's Color Mixer since
+The **Color Mixer (HSL)** fold holds the full Color Mixer since
 v1.5.0. **Black & White** at the top of the fold develops the photo to grey and
 swaps the eight colour bands for the **B&W mix**, where each band decides how
 light the greys that came from that colour turn; colour grading still tints the
 result, which is how a split-toned black and white is made. A photo whose
 creative profile is a monochrome one — 「Adobe Monochrome」 and its relatives —
-develops to grey with this switch still off, because in Lightroom the profile is
-what made it black and white. Below the mixer,
+develops to grey with this switch still off, because the profile's own
+black-and-white switch is what made it black and white. Below the mixer,
 **Point Color** adds one swatch per colour you want to move on its own: click
 「💧 Pick a color」, then click that colour in the image, and the swatch appears
 with its own Hue, Saturation, Luminance and **Range** sliders — Range widens or
@@ -361,8 +360,8 @@ almost grey makes no swatch, because no swatch could move it. Swatches you made
 in Lightroom arrive with the photo and go back to the sidecar; a Lightroom file
 with no swatches keeps its empty block exactly as Lightroom wrote it.
 
-The **Calibration** fold is Lightroom's Calibration panel: the shadows tint and
-each primary's hue and saturation. These seven are the FIRST thing applied to
+The **Calibration** fold holds the shadows tint and each primary's hue and
+saturation. These seven are the FIRST thing applied to
 the photo, so they move the colours every other section then works on — a
 Lightroom photo usually arrives with values already in them, and they used to
 be shown here without a way to change them.
@@ -376,7 +375,7 @@ much of the headroom reaches that rendition: −100 ignores it entirely, 0 is th
 headroom the sidecar states, +100 is twice as many stops of it.
 
 Those seven only render while **HDR edit mode** is ticked, as the sidecar's
-own switch says (Lightroom shows the panel only then too) — so a value left over from
+own switch says — so a value left over from
 an HDR session you later abandoned cannot quietly re-tone the photo. The values
 are still kept, still written back to the sidecar, and the fold still shows its
 ● so nothing a file holds is invisible.
@@ -447,11 +446,11 @@ the prompt fields' 420 px readable ceiling, so every row and fold ends on the
 same right edge. On Windows the toolbar is also the window's title bar: drag
 its empty space to move the window, double-click it to maximize, and use the
 minimize / maximize / close buttons at its right end; the window's edges
-resize it. A slider is laid as in Lightroom: its name on the left and
+resize it. A slider is laid out with its name on the left and
 its value on the right of one line, a thin rail the width of the column under
 them; double-click or right-click the rail or the name to reset it, hover it
 and press ↑/↓ to nudge it, or click the value to type one. **Color Grading**
-is drawn as Lightroom's colour wheels: **3-way** shows the midtone wheel over
+is drawn as colour wheels: **3-way** shows the midtone wheel over
 the shadow and highlight wheels, **Global** one wheel for the whole picture;
 the angle is the hue, the distance from the centre the saturation, Shift
 drags finely and a double-click returns a wheel to neutral, with each region's

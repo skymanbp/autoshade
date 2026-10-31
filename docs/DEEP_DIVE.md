@@ -446,9 +446,8 @@ repeated.
 the composed orientation — EXIF plus the photographer's own turns, an imported
 sidecar's `tiff:Orientation` included — applied at the head of the chain; Bayer takes
 rawler's demosaic, X-Trans an **approximate** 5×5 plane fit; `src/dcp.rs`
-develops a Lightroom photo through the `.dcp` profile and `crs:Look` it names,
-the one undecoded half (a Look's creative colour table) named on screen, and
-nothing Adobe ships is redistributed; the RAW denoiser of §5 cleans the mosaic
+reads the `.dcp` profile and `crs:Look` a sidecar names as colour data (their
+tables render, their tone does not), and nothing Adobe ships is redistributed; the RAW denoiser of §5 cleans the mosaic
 before demosaic.
 
 ### Develop pipeline and tone model
@@ -458,8 +457,8 @@ pipeline: linear-light vignette and dehaze, a monotone Fritsch–Carlson tone
 LUT with Highlights inside it, then RGB curves, HSL, colour grade,
 clarity/Texture (two measured low-pass arms, `A1=0.172443`,
 `A2=0.304888`), saturation, NR, sharpening (a calibrated law since
-v1.6.5; a RAW with no amount at Lightroom's default of 40, a baked
-raster at 0) and local edits, under the
+v1.6.5; a RAW with no amount at 40, the value a sidecar's absent amount stands
+for, a baked raster at 0) and local edits, under the
 per-photo base look of §6.
 
 ### Masks
