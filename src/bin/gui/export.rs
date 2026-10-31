@@ -1026,11 +1026,23 @@ impl AutoShadeApp {
                 // A file just landed in the user's PHOTO folder — the one place
                 // this app otherwise never writes. That is worth a toast, not
                 // just a status line that the next message scrolls away.
-                let t = trf(
+                let mut t = trf(
                     lang,
                     "Lightroom sidecar delivered → {path}",
                     &[("path", &abs_display(&to))],
                 );
+                // The file handed over is the projection of the SAVED develop,
+                // so its global half is said again here, where the user is
+                // about to open it in Lightroom (a colour field, a lens blur:
+                // the rendered exports carry them, the sidecar cannot). The
+                // mask half was said on the save that wrote the file.
+                let globals = autoshade::xmp::global_export_losses(&self.saved_recipe);
+                if let Some(m) = xmp_loss_line(lang, &[], &globals)
+                    && xmp_loss_interrupts(&[], &globals)
+                {
+                    self.toast(ToastKind::Error, m.clone());
+                    t = format!("{t} — ⚠ {m}");
+                }
                 self.status = t.clone();
                 self.toast(ToastKind::Success, t);
             }
@@ -1154,7 +1166,7 @@ impl AutoShadeApp {
         }
         // recipe.json is the source of truth for EVERY source type (the badge,
         // batch render and reopening all read it; the XMP alone is lossy — no
-        // bitmap masks / recolour gains). The XMP is the RAW-only Lightroom
+        // bitmap masks / exact recolour gains). The XMP is the RAW-only Lightroom
         // projection on top. The recipe write ALONE decides the saved state:
         // once it lands, reopening restores it regardless of the XMP — so the
         // ● baseline must follow it even when the XMP half fails.

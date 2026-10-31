@@ -3711,7 +3711,8 @@ pub fn claim_numbered(out: &Path) -> Result<PathBuf> {
 /// (see [`write_xmp_doc`] for why that is a loss worth telling the user
 /// about), and the per-mask list of what the projection itself could not
 /// carry (M6a — bitmap/muted masks skipped, bitmap components omitted, radial
-/// rotation and recolour gains dropped; [`xmp::mask_export_losses`]).
+/// rotation dropped, recolour gains past Temp/Tint's reach;
+/// [`xmp::mask_export_losses`]).
 /// Every caller receives both (round-12 disclosure threading): the old
 /// note-dropping `write_xmp` wrapper was how five of seven surfaces stayed
 /// silent, so the values ride the RETURN TYPE where a surface has to look at

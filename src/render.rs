@@ -229,7 +229,7 @@ pub(crate) use tone::{
 use tone::{CurveSpace, MiddleRatio, apply_rgb_curves, hermite_eval};
 #[cfg(test)]
 use tone::apply_camera_raw_curve;
-pub(crate) use mask_cr::LocalGreyLaw;
+pub(crate) use mask_cr::{gains_as_white, LocalGreyLaw};
 pub(crate) use tone_cr::{
     HS_SH_FLOOR, HsKey, SliderLaw, camera_raw_exposure, camera_raw_response_keyed, shadows_anchor,
     camera_raw_row, camera_raw_start, Exposure, hs_row, HsSite,

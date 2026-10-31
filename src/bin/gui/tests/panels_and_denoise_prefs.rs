@@ -25,7 +25,7 @@
             (
                 crate::i18n::Lang::En,
                 "Tone",
-                "carries reverse-fit recolour (not exported to XMP)",
+                "carries reverse-fit recolour (written to XMP as Temp/Tint)",
                 "Select a mask above to edit its adjustments",
                 ["Sharpness", "Hue shift", "Color tint", "Color tint hue"],
                 "Tint shift",
@@ -33,7 +33,7 @@
             (
                 crate::i18n::Lang::Zh,
                 "明暗",
-                "含反推重上色（不写入 XMP）",
+                "含反推重上色（XMP 里写成色温/色调）",
                 "选中上面任一蒙版即可编辑它的调整",
                 ["局部锐化", "色相旋转", "颜色染色", "颜色染色色相"],
                 "色调偏移",
@@ -85,7 +85,7 @@
             );
             assert!(
                 seen.iter().any(|t| t == recolour),
-                "{lang:?}: a mask with color_gains must say the XMP will not carry them"
+                "{lang:?}: a mask with color_gains must say how the XMP carries them"
             );
             assert!(
                 !seen.iter().any(|t| t.contains("XMP/Lightroom only")),

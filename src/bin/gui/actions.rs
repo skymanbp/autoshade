@@ -4076,7 +4076,7 @@ impl AutoShadeApp {
                             || -> std::io::Result<()> {
                         let backed = autoshade::store::backup_saved_develop(p, Some(&rep.recipe));
                         // Persist the fit losslessly: recipe.json carries the
-                        // bitmap zone masks + recolour gains the XMP cannot,
+                        // bitmap zone masks + exact recolour gains the XMP cannot,
                         // so reopening the photo restores the whole fit. The
                         // snapshot above is the gate — if it FAILED, skip the
                         // persist entirely (the fit stays on the canvas with

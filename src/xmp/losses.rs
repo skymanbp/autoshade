@@ -75,8 +75,11 @@ pub enum MaskLossReason {
     /// `0` — which the prose channels read as "no angle worth naming" and
     /// answer with their plain phrasing.
     Rotation(i32),
-    /// Per-channel recolour gains (`color_gains`) are engine-only: classic ACR
-    /// has no counterpart, so the sidecar renders without them.
+    /// Per-channel recolour gains (`color_gains`) have no ACR key; the writer
+    /// carries them on the mask's Temp and Tint (`render::gains_as_white`).
+    /// Raised when that projection sits at the end of Temp's or Tint's range:
+    /// the gains move more than the white balance can, and the sidecar
+    /// carries the nearest move it has.
     Recolour,
     /// A raster this mask rides on — a bitmap tile, a zone alpha — could not
     /// be embedded in the sidecar's AutoShade payload (v1.3.1): the file was
@@ -144,7 +147,7 @@ impl MaskLossReason {
                 "AI mask(s) re-derived by the local segmenter - not Adobe's own raster"
             }
             MaskLossReason::Rotation(_) => "radial rotation dropped",
-            MaskLossReason::Recolour => "recolour gains dropped",
+            MaskLossReason::Recolour => "recolour gains past the reach of Temp/Tint",
             MaskLossReason::RasterNotEmbedded => {
                 "mask raster(s) not embedded in the sidecar's AutoShade payload (unreadable, or \
                  over the size budget)"
