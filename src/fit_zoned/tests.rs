@@ -2319,7 +2319,10 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
             measured.push((fixture, mask.role, rim));
         }
     }
-    assert_eq!(measured.len(), 4, "every accepted zone must reach the boundary gate: {measured:?}");
+    // 3 since the cast curves' knots sit on the source's own quantiles
+    // (ae011c1): the global cast is re-fitted on the new knots and one zone
+    // fewer is accepted, so three zones reach the gate (four before).
+    assert_eq!(measured.len(), 3, "every accepted zone must reach the boundary gate: {measured:?}");
     assert!(
         measured.iter().any(|(_, role, _)| *role == MaskRole::ZoneSky)
             && measured.iter().any(|(_, role, _)| *role == MaskRole::ZoneLand),
@@ -2393,7 +2396,10 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
     // the 0.02 drift. The structural term still swings on this toy (the
     // same render reads 0.06889 at k 0.103), so these pins hold the gate's
     // own k, not a smooth frame curve. Colour on the 0.012 ceiling on both.
-    let expected = [0.006f32, 0.006, 0.008, 0.008];
+    // Since the cast curves' knots sit on the source's own quantiles
+    // (ae011c1) `sky+land` keeps one zone, its land, at 0.006 (k 0.124 from
+    // a 0.058 candidate rim).
+    let expected = [0.006f32, 0.006, 0.006];
     for ((fixture, role, rim), expected) in measured.iter().zip(expected) {
         assert!(
             (*rim - expected).abs() <= 0.002,
@@ -2406,7 +2412,7 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
     // it; per unit of brightness the full tone passes, the candidate carries
     // the whole fitted move (rim 0.0460 -> 0.0660) and the shrink lands it on
     // the SAME kept rim, 0.012, at k 0.244 -> 0.183. `sky+land` is unmoved.
-    let expected_candidates = [("sky", 0.0310f32, 0.194f32), ("sky+land", 0.0540, 0.165)];
+    let expected_candidates = [("sky", 0.0310f32, 0.194f32), ("sky+land", 0.0580, 0.124)];
     for ((fixture, before, k), (want_fixture, want_before, want_k)) in
         candidates.iter().zip(expected_candidates)
     {
