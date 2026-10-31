@@ -379,31 +379,13 @@ bundled; a machine with no profiles gets a named refusal.
   the transfer sits higher: the row at `E + h` on the input over `2^h`, with
   `h` read from a table over the neutral's largest/smallest channel
   (measured from Camera Raw renders, 12 points, 2026-10-29: 0 at 1, 0.185 at
-  1.15, 0.36 at 1.3, 0.525 at 1.45, 0.835 at 1.8, 0.995 from 2 on). SCOPE:
-  those renders were frames of grey patches alone, and Camera Raw's headroom
-  is a FRAME-LEVEL reading, not a pointwise one — the same neutral and the
-  same greys render white at L 89.5 alone, 93.2 beside a colour lattice and
-  98.5 beside a dark-grey population — so the table is the grey frame's
-  reading until the adaptive law is measured. The pair
+  1.15, 0.36 at 1.3, 0.525 at 1.45, 0.835 at 1.8, 0.995 from 2 on). The pair
   is stamped per photo as `EditRecipe::camera_start` (`render::camera_start`),
   so the canvas's Exposure (applied over the base develop by
   `render::Exposure`) reads its light back at the start the export's stage
   renders at; the sidecar never carries it. Exposure singles on p39 against
   Camera Raw, worst moving band |ΔL| / |Δa|,|Δb|: −1 EV 0.72/0.56, +0.5
   0.91/0.96, +1 0.84/0.89, +2 0.72/0.94.
-
-- Near-white colour lift (v1.17.0, `render/clip_lift.rs`, **measured** from
-  11 Camera Raw renders of synthetic DNGs, 2026-10-29): before the camera
-  matrix, in white-balanced camera RGB, Camera Raw raises a colour's lower
-  channels toward its higher ones as their SENSOR values near the white level.
-  The channel with the largest camera neutral (green on a Bayer body) anchors;
-  each of the other two rises toward the other by `k(raw) · (difference)`,
-  then the anchor rises toward their mean; `k` is a table by sensor value
-  (0 below 0.28, 0.11 at 0.5, 0.53 at 0.8, 1 at white). Independent of
-  exposure and of the camera's primaries. Seven 1728-patch lattices across
-  neutrals: worst 0.0035 of white (0.107 without it); engine against Camera
-  Raw on the grey-neutral lattice's bright in-gamut colours, max ΔE 16.65 →
-  0.92. Real frames barely reach it (p39/p40 carry and +2 EV hue unchanged).
 
 - Over-range light (v1.17.0, `render::camera` / `render::develop`, **measured** from
   Camera Raw renders, 2026-10-29): a colour the camera stage puts above the
