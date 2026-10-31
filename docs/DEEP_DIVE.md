@@ -11,7 +11,7 @@ subsystem. The equations and provenance behind each line are in
 - [1. Whole-image AI generation, then reverse-fit](#1-whole-image-ai-generation-then-reverse-fit-an-editable-recipe-from-any-finished-look)
 - [2. How the reverse-fit decides](#2-how-the-reverse-fit-decides-divergence-evidence-gates-and-a-priced-local-field)
 - [3. Style reference is retrieval](#3-style-reference-is-retrieval-over-your-whole-catalogue-not-a-preset)
-- [4. Lightroom parity is measured](#4-lightroom-parity-is-measured-and-the-residuals-are-published)
+- [4. Rendering laws are measured](#4-rendering-laws-are-measured-from-camera-raw-renders-and-the-residuals-are-published)
 - [5. The RAW denoiser](#5-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run)
 - [6. The camera's own look](#6-the-cameras-own-look-is-read-from-the-picture-like-with-like)
 - [Designed, not yet shipped](#designed-not-yet-shipped)
@@ -218,7 +218,7 @@ develop is shown the **3 closest** as a soft reference.
 
 Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](TECH_STACK.md#ai-advisor-and-reverse-fit).
 
-## 4. Lightroom parity is measured, and the residuals are published
+## 4. Rendering laws are measured from Camera Raw renders, and the residuals are published
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/pillar-lightroom-math-dark.svg" />
@@ -407,9 +407,9 @@ the tests [`scripts/check_docs.py`](../scripts/check_docs.py) re-derives.
 | What | Measured | Where |
 |---|---|---|
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](../README.md#supported-formats) |
-| Lightroom Texture parity | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
-| Lightroom Sharpening parity (v1.17.0; the same star-field frame against Camera Raw's own 16-bit renders: Amount 0 / 40 / 80 / 150, Radius 0.5 / 2 / 3, Detail 0 / 100, Masking 50 / 100) | per-pixel R² of the move 0.966 / 0.944 / 0.865 at Amount 40 / 80 / 150; Radius 0.956 / 0.955 / 0.915; Detail 0.716 / 0.947; Masking 0.961 / 0.957 — Detail 0 and Amount 150 under the 0.9 line, disclosed | [What is new §4](#4-lightroom-parity-is-measured-and-the-residuals-are-published) |
-| Lightroom Sharpening parity (v1.6.5; one star-field frame at Sharpness 0 / 40 / 80, Radius 1.0, Detail 25, Masking 0) | per-pixel R² 0.93 / 0.92 over the frame, 0.95 on the edges and stars; star peaks +0.07 / +0.11 / +0.12 in Lightroom against the law's +0.08 / +0.11 / +0.13; the ring around them 0.02 / 0.04 / 0.08 against 0.02 / 0.04 / 0.07 | [What is new §4](#4-lightroom-parity-is-measured-and-the-residuals-are-published) |
+| Texture law, measured on Lightroom exports | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
+| Sharpening law (v1.17.0; measured on Camera Raw's own 16-bit renders of the same star-field frame: Amount 0 / 40 / 80 / 150, Radius 0.5 / 2 / 3, Detail 0 / 100, Masking 50 / 100) | per-pixel R² of the move 0.966 / 0.944 / 0.865 at Amount 40 / 80 / 150; Radius 0.956 / 0.955 / 0.915; Detail 0.716 / 0.947; Masking 0.961 / 0.957 — Detail 0 and Amount 150 under the 0.9 line, disclosed | [What is new §4](#4-rendering-laws-are-measured-from-camera-raw-renders-and-the-residuals-are-published) |
+| Sharpening law (v1.6.5; measured on one star-field frame exported from Lightroom at Sharpness 0 / 40 / 80, Radius 1.0, Detail 25, Masking 0) | per-pixel R² 0.93 / 0.92 over the frame, 0.95 on the edges and stars; star peaks +0.07 / +0.11 / +0.12 in Lightroom against the law's +0.08 / +0.11 / +0.13; the ring around them 0.02 / 0.04 / 0.08 against 0.02 / 0.04 / 0.07 | [What is new §4](#4-rendering-laws-are-measured-from-camera-raw-renders-and-the-residuals-are-published) |
 | Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
 | Linear mask closure (openly not pixel-closed) | RMS 9.748 / 7.025 / 6.336 px with lens correction on, 12.449 / 9.943 / 4.979 px off | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
 | Linear falloff vs Lightroom coverage (46-export pack) | smoothstep on `t^1.124`: α rms 0.0064 against 0.0315 for the plain smoothstep and 0.0598 for a straight ramp; half-coverage contour +34.2/+38.2 px → +0.9/+5.0 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
@@ -435,8 +435,8 @@ the tests [`scripts/check_docs.py`](../scripts/check_docs.py) re-derives.
 - **The AI decides what to change; the engine does it** — a bounded recipe
   with its rationale and confidence, one deterministic renderer behind every
   front end.
-- **Measured, not assumed** — rendering laws are fitted to Lightroom and
-  camera measurements and quoted with residuals; release claims are re-derived
+- **Measured, not assumed** — rendering laws are fitted to measurements of
+  Camera Raw renders and of the camera, and quoted with residuals; release claims are re-derived
   by a script.
 - **Non-destructive, interoperable, local first** — the source library stays
   read-only, develops live in a per-user store, and sidecars are merged so a

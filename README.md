@@ -64,8 +64,8 @@ An editable, Lightroom-ready recipe instead of AI pixels.
 <tr>
 <td valign="top">
 
-**📐 Lightroom parity, measured**<br />
-<sub>Texture **45 / 45** anchors within ±0.02, radial masks **41 / 41** within 1 px. Every residual is published.</sub>
+**📐 Measured laws, published residuals**<br />
+<sub>Laws measured from Camera Raw renders: Texture **45 / 45** anchors within ±0.02, radial masks **41 / 41** within 1 px. Every residual is published.</sub>
 
 </td>
 <td valign="top">
@@ -120,7 +120,7 @@ Six techniques you will not find in another RAW developer. Each is written up in
 | **1** | [Generate, then reverse-fit](docs/DEEP_DIVE.md#1-whole-image-ai-generation-then-reverse-fit-an-editable-recipe-from-any-finished-look) | An editable recipe from any finished look, solved at the distribution level |
 | **2** | [Evidence-gated local fit](docs/DEEP_DIVE.md#2-how-the-reverse-fit-decides-divergence-evidence-gates-and-a-priced-local-field) | A divergence score `D` picks full solve or bounded mode; every local move must earn its place |
 | **3** | [Style by retrieval](docs/DEEP_DIVE.md#3-style-reference-is-retrieval-over-your-whole-catalogue-not-a-preset) | SigLIP 2 search over your own finished photos, not a preset |
-| **4** | [Measured Lightroom parity](docs/DEEP_DIVE.md#4-lightroom-parity-is-measured-and-the-residuals-are-published) | Tone, Texture, Sharpening, masks and lens geometry fitted to Lightroom exports |
+| **4** | [Measured laws, published residuals](docs/DEEP_DIVE.md#4-rendering-laws-are-measured-from-camera-raw-renders-and-the-residuals-are-published) | Tone, Texture, Sharpening, masks and lens geometry measured from Camera Raw renders; every residual published with its number |
 | **5** | [A denoiser with pre-written pass marks](docs/DEEP_DIVE.md#5-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) | Trained on this project's data; two later runs failed their marks and were refused |
 | **6** | [The camera's own look](docs/DEEP_DIVE.md#6-the-cameras-own-look-is-read-from-the-picture-like-with-like) | A per-photo base curve read from the embedded preview, like with like |
 
@@ -277,7 +277,7 @@ Per-subsystem notes: [In depth → Implementation](docs/DEEP_DIVE.md#implementat
 ## Status and limitations
 
 - **Release gates at v1.16.0** cover the CLI, desktop GUI, sidecar contracts, format fixtures and the deterministic renderer.
-- **Not in scope:** bit-exact Adobe rendering (parity is measured, not identical), an exact X-Trans demosaic, a notarised macOS build, a Linux desktop app.
+- **Not in scope:** bit-exact Adobe rendering (the laws are measured from Camera Raw renders and their residuals published), an exact X-Trans demosaic, a notarised macOS build, a Linux desktop app.
 - **Honest markers:** AI masks are local re-creations, not Adobe's pixels; linear masks are not pixel-closed (radial closes 41/41 to ≤ 1 px); the macOS app is CI-verified but has no reported interactive users yet.
 - Release ledger and rulings: [ROADMAP.md](docs/ROADMAP.md).
 

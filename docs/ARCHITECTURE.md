@@ -4213,7 +4213,7 @@ was also wired up as a readability GATE — `a > 0 ∧ b > 0`, refuse otherwise 
 and me6-2026-09 group D refuted that half. Its nine exports hand Lightroom a
 plain box (`Left < Right`, `Top < Bottom`) at `crs:Angle="30"`, whose fold is
 `b = −0.020096`, and Lightroom draws the ellipse of the MAGNITUDES: imported
-that way the nine match Lightroom's own α to a pooled rms of 0.0069 — the same
+that way the nine sit at a pooled rms of 0.0069 from the α measured in the exports — the same
 order as every other family in the pack — with the α = ½ contour +6.3 / +8.9 /
 +12.8 px out at `Feather` 25 / 50 / 75 on a 1248 px scale. Refused, they
 rendered nothing at all (pooled rms 0.3931). An ellipse metric is
@@ -4560,7 +4560,7 @@ file would cry wolf forever.
 Inbound, `xmp::unmodelled_global_crs` names the `crs:` properties an imported
 sidecar carries on its own `rdf:Description` that this engine does not model at
 all. The merge PRESERVES every one of them; what was missing was the sentence
-saying they are there, so a canvas that did not match Lightroom's render had no
+saying they are there, so a canvas that rendered differently from Lightroom had no
 explanation on screen. Its universe is the COMPLEMENT of `owned_attr_keys`, so
 it needs no catalogue of Adobe property names to keep up to date — and R25 is
 the prediction coming true: the day the batches taught the engine `crs:Texture`,

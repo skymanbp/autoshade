@@ -46,6 +46,7 @@ from pathlib import Path
 LIVE_MD = [
     "README.md", "CONTRIBUTING.md", ".github/SECURITY.md", ".github/PULL_REQUEST_TEMPLATE.md",
     "docs/USER_MANUAL.md", "docs/ARCHITECTURE.md", "docs/TECH_STACK.md", "docs/SHOWCASE.md",
+    "docs/DEEP_DIVE.md",
     "site/README.md", "assets/fonts/README.md",
 ]
 LIVE_HTML = ["site/index.html", "site/architecture.html", "site/404.html"]

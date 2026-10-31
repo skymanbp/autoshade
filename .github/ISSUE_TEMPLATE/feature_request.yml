@@ -59,9 +59,9 @@ body:
   - type: textarea
     id: lightroom_parity
     attributes:
-      label: "Lightroom parity? (optional)"
+      label: "A Lightroom control? (optional)"
       description: |
-        If the ask is *"match Lightroom's behaviour X"*, this field is where the
+        If the ask is *"model Lightroom's control X"*, this field is where the
         request becomes buildable. Please name:
 
         - **The control**, by the name Lightroom shows it under — Texture,

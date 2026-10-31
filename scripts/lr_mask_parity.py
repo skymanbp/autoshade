@@ -84,8 +84,8 @@ SHIPPED_WARP = 1.124
 def read_green(path: Path) -> np.ndarray:
     """The green channel of a JPEG or PNG, as `int32` DN.
 
-    Green because it is the channel every earlier Lightroom-parity round
-    measured on, and because a Bayer sensor samples it twice as densely as the
+    Green because it is the channel every earlier mask-measurement round
+    read, and because a Bayer sensor samples it twice as densely as the
     other two, so it carries the least demosaic invention.
     """
     import imageio.v3 as iio

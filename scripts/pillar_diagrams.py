@@ -215,8 +215,8 @@ def pillar_lightroom():
         "slider domains are measured rather than assumed, mask coordinates "
         "cross measured frame laws, and each result is published with its "
         "residual",
-        "Pillar 3 — the mathematics of matching Lightroom",
-        "measured against Adobe’s own output, not guessed from documentation")
+        "Pillar 3 — laws measured from Camera Raw renders",
+        "Camera Raw is the instrument; every law ships with its residual")
     xmp, rec, eng = s.row(104, [
         dict(rid="xmp", x=28, w=200, accent=True, title="Lightroom .xmp",
              sub="crs: fields, masks, curves"),
