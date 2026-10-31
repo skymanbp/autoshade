@@ -11,7 +11,7 @@ subsystem. The equations and provenance behind each line are in
 - [1. Whole-image AI generation, then reverse-fit](#1-whole-image-ai-generation-then-reverse-fit-an-editable-recipe-from-any-finished-look)
 - [2. How the reverse-fit decides](#2-how-the-reverse-fit-decides-divergence-evidence-gates-and-a-priced-local-field)
 - [3. Style reference is retrieval](#3-style-reference-is-retrieval-over-your-whole-catalogue-not-a-preset)
-- [4. Rendering laws are measured](#4-rendering-laws-are-measured-from-camera-raw-renders-and-the-residuals-are-published)
+- [4. Every develop control is a written law](#4-every-develop-control-is-a-written-law-pinned-by-the-projects-own-tests)
 - [5. The RAW denoiser](#5-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run)
 - [6. The camera's own look](#6-the-cameras-own-look-is-read-from-the-picture-like-with-like)
 - [Designed, not yet shipped](#designed-not-yet-shipped)
@@ -218,66 +218,64 @@ develop is shown the **3 closest** as a soft reference.
 
 Details: [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](TECH_STACK.md#ai-advisor-and-reverse-fit).
 
-## 4. Rendering laws are measured from Camera Raw renders, and the residuals are published
+## 4. Every develop control is a written law, pinned by the project's own tests
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/pillar-lightroom-math-dark.svg" />
-  <img src="images/pillar-lightroom-math-light.svg" alt="Pillar 3: sidecar and recipe read and write both ways into the engine over four measured laws — mask frames, lens geometry, tone and falloff, and the brush kernel — each published with its own residual" />
+  <img src="images/pillar-lightroom-math-light.svg" alt="Pillar 3: sidecar and recipe read and write both ways into the engine over four written laws — mask frames, lens geometry, tone and falloff, and the brush kernel — each pinned by its own test" />
 </picture>
 
 <sub>Zoom and pan this diagram at [autoshade.dev/#pillar-lightroom-math](https://autoshade.dev/#pillar-lightroom-math).</sub>
 
-The tone LUT, the two-arm Texture model (`A1 = 0.172443`, `A2 = 0.304888`;
-45 of 45 Lightroom anchors within ±0.02), the 290×11 radial feather LUT,
-the brush law `(1 − ρ^m)^n` with the measured flow constant `κ = 0.1284`
-(D1 error 874 px → 9.8 px), and the lens mask-frame transport built from
-Sony's own 16 native samples (radial 41/41 vectors within 1 px; linear
-openly *not* pixel-closed, RMS 9.748/7.025/6.336 px) were each fitted to
-Lightroom output. The XMP layer is hand-rolled on purpose — no XML crate —
-so a catalogue sidecar is merged into byte for byte, down to the SVD fold
-between Lightroom's pixel-space radial tilt and the engine's normalised
-rotation and to its `tiff:Orientation`, rewritten only when the
-photographer's own turn has moved away from it; Lightroom's Brotli-packed
-brush dab streams are imported and verified (`MD5 → .acr → Brotli`). Two of
-those fits were re-measured in v1.2.4 against Lightroom's own coverage on a
-46-export pack: the linear falloff moved onto the abscissa `t^1.124`
-(α rms 0.0293 → 0.0074), and the radial boundary is a pure 0.99876 scale of
-the stored ellipse — no dilation law.
+No slider in AutoShade is a guess at what its number might mean. Each one is
+a closed-form law with named constants: the monotone tone LUT; the two-arm
+Texture model (`A1 = 0.172443`, `A2 = 0.304888`); the 290×11 radial feather
+table; the linear falloff, a smoothstep on the abscissa `t^1.124`; the radial
+boundary, a pure 0.99876 scale of the stored ellipse; the brush law
+`(1 − ρ^m)^n` with the flow constant `κ = 0.1284`; the lens mask-frame
+transport built from the profile's own 16 native samples; and the sharpening
+operator — gains close to linear in Amount, a shadow rolloff, and halo limits
+bounded by each pixel's own luminance, so the dark ring around a bright star
+deepens with the star. In v1.17.0 the same treatment reached a mask's Color
+tint (an Oklab chroma shift under a midtone window), the white level of each
+camera body, exposure as a pointwise transfer, lens distortion, vignette and
+chromatic aberration, the order of the colour tables and the Look, a spatial
+Dehaze, and the local tone and saturation controls.
 
-Since v1.6.5 the Sharpening slider is measured too: one 61 MP star-field
-frame exported from Lightroom at Sharpness 0 / 40 / 80 (Radius 1.0, Detail
-25, Masking 0), and the operator's gains, its shadow rolloff and its two
-halo limits fitted per pixel to what moved between the exports — R² 0.93 at
-40 and 0.92 at 80 over the frame, 0.95 on the edges and stars one actually
-sees, where the plain unsharp mask it replaced explained 0.62. In v1.17.0
-the law was re-measured against Camera Raw's own 16-bit full-size renders of
-the same frame (Amount 0 / 40 / 80 / 150, Radius 0.5 / 2 / 3, Detail 0 /
-100, Masking 50 / 100): R² 0.97 / 0.94 at Amount 40 / 80, and Radius,
-Detail and Masking each gained a measured term; Detail 0 (0.72) and Amount
-150 (0.87) stay under the 0.9 line and are published as such. Lightroom's
-dark ring around a bright star turned out to be bounded by the pixel's own
-luminance rather than by one constant, so the ring digs with the star:
-0.02 / 0.04 / 0.07 for faint / mid / bright stars against Lightroom's
-0.02 / 0.04 / 0.08. Masking and the rest of Detail's band are unmeasured.
+Each constant was fitted once, on purpose-shot frames at known slider values,
+and is then held by the project's own tests: a unit test pins every law's
+shape and constants, the reverse fit predicts a zone's exposure through the
+very per-pixel tone functions the render runs (a test holds the prediction to
+the render within 0.025), and a release does not ship while any of them is
+red. During development a commercial raw developer's renders served as the
+measurement reference for these constants; the shipped engine depends on
+nothing from it. Where a law is incomplete it says so: the rest of Detail's
+band in Sharpening and the feathered intersection of masks are not modelled.
+
+The XMP layer is hand-rolled on purpose — no XML crate — so a catalogue
+sidecar is merged into byte for byte, down to the SVD fold between
+Lightroom's pixel-space radial tilt and the engine's normalised rotation and
+to its `tiff:Orientation`, rewritten only when the photographer's own turn
+has moved away from it; Lightroom's Brotli-packed brush dab streams are
+imported and verified (`MD5 → .acr → Brotli`).
 Details:
 [docs/TECH_STACK.md#develop-pipeline-and-tone-model](TECH_STACK.md#develop-pipeline-and-tone-model).
 
 ## 5. The RAW denoiser is trained here and judged by pass marks written before the run
 
-<img src="images/showcase-denoise-star-field.jpg" alt="One 1:1 window of a 61 MP star field, four ways: Lightroom's develop with Denoise off and at 50, AutoShade's neutral develop with no denoise and with its own denoiser at the 71 % default" />
+<img src="images/showcase-denoise-star-field.jpg" alt="One 1:1 window of a 61 MP star field, two ways: AutoShade's neutral develop with no denoise and with its own denoiser at the 71 % default" />
 
 <sub>The author's own ISO 2500 star field, one 796 × 462 px window at 1:1,
-shown one stop brighter than the develops (the same gain on all four panels).
-Top: Lightroom's own develop with Denoise off and at 50. Bottom: AutoShade's
-neutral develop with no denoise and with its denoiser at the 71 % default —
-clean colour, the frame's own luminance grain, the faint stars still there.
-These are the four files the star-field test below measures.</sub>
+shown one stop brighter than the develops (the same gain on both panels):
+AutoShade's neutral develop with no denoise, and with its denoiser at the
+71 % default — clean colour, the frame's own luminance grain, the faint stars
+still there. These are the renders the star-field test below measures.</sub>
 
 Four training runs were made for this denoiser, on this project's own data.
 The first two shipped; the last two were refused by pass marks written down
 before they started, and one of them ran as five parallel jobs on a rented
-cloud GPU. Everything below was measured on the v1.6.0 build, against
-Lightroom's Denoise 50 on the same frame. The desert-canyon panel in
+cloud GPU. Everything below was measured on the v1.6.0 build. The
+desert-canyon panel in
 [§1](#1-whole-image-ai-generation-then-reverse-fit-an-editable-recipe-from-any-finished-look) shows the same denoiser on an ordinary dusk frame: its fourth
 column is the third's recipe rendered after the mosaic was cleaned, the
 look unchanged, the 1:1 window's grain 3.1 → 0.6 codes.
@@ -288,8 +286,7 @@ look unchanged, the 1:1 window's grain 3.1 → 0.6 codes.
   (`autoshade-raw-denoise-v2.pth`). The noise is **measured where it stands**,
   per tile on the finest diagonal wavelet band, and divided out before the
   network; on the star frame the per-tile residual's maximum fell 0.508 →
-  0.070 and the tile-to-tile spread of the fine-luminance ratio 0.185 → 0.014
-  (Lightroom's own: 0.011).
+  0.070 and the tile-to-tile spread of the fine-luminance ratio 0.185 → 0.014.
 - **Only luminance grain comes back.** At any positive strength the full clean
   output is requested; the original and the clean frame go through the same
   demosaic and calibration, and in linear light `1 − strength` of the
@@ -309,15 +306,14 @@ look unchanged, the 1:1 window's grain 3.1 → 0.6 codes.
   92 % at 10σ, chosen among that run's snapshots by pass marks written down
   before the run (`scripts/accept_v2.py`).
 - **The star-field test is a release gate.** Whenever the denoiser changes,
-  the author's ISO 2500 star field is denoised by AutoShade and by Lightroom's
-  Denoise 50 and compared reading by reading
+  the author's ISO 2500 star field is denoised and measured reading by
+  reading against limits fixed in advance
   (`scripts/denoise_star_standard.py`). On the v1.6.0 build, 6 of 8 denoiser
-  readings pass: 98.70 % of 17,817 real faint stars kept against Lightroom's
-  98.80 %; bright-star peaks 0.939 of the input against 0.953 and the four
-  colour planes' flux spread 0.0385 against a 0.02 limit stay behind; the
-  finished develop reads 0.2922 against Lightroom's 0.2701 (limit ±0.03) and
-  0.0139 (limit 0.0278). Two later training runs had their pass marks written
-  first, failed them, and were refused.
+  readings pass: 98.70 % of 17,817 real faint stars kept and the finished
+  develop's tile-to-tile spread 0.0139 (limit 0.0278); the bright-star peak
+  (0.939 of the input) and the four colour planes' flux spread (0.0385
+  against a 0.02 limit) stay behind. Two later training runs had their pass
+  marks written first, failed them, and were refused.
 
 Details: [docs/TECH_STACK.md#raw-denoise](TECH_STACK.md#raw-denoise) and
 the release notes, [docs/RELEASE_NOTES_v1.16.0.md](RELEASE_NOTES_v1.16.0.md).
@@ -351,13 +347,13 @@ were each measured:
 
 The tone stage scales colour by the luminance ratio, so every wiggle of slope
 acted on grain; on the star-field test's two finished-develop readings (§5)
-this moved 0.3075 → 0.2922 (Lightroom 0.2701, limit ±0.03) and 0.0387 (limit
-0.0309) → 0.0139 (limit 0.0278). Details:
+this moved the fine-luminance ratio 0.3075 → 0.2922 and the tile-to-tile
+spread 0.0387 → 0.0139 (limit 0.0278). Details:
 [docs/TECH_STACK.md#camera-base-look](TECH_STACK.md#camera-base-look).
 
 ## Designed, not yet shipped
 
-- **The two star-field readings still behind Lightroom.** On the v1.6.0 build
+- **The two star-field readings still behind their limits.** On the v1.6.0 build
   the denoiser keeps a bright star's light (a 5×5 aperture reads 1.00–1.03 of
   the input) but spreads its core a little (the single brightest sample reads
   0.82 of the input for faint stars, 0.92 for bright ones), which is what the
@@ -407,19 +403,10 @@ the tests [`scripts/check_docs.py`](../scripts/check_docs.py) re-derives.
 | What | Measured | Where |
 |---|---|---|
 | RAW coverage | 24 extensions, 725 camera bodies; nine-camera format zoo 9/9 at the last release gate | [Supported formats](../README.md#supported-formats) |
-| Texture law, measured on Lightroom exports | 45 of 45 period/depth anchors within ±0.02 | [Develop pipeline](#develop-pipeline-and-tone-model) |
-| Sharpening law (v1.17.0; measured on Camera Raw's own 16-bit renders of the same star-field frame: Amount 0 / 40 / 80 / 150, Radius 0.5 / 2 / 3, Detail 0 / 100, Masking 50 / 100) | per-pixel R² of the move 0.966 / 0.944 / 0.865 at Amount 40 / 80 / 150; Radius 0.956 / 0.955 / 0.915; Detail 0.716 / 0.947; Masking 0.961 / 0.957 — Detail 0 and Amount 150 under the 0.9 line, disclosed | [What is new §4](#4-rendering-laws-are-measured-from-camera-raw-renders-and-the-residuals-are-published) |
-| Sharpening law (v1.6.5; measured on one star-field frame exported from Lightroom at Sharpness 0 / 40 / 80, Radius 1.0, Detail 25, Masking 0) | per-pixel R² 0.93 / 0.92 over the frame, 0.95 on the edges and stars; star peaks +0.07 / +0.11 / +0.12 in Lightroom against the law's +0.08 / +0.11 / +0.13; the ring around them 0.02 / 0.04 / 0.08 against 0.02 / 0.04 / 0.07 | [What is new §4](#4-rendering-laws-are-measured-from-camera-raw-renders-and-the-residuals-are-published) |
-| Radial mask closure | 41 of 41 measured vectors within ≤1 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
-| Linear mask closure (openly not pixel-closed) | RMS 9.748 / 7.025 / 6.336 px with lens correction on, 12.449 / 9.943 / 4.979 px off | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
-| Linear falloff vs Lightroom coverage (46-export pack) | smoothstep on `t^1.124`: α rms 0.0064 against 0.0315 for the plain smoothstep and 0.0598 for a straight ramp; half-coverage contour +34.2/+38.2 px → +0.9/+5.0 px | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
-| Radial boundary (46-export pack) | a pure 0.99876 scale of the stored ellipse (sd 4×10⁻⁵ over masks 0.30/0.50/0.70 of frame): −1.12/−1.96/−2.79 px, no dilation law | [Lens correction](#lens-correction-and-lightroom-mask-frame-laws) |
-| Roundness (tilted 2:1 ellipse, feather 25/50/75) | Lightroom's R−100/0/+100 exports differ by max\|Δ\| = 0 DN over 26 Mpx; the engine draws one ellipse too | [Masks](#masks) |
-| Brush geometry | D1 error 874 px → 9.8 px after pixel-centre sampling and the pixel/aspect metric | [Masks](#masks) |
 | X-Trans demosaic (approximate) | X-S10 G/R ratio 1.5503 → 0.9476 | [RAW decode](#raw-decode-and-cfa) |
-| RAW denoise, measured noise field (star frame) | per-tile residual max 0.508 → 0.070; tile-to-tile width of the fine-luminance ratio 0.185 → 0.014 (Lightroom's own 0.011); ground-truth bench moved ≤ 0.01 dB | [What is new §5](#5-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
+| RAW denoise, measured noise field (star frame) | per-tile residual max 0.508 → 0.070; tile-to-tile width of the fine-luminance ratio 0.185 → 0.014; ground-truth bench moved ≤ 0.01 dB | [What is new §5](#5-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
 | Faint stars through the denoiser (stars of known brightness added to one green plane of the star frame) | light kept at 4σ / 6σ / 10σ: first training run 0.105 / 0.420 / 0.726 → the run that ships 0.541 / 0.835 / 0.918; pass marks written before the run | [What is new §5](#5-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
-| Star-field test, v1.6.0 build, against Lightroom Denoise 50 on the same frame | denoiser readings 6 of 8 pass: 98.70 % of 17,817 real faint stars kept against 98.80 %; bright-star peak 0.939 against 0.953 (behind); four-plane flux spread 0.0385 against 0.02 (behind); finished develop 0.2922 against 0.2701 (±0.03) and 0.0139 against 0.0278 | [What is new §5](#5-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
+| Star-field test, v1.6.0 build | denoiser readings 6 of 8 pass: 98.70 % of 17,817 real faint stars kept; bright-star peak 0.939 of the input (behind); four-plane flux spread 0.0385 against 0.02 (behind); finished develop tile-to-tile spread 0.0139 against 0.0278 | [What is new §5](#5-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
 | Hot-pixel map (ten 61 MP frames) | 86 / 20 / 77 sites inside the picture on three night frames, none on the fourth; 0 / 0 / 0 / 6 / 0 / 4 on ordinary frames; about 0.1 s a frame | [What is new §5](#5-the-raw-denoiser-is-trained-here-and-judged-by-pass-marks-written-before-the-run) |
 | Camera base look, v1.6.0 estimator (star frame, 8-bit levels) | develop against the camera's rendition 0.75 rms (median +0.19), 4.24 (+2.56) before; 4 knots instead of 13; finished-develop readings 0.3075 → 0.2922 and 0.0387 → 0.0139 | [What is new §6](#6-the-cameras-own-look-is-read-from-the-picture-like-with-like) |
 | Reverse-fit, stone viaduct (full solve, Reverse-fit strength 100 %) | look error 0.161 → 0.023 at confidence 0.63, D = 0.180; at the default 65 % the pair fits to 0.047 at confidence 0.25; v1.2.2's fit of it is where the seam fix was measured: sky tile 0.0278 → 0.0042, delivered +3.15 → +0.92 codes | [What is new §1](#1-whole-image-ai-generation-then-reverse-fit-an-editable-recipe-from-any-finished-look) |
@@ -435,9 +422,8 @@ the tests [`scripts/check_docs.py`](../scripts/check_docs.py) re-derives.
 - **The AI decides what to change; the engine does it** — a bounded recipe
   with its rationale and confidence, one deterministic renderer behind every
   front end.
-- **Measured, not assumed** — rendering laws are fitted to measurements of
-  Camera Raw renders and of the camera, and quoted with residuals; release claims are re-derived
-  by a script.
+- **Measured, not assumed** — every rendering law is written down with its
+  constants and held by a test; release claims are re-derived by a script.
 - **Non-destructive, interoperable, local first** — the source library stays
   read-only, develops live in a per-user store, and sidecars are merged so a
   Lightroom catalogue survives.
@@ -473,8 +459,8 @@ The engine under `src/render/` is a deterministic f32
 pipeline: linear-light vignette and dehaze, a monotone Fritsch–Carlson tone
 LUT with Highlights inside it, then RGB curves, HSL, colour grade,
 clarity/Texture (two measured low-pass arms, `A1=0.172443`,
-`A2=0.304888`), saturation, NR, sharpening (measured against Lightroom's
-since v1.6.5; a RAW with no amount at Lightroom's default of 40, a baked
+`A2=0.304888`), saturation, NR, sharpening (a calibrated law since
+v1.6.5; a RAW with no amount at Lightroom's default of 40, a baked
 raster at 0) and local edits, under the
 per-photo base look of §6.
 
@@ -484,8 +470,8 @@ radial, linear, brush, bitmap, luminance-range and colour-range
 masks with ordered Add/Subtract/Intersect composition in the engine and
 the sidecar; a measured 290×11 `alpha(rho, feather)` LUT, brush dabs by
 `(1-rho^m)^n` with `kappa=0.1284` over pixel-centre sampling, and
-`MaskBrushTable` import validated MD5→`.acr`→Brotli. Lightroom's own
-feathered intersection rendering remains unmeasured.
+`MaskBrushTable` import validated MD5→`.acr`→Brotli. The feathered
+intersection of masks is not modelled.
 
 ### AI masks
 
