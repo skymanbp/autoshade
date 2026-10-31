@@ -109,7 +109,7 @@ use rasters::{raster_centroid};
 use regions::{attach_semantic_regions, segment_multiclass_both};
 pub use zone_fit::{ZoneMode};
 pub(crate) use zone_fit::{
-    ZoneMoments, fit_zone_dials, fit_zone_dials_on, fit_zone_tone_on, zone_err, zone_luma_cdf, zone_moments, zone_sat_step,
+    ZoneMoments, fit_zone_dials, zone_err, zone_luma_cdf, zone_moments, zone_sat_step,
 };
 use zone_fit::{
     ZONE_VOUCH_SHRINK_STEPS, ZoneAcceptArm, clamp_zone_sat, clamp_zone_sat_for_mode, local_quality,

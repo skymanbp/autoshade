@@ -342,9 +342,7 @@ pub fn render_to_file(
 }
 
 /// A MASTER of `raw` for `part`, rendered to `out` through
-/// [`BasePart::master_recipe`] and stamped with the lens geometry in its
-/// pixels before it is published ([`BasePart::baked_geometry`]): the
-/// full-resolution AI denoise's master.
+/// [`BasePart::master_recipe`]: the full-resolution AI denoise's master.
 pub fn render_master_to_file(
     raw: &Path,
     part: &BasePart,
@@ -352,8 +350,7 @@ pub fn render_master_to_file(
     denoise: Option<&crate::denoise::DenoiseOpts>,
     sink: &dyn crate::diag::Sink,
 ) -> Result<(u32, u32)> {
-    let baked = part.baked_geometry();
-    render_to_file_marked(raw, &part.master_recipe(), out, denoise, None, sink, baked.as_ref())
+    render_to_file_marked(raw, &part.master_recipe(), out, denoise, None, sink, None)
 }
 
 /// [`render_to_file`], stamping `marker` on the staged file before the

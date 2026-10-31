@@ -640,11 +640,10 @@
     /// of itself this engine cannot render.
     ///
     /// The disclosure is the point. A `crs:Look` has two halves — baked
-    /// sliders and a baked tone curve, which `render::build_tone_lut` and
-    /// `render::apply_rgb_curves` compose as the base rendition, and a
-    /// `crs:LookTable` creative colour table, which renders only when Camera
-    /// Raw's install carries it and the Look is at full amount (v1.17.0,
-    /// `dcp::find_look_table`). A panel that printed
+    /// sliders and a baked tone curve, which never render (v1.17.0: a Look is
+    /// colour data), and a `crs:LookTable` creative colour table, which
+    /// renders only when Camera Raw's install carries it and the Look is at
+    /// full amount (`dcp::find_look_table`). A panel that printed
     /// 「Adobe Landscape」 and stopped would be claiming the whole profile
     /// renders, on a photograph where the colour half does not — the exact
     /// shape of 「a slider that moves a number and no pixel」 this file's own
@@ -676,7 +675,7 @@
                 tr(lang, "Creative profile"),
                 tr(
                     lang,
-                    "Its baked tone curve and sliders render; its creative colour table does not",
+                    "Neither its creative colour table nor its baked tone curve and sliders render",
                 ),
             ] {
                 assert!(seen.iter().any(|t| t == want), "{lang:?}: {want:?} missing: {seen:?}");
@@ -708,8 +707,8 @@
             // Adobe Color's own table, where Camera Raw is installed, renders
             // and the panel says so; below full amount it does not.
             if autoshade::dcp::find_look_table("E1095149FDB39D7A057BAB208837E2E1").is_ok() {
-                let renders = tr(lang, "Its baked tone curve, sliders and creative colour table render");
-                let not = tr(lang, "Its baked tone curve and sliders render; its creative colour table does not");
+                let renders = tr(lang, "Its creative colour table renders; its baked tone curve and sliders do not");
+                let not = tr(lang, "Neither its creative colour table nor its baked tone curve and sliders render");
                 if let Some(look) = app.recipe.look.as_mut() {
                     look.table = "E1095149FDB39D7A057BAB208837E2E1".to_string();
                 }
@@ -725,9 +724,8 @@
                     look.amount = 1.0;
                 }
             }
-            // A Look with NO table renders whole, so there is nothing to
-            // disclose and the line must not appear — an unconditional
-            // disclaimer is noise that teaches the reader to skip it.
+            // A Look with NO table: its baked half is all it has, and it does
+            // not render — the line says so.
             if let Some(look) = app.recipe.look.as_mut() {
                 look.table.clear();
             }
@@ -737,12 +735,8 @@
                 "{lang:?}: the name still shows: {seen:?}"
             );
             assert!(
-                !seen.iter().any(|t| t
-                    == tr(
-                        lang,
-                        "Its baked tone curve and sliders render; its creative colour table does not",
-                    )),
-                "{lang:?}: nothing is missing, so nothing is disclosed: {seen:?}"
+                seen.iter().any(|t| t == tr(lang, "Its baked tone curve and sliders do not render")),
+                "{lang:?}: the baked half is disclosed: {seen:?}"
             );
         }
     }

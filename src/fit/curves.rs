@@ -94,7 +94,7 @@ pub(super) fn band_stats_weighted(px: &[[f32; 3]], weights: &[f32]) -> ([BandSta
 pub(super) fn residual_channel_curve(cur: &[[f32; 3]], tgt: &[[f32; 3]], ch: usize) -> Vec<CurvePoint> {
     let all_a = vec![1.0; cur.len()];
     let all_b = vec![1.0; tgt.len()];
-    residual_channel_curve_weighted(cur, tgt, ch, &all_a, &all_b, render::SliderLaw::Engine)
+    residual_channel_curve_weighted(cur, tgt, ch, &all_a, &all_b)
 }
 
 pub(super) fn residual_channel_curve_weighted(
@@ -103,14 +103,11 @@ pub(super) fn residual_channel_curve_weighted(
     ch: usize,
     cur_weights: &[f32],
     tgt_weights: &[f32],
-    law: render::SliderLaw,
 ) -> Vec<CurvePoint> {
-    // In the channels the curve is APPLIED to under the recipe's law
-    // (`render::curve_channels_under`): ProPhoto's under the sRGB transfer on
-    // Camera Raw's (v1.17.0, measured), the working channels on the engine's.
-    // A CDF matched in one space and applied in another is a different curve.
-    let c_cdf = weighted_cdf(cur, cur_weights, |p| render::curve_channels_under(p, law)[ch]);
-    let t_cdf = weighted_cdf(tgt, tgt_weights, |p| render::curve_channels_under(p, law)[ch]);
+    // In the channels the curve is applied to: the working space's own
+    // encoded channels (`render::apply_rgb_curves`).
+    let c_cdf = weighted_cdf(cur, cur_weights, |p| p[ch]);
+    let t_cdf = weighted_cdf(tgt, tgt_weights, |p| p[ch]);
     if c_cdf.iter().all(|&v| v <= 0.0) || t_cdf.iter().all(|&v| v <= 0.0) {
         return Vec::new();
     }
@@ -138,11 +135,10 @@ pub(super) fn residual_channel_curve_weighted(
     // `x → Q_t(F_c(x))` sampled on its support. Knots at FIXED inputs
     // (0, ¼, ½, ¾, 1) pinned `x = 0` to `Q_t(P_CLIP)` wherever the channel
     // holds no pixel near 0, and the spline from there to the next knot lifted
-    // every pixel in between off the map. In the curve law's channels
-    // (ProPhoto under the sRGB transfer) a colourful frame's channel floor
-    // sits well above 0, so that lift was a hue move by luminance: the
-    // hand-off ramps' as-fitted cast fanned 37° where the target differs by
-    // 4°, and raised the look error it was fitted to lower (0.017 → 0.022).
+    // every pixel in between off the map. A colourful frame's channel floor
+    // sits well above 0, so that lift was a hue move by luminance (measured
+    // while the curves acted on ProPhoto channels: the hand-off ramps' as-fitted cast fanned 37° where the target differs by
+    // 4°, and raised the look error it was fitted to lower, 0.017 → 0.022).
     // Past the support the curve continues the map's own offset at each end,
     // so a lifted black stays lifted and an untouched one stays at 0.
     let q = |cdf: &[f32], p: f32| quantile(cdf, p).clamp(0.0, 1.0);
@@ -478,8 +474,7 @@ pub(super) fn search_cast_projection(
 /// inverts onto an edge of the Kelvin domain ([`WB_SEARCH_K`]), falls outside
 /// the strength budget (`in_budget`, the same check the caller puts on every
 /// candidate), or inverts onto the same `(K, tint)` as twice that `λ` (the
-/// point has stopped moving: on Camera Raw's law a demand with a strong green
-/// component pins the tint, and past where the Kelvin also settles every
+/// point has stopped moving: past where the Kelvin and tint settle every
 /// farther `λ` names the same pair) — or at [`HANDOFF_REACH_MAX`]; the
 /// candidates are then `HANDOFF_STEPS` even steps of that extent. Measured on
 /// the two-temperature pair p40 (2026-10-29), before the budget and the

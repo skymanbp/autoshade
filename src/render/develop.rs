@@ -75,7 +75,7 @@ pub fn develop_preview_film(
     film_short_edge: Option<u32>,
     source: &SourceFrame,
 ) -> DynamicImage {
-    let corrected = source.corrected(recipe);
+    let corrected = source.corrected();
     develop_preview_inner(preview, recipe, diag, None, film_short_edge, source.is_raw(), corrected)
 }
 
@@ -108,21 +108,10 @@ fn develop_preview_inner(
     let validated = crate::recipe::ValidatedRecipe::new(recipe);
     validated.disclose(diag);
     let recipe = &*validated;
-    // Where the white balance is (v1.17.0). A reverse fit's plate re-develops
-    // the recipe's white from its camera frame (`canvas::plate_pixels`); a RAW
-    // source's canvas hands the base of the recipe's own canvas part, which is
-    // developed at that white (`BasePart::of_canvas`). Either way the white is
-    // in the pixels and this pass leaves it out; any other pixels arrive at As
-    // Shot and take it here.
-    //
-    // And the frame the pixels are in: a plate says it of its own pixels (the
-    // reverse fit's source, v1.17.0), any other pixels take the caller's word.
-    let plated = super::canvas::plate_pixels(preview, recipe, diag);
-    let (pixels, white_in_pixels, corrected) = match &plated {
-        Some((Some(img), white, c)) => (&**img, *white, *c),
-        Some((None, white, c)) => (preview, *white, *c),
-        None => (preview, raw_source && BasePart::of_canvas(recipe).carries_white(), corrected),
-    };
+    // The frame the pixels are in: a plate says it of its own pixels (the
+    // reverse fit's source), any other pixels take the caller's word.
+    let corrected = corrected || super::canvas::plate_corrected(preview);
+    let pixels = preview;
     // A float base (`render::canvas`) is read as it is, over-range light and
     // all; every other preview at 8 bits, as before.
     let (w, h) = (pixels.width(), pixels.height());
@@ -135,9 +124,7 @@ fn develop_preview_inner(
             .map(|p| [p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0])
             .collect(),
     };
-    if !white_in_pixels {
-        apply_recipe_wb(&mut data, recipe);
-    }
+    apply_recipe_wb(&mut data, recipe);
     // The pixels come first here (they used to come after the profile) for one
     // reason: the auto-CA solver reads them, and `geometry_profile` below must
     // already carry its answer — on this raster as on the export's, because the
@@ -183,7 +170,7 @@ fn apply_develop(
     raw_source: bool,
 ) {
     let rasters = best_effort_mask_raster_snapshot(r, diag);
-    apply_develop_with_rasters(data, w, h, r, &rasters, frame, film, raw_source, ExportColorSpace::Srgb, OverRange::Clip);
+    apply_develop_with_rasters(data, w, h, r, &rasters, frame, film, raw_source);
 }
 
 /// [`apply_develop`] on pixels with no owner and no caller to route to — the
@@ -306,8 +293,6 @@ pub(super) fn apply_develop_with_rasters(
     frame: MaskFrame<'_>,
     film: FilmScale,
     raw_source: bool,
-    space: ExportColorSpace,
-    over_range: OverRange,
 ) {
     // 0-) spot removal (v1.5.0 F9) — Lightroom's `crs:RetouchAreas`, which
     //    this engine re-solves from the frame's own pixels. FIRST, for two
@@ -344,12 +329,6 @@ pub(super) fn apply_develop_with_rasters(
     if !r.retouch.is_empty() {
         crate::retouch::heal_planar(data, w, h, &retouch_spots_in(r, w, h, corrected));
     }
-    // 0w) v1.17.0: a mask's Temp and Tint on a camera-profile start, right
-    //    after the global white balance they are a move of (`mask_cr`).
-    let camera_raw = SliderLaw::of(r) == SliderLaw::CameraRaw;
-    if camera_raw {
-        mask_cr::apply_local_white(data, w, h, r, rasters, frame, space);
-    }
     // 00) camera calibration (v1.5.0). Lightroom's Calibration panel belongs
     //    to the camera profile, so it is the first thing that happens to the
     //    white-balanced frame and every later stage sees the moved primaries —
@@ -371,17 +350,8 @@ pub(super) fn apply_develop_with_rasters(
     //    that should cancel multiplicatively could not cancel on clipped
     //    pixels (the old "order between them is cosmetic" comment was only
     //    true of un-clamped math — L01-6).
-    //    On a camera-profile start the PROFILE's gain is not here at all: it
-    //    went on the sensor's linear light before the profile stage
-    //    (`render::source`, and the preview bases through `BasePart`), where
-    //    Camera Raw applies it. What is left here is the manual slider, put on
-    //    under the profile's ramp and curve (`apply_radial_gain_under_tone`).
     if let Some(lut) = vignette_gain_lut(r) {
-        if camera_raw {
-            apply_radial_gain_under_tone(data, w, h, &lut, space, r.camera_start.unwrap_or_default());
-        } else {
-            apply_radial_gain(data, w, h, &lut);
-        }
+        apply_radial_gain(data, w, h, &lut);
     }
     // 0b) dehaze — pointwise atmospheric-veil removal in LINEAR light, before
     //    any tonal work: the airlight estimate then depends only on the capture
@@ -390,9 +360,7 @@ pub(super) fn apply_develop_with_rasters(
     //    pinned-white tone LUT afterwards cannot blow what dehaze protected,
     //    and saturation/vibrance stay downstream so the user can trim dehaze's
     //    chroma restoration.
-    // v1.17.0: on a camera-profile start Dehaze follows Camera Raw's
-    // measured law instead, after the exposure below (`dehaze_cr`).
-    if r.dehaze != 0.0 && !camera_raw {
+    if r.dehaze != 0.0 {
         apply_dehaze(data, w, r.dehaze);
     }
     // 1) tonal ops via the LUT (exposure/contrast/whites/blacks/highlights/
@@ -412,100 +380,13 @@ pub(super) fn apply_develop_with_rasters(
     //    recipe (`EditRecipe::has_tone_work`), against the same inputs
     //    `build_tone_lut` reads: this condition listing its own copy of them is
     //    exactly how the profile came to render nothing.
-    let tone_neutral = !r.has_tone_work()
-        && (!camera_raw || (r.dehaze == 0.0 && r.clarity == 0.0 && !mask_cr::any_local_tone(r)));
-    // The camera stage kept a Camera Raw frame's over-range light for the
-    // slider Exposure (`calibrate_camera_buffer`); with no tone pass to carry
-    // it there, it ends here.
-    if camera_raw && tone_neutral && over_range == OverRange::Clip {
-        clip_over_range(data);
-    }
-    if !tone_neutral {
-        // v1.17.0: on a camera-profile start, Highlights and Shadows first
-        // (their own pass: a local law, keyed to the frame); exposure, per channel
-        // by Adobe's rule; then Contrast, Whites and Blacks by Camera Raw's
-        // measured curve rule (`tone::CameraRawTone::sliders_px`, the middle by
-        // its encoded ratio, as the composite curve); the photographer's
-        // curves, then the Look's, by the same rule (`tone`).
-        if camera_raw {
-            let tone = camera_raw_tone_passes(r);
-            // Highlights and Shadows FIRST, global then each mask's, on one
-            // base layer (`tone_cr`: Camera Raw applies them before
-            // Exposure, and their push reads the frame's own base).
-            let (hl, sh) = tone.highlights_shadows;
-            if hl != 0.0 || sh != 0.0 || mask_cr::any_local_hs(r) {
-                let field = hs_field(data, w, h, film, true);
-                apply_camera_raw_hs(data, &field, hl, sh);
-                mask_cr::apply_local_hs(data, w, h, r, rasters, frame, &field);
-            }
-            // Exposure: one transfer at the camera start plus the slider, in
-            // the profile's reference primaries under Adobe's curve
-            // (`tone_cr::Exposure`).
-            let start = r.camera_start.unwrap_or_default();
-            let exposure = Exposure::new(start, r.exposure_ev);
-            if let Some(e) = &exposure {
-                let under = profile::UnderTone::new(space, start);
-                let (dec, enc) = transfer_luts();
-                data.par_iter_mut().for_each(|px| {
-                    *px = under.expose(px.map(|v| decode_wide(dec, v)), e).map(|v| encode_wide(enc, v.max(0.0)));
-                });
-            }
-            // A mask's Exposure, then its sliders, each after the global
-            // one it adds to (`mask_cr`).
-            let exposed = exposure.as_ref().map_or(start, Exposure::exposed);
-            mask_cr::apply_local_exposure(data, w, h, r, rasters, frame, space, exposed);
-            if over_range == OverRange::Clip {
-                clip_over_range(data);
-            }
-            // Dehaze: after Highlights/Shadows and Exposure, before Contrast,
-            // Whites, Blacks and the curves, a spatial scattering inversion
-            // under Adobe's curve (`dehaze_cr`, where it sits measured).
-            if r.dehaze != 0.0 {
-                dehaze_cr::apply_camera_raw_dehaze(data, w, h, r.dehaze, &profile::UnderTone::new(space, exposed));
-            }
-            // Contrast, Whites and Blacks (with the Look's baked moves and
-            // Clarity's tone) go on like a point curve: ProPhoto channels, the
-            // extremes through the LUT on sRGB-encoded values, the middle at its
-            // encoded ratio. Measured against Camera Raw on p39 (v1.17.0, the
-            // stacked look tables, 12 single-slider renders: Contrast ±50 ±100,
-            // Whites ±40 ±80, Blacks ±40 ±80, against the flat render; chroma
-            // > 15, mean |Δab| of the double difference): this rule 1.33, the
-            // middle at its linear ratio 1.45, each channel on its own 1.65, the
-            // channel rule on the working channels 1.75, the rule's hue with the
-            // luma's lightness (until item 35) 2.17, the luma ratio 4.45.
-            // Lightness is the LUT's under every rule (ΔL by band within 0.1).
-            // A pass that also carries Clarity's tone keeps the earlier pixel
-            // rule (`tone_cr::camera_raw_slider_pixel`): on Clarity +50, +100
-            // and −50 that rule leaves 2.30 / 4.21 / 2.90, this one 2.55 /
-            // 4.52 / 3.58 (Clarity is local in Camera Raw, its tone half here
-            // only a global stand-in).
-            // Then a negative Blacks: each ProPhoto channel through its curve
-            // on its own (`tone::CameraRawTone::blacks_down`, measured). Both
-            // per pixel by `tone::CameraRawTone::sliders_px`, the function the
-            // zone fit's law (`mask_cr::LocalGreyLaw`) calls too.
-            let cs = CurveSpace::new(space);
-            let clarity = r.clarity != 0.0;
-            if tone.sliders.is_some() || tone.blacks_down.is_some() {
-                data.par_iter_mut().for_each(|px| *px = tone.sliders_px(*px, &cs, clarity));
-            }
-            mask_cr::apply_local_sliders(data, w, h, r, rasters, frame);
-            // The photographer's parametric and point curves, then the
-            // Look's baked curve, both by Camera Raw's measured rule on
-            // ProPhoto channels (`tone::CameraRawTone::curves_px`, shared
-            // with the zone fit's law; the Look's curve went by the luma
-            // ratio until item 35). The two keep the middle channel
-            // differently, measured (`tone::MiddleRatio`).
-            if tone.curves.is_some() || tone.look.is_some() {
-                data.par_iter_mut().for_each(|px| *px = tone.curves_px(*px, &cs));
-            }
-        } else {
-            let lut = build_tone_lut(r);
-            data.par_iter_mut().for_each(|px| {
-                let l_old = luma601(px);
-                let l_new = sample_lut(&lut, l_old);
-                scale_chroma(px, l_old, l_new);
-            });
-        }
+    if r.has_tone_work() {
+        let lut = build_tone_lut(r);
+        data.par_iter_mut().for_each(|px| {
+            let l_old = luma601(px);
+            let l_new = sample_lut(&lut, l_old);
+            scale_chroma(px, l_old, l_new);
+        });
     }
     // 1a) the B&W treatment (v1.5.0) replaces the colour mixer, and it runs
     //    BEFORE the per-channel curves: a red-channel curve on a black-and-white
@@ -518,13 +399,9 @@ pub(super) fn apply_develop_with_rasters(
     if monochrome {
         apply_gray_mix(data, &r.gray_mixer());
     }
-    // 1b) per-channel RGB curves (red/green/blue) on the engine's own law,
-    //    right after the master curve, on the working channels — their place
-    //    in every release before v1.17.0. Camera Raw's law puts them after
-    //    Saturation (3c below).
-    if !camera_raw {
-        apply_rgb_curves(data, r, space);
-    }
+    // 1b) per-channel RGB curves (red/green/blue), right after the master
+    //    curve, on the working channels.
+    apply_rgb_curves(data, r);
     // 2) per-colour HSL (the 8 ACR bands): rotate/scale each colour family,
     //    after global tone and before clarity/saturation (ACR ordering) — then
     //    the point colours (v1.5.0), the Color Mixer's other half. Neither has
@@ -557,7 +434,7 @@ pub(super) fn apply_develop_with_rasters(
     //     measured two-lowpass mix since R29 B8-2 (`texture_negative_pass`) —
     //     a rendering change for every negative value, here and in the mask.
     if r.texture != 0.0 {
-        texture_pass(data, w, h, texture_amount(r, r.texture), |_, _, _| 1.0);
+        texture_pass(data, w, h, r.texture / 100.0, |_, _, _| 1.0);
     }
     // 3) saturation / vibrance — not in black and white, where the only
     //    colour left is the grade's tint: a Saturation slider that also
@@ -568,18 +445,6 @@ pub(super) fn apply_develop_with_rasters(
         data.par_iter_mut().for_each(|px| {
             *px = apply_sat_vibrance(px[0], px[1], px[2], sat, vib);
         });
-    }
-    // 3c) per-channel RGB curves (red/green/blue), on ProPhoto's channels
-    //    (v1.17.0, measured: `tone::apply_rgb_curves`). After the mixer and
-    //    Saturation/Vibrance, Camera Raw's place for them: a red curve
-    //    composed onto Camera Raw's own HSL and Saturation renders predicts
-    //    them to 0.09 and 0.08 ΔE. Still before the colour grade's place in
-    //    Camera Raw would be (after these curves: composing the curve onto
-    //    its grade render is 8.7 ΔE off), which here runs earlier — a known
-    //    difference of the order, ARCHITECTURE. Camera Raw's law only (a
-    //    recipe naming a camera profile); the engine's ran at 1b.
-    if camera_raw {
-        apply_rgb_curves(data, r, space);
     }
     // 4) the Detail panel (v1.5.0, `detail.rs`): colour noise, then luminance
     //    noise, then sharpening. Noise reduction runs BEFORE sharpening (the
@@ -600,7 +465,7 @@ pub(super) fn apply_develop_with_rasters(
     }
     // 6) local masked adjustments (linear/radial gradients).
     if !r.masks.is_empty() {
-        apply_masks(data, w, h, r, rasters, frame, film, space);
+        apply_masks(data, w, h, r, rasters, frame, film);
     }
     // 7) the colour field, after the masks on purpose: it is the residual the
     //    mask-shaped controls above could not reach, so it must read the
@@ -854,9 +719,9 @@ fn scaled_profile_gain(g: f32, s: f32) -> f32 {
 /// the one clamp in `apply_radial_gain` runs on the true combined gain and
 /// inverse corrections genuinely cancel (L01-6).
 pub(super) fn vignette_gain_lut(r: &EditRecipe) -> Option<Vec<f32>> {
-    // Under Camera Raw's law the profile's gain belongs to the source develop
-    // (`render::source`), not to this stage.
-    let profile = (r.lens_profile.vignette_active() && SliderLaw::of(r) != SliderLaw::CameraRaw)
+    let profile = r
+        .lens_profile
+        .vignette_active()
         .then(|| profile_vignette_lut(&r.lens_profile.vignette, r.lens_profile_vignetting_scale));
     let manual =
         (r.lens_vignette != 0.0).then(|| manual_vignette_lut(r.lens_vignette, r.lens_vignette_mid));
@@ -895,89 +760,6 @@ pub(super) fn apply_radial_gain(data: &mut [[f32; 3]], w: usize, h: usize, gain_
             for c in px.iter_mut() {
                 *c = sample_lut(enc, (sample_lut(dec, *c) * gain).clamp(0.0, 1.0));
             }
-        }
-    });
-}
-
-/// [`apply_radial_gain`] on LINEAR light that no transfer has touched — the
-/// sensor's own, before the camera profile stage (`render::source`). No clamp:
-/// the profile stage and its highlight treatment come after.
-pub(super) fn apply_radial_gain_linear(data: &mut [[f32; 3]], w: usize, h: usize, gain_lut: &[f32]) {
-    if w == 0 || h == 0 {
-        return; // par_chunks_mut(0) asserts even on an empty slice (U14)
-    }
-    let (cx, cy) = ((w as f32 - 1.0) * 0.5, (h as f32 - 1.0) * 0.5);
-    let rmax = (cx * cx + cy * cy).sqrt().max(1.0);
-    data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        let dy = y as f32 - cy;
-        for (x, px) in row.iter_mut().enumerate() {
-            let dx = x as f32 - cx;
-            let gain = sample_lut(gain_lut, ((dx * dx + dy * dy).sqrt() / rmax).clamp(0.0, 1.0));
-            *px = px.map(|c| c * gain);
-        }
-    });
-}
-
-/// [`apply_radial_gain`] on a frame the camera-profile stage has rendered: each
-/// pixel's light is taken back under Adobe's default curve and the exposure
-/// transfer ([`profile::UnderTone`]), multiplied there, and put back through them.
-/// Only the MANUAL vignette slider comes here; the profile's own gain goes on
-/// before the profile stage (`render::source`), because taken back under the
-/// curve alone it still met the profile's HueSatMap on the wrong side (up to
-/// 0.96 % off Camera Raw in a 14–24 mm corner, 0.12 % where it is now). Light
-/// the manual slider acts in under Camera Raw's law is not measured.
-/// What a develop does with a Camera Raw frame's over-range light at the end
-/// of its slider Exposure ([`clip_over_range`]): every render clips it, the
-/// canvas's float base keeps it for the canvas's own Exposure (`render::canvas`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum OverRange {
-    Clip,
-    Keep,
-}
-
-/// A Camera Raw frame's over-range light, which the camera stage kept
-/// ([`calibrate_camera_buffer`]), ends after the slider Exposure: each
-/// component clips at the working space's 1, with no desaturation. Measured
-/// against Camera Raw's renders: warm patches beyond sRGB at −1.51 EV come back
-/// with their hue only when the light is kept to the Exposure (worst ΔE 39.8 →
-/// 3.3), and at 0 EV and on the five carry pairs rawler's blown-pixel
-/// desaturation in this place reads worse than the clip (synthetic worst ΔE
-/// 34.9 → 10.9; p40 +0.7 EV 4.80 → 4.13).
-fn clip_over_range(data: &mut [[f32; 3]]) {
-    data.par_iter_mut().for_each(|px| *px = clip_px(*px));
-}
-
-/// One pixel's over-range light clipped at white, as [`clip_over_range`]
-/// clips the frame (shared with `mask_cr::LocalGreyLaw`).
-pub(super) fn clip_px(px: [f32; 3]) -> [f32; 3] {
-    px.map(|c| c.min(1.0))
-}
-
-fn apply_radial_gain_under_tone(
-    data: &mut [[f32; 3]],
-    w: usize,
-    h: usize,
-    gain_lut: &[f32],
-    space: ExportColorSpace,
-    start: crate::recipe::CameraStart,
-) {
-    if w == 0 || h == 0 {
-        return; // par_chunks_mut(0) asserts even on an empty slice (U14)
-    }
-    let (cx, cy) = ((w as f32 - 1.0) * 0.5, (h as f32 - 1.0) * 0.5);
-    let rmax = (cx * cx + cy * cy).sqrt().max(1.0);
-    let (dec, enc) = transfer_luts();
-    let under = profile::UnderTone::new(space, start);
-    data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        let dy = y as f32 - cy;
-        for (x, px) in row.iter_mut().enumerate() {
-            let dx = x as f32 - cx;
-            let gain = sample_lut(gain_lut, ((dx * dx + dy * dy).sqrt() / rmax).clamp(0.0, 1.0));
-            if (gain - 1.0).abs() < 1e-6 {
-                continue;
-            }
-            let light = under.undo(px.map(|v| decode_wide(dec, v))).map(|c| c * gain);
-            *px = under.redo(light).map(|v| encode_wide(enc, v.max(0.0)));
         }
     });
 }

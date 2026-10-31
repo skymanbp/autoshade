@@ -1098,10 +1098,19 @@ fn a_passthrough_value_is_never_called_unparsable() {
 /// whatever the base holds.
 #[test]
 fn a_creative_look_reaches_lightroom_from_a_fresh_document_and_a_lookless_merge() {
-    let look = crate::xmp::canvas_look();
-    assert_eq!(look.name, "Adobe Color");
-    assert_eq!(look.table, "E1095149FDB39D7A057BAB208837E2E1");
-    assert_eq!(look.tone_curve.len(), 7, "{:?}", look.tone_curve);
+    let knot = |input, output| crate::recipe::CurvePoint { input, output };
+    let line = vec![knot(0, 0), knot(255, 255)];
+    let look = crate::recipe::CreativeLook {
+        name: "A Look".into(),
+        amount: 1.0,
+        base_profile: "Adobe Standard".into(),
+        table: "00000000000000000000000000000001".into(),
+        tone_curve: vec![knot(0, 0), knot(40, 35), knot(224, 230), knot(255, 255)],
+        red_curve: line.clone(),
+        green_curve: line.clone(),
+        blue_curve: line,
+        ..Default::default()
+    };
     let r = EditRecipe {
         camera_profile: "Adobe Standard".into(),
         look: Some(look.clone()),

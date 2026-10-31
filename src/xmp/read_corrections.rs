@@ -1075,11 +1075,8 @@ fn parse_one_correction_with_reader(
         // would read 27.8, ÷360 would read 100). The recipe's domain is the
         // file's ±1.0 on that scale, ±180 (`recipe::LOCAL_HUE_MAX_DEG`,
         // v1.17.0), so this is a boundary conversion like `crs:Feather`'s.
-        //
-        // What is measured here is the SCALE. The meaning was measured in
-        // v1.17.0: on a camera-profile start Camera Raw turns the hue by the
-        // value in degrees (`render::mask_cr::hue_px`); every other recipe
-        // keeps `render::apply_masks`'s ±30° rotation.
+        // What is measured here is the SCALE; the render keeps
+        // `render::apply_masks`'s ±30° rotation per 100.
         hue: q180("LocalHue"),
         temperature: q100("LocalTemperature"),
         tint: q100("LocalTint"),

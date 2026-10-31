@@ -322,7 +322,7 @@ impl AutoShadeApp {
         if !self.source_is_raw() || self.active_variant().is_some_and(|v| v.base.is_some()) {
             return true;
         }
-        let want = autoshade::render::BasePart::of_canvas(&self.recipe);
+        let want = autoshade::render::BasePart::of(&self.recipe);
         if want == self.source_part {
             return true;
         }
@@ -1300,7 +1300,6 @@ impl AutoShadeApp {
                             if stamp {
                                 stamp_calibration(&mut recipe, &start, &lens, as_shot);
                             } else if recipe.base_curve.is_empty()
-                                && !recipe.names_profile()
                                 && !start.is_empty()
                                 && open_note.is_none()
                             {
@@ -1315,13 +1314,6 @@ impl AutoShadeApp {
                                     )
                                     .into(),
                                 );
-                            }
-                            // The camera start (v1.17.0) at whatever profile
-                            // the open settled on — a stamped fresh start and a
-                            // saved develop alike (`pipeline::stamp_camera_start`);
-                            // a generated master's strip below clears it.
-                            if let Some(p) = self.src_path.as_deref() {
-                                autoshade::pipeline::stamp_camera_start(p, &mut recipe);
                             }
                             // The saved develop is the ● baseline; a canvas
                             // stashed when the user navigated away THIS session

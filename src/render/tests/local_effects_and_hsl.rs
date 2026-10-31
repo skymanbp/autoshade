@@ -127,44 +127,6 @@ fn engine_active_counts_local_point_curves() {
     }
 }
 
-/// Item 35: on a camera-profile start a mask's `MainCurve` follows Camera
-/// Raw's curve rule on ProPhoto channels, the middle channel at its encoded
-/// ratio — measured on a full-coverage gradient mask, `0,0 / 128,180 /
-/// 255,255` after the Look: ΔE 0.069 that way, 0.718 by the luma ratio.
-///
-/// MUTATION: put the camera-profile arm in `masks::apply_masks` back on the
-/// luma ratio.
-#[test]
-fn a_masks_main_curve_follows_camera_raws_curve_rule() {
-    use crate::recipe::CurvePoint;
-    let (w, h) = (8usize, 2usize);
-    let base: Vec<[f32; 3]> = (0..w * h).map(|_| [0.62, 0.41, 0.22]).collect();
-    let curve = vec![
-        CurvePoint { input: 0, output: 0 },
-        CurvePoint { input: 128, output: 180 },
-        CurvePoint { input: 255, output: 255 },
-    ];
-    let m = LocalAdjustment {
-        mask: MaskGeometry::Linear { zero_x: 2.0, zero_y: 0.0, full_x: 1.5, full_y: 0.0 },
-        amount: 1.0,
-        main_curve: curve.clone(),
-        ..Default::default()
-    };
-    let r = EditRecipe { camera_profile: "Adobe Standard".into(), masks: vec![m], ..Default::default() };
-    let mut out = base.clone();
-    apply_masks(&mut out, w, h, &r, &MaskRasterSnapshot::default(), MaskFrame::AsRendered, FilmScale::NATIVE, ExportColorSpace::Srgb);
-    let want = CurveSpace::new(ExportColorSpace::Srgb).tone(base[0], &curve_lut(&curve), MiddleRatio::Encoded);
-    for (x, px) in out.iter().enumerate() {
-        for k in 0..3 {
-            assert!((px[k] - want[k]).abs() < 1e-5, "x {x}: {px:?} vs {want:?}");
-        }
-    }
-    let mut luma = base[0];
-    let l = luma601(&luma);
-    scale_chroma(&mut luma, l, sample_lut(&curve_lut(&curve), l));
-    assert!((0..3).any(|k| (luma[k] - want[k]).abs() > 5e-3), "the luma ratio must be a different answer: {luma:?} vs {want:?}");
-}
-
 /// R25 P6, the render half: a mask whose ONLY move is a point curve must
 /// move the pixels it covers and leave every other pixel BIT-IDENTICAL.
 ///
@@ -190,7 +152,6 @@ fn a_local_point_curve_darkens_only_inside_the_mask() {
             &MaskRasterSnapshot::default(),
             MaskFrame::AsRendered,
             FilmScale::NATIVE,
-            ExportColorSpace::Srgb,
         );
         out
     };
@@ -231,9 +192,7 @@ fn a_local_point_curve_darkens_only_inside_the_mask() {
     });
     assert!(out[0][0] > base[0][0] + 0.05, "red must lift: {:?} → {:?}", base[0], out[0]);
     // Green and blue keep their value to within LUT-sampling rounding: the
-    // recipe names no camera profile, so the curve acts on the working
-    // channels (the engine's own law; Camera Raw's law, on a recipe naming a
-    // profile, acts on ProPhoto's, `tone::apply_rgb_curves`). Not `==`: the
+    // curve acts on the working channels (`tone::apply_rgb_curves`). Not `==`: the
     // fused pass runs the identity master curve through `sample_lut` +
     // `scale_chroma` for every covered pixel, a ~1e-7 round trip on ANY
     // active mask. The claim being made is "the red curve touched one
@@ -273,7 +232,6 @@ fn local_hue_rotates_and_local_sharpness_signs_both_ways_inside_the_mask() {
             &MaskRasterSnapshot::default(),
             MaskFrame::AsRendered,
             FilmScale::NATIVE,
-            ExportColorSpace::Srgb,
         );
         out
     };
@@ -324,7 +282,6 @@ fn local_hue_rotates_and_local_sharpness_signs_both_ways_inside_the_mask() {
         &MaskRasterSnapshot::default(),
         MaskFrame::AsRendered,
         FilmScale::NATIVE,
-        ExportColorSpace::Srgb,
     );
     let energy = |d: &[[f32; 3]], lo: usize, hi: usize| -> f32 {
         let mut e = 0.0;
@@ -361,7 +318,6 @@ fn local_hue_rotates_and_local_sharpness_signs_both_ways_inside_the_mask() {
         &MaskRasterSnapshot::default(),
         MaskFrame::AsRendered,
         FilmScale::NATIVE,
-        ExportColorSpace::Srgb,
     );
     assert!(
         energy(&softened, 0, ew / 4) < energy(&flat, 0, ew / 4) * 0.99,
@@ -562,7 +518,6 @@ fn tint_masked(base: &[[f32; 3]], w: usize, h: usize, m: LocalAdjustment) -> Vec
         &MaskRasterSnapshot::default(),
         MaskFrame::AsRendered,
         FilmScale::NATIVE,
-        ExportColorSpace::Srgb,
     );
     out
 }

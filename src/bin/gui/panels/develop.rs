@@ -893,29 +893,19 @@ impl AutoShadeApp {
                     // uncheck-zeroes-tint fix can carry one with no Temp) —
                     // showing "off = as-shot" over an active tint, with its
                     // slider disabled, was a lie with no way out.
-                    // v1.17.0: a camera-profile start opens its sliders AT
-                    // As Shot (`EditRecipe::open_white_balance_at_as_shot`);
-                    // there the box reads off — As Shot is no custom white
-                    // balance — while the two sliders show the as-shot pair.
-                    let mut custom_wb = (self.recipe.temperature_k.is_some() || self.recipe.tint != 0.0)
-                        && !self.recipe.white_balance_is_as_shot();
+                    let mut custom_wb =
+                        self.recipe.temperature_k.is_some() || self.recipe.tint != 0.0;
                     if ui.checkbox(&mut custom_wb, tr(lang, "Custom white balance (off = as-shot)")).changed() {
                         // Arm AT the as-shot anchor when stamped: checking
                         // the box must not shift the image — the slider then
                         // starts from the camera's real Kelvin, not 5500.
                         self.recipe.temperature_k =
                             if custom_wb { Some(self.recipe.as_shot_k.unwrap_or(5500.0)) } else { None };
-                        if !custom_wb || self.recipe.names_profile() {
+                        if !custom_wb {
                             // "As-shot" is the WHOLE white balance: a custom
                             // Tint surviving the un-check kept a WB edit
                             // active behind a label claiming there was none.
-                            // On a camera-profile start Tint is absolute, so
-                            // both directions land on the as-shot tint.
                             self.recipe.tint = 0.0;
-                            if self.recipe.names_profile() {
-                                self.recipe.temperature_k = None;
-                                self.recipe.open_white_balance_at_as_shot();
-                            }
                         }
                         changed = true;
                     }
@@ -962,10 +952,8 @@ impl AutoShadeApp {
                 // checkbox's "off = as-shot" promise. A legacy tint-only
                 // recipe counts as Custom (see the checkbox above) so its
                 // slider stays reachable.
-                // Its reset is the as-shot tint where Tint is absolute.
-                let tint_reset = if r.names_profile() { r.as_shot_tint.unwrap_or(0.0) } else { 0.0 };
                 ui.add_enabled_ui(custom_wb, |ui| {
-                    changed |= Self::slider(ui, lang, tr(lang, "Tint"), &mut r.tint, -150.0, 150.0, tint_reset);
+                    changed |= Self::slider(ui, lang, tr(lang, "Tint"), &mut r.tint, -150.0, 150.0, 0.0);
                 });
                 changed |= Self::slider(ui, lang, tr(lang, "Exposure"), &mut r.exposure_ev, -5.0, 5.0, 0.0);
                 changed |= Self::slider(ui, lang, tr(lang, "Contrast"), &mut r.contrast, -100.0, 100.0, 0.0);
@@ -1918,23 +1906,24 @@ impl AutoShadeApp {
                     }
                     if let Some(look) = look.as_ref().filter(|l| !l.name.is_empty()) {
                         pair(ui, tr(lang, "Creative profile").to_string(), &look.name);
-                        // Named, not hidden: since v1.17.0 the creative colour
-                        // table renders when Camera Raw's install carries it
-                        // (`dcp::find_look_table`, answered once per process)
-                        // and the Look is at full amount — the render's own two
-                        // conditions — and a panel that showed the name without
-                        // saying which half arrived would be claiming the whole
-                        // profile.
-                        if !look.table.is_empty() {
-                            let table_renders = (look.amount - 1.0).abs() <= 1e-3
-                                && autoshade::dcp::find_look_table(&look.table).is_ok();
-                            let line = if table_renders {
-                                tr(lang, "Its baked tone curve, sliders and creative colour table render")
-                            } else {
-                                tr(lang, "Its baked tone curve and sliders render; its creative colour table does not")
-                            };
-                            ui.label(egui::RichText::new(line).weak().small());
-                        }
+                        // Named, not hidden: a Look is colour data (v1.17.0) —
+                        // its creative colour table renders when Camera Raw's
+                        // install carries it (`dcp::find_look_table`,
+                        // answered once per process) and the Look is at full
+                        // amount, the render's own two conditions; its baked
+                        // tone curve and sliders never do. A panel that showed
+                        // the name without saying which half arrived would be
+                        // claiming the whole profile.
+                        let line = if look.table.is_empty() {
+                            tr(lang, "Its baked tone curve and sliders do not render")
+                        } else if (look.amount - 1.0).abs() <= 1e-3
+                            && autoshade::dcp::find_look_table(&look.table).is_ok()
+                        {
+                            tr(lang, "Its creative colour table renders; its baked tone curve and sliders do not")
+                        } else {
+                            tr(lang, "Neither its creative colour table nor its baked tone curve and sliders render")
+                        };
+                        ui.label(egui::RichText::new(line).weak().small());
                     }
                 }
                 if self.recipe.passthrough.is_empty() {
@@ -3033,10 +3022,6 @@ impl AutoShadeApp {
                         }
                     }
                 }
-                // The local Hue's travel follows the law it renders through
-                // (`render::mask_cr::hue_px`): Lightroom's ±180° on a
-                // camera-profile start, the engine's ±100 (= ±30°) otherwise.
-                let hue_travel = if self.recipe.names_profile() { autoshade::recipe::LOCAL_HUE_MAX_DEG } else { 100.0 };
                 let m = &mut self.recipe.masks[i];
                 // LR's 0..100 display track (storage stays 0..1 — slider_pct).
                 changed |= Self::slider_pct(ui, lang, tr(lang, "Amount"), &mut m.amount, 1.0, 1.0);
@@ -3096,10 +3081,10 @@ impl AutoShadeApp {
                     lang,
                     tr(lang, "Hue shift"),
                     &mut m.hue,
-                    -hue_travel,
-                    hue_travel,
+                    -100.0,
+                    100.0,
                     0.0,
-                    tr(lang, "Rotates every colour inside the mask: on a camera-profile start by the value in degrees, ±180° as in Lightroom; otherwise ±100 = ±30° — unlike the global color mixer, which moves one color band across the whole frame."),
+                    tr(lang, "Rotates every colour inside the mask (±100 = ±30°) — unlike the global color mixer, which moves one color band across the whole frame."),
                 );
                 // Engine-rendered since batch #2-B (render.rs apply_masks
                 // mirrors the global WB model inside the mask) — live in the

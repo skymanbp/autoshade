@@ -449,7 +449,6 @@ pub(crate) fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) ->
                     // the SOURCE photo's anchor is a different exposure.
                     r.as_shot_k = saved.as_shot_k;
                     r.as_shot_tint = saved.as_shot_tint;
-                    autoshade::pipeline::stamp_camera_start(target, &mut r);
                     return r;
                 }
                 // The file that answered is DAMAGED: stop here and fall to the
@@ -469,7 +468,6 @@ pub(crate) fn paste_recipe_for(target: &std::path::Path, pasted: &EditRecipe) ->
     let (ask, ast) = autoshade::pipeline::fresh_as_shot_wb(target);
     r.as_shot_k = ask;
     r.as_shot_tint = ast;
-    autoshade::pipeline::stamp_camera_start(target, &mut r);
     r
 }
 
@@ -705,9 +703,7 @@ pub(crate) fn stamp_calibration(
     lens: &autoshade::recipe::LensProfile,
     as_shot: Option<(f32, f32)>,
 ) {
-    // v1.17.0: the START — a document that names its own camera profile
-    // starts from it (and so carries no camera curve); one that names none
-    // takes the photo's fresh start, Lightroom's canvas or the camera curve
+    // The START: the photo's camera curve, when it has one
     // (`pipeline::CanvasStart::stamp_import`, the library's one rule).
     start.stamp_import(recipe);
     recipe.lens_profile = lens.clone();
@@ -717,9 +713,6 @@ pub(crate) fn stamp_calibration(
         recipe.as_shot_k = Some(k);
         recipe.as_shot_tint = Some(t);
     }
-    // …and an untouched white balance opens at As Shot, where Lightroom
-    // opens it (`EditRecipe::open_white_balance_at_as_shot`).
-    recipe.open_white_balance_at_as_shot();
 }
 
 /// Reconcile a LOADED SNAPSHOT's calibration with the card it lands on
@@ -760,7 +753,7 @@ pub(crate) fn reconcile_snapshot_calibration(
         r.as_shot_tint = None;
         return false;
     }
-    if !r.base_curve.is_empty() || r.names_profile() {
+    if !r.base_curve.is_empty() {
         return false; // the snapshot brought its own start
     }
     let (start, lens, as_shot) = calibration();

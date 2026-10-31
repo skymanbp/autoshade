@@ -931,13 +931,8 @@ pub(super) fn atmosphere_wb_pairing<'a>(
 ///
 /// INVERSION is the render's own law's (`render::WbLaw::invert`, v1.17.0):
 /// the demand goes onto the (Kelvin, tint) pair whose rendered gains match
-/// it, on the law the recipe renders by — the engine's separable one, or
-/// Camera Raw's absolute Temperature and Tint on a camera-profile start —
-/// and "no demand" is that law's As Shot. Until v1.17.0 it was always the
-/// engine's law, with Tint 0 as As Shot: on a camera-profile start every
-/// moved white balance carried a green shift of the as-shot tint, and
-/// Temperature ran to the 40000 K edge (p38 40000 K / −26.2, p40 23500 K /
-/// +75.8 at 0.85). The estimator before the engine-law inversion normalised the ratios by their geometric mean
+/// it, and "no demand" is As Shot. The estimator before that inversion
+/// normalised the ratios by their geometric mean
 /// and read the tint off the resulting green, which is 1 only when the
 /// Kelvin gains' own geometric mean is 1 — it never is — so every warm move
 /// came back green: a pure 40000 K move from a 5768 K anchor read tint

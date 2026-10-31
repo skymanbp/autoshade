@@ -328,28 +328,6 @@ pub(super) fn texture_pass(
     texture_negative_pass(data, w, h, -amount, sigma_coarse, sigma_fine, weight);
 }
 
-/// A Texture slider's amount for [`texture_pass`] under the law `r` renders
-/// by. On Camera Raw's law (v1.17.0, measured) a POSITIVE Texture is the
-/// engine's operator at [`CAMERA_RAW_TEXTURE_GAIN`] of its amount: Camera
-/// Raw's Texture +50 on the flat packet moves the 1000 px frame's local
-/// detail (the change less its Gaussian blur, σ 1–30 px) by 0.47–0.68 L rms,
-/// the operator at full amount by 1.6–3.5 L, regressing onto Camera Raw's at
-/// 0.10–0.14; and where Camera Raw leaves the band means within 0.6 L the full
-/// operator lifted L 60–80 by 4.7–5.7 L. The negative half is the measured
-/// two-lowpass mix and stays as it is (the same measure reads 0.58 against
-/// 0.75 L there).
-pub(super) fn texture_amount(r: &EditRecipe, slider: f32) -> f32 {
-    let t = slider / 100.0;
-    if t > 0.0 && SliderLaw::of(r) == SliderLaw::CameraRaw {
-        t * CAMERA_RAW_TEXTURE_GAIN
-    } else {
-        t
-    }
-}
-
-/// See [`texture_amount`].
-const CAMERA_RAW_TEXTURE_GAIN: f32 = 0.2;
-
 /// The negative half, at an explicit σ pair — **two low-passes mixed in
 /// PARALLEL, scaled by a hyperbolic depth law**:
 ///

@@ -97,7 +97,6 @@ mod report;
 mod solve;
 mod structure;
 mod tone;
-mod tone_cr;
 
 use atmosphere::{
     WB_SHARE_SIZE_EVIDENCE, WB_VOUCH_SHRINK_STEPS, WbCellVerdict, cast_admitted_by_strength,
@@ -217,14 +216,14 @@ pub(crate) use solve::{fit_recipe_from_promoted, fit_recipe_from_promoted_with_d
 pub use structure::{DivergencePair, PairingScale, STRUCTURE_MIN_CORE_PX, structure_divergence};
 pub(crate) use structure::{divergence_pair_for, divergence_raster, structure_divergence_for, DivergenceRaster};
 pub(crate) use tone::{
-    PairedRobustTone, ROBUST_REJECT_DISCLOSE_MIN, SUPPORT_MIN_PIXELS, TONE_PRIOR, fit_tone_sliders_supported,
-    knot_support_for, paired_robust_tone, refine_tone_sliders_on, sample_tone_points, solve5,
+    PairedRobustTone, ROBUST_REJECT_DISCLOSE_MIN, SUPPORT_MIN_PIXELS, fit_tone_sliders_supported,
+    knot_support_for, paired_robust_tone, refine_tone_sliders_on, sample_tone_points,
 };
 use tone::{converges_toward, paired_correspondence, residual_tone_curve_with_budget};
 #[cfg(test)]
 pub(crate) use tone::{fit_tone_sliders};
 #[cfg(test)]
-use tone::residual_tone_curve;
+use tone::{TONE_PRIOR, residual_tone_curve};
 
 /// The reverse fit's source as ONE text, for the source-text gates that read what
 /// `fit.rs` alone held before it was split into files: the modules in their

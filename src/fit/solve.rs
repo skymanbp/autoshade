@@ -498,12 +498,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             .collect(),
         _ => Vec::new(),
     };
-    // v1.17.0: a recipe on a camera-profile start renders its sliders by
-    // Camera Raw's law (`render::tone_cr`), so it is solved on that law.
     let (ev, sliders) = if !tone_deliverable {
         (0.0, [0.0; 5])
-    } else if render::SliderLaw::of(base) == render::SliderLaw::CameraRaw {
-        super::tone_cr::fit_camera_raw_tone(base, &tone_map, &luma_supported, &score_set)
     } else {
         fit_tone_sliders_supported(&tone_map, &knot_support, &score_set)
     };
@@ -577,11 +573,9 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // outright — build_tone_lut's sRGB↔linear round trip is only ~1e-7 from
     // identity, but skipping keeps the default-base wrapper literally
     // bit-for-bit the old fit (review R16 #3).
-    // The base's starting tone is the camera curve — or, since v1.17.0, the
-    // creative Look's baked half on a named profile's start (Adobe Color's
-    // S-curve on every fresh canvas). Either one is a base rendition the
-    // sliders sit on, so either one is rebased through.
-    let base_toned = !base.starting_curve().is_empty() || base.baked_look().is_some();
+    // The base's starting tone is the camera curve: a base rendition the
+    // sliders sit on, so it is rebased through.
+    let base_toned = !base.base_curve.is_empty();
     let base_lut = render::build_tone_lut(base);
     let full_map = |x: f32| {
         if !base_toned { tone_map(x) } else { tone_map(render::sample_lut(&base_lut, x)) }
@@ -947,9 +941,9 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         recipe.green_curve = Vec::new();
         recipe.blue_curve = Vec::new();
         let cur = pixels_of(&render::develop_preview(&s_img, recipe));
-        recipe.red_curve = residual_channel_curve_weighted(&cur, &tp, 0, &rw_source, &rw_target, render::SliderLaw::of(recipe));
-        recipe.green_curve = residual_channel_curve_weighted(&cur, &tp, 1, &rw_source, &rw_target, render::SliderLaw::of(recipe));
-        recipe.blue_curve = residual_channel_curve_weighted(&cur, &tp, 2, &rw_source, &rw_target, render::SliderLaw::of(recipe));
+        recipe.red_curve = residual_channel_curve_weighted(&cur, &tp, 0, &rw_source, &rw_target);
+        recipe.green_curve = residual_channel_curve_weighted(&cur, &tp, 1, &rw_source, &rw_target);
+        recipe.blue_curve = residual_channel_curve_weighted(&cur, &tp, 2, &rw_source, &rw_target);
         let mut out = CastOutcome::default();
         if !(recipe.red_curve.is_empty()
             && recipe.green_curve.is_empty()
@@ -1068,11 +1062,11 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                         }
                         let under = pixels_of(&render::develop_preview(&s_img, &probe));
                         probe.red_curve =
-                            residual_channel_curve_weighted(&under, &tp, 0, &rw_source, &rw_target, render::SliderLaw::of(&probe));
+                            residual_channel_curve_weighted(&under, &tp, 0, &rw_source, &rw_target);
                         probe.green_curve =
-                            residual_channel_curve_weighted(&under, &tp, 1, &rw_source, &rw_target, render::SliderLaw::of(&probe));
+                            residual_channel_curve_weighted(&under, &tp, 1, &rw_source, &rw_target);
                         probe.blue_curve =
-                            residual_channel_curve_weighted(&under, &tp, 2, &rw_source, &rw_target, render::SliderLaw::of(&probe));
+                            residual_channel_curve_weighted(&under, &tp, 2, &rw_source, &rw_target);
                         if probe.red_curve.is_empty()
                             && probe.green_curve.is_empty()
                             && probe.blue_curve.is_empty()

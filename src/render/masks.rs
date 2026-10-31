@@ -62,7 +62,6 @@ use super::*;
 /// its passes — the spatial-pass row of `decode::PIPELINE_BYTES_PER_PIXEL`.
 /// The `!= 0.0` gate on each pass means a mask that does not use an op
 /// allocates nothing for it.
-#[allow(clippy::too_many_arguments)] // the develop's frame, rasters, film scale and working space, as `apply_develop_with_rasters`
 pub(super) fn apply_masks(
     data: &mut [[f32; 3]],
     w: usize,
@@ -71,19 +70,10 @@ pub(super) fn apply_masks(
     rasters: &MaskRasterSnapshot,
     frame: MaskFrame<'_>,
     film: FilmScale,
-    space: ExportColorSpace,
 ) {
     if w == 0 || h == 0 {
         return; // both passes below chunk by w; rayon asserts chunk_size != 0
     }
-    // v1.17.0: on a camera-profile start a mask's Exposure, five tone
-    // sliders, Dehaze, Clarity's tone and Temp/Tint follow Camera Raw's
-    // measured law in the develop's own white-balance and tone stages
-    // (`mask_cr`); this pass keeps the rest, and turns the Hue as Lightroom
-    // does (`mask_cr::hue_px`).
-    let law = SliderLaw::of(r);
-    let camera_raw = law == SliderLaw::CameraRaw;
-    let hue_space = camera_raw.then(|| (profile::UnderTone::new(space, r.camera_start.unwrap_or_default()), transfer_luts()));
     // The frame adaptation, built ONCE per frame rather than per mask or per
     // pixel (see `MaskUnwarp`). `None` whenever nothing downstream moves these
     // pixels, which is what keeps a photo with no active geometry byte-identical
@@ -97,8 +87,10 @@ pub(super) fn apply_masks(
     // ORDER: reordering or toggling masks cannot re-estimate the haze, exactly
     // as dragging Exposure cannot re-estimate the global one. A per-mask
     // estimate would also make two masks disagree about the same sky.
-    let dehaze_a = (!camera_raw
-        && r.masks.iter().any(|m| m.enabled && m.amount.clamp(0.0, 1.0) != 0.0 && m.dehaze != 0.0))
+    let dehaze_a = r
+        .masks
+        .iter()
+        .any(|m| m.enabled && m.amount.clamp(0.0, 1.0) != 0.0 && m.dehaze != 0.0)
         .then(|| dehaze_airlight(data, w));
     for stored_mask in &r.masks {
         // The eye toggle: a disabled mask renders nothing at any Amount —
@@ -113,10 +105,7 @@ pub(super) fn apply_masks(
         let framed_mask =
             frame.prepare_linear_handles(stored_mask, (w as f32, h as f32));
         let m = framed_mask.as_ref();
-        let local = if camera_raw {
-            EditRecipe { tone_curve: m.main_curve.clone(), ..EditRecipe::default() }
-        } else {
-            EditRecipe {
+        let local = EditRecipe {
             exposure_ev: m.exposure_ev,
             contrast: m.contrast,
             highlights: m.highlights,
@@ -130,30 +119,21 @@ pub(super) fn apply_masks(
             // — it is the SAME builder the global master curve goes through.
             tone_curve: m.main_curve.clone(),
             ..EditRecipe::default()
-            }
         };
         let lut = build_tone_lut(&local);
-        // On a camera-profile start the mask's `MainCurve` follows Camera
-        // Raw's measured curve rule (`tone::camera_raw_rgb_tone`, middle by
-        // its encoded ratio — item 35) instead of the luma ratio below.
-        let main_lut = (camera_raw && !m.main_curve.is_empty()).then(|| curve_lut(&m.main_curve));
         // The three per-channel local curves (`crs:{Red,Green,Blue}Curve`),
         // compiled ONCE per mask like `colour_luts` below and applied inside
-        // the fused pixel loop right after the master curve. (The global
-        // chain puts its own after Saturation since v1.17.0, Camera Raw's
-        // measured place; where a mask's sit against its local Saturation is
-        // not measured, so this order stays.) `None` when all three are
-        // empty, so a curve-free mask pays nothing.
-        let curve_space = CurveSpace::new(space);
+        // the fused pixel loop right after the master curve. `None` when all
+        // three are empty, so a curve-free mask pays nothing.
         let rgb_curve_luts = (!m.red_curve.is_empty()
             || !m.green_curve.is_empty()
             || !m.blue_curve.is_empty())
         .then(|| {
             (
                 [
-                    curve_lut_under(&m.red_curve, law),
-                    curve_lut_under(&m.green_curve, law),
-                    curve_lut_under(&m.blue_curve, law),
+                    curve_lut(&m.red_curve),
+                    curve_lut(&m.green_curve),
+                    curve_lut(&m.blue_curve),
                 ],
                 [
                     !m.red_curve.is_empty(),
@@ -167,7 +147,7 @@ pub(super) fn apply_masks(
         // pixel loop): compose Temp/Tint WB with the zoned recolour gains,
         // then compile the exact linear-light formula into channel LUTs.
         // None when neutral, so tone-only masks pay no colour-stage cost.
-        let local_wb = !camera_raw && (m.temperature != 0.0 || m.tint != 0.0);
+        let local_wb = m.temperature != 0.0 || m.tint != 0.0;
         let colour_luts =
             (local_wb || m.color_gains.is_some()).then(|| {
                 let g = if local_wb { wb_gains(5500.0, local_temp_to_kelvin(m.temperature), m.tint) } else { [1.0; 3] };
@@ -235,13 +215,12 @@ pub(super) fn apply_masks(
         // and NR passes below each still run on their own `!= 0.0` gate, so a
         // mask that moves ONLY one of those reaches it (before R22 a
         // clarity-only mask fell through every gate and rendered nothing).
-        let tone_identity = (camera_raw
-            || (m.exposure_ev == 0.0
-                && m.contrast == 0.0
-                && m.highlights == 0.0
-                && m.shadows == 0.0
-                && m.whites == 0.0
-                && m.blacks == 0.0))
+        let tone_identity = m.exposure_ev == 0.0
+            && m.contrast == 0.0
+            && m.highlights == 0.0
+            && m.shadows == 0.0
+            && m.whites == 0.0
+            && m.blacks == 0.0
             && m.saturation == 0.0
             && m.hue == 0.0
             && toning.is_none()
@@ -288,13 +267,9 @@ pub(super) fn apply_masks(
                         t[c] = sample_lut(&luts[c], t[c]);
                     }
                 }
-                if let Some(ml) = &main_lut {
-                    t = curve_space.tone(t, ml, MiddleRatio::Encoded);
-                } else {
-                    let l_old = luma601(&t);
-                    let l_new = sample_lut(&lut, l_old);
-                    scale_chroma(&mut t, l_old, l_new);
-                }
+                let l_old = luma601(&t);
+                let l_new = sample_lut(&lut, l_old);
+                scale_chroma(&mut t, l_old, l_new);
                 // Per-channel curves right after the master one, before
                 // saturation — `apply_develop`'s stage 1 → 1b → 3 order, so a
                 // full-coverage mask carrying a curve lands where the same
@@ -309,35 +284,15 @@ pub(super) fn apply_masks(
                 // within_one_code`, which owns the tolerance). The clarity and
                 // texture twins ARE bit-exact; this one is not, and the
                 // sentence used to claim it was.
-                // v1.17.0: on ProPhoto's channels under the sRGB transfer,
-                // the global curves' measured law (`tone::apply_rgb_curves`);
-                // measured for a mask too — a full-coverage linear mask's
-                // `RedCurve` on Camera Raw is predicted by it to 0.09 ΔE, by
-                // the working sRGB channels to 9.5.
-                // On the engine's own law (a recipe naming no camera
-                // profile) each curve acts on the working channel itself,
-                // as before v1.17.0 (`tone::apply_rgb_curves`).
                 if let Some((luts, active)) = &rgb_curve_luts {
-                    t = if camera_raw {
-                        curve_space.channel_curves(t, luts, *active)
-                    } else {
-                        engine_channel_curves(t, luts, *active)
-                    };
+                    t = engine_channel_curves(t, luts, *active);
                 }
-                // v1.17.0: a Saturation on Camera Raw's law moves the colour
-                // in the reference primaries about V (above 0) or the HSL
-                // lightness (below 0), measured (`mask_cr::saturate_px`).
-                let mut t = match &hue_space {
-                    Some((under, (dec, enc))) if sat != 0.0 => mask_cr::saturate_px(t, sat, under, dec, enc),
-                    _ => apply_sat_vibrance(t[0], t[1], t[2], sat, 0.0),
-                };
+                let mut t = apply_sat_vibrance(t[0], t[1], t[2], sat, 0.0);
                 // Local hue rotation, LAST in the fused transform: it turns the
                 // colour this mask's WB/tone/saturation stages produced, which
                 // is the order the sliders read in (Temp shift → Saturation →
                 // Hue). Blended by the same single weight as the rest.
-                if let (true, Some((under, (dec, enc)))) = (m.hue != 0.0, &hue_space) {
-                    t = mask_cr::hue_px(t, m.hue, under, dec, enc);
-                } else if hue_turns != 0.0 {
+                if hue_turns != 0.0 {
                     let (hh, ss, ll) = rgb_to_hsl(t[0], t[1], t[2]);
                     let (r2, g2, b2) = hsl_to_rgb((hh + hue_turns).rem_euclid(1.0), ss, ll);
                     t = [r2, g2, b2];
@@ -390,7 +345,7 @@ pub(super) fn apply_masks(
             // Lightroom ladders and carries its own residuals. Same honesty
             // stance as `manual_vignette_lut` either way: the XMP carries the
             // raw slider value, so Lightroom re-renders it with its own model.
-            texture_pass(data, w, h, texture_amount(r, m.texture), spatial_weight);
+            texture_pass(data, w, h, m.texture / 100.0, spatial_weight);
         }
         if m.sharpness != 0.0 {
             // The GLOBAL Detail panel's operator at this mask's own amount
@@ -503,18 +458,6 @@ impl<'a> Cover<'a> {
         }
         wgt * self.amount
     }
-
-    /// [`Cover::at`] with the Range Mask read on `px`, the pixel as the
-    /// calling pass finds it (masks stack, so a later mask's range sees the
-    /// earlier masks' output — the documented approximation vs Lightroom's
-    /// fixed reference image).
-    pub(super) fn at_px(&self, x: usize, y: usize, px: &[f32; 3]) -> f32 {
-        let wgt = self.at(x, y);
-        match &self.m.range {
-            Some(rm) if wgt > 0.001 => wgt * range_weight(rm, px),
-            _ => wgt,
-        }
-    }
 }
 
 /// WHERE a mask chain's output will be sampled — the value that keeps
@@ -591,8 +534,8 @@ pub enum MaskFrame<'a> {
     /// will be looked at, so every geometry is evaluated at its stored
     /// coordinates.
     AsRendered,
-    /// The pixels are ALREADY lens-corrected through exactly this profile (the
-    /// camera stage resampled them, v1.17.0, `lens_in_camera`) and nothing
+    /// The pixels are ALREADY lens-corrected through exactly this profile (a
+    /// marked baked source, v1.17.0) and nothing
     /// downstream moves them. Every geometry is stored in the original frame,
     /// so each corrected pixel first finds its original-frame point through the
     /// resample's own map (the green channel's) and is then evaluated there
@@ -681,9 +624,8 @@ impl<'a> MaskFrame<'a> {
 }
 
 /// A raster drawn in the ORIGINAL frame (a brush, a face the detector found on
-/// the sensor-frame picture), read into the lens-CORRECTED frame a base is
-/// developed in when the camera stage resamples the lens (v1.17.0,
-/// [`super::lens_in_camera`]): every corrected pixel takes the original-frame
+/// the sensor-frame picture), read into the lens-CORRECTED frame of a marked
+/// baked source (v1.17.0): every corrected pixel takes the original-frame
 /// point it shows, through the map [`MaskFrame::Corrected`] samples masks
 /// with. A copy when the profile moves nothing.
 pub fn sensor_raster_to_corrected(mask: &image::GrayImage, profile: &crate::recipe::LensProfile) -> image::GrayImage {

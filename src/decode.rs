@@ -21,9 +21,6 @@ use rawler::get_decoder;
 use rawler::rawsource::RawSource;
 use rawler::tags::TiffCommonTag;
 
-/// Camera Raw's raw white level per measured body (v1.17.0).
-pub(crate) mod white_level;
-
 /// Camera + capture metadata pulled from the RAW, for display and for feeding
 /// the AI advisor later.
 #[derive(Debug, Clone, serde::Serialize)]

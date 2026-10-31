@@ -2,11 +2,6 @@ use super::*;
 use crate::dcp::{Profile, Table};
 
 /// A profile carrying exactly what a test asks for and nothing else.
-///
-/// Its tone curve is a stated IDENTITY rather than absent: a profile with no
-/// curve renders through Adobe's default one, and these tests isolate the
-/// tables, the gain and the reference space from it. The tests about the
-/// default curve take the curve away explicitly.
 fn bare() -> Profile {
     Profile {
         name: "Test".into(),
@@ -29,45 +24,25 @@ fn flat(delta: [f32; 3]) -> Table {
 
 const SPACE: crate::render::ExportColorSpace = crate::render::ExportColorSpace::Srgb;
 
-/// What the stage's exposure transfer alone does to `px` (v1.17.0): Camera
-/// Raw's transfer at the stage's camera start, by its channel rule in the
-/// reference space. Every stage carries it, so a test about a table, a
-/// matrix or a curve states its expectation through it.
-fn ramped(s: &Stage, px: [f32; 3]) -> [f32; 3] {
-    let r = s.ramp.transfer_rgb(super::super::mat_vec3(&s.to_ref, &px).map(|c| c.max(0.0)));
-    super::super::mat_vec3(&s.from_ref, &r)
-}
-
-/// The grey the stage's transfer takes to `y`.
-fn unramp(s: &Stage, y: f32) -> f32 {
-    s.ramp.input_of(y)
-}
-
-/// A profile with nothing to say — no table, a STATED straight curve, a total
-/// exposure of 0 EV — still renders Camera Raw's exposure transfer, which is
-/// not the identity even at 0 EV (its toe: measured on exactly such a
-/// profile, `tone_cr`), and nothing else. A body baseline that the profile's
-/// offset cancels starts at 0 EV.
+/// A profile with no tables and no matrices is not a stage at all, whatever
+/// tone it states: the stage is colour data only (v1.17.0), so a profile's
+/// tone curve and baseline exposure offset never make one.
 ///
-/// MUTATION: skip the stage when no table or curve acts (the transfer would
-/// go missing), or ignore the offset in the start.
+/// MUTATION: build a stage for a curve or an offset.
 #[test]
-fn a_profile_with_nothing_to_say_renders_the_transfer_alone() {
-    let s = Stage::build(&bare(), SPACE, Some(5500.0), 0.0).expect("the transfer is always there");
-    let (lo, mut px) = ([0.002f32; 3], [0.002f32; 3]);
-    s.apply(&mut px);
-    assert!(px[0] < lo[0], "the toe at 0 EV: {px:?}");
-    let want = ramped(&s, lo);
-    assert!((px[0] - want[0]).abs() < 1e-6, "{px:?} vs {want:?}");
-    let mut cancelled = bare();
-    cancelled.baseline_exposure_offset = -0.35;
-    let s = Stage::build(&cancelled, SPACE, Some(5500.0), 0.35).expect("a stage");
-    assert_eq!(s.start(), crate::recipe::CameraStart { ev: 0.0, headroom: 0.0, tables: s.start().tables }, "0 EV in total");
+fn a_profile_with_no_tables_is_not_a_stage_whatever_tone_it_states() {
+    assert!(Stage::build(&bare(), SPACE, Some(5500.0)).is_none(), "nothing to do");
+    let toned = Profile {
+        tone_curve: vec![[0.0, 0.0], [0.25, 0.4], [1.0, 1.0]],
+        baseline_exposure_offset: -0.35,
+        ..bare()
+    };
+    assert!(Stage::build(&toned, SPACE, Some(5500.0)).is_none(), "tone is not the stage's");
 }
 
 /// The reference round trip is EXACT when no table acts, so the two matrices
 /// really are inverses and the stage cannot tint a picture by existing: what
-/// comes back is the colour it was given, through the exposure ramp alone.
+/// comes back is the colour it was given.
 ///
 /// What this can and cannot see, stated because the F7 mutation sweep asked:
 /// it sees an ASYMMETRY between the two matrices and nothing else. Building
@@ -82,15 +57,14 @@ fn a_profile_with_nothing_to_say_renders_the_transfer_alone() {
 #[test]
 fn the_reference_round_trip_returns_the_colour_it_was_given() {
     let mut p = bare();
-    // A baseline exposure offset of zero in stops: a stage that does nothing
-    // but convert to the reference space and back.
-    p.baseline_exposure_offset = 0.0;
+    // An identity table: a stage that does nothing but convert to the
+    // reference space and back.
     p.hue_sat_map[0] = Some(flat([0.0, 1.0, 1.0]));
-    let s = Stage::build(&p, SPACE, Some(5500.0), 0.0).expect("a table makes a stage");
+    let s = Stage::build(&p, SPACE, Some(5500.0)).expect("a table makes a stage");
     for px in [[0.2f32, 0.5, 0.8], [1.0, 1.0, 1.0], [0.04, 0.04, 0.04], [0.9, 0.1, 0.3]] {
         let mut got = px;
         s.apply(&mut got);
-        let want = ramped(&s, px);
+        let want = px;
         for ch in 0..3 {
             assert!(
                 (got[ch] - want[ch]).abs() < 2e-4,
@@ -98,27 +72,6 @@ fn the_reference_round_trip_returns_the_colour_it_was_given() {
             );
         }
     }
-}
-
-/// The baseline exposure offset is STOPS, so −1 halves the light.
-///
-/// MUTATION: treat the offset as a linear multiplier rather than as an
-/// exponent — which would make Adobe's own −0.35 a 65 % darkening instead of a
-/// 22 % one.
-#[test]
-fn the_baseline_exposure_offset_is_measured_in_stops() {
-    let mut p = bare();
-    p.baseline_exposure_offset = -1.0;
-    let s = Stage::build(&p, SPACE, None, 0.0).expect("an offset alone makes a stage");
-    assert_eq!(s.start().ev, -1.0, "−1 stop");
-    let mut px = [0.4f32, 0.4, 0.4];
-    s.apply(&mut px);
-    let want = s.ramp.transfer(0.4);
-    for c in px {
-        assert!((c - want).abs() < 1e-3, "the transfer at −1 EV: {px:?} vs {want}");
-    }
-    // −1 EV darkens a midtone close to the plain halving (the measured row).
-    assert!((want / 0.2 - 1.0).abs() < 0.15, "{want}");
 }
 
 /// A saturation scale from the table really desaturates the PICTURE — the
@@ -130,7 +83,7 @@ fn the_baseline_exposure_offset_is_measured_in_stops() {
 fn a_saturation_scale_of_zero_renders_the_frame_grey() {
     let mut p = bare();
     p.look_table = Some(flat([0.0, 0.0, 1.0]));
-    let s = Stage::build(&p, SPACE, None, 0.0).expect("a look table makes a stage");
+    let s = Stage::build(&p, SPACE, None).expect("a look table makes a stage");
     let mut px = [0.8f32, 0.2, 0.1];
     s.apply(&mut px);
     let (hi, lo) = (px[0].max(px[1]).max(px[2]), px[0].min(px[1]).min(px[2]));
@@ -150,7 +103,7 @@ fn a_saturation_scale_of_zero_renders_the_frame_grey() {
 fn a_hue_shift_turns_the_colour_by_that_many_degrees() {
     let mut p = bare();
     p.look_table = Some(flat([120.0, 1.0, 1.0]));
-    let s = Stage::build(&p, SPACE, None, 0.0).expect("stage");
+    let s = Stage::build(&p, SPACE, None).expect("stage");
     // Pure red in the reference space, turned by 120°, has to come back green:
     // whatever the working space, the GREEN channel must end up the largest.
     let mut px = [0.6f32, 0.05, 0.05];
@@ -186,40 +139,6 @@ fn the_calibrations_blend_by_the_frames_own_white_balance() {
     assert!((blend_calibrations(&p, Some(6000.0)).expect("first").data[0][0]).abs() < 1e-6);
 }
 
-/// Adobe's tone curve keeps the colour's shape: the curve acts on the brightest
-/// and darkest channels and the middle one is put back where it was between
-/// them.
-///
-/// Per-channel is the obvious implementation and the wrong one, so the test
-/// states the difference as a number rather than as a shape: the middle channel
-/// under per-channel application lands somewhere else entirely.
-///
-/// MUTATION: apply the lookup to each channel independently.
-#[test]
-fn the_tone_curve_is_applied_adobes_way_and_not_per_channel() {
-    // A curve that lifts everything below the midpoint hard.
-    let lut: Vec<f32> = (0..TONE_LUT)
-        .map(|i| {
-            let x = i as f32 / (TONE_LUT - 1) as f32;
-            x.powf(0.5)
-        })
-        .collect();
-    let rgb = [0.64f32, 0.25, 0.04];
-    let got = adobe_tone(rgb, &lut);
-    // hi 0.64 → 0.8, lo 0.04 → 0.2, and the middle keeps its RELATIVE place:
-    // (0.25 − 0.04)/(0.64 − 0.04) = 0.35 → 0.2 + 0.35·(0.8 − 0.2) = 0.41.
-    assert!((got[0] - 0.8).abs() < 2e-3, "brightest: {got:?}");
-    assert!((got[2] - 0.2).abs() < 2e-3, "darkest: {got:?}");
-    assert!((got[1] - 0.41).abs() < 3e-3, "middle, placed proportionally: {got:?}");
-    // Per-channel would give sqrt(0.25) = 0.5, which is a visibly different
-    // colour — the desaturation this scheme exists to avoid.
-    assert!((got[1] - 0.5).abs() > 0.05, "this is the per-channel answer, not Adobe's");
-    // A flat colour stays flat: no channel order to preserve, no division by a
-    // zero span.
-    let grey = adobe_tone([0.25, 0.25, 0.25], &lut);
-    assert!(grey.iter().all(|c| (c - 0.5).abs() < 2e-3), "a grey stays grey: {grey:?}");
-}
-
 /// HSV round-trips, including the cases that make a naive implementation
 /// produce a hue out of nothing.
 ///
@@ -247,170 +166,6 @@ fn the_hsv_round_trip_survives_grey_black_and_the_hue_wrap() {
     // A grey has no hue, and must not be given one.
     assert_eq!(to_hsv([0.42, 0.42, 0.42])[1], 0.0);
     assert_eq!(to_hsv([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
-}
-
-/// The tone lookup refuses what it cannot use instead of building a broken one
-/// — and refuses an IDENTITY, which it can use perfectly well and should not.
-///
-/// The identity arm is not tidiness. `Stage::build` decides whether this
-/// profile is a stage at all by asking whether the tone LUT is `Some`, so a
-/// profile whose only content is a straight `0,0 → 1,1` curve would become a
-/// per-pixel pass that converts to the reference space, samples a LUT and
-/// converts back — arithmetic that cannot help and can only drift. Adobe ships
-/// exactly such curves.
-///
-/// MUTATION: accept a single knot, keep duplicate x values (which divide by
-/// a zero span in the interpolation), or return the identity LUT.
-#[test]
-fn the_tone_lookup_refuses_a_curve_it_cannot_read() {
-    assert!(tone_lut(&[]).is_none(), "no knots");
-    assert!(tone_lut(&[[0.0, 0.0]]).is_none(), "one knot is not a curve");
-    // Two knots at the same x are one knot.
-    assert!(tone_lut(&[[0.5, 0.1], [0.5, 0.9]]).is_none(), "a zero-width span");
-    // Knots outside [0, 1] are dropped, and what is left has to still be a
-    // curve — otherwise the lookup would extrapolate off a single point.
-    assert!(tone_lut(&[[-1.0, 0.0], [2.0, 1.0], [0.5, 0.7]]).is_none(), "one usable knot");
-    let lut = tone_lut(&[[0.0, 0.0], [0.25, 0.5], [1.0, 1.0]]).expect("a real curve");
-    assert_eq!(lut.len(), TONE_LUT);
-    assert!((lut[0]).abs() < 1e-6 && (lut[TONE_LUT - 1] - 1.0).abs() < 1e-6, "the ends are pinned");
-    assert!(lut[TONE_LUT / 4] > 0.4, "the knot at 0.25 lifts to ~0.5: {}", lut[TONE_LUT / 4]);
-    // An identity is readable and still refused, in both the two-knot spelling
-    // and a longer one whose extra knots happen to sit on the diagonal.
-    assert!(tone_lut(&[[0.0, 0.0], [1.0, 1.0]]).is_none(), "a straight line is not a curve");
-    assert!(
-        tone_lut(&[[0.0, 0.0], [0.25, 0.25], [0.5, 0.5], [1.0, 1.0]]).is_none(),
-        "…nor is a straight line with more points on it"
-    );
-    // …and that refusal leaves such a profile's stage with no curve: what it
-    // renders is Camera Raw's exposure transfer alone.
-    let mut p = bare();
-    p.baseline_exposure_offset = 0.0;
-    p.tone_curve = vec![[0.0, 0.0], [1.0, 1.0]];
-    let s = Stage::build(&p, SPACE, Some(5500.0), 0.0).expect("the transfer");
-    assert!(s.tone.is_none(), "an identity curve is no curve to apply");
-}
-
-/// The tone lookup's two ends: above 1 the curve is continued along the chord
-/// through the origin, `lut[n−1]·x` — the identity for a curve ending at
-/// (1, 1), so a highlight outside the working gamut passes through, which is
-/// what the wide-gamut path carries — and at or below 0 it answers the
-/// curve's own start.
-///
-/// Below 0 the shipped `lut[0]·max(x, 0)` could only ever be ±0 — a step at
-/// exactly 0 for any curve that does not start there. (Whether the top
-/// should instead continue at the shoulder's tangent, which compresses every
-/// such highlight, is a decision for the profile fixtures; this test pins
-/// what ships.)
-///
-/// MUTATION: `lut[0] * x.max(0.0)` back in the bottom arm (the lifted curve
-/// reads 0 at 0), or the shoulder's tangent in the top arm (1.5 reads 1.25).
-#[test]
-fn the_tone_lookup_passes_white_through_and_starts_where_the_curve_does() {
-    let n = TONE_LUT;
-    let sqrt: Vec<f32> = (0..n).map(|i| (i as f32 / (n - 1) as f32).sqrt()).collect();
-    // Inside the range it is the curve.
-    assert!((sample(&sqrt, 0.25) - 0.5).abs() < 2e-3, "√0.25: {}", sample(&sqrt, 0.25));
-    // Above 1: the chord through the origin — the identity for a curve that
-    // ends at (1, 1) — so a highlight past white is carried, not clipped and
-    // not compressed by the shoulder's slope.
-    let got = sample(&sqrt, 1.5);
-    assert!((got - 1.5).abs() < 2e-3, "1.5 passes through on a curve ending at 1: {got}");
-    let half: Vec<f32> = sqrt.iter().map(|v| v * 0.5).collect();
-    assert!((sample(&half, 2.0) - 1.0).abs() < 2e-3, "the chord's slope is the curve's end value");
-    // A curve that starts above zero answers its start at 0 and below it.
-    let lifted: Vec<f32> = (0..n).map(|i| 0.1 + 0.9 * i as f32 / (n - 1) as f32).collect();
-    assert_eq!(sample(&lifted, 0.0), 0.1, "the curve at 0 is its first sample");
-    assert_eq!(sample(&lifted, -0.5), 0.1, "…and below 0 the same, not a sign times a clamp");
-}
-
-/// A profile that states no tone curve renders through Adobe's default one —
-/// the DNG SDK's `dng_tone_curve_acr3_default`, which `dng_render` starts from
-/// and replaces only with a profile's own valid curve.
-///
-/// The two numbers are the SDK table's own: kTable at 0.5 is 0.80486, and at
-/// 0.18 (between samples 184 and 185) it is 0.3881.
-///
-/// MUTATION: render a curve-less profile through the identity, or resample the
-/// table onto a different grid without interpolating.
-#[test]
-fn a_profile_without_a_curve_renders_adobes_default_curve() {
-    assert_eq!(acr3_default::ACR3_DEFAULT.len(), 1025, "the SDK's 1025 samples");
-    assert_eq!(acr3_default::ACR3_DEFAULT[0], 0.0);
-    assert_eq!(acr3_default::ACR3_DEFAULT[1024], 1.0);
-    assert!(acr3_default::ACR3_DEFAULT.windows(2).all(|w| w[1] >= w[0]), "monotone");
-    let mut p = bare();
-    p.tone_curve = Vec::new();
-    let s = Stage::build(&p, SPACE, None, 0.0).expect("the default curve is something to apply");
-    for (x, want) in [(0.5f32, 0.80486f32), (0.18, 0.3881)] {
-        assert!((default_curve(x) - want).abs() < 1e-3, "the table at {x}: {}", default_curve(x));
-        // The stage meets the curve after the exposure transfer.
-        let mut grey = [unramp(&s, x); 3];
-        s.apply(&mut grey);
-        for c in grey {
-            assert!((c - want).abs() < 1e-3, "grey {x} through the default curve: {grey:?}");
-        }
-    }
-    // A curve the profile states but this reader cannot use is, to the SDK, not
-    // a valid curve either — the default renders.
-    p.tone_curve = vec![[0.5, 0.7]];
-    let s = Stage::build(&p, SPACE, None, 0.0).expect("an unusable curve is no curve");
-    let mut grey = [unramp(&s, 0.5); 3];
-    s.apply(&mut grey);
-    assert!((grey[0] - 0.80486).abs() < 1e-3, "{grey:?}");
-}
-
-/// A profile that states its OWN curve renders through that curve, not the
-/// default one, exactly as before.
-///
-/// MUTATION: compose the default curve under the profile's own.
-#[test]
-fn a_profile_with_its_own_curve_keeps_it() {
-    let mut p = bare();
-    p.tone_curve = vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]];
-    let s = Stage::build(&p, SPACE, None, 0.0).expect("a real curve");
-    let mut grey = [unramp(&s, 0.5); 3];
-    s.apply(&mut grey);
-    assert!(grey.iter().all(|c| (c - 0.62).abs() < 2e-3), "its own curve at its knot: {grey:?}");
-}
-
-/// The stage's start is the body's baseline exposure PLUS the profile's
-/// offset, in stops — Adobe's `TotalBaselineExposure` — and its transfer is
-/// the measured one at that total.
-///
-/// MUTATION: ignore the baseline argument, or subtract it.
-#[test]
-fn the_start_composes_the_bodys_baseline_with_the_profiles_offset() {
-    let mut p = bare();
-    p.baseline_exposure_offset = -1.0;
-    let s = Stage::build(&p, SPACE, None, 0.5).expect("−0.5 EV in total");
-    assert_eq!(s.start().ev, -0.5, "−1 + 0.5");
-    let mut px = [0.4f32; 3];
-    s.apply(&mut px);
-    let want = super::super::tone_cr::Ramp::of(crate::recipe::CameraStart { ev: -0.5, headroom: 0.0, tables: 0 }).transfer(0.4);
-    assert!(px.iter().all(|c| (c - want).abs() < 1e-3), "−0.5 EV: {px:?} vs {want}");
-    p.baseline_exposure_offset = 0.0;
-    let s = Stage::build(&p, SPACE, None, 1.0).expect("+1 EV");
-    assert_eq!(s.start().ev, 1.0);
-}
-
-/// Light the exposure lifts towards white is rolled off, not clipped, before
-/// the look table and the curve — Camera Raw's transfer (v1.17.0, measured;
-/// the DNG SDK's `dng_function_exposure_ramp` clips at 1 instead); nothing
-/// past 1 reaches the curve.
-///
-/// MUTATION: clip at white again (0.8 at +1 EV would land on 1).
-#[test]
-fn light_lifted_towards_white_rolls_off_under_camera_raws_transfer() {
-    let mut p = bare();
-    p.baseline_exposure_offset = 0.0;
-    let s = Stage::build(&p, SPACE, None, 1.0).expect("+1 EV");
-    let mut px = [0.8f32; 3];
-    s.apply(&mut px);
-    let open = s.ramp.transfer(0.4);
-    assert!(px.iter().all(|&c| c > open && c < 0.999), "0.8 at +1 EV rolls off below white: {px:?}");
-    let mut past = [1.5f32; 3];
-    s.apply(&mut past);
-    assert!(past.iter().all(|&c| c <= 1.0 + 1e-6), "nothing past white: {past:?}");
 }
 
 
@@ -470,23 +225,23 @@ fn neutral_at(p: &Profile, which: usize, xy: [f64; 2]) -> [f32; 3] {
 fn a_profile_with_a_forward_matrix_owns_the_transform_and_keeps_grey_grey() {
     let p = with_matrices();
     let frame = Frame { neutral: Some(neutral_at(&p, 1, D65_XY64)), ..Frame::default() };
-    let s = Stage::build_for(&p, SPACE, frame, 0.0).expect("matrices make a stage");
+    let s = Stage::build_for(&p, SPACE, frame).expect("matrices make a stage");
     assert!(s.owns_camera());
     for level in [0.02f32, 0.18, 0.6] {
         let out = s.develop_camera([level; 3]);
-        let want = s.ramp.transfer(level);
+        let want = level;
         for c in out {
             assert!((c - want).abs() < 2e-4, "grey {level} came out {out:?}, not {want}");
         }
     }
     // Without a neutral the white cannot be solved, and the stage leaves the
     // matrix to the engine's own path — it does not invent a white.
-    let s = Stage::build_for(&p, SPACE, Frame::default(), 0.0);
+    let s = Stage::build_for(&p, SPACE, Frame::default());
     assert!(s.is_none_or(|s| !s.owns_camera()));
     // …and a profile with ColorMatrix but no ForwardMatrix keeps that path too.
     let no_fm = Profile { forward_matrix: [None, None], ..with_matrices() };
     let frame = Frame { neutral: Some(neutral_at(&no_fm, 1, D65_XY64)), ..Frame::default() };
-    assert!(Stage::build_for(&no_fm, SPACE, frame, 0.0).is_none_or(|s| !s.owns_camera()));
+    assert!(Stage::build_for(&no_fm, SPACE, frame).is_none_or(|s| !s.owns_camera()));
 }
 
 /// The white solved from a camera neutral (the SDK's `NeutralToXY`) lands on
@@ -531,8 +286,7 @@ fn the_installed_profile_solves_a_d65_neutral_and_keeps_it_neutral() {
     let t = white_temperature(&p, n).expect("white");
     assert!((t - 6504.0).abs() < 60.0, "D65 neutral solved to {t} K");
     assert!(1.0 - illuminant_weight(&p, Some(t)) < 0.02, "weight on A must be ≈ 0");
-    let s = Stage::build_for(&p, SPACE, Frame { neutral: Some(n), ..Frame::default() }, 0.0)
-        .expect("stage");
+    let s = Stage::build_for(&p, SPACE, Frame { neutral: Some(n), ..Frame::default() }).expect("stage");
     assert!(s.owns_camera());
     for level in [0.05f32, 0.18, 0.5] {
         let out = s.develop_camera([level; 3]);
@@ -552,9 +306,9 @@ fn the_installed_profile_solves_a_d65_neutral_and_keeps_it_neutral() {
 #[test]
 fn a_creative_table_goes_on_after_the_profiles_look_table() {
     let p = Profile { look_table: Some(flat([0.0, 0.5, 1.0])), ..bare() };
-    let only = Stage::build_for(&p, SPACE, Frame::default(), 0.0).expect("stage");
+    let only = Stage::build_for(&p, SPACE, Frame::default()).expect("stage");
     let identity = Frame { creative: Some(flat([0.0, 1.0, 1.0])), ..Frame::default() };
-    let s = Stage::build_for(&p, SPACE, identity, 0.0).expect("stage");
+    let s = Stage::build_for(&p, SPACE, identity).expect("stage");
     let (mut px, mut want) = ([0.4f32, 0.2, 0.1], [0.4f32, 0.2, 0.1]);
     s.apply(&mut px);
     only.apply(&mut want);
@@ -562,7 +316,7 @@ fn a_creative_table_goes_on_after_the_profiles_look_table() {
         assert!((px[c] - want[c]).abs() < 1e-4, "the profile's own table must stay under an identity creative one: {px:?} vs {want:?}");
     }
     let shifted = Frame { creative: Some(flat([20.0, 1.0, 1.0])), ..Frame::default() };
-    let t = Stage::build_for(&p, SPACE, shifted, 0.0).expect("stage");
+    let t = Stage::build_for(&p, SPACE, shifted).expect("stage");
     let mut moved = [0.4f32, 0.2, 0.1];
     t.apply(&mut moved);
     assert!((0..3).any(|c| (moved[c] - want[c]).abs() > 1e-3), "the creative hue shift must show on top: {moved:?}");
@@ -617,133 +371,3 @@ fn a_white_named_by_temperature_and_tint_reads_back_as_them() {
     assert_eq!(xy_to_kelvin(temp_tint_to_xy(5400.0, 14.0)), xy_to_temp_tint(temp_tint_to_xy(5400.0, 14.0)).0);
 }
 
-/// The white shift between one white and itself is the identity, and between
-/// two whites it keeps the working white's luminance.
-///
-/// MUTATION: drop the luminance scale, or conjugate the adaptation with the
-/// working primaries instead of the reference ones.
-#[test]
-fn the_white_shift_keeps_white_luminance_and_is_identity_on_one_white() {
-    let w = temp_tint_to_xy(5400.0, 14.0);
-    let id = white_shift(w, w);
-    for (i, row) in id.iter().enumerate() {
-        for (j, v) in row.iter().enumerate() {
-            assert!((v - if i == j { 1.0 } else { 0.0 }).abs() < 1e-5, "{id:?}");
-        }
-    }
-    let m = white_shift(temp_tint_to_xy(4000.0, 14.0), w);
-    let xyz = rgb_to_xyz64(PROPHOTO_PRIM, D65_XY64);
-    let white = vec64(&xyz, vec64(&mat3_f64(&m), [1.0; 3]));
-    assert!((white[1] - 1.0).abs() < 1e-5, "luminance {}", white[1]);
-    // White balanced for a warmer light than the as-shot one: the frame cools.
-    let o = super::super::mat_vec3(&m, &[0.5; 3]);
-    assert!(o[2] > o[0] + 0.02, "{o:?}");
-}
-
-/// Camera Raw's Exposure under a stage that owns the camera transform and
-/// carries a look table is the stage rendered at the total: the look table
-/// AFTER the exposure, in the stage's own reference RGB (v1.17.0,
-/// [`UnderTone`]). Without the stage's tail named by the start, the same
-/// exposure under Adobe's default curve, no look table and the working-white
-/// basis misses by more than a percent.
-///
-/// MUTATION: leave the look table out of the undo or the redo; build the
-/// reference from ProPhoto's primaries at the working white for a
-/// ForwardMatrix stage.
-#[test]
-fn an_exposure_under_the_stage_is_the_stage_at_the_total() {
-    let mut p = with_matrices();
-    p.tone_curve = vec![];
-    let mut data = Vec::new();
-    for v in 0..3 {
-        for h in 0..6 {
-            for s in 0..3 {
-                let hue = 4.0 * ((h as f32) * 1.1).sin() + v as f32;
-                data.push([hue, 1.0 + 0.08 * s as f32 - 0.03 * v as f32, 1.0 - 0.04 * v as f32 + 0.02 * s as f32]);
-            }
-        }
-    }
-    p.look_table = Some(Table { hue: 6, sat: 3, val: 3, srgb_value: true, data });
-    let n = neutral_at(&p, 1, D65_XY64);
-    let at = |ev: f32| Stage::build_for(&p, SPACE, Frame { neutral: Some(n), ..Frame::default() }, ev).expect("a stage");
-    let (s0, s1) = (at(0.35), at(0.35 - 1.51));
-    assert!(s0.owns_camera() && s0.start().tables != 0);
-    let e = super::super::tone_cr::Exposure::new(s0.start(), -1.51).expect("an exposure");
-    let under = UnderTone::new(SPACE, s0.start());
-    let legacy = UnderTone::new(SPACE, crate::recipe::CameraStart { tables: 0, ..s0.start() });
-    let mut worst_legacy = 0.0f32;
-    for cam in [[0.42f32, 0.21, 0.105], [0.3, 0.15, 0.075], [0.5, 0.4, 0.2], [0.2, 0.2, 0.2], [0.1, 0.25, 0.4], [0.05, 0.04, 0.02]] {
-        let (a, want) = (s0.develop_camera(cam), s1.develop_camera(cam));
-        let got = under.expose(a, &e);
-        let old = legacy.expose(a, &e);
-        for c in 0..3 {
-            assert!((got[c] / want[c] - 1.0).abs() < 2e-3, "{cam:?}: {got:?} vs {want:?}");
-            worst_legacy = worst_legacy.max((old[c] / want[c] - 1.0).abs());
-        }
-        let back = under.redo_curve(under.undo_curve(a));
-        for c in 0..3 {
-            assert!((back[c] / a[c] - 1.0).abs() < 2e-3, "round trip {cam:?}: {back:?} vs {a:?}");
-        }
-    }
-    assert!(worst_legacy > 0.01, "the default tail would miss: worst {worst_legacy}");
-}
-
-/// Under the stage's tone the undo and the redo are inverses for a colour the
-/// stage could have produced, so a shift that does nothing changes nothing.
-///
-/// MUTATION: undo the curve per channel (it does not invert `adobe_tone` on
-/// a colour), or leave the transfer out of one side.
-#[test]
-fn under_the_stage_tone_undo_and_redo_are_inverses() {
-    let under = UnderTone::new(super::super::ExportColorSpace::Srgb, crate::recipe::CameraStart { ev: 0.35, headroom: 1.0, tables: 0 });
-    for px in [[0.05f32, 0.05, 0.05], [0.4, 0.2, 0.1], [0.1, 0.3, 0.6], [0.8, 0.75, 0.7], [0.02, 0.01, 0.03]] {
-        let back = under.redo(under.undo(px));
-        for c in 0..3 {
-            assert!((back[c] - px[c]).abs() < 2e-3, "{px:?} -> {back:?}");
-        }
-    }
-}
-
-/// A chosen white goes to a camera neutral the way the DNG SDK's `SetWhiteXY`
-/// does — the calibration diagonal in front of the `ColorMatrix` at the
-/// white's own temperature — and that neutral reads back as the same white
-/// through the same calibrated matrices (v1.17.0, the Custom white balance
-/// Camera Raw puts into the camera stage).
-///
-/// MUTATION: interpolate the matrix at D50 instead of the white's own
-/// temperature; leave the calibration out of either direction; normalise
-/// the neutral by green instead of its largest component.
-#[test]
-fn a_chosen_white_and_its_camera_neutral_read_each_other_back() {
-    let p = with_matrices();
-    let cc = Some([1.0031f32, 1.0, 0.9653]);
-    for (k, tint) in [(2500.0, 0.0), (3200.0, 20.0), (5400.0, 14.0), (9000.0, -30.0), (30000.0, 0.0)] {
-        let xy = temp_tint_to_xy(k, tint);
-        let n = camera_neutral_of(&p, xy, cc).expect("a neutral");
-        assert!((n.iter().cloned().fold(0.0f32, f32::max) - 1.0).abs() < 1e-6, "{n:?}");
-        let back = white_temperature_with(&p, n, cc).expect("a white");
-        assert!((1e6 / f64::from(back) - 1e6 / k).abs() < 0.5, "{k} K read back as {back} K");
-        let plain = camera_neutral_of(&p, xy, None).expect("a neutral");
-        let ratio = [0, 1, 2].map(|c| n[c] / plain[c]);
-        assert!((ratio[0] / ratio[1] - 1.0031).abs() < 1e-4 && (ratio[2] / ratio[1] - 0.9653).abs() < 1e-4, "{ratio:?}");
-    }
-    assert_eq!(camera_neutral_of(&bare(), D65_XY64, None), None, "no ColorMatrix, no neutral");
-}
-
-/// Camera Raw holds each camera-neutral component at no less than 1/16 of the
-/// largest; a white whose blue component falls under it (a calibration that
-/// cuts blue 100-fold) renders at the floor, and the other two keep their
-/// ratio. A neutral above the floor is untouched.
-///
-/// MUTATION: drop the `.max(NEUTRAL_FLOOR)`.
-#[test]
-fn a_camera_neutral_component_is_held_at_a_sixteenth_of_the_largest() {
-    let p = with_matrices();
-    let xy = temp_tint_to_xy(5400.0, 0.0);
-    let plain = camera_neutral_of(&p, xy, None).expect("a neutral");
-    assert!(plain.iter().all(|c| *c > NEUTRAL_FLOOR), "premise: this white is above the floor: {plain:?}");
-    let cut = camera_neutral_of(&p, xy, Some([1.0, 1.0, 0.01])).expect("a neutral");
-    assert!(plain[2] * 0.01 < NEUTRAL_FLOOR, "premise: the cut puts blue under the floor");
-    assert_eq!(cut[2], NEUTRAL_FLOOR, "{cut:?}");
-    assert!((cut[0] / cut[1] - plain[0] / plain[1]).abs() < 1e-6, "red and green keep their ratio: {cut:?}");
-}

@@ -247,113 +247,50 @@ fn base_curve_composes_under_user_tone_and_is_not_skipped() {
     assert_eq!(develop_preview(&black, &lifted).to_rgb8()[(0, 0)][0], 0);
 }
 
-/// v1.5.0 F7, END TO END: a creative profile's baked half reaches the
-/// PIXELS, in the direction the profile states.
+/// A creative profile is colour data (v1.17.0, the Camera Raw law family
+/// removed: a profile stage is colour only): its baked half — the master
+/// curve, the per-channel curves and the baked sliders — does not reach the
+/// pixels, so a Look whose colour table is not on this machine develops
+/// exactly as no Look. Its black-and-white switch still does.
 ///
-/// This is the claim the whole batch rests on and the one the unit tests
-/// underneath it cannot make. `render::build_tone_lut`,
-/// `render::apply_rgb_curves` and `EditRecipe::with_baked` each read the
-/// Look, and every one of them could have been written correctly while
-/// nothing called them — a develop panel that shows a profile's name over
-/// an unchanged photograph is exactly the 「a slider that moves a number
-/// and no pixel」 failure this file's rules call the worst kind here.
-///
-/// The curve is `Adobe Color`'s own, measured off the sidecars: 161 of the
-/// 175 in the reference library carry a Look and 152 of those are this one,
-/// so this S is what almost every Lightroom photograph is developed
-/// through. It darkens the low end (22→16, 40→35) and lifts the high end
-/// (224→230, 240→246) about a pinned midpoint (127→127).
-///
-/// MUTATION: drop any of the four `baked_look`/`with_baked` reads in this
-/// file, or let `amount` scale nothing.
+/// MUTATION: read the Look's baked curve, per-channel curves or sliders in
+/// the tone LUT or the channel curves (the equality breaks); drop the Look's
+/// switch from `renders_grayscale` (the grey assertion breaks).
 #[test]
-fn a_baked_creative_profile_reaches_the_pixels_in_its_own_direction() {
+fn a_creative_profiles_baked_half_does_not_reach_the_pixels() {
     use crate::recipe::{CreativeLook, CurvePoint};
     let knot = |input, output| CurvePoint { input, output };
-    let adobe_color = || CreativeLook {
+    let baked = CreativeLook {
         name: "Adobe Color".to_string(),
         amount: 1.0,
-        tone_curve: vec![
-            knot(0, 0),
-            knot(22, 16),
-            knot(40, 35),
-            knot(127, 127),
-            knot(224, 230),
-            knot(240, 246),
-            knot(255, 255),
-        ],
-        ..Default::default()
-    };
-    let patch = |v: u8| DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, image::Rgb([v; 3])));
-    let shot = |img: &DynamicImage, r: &EditRecipe| develop_preview(img, r).to_rgb8()[(0, 0)][0];
-
-    let bare = EditRecipe::default();
-    let profiled = EditRecipe { look: Some(adobe_color()), ..Default::default() };
-
-    // The two ends move the way the curve says, and the pinned middle does
-    // not move at all — which is what makes this the curve's shape rather
-    // than a brightness offset that happens to be signed correctly.
-    let (dark_bare, dark_profiled) = (shot(&patch(40), &bare), shot(&patch(40), &profiled));
-    let (lit_bare, lit_profiled) = (shot(&patch(224), &bare), shot(&patch(224), &profiled));
-    let (mid_bare, mid_profiled) = (shot(&patch(127), &bare), shot(&patch(127), &profiled));
-    assert!(dark_profiled < dark_bare, "40→35 must darken: {dark_bare} → {dark_profiled}");
-    assert!(lit_profiled > lit_bare, "224→230 must lift: {lit_bare} → {lit_profiled}");
-    assert!(
-        mid_profiled.abs_diff(mid_bare) <= 1,
-        "127→127 is pinned: {mid_bare} → {mid_profiled}"
-    );
-
-    // `crs:Amount` scales the baked half, so half of it lands strictly
-    // between doing nothing and doing all of it.
-    let half = EditRecipe {
-        look: Some(CreativeLook { amount: 0.5, ..adobe_color() }),
-        ..Default::default()
-    };
-    let dark_half = shot(&patch(40), &half);
-    assert!(
-        dark_profiled < dark_half && dark_half < dark_bare,
-        "amount 0.5 sits between: {dark_bare} / {dark_half} / {dark_profiled}"
-    );
-
-    // The baked SLIDERS add to the photographer's own rather than replacing
-    // them (`EditRecipe::with_baked`): the same −40 shadows pulls further
-    // down when the profile bakes −40 too.
-    let img = patch(90);
-    let own = EditRecipe { shadows: -40.0, ..Default::default() };
-    let both = EditRecipe {
+        tone_curve: vec![knot(0, 0), knot(22, 16), knot(40, 35), knot(127, 127), knot(224, 230), knot(255, 255)],
+        red_curve: vec![knot(0, 0), knot(128, 64), knot(255, 255)],
         shadows: -40.0,
-        look: Some(CreativeLook { shadows: -40.0, ..adobe_color() }),
+        highlights: -12.0,
         ..Default::default()
     };
-    assert!(
-        shot(&img, &both) < shot(&img, &own),
-        "a baked shadow move ADDS: {} vs {}",
-        shot(&img, &both),
-        shot(&img, &own)
+    let colourful = DynamicImage::ImageRgb8(RgbImage::from_fn(16, 8, |x, y| {
+        image::Rgb([(x * 16) as u8, (y * 30) as u8, (255 - x * 12) as u8])
+    }));
+    let own = EditRecipe { shadows: -40.0, contrast: 15.0, ..Default::default() };
+    let with_look = EditRecipe { look: Some(baked.clone()), ..own.clone() };
+    assert_eq!(
+        develop_preview(&colourful, &with_look).to_rgb8().as_raw(),
+        develop_preview(&colourful, &own).to_rgb8().as_raw(),
+        "a Look's baked curve, channel curves and sliders render nothing"
     );
 
-    // …and a monochrome profile develops to grey with the photographer's
-    // own Black & White switch still off.
+    // A monochrome profile still develops to grey with the photographer's
+    // own Black & White switch off.
     let mono = EditRecipe {
-        look: Some(CreativeLook {
-            name: "Adobe Monochrome".to_string(),
-            grayscale: true,
-            ..adobe_color()
-        }),
+        look: Some(CreativeLook { name: "Adobe Monochrome".to_string(), grayscale: true, ..baked }),
         ..Default::default()
     };
     assert!(!mono.convert_to_grayscale, "the photographer never touched the switch");
-    let colourful =
-        DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, image::Rgb([200, 60, 40])));
-    let px = develop_preview(&colourful, &mono).to_rgb8()[(0, 0)];
+    let red = DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, image::Rgb([200, 60, 40])));
+    let px = develop_preview(&red, &mono).to_rgb8()[(0, 0)];
     let (hi, lo) = (px[0].max(px[1]).max(px[2]), px[0].min(px[1]).min(px[2]));
     assert!(hi - lo <= 1, "a monochrome profile must develop grey: {px:?}");
-    // The control: the very same frame through the colour profile is not.
-    let colour_px = develop_preview(&colourful, &profiled).to_rgb8()[(0, 0)];
-    assert!(
-        colour_px[0] > colour_px[2] + 20,
-        "…and the colour profile leaves it red: {colour_px:?}"
-    );
 }
 
 /// v1.5.0 F9, end to end: an area the photographer removed in Lightroom
@@ -903,90 +840,6 @@ fn the_sdr_renditions_clarity_is_the_basic_panels_clarity() {
     );
 }
 
-/// v1.5.0 F7, the class sweep's SECOND site: a creative profile's
-/// per-channel curves reach the pixels, and they compose UNDER the
-/// photographer's own.
-///
-/// This is the arm no real photograph exercises. Adobe writes all three
-/// channels of every one of the 161 measured Looks as identity
-/// (`0,0 … 255,255`), which `parse_curve_checked` returns EMPTY, so
-/// `apply_rgb_curves`'s composition branch has never run on a file. The
-/// branch was still wrong — it indexed a 256-entry `curve_lut` with this
-/// table's `LUT_N` = 4096 counter, the same out-of-bounds the master
-/// curve's arm had — and the 29-mutation sweep is what said so: M27 put
-/// the defect back and every one of the 1,593 tests stayed green. A fix
-/// nothing can fail is a fix nobody can keep.
-///
-/// MUTATION: index `base[i]` instead of `sample_lut(&base, x)` (the arm
-/// panics); compose the two curves in the other order, or drop either one
-/// (the three-way ordering below stops holding).
-#[test]
-fn a_baked_per_channel_curve_reaches_the_pixels_under_the_photographers_own() {
-    use crate::recipe::{CreativeLook, CurvePoint};
-    let knot = |input, output| CurvePoint { input, output };
-    // RED only, so green is an in-frame control for "did this touch the
-    // channels it was not given?".
-    //
-    // The two curves move the SAME input in opposite directions, and they
-    // are deliberately NOT each other's inverse. The first draft made them
-    // inverses (128→64 against 64→128) and the mutation that swaps the
-    // composition order stayed GREEN: where two curves undo each other,
-    // `own(baked(x))` and `baked(own(x))` both land back on x, so the
-    // probe was blind to the very order it claimed to pin. These two share
-    // the knot at 128 instead, which makes the two orders land on opposite
-    // sides of where the pixel started.
-    let darker = vec![knot(0, 0), knot(128, 64), knot(255, 255)];
-    let lighter = vec![knot(0, 0), knot(128, 192), knot(255, 255)];
-    let baked = |c: &[CurvePoint]| CreativeLook {
-        name: "per-channel".to_string(),
-        amount: 1.0,
-        red_curve: c.to_vec(),
-        ..Default::default()
-    };
-    let patch = DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, image::Rgb([128; 3])));
-    let shot = |r: &EditRecipe| {
-        let p = develop_preview(&patch, r).to_rgb8()[(0, 0)];
-        (p[0], p[1])
-    };
-
-    let (bare_r, bare_g) = shot(&EditRecipe::default());
-
-    // 1) The PROFILE's curve lands at all, on red alone — the half that
-    //    was unreachable before F7 read a Look's per-channel curves.
-    let (prof_r, prof_g) =
-        shot(&EditRecipe { look: Some(baked(&darker)), ..Default::default() });
-    assert!(prof_r < bare_r, "a baked 128→64 must darken red: {bare_r} → {prof_r}");
-    assert_eq!(prof_g, bare_g, "…and must leave green alone: {bare_g} → {prof_g}");
-
-    // 2) The PHOTOGRAPHER's own curve, on its own, the other way.
-    let (own_r, _) =
-        shot(&EditRecipe { red_curve: lighter.clone(), ..Default::default() });
-    assert!(own_r > bare_r, "a photographer's 64→128 must lift red: {bare_r} → {own_r}");
-
-    // 3) COMPOSITION, in the ORDER the engine claims: the photographer's
-    //    curve reads the PROFILE's output, not the raw pixel.
-    //
-    //    The profile darkens 128 to ~64; the photographer's curve then
-    //    reads 64, which it lifts only part of the way, so the composition
-    //    lands BELOW where the pixel started. Swap the two and the
-    //    photographer's curve reads 128 and lifts it to ~192, which the
-    //    profile then darkens to ~160 — ABOVE where it started. One
-    //    ordering assertion separates them, and it is stated against
-    //    `bare` rather than as an exact value so it does not rest on where
-    //    in the encoding this stage happens to sit.
-    let (both_r, both_g) = shot(&EditRecipe {
-        look: Some(baked(&darker)),
-        red_curve: lighter.clone(),
-        ..Default::default()
-    });
-    assert!(
-        prof_r < both_r && both_r < bare_r,
-        "the photographer's curve reads the profile's OUTPUT, so the pair lands \
-         BELOW bare: darker={prof_r}, composed={both_r}, bare={bare_r}, lighter={own_r}"
-    );
-    assert_eq!(both_g, bare_g, "green is still untouched: {bare_g} → {both_g}");
-}
-
 #[test]
 fn camera_base_knots_recovers_the_map_and_identity_is_empty() {
     // neutral = a luma gradient; camera = the SAME frame through a known
@@ -1402,208 +1255,21 @@ fn probe_real_raw_base_look() {
     );
 }
 
-/// v1.17.0 — exactly ONE starting tone, decided from the recipe
-/// (`EditRecipe::starting_curve`). A recipe that names a camera profile starts
-/// from the profile's tone (own curve or Adobe's default), so a camera-matched
-/// `base_curve` it still carries does not ALSO apply — in the export and in
-/// every preview develop alike; a creative Look's baked curve still composes
-/// on top.
+/// The stamped base curve IS the start, bit for bit as before v1.17.0,
+/// whatever camera profile the recipe names (v1.17.0, the Camera Raw law
+/// family removed: a profile is colour data and never replaces the tone).
 ///
-/// MUTATION: return `base_curve` from `starting_curve` whatever the recipe
-/// names, or drop the Look along with the base curve.
+/// MUTATION: clear the base curve on a recipe that names a profile.
 #[test]
-fn a_named_camera_profile_is_the_only_starting_tone() {
-    use crate::recipe::{CreativeLook, CurvePoint};
+fn the_base_curve_is_the_start_whatever_profile_the_recipe_names() {
     let lift = vec![[0.0, 0.0], [0.25, 0.4], [0.5, 0.7], [1.0, 1.0]];
-    let stamped = EditRecipe { base_curve: lift.clone(), contrast: 20.0, ..Default::default() };
-    let unstamped = EditRecipe { contrast: 20.0, ..Default::default() };
-    assert_ne!(build_tone_lut(&stamped), build_tone_lut(&unstamped), "the base curve is tone work");
-    let profiled = EditRecipe { camera_profile: "Adobe Standard".into(), ..stamped.clone() };
-    assert!(profiled.starting_curve().is_empty(), "a named profile replaces the base curve");
-    // The sliders on a named profile follow Camera Raw's law (`tone_cr`), so
-    // the same recipe without the stamped curve is the comparison.
-    let profiled_unstamped = EditRecipe { camera_profile: "Adobe Standard".into(), ..unstamped.clone() };
-    assert_eq!(build_tone_lut(&profiled), build_tone_lut(&profiled_unstamped), "…and nothing else moved");
-    // The Look's own base profile names a profile too, and its baked curve is
-    // still the start's next step.
-    let knot = |input, output| CurvePoint { input, output };
-    let look = CreativeLook {
-        name: "Adobe Color".to_string(),
-        amount: 1.0,
-        base_profile: "Adobe Standard".to_string(),
-        tone_curve: vec![knot(0, 0), knot(40, 35), knot(224, 230), knot(255, 255)],
-        ..Default::default()
-    };
-    let with_look = EditRecipe { look: Some(look), ..stamped.clone() };
-    assert!(with_look.starting_curve().is_empty());
-    assert_eq!(
-        build_tone_lut(&with_look),
-        build_tone_lut(&EditRecipe { base_curve: Vec::new(), ..with_look.clone() }),
-    );
-    assert_ne!(build_tone_lut(&with_look), build_tone_lut(&unstamped), "the Look's curve renders");
-}
-
-/// Without a named profile — an old recipe, and every fresh open on a machine
-/// that cannot render Lightroom's canvas — the stamped base curve IS the
-/// start, bit for bit as before v1.17.0.
-///
-/// MUTATION: clear the base curve whatever the recipe names.
-#[test]
-fn without_a_named_profile_the_base_curve_is_the_start() {
-    let lift = vec![[0.0, 0.0], [0.25, 0.4], [0.5, 0.7], [1.0, 1.0]];
-    let fresh = EditRecipe { base_curve: lift.clone(), ..Default::default() };
+    let fresh = EditRecipe { base_curve: lift.clone(), contrast: 20.0, ..Default::default() };
     assert!(!fresh.names_profile());
-    assert_eq!(fresh.starting_curve(), lift.as_slice(), "untouched");
     assert!(fresh.has_tone_work(), "the curve is tone work");
-    assert_ne!(build_tone_lut(&fresh), build_tone_lut(&EditRecipe::default()));
-}
-
-/// CALIBRATION (env-gated, `AUTOSHADE_FIT_CALIBRATION_DIR`): a sidecar that
-/// names Adobe Standard and the Adobe Color Look and nothing else renders
-/// where Lightroom's export of the same frame with no develop settings sits,
-/// band by band in lightness — the v1.17.0 baseline exposure and default
-/// curve. Measured before them: midtones ΔL −17.15, highlights −19.68,
-/// shadows −1.20. Since the colour spec (ForwardMatrix) and the Adobe Color
-/// table, the sky-ish and warm rows' Δb as well (from −5.76 and +7.94).
-///
-/// Needs the corpus pair (`p39.arw`, `tint/p39-flat.jpg`) and Adobe's
-/// installed profiles; says which is missing and passes without them.
-#[test]
-fn calibration_a_flat_sidecar_renders_where_lightroom_starts() {
-    let Some(dir) = crate::config::live_env_os("AUTOSHADE_FIT_CALIBRATION_DIR").map(std::path::PathBuf::from)
-    else {
-        crate::test_skipped("flat sidecar calibration", "AUTOSHADE_FIT_CALIBRATION_DIR is unset");
-        return;
-    };
-    let (raw, flat) = (dir.join("p39.arw"), dir.join("tint").join("p39-flat.jpg"));
-    if !raw.is_file() || !flat.is_file() {
-        crate::test_skipped(
-            "flat sidecar calibration",
-            &format!("the corpus at {} lacks the flat pair", dir.display()),
-        );
-        return;
-    }
-    if crate::dcp::find("SONY", "ILCE-7RM4A", "Adobe Standard").is_err() {
-        crate::test_skipped("flat sidecar calibration", "Adobe's camera profiles are not installed");
-        return;
-    }
-    let curve = |pts: &[(u8, u8)]| -> String {
-        pts.iter().map(|(i, o)| format!("<rdf:li>{i}, {o}</rdf:li>")).collect()
-    };
-    let flat_curve = curve(&[(0, 0), (255, 255)]);
-    let xmp = format!(
-        r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-<rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
- crs:Version="15.5.1" crs:ProcessVersion="15.4" crs:CameraProfile="Adobe Standard" crs:HasSettings="True">
-<crs:Look><rdf:Description crs:Name="Adobe Color" crs:Amount="1"><crs:Parameters>
-<rdf:Description crs:Version="15.5.1" crs:ProcessVersion="15.4" crs:ConvertToGrayscale="False"
- crs:CameraProfile="Adobe Standard" crs:LookTable="E1095149FDB39D7A057BAB208837E2E1">
-<crs:ToneCurvePV2012><rdf:Seq>{}</rdf:Seq></crs:ToneCurvePV2012>
-<crs:ToneCurvePV2012Red><rdf:Seq>{flat_curve}</rdf:Seq></crs:ToneCurvePV2012Red>
-<crs:ToneCurvePV2012Green><rdf:Seq>{flat_curve}</rdf:Seq></crs:ToneCurvePV2012Green>
-<crs:ToneCurvePV2012Blue><rdf:Seq>{flat_curve}</rdf:Seq></crs:ToneCurvePV2012Blue>
-</rdf:Description></crs:Parameters></rdf:Description></crs:Look>
-</rdf:Description></rdf:RDF></x:xmpmeta>"#,
-        curve(&[(0, 0), (22, 16), (40, 35), (127, 127), (224, 230), (240, 246), (255, 255)]),
-    );
-    let mut recipe = crate::xmp::xmp_to_recipe_for_photo(&xmp, &raw);
-    assert_eq!(recipe.camera_profile, "Adobe Standard", "the sidecar names the profile");
-    recipe.lens_profile = crate::pipeline::fresh_lens_profile_for_sidecar(&raw, Some(&xmp));
-    let ours = render_to_image(&raw, &recipe, None, Some(1000)).expect("render").to_rgb8();
-    let theirs = image::open(&flat)
-        .expect("flat export")
-        .resize_exact(ours.width(), ours.height(), image::imageops::FilterType::Triangle)
-        .to_rgb8();
-    // sRGB → CIE Lab (D65), the measurement script's own conversion.
-    #[allow(clippy::excessive_precision)]
-    let lab = |p: &image::Rgb<u8>| -> [f64; 3] {
-        let lin = |v: u8| {
-            let c = v as f64 / 255.0;
-            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
-        };
-        let (r, g, b) = (lin(p[0]), lin(p[1]), lin(p[2]));
-        let x = (0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047;
-        let y = 0.2126729 * r + 0.7151522 * g + 0.0721750 * b;
-        let z = (0.0193339 * r + 0.1191920 * g + 0.9503041 * b) / 1.08883;
-        let f = |t: f64| if t > 0.008856 { t.cbrt() } else { 7.787 * t + 16.0 / 116.0 };
-        [116.0 * f(y) - 16.0, 500.0 * (f(x) - f(y)), 200.0 * (f(y) - f(z))]
-    };
-    // Bands by LIGHTROOM's lightness, ΔL = ours − Lightroom's; and two colour
-    // rows by Lightroom's hue (v1.17.0, the ForwardMatrix and the Adobe Color
-    // table): sky-ish h 190–280° C > 8 and warm h 20–90° C > 12, Δb.
-    let mut bands = [(0.0f64, 0usize); 3];
-    let mut colour = [(0.0f64, 0usize); 2];
-    for (a, b) in ours.pixels().zip(theirs.pixels()) {
-        let (la, lb) = (lab(a), lab(b));
-        let band = if lb[0] < 35.0 { 0 } else if lb[0] < 70.0 { 1 } else { 2 };
-        bands[band].0 += la[0] - lb[0];
-        bands[band].1 += 1;
-        let (c, h) = (lb[1].hypot(lb[2]), lb[2].atan2(lb[1]).to_degrees().rem_euclid(360.0));
-        let row = if h > 190.0 && h < 280.0 && c > 8.0 {
-            Some(0)
-        } else if h > 20.0 && h < 90.0 && c > 12.0 {
-            Some(1)
-        } else {
-            None
-        };
-        if let Some(i) = row {
-            colour[i].0 += la[2] - lb[2];
-            colour[i].1 += 1;
-        }
-    }
-    let mean = |s: (f64, usize)| s.0 / s.1.max(1) as f64;
-    let (dark, mid, light) = (mean(bands[0]), mean(bands[1]), mean(bands[2]));
-    let (sky_b, warm_b) = (mean(colour[0]), mean(colour[1]));
-    eprintln!("flat sidecar ΔL by band: L<35 {dark:+.2}, L35-70 {mid:+.2}, L>70 {light:+.2}");
-    eprintln!("flat sidecar Δb by row: sky-ish {sky_b:+.2}, warm {warm_b:+.2}");
-    assert!(dark.abs() <= 2.0, "shadows ΔL {dark:+.2} (bound ±2)");
-    assert!(mid.abs() <= 3.0, "midtones ΔL {mid:+.2} (bound ±3)");
-    assert!(light.abs() <= 3.0, "highlights ΔL {light:+.2} (bound ±3)");
-    // Before v1.17.0's colour spec and look table: −5.76 and +7.94.
-    if crate::dcp::find_look_table("E1095149FDB39D7A057BAB208837E2E1").is_ok() {
-        assert!(sky_b.abs() <= 1.5, "sky-ish Δb {sky_b:+.2} (bound ±1.5)");
-        assert!(warm_b.abs() <= 1.5, "warm Δb {warm_b:+.2} (bound ±1.5)");
-    }
+    assert_ne!(build_tone_lut(&fresh), build_tone_lut(&EditRecipe { contrast: 20.0, ..Default::default() }));
+    let profiled = EditRecipe { camera_profile: "Adobe Standard".into(), ..fresh.clone() };
+    assert!(profiled.names_profile());
+    assert_eq!(build_tone_lut(&profiled), build_tone_lut(&fresh), "the profile moves no tone");
 }
 
 
-/// v1.17.0 step 2's contract, ahead of the canvas switch: the canvas start —
-/// 「Adobe Standard」 with the 「Adobe Color」 Look, [`crate::xmp::canvas_look`]
-/// — is the SAME recipe as an all-zero Lightroom sidecar that names Adobe
-/// Color, and renders the same pixels, byte for byte. Env-gated on the corpus
-/// (`p39.arw`); passes without it after saying so.
-///
-/// MUTATION: change any knot of `CANVAS_LOOK_XMP`'s curve, or its table id.
-#[test]
-fn a_fresh_canvas_renders_like_a_sidecar_that_names_adobe_color() {
-    let Some(dir) = crate::config::live_env_os("AUTOSHADE_FIT_CALIBRATION_DIR").map(std::path::PathBuf::from)
-    else {
-        crate::test_skipped("canvas start identity", "AUTOSHADE_FIT_CALIBRATION_DIR is unset");
-        return;
-    };
-    let raw = dir.join("p39.arw");
-    if !raw.is_file() {
-        crate::test_skipped("canvas start identity", "the corpus lacks its RAW");
-        return;
-    }
-    let xmp = format!(
-        r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-<rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
- crs:Version="18.4" crs:ProcessVersion="15.4" crs:CameraProfile="Adobe Standard" crs:HasSettings="True">
-{}
-</rdf:Description></rdf:RDF></x:xmpmeta>"#,
-        crate::xmp::CANVAS_LOOK_XMP
-    );
-    let sidecar = crate::xmp::xmp_to_recipe(&xmp);
-    let canvas = EditRecipe {
-        camera_profile: "Adobe Standard".into(),
-        look: Some(crate::xmp::canvas_look()),
-        ..Default::default()
-    };
-    assert_eq!(sidecar.look, canvas.look, "one Look");
-    assert_eq!(sidecar.camera_profile, canvas.camera_profile);
-    let a = render_to_image(&raw, &canvas, None, Some(600)).expect("canvas").to_rgb16();
-    let b = render_to_image(&raw, &sidecar, None, Some(600)).expect("sidecar").to_rgb16();
-    assert_eq!(a.dimensions(), b.dimensions());
-    assert!(a.as_raw() == b.as_raw(), "the canvas start and the sidecar render different pixels");
-}

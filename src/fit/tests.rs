@@ -8521,9 +8521,9 @@ fn a_white_balance_cast_does_not_fan_and_never_enters_the_hand_off() {
         let cur = pixels_of(&render::develop_preview(&src, &r));
         let ev = evidence_model(&cur, &tp);
         let ones = vec![1.0f32; cur.len()];
-        r.red_curve = residual_channel_curve_weighted(&cur, &tp, 0, &ones, &ones, render::SliderLaw::of(&r));
-        r.green_curve = residual_channel_curve_weighted(&cur, &tp, 1, &ones, &ones, render::SliderLaw::of(&r));
-        r.blue_curve = residual_channel_curve_weighted(&cur, &tp, 2, &ones, &ones, render::SliderLaw::of(&r));
+        r.red_curve = residual_channel_curve_weighted(&cur, &tp, 0, &ones, &ones);
+        r.green_curve = residual_channel_curve_weighted(&cur, &tp, 1, &ones, &ones);
+        r.blue_curve = residual_channel_curve_weighted(&cur, &tp, 2, &ones, &ones);
         let with_px = pixels_of(&render::develop_preview(&src, &r));
         let fan = hue_fan_weighted(&cur, &with_px, &ev).map_or(0.0, |f| f.1);
         assert!(fan < FAN_DEG, "{k} K: a white-balance cast fans {fan:.1}° (limit {FAN_DEG}°)");
@@ -8670,19 +8670,17 @@ fn the_hand_off_breaks_look_error_ties_by_pull_and_keeps_the_gain_bar() {
 }
 
 /// The hand-off walk reaches the white balances the strength budget admits.
-/// On Camera Raw's law the two-temperature pair's curves pull a direction
-/// whose green part pins the tint at +100 by `λ = 1`; the Kelvin then settles
-/// and never meets an edge, so a walk extended only to a Kelvin edge ran to
-/// `λ = 64` and judged 24 copies of one out-of-budget pair (measured on p40,
-/// 2026-10-29, direction and anchor below). The extent now ends where the
-/// point leaves the budget or stops moving, so in-budget candidates are judged.
+/// A walk extended only to a Kelvin edge ran to `λ = 64` on the
+/// two-temperature pair and judged 24 copies of one out-of-budget pair
+/// (measured on p40, 2026-10-29, direction and anchor below). The extent now
+/// ends where the point leaves the budget or stops moving, so in-budget
+/// candidates are judged.
 ///
 /// MUTATION: drop `!in_budget(here)` and `at(2.0 * reach) == here` from the
 /// extent loop — the judge sees no in-budget candidate.
 #[test]
 fn the_hand_off_walk_reaches_the_white_balances_the_budget_admits() {
     let law = render::WbLaw::of(&EditRecipe {
-        camera_profile: "Adobe Standard".into(),
         as_shot_k: Some(7650.0),
         as_shot_tint: Some(16.0),
         ..EditRecipe::default()
@@ -8956,66 +8954,20 @@ fn the_hand_off_walk_meets_white_balances_the_stage_gates_refuse() {
     assert!(refused >= 1, "the stage's gates refuse a warm candidate the walk judges ({refused} of {judged})");
 }
 
-/// A camera-profile base (Camera Raw's law, as shot 5950 K / +13).
-fn camera_raw_law_base() -> EditRecipe {
-    EditRecipe {
-        camera_profile: "Adobe Standard".into(),
-        as_shot_k: Some(5950.0),
-        as_shot_tint: Some(13.0),
-        ..EditRecipe::default()
-    }
-}
 
-/// The white-balance estimator on Camera Raw's law (v1.17.0): shown a frame
-/// moved by a Camera Raw white balance, it reads back that white balance in
-/// Camera Raw's ABSOLUTE tint; shown no move, it answers the law's As Shot —
-/// the stamped as-shot tint, not 0 — and the stage then does nothing.
+/// The share search walks from As Shot: the zero end of the path is the
+/// as-shot Kelvin with no tint move (Tint is relative, v1.17.0, the Camera
+/// Raw law family removed) and the far end the free fit, and every point
+/// between renders between them.
 ///
-/// Until v1.17.0 the fit inverted every demand on the engine's law, where
-/// Tint is a shift from 0, and wrote the answer into a recipe that renders
-/// Tint as absolute: p38 fitted 40000 K / −26.2 from as shot 5950 K / +13
-/// (a green cast of the as-shot tint plus a Temperature run to the edge to
-/// make up the engine law's weaker Kelvin), and the same pair now fits
-/// 8800 K / +16.6 at look error 0.005 against 0.011.
-///
-/// MUTATION: invert on `render::wb_gains` (the engine's law) whatever the
-/// base, or answer `(anchor, 0)` for "no demand".
+/// MUTATION: start `wb_path_candidate` anywhere but the law's As Shot.
 #[test]
-fn the_estimator_reads_a_camera_raw_white_balance_in_its_absolute_tint() {
-    let base = camera_raw_law_base();
-    let law = render::WbLaw::of(&base);
-    let sp: Vec<[f32; 3]> = (0..600)
-        .map(|i| {
-            let f = i as f32 / 600.0;
-            [0.40 + 0.10 * f, 0.42 + 0.05 * (1.0 - f), 0.38 + 0.08 * (f * 7.0).sin().abs()]
-        })
-        .collect();
-    let weights = vec![1.0f32; sp.len()];
-    let (k0, t0, _) = atmosphere_wb_from_populations(&sp, &sp, &weights, law);
-    assert_eq!((k0, t0), (5950.0, 13.0), "no move is Camera Raw's As Shot, its tint included");
-    for wb in [(8800.0f32, 16.6f32), (4300.0, 13.0), (7000.0, 40.0)] {
-        let g = law.gains(wb);
-        let tp: Vec<[f32; 3]> = sp
-            .iter()
-            .map(|p| std::array::from_fn(|c| render::linear_to_srgb(render::srgb_to_linear(p[c]) * g[c])))
-            .collect();
-        let (k, t, _) = atmosphere_wb_from_populations(&sp, &tp, &weights, law);
-        assert!((1e6 / k - 1e6 / wb.0).abs() <= 2.0, "{wb:?} read back as {k} K / {t:+}");
-        assert!((t - wb.1).abs() <= 1.0, "{wb:?} read back as {k} K / {t:+}");
-    }
-}
-
-/// The share search walks from the law's As Shot: on Camera Raw's law the
-/// zero end of the path is the stamped as-shot pair and the far end the
-/// free fit, and every point between renders between them.
-///
-/// MUTATION: start `wb_path_candidate` at `(anchor, 0)`.
-#[test]
-fn the_white_balance_path_starts_at_camera_raws_as_shot() {
-    let law = render::WbLaw::of(&camera_raw_law_base());
-    assert_eq!(wb_path_candidate(law, 8800.0, 16.6, 0.0), (5950.0, 13.0));
+fn the_white_balance_path_starts_at_as_shot() {
+    let law = render::WbLaw::of(&EditRecipe { as_shot_k: Some(5950.0), as_shot_tint: Some(13.0), ..EditRecipe::default() });
+    assert_eq!(wb_path_candidate(law, 8800.0, 16.6, 0.0), (5950.0, 0.0));
     assert_eq!(wb_path_candidate(law, 8800.0, 16.6, 1.0), (8800.0, 16.6));
     let (k, t) = wb_path_candidate(law, 8800.0, 16.6, 0.5);
     assert!(k > 5950.0 && k < 8800.0, "half way is between in Kelvin: {k}");
-    assert!(t > 12.0 && t < 17.6, "and in tint: {t}");
+    assert!(t > 0.0 && t < 16.6, "and in tint: {t}");
 }
+

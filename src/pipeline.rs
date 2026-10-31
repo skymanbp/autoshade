@@ -458,7 +458,6 @@ pub fn produce_recipe(
             let mut shown = stripped.clone();
             shown.as_shot_k = anchor_k;
             shown.as_shot_tint = anchor_tint;
-            shown.camera_start = if pixels.is_some() { None } else { crate::render::camera_start(raw, &shown) };
             let mut jpeg = Vec::new();
             crate::render::develop_preview(&preview_img, &shown)
                 .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
@@ -764,7 +763,6 @@ pub fn produce_recipe(
             v.strip_baked_start();
             v.as_shot_k = anchor_k;
             v.as_shot_tint = anchor_tint;
-            v.camera_start = if pixels.is_some() { None } else { crate::render::camera_start(raw, &v) };
             v
         };
         let judge_of = |r: &EditRecipe,
@@ -1150,8 +1148,6 @@ pub fn produce_recipe(
     // the anchor it was scored on and the anchor delivered are all one).
     recipe.as_shot_k = anchor_k;
     recipe.as_shot_tint = anchor_tint;
-    // …and the camera start, at the profile the stamp settled on.
-    recipe.camera_start = if pixels.is_some() { None } else { crate::render::camera_start(raw, &recipe) };
     // The stamp is complete, and every number this call produced -- the fit's
     // residual and the judge's score alike -- was read before it existed. Same
     // disclosure as CLI `match`, from the other production stamper.
@@ -2645,17 +2641,12 @@ pub struct PhotoCalibration {
     pub lens_profile: crate::recipe::LensProfile,
     pub as_shot_k: Option<f32>,
     pub as_shot_tint: Option<f32>,
-    /// v1.17.0 — the camera profile and creative Look the develop starts from
-    /// (the canvas: [`crate::render::canvas_recipe`] on a fresh open, a
-    /// sidecar's own on an import). Calibration like the curve beside it, and
-    /// the curve's successor: it decides the base develop
-    /// ([`crate::render::BasePart`]) every surface shows, fits and bakes from.
+    /// v1.17.0 — the camera profile and creative Look a saved develop names
+    /// (a sidecar's own on an import; none on a fresh open). Colour data: it
+    /// decides the base develop ([`crate::render::BasePart`]) every surface
+    /// shows, fits and bakes from, and never the tone.
     pub camera_profile: String,
     pub look: Option<crate::recipe::CreativeLook>,
-    /// v1.17.0 — the camera start the profile stage develops the photo at
-    /// under that profile ([`stamp_camera_start`]): read from the RAW for
-    /// both arms, never kept from a save.
-    pub camera_start: Option<crate::recipe::CameraStart>,
 }
 
 impl PhotoCalibration {
@@ -2669,41 +2660,20 @@ impl PhotoCalibration {
             as_shot_tint: r.as_shot_tint,
             camera_profile: r.camera_profile,
             look: r.look,
-            camera_start: None,
         }
-    }
-
-    /// This calibration with the camera start `raw` develops at under its
-    /// profile ([`stamp_camera_start`]).
-    fn started(mut self, raw: &Path) -> Self {
-        let named = EditRecipe { camera_profile: self.camera_profile.clone(), look: self.look.clone(), ..Default::default() };
-        self.camera_start = crate::render::camera_start(raw, &named);
-        self
     }
 }
 
 /// What a fresh develop of a photograph starts from: the camera-matched base
-/// curve estimated from the embedded preview (empty for a baked image), and
-/// no camera profile — so a fresh develop renders on the engine's own law
-/// (`render::SliderLaw::Engine`), as every release before v1.17.0 did.
-///
-/// Camera Raw's measured laws apply only to a recipe that names a camera
-/// profile (an imported Lightroom develop, or a refine carrying its base's
-/// profile): `render::SliderLaw::of` is the one switch. A develop the engine
-/// starts itself does not name one, so its look does not depend on whether a
-/// Camera Raw install happens to be on the machine.
+/// curve estimated from the embedded preview (empty for a baked image).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CanvasStart {
-    pub camera_profile: String,
-    pub look: Option<crate::recipe::CreativeLook>,
     pub base_curve: Vec<[f32; 2]>,
 }
 
 impl CanvasStart {
-    /// Write this start onto `r` — its profile, Look and curve, together.
+    /// Write this start onto `r`.
     pub fn stamp(self, r: &mut EditRecipe) {
-        r.camera_profile = self.camera_profile;
-        r.look = self.look;
         r.base_curve = self.base_curve;
     }
 }
@@ -2711,9 +2681,8 @@ impl CanvasStart {
 /// The base part (v1.17.0, [`crate::render::BasePart`]) of the develop this
 /// photograph starts from: its saved develop's, or a fresh start's — the part
 /// a surface without a recipe in hand (a CLI retouch, a web pane that has
-/// not been sent one) bakes or shows under. A fresh start that cannot render
-/// the canvas is the neutral part; that answer needs no estimate, so none is
-/// paid.
+/// not been sent one) bakes or shows under. A fresh start names no camera
+/// profile, so it is the neutral part; that answer needs no estimate.
 pub fn photo_base_part(raw: &Path) -> crate::render::BasePart {
     match saved_recipe_snapshot(raw, &crate::diag::photo(raw)) {
         Some(r) => crate::render::BasePart::of(&r),
@@ -2740,36 +2709,31 @@ pub fn fresh_canvas_start_with(
     if !decode::is_raw(raw) {
         return CanvasStart::default();
     }
-    CanvasStart { base_curve: estimate(), ..Default::default() }
+    CanvasStart { base_curve: estimate() }
 }
 
 /// The start of a develop IMPORTED from a Lightroom document (a sidecar, the
-/// saved projection, a RAW's embedded packet): one that names its own camera
-/// profile starts from it, so no camera base curve; one that names none is
-/// Lightroom's default and starts from the fresh canvas.
+/// saved projection, a RAW's embedded packet): the photo's camera base curve,
+/// as a fresh develop's. A camera profile or Look the document names stays
+/// on the recipe as colour data (`render::BasePart`); it never changes how a
+/// control behaves.
 ///
 /// A fresh start with nothing in it (a baked image, an estimate that found no
 /// base look) leaves a curve the document itself brought where it is.
 pub fn stamp_import_start(raw: &Path, r: &mut EditRecipe, d: &crate::diag::Diag) {
-    if r.names_profile() {
-        r.base_curve.clear();
-    } else {
-        fresh_canvas_start(raw, d).stamp_import(r);
-    }
+    fresh_canvas_start(raw, d).stamp_import(r);
 }
 
 impl CanvasStart {
-    /// Nothing to start from: no profile and no curve.
+    /// Nothing to start from: no curve.
     pub fn is_empty(&self) -> bool {
-        self.camera_profile.is_empty() && self.look.is_none() && self.base_curve.is_empty()
+        self.base_curve.is_empty()
     }
 
     /// [`stamp_import_start`] with a start the caller already holds (a pack
     /// of imports of one capture estimates it once).
     pub fn stamp_import(&self, r: &mut EditRecipe) {
-        if r.names_profile() {
-            r.base_curve.clear();
-        } else if !self.is_empty() {
+        if !self.is_empty() {
             self.clone().stamp(r);
         }
     }
@@ -2785,7 +2749,7 @@ impl CanvasStart {
 /// construction — those estimates come from THIS build's sampler.
 pub fn photo_calibration(raw: &Path) -> PhotoCalibration {
     match saved_recipe_snapshot(raw, &crate::diag::photo(raw)) {
-        Some(r) => PhotoCalibration::of_saved(r).started(raw),
+        Some(r) => PhotoCalibration::of_saved(r),
         None => fresh_photo_calibration(raw),
     }
 }
@@ -2801,11 +2765,9 @@ pub(crate) fn fresh_photo_calibration(raw: &Path) -> PhotoCalibration {
         lens_profile: fresh_lens_profile(raw),
         as_shot_k,
         as_shot_tint,
-        camera_profile: start.camera_profile,
-        look: start.look,
-        camera_start: None,
+        camera_profile: String::new(),
+        look: None,
     }
-    .started(raw)
 }
 
 /// True when a calibration carries NOTHING the render would act on — no
@@ -2842,7 +2804,7 @@ pub fn fit_calibration(raw: &Path) -> PhotoCalibration {
     match saved_recipe_snapshot(raw, &crate::diag::photo(raw)) {
         Some(r) => {
             let cal = PhotoCalibration::of_saved(r);
-            if calibration_is_neutral(&cal) { fresh_photo_calibration(raw) } else { cal.started(raw) }
+            if calibration_is_neutral(&cal) { fresh_photo_calibration(raw) } else { cal }
         }
         None => fresh_photo_calibration(raw),
     }
@@ -2865,7 +2827,6 @@ pub fn stamp_fit_calibration(recipe: &mut crate::recipe::EditRecipe, cal: PhotoC
     recipe.as_shot_tint = cal.as_shot_tint;
     recipe.camera_profile = cal.camera_profile;
     recipe.look = cal.look;
-    recipe.camera_start = cal.camera_start;
 }
 
 /// What a post-stamp calibration adds to the delivered render, as a phrase --
@@ -2877,14 +2838,13 @@ pub fn stamp_fit_calibration(recipe: &mut crate::recipe::EditRecipe, cal: PhotoC
 /// asks this question. CLI `match` composed its calibration into every solve
 /// from 2026-09-26 and has nothing left to disclose.
 pub fn post_stamp_domain_shift(recipe: &crate::recipe::EditRecipe) -> Option<String> {
-    // The start the render applies — a named camera profile (v1.17.0) or the
-    // camera curve it replaces, never both (`EditRecipe::starting_curve`).
-    let start = if recipe.names_profile() {
-        Some("its camera profile")
-    } else if !recipe.base_curve.is_empty() {
-        Some("its camera curve")
-    } else {
-        None
+    // The start the render applies: a named camera profile's colour tables
+    // and the camera curve.
+    let start = match (recipe.names_profile(), !recipe.base_curve.is_empty()) {
+        (true, true) => Some("its camera profile and camera curve"),
+        (true, false) => Some("its camera profile"),
+        (false, true) => Some("its camera curve"),
+        (false, false) => None,
     };
     // "Enabled" is the recipe's own activity predicates — the ones the
     // renderer gates each stage on — not the switches alone: a profile whose
@@ -2951,17 +2911,12 @@ pub const FIT_SOURCE_EDGE: u32 = 2048;
 /// the preview develop over it, which runs no profile stage, so a source
 /// without the profile would be fitted as a different picture from the one
 /// the canvas and the export show. It comes as a [`crate::render::Plate`]
-/// that keeps the camera frame it was developed from, so a candidate that
-/// moves the white is rendered with the white in the profile stage
 /// ([`crate::render::source_plate`]).
 ///
-/// And in the FRAME that base develop is in (v1.17.0): lens-corrected when
-/// the calibration's camera stage resamples the lens
-/// ([`crate::render::lens_in_camera`]), as the canvas and the export are and
-/// as a Lightroom export made with the profile on is. The fit draws its zone
-/// rasters in that frame and they say so ([`crate::render::fit_raster_frame`]),
-/// so neither the target nor a mask is resampled from one frame into the
-/// other on the way.
+/// In the FRAME that base develop is in: the sensor frame for a RAW. The fit
+/// draws its zone rasters in its source's frame and they say so
+/// ([`crate::render::fit_raster_frame`]), so a mask is never resampled from
+/// one frame into the other on the way.
 pub fn fit_source(raw: &Path) -> Result<(crate::render::Plate, crate::recipe::EditRecipe)> {
     let base = calibration_recipe(fit_calibration(raw));
     Ok((fit_source_of(raw, &base)?, base))
@@ -2976,8 +2931,8 @@ fn fit_source_of(raw: &Path, base: &EditRecipe) -> Result<crate::render::Plate> 
 /// `image`: a plate in the frame the file's marker says its pixels are in
 /// ([`crate::render::SourceFrame::corrected`]), so its candidates read their
 /// masks where the pixels are.
-pub fn fit_source_baked(path: &Path, image: image::DynamicImage, base: &EditRecipe) -> Result<crate::render::Plate> {
-    let corrected = crate::render::SourceFrame::of(path)?.corrected(base);
+pub fn fit_source_baked(path: &Path, image: image::DynamicImage) -> Result<crate::render::Plate> {
+    let corrected = crate::render::SourceFrame::of(path)?.corrected();
     Ok(crate::render::Plate::baked_in(image, corrected))
 }
 
@@ -3001,7 +2956,6 @@ pub fn calibration_recipe(cal: PhotoCalibration) -> crate::recipe::EditRecipe {
         as_shot_tint: cal.as_shot_tint,
         camera_profile: cal.camera_profile,
         look: cal.look,
-        camera_start: cal.camera_start,
         ..Default::default()
     }
 }
@@ -3454,17 +3408,6 @@ pub fn fresh_as_shot_wb(raw: &Path) -> (Option<f32>, Option<f32>) {
         Some((k, t)) => (Some(k), Some(t)),
         None => (None, None),
     }
-}
-
-/// Stamp `r` with the camera start (v1.17.0, [`crate::recipe::CameraStart`])
-/// its profile stage develops `raw` at — every surface that stamps the
-/// as-shot anchor stamps this beside it, once `r`'s profile is settled. Read
-/// fresh from the RAW every time rather than kept from a save: it is a
-/// function of the file and the profile alone, so a saved copy could only be
-/// the same or stale. `None` for a recipe that names no profile, a baked
-/// image, or a profile not installed.
-pub fn stamp_camera_start(raw: &Path, r: &mut EditRecipe) {
-    r.camera_start = crate::render::camera_start(raw, r);
 }
 
 /// Fresh camera-matched base-look estimate for `raw`: a neutral develop
@@ -4917,12 +4860,9 @@ mod guard_tests {
         // `produce_recipe` for every photo. The other four are probed below.
         // v1.17.0 moved `look` out: the writer emits `<crs:Look>`, so it is
         // an owned row now and `carried_effects_survive_a_refine` probes it.
-        // v1.17.0's `camera_start` is re-stamped by `produce_recipe` for
-        // every photo, as `base_curve` is.
         assert_eq!(
             all,
             [
-                "camera_start",
                 "upright_transform",
                 "explicit_zero",
                 "base_curve",
@@ -6837,7 +6777,7 @@ mod tests {
     }
 
     /// …and what `fit_source` actually returns, where a RAW is available: the
-    /// whole frame at the working edge, in the frame its base develop is in.
+    /// whole frame at the working edge, in the sensor frame.
     /// Env-gated on the private calibration corpus like every other test that
     /// needs a real negative; it prints its reason and passes when unset.
     #[test]
@@ -6862,11 +6802,7 @@ mod tests {
             ),
             "the fit source IS the whole frame, not an in-camera crop of it"
         );
-        assert_eq!(
-            frame.corrected(),
-            crate::render::lens_in_camera(&base),
-            "lens-corrected exactly when the calibration's camera stage resamples the lens"
-        );
+        assert!(!frame.corrected(), "a RAW's fit source is in the sensor frame");
         assert_eq!(
             base,
             calibration_recipe(fit_calibration(&raw)),
@@ -8695,7 +8631,6 @@ mod tests {
             as_shot_tint: Some(15.2),
             camera_profile: String::new(),
             look: None,
-            camera_start: None,
         };
         let mut r = EditRecipe::default();
         stamp_fit_calibration(&mut r, cal);
@@ -8722,7 +8657,6 @@ mod tests {
             as_shot_tint: Some(15.2),
             camera_profile: String::new(),
             look: None,
-            camera_start: None,
         };
         let r = calibration_recipe(cal);
         assert_eq!(r.version, 1);
@@ -8769,7 +8703,6 @@ mod tests {
             as_shot_tint: Some(15.2),
             camera_profile: String::new(),
             look: None,
-            camera_start: None,
         });
         let graded = EditRecipe {
             exposure_ev: 0.3,
@@ -8843,7 +8776,6 @@ mod tests {
             as_shot_tint: None,
             camera_profile: String::new(),
             look: None,
-            camera_start: None,
         });
         let rep = crate::fit::fit_recipe_from(&flat, &flat, &base);
         assert_eq!(

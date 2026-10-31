@@ -514,8 +514,8 @@ pub(super) fn attach_zones_with_divergence(
 /// Until v1.17.0 these exits returned before the band trials, so whether the
 /// sky got its bands depended on whether the LAND survived the single-zone
 /// negotiation. On the night pair in v1.16.0 the land did (k 0.332) and the
-/// sky shipped as two bands carrying its vertical gradient; on the
-/// camera-profile start both zones were refused at the shared shrink
+/// sky shipped as two bands carrying its vertical gradient; on a
+/// v1.17.0 development start both zones were refused at the shared shrink
 /// (k 0.137: the sky's colour move draws a rim at the horizon), the bands
 /// were never tried, the spatial tiles took the sky instead, and the colour
 /// field that carries the horizon glow was handed back by a tile it

@@ -343,9 +343,7 @@ pub struct Control {
     /// at all but part of the response ENVELOPE (the era stamp) or the AI's own
     /// provenance (`rationale`, `confidence`), mask bookkeeping the solver
     /// owns (`role`), the recipe's own bookkeeping about OTHER rows
-    /// (`explicit_zero`, which says how a companion's stored 0 reads), or
-    /// bookkeeping about the RAW (`camera_start`, the start its base develop
-    /// rendered at, which Lightroom recomputes from the same file). A `None`
+    /// (`explicit_zero`, which says how a companion's stored 0 reads). A `None`
     /// row may never own a `crs:` property — asserted, so the escape hatch
     /// cannot be used to dodge a classification.
     ///
@@ -383,7 +381,7 @@ fn trim_num(v: f32) -> String {
 /// Every field of [`EditRecipe`], in DECLARATION order — which is also the
 /// order the strict schema's `required` array takes, so the generated schema
 /// is byte-identical to the hand-written mirror it replaced.
-pub const RECIPE_CONTROLS: [Control; 117] = [
+pub const RECIPE_CONTROLS: [Control; 116] = [
     Control {
         name: "version",
         shape: Shape::Integer,
@@ -532,23 +530,6 @@ pub const RECIPE_CONTROLS: [Control; 117] = [
         crs: CrsKey::None,
         tier: Some(Tier::DerivedWriteOnly),
         purpose: "the as-shot green/magenta companion of as_shot_k (display + XMP honesty only)",
-    },
-    Control {
-        // v1.17.0. Bookkeeping about the RAW, stamped with the as-shot
-        // anchor: the start its base develop rendered at, which the canvas's
-        // Exposure reads its light back under. No tier: it is not a control
-        // anyone sets, and not an export loss either — Lightroom computes
-        // the same start from the same RAW, and the export's own stage
-        // renders at the start it computes rather than at this stamp.
-        name: "camera_start",
-        shape: Shape::EngineCarrier,
-        range: None,
-        neutral: "null = unknown: 0 EV, no headroom",
-        engine_only: true,
-        crs: CrsKey::None,
-        tier: None,
-        purpose: "the total exposure and white-balance headroom the camera-profile stage rendered \
-                  this photo at, stamped per photo by the engine (calibration, never exported to XMP)",
     },
     Control {
         name: "vibrance",
@@ -2064,10 +2045,9 @@ pub const LOCAL_CONTROLS: [Control; 30] = [
         engine_only: false,
         crs: CrsKey::Family("LocalHue"),
         tier: Some(Tier::Rendered),
-        purpose: "local HUE ROTATION of every colour inside the mask (on a camera-profile start the \
-                  value is the angle in degrees, ±180 as in Lightroom; otherwise ±100 = ±30°) — for \
-                  turning one region's colour without touching the same colour elsewhere in the \
-                  frame",
+        purpose: "local HUE ROTATION of every colour inside the mask (±100 = ±30°, the same scale \
+                  as the global mixer's hue axis) — for turning one region's colour without \
+                  touching the same colour elsewhere in the frame",
     },
     Control {
         name: "temperature",
@@ -2444,11 +2424,10 @@ impl Family {
 /// it off in one click. Answering "can they act on it?" with "can the model
 /// say it?" would have filed the first actionable global loss this app has
 /// ever had into the quiet channel.
-pub const STAMPED_CALIBRATION: [&str; 7] = [
+pub const STAMPED_CALIBRATION: [&str; 6] = [
     "as_shot_k",
     "as_shot_tint",
     "base_curve",
-    "camera_start",
     "lens_profile",
     "look",
     "upright_transform",
@@ -2805,11 +2784,6 @@ pub const DOT_EXEMPT: &[(&str, &str)] = &[
 /// stored number says: that 0 renders differently from the default recipe's
 /// absent one, which inequality on the number alone cannot see.
 pub fn family_is_active(f: &Family, r: &EditRecipe) -> bool {
-    // A white balance at As Shot is where a camera-profile start opens
-    // (`EditRecipe::open_white_balance_at_as_shot`), not an edit.
-    if f.name == "white_balance" && r.white_balance_is_as_shot() {
-        return false;
-    }
     let neutral = EditRecipe::default();
     f.members.iter().filter(|m| !DOT_EXEMPT.iter().any(|(n, _)| n == *m)).any(|m| {
         r.explicit_zero.iter().any(|e| e == m)
@@ -3047,8 +3021,6 @@ pub enum GlobalValue<'a> {
     Lens(&'a LensProfile),
     /// The solved colour field, or `None` for a recipe that carries none.
     ColourField(Option<&'a crate::recipe::ColourField>),
-    /// The stamped camera start (v1.17.0), or `None` when unknown.
-    Start(Option<&'a crate::recipe::CameraStart>),
     /// The R25 B4 pass-through block: `crs:` key → the verbatim string
     /// Lightroom wrote. Equality is the whole map, which is the right
     /// "is it active" answer for a value nothing interprets.
@@ -3107,7 +3079,6 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         tint,
         as_shot_k,
         as_shot_tint,
-        camera_start,
         vibrance,
         saturation,
         clarity,
@@ -3224,7 +3195,6 @@ pub fn global_value<'a>(r: &'a EditRecipe, name: &str) -> Option<GlobalValue<'a>
         "tint" => GlobalValue::Num(*tint),
         "as_shot_k" => GlobalValue::OptNum(*as_shot_k),
         "as_shot_tint" => GlobalValue::OptNum(*as_shot_tint),
-        "camera_start" => GlobalValue::Start(camera_start.as_ref()),
         "vibrance" => GlobalValue::Num(*vibrance),
         "saturation" => GlobalValue::Num(*saturation),
         "clarity" => GlobalValue::Num(*clarity),
@@ -3767,8 +3737,6 @@ mod tests {
             colour_field: Some(crate::recipe::ColourField::default()),
             // …and so does the 2026-10-13 lens blur.
             lens_blur: Some(crate::render::LensBlur::default()),
-            // …and v1.17.0's stamped camera start.
-            camera_start: Some(crate::recipe::CameraStart::default()),
             // v1.5.0's list skips when empty, by the same argument again.
             explicit_zero: vec!["sharpen_detail".to_string()],
             // …and so does v1.5.0's parametric curve, at Adobe's defaults.
@@ -4385,7 +4353,6 @@ mod tests {
                 // is Adobe's own creative block; a model that named one would
                 // be naming something it cannot see and cannot check.
                 "camera_profile",
-                "camera_start",
                 "color_nr",
                 "color_nr_detail",
                 "color_nr_smooth",

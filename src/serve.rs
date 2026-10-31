@@ -884,10 +884,9 @@ fn api_image(request: &Request, state: &AppState, max_edge: u32) -> Result<Respo
     }
 }
 
-/// What a fresh develop of `raw` starts from (v1.17.0,
-/// `pipeline::CanvasStart`): Lightroom's 「Adobe Color」 canvas where this
-/// machine can render it, otherwise the camera-matched base curve — estimated
-/// here on the SAME neutral develop_base the panes then build (cached, so
+/// What a fresh develop of `raw` starts from (`pipeline::CanvasStart`): the
+/// camera-matched base curve — estimated here on the SAME neutral
+/// develop_base the panes then build (cached, so
 /// selecting such a photo still costs one demosaic total) rather than by
 /// `pipeline::fresh_canvas_start`, which would pay a second.
 fn fresh_start(raw: &Path) -> pipeline::CanvasStart {
@@ -897,15 +896,11 @@ fn fresh_start(raw: &Path) -> pipeline::CanvasStart {
 /// [`fresh_start`] for a develop imported from a Lightroom document — the
 /// rule of `pipeline::stamp_import_start`, on this module's cached estimate.
 fn stamp_import_start(raw: &Path, r: &mut EditRecipe) {
-    if r.names_profile() {
-        r.base_curve.clear();
-    } else {
-        fresh_start(raw).stamp(r);
-    }
+    fresh_start(raw).stamp_import(r);
 }
 
-/// Fresh camera-matched base-look knots — [`fresh_start`]'s answer on a
-/// machine that cannot render the canvas — on the SAME neutral develop_base
+/// Fresh camera-matched base-look knots — [`fresh_start`]'s answer — on the
+/// SAME neutral develop_base
 /// the panes build, CDF-matched against the camera's own embedded rendition.
 /// A saved recipe.json's curve is NEVER manufactured here: api_recipe serves
 /// those verbatim, legacy-empty included.
@@ -992,8 +987,6 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                     r.as_shot_k = ask;
                     r.as_shot_tint = ast;
                 }
-                pipeline::stamp_camera_start(raw, &mut r);
-                r.open_white_balance_at_as_shot();
                 let h = Header::from_bytes(&b"X-Recipe-Source"[..], &b"lightroom-sidecar"[..])
                     .expect("static ASCII header");
                 let mut resp = json_text(serde_json::to_string(&r)?).with_header(h);
@@ -1201,8 +1194,6 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                     r.as_shot_k = ask;
                     r.as_shot_tint = ast;
                 }
-                pipeline::stamp_camera_start(raw, &mut r);
-                r.open_white_balance_at_as_shot();
                 let mut resp = json_text(serde_json::to_string(&r)?);
                 // A corrupt recipe.json used to fall through to THIS lossy
                 // XMP answer SILENTLY — the authoritative save (bitmap
@@ -1258,8 +1249,6 @@ fn api_recipe(request: &Request, state: &AppState) -> Result<ResponseBox> {
                     r.as_shot_k = ask;
                     r.as_shot_tint = ast;
                 }
-                pipeline::stamp_camera_start(raw, &mut r);
-                r.open_white_balance_at_as_shot();
                 let h = Header::from_bytes(&b"X-Recipe-Source"[..], &b"embedded-xmp"[..])
                     .expect("static ASCII header");
                 let mut resp = json_text(serde_json::to_string(&r)?).with_header(h);
@@ -1350,8 +1339,7 @@ fn recipe_warning_header(xmp_text: &str) -> Option<Header> {
     header("X-Recipe-Warning", &msg)
 }
 
-/// The photo's FRESH start (v1.17.0: its canvas profile and Look, or the
-/// camera-matched base curve where the canvas cannot render), regardless of
+/// The photo's FRESH start (its camera-matched base curve), regardless of
 /// any saved recipe — the web client's Reset needs it to mean "the fresh-open
 /// look" (the GUI's `photo_knots` rule): a legacy save deliberately carries
 /// an empty curve, and preserving that on Reset kept the photo dark. Cheap
@@ -1368,16 +1356,11 @@ fn api_fresh_base(request: &Request, state: &AppState) -> Result<ResponseBox> {
 /// differently depending on which door it came through.
 fn fresh_base_payload(raw: &Path) -> String {
     let (as_shot_k, as_shot_tint) = pipeline::fresh_as_shot_wb(raw);
-    let start = fresh_start(raw);
-    let named = EditRecipe { camera_profile: start.camera_profile.clone(), look: start.look.clone(), ..Default::default() };
     serde_json::json!({
-        "base_curve": start.base_curve,
-        "camera_profile": start.camera_profile,
-        "look": start.look,
+        "base_curve": fresh_start(raw).base_curve,
         "lens_profile": pipeline::fresh_lens_profile(raw),
         "as_shot_k": as_shot_k,
         "as_shot_tint": as_shot_tint,
-        "camera_start": crate::render::camera_start(raw, &named),
     })
     .to_string()
 }
@@ -2062,9 +2045,6 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // thousand-mask body monopolised the render thread).
     req.recipe.clamp();
     crate::store::resolve_mask_paths(&mut req.recipe, &crate::store::develop_dir(&raw));
-    // The camera start the base develops at (v1.17.0), stamped on the server
-    // whatever the client sent: a generated master's strip below clears it.
-    pipeline::stamp_camera_start(&raw, &mut req.recipe);
     // Same decode source as `api_export` below — see `develop_base`. A
     // browser-session master (fill/heal chained this session, not yet
     // persisted) overrides the persisted source; whether the calibration
@@ -2135,7 +2115,7 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     };
     // The base of the recipe being shown (v1.17.0): its camera profile and
     // Look table, which the preview develop below cannot add.
-    let preview = develop_base(&src, &render::BasePart::of_canvas(&req.recipe))?;
+    let preview = develop_base(&src, &render::BasePart::of(&req.recipe))?;
     // The Detail panel's radii are FILM pixels (v1.5.0): the source's own short
     // edge, from its header, so the web pane shows sharpening and noise
     // reduction the way the export looks downscaled to it — the GUI canvas's
@@ -2155,10 +2135,10 @@ fn api_develop(request: &mut Request, state: &AppState) -> Result<ResponseBox> {
     // for whole-frame slider feedback, same policy). The web pane previously
     // skipped ALL of it — a recipe with distortion or straighten previewed one
     // framing and exported another.
-    // A base whose camera stage resampled the lens (v1.17.0) takes no second
-    // resample (`render::tail_lens`).
+    // A marked baked source already in the lens-corrected frame takes no
+    // second resample (`render::tail_lens`).
     let geom = render::geometry_profile(&req.recipe);
-    let corrected = frame.corrected(&req.recipe);
+    let corrected = frame.corrected();
     let film_scale =
         render::FilmScale::of(film, after.width() as usize, after.height() as usize);
     after = render::frame_and_finish(
@@ -2397,8 +2377,6 @@ fn deliverable_source(
 ) -> std::result::Result<(PathBuf, Option<String>), ResponseBox> {
     let mut note: Option<String> = None;
     let mut funnel_ran = false;
-    // The camera start, as the preview stamps it (v1.17.0).
-    pipeline::stamp_camera_start(raw, &mut req.recipe);
     let src = match session_master(req.master.as_deref(), raw) {
         Ok(Some((p, generated))) => {
             if generated {
@@ -4423,42 +4401,14 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["as_shot_k", "as_shot_tint", "base_curve", "camera_profile", "camera_start", "lens_profile", "look"],
-            "the fresh-open contract is exactly these seven keys"
+            ["as_shot_k", "as_shot_tint", "base_curve", "lens_profile"],
+            "the fresh-open contract is exactly these four keys"
         );
         // A baked source has no camera rendition and no as-shot reading: the
         // keys are still PRESENT (the client branches on null, not on absence).
         assert!(v["base_curve"].as_array().expect("an array").is_empty());
         assert!(v["as_shot_k"].is_null() && v["as_shot_tint"].is_null());
-        assert!(v["camera_start"].is_null(), "no profile stage runs on a baked source");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The web door's fresh-open payload carries the photo's camera start
-    /// (v1.17.0) — the same one the desktop open stamps
-    /// (`render::camera_start` at the fresh start's profile): none, since a
-    /// fresh open names no camera profile (the engine's own law,
-    /// `pipeline::fresh_canvas_start_with`), and the key is still present.
-    /// Env-gated on the calibration corpus and Camera Raw's install.
-    ///
-    /// MUTATION: drop the key, or stamp a start the desktop open does not.
-    #[test]
-    fn the_fresh_open_payload_carries_the_photos_camera_start() {
-        let Some(dir) = crate::config::live_env_os("AUTOSHADE_FIT_CALIBRATION_DIR").map(std::path::PathBuf::from)
-        else {
-            crate::test_skipped("serve camera start", "AUTOSHADE_FIT_CALIBRATION_DIR is unset");
-            return;
-        };
-        let raw = dir.join("p39.arw");
-        if !raw.is_file() || crate::render::canvas_renders(&raw).is_err() {
-            crate::test_skipped("serve camera start", "no corpus RAW or no canvas here");
-            return;
-        }
-        let v: serde_json::Value = serde_json::from_str(&fresh_base_payload(&raw)).expect("the payload is JSON");
-        let fresh = crate::pipeline::calibration_recipe(crate::pipeline::fresh_photo_calibration(&raw));
-        assert!(!fresh.names_profile(), "a fresh open names no camera profile");
-        assert!(v.get("camera_start").is_some(), "the payload carries the key");
-        assert_eq!(v["camera_start"], serde_json::to_value(fresh.camera_start).expect("json"));
     }
 
     /// The A6 rule for DELIVERABLES, now that export and download share one

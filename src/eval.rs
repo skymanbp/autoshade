@@ -258,10 +258,9 @@ fn ai_value(row: &Row, r: &EditRecipe) -> Option<f32> {
     match row.source {
         Source::Field => match row.metric.as_str() {
             // ACR records an ABSOLUTE Temperature and Tint, so compare
-            // absolutes, read through the law the recipe renders by: As Shot
-            // resolves through the recipe's own stamp (the engine's
-            // historical 5500 K fallback), and the engine's Tint is a DELTA
-            // from the as-shot green while Camera Raw's is already absolute.
+            // absolutes: As Shot resolves through the recipe's own stamp (the
+            // engine's historical 5500 K fallback), and the engine's Tint is
+            // a DELTA from the as-shot green.
             "temperature_k" => Some(crate::render::WbLaw::absolute_point_of(r).0),
             "tint" => Some(crate::render::WbLaw::absolute_point_of(r).1),
             f => catalogue::global_value(r, f).and_then(|v| v.scalar()),
@@ -2018,30 +2017,6 @@ mod tests {
         assert_eq!(neutral(&row("tint"), &ai), 7.0);
         // The engine's tint is a DELTA from as-shot; ACR's is absolute.
         assert_eq!(ai_value(&row("tint"), &ai), Some(10.0));
-    }
-
-    /// A recipe that names a camera profile renders on Camera Raw's law, where
-    /// its Tint is already absolute: it is compared as it stands, never with
-    /// the as-shot tint added a second time; As Shot is the stamped pair.
-    #[test]
-    fn a_camera_raw_recipes_white_balance_is_compared_as_the_absolute_it_already_is() {
-        let ruler = rows();
-        let row = |m: &str| ruler.iter().find(|r| r.metric == m).unwrap().clone();
-        let moved = EditRecipe {
-            camera_profile: "Adobe Standard".into(),
-            as_shot_k: Some(5950.0),
-            as_shot_tint: Some(13.0),
-            temperature_k: Some(6400.0),
-            tint: 20.0,
-            ..Default::default()
-        };
-        assert_eq!(ai_value(&row("temperature_k"), &moved), Some(6400.0));
-        assert_eq!(ai_value(&row("tint"), &moved), Some(20.0));
-        assert_eq!(neutral(&row("tint"), &moved), 13.0);
-        let as_shot = EditRecipe { temperature_k: None, tint: 0.0, ..moved };
-        assert_eq!(ai_value(&row("temperature_k"), &as_shot), Some(5950.0));
-        assert_eq!(ai_value(&row("tint"), &as_shot), Some(13.0));
-        assert_eq!(ai_value(&row("tint"), &as_shot), Some(neutral(&row("tint"), &as_shot)));
     }
 
     // ── resumable progress ────────────────────────────────────────────────

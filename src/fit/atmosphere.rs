@@ -124,8 +124,7 @@ pub(super) fn solve_white_balance(
     // (the seaside street: 5226 K as shot, 5200 K solved, 0.000 converged,
     // "returned to as-shot"). An exact comparison, not a tolerance: the
     // estimator returns exactly this pair and nothing else rounds to it
-    // without being it. "The anchor" is the law's As Shot: on Camera Raw's
-    // law its tint is the stamped as-shot tint, not 0.
+    // without being it. "The anchor" is the law's As Shot.
     let as_shot = law.as_shot();
     if wb_k == (as_shot.0 / 50.0).round() * 50.0 && wb_tint == round1(as_shot.1) {
         return WbFacts::default();

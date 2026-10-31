@@ -54,7 +54,7 @@ use geometry::{
 #[cfg(test)]
 use geometry::{LrCrop, inscribed_norm, lr_to_engine_crop, svd2};
 pub use losses::{
-    MaskImportLoss, MaskImportReason, MaskLoss, MaskLossReason, PASSTHROUGH_CRS, canvas_look,
+    MaskImportLoss, MaskImportReason, MaskLoss, MaskLossReason, PASSTHROUGH_CRS,
     describe_global_losses, describe_import_losses, describe_mask_losses, global_export_losses,
     global_render_gaps,
     import_losses, import_losses_for_photo, lens_profile_enabled, mask_export_losses,
@@ -62,9 +62,6 @@ pub use losses::{
     unmodelled_global_crs,
 };
 pub(crate) use losses::{CALIBRATION_CRS, OWNED_ELEMENT_ONLY, SDR_CRS};
-// Only the canvas test reads the raw packet; the library goes through `canvas_look`.
-#[cfg(test)]
-pub(crate) use losses::CANVAS_LOOK_XMP;
 use losses::{read_creative_look, upright_matrices};
 #[cfg(test)]
 use losses::{render_gaps_in};

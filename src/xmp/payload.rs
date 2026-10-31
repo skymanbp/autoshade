@@ -103,10 +103,6 @@ pub(super) fn portable(r: &EditRecipe) -> EditRecipe {
     for path in p.raster_paths_mut() {
         *path = bare_name(path);
     }
-    // The camera start (v1.17.0) is this engine's reading of the RAW, made
-    // again on every open (`render::camera_start`); the sidecar does not
-    // carry it.
-    p.camera_start = None;
     p
 }
 

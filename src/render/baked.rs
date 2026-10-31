@@ -1,18 +1,12 @@
-//! The lens geometry a pixel master carries (v1.17.0), written into the
-//! master file itself.
+//! The lens geometry a pixel file carries (v1.17.0), written into the file
+//! itself.
 //!
-//! Under Camera Raw's law the camera stage resamples the lens profile
-//! ([`lens_in_camera`]), so a master baked from a RAW (a heal, a clone, a
-//! fill, a stack, a denoise) is in the lens-CORRECTED frame and has the
-//! profile's distortion, chromatic aberration and vignetting in its pixels. A
-//! card over it must not apply them a second time, and its masks must be read
-//! in the corrected frame. The file says so itself. The marker sits in the
-//! file's metadata under one key, [`BAKED_GEOMETRY_KEY`]: a PNG `iTXt` chunk,
-//! a TIFF private tag ([`BAKED_GEOMETRY_TIFF_TAG`]) or a JPEG comment
-//! segment. Every surface that renders, fits or bakes from the file reads it
-//! through [`SourceFrame::of`], so the marker cannot be lost on the way the
-//! way a flag handed from caller to caller can, and there is no second
-//! record to disagree with the pixels.
+//! A develop bakes no lens geometry into a master: the tail resamples the
+//! lens on every render. A file that DOES carry geometry in its pixels says
+//! so in its metadata under one key, [`BAKED_GEOMETRY_KEY`]: a PNG `iTXt`
+//! chunk, a TIFF private tag ([`BAKED_GEOMETRY_TIFF_TAG`]) or a JPEG comment
+//! segment, read through [`SourceFrame::of`] by every surface that renders,
+//! fits or bakes from the file, so the marker cannot be lost on the way.
 //!
 //! The marker names WHICH geometry was baked ([`BakedGeometry`]): the lens
 //! profile, which of its corrections, the manual Distortion amount, and a
@@ -63,8 +57,7 @@ pub struct BakedGeometry {
     pub ca: bool,
     /// The profile's vignetting is in the pixels.
     pub vignette: bool,
-    /// The manual Distortion amount in the pixels. Always 0 today: a moved
-    /// slider keeps the whole geometry in the tail ([`lens_in_camera`]).
+    /// The manual Distortion amount in the pixels.
     pub manual_distortion: f32,
     /// FNV-1a 64 of the composed knots and the vignetting strength, so a
     /// changed Distortion strength or manual CA pair is told apart from the
@@ -73,45 +66,6 @@ pub struct BakedGeometry {
 }
 
 impl BakedGeometry {
-    /// The geometry a base of `part` bakes: `None` when it bakes none (no lens
-    /// profile resampled in the camera stage and no profile vignetting).
-    pub fn of_part(part: &BasePart) -> Option<Self> {
-        let lens = part.lens();
-        let vignette = part.vignette();
-        if lens.is_none() && vignette.is_empty() {
-            return None;
-        }
-        let distortion = lens.is_some_and(|l| l.distortion_on && !l.distortion.is_empty());
-        let ca = lens.is_some_and(|l| l.ca_on && !l.ca_r.is_empty() && !l.ca_b.is_empty());
-        let mut h = Fnv::default();
-        for (on, knots) in [
-            (distortion, lens.map_or(&[][..], |l| &l.distortion[..])),
-            (ca, lens.map_or(&[][..], |l| &l.ca_r[..])),
-            (ca, lens.map_or(&[][..], |l| &l.ca_b[..])),
-            (true, vignette),
-        ] {
-            h.u32(if on { knots.len() as u32 } else { 0 });
-            if on {
-                knots.iter().for_each(|k| h.u32(k.to_bits()));
-            }
-        }
-        h.u32(if vignette.is_empty() { 0 } else { part.vignette_scale().to_bits() });
-        Some(Self {
-            version: VERSION,
-            lens_profile: part.lens_id().to_string(),
-            distortion,
-            ca,
-            vignette: !vignette.is_empty(),
-            manual_distortion: 0.0,
-            knots: format!("fnv1a64:{:016x}", h.0),
-        })
-    }
-
-    /// The geometry a base of `r` bakes ([`BakedGeometry::of_part`]).
-    pub fn wanted(r: &EditRecipe) -> Option<Self> {
-        Self::of_part(&BasePart::of(r))
-    }
-
     /// Is a frame with this geometry baked in the lens-CORRECTED frame?
     /// Vignetting alone moves no pixel.
     pub fn corrects_frame(&self) -> bool {
@@ -196,7 +150,7 @@ impl Fnv {
 /// [`SourceFrame::of`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum SourceFrame {
-    /// A camera RAW: its base develop decides ([`lens_in_camera`]).
+    /// A camera RAW: its base develop is in the sensor frame.
     Raw,
     /// A baked file, with the geometry its marker says is in its pixels;
     /// `None` = no marker, the sensor frame.
@@ -247,38 +201,27 @@ impl SourceFrame {
         }
     }
 
-    /// Are the pixels `r` develops from this source in the lens-corrected
-    /// frame? A RAW's base is when its camera stage resamples the lens; a
-    /// baked file's is when its marker says so, whatever `r` asks for —
-    /// this is what the pixels ARE ([`SourceFrame::check`] is what refuses a
-    /// recipe that disagrees).
-    pub fn corrected(&self, r: &EditRecipe) -> bool {
+    /// Are this source's pixels in the lens-corrected frame? A RAW's base
+    /// never is; a baked file's is when its marker says so — this is what
+    /// the pixels ARE ([`SourceFrame::check`] is what refuses a recipe over
+    /// them).
+    pub fn corrected(&self) -> bool {
         match self {
-            Self::Raw => lens_in_camera(r),
+            Self::Raw => false,
             Self::Baked(g) => g.as_ref().is_some_and(BakedGeometry::corrects_frame),
         }
     }
 
-    /// Refuse `r` on a marked master whose baked geometry is not the one `r`
-    /// develops: applying `r`'s geometry over it would correct the lens twice,
-    /// or leave a correction in that `r` switched off. A RAW and an unmarked
-    /// file always pass.
+    /// Refuse `r` on a marked master: a develop bakes no lens geometry, and
+    /// applying `r`'s over pixels that carry one would correct the lens
+    /// twice. A RAW and an unmarked file always pass.
     pub fn check(&self, r: &EditRecipe) -> Result<()> {
+        let _ = r;
         let Some(baked) = self.baked() else { return Ok(()) };
-        let wanted = BakedGeometry::wanted(r);
-        if wanted.as_ref() == Some(baked) {
-            return Ok(());
-        }
-        match wanted {
-            Some(w) => bail!(
-                "this master has {baked} in its pixels, but the recipe develops {w} — \
-                 bake the master again from the RAW, or set the lens corrections back"
-            ),
-            None => bail!(
-                "this master has {baked} in its pixels, but the recipe develops no lens \
-                 profile — bake the master again from the RAW, or set the lens corrections back"
-            ),
-        }
+        bail!(
+            "this master has {baked} in its pixels, but a develop bakes no lens geometry — bake \
+             the master again from the RAW"
+        )
     }
 }
 

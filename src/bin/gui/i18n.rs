@@ -679,8 +679,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Sharpens inside the mask when positive and SOFTENS when negative (the global 「Sharpening」 has no negative half). Same radius as the global one.",
         "正值在蒙版内锐化，负值柔化（全局「锐化」没有负值一半）。半径与全局一致。"),
     ("Hue shift", "色相旋转"),
-    ("Rotates every colour inside the mask: on a camera-profile start by the value in degrees, ±180° as in Lightroom; otherwise ±100 = ±30° — unlike the global color mixer, which moves one color band across the whole frame.",
-        "旋转蒙版内的所有颜色：用相机配置文件起步时按数值的度数转，范围 ±180°，与 Lightroom 一致；否则 ±100 = ±30°——不同于全局颜色混合器：那个是把某一色段在整幅画面上移动。"),
+    ("Rotates every colour inside the mask (±100 = ±30°) — unlike the global color mixer, which moves one color band across the whole frame.",
+        "旋转蒙版内的所有颜色（±100 = ±30°）——不同于全局颜色混合器：那个是把某一色段在整幅画面上移动。"),
     // The mask Color swatch (crs:LocalToningHue / LocalToningSaturation) —
     // Lightroom's mask panel calls it 「颜色」; 「颜色染色」 keeps it apart from
     // the 「颜色」 group caption it sits under.
@@ -828,12 +828,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // profile it sits on. 「创意」 is Adobe's own Chinese word for this
     // family of profiles, so the panel and Lightroom agree.
     ("Creative profile", "创意配置文件"),
-    ("Its baked tone curve and sliders render; its creative colour table does not",
-        "它烘焙的色调曲线与滑杆会渲染；它的创意色彩表不会"),
-    // v1.17.0 — the creative colour table renders when Camera Raw's install
-    // carries it (read and checked against its id, never bundled).
-    ("Its baked tone curve, sliders and creative colour table render",
-        "它烘焙的色调曲线、滑杆与创意色彩表都会渲染"),
+    // v1.17.0 — a Look is colour data: its creative colour table renders
+    // when Camera Raw's install carries it (read and checked against its id,
+    // never bundled); its baked tone curve and sliders never do.
+    ("Its baked tone curve and sliders do not render",
+        "它烘焙的色调曲线与滑杆不会渲染"),
+    ("Its creative colour table renders; its baked tone curve and sliders do not",
+        "它的创意色彩表会渲染；它烘焙的色调曲线与滑杆不会"),
+    ("Neither its creative colour table nor its baked tone curve and sliders render",
+        "它的创意色彩表与烘焙的色调曲线、滑杆都不会渲染"),
     ("Carried through to the sidecar unchanged; AutoShade never interprets these",
         "原样带出到边车文件；AutoShade 从不解读这些值"),
     // v1.5.0 F6 — the Transform panel RENDERS now, so the section holds real
@@ -1083,7 +1086,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Open photo…", "打开照片…"),
     ("Ctrl+O · or drag a file into the window", "Ctrl+O · 或直接拖拽进窗口"),
     ("Reset", "重置"),
-    ("Back to this photo's fresh-open look: sliders neutral on its starting look — Lightroom's Adobe Color where Camera Raw is installed, else the camera's own default tone (one undo brings it back)", "回到本照片刚打开的状态：全部滑杆归中性，回到起点外观——装有 Camera Raw 时为 Lightroom 的 Adobe Color，否则为相机自带的默认色调（一步撤销可回来）"),
+    ("Back to this photo's fresh-open look: sliders neutral on the camera's own default colour and tone, like the in-camera JPEG (one undo brings it back)", "回到本照片刚打开的状态：全部滑杆归中性、保留相机自带的默认色调（接近机内 JPEG）（一步撤销可回来）"),
     ("saved before this version's starting look — renders as originally tuned; Reset switches to the photo's fresh starting look", "此存档保存于当前起点外观之前——按原样渲染；「重置」可切换到本照片新的起点外观"),
     ("the canvas could not be developed under this photo's camera profile ({err})", "画布无法按本照片的相机配置文件渲染（{err}）"),
     ("↶ Undo", "↶ 撤销"),

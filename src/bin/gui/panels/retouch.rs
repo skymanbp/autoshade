@@ -21,17 +21,15 @@ fn developed_card_pixels(
     frame.check(recipe)?;
     let part = autoshade::render::BasePart::of(recipe);
     // The card's own base (v1.17.0): the profile and Look table its recipe
-    // names are in the pixels the preview develop below is handed.
-    // The card's canvas part for the pixels (its white too, which a RAW's
-    // canvas base is developed at — `BasePart::of_canvas`); the master keeps
-    // `part`, whose geometry is the one the pixels are in.
+    // names are in the pixels the preview develop below is handed; the
+    // master keeps `part`.
     let base = autoshade::render::source_pixels_for(
         path,
-        &autoshade::render::BasePart::of_canvas(recipe),
+        &autoshade::render::BasePart::of(recipe),
         (raw && !full_res).then_some(2048),
     )?;
     let geom = autoshade::render::geometry_profile(recipe);
-    let corrected = frame.corrected(recipe);
+    let corrected = frame.corrected();
     let image = autoshade::render::develop_preview_framed(
         &base,
         recipe,

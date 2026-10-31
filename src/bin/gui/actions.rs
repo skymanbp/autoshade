@@ -511,10 +511,8 @@ impl AutoShadeApp {
                         // demosaic) — the Temp slider then speaks absolute
                         // Kelvin for this photo.
                         let as_shot = autoshade::render::as_shot_wb(&path);
-                        // The fresh START (v1.17.0): Lightroom's Adobe Color
-                        // canvas where this machine's Camera Raw install can
-                        // render it — no estimate paid. Otherwise the
-                        // camera-matched base look: CDF-match the neutral
+                        // The fresh START: the camera-matched base look:
+                        // CDF-match the neutral
                         // develop against the camera's own rendition, paired
                         // like with like by the one entry all three open
                         // paths share — the frame the rendition shows, and
@@ -2153,11 +2151,6 @@ impl AutoShadeApp {
                         )
                     },
                 );
-                // The camera start (v1.17.0) at the profile the snapshot now
-                // names, read from the photo — never the snapshot's own.
-                if !self.active_on_ai_pixels() {
-                    autoshade::pipeline::stamp_camera_start(&src, &mut r);
-                }
                 // A version snapshot is a saved recipe like any other, and
                 // it predates the era stamp by definition — loading one put
                 // an unrepaired washed curve straight onto the canvas and
@@ -3757,7 +3750,7 @@ impl AutoShadeApp {
                                 master,
                                 Some(autoshade::pipeline::FIT_SOURCE_EDGE),
                             )?;
-                            (autoshade::pipeline::fit_source_baked(master, pixels, &cal)?, cal, None)
+                            (autoshade::pipeline::fit_source_baked(master, pixels)?, cal, None)
                         }
                         (Some(p), None) if autoshade::decode::is_raw(p) => {
                             let (frame, cal) = autoshade::pipeline::fit_source(p)?;
@@ -3767,7 +3760,7 @@ impl AutoShadeApp {
                             let cal = autoshade::pipeline::calibration_recipe(
                                 autoshade::pipeline::fit_calibration(p),
                             );
-                            (autoshade::pipeline::fit_source_baked(p, (*base).clone(), &cal)?, cal, None)
+                            (autoshade::pipeline::fit_source_baked(p, (*base).clone())?, cal, None)
                         }
                         (None, _) => (autoshade::render::Plate::baked((*base).clone()), Default::default(), None),
                     };

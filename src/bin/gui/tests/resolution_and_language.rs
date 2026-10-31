@@ -438,7 +438,7 @@
             p,
             &(
                 base.clone(),
-                (autoshade::pipeline::CanvasStart { base_curve: knots.clone(), ..Default::default() }, Default::default()),
+                (autoshade::pipeline::CanvasStart { base_curve: knots.clone() }, Default::default()),
                 lens.clone(),
                 Some((4830.0, 6.0)),
                 None,

@@ -99,15 +99,6 @@ pub struct EditRecipe {
     /// (display + XMP honesty only — `tint` stays a RELATIVE shift from
     /// as-shot, so the engine never feeds this to `wb_gains`).
     pub as_shot_tint: Option<f32>,
-    /// ENGINE-ONLY camera start (v1.17.0, never in XMP): the total exposure
-    /// and the white balance's over-range headroom the camera-profile stage
-    /// rendered this photograph's base at ([`CameraStart`]). Stamped with
-    /// the as-shot anchor above, from the RAW, and read by the develop's
-    /// Exposure and by every adjustment that acts under the stage's exposure
-    /// transfer (`render::profile::UnderTone`). `None` = unknown → 0 EV and no
-    /// headroom; only a recipe that names a camera profile reads it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub camera_start: Option<CameraStart>,
 
     // --- Colour / presence --------------------------------------------------
     /// -100..=100, protects already-saturated colours.
@@ -773,29 +764,6 @@ pub struct EditRecipe {
     pub confidence: f32,
 }
 
-/// Where the camera-profile stage started a photograph (v1.17.0): the TOTAL
-/// exposure its transfer ran at — the body's `BaselineExposure` plus the
-/// profile's `BaselineExposureOffset` — and the white balance's over-range
-/// headroom in stops (measured against the camera neutral's max over min,
-/// `render::tone_cr`). The develop's Exposure takes
-/// the light back under this start and puts it through the transfer at the
-/// start plus the slider, which is how Camera Raw's Exposure meets its
-/// baseline: one transfer at their sum.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-pub struct CameraStart {
-    /// The total exposure, in EV.
-    pub ev: f32,
-    /// The over-range headroom, in stops (0..=1).
-    pub headroom: f32,
-    /// The profile stage's look table and tone curve — what it puts on after
-    /// its exposure transfer — by the key the stage registered them under
-    /// (`render::profile::register_tail`), filled in the same step that reads
-    /// the profile. 0, the default (every recipe written before the key
-    /// existed): Adobe's default curve and no look table.
-    pub tables: u64,
-}
-
 /// One smooth field of local colour and tone, on the same bilateral grid the
 /// reverse fit analyses with ([`crate::fit_field`]): `x` × `y` spatial cells
 /// × `b` luma bins, five parameters per vertex, read trilinearly per pixel.
@@ -1160,7 +1128,6 @@ impl Default for EditRecipe {
             tint: 0.0,
             as_shot_k: None,
             as_shot_tint: None,
-            camera_start: None,
             vibrance: 0.0,
             saturation: 0.0,
             clarity: 0.0,
@@ -1406,40 +1373,20 @@ impl EditRecipe {
         self.convert_to_grayscale || self.baked_look().is_some_and(|l| l.grayscale)
     }
 
-    /// The creative profile's baked tone curve, when it has one that renders.
-    ///
-    /// THE one place that answers "does the profile state a base rendition",
-    /// because two places answering it differently is what this method was
-    /// written to end: `render::build_tone_lut` composed the Look's curve as the
-    /// base rendition while `render::apply_develop`'s tone-neutral
-    /// short-circuit still asked only about `base_curve`, so a photograph whose
-    /// only tonal content was its profile skipped the tone pass entirely and
-    /// rendered the profile as nothing at all. That is not an edge case: 161 of
-    /// the 175 sidecars in the reference library carry a `crs:Look`, and the
-    /// default `Adobe Color` bakes a real S-curve and no sliders.
-    pub(crate) fn baked_tone_curve(&self) -> Option<&CreativeLook> {
-        self.baked_look().filter(|l| !l.tone_curve.is_empty())
-    }
-
     /// Does the tone stage have anything to do?
     ///
     /// Every input [`crate::render::build_tone_lut`] reads, asked in one place
-    /// so the short-circuit and the LUT cannot disagree. The two slider terms
-    /// go through [`Self::with_baked`] for the same reason: a profile that
-    /// bakes Highlights −12 onto a photograph the photographer never touched is
-    /// tone work, and a neutrality test reading the raw field would have
-    /// skipped it.
+    /// so the short-circuit and the LUT cannot disagree.
     pub(crate) fn has_tone_work(&self) -> bool {
         self.exposure_ev != 0.0
             || self.contrast != 0.0
-            || self.with_baked(self.highlights, |l| l.highlights) != 0.0
-            || self.with_baked(self.shadows, |l| l.shadows) != 0.0
+            || self.highlights != 0.0
+            || self.shadows != 0.0
             || self.whites != 0.0
             || self.blacks != 0.0
             || !self.tone_curve.is_empty()
             || self.parametric_regions().is_some()
-            || self.baked_tone_curve().is_some()
-            || !self.starting_curve().is_empty()
+            || !self.base_curve.is_empty()
     }
 
     /// Does this recipe name a camera profile — its own `crs:CameraProfile`,
@@ -1450,57 +1397,8 @@ impl EditRecipe {
             || self.look.as_ref().is_some_and(|l| !l.base_profile.is_empty())
     }
 
-    /// Open the white balance where Lightroom opens it (v1.17.0): on a recipe
-    /// that names a camera profile and carries the photo's as-shot anchor,
-    /// an untouched white balance — no Temperature, and a Tint of 0 or the
-    /// as-shot one — is stamped AT As Shot: `temperature_k` the as-shot
-    /// Kelvin and `tint` the as-shot tint, the values Lightroom's sliders show
-    /// on open. On that law Tint is Camera Raw's absolute tint
-    /// (`render::camera_raw_wb`), so a Tint left at 0 is a move to 0: the
-    /// first drag of Temperature then also took the as-shot tint away (−14 on
-    /// a +14 frame). The stamp renders exactly what the unstamped recipe
-    /// rendered (the white balance stage skips a target equal to As Shot).
-    /// Every other recipe is left as it is, byte for byte.
-    pub fn open_white_balance_at_as_shot(&mut self) {
-        let (Some(k), true) = (self.as_shot_k, self.names_profile()) else {
-            return;
-        };
-        let t = self.as_shot_tint.unwrap_or(0.0);
-        if self.temperature_k.is_none() && (self.tint == 0.0 || self.tint == t) {
-            self.temperature_k = Some(k);
-            self.tint = t;
-        }
-    }
-
-    /// The white balance sits at As Shot: a recipe that names a camera
-    /// profile, with Temperature and Tint at the stamped as-shot pair — what
-    /// [`EditRecipe::open_white_balance_at_as_shot`] opens at, and what the
-    /// XMP writer then writes as Lightroom's `WhiteBalance="As Shot"`.
-    pub fn white_balance_is_as_shot(&self) -> bool {
-        self.names_profile()
-            && self.as_shot_k.is_some()
-            && self.temperature_k == self.as_shot_k
-            && self.tint == self.as_shot_tint.unwrap_or(0.0)
-    }
-
-    /// The camera base curve this recipe renders (v1.17.0): `base_curve`,
-    /// unless the recipe names a camera profile — exactly ONE starting tone.
-    /// Lightroom's order is profile → the Look's baked curve → the sliders, so
-    /// a profile's tone is the start and the camera-matched estimate must not
-    /// stack under it.
-    ///
-    /// Decided from the recipe ALONE, so the export, the GUI and web previews
-    /// and the reverse fit answer it the same way without asking whether this
-    /// machine's Camera Raw install holds the profile. A named profile that is
-    /// not installed renders without its tables (and says so); it does not
-    /// fall back to the estimate, because the estimate approximates a canvas
-    /// the recipe no longer describes.
-    pub fn starting_curve(&self) -> &[[f32; 2]] {
-        if self.names_profile() { &[] } else { &self.base_curve }
-    }
-
-    /// Just the start this recipe develops from — its camera base curve, or
-    /// the camera profile and creative Look that replace it (v1.17.0) — on
+    /// Just the start this recipe develops from — its camera base curve, with
+    /// the colour of a camera profile and creative Look it names — on
     /// otherwise neutral sliders: what a Before pane shows.
     pub fn start_only(&self) -> EditRecipe {
         EditRecipe {
@@ -1522,23 +1420,6 @@ impl EditRecipe {
         self.camera_profile = String::new();
         self.look = None;
         self.lens_profile = Default::default();
-        // …and the camera start the profile stage rendered at: baked pixels
-        // went through no stage here.
-        self.camera_start = None;
-    }
-
-    /// One tone slider, with the Look's baked move added.
-    ///
-    /// ADDED, and that is exact rather than convenient: the engine's tone model
-    /// is `base + basis·sliders`, LINEAR in the sliders by construction (see
-    /// `render::build_tone_lut`), so a baked −12 followed by the
-    /// photographer's +20 is the same curve as a single +8. The amount scales
-    /// the baked half only, which is what a profile's `crs:Amount` means.
-    pub(crate) fn with_baked(&self, own: f32, pick: fn(&CreativeLook) -> f32) -> f32 {
-        match self.baked_look() {
-            Some(l) => own + pick(l) * l.amount,
-            None => own,
-        }
     }
 }
 
@@ -2320,12 +2201,8 @@ pub struct LocalAdjustment {
     pub sharpness: f32,
     pub saturation: f32,
     /// Local HUE ROTATION → `crs:LocalHue` (the file holds degrees ÷ 180),
-    /// ±[`LOCAL_HUE_MAX_DEG`]. On a camera-profile start the value is the
-    /// angle in degrees, as Camera Raw renders it (`render::mask_cr::hue_px`,
-    /// v1.17.0: file values 0.25 / 0.5 / 0.75 / 1.0 turn the Lab hue by
-    /// 54.7° / 81.9° / 112.9° / 173.5°, every L band within 2.01 L / 1.20 ab
-    /// of this law, ±1.0 the same half turn); otherwise ±100 maps to ±30° (the
-    /// global 8-band mixer's hue axis, `render::apply_hsl`).
+    /// ±[`LOCAL_HUE_MAX_DEG`]; ±100 maps to ±30° (the global 8-band mixer's
+    /// hue axis, `render::apply_hsl`).
     /// Rotates every hue inside the mask instead of one band across the whole
     /// frame — the one shape of colour move a global mixer cannot make. Added
     /// in R23-1b beside `sharpness`, for the same reason.
@@ -4028,8 +3905,8 @@ impl EditRecipe {
         self.shadows = c(self.shadows, -100.0, 100.0);
         self.whites = c(self.whites, -100.0, 100.0);
         self.blacks = c(self.blacks, -100.0, 100.0);
-        // Camera Raw's own Tint range (±150): within ±100 a render is what it
-        // was; past it the recipe used to clamp a value Camera Raw renders.
+        // A Lightroom document's Tint range (±150), so an imported value is
+        // kept rather than clamped; within ±100 a render is what it was.
         self.tint = c(self.tint, -150.0, 150.0);
         self.vibrance = c(self.vibrance, -100.0, 100.0);
         self.saturation = c(self.saturation, -100.0, 100.0);
@@ -4203,11 +4080,10 @@ impl EditRecipe {
         self.quarter_turns %= 4;
         self.confidence = c(self.confidence, 0.0, 1.0);
         self.temperature_k = match self.temperature_k {
-            // Camera Raw's Temperature range, 2000–50000 K (v1.17.0): its law
-            // renders the whole of it (`wb::camera_raw_white`). The engine's
-            // own law — a recipe with no camera profile — saturates at its
-            // blackbody fit's 40000 K (`wb::kelvin_to_rgb`), so there the top
-            // 10000 K render as 40000 K.
+            // A Lightroom document's Temperature range, 2000–50000 K
+            // (v1.17.0), so an imported value is kept rather than clamped.
+            // The render saturates at its blackbody fit's 40000 K
+            // (`wb::kelvin_to_rgb`), so the top 10000 K render as 40000 K.
             Some(k) if k.is_finite() => Some(k.clamp(2000.0, 50000.0)),
             // A non-finite Kelvin cannot fall back to the closure's 0.0 (out
             // of range) — corrupt WB goes back to as-shot.
@@ -4224,13 +4100,6 @@ impl EditRecipe {
             Some(t) if t.is_finite() => Some(t.clamp(-150.0, 150.0)),
             _ => None,
         };
-        // The camera start: Camera Raw's exposure slider range and the
-        // headroom's one stop; a corrupt one is "unknown".
-        self.camera_start = self.camera_start.filter(|c| c.ev.is_finite() && c.headroom.is_finite()).map(|c| CameraStart {
-            ev: c.ev.clamp(-10.0, 10.0),
-            headroom: c.headroom.clamp(0.0, 1.0),
-            tables: c.tables,
-        });
         // Crop is a normalized [0,1] view-frame rectangle; untrusted input
         // (AI JSON, foreign XMP, a hand-edited recipe) can carry values
         // outside the frame or an inverted/empty rectangle. Clamp into the
@@ -4696,8 +4565,7 @@ impl EditRecipe {
                 // calibration — a fresh-open stamp must still count as no-op.
                 as_shot_k: None,
                 as_shot_tint: None,
-                camera_start: None,
-                lens_profile: if self.lens_profile.is_as_stamped() {
+                    lens_profile: if self.lens_profile.is_as_stamped() {
                     LensProfile::default()
                 } else {
                     self.lens_profile.clone()
@@ -5357,22 +5225,6 @@ mod tests {
         stub.clamp();
         assert!(stub.mask_warp.is_empty());
         assert_eq!(stub.mask_warp_src, MaskWarpSource::Unparseable);
-    }
-
-    /// A camera start written before the stage's tail key existed loads with
-    /// key 0 — Adobe's default curve and no look table, what it rendered under
-    /// — and a stamped key survives the JSON round trip.
-    #[test]
-    fn a_camera_start_without_its_tail_key_loads_as_the_default_tail() {
-        let legacy: EditRecipe =
-            serde_json::from_str(r#"{"camera_start":{"ev":0.35,"headroom":0.995}}"#).unwrap();
-        assert_eq!(legacy.camera_start, Some(CameraStart { ev: 0.35, headroom: 0.995, tables: 0 }));
-        let stamped = EditRecipe {
-            camera_start: Some(CameraStart { ev: 0.35, headroom: 1.0, tables: 0x1234_5678_9abc_def0 }),
-            ..Default::default()
-        };
-        let back: EditRecipe = serde_json::from_str(&serde_json::to_string(&stamped).unwrap()).unwrap();
-        assert_eq!(back.camera_start, stamped.camera_start);
     }
 
     #[test]

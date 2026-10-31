@@ -169,7 +169,7 @@ pub(super) fn load_layers(
         }
         let frame = SourceFrame::of(std::path::Path::new(path)).and_then(|f| f.check(recipe).map(|()| f));
         let corrected = match frame {
-            Ok(f) => f.corrected(recipe),
+            Ok(f) => f.corrected(),
             Err(e) if strict => {
                 return Err(e.context(format!("{} '{path}' — no pixels were rendered", LAYER.what)));
             }

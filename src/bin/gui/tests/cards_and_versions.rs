@@ -793,7 +793,7 @@
             distortion_on: true,
             ..Default::default()
         };
-        let cal = || (autoshade::pipeline::CanvasStart { base_curve: knots.clone(), ..Default::default() }, lens.clone(), Some((5200.0, 3.0)));
+        let cal = || (autoshade::pipeline::CanvasStart { base_curve: knots.clone() }, lens.clone(), Some((5200.0, 3.0)));
 
         // The defect's direction: a snapshot with no calibration, onto the
         // parametric negative.

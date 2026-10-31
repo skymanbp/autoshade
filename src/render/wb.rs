@@ -173,137 +173,37 @@ fn apply_wb(data: &mut [[f32; 3]], as_shot_k: f32, target_k: f32, tint: f32) {
 /// applies on its own, matching the recipe contract (tint 0 = neutral) and
 /// what the GUI slider promises.
 pub(super) fn apply_recipe_wb(data: &mut [[f32; 3]], r: &EditRecipe) {
-    apply_recipe_wb_in(data, r, ExportColorSpace::Srgb);
-}
-
-/// [`apply_recipe_wb`] on a buffer in the working space `space` — the RAW
-/// render's, whose primaries a recipe on Camera Raw's law is undone from.
-pub(super) fn apply_recipe_wb_in(data: &mut [[f32; 3]], r: &EditRecipe, space: ExportColorSpace) {
     if r.temperature_k.is_some() || r.tint != 0.0 {
         let anchor = r.as_shot_k.unwrap_or(5500.0);
-        if SliderLaw::of(r) == SliderLaw::CameraRaw {
-            let target = (r.temperature_k.unwrap_or(anchor), r.tint);
-            let as_shot = (anchor, r.as_shot_tint.unwrap_or(0.0));
-            // As Shot is no move: a fresh develop opens there
-            // (`EditRecipe::open_white_balance_at_as_shot`), and rendering it
-            // must be what the unstamped recipe rendered.
-            if target == as_shot {
-                return;
-            }
-            let m = camera_raw_wb(target, as_shot);
-            apply_camera_raw_wb(data, &m, &profile::UnderTone::new(space, r.camera_start.unwrap_or_default()));
-            return;
-        }
         apply_wb(data, anchor, r.temperature_k.unwrap_or(anchor), r.tint);
     }
 }
 
-/// The white a recipe on Camera Raw's law names when it moves from As Shot:
-/// `dng_temperature::Get_xy_coord` of its Temperature and Tint, at Camera
-/// Raw's own slider ranges (2000–50000 K, ±150). `None` on the engine's law
-/// and at As Shot. The RAW render puts this white into the camera stage
-/// (`profile::camera_neutral_of`), where Camera Raw puts it.
-pub(super) fn camera_raw_white(r: &EditRecipe) -> Option<[f64; 2]> {
-    if SliderLaw::of(r) != SliderLaw::CameraRaw || (r.temperature_k.is_none() && r.tint == 0.0) {
-        return None;
-    }
-    let anchor = r.as_shot_k.unwrap_or(5500.0);
-    let target = (r.temperature_k.unwrap_or(anchor), r.tint);
-    if target == (anchor, r.as_shot_tint.unwrap_or(0.0)) {
-        return None;
-    }
-    Some(profile::temp_tint_to_xy(
-        f64::from(target.0.clamp(2000.0, 50000.0)),
-        f64::from(target.1.clamp(-150.0, 150.0)),
-    ))
-}
-
-/// Camera Raw's white balance (v1.17.0, measured): the frame is adapted from
-/// the white its Temperature and Tint name to the as-shot white it was
-/// rendered at — the DNG SDK's chromaticity of a temperature and tint
-/// ([`profile::temp_tint_to_xy`]) and its Bradford adaptation
-/// ([`profile::white_shift`]) — on the light the white balance acts on in
-/// Camera Raw: before the exposure ramp and the curve, which the profile
-/// stage had already put on the frame and [`profile::UnderTone`] undoes and
-/// redoes around the shift.
-///
-/// Measured on p39 (Temperature 4000 / 5000 / 7500 / 10000 K and Tint ±30
-/// from its as-shot 5400 K / +14, 1000 px, lens-matched): Camera Raw moves
-/// the white a little MORE than the slider's own mired distance
-/// ([`WB_MIRED_SCALE`]), the tint by its own ([`WB_TINT_SCALE`]), adds green
-/// as it cools and magenta as it warms
-/// ([`WB_TINT_PER_MIRED`]) and darkens as it cools ([`WB_EV_PER_MIRED`]) —
-/// what its profile's temperature-weighted matrices and tables do that one
-/// adaptation does not. The four constants are fitted with the engine in the
-/// loop (Nelder–Mead on the band errors of the six renders, the frame's
-/// as-shot white held at Lightroom's 5400 K / +14).
-///
-/// `target` and `as_shot` are (Kelvin, tint) in Camera Raw's units; the
-/// matrix acts on the profile stage's linear reference RGB.
-pub(super) fn camera_raw_wb(target: (f32, f32), as_shot: (f32, f32)) -> [[f32; 3]; 3] {
-    let m0 = 1e6 / f64::from(as_shot.0);
-    let m1 = (m0 + WB_MIRED_SCALE * (1e6 / f64::from(target.0) - m0)).clamp(1e6 / 40000.0, 1e6 / 2000.0);
-    let shift = m1 - m0;
-    let t0 = f64::from(as_shot.1);
-    let tint = t0 + WB_TINT_SCALE * (f64::from(target.1) - t0) + WB_TINT_PER_MIRED * shift;
-    let from = profile::temp_tint_to_xy(1e6 / m1, tint);
-    let to = profile::temp_tint_to_xy(f64::from(as_shot.0), t0);
-    let k = (-(WB_EV_PER_MIRED * shift / 100.0) as f32).exp2();
-    profile::white_shift(from, to).map(|row| row.map(|v| v * k))
-}
-
 /// The white-balance law a recipe's Temperature and Tint render by, as the
-/// reverse fit reasons about it (v1.17.0). The fit estimates a colour change
-/// from pixels, puts it on (Temperature, Tint), budgets it, walks it and
-/// hands it back — and every one of those steps must predict what the render
-/// will do with the pair it writes, so they all ask this, and this asks the
-/// render's own stage: [`wb_gains`] on the engine's law, [`camera_raw_wb`]
-/// under the profile stage's tone on Camera Raw's. Two facts differ between
-/// the laws and both were the fit's undoing on a camera-profile start until
-/// it asked here: Camera Raw's Tint is ABSOLUTE, so As Shot is the stamped
-/// as-shot tint and not 0 (a fit that read "no tint change" as 0 wrote a
-/// green shift of the as-shot tint into every recipe whose white balance it
-/// moved), and its Temperature moves the light several times as far per
-/// mired as the engine law's Tanner–Helland ratio, so a demand inverted on
-/// the engine's law ran to the 40000 K edge for a move Camera Raw makes at a
-/// fraction of the distance.
+/// reverse fit reasons about it. The fit estimates a colour change from
+/// pixels, puts it on (Temperature, Tint), budgets it, walks it and hands it
+/// back — and every one of those steps must predict what the render will do
+/// with the pair it writes, so they all ask this, and this asks the render's
+/// own stage ([`wb_gains`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct WbLaw {
-    camera_raw: bool,
     anchor: f32,
-    as_shot_tint: f32,
-    /// The camera start the stage's transfer ran at, under which Camera
-    /// Raw's white balance acts.
-    start: crate::recipe::CameraStart,
 }
-
-/// The post-tone linear level the fit's white-balance gains are read at:
-/// mid grey. On the engine's law the gains do not depend on level; on Camera
-/// Raw's they act under the curve and are read where a frame's mass is.
-const WB_LAW_GREY: f32 = 0.18;
 
 impl WbLaw {
     /// The law `r` renders its white balance by, and the as-shot white it
     /// moves from.
     pub(crate) fn of(r: &EditRecipe) -> Self {
-        let camera_raw = SliderLaw::of(r) == SliderLaw::CameraRaw;
-        WbLaw {
-            camera_raw,
-            anchor: r.as_shot_k.unwrap_or(5500.0),
-            as_shot_tint: if camera_raw { r.as_shot_tint.unwrap_or(0.0) } else { 0.0 },
-            start: r.camera_start.unwrap_or_default(),
-        }
+        WbLaw { anchor: r.as_shot_k.unwrap_or(5500.0) }
     }
 
-    /// The pair that renders no move: (as-shot Kelvin, 0) on the engine's
-    /// law, where Tint is relative; (as-shot Kelvin, as-shot tint) on
-    /// Camera Raw's, where it is absolute.
+    /// The pair that renders no move: (as-shot Kelvin, 0) — Tint is relative.
     pub(crate) fn as_shot(&self) -> (f32, f32) {
-        (self.anchor, self.as_shot_tint)
+        (self.anchor, 0.0)
     }
 
     /// The (Temperature, Tint) `r` renders at, exactly as
-    /// [`apply_recipe_wb_in`] reads it: no Temperature and no Tint is As Shot.
+    /// [`apply_recipe_wb`] reads it: no Temperature and no Tint is As Shot.
     pub(crate) fn point_of(&self, r: &EditRecipe) -> (f32, f32) {
         self.point(r.temperature_k, r.tint)
     }
@@ -317,35 +217,19 @@ impl WbLaw {
     }
 
     /// The per-channel gains the render's white-balance stage puts on a
-    /// neutral when it renders `wb`, in the fit's sRGB working light, green
-    /// normalised to 1 (white balance moves colour; exposure owns
-    /// brightness). The engine's law is [`wb_gains`] itself; Camera Raw's is
-    /// [`camera_raw_wb`] on mid grey under [`profile::UnderTone`], the path
-    /// [`apply_recipe_wb_in`] runs every pixel through.
+    /// neutral when it renders `wb`, in the fit's sRGB working light
+    /// ([`wb_gains`]).
     pub(crate) fn gains(&self, wb: (f32, f32)) -> [f32; 3] {
-        if !self.camera_raw {
-            return wb_gains(self.anchor, wb.0, wb.1);
-        }
-        if wb == self.as_shot() {
-            return [1.0; 3];
-        }
-        let under = srgb_under_tone(self.start);
-        let m = camera_raw_wb(wb, self.as_shot());
-        let out = under.redo(mat_vec3(&m, &under.undo([WB_LAW_GREY; 3])));
-        let g = out[1].max(1e-6);
-        out.map(|v| v.max(1e-6) / g)
+        wb_gains(self.anchor, wb.0, wb.1)
     }
 
     /// The (Temperature, Tint) `r` renders at on the ABSOLUTE scale a
-    /// sidecar's `crs:Temperature` / `crs:Tint` carry. Camera Raw's law reads
-    /// the recipe's Tint as absolute already; the engine's reads it as a delta
-    /// from the as-shot green, so there the photo's as-shot tint is added
-    /// back. Comparing a recipe against a sidecar must go through this, or a
-    /// Camera Raw recipe's tint counts its as-shot twice.
+    /// sidecar's `crs:Temperature` / `crs:Tint` carry: the recipe's Tint is a
+    /// delta from the as-shot green, so the photo's as-shot tint is added
+    /// back. Comparing a recipe against a sidecar must go through this.
     pub(crate) fn absolute_point_of(r: &EditRecipe) -> (f32, f32) {
-        let law = WbLaw::of(r);
-        let (k, t) = law.point_of(r);
-        if law.camera_raw { (k, t) } else { (k, r.as_shot_tint.unwrap_or(0.0) + t) }
+        let (k, t) = WbLaw::of(r).point_of(r);
+        (k, r.as_shot_tint.unwrap_or(0.0) + t)
     }
 
     /// [`WbLaw::gains`] as natural logs.
@@ -358,18 +242,14 @@ impl WbLaw {
     /// [`WbLaw::log_gains`] match it up to a common scalar. The Kelvin comes
     /// back rounded to 50, the tint to 0.1, as the recipe persists them.
     ///
-    /// The engine's law is separable and inverts exactly: the Kelvin on the
-    /// red/blue axis alone (401 steps in log Kelvin), then the tint as the
-    /// green against the red/blue mean of the residual at that Kelvin, so an
+    /// The law is separable and inverts exactly: the Kelvin on the red/blue
+    /// axis alone (401 steps in log Kelvin), then the tint as the green
+    /// against the red/blue mean of the residual at that Kelvin, so an
     /// unreachable remainder of warmth at the domain's edge stays warmth and
-    /// is not booked as green. Camera Raw's is not separable — its
-    /// Temperature carries green with it ([`WB_TINT_PER_MIRED`]) and its
-    /// Tint moves red and blue as well as green — so it is a joint search
-    /// over (mired, tint): a 41 × 41 grid over the domain and three finer
-    /// grids about the best point, on the full chromaticity residual.
+    /// is not booked as green.
     pub(crate) fn invert(&self, want_log: [f32; 3], kelvin: (f32, f32)) -> (f32, f32) {
         let quantise = |k: f32, t: f32| ((k / 50.0).round() * 50.0, (t * 10.0).round() / 10.0);
-        if !self.camera_raw {
+        {
             let (lo, hi) = (kelvin.0.ln(), kelvin.1.ln());
             let log_gains = |k: f32| self.log_gains((k, 0.0));
             let mut best = (self.anchor, f32::INFINITY);
@@ -388,128 +268,19 @@ impl WbLaw {
             let r = [want_log[0] - g[0], want_log[1] - g[1], want_log[2] - g[2]];
             let t = r[1] - 0.5 * (r[0] + r[2]);
             let tint = ((1.0 - t.exp()) / ENGINE_TINT_GREEN * 100.0).clamp(-100.0, 100.0);
-            return quantise(best.0, tint);
+            quantise(best.0, tint)
         }
-        let miss = |k: f32, t: f32| {
-            let g = self.log_gains((k, t));
-            let r = [want_log[0] - g[0], want_log[1] - g[1], want_log[2] - g[2]];
-            (r[0] - r[1]).powi(2) + (r[2] - r[1]).powi(2)
-        };
-        let (lo, hi) = (1e6 / kelvin.1, 1e6 / kelvin.0);
-        let (mut mired, mut tint) = (1e6 / self.anchor.clamp(kelvin.0, kelvin.1), self.as_shot_tint);
-        let (mut span_m, mut span_t) = (hi - lo, 100.0f32);
-        let mut best = (miss(1e6 / mired, tint), mired, tint);
-        for _ in 0..4 {
-            let centre = (mired, tint);
-            for i in 0..=40 {
-                let mm = (centre.0 + span_m * (i as f32 / 20.0 - 1.0)).clamp(lo, hi);
-                for j in 0..=40 {
-                    let tt = (centre.1 + span_t * (j as f32 / 20.0 - 1.0)).clamp(-100.0, 100.0);
-                    let e = miss(1e6 / mm, tt);
-                    if e < best.0 {
-                        best = (e, mm, tt);
-                    }
-                }
-            }
-            (mired, tint) = (best.1, best.2);
-            span_m /= 10.0;
-            span_t /= 10.0;
-        }
-        let (k, t) = quantise((1e6 / mired).clamp(kelvin.0, kelvin.1), tint);
-        (k.clamp(kelvin.0, kelvin.1), t)
     }
 }
 
 /// The engine law's green cut at Tint 100 ([`wb_gains`]).
 const ENGINE_TINT_GREEN: f32 = 0.20;
 
-/// The sRGB working space's [`profile::UnderTone`] at a camera start, built
-/// once per start: the fit asks [`WbLaw::gains`] thousands of times per
-/// solve, and a process meets a handful of starts (one per body and white
-/// balance headroom). What an under-tone holds depends on the start AND on
-/// whether this process has registered the start's tail yet
-/// ([`profile::tail_resolves`]): built before the profile is read, it is the
-/// fallback without the profile's look tables. So that is part of the key —
-/// a fallback is never handed out once the tail is registered.
-fn srgb_under_tone(start: crate::recipe::CameraStart) -> std::sync::Arc<profile::UnderTone> {
-    use std::sync::{Arc, Mutex, OnceLock};
-    type Cache = Mutex<Vec<((crate::recipe::CameraStart, bool), Arc<profile::UnderTone>)>>;
-    static UNDER: OnceLock<Cache> = OnceLock::new();
-    let key = (start, profile::tail_resolves(start.tables));
-    let cache = UNDER.get_or_init(Cache::default);
-    let mut cache = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((_, u)) = cache.iter().find(|(k, _)| *k == key) {
-        return Arc::clone(u);
-    }
-    let u = Arc::new(profile::UnderTone::new(ExportColorSpace::Srgb, start));
-    if cache.len() >= 16 {
-        cache.remove(0);
-    }
-    cache.push((key, Arc::clone(&u)));
-    u
-}
-
-/// Camera Raw's mired distance per mired the Temperature slider asks for.
-const WB_MIRED_SCALE: f64 = 1.042;
-/// …its tint per tint unit the Tint slider asks for.
-const WB_TINT_SCALE: f64 = 0.999;
-/// …the tint it adds per mired of cooling (green; warming adds magenta).
-const WB_TINT_PER_MIRED: f64 = -0.078;
-/// …and the exposure it takes per 100 mired of cooling, in EV.
-const WB_EV_PER_MIRED: f64 = 0.099;
-
-/// [`camera_raw_wb`]'s matrix on every pixel, under the profile stage's tone.
-fn apply_camera_raw_wb(data: &mut [[f32; 3]], m: &[[f32; 3]; 3], under: &profile::UnderTone) {
-    let (dec, enc) = transfer_luts();
-    data.par_iter_mut().for_each(|px| {
-        let lin = px.map(|v| sample_lut(dec, v));
-        let out = under.redo(mat_vec3(m, &under.undo(lin)));
-        *px = out.map(|v| sample_lut(enc, v.clamp(0.0, 1.0)));
-    });
-}
-
 /// The eyedropper's solve for `r`: the (Temperature, Tint) that renders the
-/// base-plate pixel `px` neutral under the law `r` renders by —
-/// [`solve_wb_from_neutral`] on the engine's, a search of [`camera_raw_wb`]
-/// on Camera Raw's (Tint then in Camera Raw's absolute units).
+/// base-plate pixel `px` neutral, anchored at `r`'s as-shot white
+/// ([`solve_wb_from_neutral`]).
 pub fn solve_wb_for(px: [f32; 3], r: &EditRecipe) -> (f32, f32) {
-    let anchor = r.as_shot_k.unwrap_or(5500.0);
-    if SliderLaw::of(r) != SliderLaw::CameraRaw {
-        return solve_wb_from_neutral(px, anchor);
-    }
-    let as_shot = (anchor, r.as_shot_tint.unwrap_or(0.0));
-    let l = profile::UnderTone::new(ExportColorSpace::Srgb, r.camera_start.unwrap_or_default())
-        .undo(px.map(srgb_to_linear))
-        .map(|v| v.max(1e-5));
-    // Off-neutral of the shifted pixel (white is equal channels in the
-    // reference RGB): its chroma over its level.
-    let miss = |k: f32, t: f32| {
-        let o = mat_vec3(&camera_raw_wb((k, t), as_shot), &l);
-        let g = o[1].max(1e-6);
-        ((o[0] - g) / g).powi(2) + ((o[2] - g) / g).powi(2)
-    };
-    // A coarse grid over the legal range (mired, tint), then two finer grids
-    // around the best point.
-    let (lo, hi) = (1e6 / 40000.0f32, 1e6 / 2000.0f32);
-    let (mut mired, mut tint) = (0.5 * (lo + hi), 0.0f32);
-    let (mut span_m, mut span_t) = (0.5 * (hi - lo), 100.0f32);
-    for _ in 0..3 {
-        let mut best = (f32::INFINITY, mired, tint);
-        for i in 0..=40 {
-            let mm = (mired + span_m * (i as f32 / 20.0 - 1.0)).clamp(lo, hi);
-            for j in 0..=40 {
-                let tt = (tint + span_t * (j as f32 / 20.0 - 1.0)).clamp(-100.0, 100.0);
-                let e = miss(1e6 / mm, tt);
-                if e < best.0 {
-                    best = (e, mm, tt);
-                }
-            }
-        }
-        (mired, tint) = (best.1, best.2);
-        span_m /= 10.0;
-        span_t /= 10.0;
-    }
-    ((1e6 / mired).round(), tint)
+    solve_wb_from_neutral(px, r.as_shot_k.unwrap_or(5500.0))
 }
 
 /// Inverse white balance — the WB eyedropper's solver. Given an sRGB pixel the
@@ -579,47 +350,5 @@ pub(super) fn ramp(e0: f32, e1: f32, x: f32) -> f32 {
         if x < e0 { 0.0 } else { 1.0 }
     } else {
         smoothstep(e0, e1, x)
-    }
-}
-
-#[cfg(test)]
-mod under_tone_cache_tests {
-    use super::*;
-
-    /// [`srgb_under_tone`] asked for a start before the process has
-    /// registered its tail gets the fallback (no look table), and asked again
-    /// after the registration gets the start's own tail, the same as an
-    /// under-tone built fresh — not the fallback it cached first. The profile
-    /// carries a look table that halves saturation, so the two differ on a
-    /// warm colour.
-    ///
-    /// MUTATION: key the cache on the start alone again.
-    #[test]
-    fn the_under_tone_cache_uses_the_look_tables_once_the_profile_is_registered() {
-        let table = crate::dcp::Table { hue: 2, sat: 2, val: 1, srgb_value: false, data: vec![[0.0, 0.5, 1.0]; 4] };
-        let p = crate::dcp::Profile {
-            name: "Cache test".into(),
-            unique_model: "TEST-CACHE".into(),
-            illuminant: [Some(17), Some(21)],
-            color_matrix: [None, None],
-            forward_matrix: [None, None],
-            hue_sat_map: [None, None],
-            look_table: Some(table),
-            // A curve no other test registers, so the key is this test's.
-            tone_curve: vec![[0.0, 0.0], [0.5, 0.4713], [1.0, 1.0]],
-            baseline_exposure_offset: 0.0,
-            has_third_illuminant: false,
-        };
-        let key = profile::tail_key(&p, None, None);
-        profile::forget_tail(key);
-        let start = crate::recipe::CameraStart { ev: 0.0, headroom: 0.0, tables: key };
-        let warm = [0.6f32, 0.3, 0.1];
-        let before = srgb_under_tone(start).undo(warm);
-        assert_eq!(profile::tail_key(&p, None, None), key, "premise: the same profile registers the same key");
-        let after = srgb_under_tone(start).undo(warm);
-        let fresh = profile::UnderTone::new(ExportColorSpace::Srgb, start).undo(warm);
-        assert_eq!(after, fresh, "after the registration the cache hands out the start's own tail");
-        let apart = before.iter().zip(&fresh).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
-        assert!(apart > 0.01, "premise: the fallback differs from the tail with its look table ({apart})");
     }
 }

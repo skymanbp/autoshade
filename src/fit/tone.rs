@@ -455,7 +455,7 @@ pub(crate) fn knot_support_for(
 /// slider (s=1) like a ~0.14 luma miss at one knot — strong enough to kill
 /// cancellation combos, weak enough that genuinely-needed big moves survive
 /// (the roundtrip test pins recovery of a real ±25-point recipe).
-pub(crate) const TONE_PRIOR: f64 = 0.01;
+pub(super) const TONE_PRIOR: f64 = 0.01;
 
 /// Scan exposure (nonlinear in the model) and, for each candidate, solve the 5
 /// linear sliders (contrast/highlights/shadows/whites/blacks, in the basis
@@ -676,7 +676,7 @@ pub(crate) fn refine_tone_sliders_on(
 const REFINE_PASS_CAP: usize = 40;
 
 /// Gaussian elimination with partial pivoting for the 5×5 normal equations.
-pub(crate) fn solve5(mut a: [[f64; 5]; 5], mut b: [f64; 5]) -> [f64; 5] {
+fn solve5(mut a: [[f64; 5]; 5], mut b: [f64; 5]) -> [f64; 5] {
     for c in 0..5 {
         let mut p = c;
         for r in c + 1..5 {

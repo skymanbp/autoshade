@@ -72,13 +72,6 @@ pub(super) fn attach_one_zone_as(
     );
     let (sw, tw) = (&*sw, &*tw);
     let cur_px = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
-    // The develop's mask law for this frame (v1.17.0): `Some` on Camera Raw's
-    // law, where a mask's tone is not the engine's gain on the rendered value,
-    // and the dials and the tone solve below then solve on it.
-    let law = render::LocalGreyLaw::of(
-        &report.recipe,
-        render::LocalGreyLaw::frame_key(&report.recipe, &cur_px),
-    );
     // Mode is derived FIRST since step 7b: the correspondence composes only
     // into a FULL zone's estimators. An Atmosphere zone is fitted as a
     // bounded distribution precisely BECAUSE its content was replaced, and
@@ -319,7 +312,7 @@ pub(super) fn attach_one_zone_as(
             ),
         );
     }
-    let d = fit_zone_dials_on(law.as_ref(), &cur_px, sw, &zw_source, &ms, &mt);
+    let d = fit_zone_dials(&ms, &mt);
     let round1 = |v: f32| (v * 10.0).round() / 10.0;
     let round2 = |v: f32| (v * 100.0).round() / 100.0;
     report.recipe.masks.push(LocalAdjustment {
@@ -487,10 +480,7 @@ pub(super) fn attach_one_zone_as(
                 unsupported_knots = Some(supported_knots);
             }
             let refine = supported_knots >= 2 && points.len() < 6;
-            let (ev, sliders) = match law.as_ref() {
-                Some(law) => fit_zone_tone_on(law, &tone_map, &support, &score_set, refine),
-                None => fit::fit_tone_sliders_supported(&tone_map, &support, &score_set),
-            };
+            let (ev, sliders) = fit::fit_tone_sliders_supported(&tone_map, &support, &score_set);
             // The knots cannot see a bend inside the zone's own range; the
             // score set can (see `fit::refine_tone_sliders_on`). Distribution
             // branch only: its map is the deterministic quantile transport,
@@ -499,7 +489,7 @@ pub(super) fn attach_one_zone_as(
             // −0.15 and the frame paid +0.049 over its 0.02 tolerance), so
             // there the score set keeps choosing the exposure only. A
             // neutral under-supported answer stays neutral.
-            let (ev, sliders) = if refine && law.is_none() {
+            let (ev, sliders) = if refine {
                 fit::refine_tone_sliders_on(&score_set, ev, sliders)
             } else {
                 (ev, sliders)
@@ -574,7 +564,7 @@ pub(super) fn attach_one_zone_as(
         // estimator. (On gains: the plain gains already stand under the read.)
         if colour == ZoneColour::Tint {
             let tinted_px = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
-            // Only the gains are read, and on any law: the tinted render already
+            // Only the gains are read: the tinted render already
             // carries the mask's tone, so the luma ratio left on it is what
             // normalises the per-channel ratios; no EV is shipped from here.
             let gains = fit_zone_dials(&zone_moments(&tinted_px, &zw_source), &mt).color_gains;

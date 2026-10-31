@@ -223,32 +223,28 @@ pub(super) fn camera_to_space_matrix(xyz2cam: &[[f32; 3]; 3], space: ExportColor
 /// outside the DELIVERY gamut go negative here and clip at the final
 /// 16-bit pack. Highlights (any component > 1 after white balance) get the
 /// same desaturating treatment rawler's develop applies ([`settle_over_range`])
-/// so wide and sRGB renders treat blown areas alike — unless
-/// `defer_over_range` (Camera Raw's law): then the frame keeps its over-range
-/// components, encoded exactly above 1, and they end after the slider
-/// Exposure (`render::develop`), where Camera Raw's renders put them. The
-/// transfer's linear segment covers negatives (no NaN).
+/// so wide and sRGB renders treat blown areas alike. The transfer's linear
+/// segment covers negatives (no NaN).
 pub(super) fn calibrate_camera_buffer(
     data: &mut [[f32; 3]],
     xyz2cam: &[[f32; 3]; 3],
     wb: [f32; 3],
     space: ExportColorSpace,
     profile: Option<&profile::Stage>,
-    defer_over_range: bool,
 ) {
     let m = camera_to_space_matrix(xyz2cam, space);
     data.par_iter_mut().for_each(|px| {
         let v = [px[0] * wb[0], px[1] * wb[1], px[2] * wb[2]];
-        // The camera profile acts HERE: linear light, before the transfer
-        // encode. Everything downstream — exposure, tone, the mixer, the masks
-        // — then sees a frame that already carries the profile, which is the
-        // order Lightroom's own panel implies. A profile with a ForwardMatrix
+        // The camera profile's colour tables act HERE: linear light, before
+        // the transfer encode. Everything downstream — exposure, tone, the
+        // mixer, the masks — then sees a frame that already carries the
+        // profile's colour. A profile with a ForwardMatrix
         // takes the white-balanced CAMERA triple and owns the matrix too
         // (`profile::Stage::develop_camera`, the DNG SDK's colour spec); any
         // other profile acts on the working-space pixel this engine's own D65
         // matrix makes — and a render with no profile (no Adobe install, or
         // none named) keeps that matrix alone, as before v1.17.0.
-        let mut t = match profile {
+        let t = match profile {
             Some(p) if p.owns_camera() => p.develop_camera(v),
             Some(p) => {
                 let mut t = mat_vec3(&m, &v);
@@ -257,9 +253,7 @@ pub(super) fn calibrate_camera_buffer(
             }
             None => mat_vec3(&m, &v),
         };
-        if !defer_over_range {
-            t = settle_over_range(t);
-        }
+        let t = settle_over_range(t);
         *px = [linear_to_srgb(t[0]), linear_to_srgb(t[1]), linear_to_srgb(t[2])];
     });
 }
@@ -282,8 +276,7 @@ fn settle_over_range(t: [f32; 3]) -> [f32; 3] {
 }
 
 /// The creative Look's colour table `r` renders through (`None`: its Look
-/// names none), or why it cannot — one rule for the render's profile stage and
-/// the open path's camera start (`render::camera_start`).
+/// names none), or why it cannot.
 pub(super) fn creative_table(r: &EditRecipe) -> Option<std::result::Result<crate::dcp::Table, String>> {
     let look = r.look.as_ref().filter(|l| !l.table.is_empty())?;
     // Lightroom scales a Look by its Amount; every Look measured carries
@@ -298,8 +291,7 @@ pub(super) fn creative_table(r: &EditRecipe) -> Option<std::result::Result<crate
 /// body's names (which profile file), its colour matrix and as-shot levels
 /// (which white), and the calibration Camera Raw puts in front of the
 /// profile's matrices ([`super::as_shot::camera_calibration`]). Kept apart
-/// from the `RawImage` so a [`super::CameraBase`] can rebuild the stage at
-/// another white long after the file's bytes are gone.
+/// from the `RawImage` the stage is built from.
 #[derive(Clone, Debug)]
 pub(super) struct CameraMeta {
     pub(super) make: String,
@@ -337,20 +329,15 @@ impl CameraMeta {
 /// you named was not applied" is exactly the kind of silence that makes a
 /// render disagree with Lightroom for no visible reason.
 ///
-/// The second half of the answer is the white-balance multipliers of the
-/// recipe's own white when the stage took it in (v1.17.0): a recipe on
-/// Camera Raw's law that moves from As Shot names a white
-/// ([`super::wb::camera_raw_white`]), and a stage that owns the camera
-/// transform is built at that white's camera neutral, as Camera Raw builds
-/// its colour spec — the camera triple is balanced to it and the matrices
-/// and hue/sat maps are blended at its temperature. `None` there leaves the
-/// frame at As Shot and the move to the post-profile adaptation.
+/// The stage is colour data only — matrices, hue/sat map and look tables, at
+/// the frame's As Shot white; the white balance itself, and every tone, is the
+/// develop's.
 pub(super) fn resolve_camera_profile(
     meta: &CameraMeta,
     r: &EditRecipe,
     space: ExportColorSpace,
     diag: &crate::diag::Diag<'_>,
-) -> Option<(profile::Stage, Option<[f32; 3]>)> {
+) -> Option<profile::Stage> {
     let calibration = meta.calibration;
     let name = if !r.camera_profile.is_empty() {
         r.camera_profile.as_str()
@@ -399,48 +386,14 @@ pub(super) fn resolve_camera_profile(
     let kelvin = wb_to_kelvin_tint(&matrix, wb).map(|(k, _)| k);
     // The camera neutral is the reciprocal of the white-balance multipliers;
     // with the profile's own matrices it fixes the white the SDK's way.
-    let as_shot = wb.iter().all(|c| c.is_finite() && *c > 0.0).then(|| wb.map(|c| 1.0 / c));
-    let chosen = super::wb::camera_raw_white(r).and_then(|xy| profile::camera_neutral_of(&prof, xy, calibration));
-    let neutral = chosen.or(as_shot);
-    // Adobe's baseline exposure for the body, which its renderer adds to the
-    // profile's own offset. Disclosed either way: inferred, it is a number
-    // this engine did not read from the photograph; unknown, it is why the
-    // render may sit darker than Lightroom's.
-    let baseline = crate::dcp::baseline_exposure(make, model);
-    diag.warn(baseline_disclosure(make, model, &baseline));
-    let frame = profile::Frame { kelvin, neutral, creative: creative.clone(), calibration };
-    let stage = profile::Stage::build_for(&prof, space, frame, baseline.ev());
+    let neutral = wb.iter().all(|c| c.is_finite() && *c > 0.0).then(|| wb.map(|c| 1.0 / c));
+    let frame = profile::Frame { kelvin, neutral, creative, calibration };
+    let stage = profile::Stage::build_for(&prof, space, frame);
     if stage.is_none() {
         diag.warn(format!(
-            "camera profile \"{name}\" ({}) carries no table or curve this engine renders",
+            "camera profile \"{name}\" ({}) carries no colour table this engine renders",
             path.display()
         ));
     }
-    let stage = stage?;
-    // Only a stage that owns the camera transform balances the camera triple
-    // itself; a profile with no `ForwardMatrix` is rebuilt at As Shot and the
-    // move stays the post-profile adaptation's.
-    if chosen.is_some() && !stage.owns_camera() {
-        let frame = profile::Frame { kelvin, neutral: as_shot, creative, calibration };
-        return profile::Stage::build_for(&prof, space, frame, baseline.ev()).map(|s| (s, None));
-    }
-    Some((stage, chosen.map(|n| n.map(|v| 1.0 / v))))
-}
-
-/// The one line a profiled render says about the body's baseline exposure.
-pub(super) fn baseline_disclosure(make: &str, model: &str, b: &crate::dcp::Baseline) -> String {
-    let body = if model.to_ascii_lowercase().starts_with(&make.to_ascii_lowercase()) {
-        model.to_string()
-    } else {
-        format!("{make} {model}")
-    };
-    match b {
-        crate::dcp::Baseline::Inferred { ev, .. } => format!(
-            "Adobe's baseline exposure for {body}: {ev:+.2} EV (inferred from its camera profiles)"
-        ),
-        crate::dcp::Baseline::NoCameraProfiles | crate::dcp::Baseline::Disagree { .. } => format!(
-            "Adobe's baseline exposure for {body} is unknown: rendering 0 EV — a \
-             Lightroom-written DNG of this body carries it as BaselineExposure"
-        ),
-    }
+    stage
 }

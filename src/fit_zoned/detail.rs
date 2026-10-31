@@ -592,16 +592,9 @@ pub(super) fn attach_zone_detail(
             let frame_after = frame_err(report);
             // The frame may not pay for local contrast beyond the fit's own
             // quantisation. Until v1.17.0 this was the zones' drift allowance
-            // (`ZONE_GLOBAL_REGRESSION_TOL`, 0.02), sized for a mask that
-            // cannot touch pixels outside its raster; with Camera Raw's law
-            // for a mask's Clarity (it lifts the zone's midtones as it
-            // sharpens them) a land zone's clarity moved the whole frame's
-            // tone, and 0.02 is twice a finished frame's error: measured
-            // 2026-10-28 on the merged tree, p39 at 0.65 frame 0.0108 →
-            // 0.0260 at half the solved clarity, p40 at 0.85 0.0199 → 0.0322
-            // at a quarter, both shipped — the fit ended worse than its own
-            // start on p39 (0.024 → 0.026). The skies' local contrast cost
-            // the frame +0.0017 (p40) or bought it −0.0009 (p39).
+            // (`ZONE_GLOBAL_REGRESSION_TOL`, 0.02), which is twice a finished
+            // frame's error: a zone's clarity could leave the fit worse than
+            // its own start and still ship.
             if frame_after > frame_before + fit::FIT_QUANT {
                 return Err(DetailRefusal::Frame);
             }

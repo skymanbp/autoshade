@@ -759,7 +759,7 @@
         app.tx
             .send(Msg::Opened(Box::new(Ok((
                 Arc::new(image::DynamicImage::new_rgb8(6, 4)),
-                (autoshade::pipeline::CanvasStart { base_curve: vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]], ..Default::default() }, Default::default()),
+                (autoshade::pipeline::CanvasStart { base_curve: vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]] }, Default::default()),
                 Default::default(),
                 Some((5653.0, 0.0)),
                 Some((ai_px.clone(), master.clone(), true)),
@@ -898,7 +898,7 @@
         app.tx
             .send(Msg::Opened(Box::new(Ok((
                 Arc::new(image::DynamicImage::new_rgb8(6, 4)),
-                (autoshade::pipeline::CanvasStart { base_curve: vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]], ..Default::default() }, Default::default()),
+                (autoshade::pipeline::CanvasStart { base_curve: vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]] }, Default::default()),
                 Default::default(),
                 Some((5653.0, 0.0)),
                 Some((ai_px.clone(), master.to_path_buf(), true)),

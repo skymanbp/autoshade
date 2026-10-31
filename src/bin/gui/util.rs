@@ -1579,7 +1579,7 @@ pub(crate) fn build_preview(
             after,
             &recipe,
             // A lens-corrected base (v1.17.0) takes no second resample.
-            autoshade::render::tail_lens(&geom, source.corrected(&recipe)),
+            autoshade::render::tail_lens(&geom, source.corrected()),
             film,
             autoshade::render::CropPolicy::Keep,
         )

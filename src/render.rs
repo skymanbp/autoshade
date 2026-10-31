@@ -52,7 +52,6 @@ mod as_shot;
 mod camera;
 mod canvas;
 mod colour;
-mod dehaze_cr;
 mod develop;
 mod export;
 mod geometry;
@@ -63,13 +62,12 @@ mod mask_falloff;
 mod mask_raster;
 mod mask_warp;
 mod mask_weight;
-mod mask_cr;
+mod mask_gains;
 mod masks;
 mod orient;
 mod resample;
 mod source;
 mod tone;
-mod tone_cr;
 mod wb;
 pub use detail::FilmScale;
 pub use finish::{frame_and_finish, CropPolicy};
@@ -86,7 +84,7 @@ use brush::{
     BRUSH_RASTER_MAX_WORK, BRUSH_RASTER_MIN_EDGE, brush_flow_deposit, brush_kernel,
     brush_kernel_exponents, brush_raster_dims,
 };
-pub use as_shot::{as_shot_wb, camera_start};
+pub use as_shot::as_shot_wb;
 #[cfg(test)]
 use as_shot::{camera_calibration, camera_raw_as_shot, sony_daylight_preset, sony_decrypt};
 use camera::{
@@ -110,10 +108,12 @@ pub use develop::{
     retouch_spots,
 };
 pub(crate) use develop::{apply_colour_field, field_axis, field_guide_luma};
-use develop::{apply_develop_with_rasters, dehaze_airlight, dehaze_px, luma601, OverRange};
-use develop::{apply_radial_gain, apply_radial_gain_linear, profile_vignette_lut};
+use develop::{apply_develop_with_rasters, dehaze_airlight, dehaze_px, luma601};
 #[cfg(test)]
-use develop::{apply_dehaze, apply_develop_anon, manual_vignette_lut, retouch_spots_in, vignette_gain_lut};
+use develop::{
+    apply_dehaze, apply_develop_anon, apply_radial_gain, manual_vignette_lut, profile_vignette_lut,
+    vignette_gain_lut,
+};
 pub use export::{
     ExportColorSpace, ExportOpts, convert_export_color_space, render_master_to_file, render_to_file,
     stage_and_publish,
@@ -124,11 +124,11 @@ use export::{ADOBE_PRIM, D65_XY, P3_PRIM, SRGB_PRIM, inv3, mat_mul3, mat_vec3, r
 use export::{ADOBE_RGB_ICC, DISPLAY_P3_ICC, srgb_to_space_matrix, transcode_srgb_trc_to_adobe};
 pub use geometry::{
     MANUAL_CA_PER_UNIT, apply_lens_distortion, apply_lens_geometry, apply_lens_geometry_rgba,
-    corrected_to_sensor_frame, distort_norm, geometry_moves_frame, geometry_profile, lens_geom_norm, lens_in_camera,
+    corrected_to_sensor_frame, distort_norm, geometry_moves_frame, geometry_profile, lens_geom_norm,
     lens_ungeom_norm, rotate_straighten_rgba, tail_lens, undistort_norm,
 };
 pub(crate) use geometry::{profile_knot_interp};
-use geometry::{apply_lens_geometry_linear, channel_luts};
+use geometry::channel_luts;
 use geometry::{profile_fill_scale};
 #[cfg(test)]
 use geometry::{lens_geom_factor};
@@ -137,7 +137,7 @@ pub(crate) use luma::{bilinear_plane, gauss_blur_plane, neighbours4};
 // Clarity passes move, with this engine's own blur and radii.
 pub(crate) use luma::{blur_plane, clarity_radius, texture_radius};
 use luma::{
-    box_blur_h, box_blur_v, scale_chroma, texture_amount, texture_pass, unsharp_luma,
+    box_blur_h, box_blur_v, scale_chroma, texture_pass, unsharp_luma,
     unsharp_luma_weighted, write_luma_additive, write_luma_weighted,
 };
 #[cfg(test)]
@@ -192,7 +192,7 @@ pub use masks::{MaskFrame, corrected_raster_to_sensor, engine_active, sensor_ras
 pub(crate) use masks::{linear_to_oklab, tint_from_push, tint_luma, tint_window};
 #[cfg(test)]
 pub(crate) use masks::{TINT_WINDOW_CENTRE, oklab_to_linear, tint_push, tint_px};
-use masks::{Brushes, Cover, MaskUnwarp, apply_masks};
+use masks::{MaskUnwarp, apply_masks};
 #[cfg(test)]
 use masks::{LOCAL_NR_GATE, is_lr_post_correction_geometry};
 pub use orient::{
@@ -209,8 +209,8 @@ use resample::{
 };
 pub use source::{render_baked_to_image, render_to_image, render_to_image_in, source_pixels};
 pub use canvas::{
-    base_develop, canvas_recipe, canvas_renders, master_develop, master_pixels_for, source_pixels_for, source_plate,
-    plate_corrected, BasePart, CameraBase, Master, Plate, CANVAS_PROFILE,
+    base_develop, master_develop, master_pixels_for, source_pixels_for, source_plate, plate_corrected, BasePart,
+    Master, Plate,
 };
 pub use baked::{
     carry_baked_geometry, fit_raster_frame, open_mask_raster, read_baked_geometry, save_mask_raster,
@@ -220,32 +220,19 @@ pub use baked::{
 use source::{apply_crop, render_frame, rgb16_source};
 #[cfg(test)]
 use source::{cfa_needs_geometry_demosaic, cfa_taps, demosaic_over_cfa_geometry, wrap_table};
-pub use tone::{curve_lut, curve_lut_for, curve_lut_under};
-pub use tone_cr::SliderLaw;
+pub use tone::curve_lut;
 pub(crate) use tone::{
-    TONE_KNOTS_X, build_tone_lut, camera_raw_tone_passes, curve_channels_under, sample_lut, sample_tone_model, tone_exposure_curve,
+    TONE_KNOTS_X, build_tone_lut, sample_lut, sample_tone_model, tone_exposure_curve,
     tone_knot_weights, tone_model_knots, tone_slider_basis,
 };
-use tone::{CurveSpace, MiddleRatio, apply_rgb_curves, engine_channel_curves, hermite_eval};
-#[cfg(test)]
-use tone::{apply_camera_raw_curve, curve_channels};
-pub(crate) use mask_cr::{gains_as_white, LocalGreyLaw};
-pub(crate) use tone_cr::{
-    HS_SH_FLOOR, HsKey, camera_raw_exposure, camera_raw_response_keyed, shadows_anchor,
-    camera_raw_row, camera_raw_start, Exposure, hs_row, HsSite,
-};
-use tone_cr::{
-    apply_camera_raw_hs, camera_raw_after_lut, camera_raw_slider_lut,
-    camera_raw_slider_pixel, camera_raw_tone_lut, hs_field, Local, SliderPass,
-};
+use tone::{apply_rgb_curves, engine_channel_curves, hermite_eval};
+pub(crate) use mask_gains::gains_as_white;
 #[cfg(test)]
 pub(crate) use tone::{limit_tone_sliders, parametric_lut};
-#[cfg(test)]
-use tone::{camera_raw_rgb_tone, look_curve_lut};
 pub use wb::{local_temp_to_kelvin, solve_wb_for, solve_wb_from_neutral};
 pub(crate) use wb::{WbLaw, linear_to_srgb, srgb_to_linear, wb_gains};
 use wb::{
-    apply_recipe_wb, apply_recipe_wb_in, colour_gain_luts, decode_wide, encode_wide, ramp, smoothstep, transfer_luts,
+    apply_recipe_wb, colour_gain_luts, decode_wide, encode_wide, ramp, smoothstep, transfer_luts,
 };
 #[cfg(test)]
 use wb::{kelvin_to_rgb};

@@ -1245,8 +1245,6 @@ fn read_recipe_at(recipe_path: &Path, raw: &Path) -> Result<EditRecipe> {
         if r.as_shot_k.is_none() {
             (r.as_shot_k, r.as_shot_tint) = pipeline::fresh_as_shot_wb(raw);
         }
-        pipeline::stamp_camera_start(raw, &mut r);
-        r.open_white_balance_at_as_shot();
         return Ok(r);
     }
     serde_json::from_str(&text).with_context(|| format!("parse recipe {}", recipe_path.display()))
@@ -1705,10 +1703,10 @@ fn match_source(raw: &Path, negative: Option<&Path>) -> Result<(render::Plate, E
         println!("  (a master of {}: its calibration composes into the solve)", neg.display());
         let base = pipeline::calibration_recipe(pipeline::fit_calibration(neg));
         let pixels = render::source_pixels(raw, Some(pipeline::FIT_SOURCE_EDGE))?;
-        return Ok((pipeline::fit_source_baked(raw, pixels, &base)?, base));
+        return Ok((pipeline::fit_source_baked(raw, pixels)?, base));
     }
     let base = pipeline::calibration_recipe(pipeline::fit_calibration(raw));
-    Ok((pipeline::fit_source_baked(raw, decode::preview_only(raw)?, &base)?, base))
+    Ok((pipeline::fit_source_baked(raw, decode::preview_only(raw)?)?, base))
 }
 
 /// Reverse-fit: solve for the EditRecipe that maps `raw`'s look onto `target`'s
