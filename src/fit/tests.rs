@@ -7697,7 +7697,10 @@ fn the_per_band_mixer_rotates_no_band_its_paired_pixels_do_not_ask() {
 /// One control unit (0.3° of rotation): the target is 8-bit, so the rotated
 /// family's hue is read through code-value rounding, and the solve rounds
 /// its amount to 0.1. Measured 2026-11-02: Blue +15 solved back as +15.5,
-/// look error 0.0072 -> 0.0025.
+/// look error 0.0072 -> 0.0025, with one equation per band; as +15.1, look
+/// error 0.0018, with one per luma range (d) — each range's median against
+/// that range's own reach, where the darker ranges' lower chroma fades the
+/// rotation and a band-mean reach under a median demand overshot (+16.2).
 const BAND_HUE_TOLERANCE: f32 = 1.0;
 #[test]
 fn a_band_rotated_a_few_degrees_is_solved_back_to_that_band_and_no_other() {
@@ -7714,18 +7717,25 @@ fn a_band_rotated_a_few_degrees_is_solved_back_to_that_band_and_no_other() {
     assert!(moved.contains("Blue hue +"), "the report names the band that rotated: {moved:?}");
 }
 
-/// The band-hue rule's veto, the white balance's own ([`wb_consensus`]): the
-/// Blue family's alternate rows rotated +4.5° and -4.5° — one band whose
-/// pixels ask opposite rotations at equal mass — ships no rotation on any
-/// band. Rows alternate so both rotations ride the same brightness ramp and
-/// no tonal region sees only one of them.
+/// The band-hue rule's veto, the white balance's own ([`wb_consensus`]) on
+/// the white balance's own unit, the band's luma ranges: the Blue family
+/// rotated +4.5° on the darker half of its brightness ramp and -4.5° on the
+/// brighter half — one band whose brightness ranges ask opposite rotations
+/// at equal mass — ships no rotation on any band. A rotation that changes
+/// sign with brightness is not a band's move.
+///
+/// Until 2026-11-02 (d) the fixture alternated the two rotations row by row
+/// at the same brightness, because the demand was a consensus over pixels;
+/// a range's median now stands for its pixels, so the opposition the rule
+/// reads is between ranges, and the fixture puts it there.
 #[test]
-fn a_band_whose_pixels_ask_opposite_rotations_ships_nothing() {
+fn a_band_whose_ranges_ask_opposite_rotations_ships_nothing() {
     let source = band_frame([0, 1, 2, 4], [0.55; 4]);
     let up = developed(&source, |hsl| hsl.hue[5] = 15.0).to_rgb8();
     let down = developed(&source, |hsl| hsl.hue[5] = -15.0).to_rgb8();
+    // band_frame's brightness ramps with x: the left half is the darker.
     let target = DynamicImage::ImageRgb8(RgbImage::from_fn(up.width(), up.height(), |x, y| {
-        if y % 2 == 0 { *up.get_pixel(x, y) } else { *down.get_pixel(x, y) }
+        if x < up.width() / 2 { *up.get_pixel(x, y) } else { *down.get_pixel(x, y) }
     }));
     let report = fit_recipe(&source, &target);
     eprintln!("BAND_HUE opposed {:?}", report.recipe.hsl.hue);
@@ -8894,7 +8904,10 @@ fn the_hand_off_walk_is_entered_by_a_cast_that_really_fans() {
 /// paired pixels ask and the finished frame pays for (Orange +2.3 / Green
 /// -2.3 after the mixer's band hues earned their place against their own
 /// absence, 0.01354 against 0.01355 without them), and the paired summary
-/// and the mixer note state what is solved.
+/// and the mixer note state what is solved. Re-pinned again at (d): the band
+/// demand is read over its luma ranges and each range answered against its
+/// own reach, so the rotation is Orange +1.2 / Green -1.2 and the finished
+/// frame 0.01340.
 #[test]
 fn a_cast_with_no_fan_never_enters_the_hand_off() {
     use crate::rationale::keys;
@@ -8916,7 +8929,7 @@ fn a_cast_with_no_fan_never_enters_the_hand_off() {
     assert!(!rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB));
     assert_eq!(
         recipe_fnv(&rep.recipe),
-        0xc204_0fdb_5af7_dabe,
+        0x8d9d_d657_14e7_cc8b,
         "a recipe the hand-off never touched moved: {}",
         rep.recipe.rationale
     );

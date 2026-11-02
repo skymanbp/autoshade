@@ -1,7 +1,7 @@
 //! The HSL stage: band refusals and withdrawals, the halved bands, and the stage itself.
 
 use super::*;
-use super::evidence::wb_consensus;
+use super::evidence::{EVIDENCE_LUMA_BINS, evidence_luma_bin, wb_consensus, weighted_median};
 use super::grade::largest_vouched_share;
 
 // --------------------------------------------------------------------------
@@ -347,18 +347,28 @@ fn fit_band_populations(
 /// ([`render::hsl_band_reach`]). Pixels under the evidence chroma floor on
 /// either side ([`evidence_hue_band`]) have no hue to testify with. A band
 /// the population gate did not admit, or holding under
-/// [`EVIDENCE_MIN_SHARE`] of the testifying mass, is silent; a band's demand
-/// is [`wb_consensus`] of its pixels' rotations — the white balance's own
-/// rule, its own constants — so a band whose pixels ask opposite rotations in
-/// force asks nothing.
+/// [`EVIDENCE_MIN_SHARE`] of the testifying mass, is silent. A band's demand
+/// is the white balance's own reading on the white balance's own testimony
+/// unit ([`super::evidence::wb_axes_by_range`]): its pixels binned by source
+/// luma into the evidence luma ranges, a range under [`EVIDENCE_MIN_SHARE`]
+/// of the band's mass silent, each range testifying its weighted median, and
+/// [`wb_consensus`] over the ranges — so a band whose brightness ranges ask
+/// opposite rotations in force asks nothing. One pixel's hue change is not
+/// testimony on its own: measured 2026-11-02 on a real sunset pair, every
+/// band's pixels scattered so widely about a median of a degree or two that
+/// 24-47 % of them sat on the far side, and a consensus over pixels vetoed
+/// every band of every photo in the leg; a range's median is the unit the
+/// rule's constants were set on.
 ///
 /// MOVE. The engine's hue law, which is linear in the amounts: a pixel
 /// rotates by `HSL_HUE_REACH_DEG / 100` degrees per unit of each bracketing
 /// band's amount, times its weight in that band and the chroma gate's fade.
-/// Averaged over each band's testifying pixels that is a band × band reach
-/// (two bands share the pixels between their centres); the amounts are its
-/// mass-weighted least-squares answer to the demands, every heard band an
-/// equation (a silent-but-heard band asks to stay), clamped to the
+/// Averaged over each testifying range of each band that is a reach per
+/// range and band (two bands share the pixels between their centres). Every
+/// testifying range of a heard band is one equation: its own median against
+/// its own reach when the band asks, zero when the band's consensus asks
+/// nothing (it asks to stay). The amounts are the mass-weighted
+/// least-squares answer, clamped to the
 /// strength's band budget (`budget.hsl_band`, the bound the saturation and
 /// luminance chase obey) and kept only when they leave less of the demand
 /// than no rotation does.
@@ -391,11 +401,14 @@ fn fit_band_hues(
     let before = pixels_of(&render::develop_preview(s_img, recipe));
     let trust = vouch.0;
     let n = before.len().min(tp.len()).min(trust.len());
-    let mut asks: [Vec<(f32, f32)>; B] = Default::default();
+    // Each band's testimony, binned by the pixel's source luma range.
+    let mut asks: [Vec<Vec<(f32, f32)>>; B] = std::array::from_fn(|_| vec![Vec::new(); EVIDENCE_LUMA_BINS]);
+    let mut range_mass = [[0.0f64; EVIDENCE_LUMA_BINS]; B];
     let mut mass = [0.0f64; B];
-    // reach[b][c]: the rotation, in degrees per unit of band c's amount,
-    // of band b's testifying pixels, mass-weighted (divided through below).
-    let mut reach = [[0.0f64; B]; B];
+    // reach[b][r][c]: the rotation, in degrees per unit of band c's amount,
+    // of band b's pixels in luma range r, mass-weighted (divided through
+    // below) — the reach of the same unit the range's median testifies for.
+    let mut reach = [[[0.0f64; B]; EVIDENCE_LUMA_BINS]; B];
     for i in 0..n {
         let e = trust[i].max(0.0);
         let (p, t) = (before[i], tp[i]);
@@ -409,46 +422,57 @@ fn fit_band_hues(
         };
         let turn = ((ht - hp + 0.5).rem_euclid(1.0) - 0.5) * 360.0;
         let per_unit = (fade * render::HSL_HUE_REACH_DEG / 100.0) as f64;
+        let range = evidence_luma_bin(luma601(&p));
         for (band, w) in [(b0, 1.0 - w1), (b1, w1)] {
             let m = e * w;
             if m <= 0.0 {
                 continue;
             }
-            asks[band].push((turn, m));
+            asks[band][range].push((turn, m));
+            range_mass[band][range] += m as f64;
             mass[band] += m as f64;
-            reach[band][b0] += m as f64 * per_unit * (1.0 - w1) as f64;
-            reach[band][b1] += m as f64 * per_unit * w1 as f64;
+            reach[band][range][b0] += m as f64 * per_unit * (1.0 - w1) as f64;
+            reach[band][range][b1] += m as f64 * per_unit * w1 as f64;
         }
     }
     let total: f64 = mass.iter().sum();
     if total <= 0.0 {
         return;
     }
-    let mut heard = [false; B];
-    let mut demand = [0.0f64; B];
+    // The equations: (band, its range's mass, its range's reach, what the
+    // range asks of the move) for every testifying range of a heard band.
+    let mut equations: Vec<(f64, [f64; B], f64)> = Vec::new();
+    let mut asks_any = [false; B];
     for band in 0..B {
         if !admitted[band] || mass[band] / total < EVIDENCE_MIN_SHARE as f64 {
             continue;
         }
-        heard[band] = true;
-        demand[band] = wb_consensus(&asks[band]).0 as f64;
-        for r in reach[band].iter_mut() {
-            *r /= mass[band];
+        let testifying: Vec<usize> = (0..EVIDENCE_LUMA_BINS)
+            .filter(|&r| range_mass[band][r] / mass[band] >= EVIDENCE_MIN_SHARE as f64)
+            .collect();
+        let medians: Vec<f32> = testifying.iter().map(|&r| weighted_median(&mut asks[band][r])).collect();
+        let ranges: Vec<(f32, f32)> =
+            testifying.iter().zip(&medians).map(|(&r, &m)| (m, range_mass[band][r] as f32)).collect();
+        asks_any[band] = wb_consensus(&ranges).0 != 0.0;
+        for (&r, &median) in testifying.iter().zip(&medians) {
+            let w = range_mass[band][r];
+            let reach_r: [f64; B] = std::array::from_fn(|c| reach[band][r][c] / w);
+            equations.push((w, reach_r, if asks_any[band] { median as f64 } else { 0.0 }));
         }
     }
-    // The unknowns are the bands that ask; every heard band is an equation.
-    let free: Vec<usize> = (0..B).filter(|&b| heard[b] && demand[b] != 0.0).collect();
+    // The unknowns are the bands that ask.
+    let free: Vec<usize> = (0..B).filter(|&b| asks_any[b]).collect();
     if free.is_empty() {
         return;
     }
     let k = free.len();
     let mut normal = vec![vec![0.0f64; k + 1]; k];
-    for b in (0..B).filter(|&b| heard[b]) {
+    for (w, reach_r, want) in &equations {
         for (r, &cr) in free.iter().enumerate() {
             for (c, &cc) in free.iter().enumerate() {
-                normal[r][c] += mass[b] * reach[b][cr] * reach[b][cc];
+                normal[r][c] += w * reach_r[cr] * reach_r[cc];
             }
-            normal[r][k] += mass[b] * reach[b][cr] * demand[b];
+            normal[r][k] += w * reach_r[cr] * want;
         }
     }
     // Gaussian elimination with partial pivoting; a band whose pixels the
@@ -476,11 +500,11 @@ fn fit_band_hues(
         amount[band] = round1(((normal[r][k] / normal[r][r]) as f32).clamp(-budget.hsl_band, budget.hsl_band));
     }
     let left = |x: &[f32; B]| -> f64 {
-        (0..B)
-            .filter(|&b| heard[b])
-            .map(|b| {
-                let moved: f64 = (0..B).map(|c| reach[b][c] * x[c] as f64).sum();
-                mass[b] * (demand[b] - moved).powi(2)
+        equations
+            .iter()
+            .map(|(w, reach_r, want)| {
+                let moved: f64 = (0..B).map(|c| reach_r[c] * x[c] as f64).sum();
+                w * (want - moved).powi(2)
             })
             .sum()
     };
