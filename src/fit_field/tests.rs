@@ -213,6 +213,54 @@ fn field_adjoint_matches_forward() {
     );
 }
 
+/// v1.17.1. A channel at the clip in BOTH frames is a measurement: the pixel
+/// testifies, and the field keeps it where the target keeps it. Left half:
+/// pixels scattered, one in four a warm one the target takes 10 % less red
+/// (0.80 → 0.72), the rest a bright one whose red sits at the clip in both
+/// frames (luma 0.64 and 0.71, so they share the field's brightness-bin
+/// vertices and no field can serve both exactly).
+/// Right half: the bright pixel clipped in the SOURCE only (the target's red
+/// 0.90) — its true source value is unknown, and it still does not testify.
+/// Until v1.17.1 the clipped-in-both pixels were left out of the solve and
+/// took their vertices' red cut anyway, as p36's clouds did (0.999 → 0.972
+/// against a target at 0.998). Measured 2026-11-02: the clipped-in-both red
+/// renders at 0.988 under the rule (the warm pixels' at 0.765), at 0.935
+/// with those pixels left out (0.750).
+///
+/// MUTATION THIS KILLS: weigh only pixels inside the clip in both frames, or
+/// let a one-sided clip testify.
+#[test]
+fn a_channel_clipped_in_both_frames_testifies_and_keeps_its_colour() {
+    let (w, h) = FIXTURE;
+    let mut lcg = Lcg(0x5eed_0c11);
+    let (warm, bright) = ([0.80f32, 0.60, 0.45], [1.0f32, 0.62, 0.45]);
+    let (mut current, mut target, mut kind) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..w * h {
+        let left = i % w < w / 2;
+        if lcg.unit() < 0.25 {
+            current.push(warm.map(byte_round));
+            target.push([0.72f32, 0.60, 0.45].map(byte_round));
+            kind.push(0u8);
+        } else {
+            current.push(bright.map(byte_round));
+            target.push(if left { bright } else { [0.90f32, 0.62, 0.45] }.map(byte_round));
+            kind.push(if left { 1 } else { 2 });
+        }
+    }
+    let evidence = fit::evidence_model_for(&current, &target, w as u32, h as u32);
+    let field = LocalField::solve(&current, &target, w as u32, h as u32, &evidence).expect("solve");
+    let kind = &kind;
+    let of = |k: u8| (0..w * h).filter(move |&i| kind[i] == k);
+    let render = field.render(&current);
+    let red = |k: u8| of(k).map(|i| render[i][0] as f64).sum::<f64>() / of(k).count() as f64;
+    let (kept, cut) = (red(1), red(0));
+    assert!(of(1).all(|i| testifies(&current[i], &target[i])), "clipped in both frames testifies");
+    assert!(of(2).all(|i| !testifies(&current[i], &target[i]) && field.weight[i] == 0.0), "a one-sided clip does not");
+    assert!(of(1).any(|i| field.weight[i] > 0.0), "premise: the clipped-in-both pixels carry evidence weight");
+    assert!(cut < 0.78, "premise: the warm pixels' red was cut toward 0.72: {cut:.4}");
+    assert!(kept >= 0.98, "the clipped-in-both red is kept where the target keeps it: {kept:.4}");
+}
+
 /// The recon's proven property: pull the solution hard enough toward zero and the
 /// field's render IS the global render.  A `matvec` that ignores the Tikhonov term
 /// solves the free problem instead and moves the render by whole levels.
@@ -832,7 +880,7 @@ fn export_calibration_field_inputs_for_numpy() {
     let guide = smooth_3tap_luma(&pair.current, pair.width as usize, pair.height as usize);
     let weights: Vec<f32> = (0..pair.current.len())
         .map(|i| {
-            if unclipped(&pair.current[i]) && unclipped(&pair.target[i]) {
+            if testifies(&pair.current[i], &pair.target[i]) {
                 pair.evidence.source_weights[i].max(0.0) * support[i]
             } else {
                 0.0

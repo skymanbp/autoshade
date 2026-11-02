@@ -182,7 +182,7 @@ pub(crate) struct LocalField {
     /// Per pixel: `luma601(field render) - luma601(band projection render)`.
     pub remainder: Vec<f32>,
     /// Per pixel: the fit weight the solve used (frozen evidence x local support
-    /// x unclipped).  Shape verdicts weight the remainder by it, so a pixel whose
+    /// x [`testifies`]).  Shape verdicts weight the remainder by it, so a pixel whose
     /// vertices hold the occupancy-floor policy zero (a missing measurement, not
     /// a measured zero) cannot masquerade as spatial structure.
     pub weight: Vec<f32>,
@@ -224,7 +224,7 @@ impl LocalField {
         if evidence.source_weights.len() != n || evidence.identifiability <= IDENTIFIABILITY_MIN {
             return None;
         }
-        // Fit weight = frozen evidence x local structural support x unclipped.  The
+        // Fit weight = frozen evidence x local structural support x testifies.  The
         // evidence model is the fit's own; this module never builds a second one.
         let support = opts
             .local_support
@@ -232,7 +232,7 @@ impl LocalField {
         let mut fit_weight = vec![0.0f32; n];
         let mut mass = 0.0f64;
         for (i, weight) in fit_weight.iter_mut().enumerate() {
-            if unclipped(&current[i]) && unclipped(&target[i]) {
+            if testifies(&current[i], &target[i]) {
                 *weight = evidence.source_weights[i].max(0.0)
                     * support.as_ref().map_or(1.0, |s| s[i]);
             }
@@ -390,12 +390,35 @@ pub(crate) fn cell_vertex_spans(cell: usize) -> impl Iterator<Item = std::ops::R
     })
 }
 
-/// Both frames strictly inside `(1/255, 254/255)` on all three channels.
-/// `pub(crate)`: [`crate::fit_cells`] excludes the same pixels from its cell
-/// means for the same reason, and two copies of this line would be two
-/// definitions of "this pixel cannot move".
+/// One frame's pixel strictly inside `(1/255, 254/255)` on all three
+/// channels — read on the TARGET alone by [`crate::fit_cells`] for its cell
+/// means (the field itself reads [`testifies`]).
 pub(crate) fn unclipped(p: &[f32; 3]) -> bool {
     p[0].min(p[1]).min(p[2]) > 1.0 / 255.0 && p[0].max(p[1]).max(p[2]) < 254.0 / 255.0
+}
+
+/// Whether a PAIR of pixels — the frame being moved and its target —
+/// testifies: no channel at or under 1/255 in either frame, and every channel
+/// either inside 254/255 in BOTH frames or at the clip in BOTH. A channel at
+/// the clip on both sides is known on both sides — the target keeps it there
+/// — and a pixel clipped on one side only is not (its true value on that
+/// side is unknown), so it stays out as before.
+///
+/// WHY (v1.17.1). Until then a pixel testified only when it was inside the
+/// clip in both frames, while the colour field it was excluded from was
+/// still APPLIED to it. On the sunset-rooftops pair (p36, 0.85) 32 % of the
+/// upper clouds' pixels have red at the clip in both frames; their vertices
+/// were solved from the unclipped pixels around them, and the field pulled
+/// their red 0.999 → 0.972 against a target at 0.998 (blue 0.521 → 0.504
+/// where the target asks 0.574): the clouds' a* fell 16.9 → 15.7 against
+/// the target's 17.1, and the cells, which exclude the target's clip, could
+/// not see it. Testifying, those pixels hold their own vertices: clouds a* 17.0 /
+/// b* 28.1 against 17.1 / 28.1, the frame's 480-px distance 2.78 → 1.95
+/// (the seaside street 2.28 → 1.92), every other pair of the leg unchanged.
+pub(crate) fn testifies(current: &[f32; 3], target: &[f32; 3]) -> bool {
+    const HIGH: f32 = 254.0 / 255.0;
+    current.iter().chain(target).all(|&v| v > 1.0 / 255.0)
+        && (0..3).all(|c| (current[c] >= HIGH) == (target[c] >= HIGH))
 }
 
 /// The field's guide, owned by the engine since R33 §G: see

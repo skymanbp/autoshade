@@ -2,7 +2,7 @@
 
 Reads the artefacts written by the Rust probe test
 `export_calibration_field_inputs_for_numpy` (target/field-probe/*.bin + meta.json),
-re-derives the guide and the unclipped mask from the exported pixels, runs
+re-derives the guide and the testifying mask from the exported pixels, runs
 `grid_experiment.GridSystem` at production's grid and regulariser (the 12x8x8
 experiment refined to 32 vertex rows, tikhonov and smooth rescaled with it, 90
 iterations — `src/fit_field.rs`) on exactly those numbers, with production's
@@ -37,7 +37,7 @@ SMOOTH = (1.0 / ROWS_PER_CELL, 1.0, 1.0 / ROWS_PER_CELL)
 OCCUPANCY_MIN = 8.0
 ITERATIONS = 90
 ACTIVE_SET_PASSES = 40
-LOW, HIGH = 1.0 / 255.0, 254.0 / 255.0
+LOW, HIGH = np.float32(1.0 / 255.0), np.float32(254.0 / 255.0)
 
 
 def load(name: str) -> np.ndarray:
@@ -158,16 +158,19 @@ def main() -> None:
     luma = current @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
     guide_delta = float(np.max(np.abs(smooth_3tap(luma) - guide)))
 
-    # 2. the fit weight must be evidence x local support x unclipped.  "Unclipped"
-    # is both frames strictly inside (1/255, 254/255) on all three channels, which
-    # over the six stacked channels is one min/max pair.
+    # 2. the fit weight must be evidence x local support x testifies
+    # (`fit_field::testifies`, v1.17.1): no channel at or under 1/255 in either
+    # frame, and every channel inside 254/255 in both frames or at the clip in
+    # both.
     stacked = np.concatenate([current, target], axis=2)
-    unclipped = ((stacked.min(axis=2) > LOW) & (stacked.max(axis=2) < HIGH)).astype(np.float32)
-    fit_weight = evidence * support * unclipped
+    above = stacked.min(axis=2) > LOW
+    same_clip = np.all((current >= HIGH) == (target >= HIGH), axis=2)
+    testifies = (above & same_clip).astype(np.float32)
+    fit_weight = evidence * support * testifies
     weight_delta = float(np.max(np.abs(fit_weight - exported_weight)))
     if weight_delta > 1e-6:
         raise SystemExit(
-            f"the exported fit weight disagrees with evidence x support x unclipped by "
+            f"the exported fit weight disagrees with evidence x support x testifies by "
             f"{weight_delta} — the two sides are not solving the same system"
         )
 
