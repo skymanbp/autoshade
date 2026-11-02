@@ -249,26 +249,23 @@ fn a_white_balance_is_vouched_along_chromaticity_not_the_full_direction() {
 /// refuse while agreeing on its DIRECTION ships at the largest share they
 /// vouch, instead of going back to as-shot whole.
 ///
-/// The fixture asks every cell for the same warm move at two sizes: the
-/// bright half of the ramp is relit by a strong warm cast, the dark half by
-/// a gentle one. The population solves ONE white balance between the two,
-/// which pushes the gentle half PAST its own target — diverged over the
-/// line, aligned near one — exactly the seaside street's shape
-/// (0.847 / 0.117 / 0.954). The share search then finds the size the gentle
-/// half still converges under.
+/// The fixture asks every cell for the same warm move at two sizes: three of
+/// the four colour bands are relit by a strong warm cast, the green band at
+/// the bottom by a gentle one. Every band of [`synth`] ramps across the whole
+/// luma range, so each tonal region holds both sizes in the same three-to-one
+/// proportion and the move every region shares is the strong one: the white
+/// balance takes it, which pushes the gentle band PAST its own target —
+/// diverged over the line, aligned near one — exactly the seaside street's
+/// shape (0.847 / 0.117 / 0.954). The share search then finds the size the
+/// gentle band still converges under.
 ///
-/// 2026-10-22: the dark range is no longer left idle. With the demand read
-/// from the toned render and opposition by sign alone, an idle quarter read
-/// −0.032 on the Kelvin axis after the tone sliders (0.102 of the mass,
-/// over `WB_OPPOSING_SHARE`), the Kelvin demand went to zero and only a
-/// tint −4.5 was vouched (0.026 / 0.000 / 0.349, refused on DIRECTION).
-/// Under `WB_OPPOSING_RATIO` that range is a sliver (0.09 of the rest's
-/// +0.35) and the idle fixture's Kelvin axis reads +0.349, opposing 0.000
-/// — but that is a red/blue ratio of e^0.349 = 1.42 (free fit 9150 K /
-/// tint −0.3), over the default budget's 1.40, and the stage leaves no
-/// white-balance sentence at all. So the dark quarter still gets the gentle
-/// warm cast this comment always described, and the bright cast is a step
-/// milder.
+/// 2026-11-01: the two sizes used to sit in two BRIGHTNESS ranges (the
+/// darkest quarter gentle, the rest strong). Since the white balance takes
+/// only the colour change every tonal region shares, that split is a
+/// brightness-dependent change: the white balance took the gentle part, the
+/// cells vouched it whole (0.776 / 0.000 / 1.000), and nothing was refused
+/// on size. The sizes are split by band now, across every brightness, which
+/// is the shape a white balance can over-shoot.
 ///
 /// MUTATION THIS KILLS: delete the share search (the cast goes back to
 /// as-shot and the refusal note rides).
@@ -279,17 +276,15 @@ fn a_white_balance_refused_on_size_ships_at_the_share_the_cells_vouch() {
     let (w, h) = (source.width(), source.height());
     let target = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
         let p = source.get_pixel(x, y).0;
-        let luma = (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) / 255.0;
-        // Most of the frame asks for a warm cast the default strength's
-        // budget admits (a stronger one stays as-shot without a verdict at
-        // all) and the darkest quarter for a gentle one: the population
-        // solves one cast between the two, the full move pushes the dark
-        // cells' means past their own targets (a refusal on SIZE: diverged
-        // over 0.10 while the cells keep the direction over 0.70 — measured
-        // 2026-10-22: 0.636 / 0.266 / 0.851), and a share of it small enough
-        // to leave those dark means inside the blind-move line is what ships
-        // (0.266 of the move, 6200 K / tint −3.9: 0.721 / 0.000 / 0.870).
-        let gains = if luma > 0.25 { [1.085, 1.0, 0.915] } else { [1.015, 1.0, 0.985] };
+        // Three bands ask for a warm cast the default strength's budget
+        // admits (a stronger one stays as-shot without a verdict at all) and
+        // the green band for a gentle one, each across every brightness: the
+        // white balance takes the strong move every region shares, it pushes
+        // the green band's cells past their own targets (a refusal on SIZE:
+        // diverged over 0.10 while the cells keep the direction over 0.70),
+        // and a share of it small enough to leave those means inside the
+        // blind-move line is what ships.
+        let gains = if y < h * 3 / 4 { [1.085, 1.0, 0.915] } else { [1.015, 1.0, 0.985] };
         image::Rgb(std::array::from_fn(|c| {
             (p[c] as f32 * gains[c]).round().clamp(0.0, 255.0) as u8
         }))
@@ -7912,7 +7907,19 @@ fn hsl_band_budget_is_monotone_across_the_three_strength_stops() {
 /// figures to the last digit. The pin therefore holds where the pool has
 /// this lens's profile, and the test checks that first. `p41`'s question
 /// changed its answer on the same frame and is asked by
-/// `a_two_temperature_cast_is_withheld_past_the_gate_once_the_cells_keep_its_white_balance_as_shot`.
+/// `p41_ships_the_brightness_common_white_balance_its_cells_approve_and_admits_the_cast`.
+///
+/// 2026-11-02: the white balance takes only the brightness-common colour
+/// change and the colour-grade stage carries the per-range remainder. Here
+/// both tonal regions ask the same way (Kelvin axis +0.34 / +0.50, tint
+/// +0.34 / +0.51), so the shared part is +0.34 / +0.34; solved, that is
+/// 27700 K / +100, whose channel gains (1.160 / 0.800 / 0.823, ratio 1.450)
+/// lie past the default budget's 1.40, and the stage leaves as-shot. The
+/// wheels never take a cast the white balance gave back, so the cast curves
+/// carry it whole: admitted at 14.6°, fit 0.0673 -> 0.0421, confidence
+/// 0.554. That is 0.4° under the line, and it is this pair's cast — the one
+/// the range-consensus white balance (17300 K / +100) used to take inside
+/// the budget — not a grade artefact.
 ///
 /// The pair is OPTIONAL, like every other corpus pair: absent, the test
 /// says so and passes, and the synthetic two-temperature fixture carries
@@ -7924,7 +7931,7 @@ fn hsl_band_budget_is_monotone_across_the_three_strength_stops() {
 fn the_fan_gate_costs_a_real_two_temperature_pair_nothing() {
     use crate::rationale::keys;
     let Some(root) = calibration_corpus() else { return };
-    for (code, want_fan, want_before, want_after, want_conf) in [("p40", 6.3f32, 0.0673f32, 0.0424f32, 0.552f32)] {
+    for (code, want_fan, want_before, want_after, want_conf) in [("p40", 14.6f32, 0.0673f32, 0.0421f32, 0.554f32)] {
         let raw = root.join(format!("{code}.arw"));
         let target_path = root.join(format!("{code}-target.jpg"));
         if !raw.is_file() || !target_path.is_file() {
@@ -7995,28 +8002,28 @@ fn the_fan_gate_costs_a_real_two_temperature_pair_nothing() {
 /// The other two-temperature pair, `p41` (a building at twilight: a warm
 /// horizon band, a deep blue sky, a warm lamp), on the frame v1.17.0 reads
 /// it in — the lens profile's vignetting is the Adobe profile's
-/// ([`crate::lensmeta::read_for`]). Until then the fan gate cost it
-/// nothing: the white-balance stage shipped 3800 K / tint -100, the cells
-/// vouched it at 0.755 converged / 0.043 diverged / 0.709 aligned, and the
-/// curves were left a 4.0° fan.
+/// ([`crate::lensmeta::read_for`]).
 ///
-/// On this frame the stage solves the same 3800 K / -100 and the cells
-/// refuse it on DIRECTION, by their own rule: 0.727 converged and 0.035
-/// diverged clear their lines, 0.673 aligned does not (`VOUCH_MIN_ALIGNED`
-/// 0.70), so it goes back to as-shot and, the direction not agreeing, no
-/// share of it is searched for. The whole frame agrees with the cells: at
-/// the stage the move takes the look error 0.028581 -> 0.028915, worse (it
-/// did on v1.16.0 too, 0.031825 -> 0.034001, where the cells' 0.709 let it
-/// ship). With the white balance at as-shot the channel curves are asked
-/// for the whole cast and fan its widest hue class 15.1° against the 15°
-/// line, so the gate withholds them. That is the gate doing its job on a
-/// cast the target's cells do not ask for, and the fit still ships: 0.0742
-/// -> 0.0283 at confidence 0.480.
+/// Until 2026-11-01 this test pinned a REFUSAL: the white-balance stage took
+/// the range consensus, 3800 K / tint -100, the cells refused it on
+/// direction (0.727 converged / 0.035 diverged / 0.673 aligned, under the
+/// 0.70 line), and the channel curves asked for the whole cast fanned its
+/// widest hue class 15.1° and were withheld (0.0742 -> 0.0283 at 0.480).
+///
+/// Since the white balance takes only the brightness-common colour change,
+/// it asks for less — the part every tonal region shares — and the cells
+/// approve that part (0.707 / 0.035 / 0.730). The rest of the cast reaches
+/// the curves smaller, they fan the widest class +5.7°, inside the line, and
+/// ship admitted; the fit lands nearer the target than the refusal did
+/// (0.0742 -> 0.0269 at 0.484, measured 2026-11-02). So the refusal was the
+/// consensus white balance's, and the claim pinned here is the rule's: the
+/// white balance asks only the shared part, the cells approve it, the cast
+/// ships.
 ///
 /// OPTIONAL like every corpus pair; the same lens-profile premise as the
 /// pair above.
 #[test]
-fn a_two_temperature_cast_is_withheld_past_the_gate_once_the_cells_keep_its_white_balance_as_shot() {
+fn p41_ships_the_brightness_common_white_balance_its_cells_approve_and_admits_the_cast() {
     use crate::rationale::keys;
     let Some(root) = calibration_corpus() else { return };
     let code = "p41";
@@ -8024,7 +8031,7 @@ fn a_two_temperature_cast_is_withheld_past_the_gate_once_the_cells_keep_its_whit
     let target_path = root.join(format!("{code}-target.jpg"));
     if !raw.is_file() || !target_path.is_file() {
         crate::test_skipped(
-            "a_two_temperature_cast_is_withheld_past_the_gate_once_the_cells_keep_its_white_balance_as_shot",
+            "p41_ships_the_brightness_common_white_balance_its_cells_approve_and_admits_the_cast",
             &format!("the two-temperature pair {code} is not in this corpus"),
         );
         return;
@@ -8035,55 +8042,45 @@ fn a_two_temperature_cast_is_withheld_past_the_gate_once_the_cells_keep_its_whit
     let base = crate::pipeline::calibration_recipe(crate::pipeline::fit_calibration(&raw));
     assert!(
         base.lens_profile.adobe.is_some(),
-        "{code}: the reading is measured with the lens's Adobe profile from this machine's pool, \
-             and the pool has none for it here"
+        "{code}: the reading is measured with the lens's Adobe profile from this machine's pool, and the pool has none for it here"
     );
     let report = fit_recipe_from(&src, &tgt, &base);
     let share = |arg: &str| {
-        projection_arg(&report, keys::FIT_NOTE_WB_CELLS_REFUSED, arg).unwrap_or_else(|| {
-            panic!("{code}: the cells' refusal of the white balance: {}", report.recipe.rationale)
+        projection_arg(&report, keys::FIT_NOTE_WB_CELLS_VOUCHED, arg).unwrap_or_else(|| {
+            panic!("{code}: the cells approve the shared-part white balance: {}", report.recipe.rationale)
         })
     };
     let (converged, diverged, aligned) = (share("converged"), share("diverged"), share("aligned"));
+    let fan = projection_arg(&report, keys::FIT_NOTE_CAST_ADMITTED_FAN, "fan")
+        .unwrap_or_else(|| panic!("{code}: the cast ships admitted: {}", report.recipe.rationale));
     eprintln!(
-        "TWO_TEMPERATURE {code} wb_cells={converged:.3}/{diverged:.3}/{aligned:.3} err={:.6}->{:.6} conf={:.6}",
+        "TWO_TEMPERATURE {code} wb_cells={converged:.3}/{diverged:.3}/{aligned:.3} fan={fan:.1} err={:.6}->{:.6} conf={:.6}",
         report.err_before, report.err_after, report.recipe.confidence
     );
     assert!(
-        (converged - 0.727).abs() <= 0.02 && (diverged - 0.035).abs() <= 0.02 && (aligned - 0.673).abs() <= 0.02,
-        "{code}: the cells' shares moved off the measured 0.727 / 0.035 / 0.673: \
-             {converged} / {diverged} / {aligned}"
+        (converged - 0.707).abs() <= 0.02 && (diverged - 0.035).abs() <= 0.02 && (aligned - 0.730).abs() <= 0.02,
+        "{code}: the cells' shares moved off the measured 0.707 / 0.035 / 0.730: {converged} / {diverged} / {aligned}"
+    );
+    assert!(report.recipe.temperature_k.is_some(), "{code}: the approved white balance ships");
+    assert!(
+        (fan - 5.7).abs() <= 0.6 && fan < FAN_DEG,
+        "{code}: the admitted curves' fan moved off the measured 5.7°: {fan:.1}°"
     );
     assert!(
-        converged >= 0.70 && diverged <= 0.10 && aligned < 0.70,
-        "{code}: the refusal is on direction alone, by the cells' own lines"
-    );
-    assert!(
-        report.recipe.temperature_k.is_none() && report.recipe.tint == 0.0,
-        "{code}: the refused white balance went back to as-shot: {:?} / {}",
-        report.recipe.temperature_k,
-        report.recipe.tint
-    );
-    let fan = projection_arg(&report, keys::FIT_NOTE_CAST_HUE_FANNED, "fan")
-        .unwrap_or_else(|| panic!("{code}: the fan gate withholds the curves: {}", report.recipe.rationale));
-    assert!(
-        (fan - 15.1).abs() <= 0.6 && fan > FAN_DEG,
-        "{code}: the withheld curves' fan moved off the measured 15.1°: {fan:.1}°"
-    );
-    assert!(
-        !report.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED),
-        "{code}: a withheld cast is not also admitted: {}",
+        !report.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HUE_FANNED
+            || n.key == keys::FIT_NOTE_CAST_PROJECTED),
+        "{code}: an admitted cast is neither refused nor projected: {}",
         report.recipe.rationale
     );
     assert!(
-        (report.err_before - 0.0742).abs() <= 0.002 && (report.err_after - 0.0283).abs() <= 0.002,
-        "{code}: residual moved off the measured 0.0742 -> 0.0283: {:.6} -> {:.6}",
+        (report.err_before - 0.0742).abs() <= 0.002 && (report.err_after - 0.0269).abs() <= 0.002,
+        "{code}: residual moved off the measured 0.0742 -> 0.0269: {:.6} -> {:.6}",
         report.err_before,
         report.err_after
     );
     assert!(
-        (report.recipe.confidence - 0.480).abs() <= 0.02,
-        "{code}: confidence moved off the measured 0.480: {}",
+        (report.recipe.confidence - 0.484).abs() <= 0.02,
+        "{code}: confidence moved off the measured 0.484: {}",
         report.recipe.confidence
     );
 }
@@ -8450,6 +8447,10 @@ fn a_delivered_fan_the_curves_did_not_cause_is_disclosed_not_withdrawn() {
 /// read 12.4° under the ungated tone arm and 7.6° once re-drawn (see
 /// [`coast`]).
 ///
+/// 2026-11-01: the cornwall panel reads 11.5°, since the white balance takes
+/// only the brightness-common colour change and the colour-grade stage
+/// carries the per-range remainder; it is still the worst.
+///
 /// Mutation: set `FAN_PROJECT_DEG` to `FAN_DEG` (let the projection keep
 /// twice the fan it is allowed) and the coast pair's delivered reading
 /// goes over the line, red here. (2026-10-22, run: the re-drawn coast stays
@@ -8491,8 +8492,8 @@ fn no_shipped_fit_delivers_a_hue_fan_past_the_limit() {
         }
     }
     assert!(
-        (worst - 12.9).abs() < 0.5,
-        "the worst delivered fan moved off the measured 12.9°: {worst:.1}"
+        (worst - 11.5).abs() < 0.5,
+        "the worst delivered fan moved off the measured 11.5°: {worst:.1}"
     );
 }
 

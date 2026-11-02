@@ -2406,7 +2406,11 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
     // it; per unit of brightness the full tone passes, the candidate carries
     // the whole fitted move (rim 0.0460 -> 0.0660) and the shrink lands it on
     // the SAME kept rim, 0.012, at k 0.244 -> 0.183. `sky+land` is unmoved.
-    let expected_candidates = [("sky", 0.0310f32, 0.194f32), ("sky+land", 0.0540, 0.165)];
+    // 2026-11-02: the white balance takes only the brightness-common colour
+    // change and the colour-grade stage carries the per-range, per-hue
+    // remainder, so the land pair's global recipe under its zones differs and
+    // its candidate reads 0.0570 at k 0.164.
+    let expected_candidates = [("sky", 0.0310f32, 0.194f32), ("sky+land", 0.0570, 0.165)];
     for ((fixture, before, k), (want_fixture, want_before, want_k)) in
         candidates.iter().zip(expected_candidates)
     {
