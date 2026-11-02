@@ -11,12 +11,12 @@ An editable, Lightroom-ready recipe instead of AI pixels.
 
 <br />
 
-[![Release](https://img.shields.io/badge/release-v1.16.0-146b5a?style=flat-square)](https://github.com/skymanbp/autoshade/releases/tag/v1.16.0)
+[![Release](https://img.shields.io/badge/release-v1.17.0-146b5a?style=flat-square)](https://github.com/skymanbp/autoshade/releases/tag/v1.17.0)
 [![Platforms](https://img.shields.io/badge/Windows%20·%20macOS%20·%20Linux-0b4b3f?style=flat-square)](#install-and-quickstart)
 [![Rust](https://img.shields.io/badge/Rust-1.94-a34b29?style=flat-square&logo=rust&logoColor=white)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-MIT-4f5e5a?style=flat-square)](LICENSE)
 
-**[Download v1.16.0](https://github.com/skymanbp/autoshade/releases/tag/v1.16.0)**
+**[Download v1.17.0](https://github.com/skymanbp/autoshade/releases/tag/v1.17.0)**
 &nbsp;·&nbsp; [Website](https://autoshade.dev/)
 &nbsp;·&nbsp; [Manual](docs/USER_MANUAL.md)
 &nbsp;·&nbsp; [Showcase](docs/SHOWCASE.md)
@@ -153,11 +153,11 @@ Six techniques you will not find in another RAW developer. Each is written up in
 
 | Platform | Get it |
 |---|---|
-| **Windows** | `AutoShade-Setup-1.16.0.exe` — per-user, no admin. Or the portable `autoshade-1.16.0-windows-x64.zip` |
-| **macOS** | `AutoShade-1.16.0-macos-universal.zip` (Apple silicon + Intel), or `-macos-cli.zip` |
-| **Linux** | `AutoShade-1.16.0-linux-x64.zip` — command line only |
+| **Windows** | `AutoShade-Setup-1.17.0.exe` — per-user, no admin. Or the portable `autoshade-1.17.0-windows-x64.zip` |
+| **macOS** | `AutoShade-1.17.0-macos-universal.zip` (Apple silicon + Intel), or `-macos-cli.zip` |
+| **Linux** | `AutoShade-1.17.0-linux-x64.zip` — command line only |
 
-All on the **[v1.16.0 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.16.0)**. Python 3 is needed only for the local AI sidecars; model weights download on first use.
+All on the **[v1.17.0 release page](https://github.com/skymanbp/autoshade/releases/tag/v1.17.0)**. Python 3 is needed only for the local AI sidecars; model weights download on first use.
 
 > [!NOTE]
 > **macOS:** the app is ad-hoc signed, not notarised — on first launch use **System Settings → Privacy & Security → Open Anyway** (once per machine).
@@ -193,11 +193,11 @@ mirrored byte-exact on [Hugging Face](https://huggingface.co/Azng0/autoshade-mir
 |---|---:|---|
 | `autoshade.exe` (CLI) | 23,432,704 bytes | `2eb734d4ca79fbf1bc51093120fd17b0be415244adb4d3adfa96a94a71add50e` |
 | `autoshade-gui.exe` (desktop app) | 30,681,600 bytes | `2a3575462f7a4f6e8c9f3c6835bb4a89d7ee1d08f10079bb518f4d6acc3d7f37` |
-| `AutoShade-Setup-1.16.0.exe` (installer) | 15,563,883 bytes | `ac36c9cd6e70930031d7f18b77c8b30049d3616df00889b9214ef7cdb3213dbb` |
-| `autoshade-1.16.0-windows-x64.zip` (portable archive) | 21,167,641 bytes | `fe51a8f7d716a10e0e5ffd812fddd6d472462ac7940784a7de8e5bb16edff29c` |
-| `AutoShade-1.16.0-macos-universal.zip` (macOS app bundle) | 42,558,937 bytes | `44da3b8860ea97ccc5cbe042cad30e7bd77661341cc79c46508ea2fbfc99f471` |
-| `AutoShade-1.16.0-linux-x64.zip` (Linux command line only) | 10,144,539 bytes | `65a9e61a153f23947b5506c4462c85169921af1d022ed3197d9fadbfd2f37845` |
-| `AutoShade-1.16.0-macos-cli.zip` (macOS command line only) | 18,365,214 bytes | `1a604f8c8012eef95cd22a2f1d8571e6ca3c2a89646c1dbad6a144ed6e374d8b` |
+| `AutoShade-Setup-1.17.0.exe` (installer) | 15,563,883 bytes | `ac36c9cd6e70930031d7f18b77c8b30049d3616df00889b9214ef7cdb3213dbb` |
+| `autoshade-1.17.0-windows-x64.zip` (portable archive) | 21,167,641 bytes | `fe51a8f7d716a10e0e5ffd812fddd6d472462ac7940784a7de8e5bb16edff29c` |
+| `AutoShade-1.17.0-macos-universal.zip` (macOS app bundle) | 42,558,937 bytes | `44da3b8860ea97ccc5cbe042cad30e7bd77661341cc79c46508ea2fbfc99f471` |
+| `AutoShade-1.17.0-linux-x64.zip` (Linux command line only) | 10,144,539 bytes | `65a9e61a153f23947b5506c4462c85169921af1d022ed3197d9fadbfd2f37845` |
+| `AutoShade-1.17.0-macos-cli.zip` (macOS command line only) | 18,365,214 bytes | `1a604f8c8012eef95cd22a2f1d8571e6ca3c2a89646c1dbad6a144ed6e374d8b` |
 | `autoshade-raw-denoise-v2.pth` (RAW denoiser weights, fetched on demand from the v1.6.0 release) | 130,590,559 bytes | `ffafa40a53f52092149db2fcf03636117ad6855e1068142d4f6b03b634e9f9c4` |
 
 </details>
@@ -274,7 +274,7 @@ Per-subsystem notes: [In depth → Implementation](docs/DEEP_DIVE.md#implementat
 
 ## Status and limitations
 
-- **Release gates at v1.16.0** cover the CLI, desktop GUI, sidecar contracts, format fixtures and the deterministic renderer.
+- **Release gates at v1.17.0** cover the CLI, desktop GUI, sidecar contracts, format fixtures and the deterministic renderer.
 - **Not in scope:** Adobe's rendering (AutoShade is its own develop engine; a sidecar carries the same settings to Lightroom, which renders them its own way), an exact X-Trans demosaic, a notarised macOS build, a Linux desktop app.
 - **Honest markers:** AI masks are local re-creations, not Adobe's pixels; the macOS app is CI-verified but has no reported interactive users yet.
 - Release ledger and rulings: [ROADMAP.md](docs/ROADMAP.md).

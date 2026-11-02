@@ -1,6 +1,13 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.16.0 — the reverse fit measures the target's geometry
+> Status: **implemented** (v1.17.0 — one develop law for every recipe, a
+> camera profile colour data only; dark sensor values signed; lens distortion
+> and chromatic aberration by their own knots and the installed profile's
+> vignetting; a mask's Color tint; the white balance takes only the colour
+> change every brightness range shares and a colour-grade stage carries the
+> rest, the mixer solves band hue; the sidecar carries a zone's colour gains as
+> that mask's Temp / Tint and names the colour field it cannot carry;
+> v1.16.0 — the reverse fit measures the target's geometry
 > and pairs in the sensor frame: a lens-corrected export is brought back through
 > the profile's own map and its ring outside the field is absent evidence, an
 > uncorrected one keeps its geometry, and `apply` with a sidecar stamps the
