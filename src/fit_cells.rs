@@ -246,6 +246,12 @@ impl PairedCells {
                 (y * CELLS_Y / height as usize) * CELLS_X + x * CELLS_X / width as usize
             })
             .collect();
+        // The cells keep the target-only clip check, unlike the colour field's
+        // `fit_field::testifies` (a channel at the clip in both frames
+        // testifies there): a pixel at the clip on both sides cannot show
+        // whether a move took its cell toward the target. Admitted, such
+        // pixels only diluted the converged share (p41's white balance,
+        // 0.707 -> 0.699 under the 0.70 line).
         let weight: Vec<f32> = (0..n)
             .map(|i| {
                 if unclipped(&tp[i]) { evidence.source_weights[i].max(0.0) } else { 0.0 }
