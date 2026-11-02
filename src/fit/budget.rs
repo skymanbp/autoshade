@@ -123,6 +123,17 @@ pub struct FitBudget {
     /// +/-100 axis. The strength dial has to be able to turn this stage, so
     /// it interpolates like every other budget dimension.
     pub hsl_band: f32,
+    /// Ceiling for each colour-grade wheel's Saturation, on the wheel's own
+    /// 0..100 axis (`fit::grade`). The mixer's band ceiling read as what it
+    /// is — a share of its control's reach (6 / 18 / 45 of the band's ±100)
+    /// — and applied to the wheel's reach: a wheel, like a band, is a colour
+    /// move on a SUB-population (one tonal region), and the dial restrains it
+    /// as it restrains the mixer. Until v1.17.1 the wheels obeyed only the
+    /// saturation chase's ceiling (30 at Strength 0, 60 at the default),
+    /// above what the seaside street's wheels asked at any strength, so the
+    /// grade moved about as far at Strength 0 as at 1 (shadows 30.0 / 29.1,
+    /// midtones 21.6 / 16.5 at 0 / 1; 2026-11-02).
+    pub grade_wheel: f32,
     /// Window an ATMOSPHERE zone's per-channel recolour is shrunk into
     /// (`fit_zoned::shrink_atmosphere_gains`). It was a pair of fixed
     /// constants, so a user asking for Strength 1.0 on a repainted sky got
@@ -175,6 +186,12 @@ impl FitBudget {
             slope: (between(0.7, ATMOSPHERE_CURVE_SLOPE_MIN, 0.25), between(1.3, ATMOSPHERE_CURVE_SLOPE_MAX, 3.0)),
             confidence_cap: between(0.50, ATMOSPHERE_CONFIDENCE_CAP, 0.35),
             hsl_band: between(HSL_BAND_LIMIT_MIN, HSL_BAND_LIMIT_DEFAULT, HSL_BAND_LIMIT_MAX),
+            // The band's share of its ±100 reach, times the wheel's 100.
+            grade_wheel: between(
+                HSL_BAND_LIMIT_MIN / 100.0,
+                HSL_BAND_LIMIT_DEFAULT / 100.0,
+                HSL_BAND_LIMIT_MAX / 100.0,
+            ) * 100.0,
             zone_gain: (
                 between(0.92, crate::fit_zoned::ZONE_ATMOS_GAIN_MIN, 0.50),
                 between(1.08, crate::fit_zoned::ZONE_ATMOS_GAIN_MAX, 2.00),

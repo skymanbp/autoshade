@@ -576,6 +576,8 @@ pub(super) fn fit_atmosphere_from_parts(
             vouched_bands: None,
             cast_cells: None,
             hsl: hsl_facts,
+            // Atmosphere mode solves no colour grade.
+            grade_held: None,
             atmosphere_reference,
         },
     )

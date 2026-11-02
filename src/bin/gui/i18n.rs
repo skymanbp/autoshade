@@ -2221,6 +2221,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" The colour grade carries the part of the paired colour change that differs by brightness, which no white balance can: \
       shadows {shadows}, midtones {midtones}, highlights {highlights}.",
         " 颜色分级承担了配对颜色变化中随亮度而不同的部分，这是任何白平衡都做不到的：阴影 {shadows}，中间调 {midtones}，高光 {highlights}。"),
+    (" The grade was held at this strength's ceiling, Saturation {ceiling} per wheel; the paired pixels asked for up to {asked}. A higher reverse-fit strength lets it move further.",
+        " 颜色分级被限制在当前强度的上限：每个色轮饱和度 {ceiling}；成对像素要求的最大值为 {asked}。调高反推强度可让它走得更远。"),
     (" The per-band colour move was given back: applying it did not leave the frame closer to the target, so every band returned to neutral.",
         " 逐带颜色调整已交还：应用后画面并未更接近目标，因此所有色带恢复中性。"),
     (" The per-band colour move was given back: it would have carried pixels through hue bands no two-sided evidence covers, and blind movement is vetoed rather than shipped.",

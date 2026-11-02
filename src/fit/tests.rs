@@ -60,6 +60,10 @@ fn fit_budget_default_is_byte_identical_to_pre_f1() {
         slope: (0.5, 1.5),
         confidence_cap: 0.50,
         hsl_band: HSL_BAND_LIMIT_DEFAULT,
+        // v1.17.1 added this axis: the band ceiling's share of its ±100
+        // reach on the wheel's 0..100. The default recipe's grade is held
+        // at 18 where the saturation chase's 60 held it before.
+        grade_wheel: HSL_BAND_LIMIT_DEFAULT,
         // R33 §F added this axis; its DEFAULT point is the pair of
         // constants the zone shrink used to carry alone, so the shipped
         // default recipe is unchanged and the dial now reaches the zone.
@@ -784,6 +788,68 @@ fn a_split_tone_goes_to_the_grade_wheels_and_not_to_the_white_balance() {
     );
 }
 
+/// v1.17.1. The colour-grade wheels obey the strength budget as every stage
+/// does: each wheel's Saturation is held under `FitBudget::grade_wheel`, the
+/// mixer's band ceiling read on the wheel's axis (6 at Strength 0, 45 at
+/// Strength 1). Strength is a restraint budget, not an amount: at 0 the
+/// stage still ships what the tightest budget admits. A split-toned pair
+/// (a structured neutral ramp; the target warms the darker half and cools
+/// the brighter half by ±0.4 in log red/blue) whose regions ask far more
+/// than the floor, through the stage itself with the pair's own cells:
+/// at the Strength 0 ceiling no wheel exceeds 6 and the stage says it held
+/// the grade; at the Strength 1 ceiling none exceeds 45 and the wheels move
+/// further than at 0 (measured 2026-11-02: shadows / midtones / highlights
+/// 6.0 / 0.9 / 6.0 at Strength 0, the paired pixels asking 88; 30.7 / 0.9 /
+/// 45.0 at Strength 1, every cell converged). (The whole solve does not reach the stage on such a
+/// pair: from a neutral source every target hue band is one-sided, and the
+/// paired regression down-weights the toned regions.)
+///
+/// MUTATION THIS KILLS: clamp the wheels to the saturation chase's ceiling
+/// (30 at Strength 0) instead of `grade_wheel`, or drop the clamp.
+#[test]
+fn the_grade_wheels_obey_the_strength_budget() {
+    let (w, h) = (192u32, 128u32);
+    let lin = render::srgb_to_linear;
+    let enc = render::linear_to_srgb;
+    let mut src = RgbImage::new(w, h);
+    let mut tgt = RgbImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let block = if (x / 8 + y / 8) % 2 == 0 { 0.04 } else { -0.04 };
+            let l = (0.08 + 0.84 * x as f32 / (w - 1) as f32 + block).clamp(0.02, 0.98);
+            let k: f32 = if l < 0.5 { 0.20 } else { -0.20 };
+            let t = [enc(lin(l) * k.exp()), l, enc(lin(l) * (-k).exp())];
+            let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            src.put_pixel(x, y, image::Rgb([byte(l); 3]));
+            tgt.put_pixel(x, y, image::Rgb(t.map(byte)));
+        }
+    }
+    let (s_img, t_img) = analysis_pair(&DynamicImage::ImageRgb8(src), &DynamicImage::ImageRgb8(tgt));
+    let (sp, tp) = (pixels_of(&s_img), pixels_of(&t_img));
+    let evidence = evidence_model_for(&sp, &tp, s_img.width(), s_img.height());
+    let cells = crate::fit_cells::PairedCells::build(&tp, s_img.width(), s_img.height(), &evidence)
+        .expect("a populated pair builds cells");
+    let weights = vec![1.0f32; tp.len()];
+    let ceiling = |s: f32| FitBudget::for_strength(crate::recipe::GradeStrength::new(s)).grade_wheel;
+    assert!((ceiling(0.0) - HSL_BAND_LIMIT_MIN).abs() < 1e-4 && (ceiling(1.0) - HSL_BAND_LIMIT_MAX).abs() < 1e-4);
+    let stage = |s: f32| {
+        let mut recipe = EditRecipe::default();
+        let held = grade::fit_grade_stage(&s_img, &tp, &weights, Some(&cells), ceiling(s), &mut recipe);
+        let cg = &recipe.color_grade;
+        ([cg.shadow_sat, cg.midtone_sat, cg.highlight_sat], held)
+    };
+    let (low, low_held) = stage(0.0);
+    let (high, _) = stage(1.0);
+    assert!(low.iter().all(|&sat| sat <= ceiling(0.0) + 0.05), "Strength 0 wheels {low:?} over {}", ceiling(0.0));
+    assert!(high.iter().all(|&sat| sat <= ceiling(1.0) + 0.05), "Strength 1 wheels {high:?} over {}", ceiling(1.0));
+    assert!(
+        high.iter().copied().fold(0.0, f32::max) > ceiling(0.0) + 1.0,
+        "premise: the split asks more than the floor ceiling — Strength 1 wheels {high:?}"
+    );
+    let (held_at, asked) = low_held.expect("the dial held the grade at Strength 0 and the stage must say so");
+    assert!((held_at - ceiling(0.0)).abs() < 1e-4 && asked > held_at, "held at {held_at}, asked {asked}");
+}
+
 #[test]
 fn global_cast_is_measured_when_every_band_is_one_sided_and_consistent() {
     let source = vec![[0.08, 0.16, 0.82]; 256];
@@ -859,6 +925,7 @@ fn high_strength_discloses_instead_of_withholding() {
             vouched_bands: None,
             cast_cells: None,
             hsl: HslStageFacts::default(),
+            grade_held: None,
             atmosphere_reference: AtmosphereReference::WholeFrame,
         },
     );
@@ -7241,6 +7308,7 @@ fn confidence_identifiability_separates_low_evidence_render() {
                 vouched_bands: None,
                 cast_cells: None,
                 hsl: HslStageFacts::default(),
+                grade_held: None,
                 atmosphere_reference: AtmosphereReference::WholeFrame,
             },
         )

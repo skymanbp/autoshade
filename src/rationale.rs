@@ -524,6 +524,9 @@ pub mod keys {
     pub const FIT_NOTE_COLOR_GRADE: &str =
         " The colour grade carries the part of the paired colour change that differs by brightness, which no white balance can: \
          shadows {shadows}, midtones {midtones}, highlights {highlights}.";
+    /// The colour grade was held at the strength budget's wheel ceiling.
+    pub const FIT_NOTE_COLOR_GRADE_HELD: &str =
+        " The grade was held at this strength's ceiling, Saturation {ceiling} per wheel; the paired pixels asked for up to {asked}. A higher reverse-fit strength lets it move further.";
     pub const FIT_NOTE_HSL_WITHDRAWN_ERROR: &str =
         " The per-band colour move was given back: applying it did not leave the frame closer to the target, so every band returned to neutral.";
     pub const FIT_NOTE_HSL_WITHDRAWN_BLIND: &str =
@@ -1340,7 +1343,7 @@ pub(crate) const GLOBAL_SOLVE_KEYS: &[&str] = &[
     keys::FIT_NOTE_EVIDENCE_WITHHELD, keys::FIT_NOTE_DETAIL,
     keys::FIT_NOTE_DETAIL_WITHHELD, keys::FIT_NOTE_HSL_BANDS, keys::FIT_NOTE_HSL_BANDS_VOUCHED,
     keys::FIT_NOTE_HSL_WITHDRAWN_ERROR, keys::FIT_NOTE_HSL_WITHDRAWN_BLIND,
-    keys::FIT_NOTE_COLOR_GRADE,
+    keys::FIT_NOTE_COLOR_GRADE, keys::FIT_NOTE_COLOR_GRADE_HELD,
     keys::FIT_ATMOSPHERE_REFERENCE_POPULATION, keys::FIT_ATMOSPHERE_REFERENCE_UNPAIRED,
     keys::FIT_ATMOSPHERE_REFERENCE_EXCLUDED, keys::FIT_ATMOSPHERE_REFERENCE_SHARED,
     keys::FIT_ATMOSPHERE_REFERENCE_THIN, keys::FIT_ATMOSPHERE_REFERENCE_UNMEASURED,

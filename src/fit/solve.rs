@@ -330,6 +330,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 vouched_bands: None,
                 cast_cells: None,
                 hsl: HslStageFacts::default(),
+                grade_held: None,
                 atmosphere_reference: AtmosphereReference::WholeFrame,
             },
         );
@@ -362,7 +363,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 structural_evidence: None,
                 defer_disclosure,
             },
-            SolveFacts { budget: Some(FitBudget::for_strength(options.strength)), strength: Some(options.strength.get()), veto_luma: None, veto_hue: None, wb_clamped: None, wb_search_bound: None, wb_rotation_coverage: None, wb_rotation_disclosure: None, cast_admitted_by_strength: None, cast_admitted: None, cast_projected: None, wb_cells: None, wb_foreign_hue_withheld: false, wb_rotation_withheld: false, sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, tone_harm: None, curve_harm: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None, cast_cells: None, hsl: HslStageFacts::default(), atmosphere_reference: AtmosphereReference::WholeFrame },
+            SolveFacts { budget: Some(FitBudget::for_strength(options.strength)), strength: Some(options.strength.get()), veto_luma: None, veto_hue: None, wb_clamped: None, wb_search_bound: None, wb_rotation_coverage: None, wb_rotation_disclosure: None, cast_admitted_by_strength: None, cast_admitted: None, cast_projected: None, wb_cells: None, wb_foreign_hue_withheld: false, wb_rotation_withheld: false, sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, tone_harm: None, curve_harm: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None, cast_cells: None, hsl: HslStageFacts::default(), grade_held: None, atmosphere_reference: AtmosphereReference::WholeFrame },
         );
     }
 
@@ -856,7 +857,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     let sat_pegged = chase_saturation(&mut recipe);
     // --- 3b) colour grade: the white balance's brightness-dependent
     // remainder, on the shadow / midtone / highlight wheels (`grade`).
-    grade::fit_grade_stage(&s_img, &tp, &wb_weights, cells.as_ref(), full_sat_limit, &mut recipe);
+    let grade_held =
+        grade::fit_grade_stage(&s_img, &tp, &wb_weights, cells.as_ref(), budget.grade_wheel, &mut recipe);
     // NOTE deliberately NO mid-pipeline hue veto here EITHER (it was tried
     // in the evidence era and removed): the ordering comment above is the
     // contract — saturation legitimately amplifies a latent cast and the
@@ -1545,6 +1547,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             vouched_bands,
             cast_cells,
             hsl: hsl_facts,
+            grade_held: grade_held.filter(|_| !fit_regressed),
             atmosphere_reference: AtmosphereReference::WholeFrame,
         },
     );

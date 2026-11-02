@@ -226,10 +226,14 @@ fn modelled(px: &[[f32; 3]], cg: &crate::recipe::ColorGrade) -> Vec<[f32; 3]> {
 /// group shares ([`solve_wheel`]); the per-hue part is the mixer's.
 ///
 /// THE STRENGTH DIAL REACHES IT. Each wheel's Saturation is held under the
-/// ceiling the saturation chase obeys at this strength (`sat_ceiling`, the
-/// solve's `full_sat_limit`: 30 at Strength 0, 60 at the default, capped at
-/// the wheel's own 100 above), so the stage moves less at a lower strength,
-/// like every other stage of the solve.
+/// strength budget's wheel ceiling (`wheel_ceiling`, [`FitBudget::grade_wheel`]:
+/// 6 at Strength 0, 18 at the default, 45 at 1), the mixer's own band
+/// ceiling read on the wheel's axis. Strength is a restraint budget, not an
+/// amount: at 0 the stage still ships what the tightest budget admits. Until
+/// v1.17.1 the wheels obeyed only the saturation chase's ceiling (30 / 60),
+/// above what the seaside street's wheels asked at any strength, so the
+/// grade moved about as far at Strength 0 as at 1 (shadows 30.0 / 29.1,
+/// midtones 21.6 / 16.5 at 0 / 1; 2026-11-02).
 ///
 /// Judged the way the white balance is: the target's own cells must vouch
 /// the move along the colour axis (`vouch_along`,
@@ -238,17 +242,19 @@ fn modelled(px: &[[f32; 3]], cg: &crate::recipe::ColorGrade) -> Vec<[f32; 3]> {
 /// largest share they vouch, by the white balance's own search
 /// ([`WB_VOUCH_SHRINK_STEPS`], [`WB_SHARE_SIZE_EVIDENCE`]); anything else is
 /// given back. The pipeline-end do-no-harm loop judges the whole
-/// recipe after it, as it judges every stage. Returns the three wheels it
-/// shipped, `(hue, saturation)` for shadows, midtones and highlights; the
-/// disclosure reads them off the recipe (`compose_report`).
+/// recipe after it, as it judges every stage. The disclosure reads the
+/// shipped wheels off the recipe (`compose_report`); this returns
+/// `Some((ceiling, asked))` when a wheel that shipped was held at the
+/// strength ceiling, `asked` being the largest Saturation the paired pixels
+/// asked for, so the report can say the dial restrained the stage.
 pub(super) fn fit_grade_stage(
     s_img: &DynamicImage,
     tp: &[[f32; 3]],
     weights: &[f32],
     cells: Option<&crate::fit_cells::PairedCells>,
-    sat_ceiling: f32,
+    wheel_ceiling: f32,
     recipe: &mut EditRecipe,
-) -> Option<[(f32, f32); 3]> {
+) -> Option<(f32, f32)> {
     let restore = recipe.color_grade.clone();
     let before = pixels_of(&render::develop_preview(s_img, recipe));
     let mut cg = restore.clone();
@@ -281,6 +287,8 @@ pub(super) fn fit_grade_stage(
     recipe.color_grade = cg.clone();
     let after = pixels_of(&render::develop_preview(s_img, recipe));
     let mut scaled = solved;
+    let ceiling = wheel_ceiling.clamp(0.0, 100.0);
+    let mut asked = 0.0f32;
     for (region, slot) in scaled.iter_mut().enumerate() {
         let (mut along, mut realised) = (0.0f64, 0.0f64);
         for i in 0..before.len().min(after.len()).min(weights.len()) {
@@ -298,10 +306,13 @@ pub(super) fn fit_grade_stage(
         if realised > 0.0 && along > 0.0 {
             slot.1 = (slot.1 * (along / realised) as f32).clamp(0.0, 100.0);
         }
-        // The saturation chase's own ceiling for this strength, on the
-        // wheel's own Saturation axis.
-        slot.1 = slot.1.min(sat_ceiling.clamp(0.0, 100.0));
+        // The strength budget's wheel ceiling.
+        if slot.1 > ceiling {
+            asked = asked.max(slot.1);
+        }
+        slot.1 = slot.1.min(ceiling);
     }
+    let held = (asked > 0.0).then_some((ceiling, asked));
     let apply = |cg: &mut crate::recipe::ColorGrade, wheels: &[(f32, f32); 3], share: f32| {
         (cg.shadow_hue, cg.shadow_sat) = (wheels[0].0, round1(wheels[0].1 * share));
         (cg.midtone_hue, cg.midtone_sat) = (wheels[1].0, round1(wheels[1].1 * share));
@@ -312,18 +323,15 @@ pub(super) fn fit_grade_stage(
         let px = pixels_of(&render::develop_preview(s_img, recipe));
         cells.map(|c| c.vouch_along(crate::fit_cells::MoveAxis::Colour, &before, &px, None))
     };
-    let shipped = |recipe: &EditRecipe| {
-        let cg = &recipe.color_grade;
-        Some([
-            (cg.shadow_hue, cg.shadow_sat),
-            (cg.midtone_hue, cg.midtone_sat),
-            (cg.highlight_hue, cg.highlight_sat),
-        ])
-    };
     let full = vouch_at(recipe, 1.0);
     if let Some(share) = largest_vouched_share(full, |share| vouch_at(recipe, share)) {
         apply(&mut recipe.color_grade, &scaled, share);
-        return shipped(recipe);
+        // Held only if a held wheel still ships AT the ceiling: a share the
+        // cells cut below it was restrained by the cells, not by the dial.
+        return held.filter(|&(c, _)| {
+            let cg = &recipe.color_grade;
+            [cg.shadow_sat, cg.midtone_sat, cg.highlight_sat].iter().any(|&s| s >= round1(c) - 0.05)
+        });
     }
     recipe.color_grade = restore;
     None

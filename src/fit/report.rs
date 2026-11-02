@@ -118,6 +118,10 @@ pub(super) struct SolveFacts {
     /// The per-band colour mixer's own verdicts: which bands it could not
     /// measure, and whether it gave back what it fitted.
     pub(super) hsl: HslStageFacts,
+    /// The colour grade was held at the strength budget's wheel ceiling
+    /// (`FitBudget::grade_wheel`): `(ceiling, asked)`, the Saturation it was
+    /// held at and the largest one the paired pixels asked for.
+    pub(super) grade_held: Option<(f32, f32)>,
     /// R30 R2: which population the Atmosphere white balance and exposure
     /// were read over. Only the solve knows — a re-measurement of the
     /// finished recipe cannot tell a whole-frame median from a shared-content
@@ -679,6 +683,16 @@ pub(super) fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: Sol
                 ],
             ),
         );
+        if let Some((ceiling, asked)) = solve.grade_held {
+            push_note(
+                &mut rationale,
+                &mut notes,
+                Note::new(
+                    keys::FIT_NOTE_COLOR_GRADE_HELD,
+                    vec![("ceiling", format!("{ceiling:.0}")), ("asked", format!("{asked:.0}"))],
+                ),
+            );
+        }
     }
     if let Some(withdrawal) = solve.hsl.withdrawn {
         push_note(
@@ -1116,6 +1130,11 @@ pub fn rescore_report(
                     None
                 },
             },
+            // Carried like the mixer's verdicts: the deep step never re-runs
+            // the grade stage, so whether the dial held it is the solve's.
+            grade_held: carried_arg(keys::FIT_NOTE_COLOR_GRADE_HELD, "ceiling")
+                .zip(carried_arg(keys::FIT_NOTE_COLOR_GRADE_HELD, "asked"))
+                .and_then(|(c, a)| Some((c.parse::<f32>().ok()?, a.parse::<f32>().ok()?))),
             // R30 R2: WholeFrame on purpose, and NOT carried from the notes.
             // `rescore_report` re-measures a recipe someone ADJUSTED after
             // the solve, and which population that solve read its two robust
