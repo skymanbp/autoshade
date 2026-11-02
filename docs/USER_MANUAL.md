@@ -694,11 +694,16 @@ also pass the foreign-hue veto and a weighted rotation allowance, pinned at
 remains, it is withheld and the recipe stays as-shot with a typed explanation.
 
 Since v1.3.0, the full solve has a white balance too, not only the Atmosphere
-path. It is solved from the same population estimator — since 2026-10-21 the
-colour change the frame's brightness ranges AGREE on (each range's own median
-of its pixels' colour change with the brightness change taken out; where a
-tenth of the frame or more asks the opposite move, by at least a fifth of
-the agreed one, there is no one light to correct and nothing ships), read from the frame as the tone stage left it
+path. It is solved from the same population estimator — since v1.17.0 only the
+colour change EVERY brightness range of the photo shares (the shadows', the
+midtones' and the highlights' own medians of their pixels' colour change,
+with the brightness change taken out; the smallest of them when they all ask
+the same way, nothing when two disagree, because one light moves every
+brightness the same way). What a range asks beyond that goes to the Color
+Grading wheels (shadows, midtones, highlights), each solved from its own
+range's pixels and shipped only as far as the frame vouches for it, so a
+photo graded warm in the shadows and cool in the sky keeps its white balance
+as shot and takes the split tone on the wheels. The white balance is read from the frame as the tone stage left it
 rather than from the untouched source, so a strong contrast move is no longer
 booked as a colour cast, a warm move no longer comes back green, and a bright
 sky that asks to stay cool is no longer yellowed by a warm majority below it —

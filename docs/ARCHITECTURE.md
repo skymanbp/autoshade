@@ -234,9 +234,9 @@
 > `scripts/roundtrip_gate.py` is an optional developer instrument (Photoshop
 > with Camera Raw, driven through `scripts/acr_render.ps1`), not part of the
 > release battery.
-> 1759 library + 26 CLI + 292 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1744 pass + 15 `#[ignore]`d forensic probes and
-> the GUI result is 288 pass + four ignored (an explicit scratch-recipe export
+> 1825 library + 26 CLI + 297 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1810 pass + 15 `#[ignore]`d forensic probes and
+> the GUI result is 293 pass + four ignored (an explicit scratch-recipe export
 > probe and the offline panel, window and mode-workspace screenshots) in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
 > refusal pair (a RAW source, a baked negative); the library and GUI lists are
 > v1.6.1's. For v1.6.3, four library names (decode: the 16-bit profile lattice
@@ -269,7 +269,22 @@
 > edit read as the edit, a maskless edit sending no mask and layering only
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
-> screenshots). For v1.16.0, by name against the v1.15.1 battery: library
+> screenshots). For v1.17.0, by name against the v1.16.0 battery: library
+> +85 / −19 — the 85 added: 44 in `render` (the one develop law and the
+> profile stage as colour data, the base curve as every recipe's start, the
+> point curve as one law, chromatic aberration by its own knots, the linear
+> and radial mask handles under lens geometry, the Color tint), 7 in `dcp`,
+> 6 in `xmp` (profile strengths named with their profile, the tint keys),
+> 6 in `fit_zoned`, 6 in `fit` (the cast-to-white-balance hand-off walk, the
+> two-temperature pair), 5 in `lensmeta`, 5 in `lcp`, 4 in `pipeline` (the
+> target paired in the corrected frame), 1 each in `recipe` and `fit_field`;
+> the 19 removed: 15 in `render` (the profile's own tone stage and baked
+> Look halves, the composite chromatic-aberration zoom, and the mask-handle
+> tests the lens-geometry rewrite replaced), 2 in `pipeline` (pairing in the
+> sensor frame, replaced by pairing in the corrected frame) and 2 in `fit`
+> (two hand-off premises, re-derived as the walk tests); GUI +5 / −0 (the
+> prompt after 「AI generate」); CLI 26 → 26. For
+> v1.16.0, by name against the v1.15.1 battery: library
 > +5 / −0 — all 5 in `pipeline` (a lens-corrected target is paired in the
 > sensor frame; an uncorrected target keeps its evidence and drops the
 > profile geometry; the ring outside a moved target is absent, not a
@@ -4529,7 +4544,14 @@ do-no-harm check; then the per-band colour mixer — `hsl.saturation` and
 `hsl.luminance` solved one ACR band at a time from that band's own population
 statistics (weighted mean chroma, weighted mean Rec.601 luma, never paired
 pixels), admitted by the same two-sided population gate the rest of the module
-reads, with refusals typed and named and `hsl.hue` never solved; it is judged
+reads, with refusals typed and named; since v1.17.0 `hsl.hue` is solved too,
+on the paired pixels after the colour grade — each band's mass-weighted
+median hue change read by brightness range, nothing where the band's ranges
+ask opposite rotations,
+the engine's own hue law on the band's pixels, the cells' admission and the
+stage strength as the band's saturation and luminance obey them — because
+the white balance that takes only the brightness-common change leaves the
+per-hue part to the mixer, and a carrier must carry; it is judged
 twice, once where it is fitted and once after the cast curves against its own
 absence on the finished frame; then per-channel CDF residuals as red/green/blue curves,
 admitted only through four vetoes (aggregate error, foreign-hue, rotation
@@ -5575,12 +5597,10 @@ own normalisation, green 1 under a pure Kelvin move: the Kelvin is the red/blue
 axis, the tint the green axis against the red/blue mean of the residual at that
 Kelvin, so a warm move no longer reads as green. Since v1.17.0 every step of
 the fit's white balance — this inversion, the budget path, the cast hand-off,
-the vouch — asks the law the recipe renders by (`render::WbLaw`): the engine's
-separable law inverts as above; the camera-profile law (a recipe that names a camera
-profile) is inverted jointly on mired × tint, its As Shot is the stamped
-as-shot tint rather than 0, and its gains are what its stage does to mid grey (the geometric-mean
-normalisation it replaces read a pure 40000 K move as tint −19.7). And the
-demand is the CONSENSUS of the brightness ranges: the cloud is read per evidence
+the vouch — asks `render::WbLaw`, which under the one develop law is the
+recipe's as-shot anchor and nothing more: one white-balance law, inverted as
+above, whatever file the recipe came from. And the demand is read BY
+BRIGHTNESS, two ways. Atmosphere's is the CONSENSUS of the brightness ranges: the cloud is read per evidence
 luma range (the 17 ranges and the 1.5% share floor the evidence model already
 uses; pixels with a channel maximum under 0.04 on either side carry no
 chromaticity and do not testify), each range's medians go on the engine's two
@@ -5590,10 +5610,30 @@ sliver the other way is idle, not a second light), are weighed — where
 they hold a tenth or more of the testifying mass there is no single illuminant
 and the demand is nothing, otherwise it is that median — because an illuminant moves every brightness the same way and
 a grade that warms the shadows while cooling the highlights is not one. The
-seaside street's dark 85% asks 40000 K and its bright fifth (sky, sea, the far
-houses, the windows) asks cooler: the white balance stays as shot, where the
-whole cloud's centre had shipped 40000 K and turned every bright thing yellow.
-The first form of this rule took the least demand across the ranges, and one
+Full solve goes one step further (2026-11-01), because it has a stage that can
+carry what an illuminant cannot: its cloud is read per TONAL REGION of the
+colour grade — shadows, midtones, highlights, each pixel testifying with the
+weights the grade itself gives its source luma, a region under the evidence
+share floor silent (`evidence::wb_axes_by_region`) — and on each axis the
+white balance takes only the part EVERY region asks: the smallest demand when
+they all ask the same sign, nothing when any two disagree (`wb_common`). What a
+region asks past that is its own remainder and goes to the COLOUR-GRADE stage
+(`fit::grade`, after the saturation chase and before the mixer and the cast
+curves): each wheel is solved from its region's own paired pixels — the
+region's median chromaticity change less the part every region shares, which
+is the white balance's whether it shipped it or gave it back over budget, and
+within the region only what every hue band shares (a band asking nothing or
+the other way leaves the wheel nothing), the per-hue part being the mixer's,
+whose per-band hue is solved since the same day — modelled on the region's
+own pixels, admitted by the target's cells
+along the colour axis or at the largest share they vouch, and scaled by the
+stage strength like every other stage. The seaside street is the case: its
+shadows ask warm (log blue/red −1.0) and its sky and highlights ask cool
+(+0.16), so there is no common part, the white balance stays as shot and the
+wheels carry the split tone — where the whole cloud's mass-weighted median,
+owned by the dark 85%, had shipped 40000 K at the clamp, and the sky zone that
+had to undo it was cut to a fifth by the boundary gate, leaving an orange sky
+under cyan clouds. The first form of the range rule took the least demand across the ranges, and one
 small range could zero a frame: the night sky's near-black darkest fifth read
 −0.22 against the sky's −2.7 and the stage shipped tint 100 at 5000 K instead
 of the deep cool the frame asked (ΔE 5.2 → 12.6), the sunset city's blown

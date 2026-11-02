@@ -8,7 +8,10 @@ lens profile; it never changes how a control behaves. Around that rule this
 release adds a mask Color tint, fixes the reverse fit at the causes found on
 the reference pairs, and keeps dark sensor values signed.
 
-待填_AUTHORSHIP
+The design, the rulings and this document are the maintainer's. The code of
+this release was written with an AI coding assistant working under the
+maintainer's direction, and every change passed the project's own test
+battery and reference-pair gate before it shipped.
 
 ## The develop
 
@@ -54,6 +57,18 @@ the reference pairs, and keeps dark sensor values signed.
 
 ## The reverse fit
 
+- **The white balance takes only the colour change every brightness range
+  shares.** A target graded warm in the shadows and cool in the highlights no
+  longer drives the white balance to its limit. The brightness-dependent rest
+  goes to the Color Grading wheels (shadows, midtones, highlights), solved
+  from each range's own matched pixels and shipped only as far as the frame
+  vouches for them. On the seaside street pair the sky is light blue again
+  and the white balance stays as shot.
+- **The colour mixer solves each band's hue.** A hue rotation the target
+  applies to one colour band is read from that band's own paired pixels, by
+  brightness range, and ships only where the band's ranges agree and the
+  target's cells approve it; a band whose bright and dark pixels ask opposite
+  rotations is left alone.
 - **The cast-to-white-balance hand-off stops where it should.** The walk that
   hands a colour cast back to the white balance ends when it leaves the
   strength budget or stops moving.
@@ -94,6 +109,10 @@ the reference pairs, and keeps dark sensor values signed.
   the sidecar's version is less saturated than AutoShade's own export.
 - **Colour noise reduction** leaves a faint colour grain that comes from the
   demosaic itself.
+- **One reference pair's clouds.** On the sunset rooftops pair the upper
+  clouds come out a little less pink than the target. The frame-wide colour
+  field solves pixel by pixel and trades the clouds' mean colour for a
+  smaller per-pixel error; a mean-colour term in that solve is the next step.
 
 ## Known changes
 
