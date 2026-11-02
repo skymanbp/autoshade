@@ -4744,6 +4744,19 @@ fn the_haze_correction_is_never_projected() {
 /// 12.1 / 12.9 / 14.2° and the re-hue gate withholds every time. So the
 /// pair stays and is pinned as withheld. Canyon-gold's candidate on its new
 /// recipe reads 10.1° (was 5.2°), so its ceiling is 0.75 of the line.
+///
+/// 2026-11-02, the mixer solves band hue from the paired pixels: the rocks'
+/// red offset is a hue change toward red, and the mixer carries the part a
+/// single band rotation can (Orange -18, the band budget at the default
+/// strength), landing 0.0387 -> 0.0323 at confidence 0.430. The rocks'
+/// residual hue keeps its sign at every brightness (target minus render,
+/// dark / mid / bright thirds: -13.2 / -9.0 / -6.9 degrees without the
+/// rotation, -9.3 / -4.7 / -2.6 with it), so the curves are left less hue to
+/// move: the pixel-aligned re-hue gate no longer blocks them, and the fan
+/// gate's own reading of them convicts (34.1 degrees, its note), which the
+/// re-hue verdict used to speak over (the hue note wins a double
+/// rejection). The test's candidate, rebuilt on the new recipe, reads 6.9
+/// degrees.
 #[test]
 fn the_fan_gate_leaves_a_legitimate_cast_alone() {
     let clean = synth();
@@ -4797,16 +4810,17 @@ fn the_fan_gate_leaves_a_legitimate_cast_alone() {
     // tolerance stated: measured 2026-09-02 on this tree, err_after
     // 0.0339 and reported confidence 0.4061; re-measured 2026-10-21 with
     // the tone sliders withheld on their own tonal reading, 0.0349 and
-    // 0.3889; 2026-10-22 under the ungated tone arm, 0.0365 and 0.3564.
+    // 0.3889; 2026-10-22 under the ungated tone arm, 0.0365 and 0.3564;
+    // 2026-11-02 with the mixer's band hue (Orange -18), 0.0323 and 0.4299.
     assert!(
-        (warm.err_after - 0.0365).abs() < 0.001,
-        "canyon-warm's landing moved off the measured 0.0365: {} -> {}",
+        (warm.err_after - 0.0323).abs() < 0.001,
+        "canyon-warm's landing moved off the measured 0.0323: {} -> {}",
         warm.err_before,
         warm.err_after
     );
     assert!(
-        (warm.recipe.confidence - 0.356).abs() < 0.01,
-        "…and its reported confidence off the measured 0.356: {}",
+        (warm.recipe.confidence - 0.430).abs() < 0.01,
+        "…and its reported confidence off the measured 0.430: {}",
         warm.recipe.confidence
     );
     let c = cast_stage_candidate(&canyon(false), &canyon(true));
@@ -4815,22 +4829,22 @@ fn the_fan_gate_leaves_a_legitimate_cast_alone() {
         .unwrap_or(0.0);
     assert!(fan < FAN_DEG, "canyon-warm's candidate is left alone by the fan gate ({fan:.1}°)");
     assert!(
-        (fan - 12.1).abs() < 0.2,
-        "canyon-warm's candidate reads {fan:.1}°, not the 12.1° measured on 2026-10-22"
+        (fan - 6.9).abs() < 0.2,
+        "canyon-warm's candidate reads {fan:.1}°, not the 6.9° measured on 2026-11-02"
     );
     use crate::rationale::keys;
     assert!(
         warm.recipe.red_curve.is_empty()
             && warm.recipe.green_curve.is_empty()
             && warm.recipe.blue_curve.is_empty()
-            && warm.notes.iter().any(|n| n.key == keys::FIT_NOTE_REHUE_BLOCKED),
-        "…its curves are withheld by the re-hue gate: {}",
+            && warm.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HUE_FANNED),
+        "…its curves are withheld by the fan gate's own reading: {}",
         warm.recipe.rationale
     );
     assert!(
         !warm.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_PROJECTED
-            || n.key == keys::FIT_NOTE_CAST_HUE_FANNED),
-        "…and the fan gate neither projected nor refused them: {}",
+            || n.key == keys::FIT_NOTE_REHUE_BLOCKED),
+        "…neither projected nor blocked by the re-hue gate: {}",
         warm.recipe.rationale
     );
 }
@@ -5765,16 +5779,19 @@ fn joint_family_is_calibrated_on_the_fixture_set() {
         // 2026-10-22); 2026-10-21,
         // the tone sliders' own do-no-harm withholding the contrast +3.1
         // the regression asks for: 0.0387 -> 0.0349 at 0.3889; 2026-10-22,
-        // the ungated tone arm: 0.0387 -> 0.0365 at 0.3564).
+        // the ungated tone arm: 0.0387 -> 0.0365 at 0.3564; 2026-11-02, the
+        // mixer carrying the rocks' hue change as a band rotation (Orange
+        // -18): 0.0387 -> 0.0323 at 0.4299, joint reading 0.0590 -> 0.0467,
+        // see `the_fan_gate_leaves_a_legitimate_cast_alone`).
         assert!(
-            (report.err_after - 0.0365).abs() < 0.001
-                && (report.recipe.confidence - 0.356).abs() < 0.01,
-            "canyon warm's landing moved off the measured 0.0365 / 0.356: {} -> {} at {}",
+            (report.err_after - 0.0323).abs() < 0.001
+                && (report.recipe.confidence - 0.430).abs() < 0.01,
+            "canyon warm's landing moved off the measured 0.0323 / 0.430: {} -> {} at {}",
             report.err_before, report.err_after, report.recipe.confidence
         );
         assert!(
-            (after - 0.0590).abs() < 0.005,
-            "…and its joint reading off the measured 0.0590: {before:.4} -> {after:.4}"
+            (after - 0.0467).abs() < 0.005,
+            "…and its joint reading off the measured 0.0467: {before:.4} -> {after:.4}"
         );
         assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_REFUSED), "canyon warm is no longer a refusal: {}", report.recipe.rationale);
         assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_MISS), "nor a miss: {}", report.recipe.rationale);
@@ -6050,11 +6067,16 @@ fn a_silently_rejected_colour_stage_now_says_so() {
         if !empty {
             continue;
         }
+        // The fan gate's refusal is the fourth explanation (2026-11-02): with
+        // the mixer solving band hue, canyon warm's rocks rotate toward red
+        // (Orange -18) and the cast left for the curves would fan the rock
+        // class 34.1 degrees, so the fan gate withholds them with its note.
         assert!(
             rep.notes.iter().any(|n| {
                 n.key == keys::FIT_NOTE_CAST_REJECTED
                     || n.key == keys::FIT_NOTE_REHUE_BLOCKED
                     || n.key == keys::FIT_NOTE_REGRESSED
+                    || n.key == keys::FIT_NOTE_CAST_HUE_FANNED
                     || n.key == keys::FIT_SUMMARY_ATMOSPHERE
             }),
             "{name}: an empty colour stage must disclose WHY: {}",
@@ -8868,7 +8890,11 @@ fn the_hand_off_walk_is_entered_by_a_cast_that_really_fans() {
 
 /// A cast the fan gate never convicts never reaches the hand-off: the haze
 /// correction, the fan gate's own legitimate case, pinned by value at
-/// 9631905.
+/// 9631905. Re-pinned 2026-11-02: the recipe now carries the band hue its
+/// paired pixels ask and the finished frame pays for (Orange +2.3 / Green
+/// -2.3 after the mixer's band hues earned their place against their own
+/// absence, 0.01354 against 0.01355 without them), and the paired summary
+/// and the mixer note state what is solved.
 #[test]
 fn a_cast_with_no_fan_never_enters_the_hand_off() {
     use crate::rationale::keys;
@@ -8890,7 +8916,7 @@ fn a_cast_with_no_fan_never_enters_the_hand_off() {
     assert!(!rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB));
     assert_eq!(
         recipe_fnv(&rep.recipe),
-        0x732f_f6a1_d6b6_ea19,
+        0xc204_0fdb_5af7_dabe,
         "a recipe the hand-off never touched moved: {}",
         rep.recipe.rationale
     );
