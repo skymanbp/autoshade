@@ -2218,6 +2218,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
          earlier stages moved those pixels toward it, so the bands were admitted rather \
          than left neutral.",
         " 色相带 [{bands}] 在图像对进入时是单侧的，而在本阶段求解所依据的渲染上已是双侧；目标自身的单元均值担保了先前各阶段已把这些像素推向目标，因此这些带被采用，而非保持中性。"),
+    (" The colour grade carries the part of the paired colour change that differs by brightness, which no white balance can: \
+      shadows {shadows}, midtones {midtones}, highlights {highlights}.",
+        " 颜色分级承担了配对颜色变化中随亮度而不同的部分，这是任何白平衡都做不到的：阴影 {shadows}，中间调 {midtones}，高光 {highlights}。"),
     (" The per-band colour move was given back: applying it did not leave the frame closer to the target, so every band returned to neutral.",
         " 逐带颜色调整已交还：应用后画面并未更接近目标，因此所有色带恢复中性。"),
     (" The per-band colour move was given back: it would have carried pixels through hue bands no two-sided evidence covers, and blind movement is vetoed rather than shipped.",

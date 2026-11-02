@@ -88,6 +88,7 @@ mod curves;
 mod detail;
 mod evidence;
 mod gates;
+mod grade;
 mod hsl;
 mod hue_gates;
 mod look;
@@ -150,14 +151,14 @@ pub(crate) use evidence::{
 };
 use evidence::{
     DETAIL_EVIDENCE_MIN_IDENTIFIABILITY, EVIDENCE_HUE_BANDS, EVIDENCE_LUMA_BINS, EVIDENCE_MIN_SHARE,
-    EVIDENCE_RANGE_SURVIVAL_MIN, atmosphere_wb_from_populations, atmosphere_wb_pairing,
+    EVIDENCE_RANGE_SURVIVAL_MIN, atmosphere_wb_from_populations, atmosphere_wb_pairing, paired_wb_from_populations,
     divergent_range_names, movement_identifiability, source_hue_is_withheld,
     source_luma_is_withheld, weighted_cdf, weighted_mean, weighted_mean_chroma,
 };
 #[cfg(test)]
 pub(crate) use evidence::{evidence_model};
 #[cfg(test)]
-use evidence::{SupportField, WB_OPPOSING_SHARE, aggregate_ranges, wb_axes_by_range, wb_consensus};
+use evidence::{SupportField, WB_OPPOSING_SHARE, aggregate_ranges, wb_axes_by_range, wb_axes_by_region, wb_common, wb_consensus};
 pub(crate) use gates::{P_CLIP, clamp_confidence};
 use gates::{
     CAST_ACCEPT_RATIO, CONFIDENCE_CEIL, CONFIDENCE_FLOOR, FAN_DEG, FAN_HUE_CLASSES, FAN_PROJECT_DEG,

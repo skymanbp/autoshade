@@ -794,7 +794,7 @@ pub(super) fn weighted_cdf(px: &[[f32; 3]], weights: &[f32], value: impl Fn(&[f3
 /// would clamp half of it into one bin. Sorting is exact and the cost is one
 /// sort of the analysis frame per channel, against thirteen full renders on
 /// the same path.
-fn weighted_median(samples: &mut [(f32, f32)]) -> f32 {
+pub(super) fn weighted_median(samples: &mut [(f32, f32)]) -> f32 {
     if samples.is_empty() {
         return 0.0;
     }
@@ -1041,6 +1041,75 @@ pub(super) fn wb_consensus(axis: &[(f32, f32)]) -> (f32, f32) {
     (median, opposing)
 }
 
+/// The same per-pixel chromaticity change as [`wb_axes_by_range`], read per
+/// TONAL REGION of the colour grade instead of per evidence luma range: each
+/// paired pixel testifies to the shadow, midtone and highlight regions with
+/// the weights the grade itself gives its source luma
+/// ([`render::color_grade_regions`], at the grade's default split), and a
+/// region holding under [`EVIDENCE_MIN_SHARE`] of the testifying mass does
+/// not testify. The regions are the partition the colour-grade stage
+/// (`grade::fit_grade_stage`) can carry a remainder on, so the white
+/// balance is read on the same one.
+pub(super) fn wb_axes_by_region(sp: &[[f32; 3]], pair_tp: &[[f32; 3]], pair_w: &[f32]) -> WbAxes {
+    let n = sp.len().min(pair_tp.len());
+    let split = crate::recipe::ColorGrade::default();
+    let mut red: [Vec<(f32, f32)>; 3] = Default::default();
+    let mut blue: [Vec<(f32, f32)>; 3] = Default::default();
+    let mut mass = [0.0f64; 3];
+    for i in 0..n {
+        let w = pair_w.get(i).copied().unwrap_or(0.0).max(0.0);
+        if w <= 0.0 {
+            continue;
+        }
+        let too_dark = |p: &[f32; 3]| p[0].max(p[1]).max(p[2]) < WB_CHROMA_FLOOR;
+        if too_dark(&sp[i]) || too_dark(&pair_tp[i]) {
+            continue;
+        }
+        let d: [f32; 3] = std::array::from_fn(|ch| {
+            let source = render::srgb_to_linear(sp[i][ch]).max(1e-5);
+            let target = render::srgb_to_linear(pair_tp[i][ch]).max(1e-5);
+            target.ln() - source.ln()
+        });
+        let regions = render::color_grade_regions(&split, luma601(&sp[i]));
+        for r in 0..3 {
+            let m = w * regions[r];
+            if m > 0.0 {
+                red[r].push((d[0] - d[1], m));
+                blue[r].push((d[2] - d[1], m));
+                mass[r] += m as f64;
+            }
+        }
+    }
+    let total: f64 = mass.iter().sum();
+    let mut axes = WbAxes { kelvin: Vec::new(), tint: Vec::new() };
+    for r in 0..3 {
+        if total <= 0.0 || mass[r] / total < EVIDENCE_MIN_SHARE as f64 {
+            continue;
+        }
+        let (u, v) = (weighted_median(&mut red[r]), weighted_median(&mut blue[r]));
+        axes.kelvin.push((u - v, mass[r] as f32));
+        axes.tint.push((0.5 * (u + v), mass[r] as f32));
+    }
+    axes
+}
+
+/// The part of one axis's demand EVERY testifying tonal region asks: the
+/// smallest in size when they all ask the same sign, nothing when any two
+/// disagree or one asks nothing. That is the brightness-invariant component
+/// — what an illuminant can be — and everything past it in any region is
+/// that region's own remainder, the colour grade's to carry.
+pub(super) fn wb_common(axis: &[(f32, f32)]) -> f32 {
+    let mut common: Option<f32> = None;
+    for &(v, _) in axis {
+        common = match common {
+            None => Some(v),
+            Some(c) if c * v <= 0.0 => return 0.0,
+            Some(c) => Some(if v.abs() < c.abs() { v } else { c }),
+        };
+    }
+    common.unwrap_or(0.0)
+}
+
 pub(super) fn atmosphere_wb_from_populations(
     sp: &[[f32; 3]],
     pair_tp: &[[f32; 3]],
@@ -1050,6 +1119,27 @@ pub(super) fn atmosphere_wb_from_populations(
     let axes = wb_axes_by_range(sp, pair_tp, pair_w);
     let (a, _) = wb_consensus(&axes.kelvin);
     let (m, _) = wb_consensus(&axes.tint);
+    wb_demand(a, m, law)
+}
+
+/// The FULL solve's white-balance demand: the brightness-invariant
+/// component ([`wb_common`] over [`wb_axes_by_region`]), because the Full
+/// solve's colour-grade stage (`grade::fit_grade_stage`) carries the
+/// region-dependent rest. The Atmosphere solve has no such stage and keeps
+/// the consensus of [`atmosphere_wb_from_populations`].
+pub(super) fn paired_wb_from_populations(
+    sp: &[[f32; 3]],
+    pair_tp: &[[f32; 3]],
+    pair_w: &[f32],
+    law: render::WbLaw,
+) -> (f32, f32, [f32; 3]) {
+    let axes = wb_axes_by_region(sp, pair_tp, pair_w);
+    wb_demand(wb_common(&axes.kelvin), wb_common(&axes.tint), law)
+}
+
+/// One axis pair's demand onto the render's own law: the Kelvin axis `a`
+/// (red against blue) and the tint axis `m` (green against their mean).
+fn wb_demand(a: f32, m: f32, law: render::WbLaw) -> (f32, f32, [f32; 3]) {
     // Nothing in common is no demand: the anchor itself, at the solve's own
     // quantisation, so the stage can tell "no move" from a small one.
     if a == 0.0 && m == 0.0 {

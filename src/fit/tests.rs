@@ -701,6 +701,94 @@ fn a_sliver_the_other_way_does_not_veto_the_white_balance() {
     );
 }
 
+/// 2026-11-01. The Full solve's white balance is the BRIGHTNESS-INVARIANT
+/// component of the paired colour change: per tonal region of the colour
+/// grade, the part every region asks (`wb_common`). Same sign everywhere:
+/// the smallest. Any two regions disagreeing, or none testifying: nothing.
+/// The seaside street's regions read +0.93 / +0.72 / −0.14 on the Kelvin
+/// axis and its white balance, which used to take the mass-weighted median
+/// of the luma ranges and land on the 40000 K clamp, takes none of it.
+///
+/// MUTATION THIS KILLS: return the mass-weighted median (or the largest)
+/// instead of the smallest agreeing value.
+#[test]
+fn the_white_balance_takes_only_the_colour_change_every_tonal_region_shares() {
+    assert_eq!(wb_common(&[(0.44, 3.0), (0.30, 2.0), (0.17, 3.0)]), 0.17);
+    assert_eq!(wb_common(&[(-0.40, 1.0), (-2.6, 9.0)]), -0.40);
+    assert_eq!(wb_common(&[(0.93, 5.0), (0.72, 0.5), (-0.14, 1.3)]), 0.0);
+    assert_eq!(wb_common(&[(0.20, 1.0), (0.0, 1.0)]), 0.0);
+    assert_eq!(wb_common(&[(-2.58, 9.0)]), -2.58);
+    assert_eq!(wb_common(&[]), 0.0);
+}
+
+/// A split-toned pair: the target warms the shadows, leaves the midtones
+/// and cools the highlights of a neutral ramp. No illuminant does that, so
+/// the white balance takes nothing (as shot), and the colour-grade wheels,
+/// each solved from its own region's paired pixels, carry the split: a
+/// warm shadow wheel, a cool highlight wheel, a midtone wheel that stays
+/// far weaker than either.
+///
+/// This is also the line between a split tone and the FAN the cast curves'
+/// gate refuses (`FAN_DEG`): the gate refuses hue sorted by luminance that
+/// a per-channel curve invents and no region asked for; a wheel is solved
+/// from the median change of its OWN region's paired pixels, so it moves a
+/// region only the way that region testifies. The ramp's regions testify
+/// warm, nothing and cool, and the wheels say exactly that.
+///
+/// MUTATION THIS KILLS: solve every wheel on the whole frame (no region
+/// weight) — all three take one hue; or return the mass-weighted median
+/// from `paired_wb_from_populations` — the white balance moves.
+#[test]
+fn a_split_tone_goes_to_the_grade_wheels_and_not_to_the_white_balance() {
+    let n = 4096;
+    let lin = render::srgb_to_linear;
+    let enc = render::linear_to_srgb;
+    let source: Vec<[f32; 3]> = (0..n)
+        .map(|i| {
+            let v = 0.06 + 0.9 * i as f32 / (n - 1) as f32;
+            [v, v, v]
+        })
+        .collect();
+    let target: Vec<[f32; 3]> = source
+        .iter()
+        .map(|p| {
+            let l = p[0];
+            // Warm below a quarter, cool above three quarters, untouched
+            // between: red against blue by ±0.30 in log linear light.
+            let k: f32 = if l < 0.25 { 0.15 } else if l > 0.75 { -0.15 } else { 0.0 };
+            [enc(lin(l) * k.exp()), l, enc(lin(l) * (-k).exp())]
+        })
+        .collect();
+    let weights = vec![1.0f32; n];
+    let axes = wb_axes_by_region(&source, &target, &weights);
+    assert_eq!(axes.kelvin.len(), 3, "premise: all three regions testify");
+    assert!(
+        axes.kelvin[0].0 > 0.2 && axes.kelvin[2].0 < -0.2,
+        "premise: the shadows ask warm and the highlights cool: {:?}",
+        axes.kelvin
+    );
+    let law = render::WbLaw::of(&EditRecipe::default());
+    let (k, tint, _) = paired_wb_from_populations(&source, &target, &weights, law);
+    let as_shot = law.as_shot();
+    assert_eq!(
+        (k, tint),
+        ((as_shot.0 / 50.0).round() * 50.0, round1(as_shot.1)),
+        "no illuminant moves shadows and highlights opposite ways"
+    );
+    let grade = crate::recipe::ColorGrade::default();
+    let warm = |h: f32| !(60.0..=330.0).contains(&h);
+    let cool = |h: f32| (170.0..=270.0).contains(&h);
+    let (sh_hue, sh_sat) = grade::solve_wheel(&source, &target, &weights, &grade, 0, [0.0, 0.0]);
+    let (mid_hue, mid_sat) = grade::solve_wheel(&source, &target, &weights, &grade, 1, [0.0, 0.0]);
+    let (hi_hue, hi_sat) = grade::solve_wheel(&source, &target, &weights, &grade, 2, [0.0, 0.0]);
+    assert!(warm(sh_hue) && sh_sat > 5.0, "the shadow wheel warms: hue {sh_hue} sat {sh_sat}");
+    assert!(cool(hi_hue) && hi_sat > 5.0, "the highlight wheel cools: hue {hi_hue} sat {hi_sat}");
+    assert!(
+        mid_sat < 0.5 * sh_sat.min(hi_sat),
+        "the midtones asked nothing: hue {mid_hue} sat {mid_sat} against {sh_sat} / {hi_sat}"
+    );
+}
+
 #[test]
 fn global_cast_is_measured_when_every_band_is_one_sided_and_consistent() {
     let source = vec![[0.08, 0.16, 0.82]; 256];

@@ -658,6 +658,24 @@ pub(super) fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: Sol
             ),
         );
     }
+    // The colour grade, read off the recipe for the same reason as the
+    // mixer: a later do-no-harm loop may have shrunk or reset it.
+    if !recipe.color_grade.is_neutral() {
+        let wheel = |hue: f32, sat: f32| format!("hue {hue:.0} sat {sat:.0}");
+        let cg = &recipe.color_grade;
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(
+                keys::FIT_NOTE_COLOR_GRADE,
+                vec![
+                    ("shadows", wheel(cg.shadow_hue, cg.shadow_sat)),
+                    ("midtones", wheel(cg.midtone_hue, cg.midtone_sat)),
+                    ("highlights", wheel(cg.highlight_hue, cg.highlight_sat)),
+                ],
+            ),
+        );
+    }
     if let Some(withdrawal) = solve.hsl.withdrawn {
         push_note(
             &mut rationale,

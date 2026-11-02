@@ -96,7 +96,7 @@ pub(crate) use camera::{wb_to_kelvin_tint};
 #[cfg(test)]
 use camera::{camera_to_space_matrix};
 pub use colour::{point_color_at, point_color_rgb, point_color_sampling_recipe};
-pub(crate) use colour::{HSL_CENTERS, bracket_bands, chroma, rgb_to_hsl};
+pub(crate) use colour::{HSL_CENTERS, WHEEL_SAT_REACH, bracket_bands, chroma, color_grade_regions, rgb_to_hsl, wheel_tint};
 use colour::{
     CHROMA_GATE, apply_calibration, apply_color_grade, apply_gray_mix, apply_hsl,
     apply_point_colors, apply_sat_vibrance, hsl_to_rgb, to_u16, to_u8,

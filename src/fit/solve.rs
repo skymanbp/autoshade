@@ -712,7 +712,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // below has always read the current render for the same reason.
     let before_wb = pixels_of(&render::develop_preview(&s_img, &recipe));
     let (free_k, free_tint, _wanted) =
-        atmosphere_wb_from_populations(&before_wb, &tp, &wb_weights, law);
+        paired_wb_from_populations(&before_wb, &tp, &wb_weights, law);
     let wb_restore = (recipe.temperature_k, recipe.tint);
     let wb_facts = solve_white_balance(
         &s_img,
@@ -854,6 +854,9 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         pegged
     };
     let sat_pegged = chase_saturation(&mut recipe);
+    // --- 3b) colour grade: the white balance's brightness-dependent
+    // remainder, on the shadow / midtone / highlight wheels (`grade`).
+    grade::fit_grade_stage(&s_img, &tp, &wb_weights, cells.as_ref(), full_sat_limit, &mut recipe);
     // NOTE deliberately NO mid-pipeline hue veto here EITHER (it was tried
     // in the evidence era and removed): the ordering comment above is the
     // contract — saturation legitimately amplifies a latent cast and the

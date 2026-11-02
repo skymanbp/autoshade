@@ -145,6 +145,20 @@ pub(super) fn apply_color_grade(data: &mut [[f32; 3]], cg: &crate::recipe::Color
     if cg.is_neutral() {
         return;
     }
+    data.par_iter_mut().for_each(|px| {
+        let [w_sh, w_mid, w_hi] = color_grade_regions(cg, luma601(px));
+        apply_wheel(px, cg.shadow_hue, cg.shadow_sat, cg.shadow_lum, w_sh);
+        apply_wheel(px, cg.midtone_hue, cg.midtone_sat, cg.midtone_lum, w_mid);
+        apply_wheel(px, cg.highlight_hue, cg.highlight_sat, cg.highlight_lum, w_hi);
+        apply_wheel(px, cg.global_hue, cg.global_sat, cg.global_lum, 1.0); // global: all tones
+    });
+}
+
+/// The shadow / midtone / highlight weights the grade gives a pixel of luma
+/// `l`. One function for the renderer and for the fit's colour-grade stage
+/// (`fit::grade`), which solves the wheels on the same split it is rendered
+/// with.
+pub(crate) fn color_grade_regions(cg: &crate::recipe::ColorGrade, l: f32) -> [f32; 3] {
     // balance shifts the shadow/highlight midpoint: positive leans toward highlights.
     let mid = (0.5 - 0.25 * (cg.balance / 100.0)).clamp(0.05, 0.95);
     // `blending` sets how much the tonal regions OVERLAP — the schema's own
@@ -163,16 +177,21 @@ pub(super) fn apply_color_grade(data: &mut [[f32; 3]], cg: &crate::recipe::Color
     const MIN_SPAN: f32 = 0.02;
     let hi_end = (mid + ((1.0 - mid) * overlap).max(MIN_SPAN)).min(1.0);
     let sh_start = (mid - (mid * overlap).max(MIN_SPAN)).max(0.0);
-    data.par_iter_mut().for_each(|px| {
-        let l = luma601(px);
-        let w_hi = smoothstep(mid, hi_end, l);
-        let w_sh = 1.0 - smoothstep(sh_start, mid, l);
-        let w_mid = (1.0 - w_hi - w_sh).clamp(0.0, 1.0);
-        apply_wheel(px, cg.shadow_hue, cg.shadow_sat, cg.shadow_lum, w_sh);
-        apply_wheel(px, cg.midtone_hue, cg.midtone_sat, cg.midtone_lum, w_mid);
-        apply_wheel(px, cg.highlight_hue, cg.highlight_sat, cg.highlight_lum, w_hi);
-        apply_wheel(px, cg.global_hue, cg.global_sat, cg.global_lum, 1.0); // global: all tones
-    });
+    let w_hi = smoothstep(mid, hi_end, l);
+    let w_sh = 1.0 - smoothstep(sh_start, mid, l);
+    let w_mid = (1.0 - w_hi - w_sh).clamp(0.0, 1.0);
+    [w_sh, w_mid, w_hi]
+}
+
+/// How far a wheel at Saturation 100 and full region weight carries a pixel
+/// toward its pure hue: the blend amount is `sat / 100 * weight * this`.
+pub(crate) const WHEEL_SAT_REACH: f32 = 0.4;
+
+/// The pure hue a wheel at `hue_deg` tints a pixel of luma `l` toward
+/// ([`apply_wheel`]'s own target), as an RGB triple.
+pub(crate) fn wheel_tint(hue_deg: f32, l: f32) -> [f32; 3] {
+    let (r, g, b) = hsl_to_rgb((hue_deg / 360.0).rem_euclid(1.0), 1.0, l);
+    [r, g, b]
 }
 
 /// Apply one colour-grade wheel to a pixel: shift chroma toward the wheel's hue
@@ -186,12 +205,11 @@ fn apply_wheel(px: &mut [f32; 3], hue_deg: f32, sat: f32, lum: f32, weight: f32)
         // 0.5-grey anchor) and blend — this keeps luma roughly constant, so deep
         // shadows / bright highlights aren't crushed past [0,1] the way a fixed
         // additive push does. Closer to ACR's luma-aware toning.
-        let l = luma601(px);
-        let tint = hsl_to_rgb((hue_deg / 360.0).rem_euclid(1.0), 1.0, l);
-        let amt = (sat / 100.0) * weight * 0.4;
-        px[0] = (px[0] + (tint.0 - px[0]) * amt).clamp(0.0, 1.0);
-        px[1] = (px[1] + (tint.1 - px[1]) * amt).clamp(0.0, 1.0);
-        px[2] = (px[2] + (tint.2 - px[2]) * amt).clamp(0.0, 1.0);
+        let tint = wheel_tint(hue_deg, luma601(px));
+        let amt = (sat / 100.0) * weight * WHEEL_SAT_REACH;
+        for c in 0..3 {
+            px[c] = (px[c] + (tint[c] - px[c]) * amt).clamp(0.0, 1.0);
+        }
     }
     if lum.abs() > 1e-4 {
         let k = (1.0 + (lum / 100.0) * weight * 0.5).max(0.0);
