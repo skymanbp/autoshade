@@ -234,8 +234,8 @@
 > `scripts/roundtrip_gate.py` is an optional developer instrument (Photoshop
 > with Camera Raw, driven through `scripts/acr_render.ps1`), not part of the
 > release battery.
-> 1825 library + 26 CLI + 297 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1810 pass + 15 `#[ignore]`d forensic probes and
+> 1829 library + 26 CLI + 297 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1814 pass + 15 `#[ignore]`d forensic probes and
 > the GUI result is 293 pass + four ignored (an explicit scratch-recipe export
 > probe and the offline panel, window and mode-workspace screenshots) in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
 > refusal pair (a RAW source, a baked negative); the library and GUI lists are
@@ -270,20 +270,25 @@
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
 > screenshots). For v1.17.0, by name against the v1.16.0 battery: library
-> +85 / −19 — the 85 added: 44 in `render` (the one develop law and the
+> +92 / −22 — the 92 added: 44 in `render` (the one develop law and the
 > profile stage as colour data, the base curve as every recipe's start, the
 > point curve as one law, chromatic aberration by its own knots, the linear
-> and radial mask handles under lens geometry, the Color tint), 7 in `dcp`,
-> 6 in `xmp` (profile strengths named with their profile, the tint keys),
-> 6 in `fit_zoned`, 6 in `fit` (the cast-to-white-balance hand-off walk, the
-> two-temperature pair), 5 in `lensmeta`, 5 in `lcp`, 4 in `pipeline` (the
-> target paired in the corrected frame), 1 each in `recipe` and `fit_field`;
-> the 19 removed: 15 in `render` (the profile's own tone stage and baked
-> Look halves, the composite chromatic-aberration zoom, and the mask-handle
-> tests the lens-geometry rewrite replaced), 2 in `pipeline` (pairing in the
-> sensor frame, replaced by pairing in the corrected frame) and 2 in `fit`
-> (two hand-off premises, re-derived as the walk tests); GUI +5 / −0 (the
-> prompt after 「AI generate」); CLI 26 → 26. For
+> and radial mask handles under lens geometry, the Color tint), 13 in `fit`
+> (the white balance that takes only the colour change every tonal region
+> shares and the split tone that goes to the grade wheels, the cast-to-white-
+> balance hand-off walk, the two-temperature pair, the mixer's band hue and
+> its withdrawals, the p41 pin under the brightness-common white balance),
+> 7 in `dcp`, 6 in `xmp` (profile strengths named with their profile, the
+> tint keys), 6 in `fit_zoned`, 5 in `lensmeta`, 5 in `lcp`, 4 in `pipeline`
+> (the target paired in the corrected frame), 1 each in `recipe` and
+> `fit_field`; the 22 removed: 15 in `render` (the profile's own tone stage
+> and baked Look halves, the composite chromatic-aberration zoom, and the
+> mask-handle tests the lens-geometry rewrite replaced), 5 in `fit` (two
+> hand-off premises re-derived as the walk tests, the mixer-bound tests
+> re-derived as withdrawals, and the test that the mixer never rotates a
+> band — it now does), and 2 in `pipeline` (pairing in the sensor frame,
+> replaced by pairing in the corrected frame); GUI +5 / −0 (the prompt after
+> 「AI generate」); CLI 26 → 26. For
 > v1.16.0, by name against the v1.15.1 battery: library
 > +5 / −0 — all 5 in `pipeline` (a lens-corrected target is paired in the
 > sensor frame; an uncorrected target keeps its evidence and drops the
