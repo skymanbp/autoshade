@@ -143,4 +143,20 @@ Color tint and Color tint hue (`crs:LocalToningHue`,
 
 ## Gates
 
-待填_GATES
+The release battery (`scripts/release_battery.sh`: the library, the desktop
+app and command line, and the calibration run, on a frozen copy of the release
+code at `7918fa4`, with the calibration photos and the denoiser weights in
+reach): library **1814 passed / 0 failed / 15 ignored** (1335.32 s), CLI
+**26 / 0**, contract 2 + 2, doc-tests 0, GUI **293 / 0 / 4**, calibration run
+**1814 / 0 / 15** (1513.50 s; the tests gated on the calibration corpus ran on it here, where the default lane passes them without it);
+`audit_i18n` 0 findings, the font check (923 of 924 code points embedded, one
+left to egui's bundle) and `check_doc_drift` (0 findings);
+clippy 0 warnings on both feature sets; the Python suite under `scripts/` 44
+tests, all passing (the suite under `python/` was not run: `python/` is unchanged
+since v1.16.0); `check_docs.py
+--gates` 28 / 4 PASS / FAIL on the snapshot — the test-count claims, still
+at the earlier snapshot's figures — and **32 / 0 / 0 PASS / FAIL / SKIP** once the counts were
+moved. By name against the v1.16.0 release battery: library 1759 → 1829 (+92 / −22); GUI
+292 → 297 (+5 / −0); CLI 26 → 26. The reverse fit changed, so the reference
+pairs were fitted again by the installed v1.16.0 command line and by this build:
+on the seaside street pair (p39) the mean colour distance to the target at 1000 px fell from 7.89 to 3.59 over the frame and from 9.20 to 4.09 over the sky (top-centre blue-minus-red 42.1 → 54.1 against the target's 56.3): the sky reads light blue under white clouds, as the target does; the lantern street (p38) 5.86 → 4.02, the sunset street (p40) 8.72 → 6.16, the reference pair 8.01 → 7.91 at 0.85 (8.09 → 8.15 at 0.65, 8.00 → 7.90 at 1.0); the dusk farmhouse (p41) 5.53 → 5.91 at 1000 px while its 480 px distance fell 4.27 → 4.19 and its upper sky reads closer by eye; the sunset rooftops (p36) 3.57 → 3.90, its upper clouds a touch less pink (the known limit above); the pair whose target is another photograph (p37) 62.4, unchanged. The night pair (p42) fitted from its denoised master: 5.14 with a horizon ripple of 0.73, against v1.16.0's 5.31 / 0.88. Every recipe differs from v1.16.0's throughout, as one develop law must. The three-way sheets (target | v1.16.0 | this build) were viewed for every pair, the night pair from both starts.
