@@ -36,23 +36,40 @@ pub(super) fn apply_hsl(data: &mut [[f32; 3]], hsl: &crate::recipe::Hsl) {
         // colourfulness measure: ≈0 for near-grey (the overcast-sky blotch case)
         // AND for near-white foam, ramping to full only on genuinely saturated
         // colour, so both are protected while real colours are still adjusted.
-        let chroma = chroma(px);
-        let satw = smoothstep(CHROMA_GATE.0, CHROMA_GATE.1, chroma);
-        if satw <= 0.0 {
+        let Some((b0, b1, w1, satw)) = hsl_band_reach(h, chroma(px)) else {
             return; // (per-pixel closure: this pixel is untouched)
-        }
-        let (b0, b1, w1) = bracket_bands(h * 360.0, &HSL_CENTERS);
+        };
         let w0 = 1.0 - w1;
         let hue_adj = (w0 * hsl.hue[b0] + w1 * hsl.hue[b1]) * satw;
         let sat_adj = (w0 * hsl.saturation[b0] + w1 * hsl.saturation[b1]) * satw;
         let lum_adj = (w0 * hsl.luminance[b0] + w1 * hsl.luminance[b1]) * satw;
         // hue: ±100 → ±30° rotation; sat: ±100 → ±100%; lum gentler (×0.5).
-        let new_h = (h + (hue_adj / 100.0) * (30.0 / 360.0)).rem_euclid(1.0);
+        let new_h = (h + (hue_adj / 100.0) * (HSL_HUE_REACH_DEG / 360.0)).rem_euclid(1.0);
         let new_s = (s * (1.0 + sat_adj / 100.0)).clamp(0.0, 1.0);
         let new_l = (l * (1.0 + 0.5 * lum_adj / 100.0)).clamp(0.0, 1.0);
         let (r, g, b) = hsl_to_rgb(new_h, new_s, new_l);
         *px = [r, g, b];
     });
+}
+
+/// The hue rotation, in degrees, of a band amount of 100 on a pixel the
+/// mixer reaches in full ([`apply_hsl`]). The reverse fit's band-hue solve
+/// reads its move off this and [`hsl_band_reach`], so the law it inverts is
+/// the law the renderer applies.
+pub(crate) const HSL_HUE_REACH_DEG: f32 = 30.0;
+
+/// How the mixer reaches one pixel of hue `h` (turns) and chroma `chroma`:
+/// the two bands bracketing its hue, the weight toward the second (partition
+/// of unity) and the chroma gate's fade (`CHROMA_GATE`), or `None` when the
+/// gate leaves the pixel untouched. The one statement of that reach, read by
+/// [`apply_hsl`] and by the reverse fit's band-hue solve.
+pub(crate) fn hsl_band_reach(h: f32, chroma: f32) -> Option<(usize, usize, f32, f32)> {
+    let satw = smoothstep(CHROMA_GATE.0, CHROMA_GATE.1, chroma);
+    if satw <= 0.0 {
+        return None;
+    }
+    let (b0, b1, w1) = bracket_bands(h * 360.0, &HSL_CENTERS);
+    Some((b0, b1, w1, satw))
 }
 
 /// ACR band centres in degrees (red..magenta), matching recipe::HSL_BANDS.

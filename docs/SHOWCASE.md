@@ -260,8 +260,8 @@ training runs in [RELEASE_NOTES_v1.6.0.md](RELEASE_NOTES_v1.6.0.md).
 
 Reverse-fit recovers global tone, saturation and guarded colour casts, and
 bounded local corrections behind evidence and boundary gates. It does not
-claim to recover generated objects or detail, per-band hue rotation, or a
-target's local masks; every recipe's rationale names what the target appears
+claim to recover generated objects or detail, per-band hue rotation on a
+target whose pixels it cannot pair, or a target's local masks; every recipe's rationale names what the target appears
 to use that the solve cannot reach. The style read carries a mood — with the
 photographer's own edits indexed the advisor sees the four nearest as numbers
 and prose, and in either case one finished photo as an image — not a

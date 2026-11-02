@@ -2070,15 +2070,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       per-channel cast curves. Residual look error {err_before} → {err_after}.",
         "从目标成品反推（统计匹配；目标未像素对齐，故局部蒙版与分色相的色相旋转无法恢复）：亮度 CDF → 影调滑杆（无残差曲线），色度 → 饱和度，逐色带颜色混合器，逐通道色偏曲线。剩余观感误差 {err_before} → {err_after}。"),
     ("Reverse-fit from a target rendition (paired robust match on corresponding \
-      pixels; local masks and per-band hue rotation are still not solved): robust paired \
+      pixels; local masks are still not solved; per-band hue rotation is solved from the paired pixels): robust paired \
       luma regression → tone sliders + residual tone curve, chroma → saturation, \
       per-band colour mixer, per-channel cast curves. Residual look error {err_before} → {err_after}.",
-        "从目标成品反推（对应像素稳健配对匹配；局部蒙版与分色相的色相旋转仍不解算）：稳健配对亮度回归 → 影调滑杆 + 残差影调曲线，色度 → 饱和度，逐色带颜色混合器，逐通道色偏曲线。剩余观感误差 {err_before} → {err_after}。"),
+        "从目标成品反推（对应像素稳健配对匹配；局部蒙版仍不解算；分色相的色相旋转按成对像素解算）：稳健配对亮度回归 → 影调滑杆 + 残差影调曲线，色度 → 饱和度，逐色带颜色混合器，逐通道色偏曲线。剩余观感误差 {err_before} → {err_after}。"),
     ("Reverse-fit from a target rendition (paired robust match on corresponding \
-      pixels; local masks and per-band hue rotation are still not solved): robust paired \
+      pixels; local masks are still not solved; per-band hue rotation is solved from the paired pixels): robust paired \
       luma regression → tone sliders (no residual curve), chroma → saturation, \
       per-band colour mixer, per-channel cast curves. Residual look error {err_before} → {err_after}.",
-        "从目标成品反推（对应像素稳健配对匹配；局部蒙版与分色相的色相旋转仍不解算）：稳健配对亮度回归 → 影调滑杆（无残差曲线），色度 → 饱和度，逐色带颜色混合器，逐通道色偏曲线。剩余观感误差 {err_before} → {err_after}。"),
+        "从目标成品反推（对应像素稳健配对匹配；局部蒙版仍不解算；分色相的色相旋转按成对像素解算）：稳健配对亮度回归 → 影调滑杆（无残差曲线），色度 → 饱和度，逐色带颜色混合器，逐通道色偏曲线。剩余观感误差 {err_before} → {err_after}。"),
     (" Paired convergence carried movement through one-sided hue bands \
       [{bands}]: each moved pixel was individually vouched (robust \
       weight, hue-coherent with the global edit) and moved toward its own \
@@ -2211,8 +2211,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 细节证据在 +/-20 限额内拟合了清晰度 {clarity} 和纹理 {texture}；高频测量仅使用可识别像素。"),
     (" Detail controls were withheld: two-sided structural and luma-range evidence did not support a safe global detail move, so clarity and texture were not moved.",
         " 细节控制暂不调整：两侧结构与亮度范围的证据不足，因此未移动清晰度与纹理。"),
-    (" Per-band colour mixer, solved from each band's own population: [{moved}]. Hue rotation is never solved, so every band's hue stays 0. Bands left neutral for want of two-sided population evidence: [{refused}].",
-        " 逐带颜色混合器按各色带自身的人口统计求解：[{moved}]。色相旋转从不求解，因此每个色带的色相保持 0。因两侧人口证据不足而保持中性的色带：[{refused}]。"),
+    (" Per-band colour mixer: saturation and luminance solved from each band's own population, hue from the paired pixels' own rotation where the target's cells vouch it: [{moved}]. Bands left neutral for want of two-sided population evidence: [{refused}].",
+        " 逐带颜色混合器：饱和度与明度按各色带自身的人口统计求解，色相按成对像素自身的旋转求解（须经目标自身的单元格担保）：[{moved}]。因两侧人口证据不足而保持中性的色带：[{refused}]。"),
     (" Hue bands [{bands}] were one-sided on the pair as it arrived and are two-sided on \
          the render this stage solved from; the target's own cell means vouched that the \
          earlier stages moved those pixels toward it, so the bands were admitted rather \
@@ -2249,13 +2249,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 分区 {label} 的影调取自该分区自身的亮度分布：在 D={d} 下逐像素配对把该分区的亮度跨度压到目标的 {ratio}（p10–p90 {mapped} 对 {target}），低于 {floor} 的下限 —— 条件中位数会让配对松散的分区跨度变小。"),
     (" No zoned correction attached: the source and target zone shares differ by more than 2:1, so neither population is a comparable measurement of the same subject.",
         " 未附加任何分区修正：源图与目标的分区占比之比超过 2:1，两侧不是对同一主体的可比测量。"),
-    (" This target's look appears to use {controls}, which the reverse-fit \
-      never solves for (its solution space is exposure/contrast/\
-      highlights/shadows/whites/blacks, a tone curve, one global \
-      saturation, clarity/texture, an evidence-gated per-band colour mixer that never \
-      rotates hue, and the three channel curves) — that part of the look \
-      cannot arrive through this route.",
-        "此目标的风格似乎使用了 {controls}；反推不会求解这些控制项，因此这部分风格无法通过此路径得到。"),
+    (" This target's look appears to use more {controls} than the reverse-fit \
+      could ship (its solution space is exposure/contrast/\
+      highlights/shadows/whites/blacks, white balance, a tone curve, one global \
+      saturation, clarity/texture, the colour-grade wheels, an evidence-gated \
+      per-band colour mixer whose hue is read from paired pixels only, and the \
+      three channel curves, each shipping only what its evidence admits) — that \
+      part of the look cannot arrive through this route.",
+        "此目标的风格似乎需要比反推所能交付的更多的 {controls}；各控制项只交付其证据所允许的部分，因此这部分风格无法通过此路径得到。"),
     (" This target's remaining look appears to need {controls}; Atmosphere mode only \
       solves bounded exposure, white balance, a robust five-point tone curve, \
       saturation, an evidence-gated per-band colour mixer that never rotates hue, \

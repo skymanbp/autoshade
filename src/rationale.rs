@@ -416,12 +416,13 @@ pub mod keys {
     /// R23-6 A-5: which controls THIS pair seems to need that the solver
     /// never assigns.
     pub const FIT_NOTE_UNREPRESENTED: &str =
-        " This target's look appears to use {controls}, which the reverse-fit \
-         never solves for (its solution space is exposure/contrast/\
-         highlights/shadows/whites/blacks, a tone curve, one global \
-         saturation, clarity/texture, an evidence-gated per-band colour mixer that never \
-         rotates hue, and the three channel curves) — that part of the look \
-         cannot arrive through this route.";
+        " This target's look appears to use more {controls} than the reverse-fit \
+         could ship (its solution space is exposure/contrast/\
+         highlights/shadows/whites/blacks, white balance, a tone curve, one global \
+         saturation, clarity/texture, the colour-grade wheels, an evidence-gated \
+         per-band colour mixer whose hue is read from paired pixels only, and the \
+         three channel curves, each shipping only what its evidence admits) — that \
+         part of the look cannot arrive through this route.";
     pub const FIT_NOTE_ATMOSPHERE_UNREPRESENTED: &str =
         " This target's remaining look appears to need {controls}; Atmosphere mode only \
          solves bounded exposure, white balance, a robust five-point tone curve, \
@@ -457,12 +458,12 @@ pub mod keys {
     /// alignment the solve just used.
     pub const FIT_SUMMARY_WITH_CURVE_PAIRED: &str =
         "Reverse-fit from a target rendition (paired robust match on corresponding \
-         pixels; local masks and per-band hue rotation are still not solved): robust paired \
+         pixels; local masks are still not solved; per-band hue rotation is solved from the paired pixels): robust paired \
          luma regression → tone sliders + residual tone curve, chroma → saturation, \
          per-band colour mixer, per-channel cast curves. Residual look error {err_before} → {err_after}.";
     pub const FIT_SUMMARY_NO_CURVE_PAIRED: &str =
         "Reverse-fit from a target rendition (paired robust match on corresponding \
-         pixels; local masks and per-band hue rotation are still not solved): robust paired \
+         pixels; local masks are still not solved; per-band hue rotation is solved from the paired pixels): robust paired \
          luma regression → tone sliders (no residual curve), chroma → saturation, \
          per-band colour mixer, per-channel cast curves. Residual look error {err_before} → {err_after}.";
     pub const FIT_NOTE_ROBUST_REJECTED: &str =
@@ -508,7 +509,7 @@ pub mod keys {
     /// Both halves matter — what moved, and which bands were left alone
     /// because neither frame's population could speak for them.
     pub const FIT_NOTE_HSL_BANDS: &str =
-        " Per-band colour mixer, solved from each band's own population: [{moved}]. Hue rotation is never solved, so every band's hue stays 0. Bands left neutral for want of two-sided population evidence: [{refused}].";
+        " Per-band colour mixer: saturation and luminance solved from each band's own population, hue from the paired pixels' own rotation where the target's cells vouch it: [{moved}]. Bands left neutral for want of two-sided population evidence: [{refused}].";
     /// R33 §E: bands the pair's FROZEN evidence called one-sided that the
     /// render in front of the stage carries on both sides, whose members the
     /// target's own cells then vouched. The band stops being unmeasurable

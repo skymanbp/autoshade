@@ -895,16 +895,17 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // hue damage the metric's hue term partially sees. Marginal gain does
     // not earn regional risk: keep the recipe clean instead.
     //
-    // Per-band HSL is fitted in stage 4a above — but only its SATURATION and
-    // LUMINANCE axes, and only on bands the two-sided population gate can
-    // measure. The 2026-07-07 failure this comment used to record was the
-    // HUE axis: a band's centroid hue delta conflates CONTENT difference with
-    // style, and an honest-looking 13° in-gate delta applied as a whole-band
-    // rotation turns brown rock olive and a pale sky lavender. That axis is
-    // still never solved (`fit_hsl_stage` never writes `hsl.hue`, pinned by a
-    // named test); a band's mean chroma and mean lightness are ordinary
-    // population statistics, identifiable exactly as far as the same evidence
-    // gate says the band is.
+    // Per-band HSL is fitted in stage 4a above: its SATURATION and LUMINANCE
+    // axes from each band's population, on bands the two-sided population
+    // gate can measure, and since 2026-11-02 its HUE axis from the paired
+    // pixels only (`fit_band_hues`). The 2026-07-07 failure this comment used
+    // to record was the hue axis read from POPULATIONS: a band's centroid hue
+    // delta conflates CONTENT difference with style, and an honest-looking
+    // 13° in-gate delta applied as a whole-band rotation turns brown rock
+    // olive and a pale sky lavender. That reading is still never made; the
+    // paired solve reads each pixel's own rotation, on pairs whose pixels are
+    // each other's counterparts, and ships only what the target's cells
+    // vouch.
     let (detail, detail_supported) = fit_detail_stage(&s_img, &tp, &evidence, &mut recipe);
     // The paired voucher every hue-damage guard consults (see
     // converges_toward): robust per-pixel weights plus each pixel's own
@@ -924,6 +925,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // engine agrees — it runs the mixer before saturation and the RGB curves
     // before the mixer — which is exactly why both colour stages measure
     // their demand on a re-render rather than on an algebraic composition.
+    let hue_before_mixer = recipe.hsl.hue;
     let mut hsl_facts =
         fit_hsl_stage(&s_img, &sp, &tp, &evidence, hue_vouch, cells.as_ref(), budget, &mut recipe);
     let hsl_fitted = recipe.hsl.clone();
@@ -1200,14 +1202,32 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // to neutral is always reachable, at zero or at the round bound. Judging 4a only where it is fitted was tried first
     // and it shipped a ceiling-pegged three-band move on the viaduct pair
     // that the cast stage could then no longer clean up (look 0.026 -> 0.035).
+    //
+    // The band hues answer the same question on their own first: they are a
+    // separate solve on separate evidence (`fit_band_hues`, paired pixels),
+    // so a rotation must not ride along on a saturation and luminance move
+    // that earns the place. Measured 2026-11-02 on the haze pair: the whole
+    // mixer beat no mixer, but the rotations it carried (Orange +9, Green -9,
+    // Aqua -3) left the finished frame at 0.0145 where the same mixer without
+    // them reached 0.0136 — the cast curves carry that pair's per-band hue
+    // change, which is a channel curve's, better than a rotation can.
+    let finished_err = |candidate: &EditRecipe| {
+        look_err_with_evidence(&pixels_of(&render::develop_preview(&s_img, candidate)), &tp, &evidence)
+    };
+    if recipe.hsl.hue != hue_before_mixer {
+        let mut unrotated = recipe.clone();
+        unrotated.hsl.hue = hue_before_mixer;
+        fit_cast_stage(&mut unrotated, CastRescue::Off);
+        let unrotated_err = finished_err(&unrotated);
+        for _ in 0..DO_NO_HARM_MAX_ROUNDS {
+            if recipe.hsl.hue == hue_before_mixer || finished_err(&recipe) <= unrotated_err + 1e-4 {
+                break;
+            }
+            recipe.hsl.hue = super::hsl::hue_halved_toward(&recipe.hsl.hue, &hue_before_mixer);
+            fit_cast_stage(&mut recipe, CastRescue::Off);
+        }
+    }
     if !recipe.hsl.is_neutral() {
-        let finished_err = |candidate: &EditRecipe| {
-            look_err_with_evidence(
-                &pixels_of(&render::develop_preview(&s_img, candidate)),
-                &tp,
-                &evidence,
-            )
-        };
         let mut neutral = recipe.clone();
         neutral.hsl = crate::recipe::Hsl::default();
         // BOTH sides of this comparison are judged with the cast the gates
@@ -1670,9 +1690,10 @@ pub(super) const DO_NO_HARM_RESCUE: CastRescue = CastRescue::KeepSaturation;
 /// two (the stage's own and 4a'), which share it. Saturation halving from
 /// the model cap reaches zero in at most six rounds and a mixer band halving
 /// from its budget reaches neutral in at most eight, so a solve that needs
-/// more is not descending: a re-fit that raises what the round lowered, or a
-/// mixer carrying a hue rotation the halving never touches (`halved_hsl`
-/// keeps `hue`, `Hsl::is_neutral` reads it).
+/// more is not descending: a re-fit that raises what the round lowered. The
+/// mixer's own halving descends on every axis (`halved_hsl` halves hue with
+/// saturation and luminance since the stage solves it), so for the two
+/// mixer loops the bound is a guard no mixer reaches.
 pub(super) const DO_NO_HARM_MAX_ROUNDS: u32 = 16;
 
 /// The 4b loop's control, separated from its measurements so its
@@ -1706,9 +1727,9 @@ pub(super) fn step_down_until_harmless(
 /// mixer than without it, halve the mixer and let `refit` re-fit the cast on
 /// it. `Ok(rounds)` when the mixer stopped costing anything; `Err(rounds)`
 /// when the mixer was withdrawn — the halving reached neutral, or ran
-/// [`DO_NO_HARM_MAX_ROUNDS`] rounds without the cost going away (a hue
-/// rotation from the base recipe, which `halved_hsl` keeps, is a fixed point
-/// of the halving). A withdrawal leaves the mixer at `Hsl::default()`, the
+/// [`DO_NO_HARM_MAX_ROUNDS`] rounds without the cost going away (a guard:
+/// `halved_hsl` reaches neutral on every axis in at most eight). A
+/// withdrawal leaves the mixer at `Hsl::default()`, the
 /// state the comparison measured as no worse; the curves are as the last
 /// round fitted them, and the caller's next cast fit re-derives them.
 pub(super) fn halve_mixer_until_it_earns(

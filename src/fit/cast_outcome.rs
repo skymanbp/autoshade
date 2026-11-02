@@ -414,12 +414,13 @@ impl CastOutcome {
 /// Name the develop controls THIS pair's residual points at that the fit has
 /// no way to solve for (R23-6 A-5).
 ///
-/// The summary note already says "local masks and per-band hue rotation are
-/// not recovered" on every fit ever produced, which is true and useless: it
-/// does not say whether THIS target needed them. The solve domain is a fact
+/// The summary note already says "local masks are not recovered" (and, on
+/// the statistical path, "per-band hue rotation") on every fit, which is true
+/// and useless: it does not say whether THIS target needed them. The solve domain is a fact
 /// about the code — the global arm writes exposure/contrast/highlights/
 /// shadows/whites/blacks, a tone curve, one saturation, the per-band mixer's
-/// saturation/luminance axes and three channel curves, and NOTHING in
+/// saturation/luminance axes (and, on paired fits, its hue), the grade
+/// wheels and three channel curves, and NOTHING in
 /// `advisor::catalogue::RECIPE_CONTROLS` else — so the honest disclosure is
 /// the intersection of "the model can express it", "we never solve it" and
 /// "the residual has evidence pointing at it".
@@ -519,12 +520,14 @@ pub(super) fn unrepresented_note(
     let mut names: Vec<&str> = Vec::new();
 
     if residual_is_colour_shaped(after_px, tp, evidence) {
-        // `hsl` here means the axis stage 4a does NOT solve: it fits a
-        // band's saturation and luminance from that band's own population,
-        // and this note is read on the residual those moves left behind, so
-        // a per-band gap the mixer closed never reaches this line. What
-        // survives it is a per-band HUE rotation (the one axis the solver
-        // bans outright) or a demand the mixer's evidence gate refused.
+        // `hsl` here means what stage 4a left: it fits a band's saturation
+        // and luminance from that band's own population and, on paired fits,
+        // its hue from the pixels' own rotation, and this note is read on the
+        // residual those moves left behind, so a per-band gap the mixer
+        // closed never reaches this line. What survives it is a band
+        // rotation the paired solve could not ship (no pairing, past the
+        // band budget, or refused by the cells) or a demand the mixer's
+        // evidence gate refused.
         // `color_grade` is the tone-conditioned version of the same move.
         // Name the second only when the channel curves — our one lever with
         // that shape — are absent, which is both the honest condition and the
@@ -538,9 +541,9 @@ pub(super) fn unrepresented_note(
             names.push("color_grade");
         }
     }
-    // A surviving UNIFORM channel-mean offset is the white-balance shape.
-    // Full mode never assigns temperature/tint; Atmosphere mode names them
-    // only when its bounded WB solve declined the demand.
+    // A surviving UNIFORM channel-mean offset is the white-balance shape,
+    // named only when no white balance shipped (in either mode the white
+    // balance is solved and may decline the demand).
     let mean = |px: &[[f32; 3]], ch: usize| -> f32 {
         if px.is_empty() {
             0.0

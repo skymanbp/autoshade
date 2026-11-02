@@ -616,12 +616,16 @@ pub(super) fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: Sol
     // verdict are solve facts no re-measurement could recover.
     let hsl_moved = (0..EVIDENCE_HUE_BANDS)
         .filter(|&band| {
-            recipe.hsl.saturation[band] != 0.0 || recipe.hsl.luminance[band] != 0.0
+            recipe.hsl.hue[band] != 0.0
+                || recipe.hsl.saturation[band] != 0.0
+                || recipe.hsl.luminance[band] != 0.0
         })
         .map(|band| {
+            let hue = recipe.hsl.hue[band];
             format!(
-                "{} sat {:+.0} lum {:+.0}",
+                "{} {}sat {:+.0} lum {:+.0}",
                 crate::recipe::HSL_BANDS[band],
+                if hue != 0.0 { format!("hue {hue:+.0} ") } else { String::new() },
                 recipe.hsl.saturation[band],
                 recipe.hsl.luminance[band]
             )

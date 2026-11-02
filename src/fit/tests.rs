@@ -7624,18 +7624,20 @@ fn a_one_sided_band_is_refused_by_name_never_read_as_equal() {
     );
 }
 
-/// (c) The hue axis is never written, on any pair, at any strength —
-/// including a target whose only edit IS a band rotation, where the
-/// temptation to rotate back is greatest.
+/// (c) The hue axis rotates no band its paired pixels do not ask to rotate,
+/// on any pair, at any strength: a saturation edit, an over-cap one, a
+/// one-sided band, an unpaired cloud deck and a structural permutation all
+/// keep every band's hue at 0.
+///
+/// Until 2026-11-02 this test read "the mixer never rotates a hue band" and
+/// carried a band-rotated target (Green -60 / Blue +60) among its pairs. The
+/// mixer now solves band hue from the paired pixels' own rotation
+/// ([`a_band_rotated_a_few_degrees_is_solved_back_to_that_band_and_no_other`]),
+/// so that pair is the inverse problem the stage answers, not a temptation it
+/// refuses; it left this list for that test.
 #[test]
-fn the_per_band_mixer_never_rotates_a_hue_band() {
-    let rotated_source = band_frame([0, 1, 2, 4], [0.55; 4]);
-    let rotated = developed(&rotated_source, |hsl| {
-        hsl.hue[3] = -60.0;
-        hsl.hue[5] = 60.0;
-    });
+fn the_per_band_mixer_rotates_no_band_its_paired_pixels_do_not_ask() {
     let mut pairs: Vec<(&str, DynamicImage, DynamicImage)> = vec![
-        ("hue-rotated", rotated_source.clone(), rotated),
         ("solved", engine_hsl_pair(15.0).0, engine_hsl_pair(15.0).1),
         ("over-cap", over_cap_band_pair().0, over_cap_band_pair().1),
         ("one-sided", one_sided_band_pair().0, one_sided_band_pair().1),
@@ -7663,6 +7665,49 @@ fn the_per_band_mixer_never_rotates_a_hue_band() {
             );
         }
     }
+}
+
+/// The band-hue solve's inverse problem: the target is the source with ONE
+/// band rotated a few degrees through the real engine (Blue +15, 4.5°), and
+/// the fit rotates that band back and no other. The four families sit on
+/// band centres (red, green, blue, magenta), so the rotated band's pixels
+/// belong to it alone and the other bands' pixels ask nothing.
+/// One control unit (0.3° of rotation): the target is 8-bit, so the rotated
+/// family's hue is read through code-value rounding, and the solve rounds
+/// its amount to 0.1. Measured 2026-11-02: Blue +15 solved back as +15.5,
+/// look error 0.0072 -> 0.0025.
+const BAND_HUE_TOLERANCE: f32 = 1.0;
+#[test]
+fn a_band_rotated_a_few_degrees_is_solved_back_to_that_band_and_no_other() {
+    let source = band_frame([0, 1, 2, 4], [0.55; 4]);
+    let target = developed(&source, |hsl| hsl.hue[5] = 15.0);
+    let report = fit_recipe(&source, &target);
+    let hue = report.recipe.hsl.hue;
+    eprintln!("BAND_HUE rotated {hue:?} err {:.4} -> {:.4}", report.err_before, report.err_after);
+    assert!((hue[5] - 15.0).abs() <= BAND_HUE_TOLERANCE, "Blue solved back: {hue:?}");
+    for band in (0..8).filter(|&b| b != 5) {
+        assert_eq!(hue[band], 0.0, "band {band} rotated although its pixels ask nothing: {hue:?}");
+    }
+    let moved = note_arg(&report, crate::rationale::keys::FIT_NOTE_HSL_BANDS, "moved");
+    assert!(moved.contains("Blue hue +"), "the report names the band that rotated: {moved:?}");
+}
+
+/// The band-hue rule's veto, the white balance's own ([`wb_consensus`]): the
+/// Blue family's alternate rows rotated +4.5° and -4.5° — one band whose
+/// pixels ask opposite rotations at equal mass — ships no rotation on any
+/// band. Rows alternate so both rotations ride the same brightness ramp and
+/// no tonal region sees only one of them.
+#[test]
+fn a_band_whose_pixels_ask_opposite_rotations_ships_nothing() {
+    let source = band_frame([0, 1, 2, 4], [0.55; 4]);
+    let up = developed(&source, |hsl| hsl.hue[5] = 15.0).to_rgb8();
+    let down = developed(&source, |hsl| hsl.hue[5] = -15.0).to_rgb8();
+    let target = DynamicImage::ImageRgb8(RgbImage::from_fn(up.width(), up.height(), |x, y| {
+        if y % 2 == 0 { *up.get_pixel(x, y) } else { *down.get_pixel(x, y) }
+    }));
+    let report = fit_recipe(&source, &target);
+    eprintln!("BAND_HUE opposed {:?}", report.recipe.hsl.hue);
+    assert_eq!(report.recipe.hsl.hue, [0.0f32; 8], "opposite rotations ask nothing");
 }
 
 /// (d) A move the frame ruler will not pay for is given back to zero and
@@ -8979,12 +9024,14 @@ fn the_do_no_harm_loop_descends_when_the_hand_off_would_re_raise_saturation() {
     assert_eq!(recipe.saturation, 0.0);
 }
 
-/// …and the bound, on stubs that cannot descend: the pre-fix hand-off
-/// (chase from stage 3's start every round), and a mixer carrying a hue
-/// rotation `halved_hsl` never halves. Both stop at
-/// `DO_NO_HARM_MAX_ROUNDS` and say so through `Err`, which the solve turns
+/// …and the bound, on a stub that cannot descend: the pre-fix hand-off
+/// (chase from stage 3's start every round) stops at
+/// `DO_NO_HARM_MAX_ROUNDS` and says so through `Err`, which the solve turns
 /// into its warning line; a loop whose end state stops objecting stops at
-/// once.
+/// once. A mixer carrying a hue rotation was the second such stub until
+/// 2026-11-02, when the mixer began solving band hue and `halved_hsl` began
+/// halving it: the rotation now descends to neutral and the loop ends there,
+/// well inside the bound.
 #[test]
 fn the_do_no_harm_loop_stops_at_its_bound_when_nothing_descends() {
     use super::solve::{CastRescue, DO_NO_HARM_MAX_ROUNDS, step_down_until_harmless};
@@ -8998,8 +9045,9 @@ fn the_do_no_harm_loop_stops_at_its_bound_when_nothing_descends() {
     assert_eq!(out, Err(DO_NO_HARM_MAX_ROUNDS));
     let mut rotated = EditRecipe::default();
     rotated.hsl.hue[0] = 10.0;
-    assert_eq!(step_down_until_harmless(&mut rotated, true, |_| true), Err(DO_NO_HARM_MAX_ROUNDS));
-    assert_eq!(rotated.hsl.hue[0], 10.0, "the halving never touches hue");
+    let out = step_down_until_harmless(&mut rotated, true, |_| true);
+    assert!(matches!(out, Ok(n) if n < DO_NO_HARM_MAX_ROUNDS), "{out:?}");
+    assert_eq!(rotated.hsl.hue[0], 0.0, "the halving gives the rotation back");
     let mut quiet = EditRecipe { saturation: 40.0, ..Default::default() };
     assert_eq!(step_down_until_harmless(&mut quiet, true, |_| false), Ok(1));
     assert_eq!(quiet.saturation, 20.0);
@@ -9094,13 +9142,14 @@ fn mixer(hue: f32, sat: f32) -> crate::recipe::Hsl {
     hsl
 }
 
-/// The stage's own do-no-harm (4a), on a mixer whose halving cannot reach
-/// neutral — a hue rotation from the base recipe, which `halved_hsl` keeps by
-/// design — against a frame that objects to every candidate. The loop stops
-/// at `DO_NO_HARM_MAX_ROUNDS` and withdraws with the last objection, exactly
-/// as it does when the halving reaches neutral.
+/// The stage's own do-no-harm (4a), on a rotated, saturated mixer against a
+/// frame that objects to every candidate: the halving reaches neutral on
+/// every axis and the loop withdraws with the last objection, inside
+/// `DO_NO_HARM_MAX_ROUNDS`. Until 2026-11-02 `halved_hsl` kept hue, so this
+/// mixer was a fixed point and the loop ran to the bound; it halves hue since
+/// the stage solves it, and no mixer reaches the bound.
 #[test]
-fn the_mixer_stage_do_no_harm_stops_at_its_bound_when_nothing_descends() {
+fn the_mixer_stage_do_no_harm_withdraws_a_rotated_mixer_inside_its_bound() {
     use super::hsl::halve_mixer_until_harmless;
     use super::solve::DO_NO_HARM_MAX_ROUNDS;
     let rotated = mixer(10.0, 40.0);
@@ -9111,9 +9160,8 @@ fn the_mixer_stage_do_no_harm_stops_at_its_bound_when_nothing_descends() {
         Some(HslWithdrawal::Blind)
     });
     assert_eq!(out, Err(HslWithdrawal::Blind));
-    assert_eq!(calls, DO_NO_HARM_MAX_ROUNDS);
-    // The bound never binds where halving does reach neutral: a band at the
-    // budget ceiling is withdrawn after eight judged candidates.
+    assert!(calls < DO_NO_HARM_MAX_ROUNDS, "{calls} rounds to neutral");
+    // A band at the budget ceiling is withdrawn after eight judged candidates.
     let pegged = crate::recipe::Hsl { hue: [0.0; 8], saturation: [100.0; 8], luminance: [-100.0; 8] };
     let mut judged = 0u32;
     let out = halve_mixer_until_harmless(pegged, |_| {
@@ -9126,11 +9174,12 @@ fn the_mixer_stage_do_no_harm_stops_at_its_bound_when_nothing_descends() {
     assert_eq!(halve_mixer_until_harmless(kept.clone(), |_| None), Ok(kept));
 }
 
-/// The mixer against its own absence (4a'), on the same non-descending
-/// mixer: the loop stops at `DO_NO_HARM_MAX_ROUNDS` and withdraws the mixer
-/// to the neutral state its comparison was measured against.
+/// The mixer against its own absence (4a'), on the same rotated mixer: the
+/// halving reaches neutral inside `DO_NO_HARM_MAX_ROUNDS` (it halves hue
+/// since 2026-11-02, see above) and the loop withdraws the mixer to the
+/// neutral state its comparison was measured against.
 #[test]
-fn the_mixer_against_its_absence_stops_at_its_bound_when_nothing_descends() {
+fn the_mixer_against_its_absence_withdraws_a_rotated_mixer_inside_its_bound() {
     use super::solve::{DO_NO_HARM_MAX_ROUNDS, halve_mixer_until_it_earns};
     let mut recipe = EditRecipe { hsl: mixer(10.0, 40.0), ..Default::default() };
     let mut refits = 0u32;
@@ -9142,7 +9191,7 @@ fn the_mixer_against_its_absence_stops_at_its_bound_when_nothing_descends() {
             assert!(refits <= SPIN_GUARD, "the 4a' loop spun past {SPIN_GUARD} rounds");
         },
     );
-    assert_eq!(out, Err(DO_NO_HARM_MAX_ROUNDS));
+    assert!(matches!(out, Err(n) if n < DO_NO_HARM_MAX_ROUNDS), "{out:?}");
     assert!(recipe.hsl.is_neutral(), "withdrawn to neutral: {:?}", recipe.hsl);
     let mut pegged = EditRecipe {
         hsl: crate::recipe::Hsl { hue: [0.0; 8], saturation: [100.0; 8], luminance: [0.0; 8] },
@@ -9221,4 +9270,3 @@ fn the_white_balance_path_starts_at_as_shot() {
     assert!(k > 5950.0 && k < 8800.0, "half way is between in Kelvin: {k}");
     assert!(t > 0.0 && t < 16.6, "and in tint: {t}");
 }
-

@@ -321,16 +321,33 @@ pub(super) fn fit_grade_stage(
         ])
     };
     let full = vouch_at(recipe, 1.0);
+    if let Some(share) = largest_vouched_share(full, |share| vouch_at(recipe, share)) {
+        apply(&mut recipe.color_grade, &scaled, share);
+        return shipped(recipe);
+    }
+    recipe.color_grade = restore;
+    None
+}
+
+/// The share of a colour move the target's cells vouch, given their verdict
+/// `full` on the whole move and `vouch_at`, which renders a share and asks
+/// them again: the whole move when they vouch it; otherwise the white
+/// balance's own R36 search — a refusal on SIZE in a direction the cells
+/// agree with ships the largest share they vouch, provided the cells that
+/// diverged at the full move mostly stop ([`WB_SHARE_SIZE_EVIDENCE`]);
+/// `None` when they refuse the direction, or no share earns it. One search,
+/// read by the colour grade and by the mixer's band hues.
+pub(super) fn largest_vouched_share(
+    full: Option<crate::fit_cells::CellVouch>,
+    mut vouch_at: impl FnMut(f32) -> Option<crate::fit_cells::CellVouch>,
+) -> Option<f32> {
     match full {
-        Some(v) if v.vouched() => return shipped(recipe),
-        // The white balance's own R36 search: a refusal on SIZE in a
-        // direction the cells agree with ships the largest share they vouch,
-        // provided the cells that diverged at the full move mostly stop.
+        Some(v) if v.vouched() => Some(1.0),
         Some(v) if v.direction_agrees() => {
             let (mut lo, mut hi, mut best) = (0.0f32, 1.0f32, None);
             for _ in 0..WB_VOUCH_SHRINK_STEPS {
                 let mid = 0.5 * (lo + hi);
-                match vouch_at(recipe, mid) {
+                match vouch_at(mid) {
                     Some(at) if at.vouched() && at.diverged <= v.diverged * WB_SHARE_SIZE_EVIDENCE => {
                         best = Some(mid);
                         lo = mid;
@@ -338,13 +355,8 @@ pub(super) fn fit_grade_stage(
                     _ => hi = mid,
                 }
             }
-            if let Some(share) = best {
-                apply(&mut recipe.color_grade, &scaled, share);
-                return shipped(recipe);
-            }
+            best
         }
-        _ => {}
+        _ => None,
     }
-    recipe.color_grade = restore;
-    None
 }
