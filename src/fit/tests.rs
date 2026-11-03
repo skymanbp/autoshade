@@ -8066,6 +8066,14 @@ fn hsl_band_budget_is_monotone_across_the_three_strength_stops() {
 /// the range-consensus white balance (17300 K / +100) used to take inside
 /// the budget — not a grade artefact.
 ///
+/// 2026-11-03 (v1.17.1): the curve now delivers its residual on the
+/// finished frame ([`refine_curves_on_finished_frame`]); before, the stages
+/// after it scaled it — the first curve's red knots arrived on the finished
+/// frame 1.17-1.63x as far from the uncurved frame as they were set (red at
+/// the 191 knot delivered 0.835 where 0.788 was asked). Closed, the admitted
+/// cast fans the class 12.5° and the fit lands 0.0673 -> 0.0392 at
+/// confidence 0.570.
+///
 /// The pair is OPTIONAL, like every other corpus pair: absent, the test
 /// says so and passes, and the synthetic two-temperature fixture carries
 /// the refusal side of the same question on its own.
@@ -8076,7 +8084,7 @@ fn hsl_band_budget_is_monotone_across_the_three_strength_stops() {
 fn the_fan_gate_costs_a_real_two_temperature_pair_nothing() {
     use crate::rationale::keys;
     let Some(root) = calibration_corpus() else { return };
-    for (code, want_fan, want_before, want_after, want_conf) in [("p40", 14.6f32, 0.0673f32, 0.0421f32, 0.554f32)] {
+    for (code, want_fan, want_before, want_after, want_conf) in [("p40", 12.5f32, 0.0673f32, 0.0392f32, 0.570f32)] {
         let raw = root.join(format!("{code}.arw"));
         let target_path = root.join(format!("{code}-target.jpg"));
         if !raw.is_file() || !target_path.is_file() {

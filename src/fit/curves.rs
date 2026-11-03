@@ -147,6 +147,90 @@ pub(super) fn residual_channel_curve_weighted(
     pts
 }
 
+/// Close the channel curves' loop on the FINISHED frame (v1.17.1).
+///
+/// [`residual_channel_curve_weighted`] reads the curve off the finished
+/// frame's residual (the recipe rendered without curves, `cur`, against the
+/// target), but the engine applies the curves BEFORE the mixer, the grade,
+/// clarity / texture and saturation (`render::develop`), so what a curve
+/// delivers on the finished frame is not the residual it was solved for: the
+/// stages after it scale and bend it. This applies the curves where the
+/// render applies them, re-renders the finished frame, and reads the residual
+/// it still shows, knot by knot: at each knot the pixels it governs are the
+/// fraction `f = F_cur(x)` of the frame, the target asks `Q_target(f)` there
+/// and the finished frame delivers `Q_with(f)`; one secant step per knot (the
+/// slope from the knot's last two outputs and what each delivered, starting
+/// from no curve, where the delivery is `Q_cur(f)`) moves its output toward
+/// the ask. Rounds run while the finished frame's look error still improves
+/// by the 4a' arbitration's own margin (1e-4), bounded by
+/// [`super::solve::DO_NO_HARM_MAX_ROUNDS`]; the best round is kept, so the
+/// first curve is never made worse. Curves that came back empty stay empty.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn refine_curves_on_finished_frame(
+    s_img: &DynamicImage,
+    recipe: &mut EditRecipe,
+    cur: &[[f32; 3]],
+    tp: &[[f32; 3]],
+    cur_weights: &[f32],
+    tgt_weights: &[f32],
+    evidence: &EvidenceModel,
+) -> u32 {
+    let take = |r: &EditRecipe| [r.red_curve.clone(), r.green_curve.clone(), r.blue_curve.clone()];
+    let put = |r: &mut EditRecipe, c: &[Vec<CurvePoint>; 3]| {
+        (r.red_curve, r.green_curve, r.blue_curve) = (c[0].clone(), c[1].clone(), c[2].clone());
+    };
+    let first = take(recipe);
+    if first.iter().all(|c| c.is_empty()) {
+        return 0;
+    }
+    let c_cdf: [Vec<f32>; 3] = std::array::from_fn(|ch| weighted_cdf(cur, cur_weights, |p| p[ch]));
+    let t_cdf: [Vec<f32>; 3] = std::array::from_fn(|ch| weighted_cdf(tp, tgt_weights, |p| p[ch]));
+    let frac = |ch: usize, input: u8| cdf_at(&c_cdf[ch], input as f32 / 255.0).clamp(P_CLIP, 1.0 - P_CLIP);
+    // Per channel, per knot: the last output tried and what it delivered;
+    // the first pair is "no curve", which delivers the uncurved frame.
+    let mut last: [Vec<(f32, f32)>; 3] = std::array::from_fn(|ch| {
+        first[ch].iter().map(|k| (k.input as f32 / 255.0, quantile(&c_cdf[ch], frac(ch, k.input)))).collect()
+    });
+    let mut px = pixels_of(&render::develop_preview(s_img, recipe));
+    let mut best = (look_err_with_evidence(&px, tp, evidence), first);
+    let mut rounds = 0;
+    while rounds < super::solve::DO_NO_HARM_MAX_ROUNDS {
+        let mut next = best.1.clone();
+        for ch in 0..3 {
+            if next[ch].is_empty() {
+                continue;
+            }
+            let w_cdf = weighted_cdf(&px, cur_weights, |p| p[ch]);
+            let mut prev_out = 0i32;
+            for (k, knot) in next[ch].iter_mut().enumerate() {
+                let f = frac(ch, knot.input);
+                let (want, got) = (quantile(&t_cdf[ch], f), quantile(&w_cdf, f));
+                let y = knot.output as f32 / 255.0;
+                let (y0, d0) = last[ch][k];
+                let slope = if (y - y0).abs() > 1e-4 { (got - d0) / (y - y0) } else { 1.0 };
+                let slope = if slope > 0.05 { slope } else { 1.0 };
+                last[ch][k] = (y, got);
+                let out = (((y + (want - got) / slope).clamp(0.0, 1.0) * 255.0).round() as i32).max(prev_out);
+                knot.output = out.min(255) as u8;
+                prev_out = out;
+            }
+        }
+        if next == best.1 {
+            break;
+        }
+        put(recipe, &next);
+        px = pixels_of(&render::develop_preview(s_img, recipe));
+        let err = look_err_with_evidence(&px, tp, evidence);
+        rounds += 1;
+        if err >= best.0 - 1e-4 {
+            break;
+        }
+        best = (err, next);
+    }
+    put(recipe, &best.1);
+    rounds
+}
+
 /// Shrink the three fitted channel curves along one continuous path, so a
 /// cast the hue-fan gate convicts can be made milder instead of thrown away.
 ///

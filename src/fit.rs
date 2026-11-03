@@ -130,7 +130,7 @@ use cast_outcome::{
 };
 use curves::{
     CastHandOff, HandOffFacts, band_stats_weighted, cast_wb_direction,
-    residual_channel_curve_weighted, search_cast_hand_off, search_cast_projection,
+    refine_curves_on_finished_frame, residual_channel_curve_weighted, search_cast_hand_off, search_cast_projection,
 };
 #[cfg(test)]
 use curves::{

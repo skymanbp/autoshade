@@ -944,6 +944,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         // Cleared per call: the fact must describe the recipe this call
         // produces, not a probe an earlier call admitted.
         cast_admission = None;
+        let mut handed_now = false;
         recipe.red_curve = Vec::new();
         recipe.green_curve = Vec::new();
         recipe.blue_curve = Vec::new();
@@ -1122,6 +1123,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                     recipe.red_curve = red;
                     recipe.green_curve = green;
                     recipe.blue_curve = blue;
+                    handed_now = true;
                     cast_handoff = Some(HandOffFacts {
                         from: cast_handoff.map_or(from, |prior| prior.from),
                         to: h.wb,
@@ -1172,6 +1174,41 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                         }),
                         ..won
                     };
+                }
+            }
+            // v1.17.1: the curves are read off the finished frame's residual
+            // but applied before the mixer, the grade and saturation, so what
+            // they deliver on the finished frame is not the residual they were
+            // solved for. A cast the four gates ADMITTED as fitted (not
+            // projected, not handed off) has its loop closed on the finished
+            // frame (`refine_curves_on_finished_frame`), and the refined curves
+            // are put to the same four gates on the same frames; they ship only
+            // when those admit them too. Every verdict above is the fitted
+            // curve's, as before — the refinement changes no gate's decision,
+            // only what an admitted cast delivers.
+            if !out.refused() && out.projected.is_none() && !handed_now {
+                let mut refined = recipe.clone();
+                refine_curves_on_finished_frame(&s_img, &mut refined, &cur, &tp, &rw_source, &rw_target, &evidence);
+                let moved = refined.red_curve != recipe.red_curve
+                    || refined.green_curve != recipe.green_curve
+                    || refined.blue_curve != recipe.blue_curve;
+                if moved {
+                    let px = pixels_of(&render::develop_preview(&s_img, &refined));
+                    let arm = cells.as_ref().and_then(|c| c.region_arm(&cur, &px));
+                    let again = cast_gate_outcome_with_ratio(
+                        &cur,
+                        &px,
+                        &tp,
+                        &evidence,
+                        hue_vouch,
+                        cells.as_ref().zip(arm.as_ref().map(|(_, v)| v.as_slice())),
+                        full_cast_accept_ratio,
+                    );
+                    if !again.refused() {
+                        (recipe.red_curve, recipe.green_curve, recipe.blue_curve) =
+                            (refined.red_curve, refined.green_curve, refined.blue_curve);
+                        out = again;
+                    }
                 }
             }
             let measured_ratio = out.readings.map(|r| r.ratio).unwrap_or(0.0);
