@@ -741,6 +741,21 @@ pub(super) fn replace_zone(
         fit::pixels_of(&render::develop_preview(image, &without_parent))
     };
     let uncorrected_error = fit::look_err_with_evidence(&uncorrected, target, &report.evidence);
+    // A REPLACEMENT is judged on the finished end state (v1.17.1). Where the
+    // single zone shipped (`parent_index`), the bands do not attach to a
+    // frame the zone never touched — they compete with a correction of the
+    // SAME region, on the same finished frame, so the frame-wide reading is a
+    // fair referee and the bands may not leave it worse than the single zone
+    // did by more than the finished-frame arbitration's own margin (1e-4,
+    // the 4a' mixer-vs-absence step). The zone stage's attachment tolerance
+    // (`frame_regression_tol`) exists because a frame-wide reading cannot
+    // judge a zone against NO zone when the two frames hold it in different
+    // shares; it stays for the bands-only exit, where there is no single zone
+    // to compare with. Measured on the zoned fixture under the closed curve:
+    // the bands took the land zone's deltaE 9.57 -> 6.40 and the finished
+    // frame 0.03535 -> 0.03606, inside the old tolerance (0.02) and worse
+    // than the single inverted zone they replaced.
+    let frame_allowance = if parent_index.is_some() { 1e-4 } else { parent.frame_regression_tol };
     let neutral = LocalAdjustment::default();
     for model in models {
         report.recipe = saved_recipe.clone();
@@ -828,7 +843,7 @@ pub(super) fn replace_zone(
             else if !boundary_passed { values::BOUNDARY_BUDGET }
             else if after >= before - ZONE_GLOBAL_REGRESSION_TOL { values::DELTA_E_MARGIN }
             else if zone_after > zone_before + ZONE_GLOBAL_REGRESSION_TOL { values::ZONE_DO_NO_HARM }
-            else if frame_after > saved_error + parent.frame_regression_tol { values::FRAME_DO_NO_HARM }
+            else if frame_after > saved_error + frame_allowance { values::FRAME_DO_NO_HARM }
             else if !no_seam_regression { values::BOUNDARY_REGRESSION }
             else if !ramps_follow { values::RAMP_STEEPER } else { "accepted" };
         let complete = solved && boundary_passed;
