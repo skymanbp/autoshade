@@ -862,6 +862,7 @@ pub(super) fn replace_zone(
     if let Some((recipe, notes, args, _)) = best {
         report.recipe = recipe;
         report.notes = notes;
+        drop_replaced_zone_notes(report, &parent.label, saved_notes.len());
         let pixels = fit::pixels_of(&render::develop_preview(image, &report.recipe));
         report.err_after = fit::look_err_with_evidence(&pixels, target, &report.evidence);
         crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
@@ -876,6 +877,33 @@ pub(super) fn replace_zone(
                 crate::rationale::Note::new(crate::rationale::keys::ZONE_SUBZONES_REGRESSED, args));
         }
     }
+}
+
+/// The bands REPLACE the single zone, so they replace its account too: every
+/// note the single zone wrote under its own label before the bands were
+/// tried (its divergence reading, its robust down-weighting, its quality
+/// verdict, "correction attached") is taken out of the notes and out of the
+/// persisted rationale, which otherwise kept claiming a correction the recipe
+/// no longer carries (v1.17.1: on the zoned fixture the rationale said "Zoned
+/// land correction attached … zone residual 0.110 → 0.086" beside the three
+/// land bands that replaced it, and the quality gate counted five verdicts for
+/// four masks). Only notes written before `replaced` (the notes as they stood
+/// when the bands were tried) and labelled exactly `label` go; the bands'
+/// own notes carry their band labels, and every other zone keeps its own.
+fn drop_replaced_zone_notes(report: &mut FitReport, label: &str, replaced: usize) {
+    let mut kept = Vec::with_capacity(report.notes.len());
+    for (i, note) in std::mem::take(&mut report.notes).into_iter().enumerate() {
+        let parents = i < replaced && note.args.iter().any(|(k, v)| *k == "label" && v == label);
+        if parents {
+            let text = crate::rationale::render_one(&note);
+            if let Some(at) = report.recipe.rationale.find(&text) {
+                report.recipe.rationale.replace_range(at..at + text.len(), "");
+            }
+        } else {
+            kept.push(note);
+        }
+    }
+    report.notes = kept;
 }
 
 #[cfg(test)]
@@ -1352,5 +1380,37 @@ mod tests {
         assert!(report.recipe.masks.iter().all(|m| m.role == MaskRole::ZoneSky && !m.components.is_empty()));
         let after = fit::pixels_of(&render::develop_preview(&source, &report.recipe));
         assert!(delta_e(&after, &target, &parent.source_weights) < delta_e(&before, &target, &parent.source_weights) - ZONE_GLOBAL_REGRESSION_TOL);
+    }
+
+    /// The single zone the bands replace takes its own account with it: its
+    /// "correction attached" and quality verdict leave the notes AND the
+    /// persisted rationale, while another zone's notes stay. MUTATION: drop
+    /// the `drop_replaced_zone_notes` call and the sky's own attach sentence
+    /// survives beside the bands that replaced it.
+    #[test]
+    fn the_bands_replace_the_single_zones_account_too() {
+        let (source, target, parent, mut report) = fixture(true);
+        let target = fit::pixels_of(&target);
+        let own = |label: &str, key: &'static str| crate::rationale::Note::new(key, vec![
+            ("label", label.to_string()), ("texture", "1.000".into()),
+            ("clip_before", "0.00".into()), ("clip_after", "0.00".into()),
+        ]);
+        for note in [
+            own("sky", crate::rationale::keys::ZONE_QUALITY_PASSED),
+            own("land", crate::rationale::keys::ZONE_QUALITY_PASSED),
+        ] {
+            crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes, note);
+        }
+        replace_zone(&source, &target, &mut report, &parent, None);
+        assert!(report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_SUBZONES_ATTACHED),
+            "premise: the bands replace the sky here: {}", report.recipe.rationale);
+        let labelled = |label: &str| report.notes.iter().filter(|n| n.key == crate::rationale::keys::ZONE_QUALITY_PASSED
+            && n.args.iter().any(|(k, v)| *k == "label" && v == label)).count();
+        assert_eq!(labelled("sky"), 0, "the replaced sky's verdict stayed: {}", report.recipe.rationale);
+        assert_eq!(labelled("land"), 1, "another zone's verdict went with it");
+        assert!(!report.recipe.rationale.contains("Local quality gate passed for sky:"), "{}", report.recipe.rationale);
+        assert!(report.recipe.rationale.contains("Local quality gate passed for land:"));
+        assert_eq!(crate::rationale::render_en(&report.notes), report.recipe.rationale,
+            "the notes and the persisted string still say the same thing");
     }
 }

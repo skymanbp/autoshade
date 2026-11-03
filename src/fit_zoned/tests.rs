@@ -6120,14 +6120,16 @@ fn calibration_sky_zone_survives_luminance_with_partial_chroma_refusal() {
     );
     let gated = note_number(note, "charged").max(note_number(note, "colour_charged"));
     assert!(gated <= ZONE_BOUNDARY_RIM_MAX, "charged {gated} (raw rim {after})");
+    // v1.17.1: read on the band that SHIPS (`sky`, "sky · band 1/2"). Until
+    // then this found the single sky zone's own note, which the bands
+    // replaced and which stayed in the rationale beside them; a replaced
+    // zone's notes now leave with it (`subzones::drop_replaced_zone_notes`).
     let colour_note = report
         .notes
         .iter()
         .find(|note| {
             note.key == crate::rationale::keys::ZONE_COLOUR_VOUCHED_AT_SHARE
-                && note.args.iter().any(|(key, value)| {
-                    *key == "label" && value == MaskRole::ZoneSky.tag()
-                })
+                && note.args.iter().any(|(key, value)| *key == "label" && *value == sky.name)
         })
         .expect("the one-sided calibration sky must refuse its full colour move and ship a share");
     assert!(
