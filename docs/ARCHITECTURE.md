@@ -1,6 +1,12 @@
 # AutoShade — Architecture
 
-> Status: **implemented** (v1.17.0 — one develop law for every recipe, a
+> Status: **implemented** (v1.17.1 — the cast curves close their loop on the finished
+> frame; colour bands replace a zone only if the finished frame is no worse; the
+> colour-grade wheels obey the strength budget; a channel at the clip in both frames
+> testifies to the colour field; the zone confidence is read on the render that ships;
+> our own sidecar is read against the document it was written as; the analyzer and
+> the engine render the colour field in one arithmetic;
+> v1.17.0 — one develop law for every recipe, a
 > camera profile colour data only; dark sensor values signed; lens distortion
 > and chromatic aberration by their own knots and the installed profile's
 > vignetting; a mask's Color tint; the white balance takes only the colour
