@@ -9370,6 +9370,58 @@ fn the_hand_off_walk_meets_white_balances_the_stage_gates_refuse() {
 }
 
 
+/// The hand-off's white-balance gates, end to end (the v1.15.0 ledger's
+/// last open line; the unit form above has stood alone since 2026-10-30).
+/// The neutral-and-blue frame of the unit form at 192x160, its target split
+/// by brightness as [`the_hand_off_walk_is_entered_by_a_cast_that_really_fans`]
+/// splits [`hue_ramps`]: the darker half under 6500 K, the brighter half
+/// under 3000 K. No white balance answers a split by brightness, so the cast
+/// curves take it and the fan gate alone convicts them: the walk is entered.
+/// Of the 23 white balances the walk judges at strength 1.0 (5700 K / +4.8
+/// to 40000 K / +100), the 20 from 6550 K / +17.7 on paint hue mass the
+/// target holds nowhere, so the stage's own reader
+/// ([`super::atmosphere::read_wb_step`]) does not admit them and the walk
+/// refuses them (`hand_off_wb_step_refused`); nothing refused ships and the
+/// finished frame does no harm. At the default strength the stage reads
+/// neither gate, and neither does the walk: 0 refusals at 0.65. It is the
+/// foreign-hue gate that refuses here; every candidate re-hues at most 0.53%
+/// of the frame, and at 1.0 the re-hued-share gate's own limit is the whole
+/// frame (`FitBudget::for_strength` interpolates it to 1.0), so that gate
+/// cannot refuse at this strength. On `hue_ramps` the same split is judged
+/// at 0.7 to 0.9 with no refusal at 0.7 or 0.8 and one, on the foreign-hue
+/// gate, at 0.9.
+///
+/// MUTATION: make `hand_off_wb_step_refused` answer false — the walk counts no
+/// refusal at 1.0.
+#[test]
+fn the_hand_off_walk_meets_the_stage_gates_end_to_end_above_default() {
+    use super::solve::route;
+    use crate::recipe::GradeStrength;
+    let (w, h) = (192u32, 160u32);
+    let src = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+        let l = 0.10 + 0.80 * x as f32 / (w - 1) as f32;
+        let p = if y < h / 2 { [l, l, l] } else { [l * 0.3, l * 0.55, l] };
+        image::Rgb(p.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8))
+    }));
+    let shade = |k: f32| {
+        render::develop_preview(&src, &EditRecipe { temperature_k: Some(k), ..Default::default() }).to_rgb8()
+    };
+    let (dark, bright) = (shade(6500.0), shade(3000.0));
+    let tgt = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+        if x < w / 2 { *dark.get_pixel(x, y) } else { *bright.get_pixel(x, y) }
+    }));
+    route::take();
+    let rep = fit_recipe_with(&src, &tgt, FitOptions { strength: GradeStrength::new(1.0), provider: None });
+    let seen = route::take();
+    assert!(seen.hand_off_entered >= 1, "premise: the fan enters the walk: {seen:?}");
+    assert!(seen.wb_step_refusals >= 1, "the stage's gates refuse a candidate the walk meets: {seen:?}");
+    assert!(rep.err_after <= rep.err_before, "{} -> {}", rep.err_before, rep.err_after);
+    let _ = fit_recipe_with(&src, &tgt, FitOptions { strength: GradeStrength::new(0.65), provider: None });
+    let quiet = route::take();
+    assert!(quiet.hand_off_entered >= 1, "premise at the default: {quiet:?}");
+    assert_eq!(quiet.wb_step_refusals, 0, "at the default the walk reads neither gate: {quiet:?}");
+}
+
 /// The share search walks from As Shot: the zero end of the path is the
 /// as-shot Kelvin with no tint move (Tint is relative, v1.17.0, the Camera
 /// Raw law family removed) and the far end the free fit, and every point
