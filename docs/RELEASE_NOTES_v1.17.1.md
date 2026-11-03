@@ -18,10 +18,9 @@ battery and reference-pair gate before it shipped.
   mixer, the grade and the saturation stages, which used to scale what the
   curves delivered. A cast the fit admits now has its knots refined on the
   finished frame, one step at a time while the look improves, and ships only
-  if the same checks admit the refined curves. On the sunset street pair the
+  if the same checks admit the refined curves. On the neon street pair the
   red fan of the earlier releases is gone and the frame's colour distance to
-  the target fell from 5.81 to 4.75; the sunset rooftops pair went 2.78 →
-  1.95 and the seaside street 2.28 → 2.08. No pair is worse than v1.17.0.
+  the target fell from 5.81 to 4.75. No pair is worse than v1.17.0.
 - **Colour bands replace a zone only if the finished frame is no worse.** A
   set of brightness bands that replaces a single zone was held only to the
   zone stage's attachment tolerance, so it could win on the zone's own error
@@ -37,6 +36,9 @@ battery and reference-pair gate before it shipped.
   sunset rooftops pair the upper clouds, a third of whose pixels have red at
   the clip in both frames, were pulled away from their colour. Such pixels
   now hold their vertices; a pixel clipped on one side only still stays out.
+  The rooftops pair's colour distance to the target fell from 2.78 to 1.95
+  and the seaside street's from 2.28 to 2.08 across this and the fit changes
+  above.
 - **The zone confidence is read on the render that ships.** The confidence
   verdict was taken before the band trials, so a zone the bands replaced
   still set it from a correction the recipe no longer carried.
