@@ -50,16 +50,55 @@ def load(name: str) -> np.ndarray:
     return np.fromfile(path, dtype="<f4")
 
 
+def preconditioner(system):
+    """`System::preconditioner`: the inverse diagonal of `AᵀWA + λI + L` — the
+    data term's diagonal (each pixel's trilinear weights on a vertex summed
+    before squaring, since the last column/row/bin folds onto itself), the
+    ridge, and one smoother weight per neighbour along each axis."""
+    c = system.current.astype(np.float64)
+    g = system.guide.astype(np.float64)
+    ln2 = np.log(2.0)
+    per = np.stack([
+        ln2 * ln2 * np.sum(c * c, axis=1), c[:, 0] ** 2, c[:, 1] ** 2, c[:, 2] ** 2,
+        np.sum((c - g[:, None]) ** 2, axis=1),
+    ], axis=1) * system.total_weight.astype(np.float64)[:, None]
+    diagonal = np.zeros((grid_experiment.VERTICES, PARAMS))
+    for pixel_ids, pixel_tri, pixel_per in zip(system.ids, system.tri.astype(np.float64), per):
+        if not pixel_per.any():
+            continue
+        merged = {}
+        for i, t in zip(pixel_ids, pixel_tri):
+            merged[int(i)] = merged.get(int(i), 0.0) + t
+        for i, t in merged.items():
+            diagonal[i] += t * t * pixel_per
+    diagonal = diagonal.reshape(SY, grid_experiment.SX, grid_experiment.SB, PARAMS) + TIKHONOV
+    for axis, weight in enumerate((SMOOTH[1], SMOOTH[0], SMOOTH[2])):
+        if weight <= 0.0:
+            continue
+        first = [slice(None)] * 4
+        second = [slice(None)] * 4
+        first[axis] = slice(0, -1)
+        second[axis] = slice(1, None)
+        diagonal[tuple(first)] += weight
+        diagonal[tuple(second)] += weight
+    diagonal = diagonal.ravel()
+    return np.where(diagonal > 0.0, 1.0 / np.where(diagonal > 0.0, diagonal, 1.0), 1.0).astype(np.float32)
+
+
 def conjugate_gradients(system, rhs, start, free, iterations):
-    """`System::conjugate_gradients`: CG restricted to the `free` parameters,
-    warm-started from `start`; the held ones keep their value and take no step."""
+    """`System::conjugate_gradients`: Jacobi-preconditioned CG restricted to the
+    `free` parameters, warm-started from `start`; the held ones keep their
+    value and take no step. The stop is on the residual's own norm."""
+    inverse = preconditioner(system)
     vector = start.copy()
     if np.all(vector == 0.0):
         residual = rhs.copy()
     else:
         residual = rhs - system.matvec(vector, TIKHONOV, SMOOTH)
     residual[~free] = 0.0
-    direction = residual.copy()
+    z = residual * inverse
+    direction = z.copy()
+    rz = float(np.dot(residual.astype(np.float64), z.astype(np.float64)))
     rr = float(np.dot(residual.astype(np.float64), residual.astype(np.float64)))
     initial = max(rr, 1e-30)
     used = 0
@@ -69,15 +108,17 @@ def conjugate_gradients(system, rhs, start, free, iterations):
         denominator = float(np.dot(direction.astype(np.float64), product.astype(np.float64)))
         if denominator <= 1e-20:
             break
-        alpha = np.float32(rr / denominator)
+        alpha = np.float32(rz / denominator)
         vector += alpha * direction
         residual -= alpha * product
         next_rr = float(np.dot(residual.astype(np.float64), residual.astype(np.float64)))
         if next_rr <= initial * 1e-10:
             rr = next_rr
             break
-        direction = residual + np.float32(next_rr / max(rr, 1e-30)) * direction
-        rr = next_rr
+        z = residual * inverse
+        rz_next = float(np.dot(residual.astype(np.float64), z.astype(np.float64)))
+        direction = z + np.float32(rz_next / max(rz, 1e-30)) * direction
+        rr, rz = next_rr, rz_next
     return vector, {"iterations": used, "relative_residual": (rr / initial) ** 0.5}
 
 

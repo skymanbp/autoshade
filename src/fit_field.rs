@@ -556,6 +556,10 @@ struct System<'a> {
     target_delta: Vec<[f32; 3]>,
     splat: Splat,
     occupancy: Vec<f32>,
+    /// The diagonal of the data term `AᵀWA`, per parameter: the CG's Jacobi
+    /// preconditioner together with the ridge and the smoother's diagonal
+    /// ([`System::preconditioner`]).
+    data_diagonal: Vec<f64>,
 }
 
 impl<'a> System<'a> {
@@ -573,7 +577,65 @@ impl<'a> System<'a> {
             }
         }
         let occupancy: Vec<f32> = mass.into_iter().map(|v| v as f32).collect();
-        Self { current, guide, fit_weight, target_delta, splat, occupancy }
+        // diag(AᵀWA): Σ_i w_i·(pixel i's trilinear weight on the vertex)²·(∂δ/∂p)²,
+        // with ∂δ_c/∂EV = ln2·c_c, ∂δ_c/∂gain_c = c_c, ∂δ_c/∂slope = c_c − guide,
+        // summed over the channels — the operator `matvec` applies, read on its
+        // diagonal. A pixel on the last column, row or bin splats twice onto one
+        // vertex (`splat_table` folds the high index), so its weights on that
+        // vertex are summed before they are squared.
+        let mut data_diagonal = vec![0.0f64; VERTICES * PARAMS];
+        for (i, (ids, tri)) in splat.ids.iter().zip(&splat.tri).enumerate() {
+            let (c, g, w) = (&current[i], guide[i] as f64, fit_weight[i] as f64);
+            if w <= 0.0 { continue; }
+            let cc = [c[0] as f64, c[1] as f64, c[2] as f64];
+            let per = [
+                LN2 * LN2 * (cc[0] * cc[0] + cc[1] * cc[1] + cc[2] * cc[2]),
+                cc[0] * cc[0],
+                cc[1] * cc[1],
+                cc[2] * cc[2],
+                cc.iter().map(|&v| (v - g) * (v - g)).sum::<f64>(),
+            ];
+            let mut merged: [(u32, f64); 8] = [(u32::MAX, 0.0); 8];
+            for (&id, &weight) in ids.iter().zip(tri) {
+                if let Some(slot) = merged.iter_mut().find(|(at, _)| *at == id || *at == u32::MAX) {
+                    slot.0 = id;
+                    slot.1 += weight as f64;
+                }
+            }
+            for &(id, weight) in merged.iter().filter(|(id, _)| *id != u32::MAX) {
+                let base = id as usize * PARAMS;
+                for (p, d) in per.iter().enumerate() { data_diagonal[base + p] += w * weight * weight * d; }
+            }
+        }
+        Self { current, guide, fit_weight, target_delta, splat, occupancy, data_diagonal }
+    }
+
+    /// The inverse diagonal of the whole system `AᵀWA + λI + L`: the data
+    /// term's own diagonal ([`Self::data_diagonal`]), the ridge, and the
+    /// smoother's (one `weight` per neighbour along each axis — the diagonal
+    /// of [`laplacian`]'s operator). A Jacobi preconditioner states no number
+    /// of its own: it rescales each parameter by the curvature the solve
+    /// already gives it, so CG reaches the SAME minimiser in fewer steps.
+    /// Why the solve needs it: the data curvature grows with a vertex's
+    /// occupancy and with c², so a populated vertex's EV and a thinly
+    /// evidenced vertex's gain sit far apart on the diagonal, and the plain
+    /// CG paid for that spread in steps: p39's three solves stopped on the
+    /// 90-step budget at relative residuals 3e-4 to 8e-4; preconditioned they
+    /// stop on the 1e-5 tolerance in 70 to 85 steps.
+    fn preconditioner(&self, tikhonov: f32, smooth: [f32; 3]) -> Vec<f32> {
+        let mut diagonal: Vec<f64> = self.data_diagonal.iter().map(|d| d + tikhonov as f64).collect();
+        let strides = [FIELD_X * FIELD_B * PARAMS, FIELD_B * PARAMS, PARAMS];
+        let counts = [FIELD_Y, FIELD_X, FIELD_B];
+        for (axis, &weight) in [smooth[1], smooth[0], smooth[2]].iter().enumerate() {
+            if weight <= 0.0 { continue; }
+            let (stride, count) = (strides[axis], counts[axis]);
+            for i in 0..diagonal.len() {
+                if (i / stride) % count + 1 >= count { continue; }
+                diagonal[i] += weight as f64;
+                diagonal[i + stride] += weight as f64;
+            }
+        }
+        diagonal.into_iter().map(|d| if d > 0.0 { (1.0 / d) as f32 } else { 1.0 }).collect()
     }
 
     fn forward(&self, v: &[f32]) -> Vec<[f32; 3]> {
@@ -615,7 +677,8 @@ impl<'a> System<'a> {
         out
     }
 
-    /// The bounded least-squares solve: conjugate gradients (f64 dot products,
+    /// The bounded least-squares solve: Jacobi-preconditioned conjugate
+    /// gradients ([`Self::preconditioner`]; f64 dot products,
     /// a per-pass step budget, a relative-residual stop at 1e-10, the
     /// `denominator <= 1e-20` break), then every vertex's colour change limited
     /// to its bounds ALONG ITS OWN DIRECTION ([`limit_colour_change`]) and
@@ -700,6 +763,8 @@ impl<'a> System<'a> {
         let mask = |values: &mut [f32]| {
             for (slot, &open) in values.iter_mut().zip(free) { if !open { *slot = 0.0; } }
         };
+        let inverse = self.preconditioner(tikhonov, smooth);
+        let precondition = |r: &[f32]| -> Vec<f32> { r.iter().zip(&inverse).map(|(r, m)| r * m).collect() };
         let mut vector = start;
         let mut residual: Vec<f32> = if vector.iter().all(|&v| v == 0.0) {
             rhs.to_vec()
@@ -708,7 +773,11 @@ impl<'a> System<'a> {
             rhs.iter().zip(&product).map(|(b, a)| b - a).collect()
         };
         mask(&mut residual);
-        let mut direction = residual.clone();
+        // The stop stays on the RESIDUAL's own norm, so the tolerance means
+        // what it meant before the preconditioner.
+        let mut z = precondition(&residual);
+        let mut direction = z.clone();
+        let mut rz = dot(&residual, &z);
         let mut rr = dot(&residual, &residual);
         let initial = rr.max(1e-30);
         let mut used = 0usize;
@@ -718,16 +787,18 @@ impl<'a> System<'a> {
             mask(&mut product);
             let denominator = dot(&direction, &product);
             if denominator <= 1e-20 { break; }
-            let alpha = (rr / denominator) as f32;
+            let alpha = (rz / denominator) as f32;
             for (i, slot) in vector.iter_mut().enumerate() {
                 *slot += alpha * direction[i];
                 residual[i] -= alpha * product[i];
             }
             let next = dot(&residual, &residual);
             if next <= initial * 1e-10 { rr = next; break; }
-            let beta = (next / rr.max(1e-30)) as f32;
-            for (slot, &r) in direction.iter_mut().zip(&residual) { *slot = r + beta * *slot; }
-            rr = next;
+            z = precondition(&residual);
+            let rz_next = dot(&residual, &z);
+            let beta = (rz_next / rz.max(1e-30)) as f32;
+            for (slot, &zi) in direction.iter_mut().zip(&z) { *slot = zi + beta * *slot; }
+            (rr, rz) = (next, rz_next);
         }
         (vector, SolveInfo { iterations: used, relative_residual: (rr / initial).sqrt() as f32 })
     }

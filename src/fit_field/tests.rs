@@ -359,6 +359,54 @@ fn field_identity_pair_is_all_zero() {
     assert_eq!(field.band_dispersion, [0.0; FIELD_B]);
 }
 
+/// A dark, thinly lit sky over a bright, well-lit ground, each asking for its
+/// own colour change: the data term's curvature is ∝ occupancy·c², so the
+/// sky's red gain carries a diagonal two orders under the ground's EV — the
+/// spread that made the seaside street's three solves stop on the 90-step
+/// budget, not on the tolerance. Jacobi-preconditioned by the system's own
+/// diagonal the solve reaches the tolerance inside the budget.
+///
+/// MUTATION: make `System::preconditioner` return all ones (plain CG) — the
+/// solve runs the whole budget and stops short of the tolerance.
+#[test]
+fn a_dark_sky_over_a_bright_ground_solves_to_its_tolerance_inside_the_budget() {
+    // The analysis raster's own size: the data curvature grows with a vertex's
+    // pixel count, and the spread it makes is what the budget ran out on.
+    let (w, h) = (384usize, 256usize);
+    let mut lcg = Lcg(0x0d4c_5c1e);
+    let current: Vec<[f32; 3]> = (0..w * h)
+        .map(|i| {
+            let y = i / w;
+            let t = 0.03 * (lcg.unit() - 0.5);
+            if y < h * 3 / 5 {
+                let v = 0.03 + 0.10 * y as f32 / (h * 3 / 5) as f32 + 0.3 * t;
+                [byte_round(v * 0.45), byte_round(v * 0.8), byte_round(v * 1.25)]
+            } else {
+                let v = 0.60 + 0.38 * (y - h * 3 / 5) as f32 / (h * 2 / 5) as f32 + t;
+                [byte_round(v * 1.05), byte_round(v * 0.95), byte_round(v * 0.8)]
+            }
+        })
+        .collect();
+    let guide = smooth_3tap_luma(&current, w, h);
+    let target: Vec<[f32; 3]> = current
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let p = if i / w < h * 3 / 5 { [0.0, 0.30, 0.05, -0.05, 0.0] } else { [-0.30, 0.0, 0.0, 0.0, 0.1] };
+            let d = delta(c, guide[i], &p);
+            [byte_round(c[0] + d[0]), byte_round(c[1] + d[1]), byte_round(c[2] + d[2])]
+        })
+        .collect();
+    let evidence = fit::evidence_model_for(&current, &target, w as u32, h as u32);
+    let field = LocalField::solve(&current, &target, w as u32, h as u32, &evidence).expect("solve");
+    assert!(
+        field.solve.iterations < ITERATIONS && field.solve.relative_residual <= 1e-5,
+        "the solve stops on its tolerance, not on its budget: {} steps, relative residual {:.2e}",
+        field.solve.iterations,
+        field.solve.relative_residual,
+    );
+}
+
 /// Two solves of one input must be bit-identical: no HashMap iteration, no threads,
 /// no fast-math.
 #[test]
@@ -778,7 +826,15 @@ fn calibration_local_support_is_not_constant() {
 /// The NumPy solver's ceiling on the calibration pair `neutral.jpg -> target.jpg`,
 /// measured on the Rust module's OWN exported analysis pixels, guide and fit weight.
 ///
-/// PROVENANCE — RE-MEASURED 2026-11-03 for v1.17.1's f64 parameter read
+/// PROVENANCE — RE-MEASURED 2026-11-03 for v1.18.0's Jacobi-preconditioned
+/// conjugate gradients (`System::preconditioner`; `scripts/field_check.py`
+/// ported with it), by the three steps below: NumPy ceiling 0.073203 against
+/// the Rust port's 0.073203, `max |grid_rust - grid_numpy| = 1.5e-6`, both
+/// solvers 34 CG iterations where the unpreconditioned solve took 52 (the
+/// same tolerance reached sooner: the diagonal scales away the spread
+/// between well- and thinly-evidenced vertices). The constant stands.
+///
+/// RE-MEASURED 2026-11-03 for v1.17.1's f64 parameter read
 /// (`slice_flat` and `delta` keep the per-pixel parameters in the f64 they
 /// are accumulated in, as the engine does), by the three steps below: NumPy
 /// ceiling 0.073202, unchanged, against the Rust port's 0.073203 (52 CG
@@ -834,7 +890,7 @@ fn calibration_local_support_is_not_constant() {
 /// RAW-path renders, a different baseline.
 const NUMPY_FIELD_CEILING_CALIBRATION: f32 = 0.073_202_0;
 /// The largest per-parameter disagreement between the two solvers over all
-/// 3072 vertices: measured 6.6e-6 in the 2026-11-03 run, 1.0e-5 in the 2026-10-29 run, 6.0e-7 in the 2026-10-21 run (1.50e-5 at the 8-row
+/// 3072 vertices: measured 1.5e-6 in the 2026-11-03 preconditioned run, 6.6e-6 in the 2026-11-03 run before it, 1.0e-5 in the 2026-10-29 run, 6.0e-7 in the 2026-10-21 run (1.50e-5 at the 8-row
 /// grid in 2026-08), bounded here at a legible 1e-4.
 const NUMPY_FIELD_GRID_MAX_DELTA: f32 = 1e-4;
 
