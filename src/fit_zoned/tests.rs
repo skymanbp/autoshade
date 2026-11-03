@@ -6019,6 +6019,48 @@ fn a_zone_whose_movable_class_already_matches_is_left_alone() {
     path.remove();
 }
 
+/// The zone stage's confidence is read on the render that ships. On the
+/// calibration pair the bands replace the single sky zone, so the
+/// confidence verdict has to come after the band trials and read each
+/// accepted region on the finished frame. Until v1.17.1 it was taken before
+/// `replace_zone`, from the single sky zone's own residual, and the shipped
+/// confidence described a correction the recipe no longer carried.
+#[test]
+fn a_zoned_fits_confidence_is_read_on_the_render_that_ships() {
+    let Some(root) = fit::calibration_corpus() else { return };
+    let source = image::open(root.join("neutral.jpg")).expect("calibration neutral.jpg");
+    let target = image::open(root.join("target.jpg")).expect("calibration target.jpg");
+    let sky_mask = image::open(root.join("sky-mask.png")).expect("calibration sky-mask.png").to_luma8();
+    let mask_path = fixture_mask_path("calibration-confidence-scratch");
+    sky_mask.save(mask_path.path()).unwrap();
+    let mut report = fit::fit_recipe(&source, &target);
+    let global_confidence = report.recipe.confidence;
+    attach_zones(&source, &target, &mut report, &sky_mask, &sky_mask, &mask_path);
+    let position = |key: &str| report.notes.iter().position(|n| n.key == key);
+    let bands = position(crate::rationale::keys::ZONE_SUBZONES_ATTACHED)
+        .expect("premise: the bands replace a single zone on the calibration pair");
+    let verdict = position(crate::rationale::keys::ZONE_CONFIDENCE).expect("the zone stage states its confidence");
+    assert!(verdict > bands, "the confidence was read before the bands shipped");
+    let note = &report.notes[verdict];
+    let (worst, frame) = (note_number(note, "worst"), note_number(note, "frame"));
+    // It is read on the frame that ships: the finished frame's own error
+    // (`err_after`, set by the band trial that won) ...
+    let (s_img, t_img) = fit::analysis_pair(&source, &target);
+    let shipped = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
+    let shipped_err = fit::look_err_with_evidence(&shipped, &fit::pixels_of(&t_img), &report.evidence);
+    assert!((frame - shipped_err).abs() <= 0.0005, "the verdict read frame {frame}, the shipped recipe renders {shipped_err}");
+    // ... and the shipped confidence is the verdict it states, through the
+    // slope, floored by the global stage's claim (the note's three decimals
+    // bound the comparison at half a unit of the third decimal times the slope).
+    let claim = global_confidence.min(fit::clamp_confidence(1.0 - worst * ZONE_CONFIDENCE_SLOPE));
+    assert!(
+        (report.recipe.confidence - claim).abs() <= 0.0005 * ZONE_CONFIDENCE_SLOPE,
+        "confidence {} is not the stated verdict's {claim} (worst {worst})",
+        report.recipe.confidence
+    );
+    mask_path.remove();
+}
+
 #[test]
 fn calibration_sky_zone_survives_luminance_with_partial_chroma_refusal() {
     let Some(root) = fit::calibration_corpus() else { return };

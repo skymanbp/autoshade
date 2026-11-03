@@ -471,6 +471,9 @@ pub(super) fn attach_zones_with_divergence(
     // what every printout pairs it with. What changes is that it no longer
     // doubles as the zone stage's verdict.
     report.err_after = frame_err;
+    subzones::replace_zone(&s_img, &tgt_px, report, &sky_attachment, divergence.sky.divergence);
+    subzones::replace_zone(&s_img, &tgt_px, report, &land_attachment, divergence.land.divergence);
+    let final_px = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
     // CONFIDENCE, on the other hand, is a verdict, and it now comes from what
     // was actually judged: the WORST accepted zone's own residual, on the
     // zone scale, floored against the global stage's own claim so neither
@@ -478,7 +481,19 @@ pub(super) fn attach_zones_with_divergence(
     // area-weighted: a perfectly matched sky over a wrecked foreground is not
     // a 70%-confident fit, and the zones are few and large enough that the
     // worst one is never a sliver.
-    let worst = semantic::worst_region_residual(&accepted.iter().map(|z| z.after).collect::<Vec<_>>());
+    //
+    // It is read on the render that SHIPS (v1.17.1): after the band trials,
+    // each accepted zone's region measured on the finished frame, whether the
+    // single zone or the bands that replaced it carry it. Until then it was
+    // read before `replace_zone`, from the single zones' residuals, so a zone
+    // the bands replaced still set the shipped confidence with a residual of
+    // a correction the recipe no longer carried.
+    let worst = semantic::worst_region_residual(
+        &accepted
+            .iter()
+            .map(|z| zone_err(&zone_moments(&final_px, &z.source_weights), &zone_moments(&tgt_px, &z.target_weights)))
+            .collect::<Vec<_>>(),
+    );
     let zone_conf = fit::clamp_confidence(1.0 - worst * ZONE_CONFIDENCE_SLOPE);
     report.recipe.confidence = report.recipe.confidence.min(zone_conf);
     crate::rationale::push_note(
@@ -489,13 +504,10 @@ pub(super) fn attach_zones_with_divergence(
             vec![
                 ("n", accepted.len().to_string()),
                 ("worst", format!("{worst:.3}")),
-                ("frame", format!("{frame_err:.3}")),
+                ("frame", format!("{:.3}", report.err_after)),
             ],
         ),
     );
-    subzones::replace_zone(&s_img, &tgt_px, report, &sky_attachment, divergence.sky.divergence);
-    subzones::replace_zone(&s_img, &tgt_px, report, &land_attachment, divergence.land.divergence);
-    let final_px = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
     fit::append_finished_disclosure(
         report,
         &final_px,
