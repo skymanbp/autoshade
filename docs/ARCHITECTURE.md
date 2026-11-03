@@ -241,8 +241,8 @@
 > `scripts/roundtrip_gate.py` is an optional developer instrument (Photoshop
 > with Camera Raw, driven through `scripts/acr_render.ps1`), not part of the
 > release battery.
-> 1829 library + 26 CLI + 297 GUI + 2+2 contract tests are enumerated in the GUI
-> build; the library result is 1814 pass + 15 `#[ignore]`d forensic probes and
+> 1837 library + 26 CLI + 297 GUI + 2+2 contract tests are enumerated in the GUI
+> build; the library result is 1822 pass + 15 `#[ignore]`d forensic probes and
 > the GUI result is 293 pass + four ignored (an explicit scratch-recipe export
 > probe and the offline panel, window and mode-workspace screenshots) in the ordinary battery. The one CLI name added for v1.6.2 is the `--negative`
 > refusal pair (a RAW source, a baked negative); the library and GUI lists are
@@ -276,7 +276,17 @@
 > edit read as the edit, a maskless edit sending no mask and layering only
 > what changed, and the ignored tuning bench on real answers) and two GUI names
 > (no side-panel text runs under the scrollbar, and the ignored offline panel
-> screenshots). For v1.17.0, by name against the v1.16.0 battery: library
+> screenshots). For v1.17.1, by name against the v1.17.0 battery: library
+> +8 / −0 — the 8 added: 3 in `xmp` (our own sidecar over a Lightroom base
+> reads back as the develop it carries, a later Lightroom edit to a
+> base-carried key still wins, a written record that does not verify is
+> disclosed and dropped), 2 in `fit_field` (a channel clipped in both frames
+> testifies and keeps its colour, the engine renders the analyzer's field bit
+> for bit), 2 in `fit_zoned` (the bands replace the single zone's account too,
+> a zoned fit's confidence is read on the render that ships), 1 in `fit` (the
+> grade wheels obey the strength budget); nothing removed; GUI +0 / −0;
+> CLI 26 → 26. For
+> v1.17.0, by name against the v1.16.0 battery: library
 > +92 / −22 — the 92 added: 44 in `render` (the one develop law and the
 > profile stage as colour data, the base curve as every recipe's start, the
 > point curve as one law, chromatic aberration by its own knots, the linear
