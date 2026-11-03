@@ -396,12 +396,12 @@ look below included.
 The global reverse-fit derives one `FitBudget` from `GradeStrength` and
 interpolates linearly between these pinned points:
 
-| Strength | EV | Saturation | Per-band HSL | WB gain | WB ratio | WB rotation share | Full cast ratio | Curve slope | Confidence cap | Veto |
-|---|---:|---:|---:|---|---:|---:|---:|---|---:|---|
-| 0.00 | +/-0.5 | +/-15 | +/-6 | 0.90..1.12 | 1.20 | 0.05 | 1.50 | 0.7..1.3 | 0.50 | withhold |
-| 0.65 | +/-1.0 | +/-30 | +/-18 | 0.80..1.25 | 1.40 | 0.05 | 2.00 | 0.5..1.5 | 0.50 | withhold |
-| 0.85 | interpolated | interpolated | interpolated | interpolated | interpolated | 0.593 | interpolated | interpolated | interpolated | disclose |
-| 1.00 | +/-2.5 | +/-60 | +/-45 | 0.50..2.00 | 3.00 | 1.00 | 3.00 | 0.25..3.0 | 0.35 | disclose |
+| Strength | EV | Saturation | Per-band HSL | Grade wheel | WB gain | WB ratio | WB rotation share | Full cast ratio | Curve slope | Confidence cap | Veto |
+|---|---:|---:|---:|---:|---|---:|---:|---:|---|---:|---|
+| 0.00 | +/-0.5 | +/-15 | +/-6 | 6 | 0.90..1.12 | 1.20 | 0.05 | 1.50 | 0.7..1.3 | 0.50 | withhold |
+| 0.65 | +/-1.0 | +/-30 | +/-18 | 18 | 0.80..1.25 | 1.40 | 0.05 | 2.00 | 0.5..1.5 | 0.50 | withhold |
+| 0.85 | interpolated | interpolated | interpolated | interpolated | interpolated | interpolated | 0.593 | interpolated | interpolated | interpolated | disclose |
+| 1.00 | +/-2.5 | +/-60 | +/-45 | 45 | 0.50..2.00 | 3.00 | 1.00 | 3.00 | 0.25..3.0 | 0.35 | disclose |
 
 The default-strength exception is deliberate: at or below 0.65 an out-of-budget
 WB request remains as-shot, byte-identical to the pre-F1 path. Above default,
@@ -410,7 +410,10 @@ linear tint), rounds exactly once as a legal renderer WB, and is disclosed when
 clamped. Its pre/post renders pass the foreign-hue veto and the weighted
 rotation allowance; a failure returns the WB to as-shot with a typed note. WB
 gain ratio, WB rotation share, and Full cast look-error ratio are separate
-quantities; the latter retains its historical 2.0 default. A
+quantities; the latter retains its historical 2.0 default. The grade wheel
+column (v1.17.1, `FitBudget::grade_wheel`) is each colour-grade wheel's
+Saturation ceiling on its 0..100 axis: the per-band HSL ceiling read as a
+share of the band's ±100 and applied to the wheel's reach. A
 direction-consistent all-one-sided cast is measured from population
 chromaticity. The confidence value remains the measured look-error ladder,
 only capped by the strength budget; it is not increased to reward higher
@@ -989,14 +992,28 @@ display-referred delta is `dc = ln2*c*EV + c*gain_ch + (c - guide)*slope`, with
 `guide` the 3-tap-smoothed `luma601` of the CURRENT render — the same pixels
 the producers start from. The fit weight is the FROZEN evidence
 `source_weights` times a local structural support term (`1 - D` from one
-`fit::structure_divergence` reading per `12 x 8` cell) times an unclipped test
-on both frames; the module never builds a second evidence model. The normal
+`fit::structure_divergence` reading per `12 x 8` cell) times the pair's
+testimony (`fit_field::testifies`, v1.17.1): no channel at or under 1/255 in
+either frame, and every channel inside 254/255 in both frames or at the clip in
+both. A channel at the clip on both sides is known on both sides; a pixel
+clipped on one side only stays out. Until v1.17.1 only pixels inside the clip
+in both frames testified, while the field was still applied to the rest: on
+the sunset-rooftops pair a third of the upper clouds' pixels have red at the
+clip in both frames and the field pulled it 0.999 → 0.972 against a target at
+0.998. The evidence cells keep their target-only clip exclusion
+(`fit_field::unclipped` on the target), because a pixel at the clip on both
+sides cannot show whether a move took its cell toward the target. The module
+never builds a second evidence model. The normal
 equations are solved by conjugate gradient with f64 accumulators, Tikhonov
 `lambda = 1` toward zero (= the global recipe) plus an x/y/b Laplacian `s = 1`,
 at most 90 iterations or a squared relative residual of `1e-10`. The CG solve
 and every reduction stay sequential; only the 96 independent cell readings run
 in parallel and are scattered in cell order, so two solves of one input are
-bit-identical (pinned by test). There is no per-image regulariser sweep: the
+bit-identical (pinned by test). The analyzer reads and applies the field's
+per-pixel parameters in the f64 they are accumulated in, as
+`render::apply_colour_field` does, so its render of a grid and the engine's
+are the same bits (`the_engine_renders_the_analyzers_field_bit_for_bit`; until
+v1.17.1 a cast to f32 between the read and the delta left 1 ulp). There is no per-image regulariser sweep: the
 experiment's sweep picked `s = 0` on two of its five pairs to buy a last
 `0.003` of the objective, and determinism plus no selection bias are worth
 more. After the solve, vertices are clipped to `EV +-1.25 / gains +-0.35 /
@@ -1073,7 +1090,12 @@ and `src/recipe.rs` for the module name.
   quality gate that refuses those bands reads the frame correctly.
 - NumPy cross-check on the calibration pair, on the Rust module's OWN exported
   analysis pixels, guide and fit weight (NumPy 2.3.5 / Python 3.13.3). Re-run
-  2026-10-29 with `scripts/field_check.py` carrying the direction-preserving
+  2026-11-03 for v1.17.1's f64 parameter read: NumPy ceiling `0.073202`,
+  unchanged, against the Rust port's `0.073203` (52 CG iterations where it took
+  51: the solve's forward operator lost one rounding per pixel),
+  `max |grid_rust - grid_numpy| = 6.6e-6`; the calibration pair has no pixel
+  with a channel at the clip in both frames, so v1.17.1's testimony rule leaves
+  it unchanged. Before that, re-run 2026-10-29 with `scripts/field_check.py` carrying the direction-preserving
   limit above: NumPy ceiling `0.073202` against the Rust port's `0.073202`,
   `max |grid_rust - grid_numpy| = 1.0e-5`, 51 CG iterations, `supported
   748/3072` (the box solve read `0.072526`: holding each channel's own best
@@ -1579,8 +1601,11 @@ readers, never by the silent probes.
   ellipse centre in pixel space (**measured**).
 - `MaskInverted` controls inversion; `Flipped` is not treated as a second
   inversion bit (**measured polarity census**).
-- Payload: zlib level 9 + base64 for the recipe, CRC-32 over the JSON bytes
-  and over each raster, `asr:Payload="1"` format version; raster budget
+- Payload: zlib level 9 + base64 for the recipe and, on a merge, for the
+  document as written without the payload (`asr:Written`, v1.17.1, the
+  document the reconciliation measures Lightroom's edits against), CRC-32
+  over the JSON bytes, over that document (`asr:WrittenCrc32`) and over each
+  raster, `asr:Payload="1"` format version; raster budget
   **6 MiB** raw per sidecar (the document cap is 16 MiB); reconciliation
   tolerance **2e-4** per numeric leaf (Lightroom rewrites numbers to six
   decimals); Camera Raw defaults treated as materialisation, not edits:
@@ -1847,7 +1872,11 @@ prompt, only the rationale.
 `match` is inverse rendering rather than pixel copying: it aligns luminance
 CDFs, searches exposure, solves a regularized basis of engine controls, adds a
 residual monotone tone curve, closes saturation in a render/measure loop, and
-fits channel-cast curves, which ship only through four vetoes — the look-error
+fits channel-cast curves (since v1.17.1 an admitted cast is refined on the
+finished frame in a closed loop, one secant step per knot while the look error
+improves by 1e-4, because the curves render before the mixer, the grade and
+saturation, and ships only if the same gates admit the refined curves), which
+ship only through four vetoes — the look-error
 ratio against the strength budget's bound, `cast_paints_foreign_hues` (a visible
 colour family more than 45 degrees from every target family over at least 5% of
 the frame), `cast_rotates_a_region` (75 degrees over 5%), and since v1.2.3

@@ -96,7 +96,10 @@ regression**:
   solved against its own slider basis under a ridge and a model-selection
   prior; saturation closes by mean-chroma ratio.
 - The per-channel CDF residual becomes RGB curves admitted only through four
-  vetoes and a projection: one refuses a cast painting a hue more than 45°
+  vetoes and a projection, and since v1.17.1 an admitted cast closes its loop
+  on the finished frame (the curves render before the mixer, the grade and
+  saturation, so its knots are refined where they land and re-put to the same
+  vetoes): one refuses a cast painting a hue more than 45°
   from every target family over ≥ 5 % of the frame, and the fourth (v1.2.3)
   refuses curves that fan a single-hued class by ≥ 15° across luminance.
 - Residual tone-curve knots sit uniformly in the LUT's *output* domain, which

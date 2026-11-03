@@ -4143,7 +4143,10 @@ into XMP's compact form (simple properties become attributes on the root
 elements are dropped. So the writer puts the develop THERE: `asr:Recipe` (the
 recipe as the app holds it, display frame, raster paths reduced to bare
 names; zlib level 9, base64) with `asr:RecipeCrc32`, `asr:Payload="1"` and
-`asr:Writer`, plus `<asr:Rasters>` — every raster nothing can re-derive
+`asr:Writer`, on a merge (v1.17.1) `asr:Written` — the merged document as
+written, without the payload itself, zlib + base64 — with
+`asr:WrittenCrc32` over its bytes (left out when it would push the document
+past the 16 MiB cap), plus `<asr:Rasters>` — every raster nothing can re-derive
 (`LocalAdjustment::turnable_raster_paths_mut`: bitmap tiles and zone alphas,
 never an AI mask's cached re-derivation), each once, as `{Name, Crc32, Data}`
 in the compact struct form, under a 6 MiB raw budget with the overflow named
@@ -4158,8 +4161,11 @@ the strip-then-append discipline the `crs:` keys already follow.
 The reader decodes the `crs:` settings exactly as before, then RECONCILES
 (`payload::restore`). Three recipes meet: **P**, the payload; **C**, the crs
 reading of the document, where Lightroom's edits live; **W**, the crs reading
-of P projected through this writer with no payload (`xmp::bare_document`)
-and no `ash:` intent — what Lightroom would have handed back had it
+of the document P was written into (`payload::written_document`: the
+verified `asr:Written` record when the payload carries one, else P projected
+through this writer with no payload (`xmp::bare_document`), which IS the
+written document of a fresh sidecar and the best a payload from before the
+record can offer) with no `ash:` intent — what Lightroom would have handed back had it
 rewritten the file without touching anything: rounding included, and the
 intent gone, which is the measured half of the rewrite. Leaf by leaf over
 the JSON trees:
@@ -4184,6 +4190,26 @@ pair Lightroom removed is dropped, a correction Lightroom added is
 appended. A payload this build cannot trust — a
 format version it does not know, bytes that do not inflate, a CRC mismatch,
 an unknown recipe field — is disclosed and the crs reading stands alone.
+
+Why W is the record (v1.17.1): a merge keeps every key of its base this
+writer does not own — the camera profile, the creative Look and the
+lens-profile switch of the Lightroom sidecar beside the RAW — and the bare
+projection never had them, so on AutoShade's own unedited sidecar every
+base-carried key read as a Lightroom edit and replaced the develop's value,
+and the re-import rendered through the base's Look. A record that does not
+verify (not base64, does not inflate, past the recipe ceiling, a CRC
+mismatch, not UTF-8) is disclosed and W falls back to the bare projection. P
+is the authority only for the fields its recipe CARRIES: a control the
+recipe's schema era predates holds serde's default and is neither written
+nor stripped (`merge::unspoken_era_controls`), so the document's value stands
+there. The lens stamp reads the same record (`xmp::written_lens_profile`):
+while the document's `LensProfileEnable` / `LensProfileSetup` /
+`LensProfileName` / `LensProfileFilename` are as written,
+`pipeline::fresh_lens_profile_for_sidecar` returns the payload's own lens
+profile, exactly as the develop rendered it; when Lightroom changed them, or
+the document is not AutoShade's, the switches are obeyed as before. On three
+reference pairs the sidecar re-import is byte-identical to the export
+render.
 
 Rasters are placed beside the develop only on a DISCLOSING read (the
 `_with_diag` doors: the GUI's restore, the CLI, the web server, the store's
@@ -4568,7 +4594,20 @@ twice, once where it is fitted and once after the cast curves against its own
 absence on the finished frame; then per-channel CDF residuals as red/green/blue curves,
 admitted only through four vetoes (aggregate error, foreign-hue, rotation
 budget, hue fan) — each veto is a specific real-photo failure recorded at its const
-block.
+block. The curves are read off the finished frame's residual but the engine
+applies them before the mixer, the grade, clarity / texture and saturation,
+which scale what they deliver (the neon street's red knots arrived 1.17–1.63×
+as far from the uncurved frame as they were set), so since v1.17.1 a cast the
+four vetoes admit as fitted — not projected, not handed off to the white
+balance — has its loop closed on the finished frame
+(`fit::curves::refine_curves_on_finished_frame`): the curves rendered where the
+render applies them, one secant step per knot toward the target's quantile at
+the share of the frame that knot governs, rounds while the look error still
+improves by the finished-frame arbitration's own margin (1e-4) and at most
+`DO_NO_HARM_MAX_ROUNDS`, the best round kept. The refined curves ship only if
+the same four vetoes admit them on the same frames; every verdict before that
+is the fitted curves', so the refinement changes what an admitted cast
+delivers, never which cast is admitted.
 
 **The tone estimator follows the pairing scale** (R33 §D). `paired_correspondence`
 returns the robust map's points only at `PairingScale::Pixel`; at cell scale
@@ -4648,7 +4687,15 @@ R2 does not discard a weaker explanation whose native rendering may fare
 better. Both candidate sizes use `attach_one_zone`, the parent's
 PairingScale/correspondence, and the band's own population/cell probes. A
 trial replaces the parent, never stacks on it. The whole trial must improve
-the zone's mean deltaE by >0.02 and retain zone/frame do-no-harm. One shared
+the zone's mean deltaE by >0.02 and retain zone/frame do-no-harm. Where the
+single zone shipped, the frame's do-no-harm is a REPLACEMENT's (v1.17.1): the
+bands compete with a correction of the same region on the same finished
+frame, so they may leave it worse than the single zone did by no more than the
+finished-frame arbitration's own margin (1e-4) — held only to the zone stage's
+attachment tolerance (0.02) they had taken the zoned fixture's land zone
+deltaE 9.57 → 6.40 and the finished frame 0.03535 → 0.03606, worse than the
+single inverted zone they replaced. The attachment tolerance stays for the
+bands-only exit, which has no single zone to compare with. One shared
 boundary-budget shrink covers every band break and the semantic horizon,
 using the same frozen-rim measurement and zero-difference invariant as the
 single-zone gate. After that, the complete set must not regress the
@@ -4684,7 +4731,15 @@ the negative cross-rim pin catches that false admission.
 `a_target_referenced_cell_gap_reads_the_band_shape_not_the_texture` pins
 that a three-code checkerboard twin of the target reads under a code while a
 four-code band reads at least three. Rejected trials restore the recipe and
-notes; the single outcome note is the only change when no split ships.
+notes; the single outcome note is the only change when no split ships. An
+accepted trial replaces the single zone's account as well as its correction
+(v1.17.1, `drop_replaced_zone_notes`): every note the single zone wrote under
+its own label before the bands were tried — its divergence reading, its robust
+down-weighting, its quality verdict, "correction attached" — leaves the notes
+and the persisted rationale together, so neither claims a correction the
+recipe no longer carries and the quality gate counts no verdict for a mask
+that does not ship; the bands' notes carry their band labels and every other
+zone keeps its own.
 
 Replacement shrink uses the same boundary gate and bisection, but its zero
 baseline retains the accepted parent's controls on each band's geometry.
@@ -4885,8 +4940,10 @@ trial's gains and saturation exactly as the plain solve's and does not judge
 the tint, because the tint was read from the pairs on both sides of every band.
 A trial counts only when it shipped a tint, lands the zone's mean ΔE lower
 than the plain solve by `ZONE_GLOBAL_REGRESSION_TOL` and leaves the frame
-within the zone's own regression tolerance — the subzone bands' replacement
-rule — and the counting trial with the lower zone ΔE replaces the plain
+within the zone's own regression tolerance of what the plain solve left —
+the subzone bands' replacement rule until v1.17.1, which now holds a band set
+that replaces a shipped single zone to the finished-frame margin (1e-4) — and
+the counting trial with the lower zone ΔE replaces the plain
 solve; when none counts, the plain solve stands to the byte. On a
 gains-shaped gap a trial keeps or re-solves the same gains and can add only a
 residual tint that lands the zone closer (on the pinned warm-recolour zone,
@@ -5638,8 +5695,17 @@ within the region only what every hue band shares (a band asking nothing or
 the other way leaves the wheel nothing), the per-hue part being the mixer's,
 whose per-band hue is solved since the same day — modelled on the region's
 own pixels, admitted by the target's cells
-along the colour axis or at the largest share they vouch, and scaled by the
-stage strength like every other stage. The seaside street is the case: its
+along the colour axis or at the largest share they vouch, and held under the
+strength budget's wheel ceiling (`FitBudget::grade_wheel`, v1.17.1): the
+mixer's own band ceiling read as a share of its control's reach — 6 / 18 / 45
+of the band's ±100 — and applied to the wheel's 0..100 Saturation, so 6 at
+Strength 0, 18 at the default and 45 at 1, interpolated like the band's.
+Until then the wheels obeyed only the saturation chase's ceiling (30 / 60),
+which sat above what the seaside street's wheels asked at any strength, so
+the grade moved about as far at Strength 0 as at 1. A shipped wheel held at
+the ceiling says so (`FIT_NOTE_COLOR_GRADE_HELD`: the ceiling and the largest
+Saturation the paired pixels asked for), unless the cells' share cut it
+below the ceiling first, and a rescore carries the fact from the note. The seaside street is the case: its
 shadows ask warm (log blue/red −1.0) and its sky and highlights ask cool
 (+0.16), so there is no common part, the white balance stays as shot and the
 wheels carry the split tone — where the whole cloud's mass-weighted median,
@@ -6498,7 +6564,15 @@ control-set era's `crs:` keys, and a colour field owns none.
 ONE renderer: `render::apply_colour_field`, with `LocalField::render` a call
 into it and the guide (`render::field_guide_luma`, re-exported into
 `fit_field` under its analyzer name) and the axis mapping
-(`render::field_axis`) moved into the engine with it. The field runs LAST in
+(`render::field_axis`) moved into the engine with it. The solve's own forward
+operator — the trilinear read and the delta its ceiling and its CG solve
+render with (`fit_field::slice_flat`, `delta`) — keeps the eight-corner sum in
+the f64 it accumulates and applies the delta in f64, the arithmetic
+`render::apply_colour_field` performs on the same corners, so the analyzer's
+render of a grid and the engine's are the same bits
+(`fit_field::tests::the_engine_renders_the_analyzers_field_bit_for_bit`, on two
+full solved fields); until v1.17.1 `slice_flat` rounded the parameters to f32
+between the read and the delta, and the two differed by 1 ulp. The field runs LAST in
 `apply_develop`, after `apply_masks`, because it is the residual the masks
 could not reach and must read the frame they produced. A field that is off, at
 zero amount, or whose grid length disagrees with its own declared shape leaves
@@ -6756,7 +6830,7 @@ boundary stays under 2/255, are capped at `RANGE_MAX_BANDS`, and must carry
 `RANGE_MIN_EVIDENCE_SHARE` on both sides of the pair, both shares measured on
 the same 3-tap guide luma. Shape is read off the remainder with every sum
 weighted by the solve's own per-pixel fit weight (`LocalField.weight`: frozen
-evidence x local support x unclipped), so a pixel whose vertices hold the
+evidence x local support x `fit_field::testifies`), so a pixel whose vertices hold the
 occupancy-floor policy zero — a missing measurement, not a measured zero —
 cannot pose as spatial structure: `R2(4x4)` against the weighted 4x4 tile
 means, `R2(linear)` against the weighted least-squares plane solved in f64.
@@ -6921,7 +6995,13 @@ correct cast in the set and admits both wrecks
 `look_err`'s weighted sum — R17-R19's constants were each calibrated against a
 real failure pair. `AUTOSHADE_FIT_JOINT=off` removes the whole family for
 baseline comparison. A zoned fit's **confidence** now comes from the zones it
-actually accepted rather than the frame-global number this module's own
+actually accepted — read on the render that ships: since v1.17.1 after the
+band trials, each accepted zone's region measured on the finished frame
+whichever of the single zone or its bands carries it, where it used to be
+read before them from the single zones' residuals, so a zone the bands
+replaced set the confidence with a correction the recipe no longer carried;
+its frame figure is the shipped frame's error — rather than the frame-global
+number this module's own
 acceptance doc proves cannot judge a zone; `err_after` keeps its contract
 (frame-global, comparable to `err_before`) and the rationale says which is
 which.
