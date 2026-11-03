@@ -104,4 +104,20 @@ as written; ignored by other readers).
 
 ## Gates
 
-待填（fill_gates_v1171.py pre 从冻结快照电池与 gate_fit_final_1171 日志生成；目视结论手填）
+The release battery (`scripts/release_battery.sh`: the library, the desktop
+app and command line, and the calibration run, on a frozen copy of the release
+code at `57e9b4b`, with the calibration photos and the denoiser weights in
+reach): library **1822 passed / 0 failed / 15 ignored** (1868.38 s), CLI
+**26 / 0**, contract 2 + 2, doc-tests 0, GUI **293 / 0 / 4**, calibration run
+**1822 / 0 / 15** (2010.96 s; the tests gated on the calibration corpus ran on it here, where the default lane passes them without it);
+`audit_i18n` 0, the font check (923 of 924 code points embedded, one
+left to egui's bundle) and `check_doc_drift` (0 findings);
+clippy 0 warnings on both feature sets; the Python suite under `scripts/` 44
+tests, all passing (the suite under `python/` was not run: `python/` is unchanged
+since v1.17.0); `check_docs.py
+--gates` 28 / 4 PASS / FAIL on the snapshot — the test-count claims, still
+at v1.17.0's figures — and **32 / 0 / 0 PASS / FAIL / SKIP** once the counts were
+moved. By name against the v1.17.0 release battery: library 1829 → 1837 (+8 / −0); GUI
+297 → 297 (+0 / −0); CLI 26 → 26 (+0 / −0). The reverse fit changed, so the reference
+pairs were fitted again by the installed v1.17.0 command line and by this build:
+on the neon street pair (p40) the mean colour distance to the target at 1000 px fell from 6.16 to 5.28 over the frame and from 6.65 to 5.76 over the sky, and the sky shows no hue fan; the sunset rooftops (p36) 3.90 → 3.06 (sky 2.79 → 1.97), its upper clouds now the target's pink; the seaside street (p39) 3.59 → 3.45 (sky 4.09 → 3.62; top-centre blue-minus-red 54.1 → 56.0 against the target's 56.3); the lantern street (p38) 4.02 → 3.92; the dusk farmhouse (p41) 5.91 → 5.91 and the reference pair 7.91 → 7.91 at 0.85 (8.15 → 8.15 at 0.65, 7.90 → 7.90 at 1.0), their renders within one code of v1.17.0's; the pair whose target is another photograph (p37) 62.4, unchanged. The night pair (p42) fitted from its denoised master: 5.14 with a horizon ripple of 0.73, as v1.17.0 (from its RAW 7.59 / 3.68, also as v1.17.0). No pair is worse than v1.17.0. The three-way sheets (target | v1.17.0 | this build) were viewed for every pair.
