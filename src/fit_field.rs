@@ -461,26 +461,34 @@ fn splat_table(guide: &[f32], width: usize, height: usize) -> Splat {
 }
 
 /// `dc = ln2*c*EV + c*gain_c + (c - guide)*slope` (`GridSystem.forward`).
-fn delta(c: &[f32; 3], guide: f32, p: &[f32; PARAMS]) -> [f32; 3] {
+///
+/// The per-pixel parameters arrive in f64, as [`slice_flat`] accumulated
+/// them, and are used in f64: exactly the arithmetic
+/// `render::apply_colour_field` performs on the same eight corners. Until
+/// v1.17.1 they were rounded to f32 between the read and the delta, so the
+/// analyzer's render and the engine's differed in the last place (1 ulp,
+/// measured) while the docs here claimed bit-for-bit.
+fn delta(c: &[f32; 3], guide: f32, p: &[f64; PARAMS]) -> [f32; 3] {
     std::array::from_fn(|ch| {
-        (LN2 * c[ch] as f64 * p[0] as f64 + c[ch] as f64 * p[1 + ch] as f64
-            + (c[ch] - guide) as f64 * p[4] as f64) as f32
+        (LN2 * c[ch] as f64 * p[0] + c[ch] as f64 * p[1 + ch]
+            + (c[ch] - guide) as f64 * p[4]) as f32
     })
 }
 
-/// `GridSystem.slice_params` for one pixel: the trilinear read of the grid.
-fn slice_flat(v: &[f32], ids: &[u32; 8], tri: &[f32; 8]) -> [f32; PARAMS] {
+/// `GridSystem.slice_params` for one pixel: the trilinear read of the grid,
+/// kept in the f64 it is accumulated in ([`delta`]).
+fn slice_flat(v: &[f32], ids: &[u32; 8], tri: &[f32; 8]) -> [f64; PARAMS] {
     let mut acc = [0.0f64; PARAMS];
     for (&id, &weight) in ids.iter().zip(tri) {
         let base = id as usize * PARAMS;
         for (p, slot) in acc.iter_mut().enumerate() { *slot += weight as f64 * v[base + p] as f64; }
     }
-    acc.map(|value| value as f32)
+    acc
 }
 
 /// One per-pixel parameter vector applied as the field's delta, display-clamped.
 fn apply_params(
-    current: &[[f32; 3]], guide: &[f32], mut params: impl FnMut(usize) -> [f32; PARAMS],
+    current: &[[f32; 3]], guide: &[f32], mut params: impl FnMut(usize) -> [f64; PARAMS],
 ) -> Vec<[f32; 3]> {
     current.iter().enumerate().map(|(i, c)| {
         let d = delta(c, guide[i], &params(i));
@@ -503,7 +511,7 @@ fn apply_bands(
         let bin = guide[i].clamp(0.0, 1.0) * (FIELD_B - 1) as f32;
         let low = (bin.floor() as usize).min(FIELD_B - 1);
         let (high, f) = ((low + 1).min(FIELD_B - 1), bin - low as f32);
-        std::array::from_fn(|q| marginal[low][q] * (1.0 - f) + marginal[high][q] * f)
+        std::array::from_fn(|q| (marginal[low][q] * (1.0 - f) + marginal[high][q] * f) as f64)
     })
 }
 

@@ -89,7 +89,7 @@ pub(crate) fn plant(
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let d = delta(c, guide[i], &[ev(i, guide[i]), 0.0, 0.0, 0.0, 0.0]);
+            let d = delta(c, guide[i], &[ev(i, guide[i]) as f64, 0.0, 0.0, 0.0, 0.0]);
             [byte_round(c[0] + d[0]), byte_round(c[1] + d[1]), byte_round(c[2] + d[2])]
         })
         .collect()
@@ -259,6 +259,43 @@ fn a_channel_clipped_in_both_frames_testifies_and_keeps_its_colour() {
     assert!(of(1).any(|i| field.weight[i] > 0.0), "premise: the clipped-in-both pixels carry evidence weight");
     assert!(cut < 0.78, "premise: the warm pixels' red was cut toward 0.72: {cut:.4}");
     assert!(kept >= 0.98, "the clipped-in-both red is kept where the target keeps it: {kept:.4}");
+}
+
+/// The property the analyzer's ceiling and the user's export rest on: the
+/// field the solver measured its ceiling on (`apply_flat` over its own splat
+/// table) and the field the engine renders from the recipe are the same
+/// bytes, for a FULL solved field. Both read the eight corners with the same
+/// weights, accumulate in f64 in the same order and apply the delta in f64;
+/// until v1.17.1 `slice_flat` rounded the parameters to f32 in between and
+/// the two renders of one grid differed by 1 ulp (pixel 42 of a two-class
+/// frame, 1052788456 against 1052788457).
+#[test]
+fn the_engine_renders_the_analyzers_field_bit_for_bit() {
+    for (current, target, w, h) in [two_band_pair(), {
+        let (w, h) = FIXTURE;
+        let current = ramp(w, h, 0.05, 0.9, 0x5eed_00e1);
+        let target = current.iter().enumerate()
+            .map(|(i, c)| if i % w < w / 2 { [byte_round(c[0] * 1.08), c[1], byte_round(c[2] * 0.9)] } else { *c })
+            .collect();
+        (current, target, w as u32, h as u32)
+    }] {
+        let evidence = fit::evidence_model_for(&current, &target, w, h);
+        let field = LocalField::solve(&current, &target, w, h, &evidence).expect("solve");
+        let (w, h) = (w as usize, h as usize);
+        let guide = smooth_3tap_luma(&current, w, h);
+        let splat = splat_table(&guide, w, h);
+        let flat: Vec<f32> = field.grid.iter().flatten().copied().collect();
+        assert!(flat.iter().any(|&v| v != 0.0), "premise: the solved field is not zero");
+        let analyzer = apply_flat(&current, &guide, &splat, &flat);
+        let engine = field.render(&current);
+        let moved = analyzer.iter().zip(&current).filter(|(a, c)| a != c).count();
+        assert!(moved > w * h / 4, "premise: the field moves the frame ({moved} pixels)");
+        for (i, (a, b)) in analyzer.iter().zip(&engine).enumerate() {
+            for channel in 0..3 {
+                assert_eq!(a[channel].to_bits(), b[channel].to_bits(), "pixel {i} channel {channel}");
+            }
+        }
+    }
 }
 
 /// The recon's proven property: pull the solution hard enough toward zero and the
@@ -741,7 +778,16 @@ fn calibration_local_support_is_not_constant() {
 /// The NumPy solver's ceiling on the calibration pair `neutral.jpg -> target.jpg`,
 /// measured on the Rust module's OWN exported analysis pixels, guide and fit weight.
 ///
-/// PROVENANCE — RE-MEASURED 2026-10-29 for v1.17.0's direction-preserving
+/// PROVENANCE — RE-MEASURED 2026-11-03 for v1.17.1's f64 parameter read
+/// (`slice_flat` and `delta` keep the per-pixel parameters in the f64 they
+/// are accumulated in, as the engine does), by the three steps below: NumPy
+/// ceiling 0.073202, unchanged, against the Rust port's 0.073203 (52 CG
+/// iterations where it took 51: the solve's forward operator lost one
+/// rounding per pixel), `max |grid_rust - grid_numpy| = 6.6e-6` against
+/// 1.0e-5 before. The constant stands. Below, the earlier provenance as it
+/// stood.
+///
+/// RE-MEASURED 2026-10-29 for v1.17.0's direction-preserving
 /// limit (`System::solve`: each vertex's colour change scaled along its own
 /// direction and held, the slopes' active set alone; `scripts/field_check.py`
 /// ported with it), by the three steps below: NumPy ceiling 0.073202 against
@@ -788,7 +834,7 @@ fn calibration_local_support_is_not_constant() {
 /// RAW-path renders, a different baseline.
 const NUMPY_FIELD_CEILING_CALIBRATION: f32 = 0.073_202_0;
 /// The largest per-parameter disagreement between the two solvers over all
-/// 3072 vertices: measured 1.0e-5 in the 2026-10-29 run, 6.0e-7 in the 2026-10-21 run (1.50e-5 at the 8-row
+/// 3072 vertices: measured 6.6e-6 in the 2026-11-03 run, 1.0e-5 in the 2026-10-29 run, 6.0e-7 in the 2026-10-21 run (1.50e-5 at the 8-row
 /// grid in 2026-08), bounded here at a legible 1e-4.
 const NUMPY_FIELD_GRID_MAX_DELTA: f32 = 1e-4;
 
