@@ -154,6 +154,59 @@ pub(super) fn root_attrs(r: &EditRecipe, prefix: &str) -> String {
     )
 }
 
+/// The record of the document AS WRITTEN — `written`, the merged document
+/// without this payload — under the payload's prefix: `Written` (zlib +
+/// base64) and `WrittenCrc32` over its bytes. It is what [`restore`] measures
+/// Lightroom's edits against. A merge keeps every key of its base this writer
+/// does not own (the camera profile and Look a Lightroom sidecar carries, its
+/// lens-profile switch), so the bare projection of the recipe is not the
+/// document that was written: read against it, those keys were Lightroom
+/// edits and replaced the payload's values on our own unedited sidecar
+/// (v1.17.1, measured on the reference pairs' own Lightroom sidecars).
+/// Empty when the record would push the document past
+/// [`super::MAX_XMP_BYTES`]; the reader then measures against the bare
+/// projection, as it did before the record existed.
+pub(super) fn written_attrs(written: &str, prefix: &str) -> String {
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    let packed = z.write_all(written.as_bytes()).and_then(|()| z.finish()).unwrap_or_default();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&packed);
+    if packed.is_empty() || 2 * written.len() + b64.len() > super::MAX_XMP_BYTES {
+        return String::new();
+    }
+    format!(
+        "\n    {prefix}:WrittenCrc32=\"{:08x}\"\n    {prefix}:Written=\"{b64}\"",
+        crc32fast::hash(written.as_bytes()),
+    )
+}
+
+/// The lens profile a sidecar of OURS carries, when Lightroom has not touched
+/// the lens keys since it was written: the payload's own, exactly as the
+/// develop rendered it. `None` for a document with no payload this build
+/// reads, and for one whose `LensProfileEnable` / `LensProfileSetup` /
+/// `LensProfileName` / `LensProfileFilename` differ from the document as
+/// written ([`written_document`]) — an edit, which
+/// `pipeline::fresh_lens_profile_for_sidecar` then obeys.
+///
+/// Why (v1.17.1): those keys are not this writer's. A merge carries them from
+/// the base — the Lightroom sidecar beside the RAW — so our own unedited
+/// sidecar said `LensProfileEnable="0"` beside a develop that rendered the
+/// camera's distortion and vignetting correction, and the import stamp
+/// switched them off: with the profile and Look already restored, that alone
+/// left one reference pair's re-import 3.24 dE from its export outside the sky.
+pub fn written_lens_profile(xmp: &str) -> Option<crate::recipe::LensProfile> {
+    let payload = find(xmp)?.ok()?;
+    let written = written_document(&payload, None);
+    let keys = |doc: &str| {
+        (
+            super::lens_profile_enabled(doc),
+            super::lens_profile_setup(doc),
+            super::lens_profile_name(doc),
+            super::lens_profile_filename(doc),
+        )
+    };
+    (keys(xmp) == keys(&written)).then_some(payload.recipe.lens_profile)
+}
+
 /// The `<asr:Rasters>` child element: every raster the recipe cannot
 /// re-derive — [`crate::recipe::LocalAdjustment::turnable_raster_paths_mut`]
 /// is that set, the bitmap tiles and the zone alphas, and NOT an AI mask's
@@ -299,6 +352,11 @@ pub(crate) struct Raster {
 /// that verified, and what did not (disclosed at restore time).
 pub(crate) struct Payload {
     pub(crate) recipe: EditRecipe,
+    /// The document as written, without the payload ([`written_attrs`]):
+    /// `None` for a payload written before the record existed, a fresh
+    /// document (whose written form IS the bare projection), or a record that
+    /// did not verify.
+    pub(crate) written: Option<String>,
     pub(crate) rasters: Vec<Raster>,
     pub(crate) notes: Vec<String>,
 }
@@ -392,8 +450,48 @@ fn decode(xmp: &str, prefix: &str, packed: &str) -> Result<Payload, String> {
     }
     let recipe: EditRecipe =
         serde_json::from_slice(&json).map_err(|e| format!("the recipe JSON: {e}"))?;
-    let (rasters, notes) = read_rasters(xmp, prefix);
-    Ok(Payload { recipe, rasters, notes })
+    let (rasters, mut notes) = read_rasters(xmp, prefix);
+    let written = match read_written(xmp, prefix) {
+        Ok(written) => written,
+        Err(why) => {
+            notes.push(format!(
+                "the sidecar's record of the document AutoShade wrote could not be read ({why}) — Lightroom's edits were told from AutoShade's own values by re-projecting the develop instead"
+            ));
+            None
+        }
+    };
+    Ok(Payload { recipe, written, rasters, notes })
+}
+
+/// The [`written_attrs`] record, verified: `Ok(None)` when the document
+/// carries none.
+fn read_written(xmp: &str, prefix: &str) -> Result<Option<String>, String> {
+    let Some(packed) = simple_property(xmp, prefix, "Written") else { return Ok(None) };
+    let deflated = base64::engine::general_purpose::STANDARD
+        .decode(packed.trim().as_bytes())
+        .map_err(|e| format!("it is not base64: {e}"))?;
+    let mut bytes = Vec::new();
+    flate2::read::ZlibDecoder::new(&deflated[..])
+        .take(MAX_RECIPE_JSON + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("it does not inflate: {e}"))?;
+    if bytes.len() as u64 > MAX_RECIPE_JSON {
+        return Err(format!("it inflates past the {MAX_RECIPE_JSON}-byte ceiling this build reads"));
+    }
+    let want = simple_property(xmp, prefix, "WrittenCrc32").and_then(|s| u32::from_str_radix(s.trim(), 16).ok());
+    if want != Some(crc32fast::hash(&bytes)) {
+        return Err("its checksum does not match".to_string());
+    }
+    String::from_utf8(bytes).map(Some).map_err(|e| format!("it is not UTF-8: {e}"))
+}
+
+/// The document a payload's values were written into, as [`restore`] measures
+/// edits against it: the recorded one ([`written_attrs`]) when the payload
+/// carries it, else the bare projection of the recipe — which IS the written
+/// document of a fresh sidecar, and the best a payload from before the record
+/// can offer.
+pub(super) fn written_document(payload: &Payload, frame: Option<FrameAspect>) -> String {
+    payload.written.clone().unwrap_or_else(|| super::bare_document(&payload.recipe, frame))
 }
 
 /// Every `rdf:li` of `<prefix:Rasters>` as the `{prefix}:` fields it carries,
@@ -581,7 +679,7 @@ pub(crate) fn restore(
     for note in &payload.notes {
         warn(note.clone());
     }
-    let written = strip_mask_intent(&super::bare_document(&payload.recipe, frame));
+    let written = strip_mask_intent(&written_document(&payload, frame));
     // The raw reading: a photo-less outer read disables raster names only
     // once it is finished, so W keeps the bare names P and C are compared in.
     let written_then = super::read_document(&written, photo, None).0;
@@ -595,6 +693,29 @@ pub(crate) fn restore(
             return crs;
         }
     };
+    // The payload is the authority for every field its recipe CARRIES. A
+    // recipe older than a control carries none for it — serde filled the
+    // default, and the writer neither strips nor writes that key
+    // (`merge::unspoken_attr_keys`) — so the document's value stands there,
+    // whatever the payload's JSON spells. Until v1.17.1 the bare projection
+    // the payload was measured against lacked those keys, which gave the same
+    // answer by accident; measured against the document as written it would
+    // not (`written_attrs`).
+    let unspoken = super::merge::unspoken_era_controls(&payload.recipe);
+    if !unspoken.is_empty()
+        && let (Ok(mut restored), Ok(document)) = (serde_json::to_value(&r), serde_json::to_value(&crs))
+        && let (Some(out), Some(doc)) = (restored.as_object_mut(), document.as_object())
+    {
+        for (field, _) in unspoken {
+            match doc.get(field) {
+                Some(value) => out.insert(field.to_string(), value.clone()),
+                None => out.remove(field),
+            };
+        }
+        if let Ok(back) = serde_json::from_value(restored) {
+            r = back;
+        }
+    }
     if let Some(dir) = develop_dir {
         if materialize {
             place_rasters(&mut r, &payload.rasters, dir, &warn);

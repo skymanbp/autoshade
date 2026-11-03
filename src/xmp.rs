@@ -172,6 +172,7 @@ mod composition_tests;
 /// The AutoShade payload: the whole develop under this app's own namespace,
 /// which a Lightroom rewrite preserves (v1.3.1) — see the module's own docs.
 mod payload;
+pub use payload::written_lens_profile;
 
 #[cfg(test)]
 mod payload_tests;

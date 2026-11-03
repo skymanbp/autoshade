@@ -173,7 +173,6 @@ const WHOLE_BLOCKS: [&str; 4] = ["defringe", "param_", "cal_", "gray_"];
 /// none, so a gate that released part of one would publish exactly the shape
 /// the writer refuses to.
 pub(super) fn unspoken_attr_keys(r: &EditRecipe) -> std::collections::BTreeSet<&'static str> {
-    use crate::advisor::catalogue::global_value;
     // A name we do not hold is a name we must not delete — whatever the era.
     let mut out: std::collections::BTreeSet<&'static str> = Default::default();
     if r.camera_profile.is_empty() {
@@ -184,8 +183,18 @@ pub(super) fn unspoken_attr_keys(r: &EditRecipe) -> std::collections::BTreeSet<&
     if r.lightroom_named_lens_profile().is_none() {
         out.extend(["LensProfileSetup", "LensProfileName", "LensProfileFilename"]);
     }
+    out.extend(unspoken_era_controls(r).into_iter().map(|(_, k)| k));
+    out
+}
+
+/// The era half of [`unspoken_attr_keys`]: every control `r`'s schema era
+/// predates and `r` leaves at serde's default fill, as `(recipe field, crs
+/// key)`. A recipe CARRIES no value for these — and so neither does its
+/// payload, which is why `payload::restore` takes the document's.
+pub(super) fn unspoken_era_controls(r: &EditRecipe) -> Vec<(&'static str, &'static str)> {
+    use crate::advisor::catalogue::global_value;
     if r.schema_era >= crate::recipe::SCHEMA_ERA {
-        return out;
+        return Vec::new();
     }
     let neutral = EditRecipe::default();
     let keys: Vec<_> = (r.schema_era + 1..=crate::recipe::SCHEMA_ERA).flat_map(era_attr_keys).collect();
@@ -197,15 +206,13 @@ pub(super) fn unspoken_attr_keys(r: &EditRecipe) -> std::collections::BTreeSet<&
     };
     let block_untouched =
         |block: &str| keys.iter().filter(|(n, _)| n.starts_with(block)).all(|(n, _)| untouched(n));
-    out.extend(
-        keys.iter()
-            .filter(|(n, _)| match WHOLE_BLOCKS.iter().find(|b| n.starts_with(**b)) {
-                Some(block) => block_untouched(block),
-                None => untouched(n),
-            })
-            .map(|(_, k)| *k),
-    );
-    out
+    keys.iter()
+        .filter(|(n, _)| match WHOLE_BLOCKS.iter().find(|b| n.starts_with(**b)) {
+            Some(block) => block_untouched(block),
+            None => untouched(n),
+        })
+        .copied()
+        .collect()
 }
 
 pub fn merge_recipe_into_xmp(existing: &str, r: &EditRecipe) -> Option<MergeOutcome> {
@@ -434,8 +441,10 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
 
     let closing_len = if self_closing { 2 } else { 1 };
     let head = tag[..tag.len() - closing_len].trim_end().to_string();
+    // The opening tag up to where the payload's attributes go; they are
+    // appended at assembly (below), once the document they record is known.
     let new_tag = format!(
-        "{head}{tiff}{attrs}{payload}>",
+        "{head}{tiff}{attrs}",
         tiff = match declare_frame {
             FrameDecl::Whole => frame_declaration(frame),
             FrameDecl::Orientation => {
@@ -444,7 +453,6 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
             FrameDecl::Keep => String::new(),
         },
         attrs = owned_attrs(r, frame),
-        payload = payload::root_attrs(app, &payload_prefix),
     );
 
     // The element body: drop every owned child block, then prepend ours.
@@ -582,9 +590,10 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
         body.replace_range(start..end, "");
     }
 
-    let mut out = String::with_capacity(existing.len() + 256);
-    out.push_str(&existing[..desc_start]);
-    out.push_str(&new_tag);
+    let mut head = String::with_capacity(existing.len() + 256);
+    head.push_str(&existing[..desc_start]);
+    head.push_str(&new_tag);
+    let mut out = String::from(">");
     let (children, mut losses) = owned_children(r, !preserve_masks, frame);
     out.push_str(&children);
     // The creative profile: a base that carries a Look keeps its own verbatim
@@ -596,13 +605,24 @@ pub fn merge_recipe_into_xmp_in_frame_for_photo(
     }
     let (rasters, mut raster_losses) = payload::rasters_element(app, &payload_prefix, photo);
     losses.append(&mut raster_losses);
-    out.push_str(&rasters);
-    out.push_str(body.trim_end());
-    out.push_str("\n  </rdf:Description>");
-    out.push_str(&existing[tail_start..]);
-    Some(MergeOutcome {
-        doc: upgrade_era_marker(refresh_rationale_comment(out, r)),
-        notes,
-        losses,
-    })
+    let mut tail = body.trim_end().to_string();
+    tail.push_str("\n  </rdf:Description>");
+    tail.push_str(&existing[tail_start..]);
+    // The document is assembled twice: once WITHOUT the payload, which is the
+    // document as written that the payload then records (`payload::
+    // written_attrs`), and once with it. A merged document keeps the base's
+    // keys this writer does not own (a camera profile, a Look, the lens
+    // switch), so a bare projection of the recipe is not what was written,
+    // and the reader needs the real one to tell Lightroom's edits from the
+    // base's own settings (`payload::restore`).
+    let assemble = |attrs: &str, rasters: &str| {
+        upgrade_era_marker(refresh_rationale_comment(format!("{head}{attrs}{out}{rasters}{tail}"), r))
+    };
+    let written = assemble("", "");
+    let attrs = format!(
+        "{}{}",
+        payload::root_attrs(app, &payload_prefix),
+        payload::written_attrs(&written, &payload_prefix),
+    );
+    Some(MergeOutcome { doc: assemble(&attrs, &rasters), notes, losses })
 }

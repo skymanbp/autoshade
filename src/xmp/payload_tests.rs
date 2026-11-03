@@ -986,3 +986,120 @@ fn the_payload_carries_depth_protect_and_layer_paths_bare_and_refuses_a_share() 
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&dev);
 }
+
+/// A Lightroom sidecar as it sits beside a RAW before AutoShade writes over
+/// it: the settings this writer does not own (the camera profile, a creative
+/// Look, the lens-profile switch) are what a merge keeps from it.
+const LIGHTROOM_BASE: &str = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+     xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+     <rdf:Description rdf:about=\"\" \
+     xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+     crs:ProcessVersion=\"15.4\" crs:LensProfileEnable=\"0\" crs:HasSettings=\"True\" \
+     crs:CameraProfile=\"Adobe Standard\">\
+     <crs:Look>\
+      <rdf:Description crs:Name=\"Adobe Color\" crs:Amount=\"1\" \
+       crs:UUID=\"B952C231111CD8E0ECCF14B86BAA7077\" crs:SupportsMonochrome=\"false\">\
+      <crs:Parameters>\
+       <rdf:Description crs:Version=\"18.0\" crs:ProcessVersion=\"15.4\" \
+        crs:ConvertToGrayscale=\"False\" crs:CameraProfile=\"Adobe Standard\" \
+        crs:LookTable=\"E1095149FDB39D7A057BAB208837E2E1\">\
+       <crs:ToneCurvePV2012><rdf:Seq>\
+        <rdf:li>0, 0</rdf:li><rdf:li>22, 16</rdf:li><rdf:li>40, 35</rdf:li>\
+        <rdf:li>127, 127</rdf:li><rdf:li>224, 230</rdf:li><rdf:li>240, 246</rdf:li>\
+        <rdf:li>255, 255</rdf:li></rdf:Seq></crs:ToneCurvePV2012>\
+       </rdf:Description>\
+      </crs:Parameters>\
+      </rdf:Description>\
+     </crs:Look>\
+     </rdf:Description></rdf:RDF></x:xmpmeta>";
+
+/// Our own sidecar, merged over a Lightroom base and read back untouched, is
+/// the develop that was written — not the base's camera profile, Look and
+/// lens switch, which the merge keeps for Lightroom (v1.17.1). Until then the
+/// reader measured Lightroom's edits against a bare projection of the
+/// develop, which never had those keys, so all three read as Lightroom edits:
+/// the re-import rendered through the base's Adobe Color Look, and the import
+/// stamp switched the camera's lens correction off.
+///
+/// Render → write → read → render: the two renders are the same bytes.
+#[test]
+fn our_own_sidecar_over_a_lightroom_base_reads_back_as_the_develop_it_carries() {
+    let dir = scratch("own-over-base");
+    let mut r = rich(&dir);
+    r.lens_profile = crate::recipe::LensProfile {
+        vignette_on: true,
+        distortion_on: true,
+        ca_on: true,
+        ..Default::default()
+    };
+    let merged = merge_recipe_into_xmp(LIGHTROOM_BASE, &r).expect("a Lightroom base merges").doc;
+    for kept in ["crs:CameraProfile=\"Adobe Standard\"", "<crs:Look>", "crs:LensProfileEnable=\"0\""] {
+        assert!(merged.contains(kept), "premise: the merge keeps the base's {kept}: {merged}");
+    }
+    assert!(merged.contains("\n    asr:Written=\""), "the payload records the document as written");
+    let found = payload::find(&merged).expect("a payload").expect("decodes");
+    assert!(found.notes.is_empty(), "{:?}", found.notes);
+    assert!(found.written.as_deref().is_some_and(|w| !w.contains("asr:")), "the record holds no payload of its own");
+
+    // Field by field: everything the develop carries comes back as written.
+    let back = load(&merged);
+    assert_eq!(back.camera_profile, r.camera_profile, "the base's profile is not an edit");
+    assert_eq!(back.look, r.look, "the base's Look is not an edit");
+    assert_eq!(back, loaded(&r));
+    // The lens profile the import stamp hands every surface is the develop's.
+    assert_eq!(crate::xmp::written_lens_profile(&merged), Some(r.lens_profile.clone()));
+
+    // The render round trip, on a recipe the preview renders whole (the rich
+    // recipe's rasters are not images): the same bytes both ways.
+    let plain = EditRecipe {
+        exposure_ev: 0.35,
+        contrast: 12.0,
+        saturation: -8.0,
+        lens_profile: r.lens_profile.clone(),
+        ..Default::default()
+    };
+    let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(24, 16, |x, y| {
+        image::Rgb([(x * 10) as u8, (y * 15) as u8, ((x + y) * 6) as u8])
+    }));
+    let doc = merge_recipe_into_xmp(LIGHTROOM_BASE, &plain).expect("merges").doc;
+    let render = |r: &EditRecipe| crate::render::develop_preview(&img, r).to_rgb8().into_raw();
+    assert_eq!(render(&load(&doc)), render(&plain), "write -> read must not move a pixel");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// …and Lightroom's edits still win: a camera profile or lens switch changed
+/// AFTER the write differs from the recorded document, so it is Lightroom's.
+#[test]
+fn a_lightroom_edit_to_a_key_the_base_carried_still_wins() {
+    let dir = scratch("base-key-edit");
+    let mut r = rich(&dir);
+    r.lens_profile = crate::recipe::LensProfile { distortion_on: true, ..Default::default() };
+    let merged = merge_recipe_into_xmp(LIGHTROOM_BASE, &r).expect("merges").doc;
+    // The ROOT tag's profile comes first in the document; the Look's own
+    // baked one stays.
+    let edited = merged.replacen("crs:CameraProfile=\"Adobe Standard\"", "crs:CameraProfile=\"Adobe Portrait\"", 1);
+    assert_eq!(load(&edited).camera_profile, "Adobe Portrait", "the photographer's profile in Lightroom");
+    let switched = merged.replacen("crs:LensProfileEnable=\"0\"", "crs:LensProfileEnable=\"1\"", 1);
+    assert_eq!(crate::xmp::written_lens_profile(&switched), None, "a flipped switch is Lightroom's to obey");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The record of the written document is verified like the recipe: one
+/// that does not match its checksum is disclosed and dropped, and the reader
+/// measures against the bare projection as before the record existed.
+#[test]
+fn a_written_record_that_does_not_verify_is_disclosed_and_dropped() {
+    let dir = scratch("written-crc");
+    let r = rich(&dir);
+    let merged = merge_recipe_into_xmp(LIGHTROOM_BASE, &r).expect("merges").doc;
+    let key = "asr:WrittenCrc32=\"";
+    let start = merged.find(key).expect("a record checksum") + key.len();
+    let mut tampered = merged.clone();
+    let digits = start..start + 8;
+    let flipped = if &merged[digits.clone()] == "00000000" { "00000001" } else { "00000000" };
+    tampered.replace_range(digits, flipped);
+    let found = payload::find(&tampered).expect("a payload").expect("the recipe itself still decodes");
+    assert!(found.written.is_none());
+    assert!(found.notes.iter().any(|n| n.contains("record of the document AutoShade wrote")), "{:?}", found.notes);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1137,7 +1137,13 @@ fn a_creative_look_reaches_lightroom_from_a_fresh_document_and_a_lookless_merge(
     // …and one that has its own keeps it, verbatim and alone.
     let merged = crate::xmp::merge_recipe_into_xmp(LOOK_DOC, &r).expect("merges").doc;
     assert_eq!(merged.matches("<crs:Look>").count(), 1, "{merged}");
-    assert_eq!(xmp_to_recipe(&merged).look.map(|l| l.name), Some("Adobe Landscape".to_string()));
+    assert!(merged.contains("crs:Name=\"Adobe Landscape\""), "the base's Look, verbatim: {merged}");
+    // RE-PINNED v1.17.1 (was: reads back as "Adobe Landscape"): the payload is
+    // measured against the document AS WRITTEN (`payload::written_attrs`),
+    // which already held the base's Look, so that Look is not a Lightroom edit
+    // and our own document reads back as the develop it carries — this
+    // recipe's Look. The base's Look is still what Lightroom renders.
+    assert_eq!(xmp_to_recipe(&merged).look.map(|l| l.name), Some(look.name.clone()));
     // No Look, no element.
     assert!(!recipe_to_xmp(&EditRecipe::default()).contains("<crs:Look>"));
 }

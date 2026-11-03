@@ -3316,6 +3316,13 @@ pub fn fresh_lens_profile_for_sidecar(
     raw: &Path,
     sidecar: Option<&str>,
 ) -> crate::recipe::LensProfile {
+    // A sidecar of OURS whose lens keys Lightroom left as written carries the
+    // develop's own lens profile: that is the authority (`xmp::
+    // written_lens_profile`). The switches below are obeyed when they are an
+    // edit, or when the document is not ours.
+    if let Some(p) = sidecar.and_then(crate::xmp::written_lens_profile) {
+        return p;
+    }
     let query = sidecar.map_or_else(Default::default, |x| crate::lensmeta::LensQuery {
         named: sidecar_named_profile(x),
         focus_distance_m: crate::xmp::approximate_focus_distance(x),
