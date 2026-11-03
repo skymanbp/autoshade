@@ -144,4 +144,6 @@ pub(crate) fn source_text() -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod self_consistency;
 
