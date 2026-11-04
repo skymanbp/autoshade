@@ -826,7 +826,17 @@ fn calibration_local_support_is_not_constant() {
 /// The NumPy solver's ceiling on the calibration pair `neutral.jpg -> target.jpg`,
 /// measured on the Rust module's OWN exported analysis pixels, guide and fit weight.
 ///
-/// PROVENANCE — RE-MEASURED 2026-11-03 for v1.18.0's Jacobi-preconditioned
+/// PROVENANCE — RE-MEASURED 2026-11-04 for v1.18.0's objective (J*), by the
+/// three steps below on the R15 tree: NumPy ceiling 0.087511 against the
+/// Rust port's 0.087511, `max |grid_rust - grid_numpy| = 1.0e-5`, both
+/// solvers 33 CG iterations, on a global figure of 0.138096. The two
+/// solvers agree as before; what moved is the ruler the ceiling is read on
+/// (`look_err_with_evidence` is J* now, per-pixel CIE76 on local means where
+/// pixels pair) and the inputs it is read from (the global render, solved on
+/// J*, and the cells' structural support under the tie rule, 780f90d).
+/// 0.073202 -> 0.087511.
+///
+/// RE-MEASURED 2026-11-03 for v1.18.0's Jacobi-preconditioned
 /// conjugate gradients (`System::preconditioner`; `scripts/field_check.py`
 /// ported with it), by the three steps below: NumPy ceiling 0.073203 against
 /// the Rust port's 0.073203, `max |grid_rust - grid_numpy| = 1.5e-6`, both
@@ -888,9 +898,9 @@ fn calibration_local_support_is_not_constant() {
 /// 0.070_022_5 before that (2026-08-27, before the mixer). The recon's
 /// published grid figures are NOT reusable here: they were measured on the
 /// RAW-path renders, a different baseline.
-const NUMPY_FIELD_CEILING_CALIBRATION: f32 = 0.073_202_0;
+const NUMPY_FIELD_CEILING_CALIBRATION: f32 = 0.087_511_0;
 /// The largest per-parameter disagreement between the two solvers over all
-/// 3072 vertices: measured 1.5e-6 in the 2026-11-03 preconditioned run, 6.6e-6 in the 2026-11-03 run before it, 1.0e-5 in the 2026-10-29 run, 6.0e-7 in the 2026-10-21 run (1.50e-5 at the 8-row
+/// 3072 vertices: measured 1.0e-5 in the 2026-11-04 J* run, 1.5e-6 in the 2026-11-03 preconditioned run, 6.6e-6 in the 2026-11-03 run before it, 1.0e-5 in the 2026-10-29 run, 6.0e-7 in the 2026-10-21 run (1.50e-5 at the 8-row
 /// grid in 2026-08), bounded here at a legible 1e-4.
 const NUMPY_FIELD_GRID_MAX_DELTA: f32 = 1e-4;
 

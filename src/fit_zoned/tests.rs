@@ -2371,7 +2371,14 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
     // swing documented below), so that fixture ships none. Its boundary
     // verdict is still read above; the `sky` fixture still reaches the gate
     // with both zone classes.
-    assert_eq!(measured.len(), 2, "every accepted zone must reach the boundary gate: {measured:?}");
+    // RE-PINNED (v1.18.0, J*): 2 -> 3. The swing that refused the `sky+land`
+    // zones was the display objective's S reading three flat blocks a few
+    // codes apart as whole rank steps; J*'s S charges a tie within one output
+    // code by the fraction of a code that separates it (780f90d), and the
+    // zones' do-no-harm reads the per-pixel Lab terms, so that fixture's sky
+    // zone reaches the gate and ships again (measured: `sky` ZoneSky and
+    // ZoneLand at rim 0.006, `sky+land` ZoneSky at 0.007).
+    assert_eq!(measured.len(), 3, "every accepted zone must reach the boundary gate: {measured:?}");
     assert!(
         measured.iter().any(|(_, role, _)| *role == MaskRole::ZoneSky)
             && measured.iter().any(|(_, role, _)| *role == MaskRole::ZoneLand),
@@ -2447,7 +2454,11 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
     // own k, not a smooth frame curve. Colour on the 0.012 ceiling on both.
     // RE-PINNED 2026-11-03 (v1.17.1): `sky` 0.006 -> 0.003 — the sky zone
     // has less to paint once the curves carry the shared colour.
-    let expected = [0.003f32, 0.003];
+    // RE-PINNED (v1.18.0, J*): the global recipe under these zones and the
+    // zones' own verdicts are read on J*, so the candidates the gate shrinks
+    // moved: kept `sky` 0.003 -> 0.006 on both of its zones, and the third
+    // entry, `sky+land`'s sky zone, 0.007.
+    let expected = [0.006f32, 0.006, 0.007];
     for ((fixture, role, rim), expected) in measured.iter().zip(expected) {
         assert!(
             (*rim - expected).abs() <= 0.002,
@@ -2468,7 +2479,9 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
     // has less to paint once the curves carry the shared colour; `sky+land`
     // 0.057 -> 0.016 at k 0.316 — the finished-frame curves now correct the
     // land the inverted zone used to correct, so the candidate pair moves less.
-    let expected_candidates = [("sky", 0.0030f32, 0.212f32), ("sky+land", 0.0160, 0.316)];
+    // v1.18.0 (J*, same mechanism as above): `sky` 0.003 -> 0.039 at k
+    // 0.212 -> 0.165; `sky+land` 0.016 -> 0.047 at k 0.316 -> 0.166.
+    let expected_candidates = [("sky", 0.0390f32, 0.165f32), ("sky+land", 0.0470, 0.166)];
     for ((fixture, before, k), (want_fixture, want_before, want_k)) in
         candidates.iter().zip(expected_candidates)
     {
@@ -3874,23 +3887,21 @@ fn a_strictly_better_zone_attaches_and_publishes_its_own_arm() {
     assert!(!report.recipe.masks.is_empty(), "an accepted zone leaves its mask attached");
 }
 
-/// 2026-10-21. A colour class the pixels (or the cells) vouched is still the
-/// local-quality gate's to refuse — but the gate used to refuse the WHOLE
-/// correction, tone included, for a zone whose colour shipped, while a
-/// colour-withheld zone backed its tone off through the ladder until the
-/// gate passed. On the strictly-better fixture the warm gains crush the
-/// lower half's texture to 0.449 of the source's; without them the tone
-/// move reads 1.00 and attaches through the absolute arm. The colour class
-/// is probed alone, withheld by the gate under its own sentence, and the
-/// tone ships as it did before the paired vouch existed.
-///
-/// 2026-10-22: at sat 4 the zone's colour probe, vouched in chromaticity
-/// now, leaves the clipped-yellow target's Orange pixels unvouched, so the
-/// EVIDENCE gate withheld the colour before this gate could see it. At
-/// sat 2 the colour is admitted, the full move reads texture 0.419, the
-/// tone alone 0.845 (ev +2.50), and the absolute arm keeps it 0.942 → 0.716.
+/// REWRITTEN (v1.18.0, the structural term's tie rule, 780f90d). Until
+/// v1.18.0 this fixture reached the local-quality gate with its colour class
+/// vouched by the zone's pixels, and pinned that the gate withheld the colour
+/// alone and let the tone ship. Under the tie rule the clipped-bright target
+/// zone reads as the flat block it is (D 0.418, was under the 0.35 pairing
+/// line), so the zone is Cell-scale: its pixels are not each other's
+/// counterparts and the colour move is put to the target's 12x8 cell means
+/// instead, which do not vouch it (1.000 converged, 0.483 aligned over 12
+/// cells). The outcome the old name stated still holds, by the evidence gate
+/// that now fires first: the colour class is withheld whole, said once, and
+/// the tone ships alone through the absolute arm (0.942 -> 0.515). The
+/// quality gate's colour-only refusal no longer has a fixture that reaches
+/// it (lane c notes, rel1180).
 #[test]
-fn a_colour_move_the_quality_gate_refuses_leaves_the_tone_to_ship_alone() {
+fn a_colour_move_the_cells_do_not_vouch_leaves_the_tone_to_ship_alone() {
     let (accepted, report, _, _) =
         run_strictly_better_zone("quality-withholds-colour", 2.0, 8.0, 1.0, false);
     let zone = accepted
@@ -3899,25 +3910,24 @@ fn a_colour_move_the_quality_gate_refuses_leaves_the_tone_to_ship_alone() {
     assert_gains_withheld(mask.color_gains);
     assert_eq!(mask.saturation, 0.0, "the gate withholds the whole colour class");
     assert!(mask.exposure_ev > 0.0, "the tone move ships: {mask:?}");
-    let note = report
+    let withheld = report
         .notes
         .iter()
-        .find(|n| n.key == crate::rationale::keys::ZONE_COLOUR_WITHHELD_BY_QUALITY)
-        .unwrap_or_else(|| {
-            panic!("the gate's refusal of the colour class was silent: {}", report.recipe.rationale)
-        });
-    assert!(
-        note.args.iter().any(|(k, v)| {
-            *k == "ratio" && v.parse::<f32>().is_ok_and(|ratio| ratio < ZONE_TEXTURE_MIN)
-        }),
-        "the sentence carries the reading it was decided on: {note:?}"
-    );
+        .filter(|n| n.key == crate::rationale::keys::ZONE_EVIDENCE_WITHHELD_COLOUR_CELLS)
+        .count();
+    assert_eq!(withheld, 1, "the cells' refusal of the colour class is said once: {}", report.recipe.rationale);
     assert!(
         !report.notes.iter().any(|n| {
-            n.key == crate::rationale::keys::ZONE_QUALITY_TEXTURE_FAILED
+            n.key == crate::rationale::keys::ZONE_COLOUR_WITHHELD_BY_QUALITY
+                || n.key == crate::rationale::keys::ZONE_QUALITY_TEXTURE_FAILED
                 || n.key == crate::rationale::keys::ZONE_COLOUR_VOUCHED_BY_PIXELS
         }),
         "one outcome, one sentence: {}",
+        report.recipe.rationale
+    );
+    assert!(
+        report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_STRICTLY_BETTER),
+        "the tone ships through the absolute arm: {}",
         report.recipe.rationale
     );
 }
@@ -3953,108 +3963,47 @@ fn an_improving_atmosphere_zone_keeps_do_no_harm_and_never_the_absolute_arm() {
     );
 }
 
-/// …and the price. This pair improves its zone by a LARGE absolute margin
-/// (well past the floor) and the two ratio arms still refuse it — but the
-/// frame gets worse, by an amount that sits comfortably INSIDE the
-/// semantic route's own `ZONE_GLOBAL_REGRESSION_TOL`. The old outer gate
-/// would have waved that drift through; the absolute arm will not, so the
-/// zone is dropped. Relaxing the arm's frame condition back to that
-/// tolerance attaches this zone and fails here.
-///
-/// 2026-10-22: at (ev 4, warm 1.8) the full move now fails the texture
-/// gate (0.223), the colour is withheld by it and the tone alone pays the
-/// frame nothing (0.21473 → 0.19866), so there was no cost left to refuse.
-/// At (ev 3.5, warm 1.4) colour and tone both ship (texture 0.930), the
-/// zone reads 1.067 → 0.580 (the halving arm wants 0.534) and the frame
-/// drifts +0.00692, inside the 0.02 tolerance.
-///
-/// Later on 2026-10-22 that cost turned out to BE the squeezed paired tone
-/// map: the target's bright checker cells sit at the luma ceiling, the
-/// paired regression skips them, and the map read 0.62 of the target's
-/// p10–p90. The dilution guard now solves that zone from its distribution
-/// and the frame improves (0.19929 → 0.15292), so the price was gone. At
-/// (sat 2, ev 4, warm 1.4) the guard also fires (ratio 0.19) and the
-/// distribution-matched move still pays: the zone reads 1.102 → 0.636 (the
-/// halving arm wants 0.551, the gain clears the 0.012 floor) while the
-/// frame drifts +0.00987 — about 0.01 clear of both zero and the 0.02
-/// tolerance. Swept over sat {0.5, 1, 2, 4} × ev {1.5, 2, 3, 4, 6} ×
-/// warm {0.8, 1, 1.4}, this is the drop whose drift sits closest to the
-/// middle of that band.
-///
-/// Later still on 2026-10-22 (population-weighted dilution guard, the
-/// distribution branch's population score set and the fourth,
-/// distribution-matched arm) that move IMPROVED the frame, 0.22066 →
-/// 0.17250, and the strictly-better arm kept it. Re-swept over
-/// sat {0.5, 1, 2, 3, 4} × ev {2.5, 3, 3.5, 4, 4.5, 5} × warm
-/// {0.8, 1, 1.2, 1.4, 1.6}: nine settings drop with a gain past the floor,
-/// no halving and a drift inside the tolerance, all with drifts in
-/// +0.0001 … +0.0074. This one, (sat 4, ev 3.5, warm 1.4), carries the
-/// largest drift and sits inside a plateau of drops (warm 1.3 / 1.5 and
-/// ev 3.25 drop too; ev 3.75 improves the frame and attaches): the zone
-/// reads 1.218 → 0.690 (the halving arm wants 0.609) and the frame drifts
-/// +0.00738, inside the 0.02 tolerance. The distribution arm refuses it
-/// on two of its four conditions: it shares the strict arm's
-/// `frame_after <= frame_before`, and the zone's luma quantile gap starts
-/// at 0.5219 and lands at 0.3952 (read with the strict arm's frame
-/// condition relaxed, so the zone attaches and its render can be read):
-/// a real one-fifth gain, but far above the 0.015 `ZONE_TONAL_MATCHED`
-/// line. Relaxing the strict arm's frame condition to `+ 0.02` attaches
-/// this zone and fails here.
+/// REWRITTEN (v1.18.0, J*). This pair was the end-to-end "price" case of
+/// the strictly-better arm: a zone that improves by a LARGE absolute margin
+/// (well past the floor) while both ratio arms refuse it, and that the
+/// display objective read as costing the frame +0.00738, inside the old 0.02
+/// drift, so only the arm's own frame condition dropped it. On J* (per-pixel
+/// CIE76 on local means where pixels pair) the same move reads as a frame
+/// GAIN, 0.38180 -> 0.26230: the frame cost was the display objective's
+/// distribution reading, not the photo's. So the premise is gone, and the
+/// same fixture now pins the other side of the arm: a strictly-better zone
+/// whose frame gains FIT_QUANT and more is KEPT by that arm, says so with
+/// the readings it was decided on, and the distribution arm (whose landing
+/// line it is far from) does not claim it. The arm's frame condition itself
+/// stays pinned at predicate level
+/// (`the_strictly_better_arm_charges_an_absolute_floor_and_a_still_frame`).
 #[test]
-fn a_strictly_better_zone_is_refused_when_the_frame_pays() {
+fn a_strictly_better_zone_whose_frame_gains_on_j_star_is_kept_by_its_arm() {
     let (sat, ev, warm) = (4.0, 3.5, 1.4);
-    let (accepted, report, frame_before, _) =
+    let (accepted, report, frame_before, frame_after) =
         run_strictly_better_zone("strictly-better-frame-cost", sat, ev, warm, false);
+    let zone = accepted.unwrap_or_else(|| {
+        panic!("a strictly-better zone that gains the frame attaches: {}", report.recipe.rationale)
+    });
     assert!(
-        accepted.is_none(),
-        "a zone whose gain costs the frame must be dropped: {}",
+        fit::ships(frame_after, frame_before),
+        "premise: the frame gains FIT_QUANT ({frame_before} -> {frame_after})"
+    );
+    assert!(
+        zone.before - zone.after > ZONE_MIN_ABS_GAIN
+            && zone.after > zone.before * ZONE_ACCEPT_RATIO
+            && zone.after > ZONE_MATCHED_ERR,
+        "premise: only the strictly-better arm can take it ({} -> {})",
+        zone.before,
+        zone.after
+    );
+    assert!(
+        report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_STRICTLY_BETTER),
+        "the arm that kept it says so: {}",
         report.recipe.rationale
     );
-    let dropped = report
-        .notes
-        .iter()
-        .find(|n| n.key == crate::rationale::keys::ZONE_DROPPED)
-        .unwrap_or_else(|| panic!("the drop was silent: {}", report.recipe.rationale));
-    let drift: f32 = dropped
-        .args
-        .iter()
-        .find(|(k, _)| *k == "drift")
-        .map(|(_, v)| v.parse().expect("the drift is a number"))
-        .expect("the drop discloses its frame drift");
-    assert!(drift > 0.0, "premise: the frame must actually have paid ({drift})");
-    // The arm under test is the one that refused: the gain is past the
-    // absolute floor, and neither ratio arm would have taken the zone.
-    let reading = |key: &str| -> f32 {
-        dropped
-            .args
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, v)| v.parse().expect("a numeric residual"))
-            .unwrap_or_else(|| panic!("the drop discloses {key}"))
-    };
-    let (zone_before, zone_after) = (reading("before"), reading("after"));
-    assert!(
-        zone_before - zone_after > ZONE_MIN_ABS_GAIN
-            && zone_after > zone_before * ZONE_ACCEPT_RATIO
-            && zone_after > ZONE_MATCHED_ERR,
-        "premise: only the strictly-better arm's frame condition can refuse \
-             ({zone_before} -> {zone_after})"
-    );
-    assert!(
-        drift < ZONE_GLOBAL_REGRESSION_TOL,
-        "premise: the drift must sit INSIDE the old tolerance ({drift}),              so only the new arm's stricter frame condition can refuse it"
-    );
-    assert!(frame_before > 0.0);
-    assert!(
-        !report
-            .notes
-            .iter()
-            .any(|n| n.key == crate::rationale::keys::ZONE_STRICTLY_BETTER),
-        "a refused zone must not claim the arm"
-    );
-    // The fourth arm refuses too, and not only for the shared frame
-    // condition the drift above already fails: the zone's luma quantile gap
-    // starts far outside matched territory.
+    // The distribution arm's landing line stays out of reach: the zone's
+    // luma quantile gap starts far outside matched territory.
     let tonal_before = {
         let src = strictly_better_fixture(sat, ev, warm, false);
         let tgt = strictly_better_fixture(sat, ev, warm, true);
@@ -4071,10 +4020,7 @@ fn a_strictly_better_zone_is_refused_when_the_frame_pays() {
         "premise: the distribution arm's landing line is out of reach ({tonal_before})"
     );
     assert!(
-        !report
-            .notes
-            .iter()
-            .any(|n| n.key == crate::rationale::keys::ZONE_DISTRIBUTION_MATCHED),
+        !report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_DISTRIBUTION_MATCHED),
         "nor may the distribution arm claim it: {}",
         report.recipe.rationale
     );
@@ -5594,11 +5540,16 @@ fn calibration_land_zone_is_withheld_by_its_own_rerendered_mid_tones() {
         .find(|(key, _)| *key == "luma_ranges")
         .map(|(_, value)| value.as_str())
         .expect("land tone note carries luma_ranges");
+    // RE-PINNED (v1.18.0, J*): the global solve under the zone is read on J*,
+    // so the land's re-rendered mid-tones sit in different bins: the note now
+    // withholds luma[0.24-0.29] through luma[0.41-0.47] and luma[0.53-0.59],
+    // and luma[0.47-0.53] reads supported (it was withheld on the display
+    // objective's render). The mid-tones are still withheld and the sky's
+    // bright bins still are not, which is what this test is for.
     for expected in [
         "luma[0.29-0.35]",
         "luma[0.35-0.41]",
         "luma[0.41-0.47]",
-        "luma[0.47-0.53]",
         "luma[0.53-0.59]",
     ] {
         assert!(ranges.contains(expected), "land note missed {expected}: {ranges}");
@@ -6296,7 +6247,7 @@ fn a_zoned_fits_confidence_comes_from_the_zones_it_accepted() {
 }
 
 #[test]
-fn zoned_orchestration_corrects_the_land_through_the_inverted_raster() {
+fn zoned_orchestration_leaves_the_matched_land_and_ships_the_shrunk_sky() {
     // The first real-pair render's lesson: repainting ONLY the sky leaves
     // everything outside the mask with the global look — on the real
     // pair a blue haze band clashed against the new gold sky. The land
@@ -6361,28 +6312,27 @@ fn zoned_orchestration_corrects_the_land_through_the_inverted_raster() {
     let mask_path = fixture_mask_path("zoned-orch-land-mask");
     sky_mask.save(mask_path.path()).unwrap();
     let mut report = fit::fit_recipe(&src, &tgt);
+    let entry = report.err_after;
     attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, &mask_path);
-    // RE-PINNED 2026-11-03 (v1.17.1): the finished-frame curves now correct
-    // the land the inverted zone used to correct; end error 0.05691 ->
-    // 0.04087; the zones that remain are refused by the frame's structural
-    // term, which on this 16-pixel toy swings 0.140 -> 0.354 (documented in
-    // the fixture, `every_accepted_fixture_zone_still_passes_the_boundary_gate`);
-    // the inverted-raster path is exercised by zoned_pair, where the inverted
-    // land zone forms (`zoned_orchestration_attaches_the_sky_mask_and_improves_the_zone`).
+    // REWRITTEN (v1.18.0, J*). v1.17.1 pinned that the finished-frame curves
+    // correct the land the inverted zone used to correct and that both shrunk
+    // zones were then refused on the frame's structural swing (end error
+    // 0.04087). On J* the global solve lands the land (its zone reads 0.006,
+    // "already matches", so no inverted land zone forms), and the sky zone,
+    // shrunk to k 0.166 by the boundary gate, earns its keep on the frame and
+    // ships (the swing that refused it was the display objective's S reading
+    // flat blocks a few codes apart as whole rank steps; see
+    // `every_accepted_fixture_zone_still_passes_the_boundary_gate`).
+    let zones: Vec<_> = report.recipe.masks.iter().filter(|m| m.role.is_zone()).map(|m| m.role).collect();
+    assert_eq!(zones, vec![MaskRole::ZoneSky], "only the sky zone ships on this toy: {}", report.recipe.rationale);
     assert!(
-        report.recipe.masks.iter().all(|m| !m.role.is_zone()),
-        "the shrunk zones are refused on this toy: {}",
+        !report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_SHRUNK_REFUSED),
+        "the shipped sky is not also refused: {}",
         report.recipe.rationale
     );
-    let refused = report
-        .notes
-        .iter()
-        .filter(|n| n.key == crate::rationale::keys::ZONE_SHRUNK_REFUSED)
-        .count();
-    assert_eq!(refused, 2, "both zones say why they were refused: {}", report.recipe.rationale);
     assert!(
-        (report.err_after - 0.04087).abs() <= 0.001,
-        "the end error moved off the measured 0.04087: {}",
+        report.err_after < entry,
+        "the zone stage leaves the frame better than it found it: {entry} -> {}",
         report.err_after
     );
     // Render check: a land pixel must move toward the vivid warm target.
