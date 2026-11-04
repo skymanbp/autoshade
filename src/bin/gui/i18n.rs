@@ -672,6 +672,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("Colour noise reduction", "彩色降噪"),
     ("Colour noise detail", "彩噪细节"),
     ("Colour noise smoothness", "彩噪平滑度"),
+    ("Colour noise: the linear stage has one strength; detail and smoothness apply to sources without a mosaic", "彩色降噪：线性阶段只有一个强度；细节与平滑度只作用于没有传感器马赛克的来源"),
     // R23-1b: the two new PER-MASK sliders. Distinct labels from the global
     // 「锐化」/「色相」 on purpose — these are the local, signed/rotating forms,
     // and the tooltips carry the difference.

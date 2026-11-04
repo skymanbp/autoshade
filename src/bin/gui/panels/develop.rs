@@ -1437,6 +1437,12 @@ impl AutoShadeApp {
                     // holds none — and reset to it (`companion_slider`,
                     // `sharpening_slider`).
                     let raw_source = self.source_is_raw();
+                    // The colour noise reduction's stage (E3 of v1.18.0): over
+                    // pixels that carry the linear one (a RAW's base, a marked
+                    // master) its only strength is the slider's; Detail and
+                    // Smoothness belong to the display-frame pass and are
+                    // shown only where it runs.
+                    let linear_colour = self.source_frame().is_ok_and(|f| f.colour_nr_in_pixels());
                     let r = &mut self.recipe;
                     changed |= Self::sharpening_slider(ui, lang, tr(lang, "Sharpening"), r, raw_source);
                     // Lightroom's radius band, 0.5..3.0. `Fine` (0.1 snap, one
@@ -1454,8 +1460,12 @@ impl AutoShadeApp {
                     changed |= Self::slider(ui, lang, tr(lang, "Noise contrast"), &mut r.nr_contrast, 0.0, 100.0, 0.0);
                     ui.add_space(SPACE_SM);
                     changed |= Self::slider(ui, lang, tr(lang, "Colour noise reduction"), &mut r.color_nr, 0.0, 100.0, 0.0);
-                    changed |= Self::companion_slider(ui, lang, tr(lang, "Colour noise detail"), r, "color_nr_detail", 0.0, 100.0, SliderFeel::Int);
-                    changed |= Self::companion_slider(ui, lang, tr(lang, "Colour noise smoothness"), r, "color_nr_smooth", 0.0, 100.0, SliderFeel::Int);
+                    if linear_colour {
+                        ui.label(egui::RichText::new(tr(lang, "Colour noise: the linear stage has one strength; detail and smoothness apply to sources without a mosaic")).weak().small());
+                    } else {
+                        changed |= Self::companion_slider(ui, lang, tr(lang, "Colour noise detail"), r, "color_nr_detail", 0.0, 100.0, SliderFeel::Int);
+                        changed |= Self::companion_slider(ui, lang, tr(lang, "Colour noise smoothness"), r, "color_nr_smooth", 0.0, 100.0, SliderFeel::Int);
+                    }
                 }
                 let denoise_raw = self.denoise_uses_raw();
                 // AI denoise as an ACTIVE op: run now, see it on canvas —
