@@ -1414,7 +1414,8 @@ fn p36_fixture_recovers_the_lightroom_exposure_anchor() {
     // parameter spaces (different base curves, different shoulder), so
     // the anchor is directional and bounded rather than numeric: the
     // LR +0.50 brightening must come back as a moderate positive ev
-    // (measured 0.75 with the residual curve carrying the shape), and
+    // (measured 0.75 with the residual curve carrying the shape; 0.65 under
+    // v1.18.0's J*), and
     // NEVER as the phantom-knot degeneracy this test exists to catch
     // (support mutation MC pegs ev at +3.0 and dies here).
     assert!(
@@ -1422,7 +1423,17 @@ fn p36_fixture_recovers_the_lightroom_exposure_anchor() {
         "exposure must land as a moderate positive move, got {}",
         report.recipe.exposure_ev
     );
-    assert!(report.err_after < 0.035, "residual {:.4}", report.err_after);
+    // v1.18.0 (iii): J* reads in perceptual units (1 dE76 of local-mean
+    // offset is 0.0075), so the residual is no longer comparable with the old
+    // 0.035 line drawn in display-sRGB units: measured 0.1548 -> 0.0682 on
+    // J* (0.44 of the base). The pin is now the fit's own gain: the residual
+    // at most half of the untouched base.
+    assert!(
+        report.err_after < 0.5 * report.err_before,
+        "residual {:.4} vs before {:.4}",
+        report.err_after,
+        report.err_before
+    );
     assert!(
         report.recipe.confidence >= 0.55,
         "confidence {:.3}",
@@ -1875,7 +1886,15 @@ fn same_content_evidence_diagnosis_reports_cornwall_support_and_terminal_reading
         report.err_before,
         report.err_after
     );
-    assert!(report.err_after < 0.045, "look residual {:.4}", report.err_after);
+    // v1.18.0 (iii): J* reads in perceptual units, so the old 0.045 line
+    // (display sRGB, 0.0589 -> 0.0306) no longer applies: measured on J*
+    // 0.1539 -> 0.0566 (0.37 of the base). Pinned as the fit's gain.
+    assert!(
+        report.err_after < 0.5 * report.err_before,
+        "look residual {:.4} vs before {:.4}",
+        report.err_after,
+        report.err_before
+    );
     assert!(
         !report
             .notes
@@ -5909,15 +5928,19 @@ fn joint_family_is_calibrated_on_the_fixture_set() {
         // mixer carrying the rocks' hue change as a band rotation (Orange
         // -18): 0.0387 -> 0.0323 at 0.4299, joint reading 0.0590 -> 0.0467,
         // see `the_fan_gate_leaves_a_legitimate_cast_alone`).
+        // v1.18.0 (iii): err_* are J* in perceptual units now, so the
+        // landing is re-measured on it: 0.1545 -> 0.0692 at confidence 0.642,
+        // joint reading 0.1858 -> 0.0371 (2026-11-04, rel1180). The band is
+        // FIT_QUANT wide, the objective's own resolution.
         assert!(
-            (report.err_after - 0.0323).abs() < 0.001
-                && (report.recipe.confidence - 0.430).abs() < 0.01,
-            "canyon warm's landing moved off the measured 0.0323 / 0.430: {} -> {} at {}",
+            (report.err_after - 0.0692).abs() < FIT_QUANT
+                && (report.recipe.confidence - 0.642).abs() < 0.02,
+            "canyon warm's landing moved off the measured 0.0692 / 0.642: {} -> {} at {}",
             report.err_before, report.err_after, report.recipe.confidence
         );
         assert!(
-            (after - 0.0467).abs() < 0.005,
-            "…and its joint reading off the measured 0.0467: {before:.4} -> {after:.4}"
+            (after - 0.0371).abs() < 0.005,
+            "…and its joint reading off the measured 0.0371: {before:.4} -> {after:.4}"
         );
         assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_REFUSED), "canyon warm is no longer a refusal: {}", report.recipe.rationale);
         assert!(!report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_JOINT_MISS), "nor a miss: {}", report.recipe.rationale);
@@ -6013,8 +6036,11 @@ fn joint_family_is_calibrated_on_the_fixture_set() {
     // Root-cause fix keeps same-content ranges available even when one
     // local cell is structurally noisy. The new measured calibration
     // value is 0.1234; retain a narrow regression bound above it.
+    // v1.18.0 (iii): J* changed the scalar's units on purpose (display-sRGB
+    // distribution terms -> CIE76 in Lab); re-measured 0.4267 on J*, the
+    // bound kept FIT_QUANT above it.
     assert!(
-        look < 0.125,
+        look < 0.4267 + FIT_QUANT,
         "the evidence-weighted scalar changed scale unexpectedly ({look:.4})"
     );
 }
