@@ -12,10 +12,45 @@ pub(crate) fn look_err(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
     look_err_with_evidence(a, b, &evidence)
 }
 
-/// Evidence-weighted look error used by every fit decision.  The structural
-/// term makes the objective sensitive to spatially wrong pixels; the weighted
-/// distribution terms ignore ranges that are one-sided or structurally
-/// divergent instead of silently treating them as a match.
+/// THE look error every fit decision reads, J* (v1.18.0), in the units the
+/// eye uses: 1 dE76 of local-mean offset over the whole paired frame is 0.0075.
+///
+/// `J* = 0.75·[p·E_paired + (1 − p)·E_dist / 0.75] + 0.15·H_ab·w + 0.10·S`
+///
+/// * `E_paired` — where pixels PAIR (index i on one side is index i on the
+///   other: [`EvidenceModel::paired`]), the evidence-weighted mean CIE76
+///   distance between the two sides' LOCAL MEANS,
+///   `Σ w_i·ΔE76(Lab(G_2*a)_i, Lab(G_2*b)_i) / 100 / Σ w_i`, `w` the evidence
+///   source weight (range weight × spatial support × membership) and `G_2`
+///   the σ 2 px Gaussian the structural instrument pools its gradients at
+///   ([`PAIRED_POOL_SIGMA`]). Local means, not raw pixels: the eye reads a
+///   mean offset under texture (a 0.81 dE band is visible under 4 dE of star
+///   noise), and on the disagreement census the σ 2 reading kept the
+///   per-pixel sign on 39 of 41 verdicts, the two it flipped being star
+///   texture a tile did not make (rel1180 msg1 §b).
+/// * `E_dist = 0.55·T_L + 0.20·C_ab` — where pixels do not pair (Atmosphere,
+///   a structure-blind model), the distribution distance the objective used
+///   to be, in CIE units: `T_L` the 21-quantile CDF gap on L*/100
+///   ([`tonal_err_with_evidence`]'s reading), `C_ab` the mean of |Δ mean a*|
+///   and |Δ mean b*| over 100.
+/// * `p` — the paired share of the evidence mass: the 0.75 the two
+///   distribution terms carried goes to the per-pixel term where every pixel
+///   pairs, and the old decomposition holds (in Lab) where none does.
+/// * `H_ab` — the worst qualifying band's mean colour offset in units of its
+///   target chroma ([`band_colour_offset`]), times that range's evidence
+///   weight `w`.
+/// * `S` — the structural divergence D ([`structure_divergence`]) under its
+///   tie rule: two luma values within one output code are a tie; a tie is
+///   charged in proportion to the fraction of a code that separates them,
+///   never as a whole rank step. A PENALTY term: with no reading there is
+///   nothing to charge — that is what the abstention says, not that the
+///   structure survived.
+///
+/// Before v1.18.0 the objective was `0.55·T + 0.20·C + 0.15·H + 0.10·S` in
+/// display sRGB: a frame-level distribution distance that cannot credit a
+/// local correction for moving its own pixels (21 of the census's 39
+/// disagreements), in which the night sky's brightness demand carried 67×
+/// the energy of its colour demand.
 pub(crate) fn look_err_with_evidence(
     a: &[[f32; 3]],
     b: &[[f32; 3]],
@@ -24,26 +59,133 @@ pub(crate) fn look_err_with_evidence(
     if evidence.identifiability <= 1e-5 {
         return 1.0;
     }
-    let tonal = tonal_err_with_evidence(a, b, evidence);
-    let colour = (0..3)
-        .map(|ch| {
-            (weighted_mean(a, &evidence.source_weights, ch).unwrap_or(0.0)
-                - weighted_mean(b, &evidence.target_weights, ch).unwrap_or(0.0))
-                .abs()
-        })
-        .sum::<f32>()
-        / 3.0;
-    let base = 0.55 * tonal + 0.20 * colour;
+    look_terms(a, b, evidence).total()
+}
+
+/// The σ of the local mean `E_paired` reads: the σ 2 px pool of the
+/// structural instrument's gradient maps ([`structure_divergence`]), the
+/// scale at which that instrument already decides two rasters show the same
+/// thing. No new number.
+pub(crate) const PAIRED_POOL_SIGMA: f32 = 2.0;
+
+/// The terms of [`look_err_with_evidence`] (J*), each in its own unit.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct LookTerms {
+    /// `E_paired`, dE76 / 100 over the paired population.
+    pub paired: f32,
+    /// `E_dist = 0.55·T_L + 0.20·C_ab` over the unpaired population.
+    pub dist: f32,
+    /// `p`, the paired share of the evidence mass.
+    pub share: f32,
+    /// `H_ab·w`, already weighted by the qualifying bands' range evidence.
+    pub hue: f32,
+    /// `S`, the structural divergence capped at 1.
+    pub structural: f32,
+}
+
+impl LookTerms {
+    /// J*.
+    pub(crate) fn total(&self) -> f32 {
+        0.75 * (self.share * self.paired + (1.0 - self.share) * self.dist / 0.75)
+            + 0.15 * self.hue
+            + 0.10 * self.structural
+    }
+}
+
+/// [`look_err_with_evidence`]'s terms, read once.
+pub(crate) fn look_terms(a: &[[f32; 3]], b: &[[f32; 3]], evidence: &EvidenceModel) -> LookTerms {
+    let n = a.len().min(b.len());
+    let weight = |i: usize| evidence.source_weights.get(i).copied().unwrap_or(0.0).max(0.0);
+    let pairs = |i: usize| evidence.paired.get(i).copied().unwrap_or(false);
+    let (mut mass, mut paired_mass) = (0.0f64, 0.0f64);
+    for i in 0..n {
+        mass += weight(i) as f64;
+        if pairs(i) {
+            paired_mass += weight(i) as f64;
+        }
+    }
+    let share = if mass > 0.0 { (paired_mass / mass) as f32 } else { 0.0 };
+    let paired = if paired_mass > 0.0 {
+        let (w, h) = (evidence.width as usize, evidence.height as usize);
+        let local = |px: &[[f32; 3]]| -> Vec<[f32; 3]> {
+            if w * h == px.len() {
+                low_pass_pixels(px, w, h, PAIRED_POOL_SIGMA)
+            } else {
+                px.to_vec()
+            }
+        };
+        let (la, lb) = (local(&a[..n]), local(&b[..n]));
+        let mut sum = 0.0f64;
+        for i in (0..n).filter(|&i| pairs(i)) {
+            let wi = weight(i) as f64;
+            if wi <= 0.0 {
+                continue;
+            }
+            let (x, y) = (cie_lab(&la[i]), cie_lab(&lb[i]));
+            let de = ((x[0] - y[0]).powi(2) + (x[1] - y[1]).powi(2) + (x[2] - y[2]).powi(2)).sqrt();
+            sum += wi * de as f64;
+        }
+        (sum / paired_mass / 100.0) as f32
+    } else {
+        0.0
+    };
+    let dist = if share < 1.0 {
+        let unpaired = |weights: &[f32]| -> Vec<f32> {
+            (0..n).map(|i| if pairs(i) { 0.0 } else { weights.get(i).copied().unwrap_or(0.0) }).collect()
+        };
+        let (sw, tw) = (unpaired(&evidence.source_weights), unpaired(&evidence.target_weights));
+        let (la, lb): (Vec<[f32; 3]>, Vec<[f32; 3]>) =
+            (a[..n].iter().map(cie_lab).collect(), b[..n].iter().map(cie_lab).collect());
+        let tonal = lightness_cdf_gap(&la, &sw, &lb, &tw);
+        let mean = |px: &[[f32; 3]], w: &[f32], ch: usize| weighted_mean(px, w, ch).unwrap_or(0.0);
+        let colour = ((mean(&la, &sw, 1) - mean(&lb, &tw, 1)).abs() + (mean(&la, &sw, 2) - mean(&lb, &tw, 2)).abs())
+            / 2.0
+            / 100.0;
+        0.55 * tonal + 0.20 * colour
+    } else {
+        0.0
+    };
     let (hue, hue_weight) = band_colour_offset(a, b, evidence);
     let (w, h) = (evidence.width, evidence.height);
-    // A PENALTY term: with no reading there is nothing to charge. That is what
-    // the abstention says here — not that the structure survived.
     let structural = if w > 0 && h > 0 && evidence.source_weights.len() == a.len() {
         structure_divergence(a, b, w, h, &evidence.source_weights).map_or(0.0, |r| r.d)
     } else {
         0.0
     };
-    base + 0.15 * hue * hue_weight.min(1.0) + 0.10 * structural.min(1.0)
+    LookTerms { paired, dist, share, hue: hue * hue_weight.min(1.0), structural: structural.min(1.0) }
+}
+
+/// `T_L`: the mean absolute gap between two weighted L*/100 CDFs at 21
+/// quantiles (each clamped to [`P_CLIP`]), over CIE Lab pixels.
+fn lightness_cdf_gap(la: &[[f32; 3]], wa: &[f32], lb: &[[f32; 3]], wb: &[f32]) -> f32 {
+    let lightness = |p: &[f32; 3]| p[0] / 100.0;
+    let (ca, cb) = (weighted_cdf(la, wa, lightness), weighted_cdf(lb, wb, lightness));
+    let mut gap = 0.0f32;
+    for i in 0..=20 {
+        let q = (i as f32 / 20.0).clamp(P_CLIP, 1.0 - P_CLIP);
+        gap += (quantile(&ca, q) - quantile(&cb, q)).abs();
+    }
+    gap / 21.0
+}
+
+/// The TONAL ruler a tone stage is held to: `T_L`, the 21-quantile gap of the
+/// two frames' evidence-weighted L*/100 CDFs — the tonal half of `E_dist`
+/// (v1.18.0; display luma601 before, the same mechanism in CIE units). It is
+/// the term a tone stage controls, and so the ruler a tone stage is held to
+/// (2026-10-21): the sliders and the residual curve each ship only where they
+/// leave this reading no worse than they found it. Judging them on the whole
+/// objective charged a correct luma move for the colour-mean drift that
+/// brightening a muted frame toward a vivid target necessarily brings —
+/// drift the stages after it exist to correct — while the lantern street's
+/// wrong +1.65 EV raised the display form of this term 0.0468 → 0.0748 on
+/// its own and needs no other term to be refused.
+pub(crate) fn tonal_err_with_evidence(
+    a: &[[f32; 3]],
+    b: &[[f32; 3]],
+    evidence: &EvidenceModel,
+) -> f32 {
+    let (la, lb): (Vec<[f32; 3]>, Vec<[f32; 3]>) = (a.iter().map(cie_lab).collect(), b.iter().map(cie_lab).collect());
+    lightness_cdf_gap(&la, &evidence.source_weights, &lb, &evidence.target_weights)
 }
 
 /// H_ab, the colour term's WORST band (v1.18.0): per qualifying HSL band,
@@ -124,36 +266,6 @@ fn band_ab_weighted(px: &[[f32; 3]], weights: &[f32]) -> ([[f64; 3]; 8], f64) {
     }
     (bands, total)
 }
-
-/// The TONAL term of [`look_err_with_evidence`] on its own: the mean absolute
-/// gap between the two frames' evidence-weighted luma CDFs at 21 quantiles.
-/// It is the term a tone stage controls, and so the ruler a tone stage is
-/// held to (2026-10-21): the sliders and the residual curve each ship only
-/// where they leave this reading no worse than they found it. Judging them on
-/// the whole objective charged a correct luma move for the colour-mean drift
-/// that brightening a muted frame toward a vivid target necessarily brings —
-/// drift the stages after it exist to correct — while the lantern street's
-/// wrong +1.65 EV raised this term 0.0468 → 0.0748 on its own and needs no
-/// other term to be refused.
-pub(crate) fn tonal_err_with_evidence(
-    a: &[[f32; 3]],
-    b: &[[f32; 3]],
-    evidence: &EvidenceModel,
-) -> f32 {
-    let (ca, cb) = (
-        weighted_cdf(a, &evidence.source_weights, luma601),
-        weighted_cdf(b, &evidence.target_weights, luma601),
-    );
-    let mut tonal = 0.0f32;
-    let mut n = 0.0f32;
-    for i in 0..=20 {
-        let p = (i as f32 / 20.0).clamp(P_CLIP, 1.0 - P_CLIP);
-        tonal += (quantile(&ca, p) - quantile(&cb, p)).abs();
-        n += 1.0;
-    }
-    tonal / n
-}
-
 
 pub(super) fn round1(v: f32) -> f32 {
     (v * 10.0).round() / 10.0

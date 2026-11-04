@@ -1904,6 +1904,7 @@ mod tests {
             width: n as u32,
             height: 1,
             spatial_supported: vec![true; n],
+            paired: vec![true; n],
             presence: None,
             source_weights: vec![1.0; n],
             target_weights: vec![1.0; n],

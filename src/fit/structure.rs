@@ -278,7 +278,7 @@ pub fn structure_divergence(
 /// the correlation half of the statistic is handed agreement it did not
 /// measure. Renormalising costs one division per tap and states no border
 /// fact at all.
-fn low_pass_pixels(px: &[[f32; 3]], w: usize, h: usize, sigma: f32) -> Vec<[f32; 3]> {
+pub(super) fn low_pass_pixels(px: &[[f32; 3]], w: usize, h: usize, sigma: f32) -> Vec<[f32; 3]> {
     let n = w * h;
     let radius = (3.0 * sigma).ceil().max(1.0) as isize;
     let kernel: Vec<f32> = (-radius..=radius)

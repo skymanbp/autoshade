@@ -48,6 +48,13 @@ pub struct EvidenceModel {
     pub width: u32,
     pub height: u32,
     pub spatial_supported: Vec<bool>,
+    /// Does pixel `i` PAIR — is index `i` on one side the same scene point as
+    /// index `i` on the other? The population the objective's `E_paired`
+    /// reads (`look_err_with_evidence`): the present, spatially supported
+    /// pixels of a model built on an aligned pair, and none of a
+    /// structure-blind one ([`Self::structure_blind`]: Atmosphere is the claim
+    /// that the structure was replaced, so no pixel pairs with its index).
+    pub paired: Vec<bool>,
     pub source_weights: Vec<f32>,
     pub target_weights: Vec<f32>,
     pub source_hue_weights: Vec<f32>,
@@ -127,6 +134,7 @@ impl EvidenceModel {
             width: self.width,
             height: self.height,
             spatial_supported: self.spatial_supported.clone(),
+            paired: self.paired.clone(),
             source_weights: ranges.source_weights,
             target_weights: ranges.target_weights,
             source_hue_weights: ranges.source_hue_weights,
@@ -154,8 +162,9 @@ impl EvidenceModel {
     ///
     /// On a model that is already blind — every spatial weight 1.0, every
     /// pixel supported, `globally_same_content` true, as an identical pair
-    /// produces — this is byte-equal to `scoped(tp, ones, ones)`, and the unit
-    /// test pins that. Anywhere else the two differ by design: `scoped` reads
+    /// produces — this is byte-equal to `scoped(tp, ones, ones)` but for
+    /// [`Self::paired`], which a blind model empties (nothing pairs where the
+    /// structure was replaced), and the unit test pins that. Anywhere else the two differ by design: `scoped` reads
     /// the model's own structural weights and support, and replacing those is
     /// this function's whole job.
     pub fn structure_blind(&self, tp: &[[f32; 3]]) -> EvidenceModel {
@@ -165,6 +174,7 @@ impl EvidenceModel {
         blind.spatial_weights = ones.clone();
         blind.spatial_supported = vec![true; n];
         blind.globally_same_content = true;
+        blind.paired = vec![false; n];
         blind.scoped(tp, &ones, &ones)
     }
 }
@@ -634,6 +644,7 @@ pub fn evidence_model_paired(
         source_membership: ranges.source_membership,
         width: w,
         height: h,
+        paired: spatial_supported.clone(),
         spatial_supported,
         source_weights: ranges.source_weights,
         target_weights: ranges.target_weights,

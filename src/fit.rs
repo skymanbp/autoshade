@@ -217,6 +217,7 @@ pub(crate) use solve::{fit_recipe_from_promoted_with_disclosure_opts};
 pub(crate) use solve::{fit_recipe_from_promoted, fit_recipe_from_promoted_with_disclosure};
 pub use structure::{DivergencePair, PairingScale, STRUCTURE_MIN_CORE_PX, structure_divergence};
 pub(crate) use structure::{divergence_pair_for, divergence_raster, structure_divergence_for, DivergenceRaster};
+use structure::low_pass_pixels;
 pub(crate) use tone::{
     PairedRobustTone, ROBUST_REJECT_DISCLOSE_MIN, SUPPORT_MIN_PIXELS, fit_tone_sliders_supported,
     knot_support_for, paired_robust_tone, refine_tone_sliders_on, sample_tone_points,
