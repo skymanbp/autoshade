@@ -1404,8 +1404,20 @@ fn field_disabled_layer_is_byte_identical() {
     path.remove();
 }
 
+/// REWRITTEN (v1.18.0, R3): the stop rule reads one ruler on one state, and a
+/// stale ceiling stops nothing. Until R3 the field's ceiling, solved BEFORE
+/// the zones, was compared with the frame after them and could skip the
+/// tiles and the free masks together ("tiles, free masks"); this test forced
+/// that ceiling 1e-4 under the producer-free frame to make it fire. R3 says
+/// the ceiling bounds the field and the producers carved from its remainder
+/// (the free masks) and nothing about the tiles: no stop runs before the
+/// tiles, and the free masks' stop reads the field re-solved on the render
+/// they would start from (`field::reread_field`), through `fit::ships`. So
+/// the same forced first-solve ceiling must skip no tile, and any stop that
+/// does fire names the free masks alone and carries two readings of that
+/// re-read field under FIT_QUANT apart.
 #[test]
-fn field_stop_rule_skips_the_tile_producer_and_names_it() {
+fn a_stale_field_ceiling_stops_no_tile_and_only_a_reread_one_stops_the_free_masks() {
     let (current, target, width, height) = crate::fit_field::tests::two_band_pair();
     let image = |pixels: &[[f32; 3]]| DynamicImage::ImageRgb8(RgbImage::from_fn(
         width, height, |x, y| image::Rgb(pixels[(y * width + x) as usize]
@@ -1420,9 +1432,9 @@ fn field_stop_rule_skips_the_tile_producer_and_names_it() {
         prompt_points: None,
     };
     let path = fixture_mask_path("field-stop");
-    // Ceiling forced to sit 1e-4 under the producer-free frame: any
-    // producer that does not regress the frame then lands inside the
-    // 0.002 stop margin, and the guard `ceiling < global` still holds.
+    // The FIRST solve's ceiling forced 1e-4 under the producer-free frame:
+    // under the pre-R3 rule this stopped every producer; it now reaches
+    // no stop at all (the override does not touch the re-read field).
     field::FIELD_CEILING_OVERRIDE.with(|value| value.set(Some(1e-4)));
     let report = fit_recipe_zoned_inner(
         &source, &target, &seg, &path, &crate::recipe::EditRecipe::default(), None,
@@ -1430,16 +1442,30 @@ fn field_stop_rule_skips_the_tile_producer_and_names_it() {
             field: true, spatial: true, free_masks: true, refine_masks: false, detail: false,
         },
     );
-    let stop = report.notes.iter().position(|note| note.key == crate::rationale::keys::LOCAL_STOP)
-        .unwrap_or_else(|| panic!("missing stop: {}", report.recipe.rationale));
-    assert!(report.notes[stop].args.iter().any(|(key, value)|
-        *key == "skipped" && value == "tiles, free masks"));
-    assert!(report.notes.iter().skip(stop + 1).all(|note| !note.key.starts_with(" Spatial")));
+    for stop in report.notes.iter().filter(|note| note.key == crate::rationale::keys::LOCAL_STOP) {
+        let arg = |key: &str| stop.args.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone()).unwrap();
+        assert_eq!(arg("skipped"), "free masks", "a stop skips the free masks only: {stop:?}");
+        let (global, ceiling): (f32, f32) = (arg("global").parse().unwrap(), arg("ceiling").parse().unwrap());
+        assert!(
+            ceiling < global && !fit::ships(ceiling, global),
+            "a stop reads a re-read ceiling under FIT_QUANT from its own frame: {stop:?}"
+        );
+    }
+    assert!(
+        !report.notes.iter().any(|note| note.key == crate::rationale::keys::LOCAL_STOP
+            && note.args.iter().any(|(key, value)| *key == "skipped" && value.contains("tiles"))),
+        "the stale first-solve ceiling skipped the tiles: {}",
+        report.recipe.rationale
+    );
     let finished = report.notes.iter().filter(|note| {
         note.key == crate::rationale::keys::FIT_NOTE_UNREPRESENTED
             || note.key == crate::rationale::keys::FIT_NOTE_ATMOSPHERE_UNREPRESENTED
     }).count();
-    assert_eq!(finished, 1, "finished disclosure count: {}", report.recipe.rationale);
+    // Never twice. It used to be exactly once, read after a stop that ended
+    // the producers; with no stop the free masks and the colour field run,
+    // and the field takes this frame 0.0307 -> 0.0027 (measured), under the
+    // residual that discloses an unrepresented look, so it reads 0 here.
+    assert!(finished <= 1, "finished disclosure count {finished}: {}", report.recipe.rationale);
     path.remove();
 }
 
@@ -1501,8 +1527,14 @@ fn calibration_local_field_discloses_ceiling_and_realized_share() {
     const FIELD_CAP_COST: f32 = 2e-4;
     assert!(report.err_after <= head.err_after + FIELD_CAP_COST,
         "field path {} regressed HEAD semantics {} by more than the              analyzer's disclosed tile-cap cost", report.err_after, head.err_after);
-    assert!(report.recipe.rationale.len() < 16 * 1024,
-        "rationale is {} bytes", report.recipe.rationale.len());
+    // RE-PINNED (v1.18.0): 16 -> 24 KiB, measured 20,177 bytes on J*, where
+    // R3 lets the tiles run before any stop; the tile and range verdicts are
+    // the bulk of the text (by sentence
+    // family: zoned tile 1.3 KB, colour ranges 1.2 KB, range boundary gate
+    // 0.8 KB). The persisted cap is `EditRecipe::MAX_RATIONALE` (512 KiB);
+    // this bound only catches a runaway disclosure.
+    assert!(report.recipe.rationale.len() < 24 * 1024,
+        "rationale is {} bytes: {}", report.recipe.rationale.len(), report.recipe.rationale);
     eprintln!("calibration HEAD={} field={} rationale={}",
         head.err_after, report.err_after, report.recipe.rationale.len());
     head_path.remove();
