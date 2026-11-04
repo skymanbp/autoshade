@@ -283,7 +283,7 @@ impl BaseEncoding {
         if let Some(lut) = &self.tone {
             data.par_iter_mut().for_each(|px| {
                 let l_old = luma601(px);
-                scale_chroma_in(px, l_old, sample_lut(lut, l_old), PixelRange::Float);
+                scale_chroma(px, l_old, sample_lut(lut, l_old));
             });
         }
         image_f32(data, w, h)
@@ -291,16 +291,14 @@ impl BaseEncoding {
 
     /// [`Self::encode`]'s inverse, stage by stage in reverse order: the tone's
     /// inverse on the luma, then the vignette gain divided out in linear
-    /// light. Both run in `Float` range (R13a): a channel the base's tone
-    /// carried past 1 is carried back, so a plate developed in `Float`
-    /// inverts exactly.
+    /// light. Exact wherever the encode clipped nothing.
     fn decode(&self, img: &DynamicImage) -> DynamicImage {
         let (w, h) = (img.width() as usize, img.height() as usize);
         let mut data = pixels_f32(img);
         if let Some(lut) = &self.tone_inverse {
             data.par_iter_mut().for_each(|px| {
                 let l_old = luma601(px);
-                scale_chroma_in(px, l_old, sample_lut(lut, l_old), PixelRange::Float);
+                scale_chroma(px, l_old, sample_lut(lut, l_old));
             });
         }
         if let Some(lut) = &self.vignette {
@@ -310,23 +308,9 @@ impl BaseEncoding {
         image_f32(data, w, h)
     }
 
-    /// `resample` run where the export runs it: on the encoded pixels. A
-    /// `Float` plate's encoded channels run past 1 (R13a), and the engine's
-    /// geometry samplers read a frame as 16-bit (`rgb16_source`), which would
-    /// clip them there; a resample is linear in the pixel values, so the
-    /// frame is scaled into range by its own peak and back, and the headroom
-    /// rides the resample at 16-bit precision.
+    /// `resample` run where the export runs it: on the encoded pixels.
     fn resample(&self, img: &DynamicImage, resample: impl FnOnce(&DynamicImage) -> DynamicImage) -> DynamicImage {
-        let encoded = self.encode(img);
-        let peak = encoded.as_rgb32f().map_or(1.0, |b| b.as_raw().iter().copied().fold(1.0f32, f32::max));
-        if peak <= 1.0 {
-            return self.decode(&resample(&encoded));
-        }
-        let scaled = |img: &DynamicImage, k: f32| {
-            let (w, h) = (img.width() as usize, img.height() as usize);
-            image_f32(pixels_f32(img).into_iter().map(|p| p.map(|v| v * k)).collect(), w, h)
-        };
-        self.decode(&scaled(&resample(&scaled(&encoded, 1.0 / peak)), peak))
+        self.decode(&resample(&self.encode(img)))
     }
 }
 
@@ -457,8 +441,7 @@ impl Drop for Plate {
 pub fn source_plate(raw: &Path, base: &EditRecipe, edge: u32) -> Result<Plate> {
     let mut develop = base.clone();
     (develop.lens_profile.distortion_on, develop.lens_profile.ca_on) = (false, false);
-    let developed =
-        render_frame_in(raw, &develop, None, Some(edge), ExportColorSpace::Srgb, crate::diag::stderr(), PixelRange::Float)?;
+    let developed = render_frame(raw, &develop, None, Some(edge), ExportColorSpace::Srgb, crate::diag::stderr())?;
     let pixels = match BaseEncoding::of(base) {
         Some(e) => e.decode(&developed),
         None => developed,

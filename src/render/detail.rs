@@ -35,8 +35,8 @@
 use rayon::prelude::*;
 
 use super::{
-    bilinear_plane, box_blur_h, box_blur_v, gauss_blur_plane, luma601, smoothstep, write_luma_additive_in,
-    write_luma_weighted_in, PixelRange,
+    bilinear_plane, box_blur_h, box_blur_v, gauss_blur_plane, luma601, smoothstep, write_luma_additive,
+    write_luma_weighted,
 };
 use crate::recipe::EditRecipe;
 
@@ -284,7 +284,7 @@ fn usm_transfer(sigma: f32) -> f32 {
 /// ```
 ///
 /// The move is ADDED to the three channels — neutral light in or out — which
-/// is how the Lightroom export moved (`write_luma_additive_in`); every other luma
+/// is how the Lightroom export moved (`write_luma_additive`); every other luma
 /// pass in this engine scales chroma instead.
 ///
 /// A NEGATIVE amount (a mask softening its background) is the plain signed
@@ -298,19 +298,6 @@ pub(crate) fn sharpen(
     p: &SharpenParams,
     film: FilmScale,
     weight: impl Fn(usize, usize, &[f32; 3]) -> f32 + Sync,
-) {
-    sharpen_in(data, w, h, p, film, weight, PixelRange::Display)
-}
-
-/// [`sharpen`] in `range` (the reverse fit's float plate, R13a).
-pub(crate) fn sharpen_in(
-    data: &mut [[f32; 3]],
-    w: usize,
-    h: usize,
-    p: &SharpenParams,
-    film: FilmScale,
-    weight: impl Fn(usize, usize, &[f32; 3]) -> f32 + Sync,
-    range: PixelRange,
 ) {
     if w == 0 || h == 0 || p.amount == 0.0 || !p.amount.is_finite() {
         return;
@@ -327,7 +314,7 @@ pub(crate) fn sharpen_in(
     let gate = |i: usize| edge.as_ref().map_or(1.0, |e| e[i]);
     if p.amount < 0.0 {
         let k = p.amount * fade;
-        write_luma_weighted_in(data, w, weight, |i, l, wgt| l + k * (l - blur[i]) * gate(i) * wgt, range);
+        write_luma_weighted(data, w, weight, |i, l, wgt| l + k * (l - blur[i]) * gate(i) * wgt);
         return;
     }
     // The slider over Lightroom's RAW default of 40, the amount the law is
@@ -338,7 +325,7 @@ pub(crate) fn sharpen_in(
     let cap_bright = cap_at_detail(SHARPEN.cap_bright * over40.powf(SHARPEN.cap_power), p.detail);
     let detail_exp = detail_exponent(p.detail);
     let rolloff = rolloff_table();
-    write_luma_additive_in(data, w, weight, |i, l, wgt| {
+    write_luma_additive(data, w, weight, |i, l, wgt| {
         let s = l - blur[i];
         let rho = rolloff[(blur[i].clamp(0.0, 1.0) * ROLLOFF_STEPS as f32).round() as usize];
         let mv = if s >= 0.0 {
@@ -351,7 +338,7 @@ pub(crate) fn sharpen_in(
             -soft_cap(f, cap)
         };
         l + mv * gate(i) * wgt
-    }, range);
+    });
 }
 
 /// Masking's edge map: 0 in flat areas, 1 on edges, from the gradient of the
@@ -456,19 +443,6 @@ pub(crate) fn luma_nr(
     film: FilmScale,
     weight: impl Fn(usize, usize, &[f32; 3]) -> f32 + Sync,
 ) {
-    luma_nr_in(data, w, h, p, film, weight, PixelRange::Display)
-}
-
-/// [`luma_nr`] in `range` (the reverse fit's float plate, R13a).
-pub(crate) fn luma_nr_in(
-    data: &mut [[f32; 3]],
-    w: usize,
-    h: usize,
-    p: &LumaNrParams,
-    film: FilmScale,
-    weight: impl Fn(usize, usize, &[f32; 3]) -> f32 + Sync,
-    range: PixelRange,
-) {
     if w == 0 || h == 0 || p.amount <= 0.0 {
         return;
     }
@@ -500,10 +474,10 @@ pub(crate) fn luma_nr_in(
             q.par_iter().enumerate().map(|(i, q)| luma601(&data[i]) - q).collect();
         box_mean_owned(residual, w, h, 2 * radius)
     });
-    write_luma_weighted_in(data, w, weight, |i, l, wgt| {
+    write_luma_weighted(data, w, weight, |i, l, wgt| {
         let target = q[i] + lift.as_ref().map_or(0.0, |r| p.contrast * r[i]);
         l + (target - l) * wgt
-    }, range);
+    });
 }
 
 // ── colour noise reduction ───────────────────────────────────────────────────
@@ -598,14 +572,7 @@ fn block_mean(
 /// full planes' worth (8 B/px), inside the spatial-pass budget. The guide and
 /// its two moments stay for both channels; each colour plane is built from
 /// the frame only when its turn comes and is gone before the next one is.
-#[cfg(test)]
 pub(crate) fn chroma_nr(data: &mut [[f32; 3]], w: usize, h: usize, p: &ChromaNrParams, film: FilmScale) {
-    chroma_nr_in(data, w, h, p, film, PixelRange::Display)
-}
-
-/// [`chroma_nr`] in `range`: a `Float` plate keeps a channel past the range
-/// rather than pulling the pixel's chroma in (R13a).
-pub(crate) fn chroma_nr_in(data: &mut [[f32; 3]], w: usize, h: usize, p: &ChromaNrParams, film: FilmScale, range: PixelRange) {
     if w == 0 || h == 0 || p.amount <= 0.0 {
         return;
     }
@@ -649,7 +616,7 @@ pub(crate) fn chroma_nr_in(data: &mut [[f32; 3]], w: usize, h: usize, p: &Chroma
             let r = l + cr + (cr_q - cr) * blend;
             let b = l + cb + (cb_q - cb) * blend;
             let g = (l - 0.299 * r - 0.114 * b) / 0.587;
-            *px = if range == PixelRange::Display { chroma_into_range(l, [r, g, b]) } else { [r, g, b] };
+            *px = chroma_into_range(l, [r, g, b]);
         }
     });
 }

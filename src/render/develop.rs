@@ -294,24 +294,6 @@ pub(super) fn apply_develop_with_rasters(
     film: FilmScale,
     raw_source: bool,
 ) {
-    apply_develop_with_rasters_in(data, w, h, r, rasters, frame, film, raw_source, PixelRange::Display)
-}
-
-/// [`apply_develop_with_rasters`] in `range`: the export develops in
-/// `Display`, the reverse fit's plate in `Float` (R13a) — the tone pass and
-/// the detail passes keep a channel past 1 so the plate's inverse recovers it.
-#[allow(clippy::too_many_arguments)] // the develop's frame, and the range it writes in
-pub(super) fn apply_develop_with_rasters_in(
-    data: &mut [[f32; 3]],
-    w: usize,
-    h: usize,
-    r: &EditRecipe,
-    rasters: &MaskRasterSnapshot,
-    frame: MaskFrame<'_>,
-    film: FilmScale,
-    raw_source: bool,
-    range: PixelRange,
-) {
     // 0-) spot removal (v1.5.0 F9) — Lightroom's `crs:RetouchAreas`, which
     //    this engine re-solves from the frame's own pixels. FIRST, for two
     //    reasons that both say "before", and one measurement that says "here".
@@ -403,7 +385,7 @@ pub(super) fn apply_develop_with_rasters_in(
         data.par_iter_mut().for_each(|px| {
             let l_old = luma601(px);
             let l_new = sample_lut(&lut, l_old);
-            scale_chroma_in(px, l_old, l_new, range);
+            scale_chroma(px, l_old, l_new);
         });
     }
     // 1a) the B&W treatment (v1.5.0) replaces the colour mixer, and it runs
@@ -473,13 +455,13 @@ pub(super) fn apply_develop_with_rasters_in(
     //    clamp(0.0008·min(w,h), 0.7, 2.0), NR at a raster-pixel radius) under
     //    which one slider value meant two structures at preview and at export.
     if let Some(p) = detail::ChromaNrParams::global(r) {
-        detail::chroma_nr_in(data, w, h, &p, film, range);
+        detail::chroma_nr(data, w, h, &p, film);
     }
     if let Some(p) = detail::LumaNrParams::global(r) {
-        detail::luma_nr_in(data, w, h, &p, film, |_, _, _| 1.0, range);
+        detail::luma_nr(data, w, h, &p, film, |_, _, _| 1.0);
     }
     if let Some(p) = detail::SharpenParams::global(r, raw_source) {
-        detail::sharpen_in(data, w, h, &p, film, |_, _, _| 1.0, range);
+        detail::sharpen(data, w, h, &p, film, |_, _, _| 1.0);
     }
     // 6) local masked adjustments (linear/radial gradients).
     if !r.masks.is_empty() {
