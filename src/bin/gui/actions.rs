@@ -3750,7 +3750,7 @@ impl AutoShadeApp {
                                 master,
                                 Some(autoshade::pipeline::FIT_SOURCE_EDGE),
                             )?;
-                            (autoshade::pipeline::fit_source_baked(master, pixels)?, cal, None)
+                            (autoshade::pipeline::fit_source_baked(master, pixels, &cal)?, cal, None)
                         }
                         (Some(p), None) if autoshade::decode::is_raw(p) => {
                             let (frame, cal) = autoshade::pipeline::fit_source(p)?;
@@ -3760,7 +3760,7 @@ impl AutoShadeApp {
                             let cal = autoshade::pipeline::calibration_recipe(
                                 autoshade::pipeline::fit_calibration(p),
                             );
-                            (autoshade::pipeline::fit_source_baked(p, (*base).clone())?, cal, None)
+                            (autoshade::pipeline::fit_source_baked(p, (*base).clone(), &cal)?, cal, None)
                         }
                         (None, _) => (autoshade::render::Plate::baked((*base).clone()), Default::default(), None),
                     };

@@ -128,7 +128,7 @@ fn profile_named(raw: &std::path::Path) -> EditRecipe {
 /// The reverse fit's source of `raw` when its calibration is `cal`
 /// (`pipeline::fit_source` for a photo whose saved develop is `cal`).
 fn canvas_fit_source(raw: &std::path::Path, cal: &EditRecipe) -> (Plate, EditRecipe) {
-    let plate = source_plate(raw, &BasePart::of(cal), crate::pipeline::FIT_SOURCE_EDGE).expect("fit source");
+    let plate = source_plate(raw, cal, crate::pipeline::FIT_SOURCE_EDGE).expect("fit source");
     (plate, cal.clone())
 }
 

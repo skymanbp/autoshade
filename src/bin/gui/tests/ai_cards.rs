@@ -1014,7 +1014,7 @@
         assert!(fit.contains("let negative = self.fit_negative();"));
         assert!(
             fit.contains("(Some(p), Some(master)) => {")
-                && fit.contains("fit_source_baked(master, pixels)"),
+                && fit.contains("fit_source_baked(master, pixels, &cal)"),
             "the solve's source frame is the master when the negative carries one"
         );
         assert!(

@@ -2913,6 +2913,15 @@ pub const FIT_SOURCE_EDGE: u32 = 2048;
 /// the canvas and the export show. It comes as a [`crate::render::Plate`]
 /// ([`crate::render::source_plate`]).
 ///
+/// v1.18.0: the plate is the export's own develop of the base with the lens
+/// geometry left for later, held decoded through the base's pointwise stages
+/// and resampled after them ([`crate::render::source_plate`],
+/// `render::canvas::BaseEncoding`) — so a candidate is rendered on the pixels
+/// the export develops (capture sharpening included) and the geometry warp and
+/// the analysis thumbnail average what the export averages. Before it, the
+/// identical pair (the export of the base against the fit's preview of it)
+/// read 0.00235 / 0.00285 on p39 / p40 against `fit::FIT_QUANT` 0.0018.
+///
 /// In the FRAME that base develop is in: the sensor frame for a RAW. The fit
 /// draws its zone rasters in its source's frame and they say so
 /// ([`crate::render::fit_raster_frame`]), so a mask is never resampled from
@@ -2924,16 +2933,16 @@ pub fn fit_source(raw: &Path) -> Result<(crate::render::Plate, crate::recipe::Ed
 
 /// [`fit_source`]'s plate of `raw` under `base`.
 fn fit_source_of(raw: &Path, base: &EditRecipe) -> Result<crate::render::Plate> {
-    crate::render::source_plate(raw, &crate::render::BasePart::of(base), FIT_SOURCE_EDGE)
+    crate::render::source_plate(raw, base, FIT_SOURCE_EDGE)
 }
 
 /// The fit source of a BAKED file (a master, a bare raster) whose pixels are
 /// `image`: a plate in the frame the file's marker says its pixels are in
 /// ([`crate::render::SourceFrame::corrected`]), so its candidates read their
 /// masks where the pixels are.
-pub fn fit_source_baked(path: &Path, image: image::DynamicImage) -> Result<crate::render::Plate> {
+pub fn fit_source_baked(path: &Path, image: image::DynamicImage, base: &EditRecipe) -> Result<crate::render::Plate> {
     let corrected = crate::render::SourceFrame::of(path)?.corrected();
-    Ok(crate::render::Plate::baked_in(image, corrected))
+    Ok(crate::render::Plate::fit_plate(image, corrected, base))
 }
 
 /// A calibration-only [`EditRecipe`] — the `base` the R16 fit composes
@@ -3048,8 +3057,7 @@ pub fn fit_target(
             // calibration's lens, or an unmarked master): the engine's own
             // geometry stage moves it into the frame the target was exported
             // in, as the export moves the same pixels.
-            let moved = crate::render::apply_lens_geometry(src, &geom, amount);
-            *src = crate::render::Plate::baked_in(moved, true);
+            *src = src.lens_corrected(&geom, amount);
         }
         return as_exported(TargetGeometry::Corrected { corrected, as_shot });
     }

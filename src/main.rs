@@ -1703,10 +1703,10 @@ fn match_source(raw: &Path, negative: Option<&Path>) -> Result<(render::Plate, E
         println!("  (a master of {}: its calibration composes into the solve)", neg.display());
         let base = pipeline::calibration_recipe(pipeline::fit_calibration(neg));
         let pixels = render::source_pixels(raw, Some(pipeline::FIT_SOURCE_EDGE))?;
-        return Ok((pipeline::fit_source_baked(raw, pixels)?, base));
+        return Ok((pipeline::fit_source_baked(raw, pixels, &base)?, base));
     }
     let base = pipeline::calibration_recipe(pipeline::fit_calibration(raw));
-    Ok((pipeline::fit_source_baked(raw, decode::preview_only(raw)?)?, base))
+    Ok((pipeline::fit_source_baked(raw, decode::preview_only(raw)?, &base)?, base))
 }
 
 /// Reverse-fit: solve for the EditRecipe that maps `raw`'s look onto `target`'s

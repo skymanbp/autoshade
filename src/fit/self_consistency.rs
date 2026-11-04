@@ -204,7 +204,6 @@ fn the_fit_recovers_a_cast_curve_it_rendered() {
 /// moved — or every gate below measures the gap between the export and the
 /// fit's own preview develop, not the control.
 #[test]
-#[ignore = "self-consistency gate: fails at v1.18.0 start, a defect this version fixes (rel1180 msg2); run with --ignored"]
 fn the_straight_conversion_round_trips_to_itself() {
     let mut failures = Vec::new();
     for name in ["p38.arw", "p39.arw", "p40.arw", "p41.arw"] {
