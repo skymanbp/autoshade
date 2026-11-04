@@ -201,7 +201,7 @@ fn every_surface_shows_a_profile_naming_develop_as_the_export_renders_it() {
     // baked door every master export takes.
     let master = master_develop(&raw, &part, Some(EDGE)).expect("master");
     let from_master =
-        render_baked_to_image(&master, &named, None, None, None, &crate::diag::pixels()).expect("master render");
+        render_baked_to_image(&master, &named, None, None, None, false, &crate::diag::pixels()).expect("master render");
     let de_master = mean_de76(&from_master, &reference);
 
     // 3. The reverse fit's source under its calibration, at the fit's edge,

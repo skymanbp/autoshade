@@ -90,7 +90,7 @@ pub fn render_to_image_in(
     working: ExportColorSpace,
     sink: &dyn crate::diag::Sink,
 ) -> Result<DynamicImage> {
-    render_frame(raw_path, recipe, denoise, max_edge, working, sink, recipe.color_nr)
+    render_frame(raw_path, recipe, denoise, max_edge, working, sink, BasePart::of(recipe).colour_nr())
 }
 
 /// [`render_to_image_in`]'s body. `colour_nr` is the strength of the RAW's
@@ -400,7 +400,7 @@ pub(super) fn finish_develop(
     let frame = MaskFrame::of_base(&geom, recipe.lens_distortion, false);
     // A RAW negative: an absent Sharpening amount renders at Lightroom's own
     // RAW default (`EditRecipe::capture_sharpening`, v1.6.0).
-    apply_develop_with_rasters(&mut data, w, h, recipe, rasters, frame, film, true);
+    apply_develop_with_rasters(&mut data, w, h, recipe, rasters, frame, film, true, true);
 
     // --- pack to 16-bit (highest precision; JPEG downconverts at encode).
     // Orientation was applied BEFORE develop (see orient_f32 above), so the
@@ -1056,12 +1056,16 @@ pub(super) fn rgb16_source(img: &DynamicImage) -> Cow<'_, ImageBuffer<Rgb<u16>, 
 /// [`SourceFrame::of`]): a lens-corrected master is masked in the corrected
 /// frame and takes no second resample in the tail. The caller has already
 /// refused a recipe that develops other geometry ([`SourceFrame::check`]).
+/// `colour_nr_in_pixels`: the pixels already carry the develop's one colour
+/// noise reduction (a marked master, [`SourceFrame::colour_nr_in_pixels`]),
+/// so the display-frame pass does not run again.
 pub fn render_baked_to_image(
     img: &DynamicImage,
     recipe: &EditRecipe,
     denoise: Option<&crate::denoise::DenoiseOpts>,
     max_edge: Option<u32>,
     baked: Option<&BakedGeometry>,
+    colour_nr_in_pixels: bool,
     diag: &crate::diag::Diag<'_>,
 ) -> Result<DynamicImage> {
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
@@ -1122,7 +1126,7 @@ pub fn render_baked_to_image(
     let film = FilmScale::of(film_short, w, h);
     // A baked raster: Lightroom gives a JPEG / TIFF no sharpening by default,
     // so an absent amount renders none (`EditRecipe::capture_sharpening`).
-    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, false);
+    apply_develop_with_rasters(&mut data, w, h, recipe, &rasters, frame, film, false, colour_nr_in_pixels);
 
     let mut buf: Vec<u16> = vec![0u16; w * h * 3];
     buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {

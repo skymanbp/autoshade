@@ -72,18 +72,18 @@ fn the_baked_develop_caps_its_working_resolution_downward_only() {
 
     // Uncapped = the source's own resolution (what the export path asks).
     assert_eq!(
-        render_baked_to_image(&big, &r, None, None, None, &crate::diag::pixels()).unwrap().dimensions(),
+        render_baked_to_image(&big, &r, None, None, None, false, &crate::diag::pixels()).unwrap().dimensions(),
         (400, 200)
     );
     // Capped on the LONG edge, aspect kept.
     assert_eq!(
-        render_baked_to_image(&big, &r, None, Some(100), None, &crate::diag::pixels()).unwrap().dimensions(),
+        render_baked_to_image(&big, &r, None, Some(100), None, false, &crate::diag::pixels()).unwrap().dimensions(),
         (100, 50)
     );
     // Never upsampled.
     let small = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(64, 48, image::Rgb([3, 4, 5])));
     assert_eq!(
-        render_baked_to_image(&small, &r, None, Some(2048), None, &crate::diag::pixels()).unwrap().dimensions(),
+        render_baked_to_image(&small, &r, None, Some(2048), None, false, &crate::diag::pixels()).unwrap().dimensions(),
         (64, 48)
     );
 
@@ -100,7 +100,7 @@ fn the_baked_develop_caps_its_working_resolution_downward_only() {
         ..Default::default()
     };
     assert_eq!(
-        render_baked_to_image(&big, &cropped, None, Some(100), None, &crate::diag::pixels()).unwrap().dimensions(),
+        render_baked_to_image(&big, &cropped, None, Some(100), None, false, &crate::diag::pixels()).unwrap().dimensions(),
         (50, 50),
         "the crop must be taken from the CAPPED frame — i.e. the cap ran first"
     );

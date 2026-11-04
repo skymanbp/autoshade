@@ -65,7 +65,7 @@ pub(crate) fn gains_as_white(r: &EditRecipe, m: &crate::recipe::LocalAdjustment)
     let shown = |mask: crate::recipe::LocalAdjustment| -> Vec<[f32; 3]> {
         let mut data = strip.clone();
         let rr = EditRecipe { masks: vec![mask], ..base.clone() };
-        apply_develop_with_rasters(&mut data, w, h, &rr, &rasters, MaskFrame::AsRendered, FilmScale::NATIVE, false);
+        apply_develop_with_rasters(&mut data, w, h, &rr, &rasters, MaskFrame::AsRendered, FilmScale::NATIVE, false, false);
         (0..GREYS - 1)
             .map(|k| super::masks::linear_to_oklab(data[(h / 2) * w + k * BLOCK + BLOCK / 2].map(srgb_to_linear)))
             .collect()
@@ -170,7 +170,7 @@ mod tests {
             let rr = EditRecipe { masks: m.into_iter().collect(), ..r.clone() };
             apply_develop_with_rasters(
                 &mut px, 4, 4, &rr, &MaskRasterSnapshot::default(), MaskFrame::AsRendered,
-                FilmScale::NATIVE, false,
+                FilmScale::NATIVE, false, false,
             );
             px[5].map(srgb_to_linear)
         };

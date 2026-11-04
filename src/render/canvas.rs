@@ -23,10 +23,22 @@ use super::develop::{apply_radial_gain, vignette_gain_lut};
 ///
 /// The Look is kept WITHOUT its baked half: a profile and a Look are colour
 /// data, never tone.
+///
+/// The part also carries the strength of the RAW's colour noise reduction (E3
+/// of v1.18.0). That stage runs on the linear mosaic inside the demosaic, the
+/// develop's first half (`denoise::linear_chroma`), so it belongs to the part:
+/// one law decides it for every sensor develop — the export, the canvas's
+/// base, a master's bake, the fit's plate — and that law is the colour-NR
+/// control's own (`detail::ChromaNrParams::global`): the stage runs exactly
+/// when the recipe the part is taken from asks for colour NR, at its slider.
+/// A master is baked through the part of the photo's recipe, so a master of a
+/// photo whose colour NR is on carries the stage, as the export of that photo
+/// does, and says so in its file (`BakedColourNr`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BasePart {
     camera_profile: String,
     look: Option<crate::recipe::CreativeLook>,
+    colour_nr: f32,
 }
 
 impl BasePart {
@@ -34,10 +46,12 @@ impl BasePart {
     /// part, whatever else its Look carries — the profile stage cannot run
     /// without a profile ([`EditRecipe::names_profile`]).
     pub fn of(r: &EditRecipe) -> Self {
+        let colour_nr = super::detail::ChromaNrParams::global(r).map_or(0.0, |_| r.color_nr);
         if !r.names_profile() {
-            return Self::default();
+            return Self { colour_nr, ..Self::default() };
         }
         Self {
+            colour_nr,
             camera_profile: r.camera_profile.clone(),
             look: r.look.as_ref().map(|l| crate::recipe::CreativeLook {
                 name: l.name.clone(),
@@ -49,9 +63,16 @@ impl BasePart {
         }
     }
 
-    /// The neutral develop: no profile named.
+    /// The neutral develop: no profile named, and the mosaic as the sensor
+    /// wrote it.
     pub fn is_neutral(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// The strength the RAW's colour noise reduction runs at in this part's
+    /// develop (the slider; 0 = off). See [`BasePart`].
+    pub fn colour_nr(&self) -> f32 {
+        self.colour_nr
     }
 
     /// The recipe that develops exactly this part and nothing else — with
@@ -98,8 +119,8 @@ impl Master {
     pub fn of(image: DynamicImage, frame: &SourceFrame, part: &BasePart) -> Result<Self> {
         let _ = part;
         match frame {
-            SourceFrame::Raw | SourceFrame::Baked(None) => Ok(Self::sensor(image)),
-            SourceFrame::Baked(Some(g)) => bail!(
+            SourceFrame::Raw | SourceFrame::Baked(None, _) => Ok(Self::sensor(image)),
+            SourceFrame::Baked(Some(g), _) => bail!(
                 "this master has {g} in its pixels, but the develop bakes no lens geometry — bake \
                  the master again from the RAW"
             ),
@@ -181,14 +202,14 @@ impl Master {
 /// at `max_edge` (the cap runs right after the profile stage, as in
 /// [`render_to_image`]), unsharpened ([`BasePart::recipe`]).
 pub fn base_develop(raw: &Path, part: &BasePart, max_edge: Option<u32>) -> Result<DynamicImage> {
-    render_frame(raw, &part.recipe(), None, max_edge, ExportColorSpace::Srgb, crate::diag::stderr(), 0.0)
+    render_frame(raw, &part.recipe(), None, max_edge, ExportColorSpace::Srgb, crate::diag::stderr(), part.colour_nr())
 }
 
 /// A master's pixels for `part` (a heal, a fill, a denoise): the base part
 /// developed with the RAW default sharpening a baked master is owed
 /// ([`BasePart::master_recipe`]), 16-bit as the master file is.
 pub fn master_develop(raw: &Path, part: &BasePart, max_edge: Option<u32>) -> Result<DynamicImage> {
-    render_to_image(raw, &part.master_recipe(), None, max_edge)
+    render_frame(raw, &part.master_recipe(), None, max_edge, ExportColorSpace::Srgb, crate::diag::stderr(), part.colour_nr())
 }
 
 /// [`source_pixels_for`] for a master: a RAW through [`master_develop`], a
@@ -441,7 +462,8 @@ impl Drop for Plate {
 pub fn source_plate(raw: &Path, base: &EditRecipe, edge: u32) -> Result<Plate> {
     let mut develop = base.clone();
     (develop.lens_profile.distortion_on, develop.lens_profile.ca_on) = (false, false);
-    let developed = render_frame(raw, &develop, None, Some(edge), ExportColorSpace::Srgb, crate::diag::stderr(), develop.color_nr)?;
+    let colour_nr = BasePart::of(base).colour_nr();
+    let developed = render_frame(raw, &develop, None, Some(edge), ExportColorSpace::Srgb, crate::diag::stderr(), colour_nr)?;
     let pixels = match BaseEncoding::of(base) {
         Some(e) => e.decode(&developed),
         None => developed,

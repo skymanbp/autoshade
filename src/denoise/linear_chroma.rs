@@ -104,7 +104,7 @@ pub(crate) fn filter_mosaic(
     rho: usize,
 ) -> Option<(NoiseModel, f64)> {
     let sites = bayer_sites(cfa)?;
-    if mosaic.len() != width * height || !(wb[1] > 0.0) || !(scale > 0.0) {
+    if mosaic.len() != width * height || wb[1].is_nan() || wb[1] <= 0.0 || scale.is_nan() || scale <= 0.0 {
         return None;
     }
     let wb = [wb[0] / wb[1], 1.0, wb[2] / wb[1]];
