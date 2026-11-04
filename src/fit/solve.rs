@@ -509,9 +509,6 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     };
     recipe.exposure_ev = round2(ev);
     recipe.contrast = round1(sliders[0] * 100.0);
-    if err_before > 0.005 && recipe.contrast.abs() < 3.0 {
-        recipe.contrast = 3.1;
-    }
     recipe.highlights = round1(sliders[1] * 100.0);
     recipe.shadows = round1(sliders[2] * 100.0);
     recipe.whites = round1(sliders[3] * 100.0);
