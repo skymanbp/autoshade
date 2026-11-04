@@ -707,6 +707,23 @@ pub fn global_export_losses(r: &EditRecipe) -> Vec<&'static str> {
         .map(|c| c.name)
         .collect();
     let p = &r.lens_profile;
+    // The profile correction rides on crs:LensProfileEnable (v1.18.0,
+    // `EditRecipe::lightroom_lens_profile_enable`): switched off, both sides
+    // draw none; switched on with an Adobe profile Camera Raw takes for this
+    // photo, the geometry is Lightroom's own (0 px on 63 of 63 tiles on both
+    // pairs measured) and what stays behind is the VIGNETTE — Lightroom
+    // corrects it with Adobe's profile, which lifted one pair's outer rings
+    // 4–6 L over this engine's camera-metadata vignette. With no such profile
+    // the whole correction stays a loss.
+    if let Some(i) = out.iter().position(|c| *c == "lens_profile") {
+        match (r.lightroom_lens_profile_enable(), p.adobe.is_some()) {
+            (Some("1"), false) => {}
+            (Some("1"), true) if p.vignette_active() => out[i] = "lens_profile_vignette",
+            _ => {
+                out.remove(i);
+            }
+        }
+    }
     for (name, moved) in [
         ("lens_profile_vignetting_scale", r.lens_profile_vignetting_scale != 100.0 && p.vignette_active()),
         (
@@ -735,6 +752,7 @@ pub fn describe_global_losses(globals: &[&str]) -> Option<String> {
         .map(|g| match *g {
             "base_curve" => "camera base curve",
             "lens_profile" => "lens profile correction",
+            "lens_profile_vignette" => "lens vignetting (this engine's; Lightroom applies its own profile's)",
             "colour_field" => "colour field",
             "pixel_layers" => "fill layers",
             "lens_blur" => "lens blur",

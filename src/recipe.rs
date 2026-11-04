@@ -1326,6 +1326,31 @@ impl EditRecipe {
     /// setup keeps the camera's CA, as the render does) — unless the camera's
     /// CA is there and switched off, which Camera Raw draws only under Custom
     /// (measured: no camera CA under Custom, the camera's under LensDefaults).
+    /// The crs:LensProfileEnable this develop states (v1.18.0): `"1"` when it
+    /// renders the profile's distortion or vignetting correction, `"0"` when it
+    /// carries the profile with both switched off, `None` when it carries no
+    /// profile at all — a recipe with nothing to say about the lens leaves the
+    /// document's switch as it is (`xmp::merge::unspoken_attr_keys`).
+    ///
+    /// Why the writer owns it: a mask is stored in the frame the develop drew
+    /// it in, and Lightroom places it in the frame its own switch names. Merged
+    /// over a Lightroom base that said `"0"`, our sidecar carried that `"0"`
+    /// beside a develop that rendered the camera's correction, and Lightroom
+    /// drew the photo — and every mask on it — up to 33 px off our export on
+    /// one reference pair (3000 px wide). With `"1"` and the installed profile,
+    /// Camera Raw's geometry matched the export to 0 px on 63 of 63 tiles on
+    /// both pairs measured, with or without a stated LensProfileSetup.
+    pub fn lightroom_lens_profile_enable(&self) -> Option<&'static str> {
+        let p = &self.lens_profile;
+        if (p.distortion_on && !p.distortion.is_empty()) || p.vignette_active() {
+            Some("1")
+        } else if !p.distortion.is_empty() || !p.vignette.is_empty() {
+            Some("0")
+        } else {
+            None
+        }
+    }
+
     pub fn lightroom_lens_setup(&self) -> &'static str {
         let p = &self.lens_profile;
         let ca_off = !p.ca_on && !p.ca_r.is_empty() && !p.ca_b.is_empty();

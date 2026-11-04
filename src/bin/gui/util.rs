@@ -557,6 +557,7 @@ pub(crate) fn xmp_loss_line(
         parts.push(match *g {
             "base_curve" => tr(lang, "camera base curve").to_string(),
             "lens_profile" => tr(lang, "lens profile correction").to_string(),
+            "lens_profile_vignette" => tr(lang, "lens vignetting (this engine's; Lightroom applies its own profile's)").to_string(),
             "colour_field" => tr(lang, "colour field").to_string(),
             "pixel_layers" => tr(lang, "fill layers").to_string(),
             "lens_blur" => tr(lang, "lens blur").to_string(),
@@ -612,7 +613,13 @@ pub(crate) fn xmp_loss_interrupts(
     // A name with no registry row is not something this can vouch for as
     // engine calibration — an unknown falls to the interrupting side, and so
     // does every known control that is not one of the stamped four.
-    !losses.is_empty() || globals.iter().any(|g| !STAMPED_CALIBRATION.contains(g))
+    // `lens_profile_vignette` is the part of the stamped `lens_profile` the
+    // sidecar's switch does not carry (v1.18.0) — the same calibration.
+    !losses.is_empty()
+        || globals.iter().any(|&g| {
+            let control = if g == "lens_profile_vignette" { "lens_profile" } else { g };
+            !STAMPED_CALIBRATION.contains(&control)
+        })
 }
 
 /// The OTHER corner of the disclosure square (R25 B4): the settings this

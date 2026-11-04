@@ -548,6 +548,21 @@
             !xmp_loss_interrupts(&[], &["base_curve", "lens_profile"]),
             "…nor both halves of the same calibration"
         );
+        // v1.18.0: with the lens switch written, what the sidecar still leaves
+        // behind of the stamped lens profile is its vignette — the same
+        // calibration, so the same quiet arm, under its own label.
+        assert!(
+            !xmp_loss_interrupts(&[], &["base_curve", "lens_profile_vignette"]),
+            "…nor the vignette the lens switch does not carry"
+        );
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Zh] {
+            let line = xmp_loss_line(lang, &[], &["lens_profile_vignette"]).expect("a line");
+            assert!(line.contains(tr(lang, "lens vignetting (this engine's; Lightroom applies its own profile's)")), "{lang:?}: {line}");
+        }
+        assert!(
+            tr(crate::i18n::Lang::Zh, "lens vignetting (this engine's; Lightroom applies its own profile's)").contains("暗角"),
+            "the label has its Chinese line"
+        );
         assert!(
             !xmp_loss_interrupts(&[], &["upright_transform"]),
             "…nor Adobe's own Upright solution, which the merge leaves in the document anyway"

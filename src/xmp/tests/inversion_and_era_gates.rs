@@ -913,9 +913,12 @@ fn the_era_gate_is_the_twenty_seven_keys_r25_added() {
     // an ordinary save leaves Lightroom's own profile alone.
     // The lens profile's identity likewise: written only with a strength
     // that needs it named, so an ordinary save leaves Lightroom's own alone.
+    // And its switch (v1.18.0): the writer states LensProfileEnable for the
+    // profile a develop carries (`EditRecipe::lightroom_lens_profile_enable`);
+    // a recipe that carries none, like this default, has nothing to say.
     assert_eq!(
         unspoken_attr_keys(&EditRecipe::default()).into_iter().collect::<Vec<_>>(),
-        vec!["CameraProfile", "LensProfileFilename", "LensProfileName", "LensProfileSetup"]
+        vec!["CameraProfile", "LensProfileEnable", "LensProfileFilename", "LensProfileName", "LensProfileSetup"]
     );
     assert!(
         unspoken_attr_keys(&EditRecipe {
@@ -929,7 +932,9 @@ fn the_era_gate_is_the_twenty_seven_keys_r25_added() {
     let v150 = era_attr_keys(2).len();
     assert_eq!(
         unspoken_attr_keys(&EditRecipe { schema_era: 0, ..Default::default() }).len(),
-        27 + v150 + 3,
+        // + 4: the lens profile's three identity keys and (v1.18.0) its
+        // switch, all unspoken for a recipe carrying no lens profile.
+        27 + v150 + 4,
         "an untouched v0.30 recipe suppresses all twenty-seven and every later era's"
     );
 }
@@ -1004,9 +1009,11 @@ fn the_era_gate_names_the_keys_v1_5_0_added() {
         unspoken_attr_keys(&EditRecipe { schema_era: 1, ..Default::default() }).into_iter().collect();
     gated.sort_unstable();
     // Plus the lens profile's identity, which is not an era's but the same
-    // rule's: unspoken while no strength needs the profile named.
+    // rule's: unspoken while no strength needs the profile named — and its
+    // switch, unspoken while the recipe carries no profile (v1.18.0,
+    // `EditRecipe::lightroom_lens_profile_enable`).
     let mut want = keys.clone();
-    want.extend(["LensProfileFilename", "LensProfileName", "LensProfileSetup"]);
+    want.extend(["LensProfileEnable", "LensProfileFilename", "LensProfileName", "LensProfileSetup"]);
     want.sort_unstable();
     assert_eq!(gated, want, "an untouched v1.4 recipe is gated on v1.5.0's keys and nothing else");
     assert!(era_attr_keys(0).is_empty() && era_attr_keys(crate::recipe::SCHEMA_ERA + 1).is_empty());

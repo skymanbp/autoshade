@@ -1103,3 +1103,90 @@ fn a_written_record_that_does_not_verify_is_disclosed_and_dropped() {
     assert!(found.notes.iter().any(|n| n.contains("record of the document AutoShade wrote")), "{:?}", found.notes);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A develop carrying the camera's lens profile, as a RAW's stamp fills it:
+/// knots for both components, the Adobe profile Camera Raw takes for the photo.
+fn stamped_lens(adobe: bool) -> crate::recipe::LensProfile {
+    crate::recipe::LensProfile {
+        vignette: vec![1.0, 1.1, 1.3],
+        distortion: vec![1.0, 1.0, 1.01],
+        vignette_on: true,
+        distortion_on: true,
+        ca_on: true,
+        adobe: adobe.then(|| crate::recipe::AdobeLensProfile {
+            name: "Adobe (Test 24mm)".into(),
+            filename: "TEST (Test 24mm) - RAW.lcp".into(),
+        }),
+        ..Default::default()
+    }
+}
+
+/// The lens switch is the develop's statement (v1.18.0): a develop that
+/// rendered the camera's lens correction says `LensProfileEnable="1"` over a
+/// Lightroom base that said `"0"`, so Lightroom draws the photo — and places
+/// every mask — in the frame the develop drew them in (Camera Raw's geometry
+/// against the export: 0 px on 63 of 63 tiles on both pairs measured, against
+/// up to 33 px under the base's "0"). Our own document still reads back as the
+/// develop it carries, byte for byte through the render (eeb0b99's law), and
+/// what the switch carries leaves `asr:NotCarried`: with an Adobe profile for
+/// the photo only this engine's vignette stays declared; with none, the whole
+/// correction does.
+#[test]
+fn a_develop_with_the_cameras_lens_correction_states_the_switch_over_a_base_that_said_off() {
+    let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(24, 16, |x, y| {
+        image::Rgb([(x * 10) as u8, (y * 15) as u8, ((x + y) * 6) as u8])
+    }));
+    let render = |r: &EditRecipe| crate::render::develop_preview(&img, r).to_rgb8().into_raw();
+    for adobe in [true, false] {
+        let r = EditRecipe { exposure_ev: 0.35, contrast: 12.0, lens_profile: stamped_lens(adobe), ..Default::default() };
+        assert_eq!(r.lightroom_lens_profile_enable(), Some("1"));
+        let doc = merge_recipe_into_xmp(LIGHTROOM_BASE, &r).expect("a Lightroom base merges").doc;
+        assert_eq!(doc.matches("crs:LensProfileEnable=").count(), 1, "one switch, ours, not the base's beside it: {doc}");
+        assert!(doc.contains("crs:LensProfileEnable=\"1\""), "{doc}");
+        assert!(!doc.contains("crs:LensProfileSetup="), "the setup stays the document's (none here): {doc}");
+        assert_eq!(crate::xmp::written_lens_profile(&doc), Some(r.lens_profile.clone()), "our own switch is not an edit");
+        assert_eq!(load(&doc), loaded(&r), "adobe {adobe}: the read-back is the develop");
+        assert_eq!(render(&load(&doc)), render(&r), "adobe {adobe}: write -> read must not move a pixel");
+        let declared = crate::xmp::describe_global_losses(&crate::xmp::global_export_losses(&r)).unwrap_or_default();
+        let vignette = "lens vignetting (this engine's; Lightroom applies its own profile's)";
+        if adobe {
+            assert!(declared.contains(vignette) && !declared.contains("lens profile correction"), "{declared}");
+        } else {
+            assert!(declared.contains("lens profile correction") && !declared.contains(vignette), "{declared}");
+        }
+        assert!(doc.contains(&xml_attr_escape(&declared)), "the document declares it: {doc}");
+        // Lightroom switching it off after the write is Lightroom's to obey.
+        let off = doc.replacen("crs:LensProfileEnable=\"1\"", "crs:LensProfileEnable=\"0\"", 1);
+        assert_eq!(crate::xmp::written_lens_profile(&off), None);
+    }
+    // A fresh document states it too, and reads back the same way.
+    let r = EditRecipe { lens_profile: stamped_lens(true), ..Default::default() };
+    let fresh = recipe_to_xmp(&r);
+    assert!(fresh.contains("crs:LensProfileEnable=\"1\""), "{fresh}");
+    assert_eq!(crate::xmp::written_lens_profile(&fresh), Some(r.lens_profile.clone()));
+    assert_eq!(render(&load(&fresh)), render(&r));
+}
+
+/// The other two states of the switch: a profile carried with both components
+/// off says `"0"` (nothing is drawn on either side, so nothing is declared);
+/// a recipe carrying no profile says nothing and the base's switch stays.
+#[test]
+fn a_switched_off_profile_says_off_and_no_profile_leaves_the_documents_switch() {
+    let mut off = stamped_lens(true);
+    off.vignette_on = false;
+    off.distortion_on = false;
+    let r = EditRecipe { lens_profile: off, ..Default::default() };
+    assert_eq!(r.lightroom_lens_profile_enable(), Some("0"));
+    let doc = merge_recipe_into_xmp(&LIGHTROOM_BASE.replace("crs:LensProfileEnable=\"0\"", "crs:LensProfileEnable=\"1\""), &r)
+        .expect("merges")
+        .doc;
+    assert_eq!(doc.matches("crs:LensProfileEnable=").count(), 1, "{doc}");
+    assert!(doc.contains("crs:LensProfileEnable=\"0\""), "{doc}");
+    assert!(!crate::xmp::global_export_losses(&r).contains(&"lens_profile"));
+    let bare = EditRecipe { exposure_ev: 0.5, ..Default::default() };
+    assert_eq!(bare.lightroom_lens_profile_enable(), None);
+    let on_base = LIGHTROOM_BASE.replace("crs:LensProfileEnable=\"0\"", "crs:LensProfileEnable=\"1\"");
+    let kept = merge_recipe_into_xmp(&on_base, &bare).expect("merges").doc;
+    assert!(kept.contains("crs:LensProfileEnable=\"1\""), "a recipe with no profile does not touch the switch: {kept}");
+    assert!(!recipe_to_xmp(&bare).contains("LensProfileEnable"));
+}
