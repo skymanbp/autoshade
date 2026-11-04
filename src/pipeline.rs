@@ -3093,9 +3093,10 @@ pub fn fit_target(
 /// The TERMINAL re-read at full size (v1.18.0, R13b). The fit judges every
 /// candidate on its preview at the analysis size; the export renders at the
 /// working edge and is resampled after. A tone with a clamp does not commute
-/// with that average, and measured on the corpus's FINISHED recipes the gap
-/// between the two readings of one recipe was 0.0032-0.0147 of J* — above
-/// FIT_QUANT on every pair (rel1180 msg7). So the finished recipe and the
+/// with that average, and measured on the corpus's FINISHED recipes on the
+/// clamped plate the search reads (R14) the gap between the two readings of
+/// one recipe was 0.0032-0.0214 of J* — above FIT_QUANT on every pair
+/// (rel1180 msg8, R14's measurement). So the finished recipe and the
 /// calibration-only base are each rendered once as the export renders them,
 /// resampled as the fit resamples the target, and read by J* on the frame's
 /// own evidence model; the finished recipe ships only when it ships against
