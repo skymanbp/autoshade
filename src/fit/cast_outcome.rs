@@ -291,12 +291,25 @@ impl TerminalHarm {
     }
 }
 
-/// Tolerance for the fit's OWN quantisation, not a fixed error size. The
-/// rounded sliders, the 8-bit residual tone curve and the f32 develop round
-/// trip cost about 1e-3 of residual even on an IDENTICAL pair, where
-/// `err_before` is exactly 0 — so a bare +1e-4 margin fired there, wiping a
-/// perfectly good near-neutral solve and reporting "outside the global
-/// model's reach" directly beneath a printed residual of 0.000 -> 0.000.
+/// Tolerance for the fit's OWN quantisation, not a fixed error size: the
+/// objective (J*) of an IDENTICAL pair after the fit's own rounding. Measured
+/// by that definition (v1.18.0, `self_consistency::
+/// fit_quant_is_the_objective_of_the_fits_own_rounding`): the app's render of
+/// a corpus RAW's straight conversion with every control the global fit
+/// stores displaced by half its storage step in one direction (exposure
+/// 0.005 EV, the tone sliders, saturation, vibrance, tint and the 24 mixer
+/// values 0.05, white balance 25 K), read against the straight conversion
+/// through the fit's own preview develop: p38 0.001346 / 0.001786, p39
+/// 0.001096 / 0.001121, p40 0.000581 / 0.000509, p41 0.001565 / 0.001584
+/// (+ / -). The largest, 0.001786, is the constant at two figures — the same
+/// 1.8e-3 the display objective carried, re-measured rather than kept. Since
+/// v1.18.0 it is also the ONE margin every do-no-harm of the fit reads (the
+/// nine bare 1e-4 margins, the tone rulers' 1e-4, the bands' end state, the
+/// zones' frame allowance): a difference the objective cannot tell from its
+/// own rounding is no difference. A bare +1e-4 margin used to fire on an
+/// identical pair's rounding, wiping a perfectly good near-neutral solve and
+/// reporting "outside the global model's reach" directly beneath a printed
+/// residual of 0.000 -> 0.000.
 ///
 /// A flat FLOOR is the wrong correction though: it would also wave through a
 /// fit that is genuinely worse whenever both numbers are small (err_before

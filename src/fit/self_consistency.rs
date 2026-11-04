@@ -244,3 +244,46 @@ fn the_fit_recovers_an_exposure_alone_just_under_the_clip() {
     let (base, rep) = round_trip(&raw, 0.85, |r| r.exposure_ev = -0.4);
     gate("exposure -0.4 EV (under the clip)", &base, &rep, rep.recipe.exposure_ev - base.exposure_ev, -0.4, &["exposure_ev"]);
 }
+
+/// FIT_QUANT's own fixture, read by its definition: the objective of an
+/// IDENTICAL pair after the fit's own rounding. The target is the app's
+/// render of the straight conversion with every control the global fit
+/// stores displaced by half its storage step, all in one direction (the
+/// worst a rounded solve of that very target can be left with): exposure
+/// 0.01 EV -> 0.005, the tone sliders, saturation, vibrance, tint and the 24
+/// mixer values 0.1 -> 0.05, the white balance 50 K -> 25 K. The fit reads it
+/// against the straight conversion through its own preview develop (the f32
+/// develop is in the reading), and `err_before` IS that objective. The 8-bit
+/// curves' half code cannot be rendered (a curve stores integer codes), so it
+/// is not in the reading; one code of luma at mid-grey is ~0.4 L*, a curve
+/// stores to half of that, and the readings below are dominated by the
+/// exposure's half step (0.0036 L* stops ~ 0.1-0.2 L*) at the same order.
+/// The constant is the largest reading over the four corpus RAWs and both
+/// directions.
+#[test]
+#[ignore = "measurement: prints the readings FIT_QUANT is taken from; run with --ignored"]
+fn fit_quant_is_the_objective_of_the_fits_own_rounding() {
+    let mut worst = 0.0f32;
+    for name in ["p38.arw", "p39.arw", "p40.arw", "p41.arw"] {
+        let Some(raw) = corpus_raw(name) else { return };
+        for sign in [1.0f32, -1.0] {
+            let (_, rep) = round_trip(&raw, 0.85, |r| {
+                r.exposure_ev += sign * 0.005;
+                for v in [&mut r.contrast, &mut r.highlights, &mut r.shadows, &mut r.whites, &mut r.blacks,
+                    &mut r.saturation, &mut r.vibrance, &mut r.tint]
+                {
+                    *v += sign * 0.05;
+                }
+                for band in [&mut r.hsl.hue, &mut r.hsl.saturation, &mut r.hsl.luminance] {
+                    for v in band.iter_mut() {
+                        *v += sign * 0.05;
+                    }
+                }
+                r.temperature_k = Some(r.temperature_k.or(r.as_shot_k).unwrap_or(5500.0) + sign * 25.0);
+            });
+            eprintln!("FITQUANT {name} {sign:+}: {:.6}", rep.err_before);
+            worst = worst.max(rep.err_before);
+        }
+    }
+    eprintln!("FITQUANT worst {worst:.6} (FIT_QUANT {FIT_QUANT})");
+}

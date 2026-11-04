@@ -162,7 +162,7 @@ pub(super) fn residual_channel_curve_weighted(
 /// slope from the knot's last two outputs and what each delivered, starting
 /// from no curve, where the delivery is `Q_cur(f)`) moves its output toward
 /// the ask. Rounds run while the finished frame's look error still improves
-/// by the 4a' arbitration's own margin (1e-4), bounded by
+/// by the 4a' arbitration's own margin ([`FIT_QUANT`] since v1.18.0), bounded by
 /// [`super::solve::DO_NO_HARM_MAX_ROUNDS`]; the best round is kept, so the
 /// first curve is never made worse. Curves that came back empty stay empty.
 #[allow(clippy::too_many_arguments)]
@@ -222,7 +222,9 @@ pub(super) fn refine_curves_on_finished_frame(
         px = pixels_of(&render::develop_preview(s_img, recipe));
         let err = look_err_with_evidence(&px, tp, evidence);
         rounds += 1;
-        if err >= best.0 - 1e-4 {
+        // A refinement step must buy more than the objective's own rounding
+        // (FIT_QUANT, v1.18.0).
+        if err >= best.0 - FIT_QUANT {
             break;
         }
         best = (err, next);

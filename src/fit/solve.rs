@@ -286,7 +286,10 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         return report;
     }
 
-    if err_before <= 0.001 {
+    // Already matched: the base reads within the objective's own rounding of
+    // the target, so there is nothing a rounded recipe could correct
+    // (FIT_QUANT, v1.18.0; a bare 0.001 with no record before).
+    if err_before <= FIT_QUANT {
         return compose_report(
             base.clone(),
             Measured {
@@ -554,7 +557,9 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     {
         let toned = pixels_of(&render::develop_preview(&s_img, &recipe));
         let err_toned = look::tonal_err_with_evidence(&toned, &tp, &evidence);
-        if err_toned > tonal_before + 1e-4 {
+        // FIT_QUANT on T_L: the sliders' ruler takes the same one margin
+        // (v1.18.0; T_L is J*'s tonal term, in J*'s units).
+        if err_toned > tonal_before + FIT_QUANT {
             recipe.exposure_ev = base.exposure_ev;
             recipe.contrast = base.contrast;
             recipe.highlights = base.highlights;
@@ -657,7 +662,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             &tp,
             &evidence,
         );
-        if err_with > err_without + 1e-4 {
+        // FIT_QUANT on T_L, as the sliders above (v1.18.0).
+        if err_with > err_without + FIT_QUANT {
             recipe.tone_curve = base.tone_curve.clone();
             curve_harm = Some((err_without, err_with));
         }
@@ -1259,7 +1265,9 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         fit_cast_stage(&mut unrotated, CastRescue::Off);
         let unrotated_err = finished_err(&unrotated);
         for _ in 0..DO_NO_HARM_MAX_ROUNDS {
-            if recipe.hsl.hue == hue_before_mixer || finished_err(&recipe) <= unrotated_err + 1e-4 {
+            // FIT_QUANT: the rotation is kept while it is not worse than its
+            // absence by more than the objective's own rounding (v1.18.0).
+            if recipe.hsl.hue == hue_before_mixer || finished_err(&recipe) <= unrotated_err + FIT_QUANT {
                 break;
             }
             recipe.hsl.hue = super::hsl::hue_halved_toward(&recipe.hsl.hue, &hue_before_mixer);
@@ -1282,7 +1290,9 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         let neutral_err = finished_err(&neutral);
         let withdrawn = halve_mixer_until_it_earns(
             &mut recipe,
-            |candidate| finished_err(candidate) > neutral_err + 1e-4,
+            // FIT_QUANT: the mixer must not cost more than the objective's own
+            // rounding against its absence (v1.18.0).
+            |candidate| finished_err(candidate) > neutral_err + FIT_QUANT,
             |candidate| {
                 fit_cast_stage(candidate, CastRescue::Off);
             },
@@ -1369,7 +1379,9 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // Halving a neutral mixer is neutral, so a run where the stage attached
     // nothing is byte-identical to the pre-4a loop.
     let objects = |err_after: f32, end_moves_hue: bool| {
-        err_after > err_before + 1e-4 || (end_moves_hue && budget.vetoes == VetoPolicy::Withhold)
+        // FIT_QUANT: the 4b step-down fires on a cost the objective can tell
+        // from its own rounding (v1.18.0).
+        err_after > err_before + FIT_QUANT || (end_moves_hue && budget.vetoes == VetoPolicy::Withhold)
     };
     let descent = step_down_until_harmless(&mut recipe, objects(err_after, end_moves_hue), |recipe| {
         #[cfg(test)]
