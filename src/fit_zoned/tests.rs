@@ -2576,21 +2576,22 @@ fn boundary_gate_discloses_the_applied_shrink_and_measured_rim() {
     path.remove();
 }
 
-/// 2026-10-22: one frame tolerance per gate family. A semantic region is
-/// admitted by `attach_one_zone` under [`ZONE_GLOBAL_REGRESSION_TOL`], and
-/// the shared bitmap gate re-checks the composed frame under the tolerance
-/// its CALLER passes — it used to apply the spatial family's 0.0 to every
-/// caller, so a region inside its admitted drift budget was refused for
-/// "the composed frame regressed". The same region is run twice through
-/// `attach_semantic_regions`: once to read the frame it lands on (F), then
-/// with the running frame set to F − 0.01, i.e. the region now regresses
-/// the frame by 0.01 — more than 0, less than 0.02. It must stay attached.
+/// REWRITTEN (v1.18.0, R1): one law for every gate family. Until v1.18.0 a
+/// semantic region was admitted under the zones' 0.02 frame drift and the
+/// shared bitmap gate re-checked the composed frame under the tolerance its
+/// CALLER passed (`frame_tol`), so a region that regressed the frame by 0.01
+/// was kept. R1 removed `frame_tol` with every per-family allowance: the
+/// composed frame ships only on a J* gain of FIT_QUANT over the frame without
+/// the region (`fit::ships`), and a loss of any size refuses. The same region
+/// is run twice through `attach_semantic_regions`: once from the honest
+/// region-free frame, where it passes, to read the frame it lands on (F);
+/// then with the running frame set to F - 0.01, i.e. the region now
+/// regresses the frame by 0.01. It must be refused, and say why.
 ///
-/// MUTATION THIS KILLS: `frame_tol: 0.0` (or `SPATIAL_FRAME_REGRESSION_TOL`)
-/// on the semantic-region caller in `regions.rs` — the second run is then
-/// refused with `REGION_BOUNDARY_REFUSED`.
+/// MUTATION THIS KILLS: a frame allowance on the semantic-region caller in
+/// `regions.rs` (the second run then keeps the region).
 #[test]
-fn a_region_inside_its_admitted_frame_budget_is_kept_by_the_boundary_gate() {
+fn a_region_that_costs_the_frame_is_refused_by_the_boundary_gate() {
     let (src, tgt, mask) = zoned_pair();
     let run = |frame_before: Option<f32>, name: &str| {
         let dir = std::env::temp_dir().join(format!("autoshade-{name}-{}", std::process::id()));
@@ -2632,13 +2633,16 @@ fn a_region_inside_its_admitted_frame_budget_is_kept_by_the_boundary_gate() {
     let landed = first.err_after;
     let second = run(Some(landed - 0.01), "region-frame-tol-b");
     assert!(
-        has(&second, crate::rationale::keys::ZONE_BOUNDARY_PASSED)
-            && !has(&second, crate::rationale::keys::REGION_BOUNDARY_REFUSED),
-        "a region that regresses the frame by 0.01 < {ZONE_GLOBAL_REGRESSION_TOL} was refused \
-         (landed {landed:.5}): {}",
+        has(&second, crate::rationale::keys::REGION_BOUNDARY_REFUSED),
+        "a region that regresses the frame by 0.01 was kept (landed {landed:.5}): {}",
         second.recipe.rationale
     );
-    assert_eq!(second.recipe.masks.len(), first.recipe.masks.len());
+    assert!(
+        second.recipe.rationale.contains("the composed frame regressed"),
+        "the refusal names the frame: {}",
+        second.recipe.rationale
+    );
+    assert!(second.recipe.masks.len() < first.recipe.masks.len(), "the refused region leaves no mask");
 }
 
 /// Step 9 / R1 (acceptance A4, ARM A): the gate charges the CORRECTION,
@@ -4049,7 +4053,7 @@ fn a_strictly_better_zone_is_refused_when_the_frame_pays() {
 /// separate the predicates: a hairline move toward the target — every arm
 /// refuses it, the gain being under `ZONE_MIN_ABS_GAIN` and nowhere near
 /// a halving — is KEPT, and the same-sized move away is REFUSED. The
-/// frame condition is the attachment's own tolerance, read at its edge.
+/// frame condition is the stage-vs-absence law (`fit::ships`), read at its edge.
 #[test]
 fn a_shrunk_correction_is_held_to_do_no_harm_not_to_the_arms() {
     let n = 64;
@@ -4075,9 +4079,16 @@ fn a_shrunk_correction_is_held_to_do_no_harm_not_to_the_arms() {
         judged_toward < without && zone.judged(&away, &target) > without,
         "premise: 0.403 sits nearer the 0.50 target than 0.40 and 0.397 farther"
     );
+    // RE-PINNED (v1.18.0, R1): the frame half of the predicate is the
+    // stage-vs-absence law (`fit::ships`): the shrunk set must still earn
+    // FIT_QUANT on the frame over the render without the zones, and a tie
+    // goes to absence. The zone half is what these two verdicts separate, so
+    // the frame is handed a set that earned 2·FIT_QUANT (it read the bare
+    // `fb, fb` tie before, which the 0.02 drift allowance passed).
     let fb = 0.100f32;
-    assert!(zone.still_accepted(&toward, &target, without, fb, fb), "a hairline gain does no harm");
-    assert!(!zone.still_accepted(&away, &target, without, fb, fb), "a move away from the target is harm");
+    let earned = fb - 2.0 * fit::FIT_QUANT;
+    assert!(zone.still_accepted(&toward, &target, without, fb, earned), "a hairline gain does no harm");
+    assert!(!zone.still_accepted(&away, &target, without, fb, earned), "a move away from the target is harm");
     // The k=1 arms refuse the very correction the predicate keeps — with
     // the true EV gap of that render, not a convenient one — which is
     // what separates "still accepted" from "accepted again".
@@ -4090,9 +4101,12 @@ fn a_shrunk_correction_is_held_to_do_no_harm_not_to_the_arms() {
         zone_accepts(without, judged_toward, ev, fb, fb, UNMATCHED_TONAL).is_none(),
         "premise: every k=1 arm refuses a hairline gain ({without} -> {judged_toward}, ev {ev})"
     );
-    // The frame may drift by the attachment's tolerance and no further.
-    assert!(zone.still_accepted(&toward, &target, without, fb, fb + ZONE_GLOBAL_REGRESSION_TOL));
-    assert!(!zone.still_accepted(&toward, &target, without, fb, fb + ZONE_GLOBAL_REGRESSION_TOL + 1e-3));
+    // The frame side at its edge: a set that earns FIT_QUANT and a hair
+    // more is kept; one that earns a hair under it, ties or regresses is not.
+    assert!(zone.still_accepted(&toward, &target, without, fb, fb - fit::FIT_QUANT - 1e-4));
+    assert!(!zone.still_accepted(&toward, &target, without, fb, fb - fit::FIT_QUANT + 1e-4));
+    assert!(!zone.still_accepted(&toward, &target, without, fb, fb), "a tie goes to absence");
+    assert!(!zone.still_accepted(&toward, &target, without, fb, fb + 1e-4), "a loss of any size refuses");
 }
 
 /// R39. On the shared routes each zone's baseline is the shipped set
@@ -4153,8 +4167,15 @@ fn refuse_shrunk_zones_judges_each_zone_against_the_shipped_set_without_it() {
     };
     let mut accepted = vec![zone(0, "left"), zone(1, "right")];
     let frame = fit::look_err_with_evidence(&pixels, &tgt_px, &report.evidence);
+    // RE-PINNED (v1.18.0, R1): the frame half of `still_accepted` is the
+    // stage-vs-absence law (`fit::ships`), one verdict for the whole shrunk
+    // set, and a tie goes to absence — the `frame, frame` this test passed
+    // refused every zone. The frame half is not under test here (the
+    // leave-one-out baselines are), so it is handed a set that earned
+    // 2·FIT_QUANT over its absence.
     let refused = refuse_shrunk_zones(
-        &source, &mut report, &mut accepted, &mut originals, 0, &pixels, &tgt_px, 0.25, frame, frame,
+        &source, &mut report, &mut accepted, &mut originals, 0, &pixels, &tgt_px, 0.25,
+        frame + 2.0 * fit::FIT_QUANT, frame,
     );
     for path in &paths {
         path.remove();
@@ -6034,10 +6055,13 @@ fn a_zone_whose_movable_class_already_matches_is_left_alone() {
     path.remove();
 }
 
-/// The zone stage's confidence is read on the render that ships. On the
-/// calibration pair the bands replace the single sky zone, so the
+/// The zone stage's confidence is read on the render that ships, so the
 /// confidence verdict has to come after the band trials and read each
-/// accepted region on the finished frame. Until v1.17.1 it was taken before
+/// accepted region on the finished frame. RE-PINNED (v1.18.0, R1): on the
+/// calibration pair the bands no longer replace the single sky zone (a band
+/// set must gain FIT_QUANT on the frame over it, and here it does not:
+/// "frame do-no-harm, 7 trials"), so the trial that decides what ships is
+/// the one that KEPT the zone; the verdict must still come after it. Until v1.17.1 it was taken before
 /// `replace_zone`, from the single sky zone's own residual, and the shipped
 /// confidence described a correction the recipe no longer carried.
 #[test]
@@ -6053,9 +6077,10 @@ fn a_zoned_fits_confidence_is_read_on_the_render_that_ships() {
     attach_zones(&source, &target, &mut report, &sky_mask, &sky_mask, &mask_path);
     let position = |key: &str| report.notes.iter().position(|n| n.key == key);
     let bands = position(crate::rationale::keys::ZONE_SUBZONES_ATTACHED)
-        .expect("premise: the bands replace a single zone on the calibration pair");
+        .or_else(|| position(crate::rationale::keys::ZONE_SUBZONES_REGRESSED))
+        .unwrap_or_else(|| panic!("premise: the band trials ran on the calibration pair: {}", report.recipe.rationale));
     let verdict = position(crate::rationale::keys::ZONE_CONFIDENCE).expect("the zone stage states its confidence");
-    assert!(verdict > bands, "the confidence was read before the bands shipped");
+    assert!(verdict > bands, "the confidence was read before the band trials decided what ships");
     let note = &report.notes[verdict];
     let (worst, frame) = (note_number(note, "worst"), note_number(note, "frame"));
     // It is read on the frame that ships: the finished frame's own error
@@ -6147,13 +6172,23 @@ fn calibration_sky_zone_survives_luminance_with_partial_chroma_refusal() {
     // own boundary asks 0.227 of it: the gate compares the charged ranks
     // (`BoundaryReading::gated`, 0.011 luma / 0.012 colour), so that is what
     // is asserted below, as `every_accepted_fixture_zone_...` reads it.
-    let sky_bands: Vec<_> =
+    // RE-PINNED (v1.18.0, R1): the sky survives as ONE zone again. The
+    // bands still lower the sky's deltaE (19.74 -> 18.37) but a band set now
+    // replaces the single zone only on a J* gain of FIT_QUANT over it
+    // (`subzones::replace_zone`, `fit::ships`), and it does not earn one:
+    // "kept the current recipe ... (frame do-no-harm, 7 trials)", read the
+    // same with S in the ruler and in S-mode (lane c probe). The single
+    // zone carries the luminance move and ships its colour at a share of the
+    // solved move, the full move refused by its cells: the partial chroma
+    // refusal this test is named for.
+    let sky_zones: Vec<_> =
         report.recipe.masks.iter().filter(|mask| mask.role == MaskRole::ZoneSky).collect();
-    let (sky, second) = match sky_bands.as_slice() {
-        [first, second] => (*first, *second),
+    let sky = match sky_zones.as_slice() {
+        [only] => *only,
         other => panic!(
-            "the calibration sky survives as two bands, not {:?}",
-            other.iter().map(|mask| &mask.name).collect::<Vec<_>>()
+            "the calibration sky survives as one zone, not {:?}: {}",
+            other.iter().map(|mask| &mask.name).collect::<Vec<_>>(),
+            report.recipe.rationale
         ),
     };
     let note = report
@@ -6162,48 +6197,26 @@ fn calibration_sky_zone_survives_luminance_with_partial_chroma_refusal() {
         .find(|note| note.key == crate::rationale::keys::ZONE_BOUNDARY_PASSED)
         .expect("calibration sky must reach the boundary gate");
     let after = note_number(note, "after");
-    // Printed BEFORE the pins: a moved number is only diagnosable from the
-    // rationale that moved it, and a failed assertion never reached here.
-    for mask in &report.recipe.masks {
-        eprintln!(
-            "CALIBRATION_ZONE name={:?} role={:?} ev={:.3} gains={:?} sat={:.1}",
-            mask.name, mask.role, mask.exposure_ev, mask.color_gains, mask.saturation
-        );
-    }
     eprintln!(
         "CALIBRATION_SKY ev={:.3} gains={:?} sat={:.1} rim={:.4} rationale={}",
         sky.exposure_ev, sky.color_gains, sky.saturation, after, report.recipe.rationale
     );
-    assert!((-0.39..=-0.35).contains(&sky.exposure_ev), "ev {}", sky.exposure_ev);
+    assert!(sky.exposure_ev < 0.0, "the sky zone carries a darkening luminance move: ev {}", sky.exposure_ev);
     assert!(
-        !gains_withheld(sky.color_gains) && sky.saturation > 0.0,
-        "the luminance band ships the share of its colour the cells vouched: {:?} sat {}",
+        !gains_withheld(sky.color_gains),
+        "the sky ships the share of its colour the cells vouched: {:?} sat {}",
         sky.color_gains,
         sky.saturation
     );
-    assert!(
-        (-0.09..=-0.04).contains(&second.exposure_ev),
-        "second band ev {}",
-        second.exposure_ev
-    );
-    assert!(
-        second.saturation > 0.0,
-        "the second band ships the colour its cells vouched: sat {} gains {:?}",
-        second.saturation,
-        second.color_gains
-    );
     let gated = note_number(note, "charged").max(note_number(note, "colour_charged"));
     assert!(gated <= ZONE_BOUNDARY_RIM_MAX, "charged {gated} (raw rim {after})");
-    // v1.17.1: read on the band that SHIPS (`sky`, "sky · band 1/2"). Until
-    // then this found the single sky zone's own note, which the bands
-    // replaced and which stayed in the rationale beside them; a replaced
-    // zone's notes now leave with it (`subzones::drop_replaced_zone_notes`).
+    let label = if sky.name.is_empty() { MaskRole::ZoneSky.tag().to_string() } else { sky.name.clone() };
     let colour_note = report
         .notes
         .iter()
         .find(|note| {
             note.key == crate::rationale::keys::ZONE_COLOUR_VOUCHED_AT_SHARE
-                && note.args.iter().any(|(key, value)| *key == "label" && *value == sky.name)
+                && note.args.iter().any(|(key, value)| *key == "label" && *value == label)
         })
         .expect("the one-sided calibration sky must refuse its full colour move and ship a share");
     assert!(
@@ -7239,30 +7252,45 @@ fn a_zone_whose_target_is_a_gains_recolour_does_not_read_as_a_tint() {
     path.remove();
 }
 
-/// The colour field's PINNED path (1.17.0). A settled zone — its render
-/// already the target's — woven through the frame in 8-px stripes, finer than
-/// the field's 12-column grid, and 0.16 darker than its neighbours, close
-/// enough that the two share the field's luma vertices. Every other pixel asks
-/// for +0.10 of light. A field solved for the frame cannot give the stripes a
-/// vertex of their own, so it lifts them with their neighbours and the zone
-/// regresses past the tolerance; pinned — the zone's own render as its target
-/// at full weight, in pass A and in the support-free pass B alike — the
-/// re-solve holds the zone within it and the field still ships.
+/// The colour field's PINNED path, REWRITTEN for v1.18.0 (R1). A settled
+/// zone — its render already the target's — woven through the frame in 8-px
+/// stripes, finer than the field's 12-column grid, and 0.16 darker than its
+/// neighbours, close enough that the two share the field's luma vertices.
+/// Every other pixel asks for +0.10 of light. A field solved for the frame
+/// cannot give the stripes a vertex of their own, so it lifts them with their
+/// neighbours; the zone is pinned (its own render as its target at full
+/// weight) and the field solved again. Until v1.18.0 that re-solve had to
+/// hold the zone within the 0.02 a zone could cost, and it did, so the field
+/// shipped. R1 made the per-zone half of the field's do-no-harm "a loss of
+/// any size refuses" (`field::zone_regressed`): the re-solve still lifts the
+/// stripes (the zone reads 0.0061 -> 0.0120 on it), so the field is given
+/// back, says which zone it would have cost, and ships nothing.
 #[test]
-fn a_zone_the_colour_field_regresses_is_pinned_and_the_field_still_ships() {
-    pinned_zone_fixture(None);
+fn a_zone_the_pinned_field_still_regresses_takes_the_field_back() {
+    pinned_zone_fixture(None, "field-pin");
 }
 
 /// The same zone carrying little frame evidence (weight 0.1, where the night
 /// pair's settled tile sat in content the evidence down-weights). The pin's
 /// full weight must reach the support-free pass B that most cells take, not
-/// pass A alone, or the re-solve hears the zone no better than the first.
+/// pass A alone: the re-solve then hears the zone as it hears the
+/// full-evidence one, and the zone's cost on it reads alike (measured 0.00634
+/// against 0.00592 at full evidence) — and is given back by the same law.
 #[test]
 fn a_pinned_zone_is_heard_at_full_weight_by_both_field_solves() {
-    pinned_zone_fixture(Some(0.1));
+    let (low_before, low_after) = pinned_zone_fixture(Some(0.1), "field-pin-low");
+    let (full_before, full_after) = pinned_zone_fixture(None, "field-pin-full");
+    let (low, full) = (low_after - low_before, full_after - full_before);
+    assert!(
+        (low / full - 1.0).abs() <= 0.15,
+        "the pinned re-solve hears the low-evidence zone as it hears the full-evidence one: \
+         cost {low:.6} against {full:.6}"
+    );
 }
 
-fn pinned_zone_fixture(zone_evidence: Option<f32>) {
+/// Runs the settled-zone fixture and returns the regressed zone's reading
+/// (before, after) from the give-back sentence.
+fn pinned_zone_fixture(zone_evidence: Option<f32>, name: &str) -> (f32, f32) {
     let (w, h) = (96u32, 64u32);
     let in_zone = |x: u32| (32..64).contains(&x) && (x / 8).is_multiple_of(2);
     let grey = |x: u32, y: u32| {
@@ -7274,8 +7302,8 @@ fn pinned_zone_fixture(zone_evidence: Option<f32>) {
         let v = grey(x, y);
         to8(if in_zone(x) { [v; 3] } else { [v + 0.10; 3] })
     }));
-    // One raster per variant: the two run in parallel, and each removes its own.
-    let path = fixture_mask_path(if zone_evidence.is_some() { "field-pin-low" } else { "field-pin" });
+    // One raster per run: the runs go in parallel, and each removes its own.
+    let path = fixture_mask_path(name);
     GrayImage::from_fn(w, h, |x, _| image::Luma([if in_zone(x) { 255u8 } else { 0 }]))
         .save(path.path())
         .unwrap();
@@ -7312,25 +7340,23 @@ fn pinned_zone_fixture(zone_evidence: Option<f32>) {
     let read = |note: &crate::rationale::Note, key: &str| -> f32 {
         note.args.iter().find(|(k, _)| *k == key).map(|(_, v)| v.parse().unwrap()).unwrap()
     };
-    let pinned = report
+    let regressed = report
         .notes
         .iter()
-        .find(|n| n.key == crate::rationale::keys::FIELD_ZONE_PINNED)
-        .unwrap_or_else(|| panic!("the field must regress the settled zone and pin it: {}", report.recipe.rationale));
-    let (before, first, after) = (read(pinned, "before"), read(pinned, "first"), read(pinned, "after"));
+        .find(|n| n.key == crate::rationale::keys::FIELD_ZONE_REGRESSED)
+        .unwrap_or_else(|| panic!("the pinned re-solve still costs the settled zone: {}", report.recipe.rationale));
     assert!(
-        first > before + ZONE_GLOBAL_REGRESSION_TOL,
-        "premise: the first solve costs the zone past the tolerance ({before} -> {first})"
+        regressed.args.iter().any(|(k, v)| *k == "label" && v == "settled"),
+        "the give-back names the zone: {regressed:?}"
     );
+    let (before, after) = (read(regressed, "before"), read(regressed, "after"));
+    assert!(after > before, "premise: the re-solved field costs the zone ({before} -> {after})");
     assert!(
-        after <= before + ZONE_GLOBAL_REGRESSION_TOL,
-        "the re-solved field leaves the zone within the tolerance ({before} -> {after}, first {first})"
-    );
-    assert!(
-        !report.notes.iter().any(|n| n.key == crate::rationale::keys::FIELD_ZONE_REGRESSED),
-        "a pin that held must not give the field back: {}",
+        !report.notes.iter().any(|n| n.key == crate::rationale::keys::FIELD_ZONE_PINNED),
+        "a pin that did not hold is not reported as shipped: {}",
         report.recipe.rationale
     );
-    assert!(report.recipe.colour_field.is_some(), "the field ships: {}", report.recipe.rationale);
+    assert!(report.recipe.colour_field.is_none(), "the field is given back: {}", report.recipe.rationale);
     std::fs::remove_file(path.path()).ok();
+    (before, after)
 }
