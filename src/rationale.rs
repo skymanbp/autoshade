@@ -1097,7 +1097,9 @@ pub mod keys {
         " Local-field realized after {producer}: frame {err_after}, ceiling \
          {ceiling}, share {realized}.";
     pub const LOCAL_STOP: &str =
-        " Local-field stop after {producer}: the field re-read on this state          reaches {ceiling} from {global} (frame {err_after}), a gain under the margin          {margin}; skipped [{skipped}].";
+        " Local-field stop after {producer}: the field re-read on this state \
+         reaches {ceiling} from {global} (frame {err_after}), a gain under the margin \
+         {margin}; skipped [{skipped}].";
     pub const FIELD_ATTACHED: &str =
         " Colour field attached ({x}x{y}x{b} vertices): frame {before} -> {after}, \
          ceiling {ceiling}, share {realized}, saturated vertices {saturated}. It is \

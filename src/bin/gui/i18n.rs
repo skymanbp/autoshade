@@ -2429,7 +2429,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" Local-field realized after {producer}: frame {err_after}, ceiling \
       {ceiling}, share {realized}.",
         " 局部场在 {producer} 后的实现量：全画面 {err_after}，上限 {ceiling}，比例 {realized}。"),
-    (" Local-field stop after {producer}: the field re-read on this state          reaches {ceiling} from {global} (frame {err_after}), a gain under the margin          {margin}; skipped [{skipped}].",
+    (" Local-field stop after {producer}: the field re-read on this state \
+      reaches {ceiling} from {global} (frame {err_after}), a gain under the margin \
+      {margin}; skipped [{skipped}].",
         " 局部场在 {producer} 后停止：在当前状态重读的局部场从 {global} 最多到 {ceiling}（画面 {err_after}），增益不到余量 {margin}；跳过 [{skipped}]。"),
     (" Colour field attached ({x}x{y}x{b} vertices): frame {before} -> {after}, \
       ceiling {ceiling}, share {realized}, saturated vertices {saturated}. It is \
