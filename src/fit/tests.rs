@@ -4383,7 +4383,7 @@ fn a_projection_worth_less_than_the_fits_own_quantisation_is_not_shipped() {
         }
     };
     // err_without = 0.05. A ratio of 0.99 buys 0.0005 of look error —
-    // under FIT_QUANT (0.0018), so nothing ships…
+    // under FIT_QUANT (0.0023), so nothing ships…
     let mut recipe = EditRecipe::default();
     assert!(
         search_cast_projection(&img, &mut recipe, fitted, 0.05, clean_gate(0.99)).is_none(),

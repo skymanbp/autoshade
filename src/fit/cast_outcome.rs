@@ -299,10 +299,12 @@ impl TerminalHarm {
 /// stores displaced by half its storage step in one direction (exposure
 /// 0.005 EV, the tone sliders, saturation, vibrance, tint and the 24 mixer
 /// values 0.05, white balance 25 K), read against the straight conversion
-/// through the fit's own preview develop: p38 0.001346 / 0.001786, p39
-/// 0.001096 / 0.001121, p40 0.000581 / 0.000509, p41 0.001565 / 0.001584
-/// (+ / -). The largest, 0.001786, is the constant at two figures — the same
-/// 1.8e-3 the display objective carried, re-measured rather than kept. Since
+/// through the fit's own preview develop, every present pixel judged at its
+/// presence weight (R11): p38 0.001397 / 0.001841, p39 0.001093 / 0.001109,
+/// p40 0.000614 / 0.000533, p41 0.002250 / 0.002132 (+ / -). The constant is
+/// the smallest two-figure value not below the largest reading, 0.002250 —
+/// the rule that gave 1.8e-3 from 0.001786 when J* read the estimation
+/// weights, which left p41's sky ranges out of the reading. Since
 /// v1.18.0 it is also the ONE margin every do-no-harm of the fit reads (the
 /// nine bare 1e-4 margins, the tone rulers' 1e-4, the bands' end state, the
 /// zones' frame allowance): a difference the objective cannot tell from its
@@ -316,7 +318,7 @@ impl TerminalHarm {
 /// 0.0010 -> err_after 0.0029 is nearly 3× worse, and no absolute floor below
 /// 0.003 catches it). Scale with the error instead and add the quantisation
 /// budget once.
-pub(crate) const FIT_QUANT: f32 = 1.8e-3;
+pub(crate) const FIT_QUANT: f32 = 2.3e-3;
 
 /// THE stage-vs-absence law (v1.18.0, R1): a stage SHIPS only when its
 /// objective gain over its absence is at least [`FIT_QUANT`]. A gain under
