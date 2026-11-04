@@ -389,18 +389,8 @@ fn cell_gaps(cells: &[CellSums]) -> Vec<[f32; 3]> {
         .collect()
 }
 
-/// CIE Lab, D65, from the analysis raster's display sRGB. Keep signed a/b:
-/// equally strong warm/cool residuals have equal deltaE and opposite intent.
-pub(super) fn lab(rgb: &[f32; 3]) -> [f32; 3] {
-    let [r, g, b] = rgb.map(render::srgb_to_linear);
-    let f = |t: f32| if t > 216.0 / 24389.0 {
-        t.cbrt()
-    } else { (24389.0 / 27.0 * t + 16.0) / 116.0 };
-    let x = f((0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047);
-    let y = f(0.2126729 * r + 0.7151522 * g + 0.0721750 * b);
-    let z = f((0.0193339 * r + 0.119192 * g + 0.9503041 * b) / 1.08883);
-    [116.0 * y - 16.0, 500.0 * (x - y), 200.0 * (y - z)]
-}
+/// CIE Lab, D65 — the objective's own conversion ([`fit::cie_lab`]).
+pub(super) use crate::fit::cie_lab as lab;
 
 /// The evidence cell a pixel index falls in, on the same grid the target's
 /// cell means are read on (`fit_cells`).

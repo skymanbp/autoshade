@@ -328,3 +328,17 @@ pub(super) fn mean_chroma(px: &[[f32; 3]]) -> f32 {
         px.iter().map(|p| p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2])).sum();
     sum / px.len() as f32
 }
+
+/// CIE Lab, D65, from the analysis raster's display sRGB. Keep signed a/b:
+/// equally strong warm/cool residuals have equal deltaE and opposite intent.
+/// The one conversion the objective (J*) and the zoned rulers both read.
+pub(crate) fn cie_lab(rgb: &[f32; 3]) -> [f32; 3] {
+    let [r, g, b] = rgb.map(render::srgb_to_linear);
+    let f = |t: f32| if t > 216.0 / 24389.0 {
+        t.cbrt()
+    } else { (24389.0 / 27.0 * t + 16.0) / 116.0 };
+    let x = f((0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047);
+    let y = f(0.2126729 * r + 0.7151522 * g + 0.0721750 * b);
+    let z = f((0.0193339 * r + 0.119192 * g + 0.9503041 * b) / 1.08883);
+    [116.0 * y - 16.0, 500.0 * (x - y), 200.0 * (y - z)]
+}

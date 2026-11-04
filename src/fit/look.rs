@@ -34,34 +34,7 @@ pub(crate) fn look_err_with_evidence(
         .sum::<f32>()
         / 3.0;
     let base = 0.55 * tonal + 0.20 * colour;
-    // Per-band centroid hue disagreement — the WORST qualifying band, not a
-    // weighted mean: one region with wrecked hue ruins a photo no matter how
-    // small its area share (a lavender sky over perfect rocks), and an
-    // area-weighted mean lets exactly that hide (measured: the violet-sky
-    // curves slipped through the cast-acceptance gate on the mean variant).
-    // |Δ| saturates at 60° so a fully-wrecked band reads 1.
-    let (sa, ta) = band_stats_weighted(a, &evidence.source_hue_weights);
-    let (sb, tb) = band_stats_weighted(b, &evidence.target_hue_weights);
-    let mut hue = 0.0f32;
-    let mut hue_weight = 0.0f32;
-    if ta >= 1.0 && tb >= 1.0 {
-        for i in 0..8 {
-            let (x, y) = (&sa[i], &sb[i]);
-            let range_weight = evidence.hue.get(i).map(|r| r.weight).unwrap_or(0.0);
-            if range_weight <= 0.0 || x.w / ta < EVIDENCE_MIN_SHARE as f64 || y.w / tb < EVIDENCE_MIN_SHARE as f64 {
-                continue;
-            }
-            let mut d = y.sin.atan2(y.cos).to_degrees() - x.sin.atan2(x.cos).to_degrees();
-            while d > 180.0 {
-                d -= 360.0;
-            }
-            while d < -180.0 {
-                d += 360.0;
-            }
-            hue = hue.max((d.abs().min(60.0) / 60.0) as f32);
-            hue_weight = hue_weight.max(range_weight);
-        }
-    }
+    let (hue, hue_weight) = band_colour_offset(a, b, evidence);
     let (w, h) = (evidence.width, evidence.height);
     // A PENALTY term: with no reading there is nothing to charge. That is what
     // the abstention says here — not that the structure survived.
@@ -71,6 +44,85 @@ pub(crate) fn look_err_with_evidence(
         0.0
     };
     base + 0.15 * hue * hue_weight.min(1.0) + 0.10 * structural.min(1.0)
+}
+
+/// H_ab, the colour term's WORST band (v1.18.0): per qualifying HSL band,
+/// the distance between the two sides' mean CIE a*, b* over the band's
+/// members, in units of the TARGET band's own chroma — `min(|Δ(mean a*,
+/// mean b*)| / C*_target, 1)` with `C*_target = |(mean a*, mean b*)|` of the
+/// target's members — and the worst such band, not a weighted mean: one
+/// region with wrecked colour ruins a photo no matter how small its area
+/// share (a lavender sky over perfect rocks), and an area-weighted mean lets
+/// exactly that hide (measured: the violet-sky curves slipped through the
+/// cast-acceptance gate on the mean variant).
+///
+/// The reading it replaces took the band's centroid HUE ANGLE alone,
+/// saturating at 60°, so a band whose chroma overshot the target at the
+/// right angle read as matched (rel1180 msg1: a land tile's a* went -3.8 ->
+/// +4.4 and was admitted because its centroid angle moved closer). The 60°
+/// saturation transfers exactly: a rotation of 60° at chroma C is a chord of
+/// length C, so a band rotated by the old saturation reads 1 here as it did
+/// there, and an offset in chroma now counts as an offset in angle does.
+///
+/// Membership is unchanged — the display-HSL band partition and its chroma
+/// gate (`band_stats_weighted`), the [`EVIDENCE_MIN_SHARE`] floor on both
+/// sides and the range's evidence weight — so the same pixels qualify the
+/// same bands; only the distance moved into CIE units. Returns (the worst
+/// band's offset, the largest qualifying band's evidence weight).
+fn band_colour_offset(a: &[[f32; 3]], b: &[[f32; 3]], evidence: &EvidenceModel) -> (f32, f32) {
+    let (sa, ta) = band_ab_weighted(a, &evidence.source_hue_weights);
+    let (sb, tb) = band_ab_weighted(b, &evidence.target_hue_weights);
+    let (mut worst, mut weight) = (0.0f32, 0.0f32);
+    if ta < 1.0 || tb < 1.0 {
+        return (worst, weight);
+    }
+    for i in 0..8 {
+        let (x, y) = (&sa[i], &sb[i]);
+        let range_weight = evidence.hue.get(i).map(|r| r.weight).unwrap_or(0.0);
+        if range_weight <= 0.0 || x[0] / ta < EVIDENCE_MIN_SHARE as f64 || y[0] / tb < EVIDENCE_MIN_SHARE as f64 {
+            continue;
+        }
+        let mean = |s: &[f64; 3]| (s[1] / s[0], s[2] / s[0]);
+        let ((xa, xb), (ya, yb)) = (mean(x), mean(y));
+        let chroma = ya.hypot(yb);
+        let offset = (ya - xa).hypot(yb - xb);
+        // A band whose target mean sits at the neutral axis has no chroma to
+        // measure in; any offset there is a whole band's worth of wrong colour.
+        let read = if chroma > 1e-6 { (offset / chroma).min(1.0) } else if offset > 1e-6 { 1.0 } else { 0.0 };
+        worst = worst.max(read as f32);
+        weight = weight.max(range_weight);
+    }
+    (worst, weight)
+}
+
+/// Per-band [weight, Σ weight·a*, Σ weight·b*] over the display-HSL band
+/// partition `band_stats_weighted` uses (the same chroma gate, the same
+/// two-band bracketing), and the total weight of the pixels that entered.
+fn band_ab_weighted(px: &[[f32; 3]], weights: &[f32]) -> ([[f64; 3]; 8], f64) {
+    let mut bands = [[0.0f64; 3]; 8];
+    let mut total = 0.0f64;
+    for (i, p) in px.iter().enumerate() {
+        let weight = weights.get(i).copied().unwrap_or(0.0).max(0.0) as f64;
+        if weight <= 0.0 {
+            continue;
+        }
+        let chroma = p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]);
+        if chroma < 0.06 {
+            continue;
+        }
+        let (h, _, _) = render::rgb_to_hsl(p[0], p[1], p[2]);
+        let (b0, b1, w1) = render::bracket_bands(h * 360.0, &render::HSL_CENTERS);
+        let lab = cie_lab(p);
+        for (bi, w) in [(b0, 1.0 - w1 as f64), (b1, w1 as f64)] {
+            let w = w * weight;
+            let band = &mut bands[bi];
+            band[0] += w;
+            band[1] += w * lab[1] as f64;
+            band[2] += w * lab[2] as f64;
+        }
+        total += weight;
+    }
+    (bands, total)
 }
 
 /// The TONAL term of [`look_err_with_evidence`] on its own: the mean absolute

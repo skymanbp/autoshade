@@ -199,6 +199,7 @@ pub(crate) use pairing::{
 };
 use pairing::{NOT_SAME_FRAME_CONFIDENCE_CAP, shared_content_population};
 pub use pixels::{luma601, pixels_of};
+pub(crate) use pixels::cie_lab;
 pub(crate) use pixels::{cdf_at, quantile};
 use pixels::{
     DEGENERATE_LUMA_VAR, is_neutralish, luma_variance, mean_chroma, tone_cdf_pair_weighted,
