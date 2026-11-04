@@ -121,7 +121,12 @@ fn gate(name: &str, base: &EditRecipe, rep: &FitReport, carried: f32, wanted: f3
     if !foreign.is_empty() {
         failures.push(format!("controls not set moved: {foreign:?}"));
     }
-    eprintln!("GATE {name}: err {:.5} -> {:.5}; carried {carried:+.2} of {wanted:+.2}; moved {moved:?}", rep.err_before, rep.err_after);
+    eprintln!(
+        "GATE {name}: err {:.5} -> {:.5}; D {:?}; carried {carried:+.2} of {wanted:+.2}; moved {moved:?}",
+        rep.err_before,
+        rep.err_after,
+        rep.divergence.map(|r| r.d)
+    );
     assert!(failures.is_empty(), "{name}: {}\n{}", failures.join("; "), rep.recipe.rationale);
 }
 
