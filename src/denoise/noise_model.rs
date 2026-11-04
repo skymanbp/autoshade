@@ -22,7 +22,7 @@
 //! with it, the residual has no trend left in level or radius (medians within
 //! 0.025 per level decile and per ring on three photos) and its spread is the
 //! variance estimate's own sampling spread plus 2–5 % (0.111 / 0.138 / 0.112
-//! against `sqrt(2/255)` = 0.089). The same model, fitted on green alone,
+//! against `sqrt(2/255)` = 0.089, measured on 16-cell patches). The same model, fitted on green alone,
 //! predicts the red and blue colour-difference noise to within 2–8 %.
 //!
 //! **The population, and the flat rule — no chosen factor.** Texture only
@@ -45,10 +45,18 @@
 
 use rayon::prelude::*;
 
-/// Cells per patch side (a patch is `2·PATCH` pixels square). The one size
-/// this measurement holds that is not yet derived: it sets the variance
-/// estimate's sampling spread, `sqrt(2/(PATCH² − 1))` = 0.089.
-pub(crate) const PATCH: usize = 16;
+/// Cells per patch side (a patch is `2·PATCH` pixels square): the smallest
+/// patch whose variance estimate is sharper than the flat band it is judged
+/// by. The estimate's sampling error — measured, the robust spread of
+/// `ln(v / model)` of the green and the two colour differences on the
+/// noise-only patches, which carries the stored mosaic's own steps and the
+/// model's misfit beside the chi-square spread — falls with the patch
+/// (0.465 / 0.369 / 0.318 / 0.278 / 0.252 at 4 / 5 / 6 / 7 / 8 cells, the
+/// worst of three photos, rel1180 msg-e3 round 4) and first drops under the
+/// smallest band of those photos (0.256) at 8. A smaller patch is more local;
+/// below 8 a patch's own sampling error is wider than the band that is to
+/// tell its noise from its texture.
+pub(crate) const PATCH: usize = 8;
 
 /// The fitted model of one mosaic.
 #[derive(Debug, Clone, Copy, PartialEq)]
