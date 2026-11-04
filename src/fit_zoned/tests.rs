@@ -1724,20 +1724,27 @@ fn atmosphere_zone_shrinks_gains_toward_unity_but_keeps_their_direction() {
     );
 }
 
-/// RE-PIN (R34 §D2).
+/// RE-PIN (R34 §D2), REWRITTEN for v1.18.0 (R1).
 ///
-/// OLD RULE: an Atmosphere zone attaches its luma correction and its
-/// COLOUR is withheld — always, because the region diverged.
-/// NEW RULE: it attaches its luma correction, and its colour follows its
-/// own cells: withheld unless the target's own 12x8 cell means over that
-/// zone vouch the rendered move, and whichever way it goes the recipe and
-/// the rationale agree.
-/// WHY: "this region diverged" is the premise that its pixels are not each
-/// other's counterparts — which makes the pixel-scale refusal unmeasurable
-/// rather than correct. The cells are the measurement that premise leaves
-/// available, and this fixture supplies D 0.80 precisely to reach it.
+/// R34 §D2: an Atmosphere zone is attached -- its divergence does not veto it
+/// -- and its colour follows its own cells: withheld unless the target's own
+/// 12x8 cell means over that zone vouch the rendered move, with exactly one
+/// colour verdict disclosed for it.
+/// R1 (v1.18.0): after the shared boundary shrink a zone ships only on a frame
+/// gain of FIT_QUANT over the shipped set without it (`fit::ships` inside
+/// `AcceptedZone::still_accepted`); the drift allowance that let a smaller
+/// gain through is gone. On this fixture the boundary gate shrinks the sky to
+/// k 0.184, where its own residual still improves (0.653 -> 0.649) but the
+/// frame reads 0.11175 -> 0.11064, a gain of 0.00111 under FIT_QUANT 0.0023,
+/// so the shrunk correction -- luma and colour together -- is refused. The old
+/// premise (the luma correction survives the whole route) is gone with the
+/// allowance. What the route must still do: attach the zone in Atmosphere
+/// mode, disclose one colour verdict for it, and refuse the shrunk set on the
+/// frame half of the law, by the two readings its note prints. That the
+/// colour the cells decide is the colour the solve renders is pinned at the
+/// solve, in `atmosphere_zone_skips_the_within_zone_cdf_solve`.
 #[test]
-fn a_divergent_zone_is_still_attached_in_atmosphere_mode_and_its_colour_follows_its_cells() {
+fn a_divergent_zone_attaches_in_atmosphere_mode_its_colour_follows_its_cells_and_its_shrink_ships_only_on_fit_quant() {
     let (src, tgt, sky_mask) = zoned_pair_gold();
     let mask_path = fixture_mask_path("zoned-atmos-attached");
     sky_mask.save(mask_path.path()).unwrap();
@@ -1754,51 +1761,106 @@ fn a_divergent_zone_is_still_attached_in_atmosphere_mode_and_its_colour_follows_
             land: ZoneDivergence { divergence: divergence(0.0), share: 0.75 },
         },
     );
-    let sky = report
-        .recipe
-        .masks
-        .iter()
-        .find(|m| m.role == MaskRole::ZoneSky)
-        .unwrap_or_else(|| panic!("Atmosphere luma correction was lost: {}", report.recipe.rationale));
-    let gains = sky.color_gains;
-    assert!(report
+    mask_path.remove();
+    let about_sky = |note: &crate::rationale::Note| {
+        note.args.iter().any(|(name, value)| *name == "label" && value == "sky")
+    };
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.key == crate::rationale::keys::ZONE_MODE_ATMOSPHERE && about_sky(n)),
+        "the divergent sky must be solved in Atmosphere mode: {}",
+        report.recipe.rationale
+    );
+    let vouched = report.notes.iter().any(|n| {
+        (n.key == crate::rationale::keys::ZONE_COLOUR_VOUCHED_BY_CELLS
+            || n.key == crate::rationale::keys::ZONE_COLOUR_VOUCHED_BY_PIXELS)
+            && about_sky(n)
+    });
+    let refused = report.notes.iter().any(|n| is_colour_refusal(n.key) && about_sky(n));
+    assert!(
+        vouched != refused,
+        "exactly one colour verdict must be disclosed for sky: {}",
+        report.recipe.rationale
+    );
+    let shrunk = report
         .notes
         .iter()
-        .any(|n| n.key == crate::rationale::keys::ZONE_MODE_ATMOSPHERE));
-    assert_colour_verdict_matches_recipe(&report, "sky", gains);
-    mask_path.remove();
+        .find(|n| n.key == crate::rationale::keys::ZONE_SHRUNK_REFUSED && about_sky(n))
+        .unwrap_or_else(|| {
+            panic!(
+                "the attached sky must reach the shrunk-set verdict and be refused there: {}",
+                report.recipe.rationale
+            )
+        });
+    let (frame_before, frame_after) =
+        (note_number(shrunk, "frame_before"), note_number(shrunk, "frame_after"));
+    assert!(
+        note_number(shrunk, "after") <= note_number(shrunk, "before"),
+        "the shrunk sky leaves its own zone no worse, so the frame half alone refuses it: {:?}",
+        shrunk.args
+    );
+    assert!(
+        !fit::ships(frame_after, frame_before),
+        "R1: the refusal must be a frame gain under FIT_QUANT ({frame_before} -> {frame_after})"
+    );
+    assert!(
+        !report.recipe.masks.iter().any(|m| m.role == MaskRole::ZoneSky),
+        "a refused shrunk sky ships neither its luma nor its colour: {:?}",
+        report.recipe.masks
+    );
 }
 
+/// The Atmosphere solve is bounded: exposure within ZONE_ATMOS_EV_LIMIT,
+/// saturation within ZONE_ATMOS_SAT_LIMIT, and none of the within-zone CDF
+/// tone dials (contrast, highlights, shadows, whites, blacks). Read at the
+/// SOLVE (`attach_one_zone`), where those controls are set. v1.18.0 (R1): on
+/// this fixture the whole sky/land route no longer ships the sky -- its
+/// boundary shrink leaves a frame gain under FIT_QUANT (see the test above)
+/// -- so the route's recipe can no longer show what the solve chose; the
+/// fixture, the divergence and the running frame are the route's own.
+/// R34 §D2: the colour verdict the cells give and the gains the solve
+/// renders agree.
 #[test]
 fn atmosphere_zone_skips_the_within_zone_cdf_solve() {
     let (src, tgt, sky_mask) = zoned_pair_gold();
     let mask_path = fixture_mask_path("zoned-atmos-no-cdf");
     sky_mask.save(mask_path.path()).unwrap();
     let mut report = neutral_report(&src, &tgt);
-    attach_zones_with_divergence(
-        &src,
-        &tgt,
+    let (s_img, t_img) = fit::analysis_pair(&src, &tgt);
+    let t_px = fit::pixels_of(&t_img);
+    let sw = mask_weights(&sky_mask, s_img.width(), s_img.height());
+    let tw = mask_weights(&sky_mask, t_img.width(), t_img.height());
+    let attachment = semantic_attachment(sw, tw, &mask_path);
+    // The route's running frame starts at the report's own entry residual.
+    let mut frame_err = report.err_after;
+    let accepted = attach_one_zone(
+        &s_img,
+        &t_px,
         &mut report,
-        &sky_mask,
-        &sky_mask,
-        &mask_path,
-        ZoneDivergences {
-            sky: ZoneDivergence { divergence: divergence(0.80), share: 0.25 },
-            land: ZoneDivergence { divergence: divergence(0.0), share: 0.75 },
-        },
+        &mut frame_err,
+        &attachment,
+        divergence(0.80),
+        None,
     );
-    let sky = report
-        .recipe
-        .masks
-        .iter()
-        .find(|mask| mask.role == MaskRole::ZoneSky)
-        .expect("the Atmosphere luma correction must survive the hue-band verdict");
-    let gains = sky.color_gains;
-    // R34 §D2 re-pin: the luma correction surviving is this test's subject
-    // and is unchanged; what the colour class does is now its cells' to
-    // decide, and the recipe must agree with the sentence either way.
-    assert_colour_verdict_matches_recipe(&report, "sky", gains);
     mask_path.remove();
+    let zone = accepted.unwrap_or_else(|| {
+        panic!("the Atmosphere sky must attach at its solve: {}", report.recipe.rationale)
+    });
+    assert!(report
+        .notes
+        .iter()
+        .any(|n| n.key == crate::rationale::keys::ZONE_MODE_ATMOSPHERE));
+    let sky = &report.recipe.masks[zone.mask_index];
+    assert!(sky.exposure_ev.abs() <= ZONE_ATMOS_EV_LIMIT, "{sky:?}");
+    assert_eq!(
+        (sky.contrast, sky.highlights, sky.shadows, sky.whites, sky.blacks),
+        (0.0, 0.0, 0.0, 0.0, 0.0),
+        "an Atmosphere zone solves no within-zone CDF tone"
+    );
+    assert!(sky.saturation.abs() <= ZONE_ATMOS_SAT_LIMIT, "{sky:?}");
+    assert_colour_verdict_matches_recipe(&report, "sky", sky.color_gains);
 }
 
 #[test]
