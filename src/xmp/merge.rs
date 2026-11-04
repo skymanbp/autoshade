@@ -183,6 +183,10 @@ pub(super) fn unspoken_attr_keys(r: &EditRecipe) -> std::collections::BTreeSet<&
     if r.lightroom_named_lens_profile().is_none() {
         out.extend(["LensProfileSetup", "LensProfileName", "LensProfileFilename"]);
     }
+    // The switch, only when the recipe carries no profile to switch.
+    if r.lightroom_lens_profile_enable().is_none() {
+        out.insert("LensProfileEnable");
+    }
     out.extend(unspoken_era_controls(r).into_iter().map(|(_, k)| k));
     out
 }

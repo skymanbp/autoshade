@@ -1425,6 +1425,7 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     ("colour field", "颜色场"),
     ("fill layers", "填充图层"),
     ("lens profile correction", "镜头配置文件校正"),
+    ("lens vignetting (this engine's; Lightroom applies its own profile's)", "镜头暗角（本引擎的；Lightroom 用它自己配置文件的暗角）"),
     ("profile vignetting amount (no Adobe lens profile here to name)", "配置文件暗角强度（本机没有可指名的 Adobe 镜头配置文件）"),
     ("profile distortion amount (no Adobe lens profile here to name)", "配置文件畸变强度（本机没有可指名的 Adobe 镜头配置文件）"),
     // The import direction of the same fact (workers.rs, the Opened handler).

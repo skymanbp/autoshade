@@ -586,6 +586,13 @@ pub(super) fn owned_attrs(r: &EditRecipe, frame: Option<FrameAspect>) -> String 
         attr(&mut a, "LensManualDistortionAmount", &signed(r.lens_distortion));
     }
 
+    // The profile switch the develop rendered under
+    // ([`EditRecipe::lightroom_lens_profile_enable`]): the frame Lightroom
+    // places every mask in. Owned only while stated (`unspoken_attr_keys`).
+    if let Some(on) = r.lightroom_lens_profile_enable() {
+        attr(&mut a, "LensProfileEnable", on);
+    }
+
     // The profile a strength needs NAMED (2026-10-28): Camera Raw honours the
     // two strengths below only for a profile crs:LensProfileName names, and
     // renders them at 100 otherwise, so the export names it whenever a
@@ -1330,6 +1337,7 @@ pub(crate) fn owned_attr_keys() -> Vec<String> {
         "VignetteAmount",
         "VignetteMidpoint",
         "LensManualDistortionAmount",
+        "LensProfileEnable",
         "LensProfileSetup",
         "LensProfileName",
         "LensProfileFilename",
