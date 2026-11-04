@@ -46,6 +46,15 @@ pub(crate) fn look_err(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
 ///   nothing to charge — that is what the abstention says, not that the
 ///   structure survived.
 ///
+/// S-MODE: S is read where the question is structure — mode and evidence
+/// (`DIVERGENCE_GLOBAL` / `DIVERGENCE_ZONE`, `MODE_MARGIN`) and the
+/// comparisons of two different GLOBAL solves (terminal do-no-harm, the 4b
+/// step-down, base against fit). The do-no-harm of a LOCAL correction (zone,
+/// tile, band, field, tint) reads `E_paired + H_ab` ([`LookTerms::local`],
+/// on a model whose [`EvidenceModel::local`] is set); its seams stay with the
+/// boundary / ramp rulers; its structural gate is the existing D threshold
+/// only.
+///
 /// Before v1.18.0 the objective was `0.55·T + 0.20·C + 0.15·H + 0.10·S` in
 /// display sRGB: a frame-level distribution distance that cannot credit a
 /// local correction for moving its own pixels (21 of the census's 39
@@ -59,7 +68,8 @@ pub(crate) fn look_err_with_evidence(
     if evidence.identifiability <= 1e-5 {
         return 1.0;
     }
-    look_terms(a, b, evidence).total()
+    let terms = look_terms(a, b, evidence);
+    if evidence.local { terms.local() } else { terms.total() }
 }
 
 /// The σ of the local mean `E_paired` reads: the σ 2 px pool of the
@@ -86,9 +96,14 @@ pub(crate) struct LookTerms {
 impl LookTerms {
     /// J*.
     pub(crate) fn total(&self) -> f32 {
-        0.75 * (self.share * self.paired + (1.0 - self.share) * self.dist / 0.75)
-            + 0.15 * self.hue
-            + 0.10 * self.structural
+        self.local() + 0.10 * self.structural
+    }
+
+    /// J* as a LOCAL correction's do-no-harm reads it (S-mode,
+    /// [`EvidenceModel::local`]): `E_paired + H_ab` in J*'s own weights, the
+    /// structural term left to the D threshold and the seam / ramp rulers.
+    pub(crate) fn local(&self) -> f32 {
+        0.75 * (self.share * self.paired + (1.0 - self.share) * self.dist / 0.75) + 0.15 * self.hue
     }
 }
 
@@ -147,7 +162,7 @@ pub(crate) fn look_terms(a: &[[f32; 3]], b: &[[f32; 3]], evidence: &EvidenceMode
     };
     let (hue, hue_weight) = band_colour_offset(a, b, evidence);
     let (w, h) = (evidence.width, evidence.height);
-    let structural = if w > 0 && h > 0 && evidence.source_weights.len() == a.len() {
+    let structural = if !evidence.local && w > 0 && h > 0 && evidence.source_weights.len() == a.len() {
         structure_divergence(a, b, w, h, &evidence.source_weights).map_or(0.0, |r| r.d)
     } else {
         0.0

@@ -198,6 +198,11 @@ pub(super) fn attach_zone_tint_or_plain(
         let de = subzones::delta_e(&zone.rendered, tgt_px, &sw);
         let counts = report.recipe.masks[zone.mask_index].toning_amount > 0.0
             && de < plain_de - ZONE_DELTA_E_MARGIN
+            // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
+            // E_paired + H_ab (`report.evidence.local`): S is read where the question
+            // is structure, a local correction cannot change which pixels pair, its
+            // seams stay with the boundary / ramp rulers and its structural gate is
+            // the existing D threshold only.
             && *frame_err <= plain_exit.2 + attachment.frame_regression_tol;
         if counts && best.as_ref().is_none_or(|b| de < b.0) {
             best = Some((de, tinted, (report.recipe.clone(), report.notes.clone(), *frame_err)));

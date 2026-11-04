@@ -432,6 +432,11 @@ pub(super) fn attach_colour_field(
             out
         };
         let err_with = fit::look_err_with_evidence(&after, &target_pixels, &report.evidence);
+        // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
+        // E_paired + H_ab (`report.evidence.local`): S is read where the question
+        // is structure, a local correction cannot change which pixels pair, its
+        // seams stay with the boundary / ramp rulers and its structural gate is
+        // the existing D threshold only.
         if err_with >= report.err_after {
             note(report, crate::rationale::keys::FIELD_REGRESSED, vec![
                 ("before", format!("{:.6}", report.err_after)),
@@ -662,6 +667,11 @@ fn zone_regressed(
             fit::look_err_with_evidence(px, target, &report.evidence.scoped(target, &weights, &weights))
         };
         let (was, now) = (err(&current), err(after));
+        // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
+        // E_paired + H_ab (`report.evidence.local`): S is read where the question
+        // is structure, a local correction cannot change which pixels pair, its
+        // seams stay with the boundary / ramp rulers and its structural gate is
+        // the existing D threshold only.
         (now > was + super::ZONE_GLOBAL_REGRESSION_TOL).then_some((label, was, now, weights))
     })
 }

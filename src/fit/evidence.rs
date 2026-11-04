@@ -55,6 +55,20 @@ pub struct EvidenceModel {
     /// structure-blind one ([`Self::structure_blind`]: Atmosphere is the claim
     /// that the structure was replaced, so no pixel pairs with its index).
     pub paired: Vec<bool>,
+    /// S-MODE (v1.18.0): does this model judge a LOCAL correction? The
+    /// structural term S is read where the question is structure — mode and
+    /// evidence (`DIVERGENCE_GLOBAL` / `DIVERGENCE_ZONE`) and the comparisons
+    /// of two different GLOBAL solves (terminal do-no-harm, the 4b
+    /// step-down, base against fit). The do-no-harm of a LOCAL correction
+    /// (zone, tile, band, field, tint) reads `E_paired + H_ab` only: a local
+    /// correction cannot change which pixels pair, its seams stay with the
+    /// boundary / ramp rulers, and its structural gate is the existing D
+    /// threshold only. On the disagreement census S's sign under zone, tile
+    /// and field moves was unrelated to Lab's (rel1180 msg1: 13 of class A
+    /// and all 10 of class B were S-driven). Set once, where the zoned fit
+    /// takes the global solve's report ([`crate::fit_zoned`]'s entry), and
+    /// carried by every scoped view of the model.
+    pub local: bool,
     pub source_weights: Vec<f32>,
     pub target_weights: Vec<f32>,
     pub source_hue_weights: Vec<f32>,
@@ -135,6 +149,7 @@ impl EvidenceModel {
             height: self.height,
             spatial_supported: self.spatial_supported.clone(),
             paired: self.paired.clone(),
+            local: self.local,
             source_weights: ranges.source_weights,
             target_weights: ranges.target_weights,
             source_hue_weights: ranges.source_hue_weights,
@@ -645,6 +660,7 @@ pub fn evidence_model_paired(
         width: w,
         height: h,
         paired: spatial_supported.clone(),
+        local: false,
         spatial_supported,
         source_weights: ranges.source_weights,
         target_weights: ranges.target_weights,

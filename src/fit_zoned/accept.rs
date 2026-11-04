@@ -88,6 +88,11 @@ impl AcceptedZone {
         frame_before: f32,
         frame_after: f32,
     ) -> bool {
+        // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
+        // E_paired + H_ab (`report.evidence.local`): S is read where the question
+        // is structure, a local correction cannot change which pixels pair, its
+        // seams stay with the boundary / ramp rulers and its structural gate is
+        // the existing D threshold only.
         frame_after <= frame_before + self.frame_regression_tol
             && self.judged(pixels, tgt_px) <= without
     }

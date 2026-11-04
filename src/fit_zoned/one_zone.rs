@@ -1179,6 +1179,11 @@ pub(super) fn attach_one_zone_as(
             (accepted_after <= accepted_before).then_some(ZoneAcceptArm::AtmosphereDoNoHarm)
         }
     };
+    // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
+    // E_paired + H_ab (`report.evidence.local`): S is read where the question
+    // is structure, a local correction cannot change which pixels pair, its
+    // seams stay with the boundary / ramp rulers and its structural gate is
+    // the existing D threshold only.
     if arm.is_some() && zoned_err <= *frame_err + attachment.frame_regression_tol {
         // The strictly-better arm is the one that changes what ships, so it
         // says so — with the two readings it was decided on, in the zone's

@@ -732,6 +732,11 @@ pub(super) fn enforce_bitmap_boundary(
         report.recipe.masks.truncate(first_mask);
         return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Inert, initial });
     }
+    // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
+    // E_paired + H_ab (`report.evidence.local`): S is read where the question
+    // is structure, a local correction cannot change which pixels pair, its
+    // seams stay with the boundary / ramp rulers and its structural gate is
+    // the existing D threshold only.
     if frame > frame_before + frame_tol {
         report.recipe.masks.truncate(first_mask);
         return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Frame, initial });

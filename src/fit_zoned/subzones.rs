@@ -836,6 +836,11 @@ pub(super) fn replace_zone(
         );
         let zone_before = zone_err(&zone_moments(&single_px, &parent.source_weights), &zone_moments(target, &parent.target_weights));
         let zone_after = zone_err(&zone_moments(&pixels, &parent.source_weights), &zone_moments(target, &parent.target_weights));
+        // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
+        // E_paired + H_ab (`report.evidence.local`): S is read where the question
+        // is structure, a local correction cannot change which pixels pair, its
+        // seams stay with the boundary / ramp rulers and its structural gate is
+        // the existing D threshold only.
         let frame_after = fit::look_err_with_evidence(&pixels, target, &report.evidence);
         let reason = if !solved { values::BAND_ESTIMATOR }
             else if !boundary_passed { values::BOUNDARY_BUDGET }

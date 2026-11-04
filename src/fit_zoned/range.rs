@@ -1729,6 +1729,11 @@ fn attach_band_stage(
             BoundaryGateResult::Dropped => return nothing,
         };
         let final_frame_err = final_range_frame_err(&pixels, tgt_px, &report.evidence);
+        // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
+        // E_paired + H_ab (`report.evidence.local`): S is read where the question
+        // is structure, a local correction cannot change which pixels pair, its
+        // seams stay with the boundary / ramp rulers and its structural gate is
+        // the existing D threshold only.
         if final_frame_err > entry_frame_err + RANGE_FRAME_REGRESSION_TOL {
             report.recipe.masks.truncate(first_range);
             crate::rationale::push_note(
@@ -1905,6 +1910,7 @@ mod tests {
             height: 1,
             spatial_supported: vec![true; n],
             paired: vec![true; n],
+            local: false,
             presence: None,
             source_weights: vec![1.0; n],
             target_weights: vec![1.0; n],

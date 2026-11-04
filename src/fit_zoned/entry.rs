@@ -185,6 +185,7 @@ fn fit_recipe_zoned_inner_seeded(
                     true,
                     options,
                 );
+                local_verdicts(src, target, base, &mut report);
                 for (label, kept, reading) in readings {
                     crate::rationale::push_note(
                         &mut report.recipe.rationale,
@@ -240,6 +241,7 @@ fn fit_recipe_zoned_inner_seeded(
                 true,
                 options,
             );
+            local_verdicts(src, target, base, &mut report);
             let field = layers.field
                 .then(|| field::solve_local_field(src, target, &mut report)).flatten();
             let partitioned = attach_zones_with_divergence(
@@ -271,6 +273,7 @@ fn fit_recipe_zoned_inner_seeded(
                 true,
                 options,
             );
+            local_verdicts(src, target, base, &mut report);
             crate::rationale::push_note(
                 &mut report.recipe.rationale,
                 &mut report.notes,
@@ -510,6 +513,7 @@ fn fit_recipe_zoned_multi_inner(
         let divergent_cover = divergences.iter().filter(|d| d.divergence.is_some_and(|r| r.d >= fit::DIVERGENCE_ZONE)).map(|d| d.share).sum::<f32>();
         let mut report = fit::fit_recipe_from_promoted_with_disclosure_opts(src, target, base,
             divergent_cover >= fit::DIVERGENT_COVER_PROMOTES, true, options);
+        local_verdicts(src, target, base, &mut report);
         // The same disclosure the sky/land route makes for ITS refinement.
         push_refinement_notes(&mut report, &refinements);
         push_matte_notes(&mut report, &mattes);
@@ -656,6 +660,29 @@ pub(super) fn release_unselected_rasters(
     if !keep.contains(&anchor_name) {
         anchor.remove();
     }
+}
+
+/// S-MODE at the zoned fit's entry ([`fit::EvidenceModel::local`]): every
+/// verdict after the global solve judges a LOCAL correction (zone, tile,
+/// band, field, tint), and a local correction's do-no-harm reads
+/// `E_paired + H_ab` — the structural term is read where the question is
+/// structure (mode and evidence, the D thresholds, the comparisons of two
+/// different global solves), a local correction cannot change which pixels
+/// pair, its seams stay with the boundary / ramp rulers, and its structural
+/// gate is the existing D threshold only. The report's two numbers are
+/// re-read on that ruler here, so every comparison the local stages make is
+/// between two readings of ONE ruler, and the zoned report's `err_before` ->
+/// `err_after` is the local reading at both ends.
+fn local_verdicts(src: &DynamicImage, target: &DynamicImage, base: &crate::recipe::EditRecipe, report: &mut FitReport) {
+    report.evidence.local = true;
+    let (s_img, t_img) = fit::analysis_pair(src, target);
+    let tgt_px = fit::pixels_of(&t_img);
+    let read = |recipe: &crate::recipe::EditRecipe| {
+        fit::look_err_with_evidence(&fit::pixels_of(&render::develop_preview(&s_img, recipe)), &tgt_px, &report.evidence)
+    };
+    let (before, after) = (read(base), read(&report.recipe));
+    report.err_before = before;
+    report.err_after = after;
 }
 
 /// A report's finished render measured under a GIVEN evidence ruler — the
