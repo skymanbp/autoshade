@@ -1828,6 +1828,7 @@ fn match_cmd(
         })
         .map(|mut r| {
             pipeline::note_target_geometry(&mut r, fitted_target.geometry);
+            pipeline::reread_at_full_size(&mut r, decode::is_raw(raw).then_some(raw), &src, fit_tgt, &fit_base);
             r
         })
     };

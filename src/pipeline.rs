@@ -3090,6 +3090,71 @@ pub fn fit_target(
 }
 
 /// The verdict, said once per fit in the rationale.
+/// The TERMINAL re-read at full size (v1.18.0, R13b). The fit judges every
+/// candidate on its preview at the analysis size; the export renders at the
+/// working edge and is resampled after. A tone with a clamp does not commute
+/// with that average, and measured on the corpus's FINISHED recipes the gap
+/// between the two readings of one recipe was 0.0032-0.0147 of J* — above
+/// FIT_QUANT on every pair (rel1180 msg7). So the finished recipe and the
+/// calibration-only base are each rendered once as the export renders them,
+/// resampled as the fit resamples the target, and read by J* on the frame's
+/// own evidence model; the finished recipe ships only when it ships against
+/// the base on THAT reading (`fit::ships`), and the report carries it as its
+/// residual. One render per side, not a search. A source that is not a RAW,
+/// or an export whose frame does not match the plate's, is left as fitted.
+pub fn reread_at_full_size(
+    report: &mut crate::fit::FitReport,
+    raw: Option<&Path>,
+    src: &image::DynamicImage,
+    target: &image::DynamicImage,
+    base: &EditRecipe,
+) {
+    use crate::rationale::{Note, keys};
+    use image::GenericImageView;
+    let Some(raw) = raw else { return };
+    let started = std::time::Instant::now();
+    let (s_img, t_img) = crate::fit::analysis_pair(src, target);
+    let tp = crate::fit::pixels_of(&t_img);
+    let evidence = crate::fit::evidence_model_paired(
+        &crate::fit::pixels_of(&s_img),
+        &tp,
+        crate::fit::presence_of(&t_img).as_deref(),
+        s_img.width(),
+        s_img.height(),
+    );
+    let read = |recipe: &EditRecipe| -> Option<f32> {
+        let export = crate::render::render_to_image(raw, recipe, None, Some(FIT_SOURCE_EDGE)).ok()?;
+        if export.dimensions() != src.dimensions() {
+            return None;
+        }
+        let (e_img, _) = crate::fit::analysis_pair(&export, target);
+        (e_img.dimensions() == s_img.dimensions())
+            .then(|| crate::fit::look_err_with_evidence(&crate::fit::pixels_of(&e_img), &tp, &evidence))
+    };
+    let (Some(full), Some(full_base)) = (read(&report.recipe), read(base)) else { return };
+    let three = |v: f32| format!("{v:.4}");
+    let preview = report.err_after;
+    let ships = crate::fit::ships(full, full_base);
+    println!(
+        "  terminal re-read at full size: J* {} (preview {}), base {} -> {} ({:.1} s)",
+        three(full),
+        three(preview),
+        three(full_base),
+        if ships { "ships" } else { "the base ships" },
+        started.elapsed().as_secs_f32()
+    );
+    let note = if ships {
+        report.err_after = full;
+        Note::new(keys::FIT_TERMINAL_FULL_SIZE, vec![("full", three(full)), ("preview", three(preview)), ("base", three(full_base))])
+    } else {
+        let rationale = std::mem::take(&mut report.recipe.rationale);
+        report.recipe = EditRecipe { rationale, ..base.clone() };
+        report.err_after = full_base;
+        Note::new(keys::FIT_TERMINAL_FULL_SIZE_BASE, vec![("full", three(full)), ("base", three(full_base))])
+    };
+    crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes, note);
+}
+
 pub fn note_target_geometry(report: &mut crate::fit::FitReport, geometry: TargetGeometry) {
     use crate::rationale::{Note, keys};
     let two = |v: f32| format!("{v:.2}");

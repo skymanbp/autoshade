@@ -3872,6 +3872,7 @@ impl AutoShadeApp {
                     // when it claimed nothing at all.
                     let (mut rep, _first_claim) = run_zoned(zoned)?;
                     autoshade::pipeline::note_target_geometry(&mut rep, fitted_target.geometry);
+                    autoshade::pipeline::reread_at_full_size(&mut rep, raw_source, &plate, fit_target, &fit_base);
                     // FACTS, not prose (L12#4): the landing renders these
                     // with the language live when the result LANDS — the old
                     // trf calls here used the language captured at spawn,
@@ -3927,6 +3928,7 @@ impl AutoShadeApp {
                                     // hand is already a valid result.
                                     FitAction::Zoned => run_zoned(true).ok().map(|(mut r, claim)| {
                                         autoshade::pipeline::note_target_geometry(&mut r, fitted_target.geometry);
+                                        autoshade::pipeline::reread_at_full_size(&mut r, raw_source, &plate, fit_target, &fit_base);
                                         (r, claim)
                                     }),
                                     FitAction::Saturation(d) => {

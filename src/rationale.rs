@@ -875,6 +875,13 @@ pub mod keys {
          as shot); the target was paired as it stands and the lens profile's \
          distortion and chromatic-aberration corrections were switched off, so \
          the render keeps the geometry the target was exported with.";
+    /// [`crate::pipeline::reread_at_full_size`] (v1.18.0, R13b).
+    pub const FIT_TERMINAL_FULL_SIZE: &str =
+        " Read again as the export renders it (full size, then resampled): {full} against {preview} on the fit's preview \
+         and {base} for the calibration-only base.";
+    pub const FIT_TERMINAL_FULL_SIZE_BASE: &str =
+        " Read again as the export renders it (full size, then resampled), the finished recipe ({full}) did not come closer \
+         than the calibration-only base ({base}) by the objective's own rounding, so the base ships.";
     pub const TARGET_GEOMETRY_AMBIGUOUS: &str =
         " Target geometry: undecided (alignment {corrected} corrected vs \
          {as_shot} as shot, no clear margin); the target was paired as it \
