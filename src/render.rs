@@ -111,7 +111,7 @@ pub use develop::{
     retouch_spots,
 };
 pub(crate) use develop::{apply_colour_field, field_axis, field_guide_luma};
-use develop::{apply_develop_with_rasters, dehaze_airlight, dehaze_px, luma601};
+use develop::{apply_develop_with_rasters, apply_develop_with_rasters_in, dehaze_airlight, dehaze_px, luma601};
 #[cfg(test)]
 use develop::{
     apply_dehaze, apply_develop_anon, apply_radial_gain, manual_vignette_lut, profile_vignette_lut,
@@ -139,9 +139,11 @@ pub(crate) use luma::{bilinear_plane, gauss_blur_plane, neighbours4};
 // The zoned fit's detail stage reads the two bands the local Texture and
 // Clarity passes move, with this engine's own blur and radii.
 pub(crate) use luma::{blur_plane, clarity_radius, texture_radius};
+pub(crate) use luma::PixelRange;
 use luma::{
-    box_blur_h, box_blur_v, scale_chroma, texture_pass, unsharp_luma,
-    unsharp_luma_weighted, write_luma_additive, write_luma_weighted,
+    box_blur_h, box_blur_v, scale_chroma, scale_chroma_in, texture_pass, unsharp_luma,
+    unsharp_luma_weighted, write_luma_additive, write_luma_additive_in, write_luma_weighted,
+    write_luma_weighted_in,
 };
 #[cfg(test)]
 use luma::{TEXTURE_MIN_SIGMA_PX, texture_negative_pass, texture_sigmas};
@@ -220,7 +222,7 @@ pub use baked::{
     stamp_baked_geometry, stamp_mask_frame, BakedGeometry, MaskRaster, RasterFrame, SourceFrame,
     BAKED_GEOMETRY_KEY, BAKED_GEOMETRY_TIFF_TAG,
 };
-use source::{apply_crop, render_frame, rgb16_source};
+use source::{apply_crop, render_frame, render_frame_in, rgb16_source};
 #[cfg(test)]
 use source::{cfa_needs_geometry_demosaic, cfa_taps, demosaic_over_cfa_geometry, wrap_table};
 pub use tone::curve_lut;

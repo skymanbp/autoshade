@@ -2,13 +2,42 @@
 
 use super::*;
 
+/// The value range a develop writes its pixels in (v1.18.0, R13a). `Display`
+/// is the export's: every write clamps a channel to [0, 1], the range an
+/// output file holds. `Float` is the reverse fit's PLATE: the base's tone,
+/// the detail passes and the pack keep a channel that runs past 1, so the
+/// plate's inverse (`BaseEncoding::decode`) recovers the light the export
+/// still has when it renders the same frame at another exposure. A clamped
+/// plate lost it: 13 % of the base render's pixels have a channel at the clip
+/// and an exposure-alone target 0.4 EV darker read 3.9 codes from the fit's
+/// preview of that very recipe on them (rel1180 msg6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PixelRange {
+    Display,
+    Float,
+}
+
+impl PixelRange {
+    pub(super) fn clamp(self, v: f32) -> f32 {
+        match self {
+            PixelRange::Display => v.clamp(0.0, 1.0),
+            PixelRange::Float => v,
+        }
+    }
+}
+
 /// Scale a pixel's chroma so its luma moves `l_old`→`l_new` while preserving hue.
 pub(super) fn scale_chroma(px: &mut [f32; 3], l_old: f32, l_new: f32) {
+    scale_chroma_in(px, l_old, l_new, PixelRange::Display)
+}
+
+/// [`scale_chroma`] in `range`.
+pub(super) fn scale_chroma_in(px: &mut [f32; 3], l_old: f32, l_new: f32, range: PixelRange) {
     if l_old > 1e-4 {
         let k = l_new / l_old;
-        px[0] = (px[0] * k).clamp(0.0, 1.0);
-        px[1] = (px[1] * k).clamp(0.0, 1.0);
-        px[2] = (px[2] * k).clamp(0.0, 1.0);
+        px[0] = range.clamp(px[0] * k);
+        px[1] = range.clamp(px[1] * k);
+        px[2] = range.clamp(px[2] * k);
     } else {
         *px = [l_new, l_new, l_new];
     }
@@ -137,6 +166,17 @@ pub(super) fn write_luma_weighted(
     weight: impl Fn(usize, usize, &[f32; 3]) -> f32 + Sync,
     new_luma: impl Fn(usize, f32, f32) -> f32 + Sync,
 ) {
+    write_luma_weighted_in(data, w, weight, new_luma, PixelRange::Display)
+}
+
+/// [`write_luma_weighted`] in `range`.
+pub(super) fn write_luma_weighted_in(
+    data: &mut [[f32; 3]],
+    w: usize,
+    weight: impl Fn(usize, usize, &[f32; 3]) -> f32 + Sync,
+    new_luma: impl Fn(usize, f32, f32) -> f32 + Sync,
+    range: PixelRange,
+) {
     if w == 0 {
         return; // par_chunks_mut(0) asserts
     }
@@ -147,8 +187,8 @@ pub(super) fn write_luma_weighted(
                 continue;
             }
             let l = luma601(px);
-            let new_l = new_luma(y * w + x, l, wgt).clamp(0.0, 1.0);
-            scale_chroma(px, l, new_l);
+            let new_l = range.clamp(new_luma(y * w + x, l, wgt));
+            scale_chroma_in(px, l, new_l, range);
         }
     });
 }
@@ -168,6 +208,17 @@ pub(super) fn write_luma_additive(
     weight: impl Fn(usize, usize, &[f32; 3]) -> f32 + Sync,
     new_luma: impl Fn(usize, f32, f32) -> f32 + Sync,
 ) {
+    write_luma_additive_in(data, w, weight, new_luma, PixelRange::Display)
+}
+
+/// [`write_luma_additive`] in `range`.
+pub(super) fn write_luma_additive_in(
+    data: &mut [[f32; 3]],
+    w: usize,
+    weight: impl Fn(usize, usize, &[f32; 3]) -> f32 + Sync,
+    new_luma: impl Fn(usize, f32, f32) -> f32 + Sync,
+    range: PixelRange,
+) {
     if w == 0 {
         return; // par_chunks_mut(0) asserts
     }
@@ -178,10 +229,10 @@ pub(super) fn write_luma_additive(
                 continue;
             }
             let l = luma601(px);
-            let d = new_luma(y * w + x, l, wgt).clamp(0.0, 1.0) - l;
+            let d = range.clamp(new_luma(y * w + x, l, wgt)) - l;
             if d != 0.0 {
                 for c in px.iter_mut() {
-                    *c = (*c + d).clamp(0.0, 1.0);
+                    *c = range.clamp(*c + d);
                 }
             }
         }

@@ -93,7 +93,7 @@ pub fn render_to_image_in(
     render_frame(raw_path, recipe, denoise, max_edge, working, sink)
 }
 
-/// [`render_to_image_in`]'s body.
+/// [`render_to_image_in`]'s body: the export, in `Display` range.
 pub(super) fn render_frame(
     raw_path: &Path,
     recipe: &EditRecipe,
@@ -101,6 +101,21 @@ pub(super) fn render_frame(
     max_edge: Option<u32>,
     working: ExportColorSpace,
     sink: &dyn crate::diag::Sink,
+) -> Result<DynamicImage> {
+    render_frame_in(raw_path, recipe, denoise, max_edge, working, sink, PixelRange::Display)
+}
+
+/// [`render_frame`] in `range`: `Float` returns an f32 frame whose channels
+/// may run past 1 — the reverse fit's plate (`source_plate`, R13a); every
+/// stage before the develop is the export's own.
+pub(super) fn render_frame_in(
+    raw_path: &Path,
+    recipe: &EditRecipe,
+    denoise: Option<&crate::denoise::DenoiseOpts>,
+    max_edge: Option<u32>,
+    working: ExportColorSpace,
+    sink: &dyn crate::diag::Sink,
+    range: PixelRange,
 ) -> Result<DynamicImage> {
     let diag = crate::diag::Diag::about(sink, raw_path);
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
@@ -264,7 +279,7 @@ pub(super) fn render_frame(
         crate::denoise::denoise_buffer(opts, &mut data, w, h).context("AI denoise")?;
     }
 
-    finish_develop(data, w, h, film, recipe, &rasters)
+    finish_develop(data, w, h, film, recipe, &rasters, range)
 }
 
 /// Open `raw_path` and read its sensor: the guards, the metadata, the per-file
@@ -376,6 +391,7 @@ pub(super) fn finish_develop(
     film: FilmScale,
     recipe: &EditRecipe,
     rasters: &MaskRasterSnapshot,
+    range: PixelRange,
 ) -> Result<DynamicImage> {
     // --- white balance (target Kelvin/tint) in linear light -------------------
     apply_recipe_wb(&mut data, recipe);
@@ -396,12 +412,18 @@ pub(super) fn finish_develop(
     let frame = MaskFrame::of_base(&geom, recipe.lens_distortion, false);
     // A RAW negative: an absent Sharpening amount renders at Lightroom's own
     // RAW default (`EditRecipe::capture_sharpening`, v1.6.0).
-    apply_develop_with_rasters(&mut data, w, h, recipe, rasters, frame, film, true);
+    apply_develop_with_rasters_in(&mut data, w, h, recipe, rasters, frame, film, true, range);
 
-    // --- pack to 16-bit (highest precision; JPEG downconverts at encode).
+    // --- pack to 16-bit (highest precision; JPEG downconverts at encode); a
+    // `Float` develop (the reverse fit's plate) keeps its f32 values instead.
     // Orientation was applied BEFORE develop (see orient_f32 above), so the
     // buffer is already in the display frame — no tail rotation.
-    let dynimg = {
+    let dynimg = if range == PixelRange::Float {
+        let flat: Vec<f32> = data.into_iter().flatten().collect();
+        DynamicImage::ImageRgb32F(
+            ImageBuffer::from_raw(w as u32, h as u32, flat).ok_or_else(|| anyhow!("pixel buffer size mismatch"))?,
+        )
+    } else {
         let mut buf: Vec<u16> = vec![0u16; w * h * 3];
         buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
             o[0] = to_u16(px[0]);
