@@ -20,8 +20,8 @@ pub(crate) fn look_err(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
 /// * `E_paired` — where pixels PAIR (index i on one side is index i on the
 ///   other: [`EvidenceModel::paired`]), the evidence-weighted mean CIE76
 ///   distance between the two sides' LOCAL MEANS,
-///   `Σ w_i·ΔE76(Lab(G_2*a)_i, Lab(G_2*b)_i) / 100 / Σ w_i`, `w` the evidence
-///   source weight (range weight × spatial support × membership) and `G_2`
+///   `Σ w_i·ΔE76(Lab(G_2*a)_i, Lab(G_2*b)_i) / 100 / Σ w_i`, `w` the pixel's
+///   PRESENCE weight (spatial support × membership) and `G_2`
 ///   the σ 2 px Gaussian the structural instrument pools its gradients at
 ///   ([`PAIRED_POOL_SIGMA`]). Local means, not raw pixels: the eye reads a
 ///   mean offset under texture (a 0.81 dE band is visible under 4 dE of star
@@ -50,6 +50,17 @@ pub(crate) fn look_err(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
 ///   never as a whole rank step. A PENALTY term: with no reading there is
 ///   nothing to charge — that is what the abstention says, not that the
 ///   structure survived.
+///
+/// WEIGHTS (v1.18.0, R11): the objective JUDGES every present pixel at its
+/// presence weight — spatial support × membership, 1 for a frame pixel
+/// ([`EvidenceModel::source_presence_weights`]) — in every term: `E_paired`,
+/// `E_dist`'s `T_L` and `C_ab`, `H_ab`'s band membership, offset and band
+/// weight, `S`, and the paired share `p`. The evidence model's per-range
+/// estimation weights only DRIVE (which ranges may move a control's
+/// estimate); a ship decision read at them is blind to whatever range the
+/// evidence withheld, and a tie there goes to absence however much the photo
+/// gained (rel1180 msg6: p41's cloud-edge band, +4-5.7 dE/px at evidence
+/// weight 0.000-0.21).
 ///
 /// S-MODE: S is read where the question is structure — mode and evidence
 /// (`DIVERGENCE_GLOBAL` / `DIVERGENCE_ZONE`, `MODE_MARGIN`) and the
@@ -115,7 +126,7 @@ impl LookTerms {
 /// [`look_err_with_evidence`]'s terms, read once.
 pub(crate) fn look_terms(a: &[[f32; 3]], b: &[[f32; 3]], evidence: &EvidenceModel) -> LookTerms {
     let n = a.len().min(b.len());
-    let weight = |i: usize| evidence.source_weights.get(i).copied().unwrap_or(0.0).max(0.0);
+    let weight = |i: usize| evidence.source_presence_weights.get(i).copied().unwrap_or(0.0).max(0.0);
     let pairs = |i: usize| evidence.paired.get(i).copied().unwrap_or(false);
     let (mut mass, mut paired_mass) = (0.0f64, 0.0f64);
     for i in 0..n {
@@ -153,7 +164,7 @@ pub(crate) fn look_terms(a: &[[f32; 3]], b: &[[f32; 3]], evidence: &EvidenceMode
         let unpaired = |weights: &[f32]| -> Vec<f32> {
             (0..n).map(|i| if pairs(i) { 0.0 } else { weights.get(i).copied().unwrap_or(0.0) }).collect()
         };
-        let (sw, tw) = (unpaired(&evidence.source_weights), unpaired(&evidence.target_weights));
+        let (sw, tw) = (unpaired(&evidence.source_presence_weights), unpaired(&evidence.target_presence_weights));
         let (la, lb): (Vec<[f32; 3]>, Vec<[f32; 3]>) =
             (a[..n].iter().map(cie_lab).collect(), b[..n].iter().map(cie_lab).collect());
         let tonal = lightness_cdf_gap(&la, &sw, &lb, &tw);
@@ -167,8 +178,8 @@ pub(crate) fn look_terms(a: &[[f32; 3]], b: &[[f32; 3]], evidence: &EvidenceMode
     };
     let (hue, hue_weight) = band_colour_offset(a, b, evidence);
     let (w, h) = (evidence.width, evidence.height);
-    let structural = if !evidence.local && w > 0 && h > 0 && evidence.source_weights.len() == a.len() {
-        structure_divergence(a, b, w, h, &evidence.source_weights).map_or(0.0, |r| r.d)
+    let structural = if !evidence.local && w > 0 && h > 0 && evidence.source_presence_weights.len() == a.len() {
+        structure_divergence(a, b, w, h, &evidence.source_presence_weights).map_or(0.0, |r| r.d)
     } else {
         0.0
     };
@@ -198,14 +209,15 @@ fn lightness_cdf_gap(la: &[[f32; 3]], wa: &[f32], lb: &[[f32; 3]], wb: &[f32]) -
 /// brightening a muted frame toward a vivid target necessarily brings —
 /// drift the stages after it exist to correct — while the lantern street's
 /// wrong +1.65 EV raised the display form of this term 0.0468 → 0.0748 on
-/// its own and needs no other term to be refused.
+/// its own and needs no other term to be refused. A ruler JUDGES, so it reads
+/// the presence weights as J* does (R11), never the estimation weights.
 pub(crate) fn tonal_err_with_evidence(
     a: &[[f32; 3]],
     b: &[[f32; 3]],
     evidence: &EvidenceModel,
 ) -> f32 {
     let (la, lb): (Vec<[f32; 3]>, Vec<[f32; 3]>) = (a.iter().map(cie_lab).collect(), b.iter().map(cie_lab).collect());
-    lightness_cdf_gap(&la, &evidence.source_weights, &lb, &evidence.target_weights)
+    lightness_cdf_gap(&la, &evidence.source_presence_weights, &lb, &evidence.target_presence_weights)
 }
 
 /// H_ab, the colour term's WORST band (v1.18.0): per qualifying HSL band,
@@ -226,21 +238,23 @@ pub(crate) fn tonal_err_with_evidence(
 /// length C, so a band rotated by the old saturation reads 1 here as it did
 /// there, and an offset in chroma now counts as an offset in angle does.
 ///
-/// Membership is unchanged — the display-HSL band partition and its chroma
-/// gate (`band_stats_weighted`), the [`EVIDENCE_MIN_SHARE`] floor on both
-/// sides and the range's evidence weight — so the same pixels qualify the
-/// same bands; only the distance moved into CIE units. Returns (the worst
-/// band's offset, the largest qualifying band's evidence weight).
+/// Membership is the display-HSL band partition and its chroma gate
+/// (`band_stats_weighted`) and the [`EVIDENCE_MIN_SHARE`] floor on both
+/// sides, every pixel at its PRESENCE weight (R11); a band's weight is its
+/// two-sided presence share (`two_sided_share`: the range's evidence weight
+/// before the estimation verdict withholds it). A band the evidence withholds
+/// from estimation is still judged. Returns (the worst band's offset, the
+/// largest qualifying band's two-sided presence share).
 fn band_colour_offset(a: &[[f32; 3]], b: &[[f32; 3]], evidence: &EvidenceModel) -> (f32, f32) {
-    let (sa, ta) = band_ab_weighted(a, &evidence.source_hue_weights);
-    let (sb, tb) = band_ab_weighted(b, &evidence.target_hue_weights);
+    let (sa, ta) = band_ab_weighted(a, &evidence.source_presence_weights);
+    let (sb, tb) = band_ab_weighted(b, &evidence.target_presence_weights);
     let (mut worst, mut weight) = (0.0f32, 0.0f32);
     if ta < 1.0 || tb < 1.0 {
         return (worst, weight);
     }
     for i in 0..8 {
         let (x, y) = (&sa[i], &sb[i]);
-        let range_weight = evidence.hue.get(i).map(|r| r.weight).unwrap_or(0.0);
+        let range_weight = evidence.hue.get(i).map(|r| r.two_sided_share).unwrap_or(0.0);
         if range_weight <= 0.0 || x[0] / ta < EVIDENCE_MIN_SHARE as f64 || y[0] / tb < EVIDENCE_MIN_SHARE as f64 {
             continue;
         }

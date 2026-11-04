@@ -1916,6 +1916,8 @@ mod tests {
             target_weights: vec![1.0; n],
             source_hue_weights: vec![0.0; n],
             target_hue_weights: vec![0.0; n],
+            source_presence_weights: vec![1.0; n],
+            target_presence_weights: vec![1.0; n],
             luma,
             hue: Vec::new(),
             source_chroma_vector: [0.0; 2],

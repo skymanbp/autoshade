@@ -73,6 +73,20 @@ pub struct EvidenceModel {
     pub target_weights: Vec<f32>,
     pub source_hue_weights: Vec<f32>,
     pub target_hue_weights: Vec<f32>,
+    /// PRESENCE weights (v1.18.0, R11): each aligned pixel's membership in
+    /// this model's population times its spatial support — 1 for a frame
+    /// pixel of a structure-blind model, 0 for an absent one. The objective
+    /// JUDGES every present pixel at its presence weight; the estimation
+    /// weights above (`source_weights` … `target_hue_weights`, which also
+    /// carry each range's evidence verdict) only DRIVE: they decide which
+    /// ranges may move a control's estimate (the cells, the band estimator,
+    /// `P_CLIP`, `EVIDENCE_MIN_SHARE`), never which pixels a ship decision
+    /// sees. A range withheld from estimation is still part of the photo:
+    /// judging at the estimation weights made a 4-5.7 dE/px gain on bright
+    /// cloud edges invisible (their L* 50-90 ranges weigh 0.000-0.21 as
+    /// evidence) and gave the tie to absence (rel1180 msg6, R9).
+    pub source_presence_weights: Vec<f32>,
+    pub target_presence_weights: Vec<f32>,
     pub luma: Vec<EvidenceRange>,
     pub hue: Vec<EvidenceRange>,
     /// Population chromaticity facts used to recognize a coherent global cast.
@@ -154,6 +168,8 @@ impl EvidenceModel {
             target_weights: ranges.target_weights,
             source_hue_weights: ranges.source_hue_weights,
             target_hue_weights: ranges.target_hue_weights,
+            source_presence_weights: ranges.source_presence_weights,
+            target_presence_weights: ranges.target_presence_weights,
             luma: ranges.luma,
             hue: ranges.hue,
             source_chroma_vector: self.source_chroma_vector,
@@ -360,6 +376,9 @@ pub(super) struct RangeAggregate {
     target_weights: Vec<f32>,
     source_hue_weights: Vec<f32>,
     target_hue_weights: Vec<f32>,
+    /// Membership × spatial support, the weights the objective judges at.
+    source_presence_weights: Vec<f32>,
+    target_presence_weights: Vec<f32>,
     pub(super) luma: Vec<EvidenceRange>,
     hue: Vec<EvidenceRange>,
     identifiability: f32,
@@ -488,12 +507,17 @@ pub(super) fn aggregate_ranges(
     let luma_mass = luma.iter().map(|r| r.weight).sum::<f32>().min(1.0);
     let hue_mass = hue.iter().map(|r| r.weight).sum::<f32>().min(1.0);
     let identifiability = (0.75 * luma_mass + 0.25 * hue_mass).clamp(0.0, 1.0);
+    let presence_of = |zone: &[f32]| -> Vec<f32> {
+        (0..n).map(|i| member(zone, i) * spatial_weights.get(i).copied().unwrap_or(0.0).max(0.0)).collect()
+    };
     RangeAggregate {
         source_membership,
         source_weights: luma_source_weights,
         target_weights: luma_target_weights,
         source_hue_weights,
         target_hue_weights,
+        source_presence_weights: presence_of(source_zone),
+        target_presence_weights: presence_of(target_zone),
         luma,
         hue,
         identifiability,
@@ -666,6 +690,8 @@ pub fn evidence_model_paired(
         target_weights: ranges.target_weights,
         source_hue_weights: ranges.source_hue_weights,
         target_hue_weights: ranges.target_hue_weights,
+        source_presence_weights: ranges.source_presence_weights,
+        target_presence_weights: ranges.target_presence_weights,
         luma: ranges.luma,
         hue: ranges.hue,
         source_chroma_vector,
