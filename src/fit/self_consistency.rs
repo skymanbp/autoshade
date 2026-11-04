@@ -287,3 +287,45 @@ fn fit_quant_is_the_objective_of_the_fits_own_rounding() {
     }
     eprintln!("FITQUANT worst {worst:.6} (FIT_QUANT {FIT_QUANT})");
 }
+
+/// R13b's measurement: the COMMUTATION error at the recipes the fit ships.
+/// For each finished recipe in the list (`AUTOSHADE_COMMUTE_LIST`, lines
+/// `tag|raw|recipe.json`; the recipe's rasters resolve beside it), the
+/// export of that recipe at the fit's working edge is read by the fit's own
+/// steps (`fit_target`, the analysis pair, the evidence model) against the
+/// fit's preview of the same recipe on its plate. The two describe one
+/// recipe, so every bit of J* between them is the gap between previewing at
+/// the analysis size and rendering, then resampling.
+#[test]
+#[ignore = "measurement: prints the finished recipes' commutation error; run with --ignored"]
+fn the_preview_of_a_finished_recipe_against_its_resampled_export() {
+    let Some(list) = crate::config::live_env_os("AUTOSHADE_COMMUTE_LIST") else { return };
+    let text = std::fs::read_to_string(std::path::PathBuf::from(list)).expect("the list");
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let mut parts = line.splitn(3, '|');
+        let (tag, raw, recipe_path) = (parts.next().unwrap(), parts.next().unwrap(), parts.next().unwrap());
+        let (raw, recipe_path) = (std::path::Path::new(raw), std::path::Path::new(recipe_path));
+        let mut finished: EditRecipe =
+            serde_json::from_str(&std::fs::read_to_string(recipe_path).expect("recipe")).expect("recipe json");
+        let dir = recipe_path.parent().expect("recipe dir");
+        for mask in &mut finished.masks {
+            for path in mask.bitmap_paths_mut() {
+                let local = dir.join(path.as_str());
+                if local.is_file() {
+                    *path = local.to_string_lossy().into_owned();
+                }
+            }
+        }
+        let (mut src, mut base) = crate::pipeline::fit_source(raw).expect("the fit source develops");
+        let export = render::render_to_image(raw, &finished, None, Some(crate::pipeline::FIT_SOURCE_EDGE)).expect("export");
+        let target = crate::pipeline::fit_target(&mut src, Some(raw), &export, &mut base).expect("frame").image;
+        let (s_img, t_img) = analysis_pair(&src, &target);
+        let (sp, tp) = (pixels_of(&s_img), pixels_of(&t_img));
+        let evidence = evidence_model_paired(&sp, &tp, presence_of(&t_img).as_deref(), s_img.width(), s_img.height());
+        let t = look::look_terms(&pixels_of(&render::develop_preview(&s_img, &finished)), &tp, &evidence);
+        eprintln!(
+            "COMMUTE {tag}: J* {:.6} (E_paired {:.5}, E_dist {:.5}, p {:.3}, H_ab {:.5}, S {:.5}) FIT_QUANT {FIT_QUANT}",
+            t.total(), t.paired, t.dist, t.share, t.hue, t.structural
+        );
+    }
+}
