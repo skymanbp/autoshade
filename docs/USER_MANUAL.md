@@ -261,7 +261,11 @@ sidecar says the lens correction was switched off, AutoShade switches the
 profile's vignetting and distortion off too, so the canvas draws what the
 sidecar records, and so masks and the pixels beside them are in the same frame; the camera's own
 chromatic-aberration correction stays on, because Lightroom keeps it on with
-the profile off (v1.17.0). The manual Distortion, Vignetting and CA sliders are
+the profile off (v1.17.0). A sidecar AutoShade itself wrote is read by what it
+carries while its lens keys are as AutoShade wrote them (v1.17.1): those keys
+may be the older Lightroom sidecar's that the save merged into, so the
+develop's own lens profile is used; change the lens switch in Lightroom and
+the change is obeyed. The manual Distortion, Vignetting and CA sliders are
 not the profile and are never touched by that switch.
 
 A strength set away from 100 changes what the sidecar says about the profile
@@ -701,7 +705,11 @@ with the brightness change taken out; the smallest of them when they all ask
 the same way, nothing when two disagree, because one light moves every
 brightness the same way). What a range asks beyond that goes to the Color
 Grading wheels (shadows, midtones, highlights), each solved from its own
-range's pixels and shipped only as far as the frame vouches for it, so a
+range's pixels and shipped only as far as the frame vouches for it and, since
+v1.17.1, as far as the reverse-fit strength allows — each wheel's Saturation
+at most 6 at Strength 0, 18 at the default and 45 at 1, the mixer's own band
+ceiling on the wheel's scale, with a report line when a wheel is held there —
+so a
 photo graded warm in the shadows and cool in the sky keeps its white balance
 as shot and takes the split tone on the wheels. The white balance is read from the frame as the tone stage left it
 rather than from the untouched source, so a strong contrast move is no longer
@@ -978,7 +986,9 @@ autoshade recipe-schema
 sources get recipe JSON but no RAW XMP. `apply` also takes a Lightroom `.xmp`
 sidecar in place of the recipe, and since v1.16.0 it stamps the camera's lens
 profile from the sidecar's own lens switch exactly as the desktop app does when
-it opens the photo beside that sidecar, so one sidecar renders one geometry on
+it opens the photo beside that sidecar (a sidecar AutoShade wrote, with its
+lens keys unedited, gives back the develop's own lens profile, v1.17.1), so
+one sidecar renders one geometry on
 both surfaces. Since v1.17.0 a sidecar starts from the photo's camera base
 look like any other develop, and a camera profile and creative profile it names
 add only their colour tables, read from your Camera Raw install.
@@ -1125,7 +1135,10 @@ properties in AutoShade's own XMP namespace on the same document. Lightroom
 into XMP's compact attribute form), while it drops unknown `crs:` items and
 AutoShade's per-mask intent attributes. When such a sidecar is opened again,
 AutoShade reads the Camera Raw settings as before and then reconciles them
-with the payload: where Lightroom changed a value, Lightroom's value wins;
+with the payload: where Lightroom changed a value, Lightroom's value wins —
+measured, since v1.17.1, against a record of the document as AutoShade wrote
+it, so the camera profile, Look and lens switch an existing Lightroom sidecar
+brought into the save are not mistaken for edits;
 everywhere else — the colour field, a muted mask, a bitmap tile, a zone's
 role, an exact slider position, the calibration anchor — the payload's exact
 value is restored. Rasters are placed beside the develop on a restore (a

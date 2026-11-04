@@ -1037,7 +1037,9 @@ pub fn recipe_to_xmp_in_frame_for_photo(
     (xmp_document(r, &desc), losses)
 }
 
-/// The document the payload reader measures a payload AGAINST: the recipe
+/// The document the payload reader measures a payload AGAINST when the
+/// payload carries no record of the document as written
+/// (`payload::written_document`): the recipe
 /// projected through this writer with NO payload of its own — what a
 /// Lightroom that touched nothing would hand back, once `payload::restore`
 /// has also dropped the `ash:` intent the way Lightroom does. It carries no
@@ -1079,7 +1081,7 @@ fn xmp_document(r: &EditRecipe, desc: &str) -> String {
 ///
 /// `embed` says whether the AutoShade payload rides along (`payload`): every
 /// document that leaves this app carries it; the ONE exception is the bare
-/// projection the payload reader compares a document against
+/// projection the payload reader falls back to comparing a document against
 /// ([`bare_document`]). `photo` anchors the payload's relative raster paths.
 fn crs_description(
     r: &EditRecipe,

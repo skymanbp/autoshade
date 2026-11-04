@@ -525,7 +525,7 @@ pub(super) fn attach_colour_field(
 /// R34 §D4. PASS B and its admission, the only thing that separates the field
 /// this function ships from the field the analyzer measures.
 ///
-/// The analyzer's fit weight is `evidence x local_support x unclipped`, and
+/// The analyzer's fit weight is `evidence x local_support x testifies`, and
 /// `local_support` is `1 - clamp(D)` over the 12x8 cells this grid's vertex
 /// rows refine. On a generative repaint that term is ~0 exactly where the
 /// residual is: on the desert-dusk pair the two rows above the horizon carry

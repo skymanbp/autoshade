@@ -27,7 +27,9 @@
 //! develop exactly as the app holds it, in the display frame, raster paths
 //! reduced to bare file names — on the root `rdf:Description` as one
 //! compressed attribute (`asr:Recipe`, zlib + base64, with `asr:RecipeCrc32`
-//! over the JSON bytes), and the rasters nothing can re-derive (bitmap tiles,
+//! over the JSON bytes), on a merge the document as written without the
+//! payload (`asr:Written` + `asr:WrittenCrc32`, [`written_attrs`]), and the
+//! rasters nothing can re-derive (bitmap tiles,
 //! zone alphas) as an `<asr:Rasters>` sequence of `{Name, Crc32, Data}`
 //! structs, written in the compact form Lightroom itself would rewrite them
 //! into. The reader, having decoded the `crs:` settings the ordinary way,
@@ -620,8 +622,10 @@ fn decode_raster(name: &str, crc: &str, data: &str) -> Result<Raster, String> {
 /// Three recipes meet here. **P** is the payload — the develop exactly as the
 /// app saved it. **C** is what the reader just decoded from the document's
 /// `crs:` settings, which is where Lightroom's edits live. **W** is what the
-/// same reader decodes from P projected through this writer with NO payload
-/// (`bare_document`) and NO `ash:` intent ([`strip_mask_intent`]): what
+/// same reader decodes from the document P was written into
+/// ([`written_document`]: the recorded one, [`written_attrs`], when the
+/// payload carries it, else P projected through this writer with NO payload,
+/// `bare_document`) with NO `ash:` intent ([`strip_mask_intent`]): what
 /// Lightroom would have handed back had it rewritten the file without
 /// touching anything — rounding included, and the intent gone, which is the
 /// measured half of the rewrite (0 of 12 attributes survived). The
