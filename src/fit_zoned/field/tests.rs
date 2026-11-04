@@ -254,16 +254,21 @@ fn field_stop_and_realized_helpers_are_well_conditioned() {
     let field = synthetic_field(1, 1, vec![0.0]);
     assert_eq!(realized_share(1.0, 0.5, 0.75), Some(0.5));
     assert_eq!(realized_share(1.0, 1.0 - 1e-7, 1.0), None);
+    // R3 (v1.18.0) rewrote this pin: the stop compares the field's ceiling with
+    // the frame of the SAME state (`global`, re-read with it), so the second
+    // argument is gone. The stop fires when the ceiling cannot gain FIT_QUANT
+    // over that frame (`fit::ships`), and a ceiling at or above it measured
+    // nothing and stops nothing.
     let mut field = field;
+    field.global = 0.5;
+    field.ceiling = 0.5 - crate::fit::FIT_QUANT * 0.5;
+    assert!(stop_verdict(&field), "a gain under FIT_QUANT stops the field-derived producers");
+    field.ceiling = 0.5 - crate::fit::FIT_QUANT * 2.0;
+    assert!(!stop_verdict(&field), "a gain of FIT_QUANT or more does not");
     field.ceiling = 0.5;
-    assert!(stop_verdict(&field, 0.502));
-    assert!(!stop_verdict(&field, 0.503));
-    // A ceiling that never beat the producer-free frame (global = 1.0 here)
-    // measured nothing about the headroom and must not veto the tile producer.
-    field.ceiling = 1.0;
-    assert!(!stop_verdict(&field, 0.9));
-    field.ceiling = 1.2;
-    assert!(!stop_verdict(&field, 0.9));
+    assert!(!stop_verdict(&field));
+    field.ceiling = 0.6;
+    assert!(!stop_verdict(&field));
 }
 
 /// R42. A 192x128 pair whose top-right NINTH — one 3x3 spatial-evidence cell,

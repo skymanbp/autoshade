@@ -387,18 +387,11 @@ fn run_mask_producers(
     mask_path: &crate::store::OwnedRaster,
     layers: ZonedLayerOpts,
 ) {
+    // R3 (v1.18.0): the field's ceiling bounds the FIELD and the producers
+    // carved from its remainder (the free masks); it says nothing about the
+    // tiles, so no stop runs before them.
     if let Some((local, _)) = field {
         field::push_realized(report, local, first_producer);
-        if layers.free_masks && field::stop_verdict(local, report.err_after) {
-            let skipped = match (layers.spatial, layers.free_masks) {
-                (true, true) => "tiles, free masks",
-                (true, false) => "tiles",
-                (false, true) => "free masks",
-                (false, false) => "none",
-            };
-            field::push_stop(report, first_producer, skipped);
-            return;
-        }
     }
     let mut excluded = field
         .as_ref()
@@ -410,15 +403,19 @@ fn run_mask_producers(
             .map(|(_, reading)| reading.effective_tile_cap)
             .unwrap_or(spatial::SPATIAL_MAX_ATTACHMENTS);
         excluded = spatial::attach_tiles(src, target, report, mask_path, layers.refine_masks, cap);
-        if let Some((local, _)) = field {
-            field::push_realized(report, local, "tiles");
-            if layers.free_masks && field::stop_verdict(local, report.err_after) {
-                field::push_stop(report, "tiles", "free masks");
-                return;
-            }
-        }
     }
-    if layers.free_masks && let Some((local, _)) = field {
+    if layers.free_masks && field.is_some() {
+        // R3: one ruler, one state — the field is re-read on the render the
+        // free masks would start from, and the free masks are carved from
+        // THAT field, not from the one solved before the zones and tiles.
+        let producer = if layers.spatial { "tiles" } else { first_producer };
+        let Some(local) = field::reread_field(src, target, report) else { return };
+        field::push_realized(report, &local, producer);
+        if field::stop_verdict(&local) {
+            field::push_stop(report, producer, "free masks", &local);
+            return;
+        }
+        let local = &local;
         let stage = freemask::attach_free_masks(
             src,
             target,

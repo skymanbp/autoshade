@@ -299,11 +299,26 @@ pub(super) fn realized_share(global: f32, ceiling: f32, err_after: f32) -> Optio
     (possible > 1e-6).then_some((global - err_after) / possible)
 }
 
-/// Only a ceiling that actually beat the producer-free frame can end the fit: a
-/// field that saturated or regularised its way ABOVE `global` measured nothing
-/// about what is left to win, so it never vetoes the tile producer.
-pub(super) fn stop_verdict(field: &LocalField, err_after: f32) -> bool {
-    field.ceiling < field.global && err_after - field.ceiling <= LOCAL_STOP_MARGIN
+/// R3 (v1.18.0): the stop rule compares two readings of ONE ruler on ONE
+/// state. `field` must be solved on the state it judges ([`reread_field`]):
+/// its `global` IS that state's frame on the report's ruler and its `ceiling`
+/// the best the field could reach from it, so the comparison is the
+/// stage-vs-absence law itself — the field-derived producers stop when the
+/// ceiling cannot gain FIT_QUANT ([`fit::ships`]). A field that saturated or
+/// regularised its way ABOVE `global` measured nothing about what is left to
+/// win, so it never stops anything. Before R3 the ceiling was read before the
+/// zones and compared to the frame after them, two states on one line.
+pub(super) fn stop_verdict(field: &LocalField) -> bool {
+    field.ceiling < field.global && !fit::ships(field.ceiling, field.global)
+}
+
+/// The local field re-solved on the report's CURRENT render, on the report's
+/// own ruler (`report.evidence`): the one state [`stop_verdict`] and the
+/// field-derived producers read (R3, v1.18.0).
+pub(super) fn reread_field(src: &DynamicImage, target: &DynamicImage, report: &FitReport) -> Option<LocalField> {
+    let (s_img, t_img) = fit::analysis_pair(src, target);
+    let current = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
+    LocalField::solve(&current, &fit::pixels_of(&t_img), s_img.width(), s_img.height(), &report.evidence)
 }
 
 pub(super) fn push_realized(report: &mut FitReport, field: &LocalField, producer: &str) {
@@ -467,7 +482,8 @@ pub(super) fn attach_colour_field(
             }
         }
     };
-    if report.err_after - err_with <= LOCAL_STOP_MARGIN {
+    // R1: `ships` — the field earns FIT_QUANT over its absence or is withheld.
+    if !fit::ships(err_with, report.err_after) {
         note(report, crate::rationale::keys::FIELD_WITHHELD, vec![
             ("with", format!("{err_with:.6}")),
             ("err_after", format!("{:.6}", report.err_after)),
@@ -703,9 +719,12 @@ fn zone_reading(
     })
 }
 
-pub(super) fn push_stop(report: &mut FitReport, producer: &str, skipped: &str) {
+pub(super) fn push_stop(report: &mut FitReport, producer: &str, skipped: &str, field: &LocalField) {
+    let err_after = report.err_after;
     note(report, crate::rationale::keys::LOCAL_STOP, vec![
         ("producer", producer.into()), ("skipped", skipped.into()),
+        ("global", format!("{:.6}", field.global)), ("ceiling", format!("{:.6}", field.ceiling)),
+        ("err_after", format!("{err_after:.6}")),
         ("margin", format!("{LOCAL_STOP_MARGIN:.3}")),
     ]);
 }
