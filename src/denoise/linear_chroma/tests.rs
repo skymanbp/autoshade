@@ -200,6 +200,41 @@ fn photo_k_reading() {
         println!("  k {k:7.3}: removed / noise share {r:.4}");
     }
     println!("  -> photo k {k:.3}; model fit {:.2} s, k reading {:.2} s", t1.as_secs_f64(), (t2 - t1).as_secs_f64());
+    // Round 6: does the filter move the LINEAR mean of a flat patch's colour
+    // differences? Per flat patch, the mean over its cells of (filtered - input),
+    // in units of one cell's model sd; per level decile of the flat patches.
+    for kk in [k, f64::INFINITY] {
+        let f: Vec<[f32; 2]> = (0..cells.cw * cells.ch).into_par_iter().map(|i| cells.filtered(i, kk, rho)).collect();
+        let mut rows: Vec<(f64, [f64; 2])> = Vec::new();
+        for (pi, p) in pts.iter().enumerate() {
+            if !(p.usable && model.is_flat(p, wb)) {
+                continue;
+            }
+            let (px, py) = (pi % cells.pw, pi / cells.pw);
+            let sd = cells.sd[pi];
+            let mut acc = [0.0f64; 2];
+            for cy in py * PATCH..(py + 1) * PATCH {
+                for cx in px * PATCH..(px + 1) * PATCH {
+                    let i = cy * cells.cw + cx;
+                    for j in 0..2 {
+                        acc[j] += f64::from(f[i][j] - cells.d[i][j]);
+                    }
+                }
+            }
+            let n = (PATCH * PATCH) as f64;
+            rows.push((p.m, [acc[0] / n / (f64::from(sd[0]) / 2f64.sqrt()), acc[1] / n / (f64::from(sd[1]) / 2f64.sqrt())]));
+        }
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let per = rows.len() / 10;
+        print!("  linear mean shift of flat patches, k {kk:.3} ({} patches), (filtered - input) / cell sd per level decile: R-G | B-G", rows.len());
+        for q in 0..10 {
+            let part = &rows[q * per..(q + 1) * per];
+            let mean = |j: usize| part.iter().map(|r| r.1[j]).sum::<f64>() / part.len() as f64;
+            println!();
+            print!("    D{q} level {:.2e}: {:+.4} | {:+.4}", part[part.len() / 2].0, mean(0), mean(1));
+        }
+        println!();
+    }
 }
 
 /// Q-e reading (rel1180 msg-e3 round 5): the noise model fitted on every
