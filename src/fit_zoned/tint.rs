@@ -197,7 +197,7 @@ pub(super) fn attach_zone_tint_or_plain(
         let Some(zone) = tinted.as_ref() else { continue };
         let de = subzones::delta_e(&zone.rendered, tgt_px, &sw);
         let counts = report.recipe.masks[zone.mask_index].toning_amount > 0.0
-            && de < plain_de - ZONE_GLOBAL_REGRESSION_TOL
+            && de < plain_de - ZONE_DELTA_E_MARGIN
             && *frame_err <= plain_exit.2 + attachment.frame_regression_tol;
         if counts && best.as_ref().is_none_or(|b| de < b.0) {
             best = Some((de, tinted, (report.recipe.clone(), report.notes.clone(), *frame_err)));

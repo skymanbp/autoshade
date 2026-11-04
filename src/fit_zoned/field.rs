@@ -15,7 +15,11 @@ pub(super) const BAND_DISPERSION_MAX: f32 = 15.0 / 255.0;
 pub(super) const TILE_SHAPE_MIN: f32 = 0.5;
 const LINEAR_SHAPE_MIN: f32 = 0.6;
 const BAND_MERGE_STEP: f32 = 2.0 / 255.0;
-pub(super) const LOCAL_STOP_MARGIN: f32 = 0.002;
+/// A local layer (the colour field, or the tile producer's headroom) is
+/// worth shipping only where it buys more than the objective can tell from
+/// its own rounding: [`fit::FIT_QUANT`] (v1.18.0; a bare 0.002, a hair over
+/// the 0.0018 FIT_QUANT of the display objective, before).
+pub(super) const LOCAL_STOP_MARGIN: f32 = fit::FIT_QUANT;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FieldShape { BandShaped, TileShaped, FreeForm, Linear, None }
 impl FieldShape {

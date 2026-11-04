@@ -469,7 +469,11 @@ pub(crate) fn zone_err(a: &ZoneMoments, b: &ZoneMoments) -> f32 {
 /// clamped to [`fit::P_CLIP`]`..1 - P_CLIP`, so the end points are 0.002 and
 /// 0.998), so a zone and its frame are held to one tonal yardstick. That
 /// quantile set is inline in the frame's function rather than exposed, so it
-/// is restated here by the same formula.
+/// is restated here by the same formula. Since v1.18.0 the frame's tonal
+/// ruler reads L*/100 (`T_L`) and this one still reads display luma: it is
+/// not the objective, and its one measured instance (the neon street's
+/// building, [`ZONE_TONAL_MATCHED`]) is not in the calibration corpus to
+/// re-measure, so its unit and its line are kept as they were.
 pub(super) fn zone_tonal(a_cdf: &[f32], b_cdf: &[f32]) -> f32 {
     let mut gap = 0.0f32;
     for i in 0..=20 {

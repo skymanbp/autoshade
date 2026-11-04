@@ -275,13 +275,25 @@ pub(super) const ZONE_MATCHED_EV: f32 = 0.25;
 /// overwrite `err_after` with the worse frame number. One fifth of the
 /// starting error is the smallest move worth a mask.
 pub(super) const ZONE_FLOOR_MIN_GAIN: f32 = 0.8;
-/// Insurance bound: the mask cannot touch pixels outside its raster (engine
-/// guarantee, pinned by the rocks-bit-equal test), so the only frame-global
-/// drift a correct zone repaint can cause is metric-visible band migration
-/// inside its own region. Allow that small, measured drift (+0.0024 on the
-/// real pair) but refuse anything larger — a big global regression means the
-/// mask is NOT the region we thought it was.
-pub(super) const ZONE_GLOBAL_REGRESSION_TOL: f32 = 0.02;
+/// The frame-level allowance a local correction's do-no-harm grants: the
+/// objective's own rounding, [`fit::FIT_QUANT`] (v1.18.0). It was 0.02 — the
+/// "metric-visible band migration" a frame DISTRIBUTION distance shows when a
+/// correct zone repaint moves its own pixels' quantiles past the other
+/// zone's (+0.0024 measured on the real pair). The objective now reads paired
+/// pixels by their own index (`E_paired`), and the mask cannot touch pixels
+/// outside its raster (engine guarantee, pinned by the rocks-bit-equal test),
+/// so a correct zone cannot raise the frame by migration; the remaining
+/// allowance is what the objective cannot tell from its own rounding. A
+/// regression larger than that still means the mask is not the region we
+/// thought it was.
+pub(super) const ZONE_GLOBAL_REGRESSION_TOL: f32 = crate::fit::FIT_QUANT;
+/// A band set or a zone tint must lower its region's mean CIE76 deltaE
+/// ([`super::subzones::delta_e`], Lab's 100-unit scale) by more than this to
+/// count as better than the plain zone it competes with. It is 0.02 dE —
+/// fifty times under one just-noticeable difference (2.3 dE76), i.e. a strict
+/// improvement with a float-noise floor — and was the frame tolerance's 0.02
+/// read in another unit until v1.18.0 named it; the value is unchanged.
+pub(super) const ZONE_DELTA_E_MARGIN: f32 = 0.02;
 /// Smallest ABSOLUTE zone gain the strictly-better arm will buy a mask for
 /// (R30 batch 1). Derivation, in two independent legs that meet at the same
 /// figure:

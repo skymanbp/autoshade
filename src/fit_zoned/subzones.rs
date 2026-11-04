@@ -746,16 +746,14 @@ pub(super) fn replace_zone(
     // frame the zone never touched — they compete with a correction of the
     // SAME region, on the same finished frame, so the frame-wide reading is a
     // fair referee and the bands may not leave it worse than the single zone
-    // did by more than the finished-frame arbitration's own margin (1e-4,
-    // the 4a' mixer-vs-absence step). The zone stage's attachment tolerance
-    // (`frame_regression_tol`) exists because a frame-wide reading cannot
-    // judge a zone against NO zone when the two frames hold it in different
-    // shares; it stays for the bands-only exit, where there is no single zone
-    // to compare with. Measured on the zoned fixture under the closed curve:
-    // the bands took the land zone's deltaE 9.57 -> 6.40 and the finished
-    // frame 0.03535 -> 0.03606, inside the old tolerance (0.02) and worse
-    // than the single inverted zone they replaced.
-    let frame_allowance = if parent_index.is_some() { 1e-4 } else { parent.frame_regression_tol };
+    // did by more than the objective's own rounding (FIT_QUANT). The zone
+    // stage's attachment tolerance (`frame_regression_tol`) is the same
+    // FIT_QUANT since v1.18.0 (`ZONE_GLOBAL_REGRESSION_TOL`), so both exits
+    // read one allowance. Measured on the zoned fixture under the closed curve
+    // (v1.17.1, the display objective): the bands took the land zone's deltaE
+    // 9.57 -> 6.40 and the finished frame 0.03535 -> 0.03606, inside the old
+    // tolerance (0.02) and worse than the single inverted zone they replaced.
+    let frame_allowance = if parent_index.is_some() { fit::FIT_QUANT } else { parent.frame_regression_tol };
     let neutral = LocalAdjustment::default();
     for model in models {
         report.recipe = saved_recipe.clone();
@@ -841,8 +839,13 @@ pub(super) fn replace_zone(
         let frame_after = fit::look_err_with_evidence(&pixels, target, &report.evidence);
         let reason = if !solved { values::BAND_ESTIMATOR }
             else if !boundary_passed { values::BOUNDARY_BUDGET }
-            else if after >= before - ZONE_GLOBAL_REGRESSION_TOL { values::DELTA_E_MARGIN }
-            else if zone_after > zone_before + ZONE_GLOBAL_REGRESSION_TOL { values::ZONE_DO_NO_HARM }
+            else if after >= before - ZONE_DELTA_E_MARGIN { values::DELTA_E_MARGIN }
+            // The zone's own linear-light moments (`zone_err`) may not rise by
+            // more than the line that calls a zone matched (ZONE_MATCHED_ERR):
+            // a band set may cost its zone at most what the fit calls a match.
+            // It read the frame tolerance's 0.02 in zone_err's unit before
+            // v1.18.0; the value is the same.
+            else if zone_after > zone_before + ZONE_MATCHED_ERR { values::ZONE_DO_NO_HARM }
             else if frame_after > saved_error + frame_allowance { values::FRAME_DO_NO_HARM }
             else if !no_seam_regression { values::BOUNDARY_REGRESSION }
             else if !ramps_follow { values::RAMP_STEEPER } else { "accepted" };
@@ -861,7 +864,7 @@ pub(super) fn replace_zone(
             ("step_after", if complete { scores_text(&step_after) } else { values::UNMEASURED.to_string() }),
             ("regression", if complete { regression } else { values::UNMEASURED.to_string() }),
         ];
-        if reason == "accepted" && best.as_ref().is_none_or(|(_, _, _, error): &(_, _, _, f32)| after < *error - ZONE_GLOBAL_REGRESSION_TOL) {
+        if reason == "accepted" && best.as_ref().is_none_or(|(_, _, _, error): &(_, _, _, f32)| after < *error - ZONE_DELTA_E_MARGIN) {
             report.err_after = frame_after;
             best = Some((report.recipe.clone(), report.notes.clone(), args.clone(), after));
         }
