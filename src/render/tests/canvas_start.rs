@@ -194,7 +194,7 @@ fn every_surface_shows_a_profile_naming_develop_as_the_export_renders_it() {
         let fs = FilmScale::of(film, after.width() as usize, after.height() as usize);
         frame_and_finish(after, r, tail_lens(&geom, source.corrected()), fs, CropPolicy::Cut)
     };
-    let canvas = preview(&base, &named, &SourceFrame::Raw);
+    let canvas = preview(&base, &named, &SourceFrame::of(&raw).expect("frame"));
     let de_canvas = mean_de76(&canvas, &reference);
 
     // 2. A master baked from the base and rendered under the recipe — the
@@ -208,7 +208,7 @@ fn every_surface_shows_a_profile_naming_develop_as_the_export_renders_it() {
     // through the canvas's own tail.
     let (source, cal) = canvas_fit_source(&raw, &named);
     assert!(!source.corrected(), "a RAW's fit source is in the sensor frame");
-    let fitted = preview(&DynamicImage::ImageRgb8(source.to_rgb8()), &cal, &SourceFrame::Raw);
+    let fitted = preview(&DynamicImage::ImageRgb8(source.to_rgb8()), &cal, &SourceFrame::of(&raw).expect("frame"));
     let at_fit_edge = render_to_image(&raw, &named, None, Some(crate::pipeline::FIT_SOURCE_EDGE))
         .expect("export at the fit's edge");
     let to_grid = |im: &DynamicImage| {

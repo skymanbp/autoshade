@@ -194,8 +194,12 @@ impl Fnv {
 /// [`SourceFrame::of`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum SourceFrame {
-    /// A camera RAW: its base develop is in the sensor frame.
-    Raw,
+    /// A camera RAW: its base develop is in the sensor frame. `linear_stage`:
+    /// its mosaic is one the linear colour stage reads
+    /// (`denoise::linear_chroma::reads`, off a metadata-only decode), so its
+    /// develop carries the one colour noise reduction; `false` (X-Trans, a
+    /// linear DNG) leaves it to the display-frame pass.
+    Raw { linear_stage: bool },
     /// A baked file, with the geometry its marker says is in its pixels
     /// (`None` = no marker, the sensor frame) and the colour noise reduction
     /// its pixels already carry (`None` = none: the display-frame pass runs).
@@ -203,14 +207,13 @@ pub enum SourceFrame {
 }
 
 impl SourceFrame {
-    /// The frame of the file at `path`. A RAW is told by its kind; a baked
-    /// file by its marker, read once per (path, modification time, length)
+    /// The frame of the file at `path`. A RAW is told by its kind and its
+    /// mosaic (whether the linear colour stage reads it, a metadata-only
+    /// decode); a baked file by its marker; each read once per (path,
+    /// modification time, length)
     /// for the process. `Err` when the file cannot be read or its marker
     /// cannot be parsed — never a silent "sensor frame".
     pub fn of(path: &Path) -> Result<Self> {
-        if crate::decode::is_raw(path) {
-            return Ok(Self::Raw);
-        }
         type Slot = (std::path::PathBuf, Option<(Option<std::time::SystemTime>, u64)>, SourceFrame);
         static SEEN: std::sync::OnceLock<std::sync::Mutex<Vec<Slot>>> = std::sync::OnceLock::new();
         let ident = std::fs::metadata(path).ok().map(|m| (m.modified().ok(), m.len()));
@@ -223,7 +226,11 @@ impl SourceFrame {
         {
             return Ok(hit.2.clone());
         }
-        let frame = Self::Baked(read_baked_geometry(path)?, read_colour_nr(path)?);
+        let frame = if crate::decode::is_raw(path) {
+            Self::Raw { linear_stage: crate::decode::linear_colour_stage_reads(path)? }
+        } else {
+            Self::Baked(read_baked_geometry(path)?, read_colour_nr(path)?)
+        };
         let mut held = seen.lock().unwrap_or_else(|p| p.into_inner());
         held.retain(|(p, _, _)| p != path);
         if held.len() >= 32 {
@@ -235,14 +242,14 @@ impl SourceFrame {
 
     /// Is this a camera RAW?
     pub fn is_raw(&self) -> bool {
-        matches!(self, Self::Raw)
+        matches!(self, Self::Raw { .. })
     }
 
     /// The geometry a marked baked file carries.
     pub fn baked(&self) -> Option<&BakedGeometry> {
         match self {
             Self::Baked(g, _) => g.as_ref(),
-            Self::Raw => None,
+            Self::Raw { .. } => None,
         }
     }
 
@@ -252,19 +259,20 @@ impl SourceFrame {
     /// them).
     pub fn corrected(&self) -> bool {
         match self {
-            Self::Raw => false,
+            Self::Raw { .. } => false,
             Self::Baked(g, _) => g.as_ref().is_some_and(BakedGeometry::corrects_frame),
         }
     }
 
     /// Do this source's pixels already carry the develop's one colour noise
-    /// reduction? A RAW's base does whenever its part asks for it (the
-    /// stage runs inside its develop, `canvas::BasePart`); a baked file does
-    /// when its marker says so ([`BakedColourNr`]). Either way the
-    /// display-frame pass must not run over them.
+    /// reduction? A RAW's base does whenever its part asks for it and its
+    /// mosaic is one the stage reads (the stage runs inside its develop,
+    /// `canvas::BasePart`); a baked file does when its marker says so
+    /// ([`BakedColourNr`]). Either way the display-frame pass must not run
+    /// over them; otherwise it is the one stage.
     pub fn colour_nr_in_pixels(&self) -> bool {
         match self {
-            Self::Raw => true,
+            Self::Raw { linear_stage } => *linear_stage,
             Self::Baked(_, nr) => nr.is_some(),
         }
     }

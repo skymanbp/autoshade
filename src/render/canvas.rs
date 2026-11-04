@@ -119,7 +119,7 @@ impl Master {
     pub fn of(image: DynamicImage, frame: &SourceFrame, part: &BasePart) -> Result<Self> {
         let _ = part;
         match frame {
-            SourceFrame::Raw | SourceFrame::Baked(None, _) => Ok(Self::sensor(image)),
+            SourceFrame::Raw { .. } | SourceFrame::Baked(None, _) => Ok(Self::sensor(image)),
             SourceFrame::Baked(Some(g), _) => bail!(
                 "this master has {g} in its pixels, but the develop bakes no lens geometry — bake \
                  the master again from the RAW"
@@ -202,14 +202,14 @@ impl Master {
 /// at `max_edge` (the cap runs right after the profile stage, as in
 /// [`render_to_image`]), unsharpened ([`BasePart::recipe`]).
 pub fn base_develop(raw: &Path, part: &BasePart, max_edge: Option<u32>) -> Result<DynamicImage> {
-    render_frame(raw, &part.recipe(), None, max_edge, ExportColorSpace::Srgb, crate::diag::stderr(), part.colour_nr())
+    render_frame(raw, &part.recipe(), None, max_edge, ExportColorSpace::Srgb, crate::diag::stderr(), part.colour_nr()).map(|(img, _)| img)
 }
 
 /// A master's pixels for `part` (a heal, a fill, a denoise): the base part
 /// developed with the RAW default sharpening a baked master is owed
 /// ([`BasePart::master_recipe`]), 16-bit as the master file is.
 pub fn master_develop(raw: &Path, part: &BasePart, max_edge: Option<u32>) -> Result<DynamicImage> {
-    render_frame(raw, &part.master_recipe(), None, max_edge, ExportColorSpace::Srgb, crate::diag::stderr(), part.colour_nr())
+    render_frame(raw, &part.master_recipe(), None, max_edge, ExportColorSpace::Srgb, crate::diag::stderr(), part.colour_nr()).map(|(img, _)| img)
 }
 
 /// [`source_pixels_for`] for a master: a RAW through [`master_develop`], a
@@ -463,7 +463,7 @@ pub fn source_plate(raw: &Path, base: &EditRecipe, edge: u32) -> Result<Plate> {
     let mut develop = base.clone();
     (develop.lens_profile.distortion_on, develop.lens_profile.ca_on) = (false, false);
     let colour_nr = BasePart::of(base).colour_nr();
-    let developed = render_frame(raw, &develop, None, Some(edge), ExportColorSpace::Srgb, crate::diag::stderr(), colour_nr)?;
+    let (developed, _) = render_frame(raw, &develop, None, Some(edge), ExportColorSpace::Srgb, crate::diag::stderr(), colour_nr)?;
     let pixels = match BaseEncoding::of(base) {
         Some(e) => e.decode(&developed),
         None => developed,

@@ -59,16 +59,29 @@
 //! four times it. Detail and Smoothness belong to the display-frame pass,
 //! which a RAW no longer runs.
 //!
-//! **One stage per develop.** A RAW with a 2×2 Bayer mosaic runs this stage
-//! and no display-frame colour pass; a source with no mosaic (a JPEG, a TIFF,
-//! a phone picture) keeps the display-frame pass; a master baked with this
-//! stage is marked so that its card runs no second one, and a master baked
-//! without it (every master before v1.18.0) keeps the display pass until it
-//! is baked again.
+//! **One stage per develop.** The linear stage where a Bayer mosaic the
+//! stage can read exists ([`reads`]: one sample per site on a 2×2 RGB
+//! pattern); the display-frame pass otherwise — a JPEG, a TIFF, a phone
+//! picture, a RAW whose mosaic is not a 2×2 Bayer (X-Trans, a linear DNG),
+//! and a master baked without this stage (every master before v1.18.0, until
+//! it is baked again). The develop reports which one ran: a master baked
+//! with this stage is marked (`render::BakedColourNr`) so that its card runs
+//! no second one, and only then. A readable mosaic whose noise cannot be
+//! measured (fewer than 16 usable patches: a frame clipped or black all
+//! over) has no noise the stage can see, and passes through it unchanged.
 
 use rayon::prelude::*;
 
 use super::noise_model::{bayer_sites, patches, NoiseModel, Patch, PATCH};
+
+/// Can the stage read `raw`'s mosaic — one sample per site on a 2×2 RGB
+/// Bayer pattern? The rule the develop runs the stage by and every surface
+/// that asks whether a RAW's pixels carry it (`render::SourceFrame::of`,
+/// off a metadata-only decode) reads, so the two cannot disagree.
+pub(crate) fn reads(raw: &rawler::RawImage) -> bool {
+    use rawler::rawimage::RawPhotometricInterpretation as Photo;
+    matches!(&raw.photometric, Photo::Cfa(c) if raw.cpp == 1 && bayer_sites(&c.cfa).is_some())
+}
 
 /// The slider value at which the stage runs at the photo's own `k`:
 /// Lightroom's own default for Color.

@@ -607,3 +607,58 @@ fn a_raw_develop_takes_its_colour_noise_on_the_linear_mosaic() {
     });
     assert!(green_sites_equal, "a green site moved: the stage writes red and blue only");
 }
+
+/// The linear colour stage runs where a Bayer mosaic it reads exists, and the
+/// develop says so (E3 of v1.18.0, round 5): an RGGB mosaic at Colour 25
+/// reports the stage, the same mosaic at 0 does not, and an X-Trans mosaic
+/// (a 6x6 pattern the stage cannot read) neither runs it nor reports it, so
+/// its colour noise is left to the display-frame pass
+/// (`SourceFrame::Raw { linear_stage: false }`), and its master carries no
+/// mark (`render_to_file_marked` stamps on the report alone).
+///
+/// MUTATION: report `true` for every CFA develop, or stamp the mark on the
+/// part's strength without the report.
+#[test]
+fn only_a_mosaic_the_linear_stage_reads_runs_it_and_the_develop_says_which() {
+    use rawler::cfa::{PlaneColor, CFA};
+    use rawler::decoders::Camera;
+    use rawler::imgop::develop::{ProcessingStep, RawDevelop};
+    use rawler::rawimage::{BlackLevel, CFAConfig, RawImageData, RawPhotometricInterpretation, WhiteLevel};
+    let (w, h) = (384usize, 384usize);
+    let values: Vec<u16> = (0..w * h).map(|i| 1100 + ((i as u64 * 2_654_435_761) % 97) as u16).collect();
+    let raw_of = |pattern: &str| {
+        rawler::RawImage::new_with_data(
+            Camera::new(),
+            RawImageData::Integer(values.clone()),
+            w,
+            h,
+            1,
+            [1.0, 1.0, 1.0, f32::NAN],
+            RawPhotometricInterpretation::Cfa(CFAConfig::new(&CFA::new(pattern), &PlaneColor::new("RGB"))),
+            Some(BlackLevel::new(&[512u16], 1, 1, 1)),
+            Some(WhiteLevel::new(vec![16383])),
+            false,
+        )
+    };
+    let (bayer, xtrans) = (raw_of("RGGB"), raw_of("GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG"));
+    assert!(crate::denoise::linear_chroma::reads(&bayer) && !crate::denoise::linear_chroma::reads(&xtrans));
+    let mut dev = RawDevelop::default();
+    dev.steps.retain(|s| !matches!(s, ProcessingStep::WhiteBalance | ProcessingStep::Calibrate | ProcessingStep::SRgb));
+    let report = |raw: &rawler::RawImage, nr: f32| source::develop_raw_linear(raw, &dev, None, nr).unwrap().3;
+    assert!(report(&bayer, 25.0), "a Bayer mosaic at Colour 25 runs the linear stage");
+    assert!(!report(&bayer, 0.0), "at 0 nothing runs");
+    // The engine develops a non-Bayer CFA by rescale alone, then over the
+    // array's own geometry (`render_frame`'s `geometry_cfa`).
+    let cfa = CFA::new("GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG");
+    let rescale = RawDevelop { steps: vec![ProcessingStep::Rescale] };
+    let (_, _, _, ran) = source::develop_raw_linear(&xtrans, &rescale, Some(&cfa), 25.0).unwrap();
+    assert!(!ran, "an X-Trans mosaic: the linear stage does not run, and the develop says so");
+    // The export's display-pass switch and the master's mark read that report.
+    let src = crate::render::engine_source().replace("\r\n", "\n");
+    let finish = &src[src.find("pub(super) fn finish_develop(").expect("finish_develop")..];
+    assert!(
+        finish[..finish.find("\n}").unwrap()].contains("film, true, linear_colour);"),
+        "the display pass of a RAW export reads the develop's report"
+    );
+    assert!(src.contains("let nr_mark = nr_mark.filter(|_| linear_colour);"), "the mark is stamped on the report");
+}

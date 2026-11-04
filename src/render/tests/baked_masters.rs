@@ -138,8 +138,11 @@ fn the_display_pass_runs_only_over_pixels_that_carry_no_colour_stage() {
     };
     let marked = SourceFrame::Baked(None, BakedColourNr::of(25.0));
     let unmarked = SourceFrame::Baked(None, None);
-    assert!(SourceFrame::Raw.colour_nr_in_pixels() && marked.colour_nr_in_pixels() && !unmarked.colour_nr_in_pixels());
-    assert_eq!(preview(25.0, &SourceFrame::Raw), preview(0.0, &SourceFrame::Raw), "a RAW base: no display pass");
+    let (bayer, other) = (SourceFrame::Raw { linear_stage: true }, SourceFrame::Raw { linear_stage: false });
+    assert!(bayer.colour_nr_in_pixels() && marked.colour_nr_in_pixels() && !unmarked.colour_nr_in_pixels());
+    assert!(!other.colour_nr_in_pixels(), "a mosaic the linear stage cannot read carries no colour stage");
+    assert_eq!(preview(25.0, &bayer), preview(0.0, &bayer), "a RAW base: no display pass");
+    assert_ne!(preview(25.0, &other), preview(0.0, &other), "a non-Bayer RAW base: the display pass runs");
     assert_eq!(preview(25.0, &marked), preview(0.0, &marked), "a marked master: no display pass");
     assert_ne!(preview(25.0, &unmarked), preview(0.0, &unmarked), "an unmarked baked file: the display pass runs");
 }

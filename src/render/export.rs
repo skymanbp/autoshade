@@ -346,7 +346,8 @@ pub fn render_to_file(
 /// develop runs the part's colour noise reduction ([`BasePart::colour_nr`]),
 /// the stage the export of the photo the part is taken from runs, and the
 /// master says so in its file ([`BakedColourNr`]) so that its card runs no
-/// second one.
+/// second one — when, and only when, the develop reports that the stage ran
+/// (a mosaic it reads, [`render_to_file_marked`]).
 pub fn render_master_to_file(
     raw: &Path,
     part: &BasePart,
@@ -361,7 +362,10 @@ pub fn render_master_to_file(
 /// [`render_to_file`], stamping `marker` on the staged file before the
 /// publish when it is given. A RAW develops at colour NR `colour_nr` (the
 /// part's, [`BasePart::colour_nr`]); `nr_mark` is stamped beside `marker`
-/// (a master of a RAW baked with colour NR on, [`render_master_to_file`]).
+/// (a master of a RAW baked with colour NR on, [`render_master_to_file`])
+/// only when the develop reports that the linear colour stage ran: a RAW
+/// whose mosaic it cannot read took the display-frame pass, and its master
+/// must keep that pass on its card.
 #[allow(clippy::too_many_arguments)] // the export's frame plus the part's one switch
 fn render_to_file_marked(
     src_path: &Path,
@@ -400,7 +404,7 @@ fn render_to_file_marked(
     // below a relabelling that can never ADD colour). A baked source IS
     // sRGB pixels — for it the conversion below is complete by construction.
     let native_wide = is_raw_src && space != ExportColorSpace::Srgb;
-    let mut img = if is_raw_src {
+    let (mut img, linear_colour) = if is_raw_src {
         let working = if native_wide { space } else { ExportColorSpace::Srgb };
         render_frame(src_path, recipe, denoise, None, working, sink, colour_nr)?
     } else {
@@ -415,8 +419,9 @@ fn render_to_file_marked(
         // the finished pixels, which is not the same thing as developing at a
         // bounded working resolution and must not be quietly swapped for it —
         // the RAW arm above passes `None` for exactly the same reason.
-        render_baked_to_image(&src, recipe, denoise, None, frame.baked(), frame.colour_nr_in_pixels(), &diag)?
+        (render_baked_to_image(&src, recipe, denoise, None, frame.baked(), frame.colour_nr_in_pixels(), &diag)?, false)
     };
+    let nr_mark = nr_mark.filter(|_| linear_colour);
     if let Some(le) = opts.long_edge
         && le > 0
         && img.width().max(img.height()) > le
