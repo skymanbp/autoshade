@@ -3250,7 +3250,7 @@ mod tests {
     /// a fifth `raw_image` call site without one.
     #[test]
     fn every_raw_image_door_measures_the_plane_first() {
-        for (file, doors_expected) in [("src/decode.rs", 2usize), ("src/render.rs", 2usize)] {
+        for (file, doors_expected) in [("src/decode.rs", 3usize), ("src/render.rs", 2usize)] {
             // LF-normalised: this repo has MIXED line endings by design. The engine is
             // read as the one text `render.rs` was before it was split into files.
             let text = if file == "src/render.rs" {
