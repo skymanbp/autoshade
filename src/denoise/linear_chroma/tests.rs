@@ -201,3 +201,111 @@ fn photo_k_reading() {
     }
     println!("  -> photo k {k:.3}; model fit {:.2} s, k reading {:.2} s", t1.as_secs_f64(), (t2 - t1).as_secs_f64());
 }
+
+/// Q-e reading (rel1180 msg-e3 round 5): the noise model fitted on every
+/// `s`-th patch (uniform stride, offsets 0..min(s, 4)) against the fit on all
+/// of them — the worst |ln a|, |ln b|, the worst |ln var| over the frame's
+/// (level decile, radius) grid and |band| — with the time of one fit.
+/// `E3_PROBE=<raw>`; prints the crop and the dummy-decode stage rule too.
+#[test]
+#[ignore]
+fn fit_sample_reading() {
+    use rawler::rawimage::RawPhotometricInterpretation as Photo;
+    let Ok(path) = std::env::var("E3_PROBE") else { return };
+    let dummy = crate::decode::linear_colour_stage_reads(std::path::Path::new(&path)).expect("dummy decode");
+    let raw = rawler::decode_file(&path).expect("decode");
+    println!(
+        "{path}: {}x{} crop {:?} active {:?}; dummy-decode reads {dummy}, full-decode reads {}",
+        raw.width,
+        raw.height,
+        raw.crop_area,
+        raw.active_area,
+        reads(&raw)
+    );
+    let Photo::Cfa(config) = &raw.photometric else { panic!("not a CFA") };
+    let black = raw.blacklevel.as_bayer_array();
+    let white = raw.whitelevel.as_bayer_array();
+    let width = raw.width;
+    let mut v = raw.data.as_f32().into_owned();
+    v.par_chunks_exact_mut(width * 2).for_each(|lines| {
+        let (l0, l1) = lines.split_at_mut(width);
+        l0.chunks_exact_mut(2).zip(l1.chunks_exact_mut(2)).for_each(|(a, b)| {
+            a[0] = (a[0] - black[0]) / (white[0] - black[0]);
+            a[1] = (a[1] - black[1]) / (white[1] - black[1]);
+            b[0] = (b[0] - black[2]) / (white[2] - black[2]);
+            b[1] = (b[1] - black[3]) / (white[3] - black[3]);
+        });
+    });
+    let wb = [raw.wb_coeffs[0], raw.wb_coeffs[1], raw.wb_coeffs[2]].map(f64::from);
+    let wb = [wb[0] / wb[1], 1.0, wb[2] / wb[1]];
+    let sites = bayer_sites(&config.cfa).expect("Bayer");
+    let t0 = std::time::Instant::now();
+    let pts = patches(&v, width, raw.height, sites, wb);
+    let t_patches = t0.elapsed().as_secs_f64();
+    let t1 = std::time::Instant::now();
+    let full = NoiseModel::fit_all(&pts, width, raw.height).expect("model");
+    let t_fit = t1.elapsed().as_secs_f64();
+    let usable = pts.iter().filter(|p| p.usable).count();
+    let mut levels: Vec<f64> = pts.iter().filter(|p| p.usable).map(|p| p.m).collect();
+    levels.sort_by(f64::total_cmp);
+    let grid: Vec<(f64, f64)> = (0..10)
+        .flat_map(|d| {
+            let m = levels[(levels.len() - 1) * (2 * d + 1) / 20];
+            (0..5).map(move |j| (m, f64::from(j) / 4.0))
+        })
+        .collect();
+    println!(
+        "  patches {t_patches:.2} s, full fit {t_fit:.2} s on {usable} usable of {} patches; a {:.4e} b {:.4e} c2 {:+.4} c4 {:+.4} band {:.4}",
+        pts.len(),
+        full.a,
+        full.b,
+        full.c2,
+        full.c4,
+        full.band
+    );
+    if let Ok(out) = std::env::var("E3_FLAT_OUT") {
+        let (pw, ph) = ((width / 2) / PATCH, (raw.height / 2) / PATCH);
+        assert_eq!(pw * ph, pts.len(), "patches are row-major pw x ph");
+        let mut bytes = Vec::with_capacity(8 + pts.len());
+        bytes.extend_from_slice(&(pw as u32).to_le_bytes());
+        bytes.extend_from_slice(&(ph as u32).to_le_bytes());
+        bytes.extend(pts.iter().map(|p| u8::from(full.is_flat(p, wb))));
+        std::fs::write(&out, bytes).expect("flat mask");
+        println!("  flat mask {pw}x{ph} patches -> {out}");
+    }
+    let mut s = 2usize;
+    while pts.len() / s >= 16 {
+        let mut worst = [0.0f64; 4];
+        let mut t = 0.0f64;
+        let offs = s.min(4);
+        for off in 0..offs {
+            let sub: Vec<Patch> = pts.iter().skip(off).step_by(s).copied().collect();
+            let t2 = std::time::Instant::now();
+            let Some(m) = NoiseModel::fit_all(&sub, width, raw.height) else {
+                worst = [f64::INFINITY; 4];
+                continue;
+            };
+            t += t2.elapsed().as_secs_f64();
+            let e = [
+                (m.a / full.a).ln().abs(),
+                (m.b / full.b).ln().abs(),
+                grid.iter().map(|&(l, r)| (m.var(l, r) / full.var(l, r)).ln().abs()).fold(0.0, f64::max),
+                (m.band - full.band).abs(),
+            ];
+            for j in 0..4 {
+                worst[j] = worst[j].max(e[j]);
+            }
+        }
+        let n = pts.len().div_ceil(s);
+        println!(
+            "  stride {s:5}: {n:7} patches ({:9} cells): |ln a| {:.4} |ln b| {:.4} |ln var| {:.4} |band| {:.4}; fit {:.3} s",
+            n * PATCH * PATCH,
+            worst[0],
+            worst[1],
+            worst[2],
+            worst[3],
+            t / offs as f64
+        );
+        s *= 2;
+    }
+}

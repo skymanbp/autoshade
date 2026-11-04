@@ -58,6 +58,21 @@ use rayon::prelude::*;
 /// tell its noise from its texture.
 pub(crate) const PATCH: usize = 8;
 
+/// Patches the model is fitted on (a uniform stride of the frame's patches,
+/// [`NoiseModel::fit`]): the fewest whose fitted variance surface is sharp
+/// enough not to undo [`PATCH`]. A patch's residual carries its own sampling
+/// error (0.2523, the worst photo at 8 cells) plus the fit's error on the
+/// surface, in quadrature; [`PATCH`] was set so that the first is under the
+/// flat band (0.256), so the second may add at most
+/// `sqrt(0.256² − 0.2523²)` = 0.0434 before the sum crosses it. Measured
+/// (rel1180 msg-e3 round 6, the worst `|ln var|` over the frame's level ×
+/// radius grid against the all-patch fit, worst of four stride offsets, three
+/// photos of 238 800 patches): 0.0178 / 0.0345 / 0.0267 at stride 16, and
+/// the first failure at 32 (0.0570 on the 61 MP frame). So 238 800 / 16 =
+/// 14 925 patches; a frame with more is read at the stride that keeps at
+/// least these many, a frame with fewer is read whole.
+pub(crate) const FIT_PATCHES: usize = 14_925;
+
 /// The fitted model of one mosaic.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct NoiseModel {
@@ -222,9 +237,18 @@ impl NoiseModel {
     }
 
     /// Fit the model on the noise-only population of `patches` (see the
-    /// module). `None` when fewer than 16 patches are usable or the fit has
-    /// no noise-only population.
+    /// module), read at the uniform stride that keeps at least
+    /// [`FIT_PATCHES`] of them (every patch on a smaller frame). `None` when
+    /// fewer than 16 of those are usable or the fit has no noise-only
+    /// population.
     pub(crate) fn fit(patches: &[Patch], width: usize, height: usize) -> Option<Self> {
+        let stride = (patches.len() / FIT_PATCHES).max(1);
+        let sampled: Vec<Patch> = patches.iter().step_by(stride).copied().collect();
+        Self::fit_all(&sampled, width, height)
+    }
+
+    /// [`NoiseModel::fit`] on every one of `patches`.
+    pub(crate) fn fit_all(patches: &[Patch], width: usize, height: usize) -> Option<Self> {
         let usable: Vec<&Patch> = patches.iter().filter(|p| p.usable).collect();
         if usable.len() < 16 {
             return None;

@@ -126,6 +126,41 @@ fn a_patch_is_flat_when_its_colour_noise_is_the_models() {
     assert!(ground_flat as f64 >= 0.95 * ground as f64, "noise-only ground is flat: {ground_flat} of {ground}");
 }
 
+/// The fit reads a uniform stride of a large frame's patches, the stride that
+/// keeps at least [`FIT_PATCHES`] of them, and its variance surface stays
+/// within the error the patch size leaves room for (0.0434 in `ln` variance)
+/// of the fit on every patch. Patches drawn from the model with the 8-cell
+/// estimate's own spread (0.2523 in `ln`), 4.2 times [`FIT_PATCHES`] (so the
+/// stride is 4); a small frame is read whole.
+///
+/// MUTATION: read every patch (stride 1) and the first assertion fails.
+#[test]
+fn the_fit_reads_a_stride_that_keeps_its_surface_inside_the_patch_rule() {
+    let t = truth();
+    let n = FIT_PATCHES * 42 / 10;
+    let drawn: Vec<Patch> = (0..n as u64)
+        .map(|i| {
+            let m = 0.002 + 0.12 * (0.5 + 0.5 * normal(11, i).tanh());
+            let r = 0.5 + 0.5 * normal(13, i).tanh();
+            Patch { m, m_r: m, m_b: m, v_g: t.var(m, r) * (0.2523 * normal(17, i)).exp(), v_dr: 0.0, v_db: 0.0, r, usable: true }
+        })
+        .collect();
+    let stride = n / FIT_PATCHES;
+    assert_eq!(stride, 4);
+    let sampled: Vec<Patch> = drawn.iter().step_by(stride).copied().collect();
+    let fit = NoiseModel::fit(&drawn, W, H).expect("a model");
+    assert_eq!(Some(fit), NoiseModel::fit_all(&sampled, W, H), "the fit is the fit on the uniform stride");
+    let all = NoiseModel::fit_all(&drawn, W, H).expect("a model");
+    for level in [0.002, 0.01, 0.05, 0.1] {
+        for r in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let e = (fit.var(level, r) / all.var(level, r)).ln().abs();
+            assert!(e < 0.0434, "level {level} r {r}: |ln var| {e:.4} against the all-patch fit");
+        }
+    }
+    let small: Vec<Patch> = drawn[..FIT_PATCHES - 1].to_vec();
+    assert_eq!(NoiseModel::fit(&small, W, H), NoiseModel::fit_all(&small, W, H), "a small frame is read whole");
+}
+
 /// A pattern that is not a 2×2 RGB Bayer has no two greens in a cell to read
 /// the noise from: the estimator says so instead of guessing.
 #[test]
