@@ -349,13 +349,19 @@ pub mod keys {
     /// rendered the frame farther from the target and was withheld there,
     /// so the stages after it kept solving from the frame as it was.
     pub const FIT_NOTE_TONE_WITHHELD_HARM: &str =
-        " The tone sliders were withheld: rendered, they left the frame's tones farther from \
-         the target's than the untouched source's (tonal reading {before} → {after}), so the \
-         tone stage shipped nothing and the stages after it solved from the untoned frame.";
+        " The tone sliders were withheld: rendered, they did not bring the frame's tones closer \
+         to the target's than the untouched source's by the objective's own rounding (tonal \
+         reading {before} → {after}), so the tone stage shipped nothing and the stages after it \
+         solved from the untoned frame.";
     pub const FIT_NOTE_CURVE_WITHHELD_HARM: &str =
-        " The residual tone curve was withheld: rendered on top of the sliders it left the \
-         frame's tones farther from the target's (tonal reading {before} → {after}), so the \
-         sliders ship without it.";
+        " The residual tone curve was withheld: rendered on top of the sliders it did not bring \
+         the frame's tones closer to the target's by the objective's own rounding (tonal \
+         reading {before} → {after}), so the sliders ship without it.";
+    /// v1.18.0 R8: the controls the backward elimination set back to their
+    /// zero (`fit::eliminate_unearned`), named.
+    pub const FIT_NOTE_UNEARNED: &str =
+        " These controls were set back to zero, because each earned less than the objective's \
+         own rounding against its own absence: {controls}.";
     pub const FIT_NOTE_REGRESSED: &str =
         " The full fit rendered farther from the target than the untouched \
          source at every saturation level — returning a NEUTRAL recipe \
@@ -1331,7 +1337,7 @@ pub(crate) const GLOBAL_SOLVE_KEYS: &[&str] = &[
     keys::FIT_NOTE_CAST_HANDED_TO_WB,
     keys::FIT_NOTE_GLOBAL_CAST, keys::FIT_NOTE_VETO_DISCLOSED, keys::FIT_NOTE_STRENGTH,
     keys::FIT_DEGENERATE, keys::FIT_NOTE_REGRESSED, keys::FIT_NOTE_SAT_REDUCED,
-    keys::FIT_NOTE_TONE_WITHHELD_HARM, keys::FIT_NOTE_CURVE_WITHHELD_HARM,
+    keys::FIT_NOTE_TONE_WITHHELD_HARM, keys::FIT_NOTE_CURVE_WITHHELD_HARM, keys::FIT_NOTE_UNEARNED,
     keys::FIT_NOTE_REHUE_BLOCKED, keys::FIT_NOTE_CAST_REJECTED, keys::FIT_NOTE_JOINT,
     keys::FIT_NOTE_JOINT_NONE, keys::FIT_NOTE_JOINT_MISS, keys::FIT_NOTE_JOINT_REFUSED,
     keys::FIT_NOTE_JOINT_REGRESSED, keys::FIT_NOTE_EVIDENCE_CONTRADICTED,

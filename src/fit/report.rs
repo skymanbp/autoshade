@@ -94,6 +94,8 @@ pub(super) struct SolveFacts {
     /// them (`before` → `after`) and were withheld at their own stage.
     pub(super) tone_harm: Option<(f32, f32)>,
     pub(super) curve_harm: Option<(f32, f32)>,
+    /// v1.18.0 R8: the controls `eliminate_unearned` set back, named.
+    pub(super) unearned: Option<String>,
     pub(super) detail: (f32, f32),
     pub(super) detail_withheld: bool,
     /// Paired robust regression engaged and down-weighted this share of the
@@ -280,6 +282,9 @@ pub(super) fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: Sol
                 Note::new(key, vec![("before", format!("{before:.4}")), ("after", format!("{after:.4}"))]),
             );
         }
+    }
+    if let Some(controls) = &solve.unearned {
+        push_note(&mut rationale, &mut notes, Note::new(keys::FIT_NOTE_UNEARNED, vec![("controls", controls.clone())]));
     }
     if let Some(joint_regressed) = solve.regressed {
         push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_REGRESSED));
@@ -1086,6 +1091,7 @@ pub fn rescore_report(
             regressed: None,
             tone_harm: None,
             curve_harm: None,
+            unearned: carried_arg(keys::FIT_NOTE_UNEARNED, "controls"),
             detail: (recipe.clarity, recipe.texture),
             detail_withheld: false,
             robust: None,

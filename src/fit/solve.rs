@@ -326,6 +326,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 regressed: None,
                 tone_harm: None,
                 curve_harm: None,
+                unearned: None,
                 detail: (0.0, 0.0),
                 detail_withheld: false,
                 robust: None,
@@ -366,7 +367,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                 structural_evidence: None,
                 defer_disclosure,
             },
-            SolveFacts { budget: Some(FitBudget::for_strength(options.strength)), strength: Some(options.strength.get()), veto_luma: None, veto_hue: None, wb_clamped: None, wb_search_bound: None, wb_rotation_coverage: None, wb_rotation_disclosure: None, cast_admitted_by_strength: None, cast_admitted: None, cast_projected: None, wb_cells: None, wb_foreign_hue_withheld: false, wb_rotation_withheld: false, sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, tone_harm: None, curve_harm: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None, cast_cells: None, hsl: HslStageFacts::default(), grade_held: None, atmosphere_reference: AtmosphereReference::WholeFrame },
+            SolveFacts { budget: Some(FitBudget::for_strength(options.strength)), strength: Some(options.strength.get()), veto_luma: None, veto_hue: None, wb_clamped: None, wb_search_bound: None, wb_rotation_coverage: None, wb_rotation_disclosure: None, cast_admitted_by_strength: None, cast_admitted: None, cast_projected: None, wb_cells: None, wb_foreign_hue_withheld: false, wb_rotation_withheld: false, sat_pegged: None, cast: CastOutcome::default(), evidence_refused: false, sat_fitted: None, regressed: None, tone_harm: None, curve_harm: None, unearned: None, detail: (0.0, 0.0), detail_withheld: true, robust: None, paired: false, vouched_bands: None, cast_cells: None, hsl: HslStageFacts::default(), grade_held: None, atmosphere_reference: AtmosphereReference::WholeFrame },
         );
     }
 
@@ -554,9 +555,9 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     {
         let toned = pixels_of(&render::develop_preview(&s_img, &recipe));
         let err_toned = look::tonal_err_with_evidence(&toned, &tp, &evidence);
-        // FIT_QUANT on T_L: the sliders' ruler takes the same one margin
-        // (v1.18.0; T_L is J*'s tonal term, in J*'s units).
-        if err_toned > tonal_before + FIT_QUANT {
+        // R8: the sliders ship only on a T_L gain of FIT_QUANT over their
+        // absence (`ships`; T_L is J*'s tonal term, in J*'s units).
+        if !ships(err_toned, tonal_before) {
             recipe.exposure_ev = base.exposure_ev;
             recipe.contrast = base.contrast;
             recipe.highlights = base.highlights;
@@ -566,6 +567,16 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             tone_harm = Some((tonal_before, err_toned));
         }
     }
+    // R8: the six sliders come out of one joint solve, so each must earn its
+    // own place on the stage's ruler; the stages after solve from what stays.
+    let tonal_of = |r: &EditRecipe| {
+        look::tonal_err_with_evidence(&pixels_of(&render::develop_preview(&s_img, r)), &tp, &evidence)
+    };
+    let mut unearned = if tone_harm.is_none() {
+        eliminate_unearned(&mut recipe, base, &TONE_SLIDERS, tonal_of)
+    } else {
+        Vec::new()
+    };
 
     // --- 2) residual master curve (composed on top of the sliders) -----------
     // Domain care (R16): the sliders solved in the USER domain (their input
@@ -659,8 +670,9 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             &tp,
             &evidence,
         );
-        // FIT_QUANT on T_L, as the sliders above (v1.18.0).
-        if err_with > err_without + FIT_QUANT {
+        // R8: the curve ships only on a T_L gain of FIT_QUANT over its
+        // absence, as the sliders above (`ships`).
+        if !ships(err_with, err_without) {
             recipe.tone_curve = base.tone_curve.clone();
             curve_harm = Some((err_without, err_with));
         }
@@ -1411,7 +1423,14 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     let delivered_fan =
         withdraw_curves_for_delivered_fan(&s_img, &sp, &evidence, &mut recipe, &mut end_px);
     let cast_withdrawn = matches!(delivered_fan, Some((_, _, None)));
-    if cast_withdrawn {
+    // R8, once more on the finished global recipe: every control the solve
+    // set must earn FIT_QUANT of J* against its own absence.
+    let finished_dropped = eliminate_unearned(&mut recipe, base, &global_controls(), finished_err);
+    if !finished_dropped.is_empty() {
+        end_px = pixels_of(&render::develop_preview(&s_img, &recipe));
+    }
+    unearned.extend(finished_dropped.iter().copied());
+    if cast_withdrawn || !finished_dropped.is_empty() {
         err_after = look_err_with_evidence(&end_px, &tp, &evidence);
         end_cells = cells.as_ref().and_then(|c| c.region_arm(&sp, &end_px));
         end_moves_hue = moved_unsupported_hue_range_names_vouched(
@@ -1583,6 +1602,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             regressed: fit_regressed.then_some(joint_regressed),
             tone_harm,
             curve_harm,
+            unearned: control_names(&unearned),
             detail,
             detail_withheld: !detail_supported,
             robust: robust_facts,

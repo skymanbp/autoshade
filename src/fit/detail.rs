@@ -79,7 +79,9 @@ pub(super) fn detail_regression_is_bounded(
     err_after: f32,
 ) -> bool {
     (detail.0 != 0.0 || detail.1 != 0.0)
-        && err_after <= err_before + FIT_QUANT
+        // R8: J* may not lose at all (a loss of any size refuses); the gain
+        // is the detail ruler's, which J* does not read.
+        && err_after <= err_before
         && detail_residual(after, target, evidence) + 1e-6
             < detail_residual(before, target, evidence)
 }

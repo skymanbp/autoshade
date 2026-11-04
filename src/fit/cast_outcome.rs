@@ -332,6 +332,234 @@ pub(crate) fn ships(with: f32, without: f32) -> bool {
     without - with >= FIT_QUANT
 }
 
+/// One control a global solve sets, as [`eliminate_unearned`] reads it: a
+/// slider, one white-balance axis, one mixer value, one grade wheel, one
+/// curve. Its "zero" is the value the solve started from (`base`, the
+/// calibration-only recipe), which is the slider's own zero on a photograph.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Control {
+    Exposure,
+    Contrast,
+    Highlights,
+    Shadows,
+    Whites,
+    Blacks,
+    Temperature,
+    Tint,
+    Vibrance,
+    Saturation,
+    HslHue(usize),
+    HslSaturation(usize),
+    HslLuminance(usize),
+    GradeShadows,
+    GradeMidtones,
+    GradeHighlights,
+    GradeGlobal,
+    ToneCurve,
+    RedCurve,
+    GreenCurve,
+    BlueCurve,
+}
+
+/// The tone stage's joint solve.
+pub(super) const TONE_SLIDERS: [Control; 6] = [
+    Control::Exposure,
+    Control::Contrast,
+    Control::Highlights,
+    Control::Shadows,
+    Control::Whites,
+    Control::Blacks,
+];
+
+/// Every control the finished global recipe can carry whose effect the
+/// objective reads. The detail controls (clarity, texture) are not here:
+/// their gain is read by their own ruler (`detail::detail_residual`), which
+/// J* does not carry, so J* would call every one of them unearned.
+pub(super) fn global_controls() -> Vec<Control> {
+    let mut all = vec![
+        Control::Exposure,
+        Control::Contrast,
+        Control::Highlights,
+        Control::Shadows,
+        Control::Whites,
+        Control::Blacks,
+        Control::Temperature,
+        Control::Tint,
+        Control::Vibrance,
+        Control::Saturation,
+        Control::GradeShadows,
+        Control::GradeMidtones,
+        Control::GradeHighlights,
+        Control::GradeGlobal,
+        Control::ToneCurve,
+        Control::RedCurve,
+        Control::GreenCurve,
+        Control::BlueCurve,
+    ];
+    for band in 0..8 {
+        all.extend([Control::HslHue(band), Control::HslSaturation(band), Control::HslLuminance(band)]);
+    }
+    all
+}
+
+impl Control {
+    pub(super) fn name(self) -> String {
+        let band = |b: usize| crate::recipe::HSL_BANDS[b];
+        match self {
+            Control::Exposure => "exposure".into(),
+            Control::Contrast => "contrast".into(),
+            Control::Highlights => "highlights".into(),
+            Control::Shadows => "shadows".into(),
+            Control::Whites => "whites".into(),
+            Control::Blacks => "blacks".into(),
+            Control::Temperature => "temperature".into(),
+            Control::Tint => "tint".into(),
+            Control::Vibrance => "vibrance".into(),
+            Control::Saturation => "saturation".into(),
+            Control::HslHue(b) => format!("{} hue", band(b)),
+            Control::HslSaturation(b) => format!("{} saturation", band(b)),
+            Control::HslLuminance(b) => format!("{} luminance", band(b)),
+            Control::GradeShadows => "grade shadows".into(),
+            Control::GradeMidtones => "grade midtones".into(),
+            Control::GradeHighlights => "grade highlights".into(),
+            Control::GradeGlobal => "grade global".into(),
+            Control::ToneCurve => "tone curve".into(),
+            Control::RedCurve => "red curve".into(),
+            Control::GreenCurve => "green curve".into(),
+            Control::BlueCurve => "blue curve".into(),
+        }
+    }
+
+    fn differs(self, r: &EditRecipe, b: &EditRecipe) -> bool {
+        let (g, h) = (&r.color_grade, &b.color_grade);
+        match self {
+            Control::Exposure => r.exposure_ev != b.exposure_ev,
+            Control::Contrast => r.contrast != b.contrast,
+            Control::Highlights => r.highlights != b.highlights,
+            Control::Shadows => r.shadows != b.shadows,
+            Control::Whites => r.whites != b.whites,
+            Control::Blacks => r.blacks != b.blacks,
+            Control::Temperature => r.temperature_k != b.temperature_k,
+            Control::Tint => r.tint != b.tint,
+            Control::Vibrance => r.vibrance != b.vibrance,
+            Control::Saturation => r.saturation != b.saturation,
+            Control::HslHue(i) => r.hsl.hue[i] != b.hsl.hue[i],
+            Control::HslSaturation(i) => r.hsl.saturation[i] != b.hsl.saturation[i],
+            Control::HslLuminance(i) => r.hsl.luminance[i] != b.hsl.luminance[i],
+            Control::GradeShadows => {
+                (g.shadow_hue, g.shadow_sat, g.shadow_lum) != (h.shadow_hue, h.shadow_sat, h.shadow_lum)
+            }
+            Control::GradeMidtones => {
+                (g.midtone_hue, g.midtone_sat, g.midtone_lum) != (h.midtone_hue, h.midtone_sat, h.midtone_lum)
+            }
+            Control::GradeHighlights => {
+                (g.highlight_hue, g.highlight_sat, g.highlight_lum)
+                    != (h.highlight_hue, h.highlight_sat, h.highlight_lum)
+            }
+            Control::GradeGlobal => {
+                (g.global_hue, g.global_sat, g.global_lum) != (h.global_hue, h.global_sat, h.global_lum)
+            }
+            Control::ToneCurve => r.tone_curve != b.tone_curve,
+            Control::RedCurve => r.red_curve != b.red_curve,
+            Control::GreenCurve => r.green_curve != b.green_curve,
+            Control::BlueCurve => r.blue_curve != b.blue_curve,
+        }
+    }
+
+    fn reset(self, r: &mut EditRecipe, b: &EditRecipe) {
+        let h = &b.color_grade;
+        let g = &mut r.color_grade;
+        match self {
+            Control::Exposure => r.exposure_ev = b.exposure_ev,
+            Control::Contrast => r.contrast = b.contrast,
+            Control::Highlights => r.highlights = b.highlights,
+            Control::Shadows => r.shadows = b.shadows,
+            Control::Whites => r.whites = b.whites,
+            Control::Blacks => r.blacks = b.blacks,
+            Control::Temperature => r.temperature_k = b.temperature_k,
+            Control::Tint => r.tint = b.tint,
+            Control::Vibrance => r.vibrance = b.vibrance,
+            Control::Saturation => r.saturation = b.saturation,
+            Control::HslHue(i) => r.hsl.hue[i] = b.hsl.hue[i],
+            Control::HslSaturation(i) => r.hsl.saturation[i] = b.hsl.saturation[i],
+            Control::HslLuminance(i) => r.hsl.luminance[i] = b.hsl.luminance[i],
+            Control::GradeShadows => {
+                (g.shadow_hue, g.shadow_sat, g.shadow_lum) = (h.shadow_hue, h.shadow_sat, h.shadow_lum)
+            }
+            Control::GradeMidtones => {
+                (g.midtone_hue, g.midtone_sat, g.midtone_lum) = (h.midtone_hue, h.midtone_sat, h.midtone_lum)
+            }
+            Control::GradeHighlights => {
+                (g.highlight_hue, g.highlight_sat, g.highlight_lum) =
+                    (h.highlight_hue, h.highlight_sat, h.highlight_lum)
+            }
+            Control::GradeGlobal => {
+                (g.global_hue, g.global_sat, g.global_lum) = (h.global_hue, h.global_sat, h.global_lum)
+            }
+            Control::ToneCurve => r.tone_curve = b.tone_curve.clone(),
+            Control::RedCurve => r.red_curve = b.red_curve.clone(),
+            Control::GreenCurve => r.green_curve = b.green_curve.clone(),
+            Control::BlueCurve => r.blue_curve = b.blue_curve.clone(),
+        }
+    }
+}
+
+/// [`ships`] taken control by control (v1.18.0, R8). A joint solve moves
+/// several controls at once, and a control that earns nothing rides out on
+/// the ones that do: an exposure-only target came back with the exposure
+/// exact and saturation 1.6 / whites 0.4 beside it. So after a joint solve
+/// every control that differs from `base` is set back to it, one at a time in
+/// order of smallest effect (the smallest reading without it first), and
+/// stays there when the recipe without it does not lose FIT_QUANT against the
+/// recipe the solve left: the control has to ship against its own absence,
+/// the same law, and a tie goes to the simpler recipe. The loss is read
+/// against the solved recipe, not against the last drop, so the drops cannot
+/// add up past FIT_QUANT (R1: allowances never add). Repeated until a pass
+/// drops nothing. `err` is the stage's own ruler. Returns what was dropped.
+pub(super) fn eliminate_unearned(
+    recipe: &mut EditRecipe,
+    base: &EditRecipe,
+    controls: &[Control],
+    err: impl Fn(&EditRecipe) -> f32,
+) -> Vec<Control> {
+    let solved = err(recipe);
+    let without = |r: &EditRecipe, c: Control| {
+        let mut z = r.clone();
+        c.reset(&mut z, base);
+        z
+    };
+    let mut dropped = Vec::new();
+    loop {
+        let mut order: Vec<(f32, Control)> = controls
+            .iter()
+            .copied()
+            .filter(|c| c.differs(recipe, base))
+            .map(|c| (err(&without(recipe, c)), c))
+            .collect();
+        order.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut changed = false;
+        for (read, c) in order {
+            let candidate = without(recipe, c);
+            // The pass's readings were taken on the state they judge; after
+            // a drop the state moved, so the next one is read again.
+            let e = if changed { err(&candidate) } else { read };
+            if !ships(solved, e) {
+                *recipe = candidate;
+                dropped.push(c);
+                changed = true;
+            }
+        }
+        if !changed {
+            return dropped;
+        }
+    }
+}
+
+/// The names [`eliminate_unearned`] dropped, as the note prints them.
+pub(super) fn control_names(dropped: &[Control]) -> Option<String> {
+    (!dropped.is_empty()).then(|| dropped.iter().map(|c| c.name()).collect::<Vec<_>>().join(", "))
+}
+
 /// The TERMINAL do-no-harm decision, pure so both of its arms are testable
 /// without a fixture that can reach them end to end.
 ///

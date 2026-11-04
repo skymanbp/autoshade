@@ -464,6 +464,14 @@ pub(super) fn fit_atmosphere_from_parts(
         hsl_facts.withdrawn = Some(HslWithdrawal::Error);
     }
     let sat_reduced = recipe.saturation != sat_fitted;
+    // R8: every control of the finished recipe earns FIT_QUANT against its
+    // own absence on this mode's ruler, or goes back to its zero.
+    let unearned = eliminate_unearned(&mut recipe, base, &global_controls(), |r| {
+        look_err_with_evidence(&pixels_of(&render::develop_preview(s_img, r)), tp, evidence)
+    });
+    if !unearned.is_empty() {
+        err_after = look_err_with_evidence(&pixels_of(&render::develop_preview(s_img, &recipe)), tp, evidence);
+    }
     let joint_base = crate::fit_zoned::joint_reading_with_evidence(
         sp,
         tp,
@@ -571,6 +579,7 @@ pub(super) fn fit_atmosphere_from_parts(
             regressed: fit_regressed.then_some(joint_regressed),
             tone_harm: None,
             curve_harm: None,
+            unearned: control_names(&unearned),
             detail,
             detail_withheld: !detail_supported,
             robust: None,

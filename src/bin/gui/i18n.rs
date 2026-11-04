@@ -2154,14 +2154,18 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       (do-no-harm terminal case); this look is outside the global \
       model's reach.",
         " 全强度拟合在每个饱和度档位上都比未处理原图离目标更远——返回中性配方（不伤害原则的终止情形）；此风格在全局模型能力之外。"),
-    (" The tone sliders were withheld: rendered, they left the frame's tones farther from \
-      the target's than the untouched source's (tonal reading {before} → {after}), so the \
-      tone stage shipped nothing and the stages after it solved from the untoned frame.",
-        " 影调滑杆暂不调整：渲染后它们让画面的影调比未动的原图离目标更远（影调读数 {before} → {after}），因此影调一级不发布任何东西，后面各级从未调影调的画面继续求解。"),
-    (" The residual tone curve was withheld: rendered on top of the sliders it left the \
-      frame's tones farther from the target's (tonal reading {before} → {after}), so the \
-      sliders ship without it.",
-        " 残差影调曲线暂不调整：叠在滑杆之上渲染后它让画面的影调离目标更远（影调读数 {before} → {after}），因此滑杆不带曲线发布。"),
+    (" The tone sliders were withheld: rendered, they did not bring the frame's tones closer \
+      to the target's than the untouched source's by the objective's own rounding (tonal \
+      reading {before} → {after}), so the tone stage shipped nothing and the stages after it \
+      solved from the untoned frame.",
+        " 影调滑杆暂不调整：渲染后它们没有让画面的影调比未动的原图更接近目标，差距不超过目标函数自身的舍入量（影调读数 {before} → {after}），因此影调一级不发布任何东西，后面各级从未调影调的画面继续求解。"),
+    (" The residual tone curve was withheld: rendered on top of the sliders it did not bring \
+      the frame's tones closer to the target's by the objective's own rounding (tonal \
+      reading {before} → {after}), so the sliders ship without it.",
+        " 残差影调曲线暂不调整：叠在滑杆之上渲染后它没有让画面的影调更接近目标，差距不超过目标函数自身的舍入量（影调读数 {before} → {after}），因此滑杆不带曲线发布。"),
+    (" These controls were set back to zero, because each earned less than the objective's \
+      own rounding against its own absence: {controls}.",
+        " 以下控件已归零：每一个相对于不加它的配方带来的改善，都不到目标函数自身的舍入量：{controls}。"),
     (" Saturation was pulled back from the chroma-matched {sat_fitted} \
       to {sat_now} after the full-strength fit rendered farther from the \
       target than the untouched source (do-no-harm check).",

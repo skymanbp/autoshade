@@ -121,7 +121,8 @@ use budget::{
 pub(crate) use cast_outcome::{FIT_QUANT, carried_strength_from_notes, ships};
 use cast_outcome::{
     CastOutcome, CastProjection, CastReadings, cast_admission_notes,
-    cast_gate_outcome_with_ratio, cast_projection_notes, terminal_harm, unrepresented_note,
+    cast_gate_outcome_with_ratio, cast_projection_notes, control_names, eliminate_unearned, global_controls,
+    terminal_harm, unrepresented_note, TONE_SLIDERS,
 };
 #[cfg(test)]
 use cast_outcome::{
