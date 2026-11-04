@@ -15,7 +15,7 @@ pub(crate) fn look_err(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
 /// THE look error every fit decision reads, J* (v1.18.0), in the units the
 /// eye uses: 1 dE76 of local-mean offset over the whole paired frame is 0.0075.
 ///
-/// `J* = 0.75·[p·E_paired + (1 − p)·E_dist / 0.75] + 0.15·H_ab·w + 0.10·S`
+/// `J* = 0.75·[p·E_paired + (1 − p)·E_dist] + 0.15·H_ab·w + 0.10·S`
 ///
 /// * `E_paired` — where pixels PAIR (index i on one side is index i on the
 ///   other: [`EvidenceModel::paired`]), the evidence-weighted mean CIE76
@@ -33,14 +33,21 @@ pub(crate) fn look_err(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
 ///   pair, even in a Full frame, and a Full zone's pixels pair by its own
 ///   structural model, even in an Atmosphere frame; pixels in no zone that
 ///   was read pair as the frame's mode says.
-/// * `E_dist = 0.55·T_L + 0.20·C_ab` — where pixels do not pair (Atmosphere,
-///   a structure-blind model), the distribution distance the objective used
-///   to be, in CIE units: `T_L` the 21-quantile CDF gap on L*/100
-///   ([`tonal_err_with_evidence`]'s reading), `C_ab` the mean of |Δ mean a*|
-///   and |Δ mean b*| over 100.
-/// * `p` — the paired share of the evidence mass: the 0.75 the two
-///   distribution terms carried goes to the per-pixel term where every pixel
-///   pairs, and the old decomposition holds (in Lab) where none does.
+/// * `E_dist = sqrt(T_L² + T_a² + T_b²) / 100` — where pixels do not pair
+///   (Atmosphere, a structure-blind model), the CIE76 distance between the
+///   two populations' quantile-matched Lab distributions: per channel the
+///   mean absolute gap of the two weighted CDFs at the same 21 quantiles
+///   ([`P_CLIP`]-clamped) `T_L` reads on L* ([`tonal_err_with_evidence`]),
+///   on L*, a* and b* each, in that channel's own units. A uniform offset of
+///   d dE76 moves every quantile by d, so it reads d/100 here exactly as it
+///   reads d/100 in `E_paired`, paired or not (v1.18.0 R15). The form it
+///   replaces, `0.55·T_L + 0.20·C_ab` lifted by 1/0.75, read one dE of mean
+///   colour offset as 0.001 of J* against `E_paired`'s 0.0075, so on a frame
+///   where nothing pairs a white balance that moved 97 % of the frame 3-5
+///   dE/px closer earned less than [`FIT_QUANT`] and was eliminated
+///   (rel1180 msg7, R12's terms).
+/// * `p` — the paired share of the evidence mass: the two populations are
+///   read in one unit, so the 0.75 weighs their mass-weighted mean.
 /// * `H_ab` — the worst qualifying band's mean colour offset in units of its
 ///   target chroma ([`band_colour_offset`]), times that range's evidence
 ///   weight `w`.
@@ -54,7 +61,7 @@ pub(crate) fn look_err(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
 /// WEIGHTS (v1.18.0, R11): the objective JUDGES every present pixel at its
 /// presence weight — spatial support × membership, 1 for a frame pixel
 /// ([`EvidenceModel::source_presence_weights`]) — in every term: `E_paired`,
-/// `E_dist`'s `T_L` and `C_ab`, `H_ab`'s band membership, offset and band
+/// `E_dist`'s `T_L`, `T_a` and `T_b`, `H_ab`'s band membership, offset and band
 /// weight, `S`, and the paired share `p`. The evidence model's per-range
 /// estimation weights only DRIVE (which ranges may move a control's
 /// estimate); a ship decision read at them is blind to whatever range the
@@ -99,7 +106,8 @@ pub(crate) const PAIRED_POOL_SIGMA: f32 = 2.0;
 pub(crate) struct LookTerms {
     /// `E_paired`, dE76 / 100 over the paired population.
     pub paired: f32,
-    /// `E_dist = 0.55·T_L + 0.20·C_ab` over the unpaired population.
+    /// `E_dist`, the Lab quantile-distribution dE76 / 100 over the unpaired
+    /// population.
     pub dist: f32,
     /// `p`, the paired share of the evidence mass.
     pub share: f32,
@@ -119,7 +127,7 @@ impl LookTerms {
     /// [`EvidenceModel::local`]): `E_paired + H_ab` in J*'s own weights, the
     /// structural term left to the D threshold and the seam / ramp rulers.
     pub(crate) fn local(&self) -> f32 {
-        0.75 * (self.share * self.paired + (1.0 - self.share) * self.dist / 0.75) + 0.15 * self.hue
+        0.75 * (self.share * self.paired + (1.0 - self.share) * self.dist) + 0.15 * self.hue
     }
 }
 
@@ -168,11 +176,8 @@ pub(crate) fn look_terms(a: &[[f32; 3]], b: &[[f32; 3]], evidence: &EvidenceMode
         let (la, lb): (Vec<[f32; 3]>, Vec<[f32; 3]>) =
             (a[..n].iter().map(cie_lab).collect(), b[..n].iter().map(cie_lab).collect());
         let tonal = lightness_cdf_gap(&la, &sw, &lb, &tw);
-        let mean = |px: &[[f32; 3]], w: &[f32], ch: usize| weighted_mean(px, w, ch).unwrap_or(0.0);
-        let colour = ((mean(&la, &sw, 1) - mean(&lb, &tw, 1)).abs() + (mean(&la, &sw, 2) - mean(&lb, &tw, 2)).abs())
-            / 2.0
-            / 100.0;
-        0.55 * tonal + 0.20 * colour
+        let (ta, tb) = (opponent_cdf_gap(&la, &sw, &lb, &tw, 1), opponent_cdf_gap(&la, &sw, &lb, &tw, 2));
+        (tonal * tonal + ta * ta + tb * tb).sqrt()
     } else {
         0.0
     };
@@ -199,6 +204,35 @@ fn lightness_cdf_gap(la: &[[f32; 3]], wa: &[f32], lb: &[[f32; 3]], wb: &[f32]) -
     gap / 21.0
 }
 
+/// The 21-quantile gap of the opponent channel `ch` (1 = a*, 2 = b*) over
+/// 100, as [`lightness_cdf_gap`] reads L*. a* and b* are signed, so the
+/// channel is mapped onto the CDF's [0, 1] by the span both populations'
+/// present pixels occupy and the gap is carried back by that span: the
+/// mapping is exact, it sets only the bins' width, and it adds no number.
+fn opponent_cdf_gap(la: &[[f32; 3]], wa: &[f32], lb: &[[f32; 3]], wb: &[f32], ch: usize) -> f32 {
+    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for (px, w) in [(la, wa), (lb, wb)] {
+        for (p, &wi) in px.iter().zip(w) {
+            if wi > 0.0 {
+                lo = lo.min(p[ch]);
+                hi = hi.max(p[ch]);
+            }
+        }
+    }
+    let span = hi - lo;
+    if !span.is_finite() || span <= 1e-6 {
+        return 0.0;
+    }
+    let value = |p: &[f32; 3]| (p[ch] - lo) / span;
+    let (ca, cb) = (weighted_cdf(la, wa, value), weighted_cdf(lb, wb, value));
+    let mut gap = 0.0f32;
+    for i in 0..=20 {
+        let q = (i as f32 / 20.0).clamp(P_CLIP, 1.0 - P_CLIP);
+        gap += (quantile(&ca, q) - quantile(&cb, q)).abs();
+    }
+    gap / 21.0 * span / 100.0
+}
+
 /// The TONAL ruler a tone stage is held to: `T_L`, the 21-quantile gap of the
 /// two frames' evidence-weighted L*/100 CDFs — the tonal half of `E_dist`
 /// (v1.18.0; display luma601 before, the same mechanism in CIE units). It is
@@ -210,7 +244,9 @@ fn lightness_cdf_gap(la: &[[f32; 3]], wa: &[f32], lb: &[[f32; 3]], wb: &[f32]) -
 /// drift the stages after it exist to correct — while the lantern street's
 /// wrong +1.65 EV raised the display form of this term 0.0468 → 0.0748 on
 /// its own and needs no other term to be refused. A ruler JUDGES, so it reads
-/// the presence weights as J* does (R11), never the estimation weights.
+/// the presence weights as J* does (R11), never the estimation weights. The
+/// tone stages keep this ruler; `E_dist` reads it with the two opponent
+/// channels' gaps beside it (R15).
 pub(crate) fn tonal_err_with_evidence(
     a: &[[f32; 3]],
     b: &[[f32; 3]],

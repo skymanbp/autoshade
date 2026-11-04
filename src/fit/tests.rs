@@ -9439,3 +9439,22 @@ fn the_white_balance_path_starts_at_as_shot() {
     assert!(k > 5950.0 && k < 8800.0, "half way is between in Kelvin: {k}");
     assert!(t > 0.0 && t < 16.6, "and in tint: {t}");
 }
+
+/// R15: `E_dist` is in `E_paired`'s units. Two flat frames differ by one
+/// colour, so every pixel's local-mean dE76 is the same d, and every
+/// quantile of L*, a* and b* is offset by that channel's share of d: the
+/// paired reading and the unpaired distribution reading of the same pair are
+/// both d/100.
+#[test]
+fn the_unpaired_distribution_distance_reads_a_colour_offset_as_the_paired_term_does() {
+    let n = 64 * 64;
+    let (a, b) = (vec![[0.50f32, 0.40, 0.30]; n], vec![[0.40f32, 0.45, 0.35]; n]);
+    let (x, y) = (cie_lab(&a[0]), cie_lab(&b[0]));
+    let d = ((x[0] - y[0]).powi(2) + (x[1] - y[1]).powi(2) + (x[2] - y[2]).powi(2)).sqrt() / 100.0;
+    let model = evidence_model(&a, &b);
+    let paired = look::look_terms(&a, &b, &model);
+    let unpaired = look::look_terms(&a, &b, &model.structure_blind(&b));
+    assert_eq!((paired.share, unpaired.share), (1.0, 0.0), "the first pairs, the second does not");
+    assert!((paired.paired - d).abs() < 1e-4, "paired {} vs d {d}", paired.paired);
+    assert!((unpaired.dist - d).abs() < 1e-3, "unpaired {} vs d {d}", unpaired.dist);
+}

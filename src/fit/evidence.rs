@@ -1208,17 +1208,6 @@ fn wb_demand(a: f32, m: f32, law: render::WbLaw) -> (f32, f32, [f32; 3]) {
     (k, tint, wanted)
 }
 
-pub(super) fn weighted_mean(px: &[[f32; 3]], weights: &[f32], ch: usize) -> Option<f32> {
-    let mut sum = 0.0f32;
-    let mut total = 0.0f32;
-    for (i, p) in px.iter().enumerate() {
-        let w = weights.get(i).copied().unwrap_or(0.0).max(0.0);
-        sum += p[ch] * w;
-        total += w;
-    }
-    (total > 1e-8).then_some(sum / total)
-}
-
 pub(super) fn weighted_mean_chroma(px: &[[f32; 3]], weights: &[f32]) -> Option<f32> {
     let mut sum = 0.0f32;
     let mut total = 0.0f32;
