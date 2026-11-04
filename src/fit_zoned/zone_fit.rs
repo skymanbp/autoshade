@@ -469,11 +469,9 @@ pub(crate) fn zone_err(a: &ZoneMoments, b: &ZoneMoments) -> f32 {
 /// clamped to [`fit::P_CLIP`]`..1 - P_CLIP`, so the end points are 0.002 and
 /// 0.998), so a zone and its frame are held to one tonal yardstick. That
 /// quantile set is inline in the frame's function rather than exposed, so it
-/// is restated here by the same formula. Since v1.18.0 the frame's tonal
-/// ruler reads L*/100 (`T_L`) and this one still reads display luma: it is
-/// not the objective, and its one measured instance (the neon street's
-/// building, [`ZONE_TONAL_MATCHED`]) is not in the calibration corpus to
-/// re-measure, so its unit and its line are kept as they were.
+/// is restated here by the same formula. The CDFs are L*/100
+/// ([`zone_lightness_cdf`], R4 v1.18.0): the frame's tonal term `T_L` reads
+/// L*/100, and one tone ruler means the zone's reads it too.
 pub(super) fn zone_tonal(a_cdf: &[f32], b_cdf: &[f32]) -> f32 {
     let mut gap = 0.0f32;
     for i in 0..=20 {
@@ -481,6 +479,22 @@ pub(super) fn zone_tonal(a_cdf: &[f32], b_cdf: &[f32]) -> f32 {
         gap += (fit::quantile(a_cdf, p) - fit::quantile(b_cdf, p)).abs();
     }
     gap / 21.0
+}
+
+/// The zone tonal RULER's CDF ([`zone_tonal`]): mask-weighted L*/100, the
+/// frame's `T_L` unit (R4, v1.18.0). The within-zone tone SOLVE keeps
+/// [`zone_luma_cdf`] — it maps display luma through a curve, which is an
+/// estimator's domain, not a ruler's.
+pub(crate) fn zone_lightness_cdf(px: &[[f32; 3]], weights: &[f32]) -> Vec<f32> {
+    let lightness: Vec<[f32; 3]> = px
+        .iter()
+        .map(|p| {
+            let l = crate::fit::cie_lab(p)[0] / 100.0;
+            [l, l, l]
+        })
+        .collect();
+    // Rec.601 weights sum to one, so a grey triple reads its own value.
+    zone_luma_cdf(&lightness, weights)
 }
 
 /// Mask-weighted luma CDF of a zone (sRGB Rec.601 luma, the same domain as

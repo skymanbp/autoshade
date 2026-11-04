@@ -1162,11 +1162,12 @@ pub(super) fn attach_one_zone_as(
     // to the target, read on the zone's POPULATION — the mask alphas `sw`/`tw`,
     // as the dilution guard above reads it, not the robust-composed weights
     // that trim exactly the target pixels a narrow tone map fails to reach.
+    // R4 (v1.18.0): on L*/100, the frame's own tone unit.
     let tonal = (mode == ZoneMode::Full).then(|| {
-        let target_cdf = zone_luma_cdf(tgt_eff, tw);
+        let target_cdf = zone_lightness_cdf(tgt_eff, tw);
         (
-            zone_tonal(&zone_luma_cdf(&cur_px, sw), &target_cdf),
-            zone_tonal(&zone_luma_cdf(&zoned_px, sw), &target_cdf),
+            zone_tonal(&zone_lightness_cdf(&cur_px, sw), &target_cdf),
+            zone_tonal(&zone_lightness_cdf(&zoned_px, sw), &target_cdf),
         )
     });
     let arm = match mode {

@@ -317,7 +317,7 @@ pub(super) const ZONE_DELTA_E_MARGIN: f32 = 0.02;
 /// `ZONE_SKIP_ERR`: the two are calibrated from different measurements and
 /// only happen to agree today.
 pub(super) const ZONE_MIN_ABS_GAIN: f32 = 0.012;
-/// The distribution arm's landing line (2026-10-22): the largest zone luma
+/// The distribution arm's landing line (2026-10-22): the largest zone L*/100
 /// quantile gap to the target ([`super::zone_fit::zone_tonal`], the frame
 /// tonal term's own 21 quantiles, on the mask alphas) a correction may end
 /// at and be called matched in DISTRIBUTION, with the floor arm's real gain
@@ -327,13 +327,19 @@ pub(super) const ZONE_MIN_ABS_GAIN: f32 = 0.012;
 /// is): the one measured instance this arm exists for is the neon street's
 /// building (Full, distribution branch), read through this arm's own
 /// disclosure note on a calibration build with the line provisionally at
-/// 0.03: quantile gap 0.0203 -> 0.0135, the frame 0.03699 -> 0.03518, the
-/// moments 0.0091 -> 0.0061. The line is set at the next 0.005 step above
-/// that landing (0.0015 of headroom) rather than on it — one sample cannot
-/// justify a threshold its own value sits on — and no other zone of
-/// that run was bought by the arm at 0.03, so nothing between the two lines
-/// was measured. For scale: 0.015 of display luma is ~4 codes of 255 on
-/// average over the 21 quantiles.
+/// 0.03: quantile gap 0.0203 -> 0.0135 (display luma), the frame 0.03699 ->
+/// 0.03518, the moments 0.0091 -> 0.0061. The line is set at the next 0.005
+/// step above that landing (0.0015 of headroom) rather than on it — one
+/// sample cannot justify a threshold its own value sits on.
+///
+/// The ruler moved to L*/100 in v1.18.0 (R4: one tone ruler everywhere) and
+/// the line was carried across by MEASUREMENT: on the calibration legs
+/// (p36, p38-p42, the reference pair at three strengths; rel1180 msg5) every
+/// Full zone's reading was taken on both rulers for the same zone pair — 172
+/// zones, before and after each, 344 readings — and L*/100 reads a median
+/// 1.084 times display luma (quartiles 1.019 / 1.148). Within 10 % of 1, so
+/// the line stays 0.015: the transfer would move it less than the reading's
+/// own spread across pairs (per-pair medians 0.97-1.18).
 pub(super) const ZONE_TONAL_MATCHED: f32 = 0.015;
 /// Dilution guard on a Pixel-scale zone's paired tone map (2026-10-22): the
 /// smallest share of the TARGET zone's p10–p90 luma spread, read under the
