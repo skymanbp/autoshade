@@ -2817,7 +2817,20 @@ fn calibration_atmosphere_report_uses_one_population_ruler() {
     assert!((-1.0..=-0.5).contains(&report.recipe.exposure_ev));
     assert_eq!(report.recipe.saturation, 0.0);
     assert_eq!((report.recipe.clarity, report.recipe.texture), (0.0, 0.0));
-    assert!(!report.recipe.tone_curve.is_empty());
+    // v1.18.0 R12: the tone curve solved on the exposure must earn FIT_QUANT
+    // against its own absence (`eliminate_unearned`). On this pair it earns
+    // 0.000835 of J* (0.137261 with it, 0.138096 without), so it is set back
+    // and named; the exposure (0.209978 without it) ships alone.
+    let unearned = report
+        .notes
+        .iter()
+        .find(|n| n.key == crate::rationale::keys::FIT_NOTE_UNEARNED)
+        .and_then(|n| n.args.iter().find(|(k, _)| *k == "controls").map(|(_, v)| v.clone()))
+        .unwrap_or_default();
+    assert!(
+        !report.recipe.tone_curve.is_empty() || unearned.contains("tone curve"),
+        "the curve either ships or is named as unearned: {unearned}"
+    );
     assert!(report.err_after < report.err_before);
     assert!(report.recipe.confidence <= ATMOSPHERE_CONFIDENCE_CAP);
     let note = report
@@ -2890,7 +2903,25 @@ fn atmosphere_global_obeys_ev_wb_saturation_and_curve_budgets() {
         }));
         assert!(hi / lo <= ATMOSPHERE_WB_GAIN_RATIO + 1e-5);
     }
-    assert_eq!(r.tone_curve.len(), 5, "Atmosphere tone must stay a robust five-point map");
+    // v1.18.0 R12: the exposure and the curve solved on it are a joint solve,
+    // and each must earn FIT_QUANT against its own absence
+    // (`eliminate_unearned`). This pair's target is the source with its sky
+    // pixels permuted, so the two populations are identical and the curve
+    // earns exactly nothing on the Atmosphere ruler (0.100000 with it and
+    // without it): it is set back and the note says so. A curve that ships
+    // is still the robust five-point map inside the slope budget.
+    let unearned = report
+        .notes
+        .iter()
+        .find(|n| n.key == crate::rationale::keys::FIT_NOTE_UNEARNED)
+        .and_then(|n| n.args.iter().find(|(k, _)| *k == "controls").map(|(_, v)| v.clone()))
+        .unwrap_or_default();
+    assert!(
+        r.tone_curve.is_empty() && unearned.contains("tone curve"),
+        "a curve the identical populations cannot earn is set back and named: {:?} / {unearned}",
+        r.tone_curve
+    );
+    assert!(r.tone_curve.is_empty() || r.tone_curve.len() == 5, "Atmosphere tone must stay a robust five-point map");
     for pair in r.tone_curve.windows(2) {
         let slope = (pair[1].output as f32 - pair[0].output as f32)
             / (pair[1].input as f32 - pair[0].input as f32);
@@ -3109,8 +3140,30 @@ fn roundtrip_recovers_tone_and_saturation() {
     // The luma CDF of the target IS the engine's own tone map of the source,
     // so the solve must land close (exposure/slider trade-offs allowed).
     assert!((r.exposure_ev - 0.35).abs() < 0.20, "exposure {}", r.exposure_ev);
-    assert!(r.contrast > 3.0 && r.contrast < 45.0, "contrast {}", r.contrast);
-    assert!(r.highlights < -8.0 && r.highlights > -50.0, "highlights {}", r.highlights);
+    // v1.18.0 R8: each slider of the joint tone solve must earn FIT_QUANT of
+    // the tonal term against its own absence (`eliminate_unearned`). The
+    // solve's contrast +7 and highlights -17.4 (with whites -1.6, blacks
+    // -0.1) together earn 0.0016 of T_L (0.006796 solved, 0.008416 without
+    // all four), under FIT_QUANT, so they are set back and named; the
+    // exposure and shadows earn and ship. A slider that ships still lands in
+    // the truth's direction.
+    let unearned = rep
+        .notes
+        .iter()
+        .find(|n| n.key == crate::rationale::keys::FIT_NOTE_UNEARNED)
+        .and_then(|n| n.args.iter().find(|(k, _)| *k == "controls").map(|(_, v)| v.clone()))
+        .unwrap_or_default();
+    assert!(
+        (r.contrast > 3.0 && r.contrast < 45.0) || (r.contrast == 0.0 && unearned.contains("contrast")),
+        "contrast {} ({unearned})",
+        r.contrast
+    );
+    assert!(
+        (r.highlights < -8.0 && r.highlights > -50.0)
+            || (r.highlights == 0.0 && unearned.contains("highlights")),
+        "highlights {} ({unearned})",
+        r.highlights
+    );
     assert!(r.saturation > 5.0 && r.saturation < 30.0, "saturation {}", r.saturation);
     // And the fitted recipe must actually reproduce the look through the engine.
     assert!(
@@ -7485,12 +7538,17 @@ fn invented_sky_gradient_energy_is_not_amplified() {
     );
     assert!(ratio <= 1.0, "invented sky was sharpened: {ratio:.4}x neutral");
     assert_eq!(report.mode, FitMode::Atmosphere);
+    // v1.18.0 R12: the curve solved on the exposure earns 0.000835 of J*
+    // here, under FIT_QUANT, and is set back (`eliminate_unearned`); the
+    // recipe is the exposure alone at its -1.00 budget edge. The old sum
+    // `|ev| + |contrast| + curve points + |sat| > 1.0` counted the curve's
+    // five points and reads exactly 1.0 without them, so the non-empty check
+    // is now the recipe's own: some control moved.
     assert!(
-        report.recipe.exposure_ev.abs()
-            + report.recipe.contrast.abs()
-            + report.recipe.tone_curve.len() as f32
-            + report.recipe.saturation.abs()
-            > 1.0,
+        report.recipe.exposure_ev.abs() > 0.001
+            || report.recipe.contrast.abs() > 0.001
+            || !report.recipe.tone_curve.is_empty()
+            || report.recipe.saturation.abs() > 0.001,
         "content-divergent calibration pair was incorrectly returned as an empty recipe"
     );
     assert_eq!(report.recipe.saturation, 0.0);
