@@ -766,6 +766,32 @@ fn local_verdicts(
     report.err_after = after;
 }
 
+/// Test-only: [`local_verdicts`] as the two-region route calls it, for a test
+/// that rebuilds that route (`layered_disabled_is_byte_identical_to_current_zoned_fit`).
+#[cfg(test)]
+pub(super) fn local_verdicts_sky_land(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    base: &crate::recipe::EditRecipe,
+    report: &mut FitReport,
+    zones: &attach::ZoneDivergences,
+    src_mask: &GrayImage,
+) {
+    let pairing = sky_land_pairing(report, zones, src_mask);
+    local_verdicts(src, target, base, report, &pairing);
+}
+
+/// Test-only: [`local_verdicts`] as the segmentation-failed route calls it.
+#[cfg(test)]
+pub(super) fn local_verdicts_unzoned(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    base: &crate::recipe::EditRecipe,
+    report: &mut FitReport,
+) {
+    local_verdicts(src, target, base, report, &ZonePairing::default());
+}
+
 /// A report's finished render measured under a GIVEN evidence ruler — the
 /// only way two reports that may have solved in different modes can be
 /// compared. Analysis geometry, like every zone gate.

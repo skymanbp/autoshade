@@ -826,6 +826,15 @@ fn pretend_full_support(evidence: &mut fit::EvidenceModel) {
     evidence.globally_same_content = true;
     evidence.source_weights.fill(1.0);
     evidence.target_weights.fill(1.0);
+    // v1.18.0 (R11, R2): the objective JUDGES at the presence weights
+    // (membership x spatial support) and pairs where the model pairs
+    // (`paired` = `spatial_supported` on an aligned model), both derived from
+    // the spatial support above when the model is built. A frame pretended
+    // fully supported is fully present and fully paired, or the judge keeps
+    // the support this helper overrode.
+    evidence.source_presence_weights.fill(1.0);
+    evidence.target_presence_weights.fill(1.0);
+    evidence.paired.fill(true);
 }
 
 pub(super) fn neutral_report(src: &DynamicImage, tgt: &DynamicImage) -> fit::FitReport {
@@ -973,6 +982,9 @@ fn legacy_zoned_fit(
                 true,
                 None,
             );
+            // v1.18.0 (R2, S-mode): the route re-pairs both rulers by the
+            // finest mode read and sets the local flag before any zone.
+            super::entry::local_verdicts_sky_land(src, target, base, &mut report, &zone_divergence, &src_mask);
             attach_zones_with_divergence(
                 src,
                 target,
@@ -993,6 +1005,7 @@ fn legacy_zoned_fit(
                 true,
                 None,
             );
+            super::entry::local_verdicts_unzoned(src, target, base, &mut report);
             crate::rationale::push_note(
                 &mut report.recipe.rationale,
                 &mut report.notes,
@@ -3750,7 +3763,11 @@ fn run_strictly_better_zone(
     let sw = mask_weights(&mask, s_img.width(), s_img.height());
     let tw = mask_weights(&mask, t_img.width(), t_img.height());
     let attachment = semantic_attachment(sw, tw, &path);
-    let mut frame_err = report.err_after;
+    // The running frame on the gate's own ruler, as `dilution_run` reads it:
+    // `neutral_report` carries the plain look distance, and since v1.18.0 (R1)
+    // the gate compares the two readings with no allowance to absorb a
+    // difference of rulers.
+    let mut frame_err = fit::look_err_with_evidence(&fit::pixels_of(&s_img), &t_px, &report.evidence);
     let frame_before = frame_err;
     let accepted = attach_one_zone(
         &s_img,
