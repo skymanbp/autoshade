@@ -6896,12 +6896,17 @@ fn evidence_weighted_objective_sees_spatial_permutation() {
 }
 
 
-// Mutation guard: replace BOTH `evidence.source_weights` and
-// `evidence.target_weights` in `look_err_with_evidence` with uniform
-// `vec![1.0f32; n]` values. The calibrated weighted score below must then
-// differ and this named test turns RED.
+/// v1.18.0 R11: the objective JUDGES every present pixel at its presence
+/// weight, and the evidence model's estimation weights only DRIVE. This test
+/// used to pin the opposite (J* read at `source_weights` / `target_weights`,
+/// so replacing them with uniform weights had to move the score); R11 made
+/// the estimation weights invisible to every term of J*, so the test now
+/// pins both halves of the law that replaced it on the same fixture.
+/// Mutation guards: reading J* at the estimation weights again turns the
+/// first assertion red; ignoring the presence weights (uniform `w` in
+/// `look_terms`) turns the second red.
 #[test]
-fn evidence_weighted_objective_changes_the_fitted_population_score() {
+fn the_objective_judges_presence_weights_not_estimation_weights() {
     let source: Vec<[f32; 3]> = (0..4096)
         .map(|i| {
             let x = i as f32 / 4095.0;
@@ -6920,18 +6925,35 @@ fn evidence_weighted_objective_changes_the_fitted_population_score() {
         })
         .collect();
     let evidence = evidence_model(&source, &target);
-    let weighted = look_err_with_evidence(&source, &target, &evidence);
-    let uniform = {
+    let judged = look_err_with_evidence(&source, &target, &evidence);
+    let uniform_estimation = {
         let mut unweighted = evidence.clone();
         unweighted.source_weights.fill(1.0);
         unweighted.target_weights.fill(1.0);
         look_err_with_evidence(&source, &target, &unweighted)
     };
-    eprintln!("EVIDENCE_OBJECTIVE_CALIBRATION weighted={weighted:.6} uniform={uniform:.6}");
-    assert!((weighted - uniform).abs() > 0.01,
-        "the objective must use the evidence population, not a uniform replacement");
-    assert!((weighted - 0.0591).abs() < 0.005,
-        "the evidence-weighted objective calibration drifted: {weighted:.6}");
+    let brightened_absent = {
+        let mut absent = evidence.clone();
+        absent.source_presence_weights[1024..].fill(0.0);
+        absent.target_presence_weights[1024..].fill(0.0);
+        look_err_with_evidence(&source, &target, &absent)
+    };
+    eprintln!(
+        "PRESENCE_OBJECTIVE judged={judged:.6} uniform_estimation={uniform_estimation:.6} brightened_absent={brightened_absent:.6}"
+    );
+    assert_eq!(
+        judged.to_bits(),
+        uniform_estimation.to_bits(),
+        "the estimation weights only drive: replacing them must not move J*"
+    );
+    // Measured: 0.079845 judged, 0.073833 with only the darkened quarter
+    // present, a difference of 2.6 FIT_QUANT.
+    assert!(
+        (judged - brightened_absent).abs() > FIT_QUANT,
+        "J* judges at the presence weights: leaving only the darkened quarter present must move it \
+         ({judged:.6} -> {brightened_absent:.6})"
+    );
+    assert!((judged - 0.0798).abs() < 0.005, "the presence-weighted objective calibration drifted: {judged:.6}");
 }
 
 /// The POSITIVE twin of `cast_gate_withholds_motion_where_hue_evidence_is_zero`
