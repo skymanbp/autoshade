@@ -599,7 +599,7 @@ fn develop_cfa_signed(raw: &rawler::RawImage, dev: &RawDevelop, colour_nr: f32) 
         } else {
             [1.0; 3]
         };
-        let rho = crate::denoise::linear_chroma::window();
+        let rho = crate::denoise::linear_chroma::window(colour_nr);
         crate::denoise::linear_chroma::filter_mosaic(&mut v, width, raw.height, &config.cfa, wb, scale, rho);
     }
     let pixels = PixF32::new_with(v, raw.width, raw.height);

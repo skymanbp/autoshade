@@ -48,16 +48,22 @@
 //! round 4), further apart than the model's own 2–8 % error on the noise
 //! can move it; over all their textured patches the law reads 3.42 and
 //! 4.12, and 1.97 on a night sky. A photo with no texture has nothing to
-//! protect, and its `k`
-//! is unbounded (the window's mean).
+//! protect, and its `k` is unbounded: the filter is then the plain mean of
+//! its window, and the window is the bound.
 //!
-//! **The window** is the colour noise reduction's own reach at its default
-//! strength (`detail::chroma_nr_reach_px`, 5.5 film pixels at 25), in cells.
+//! **The window** is the colour noise reduction's own reach at the slider's
+//! strength (`detail::chroma_nr_reach_px`: 5.5 film pixels at 25, so 3
+//! cells), the reach rule the display pass already had: a lower strength
+//! reaches less far. `k` itself is read at the default strength's window
+//! ([`DEFAULT_AMOUNT`]), so it is one reading per photo.
 //!
-//! **The slider.** "Colour noise reduction" scales `k` linearly: 0 is off,
-//! the default strength (Lightroom's own 25) is the photo's own `k`, 100 is
-//! four times it. Detail and Smoothness belong to the display-frame pass,
-//! which a RAW no longer runs.
+//! **The slider.** "Colour noise reduction" scales `k` linearly and sets the
+//! window by the reach rule: 0 is off, the default strength (Lightroom's own
+//! 25) is the photo's own `k` over 3 cells, 100 is four times it over 8.
+//! Where `k` is unbounded (no texture) the scale cannot weaken it, and the
+//! window does: at 10 the mean runs over 2 cells, at 25 over 3, so the
+//! slider is never dead. Detail and Smoothness belong to the display-frame
+//! pass, which a RAW no longer runs.
 //!
 //! **One stage per develop.** The linear stage where a Bayer mosaic the
 //! stage can read exists ([`reads`]: one sample per site on a 2×2 RGB
@@ -94,17 +100,17 @@ pub(crate) fn scale_of(color_nr: f32) -> Option<f64> {
     (color_nr > 0.0).then(|| f64::from(color_nr.min(100.0)) / f64::from(DEFAULT_AMOUNT))
 }
 
-/// The window's half side in cells: the colour NR's reach at its default
-/// strength (`render::chroma_nr_reach_px`, film pixels) over the cell's two
-/// pixels.
-pub(crate) fn window() -> usize {
-    ((crate::render::chroma_nr_reach_px(DEFAULT_AMOUNT / 100.0) / 2.0).round() as usize).max(1)
+/// The window's half side in cells at slider value `color_nr` (0..=100): the
+/// colour NR's reach at that strength (`render::chroma_nr_reach_px`, film
+/// pixels) over the cell's two pixels, at least one cell.
+pub(crate) fn window(color_nr: f32) -> usize {
+    ((crate::render::chroma_nr_reach_px(color_nr.clamp(0.0, 100.0) / 100.0) / 2.0).round() as usize).max(1)
 }
 
 /// Run the stage on the normalised signed `mosaic` (`width × height`, sites
 /// of `cfa`), white-balanced by `wb` (any scale; green is divided out), at
-/// `scale` times the photo's own `k` ([`photo_k`]) over a window of half side
-/// `rho` cells. Returns the fitted model and the `k` it ran at, or `None` —
+/// `scale` times the photo's own `k` ([`photo_k`], read at the default
+/// strength's window) over a window of half side `rho` cells ([`window`]). Returns the fitted model and the `k` it ran at, or `None` —
 /// and the mosaic untouched — when the pattern is not a 2×2 RGB Bayer or the
 /// frame has too few usable patches for a model.
 pub(crate) fn filter_mosaic(
@@ -124,7 +130,7 @@ pub(crate) fn filter_mosaic(
     let pts = patches(mosaic, width, height, sites, wb);
     let model = NoiseModel::fit(&pts, width, height)?;
     let cells = Cells::of(mosaic, width, height, sites, wb, &model, &pts)?;
-    let k = photo_k(&cells, &model, &pts, wb, rho).0 * scale;
+    let k = photo_k(&cells, &model, &pts, wb, window(DEFAULT_AMOUNT)).0 * scale;
     let filtered: Vec<[f32; 2]> = (0..cells.cw * cells.ch).into_par_iter().map(|i| cells.filtered(i, k, rho)).collect();
     cells.write(mosaic, width, sites, wb, &filtered);
     Some((model, k))

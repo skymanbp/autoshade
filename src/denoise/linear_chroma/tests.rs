@@ -126,6 +126,27 @@ fn the_slider_scales_k_and_zero_is_off() {
     assert_eq!(scale_of(250.0), Some(4.0));
 }
 
+/// Where the photo has nothing to protect `k` is unbounded and the filter is
+/// the plain mean of its window; the slider still weakens it, through the
+/// reach rule: at 10 the window is 2 cells, at 25 it is 3, and the residual
+/// colour noise at 10 is the larger.
+///
+/// MUTATION: the window fixed at the default strength's (the slider is then
+/// dead below 25 on such a photo).
+#[test]
+fn where_k_is_unbounded_the_slider_weakens_the_stage_through_its_window() {
+    let before = mosaic(0.01, 0.0);
+    let at = |nr: f32| {
+        let mut m = before.clone();
+        let (_, k) = filter_mosaic(&mut m, W, H, &rggb(), WB, scale_of(nr).unwrap(), window(nr)).expect("a model");
+        (k, var_dr(&m, 0..W / 2))
+    };
+    assert_eq!((window(10.0), window(25.0), window(100.0)), (2, 3, 8), "the reach rule in cells");
+    let ((k10, v10), (k25, v25)) = (at(10.0), at(25.0));
+    assert!(k10.is_infinite() && k25.is_infinite(), "a noise-only frame has no texture to protect: k {k10} / {k25}");
+    assert!(v10 > v25, "residual colour variance at 10 ({v10:.3e}) must exceed that at 25 ({v25:.3e})");
+}
+
 #[test]
 fn a_pattern_that_is_not_a_two_by_two_bayer_is_left_alone() {
     let before = mosaic(0.01, 0.0);
@@ -166,7 +187,7 @@ fn photo_k_reading() {
     let model = NoiseModel::fit(&pts, width, raw.height).expect("model");
     let t1 = t0.elapsed();
     let cells = Cells::of(&v, width, raw.height, sites, wb, &model, &pts).expect("cells");
-    let rho = window();
+    let rho = window(DEFAULT_AMOUNT);
     let (k, read) = photo_k(&cells, &model, &pts, wb, rho);
     let t2 = t0.elapsed();
     let usable = pts.iter().filter(|p| p.usable).count();
