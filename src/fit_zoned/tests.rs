@@ -839,7 +839,19 @@ fn pretend_full_support(evidence: &mut fit::EvidenceModel) {
 
 pub(super) fn neutral_report(src: &DynamicImage, tgt: &DynamicImage) -> fit::FitReport {
     let (s, t) = fit::analysis_pair(src, tgt);
-    let err = fit::look_err(&fit::pixels_of(&s), &fit::pixels_of(&t));
+    // The entry residual is read on the report's OWN evidence model, at the
+    // analysis geometry. J* pools E_paired at sigma 2 px in the frame's
+    // layout, so `fit::look_err`, which infers a near-square layout from the
+    // pixel count, reads a non-square fixture on a different ruler (the
+    // 384x12 range fixture: 0.0021 there, 0.0732 here) and every stage gate
+    // that starts from `err_after` compared two rulers.
+    let evidence = fit::evidence_model_for(
+        &fit::pixels_of(&s),
+        &fit::pixels_of(&t),
+        s.width(),
+        s.height(),
+    );
+    let err = fit::look_err_with_evidence(&fit::pixels_of(&s), &fit::pixels_of(&t), &evidence);
     fit::FitReport {
         correspondence: None,
         recipe: crate::recipe::EditRecipe::default(),
@@ -850,12 +862,7 @@ pub(super) fn neutral_report(src: &DynamicImage, tgt: &DynamicImage) -> fit::Fit
         divergence: divergence(0.0),
         divergence_coarse: divergence(0.0),
         pairing: fit::PairingScale::Pixel,
-        evidence: fit::evidence_model_for(
-            &fit::pixels_of(&s),
-            &fit::pixels_of(&t),
-            s.width(),
-            s.height(),
-        ),
+        evidence,
         structural_evidence: None,
         atmosphere_reference: fit::AtmosphereReference::WholeFrame,
     }
