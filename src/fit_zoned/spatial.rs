@@ -727,7 +727,13 @@ pub(super) fn enforce_bitmap_boundary(
     // is structure, a local correction cannot change which pixels pair, its
     // seams stay with the boundary / ramp rulers and its structural gate is
     // the existing D threshold only.
-    if !fit::ships(frame, frame_before) {
+    // R19: on the correction's own population (`fit::ships_local`).
+    let own = super::accept::masks_coverage(s_img, report, &report.recipe.masks[first_mask..], tgt_px.len());
+    let (own_with, own_without) = (
+        super::accept::own_reading(report, &pixels, tgt_px, &own, &own),
+        super::accept::own_reading(report, reference, tgt_px, &own, &own),
+    );
+    if !fit::ships_local(own_with, own_without, frame, frame_before) {
         report.recipe.masks.truncate(first_mask);
         return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Frame, initial });
     }

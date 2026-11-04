@@ -78,6 +78,16 @@ pub(crate) fn look_err(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
 /// boundary / ramp rulers; its structural gate is the existing D threshold
 /// only.
 ///
+/// LOCAL SHIP LAW (R19): a LOCAL correction ships when it earns FIT_QUANT on
+/// its OWN population — this objective read over the region's own present
+/// pixels and bands ([`EvidenceModel::scoped`]: `E_paired + H_ab`, the
+/// region's pairing, its own worst band) — and the frame reading is a guard
+/// only: the correction may not raise the frame's J* by more than FIT_QUANT
+/// ([`crate::fit::ships_local`]). Read on the frame, a region's gain is its
+/// own gain times its share, and R1's FIT_QUANT then asked a 6 % tile for
+/// 17x FIT_QUANT on its own pixels (rel1180 msg8: 57 + 12 refusals of
+/// corrections both rulers call better).
+///
 /// Before v1.18.0 the objective was `0.55·T + 0.20·C + 0.15·H + 0.10·S` in
 /// display sRGB: a frame-level distribution distance that cannot credit a
 /// local correction for moving its own pixels (21 of the census's 39

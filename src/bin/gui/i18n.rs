@@ -2349,12 +2349,13 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 注：{label} 区占原图 {s}% 而占目标图 {t}%——两者构图不同，整体分布残差停留在全局拟合的水平。"),
     (" Zoned {label} correction dropped: zone residual {before} → {after} \
       (needs ≤ {ratio}% of the original, or ≤ {floor} with a ≥ {gain}% \
-      gain) with frame-global drift {drift} (tolerance {tol}).",
-        " 已弃用 {label} 区校正：区残差 {before} → {after}（需 ≤ 原值的 {ratio}%，或 ≤ {floor} 同时增益 ≥ {gain}%），全画面漂移 {drift}（容差 {tol}）。"),
+      gain); its own pixels read {own_before} → {own_after}, frame-global \
+      drift {drift} (tolerance {tol}).",
+        " 已弃用 {label} 区校正：区残差 {before} → {after}（需 ≤ 原值的 {ratio}%，或 ≤ {floor} 同时增益 ≥ {gain}%）；本区像素 {own_before} → {own_after}，全画面漂移 {drift}（容差 {tol}）。"),
     (" Zoned {label} atmosphere correction dropped: zone residual {before} → \
-      {after} did not satisfy do-no-harm, or frame-global drift {drift} exceeded \
-      tolerance {tol}.",
-        " 已弃用 {label} 区氛围校正：区残差 {before} → {after} 未通过不伤害原则，或全画面漂移 {drift} 超出容差 {tol}。"),
+      {after} did not satisfy do-no-harm, or its own pixels read {own_before} → \
+      {own_after} with frame-global drift {drift} (tolerance {tol}).",
+        " 已弃用 {label} 区氛围校正：区残差 {before} → {after} 未通过不伤害原则，或本区像素 {own_before} → {own_after}、全画面漂移 {drift}（容差 {tol}）。"),
     (" The {label} zone already matches the target (zone residual \
       {before}) — no correction needed.",
         " {label} 区已与目标匹配（区残差 {before}）——无需校正。"),

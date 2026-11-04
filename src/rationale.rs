@@ -817,11 +817,12 @@ pub mod keys {
     pub const ZONE_DROPPED: &str =
         " Zoned {label} correction dropped: zone residual {before} → {after} \
          (needs ≤ {ratio}% of the original, or ≤ {floor} with a ≥ {gain}% \
-         gain) with frame-global drift {drift} (tolerance {tol}).";
+         gain); its own pixels read {own_before} → {own_after}, frame-global \
+         drift {drift} (tolerance {tol}).";
     pub const ZONE_ATMOSPHERE_DROPPED: &str =
         " Zoned {label} atmosphere correction dropped: zone residual {before} → \
-         {after} did not satisfy do-no-harm, or frame-global drift {drift} exceeded \
-         tolerance {tol}.";
+         {after} did not satisfy do-no-harm, or its own pixels read {own_before} → \
+         {own_after} with frame-global drift {drift} (tolerance {tol}).";
     /// R30 batch 1 (R1): the third acceptance arm is the one that changes
     /// what ships, so a correction admitted by it says so — with both
     /// readings it was decided on, and with the ONE safety gate that is
