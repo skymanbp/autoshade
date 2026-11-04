@@ -451,7 +451,7 @@ fn joint_reading_from_buckets(buckets: &[JointBucket]) -> Option<JointReading> {
 /// `fit::wb_default_strength_is_byte_identical_to_head` pins a confidence the
 /// cap produces, `fit::same_content_evidence_diagnosis_reports_cornwall_support_and_terminal_readings`
 /// reads the terminal arm, `fit::a_residual_the_mixer_cannot_reach_is_still_named`,
-/// `fit::solving_the_bands_takes_the_colour_shape_out_of_the_residual`,
+/// `fit::a_per_band_residual_stays_named_until_the_full_strength_fit_closes_it`,
 /// `fit::the_unsolvable_controls_are_named_for_this_pair` and
 /// `fit_zoned::unrepresented_note_is_derived_from_the_finished_zoned_render`
 /// assert the colour-shaped route of `unrepresented_note` that consumer 4
