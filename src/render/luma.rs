@@ -202,16 +202,9 @@ pub(super) fn write_luma_weighted_in(
 /// engine's render of the same frame — Lightroom adds light, it does not scale
 /// colour. A channel that runs past 0 or 1 clips on its own, so a saturated
 /// colour keeps its hue and loses a little of the move.
-pub(super) fn write_luma_additive(
-    data: &mut [[f32; 3]],
-    w: usize,
-    weight: impl Fn(usize, usize, &[f32; 3]) -> f32 + Sync,
-    new_luma: impl Fn(usize, f32, f32) -> f32 + Sync,
-) {
-    write_luma_additive_in(data, w, weight, new_luma, PixelRange::Display)
-}
-
-/// [`write_luma_additive`] in `range`.
+///
+/// `range` is the develop's ([`PixelRange`]): the export clips each channel
+/// at [0, 1]; the reverse fit's float plate keeps it.
 pub(super) fn write_luma_additive_in(
     data: &mut [[f32; 3]],
     w: usize,

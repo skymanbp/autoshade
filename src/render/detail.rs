@@ -284,7 +284,7 @@ fn usm_transfer(sigma: f32) -> f32 {
 /// ```
 ///
 /// The move is ADDED to the three channels — neutral light in or out — which
-/// is how the Lightroom export moved (`write_luma_additive`); every other luma
+/// is how the Lightroom export moved (`write_luma_additive_in`); every other luma
 /// pass in this engine scales chroma instead.
 ///
 /// A NEGATIVE amount (a mask softening its background) is the plain signed
@@ -598,6 +598,7 @@ fn block_mean(
 /// full planes' worth (8 B/px), inside the spatial-pass budget. The guide and
 /// its two moments stay for both channels; each colour plane is built from
 /// the frame only when its turn comes and is gone before the next one is.
+#[cfg(test)]
 pub(crate) fn chroma_nr(data: &mut [[f32; 3]], w: usize, h: usize, p: &ChromaNrParams, film: FilmScale) {
     chroma_nr_in(data, w, h, p, film, PixelRange::Display)
 }
