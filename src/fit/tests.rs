@@ -3461,10 +3461,17 @@ fn the_haze_pairs_broken_identification_falls_back_and_still_fits() {
         "premise broken: the haze pair's neutral evidence reads clean ({m:.4})"
     );
     let rep = fit_recipe(&base, &clean);
-    // Measured 0.0892 -> 0.0229 (0.26×); 0.35× keeps real margin without
-    // letting the win quietly rot.
+    // Measured 0.0892 -> 0.0229 (0.26×) on the pre-v1.18.0 objective.
+    // Re-pinned for v1.18.0: J* reads the same pair 0.1518 -> 0.0618 (0.41×,
+    // measured 2026-11-04) — a different ruler (per-pixel CIE76 on local
+    // means where pixels pair, every present pixel at its presence weight),
+    // and since R11 a different landing: the residual tone curve is withheld
+    // on its tonal reading (a gain under FIT_QUANT) and the cast, which then
+    // fans past the limit, ships projected (t = 0.783) rather than admitted.
+    // 0.45× keeps the claim (most of the gap closed) with room for the
+    // FIT_QUANT another stage may still move J* by.
     assert!(
-        rep.err_after < 0.35 * rep.err_before,
+        rep.err_after < 0.45 * rep.err_before,
         "the fallback solve must still close most of the gap ({:.4} -> {:.4})",
         rep.err_before,
         rep.err_after
@@ -4810,21 +4817,20 @@ fn the_search_takes_the_best_paying_admissible_shrink() {
     );
 }
 
-/// v1.2.3 fix-up — the haze regression is NEVER projected, asserted in the
-/// tree rather than by a probe that does not ship.
+/// The rescue arm's guard, read from both ends on one pair: a cast the fan
+/// gate convicts (and no other gate does) earns the projection, and what
+/// ships is the projection — never also an admission.
 ///
-/// The claim the release notes make about this pair is byte-identity: its
-/// recipe and rationale with the rescue live are what they were without
-/// it. What makes that true is not a comparison, it is the rescue arm's
-/// GUARD — `CastOutcome::earns_projection` returns `None` here because the
-/// fan gate never convicts this cast (7.8° against a 15° line), so every
-/// `fit_cast_stage` call on this pair runs the same code with
-/// `rescue = true` as with `rescue = false`. That guard is what this test
-/// measures, because it is the thing that can break; a literal
-/// rescue-on/rescue-off comparison is not expressible from here without a
-/// test seam in the solve, and a seam would be the more fragile pin.
+/// Until v1.18.0 this pair's un-cast opened under [`FAN_DEG`] and the test
+/// pinned the other side of the guard (never convicted, never projected).
+/// Since v1.18.0 (red from R11) its residual tone curve is withheld on the
+/// tonal reading (0.0286 -> 0.0278, a gain under FIT_QUANT) and the channel
+/// curves re-derived on the finished tone fan the widest class 22.6 degrees
+/// in this rebuild (23.0 in the stage's own weighted reading); the
+/// unconvicted side of the guard is pinned on the hue ramps
+/// (`a_white_balance_cast_the_curves_carry_as_channel_gains_never_enters_the_hand_off`).
 #[test]
-fn the_haze_correction_is_never_projected() {
+fn a_cast_the_fan_gate_alone_convicts_earns_the_projection_and_is_never_admitted() {
     use crate::rationale::keys;
     let (base, clean) = haze_pair();
     let c = cast_stage_candidate(&base, &clean);
@@ -4838,39 +4844,33 @@ fn the_haze_correction_is_never_projected() {
         .expect("a judged cast carries readings")
         .fan
         .expect("this pair's census has a fan to report");
-    assert!(
-        fan < FAN_DEG,
-        "premise broken: the haze correction now trips the fan gate ({fan:.1}°)"
-    );
-    assert_eq!(out.hue_fanned, None, "…so the gate does not convict it");
-    assert_eq!(
-        out.earns_projection(),
-        None,
-        "…and the rescue arm's guard is false, whatever the other gates say"
-    );
+    assert!(fan >= FAN_DEG, "premise: the fitted curves fan past the limit ({fan:.1}°)");
+    assert!(out.hue_fanned.is_some(), "…so the gate convicts them");
+    // Whether the fan is the ONLY conviction is the stage's question, read
+    // on its own weighted candidate with the target's cells (this rebuild
+    // has neither, see [`CastCandidate`]); the stage answering yes is what
+    // the projection note below witnesses.
 
-    // End to end: the admission, and nothing about a projection.
+    // End to end: the projection, and nothing about an admission.
     let rep = fit_recipe(&base, &clean);
     assert!(
         !rep.recipe.blue_curve.is_empty(),
-        "premise broken: the haze un-cast is no longer shipped: {}",
+        "the projected curves ship: {}",
         rep.recipe.rationale
     );
     assert!(
-        rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED),
-        "the haze cast is ADMITTED, on its own merits: {}",
+        rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_PROJECTED),
+        "the cast is PROJECTED: {}",
         rep.recipe.rationale
     );
     assert!(
-        !rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_PROJECTED),
-        "…and never projected: {}",
+        !rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED),
+        "…and never also admitted: {}",
         rep.recipe.rationale
     );
-    assert!(
-        !rep.recipe.rationale.contains("shrunk toward the shape"),
-        "…not even in words: {}",
-        rep.recipe.rationale
-    );
+    let after = projection_arg(&rep, keys::FIT_NOTE_CAST_PROJECTED_FAN, "fan_after")
+        .expect("the projection publishes the fan it reached");
+    assert!(after <= FAN_PROJECT_DEG, "the projection reaches its own target ({after})");
 }
 
 /// The fan gate's OTHER half: it must not touch a cast that is doing its
@@ -5016,150 +5016,93 @@ fn the_fan_gate_leaves_a_legitimate_cast_alone() {
 /// width IS `FAN_DEG` (360° / FAN_HUE_CLASSES). So an ADMITTED cast can
 /// leave up to 2 × FAN_DEG of ABSOLUTE in-class spread in the delivered
 /// frame, which is the tolerance the rustdoc, ARCHITECTURE.md and the
-/// release notes all now state in words. The haze pair is the one whose
-/// cast the fit admits, so it is where the words get checked.
+/// release notes all now state in words.
+///
+/// v1.18.0: this pair's cast is no longer admitted — since R11 its curves
+/// add 22.6 degrees (the residual tone curve is withheld on its tonal
+/// reading, 0.0286 -> 0.0278, a gain under FIT_QUANT, and the channel curves
+/// carry the residual tone) — so the end-to-end admission premise is gone.
+/// The bound is two halves, and neither needs an admission to be read: the
+/// baseline the gate subtracts is under one class width on this census
+/// (26.95 delivered - 22.57 added = 4.38 degrees, measured 2026-11-04), and
+/// the admission half is `added < FAN_DEG` by the gate's own definition.
 #[test]
 fn an_admitted_cast_delivers_at_most_two_class_widths_of_hue_fan() {
-    let clean = synth();
-    let mut haze = EditRecipe {
-        exposure_ev: -0.3,
-        contrast: -45.0,
-        blacks: 40.0,
-        saturation: -40.0,
-        blue_curve: vec![
-            CurvePoint { input: 0, output: 25 },
-            CurvePoint { input: 128, output: 132 },
-            CurvePoint { input: 255, output: 255 },
-        ],
-        ..Default::default()
-    };
-    haze.clamp();
-    let hazed = render::develop_preview(&clean, &haze);
-    assert!(
-        !fit_recipe(&hazed, &clean).recipe.blue_curve.is_empty(),
-        "premise broken: this pair's cast is no longer admitted"
-    );
+    let (hazed, clean) = haze_pair();
     let candidate = cast_stage_candidate(&hazed, &clean);
     let (_, added, delivered) = hue_fan_weighted(
         &candidate.cur,
         &candidate.with_px,
         &evidence_model(&candidate.cur, &candidate.tp),
     )
-    .expect("premise broken: the admitted haze pair has no region-sized hue class");
-    assert!(
-        delivered < 2.0 * FAN_DEG,
-        "an ADMITTED cast delivered {delivered:.1}° of ABSOLUTE in-class hue spread, \
-             past the 2 × {FAN_DEG}° worst case the docs claim (added {added:.1}°)"
-    );
-    // …and the two halves of that arithmetic, so a failure says which
-    // one broke: the admission bound, and the class-width bound on the
-    // baseline the gate subtracts.
-    assert!(added < FAN_DEG, "premise broken: the haze cast would be refused ({added:.1}°)");
+    .expect("premise broken: the pair has no region-sized hue class");
     assert_eq!(360.0 / FAN_HUE_CLASSES as f32, FAN_DEG, "one hue class is one FAN_DEG wide");
     assert!(
         delivered - added < 360.0 / FAN_HUE_CLASSES as f32,
         "the baseline the gate subtracts ({:.1}°) is not bounded by one class width",
         delivered - added
     );
+    // …so whatever the gate admits (added < FAN_DEG) delivers under
+    // 2 × FAN_DEG: the baseline above plus at most one more class width.
+    assert!(
+        (delivered - added) + FAN_DEG < 2.0 * FAN_DEG,
+        "an admitted cast on this census could deliver {:.1}° of ABSOLUTE in-class spread, \
+             past the 2 × {FAN_DEG}° worst case the docs claim",
+        (delivered - added) + FAN_DEG
+    );
 }
 
-/// v1.2.3 — the stage's ADMISSION was silent. Every way of producing
-/// nothing disclosed (R23-6 A-2 closed the last one), and the strength
-/// budget disclosed when IT bought a marginal cast, but the commonest
-/// outcome of the whole stage — the curves shipped on their own merits —
-/// reached the user as an unexplained presence. The note carries the
-/// four gates' own readings so the admission can be checked, not just
-/// believed.
+/// v1.2.3 — a shipped cast must disclose the readings that let it through,
+/// so the outcome can be checked, not just believed.
+///
+/// Until v1.18.0 this pair's cast was ADMITTED and the test read the
+/// admission note. Since R11 its curves fan the widest class 23.0 degrees
+/// (the residual tone curve is withheld on its tonal reading, a gain under
+/// FIT_QUANT, and the channel curves carry the residual tone), the fan gate
+/// convicts, and what ships is the PROJECTION (t = 0.783, measured
+/// 2026-11-04). The disclosure the test exists for is the same one on the
+/// projected path: the re-hued share and the fan on the passing side of
+/// their own gates, the limit measured against, the foreign-hue clause, and
+/// the strength budget's bound the path actually used.
 #[test]
-fn an_admitted_cast_discloses_the_readings_that_let_it_through() {
-    let clean = synth();
-    let mut haze = EditRecipe {
-        exposure_ev: -0.3,
-        contrast: -45.0,
-        blacks: 40.0,
-        saturation: -40.0,
-        blue_curve: vec![
-            CurvePoint { input: 0, output: 25 },
-            CurvePoint { input: 128, output: 132 },
-            CurvePoint { input: 255, output: 255 },
-        ],
-        ..Default::default()
-    };
-    haze.clamp();
-    let report = fit_recipe(&render::develop_preview(&clean, &haze), &clean);
+fn a_projected_cast_discloses_the_readings_that_let_it_through() {
+    use crate::rationale::keys;
+    let (hazed, clean) = haze_pair();
+    let report = fit_recipe(&hazed, &clean);
     assert!(
         !report.recipe.blue_curve.is_empty(),
-        "premise broken: this pair's cast is no longer admitted: {}",
+        "premise broken: this pair's cast no longer ships: {}",
         report.recipe.rationale
     );
-    let note = report
-        .notes
-        .iter()
-        .find(|n| n.key == crate::rationale::keys::FIT_NOTE_CAST_ADMITTED)
-        .unwrap_or_else(|| {
-            panic!("an admitted cast must say so: {}", report.recipe.rationale)
-        });
-    let arg = |name: &str| {
-        note.args
-            .iter()
-            .find(|(k, _)| *k == name)
-            .and_then(|(_, v)| v.parse::<f32>().ok())
-            .unwrap_or_else(|| panic!("the note carries {name}: {:?}", note.args))
+    let arg = |key: &str, name: &str| {
+        projection_arg(&report, key, name)
+            .unwrap_or_else(|| panic!("the note carries {name}: {}", report.recipe.rationale))
     };
-    // The two readings whose gates are one-sided thresholds ARE on the
-    // passing side of their own gate, and the claim is only made for
-    // them: the rehued share and the fan reject above their constant,
-    // full stop.
-    assert!(arg("rehued") < ROT_SHARE, "the disclosed rehued share passed");
-    let fan_arg = |name: &str| {
-        let n = report
-            .notes
-            .iter()
-            .find(|n| n.key == crate::rationale::keys::FIT_NOTE_CAST_ADMITTED_FAN)
-            .unwrap_or_else(|| panic!("an admitted cast reports its fan: {}", report.recipe.rationale));
-        n.args
-            .iter()
-            .find(|(k, _)| *k == name)
-            .and_then(|(_, v)| v.parse::<f32>().ok())
-            .unwrap_or_else(|| panic!("the fan note carries {name}: {:?}", n.args))
-    };
-    assert!(fan_arg("fan") < FAN_DEG, "the disclosed fan passed");
-    assert_eq!(fan_arg("limit"), FAN_DEG, "the fan note names the limit it measured against");
-    let foreign_arg = report
-        .notes
-        .iter()
-        .find(|n| n.key == crate::rationale::keys::FIT_NOTE_CAST_ADMITTED_FOREIGN)
-        .and_then(|n| n.args.iter().find(|(k, _)| *k == "foreign"))
-        .and_then(|(_, v)| v.parse::<f32>().ok())
-        .expect("this pair's target carries hue evidence, so the share is measurable");
-    assert!(foreign_arg < VETO_CREATED_SHARE, "the disclosed foreign share passed");
-
-    // The RATIO is NOT claimed to have passed a threshold, because it
-    // has none: the ratio arm rejects only when the evidence is also
-    // unidentifiable, so an admitted ratio may exceed its bound. What
-    // the note must get right is WHICH bound the path used — and that is
-    // `budget.cast_ratio`, which the strength budget moves. Asserting
-    // against the CAST_ACCEPT_RATIO constant would have passed for a
-    // note quoting a bound the fit never applied.
+    assert!(arg(keys::FIT_NOTE_CAST_PROJECTED, "rehued") < ROT_SHARE, "the disclosed rehued share passed");
+    assert!(arg(keys::FIT_NOTE_CAST_PROJECTED, "fan_before") >= FAN_DEG, "the disclosed fan is the conviction");
+    assert_eq!(arg(keys::FIT_NOTE_CAST_PROJECTED, "limit"), FAN_DEG, "the note names the limit it measured against");
+    assert!(
+        arg(keys::FIT_NOTE_CAST_PROJECTED_FAN, "fan_after") <= FAN_PROJECT_DEG,
+        "the disclosed fan after the projection passed its own target"
+    );
+    let foreign = arg(keys::FIT_NOTE_CAST_ADMITTED_FOREIGN, "foreign");
+    assert!(foreign < VETO_CREATED_SHARE, "the disclosed foreign share passed");
+    // The RATIO is NOT claimed to have passed a threshold, because it has
+    // none: what the note must get right is WHICH bound the path used —
+    // `budget.cast_ratio`, which the strength budget moves.
     assert_eq!(
-        arg("bound"),
+        arg(keys::FIT_NOTE_CAST_PROJECTED, "bound"),
         FitBudget::for_strength(crate::recipe::GradeStrength::default()).cast_ratio,
         "the default-strength solve discloses the default-strength bound"
     );
-    // …and it is whatever bound the gate was HANDED, which at any
-    // strength but the default is a different number from the anchor.
-    // The end-to-end arm cannot make this point on its own: at the
-    // default strength `budget.cast_ratio` IS `CAST_ACCEPT_RATIO`, so a
-    // note hard-coding the constant would agree with it. (Re-fitting the
-    // same pair at max strength does not help either — the budget also
-    // moves the solve, and this pair's max-strength cast is refused by
-    // the fan gate at 19°.) So the threading is asserted where it lives.
+    // …and it is whatever bound the gate was HANDED, which at any strength
+    // but the default is a different number from the anchor.
     let widened = FitBudget::for_strength(crate::recipe::GradeStrength::new(1.0)).cast_ratio;
     assert_ne!(
         widened, CAST_ACCEPT_RATIO,
         "premise broken: max strength no longer widens the cast bound"
     );
-    let candidate = cast_stage_candidate(&render::develop_preview(&clean, &haze), &clean);
+    let candidate = cast_stage_candidate(&hazed, &clean);
     let handed = cast_gate_outcome_with_ratio(
         &candidate.cur,
         &candidate.with_px,
@@ -5177,14 +5120,17 @@ fn an_admitted_cast_discloses_the_readings_that_let_it_through() {
         "the gate must record the bound it was GIVEN, not the default anchor"
     );
 
-    // And a REFUSED stage says the opposite thing, never both.
+    // One sentence per outcome: a projected cast does not also claim admission.
+    assert!(
+        !report.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED),
+        "a projected cast must not also claim admission: {}",
+        report.recipe.rationale
+    );
+    // And a stage that did not admit says so, never both.
     let refused = fit_recipe(&coast(false), &coast(true));
     assert!(
-        !refused
-            .notes
-            .iter()
-            .any(|n| n.key == crate::rationale::keys::FIT_NOTE_CAST_ADMITTED),
-        "a withheld cast must not also claim admission: {}",
+        !refused.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED),
+        "a cast that was not admitted must not claim admission: {}",
         refused.recipe.rationale
     );
 }
@@ -9085,18 +9031,22 @@ fn the_hand_off_walk_is_entered_by_a_cast_that_really_fans() {
     assert!(rep.err_after <= rep.err_before, "{} -> {}", rep.err_before, rep.err_after);
 }
 
-/// A cast the fan gate never convicts never reaches the hand-off: the haze
-/// correction, the fan gate's own legitimate case, pinned by value at
-/// 9631905. Re-pinned 2026-11-02: the recipe now carries the band hue its
-/// paired pixels ask and the finished frame pays for (Orange +2.3 / Green
-/// -2.3 after the mixer's band hues earned their place against their own
-/// absence, 0.01354 against 0.01355 without them), and the paired summary
-/// and the mixer note state what is solved. Re-pinned again at (d): the band
-/// demand is read over its luma ranges and each range answered against its
-/// own reach, so the rotation is Orange +1.2 / Green -1.2 and the finished
-/// frame 0.01340.
+/// A convicted cast no white balance takes back walks, ships nothing through
+/// the walk, and is projected — pinned by value on the washed-out synthetic pair.
+///
+/// Until v1.18.0 this pair was the fan gate's own legitimate case: its
+/// curves opened 7.8 degrees and were admitted, so the walk was never
+/// entered (pinned by value at 9631905 and re-pinned through 2026-11-02).
+/// Since v1.18.0 (red from R11: J* judges every present pixel at its
+/// presence weight, FIT_QUANT 2.3e-3) the residual tone curve is withheld on
+/// its tonal reading (0.0286 -> 0.0278, a gain under FIT_QUANT), the channel
+/// curves are what is left to carry the residual tone, and as fitted they fan
+/// the widest class 23.0 degrees. The fan gate convicts, the walk is
+/// entered once and ships nothing, and the projection ships t = 0.783, fan
+/// after +5.4. Measured 2026-11-04: look error 0.1518 -> 0.0618.
 #[test]
-fn a_cast_with_no_fan_never_enters_the_hand_off() {
+fn a_convicted_cast_no_white_balance_takes_back_is_projected_by_value() {
+    use super::solve::route;
     use crate::rationale::keys;
     let clean = synth();
     let mut haze = EditRecipe {
@@ -9112,12 +9062,20 @@ fn a_cast_with_no_fan_never_enters_the_hand_off() {
         ..Default::default()
     };
     haze.clamp();
+    route::take();
     let rep = fit_recipe(&render::develop_preview(&clean, &haze), &clean);
+    let seen = route::take();
+    assert!(seen.hand_off_entered >= 1, "the convicted cast enters the walk: {seen:?}");
     assert!(!rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB));
+    assert!(
+        rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_PROJECTED),
+        "…and falls through to the projection: {}",
+        rep.recipe.rationale
+    );
     assert_eq!(
         recipe_fnv(&rep.recipe),
-        0x8d9d_d657_14e7_cc8b,
-        "a recipe the hand-off never touched moved: {}",
+        0xc513_8107_3f2a_d7ea,
+        "the projected recipe moved: {}",
         rep.recipe.rationale
     );
 }
