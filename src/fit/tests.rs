@@ -4624,12 +4624,17 @@ fn a_cast_the_ratio_gate_convicts_is_not_rescued_by_the_projection() {
 #[test]
 fn the_search_does_not_bisect_past_a_band_the_gain_bar_opens() {
     let err_without = 0.05f32;
-    // ratio = 1 − 0.1·t, so gain = err_without·0.1·t = 0.005·t, crossing
-    // FIT_QUANT (0.0018) at t = 0.36; the fan is over the target above
-    // t = 0.4. Clearing band: (0.36, 0.4].
+    // The path's slope is written in the law's unit (v1.18.0: FIT_QUANT is
+    // measured, 1.8e-3 then 2.3e-3, so a slope in bare numbers moved the
+    // crossing past the fan frontier and emptied the band the test is
+    // about): ratio = 1 − k·t with k = FIT_QUANT / (0.36·err_without), so
+    // gain = err_without·k·t crosses FIT_QUANT at t = 0.36 whatever
+    // FIT_QUANT measures; the fan is over the target above t = 0.4.
+    // Clearing band: (0.36, 0.4].
+    let k = FIT_QUANT / (0.36 * err_without);
     let judge = |t: f32| CastOutcome {
         readings: Some(CastReadings {
-            ratio: 1.0 - 0.1 * t,
+            ratio: 1.0 - k * t,
             bound: CAST_ACCEPT_RATIO,
             foreign: Some(0.0),
             rehued: 0.0,
