@@ -4049,7 +4049,6 @@ fn a_shrunk_correction_is_held_to_do_no_harm_not_to_the_arms() {
         rendered: Vec::new(),
         judged_before: 0.0,
         luma_only: false,
-        frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
     };
     let target = grey(0.50);
     let without = zone.judged(&grey(0.40), &target);
@@ -4134,7 +4133,6 @@ fn refuse_shrunk_zones_judges_each_zone_against_the_shipped_set_without_it() {
         rendered: Vec::new(),
         judged_before: 0.0,
         luma_only: false,
-        frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
     };
     let mut accepted = vec![zone(0, "left"), zone(1, "right")];
     let frame = fit::look_err_with_evidence(&pixels, &tgt_px, &report.evidence);

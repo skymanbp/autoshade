@@ -506,8 +506,8 @@ fn boundary_args(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BitmapBoundaryWhy {
-    /// The composed frame at the surviving `k` regressed by more than the
-    /// caller's own admission tolerance (`BitmapBoundaryInput::frame_tol`).
+    /// The composed frame at the surviving `k` did not gain FIT_QUANT over
+    /// the frame before it (`fit::ships`, R1 v1.18.0).
     Frame,
     Rim,
     /// The mask reaches the gate with a contour that could not be sampled at
@@ -603,21 +603,11 @@ pub(super) struct BitmapBoundaryInput<'a> {
     pub(super) target_boundary: Option<&'a [[f32; 3]]>,
     pub(super) initial_px: Vec<[f32; 3]>,
     pub(super) frame_before: f32,
-    /// The composed-frame regression this caller's ADMISSION allowed: the
-    /// gate re-checks the frame at the surviving `k` under the same
-    /// tolerance the candidate was admitted on, never a stricter one of its
-    /// own. Spatial tiles and free masks pass
-    /// [`SPATIAL_FRAME_REGRESSION_TOL`]; a semantic region passes
-    /// [`ZONE_GLOBAL_REGRESSION_TOL`] (2026-10-22: the gate used to apply 0.0
-    /// to every family, so a region `attach_one_zone` had admitted within its
-    /// 0.02 drift budget was silently refused here).
-    pub(super) frame_tol: f32,
 }
 
 /// One bitmap boundary/composed-frame gate shared by tiles, free masks and
-/// the multi-region semantic path, each naming its own ruler and its own
-/// frame tolerance (`frame_tol`, the caller's admission tolerance — one
-/// tolerance per gate family).
+/// the multi-region semantic path, each naming its own ruler; the composed
+/// frame is judged by the one stage-vs-absence law (`fit::ships`, R1 v1.18.0).
 ///
 /// For [`BoundaryRuler::CrossBoundaryStep`] a reading of `0` transitions is a
 /// REFUSAL. That combination is precisely what shipped a seam: every hard
@@ -630,7 +620,7 @@ pub(super) fn enforce_bitmap_boundary(
     first_mask: usize,
     input: BitmapBoundaryInput<'_>,
 ) -> Result<BitmapBoundaryAccepted, BitmapBoundaryRefusal> {
-    let BitmapBoundaryInput { ruler, target_boundary, initial_px, frame_before, frame_tol } = input;
+    let BitmapBoundaryInput { ruler, target_boundary, initial_px, frame_before } = input;
     let presence = report.evidence.presence.clone();
     let measure = |rendered: &[[f32; 3]]| match ruler {
         BoundaryRuler::TransitionBand { weights, reference } => {
@@ -737,7 +727,7 @@ pub(super) fn enforce_bitmap_boundary(
     // is structure, a local correction cannot change which pixels pair, its
     // seams stay with the boundary / ramp rulers and its structural gate is
     // the existing D threshold only.
-    if frame > frame_before + frame_tol {
+    if !fit::ships(frame, frame_before) {
         report.recipe.masks.truncate(first_mask);
         return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Frame, initial });
     }
@@ -971,7 +961,6 @@ pub(super) fn attach_tiles(
                 target_boundary: Some(&tgt_px[..]),
                 initial_px: std::mem::take(&mut accepted.rendered),
                 frame_before,
-                frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
             },
         );
         let mut boundary = match boundary {
@@ -1039,7 +1028,6 @@ pub(super) fn attach_tiles(
                         ruler: BoundaryRuler::CrossBoundaryStep { geometry: &weights, reference: &current },
                         target_boundary: Some(&tgt_px[..]),
                         initial_px: std::mem::take(&mut native.rendered), frame_before,
-                        frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
                     });
                 if let Ok(trial) = trial {
                     let raster_pixels = render::develop_preview(&guide, &saved_recipe).to_rgb8();
@@ -2007,7 +1995,6 @@ mod tests {
                 },
                 initial_px: candidate,
                 frame_before,
-                frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
             },
         )
         .expect("a sloping-sky seam is negotiated down, not dropped");
@@ -2140,7 +2127,6 @@ mod tests {
                 },
                 initial_px: candidate,
                 frame_before,
-                frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
             },
         )
         .expect("a shrinkable tile must be negotiated, not dropped");
@@ -2206,7 +2192,6 @@ mod tests {
                 },
                 initial_px: candidate,
                 frame_before,
-                frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
             },
         )
         .expect("a continuous ramp must not be refused");
@@ -2254,7 +2239,6 @@ mod tests {
                     ruler: BoundaryRuler::CrossBoundaryStep { geometry, reference },
                     initial_px: candidate,
                     frame_before,
-                    frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
                 },
             )
         };
@@ -2433,7 +2417,6 @@ mod tests {
                     ruler: BoundaryRuler::CrossBoundaryStep { geometry: &geometry, reference: &reference },
                     initial_px: candidate.clone(),
                     frame_before,
-                    frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
                 },
             )
             .unwrap_or_else(|refusal| panic!("negotiated, not dropped: {:?}", refusal.why));
@@ -2485,7 +2468,6 @@ mod tests {
                     ruler: BoundaryRuler::CrossBoundaryStep { geometry, reference },
                     initial_px: candidate,
                     frame_before,
-                    frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
                 },
             )
         };
@@ -2659,7 +2641,6 @@ mod tests {
                 // The candidate render IS the reference: nothing moved.
                 initial_px: reference.clone(),
                 frame_before,
-                frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
             },
         );
         let Err(refusal) = outcome else {
@@ -2690,7 +2671,6 @@ mod tests {
                 },
                 initial_px: candidate,
                 frame_before: 1.0,
-                frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
             },
         );
         // Matched rather than `expect_err`: the Ok payload carries a full
@@ -2721,7 +2701,6 @@ mod tests {
                 },
                 initial_px: candidate,
                 frame_before: 0.0,
-                frame_tol: SPATIAL_FRAME_REGRESSION_TOL,
             },
         );
         assert!(result.is_err(), "a refined alpha cannot bypass composed-frame arbitration");

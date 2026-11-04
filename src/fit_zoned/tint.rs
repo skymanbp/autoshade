@@ -203,7 +203,7 @@ pub(super) fn attach_zone_tint_or_plain(
             // is structure, a local correction cannot change which pixels pair, its
             // seams stay with the boundary / ramp rulers and its structural gate is
             // the existing D threshold only.
-            && *frame_err <= plain_exit.2 + attachment.frame_regression_tol;
+            && fit::ships(*frame_err, plain_exit.2);
         if counts && best.as_ref().is_none_or(|b| de < b.0) {
             best = Some((de, tinted, (report.recipe.clone(), report.notes.clone(), *frame_err)));
         }

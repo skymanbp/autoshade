@@ -318,6 +318,20 @@ impl TerminalHarm {
 /// budget once.
 pub(crate) const FIT_QUANT: f32 = 1.8e-3;
 
+/// THE stage-vs-absence law (v1.18.0, R1): a stage SHIPS only when its
+/// objective gain over its absence is at least [`FIT_QUANT`]. A gain under
+/// FIT_QUANT is no difference after the fit's own rounding, and no difference
+/// goes to the untouched, simpler recipe; a loss of any size refuses. Every
+/// stage-vs-absence decision calls this — the mixer (4a'), the band hue (4a),
+/// the 4b step-down, the cast curves and their hand-off, the Atmosphere
+/// colour stage, the terminal arm, and the local layers (zones, bands, tint,
+/// tiles, free masks, ranges, the colour field) — so the stages' allowances
+/// cannot add: each one that ships has earned FIT_QUANT. `with` / `without`
+/// are the two frames' readings on one ruler.
+pub(crate) fn ships(with: f32, without: f32) -> bool {
+    without - with >= FIT_QUANT
+}
+
 /// The TERMINAL do-no-harm decision, pure so both of its arms are testable
 /// without a fixture that can reach them end to end.
 ///
@@ -337,7 +351,7 @@ pub(super) fn terminal_harm(
     joint_after: Option<crate::fit_zoned::JointReading>,
 ) -> TerminalHarm {
     TerminalHarm {
-        scalar: err_after > err_before + 1e-6,
+        scalar: !ships(err_after, err_before),
         joint: match (joint_base, joint_after) {
             (Some(b), Some(a)) => {
                 a.weighted > b.weighted + crate::fit_zoned::JOINT_DRIFT_TOL

@@ -310,10 +310,8 @@ fn fit_band_populations(
     let verdict = halve_mixer_until_harmless(fitted, |candidate| {
         recipe.hsl = candidate.clone();
         let px = pixels_of(&render::develop_preview(s_img, recipe));
-        // FIT_QUANT, not a bare 1e-4: a difference the objective cannot tell from
-        // its own rounding is no difference (v1.18.0, one margin for every
-        // do-no-harm of the global solve).
-        let regressed = look_err_with_evidence(&px, tp, evidence) > err_before + FIT_QUANT;
+        // R1: ships only on a gain of at least FIT_QUANT over its absence (`ships`).
+        let regressed = !ships(look_err_with_evidence(&px, tp, evidence), err_before);
         let blind_new = budget.vetoes == VetoPolicy::Withhold
             && !blind_before
             && moved_unsupported_hue_range_names_vouched(sp, &px, evidence, vouch, None)
@@ -552,10 +550,8 @@ fn fit_band_hues(
             return;
         }
         let px = pixels_of(&render::develop_preview(s_img, recipe));
-        // FIT_QUANT, not a bare 1e-4: a difference the objective cannot tell from
-        // its own rounding is no difference (v1.18.0, one margin for every
-        // do-no-harm of the global solve).
-        let regressed = look_err_with_evidence(&px, tp, evidence) > err_before + FIT_QUANT;
+        // R1: ships only on a gain of at least FIT_QUANT over its absence (`ships`).
+        let regressed = !ships(look_err_with_evidence(&px, tp, evidence), err_before);
         let blind_new = budget.vetoes == VetoPolicy::Withhold
             && !blind_before
             && moved_unsupported_hue_range_names_vouched(sp, &px, evidence, Some(vouch), None).is_some();

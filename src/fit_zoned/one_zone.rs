@@ -1184,7 +1184,7 @@ pub(super) fn attach_one_zone_as(
     // is structure, a local correction cannot change which pixels pair, its
     // seams stay with the boundary / ramp rulers and its structural gate is
     // the existing D threshold only.
-    if arm.is_some() && zoned_err <= *frame_err + attachment.frame_regression_tol {
+    if arm.is_some() && fit::ships(zoned_err, *frame_err) {
         // The strictly-better arm is the one that changes what ships, so it
         // says so — with the two readings it was decided on, in the zone's
         // own unit and the frame's. Without this a reader cannot tell a
@@ -1250,7 +1250,6 @@ pub(super) fn attach_one_zone_as(
             rendered: zoned_px,
             judged_before: accepted_before,
             luma_only: colour_withheld && !tone_withheld,
-            frame_regression_tol: attachment.frame_regression_tol,
         })
     } else {
         report.recipe.masks.pop();

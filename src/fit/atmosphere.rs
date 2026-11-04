@@ -450,8 +450,8 @@ pub(super) fn fit_atmosphere_from_parts(
 
     let sat_fitted = recipe.saturation;
     let mut err_after = look_err_with_evidence(&pixels_of(&render::develop_preview(s_img, &recipe)), tp, evidence);
-    // FIT_QUANT: the objective's own rounding (v1.18.0).
-    while err_after > err_before + FIT_QUANT
+    // R1: the colour stage ships only on a gain of FIT_QUANT (`ships`).
+    while !ships(err_after, err_before)
         && (recipe.saturation != 0.0 || !recipe.hsl.is_neutral())
     {
         let next = if recipe.saturation.abs() < 4.0 { 0.0 } else { recipe.saturation / 2.0 };
@@ -506,8 +506,8 @@ pub(super) fn fit_atmosphere_from_parts(
             let capped_sat = sat_fitted.clamp(-budget.sat, budget.sat);
             recipe.saturation = round1(capped_sat);
             let sat_px = pixels_of(&render::develop_preview(s_img, &recipe));
-            // FIT_QUANT: the objective's own rounding (v1.18.0).
-            if look_err_with_evidence(&sat_px, tp, evidence) > err_before + FIT_QUANT {
+            // R1: `ships`.
+            if !ships(look_err_with_evidence(&sat_px, tp, evidence), err_before) {
                 recipe = base.clone();
             } else {
                 after_px = sat_px;

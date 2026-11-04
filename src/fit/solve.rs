@@ -1262,9 +1262,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         fit_cast_stage(&mut unrotated, CastRescue::Off);
         let unrotated_err = finished_err(&unrotated);
         for _ in 0..DO_NO_HARM_MAX_ROUNDS {
-            // FIT_QUANT: the rotation is kept while it is not worse than its
-            // absence by more than the objective's own rounding (v1.18.0).
-            if recipe.hsl.hue == hue_before_mixer || finished_err(&recipe) <= unrotated_err + FIT_QUANT {
+            // R1: the rotation is kept once it gains FIT_QUANT over its absence.
+            if recipe.hsl.hue == hue_before_mixer || ships(finished_err(&recipe), unrotated_err) {
                 break;
             }
             recipe.hsl.hue = super::hsl::hue_halved_toward(&recipe.hsl.hue, &hue_before_mixer);
@@ -1287,9 +1286,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         let neutral_err = finished_err(&neutral);
         let withdrawn = halve_mixer_until_it_earns(
             &mut recipe,
-            // FIT_QUANT: the mixer must not cost more than the objective's own
-            // rounding against its absence (v1.18.0).
-            |candidate| finished_err(candidate) > neutral_err + FIT_QUANT,
+            // R1: the mixer ships only on a gain of FIT_QUANT over its absence.
+            |candidate| !ships(finished_err(candidate), neutral_err),
             |candidate| {
                 fit_cast_stage(candidate, CastRescue::Off);
             },
@@ -1376,9 +1374,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // Halving a neutral mixer is neutral, so a run where the stage attached
     // nothing is byte-identical to the pre-4a loop.
     let objects = |err_after: f32, end_moves_hue: bool| {
-        // FIT_QUANT: the 4b step-down fires on a cost the objective can tell
-        // from its own rounding (v1.18.0).
-        err_after > err_before + FIT_QUANT || (end_moves_hue && budget.vetoes == VetoPolicy::Withhold)
+        // R1: the end state ships only on a gain of FIT_QUANT over the start.
+        !ships(err_after, err_before) || (end_moves_hue && budget.vetoes == VetoPolicy::Withhold)
     };
     let descent = step_down_until_harmless(&mut recipe, objects(err_after, end_moves_hue), |recipe| {
         #[cfg(test)]

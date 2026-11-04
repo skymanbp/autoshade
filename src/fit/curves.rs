@@ -224,7 +224,7 @@ pub(super) fn refine_curves_on_finished_frame(
         rounds += 1;
         // A refinement step must buy more than the objective's own rounding
         // (FIT_QUANT, v1.18.0).
-        if err >= best.0 - FIT_QUANT {
+        if !ships(err, best.0) {
             break;
         }
         best = (err, next);
@@ -477,7 +477,7 @@ pub(super) fn search_cast_projection_t(
         }
     }
     // The gain bar, once, on the MAXIMUM over the admissible set.
-    (best.2 > FIT_QUANT).then_some((best.0, best.1))
+    (best.2 >= FIT_QUANT).then_some((best.0, best.1))
 }
 
 /// The projection search wired to the RENDERER: `search_cast_projection_t`
@@ -725,5 +725,5 @@ pub(super) fn pick_cast_hand_off(
             pick = Some(candidate);
         }
     }
-    pick.filter(|p| err_without - p.err > FIT_QUANT)
+    pick.filter(|p| ships(p.err, err_without))
 }

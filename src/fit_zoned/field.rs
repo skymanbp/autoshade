@@ -437,7 +437,7 @@ pub(super) fn attach_colour_field(
         // is structure, a local correction cannot change which pixels pair, its
         // seams stay with the boundary / ramp rulers and its structural gate is
         // the existing D threshold only.
-        if err_with >= report.err_after {
+        if !fit::ships(err_with, report.err_after) {
             note(report, crate::rationale::keys::FIELD_REGRESSED, vec![
                 ("before", format!("{:.6}", report.err_after)),
                 ("after", format!("{:.6}", err_with)),
@@ -672,7 +672,8 @@ fn zone_regressed(
         // is structure, a local correction cannot change which pixels pair, its
         // seams stay with the boundary / ramp rulers and its structural gate is
         // the existing D threshold only.
-        (now > was + super::ZONE_GLOBAL_REGRESSION_TOL).then_some((label, was, now, weights))
+        // R1: a loss of any size refuses — the field may not cost an attached zone.
+        (now > was).then_some((label, was, now, weights))
     })
 }
 

@@ -741,19 +741,15 @@ pub(super) fn replace_zone(
         fit::pixels_of(&render::develop_preview(image, &without_parent))
     };
     let uncorrected_error = fit::look_err_with_evidence(&uncorrected, target, &report.evidence);
-    // A REPLACEMENT is judged on the finished end state (v1.17.1). Where the
-    // single zone shipped (`parent_index`), the bands do not attach to a
-    // frame the zone never touched — they compete with a correction of the
-    // SAME region, on the same finished frame, so the frame-wide reading is a
-    // fair referee and the bands may not leave it worse than the single zone
-    // did by more than the objective's own rounding (FIT_QUANT). The zone
-    // stage's attachment tolerance (`frame_regression_tol`) is the same
-    // FIT_QUANT since v1.18.0 (`ZONE_GLOBAL_REGRESSION_TOL`), so both exits
-    // read one allowance. Measured on the zoned fixture under the closed curve
+    // A REPLACEMENT is judged on the finished end state (v1.17.1): the
+    // bands compete with a correction of the SAME region on the same
+    // finished frame, so the frame-wide reading is a fair referee, and since
+    // R1 (v1.18.0) the bands ship only on a gain of FIT_QUANT over the saved
+    // state (`fit::ships`) — the zone stage's admission and this end state
+    // read one law. Measured on the zoned fixture under the closed curve
     // (v1.17.1, the display objective): the bands took the land zone's deltaE
     // 9.57 -> 6.40 and the finished frame 0.03535 -> 0.03606, inside the old
     // tolerance (0.02) and worse than the single inverted zone they replaced.
-    let frame_allowance = if parent_index.is_some() { fit::FIT_QUANT } else { parent.frame_regression_tol };
     let neutral = LocalAdjustment::default();
     for model in models {
         report.recipe = saved_recipe.clone();
@@ -851,7 +847,7 @@ pub(super) fn replace_zone(
             // It read the frame tolerance's 0.02 in zone_err's unit before
             // v1.18.0; the value is the same.
             else if zone_after > zone_before + ZONE_MATCHED_ERR { values::ZONE_DO_NO_HARM }
-            else if frame_after > saved_error + frame_allowance { values::FRAME_DO_NO_HARM }
+            else if !fit::ships(frame_after, saved_error) { values::FRAME_DO_NO_HARM }
             else if !no_seam_regression { values::BOUNDARY_REGRESSION }
             else if !ramps_follow { values::RAMP_STEEPER } else { "accepted" };
         let complete = solved && boundary_passed;

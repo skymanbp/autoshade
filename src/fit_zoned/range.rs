@@ -1734,7 +1734,7 @@ fn attach_band_stage(
         // is structure, a local correction cannot change which pixels pair, its
         // seams stay with the boundary / ramp rulers and its structural gate is
         // the existing D threshold only.
-        if final_frame_err > entry_frame_err + RANGE_FRAME_REGRESSION_TOL {
+        if !fit::ships(final_frame_err, entry_frame_err) {
             report.recipe.masks.truncate(first_range);
             crate::rationale::push_note(
                 &mut report.recipe.rationale,

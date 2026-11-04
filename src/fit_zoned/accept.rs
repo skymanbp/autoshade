@@ -43,7 +43,6 @@ pub(super) struct AcceptedZone {
     /// routes render their own (`refuse_shrunk_zones`).
     pub(super) judged_before: f32,
     pub(super) luma_only: bool,
-    pub(super) frame_regression_tol: f32,
 }
 
 impl AcceptedZone {
@@ -93,7 +92,7 @@ impl AcceptedZone {
         // is structure, a local correction cannot change which pixels pair, its
         // seams stay with the boundary / ramp rulers and its structural gate is
         // the existing D threshold only.
-        frame_after <= frame_before + self.frame_regression_tol
+        fit::ships(frame_after, frame_before)
             && self.judged(pixels, tgt_px) <= without
     }
 
