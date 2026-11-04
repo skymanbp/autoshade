@@ -428,8 +428,14 @@ pub(super) const PROJECT_REFINE: usize = 8;
 // `the_confidence_family_is_one_calibration` pins, and it holds frame by
 // frame. The current residuals are in the ledger (Part 13).
 
-/// Confidence per unit of look error.
-pub(super) const CONFIDENCE_SLOPE: f32 = 6.0;
+/// Confidence per unit of look error. 6.0 per unit of the display objective
+/// (the table above), carried into J* by the corpus exchange rate (v1.18.0):
+/// the same base frame reads a median 1.53 times higher in J* than in the
+/// display objective on the five Full-mode calibration pairs (p36 1.39, p38
+/// 2.20, p39 1.53, p40 2.32, p41 1.30), so a fit that claimed c on the old
+/// ruler claims c on the new one at 6.0 / 1.53 = 3.92. The relation the
+/// family is pinned on (the floor reached at the FAR line) is unchanged.
+pub(super) const CONFIDENCE_SLOPE: f32 = 3.92;
 /// Never claim less than this — a fit that lands far is still a fit, and 0
 /// would read as "broken" rather than "approximate".
 pub(super) const CONFIDENCE_FLOOR: f32 = 0.25;
@@ -441,9 +447,10 @@ pub(super) const CONFIDENCE_CEIL: f32 = 0.95;
 /// versus 0.0413 for the preferred saved render.
 pub(super) const UNSUPPORTED_MOVEMENT_CONFIDENCE_SLOPE: f32 = 8.0;
 /// The FAR line — the residual at which [`CONFIDENCE_SLOPE`] has already
-/// driven confidence onto [`CONFIDENCE_FLOOR`] ((1 − 0.25)/6 = 0.125),
+/// driven confidence onto [`CONFIDENCE_FLOOR`] ((1 − 0.25)/3.92 = 0.191 in
+/// J*; (1 − 0.25)/6 = 0.125 of the display objective before v1.18.0),
 /// rounded down to a legible number.
-pub(super) const FIT_FAR_ERR: f32 = 0.12;
+pub(super) const FIT_FAR_ERR: f32 = 0.19;
 
 /// The one clamp both confidence ladders (this module's and the zoned one's)
 /// pass through, so the floor and ceiling are stated once.

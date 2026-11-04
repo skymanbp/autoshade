@@ -153,7 +153,10 @@ pub(crate) fn with_presence<'w>(weights: &'w [f32], presence: Option<&[f32]>) ->
 /// The largest residual the framing alone manufactured was 0.0854, which
 /// [`confidence_from_look_err`] reads as 0.488; 0.5 is that number, rounded to
 /// a legible one. It is what the ladder itself says a fit is worth when its
-/// whole residual could be framing.
+/// whole residual could be framing. The cap is a CONFIDENCE, not a residual:
+/// carried into J* (v1.18.0) the residual and the ladder's slope move by the
+/// same corpus exchange rate (1.53, [`CONFIDENCE_SLOPE`]), so the ladder
+/// reads the framing residual at the same 0.488 and the cap is unchanged.
 pub(super) const NOT_SAME_FRAME_CONFIDENCE_CAP: f32 = 0.5;
 
 /// The fit outcome: the recipe plus the evidence-weighted tonal, colour, hue

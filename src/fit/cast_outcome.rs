@@ -585,8 +585,12 @@ pub(super) fn unrepresented_note(
 }
 
 /// Below this residual there is nothing to explain and the disclosure would
-/// be noise — the same order as the fit's own quantisation budget.
-pub(super) const FIT_QUANT_CLEAN: f32 = 0.025;
+/// be noise. 0.025 of the display objective, carried into J* by the corpus
+/// exchange rate (v1.18.0): on the five Full-mode calibration pairs the SAME
+/// base frame reads 1.39 / 2.20 / 1.53 / 2.32 / 1.30 times higher in J*
+/// than in the display objective (p36 / p38 / p39 / p40 / p41, `err_before`
+/// of the rel1180 legs I8 and C), median 1.53; 0.025 × 1.53 = 0.038.
+pub(super) const FIT_QUANT_CLEAN: f32 = 0.038;
 /// Worst populated-band centroid disagreement (degrees) that counts as
 /// "this target used a per-band colour move". 20° is well past the ±13.5°
 /// the engine's own HSL hue axis can even express, so a gap this size cannot
