@@ -10,7 +10,8 @@ use super::*;
 pub const STRUCTURE_MIN_CORE_PX: usize = 100;
 
 /// Tone-invariant structural comparison shared by the global and zoned
-/// solvers. Luma is rank-equalized through a mask-weighted 1024-bin CDF; a
+/// solvers. Luma is rank-equalized through a mask-weighted 1024-bin CDF
+/// under the one-code tie rule (see `rank_equalized` below); a
 /// three-pixel erosion keeps semantic-mask boundaries out of the reading.
 /// Central-difference rank-gradient maps are pooled at sigma 2 and correlated
 /// over translations of +/-6 pixels. Five Gaussian bands (sigma 1/2/4/8/16)
@@ -52,12 +53,46 @@ pub fn structure_divergence(
         if total <= 1e-12 {
             return vec![0.0; n];
         }
-        let mut acc = 0.0f64;
-        for v in &mut hist {
-            acc += *v;
-            *v = acc / total;
+        // THE TIE RULE (v1.18.0): two luma values within one output code are
+        // a tie; a tie is charged in proportion to the fraction of a code
+        // that separates them, never as a whole rank step. The render's
+        // quantum is one 8-bit code, `CODE` = 1023/255 = 4.012 of the
+        // histogram's bins, and below it two values are not told apart by
+        // anything the fit ships. The rank of a bin is therefore its
+        // MID-RANK (the mass below it plus half its own) averaged over a box
+        // exactly one code wide centred on it — the expected rank of a value
+        // known to one code. A flat block whose render varies by a fraction
+        // of a code (a clipped sky, a crushed shadow, a posterised or
+        // generated target) keeps one rank up to that fraction, where the
+        // plain cumulative CDF split it by bin into ranks a whole block's
+        // mass apart; continuous luma keeps a continuous rank, where giving
+        // every value of a code ONE rank posterises the rank image into
+        // code-wide contours the low-passed reading then sees as structure
+        // (rel1171 msg10 §1: that form read the coarse Cornwall panel 0.183
+        // against this form's 0.108).
+        let mut below = 0.0f64;
+        let mut mid = [0.0f64; HIST_BINS];
+        for (m, &mass) in mid.iter_mut().zip(&hist) {
+            *m = (below + 0.5 * mass) / total;
+            below += mass;
         }
-        bins.into_iter().map(|i| hist[i] as f32).collect()
+        const CODE: f64 = (HIST_BINS - 1) as f64 / 255.0;
+        let reach = (CODE / 2.0).floor() as isize;
+        // The two end taps carry what is left of the code's width, so the
+        // box is exactly CODE bins wide and its taps sum to CODE.
+        let edge = (CODE - (2 * reach - 1) as f64) / 2.0;
+        let rank: Vec<f64> = (0..HIST_BINS as isize)
+            .map(|b| {
+                (-reach..=reach)
+                    .map(|k| {
+                        let tap = if k.abs() == reach { edge } else { 1.0 };
+                        tap * mid[(b + k).clamp(0, HIST_BINS as isize - 1) as usize]
+                    })
+                    .sum::<f64>()
+                    / CODE
+            })
+            .collect();
+        bins.into_iter().map(|i| rank[i] as f32).collect()
     };
 
     let mut core: Vec<bool> = weights.iter().map(|&v| v > 0.8).collect();
