@@ -90,10 +90,13 @@ pub fn render_to_image_in(
     working: ExportColorSpace,
     sink: &dyn crate::diag::Sink,
 ) -> Result<DynamicImage> {
-    render_frame(raw_path, recipe, denoise, max_edge, working, sink)
+    render_frame(raw_path, recipe, denoise, max_edge, working, sink, recipe.color_nr)
 }
 
-/// [`render_to_image_in`]'s body.
+/// [`render_to_image_in`]'s body. `colour_nr` is the strength of the RAW's
+/// colour noise reduction, which runs on the linear mosaic inside the demosaic
+/// ([`crate::denoise::linear_chroma`]); 0 is off.
+#[allow(clippy::too_many_arguments)] // the develop's frame plus the one switch of its first half
 pub(super) fn render_frame(
     raw_path: &Path,
     recipe: &EditRecipe,
@@ -101,6 +104,7 @@ pub(super) fn render_frame(
     max_edge: Option<u32>,
     working: ExportColorSpace,
     sink: &dyn crate::diag::Sink,
+    colour_nr: f32,
 ) -> Result<DynamicImage> {
     let diag = crate::diag::Diag::about(sink, raw_path);
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
@@ -189,7 +193,7 @@ pub(super) fn render_frame(
         strength,
         crate::denoise::mosaic_args_for(&rawimage).is_ok(),
         grain_weights,
-        || develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), calibration, working, profile_stage.as_ref())
+        || develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), colour_nr, calibration, working, profile_stage.as_ref())
             .map(|(rgb, _, _)| rgb),
     )?;
     // --- AI denoise on the MOSAIC (opt-in), BEFORE demosaic (2026-09-15).
@@ -215,7 +219,7 @@ pub(super) fn render_frame(
 
     // The develop in its two halves with the mosaic dropped between them
     // (`develop_raw_buffer` is the same two halves back to back).
-    let (data, w, h) = develop_raw_linear(&rawimage, &dev, geometry_cfa.as_ref())?;
+    let (data, w, h) = develop_raw_linear(&rawimage, &dev, geometry_cfa.as_ref(), colour_nr)?;
     // The clean RGB owns the remaining work. Drop the mosaic before returning
     // grain; the original RGB already died when capture_original kept only Y.
     drop(rawimage);
@@ -440,24 +444,27 @@ pub(super) fn develop_raw_buffer(
     rawimage: &rawler::RawImage,
     dev: &RawDevelop,
     geometry_cfa: Option<&rawler::cfa::CFA>,
+    colour_nr: f32,
     calibration: Option<([[f32; 3]; 3], [f32; 3])>,
     working: ExportColorSpace,
     profile_stage: Option<&profile::Stage>,
 ) -> Result<(Vec<[f32; 3]>, usize, usize)> {
-    let (data, w, h) = develop_raw_linear(rawimage, dev, geometry_cfa)?;
+    let (data, w, h) = develop_raw_linear(rawimage, dev, geometry_cfa, colour_nr)?;
     let data = settle_camera_buffer(data, calibration, geometry_cfa.is_some(), working, profile_stage);
     Ok((data, w, h))
 }
 
 /// The develop's first half: the demosaic (with its default crop), on
 /// camera-native LINEAR light when the engine calibrates or demosaiced the
-/// CFA itself, and on rawler's own sRGB develop otherwise.
+/// CFA itself, and on rawler's own sRGB develop otherwise. `colour_nr` is the
+/// colour noise reduction's strength ([`render_frame`]).
 pub(super) fn develop_raw_linear(
     rawimage: &rawler::RawImage,
     dev: &RawDevelop,
     geometry_cfa: Option<&rawler::cfa::CFA>,
+    colour_nr: f32,
 ) -> Result<(Vec<[f32; 3]>, usize, usize)> {
-    let inter = match develop_cfa_signed(rawimage, dev) {
+    let inter = match develop_cfa_signed(rawimage, dev, colour_nr) {
         Some(inter) => inter,
         None => dev.develop_intermediate(rawimage).map_err(|e| anyhow!("develop: {e}"))?,
     };
@@ -548,7 +555,12 @@ pub(super) fn settle_camera_buffer(
 /// pixel of peak commit (1745 → 1979 MB on a 60 MP frame). `None` — rawler's own
 /// develop — when the develop does not rescale, the frame is not a CFA
 /// mosaic, or rawler would demosaic it as four colours.
-fn develop_cfa_signed(raw: &rawler::RawImage, dev: &RawDevelop) -> Option<Intermediate> {
+///
+/// The colour noise reduction of a RAW runs here, on the normalised signed
+/// mosaic before the demosaic (`colour_nr` > 0, [`crate::denoise::linear_chroma`]):
+/// the one place of the develop where the noise is the mosaic's own and no
+/// per-pixel nonlinear stage has read it yet.
+fn develop_cfa_signed(raw: &rawler::RawImage, dev: &RawDevelop, colour_nr: f32) -> Option<Intermediate> {
     use rawler::imgop::sensor::bayer::{ppg::PPGDemosaic, Demosaic};
     use rawler::pixarray::PixF32;
     use rawler::rawimage::RawPhotometricInterpretation as Photo;
@@ -571,6 +583,15 @@ fn develop_cfa_signed(raw: &rawler::RawImage, dev: &RawDevelop) -> Option<Interm
             b[1] = (b[1] - black[3]) / max[3];
         });
     });
+    if let Some(scale) = crate::denoise::linear_chroma::scale_of(colour_nr) {
+        let wb = if raw.wb_coeffs[..3].iter().all(|c| c.is_finite() && *c > 0.0) {
+            [raw.wb_coeffs[0], raw.wb_coeffs[1], raw.wb_coeffs[2]].map(f64::from)
+        } else {
+            [1.0; 3]
+        };
+        let rho = crate::denoise::linear_chroma::window();
+        crate::denoise::linear_chroma::filter_mosaic(&mut v, width, raw.height, &config.cfa, wb, scale, rho);
+    }
     let pixels = PixF32::new_with(v, raw.width, raw.height);
     if !demosaic {
         return Some(Intermediate::Monochrome(pixels));

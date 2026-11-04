@@ -70,6 +70,7 @@ mod source;
 mod tone;
 mod wb;
 pub use detail::FilmScale;
+pub(crate) use detail::chroma_nr_reach_px;
 pub use finish::{frame_and_finish, CropPolicy};
 
 const LUT_N: usize = 4096;

@@ -181,7 +181,7 @@ impl Master {
 /// at `max_edge` (the cap runs right after the profile stage, as in
 /// [`render_to_image`]), unsharpened ([`BasePart::recipe`]).
 pub fn base_develop(raw: &Path, part: &BasePart, max_edge: Option<u32>) -> Result<DynamicImage> {
-    render_frame(raw, &part.recipe(), None, max_edge, ExportColorSpace::Srgb, crate::diag::stderr())
+    render_frame(raw, &part.recipe(), None, max_edge, ExportColorSpace::Srgb, crate::diag::stderr(), 0.0)
 }
 
 /// A master's pixels for `part` (a heal, a fill, a denoise): the base part
@@ -441,7 +441,7 @@ impl Drop for Plate {
 pub fn source_plate(raw: &Path, base: &EditRecipe, edge: u32) -> Result<Plate> {
     let mut develop = base.clone();
     (develop.lens_profile.distortion_on, develop.lens_profile.ca_on) = (false, false);
-    let developed = render_frame(raw, &develop, None, Some(edge), ExportColorSpace::Srgb, crate::diag::stderr())?;
+    let developed = render_frame(raw, &develop, None, Some(edge), ExportColorSpace::Srgb, crate::diag::stderr(), develop.color_nr)?;
     let pixels = match BaseEncoding::of(base) {
         Some(e) => e.decode(&developed),
         None => developed,

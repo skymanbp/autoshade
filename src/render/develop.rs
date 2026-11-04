@@ -454,7 +454,11 @@ pub(super) fn apply_develop_with_rasters(
     //    `film`, which retires the V2 §4c/§4d rules (sharpening σ =
     //    clamp(0.0008·min(w,h), 0.7, 2.0), NR at a raster-pixel radius) under
     //    which one slider value meant two structures at preview and at export.
-    if let Some(p) = detail::ChromaNrParams::global(r) {
+    //    Colour noise has ONE stage per develop (E3 of v1.18.0): a RAW's runs
+    //    on its linear mosaic before the demosaic (`denoise::linear_chroma`,
+    //    in the base these pixels came from), so here it runs only for a
+    //    source with no mosaic — a JPEG, a TIFF, a phone picture.
+    if let Some(p) = detail::ChromaNrParams::global(r).filter(|_| !raw_source) {
         detail::chroma_nr(data, w, h, &p, film);
     }
     if let Some(p) = detail::LumaNrParams::global(r) {

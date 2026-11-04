@@ -517,7 +517,7 @@ fn the_black_is_subtracted_signed_through_the_demosaic() {
     };
     let mut dev = RawDevelop::default();
     dev.steps.retain(|s| !matches!(s, ProcessingStep::WhiteBalance | ProcessingStep::Calibrate | ProcessingStep::SRgb));
-    let develop = |raw: &rawler::RawImage| source::develop_raw_buffer(raw, &dev, None, None, ExportColorSpace::Srgb, None).unwrap().0;
+    let develop = |raw: &rawler::RawImage| source::develop_raw_buffer(raw, &dev, None, 0.0, None, ExportColorSpace::Srgb, None).unwrap().0;
     let mean = |px: &[[f32; 3]]| px.iter().map(|p| f64::from(p[0] + p[1] + p[2]) / 3.0).sum::<f64>() / px.len() as f64;
     // Black ± 40 DN in a checkerboard of 2×2 cells: every channel sees both signs.
     let noisy: Vec<u16> = (0..w * h).map(|i| if ((i % w) / 2 + (i / w) / 2) % 2 == 0 { 552 } else { 472 }).collect();
@@ -545,4 +545,65 @@ fn the_black_is_subtracted_signed_through_the_demosaic() {
         panic!("three-colour develop")
     };
     assert_eq!(ours, theirs.data, "above the black the signed subtraction is rawler's own");
+}
+
+/// A RAW's colour noise reduction runs on its linear mosaic inside the
+/// demosaic (E3 of v1.18.0, `denoise::linear_chroma`): developed at Colour 25
+/// a noisy grey mosaic comes out with less colour noise and the same mean
+/// colour; at 0 the develop is the one it always was, to the bit.
+///
+/// MUTATION: drop the stage from `develop_cfa_signed`, or run it at 0.
+#[test]
+fn a_raw_develop_takes_its_colour_noise_on_the_linear_mosaic() {
+    use rawler::cfa::{PlaneColor, CFA};
+    use rawler::decoders::Camera;
+    use rawler::imgop::develop::{ProcessingStep, RawDevelop};
+    use rawler::rawimage::{BlackLevel, CFAConfig, RawImageData, RawPhotometricInterpretation, WhiteLevel};
+    let (w, h) = (512usize, 384usize);
+    // Grey at 600 DN above a black of 512, photon + read noise (a = 4 DN,
+    // read sd 8 DN), a deterministic normal per site.
+    let normal = |i: u64| {
+        let hsh = |x: u64| {
+            let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        let u1 = ((hsh(2 * i) >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
+        let u2 = ((hsh(2 * i + 1) >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
+        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+    };
+    let values: Vec<u16> = (0..w * h)
+        .map(|i| (512.0 + 600.0 + (4.0 * 600.0 + 64.0f64).sqrt() * normal(i as u64)).round() as u16)
+        .collect();
+    let raw = rawler::RawImage::new_with_data(
+        Camera::new(),
+        RawImageData::Integer(values),
+        w,
+        h,
+        1,
+        [1.0, 1.0, 1.0, f32::NAN],
+        RawPhotometricInterpretation::Cfa(CFAConfig::new(&CFA::new("RGGB"), &PlaneColor::new("RGB"))),
+        Some(BlackLevel::new(&[512u16], 1, 1, 1)),
+        Some(WhiteLevel::new(vec![16383])),
+        false,
+    );
+    let mut dev = RawDevelop::default();
+    dev.steps.retain(|s| !matches!(s, ProcessingStep::WhiteBalance | ProcessingStep::Calibrate | ProcessingStep::SRgb));
+    let develop = |nr: f32| source::develop_raw_buffer(&raw, &dev, None, nr, None, ExportColorSpace::Srgb, None).unwrap().0;
+    let stats = |px: &[[f32; 3]]| {
+        let d: Vec<f64> = px.iter().map(|p| f64::from(p[0] - p[1])).collect();
+        let m = d.iter().sum::<f64>() / d.len() as f64;
+        (m, d.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (d.len() - 1) as f64)
+    };
+    let (off, on) = (develop(0.0), develop(25.0));
+    let ((m0, v0), (m1, v1)) = (stats(&off), stats(&on));
+    assert!(v1 < 0.5 * v0, "R - G variance {v0:.3e} -> {v1:.3e}: the stage did not take the colour noise");
+    assert!((m1 - m0).abs() < 0.05 * v0.sqrt(), "mean R - G {m0:.3e} -> {m1:.3e} (pixel sd {:.3e})", v0.sqrt());
+    assert_eq!(off, develop(0.0), "at 0 the develop is deterministic and has no stage");
+    // The greens the demosaic wrote at the green sites are the mosaic's own.
+    let green_sites_equal = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|(x, y)| (x + y) % 2 == 1).all(|(x, y)| {
+        off[y * w + x][1].to_bits() == on[y * w + x][1].to_bits()
+    });
+    assert!(green_sites_equal, "a green site moved: the stage writes red and blue only");
 }

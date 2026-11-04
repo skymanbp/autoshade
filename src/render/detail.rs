@@ -507,6 +507,13 @@ struct ChromaNrLaw {
 const CHROMA_NR: ChromaNrLaw =
     ChromaNrLaw { radius: Ramp(2.0, 16.0), edge: Ramp(0.08, 0.01), widen: Ramp(1.0, 3.0), full_at: 0.25 };
 
+/// The colour NR's reach in film pixels at slider fraction `amount` (0..=1):
+/// the radius law above, read by the RAW's linear stage at its default strength
+/// (`denoise::linear_chroma`) so the two stages reach the same colour blotch.
+pub(crate) fn chroma_nr_reach_px(amount: f32) -> f32 {
+    CHROMA_NR.radius.at(amount)
+}
+
 /// The Color NR sliders, resolved to 0..=1.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ChromaNrParams {
