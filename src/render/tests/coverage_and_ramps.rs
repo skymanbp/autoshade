@@ -576,7 +576,7 @@ fn gui_coverage_overlay_matches_an_angled_linear_render_weight() {
     let recipe = EditRecipe { masks: vec![adj.clone()], ..Default::default() };
     let coverage = mask_coverage(&adj, &base, MaskFrame::AsRendered);
     let rendered =
-        develop_preview_framed(&base, &recipe, &crate::diag::pixels(), MaskFrame::AsRendered, None, false)
+        develop_preview_framed(&base, &recipe, &crate::diag::pixels(), MaskFrame::AsRendered, None, &crate::render::SourceFrame::Baked(None, None))
             .to_rgb8();
     let (mut claimed, mut agreed, mut clear, mut clean) = (0u32, 0u32, 0u32, 0u32);
     for (x, y, p) in coverage.enumerate_pixels() {

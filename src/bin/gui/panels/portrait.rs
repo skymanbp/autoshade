@@ -136,7 +136,7 @@ const PORTRAIT_ROLES: [MaskRole; 4] = [MaskRole::Face, MaskRole::Eyes, MaskRole:
 /// claimed name beside the photo's develop. The skin seed is sampled from the
 /// canvas's `base` as `recipe` develops it up to the skin mask
 /// ([`panel_skin_seed`]); `lens` is the composed profile when that base is
-/// lens-corrected (the two are then different frames). `film` / `raw_source`
+/// lens-corrected (the two are then different frames). `film` / `source`
 /// are the canvas's (`film_short_edge`, `source_is_raw`).
 #[allow(clippy::too_many_arguments)] // the two pictures, the base's lens, the photo, and the canvas's recipe, film edge and source kind
 pub(crate) fn find_people(
@@ -146,7 +146,7 @@ pub(crate) fn find_people(
     photo: &std::path::Path,
     recipe: &EditRecipe,
     film: Option<u32>,
-    raw_source: bool,
+    source: &autoshade::render::SourceFrame,
 ) -> PortraitFind {
     let cfg = autoshade::config::Config::load();
     let staged = match crate::masks::stage_preview_png(original, "portrait") {
@@ -175,7 +175,7 @@ pub(crate) fn find_people(
         let (w, h) = (original.width(), original.height());
         let face_mask = autoshade::face::face_mask(&report, w, h);
         let eyes_mask = autoshade::face::eyes_mask(&report, w, h);
-        let seed = panel_skin_seed(base, &face_mask, recipe, film, raw_source, lens);
+        let seed = panel_skin_seed(base, &face_mask, recipe, film, source, lens);
         let face = autoshade::face::save_mask(&face_mask, photo, "mask-face")?;
         let eyes = autoshade::face::save_mask(&eyes_mask, photo, "mask-eyes")?;
         Ok(Some(FoundFaces { n: report.faces.len(), face, eyes, seed }))
@@ -197,11 +197,11 @@ pub(crate) fn panel_skin_seed(
     face_mask: &image::GrayImage,
     recipe: &EditRecipe,
     film: Option<u32>,
-    raw_source: bool,
+    source: &autoshade::render::SourceFrame,
     lens: Option<&autoshade::recipe::LensProfile>,
 ) -> Option<([f32; 3], [f32; 2])> {
     let before = recipe.masks.iter().position(|m| m.role == MaskRole::Skin).unwrap_or(recipe.masks.len());
-    let reference = autoshade::face::skin_seed_reference(base, recipe, before, film, raw_source, lens);
+    let reference = autoshade::face::skin_seed_reference(base, recipe, before, film, source, lens);
     match lens {
         Some(p) => {
             autoshade::face::skin_seed(&reference, &autoshade::render::sensor_raster_to_corrected(face_mask, p))
@@ -316,13 +316,13 @@ impl AutoShadeApp {
         let lens = self.base_corrected().then(|| autoshade::render::geometry_profile(&self.recipe).into_owned());
         let recipe = self.recipe.clone();
         let film = self.film_short_edge();
-        let raw_source = self.source_is_raw();
+        let Ok(source) = self.source_frame() else { return };
         self.busy = true;
         self.portrait.line = PortraitLine::Finding;
         self.status = tr(self.lang, "Finding the people and faces… (the first run downloads the models)").into();
         self.spawn_worker(
             move || {
-                Msg::PortraitFound(Box::new(find_people(&original, &base, lens.as_ref(), &photo, &recipe, film, raw_source)))
+                Msg::PortraitFound(Box::new(find_people(&original, &base, lens.as_ref(), &photo, &recipe, film, &source)))
             },
             |e| Msg::PortraitFound(Box::new(PortraitFind { photo: PathBuf::new(), subject: Err(e.to_string()), faces: Err(e.to_string()) })),
         );

@@ -1174,7 +1174,7 @@ fn a_parametric_radial_follows_the_photograph_at_its_stored_size_under_lens_geom
         let area = std::f64::consts::PI * (r * w as f32) as f64 * (r * h as f32) as f64;
         let wired = apply_lens_geometry(&develop_preview(&base, &recipe), &profile, 0.0);
         let control = apply_lens_geometry(
-            &develop_preview_framed(&base, &recipe, &crate::diag::pixels(), MaskFrame::AsRendered, None, false),
+            &develop_preview_framed(&base, &recipe, &crate::diag::pixels(), MaskFrame::AsRendered, None, &crate::render::SourceFrame::Baked(None, None)),
             &profile,
             0.0,
         );
@@ -1221,7 +1221,7 @@ fn a_centred_radial_ends_at_camera_raws_edge_under_lens_geometry() {
     };
     let wired = edge(&apply_lens_geometry(&develop_preview(&base, &recipe), &profile, 0.0));
     let control = edge(&apply_lens_geometry(
-        &develop_preview_framed(&base, &recipe, &crate::diag::pixels(), MaskFrame::AsRendered, None, false),
+        &develop_preview_framed(&base, &recipe, &crate::diag::pixels(), MaskFrame::AsRendered, None, &crate::render::SourceFrame::Baked(None, None)),
         &profile,
         0.0,
     ));
@@ -1321,7 +1321,7 @@ fn with_the_geometry_stage_inactive_the_mask_chain_is_untouched() {
     assert_eq!(a.to_rgb8().as_raw(), b.to_rgb8().as_raw(), "an inert profile moved a mask");
     // …and both equal the explicitly-unadapted chain, which is what
     // "unchanged from before this batch" means.
-    let c = develop_preview_framed(&base, &none, &crate::diag::pixels(), MaskFrame::AsRendered, None, false);
+    let c = develop_preview_framed(&base, &none, &crate::diag::pixels(), MaskFrame::AsRendered, None, &crate::render::SourceFrame::Baked(None, None));
     assert_eq!(a.to_rgb8().as_raw(), c.to_rgb8().as_raw());
 
     // (a2) The case the identity short-circuit in `MaskUnwarp::new` exists
@@ -1659,8 +1659,8 @@ fn the_engine_evaluates_masks_before_the_geometry_stage() {
     // the fix, not a counter-example to the ordering, and asking with the
     // frame pinned is how the ordering stays measurable.
     let anon = crate::diag::pixels();
-    let masked_off = develop_preview_framed(&base, &off, &anon, MaskFrame::AsRendered, None, false);
-    let masked_on = develop_preview_framed(&base, &on, &anon, MaskFrame::AsRendered, None, false);
+    let masked_off = develop_preview_framed(&base, &off, &anon, MaskFrame::AsRendered, None, &crate::render::SourceFrame::Baked(None, None));
+    let masked_on = develop_preview_framed(&base, &on, &anon, MaskFrame::AsRendered, None, &crate::render::SourceFrame::Baked(None, None));
     assert_eq!(
         masked_off.to_rgb8().as_raw(),
         masked_on.to_rgb8().as_raw(),

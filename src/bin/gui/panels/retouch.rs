@@ -36,7 +36,7 @@ fn developed_card_pixels(
         &autoshade::diag::pixels(),
         autoshade::render::MaskFrame::sampled(&geom, corrected),
         autoshade::decode::film_short_edge(path),
-        raw,
+        &frame,
     );
     autoshade::render::Master::of(image, &frame, &part)
 }

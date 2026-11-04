@@ -313,14 +313,14 @@ pub fn skin_seed(reference: &image::RgbImage, face: &GrayImage) -> Option<([f32;
 /// [`crate::render::MaskFrame::AsRendered`]; the GUI's
 /// `range_reference_recipe`). Seeded from the undeveloped frame (until
 /// 2026-10-26), a recipe that moved the white balance seeded a colour no skin
-/// pixel of the render carries. `film_short_edge` / `raw_source` are
+/// pixel of the render carries. `film_short_edge` / `source` are
 /// `develop_preview_framed`'s.
 pub fn skin_seed_reference(
     frame: &image::DynamicImage,
     recipe: &crate::recipe::EditRecipe,
     before: usize,
     film_short_edge: Option<u32>,
-    raw_source: bool,
+    source: &crate::render::SourceFrame,
     lens: Option<&crate::recipe::LensProfile>,
 ) -> image::RgbImage {
     let mut pre = recipe.clone();
@@ -334,7 +334,7 @@ pub fn skin_seed_reference(
         Some(profile) => crate::render::MaskFrame::Corrected { profile },
         None => crate::render::MaskFrame::AsRendered,
     };
-    crate::render::develop_preview_framed(frame, &pre, &crate::diag::pixels(), mask_frame, film_short_edge, raw_source)
+    crate::render::develop_preview_framed(frame, &pre, &crate::diag::pixels(), mask_frame, film_short_edge, source)
         .to_rgb8()
 }
 
@@ -637,7 +637,7 @@ fn resolve_face_masks_with(
                     pre,
                     *at,
                     crate::decode::film_short_edge(src),
-                    crate::decode::is_raw(src),
+                    &crate::render::SourceFrame::of(src).ok()?,
                     // The sensor-frame picture the face was found on.
                     None,
                 );
@@ -1069,7 +1069,7 @@ mod tests {
             &crate::diag::pixels(),
             crate::render::MaskFrame::AsRendered,
             crate::decode::film_short_edge(&src),
-            false,
+            &crate::render::SourceFrame::Baked(None, None),
         )
         .to_rgb8();
         let p = developed.get_pixel(80, 100);

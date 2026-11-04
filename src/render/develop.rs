@@ -38,17 +38,21 @@ pub fn develop_preview(preview: &DynamicImage, recipe: &EditRecipe) -> DynamicIm
 /// the canvas shows (the GUI's Range-mask references and Point Color samples,
 /// the fill's picture of a card) passes the source's own edge so its pixels
 /// are the canvas's pixels;
-/// `None` treats the preview itself as the film. `raw_source` is
-/// [`develop_preview_film`]'s too: the kind of source these pixels came from.
+/// `None` treats the preview itself as the film. `source` is
+/// [`develop_preview_film`]'s too: the frame of the source these pixels came
+/// from — its kind (the Sharpening default) and whether its pixels already
+/// carry the one colour noise reduction (a RAW's base, a marked master;
+/// [`SourceFrame::colour_nr_in_pixels`]), so a surface that samples the
+/// canvas's pixels develops them exactly as the canvas does.
 pub fn develop_preview_framed(
     preview: &DynamicImage,
     recipe: &EditRecipe,
     diag: &crate::diag::Diag<'_>,
     frame: MaskFrame<'_>,
     film_short_edge: Option<u32>,
-    raw_source: bool,
+    source: &SourceFrame,
 ) -> DynamicImage {
-    develop_preview_inner(preview, recipe, diag, Some(frame), film_short_edge, raw_source, false, raw_source)
+    develop_preview_inner(preview, recipe, diag, Some(frame), film_short_edge, source.is_raw(), false, source.colour_nr_in_pixels())
 }
 
 /// [`develop_preview_with`] for a VIEWING surface that knows how large the

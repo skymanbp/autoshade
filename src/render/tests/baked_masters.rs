@@ -200,3 +200,29 @@ fn the_part_carries_the_colour_stage_by_the_controls_own_rule() {
         }
     }
 }
+
+/// The sampling surfaces (the Range-mask reference, the Point Color sample,
+/// the retouch and face crops) develop over the source frame the canvas
+/// shows (E3 of v1.18.0, round 5): on a marked master, a non-Bayer RAW and an
+/// unmarked file alike, the pixel a surface samples is the canvas's pixel.
+///
+/// MUTATION: hand `develop_preview_framed` the source's kind alone (a master
+/// is not a RAW, so its marked pixels would take the display pass a second
+/// time).
+#[test]
+fn a_sampled_colour_is_the_canvas_pixel_whatever_the_source_carries() {
+    let img = chroma_noise_frame(96, 64);
+    let r = EditRecipe { color_nr: 25.0, ..Default::default() };
+    for source in [
+        SourceFrame::Baked(None, BakedColourNr::of(25.0)),
+        SourceFrame::Baked(None, None),
+        SourceFrame::Raw { linear_stage: true },
+        SourceFrame::Raw { linear_stage: false },
+    ] {
+        let canvas = develop_preview_film(&img, &r, &crate::diag::pixels(), None, &source).to_rgb8();
+        let sampled =
+            crate::render::develop_preview_framed(&img, &r, &crate::diag::pixels(), crate::render::MaskFrame::AsRendered, None, &source)
+                .to_rgb8();
+        assert_eq!(sampled, canvas, "{source:?}: the sampled pixels are the canvas's");
+    }
+}

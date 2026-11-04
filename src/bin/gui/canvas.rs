@@ -296,7 +296,9 @@ impl AutoShadeApp {
                 // The canvas's own film edge: the Detail passes ran before this
                 // mask on the canvas, at that scale, so the range must too.
                 let film = self.film_short_edge();
-                let raw_source = self.source_is_raw();
+                // The canvas's own source frame (E3 of v1.18.0): a marked
+                // master's pixels carry the colour stage, as a RAW's base does.
+                let Ok(source) = self.source_frame() else { return };
                 let composed = autoshade::render::geometry_profile(&self.recipe);
                 let img = autoshade::render::develop_preview_framed(
                     &base,
@@ -304,7 +306,7 @@ impl AutoShadeApp {
                     &autoshade::diag::pixels(),
                     self.sampled_frame(&composed),
                     film,
-                    raw_source,
+                    &source,
                 );
                 self.overlay_ref = Some((pre, img));
             }
@@ -1040,7 +1042,9 @@ impl AutoShadeApp {
                 // reasons as the overlay build above, and they must MATCH it —
                 // they share cache.
                 let film = self.film_short_edge();
-                let raw_source = self.source_is_raw();
+                // The canvas's own source frame (E3 of v1.18.0): a marked
+                // master's pixels carry the colour stage, as a RAW's base does.
+                let Ok(source) = self.source_frame() else { return };
                 let composed = autoshade::render::geometry_profile(&self.recipe);
                 let img = autoshade::render::develop_preview_framed(
                     &base,
@@ -1048,7 +1052,7 @@ impl AutoShadeApp {
                     &autoshade::diag::pixels(),
                     self.sampled_frame(&composed),
                     film,
-                    raw_source,
+                    &source,
                 );
                 self.overlay_ref = Some((pre, img));
             }
@@ -1090,7 +1094,7 @@ impl AutoShadeApp {
             let Some(base) = self.base_preview.clone() else { return };
             let reference = autoshade::render::point_color_sampling_recipe(&self.recipe);
             let film = self.film_short_edge();
-            let raw_source = self.source_is_raw();
+            let Ok(source) = self.source_frame() else { return };
             let composed = autoshade::render::geometry_profile(&self.recipe);
             let img = autoshade::render::develop_preview_framed(
                 &base,
@@ -1098,7 +1102,7 @@ impl AutoShadeApp {
                 &autoshade::diag::pixels(),
                 self.sampled_frame(&composed),
                 film,
-                raw_source,
+                &source,
             );
             let (bx, by) = self.orig_to_base_norm((nx, ny));
             let Some(px) = sample_5x5_mean(&img, bx, by) else { return };
