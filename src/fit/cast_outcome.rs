@@ -318,6 +318,19 @@ impl TerminalHarm {
 /// 0.0010 -> err_after 0.0029 is nearly 3× worse, and no absolute floor below
 /// 0.003 catches it). Scale with the error instead and add the quantisation
 /// budget once.
+///
+/// What FIT_QUANT does NOT hold is the commutation error: the search previews
+/// a candidate at the analysis size on a plate clamped where the export clamps
+/// (the zero point exact), while the export renders the candidate and then
+/// resamples, and clamp-then-average differs from average-then-clamp wherever
+/// a window holds clipped and unclipped pixels. Measured at the finished
+/// recipes of the seven corpus fits on the clamped plate (v1.18.0 R13b /
+/// R14, `self_consistency::
+/// the_preview_of_a_finished_recipe_against_its_resampled_export`): 0.0032 to
+/// 0.0214 of J*, 1.4x to 9.3x this constant. That gap is why the terminal arm
+/// re-reads the finished recipe at full size and ships on that reading
+/// (`pipeline::reread_at_full_size`); it is a property of the recipe, not of
+/// the fit's rounding, and is not folded in here.
 pub(crate) const FIT_QUANT: f32 = 2.3e-3;
 
 /// THE stage-vs-absence law (v1.18.0, R1): a stage SHIPS only when its

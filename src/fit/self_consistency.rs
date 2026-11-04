@@ -92,15 +92,28 @@ pub(crate) fn straight_pair(raw: &std::path::Path, set: impl Fn(&mut EditRecipe)
 }
 
 /// Render `raw` with the control `set` applies on top of its straight
-/// conversion, reverse-fit from the straight conversion at `strength`, and
-/// return (the base the fit composed, the report).
+/// conversion, reverse-fit from the straight conversion at `strength`, re-read
+/// the finished recipe at full size as the entry points do
+/// ([`crate::pipeline::reread_at_full_size`], R13b), and return (the base the
+/// fit composed, the report). The report's residual is then the terminal
+/// full-size reading — what ships (R14); the analysis-size residual the search
+/// ended on is printed beside it, and their gap is the measured commutation
+/// error of that recipe.
 fn round_trip(raw: &std::path::Path, strength: f32, set: impl Fn(&mut EditRecipe)) -> (EditRecipe, FitReport) {
     let (src, target, base) = straight_pair(raw, set);
-    let report = fit_recipe_from_with(
+    let mut report = fit_recipe_from_with(
         &src,
         &target,
         &base,
         FitOptions { strength: GradeStrength::new(strength), provider: None },
+    );
+    let analysis = report.err_after;
+    crate::pipeline::reread_at_full_size(&mut report, Some(raw), &src, &target, &base);
+    eprintln!(
+        "TERMINAL {}: full-size residual {:.5}; analysis-size residual {analysis:.5} (commutation {:+.5})",
+        raw.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        report.err_after,
+        report.err_after - analysis
     );
     (base, report)
 }
@@ -141,7 +154,6 @@ fn the_fit_recovers_a_white_balance_it_rendered() {
 }
 
 #[test]
-#[ignore = "self-consistency gate: fails at v1.18.0 start, a defect this version fixes (rel1180 msg2); run with --ignored"]
 fn the_fit_recovers_a_tint_it_rendered() {
     let Some(raw) = corpus_raw("p39.arw") else { return };
     let (base, rep) = round_trip(&raw, 0.85, |r| r.tint = 15.0);
@@ -215,9 +227,12 @@ fn the_straight_conversion_round_trips_to_itself() {
         let Some(raw) = corpus_raw(name) else { return };
         let (base, rep) = round_trip(&raw, 0.85, |_| {});
         let moved = moved_controls(&base, &rep.recipe);
-        eprintln!("GATE identity {name}: err {:.5} -> {:.5}; moved {moved:?}", rep.err_before, rep.err_after);
-        if rep.err_before > FIT_QUANT || !moved.is_empty() {
-            failures.push(format!("{name}: the identical pair reads {:.5} (FIT_QUANT {FIT_QUANT}) and moved {} controls", rep.err_before, moved.len()));
+        eprintln!("GATE identity {name}: err {:.5} -> {:.5} (terminal); moved {moved:?}", rep.err_before, rep.err_after);
+        if rep.err_before > FIT_QUANT || rep.err_after > FIT_QUANT || !moved.is_empty() {
+            failures.push(format!(
+                "{name}: the identical pair reads {:.5} at the search's zero point and {:.5} at full size (FIT_QUANT {FIT_QUANT}) and moved {} controls",
+                rep.err_before, rep.err_after, moved.len()
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("; "));
@@ -230,7 +245,6 @@ fn the_straight_conversion_round_trips_to_itself() {
 /// under the clip (-0.4 EV). In v1.17.1 the clipped target pegged the mixer,
 /// tinted the sky and fanned the cast curves (rel1180 msg1, item 5).
 #[test]
-#[ignore = "self-consistency gate: fails at v1.18.0 start, a defect this version fixes (rel1180 msg2); run with --ignored"]
 fn the_fit_recovers_an_exposure_alone_with_a_clipped_sky() {
     let Some(raw) = corpus_raw("p39.arw") else { return };
     let (base, rep) = round_trip(&raw, 0.85, |r| r.exposure_ev = 1.0);
@@ -238,7 +252,6 @@ fn the_fit_recovers_an_exposure_alone_with_a_clipped_sky() {
 }
 
 #[test]
-#[ignore = "self-consistency gate: fails at v1.18.0 start, a defect this version fixes (rel1180 msg2); run with --ignored"]
 fn the_fit_recovers_an_exposure_alone_just_under_the_clip() {
     let Some(raw) = corpus_raw("p39.arw") else { return };
     let (base, rep) = round_trip(&raw, 0.85, |r| r.exposure_ev = -0.4);
