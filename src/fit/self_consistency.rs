@@ -217,3 +217,25 @@ fn the_straight_conversion_round_trips_to_itself() {
     }
     assert!(failures.is_empty(), "{}", failures.join("; "));
 }
+
+/// Item 5's case in the gate's form: a target that differs from the straight
+/// conversion by EXPOSURE ALONE is recovered as exposure alone — no mixer, no
+/// tint, no cast curves (no fan), nothing else — whether the exposure clips
+/// the sky (+1.0 EV on p39: green and blue clip over the sky) or stays just
+/// under the clip (-0.4 EV). In v1.17.1 the clipped target pegged the mixer,
+/// tinted the sky and fanned the cast curves (rel1180 msg1, item 5).
+#[test]
+#[ignore = "self-consistency gate: fails at v1.18.0 start, a defect this version fixes (rel1180 msg2); run with --ignored"]
+fn the_fit_recovers_an_exposure_alone_with_a_clipped_sky() {
+    let Some(raw) = corpus_raw("p39.arw") else { return };
+    let (base, rep) = round_trip(&raw, 0.85, |r| r.exposure_ev = 1.0);
+    gate("exposure +1.0 EV (sky clipped)", &base, &rep, rep.recipe.exposure_ev - base.exposure_ev, 1.0, &["exposure_ev"]);
+}
+
+#[test]
+#[ignore = "self-consistency gate: fails at v1.18.0 start, a defect this version fixes (rel1180 msg2); run with --ignored"]
+fn the_fit_recovers_an_exposure_alone_just_under_the_clip() {
+    let Some(raw) = corpus_raw("p39.arw") else { return };
+    let (base, rep) = round_trip(&raw, 0.85, |r| r.exposure_ev = -0.4);
+    gate("exposure -0.4 EV (under the clip)", &base, &rep, rep.recipe.exposure_ev - base.exposure_ev, -0.4, &["exposure_ev"]);
+}
