@@ -156,7 +156,7 @@ pub(crate) fn with_presence<'w>(weights: &'w [f32], presence: Option<&[f32]>) ->
 /// whole residual could be framing. The cap is a CONFIDENCE, not a residual,
 /// and stays 0.5 in J* (v1.18.0). The framing residual was not re-read in J*;
 /// carried by the corpus exchange rate (1.53) it is 0.131, which the R5
-/// ladder ([`CONFIDENCE_SLOPE`] 4.82) reads as 0.37 — below the cap, so on
+/// ladder ([`CONFIDENCE_SLOPE`] 4.8) reads as 0.37 — below the cap, so on
 /// such a pair the ladder, not the cap, now sets the number.
 pub(super) const NOT_SAME_FRAME_CONFIDENCE_CAP: f32 = 0.5;
 

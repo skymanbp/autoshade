@@ -428,32 +428,32 @@ pub(super) const PROJECT_REFINE: usize = 8;
 // `the_confidence_family_is_one_calibration` pins, and it holds frame by
 // frame. The current residuals are in the ledger (Part 13).
 
-/// Confidence per unit of look error, refit in J* from the table above (R5,
-/// v1.18.0): each row's finished global residual re-read in J* — loaded the
-/// way CLI `match` loads a RAW, the shipped default strength — against the
-/// confidence "this ladder" gave it, least squares through `c = 1 − s·J*`:
+/// Confidence per unit of look error in J* (R5, v1.18.0), derived from the one
+/// row of the table above whose value is fixed by definition: `p37`, the pair
+/// whose target is ANOTHER photograph. No recipe can fit it, so its confidence
+/// must sit on [`CONFIDENCE_FLOOR`]: `1 − s·J*(p37) ≤ 0.25`, i.e.
+/// `s ≥ 0.75 / 0.157756 = 4.754`, and 4.8 is the smallest slope at two figures
+/// that meets it (`p37` reads 1 − 4.8 × 0.157756 = 0.243 → the floor). The
+/// residual is the finished global one, loaded the way CLI `match` loads the
+/// pair, at the shipped default strength, read after R8.
 ///
-/// | row     | J* residual | source of the reading        | table c | at 4.82 |
-/// |---------|-------------|------------------------------|---------|---------|
-/// | p40     | 0.051415    | re-read                      | 0.799   | 0.752   |
-/// | p41     | 0.061028    | re-read                      | 0.752   | 0.706   |
-/// | p38     | 0.054378    | re-read                      | 0.678   | 0.738   |
-/// | p39     | 0.041420    | re-read                      | 0.673   | 0.800   |
-/// | neutral | 0.152800    | FALLBACK 1.53 × 0.099869 (*) | 0.401   | 0.264   |
-/// | p36     | 0.040627    | re-read                      | 0.370   | 0.804   |
-/// | p37     | 0.157756    | re-read (Atmosphere)         | 0.250   | 0.250   |
+/// The other rows are the record, not the derivation: their "this ladder"
+/// column above was the OLD formula's own output (1 − 6 × display residual),
+/// not a measurement of what a fit is worth, so fitting a slope to reproduce
+/// it would be circular. Read in J* on the same tree (each row through
+/// `pipeline::fit_source`; the neutral row is a calibration JPEG, a baked
+/// source):
 ///
-/// (*) the corpus cannot re-read this row: its source (a calibration JPEG)
-/// does not load through `pipeline::fit_source`, so its display residual is carried by the
-/// exchange rate (the same base frame reads a median 1.53 times higher in J*
-/// on the five Full-mode pairs). `p37` sits on the floor and enters as the
-/// constraint `s ≥ 0.75 / 0.157756 = 4.754`, which the fit (4.818) meets.
-/// No slope keeps every row: the rows were claims about the 2026-09-02 fits,
-/// and today's fits moved the residuals unevenly — `p36` (0.0406) and `p39`
-/// (0.0414) now land within 0.001 of each other but claimed 0.37 and 0.67 —
-/// so a monotone ladder misses `p36` by 0.43 at any slope; the fit is the
-/// least-squares compromise over the six re-readable rows and the floor.
-pub(super) const CONFIDENCE_SLOPE: f32 = 4.82;
+/// | row     | J* residual | at 4.8 |
+/// |---------|-------------|--------|
+/// | p40     | 0.053340    | 0.744  |
+/// | p41     | 0.061116    | 0.707  |
+/// | p38     | 0.055669    | 0.733  |
+/// | p39     | 0.042468    | 0.796  |
+/// | neutral | 0.087423    | 0.580  |
+/// | p36     | 0.043867    | 0.789  |
+/// | p37     | 0.157756    | 0.250 (floor) |
+pub(super) const CONFIDENCE_SLOPE: f32 = 4.8;
 /// Never claim less than this — a fit that lands far is still a fit, and 0
 /// would read as "broken" rather than "approximate".
 pub(super) const CONFIDENCE_FLOOR: f32 = 0.25;
@@ -465,9 +465,9 @@ pub(super) const CONFIDENCE_CEIL: f32 = 0.95;
 /// versus 0.0413 for the preferred saved render.
 pub(super) const UNSUPPORTED_MOVEMENT_CONFIDENCE_SLOPE: f32 = 8.0;
 /// The FAR line — the residual at which [`CONFIDENCE_SLOPE`] has already
-/// driven confidence onto [`CONFIDENCE_FLOOR`] ((1 − 0.25)/4.82 = 0.156 in
-/// J* since R5; (1 − 0.25)/6 = 0.125 of the display objective before
-/// v1.18.0), rounded down to a legible number.
+/// driven confidence onto [`CONFIDENCE_FLOOR`] ((1 − 0.25)/4.8 = 0.156 in J*
+/// since R5; (1 − 0.25)/6 = 0.125 of the display objective before v1.18.0),
+/// rounded down to two figures.
 pub(super) const FIT_FAR_ERR: f32 = 0.15;
 
 /// The one clamp both confidence ladders (this module's and the zoned one's)
