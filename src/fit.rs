@@ -122,6 +122,7 @@ pub(crate) use cast_outcome::{FIT_QUANT, carried_strength_from_notes, ships};
 use cast_outcome::{
     CastOutcome, CastProjection, CastReadings, cast_admission_notes,
     cast_gate_outcome_with_ratio, cast_projection_notes, control_names, eliminate_unearned, global_controls,
+    mixer_controls, Control, CAST_CURVES, GRADE_WHEELS, WB_AXES,
     terminal_harm, unrepresented_note, TONE_SLIDERS,
 };
 #[cfg(test)]

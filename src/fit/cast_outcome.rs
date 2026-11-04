@@ -373,6 +373,21 @@ pub(super) const TONE_SLIDERS: [Control; 6] = [
     Control::Blacks,
 ];
 
+/// The white balance's joint solve: its two axes.
+pub(super) const WB_AXES: [Control; 2] = [Control::Temperature, Control::Tint];
+
+/// The colour grade's joint solve: its four wheels.
+pub(super) const GRADE_WHEELS: [Control; 4] =
+    [Control::GradeShadows, Control::GradeMidtones, Control::GradeHighlights, Control::GradeGlobal];
+
+/// The cast stage's joint solve: the three channel curves.
+pub(super) const CAST_CURVES: [Control; 3] = [Control::RedCurve, Control::GreenCurve, Control::BlueCurve];
+
+/// The mixer's joint solve: the 24 band values.
+pub(super) fn mixer_controls() -> Vec<Control> {
+    (0..8).flat_map(|band| [Control::HslHue(band), Control::HslSaturation(band), Control::HslLuminance(band)]).collect()
+}
+
 /// Every control the finished global recipe can carry whose effect the
 /// objective reads. The detail controls (clarity, texture) are not here:
 /// their gain is read by their own ruler (`detail::detail_residual`), which
@@ -398,9 +413,7 @@ pub(super) fn global_controls() -> Vec<Control> {
         Control::GreenCurve,
         Control::BlueCurve,
     ];
-    for band in 0..8 {
-        all.extend([Control::HslHue(band), Control::HslSaturation(band), Control::HslLuminance(band)]);
-    }
+    all.extend(mixer_controls());
     all
 }
 
@@ -518,6 +531,13 @@ impl Control {
 /// against the solved recipe, not against the last drop, so the drops cannot
 /// add up past FIT_QUANT (R1: allowances never add). Repeated until a pass
 /// drops nothing. `err` is the stage's own ruler. Returns what was dropped.
+///
+/// It runs after EVERY joint solve (R12) — the white balance's two axes, the
+/// tone sliders, the grade wheels, the mixer's bands, the cast curves (with
+/// the white balance when the cast→WB hand-off moved it) — and once more on
+/// the finished recipe: a control that earns nothing must not be built upon
+/// by a later stage, which would otherwise solve from a state that includes
+/// it. One law, this function, at every site.
 pub(super) fn eliminate_unearned(
     recipe: &mut EditRecipe,
     base: &EditRecipe,

@@ -818,6 +818,12 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     if wb_moved && !wb_cells.is_some_and(|v| v.vouched()) && wb_shipped_at.is_none() {
         (recipe.temperature_k, recipe.tint) = wb_restore;
     }
+    // R12: the white balance's two axes came out of one joint solve; each
+    // earns its place on the objective before the stages after build on it.
+    let objective_of = |r: &EditRecipe| {
+        look_err_with_evidence(&pixels_of(&render::develop_preview(&s_img, r)), &tp, &evidence)
+    };
+    unearned.extend(eliminate_unearned(&mut recipe, base, &WB_AXES, objective_of));
     let wb_admitted = (recipe.temperature_k, recipe.tint) != wb_restore;
     let wb_cells = wb_cells.map(|vouch| WbCellVerdict {
         vouch,
@@ -874,6 +880,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // remainder, on the shadow / midtone / highlight wheels (`grade`).
     let grade_held =
         grade::fit_grade_stage(&s_img, &tp, &wb_weights, cells.as_ref(), budget.grade_wheel, &mut recipe);
+    // R12: the four wheels are one joint solve.
+    unearned.extend(eliminate_unearned(&mut recipe, base, &GRADE_WHEELS, objective_of));
     // NOTE deliberately NO mid-pipeline hue veto here EITHER (it was tried
     // in the evidence era and removed): the ordering comment above is the
     // contract — saturation legitimately amplifies a latent cast and the
@@ -945,6 +953,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     let hue_before_mixer = recipe.hsl.hue;
     let mut hsl_facts =
         fit_hsl_stage(&s_img, &sp, &tp, &evidence, hue_vouch, cells.as_ref(), budget, &mut recipe);
+    // R12: the mixer's bands are one joint solve; the cast curves fit on what stays.
+    unearned.extend(eliminate_unearned(&mut recipe, base, &mixer_controls(), objective_of));
     let hsl_fitted = recipe.hsl.clone();
     let mut cast_admission: Option<(f32, f32)> = None;
     // NOT cleared per call, unlike `cast_admission`: a hand-off moves the
@@ -1324,6 +1334,13 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // the reason, which is a fact about how the two colour gates behave in a
     // stepped-down state rather than a hole in the fixture set.
     let mut cast = fit_cast_stage(&mut recipe, CastRescue::ChaseSaturation);
+    // R12: the three curves are one joint solve, and a cast→WB hand-off made
+    // the white balance part of it.
+    let mut cast_controls = CAST_CURVES.to_vec();
+    if (recipe.temperature_k, recipe.tint) != (wb_stage.temperature_k, wb_stage.tint) {
+        cast_controls.extend(WB_AXES);
+    }
+    unearned.extend(eliminate_unearned(&mut recipe, base, &cast_controls, objective_of));
 
     // --- 4b) do-no-harm — the pipeline-END check ------------------------------
     // Goal: don't hand back a recipe that renders FARTHER from the target

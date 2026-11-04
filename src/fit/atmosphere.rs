@@ -377,6 +377,10 @@ pub(super) fn fit_atmosphere_from_parts(
         budget,
         strength,
     );
+    // R12: elimination after every joint solve, on this mode's objective.
+    let objective_of =
+        |r: &EditRecipe| look_err_with_evidence(&pixels_of(&render::develop_preview(s_img, r)), tp, evidence);
+    let mut unearned = eliminate_unearned(&mut recipe, base, &WB_AXES, objective_of);
     let provisional = pixels_of(&render::develop_preview(s_img, &recipe));
     recipe.tone_curve = atmosphere_tone_curve_weighted(
         &provisional,
@@ -393,6 +397,8 @@ pub(super) fn fit_atmosphere_from_parts(
     ) && budget.vetoes == VetoPolicy::Withhold {
         withhold_atmosphere_tone(&mut recipe, base, &mut facts);
     }
+    // The exposure and the curve solved on it are the tone's joint solve.
+    unearned.extend(eliminate_unearned(&mut recipe, base, &[Control::Exposure, Control::ToneCurve], objective_of));
 
     let target_chroma = weighted_mean_chroma(tp, &evidence.target_weights).unwrap_or_else(|| mean_chroma(tp));
     let mut sat_pegged = false;
@@ -446,6 +452,7 @@ pub(super) fn fit_atmosphere_from_parts(
     // statement about the same content on both sides. Its per-band gate is
     // unchanged.
     let mut hsl_facts = fit_hsl_stage(s_img, sp, tp, evidence, None, None, budget, &mut recipe);
+    unearned.extend(eliminate_unearned(&mut recipe, base, &mixer_controls(), objective_of));
     let hsl_fitted = recipe.hsl.clone();
 
     let sat_fitted = recipe.saturation;
@@ -466,10 +473,9 @@ pub(super) fn fit_atmosphere_from_parts(
     let sat_reduced = recipe.saturation != sat_fitted;
     // R8: every control of the finished recipe earns FIT_QUANT against its
     // own absence on this mode's ruler, or goes back to its zero.
-    let unearned = eliminate_unearned(&mut recipe, base, &global_controls(), |r| {
-        look_err_with_evidence(&pixels_of(&render::develop_preview(s_img, r)), tp, evidence)
-    });
-    if !unearned.is_empty() {
+    let finished = eliminate_unearned(&mut recipe, base, &global_controls(), objective_of);
+    unearned.extend(finished.iter().copied());
+    if !finished.is_empty() {
         err_after = look_err_with_evidence(&pixels_of(&render::develop_preview(s_img, &recipe)), tp, evidence);
     }
     let joint_base = crate::fit_zoned::joint_reading_with_evidence(
