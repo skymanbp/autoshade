@@ -2926,8 +2926,19 @@ pub const FIT_SOURCE_EDGE: u32 = 2048;
 /// draws its zone rasters in its source's frame and they say so
 /// ([`crate::render::fit_raster_frame`]), so a mask is never resampled from
 /// one frame into the other on the way.
+///
+/// A BAKED file (a JPEG, a PNG — what Normal mode fits) has no sensor frame:
+/// it is fitted on its own pixels under the calibration its own saved develop
+/// carries (none for a file nothing has calibrated), the rule the CLI's
+/// `match_source` applies to it. This function used to send every path into
+/// the sensor develop, so a baked source failed in the RAW decoder and the
+/// confidence table's neutral row (a calibration JPEG) could not be read
+/// through the entry the app fits it with (v1.18.0, R5).
 pub fn fit_source(raw: &Path) -> Result<(crate::render::Plate, crate::recipe::EditRecipe)> {
     let base = calibration_recipe(fit_calibration(raw));
+    if !crate::decode::is_raw(raw) {
+        return Ok((fit_source_baked(raw, crate::decode::preview_only(raw)?, &base)?, base));
+    }
     Ok((fit_source_of(raw, &base)?, base))
 }
 

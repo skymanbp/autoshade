@@ -1705,8 +1705,7 @@ fn match_source(raw: &Path, negative: Option<&Path>) -> Result<(render::Plate, E
         let pixels = render::source_pixels(raw, Some(pipeline::FIT_SOURCE_EDGE))?;
         return Ok((pipeline::fit_source_baked(raw, pixels, &base)?, base));
     }
-    let base = pipeline::calibration_recipe(pipeline::fit_calibration(raw));
-    Ok((pipeline::fit_source_baked(raw, decode::preview_only(raw)?, &base)?, base))
+    pipeline::fit_source(raw)
 }
 
 /// Reverse-fit: solve for the EditRecipe that maps `raw`'s look onto `target`'s
