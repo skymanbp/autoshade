@@ -601,7 +601,13 @@ pub(super) fn attach_one_zone_as(
         ZoneMode::Atmosphere => &report.evidence,
         ZoneMode::Full => report.structural_evidence.as_ref().unwrap_or(&report.evidence),
     };
-    let zone_evidence = frame_evidence.scoped(tgt_px, moved_source, moved_target);
+    let mut zone_evidence = frame_evidence.scoped(tgt_px, moved_source, moved_target);
+    // R2 (v1.18.0): a zone's own model pairs by the zone's OWN D, not the
+    // frame's: an Atmosphere zone claims its structure was replaced, so none
+    // of its pixels pair and its terms read the distribution.
+    if mode == ZoneMode::Atmosphere {
+        zone_evidence.paired.fill(false);
+    }
     // Probe the two control classes independently. A one-sided hue band must
     // withhold only chroma movement; supported luminance evidence still earns
     // the zone correction.

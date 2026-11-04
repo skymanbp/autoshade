@@ -185,7 +185,8 @@ fn fit_recipe_zoned_inner_seeded(
                     true,
                     options,
                 );
-                local_verdicts(src, target, base, &mut report);
+                let atmosphere = sky_land_atmosphere(&report, &zone_divergence, &src_mask);
+                local_verdicts(src, target, base, &mut report, &atmosphere);
                 for (label, kept, reading) in readings {
                     crate::rationale::push_note(
                         &mut report.recipe.rationale,
@@ -241,7 +242,8 @@ fn fit_recipe_zoned_inner_seeded(
                 true,
                 options,
             );
-            local_verdicts(src, target, base, &mut report);
+            let atmosphere = sky_land_atmosphere(&report, &zone_divergence, &src_mask);
+            local_verdicts(src, target, base, &mut report, &atmosphere);
             let field = layers.field
                 .then(|| field::solve_local_field(src, target, &mut report)).flatten();
             let partitioned = attach_zones_with_divergence(
@@ -273,7 +275,7 @@ fn fit_recipe_zoned_inner_seeded(
                 true,
                 options,
             );
-            local_verdicts(src, target, base, &mut report);
+            local_verdicts(src, target, base, &mut report, &[]);
             crate::rationale::push_note(
                 &mut report.recipe.rationale,
                 &mut report.notes,
@@ -513,7 +515,11 @@ fn fit_recipe_zoned_multi_inner(
         let divergent_cover = divergences.iter().filter(|d| d.divergence.is_some_and(|r| r.d >= fit::DIVERGENCE_ZONE)).map(|d| d.share).sum::<f32>();
         let mut report = fit::fit_recipe_from_promoted_with_disclosure_opts(src, target, base,
             divergent_cover >= fit::DIVERGENT_COVER_PROMOTES, true, options);
-        local_verdicts(src, target, base, &mut report);
+        let (aw, ah) = (report.evidence.width, report.evidence.height);
+        let atmosphere = atmosphere_members(
+            divergences.iter().zip(regions.iter().map(|r| mask_weights(&r.source, aw, ah))),
+        );
+        local_verdicts(src, target, base, &mut report, &atmosphere);
         // The same disclosure the sky/land route makes for ITS refinement.
         push_refinement_notes(&mut report, &refinements);
         push_matte_notes(&mut report, &mattes);
@@ -673,8 +679,60 @@ pub(super) fn release_unselected_rasters(
 /// re-read on that ruler here, so every comparison the local stages make is
 /// between two readings of ONE ruler, and the zoned report's `err_before` ->
 /// `err_after` is the local reading at both ends.
-fn local_verdicts(src: &DynamicImage, target: &DynamicImage, base: &crate::recipe::EditRecipe, report: &mut FitReport) {
+/// R2 (v1.18.0): pairing is decided by the FINEST mode that was read. A pixel
+/// pairs in `E_paired` only if the frame pairs it AND no zone containing it
+/// reads Atmosphere (its own D >= [`fit::DIVERGENCE_ZONE`]): Atmosphere is the
+/// claim that the zone's structure was replaced, so its pixels have no index
+/// counterpart and are read by `E_dist`, whatever the frame's own D said.
+/// "Containing" is membership above one half — the pixel belongs more to the
+/// zone than to its complement (the free-mask carrier's half-alpha rule).
+/// `atmosphere` holds the SOURCE soft memberships of every segmented zone that
+/// reads Atmosphere, on the analysis raster. Both frame rulers the local layers
+/// read (the report's and the structural one Full zones scope inside an
+/// Atmosphere frame) carry the same population and the S-mode flag.
+fn atmosphere_unpaired(evidence: &mut fit::EvidenceModel, atmosphere: &[Vec<f32>]) {
+    for zone in atmosphere {
+        for (pairs, member) in evidence.paired.iter_mut().zip(zone) {
+            if *member > 0.5 {
+                *pairs = false;
+            }
+        }
+    }
+}
+
+/// The SOURCE soft memberships, on the analysis raster of `report`'s ruler,
+/// of the zones whose own reading is Atmosphere ([`atmosphere_unpaired`]).
+fn atmosphere_members<'a>(
+    zones: impl IntoIterator<Item = (&'a ZoneDivergence, Vec<f32>)>,
+) -> Vec<Vec<f32>> {
+    zones
+        .into_iter()
+        .filter(|(zone, _)| zone.divergence.is_some_and(|d| d.d >= fit::DIVERGENCE_ZONE))
+        .map(|(_, weights)| weights)
+        .collect()
+}
+
+/// The sky and land zones' Atmosphere memberships: the sky's source mask and
+/// its complement, as [`measure_zone_divergence`] read them.
+fn sky_land_atmosphere(report: &FitReport, zones: &attach::ZoneDivergences, src_mask: &GrayImage) -> Vec<Vec<f32>> {
+    let sky = mask_weights(src_mask, report.evidence.width, report.evidence.height);
+    let land = sky.iter().map(|v| 1.0 - v).collect();
+    atmosphere_members([(&zones.sky, sky), (&zones.land, land)])
+}
+
+fn local_verdicts(
+    src: &DynamicImage,
+    target: &DynamicImage,
+    base: &crate::recipe::EditRecipe,
+    report: &mut FitReport,
+    atmosphere: &[Vec<f32>],
+) {
     report.evidence.local = true;
+    atmosphere_unpaired(&mut report.evidence, atmosphere);
+    if let Some(structural) = report.structural_evidence.as_mut() {
+        structural.local = true;
+        atmosphere_unpaired(structural, atmosphere);
+    }
     let (s_img, t_img) = fit::analysis_pair(src, target);
     let tgt_px = fit::pixels_of(&t_img);
     let read = |recipe: &crate::recipe::EditRecipe| {
