@@ -525,9 +525,25 @@ fn free_mask_layer_off_is_byte_identical() {
     );
     assert_eq!(FREE_MASK_CALLS.with(|calls| calls.get()), 1,
         "the control run did not reach the bypassed stage");
-    assert_eq!(serde_json::to_vec(&disabled.recipe).unwrap(),
-        serde_json::to_vec(&without_stage.recipe).unwrap());
-    assert_eq!(disabled.recipe.rationale.as_bytes(), without_stage.recipe.rationale.as_bytes());
+    // R3 (v1.18.0): the free-mask layer begins with the sequencer re-reading
+    // the field on the state the stage would start from, and that reading is
+    // published (LOCAL_REALIZED) before the stage is entered. The bypass sits
+    // inside the stage, so the control carries exactly that one note more than
+    // the disabled run, and everything else is byte for byte the same.
+    let extra = without_stage.notes.iter()
+        .filter(|note| !disabled.notes.contains(note)).collect::<Vec<_>>();
+    assert_eq!(extra.len(), 1, "{extra:?}");
+    assert_eq!(extra[0].key, crate::rationale::keys::LOCAL_REALIZED, "{extra:?}");
+    assert_eq!(
+        disabled.notes,
+        without_stage.notes.iter().filter(|note| *note != extra[0]).cloned().collect::<Vec<_>>(),
+    );
+    let without_rationale = |recipe: &crate::recipe::EditRecipe| {
+        let mut recipe = recipe.clone();
+        recipe.rationale.clear();
+        serde_json::to_vec(&recipe).unwrap()
+    };
+    assert_eq!(without_rationale(&disabled.recipe), without_rationale(&without_stage.recipe));
     path.remove();
 
     for (override_value, spatial) in [(Some(1.0), false), (Some(0.003), true), (Some(0.0), true)] {
