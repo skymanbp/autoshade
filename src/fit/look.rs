@@ -28,6 +28,11 @@ pub(crate) fn look_err(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
 ///   noise), and on the disagreement census the σ 2 reading kept the
 ///   per-pixel sign on 39 of 41 verdicts, the two it flipped being star
 ///   texture a tile did not make (rel1180 msg1 §b).
+///   Who pairs is decided by the finest mode that was read, both ways
+///   (v1.18.0 R2, `fit_zoned`'s entry): an Atmosphere zone's pixels never
+///   pair, even in a Full frame, and a Full zone's pixels pair by its own
+///   structural model, even in an Atmosphere frame; pixels in no zone that
+///   was read pair as the frame's mode says.
 /// * `E_dist = 0.55·T_L + 0.20·C_ab` — where pixels do not pair (Atmosphere,
 ///   a structure-blind model), the distribution distance the objective used
 ///   to be, in CIE units: `T_L` the 21-quantile CDF gap on L*/100

@@ -185,8 +185,8 @@ fn fit_recipe_zoned_inner_seeded(
                     true,
                     options,
                 );
-                let atmosphere = sky_land_atmosphere(&report, &zone_divergence, &src_mask);
-                local_verdicts(src, target, base, &mut report, &atmosphere);
+                let pairing = sky_land_pairing(&report, &zone_divergence, &src_mask);
+                local_verdicts(src, target, base, &mut report, &pairing);
                 for (label, kept, reading) in readings {
                     crate::rationale::push_note(
                         &mut report.recipe.rationale,
@@ -242,8 +242,8 @@ fn fit_recipe_zoned_inner_seeded(
                 true,
                 options,
             );
-            let atmosphere = sky_land_atmosphere(&report, &zone_divergence, &src_mask);
-            local_verdicts(src, target, base, &mut report, &atmosphere);
+            let pairing = sky_land_pairing(&report, &zone_divergence, &src_mask);
+            local_verdicts(src, target, base, &mut report, &pairing);
             let field = layers.field
                 .then(|| field::solve_local_field(src, target, &mut report)).flatten();
             let partitioned = attach_zones_with_divergence(
@@ -275,7 +275,7 @@ fn fit_recipe_zoned_inner_seeded(
                 true,
                 options,
             );
-            local_verdicts(src, target, base, &mut report, &[]);
+            local_verdicts(src, target, base, &mut report, &ZonePairing::default());
             crate::rationale::push_note(
                 &mut report.recipe.rationale,
                 &mut report.notes,
@@ -516,10 +516,10 @@ fn fit_recipe_zoned_multi_inner(
         let mut report = fit::fit_recipe_from_promoted_with_disclosure_opts(src, target, base,
             divergent_cover >= fit::DIVERGENT_COVER_PROMOTES, true, options);
         let (aw, ah) = (report.evidence.width, report.evidence.height);
-        let atmosphere = atmosphere_members(
+        let pairing = zone_pairing(
             divergences.iter().zip(regions.iter().map(|r| mask_weights(&r.source, aw, ah))),
         );
-        local_verdicts(src, target, base, &mut report, &atmosphere);
+        local_verdicts(src, target, base, &mut report, &pairing);
         // The same disclosure the sky/land route makes for ITS refinement.
         push_refinement_notes(&mut report, &refinements);
         push_matte_notes(&mut report, &mattes);
@@ -679,19 +679,55 @@ pub(super) fn release_unselected_rasters(
 /// re-read on that ruler here, so every comparison the local stages make is
 /// between two readings of ONE ruler, and the zoned report's `err_before` ->
 /// `err_after` is the local reading at both ends.
-/// R2 (v1.18.0): pairing is decided by the FINEST mode that was read. A pixel
-/// pairs in `E_paired` only if the frame pairs it AND no zone containing it
-/// reads Atmosphere (its own D >= [`fit::DIVERGENCE_ZONE`]): Atmosphere is the
-/// claim that the zone's structure was replaced, so its pixels have no index
-/// counterpart and are read by `E_dist`, whatever the frame's own D said.
-/// "Containing" is membership above one half — the pixel belongs more to the
-/// zone than to its complement (the free-mask carrier's half-alpha rule).
-/// `atmosphere` holds the SOURCE soft memberships of every segmented zone that
-/// reads Atmosphere, on the analysis raster. Both frame rulers the local layers
+///
+/// R2 (v1.18.0): pairing is decided by the FINEST mode that was read, BOTH
+/// ways. The frame ruler's paired population is the frame-paired pixels
+/// outside every Atmosphere zone, together with the pixels of every Full zone
+/// where that zone's own structural model pairs them: an Atmosphere zone's
+/// pixels never pair, even in a Full frame (Atmosphere is the claim that the
+/// zone's structure was replaced, so its pixels have no index counterpart and
+/// are read by `E_dist`), and a Full zone's pixels pair by its own model, even
+/// in an Atmosphere frame (the zone's own D says its structure held, so the
+/// frame-pooled distribution is not its referee). A zone's mode is its own
+/// D against [`fit::DIVERGENCE_ZONE`]; a zone whose D abstained made no claim
+/// and leaves its pixels to the frame. "Containing" is membership above one
+/// half — the pixel belongs more to the zone than to its complement (the
+/// free-mask carrier's half-alpha rule). Both frame rulers the local layers
 /// read (the report's and the structural one Full zones scope inside an
 /// Atmosphere frame) carry the same population and the S-mode flag.
-fn atmosphere_unpaired(evidence: &mut fit::EvidenceModel, atmosphere: &[Vec<f32>]) {
-    for zone in atmosphere {
+#[derive(Default)]
+struct ZonePairing {
+    /// SOURCE soft memberships, on the analysis raster, of the zones whose
+    /// own reading is Atmosphere.
+    atmosphere: Vec<Vec<f32>>,
+    /// The same for the zones whose own reading is Full.
+    full: Vec<Vec<f32>>,
+}
+
+fn zone_pairing<'a>(zones: impl IntoIterator<Item = (&'a ZoneDivergence, Vec<f32>)>) -> ZonePairing {
+    let mut pairing = ZonePairing::default();
+    for (zone, weights) in zones {
+        match zone.divergence {
+            Some(d) if d.d >= fit::DIVERGENCE_ZONE => pairing.atmosphere.push(weights),
+            Some(_) => pairing.full.push(weights),
+            None => {}
+        }
+    }
+    pairing
+}
+
+/// Apply [`ZonePairing`] to one ruler. `own` is what a Full zone's own
+/// structural model pairs: the structural model's pairing (the spatially
+/// supported pixels), which is the frame's own when the frame is Full.
+fn pair_by_finest_mode(evidence: &mut fit::EvidenceModel, own: &[bool], zones: &ZonePairing) {
+    for zone in &zones.full {
+        for ((pairs, member), own) in evidence.paired.iter_mut().zip(zone).zip(own) {
+            if *member > 0.5 {
+                *pairs = *own;
+            }
+        }
+    }
+    for zone in &zones.atmosphere {
         for (pairs, member) in evidence.paired.iter_mut().zip(zone) {
             if *member > 0.5 {
                 *pairs = false;
@@ -700,24 +736,12 @@ fn atmosphere_unpaired(evidence: &mut fit::EvidenceModel, atmosphere: &[Vec<f32>
     }
 }
 
-/// The SOURCE soft memberships, on the analysis raster of `report`'s ruler,
-/// of the zones whose own reading is Atmosphere ([`atmosphere_unpaired`]).
-fn atmosphere_members<'a>(
-    zones: impl IntoIterator<Item = (&'a ZoneDivergence, Vec<f32>)>,
-) -> Vec<Vec<f32>> {
-    zones
-        .into_iter()
-        .filter(|(zone, _)| zone.divergence.is_some_and(|d| d.d >= fit::DIVERGENCE_ZONE))
-        .map(|(_, weights)| weights)
-        .collect()
-}
-
-/// The sky and land zones' Atmosphere memberships: the sky's source mask and
-/// its complement, as [`measure_zone_divergence`] read them.
-fn sky_land_atmosphere(report: &FitReport, zones: &attach::ZoneDivergences, src_mask: &GrayImage) -> Vec<Vec<f32>> {
+/// The sky and land zones' pairing: the sky's source mask and its
+/// complement, as [`measure_zone_divergence`] read them.
+fn sky_land_pairing(report: &FitReport, zones: &attach::ZoneDivergences, src_mask: &GrayImage) -> ZonePairing {
     let sky = mask_weights(src_mask, report.evidence.width, report.evidence.height);
     let land = sky.iter().map(|v| 1.0 - v).collect();
-    atmosphere_members([(&zones.sky, sky), (&zones.land, land)])
+    zone_pairing([(&zones.sky, sky), (&zones.land, land)])
 }
 
 fn local_verdicts(
@@ -725,13 +749,15 @@ fn local_verdicts(
     target: &DynamicImage,
     base: &crate::recipe::EditRecipe,
     report: &mut FitReport,
-    atmosphere: &[Vec<f32>],
+    zones: &ZonePairing,
 ) {
+    // R2: the Full zones' own model, read BEFORE either ruler is re-paired.
+    let own = report.structural_evidence.as_ref().unwrap_or(&report.evidence).paired.clone();
     report.evidence.local = true;
-    atmosphere_unpaired(&mut report.evidence, atmosphere);
+    pair_by_finest_mode(&mut report.evidence, &own, zones);
     if let Some(structural) = report.structural_evidence.as_mut() {
         structural.local = true;
-        atmosphere_unpaired(structural, atmosphere);
+        pair_by_finest_mode(structural, &own, zones);
     }
     let (s_img, t_img) = fit::analysis_pair(src, target);
     let tgt_px = fit::pixels_of(&t_img);
