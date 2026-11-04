@@ -25,6 +25,7 @@ use image::{DynamicImage, GenericImageView, ImageBuffer, Rgb};
 use crate::config::Config;
 
 pub(crate) mod hot_pixels;
+pub(crate) mod noise_model;
 
 const SIDECAR_DEFAULT_TIMEOUT_SECS: u64 = 30 * 60;
 const SIDECAR_OUTPUT_CAP: usize = 1024 * 1024;
