@@ -240,6 +240,36 @@ impl SourceFrame {
         Ok(frame)
     }
 
+    /// The exposure's noise reading for the RAW at `path`
+    /// (`denoise::linear_chroma::SourceReading`: its noise model and its own
+    /// `k`), kept beside its frame. Both are properties of the exposure, not
+    /// of a develop or a recipe, so they are read ONCE per (path,
+    /// modification time, length) for the process, by `read` off the
+    /// sensor's own mosaic, and every later develop of the source — a slider
+    /// change, a master's bake after its AI denoise — runs the colour
+    /// stage's pass alone over it. `None` when the mosaic has no model.
+    pub(crate) fn noise_reading(
+        path: &Path,
+        read: impl FnOnce() -> Option<crate::denoise::linear_chroma::SourceReading>,
+    ) -> Option<crate::denoise::linear_chroma::SourceReading> {
+        type Reading = Option<crate::denoise::linear_chroma::SourceReading>;
+        type Slot = (std::path::PathBuf, (Option<std::time::SystemTime>, u64), Reading);
+        static READ: std::sync::OnceLock<std::sync::Mutex<Vec<Slot>>> = std::sync::OnceLock::new();
+        let Some(ident) = std::fs::metadata(path).ok().map(|m| (m.modified().ok(), m.len())) else { return read() };
+        let held = READ.get_or_init(Default::default);
+        if let Some(hit) = held.lock().unwrap_or_else(|p| p.into_inner()).iter().find(|(p, i, _)| p == path && *i == ident) {
+            return hit.2;
+        }
+        let reading = read();
+        let mut held = held.lock().unwrap_or_else(|p| p.into_inner());
+        held.retain(|(p, _, _)| p != path);
+        if held.len() >= 32 {
+            held.remove(0);
+        }
+        held.push((path.to_path_buf(), ident, reading));
+        reading
+    }
+
     /// Is this a camera RAW?
     pub fn is_raw(&self) -> bool {
         matches!(self, Self::Raw { .. })

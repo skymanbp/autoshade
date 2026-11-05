@@ -194,9 +194,10 @@ pub(super) fn render_frame(
     // The exposure's noise reading for the colour stage (its model and its
     // `k`): a property of the exposure, read ONCE per source off the sensor's
     // own mosaic — here, before the AI denoise below replaces that mosaic
-    // with one whose noise is no longer the sensor's.
+    // with one whose noise is no longer the sensor's — and kept with the
+    // source frame, so a second develop runs the stage's pass alone.
     let reading = (colour_nr > 0.0 && crate::denoise::linear_chroma::reads(&rawimage))
-        .then(|| read_sensor(&rawimage))
+        .then(|| SourceFrame::noise_reading(raw_path, || read_sensor(&rawimage)))
         .flatten();
     let grain_weights = denoise_grain::weights(working);
     let original_y = denoise_grain::capture_original(

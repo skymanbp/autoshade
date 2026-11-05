@@ -682,3 +682,31 @@ fn the_colour_stage_reads_the_exposure_off_the_sensors_mosaic_before_the_ai_deno
     assert!(read < body.find("crate::denoise::denoise_mosaic(").unwrap(), "the reading is the sensor's, before the AI denoise");
     assert_eq!(body.matches("(colour_nr, reading.as_ref())").count(), 2, "both develops run at the exposure's reading");
 }
+
+/// The exposure's reading is kept with the source (round 11, T1): read once
+/// per (path, modification time, length) for the process, so a second
+/// develop of the same source runs the stage's pass alone; a file that
+/// changes is read again.
+///
+/// MUTATION: the reading is not kept (read on every call).
+#[test]
+fn the_exposures_noise_reading_is_read_once_per_source() {
+    let dir = std::env::temp_dir().join(format!("autoshade-noise-reading-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("frame.arw");
+    std::fs::write(&path, b"one exposure").unwrap();
+    let reads = std::cell::Cell::new(0);
+    // The reading's value is the cache's business only as an identity: a
+    // mosaic with no model (`None`) is kept the same way.
+    let read = || {
+        reads.set(reads.get() + 1);
+        None
+    };
+    assert_eq!(SourceFrame::noise_reading(&path, read), None);
+    assert_eq!(SourceFrame::noise_reading(&path, read), None);
+    assert_eq!(reads.get(), 1, "the second develop of the same source read the exposure again");
+    std::fs::write(&path, b"another exposure, longer").unwrap();
+    assert_eq!(SourceFrame::noise_reading(&path, read), None);
+    assert_eq!(reads.get(), 2, "a changed file is read again");
+    let _ = std::fs::remove_dir_all(&dir);
+}
