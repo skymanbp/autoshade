@@ -507,11 +507,70 @@ struct ChromaNrLaw {
 const CHROMA_NR: ChromaNrLaw =
     ChromaNrLaw { radius: Ramp(2.0, 16.0), edge: Ramp(0.08, 0.01), widen: Ramp(1.0, 3.0), full_at: 0.25 };
 
-/// The colour NR's reach in film pixels at slider fraction `amount` (0..=1):
-/// the radius law above, read by the RAW's linear stage at its default strength
-/// (`denoise::linear_chroma`) so the two stages reach the same colour blotch.
-pub(crate) fn chroma_nr_reach_px(amount: f32) -> f32 {
-    CHROMA_NR.radius.at(amount)
+/// The fast guided filter's geometry at a reach of `r_raster` raster pixels
+/// and Smoothness `smoothness` (0..=1): the subsampling `s` (at most `cap`),
+/// the box radius on the subsampled plane and the offset plane's widened one.
+fn chroma_nr_geometry(r_raster: f32, smoothness: f32, cap: usize) -> (usize, usize, usize) {
+    let s = ((r_raster / 2.5).floor() as usize).max(2).min(cap);
+    let radius = ((r_raster / s as f32).round() as usize).max(1);
+    let smooth_radius = ((radius as f32 * CHROMA_NR.widen.at(smoothness)).round() as usize).max(radius);
+    (s, radius, smooth_radius)
+}
+
+/// The share of white noise [`chroma_nr`] leaves on a flat region of a
+/// full-size develop (film = raster) at slider fraction `amount` and
+/// Smoothness `smoothness` (both 0..=1): `Σw²` of its whole chain there. On a
+/// flat region the guide carries no variation, the coefficient `a` is 0 and
+/// the output is the offset plane — the `s × s` block mean, the box of
+/// `radius` cells, the box of `smooth_radius` cells, the bilinear upsample —
+/// blended with the input by `min(amount / full_at, 1)`. Every step is
+/// separable, so `Σw²` is a product of two 1-D sums per output pixel's phase
+/// in its block, averaged over the `s²` phases. 1 when the pass does not run.
+/// The RAW's linear stage reads it (`denoise::linear_chroma::window`): at each
+/// strength it averages as many samples as this pass would.
+pub(crate) fn chroma_nr_flat_noise_share(amount: f32, smoothness: f32) -> f64 {
+    let r = CHROMA_NR.radius.at(amount);
+    if amount <= 0.0 || r < 0.5 {
+        return 1.0;
+    }
+    let (s, radius, smooth_radius) = chroma_nr_geometry(r, smoothness, usize::MAX);
+    let blend = f64::from((amount / CHROMA_NR.full_at).min(1.0));
+    // The two boxes on the cells, convolved: the offset plane's cell weights
+    // about the cell the bilinear tap reads.
+    let (a, b) = (2 * radius + 1, 2 * smooth_radius + 1);
+    let mut cell = vec![0.0f64; a + b - 1];
+    for i in 0..a {
+        for j in 0..b {
+            cell[i + j] += 1.0 / (a * b) as f64;
+        }
+    }
+    let c0 = (a + b - 2) / 2;
+    // Per phase `p` of an interior output pixel `x = n·s + p`: the bilinear
+    // tap (`upsample_at`'s coordinate) spreads the cell weights over two
+    // cells, and each cell's weight over its `s` pixels. Returns `Σw²` over
+    // the pixels and the weight of the output pixel's own pixel.
+    let phase = |p: usize| -> (f64, f64) {
+        let x = 64 * s + p;
+        let u = (x as f64 + 0.5) / s as f64 - 0.5;
+        let x0 = u.floor();
+        let fx = u - x0;
+        let mut wc = vec![0.0f64; cell.len() + 1];
+        for (j, w) in cell.iter().enumerate() {
+            wc[j] += (1.0 - fx) * w;
+            wc[j + 1] += fx * w;
+        }
+        // `wc[m]` is cell `x0 + m − c0`; the pixel's own cell is `x / s`.
+        let own = ((x / s) as f64 - x0) as usize + c0;
+        (wc.iter().map(|w| w * w).sum::<f64>() / s as f64, wc.get(own).map_or(0.0, |w| w / s as f64))
+    };
+    let phases: Vec<(f64, f64)> = (0..s).map(phase).collect();
+    let mut total = 0.0f64;
+    for &(sx, ox) in &phases {
+        for &(sy, oy) in &phases {
+            total += (1.0 - blend).powi(2) + 2.0 * blend * (1.0 - blend) * ox * oy + blend * blend * sx * sy;
+        }
+    }
+    total / (s * s) as f64
 }
 
 /// The Color NR sliders, resolved to 0..=1.
@@ -587,16 +646,14 @@ pub(crate) fn chroma_nr(data: &mut [[f32; 3]], w: usize, h: usize, p: &ChromaNrP
     if r_raster < 0.5 {
         return;
     }
-    let s = ((r_raster / 2.5).floor() as usize).max(2).min(w.max(h));
+    let (s, radius, smooth_radius) = chroma_nr_geometry(r_raster, p.smoothness, w.max(h));
     let (lw, lh) = (w.div_ceil(s), h.div_ceil(s));
-    let radius = ((r_raster / s as f32).round() as usize).max(1);
     let edge = CHROMA_NR.edge.at(p.detail) / film.factor();
     let eps = edge * edge;
     let guide = block_mean(data, w, h, s, luma601);
     let mean_g = box_mean(&guide, lw, lh, radius);
     let mut var_g = box_mean_owned(guide.iter().map(|g| g * g).collect(), lw, lh, radius);
     var_g.iter_mut().zip(&mean_g).for_each(|(v, m)| *v = (*v - m * m).max(0.0));
-    let smooth_radius = ((radius as f32 * CHROMA_NR.widen.at(p.smoothness)).round() as usize).max(radius);
     // (ā, b̄) for one colour-difference plane, which it consumes.
     let coefficients = |plane: Vec<f32>| -> (Vec<f32>, Vec<f32>) {
         let mut b = box_mean(&plane, lw, lh, radius);

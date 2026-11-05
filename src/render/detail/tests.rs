@@ -212,6 +212,53 @@ fn colour_nr_removes_colour_noise_and_leaves_luma() {
     assert!(drift < 1e-4, "luma is not colour noise: {drift}");
 }
 
+/// The display pass's flat-region noise share, stated from its constants
+/// (`chroma_nr_flat_noise_share`), is the share the pass itself leaves: on a
+/// frame of constant luma and white colour-difference noise the guide carries
+/// no variation, and the residual `R − Y` variance over the input's is the
+/// share, within three standard errors (16 tiles of 512 px, the kernel's
+/// border left out). At Color 10 (blended), 25 and 100.
+///
+/// MUTATION: the offset plane's second box at `radius` instead of
+/// `smooth_radius` in the share.
+#[test]
+fn colour_nr_flat_noise_share_is_the_share_the_pass_leaves() {
+    let (w, h, tile) = (2048usize, 2048usize, 512usize);
+    for amount in [0.1f32, 0.25, 1.0] {
+        let mut d = frame(w, h, |x, y| {
+            let (r, b) = (0.5 + 0.05 * hashed(31, x, y), 0.5 + 0.05 * hashed(32, x, y));
+            [r, (0.5 - 0.299 * r - 0.114 * b) / 0.587, b]
+        });
+        let cr = |d: &[[f32; 3]], i: usize| f64::from(d[i][0] - luma601(&d[i]));
+        let var_in = {
+            let v: Vec<f64> = (0..w * h).map(|i| cr(&d, i)).collect();
+            let m = v.iter().sum::<f64>() / v.len() as f64;
+            v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / v.len() as f64
+        };
+        let p = ChromaNrParams { amount, detail: 0.5, smoothness: 0.5 };
+        chroma_nr(&mut d, w, h, &p, FilmScale::NATIVE);
+        // The kernel's reach in pixels: both boxes and the bilinear tap, in cells of `s`.
+        let (s, radius, smooth) = chroma_nr_geometry(CHROMA_NR.radius.at(amount), 0.5, w);
+        let border = (radius + smooth + 2) * s;
+        let shares: Vec<f64> = (0..16)
+            .map(|t| {
+                let (tx, ty) = ((t % 4) * tile, (t / 4) * tile);
+                let v: Vec<f64> = (ty.max(border)..(ty + tile).min(h - border))
+                    .flat_map(|y| (tx.max(border)..(tx + tile).min(w - border)).map(move |x| y * w + x))
+                    .map(|i| cr(&d, i))
+                    .collect();
+                let m = v.iter().sum::<f64>() / v.len() as f64;
+                v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / v.len() as f64 / var_in
+            })
+            .collect();
+        let mean = shares.iter().sum::<f64>() / 16.0;
+        let se = (shares.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / 15.0 / 16.0).sqrt();
+        let want = chroma_nr_flat_noise_share(amount, 0.5);
+        println!("Color {}: measured share {mean:.6} (se {se:.6}), stated {want:.6}, N = {:.1} px", amount * 100.0, 1.0 / want);
+        assert!((mean - want).abs() <= 3.0 * se, "Color {}: the pass leaves {mean:.6} of white colour noise, the share states {want:.6} (3 se {:.6})", amount * 100.0, 3.0 * se);
+    }
+}
+
 /// Colour NR keeps a pure black black and every pixel's luma, at Lightroom's
 /// default Color 25 and at 100: half the frame exact zeros among dark,
 /// strongly coloured pixels (their neighbours lend a zero colour, which needs

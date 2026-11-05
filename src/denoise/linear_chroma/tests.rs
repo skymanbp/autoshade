@@ -128,8 +128,8 @@ fn the_slider_scales_k_and_zero_is_off() {
 
 /// Where the photo has nothing to protect `k` is unbounded and the filter is
 /// the plain mean of its window; the slider still weakens it, through the
-/// reach rule: at 10 the window is 2 cells, at 25 it is 3, and the residual
-/// colour noise at 10 is the larger.
+/// window: at 10 it is 1 cell, at 25 it is 7 (as many samples as the display
+/// pass averages there), and the residual colour noise at 10 is the larger.
 ///
 /// MUTATION: the window fixed at the default strength's (the slider is then
 /// dead below 25 on such a photo).
@@ -141,10 +141,33 @@ fn where_k_is_unbounded_the_slider_weakens_the_stage_through_its_window() {
         let (_, k) = filter_mosaic(&mut m, W, H, &rggb(), WB, scale_of(nr).unwrap(), window(nr)).expect("a model");
         (k, var_dr(&m, 0..W / 2))
     };
-    assert_eq!((window(10.0), window(25.0), window(100.0)), (2, 3, 8), "the reach rule in cells");
+    assert_eq!((window(10.0), window(25.0), window(100.0)), (1, 7, 23), "the display pass's sample count in cells");
     let ((k10, v10), (k25, v25)) = (at(10.0), at(25.0));
     assert!(k10.is_infinite() && k25.is_infinite(), "a noise-only frame has no texture to protect: k {k10} / {k25}");
     assert!(v10 > v25, "residual colour variance at 10 ({v10:.3e}) must exceed that at 25 ({v25:.3e})");
+}
+
+/// The window holds as many samples as the display pass averages: at each
+/// strength the odd square of cells nearest (in half side) to
+/// `display_samples / 4` cells, the half side `(√N − 1)/2` rounded and at
+/// least one; printed per strength with the display pass's noise share.
+///
+/// MUTATION: the window from the pixel count instead of the cell count (the
+/// stage then averages four times the samples the display pass does).
+#[test]
+fn the_window_averages_as_many_samples_as_the_display_pass_it_replaces() {
+    for nr in [10.0f32, 20.0, 25.0, 50.0, 75.0, 100.0] {
+        let n_px = display_samples(nr);
+        let rho = window(nr);
+        let cells = n_px / 4.0;
+        println!("colour NR {nr}: display share {:.6}, N {n_px:.1} px = {cells:.1} cells -> half side {rho} cells", 1.0 / n_px);
+        let want = (((cells.sqrt() - 1.0) / 2.0).round().max(1.0)) as usize;
+        assert_eq!(rho, want, "at {nr}: {cells:.1} cells want a half side of {want}");
+        // The nearest odd square in half side: no other half side is nearer.
+        let off = |r: usize| ((2 * r + 1) as f64 - cells.sqrt()).abs();
+        assert!(rho == 1 || off(rho) <= off(rho - 1) && off(rho) <= off(rho + 1), "at {nr}: half side {rho}");
+    }
+    assert_eq!(window(DEFAULT_AMOUNT), 7, "at 25 the display pass averages 1005 pixels, 251 cells");
 }
 
 /// The standard normal's mass within `±t` (Simpson's rule on `0..t`) and its

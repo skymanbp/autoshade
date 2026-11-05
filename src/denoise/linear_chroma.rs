@@ -57,24 +57,36 @@
 //! It is one law, not one constant: on the most textured 1000 px windows of
 //! two ordinary scenes the meeting point is 2.62 and 3.69 (rel1180 msg-e3
 //! round 4), further apart than the model's own 2–8 % error on the noise
-//! can move it; over all their textured patches the law reads 3.42 and
-//! 4.12, and 1.97 on a night sky. A photo with no texture has nothing to
+//! can move it; over all their textured patches, with the estimate-anchored
+//! test and the window below, the law reads 6.21 and 13.61, and 1.43 on a
+//! night sky (round 9; at round 8's 3-cell window 5.86, 10.36, 1.63: the
+//! crossing moves with the window, the law is the same). A photo with no texture has nothing to
 //! protect, and its `k` is unbounded: the filter is then the plain mean of
 //! its window, and the window is the bound.
 //!
-//! **The window** is the colour noise reduction's own reach at the slider's
-//! strength (`detail::chroma_nr_reach_px`: 5.5 film pixels at 25, so 3
-//! cells), the reach rule the display pass already had: a lower strength
-//! reaches less far. `k` itself is read at the default strength's window
+//! **The window** ([`window`]): the slider keeps its meaning — at each
+//! strength the stage averages as many samples as the pass it replaces, so a
+//! flat sky is as clean as before and the texture is now kept by the sigma
+//! test, not by a blur. The display pass (`render::detail::chroma_nr`) leaves
+//! on a flat region the share `Σw²` of white noise its kernel's weights give
+//! (`render::chroma_nr_flat_noise_share`, from its own constants); a plain
+//! mean leaves `1/N` of it, so the stage's window holds `N = 1/Σw²` pixels,
+//! `N/4` cells: at 25, `Σw² = 0.000995`, 1005 pixels, a half side of
+//! `(√251 − 1)/2 = 7.4`, so 7 cells (rel1180 msg-e3 round 9). The display
+//! pass's reach (its radius law) stays that pass's own, for the sources it
+//! still runs on. `k` itself is read at the default strength's window
 //! ([`DEFAULT_AMOUNT`]), so it is one reading per photo.
 //!
 //! **The slider.** "Colour noise reduction" scales `k` linearly and sets the
-//! window by the reach rule: 0 is off, the default strength (Lightroom's own
-//! 25) is the photo's own `k` over 3 cells, 100 is four times it over 8.
+//! window as above: 0 is off, the default strength (Lightroom's own 25) is the
+//! photo's own `k` over 7 cells, 100 is four times it over 23. Below 25 the
+//! display pass blends its result with the input and keeps more than one
+//! cell's worth of noise; the stage's window is then its least, one cell.
 //! Where `k` is unbounded (no texture) the scale cannot weaken it, and the
-//! window does: at 10 the mean runs over 2 cells, at 25 over 3, so the
-//! slider is never dead. Detail and Smoothness belong to the display-frame
-//! pass, which a RAW no longer runs.
+//! window does: at 10 the mean runs over 1 cell, at 25 over 7, so the slider
+//! is never dead. Detail and Smoothness belong to the display-frame pass,
+//! which a RAW no longer runs; the window reads that pass at Lightroom's own
+//! Smoothness, the value an absent one resolves to.
 //!
 //! **One stage per develop.** The linear stage where a Bayer mosaic the
 //! stage can read exists ([`reads`]: one sample per site on a 2×2 RGB
@@ -111,11 +123,21 @@ pub(crate) fn scale_of(color_nr: f32) -> Option<f64> {
     (color_nr > 0.0).then(|| f64::from(color_nr.min(100.0)) / f64::from(DEFAULT_AMOUNT))
 }
 
+/// The number of pixels the display pass averages on a flat region at slider
+/// value `color_nr` (0..=100), Smoothness at Lightroom's own default: the
+/// plain mean that leaves the same share of white noise,
+/// `1 / render::chroma_nr_flat_noise_share`.
+pub(crate) fn display_samples(color_nr: f32) -> f64 {
+    let smooth = crate::recipe::LR_COMPANION_DEFAULTS.iter().find(|(n, _)| *n == "color_nr_smooth").expect("Smoothness is a companion").1;
+    1.0 / crate::render::chroma_nr_flat_noise_share(color_nr.clamp(0.0, 100.0) / 100.0, smooth / 100.0)
+}
+
 /// The window's half side in cells at slider value `color_nr` (0..=100): the
-/// colour NR's reach at that strength (`render::chroma_nr_reach_px`, film
-/// pixels) over the cell's two pixels, at least one cell.
+/// square of cells that holds as many samples as the display pass averages
+/// ([`display_samples`] pixels, four to a cell), half side `(√N − 1)/2`
+/// rounded, at least one cell (see the module).
 pub(crate) fn window(color_nr: f32) -> usize {
-    ((crate::render::chroma_nr_reach_px(color_nr.clamp(0.0, 100.0) / 100.0) / 2.0).round() as usize).max(1)
+    (((display_samples(color_nr) / 4.0).sqrt() - 1.0) / 2.0).round().max(1.0) as usize
 }
 
 /// Run the stage on the normalised signed `mosaic` (`width × height`, sites
