@@ -452,7 +452,14 @@ fn field_refuses_without_evidence() {
 
 /// A planted two-band exposure the field's own model can express: the solver must
 /// recover its sign per luma bin, leave each bin spatially uniform, and close most
-/// of the objective.  Also the occupancy floor's falsifier, rewritten in
+/// of the part of the objective a colour field moves. DEF-5 (presence is
+/// membership): every pixel is in the structural reading's core, and the planted
+/// +/-0.5 EV step at the guide's 0.5 line reorders the luminance ranks there, so
+/// `S` reads its cap 1.0 on the source AND on the field's render — structure no
+/// tone field moves. J* = local + 0.10 S then reads 0.1895 -> 0.1207 (ratio 0.64)
+/// while the local part the field answers for reads 0.0895 -> 0.0207 (0.23);
+/// before DEF-5 the core held only the well-supported pixels and S stayed under
+/// the cap. So the test asserts S unmoved and the local part closed by half.  Also the occupancy floor's falsifier, rewritten in
 /// v1.18.0 to the law that replaced the policy zero: an unmeasured vertex
 /// ships the solve's own value (the smoother's continuation of its measured
 /// neighbours), because a zero written there is rendered as a measured "no
@@ -462,9 +469,25 @@ fn field_recovers_a_planted_two_band_exposure() {
     let (current, target, w, h) = two_band_pair();
     let evidence = fit::evidence_model_for(&current, &target, w, h);
     let field = LocalField::solve(&current, &target, w, h, &evidence).expect("solve");
+    let (with, without) = (
+        fit::look_terms(&field.render(&current), &target, &evidence),
+        fit::look_terms(&current, &target, &evidence),
+    );
     assert!(
-        field.ceiling < 0.5 * field.global,
-        "the field must close most of a representable edit: ceiling {} vs global {}",
+        (with.total() - field.ceiling).abs() < 1e-6 && (without.total() - field.global).abs() < 1e-6,
+        "the terms read are the solve's own ceiling and global ({with:?} / {without:?})"
+    );
+    assert!(
+        (with.structural - without.structural).abs() < 1e-3,
+        "a tone field does not move the structural term ({} -> {})",
+        without.structural,
+        with.structural
+    );
+    assert!(
+        with.local() < 0.5 * without.local(),
+        "the field must close most of a representable edit: local {} vs global {} (J* {} vs {})",
+        with.local(),
+        without.local(),
         field.ceiling,
         field.global,
     );

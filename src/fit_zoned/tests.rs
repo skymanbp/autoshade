@@ -660,13 +660,16 @@ fn a_region_of_only_unsupported_pixels_abstains_and_the_refusal_stands() {
     let path = fixture_mask_path("zoned-evidence-hue-abstain");
     mask.save(path.path()).unwrap();
     let mut report = neutral_report(&src, &tgt);
-    // Zero the evidence everywhere the MASK reaches on the analysis raster
+    // Zero the SUPPORT everywhere the MASK reaches on the analysis raster
     // — its own soft edge included. Zeroing by analysis ROW instead misses
     // the cell row the feathered boundary straddles, and one read cell is
-    // enough to make the region speak rather than abstain.
+    // enough to make the region speak rather than abstain. DEF-5: support
+    // is the spatial support the cells' trust is read from; the estimation
+    // weights only drive and no longer reach a cell's vote, so zeroing them
+    // (what this test did before) left every cell asked at its presence.
     let (s_img, _) = fit::analysis_pair(&src, &tgt);
     let alpha = mask_weights(&mask, s_img.width(), s_img.height());
-    for (weight, member) in report.evidence.source_weights.iter_mut().zip(&alpha) {
+    for (weight, member) in report.evidence.spatial_weights.iter_mut().zip(&alpha) {
         if *member > 0.0 {
             *weight = 0.0;
         }
@@ -5146,22 +5149,28 @@ fn synthetic_zone_tone_verdict_is_named_by_luma_evidence_and_matches_the_recipe(
                 report.recipe.rationale
             );
         } else {
+            // DEF-5: the cells vote at PRESENCE. Read at the estimation
+            // weights (which withheld every sky luma range but a few) part
+            // of the region was asked by a handful of pixels and the full
+            // move was refused for its size, shipping a share; read at
+            // presence the whole brightening is vouched (0.992 closer,
+            // 0.008 away, 0.992 aligned), so the WHOLE move ships on region
+            // evidence, still naming the luma ranges the pixel reading
+            // withholds.
             let sky = sky.expect("the synthetic sky zone was pushed");
             let note = report
                 .notes
                 .iter()
-                .find(|n| n.key == crate::rationale::keys::ZONE_TONE_VOUCHED_AT_SHARE)
-                .unwrap_or_else(|| panic!("the vouched share was silent: {}", report.recipe.rationale));
+                .find(|n| n.key == crate::rationale::keys::ZONE_TONE_VOUCHED_BY_CELLS)
+                .unwrap_or_else(|| panic!("the region voucher was silent: {}", report.recipe.rationale));
             assert!(named(note), "the withheld luma range must still be named: {note:?}");
-            let share: f32 = note
-                .args
-                .iter()
-                .find(|(k, _)| *k == "share")
-                .map(|(_, v)| v.parse().unwrap())
-                .expect("the share is printed");
-            assert!(share > 0.0 && share < 1.0, "{note:?}");
-            assert!(tone_dials(sky).iter().any(|d| *d != 0.0), "a shipped share must move a dial: {sky:?}");
-            assert!(!report.notes.iter().any(|n| is_tone_refusal(n.key)), "a shipped share is not also a refusal");
+            assert!(
+                !report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_TONE_VOUCHED_AT_SHARE),
+                "a move vouched whole is not also shipped at a share: {}",
+                report.recipe.rationale
+            );
+            assert!(tone_dials(sky).iter().any(|d| *d != 0.0), "a vouched move must move a dial: {sky:?}");
+            assert!(!report.notes.iter().any(|n| is_tone_refusal(n.key)), "a shipped move is not also a refusal");
         }
         assert!(
             !report.notes.iter().any(|n| is_colour_refusal(n.key)),
@@ -6085,7 +6094,9 @@ fn a_zone_whose_movable_class_already_matches_is_left_alone() {
     let t_px = fit::pixels_of(&t_img);
     let sw = mask_weights(&sky_mask, s_img.width(), s_img.height());
     let tw = mask_weights(&sky_mask, t_img.width(), t_img.height());
-    for (weight, member) in report.evidence.source_weights.iter_mut().zip(&sw) {
+    // No support under the mask (DEF-5: the cells' trust is the spatial
+    // support; the estimation weights no longer reach a cell's vote).
+    for (weight, member) in report.evidence.spatial_weights.iter_mut().zip(&sw) {
         if *member > 0.0 {
             *weight = 0.0;
         }

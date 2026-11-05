@@ -190,6 +190,8 @@ use hue_gates::{
     foreign_share, rehued_share,
 };
 pub(crate) use look::{look_err_with_evidence};
+#[cfg(test)]
+pub(crate) use look::look_terms;
 use look::{round1, round2};
 #[cfg(test)]
 pub(crate) use look::{calibration_corpus, calibration_recipe, look_err};

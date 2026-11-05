@@ -6937,14 +6937,18 @@ fn the_objective_judges_presence_weights_not_estimation_weights() {
         uniform_estimation.to_bits(),
         "the estimation weights only drive: replacing them must not move J*"
     );
-    // Measured: 0.079845 judged, 0.073833 with only the darkened quarter
-    // present, a difference of 2.6 FIT_QUANT.
+    // Measured (DEF-5, presence is membership; DEF-3, band blurs inside the
+    // mask): 0.120126 judged, 0.077716 with only the darkened quarter
+    // present, a difference of 18 FIT_QUANT. The terms: E_paired 0.0980,
+    // H_ab 0.0137, S 0.4458 — every pixel now in S's core and E's mass;
+    // presence read as membership x spatial support judged 0.0798 (S 0.2859
+    // and 0.1047 with DEF-5 alone).
     assert!(
         (judged - brightened_absent).abs() > FIT_QUANT,
         "J* judges at the presence weights: leaving only the darkened quarter present must move it \
          ({judged:.6} -> {brightened_absent:.6})"
     );
-    assert!((judged - 0.0798).abs() < 0.005, "the presence-weighted objective calibration drifted: {judged:.6}");
+    assert!((judged - 0.1201).abs() < 0.005, "the presence-weighted objective calibration drifted: {judged:.6}");
 }
 
 /// The POSITIVE twin of `cast_gate_withholds_motion_where_hue_evidence_is_zero`
@@ -7976,8 +7980,18 @@ fn a_per_band_move_the_frame_ruler_refuses_shrinks_to_zero_and_says_so() {
 /// arbitrated withdrawal from the terminal do-no-harm reset. At full
 /// strength the same frame keeps its mixer: the arbitration is reading
 /// the state, not disliking the fixture.
+///
+/// RE-READ for v1.18.0 DEF-5 (presence is membership): it was
+/// `the_finished_frame_arbitration_withdraws_a_synthetic_mixer_that_costs_it`.
+/// At strength 0 the finished frame now PAYS for the mixer (Orange
+/// saturation +6, Red/Orange luminance +6 / -4.5): J* 0.05835 with it,
+/// 0.07288 with it given back (6.3 FIT_QUANT; 0.05632 / 0.07556 with DEF-3
+/// also reverted), so the arbitration keeps it at both strengths, and what
+/// this pair witnesses is the keeping side: the arbitration reads the state.
+/// The withdrawing side has no fixture under DEF-5 — deleting the loop's
+/// withdrawal leaves this test green; stated, not hidden.
 #[test]
-fn the_finished_frame_arbitration_withdraws_a_synthetic_mixer_that_costs_it() {
+fn the_finished_frame_arbitration_keeps_a_synthetic_mixer_the_finished_frame_pays_for() {
     // RED on v1.17.0, a defect, not a stale image (measured): on this pair
     // the ±6 mixer no longer costs the finished frame at strength 0 (0.02444
     // against 0.02436, inside the 1e-4 margin), and where 4a' does find a
@@ -8011,13 +8025,21 @@ fn the_finished_frame_arbitration_withdraws_a_synthetic_mixer_that_costs_it() {
         low.err_after
     );
     assert!(
-        low.recipe.hsl.is_neutral(),
-        "the finished frame says the mixer costs it, so it must go: {:?}",
-        low.recipe.hsl
+        !low.recipe.hsl.is_neutral(),
+        "the finished frame pays for the mixer, so it stays: {}",
+        low.recipe.rationale
+    );
+    let mut neutral = low.recipe.clone();
+    neutral.hsl = crate::recipe::Hsl::default();
+    let given_back = rescore_report(&src, &tgt, &neutral, &EditRecipe::default(), low.err_before, &low.notes).err_after;
+    let kept = rescore_report(&src, &tgt, &low.recipe, &EditRecipe::default(), low.err_before, &low.notes).err_after;
+    assert!(
+        ships(kept, given_back),
+        "…by the arbitration's own reading: {given_back:.5} without it, {kept:.5} with it"
     );
     assert!(
-        hsl_note(&low, crate::rationale::keys::FIT_NOTE_HSL_WITHDRAWN_ERROR).is_some(),
-        "…and say so: {}",
+        hsl_note(&low, crate::rationale::keys::FIT_NOTE_HSL_WITHDRAWN_ERROR).is_none(),
+        "…and no withdrawal is reported: {}",
         low.recipe.rationale
     );
     // The other answer, same frame: at full strength the mixer earns its
@@ -8335,15 +8357,24 @@ fn the_twilight_pairs_shared_part_white_balance_is_refused_on_direction_and_the_
         "TWO_TEMPERATURE {code} wb_cells={converged:.3}/{diverged:.3}/{aligned:.3} fan={fan:.1} err={:.6}->{:.6} conf={:.6}",
         report.err_before, report.err_after, report.recipe.confidence
     );
+    // Re-measured under the step-1 laws (int, 2026-11-04): 0.730 / 0.044 /
+    // 0.675 at 5b7ccf7. With one fix reverted at a time: DEF-3 off 0.669 /
+    // 0.021 / 0.614, the judge's presence (DEF-5) off 0.707 / 0.033 / 0.618,
+    // the cell votes at presence (DEF-5) off 0.582 / 0.044 / 0.676 — the
+    // diverged and aligned shares are the cells voting at presence, the
+    // converged share the frame the judge and the supports leave them. The
+    // verdict is the same: refused on direction, aligned under its 0.70 line.
     assert!(
-        (converged - 0.730).abs() <= 0.02 && (diverged - 0.044).abs() <= 0.02 && (aligned - 0.675).abs() <= 0.02,
-        "{code}: the cells' shares moved off the measured 0.730 / 0.044 / 0.675: {converged} / {diverged} / {aligned}"
+        (converged - 0.587).abs() <= 0.02 && (diverged - 0.021).abs() <= 0.02 && (aligned - 0.614).abs() <= 0.02,
+        "{code}: the cells' shares moved off the measured 0.587 / 0.021 / 0.614: {converged} / {diverged} / {aligned}"
     );
     assert!(aligned < 0.70, "{code}: the refusal is on direction ({aligned})");
     assert_eq!(report.recipe.temperature_k, None, "{code}: the refused white balance stays as-shot");
+    // 13.5 deg at 5b7ccf7; 7.6 deg under the step-1 laws (14.1 with the
+    // judge's presence alone reverted, 7.1 with DEF-3 alone reverted).
     assert!(
-        (fan - 13.5).abs() <= 0.6 && fan < FAN_DEG,
-        "{code}: the admitted curves' fan moved off the measured 13.5°: {fan:.1}°"
+        (fan - 7.6).abs() <= 0.6 && fan < FAN_DEG,
+        "{code}: the admitted curves' fan moved off the measured 7.6°: {fan:.1}°"
     );
     assert!(
         !report.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HUE_FANNED
@@ -8351,15 +8382,19 @@ fn the_twilight_pairs_shared_part_white_balance_is_refused_on_direction_and_the_
         "{code}: an admitted cast is neither refused nor projected: {}",
         report.recipe.rationale
     );
+    // J* itself reads every present pixel now (DEF-5): 0.149 -> 0.066 at
+    // 5b7ccf7, 0.1613 -> 0.0794 here (0.1505 -> 0.0665 with the judge's
+    // presence alone reverted), the source's own reading rising with the
+    // ruler.
     assert!(
-        (report.err_before - 0.149).abs() <= 0.002 && (report.err_after - 0.066).abs() <= 0.002,
-        "{code}: residual moved off the measured 0.149 -> 0.066: {:.6} -> {:.6}",
+        (report.err_before - 0.161).abs() <= 0.002 && (report.err_after - 0.079).abs() <= 0.002,
+        "{code}: residual moved off the measured 0.161 -> 0.079: {:.6} -> {:.6}",
         report.err_before,
         report.err_after
     );
     assert!(
-        (report.recipe.confidence - 0.472).abs() <= 0.02,
-        "{code}: confidence moved off the measured 0.472: {}",
+        (report.recipe.confidence - 0.464).abs() <= 0.02,
+        "{code}: confidence moved off the measured 0.464: {}",
         report.recipe.confidence
     );
 }
@@ -9073,7 +9108,9 @@ fn the_hand_off_walk_is_entered_by_a_cast_that_really_fans() {
 /// curves are what is left to carry the residual tone, and as fitted they fan
 /// the widest class 23.0 degrees. The fan gate convicts, the walk is
 /// entered once and ships nothing, and the projection ships t = 0.783, fan
-/// after +5.4. Measured 2026-11-04: look error 0.1518 -> 0.0618.
+/// after +5.4. Measured 2026-11-04: look error 0.1518 -> 0.0618. Under the
+/// step-1 laws (DEF-3 / DEF-5) the same route ships t = 0.744, fan after
+/// +3.6, look error 0.1514 -> 0.0729.
 #[test]
 fn a_convicted_cast_no_white_balance_takes_back_is_projected_by_value() {
     use super::solve::route;
@@ -9102,9 +9139,13 @@ fn a_convicted_cast_no_white_balance_takes_back_is_projected_by_value() {
         "…and falls through to the projection: {}",
         rep.recipe.rationale
     );
+    // Re-pinned for the step-1 laws (DEF-3 / DEF-5): look error 0.1514 ->
+    // 0.0729, the fitted curves fan 23.0 degrees, the projection ships
+    // t = 0.744 with the class's spread +3.6 degrees; the white balance the
+    // walk meets is refused by the cells (0.228 closer / 0.473 away).
     assert_eq!(
         recipe_fnv(&rep.recipe),
-        0xc513_8107_3f2a_d7ea,
+        0xc496_a041_4287_a50e,
         "the projected recipe moved: {}",
         rep.recipe.rationale
     );

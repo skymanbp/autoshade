@@ -91,7 +91,11 @@ pub(crate) struct PairedCells {
     trust: Vec<f32>,
     /// Cell index of every analysis pixel.
     of_pixel: Vec<usize>,
-    /// Per-pixel weight the means are taken with (evidence, clipping-aware).
+    /// Per-pixel weight the means and the votes are taken with: the pixel's
+    /// PRESENCE (its membership, DEF-5), zero where the target clips. The
+    /// cells JUDGE a move, so the estimation weights — which carry each
+    /// range's evidence verdict and only drive — are not what they vote
+    /// with; the structural confidence enters once, as each cell's `trust`.
     weight: Vec<f32>,
     /// The evidence model's per-pixel structural confidence, kept per PIXEL
     /// rather than only per cell: a region's verdict must be trusted by what
@@ -252,9 +256,22 @@ impl PairedCells {
         // whether a move took its cell toward the target. Admitted, such
         // pixels only diluted the converged share (p41's white balance,
         // 0.707 -> 0.699 under the 0.70 line).
+        // DEF-5: the votes are cast at PRESENCE, not at the estimation
+        // weights. On the two-way synthetic zone (the sky's left half asks
+        // brighter, its right half darker) the estimation withheld every sky
+        // luma range but one, so the region's vote mass was the few pixels
+        // that range held — 191.6 on the brighter-asking half against 29.6 on
+        // the other, while the cells' structural trust split 0.455 / 0.545 —
+        // and a region whose cells ask for opposite moves read 0.712 aligned.
+        // An estimation verdict decided which cells were asked; it may only
+        // decide what a control is solved from.
         let weight: Vec<f32> = (0..n)
             .map(|i| {
-                if unclipped(&tp[i]) { evidence.source_weights[i].max(0.0) } else { 0.0 }
+                if unclipped(&tp[i]) {
+                    evidence.source_presence_weights.get(i).copied().unwrap_or(0.0).max(0.0)
+                } else {
+                    0.0
+                }
             })
             .collect();
         let spatial: Vec<f32> = (0..n)
@@ -303,7 +320,7 @@ impl PairedCells {
         let weight: Vec<f32> = (0..n)
             .map(|i| {
                 let via_layout = if unclipped(&self.tgt[i]) {
-                    blind.source_weights[i].max(0.0) * member(i)
+                    blind.source_presence_weights.get(i).copied().unwrap_or(0.0).max(0.0) * member(i)
                 } else {
                     0.0
                 };
@@ -486,10 +503,11 @@ impl PairedCells {
         }
         (0..cells)
             .map(|cell| {
-                // The verdict's weight is the cell's EVIDENCE mass scaled by
-                // how much structure survived in it — a cell nothing measured
-                // is not asked, and a cell the instrument distrusts is asked
-                // quietly. Both are read over the region, so a cell a zone's
+                // The verdict's weight is the cell's PRESENCE mass (DEF-5)
+                // scaled by how much structure survived in it — a cell no
+                // present pixel reaches is not asked, and a cell the
+                // instrument distrusts (spatial support, the trust) is asked
+                // quietly; one with no support at all abstains. Both are read over the region, so a cell a zone's
                 // feather merely clips votes in proportion to the sliver it
                 // actually contributed.
                 let trust =

@@ -73,9 +73,13 @@ pub struct EvidenceModel {
     pub target_weights: Vec<f32>,
     pub source_hue_weights: Vec<f32>,
     pub target_hue_weights: Vec<f32>,
-    /// PRESENCE weights (v1.18.0, R11): each aligned pixel's membership in
-    /// this model's population times its spatial support — 1 for a frame
-    /// pixel of a structure-blind model, 0 for an absent one. The objective
+    /// PRESENCE weights (v1.18.0, R11; DEF-5): each aligned pixel's
+    /// membership in this model's population — 1 for a present frame pixel,
+    /// the coverage for a scoped view, 0 for an absent one. Presence is
+    /// membership: spatial support is an estimation and pairing input (it
+    /// decides who pairs, R2b, and the cells' trust), never a judge weight —
+    /// read as one, a structurally replaced region weighed ~0 and a
+    /// correction of its pixels could not earn. The objective
     /// JUDGES every present pixel at its presence weight; the estimation
     /// weights above (`source_weights` … `target_hue_weights`, which also
     /// carry each range's evidence verdict) only DRIVE: they decide which
@@ -376,7 +380,8 @@ pub(super) struct RangeAggregate {
     target_weights: Vec<f32>,
     source_hue_weights: Vec<f32>,
     target_hue_weights: Vec<f32>,
-    /// Membership × spatial support, the weights the objective judges at.
+    /// Membership, the weights the objective judges at (DEF-5: presence is
+    /// membership; spatial support never weighs a judged pixel).
     source_presence_weights: Vec<f32>,
     target_presence_weights: Vec<f32>,
     pub(super) luma: Vec<EvidenceRange>,
@@ -507,9 +512,10 @@ pub(super) fn aggregate_ranges(
     let luma_mass = luma.iter().map(|r| r.weight).sum::<f32>().min(1.0);
     let hue_mass = hue.iter().map(|r| r.weight).sum::<f32>().min(1.0);
     let identifiability = (0.75 * luma_mass + 0.25 * hue_mass).clamp(0.0, 1.0);
-    let presence_of = |zone: &[f32]| -> Vec<f32> {
-        (0..n).map(|i| member(zone, i) * spatial_weights.get(i).copied().unwrap_or(0.0).max(0.0)).collect()
-    };
+    // DEF-5: presence is membership. `source_zone` / `target_zone` already
+    // carry the target's presence (absent pixels are members of nothing,
+    // `present_weights`), so nothing else enters a judged weight.
+    let presence_of = |zone: &[f32]| -> Vec<f32> { (0..n).map(|i| member(zone, i)).collect() };
     RangeAggregate {
         source_membership,
         source_weights: luma_source_weights,

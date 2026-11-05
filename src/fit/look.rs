@@ -21,7 +21,7 @@ pub(crate) fn look_err(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
 ///   other: [`EvidenceModel::paired`]), the evidence-weighted mean CIE76
 ///   distance between the two sides' LOCAL MEANS,
 ///   `Σ w_i·ΔE76(Lab(G_2*a)_i, Lab(G_2*b)_i) / 100 / Σ w_i`, `w` the pixel's
-///   PRESENCE weight (spatial support × membership) and `G_2`
+///   PRESENCE weight (its membership, DEF-5) and `G_2`
 ///   the σ 2 px Gaussian the structural instrument pools its gradients at
 ///   ([`PAIRED_POOL_SIGMA`]). Local means, not raw pixels: the eye reads a
 ///   mean offset under texture (a 0.81 dE band is visible under 4 dE of star
@@ -59,8 +59,9 @@ pub(crate) fn look_err(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
 ///   structure survived.
 ///
 /// WEIGHTS (v1.18.0, R11): the objective JUDGES every present pixel at its
-/// presence weight — spatial support × membership, 1 for a frame pixel
-/// ([`EvidenceModel::source_presence_weights`]) — in every term: `E_paired`,
+/// presence weight — its membership, 1 for a present frame pixel
+/// ([`EvidenceModel::source_presence_weights`]; DEF-5: presence is
+/// membership, spatial support only decides who pairs) — in every term: `E_paired`,
 /// `E_dist`'s `T_L`, `T_a` and `T_b`, `H_ab`'s band membership, offset and band
 /// weight, `S`, and the paired share `p`. The evidence model's per-range
 /// estimation weights only DRIVE (which ranges may move a control's
