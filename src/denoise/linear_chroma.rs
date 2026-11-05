@@ -73,8 +73,13 @@
 //! rel1180 msg-e3 round 8: 0.18–0.22 of it at its `k`, where the plain
 //! window mean keeps 1/N = 0.02). So the sample anchors only the first
 //! estimate (within `k·σ_d`, `σ_d` the model's sd of a DIFFERENCE of two
-//! cells at that level, `√2` times one cell's `σ`, per colour difference, the
-//! red and blue predicted from the green fit); each next pass is anchored on
+//! cells at the anchor cell's own level, `√2` times one cell's `σ`, per
+//! colour difference, the red and blue predicted from the green fit — the
+//! test's noise is the hypothesis's: the anchor's own level, since a
+//! neighbour sharing its true value carries that value's noise; at a patch's
+//! mean level a dark branch against a bright sky was tested at the sky's
+//! noise, 2.3 times its own, and took the sky's colour, rel1180 msg-e3 round
+//! 14); each next pass is anchored on
 //! the last estimate, a mean of `n` cells, against which a sample differs by
 //! `σ·√(1 + 1/n)`, until an estimate repeats. That fixed point is the mean of
 //! the window's samples within `t` of itself — the skipped mean, whose share
@@ -655,6 +660,12 @@ pub(crate) struct Cells {
     /// The red and the blue site of a cell, `(dy, dx)`: where each colour
     /// difference's grid sits.
     origin: [(usize, usize); 2],
+    /// The noise model, the white balance (green = 1) and the side `s` in
+    /// base cells of one of these cells (1 at the base, `2^level` on the
+    /// pyramid): what states a cell's noise at its own level ([`Self::own_sd`]).
+    model: NoiseModel,
+    wb: [f64; 3],
+    side: usize,
 }
 
 impl Cells {
@@ -716,7 +727,7 @@ impl Cells {
         };
         let sd = pts.iter().map(|p| site_var(p).0.map(|v| (2.0 * v).sqrt() as f32)).collect();
         let cov = pts.iter().map(|p| site_var(p).1 as f32).collect();
-        Some(Self { cw, ch, pw, ph, d, sd, cov, origin: [sites[0], sites[3]] })
+        Some(Self { cw, ch, pw, ph, d, sd, cov, origin: [sites[0], sites[3]], model: *model, wb, side: 1 })
     }
 
     /// These cells at pyramid level `level` (`level ≥ 1`): each the mean of a
@@ -774,7 +785,32 @@ impl Cells {
                 (sd, (c / (sf * sf * sf)) as f32)
             })
             .unzip();
-        Self { cw, ch, pw, ph, d, sd, cov, origin: self.origin }
+        Self { cw, ch, pw, ph, d, sd, cov, origin: self.origin, model: self.model, wb: self.wb, side: self.side * s }
+    }
+
+    /// One cell's noise sd per colour difference at cell `i`'s OWN level —
+    /// the test's noise is the hypothesis's: the anchor's own level. The test
+    /// asks whether a neighbour shares the anchor's true value, and a sample
+    /// of that value carries the noise the model gives that value's level, not
+    /// the patch's mean level (on a dark branch against a bright sky the
+    /// patch's mean is the sky's, 2.3 times the branch cells' sd, and the
+    /// window's brighter cells passed the test: rel1180 msg-e3 round 14). The
+    /// level is the cell's own measurement: its green `G`, its red
+    /// `(d_R + G)/wR` and its blue `(d_B + G)/wB` (the colour site's green read
+    /// as the cell's); one site's difference `wR²·var(R) + σ²_G/4`, and at a
+    /// pyramid level of side `s` the mean of `s²` of them,
+    /// `(v + 4c·(1 − 1/s))/s²` with `c = σ²_G/16` (as [`Self::level`] states
+    /// a patch's), at the cell's own radius. The patch's sd ([`Self::sd`])
+    /// stays the noise share `photo_k` reads.
+    fn own_sd(&self, i: usize) -> [f64; 2] {
+        let (cx, cy) = (i % self.cw, i / self.cw);
+        let s = self.side as f64;
+        let r = self.model.radius((cx as f64 + 0.5) * 2.0 * s, (cy as f64 + 0.5) * 2.0 * s);
+        let [dr, db, g] = self.d[i].map(f64::from);
+        let vg = self.model.var(g, r) * self.wb[1] * self.wb[1];
+        let c = vg / 16.0;
+        let site = |w: f64, dc: f64| w * w * self.model.var((dc + g) / w, r) + vg / 4.0;
+        [site(self.wb[0], dr), site(self.wb[2], db)].map(|v| ((v + 4.0 * c * (1.0 - 1.0 / s)) / (s * s)).sqrt())
     }
 
     /// Cell `i`'s two colour differences through the sigma filter at `k`:
@@ -794,7 +830,7 @@ impl Cells {
     fn filtered_in(&self, i: usize, k: f64, rho: usize, scratch: &mut Scratch) -> ([f32; 2], [u32; 2]) {
         let (cw, ch) = (self.cw, self.ch);
         let (cx, cy) = (i % cw, i / cw);
-        let sd = self.sd[(cy / PATCH).min(self.ph - 1) * self.pw + (cx / PATCH).min(self.pw - 1)];
+        let sd = self.own_sd(i);
         let (y0, y1, x0, x1) = (cy.saturating_sub(rho), (cy + rho + 1).min(ch), cx.saturating_sub(rho), (cx + rho + 1).min(cw));
         let Scratch { window: [w0, w1], seen } = scratch;
         w0.clear();
@@ -807,8 +843,7 @@ impl Cells {
         }
         let (mut out, mut count) = ([0.0f32; 2], [0u32; 2]);
         for (j, window) in [&*w0, &*w1].into_iter().enumerate() {
-            // One cell's sd is `σ_d / √2`.
-            (out[j], count[j]) = skipped_mean(window, self.d[i][j], f64::from(sd[j]) / 2f64.sqrt(), k, seen);
+            (out[j], count[j]) = skipped_mean(window, self.d[i][j], sd[j], k, seen);
         }
         (out, count)
     }

@@ -117,6 +117,68 @@ fn a_colour_edge_the_noise_cannot_make_is_kept() {
     assert!((kept / step - 1.0).abs() < 0.1, "the step {step:.3e} came out {kept:.3e}");
 }
 
+/// The test's noise is the hypothesis's: the anchor's own level. A dark
+/// region (green 0.01) beside a bright one (green 0.5) of the same hue
+/// (`wR·R = 1.4·G`), the edge in the middle of a patch, under the module's
+/// photon and read noise: the patch straddling the edge has its mean level,
+/// and so its sd, between the two sides'. At a `k` between the step's size in
+/// the straddling patch's sds and in a dark cell's own (their geometric
+/// mean, computed here from the noise law), a dark cell tested at the
+/// patch's sd lets the bright side vote; tested at its own it does not. The
+/// dark columns of that patch keep their own colour difference: the mean
+/// over the rows within 0.15 of the step of the noiseless scene's (the colour
+/// edge test's limit), the column next to the edge excluded on neither side
+/// (a red site's four greens are all dark there).
+///
+/// MUTATION: the test's sd read from the cell's patch (the form before
+/// rel1180 round 14).
+#[test]
+fn a_dark_cells_test_is_at_its_own_noise() {
+    const HUE: f64 = 1.4;
+    let (dark, bright) = (0.01, 0.5);
+    let e = W / 4 + PATCH / 2; // the edge, in cells: mid-patch
+    let scene = |x: usize| if x / 2 < e { dark } else { bright };
+    let site = |x: usize, y: usize, g: f64| match (y % 2, x % 2) {
+        (0, 0) => HUE * g / WB[0],
+        (1, 1) => g / WB[2],
+        _ => g,
+    };
+    let make = |noise: bool| -> Vec<f32> {
+        let mut out = vec![0.0f32; W * H];
+        out.par_chunks_mut(W).enumerate().for_each(|(y, row)| {
+            for (x, v) in row.iter_mut().enumerate() {
+                let s = site(x, y, scene(x));
+                *v = (s + if noise { (A * s + B).sqrt() * normal(41, (y * W + x) as u64) } else { 0.0 }) as f32;
+            }
+        });
+        out
+    };
+    let (m, clean) = (make(true), make(false));
+    let sites = bayer_sites(&rggb()).expect("Bayer");
+    let pts = patches(&m, W, H, sites, WB);
+    let model = NoiseModel::fit(&pts, W, H).expect("a Bayer mosaic with noise fits a model");
+    let cells = Cells::of(&m, W, H, sites, WB, &model, &pts).expect("cells");
+    let truth = Cells::of(&clean, W, H, sites, WB, &model, &patches(&clean, W, H, sites, WB)).expect("cells");
+    // One cell's R − G sd at a level: the site's own and its four greens.
+    let cell_sd = |g: f64| (WB[0] * WB[0] * (A * HUE * g / WB[0] + B) + (A * g + B) / 4.0).sqrt();
+    let step = (HUE - 1.0) * (bright - dark);
+    let mean_level = (dark + bright) / 2.0;
+    let k = (step / cell_sd(mean_level) * step / cell_sd(dark)).sqrt();
+    assert!(step / cell_sd(mean_level) < k && k < step / cell_sd(dark));
+    let rho = 3;
+    let col = |c: &Cells, cx: usize, f: &dyn Fn(usize) -> f64| (0..c.ch).map(|cy| f(cy * c.cw + cx)).sum::<f64>() / c.ch as f64;
+    for cx in e - PATCH / 2..e {
+        let got = col(&cells, cx, &|i| f64::from(cells.filtered(i, k, rho)[0]));
+        let want = col(&truth, cx, &|i| f64::from(truth.d[i][0]));
+        assert!(
+            (got - want).abs() < 0.15 * step,
+            "column {cx} (edge at {e}, k {k:.2}): R - G {got:.4e} against the scene's {want:.4e} (step {step:.4e}; own sd {:.4e}, the patch's mean-level sd {:.4e})",
+            cell_sd(dark),
+            cell_sd(mean_level)
+        );
+    }
+}
+
 #[test]
 fn the_slider_scales_k_and_zero_is_off() {
     assert_eq!(scale_of(0.0), None);
