@@ -75,7 +75,7 @@ fn rggb() -> rawler::cfa::CFA {
 fn the_stage_takes_the_colour_noise_and_leaves_the_greens_and_the_mean() {
     let before = mosaic(0.01, 0.0);
     let mut after = before.clone();
-    let (SourceReading { model, .. }, _, _) = filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, |_| 3, None, 0).expect("a Bayer mosaic with noise fits a model");
+    let (SourceReading { model, .. }, _, _) = filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, |_| 3, None, 0, true).expect("a Bayer mosaic with noise fits a model");
     // The greens are never written.
     for y in 0..H {
         for x in 0..W {
@@ -104,7 +104,7 @@ fn a_colour_edge_the_noise_cannot_make_is_kept() {
     let step = 12.0 * cell_sd;
     let before = mosaic(level, step);
     let mut after = before.clone();
-    filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, |_| 3, None, 0).expect("model");
+    filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, |_| 3, None, 0, true).expect("model");
     let (m0, m1) = (column_dr(&before), column_dr(&after));
     let side = |m: &[f64], cols: std::ops::Range<usize>| cols.clone().map(|c| m[c]).sum::<f64>() / cols.len() as f64;
     let e = W / 4; // the edge, in cells
@@ -138,7 +138,7 @@ fn where_k_is_unbounded_the_slider_weakens_the_stage_through_its_window() {
     let before = mosaic(0.01, 0.0);
     let at = |nr: f32| {
         let mut m = before.clone();
-        let (_, k, _) = filter_mosaic(&mut m, W, H, &rggb(), WB, scale_of(nr).unwrap(), |k| window(nr, k), None, 0).expect("a model");
+        let (_, k, _) = filter_mosaic(&mut m, W, H, &rggb(), WB, scale_of(nr).unwrap(), |k| window(nr, k), None, 0, true).expect("a model");
         (k, var_dr(&m, 0..W / 2))
     };
     assert_eq!((window(10.0, f64::INFINITY), window(25.0, f64::INFINITY), window(100.0, f64::INFINITY)), (1, 7, 23), "the display pass's sample count in cells");
@@ -286,7 +286,7 @@ fn a_pattern_that_is_not_a_two_by_two_bayer_is_left_alone() {
     let before = mosaic(0.01, 0.0);
     let mut after = before.clone();
     let xtrans = rawler::cfa::CFA::new("GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG");
-    assert!(filter_mosaic(&mut after, W, H, &xtrans, WB, 1.0, |_| 3, None, 0).is_none());
+    assert!(filter_mosaic(&mut after, W, H, &xtrans, WB, 1.0, |_| 3, None, 0, true).is_none());
     assert!(before.iter().zip(&after).all(|(a, b)| a.to_bits() == b.to_bits()));
 }
 
@@ -318,6 +318,117 @@ fn the_k_reading_reads_the_textured_patches_at_the_fits_own_stride() {
     }
 }
 
+/// The demosaic reads the sensor's own mosaic: a develop that demosaics asks
+/// the stage not to write (`write` false), so its mosaic comes back bit for
+/// bit as it went in — the demosaic's green at a red or blue site is built
+/// from that site's own sample, and a filtered sample written back would move
+/// the pixel's luma — while the cell chroma the rebuild writes the colour from
+/// is the one a writing stage returns (the write is an output, not an input
+/// of the pass).
+///
+/// MUTATION: the stage writes whatever `write` says: the mosaic then carries
+/// the filtered samples.
+#[test]
+fn a_demosaicing_develop_reads_the_sensors_own_mosaic() {
+    let before = mosaic(0.01, 0.0);
+    let (mut kept, mut written) = (before.clone(), before.clone());
+    let (_, k0, c0) = filter_mosaic(&mut kept, W, H, &rggb(), WB, 1.0, |_| 3, None, 0, false).expect("a model");
+    let (_, k1, c1) = filter_mosaic(&mut written, W, H, &rggb(), WB, 1.0, |_| 3, None, 0, true).expect("a model");
+    assert!(kept.iter().zip(&before).all(|(a, b)| a.to_bits() == b.to_bits()), "the mosaic a demosaic reads was written");
+    assert!(written.iter().zip(&before).any(|(a, b)| a != b), "the writing stage left its mosaic as it was");
+    assert_eq!(k0.to_bits(), k1.to_bits(), "the k");
+    for j in 0..2 {
+        assert!(c0.planes[j].iter().zip(&c1.planes[j]).all(|(a, b)| a.to_bits() == b.to_bits()), "colour difference {j}'s cell chroma");
+        assert!(c0.slopes[j].iter().zip(&c1.slopes[j]).all(|(a, b)| a.to_bits() == b.to_bits()), "colour difference {j}'s slopes");
+    }
+}
+
+/// The luma that is the green: the rebuild then keeps each pixel's green bit
+/// for bit, and the chroma read, the slope and the star tests read the
+/// colour differences on the demosaic's own greens (the luma kept is the next
+/// test's).
+const GREEN_LUMA: [f32; 3] = [0.0, 1.0, 0.0];
+
+/// Colour noise has no content at a pixel's scale; the pixel's light has —
+/// the stage decides the colour, the demosaic's luma stays. A demosaic's
+/// camera-native frame (signed dark noise, a lit sky, and a row of pixels at
+/// the white level), a cell chroma that moves every pixel's red and blue, and
+/// the luma of a working space (`0.25·qR + 0.70·qG + 0.05·qB` on the
+/// white-balanced channels `q`): after the rebuild every pixel's luma is the
+/// demosaic's own, to the rounding of its three channels to `f32` (the luma is
+/// a sum of three products; it cannot be bit-identical through a change of
+/// its terms, only to their rounding), its colour differences `wR·R − G`,
+/// `wB·B − G` the cell chroma, except on the pixels the rebuild reports
+/// brought into range — and those are exactly the pixels whose rebuilt
+/// colour would have put a channel over the white level: at most 1 with their
+/// luma kept where a grey of that luma fits, the demosaic's own pixel where
+/// none does (the white row: its luma is past any grey's).
+///
+/// MUTATION: the move along the grey dropped (the pixel keeps its green and
+/// takes `R = (G + c)/wR`, round 11's form): the luma moves by the red's and
+/// the blue's share of the change.
+#[test]
+fn the_rebuild_keeps_the_demosaics_luma() {
+    let (cw, ch, w, h) = (34usize, 26usize, 64usize, 48usize);
+    let (wr, wb) = (WB[0] as f32, WB[2] as f32);
+    let luma = [0.25 * wr, 0.70, 0.05 * wb];
+    let l = luma.map(f64::from);
+    let planes = [
+        (0..cw * ch).map(|i| (0.02 + 0.01 * normal(31, i as u64)) as f32).collect::<Vec<f32>>(),
+        (0..cw * ch).map(|i| (-0.015 + 0.01 * normal(37, i as u64)) as f32).collect::<Vec<f32>>(),
+    ];
+    let flat = || vec![0.0f32; cw * ch];
+    let chroma = CellChroma { cw, ch, wb: [wr, wb], origin: [(0, 0), (1, 1)], planes, green: flat(), slopes: [flat(), flat()] };
+    // Rows 0..16 the night's signed noise about 0, rows 16..47 a lit sky,
+    // row 47 at the white level (the green a hair under it).
+    let before: Vec<[f32; 3]> = (0..w * h)
+        .map(|i| {
+            let y = i / w;
+            let level = if y < 16 { 0.0 } else if y < h - 1 { 0.3 } else { 0.999 };
+            let sd = if y < 16 { 0.004 } else if y < h - 1 { 0.02 } else { 0.0 };
+            [0, 1, 2].map(|c| {
+                let base = if y == h - 1 { [1.0 / f64::from(wr) + 0.55, level, 1.0 / f64::from(wb) + 0.35][c] } else { level / [WB[0], 1.0, WB[2]][c] };
+                (base + sd * normal(41 + c as u64, i as u64)) as f32
+            })
+        })
+        .collect();
+    let mut after = before.clone();
+    let pulled = chroma.rebuild(&mut after, w, 0, 0, luma);
+    let y_of = |p: &[f32; 3]| (0..3).map(|c| l[c] * f64::from(p[c])).sum::<f64>();
+    let rounding = |p: &[f32; 3]| (0..3).map(|c| (l[c] * f64::from(p[c])).abs()).sum::<f64>() * f64::from(f32::EPSILON);
+    let mut over = 0;
+    for (i, (b, a)) in before.iter().zip(&after).enumerate() {
+        let (x, y) = (i % w, i / w);
+        let c = [0usize, 1].map(|j| {
+            let (oy, ox) = [(0usize, 0usize), (1, 1)][j];
+            crate::render::bilinear_plane(&chroma.planes[j], cw, ch, (x as f32 - ox as f32) / 2.0, (y as f32 - oy as f32) / 2.0)
+        });
+        let decided = [f64::from((b[1] + c[0]) / wr), f64::from(b[1]), f64::from((b[1] + c[1]) / wb)];
+        let lift = (y_of(b) - (0..3).map(|k| l[k] * decided[k]).sum::<f64>()) / (l[0] / f64::from(wr) + l[1] + l[2] / f64::from(wb));
+        let goes_over = [lift / f64::from(wr), lift, lift / f64::from(wb)].iter().zip(&decided).any(|(g, d)| d + g > 1.0);
+        let grey_fits = [1.0 / f64::from(wr), 1.0, 1.0 / f64::from(wb)]
+            .iter()
+            .all(|g| g * y_of(b) / (l[0] / f64::from(wr) + l[1] + l[2] / f64::from(wb)) <= 1.0);
+        if goes_over {
+            over += 1;
+            if grey_fits {
+                assert!(a.iter().all(|&v| v <= 1.0), "pixel ({x}, {y}) brought into range has a channel over the white level: {a:?}");
+            } else {
+                assert_eq!(a, b, "pixel ({x}, {y}): no grey of its luma fits, so it stays the demosaic's");
+            }
+        } else {
+            let got = [f64::from(wr) * f64::from(a[0]) - f64::from(a[1]), f64::from(wb) * f64::from(a[2]) - f64::from(a[1])];
+            for j in 0..2 {
+                assert!((got[j] - f64::from(c[j])).abs() < 1e-5, "pixel ({x}, {y}): colour difference {j} {:.6}, the cell chroma {:.6}", got[j], c[j]);
+            }
+        }
+        let dy = (y_of(a) - y_of(b)).abs();
+        assert!(dy <= 2.0 * rounding(a), "pixel ({x}, {y}): luma {:.9} after, the demosaic's {:.9} (rounding {:.2e})", y_of(a), y_of(b), rounding(a));
+    }
+    assert_eq!(pulled, over, "the pixels reported brought into range are the ones whose colour went over the white level");
+    assert!(over > 0 && over <= w, "the white row is the one that goes over: {over}");
+}
+
 /// The sensor measures colour once per cell; pixel-scale chroma is the
 /// demosaic's, so the stage's cell chroma is the pixel's: after the rebuild
 /// every pixel's green is its own (bit for bit) and its chroma `wR·R − G`,
@@ -343,7 +454,7 @@ fn the_pixels_chroma_is_the_cells_chroma_read_at_the_pixel() {
     let before: Vec<[f32; 3]> =
         (0..w * h).map(|i| [0, 1, 2].map(|c| (0.2 + 0.05 * normal(11 + c as u64, i as u64)) as f32)).collect();
     let mut after = before.clone();
-    chroma.rebuild(&mut after, w, ox, oy);
+    chroma.rebuild(&mut after, w, ox, oy, GREEN_LUMA);
     for (i, (b, a)) in before.iter().zip(&after).enumerate() {
         let (x, y) = (i % w, i / w);
         assert_eq!(b[1].to_bits(), a[1].to_bits(), "the green of pixel ({x}, {y}) moved");
@@ -429,7 +540,7 @@ fn a_pixels_colour_follows_its_light_where_the_green_varies_more_than_its_noise(
     let scene: Vec<[f32; 2]> = cells.d.iter().map(|d| RATIO.map(|r| ((r - 1.0) * f64::from(d[2])) as f32)).collect();
     let chroma = cells.chroma(&scene, &model, WB, 3);
     let mut rgb: Vec<[f32; 3]> = (0..W * H).map(|i| [0.0, light(i % W, i / W) as f32, 0.0]).collect();
-    chroma.rebuild(&mut rgb, W, 0, 0);
+    chroma.rebuild(&mut rgb, W, 0, 0, GREEN_LUMA);
     for (c, wc) in [(0usize, WB[0]), (2, WB[2])] {
         let want = RATIO[c / 2];
         let per_star: Vec<f64> = stars
@@ -514,7 +625,7 @@ fn a_stars_colour_sits_where_its_light_sits() {
     let measured: Vec<[f32; 2]> = cells.d.iter().map(|d| [d[0], d[1]]).collect();
     let chroma = cells.chroma(&measured, &model, WB, 3);
     let mut rgb: Vec<[f32; 3]> = (0..W * H).map(|i| [0.0, light(i % W, i / W) as f32, 0.0]).collect();
-    chroma.rebuild(&mut rgb, W, 0, 0);
+    chroma.rebuild(&mut rgb, W, 0, 0, GREEN_LUMA);
     // Per star, the centroid of `value − sky` over the square about it.
     let centroid = |sx: f64, sy: f64, value: &dyn Fn(usize) -> f64, sky: f64| {
         let (x0, y0) = (sx.round() as usize - HALF, sy.round() as usize - HALF);
@@ -580,7 +691,7 @@ fn the_stage_runs_at_the_exposures_reading_not_at_a_fit_of_the_mosaic_it_is_give
         .collect();
     let refit = read_source(&denoised, W, H, &rggb(), WB).expect("a model");
     assert_ne!(refit.model, reading.model, "the denoised mosaic must read another model for this test to say anything");
-    let (ran, k, _) = filter_mosaic(&mut denoised, W, H, &rggb(), WB, 1.0, |_| 3, Some(&reading), 0).expect("the stage runs");
+    let (ran, k, _) = filter_mosaic(&mut denoised, W, H, &rggb(), WB, 1.0, |_| 3, Some(&reading), 0, true).expect("the stage runs");
     assert_eq!(ran, reading, "the stage ran at {ran:?}, the exposure's reading is {reading:?}");
     assert!(k == reading.k, "k {k}, the exposure's {}", reading.k);
 }

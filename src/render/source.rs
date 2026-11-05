@@ -585,6 +585,32 @@ fn stage_wb(raw: &rawler::RawImage) -> [f64; 3] {
     }
 }
 
+/// rawler's calibrate for `raw`: its camera-to-sRGB matrix (the D65 colour
+/// matrix, else the first, through `normalize` and `pseudo_inverse`) and the
+/// white balance applied before it (none without `WhiteBalance`), or `None`
+/// when the frame carries no usable matrix.
+fn calibration(raw: &rawler::RawImage, dev: &RawDevelop) -> Option<([[f32; 4]; 3], [f32; 4])> {
+    use rawler::imgop::matrix::{multiply, normalize, pseudo_inverse};
+    let found = raw
+        .color_matrix
+        .iter()
+        .find(|(illuminant, _)| **illuminant == rawler::imgop::xyz::Illuminant::D65)
+        .or_else(|| raw.color_matrix.iter().next());
+    let (_, m) = found.filter(|(_, m)| m.len() % 3 == 0)?;
+    let mut xyz2cam = [[0.0f32; 3]; 4];
+    for i in 0..m.len() / 3 {
+        for j in 0..3 {
+            xyz2cam[i][j] = m[i * 3 + j];
+        }
+    }
+    let wb = if raw.wb_coeffs[0].is_nan() || !dev.steps.contains(&ProcessingStep::WhiteBalance) {
+        [1.0f32; 4]
+    } else {
+        raw.wb_coeffs
+    };
+    Some((pseudo_inverse(normalize(multiply(&xyz2cam, &rawler::imgop::xyz::SRGB_TO_XYZ_D65))), wb))
+}
+
 /// The exposure's noise reading for the colour stage, off `raw`'s own sensor
 /// mosaic ([`crate::denoise::linear_chroma::read_source`]).
 fn read_sensor(raw: &rawler::RawImage) -> Option<crate::denoise::linear_chroma::SourceReading> {
@@ -640,7 +666,7 @@ fn develop_cfa_signed(raw: &rawler::RawImage, dev: &RawDevelop, (colour_nr, read
     let mut cell_chroma = None;
     if let Some(scale) = stage {
         let rho = |k| crate::denoise::linear_chroma::window(colour_nr, k);
-        cell_chroma = crate::denoise::linear_chroma::filter_mosaic(&mut v, width, raw.height, &config.cfa, stage_wb(raw), scale, rho, reading, crate::denoise::linear_chroma::preview_level(raw.width, raw.height, max_edge))
+        cell_chroma = crate::denoise::linear_chroma::filter_mosaic(&mut v, width, raw.height, &config.cfa, stage_wb(raw), scale, rho, reading, crate::denoise::linear_chroma::preview_level(raw.width, raw.height, max_edge), !demosaic)
             .map(|(_, _, chroma)| chroma);
     }
     let pixels = PixF32::new_with(v, raw.width, raw.height);
@@ -651,42 +677,25 @@ fn develop_cfa_signed(raw: &rawler::RawImage, dev: &RawDevelop, (colour_nr, read
     let roi = if crop_active { raw.active_area.unwrap_or(pixels.rect()) } else { pixels.rect() };
     let mut rgb = PPGDemosaic::new().demosaic(&pixels, &config.cfa, &config.colors, roi);
     drop(pixels);
+    let calibration = dev.steps.contains(&ProcessingStep::Calibrate).then(|| calibration(raw, dev)).flatten();
     // The sensor measures colour once per cell; pixel-scale chroma is the
-    // demosaic's, so the stage's cell chroma is the pixel's.
+    // demosaic's, so the stage's cell chroma is the pixel's; the pixel's luma
+    // stays the demosaic's, in the working space the calibrate maps it to.
     if let Some(chroma) = &cell_chroma {
         let width = rgb.width;
-        chroma.rebuild(&mut rgb.data, width, roi.p.x, roi.p.y);
+        let luma = crate::denoise::linear_chroma::camera_luma(calibration.as_ref().map(|(m, wb)| (m, *wb)), rawler::imgop::xyz::SRGB_TO_XYZ_D65[1]);
+        chroma.rebuild(&mut rgb.data, width, roi.p.x, roi.p.y, luma);
     }
-    if dev.steps.contains(&ProcessingStep::Calibrate) {
-        use rawler::imgop::matrix::{multiply, normalize, pseudo_inverse};
-        let found = raw
-            .color_matrix
-            .iter()
-            .find(|(illuminant, _)| **illuminant == rawler::imgop::xyz::Illuminant::D65)
-            .or_else(|| raw.color_matrix.iter().next());
-        if let Some((_, m)) = found.filter(|(_, m)| m.len() % 3 == 0) {
-            let mut xyz2cam = [[0.0f32; 3]; 4];
-            for i in 0..m.len() / 3 {
-                for j in 0..3 {
-                    xyz2cam[i][j] = m[i * 3 + j];
-                }
-            }
-            let wb = if raw.wb_coeffs[0].is_nan() || !dev.steps.contains(&ProcessingStep::WhiteBalance) {
-                [1.0f32; 4]
-            } else {
-                raw.wb_coeffs
-            };
-            let cam2rgb = pseudo_inverse(normalize(multiply(&xyz2cam, &rawler::imgop::xyz::SRGB_TO_XYZ_D65)));
-            rgb.data.par_iter_mut().for_each(|px| {
-                let (r, g, b) = (px[0] * wb[0], px[1] * wb[1], px[2] * wb[2]);
-                let out = [
-                    cam2rgb[0][0] * r + cam2rgb[0][1] * g + cam2rgb[0][2] * b,
-                    cam2rgb[1][0] * r + cam2rgb[1][1] * g + cam2rgb[1][2] * b,
-                    cam2rgb[2][0] * r + cam2rgb[2][1] * g + cam2rgb[2][2] * b,
-                ];
-                *px = rawler::imgop::raw::clip_euclidean_norm_avg(&out);
-            });
-        }
+    if let Some((cam2rgb, wb)) = calibration {
+        rgb.data.par_iter_mut().for_each(|px| {
+            let (r, g, b) = (px[0] * wb[0], px[1] * wb[1], px[2] * wb[2]);
+            let out = [
+                cam2rgb[0][0] * r + cam2rgb[0][1] * g + cam2rgb[0][2] * b,
+                cam2rgb[1][0] * r + cam2rgb[1][1] * g + cam2rgb[1][2] * b,
+                cam2rgb[2][0] * r + cam2rgb[2][1] * g + cam2rgb[2][2] * b,
+            ];
+            *px = rawler::imgop::raw::clip_euclidean_norm_avg(&out);
+        });
     }
     if dev.steps.contains(&ProcessingStep::CropDefault)
         && let Some(mut crop) = raw.crop_area.or(raw.active_area)

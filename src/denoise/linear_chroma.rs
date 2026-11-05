@@ -35,9 +35,8 @@
 //! per cell; pixel-scale chroma is the demosaic's, so the stage's cell chroma
 //! is the pixel's — and a pixel's colour follows its light: the cell's
 //! colour, carried along the cell's own slope against green, believed only
-//! where the green varies more than its noise. After the demosaic every pixel
-//! keeps its green — the demosaic's luminance, `Y` of the colour differences
-//! above, untouched — and its red and blue are rebuilt on it from the
+//! where the green varies more than its noise. After the demosaic every
+//! pixel's red and blue are rebuilt on its green from the
 //! filtered cell chroma moved along the cell's slope by the pixel's green
 //! against the cell's (`c + a·(G − G_cell)`, [`Cells::slopes`]: the display
 //! pass's own `a·l + b` in linear light, its `ε` the model's noise variance),
@@ -52,10 +51,19 @@
 //! while the ramp around it takes the rest (round 11: on a sunset's texture window
 //! 79 % of the L* edge energy lost sat on the quarter of pixels whose
 //! luminance is 20 % or more off their cell's; the night sky's star cores
-//! went from R/G 1.06 to 0.80). No pixel pass: box sums over the cells and a
-//! few reads per pixel. (The filtered red and blue samples are still written
-//! to the mosaic, so the demosaic's own direction choices read the filtered
-//! colour.)
+//! went from R/G 1.06 to 0.80). Colour noise has no content at a pixel's
+//! scale; the pixel's light has — the stage decides the colour, the
+//! demosaic's luma stays: the rebuilt pixel is moved along the grey, which
+//! changes no colour difference, until its luma in the working space
+//! ([`camera_luma`]) is the demosaic's own (with only R and B rebuilt, a
+//! window-wide chroma flattened a twig's red and blue edge and with them a
+//! fifth of a sunset texture's L* edge energy, round 11). No pixel pass: box sums over the cells and a
+//! few reads per pixel. The demosaic reads the sensor's own mosaic: its
+//! green at a red or blue site is built from that site's own sample (PPG:
+//! `(3·G₁ + G₋₁ + R − R₂)/4` along the flattest direction), so a filtered
+//! sample written back would move the demosaic's green, and with it the
+//! pixel's luma — the rebuild writes the colour after it. (Only a develop
+//! that does not demosaic takes the filtered samples into its mosaic.)
 //!
 //! **The filter.** A sigma filter: a neighbour votes when the evidence says
 //! it shares the cell's TRUE colour — it lies within `k` noise sds of an
@@ -296,10 +304,13 @@ pub(crate) fn preview_level(width: usize, height: usize, max_edge: Option<u32>) 
 /// and the filtered cell chroma the demosaiced pixels are rebuilt on
 /// ([`CellChroma::rebuild`]), or `None` — and the mosaic untouched — when the
 /// pattern is not a 2×2 RGB Bayer or the frame has too few usable patches for
-/// a model. At `level` > 0 ([`preview_level`]) the pass runs on that level of
+/// a model. The filtered samples are written back into `mosaic` only when
+/// `write` (a develop that does not demosaic): a demosaic reads the sensor's
+/// own mosaic and takes its colour from the rebuild. At `level` > 0
+/// ([`preview_level`]) the pass runs on that level of
 /// the cell pyramid ([`Cells::level`], the base window there) and each cell
 /// takes the level's filtered chroma read bilinearly at its centre.
-#[allow(clippy::too_many_arguments)] // the mosaic's frame plus the stage's strength, window and the exposure's reading
+#[allow(clippy::too_many_arguments)] // the mosaic's frame plus the stage's strength, window, the exposure's reading and the write
 pub(crate) fn filter_mosaic(
     mosaic: &mut [f32],
     width: usize,
@@ -310,6 +321,7 @@ pub(crate) fn filter_mosaic(
     rho: impl Fn(f64) -> usize,
     source: Option<&SourceReading>,
     level: u32,
+    write: bool,
 ) -> Option<(SourceReading, f64, CellChroma)> {
     let sites = bayer_sites(cfa)?;
     if mosaic.len() != width * height || wb[1].is_nan() || wb[1] <= 0.0 || scale.is_nan() || scale <= 0.0 {
@@ -345,7 +357,9 @@ pub(crate) fn filter_mosaic(
             })
             .collect()
     };
-    cells.write(mosaic, width, sites, wb, &filtered);
+    if write {
+        cells.write(mosaic, width, sites, wb, &filtered);
+    }
     let chroma = cells.chroma(&filtered, &model, wb, rho);
     Some((reading, k, chroma))
 }
@@ -388,9 +402,36 @@ impl CellChroma {
     /// Where `a` is 0 (a flat cell) the pixel's chroma is the cell's and the
     /// green's own noise stays luminance; where the green carries a star or a
     /// twig, the chroma follows it at the cell's own colour ratio.
-    pub(crate) fn rebuild(&self, rgb: &mut [[f32; 3]], width: usize, ox: usize, oy: usize) {
+    ///
+    /// Colour noise has no content at a pixel's scale; the pixel's light has —
+    /// the stage decides the colour, the demosaic's luma stays. `luma` is the
+    /// working space's luminance of a camera-native pixel, `Y = luma·rgb`
+    /// (the Y row of the develop's own camera-to-working matrix, white balance
+    /// included: [`camera_luma`]). The colour differences `c` are written as
+    /// decided and the pixel's three channels are then moved together along
+    /// the grey `(1/wR, 1, 1/wB)` — the one direction that changes no colour
+    /// difference — until its luma is the demosaic's own `Y` again: `R`, `B`
+    /// moved by a filtered `c` no longer carry the pixel's light away with
+    /// them (on a twig a window-wide `c` flattened its red and blue edge, and
+    /// with them a fifth of the L* edge energy, rel1180 msg-e3 round 11). A
+    /// move along the grey rather than a scale by `Y/Y'`: the colour
+    /// differences are what the stage filtered and are kept exactly, and
+    /// `Y/Y'` has no bound where the signed dark noise puts `Y'` at 0. Where
+    /// that would put a channel over the white level (1, the normalised
+    /// mosaic's clip), the display pass's own into-range rule
+    /// (`render::detail::chroma_into_range`) applies: the chroma is pulled
+    /// toward the grey of the same luma by the largest factor in `[0, 1]`
+    /// that fits, and where even that grey does not fit (a clipped core) the
+    /// pixel stays the demosaic's. The noise below the black stays signed, as
+    /// the develop keeps it (`render::source`). With `luma = [0, 1, 0]` the
+    /// luma is the green and the pixel keeps its green bit for bit. Returns
+    /// the number of pixels brought into range.
+    pub(crate) fn rebuild(&self, rgb: &mut [[f32; 3]], width: usize, ox: usize, oy: usize, luma: [f32; 3]) -> usize {
         let (cw, ch) = (self.cw, self.ch);
         let [wr, wbl] = self.wb;
+        let l = luma.map(f64::from);
+        let grey = [1.0 / f64::from(wr), 1.0, 1.0 / f64::from(wbl)];
+        let grey_y = l[0] * grey[0] + l[1] + l[2] * grey[2];
         let at = |plane: &[f32], sx: usize, sy: usize| crate::render::upsample_at(plane, cw, ch, 2, sx, sy);
         // Plane `j`'s value of cell `(cx, cy)` sits at mosaic site
         // `(2cx + dx, 2cy + dy)`.
@@ -399,16 +440,57 @@ impl CellChroma {
             let (u, v) = ((sx as f32 - dx as f32) / 2.0, (sy as f32 - dy as f32) / 2.0);
             crate::render::bilinear_plane(&self.planes[j], cw, ch, u, v)
         };
-        rgb.par_chunks_mut(width.max(1)).enumerate().for_each(|(y, row)| {
-            for (x, px) in row.iter_mut().enumerate() {
-                let (sx, sy) = (x + ox, y + oy);
-                let dg = px[1] - at(&self.green, sx, sy);
-                let cr = on_sites(0, sx, sy) + at(&self.slopes[0], sx, sy) * dg;
-                let cb = on_sites(1, sx, sy) + at(&self.slopes[1], sx, sy) * dg;
-                px[0] = (px[1] + cr) / wr;
-                px[2] = (px[1] + cb) / wbl;
-            }
-        });
+        let y_of = |p: [f64; 3]| l[0] * p[0] + l[1] * p[1] + l[2] * p[2];
+        rgb.par_chunks_mut(width.max(1))
+            .enumerate()
+            .map(|(y, row)| {
+                let mut pulled = 0;
+                for (x, px) in row.iter_mut().enumerate() {
+                    let (sx, sy) = (x + ox, y + oy);
+                    let own = px.map(f64::from);
+                    let dg = px[1] - at(&self.green, sx, sy);
+                    let cr = on_sites(0, sx, sy) + at(&self.slopes[0], sx, sy) * dg;
+                    let cb = on_sites(1, sx, sy) + at(&self.slopes[1], sx, sy) * dg;
+                    let v = [f64::from((px[1] + cr) / wr), own[1], f64::from((px[1] + cb) / wbl)];
+                    let y = y_of(own);
+                    let lift = (y - y_of(v)) / grey_y;
+                    let v = [0, 1, 2].map(|c| v[c] + lift * grey[c]);
+                    if v.iter().all(|&c| c <= 1.0) {
+                        if lift != 0.0 {
+                            *px = v.map(|c| c as f32);
+                        } else {
+                            // The luma is already the demosaic's (always so at
+                            // `luma = [0, 1, 0]`): the green is the pixel's own.
+                            px[0] = v[0] as f32;
+                            px[2] = v[2] as f32;
+                        }
+                        continue;
+                    }
+                    pulled += 1;
+                    let n = grey.map(|g| g * y / grey_y);
+                    if n.iter().any(|&c| c > 1.0) {
+                        continue;
+                    }
+                    let t = (0..3).filter(|&c| v[c] > 1.0).map(|c| (1.0 - n[c]) / (v[c] - n[c])).fold(1.0f64, f64::min).max(0.0);
+                    *px = [0, 1, 2].map(|c| (n[c] + t * (v[c] - n[c])) as f32);
+                }
+                pulled
+            })
+            .sum()
+    }
+}
+
+/// The working space's luminance of a camera-native pixel, as coefficients
+/// on its camera `R, G, B`: the Y row of the working space (`xyz` the
+/// working-to-XYZ matrix's luminance row) through the develop's own
+/// camera-to-working matrix `cam2rgb`, after its white balance `wb` —
+/// `luma_i = wb_i · Σ_j xyz_j · cam2rgb[j][i]`. The luma the colour stage
+/// keeps ([`CellChroma::rebuild`]); `None` (a develop with no camera matrix)
+/// reads the green, the luminance a Bayer demosaic is built around.
+pub(crate) fn camera_luma(calibration: Option<(&[[f32; 4]; 3], [f32; 4])>, xyz: [f32; 3]) -> [f32; 3] {
+    match calibration {
+        Some((cam2rgb, wb)) => [0, 1, 2].map(|i| wb[i] * (0..3).map(|j| xyz[j] * cam2rgb[j][i]).sum::<f32>()),
+        None => [0.0, 1.0, 0.0],
     }
 }
 
