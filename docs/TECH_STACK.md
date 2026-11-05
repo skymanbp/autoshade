@@ -1004,9 +1004,15 @@ clip in both frames and the field pulled it 0.999 → 0.972 against a target at
 (`fit_field::unclipped` on the target), because a pixel at the clip on both
 sides cannot show whether a move took its cell toward the target. The module
 never builds a second evidence model. The normal
-equations are solved by conjugate gradient with f64 accumulators, Tikhonov
+equations are solved by conjugate gradient, preconditioned since v1.18.0 by
+the inverse diagonal of the whole system (the data term's diagonal, the
+ridge and the smoother's per-neighbour weight: no number of its own), with
+f64 accumulators, Tikhonov
 `lambda = 1` toward zero (= the global recipe) plus an x/y/b Laplacian `s = 1`,
-at most 90 iterations or a squared relative residual of `1e-10`. The CG solve
+at most 90 iterations or a squared relative residual of `1e-10` (with the
+preconditioner the seaside pair's three solves reach the tolerance inside the
+budget, 270 → 233 steps in all where three stopped on it, and the renders
+move by at most one code value). The CG solve
 and every reduction stay sequential; only the 96 independent cell readings run
 in parallel and are scattered in cell order, so two solves of one input are
 bit-identical (pinned by test). The analyzer reads and applies the field's
@@ -1017,10 +1023,14 @@ v1.17.1 a cast to f32 between the read and the delta left 1 ulp). There is no pe
 experiment's sweep picked `s = 0` on two of its five pairs to buy a last
 `0.003` of the objective, and determinism plus no selection bias are worth
 more. After the solve, vertices are clipped to `EV +-1.25 / gains +-0.35 /
-slope +-0.5` and zeroed below an occupancy floor of `8`; saturation against
+slope +-0.5`; a vertex under the occupancy floor of `8` is left out of the
+analyzer's statistics but ships the solve's own value (until v1.18.0 it was
+zeroed, which renders as a measured "no change" beside its measured
+neighbours); saturation against
 those bounds is COUNTED and disclosed, never widened away.
 
-`ceiling` is `fit::look_err_with_evidence` of the field's rendered analysis
+`ceiling` is `fit::look_err_with_evidence` (the per-pixel Lab objective since
+v1.18.0) of the field's rendered analysis
 pixels against the target under the report's own evidence — the same
 objective, the same weights and the same size as `report.err_after`, so the two
 are directly comparable — and `global` is that objective on the unmodified
@@ -1060,7 +1070,7 @@ and `src/recipe.rs` for the module name.
   against the target: ripple 2.40 -> 0.63 L, sky deltaE 3.96 -> 3.26.
 - Verdict constants: `BAND_DISPERSION_MAX = 15/255`, `BAND_MERGE_STEP = 2/255`,
   `TILE_SHAPE_MIN = 0.5`, `LINEAR_SHAPE_MIN = 0.6`,
-  `LOCAL_STOP_MARGIN = 0.002`. `BAND_DISPERSION_MAX` is a measured line: the
+  `LOCAL_STOP_MARGIN = FIT_QUANT` (0.002 until v1.18.0). `BAND_DISPERSION_MAX` is a measured line: the
   phase-A fixture sweep (96x64 to 192x128, amplitudes 0.25 to 0.50, ramps and
   waves) reads a spatially UNIFORM two-band edit at at most `9.2/255` in sparse
   bins, spatially structured bins at `21.9-51.8/255`, and the calibration
@@ -1090,6 +1100,10 @@ and `src/recipe.rs` for the module name.
   quality gate that refuses those bands reads the frame correctly.
 - NumPy cross-check on the calibration pair, on the Rust module's OWN exported
   analysis pixels, guide and fit weight (NumPy 2.3.5 / Python 3.13.3). Re-run
+  2026-11-03 for v1.18.0's preconditioned solve (`scripts/field_check.py`
+  ported with it): ceiling `0.073203` on both sides,
+  `max |grid_rust - grid_numpy| = 1.5e-6`, 34 CG iterations on both where the
+  plain solve took 52. Re-run
   2026-11-03 for v1.17.1's f64 parameter read: NumPy ceiling `0.073202`,
   unchanged, against the Rust port's `0.073203` (52 CG iterations where it took
   51: the solve's forward operator lost one rounding per pixel),
@@ -1167,6 +1181,7 @@ and `src/recipe.rs` for the module name.
 - `look_err_with_evidence`'s structural term abstains on this pair (its core is
   under 100 px, so `structure_divergence` returns `None` since v1.2.4 instead of
   a manufactured match). It is a penalty term, so an abstention charges nothing
+  (and since v1.18.0 a local verdict does not read it at all)
   and these numbers are unchanged; the ceiling and every realized share inherit
   that.
 
@@ -1209,7 +1224,7 @@ and `src/recipe.rs` for the module name.
   ceiling by evidence (`pushed_past_evidence`: a paired band may rise to the
   target's, an unpaired band not at all — the night sky's unpaired fine band
   rose 0.38 → 0.52 under clarity +53 and the frame's ΔE 5.22 → 8.05 before
-  it), frame do-no-harm ≤ `FIT_QUANT` (1.8e-3; the zones' 0.02
+  it), frame do-no-harm ≤ `FIT_QUANT` (2.3e-3 since v1.18.0, 1.8e-3 in v1.17; the zones' 0.02
   `ZONE_GLOBAL_REGRESSION_TOL` until v1.17.0, twice a finished frame's error).
   Solves texture and clarity only — capture
   sharpening's radius is in film pixels and is not a quantity a 768-px reading
@@ -1469,7 +1484,15 @@ an EV-piecewise law (`render::develop`), and a strength off 100 is
 exported with the profile named (crs:LensProfileName and
 crs:LensProfileFilename, `EditRecipe::lightroom_named_lens_profile`), the only
 form Camera Raw honours it in, under LensDefaults unless the camera's CA is
-switched off (`EditRecipe::lightroom_lens_setup`);
+switched off (`EditRecipe::lightroom_lens_setup`); since v1.18.0 the writer
+also states the switch itself (`EditRecipe::lightroom_lens_profile_enable`:
+"1" while the develop renders the profile's distortion or vignetting, "0"
+when it carries the profile with both off, nothing when it carries none),
+because Lightroom places every mask in the frame its own
+crs:LensProfileEnable names and a merge over a document that said "0" left
+the masks in another frame than the develop drew them in; with an Adobe
+profile for the photo, `asr:NotCarried` then names only this engine's
+vignetting (Lightroom corrects it with Adobe's profile);
 the Lightroom mask solve keeps its native `(i+1)/16` reading, resampled onto
 2048 canonical nodes, and persists a bounded 64-knot inverse transport.
 
@@ -1874,7 +1897,7 @@ CDFs, searches exposure, solves a regularized basis of engine controls, adds a
 residual monotone tone curve, closes saturation in a render/measure loop, and
 fits channel-cast curves (since v1.17.1 an admitted cast is refined on the
 finished frame in a closed loop, one secant step per knot while the look error
-improves by 1e-4, because the curves render before the mixer, the grade and
+improves by `FIT_QUANT` (1e-4 until v1.18.0), because the curves render before the mixer, the grade and
 saturation, and ships only if the same gates admit the refined curves), which
 ship only through four vetoes — the look-error
 ratio against the strength budget's bound, `cast_paints_foreign_hues` (a visible
@@ -1885,7 +1908,11 @@ luminance); a cast only the fan gate convicts is projected along
 `C(t) = x + min(1, 2t)(L − x) + max(0, 2t − 1)(C − L)` toward the shared shape
 `L` and beyond it toward no curves, the largest `t` whose rendered candidate
 clears 7.5 degrees, all four gates and a `FIT_QUANT` gain bar shipping; terminal do-no-harm can shrink saturation or reset to
-the caller's base recipe, and since 2026-10-21 the tone sliders and the residual
+the caller's base recipe; since v1.18.0 every control that earns less than
+`FIT_QUANT` against its own absence is set back to its base after each joint
+solve and on the finished recipe, and the finished recipe is read again at
+full size as the export renders it and ships only if it still beats the
+calibration-only base there; and since 2026-10-21 the tone sliders and the residual
 curve are each held to do no harm at their own stage, and a white balance the
 target's cells refuse only on size ships at the largest share they vouch.
 
