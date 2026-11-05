@@ -204,8 +204,9 @@ pub(crate) struct LocalField {
     pub remainder: Vec<f32>,
     /// Per pixel: the fit weight the solve used (frozen evidence x local support
     /// x [`testifies`]).  Shape verdicts weight the remainder by it, so a pixel whose
-    /// vertices hold the occupancy-floor policy zero (a missing measurement, not
-    /// a measured zero) cannot masquerade as spatial structure.
+    /// vertices are under the occupancy floor (unmeasured: they carry the solve's
+    /// smooth continuation, not a measurement) cannot masquerade as spatial
+    /// structure.
     pub weight: Vec<f32>,
     /// Occupancy-supported vertices whose colour change or slope the bounds
     /// limited ([`limit_colour_change`]).
@@ -537,9 +538,9 @@ fn apply_bands(
 
 /// Per luma bin: the occupancy-weighted mean of the parameters over its 96 (x, y)
 /// vertices and the weighted std of their luma effect ([`LocalField::band_dispersion`]).
-/// Only vertices ABOVE the occupancy floor take part: the others hold a policy zero,
-/// not a measurement, and averaging it in reports spatial structure that is really
-/// missing evidence.
+/// Only vertices ABOVE the occupancy floor take part: the others carry the solve's
+/// smooth continuation of their measured neighbours, not a measurement, and averaging
+/// it in reports spatial structure that is really missing evidence.
 fn band_summary(
     grid: &[[f32; PARAMS]], occupancy: &[f32], supported: &[bool],
 ) -> ([[f32; PARAMS]; FIELD_B], [f32; FIELD_B]) {

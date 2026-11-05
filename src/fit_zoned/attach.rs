@@ -38,7 +38,6 @@ pub(super) struct ZoneAttachment {
     pub(super) inverted: bool,
     pub(super) label: String,
     pub(super) min_share: f32,
-    pub(super) frame_regression_tol: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -345,7 +344,6 @@ pub(super) fn attach_zones_with_divergence(
         inverted: false,
         label: MaskRole::ZoneSky.tag().to_string(),
         min_share: MIN_ZONE_SHARE,
-        frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
     };
     // ONE HOME FOR THE INVERSION, and it is `LocalAdjustment::inverted` — the
     // flag this engine's weight loop applies and every zone gate already
@@ -371,7 +369,6 @@ pub(super) fn attach_zones_with_divergence(
         inverted: true,
         label: MaskRole::ZoneLand.tag().to_string(),
         min_share: MIN_ZONE_SHARE,
-        frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
     };
     // Both semantic zones also try the tint (`tint::attach_zone_tint_or_plain`).
     let sky = super::tint::attach_zone_tint_or_plain(

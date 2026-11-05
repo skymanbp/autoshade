@@ -462,8 +462,8 @@ pub(super) fn attach_colour_field(
         // …and the do-no-harm the FRAME ruler cannot do. A field that pays for
         // the sky out of the land wins on the frame and loses the picture, and
         // with pass B's wider gains that trade is newly affordable. Every
-        // attached zone is re-measured on its own membership, against the same
-        // tolerance a zone is allowed to cost the frame.
+        // attached zone is re-measured on its own membership, and any loss there
+        // refuses ([`zone_regressed`]).
         match zone_regressed(&s_img, report, &after, &target_pixels) {
             None => break (solved, admitted, read, paired, field, err_with, after),
             Some((label, was, now, weights)) => {
@@ -660,8 +660,8 @@ pub(super) struct LayoutAdmission {
 
 
 /// The per-ZONE half of the field's do-no-harm: the first attached mask whose
-/// own look distance the field made worse by more than a zone is ever allowed
-/// to cost the frame, or `None` if it hurt none of them. EVERY mask the fit
+/// own look distance the field made worse at all (a loss of any size, R1), or
+/// `None` if it hurt none of them. EVERY mask the fit
 /// carries is judged — the two zone roles, and the Custom-role region masks
 /// of the multi-region route; until 2026-09-24 the role filter left the
 /// check inert on that route.

@@ -563,7 +563,6 @@ fn bands_from_runs(
                 inverted: false,
                 label: name,
                 min_share: MIN_ZONE_SHARE,
-                frame_regression_tol: RANGE_FRAME_REGRESSION_TOL,
             },
             source,
             target,
@@ -1517,7 +1516,6 @@ fn derive_colour_bands(
                     inverted: false,
                     label: String::new(),
                     min_share: MIN_ZONE_SHARE,
-                    frame_regression_tol: RANGE_FRAME_REGRESSION_TOL,
                 },
                 source,
                 target,
@@ -2661,7 +2659,6 @@ mod tests {
             inverted: false,
             label: "Luminance range 01".to_string(),
             min_share: MIN_ZONE_SHARE,
-            frame_regression_tol: RANGE_FRAME_REGRESSION_TOL,
         };
 
         // Obtain the deterministic candidate frame without making its

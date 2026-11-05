@@ -23,9 +23,9 @@ pub(super) const ZONE_CONFIDENCE_SLOPE: f32 = 5.0;
 /// source (the composition differs — no zone repaint can reconcile
 /// frame-level distributions) and a correct blue->gold repaint migrates band
 /// mass, which the worst-band hue term can only read as damage.
-/// `frame_err` carries the running frame-global look distance IN and OUT.
-/// Semantic zones use it for bounded-drift insurance; range bands require a
-/// neutral-or-better composed frame. It is deliberately not the report's own
+/// `frame_err` carries the running frame-global look distance IN and OUT:
+/// it is `ships_local`'s guard (the zone may raise it by at most FIT_QUANT)
+/// and advances when the zone ships. It is deliberately not the report's own
 /// field any more (R23-6).
 pub(super) fn attach_one_zone(
     s_img: &DynamicImage,

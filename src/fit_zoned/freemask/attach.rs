@@ -179,7 +179,6 @@ pub(in crate::fit_zoned) fn attach_free_masks(
             mask: MaskGeometry::Bitmap { path: owned.path().to_string_lossy().into_owned() },
             range: None, name: label.clone(), role: MaskRole::Custom, inverted: false,
             label, min_share: MIN_ZONE_SHARE,
-            frame_regression_tol: spatial::SPATIAL_FRAME_REGRESSION_TOL,
         };
         let before_px = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
         let frame_before = fit::look_err_with_evidence(&before_px, &target_px, &report.evidence);

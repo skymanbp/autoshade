@@ -8,7 +8,6 @@ use crate::rationale::values;
 pub(super) const SPATIAL_MAX_DEPTH: u8 = 2;
 pub(super) const SPATIAL_MAX_ATTACHMENTS: usize = 4;
 pub(super) const SPATIAL_RESIDUAL_MIN: f32 = 2.0 / 255.0;
-pub(super) const SPATIAL_FRAME_REGRESSION_TOL: f32 = 0.0;
 pub(super) const TILE_RASTER_EDGE: u32 = 2048;
 /// Half a pixel of the tile analysis raster, in normalised frame units.
 /// The Zero/Full ramp fits between adjacent pixel centres, preserving the
@@ -456,7 +455,6 @@ fn tile_attachment(
         inverted: false,
         label: reading.id.label(),
         min_share: MIN_ZONE_SHARE,
-        frame_regression_tol: SPATIAL_FRAME_REGRESSION_TOL,
     }
 }
 
@@ -1616,29 +1614,6 @@ mod tests {
         assert!(added_shipped <= SPATIAL_MAX_ATTACHMENTS);
         assert_eq!(cap_of(&shipped), SPATIAL_MAX_ATTACHMENTS.to_string());
         std::fs::remove_dir_all(&fixture.dir).ok();
-    }
-
-    #[test]
-    fn tile_attachment_cannot_regress_the_composed_frame() {
-        let (current, target, evidence) = localized_residual();
-        let reading = read_tile_uncached(
-            TileId { depth: 2, row: 2, col: 0 },
-            &current,
-            &target,
-            &evidence,
-        );
-        let attachment = tile_attachment(
-            &reading,
-            (64, 64),
-            reading.source_weights.clone(),
-            reading.target_weights.clone(),
-            ZoneCoverage {
-                source: tile_geometry(reading.id, 64, 64),
-                target: tile_geometry(reading.id, 64, 64),
-            },
-        );
-        assert_eq!(SPATIAL_FRAME_REGRESSION_TOL.to_bits(), 0.0f32.to_bits());
-        assert_eq!(attachment.frame_regression_tol.to_bits(), 0.0f32.to_bits());
     }
 
     #[test]

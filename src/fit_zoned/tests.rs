@@ -814,7 +814,6 @@ fn semantic_attachment(
         inverted: false,
         label: MaskRole::ZoneSky.tag().to_string(),
         min_share: MIN_ZONE_SHARE,
-        frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
     }
 }
 
@@ -5307,7 +5306,6 @@ fn a_ground_zone_is_not_vetoed_by_the_sky_it_does_not_touch() {
         inverted: true,
         label: MaskRole::ZoneLand.tag().to_string(),
         min_share: MIN_ZONE_SHARE,
-        frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
     };
     let before = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
     let mut frame_err = report.err_after;
@@ -5550,7 +5548,6 @@ fn the_neutral_solution_exit_is_reached_when_every_class_is_withheld() {
         inverted: false,
         label: MaskRole::ZoneSky.tag().to_string(),
         min_share: MIN_ZONE_SHARE,
-        frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
     };
     let masks_before = report.recipe.masks.len();
     let mut frame_err = report.err_after;

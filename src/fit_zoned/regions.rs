@@ -196,7 +196,6 @@ pub(super) fn attach_semantic_regions(
             inverted: false,
             label: format!("region-{}-{}", region.class_id, region.label),
             min_share: MIN_ZONE_SHARE,
-            frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
         };
         let frame_before = frame_err;
         if let Some(mut zone) = attach_one_zone(

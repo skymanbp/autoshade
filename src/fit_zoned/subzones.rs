@@ -1044,7 +1044,6 @@ mod tests {
             components: Vec::new(), source_weights: weights.clone(), target_weights: weights,
             coverage: None, range: None, role: MaskRole::ZoneSky, inverted: false,
             name: String::new(), label: "sky".into(), min_share: MIN_ZONE_SHARE,
-            frame_regression_tol: ZONE_GLOBAL_REGRESSION_TOL,
         };
         let model = BandModel { r2: 1.0, breaks: vec![0.3125], widths: vec![0.625 * SUBZONE_OVERLAP], shape: None };
         let masks = if split {
