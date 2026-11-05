@@ -80,6 +80,16 @@ pub(crate) fn fit_stride(n: usize) -> usize {
     (n / FIT_PATCHES).max(1)
 }
 
+/// The mean of the log of a sample variance of `k` degrees of freedom over
+/// its true value (Gaussian samples): `E[ln(χ²_k/k)] = ψ(k/2) − ln(k/2)`, by
+/// the digamma's asymptotic series (`x = k/2`; exact to 1e-12 at `x ≥ 10`;
+/// −0.015957 at `k` 63). A least-squares fit of `ln v` reads the model low by
+/// it unless it is taken out.
+pub(crate) fn log_bias(k: f64) -> f64 {
+    let x = k / 2.0;
+    -1.0 / (2.0 * x) - 1.0 / (12.0 * x * x) + 1.0 / (120.0 * x.powi(4)) - 1.0 / (252.0 * x.powi(6))
+}
+
 /// The fitted model of one mosaic.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct NoiseModel {
@@ -220,9 +230,20 @@ impl NoiseModel {
         ((x - cx).powi(2) + (y - cy).powi(2)).sqrt() / (cx * cx + cy * cy).sqrt()
     }
 
-    /// `ln(measured / model)` of a patch's green variance.
+    /// `ln(measured / model)` of a patch's green variance, less the mean a
+    /// sample variance's log carries about its true value ([`log_bias`] at
+    /// the estimate's `PATCH² − 1` degrees of freedom): so the noise-only
+    /// residuals are centred on 0 at the true model and the fit is not low by
+    /// it (rel1180 RULING r26 Q26-5: −1.6 % at every level, 63 degrees).
     pub(crate) fn residual(&self, p: &Patch) -> f64 {
-        (p.v_g / self.var(p.m, p.r)).ln()
+        (p.v_g / self.var(p.m, p.r)).ln() - log_bias((PATCH * PATCH - 1) as f64)
+    }
+
+    /// The model of the photon and read terms `a`, `b` with no gain, on a
+    /// `width × height` mosaic: a fixture's own noise, stated.
+    #[cfg(test)]
+    pub(crate) fn known(a: f64, b: f64, width: usize, height: usize) -> Self {
+        Self { a, b, c2: 0.0, c4: 0.0, band: f64::INFINITY, width, height }
     }
 
     /// The model's prediction of a patch's two colour-difference variances
@@ -239,8 +260,8 @@ impl NoiseModel {
         p.usable
             && p.v_dr > 0.0
             && p.v_db > 0.0
-            && (p.v_dr / pr).ln().abs() <= self.band
-            && (p.v_db / pb).ln().abs() <= self.band
+            && ((p.v_dr / pr).ln() - log_bias((PATCH * PATCH - 3) as f64)).abs() <= self.band
+            && ((p.v_db / pb).ln() - log_bias((PATCH * PATCH - 3) as f64)).abs() <= self.band
     }
 
     /// Fit the model on the noise-only population of `patches` (see the

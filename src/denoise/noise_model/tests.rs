@@ -161,6 +161,42 @@ fn the_fit_reads_a_stride_that_keeps_its_surface_inside_the_patch_rule() {
     assert_eq!(NoiseModel::fit(&small, W, H), NoiseModel::fit_all(&small, W, H), "a small frame is read whole");
 }
 
+/// The fit is not low by the log of its variance estimates: a patch's green
+/// variance is a sample variance of `PATCH² − 1` degrees of freedom, whose log
+/// sits below the truth's by [`log_bias`] in the mean (−0.016 at 63), and a
+/// least-squares fit of the logs would carry it whole (rel1180 RULING r26
+/// Q26-5: the two-level fixture's model −1.3 / −2.1 % at its two greens).
+/// Drawn: patches over level and radius whose `v_g` is the truth's variance
+/// times `χ²_k/k` (the sum of `k` squared normals). The fitted surface's mean
+/// log error over the drawn patches is within three standard errors of 0 —
+/// `√ψ′(k/2)/√n`, `ψ′(x) ≈ 1/x + 1/(2x²) + 1/(6x³)` the log's own spread.
+///
+/// MUTATION: the correction dropped (`residual` without `log_bias`): the mean
+/// reads −0.016, about eleven standard errors (red).
+#[test]
+fn the_fit_is_not_low_by_the_log_of_its_variance_estimates() {
+    let t = truth();
+    let n = FIT_PATCHES - 1;
+    let k = PATCH * PATCH - 1;
+    let drawn: Vec<Patch> = (0..n as u64)
+        .map(|i| {
+            let m = 0.002 + 0.12 * (0.5 + 0.5 * normal(21, i).tanh());
+            let r = 0.5 + 0.5 * normal(23, i).tanh();
+            let chi: f64 = (0..k as u64).map(|j| normal(29, i * k as u64 + j).powi(2)).sum();
+            Patch { m, m_r: m, m_b: m, v_g: t.var(m, r) * chi / k as f64, v_dr: 0.0, v_db: 0.0, r, usable: true }
+        })
+        .collect();
+    let fit = NoiseModel::fit(&drawn, W, H).expect("a model");
+    let mean = drawn.iter().map(|p| (fit.var(p.m, p.r) / t.var(p.m, p.r)).ln()).sum::<f64>() / n as f64;
+    let x = k as f64 / 2.0;
+    let se = (1.0 / x + 1.0 / (2.0 * x * x) + 1.0 / (6.0 * x * x * x)).sqrt() / (n as f64).sqrt();
+    println!("fit over {n} drawn patches of {k} degrees: mean ln(fit / truth) {mean:+.5} (se {se:.5}); log bias {:+.6}; {fit:?}", log_bias(k as f64));
+    for level in [0.01, 0.05, 0.1] {
+        println!("  level {level}: ln(fit / truth) at r 0.25 / 0.5 / 0.75: {}", [0.25, 0.5, 0.75].map(|r| format!("{:+.4}", (fit.var(level, r) / t.var(level, r)).ln())).join(" / "));
+    }
+    assert!(mean.abs() <= 3.0 * se, "the fitted surface is {mean:+.5} off the truth in the log's mean (3 se {:.5})", 3.0 * se);
+}
+
 /// A pattern that is not a 2×2 RGB Bayer has no two greens in a cell to read
 /// the noise from: the estimator says so instead of guessing.
 #[test]

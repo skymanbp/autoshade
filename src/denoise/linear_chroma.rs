@@ -245,40 +245,94 @@ pub(crate) fn display_samples(color_nr: f32) -> f64 {
     1.0 / crate::render::chroma_nr_flat_noise_share(color_nr.clamp(0.0, 100.0) / 100.0, smooth / 100.0)
 }
 
-/// The guided read's window at slider value `color_nr` (0..=100): the
-/// smallest half side `ρ` (at least one cell, so the slider is never dead) at
-/// which the slider's share of a flat frame's noise ([`flat_share`]) is at most
-/// the display pass's share of a cell's, `4 / display_samples` (see the
-/// module); `None` when off (the colour-NR control's own rule,
+/// The read's window at slider value `color_nr` (0..=100): the smallest
+/// half side `ρ` (at least one cell, so the slider is never dead) at which a
+/// flat frame keeps at most the display pass's share of a cell's white noise,
+/// `4 / display_samples` (see the module): no slope is read there but at the
+/// false reads, so it keeps [`box_share`] (rel1180 RULING r25 Q25-1; the
+/// false reads' share, at most `σ²_d/N` a read window, is printed per frame
+/// by the flat test); `None` when off (the colour-NR control's own rule,
 /// `ChromaNrParams::global`).
 pub(crate) fn window(color_nr: f32) -> Option<usize> {
     if color_nr.is_nan() || color_nr <= 0.0 {
         return None;
     }
     let share = 4.0 / display_samples(color_nr.min(100.0));
-    (1usize..).find(|&rho| flat_share(rho) <= share)
+    (1usize..).find(|&rho| {
+        let p = plane_read(rho);
+        p.share * (1.0 + 4.0 * RHO_G_MAX * p.tau) <= share
+    })
+}
+
+/// The largest share of a colour difference's variance its axis neighbour's
+/// shares through the green their sites both read, on a neutral with colour
+/// gains at least 1 (rel1180 RULING r26 Q26-3): one site's difference carries
+/// `w²·var_c + σ²_G/4` and two neighbours share `σ²_G/16`; on a neutral the
+/// colour site's level is the green's over its gain `w`, so under the model
+/// (`a·m + b`, `a, b ≥ 0`) `w²·var_c = w·a·G + w²·b ≥ σ²_G` for `w ≥ 1`, and
+/// `ρ_G = (σ²_G/16)/(w²·var_c + σ²_G/4) ≤ (1/16)/(1 + 1/4) = 1/20`, attained
+/// at `w = 1` at every level. (Off a neutral the colour site can be darker
+/// than the green's level over its gain, and `ρ_G` rises toward `1/4` as it
+/// goes black: printed by the slider's test.)
+pub(crate) const RHO_G_MAX: f64 = 1.0 / 20.0;
+
+/// The read of a flat frame at half side `rho` (`n = 2ρ + 1`, `N = n²`): each
+/// window fits its plane and a cell reads the mean of the planes of the `N`
+/// windows holding it, so it weighs cell `j` (`δ` from it a side) by
+/// `w(δ) = T(δx)·T(δy)/N² + (U(δx)·T(δy) + T(δx)·U(δy))/(N·n·S)` — `T(δ) = n − |δ|`
+/// the windows holding both, `U(δ) = Σ_c c·(c − δ)` over their centres, `S =
+/// Σu² = ρ(ρ + 1)(2ρ + 1)/3`. Its share of white noise `Σ w²`, the lag-one
+/// correlation of the weights `τ` (the shared green's factor, `1 + 4·ρ_G·τ`),
+/// the centre weight and the axis neighbour's (a cell's own noise kept).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PlaneRead {
+    pub(crate) share: f64,
+    pub(crate) tau: f64,
+    /// Read by the own-noise test (the stage needs only the share and `τ`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) centre: f64,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) side: f64,
+}
+
+/// [`PlaneRead`] at half side `rho`, exact from the window's geometry.
+pub(crate) fn plane_read(rho: usize) -> PlaneRead {
+    let r = rho as isize;
+    let n = (2 * rho + 1) as f64;
+    let big_n = n * n;
+    let s = (rho * (rho + 1) * (2 * rho + 1)) as f64 / 3.0;
+    let span: Vec<isize> = (-2 * r..=2 * r).collect();
+    let t: Vec<f64> = span.iter().map(|&d| n - d.abs() as f64).collect();
+    let u: Vec<f64> = span.iter().map(|&d| (-r..=r).filter(|c| (d - c).abs() <= r).map(|c| (c * (c - d)) as f64).sum()).collect();
+    let m = span.len();
+    let w = |x: usize, y: usize| t[x] * t[y] / (big_n * big_n) + (u[x] * t[y] + t[x] * u[y]) / (big_n * n * s);
+    let (mut sq, mut lag) = (0.0, 0.0);
+    for y in 0..m {
+        for x in 0..m {
+            sq += w(x, y) * w(x, y);
+            if x + 1 < m {
+                lag += w(x, y) * w(x + 1, y);
+            }
+            if y + 1 < m {
+                lag += w(x, y) * w(x, y + 1);
+            }
+        }
+    }
+    let c = 2 * rho;
+    PlaneRead { share: sq, tau: lag / 2.0 / sq, centre: w(c, c), side: w(c + 1, c) }
 }
 
 /// The share of a cell's white noise the box mean of the windows' box means
-/// keeps (the read's `b̄` on a flat frame): `Σ T²/N⁴`, `T` the count of
+/// would keep (the read before the plane, rel1180 r25; printed beside [`plane_read`]): `Σ T²/N⁴`, `T` the count of
 /// windows of `N = n²` cells (`n = 2ρ + 1`) holding two cells — a triangle
 /// of base `2n − 1` along each axis, `Σ t² = n·(2n² + 1)/3` — so
 /// `((2n² + 1)/(3n³))²` (see the module).
+#[cfg(test)]
 pub(crate) fn box_share(rho: usize) -> f64 {
     let n = (2 * rho + 1) as f64;
     ((2.0 * n * n + 1.0) / (3.0 * n * n * n)).powi(2)
 }
 
-/// The slider's share of a cell's white noise on a flat frame (see the
-/// module): the box term [`box_share`] and the slope term a read line adds,
-/// a quarter of it — `ā·(G − Ḡ)` with `var(ā) = box_share·var(d)/(4·v)` (the
-/// ridge doubles the window's light variance) — for a light and a colour
-/// difference of independent white noise. Round 23's form, kept as the
-/// slider's: a flat frame reads no slope ([`slope_read`]), so the read keeps
-/// the box share and at most this.
-pub(crate) fn flat_share(rho: usize) -> f64 {
-    1.25 * box_share(rho)
-}
 /// The standard normal's mass within `±t` and its density at `t` (Simpson's
 /// rule on `0..t` in 2000 steps, exact to 1e-12 at any `t` the stage reads;
 /// `(1, 0)` at an unbounded `t`).
@@ -770,8 +824,8 @@ fn weight(bits: u8, a: u32, levels: u32) -> f64 {
 /// light's read (see [`Cells::read_light`]): `t1`, the window's mean of each
 /// cell's own share, less the window's mean of the whole window's share,
 /// `held`, over `n²` (`n` the window's cells).
-fn shared_noise(t1: f64, held: f64, n: f64) -> f64 {
-    t1 - held / (n * n)
+fn shared_noise(t1: f64, held: f64, held_u: f64, n: f64) -> f64 {
+    t1 - held / (n * n) - held_u / n
 }
 
 /// Per level `a` of `0..=levels`, `Σ_{j,k∈Ω} P_a(j, k)` on a whole window of
@@ -788,11 +842,41 @@ fn window_mass(rho: usize, levels: u32) -> Vec<f64> {
         .collect()
 }
 
+/// Per level `a` of `0..=levels`, the share of level `a`'s smoothing the
+/// window's plane takes in its two position terms ([`shared_noise`]'s
+/// `held_u`): the cross covariance a window's plane removes along `x` is
+/// `uᵀ·K·u/Σu²` over `N`, and `K` (the light's noise against the difference's)
+/// is level `a`'s smoothing, separable — `Σ_{j,m} j·m·k_a(j − m)` along the
+/// axis times `Σ_{j,m} k_a(j − m)` across it, over `n·S` (`S = Σu²` a side),
+/// twice for the two axes.
+pub(crate) fn window_mass_u(rho: usize, levels: u32) -> Vec<f64> {
+    let r = rho as isize;
+    let n = (2 * rho + 1) as f64;
+    let s = (rho * (rho + 1) * (2 * rho + 1)) as f64 / 3.0;
+    (0..=levels)
+        .map(|a| {
+            let k = composed_kernel(a);
+            let mid = (k.len() / 2) as isize;
+            let at = |d: isize| if d.abs() <= mid { k[(d + mid) as usize] } else { 0.0 };
+            let (mut tm, mut ux) = (0.0, 0.0);
+            for j in -r..=r {
+                for m in -r..=r {
+                    tm += at(j - m);
+                    ux += (j * m) as f64 * at(j - m);
+                }
+            }
+            2.0 * ux * tm / (n * s)
+        })
+        .collect()
+}
+
 /// Is a window's slope read? Where the read light varies over the window
 /// beyond what its own residual noise makes there, at the frame's fairness
-/// `k`: `var_Ω(Ĝ) − r̄_Ω > k·r̄_Ω·√(2/ν)` (`var` the window's light variance,
-/// `r` its mean residual, `ν` [`window_dof`]); nothing otherwise, and the
-/// window's line is its box mean. On a flat frame the read light is its own
+/// `k`: `var⊥_Ω(Ĝ) − r̄_Ω > k·r̄_Ω·√(2/ν)` (`var⊥` the window's light variance
+/// about its own plane in position — a light ramp is a plane, and a slope
+/// fitted to what is left of it a ratio of two noises — `r` its mean
+/// residual, `ν` [`window_dof`]); nothing otherwise, and the window's
+/// hypothesis is its plane alone. On a flat frame the read light is its own
 /// noise smoothed, small and coherent over the window, and its slope a ratio
 /// of two small numbers: read where evidence, nothing otherwise (rel1180
 /// RULING r24).
@@ -800,35 +884,100 @@ fn slope_read(var: f64, r: f64, k: f64, nu: f64) -> bool {
     var - r > k * r * (2.0 / nu).sqrt()
 }
 
+/// Does a window's line vote for its cells? Its residual about the line,
+/// `R = var_Ω(d) − 2a·cov_Ω(Ĝ, d) + a²·var_Ω(Ĝ)` (`var_Ω(d)` where no slope
+/// is read: the plane alone), against its null at the frame's fairness `k`:
+/// the model's colour noise over the window's `n` cells, `s` the mean of their
+/// variances, `q` of their squares, `c` the mean covariance of axis neighbours
+/// (the green their sites share), with the fit's `p` degrees taken (3 for the
+/// plane, 4 with the light's slope) — `E[R] = s·(n − p)/n − c·(4·(n − √n)/n +
+/// 2·t_u)/n`, `t_u` the adjacency's share along a position direction
+/// ([`adjacency_u`]; the light's direction's taken as white),
+/// `var(R) = 2·q·(n − p)/n²·(1 + 4·(c/s)²·(√n − 1)/√n)` (heteroscedastic: the
+/// window's cells are not all at one level). It votes where
+/// `R − E[R] ≤ k·sd(R)`; a refused hypothesis is evidence for nothing
+/// (rel1180 RULING r25 Q25-4).
+fn votes(resid: f64, s: f64, q: f64, c: f64, n: f64, p: f64, k: f64) -> bool {
+    if n <= p || s <= 0.0 {
+        return false;
+    }
+    let (mean, sd) = vote_null(s, q, c, n, p);
+    resid - mean <= k * sd
+}
+
+/// The null of a window's residual ([`votes`]): its mean and sd.
+fn vote_null(s: f64, q: f64, c: f64, n: f64, p: f64) -> (f64, f64) {
+    let side = n.sqrt();
+    let mean = s * (n - p) / n - c * (4.0 * (n - side) / n + 2.0 * adjacency_u(side)) / n;
+    let var = 2.0 * q * (n - p) / (n * n) * (1.0 + 4.0 * (c / s).powi(2) * (side - 1.0) / side);
+    (mean, var.sqrt())
+}
+
+/// `uᵀ·Adj·u/|u|²` for the plane's position direction `u` on a window of
+/// `side` cells a side (`Adj` the axis neighbours, both ways): along `u`,
+/// `2·Σ u_k·u_{k+1}` a row, `n` rows, and across it every cell's `u²` twice
+/// for each of the `n − 1` neighbour pairs of a column —
+/// `(2n·(S − ρ² − ρ) + 2(n − 1)·S)/(n·S)`, `ρ = (n − 1)/2`, `S = ρ(ρ + 1)(2ρ + 1)/3`.
+fn adjacency_u(side: f64) -> f64 {
+    let rho = (side - 1.0) / 2.0;
+    let s = rho * (rho + 1.0) * (2.0 * rho + 1.0) / 3.0;
+    if s <= 0.0 {
+        return 0.0;
+    }
+    (2.0 * side * (s - rho * rho - rho) + 2.0 * (side - 1.0) * s) / (side * s)
+}
+
+/// The widths the colour is read at, from the slider's half side `rho` down
+/// (rel1180 RULING r25 Q25-4 (iii)): the à-trous levels' own — level `l`'s
+/// hole, `2^l` cells, for `l < levels`, at most `rho`, and `rho` at `levels`
+/// — distinct, largest first (at 25, `ρ` 5 and `L` 3: 5, 4, 2, 1).
+pub(crate) fn ladder(rho: usize, levels: u32) -> Vec<usize> {
+    let mut w: Vec<usize> = (0..levels).map(|l| (1usize << l).min(rho)).chain([rho]).collect();
+    w.sort_unstable_by(|a, b| b.cmp(a));
+    w.dedup();
+    w
+}
+
 /// The effective number of independent samples `ν` of a window's light
-/// variance on a flat frame, and the share `μ` of the light's residual a
-/// window's variance holds in the mean, for the window of half side `rho`
-/// and the light read to `levels`: the read light there is white noise
-/// through the composed smoothing `K_L` ([`composed_kernel`]), whose
-/// correlation between cells `δ` apart is `ρ(δ) = R(δx)·R(δy)`, `R` the 1-D
-/// kernel's autocorrelation over its centre value. A window's population
-/// variance is `Q = gᵀ·M·g/N` (`M = I − J/N`); with `C` the correlation over
-/// the window, `E[Q] = r·tr(CM)/N` and `var(Q) = 2·r²·tr((CM)²)/N²`, so
-/// `μ = tr(CM)/N` and, as a variance of `ν` independent samples
-/// (Satterthwaite), `ν = tr(CM)²/tr((CM)²)` — from the taps, one value per
-/// window and levels. `C` is separable (`C = Cx ⊗ Cy`, one `n × n` Toeplitz
-/// matrix `T` a side), so `tr(CM) = tr(T)² − (1ᵀT1)²/N` and
-/// `tr((CM)²) = tr(T²)² − 2·(1ᵀT²1)²/N + (1ᵀT1)⁴/N²`.
+/// variance about its own plane on a flat frame, and the share `μ` of the
+/// light's residual that variance holds in the mean, for the window of half
+/// side `rho` and the light read to `levels`: the read light there is white
+/// noise through the composed smoothing `K_L` ([`composed_kernel`]), whose
+/// correlation between cells `δ` apart is `R(δx)·R(δy)`, `R` the 1-D kernel's
+/// autocorrelation over its centre value. A window's variance about its plane
+/// is `Q = gᵀ·M·g/N`, `M = I − P₁ − P_u − P_v` the projector off the plane
+/// (the mean and the two position terms, orthogonal on a whole window); with
+/// `C` the correlation over the window, `E[Q] = r·tr(CM)/N` and `var(Q) =
+/// 2·r²·tr((CM)²)/N²`, so `μ = tr(CM)/N` and, as a variance of `ν` independent
+/// samples (Satterthwaite), `ν = tr(CM)²/tr((CM)²)` — from the taps, one value
+/// per window and levels. Everything is separable: `C = T ⊗ T` (`T` the
+/// `n × n` Toeplitz matrix of `R`), `P₁ = A ⊗ A`, `P_u = B ⊗ A`, `P_v = A ⊗ B`
+/// (`A = J/n`, `B = uuᵀ/Σu²`), so `CM` is a signed sum of four Kronecker
+/// products and each trace a product of two `n × n` traces.
 pub(crate) fn window_dof(rho: usize, levels: u32) -> (f64, f64) {
     let k = composed_kernel(levels);
     // `R(d)`, the kernel's autocorrelation at lag `d` (0 past its length).
     let auto = |d: usize| -> f64 { k.iter().zip(k.get(d..).unwrap_or(&[])).map(|(a, b)| a * b).sum() };
     let r0 = auto(0);
     let n = 2 * rho + 1;
+    let mul = |x: &[Vec<f64>], y: &[Vec<f64>]| -> Vec<Vec<f64>> { (0..n).map(|j| (0..n).map(|m| (0..n).map(|q| x[j][q] * y[q][m]).sum()).collect()).collect() };
+    let tr = |x: &[Vec<f64>]| (0..n).map(|j| x[j][j]).sum::<f64>();
     let t: Vec<Vec<f64>> = (0..n).map(|j| (0..n).map(|m| auto(j.abs_diff(m)) / r0).collect()).collect();
-    let tr = (0..n).map(|j| t[j][j]).sum::<f64>();
-    let one = t.iter().flatten().sum::<f64>();
-    let t2: Vec<Vec<f64>> = (0..n).map(|j| (0..n).map(|m| (0..n).map(|q| t[j][q] * t[q][m]).sum()).collect()).collect();
-    let tr2 = (0..n).map(|j| t2[j][j]).sum::<f64>();
-    let one2 = t2.iter().flatten().sum::<f64>();
+    let u: Vec<f64> = (0..n).map(|j| j as f64 - rho as f64).collect();
+    let su: f64 = u.iter().map(|x| x * x).sum();
+    let mean: Vec<Vec<f64>> = vec![vec![1.0 / n as f64; n]; n];
+    let slope: Vec<Vec<f64>> = (0..n).map(|j| (0..n).map(|m| u[j] * u[m] / su).collect()).collect();
+    let (ta, tb) = (mul(&t, &mean), mul(&t, &slope));
+    type Term<'a> = (f64, &'a [Vec<f64>], &'a [Vec<f64>]);
+    let terms: [Term; 4] = [(1.0, &t, &t), (-1.0, &ta, &ta), (-1.0, &tb, &ta), (-1.0, &ta, &tb)];
+    let tcm: f64 = terms.iter().map(|(sg, x, y)| sg * tr(x) * tr(y)).sum();
+    let mut tcm2 = 0.0;
+    for (s1, x1, y1) in &terms {
+        for (s2, x2, y2) in &terms {
+            tcm2 += s1 * s2 * tr(&mul(x1, x2)) * tr(&mul(y1, y2));
+        }
+    }
     let big_n = (n * n) as f64;
-    let tcm = tr * tr - one * one / big_n;
-    let tcm2 = tr2 * tr2 - 2.0 * one2 * one2 / big_n + one.powi(4) / (big_n * big_n);
     (tcm * tcm / tcm2, tcm / big_n)
 }
 
@@ -998,7 +1147,6 @@ impl Cells {
     /// a patch's), at the cell's own radius. With it, the correlation of the
     /// cell's noise with an axis neighbour's at the same level: the greens
     /// their sites share, `c/s³`, over that variance.
-    #[allow(dead_code)] // the pixel rebuild's slope at the cell's own level reads it ((b), rel1180 RULING r20)
     fn own_noise(&self, i: usize) -> ([f64; 2], [f64; 2]) {
         let (cx, cy) = (i % self.cw, i / self.cw);
         let s = self.side as f64;
@@ -1028,6 +1176,17 @@ impl Cells {
         [vg / (2.0 * s * s), -vg * (2.0 * s - 1.0) / (4.0 * s * s * s), -vg / (4.0 * s * s * s)]
     }
 
+    /// The light's variance `v` at cell `i` were its green at level `g`: the
+    /// variance the model gives the hypothesis's level, not the cell's own
+    /// sample ([`Self::read_light`]: a level's detail is tested against the
+    /// noise of the smoother light it would be were the detail not there).
+    fn light_var_at(&self, i: usize, g: f64) -> f64 {
+        let (cx, cy) = (i % self.cw, i / self.cw);
+        let s = self.side as f64;
+        let r = self.model.radius((cx as f64 + 0.5) * 2.0 * s, (cy as f64 + 0.5) * 2.0 * s);
+        self.model.var(g, r) * self.wb[1] * self.wb[1] / (2.0 * s * s)
+    }
+
     /// The light read first on its own evidence (see the module): the cells'
     /// green through `levels` levels of the à-trous [`SPLINE`] pyramid, each
     /// detail coefficient read where it is resolved beyond its own noise at
@@ -1050,14 +1209,18 @@ impl Cells {
             px.push(x);
             py.push(y);
         }
-        let var_of = |a: usize, b: usize| separable(&v, cw, ch, &px[a].product(&px[b]), &py[a].product(&py[b]));
+        let var_on = |f: &[f32], a: usize, b: usize| separable(f, cw, ch, &px[a].product(&px[b]), &py[a].product(&py[b]));
+        let var_of = |a: usize, b: usize| var_on(&v, a, b);
         let mut smooth: Vec<f32> = self.d.iter().map(|q| q[2]).collect();
         let mut g = vec![0.0f32; cw * ch];
         let mut bits = vec![0u8; cw * ch];
-        let mut own = v.clone();
         for l in 0..levels as usize {
             let next = separable(&smooth, cw, ch, &Band::identity(cw).smoothed(l as u32), &Band::identity(ch).smoothed(l as u32));
-            let (cross, own_next) = (var_of(l, l + 1), var_of(l + 1, l + 1));
+            // The level's hypothesis is the smoother light `s_{l+1}`: its
+            // detail is tested against the noise the model gives that light
+            // (rel1180 RULING r25 Q25-3).
+            let at: Vec<f32> = (0..cw * ch).into_par_iter().map(|i| self.light_var_at(i, f64::from(next[i])) as f32).collect();
+            let (own, cross, own_next) = (var_on(&at, l, l), var_on(&at, l, l + 1), var_on(&at, l + 1, l + 1));
             g.par_iter_mut()
                 .zip(bits.par_iter_mut())
                 .enumerate()
@@ -1069,7 +1232,6 @@ impl Cells {
                         *b |= 1 << l;
                     }
                 });
-            own = own_next;
             smooth = next;
         }
         g.par_iter_mut().zip(&smooth).for_each(|(o, s)| *o += s);
@@ -1109,57 +1271,162 @@ impl Cells {
     /// The cells' two colour differences read in two steps (see the module):
     /// the light is read first on its own evidence ([`Self::read_light`],
     /// `levels` levels at the frame's fairness `k_F`, [`fair_k`] of the
-    /// cells' count); the colour is read through the light that was read:
-    /// per window `Ω` of half side `rho`,
-    /// `a_Ω = (cov_Ω(Ĝ, d) − κ_Ω)/(var_Ω(Ĝ) + ε_Ω)`, `b_Ω = d̄ − a_Ω·Ĝ̄`,
-    /// `ε_Ω` the mean of the guide's residual `r` over `Ω` and `κ_Ω` the
-    /// shared noise that survives the read; per cell `d̂ = ā·Ĝ + b̄`.
+    /// cells' count); the colour is read through the light that was read
+    /// ([`Self::read_widths`]).
     fn guided(&self, rho: usize, levels: u32) -> Vec<[f32; 2]> {
         let light = self.read_light(levels, fair_k((self.cw * self.ch) as f64));
         self.guided_on(rho, levels, &light)
     }
 
-    /// The colour read through `light` ([`Self::guided`]): a window's slope is
-    /// read where the read light carries content beyond its own noise at the
-    /// frame's fairness ([`slope_read`], `ν` of [`window_dof`]), and is 0
-    /// otherwise — the window's line is then its box mean.
+    /// The colour read through `light` ([`Self::guided`], [`Self::read_widths`]).
     fn guided_on(&self, rho: usize, levels: u32, light: &Light) -> Vec<[f32; 2]> {
+        self.read_widths(rho, levels, light).0
+    }
+
+    /// The colour read through `light`, per colour difference: at each width
+    /// of [`ladder`] from the slider's `rho` down, the cell is read as the mean
+    /// of the lines of the windows of that width that vote for it
+    /// ([`Self::lines`]: a window's line votes where it fits its own window);
+    /// a cell no window of a width votes for is read at the next smaller width,
+    /// and where none fits it keeps its own sample. Returns the read and, per
+    /// cell and colour difference, the index into [`ladder`] it was read at
+    /// (the ladder's length where it kept its own sample).
+    fn read_widths(&self, rho: usize, levels: u32, light: &Light) -> (Vec<[f32; 2]>, Vec<[u8; 2]>) {
+        let (cw, ch) = (self.cw, self.ch);
+        let noise: Vec<[f32; 3]> = (0..cw * ch)
+            .into_par_iter()
+            .map(|i| {
+                let (sd, corr) = self.own_noise(i);
+                [(sd[0] * sd[0]) as f32, (sd[1] * sd[1]) as f32, (corr[0] * sd[0] * sd[0]) as f32]
+            })
+            .collect();
+        let widths = ladder(rho, levels);
+        let kept = widths.len() as u8;
+        let mut out: Vec<[f32; 2]> = self.d.iter().map(|q| [q[0], q[1]]).collect();
+        let mut used = vec![[kept; 2]; cw * ch];
+        for (wi, &w) in widths.iter().enumerate() {
+            if !used.iter().any(|u| u[0] == kept || u[1] == kept) {
+                break;
+            }
+            let lines = self.lines(w, levels, light, &noise);
+            // A voting window `Ω` reads cell `i` on its plane:
+            // `b_Ω + c_Ω·(x_i − x_Ω) + e_Ω·(y_i − y_Ω) + a_Ω·Ĝ_i`, so the sums over
+            // the windows holding `i` are of `v·(b − c·x_Ω − e·y_Ω)`, `v·c`,
+            // `v·e`, `v·a` and `v`, finished at `i`'s place and light.
+            let read: Vec<[f32; 2]> = box_means(
+                (cw, ch),
+                w,
+                |j| {
+                    let (x, y) = self.place(j);
+                    let q = lines[j].map(f64::from);
+                    let one = |o: usize| {
+                        let [a, b, c, e, v] = [q[o], q[o + 1], q[o + 2], q[o + 3], q[o + 4]];
+                        [v * (b - c * x - e * y), v * c, v * e, v * a, v]
+                    };
+                    let (r, b) = (one(0), one(5));
+                    [r[0], r[1], r[2], r[3], r[4], b[0], b[1], b[2], b[3], b[4]]
+                },
+                |i, q, _| {
+                    let g = f64::from(light.g[i]);
+                    let (x, y) = self.place(i);
+                    let at = |o: usize| if q[o + 4] > 0.0 { ((q[o] + x * q[o + 1] + y * q[o + 2] + g * q[o + 3]) / q[o + 4]) as f32 } else { f32::NAN };
+                    [at(0), at(5)]
+                },
+            );
+            out.par_iter_mut().zip(used.par_iter_mut()).zip(&read).for_each(|((o, u), q)| {
+                for j in 0..2 {
+                    if u[j] == kept && !q[j].is_nan() {
+                        o[j] = q[j];
+                        u[j] = wi as u8;
+                    }
+                }
+            });
+        }
+        (out, used)
+    }
+
+    /// Cell `i`'s place on the grid, about the frame's centre (the plane's
+    /// position coordinates).
+    fn place(&self, i: usize) -> (f64, f64) {
+        ((i % self.cw) as f64 - (self.cw / 2) as f64, (i / self.cw) as f64 - (self.ch / 2) as f64)
+    }
+
+    /// Per window `Ω` of half side `rho` under `light`, its hypothesis and
+    /// its vote for each colour difference, `[a, b, c, e, vote]` twice (R − G,
+    /// B − G): the window's hypothesis is first order in position and in the
+    /// read light, `d = b + c·(x − x_Ω) + e·(y − y_Ω) + a·Ĝ` (rel1180 RULING r26
+    /// Q26-1), one least-squares fit over the window's cells (`noise` per cell:
+    /// each difference's variance at its own level and the covariance it shares
+    /// with an axis neighbour, [`Self::own_noise`]). The light's slope `a` is
+    /// read where the read light carries content beyond its own plane and its
+    /// own noise at the frame's fairness ([`slope_read`] on `var⊥_Ω(Ĝ)`, `ν` of
+    /// [`window_dof`]): `a = (cov⊥_Ω(Ĝ, d) − κ_Ω)/var⊥_Ω(Ĝ)`, `⊥` about the
+    /// window's plane in position, and 0 otherwise (the plane alone); then
+    /// `c`, `e` the plane of `d − a·Ĝ`. The window votes where its residual
+    /// about the fit fits the model's colour noise over its cells at the
+    /// frame's fairness ([`votes`], `p` 4 or 3).
+    fn lines(&self, rho: usize, levels: u32, light: &Light, noise: &[[f32; 3]]) -> Vec<[f32; 10]> {
         let (cw, ch) = (self.cw, self.ch);
         let k = fair_k((cw * ch) as f64);
         let nu = window_dof(rho, levels).0;
-        let mass = window_mass(rho, levels);
-        let lines: Vec<[f32; 4]> = box_means(
+        let (mass, mass_u) = (window_mass(rho, levels), window_mass_u(rho, levels));
+        box_means(
             (cw, ch),
             rho,
             |i| {
                 let [d0, d1, _] = self.d[i].map(f64::from);
                 let g = f64::from(light.g[i]);
-                let [t1, held] = self.shared_terms(light, i, levels, &mass);
-                [g, g * g, d0, d1, g * d0, g * d1, f64::from(light.r[i]), t1, held]
+                let (x, y) = self.place(i);
+                let [t1, held, held_u] = self.shared_terms(light, i, levels, &mass, &mass_u);
+                let [s0, s1, c] = noise[i].map(f64::from);
+                [
+                    g, g * g, d0, d1, g * d0, g * d1, d0 * d0, d1 * d1, f64::from(light.r[i]), t1, held, held_u, s0, s1, s0 * s0, s1 * s1, c,
+                    x, y, x * x, y * y, x * y, x * g, y * g, x * d0, y * d0, x * d1, y * d1,
+                ]
             },
-            |_, [g, gg, d0, d1, gd0, gd1, r, t1, held], n| {
-                let var = (gg - g * g).max(0.0);
-                let den = var + r;
-                let kappa = shared_noise(t1, held, n);
-                let read = den > 0.0 && slope_read(var, r, k, nu);
-                let a = [gd0 - g * d0, gd1 - g * d1].map(|c| if read { (c - kappa) / den } else { 0.0 });
-                [a[0] as f32, a[1] as f32, (d0 - a[0] * g) as f32, (d1 - a[1] * g) as f32]
+            |i, m, n| {
+                let [g, gg, d0, d1, gd0, gd1, dd0, dd1, r, t1, held, held_u, s0, s1, q0, q1, c, x, y, xx, yy, xy, xg, yg, xd0, yd0, xd1, yd1] = m;
+                let (xo, yo) = self.place(i);
+                let (sxx, syy, sxy) = (xx - x * x, yy - y * y, xy - x * y);
+                let det = sxx * syy - sxy * sxy;
+                let mut out = [0.0f32; 10];
+                if det <= 0.0 {
+                    return out;
+                }
+                let solve = |p: f64, q: f64| ((syy * p - sxy * q) / det, (sxx * q - sxy * p) / det);
+                let (sxg, syg) = (xg - x * g, yg - y * g);
+                let (gx, gy) = solve(sxg, syg);
+                let var = (gg - g * g - gx * sxg - gy * syg).max(0.0);
+                let kappa = shared_noise(t1, held, held_u, n);
+                let read = var > 0.0 && slope_read(var, r, k, nu);
+                for (j, (d, gd, dd, xd, yd, s, q)) in [(d0, gd0, dd0, xd0, yd0, s0, q0), (d1, gd1, dd1, xd1, yd1, s1, q1)].into_iter().enumerate() {
+                    let (sgd, sdd, sxd, syd) = (gd - g * d, dd - d * d, xd - x * d, yd - y * d);
+                    let cov = sgd - gx * sxd - gy * syd;
+                    let a = if read { (cov - kappa) / var } else { 0.0 };
+                    let (px, py) = (sxd - a * sxg, syd - a * syg);
+                    let (ce, ee) = solve(px, py);
+                    let resid = (sdd - 2.0 * a * sgd + a * a * (gg - g * g)) - ce * px - ee * py;
+                    let fit = if read { 4.0 } else { 3.0 };
+                    out[5 * j] = a as f32;
+                    out[5 * j + 1] = (d - a * g + ce * (xo - x) + ee * (yo - y)) as f32;
+                    out[5 * j + 2] = ce as f32;
+                    out[5 * j + 3] = ee as f32;
+                    out[5 * j + 4] = f32::from(u8::from(votes(resid, s, q, c, n, fit, k)));
+                }
+                out
             },
-        );
-        box_means((cw, ch), rho, |i| lines[i].map(f64::from), |i, [a0, a1, b0, b1], _| {
-            let g = f64::from(light.g[i]);
-            [(a0 * g + b0) as f32, (a1 * g + b1) as f32]
-        })
+        )
     }
 
     /// Cell `i`'s two terms of the shared noise ([`shared_noise`]) under
     /// `light`: its own share `t1`, and its light covariance with the cells
     /// whose green its differences read times the mass of its read levels a
-    /// window keeps ([`window_mass`] `mass`).
-    fn shared_terms(&self, light: &Light, i: usize, levels: u32, mass: &[f64]) -> [f64; 2] {
+    /// window keeps ([`window_mass`] `mass`), and the same times the mass its
+    /// plane's position terms take ([`window_mass_u`] `mass_u`).
+    fn shared_terms(&self, light: &Light, i: usize, levels: u32, mass: &[f64], mass_u: &[f64]) -> [f64; 3] {
         let [_, own, cross] = self.light_noise(i);
-        let held: f64 = (0..=levels).map(|a| weight(light.bits[i], a, levels) * mass[a as usize]).sum();
-        [f64::from(light.t1[i]), (own + cross) * held]
+        let at = |m: &[f64]| -> f64 { (0..=levels).map(|a| weight(light.bits[i], a, levels) * m[a as usize]).sum() };
+        [f64::from(light.t1[i]), (own + cross) * at(mass), (own + cross) * at(mass_u)]
     }
 
     /// The planes the demosaiced pixels are rebuilt on ([`CellChroma`]):
