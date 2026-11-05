@@ -94,23 +94,27 @@
 //! predicted was measured on the display frame, where the encode bends the
 //! scale; it does not apply in the linear domain.)
 //!
-//! **k follows the photo** ([`photo_k`]). It is read where the stop is
-//! visible, on texture: over the photo's own textured patches (the flat
-//! rule's complement, [`NoiseModel::is_flat`]) the filter removes the noise
-//! and nothing more while the edge energy it takes away (the squared cell
-//! differences of both colour differences) stays within the edge energy the
-//! noise model attributes to noise there; `k` is where the two meet. A flat
-//! patch cannot say where to stop — more smoothing is always closer to the
-//! truth there — so the flat patches are the CHECK of `k`, never its source.
-//! It is one law, not one constant: on the most textured 1000 px windows of
-//! two ordinary scenes the meeting point is 2.62 and 3.69 (rel1180 msg-e3
-//! round 4), further apart than the model's own 2–8 % error on the noise
-//! can move it; over all their textured patches, with the estimate-anchored
-//! test and the window below, the law reads 6.21 and 13.61, and 1.43 on a
-//! night sky (round 9; at round 8's 3-cell window 5.86, 10.36, 1.63: the
-//! crossing moves with the window, the law is the same). A photo with no texture has nothing to
-//! protect, and its `k` is unbounded: the filter is then the plain mean of
-//! its window, and the window is the bound.
+//! **k is the test's fairness to its window** ([`fair_k`]). The sigma test
+//! is a hypothesis test with the model's `σ` known; its level is its only
+//! free quantity, and the window sets it. The window asks its `N` cells
+//! whether they share the anchor's true value, and a true neighbour lies
+//! outside `±k·σ` of that value with probability `2·Φ(−k)` (against the
+//! estimate, a mean of `n`, the width `k·σ·√(1 + 1/n)` holds the same
+//! probability). Over the window the expected false refusals are
+//! `2·N·Φ(−k)`, and `k` is where they reach one: `k = Φ⁻¹(1 − 1/(2N))`,
+//! `N = (2ρ + 1)²` the window's cells. The test is fair to its window: of N
+//! true neighbours, fewer than one is expected to be refused. The window
+//! depends on `k` ([`window`]) and `k` on `N`: the two are read in turn until
+//! both repeat ([`fair_test`]). `k` moves with the log of `N` and nothing
+//! else — 2.32 over 49 cells, 3.11 over 529, 3.35 over 1225 — so no photo can
+//! push it to 1 or to 15. (The law before read `k` off the photo: where the
+//! edge energy the filter removed from its textured patches met the noise's
+//! share there. The filter ADDS edge energy to texture — an edge-preserving
+//! selection assigns a transition cell to one side, and a step holds more
+//! squared difference than a ramp — so the removal is not monotone in `k`;
+//! its first crossing read 15 on a sunset, where the test had become the
+//! window's plain mean and a sky 8 σ off a dark branch's colour voted in the
+//! branch's cells, and 1.02 on a night sky: rel1180 msg-e3 round 14.)
 //!
 //! **The window** ([`window`]): the slider keeps its meaning — at each
 //! strength the stage averages as many samples as the pass it replaces, so a
@@ -124,18 +128,14 @@
 //! round 9). The stage is not a plain mean: the skipped mean at its test
 //! width `t` keeps `1/(N·(Z − 2t·φ(t)))` of a sample's noise (above), so its
 //! window holds the `N` cells at which `N·(Z − 2t·φ(t))` is the display
-//! pass's `N/4` ([`window`]; `t` the width the stage runs at, so it follows
-//! the photo): the same on daylight, where `t` is wide and `Z − 2t·φ(t)` is 1
-//! (7 cells at 25), wider on a night sky (11 cells at its `k` 1.43, rel1180
-//! msg-e3 round 10). The display pass's reach (its radius law) stays that
-//! pass's own, for the sources it still runs on. `k` itself is read over the
-//! plain mean's window at the default strength ([`DEFAULT_AMOUNT`]) — the one
-//! window that does not depend on the reading — so it is one reading per
-//! photo. That reading and the noise model are the exposure's: read ONCE,
-//! off the sensor's own mosaic ([`SourceReading`]), and kept with the source,
-//! so a develop runs the pass alone; a mosaic another process has denoised (a
-//! master's AI denoise) is filtered at the sensor's model, an upper bound of
-//! the noise left in it.
+//! pass's `N/4` ([`window`]; `t` the width the stage runs at, the fair
+//! test's `k` for that window, read with it to their fixed point,
+//! [`fair_test`]). The display pass's reach (its radius law) stays that
+//! pass's own, for the sources it still runs on. The noise model is the
+//! exposure's: read ONCE, off the sensor's own mosaic ([`SourceReading`]),
+//! and kept with the source, so a develop runs the pass alone; a mosaic
+//! another process has denoised (a master's AI denoise) is filtered at the
+//! sensor's model, an upper bound of the noise left in it.
 //!
 //! **A preview** ([`preview_level`]): white noise averages the same at any
 //! scale, so the wide window is taken where it is cheap — a develop capped at
@@ -143,14 +143,12 @@
 //! is no larger than one of its pixels (`σ/2^L` there, the base window);
 //! an export and a master's bake run it at sensor scale.
 //!
-//! **The slider.** "Colour noise reduction" scales `k` linearly and sets the
-//! window as above: 0 is off, the default strength (Lightroom's own 25) is the
-//! photo's own `k` over (on daylight) 7 cells, 100 is four times it over 23. Below 25 the
+//! **The slider.** "Colour noise reduction" sets the window as above, and the
+//! window its fair test: 0 is off; each strength is one fixed point of the
+//! window and `k` ([`fair_test`]), the same for every photo. Below 25 the
 //! display pass blends its result with the input and keeps more than one
-//! cell's worth of noise; the stage's window is then its least, one cell.
-//! Where `k` is unbounded (no texture) the scale cannot weaken it, and the
-//! window does: at 10 the mean runs over 1 cell, at 25 over 7, so the slider
-//! is never dead. Detail and Smoothness belong to the display-frame pass,
+//! cell's worth of noise; the stage's window is then its least, one cell, so
+//! the slider is never dead. Detail and Smoothness belong to the display-frame pass,
 //! which a RAW no longer runs; the window reads that pass at Lightroom's own
 //! Smoothness, the value an absent one resolves to.
 //!
@@ -178,16 +176,9 @@ pub(crate) fn reads(raw: &rawler::RawImage) -> bool {
     matches!(&raw.photometric, Photo::Cfa(c) if raw.cpp == 1 && bayer_sites(&c.cfa).is_some())
 }
 
-/// The slider value at which the stage runs at the photo's own `k`:
-/// Lightroom's own default for Color.
+/// Lightroom's own default for Color (the strength the lane's probes read at).
+#[cfg(test)]
 pub(crate) const DEFAULT_AMOUNT: f32 = 25.0;
-
-/// The multiple of the photo's `k` the slider value `color_nr` (0..=100)
-/// asks for: `None` when off (the colour-NR control's own rule,
-/// `ChromaNrParams::global`).
-pub(crate) fn scale_of(color_nr: f32) -> Option<f64> {
-    (color_nr > 0.0).then(|| f64::from(color_nr.min(100.0)) / f64::from(DEFAULT_AMOUNT))
-}
 
 /// The number of pixels the display pass averages on a flat region at slider
 /// value `color_nr` (0..=100), Smoothness at Lightroom's own default: the
@@ -206,7 +197,8 @@ fn half_side(n: f64) -> usize {
 
 /// The plain mean's window at slider value `color_nr` (0..=100): the square
 /// of cells that holds as many samples as the display pass averages
-/// ([`display_samples`] pixels, four to a cell). The window `k` is read over.
+/// ([`display_samples`] pixels, four to a cell): the window at an unbounded
+/// `k`, where [`fair_test`] starts.
 pub(crate) fn plain_window(color_nr: f32) -> usize {
     half_side(display_samples(color_nr) / 4.0)
 }
@@ -250,12 +242,57 @@ pub(crate) fn window(color_nr: f32, k: f64) -> usize {
     }
 }
 
-/// What the stage reads of an exposure: its noise model and its own `k`
-/// ([`photo_k`], at the default strength). Both are properties of the
-/// exposure, not of a develop or a recipe: they are read ONCE, off the
-/// sensor's own mosaic ([`read_source`]), and carried (the develop keeps them
-/// with the source, `render::SourceFrame::noise_reading`), so a develop runs
-/// the pass alone. The model is the sensor's: a mosaic another process has
+/// The test's width (in `σ`, as [`skipped_mean`] reads it) fair to a window
+/// of `n` cells: of `n` true neighbours, fewer than one is expected to be
+/// refused — `2·n·Φ(−k) = 1`, `k = Φ⁻¹(1 − 1/(2n))` (see the module), read by
+/// bisection on [`normal_mass`] (`n·(1 − Z(k))` falls with `k`).
+pub(crate) fn fair_k(n: f64) -> f64 {
+    let (mut lo, mut hi) = (0.0f64, 10.0f64);
+    for _ in 0..60 {
+        let mid = (lo + hi) / 2.0;
+        if n * (1.0 - normal_mass(mid).0) > 1.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    (lo + hi) / 2.0
+}
+
+/// The stage's test at slider value `color_nr` (0..=100): its width `k`
+/// ([`fair_k`] of the window's `(2ρ + 1)²` cells) and the window's half side
+/// `ρ` ([`window`] at that `k`), read in turn from the plain mean's window
+/// until both repeat; `None` when off (the colour-NR control's own rule,
+/// `ChromaNrParams::global`). Where the window's whole half side has no fixed
+/// point (the share's `N` falls between two odd squares, so `ρ` asks for
+/// `ρ + 1` and `ρ + 1` for `ρ`), the larger of the two: its test is fair to
+/// it, and it leaves no more than the display pass's share.
+pub(crate) fn fair_test(color_nr: f32) -> Option<(f64, usize)> {
+    if color_nr.is_nan() || color_nr <= 0.0 {
+        return None;
+    }
+    let color_nr = color_nr.min(100.0);
+    let at = |rho: usize| fair_k(((2 * rho + 1) * (2 * rho + 1)) as f64);
+    let (mut rho, mut seen) = (plain_window(color_nr), Vec::new());
+    loop {
+        let next = window(color_nr, at(rho));
+        if next == rho {
+            return Some((at(rho), rho));
+        }
+        if seen.contains(&next) {
+            let rho = rho.max(next);
+            return Some((at(rho), rho));
+        }
+        seen.push(rho);
+        rho = next;
+    }
+}
+
+/// What the stage reads of an exposure: its noise model, a property of the
+/// exposure, not of a develop or a recipe: it is read ONCE, off the sensor's
+/// own mosaic ([`read_source`]), and carried (the develop keeps it with the
+/// source, `render::SourceFrame::noise_reading`), so a develop runs the pass
+/// alone. The model is the sensor's: a mosaic another process has
 /// already denoised (a master's AI denoise) does not carry the sensor's
 /// Poisson noise, so `var = g·a·m + g²·b` is not its law and a model fitted
 /// on it is not a measurement. Run over such a mosaic, the stage's test reads
@@ -263,9 +300,6 @@ pub(crate) fn window(color_nr: f32, k: f64) -> usize {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SourceReading {
     pub(crate) model: NoiseModel,
-    /// The photo's own `k` at the default strength (`f64::INFINITY` when it
-    /// has no texture to protect).
-    pub(crate) k: f64,
 }
 
 /// Read the exposure ([`SourceReading`]) off its normalised signed sensor
@@ -279,10 +313,7 @@ pub(crate) fn read_source(mosaic: &[f32], width: usize, height: usize, cfa: &raw
     }
     let wb = [wb[0] / wb[1], 1.0, wb[2] / wb[1]];
     let pts = patches(mosaic, width, height, sites, wb);
-    let model = NoiseModel::fit(&pts, width, height)?;
-    let cells = Cells::of(mosaic, width, height, sites, wb, &model, &pts)?;
-    let k = photo_k(&cells, &model, &pts, wb, plain_window(DEFAULT_AMOUNT)).0;
-    Some(SourceReading { model, k })
+    Some(SourceReading { model: NoiseModel::fit(&pts, width, height)? })
 }
 
 /// The pyramid level a develop capped at `max_edge` (its long edge) reads
@@ -301,12 +332,11 @@ pub(crate) fn preview_level(width: usize, height: usize, max_edge: Option<u32>) 
 
 /// Run the stage on the normalised signed `mosaic` (`width × height`, sites
 /// of `cfa`), white-balanced by `wb` (any scale; green is divided out), at
-/// `scale` times the photo's own `k` over a window of half side `rho(k)`
-/// cells for the `k` it runs at ([`window`]). The model and the `k` are the
-/// exposure's `source` reading ([`SourceReading`], read once off the sensor's
-/// own mosaic), or, without one, read off `mosaic` itself ([`read_source`]:
-/// `mosaic` is then the sensor's). Returns the reading, the `k` it ran at
-/// and the filtered cell chroma the demosaiced pixels are rebuilt on
+/// the test `(k, rho)`: its width and the window's half side in cells
+/// ([`fair_test`]). The model is the exposure's `source` reading
+/// ([`SourceReading`], read once off the sensor's own mosaic), or, without
+/// one, read off `mosaic` itself ([`read_source`]: `mosaic` is then the
+/// sensor's). Returns the reading and the filtered cell chroma the demosaiced pixels are rebuilt on
 /// ([`CellChroma::rebuild`]), or `None` — and the mosaic untouched — when the
 /// pattern is not a 2×2 RGB Bayer or the frame has too few usable patches for
 /// a model. The filtered samples are written back into `mosaic` only when
@@ -315,37 +345,30 @@ pub(crate) fn preview_level(width: usize, height: usize, max_edge: Option<u32>) 
 /// ([`preview_level`]) the pass runs on that level of
 /// the cell pyramid ([`Cells::level`], the base window there) and each cell
 /// takes the level's filtered chroma read bilinearly at its centre.
-#[allow(clippy::too_many_arguments)] // the mosaic's frame plus the stage's strength, window, the exposure's reading and the write
+#[allow(clippy::too_many_arguments)] // the mosaic's frame plus the stage's test, the exposure's reading, the level and the write
 pub(crate) fn filter_mosaic(
     mosaic: &mut [f32],
     width: usize,
     height: usize,
     cfa: &rawler::cfa::CFA,
     wb: [f64; 3],
-    scale: f64,
-    rho: impl Fn(f64) -> usize,
+    (k, rho): (f64, usize),
     source: Option<&SourceReading>,
     level: u32,
     write: bool,
-) -> Option<(SourceReading, f64, CellChroma)> {
+) -> Option<(SourceReading, CellChroma)> {
     let sites = bayer_sites(cfa)?;
-    if mosaic.len() != width * height || wb[1].is_nan() || wb[1] <= 0.0 || scale.is_nan() || scale <= 0.0 {
+    if mosaic.len() != width * height || wb[1].is_nan() || wb[1] <= 0.0 || k.is_nan() || k < 0.0 {
         return None;
     }
     let wb = [wb[0] / wb[1], 1.0, wb[2] / wb[1]];
     let pts = patches(mosaic, width, height, sites, wb);
-    let (model, cells, k) = match source {
-        Some(r) => (r.model, Cells::of(mosaic, width, height, sites, wb, &r.model, &pts)?, r.k),
-        None => {
-            let model = NoiseModel::fit(&pts, width, height)?;
-            let cells = Cells::of(mosaic, width, height, sites, wb, &model, &pts)?;
-            let k = photo_k(&cells, &model, &pts, wb, plain_window(DEFAULT_AMOUNT)).0;
-            (model, cells, k)
-        }
+    let model = match source {
+        Some(r) => r.model,
+        None => NoiseModel::fit(&pts, width, height)?,
     };
-    let reading = SourceReading { model, k };
-    let k = k * scale;
-    let rho = rho(k);
+    let cells = Cells::of(mosaic, width, height, sites, wb, &model, &pts)?;
+    let reading = SourceReading { model };
     let filtered: Vec<[f32; 2]> = if level == 0 {
         (0..cells.cw * cells.ch).into_par_iter().map_init(Scratch::default, |s, i| cells.filtered_in(i, k, rho, s).0).collect()
     } else {
@@ -366,7 +389,7 @@ pub(crate) fn filter_mosaic(
         cells.write(mosaic, width, sites, wb, &filtered);
     }
     let chroma = cells.chroma(&filtered, &model, wb, rho);
-    Some((reading, k, chroma))
+    Some((reading, chroma))
 }
 
 /// The stage's filtered cell chroma, `wR·R − G` and `wB·B − G` per cell of
@@ -497,100 +520,6 @@ pub(crate) fn camera_luma(calibration: Option<(&[[f32; 4]; 3], [f32; 4])>, xyz: 
         Some((cam2rgb, wb)) => [0, 1, 2].map(|i| wb[i] * (0..3).map(|j| xyz[j] * cam2rgb[j][i]).sum::<f32>()),
         None => [0.0, 1.0, 0.0],
     }
-}
-
-/// The rungs `photo_k` reads the removed edge energy on: `2^(j/2)`,
-/// `j = 0..LADDER` (1 to 64, half an octave apart — a resolution: the
-/// crossing is interpolated between rungs).
-const LADDER: usize = 13;
-
-/// The textured patches [`photo_k`] reads (the flat rule's complement): a
-/// reading summed over the frame's patches, as the noise model's fit is, read
-/// at the fit's own subsample rule (`noise_model::fit_stride`: the uniform
-/// stride that keeps at least `FIT_PATCHES`, every one on a frame with
-/// fewer). The reading is a reading, not the filter: it costs the filter's
-/// window on the patches it reads, so it reads no more of them than the
-/// model's own resolution needs.
-fn reading_patches(model: &NoiseModel, pts: &[Patch], wb: [f64; 3]) -> Vec<usize> {
-    let textured: Vec<usize> = (0..pts.len()).filter(|&i| pts[i].usable && !model.is_flat(&pts[i], wb)).collect();
-    let stride = super::noise_model::fit_stride(textured.len());
-    textured.into_iter().step_by(stride).collect()
-}
-
-/// The photo's own `k`: the threshold (in `σ_d`) at which the edge energy the
-/// filter removes from the photo's TEXTURED patches meets the noise model's
-/// share of that energy (see the module), linear between the rungs of
-/// [`LADDER`]; `f64::INFINITY` when no textured patch exists or the removed
-/// energy never reaches the share. Also returns, per rung read,
-/// `(k, removed / share)` — the reading itself.
-pub(crate) fn photo_k(cells: &Cells, model: &NoiseModel, pts: &[Patch], wb: [f64; 3], rho: usize) -> (f64, Vec<(f64, f64)>) {
-    let textured = reading_patches(model, pts, wb);
-    if textured.is_empty() {
-        return (f64::INFINITY, Vec::new());
-    }
-    let (cw, ch, pw) = (cells.cw, cells.ch, cells.pw);
-    let origin = |p: usize| ((p % pw) * PATCH, (p / pw) * PATCH);
-    // A patch's forward differences (to the right and below, inside the
-    // frame): each pairs two neighbouring cells.
-    let neighbours = move |cx: usize, cy: usize| {
-        [(cx + 1 < cw).then(|| cy * cw + cx + 1), (cy + 1 < ch).then(|| (cy + 1) * cw + cx)].into_iter().flatten()
-    };
-    // Each cell's value is read once per patch (the patch and the row and
-    // column its forward differences reach), not once per difference it is in.
-    let energy = |value: &(dyn Fn(usize) -> [f32; 2] + Sync)| -> f64 {
-        textured
-            .par_iter()
-            .map(|&p| {
-                let (x0, y0) = origin(p);
-                let (x1, y1) = ((x0 + PATCH + 1).min(cw), (y0 + PATCH + 1).min(ch));
-                let bw = x1 - x0;
-                let at: Vec<[f32; 2]> = (y0..y1).flat_map(|cy| (x0..x1).map(move |cx| cy * cw + cx)).map(value).collect();
-                let mut e = 0.0f64;
-                for cy in y0..y0 + PATCH {
-                    for cx in x0..x0 + PATCH {
-                        let c = at[(cy - y0) * bw + cx - x0];
-                        for n in neighbours(cx, cy) {
-                            let q = at[(n / cw - y0) * bw + n % cw - x0];
-                            e += f64::from(q[0] - c[0]).powi(2) + f64::from(q[1] - c[1]).powi(2);
-                        }
-                    }
-                }
-                e
-            })
-            .sum()
-    };
-    // The noise's share: each difference carries both cells' variance less
-    // the green they share, at the patch's level (`2·(v − c)` per difference
-    // and colour difference, `2v = σ_d²`).
-    let share: f64 = textured
-        .iter()
-        .map(|&p| {
-            let [sr, sb] = cells.sd[p].map(f64::from);
-            let c = f64::from(cells.cov[p]);
-            let (x0, y0) = origin(p);
-            let diffs: usize =
-                (y0..y0 + PATCH).flat_map(|cy| (x0..x0 + PATCH).map(move |cx| neighbours(cx, cy).count())).sum();
-            (sr * sr + sb * sb - 4.0 * c) * diffs as f64
-        })
-        .sum();
-    let e_in = energy(&|i| [cells.d[i][0], cells.d[i][1]]);
-    let mut read: Vec<(f64, f64)> = Vec::with_capacity(LADDER);
-    for j in 0..LADDER {
-        let k = 2f64.powf(j as f64 / 2.0);
-        let removed = (e_in - energy(&|i| cells.filtered(i, k, rho))) / share;
-        read.push((k, removed));
-        if removed >= 1.0 {
-            let k = match read.len() {
-                1 => k,
-                n => {
-                    let ((k0, r0), (k1, r1)) = (read[n - 2], read[n - 1]);
-                    k0 + (1.0 - r0) * (k1 - k0) / (r1 - r0)
-                }
-            };
-            return (k, read);
-        }
-    }
-    (f64::INFINITY, read)
 }
 
 /// The sigma filter's estimate of the true value of `centre` (one sample of
@@ -800,8 +729,7 @@ impl Cells {
     /// as the cell's); one site's difference `wR²·var(R) + σ²_G/4`, and at a
     /// pyramid level of side `s` the mean of `s²` of them,
     /// `(v + 4c·(1 − 1/s))/s²` with `c = σ²_G/16` (as [`Self::level`] states
-    /// a patch's), at the cell's own radius. The patch's sd ([`Self::sd`])
-    /// stays the noise share `photo_k` reads.
+    /// a patch's), at the cell's own radius.
     fn own_sd(&self, i: usize) -> [f64; 2] {
         let (cx, cy) = (i % self.cw, i / self.cw);
         let s = self.side as f64;
@@ -816,11 +744,13 @@ impl Cells {
     /// Cell `i`'s two colour differences through the sigma filter at `k`:
     /// the test is anchored on an estimate of the cell's true colour, not on
     /// its own noisy sample (see the module).
+    #[cfg(test)]
     fn filtered(&self, i: usize, k: f64, rho: usize) -> [f32; 2] {
         self.filtered_counted(i, k, rho).0
     }
 
     /// [`Self::filtered`] with the count of window samples the last pass accepted.
+    #[cfg(test)]
     fn filtered_counted(&self, i: usize, k: f64, rho: usize) -> ([f32; 2], [u32; 2]) {
         self.filtered_in(i, k, rho, &mut Scratch::default())
     }

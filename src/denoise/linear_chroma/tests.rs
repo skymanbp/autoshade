@@ -71,11 +71,16 @@ fn rggb() -> rawler::cfa::CFA {
     rawler::cfa::CFA::new("RGGB")
 }
 
+/// The fair test over a window of half side `rho`: [`fair_k`] of its cells.
+fn fair(rho: usize) -> (f64, usize) {
+    (fair_k(((2 * rho + 1) * (2 * rho + 1)) as f64), rho)
+}
+
 #[test]
 fn the_stage_takes_the_colour_noise_and_leaves_the_greens_and_the_mean() {
     let before = mosaic(0.01, 0.0);
     let mut after = before.clone();
-    let (SourceReading { model, .. }, _, _) = filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, |_| 3, None, 0, true).expect("a Bayer mosaic with noise fits a model");
+    let (SourceReading { model }, _) = filter_mosaic(&mut after, W, H, &rggb(), WB, fair(3), None, 0, true).expect("a Bayer mosaic with noise fits a model");
     // The greens are never written.
     for y in 0..H {
         for x in 0..W {
@@ -104,7 +109,7 @@ fn a_colour_edge_the_noise_cannot_make_is_kept() {
     let step = 12.0 * cell_sd;
     let before = mosaic(level, step);
     let mut after = before.clone();
-    filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, |_| 3, None, 0, true).expect("model");
+    filter_mosaic(&mut after, W, H, &rggb(), WB, fair(3), None, 0, true).expect("model");
     let (m0, m1) = (column_dr(&before), column_dr(&after));
     let side = |m: &[f64], cols: std::ops::Range<usize>| cols.clone().map(|c| m[c]).sum::<f64>() / cols.len() as f64;
     let e = W / 4; // the edge, in cells
@@ -179,33 +184,65 @@ fn a_dark_cells_test_is_at_its_own_noise() {
     }
 }
 
+/// The test is fair to its window: of N true neighbours, fewer than one is
+/// expected to be refused. On three windows (half sides 3, 8 and 11: 49, 289
+/// and 529 cells) the law's `k` puts the expected false refusals,
+/// `2·N·Φ(−k) = N·(1 − Z(k))`, at one: the closed form `Φ⁻¹(1 − 1/(2N))`,
+/// read here by bisection on the module's own [`normal_mass`]. Each strength
+/// of the slider is a fixed point of the window and the law (printed) — or,
+/// where the whole half side has none, the larger window of the two it
+/// alternates between — the same above 100 as at 100; 0 is off.
+///
+/// MUTATION: the expected refusals set to N/2 (a `k` of 0.67): this test, the
+/// 12-sd colour edge test and the own-noise test fail.
 #[test]
-fn the_slider_scales_k_and_zero_is_off() {
-    assert_eq!(scale_of(0.0), None);
-    assert_eq!(scale_of(DEFAULT_AMOUNT), Some(1.0));
-    assert_eq!(scale_of(50.0), Some(2.0));
-    assert_eq!(scale_of(100.0), Some(4.0));
-    assert_eq!(scale_of(250.0), Some(4.0));
+fn the_test_is_fair_to_its_window() {
+    for rho in [3usize, 8, 11] {
+        let n = ((2 * rho + 1) * (2 * rho + 1)) as f64;
+        let (mut lo, mut hi) = (0.0f64, 10.0f64);
+        while hi - lo > 1e-12 {
+            let mid = (lo + hi) / 2.0;
+            if n * (1.0 - normal_mass(mid).0) > 1.0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let want = (lo + hi) / 2.0;
+        let k = fair_k(n);
+        println!("half side {rho}, {n} cells: k {k:.6} (closed form {want:.6}), expected false refusals {:.6}", n * (1.0 - normal_mass(k).0));
+        assert!((k - want).abs() < 1e-9, "half side {rho}: the law's k {k} against the closed form {want}");
+    }
+    assert_eq!(fair_test(0.0), None, "0 is off");
+    for nr in [1.0f32, 10.0, 20.0, 25.0, 50.0, 75.0, 100.0] {
+        let (k, rho) = fair_test(nr).expect("on");
+        let n = ((2 * rho + 1) * (2 * rho + 1)) as f64;
+        println!("colour NR {nr}: half side {rho} ({n} cells), k {k:.4}");
+        let (w, cycle) = (window(nr, k), rho > 1 && window(nr, fair(rho - 1).0) == rho);
+        println!("colour NR {nr}: the window at the test's k {w}{}", if cycle && w == rho - 1 { " (no whole fixed point: the larger of the two)" } else { "" });
+        assert!(w == rho || w == rho - 1 && cycle, "colour NR {nr}: the window at the test's k is {w}, not {rho}");
+        assert_eq!(k.to_bits(), fair_k(n).to_bits(), "colour NR {nr}: the test's k for its window");
+    }
+    assert_eq!(fair_test(250.0), fair_test(100.0));
 }
 
-/// Where the photo has nothing to protect `k` is unbounded and the filter is
-/// the plain mean of its window; the slider still weakens it, through the
-/// window: at 10 it is 1 cell, at 25 it is 7 (as many samples as the display
-/// pass averages there), and the residual colour noise at 10 is the larger.
+/// The slider weakens the stage through its window: at 10 it is 1 cell, at
+/// 25 it is 7 at an unbounded `k` (as many samples as the display pass
+/// averages there), and on a noise-only frame the residual colour noise at
+/// 10 is the larger.
 ///
 /// MUTATION: the window fixed at the default strength's (the slider is then
-/// dead below 25 on such a photo).
+/// dead below 25).
 #[test]
-fn where_k_is_unbounded_the_slider_weakens_the_stage_through_its_window() {
+fn the_slider_weakens_the_stage_through_its_window() {
     let before = mosaic(0.01, 0.0);
     let at = |nr: f32| {
         let mut m = before.clone();
-        let (_, k, _) = filter_mosaic(&mut m, W, H, &rggb(), WB, scale_of(nr).unwrap(), |k| window(nr, k), None, 0, true).expect("a model");
-        (k, var_dr(&m, 0..W / 2))
+        filter_mosaic(&mut m, W, H, &rggb(), WB, fair_test(nr).expect("on"), None, 0, true).expect("a model");
+        var_dr(&m, 0..W / 2)
     };
     assert_eq!((window(10.0, f64::INFINITY), window(25.0, f64::INFINITY), window(100.0, f64::INFINITY)), (1, 7, 23), "the display pass's sample count in cells");
-    let ((k10, v10), (k25, v25)) = (at(10.0), at(25.0));
-    assert!(k10.is_infinite() && k25.is_infinite(), "a noise-only frame has no texture to protect: k {k10} / {k25}");
+    let (v10, v25) = (at(10.0), at(25.0));
     assert!(v10 > v25, "residual colour variance at 10 ({v10:.3e}) must exceed that at 25 ({v25:.3e})");
 }
 
@@ -236,19 +273,18 @@ fn the_window_averages_as_many_samples_as_the_display_pass_it_replaces() {
 /// at: the skipped mean over `N` cells at `t` keeps `1/(N·(Z − 2t·φ(t)))` of
 /// a sample's noise, so the window is the odd square nearest (in half side)
 /// to the `N` at which that is the display share `4 / display_samples`,
-/// `t = k·√(1 + 1/(N·Z))` read with it to its fixed point. On daylight's `k`
-/// (wide `t`) it is the plain mean's window; at the night sky's `k` (1.43,
-/// rel1180 msg-e3 round 9) it is wider, 11 cells at 25; unbounded `k` is the
-/// plain mean's. Printed per strength at the three photos' `k`.
+/// `t = k·√(1 + 1/(N·Z))` read with it to its fixed point — at each
+/// strength's fair test ([`fair_test`]) and at an unbounded `k` (the plain
+/// mean's window). Printed per strength.
 ///
 /// MUTATION: the window from the plain mean's share (the `Z − 2t·φ(t)`
-/// factor dropped): the night sky's window is then 7 cells and keeps 2.3
-/// times the display pass's share.
+/// factor dropped): the window is then the plain mean's at every `k`.
 #[test]
 fn the_window_leaves_the_display_share_at_the_width_the_stage_runs_at() {
-    for k in [1.432, 6.210, 13.614, f64::INFINITY] {
+    for fair_at in [true, false] {
         for nr in [10.0f32, 20.0, 25.0, 50.0, 75.0, 100.0] {
-            let ks = k * scale_of(nr).unwrap();
+            let ks = if fair_at { fair_test(nr).expect("on").0 } else { f64::INFINITY };
+            let k = ks;
             let plain = display_samples(nr) / 4.0;
             let (mut t, mut n) = (ks, plain);
             for _ in 0..50 {
@@ -268,8 +304,7 @@ fn the_window_leaves_the_display_share_at_the_width_the_stage_runs_at() {
             );
         }
     }
-    assert_eq!(window(DEFAULT_AMOUNT, 13.614), plain_window(DEFAULT_AMOUNT), "daylight's t is wide: the plain mean's window");
-    assert_eq!(window(DEFAULT_AMOUNT, 1.432), 11, "the night sky at 25");
+    assert_eq!(window(DEFAULT_AMOUNT, f64::INFINITY), plain_window(DEFAULT_AMOUNT), "an unbounded k: the plain mean's window");
 }
 
 /// On a flat frame the filter keeps of a cell's own noise what the skipped
@@ -282,8 +317,8 @@ fn the_window_leaves_the_display_share_at_the_width_the_stage_runs_at() {
 /// samples), so each neighbour adds `cov/(N·v)` (`cov = σ²_G/16`, `v` one
 /// cell's variance) — within three standard errors of the slope (its
 /// residual sd over the sample sd, over the square root of the cells that
-/// are independent: one per window). At `k` = 1.6 and 2.5, the night sky's
-/// order of `k` and a daylight one.
+/// are independent: one per window). At the fair test of two windows (half
+/// sides 3 and 7: `k` 2.32 and 2.84).
 ///
 /// MUTATION: every pass anchored on the cell's own sample (the form before
 /// rel1180 round 8): the test then keeps the neighbours on the sample's side
@@ -296,8 +331,6 @@ fn the_filter_keeps_of_a_cells_own_noise_only_what_the_skipped_mean_keeps() {
     let pts = patches(&m, W, H, sites, WB);
     let model = NoiseModel::fit(&pts, W, H).expect("model");
     let cells = Cells::of(&m, W, H, sites, WB, &model, &pts).expect("cells");
-    let rho = 3;
-    let n_win = ((2 * rho + 1) * (2 * rho + 1)) as f64;
     // The true sd of each colour difference of one cell (the mosaic's own
     // noise: the site's, its four green neighbours averaged), and the
     // covariance of two axis-neighbouring cells' differences (one green shared).
@@ -307,8 +340,9 @@ fn the_filter_keeps_of_a_cells_own_noise_only_what_the_skipped_mean_keeps() {
         (WB[0] * WB[0] * (A * level / WB[0] + B) + g_var).sqrt(),
         (WB[2] * WB[2] * (A * level / WB[2] + B) + g_var).sqrt(),
     ];
-    let interior: Vec<usize> = (rho..cells.ch - rho).flat_map(|cy| (rho..cells.cw - rho).map(move |cx| cy * W / 2 + cx)).collect();
-    for k in [1.6, 2.5] {
+    for (k, rho) in [fair(3), fair(7)] {
+        let n_win = ((2 * rho + 1) * (2 * rho + 1)) as f64;
+        let interior: Vec<usize> = (rho..cells.ch - rho).flat_map(|cy| (rho..cells.cw - rho).map(move |cx| cy * W / 2 + cx)).collect();
         let f: Vec<[f32; 2]> = interior.par_iter().map(|&i| cells.filtered(i, k, rho)).collect();
         for j in 0..2 {
             let (mut sdd, mut sdf) = (0.0f64, 0.0f64);
@@ -335,7 +369,7 @@ fn the_filter_keeps_of_a_cells_own_noise_only_what_the_skipped_mean_keeps() {
             let want = 1.0 / (n_win * (z - 2.0 * t * phi)) + 4.0 * shared / (n_win * true_sd[j] * true_sd[j]);
             assert!(
                 (slope - want).abs() <= 3.0 * se,
-                "k {k}, colour difference {j}: the filter keeps {slope:.4} of a cell's own noise; the skipped mean at t = {t:.3} keeps {want:.4} (3 se {:.4}; the window mean 1/N = {:.4})",
+                "k {k:.3} over half side {rho}, colour difference {j}: the filter keeps {slope:.4} of a cell's own noise; the skipped mean at t = {t:.3} keeps {want:.4} (3 se {:.4}; the window mean 1/N = {:.4})",
                 3.0 * se,
                 1.0 / n_win
             );
@@ -348,36 +382,8 @@ fn a_pattern_that_is_not_a_two_by_two_bayer_is_left_alone() {
     let before = mosaic(0.01, 0.0);
     let mut after = before.clone();
     let xtrans = rawler::cfa::CFA::new("GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG");
-    assert!(filter_mosaic(&mut after, W, H, &xtrans, WB, 1.0, |_| 3, None, 0, true).is_none());
+    assert!(filter_mosaic(&mut after, W, H, &xtrans, WB, fair(3), None, 0, true).is_none());
     assert!(before.iter().zip(&after).all(|(a, b)| a.to_bits() == b.to_bits()));
-}
-
-/// The k reading reads the textured patches at the fit's own subsample rule:
-/// every one on a frame with fewer than `FIT_PATCHES`, otherwise the uniform
-/// stride `n / FIT_PATCHES` over them, which keeps at least `FIT_PATCHES`;
-/// flat patches never.
-///
-/// MUTATION: every textured patch read (the reading then costs the filter's
-/// window on all of them: 13 s on a 61 MP daylight frame at 7 cells).
-#[test]
-fn the_k_reading_reads_the_textured_patches_at_the_fits_own_stride() {
-    use super::super::noise_model::FIT_PATCHES;
-    let m = mosaic(0.01, 0.0);
-    let sites = bayer_sites(&rggb()).expect("Bayer");
-    let pts = patches(&m, W, H, sites, WB);
-    let model = NoiseModel::fit(&pts, W, H).expect("model");
-    let flat = *pts.iter().find(|p| model.is_flat(p, WB)).expect("a flat patch");
-    let textured = Patch { v_dr: 100.0 * flat.v_dr, v_db: 100.0 * flat.v_db, ..flat };
-    for n in [1000usize, FIT_PATCHES - 1, FIT_PATCHES, 2 * FIT_PATCHES + 1, 40_000] {
-        // Every third patch flat.
-        let list: Vec<Patch> = (0..n + n / 2).map(|i| if i % 3 == 2 { flat } else { textured }).collect();
-        let all: Vec<usize> = (0..list.len()).filter(|i| i % 3 != 2).collect();
-        let read = reading_patches(&model, &list, WB);
-        let stride = (all.len() / FIT_PATCHES).max(1);
-        let want: Vec<usize> = all.iter().copied().step_by(stride).collect();
-        assert_eq!(read, want, "{} textured patches: the reading is the uniform stride {stride} over them", all.len());
-        assert!(read.len() >= all.len().min(FIT_PATCHES), "{} textured: {} read", all.len(), read.len());
-    }
 }
 
 /// The demosaic reads the sensor's own mosaic: a develop that demosaics asks
@@ -394,11 +400,10 @@ fn the_k_reading_reads_the_textured_patches_at_the_fits_own_stride() {
 fn a_demosaicing_develop_reads_the_sensors_own_mosaic() {
     let before = mosaic(0.01, 0.0);
     let (mut kept, mut written) = (before.clone(), before.clone());
-    let (_, k0, c0) = filter_mosaic(&mut kept, W, H, &rggb(), WB, 1.0, |_| 3, None, 0, false).expect("a model");
-    let (_, k1, c1) = filter_mosaic(&mut written, W, H, &rggb(), WB, 1.0, |_| 3, None, 0, true).expect("a model");
+    let (_, c0) = filter_mosaic(&mut kept, W, H, &rggb(), WB, fair(3), None, 0, false).expect("a model");
+    let (_, c1) = filter_mosaic(&mut written, W, H, &rggb(), WB, fair(3), None, 0, true).expect("a model");
     assert!(kept.iter().zip(&before).all(|(a, b)| a.to_bits() == b.to_bits()), "the mosaic a demosaic reads was written");
     assert!(written.iter().zip(&before).any(|(a, b)| a != b), "the writing stage left its mosaic as it was");
-    assert_eq!(k0.to_bits(), k1.to_bits(), "the k");
     for j in 0..2 {
         assert!(c0.planes[j].iter().zip(&c1.planes[j]).all(|(a, b)| a.to_bits() == b.to_bits()), "colour difference {j}'s cell chroma");
         assert!(c0.slopes[j].iter().zip(&c1.slopes[j]).all(|(a, b)| a.to_bits() == b.to_bits()), "colour difference {j}'s slopes");
@@ -730,7 +735,7 @@ fn a_stars_colour_sits_where_its_light_sits() {
 /// The noise model is a property of the exposure, and a model fitted on a
 /// denoised mosaic is not a measurement: handed the exposure's reading (read
 /// once off the sensor's own mosaic, `read_source`), the stage runs at that
-/// model and that `k` whatever mosaic it is given — here the same frame with
+/// model whatever mosaic it is given — here the same frame with
 /// each site averaged with its eight same-colour neighbours (a denoiser's
 /// output: a ninth of the sensor's noise variance, not the sensor's law), on
 /// which a fit of its own would read another model.
@@ -753,9 +758,8 @@ fn the_stage_runs_at_the_exposures_reading_not_at_a_fit_of_the_mosaic_it_is_give
         .collect();
     let refit = read_source(&denoised, W, H, &rggb(), WB).expect("a model");
     assert_ne!(refit.model, reading.model, "the denoised mosaic must read another model for this test to say anything");
-    let (ran, k, _) = filter_mosaic(&mut denoised, W, H, &rggb(), WB, 1.0, |_| 3, Some(&reading), 0, true).expect("the stage runs");
+    let (ran, _) = filter_mosaic(&mut denoised, W, H, &rggb(), WB, fair(3), Some(&reading), 0, true).expect("the stage runs");
     assert_eq!(ran, reading, "the stage ran at {ran:?}, the exposure's reading is {reading:?}");
-    assert!(k == reading.k, "k {k}, the exposure's {}", reading.k);
 }
 
 /// A preview reads the stage's pass at its own scale: white noise averages
@@ -810,12 +814,107 @@ fn a_preview_reads_the_pass_at_the_level_whose_cells_match_its_pixels() {
     }
 }
 
-/// The reading behind `photo_k` on a real RAW (`E3_PROBE=<raw path>`): the
-/// model, the textured share and, per rung, the removed edge energy over the
-/// noise's share. Run by hand: `cargo test --release --lib photo_k_reading -- --ignored --nocapture`.
+/// The rungs [`edge_energy_ladder`] reads the removed edge energy on: `2^(j/2)`,
+/// `j = 0..LADDER` (1 to 64, half an octave apart — a resolution: the
+/// crossing is interpolated between rungs).
+const LADDER: usize = 13;
+
+/// The textured patches [`edge_energy_ladder`] reads (the flat rule's complement): a
+/// reading summed over the frame's patches, as the noise model's fit is, read
+/// at the fit's own subsample rule (`noise_model::fit_stride`: the uniform
+/// stride that keeps at least `FIT_PATCHES`, every one on a frame with
+/// fewer). The reading is a reading, not the filter: it costs the filter's
+/// window on the patches it reads, so it reads no more of them than the
+/// model's own resolution needs.
+fn reading_patches(model: &NoiseModel, pts: &[Patch], wb: [f64; 3]) -> Vec<usize> {
+    let textured: Vec<usize> = (0..pts.len()).filter(|&i| pts[i].usable && !model.is_flat(&pts[i], wb)).collect();
+    let stride = super::super::noise_model::fit_stride(textured.len());
+    textured.into_iter().step_by(stride).collect()
+}
+
+/// The edge-energy ladder (the stage's `k` law before rel1180 round 14, kept
+/// for the record as a probe): per rung, the edge energy the filter removes
+/// from the photo's TEXTURED patches over the noise model's share of that
+/// energy — a reading of the filter's sharpening and its removal together,
+/// not of the noise removed — and the first rung's crossing of one, linear
+/// between rungs (`f64::INFINITY` when there is none).
+fn edge_energy_ladder(cells: &Cells, model: &NoiseModel, pts: &[Patch], wb: [f64; 3], rho: usize) -> (f64, Vec<(f64, f64)>) {
+    let textured = reading_patches(model, pts, wb);
+    if textured.is_empty() {
+        return (f64::INFINITY, Vec::new());
+    }
+    let (cw, ch, pw) = (cells.cw, cells.ch, cells.pw);
+    let origin = |p: usize| ((p % pw) * PATCH, (p / pw) * PATCH);
+    // A patch's forward differences (to the right and below, inside the
+    // frame): each pairs two neighbouring cells.
+    let neighbours = move |cx: usize, cy: usize| {
+        [(cx + 1 < cw).then(|| cy * cw + cx + 1), (cy + 1 < ch).then(|| (cy + 1) * cw + cx)].into_iter().flatten()
+    };
+    // Each cell's value is read once per patch (the patch and the row and
+    // column its forward differences reach), not once per difference it is in.
+    let energy = |value: &(dyn Fn(usize) -> [f32; 2] + Sync)| -> f64 {
+        textured
+            .par_iter()
+            .map(|&p| {
+                let (x0, y0) = origin(p);
+                let (x1, y1) = ((x0 + PATCH + 1).min(cw), (y0 + PATCH + 1).min(ch));
+                let bw = x1 - x0;
+                let at: Vec<[f32; 2]> = (y0..y1).flat_map(|cy| (x0..x1).map(move |cx| cy * cw + cx)).map(value).collect();
+                let mut e = 0.0f64;
+                for cy in y0..y0 + PATCH {
+                    for cx in x0..x0 + PATCH {
+                        let c = at[(cy - y0) * bw + cx - x0];
+                        for n in neighbours(cx, cy) {
+                            let q = at[(n / cw - y0) * bw + n % cw - x0];
+                            e += f64::from(q[0] - c[0]).powi(2) + f64::from(q[1] - c[1]).powi(2);
+                        }
+                    }
+                }
+                e
+            })
+            .sum()
+    };
+    // The noise's share: each difference carries both cells' variance less
+    // the green they share, at the patch's level (`2·(v − c)` per difference
+    // and colour difference, `2v = σ_d²`).
+    let share: f64 = textured
+        .iter()
+        .map(|&p| {
+            let [sr, sb] = cells.sd[p].map(f64::from);
+            let c = f64::from(cells.cov[p]);
+            let (x0, y0) = origin(p);
+            let diffs: usize =
+                (y0..y0 + PATCH).flat_map(|cy| (x0..x0 + PATCH).map(move |cx| neighbours(cx, cy).count())).sum();
+            (sr * sr + sb * sb - 4.0 * c) * diffs as f64
+        })
+        .sum();
+    let e_in = energy(&|i| [cells.d[i][0], cells.d[i][1]]);
+    let mut read: Vec<(f64, f64)> = Vec::with_capacity(LADDER);
+    for j in 0..LADDER {
+        let k = 2f64.powf(j as f64 / 2.0);
+        let removed = (e_in - energy(&|i| cells.filtered(i, k, rho))) / share;
+        read.push((k, removed));
+        if removed >= 1.0 {
+            let k = match read.len() {
+                1 => k,
+                n => {
+                    let ((k0, r0), (k1, r1)) = (read[n - 2], read[n - 1]);
+                    k0 + (1.0 - r0) * (k1 - k0) / (r1 - r0)
+                }
+            };
+            return (k, read);
+        }
+    }
+    (f64::INFINITY, read)
+}
+
+/// The edge-energy ladder on a real RAW (`E3_PROBE=<raw path>`): the model,
+/// the textured share and, per rung, the removed edge energy over the noise's
+/// share (a lane probe, rel1180 msg-e3). Run by hand:
+/// `cargo test --release --lib edge_energy_ladder_reading -- --ignored --nocapture`.
 #[test]
 #[ignore]
-fn photo_k_reading() {
+fn edge_energy_ladder_reading() {
     use rawler::rawimage::RawPhotometricInterpretation as Photo;
     let Ok(path) = std::env::var("E3_PROBE") else { return };
     let raw = rawler::decode_file(&path).expect("decode");
@@ -842,7 +941,7 @@ fn photo_k_reading() {
     let t1 = t0.elapsed();
     let cells = Cells::of(&v, width, raw.height, sites, wb, &model, &pts).expect("cells");
     let rho = plain_window(DEFAULT_AMOUNT);
-    let (k, read) = photo_k(&cells, &model, &pts, wb, rho);
+    let (k, read) = edge_energy_ladder(&cells, &model, &pts, wb, rho);
     let t2 = t0.elapsed();
     let usable = pts.iter().filter(|p| p.usable).count();
     let textured = pts.iter().filter(|p| p.usable && !model.is_flat(p, wb)).count();
@@ -854,14 +953,15 @@ fn photo_k_reading() {
         println!("  k {k:7.3}: removed / noise share {r:.4}");
     }
     println!(
-        "  -> photo k {k:.3} over {} textured patches read; model fit {:.2} s, k reading {:.2} s",
+        "  -> ladder crossing {k:.3} over {} textured patches read; model fit {:.2} s, ladder {:.2} s",
         reading_patches(&model, &pts, wb).len(),
         t1.as_secs_f64(),
         (t2 - t1).as_secs_f64()
     );
-    // Round 11: the cost of the pass at the photo's k over its window at the
-    // default strength, and of the slopes the pixels are rebuilt on.
-    let rho_k = window(DEFAULT_AMOUNT, k);
+    // The cost of the pass at the stage's test at the default strength, and
+    // of the slopes the pixels are rebuilt on; the readings below at that test.
+    let (k, rho) = fair_test(DEFAULT_AMOUNT).expect("on");
+    let rho_k = rho;
     let t3 = std::time::Instant::now();
     let f: Vec<[f32; 2]> = (0..cells.cw * cells.ch).into_par_iter().map(|i| cells.filtered(i, k, rho_k)).collect();
     let t4 = t3.elapsed();

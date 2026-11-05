@@ -75,7 +75,7 @@ pub(crate) const FIT_PATCHES: usize = 14_925;
 
 /// The uniform stride over `n` patches that keeps at least [`FIT_PATCHES`]
 /// of them (1 when there are fewer): the one subsample rule of every reading
-/// summed over a frame's patches (the fit, `linear_chroma::photo_k`).
+/// summed over a frame's patches (the fit).
 pub(crate) fn fit_stride(n: usize) -> usize {
     (n / FIT_PATCHES).max(1)
 }

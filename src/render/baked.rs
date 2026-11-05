@@ -241,9 +241,9 @@ impl SourceFrame {
     }
 
     /// The exposure's noise reading for the RAW at `path`
-    /// (`denoise::linear_chroma::SourceReading`: its noise model and its own
-    /// `k`), kept beside its frame. Both are properties of the exposure, not
-    /// of a develop or a recipe, so they are read ONCE per (path,
+    /// (`denoise::linear_chroma::SourceReading`: its noise model), kept
+    /// beside its frame. It is a property of the exposure, not of a develop
+    /// or a recipe, so it is read ONCE per (path,
     /// modification time, length) for the process, by `read` off the
     /// sensor's own mosaic, and every later develop of the source — a slider
     /// change, a master's bake after its AI denoise — runs the colour

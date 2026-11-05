@@ -191,8 +191,8 @@ pub(super) fn render_frame(
     if hot_sites > 0 {
         println!("mapped {hot_sites} isolated hot pixels stronger than 20 local sigma");
     }
-    // The exposure's noise reading for the colour stage (its model and its
-    // `k`): a property of the exposure, read ONCE per source off the sensor's
+    // The exposure's noise reading for the colour stage (its noise model): a
+    // property of the exposure, read ONCE per source off the sensor's
     // own mosaic — here, before the AI denoise below replaces that mosaic
     // with one whose noise is no longer the sensor's — and kept with the
     // source frame, so a second develop runs the stage's pass alone.
@@ -661,13 +661,12 @@ fn develop_cfa_signed(raw: &rawler::RawImage, dev: &RawDevelop, (colour_nr, read
     }
     let mut v = normalised_mosaic(raw);
     let width = raw.width;
-    let stage = crate::denoise::linear_chroma::scale_of(colour_nr).filter(|_| crate::denoise::linear_chroma::reads(raw));
+    let stage = crate::denoise::linear_chroma::fair_test(colour_nr).filter(|_| crate::denoise::linear_chroma::reads(raw));
     let linear_colour = stage.is_some();
     let mut cell_chroma = None;
-    if let Some(scale) = stage {
-        let rho = |k| crate::denoise::linear_chroma::window(colour_nr, k);
-        cell_chroma = crate::denoise::linear_chroma::filter_mosaic(&mut v, width, raw.height, &config.cfa, stage_wb(raw), scale, rho, reading, crate::denoise::linear_chroma::preview_level(raw.width, raw.height, max_edge), !demosaic)
-            .map(|(_, _, chroma)| chroma);
+    if let Some(test) = stage {
+        cell_chroma = crate::denoise::linear_chroma::filter_mosaic(&mut v, width, raw.height, &config.cfa, stage_wb(raw), test, reading, crate::denoise::linear_chroma::preview_level(raw.width, raw.height, max_edge), !demosaic)
+            .map(|(_, chroma)| chroma);
     }
     let pixels = PixF32::new_with(v, raw.width, raw.height);
     if !demosaic {
