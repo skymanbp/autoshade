@@ -1285,7 +1285,7 @@ pub(super) fn attach_one_zone_as(
                     ("own_before", format!("{own_before:.5}")),
                     ("own_after", format!("{own_after:.5}")),
                     ("drift", format!("{:+.5}", zoned_err - *frame_err)),
-                    ("tol", format!("{:+.5}", attachment.frame_regression_tol)),
+                    ("quant", format!("{:.4}", fit::FIT_QUANT)),
                 ],
             ),
         );

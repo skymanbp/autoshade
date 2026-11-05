@@ -471,7 +471,6 @@ pub(super) fn attach_colour_field(
                     note(report, crate::rationale::keys::FIELD_ZONE_REGRESSED, vec![
                         ("label", label), ("before", format!("{was:.6}")),
                         ("after", format!("{now:.6}")),
-                        ("tol", format!("{:.4}", super::ZONE_GLOBAL_REGRESSION_TOL)),
                     ]);
                     return;
                 }
@@ -496,7 +495,6 @@ pub(super) fn attach_colour_field(
         note(report, crate::rationale::keys::FIELD_ZONE_PINNED, vec![
             ("label", label.clone()), ("before", format!("{was:.6}")),
             ("first", format!("{first:.6}")), ("after", format!("{shipped:.6}")),
-            ("tol", format!("{:.4}", super::ZONE_GLOBAL_REGRESSION_TOL)),
         ]);
     }
     note(report, crate::rationale::keys::FIELD_CELLS_ADMITTED, vec![

@@ -120,6 +120,7 @@ impl AcceptedZone {
                 ("after", format!("{:.3}", self.judged(pixels, tgt_px))),
                 ("frame_before", format!("{frame_before:.5}")),
                 ("frame_after", format!("{frame_after:.5}")),
+                ("quant", format!("{:.4}", fit::FIT_QUANT)),
             ],
         )
     }
@@ -174,6 +175,14 @@ pub(super) fn refuse_shrunk_zones(
             continue;
         }
         let note = accepted[i].shrunk_refusal_note(pixels, tgt_px, baseline, k, frame_before, frame_after);
+        // A refused zone ships none of its controls, so the sentences that
+        // said its colour or tone SHIPPED are withdrawn with it: a note
+        // describes what ships.
+        let label = accepted[i].label.clone();
+        crate::rationale::withdraw_notes(&mut report.recipe.rationale, &mut report.notes, |n| {
+            crate::rationale::keys::ZONE_VOUCHED.contains(&n.key)
+                && n.args.iter().any(|(name, value)| *name == "label" && *value == label)
+        });
         crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes, note);
         accepted.remove(i);
         originals.remove(i);

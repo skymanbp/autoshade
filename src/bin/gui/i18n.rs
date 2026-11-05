@@ -2277,8 +2277,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 警告：参考图与本图的比例不一致——它被裁切过，或者不是同一张。两者都会让两边的分布无法相比，因为裁切会改变统计所覆盖的像素。反推仍按要求做了匹配——结果请视为不可靠。"),
     (" Zoned sky fit unavailable ({e}) — trying the automatic luminance-range fallback.",
         " 分区天空拟合不可用（{e}）——正在尝试自动亮度范围回退。"),
-    (" Multi-region semantic corrections refused after the final comparison: the multi-region frame residual {multi} was no better than the seeded two-region residual {two}, so the byte-identical two-region result was kept. Trialled regions: {regions}.",
-        " 多区域语义校正在最终比较后被拒绝：多区域残差 {multi} 不优于双区域残差 {two}，因此保留字节相同的双区域结果。试验区域：{regions}。"),
+    (" Multi-region semantic corrections refused after the final comparison: the multi-region frame residual {multi} did not earn FIT_QUANT {quant} over the seeded two-region residual {two}, so the byte-identical two-region result was kept. Trialled regions: {regions}.",
+        " 多区域语义校正在最终比较后被拒绝：多区域残差 {multi} 相对双区域残差 {two} 的增益未达到 FIT_QUANT {quant}，因此保留字节相同的双区域结果。试验区域：{regions}。"),
     (" Multi-region semantic segmentation unavailable ({e}) — the historical sky/land pass was used instead.",
         " 多区域语义分割不可用（{e}）——改用历史的天空/地面流程。"),
     (" No semantic region cleared the shared support floor on both frames (up to {n} requested) — the historical sky/land pass was used instead.",
@@ -2350,13 +2350,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
         " 注：{label} 区占原图 {s}% 而占目标图 {t}%——两者构图不同，整体分布残差停留在全局拟合的水平。"),
     (" Zoned {label} correction dropped: zone residual {before} → {after} \
       (needs ≤ {ratio}% of the original, or ≤ {floor} with a ≥ {gain}% \
-      gain); its own pixels read {own_before} → {own_after}, frame-global \
-      drift {drift} (tolerance {tol}).",
-        " 已弃用 {label} 区校正：区残差 {before} → {after}（需 ≤ 原值的 {ratio}%，或 ≤ {floor} 同时增益 ≥ {gain}%）；本区像素 {own_before} → {own_after}，全画面漂移 {drift}（容差 {tol}）。"),
+      gain); its own pixels read {own_before} → {own_after}, a gain that \
+      must reach FIT_QUANT {quant}, and the frame moved {drift} (a guard: it \
+      may rise at most {quant}).",
+        " 已弃用 {label} 区校正：区残差 {before} → {after}（需 ≤ 原值的 {ratio}%，或 ≤ {floor} 同时增益 ≥ {gain}%）；本区像素 {own_before} → {own_after}，增益须达到 FIT_QUANT {quant}；全画面变化 {drift}（全画面最多变差 {quant}）。"),
     (" Zoned {label} atmosphere correction dropped: zone residual {before} → \
       {after} did not satisfy do-no-harm, or its own pixels read {own_before} → \
-      {own_after} with frame-global drift {drift} (tolerance {tol}).",
-        " 已弃用 {label} 区氛围校正：区残差 {before} → {after} 未通过不伤害原则，或本区像素 {own_before} → {own_after}、全画面漂移 {drift}（容差 {tol}）。"),
+      {own_after}, a gain that must reach FIT_QUANT {quant}, or the frame \
+      moved {drift} (a guard: it may rise at most {quant}).",
+        " 已弃用 {label} 区氛围校正：区残差 {before} → {after} 未通过不伤害原则，或本区像素 {own_before} → {own_after}，增益未达到 FIT_QUANT {quant}，或全画面变化 {drift}（全画面最多变差 {quant}）。"),
     (" The {label} zone already matches the target (zone residual \
       {before}) — no correction needed.",
         " {label} 区已与目标匹配（区残差 {before}）——无需校正。"),
@@ -2399,11 +2401,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       budget and \
       disclose a change it did not make.",
         " 边界连续性门丢弃了 {n} 个范围校正：候选边缘为 {before}，预算 {max} 内最大的收缩为 k={k}，其渲染结果与不加该校正的画面逐字节一致——读数 {after}，测得 {transitions} 个交叉，交付的色调顺序回落 {reversal} 亮度（允许 {rev_max}）。无效附加会占用校正预算，并声称做了它并未做的改动。"),
-    (" Range corrections refused after the final boundary pass: the \
-      composed frame residual {after} exceeded the residual {global} this \
-      stage was handed plus tolerance {tol}, so all {n} range \
-      correction(s) were removed.",
-        " 最终边界检查后已拒绝范围校正：合成全画面残差 {after} 超过本阶段接手时的残差 {global} 加容差 {tol}，因此移除了全部 {n} 个范围校正。"),
+    (" Range corrections refused after the final boundary pass: on their \
+      own pixels they read {own_before} → {own_after}, a gain that must reach \
+      FIT_QUANT {quant}, and the composed frame moved {global} → {after} (a \
+      guard: it may rise at most {quant}), so all {n} range correction(s) \
+      were removed.",
+        " 最终边界检查后已拒绝范围校正：其自身像素 {own_before} → {own_after}，增益须达到 FIT_QUANT {quant}；合成全画面 {global} → {after}（全画面最多变差 {quant}），因此移除了全部 {n} 个范围校正。"),
     (" Confidence for this fit includes the {n} accepted range \
       correction(s) (worst band residual {worst}); the final frame residual \
       is {frame}.",
@@ -2459,14 +2462,14 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       solve on the same cell-mean verdict the measured cells take it on.",
         " 颜色场的布局准入：有 {read} 个像素级证据完全读不到的单元位于分割器在两帧里都找到的同一区域内，改按该区域配对来读；其中 {admitted} 个按与已测单元相同的格均值裁定采用了不带结构支持项的求解。"),
     (" The solved colour field was given back: it improved the frame but moved \
-      the {label} zone {before} -> {after}, past the {tol} a zone is ever allowed \
-      to cost (per-zone do-no-harm check).",
-        " 已解出的颜色场被退回：它让整幅画面更接近目标，但把 {label} 分区从 {before} 变成 {after}，超出了一个分区所允许付出的 {tol}（逐分区不使画面变差的检查）。"),
-    (" The solved colour field moved the {label} zone {before} -> {first}, past \
-      the {tol} a zone is ever allowed to cost, so that zone was pinned to its own \
+      the {label} zone {before} -> {after}, and the field may not cost an \
+      attached zone anything (per-zone do-no-harm check).",
+        " 已解出的颜色场被退回：它让整幅画面更接近目标，但把 {label} 分区从 {before} 变成 {after}，而颜色场不允许让已附加的分区变差（逐分区不使画面变差的检查）。"),
+    (" The solved colour field moved the {label} zone {before} -> {first}, a \
+      loss the field may not cause an attached zone, so that zone was pinned to its own \
       render and the field solved again around it: with the field it ships the \
       zone reads {after}.",
-        " 已解出的颜色场把 {label} 分区从 {before} 变成 {first}，超出了一个分区所允许付出的 {tol}，于是把该分区固定在它自己的渲染上，避开它重新求解颜色场：带上最终交付的颜色场，该分区读数为 {after}。"),
+        " 已解出的颜色场把 {label} 分区从 {before} 变成 {first}，而颜色场不允许让已附加的分区变差，于是把该分区固定在它自己的渲染上，避开它重新求解颜色场：带上最终交付的颜色场，该分区读数为 {after}。"),
     (" The solved colour field was given back: rendering it moved the frame \
       {before} -> {after}, away from the target rather than toward it \
       (do-no-harm check).",
@@ -2650,9 +2653,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" {label} correction refused after its boundary shrink to k={k}: at that \
      strength its own residual reads {after} against {before} for the same render \
      without it, with the frame {frame_before} -> {frame_after}; a shrunk \
-     correction ships only while it leaves its zone no worse and the frame within \
-     its allowed drift.",
-     " {label} 校正在边界收缩到 k={k} 之后被拒绝：按该强度，其自身残差为 {after}，同一画面去掉它时为 {before}，画面 {frame_before} -> {frame_after}；收缩后的校正只有在不让自身区域变差、画面不超出允许漂移时才会发出。"),
+     correction ships only while it leaves its zone no worse and the frame guard \
+     holds (the frame may rise at most {quant}).",
+     " {label} 校正在边界收缩到 k={k} 之后被拒绝：按该强度，其自身残差为 {after}，同一画面去掉它时为 {before}，画面 {frame_before} -> {frame_after}；收缩后的校正只有在不让自身区域变差、画面最多变差 {quant} 时才会发出。"),
     (" No zoned {label} correction attached: every control that survived \
       the evidence and quality gates solved to neutral, so the zone \
       residual {before} is left uncorrected.",

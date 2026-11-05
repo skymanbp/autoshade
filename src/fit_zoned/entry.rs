@@ -612,6 +612,7 @@ fn fit_recipe_zoned_multi_inner(
             vec![
                 ("multi", format!("{multi_error:.6}")),
                 ("two", format!("{two_error:.6}")),
+                ("quant", format!("{:.4}", crate::fit::FIT_QUANT)),
                 ("regions", regions_text),
             ],
         );

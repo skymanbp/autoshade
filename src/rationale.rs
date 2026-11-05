@@ -701,6 +701,16 @@ pub mod keys {
         " Zoned {label} colour controls shipped at {share} of the solved move on REGION evidence: the pixel-scale reading withholds hue bands [{hue_bands}], the full move was refused by the target's own 12x8 cell means ({full}), and at this share {converged} of the region moved closer, {diverged} moved away, and {aligned} moved in the direction its own target asks for.";
     pub const ZONE_TONE_VOUCHED_AT_SHARE: &str =
         " Zoned {label} tone controls shipped at {share} of the solved move on REGION evidence: the pixel-scale reading withholds luma ranges [{luma_ranges}], the full move was refused by the target's own 12x8 cell means ({full}), and at this share {converged} of the region moved closer, {diverged} moved away, and {aligned} moved in the direction its own target asks for.";
+    /// The five sentences that say a zone's colour or tone SHIPPED on a
+    /// voucher. A zone refused after its boundary shrink ships none of its
+    /// controls, so these are withdrawn with it (`fit_zoned::accept`).
+    pub const ZONE_VOUCHED: [&str; 5] = [
+        ZONE_COLOUR_VOUCHED_BY_CELLS,
+        ZONE_TONE_VOUCHED_BY_CELLS,
+        ZONE_COLOUR_VOUCHED_BY_PIXELS,
+        ZONE_COLOUR_VOUCHED_AT_SHARE,
+        ZONE_TONE_VOUCHED_AT_SHARE,
+    ];
     /// R36: the carrier is chosen by fidelity to the target — the hard cell's
     /// own residual under each carrier — not by how closely the native render
     /// resembles the raster's; the rendered change stays as a reading.
@@ -778,7 +788,7 @@ pub mod keys {
          strength its own residual reads {after} against {before} for the same \
          render without it, with the frame {frame_before} -> {frame_after}; a \
          shrunk correction ships only while it leaves its zone no worse and the \
-         frame within its allowed drift.";
+         frame guard holds (the frame may rise at most {quant}).";
     pub const ZONE_BOUNDARY_DROPPED: &str =
         " Zoned corrections dropped by the boundary-continuity gate: candidate \
          rim {before} luma, and even shared shrink k=0 left {after} \
@@ -817,12 +827,14 @@ pub mod keys {
     pub const ZONE_DROPPED: &str =
         " Zoned {label} correction dropped: zone residual {before} → {after} \
          (needs ≤ {ratio}% of the original, or ≤ {floor} with a ≥ {gain}% \
-         gain); its own pixels read {own_before} → {own_after}, frame-global \
-         drift {drift} (tolerance {tol}).";
+         gain); its own pixels read {own_before} → {own_after}, a gain that \
+         must reach FIT_QUANT {quant}, and the frame moved {drift} (a guard: it \
+         may rise at most {quant}).";
     pub const ZONE_ATMOSPHERE_DROPPED: &str =
         " Zoned {label} atmosphere correction dropped: zone residual {before} → \
          {after} did not satisfy do-no-harm, or its own pixels read {own_before} → \
-         {own_after} with frame-global drift {drift} (tolerance {tol}).";
+         {own_after}, a gain that must reach FIT_QUANT {quant}, or the frame \
+         moved {drift} (a guard: it may rise at most {quant}).";
     /// R30 batch 1 (R1): the third acceptance arm is the one that changes
     /// what ships, so a correction admitted by it says so — with both
     /// readings it was decided on, and with the ONE safety gate that is
@@ -919,8 +931,8 @@ pub mod keys {
          judge a zone whose share of the two frames differs.";
     pub const REGION_FRAME_REFUSED: &str =
         " Multi-region semantic corrections refused after the final comparison: \
-         the multi-region frame residual {multi} was no better than the seeded \
-         two-region residual {two}, so the byte-identical two-region result was kept. \
+         the multi-region frame residual {multi} did not earn FIT_QUANT {quant} over \
+         the seeded two-region residual {two}, so the byte-identical two-region result was kept. \
          Trialled regions: {regions}.";
     /// The multi-class layer failed (sidecar, manifest, budget, claim). The
     /// historical sky/land route ran INSTEAD and is what the report describes;
@@ -1062,10 +1074,11 @@ pub mod keys {
          budget and \
          disclose a change it did not make.";
     pub const RANGE_FRAME_REFUSED: &str =
-        " Range corrections refused after the final boundary pass: the \
-         composed frame residual {after} exceeded the residual {global} this \
-         stage was handed plus tolerance {tol}, so all {n} range \
-         correction(s) were removed.";
+        " Range corrections refused after the final boundary pass: on their \
+         own pixels they read {own_before} → {own_after}, a gain that must reach \
+         FIT_QUANT {quant}, and the composed frame moved {global} → {after} (a \
+         guard: it may rise at most {quant}), so all {n} range correction(s) \
+         were removed.";
     pub const RANGE_CONFIDENCE: &str =
         " Confidence for this fit includes the {n} accepted range \
          correction(s) (worst band residual {worst}); the final frame residual \
@@ -1141,14 +1154,14 @@ pub mod keys {
     /// wins on the frame and loses the picture.
     pub const FIELD_ZONE_REGRESSED: &str =
         " The solved colour field was given back: it improved the frame but moved \
-         the {label} zone {before} -> {after}, past the {tol} a zone is ever allowed \
-         to cost (per-zone do-no-harm check).";
+         the {label} zone {before} -> {after}, and the field may not cost an \
+         attached zone anything (per-zone do-no-harm check).";
     /// v1.17.0. The first half of that check no longer gives the field back on
     /// its own: the zone is pinned (the solve asked to leave it where the zone
     /// stage put it) and the field solved again, and the check judges that.
     pub const FIELD_ZONE_PINNED: &str =
-        " The solved colour field moved the {label} zone {before} -> {first}, past \
-         the {tol} a zone is ever allowed to cost, so that zone was pinned to its own \
+        " The solved colour field moved the {label} zone {before} -> {first}, a \
+         loss the field may not cause an attached zone, so that zone was pinned to its own \
          render and the field solved again around it: with the field it ships the \
          zone reads {after}.";
     pub const FIELD_REGRESSED: &str =
@@ -1418,6 +1431,23 @@ pub fn render_en(notes: &[Note]) -> String {
 /// never drift. Past [`MAX_NOTES`] the string still grows (it stays the
 /// complete record) and the vec stops; the consumer-side strip rule then
 /// falls back to raw English rather than rendering a partial translation.
+/// Take back every note `withdrawn` selects, from the typed list and from the
+/// rendered rationale (each rendered sentence once, where `push_note` put it):
+/// a note describes what ships, so a step that takes a control back out takes
+/// its sentence with it.
+pub fn withdraw_notes(rationale: &mut String, notes: &mut Vec<Note>, withdrawn: impl Fn(&Note) -> bool) {
+    notes.retain(|note| {
+        if !withdrawn(note) {
+            return true;
+        }
+        let text = render_one(note);
+        if let Some(at) = rationale.find(&text) {
+            rationale.replace_range(at..at + text.len(), "");
+        }
+        false
+    });
+}
+
 pub fn push_note(rationale: &mut String, notes: &mut Vec<Note>, note: Note) {
     rationale.push_str(&render_one(&note));
     if notes.len() < MAX_NOTES {

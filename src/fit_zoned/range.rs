@@ -1747,9 +1747,11 @@ fn attach_band_stage(
                     crate::rationale::keys::RANGE_FRAME_REFUSED,
                     vec![
                         ("n", accepted.len().to_string()),
-                        ("global", format!("{entry_frame_err:.3}")),
-                        ("after", format!("{final_frame_err:.3}")),
-                        ("tol", format!("{RANGE_FRAME_REGRESSION_TOL:+.3}")),
+                        ("global", format!("{entry_frame_err:.5}")),
+                        ("after", format!("{final_frame_err:.5}")),
+                        ("own_before", format!("{own_without:.5}")),
+                        ("own_after", format!("{own_with:.5}")),
+                        ("quant", format!("{:.4}", fit::FIT_QUANT)),
                     ],
                 ),
             );
@@ -2469,19 +2471,38 @@ mod tests {
         );
     }
 
+    /// R19 (v1.18.0): the range set is a LOCAL correction, so after the final
+    /// boundary pass the composed frame is its guard — it may not rise by more
+    /// than FIT_QUANT — and its own gain is read on the range masks' coverage
+    /// (`fit::ships_local`). A post-shrink frame regression past the guard
+    /// reverts the whole stack, and the note prints the readings the law
+    /// made: the set's own pixels before and after, the frame pair, and the
+    /// FIT_QUANT both are read against (the removed per-caller tolerance is
+    /// gone with its "tol" argument). The regression is forced one
+    /// thousandth past the guard; a +0.001 regression, the pin before R19,
+    /// is inside it.
     #[test]
-    fn range_final_frame_ceiling_refuses_a_post_shrink_regression() {
+    fn range_final_frame_ceiling_refuses_a_post_shrink_regression_past_the_guard() {
         let (source, target) = compact_rank_wave_fixture();
         let mut report = neutral_report(&source, &target);
         let global_frame_err = report.err_after;
-        RANGE_FINAL_FRAME_ERR_OVERRIDE.with(|value| value.set(Some(global_frame_err + 0.001)));
+        RANGE_FINAL_FRAME_ERR_OVERRIDE
+            .with(|value| value.set(Some(global_frame_err + fit::FIT_QUANT + 0.001)));
         attach_ranges(&source, &target, &mut report, &[]);
         assert!(report.recipe.masks.is_empty(), "the complete range stack must be reverted");
         assert_eq!(report.err_after, global_frame_err);
-        assert!(report.notes.iter().any(|note| {
-            note.key == crate::rationale::keys::RANGE_FRAME_REFUSED
-                && note.args.iter().any(|(key, value)| *key == "tol" && value == "+0.000")
-        }));
+        let note = report
+            .notes
+            .iter()
+            .find(|note| note.key == crate::rationale::keys::RANGE_FRAME_REFUSED)
+            .unwrap_or_else(|| panic!("the reverted stack must say why: {:?}", report.notes));
+        let arg = |name: &str| {
+            note.args.iter().find(|(key, _)| *key == name).map(|(_, value)| value.clone())
+        };
+        assert_eq!(arg("quant").as_deref(), Some(format!("{:.4}", fit::FIT_QUANT).as_str()));
+        assert_eq!(arg("after").as_deref(), Some(format!("{:.5}", global_frame_err + fit::FIT_QUANT + 0.001).as_str()));
+        assert!(arg("own_before").is_some() && arg("own_after").is_some(), "the set's own reading: {note:?}");
+        assert!(arg("tol").is_none(), "the removed tolerance is not printed: {note:?}");
     }
 
     #[test]
