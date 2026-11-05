@@ -572,8 +572,22 @@ fn free_mask_layer_off_is_byte_identical() {
     }
 }
 
+/// RE-READ for v1.18.0 (DEF-3 + the band floor). This fixture was the
+/// witness of the stop law — tiles meet the ceiling, the sequencer stops and
+/// skips the free masks. Its premise no longer holds, and the fixture is not
+/// edited to restore it: the source is a texture with no energy at sigma
+/// 8 / 16 once its bands are read inside the frame (0.0011 / 0.00026, each
+/// above its quantisation floor — 1.3e-5 / 6.8e-6 on a million-pixel core,
+/// a little higher on this one — so real, and small),
+/// while the target's +20-code patch carries 6x / 35x that. That patch IS
+/// target content no source answers for (R11's case): the frame reads D
+/// 2.611, Atmosphere, the tiles abstain and none meets the ceiling. What it now witnesses is the other side of
+/// the same sequencer: with the ceiling unmet after the tiles, the free-mask
+/// stage IS entered, publishes no stop, and attaches no field mask it
+/// cannot vouch (components refused on share / divergence / footprint).
+/// The stop-after-tiles law has no fixture witness after this re-read.
 #[test]
-fn free_masks_are_skipped_when_the_ceiling_is_met() {
+fn free_masks_are_entered_when_no_tile_meets_the_ceiling() {
     let source = textured_image();
     let mut target = source.to_rgb8();
     for y in EDGE / 2..3 * EDGE / 4 {
@@ -599,15 +613,14 @@ fn free_masks_are_skipped_when_the_ceiling_is_met() {
             field: true, spatial: true, free_masks: true, refine_masks: false, detail: false,
         },
     );
-    let stop = report.notes.iter().find(|note| note.key == crate::rationale::keys::LOCAL_STOP)
-        .unwrap_or_else(|| panic!("missing stop: {}", report.recipe.rationale));
-    assert!(stop.args.iter().any(|(key, value)| *key == "producer" && value == "tiles"),
-        "{:?}", stop.args);
-    assert!(stop.args.iter().any(|(key, value)| *key == "skipped" && value == "free masks"),
-        "{:?}", stop.args);
-    assert_eq!(FREE_MASK_CALLS.with(|calls| calls.get()), 0,
-        "the stopped sequencer entered the free-mask stage");
-    assert!(report.notes.iter().all(|note| note.key != crate::rationale::keys::FIELD_MASK_PROPOSED));
+    assert_eq!(report.mode, fit::FitMode::Atmosphere, "premise: the patch is content no source answers for: {}",
+        report.recipe.rationale);
+    assert!(report.notes.iter().all(|note| note.key != crate::rationale::keys::LOCAL_STOP),
+        "no producer met the ceiling, so nothing stops the sequencer: {}", report.recipe.rationale);
+    assert!(FREE_MASK_CALLS.with(|calls| calls.get()) >= 1,
+        "the unmet ceiling enters the free-mask stage");
+    assert!(report.notes.iter().all(|note| note.key != crate::rationale::keys::FIELD_MASK_PROPOSED),
+        "no component the stage refused is attached: {}", report.recipe.rationale);
     path.remove();
 }
 

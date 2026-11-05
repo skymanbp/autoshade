@@ -8920,9 +8920,13 @@ fn no_shipped_fit_delivers_a_hue_fan_past_the_limit() {
     // 3.83 / 7.03 / 4.54 (the coast's cast refused, no curves ship); the judge's presence
     // -> 14.23 / 0.0 / 3.76 / 12.00 / -1.29; the cell votes or DEF-1 -> the
     // readings above unchanged.
+    // RE-PINNED for the band floor (a band the ranks cannot resolve reads as
+    // empty): 8.35 / 0.0 / 3.76 / 7.03 / -1.29, the worst still the coast
+    // pair, whose shipped curves now deliver 8.35 degrees on 0.608 of the
+    // measurable colour (14.45 with the floor dropped) — 6.65 under FAN_DEG.
     assert!(
-        (worst - 14.45).abs() < 0.5,
-        "the worst delivered fan moved off the measured 14.45°: {worst:.1}"
+        (worst - 8.35).abs() < 0.5,
+        "the worst delivered fan moved off the measured 8.35°: {worst:.1}"
     );
 }
 
@@ -9251,9 +9255,13 @@ fn a_convicted_cast_no_white_balance_takes_back_is_projected_by_value() {
     // 0.0729, the fitted curves fan 23.0 degrees, the projection ships
     // t = 0.744 with the class's spread +3.6 degrees; the white balance the
     // walk meets is refused by the cells (0.228 closer / 0.473 away).
+    // RE-PINNED for the band floor: every dial and every reading above is
+    // unchanged; the recipe's confidence, which reads the structural D, moves
+    // 0.603318 -> 0.603293 (int probe, recipe Debug diffed with the floor
+    // dropped), and with it the hash.
     assert_eq!(
         recipe_fnv(&rep.recipe),
-        0xc496_a041_4287_a50e,
+        0xcfd6_9678_a868_7aff,
         "the projected recipe moved: {}",
         rep.recipe.rationale
     );
@@ -9641,8 +9649,20 @@ fn the_hand_off_walk_meets_white_balances_the_stage_gates_refuse() {
 ///
 /// MUTATION: make `hand_off_wb_step_refused` answer false — the walk counts no
 /// refusal at 1.0.
+///
+/// RE-READ for v1.18.0 (DEF-3). The premise above no longer holds and the
+/// fixture is not edited to restore it: with the band blurs read inside the
+/// frame (DEF-3) the solve keeps no tone slider here, the split is carried by
+/// the blue curve and saturation +4.6 on the untoned frame, and those curves
+/// widen the widest hue class by +3.4 degrees (limit 15): the fan gate does not
+/// convict, the walk is entered 0 times at 1.0 and at 0.65, and the look error
+/// goes 0.0847 -> 0.0590 (DEF-3 reverted: entered, 21 white balances refused).
+/// What the fixture now witnesses is that a brightness split the curves carry
+/// without fanning never reaches the walk, at either strength. The stage
+/// gates' end-to-end reading has no fixture after this re-read; the unit form
+/// above (`search_cast_hand_off` + `hand_off_wb_step_refused`) still pins them.
 #[test]
-fn the_hand_off_walk_meets_the_stage_gates_end_to_end_above_default() {
+fn a_brightness_split_the_curves_carry_without_fanning_never_reaches_the_walk() {
     use super::solve::route;
     use crate::recipe::GradeStrength;
     let (w, h) = (192u32, 160u32);
@@ -9661,13 +9681,14 @@ fn the_hand_off_walk_meets_the_stage_gates_end_to_end_above_default() {
     route::take();
     let rep = fit_recipe_with(&src, &tgt, FitOptions { strength: GradeStrength::new(1.0), provider: None });
     let seen = route::take();
-    assert!(seen.hand_off_entered >= 1, "premise: the fan enters the walk: {seen:?}");
-    assert!(seen.wb_step_refusals >= 1, "the stage's gates refuse a candidate the walk meets: {seen:?}");
-    assert!(rep.err_after <= rep.err_before, "{} -> {}", rep.err_before, rep.err_after);
+    assert_eq!(seen.hand_off_entered, 0, "curves that do not fan never enter the walk: {seen:?}");
+    let fan = projection_arg(&rep, crate::rationale::keys::FIT_NOTE_CAST_ADMITTED_FAN, "fan")
+        .unwrap_or_else(|| panic!("the split ships as admitted curves: {}", rep.recipe.rationale));
+    assert!(fan < FAN_DEG, "the admitted curves clear the limit ({fan})");
+    assert!(ships(rep.err_after, rep.err_before), "{} -> {}", rep.err_before, rep.err_after);
     let _ = fit_recipe_with(&src, &tgt, FitOptions { strength: GradeStrength::new(0.65), provider: None });
     let quiet = route::take();
-    assert!(quiet.hand_off_entered >= 1, "premise at the default: {quiet:?}");
-    assert_eq!(quiet.wb_step_refusals, 0, "at the default the walk reads neither gate: {quiet:?}");
+    assert_eq!(quiet.hand_off_entered, 0, "nor at the default: {quiet:?}");
 }
 
 /// The share search walks from As Shot: the zero end of the path is the

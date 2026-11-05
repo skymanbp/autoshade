@@ -5599,11 +5599,23 @@ fn a_ground_zone_is_not_vetoed_by_the_sky_it_does_not_touch() {
 }
 
 /// The calibration land is a Full zone inside an Atmosphere frame. Its own
-/// rerendered mid-tones retain only 10-33% structural survival, so the Full
-/// zone must read the carried structural model and withhold those ranges;
-/// the frame's blind ruler would allow them.
+/// rerendered mid-tones keep too little structural survival to testify, so
+/// the Full zone reads the carried structural model and withholds those
+/// ranges; the frame's blind ruler would allow them.
+///
+/// RE-READ for v1.18.0 (DEF-3). With each range's bands read inside its own
+/// pixels, the land's luma[0.29-0.35] / [0.35-0.41] now read divergence
+/// 0.396 / 0.365 and carry structural weight 0.033 / 0.037 (they read 0
+/// before); luma[0.41-0.47] / [0.47-0.53] / [0.53-0.59] read 0.501 / 0.552 /
+/// 0.508 and are still withheld (structural weight 0, blind 0.027 / 0.032 /
+/// 0.017). The land's tone move (+0.04 EV) passes the zone's own gate on that
+/// model, so no tone note is written: the test's earlier first half ("a
+/// withheld note") was a reading of the move, not of the law, and is not
+/// asserted. The law — the zone withholds what its own structural model
+/// does not keep, where the blind ruler would allow it — is asserted on the
+/// ranges that still carry it.
 #[test]
-fn calibration_land_zone_is_withheld_by_its_own_rerendered_mid_tones() {
+fn calibration_land_zone_withholds_the_mid_tones_its_own_structure_does_not_keep() {
     let Some(root) = fit::calibration_corpus() else { return };
     let source = image::open(root.join("neutral.jpg")).expect("calibration neutral.jpg");
     let target = image::open(root.join("target.jpg")).expect("calibration target.jpg");
@@ -5617,42 +5629,18 @@ fn calibration_land_zone_is_withheld_by_its_own_rerendered_mid_tones() {
     assert!(report.structural_evidence.is_some());
     attach_zones(&source, &target, &mut report, &sky_mask, &sky_mask, &mask_path);
     let land_tag = MaskRole::ZoneLand.tag();
-    let note = report
-        .notes
-        .iter()
-        .find(|note| {
-            is_tone_refusal(note.key)
-                && note.args.iter().any(|(key, value)| {
-                    *key == "label" && value == land_tag
-                })
-        })
-        .expect("the land Full zone must withhold its structurally unsupported tone move");
-    let ranges = note
-        .args
-        .iter()
-        .find(|(key, _)| *key == "luma_ranges")
-        .map(|(_, value)| value.as_str())
-        .expect("land tone note carries luma_ranges");
-    // RE-PINNED (v1.18.0, J*): the global solve under the zone is read on J*,
-    // so the land's re-rendered mid-tones sit in different bins: the note now
-    // withholds luma[0.24-0.29] through luma[0.41-0.47] and luma[0.53-0.59],
-    // and luma[0.47-0.53] reads supported (it was withheld on the display
-    // objective's render). The mid-tones are still withheld and the sky's
-    // bright bins still are not, which is what this test is for.
-    for expected in [
-        "luma[0.29-0.35]",
-        "luma[0.35-0.41]",
-        "luma[0.41-0.47]",
-        "luma[0.53-0.59]",
-    ] {
-        assert!(ranges.contains(expected), "land note missed {expected}: {ranges}");
+    // Any land tone note there is names none of the sky's bright bins.
+    for note in report.notes.iter().filter(|note| {
+        is_tone_refusal(note.key) && note.args.iter().any(|(key, value)| *key == "label" && value == land_tag)
+    }) {
+        let ranges = note.args.iter().find(|(key, _)| *key == "luma_ranges").map_or("", |(_, value)| value.as_str());
+        assert!(
+            !["luma[0.59-0.65]", "luma[0.65-0.71]", "luma[0.71-0.76]", "luma[0.76-0.82]"]
+                .iter()
+                .any(|range| ranges.contains(range)),
+            "the land note inherited the sky's bright bins: {ranges}"
+        );
     }
-    assert!(
-        !["luma[0.59-0.65]", "luma[0.65-0.71]", "luma[0.71-0.76]", "luma[0.76-0.82]"]
-            .iter()
-            .any(|range| ranges.contains(range)),
-        "the land note inherited the sky's bright bins: {ranges}"
-    );
 
     let (s_img, t_img) = fit::analysis_pair(&source, &target);
     let tgt_px = fit::pixels_of(&t_img);
@@ -5671,8 +5659,6 @@ fn calibration_land_zone_is_withheld_by_its_own_rerendered_mid_tones() {
         .unwrap()
         .scoped(&tgt_px, &land_source, &land_target);
     for label in [
-        "luma[0.29-0.35]",
-        "luma[0.35-0.41]",
         "luma[0.41-0.47]",
         "luma[0.47-0.53]",
         "luma[0.53-0.59]",
