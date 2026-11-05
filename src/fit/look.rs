@@ -37,7 +37,7 @@ pub(crate) fn look_err(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
 ///   (Atmosphere, a structure-blind model), the CIE76 distance between the
 ///   two populations' quantile-matched Lab distributions: per channel the
 ///   mean absolute gap of the two weighted CDFs at the same 21 quantiles
-///   ([`P_CLIP`]-clamped) `T_L` reads on L* (`lightness_cdf_gap`),
+///   ([`P_CLIP`]-clamped) `T_L` reads on L* ([`tonal_err_with_evidence`]),
 ///   on L*, a* and b* each, in that channel's own units. A uniform offset of
 ///   d dE76 moves every quantile by d, so it reads d/100 here exactly as it
 ///   reads d/100 in `E_paired`, paired or not (v1.18.0 R15). The form it
@@ -241,6 +241,29 @@ fn opponent_cdf_gap(la: &[[f32; 3]], wa: &[f32], lb: &[[f32; 3]], wb: &[f32], ch
         gap += (quantile(&ca, q) - quantile(&cb, q)).abs();
     }
     gap / 21.0 * span / 100.0
+}
+
+/// The TONAL ruler a tone stage is held to: `T_L`, the 21-quantile gap of the
+/// two frames' evidence-weighted L*/100 CDFs — the tonal half of `E_dist`
+/// (v1.18.0; display luma601 before, the same mechanism in CIE units). It is
+/// the term a tone stage controls, and so the ruler a tone stage is held to
+/// (2026-10-21): the sliders and the residual curve each ship only where they
+/// leave this reading no worse than they found it. Judging them on the whole
+/// objective charged a correct luma move for the colour-mean drift that
+/// brightening a muted frame toward a vivid target necessarily brings —
+/// drift the stages after it exist to correct — while the lantern street's
+/// wrong +1.65 EV raised the display form of this term 0.0468 → 0.0748 on
+/// its own and needs no other term to be refused. A ruler JUDGES, so it reads
+/// the presence weights as J* does (R11), never the estimation weights. The
+/// tone stages keep this ruler; `E_dist` reads it with the two opponent
+/// channels' gaps beside it (R15).
+pub(crate) fn tonal_err_with_evidence(
+    a: &[[f32; 3]],
+    b: &[[f32; 3]],
+    evidence: &EvidenceModel,
+) -> f32 {
+    let (la, lb): (Vec<[f32; 3]>, Vec<[f32; 3]>) = (a.iter().map(cie_lab).collect(), b.iter().map(cie_lab).collect());
+    lightness_cdf_gap(&la, &evidence.source_presence_weights, &lb, &evidence.target_presence_weights)
 }
 
 /// H_ab, the colour term's WORST band (v1.18.0): per qualifying HSL band,

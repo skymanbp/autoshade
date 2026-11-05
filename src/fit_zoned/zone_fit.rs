@@ -465,7 +465,7 @@ pub(crate) fn zone_err(a: &ZoneMoments, b: &ZoneMoments) -> f32 {
 
 /// The zone-scale TONAL ruler: the mean absolute gap between two zone luma
 /// CDFs ([`zone_luma_cdf`]) at the SAME 21 quantiles the frame metric's tonal
-/// term reads (`fit::look::lightness_cdf_gap`: `i / 20` for `i = 0..=20`,
+/// term reads (`fit::tonal_err_with_evidence`: `i / 20` for `i = 0..=20`,
 /// clamped to [`fit::P_CLIP`]`..1 - P_CLIP`, so the end points are 0.002 and
 /// 0.998), so a zone and its frame are held to one tonal yardstick. That
 /// quantile set is inline in the frame's function rather than exposed, so it

@@ -541,8 +541,8 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // balance the cells had vouched along with the sliders that caused the
     // harm. A stage that renders the frame farther from the target than it
     // found it ships nothing; the stages after it solve from the frame as
-    // it was. Until R20 the ruler was the TONAL term of the objective alone
-    // (T_L, the term the sliders control), because, held to
+    // it was. The ruler is the TONAL term of the terminal's objective — the
+    // term the sliders control (`look::tonal_err_with_evidence`). Held to
     // the whole objective, a correct luma move was charged for the
     // colour-mean drift it brings to a muted frame whose target is vivid
     // (the land-and-sky toy: whole objective 0.1233 → 0.1240 on the sliders
@@ -550,21 +550,13 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // beside), drift the saturation, white-balance and cast stages exist to
     // correct; the lantern street's sliders raised the tonal term itself,
     // 0.0468 → 0.0748, and are refused on it alone.
-    //
-    // R20 (v1.18.0): the sliders are SOLVED on the tone map (it drives the
-    // solve), but they SHIP on J* — R11's principle, estimation weights and
-    // drive terms only drive, J* judges. Judged on T_L alone, the lantern
-    // street's sliders and their backward elimination kept exposure, shadows
-    // and contrast that T_L credited while the frame's per-pixel Lab read
-    // worse by 0.09-0.46 dE (rel1180 msg8 census, the tone rows): T_L is an
-    // L*-quantile distance and cannot see what a tone move does to colour.
-    let tonal_before = look_err_with_evidence(&sp, &tp, &evidence);
+    let tonal_before = look::tonal_err_with_evidence(&sp, &tp, &evidence);
     let mut tone_harm = None;
     {
         let toned = pixels_of(&render::develop_preview(&s_img, &recipe));
-        let err_toned = look_err_with_evidence(&toned, &tp, &evidence);
-        // R8 / R20: the sliders ship only on a J* gain of FIT_QUANT over
-        // their absence (`ships`).
+        let err_toned = look::tonal_err_with_evidence(&toned, &tp, &evidence);
+        // R8: the sliders ship only on a T_L gain of FIT_QUANT over their
+        // absence (`ships`; T_L is J*'s tonal term, in J*'s units).
         if !ships(err_toned, tonal_before) {
             recipe.exposure_ev = base.exposure_ev;
             recipe.contrast = base.contrast;
@@ -576,9 +568,9 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         }
     }
     // R8: the six sliders come out of one joint solve, so each must earn its
-    // own place; the stages after solve from what stays. R20: on J*.
+    // own place on the stage's ruler; the stages after solve from what stays.
     let tonal_of = |r: &EditRecipe| {
-        look_err_with_evidence(&pixels_of(&render::develop_preview(&s_img, r)), &tp, &evidence)
+        look::tonal_err_with_evidence(&pixels_of(&render::develop_preview(&s_img, r)), &tp, &evidence)
     };
     let mut unearned = if tone_harm.is_none() {
         eliminate_unearned(&mut recipe, base, &TONE_SLIDERS, tonal_of)
@@ -670,16 +662,16 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     let mut curve_harm = None;
     if recipe.tone_curve != base.tone_curve {
         let with_curve = pixels_of(&render::develop_preview(&s_img, &recipe));
-        let err_with = look_err_with_evidence(&with_curve, &tp, &evidence);
+        let err_with = look::tonal_err_with_evidence(&with_curve, &tp, &evidence);
         let mut without = recipe.clone();
         without.tone_curve = base.tone_curve.clone();
-        let err_without = look_err_with_evidence(
+        let err_without = look::tonal_err_with_evidence(
             &pixels_of(&render::develop_preview(&s_img, &without)),
             &tp,
             &evidence,
         );
-        // R8 / R20: the curve is solved on the paired tone map and ships
-        // only on a J* gain of FIT_QUANT over its absence, as the sliders.
+        // R8: the curve ships only on a T_L gain of FIT_QUANT over its
+        // absence, as the sliders above (`ships`).
         if !ships(err_with, err_without) {
             recipe.tone_curve = base.tone_curve.clone();
             curve_harm = Some((err_without, err_with));
