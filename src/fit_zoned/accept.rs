@@ -69,8 +69,8 @@ impl AcceptedZone {
     /// colour arm withheld, and that improves; the block is the boundary
     /// ruler's to refuse — R40, [`discontinuity_budget`].)
     ///
-    /// The predicate is do-no-harm, not the k=1 arms. The arms
-    /// ([`zone_accepts`]) ask for a real GAIN, which was established at full
+    /// The predicate is do-no-harm, not the k=1 law. That law
+    /// ([`attach_one_zone`]: FIT_QUANT on the zone's own pixels) asks for a real GAIN, which was established at full
     /// strength and is what the shrink trades away on purpose: a sky
     /// correction negotiated down to k=0.088 that still takes its zone from
     /// 0.040 to 0.038 (the inverted-raster fixture) is the boundary gate

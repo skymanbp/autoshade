@@ -347,7 +347,7 @@ pub struct JointReading {
     /// count collapsing 7 → 4. A "worst bucket must not get worse" veto
     /// would therefore reject the one correct cast in the set and admit the
     /// wrecks. This is the failure this module already recorded from the
-    /// other side (see [`ZONE_ACCEPT_RATIO`]: "a correct blue→gold repaint
+    /// other side (see [`attach_one_zone`]: "a correct blue->gold repaint
     /// migrates band mass, which the worst-band hue term can only read as
     /// damage"), reproduced first-hand on the new reading.
     pub worst: f32,
@@ -373,7 +373,7 @@ pub struct JointReading {
 /// not by position, which is what makes this reading immune to the
 /// composition differences that defeat frame-global distribution matching
 /// (a generative target holding ~3× the sky area, measured — see
-/// [`ZONE_ACCEPT_RATIO`]).
+/// [`attach_one_zone`]).
 pub fn joint_reading(cand: &[[f32; 3]], tgt: &[[f32; 3]]) -> Option<JointReading> {
     let buckets = joint_buckets(cand, tgt);
     joint_reading_from_buckets(&buckets)

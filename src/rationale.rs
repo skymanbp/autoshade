@@ -839,36 +839,23 @@ pub mod keys {
          overall distribution residual stays where the global fit \
          left it.";
     pub const ZONE_DROPPED: &str =
-        " Zoned {label} correction dropped: zone residual {before} → {after} \
-         (needs ≤ {ratio}% of the original, or ≤ {floor} with a ≥ {gain}% \
-         gain); its own pixels read {own_before} → {own_after}, a gain that \
-         must reach FIT_QUANT {quant}, and the frame moved {drift} (a guard: it \
-         may rise at most {quant}).";
+        " Zoned {label} correction dropped: its own pixels read {own_before} → \
+         {own_after}, a gain that must reach FIT_QUANT {quant}, and the frame \
+         moved {drift} (a guard: it may rise at most {quant}); zone residual \
+         {before} → {after}.";
     pub const ZONE_ATMOSPHERE_DROPPED: &str =
-        " Zoned {label} atmosphere correction dropped: zone residual {before} → \
-         {after} did not satisfy do-no-harm, or its own pixels read {own_before} → \
-         {own_after}, a gain that must reach FIT_QUANT {quant}, or the frame \
-         moved {drift} (a guard: it may rise at most {quant}).";
-    /// R30 batch 1 (R1): the third acceptance arm is the one that changes
-    /// what ships, so a correction admitted by it says so — with both
-    /// readings it was decided on, and with the ONE safety gate that is
-    /// known not to discriminate named rather than counted.
-    pub const ZONE_STRICTLY_BETTER: &str =
-        " Zoned {label} correction kept by the strictly-better arm: zone residual {before} \
-         → {after}, an absolute gain past the {gain} floor that the halve-or-land arms \
-         would have dropped, at no cost to the frame ({frame_before} → {frame_after}). \
-         Local quality read texture ratio {texture}; that texture floor is calibrated but \
-         known not to separate every case, so this correction rests on the clipping gate, \
-         the zero-regression frame reading and the boundary gate.";
-    /// 2026-10-22: the fourth acceptance arm, tried after the three moments
-    /// arms, says what it was decided on — the zone's luma quantile gap — and
-    /// the three readings it also demanded, because a moments residual alone
-    /// would print a pair no arm accepts.
-    pub const ZONE_DISTRIBUTION_MATCHED: &str =
-        " Zoned {label} correction accepted on its luma distribution: the quantile gap \
-         to the target fell {before} → {after} (floor {floor}), the frame {frame_before} → \
-         {frame_after}, and the zone moments did not regress ({zone_before} → {zone_after}); \
-         a moments ruler cannot see a contrast-type reshape.";
+        " Zoned {label} atmosphere correction dropped: its own pixels read \
+         {own_before} → {own_after}, a gain that must reach FIT_QUANT {quant} \
+         (and they may not get worse), or the frame moved {drift} (a guard: it \
+         may rise at most {quant}); zone residual {before} → {after}.";
+    /// RULING-1180-int-r5 (b): one law at the zone's acceptance, so a kept
+    /// zone names the readings it was decided on — its own pixels' J* and the
+    /// frame it guards. (It replaced the strictly-better and distribution
+    /// arms' two notes with the arms.)
+    pub const ZONE_SHIPPED_ON_OWN_PIXELS: &str =
+        " Zoned {label} correction kept on its own pixels: they read {own_before} → \
+         {own_after}, a gain of at least FIT_QUANT {quant}, and the frame {frame_before} → \
+         {frame_after} (a guard: it may rise at most {quant}).";
     /// Which frame the residual above was measured on.
     ///
     /// The AI-proposal path solves and scores over the camera's EMBEDDED

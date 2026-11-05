@@ -227,54 +227,37 @@ pub(crate) const BOUNDARY_STEP_FLOOR: f32 = 1.0 / 255.0;
 /// code low (3 x 1 code = 0.0118 ~ ceiling). A value of 2 sits on that
 /// coin flip; 3 does not.
 pub(crate) const BOUNDARY_STEP_SHAPE: f32 = 3.0;
-/// Acceptance: the zone-local error ([`zone_err`]) must fall to ≤ this
-/// fraction of its pre-correction value. The correction is judged on ITS
-/// zone, not on the frame-global `look_err` — measured on the real pair
-/// (2026-07-09, P21 × reimagine-5): the sky correction landed the zone
-/// moments almost exactly on the target's (zone error 0.507 → 0.015) while
-/// the FRAME-global metric moved 0.1768 → 0.1792, because the generative
-/// target holds ~3× more sky area than the source (the composition differs —
-/// no zone repaint can reconcile frame-level distributions) and a correct
-/// blue→gold repaint migrates band mass, which the worst-band hue term can
-/// only read as damage. A frame-global gate therefore vetoes exactly the
-/// correction this module exists to make.
-pub(super) const ZONE_ACCEPT_RATIO: f32 = 0.5;
-/// The relative gate above has no absolute yardstick, and that produced the
-/// R17-era complaint: a zone that was ALREADY matched (sky 0.012 on the
+/// The line that calls a zone matched in its moments ([`zone_err`]). Until
+/// RULING-1180-int-r5 it was also the floor of a moments acceptance arm
+/// beside a relative one (halve the zone error); a zone now ships on its own
+/// pixels' J* alone ([`attach_one_zone`]), and this line is read where a
+/// moments reading still decides (a band set's do-no-harm, the band models'
+/// separation, the range bands' residual). Its origin: the relative gate had
+/// no absolute yardstick, and that produced the R17-era complaint: a zone that was ALREADY matched (sky 0.012 on the
 /// murk-era pair) was "corrected", barely moved, and reported "dropped:
 /// needs ≤ 50%" — reading like a discarded improvement when there was
 /// nothing to improve. Two absolute yardsticks fix that, SPLIT on purpose
 /// (R19 — one shared number either skipped fixable zones or dialled
 /// matched ones): corrections that genuinely work LAND at 0.007–0.015
 /// (this pair's sky 0.076 → 0.007; golden-sky 0.507 → 0.015), so this
-/// figure — just above that landing range — is the ACCEPTANCE floor: a
-/// correction ending at/below it with a real gain is accepted even when
-/// the relative arm alone would refuse (started close, ended matched).
+/// figure is just above that landing range.
 pub(super) const ZONE_MATCHED_ERR: f32 = 0.02;
 /// …while the observed already-matched zones read 0.009–0.012 and every
 /// attempt at them regressed (land 0.009 → 0.029 on the live pair), so
 /// THIS figure — the ceiling of that observed matched domain — is the
 /// SKIP line: at/below it the zone is left alone with an honest "already
-/// matches" note. Zones between the two figures are attempted and judged
-/// by [`zone_accepts`]; nothing is declined untried above the matched
-/// domain.
+/// matches" note. Zones above it are attempted and judged on their own
+/// pixels ([`attach_one_zone`]); nothing is declined untried above the
+/// matched domain.
 pub(super) const ZONE_SKIP_ERR: f32 = 0.012;
 /// `zone_err` lives in LINEAR light, so an absolute line alone means
 /// different things at different zone levels — 0.012 of linear mean is a
 /// hundredth of a stop on a bright sky but most of a stop in deep shadow
 /// (sRGB ≈ 0.12 vs 0.173 zones score zone_err ≈ 0.012 while sitting
-/// 0.9 EV apart; that zone must be FITTED, not declared matched). Both
-/// absolute yardsticks therefore carry this quarter-stop EV companion —
-/// the skip line refuses to declare such a zone matched, and the
-/// acceptance floor refuses to call such a landing matched; the relative
-/// acceptance arm needs no companion because ratios are scale-free.
+/// 0.9 EV apart; that zone must be FITTED, not declared matched). The skip
+/// line therefore carries this quarter-stop EV companion and refuses to
+/// declare such a zone matched.
 pub(super) const ZONE_MATCHED_EV: f32 = 0.25;
-/// The floor-landing acceptance arm must still MOVE the zone — without a
-/// minimum gain, a hairline 0.0201 → 0.0200 "landing" would buy the full
-/// [`ZONE_GLOBAL_REGRESSION_TOL`] drift budget (200× the zone gain) and
-/// overwrite `err_after` with the worse frame number. One fifth of the
-/// starting error is the smallest move worth a mask.
-pub(super) const ZONE_FLOOR_MIN_GAIN: f32 = 0.8;
 /// The frame-level allowance a local correction's do-no-harm grants: the
 /// objective's own rounding, [`fit::FIT_QUANT`] (v1.18.0). It was 0.02 — the
 /// "metric-visible band migration" a frame DISTRIBUTION distance shows when a
@@ -294,53 +277,6 @@ pub(super) const ZONE_GLOBAL_REGRESSION_TOL: f32 = crate::fit::FIT_QUANT;
 /// improvement with a float-noise floor — and was the frame tolerance's 0.02
 /// read in another unit until v1.18.0 named it; the value is unchanged.
 pub(super) const ZONE_DELTA_E_MARGIN: f32 = 0.02;
-/// Smallest ABSOLUTE zone gain the strictly-better arm will buy a mask for
-/// (R30 batch 1). Derivation, in two independent legs that meet at the same
-/// figure:
-///
-/// 1. The one measured instance the arm exists for is the calibration land
-///    zone: 0.078 -> 0.054, an absolute gain of 0.024, with the frame moving
-///    -0.00004 and the quality gates clear. The task book names that 0.024 as
-///    the calibration ANCHOR and asks for the floor to be derived below it and
-///    the derivation disclosed; it is the smallest gain yet observed to be
-///    worth buying, NOT the threshold itself. Reading it as the threshold
-///    would make this arm's strict `<` refuse the very zone it exists for.
-///    n = 1, so the floor is set a factor of two under the anchor rather than
-///    on it -- one sample cannot justify a threshold its own value sits on.
-/// 2. 0.012 is already this module's [`ZONE_SKIP_ERR`], the ceiling of the
-///    observed already-matched domain: a zone anywhere at or below it is
-///    declared matched and left alone. A gain SMALLER than that whole domain
-///    is therefore not worth a bitmap mask (engine-only, a named XMP loss,
-///    a raster per correction) by the module's own yardstick.
-///
-/// It is deliberately a separate constant rather than a reference to
-/// `ZONE_SKIP_ERR`: the two are calibrated from different measurements and
-/// only happen to agree today.
-pub(super) const ZONE_MIN_ABS_GAIN: f32 = 0.012;
-/// The distribution arm's landing line (2026-10-22): the largest zone L*/100
-/// quantile gap to the target ([`super::zone_fit::zone_tonal`], the frame
-/// tonal term's own 21 quantiles, on the mask alphas) a correction may end
-/// at and be called matched in DISTRIBUTION, with the floor arm's real gain
-/// ([`ZONE_FLOOR_MIN_GAIN`]), a still frame and no moments regression.
-///
-/// Derivation, n = 1 pair, and flagged as such (as [`ZONE_MIN_ABS_GAIN`]'s
-/// is): the one measured instance this arm exists for is the neon street's
-/// building (Full, distribution branch), read through this arm's own
-/// disclosure note on a calibration build with the line provisionally at
-/// 0.03: quantile gap 0.0203 -> 0.0135 (display luma), the frame 0.03699 ->
-/// 0.03518, the moments 0.0091 -> 0.0061. The line is set at the next 0.005
-/// step above that landing (0.0015 of headroom) rather than on it — one
-/// sample cannot justify a threshold its own value sits on.
-///
-/// The ruler moved to L*/100 in v1.18.0 (R4: one tone ruler everywhere) and
-/// the line was carried across by MEASUREMENT: on the calibration legs
-/// (p36, p38-p42, the reference pair at three strengths; rel1180 msg5) every
-/// Full zone's reading was taken on both rulers for the same zone pair — 172
-/// zones, before and after each, 344 readings — and L*/100 reads a median
-/// 1.084 times display luma (quartiles 1.019 / 1.148). Within 10 % of 1, so
-/// the line stays 0.015: the transfer would move it less than the reading's
-/// own spread across pairs (per-pair medians 0.97-1.18).
-pub(super) const ZONE_TONAL_MATCHED: f32 = 0.015;
 /// Dilution guard on a Pixel-scale zone's paired tone map (2026-10-22): the
 /// smallest share of the TARGET zone's p10–p90 luma spread, read under the
 /// target's mask alphas, that the paired map, applied to the source zone under

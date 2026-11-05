@@ -96,10 +96,10 @@ pub(super) use limits::{
     BOUNDARY_STEP_FLOOR, BOUNDARY_STEP_SHAPE, ZONE_BOUNDARY_RIM_MAX, ZONE_BOUNDARY_STEP_MAX,
 };
 use limits::{
-    MASK_REFINE_EPSILON, MASK_REFINE_RADIUS, SHIPPED_LAYERS, ZONE_ACCEPT_RATIO, ZONE_ATMOS_EV_LIMIT,
-    ZONE_ATMOS_SAT_LIMIT, ZONE_CLIP_GROWTH, ZONE_EV_LIMIT, ZONE_FLOOR_MIN_GAIN,
-    ZONE_DELTA_E_MARGIN, ZONE_GLOBAL_REGRESSION_TOL, ZONE_MATCHED_ERR, ZONE_MATCHED_EV, ZONE_MIN_ABS_GAIN,
-    ZONE_SAT_LIMIT, ZONE_SKIP_ERR, ZONE_TEXTURE_MAX, ZONE_TEXTURE_MIN, ZONE_TONAL_MATCHED,
+    MASK_REFINE_EPSILON, MASK_REFINE_RADIUS, SHIPPED_LAYERS, ZONE_ATMOS_EV_LIMIT,
+    ZONE_ATMOS_SAT_LIMIT, ZONE_CLIP_GROWTH, ZONE_EV_LIMIT,
+    ZONE_DELTA_E_MARGIN, ZONE_GLOBAL_REGRESSION_TOL, ZONE_MATCHED_ERR, ZONE_MATCHED_EV,
+    ZONE_SAT_LIMIT, ZONE_SKIP_ERR, ZONE_TEXTURE_MAX, ZONE_TEXTURE_MIN,
     ZonedLayerOpts,
 };
 use one_zone::{ZONE_CONFIDENCE_SLOPE, attach_one_zone};
@@ -109,12 +109,12 @@ use rasters::{raster_centroid};
 use regions::{attach_semantic_regions, segment_multiclass_both};
 pub use zone_fit::{ZoneMode};
 pub(crate) use zone_fit::{
-    ZoneMoments, fit_zone_dials, zone_err, zone_lightness_cdf, zone_luma_cdf, zone_moments, zone_sat_step,
+    ZoneMoments, fit_zone_dials, zone_err, zone_luma_cdf, zone_moments, zone_sat_step,
 };
 use zone_fit::{
-    ZONE_VOUCH_SHRINK_STEPS, ZoneAcceptArm, clamp_zone_sat, clamp_zone_sat_for_mode, local_quality,
+    ZONE_VOUCH_SHRINK_STEPS, clamp_zone_sat, clamp_zone_sat_for_mode, local_quality,
     scale_zone_colour, scale_zone_tone, shrink_atmosphere_gains_in, shrink_zone_corrections,
-    zone_accepts, zone_skips, zone_tonal,
+    zone_skips,
 };
 
 /// The zoned fit's source as ONE text, for the source-text gates that read what

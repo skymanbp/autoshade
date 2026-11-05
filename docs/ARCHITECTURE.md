@@ -6313,39 +6313,21 @@ unchanged and was never what was wrong.
 For the step family a reading of ZERO measured crossings is a refusal, never
 a pass — until 2026-08-30 the rim ruler returned `0.000` from an empty
 transition band for every hard raster ever gated, and the gate read that as
-comfortably inside budget. A Full-zone correction then uses the four-arm gate
-(v0.26.1, third arm R30 batch 1, fourth 2026-10-22): halve the zone error, land it at/below an
-absolute matched floor (0.02 of linear-mean error, brightness within a quarter
-stop — the floor lives in scale-dependent linear light, so the EV companion
-rides both absolute yardsticks) with a real ≥20% gain, or be STRICTLY BETTER —
-an absolute zone gain over `ZONE_MIN_ABS_GAIN = 0.012` while the frame-global
-reading does not regress at all. The third arm exists because the first two are
-ratio yardsticks with nothing absolute in them: the calibration land zone
-improved 0.078 → 0.054 with the frame moving −0.00004 and every quality gate
-clear, and was dropped for landing at 69% of its start rather than 50%. It pays
-for that relaxation on the frame side, where zero regression is stricter than
-the semantic route's own `0.02` drift insurance and equal to what the spatial,
-range and free-mask routes already demand; a correction admitted by it carries
-its own typed disclosure naming both readings and naming `ZONE_TEXTURE_MIN` as
-the one safety gate known NOT to discriminate. The fourth arm, tried last so
-every verdict the first three reach is unchanged, judges the zone's luma
-DISTRIBUTION: `zone_err` is a moments ruler (linear channel means plus chroma)
-and cannot see a contrast-type reshape that leaves the mean alone, while the EV
-companion forces such a zone to be fitted. `zone_tonal` reads the mean absolute
-gap between the zone's and the target's luma CDFs at the frame tonal term's own
-21 quantiles, on the mask alphas, and the arm buys the zone when that gap lands
-at or under `ZONE_TONAL_MATCHED = 0.015` with the floor arm's ≥20% gain, the
-frame does not regress at all and the moments do not regress. Calibrated on
-one pair (n = 1, flagged): the neon street's building, refused by all three
-moments arms (0.0091 → 0.0061, EV gap 0.31) while the frame improved
-0.03699 → 0.03518, reads a quantile gap 0.0203 → 0.0135; it discloses itself
-with `ZONE_DISTRIBUTION_MATCHED`. An Atmosphere zone uses
-zone-local do-no-harm instead, and the absolute arm never reaches it. A zone already inside the
+comfortably inside budget. A zone then ships on ONE law (v1.18.0, RULING-1180-int-r5):
+`fit::ships_local` — it earns `FIT_QUANT` of J* on its own present pixels, and the
+frame is a guard that may rise by at most `FIT_QUANT`; an Atmosphere zone also
+may not leave its own pixels worse. The kept zone says so with
+`ZONE_SHIPPED_ON_OWN_PIXELS` (own before / after, frame before / after). The
+four moments arms it replaced (halve the zone error, land at the 0.02 matched
+floor, be strictly better by 0.012 with a still frame, land the luma
+distribution) were the display objective's readings ANDed with that law; on the
+night pair's land they refused a band whose own J* gained 11.7 `FIT_QUANT` while
+the frame improved. The texture gate (`ZONE_TEXTURE_MIN`) stays: it is a
+structure do-no-harm, not an objective. A zone already inside the
 observed matched DOMAIN (≤0.012, same EV companion) is left alone with an
 honest "already matches" note instead of being dialled, regressed, and
-reported as a dropped improvement; zones between the two yardsticks are
-always attempted — the skip line and the acceptance floor are split
-constants precisely so nothing fixable is declined untried. The GUI's **反推 / Reverse-fit** action drives the
+reported as a dropped improvement; every zone above it is attempted, so
+nothing fixable is declined untried. The GUI's **反推 / Reverse-fit** action drives the
 same two entry points (`fit_recipe`, `fit_recipe_zoned`) and lands the
 result as an editable variant.
 

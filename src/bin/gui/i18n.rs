@@ -2359,17 +2359,16 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       overall distribution residual stays where the global fit \
       left it.",
         " 注：{label} 区占原图 {s}% 而占目标图 {t}%——两者构图不同，整体分布残差停留在全局拟合的水平。"),
-    (" Zoned {label} correction dropped: zone residual {before} → {after} \
-      (needs ≤ {ratio}% of the original, or ≤ {floor} with a ≥ {gain}% \
-      gain); its own pixels read {own_before} → {own_after}, a gain that \
-      must reach FIT_QUANT {quant}, and the frame moved {drift} (a guard: it \
-      may rise at most {quant}).",
-        " 已弃用 {label} 区校正：区残差 {before} → {after}（需 ≤ 原值的 {ratio}%，或 ≤ {floor} 同时增益 ≥ {gain}%）；本区像素 {own_before} → {own_after}，增益须达到 FIT_QUANT {quant}；全画面变化 {drift}（全画面最多变差 {quant}）。"),
-    (" Zoned {label} atmosphere correction dropped: zone residual {before} → \
-      {after} did not satisfy do-no-harm, or its own pixels read {own_before} → \
-      {own_after}, a gain that must reach FIT_QUANT {quant}, or the frame \
-      moved {drift} (a guard: it may rise at most {quant}).",
-        " 已弃用 {label} 区氛围校正：区残差 {before} → {after} 未通过不伤害原则，或本区像素 {own_before} → {own_after}，增益未达到 FIT_QUANT {quant}，或全画面变化 {drift}（全画面最多变差 {quant}）。"),
+    (" Zoned {label} correction dropped: its own pixels read {own_before} → \
+      {own_after}, a gain that must reach FIT_QUANT {quant}, and the frame \
+      moved {drift} (a guard: it may rise at most {quant}); zone residual \
+      {before} → {after}.",
+        " 已弃用 {label} 区校正：本区像素 {own_before} → {own_after}，增益须达到 FIT_QUANT {quant}；全画面变化 {drift}（全画面最多变差 {quant}）；区残差 {before} → {after}。"),
+    (" Zoned {label} atmosphere correction dropped: its own pixels read \
+      {own_before} → {own_after}, a gain that must reach FIT_QUANT {quant} \
+      (and they may not get worse), or the frame moved {drift} (a guard: it \
+      may rise at most {quant}); zone residual {before} → {after}.",
+        " 已弃用 {label} 区氛围校正：本区像素 {own_before} → {own_after}，增益未达到 FIT_QUANT {quant}（且不得变差），或全画面变化 {drift}（全画面最多变差 {quant}）；区残差 {before} → {after}。"),
     (" The {label} zone already matches the target (zone residual \
       {before}) — no correction needed.",
         " {label} 区已与目标匹配（区残差 {before}）——无需校正。"),
@@ -2836,23 +2835,10 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" How much of that reference population has no counterpart in the source was not \
       measured: no cross-image correspondence field was available for this pair.",
         " 该参照人口中有多少在源图中没有对应，本次未测量：这一对没有可用的跨图对应场。"),
-    (" Zoned {label} correction kept by the strictly-better arm: zone residual {before} \
-      → {after}, an absolute gain past the {gain} floor that the halve-or-land arms \
-      would have dropped, at no cost to the frame ({frame_before} → {frame_after}). \
-      Local quality read texture ratio {texture}; that texture floor is calibrated but \
-      known not to separate every case, so this correction rests on the clipping gate, \
-      the zero-regression frame reading and the boundary gate.",
-        " {label} 区校正由「严格更优」臂保留：区内残差 {before} → {after}，绝对收益越过 {gain} 下限，\
-         而「减半或落位」两臂本会丢弃它；帧上没有付出代价（{frame_before} → {frame_after}）。\
-         局部质量读数为纹理比 {texture}；该纹理下限虽经标定，但已知无法区分所有情形，\
-         故此校正实际依托的是裁切门、零回归的帧读数与边界门。"),
-    (" Zoned {label} correction accepted on its luma distribution: the quantile gap \
-      to the target fell {before} → {after} (floor {floor}), the frame {frame_before} → \
-      {frame_after}, and the zone moments did not regress ({zone_before} → {zone_after}); \
-      a moments ruler cannot see a contrast-type reshape.",
-        " {label} 区校正按亮度分布接受：与目标的分位数差距 {before} → {after}（下限 {floor}），\
-         全画面 {frame_before} → {frame_after}，区内矩未变差（{zone_before} → {zone_after}）；\
-         以矩为尺读不出对比度式的形状改变。"),
+    (" Zoned {label} correction kept on its own pixels: they read {own_before} → \
+      {own_after}, a gain of at least FIT_QUANT {quant}, and the frame {frame_before} → \
+      {frame_after} (a guard: it may rise at most {quant}).",
+        " {label} 区校正按本区像素保留：本区像素 {own_before} → {own_after}，增益至少达到 FIT_QUANT {quant}；全画面 {frame_before} → {frame_after}（全画面最多变差 {quant}）。"),
     (" Cross-image correspondence measured (DIFT): {cov}% of the frame has a confident counterpart in the target (median confidence {med}); full zone fits weight pairs by it and read shifted content at its corresponded position.",
         " 跨图对应已测量（DIFT）：画面 {cov}% 在目标中有可信对应（中位置信 {med}）；完整区拟合按其为像素对加权，并在对应位置读取被移动的内容。"),
     (" Cross-image correspondence unavailable ({e}) — the content-divergent estimators ran without it.",

@@ -301,7 +301,7 @@ pub(super) fn attach_zones_with_divergence(
     // the bounded-drift insurance ONLY (R23-6 honesty fix). It used to be
     // `report.err_after` itself, read and overwritten in place — which made
     // the number handed to the user, and the confidence derived from it, the
-    // very frame-global metric this module's own [`ZONE_ACCEPT_RATIO`] doc
+    // very frame-global metric this module's own [`attach_one_zone`] doc
     // proves cannot judge a zone (0.507 → 0.015 zone-local while the frame
     // moved 0.1768 → 0.1792). Drift still has to be measured incrementally,
     // so the value still has to be carried; it is simply no longer the same

@@ -2742,9 +2742,8 @@ fn a_region_that_costs_the_frame_is_refused_by_the_boundary_gate() {
     let first = run(None, "region-frame-tol-a");
     let has = |report: &fit::FitReport, key: &str| report.notes.iter().any(|n| n.key == key);
     assert!(
-        has(&first, crate::rationale::keys::ZONE_BOUNDARY_PASSED)
-            && !has(&first, crate::rationale::keys::ZONE_STRICTLY_BETTER),
-        "premise: the region passes the gate on an arm that does not read the frame: {}",
+        has(&first, crate::rationale::keys::ZONE_BOUNDARY_PASSED),
+        "premise: the region passes the gate: {}",
         first.recipe.rationale
     );
     let landed = first.err_after;
@@ -3911,61 +3910,40 @@ fn run_strictly_better_zone(
     (accepted, report, frame_before, frame_err)
 }
 
-/// R30 batch 1, END TO END: a correction the two ratio arms refuse, that
-/// the absolute arm buys, must ATTACH and must SAY SO. The unit test
-/// above pins the predicate; this one pins that the stage publishes its
-/// own verdict — the free-mask lesson, where a disclosure that never
-/// reached the note table was a disclosure that was not made. Deleting
-/// the note push leaves the predicate tests green and fails here.
-///
-/// v1.18.0 (DEF-3): read on the (sat 4, ev 3.5, warm 1.4) strictly-better
-/// pair, the existing fixture whose zone the third arm keeps on a frame
-/// GAIN (`a_strictly_better_zone_whose_frame_gains_on_j_star_is_kept_by_its_arm`).
-/// The (4, 8, 1) pair it read before no longer carries the premise "the
-/// frame must not have paid": its zone correction takes the zone 0.6725 ->
-/// 0.5645 but flattens the lower half's checker the target keeps, the
-/// structural term reading 0.088 -> 0.698 (0.610 with the bands still
-/// truncated), so the frame moves 0.34850 -> 0.35503 (+0.00652) where it
-/// moved 0.34849 -> 0.34620 before; the R19 guard refuses that, rightly.
+/// RE-READ (RULING-1180-int-r5 (b), one law at the zone's acceptance). This
+/// was the end-to-end pin of the strictly-better arm (R30 batch 1): a
+/// correction the two ratio arms refused and the absolute arm bought had to
+/// attach and say so. The arms are retired; what it witnesses under J* is
+/// the one law's own verdict, END TO END: a zone that earns FIT_QUANT on its
+/// own pixels with the frame inside its guard ATTACHES and its note carries
+/// the readings it was decided on (the free-mask lesson: a disclosure that
+/// never reaches the note table was not made). Read on the (sat 4, ev 3.5,
+/// warm 1.4) pair (DEF-3: the (4, 8, 1) pair's correction flattens the
+/// checker the target keeps, the structural term 0.088 -> 0.698, and the
+/// R19 guard refuses it, rightly).
 #[test]
-fn a_strictly_better_zone_attaches_and_publishes_its_own_arm() {
+fn a_zone_that_earns_on_its_own_pixels_attaches_and_names_the_readings_it_shipped_on() {
     let (accepted, report, frame_before, frame_after) =
         run_strictly_better_zone("strictly-better-attach", 4.0, 3.5, 1.4, false);
-    let zone = accepted.unwrap_or_else(|| {
-        panic!("the absolute arm must attach this zone: {}", report.recipe.rationale)
+    accepted.unwrap_or_else(|| {
+        panic!("a zone that earns on its own pixels attaches: {}", report.recipe.rationale)
     });
-    // The regime, re-derived from what the stage actually measured — not
-    // hard-coded numbers, so the test states the REASON it is the third
-    // arm's case rather than restating a build's floats.
-    assert!(
-        zone.after > zone.before * ZONE_ACCEPT_RATIO,
-        "premise: the halving arm must refuse ({} -> {})",
-        zone.before,
-        zone.after
-    );
-    assert!(zone.after > ZONE_MATCHED_ERR, "premise: the floor arm must refuse");
-    assert!(
-        zone.before - zone.after > ZONE_MIN_ABS_GAIN,
-        "premise: the absolute gain must clear the floor"
-    );
-    assert!(frame_after <= frame_before, "premise: the frame must not have paid");
     let note = report
         .notes
         .iter()
-        .find(|n| n.key == crate::rationale::keys::ZONE_STRICTLY_BETTER)
-        .unwrap_or_else(|| {
-            panic!("the third arm attached in silence: {}", report.recipe.rationale)
-        });
-    // The disclosure must carry the readings it was DECIDED on, and it
-    // must name the texture gate rather than counting it as a defence.
-    for key in ["label", "before", "after", "gain", "frame_before", "frame_after", "texture"] {
-        assert!(note.args.iter().any(|(k, v)| *k == key && !v.is_empty()), "{key}: {note:?}");
-    }
+        .find(|n| n.key == crate::rationale::keys::ZONE_SHIPPED_ON_OWN_PIXELS)
+        .unwrap_or_else(|| panic!("the zone attached in silence: {}", report.recipe.rationale));
+    let (own_before, own_after) = (note_number(note, "own_before"), note_number(note, "own_after"));
     assert!(
-        report.recipe.rationale.contains("known not to separate every case"),
-        "the known-indiscriminate texture gate must not be counted as a defence: {}",
-        report.recipe.rationale
+        fit::ships(own_after, own_before),
+        "the note's own readings are a FIT_QUANT gain: {own_before} -> {own_after}"
     );
+    assert!(
+        (note_number(note, "frame_before") - frame_before).abs() <= 1e-5
+            && (note_number(note, "frame_after") - frame_after).abs() <= 1e-5,
+        "the note's frame pair is the guard's: {note:?} vs {frame_before} -> {frame_after}"
+    );
+    assert!(frame_after - frame_before <= fit::FIT_QUANT, "premise: inside the frame guard");
     assert!(!report.recipe.masks.is_empty(), "an accepted zone leaves its mask attached");
 }
 
@@ -4008,35 +3986,35 @@ fn a_colour_move_the_cells_do_not_vouch_leaves_the_tone_to_ship_alone() {
         report.recipe.rationale
     );
     assert!(
-        report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_STRICTLY_BETTER),
-        "the tone ships through the absolute arm: {}",
+        report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_SHIPPED_ON_OWN_PIXELS),
+        "the tone ships on its own pixels: {}",
         report.recipe.rationale
     );
 }
 
-/// R30 batch 1, the MERGE-TIME pin: an ATMOSPHERE zone is judged by its
-/// own do-no-harm arm and never by the three-arm Full predicate. The
-/// supervising review's hand mutation — routing `ZoneMode::Atmosphere`
-/// through `zone_accepts` — left every existing test green, because an
-/// improving zone attached either way and the named atmosphere test only
-/// proves both modes refuse a worsening zone. This pins the observable
-/// differences: the SAME pair the absolute arm buys in Full mode must,
-/// as an atmosphere zone, attach WITHOUT the strictly-better disclosure
-/// (under the mutation the Full arm claims it and the note fires), and
-/// its report must name the Atmosphere mode.
+/// RE-READ (RULING-1180-int-r5 (b)). This pinned that an ATMOSPHERE zone
+/// was judged by its own do-no-harm arm and never by the Full moments
+/// predicate (no strictly-better note). Under one law both modes ship on
+/// their own pixels; what it witnesses now is that an improving atmosphere
+/// zone attaches on that law — its own pixels gain FIT_QUANT and so do no
+/// harm — says so with the one note, and names the Atmosphere mode.
 #[test]
-fn an_improving_atmosphere_zone_keeps_do_no_harm_and_never_the_absolute_arm() {
+fn an_improving_atmosphere_zone_ships_on_its_own_pixels_and_names_its_mode() {
     let (accepted, report, _frame_before, _frame_after) =
         run_strictly_better_zone("atmos-do-no-harm", 4.0, 8.0, 1.0, true);
     assert!(
         accepted.is_some(),
-        "an improving atmosphere zone attaches by do-no-harm: {}",
+        "an improving atmosphere zone attaches: {}",
         report.recipe.rationale
     );
+    let note = report
+        .notes
+        .iter()
+        .find(|n| n.key == crate::rationale::keys::ZONE_SHIPPED_ON_OWN_PIXELS)
+        .unwrap_or_else(|| panic!("the one law names its readings: {}", report.recipe.rationale));
     assert!(
-        report.notes.iter().all(|n| n.key != crate::rationale::keys::ZONE_STRICTLY_BETTER),
-        "the absolute arm's disclosure must never fire for an atmosphere zone: {}",
-        report.recipe.rationale
+        note_number(note, "own_after") <= note_number(note, "own_before"),
+        "its own pixels did no harm: {note:?}"
     );
     assert!(
         report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_MODE_ATMOSPHERE),
@@ -4045,77 +4023,15 @@ fn an_improving_atmosphere_zone_keeps_do_no_harm_and_never_the_absolute_arm() {
     );
 }
 
-/// REWRITTEN (v1.18.0, J*). This pair was the end-to-end "price" case of
-/// the strictly-better arm: a zone that improves by a LARGE absolute margin
-/// (well past the floor) while both ratio arms refuse it, and that the
-/// display objective read as costing the frame +0.00738, inside the old 0.02
-/// drift, so only the arm's own frame condition dropped it. On J* (per-pixel
-/// CIE76 on local means where pixels pair) the same move reads as a frame
-/// GAIN, 0.38180 -> 0.26230: the frame cost was the display objective's
-/// distribution reading, not the photo's. So the premise is gone, and the
-/// same fixture now pins the other side of the arm: a strictly-better zone
-/// whose frame gains FIT_QUANT and more is KEPT by that arm, says so with
-/// the readings it was decided on, and the distribution arm (whose landing
-/// line it is far from) does not claim it. The arm's frame condition itself
-/// stays pinned at predicate level
-/// (`the_strictly_better_arm_charges_an_absolute_floor_and_a_still_frame`).
-#[test]
-fn a_strictly_better_zone_whose_frame_gains_on_j_star_is_kept_by_its_arm() {
-    let (sat, ev, warm) = (4.0, 3.5, 1.4);
-    let (accepted, report, frame_before, frame_after) =
-        run_strictly_better_zone("strictly-better-frame-cost", sat, ev, warm, false);
-    let zone = accepted.unwrap_or_else(|| {
-        panic!("a strictly-better zone that gains the frame attaches: {}", report.recipe.rationale)
-    });
-    assert!(
-        fit::ships(frame_after, frame_before),
-        "premise: the frame gains FIT_QUANT ({frame_before} -> {frame_after})"
-    );
-    assert!(
-        zone.before - zone.after > ZONE_MIN_ABS_GAIN
-            && zone.after > zone.before * ZONE_ACCEPT_RATIO
-            && zone.after > ZONE_MATCHED_ERR,
-        "premise: only the strictly-better arm can take it ({} -> {})",
-        zone.before,
-        zone.after
-    );
-    assert!(
-        report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_STRICTLY_BETTER),
-        "the arm that kept it says so: {}",
-        report.recipe.rationale
-    );
-    // The distribution arm's landing line stays out of reach: the zone's
-    // luma quantile gap starts far outside matched territory.
-    let tonal_before = {
-        let src = strictly_better_fixture(sat, ev, warm, false);
-        let tgt = strictly_better_fixture(sat, ev, warm, true);
-        let (s_img, t_img) = fit::analysis_pair(&src, &tgt);
-        let half = GrayImage::from_fn(96, 96, |_, y| image::Luma([if y >= 48 { 255u8 } else { 0 }]));
-        let cur = fit::pixels_of(&render::develop_preview(&s_img, &crate::recipe::EditRecipe::default()));
-        zone_tonal(
-            &zone_luma_cdf(&cur, &mask_weights(&half, s_img.width(), s_img.height())),
-            &zone_luma_cdf(&fit::pixels_of(&t_img), &mask_weights(&half, t_img.width(), t_img.height())),
-        )
-    };
-    assert!(
-        tonal_before > 10.0 * ZONE_TONAL_MATCHED,
-        "premise: the distribution arm's landing line is out of reach ({tonal_before})"
-    );
-    assert!(
-        !report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_DISTRIBUTION_MATCHED),
-        "nor may the distribution arm claim it: {}",
-        report.recipe.rationale
-    );
-}
-
 /// R39. A SHRUNK correction is held to do-no-harm against the render
-/// without it, not to the k=1 arms. Pinned on the two verdicts that
-/// separate the predicates: a hairline move toward the target — every arm
-/// refuses it, the gain being under `ZONE_MIN_ABS_GAIN` and nowhere near
-/// a halving — is KEPT, and the same-sized move away is REFUSED. The
-/// frame condition is R19's guard (a rise of at most FIT_QUANT), read at its edge.
+/// without it, not to the k=1 law. Pinned on the two verdicts that
+/// separate the predicates: a hairline move toward the target is KEPT, and
+/// the same-sized move away is REFUSED. The frame condition is R19's guard
+/// (a rise of at most FIT_QUANT), read at its edge. (RULING-1180-int-r5
+/// (b): the premise that every k=1 moments arm refused the hairline gain
+/// went with those arms.)
 #[test]
-fn a_shrunk_correction_is_held_to_do_no_harm_not_to_the_arms() {
+fn a_shrunk_correction_is_held_to_do_no_harm_not_to_the_k1_law() {
     let n = 64;
     let grey = |v: f32| vec![[v, v, v]; n];
     let zone = AcceptedZone {
@@ -4151,18 +4067,6 @@ fn a_shrunk_correction_is_held_to_do_no_harm_not_to_the_arms() {
     let earned = fb - 2.0 * fit::FIT_QUANT;
     assert!(zone.still_accepted(&toward, &target, without, fb, earned), "a hairline gain does no harm");
     assert!(!zone.still_accepted(&away, &target, without, fb, earned), "a move away from the target is harm");
-    // The k=1 arms refuse the very correction the predicate keeps — with
-    // the true EV gap of that render, not a convenient one — which is
-    // what separates "still accepted" from "accepted again".
-    let ev = {
-        let t = zone_moments(&target, &zone.target_weights);
-        let a = zone_moments(&toward, &zone.source_weights);
-        (t.luma_lin.max(1e-6) / a.luma_lin.max(1e-6)).log2().abs()
-    };
-    assert!(
-        zone_accepts(without, judged_toward, ev, fb, fb, UNMATCHED_TONAL).is_none(),
-        "premise: every k=1 arm refuses a hairline gain ({without} -> {judged_toward}, ev {ev})"
-    );
     // The frame side at its edge: a gain, a tie and a rise up to FIT_QUANT
     // are inside the guard; a rise of FIT_QUANT and a hair more is not.
     assert!(zone.still_accepted(&toward, &target, without, fb, fb - fit::FIT_QUANT - 1e-4), "a frame gain is inside the guard");
@@ -4259,196 +4163,6 @@ fn refuse_shrunk_zones_judges_each_zone_against_the_shipped_set_without_it() {
         .find(|n| n.key == crate::rationale::keys::ZONE_SHRUNK_REFUSED)
         .expect("the refusal is a typed note");
     assert!(note.args.iter().any(|(k, v)| *k == "label" && v == "right"), "{note:?}");
-}
-
-/// R18: the acceptance predicate's two RATIO regimes, pinned on the live
-/// numbers and isolated from the R30 absolute arm by a frame reading the
-/// absolute arm always refuses (`frame_after > frame_before`). Halving
-/// accepts (0.076 → 0.007) — and the relative arm must carry that verdict
-/// ALONE above the floor (0.500 → 0.200), so deleting it fails here. The
-/// floor arm accepts a sub-50% correction that lands matched with a real
-/// gain (0.035 → 0.018) but refuses a hairline move that would only buy
-/// the drift budget (0.021 → 0.0205). Neither ratio arm rescues a
-/// correction that stays high (0.507 → 0.280) or lands above the floor at
-/// sub-50% (0.040 → 0.025) — and with the frame paying, nothing does.
-#[test]
-fn the_zone_gate_halves_or_lands_matched() {
-    // A frame that got WORSE: the third arm can never fire here, so every
-    // verdict below is the ratio arms' own.
-    let (fb, fa) = (0.100f32, 0.101f32);
-    assert_eq!(
-        zone_accepts(0.076, 0.007, 0.1, fb, fa, UNMATCHED_TONAL),
-        Some(ZoneAcceptArm::Halved),
-        "a real halving must pass"
-    );
-    assert_eq!(
-        zone_accepts(0.500, 0.200, 0.9, fb, fa, UNMATCHED_TONAL),
-        Some(ZoneAcceptArm::Halved),
-        "the relative arm alone must pass"
-    );
-    assert_eq!(
-        zone_accepts(0.035, 0.018, 0.1, fb, fa, UNMATCHED_TONAL),
-        Some(ZoneAcceptArm::MatchedFloor),
-        "landing under the matched floor must pass"
-    );
-    // The (skip, floor] band is ATTEMPTED, not declined (R19): a zone
-    // starting between 0.012 and 0.02 can still earn its correction.
-    assert_eq!(
-        zone_accepts(0.016, 0.010, 0.1, fb, fa, UNMATCHED_TONAL),
-        Some(ZoneAcceptArm::MatchedFloor),
-        "the between-yardsticks band must stay winnable"
-    );
-    assert!(
-        zone_accepts(0.021, 0.0205, 0.1, fb, fa, UNMATCHED_TONAL).is_none(),
-        "a hairline move must not buy the drift budget"
-    );
-    assert!(
-        zone_accepts(0.507, 0.280, 0.1, fb, fa, UNMATCHED_TONAL).is_none(),
-        "a large remaining error must refuse"
-    );
-    assert!(
-        zone_accepts(0.040, 0.025, 0.1, fb, fa, UNMATCHED_TONAL).is_none(),
-        "sub-50% above the floor must refuse"
-    );
-    // The floor arm calls a landing "matched" only when its BRIGHTNESS
-    // matches too — a dark zone can score 0.018 while a stop away.
-    assert!(
-        zone_accepts(0.035, 0.018, 0.9, fb, fa, UNMATCHED_TONAL).is_none(),
-        "an EV-far landing is not matched"
-    );
-}
-
-/// R30 batch 1: the strictly-better arm, pinned on the instance it was
-/// built from — the calibration/island `land` zone, measured on this
-/// build at zone residual 0.078 → 0.054 with the frame moving -0.00004,
-/// texture ratio 1.004 and zero clipped-share growth. Both ratio arms
-/// refuse it (0.054 / 0.078 = 0.69 > 0.50; 0.054 is far above the 0.020
-/// floor); the absolute arm buys it because the gain is 0.024 and the
-/// frame did not pay. Deleting the arm fails the first assertion.
-#[test]
-fn the_strictly_better_arm_buys_a_gain_the_ratio_arms_refuse() {
-    // The frame improved by the measured -0.00004.
-    let (fb, fa) = (0.09330f32, 0.09326f32);
-    assert_eq!(
-        zone_accepts(0.078, 0.054, 0.1, fb, fa, UNMATCHED_TONAL),
-        Some(ZoneAcceptArm::StrictlyBetter),
-        "the land instance is exactly what this arm exists for"
-    );
-    // …and it really is the THIRD arm doing it. Asked with the frame
-    // PAYING — the one input only the third arm reads — the very same zone
-    // readings are refused, so neither ratio arm can be what accepted
-    // them. Stated behaviourally rather than by restating the two ratio
-    // inequalities on literals, which asserts nothing a compiler could
-    // not fold away.
-    assert!(
-        zone_accepts(0.078, 0.054, 0.1, fb, fb + 1e-4, UNMATCHED_TONAL).is_none(),
-        "premise: neither ratio arm accepts these readings"
-    );
-    // An unchanged frame is "no cost" too — the condition is <=, not <.
-    assert_eq!(
-        zone_accepts(0.078, 0.054, 0.1, fb, fb, UNMATCHED_TONAL),
-        Some(ZoneAcceptArm::StrictlyBetter),
-        "an unchanged frame is not a cost"
-    );
-    // The arm is absolute, not relative: a big zone that improves by the
-    // same absolute margin is bought on the same evidence.
-    assert_eq!(
-        zone_accepts(0.500, 0.470, 0.9, fb, fa, UNMATCHED_TONAL),
-        Some(ZoneAcceptArm::StrictlyBetter),
-        "the arm is an ABSOLUTE yardstick"
-    );
-}
-
-/// R30 batch 1: the two prices of that arm, each pinned on its own.
-/// (a) the gain must clear [`ZONE_MIN_ABS_GAIN`] — a move smaller than
-/// the whole already-matched domain does not earn a bitmap mask; (b) the
-/// FRAME may not pay, and this is STRICTER than the semantic route's
-/// [`ZONE_GLOBAL_REGRESSION_TOL`], so relaxing the arm back to that
-/// tolerance fails here. Both are the mutations the batch pins.
-#[test]
-fn the_strictly_better_arm_charges_an_absolute_floor_and_a_still_frame() {
-    let (fb, fa) = (0.09330f32, 0.09326f32);
-    // (a) exactly at the floor is NOT past it: the comparison is strict.
-    assert!(
-        zone_accepts(0.078, 0.078 - ZONE_MIN_ABS_GAIN, 0.1, fb, fa, UNMATCHED_TONAL).is_none(),
-        "a gain equal to the floor is not past it"
-    );
-    assert!(
-        zone_accepts(0.078, 0.070, 0.1, fb, fa, UNMATCHED_TONAL).is_none(),
-        "a 0.008 gain is under the floor"
-    );
-    // …and the line itself, pinned from the other side: a gain a hair
-    // PAST the floor is already bought. With the assertion above, the
-    // boundary is fixed exactly, and the measured land gain (twice the
-    // floor — see the constant's own derivation) is nowhere near it.
-    assert_eq!(
-        zone_accepts(0.078, 0.078 - ZONE_MIN_ABS_GAIN - 1e-4, 0.1, fb, fa, UNMATCHED_TONAL),
-        Some(ZoneAcceptArm::StrictlyBetter),
-        "a gain a hair past the floor is already bought"
-    );
-    // (b) a frame that regressed by ANY amount refuses — including one
-    // well inside the semantic route's own drift tolerance.
-    assert!(
-        zone_accepts(0.078, 0.054, 0.1, 0.09330, 0.09331, UNMATCHED_TONAL).is_none(),
-        "the arm never lets the frame pay"
-    );
-    assert!(
-        zone_accepts(0.078, 0.054, 0.1, 0.09330, 0.09330 + ZONE_GLOBAL_REGRESSION_TOL * 0.5, UNMATCHED_TONAL)
-            .is_none(),
-        "half the semantic drift tolerance is still the frame paying"
-    );
-}
-
-/// R30 batch 1: Atmosphere zones keep their own do-no-harm arm. The
-/// absolute-gain arm has no calibration on a bounded atmosphere move, so
-/// it must not reach that mode — an Atmosphere zone that got worse stays
-/// refused however still the frame is.
-#[test]
-fn the_absolute_arm_never_reaches_an_atmosphere_zone() {
-    // The Atmosphere branch is `accepted_after <= accepted_before`, and
-    // this is the reading it must refuse: a zone that got worse.
-    let (before, after) = (0.078f32, 0.090f32);
-    assert!(after > before, "premise: the atmosphere zone got worse");
-    // The Full predicate would also refuse this one (no gain at all),
-    // which is what makes the two modes agree here; the mode split is
-    // pinned behaviourally by the fixture tests.
-    assert!(zone_accepts(before, after, 0.1, 0.09330, 0.09326, UNMATCHED_TONAL).is_none());
-}
-
-/// The tonal pair the moments-arm pins pass [`zone_accepts`]: a quantile gap
-/// of a whole unit, the most two [0, 1] luma distributions can differ by, so
-/// the fourth arm can never fire and every verdict above is the moments
-/// arms' own.
-const UNMATCHED_TONAL: (f32, f32) = (1.0, 1.0);
-
-/// 2026-10-22: the fourth arm, DistributionMatched, on the readings it was
-/// built for — the neon street's building, whose moments every other arm
-/// refuses (0.00911 -> 0.00609 is not halved; the EV gap 0.3104 is over the
-/// floor arm's companion; a 0.003 gain is under the absolute floor) while
-/// the frame improved 0.036988 -> 0.035177. Each of the four conditions is
-/// pinned failing on its own, and an earlier arm still wins first.
-#[test]
-fn the_distribution_arm_buys_a_reshape_the_moments_arms_cannot_see() {
-    let (zb, za, ev, fb, fa) = (0.00911f32, 0.00609f32, 0.3104f32, 0.036988f32, 0.035177f32);
-    let matched = ZONE_TONAL_MATCHED;
-    let landed = (2.0 * matched, matched);
-    assert!(
-        zone_accepts(zb, za, ev, fb, fa, UNMATCHED_TONAL).is_none(),
-        "premise: no moments arm accepts the building"
-    );
-    assert_eq!(zone_accepts(zb, za, ev, fb, fa, landed), Some(ZoneAcceptArm::DistributionMatched));
-    // (1) the landing: a gap a hair over the line is not matched.
-    assert!(zone_accepts(zb, za, ev, fb, fa, (2.0 * matched, matched + 1e-4)).is_none(), "over the line");
-    // (2) the real gain: under the line but by less than a fifth.
-    assert!(zone_accepts(zb, za, ev, fb, fa, (matched, 0.9 * matched)).is_none(), "a hairline gain");
-    // (3) the frame may not pay, by any amount.
-    assert!(zone_accepts(zb, za, ev, fb, fb + 1e-5, landed).is_none(), "the frame paid");
-    // (4) the moments may not regress.
-    assert!(zone_accepts(zb, zb + 1e-5, ev, fb, fa, landed).is_none(), "the moments regressed");
-    // An earlier arm still wins first wherever it already buys the zone.
-    assert_eq!(zone_accepts(0.076, 0.007, 0.1, fb, fa, landed), Some(ZoneAcceptArm::Halved));
-    assert_eq!(zone_accepts(0.035, 0.018, 0.1, fb, fa, landed), Some(ZoneAcceptArm::MatchedFloor));
-    assert_eq!(zone_accepts(0.078, 0.054, 0.1, fb, fa, landed), Some(ZoneAcceptArm::StrictlyBetter));
 }
 
 /// R19: the SKIP/floor split itself, pinned — setting the skip back to
@@ -4683,7 +4397,7 @@ fn zoned_orchestration_attaches_the_sky_mask_and_improves_the_zone() {
     // verdict any more. The old line was
     // `confidence = (1 - zoned_err * 6).clamp(0.25, 0.95)`, which on this
     // fixture reports a number derived from a metric the module's own
-    // ZONE_ACCEPT_RATIO doc proves cannot see the zone. It now comes from
+    // attach_one_zone doc proves cannot see the zone. It now comes from
     // the accepted zones, and says so.
     assert!(
         report.recipe.rationale.contains("Confidence for this fit comes from"),

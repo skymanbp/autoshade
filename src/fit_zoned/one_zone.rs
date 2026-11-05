@@ -14,8 +14,15 @@ pub(super) const ZONE_CONFIDENCE_SLOPE: f32 = 5.0;
 /// Fit + gate ONE zone; returns its verdict when the correction was kept.
 /// The zone is measured on a fresh render of the CURRENT recipe (including
 /// any zone already attached), so corrections stack the way the engine
-/// renders them. Judged by the ZONE-LOCAL error (see [`ZONE_ACCEPT_RATIO`]
-/// for the measured reason the frame-global metric cannot be the judge);
+/// renders them. Judged on the zone's OWN population (`fit::ships_local`,
+/// the frame a guard) because the frame-global reading cannot be the judge —
+/// measured on the real pair (2026-07-09, P21 x reimagine-5): the sky
+/// correction landed the zone moments almost exactly on the target's (zone
+/// error 0.507 -> 0.015) while the FRAME-global metric moved 0.1768 ->
+/// 0.1792, because the generative target holds ~3x more sky area than the
+/// source (the composition differs — no zone repaint can reconcile
+/// frame-level distributions) and a correct blue->gold repaint migrates band
+/// mass, which the worst-band hue term can only read as damage.
 /// `frame_err` carries the running frame-global look distance IN and OUT.
 /// Semantic zones use it for bounded-drift insurance; range bands require a
 /// neutral-or-better composed frame. It is deliberately not the report's own
@@ -1107,7 +1114,6 @@ pub(super) fn attach_one_zone_as(
     // remeasurement below read a third.
     let m_after = zone_moments(&zoned_px, &zw_source);
     let zone_after = zone_err(&m_after, &mt);
-    let ev_after = (mt.luma_lin.max(1e-6) / m_after.luma_lin.max(1e-6)).log2().abs();
     let quality = local_quality(&cur_px, &zoned_px, sw, s_img.width(), s_img.height());
     if quality.passes() {
         crate::rationale::push_note(
@@ -1171,34 +1177,17 @@ pub(super) fn attach_one_zone_as(
     } else {
         zone_after
     };
-    // The distribution arm's ruler (2026-10-22): the zone's luma quantile gap
-    // to the target, read on the zone's POPULATION — the mask alphas `sw`/`tw`,
-    // as the dilution guard above reads it, not the robust-composed weights
-    // that trim exactly the target pixels a narrow tone map fails to reach.
-    // R4 (v1.18.0): on L*/100, the frame's own tone unit.
-    let tonal = (mode == ZoneMode::Full).then(|| {
-        let target_cdf = zone_lightness_cdf(tgt_eff, tw);
-        (
-            zone_tonal(&zone_lightness_cdf(&cur_px, sw), &target_cdf),
-            zone_tonal(&zone_lightness_cdf(&zoned_px, sw), &target_cdf),
-        )
-    });
-    let arm = match mode {
-        ZoneMode::Full => zone_accepts(
-            accepted_before,
-            accepted_after,
-            ev_after,
-            *frame_err,
-            zoned_err,
-            tonal.expect("read for every Full zone"),
-        ),
-        // Atmosphere keeps its own do-no-harm arm: a bounded atmosphere move
-        // is judged only on not making its zone worse, and the absolute-gain
-        // arm has no calibration there.
-        ZoneMode::Atmosphere => {
-            (accepted_after <= accepted_before).then_some(ZoneAcceptArm::AtmosphereDoNoHarm)
-        }
-    };
+    // ONE law at the zone's acceptance (RULING-1180-int-r5 (b)): R19's
+    // `fit::ships_local` alone. The four moments arms it used to be ANDed
+    // with (halve the zone error, land it matched, be strictly better by
+    // 0.012, land the luma distribution — 2026-07 to 2026-10-22, the display
+    // objective's readings) were a second objective; on the night pair's
+    // land the upper band's own J* read 0.15212 -> 0.12528 (11.7 FIT_QUANT)
+    // with the frame improving, and the moments arm refused it (its tone-only
+    // luma residual 0.024 -> 0.019 neither halved nor landed). An Atmosphere
+    // zone keeps its do-no-harm, read in the same units: its own pixels may
+    // not get worse. `ships_local`'s gain implies that today; it is stated so
+    // a change to that law cannot drop the do-no-harm with it.
     // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
     // E_paired + H_ab (`report.evidence.local`): S is read where the question
     // is structure, a local correction cannot change which pixels pair, its
@@ -1208,58 +1197,29 @@ pub(super) fn attach_one_zone_as(
     // earns FIT_QUANT on its own present pixels; the frame is a guard.
     let own_before = super::accept::own_reading(report, &cur_px, tgt_px, sw, tw);
     let own_after = super::accept::own_reading(report, &zoned_px, tgt_px, sw, tw);
-    if arm.is_some() && fit::ships_local(own_after, own_before, zoned_err, *frame_err) {
-        // The strictly-better arm is the one that changes what ships, so it
-        // says so — with the two readings it was decided on, in the zone's
-        // own unit and the frame's. Without this a reader cannot tell a
-        // correction that halved from one that was admitted by the R30
-        // relaxation (the free-mask lesson: a disclosure that never reaches
-        // the note table is a disclosure that was not made).
-        if arm == Some(ZoneAcceptArm::StrictlyBetter) {
-            crate::rationale::push_note(
-                &mut report.recipe.rationale,
-                &mut report.notes,
-                crate::rationale::Note::new(
-                    crate::rationale::keys::ZONE_STRICTLY_BETTER,
-                    vec![
-                        ("label", label.to_string()),
-                        ("before", format!("{accepted_before:.3}")),
-                        ("after", format!("{accepted_after:.3}")),
-                        ("gain", format!("{ZONE_MIN_ABS_GAIN:.3}")),
-                        ("frame_before", format!("{:.5}", *frame_err)),
-                        ("frame_after", format!("{zoned_err:.5}")),
-                        ("texture", format!("{:.3}", quality.texture_ratio)),
-                    ],
-                ),
-            );
-        }
-        // The fourth arm says so too, with the ruler it was decided on: a
-        // moments reading alone would print a residual no arm accepts.
-        if arm == Some(ZoneAcceptArm::DistributionMatched)
-            && let Some((tonal_before, tonal_after)) = tonal
-        {
-            crate::rationale::push_note(
-                &mut report.recipe.rationale,
-                &mut report.notes,
-                crate::rationale::Note::new(
-                    crate::rationale::keys::ZONE_DISTRIBUTION_MATCHED,
-                    vec![
-                        ("label", label.to_string()),
-                        ("before", format!("{tonal_before:.4}")),
-                        ("after", format!("{tonal_after:.4}")),
-                        ("floor", format!("{ZONE_TONAL_MATCHED:.3}")),
-                        ("frame_before", format!("{:.5}", *frame_err)),
-                        ("frame_after", format!("{zoned_err:.5}")),
-                        ("zone_before", format!("{accepted_before:.4}")),
-                        ("zone_after", format!("{accepted_after:.4}")),
-                    ],
-                ),
-            );
-        }
+    let do_no_harm = mode == ZoneMode::Full || own_after <= own_before;
+    if do_no_harm && fit::ships_local(own_after, own_before, zoned_err, *frame_err) {
+        // The law that kept it says so, with the readings it was decided on:
+        // the zone's own pixels and the frame it guards.
+        crate::rationale::push_note(
+            &mut report.recipe.rationale,
+            &mut report.notes,
+            crate::rationale::Note::new(
+                crate::rationale::keys::ZONE_SHIPPED_ON_OWN_PIXELS,
+                vec![
+                    ("label", label.to_string()),
+                    ("own_before", format!("{own_before:.5}")),
+                    ("own_after", format!("{own_after:.5}")),
+                    ("frame_before", format!("{:.5}", *frame_err)),
+                    ("frame_after", format!("{zoned_err:.5}")),
+                    ("quant", format!("{:.4}", fit::FIT_QUANT)),
+                ],
+            ),
+        );
         // The running frame-global value advances so the NEXT zone's drift
         // budget is measured from here — but neither `err_after` nor
         // `confidence` is written from it any more (R23-6): see the comment
-        // in [`attach_zones`] and this module's own [`ZONE_ACCEPT_RATIO`]
+        // in [`attach_zones`] and this function's own doc ([`attach_one_zone`]) for the
         // proof that this number cannot judge a zone.
         *frame_err = zoned_err;
         Some(AcceptedZone {
@@ -1287,14 +1247,11 @@ pub(super) fn attach_one_zone_as(
                 },
                 vec![
                     ("label", label.to_string()),
-                    // The pair the verdict was decided on: with colour
-                    // withheld and tone kept that is the luma-only residual,
-                    // not the whole-zone one an accepted zone records.
+                    // The zone's moments, a disclosure: with colour withheld
+                    // and tone kept the luma-only residual, as the accepted
+                    // zone records it.
                     ("before", format!("{accepted_before:.3}")),
                     ("after", format!("{accepted_after:.3}")),
-                    ("ratio", format!("{:.0}", ZONE_ACCEPT_RATIO * 100.0)),
-                    ("floor", format!("{ZONE_MATCHED_ERR:.3}")),
-                    ("gain", format!("{:.0}", (1.0 - ZONE_FLOOR_MIN_GAIN) * 100.0)),
                     ("own_before", format!("{own_before:.5}")),
                     ("own_after", format!("{own_after:.5}")),
                     ("drift", format!("{:+.5}", zoned_err - *frame_err)),
