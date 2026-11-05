@@ -265,7 +265,16 @@ the profile off (v1.17.0). A sidecar AutoShade itself wrote is read by what it
 carries while its lens keys are as AutoShade wrote them (v1.17.1): those keys
 may be the older Lightroom sidecar's that the save merged into, so the
 develop's own lens profile is used; change the lens switch in Lightroom and
-the change is obeyed. The manual Distortion, Vignetting and CA sliders are
+the change is obeyed. Since v1.18.0 the save writes the lens switch itself —
+on while the develop renders the lens profile's distortion or vignetting
+correction, off when it carries the profile with both switched off — because
+Lightroom places every mask in the frame its own switch names: merged over a
+Lightroom sidecar that had the switch off, the photo and its masks were drawn
+without the correction the develop had rendered. When the photo has an Adobe
+lens profile, Lightroom corrects the vignetting with that profile rather than
+with the camera data this app uses, so the sidecar's `asr:NotCarried` line
+names the vignetting as this engine's; without one it names the whole lens
+correction, as before. The manual Distortion, Vignetting and CA sliders are
 not the profile and are never touched by that switch.
 
 A strength set away from 100 changes what the sidecar says about the profile
@@ -733,15 +742,36 @@ The tone stage reads every paired pixel since 2026-10-21, not only the
 near-grey ones: on a street whose grey pixels are the shadow walls the target
 crushes, the grey-only map asked for contrast 100 and took the whole frame's
 shadows with it. The tone stage and the residual tone curve each answer for themselves too,
-on the tonal reading (the luma-distribution term of the look error, the one
-thing a tone move controls): rendered, if the tone sliders leave the frame's
-tones farther from the target's than the untouched source's, they ship nothing
-and the later stages solve from the untoned frame; if the curve on top of the
-sliders reads worse than the sliders alone, the sliders ship without it. Each
+on the tonal reading (the lightness-distribution term of the look error, the
+one thing a tone move controls): rendered, the tone sliders ship only if they
+bring the frame's tones closer to the target's than the untouched source's by
+more than the fit's own rounding — otherwise they ship nothing and the later
+stages solve from the untoned frame — and the curve on top of the sliders
+ships only if it brings them closer still by the same margin. Each
 refusal has its own sentence. Before this the
 only such check was the one at the very end, which returned the WHOLE recipe
 to neutral — on a lantern-lit street the white balance the cells had vouched
 was thrown out with the tone move that had harmed the frame.
+
+**How the fit decides a result is closer** (v1.18.0). The fit measures the
+distance to the target as a colour difference: pixel by pixel, on lightly
+smoothed neighbourhoods so that grain and sharpening do not count, wherever
+the two pictures show the same thing; as the difference between their
+lightness and colour distributions wherever they do not (a repainted sky, an
+invented texture) — in the same units, so one step of colour costs the same
+either way. Every stage and every control has to bring the picture closer by
+more than the fit's own rounding (the smallest difference it makes by
+rounding its own sliders); a smaller gain counts as no difference, and no
+difference goes to the simpler recipe, so a control that earned nothing is
+set back to zero and the report names it. A local correction — a zone, a
+band, a tile, a mask — is judged on its own pixels, and the rest of the
+picture only checks that it did not get worse by more than that rounding.
+Before the recipe ships it is
+rendered once more at full size, the way the export renders it, and the
+report prints that reading beside the preview's and the untouched starting
+point's; the fit starts from the picture the export would make of the
+untouched recipe, so an untouched recipe reads as identical to its own
+export.
 
 **When a region was repainted rather than re-graded.** An AI variant that
 recolours the sky and leaves its layout alone breaks the pixel-to-pixel
