@@ -98,7 +98,17 @@ pub(crate) fn look_err_with_evidence(
     b: &[[f32; 3]],
     evidence: &EvidenceModel,
 ) -> f32 {
-    if evidence.identifiability <= 1e-5 {
+    // DEF-4: the "unidentifiable" sentinel is a statement about the
+    // POPULATION, not about estimation: it is returned only when no pixel is
+    // present on a side (presence mass 0), so there is nothing to judge. Low
+    // estimation identifiability (every range withheld as evidence) says the
+    // controls cannot be ESTIMATED from these pixels; it is not a verdict
+    // that present pixels look alike, and read as one it scored a source and
+    // a render whose ground IS the target both 1.0, so the tie went to
+    // absence (R11: estimation weights only drive). Identifiability stays
+    // with the estimation.
+    let mass = |w: &[f32]| w.iter().map(|v| v.max(0.0) as f64).sum::<f64>();
+    if mass(&evidence.source_presence_weights) <= 0.0 || mass(&evidence.target_presence_weights) <= 0.0 {
         return 1.0;
     }
     let terms = look_terms(a, b, evidence);

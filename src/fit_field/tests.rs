@@ -440,7 +440,7 @@ fn field_refuses_without_evidence() {
     unmeasurable.identifiability = 1e-6;
     assert!(
         LocalField::solve(&current, &target, w, h, &unmeasurable).is_none(),
-        "identifiability <= 1e-5 must refuse, exactly as look_err_with_evidence does",
+        "identifiability <= 1e-5 must refuse: the field solve is an estimation (DEF-4)",
     );
     let mut massless = evidence.clone();
     massless.source_weights = vec![0.0; (w * h) as usize];

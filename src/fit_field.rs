@@ -107,8 +107,10 @@ pub(crate) const ITERATIONS: usize = 90;
 /// [`ITERATIONS`] steps. The loop normally stops earlier, when the set of
 /// parameters pinned on a bound repeats.
 const ACTIVE_SET_PASSES: usize = 40;
-/// The refusal line of `fit::look_err_with_evidence`, reused verbatim: a pair the
-/// objective calls unmeasurable gets no field either.
+/// The estimation's refusal line: a pair whose ranges carry no evidence to
+/// estimate a control from gets no field. The field solve IS an estimation, so
+/// this stays here; since DEF-4 the objective's own sentinel reads presence
+/// (no pixel present), not identifiability.
 const IDENTIFIABILITY_MIN: f32 = 1e-5;
 const LN2: f64 = std::f64::consts::LN_2;
 
