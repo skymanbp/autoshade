@@ -1531,6 +1531,39 @@ mod tests {
         assert_eq!(report.recipe.masks.iter().filter(|m| m.role == MaskRole::ZoneSky && !m.components.is_empty()).count(), 2);
     }
 
+    /// A seam is charged to the side that is off (RULING-1180-int-r5 (c)). A
+    /// land zone (the inside, the mover) beside a sky shipped 38 codes under
+    /// its target: the land's correction lands exactly on its own target,
+    /// and the render's step across the contour moves AWAY from the target's
+    /// by the land's approach — the gap is the sky's shortfall. That land is
+    /// not refused for the sky's debt; one that overshoots its target by ten
+    /// codes is, for its overshoot; and beside a correct sky a land that
+    /// leaves its target is charged as before. MUTATION: the attribution
+    /// dropped (`cell_gaps` for the hard family) -> the correct land is
+    /// refused at the contour, as it was on the night pair.
+    #[test]
+    fn a_correct_land_beside_an_under_corrected_sky_is_not_refused_for_the_skys_debt() {
+        let (w, h) = (192usize, 96usize);
+        let land = |i: usize| i / w >= h / 2;
+        let frame = |sky: f32, ground: f32| -> Vec<[f32; 3]> {
+            (0..w * h).map(|i| if land(i) { [ground; 3] } else { [sky; 3] }).collect()
+        };
+        let rims = vec![(0..w * h).map(|i| if land(i) { 1.0f32 } else { 0.0 }).collect::<Vec<f32>>()];
+        let size = (w as u32, h as u32);
+        let target = frame(0.60, 0.30);
+        let verdict = |before: &[[f32; 3]], after: &[[f32; 3]]| {
+            let (b, a) = (target_steps(&target, before, &rims, size, None), target_steps(&target, after, &rims, size, None));
+            (boundary_does_not_regress(&b, &a), mean_regression(&b, &a))
+        };
+        let (dark_sky_before, dark_sky_landed) = (frame(0.45, 0.20), frame(0.45, 0.30));
+        let (passes, worse) = verdict(&dark_sky_before, &dark_sky_landed);
+        assert!(passes, "a land that lands on its target is not charged the sky's shortfall: {worse:?}");
+        let (passes, worse) = verdict(&dark_sky_before, &frame(0.45, 0.34));
+        assert!(!passes, "a land ten codes past its target is charged its overshoot: {worse:?}");
+        let (passes, worse) = verdict(&frame(0.60, 0.30), &frame(0.60, 0.34));
+        assert!(!passes && (worse[0] - 0.04).abs() < 1e-3, "beside a correct sky the mover carries the whole gap: {worse:?}");
+    }
+
     /// The single zone the bands replace takes its own account with it: its
     /// "correction attached" and quality verdict leave the notes AND the
     /// persisted rationale, while another zone's notes stay. MUTATION: drop

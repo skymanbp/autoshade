@@ -295,6 +295,11 @@ pub(super) struct CellSums {
     target_sq: [f32; 4],
     /// The rendered step's Lab a*/b* part, for the sub-zone trial rulers.
     ab: [f32; 2],
+    /// Hard family: the render against `reference` at each crossing's INSIDE
+    /// foot (`[luma, R, G, B]`) and its Lab a*/b* — the mover's own side,
+    /// which [`cell_charged_gaps`] attributes the step's gap to.
+    own: [f32; 4],
+    own_ab: [f32; 2],
 }
 
 impl CellSums {
@@ -310,6 +315,14 @@ impl CellSums {
         }
         self.ab[0] += ab[0];
         self.ab[1] += ab[1];
+    }
+
+    fn add_own(&mut self, own: [f32; 4], own_ab: [f32; 2]) {
+        for k in 0..4 {
+            self.own[k] += own[k];
+        }
+        self.own_ab[0] += own_ab[0];
+        self.own_ab[1] += own_ab[1];
     }
 }
 
@@ -385,6 +398,40 @@ fn cell_gaps(cells: &[CellSums]) -> Vec<[f32; 3]> {
             let mean = cell.rendered.map(|v| v / n);
             let chroma = (cell.ab[0] / n).hypot(cell.ab[1] / n) / 100.0;
             [mean[0].abs(), mean[1..].iter().fold(0.0f32, |m, v| m.max(v.abs())), chroma]
+        })
+        .collect()
+}
+
+/// A seam is charged to the side that is off (RULING-1180-int-r5 (c)): the
+/// sub-zone contour ruler's reading of [`cell_gaps`]' sums, each coordinate
+/// of a cell's mean step gap `g = (render - target)_inside - (render -
+/// target)_outside` charged only for the part the MOVER's side explains —
+/// its own mean residual at the inside foot `a`, clipped to `[0, g]`
+/// (`|clamp(a, min(0, g), max(0, g))|`). A trial moves the inside (the zone
+/// the bands replace); the outside is the zone beside it, shipped before and
+/// unchanged by the trial, so the part of the gap its residual carries is
+/// its debt, and refusing the mover for it leaves both sides wrong. A mover
+/// that lands on its target is charged nothing; one that overshoots is
+/// charged its overshoot; one alone against a correct neighbour is charged
+/// the whole gap, as before. Measured on the night pair's land bands (int-r5,
+/// both starts): at the contour the render's sky foot sat 52.3 / 54.5 / 72.6
+/// (master) and 52.8 / 52.8 / 61.1 (raw) codes under the target's, unchanged
+/// by the trial, while the land foot moved toward its target (master -24.7 /
+/// -23.0 / -42.3 -> -21.6 / -20.2 / -39.8); the gap grew by the land's
+/// approach and the ruler refused the land for the sky's shortfall.
+fn cell_charged_gaps(cells: &[CellSums]) -> Vec<[f32; 3]> {
+    let charged = |a: f32, g: f32| a.clamp(g.min(0.0), g.max(0.0)).abs();
+    cells
+        .iter()
+        .map(|cell| {
+            if cell.pixels == 0 {
+                return [0.0; 3];
+            }
+            let n = cell.pixels as f32;
+            let (gap, own) = (cell.rendered.map(|v| v / n), cell.own.map(|v| v / n));
+            let k: [f32; 4] = std::array::from_fn(|c| charged(own[c], gap[c]));
+            let ab = [0, 1].map(|c| charged(cell.own_ab[c] / n, cell.ab[c] / n));
+            [k[0], k[1].max(k[2]).max(k[3]), ab[0].hypot(ab[1]) / 100.0]
         })
         .collect()
 }
@@ -1284,6 +1331,16 @@ fn boundary_line_steps(
             [disc(rendered, &lab_a) - disc(reference, &lab_a), disc(rendered, &lab_b) - disc(reference, &lab_b)],
         );
         cells[cell].crossings += 1;
+        let (lab_in, lab_ref) = (lab(&rendered[i_in]), lab(&reference[i_in]));
+        cells[cell].add_own(
+            [
+                luma(&rendered[i_in]) - luma(&reference[i_in]),
+                rendered[i_in][0] - reference[i_in][0],
+                rendered[i_in][1] - reference[i_in][1],
+                rendered[i_in][2] - reference[i_in][2],
+            ],
+            [lab_in[1] - lab_ref[1], lab_in[2] - lab_ref[2]],
+        );
         out.push(CrossingSample {
             luma: introduced,
             luma_frozen,
@@ -1370,7 +1427,9 @@ pub(crate) fn rim_cell_gaps(
 }
 
 /// [`rim_cell_gaps`]' hard-family counterpart: the render's cross-contour
-/// step against `reference`'s, per cell ([`boundary_line_steps`]).
+/// step against `reference`'s, per cell ([`boundary_line_steps`]), charged to
+/// the inside — the mover — for the part its own side explains
+/// ([`cell_charged_gaps`]).
 pub(crate) fn step_cell_gaps(
     reference: &[[f32; 3]],
     rendered: &[[f32; 3]],
@@ -1388,5 +1447,5 @@ pub(crate) fn step_cell_gaps(
     for x in 0..w {
         boundary_line_steps(frames, geometry, ScanLine::column(x, (w, h)), &mut steps, &mut cells);
     }
-    cell_gaps(&cells)
+    cell_charged_gaps(&cells)
 }
