@@ -383,12 +383,20 @@ pub(super) fn fit_atmosphere_from_parts(
     // DEF-2 (R19's sentence at this site): the white balance SHIPS on the
     // population it was SOLVED on. Where the shared-content restriction is in
     // force, a WB axis earns FIT_QUANT of J* read over the shared content's
-    // own present pixels (the scoped model at membership weights), and the
-    // whole frame is the guard only — it may not rise by more than FIT_QUANT.
-    // Judged on the whole frame, the content the restriction removed (target
-    // pixels no source cell answers for) overruled the solve that was made
-    // without them: "solved from the part that DOES correspond" and shipped
-    // on the part that does not. Every other control keeps the frame ruler.
+    // own present pixels (the scoped model at membership weights). Judged on
+    // the whole frame, the content the restriction removed (target pixels no
+    // source cell answers for) overruled the solve that was made without
+    // them: "solved from the part that DOES correspond" and shipped on the
+    // part that does not. Every other control keeps the frame ruler.
+    //
+    // What the restriction excludes, no guard reads (Q-DEF2): the guard of a
+    // WB axis is read over the population the restriction KEPT — present =
+    // corresponding — so it is the same scoped reading, and the axis may not
+    // raise it by more than FIT_QUANT. A guard over the whole frame let the
+    // excluded content veto through the guard what it could no longer veto
+    // through the gain. (The R19 local corrections of `fit_zoned` read no
+    // restriction: the shared-content population exists only inside this
+    // solve, so their frame guards exclude nothing.)
     let shared_model = readable.map(|p| evidence.scoped(tp, &p.source_member, &p.target_member));
     let wb_reading = |r: &EditRecipe| {
         let px = pixels_of(&render::develop_preview(s_img, r));
@@ -397,7 +405,7 @@ pub(super) fn fit_atmosphere_from_parts(
     };
     let wb_earns = |c: Control, solved: &(f32, Option<f32>), without: &(f32, Option<f32>)| {
         match (WB_AXES.contains(&c), solved.1, without.1) {
-            (true, Some(own_with), Some(own_without)) => ships_local(own_with, own_without, solved.0, without.0),
+            (true, Some(own_with), Some(own_without)) => ships_local(own_with, own_without, own_with, own_without),
             _ => ships(solved.0, without.0),
         }
     };
