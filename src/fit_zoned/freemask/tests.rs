@@ -197,8 +197,17 @@ fn free_mask_refuses_replaced_content() {
     assert!(report.notes.iter().all(|note| note.key != crate::rationale::keys::FIELD_MASK_ATTACHED));
 }
 
+/// R1 (v1.18.0): a tile ships only on a composed-frame gain of FIT_QUANT
+/// (`fit::ships`), and a tile that does not ship reserves nothing. On this
+/// fixture the tile takes its own zone residual from 0.091 to 0.003 but moves
+/// the frame by 0.0016, under the quantum: it ties to absence, no raster
+/// attaches, the exclusion handed to the free-mask producer is zero
+/// everywhere, and the producer is offered the whole region. Before R1 the
+/// tile shipped at the boundary gate's k = 0.111 and the test pinned that
+/// alpha as the exclusion; no fixture now carries `attach_tiles`' `* k`
+/// exclusion wiring end to end.
 #[test]
-fn free_masks_eat_only_what_tiles_left() {
+fn a_tile_that_ties_to_absence_reserves_nothing_from_the_free_masks() {
     let truth = disc(221, 167, 72);
     let source = textured_image();
     let mut base = crate::recipe::EditRecipe::default();
@@ -238,37 +247,30 @@ fn free_masks_eat_only_what_tiles_left() {
     report.recipe = base;
     report.evidence = evidence;
     let excluded = spatial::attach_tiles(&source, &target, &mut report, &home, false, 1);
-    assert!(report.recipe.masks.len() >= 2, "fixture did not accept a tile: {}", report.recipe.rationale);
-    // A35 (v1.2.4): what a tile hands the free-mask producer is the alpha the
-    // boundary gate LEFT it — its raster times the accepted `k` — and not the
-    // raster it asked for. The gate negotiated this tile down to k = 0.111
-    // (0.159 before R40, when the field's sawtooth ramps still counted as
-    // context), so it reserves a ninth of its footprint and the region stays
-    // open to a producer that can correct what the tile was forbidden to.
-    // `a_tile_reserves_only_the_alpha_the_boundary_gate_left_it` pins the rule
-    // itself; this is the end-to-end reading that shows `attach_tiles` emits it.
-    let max_excluded = excluded.iter().cloned().fold(0.0f32, f32::max);
-    assert!(
-        (max_excluded - TILE_EXCLUSION_ALPHA).abs() <= 1e-6,
-        "the exclusion must be the accepted alpha, not the raw raster: {max_excluded}",
-    );
-    assert!(
-        excluded.iter().all(|alpha| *alpha == 0.0 || (*alpha - max_excluded).abs() <= 1e-6),
-        "a hard raster times one scalar is still a hard raster",
-    );
+    assert_eq!(report.recipe.masks.len(), 1, "only the prior mask: {}", report.recipe.rationale);
+    // The tile's drop note carries the frame move it was judged on: a gain,
+    // and one under the quantum.
+    let drift = report
+        .notes
+        .iter()
+        .filter(|note| note.key == crate::rationale::keys::ZONE_DROPPED)
+        .find_map(|note| note.args.iter().find(|(key, _)| *key == "drift"))
+        .map(|(_, value)| value.parse::<f32>().unwrap())
+        .unwrap_or_else(|| panic!("the tile must be dropped by its frame arm: {}", report.recipe.rationale));
+    assert!(drift < 0.0 && -drift < fit::FIT_QUANT, "a gain under FIT_QUANT: {drift}");
+    assert!(excluded.iter().all(|alpha| *alpha == 0.0), "a tile that did not ship reserves nothing");
     let evidence = report.evidence.clone();
     let proposals = propose_free_masks(
         &field_from(&truth, -0.1), &excluded, &source_px, &target_px, &evidence, 2,
     );
-    assert_eq!(proposals.len(), 1, "{proposals:?}");
-    assert!(proposals[0].mask.as_raw().iter().enumerate()
-        .all(|(i, value)| excluded[i] < 0.5 || *value == 0));
+    assert_eq!(proposals.len(), 1, "the region is offered whole: {proposals:?}");
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// The alpha `attach_tiles` leaves on the fixture in
-/// `free_masks_eat_only_what_tiles_left`: that tile's raster times the `k`
-/// its boundary gate accepted.
+/// The alpha `attach_tiles` left on the fixture of
+/// `a_tile_that_ties_to_absence_reserves_nothing_from_the_free_masks` before
+/// R1 (v1.18.0), when that tile shipped at its boundary gate's k: a light
+/// reservation, kept as the rule test's input.
 const TILE_EXCLUSION_ALPHA: f32 = 0.110839844;
 
 /// A35 (v1.2.4). A tile reserves the strength it KEPT, not the footprint it
@@ -290,9 +292,10 @@ const TILE_EXCLUSION_ALPHA: f32 = 0.110839844;
 /// a region an accepted tile covers whole, and fails — 1 of 18. Silence the
 /// disclosure (`let withheld = Vec::new();`): arm B's drop goes back to
 /// leaving no trace, and the same test fails. The WIRING that produces the
-/// alpha is pinned next door: drop the `* boundary.k` from `attach_tiles`'
-/// exclusion merge and `free_masks_eat_only_what_tiles_left` fails on the
-/// pinned 0.1586914 against a raw 1.0 — 1 of 150.
+/// alpha was pinned next door until R1 (v1.18.0): drop the `* boundary.k`
+/// from `attach_tiles`' exclusion merge and the end-to-end test failed on the
+/// pinned 0.1586914 against a raw 1.0 — 1 of 150. Under R1 that fixture's
+/// tile ties to absence, so the wiring has no end-to-end pin.
 #[test]
 fn a_tile_reserves_only_the_alpha_the_boundary_gate_left_it() {
     // The same disc, source and dose as `free_mask_proposes_the_blob_the_tiles_cannot_box`,
@@ -522,9 +525,25 @@ fn free_mask_layer_off_is_byte_identical() {
     );
     assert_eq!(FREE_MASK_CALLS.with(|calls| calls.get()), 1,
         "the control run did not reach the bypassed stage");
-    assert_eq!(serde_json::to_vec(&disabled.recipe).unwrap(),
-        serde_json::to_vec(&without_stage.recipe).unwrap());
-    assert_eq!(disabled.recipe.rationale.as_bytes(), without_stage.recipe.rationale.as_bytes());
+    // R3 (v1.18.0): the free-mask layer begins with the sequencer re-reading
+    // the field on the state the stage would start from, and that reading is
+    // published (LOCAL_REALIZED) before the stage is entered. The bypass sits
+    // inside the stage, so the control carries exactly that one note more than
+    // the disabled run, and everything else is byte for byte the same.
+    let extra = without_stage.notes.iter()
+        .filter(|note| !disabled.notes.contains(note)).collect::<Vec<_>>();
+    assert_eq!(extra.len(), 1, "{extra:?}");
+    assert_eq!(extra[0].key, crate::rationale::keys::LOCAL_REALIZED, "{extra:?}");
+    assert_eq!(
+        disabled.notes,
+        without_stage.notes.iter().filter(|note| *note != extra[0]).cloned().collect::<Vec<_>>(),
+    );
+    let without_rationale = |recipe: &crate::recipe::EditRecipe| {
+        let mut recipe = recipe.clone();
+        recipe.rationale.clear();
+        serde_json::to_vec(&recipe).unwrap()
+    };
+    assert_eq!(without_rationale(&disabled.recipe), without_rationale(&without_stage.recipe));
     path.remove();
 
     for (override_value, spatial) in [(Some(1.0), false), (Some(0.003), true), (Some(0.0), true)] {

@@ -1268,6 +1268,19 @@ mod tests {
         read_tile(id, current, target, evidence, &mut TileEvidenceCache::new())
     }
 
+    /// R1 (v1.18.0): the composed-frame arm of [`enforce_bitmap_boundary`]
+    /// is the stage-vs-absence law (`fit::ships`). On this module's 64-px
+    /// boundary fixtures the whole frame residual is of the order of
+    /// FIT_QUANT, so a tile negotiated down towards the floor gains under the
+    /// quantum and ties to absence (measured 2026-11-04 at each fixture's
+    /// negotiated k: gains 0.0002-0.0014 against FIT_QUANT 0.0023, one arm a
+    /// loss of 0.00002, and the flat grey frame unidentifiable, 1.0 on both
+    /// sides). The tests whose subject is the BOUNDARY negotiation hand the
+    /// gate this `frame_before`, under which every finite frame ships, so the
+    /// boundary rulers alone decide k; the frame arm is pinned on the honest
+    /// reading by `a_negotiated_tile_under_fit_quant_ties_to_absence`.
+    const FRAME_ARM_OFF: f32 = f32::INFINITY;
+
     type BoundaryFixture = (
         DynamicImage,
         Vec<[f32; 3]>,
@@ -1952,6 +1965,48 @@ mod tests {
     const GRADIENT_K: f32 = 0.0126953125;
     const GRADIENT_RIM: f32 = 0.0034745336;
 
+    /// R1 (v1.18.0), the frame arm on the honest reading. The sloping-field
+    /// tile is negotiated down to the floor (k = `GRADIENT_K`); there it
+    /// still gains on the frame, but less than FIT_QUANT, and a gain under
+    /// the quantum is no difference after the fit's own rounding: the gate
+    /// refuses it as `Frame` and the mask goes. Before R1 the gate admitted
+    /// any frame within `SPATIAL_FRAME_REGRESSION_TOL` of the frame before.
+    #[test]
+    fn a_negotiated_tile_under_fit_quant_ties_to_absence() {
+        let gate = |name: &str, frame_arm: Option<f32>| {
+            let (source, target, mut report, path, geometry, reference, candidate) =
+                gradient_fixture(1.5, name);
+            let frame_before = fit::look_err_with_evidence(&reference, &target, &report.evidence);
+            let outcome = enforce_bitmap_boundary(
+                &source,
+                &target,
+                &mut report,
+                0,
+                BitmapBoundaryInput {
+                    target_boundary: None,
+                    ruler: BoundaryRuler::CrossBoundaryStep { geometry: &geometry, reference: &reference },
+                    initial_px: candidate,
+                    frame_before: frame_arm.unwrap_or(frame_before),
+                },
+            );
+            path.remove();
+            let outcome = outcome.map(|accepted| {
+                (accepted.k, frame_before - fit::look_err_with_evidence(&accepted.pixels, &target, &report.evidence))
+            });
+            (outcome, report.recipe.masks.len())
+        };
+        let (negotiated, _) = gate("tile-law-negotiated", Some(FRAME_ARM_OFF));
+        let Ok((k, gain)) = negotiated else { panic!("premise: the boundary rulers negotiate this tile") };
+        assert_eq!(k, GRADIENT_K, "premise: the floor-budgeted k");
+        assert!(gain > 0.0 && gain < fit::FIT_QUANT, "a real gain, under the quantum: {gain}");
+        let (honest, masks) = gate("tile-law-honest", None);
+        match honest {
+            Err(refusal) => assert_eq!(refusal.why, BitmapBoundaryWhy::Frame),
+            Ok((k, gain)) => panic!("a gain under FIT_QUANT shipped: k={k} gain={gain}"),
+        }
+        assert_eq!(masks, 0, "the refused tile's mask must be removed");
+    }
+
     /// R40 (v1.6.0), reversing A22 (v1.2.4). A hard tile edge over a SMOOTH
     /// sloping field buys no budget from the slope: a gradient is not a
     /// discontinuity, so the de-trended reading of the scene there is ~0,
@@ -1987,7 +2042,6 @@ mod tests {
             with_frozen.charged > ZONE_BOUNDARY_STEP_MAX,
             "a smooth gradient is no context: the step is charged at the floor's rate: {with_frozen:?}",
         );
-        let frame_before = fit::look_err_with_evidence(&reference, &target, &report.evidence);
         let accepted = enforce_bitmap_boundary(
             &source,
             &target,
@@ -2000,7 +2054,7 @@ mod tests {
                     reference: &reference,
                 },
                 initial_px: candidate,
-                frame_before,
+                frame_before: FRAME_ARM_OFF,
             },
         )
         .expect("a sloping-sky seam is negotiated down, not dropped");
@@ -2118,8 +2172,6 @@ mod tests {
             "premise: a -0.40 EV hard tile steps across its own border: {measured:?}"
         );
 
-        let frame_before =
-            fit::look_err_with_evidence(&reference, &target, &report.evidence);
         let accepted = enforce_bitmap_boundary(
             &source,
             &target,
@@ -2132,7 +2184,7 @@ mod tests {
                     reference: &reference,
                 },
                 initial_px: candidate,
-                frame_before,
+                frame_before: FRAME_ARM_OFF,
             },
         )
         .expect("a shrinkable tile must be negotiated, not dropped");
@@ -2157,8 +2209,6 @@ mod tests {
         // sampling is made one-sided.
         let (source, target, mut report, feather, geometry, reference, candidate) =
             feathered_fixture(0.55, "tile-boundary-feathered");
-        let frame_before =
-            fit::look_err_with_evidence(&reference, &target, &report.evidence);
         let luma = |p: &[f32; 3]| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
         // x=33 is the inside foot of the crossing at the 50% contour (x=32).
         let inside = 32 * 64 + 33;
@@ -2197,7 +2247,7 @@ mod tests {
                     reference: &reference,
                 },
                 initial_px: candidate,
-                frame_before,
+                frame_before: FRAME_ARM_OFF,
             },
         )
         .expect("a continuous ramp must not be refused");
@@ -2234,7 +2284,6 @@ mod tests {
                     geometry: &[f32],
                     reference: &[[f32; 3]],
                     candidate: Vec<[f32; 3]>| {
-            let frame_before = fit::look_err_with_evidence(reference, target, &report.evidence);
             enforce_bitmap_boundary(
                 source,
                 target,
@@ -2244,7 +2293,7 @@ mod tests {
                     target_boundary: None,
                     ruler: BoundaryRuler::CrossBoundaryStep { geometry, reference },
                     initial_px: candidate,
-                    frame_before,
+                    frame_before: FRAME_ARM_OFF,
                 },
             )
         };
@@ -2406,13 +2455,14 @@ mod tests {
         let coin = against(Some(&flip));
         assert_eq!((coin.charged.to_bits(), coin.asked), (none.charged.to_bits(), 0.0), "{coin:?}");
 
-        // The gate. The frame gate is given the candidate itself so it
-        // improves with every k and cannot decide these arms.
+        // The gate. The target is the candidate itself, and the frame arm is
+        // off (`FRAME_ARM_OFF`): under R1 a tile shrunk towards the floor here
+        // gains under FIT_QUANT and ties to absence, so the frame arm, not the
+        // boundary ruler, would decide the arms this test is about.
         let gate = |target: Option<&[[f32; 3]]>| -> (f32, f32, f32) {
             let target_image = render::develop_preview(&source, &recipe_at(EV));
             let mut report = super::super::tests::neutral_report(&source, &target_image);
             report.recipe = recipe_at(EV);
-            let frame_before = fit::look_err_with_evidence(&reference, &candidate, &report.evidence);
             let accepted = enforce_bitmap_boundary(
                 &source,
                 &candidate,
@@ -2422,7 +2472,7 @@ mod tests {
                     target_boundary: target,
                     ruler: BoundaryRuler::CrossBoundaryStep { geometry: &geometry, reference: &reference },
                     initial_px: candidate.clone(),
-                    frame_before,
+                    frame_before: FRAME_ARM_OFF,
                 },
             )
             .unwrap_or_else(|refusal| panic!("negotiated, not dropped: {:?}", refusal.why));
@@ -2463,7 +2513,6 @@ mod tests {
                     geometry: &[f32],
                     reference: &[[f32; 3]],
                     candidate: Vec<[f32; 3]>| {
-            let frame_before = fit::look_err_with_evidence(reference, target, &report.evidence);
             enforce_bitmap_boundary(
                 source,
                 target,
@@ -2473,7 +2522,7 @@ mod tests {
                     target_boundary: None,
                     ruler: BoundaryRuler::CrossBoundaryStep { geometry, reference },
                     initial_px: candidate,
-                    frame_before,
+                    frame_before: FRAME_ARM_OFF,
                 },
             )
         };
@@ -2819,7 +2868,7 @@ mod tests {
         let home = crate::store::OwnedRaster::scratch(dir.join("tile.png"));
         TILE_EVIDENCE_READS.with(|reads| reads.set(0));
         TILE_EVIDENCE_COMPUTES.with(|computes| computes.set(0));
-        let excluded = attach_tiles(&source, &target, &mut report, &home, false, 2);
+        attach_tiles(&source, &target, &mut report, &home, false, 2);
         let reads = TILE_EVIDENCE_READS.with(std::cell::Cell::get);
         let computes = TILE_EVIDENCE_COMPUTES.with(std::cell::Cell::get);
         std::fs::remove_dir_all(&dir).ok();
@@ -2835,10 +2884,18 @@ mod tests {
             computes <= 21,
             "each node is scoped once per fit, not once per generation: {computes}",
         );
-        assert!(
-            excluded.iter().any(|alpha| *alpha > 0.0),
-            "premise: this pair attaches a tile",
-        );
+        // Premise: the walk swept the tree more than once. Under R1 (v1.18.0)
+        // every candidate tile on this pair is refused (on the fixture's
+        // ruler each one moves the frame the wrong way, +0.0035 to +0.011, and
+        // a loss of any size refuses), so nothing attaches; the traversal
+        // still re-sweeps the tree after each refusal, which is what the
+        // cache serves. Before R1 the premise was an attached tile.
+        let tried = report
+            .notes
+            .iter()
+            .filter(|note| note.key == crate::rationale::keys::TILE_ELIGIBLE)
+            .count();
+        assert!(tried >= 2, "premise: the traversal tried more than one tile: {tried}");
     }
 
     #[test]

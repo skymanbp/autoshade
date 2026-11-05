@@ -2586,8 +2586,14 @@ mod tests {
         assert_eq!(deferred.err_after, global.err_after);
     }
 
+    /// R1 (v1.18.0): a band ships on the stage-vs-absence law (`fit::ships`)
+    /// and nothing else — the composed frame must GAIN at least `FIT_QUANT`
+    /// over the frame it was handed. A loss of any size drops it, a tie drops
+    /// it (it goes to the simpler recipe), a gain under the quantum drops it,
+    /// and a gain of the quantum keeps it. Before R1 the line was the band's
+    /// own zero tolerance, so a neutral frame kept the band.
     #[test]
-    fn range_band_composed_frame_regression_is_dropped_while_neutral_or_better_is_kept() {
+    fn range_band_ships_only_on_a_composed_frame_gain_of_fit_quant() {
         let (w, h) = (64u32, 64u32);
         let build = |target: bool| DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
             let v = 0.30 + 0.30 * x as f32 / (w - 1) as f32;
@@ -2633,8 +2639,8 @@ mod tests {
         };
 
         // Obtain the deterministic candidate frame without making its
-        // composed-frame arm binding; both assertions replay this attachment
-        // against either side of the zero-tolerance line.
+        // composed-frame arm binding; the arms below replay this attachment
+        // against either side of the FIT_QUANT line.
         let mut probe = neutral_report(&source, &target);
         let mut loose_frame_err = f32::MAX;
         let candidate = attach_one_zone(
@@ -2672,21 +2678,32 @@ mod tests {
             })
             .expect("the dropped band must disclose its measured frame drift");
         assert!(note.args.iter().any(|(key, value)| *key == "drift" && value == "+0.00100"));
-        assert!(note.args.iter().any(|(key, value)| *key == "tol" && value == "+0.00000"));
 
-        let mut nonregressing = neutral_report(&source, &target);
-        let mut no_worse_running_frame = candidate_err;
+        // A tie and a gain under the quantum are no difference after the
+        // fit's own rounding: both go to absence.
+        for (arm, handed) in [("tie", candidate_err), ("under", candidate_err + 0.5 * fit::FIT_QUANT)] {
+            let mut report = neutral_report(&source, &target);
+            let mut running = handed;
+            let outcome = attach_one_zone(
+                &s_img, &tgt_px, &mut report, &mut running, &attachment, divergence, None,
+            );
+            assert!(outcome.is_none(), "{arm}: a gain under FIT_QUANT must drop the band");
+            assert!(report.recipe.masks.is_empty(), "{arm}: the dropped band must be removed");
+        }
+
+        let mut earning = neutral_report(&source, &target);
+        let mut handed = candidate_err + 1.01 * fit::FIT_QUANT;
         let kept = attach_one_zone(
             &s_img,
             &tgt_px,
-            &mut nonregressing,
-            &mut no_worse_running_frame,
+            &mut earning,
+            &mut handed,
             &attachment,
             divergence,
             None,
         );
-        assert!(kept.is_some(), "a neutral-or-better composed frame must keep the band");
-        assert_eq!(nonregressing.recipe.masks.len(), 1);
+        assert!(kept.is_some(), "a composed-frame gain of FIT_QUANT must keep the band");
+        assert_eq!(earning.recipe.masks.len(), 1);
         path.remove();
     }
 
