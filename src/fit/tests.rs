@@ -4219,16 +4219,25 @@ fn a_coherent_sky_cast_the_curves_carry_as_a_gain_does_not_fan_and_ships_admitte
         "premise broken: the foreign-hue veto fires — the destinations should be target-native"
     );
 
-    // THE reading, and its margin under the threshold (measured 10.2°;
-    // the gate's own 0.6 x FAN_DEG margin the legitimate-cast arm carries).
+    // THE candidate's reading: admitted or not (measured 10.2° at step 1,
+    // 12.0° under the band floor). "A margin is read on what ships; a
+    // candidate is admitted or not" (RULING-1180-int-r2 Q-FL1): the candidate
+    // is a stage's proposal, the user sees the shipped frame, so the margin
+    // is read below on the delivered fan.
     let (share, fan, _) = hue_fan_weighted(&cur, &with_px, &evidence)
         .expect("the sky is a region-sized hue class");
     assert!(share > 0.5, "premise broken: the sky class is not region-sized ({share:.3})");
-    assert!(fan < 0.7 * FAN_DEG, "margin eroded: fan {fan:.1}° against {FAN_DEG}°");
+    assert!(fan < FAN_DEG, "the candidate is admitted: fan {fan:.1}° against {FAN_DEG}°");
 
     // END TO END: the curves ship admitted, the note says so, and nothing
     // claims a conviction or a projection.
     let rep = fit_recipe(&src, &tgt);
+    let shipped = delivered_fan_of(&src, &tgt, &rep);
+    eprintln!("COHERENT_SKY candidate {fan:.2} shipped {shipped:.2}");
+    assert!(
+        shipped < 0.7 * FAN_DEG,
+        "margin eroded: the shipped frame fans {shipped:.1}° against {FAN_DEG}° (measured 8.35°)"
+    );
     use crate::rationale::keys;
     assert!(
         !(rep.recipe.red_curve.is_empty() && rep.recipe.green_curve.is_empty() && rep.recipe.blue_curve.is_empty()),
@@ -5111,6 +5120,9 @@ fn the_fan_gate_convicts_a_cast_whose_render_fans_and_leaves_a_legitimate_cast_a
         legit_fan < 0.6 * FAN_DEG,
         "margin eroded: the hue-ramps cast fans {legit_fan:.1}° against the {FAN_DEG}° threshold"
     );
+    // "A margin is read on what ships; a candidate is admitted or not"
+    // (RULING-1180-int-r2 Q-FL1): each pair's candidate is pinned admitted,
+    // its margin read on the delivered frame.
     for (name, src, tgt, ceiling) in [
         ("canyon_gold", canyon(false), canyon_gold_target(), 0.75),
         ("hazy_vivid", hazy_canyon_source(), vivid_warm_target(), 0.3),
@@ -5119,9 +5131,12 @@ fn the_fan_gate_convicts_a_cast_whose_render_fans_and_leaves_a_legitimate_cast_a
         let fan = hue_fan_weighted(&c.cur, &c.with_px, &evidence_model(&c.cur, &c.tp))
             .map(|(_, added, _)| added)
             .unwrap_or(0.0);
+        let shipped = delivered_fan_of(&src, &tgt, &fit_recipe(&src, &tgt));
+        eprintln!("FAN_ARM {name} candidate {fan:.2} shipped {shipped:.2}");
+        assert!(fan < FAN_DEG, "{name}'s candidate is admitted: {fan:.1}° against {FAN_DEG}°");
         assert!(
-            fan < ceiling * FAN_DEG,
-            "margin eroded: {name} fans {fan:.1}° against the {FAN_DEG}° threshold"
+            shipped < ceiling * FAN_DEG,
+            "margin eroded: {name}'s shipped frame fans {shipped:.1}° against the {FAN_DEG}° threshold"
         );
     }
     // Canyon-warm, pinned where it now sits — since 2026-10-22 as a pair the
@@ -9781,6 +9796,19 @@ fn the_white_balance_path_starts_at_as_shot() {
     let (k, t) = wb_path_candidate(law, 8800.0, 16.6, 0.5);
     assert!(k > 5950.0 && k < 8800.0, "half way is between in Kelvin: {k}");
     assert!(t > 0.0 && t < 16.6, "and in tint: {t}");
+}
+
+/// The fan the user sees: the shipped recipe's render against the straight
+/// conversion, at analysis size, over the shared evidence — the reading
+/// `no_shipped_fit_delivers_a_hue_fan_past_the_limit` pins on every pair. 0
+/// when no region-sized hue class reads.
+fn delivered_fan_of(src: &DynamicImage, tgt: &DynamicImage, report: &FitReport) -> f32 {
+    let (s_img, t_img) = analysis_pair(src, tgt);
+    let sp = pixels_of(&render::develop_preview(&s_img, &EditRecipe::default()));
+    let tp = pixels_of(&t_img);
+    let evidence = evidence_model_for(&sp, &tp, s_img.width(), s_img.height());
+    let px = pixels_of(&render::develop_preview(&s_img, &report.recipe));
+    hue_fan_weighted(&sp, &px, &evidence).map(|(_, fan, _)| fan).unwrap_or(0.0)
 }
 
 /// R22 (a): the band a tone slider earns on is the band its own response
