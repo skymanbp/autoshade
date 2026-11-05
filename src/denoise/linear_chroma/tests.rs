@@ -147,6 +147,81 @@ fn where_k_is_unbounded_the_slider_weakens_the_stage_through_its_window() {
     assert!(v10 > v25, "residual colour variance at 10 ({v10:.3e}) must exceed that at 25 ({v25:.3e})");
 }
 
+/// The standard normal's mass within `±t` (Simpson's rule on `0..t`) and its
+/// density at `t`.
+fn normal_mass(t: f64) -> (f64, f64) {
+    let phi = |x: f64| (-x * x / 2.0).exp() / std::f64::consts::TAU.sqrt();
+    let steps = 2000;
+    let h = t / steps as f64;
+    let inner: f64 = (1..steps).map(|i| phi(i as f64 * h) * if i % 2 == 1 { 4.0 } else { 2.0 }).sum();
+    (2.0 * (phi(0.0) + phi(t) + inner) * h / 3.0, phi(t))
+}
+
+/// On a flat frame the filter keeps of a cell's own noise what the skipped
+/// mean at its test width keeps, and no more: the slope of the filtered
+/// colour difference on the cell's own sample is `1 / (N·(Z − 2t·φ(t)))`,
+/// `t = k·√(1 + 1/n)` in the cell's true sd (the model's sd over the true
+/// one carried in, `n = N·Z`), within three standard errors of the slope
+/// (its residual sd over the sample sd, over the square root of the cells
+/// that are independent: one per window). At `k` = 1.6 and 2.5, the night
+/// sky's order of `k` and a daylight one.
+///
+/// MUTATION: every pass anchored on the cell's own sample (the form before
+/// rel1180 round 8): the test then keeps the neighbours on the sample's side
+/// and the slope is several times the bound.
+#[test]
+fn the_filter_keeps_of_a_cells_own_noise_only_what_the_skipped_mean_keeps() {
+    let level = 0.01;
+    let m = mosaic(level, 0.0);
+    let sites = bayer_sites(&rggb()).expect("Bayer");
+    let pts = patches(&m, W, H, sites, WB);
+    let model = NoiseModel::fit(&pts, W, H).expect("model");
+    let cells = Cells::of(&m, W, H, sites, WB, &model, &pts).expect("cells");
+    let rho = 3;
+    let n_win = ((2 * rho + 1) * (2 * rho + 1)) as f64;
+    // The true sd of each colour difference of one cell (the mosaic's own
+    // noise: the site's, the two greens averaged).
+    let g_var = (A * level + B) / 2.0;
+    let true_sd = [
+        (WB[0] * WB[0] * (A * level / WB[0] + B) + g_var).sqrt(),
+        (WB[2] * WB[2] * (A * level / WB[2] + B) + g_var).sqrt(),
+    ];
+    let interior: Vec<usize> = (rho..cells.ch - rho).flat_map(|cy| (rho..cells.cw - rho).map(move |cx| cy * W / 2 + cx)).collect();
+    for k in [1.6, 2.5] {
+        let f: Vec<[f32; 2]> = interior.par_iter().map(|&i| cells.filtered(i, k, rho)).collect();
+        for j in 0..2 {
+            let (mut sdd, mut sdf) = (0.0f64, 0.0f64);
+            for (n, &i) in interior.iter().enumerate() {
+                let d = f64::from(cells.d[i][j]);
+                sdd += d * d;
+                sdf += d * f64::from(f[n][j]);
+            }
+            let slope = sdf / sdd;
+            let resid: f64 = interior
+                .iter()
+                .enumerate()
+                .map(|(n, &i)| (f64::from(f[n][j]) - slope * f64::from(cells.d[i][j])).powi(2))
+                .sum::<f64>()
+                / interior.len() as f64;
+            let se = resid.sqrt() / (sdd / interior.len() as f64).sqrt() / (interior.len() as f64 / n_win).sqrt();
+            let r = f64::from(cells.sd[0][j]) / 2f64.sqrt() / true_sd[j];
+            let mut t = k * r * 2f64.sqrt();
+            // t and n = N·Z depend on each other; the iteration settles within a few steps.
+            for _ in 0..8 {
+                t = k * r * (1.0 + 1.0 / (n_win * normal_mass(t).0)).sqrt();
+            }
+            let (z, phi) = normal_mass(t);
+            let want = 1.0 / (n_win * (z - 2.0 * t * phi));
+            assert!(
+                (slope - want).abs() <= 3.0 * se,
+                "k {k}, colour difference {j}: the filter keeps {slope:.4} of a cell's own noise; the skipped mean at t = {t:.3} keeps {want:.4} (3 se {:.4}; the window mean 1/N = {:.4})",
+                3.0 * se,
+                1.0 / n_win
+            );
+        }
+    }
+}
+
 #[test]
 fn a_pattern_that_is_not_a_two_by_two_bayer_is_left_alone() {
     let before = mosaic(0.01, 0.0);
@@ -232,6 +307,74 @@ fn photo_k_reading() {
             let mean = |j: usize| part.iter().map(|r| r.1[j]).sum::<f64>() / part.len() as f64;
             println!();
             print!("    D{q} level {:.2e}: {:+.4} | {:+.4}", part[part.len() / 2].0, mean(0), mean(1));
+        }
+        println!();
+    }
+    // Round 8 (F1): how much of a cell's own noise the filter keeps. Per flat
+    // patch and colour difference, about the patch's input mean: the residual
+    // variance over the input variance, the slope of the filtered value on
+    // the cell's own sample (the share of its own noise it keeps; the window
+    // mean's is 1/N whatever the neighbours do) and the mean fraction of the
+    // window that passes the test; per level decile, at the photo's k and
+    // unbounded. 1/N for the full window is printed beside them.
+    let n_win = ((2 * rho + 1) * (2 * rho + 1)) as f64;
+    for kk in [k, f64::INFINITY] {
+        let f: Vec<[f32; 2]> = (0..cells.cw * cells.ch).into_par_iter().map(|i| cells.filtered(i, kk, rho)).collect();
+        let included = |i: usize| -> [f64; 2] {
+            let (cw, ch) = (cells.cw, cells.ch);
+            let (cx, cy) = (i % cw, i / cw);
+            let all = ((cy + rho + 1).min(ch) - cy.saturating_sub(rho)) * ((cx + rho + 1).min(cw) - cx.saturating_sub(rho));
+            cells.filtered_counted(i, kk, rho).1.map(|n| f64::from(n) / all as f64)
+        };
+        // (level, [var ratio, own slope, inclusion] x 2)
+        let rows: Vec<(f64, [f64; 6])> = pts
+            .par_iter()
+            .enumerate()
+            .filter(|(_, p)| p.usable && model.is_flat(p, wb))
+            .map(|(pi, p)| {
+                let (px, py) = (pi % cells.pw, pi / cells.pw);
+                let idx: Vec<usize> = (py * PATCH..(py + 1) * PATCH)
+                    .flat_map(|cy| (px * PATCH..(px + 1) * PATCH).map(move |cx| cy * cells.cw + cx))
+                    .collect();
+                let mut out = [0.0f64; 6];
+                for j in 0..2 {
+                    let mu = idx.iter().map(|&i| f64::from(cells.d[i][j])).sum::<f64>() / idx.len() as f64;
+                    let (mut vin, mut vout, mut cov, mut inc) = (0.0, 0.0, 0.0, 0.0);
+                    for &i in &idx {
+                        let (d, g) = (f64::from(cells.d[i][j]) - mu, f64::from(f[i][j]) - mu);
+                        vin += d * d;
+                        vout += g * g;
+                        cov += d * g;
+                        inc += included(i)[j];
+                    }
+                    out[3 * j] = vout / vin;
+                    out[3 * j + 1] = cov / vin;
+                    out[3 * j + 2] = inc / idx.len() as f64;
+                }
+                (p.m, out)
+            })
+            .collect();
+        let mut rows = rows;
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let per = rows.len() / 10;
+        print!(
+            "  retention on flat patches, k {kk:.3}, window 1/N = {:.4}: per level decile, R-G var ratio / own slope / inclusion | B-G the same",
+            1.0 / n_win
+        );
+        for q in 0..10 {
+            let part = &rows[q * per..(q + 1) * per];
+            let mean = |j: usize| part.iter().map(|r| r.1[j]).sum::<f64>() / part.len() as f64;
+            println!();
+            print!(
+                "    D{q} level {:.2e}: {:.4} / {:.4} / {:.3} | {:.4} / {:.4} / {:.3}",
+                part[part.len() / 2].0,
+                mean(0),
+                mean(1),
+                mean(2),
+                mean(3),
+                mean(4),
+                mean(5)
+            );
         }
         println!();
     }

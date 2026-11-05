@@ -22,12 +22,23 @@
 //! the mosaic and the luminance a Bayer demosaic is built around, are never
 //! written; the red and blue sites are rebuilt on their cell's green.
 //!
-//! **The filter.** A sigma filter: a cell's colour difference becomes the
-//! mean of the differences in its window that lie within `t = k·σ_d` of its
-//! own, `σ_d` the model's standard deviation of a DIFFERENCE of two cells at
-//! that level (`√2` times one cell's, per colour difference, the red and blue
-//! predicted from the green fit). A neighbour further away than the noise
-//! can carry is scene, and does not vote.
+//! **The filter.** A sigma filter: a neighbour votes when the evidence says
+//! it shares the cell's TRUE colour — it lies within `k` noise sds of an
+//! estimate of that colour. The cell's own sample is not that colour: a test
+//! anchored on it keeps the neighbours on the sample's side, and with them a
+//! share of the sample's own noise (measured on the night sky's flat patches,
+//! rel1180 msg-e3 round 8: 0.18–0.22 of it at its `k`, where the plain
+//! window mean keeps 1/N = 0.02). So the sample anchors only the first
+//! estimate (within `k·σ_d`, `σ_d` the model's sd of a DIFFERENCE of two
+//! cells at that level, `√2` times one cell's `σ`, per colour difference, the
+//! red and blue predicted from the green fit); each next pass is anchored on
+//! the last estimate, a mean of `n` cells, against which a sample differs by
+//! `σ·√(1 + 1/n)`, until an estimate repeats. That fixed point is the mean of
+//! the window's samples within `t` of itself — the skipped mean, whose share
+//! of one sample's noise is `1 / (N·(Z − 2t·φ(t)))` (`t` in `σ`, `Z` the
+//! normal mass within `±t`; its influence function), which falls to the
+//! window mean's `1/N` as `k` grows. A neighbour further from the estimate than
+//! the noise can carry is scene, and does not vote.
 //!
 //! **γ = 1.** In linear light the noise is the only scale at a pixel; a
 //! threshold that is a multiple of `σ(L)` is the only form that does not
@@ -210,6 +221,41 @@ pub(crate) fn photo_k(cells: &Cells, model: &NoiseModel, pts: &[Patch], wb: [f64
     (f64::INFINITY, read)
 }
 
+/// The sigma filter's estimate of the true value of `centre` (one sample of
+/// noise sd `sigma`) over `window` (its samples, the centre among them):
+/// starting from the sample itself, a mean of `n = 1`, the mean of the window's
+/// samples within `k·σ·√(1 + 1/n)` of the current estimate — a sample against
+/// a mean of `n` samples differs by that sd — until an estimate repeats (a
+/// fixed point, or a cycle: from there the passes only repeat; the estimates
+/// are means of subsets of a finite window, so a repeat comes). Returns the
+/// estimate and the `n` of the last pass. The first pass accepts the centre
+/// (|0| ≤ t), so `n ≥ 1`; a later pass that accepts no sample leaves the
+/// estimate it was anchored on, itself a mean of accepted samples.
+pub(crate) fn skipped_mean(window: &[f32], centre: f32, sigma: f64, k: f64) -> (f32, u32) {
+    let (mut estimate, mut n) = (centre, 1u32);
+    let mut seen: Vec<u32> = Vec::new();
+    loop {
+        let t = (k * sigma * (1.0 + 1.0 / f64::from(n)).sqrt()) as f32;
+        let (mut sum, mut m) = (0.0f64, 0u32);
+        for &q in window {
+            if (q - estimate).abs() <= t {
+                sum += f64::from(q);
+                m += 1;
+            }
+        }
+        if m == 0 {
+            return (estimate, n);
+        }
+        let next = (sum / f64::from(m)) as f32;
+        n = m;
+        if seen.contains(&next.to_bits()) {
+            return (next, n);
+        }
+        seen.push(next.to_bits());
+        estimate = next;
+    }
+}
+
 /// The mosaic's cells: the two colour differences and the green of each, and
 /// each patch's `σ_d` per colour difference.
 pub(crate) struct Cells {
@@ -255,26 +301,28 @@ impl Cells {
         Some(Self { cw, ch, pw, ph, d, sd })
     }
 
-    /// Cell `i`'s two colour differences through the sigma filter at `k`.
+    /// Cell `i`'s two colour differences through the sigma filter at `k`:
+    /// the test is anchored on an estimate of the cell's true colour, not on
+    /// its own noisy sample (see the module).
     fn filtered(&self, i: usize, k: f64, rho: usize) -> [f32; 2] {
+        self.filtered_counted(i, k, rho).0
+    }
+
+    /// [`Self::filtered`] with the count of window samples the last pass accepted.
+    fn filtered_counted(&self, i: usize, k: f64, rho: usize) -> ([f32; 2], [u32; 2]) {
         let (cw, ch) = (self.cw, self.ch);
         let (cx, cy) = (i % cw, i / cw);
         let sd = self.sd[(cy / PATCH).min(self.ph - 1) * self.pw + (cx / PATCH).min(self.pw - 1)];
-        let t = [(k * f64::from(sd[0])) as f32, (k * f64::from(sd[1])) as f32];
-        let c = self.d[i];
-        let (mut sum, mut n) = ([0.0f64; 2], [0u32; 2]);
-        for y in cy.saturating_sub(rho)..(cy + rho + 1).min(ch) {
-            for q in &self.d[y * cw + cx.saturating_sub(rho)..y * cw + (cx + rho + 1).min(cw)] {
-                for j in 0..2 {
-                    if (q[j] - c[j]).abs() <= t[j] {
-                        sum[j] += f64::from(q[j]);
-                        n[j] += 1;
-                    }
-                }
-            }
+        let (y0, y1, x0, x1) = (cy.saturating_sub(rho), (cy + rho + 1).min(ch), cx.saturating_sub(rho), (cx + rho + 1).min(cw));
+        let mut window = Vec::with_capacity((y1 - y0) * (x1 - x0));
+        let (mut out, mut count) = ([0.0f32; 2], [0u32; 2]);
+        for j in 0..2 {
+            window.clear();
+            window.extend((y0..y1).flat_map(|y| self.d[y * cw + x0..y * cw + x1].iter().map(move |q| q[j])));
+            // One cell's sd is `σ_d / √2`.
+            (out[j], count[j]) = skipped_mean(&window, self.d[i][j], f64::from(sd[j]) / 2f64.sqrt(), k);
         }
-        // The centre always votes (|0| ≤ t), so n ≥ 1.
-        [(sum[0] / f64::from(n[0])) as f32, (sum[1] / f64::from(n[1])) as f32]
+        (out, count)
     }
 
     /// Write `filtered` back: red and blue rebuilt on the cell's own green,
