@@ -463,7 +463,7 @@ pub(crate) fn filter_mosaic(
     if write {
         cells.write(mosaic, width, sites, wb, &filtered);
     }
-    let chroma = cells.chroma(&filtered, &model, wb, rho);
+    let chroma = cells.chroma(&filtered, wb, rho);
     Some((reading, chroma))
 }
 
@@ -994,6 +994,11 @@ pub(crate) struct Cells {
     /// mean of the site's four green neighbours), and the cell's green (the
     /// mean of its two green sites, the slope's).
     d: Vec<[f32; 3]>,
+    /// `[wR·R − G, wB·B − G]` per cell: each colour sample against the cell's
+    /// own green — the colour ratio's measurement, which the rebuild's slope
+    /// regresses ([`Self::slopes`]); the site difference `d` carries the
+    /// demosaic green's own curvature, which a star correlates with its light.
+    own: Vec<[f32; 2]>,
     /// `σ_d` per patch and colour difference: `√2` times one cell's sd,
     /// `√(wR²·var(R) + σ²_G/4)` (four greens a site).
     sd: Vec<[f32; 2]>,
@@ -1048,18 +1053,15 @@ impl Cells {
             }
             sum / n
         };
-        let d = (0..cw * ch)
+        let (d, own): (Vec<[f32; 3]>, Vec<[f32; 2]>) = (0..cw * ch)
             .into_par_iter()
             .map(|i| {
                 let (cx, cy) = (i % cw, i / cw);
                 let g = (at(cx, cy, 1) + at(cx, cy, 2)) / 2.0;
-                [
-                    (wb[0] * at(cx, cy, 0) - green_at(cx, cy, 0)) as f32,
-                    (wb[2] * at(cx, cy, 3) - green_at(cx, cy, 3)) as f32,
-                    g as f32,
-                ]
+                let (r, b) = (wb[0] * at(cx, cy, 0), wb[2] * at(cx, cy, 3));
+                ([(r - green_at(cx, cy, 0)) as f32, (b - green_at(cx, cy, 3)) as f32, g as f32], [(r - g) as f32, (b - g) as f32])
             })
-            .collect();
+            .unzip();
         // One site's colour difference: its own sample and four greens,
         // `wR²·var(R) + σ²_G/4`; two axis-neighbouring sites of one colour
         // share one of their greens, `cov = σ²_G/16` (the red's and the blue's
@@ -1071,7 +1073,7 @@ impl Cells {
         };
         let sd = pts.iter().map(|p| site_var(p).0.map(|v| (2.0 * v).sqrt() as f32)).collect();
         let cov = pts.iter().map(|p| site_var(p).1 as f32).collect();
-        Some(Self { cw, ch, pw, ph, d, sd, cov, origin: [sites[0], sites[3]], model: *model, wb, side: 1 })
+        Some(Self { cw, ch, pw, ph, d, own, sd, cov, origin: [sites[0], sites[3]], model: *model, wb, side: 1 })
     }
 
     /// These cells at pyramid level `level` (`level ≥ 1`): each the mean of a
@@ -1087,23 +1089,25 @@ impl Cells {
     fn level(&self, level: u32) -> Self {
         let s = 1usize << level;
         let (cw, ch) = (self.cw.div_ceil(s), self.ch.div_ceil(s));
-        let d: Vec<[f32; 3]> = (0..cw * ch)
+        let (d, own): (Vec<[f32; 3]>, Vec<[f32; 2]>) = (0..cw * ch)
             .into_par_iter()
             .map(|i| {
                 let (x0, y0) = ((i % cw) * s, (i / cw) * s);
                 let (x1, y1) = ((x0 + s).min(self.cw), (y0 + s).min(self.ch));
-                let mut acc = [0.0f64; 3];
+                let mut acc = [0.0f64; 5];
                 for y in y0..y1 {
-                    for q in &self.d[y * self.cw + x0..y * self.cw + x1] {
-                        for c in 0..3 {
-                            acc[c] += f64::from(q[c]);
+                    for j in y * self.cw + x0..y * self.cw + x1 {
+                        let (q, o) = (self.d[j], self.own[j]);
+                        for (a, v) in acc.iter_mut().zip([q[0], q[1], q[2], o[0], o[1]]) {
+                            *a += f64::from(v);
                         }
                     }
                 }
                 let n = ((x1 - x0) * (y1 - y0)) as f64;
-                acc.map(|a| (a / n) as f32)
+                let m = acc.map(|a| (a / n) as f32);
+                ([m[0], m[1], m[2]], [m[3], m[4]])
             })
-            .collect();
+            .unzip();
         let (pw, ph) = (cw.div_ceil(PATCH).max(1), ch.div_ceil(PATCH).max(1));
         // The base patches under level patch `(px, py)`: `s` of them a side.
         let span = |p: usize, n: usize| {
@@ -1129,7 +1133,7 @@ impl Cells {
                 (sd, (c / (sf * sf * sf)) as f32)
             })
             .unzip();
-        Self { cw, ch, pw, ph, d, sd, cov, origin: self.origin, model: self.model, wb: self.wb, side: self.side * s }
+        Self { cw, ch, pw, ph, d, own, sd, cov, origin: self.origin, model: self.model, wb: self.wb, side: self.side * s }
     }
 
     /// One cell's noise sd per colour difference at cell `i`'s OWN level —
@@ -1432,7 +1436,7 @@ impl Cells {
     /// The planes the demosaiced pixels are rebuilt on ([`CellChroma`]):
     /// the filtered cell chroma, each cell's green and its slope
     /// ([`Self::slopes`]) over the window of half side `rho` cells.
-    fn chroma(&self, filtered: &[[f32; 2]], model: &NoiseModel, wb: [f64; 3], rho: usize) -> CellChroma {
+    fn chroma(&self, filtered: &[[f32; 2]], wb: [f64; 3], rho: usize) -> CellChroma {
         CellChroma {
             cw: self.cw,
             ch: self.ch,
@@ -1440,79 +1444,59 @@ impl Cells {
             origin: self.origin,
             planes: [0, 1].map(|j| filtered.iter().map(|f| f[j]).collect()),
             green: self.d.iter().map(|d| d[2]).collect(),
-            slopes: self.slopes(filtered, model, rho),
+            slopes: self.slopes(rho),
         }
     }
 
-    /// Each cell's slope of its filtered chroma (`filtered`) against its
-    /// green over the window of half side `rho` cells, per colour difference:
-    /// `a = cov(G, c) / (var(G) + σ²_G)`, the display pass's own `a·l + b`
-    /// (`render::detail::chroma_nr`) brought to linear light with the model
-    /// in place of a chosen `ε` — `σ²_G` the model's noise variance of a
-    /// cell's green (the mean of two sites, half one site's) at the window's
-    /// mean green, at the cell's radius. That is the only shrinkage, and it is
-    /// derived: a slope is believed where the green's variance exceeds the
-    /// noise's. On a flat sky `cov → 0`, so `a → 0` and the pixel keeps the
-    /// cell's chroma (the green's noise is not re-injected into colour); on a
-    /// star or a twig `var(G) ≫ σ²_G` and `a` is the true slope. Box sums,
-    /// O(cells): column sums slid down a band of rows, row sums slid along.
-    fn slopes(&self, filtered: &[[f32; 2]], model: &NoiseModel, rho: usize) -> [Vec<f32>; 2] {
-        const BAND: usize = 64;
+    /// Each cell's slope of its colour against its light, for the pixel
+    /// rebuild ([`CellChroma::rebuild`]), per colour difference: the
+    /// least-squares slope of the cells' MEASURED colour against their own
+    /// green (`o = wR·R − G`, [`Self::own`]: the colour ratio's measurement)
+    /// on `G` over the window of half side `rho` cells, less the noise's own
+    /// covariance, `â = (cov_W(G, o) − κ)/var_W(G)`, read where it is
+    /// resolved at the frame's fairness, `|â| > k_F·σ_a` (a question asked
+    /// once per cell, [`fair_k`]), and nothing otherwise (see the module).
+    /// The noise: `o` holds the cell's green with weight −1, so
+    /// `cov(G_i, o_i) = −v_i` (`v` the green's variance at the cell's own
+    /// level, [`Self::light_noise`]) and nothing with another cell's (the
+    /// cells' greens share no site): `κ = −v̄·(1 − 1/N)`;
+    /// `σ_a² = v̄_o/(N·var_W(G)) + v̄²/(N·var_W(G)²)`, the
+    /// slope's variance under the null — the regression's, `v_o` one cell's
+    /// `wR²·var(R) + σ²_G/2` at its level, and the product of the noise `o`
+    /// shares with its own green (Isserlis). On a flat frame the slope is
+    /// nothing but at the frame's false reads; on a star it is resolved many
+    /// times over and read whole. (The site difference `d`, regressed on `G`,
+    /// carries the demosaic green's curvature, `(2·L_c − L_l − L_u)/4` at a
+    /// red site, which a star correlates with its light: 0.55 against a star's
+    /// 0.40 in the numpy model, rel1180 msg-e3 round 27.) Box sums, O(cells).
+    fn slopes(&self, rho: usize) -> [Vec<f32>; 2] {
         let (cw, ch) = (self.cw, self.ch);
-        let mut both = vec![[0.0f32; 2]; cw * ch];
-        // Per cell: G, G², c_R, c_B, G·c_R, G·c_B.
-        let q = |i: usize| {
-            let g = f64::from(self.d[i][2]);
-            let [c0, c1] = filtered[i].map(f64::from);
-            [g, g * g, c0, c1, g * c0, g * c1]
-        };
-        both.par_chunks_mut(cw * BAND).enumerate().for_each(|(band, rows)| {
-            let y0 = band * BAND;
-            let mut col = vec![[0.0f64; 6]; cw];
-            let slide = |col: &mut [[f64; 6]], y: usize, sign: f64| {
-                for (x, c) in col.iter_mut().enumerate() {
-                    let v = q(y * cw + x);
-                    for k in 0..6 {
-                        c[k] += sign * v[k];
-                    }
+        let k = fair_k((cw * ch) as f64);
+        let s = self.side as f64;
+        // Per cell: G, G², o_R, o_B, G·o_R, G·o_B, v_oR, v_oB, v.
+        let q: Vec<[f64; 9]> = (0..cw * ch)
+            .into_par_iter()
+            .map(|i| {
+                let g = f64::from(self.d[i][2]);
+                let [o0, o1] = self.own[i].map(f64::from);
+                let (cx, cy) = (i % cw, i / cw);
+                let r = self.model.radius((cx as f64 + 0.5) * 2.0 * s, (cy as f64 + 0.5) * 2.0 * s);
+                let v = self.light_noise(i)[0];
+                let colour = |w: f64, o: f64| w * w * self.model.var((o + g) / w, r) / (s * s) + v;
+                [g, g * g, o0, o1, g * o0, g * o1, colour(self.wb[0], o0), colour(self.wb[2], o1), v]
+            })
+            .collect();
+        let both = box_means((cw, ch), rho, |i| q[i], |_, m: [f64; 9], n| {
+            let var = m[1] - m[0] * m[0];
+            let kappa = -m[8] + m[8] / n;
+            [0, 1].map(|j| {
+                if var.is_nan() || var <= 0.0 {
+                    return 0.0;
                 }
-            };
-            for y in y0.saturating_sub(rho)..(y0 + rho + 1).min(ch) {
-                slide(&mut col, y, 1.0);
-            }
-            for (dy, out) in rows.chunks_mut(cw).enumerate() {
-                let y = y0 + dy;
-                let rows_n = ((y + rho + 1).min(ch) - y.saturating_sub(rho)) as f64;
-                let mut s = [0.0f64; 6];
-                for c in &col[..(rho + 1).min(cw)] {
-                    for k in 0..6 {
-                        s[k] += c[k];
-                    }
-                }
-                for (x, a) in out.iter_mut().enumerate() {
-                    let n = rows_n * ((x + rho + 1).min(cw) - x.saturating_sub(rho)) as f64;
-                    let mg = s[0] / n;
-                    let noise = model.var(mg, model.radius((2 * x + 1) as f64, (2 * y + 1) as f64)) / 2.0;
-                    let den = (s[1] / n - mg * mg).max(0.0) + noise;
-                    *a = [0, 1].map(|j| if den > 0.0 { ((s[4 + j] / n - mg * s[2 + j] / n) / den) as f32 } else { 0.0 });
-                    if x + rho + 1 < cw {
-                        for k in 0..6 {
-                            s[k] += col[x + rho + 1][k];
-                        }
-                    }
-                    if x >= rho {
-                        for k in 0..6 {
-                            s[k] -= col[x - rho][k];
-                        }
-                    }
-                }
-                if y + rho + 1 < ch {
-                    slide(&mut col, y + rho + 1, 1.0);
-                }
-                if y >= rho {
-                    slide(&mut col, y - rho, -1.0);
-                }
-            }
+                let a = (m[4 + j] - m[0] * m[2 + j] - kappa) / var;
+                let err = m[6 + j] / (n * var) + m[8] * m[8] / (n * var * var);
+                if a * a > k * k * err { a as f32 } else { 0.0 }
+            })
         });
         [0, 1].map(|j| both.iter().map(|a| a[j]).collect())
     }

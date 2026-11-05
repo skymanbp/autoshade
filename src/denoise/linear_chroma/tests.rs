@@ -378,7 +378,7 @@ fn a_pixels_colour_follows_its_light_where_the_green_varies_more_than_its_noise(
     let model = NoiseModel::fit(&pts, W, H).expect("a Bayer mosaic with noise fits a model");
     let cells = Cells::of(&m, W, H, sites, WB, &model, &pts).expect("cells");
     let scene: Vec<[f32; 2]> = cells.d.iter().map(|d| RATIO.map(|r| ((r - 1.0) * f64::from(d[2])) as f32)).collect();
-    let chroma = cells.chroma(&scene, &model, WB, 3);
+    let chroma = cells.chroma(&scene, WB, 3);
     let mut rgb: Vec<[f32; 3]> = (0..W * H).map(|i| [0.0, light(i % W, i / W) as f32, 0.0]).collect();
     chroma.rebuild(&mut rgb, W, 0, 0, GREEN_LUMA);
     for (c, wc) in [(0usize, WB[0]), (2, WB[2])] {
@@ -463,7 +463,7 @@ fn a_stars_colour_sits_where_its_light_sits() {
     let model = NoiseModel::fit(&pts, W, H).expect("a Bayer mosaic with noise fits a model");
     let cells = Cells::of(&m, W, H, sites, WB, &model, &pts).expect("cells");
     let measured: Vec<[f32; 2]> = cells.d.iter().map(|d| [d[0], d[1]]).collect();
-    let chroma = cells.chroma(&measured, &model, WB, 3);
+    let chroma = cells.chroma(&measured, WB, 3);
     let mut rgb: Vec<[f32; 3]> = (0..W * H).map(|i| [0.0, light(i % W, i / W) as f32, 0.0]).collect();
     chroma.rebuild(&mut rgb, W, 0, 0, GREEN_LUMA);
     // Per star, the centroid of `value − sky` over the square about it.
@@ -1900,4 +1900,73 @@ fn the_lights_false_reads_are_the_laws_at_two_levels() {
         }
     }
     assert!(over.is_empty(), "the light's false reads exceed the law's {law:.3} where the photon term is real: {over:?}");
+}
+
+/// (b), rel1180 RULING r20: the rebuild's slope is read where it is resolved
+/// at the frame's fairness and is nothing otherwise, so on a flat frame it
+/// adds no grain: the rebuilt pixels' chroma (the stage's own read at 25 and
+/// its slope) against the same rebuild with every slope zero, the energy the
+/// slope adds, `mean((c_b − c_0)²)`, within 3 se of the zero-slope grain's
+/// own measurement (its spread over 16 blocks of the frame). Printed: the
+/// cells whose slope is read, against the law's expected `2·Φ(−k_F)·C`
+/// windows (each lights the cells around it: adjacent windows share all but
+/// a column).
+///
+/// MUTATION: the test dropped (every slope read) → the slope's own noise,
+/// `σ_a²·var(G_px − G_cell)`, is added to every pixel and the grain rises.
+#[test]
+fn a_flat_cells_slope_is_nothing_and_adds_no_grain() {
+    let m = mosaic(0.01, 0.0);
+    let cells = cells_of(&m, None);
+    let rho = at25();
+    let out = cells.guided(rho, lv25());
+    let chroma = cells.chroma(&out, WB, rho);
+    let n = cells.cw * cells.ch;
+    let mut zero = cells.chroma(&out, WB, rho);
+    zero.slopes = [vec![0.0; n], vec![0.0; n]];
+    // A demosaic's green: the site's own at a green site, its four greens' mean at a colour site.
+    let g = |x: usize, y: usize| -> f32 {
+        if (x + y) % 2 == 1 {
+            return m[y * W + x];
+        }
+        let at = |x: isize, y: isize| m[(y.clamp(0, H as isize - 1) as usize) * W + x.clamp(0, W as isize - 1) as usize];
+        let (x, y) = (x as isize, y as isize);
+        (at(x - 1, y) + at(x + 1, y) + at(x, y - 1) + at(x, y + 1)) / 4.0
+    };
+    let base: Vec<[f32; 3]> = (0..W * H).map(|i| [0.0, g(i % W, i / W), 0.0]).collect();
+    let (mut rb, mut r0) = (base.clone(), base);
+    chroma.rebuild(&mut rb, W, 0, 0, GREEN_LUMA);
+    zero.rebuild(&mut r0, W, 0, 0, GREEN_LUMA);
+    let read: [usize; 2] = [0, 1].map(|j| chroma.slopes[j].iter().filter(|a| **a != 0.0).count());
+    let k = fair_k(n as f64);
+    let law = (1.0 - normal_mass(k).0) * n as f64;
+    let r = 4 * rho + 4;
+    let (xs, ys) = (r..W - r, r..H - r);
+    for (j, c, w) in [(0usize, 0usize, WB[0]), (1, 2, WB[2])] {
+        let chroma_of = |p: &[f32; 3]| w * f64::from(p[c]) - f64::from(p[1]);
+        let mut added = 0.0;
+        let mut count = 0.0;
+        let mut blocks = vec![(0.0f64, 0.0f64, 0.0f64); 16];
+        for y in ys.clone() {
+            for x in xs.clone() {
+                let i = y * W + x;
+                let (b, z) = (chroma_of(&rb[i]), chroma_of(&r0[i]));
+                added += (b - z) * (b - z);
+                count += 1.0;
+                let bi = 4 * ((y - r) * 4 / (H - 2 * r)) + (x - r) * 4 / (W - 2 * r);
+                blocks[bi].0 += z;
+                blocks[bi].1 += z * z;
+                blocks[bi].2 += 1.0;
+            }
+        }
+        let added = added / count;
+        let vars: Vec<f64> = blocks.iter().map(|(s, q, n)| q / n - (s / n) * (s / n)).collect();
+        let mean = vars.iter().sum::<f64>() / 16.0;
+        let se = (vars.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / 15.0 / 16.0).sqrt();
+        println!(
+            "colour difference {j}: the zero-slope grain {mean:.4e} (se {se:.2e}), the slope adds {added:.4e}; cells read {} of {n} (the law's windows {law:.2})",
+            read[j]
+        );
+        assert!(added <= 3.0 * se, "colour difference {j}: the slope adds {added:.4e} of grain on a flat frame, over 3 se {:.4e}", 3.0 * se);
+    }
 }
