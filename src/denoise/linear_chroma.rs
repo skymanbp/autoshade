@@ -293,7 +293,8 @@ pub(crate) fn filter_mosaic(
     let reading = SourceReading { model, k };
     let k = k * scale;
     let rho = rho(k);
-    let filtered: Vec<[f32; 2]> = (0..cells.cw * cells.ch).into_par_iter().map(|i| cells.filtered(i, k, rho)).collect();
+    let filtered: Vec<[f32; 2]> =
+        (0..cells.cw * cells.ch).into_par_iter().map_init(Scratch::default, |s, i| cells.filtered_in(i, k, rho, s).0).collect();
     cells.write(mosaic, width, sites, wb, &filtered);
     let chroma = cells.chroma(&filtered, &model, wb, rho);
     Some((reading, k, chroma))
@@ -449,17 +450,18 @@ pub(crate) fn photo_k(cells: &Cells, model: &NoiseModel, pts: &[Patch], wb: [f64
 /// estimate and the `n` of the last pass. The first pass accepts the centre
 /// (|0| ≤ t), so `n ≥ 1`; a later pass that accepts no sample leaves the
 /// estimate it was anchored on, itself a mean of accepted samples.
-pub(crate) fn skipped_mean(window: &[f32], centre: f32, sigma: f64, k: f64) -> (f32, u32) {
+/// `seen` keeps the estimates seen (cleared first): a worker's buffer, reused
+/// across its cells.
+pub(crate) fn skipped_mean(window: &[f32], centre: f32, sigma: f64, k: f64, seen: &mut Vec<u32>) -> (f32, u32) {
     let (mut estimate, mut n) = (centre, 1u32);
-    let mut seen: Vec<u32> = Vec::new();
+    seen.clear();
     loop {
         let t = (k * sigma * (1.0 + 1.0 / f64::from(n)).sqrt()) as f32;
         let (mut sum, mut m) = (0.0f64, 0u32);
         for &q in window {
-            if (q - estimate).abs() <= t {
-                sum += f64::from(q);
-                m += 1;
-            }
+            let inside = (q - estimate).abs() <= t;
+            sum += if inside { f64::from(q) } else { 0.0 };
+            m += u32::from(inside);
         }
         if m == 0 {
             return (estimate, n);
@@ -472,6 +474,14 @@ pub(crate) fn skipped_mean(window: &[f32], centre: f32, sigma: f64, k: f64) -> (
         seen.push(next.to_bits());
         estimate = next;
     }
+}
+
+/// One worker's buffers for the pass: the window per colour difference and
+/// the estimates seen.
+#[derive(Default)]
+struct Scratch {
+    window: [Vec<f32>; 2],
+    seen: Vec<u32>,
 }
 
 /// The mosaic's cells: the two colour differences and the green of each, and
@@ -528,17 +538,29 @@ impl Cells {
 
     /// [`Self::filtered`] with the count of window samples the last pass accepted.
     fn filtered_counted(&self, i: usize, k: f64, rho: usize) -> ([f32; 2], [u32; 2]) {
+        self.filtered_in(i, k, rho, &mut Scratch::default())
+    }
+
+    /// [`Self::filtered_counted`] in a worker's reused buffers: the window's
+    /// samples gathered once per centre, both colour differences in one sweep.
+    fn filtered_in(&self, i: usize, k: f64, rho: usize, scratch: &mut Scratch) -> ([f32; 2], [u32; 2]) {
         let (cw, ch) = (self.cw, self.ch);
         let (cx, cy) = (i % cw, i / cw);
         let sd = self.sd[(cy / PATCH).min(self.ph - 1) * self.pw + (cx / PATCH).min(self.pw - 1)];
         let (y0, y1, x0, x1) = (cy.saturating_sub(rho), (cy + rho + 1).min(ch), cx.saturating_sub(rho), (cx + rho + 1).min(cw));
-        let mut window = Vec::with_capacity((y1 - y0) * (x1 - x0));
+        let Scratch { window: [w0, w1], seen } = scratch;
+        w0.clear();
+        w1.clear();
+        for y in y0..y1 {
+            for q in &self.d[y * cw + x0..y * cw + x1] {
+                w0.push(q[0]);
+                w1.push(q[1]);
+            }
+        }
         let (mut out, mut count) = ([0.0f32; 2], [0u32; 2]);
-        for j in 0..2 {
-            window.clear();
-            window.extend((y0..y1).flat_map(|y| self.d[y * cw + x0..y * cw + x1].iter().map(move |q| q[j])));
+        for (j, window) in [&*w0, &*w1].into_iter().enumerate() {
             // One cell's sd is `σ_d / √2`.
-            (out[j], count[j]) = skipped_mean(&window, self.d[i][j], f64::from(sd[j]) / 2f64.sqrt(), k);
+            (out[j], count[j]) = skipped_mean(window, self.d[i][j], f64::from(sd[j]) / 2f64.sqrt(), k, seen);
         }
         (out, count)
     }
