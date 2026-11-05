@@ -799,7 +799,7 @@ fn replace_zone_with(
     // same gates. The smallest model wins ties; no reference-pair special case.
     let trial_count = models.len();
     let rows = profile_rows(&single_px, target, &parent.source_weights, image.width() as usize, image.height() as usize);
-    let tried: Vec<(Vec<f32>, Vec<f32>)> = models.iter().map(|m| (m.breaks.clone(), m.widths.clone())).collect();
+    let mut tried: Vec<(Vec<f32>, Vec<f32>)> = models.iter().map(|m| (m.breaks.clone(), m.widths.clone())).collect();
     // The control arm without its parent renders the same for every trial:
     // one render, not one per trial.
     let uncorrected = {
@@ -840,9 +840,12 @@ fn replace_zone_with(
                 None => break attachments,
             }
         };
-        // A re-cut that lands on a partition the model set already holds is
-        // that partition's own trial.
-        if recut && tried.iter().any(|(b, w)| *b == model.breaks && *w == model.widths) { continue; }
+        // A re-cut that lands on a partition the model set already holds, or
+        // one an earlier re-cut already tried, is that partition's own trial.
+        if recut {
+            if tried.iter().any(|(b, w)| *b == model.breaks && *w == model.widths) { continue; }
+            tried.push((model.breaks.clone(), model.widths.clone()));
+        }
         // The one boundary a trial is judged at: the zone's own contour. A
         // band's ramp is not a boundary — it is the correction's designed
         // gradient between two fits of the same region, as wide as the target's
