@@ -52,8 +52,19 @@ impl AcceptedZone {
     /// `ships_local` read it at k = 1 (RULING-1180-int-r6 (2): every
     /// do-no-harm at a zone reads the one objective; until then this read
     /// the display moments, luma-only where colour was withheld).
+    ///
+    /// S-MODE: a local correction's do-no-harm reads `E_paired + H_ab`
+    /// (`LookTerms::local`), so this reading is local whether or not the
+    /// caller's model was switched to its local form. The pipeline switches
+    /// it before any zone (`entry::local_verdicts`); a caller that drives the
+    /// zone stage on its own did not, and there the structural term — the D
+    /// threshold's and the seam rulers' question — decided the do-no-harm: a
+    /// shrunk land zone whose own E_paired + H_ab read 0.05311 -> 0.05053 was
+    /// refused on S 0.163 -> 0.192.
     pub(super) fn judged(&self, report: &FitReport, pixels: &[[f32; 3]], tgt_px: &[[f32; 3]]) -> f32 {
-        own_reading(report, pixels, tgt_px, &self.own_weights.0, &self.own_weights.1)
+        let mut own = report.evidence.scoped(tgt_px, &self.own_weights.0, &self.own_weights.1);
+        own.local = true;
+        fit::look_err_with_evidence(pixels, tgt_px, &own)
     }
 
     /// R39. Does the correction that SHIPS still do what it was admitted
@@ -106,6 +117,7 @@ impl AcceptedZone {
     /// The refusal note a caller pushes when [`Self::still_accepted`] says
     /// no: which correction, at what shrink, its residual with and without
     /// it, and the frame pair.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn shrunk_refusal_note(
         &self,
         report: &FitReport,
@@ -522,19 +534,8 @@ pub(super) fn push_zone_attached_note(report: &mut FitReport, zone: &AcceptedZon
 /// frame's ruler (the report's local J*, its evidence) scoped to the
 /// region's own weights, so its pairing, its bands and its worst band are
 /// the region's (`fit::ships_local`).
-///
-/// S-MODE: it is a local correction's reading wherever it is taken, so it is
-/// `E_paired + H_ab` (`LookTerms::local`) whether or not the caller's
-/// model was switched to its local form (`local_verdicts` switches the
-/// report's model before any zone in the pipeline; a caller that drives a
-/// zone stage on its own did not, and there the structural term — the
-/// D threshold's and the seam rulers' question — decided a zone's
-/// do-no-harm: a shrunk land zone whose own E_paired + H_ab read
-/// 0.05311 -> 0.05053 was refused on S 0.163 -> 0.192).
 pub(super) fn own_reading(report: &FitReport, px: &[[f32; 3]], tgt: &[[f32; 3]], sw: &[f32], tw: &[f32]) -> f32 {
-    let mut own = report.evidence.scoped(tgt, sw, tw);
-    own.local = true;
-    fit::look_err_with_evidence(px, tgt, &own)
+    fit::look_err_with_evidence(px, tgt, &report.evidence.scoped(tgt, sw, tw))
 }
 
 /// R19: the analysis-size coverage of `masks` (the engine's own weight per
