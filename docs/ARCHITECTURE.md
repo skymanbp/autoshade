@@ -809,7 +809,9 @@
 > `field_proposal_spans_are_mapped_through_the_pixels_that_occupy_them`; in
 > `src/fit_zoned/spatial.rs`, `tile_attachment_cap_is_parameterized`; and in
 > `src/fit_zoned.rs`, `field_disabled_layer_is_byte_identical`,
-> `field_stop_rule_skips_the_tile_producer_and_names_it` and
+> `field_stop_rule_skips_the_tile_producer_and_names_it` (renamed
+> `a_stale_field_ceiling_stops_no_tile_and_only_a_reread_one_stops_the_free_masks`
+> in v1.18.0, when the stop rule stopped skipping the tiles) and
 > `calibration_local_field_discloses_ceiling_and_realized_share`; nothing
 > removed. THREE suites are ADDITIONAL and env-gated, so a bare `cargo test`
 > does not include them. The F1 release reproof adds +22 default test names
@@ -1820,7 +1822,7 @@ image path and the API analysis path each need an OpenAI-compatible key.
 | V2 | Baked-source mode (edit exported PNG/TIFF) | extension dispatch; develop runs on loaded pixels | **done** |
 | V2 | Generative reimagine / retouch / GUI adjust | OpenAI Images (`gpt-image-*`); reimagine composes a faithfulness scaffold onto the prompt under `high` (the `input_fidelity` parameter is negotiated away on gpt-image-2), measures the result's structural divergence D with the reverse-fit's own statistic (`fit::structure_divergence_for`, threshold `fit::DIVERGENCE_GLOBAL`), disclosures it, and offers a bounded opt-in retry that keeps the closer of two results; `retouch_onto`, `auto_fill_onto` and `adjust_onto` share the private `edit_onto` request core (`Keep::Painted` / `Found` / `Whole`): a painted mask or the area the answer changed is levelled onto the base and composited, a whole-frame edit keeps the answer and its sent-input D | **done (experimental)** |
 | V2 | Pixel retouch / heal (spot removal) | deterministic heal engine + vision spot-detect ([`src/retouch.rs`](../src/retouch.rs)) | **done (experimental)** |
-| V2 | Look matching / reverse-fit (`match`) | distribution-level solve for the recipe that reproduces a target rendition ([`src/fit.rs`](../src/fit.rs); zoned variant [`src/fit_zoned.rs`](../src/fit_zoned.rs), range layer [`src/fit_zoned/range.rs`](../src/fit_zoned/range.rs)) | **done** |
+| V2 | Look matching / reverse-fit (`match`) | solve for the recipe that reproduces a target rendition, judged per pixel where the two frames correspond and by Lab distribution where they do not ([`src/fit.rs`](../src/fit.rs); zoned variant [`src/fit_zoned.rs`](../src/fit_zoned.rs), range layer [`src/fit_zoned/range.rs`](../src/fit_zoned/range.rs)) | **done** |
 | V2 | Cross-image correspondence (content-divergent pairs) | DIFT (SD 2.1) sidecar → 48×48 field of target coordinates + cyclic×smoothness confidences ([`src/correspond.rs`](../src/correspond.rs), [`python/correspond.py`](../python/correspond.py)); CLI `correspond` diagnostic; the reverse-fit consults it automatically on content-divergent pairs (the fit's own D gate, single-sourced) and FULL zone fits weight pairs by confidence + read shifted content at its corresponded position — share gates and Atmosphere zones keep pre-field semantics, and identity/zero fields are conservation-tested to change nothing | **done (7a instrument + 7b estimator wiring)** |
 
 ### 4.1 RAW decode (M1)
@@ -2859,7 +2861,12 @@ sliders: `render::base_develop` / `source_pixels_for` for the GUI and web
 canvases (re-developed in the background when the recipe's part changes,
 `ensure_source_part`), the Before view, the fill's card pixels and the reverse
 fit's source (`pipeline::fit_source`, a `Plate` in the sensor frame,
-`render::source_plate`). A recipe that names no profile — every fresh
+`render::source_plate`) — since v1.18.0 not the base develop itself but the
+export's own develop of the base with the lens geometry left for later
+(capture sharpening included, where the export applies it), decoded back
+through the base's pointwise stages (`BaseEncoding`) so that every resample
+of it runs where the export's does, and an untouched recipe reads as
+identical to its own export. A recipe that names no profile — every fresh
 develop — has the neutral part, which is the v1.16.0 develop. The base is
 UNSHARPENED (the display and the export sharpen once, over it); the heal /
 clone / denoise / stack / generative MASTERS bake through
@@ -4446,6 +4453,11 @@ ticked on a brush or AI mask never reached the sidecar.
 `FIT_SOURCE_EDGE = 2048` under its calibration's camera profile (a neutral
 develop until v1.17.0) plus the per-photo calibration recipe — and both
 entry points, `main.rs`'s `match` and the GUI's `start_fit` worker, call it.
+Since v1.18.0 that develop is the export's own (`render::source_plate`,
+above), and a baked source (a JPEG or PNG, what Normal mode fits) has no
+sensor frame: `fit_source` reads it on its own pixels under the calibration
+its saved develop carries, the CLI's baked arm, which `match_source`'s last
+arm calls.
 The CLI used to take the camera's embedded JPEG preview when one existed, and
 the two frames read differently enough to choose different solvers: on the
 desert-dusk reference pair the embedded rendition measures D = 0.361 and buys
@@ -4492,18 +4504,92 @@ marked (above), so neither the target nor a mask is mapped from one frame
 into the other on the way; `render::corrected_to_sensor_frame` is left to the
 GUI's segmentation, depth and face helpers, which draw on the sensor frame.
 
-The method is deliberately **distribution-level, not per-pixel regression** — a
-generative target is not pixel-aligned with its source, so only statistics are
-trustworthy. A rank/gradient/pyramid structural-divergence reading selects the
-global policy before any CDF solve.
+The objective reads **per pixel where the two frames correspond and by
+distribution where they do not** (v1.18.0, `fit::look_err_with_evidence`).
+Where the evidence model pairs a pixel, it reads the CIE76 distance between
+the two sides' σ = 2 px local means (`PAIRED_POOL_SIGMA`, the pool the
+structural instrument already reads its gradients at), a pixel-level reading
+that grain and sharpening do not move; where it does not — a repainted or
+generated region, whose pixels are not aligned with the source — it reads
+the distance between the two Lab distributions, √(T_L² + T_a² + T_b²)/100
+over 21 clamped quantiles per channel, in the same units, so a uniform offset
+of d ΔE reads d/100 either way. The look error is
+`0.75·[p·E_paired + (1 − p)·E_dist] + 0.15·H_ab·w + 0.10·S`, `p` the paired
+share; `H_ab` is the worst qualifying band's mean a\*b\* offset in units of
+the target band's own chroma (a 60° rotation is a chord of length one, so the
+old hue term's saturation carries over), `S` the structural divergence under
+its tie rule — two luma values within one output code are a tie, charged by
+the fraction of a code that separates them, never as a whole rank step, so a
+clipped sky or a crushed shadow is not read as scrambled. Every term weighs a
+pixel by its presence (its membership, 1 for a present pixel), never by the
+evidence model's estimation weights, which only drive the solves. Who pairs
+is decided by the finest mode that was read, both ways: an Atmosphere zone's
+pixels never pair, even in a Full frame, and a Full zone's pixels pair by
+its own model, even in an Atmosphere frame. `S` is read only where the
+question is structure — mode, evidence and the comparisons of two global
+solves; a local correction's do-no-harm reads `E_paired + H_ab`
+(`LookTerms::local`), its seams the boundary and ramp rulers. The solves
+themselves stay distribution-level (CDF matching, mean-chroma ratio): only
+the judging moved. Until v1.18.0 the objective was
+`0.55·T + 0.20·C + 0.15·H + 0.10·S` in display sRGB, a frame-level
+distribution distance that could not credit a local correction for moving
+its own pixels and in which a night sky's brightness outweighed its colour
+many times over. A rank/gradient/pyramid structural-divergence reading
+still selects the global policy before any CDF solve.
+
+**One law decides what ships** (v1.18.0). Every stage-vs-absence decision is
+`fit::ships`: a stage ships only when its gain over its absence is at least
+`FIT_QUANT`; a smaller gain is no difference and goes to the simpler recipe,
+a loss of any size refuses, so the stages' allowances cannot add up.
+`FIT_QUANT` is measured, not chosen: an identical pair with every stored
+control displaced by half its storage step, read through the fit's own
+preview, worst of four corpus pairs 0.002250, hence 2.3e-3; the nine bare
+1e-4 margins, the tone rulers', the bands' end state and the zones' frame
+allowance all read it. A LOCAL correction (zone, tile, free mask, band set,
+range set, zone tint) ships when it earns `FIT_QUANT` on its own population —
+the objective over the region's own present pixels and its own worst band —
+and the frame is a guard that may not rise by more than `FIT_QUANT`
+(`fit::ships_local`): read on the frame, a region's gain is divided by its
+share, and a tile covering 6 % of the frame was asked for seventeen times
+the margin on its own pixels. After every joint solve, and once more on the
+finished recipe, each control off its base is set back in order of smallest
+effect and stays there when its loss is under `FIT_QUANT`
+(`eliminate_unearned`, note `FIT_NOTE_UNEARNED`); on the finished recipe a
+tone slider that does not earn on the frame may earn on the one L\* band its
+own response weighs most, fixed before any error is read
+(`look::LumaBands::acting_band`, the frame a guard) — contrast, exposure and
+the tone curve act on the frame and earn there. The finished recipe and the
+calibration-only base are then each rendered once as the export renders
+them, at full size and then resampled, and read on the frame's evidence; the
+recipe ships only when it ships against the base there
+(`pipeline::reread_at_full_size`, notes `FIT_TERMINAL_FULL_SIZE` /
+`FIT_TERMINAL_FULL_SIZE_BASE`), because the search previews on a plate
+clamped where the export clamps and clamp-then-average differs from
+average-then-clamp wherever a window holds clipped and unclipped pixels —
+0.0032 to 0.0214 of look error on the corpus's finished recipes, past
+`FIT_QUANT`. A note describes what ships: the cast, hand-off and zone
+sentences are derived from the finished recipe, and a shrunk zone's
+vouched-colour notes are withdrawn when the shrink refuses it. The
+self-consistency gate ([`src/fit/self_consistency.rs`](../src/fit/self_consistency.rs),
+[`src/fit_zoned/self_consistency.rs`](../src/fit_zoned/self_consistency.rs))
+renders a corpus RAW with one control set to a known value, takes the render
+as the target and asks the fit to find it again from the straight
+conversion: the control must come back with its sign and at least half its
+size, nothing else may move, and the finished frame must land within
+`FIT_QUANT`; the same file checks that an untouched recipe reads as identical
+to its own export, and the cases that still fail are `#[ignore]`d as the
+open defects they are.
 
 **Two scales, both read, both disclosed** (R33 §B). `divergence_pair_for`
 builds the 384×256 raster once and takes two readings off it: the existing
 `structure_divergence`, and `structure_divergence_coarse`, the same statistic
 after a separable Gaussian low-pass at σ = `ANALYZE_EDGE / COARSE_SIGMA_DIVISOR`
-(8 px at 384; the taps are renormalised at the border, unlike the band blurs
-inside `structure_divergence`, so the coarse pass cannot inject a shared
-vignette). The pair reports a `PairingScale` — `Pixel` when the FINE reading is
+(8 px at 384; the taps are renormalised at the border, as the band blurs
+inside `structure_divergence` are too since v1.18.0 — each a normalised
+masked blur, blur(m·x) / blur(m), so a pixel the reading's mask leaves out
+contributes nothing at any scale, and each band reads max(E, f) against a
+floor f derived from the ranks' own 1024-bin rounding carried through that
+band's filter — so the coarse pass cannot inject a shared vignette). The pair reports a `PairingScale` — `Pixel` when the FINE reading is
 under `DIVERGENCE_GLOBAL`, else `Cell` — and both numbers reach the CLI line,
 the GUI status line and the rationale.
 
@@ -4562,13 +4648,21 @@ size rule refuses it and the cast returns to as-shot.
 The tone stage and the residual curve stage each carry their own do-no-harm
 now (`SolveFacts::tone_harm` / `curve_harm`, `FIT_NOTE_TONE_WITHHELD_HARM` /
 `FIT_NOTE_CURVE_WITHHELD_HARM`): the sliders are rendered against the untouched
-source and withheld where they read worse, the curve against the sliders alone
-— on the TONAL term of the objective (`look::tonal_err_with_evidence`), the
-term a tone move controls. Held to the whole objective, a correct luma move on
+source and ship only where they bring the frame's tones closer by at least
+`FIT_QUANT` (`fit::ships`, v1.18.0; until then wherever they did not read
+worse), the curve against the sliders alone
+— on the TONAL term of the objective (`look::tonal_err_with_evidence`, the
+21-quantile gap between the two L\*/100 CDFs since v1.18.0), the
+term a tone move controls; the six sliders then each earn their own place on
+that ruler, and what stays ships on the whole objective against its absence
+on the finished recipe. A second whole-objective verdict at the tone stage
+itself was tried in v1.18.0 and withdrawn: read before the white balance,
+saturation and grade are solved, it charged a correct luma move for the
+colour drift those stages exist to take out. Held to the whole objective, a correct luma move on
 a muted frame with a vivid target was charged for the colour-mean drift the
 later stages exist to correct (the land-and-sky toy: 0.1233 → 0.1240 on the
 sliders alone, and its zones lost the global move they were solved beside).
-Measured on the lantern street: the tone stage alone took the look error from
+Measured on the lantern street, in the objective of the day: the tone stage alone took the look error from
 0.0595 to 0.0815 and its tonal term from 0.0468 to 0.0748 (+1.65 EV against a
 darker target), the curve on top of the withheld sliders to 0.0837 against
 the untouched source, and the terminal do-no-harm — the only
@@ -4619,7 +4713,7 @@ balance — has its loop closed on the finished frame
 (`fit::curves::refine_curves_on_finished_frame`): the curves rendered where the
 render applies them, one secant step per knot toward the target's quantile at
 the share of the frame that knot governs, rounds while the look error still
-improves by the finished-frame arbitration's own margin (1e-4) and at most
+improves by `FIT_QUANT` (the finished-frame arbitration's 1e-4 until v1.18.0) and at most
 `DO_NO_HARM_MAX_ROUNDS`, the best round kept. The refined curves ship only if
 the same four vetoes admit them on the same frames; every verdict before that
 is the fitted curves', so the refinement changes what an admitted cast
@@ -4707,11 +4801,19 @@ the zone's mean deltaE by >0.02 and retain zone/frame do-no-harm. Where the
 single zone shipped, the frame's do-no-harm is a REPLACEMENT's (v1.17.1): the
 bands compete with a correction of the same region on the same finished
 frame, so they may leave it worse than the single zone did by no more than the
-finished-frame arbitration's own margin (1e-4) — held only to the zone stage's
+finished-frame arbitration's own margin (1e-4 in v1.17.1, `FIT_QUANT` since
+v1.18.0, when the band set also came to earn on the zone's own pixels with
+the frame as a guard, `fit::ships_local`) — held only to the zone stage's
 attachment tolerance (0.02) they had taken the zoned fixture's land zone
 deltaE 9.57 → 6.40 and the finished frame 0.03535 → 0.03606, worse than the
-single inverted zone they replaced. The attachment tolerance stays for the
-bands-only exit, which has no single zone to compare with. One shared
+single inverted zone they replaced. The bands-only exit, which has no single
+zone to compare with, reads the zone tolerance, `FIT_QUANT` too since
+v1.18.0. A band the model's breaks leave under the zone share floor is not a
+zone: since v1.18.0, before a trial is solved, the smallest such band is
+merged into its neighbour by removing the break it sits behind (into the
+neighbour whose merged model leaves the lower residual on the zone's own
+profile), the merged partition is held to the band model's own earning test,
+and a partition already tried is not tried again. One shared
 boundary-budget shrink covers every band break and the semantic horizon,
 using the same frozen-rim measurement and zero-difference invariant as the
 single-zone gate. After that, the complete set must not regress the
@@ -4721,7 +4823,12 @@ Since R37 both readings are CELL MEANS (`rim_cell_gaps`: the render's
 transition band against the target's through the settled-sky transport;
 `step_cell_gaps`: the cross-contour step against the target's — the
 transported soft-rim bow is not that target gap, and has no samples at a hard
-edge). A cell may move away from the target by no more than the family's
+edge). Since v1.18.0 the contour step charges a trial only for the part of
+each cell's gap that the mover's own residual at the inside foot explains,
+`|clamp(a, min(0, g), max(0, g))|` (`cell_charged_gaps`): a mover on its
+target is charged nothing beside a neighbour that is still off, an overshoot
+its overshoot, and a mover beside a correct neighbour the whole gap as
+before. A cell may move away from the target by no more than the family's
 own seam ceiling in luma or the widest channel — the largest step the
 boundary gate lets any one crossing introduce, so a fidelity ruler that
 refused less would refuse what the gate had just accepted as a seam — and
@@ -4955,10 +5062,11 @@ acceptance and boundary gates judge it; the one-sided band veto judges the
 trial's gains and saturation exactly as the plain solve's and does not judge
 the tint, because the tint was read from the pairs on both sides of every band.
 A trial counts only when it shipped a tint, lands the zone's mean ΔE lower
-than the plain solve by `ZONE_GLOBAL_REGRESSION_TOL` and leaves the frame
-within the zone's own regression tolerance of what the plain solve left —
-the subzone bands' replacement rule until v1.17.1, which now holds a band set
-that replaces a shipped single zone to the finished-frame margin (1e-4) — and
+than the plain solve by `ZONE_DELTA_E_MARGIN` (0.02 ΔE, the ΔE use the zone
+tolerance's old 0.02 doubled as, named in v1.18.0) and, since v1.18.0, earns
+`FIT_QUANT` over the plain solve on the zone's own pixels with the frame as a
+guard (`fit::ships_local`; until then it had to leave the frame within the
+zone's own regression tolerance of what the plain solve left) — and
 the counting trial with the lower zone ΔE replaces the plain
 solve; when none counts, the plain solve stands to the byte. On a
 gains-shaped gap a trial keeps or re-solves the same gains and can add only a
@@ -5023,7 +5131,7 @@ threshold. Four sites consume it:
     gate was opened on, not a second reading of it.
   * **the colour field** (`fit_zoned::field::attach_colour_field`). Only the
     SHIPPED producer changed; the analysis solve, its ceiling, the shape
-    verdicts and `LOCAL_STOP_MARGIN` are byte-identical, because the two things
+    verdicts and `LOCAL_STOP_MARGIN` (`FIT_QUANT` since v1.18.0) are byte-identical, because the two things
     that differ are now explicit parameters (`fit_field::FieldSolveOpts`) whose
     defaults are the analyzer's own constants. Pass A is today's solve. Pass B
     drops the `local_support` factor — `1 - clamp(D_cell)`, which is ~0 exactly
@@ -5356,7 +5464,11 @@ which is what holds those recipes byte-identical. The scope of that
 byte-identity claim is exact, because the admission notes below APPEND to the
 rationale and the rationale is part of the recipe: a pair whose cast is
 refused (the viaduct) or never fitted is byte-identical to v1.2.2; a pair
-whose cast is ADMITTED or PROJECTED is not.
+whose cast is ADMITTED or PROJECTED is not. Since v1.18.0 the admitted and
+projected sentences are derived from the finished recipe — whether any cast
+curve still ships after every elimination — not from the gates' mid-solve
+verdict, so a cast whose curves an elimination set back is never reported
+as projected.
 
 ### …and a projection, so a convicted cast is shrunk rather than thrown away
 
@@ -5410,7 +5522,9 @@ experiment shipped a 19° cast that left 20.6° of delivered fan) while the
 widest fan the gate passes on its own merits is the haze correction's 7.8°: a
 cast the fit CHOOSES to keep must be no worse than one it already accepts.
 And it must buy more than `FIT_QUANT` of absolute look error — the fit's own
-quantisation budget, the same constant the terminal do-no-harm check uses —
+quantisation budget, the same constant the terminal do-no-harm check uses
+and, since v1.18.0, every stage-vs-absence decision (`fit::ships`), measured
+rather than chosen (above) —
 because the gates decide whether a MEASURED cast may ship, not whether an
 INVENTED milder one is worth shipping, and marginal gain does not earn
 regional risk.
@@ -5439,7 +5553,7 @@ refused although every `t ≤ 0.25` on its path was admissible and paid
 0.0019–0.0033 while the frontier read −0.012. v1.2.4 closes that, and the
 sweep is what a bisection could not do soundly. The pair now ships a shrink at
 `t = 0.318` whose look error is 0.885 of the error without it, and its finished
-residual falls 0.0256 → 0.0227 — under the `FIT_QUANT_CLEAN` = 0.025 floor at
+residual falls 0.0256 → 0.0227 — under the `FIT_QUANT_CLEAN` = 0.025 floor (0.038 since v1.18.0) at
 which the unrepresented-controls disclosure returns early because there is
 nothing left to explain, so that pair ships a better fit and a shorter
 rationale, and the `hsl` sentence it used to carry is asserted on a wider band
@@ -5536,7 +5650,7 @@ the protection is measured, and it reads 216.9° against a ±30° band around
 
 **Three.** The two-family HSL fixture ends where it began. With the gain bar
 tested inside the bisection it shipped a rescue worth 0.0006 of look error,
-which took its finished residual under the `FIT_QUANT_CLEAN` = 0.025 floor and
+which took its finished residual under the `FIT_QUANT_CLEAN` = 0.025 floor (0.038 since v1.18.0) and
 cost the pair the sentence naming `hsl`. With the bar applied once, to the
 winner, that rescue is refused, the residual is back at 0.0256 and the
 disclosure is back with it — the fix-up's soundness change paid for itself
@@ -5619,9 +5733,12 @@ ships only when it beats the frame without curves by more than `FIT_QUANT`,
 the projection's own bar; otherwise the projection runs exactly as before,
 on an untouched recipe. (The synthetic pair that pinned that path by value
 until 2026-10-29 had been refused only at the coarse steps; the finer walk
-reaches a white balance its cells vouch, and
-`the_hand_off_walk_reaches_the_nearer_white_balance_the_cells_vouch` pins
-that. A luminance split no single white balance takes back enters the walk
+reaches a nearer white balance, and
+`a_warm_strip_cast_is_walked_to_a_nearer_white_balance_and_its_note_names_what_ships`
+pins that — and, since v1.18.0, that the note names what the finished recipe
+ships: there the finished-recipe elimination sets the walk's tint back and
+the refitted curves are taken out, so the sentence names the shipped white
+balance and no curves (`FIT_NOTE_CAST_HANDED_TO_WB_NO_CURVES`). A luminance split no single white balance takes back enters the walk
 and ships nothing through it,
 `the_hand_off_walk_is_entered_by_a_cast_that_really_fans`.) A shipped
 hand-off says so (`FIT_NOTE_CAST_HANDED_TO_WB`: Kelvin and tint before and
@@ -5780,7 +5897,11 @@ The restriction moves the reference population of those two controls and
 nothing else — the structure-blind ruler, mode selection, the 0.50 confidence
 cap, the tone curve, the saturation chase and the per-band mixer are untouched,
 and a pair with no field is byte-identical by construction rather than by
-arithmetic.
+arithmetic. Since v1.18.0 the ship decisions read the population the solve
+did: a white-balance axis, and the Atmosphere exposure solved on the shared
+content, earns `FIT_QUANT` over the kept population's own present pixels and
+is guarded there too, so the content the restriction removed vetoes neither
+through the gain nor through the guard; every other control keeps the frame.
 It is also a PARTIAL repair on real pairs, and the size of what it leaves is
 measured rather than assumed. On the island pair it moves the white balance
 4400 K/−20.6 to 4350 K/−33.1 and the bottom third's closures by less than
@@ -5900,13 +6021,14 @@ correction itself introduced is budgeted. The two constants are SEPARATE
 they were one constant until step 9, which meant re-deriving either ruler's
 budget silently re-tuned the other, and the island's three accepted tiles
 sit 1.7%-3.3% below the step ceiling where that would have moved them.
-The gate's composed-frame re-check takes ONE tolerance per gate family, the
-one its caller admitted the candidate on (`BitmapBoundaryInput::frame_tol`):
-spatial tiles and free masks keep `SPATIAL_FRAME_REGRESSION_TOL = 0.0`, and a
-semantic region passes `ZONE_GLOBAL_REGRESSION_TOL = 0.02` — until 2026-10-22
-the gate applied 0.0 to every family, so a region `attach_one_zone` had
-admitted inside its drift budget was refused here as "the composed frame
-regressed".
+Since v1.18.0 the gate's composed-frame re-check is one law for every family
+(`fit::ships_local`): the candidate earns `FIT_QUANT` on its own pixels and
+the composed frame may not rise by more than `FIT_QUANT`; a tile refused
+after the rulers negotiated its strength reports the strength and reading
+they settled on. Until then each family carried the tolerance its caller had
+admitted the candidate on — spatial tiles and free masks 0.0, a semantic
+region `ZONE_GLOBAL_REGRESSION_TOL` = 0.02 (until 2026-10-22, 0.0 for every
+family) — and the allowances could add.
 Since v1.2.2 the step constant is a CEILING rather than a flat budget:
 0.012 was calibrated where neighbourhood contrast masks a discontinuity of
 that size, and a measured tile seam in clean sky sat exactly on it at 7.8
@@ -6539,8 +6661,9 @@ producer after the ranges, the tiles and the free masks: it RE-SOLVES the field
 on the current render (every earlier producer applied — the head-of-sequencer
 field measured a frame that no longer exists), renders it, and keeps it only if
 the frame moved toward the target. Three outcomes, one note each:
-`FIELD_ATTACHED`, `FIELD_WITHHELD` (the frame the field renders is not more
-than `LOCAL_STOP_MARGIN` better than the frame already reached; since v1.17.0
+`FIELD_ATTACHED`, `FIELD_WITHHELD` (the frame the field renders is not at
+least `FIT_QUANT` better than the frame already reached, `fit::ships` —
+`LOCAL_STOP_MARGIN`, 0.002 until v1.18.0, is that constant now; since v1.17.0
 read on the field that ships — pass B on its admitted cells — not on pass A's
 ceiling, which the shipped field beats: on p36 a ceiling of 0.0116 withheld a
 field that reaches 0.0090) and `FIELD_REGRESSED`.
@@ -6604,7 +6727,12 @@ exists to remove. The occupancy floor (`OCCUPANCY_MIN = 8`) is read per CELL
 (`fit_field::supported`: the vertex rows that refine a cell summed, per
 column and luma bin), not per vertex: per vertex it zeroed rows a sharp
 horizon or a dark bin leaves thin inside a well-measured cell and cost the
-calibration ceiling 0.0023. And the cell admission copies a vouched cell's
+calibration ceiling 0.0023. Since v1.18.0 the floor is the analyzer's
+exclusion only (the band marginals, the dispersion, the saturation count)
+and is no longer written into the rendered grid: an unmeasured vertex ships
+the solve's own value, the smoother's continuation of its measured
+neighbours, because a zero written there renders as a measured "no change"
+and drew a rectangular plateau on a horizon cell's boundary. And the cell admission copies a vouched cell's
 verdict onto all of its vertices (`fit_field::cell_vertex_spans`), so
 `fit_cells::CELLS_Y` is now `fit_field::CELL_ROWS`, the 8 the instrument has
 always read, not `FIELD_Y`. `local_support`'s 96 structural readings are
@@ -6645,8 +6773,10 @@ field as a control** below; the grep pin survives in the one direction that
 still matters (`the_engine_renders_the_field_from_the_recipe_and_never_calls_the_analyzer`),
 and schema era 1 is unchanged because the field owns no `crs:` key.
 `LocalField::solve` returns
-`None` when the objective already calls the pair unmeasurable (identifiability
-<= 1e-5), when the fit weight carries no mass, or when the solve is
+`None` when the evidence leaves nothing to estimate from (identifiability
+<= 1e-5; since v1.18.0 that is the estimation's refusal alone — the
+objective returns its unmeasurable sentinel only when a side has no present
+pixel), when the fit weight carries no mass, or when the solve is
 non-finite; a `None` field — like the disabled layer `ZonedLayerOpts { field:
 false }` — leaves all three producers byte for byte as they were
 (`field_disabled_layer_is_byte_identical`).
@@ -6660,13 +6790,21 @@ never recomputes it) and appends the realized and stop notes. `realized =
 (global − err_after) / (global − ceiling)`, disclosed as `n/a` rather than
 divided when the denominator is within 1e-6 of zero. When a producer already
 lands within `LOCAL_STOP_MARGIN = 0.002` of the ceiling, the tile stage is
-skipped and named — but only when `ceiling < global`: a field that saturated
+skipped and named — that was the rule until v1.18.0, when a ceiling solved
+before the zones was compared with the frame after them. Since v1.18.0 the
+field is re-solved on the render the free masks would start from, on the
+report's own ruler (`reread_field`), and `stop_verdict` stops the
+field-derived producers — the free masks, carved from the field's
+remainder — when that field's own ceiling cannot gain `FIT_QUANT` over its
+own global (`fit::ships`): the ceiling bounds the field and says nothing
+about the tiles, so no stop runs before them. Either way it stops only
+when `ceiling < global`: a field that saturated
 or regularised its way ABOVE the producer-free frame measured nothing about
 the headroom, is disclosed as such, and never vetoes a producer (the adversarial
 review of 2026-08-28 found the unguarded rule would have suppressed the tiles
 after any failed solve). Nothing else is appended on that path: every producer
 already closes its own stage with `fit::append_finished_disclosure` on ITS
-final render, so a skipped tile stage leaves exactly one finished disclosure,
+final render, so a skipped stage leaves exactly one finished disclosure,
 and the persisted rationale string is never rebuilt from the
 `MAX_NOTES`-bounded typed vector (which would truncate it and render the
 truncation sentinel).
@@ -6763,9 +6901,9 @@ clarity move adds there is leak: the night pair's sky took clarity +53 for a
 mid band paired at 0.62, its unpaired fine band rose 0.38 → 0.52 of the
 target's, and the frame's ΔE went 5.22 → 8.05 with every gate passing until
 this one) and the frame's do-no-harm — since v1.17.0 the fit's own
-quantisation (`FIT_QUANT`, 1.8e-3), not the zones' drift budget
-`ZONE_GLOBAL_REGRESSION_TOL` (0.02, sized for a mask that cannot touch pixels
-outside its raster): measured under a start v1.17.0 later removed, a land
+quantisation (`FIT_QUANT`, 1.8e-3; 2.3e-3 since v1.18.0), not the zones' drift budget
+`ZONE_GLOBAL_REGRESSION_TOL` (then 0.02, sized for a mask that cannot touch pixels
+outside its raster; `FIT_QUANT` itself since v1.18.0): measured under a start v1.17.0 later removed, a land
 zone's clarity moved the whole frame's tone and 0.02 let it ship — p39 at 0.65 frame 0.0108 → 0.0260 at half the solved clarity, the
 fit ending worse than its own start (0.024 → 0.026), p40 at 0.85 0.0199 →
 0.0322 at a quarter; with the quantisation bound both lands are refused and
@@ -6800,7 +6938,9 @@ of the whole frame, and the anchor raster the failed partition had dropped
 came back under the detail mask
 (`empty_semantic_region_set_hands_off_to_the_seeded_legacy_route`).
 
-When a multi-region trial loses — or ties — arbitration, the two-region `FitReport` remains
+When a multi-region trial loses — or ties — arbitration (since v1.18.0 the
+four-region recipe must gain `FIT_QUANT` over the two-region one, `fit::ships`,
+and the refusal prints that margin), the two-region `FitReport` remains
 intact and receives one typed `REGION_FRAME_REFUSED` note naming the trialled
 class IDs, labels, and verdict keys. The losing rationale and masks are never
 transplanted onto the winning recipe. The default two-region dials and
@@ -6912,7 +7052,9 @@ reading a fresh one produces (`the_tile_evidence_cache_recomputes_each_node_once
 
 Each leaf reuses `attach_one_zone` through `ZoneAttachment { min_share: 0.03,
 frame_regression_tol: 0.0 }`, then passes its own `0.012` cross-boundary-step
-and zero-regression composed-frame gates. Its deterministic normalized-source
+gate and the composed-frame gate (since v1.18.0 `fit::ships_local`: its own
+pixels earn `FIT_QUANT`, the frame a guard; the attachment's tolerance field
+is still filled in and no gate reads it). Its deterministic normalized-source
 raster is capped at a 2048-pixel long edge and persists as an existing
 `MaskGeometry::Bitmap`, `MaskRole::Custom` adjustment. Recipe schema era 1 is
 unchanged. Classic XMP deliberately skips the bitmap and returns the existing
@@ -6977,9 +7119,11 @@ value-range reading** (`fit_zoned::joint_reading`): four luminance bands ×
 two chroma classes, built on the existing `zone_moments` weight-vector
 interface, compared with `zone_err`'s formula read in the DISPLAY domain so
 one number means the same thing in shadows and highlights. It answers a
-question no term of `look_err` computes — its colour term is three
-*unconditional* channel means and its hue term skips everything under 0.06
-chroma — and it has exactly three jobs: report; cap the reported confidence
+question no term of `look_err` computes per value range — its colour reading
+is a Lab distance over the paired pixels or over the whole distribution, and
+its band term reads only the worst qualifying band (`H_ab`; until v1.18.0
+three *unconditional* channel means and a hue angle that skipped everything
+under 0.06 chroma) — and it has exactly three jobs: report; cap the reported confidence
 (downward only, never raise); and act as ONE additional bounded-drift veto at
 the pipeline END (`fit::terminal_harm`), fail-open, in
 `ZONE_GLOBAL_REGRESSION_TOL`'s shape — with its JOINT hue/chroma readings
@@ -7087,7 +7231,9 @@ same fits run on both curves over the six calibration-corpus pairs moved both
 ways — one pair's fitted residual 0.105 → 0.055, the other five up by
 0.0007–0.0168 — so the two pinned two-temperature readings were re-measured
 (`fit::tests::the_fan_gate_costs_a_real_two_temperature_pair_nothing`; the
-question that test asks kept its answer).
+question that test asks kept its answer — until v1.18.0, when backward
+elimination changed it and the test was renamed
+`the_fan_gate_now_costs_a_real_two_temperature_pair_its_cast`).
 
 **…and read on block means (calibration era 3, 2026-09-23).** Paired like
 with like, the estimate was still a pixel-level CDF match: eleven quantile

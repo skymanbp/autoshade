@@ -65,6 +65,8 @@ HISTORY = {
     "a_rim_that_cannot_be_shrunk_is_dropped_with_its_own_note": "ARCHITECTURE: a count clause records its rename",
     "legacy_autoshop_sidecar_": "ARCHITECTURE: a count clause records a renamed test prefix",
     "src/style.rs": "ARCHITECTURE: a count clause names where tests lived before v1.9.0 retired the style index",
+    "field_stop_rule_skips_the_tile_producer_and_names_it": "ARCHITECTURE: a count clause records its v1.18.0 rename",
+    "the_fan_gate_costs_a_real_two_temperature_pair_nothing": "ARCHITECTURE: a dated measurement records its v1.18.0 rename",
 }
 
 REPO_PATH = re.compile(
