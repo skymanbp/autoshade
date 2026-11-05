@@ -220,10 +220,6 @@ const RANGE_SMOOTH_CROSSING: f32 = 2.5 / 255.0;
 /// Native bands reuse the global evidence model's measured 1.5% population
 /// floor; a smaller interval is not a two-sided measurement.
 pub(super) const RANGE_MIN_EVIDENCE_SHARE: f32 = 0.015;
-/// Range bands must pay for themselves on the composed evidence-weighted
-/// frame: the live regression measured `0.018 -> 0.024` after two bands.
-/// Equality is acceptable, but any worse frame restores the running recipe.
-const RANGE_FRAME_REGRESSION_TOL: f32 = 0.0;
 
 const RANGE_HOST: MaskGeometry = MaskGeometry::Linear {
     zero_x: 0.5,
@@ -2464,7 +2460,7 @@ mod tests {
             });
         assert!(note.args.iter().any(|(key, _)| *key == "before"));
         assert!(
-            report.err_after <= global_err + RANGE_FRAME_REGRESSION_TOL,
+            report.err_after <= global_err,
             "the post-shrink stack escaped the global-only frame ceiling"
         );
     }

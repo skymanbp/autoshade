@@ -4388,7 +4388,7 @@ fn zoned_orchestration_attaches_the_sky_mask_and_improves_the_zone() {
     // (the insurance tolerance, once per attached zone), never required
     // to improve.
     let bound = err_global
-        + ZONE_GLOBAL_REGRESSION_TOL * report.recipe.masks.len() as f32;
+        + fit::FIT_QUANT * report.recipe.masks.len() as f32;
     assert!(
         report.err_after <= bound,
         "zoned err {} exceeded the insurance bound {bound}",

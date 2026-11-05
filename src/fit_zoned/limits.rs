@@ -258,18 +258,6 @@ pub(super) const ZONE_SKIP_ERR: f32 = 0.012;
 /// line therefore carries this quarter-stop EV companion and refuses to
 /// declare such a zone matched.
 pub(super) const ZONE_MATCHED_EV: f32 = 0.25;
-/// The frame-level allowance a local correction's do-no-harm grants: the
-/// objective's own rounding, [`fit::FIT_QUANT`] (v1.18.0). It was 0.02 — the
-/// "metric-visible band migration" a frame DISTRIBUTION distance shows when a
-/// correct zone repaint moves its own pixels' quantiles past the other
-/// zone's (+0.0024 measured on the real pair). The objective now reads paired
-/// pixels by their own index (`E_paired`), and the mask cannot touch pixels
-/// outside its raster (engine guarantee, pinned by the rocks-bit-equal test),
-/// so a correct zone cannot raise the frame by migration; the remaining
-/// allowance is what the objective cannot tell from its own rounding. A
-/// regression larger than that still means the mask is not the region we
-/// thought it was.
-pub(super) const ZONE_GLOBAL_REGRESSION_TOL: f32 = crate::fit::FIT_QUANT;
 /// A band set or a zone tint must lower its region's mean CIE76 deltaE
 /// ([`super::subzones::delta_e`], Lab's 100-unit scale) by more than this to
 /// count as better than the plain zone it competes with. It is 0.02 dE —

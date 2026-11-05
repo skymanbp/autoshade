@@ -1316,27 +1316,6 @@ mod tests {
         evidence.target_weights.fill(1.0);
     }
 
-    fn localized_residual() -> (Vec<[f32; 3]>, Vec<[f32; 3]>, fit::EvidenceModel) {
-        let (width, height) = (64u32, 64u32);
-        let id = TileId { depth: 2, row: 2, col: 0 };
-        let mut source = flat_pixels(width, height, 120);
-        let mut current = source.clone();
-        let mut target = source.clone();
-        for y in 0..height {
-            for x in 0..width {
-                if in_tile(id, x, y, width, height) {
-                    let i = (y * width + x) as usize;
-                    source[i] = [130.0 / 255.0; 3];
-                    current[i] = [140.0 / 255.0; 3];
-                    target[i] = [160.0 / 255.0; 3];
-                }
-            }
-        }
-        let mut evidence = fit::evidence_model_for(&source, &target, width, height);
-        pretend_full_support(&mut evidence);
-        (current, target, evidence)
-    }
-
     /// Both share gates own a falsifier. The first case removes support from
     /// both sides and reaches `source-share`. The second swaps bright/dark
     /// halves: rank pairing places the bright target members on the right,
@@ -1679,12 +1658,6 @@ mod tests {
         let shifted = GrayImage::from_fn(32, 32, |x,_| Luma([if x > 0 && x <= 16 { 255 } else { 0 }]));
         assert_eq!(hard.as_raw().iter().map(|v| *v as u32).sum::<u32>(), shifted.as_raw().iter().map(|v| *v as u32).sum::<u32>());
         assert!(refinement_alpha_delta(&hard, &shifted) > ZONE_BOUNDARY_STEP_MAX);
-    }
-
-    fn tile_geometry(id: TileId, width: u32, height: u32) -> Vec<f32> {
-        (0..width * height)
-            .map(|i| if in_tile(id, i % width, i / width, width, height) { 1.0 } else { 0.0 })
-            .collect()
     }
 
     /// The vetoes are asked over the raster a tile MOVES, not over its

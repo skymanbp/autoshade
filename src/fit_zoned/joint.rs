@@ -43,8 +43,8 @@ use super::*;
 //   1. REPORT. Always, when it has an opinion.
 //   2. CAP the reported confidence. Only downward: a reading that cannot see
 //      must never raise a claim (see [`JOINT_CONFIDENCE_SLOPE`]).
-//   3. ONE additional bounded-drift veto, in the shape
-//      [`ZONE_GLOBAL_REGRESSION_TOL`] already has and fail-open like
+//   3. ONE additional bounded-drift veto, in the shape a local
+//      correction's frame guard has and fail-open like
 //      `fit::neutral_gate_misprediction` — but at the PIPELINE END only
 //      (final render vs the untouched base), never inside a stage. Tried
 //      inside the cast stage first and measured: the bucket that a change

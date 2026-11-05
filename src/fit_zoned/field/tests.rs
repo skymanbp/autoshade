@@ -214,7 +214,7 @@ fn the_field_do_no_harm_judges_a_custom_region_mask_too() {
     let (label, was, now, _) = zone_regressed(&s_img, &report, &hurt, &target)
         .expect("the region mask's own residual grew past the tolerance");
     assert_eq!(label, "region-1");
-    assert!(now > was + crate::fit_zoned::ZONE_GLOBAL_REGRESSION_TOL, "{was} -> {now}");
+    assert!(now > was + crate::fit::FIT_QUANT, "{was} -> {now}");
 }
 
 /// A pair the field solver cannot fit (every evidence weight zero) says so

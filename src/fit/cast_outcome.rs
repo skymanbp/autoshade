@@ -661,8 +661,7 @@ pub(super) fn control_names(dropped: &[Control]) -> Option<String> {
 ///
 /// Two independent readings, OR-ed, because they see different damage. The
 /// scalar arm is R16's and unchanged. The joint arm (R23-6) is the
-/// ADDITIONAL veto in [`crate::fit_zoned::ZONE_GLOBAL_REGRESSION_TOL`]'s
-/// shape: a fit that leaves the value ranges further apart than doing
+/// ADDITIONAL veto in the shape of a local correction's frame guard: a fit that leaves the value ranges further apart than doing
 /// nothing has done harm whatever the scalar says — and the scalar
 /// structurally cannot say it, its colour term being three unconditional
 /// channel means. It only ever REJECTS, never rescues (a joint reading that

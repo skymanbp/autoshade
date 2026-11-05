@@ -935,8 +935,8 @@ fn replace_zone_with(
             // at most the objective's own rounding, FIT_QUANT. It read the
             // display moments (`zone_err`) against ZONE_MATCHED_ERR before —
             // a margin the frame tolerance's 0.02 carried, which the
-            // objective's change transferred to FIT_QUANT
-            // (ZONE_GLOBAL_REGRESSION_TOL); the margin transfers the same way.
+            // objective's change transferred to FIT_QUANT; the margin
+            // transfers the same way.
             else if own_after > own_before + fit::FIT_QUANT { values::ZONE_DO_NO_HARM }
             else if !fit::ships_local(own_after, own_before, frame_after, saved_error) { values::FRAME_DO_NO_HARM }
             else if !no_seam_regression { values::BOUNDARY_REGRESSION }
@@ -1488,7 +1488,7 @@ mod tests {
         assert!((2..=3).contains(&report.recipe.masks.len()));
         assert!(report.recipe.masks.iter().all(|m| m.role == MaskRole::ZoneSky && !m.components.is_empty()));
         let after = fit::pixels_of(&render::develop_preview(&source, &report.recipe));
-        assert!(delta_e(&after, &target, &parent.source_weights) < delta_e(&before, &target, &parent.source_weights) - ZONE_GLOBAL_REGRESSION_TOL);
+        assert!(delta_e(&after, &target, &parent.source_weights) < delta_e(&before, &target, &parent.source_weights) - fit::FIT_QUANT);
     }
 
     /// A band under the zone floor is not a zone: it is re-cut into its

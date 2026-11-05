@@ -148,12 +148,9 @@ pub(super) fn read_zone_tint(
 /// Each trial goes through the very same function as the plain solve, so the
 /// same probes, voucher, quality, acceptance and frame gates judge it. A
 /// trial counts only when it shipped a tint and, against the plain solve,
-/// lands the zone's mean ΔE to its target lower by
-/// `ZONE_GLOBAL_REGRESSION_TOL` and leaves the frame within the zone's own
-/// regression tolerance of what the plain solve left — the subzone bands'
-/// replacement rule until v1.17.1; a band set that replaces a shipped single
-/// zone is now held to the finished-frame margin of 1e-4
-/// (`subzones::replace_zone`). Of the trials that
+/// lands the zone's mean ΔE to its target lower by [`ZONE_DELTA_E_MARGIN`]
+/// and ships on the zone's own pixels against the plain solve's render
+/// (`fit::ships_local`, the frame a guard). Of the trials that
 /// count, the one with the lower zone ΔE replaces the plain solve; when none
 /// does, the plain solve stands exactly as it would have without them — its
 /// recipe, notes and running frame error are restored to the byte. The tint
