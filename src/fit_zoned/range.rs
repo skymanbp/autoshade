@@ -2607,14 +2607,19 @@ mod tests {
         assert_eq!(deferred.err_after, global.err_after);
     }
 
-    /// R1 (v1.18.0): a band ships on the stage-vs-absence law (`fit::ships`)
-    /// and nothing else — the composed frame must GAIN at least `FIT_QUANT`
-    /// over the frame it was handed. A loss of any size drops it, a tie drops
-    /// it (it goes to the simpler recipe), a gain under the quantum drops it,
-    /// and a gain of the quantum keeps it. Before R1 the line was the band's
-    /// own zero tolerance, so a neutral frame kept the band.
+    /// R19 (v1.18.0): a band is a LOCAL correction, so it ships on its OWN
+    /// population (`fit::ships_local`): its own pixels must gain FIT_QUANT,
+    /// and the composed frame is a guard only — it may not rise by more than
+    /// FIT_QUANT over the frame the band was handed. The band's own gain is
+    /// the fixture's (printed below, far past the quantum), so the arms are
+    /// the guard's: a frame rise of FIT_QUANT + 0.001 drops the band and its
+    /// note prints the rise; a rise of 0.001, a tie and a frame gain under
+    /// the quantum all keep it — the frame is no longer the band's earning
+    /// reading. Between R1 and R19 the frame gain WAS the earning reading
+    /// (`range_band_ships_only_on_a_composed_frame_gain_of_fit_quant`: the
+    /// +0.001 rise, the tie and the half-quantum gain dropped the band).
     #[test]
-    fn range_band_ships_only_on_a_composed_frame_gain_of_fit_quant() {
+    fn range_band_ships_on_its_own_gain_with_the_composed_frame_as_guard() {
         let (w, h) = (64u32, 64u32);
         let build = |target: bool| DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
             let v = 0.30 + 0.30 * x as f32 / (w - 1) as f32;
@@ -2677,8 +2682,19 @@ mod tests {
         let candidate_err =
             fit::look_err_with_evidence(&candidate.rendered, &tgt_px, &probe.evidence);
 
+        // The band's own reading, on the ruler the verdict reads it on.
+        let own = |px: &[[f32; 3]]| {
+            super::super::accept::own_reading(&probe, px, &tgt_px, &attachment.source_weights, &attachment.target_weights)
+        };
+        let (own_with, own_without) = (own(&candidate.rendered), own(&fit::pixels_of(&s_img)));
+        eprintln!("RANGE_BAND own {own_without:.5} -> {own_with:.5}, frame with the band {candidate_err:.5}");
+        assert!(
+            own_without - own_with >= fit::FIT_QUANT,
+            "premise: the band earns FIT_QUANT on its own pixels ({own_without} -> {own_with})"
+        );
+
         let mut regressing = neutral_report(&source, &target);
-        let mut better_running_frame = candidate_err - 0.001;
+        let mut better_running_frame = candidate_err - fit::FIT_QUANT - 0.001;
         let dropped = attach_one_zone(
             &s_img,
             &tgt_px,
@@ -2688,7 +2704,7 @@ mod tests {
             divergence,
             None,
         );
-        assert!(dropped.is_none(), "a +0.001 composed-frame regression must drop the band");
+        assert!(dropped.is_none(), "a composed-frame rise past FIT_QUANT must drop the band");
         assert!(regressing.recipe.masks.is_empty(), "the dropped band must be removed");
         let note = regressing
             .notes
@@ -2698,33 +2714,29 @@ mod tests {
                     || note.key == crate::rationale::keys::ZONE_ATMOSPHERE_DROPPED
             })
             .expect("the dropped band must disclose its measured frame drift");
-        assert!(note.args.iter().any(|(key, value)| *key == "drift" && value == "+0.00100"));
+        let drift = note
+            .args
+            .iter()
+            .find(|(key, _)| *key == "drift")
+            .map(|(_, value)| value.parse::<f32>().unwrap())
+            .expect("the drop note prints the frame move");
+        assert!((drift - (fit::FIT_QUANT + 0.001)).abs() < 2e-5, "the note prints the guard's reading: {drift}");
 
-        // A tie and a gain under the quantum are no difference after the
-        // fit's own rounding: both go to absence.
-        for (arm, handed) in [("tie", candidate_err), ("under", candidate_err + 0.5 * fit::FIT_QUANT)] {
+        // Inside the guard the frame is not the band's earning reading: a
+        // rise of 0.001, a tie and a gain under the quantum all keep it.
+        for (arm, handed) in [
+            ("rise 0.001", candidate_err - 0.001),
+            ("tie", candidate_err),
+            ("under", candidate_err + 0.5 * fit::FIT_QUANT),
+        ] {
             let mut report = neutral_report(&source, &target);
             let mut running = handed;
             let outcome = attach_one_zone(
                 &s_img, &tgt_px, &mut report, &mut running, &attachment, divergence, None,
             );
-            assert!(outcome.is_none(), "{arm}: a gain under FIT_QUANT must drop the band");
-            assert!(report.recipe.masks.is_empty(), "{arm}: the dropped band must be removed");
+            assert!(outcome.is_some(), "{arm}: a band that earns on its own pixels inside the guard ships");
+            assert_eq!(report.recipe.masks.len(), 1, "{arm}");
         }
-
-        let mut earning = neutral_report(&source, &target);
-        let mut handed = candidate_err + 1.01 * fit::FIT_QUANT;
-        let kept = attach_one_zone(
-            &s_img,
-            &tgt_px,
-            &mut earning,
-            &mut handed,
-            &attachment,
-            divergence,
-            None,
-        );
-        assert!(kept.is_some(), "a composed-frame gain of FIT_QUANT must keep the band");
-        assert_eq!(earning.recipe.masks.len(), 1);
         path.remove();
     }
 

@@ -1978,14 +1978,17 @@ mod tests {
     const GRADIENT_K: f32 = 0.0126953125;
     const GRADIENT_RIM: f32 = 0.0034745336;
 
-    /// R1 (v1.18.0), the frame arm on the honest reading. The sloping-field
-    /// tile is negotiated down to the floor (k = `GRADIENT_K`); there it
-    /// still gains on the frame, but less than FIT_QUANT, and a gain under
-    /// the quantum is no difference after the fit's own rounding: the gate
-    /// refuses it as `Frame` and the mask goes. Before R1 the gate admitted
-    /// any frame within `SPATIAL_FRAME_REGRESSION_TOL` of the frame before.
+    /// R19 (v1.18.0), the frame arm on the honest reading. The sloping-field
+    /// tile is negotiated down to the floor (k = `GRADIENT_K`); there it gains
+    /// on the frame by less than FIT_QUANT (0.00036), which under R1 tied it
+    /// to absence (`a_negotiated_tile_under_fit_quant_ties_to_absence`). A
+    /// tile is a LOCAL correction: it ships on its own population's gain of
+    /// FIT_QUANT (`fit::ships_local`), the frame a guard only. Its own pixels
+    /// sit +0.75 EV from the target, so even the floor-budgeted move earns
+    /// the quantum there (printed below); the gate keeps it at `GRADIENT_K`,
+    /// and the frame's small gain is inside the guard.
     #[test]
-    fn a_negotiated_tile_under_fit_quant_ties_to_absence() {
+    fn a_negotiated_tile_ships_on_its_own_gain_while_the_frame_gains_under_fit_quant() {
         let gate = |name: &str, frame_arm: Option<f32>| {
             let (source, target, mut report, path, geometry, reference, candidate) =
                 gradient_fixture(1.5, name);
@@ -2013,11 +2016,37 @@ mod tests {
         assert_eq!(k, GRADIENT_K, "premise: the floor-budgeted k");
         assert!(gain > 0.0 && gain < fit::FIT_QUANT, "a real gain, under the quantum: {gain}");
         let (honest, masks) = gate("tile-law-honest", None);
-        match honest {
-            Err(refusal) => assert_eq!(refusal.why, BitmapBoundaryWhy::Frame),
-            Ok((k, gain)) => panic!("a gain under FIT_QUANT shipped: k={k} gain={gain}"),
-        }
-        assert_eq!(masks, 0, "the refused tile's mask must be removed");
+        let Ok((honest_k, honest_gain)) = honest else {
+            panic!("a tile that earns on its own pixels ships: {honest:?}")
+        };
+        assert_eq!(honest_k, GRADIENT_K, "the boundary rulers alone decide k");
+        assert!(honest_gain > 0.0 && honest_gain < fit::FIT_QUANT, "the frame half reads a gain under the quantum: {honest_gain}");
+        assert_eq!(masks, 1, "the shipped tile keeps its mask");
+        // The earning reading: the tile's own pixels, on the ruler the gate
+        // reads them on, with and without it.
+        let (source, target, mut report, path, geometry, reference, candidate) =
+            gradient_fixture(1.5, "tile-law-own");
+        let accepted = enforce_bitmap_boundary(
+            &source,
+            &target,
+            &mut report,
+            0,
+            BitmapBoundaryInput {
+                target_boundary: None,
+                ruler: BoundaryRuler::CrossBoundaryStep { geometry: &geometry, reference: &reference },
+                initial_px: candidate,
+                frame_before: FRAME_ARM_OFF,
+            },
+        )
+        .expect("premise: the rulers negotiate this tile");
+        // The coverage is read off the mask raster, so it is read before the
+        // scratch raster goes.
+        let own = super::super::accept::masks_coverage(&source, &report, &report.recipe.masks[0..], target.len());
+        path.remove();
+        let own_with = super::super::accept::own_reading(&report, &accepted.pixels, &target, &own, &own);
+        let own_without = super::super::accept::own_reading(&report, &reference, &target, &own, &own);
+        eprintln!("NEGOTIATED_TILE k {honest_k} frame gain {honest_gain:.6} own {own_without:.6} -> {own_with:.6}");
+        assert!(own_without - own_with >= fit::FIT_QUANT, "its own pixels gain the quantum: {own_without} -> {own_with}");
     }
 
     /// R40 (v1.6.0), reversing A22 (v1.2.4). A hard tile edge over a SMOOTH

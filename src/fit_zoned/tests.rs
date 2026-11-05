@@ -1737,21 +1737,19 @@ fn atmosphere_zone_shrinks_gains_toward_unity_but_keeps_their_direction() {
 /// -- and its colour follows its own cells: withheld unless the target's own
 /// 12x8 cell means over that zone vouch the rendered move, with exactly one
 /// colour verdict disclosed for it.
-/// R1 (v1.18.0): after the shared boundary shrink a zone ships only on a frame
-/// gain of FIT_QUANT over the shipped set without it (`fit::ships` inside
-/// `AcceptedZone::still_accepted`); the drift allowance that let a smaller
-/// gain through is gone. On this fixture the boundary gate shrinks the sky to
-/// k 0.184, where its own residual still improves (0.653 -> 0.649) but the
-/// frame reads 0.11175 -> 0.11064, a gain of 0.00111 under FIT_QUANT 0.0023,
-/// so the shrunk correction -- luma and colour together -- is refused. The old
-/// premise (the luma correction survives the whole route) is gone with the
-/// allowance. What the route must still do: attach the zone in Atmosphere
-/// mode, disclose one colour verdict for it, and refuse the shrunk set on the
-/// frame half of the law, by the two readings its note prints. That the
-/// colour the cells decide is the colour the solve renders is pinned at the
-/// solve, in `atmosphere_zone_skips_the_within_zone_cdf_solve`.
+/// R1 (v1.18.0) held the shrunk set to a frame gain of FIT_QUANT and refused
+/// this sky on 0.11175 -> 0.11064 (a gain of 0.00111) although its own zone
+/// improved (0.653 -> 0.649). R19 (v1.18.0): a shrunk LOCAL correction is
+/// held to do-no-harm on its own zone (no worse than the shipped set without
+/// it) with the frame a guard of FIT_QUANT (`AcceptedZone::still_accepted`),
+/// its gain having been decided at k = 1 on its own population. The sky
+/// shrunk to k 0.184 leaves its zone better and the frame inside the guard,
+/// so it SHIPS. What the route must do: attach the zone in Atmosphere mode,
+/// disclose one colour verdict for it, keep the shrunk sky and refuse
+/// nothing. That the colour the cells decide is the colour the solve renders
+/// is pinned at the solve, in `atmosphere_zone_skips_the_within_zone_cdf_solve`.
 #[test]
-fn a_divergent_zone_attaches_in_atmosphere_mode_its_colour_follows_its_cells_and_its_shrink_ships_only_on_fit_quant() {
+fn a_divergent_zone_attaches_in_atmosphere_mode_its_colour_follows_its_cells_and_its_shrink_ships_on_its_own_zone() {
     let (src, tgt, sky_mask) = zoned_pair_gold();
     let mask_path = fixture_mask_path("zoned-atmos-attached");
     sky_mask.save(mask_path.path()).unwrap();
@@ -1791,30 +1789,14 @@ fn a_divergent_zone_attaches_in_atmosphere_mode_its_colour_follows_its_cells_and
         "exactly one colour verdict must be disclosed for sky: {}",
         report.recipe.rationale
     );
-    let shrunk = report
-        .notes
-        .iter()
-        .find(|n| n.key == crate::rationale::keys::ZONE_SHRUNK_REFUSED && about_sky(n))
-        .unwrap_or_else(|| {
-            panic!(
-                "the attached sky must reach the shrunk-set verdict and be refused there: {}",
-                report.recipe.rationale
-            )
-        });
-    let (frame_before, frame_after) =
-        (note_number(shrunk, "frame_before"), note_number(shrunk, "frame_after"));
     assert!(
-        note_number(shrunk, "after") <= note_number(shrunk, "before"),
-        "the shrunk sky leaves its own zone no worse, so the frame half alone refuses it: {:?}",
-        shrunk.args
+        !report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_SHRUNK_REFUSED && about_sky(n)),
+        "R19: a shrunk sky no worse on its own zone, the frame inside its guard, is not refused: {}",
+        report.recipe.rationale
     );
     assert!(
-        !fit::ships(frame_after, frame_before),
-        "R1: the refusal must be a frame gain under FIT_QUANT ({frame_before} -> {frame_after})"
-    );
-    assert!(
-        !report.recipe.masks.iter().any(|m| m.role == MaskRole::ZoneSky),
-        "a refused shrunk sky ships neither its luma nor its colour: {:?}",
+        report.recipe.masks.iter().any(|m| m.role == MaskRole::ZoneSky),
+        "the shrunk sky ships: {:?}",
         report.recipe.masks
     );
 }
@@ -4131,7 +4113,7 @@ fn a_strictly_better_zone_whose_frame_gains_on_j_star_is_kept_by_its_arm() {
 /// separate the predicates: a hairline move toward the target — every arm
 /// refuses it, the gain being under `ZONE_MIN_ABS_GAIN` and nowhere near
 /// a halving — is KEPT, and the same-sized move away is REFUSED. The
-/// frame condition is the stage-vs-absence law (`fit::ships`), read at its edge.
+/// frame condition is R19's guard (a rise of at most FIT_QUANT), read at its edge.
 #[test]
 fn a_shrunk_correction_is_held_to_do_no_harm_not_to_the_arms() {
     let n = 64;
@@ -4157,12 +4139,14 @@ fn a_shrunk_correction_is_held_to_do_no_harm_not_to_the_arms() {
         judged_toward < without && zone.judged(&away, &target) > without,
         "premise: 0.403 sits nearer the 0.50 target than 0.40 and 0.397 farther"
     );
-    // RE-PINNED (v1.18.0, R1): the frame half of the predicate is the
-    // stage-vs-absence law (`fit::ships`): the shrunk set must still earn
-    // FIT_QUANT on the frame over the render without the zones, and a tie
-    // goes to absence. The zone half is what these two verdicts separate, so
-    // the frame is handed a set that earned 2·FIT_QUANT (it read the bare
-    // `fb, fb` tie before, which the 0.02 drift allowance passed).
+    // RE-PINNED (v1.18.0, R19): the frame half of the predicate is a GUARD
+    // for a local correction — the shrunk set may not raise the frame by more
+    // than FIT_QUANT — and the zone half (no worse than the set without it)
+    // is the do-no-harm; the gain was decided at k = 1 on the zone's own
+    // population. (Under R1 the frame half was the earning line, a gain of
+    // FIT_QUANT, and this test handed it a set that earned 2·FIT_QUANT.) The
+    // zone half is what these two verdicts separate, so the frame is handed
+    // a set inside the guard.
     let fb = 0.100f32;
     let earned = fb - 2.0 * fit::FIT_QUANT;
     assert!(zone.still_accepted(&toward, &target, without, fb, earned), "a hairline gain does no harm");
@@ -4179,12 +4163,15 @@ fn a_shrunk_correction_is_held_to_do_no_harm_not_to_the_arms() {
         zone_accepts(without, judged_toward, ev, fb, fb, UNMATCHED_TONAL).is_none(),
         "premise: every k=1 arm refuses a hairline gain ({without} -> {judged_toward}, ev {ev})"
     );
-    // The frame side at its edge: a set that earns FIT_QUANT and a hair
-    // more is kept; one that earns a hair under it, ties or regresses is not.
-    assert!(zone.still_accepted(&toward, &target, without, fb, fb - fit::FIT_QUANT - 1e-4));
-    assert!(!zone.still_accepted(&toward, &target, without, fb, fb - fit::FIT_QUANT + 1e-4));
-    assert!(!zone.still_accepted(&toward, &target, without, fb, fb), "a tie goes to absence");
-    assert!(!zone.still_accepted(&toward, &target, without, fb, fb + 1e-4), "a loss of any size refuses");
+    // The frame side at its edge: a gain, a tie and a rise up to FIT_QUANT
+    // are inside the guard; a rise of FIT_QUANT and a hair more is not.
+    assert!(zone.still_accepted(&toward, &target, without, fb, fb - fit::FIT_QUANT - 1e-4), "a frame gain is inside the guard");
+    assert!(zone.still_accepted(&toward, &target, without, fb, fb), "a tie is inside the guard");
+    assert!(zone.still_accepted(&toward, &target, without, fb, fb + fit::FIT_QUANT - 1e-4), "a rise under FIT_QUANT is inside the guard");
+    assert!(
+        !zone.still_accepted(&toward, &target, without, fb, fb + fit::FIT_QUANT + 1e-4),
+        "a rise past FIT_QUANT breaks the guard"
+    );
 }
 
 /// R39. On the shared routes each zone's baseline is the shipped set
@@ -6272,25 +6259,28 @@ fn calibration_sky_zone_survives_luminance_with_partial_chroma_refusal() {
     // zone carries the luminance move and ships its colour at a share of the
     // solved move, the full move refused by its cells: the partial chroma
     // refusal this test is named for.
+    // RE-PINNED (v1.18.0, R19: a local correction ships on its own
+    // population, the frame a guard): the sky survives as TWO bands again.
+    // The band set earns on the sky's own pixels (deltaE 20.10 -> 18.46,
+    // "Zoned sky accepted 2 bands after 7 trials", breaks 0.395, overlap
+    // 0.130, R² 0.807), where R1's frame reading tied it. The band that
+    // carries the luminance move (-0.345 EV, gains [1.057 0.975 0.975], sat
+    // +5.0) ships its colour at 0.734 of the solved move, the full move
+    // refused by its cells (0.601 converged, 0.254 diverged over 45 cells):
+    // the partial chroma refusal this test is named for, now on that band.
+    // The second band: -0.030 EV, sat +7.9. Every boundary verdict stays
+    // inside the ceiling on the charged ranks (sky: rim 0.167 -> 0.039 raw
+    // after k = 0.219, charged 0.012 / colour 0.011; land: charged 0.012).
     let sky_zones: Vec<_> =
         report.recipe.masks.iter().filter(|mask| mask.role == MaskRole::ZoneSky).collect();
-    let sky = match sky_zones.as_slice() {
-        [only] => *only,
-        other => panic!(
-            "the calibration sky survives as one zone, not {:?}: {}",
-            other.iter().map(|mask| &mask.name).collect::<Vec<_>>(),
-            report.recipe.rationale
-        ),
-    };
-    let note = report
-        .notes
+    assert!(!sky_zones.is_empty(), "the calibration sky survives: {}", report.recipe.rationale);
+    let sky = *sky_zones
         .iter()
-        .find(|note| note.key == crate::rationale::keys::ZONE_BOUNDARY_PASSED)
-        .expect("calibration sky must reach the boundary gate");
-    let after = note_number(note, "after");
+        .min_by(|a, b| a.exposure_ev.total_cmp(&b.exposure_ev))
+        .expect("non-empty");
     eprintln!(
-        "CALIBRATION_SKY ev={:.3} gains={:?} sat={:.1} rim={:.4} rationale={}",
-        sky.exposure_ev, sky.color_gains, sky.saturation, after, report.recipe.rationale
+        "CALIBRATION_SKY bands={} ev={:.3} gains={:?} sat={:.1} rationale={}",
+        sky_zones.len(), sky.exposure_ev, sky.color_gains, sky.saturation, report.recipe.rationale
     );
     assert!(sky.exposure_ev < 0.0, "the sky zone carries a darkening luminance move: ev {}", sky.exposure_ev);
     assert!(
@@ -6299,8 +6289,13 @@ fn calibration_sky_zone_survives_luminance_with_partial_chroma_refusal() {
         sky.color_gains,
         sky.saturation
     );
-    let gated = note_number(note, "charged").max(note_number(note, "colour_charged"));
-    assert!(gated <= ZONE_BOUNDARY_RIM_MAX, "charged {gated} (raw rim {after})");
+    let verdicts: Vec<_> =
+        report.notes.iter().filter(|note| note.key == crate::rationale::keys::ZONE_BOUNDARY_PASSED).collect();
+    assert!(!verdicts.is_empty(), "calibration sky must reach the boundary gate");
+    for note in verdicts {
+        let gated = note_number(note, "charged").max(note_number(note, "colour_charged"));
+        assert!(gated <= ZONE_BOUNDARY_RIM_MAX, "charged {gated} (raw rim {})", note_number(note, "after"));
+    }
     let label = if sky.name.is_empty() { MaskRole::ZoneSky.tag().to_string() } else { sky.name.clone() };
     let colour_note = report
         .notes

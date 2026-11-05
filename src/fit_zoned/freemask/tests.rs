@@ -197,17 +197,18 @@ fn free_mask_refuses_replaced_content() {
     assert!(report.notes.iter().all(|note| note.key != crate::rationale::keys::FIELD_MASK_ATTACHED));
 }
 
-/// R1 (v1.18.0): a tile ships only on a composed-frame gain of FIT_QUANT
-/// (`fit::ships`), and a tile that does not ship reserves nothing. On this
-/// fixture the tile takes its own zone residual from 0.091 to 0.003 but moves
-/// the frame by 0.0016, under the quantum: it ties to absence, no raster
-/// attaches, the exclusion handed to the free-mask producer is zero
-/// everywhere, and the producer is offered the whole region. Before R1 the
-/// tile shipped at the boundary gate's k = 0.111 and the test pinned that
-/// alpha as the exclusion; no fixture now carries `attach_tiles`' `* k`
-/// exclusion wiring end to end.
+/// R19 (v1.18.0): a tile is a LOCAL correction and ships on its own
+/// population — its own gain of FIT_QUANT, the composed frame only a guard
+/// (`fit::ships_local`). On this fixture it takes its own pixels 0.09079 ->
+/// 0.06032 at the boundary gate's k = 0.111 (13 x FIT_QUANT) and the frame
+/// 0.09467 -> 0.07448, so it ships, and the law this test was written for
+/// is back on its own fixture: what a tile hands the free-mask producer is
+/// the alpha the boundary gate LEFT it. Between R1 and R19 the tile was
+/// judged on the frame gain alone (0.0016 then, under the quantum), tied to
+/// absence and reserved nothing, and the test was renamed
+/// `a_tile_that_ties_to_absence_reserves_nothing_from_the_free_masks`.
 #[test]
-fn a_tile_that_ties_to_absence_reserves_nothing_from_the_free_masks() {
+fn free_masks_eat_only_what_tiles_left() {
     let truth = disc(221, 167, 72);
     let source = textured_image();
     let mut base = crate::recipe::EditRecipe::default();
@@ -247,30 +248,37 @@ fn a_tile_that_ties_to_absence_reserves_nothing_from_the_free_masks() {
     report.recipe = base;
     report.evidence = evidence;
     let excluded = spatial::attach_tiles(&source, &target, &mut report, &home, false, 1);
-    assert_eq!(report.recipe.masks.len(), 1, "only the prior mask: {}", report.recipe.rationale);
-    // The tile's drop note carries the frame move it was judged on: a gain,
-    // and one under the quantum.
-    let drift = report
-        .notes
-        .iter()
-        .filter(|note| note.key == crate::rationale::keys::ZONE_DROPPED)
-        .find_map(|note| note.args.iter().find(|(key, _)| *key == "drift"))
-        .map(|(_, value)| value.parse::<f32>().unwrap())
-        .unwrap_or_else(|| panic!("the tile must be dropped by its frame arm: {}", report.recipe.rationale));
-    assert!(drift < 0.0 && -drift < fit::FIT_QUANT, "a gain under FIT_QUANT: {drift}");
-    assert!(excluded.iter().all(|alpha| *alpha == 0.0), "a tile that did not ship reserves nothing");
+    assert!(report.recipe.masks.len() >= 2, "fixture did not accept a tile: {}", report.recipe.rationale);
+    // A35 (v1.2.4): what a tile hands the free-mask producer is the alpha the
+    // boundary gate LEFT it — its raster times the accepted `k` — and not the
+    // raster it asked for. The gate negotiated this tile down to k = 0.111
+    // (0.159 before R40, when the field's sawtooth ramps still counted as
+    // context), so it reserves a ninth of its footprint and the region stays
+    // open to a producer that can correct what the tile was forbidden to.
+    // `a_tile_reserves_only_the_alpha_the_boundary_gate_left_it` pins the rule
+    // itself; this is the end-to-end reading that shows `attach_tiles` emits it.
+    let max_excluded = excluded.iter().cloned().fold(0.0f32, f32::max);
+    assert!(
+        (max_excluded - TILE_EXCLUSION_ALPHA).abs() <= 1e-6,
+        "the exclusion must be the accepted alpha, not the raw raster: {max_excluded}",
+    );
+    assert!(
+        excluded.iter().all(|alpha| *alpha == 0.0 || (*alpha - max_excluded).abs() <= 1e-6),
+        "a hard raster times one scalar is still a hard raster",
+    );
     let evidence = report.evidence.clone();
     let proposals = propose_free_masks(
         &field_from(&truth, -0.1), &excluded, &source_px, &target_px, &evidence, 2,
     );
-    assert_eq!(proposals.len(), 1, "the region is offered whole: {proposals:?}");
+    assert_eq!(proposals.len(), 1, "{proposals:?}");
+    assert!(proposals[0].mask.as_raw().iter().enumerate()
+        .all(|(i, value)| excluded[i] < 0.5 || *value == 0));
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// The alpha `attach_tiles` left on the fixture of
-/// `a_tile_that_ties_to_absence_reserves_nothing_from_the_free_masks` before
-/// R1 (v1.18.0), when that tile shipped at its boundary gate's k: a light
-/// reservation, kept as the rule test's input.
+/// The alpha `attach_tiles` leaves on the fixture of
+/// `free_masks_eat_only_what_tiles_left`: that tile's raster times the `k`
+/// its boundary gate accepted.
 const TILE_EXCLUSION_ALPHA: f32 = 0.110839844;
 
 /// A35 (v1.2.4). A tile reserves the strength it KEPT, not the footprint it
