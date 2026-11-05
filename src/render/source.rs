@@ -593,6 +593,7 @@ fn develop_cfa_signed(raw: &rawler::RawImage, dev: &RawDevelop, colour_nr: f32) 
     });
     let stage = crate::denoise::linear_chroma::scale_of(colour_nr).filter(|_| crate::denoise::linear_chroma::reads(raw));
     let linear_colour = stage.is_some();
+    let mut cell_chroma = None;
     if let Some(scale) = stage {
         let wb = if raw.wb_coeffs[..3].iter().all(|c| c.is_finite() && *c > 0.0) {
             [raw.wb_coeffs[0], raw.wb_coeffs[1], raw.wb_coeffs[2]].map(f64::from)
@@ -600,7 +601,8 @@ fn develop_cfa_signed(raw: &rawler::RawImage, dev: &RawDevelop, colour_nr: f32) 
             [1.0; 3]
         };
         let rho = crate::denoise::linear_chroma::window(colour_nr);
-        crate::denoise::linear_chroma::filter_mosaic(&mut v, width, raw.height, &config.cfa, wb, scale, rho);
+        cell_chroma = crate::denoise::linear_chroma::filter_mosaic(&mut v, width, raw.height, &config.cfa, wb, scale, rho)
+            .map(|(_, _, chroma)| chroma);
     }
     let pixels = PixF32::new_with(v, raw.width, raw.height);
     if !demosaic {
@@ -610,6 +612,12 @@ fn develop_cfa_signed(raw: &rawler::RawImage, dev: &RawDevelop, colour_nr: f32) 
     let roi = if crop_active { raw.active_area.unwrap_or(pixels.rect()) } else { pixels.rect() };
     let mut rgb = PPGDemosaic::new().demosaic(&pixels, &config.cfa, &config.colors, roi);
     drop(pixels);
+    // The sensor measures colour once per cell; pixel-scale chroma is the
+    // demosaic's, so the stage's cell chroma is the pixel's.
+    if let Some(chroma) = &cell_chroma {
+        let width = rgb.width;
+        chroma.rebuild(&mut rgb.data, width, roi.p.x, roi.p.y);
+    }
     if dev.steps.contains(&ProcessingStep::Calibrate) {
         use rawler::imgop::matrix::{multiply, normalize, pseudo_inverse};
         let found = raw

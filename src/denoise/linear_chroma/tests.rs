@@ -75,7 +75,7 @@ fn rggb() -> rawler::cfa::CFA {
 fn the_stage_takes_the_colour_noise_and_leaves_the_greens_and_the_mean() {
     let before = mosaic(0.01, 0.0);
     let mut after = before.clone();
-    let (model, _) = filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, 3).expect("a Bayer mosaic with noise fits a model");
+    let (model, _, _) = filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, 3).expect("a Bayer mosaic with noise fits a model");
     // The greens are never written.
     for y in 0..H {
         for x in 0..W {
@@ -138,7 +138,7 @@ fn where_k_is_unbounded_the_slider_weakens_the_stage_through_its_window() {
     let before = mosaic(0.01, 0.0);
     let at = |nr: f32| {
         let mut m = before.clone();
-        let (_, k) = filter_mosaic(&mut m, W, H, &rggb(), WB, scale_of(nr).unwrap(), window(nr)).expect("a model");
+        let (_, k, _) = filter_mosaic(&mut m, W, H, &rggb(), WB, scale_of(nr).unwrap(), window(nr)).expect("a model");
         (k, var_dr(&m, 0..W / 2))
     };
     assert_eq!((window(10.0), window(25.0), window(100.0)), (1, 7, 23), "the display pass's sample count in cells");
@@ -252,6 +252,43 @@ fn a_pattern_that_is_not_a_two_by_two_bayer_is_left_alone() {
     let xtrans = rawler::cfa::CFA::new("GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG");
     assert!(filter_mosaic(&mut after, W, H, &xtrans, WB, 1.0, 3).is_none());
     assert!(before.iter().zip(&after).all(|(a, b)| a.to_bits() == b.to_bits()));
+}
+
+/// The sensor measures colour once per cell; pixel-scale chroma is the
+/// demosaic's, so the stage's cell chroma is the pixel's: after the rebuild
+/// every pixel's green is its own (bit for bit) and its chroma `wR·R − G`,
+/// `wB·B − G` is the cell chroma at the pixel's centre. A field linear in the
+/// cell grid is read exactly by the bilinear tap, so a ramp plane must come
+/// back as the ramp at the pixel's position in cells, `(x + ox − 0.5)/2` (a
+/// cell's two pixels sit a quarter cell either side of its centre), whatever
+/// noise the demosaic left in the pixel's own red and blue.
+///
+/// MUTATION: the pixel takes its own cell's chroma (nearest cell, no
+/// bilinear read): the chroma is then a step at every cell edge.
+#[test]
+fn the_pixels_chroma_is_the_cells_chroma_read_at_the_pixel() {
+    let (cw, ch, ox, oy, w, h) = (40usize, 30usize, 6usize, 4usize, 64usize, 44usize);
+    let ramp = |j: usize, u: f64, v: f64| if j == 0 { 0.01 * u - 0.003 * v } else { -0.002 * u + 0.008 * v + 0.05 };
+    let planes =
+        [0, 1].map(|j| (0..cw * ch).map(|i| ramp(j, (i % cw) as f64, (i / cw) as f64) as f32).collect::<Vec<f32>>());
+    let chroma = CellChroma { cw, ch, wb: [WB[0] as f32, WB[2] as f32], planes };
+    let before: Vec<[f32; 3]> =
+        (0..w * h).map(|i| [0, 1, 2].map(|c| (0.2 + 0.05 * normal(11 + c as u64, i as u64)) as f32)).collect();
+    let mut after = before.clone();
+    chroma.rebuild(&mut after, w, ox, oy);
+    for (i, (b, a)) in before.iter().zip(&after).enumerate() {
+        let (x, y) = (i % w, i / w);
+        assert_eq!(b[1].to_bits(), a[1].to_bits(), "the green of pixel ({x}, {y}) moved");
+        let (u, v) = (((x + ox) as f64 - 0.5) / 2.0, ((y + oy) as f64 - 0.5) / 2.0);
+        for (j, (wc, c)) in [(WB[0], a[0]), (WB[2], a[2])].into_iter().enumerate() {
+            let got = wc * f64::from(c) - f64::from(a[1]);
+            let want = ramp(j, u, v);
+            assert!(
+                (got - want).abs() < 2e-5,
+                "pixel ({x}, {y}), colour difference {j}: chroma {got:.6}, the cell chroma at ({u}, {v}) cells is {want:.6}"
+            );
+        }
+    }
 }
 
 /// The reading behind `photo_k` on a real RAW (`E3_PROBE=<raw path>`): the

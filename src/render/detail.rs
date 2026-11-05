@@ -593,7 +593,7 @@ impl ChromaNrParams {
 
 /// Bilinear read of a `lw × lh` plane at the centre of full-resolution pixel
 /// `(x, y)`, the plane being that frame subsampled `s×`.
-fn upsample_at(plane: &[f32], lw: usize, lh: usize, s: usize, x: usize, y: usize) -> f32 {
+pub(crate) fn upsample_at(plane: &[f32], lw: usize, lh: usize, s: usize, x: usize, y: usize) -> f32 {
     // The COORDINATE math is this function's own — pixel centres of the full
     // frame expressed in the subsampled plane's grid — and the four taps are
     // `bilinear_plane`'s, which clamps.

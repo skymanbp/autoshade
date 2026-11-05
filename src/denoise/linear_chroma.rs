@@ -22,6 +22,19 @@
 //! the mosaic and the luminance a Bayer demosaic is built around, are never
 //! written; the red and blue sites are rebuilt on their cell's green.
 //!
+//! **The pixels** ([`CellChroma::rebuild`]): the sensor measures colour once
+//! per cell; pixel-scale chroma is the demosaic's, so the stage's cell chroma
+//! is the pixel's. After the demosaic every pixel keeps its green — the
+//! demosaic's luminance, `Y` of the colour differences above, untouched — and
+//! its red and blue are rebuilt on it from the filtered cell chroma read at
+//! that pixel (bilinear in the cell grid, the coordinate of the display
+//! pass's own upsample, `render::upsample_at`). Without it each green site's
+//! own noise, which no cell pass writes, becomes pixel-scale colour after the
+//! demosaic (26–32 % of the night sky's residual grain, rel1180 msg-e3 round
+//! 7); with it that noise is luminance. No pixel pass: one read per pixel.
+//! (The filtered red and blue samples are still written to the mosaic, so
+//! the demosaic's own direction choices read the filtered colour.)
+//!
 //! **The filter.** A sigma filter: a neighbour votes when the evidence says
 //! it shares the cell's TRUE colour — it lies within `k` noise sds of an
 //! estimate of that colour. The cell's own sample is not that colour: a test
@@ -143,9 +156,11 @@ pub(crate) fn window(color_nr: f32) -> usize {
 /// Run the stage on the normalised signed `mosaic` (`width × height`, sites
 /// of `cfa`), white-balanced by `wb` (any scale; green is divided out), at
 /// `scale` times the photo's own `k` ([`photo_k`], read at the default
-/// strength's window) over a window of half side `rho` cells ([`window`]). Returns the fitted model and the `k` it ran at, or `None` —
-/// and the mosaic untouched — when the pattern is not a 2×2 RGB Bayer or the
-/// frame has too few usable patches for a model.
+/// strength's window) over a window of half side `rho` cells ([`window`]). Returns the fitted model, the `k` it ran at and
+/// the filtered cell chroma the demosaiced pixels are rebuilt on
+/// ([`CellChroma::rebuild`]), or `None` — and the mosaic untouched — when the
+/// pattern is not a 2×2 RGB Bayer or the frame has too few usable patches for
+/// a model.
 pub(crate) fn filter_mosaic(
     mosaic: &mut [f32],
     width: usize,
@@ -154,7 +169,7 @@ pub(crate) fn filter_mosaic(
     wb: [f64; 3],
     scale: f64,
     rho: usize,
-) -> Option<(NoiseModel, f64)> {
+) -> Option<(NoiseModel, f64, CellChroma)> {
     let sites = bayer_sites(cfa)?;
     if mosaic.len() != width * height || wb[1].is_nan() || wb[1] <= 0.0 || scale.is_nan() || scale <= 0.0 {
         return None;
@@ -166,7 +181,46 @@ pub(crate) fn filter_mosaic(
     let k = photo_k(&cells, &model, &pts, wb, window(DEFAULT_AMOUNT)).0 * scale;
     let filtered: Vec<[f32; 2]> = (0..cells.cw * cells.ch).into_par_iter().map(|i| cells.filtered(i, k, rho)).collect();
     cells.write(mosaic, width, sites, wb, &filtered);
-    Some((model, k))
+    let chroma = CellChroma {
+        cw: cells.cw,
+        ch: cells.ch,
+        wb: [wb[0] as f32, wb[2] as f32],
+        planes: [0, 1].map(|j| filtered.iter().map(|f| f[j]).collect()),
+    };
+    Some((model, k, chroma))
+}
+
+/// The stage's filtered cell chroma, `wR·R − G` and `wB·B − G` per cell of
+/// the mosaic, the planes the demosaiced pixels are rebuilt on.
+pub(crate) struct CellChroma {
+    cw: usize,
+    ch: usize,
+    /// `[wR, wB]`, green = 1.
+    wb: [f32; 2],
+    planes: [Vec<f32>; 2],
+}
+
+impl CellChroma {
+    /// Rebuild the demosaiced camera-native `rgb` (`width` wide, its pixel
+    /// `(0, 0)` at mosaic site `(ox, oy)`): the sensor measures colour once
+    /// per cell; pixel-scale chroma is the demosaic's, so the stage's cell
+    /// chroma is the pixel's. Each pixel keeps its green and takes
+    /// `R = (G + c_R)/wR`, `B = (G + c_B)/wB`, `c` the cell chroma read at the
+    /// pixel's centre bilinearly in the cell grid (`render::upsample_at` at
+    /// 2×, the display pass's own coordinate).
+    pub(crate) fn rebuild(&self, rgb: &mut [[f32; 3]], width: usize, ox: usize, oy: usize) {
+        let (cw, ch) = (self.cw, self.ch);
+        let [wr, wbl] = self.wb;
+        rgb.par_chunks_mut(width.max(1)).enumerate().for_each(|(y, row)| {
+            for (x, px) in row.iter_mut().enumerate() {
+                let (sx, sy) = (x + ox, y + oy);
+                let cr = crate::render::upsample_at(&self.planes[0], cw, ch, 2, sx, sy);
+                let cb = crate::render::upsample_at(&self.planes[1], cw, ch, 2, sx, sy);
+                px[0] = (px[1] + cr) / wr;
+                px[2] = (px[1] + cb) / wbl;
+            }
+        });
+    }
 }
 
 /// The rungs `photo_k` reads the removed edge energy on: `2^(j/2)`,
