@@ -7462,3 +7462,23 @@ fn pinned_zone_fixture(zone_evidence: Option<f32>, name: &str) -> (f32, f32) {
     std::fs::remove_file(path.path()).ok();
     (before, after)
 }
+
+/// R21 (2): the owed treatment is each content's LIGHT through its own
+/// multiplier. At the measured night-horizon pixel (reference red 39,
+/// settled sky 47, settled land 11 codes, area share a = 0.64, the land
+/// zone's red gain x14.5, the sky's x1) the light form owes ~53 codes;
+/// the area share applied to the whole light owed 97, which no pixel of
+/// the frame asked for (the rendered pixel read 47). MUTATION: make
+/// `light_share` return the area share — the light form then reads 97.
+#[test]
+fn the_owed_treatment_carries_each_contents_light_through_its_own_multiplier() {
+    let lin = |code: f32| render::srgb_to_linear(code / 255.0);
+    let (v, sky, land, a, m_sky, m_land) = (39.0, 47.0, 11.0, 0.64f32, 1.0f32, 14.5f32);
+    let owe = |share: f32| render::linear_to_srgb((share * m_sky + (1.0 - share) * m_land) * lin(v)) * 255.0;
+    let light = owe(super::boundary::light_share(a, lin(sky), lin(land), 1.0));
+    let area = owe(a);
+    assert!((light - 53.0).abs() <= 1.5, "the light form owes ~53 codes, read {light:.1}");
+    assert!((area - 97.0).abs() <= 1.0, "the area form it replaces owed 97, read {area:.1}");
+    assert_eq!(super::boundary::light_share(1.0, lin(sky), lin(land), 1.0), 1.0, "an all-sky pixel is owed the sky's treatment");
+    assert_eq!(super::boundary::light_share(a, lin(sky), lin(land), 0.0), 1.0, "an untrusted mixture is read as sky, as before");
+}

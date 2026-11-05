@@ -575,7 +575,7 @@ struct ContentShare {
 /// The sky content's share of a pixel's light, `a·S / (a·S + (1 − a)·L)`,
 /// trusted by `c` (1 at a trusted mixture, 0 where the content cannot be told
 /// apart): R21 (2)'s light form ([`ContentShare`]).
-fn light_share(area: f32, sky_level: f32, land_level: f32, trust: f32) -> f32 {
+pub(super) fn light_share(area: f32, sky_level: f32, land_level: f32, trust: f32) -> f32 {
     let (s, l) = (area * sky_level.max(0.0), (1.0 - area) * land_level.max(0.0));
     let light = if s + l > f32::EPSILON { s / (s + l) } else { area };
     1.0 - trust * (1.0 - light)
@@ -1027,31 +1027,6 @@ pub(super) fn boundary_rim(
     height: u32,
 ) -> BoundaryReading {
     boundary_rim_toward(None, reference, rendered, frozen, weights, width, height, None)
-}
-
-#[cfg(test)]
-mod owed_light_tests {
-    use super::*;
-
-    /// R21 (2): the owed treatment is each content's LIGHT through its own
-    /// multiplier. At the measured night-horizon pixel (reference red 39,
-    /// settled sky 47, settled land 11 codes, area share a = 0.64, the land
-    /// zone's red gain x14.5, the sky's x1) the light form owes ~53 codes;
-    /// the area share applied to the whole light owed 97, which no pixel of
-    /// the frame asked for (the rendered pixel read 47). MUTATION: make
-    /// `light_share` return the area share — the light form then reads 97.
-    #[test]
-    fn the_owed_treatment_carries_each_contents_light_through_its_own_multiplier() {
-        let lin = |code: f32| render::srgb_to_linear(code / 255.0);
-        let (v, sky, land, a, m_sky, m_land) = (39.0, 47.0, 11.0, 0.64f32, 1.0f32, 14.5f32);
-        let owe = |share: f32| render::linear_to_srgb((share * m_sky + (1.0 - share) * m_land) * lin(v)) * 255.0;
-        let light = owe(light_share(a, lin(sky), lin(land), 1.0));
-        let area = owe(a);
-        assert!((light - 53.0).abs() <= 1.5, "the light form owes ~53 codes, read {light:.1}");
-        assert!((area - 97.0).abs() <= 1.0, "the area form it replaces owed 97, read {area:.1}");
-        assert_eq!(light_share(1.0, lin(sky), lin(land), 1.0), 1.0, "an all-sky pixel is owed the sky's treatment");
-        assert_eq!(light_share(a, lin(sky), lin(land), 0.0), 1.0, "an untrusted mixture is read as sky, as before");
-    }
 }
 
 /// [`boundary_rim`] read toward a paired `target` at the same geometry (R37):
