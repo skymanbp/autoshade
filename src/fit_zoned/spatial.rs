@@ -506,8 +506,9 @@ fn boundary_args(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BitmapBoundaryWhy {
-    /// The composed frame at the surviving `k` did not gain FIT_QUANT over
-    /// the frame before it (`fit::ships`, R1 v1.18.0).
+    /// At the surviving `k` the correction did not earn FIT_QUANT on its own
+    /// population, or it raised the composed frame by more than FIT_QUANT
+    /// (`fit::ships_local`, R19 v1.18.0: the frame is the guard).
     Frame,
     Rim,
     /// The mask reaches the gate with a contour that could not be sampled at
@@ -551,6 +552,11 @@ pub(super) struct BitmapBoundaryAccepted {
 pub(super) struct BitmapBoundaryRefusal {
     pub(super) why: BitmapBoundaryWhy,
     pub(super) initial: BoundaryReading,
+    /// The `k` and reading the boundary rulers settled on, for a refusal
+    /// taken AFTER the negotiation (`Inert`, `Frame`): what the refusal note
+    /// prints as the final reading. `None` when the rulers refused
+    /// (`Rim`) or never measured (`Unmeasured`).
+    pub(super) negotiated: Option<(f32, BoundaryReading)>,
 }
 
 /// Which ruler measures this mask family's boundary. These are two readings
@@ -662,7 +668,7 @@ pub(super) fn enforce_bitmap_boundary(
     let hard_edged = matches!(ruler, BoundaryRuler::CrossBoundaryStep { .. });
     if hard_edged && initial.transitions == 0 {
         report.recipe.masks.truncate(first_mask);
-        return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Unmeasured, initial });
+        return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Unmeasured, initial, negotiated: None });
     }
     let original = report.recipe.masks[first_mask].clone();
     let render_at = |report: &mut FitReport, k: f32| {
@@ -709,7 +715,7 @@ pub(super) fn enforce_bitmap_boundary(
     };
     let Some((k, reading, pixels, frame)) = kept else {
         report.recipe.masks.truncate(first_mask);
-        return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Rim, initial });
+        return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Rim, initial, negotiated: None });
     };
     // Both rulers now carry the frame rendered WITHOUT this correction, so
     // the question "did the surviving k actually do anything" is answerable
@@ -720,7 +726,7 @@ pub(super) fn enforce_bitmap_boundary(
     };
     if pixels == reference {
         report.recipe.masks.truncate(first_mask);
-        return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Inert, initial });
+        return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Inert, initial, negotiated: Some((k, reading)) });
     }
     // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
     // E_paired + H_ab (`report.evidence.local`): S is read where the question
@@ -735,7 +741,7 @@ pub(super) fn enforce_bitmap_boundary(
     );
     if !fit::ships_local(own_with, own_without, frame, frame_before) {
         report.recipe.masks.truncate(first_mask);
-        return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Frame, initial });
+        return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Frame, initial, negotiated: Some((k, reading)) });
     }
     shrink_zone_corrections(
         &mut report.recipe.masks[first_mask..=first_mask],
@@ -987,7 +993,14 @@ pub(super) fn attach_tiles(
                     &mut report.notes,
                     crate::rationale::Note::new(
                         crate::rationale::keys::TILE_BOUNDARY_REFUSED,
-                        boundary_args(reading.id, 0.0, refusal.initial, refusal.initial),
+                        // The final reading is the one the rulers settled on
+                        // when the refusal came after them (k and its step);
+                        // a ruler refusal has none, and prints k = 0 on the
+                        // candidate's own step.
+                        match refusal.negotiated {
+                            Some((k, settled)) => boundary_args(reading.id, k, refusal.initial, settled),
+                            None => boundary_args(reading.id, 0.0, refusal.initial, refusal.initial),
+                        },
                     ),
                 );
                 owned.remove();
@@ -2346,10 +2359,19 @@ mod tests {
             measured.rim.to_bits(),
             "texture at 39x the ceiling charges nothing: {measured:?}"
         );
-        let accepted =
-            gate(&source, &target, &mut report, &geometry, &reference, candidate)
-                .expect("the textured arm was never in question");
+        // R19 (v1.18.0): past the rulers the tile is judged on its own
+        // population, and this arm's +0.09 EV dial against a target asking
+        // half of it gains its own pixels less than FIT_QUANT at the settled
+        // k, so it is refused as `Frame` AFTER the negotiation. The rulers'
+        // path is what this arm pins, and the refusal carries where they
+        // settled (`negotiated`).
+        let refusal = match gate(&source, &target, &mut report, &geometry, &reference, candidate) {
+            Err(refusal) => refusal,
+            Ok(accepted) => panic!("R19: the textured arm's own gain is under the quantum, yet it shipped at k={}", accepted.k),
+        };
         path.remove();
+        assert_eq!(refusal.why, BitmapBoundaryWhy::Frame, "{refusal:?}");
+        let (k, settled) = refusal.negotiated.expect("a refusal after the rulers carries where they settled");
         // Bit-identity with a scalar ceiling, pinned as literals: on this
         // arm `charged == rim` at every bisection step by construction (the
         // branch returns the raw step verbatim), so the gate walks the exact
@@ -2357,15 +2379,14 @@ mod tests {
         // `<= budget` assertion here would be worthless — any tightening
         // satisfies it, which is precisely how the original defect shipped.
         assert_eq!(
-            accepted.reading.charged.to_bits(),
-            accepted.reading.rim.to_bits(),
-            "texture must still charge nothing at the accepted k: {:?}",
-            accepted.reading
+            settled.charged.to_bits(),
+            settled.rim.to_bits(),
+            "texture must still charge nothing at the settled k: {settled:?}"
         );
         assert_eq!(
-            (accepted.k, accepted.reading.rim),
+            (k, settled.rim),
             (ARM_B_SHIPPED_K, ARM_B_SHIPPED_RIM),
-            "the textured arm must land on the un-charged ceiling's exact bits"
+            "the textured arm must settle on the un-charged ceiling's exact bits"
         );
 
         // Arm C — texture earns AT MOST the ceiling, never more: the same
