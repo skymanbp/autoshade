@@ -3998,6 +3998,12 @@ fn a_colour_move_the_cells_do_not_vouch_leaves_the_tone_to_ship_alone() {
 /// their own pixels; what it witnesses now is that an improving atmosphere
 /// zone attaches on that law — its own pixels gain FIT_QUANT and so do no
 /// harm — says so with the one note, and names the Atmosphere mode.
+/// RE-READ (RULING-1180-int-r6 (3)): the Atmosphere do-no-harm is no longer
+/// a condition of its own; it is `ships_local`'s gain on the same own
+/// pixels. The shipped zone's note is that gain, and on the (1, 1.25, 0.7)
+/// pair the same route REFUSES the Atmosphere zone on `ships_local` alone
+/// (its own pixels gain FIT_QUANT, the frame rising +0.00271 past
+/// the FIT_QUANT guard), under the Atmosphere drop note.
 #[test]
 fn an_improving_atmosphere_zone_ships_on_its_own_pixels_and_names_its_mode() {
     let (accepted, report, _frame_before, _frame_after) =
@@ -4013,14 +4019,29 @@ fn an_improving_atmosphere_zone_ships_on_its_own_pixels_and_names_its_mode() {
         .find(|n| n.key == crate::rationale::keys::ZONE_SHIPPED_ON_OWN_PIXELS)
         .unwrap_or_else(|| panic!("the one law names its readings: {}", report.recipe.rationale));
     assert!(
-        note_number(note, "own_after") <= note_number(note, "own_before"),
-        "its own pixels did no harm: {note:?}"
+        fit::ships(note_number(note, "own_after"), note_number(note, "own_before")),
+        "its own pixels gained FIT_QUANT, which is its do-no-harm: {note:?}"
     );
     assert!(
         report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_MODE_ATMOSPHERE),
         "the zone must say it was fitted as atmosphere: {}",
         report.recipe.rationale
     );
+    let (refused, report, frame_before, frame_after) =
+        run_strictly_better_zone("atmos-refused", 1.0, 1.25, 0.7, true);
+    assert!(refused.is_none(), "ships_local refuses this atmosphere zone: {}", report.recipe.rationale);
+    let drop = report
+        .notes
+        .iter()
+        .find(|n| n.key == crate::rationale::keys::ZONE_ATMOSPHERE_DROPPED)
+        .unwrap_or_else(|| panic!("the refusal is the Atmosphere drop: {}", report.recipe.rationale));
+    let (own_before, own_after, drift) =
+        (note_number(drop, "own_before"), note_number(drop, "own_after"), note_number(drop, "drift"));
+    assert!(
+        !fit::ships_local(own_after, own_before, frame_before + drift, frame_before),
+        "the drop is ships_local's verdict on its own readings: {drop:?}"
+    );
+    assert_eq!(frame_after, frame_before, "a refused zone leaves the running frame where it was");
 }
 
 /// R39. A SHRUNK correction is held to do-no-harm against the render
@@ -4029,10 +4050,17 @@ fn an_improving_atmosphere_zone_ships_on_its_own_pixels_and_names_its_mode() {
 /// the same-sized move away is REFUSED. The frame condition is R19's guard
 /// (a rise of at most FIT_QUANT), read at its edge. (RULING-1180-int-r5
 /// (b): the premise that every k=1 moments arm refused the hairline gain
-/// went with those arms.)
+/// went with those arms.) RE-READ (RULING-1180-int-r6 (2)): the zone half
+/// reads the one objective on the zone's own pixels (`own_reading`, the J*
+/// `ships_local` read at k = 1), not the display moments; the two verdicts
+/// it separates are the same, read in J*.
 #[test]
 fn a_shrunk_correction_is_held_to_do_no_harm_not_to_the_k1_law() {
-    let n = 64;
+    let flat = |v: u8| DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, image::Rgb([v, v, v])));
+    let (src, tgt) = (flat(102), flat(128));
+    let report = neutral_report(&src, &tgt);
+    let (s_img, t_img) = fit::analysis_pair(&src, &tgt);
+    let n = (s_img.width() * s_img.height()) as usize;
     let grey = |v: f32| vec![[v, v, v]; n];
     let zone = AcceptedZone {
         label: "sky".to_string(),
@@ -4045,15 +4073,17 @@ fn a_shrunk_correction_is_held_to_do_no_harm_not_to_the_k1_law() {
         after: 0.0,
         rendered: Vec::new(),
         judged_before: 0.0,
-        luma_only: false,
+        own_weights: (vec![1.0; n], vec![1.0; n]),
     };
-    let target = grey(0.50);
-    let without = zone.judged(&grey(0.40), &target);
+    let target = fit::pixels_of(&t_img);
+    let without = zone.judged(&report, &grey(0.40), &target);
     let (toward, away) = (grey(0.403), grey(0.397));
-    let judged_toward = zone.judged(&toward, &target);
+    let judged_toward = zone.judged(&report, &toward, &target);
+    let judged_away = zone.judged(&report, &away, &target);
     assert!(
-        judged_toward < without && zone.judged(&away, &target) > without,
-        "premise: 0.403 sits nearer the 0.50 target than 0.40 and 0.397 farther"
+        judged_toward < without && judged_away > without,
+        "premise: 0.403 sits nearer the 0.50 target than 0.40 and 0.397 farther, in own-pixel J*: \
+         {judged_toward} / {without} / {judged_away}"
     );
     // RE-PINNED (v1.18.0, R19): the frame half of the predicate is a GUARD
     // for a local correction — the shrunk set may not raise the frame by more
@@ -4065,15 +4095,16 @@ fn a_shrunk_correction_is_held_to_do_no_harm_not_to_the_k1_law() {
     // a set inside the guard.
     let fb = 0.100f32;
     let earned = fb - 2.0 * fit::FIT_QUANT;
-    assert!(zone.still_accepted(&toward, &target, without, fb, earned), "a hairline gain does no harm");
-    assert!(!zone.still_accepted(&away, &target, without, fb, earned), "a move away from the target is harm");
+    let r = &report;
+    assert!(zone.still_accepted(r, &toward, &target, without, fb, earned), "a hairline gain does no harm");
+    assert!(!zone.still_accepted(r, &away, &target, without, fb, earned), "a move away from the target is harm");
     // The frame side at its edge: a gain, a tie and a rise up to FIT_QUANT
     // are inside the guard; a rise of FIT_QUANT and a hair more is not.
-    assert!(zone.still_accepted(&toward, &target, without, fb, fb - fit::FIT_QUANT - 1e-4), "a frame gain is inside the guard");
-    assert!(zone.still_accepted(&toward, &target, without, fb, fb), "a tie is inside the guard");
-    assert!(zone.still_accepted(&toward, &target, without, fb, fb + fit::FIT_QUANT - 1e-4), "a rise under FIT_QUANT is inside the guard");
+    assert!(zone.still_accepted(r, &toward, &target, without, fb, fb - fit::FIT_QUANT - 1e-4), "a frame gain is inside the guard");
+    assert!(zone.still_accepted(r, &toward, &target, without, fb, fb), "a tie is inside the guard");
+    assert!(zone.still_accepted(r, &toward, &target, without, fb, fb + fit::FIT_QUANT - 1e-4), "a rise under FIT_QUANT is inside the guard");
     assert!(
-        !zone.still_accepted(&toward, &target, without, fb, fb + fit::FIT_QUANT + 1e-4),
+        !zone.still_accepted(r, &toward, &target, without, fb, fb + fit::FIT_QUANT + 1e-4),
         "a rise past FIT_QUANT breaks the guard"
     );
 }
@@ -4132,7 +4163,7 @@ fn refuse_shrunk_zones_judges_each_zone_against_the_shipped_set_without_it() {
         after: 0.0,
         rendered: Vec::new(),
         judged_before: 0.0,
-        luma_only: false,
+        own_weights: (mask_weights(&masks[i], edge, edge), mask_weights(&masks[i], edge, edge)),
     };
     let mut accepted = vec![zone(0, "left"), zone(1, "right")];
     let frame = fit::look_err_with_evidence(&pixels, &tgt_px, &report.evidence);

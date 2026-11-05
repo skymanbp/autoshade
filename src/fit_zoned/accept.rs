@@ -33,28 +33,27 @@ pub(super) struct AcceptedZone {
     /// analysis render instead of buying another full candidate render.
     pub(super) rendered: Vec<[f32; 3]>,
     /// R39. What the acceptance judged, so the correction that SHIPS can be
-    /// held to do-no-harm after a boundary gate has shrunk it: the residual
-    /// [`attach_one_zone`] read on the frame this zone was attached to
-    /// (luma-only where colour was withheld and tone kept, else the
-    /// whole-zone one — `luma_only` says which), and the frame drift its
-    /// attachment was allowed. On the sequential routes (tiles, free masks)
-    /// that frame is exactly the shipped set without this correction, so
-    /// `judged_before` is the leave-one-out baseline there; the shared
-    /// routes render their own (`refuse_shrunk_zones`).
+    /// held to do-no-harm after a boundary gate has shrunk it: the zone's
+    /// own-pixel J* ([`own_reading`]) that [`attach_one_zone`] read on the
+    /// frame this zone was attached to. On the sequential routes (tiles,
+    /// free masks) that frame is exactly the shipped set without this
+    /// correction, so `judged_before` is the leave-one-out baseline there;
+    /// the shared routes render their own (`refuse_shrunk_zones`).
     pub(super) judged_before: f32,
-    pub(super) luma_only: bool,
+    /// The zone's own present population, source and target — the pair
+    /// [`attach_one_zone`]'s `ships_local` read its own J* on, so every
+    /// later do-no-harm reads the same pixels by the same law.
+    pub(super) own_weights: (Vec<f32>, Vec<f32>),
 }
 
 impl AcceptedZone {
-    /// The residual this zone's acceptance judges, on `pixels`.
-    pub(super) fn judged(&self, pixels: &[[f32; 3]], tgt_px: &[[f32; 3]]) -> f32 {
-        let after = zone_moments(pixels, &self.source_weights);
-        let target = zone_moments(tgt_px, &self.target_weights);
-        if self.luma_only {
-            zone_luma_err(&after, &target)
-        } else {
-            zone_err(&after, &target)
-        }
+    /// The reading this zone's acceptance judges, on `pixels`: the one
+    /// objective on the zone's own present pixels ([`own_reading`]), as
+    /// `ships_local` read it at k = 1 (RULING-1180-int-r6 (2): every
+    /// do-no-harm at a zone reads the one objective; until then this read
+    /// the display moments, luma-only where colour was withheld).
+    pub(super) fn judged(&self, report: &FitReport, pixels: &[[f32; 3]], tgt_px: &[[f32; 3]]) -> f32 {
+        own_reading(report, pixels, tgt_px, &self.own_weights.0, &self.own_weights.1)
     }
 
     /// R39. Does the correction that SHIPS still do what it was admitted
@@ -79,8 +78,13 @@ impl AcceptedZone {
     /// may not do is leave its zone worse than the render WITHOUT it
     /// (`without`, the caller's leave-one-out baseline) or carry the frame
     /// past the drift its attachment was allowed.
+    ///
+    /// Both halves read the one objective (RULING-1180-int-r6 (2)): the zone
+    /// half is own-pixel J* no worse than without it, with no margin — the
+    /// moments form it replaces allowed none either (`judged <= without`).
     pub(super) fn still_accepted(
         &self,
+        report: &FitReport,
         pixels: &[[f32; 3]],
         tgt_px: &[[f32; 3]],
         without: f32,
@@ -96,7 +100,7 @@ impl AcceptedZone {
         // the shrunk correction may not raise it by more than FIT_QUANT; its
         // gain was decided at k = 1 on its own population.
         frame_after - frame_before <= fit::FIT_QUANT
-            && self.judged(pixels, tgt_px) <= without
+            && self.judged(report, pixels, tgt_px) <= without
     }
 
     /// The refusal note a caller pushes when [`Self::still_accepted`] says
@@ -104,6 +108,7 @@ impl AcceptedZone {
     /// it, and the frame pair.
     pub(super) fn shrunk_refusal_note(
         &self,
+        report: &FitReport,
         pixels: &[[f32; 3]],
         tgt_px: &[[f32; 3]],
         without: f32,
@@ -116,8 +121,8 @@ impl AcceptedZone {
             vec![
                 ("label", self.label.clone()),
                 ("k", format!("{k:.3}")),
-                ("before", format!("{without:.3}")),
-                ("after", format!("{:.3}", self.judged(pixels, tgt_px))),
+                ("before", format!("{without:.5}")),
+                ("after", format!("{:.5}", self.judged(report, pixels, tgt_px))),
                 ("frame_before", format!("{frame_before:.5}")),
                 ("frame_after", format!("{frame_after:.5}")),
                 ("quant", format!("{:.4}", fit::FIT_QUANT)),
@@ -164,17 +169,17 @@ pub(super) fn refuse_shrunk_zones(
             let mut recipe = report.recipe.clone();
             recipe.masks.remove(first_zone + i);
             let px = fit::pixels_of(&render::develop_preview(s_img, &recipe));
-            accepted[i].judged(&px, tgt_px)
+            accepted[i].judged(report, &px, tgt_px)
         })
         .collect::<Vec<_>>();
     let mut refused = false;
     let mut i = 0;
     for baseline in without {
-        if accepted[i].still_accepted(pixels, tgt_px, baseline, frame_before, frame_after) {
+        if accepted[i].still_accepted(report, pixels, tgt_px, baseline, frame_before, frame_after) {
             i += 1;
             continue;
         }
-        let note = accepted[i].shrunk_refusal_note(pixels, tgt_px, baseline, k, frame_before, frame_after);
+        let note = accepted[i].shrunk_refusal_note(report, pixels, tgt_px, baseline, k, frame_before, frame_after);
         // A refused zone ships none of its controls, so the sentences that
         // said its colour or tone SHIPPED are withdrawn with it: a note
         // describes what ships.
@@ -517,8 +522,19 @@ pub(super) fn push_zone_attached_note(report: &mut FitReport, zone: &AcceptedZon
 /// frame's ruler (the report's local J*, its evidence) scoped to the
 /// region's own weights, so its pairing, its bands and its worst band are
 /// the region's (`fit::ships_local`).
+///
+/// S-MODE: it is a local correction's reading wherever it is taken, so it is
+/// `E_paired + H_ab` (`LookTerms::local`) whether or not the caller's
+/// model was switched to its local form (`local_verdicts` switches the
+/// report's model before any zone in the pipeline; a caller that drives a
+/// zone stage on its own did not, and there the structural term — the
+/// D threshold's and the seam rulers' question — decided a zone's
+/// do-no-harm: a shrunk land zone whose own E_paired + H_ab read
+/// 0.05311 -> 0.05053 was refused on S 0.163 -> 0.192).
 pub(super) fn own_reading(report: &FitReport, px: &[[f32; 3]], tgt: &[[f32; 3]], sw: &[f32], tw: &[f32]) -> f32 {
-    fit::look_err_with_evidence(px, tgt, &report.evidence.scoped(tgt, sw, tw))
+    let mut own = report.evidence.scoped(tgt, sw, tw);
+    own.local = true;
+    fit::look_err_with_evidence(px, tgt, &own)
 }
 
 /// R19: the analysis-size coverage of `masks` (the engine's own weight per

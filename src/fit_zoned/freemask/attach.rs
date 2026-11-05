@@ -241,10 +241,10 @@ pub(in crate::fit_zoned) fn attach_free_masks(
         // sequential), exactly as a spatial tile is held; the numbers go in
         // their own note, the refusal in this producer's ledger.
         if !accepted.still_accepted(
-            &boundary.pixels, &target_px, accepted.judged_before, frame_before, frame_after,
+            report, &boundary.pixels, &target_px, accepted.judged_before, frame_before, frame_after,
         ) {
             let note = accepted.shrunk_refusal_note(
-                &boundary.pixels, &target_px, accepted.judged_before, boundary.k, frame_before, frame_after,
+                report, &boundary.pixels, &target_px, accepted.judged_before, boundary.k, frame_before, frame_after,
             );
             owned.remove();
             report.recipe.rationale.truncate(rationale_before_attach);

@@ -1191,10 +1191,7 @@ pub(super) fn attach_one_zone_as(
     // objective's readings) were a second objective; on the night pair's
     // land the upper band's own J* read 0.15212 -> 0.12528 (11.7 FIT_QUANT)
     // with the frame improving, and the moments arm refused it (its tone-only
-    // luma residual 0.024 -> 0.019 neither halved nor landed). An Atmosphere
-    // zone keeps its do-no-harm, read in the same units: its own pixels may
-    // not get worse. `ships_local`'s gain implies that today; it is stated so
-    // a change to that law cannot drop the do-no-harm with it.
+    // luma residual 0.024 -> 0.019 neither halved nor landed).
     // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
     // E_paired + H_ab (`report.evidence.local`): S is read where the question
     // is structure, a local correction cannot change which pixels pair, its
@@ -1204,8 +1201,14 @@ pub(super) fn attach_one_zone_as(
     // earns FIT_QUANT on its own present pixels; the frame is a guard.
     let own_before = super::accept::own_reading(report, &cur_px, tgt_px, sw, tw);
     let own_after = super::accept::own_reading(report, &zoned_px, tgt_px, sw, tw);
-    let do_no_harm = mode == ZoneMode::Full || own_after <= own_before;
-    if do_no_harm && fit::ships_local(own_after, own_before, zoned_err, *frame_err) {
+    // An Atmosphere zone is the claim that the target's structure was
+    // replaced: its colour and tone are judged without the structure, so the
+    // one thing it may never do is leave its own pixels worse than it found
+    // them. That do-no-harm IS `ships_local`'s gain read on the same own
+    // pixels (own_after <= own_before - FIT_QUANT), so it is not stated a
+    // second time (RULING-1180-int-r6 (3): a condition implied by another is
+    // a second statement of one law).
+    if fit::ships_local(own_after, own_before, zoned_err, *frame_err) {
         // The law that kept it says so, with the readings it was decided on:
         // the zone's own pixels and the frame it guards.
         crate::rationale::push_note(
@@ -1239,8 +1242,8 @@ pub(super) fn attach_one_zone_as(
             before: zone_before,
             after: zone_after,
             rendered: zoned_px,
-            judged_before: accepted_before,
-            luma_only: colour_withheld && !tone_withheld,
+            judged_before: own_before,
+            own_weights: (sw.to_vec(), tw.to_vec()),
         })
     } else {
         report.recipe.masks.pop();

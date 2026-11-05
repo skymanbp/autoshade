@@ -917,8 +917,10 @@ fn replace_zone_with(
                 (worst_regression(&step_before, &step_after), mean_regression(&step_before, &step_after)),
             ),
         );
-        let zone_before = zone_err(&zone_moments(&single_px, &parent.source_weights), &zone_moments(target, &parent.target_weights));
-        let zone_after = zone_err(&zone_moments(&pixels, &parent.source_weights), &zone_moments(target, &parent.target_weights));
+        // R19: the band set's own population is the parent zone's; its J* on
+        // those pixels with the single zone (before) and with the bands (after).
+        let own_before = super::accept::own_reading(report, &single_px, target, &parent.source_weights, &parent.target_weights);
+        let own_after = super::accept::own_reading(report, &pixels, target, &parent.source_weights, &parent.target_weights);
         // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
         // E_paired + H_ab (`report.evidence.local`): S is read where the question
         // is structure, a local correction cannot change which pixels pair, its
@@ -928,18 +930,15 @@ fn replace_zone_with(
         let reason = if !solved { values::BAND_ESTIMATOR }
             else if !boundary_passed { values::BOUNDARY_BUDGET }
             else if after >= before - ZONE_DELTA_E_MARGIN { values::DELTA_E_MARGIN }
-            // The zone's own linear-light moments (`zone_err`) may not rise by
-            // more than the line that calls a zone matched (ZONE_MATCHED_ERR):
-            // a band set may cost its zone at most what the fit calls a match.
-            // It read the frame tolerance's 0.02 in zone_err's unit before
-            // v1.18.0; the value is the same.
-            else if zone_after > zone_before + ZONE_MATCHED_ERR { values::ZONE_DO_NO_HARM }
-            // R19: the band set's own population is the parent zone's.
-            else if !fit::ships_local(
-                super::accept::own_reading(report, &pixels, target, &parent.source_weights, &parent.target_weights),
-                super::accept::own_reading(report, &single_px, target, &parent.source_weights, &parent.target_weights),
-                frame_after, saved_error,
-            ) { values::FRAME_DO_NO_HARM }
+            // The zone do-no-harm reads the one objective on the zone's own
+            // pixels (RULING-1180-int-r6 (2)): the band set may cost its zone
+            // at most the objective's own rounding, FIT_QUANT. It read the
+            // display moments (`zone_err`) against ZONE_MATCHED_ERR before —
+            // a margin the frame tolerance's 0.02 carried, which the
+            // objective's change transferred to FIT_QUANT
+            // (ZONE_GLOBAL_REGRESSION_TOL); the margin transfers the same way.
+            else if own_after > own_before + fit::FIT_QUANT { values::ZONE_DO_NO_HARM }
+            else if !fit::ships_local(own_after, own_before, frame_after, saved_error) { values::FRAME_DO_NO_HARM }
             else if !no_seam_regression { values::BOUNDARY_REGRESSION }
             else if !ramps_follow { values::RAMP_STEEPER } else { "accepted" };
         let complete = solved && boundary_passed;

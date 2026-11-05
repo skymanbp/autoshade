@@ -1122,15 +1122,12 @@ pub(super) fn attach_tiles(
         // to help its own cell while the frame reading drifts a hair the
         // right way.
         if !accepted.still_accepted(
-            &boundary.pixels, &tgt_px, accepted.judged_before, frame_before, frame_after,
+            report, &boundary.pixels, &tgt_px, accepted.judged_before, frame_before, frame_after,
         ) {
-            crate::rationale::push_note(
-                &mut report.recipe.rationale,
-                &mut report.notes,
-                accepted.shrunk_refusal_note(
-                    &boundary.pixels, &tgt_px, accepted.judged_before, boundary.k, frame_before, frame_after,
-                ),
+            let note = accepted.shrunk_refusal_note(
+                report, &boundary.pixels, &tgt_px, accepted.judged_before, boundary.k, frame_before, frame_after,
             );
+            crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes, note);
             report.recipe.masks.truncate(first_tile);
             owned.remove();
             refused.insert(reading.id);
