@@ -300,17 +300,22 @@ pub(crate) fn photo_k(cells: &Cells, model: &NoiseModel, pts: &[Patch], wb: [f64
     let neighbours = move |cx: usize, cy: usize| {
         [(cx + 1 < cw).then(|| cy * cw + cx + 1), (cy + 1 < ch).then(|| (cy + 1) * cw + cx)].into_iter().flatten()
     };
+    // Each cell's value is read once per patch (the patch and the row and
+    // column its forward differences reach), not once per difference it is in.
     let energy = |value: &(dyn Fn(usize) -> [f32; 2] + Sync)| -> f64 {
         textured
             .par_iter()
             .map(|&p| {
                 let (x0, y0) = origin(p);
+                let (x1, y1) = ((x0 + PATCH + 1).min(cw), (y0 + PATCH + 1).min(ch));
+                let bw = x1 - x0;
+                let at: Vec<[f32; 2]> = (y0..y1).flat_map(|cy| (x0..x1).map(move |cx| cy * cw + cx)).map(value).collect();
                 let mut e = 0.0f64;
                 for cy in y0..y0 + PATCH {
                     for cx in x0..x0 + PATCH {
-                        let c = value(cy * cw + cx);
+                        let c = at[(cy - y0) * bw + cx - x0];
                         for n in neighbours(cx, cy) {
-                            let q = value(n);
+                            let q = at[(n / cw - y0) * bw + n % cw - x0];
                             e += f64::from(q[0] - c[0]).powi(2) + f64::from(q[1] - c[1]).powi(2);
                         }
                     }
