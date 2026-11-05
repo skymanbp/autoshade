@@ -50,9 +50,19 @@ fn share_of(weights: &[f32]) -> f32 {
 /// (`subzones::recut_under_floor`) asks the gate's own question before a band
 /// is solved.
 pub(super) fn zone_shares(report: &FitReport, attachment: &ZoneAttachment) -> (f32, f32) {
+    let (sw, tw) = present_pair(report, attachment);
+    (share_of(&sw), share_of(&tw))
+}
+
+/// A zone's pair weights as every reader takes them: through the target's
+/// presence (a sensor pixel the target has no counterpart for is a member of
+/// no zone) — the one place they are read.
+fn present_pair<'w>(
+    report: &FitReport, attachment: &'w ZoneAttachment,
+) -> (std::borrow::Cow<'w, [f32]>, std::borrow::Cow<'w, [f32]>) {
     (
-        share_of(&report.evidence.present_weights(&attachment.source_weights)),
-        share_of(&report.evidence.present_weights(&attachment.target_weights)),
+        report.evidence.present_weights(&attachment.source_weights),
+        report.evidence.present_weights(&attachment.target_weights),
     )
 }
 
@@ -90,10 +100,7 @@ pub(super) fn attach_one_zone_as(
     let label = attachment.label.as_str();
     // Every producer's pair weights meet the target's presence HERE, once: a
     // sensor pixel the target has no counterpart for is a member of no zone.
-    let (sw, tw) = (
-        report.evidence.present_weights(&attachment.source_weights),
-        report.evidence.present_weights(&attachment.target_weights),
-    );
+    let (sw, tw) = present_pair(report, attachment);
     let (sw, tw) = (&*sw, &*tw);
     let cur_px = fit::pixels_of(&render::develop_preview(s_img, &report.recipe));
     // Mode is derived FIRST since step 7b: the correspondence composes only

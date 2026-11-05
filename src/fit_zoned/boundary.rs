@@ -318,8 +318,8 @@ impl CellSums {
     }
 
     fn add_own(&mut self, own: [f32; 4], own_ab: [f32; 2]) {
-        for k in 0..4 {
-            self.own[k] += own[k];
+        for (sum, v) in self.own.iter_mut().zip(own) {
+            *sum += v;
         }
         self.own_ab[0] += own_ab[0];
         self.own_ab[1] += own_ab[1];
