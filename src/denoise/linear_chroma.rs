@@ -218,15 +218,53 @@ pub(crate) fn window(color_nr: f32, k: f64) -> usize {
     }
 }
 
+/// What the stage reads of an exposure: its noise model and its own `k`
+/// ([`photo_k`], at the default strength). Both are properties of the
+/// exposure, not of a develop or a recipe: they are read ONCE, off the
+/// sensor's own mosaic ([`read_source`]), and carried (the develop keeps them
+/// with the source, `render::SourceFrame::noise_reading`), so a develop runs
+/// the pass alone. The model is the sensor's: a mosaic another process has
+/// already denoised (a master's AI denoise) does not carry the sensor's
+/// Poisson noise, so `var = g·a·m + g²·b` is not its law and a model fitted
+/// on it is not a measurement. Run over such a mosaic, the stage's test reads
+/// the sensor's `σ` as an UPPER bound of the noise left in it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SourceReading {
+    pub(crate) model: NoiseModel,
+    /// The photo's own `k` at the default strength (`f64::INFINITY` when it
+    /// has no texture to protect).
+    pub(crate) k: f64,
+}
+
+/// Read the exposure ([`SourceReading`]) off its normalised signed sensor
+/// `mosaic` (`width × height`, sites of `cfa`, white-balanced by `wb` as
+/// [`filter_mosaic`] reads it): `None` when the pattern is not a 2×2 RGB
+/// Bayer or the frame has too few usable patches for a model.
+pub(crate) fn read_source(mosaic: &[f32], width: usize, height: usize, cfa: &rawler::cfa::CFA, wb: [f64; 3]) -> Option<SourceReading> {
+    let sites = bayer_sites(cfa)?;
+    if mosaic.len() != width * height || wb[1].is_nan() || wb[1] <= 0.0 {
+        return None;
+    }
+    let wb = [wb[0] / wb[1], 1.0, wb[2] / wb[1]];
+    let pts = patches(mosaic, width, height, sites, wb);
+    let model = NoiseModel::fit(&pts, width, height)?;
+    let cells = Cells::of(mosaic, width, height, sites, wb, &model, &pts)?;
+    let k = photo_k(&cells, &model, &pts, wb, plain_window(DEFAULT_AMOUNT)).0;
+    Some(SourceReading { model, k })
+}
+
 /// Run the stage on the normalised signed `mosaic` (`width × height`, sites
 /// of `cfa`), white-balanced by `wb` (any scale; green is divided out), at
-/// `scale` times the photo's own `k` ([`photo_k`], read over the plain
-/// mean's window at the default strength, [`plain_window`]) over a window of
-/// half side `rho(k)` cells for the `k` it runs at ([`window`]). Returns the fitted model, the `k` it ran at and
-/// the filtered cell chroma the demosaiced pixels are rebuilt on
+/// `scale` times the photo's own `k` over a window of half side `rho(k)`
+/// cells for the `k` it runs at ([`window`]). The model and the `k` are the
+/// exposure's `source` reading ([`SourceReading`], read once off the sensor's
+/// own mosaic), or, without one, read off `mosaic` itself ([`read_source`]:
+/// `mosaic` is then the sensor's). Returns the reading, the `k` it ran at
+/// and the filtered cell chroma the demosaiced pixels are rebuilt on
 /// ([`CellChroma::rebuild`]), or `None` — and the mosaic untouched — when the
 /// pattern is not a 2×2 RGB Bayer or the frame has too few usable patches for
 /// a model.
+#[allow(clippy::too_many_arguments)] // the mosaic's frame plus the stage's strength, window and the exposure's reading
 pub(crate) fn filter_mosaic(
     mosaic: &mut [f32],
     width: usize,
@@ -235,21 +273,30 @@ pub(crate) fn filter_mosaic(
     wb: [f64; 3],
     scale: f64,
     rho: impl Fn(f64) -> usize,
-) -> Option<(NoiseModel, f64, CellChroma)> {
+    source: Option<&SourceReading>,
+) -> Option<(SourceReading, f64, CellChroma)> {
     let sites = bayer_sites(cfa)?;
     if mosaic.len() != width * height || wb[1].is_nan() || wb[1] <= 0.0 || scale.is_nan() || scale <= 0.0 {
         return None;
     }
     let wb = [wb[0] / wb[1], 1.0, wb[2] / wb[1]];
     let pts = patches(mosaic, width, height, sites, wb);
-    let model = NoiseModel::fit(&pts, width, height)?;
-    let cells = Cells::of(mosaic, width, height, sites, wb, &model, &pts)?;
-    let k = photo_k(&cells, &model, &pts, wb, plain_window(DEFAULT_AMOUNT)).0 * scale;
+    let (model, cells, k) = match source {
+        Some(r) => (r.model, Cells::of(mosaic, width, height, sites, wb, &r.model, &pts)?, r.k),
+        None => {
+            let model = NoiseModel::fit(&pts, width, height)?;
+            let cells = Cells::of(mosaic, width, height, sites, wb, &model, &pts)?;
+            let k = photo_k(&cells, &model, &pts, wb, plain_window(DEFAULT_AMOUNT)).0;
+            (model, cells, k)
+        }
+    };
+    let reading = SourceReading { model, k };
+    let k = k * scale;
     let rho = rho(k);
     let filtered: Vec<[f32; 2]> = (0..cells.cw * cells.ch).into_par_iter().map(|i| cells.filtered(i, k, rho)).collect();
     cells.write(mosaic, width, sites, wb, &filtered);
     let chroma = cells.chroma(&filtered, &model, wb, rho);
-    Some((model, k, chroma))
+    Some((reading, k, chroma))
 }
 
 /// The stage's filtered cell chroma, `wR·R − G` and `wB·B − G` per cell of

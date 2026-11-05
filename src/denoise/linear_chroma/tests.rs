@@ -75,7 +75,7 @@ fn rggb() -> rawler::cfa::CFA {
 fn the_stage_takes_the_colour_noise_and_leaves_the_greens_and_the_mean() {
     let before = mosaic(0.01, 0.0);
     let mut after = before.clone();
-    let (model, _, _) = filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, |_| 3).expect("a Bayer mosaic with noise fits a model");
+    let (SourceReading { model, .. }, _, _) = filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, |_| 3, None).expect("a Bayer mosaic with noise fits a model");
     // The greens are never written.
     for y in 0..H {
         for x in 0..W {
@@ -104,7 +104,7 @@ fn a_colour_edge_the_noise_cannot_make_is_kept() {
     let step = 12.0 * cell_sd;
     let before = mosaic(level, step);
     let mut after = before.clone();
-    filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, |_| 3).expect("model");
+    filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, |_| 3, None).expect("model");
     let (m0, m1) = (column_dr(&before), column_dr(&after));
     let side = |m: &[f64], cols: std::ops::Range<usize>| cols.clone().map(|c| m[c]).sum::<f64>() / cols.len() as f64;
     let e = W / 4; // the edge, in cells
@@ -138,7 +138,7 @@ fn where_k_is_unbounded_the_slider_weakens_the_stage_through_its_window() {
     let before = mosaic(0.01, 0.0);
     let at = |nr: f32| {
         let mut m = before.clone();
-        let (_, k, _) = filter_mosaic(&mut m, W, H, &rggb(), WB, scale_of(nr).unwrap(), |k| window(nr, k)).expect("a model");
+        let (_, k, _) = filter_mosaic(&mut m, W, H, &rggb(), WB, scale_of(nr).unwrap(), |k| window(nr, k), None).expect("a model");
         (k, var_dr(&m, 0..W / 2))
     };
     assert_eq!((window(10.0, f64::INFINITY), window(25.0, f64::INFINITY), window(100.0, f64::INFINITY)), (1, 7, 23), "the display pass's sample count in cells");
@@ -280,7 +280,7 @@ fn a_pattern_that_is_not_a_two_by_two_bayer_is_left_alone() {
     let before = mosaic(0.01, 0.0);
     let mut after = before.clone();
     let xtrans = rawler::cfa::CFA::new("GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG");
-    assert!(filter_mosaic(&mut after, W, H, &xtrans, WB, 1.0, |_| 3).is_none());
+    assert!(filter_mosaic(&mut after, W, H, &xtrans, WB, 1.0, |_| 3, None).is_none());
     assert!(before.iter().zip(&after).all(|(a, b)| a.to_bits() == b.to_bits()));
 }
 
@@ -443,6 +443,37 @@ fn a_pixels_colour_follows_its_light_where_the_green_varies_more_than_its_noise(
             per_star.len()
         );
     }
+}
+
+/// The noise model is a property of the exposure, and a model fitted on a
+/// denoised mosaic is not a measurement: handed the exposure's reading (read
+/// once off the sensor's own mosaic, `read_source`), the stage runs at that
+/// model and that `k` whatever mosaic it is given — here the same frame with
+/// each site averaged with its eight same-colour neighbours (a denoiser's
+/// output: a ninth of the sensor's noise variance, not the sensor's law), on
+/// which a fit of its own would read another model.
+///
+/// MUTATION: the stage fits its own model on the mosaic it is given.
+#[test]
+fn the_stage_runs_at_the_exposures_reading_not_at_a_fit_of_the_mosaic_it_is_given() {
+    let sensor = mosaic(0.01, 0.0);
+    let reading = read_source(&sensor, W, H, &rggb(), WB).expect("the sensor's mosaic has a model");
+    let mut denoised: Vec<f32> = (0..W * H)
+        .map(|i| {
+            let (x, y) = ((i % W) as isize, (i / W) as isize);
+            let mut s = 0.0f64;
+            for (dy, dx) in (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (2 * dy, 2 * dx))) {
+                let (xx, yy) = ((x + dx).clamp(x % 2, W as isize - 2 + x % 2), (y + dy).clamp(y % 2, H as isize - 2 + y % 2));
+                s += f64::from(sensor[yy as usize * W + xx as usize]);
+            }
+            (s / 9.0) as f32
+        })
+        .collect();
+    let refit = read_source(&denoised, W, H, &rggb(), WB).expect("a model");
+    assert_ne!(refit.model, reading.model, "the denoised mosaic must read another model for this test to say anything");
+    let (ran, k, _) = filter_mosaic(&mut denoised, W, H, &rggb(), WB, 1.0, |_| 3, Some(&reading)).expect("the stage runs");
+    assert_eq!(ran, reading, "the stage ran at {ran:?}, the exposure's reading is {reading:?}");
+    assert!(k == reading.k, "k {k}, the exposure's {}", reading.k);
 }
 
 /// The reading behind `photo_k` on a real RAW (`E3_PROBE=<raw path>`): the
