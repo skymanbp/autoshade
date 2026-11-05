@@ -537,8 +537,11 @@ fn fit_recipe_zoned_multi_inner(
     // The four-region producer may leave pixels to the global fit by design;
     // the historical two-region producer owns the inverse-sky complement.
     // Compare against the unchanged legacy sequencer and keep the multi-class
-    // candidate only when it is no worse. This is a strict selection gate,
-    // not extra segmentation and not a tolerance. The multi-class sky plane
+    // candidate only when it SHIPS against it (DEF-6): the two-region recipe
+    // is the simpler, untouched reference, so this is a stage-vs-absence
+    // decision and R1's law reads it — the multi-class candidate must earn
+    // FIT_QUANT over the two-region one, and a gain under FIT_QUANT is no
+    // gain, so the tie goes to the reference. The multi-class sky plane
     // remains available for the region producer, but the legacy path is the
     // byte-identity reference and runs through the seeded sky bridge.
     let two = fit_recipe_zoned_inner_seeded(
@@ -562,7 +565,7 @@ fn fit_recipe_zoned_multi_inner(
     // those are the numbers the refusal discloses.
     let multi_error = frame_err_under(src, target, &report, &two.evidence);
     let two_error = frame_err_under(src, target, &two, &two.evidence);
-    if multi_error >= two_error {
+    if !crate::fit::ships(multi_error, two_error) {
         // The two key FAMILIES first (R34 §D2): one outcome each, two
         // carriers each, and `is_colour_refusal`/`is_tone_refusal` are the one
         // place that knows it — a match arm per key would be a second place.
