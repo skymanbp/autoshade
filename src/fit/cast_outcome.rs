@@ -569,7 +569,27 @@ pub(super) fn eliminate_unearned(
     controls: &[Control],
     err: impl Fn(&EditRecipe) -> f32,
 ) -> Vec<Control> {
-    let solved = err(recipe);
+    eliminate_unearned_by(recipe, base, controls, err, |r| *r, |_, solved, without| ships(*solved, *without))
+}
+
+/// [`eliminate_unearned`] with the reading and the verdict apart, for the
+/// sites whose control ships on a population of its own (R19's family): an
+/// Atmosphere white balance on the shared content it was solved from
+/// (DEF-2), a global control on the luminance band it acts on (R22). `read`
+/// takes every reading a verdict needs once per recipe, `order` is the frame
+/// reading the drops are ordered by (smallest effect first, as above), and
+/// `earns(c, solved, without)` is the control's ship law. The loop, the
+/// order and "read against the solved recipe, never the last drop" are
+/// [`eliminate_unearned`]'s, unchanged.
+pub(super) fn eliminate_unearned_by<R>(
+    recipe: &mut EditRecipe,
+    base: &EditRecipe,
+    controls: &[Control],
+    read: impl Fn(&EditRecipe) -> R,
+    order_of: impl Fn(&R) -> f32,
+    earns: impl Fn(Control, &R, &R) -> bool,
+) -> Vec<Control> {
+    let solved = read(recipe);
     let without = |r: &EditRecipe, c: Control| {
         let mut z = r.clone();
         c.reset(&mut z, base);
@@ -577,20 +597,20 @@ pub(super) fn eliminate_unearned(
     };
     let mut dropped = Vec::new();
     loop {
-        let mut order: Vec<(f32, Control)> = controls
+        let mut order: Vec<(R, Control)> = controls
             .iter()
             .copied()
             .filter(|c| c.differs(recipe, base))
-            .map(|c| (err(&without(recipe, c)), c))
+            .map(|c| (read(&without(recipe, c)), c))
             .collect();
-        order.sort_by(|a, b| a.0.total_cmp(&b.0));
+        order.sort_by(|a, b| order_of(&a.0).total_cmp(&order_of(&b.0)));
         let mut changed = false;
-        for (read, c) in order {
+        for (reading, c) in order {
             let candidate = without(recipe, c);
             // The pass's readings were taken on the state they judge; after
             // a drop the state moved, so the next one is read again.
-            let e = if changed { err(&candidate) } else { read };
-            if !ships(solved, e) {
+            let e = if changed { read(&candidate) } else { reading };
+            if !earns(c, &solved, &e) {
                 *recipe = candidate;
                 dropped.push(c);
                 changed = true;

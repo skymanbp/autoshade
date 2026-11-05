@@ -380,7 +380,28 @@ pub(super) fn fit_atmosphere_from_parts(
     // R12: elimination after every joint solve, on this mode's objective.
     let objective_of =
         |r: &EditRecipe| look_err_with_evidence(&pixels_of(&render::develop_preview(s_img, r)), tp, evidence);
-    let mut unearned = eliminate_unearned(&mut recipe, base, &WB_AXES, objective_of);
+    // DEF-2 (R19's sentence at this site): the white balance SHIPS on the
+    // population it was SOLVED on. Where the shared-content restriction is in
+    // force, a WB axis earns FIT_QUANT of J* read over the shared content's
+    // own present pixels (the scoped model at membership weights), and the
+    // whole frame is the guard only — it may not rise by more than FIT_QUANT.
+    // Judged on the whole frame, the content the restriction removed (target
+    // pixels no source cell answers for) overruled the solve that was made
+    // without them: "solved from the part that DOES correspond" and shipped
+    // on the part that does not. Every other control keeps the frame ruler.
+    let shared_model = readable.map(|p| evidence.scoped(tp, &p.source_member, &p.target_member));
+    let wb_reading = |r: &EditRecipe| {
+        let px = pixels_of(&render::develop_preview(s_img, r));
+        let frame = look_err_with_evidence(&px, tp, evidence);
+        (frame, shared_model.as_ref().map(|m| look_err_with_evidence(&px, tp, m)))
+    };
+    let wb_earns = |c: Control, solved: &(f32, Option<f32>), without: &(f32, Option<f32>)| {
+        match (WB_AXES.contains(&c), solved.1, without.1) {
+            (true, Some(own_with), Some(own_without)) => ships_local(own_with, own_without, solved.0, without.0),
+            _ => ships(solved.0, without.0),
+        }
+    };
+    let mut unearned = eliminate_unearned_by(&mut recipe, base, &WB_AXES, wb_reading, |r| r.0, wb_earns);
     let provisional = pixels_of(&render::develop_preview(s_img, &recipe));
     recipe.tone_curve = atmosphere_tone_curve_weighted(
         &provisional,
@@ -472,8 +493,9 @@ pub(super) fn fit_atmosphere_from_parts(
     }
     let sat_reduced = recipe.saturation != sat_fitted;
     // R8: every control of the finished recipe earns FIT_QUANT against its
-    // own absence on this mode's ruler, or goes back to its zero.
-    let finished = eliminate_unearned(&mut recipe, base, &global_controls(), objective_of);
+    // own absence on this mode's ruler, or goes back to its zero — the white
+    // balance on the shared content it was solved from (DEF-2, above).
+    let finished = eliminate_unearned_by(&mut recipe, base, &global_controls(), wb_reading, |r| r.0, wb_earns);
     unearned.extend(finished.iter().copied());
     if !finished.is_empty() {
         err_after = look_err_with_evidence(&pixels_of(&render::develop_preview(s_img, &recipe)), tp, evidence);
