@@ -24,16 +24,29 @@
 //!
 //! **The pixels** ([`CellChroma::rebuild`]): the sensor measures colour once
 //! per cell; pixel-scale chroma is the demosaic's, so the stage's cell chroma
-//! is the pixel's. After the demosaic every pixel keeps its green — the
-//! demosaic's luminance, `Y` of the colour differences above, untouched — and
-//! its red and blue are rebuilt on it from the filtered cell chroma read at
-//! that pixel (bilinear in the cell grid, the coordinate of the display
-//! pass's own upsample, `render::upsample_at`). Without it each green site's
-//! own noise, which no cell pass writes, becomes pixel-scale colour after the
-//! demosaic (26–32 % of the night sky's residual grain, rel1180 msg-e3 round
-//! 7); with it that noise is luminance. No pixel pass: one read per pixel.
-//! (The filtered red and blue samples are still written to the mosaic, so
-//! the demosaic's own direction choices read the filtered colour.)
+//! is the pixel's — and a pixel's colour follows its light: the cell's
+//! colour, carried along the cell's own slope against green, believed only
+//! where the green varies more than its noise. After the demosaic every pixel
+//! keeps its green — the demosaic's luminance, `Y` of the colour differences
+//! above, untouched — and its red and blue are rebuilt on it from the
+//! filtered cell chroma moved along the cell's slope by the pixel's green
+//! against the cell's (`c + a·(G − G_cell)`, [`Cells::slopes`]: the display
+//! pass's own `a·l + b` in linear light, its `ε` the model's noise variance),
+//! all read at that pixel bilinearly in the cell grid (the coordinate of the
+//! display pass's own upsample, `render::upsample_at`). Without the rebuild
+//! each green site's own noise, which no cell pass writes, becomes
+//! pixel-scale colour after the demosaic (26–32 % of the night sky's residual
+//! grain, rel1180 msg-e3 round 7); with it that noise is luminance. Without
+//! the slope one cell's chroma lands on pixels whose green differs from the
+//! cell's: a dark twig inside a bright orange cell takes the sky's colour, and
+//! a star's core, brighter than its cell, takes the mean's small difference
+//! while the ramp around it takes the rest (round 11: on a sunset's texture window
+//! 79 % of the L* edge energy lost sat on the quarter of pixels whose
+//! luminance is 20 % or more off their cell's; the night sky's star cores
+//! went from R/G 1.06 to 0.80). No pixel pass: box sums over the cells and a
+//! few reads per pixel. (The filtered red and blue samples are still written
+//! to the mosaic, so the demosaic's own direction choices read the filtered
+//! colour.)
 //!
 //! **The filter.** A sigma filter: a neighbour votes when the evidence says
 //! it shares the cell's TRUE colour — it lies within `k` noise sds of an
@@ -235,41 +248,51 @@ pub(crate) fn filter_mosaic(
     let rho = rho(k);
     let filtered: Vec<[f32; 2]> = (0..cells.cw * cells.ch).into_par_iter().map(|i| cells.filtered(i, k, rho)).collect();
     cells.write(mosaic, width, sites, wb, &filtered);
-    let chroma = CellChroma {
-        cw: cells.cw,
-        ch: cells.ch,
-        wb: [wb[0] as f32, wb[2] as f32],
-        planes: [0, 1].map(|j| filtered.iter().map(|f| f[j]).collect()),
-    };
+    let chroma = cells.chroma(&filtered, &model, wb, rho);
     Some((model, k, chroma))
 }
 
 /// The stage's filtered cell chroma, `wR·R − G` and `wB·B − G` per cell of
-/// the mosaic, the planes the demosaiced pixels are rebuilt on.
+/// the mosaic, with each cell's green and the slope of its chroma against
+/// green: the planes the demosaiced pixels are rebuilt on.
 pub(crate) struct CellChroma {
     cw: usize,
     ch: usize,
     /// `[wR, wB]`, green = 1.
     wb: [f32; 2],
     planes: [Vec<f32>; 2],
+    /// The cell's green, the mean of its two green sites.
+    green: Vec<f32>,
+    /// Per colour difference, the cell's slope of chroma against green
+    /// ([`Cells::slopes`]).
+    slopes: [Vec<f32>; 2],
 }
 
 impl CellChroma {
     /// Rebuild the demosaiced camera-native `rgb` (`width` wide, its pixel
-    /// `(0, 0)` at mosaic site `(ox, oy)`): the sensor measures colour once
-    /// per cell; pixel-scale chroma is the demosaic's, so the stage's cell
-    /// chroma is the pixel's. Each pixel keeps its green and takes
-    /// `R = (G + c_R)/wR`, `B = (G + c_B)/wB`, `c` the cell chroma read at the
-    /// pixel's centre bilinearly in the cell grid (`render::upsample_at` at
-    /// 2×, the display pass's own coordinate).
+    /// `(0, 0)` at mosaic site `(ox, oy)`): a pixel's colour follows its
+    /// light — the cell's colour, carried along the cell's own slope against
+    /// green, believed only where the green varies more than its noise. The
+    /// sensor measures colour once per cell; pixel-scale chroma is the
+    /// demosaic's, so the pixel's chroma is the cell's, `c`, moved along the
+    /// cell's slope `a` by the pixel's own green against the cell's,
+    /// `c + a·(G − G_cell)`. Each pixel keeps its green and takes
+    /// `R = (G + c_R + a_R·(G − G_cell))/wR`, the same for blue; `c`, `a` and
+    /// `G_cell` are read at the pixel's centre bilinearly in the cell grid
+    /// (`render::upsample_at` at 2×, the display pass's own coordinate).
+    /// Where `a` is 0 (a flat cell) the pixel's chroma is the cell's and the
+    /// green's own noise stays luminance; where the green carries a star or a
+    /// twig, the chroma follows it at the cell's own colour ratio.
     pub(crate) fn rebuild(&self, rgb: &mut [[f32; 3]], width: usize, ox: usize, oy: usize) {
         let (cw, ch) = (self.cw, self.ch);
         let [wr, wbl] = self.wb;
+        let at = |plane: &[f32], sx: usize, sy: usize| crate::render::upsample_at(plane, cw, ch, 2, sx, sy);
         rgb.par_chunks_mut(width.max(1)).enumerate().for_each(|(y, row)| {
             for (x, px) in row.iter_mut().enumerate() {
                 let (sx, sy) = (x + ox, y + oy);
-                let cr = crate::render::upsample_at(&self.planes[0], cw, ch, 2, sx, sy);
-                let cb = crate::render::upsample_at(&self.planes[1], cw, ch, 2, sx, sy);
+                let dg = px[1] - at(&self.green, sx, sy);
+                let cr = at(&self.planes[0], sx, sy) + at(&self.slopes[0], sx, sy) * dg;
+                let cb = at(&self.planes[1], sx, sy) + at(&self.slopes[1], sx, sy) * dg;
                 px[0] = (px[1] + cr) / wr;
                 px[2] = (px[1] + cb) / wbl;
             }
@@ -471,6 +494,93 @@ impl Cells {
             (out[j], count[j]) = skipped_mean(&window, self.d[i][j], f64::from(sd[j]) / 2f64.sqrt(), k);
         }
         (out, count)
+    }
+
+    /// The planes the demosaiced pixels are rebuilt on ([`CellChroma`]):
+    /// the filtered cell chroma, each cell's green and its slope
+    /// ([`Self::slopes`]) over the window of half side `rho` cells.
+    fn chroma(&self, filtered: &[[f32; 2]], model: &NoiseModel, wb: [f64; 3], rho: usize) -> CellChroma {
+        CellChroma {
+            cw: self.cw,
+            ch: self.ch,
+            wb: [wb[0] as f32, wb[2] as f32],
+            planes: [0, 1].map(|j| filtered.iter().map(|f| f[j]).collect()),
+            green: self.d.iter().map(|d| d[2]).collect(),
+            slopes: self.slopes(filtered, model, rho),
+        }
+    }
+
+    /// Each cell's slope of its filtered chroma (`filtered`) against its
+    /// green over the window of half side `rho` cells, per colour difference:
+    /// `a = cov(G, c) / (var(G) + σ²_G)`, the display pass's own `a·l + b`
+    /// (`render::detail::chroma_nr`) brought to linear light with the model
+    /// in place of a chosen `ε` — `σ²_G` the model's noise variance of a
+    /// cell's green (the mean of two sites, half one site's) at the window's
+    /// mean green, at the cell's radius. That is the only shrinkage, and it is
+    /// derived: a slope is believed where the green's variance exceeds the
+    /// noise's. On a flat sky `cov → 0`, so `a → 0` and the pixel keeps the
+    /// cell's chroma (the green's noise is not re-injected into colour); on a
+    /// star or a twig `var(G) ≫ σ²_G` and `a` is the true slope. Box sums,
+    /// O(cells): column sums slid down a band of rows, row sums slid along.
+    fn slopes(&self, filtered: &[[f32; 2]], model: &NoiseModel, rho: usize) -> [Vec<f32>; 2] {
+        const BAND: usize = 64;
+        let (cw, ch) = (self.cw, self.ch);
+        let mut both = vec![[0.0f32; 2]; cw * ch];
+        // Per cell: G, G², c_R, c_B, G·c_R, G·c_B.
+        let q = |i: usize| {
+            let g = f64::from(self.d[i][2]);
+            let [c0, c1] = filtered[i].map(f64::from);
+            [g, g * g, c0, c1, g * c0, g * c1]
+        };
+        both.par_chunks_mut(cw * BAND).enumerate().for_each(|(band, rows)| {
+            let y0 = band * BAND;
+            let mut col = vec![[0.0f64; 6]; cw];
+            let slide = |col: &mut [[f64; 6]], y: usize, sign: f64| {
+                for (x, c) in col.iter_mut().enumerate() {
+                    let v = q(y * cw + x);
+                    for k in 0..6 {
+                        c[k] += sign * v[k];
+                    }
+                }
+            };
+            for y in y0.saturating_sub(rho)..(y0 + rho + 1).min(ch) {
+                slide(&mut col, y, 1.0);
+            }
+            for (dy, out) in rows.chunks_mut(cw).enumerate() {
+                let y = y0 + dy;
+                let rows_n = ((y + rho + 1).min(ch) - y.saturating_sub(rho)) as f64;
+                let mut s = [0.0f64; 6];
+                for c in &col[..(rho + 1).min(cw)] {
+                    for k in 0..6 {
+                        s[k] += c[k];
+                    }
+                }
+                for (x, a) in out.iter_mut().enumerate() {
+                    let n = rows_n * ((x + rho + 1).min(cw) - x.saturating_sub(rho)) as f64;
+                    let mg = s[0] / n;
+                    let noise = model.var(mg, model.radius((2 * x + 1) as f64, (2 * y + 1) as f64)) / 2.0;
+                    let den = (s[1] / n - mg * mg).max(0.0) + noise;
+                    *a = [0, 1].map(|j| if den > 0.0 { ((s[4 + j] / n - mg * s[2 + j] / n) / den) as f32 } else { 0.0 });
+                    if x + rho + 1 < cw {
+                        for k in 0..6 {
+                            s[k] += col[x + rho + 1][k];
+                        }
+                    }
+                    if x >= rho {
+                        for k in 0..6 {
+                            s[k] -= col[x - rho][k];
+                        }
+                    }
+                }
+                if y + rho + 1 < ch {
+                    slide(&mut col, y + rho + 1, 1.0);
+                }
+                if y >= rho {
+                    slide(&mut col, y - rho, -1.0);
+                }
+            }
+        });
+        [0, 1].map(|j| both.iter().map(|a| a[j]).collect())
     }
 
     /// Write `filtered` back: red and blue rebuilt on the cell's own green,
