@@ -214,10 +214,14 @@ fn the_window_leaves_the_display_share_at_the_width_the_stage_runs_at() {
 /// mean at its test width keeps, and no more: the slope of the filtered
 /// colour difference on the cell's own sample is `1 / (N·(Z − 2t·φ(t)))`,
 /// `t = k·√(1 + 1/n)` in the cell's true sd (the model's sd over the true
-/// one carried in, `n = N·Z`), within three standard errors of the slope
-/// (its residual sd over the sample sd, over the square root of the cells
-/// that are independent: one per window). At `k` = 1.6 and 2.5, the night
-/// sky's order of `k` and a daylight one.
+/// one carried in, `n = N·Z`), plus what its four axis neighbours carry of
+/// it through the green they share with it — each sample enters the estimate
+/// with an influence whose mean slope is 1 (Stein's lemma on jointly normal
+/// samples), so each neighbour adds `cov/(N·v)` (`cov = σ²_G/16`, `v` one
+/// cell's variance) — within three standard errors of the slope (its
+/// residual sd over the sample sd, over the square root of the cells that
+/// are independent: one per window). At `k` = 1.6 and 2.5, the night sky's
+/// order of `k` and a daylight one.
 ///
 /// MUTATION: every pass anchored on the cell's own sample (the form before
 /// rel1180 round 8): the test then keeps the neighbours on the sample's side
@@ -233,8 +237,10 @@ fn the_filter_keeps_of_a_cells_own_noise_only_what_the_skipped_mean_keeps() {
     let rho = 3;
     let n_win = ((2 * rho + 1) * (2 * rho + 1)) as f64;
     // The true sd of each colour difference of one cell (the mosaic's own
-    // noise: the site's, the two greens averaged).
-    let g_var = (A * level + B) / 2.0;
+    // noise: the site's, its four green neighbours averaged), and the
+    // covariance of two axis-neighbouring cells' differences (one green shared).
+    let g_var = (A * level + B) / 4.0;
+    let shared = (A * level + B) / 16.0;
     let true_sd = [
         (WB[0] * WB[0] * (A * level / WB[0] + B) + g_var).sqrt(),
         (WB[2] * WB[2] * (A * level / WB[2] + B) + g_var).sqrt(),
@@ -264,7 +270,7 @@ fn the_filter_keeps_of_a_cells_own_noise_only_what_the_skipped_mean_keeps() {
                 t = k * r * (1.0 + 1.0 / (n_win * normal_mass(t).0)).sqrt();
             }
             let (z, phi) = normal_mass(t);
-            let want = 1.0 / (n_win * (z - 2.0 * t * phi));
+            let want = 1.0 / (n_win * (z - 2.0 * t * phi)) + 4.0 * shared / (n_win * true_sd[j] * true_sd[j]);
             assert!(
                 (slope - want).abs() <= 3.0 * se,
                 "k {k}, colour difference {j}: the filter keeps {slope:.4} of a cell's own noise; the skipped mean at t = {t:.3} keeps {want:.4} (3 se {:.4}; the window mean 1/N = {:.4})",
@@ -315,10 +321,11 @@ fn the_k_reading_reads_the_textured_patches_at_the_fits_own_stride() {
 /// The sensor measures colour once per cell; pixel-scale chroma is the
 /// demosaic's, so the stage's cell chroma is the pixel's: after the rebuild
 /// every pixel's green is its own (bit for bit) and its chroma `wR·R − G`,
-/// `wB·B − G` is the cell chroma at the pixel's centre. A field linear in the
-/// cell grid is read exactly by the bilinear tap, so a ramp plane must come
-/// back as the ramp at the pixel's position in cells, `(x + ox − 0.5)/2` (a
-/// cell's two pixels sit a quarter cell either side of its centre), whatever
+/// `wB·B − G` is the cell chroma read at the pixel in its own site grid. A
+/// field linear in that grid is read exactly by the bilinear tap, so a ramp
+/// plane must come back as the ramp at the pixel's position in the grid,
+/// `(x + ox − dx)/2` (`dx` the colour site's column in its cell: 0 for an
+/// RGGB red, 1 for its blue; the same down the rows), whatever
 /// noise the demosaic left in the pixel's own red and blue — on cells whose
 /// slope against green is 0 (a flat cell: the slope is the next test's).
 ///
@@ -331,7 +338,8 @@ fn the_pixels_chroma_is_the_cells_chroma_read_at_the_pixel() {
     let planes =
         [0, 1].map(|j| (0..cw * ch).map(|i| ramp(j, (i % cw) as f64, (i / cw) as f64) as f32).collect::<Vec<f32>>());
     let flat = || vec![0.0f32; cw * ch];
-    let chroma = CellChroma { cw, ch, wb: [WB[0] as f32, WB[2] as f32], planes, green: flat(), slopes: [flat(), flat()] };
+    let origin = [(0, 0), (1, 1)];
+    let chroma = CellChroma { cw, ch, wb: [WB[0] as f32, WB[2] as f32], origin, planes, green: flat(), slopes: [flat(), flat()] };
     let before: Vec<[f32; 3]> =
         (0..w * h).map(|i| [0, 1, 2].map(|c| (0.2 + 0.05 * normal(11 + c as u64, i as u64)) as f32)).collect();
     let mut after = before.clone();
@@ -339,8 +347,9 @@ fn the_pixels_chroma_is_the_cells_chroma_read_at_the_pixel() {
     for (i, (b, a)) in before.iter().zip(&after).enumerate() {
         let (x, y) = (i % w, i / w);
         assert_eq!(b[1].to_bits(), a[1].to_bits(), "the green of pixel ({x}, {y}) moved");
-        let (u, v) = (((x + ox) as f64 - 0.5) / 2.0, ((y + oy) as f64 - 0.5) / 2.0);
         for (j, (wc, c)) in [(WB[0], a[0]), (WB[2], a[2])].into_iter().enumerate() {
+            let (dy, dx) = origin[j];
+            let (u, v) = (((x + ox) as f64 - dx as f64) / 2.0, ((y + oy) as f64 - dy as f64) / 2.0);
             let got = wc * f64::from(c) - f64::from(a[1]);
             let want = ramp(j, u, v);
             assert!(
@@ -356,10 +365,12 @@ fn the_pixels_chroma_is_the_cells_chroma_read_at_the_pixel() {
 /// than its noise. A night sky of one colour (`wR·R = 1.4·G`, `wB·B = 0.7·G`
 /// everywhere, sky and stars alike: only the light varies) with stars of one
 /// cell's sd, under the model's noise; the light is the star's at each
-/// cell's centre, the same on the cell's four sites (the colour the cell
-/// measures is then the scene's — a sharper star's sites see different light,
-/// which is the sensor's sampling, not the rebuild). Over the cells' chroma
-/// as measured, the rebuild of a demosaic whose greens are that light must
+/// cell's centre, the same on the cell's four sites. Over the scene's own
+/// cell chroma (`(1.4 − 1)·G` and `(0.7 − 1)·G` on each cell's measured
+/// green: the measurement of a colour difference, at its site against four
+/// greens of which two lie in the neighbouring cells, is the star-centroid
+/// test's, and on light held constant per cell those greens see another
+/// cell's light), the rebuild of a demosaic whose greens are that light must
 /// give each star's
 /// core pixels (green at least 0.25, over ten times the sky) the scene's
 /// colour ratio — the mean over the stars of the core's `wR·R / G` within 3
@@ -408,15 +419,15 @@ fn a_pixels_colour_follows_its_light_where_the_green_varies_more_than_its_noise(
             *v = (s + (A * s + B).sqrt() * normal(23, (y * W + x) as u64)) as f32;
         }
     });
-    // The stage's own model and cells, the cells' chroma as measured: the
-    // slope and the rebuild are under test here, the filter and its k the
-    // other tests'.
+    // The stage's own model and cells, the scene's chroma on the cells'
+    // greens: the slope and the rebuild are under test here, the measurement,
+    // the filter and its k the other tests'.
     let sites = bayer_sites(&rggb()).expect("Bayer");
     let pts = patches(&m, W, H, sites, WB);
     let model = NoiseModel::fit(&pts, W, H).expect("a Bayer mosaic with noise fits a model");
     let cells = Cells::of(&m, W, H, sites, WB, &model, &pts).expect("cells");
-    let measured: Vec<[f32; 2]> = cells.d.iter().map(|d| [d[0], d[1]]).collect();
-    let chroma = cells.chroma(&measured, &model, WB, 3);
+    let scene: Vec<[f32; 2]> = cells.d.iter().map(|d| RATIO.map(|r| ((r - 1.0) * f64::from(d[2])) as f32)).collect();
+    let chroma = cells.chroma(&scene, &model, WB, 3);
     let mut rgb: Vec<[f32; 3]> = (0..W * H).map(|i| [0.0, light(i % W, i / W) as f32, 0.0]).collect();
     chroma.rebuild(&mut rgb, W, 0, 0);
     for (c, wc) in [(0usize, WB[0]), (2, WB[2])] {
@@ -442,6 +453,104 @@ fn a_pixels_colour_follows_its_light_where_the_green_varies_more_than_its_noise(
             3.0 * se,
             per_star.len()
         );
+    }
+}
+
+/// A colour difference is measured at one place: the colour site, against
+/// the green the demosaic reads there. A night sky of one colour
+/// (`wR·R = 1.4·G`, `wB·B = 0.7·G` everywhere) with sharp stars (sd one
+/// pixel), each site seeing the light at its own position, under the
+/// model's noise; rebuilt over the cells' chroma as measured on a demosaic
+/// whose greens are the light. A star's red and blue must sit where its
+/// light sits: per star the centroid of `wR·R − sky` and of `wB·B − sky`
+/// over a 9-pixel square, against the green's, and over the stars the mean
+/// displacement on each axis within 3 standard errors (its spread over the
+/// stars) of 0. Measured against the cell's mean green instead, the red's
+/// content sits on its site, half a pixel up-left of the cell's centre where
+/// the plane is read, so the red lands down-right and the blue up-left.
+///
+/// MUTATION: each colour difference measured against the cell's mean green
+/// and read at the cell's centre (the form before rel1180 round 11).
+#[test]
+fn a_stars_colour_sits_where_its_light_sits() {
+    const RATIO: [f64; 2] = [1.4, 0.7];
+    const SKY: f64 = 0.02;
+    const PEAK: f64 = 0.6;
+    const SD: f64 = 1.0;
+    const STEP: usize = 64;
+    const HALF: usize = 4;
+    let stars: Vec<(f64, f64)> = (1..H / STEP - 1)
+        .flat_map(|j| (1..W / STEP - 1).map(move |i| (i, j)))
+        .map(|(i, j)| {
+            let n = (j * W + i) as u64;
+            ((i * STEP) as f64 + 2.0 * (normal(31, n).abs() % 1.0), (j * STEP) as f64 + 2.0 * (normal(32, n).abs() % 1.0))
+        })
+        .collect();
+    // The scene's light at pixel (x, y)'s centre: the sky and the nearest star.
+    let light = |x: usize, y: usize| {
+        let (i, j) = ((x + STEP / 2) / STEP, (y + STEP / 2) / STEP);
+        let star = (i >= 1 && j >= 1 && i < W / STEP - 1 && j < H / STEP - 1).then(|| stars[(j - 1) * (W / STEP - 2) + i - 1]);
+        SKY + star.map_or(0.0, |(sx, sy)| {
+            let r2 = (x as f64 - sx).powi(2) + (y as f64 - sy).powi(2);
+            PEAK * (-r2 / (2.0 * SD * SD)).exp()
+        })
+    };
+    let mut m = vec![0.0f32; W * H];
+    m.par_chunks_mut(W).enumerate().for_each(|(y, row)| {
+        for (x, v) in row.iter_mut().enumerate() {
+            let g = light(x, y);
+            let s = match (y % 2, x % 2) {
+                (0, 0) => RATIO[0] * g / WB[0],
+                (1, 1) => RATIO[1] * g / WB[2],
+                _ => g,
+            };
+            *v = (s + (A * s + B).sqrt() * normal(33, (y * W + x) as u64)) as f32;
+        }
+    });
+    let sites = bayer_sites(&rggb()).expect("Bayer");
+    let pts = patches(&m, W, H, sites, WB);
+    let model = NoiseModel::fit(&pts, W, H).expect("a Bayer mosaic with noise fits a model");
+    let cells = Cells::of(&m, W, H, sites, WB, &model, &pts).expect("cells");
+    let measured: Vec<[f32; 2]> = cells.d.iter().map(|d| [d[0], d[1]]).collect();
+    let chroma = cells.chroma(&measured, &model, WB, 3);
+    let mut rgb: Vec<[f32; 3]> = (0..W * H).map(|i| [0.0, light(i % W, i / W) as f32, 0.0]).collect();
+    chroma.rebuild(&mut rgb, W, 0, 0);
+    // Per star, the centroid of `value − sky` over the square about it.
+    let centroid = |sx: f64, sy: f64, value: &dyn Fn(usize) -> f64, sky: f64| {
+        let (x0, y0) = (sx.round() as usize - HALF, sy.round() as usize - HALF);
+        let (mut mx, mut my, mut mass) = (0.0f64, 0.0f64, 0.0f64);
+        for y in y0..=y0 + 2 * HALF {
+            for x in x0..=x0 + 2 * HALF {
+                let q = value(y * W + x) - sky;
+                mx += q * x as f64;
+                my += q * y as f64;
+                mass += q;
+            }
+        }
+        (mx / mass, my / mass)
+    };
+    for (c, wc) in [(0usize, WB[0]), (2, WB[2])] {
+        let sky = RATIO[c / 2] * SKY;
+        let shifts: Vec<(f64, f64)> = stars
+            .iter()
+            .map(|&(sx, sy)| {
+                let (gx, gy) = centroid(sx, sy, &|i| f64::from(rgb[i][1]), SKY);
+                let (cx, cy) = centroid(sx, sy, &|i| wc * f64::from(rgb[i][c]), sky);
+                (cx - gx, cy - gy)
+            })
+            .collect();
+        let n = shifts.len() as f64;
+        for (axis, pick) in [("x", 0usize), ("y", 1)] {
+            let v: Vec<f64> = shifts.iter().map(|s| if pick == 0 { s.0 } else { s.1 }).collect();
+            let mean = v.iter().sum::<f64>() / n;
+            let se = (v.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / (n - 1.0) / n).sqrt();
+            assert!(
+                mean.abs() <= 3.0 * se,
+                "channel {c}: the stars' colour sits {mean:+.4} px off their light along {axis} (3 se {:.4}, {} stars)",
+                3.0 * se,
+                shifts.len()
+            );
+        }
     }
 }
 

@@ -13,14 +13,23 @@
 //! the noise away before anything can rectify it.
 //!
 //! **The grid.** The mosaic's 2×2 cells: per cell its red, the mean of its two
-//! greens and its blue, and the two colour differences `wR·R − G`,
-//! `wB·B − G` (camera white balance, green = 1, so a neutral reads 0). Cells
-//! share no site, so two cells' noise is independent and the mosaic's own
-//! noise model ([`super::noise_model`]) states it exactly — the only grid of
-//! the develop on which that is true (after a demosaic, neighbouring pixels
-//! are interpolated from the same sites). The green sites, which carry half
-//! the mosaic and the luminance a Bayer demosaic is built around, are never
-//! written; the red and blue sites are rebuilt on their cell's green.
+//! greens and its blue, and the two colour differences `wR·R − G_R`,
+//! `wB·B − G_B` (camera white balance, green = 1, so a neutral reads 0). A
+//! colour difference is measured at one place: the colour site, against the
+//! green the demosaic reads there (`G_R`: the mean of the red site's four
+//! green neighbours; the same at the blue site) — the demosaic's own colour
+//! difference, so the red's grid sits on the red sites and the blue's on the
+//! blue sites. (Against the cell's mean green instead, the difference mixes
+//! two places half a cell apart, and on a sharp star the red lands half a
+//! pixel down-right of the light and the blue half a pixel up-left: rel1180
+//! msg-e3 round 11.) The mosaic's own noise model ([`super::noise_model`])
+//! states the grid's noise exactly: one site's difference carries
+//! `wR²·var(R) + σ²_G/4`, and two neighbouring sites of a colour share one
+//! green, `σ²_G/16`, the only covariance a colour difference's grid has
+//! (after a demosaic, neighbouring pixels are interpolated from the same
+//! sites). The green sites, which carry half the mosaic and the luminance a
+//! Bayer demosaic is built around, are never written; each red and blue site
+//! takes the green the demosaic reads there plus its filtered difference.
 //!
 //! **The pixels** ([`CellChroma::rebuild`]): the sensor measures colour once
 //! per cell; pixel-scale chroma is the demosaic's, so the stage's cell chroma
@@ -349,6 +358,9 @@ pub(crate) struct CellChroma {
     ch: usize,
     /// `[wR, wB]`, green = 1.
     wb: [f32; 2],
+    /// The red and the blue site of a cell, `(dy, dx)`: each colour
+    /// difference's plane sits on its own sites.
+    origin: [(usize, usize); 2],
     planes: [Vec<f32>; 2],
     /// The cell's green, the mean of its two green sites.
     green: Vec<f32>,
@@ -366,8 +378,12 @@ impl CellChroma {
     /// demosaic's, so the pixel's chroma is the cell's, `c`, moved along the
     /// cell's slope `a` by the pixel's own green against the cell's,
     /// `c + a·(G − G_cell)`. Each pixel keeps its green and takes
-    /// `R = (G + c_R + a_R·(G − G_cell))/wR`, the same for blue; `c`, `a` and
-    /// `G_cell` are read at the pixel's centre bilinearly in the cell grid
+    /// `R = (G + c_R + a_R·(G − G_cell))/wR`, the same for blue. A colour
+    /// difference is measured at one place: the colour site, against the green
+    /// the demosaic reads there — so `c` is read at the pixel bilinearly in
+    /// its own site grid (the red's plane on the red sites, the blue's on the
+    /// blue sites), while `a` and `G_cell`, window statistics of the cell, are
+    /// read at the pixel's centre bilinearly in the cell grid
     /// (`render::upsample_at` at 2×, the display pass's own coordinate).
     /// Where `a` is 0 (a flat cell) the pixel's chroma is the cell's and the
     /// green's own noise stays luminance; where the green carries a star or a
@@ -376,12 +392,19 @@ impl CellChroma {
         let (cw, ch) = (self.cw, self.ch);
         let [wr, wbl] = self.wb;
         let at = |plane: &[f32], sx: usize, sy: usize| crate::render::upsample_at(plane, cw, ch, 2, sx, sy);
+        // Plane `j`'s value of cell `(cx, cy)` sits at mosaic site
+        // `(2cx + dx, 2cy + dy)`.
+        let on_sites = |j: usize, sx: usize, sy: usize| {
+            let (dy, dx) = self.origin[j];
+            let (u, v) = ((sx as f32 - dx as f32) / 2.0, (sy as f32 - dy as f32) / 2.0);
+            crate::render::bilinear_plane(&self.planes[j], cw, ch, u, v)
+        };
         rgb.par_chunks_mut(width.max(1)).enumerate().for_each(|(y, row)| {
             for (x, px) in row.iter_mut().enumerate() {
                 let (sx, sy) = (x + ox, y + oy);
                 let dg = px[1] - at(&self.green, sx, sy);
-                let cr = at(&self.planes[0], sx, sy) + at(&self.slopes[0], sx, sy) * dg;
-                let cb = at(&self.planes[1], sx, sy) + at(&self.slopes[1], sx, sy) * dg;
+                let cr = on_sites(0, sx, sy) + at(&self.slopes[0], sx, sy) * dg;
+                let cb = on_sites(1, sx, sy) + at(&self.slopes[1], sx, sy) * dg;
                 px[0] = (px[1] + cr) / wr;
                 px[2] = (px[1] + cb) / wbl;
             }
@@ -421,7 +444,7 @@ pub(crate) fn photo_k(cells: &Cells, model: &NoiseModel, pts: &[Patch], wb: [f64
     let (cw, ch, pw) = (cells.cw, cells.ch, cells.pw);
     let origin = |p: usize| ((p % pw) * PATCH, (p / pw) * PATCH);
     // A patch's forward differences (to the right and below, inside the
-    // frame): each pairs two independent cells.
+    // frame): each pairs two neighbouring cells.
     let neighbours = move |cx: usize, cy: usize| {
         [(cx + 1 < cw).then(|| cy * cw + cx + 1), (cy + 1 < ch).then(|| (cy + 1) * cw + cx)].into_iter().flatten()
     };
@@ -449,16 +472,18 @@ pub(crate) fn photo_k(cells: &Cells, model: &NoiseModel, pts: &[Patch], wb: [f64
             })
             .sum()
     };
-    // The noise's share: each difference carries both cells' variance, at the
-    // patch's level (`2·var` per difference and colour difference).
+    // The noise's share: each difference carries both cells' variance less
+    // the green they share, at the patch's level (`2·(v − c)` per difference
+    // and colour difference, `2v = σ_d²`).
     let share: f64 = textured
         .iter()
         .map(|&p| {
-            let [vr, vb] = model.chroma_var(&pts[p], wb);
+            let [sr, sb] = cells.sd[p].map(f64::from);
+            let c = f64::from(cells.cov[p]);
             let (x0, y0) = origin(p);
             let diffs: usize =
                 (y0..y0 + PATCH).flat_map(|cy| (x0..x0 + PATCH).map(move |cx| neighbours(cx, cy).count())).sum();
-            2.0 * (vr + vb) * diffs as f64
+            (sr * sr + sb * sb - 4.0 * c) * diffs as f64
         })
         .sum();
     let e_in = energy(&|i| [cells.d[i][0], cells.d[i][1]]);
@@ -526,16 +551,28 @@ struct Scratch {
 }
 
 /// The mosaic's cells: the two colour differences and the green of each, and
-/// each patch's `σ_d` per colour difference.
+/// each patch's `σ_d` per colour difference and the covariance two
+/// neighbouring cells' differences share.
 pub(crate) struct Cells {
     cw: usize,
     ch: usize,
     pw: usize,
     ph: usize,
-    /// `[wR·R − G, wB·B − G, G]` per cell.
+    /// `[wR·R − G_R, wB·B − G_B, G]` per cell: each colour difference at its
+    /// own site against the green the demosaic reads there (`G_R`, `G_B`: the
+    /// mean of the site's four green neighbours), and the cell's green (the
+    /// mean of its two green sites, the slope's).
     d: Vec<[f32; 3]>,
-    /// `σ_d` per patch and colour difference: `√(2 · chroma_var)`.
+    /// `σ_d` per patch and colour difference: `√2` times one cell's sd,
+    /// `√(wR²·var(R) + σ²_G/4)` (four greens a site).
     sd: Vec<[f32; 2]>,
+    /// Per patch, the covariance of two axis-neighbouring cells' differences
+    /// (same colour): their sites' green neighbourhoods share one green site,
+    /// `σ²_G/16` (`σ²_G` one green site's variance).
+    cov: Vec<f32>,
+    /// The red and the blue site of a cell, `(dy, dx)`: where each colour
+    /// difference's grid sits.
+    origin: [(usize, usize); 2],
 }
 
 impl Cells {
@@ -558,25 +595,58 @@ impl Cells {
             let (dy, dx) = sites[s];
             f64::from(mosaic[(2 * cy + dy) * width + 2 * cx + dx])
         };
+        // The green the demosaic reads at colour site `s` of cell `(cx, cy)`:
+        // the mean of the site's four axis neighbours, all green on a Bayer
+        // pattern (those inside the frame, at its edge).
+        let green_at = |cx: usize, cy: usize, s: usize| {
+            let (dy, dx) = sites[s];
+            let (x, y) = (2 * cx + dx, 2 * cy + dy);
+            let mut sum = 0.0f64;
+            let mut n = 0.0f64;
+            for (nx, ny) in [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)] {
+                if nx < width && ny < height {
+                    sum += f64::from(mosaic[ny * width + nx]);
+                    n += 1.0;
+                }
+            }
+            sum / n
+        };
         let d = (0..cw * ch)
             .into_par_iter()
             .map(|i| {
                 let (cx, cy) = (i % cw, i / cw);
                 let g = (at(cx, cy, 1) + at(cx, cy, 2)) / 2.0;
-                [(wb[0] * at(cx, cy, 0) - g) as f32, (wb[2] * at(cx, cy, 3) - g) as f32, g as f32]
+                [
+                    (wb[0] * at(cx, cy, 0) - green_at(cx, cy, 0)) as f32,
+                    (wb[2] * at(cx, cy, 3) - green_at(cx, cy, 3)) as f32,
+                    g as f32,
+                ]
             })
             .collect();
-        let sd = pts.iter().map(|p| model.chroma_var(p, wb).map(|v| (2.0 * v).sqrt() as f32)).collect();
-        Some(Self { cw, ch, pw, ph, d, sd })
+        // One site's colour difference: its own sample and four greens,
+        // `wR²·var(R) + σ²_G/4`; two axis-neighbouring sites of one colour
+        // share one of their greens, `cov = σ²_G/16` (the red's and the blue's
+        // differences of one cell share two, which the filter, one colour
+        // difference at a time, does not read).
+        let site_var = |p: &Patch| {
+            let g = model.var(p.m, p.r) * wb[1] * wb[1];
+            ([wb[0] * wb[0] * model.var(p.m_r, p.r) + g / 4.0, wb[2] * wb[2] * model.var(p.m_b, p.r) + g / 4.0], g / 16.0)
+        };
+        let sd = pts.iter().map(|p| site_var(p).0.map(|v| (2.0 * v).sqrt() as f32)).collect();
+        let cov = pts.iter().map(|p| site_var(p).1 as f32).collect();
+        Some(Self { cw, ch, pw, ph, d, sd, cov, origin: [sites[0], sites[3]] })
     }
 
     /// These cells at pyramid level `level` (`level ≥ 1`): each the mean of a
     /// `2^level × 2^level` block of them (an edge block averaging what it
-    /// holds), its sd per colour difference its blocks' patches' sd over
-    /// `2^level`. White noise averages the same at any scale: a mean of
-    /// `4^level` independent cells has `σ/2^level`, the model's own `σ` at that
-    /// scale, no new number. A level patch is [`PATCH`] level cells, as at the
-    /// base.
+    /// holds; each colour difference's block in its own grid, so a level cell
+    /// sits at its block's centre in that grid). White noise averages the same
+    /// at any scale: a mean of `s² = 4^level` cells has the model's own
+    /// variance at that scale, `(v + 4c·(1 − 1/s))/s²` — `v` one cell's, `c`
+    /// the covariance of the block's `2s(s − 1)` axis-neighbouring pairs
+    /// (counted both ways, `4s(s − 1)`) — no new number; two neighbouring level
+    /// cells share the `s` greens along their border, `c/s³`. A level patch is
+    /// [`PATCH`] level cells, as at the base. Built from the base cells.
     fn level(&self, level: u32) -> Self {
         let s = 1usize << level;
         let (cw, ch) = (self.cw.div_ceil(s), self.ch.div_ceil(s));
@@ -603,21 +673,26 @@ impl Cells {
             let lo = (p * s).min(n - 1);
             lo..(p * s + s).min(n).max(lo + 1)
         };
-        let sd = (0..pw * ph)
+        let sf = s as f64;
+        let (sd, cov): (Vec<[f32; 2]>, Vec<f32>) = (0..pw * ph)
             .map(|p| {
-                let (mut v, mut n) = ([0.0f64; 2], 0.0);
+                let (mut v, mut c, mut n) = ([0.0f64; 2], 0.0f64, 0.0);
                 for by in span(p / pw, self.ph) {
                     for bx in span(p % pw, self.pw) {
                         let q = self.sd[by * self.pw + bx];
-                        v[0] += f64::from(q[0]).powi(2);
-                        v[1] += f64::from(q[1]).powi(2);
+                        // `σ_d² = 2v`: one cell's variance is half of it.
+                        v[0] += f64::from(q[0]).powi(2) / 2.0;
+                        v[1] += f64::from(q[1]).powi(2) / 2.0;
+                        c += f64::from(self.cov[by * self.pw + bx]);
                         n += 1.0;
                     }
                 }
-                v.map(|v| ((v / n).sqrt() / s as f64) as f32)
+                let c = c / n;
+                let sd = v.map(|v| (2.0 * (v / n + 4.0 * c * (1.0 - 1.0 / sf)) / (sf * sf)).sqrt() as f32);
+                (sd, (c / (sf * sf * sf)) as f32)
             })
-            .collect();
-        Self { cw, ch, pw, ph, d, sd }
+            .unzip();
+        Self { cw, ch, pw, ph, d, sd, cov, origin: self.origin }
     }
 
     /// Cell `i`'s two colour differences through the sigma filter at `k`:
@@ -664,6 +739,7 @@ impl Cells {
             cw: self.cw,
             ch: self.ch,
             wb: [wb[0] as f32, wb[2] as f32],
+            origin: self.origin,
             planes: [0, 1].map(|j| filtered.iter().map(|f| f[j]).collect()),
             green: self.d.iter().map(|d| d[2]).collect(),
             slopes: self.slopes(filtered, model, rho),
@@ -743,8 +819,11 @@ impl Cells {
         [0, 1].map(|j| both.iter().map(|a| a[j]).collect())
     }
 
-    /// Write `filtered` back: red and blue rebuilt on the cell's own green,
-    /// the greens untouched.
+    /// Write `filtered` back: each red and blue site takes the green the
+    /// demosaic reads there plus its filtered colour difference,
+    /// `G_site + c` — its own sample moved by the filter's change of its
+    /// difference, `(c − d)/w` — so the demosaic sees the filtered difference
+    /// at the site exactly. The greens untouched.
     fn write(&self, mosaic: &mut [f32], width: usize, sites: [(usize, usize); 4], wb: [f64; 3], filtered: &[[f32; 2]]) {
         let cw = self.cw;
         let (wr, wbl) = (wb[0] as f32, wb[2] as f32);
@@ -752,9 +831,9 @@ impl Cells {
         mosaic.par_chunks_mut(2 * width).take(self.ch).enumerate().for_each(|(cy, lines)| {
             for cx in 0..cw {
                 let [dr, db] = filtered[cy * cw + cx];
-                let g = self.d[cy * cw + cx][2];
-                lines[r_at.0 * width + 2 * cx + r_at.1] = (g + dr) / wr;
-                lines[b_at.0 * width + 2 * cx + b_at.1] = (g + db) / wbl;
+                let d = self.d[cy * cw + cx];
+                lines[r_at.0 * width + 2 * cx + r_at.1] += (dr - d[0]) / wr;
+                lines[b_at.0 * width + 2 * cx + b_at.1] += (db - d[1]) / wbl;
             }
         });
     }
