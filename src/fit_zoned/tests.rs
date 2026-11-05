@@ -1654,13 +1654,17 @@ fn zone_divergence_uses_the_same_source_mask_on_both_sides() {
             actual.sky.divergence.map(|r| r.d),
             actual.land.divergence.map(|r| r.d)
         );
+        // RE-PINNED for v1.18.0 DEF-3: sky 1.186 -> 1.875, land 0.436 ->
+        // 0.510. The sky core's sigma 8 / 16 bands no longer read the land
+        // below the mask (nor the land's the sky above it); both stay on
+        // their side of DIVERGENCE_ZONE (0.65), so the zone verdicts hold.
         assert!(
-            actual.sky.divergence.is_some_and(|r| (r.d - 1.186).abs() <= 0.05),
+            actual.sky.divergence.is_some_and(|r| (r.d - 1.875).abs() <= 0.05),
             "sky calibration drifted: {:?}",
             actual.sky.divergence
         );
         assert!(
-            actual.land.divergence.is_some_and(|r| (r.d - 0.436).abs() <= 0.05),
+            actual.land.divergence.is_some_and(|r| (r.d - 0.510).abs() <= 0.05),
             "land calibration drifted: {:?}",
             actual.land.divergence
         );
@@ -3914,10 +3918,20 @@ fn run_strictly_better_zone(
 /// own verdict — the free-mask lesson, where a disclosure that never
 /// reached the note table was a disclosure that was not made. Deleting
 /// the note push leaves the predicate tests green and fails here.
+///
+/// v1.18.0 (DEF-3): read on the (sat 4, ev 3.5, warm 1.4) strictly-better
+/// pair, the existing fixture whose zone the third arm keeps on a frame
+/// GAIN (`a_strictly_better_zone_whose_frame_gains_on_j_star_is_kept_by_its_arm`).
+/// The (4, 8, 1) pair it read before no longer carries the premise "the
+/// frame must not have paid": its zone correction takes the zone 0.6725 ->
+/// 0.5645 but flattens the lower half's checker the target keeps, the
+/// structural term reading 0.088 -> 0.698 (0.610 with the bands still
+/// truncated), so the frame moves 0.34850 -> 0.35503 (+0.00652) where it
+/// moved 0.34849 -> 0.34620 before; the R19 guard refuses that, rightly.
 #[test]
 fn a_strictly_better_zone_attaches_and_publishes_its_own_arm() {
     let (accepted, report, frame_before, frame_after) =
-        run_strictly_better_zone("strictly-better-attach", 4.0, 8.0, 1.0, false);
+        run_strictly_better_zone("strictly-better-attach", 4.0, 3.5, 1.4, false);
     let zone = accepted.unwrap_or_else(|| {
         panic!("the absolute arm must attach this zone: {}", report.recipe.rationale)
     });

@@ -11,11 +11,14 @@ pub const STRUCTURE_MIN_CORE_PX: usize = 100;
 
 /// Tone-invariant structural comparison shared by the global and zoned
 /// solvers. Luma is rank-equalized through a mask-weighted 1024-bin CDF
-/// under the one-code tie rule (see `rank_equalized` below); a
-/// three-pixel erosion keeps semantic-mask boundaries out of the reading.
-/// Central-difference rank-gradient maps are pooled at sigma 2 and correlated
-/// over translations of +/-6 pixels. Five Gaussian bands (sigma 1/2/4/8/16)
-/// contribute the RMS log2 energy-ratio error.
+/// under the one-code tie rule (see `rank_equalized` below). A reading is
+/// made of its mask's own pixels at every scale (DEF-3): the five band
+/// blurs are NORMALISED MASKED blurs, `blur(m·x) / blur(m)` with `m` the
+/// weights, so a σ 16 band (reach 48 px) reads no pixel the mask leaves out;
+/// a three-pixel erosion keeps the core's central differences inside the
+/// mask. Central-difference rank-gradient maps are pooled at sigma 2 and
+/// correlated over translations of +/-6 pixels. Five Gaussian bands (sigma
+/// 1/2/4/8/16) contribute the RMS log2 energy-ratio error.
 ///
 /// `None` is an ABSTENTION and never a matched reading. It is returned when
 /// the rasters are not one geometry, or when the eroded core holds fewer than
@@ -158,9 +161,28 @@ pub fn structure_divergence(
         out
     };
 
+    // DEF-3: the bands read inside the mask. A truncated blur of the whole
+    // rank image fed the core's coarse bands from up to 48 px past the mask
+    // (a cell fully inside the kept two thirds of a frame read energy_error
+    // 0.9589 from the replaced third beside it, 0.0000 without it); the
+    // normalised masked blur weighs each tap by the mask, so outside pixels
+    // contribute nothing and the image border needs no rule of its own.
+    let mask: Vec<f32> = weights.iter().map(|v| v.max(0.0)).collect();
+    let mask_blur: Vec<Vec<f32>> = [1.0, 2.0, 4.0, 8.0, 16.0].iter().map(|&s| gaussian_blur(&mask, s)).collect();
+    let masked_blur = |input: &[f32], band: usize, sigma: f32| -> Vec<f32> {
+        let weighted: Vec<f32> = input.iter().zip(&mask).map(|(v, m)| v * m).collect();
+        gaussian_blur(&weighted, sigma)
+            .into_iter()
+            .zip(&mask_blur[band])
+            .map(|(v, m)| if *m > 1e-12 { v / m } else { 0.0 })
+            .collect()
+    };
     let signature = |rank: &[f32]| -> (Vec<f32>, [f32; 5]) {
-        let blurred: Vec<Vec<f32>> =
-            [1.0, 2.0, 4.0, 8.0, 16.0].iter().map(|&s| gaussian_blur(rank, s)).collect();
+        let blurred: Vec<Vec<f32>> = [1.0, 2.0, 4.0, 8.0, 16.0]
+            .iter()
+            .enumerate()
+            .map(|(band, &s)| masked_blur(rank, band, s))
+            .collect();
         let mut energy = [0.0f32; 5];
         let count = core.iter().filter(|&&v| v).count() as f64;
         for band in 0..5 {
@@ -270,10 +292,11 @@ pub fn structure_divergence(
 /// Separable Gaussian low-pass of an analysis raster, tap weights RENORMALISED
 /// at the border.
 ///
-/// [`structure_divergence`]'s own band blurs truncate instead, which is
-/// correct there — the bands are differences of two truncated blurs, so the
-/// border deficit cancels. It does NOT cancel when the blur is the reading's
-/// input: a truncated sigma-8 pass darkens the outer 24 px of both frames by
+/// [`structure_divergence`]'s band blurs are renormalised too since DEF-3 —
+/// by the reading's mask, of which the frame border is one edge — so no
+/// blur in this file states a border fact. Truncated, a blur that is the
+/// reading's input does not cancel its border deficit the way a difference
+/// of two truncated bands can: a truncated sigma-8 pass darkens the outer 24 px of both frames by
 /// the same vignette, both rank-equalise it into the same lowest ranks, and
 /// the correlation half of the statistic is handed agreement it did not
 /// measure. Renormalising costs one division per tap and states no border

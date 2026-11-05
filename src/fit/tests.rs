@@ -1645,8 +1645,15 @@ fn content_divergence_fires_on_flat_sky_to_cloud_deck() {
             None,
         );
         eprintln!("STRUCTURE_CALIBRATION real={measured:?}");
+        // RE-PINNED for v1.18.0 DEF-3 (a reading is made of its mask's own
+        // pixels at every scale): 0.491 -> 0.892 (correlation 0.791, energy
+        // error 0.867). This reading's mask is the whole frame, so the one
+        // edge DEF-3 renormalises is the frame border (with every weight 1
+        // the two blurs differ only where a tap crosses it, up to 48 px in at
+        // sigma 16), so the whole move is the border's. Still past
+        // DIVERGENCE_GLOBAL (0.35), the side this test is named for.
         assert!(
-            (measured.expect("resolvable").d - 0.491).abs() <= 0.05,
+            (measured.expect("resolvable").d - 0.892).abs() <= 0.05,
             "generated-cloud calibration drifted: {measured:?}"
         );
     }
@@ -1724,8 +1731,13 @@ fn the_coarse_reading_is_a_second_scale_not_a_more_forgiving_one() {
     for (name, (fine, coarse), want_fine, want_coarse) in [
         ("viaduct", measure(&viaduct_src, &viaduct_tgt), 0.180f32, 0.187f32),
         ("cornwall", measure(&cornwall_src, &cornwall_tgt), 0.136, 0.110),
-        ("cloud-deck", measure(&cloud_src, &cloud_tgt), 1.642, 0.805),
-        ("permutation", measure(&perm_src, &perm_tgt), 1.970, 1.053),
+        // RE-PINNED for v1.18.0 DEF-3 (normalised band blurs, the frame
+        // border one edge of the mask): cloud-deck 1.642 / 0.805 -> 1.979 /
+        // 1.268, permutation 1.970 / 1.053 -> 2.077 / 1.221; the two shipped
+        // panels stay on their pins (viaduct 0.189 / 0.204, Cornwall 0.147 /
+        // 0.125, within 0.03 of each other as the doc above says).
+        ("cloud-deck", measure(&cloud_src, &cloud_tgt), 1.979, 1.268),
+        ("permutation", measure(&perm_src, &perm_tgt), 2.077, 1.221),
         ("identity", measure(&identity, &identity), 0.0, 0.0),
     ] {
         eprintln!("TWO_SCALE {name} fine={fine:.4} coarse={coarse:.4}");
@@ -3470,8 +3482,16 @@ fn the_haze_pairs_broken_identification_falls_back_and_still_fits() {
     // fans past the limit, ships projected (t = 0.783) rather than admitted.
     // 0.45× keeps the claim (most of the gap closed) with room for the
     // FIT_QUANT another stage may still move J* by.
+    // RE-PINNED for v1.18.0 DEF-3 (normalised band blurs): 0.1514 -> 0.0729
+    // (0.48×; 0.1509 -> 0.0645 with DEF-3 reverted). The colour terms close
+    // as before (E_paired 0.180 -> 0.036, H_ab 0.085 -> 0.041; local()
+    // 0.148 -> 0.033 on both builds); S is what moved: the fitted render
+    // reads 0.396 against the target (0.312 reverted), the source 0.033
+    // (0.028). The bar is the measured landing plus FIT_QUANT, as the joint
+    // family's scalar is pinned: 0.0729 + 0.0023 = 0.0752 = 0.497× of the
+    // starting error — still "most of the gap", the claim this pin carries.
     assert!(
-        rep.err_after < 0.45 * rep.err_before,
+        rep.err_after < 0.0729 + FIT_QUANT && rep.err_after < 0.5 * rep.err_before,
         "the fallback solve must still close most of the gap ({:.4} -> {:.4})",
         rep.err_before,
         rep.err_after
@@ -5126,8 +5146,14 @@ fn a_projected_cast_discloses_the_readings_that_let_it_through() {
         "a projected cast must not also claim admission: {}",
         report.recipe.rationale
     );
-    // And a stage that did not admit says so, never both.
-    let refused = fit_recipe(&coast(false), &coast(true));
+    // And a stage that did not admit says so, never both. The pair is the
+    // two-temperature coast, whose fan no projection can clear (the refusal
+    // `a_projection_that_cannot_clear_the_target_leaves_the_refusal_standing`
+    // pins). Until DEF-3 this arm read coast -> warm coast, convicted at
+    // 17.3 deg; with each 3x3 support cell read on its own pixels that pair's
+    // candidate fans 10.2 deg and its green curve is admitted, so it no longer
+    // carries "did not admit".
+    let refused = fit_recipe(&coast(false), &two_temperature_coast());
     assert!(
         !refused.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED),
         "a cast that was not admitted must not claim admission: {}",
@@ -6000,8 +6026,12 @@ fn joint_family_is_calibrated_on_the_fixture_set() {
     // v1.18.0 (iii): J* changed the scalar's units on purpose (display-sRGB
     // distribution terms -> CIE76 in Lab); re-measured 0.4267 on J*, the
     // bound kept FIT_QUANT above it.
+    // RE-MEASURED for v1.18.0 DEF-3 (normalised band blurs): 0.4477 (+0.0210);
+    // green under
+    // the old bound with DEF-3 alone reverted, and 0.4477 with each other
+    // step-1 fix reverted in turn. The bound stays FIT_QUANT above it.
     assert!(
-        look < 0.4267 + FIT_QUANT,
+        look < 0.4477 + FIT_QUANT,
         "the evidence-weighted scalar changed scale unexpectedly ({look:.4})"
     );
 }
