@@ -76,6 +76,49 @@ fn fair(rho: usize) -> (f64, usize) {
     (fair_k(((2 * rho + 1) * (2 * rho + 1)) as f64), rho)
 }
 
+/// The constant's reading of cell `i` (the skipped mean over the cell's
+/// window at its own noise, [`skipped_mean`]): what the cell keeps where its
+/// plane is refuted.
+fn constant_reading(cells: &Cells, i: usize, k: f64, rho: usize) -> [f32; 2] {
+    let (cw, ch) = (cells.cw, cells.ch);
+    let (cx, cy) = (i % cw, i / cw);
+    let (sd, _) = cells.own_noise(i);
+    let (y0, y1, x0, x1) = (cy.saturating_sub(rho), (cy + rho + 1).min(ch), cx.saturating_sub(rho), (cx + rho + 1).min(cw));
+    [0, 1].map(|j| {
+        let w: Vec<f32> = (y0..y1).flat_map(|y| (x0..x1).map(move |x| (y, x))).map(|(y, x)| cells.d[y * cw + x][j]).collect();
+        skipped_mean(&w, cells.d[i][j], sd[j], k, &mut Vec::new()).0
+    })
+}
+
+/// The plane's share of a cell's own noise at its fixed point over a full
+/// window of half side `rho`, `k` in the cell's true sd (the module):
+/// `1/Σᵢ (Z(tᵢ) − 2tᵢ·φ(tᵢ))`, `tᵢ = k·√(1 + hᵢ)`,
+/// `hᵢ = (1/N + uᵢ²/Σu² + vᵢ²/Σv²)/Z`, `Z` the accepted share (read with the
+/// `tᵢ` in turn).
+fn plane_share(k: f64, rho: usize) -> f64 {
+    let r = rho as i64;
+    let side = (2 * rho + 1) as f64;
+    let n = side * side;
+    let su2: f64 = side * (-r..=r).map(|u| (u * u) as f64).sum::<f64>();
+    let mut z = normal_mass(k * (1.0 + 1.0 / n).sqrt()).0;
+    let mut share = 0.0;
+    for _ in 0..6 {
+        let (mut total, mut zsum) = (0.0f64, 0.0f64);
+        for u in -r..=r {
+            for v in -r..=r {
+                let h = (1.0 / n + (u * u) as f64 / su2 + (v * v) as f64 / su2) / z;
+                let t = k * (1.0 + h).sqrt();
+                let (zt, phi) = normal_mass(t);
+                total += zt - 2.0 * t * phi;
+                zsum += zt;
+            }
+        }
+        z = zsum / n;
+        share = 1.0 / total;
+    }
+    share
+}
+
 #[test]
 fn the_stage_takes_the_colour_noise_and_leaves_the_greens_and_the_mean() {
     let before = mosaic(0.01, 0.0);
@@ -123,28 +166,48 @@ fn a_colour_edge_the_noise_cannot_make_is_kept() {
 }
 
 /// The test's noise is the hypothesis's: the anchor's own level. A dark
-/// region (green 0.01) beside a bright one (green 0.5) of the same hue
-/// (`wR·R = 1.4·G`), the edge in the middle of a patch, under the module's
+/// region (green 0.01) beside a bright one (green 0.5) of one hue
+/// (`wR·R = hue·G`), the edge in the middle of a patch, under the module's
 /// photon and read noise: the patch straddling the edge has its mean level,
-/// and so its sd, between the two sides'. At a `k` between the step's size in
-/// the straddling patch's sds and in a dark cell's own (their geometric
-/// mean, computed here from the noise law), a dark cell tested at the
-/// patch's sd lets the bright side vote; tested at its own it does not. The
-/// dark columns of that patch keep their own colour difference: the mean
-/// over the rows within 0.15 of the step of the noiseless scene's (the colour
-/// edge test's limit), the column next to the edge excluded on neither side
-/// (a red site's four greens are all dark there).
+/// and so its sd, between the two sides'. The test's `k` is the law's (the
+/// fair test of half side 3); the fixture's step is sized to the two sds it
+/// tells apart — `k·√(σ_own·σ_patch)` in the sd of a difference of two cells
+/// (`σ_d`, the first pass's width), so the step lies between `k` dark cells'
+/// own `σ_d` and `k` of the straddling patch's (about 5 and 2 of them: the
+/// hue solved for it from the noise law): a dark cell tested at the patch's
+/// sd lets the bright side vote; tested at its own it does not. The dark
+/// columns of that patch keep their own colour difference: the mean over the
+/// rows within 0.15 of the step of the noiseless scene's (the colour edge
+/// test's limit), the column next to the edge excluded on neither side (a
+/// red site's four greens are all dark there). (Before the law, this test
+/// read `k` as the geometric mean of the two sds' steps, 21.2, the free
+/// number of the law it replaced: rel1180 msg-e3 round 17.)
 ///
 /// MUTATION: the test's sd read from the cell's patch (the form before
 /// rel1180 round 14).
 #[test]
 fn a_dark_cells_test_is_at_its_own_noise() {
-    const HUE: f64 = 1.4;
     let (dark, bright) = (0.01, 0.5);
+    let (k, rho) = fair(3);
+    // One cell's R − G sd at a level and hue: the site's own and its four greens.
+    let cell_sd = |g: f64, hue: f64| (WB[0] * WB[0] * (A * hue * g / WB[0] + B) + (A * g + B) / 4.0).sqrt();
+    let mean_level = (dark + bright) / 2.0;
+    let sd_d = |g: f64, hue: f64| 2f64.sqrt() * cell_sd(g, hue);
+    let mut hue = 1.0;
+    for _ in 0..20 {
+        hue = 1.0 + k * (sd_d(dark, hue) * sd_d(mean_level, hue)).sqrt() / (bright - dark);
+    }
+    let step = (hue - 1.0) * (bright - dark);
+    println!(
+        "k {k:.3} over half side {rho}: hue {hue:.4}, step {step:.4e} = {:.2} own sd_d, {:.2} patch sd_d",
+        step / sd_d(dark, hue),
+        step / sd_d(mean_level, hue)
+    );
+    assert!(step / sd_d(mean_level, hue) < k && k < step / sd_d(dark, hue));
     let e = W / 4 + PATCH / 2; // the edge, in cells: mid-patch
     let scene = |x: usize| if x / 2 < e { dark } else { bright };
     let site = |x: usize, y: usize, g: f64| match (y % 2, x % 2) {
-        (0, 0) => HUE * g / WB[0],
+        (0, 0) => hue * g / WB[0],
         (1, 1) => g / WB[2],
         _ => g,
     };
@@ -164,22 +227,16 @@ fn a_dark_cells_test_is_at_its_own_noise() {
     let model = NoiseModel::fit(&pts, W, H).expect("a Bayer mosaic with noise fits a model");
     let cells = Cells::of(&m, W, H, sites, WB, &model, &pts).expect("cells");
     let truth = Cells::of(&clean, W, H, sites, WB, &model, &patches(&clean, W, H, sites, WB)).expect("cells");
-    // One cell's R − G sd at a level: the site's own and its four greens.
-    let cell_sd = |g: f64| (WB[0] * WB[0] * (A * HUE * g / WB[0] + B) + (A * g + B) / 4.0).sqrt();
-    let step = (HUE - 1.0) * (bright - dark);
-    let mean_level = (dark + bright) / 2.0;
-    let k = (step / cell_sd(mean_level) * step / cell_sd(dark)).sqrt();
-    assert!(step / cell_sd(mean_level) < k && k < step / cell_sd(dark));
-    let rho = 3;
-    let col = |c: &Cells, cx: usize, f: &dyn Fn(usize) -> f64| (0..c.ch).map(|cy| f(cy * c.cw + cx)).sum::<f64>() / c.ch as f64;
+    let col = |c: &Cells, cx: usize, f: &(dyn Fn(usize) -> f64 + Sync)| (0..c.ch).into_par_iter().map(|cy| f(cy * c.cw + cx)).sum::<f64>() / c.ch as f64;
     for cx in e - PATCH / 2..e {
         let got = col(&cells, cx, &|i| f64::from(cells.filtered(i, k, rho)[0]));
         let want = col(&truth, cx, &|i| f64::from(truth.d[i][0]));
+        println!("column {cx} (edge at {e}): R - G {got:.4e} against the scene's {want:.4e}: {:+.3} of the step", (got - want) / step);
         assert!(
             (got - want).abs() < 0.15 * step,
-            "column {cx} (edge at {e}, k {k:.2}): R - G {got:.4e} against the scene's {want:.4e} (step {step:.4e}; own sd {:.4e}, the patch's mean-level sd {:.4e})",
-            cell_sd(dark),
-            cell_sd(mean_level)
+            "column {cx} (edge at {e}, k {k:.2}): R - G {got:.4e} against the scene's {want:.4e} (step {step:.4e}; own sd_d {:.4e}, the patch's mean-level sd_d {:.4e})",
+            sd_d(dark, hue),
+            sd_d(mean_level, hue)
         );
     }
 }
@@ -297,28 +354,48 @@ fn the_window_leaves_the_display_share_at_the_width_the_stage_runs_at() {
             }
             let rho = window(nr, ks);
             println!("k {k:.3} colour NR {nr}: k_s {ks:.3}, t {t:.3}, N {n:.1} cells (plain {plain:.1}) -> half side {rho} cells");
-            let off = |r: usize| ((2 * r + 1) as f64 - n.sqrt()).abs();
+            let off = |n: f64, r: usize| ((2 * r + 1) as f64 - n.sqrt()).abs();
             assert!(
-                (rho == 1 || off(rho) <= off(rho - 1)) && off(rho) <= off(rho + 1),
+                (rho == 1 || off(n, rho) <= off(n, rho - 1)) && off(n, rho) <= off(n, rho + 1),
                 "k {k}, colour NR {nr}: the skipped mean at t = {t:.3} leaves the display share over {n:.1} cells, half side {rho} is not the nearest"
             );
+            if fair_at {
+                // The plane's share over the same window (the module): the N at
+                // which it is the display share, in the ratio of the two shares
+                // there, holds the same half side.
+                let cells = ((2 * rho + 1) * (2 * rho + 1)) as f64;
+                let tc = ks * (1.0 + 1.0 / (cells * normal_mass(t).0)).sqrt();
+                let (z, phi) = normal_mass(tc);
+                let (constant, plane) = (1.0 / (cells * (z - 2.0 * tc * phi)), plane_share(ks, rho));
+                let n_plane = n * plane / constant;
+                println!(
+                    "  colour NR {nr}: half side {rho} ({cells} cells), k {ks:.4}: share of a cell's noise, constant {constant:.6}, plane {plane:.6} -> N {n_plane:.1}"
+                );
+                assert!(
+                    (rho == 1 || off(n_plane, rho) <= off(n_plane, rho - 1)) && off(n_plane, rho) <= off(n_plane, rho + 1),
+                    "colour NR {nr}: the plane's share asks for another half side than {rho} ({n_plane:.1} cells)"
+                );
+            }
         }
     }
     assert_eq!(window(DEFAULT_AMOUNT, f64::INFINITY), plain_window(DEFAULT_AMOUNT), "an unbounded k: the plain mean's window");
 }
 
-/// On a flat frame the filter keeps of a cell's own noise what the skipped
-/// mean at its test width keeps, and no more: the slope of the filtered
-/// colour difference on the cell's own sample is `1 / (N·(Z − 2t·φ(t)))`,
-/// `t = k·√(1 + 1/n)` in the cell's true sd (the model's sd over the true
-/// one carried in, `n = N·Z`), plus what its four axis neighbours carry of
-/// it through the green they share with it — each sample enters the estimate
-/// with an influence whose mean slope is 1 (Stein's lemma on jointly normal
-/// samples), so each neighbour adds `cov/(N·v)` (`cov = σ²_G/16`, `v` one
-/// cell's variance) — within three standard errors of the slope (its
-/// residual sd over the sample sd, over the square root of the cells that
-/// are independent: one per window). At the fair test of two windows (half
-/// sides 3 and 7: `k` 2.32 and 2.84).
+/// On a flat frame the filter keeps of a cell's own noise what its estimate
+/// at its test width keeps, and no more: the plane's share at its fixed point,
+/// `1/Σᵢ (Z(tᵢ) − 2tᵢ·φ(tᵢ))` with `tᵢ = k·√(1 + hᵢ)` at each place of the
+/// window ([`plane_share`], derived in the module to first order: the
+/// skipped mean's `1/(N·(Z − 2t·φ(t)))` with `t` read at each place), on the
+/// cells read on their plane, and the skipped mean's on the cells whose
+/// plane the whiteness read refuted (counted here) — `k` in the cell's true
+/// sd (the model's sd over the true one carried in) — plus what its four
+/// axis neighbours carry of it through the green they share with it — each
+/// sample enters the estimate with an influence whose mean slope is 1
+/// (Stein's lemma on jointly normal samples), so each neighbour adds
+/// `cov/(N·v)` (`cov = σ²_G/16`, `v` one cell's variance) — within three
+/// standard errors of the slope (its residual sd over the sample sd, over
+/// the square root of the cells that are independent: one per window). At
+/// the fair test of two windows (half sides 3 and 7: `k` 2.32 and 2.84).
 ///
 /// MUTATION: every pass anchored on the cell's own sample (the form before
 /// rel1180 round 8): the test then keeps the neighbours on the sample's side
@@ -343,37 +420,271 @@ fn the_filter_keeps_of_a_cells_own_noise_only_what_the_skipped_mean_keeps() {
     for (k, rho) in [fair(3), fair(7)] {
         let n_win = ((2 * rho + 1) * (2 * rho + 1)) as f64;
         let interior: Vec<usize> = (rho..cells.ch - rho).flat_map(|cy| (rho..cells.cw - rho).map(move |cx| cy * W / 2 + cx)).collect();
-        let f: Vec<[f32; 2]> = interior.par_iter().map(|&i| cells.filtered(i, k, rho)).collect();
-        for j in 0..2 {
+        let f: Vec<([f32; 2], [u32; 2], [Read; 2])> = interior.par_iter().map(|&i| cells.filtered_counted(i, k, rho)).collect();
+        for (j, &true_sd) in true_sd.iter().enumerate() {
             let (mut sdd, mut sdf) = (0.0f64, 0.0f64);
             for (n, &i) in interior.iter().enumerate() {
                 let d = f64::from(cells.d[i][j]);
                 sdd += d * d;
-                sdf += d * f64::from(f[n][j]);
+                sdf += d * f64::from(f[n].0[j]);
             }
             let slope = sdf / sdd;
             let resid: f64 = interior
                 .iter()
                 .enumerate()
-                .map(|(n, &i)| (f64::from(f[n][j]) - slope * f64::from(cells.d[i][j])).powi(2))
+                .map(|(n, &i)| (f64::from(f[n].0[j]) - slope * f64::from(cells.d[i][j])).powi(2))
                 .sum::<f64>()
                 / interior.len() as f64;
             let se = resid.sqrt() / (sdd / interior.len() as f64).sqrt() / (interior.len() as f64 / n_win).sqrt();
-            let r = f64::from(cells.sd[0][j]) / 2f64.sqrt() / true_sd[j];
+            let r = f64::from(cells.sd[0][j]) / 2f64.sqrt() / true_sd;
             let mut t = k * r * 2f64.sqrt();
             // t and n = N·Z depend on each other; the iteration settles within a few steps.
             for _ in 0..8 {
                 t = k * r * (1.0 + 1.0 / (n_win * normal_mass(t).0)).sqrt();
             }
             let (z, phi) = normal_mass(t);
-            let want = 1.0 / (n_win * (z - 2.0 * t * phi)) + 4.0 * shared / (n_win * true_sd[j] * true_sd[j]);
+            let constant = 1.0 / (n_win * (z - 2.0 * t * phi));
+            let plane = plane_share(k * r, rho);
+            let refuted = f.iter().filter(|q| q.2[j] != Read::Plane).count() as f64 / f.len() as f64;
+            let want = (1.0 - refuted) * plane + refuted * constant + 4.0 * shared / (n_win * true_sd * true_sd);
+            println!(
+                "k {k:.3} over half side {rho}, colour difference {j}: slope {slope:.5} (se {se:.5}); the plane {plane:.5}, the constant {constant:.5}, refuted {refuted:.5} of the cells -> {want:.5}"
+            );
             assert!(
                 (slope - want).abs() <= 3.0 * se,
-                "k {k:.3} over half side {rho}, colour difference {j}: the filter keeps {slope:.4} of a cell's own noise; the skipped mean at t = {t:.3} keeps {want:.4} (3 se {:.4}; the window mean 1/N = {:.4})",
+                "k {k:.3} over half side {rho}, colour difference {j}: the filter keeps {slope:.4} of a cell's own noise; the plane at k = {:.3} keeps {plane:.4}, the constant {constant:.4}, {refuted:.4} of the cells refuted -> {want:.4} (3 se {:.4}; the window mean 1/N = {:.4})",
+                k * r,
                 3.0 * se,
                 1.0 / n_win
             );
         }
+    }
+}
+
+/// The ramp's cells ([`ramp_mosaic`]): R − G rises from column `RAMP.0` to
+/// `RAMP.1`.
+const RAMP: (usize, usize) = (160, 352);
+
+/// An RGGB mosaic of a grey at 0.01 whose R − G rises by `s` cell sds a cell
+/// over [`RAMP`] (read-noise dominated, so a cell's sd is nearly the same
+/// along it), and that sd.
+fn ramp_mosaic(s: f64) -> (Vec<f32>, f64) {
+    const A2: f64 = 2e-6;
+    let level = 0.01;
+    let cell_sd = (WB[0] * WB[0] * (A2 * level / WB[0] + B) + (A2 * level + B) / 4.0).sqrt();
+    let (x0, x1) = RAMP;
+    let ramp = |cx: usize| s * cell_sd * (cx.clamp(x0, x1) - x0) as f64;
+    let mut m = vec![0.0f32; W * H];
+    m.par_chunks_mut(W).enumerate().for_each(|(y, row)| {
+        for (x, v) in row.iter_mut().enumerate() {
+            let sv = match (y % 2, x % 2) {
+                (0, 0) => (level + ramp(x / 2)) / WB[0],
+                (1, 1) => level / WB[2],
+                _ => level,
+            };
+            *v = (sv + (A2 * sv + B).sqrt() * normal(57, (y * W + x) as u64)) as f32;
+        }
+    });
+    (m, cell_sd)
+}
+
+/// A ramp is read on its plane. A noisy R − G ramp of `s` cell sds per cell
+/// over 192 cells (read-noise dominated, so a cell's sd is the same along
+/// it), no edge: the filtered field's step energy along the ramp — the mean
+/// of its squared forward differences less the ramp's own step² — is within
+/// the measurement's error of zero, at every slope the round-16 probe read
+/// (0.5, 1 and 1.5 sd per cell) over the fair test of half sides 3 and 8.
+/// The measurement's error: the standard error of the same statistic on the
+/// unfiltered differences (its noise, `2v` per difference), from blocks of
+/// `2ρ + 1` rows (a window's rows are not independent). A plateau reads as
+/// a drop and a step, more step energy than the ramp has; a test against
+/// one constant holds a strip of the ramp and walks along it (rel1180 msg-e3
+/// round 16: 3.67 of a cell's variance at 1 sd per cell, half side 8, more
+/// than the noisy input's own 2.17). A flat ramp (slope 0) printed beside;
+/// the share of cells whose plane the whiteness read refuted printed.
+///
+/// MUTATION: the plane's slopes forced to zero (the constant form): the ramp
+/// then holds the strip mean's step energy (rel1180 msg-e3 round 19: 0.94 of
+/// a cell's variance at 1 sd per cell, half side 3; 3.67 at half side 8).
+#[test]
+fn a_ramp_is_read_on_its_plane() {
+    let (x0, x1) = RAMP;
+    for s in [0.0f64, 0.5, 1.0, 1.5] {
+        let (m, cell_sd) = ramp_mosaic(s);
+        let step = s * cell_sd;
+        let sites = bayer_sites(&rggb()).expect("Bayer");
+        let pts = patches(&m, W, H, sites, WB);
+        let model = NoiseModel::fit(&pts, W, H).expect("model");
+        let cells = Cells::of(&m, W, H, sites, WB, &model, &pts).expect("cells");
+        for (k, rho) in [fair(3), fair(8)] {
+            let (lo, hi) = (x0 + rho + 1, x1 - rho - 1);
+            let rows: Vec<usize> = (rho..cells.ch - rho).collect();
+            let per_row: Vec<(f64, f64, f64)> = rows
+                .par_iter()
+                .map(|&cy| {
+                    let q: Vec<([f32; 2], [u32; 2], [Read; 2])> = (lo..=hi).map(|cx| cells.filtered_counted(cy * cells.cw + cx, k, rho)).collect();
+                    let f: Vec<f32> = q.iter().map(|q| q.0[0]).collect();
+                    let d: Vec<f32> = (lo..=hi).map(|cx| cells.d[cy * cells.cw + cx][0]).collect();
+                    let e = |v: &[f32]| v.windows(2).map(|w| f64::from(w[1] - w[0]).powi(2) - step * step).sum::<f64>() / (v.len() - 1) as f64;
+                    (e(&f), e(&d), q.iter().filter(|q| q.2[0] != Read::Plane).count() as f64 / q.len() as f64)
+                })
+                .collect();
+            let g = 2 * rho + 1;
+            let blocks: Vec<(f64, f64)> = per_row
+                .chunks(g)
+                .filter(|c| c.len() == g)
+                .map(|c| (c.iter().map(|p| p.0).sum::<f64>() / g as f64, c.iter().map(|p| p.1).sum::<f64>() / g as f64))
+                .collect();
+            let refuted = per_row.iter().map(|p| p.2).sum::<f64>() / per_row.len() as f64;
+            let nb = blocks.len() as f64;
+            let v = cell_sd * cell_sd;
+            let mean = |f: &dyn Fn(&(f64, f64)) -> f64| blocks.iter().map(f).sum::<f64>() / nb;
+            let (ef, ed) = (mean(&|b| b.0) / v, mean(&|b| b.1) / v);
+            let se = |f: &dyn Fn(&(f64, f64)) -> f64, at: f64| (blocks.iter().map(|b| (f(b) / v - at).powi(2)).sum::<f64>() / (nb - 1.0) / nb).sqrt();
+            let (se_f, se_d) = (se(&|b| b.0, ef), se(&|b| b.1, ed));
+            println!(
+                "slope {s} sd/cell, half side {rho} (k {k:.3}): excess step energy filtered {ef:.4} (se {se_f:.4}), measured {ed:.4} (se {se_d:.4}), in one cell's variance; refuted {refuted:.4} of the cells"
+            );
+            if s > 0.0 {
+                assert!(ef.abs() <= se_d, "slope {s} sd/cell, half side {rho}: the filtered ramp holds {ef:.4} of a cell's variance more step energy than the ramp, the measurement's error {se_d:.4}");
+            }
+        }
+    }
+}
+
+/// A step the plane cannot tell from a ramp one neighbour at a time is
+/// kept to the colour edge test's limit wherever the constant keeps it: a
+/// one-sided R − G edge of `s` cell sds (the module's noise, the edge at
+/// column W/4) at every step the round-17 sweep read (3, 4, 5, 6, 8 and 12
+/// sds) over the fair test of the windows the stage runs first (half sides
+/// 1, 8 and 12: colour NR 1–20, 25 and 50, [`fair_test`]; half side 3, which
+/// no strength runs, is the read's known limit, see the module, and stays in
+/// [`a_ramp_is_read_on_its_plane`]). At each of the six columns
+/// either side of the edge where the constant's reading on the same windows
+/// ([`constant_reading`]) is within 0.15 of the step of its own side's level
+/// (the limit of [`a_colour_edge_the_noise_cannot_make_is_kept`]), the
+/// filtered mean over the rows is within it too. Where the constant itself is
+/// over it (a step the noise could have made, no neighbour refusable: the
+/// test's own regime) the column is printed as the regime's limit, not
+/// asserted. Each column's error over the step is printed for both, with the
+/// share of its cells whose plane the whiteness read refuted and the
+/// standard error of the unfiltered column mean (blocks of `2ρ + 1` rows).
+///
+/// MUTATION: the whiteness read dropped (the plane everywhere): the column
+/// beside a 5-sd edge reads 0.47 of the step at half side 8 (rel1180 msg-e3
+/// round 18).
+#[test]
+fn a_step_is_read_as_the_constant_reads_it() {
+    let sites = bayer_sites(&rggb()).expect("Bayer");
+    let level = 0.01;
+    let sd = (WB[0] * WB[0] * (A * level / WB[0] + B) + (A * level + B) / 4.0).sqrt();
+    let e = W / 4;
+    for s in [3.0f64, 4.0, 5.0, 6.0, 8.0, 12.0] {
+        let m = mosaic(level, s * sd);
+        let p = patches(&m, W, H, sites, WB);
+        let model = NoiseModel::fit(&p, W, H).expect("model");
+        let c = Cells::of(&m, W, H, sites, WB, &model, &p).expect("cells");
+        let side = |cols: std::ops::Range<usize>| cols.clone().map(|cx| (0..c.ch).map(|cy| f64::from(c.d[cy * c.cw + cx][0])).sum::<f64>() / c.ch as f64).sum::<f64>() / cols.len() as f64;
+        let (lo, hi) = (side(0..e - 8), side(e + 8..W / 2));
+        let step = s * sd;
+        for (k, rho) in [fair(1), fair(8), fair(12)] {
+            let g = 2 * rho + 1;
+            let mut line = format!("step {s} sd, half side {rho} (k {k:.3}), err/step plane | constant (share read as the constant, se):");
+            for cx in e - 3..e + 3 {
+                let rows: Vec<(f64, f64, f64, f64)> = (0..c.ch)
+                    .into_par_iter()
+                    .map(|cy| {
+                        let i = cy * c.cw + cx;
+                        let q = c.filtered_counted(i, k, rho);
+                        (f64::from(q.0[0]), f64::from(constant_reading(&c, i, k, rho)[0]), f64::from(c.d[i][0]), f64::from(u8::from(q.2[0] != Read::Plane)))
+                    })
+                    .collect();
+                let n = rows.len() as f64;
+                let (plane, constant) = (rows.iter().map(|r| r.0).sum::<f64>() / n, rows.iter().map(|r| r.1).sum::<f64>() / n);
+                let refuted = rows.iter().map(|r| r.3).sum::<f64>() / n;
+                let blocks: Vec<f64> = rows.chunks(g).filter(|b| b.len() == g).map(|b| b.iter().map(|r| r.2).sum::<f64>() / g as f64).collect();
+                let nb = blocks.len() as f64;
+                let bm = blocks.iter().sum::<f64>() / nb;
+                let se = (blocks.iter().map(|b| (b - bm).powi(2)).sum::<f64>() / (nb - 1.0) / nb).sqrt();
+                let want = if cx < e { lo } else { hi };
+                let (got, base) = ((plane - want) / step, (constant - want) / step);
+                let regime = base.abs() >= 0.15;
+                line += &format!("  {cx}: {got:+.3} | {base:+.3} ({refuted:.3}, {:.3}){}", se / step, if regime { " <regime>" } else { "" });
+                assert!(
+                    regime || got.abs() < 0.15,
+                    "step {s} sd, half side {rho}, column {cx} (edge {e}): the filter reads {got:+.4} of the step off its side, the constant {base:+.4} (the limit 0.15)"
+                );
+            }
+            println!("{line}");
+        }
+    }
+}
+
+/// A flat window reads the constant's value: a plane contains the constant.
+/// On a window of one value at the fair test, and on a window of noise at an
+/// unbounded `k` (every sample accepted: the plane's value at the cell of a
+/// full symmetric window is its mean, the centred places orthogonal to the
+/// intercept), the plane's reading (its whiteness read at the fixture
+/// frame's `k`) is the skipped mean's within f32 rounding, at half sides 3
+/// and 8.
+#[test]
+fn a_flat_window_reads_the_constants_value() {
+    for rho in [3usize, 8] {
+        let side = 2 * rho + 1;
+        let mut w = Window { centre: rho * side + rho, cols: side, ..Window::default() };
+        for y in 0..side {
+            for x in 0..side {
+                w.place.push([x as f32 - rho as f32, y as f32 - rho as f32]);
+                w.count.push(1.0);
+            }
+        }
+        for (k, noisy) in [(fair(rho).0, false), (f64::INFINITY, true)] {
+            for j in 0..2 {
+                w.value[j] = (0..side * side).map(|i| (0.0123 + if noisy { 0.004 * normal(71 + j as u64, i as u64) } else { 0.0 }) as f32).collect();
+            }
+            let sigma = [0.004f64; 2];
+            let (got, _, kept) = local_plane(&w, sigma, [0.0; 2], [k, fair_k((W / 2 * (H / 2)) as f64)], &mut Vec::new(), &mut Vec::new());
+            for j in 0..2 {
+                let (want, _) = skipped_mean(&w.value[j], w.value[j][w.centre], sigma[j], k, &mut Vec::new());
+                let scale = w.value[j].iter().fold(0.0f32, |a, q| a.max(q.abs()));
+                println!("half side {rho}, k {k:.3}, noisy {noisy}, difference {j}: plane {:.9e} (read {:?}), constant {want:.9e}", got[j], kept[j]);
+                assert!((got[j] - want).abs() <= f32::EPSILON * scale, "half side {rho}, k {k}, noisy {noisy}: the plane reads {:e}, the constant {want:e}", got[j]);
+            }
+        }
+    }
+}
+
+/// A model is read only where its own check can refuse it. A window of half
+/// side 1 (colour NR 1–20) has at most 12 axis pairs a direction, under the
+/// fixture frame's `k_F²` (20.8): the whiteness read has no reach, and every
+/// cell reads the constant's value ([`constant_reading`]) bit for bit, on
+/// each fixture the step sweep and the ramp test use: a flat grey, a ramp of
+/// 1 sd per cell and a step of 5 sds ([`a_step_is_read_as_the_constant_reads_it`]).
+///
+/// MUTATION: the reach rule dropped: the plane is read at half side 1, and
+/// on the flat fixture alone 144 361 of the 196 608 cells differ from the
+/// constant's reading (rel1180 msg-e3 round 20; the accepted set of three by
+/// three is lopsided wherever a neighbour is refused).
+#[test]
+fn a_window_out_of_the_reads_reach_reads_the_constant() {
+    let sites = bayer_sites(&rggb()).expect("Bayer");
+    let level = 0.01;
+    let sd = (WB[0] * WB[0] * (A * level / WB[0] + B) + (A * level + B) / 4.0).sqrt();
+    let (k, rho) = fair(1);
+    for (name, m) in [("flat", mosaic(level, 0.0)), ("ramp 1 sd/cell", ramp_mosaic(1.0).0), ("step 5 sd", mosaic(level, 5.0 * sd))] {
+        let p = patches(&m, W, H, sites, WB);
+        let model = NoiseModel::fit(&p, W, H).expect("model");
+        let c = Cells::of(&m, W, H, sites, WB, &model, &p).expect("cells");
+        let (differ, other): (usize, usize) = (0..c.cw * c.ch)
+            .into_par_iter()
+            .map(|i| {
+                let (got, _, read) = c.filtered_counted(i, k, rho);
+                let want = constant_reading(&c, i, k, rho);
+                (usize::from(got.iter().zip(&want).any(|(a, b)| a.to_bits() != b.to_bits())), usize::from(read.iter().any(|r| *r != Read::NoReach)))
+            })
+            .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+        println!("{name}: half side {rho} (k {k:.4}, k_F {:.4}): {differ} of {} cells differ from the constant's reading; {other} read in reach", c.frame_k, c.cw * c.ch);
+        assert_eq!(differ, 0, "{name}: {differ} cells at half side {rho} are not the constant's reading");
     }
 }
 

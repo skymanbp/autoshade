@@ -88,6 +88,114 @@
 //! window mean's `1/N` as `k` grows. A neighbour further from the estimate than
 //! the noise can carry is scene, and does not vote.
 //!
+//! **The cell's local plane** ([`local_plane`]). The test asks whether a
+//! neighbour shares the cell's true value, and on a chroma gradient the true
+//! values of a window are not one constant: on a ramp steeper than `t/ρ` per
+//! cell only a strip of neighbours lies within the test of the cell's value,
+//! the estimate is that strip's mean and every further pass walks along it —
+//! plateaus, blotches and specks on a cloud's chroma ramp (rel1180 msg-e3
+//! rounds 15–16: on a 1-sd-per-cell ramp, half side 8, the constant's passes
+//! left 3.7 of a cell's variance more step energy than the ramp has, more than
+//! the noisy input's own 2.2). A constant is the zero-order local model of
+//! smooth content; the first-order one is a plane, which contains it. Per
+//! colour difference the plane `d(u, v) = d₀ + gₓ·u + g_y·v` (`u, v` a
+//! sample's place against the cell, in cells) is fitted by least squares over
+//! the accepted samples, each at the anchor's own-level variance `σ²/c` (`c`
+//! the sample's count, a cell's one; the hypothesis puts every accepted
+//! sample at the anchor's level, as the test's noise is), and read at the
+//! cell: `d₀`. Its error at a place: with `x = (1, u, v)` and
+//! `S = Σ c·x·xᵀ` over the accepted set, the fit `β = S⁻¹·Σ c·x·q` has the
+//! variance `σ²·S⁻¹`, so the plane's value at `x` has `σ²·h(x)`,
+//! `h(x) = xᵀ·S⁻¹·x` (its leverage there; at the cell of a full symmetric
+//! window `1/n`, growing as `u²/Σu² + v²/Σv²` toward the window's edges and
+//! most where the accepted set is one-sided). A neighbour at `x` that lies on
+//! the plane differs from the plane's value there, read without it, by
+//! `σ²·(1/c + h(x))`: it is in when `(q − d(x))² ≤ k²·σ²·(1/c + h(x))` — on a
+//! flat accepted set at the cell the constant's `σ·√(1 + 1/n)`. The cell's own
+//! sample is always in; the first pass is anchored on the plane of zero slope
+//! through the sample (its error the sample's, `h = 1`: the width `k·σ·√2`,
+//! as before), and the passes repeat as the constant's do, until a value at
+//! the cell repeats. A flat window reads the constant's value (a plane of
+//! zero slope through the same set).
+//!
+//! **A plane is read where its own residuals are noise; where they keep a
+//! shape, the cell is read as it was.** One neighbour at a time, a step of
+//! 4–7 noise sds is within a plane's noise: a few far-side cells admitted on
+//! the first pass tilt the plane, the tilted plane's wider test at the far
+//! places admits more, and the step is fitted as a ramp whose every residual
+//! is within the test (round 17: at half side 8 a 5-sd step bled 0.46 of
+//! itself into the column beside it, where the constant bled 0.04). Together
+//! the residuals of a plane through a step are not noise: a sawtooth, of one
+//! sign along the step and alternating across it. The final accepted set's
+//! residuals `e = √c·(q − d(x))` are read for that shape: their lag-1
+//! autocorrelation along `x` and along `y`, `r = Σ e_a·e_b / ½Σ (e_a² + e_b²)`
+//! over the `P` pairs of axis neighbours both accepted. Under the hypothesis
+//! (the plane is the truth, the samples carry the model's noise) the residuals
+//! are `e = (I − H)·ε`, `H` the fit's hat matrix
+//! (`H_ab = √(c_a·c_b)·x_aᵀ·S⁻¹·x_b`), and `ε` has the cell's variance `v`
+//! and, between axis neighbours, the covariance `c_G` of the green their sites
+//! share (`ρ_G = c_G/v`, the only covariance the grid has, at the anchor's own
+//! level); to first order in `H` and `ρ_G`,
+//! `E[Σ e_a·e_b] = v·(ρ_G·P − Σ H_ab)` and
+//! `E[½Σ (e_a² + e_b²)] = v·(P − ½Σ (H_aa + H_bb))` over the pairs — the fit's
+//! three degrees of freedom: `Σ H_ab ≈ 3` on a full window, so `r` sits near
+//! `ρ_G − 3/P`, not 0 — and the sums are `tr(S⁻¹·M)` of the pairs' moments
+//! `M`. Their ratio is `r`'s expectation `r₀`, and its sd over `P` white
+//! pairs `1/√P`. The plane is refuted on this window when either
+//! `|r − r₀| > k_F/√P`: the cell then keeps the constant's
+//! reading on the same window ([`skipped_mean`], the law above, unchanged);
+//! else the plane's `d₀` is the estimate. A flat window or a ramp reads white
+//! (the plane); a step of a few sds, a real texture, a one-sided edge read a
+//! shape (the constant). Nothing is clamped and no slope capped: the plane is
+//! kept exactly where the data cannot tell it from the truth.
+//!
+//! **A question is fair over all the questions of its kind the stage asks —
+//! the neighbour test over the window's cells, the model read over the
+//! frame's.** [`fair_k`] is one derivation: the width at which, over the
+//! population a question is asked of, fewer than one true answer is expected
+//! to be refused. The neighbour test is asked of a window's `N` cells, so its
+//! `k` is `fair_k(N)` (below). The whiteness read is asked once per cell and
+//! direction, so its population is the frame's `C = cw·ch` cells and its
+//! `k_F = fair_k(C)` (≈ 5.1 at a million cells): fewer than one true plane
+//! is expected to be refuted per frame and direction. At the window's `k`
+//! it would refute `2/N` of the planes of a clean frame (3.5 % at half side
+//! 3), and each false refusal on a ramp is a speck of the constant's strip
+//! mean (rel1180 msg-e3 round 18: 0.04–0.13 of a cell's variance of excess
+//! step energy on a 1–1.5-sd-per-cell ramp).
+//!
+//! **A model is read only where its own check can refuse it; where the check
+//! has no reach, the cell is read as it was.** The whiteness statistic `r` is
+//! bounded by 1, so where its threshold `k_F/√P` is 1 or more the read can
+//! refute no plane, however shaped its residuals: the plane there has no
+//! check. It is read only where the accepted set's axis pairs exceed `k_F²`
+//! in both directions; elsewhere the cell keeps the constant's reading
+//! ([`Read::NoReach`]). No number is chosen: `k_F` is the law's and 1 the
+//! statistic's range. A window of half side 1 (colour NR 1–20) has at most
+//! 12 pairs a direction, under `k_F²` on any frame of more than 1 879 cells
+//! (21 at 0.2 million, 24 at a million): it reads the constant, as shipped.
+//! At half side 8 (colour NR 25) a full window has 272.
+//! *The read's known limit:* between the two, at half side 3 (42 pairs, the
+//! threshold 0.70 at `k_F` 4.56), the read has reach but little power on a
+//! step of 3–5 sds, which the plane bleeds where the constant does not
+//! (rel1180 msg-e3 round 19: into the column beside the edge 0.28 / 0.38–0.41
+//! / 0.25–0.29 of a 3 / 4 / 5-sd step, the constant 0.11 / 0.08–0.11 / 0.01).
+//! No strength of the slider runs that window ([`fair_test`]: half side 1 to
+//! colour NR 20, then 8, 12, 19, 23); a pyramid level's window is the
+//! strength's.
+//!
+//! **The plane's share of a cell's own noise.** At its fixed point the plane
+//! solves `Σᵢ cᵢ·xᵢ·ψᵢ(qᵢ − xᵢᵀβ) = 0`, `ψᵢ(e) = e·1{|e| ≤ tᵢ·σ}`,
+//! `tᵢ = k·√(1/cᵢ + hᵢ)`: an M-estimator of the plane, whose influence on `β`
+//! is `M⁻¹·xᵢ·ψᵢ`, `M = Σ cᵢ·xᵢ·xᵢᵀ·(Z(tᵢ) − 2tᵢ·φ(tᵢ))`. On a symmetric window
+//! `tᵢ` is an even function of the place, so `M`'s intercept row is orthogonal
+//! to its slopes, and `d₀`'s share of one sample's noise is
+//! `1/Σᵢ (Z(tᵢ) − 2tᵢ·φ(tᵢ))` — the skipped mean's `1/(N·(Z − 2t·φ(t)))` with
+//! `t` read at each place, `hᵢ = (1/N + uᵢ²/Σu² + vᵢ²/Σv²)/Z` over the
+//! accepted share `Z` of the window (first order: the corners' wider test
+//! makes the share a little smaller than the constant's). The cells refuted
+//! on a flat window keep the constant's share; they are the whiteness test's
+//! false refusals, of order `2/N` of the cells.
+//!
 //! **γ = 1.** In linear light the noise is the only scale at a pixel; a
 //! threshold that is a multiple of `σ(L)` is the only form that does not
 //! introduce a scale of its own. (The `σ^0.5` that v1.17.1's round 3
@@ -522,8 +630,10 @@ pub(crate) fn camera_luma(calibration: Option<(&[[f32; 4]; 3], [f32; 4])>, xyz: 
     }
 }
 
-/// The sigma filter's estimate of the true value of `centre` (one sample of
-/// noise sd `sigma`) over `window` (its samples, the centre among them):
+/// The sigma filter's constant reading of the true value of `centre` (one
+/// sample of noise sd `sigma`) over `window` (its samples, the centre among
+/// them) — the cell's estimate where its local plane is refuted
+/// ([`local_plane`]):
 /// starting from the sample itself, a mean of `n = 1`, the mean of the window's
 /// samples within `k·σ·√(1 + 1/n)` of the current estimate — a sample against
 /// a mean of `n` samples differs by that sd — until an estimate repeats (a
@@ -558,12 +668,210 @@ pub(crate) fn skipped_mean(window: &[f32], centre: f32, sigma: f64, k: f64, seen
     }
 }
 
-/// One worker's buffers for the pass: the window per colour difference and
-/// the estimates seen.
+/// The window a cell's estimate is read over ([`local_plane`]): per colour
+/// difference its samples, each sample's place against the cell's (in cells)
+/// and its count (a cell's sample is one), the index of the cell's own
+/// sample, and the window's row length (a sample's axis neighbours are the
+/// next in its row and the one a row on).
+#[derive(Default)]
+pub(crate) struct Window {
+    pub(crate) value: [Vec<f32>; 2],
+    pub(crate) place: Vec<[f32; 2]>,
+    pub(crate) count: Vec<f32>,
+    pub(crate) centre: usize,
+    pub(crate) cols: usize,
+}
+
+impl Window {
+    fn clear(&mut self) {
+        self.value.iter_mut().for_each(Vec::clear);
+        self.place.clear();
+        self.count.clear();
+    }
+}
+
+/// A plane over a window, `d(u, v) = d₀ + gₓ·u + g_y·v` (the cell at
+/// `u = v = 0`), and its error `S⁻¹` (symmetric, `[s00, s01, s02, s11, s12,
+/// s22]`), the plane's variance in one cell's `σ²`: at place `x = (1, u, v)`
+/// the plane's value has the variance `σ²·xᵀS⁻¹x` (see the module).
+#[derive(Clone, Copy)]
+struct Plane {
+    d: [f64; 3],
+    inv: [f64; 6],
+}
+
+impl Plane {
+    /// The plane's value at `(u, v)` and its variance there, in `σ²`.
+    fn at(&self, u: f64, v: f64) -> (f64, f64) {
+        let [a, b, c, d, e, f] = self.inv;
+        (self.d[0] + self.d[1] * u + self.d[2] * v, a + 2.0 * (b * u + c * v) + d * u * u + 2.0 * e * u * v + f * v * v)
+    }
+
+    /// `tr(S⁻¹·M)` of a symmetric moment matrix `m`, stored as `inv` is.
+    fn trace(&self, m: [f64; 6]) -> f64 {
+        let i = self.inv;
+        i[0] * m[0] + 2.0 * (i[1] * m[1] + i[2] * m[2] + i[4] * m[4]) + i[3] * m[3] + i[5] * m[5]
+    }
+
+    /// The least-squares plane of the moments `s` (`Σc, Σcu, Σcv, Σcu², Σcuv,
+    /// Σcv²`) and `r` (`Σcq, Σcqu, Σcqv`), each sample at the variance `σ²/c`:
+    /// `S·β = r`, `β`'s variance `σ²·S⁻¹`. An accepted set on one line (or at
+    /// one place) has no evidence on a slope across it: the plane there is
+    /// its mean, of zero slope, and its error the mean's.
+    fn fit(s: [f64; 6], r: [f64; 3]) -> Self {
+        let [s00, s01, s02, s11, s12, s22] = s;
+        // The adjugate of the symmetric S.
+        let c = [s11 * s22 - s12 * s12, s02 * s12 - s01 * s22, s01 * s12 - s02 * s11, s00 * s22 - s02 * s02, s01 * s02 - s00 * s12, s00 * s11 - s01 * s01];
+        let det = s00 * c[0] + s01 * c[1] + s02 * c[2];
+        if det.is_nan() || det <= 0.0 {
+            return Self { d: [r[0] / s00, 0.0, 0.0], inv: [1.0 / s00, 0.0, 0.0, 0.0, 0.0, 0.0] };
+        }
+        let inv = c.map(|x| x / det);
+        let d = [
+            inv[0] * r[0] + inv[1] * r[1] + inv[2] * r[2],
+            inv[1] * r[0] + inv[3] * r[1] + inv[4] * r[2],
+            inv[2] * r[0] + inv[4] * r[1] + inv[5] * r[2],
+        ];
+        Self { d, inv }
+    }
+}
+
+/// Colour difference `j`'s local plane over `window` at the anchor's sd
+/// `sigma` and the test's `k` (see the module): each pass fits the
+/// least-squares plane over the samples within `k·σ·√(1/c + h)` of the last
+/// plane's value at their place, the cell's own sample always in, the first
+/// pass anchored on the plane of zero slope through the cell's sample, until
+/// a value at the cell repeats (a fixed point, or a cycle: the planes are
+/// fits of subsets of a finite window, so a repeat comes). Returns the last
+/// plane and its accepted count; `inside` holds the accepted set it was
+/// fitted on, `seen` the values seen (both cleared first: a worker's buffers).
+fn plane_pass(window: &Window, j: usize, sigma: f64, k: f64, seen: &mut Vec<u32>, inside: &mut Vec<bool>) -> (Plane, u32) {
+    let c = window.centre;
+    let values = &window.value[j];
+    let own = f64::from(window.count[c]);
+    let mut plane = Plane { d: [f64::from(values[c]), 0.0, 0.0], inv: [1.0 / own, 0.0, 0.0, 0.0, 0.0, 0.0] };
+    let width = (k * sigma).powi(2);
+    seen.clear();
+    loop {
+        inside.clear();
+        let (mut s, mut r) = ([0.0f64; 6], [0.0f64; 3]);
+        for (i, ((&q, &[u, v]), &m)) in values.iter().zip(&window.place).zip(&window.count).enumerate() {
+            let (q, u, v, m) = (f64::from(q), f64::from(u), f64::from(v), f64::from(m));
+            let (p, h) = plane.at(u, v);
+            let ok = i == c || (q - p).powi(2) <= width * (1.0 / m + h);
+            inside.push(ok);
+            if ok {
+                let (mu, mv) = (m * u, m * v);
+                s = [s[0] + m, s[1] + mu, s[2] + mv, s[3] + mu * u, s[4] + mu * v, s[5] + mv * v];
+                r = [r[0] + m * q, r[1] + mu * q, r[2] + mv * q];
+            }
+        }
+        let next = Plane::fit(s, r);
+        let bits = (next.d[0] as f32).to_bits();
+        if seen.contains(&bits) {
+            return (next, s[0] as u32);
+        }
+        seen.push(bits);
+        plane = next;
+    }
+}
+
+/// How a cell's colour difference was read ([`local_plane`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Read {
+    /// On its plane: the residuals read white where the read has its reach.
+    Plane,
+    /// As the constant reads it: the plane's residuals keep a shape.
+    Shape,
+    /// As the constant reads it: the read has no reach (`P ≤ k_F²` accepted
+    /// pairs in a direction), so it could refuse nothing.
+    NoReach,
+}
+
+/// Are `plane`'s residuals over the accepted set `inside` of colour
+/// difference `j`'s `window` noise? Their lag-1 autocorrelation along `x` and
+/// along `y` against its expectation under the plane, `rho_g` the noise's own
+/// correlation of axis neighbours, at the frame's `k` (see the module). A
+/// direction of `P ≤ k²` accepted pairs is out of the read's reach (its
+/// threshold `k/√P` over the statistic's range, 1): [`Read::NoReach`]. A
+/// direction whose residuals are all zero shows no shape.
+fn residuals_read(window: &Window, j: usize, plane: &Plane, inside: &[bool], rho_g: f64, k: f64) -> Read {
+    let values = &window.value[j];
+    let (n, cols) = (values.len(), window.cols);
+    let at = |i: usize| {
+        let [u, v] = window.place[i].map(f64::from);
+        let w = f64::from(window.count[i]).sqrt();
+        (w * (f64::from(values[i]) - plane.at(u, v).0), [w, w * u, w * v])
+    };
+    let mut shaped = false;
+    for step in [1, cols] {
+        let (mut num, mut den, mut pairs) = (0.0f64, 0.0f64, 0.0f64);
+        // The pairs' moments, each `x` carrying its `√c`: `Σ ½(x_a·x_bᵀ +
+        // x_b·x_aᵀ)` and `Σ ½(x_a·x_aᵀ + x_b·x_bᵀ)`.
+        let (mut cross, mut own) = ([0.0f64; 6], [0.0f64; 6]);
+        for a in 0..n.saturating_sub(step) {
+            let b = a + step;
+            if !inside[a] || !inside[b] || step == 1 && b % cols == 0 {
+                continue;
+            }
+            let ((ea, xa), (eb, xb)) = (at(a), at(b));
+            num += ea * eb;
+            den += (ea * ea + eb * eb) / 2.0;
+            pairs += 1.0;
+            for (m, (p, q)) in [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)].into_iter().enumerate() {
+                cross[m] += (xa[p] * xb[q] + xb[p] * xa[q]) / 2.0;
+                own[m] += (xa[p] * xa[q] + xb[p] * xb[q]) / 2.0;
+            }
+        }
+        if pairs <= k * k {
+            return Read::NoReach;
+        }
+        if den.is_nan() || den <= 0.0 {
+            continue;
+        }
+        let expected = (rho_g * pairs - plane.trace(cross)) / (pairs - plane.trace(own));
+        shaped |= (num / den - expected).abs() > k / pairs.sqrt();
+    }
+    if shaped { Read::Shape } else { Read::Plane }
+}
+
+/// The sigma filter's estimate of the true values of a cell's two colour
+/// differences over `window` (each difference's samples, the cell's own among
+/// them; `sigma` one cell's noise sd of each at the cell's own level, `rho_g`
+/// the correlation of that noise with an axis neighbour's): per difference
+/// the cell's local plane read at the cell where the plane's residuals are
+/// noise, and the constant's reading on the same window ([`skipped_mean`])
+/// where they keep a shape (see the module); `k` the neighbour test's (fair to
+/// the window), `k_frame` the whiteness read's (fair to the frame). Returns the two values, each
+/// difference's accepted count, and how each was read ([`Read`]); `seen` and
+/// `inside` are a worker's buffers.
+fn local_plane(window: &Window, sigma: [f64; 2], rho_g: [f64; 2], [k, k_frame]: [f64; 2], seen: &mut Vec<u32>, inside: &mut Vec<bool>) -> ([f32; 2], [u32; 2], [Read; 2]) {
+    // A window whose pairs in a direction are all out of the read's reach
+    // leaves every accepted set in it out of reach: no plane is fitted.
+    let (cols, rows) = (window.cols, window.place.len() / window.cols);
+    let reach = (rows * (cols - 1)).min((rows - 1) * cols) as f64 > k_frame * k_frame;
+    let (mut out, mut count, mut read) = ([0.0f32; 2], [0u32; 2], [Read::NoReach; 2]);
+    for j in 0..2 {
+        if reach {
+            let (plane, n) = plane_pass(window, j, sigma[j], k, seen, inside);
+            read[j] = residuals_read(window, j, &plane, inside, rho_g[j], k_frame);
+            if read[j] == Read::Plane {
+                (out[j], count[j]) = (plane.d[0] as f32, n);
+                continue;
+            }
+        }
+        (out[j], count[j]) = skipped_mean(&window.value[j], window.value[j][window.centre], sigma[j], k, seen);
+    }
+    (out, count, read)
+}
+
+/// One worker's buffers for the pass: the window, the values seen and the
+/// accepted set.
 #[derive(Default)]
 struct Scratch {
-    window: [Vec<f32>; 2],
+    window: Window,
     seen: Vec<u32>,
+    inside: Vec<bool>,
 }
 
 /// The mosaic's cells: the two colour differences and the green of each, and
@@ -591,10 +899,14 @@ pub(crate) struct Cells {
     origin: [(usize, usize); 2],
     /// The noise model, the white balance (green = 1) and the side `s` in
     /// base cells of one of these cells (1 at the base, `2^level` on the
-    /// pyramid): what states a cell's noise at its own level ([`Self::own_sd`]).
+    /// pyramid): what states a cell's noise at its own level ([`Self::own_noise`]).
     model: NoiseModel,
     wb: [f64; 3],
     side: usize,
+    /// The whiteness read's `k` ([`residuals_read`]): [`fair_k`] of the
+    /// frame's `cw·ch` cells, the population that question is asked over
+    /// (once a cell and direction).
+    frame_k: f64,
 }
 
 impl Cells {
@@ -656,7 +968,7 @@ impl Cells {
         };
         let sd = pts.iter().map(|p| site_var(p).0.map(|v| (2.0 * v).sqrt() as f32)).collect();
         let cov = pts.iter().map(|p| site_var(p).1 as f32).collect();
-        Some(Self { cw, ch, pw, ph, d, sd, cov, origin: [sites[0], sites[3]], model: *model, wb, side: 1 })
+        Some(Self { cw, ch, pw, ph, d, sd, cov, origin: [sites[0], sites[3]], model: *model, wb, side: 1, frame_k: fair_k((cw * ch) as f64) })
     }
 
     /// These cells at pyramid level `level` (`level ≥ 1`): each the mean of a
@@ -714,7 +1026,7 @@ impl Cells {
                 (sd, (c / (sf * sf * sf)) as f32)
             })
             .unzip();
-        Self { cw, ch, pw, ph, d, sd, cov, origin: self.origin, model: self.model, wb: self.wb, side: self.side * s }
+        Self { cw, ch, pw, ph, d, sd, cov, origin: self.origin, model: self.model, wb: self.wb, side: self.side * s, frame_k: fair_k((cw * ch) as f64) }
     }
 
     /// One cell's noise sd per colour difference at cell `i`'s OWN level —
@@ -729,8 +1041,10 @@ impl Cells {
     /// as the cell's); one site's difference `wR²·var(R) + σ²_G/4`, and at a
     /// pyramid level of side `s` the mean of `s²` of them,
     /// `(v + 4c·(1 − 1/s))/s²` with `c = σ²_G/16` (as [`Self::level`] states
-    /// a patch's), at the cell's own radius.
-    fn own_sd(&self, i: usize) -> [f64; 2] {
+    /// a patch's), at the cell's own radius. With it, the correlation of the
+    /// cell's noise with an axis neighbour's at the same level: the greens
+    /// their sites share, `c/s³`, over that variance.
+    fn own_noise(&self, i: usize) -> ([f64; 2], [f64; 2]) {
         let (cx, cy) = (i % self.cw, i / self.cw);
         let s = self.side as f64;
         let r = self.model.radius((cx as f64 + 0.5) * 2.0 * s, (cy as f64 + 0.5) * 2.0 * s);
@@ -738,7 +1052,8 @@ impl Cells {
         let vg = self.model.var(g, r) * self.wb[1] * self.wb[1];
         let c = vg / 16.0;
         let site = |w: f64, dc: f64| w * w * self.model.var((dc + g) / w, r) + vg / 4.0;
-        [site(self.wb[0], dr), site(self.wb[2], db)].map(|v| ((v + 4.0 * c * (1.0 - 1.0 / s)) / (s * s)).sqrt())
+        let var = [site(self.wb[0], dr), site(self.wb[2], db)].map(|v| (v + 4.0 * c * (1.0 - 1.0 / s)) / (s * s));
+        (var.map(f64::sqrt), var.map(|v| c / (s * s * s) / v))
     }
 
     /// Cell `i`'s two colour differences through the sigma filter at `k`:
@@ -749,33 +1064,32 @@ impl Cells {
         self.filtered_counted(i, k, rho).0
     }
 
-    /// [`Self::filtered`] with the count of window samples the last pass accepted.
+    /// [`Self::filtered`] with the count of window samples the last pass
+    /// accepted and whether each difference was read on its plane.
     #[cfg(test)]
-    fn filtered_counted(&self, i: usize, k: f64, rho: usize) -> ([f32; 2], [u32; 2]) {
+    fn filtered_counted(&self, i: usize, k: f64, rho: usize) -> ([f32; 2], [u32; 2], [Read; 2]) {
         self.filtered_in(i, k, rho, &mut Scratch::default())
     }
 
     /// [`Self::filtered_counted`] in a worker's reused buffers: the window's
     /// samples gathered once per centre, both colour differences in one sweep.
-    fn filtered_in(&self, i: usize, k: f64, rho: usize, scratch: &mut Scratch) -> ([f32; 2], [u32; 2]) {
+    fn filtered_in(&self, i: usize, k: f64, rho: usize, scratch: &mut Scratch) -> ([f32; 2], [u32; 2], [Read; 2]) {
         let (cw, ch) = (self.cw, self.ch);
         let (cx, cy) = (i % cw, i / cw);
-        let sd = self.own_sd(i);
+        let (sd, rho_g) = self.own_noise(i);
         let (y0, y1, x0, x1) = (cy.saturating_sub(rho), (cy + rho + 1).min(ch), cx.saturating_sub(rho), (cx + rho + 1).min(cw));
-        let Scratch { window: [w0, w1], seen } = scratch;
-        w0.clear();
-        w1.clear();
+        let Scratch { window, seen, inside } = scratch;
+        window.clear();
         for y in y0..y1 {
-            for q in &self.d[y * cw + x0..y * cw + x1] {
-                w0.push(q[0]);
-                w1.push(q[1]);
+            for (x, q) in (x0..x1).zip(&self.d[y * cw + x0..y * cw + x1]) {
+                window.value[0].push(q[0]);
+                window.value[1].push(q[1]);
+                window.place.push([x as f32 - cx as f32, y as f32 - cy as f32]);
+                window.count.push(1.0);
             }
         }
-        let (mut out, mut count) = ([0.0f32; 2], [0u32; 2]);
-        for (j, window) in [&*w0, &*w1].into_iter().enumerate() {
-            (out[j], count[j]) = skipped_mean(window, self.d[i][j], sd[j], k, seen);
-        }
-        (out, count)
+        (window.centre, window.cols) = ((cy - y0) * (x1 - x0) + cx - x0, x1 - x0);
+        local_plane(window, sd, rho_g, [k, self.frame_k], seen, inside)
     }
 
     /// The planes the demosaiced pixels are rebuilt on ([`CellChroma`]):
