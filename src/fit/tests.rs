@@ -9148,30 +9148,56 @@ fn a_white_balance_cast_the_curves_carry_as_channel_gains_never_enters_the_hand_
 /// FIT_QUANT against their own absence are set back, the curves are fitted
 /// on the untoned frame, and the cool part of the cast is a per-channel gain
 /// there: the curves fan the widest class +6.3 degrees and are admitted as
-/// fitted, beside the mixer's Orange saturation -18. The fan gate does not
-/// convict, so the walk is never entered and the white balance stays
+/// fitted, beside the mixer's Orange saturation -18. The fan gate did not
+/// convict, so the walk was never entered and the white balance stayed
 /// as-shot. Measured 2026-11-04: look error 0.0774 -> 0.0347.
+///
+/// RE-READ (RULING-1180-int-r2 Q-FL2). Under DEF-3's masked band blurs the
+/// candidate fans 15.0458 degrees, unclamped (no clamp or saturation in
+/// `hue_fan_weighted`), past FAN_DEG = 15 under `>=` and `>` alike: the gate
+/// convicts lawfully and the walk is entered. It moves the white balance to
+/// 4950 K / tint +7.1, the re-fitted curves deliver +17.4 degrees and the
+/// terminal delivered-fan check takes them out, and the finished-recipe
+/// elimination sets the tint back to 0: what ships is 4950 K / tint 0 and no
+/// curves (0.0749 -> 0.0616). The test now witnesses that walk, and "a note
+/// names what ships, not what the walk tried": the hand-off sentence names
+/// the finished recipe's white balance and does not say the curves ship.
+/// MUTATION: the note from the walk (its `to` and the ship-whole sentence) ->
+/// the note names 4950 K / +7.1 and curves that ship whole, and this test
+/// reads the misdescription.
 #[test]
-fn a_cast_with_a_warm_strip_the_curves_carry_unconvicted_never_enters_the_hand_off() {
+fn a_warm_strip_cast_is_walked_to_a_nearer_white_balance_and_its_note_names_what_ships() {
     use super::solve::route;
     use crate::rationale::keys;
     route::take();
     let rep = fit_recipe(&hue_ramps(), &cooled_ramps(11));
     let seen = route::take();
-    assert_eq!(seen.hand_off_entered, 0, "an unconvicted cast never enters the walk: {seen:?}");
-    let fan = projection_arg(&rep, keys::FIT_NOTE_CAST_ADMITTED_FAN, "fan")
-        .unwrap_or_else(|| panic!("the cast ships admitted: {}", rep.recipe.rationale));
-    assert!(fan < FAN_DEG, "the admitted curves clear the limit ({fan})");
+    assert_eq!(seen.hand_off_entered, 1, "the convicted cast is walked: {seen:?}");
     assert!(
-        !rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB
-            || n.key == keys::FIT_NOTE_CAST_PROJECTED),
-        "an admitted cast is neither handed nor projected: {}",
+        rep.recipe.red_curve.is_empty() && rep.recipe.green_curve.is_empty() && rep.recipe.blue_curve.is_empty(),
+        "premise: no cast curve reaches the finished recipe: {}",
         rep.recipe.rationale
     );
-    assert_eq!(rep.recipe.temperature_k, None, "the white balance stays as-shot");
+    let k = rep.recipe.temperature_k.expect("the walked white balance ships");
+    let note = rep
+        .notes
+        .iter()
+        .find(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB_NO_CURVES)
+        .unwrap_or_else(|| panic!("the hand-off says no curves ship: {}", rep.recipe.rationale));
+    let arg = |name: &str| note.args.iter().find(|(key, _)| *key == name).map(|(_, v)| v.clone());
+    eprintln!("WARM_STRIP shipped {k:.0} K / {:+.1}; note {:?} / {:?}", rep.recipe.tint, arg("k_after"), arg("tint_after"));
+    assert_eq!(arg("k_after"), Some(format!("{k:.0}")), "the note names the shipped temperature");
+    assert_eq!(arg("tint_after"), Some(format!("{:+.1}", rep.recipe.tint)), "…and the shipped tint");
+    assert!(
+        !rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB
+            || n.key == keys::FIT_NOTE_CAST_ADMITTED
+            || n.key == keys::FIT_NOTE_CAST_PROJECTED),
+        "no sentence claims curves that do not ship: {}",
+        rep.recipe.rationale
+    );
     assert!(
         ships(rep.err_after, rep.err_before),
-        "the admitted cast earns its place: {} -> {}",
+        "the walked white balance earns its place: {} -> {}",
         rep.err_before,
         rep.err_after
     );

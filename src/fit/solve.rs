@@ -1659,26 +1659,41 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // back. It stays when the terminal delivered-fan check withdrew the
     // re-fitted curves — the white balance did not go with them, and the
     // delivered-fan sentence that follows says what happened to the curves.
-    if let Some(h) = cast_handoff.filter(|_| !fit_regressed) {
+    //
+    // "A note names what ships, not what the walk tried" (RULING-1180-int-r2
+    // Q-FL2, DEF-1's rule): the white balance the note names is the FINISHED
+    // recipe's — the finished-recipe elimination may set an axis back after
+    // the walk (the warm-strip pair: walked to 4950 K / +7.1, ships tint 0) —
+    // and "the curves ship whole" is said only when a cast curve does
+    // (`cast_ships`); otherwise the sentence says none ships. A walk whose
+    // white balance did not survive to the finished recipe has nothing to
+    // name.
+    let shipped_wb = law.point_of(&report.recipe);
+    if let Some(h) = cast_handoff.filter(|h| !fit_regressed && shipped_wb != h.from) {
         let (converged, diverged, aligned) = h.vouch.shares();
+        let mut args = vec![
+            ("k_before", format!("{:.0}", h.from.0)),
+            ("tint_before", format!("{:+.1}", h.from.1)),
+            ("fan_before", format!("{:.1}", h.fan_before)),
+            ("share", format!("{:.3}", h.share)),
+            ("limit", format!("{FAN_DEG:.0}")),
+            ("k_after", format!("{:.0}", shipped_wb.0)),
+            ("tint_after", format!("{:+.1}", shipped_wb.1)),
+        ];
+        if cast_ships {
+            args.push(("fan_after", format!("{:+.1}", h.fan_after)));
+        }
+        args.extend([("converged", converged), ("diverged", diverged), ("aligned", aligned)]);
         crate::rationale::push_note(
             &mut report.recipe.rationale,
             &mut report.notes,
             crate::rationale::Note::new(
-                crate::rationale::keys::FIT_NOTE_CAST_HANDED_TO_WB,
-                vec![
-                    ("k_before", format!("{:.0}", h.from.0)),
-                    ("tint_before", format!("{:+.1}", h.from.1)),
-                    ("fan_before", format!("{:.1}", h.fan_before)),
-                    ("share", format!("{:.3}", h.share)),
-                    ("limit", format!("{FAN_DEG:.0}")),
-                    ("k_after", format!("{:.0}", h.to.0)),
-                    ("tint_after", format!("{:+.1}", h.to.1)),
-                    ("fan_after", format!("{:+.1}", h.fan_after)),
-                    ("converged", converged),
-                    ("diverged", diverged),
-                    ("aligned", aligned),
-                ],
+                if cast_ships {
+                    crate::rationale::keys::FIT_NOTE_CAST_HANDED_TO_WB
+                } else {
+                    crate::rationale::keys::FIT_NOTE_CAST_HANDED_TO_WB_NO_CURVES
+                },
+                args,
             ),
         );
         // A hand-off that stopped on the Kelvin domain's edge says so in the

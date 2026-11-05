@@ -337,6 +337,20 @@ pub mod keys {
          means vouched the moved white balance: {converged} of the frame moved \
          closer, {diverged} moved away, and {aligned} moved in the direction its \
          own target asks for.";
+    /// [`FIT_NOTE_CAST_HANDED_TO_WB`] when the finished recipe carries no
+    /// cast curve: the white balance it names is the one that ships, and no
+    /// curves ship with it (Q-FL2: a note names what ships).
+    pub const FIT_NOTE_CAST_HANDED_TO_WB_NO_CURVES: &str =
+        " Colour cast handed to the white balance: as fitted on top of \
+         {k_before} K / tint {tint_before} the channel curves would have opened \
+         a {fan_before} degree hue fan in a class holding {share} of the frame's \
+         measurable colour (limit {limit}), so the white balance was searched \
+         along the direction those curves pull. What ships is {k_after} K / tint \
+         {tint_after} and no channel curves: the curves re-fitted on top of the \
+         moved white balance did not reach the finished recipe. The target's own \
+         12x8 cell means vouched the moved white balance: {converged} of the frame \
+         moved closer, {diverged} moved away, and {aligned} moved in the direction \
+         its own target asks for.";
     pub const FIT_NOTE_GLOBAL_CAST: &str =
         " Global colour cast measured from consistent hue rotation across the populated frame (rotation {rotation} degrees, chroma ratio {ratio}); white balance and saturation were read from population evidence.";
     pub const FIT_NOTE_VETO_DISCLOSED: &str =
@@ -1357,7 +1371,7 @@ pub(crate) const GLOBAL_SOLVE_KEYS: &[&str] = &[
     keys::FIT_NOTE_CAST_HUE_FANNED, keys::FIT_NOTE_CAST_PROJECTED,
     keys::FIT_NOTE_CAST_PROJECTED_FAN, keys::FIT_NOTE_CAST_PROJECTED_FAN_NA,
     keys::FIT_NOTE_DELIVERED_FAN, keys::FIT_NOTE_DELIVERED_FAN_UNCAUSED,
-    keys::FIT_NOTE_CAST_HANDED_TO_WB,
+    keys::FIT_NOTE_CAST_HANDED_TO_WB, keys::FIT_NOTE_CAST_HANDED_TO_WB_NO_CURVES,
     keys::FIT_NOTE_GLOBAL_CAST, keys::FIT_NOTE_VETO_DISCLOSED, keys::FIT_NOTE_STRENGTH,
     keys::FIT_DEGENERATE, keys::FIT_NOTE_REGRESSED, keys::FIT_NOTE_SAT_REDUCED,
     keys::FIT_NOTE_TONE_WITHHELD_HARM, keys::FIT_NOTE_CURVE_WITHHELD_HARM, keys::FIT_NOTE_UNEARNED,
