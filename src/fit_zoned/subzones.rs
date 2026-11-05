@@ -238,22 +238,10 @@ fn residual_models(
 ) -> (f32, Vec<BandModel>) {
     let (w, h) = (width as usize, height as usize);
     if w == 0 || h == 0 || weights.len() != w * h { return (0.0, Vec::new()); }
-    let rows: Vec<ProfileRow> = (0..h).map(|y| {
-        let (mut mass, mut delta) = (0.0f64, [0.0f64; 3]);
-        for x in 0..w {
-            let i = y * w + x;
-            if weights[i] <= 0.0 { continue; }
-            let (b, t) = (lab(&current[i]), lab(&target[i]));
-            mass += weights[i] as f64;
-            for c in 0..3 { delta[c] += (t[c] - b[c]) as f64 * weights[i] as f64; }
-        }
-        if mass > 0.0 { for d in delta.iter_mut() { *d /= mass; } }
-        ProfileRow { y: (y as f32 + 0.5) / h as f32, mass, delta }
-    }).collect();
+    let rows = profile_rows(current, target, weights, w, h);
     let total = rows.iter().map(|r| r.mass).sum::<f64>();
     if total < MIN_MASK_PIXELS as f64 { return (0.0, Vec::new()); }
-    let mean: [f64; 3] = std::array::from_fn(|c| rows.iter().map(|r| r.delta[c] * r.mass).sum::<f64>() / total);
-    let variance: f64 = rows.iter().map(|r| (0..3).map(|c| (r.delta[c] - mean[c]).powi(2)).sum::<f64>() * r.mass).sum();
+    let variance = profile_variance(&rows);
     if variance / total < 1e-8 { return (0.0, Vec::new()); }
     let (top, bottom) = (quantile_y(&rows, 0.005), quantile_y(&rows, 0.995));
     let own_height = bottom - top;
@@ -268,15 +256,9 @@ fn residual_models(
     let mut consider = |breaks: Vec<f32>, widths: Vec<f32>| {
         let model = BandModel { r2: 0.0, breaks, widths, shape: None };
         if (1..model.breaks.len()).any(|i| model.ramp(i - 1).1 > model.ramp(i).0) { return; }
-        let (levels, residual) = fit_levels(&model, &rows);
-        let r2 = (1.0 - residual / variance).clamp(0.0, 1.0) as f32;
+        let (r2, earned) = read_model(&model, &rows, variance);
         best_r2 = best_r2.max(r2);
-        let difference = levels.windows(2).map(|m| {
-            (0..3).map(|c| (m[0][c] - m[1][c]).powi(2)).sum::<f64>().sqrt()
-        }).fold(f64::INFINITY, f64::min) as f32;
-        // Express the zone's 0.02 acceptance floor in Lab's 100-unit scale.
-        // R2 alone would reward arbitrarily small row noise.
-        if r2 <= SUBZONE_R2_MIN || difference <= ZONE_MATCHED_ERR * 100.0 { return; }
+        if !earned { return; }
         models.push(BandModel { r2, ..model });
     };
     for (i, &a) in centres.iter().enumerate() {
@@ -298,11 +280,9 @@ fn residual_models(
     // The zone's own profile as the ramp, beside the measured ramps and not
     // in their quota: it is the one shape no ramp law can stand in for.
     if let Some(shaped) = shaped_model(&rows, top, bottom) {
-        let (levels, residual) = fit_levels(&shaped, &rows);
-        let r2 = (1.0 - residual / variance).clamp(0.0, 1.0) as f32;
+        let (r2, earned) = read_model(&shaped, &rows, variance);
         best_r2 = best_r2.max(r2);
-        let difference = (0..3).map(|c| (levels[0][c] - levels[1][c]).powi(2)).sum::<f64>().sqrt() as f32;
-        if r2 > SUBZONE_R2_MIN && difference > ZONE_MATCHED_ERR * 100.0 {
+        if earned {
             kept.push(BandModel { r2, ..shaped });
         }
     }
@@ -319,6 +299,80 @@ fn residual_models(
     }
     kept.sort_by(|a, b| a.breaks.len().cmp(&b.breaks.len()).then(b.r2.total_cmp(&a.r2)));
     (best_r2, kept)
+}
+
+/// The zone's residual profile ([`ProfileRow`]) over a `w` x `h` frame.
+fn profile_rows(current: &[[f32; 3]], target: &[[f32; 3]], weights: &[f32], w: usize, h: usize) -> Vec<ProfileRow> {
+    (0..h).map(|y| {
+        let (mut mass, mut delta) = (0.0f64, [0.0f64; 3]);
+        for x in 0..w {
+            let i = y * w + x;
+            if weights[i] <= 0.0 { continue; }
+            let (b, t) = (lab(&current[i]), lab(&target[i]));
+            mass += weights[i] as f64;
+            for c in 0..3 { delta[c] += (t[c] - b[c]) as f64 * weights[i] as f64; }
+        }
+        if mass > 0.0 { for d in delta.iter_mut() { *d /= mass; } }
+        ProfileRow { y: (y as f32 + 0.5) / h as f32, mass, delta }
+    }).collect()
+}
+
+/// The mass-weighted variance of the profile's residual about its mean: the
+/// denominator of every band model's R2.
+fn profile_variance(rows: &[ProfileRow]) -> f64 {
+    let total = rows.iter().map(|r| r.mass).sum::<f64>();
+    if total <= 0.0 { return 0.0; }
+    let mean: [f64; 3] = std::array::from_fn(|c| rows.iter().map(|r| r.delta[c] * r.mass).sum::<f64>() / total);
+    rows.iter().map(|r| (0..3).map(|c| (r.delta[c] - mean[c]).powi(2)).sum::<f64>() * r.mass).sum()
+}
+
+/// A model's reading on the zone's profile: its R2, and whether that EARNS a
+/// trial — a majority of the residual variance ([`SUBZONE_R2_MIN`]) with
+/// adjacent bands apart by more than the zone's matched line
+/// ([`ZONE_MATCHED_ERR`]) in Lab's 100-unit scale, because R2 alone would
+/// reward arbitrarily small row noise.
+fn read_model(model: &BandModel, rows: &[ProfileRow], variance: f64) -> (f32, bool) {
+    let (levels, residual) = fit_levels(model, rows);
+    let r2 = if variance > 0.0 { (1.0 - residual / variance).clamp(0.0, 1.0) as f32 } else { 0.0 };
+    let difference = levels.windows(2).map(|m| {
+        (0..3).map(|c| (m[0][c] - m[1][c]).powi(2)).sum::<f64>().sqrt()
+    }).fold(f64::INFINITY, f64::min) as f32;
+    (r2, r2 > SUBZONE_R2_MIN && difference > ZONE_MATCHED_ERR * 100.0)
+}
+
+/// A band under the zone floor is not a zone: it is re-cut into its
+/// neighbour (RULING-1180-int-r5 (a)). The floor (`MIN_ZONE_SHARE`, every
+/// zone) is a zone law; a model's breaks are the content's. A break that
+/// leaves a band under the floor is one the zone laws cannot use, so the band
+/// belongs to its neighbour: the partition is the same model with that break
+/// removed — the band merged into the neighbour whose merged model leaves the
+/// lower residual on the zone's own profile ([`fit_levels`]), the only one
+/// when the band is at an end. The merged partition is read by the band
+/// model's own law ([`read_model`]): a merge the model would not have earned
+/// is not a partition, and the trial stays refused as before. `None` then,
+/// and when the model has one break: merging its two bands is the single
+/// zone, the control arm itself. Measured on the
+/// night pair's land (RULING-1180-int-r4): the partition holding the distant
+/// strip (breaks 0.811 / 0.862) was refused whole because its top band, the
+/// butte bodies above the first break, covered 1.4 % of the source frame.
+fn recut_under_floor(model: &BandModel, band: usize, rows: &[ProfileRow]) -> Option<BandModel> {
+    if model.breaks.len() < 2 { return None; }
+    let without = |i: usize| -> BandModel {
+        let mut merged = model.clone();
+        merged.breaks.remove(i);
+        merged.widths.remove(i);
+        // A shaped falloff belongs to the first ramp only.
+        if i == 0 { merged.shape = None; }
+        merged
+    };
+    // Band `band` lies between break `band - 1` (above) and break `band` (below).
+    let candidates: Vec<BandModel> = [band.checked_sub(1), (band < model.breaks.len()).then_some(band)]
+        .into_iter().flatten().map(without).collect();
+    let (merged, _) = candidates.into_iter()
+        .map(|m| { let residual = fit_levels(&m, rows).1; (m, residual) })
+        .min_by(|a, b| a.1.total_cmp(&b.1))?;
+    let (r2, earned) = read_model(&merged, rows, profile_variance(rows));
+    earned.then_some(BandModel { r2, ..merged })
 }
 
 fn band_components(model: &BandModel, band: usize) -> Vec<MaskComponent> {
@@ -701,9 +755,6 @@ pub(super) fn replace_zone(
     image: &DynamicImage, target: &[[f32; 3]], report: &mut FitReport,
     parent: &ZoneAttachment, divergence: Option<fit::Divergence>,
 ) {
-    let parent_index = report.recipe.masks.iter().position(|m|
-        m.role == parent.role && m.components.is_empty()
-    );
     // The parent's statistics are read over the pixels the target can pair;
     // its rim stays the raw mask, whose crossings the seam rulers skip where
     // the target is absent.
@@ -717,6 +768,20 @@ pub(super) fn replace_zone(
     let parent = &paired;
     let single_px = fit::pixels_of(&render::develop_preview(image, &report.recipe));
     let (r2, models) = residual_models(&single_px, target, &parent.source_weights, image.width(), image.height());
+    replace_zone_with(image, target, report, parent, divergence, (rim, presence), (single_px, r2, models));
+}
+
+/// [`replace_zone`] past the residual models: every earned partition tried
+/// against the same gates, the best one shipped.
+fn replace_zone_with(
+    image: &DynamicImage, target: &[[f32; 3]], report: &mut FitReport,
+    parent: &ZoneAttachment, divergence: Option<fit::Divergence>,
+    (rim, presence): (Vec<f32>, Option<Vec<f32>>),
+    (single_px, r2, models): (Vec<[f32; 3]>, f32, Vec<BandModel>),
+) {
+    let parent_index = report.recipe.masks.iter().position(|m|
+        m.role == parent.role && m.components.is_empty()
+    );
     if models.is_empty() {
         crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes,
             crate::rationale::Note::new(crate::rationale::keys::ZONE_SUBZONES_NOT_EARNED,
@@ -733,6 +798,8 @@ pub(super) fn replace_zone(
     // Every earned partition is tried, ramps as measured, against all the
     // same gates. The smallest model wins ties; no reference-pair special case.
     let trial_count = models.len();
+    let rows = profile_rows(&single_px, target, &parent.source_weights, image.width() as usize, image.height() as usize);
+    let tried: Vec<(Vec<f32>, Vec<f32>)> = models.iter().map(|m| (m.breaks.clone(), m.widths.clone())).collect();
     // The control arm without its parent renders the same for every trial:
     // one render, not one per trial.
     let uncorrected = {
@@ -757,8 +824,25 @@ pub(super) fn replace_zone(
         if let Some(index) = parent_index { report.recipe.masks.remove(index); }
         let mut frame_error = uncorrected_error;
         let first_band = report.recipe.masks.len();
-        let attachments: Vec<_> = (0..=model.breaks.len())
-            .map(|band| band_attachment(parent, &model, band, image, &report.recipe)).collect();
+        let mut model = model;
+        let mut recut = false;
+        let attachments: Vec<_> = loop {
+            let attachments: Vec<_> = (0..=model.breaks.len())
+                .map(|band| band_attachment(parent, &model, band, image, &report.recipe)).collect();
+            // The smallest band under the floor is re-cut first; the merged
+            // partition is read again, until every band clears it.
+            let under = attachments.iter().enumerate()
+                .map(|(band, (a, _))| { let (s, t) = super::one_zone::zone_shares(report, a); (band, s.min(t), a.min_share) })
+                .filter(|(_, share, floor)| share < floor)
+                .min_by(|a, b| a.1.total_cmp(&b.1));
+            match under.and_then(|(band, _, _)| recut_under_floor(&model, band, &rows)) {
+                Some(merged) => { model = merged; recut = true; }
+                None => break attachments,
+            }
+        };
+        // A re-cut that lands on a partition the model set already holds is
+        // that partition's own trial.
+        if recut && tried.iter().any(|(b, w)| *b == model.breaks && *w == model.widths) { continue; }
         // The one boundary a trial is judged at: the zone's own contour. A
         // band's ramp is not a boundary — it is the correction's designed
         // gradient between two fits of the same region, as wide as the target's
@@ -1404,6 +1488,47 @@ mod tests {
         assert!(report.recipe.masks.iter().all(|m| m.role == MaskRole::ZoneSky && !m.components.is_empty()));
         let after = fit::pixels_of(&render::develop_preview(&source, &report.recipe));
         assert!(delta_e(&after, &target, &parent.source_weights) < delta_e(&before, &target, &parent.source_weights) - ZONE_GLOBAL_REGRESSION_TOL);
+    }
+
+    /// A band under the zone floor is not a zone: it is re-cut into its
+    /// neighbour (RULING-1180-int-r5 (a)). The fixture's sky is two bands,
+    /// warm above its break at 0.3125 and cool below; the partition offered
+    /// splits a top band of about 2 % of the frame off the warm one, under
+    /// MIN_ZONE_SHARE. That band has one neighbour, so the merged partition
+    /// is the fixture's own two bands, and it ships. Between two neighbours
+    /// the band goes to the one whose merged model leaves the lower residual.
+    /// MUTATION: no re-cut -> the top band is refused at the share gate and
+    /// the whole partition with it (ZONE_SUBZONES_REGRESSED, band estimator).
+    #[test]
+    fn a_band_under_the_floor_is_recut_into_its_neighbour_and_the_merged_partition_ships() {
+        let (source, target, parent, mut report) = fixture(true);
+        let target = fit::pixels_of(&target);
+        let single_px = fit::pixels_of(&render::develop_preview(&source, &report.recipe));
+        let three = BandModel {
+            r2: 0.9, breaks: vec![0.02, 0.3125], widths: vec![0.375 * SUBZONE_OVERLAP, 0.625 * SUBZONE_OVERLAP], shape: None,
+        };
+        let (top, _) = band_attachment(&parent, &three, 0, &source, &report.recipe);
+        let (s, t) = super::super::one_zone::zone_shares(&report, &top);
+        assert!(s.min(t) > 0.0 && s.min(t) < MIN_ZONE_SHARE, "premise: the top band is under the floor: {s} / {t}");
+        // Between two neighbours: a sliver between the fixture's break and
+        // one just below it merges into the side that keeps the real break.
+        let rows = profile_rows(&single_px, &target, &parent.source_weights, 384, 256);
+        let sliver = BandModel {
+            r2: 0.9, breaks: vec![0.3125, 0.34], widths: vec![0.625 * SUBZONE_OVERLAP, 0.25 * SUBZONE_OVERLAP], shape: None,
+        };
+        let merged = recut_under_floor(&sliver, 1, &rows).expect("a three-band model re-cuts");
+        assert_eq!(merged.breaks, vec![0.3125], "the sliver joins the neighbour whose merge leaves the lower residual");
+        assert!(recut_under_floor(&BandModel { breaks: vec![0.3125], widths: vec![0.03], ..sliver }, 0, &rows).is_none(),
+            "a two-band model merged is the single zone, the control arm");
+        let flat = profile_rows(&single_px, &single_px, &parent.source_weights, 384, 256);
+        assert!(recut_under_floor(&three, 0, &flat).is_none(), "a merge the band model would not earn is no partition");
+        let presence = report.evidence.presence.clone();
+        replace_zone_with(&source, &target, &mut report, &parent, None,
+            (parent.source_weights.clone(), presence), (single_px, 0.9, vec![three]));
+        let attached = report.notes.iter().find(|n| n.key == crate::rationale::keys::ZONE_SUBZONES_ATTACHED)
+            .unwrap_or_else(|| panic!("the merged partition ships: {}", report.recipe.rationale));
+        assert!(attached.args.iter().any(|(k, v)| *k == "breaks" && v == "0.31250"), "{:?}", attached.args);
+        assert_eq!(report.recipe.masks.iter().filter(|m| m.role == MaskRole::ZoneSky && !m.components.is_empty()).count(), 2);
     }
 
     /// The single zone the bands replace takes its own account with it: its

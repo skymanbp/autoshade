@@ -32,6 +32,23 @@ pub(super) fn attach_one_zone(
     attach_one_zone_as(s_img, tgt_px, report, frame_err, attachment, divergence, corr, ZoneColour::Gains, &mut None)
 }
 
+/// THE share ruler's reading of `weights` ([`attach_one_zone_as`]): the
+/// weighted fraction of the analysis frame the population covers.
+fn share_of(weights: &[f32]) -> f32 {
+    weights.iter().map(|w| w.max(0.0) as f64).sum::<f64>() as f32 / weights.len().max(1) as f32
+}
+
+/// The zone's source and target shares as the share gate reads them: its
+/// present populations, through [`share_of`]. The band re-cut
+/// (`subzones::recut_under_floor`) asks the gate's own question before a band
+/// is solved.
+pub(super) fn zone_shares(report: &FitReport, attachment: &ZoneAttachment) -> (f32, f32) {
+    (
+        share_of(&report.evidence.present_weights(&attachment.source_weights)),
+        share_of(&report.evidence.present_weights(&attachment.target_weights)),
+    )
+}
+
 /// The colour move a zone solve makes. `Gains` is the per-channel recolour
 /// every zone has always solved; `Tint` reads ONE mask Color tint from the
 /// zone's paired pixels first (`tint::read_zone_tint`) and solves the gains
@@ -143,10 +160,6 @@ pub(super) fn attach_one_zone_as(
     // is the question the do-no-harm and quality gates below already ask and
     // answer with their own numbers. Size is a question about the mask, so it
     // is asked once, of the mask, in the currency the producer used.
-    let share_of = |weights: &[f32]| {
-        weights.iter().map(|w| w.max(0.0) as f64).sum::<f64>() as f32
-            / weights.len().max(1) as f32
-    };
     // The SAME robust paired estimator the global tone stage runs (one
     // mechanism, two call sites): pixels the two zones do not share — the
     // divergent cloud deck, a moved subject — lose weight by the influence
