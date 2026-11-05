@@ -156,18 +156,48 @@ pub fn correspond_file(
 /// symptom would have been one pair's field computed on another pair's
 /// pixels. Latent today, like `segment::staging_path`'s sequence, which is
 /// precisely why it is named here and not in an incident report.
+///
+/// The two frames are named without an extension: [`stage_for_sidecar`]
+/// picks it from the pixels it writes.
 fn fit_stage_paths(dir: &Path) -> [PathBuf; 3] {
     let tag = format!("{}-{}", std::process::id(), crate::store::next_tmp_seq());
     [
-        dir.join(format!("autoshade-corr-fit-src-{tag}.png")),
-        dir.join(format!("autoshade-corr-fit-tgt-{tag}.png")),
+        dir.join(format!("autoshade-corr-fit-src-{tag}")),
+        dir.join(format!("autoshade-corr-fit-tgt-{tag}")),
         dir.join(format!("autoshade-corr-fit-field-{tag}.json")),
     ]
 }
 
+/// Writes one rendition where the sidecar reads it, holding the values the
+/// fit holds, and returns the path written (`stem` plus the extension).
+///
+/// A float frame — the fit's plate is `Rgb32F` since the plate keeps the
+/// export's develop (`render::source_plate`) — is written as a 32-bit float
+/// TIFF, the float form the sidecar reads (`python/correspond.py`'s
+/// `preprocess`); an integer frame stays a PNG, already lossless. A PNG
+/// cannot carry an `Rgb32F` frame at all (the encoder takes 8 / 16 bits), so
+/// from 1b5f59f every RAW pair's correspondence failed to stage, and an
+/// 8-bit encode instead would hand the sidecar a quantised copy of the plate
+/// the fit reads.
+fn stage_for_sidecar(img: &image::DynamicImage, stem: &Path) -> Result<PathBuf> {
+    use image::DynamicImage as D;
+    let staged = match img {
+        D::ImageRgb32F(_) | D::ImageRgba32F(_) => {
+            let p = stem.with_extension("tif");
+            D::ImageRgb32F(img.to_rgb32f()).save_with_format(&p, image::ImageFormat::Tiff).map(|()| p)
+        }
+        _ => {
+            let p = stem.with_extension("png");
+            img.save_with_format(&p, image::ImageFormat::Png).map(|()| p)
+        }
+    };
+    staged.with_context(|| format!("stage {} for the correspondence sidecar", stem.display()))
+}
+
 /// The fit's correspondence provider (step 7b), shared by the CLI and the
-/// GUI: stages both renditions as bounded PNGs the sidecar can read, runs
-/// it, and hands back the parsed field. Everything staged — including the
+/// GUI: stages both renditions, bounded, in the form the sidecar reads
+/// without quantising them ([`stage_for_sidecar`]), runs it, and hands back
+/// the parsed field. Everything staged — including the
 /// field JSON — is an intermediate here and is removed; the fit's report
 /// carries the derived per-pair data instead. Failures return `Err` and the
 /// fit discloses the reason (`FIT_CORRESPONDENCE_UNAVAILABLE`); by the
@@ -181,15 +211,17 @@ pub fn fit_provider(
         // 1024 px is comfortably above the sidecar's own 768² working size;
         // staging the full frame would spend more on the PNG encode than on
         // the model.
-        let stage = |img: &image::DynamicImage, p: &std::path::Path| -> Result<()> {
-            crate::render::thumbnail(img, 1024, 1024)
-                .save(p)
-                .with_context(|| format!("stage {} for the correspondence sidecar", p.display()))
+        let stage = |img: &image::DynamicImage, stem: &Path| {
+            stage_for_sidecar(&crate::render::thumbnail(img, 1024, 1024), stem)
         };
-        let field = stage(src, &s)
-            .and_then(|()| stage(target, &t))
-            .and_then(|()| correspond_file(&opts, &s, &t, &out));
-        for p in [&s, &t, &out] {
+        let mut staged: Vec<PathBuf> = Vec::new();
+        let mut run = || -> Result<CorrespondenceField> {
+            staged.push(stage(src, &s)?);
+            staged.push(stage(target, &t)?);
+            correspond_file(&opts, &staged[0], &staged[1], &out)
+        };
+        let field = run();
+        for p in staged.iter().chain([&out]) {
             let _ = std::fs::remove_file(p);
         }
         field
@@ -616,6 +648,29 @@ mod tests {
     /// MUTATIONS THIS CATCHES: multiplying `sim` into the confidence,
     /// dropping either term, or trading the median for a mean (one wild
     /// neighbour must not drag the reference flow).
+    /// The staged plate holds the plate's own values: a float frame written for
+    /// the sidecar reads back equal within 1e-6 (an 8-bit stage would be off by
+    /// up to half a code, 0.002), and the sidecar's reader takes that float
+    /// form as floats, not through an 8-bit conversion.
+    #[test]
+    fn a_float_plate_is_staged_for_the_sidecar_without_quantising_it() {
+        let (w, h) = (5u32, 3u32);
+        let vals: Vec<f32> = (0..w * h * 3).map(|i| (i as f32 * 0.0371 + 0.00123) % 1.0).collect();
+        let plate = image::DynamicImage::ImageRgb32F(image::ImageBuffer::from_raw(w, h, vals.clone()).unwrap());
+        let stem = std::env::temp_dir()
+            .join(format!("autoshade-corr-stage-test-{}-{}", std::process::id(), crate::store::next_tmp_seq()));
+        let staged = stage_for_sidecar(&plate, &stem).unwrap();
+        let back = image::open(&staged).unwrap().to_rgb32f().into_raw();
+        let _ = std::fs::remove_file(&staged);
+        assert_eq!(back.len(), vals.len());
+        let worst = vals.iter().zip(&back).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(worst <= 1e-6, "the staged plate differs from the plate by {worst}");
+        assert!(
+            CORRESPOND_SRC.contains("IMREAD_UNCHANGED") && CORRESPOND_SRC.contains("np.float32"),
+            "the sidecar must read a float stage as floats"
+        );
+    }
+
     #[test]
     fn the_confidence_is_cyclic_times_smoothness_and_never_raw_similarity() {
         assert!(

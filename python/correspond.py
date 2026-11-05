@@ -253,9 +253,32 @@ def alpha_cumprod_at(sched, t, torch):
 
 def preprocess(path, np):
     """One image -> float32 (1, 3, 768, 768) in [-1, 1]. Spelled out like
-    embed.py's transform so the resample filter is a named constant here."""
+    embed.py's transform so the resample filter is a named constant here.
+
+    A 32-bit float TIFF (the fit stages its float plate that way,
+    correspond.rs `stage_for_sidecar`) is read as floats and resampled per
+    channel with the same filter, so the plate reaches the model without an
+    8-bit round; its values are held to [0, 1], the range an 8-bit frame
+    has, before the same scale to [-1, 1]."""
     from PIL import Image
 
+    if path.lower().endswith((".tif", ".tiff")):
+        import cv2
+
+        raw = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+        if raw is not None and raw.dtype == np.float32 and raw.ndim == 3:
+            rgb = np.clip(raw[..., 2::-1], 0.0, 1.0) * 255.0
+            chans = [
+                np.asarray(
+                    Image.fromarray(np.ascontiguousarray(rgb[..., c]), mode="F").resize(
+                        (INPUT_SIZE, INPUT_SIZE), resample=2
+                    ),
+                    dtype=np.float32,
+                )
+                for c in range(3)
+            ]
+            a = np.stack(chans, axis=-1) / 127.5 - 1.0
+            return np.ascontiguousarray(a.transpose(2, 0, 1))[None]
     with Image.open(path) as im:
         im = im.convert("RGB")
         im = im.resize((INPUT_SIZE, INPUT_SIZE), resample=2)  # 2 = BILINEAR
