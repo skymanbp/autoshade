@@ -1191,7 +1191,11 @@ pub(super) fn attach_one_zone_as(
     // is structure, a local correction cannot change which pixels pair, its
     // seams stay with the boundary / ramp rulers and its structural gate is
     // the existing D threshold only.
-    if arm.is_some() && fit::ships(zoned_err, *frame_err) {
+    // R19: ON ITS OWN POPULATION (`fit::ships_local`): the zone ships when it
+    // earns FIT_QUANT on its own present pixels; the frame is a guard.
+    let own_before = super::accept::own_reading(report, &cur_px, tgt_px, sw, tw);
+    let own_after = super::accept::own_reading(report, &zoned_px, tgt_px, sw, tw);
+    if arm.is_some() && fit::ships_local(own_after, own_before, zoned_err, *frame_err) {
         // The strictly-better arm is the one that changes what ships, so it
         // says so — with the two readings it was decided on, in the zone's
         // own unit and the frame's. Without this a reader cannot tell a
@@ -1278,6 +1282,8 @@ pub(super) fn attach_one_zone_as(
                     ("ratio", format!("{:.0}", ZONE_ACCEPT_RATIO * 100.0)),
                     ("floor", format!("{ZONE_MATCHED_ERR:.3}")),
                     ("gain", format!("{:.0}", (1.0 - ZONE_FLOOR_MIN_GAIN) * 100.0)),
+                    ("own_before", format!("{own_before:.5}")),
+                    ("own_after", format!("{own_after:.5}")),
                     ("drift", format!("{:+.5}", zoned_err - *frame_err)),
                     ("tol", format!("{:+.5}", attachment.frame_regression_tol)),
                 ],

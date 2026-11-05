@@ -452,8 +452,11 @@ fn field_refuses_without_evidence() {
 
 /// A planted two-band exposure the field's own model can express: the solver must
 /// recover its sign per luma bin, leave each bin spatially uniform, and close most
-/// of the objective.  Also the occupancy floor's falsifier — unmeasured vertices
-/// must be zero, not whatever the Laplacian diffused into them.
+/// of the objective.  Also the occupancy floor's falsifier, rewritten in
+/// v1.18.0 to the law that replaced the policy zero: an unmeasured vertex
+/// ships the solve's own value (the smoother's continuation of its measured
+/// neighbours), because a zero written there is rendered as a measured "no
+/// change" and draws a plateau edge on the cell boundary.
 #[test]
 fn field_recovers_a_planted_two_band_exposure() {
     let (current, target, w, h) = two_band_pair();
@@ -496,14 +499,36 @@ fn field_recovers_a_planted_two_band_exposure() {
     }
     let measured = supported(&field.occupancy);
     assert!(measured.iter().any(|m| !m), "premise: this pair leaves cells below the occupancy floor");
-    for (vertex, (cell, &occupancy)) in field.grid.iter().zip(&field.occupancy).enumerate() {
-        if !measured[vertex] {
-            assert_eq!(
-                *cell, [0.0; PARAMS],
-                "vertex {vertex}'s cell carries too little mass ({occupancy} here) and must be zeroed",
-            );
+    // An unmeasured vertex beside a measured one (along x, y or luma) carries
+    // the solve's continuation of that neighbour's change, never the policy
+    // zero (MUTATION: write 0.0 into unmeasured vertices again).
+    let mut continued = 0usize;
+    for (vertex, cell) in field.grid.iter().enumerate() {
+        if measured[vertex] {
+            continue;
         }
+        let (spatial, bin) = (vertex / FIELD_B, vertex % FIELD_B);
+        let (iy, ix) = (spatial / FIELD_X, spatial % FIELD_X);
+        let neighbours = [
+            (ix > 0).then(|| vertex - FIELD_B),
+            (ix + 1 < FIELD_X).then(|| vertex + FIELD_B),
+            (iy > 0).then(|| vertex - FIELD_X * FIELD_B),
+            (iy + 1 < FIELD_Y).then(|| vertex + FIELD_X * FIELD_B),
+            (bin > 0).then(|| vertex - 1),
+            (bin + 1 < FIELD_B).then(|| vertex + 1),
+        ];
+        let Some(next) = neighbours.into_iter().flatten().find(|n| measured[*n] && field.grid[*n] != [0.0; PARAMS])
+        else {
+            continue;
+        };
+        continued += 1;
+        assert!(
+            *cell != [0.0; PARAMS],
+            "unmeasured vertex {vertex} beside measured vertex {next} ({:?}) must carry the solve's value, not zero",
+            field.grid[next],
+        );
     }
+    assert!(continued > 0, "premise: an unmeasured vertex borders a measured one");
 }
 
 /// v1.17.0: a demand the gain bound cannot meet keeps its HUE and gives up its

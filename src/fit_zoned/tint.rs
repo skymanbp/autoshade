@@ -180,6 +180,7 @@ pub(super) fn attach_zone_tint_or_plain(
     // The zone's own pixels as `attach_one_zone` reads them: its weights
     // where the target can pair, nowhere else.
     let sw = report.evidence.present_weights(&attachment.source_weights).into_owned();
+    let tw = report.evidence.present_weights(&attachment.target_weights).into_owned();
     let plain_de = subzones::delta_e(plain.as_ref().map_or(&entry_px, |z| &z.rendered), tgt_px, &sw);
     type Trial = (f32, Option<AcceptedZone>, (crate::recipe::EditRecipe, Vec<crate::rationale::Note>, f32));
     let mut best: Option<Trial> = None;
@@ -206,7 +207,12 @@ pub(super) fn attach_zone_tint_or_plain(
             // is structure, a local correction cannot change which pixels pair, its
             // seams stay with the boundary / ramp rulers and its structural gate is
             // the existing D threshold only.
-            && fit::ships(*frame_err, plain_exit.2);
+            // R19: tint against plain on the zone's own population.
+            && fit::ships_local(
+                super::accept::own_reading(report, &zone.rendered, tgt_px, &sw, &tw),
+                super::accept::own_reading(report, plain.as_ref().map_or(&entry_px, |z| &z.rendered), tgt_px, &sw, &tw),
+                *frame_err, plain_exit.2,
+            );
         if counts && best.as_ref().is_none_or(|b| de < b.0) {
             best = Some((de, tinted, (report.recipe.clone(), report.notes.clone(), *frame_err)));
         }

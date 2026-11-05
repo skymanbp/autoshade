@@ -62,6 +62,23 @@ const BOUNDS_HIGH: [f32; PARAMS] = [1.25, 0.35, 0.35, 0.35, 0.50];
 /// cell is well measured, and on the calibration pair that alone cost the
 /// ceiling 0.0023 (0.07242 against 0.07009 at the 8-row grid; with no floor
 /// at all the refined grid reads 0.06831).
+///
+/// v1.18.0: the floor is the ANALYZER's exclusion — the band marginals, the
+/// band dispersion and the saturation count read measured vertices only — and
+/// it is no longer written into the grid. Since the field became a rendered
+/// control the grid is what the engine applies, and to the renderer a zero
+/// written into an unmeasured cell is not "no measurement": it is a measured
+/// "no change" that the trilinear read interpolates against the measured
+/// cells around it, a plateau edge on the cell boundary that the solve never
+/// chose. On a dusk-landscape pair at 0.85 the global develop clipped 88-93 %
+/// of two horizon cells' pixels (a pair clipped on one side does not testify,
+/// so those cells carried no mass), their vertices were zeroed while the cells
+/// around them carried EV -0.3 and a blue gain of -0.35 in the bright bins,
+/// and the horizon rendered a rectangular over-bright block (that fifth of the
+/// frame 12.72 dE from its target). An unmeasured vertex now ships the value
+/// the solve gave it: the smoother's continuation of its measured neighbours,
+/// pulled toward zero by the Tikhonov term away from them — the surface the
+/// regulariser's smoothness describes, inside the same bounds.
 const OCCUPANCY_MIN: f32 = 8.0;
 /// The production regulariser, FIXED — no per-image sweep, ever.  The experiment's
 /// sweep picked s=0 on two of its five pairs (an overfitting bias) to buy a last
@@ -161,7 +178,9 @@ pub(crate) struct SolveInfo {
 #[derive(Clone, Debug)]
 pub(crate) struct LocalField {
     /// `FIELD_X * FIELD_Y * FIELD_B` vertices in `splat_table` order,
-    /// bound-clipped, occupancy-zeroed.
+    /// bound-limited; an unmeasured vertex carries the solve's own value
+    /// ([`OCCUPANCY_MIN`]: the floor excludes it from the statistics, not from
+    /// the render).
     pub grid: Vec<[f32; PARAMS]>,
     /// Weighted trilinear mass at each vertex (fit weight x splat weight).
     #[cfg_attr(not(test), allow(dead_code))]
@@ -249,12 +268,11 @@ impl LocalField {
         let mut saturated = 0usize;
         let measured = supported(&system.occupancy);
         for (vertex, cell) in grid.iter_mut().enumerate() {
-            let supported = measured[vertex];
             for (p, value) in cell.iter_mut().enumerate() {
-                *value = if supported { raw[vertex * PARAMS + p] } else { 0.0 };
+                *value = raw[vertex * PARAMS + p];
                 flat[vertex * PARAMS + p] = *value;
             }
-            saturated += usize::from(supported && limited[vertex]);
+            saturated += usize::from(measured[vertex] && limited[vertex]);
         }
         let field_render = apply_flat(current, &guide, &system.splat, &flat);
         let ceiling = fit::look_err_with_evidence(&field_render, target, evidence);

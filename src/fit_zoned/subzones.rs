@@ -847,7 +847,12 @@ pub(super) fn replace_zone(
             // It read the frame tolerance's 0.02 in zone_err's unit before
             // v1.18.0; the value is the same.
             else if zone_after > zone_before + ZONE_MATCHED_ERR { values::ZONE_DO_NO_HARM }
-            else if !fit::ships(frame_after, saved_error) { values::FRAME_DO_NO_HARM }
+            // R19: the band set's own population is the parent zone's.
+            else if !fit::ships_local(
+                super::accept::own_reading(report, &pixels, target, &parent.source_weights, &parent.target_weights),
+                super::accept::own_reading(report, &single_px, target, &parent.source_weights, &parent.target_weights),
+                frame_after, saved_error,
+            ) { values::FRAME_DO_NO_HARM }
             else if !no_seam_regression { values::BOUNDARY_REGRESSION }
             else if !ramps_follow { values::RAMP_STEEPER } else { "accepted" };
         let complete = solved && boundary_passed;

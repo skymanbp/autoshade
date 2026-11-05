@@ -347,6 +347,18 @@ pub(crate) fn ships(with: f32, without: f32) -> bool {
     without - with >= FIT_QUANT
 }
 
+/// R19 (v1.18.0), the LOCAL form of [`ships`]: a local correction (zone,
+/// tile, band set, range set, zone tint) ships when it earns [`FIT_QUANT`]
+/// on its OWN population (`own_with` / `own_without`: the objective read over
+/// the region's own present pixels and bands), and the frame is a guard
+/// only — the correction may not raise the frame's reading by more than
+/// FIT_QUANT. FIT_QUANT is the rounding of a per-pixel mean, so it reads the
+/// same on a region's pixels as on the frame's; read on the frame, a
+/// region's gain is divided by its share.
+pub(crate) fn ships_local(own_with: f32, own_without: f32, frame_with: f32, frame_without: f32) -> bool {
+    ships(own_with, own_without) && frame_with - frame_without <= FIT_QUANT
+}
+
 /// One control a global solve sets, as [`eliminate_unearned`] reads it: a
 /// slider, one white-balance axis, one mixer value, one grade wheel, one
 /// curve. Its "zero" is the value the solve started from (`base`, the

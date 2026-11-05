@@ -428,6 +428,7 @@ mod tests {
             crate::rationale::keys::ZONE_TOO_SMALL,
             crate::rationale::keys::ZONE_SHARE_MISMATCH,
             crate::rationale::keys::ZONE_ALREADY_MATCHED,
+            crate::rationale::keys::ZONE_NO_MOVEMENT_SURVIVED,
             crate::rationale::keys::ZONE_QUALITY_TEXTURE_FAILED,
             crate::rationale::keys::ZONE_QUALITY_CLIPPING_FAILED,
             crate::rationale::keys::ZONE_DROPPED,

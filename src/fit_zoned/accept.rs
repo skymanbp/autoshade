@@ -92,7 +92,10 @@ impl AcceptedZone {
         // is structure, a local correction cannot change which pixels pair, its
         // seams stay with the boundary / ramp rulers and its structural gate is
         // the existing D threshold only.
-        fit::ships(frame_after, frame_before)
+        // R19: the frame is a GUARD for a local correction (`fit::ships_local`):
+        // the shrunk correction may not raise it by more than FIT_QUANT; its
+        // gain was decided at k = 1 on its own population.
+        frame_after - frame_before <= fit::FIT_QUANT
             && self.judged(pixels, tgt_px) <= without
     }
 
@@ -499,4 +502,28 @@ pub(super) fn push_zone_attached_note(report: &mut FitReport, zone: &AcceptedZon
             ],
         ),
     );
+}
+
+/// R19 (v1.18.0): a LOCAL correction's reading on its OWN population — the
+/// frame's ruler (the report's local J*, its evidence) scoped to the
+/// region's own weights, so its pairing, its bands and its worst band are
+/// the region's (`fit::ships_local`).
+pub(super) fn own_reading(report: &FitReport, px: &[[f32; 3]], tgt: &[[f32; 3]], sw: &[f32], tw: &[f32]) -> f32 {
+    fit::look_err_with_evidence(px, tgt, &report.evidence.scoped(tgt, sw, tw))
+}
+
+/// R19: the analysis-size coverage of `masks` (the engine's own weight per
+/// mask, [`render::preview_mask_coverage`], the union as the per-pixel max) —
+/// the population a mask-carried local correction is judged on.
+pub(super) fn masks_coverage(
+    s_img: &DynamicImage, report: &FitReport, masks: &[LocalAdjustment], n: usize,
+) -> Vec<f32> {
+    let mut weights = vec![0.0f32; n];
+    for mask in masks {
+        let coverage = render::preview_mask_coverage(mask, s_img, &report.recipe);
+        for (slot, value) in weights.iter_mut().zip(coverage.as_raw()) {
+            *slot = slot.max(*value as f32 / 255.0);
+        }
+    }
+    weights
 }

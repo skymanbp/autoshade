@@ -1734,7 +1734,11 @@ fn attach_band_stage(
         // is structure, a local correction cannot change which pixels pair, its
         // seams stay with the boundary / ramp rulers and its structural gate is
         // the existing D threshold only.
-        if !fit::ships(final_frame_err, entry_frame_err) {
+        // R19: on the range set's own population (`fit::ships_local`).
+        let own = super::accept::masks_coverage(s_img, report, &report.recipe.masks[first_range..], tgt_px.len());
+        let own_with = super::accept::own_reading(report, &pixels, tgt_px, &own, &own);
+        let own_without = super::accept::own_reading(report, reference_px, tgt_px, &own, &own);
+        if !fit::ships_local(own_with, own_without, final_frame_err, entry_frame_err) {
             report.recipe.masks.truncate(first_range);
             crate::rationale::push_note(
                 &mut report.recipe.rationale,
