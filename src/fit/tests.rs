@@ -5012,9 +5012,11 @@ fn a_cast_the_fan_gate_alone_convicts_earns_the_projection_and_is_never_admitted
     assert!(after <= FAN_PROJECT_DEG, "the projection reaches its own target ({after})");
 }
 
-/// The fan gate's two halves on two witnesses (DEF-1, 2026-11-04). It
-/// CONVICTS a cast whose render fans, and it must not touch a cast that is
-/// doing its job.
+/// The fan gate's two halves (DEF-1, 2026-11-04; RULING-1180-int-r4 Q-CW2).
+/// It CONVICTS a cast whose render fans and ships the projection where the
+/// projection earns (the haze pair, canyon-warm), and it must not touch a
+/// cast that is doing its job (the hue-ramps pair here; the coast pair in
+/// `a_coherent_sky_cast_the_curves_carry_as_a_gain_does_not_fan_and_ships_admitted`).
 ///
 /// The haze regression's un-cast was this test's legitimate cast until
 /// v1.18.0 (7.8°). Read on its pixels it is not one: the fitted curves fan
@@ -5068,8 +5070,25 @@ fn a_cast_the_fan_gate_alone_convicts_earns_the_projection_and_is_never_admitted
 /// re-hue verdict used to speak over (the hue note wins a double
 /// rejection). The test's candidate, rebuilt on the new recipe, reads 6.9
 /// degrees.
+///
+/// 2026-11-05, under J* (RULING-1180-int-r4 Q-CW2): the pins above were the
+/// old objective's readings, and the cast never was a legitimate one — it fans
+/// 30°+ under both objectives (34.1° as convicted on 2026-11-02, 30.6° now).
+/// What changed is the projection's earning. Under the old objective every
+/// admissible point of the projection path cost the frame (look-error ratio
+/// 1.158 at t 0.074, 1.036 at t 0.035; the best gain 0.000 against FIT_QUANT
+/// 0.0018), so the search returned nothing and the cast was withheld. Under
+/// J* the same path pays at small t (ratio 0.933 at t 0.080: a gain of
+/// 0.00523 against the curves' absence, err without 0.07755, FIT_QUANT
+/// 0.0023 — not a tie and not the quantum), so the projection ships; the
+/// finished elimination then gives back the green and blue curves (each costs
+/// the frame: 0.00903 / 0.00409) and the tone curve (0.00088, under the
+/// quantum), and keeps the red curve on the frame's own reading (0.00905).
+/// The arm now witnesses the gate's verdict on a fanning cast: convicted at
+/// 30.6°, projected to t 0.080, a shipped fan of 2.01° and the colour
+/// delivered (mean ΔE76 17.42 -> 5.47).
 #[test]
-fn the_fan_gate_convicts_a_cast_whose_render_fans_and_leaves_a_legitimate_cast_alone() {
+fn the_fan_gate_convicts_a_fanning_cast_ships_its_projection_where_it_earns_and_leaves_a_legitimate_cast_alone() {
     let clean = synth();
     let mut haze = EditRecipe {
         exposure_ev: -0.3,
@@ -5139,58 +5158,53 @@ fn the_fan_gate_convicts_a_cast_whose_render_fans_and_leaves_a_legitimate_cast_a
             "margin eroded: {name}'s shipped frame fans {shipped:.1}° against the {FAN_DEG}° threshold"
         );
     }
-    // Canyon-warm, pinned where it now sits — since 2026-10-22 as a pair the
-    // fan gate does NOT convict and the re-hue gate withholds, so a future
-    // change that sends it back to a bare-base reset (or lets its curves
-    // through) fails here with its number.
-    let warm = fit_recipe(&canyon(false), &canyon(true));
+    // Canyon-warm: a cast that fans is convicted, and its projection ships
+    // where it earns, delivering the colour without the fan
+    // (RULING-1180-int-r4 Q-CW2). Readings 2026-11-05 under J*.
+    use crate::rationale::keys;
+    let (warm_src, warm_tgt) = (canyon(false), canyon(true));
+    let warm = fit_recipe(&warm_src, &warm_tgt);
     assert!(
         warm.err_after < warm.err_before,
         "canyon-warm must land rather than reset: {} -> {}",
         warm.err_before,
         warm.err_after
     );
-    // …in NUMBERS. The ruling that accepted this fixture's move named the
-    // landing it accepted, so the landing is what is asserted, with the
-    // tolerance stated: measured 2026-09-02 on this tree, err_after
-    // 0.0339 and reported confidence 0.4061; re-measured 2026-10-21 with
-    // the tone sliders withheld on their own tonal reading, 0.0349 and
-    // 0.3889; 2026-10-22 under the ungated tone arm, 0.0365 and 0.3564;
-    // 2026-11-02 with the mixer's band hue (Orange -18), 0.0323 and 0.4299.
+    let convicted = projection_arg(&warm, keys::FIT_NOTE_CAST_PROJECTED, "fan_before")
+        .unwrap_or_else(|| panic!("canyon-warm's cast is convicted and projected: {}", warm.recipe.rationale));
     assert!(
-        (warm.err_after - 0.0323).abs() < 0.001,
-        "canyon-warm's landing moved off the measured 0.0323: {} -> {}",
-        warm.err_before,
-        warm.err_after
+        (convicted - 30.6).abs() < 0.2,
+        "canyon-warm's fitted cast is convicted at {convicted:.1}°, not the 30.6° measured on 2026-11-05"
     );
+    let t = projection_arg(&warm, keys::FIT_NOTE_CAST_PROJECTED, "t").expect("the projection publishes its t");
+    assert!((t - 0.080).abs() < 0.005, "canyon-warm's projection ships at t {t:.3}, not the 0.080 measured on 2026-11-05");
     assert!(
-        (warm.recipe.confidence - 0.430).abs() < 0.01,
-        "…and its reported confidence off the measured 0.430: {}",
-        warm.recipe.confidence
-    );
-    let c = cast_stage_candidate(&canyon(false), &canyon(true));
-    let fan = hue_fan_weighted(&c.cur, &c.with_px, &evidence_model(&c.cur, &c.tp))
-        .map(|(_, added, _)| added)
-        .unwrap_or(0.0);
-    assert!(fan < FAN_DEG, "canyon-warm's candidate is left alone by the fan gate ({fan:.1}°)");
-    assert!(
-        (fan - 6.9).abs() < 0.2,
-        "canyon-warm's candidate reads {fan:.1}°, not the 6.9° measured on 2026-11-02"
-    );
-    use crate::rationale::keys;
-    assert!(
-        warm.recipe.red_curve.is_empty()
-            && warm.recipe.green_curve.is_empty()
-            && warm.recipe.blue_curve.is_empty()
-            && warm.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HUE_FANNED),
-        "…its curves are withheld by the fan gate's own reading: {}",
+        !warm.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED
+            || n.key == keys::FIT_NOTE_REHUE_BLOCKED
+            || n.key == keys::FIT_NOTE_CAST_HUE_FANNED),
+        "…projected: never also admitted, re-hue blocked or withheld: {}",
         warm.recipe.rationale
     );
+    assert!(!warm.recipe.red_curve.is_empty(), "…and its projected red curve ships: {}", warm.recipe.rationale);
+    // The delivered reading is the bar the arm holds: the fan the shipped
+    // frame shows, and the colour it delivers (mean CIE76 over the analysis
+    // pair, 17.42 for the untouched source).
+    let warm_fan = delivered_fan_of(&warm_src, &warm_tgt, &warm);
+    assert!(warm_fan < 2.01 + 0.2, "canyon-warm's shipped frame fans {warm_fan:.2}°, past the 2.01° it delivered on 2026-11-05");
+    let (s, t_img) = analysis_pair(&warm_src, &warm_tgt);
+    let tp = pixels_of(&t_img);
+    let mean_de = |recipe: &EditRecipe| {
+        let px = pixels_of(&render::develop_preview(&s, recipe));
+        px.iter().zip(&tp).map(|(a, b)| {
+            let (a, b) = (cie_lab(a), cie_lab(b));
+            ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+        }).sum::<f32>() / px.len().max(1) as f32
+    };
+    let (identity_de, shipped_de) = (mean_de(&EditRecipe::default()), mean_de(&warm.recipe));
+    eprintln!("CANYON_WARM convicted {convicted:.1} t {t:.3} shipped fan {warm_fan:.2} dE76 {identity_de:.2} -> {shipped_de:.2}");
     assert!(
-        !warm.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_PROJECTED
-            || n.key == keys::FIT_NOTE_REHUE_BLOCKED),
-        "…neither projected nor blocked by the re-hue gate: {}",
-        warm.recipe.rationale
+        shipped_de < 5.47 + 0.05,
+        "canyon-warm delivers mean ΔE76 {identity_de:.2} -> {shipped_de:.2}, past the 5.47 it delivered on 2026-11-05"
     );
 }
 
