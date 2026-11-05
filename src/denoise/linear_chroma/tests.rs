@@ -284,6 +284,34 @@ fn a_pattern_that_is_not_a_two_by_two_bayer_is_left_alone() {
     assert!(before.iter().zip(&after).all(|(a, b)| a.to_bits() == b.to_bits()));
 }
 
+/// The k reading reads the textured patches at the fit's own subsample rule:
+/// every one on a frame with fewer than `FIT_PATCHES`, otherwise the uniform
+/// stride `n / FIT_PATCHES` over them, which keeps at least `FIT_PATCHES`;
+/// flat patches never.
+///
+/// MUTATION: every textured patch read (the reading then costs the filter's
+/// window on all of them: 13 s on a 61 MP daylight frame at 7 cells).
+#[test]
+fn the_k_reading_reads_the_textured_patches_at_the_fits_own_stride() {
+    use super::super::noise_model::FIT_PATCHES;
+    let m = mosaic(0.01, 0.0);
+    let sites = bayer_sites(&rggb()).expect("Bayer");
+    let pts = patches(&m, W, H, sites, WB);
+    let model = NoiseModel::fit(&pts, W, H).expect("model");
+    let flat = *pts.iter().find(|p| model.is_flat(p, WB)).expect("a flat patch");
+    let textured = Patch { v_dr: 100.0 * flat.v_dr, v_db: 100.0 * flat.v_db, ..flat };
+    for n in [1000usize, FIT_PATCHES - 1, FIT_PATCHES, 2 * FIT_PATCHES + 1, 40_000] {
+        // Every third patch flat.
+        let list: Vec<Patch> = (0..n + n / 2).map(|i| if i % 3 == 2 { flat } else { textured }).collect();
+        let all: Vec<usize> = (0..list.len()).filter(|i| i % 3 != 2).collect();
+        let read = reading_patches(&model, &list, WB);
+        let stride = (all.len() / FIT_PATCHES).max(1);
+        let want: Vec<usize> = all.iter().copied().step_by(stride).collect();
+        assert_eq!(read, want, "{} textured patches: the reading is the uniform stride {stride} over them", all.len());
+        assert!(read.len() >= all.len().min(FIT_PATCHES), "{} textured: {} read", all.len(), read.len());
+    }
+}
+
 /// The sensor measures colour once per cell; pixel-scale chroma is the
 /// demosaic's, so the stage's cell chroma is the pixel's: after the rebuild
 /// every pixel's green is its own (bit for bit) and its chroma `wR·R − G`,
@@ -364,7 +392,12 @@ fn photo_k_reading() {
     for (k, r) in &read {
         println!("  k {k:7.3}: removed / noise share {r:.4}");
     }
-    println!("  -> photo k {k:.3}; model fit {:.2} s, k reading {:.2} s", t1.as_secs_f64(), (t2 - t1).as_secs_f64());
+    println!(
+        "  -> photo k {k:.3} over {} textured patches read; model fit {:.2} s, k reading {:.2} s",
+        reading_patches(&model, &pts, wb).len(),
+        t1.as_secs_f64(),
+        (t2 - t1).as_secs_f64()
+    );
     // Round 6: does the filter move the LINEAR mean of a flat patch's colour
     // differences? Per flat patch, the mean over its cells of (filtered - input),
     // in units of one cell's model sd; per level decile of the flat patches.

@@ -282,6 +282,19 @@ impl CellChroma {
 /// crossing is interpolated between rungs).
 const LADDER: usize = 13;
 
+/// The textured patches [`photo_k`] reads (the flat rule's complement): a
+/// reading summed over the frame's patches, as the noise model's fit is, read
+/// at the fit's own subsample rule (`noise_model::fit_stride`: the uniform
+/// stride that keeps at least `FIT_PATCHES`, every one on a frame with
+/// fewer). The reading is a reading, not the filter: it costs the filter's
+/// window on the patches it reads, so it reads no more of them than the
+/// model's own resolution needs.
+fn reading_patches(model: &NoiseModel, pts: &[Patch], wb: [f64; 3]) -> Vec<usize> {
+    let textured: Vec<usize> = (0..pts.len()).filter(|&i| pts[i].usable && !model.is_flat(&pts[i], wb)).collect();
+    let stride = super::noise_model::fit_stride(textured.len());
+    textured.into_iter().step_by(stride).collect()
+}
+
 /// The photo's own `k`: the threshold (in `σ_d`) at which the edge energy the
 /// filter removes from the photo's TEXTURED patches meets the noise model's
 /// share of that energy (see the module), linear between the rungs of
@@ -289,7 +302,7 @@ const LADDER: usize = 13;
 /// energy never reaches the share. Also returns, per rung read,
 /// `(k, removed / share)` — the reading itself.
 pub(crate) fn photo_k(cells: &Cells, model: &NoiseModel, pts: &[Patch], wb: [f64; 3], rho: usize) -> (f64, Vec<(f64, f64)>) {
-    let textured: Vec<usize> = (0..pts.len()).filter(|&i| pts[i].usable && !model.is_flat(&pts[i], wb)).collect();
+    let textured = reading_patches(model, pts, wb);
     if textured.is_empty() {
         return (f64::INFINITY, Vec::new());
     }

@@ -73,6 +73,13 @@ pub(crate) const PATCH: usize = 8;
 /// least these many, a frame with fewer is read whole.
 pub(crate) const FIT_PATCHES: usize = 14_925;
 
+/// The uniform stride over `n` patches that keeps at least [`FIT_PATCHES`]
+/// of them (1 when there are fewer): the one subsample rule of every reading
+/// summed over a frame's patches (the fit, `linear_chroma::photo_k`).
+pub(crate) fn fit_stride(n: usize) -> usize {
+    (n / FIT_PATCHES).max(1)
+}
+
 /// The fitted model of one mosaic.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct NoiseModel {
@@ -242,7 +249,7 @@ impl NoiseModel {
     /// fewer than 16 of those are usable or the fit has no noise-only
     /// population.
     pub(crate) fn fit(patches: &[Patch], width: usize, height: usize) -> Option<Self> {
-        let stride = (patches.len() / FIT_PATCHES).max(1);
+        let stride = fit_stride(patches.len());
         let sampled: Vec<Patch> = patches.iter().step_by(stride).copied().collect();
         Self::fit_all(&sampled, width, height)
     }
