@@ -360,9 +360,10 @@ pub(super) fn cast_curves_are_identity(curves: &[Vec<CurvePoint>; 3]) -> bool {
 /// PHASE 1 finds the admissible FRONTIER `t_max` by bisection, 12 steps — the
 /// convention this file already uses for closed-loop searches — because
 /// admissibility is the DOWNWARD-CLOSED half of the question and the only
-/// half a bisection may be pointed at: the fan is non-decreasing in `t`
-/// (measured, `the_projected_fan_grows_with_t`) and every gate clears as the
-/// curves go to the identity.
+/// half a bisection may be pointed at: the fan crosses the line once in `t`
+/// (measured, `the_projected_fan_crosses_the_projection_line_once_along_t`;
+/// below the line it may dip, which no bisection answer depends on) and every
+/// gate clears as the curves go to the identity.
 ///
 /// PHASE 2 sweeps a fixed grid of [`PROJECT_GRID`] cells over `(0, t_max]`
 /// and keeps the admissible probe with the largest GAIN, the frontier

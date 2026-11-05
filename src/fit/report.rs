@@ -67,18 +67,20 @@ pub(super) struct SolveFacts {
     pub(super) cast_admitted_by_strength: Option<(f32, f32)>,
     /// Every gate reading of a cast that was ADMITTED, so the shipped
     /// curves disclose the numbers they passed on. `None` = no curves
-    /// shipped, in any of THREE ways: a gate refused them, none were fitted
-    /// at all, or the TERMINAL do-no-harm check reset the whole recipe to
-    /// the calibration base. The third leaves the gates' own verdict at
-    /// "admitted" while nothing of the solve — curves included — ships,
-    /// which is why the construction site ands in `!fit_regressed`.
+    /// shipped: a gate refused them, none were fitted at all, or a step
+    /// after the gates took them out — the cast-curve elimination, the
+    /// finished-recipe elimination, the terminal delivered-fan withdrawal,
+    /// the terminal reset to the calibration base. Those leave the gates'
+    /// own verdict at "admitted" while no curve ships, which is why the
+    /// construction site reads the finished recipe itself (DEF-1: "does any
+    /// cast curve ship?").
     pub(super) cast_admitted: Option<CastReadings>,
     /// v1.2.3: the cast was PROJECTED — the fan gate convicted the fitted
     /// curves and a shrunk version of them shipped instead. Mutually
     /// exclusive with `cast_admitted` (a projected cast was not admitted as
-    /// fitted) and carrying the same `!fit_regressed` guard, for the same
-    /// reason: the terminal do-no-harm reset can leave the gates' verdict at
-    /// "projected" while nothing of the solve ships.
+    /// fitted) and carrying the same guard, for the same reason: every step
+    /// after the gates can leave their verdict at "projected" while no curve
+    /// ships.
     pub(super) cast_projected: Option<CastProjection>,
     /// The existing evidence gates withheld a one-sided range. This is the
     /// cause carried into the FAR classifier; it is not a second refusal flag.

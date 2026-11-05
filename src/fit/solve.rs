@@ -1526,6 +1526,14 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         after_px = sp.clone();
         joint_after = joint_base;
     }
+    // DEF-1: a note about a cast is derived from what SHIPS. The cast-curve
+    // elimination, the finished-recipe elimination, the terminal
+    // delivered-fan withdrawal and the terminal reset can each take the
+    // curves out after the gates spoke, and they share one reading: does any
+    // cast curve ship? Read here, on the finished recipe after every one of
+    // them, so the "admitted" / "projected" sentences can only describe
+    // curves the user gets (report.rs's guard sentence, true by construction).
+    let cast_ships = CAST_CURVES.iter().any(|c| c.differs(&recipe, base));
 
     // --- report ---------------------------------------------------------------
     let mut report = compose_report(
@@ -1587,33 +1595,24 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
             // guard costs nothing, and the doctrine is one head note per
             // outcome rather than one head note per outcome that happens to be
             // unreachable.
-            cast_admitted_by_strength: cast
-                .projected
-                .is_none()
+            cast_admitted_by_strength: (cast_ships && cast.projected.is_none())
                 .then_some(cast_admission)
                 .flatten(),
-            // `!fit_regressed` is the third way to ship no curves and the
-            // one the field's name does not suggest: the terminal do-no-harm
-            // check resets `recipe = base.clone()`, so the gates may have
-            // ADMITTED a cast that is no longer in the recipe. Disclosing
-            // that admission would describe curves the user cannot find.
-            cast_admitted: (!fit_regressed
+            // `cast_ships` (DEF-1) is every way to ship no curves at once:
+            // the eliminations, the terminal delivered-fan withdrawal and the
+            // terminal reset can each leave the gates' verdict at "admitted"
+            // while the curves it describes are not in the recipe the user
+            // gets. Disclosing that admission would describe curves the user
+            // cannot find.
+            cast_admitted: (cast_ships
                 && !cast.refused()
                 // …and not projected: a projected cast ships its OWN
                 // sentence, which states the conviction it survived. Writing
                 // both would give one cast two accounts.
-                && cast.projected.is_none()
-                // …and not withdrawn by the terminal delivered-fan check,
-                // for exactly the reason `!fit_regressed` is here: the gates'
-                // verdict stays "admitted" while the curves it describes are
-                // no longer in the recipe the user gets. Only the WITHDRAWING
-                // arm counts — the disclosing arm leaves the curves in place.
-                && !cast_withdrawn)
+                && cast.projected.is_none())
             .then_some(cast.readings)
             .flatten(),
-            cast_projected: (!fit_regressed && !cast_withdrawn)
-                .then_some(cast.projected)
-                .flatten(),
+            cast_projected: cast_ships.then_some(cast.projected).flatten(),
             evidence_refused: evidence_has_one_sided(&evidence),
             sat_fitted: sat_reduced.then_some(sat_fitted),
             regressed: fit_regressed.then_some(joint_regressed),

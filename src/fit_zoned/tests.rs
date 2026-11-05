@@ -2454,7 +2454,14 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
     // zones' do-no-harm reads the per-pixel Lab terms, so that fixture's sky
     // zone reaches the gate and ships again (measured: `sky` ZoneSky and
     // ZoneLand at rim 0.006, `sky+land` ZoneSky at 0.007).
-    assert_eq!(measured.len(), 3, "every accepted zone must reach the boundary gate: {measured:?}");
+    // RE-PINNED for v1.18.0 step 1: 3 -> 4. The `sky+land` fixture's land
+    // zone now reaches the gate beside its sky: `sky` ZoneSky and ZoneLand
+    // at rim 0.004, `sky+land` ZoneSky and ZoneLand at 0.007. (Reaching the
+    // gate is not shipping: with DEF-3 reverted this entry is here too while
+    // the orchestration toy ships its sky alone.) No single step-1 fix
+    // reverted alone (DEF-1, DEF-3, DEF-4, the judge's presence, the cell
+    // votes) brings the count back to 3; the combination was not separated.
+    assert_eq!(measured.len(), 4, "every accepted zone must reach the boundary gate: {measured:?}");
     assert!(
         measured.iter().any(|(_, role, _)| *role == MaskRole::ZoneSky)
             && measured.iter().any(|(_, role, _)| *role == MaskRole::ZoneLand),
@@ -2534,7 +2541,9 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
     // zones' own verdicts are read on J*, so the candidates the gate shrinks
     // moved: kept `sky` 0.003 -> 0.006 on both of its zones, and the third
     // entry, `sky+land`'s sky zone, 0.007.
-    let expected = [0.006f32, 0.006, 0.007];
+    // RE-PINNED for v1.18.0 step 1: `sky` 0.006 -> 0.004 on both zones,
+    // `sky+land` 0.007 on both (its land zone the fourth entry).
+    let expected = [0.004f32, 0.004, 0.007, 0.007];
     for ((fixture, role, rim), expected) in measured.iter().zip(expected) {
         assert!(
             (*rim - expected).abs() <= 0.002,
@@ -2557,7 +2566,12 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
     // land the inverted zone used to correct, so the candidate pair moves less.
     // v1.18.0 (J*, same mechanism as above): `sky` 0.003 -> 0.039 at k
     // 0.212 -> 0.165; `sky+land` 0.016 -> 0.047 at k 0.316 -> 0.166.
-    let expected_candidates = [("sky", 0.0390f32, 0.165f32), ("sky+land", 0.0470, 0.166)];
+    // v1.18.0 step 1: `sky` 0.039 -> 0.030 at k 0.165 -> 0.152; `sky+land`
+    // 0.047 -> 0.061 at k 0.166 -> 0.153 (its candidate now carries the land
+    // zone too). `sky` reads 0.030 / k 0.152 with each step-1 fix reverted
+    // alone; `sky+land` reads 0.025 / k 0.268 with DEF-3 reverted and 0.055 /
+    // k 0.149 with the judge's presence reverted.
+    let expected_candidates = [("sky", 0.0300f32, 0.152f32), ("sky+land", 0.0610, 0.153)];
     for ((fixture, before, k), (want_fixture, want_before, want_k)) in
         candidates.iter().zip(expected_candidates)
     {
@@ -6341,7 +6355,7 @@ fn a_zoned_fits_confidence_comes_from_the_zones_it_accepted() {
 }
 
 #[test]
-fn zoned_orchestration_leaves_the_matched_land_and_ships_the_shrunk_sky() {
+fn zoned_orchestration_corrects_the_land_beside_the_shrunk_sky() {
     // The first real-pair render's lesson: repainting ONLY the sky leaves
     // everything outside the mask with the global look — on the real
     // pair a blue haze band clashed against the new gold sky. The land
@@ -6418,7 +6432,24 @@ fn zoned_orchestration_leaves_the_matched_land_and_ships_the_shrunk_sky() {
     // flat blocks a few codes apart as whole rank steps; see
     // `every_accepted_fixture_zone_still_passes_the_boundary_gate`).
     let zones: Vec<_> = report.recipe.masks.iter().filter(|m| m.role.is_zone()).map(|m| m.role).collect();
-    assert_eq!(zones, vec![MaskRole::ZoneSky], "only the sky zone ships on this toy: {}", report.recipe.rationale);
+    // RE-READ for v1.18.0 step 1 (it was
+    // `zoned_orchestration_leaves_the_matched_land_and_ships_the_shrunk_sky`):
+    // under DEF-3 the global solve no longer lands the land (residual 0.189
+    // -> 0.156, saturation pulled back from +60 to 0, D 0.290 at pixel
+    // scale), so the land zone has something to correct and ships on its own
+    // pixels (+0.02 EV, gains [0.98 1.01 1.01], zone residual 0.055 ->
+    // 0.043, 5 FIT_QUANT) beside the sky, both kept by the boundary gate at
+    // k 0.153; the frame 0.15638 -> 0.14769. That is the law the first
+    // paragraph above states — the land zone attaches beside the sky's own
+    // correction — and the render check below still reads a warm land pixel
+    // (147, 108, 100). With DEF-3 alone reverted the land is landed by the
+    // global solve and only the sky ships, as R1 pinned.
+    assert_eq!(
+        zones,
+        vec![MaskRole::ZoneSky, MaskRole::ZoneLand],
+        "the land zone ships beside the sky on this toy: {}",
+        report.recipe.rationale
+    );
     assert!(
         !report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_SHRUNK_REFUSED),
         "the shipped sky is not also refused: {}",

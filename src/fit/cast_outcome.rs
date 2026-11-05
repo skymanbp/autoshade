@@ -470,7 +470,7 @@ impl Control {
         }
     }
 
-    fn differs(self, r: &EditRecipe, b: &EditRecipe) -> bool {
+    pub(super) fn differs(self, r: &EditRecipe, b: &EditRecipe) -> bool {
         let (g, h) = (&r.color_grade, &b.color_grade);
         match self {
             Control::Exposure => r.exposure_ev != b.exposure_ev,

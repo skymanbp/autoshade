@@ -4094,11 +4094,28 @@ fn projection_arg(report: &FitReport, key: &str, arg: &str) -> Option<f32> {
 /// CAST-2 (user ruling 2026-09-01): the gate still convicts, but the
 /// stage no longer throws the cast away. It shrinks the three curves
 /// along the projection path until the fan clears `FAN_PROJECT_DEG` and
-/// ships THAT. So this test's subject is the conviction and the rescue
+/// ships THAT. So this test's subject was the conviction and the rescue
 /// together: the fitted curves must never reach the frame, and what does
 /// reach it must read inside the target.
+///
+/// RE-READ for v1.18.0 (DEF-1, DEF-3). The coast pair's sky moves by a
+/// per-channel gain (source [0.74, 0.85, 1.00] x level, target [0.62, 0.78,
+/// 1.00] x level), which three channel curves carry without sorting the
+/// class by luminance. At 5b7ccf7 its candidate read 17.3 degrees and the
+/// finished-recipe elimination then set every curve back while the
+/// projection note stayed (DEF-1's defect). With each 3x3 support cell
+/// read on its own pixels (DEF-3: the sky cells' support 0.96-0.99 ->
+/// 1.000, the ground cells' 0.90-0.93 -> 0.72-0.87, int probe) and every
+/// present pixel judged (DEF-5), the candidate fans the sky class 10.2
+/// degrees, under FAN_DEG: the gate does not convict, and the green curve
+/// ships ADMITTED with its own note (+2.4 degrees delivered). The
+/// conviction-and-rescue path is pinned on the haze pair
+/// (`the_fan_gate_convicts_a_cast_whose_render_fans_and_leaves_a_legitimate_cast_alone`,
+/// `a_projected_cast_discloses_the_readings_that_let_it_through`); what
+/// this fixture now witnesses is the other side of the same gate, end to
+/// end, with the delivered-sky bar it always carried.
 #[test]
-fn cast_curves_that_fan_a_coherent_sky_are_shrunk_not_shipped() {
+fn a_coherent_sky_cast_the_curves_carry_as_a_gain_does_not_fan_and_ships_admitted() {
     let src = coast(false);
     let tgt = coast(true);
     let c = cast_stage_candidate(&src, &tgt);
@@ -4120,82 +4137,35 @@ fn cast_curves_that_fan_a_coherent_sky_are_shrunk_not_shipped() {
         "premise broken: the foreign-hue veto fires — the destinations should be target-native"
     );
 
-    // THE reading, and its margin over the threshold.
-    let (share, fan, delivered_by_census) = hue_fan_weighted(&cur, &with_px, &evidence)
+    // THE reading, and its margin under the threshold (measured 10.2°;
+    // the gate's own 0.6 x FAN_DEG margin the legitimate-cast arm carries).
+    let (share, fan, _) = hue_fan_weighted(&cur, &with_px, &evidence)
         .expect("the sky is a region-sized hue class");
     assert!(share > 0.5, "premise broken: the sky class is not region-sized ({share:.3})");
-    // 2026-10-22: 2.0×, was 2.5×. The re-drawn coast (see [`coast`]) reads
-    // 36.3° here, the old one 32.2° under the ungated tone arm; none of the
-    // twelve variants swept that still project end to end cleared 37.5°.
-    assert!(fan > 2.0 * FAN_DEG, "margin eroded: fan {fan:.1}° against {FAN_DEG}°");
+    assert!(fan < 0.7 * FAN_DEG, "margin eroded: fan {fan:.1}° against {FAN_DEG}°");
 
-    // END TO END: the FITTED curves never ship — what ships is the
-    // projection, and the note says so with the numbers behind it.
+    // END TO END: the curves ship admitted, the note says so, and nothing
+    // claims a conviction or a projection.
     let rep = fit_recipe(&src, &tgt);
-    assert!(
-        rep.recipe.red_curve != c.with.red_curve
-            || rep.recipe.green_curve != c.with.green_curve
-            || rep.recipe.blue_curve != c.with.blue_curve,
-        "the fanning curves must not ship as fitted: {}",
-        rep.recipe.rationale
-    );
-    assert!(
-        !rep.recipe.red_curve.is_empty(),
-        "…and the projection must have found a milder cast to ship: {}",
-        rep.recipe.rationale
-    );
-    let arg = |key: &str, name: &str| {
-        projection_arg(&rep, key, name)
-            .unwrap_or_else(|| panic!("the note carries {name}: {}", rep.recipe.rationale))
-    };
     use crate::rationale::keys;
-    assert!(arg(keys::FIT_NOTE_CAST_PROJECTED, "fan_before") >= FAN_DEG,
-        "the disclosed fan is the one that convicted");
-    assert!(arg(keys::FIT_NOTE_CAST_PROJECTED, "share") > 0.5,
-        "the disclosed share is the class that fanned");
-    assert_eq!(arg(keys::FIT_NOTE_CAST_PROJECTED, "limit"), FAN_DEG,
-        "the note names the limit it measured against");
-    let t = arg(keys::FIT_NOTE_CAST_PROJECTED, "t");
-    assert!((0.0..1.0).contains(&t), "the shipped cast is milder than the fitted one (t {t})");
     assert!(
-        arg(keys::FIT_NOTE_CAST_PROJECTED_FAN, "fan_after") <= FAN_PROJECT_DEG,
-        "the projection must reach its own target, not just the refusal line"
-    );
-    // …and it discloses at least what an ADMISSION does: the re-hued
-    // share on its own head note, and the admission's own foreign-hue
-    // clause beside it (measured or not-measurable, never a fabricated
-    // 0.000). These are invented curves, so the two pixel-aligned
-    // readings matter here more than they do on a measured cast.
-    assert!(
-        arg(keys::FIT_NOTE_CAST_PROJECTED, "rehued") < ROT_SHARE,
-        "the projected cast's re-hued share is disclosed, and it passed"
-    );
-    assert!(
-        rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED_FOREIGN
-            || n.key == keys::FIT_NOTE_CAST_ADMITTED_FOREIGN_NA),
-        "the projection must carry the foreign-hue clause too: {}",
+        !(rep.recipe.red_curve.is_empty() && rep.recipe.green_curve.is_empty() && rep.recipe.blue_curve.is_empty()),
+        "the admitted cast ships: {}",
         rep.recipe.rationale
     );
-    // One sentence per outcome: a projected cast is not also an admitted
-    // one. (The exclusivity itself is pinned in
-    // `a_projected_cast_is_never_also_disclosed_as_an_admitted_one`.)
+    let admitted_fan = projection_arg(&rep, keys::FIT_NOTE_CAST_ADMITTED_FAN, "fan")
+        .unwrap_or_else(|| panic!("the admission discloses its fan: {}", rep.recipe.rationale));
+    assert!(admitted_fan < FAN_DEG, "the admitted curves clear the limit ({admitted_fan})");
     assert!(
-        !rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED),
-        "a projected cast must not also claim admission: {}",
+        rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED)
+            && !rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_PROJECTED
+                || n.key == keys::FIT_NOTE_CAST_HUE_FANNED),
+        "one account, the admission: {}",
         rep.recipe.rationale
     );
-
-    // …and the DELIVERED sky: the picture claim, not the census's own
-    // arithmetic. TWO bars, and the first is the one this test carried
-    // BEFORE the projection existed — `FAN_DEG`, the refusal line: a
-    // rescued cast has to leave the delivered frame no worse than the
-    // widest fan the gate would have let through unprojected. It is
-    // deliberately NOT widened to the projection's own target plus one
-    // class width (7.5 + 15 = 22.5°, which is 50% looser than FAN_DEG
-    // itself); the fixture does not need the room. Measured 2026-09-02 on
-    // this tree: 14.58° delivered, 0.42° of margin under the bar, against
-    // the 42.4° the fitted curves would have delivered; 5.98° on the
-    // re-drawn coast (2026-10-22).
+    // …and the DELIVERED sky, the picture claim this test always carried:
+    // under `FAN_DEG`, the refusal line (measured 5.98° on the projected
+    // 2026-10-22 coast; the admitted curves' own note reads +2.4°).
     let delivered = render::develop_preview(&src, &rep.recipe);
     let spread = hue_spread_across_luma(&delivered, 0..64);
     assert!(
@@ -4204,16 +4174,48 @@ fn cast_curves_that_fan_a_coherent_sky_are_shrunk_not_shipped() {
              {FAN_DEG}° refusal line this bar is (measured 5.98° on 2026-10-22)"
     );
     assert!(
-        spread < 0.5 * delivered_by_census as f64,
-        "the projection must be most of the way back from the fitted fan \
-             ({spread:.1}° delivered against the fitted census's {delivered_by_census:.1}°)"
-    );
-    assert!(
         rep.err_after <= rep.err_before + 0.01,
         "fit made the look worse: {} -> {}",
         rep.err_before,
         rep.err_after
     );
+}
+
+/// DEF-1 (v1.18.0): a note about a cast is derived from what SHIPS. The
+/// "admitted" / "projected" / "admitted by strength" sentences describe
+/// curves; on every cast fixture of this file, end to end at the default
+/// strength, a report that carries one carries a non-identity channel curve.
+/// At 5b7ccf7 the coast pair broke it: its projection note (t, fan_before
+/// 19.7) stood while the finished-recipe elimination had set all three
+/// curves back. MUTATION: derive the flags from the gates' verdict again
+/// (`!fit_regressed && !cast_withdrawn`) and a fixture whose curves the
+/// eliminations remove reads a claim with nothing shipped.
+#[test]
+fn a_cast_note_describes_curves_the_finished_recipe_carries() {
+    use crate::rationale::keys;
+    let (hazed, clean) = haze_pair();
+    for (name, src, tgt) in [
+        ("coast", coast(false), coast(true)),
+        ("two-temperature coast", coast(false), two_temperature_coast()),
+        ("haze", hazed, clean),
+        ("canyon", canyon(false), canyon(true)),
+        ("hue ramps", hue_ramps(), cooled_ramps(0)),
+        ("warm strip", hue_ramps(), cooled_ramps(11)),
+    ] {
+        let rep = fit_recipe(&src, &tgt);
+        let ships = super::cast_outcome::CAST_CURVES.iter().any(|c| c.differs(&rep.recipe, &EditRecipe::default()));
+        let claims: Vec<&str> = rep
+            .notes
+            .iter()
+            .map(|n| n.key)
+            .filter(|k| {
+                [keys::FIT_NOTE_CAST_ADMITTED, keys::FIT_NOTE_CAST_PROJECTED, keys::FIT_NOTE_CAST_ADMITTED_BY_STRENGTH]
+                    .contains(k)
+            })
+            .collect();
+        eprintln!("CAST_NOTE {name}: curves ship {ships}, claims {}", claims.len());
+        assert!(ships || claims.is_empty(), "{name}: a cast note with no curve shipped: {}", rep.recipe.rationale);
+    }
 }
 
 /// The other half of the ruling: when the projection cannot pay, the
@@ -4277,13 +4279,28 @@ fn a_projection_that_cannot_clear_the_target_leaves_the_refusal_standing() {
 }
 
 /// The search bisects on `t` for the LARGEST value that clears, which is
-/// only the right thing to look for if the fan GROWS with `t`. Measured
-/// rather than assumed: eleven points on the path, on the fixture whose
-/// fan is the reason the gate exists.
+/// only the right thing to look for if the admissible set is DOWNWARD-CLOSED:
+/// the fan crosses [`FAN_PROJECT_DEG`] once on the path, so every `t` past the
+/// first one over the line is over it too. Measured rather than assumed:
+/// eleven points on the path, on the fixture whose fan is the reason the gate
+/// exists.
+///
+/// RE-READ for v1.18.0 (it was `the_projected_fan_grows_with_t`): on the haze
+/// pair the fan is NOT monotone below the line — 0.62 degrees at t = 0.5,
+/// -0.76 at 0.6, -0.52 at 0.7 (the first chromatic half-step narrows the
+/// blue class's spread before it widens it) — then 4.96, 13.03, 22.50 at
+/// 0.8, 0.9, 1.0: one crossing of the 7.5-degree line, between 0.8 and 0.9.
+/// A dip under the line cannot move the bisection's answer; a second
+/// crossing could, and that is what this test now forbids.
+///
+/// v1.18.0 (DEF-1 / DEF-3 / DEF-5): that fixture is the haze pair, the one
+/// the gate convicts and the projection ships on under the step-1 laws.
+/// The coast pair's candidate fans 10.2 degrees at t = 1, under the line,
+/// so no bisection runs on it (its ladder also dips, 9.1 -> 8.6 degrees
+/// from t 0.5 to 0.6, on a path the search never walks).
 #[test]
-fn the_projected_fan_grows_with_t() {
-    let src = coast(false);
-    let tgt = coast(true);
+fn the_projected_fan_crosses_the_projection_line_once_along_t() {
+    let (src, tgt) = haze_pair();
     let (s_img, _) = analysis_pair(&src, &tgt);
     let c = cast_stage_candidate(&src, &tgt);
     let evidence = evidence_model(&c.cur, &c.tp);
@@ -4306,14 +4323,14 @@ fn the_projected_fan_grows_with_t() {
             .unwrap_or(0.0);
         seen.push((t, fan));
     }
-    for pair in seen.windows(2) {
-        let ((t0, f0), (t1, f1)) = (pair[0], pair[1]);
-        assert!(
-            f1 >= f0 - 0.5,
-            "the fan must not shrink as the cast is restored: \
-                 t {t0:.1} → {f0:.1}°, t {t1:.1} → {f1:.1}° (whole ladder {seen:?})"
-        );
-    }
+    let first_over = seen.iter().position(|&(_, fan)| fan > FAN_PROJECT_DEG);
+    let first_over = first_over.unwrap_or_else(|| panic!("premise broken: the path never crosses the line ({seen:?})"));
+    assert!(first_over > 0, "premise broken: t = 0 is already over the line ({seen:?})");
+    assert!(
+        seen[first_over..].iter().all(|&(_, fan)| fan > FAN_PROJECT_DEG),
+        "the fan crosses the {FAN_PROJECT_DEG}° line more than once, so the admissible set is not \
+         downward-closed and the bisection may skip a clearing t (whole ladder {seen:?})"
+    );
     let (_, first) = seen[0];
     let (_, last) = seen[seen.len() - 1];
     // v1.18.0: the path spans the refusal line, not two of it. The candidate
@@ -4416,8 +4433,10 @@ fn the_bottom_of_the_projection_path_is_one_curve_then_none() {
 #[test]
 fn a_rescored_projection_carries_its_own_readings_back() {
     use crate::rationale::keys;
-    let src = coast(false);
-    let tgt = coast(true);
+    // v1.18.0: the haze pair, the fixture that projects under the step-1
+    // laws (coast no longer does; see
+    // `a_projected_cast_is_judged_by_the_strength_budgets_bound`).
+    let (src, tgt) = haze_pair();
     let solved = fit_recipe(&src, &tgt);
     let head = |r: &FitReport, arg: &str| projection_arg(r, keys::FIT_NOTE_CAST_PROJECTED, arg);
     assert!(
@@ -4610,7 +4629,15 @@ fn a_projected_cast_is_judged_by_the_strength_budgets_bound() {
     use crate::rationale::keys;
     // End to end at the shipped default: the bound in the note is the
     // budget's, not the `CAST_ACCEPT_RATIO` anchor by coincidence.
-    let rep = fit_recipe(&coast(false), &coast(true));
+    //
+    // v1.18.0 (DEF-1 / DEF-3 / DEF-5): read on the haze pair, the fixture
+    // that projects under the step-1 laws. Coast -> warm coast projected at
+    // 5b7ccf7 with no cast curve left on the finished recipe (the note DEF-1
+    // withdraws); with each support cell read on its own pixels (DEF-3) and
+    // every present pixel judged (DEF-5) its candidate fans 10.2 deg and
+    // ships the green curve admitted, so it carries no projection at all.
+    let (hazed, clean) = haze_pair();
+    let rep = fit_recipe(&hazed, &clean);
     let bound = projection_arg(&rep, keys::FIT_NOTE_CAST_PROJECTED, "bound")
         .unwrap_or_else(|| panic!("premise broken: no projection here: {}", rep.recipe.rationale));
     assert_eq!(
@@ -4626,12 +4653,13 @@ fn a_projected_cast_is_judged_by_the_strength_budgets_bound() {
     // the two numbers are both 2.0). The budget threads from the panel
     // dial through `full_cast_accept_ratio` into the gate that judges each
     // projected candidate. Measured 2026-09-02: this pair projects at both
-    // stops — t = 0.659 at the default, t = 0.399 at 1.0.
+    // stops — t = 0.659 at the default, t = 0.399 at 1.0 (coast, before
+    // v1.18.0; the haze pair's readings are printed below).
     let widened = FitBudget::for_strength(crate::recipe::GradeStrength::new(1.0)).cast_ratio;
     assert_ne!(widened, bound, "premise broken: the two strength stops share a bound");
     let full = fit_recipe_from_with(
-        &coast(false),
-        &coast(true),
+        &hazed,
+        &clean,
         &EditRecipe::default(),
         FitOptions { strength: crate::recipe::GradeStrength::new(1.0), provider: None },
     );
@@ -4893,10 +4921,22 @@ fn a_cast_the_fan_gate_alone_convicts_earns_the_projection_and_is_never_admitted
     assert!(after <= FAN_PROJECT_DEG, "the projection reaches its own target ({after})");
 }
 
-/// The fan gate's OTHER half: it must not touch a cast that is doing its
-/// job. The haze regression's un-cast is the pair whose curves the fit
-/// has always shipped, and it opens 7.8° — 1.9× under the threshold.
-/// Measured beside it, the pairs the other gates already refuse:
+/// The fan gate's two halves on two witnesses (DEF-1, 2026-11-04). It
+/// CONVICTS a cast whose render fans, and it must not touch a cast that is
+/// doing its job.
+///
+/// The haze regression's un-cast was this test's legitimate cast until
+/// v1.18.0 (7.8°). Read on its pixels it is not one: the fitted curves fan
+/// the blue band's hue 21.5° across luminance on their own render (the
+/// target's 0.25°, the gate's own reading of the candidate 22.5°), so the
+/// gate is right to convict it, and what ships is the projection, whose
+/// curves the same gate reads at +3.6° on the shipped frame. It is the
+/// conviction's witness here; its value pin lives in
+/// `a_convicted_cast_no_white_balance_takes_back_is_projected_by_value`.
+/// The legitimate cast is the hue-ramps pair under a 3500 K white balance,
+/// a per-channel gain the curves carry as fitted and the gate admits at
+/// +3.8° (`a_white_balance_cast_the_curves_carry_as_channel_gains_never_enters_the_hand_off`).
+/// Measured beside them, the pairs the other gates already refuse:
 /// canyon-gold 5.2°, hazy→vivid 2.7°.
 ///
 /// CANYON-WARM MOVED (2026-09-02, CAST-2), and the move is asserted below
@@ -4938,7 +4978,7 @@ fn a_cast_the_fan_gate_alone_convicts_earns_the_projection_and_is_never_admitted
 /// rejection). The test's candidate, rebuilt on the new recipe, reads 6.9
 /// degrees.
 #[test]
-fn the_fan_gate_leaves_a_legitimate_cast_alone() {
+fn the_fan_gate_convicts_a_cast_whose_render_fans_and_leaves_a_legitimate_cast_alone() {
     let clean = synth();
     let mut haze = EditRecipe {
         exposure_ev: -0.3,
@@ -4954,14 +4994,42 @@ fn the_fan_gate_leaves_a_legitimate_cast_alone() {
     };
     haze.clamp();
     let hazed = render::develop_preview(&clean, &haze);
+    // A cast whose render fans is convicted: the haze candidate's curves fan
+    // past the line (22.5° measured 2026-11-04), the fit projects them, and
+    // the curves that SHIP read inside it on the shipped frame (+3.6°).
     let report = fit_recipe(&hazed, &clean);
+    let h = cast_stage_candidate(&hazed, &clean);
+    let haze_fan = hue_fan_weighted(&h.cur, &h.with_px, &evidence_model(&h.cur, &h.tp))
+        .map(|(_, added, _)| added)
+        .unwrap_or(0.0);
+    assert!(haze_fan > FAN_DEG, "the haze candidate's render fans {haze_fan:.1}° against {FAN_DEG}°");
     assert!(
-        !report.recipe.blue_curve.is_empty(),
-        "premise broken: the haze un-cast is no longer admitted: {}",
+        report.notes.iter().any(|n| n.key == crate::rationale::keys::FIT_NOTE_CAST_PROJECTED),
+        "a cast whose render fans is convicted and projected: {}",
         report.recipe.rationale
     );
+    let (s, t) = analysis_pair(&hazed, &clean);
+    let mut uncurved = report.recipe.clone();
+    uncurved.red_curve.clear();
+    uncurved.green_curve.clear();
+    uncurved.blue_curve.clear();
+    let cur = pixels_of(&render::develop_preview(&s, &uncurved));
+    let shipped = pixels_of(&render::develop_preview(&s, &report.recipe));
+    let shipped_fan = hue_fan_weighted(&cur, &shipped, &evidence_model(&cur, &pixels_of(&t)))
+        .map(|(_, added, _)| added)
+        .unwrap_or(0.0);
+    assert!(shipped_fan < FAN_DEG, "…and the curves that ship fan {shipped_fan:.1}° on the shipped frame");
+    // The legitimate cast, left alone: admitted as fitted, and the gate's own
+    // reading of it on the fit's own candidate is +3.8°, under the 0.6 margin
+    // the haze arm used to carry.
+    let legit = fit_recipe(&hue_ramps(), &cooled_ramps(0));
+    let legit_fan = projection_arg(&legit, crate::rationale::keys::FIT_NOTE_CAST_ADMITTED_FAN, "fan")
+        .unwrap_or_else(|| panic!("the hue-ramps cast is admitted: {}", legit.recipe.rationale));
+    assert!(
+        legit_fan < 0.6 * FAN_DEG,
+        "margin eroded: the hue-ramps cast fans {legit_fan:.1}° against the {FAN_DEG}° threshold"
+    );
     for (name, src, tgt, ceiling) in [
-        ("haze", hazed.clone(), clean.clone(), 0.6),
         ("canyon_gold", canyon(false), canyon_gold_target(), 0.75),
         ("hazy_vivid", hazy_canyon_source(), vivid_warm_target(), 0.3),
     ] {
@@ -8812,9 +8880,17 @@ fn no_shipped_fit_delivers_a_hue_fan_past_the_limit() {
     // back; the warm-coast pair's curves are set back on the finished frame
     // and it delivers 0.6. Measured 2026-11-04: 0.6 / 0.0 / 5.6 / 9.4 / 4.5
     // in the order above (11.5 before).
+    // RE-PINNED for v1.18.0 step 1: 14.45 / 0.0 / 3.76 / 7.03 / -1.29 in the
+    // order above, the worst now the coast pair: its cast is admitted under
+    // DEF-3 and its curves ship, delivering 14.45 degrees on 0.608 of the
+    // measurable colour — 0.55 under FAN_DEG, the margin this pin now
+    // watches. Each fix reverted alone (int bisection): DEF-3 -> 0.59 / 0.0 /
+    // 3.83 / 7.03 / 4.54 (the coast's cast refused, no curves ship); the judge's presence
+    // -> 14.23 / 0.0 / 3.76 / 12.00 / -1.29; the cell votes or DEF-1 -> the
+    // readings above unchanged.
     assert!(
-        (worst - 9.4).abs() < 0.5,
-        "the worst delivered fan moved off the measured 9.4°: {worst:.1}"
+        (worst - 14.45).abs() < 0.5,
+        "the worst delivered fan moved off the measured 14.45°: {worst:.1}"
     );
 }
 
