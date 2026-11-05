@@ -1196,6 +1196,59 @@ pub(super) fn paired_wb_from_populations(
     wb_demand(wb_common(&axes.kelvin), wb_common(&axes.tint), law)
 }
 
+/// [`paired_wb_from_populations`] read CLOSED-LOOP through the engine: the
+/// demand is re-read on the render at the white balance it asked for, and
+/// what is still asked in common is composed onto it in the law's own log
+/// gains, until the re-read asks nothing, lands where it stands (the
+/// solve's 50 K / 0.1 quantisation), or the step does not earn [`FIT_QUANT`]
+/// of `objective` over the white balance it would replace ([`ships`]). One
+/// reading is open-loop on the DISPLAY pixels, where the tone curve
+/// compresses a white balance's log-ratio change most at the ends of the
+/// range, and [`wb_common`] keeps the smallest region's: the read under-asks
+/// by construction. And a re-read can ask nothing while the objective still
+/// asks: a region whose residual is under one output code reads a median of
+/// exactly zero, and [`wb_common`] answers zero for the frame. Where the
+/// re-read asks nothing, or lands where it stands, the chase tries its own
+/// last step once more, in the law's log gains, and keeps it only when it
+/// earns [`FIT_QUANT`] — the same law, so every step kept has earned it and
+/// the chase ends. Measured on the self-consistency gate's 4300 K render
+/// (as shot 5400 K): one reading asked 4800 K, the re-reads 4500 K and
+/// 4400 K, where the shadows' median read 0.0; the true 4300 K scored
+/// 0.0030 of J* better than 4400 K (rel1180 msg-sc). `render_at` renders the
+/// stage's recipe at a white balance; `first` is the open-loop reading.
+pub(super) fn paired_wb_closed_loop(
+    first: (f32, f32),
+    pair_tp: &[[f32; 3]],
+    pair_w: &[f32],
+    law: render::WbLaw,
+    render_at: impl Fn((f32, f32)) -> Vec<[f32; 3]>,
+    objective: impl Fn(&[[f32; 3]]) -> f32,
+) -> (f32, f32) {
+    let mut prev = law.as_shot();
+    let mut at = first;
+    let mut px = render_at(at);
+    loop {
+        let axes = wb_axes_by_region(&px, pair_tp, pair_w);
+        let (a, m) = (wb_common(&axes.kelvin), wb_common(&axes.tint));
+        let from = law.log_gains(at);
+        let read = (a != 0.0 || m != 0.0)
+            .then(|| law.invert([from[0] + m + 0.5 * a, from[1], from[2] + m - 0.5 * a], WB_SEARCH_K))
+            .filter(|&next| next != at);
+        let next = read.unwrap_or_else(|| {
+            let last = law.log_gains(prev);
+            law.invert(std::array::from_fn(|c| 2.0 * from[c] - last[c]), WB_SEARCH_K)
+        });
+        if next == at {
+            return at;
+        }
+        let next_px = render_at(next);
+        if !ships(objective(&next_px), objective(&px)) {
+            return at;
+        }
+        (prev, at, px) = (at, next, next_px);
+    }
+}
+
 /// One axis pair's demand onto the render's own law: the Kelvin axis `a`
 /// (red against blue) and the tint axis `m` (green against their mean).
 fn wb_demand(a: f32, m: f32, law: render::WbLaw) -> (f32, f32, [f32; 3]) {

@@ -729,6 +729,24 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     let before_wb = pixels_of(&render::develop_preview(&s_img, &recipe));
     let (free_k, free_tint, _wanted) =
         paired_wb_from_populations(&before_wb, &tp, &wb_weights, law);
+    // The demand closed-loop through the engine (`paired_wb_closed_loop`):
+    // the open-loop reading under-asks. No demand stays no demand.
+    let (free_k, free_tint) = if (free_k, free_tint) == ((law.as_shot().0 / 50.0).round() * 50.0, round1(law.as_shot().1)) {
+        (free_k, free_tint)
+    } else {
+        paired_wb_closed_loop(
+            (free_k, free_tint),
+            &tp,
+            &wb_weights,
+            law,
+            |wb| {
+                let mut probe = recipe.clone();
+                (probe.temperature_k, probe.tint) = (Some(wb.0), wb.1);
+                pixels_of(&render::develop_preview(&s_img, &probe))
+            },
+            |px| look_err_with_evidence(px, &tp, &evidence),
+        )
+    };
     let wb_restore = (recipe.temperature_k, recipe.tint);
     let wb_facts = solve_white_balance(
         &s_img,
