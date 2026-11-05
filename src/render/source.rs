@@ -661,11 +661,11 @@ fn develop_cfa_signed(raw: &rawler::RawImage, dev: &RawDevelop, (colour_nr, read
     }
     let mut v = normalised_mosaic(raw);
     let width = raw.width;
-    let stage = crate::denoise::linear_chroma::fair_test(colour_nr).filter(|_| crate::denoise::linear_chroma::reads(raw));
+    let stage = crate::denoise::linear_chroma::window(colour_nr).zip(crate::denoise::linear_chroma::levels(colour_nr)).filter(|_| crate::denoise::linear_chroma::reads(raw));
     let linear_colour = stage.is_some();
     let mut cell_chroma = None;
-    if let Some(test) = stage {
-        cell_chroma = crate::denoise::linear_chroma::filter_mosaic(&mut v, width, raw.height, &config.cfa, stage_wb(raw), test, reading, crate::denoise::linear_chroma::preview_level(raw.width, raw.height, max_edge), !demosaic)
+    if let Some((rho, levels)) = stage {
+        cell_chroma = crate::denoise::linear_chroma::filter_mosaic(&mut v, width, raw.height, &config.cfa, stage_wb(raw), rho, levels, reading, crate::denoise::linear_chroma::preview_level(raw.width, raw.height, max_edge), !demosaic)
             .map(|(_, chroma)| chroma);
     }
     let pixels = PixF32::new_with(v, raw.width, raw.height);
