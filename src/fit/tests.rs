@@ -1027,6 +1027,38 @@ fn a_flat_side_reads_through_the_energy_term_alone() {
     assert!(read.correlation > 0.99, "{read:?}");
 }
 
+/// A reading has a floor at its own resolution: a band the ranks cannot
+/// resolve reads as empty, not as zero. A flat frame against the same flat
+/// frame with ONE pixel a single rank bin brighter: on a million-pixel
+/// core that pixel leaves every band below its quantisation floor
+/// (`band_energy_floors`), so both sides are the same empty bands and D
+/// reads 0 — where the old 1e-6 offset read the one pixel as structure
+/// grown from nothing (band 0 alone log2(2e-4/1e-6) ≈ 7.7). The same frame
+/// with a 10x10 block one bin brighter is content the ranks resolve, and
+/// the floor does not hide it.
+#[test]
+fn a_band_the_ranks_cannot_resolve_reads_as_empty_not_as_zero() {
+    let (w, h) = (1000u32, 1000u32);
+    let n = (w * h) as usize;
+    let level = 0.5f32;
+    let bin = 1.0 / (budget::HIST_BINS - 1) as f32;
+    let flat = vec![[level; 3]; n];
+    let weights = vec![1.0f32; n];
+    let mut one_pixel = flat.clone();
+    one_pixel[(h as usize / 2) * w as usize + w as usize / 2] = [level + bin; 3];
+    let floors = structure::band_energy_floors(((w - 6) * (h - 6)) as usize);
+    let read = structure_divergence(&flat, &one_pixel, w, h, &weights).expect("a million-pixel core reads");
+    assert!(read.d.abs() <= 1e-6, "one pixel one bin off is below every band's floor {floors:?}: {read:?}");
+    let mut block = flat.clone();
+    for y in 495..505 {
+        for x in 495..505 {
+            block[y * w as usize + x] = [level + bin; 3];
+        }
+    }
+    let resolved = structure_divergence(&flat, &block, w, h, &weights).expect("a million-pixel core reads");
+    assert!(resolved.energy_error > 0.1, "a resolved block is not floored away: {resolved:?}");
+}
+
 /// The detail stage's own escape from the scalar do-no-harm check applies
 /// only to a recipe whose non-detail controls stand at the base; the HSL
 /// wheel is one of them and was not read.

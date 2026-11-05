@@ -123,15 +123,8 @@ pub fn structure_divergence(
     }
 
     let gaussian_blur = |input: &[f32], sigma: f32| -> Vec<f32> {
-        let radius = (3.0 * sigma).ceil().max(1.0) as isize;
-        let mut kernel = Vec::with_capacity((2 * radius + 1) as usize);
-        for i in -radius..=radius {
-            kernel.push((-(i * i) as f32 / (2.0 * sigma * sigma)).exp());
-        }
-        let sum: f32 = kernel.iter().sum();
-        for v in &mut kernel {
-            *v /= sum;
-        }
+        let kernel = band_kernel(sigma);
+        let radius = (kernel.len() / 2) as isize;
         let mut tmp = vec![0.0f32; n];
         let mut out = vec![0.0f32; n];
         for y in 0..hu {
@@ -168,7 +161,7 @@ pub fn structure_divergence(
     // normalised masked blur weighs each tap by the mask, so outside pixels
     // contribute nothing and the image border needs no rule of its own.
     let mask: Vec<f32> = weights.iter().map(|v| v.max(0.0)).collect();
-    let mask_blur: Vec<Vec<f32>> = [1.0, 2.0, 4.0, 8.0, 16.0].iter().map(|&s| gaussian_blur(&mask, s)).collect();
+    let mask_blur: Vec<Vec<f32>> = BAND_SIGMAS.iter().map(|&s| gaussian_blur(&mask, s)).collect();
     let masked_blur = |input: &[f32], band: usize, sigma: f32| -> Vec<f32> {
         let weighted: Vec<f32> = input.iter().zip(&mask).map(|(v, m)| v * m).collect();
         gaussian_blur(&weighted, sigma)
@@ -178,7 +171,7 @@ pub fn structure_divergence(
             .collect()
     };
     let signature = |rank: &[f32]| -> (Vec<f32>, [f32; 5]) {
-        let blurred: Vec<Vec<f32>> = [1.0, 2.0, 4.0, 8.0, 16.0]
+        let blurred: Vec<Vec<f32>> = BAND_SIGMAS
             .iter()
             .enumerate()
             .map(|(band, &s)| masked_blur(rank, band, s))
@@ -278,15 +271,113 @@ pub fn structure_divergence(
     // an abstention refuses the uniform tile and, through `is_some_and`,
     // lets a flattened target through the mode gate as "not divergent".
     let correlation = if best > -1.0 { best as f32 } else { 1.0 };
-    let energy_error = (src_energy
-        .iter()
-        .zip(tgt_energy)
-        .map(|(&a, b)| ((b + 1e-6) / (a + 1e-6)).log2().powi(2))
-        .sum::<f32>()
-        / 5.0)
-        .sqrt();
+    let core_count = core.iter().filter(|&&v| v).count();
+    let energy_error = band_energy_error(&src_energy, &tgt_energy, &band_energy_floors(core_count));
     let d = ((1.0 - correlation).powi(2) + energy_error.powi(2)).sqrt();
     Some(Divergence { correlation, energy_error, d })
+}
+
+/// The five band sigmas of [`structure_divergence`].
+const BAND_SIGMAS: [f32; 5] = [1.0, 2.0, 4.0, 8.0, 16.0];
+
+/// The normalised, truncated (reach ceil(3 sigma)) Gaussian taps every blur
+/// of [`structure_divergence`] uses — the same taps its band floor
+/// ([`band_energy_floors`]) is derived from.
+fn band_kernel(sigma: f32) -> Vec<f32> {
+    let radius = (3.0 * sigma).ceil().max(1.0) as isize;
+    let mut kernel: Vec<f32> = (-radius..=radius).map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp()).collect();
+    let sum: f32 = kernel.iter().sum();
+    for v in &mut kernel {
+        *v /= sum;
+    }
+    kernel
+}
+
+/// The band-energy ratio of two readings, each band read no lower than its
+/// floor: `sqrt(mean_b log2(max(E_t,b, f_b) / max(E_s,b, f_b))^2)`.
+///
+/// A reading has a floor at its own resolution: a band the ranks cannot
+/// resolve reads as empty, not as zero. Below `f_b` (see
+/// [`band_energy_floors`]) a band's energy is what the rank's own
+/// quantisation leaves in it, so two such bands are the same empty band
+/// whatever their ratio, and one such band against a resolved one reads as
+/// far from it as the floor, not as far as zero. The floor replaces the
+/// 1e-6 offset the ratio used to carry, which was no reading's resolution:
+/// before DEF-3 a truncated blur's border vignette had stood in for one.
+pub(crate) fn band_energy_error(source: &[f32; 5], target: &[f32; 5], floor: &[f32; 5]) -> f32 {
+    (source
+        .iter()
+        .zip(target)
+        .zip(floor)
+        .map(|((&a, &b), &f)| (b.max(f) / a.max(f)).log2().powi(2))
+        .sum::<f32>()
+        / 5.0)
+        .sqrt()
+}
+
+/// The resolution of [`structure_divergence`]'s band energies over a core of
+/// `core` pixels, per band. DERIVATION — nothing in it is chosen:
+///
+/// * The rank image is read through a 1024-bin CDF: a rank is known to one
+///   bin's width of rank, `1/HIST_BINS`, so it carries a uniform rounding
+///   error of standard deviation `q = 1/(HIST_BINS·sqrt(12))` per sample,
+///   independent from pixel to pixel.
+/// * Band `b` is a linear filter `h_b` of the rank image: band 0 is
+///   `δ − G_1`, band `k ≥ 1` is `G_σ(k−1) − G_σ(k)` with the taps of
+///   [`band_kernel`] — separable, so `h = A⊗A − B⊗B` for 1-D taps `A`, `B`
+///   (`A = δ` for band 0). White noise of variance `q²` leaves variance
+///   `q²·Σh²` in it per sample, and `Σh² = (h⋆h)(0) = P₀² − 2Q₀² + R₀²`
+///   with `P = A⋆A`, `Q = A⋆B`, `R = B⋆B` (1-D correlations, centre taps).
+///   That is the energy² a band holding nothing but the quantum reads:
+///   `E_q,b² = q²·Σh_b²`.
+/// * The energy is the mean of `v²` over the core's `N` samples. They are
+///   not independent — neighbours share the filter — so the mean's own
+///   scatter is `E_q,b² · sqrt(2·Σρ_b²/N)` (Gaussian `v`; `ρ = h⋆h / Σh²`
+///   the band's autocorrelation, `Σρ²` its correlation area in samples),
+///   with `Σ(h⋆h)² = (P·P)² + 4(Q·Q)² + (R·R)² − 4(P·Q)² + 2(P·R)² − 4(Q·R)²`
+///   for the separable form.
+/// * The floor is the quantum's reading at one standard error of its own
+///   estimate on this population: `f_b = E_q,b · sqrt(1 + sqrt(2·Σρ_b²/N))`.
+///   A coarse band on a small core resolves less (larger `Σρ²/N`), so its
+///   floor is higher there.
+///
+/// Read in the mask's interior: near a mask edge the normalised masked blur
+/// has fewer taps, its `Σh²` is larger, and this floor is a lower bound.
+pub(crate) fn band_energy_floors(core: usize) -> [f32; 5] {
+    fn correlate(a: &[f64], b: &[f64]) -> Vec<f64> {
+        let mut out = vec![0.0; a.len() + b.len() - 1];
+        for (i, x) in a.iter().enumerate() {
+            for (j, y) in b.iter().enumerate() {
+                out[i + j] += x * y;
+            }
+        }
+        out
+    }
+    // The dot product of two centred odd-length sequences.
+    fn dot(a: &[f64], b: &[f64]) -> f64 {
+        let (ca, cb) = ((a.len() / 2) as isize, (b.len() / 2) as isize);
+        let reach = ca.min(cb);
+        (-reach..=reach).map(|k| a[(ca + k) as usize] * b[(cb + k) as usize]).sum()
+    }
+    let centre = |v: &[f64]| v[v.len() / 2];
+    let taps = |sigma: f32| band_kernel(sigma).into_iter().map(f64::from).collect::<Vec<f64>>();
+    let quantum = 1.0 / (HIST_BINS as f64 * 12f64.sqrt());
+    let n = core.max(1) as f64;
+    let mut floor = [0.0f32; 5];
+    for (band, f) in floor.iter_mut().enumerate() {
+        let a = if band == 0 { vec![1.0] } else { taps(BAND_SIGMAS[band - 1]) };
+        let b = taps(BAND_SIGMAS[band]);
+        let (p, q, r) = (correlate(&a, &a), correlate(&a, &b), correlate(&b, &b));
+        let sum_h2 = centre(&p).powi(2) - 2.0 * centre(&q).powi(2) + centre(&r).powi(2);
+        let sum_hh2 = dot(&p, &p).powi(2) + 4.0 * dot(&q, &q).powi(2) + dot(&r, &r).powi(2)
+            - 4.0 * dot(&p, &q).powi(2)
+            + 2.0 * dot(&p, &r).powi(2)
+            - 4.0 * dot(&q, &r).powi(2);
+        let area = sum_hh2 / (sum_h2 * sum_h2);
+        let e_q2 = quantum * quantum * sum_h2;
+        *f = (e_q2 * (1.0 + (2.0 * area / n).sqrt())).sqrt() as f32;
+    }
+    floor
 }
 
 /// Separable Gaussian low-pass of an analysis raster, tap weights RENORMALISED
