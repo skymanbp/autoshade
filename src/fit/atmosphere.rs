@@ -397,6 +397,13 @@ pub(super) fn fit_atmosphere_from_parts(
     // through the gain. (The R19 local corrections of `fit_zoned` read no
     // restriction: the shared-content population exists only inside this
     // solve, so their frame guards exclude nothing.)
+    //
+    // The EXPOSURE is solved on the same kept population (`ref_source` /
+    // `ref_target` above), so the same sentence applies to it: solved on the
+    // kept population, earned and guarded on the kept population
+    // (RULING-1180-int-r2). Judged on the whole frame, an exposure solved
+    // without the excluded content answered for content it was told not to
+    // answer for. The tone curve and every other control keep the frame.
     let shared_model = readable.map(|p| evidence.scoped(tp, &p.source_member, &p.target_member));
     let wb_reading = |r: &EditRecipe| {
         let px = pixels_of(&render::develop_preview(s_img, r));
@@ -404,7 +411,7 @@ pub(super) fn fit_atmosphere_from_parts(
         (frame, shared_model.as_ref().map(|m| look_err_with_evidence(&px, tp, m)))
     };
     let wb_earns = |c: Control, solved: &(f32, Option<f32>), without: &(f32, Option<f32>)| {
-        match (WB_AXES.contains(&c), solved.1, without.1) {
+        match (WB_AXES.contains(&c) || c == Control::Exposure, solved.1, without.1) {
             (true, Some(own_with), Some(own_without)) => ships_local(own_with, own_without, own_with, own_without),
             _ => ships(solved.0, without.0),
         }
@@ -427,7 +434,14 @@ pub(super) fn fit_atmosphere_from_parts(
         withhold_atmosphere_tone(&mut recipe, base, &mut facts);
     }
     // The exposure and the curve solved on it are the tone's joint solve.
-    unearned.extend(eliminate_unearned(&mut recipe, base, &[Control::Exposure, Control::ToneCurve], objective_of));
+    unearned.extend(eliminate_unearned_by(
+        &mut recipe,
+        base,
+        &[Control::Exposure, Control::ToneCurve],
+        wb_reading,
+        |r| r.0,
+        wb_earns,
+    ));
 
     let target_chroma = weighted_mean_chroma(tp, &evidence.target_weights).unwrap_or_else(|| mean_chroma(tp));
     let mut sat_pegged = false;

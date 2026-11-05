@@ -2247,6 +2247,56 @@ const CORRESPONDING_TRUE_WB: f32 = 1.2181;
 /// times a cast whose luma is 1.00, so a correct solve reads 0 EV.
 const CORRESPONDING_TRUE_EV: f32 = 0.0;
 
+/// [`invented_half_pair`] with the CORRESPONDING part of the target dimmed to
+/// 0.75 of its display value: the shared content now asks for a real exposure
+/// cut, while the invented slab (target rows 0-57, no source counterpart, 60 %
+/// of the frame) stays as bright as before.
+fn dimmed_shared_half_pair() -> (DynamicImage, DynamicImage) {
+    let (src, tgt) = invented_half_pair();
+    let mut t = tgt.to_rgb8();
+    for (_, y, p) in t.enumerate_pixels_mut() {
+        if y >= INVENTED_ROWS {
+            for c in p.0.iter_mut() {
+                *c = (*c as f32 * 0.75).round() as u8;
+            }
+        }
+    }
+    (src, DynamicImage::ImageRgb8(t))
+}
+
+/// "What the restriction excludes, no guard reads", for the exposure
+/// (RULING-1180-int-r2): the Atmosphere exposure is SOLVED on the kept
+/// population (the shared content), so it is earned and guarded there too.
+/// On [`dimmed_shared_half_pair`] the shared content asks for an exposure cut
+/// and the invented slab, which no source pixel answers for, is hurt by one;
+/// the restricted solve's cut ships.
+/// MUTATION: the exposure earned and guarded on the whole frame -> the slab
+/// refuses the cut and the exposure goes back to 0.
+#[test]
+fn an_exposure_solved_on_the_shared_content_is_earned_there() {
+    let (src, tgt) = dimmed_shared_half_pair();
+    let field = |_: &DynamicImage,
+                 _: &DynamicImage|
+     -> anyhow::Result<crate::correspond::CorrespondenceField> {
+        Ok(corresponding_field())
+    };
+    let paired = atmosphere_fit(&src, &tgt, Some(&field));
+    assert_eq!(paired.mode, FitMode::Atmosphere, "premise: the Atmosphere solve");
+    match paired.atmosphere_reference {
+        AtmosphereReference::SharedContent { .. } => {}
+        other => panic!("premise: the restriction is in force, got {other:?}"),
+    }
+    eprintln!(
+        "SHARED_EXPOSURE {} (err {} -> {}): {}",
+        paired.recipe.exposure_ev, paired.err_before, paired.err_after, paired.recipe.rationale
+    );
+    assert!(
+        paired.recipe.exposure_ev <= -0.3,
+        "the shared content's exposure cut ships: {}",
+        paired.recipe.exposure_ev
+    );
+}
+
 /// Atmosphere mode on demand, through the route the zoned pass itself
 /// uses (`divergent_zone_promotes`). These tests are about what the
 /// Atmosphere solve READS, not about where a synthetic texture happens to
