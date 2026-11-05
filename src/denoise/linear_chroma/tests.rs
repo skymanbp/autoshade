@@ -75,7 +75,7 @@ fn rggb() -> rawler::cfa::CFA {
 fn the_stage_takes_the_colour_noise_and_leaves_the_greens_and_the_mean() {
     let before = mosaic(0.01, 0.0);
     let mut after = before.clone();
-    let (model, _, _) = filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, 3).expect("a Bayer mosaic with noise fits a model");
+    let (model, _, _) = filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, |_| 3).expect("a Bayer mosaic with noise fits a model");
     // The greens are never written.
     for y in 0..H {
         for x in 0..W {
@@ -104,7 +104,7 @@ fn a_colour_edge_the_noise_cannot_make_is_kept() {
     let step = 12.0 * cell_sd;
     let before = mosaic(level, step);
     let mut after = before.clone();
-    filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, 3).expect("model");
+    filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, |_| 3).expect("model");
     let (m0, m1) = (column_dr(&before), column_dr(&after));
     let side = |m: &[f64], cols: std::ops::Range<usize>| cols.clone().map(|c| m[c]).sum::<f64>() / cols.len() as f64;
     let e = W / 4; // the edge, in cells
@@ -138,10 +138,10 @@ fn where_k_is_unbounded_the_slider_weakens_the_stage_through_its_window() {
     let before = mosaic(0.01, 0.0);
     let at = |nr: f32| {
         let mut m = before.clone();
-        let (_, k, _) = filter_mosaic(&mut m, W, H, &rggb(), WB, scale_of(nr).unwrap(), window(nr)).expect("a model");
+        let (_, k, _) = filter_mosaic(&mut m, W, H, &rggb(), WB, scale_of(nr).unwrap(), |k| window(nr, k)).expect("a model");
         (k, var_dr(&m, 0..W / 2))
     };
-    assert_eq!((window(10.0), window(25.0), window(100.0)), (1, 7, 23), "the display pass's sample count in cells");
+    assert_eq!((window(10.0, f64::INFINITY), window(25.0, f64::INFINITY), window(100.0, f64::INFINITY)), (1, 7, 23), "the display pass's sample count in cells");
     let ((k10, v10), (k25, v25)) = (at(10.0), at(25.0));
     assert!(k10.is_infinite() && k25.is_infinite(), "a noise-only frame has no texture to protect: k {k10} / {k25}");
     assert!(v10 > v25, "residual colour variance at 10 ({v10:.3e}) must exceed that at 25 ({v25:.3e})");
@@ -158,7 +158,7 @@ fn where_k_is_unbounded_the_slider_weakens_the_stage_through_its_window() {
 fn the_window_averages_as_many_samples_as_the_display_pass_it_replaces() {
     for nr in [10.0f32, 20.0, 25.0, 50.0, 75.0, 100.0] {
         let n_px = display_samples(nr);
-        let rho = window(nr);
+        let rho = plain_window(nr);
         let cells = n_px / 4.0;
         println!("colour NR {nr}: display share {:.6}, N {n_px:.1} px = {cells:.1} cells -> half side {rho} cells", 1.0 / n_px);
         let want = (((cells.sqrt() - 1.0) / 2.0).round().max(1.0)) as usize;
@@ -167,17 +167,47 @@ fn the_window_averages_as_many_samples_as_the_display_pass_it_replaces() {
         let off = |r: usize| ((2 * r + 1) as f64 - cells.sqrt()).abs();
         assert!(rho == 1 || off(rho) <= off(rho - 1) && off(rho) <= off(rho + 1), "at {nr}: half side {rho}");
     }
-    assert_eq!(window(DEFAULT_AMOUNT), 7, "at 25 the display pass averages 1005 pixels, 251 cells");
+    assert_eq!(plain_window(DEFAULT_AMOUNT), 7, "at 25 the display pass averages 1005 pixels, 251 cells");
 }
 
-/// The standard normal's mass within `±t` (Simpson's rule on `0..t`) and its
-/// density at `t`.
-fn normal_mass(t: f64) -> (f64, f64) {
-    let phi = |x: f64| (-x * x / 2.0).exp() / std::f64::consts::TAU.sqrt();
-    let steps = 2000;
-    let h = t / steps as f64;
-    let inner: f64 = (1..steps).map(|i| phi(i as f64 * h) * if i % 2 == 1 { 4.0 } else { 2.0 }).sum();
-    (2.0 * (phi(0.0) + phi(t) + inner) * h / 3.0, phi(t))
+/// The stage's window leaves the display pass's share at the width it runs
+/// at: the skipped mean over `N` cells at `t` keeps `1/(N·(Z − 2t·φ(t)))` of
+/// a sample's noise, so the window is the odd square nearest (in half side)
+/// to the `N` at which that is the display share `4 / display_samples`,
+/// `t = k·√(1 + 1/(N·Z))` read with it to its fixed point. On daylight's `k`
+/// (wide `t`) it is the plain mean's window; at the night sky's `k` (1.43,
+/// rel1180 msg-e3 round 9) it is wider, 11 cells at 25; unbounded `k` is the
+/// plain mean's. Printed per strength at the three photos' `k`.
+///
+/// MUTATION: the window from the plain mean's share (the `Z − 2t·φ(t)`
+/// factor dropped): the night sky's window is then 7 cells and keeps 2.3
+/// times the display pass's share.
+#[test]
+fn the_window_leaves_the_display_share_at_the_width_the_stage_runs_at() {
+    for k in [1.432, 6.210, 13.614, f64::INFINITY] {
+        for nr in [10.0f32, 20.0, 25.0, 50.0, 75.0, 100.0] {
+            let ks = k * scale_of(nr).unwrap();
+            let plain = display_samples(nr) / 4.0;
+            let (mut t, mut n) = (ks, plain);
+            for _ in 0..50 {
+                if !t.is_finite() {
+                    break;
+                }
+                let (z, phi) = normal_mass(t);
+                n = plain / (z - 2.0 * t * phi);
+                t = ks * (1.0 + 1.0 / (n * z)).sqrt();
+            }
+            let rho = window(nr, ks);
+            println!("k {k:.3} colour NR {nr}: k_s {ks:.3}, t {t:.3}, N {n:.1} cells (plain {plain:.1}) -> half side {rho} cells");
+            let off = |r: usize| ((2 * r + 1) as f64 - n.sqrt()).abs();
+            assert!(
+                (rho == 1 || off(rho) <= off(rho - 1)) && off(rho) <= off(rho + 1),
+                "k {k}, colour NR {nr}: the skipped mean at t = {t:.3} leaves the display share over {n:.1} cells, half side {rho} is not the nearest"
+            );
+        }
+    }
+    assert_eq!(window(DEFAULT_AMOUNT, 13.614), plain_window(DEFAULT_AMOUNT), "daylight's t is wide: the plain mean's window");
+    assert_eq!(window(DEFAULT_AMOUNT, 1.432), 11, "the night sky at 25");
 }
 
 /// On a flat frame the filter keeps of a cell's own noise what the skipped
@@ -250,7 +280,7 @@ fn a_pattern_that_is_not_a_two_by_two_bayer_is_left_alone() {
     let before = mosaic(0.01, 0.0);
     let mut after = before.clone();
     let xtrans = rawler::cfa::CFA::new("GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG");
-    assert!(filter_mosaic(&mut after, W, H, &xtrans, WB, 1.0, 3).is_none());
+    assert!(filter_mosaic(&mut after, W, H, &xtrans, WB, 1.0, |_| 3).is_none());
     assert!(before.iter().zip(&after).all(|(a, b)| a.to_bits() == b.to_bits()));
 }
 
@@ -322,7 +352,7 @@ fn photo_k_reading() {
     let model = NoiseModel::fit(&pts, width, raw.height).expect("model");
     let t1 = t0.elapsed();
     let cells = Cells::of(&v, width, raw.height, sites, wb, &model, &pts).expect("cells");
-    let rho = window(DEFAULT_AMOUNT);
+    let rho = plain_window(DEFAULT_AMOUNT);
     let (k, read) = photo_k(&cells, &model, &pts, wb, rho);
     let t2 = t0.elapsed();
     let usable = pts.iter().filter(|p| p.usable).count();

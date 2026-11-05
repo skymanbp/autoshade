@@ -83,16 +83,24 @@
 //! test, not by a blur. The display pass (`render::detail::chroma_nr`) leaves
 //! on a flat region the share `Σw²` of white noise its kernel's weights give
 //! (`render::chroma_nr_flat_noise_share`, from its own constants); a plain
-//! mean leaves `1/N` of it, so the stage's window holds `N = 1/Σw²` pixels,
-//! `N/4` cells: at 25, `Σw² = 0.000995`, 1005 pixels, a half side of
-//! `(√251 − 1)/2 = 7.4`, so 7 cells (rel1180 msg-e3 round 9). The display
-//! pass's reach (its radius law) stays that pass's own, for the sources it
-//! still runs on. `k` itself is read at the default strength's window
-//! ([`DEFAULT_AMOUNT`]), so it is one reading per photo.
+//! mean leaves `1/N` of it, so a plain mean's window holds `N = 1/Σw²`
+//! pixels, `N/4` cells ([`plain_window`]): at 25, `Σw² = 0.000995`, 1005
+//! pixels, a half side of `(√251 − 1)/2 = 7.4`, so 7 cells (rel1180 msg-e3
+//! round 9). The stage is not a plain mean: the skipped mean at its test
+//! width `t` keeps `1/(N·(Z − 2t·φ(t)))` of a sample's noise (above), so its
+//! window holds the `N` cells at which `N·(Z − 2t·φ(t))` is the display
+//! pass's `N/4` ([`window`]; `t` the width the stage runs at, so it follows
+//! the photo): the same on daylight, where `t` is wide and `Z − 2t·φ(t)` is 1
+//! (7 cells at 25), wider on a night sky (11 cells at its `k` 1.43, rel1180
+//! msg-e3 round 10). The display pass's reach (its radius law) stays that
+//! pass's own, for the sources it still runs on. `k` itself is read over the
+//! plain mean's window at the default strength ([`DEFAULT_AMOUNT`]) — the one
+//! window that does not depend on the reading — so it is one reading per
+//! photo.
 //!
 //! **The slider.** "Colour noise reduction" scales `k` linearly and sets the
 //! window as above: 0 is off, the default strength (Lightroom's own 25) is the
-//! photo's own `k` over 7 cells, 100 is four times it over 23. Below 25 the
+//! photo's own `k` over (on daylight) 7 cells, 100 is four times it over 23. Below 25 the
 //! display pass blends its result with the input and keeps more than one
 //! cell's worth of noise; the stage's window is then its least, one cell.
 //! Where `k` is unbounded (no texture) the scale cannot weaken it, and the
@@ -145,18 +153,63 @@ pub(crate) fn display_samples(color_nr: f32) -> f64 {
     1.0 / crate::render::chroma_nr_flat_noise_share(color_nr.clamp(0.0, 100.0) / 100.0, smooth / 100.0)
 }
 
-/// The window's half side in cells at slider value `color_nr` (0..=100): the
-/// square of cells that holds as many samples as the display pass averages
-/// ([`display_samples`] pixels, four to a cell), half side `(√N − 1)/2`
-/// rounded, at least one cell (see the module).
-pub(crate) fn window(color_nr: f32) -> usize {
-    (((display_samples(color_nr) / 4.0).sqrt() - 1.0) / 2.0).round().max(1.0) as usize
+/// The half side in cells of the square holding `n` cells, `(√n − 1)/2`
+/// rounded, at least one cell.
+fn half_side(n: f64) -> usize {
+    ((n.sqrt() - 1.0) / 2.0).round().max(1.0) as usize
+}
+
+/// The plain mean's window at slider value `color_nr` (0..=100): the square
+/// of cells that holds as many samples as the display pass averages
+/// ([`display_samples`] pixels, four to a cell). The window `k` is read over.
+pub(crate) fn plain_window(color_nr: f32) -> usize {
+    half_side(display_samples(color_nr) / 4.0)
+}
+
+/// The standard normal's mass within `±t` and its density at `t` (Simpson's
+/// rule on `0..t` in 2000 steps, exact to 1e-12 at any `t` the stage reads;
+/// `(1, 0)` at an unbounded `t`).
+pub(crate) fn normal_mass(t: f64) -> (f64, f64) {
+    let phi = |x: f64| (-x * x / 2.0).exp() / std::f64::consts::TAU.sqrt();
+    if !t.is_finite() {
+        return (1.0, 0.0);
+    }
+    let steps = 2000;
+    let h = t / steps as f64;
+    let inner: f64 = (1..steps).map(|i| phi(i as f64 * h) * if i % 2 == 1 { 4.0 } else { 2.0 }).sum();
+    (2.0 * (phi(0.0) + phi(t) + inner) * h / 3.0, phi(t))
+}
+
+/// The window's half side in cells at slider value `color_nr` (0..=100) for
+/// the stage running at `k` (in `σ_d`): the `N` cells at which the skipped
+/// mean at its test width `t = k·√(1 + 1/n)` (in one cell's `σ`, against an
+/// estimate of `n = N·Z(t)` samples) leaves the display pass's share,
+/// `N·(Z(t) − 2t·φ(t)) = display_samples / 4` (see the module); `t` and `N`
+/// depend on each other, and are read in turn until the half side repeats.
+/// Unbounded `k` is the plain mean's window.
+pub(crate) fn window(color_nr: f32, k: f64) -> usize {
+    let plain = display_samples(color_nr) / 4.0;
+    if !k.is_finite() {
+        return half_side(plain);
+    }
+    let (mut t, mut half) = (k, 0);
+    loop {
+        let (z, phi) = normal_mass(t);
+        let n = plain / (z - 2.0 * t * phi);
+        t = k * (1.0 + 1.0 / (n * z)).sqrt();
+        let next = half_side(n);
+        if next == half {
+            return half;
+        }
+        half = next;
+    }
 }
 
 /// Run the stage on the normalised signed `mosaic` (`width × height`, sites
 /// of `cfa`), white-balanced by `wb` (any scale; green is divided out), at
-/// `scale` times the photo's own `k` ([`photo_k`], read at the default
-/// strength's window) over a window of half side `rho` cells ([`window`]). Returns the fitted model, the `k` it ran at and
+/// `scale` times the photo's own `k` ([`photo_k`], read over the plain
+/// mean's window at the default strength, [`plain_window`]) over a window of
+/// half side `rho(k)` cells for the `k` it runs at ([`window`]). Returns the fitted model, the `k` it ran at and
 /// the filtered cell chroma the demosaiced pixels are rebuilt on
 /// ([`CellChroma::rebuild`]), or `None` — and the mosaic untouched — when the
 /// pattern is not a 2×2 RGB Bayer or the frame has too few usable patches for
@@ -168,7 +221,7 @@ pub(crate) fn filter_mosaic(
     cfa: &rawler::cfa::CFA,
     wb: [f64; 3],
     scale: f64,
-    rho: usize,
+    rho: impl Fn(f64) -> usize,
 ) -> Option<(NoiseModel, f64, CellChroma)> {
     let sites = bayer_sites(cfa)?;
     if mosaic.len() != width * height || wb[1].is_nan() || wb[1] <= 0.0 || scale.is_nan() || scale <= 0.0 {
@@ -178,7 +231,8 @@ pub(crate) fn filter_mosaic(
     let pts = patches(mosaic, width, height, sites, wb);
     let model = NoiseModel::fit(&pts, width, height)?;
     let cells = Cells::of(mosaic, width, height, sites, wb, &model, &pts)?;
-    let k = photo_k(&cells, &model, &pts, wb, window(DEFAULT_AMOUNT)).0 * scale;
+    let k = photo_k(&cells, &model, &pts, wb, plain_window(DEFAULT_AMOUNT)).0 * scale;
+    let rho = rho(k);
     let filtered: Vec<[f32; 2]> = (0..cells.cw * cells.ch).into_par_iter().map(|i| cells.filtered(i, k, rho)).collect();
     cells.write(mosaic, width, sites, wb, &filtered);
     let chroma = CellChroma {
