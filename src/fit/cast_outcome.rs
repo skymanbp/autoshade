@@ -359,6 +359,35 @@ pub(crate) fn ships_local(own_with: f32, own_without: f32, frame_with: f32, fram
     ships(own_with, own_without) && frame_with - frame_without <= FIT_QUANT
 }
 
+/// One recipe's readings for R22 (a)'s verdict: frame J*, `E_paired` per
+/// luminance band (J* units, [`look::LumaBands::paired_readings`]), and the
+/// render's L* per pixel (for the control's own response).
+pub(super) type BandReading = (f32, Vec<f32>, Vec<f32>);
+
+/// R22 (a): "the band a global control earns on is the band its own curve
+/// acts on". A control that earns FIT_QUANT on the frame ships. Otherwise
+/// only the four tone sliders, which act on a luminance band by construction
+/// (whites / highlights the top of the L* range, blacks / shadows the
+/// bottom), may earn on ONE band: the band their own response weights most
+/// ([`look::LumaBands::acting_band`], fixed before any error is read), with
+/// the frame a guard only ([`ships_local`]). Contrast, exposure and the tone
+/// curve act on the frame; saturation, the mixer and the per-band controls
+/// act on hue / chroma bands, which H_ab reads on the colour side.
+pub(super) fn earns_on_its_band(
+    c: Control, bands: &look::LumaBands, solved: &BandReading, without: &BandReading,
+) -> bool {
+    if ships(solved.0, without.0) {
+        return true;
+    }
+    if !matches!(c, Control::Whites | Control::Highlights | Control::Shadows | Control::Blacks) {
+        return false;
+    }
+    bands.acting_band(&solved.2, &without.2).is_some_and(|k| match (solved.1.get(k), without.1.get(k)) {
+        (Some(&with), Some(&own_without)) => ships_local(with, own_without, solved.0, without.0),
+        _ => false,
+    })
+}
+
 /// One control a global solve sets, as [`eliminate_unearned`] reads it: a
 /// slider, one white-balance axis, one mixer value, one grade wheel, one
 /// curve. Its "zero" is the value the solve started from (`base`, the

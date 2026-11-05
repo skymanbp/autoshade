@@ -212,6 +212,85 @@ pub(crate) fn look_terms(a: &[[f32; 3]], b: &[[f32; 3]], evidence: &EvidenceMode
     LookTerms { paired, dist, share, hue: hue * hue_weight.min(1.0), structural: structural.min(1.0) }
 }
 
+/// The number of luminance bands a tone slider's own population is read on
+/// (R22): the intervals between `E_dist`'s 21 quantiles, so each band holds
+/// one twentieth of the paired presence mass. No new number.
+pub(crate) const LUMA_BANDS: usize = 20;
+
+/// R22 (a): the [`LUMA_BANDS`] luminance bands of the TARGET's paired present
+/// pixels — `E_dist`'s quantile bins, cut on the target's L* so the population
+/// is the same for every recipe compared — and each member's presence weight.
+pub(crate) struct LumaBands {
+    band: Vec<Option<usize>>,
+    weight: Vec<f64>,
+}
+
+pub(crate) fn luma_bands(target: &[[f32; 3]], evidence: &EvidenceModel) -> LumaBands {
+    let n = target.len();
+    let weight = (0..n)
+        .map(|i| {
+            let paired = evidence.paired.get(i).copied().unwrap_or(false);
+            let w = evidence.source_presence_weights.get(i).copied().unwrap_or(0.0).max(0.0) as f64;
+            if paired { w } else { 0.0 }
+        })
+        .collect::<Vec<_>>();
+    let mut members: Vec<(f32, usize)> =
+        (0..n).filter(|&i| weight[i] > 0.0).map(|i| (cie_lab(&target[i])[0], i)).collect();
+    members.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let total: f64 = members.iter().map(|&(_, i)| weight[i]).sum();
+    let mut band = vec![None; n];
+    let mut below = 0.0f64;
+    for &(_, i) in &members {
+        band[i] = Some((((below + 0.5 * weight[i]) / total * LUMA_BANDS as f64) as usize).min(LUMA_BANDS - 1));
+        below += weight[i];
+    }
+    LumaBands { band, weight }
+}
+
+impl LumaBands {
+    /// `E_paired` read band by band, in J*'s own unit (`0.75 · E_paired` of a
+    /// population that pairs whole). Empty when nothing pairs.
+    pub(crate) fn paired_readings(&self, a: &[[f32; 3]], b: &[[f32; 3]], evidence: &EvidenceModel) -> Vec<f32> {
+        let n = a.len().min(b.len()).min(self.band.len());
+        if self.band[..n].iter().all(Option::is_none) {
+            return Vec::new();
+        }
+        let (w, h) = (evidence.width as usize, evidence.height as usize);
+        let local = |px: &[[f32; 3]]| -> Vec<[f32; 3]> {
+            if w * h == px.len() { low_pass_pixels(px, w, h, PAIRED_POOL_SIGMA) } else { px.to_vec() }
+        };
+        let (la, lb) = (local(&a[..n]), local(&b[..n]));
+        let (mut sum, mut mass) = (vec![0.0f64; LUMA_BANDS], vec![0.0f64; LUMA_BANDS]);
+        for i in 0..n {
+            let Some(k) = self.band[i] else { continue };
+            let (x, y) = (cie_lab(&la[i]), cie_lab(&lb[i]));
+            let de = ((x[0] - y[0]).powi(2) + (x[1] - y[1]).powi(2) + (x[2] - y[2]).powi(2)).sqrt();
+            sum[k] += self.weight[i] * de as f64;
+            mass[k] += self.weight[i];
+        }
+        (0..LUMA_BANDS).map(|k| if mass[k] > 0.0 { (0.75 * sum[k] / mass[k] / 100.0) as f32 } else { 0.0 }).collect()
+    }
+
+    /// R22 (a): the band a tone slider ACTS on, set by its own response before
+    /// any error is read — the band whose members its move shifts most in L*
+    /// (presence-weighted mean |ΔL*| between the render with it and the render
+    /// without it). Not the band where its removal costs most: a control that
+    /// may earn on any of twenty bands has twenty chances where the frame has
+    /// one. `None` when the move shifts no paired pixel.
+    pub(crate) fn acting_band(&self, with_l: &[f32], without_l: &[f32]) -> Option<usize> {
+        let n = with_l.len().min(without_l.len()).min(self.band.len());
+        let (mut sum, mut mass) = (vec![0.0f64; LUMA_BANDS], vec![0.0f64; LUMA_BANDS]);
+        for i in 0..n {
+            let Some(k) = self.band[i] else { continue };
+            sum[k] += self.weight[i] * (with_l[i] - without_l[i]).abs() as f64;
+            mass[k] += self.weight[i];
+        }
+        let response = (0..LUMA_BANDS).map(|k| if mass[k] > 0.0 { sum[k] / mass[k] } else { 0.0 }).collect::<Vec<_>>();
+        let best = (0..LUMA_BANDS).max_by(|a, b| response[*a].total_cmp(&response[*b]))?;
+        (response[best] > 0.0).then_some(best)
+    }
+}
+
 /// `T_L`: the mean absolute gap between two weighted L*/100 CDFs at 21
 /// quantiles (each clamped to [`P_CLIP`]), over CIE Lab pixels.
 fn lightness_cdf_gap(la: &[[f32; 3]], wa: &[f32], lb: &[[f32; 3]], wb: &[f32]) -> f32 {

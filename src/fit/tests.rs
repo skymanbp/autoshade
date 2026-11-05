@@ -9707,6 +9707,81 @@ fn the_white_balance_path_starts_at_as_shot() {
     assert!(t > 0.0 && t < 16.6, "and in tint: {t}");
 }
 
+/// R22 (a): the band a tone slider earns on is the band its own response
+/// weights most, fixed before any error is read. A 64x64 grey ramp (target
+/// luma rising with the row) and a "whites" move that brightens only the six
+/// brightest rows: the acting band is the brightest, and a darker-half error
+/// that the move happens to leave alone does not move it there; the band
+/// readings of the move land in the brightest bands and nowhere in the darker
+/// half.
+///
+/// Both renders carry the same darker-row error against the target, so it is
+/// no part of the move's response. The law's own mutation is at the solve:
+/// the band read as the one whose reading the removal raises most (the
+/// refused argmax over twenty) — the exposure-only self-consistency case
+/// then ships unset tone sliders again.
+#[test]
+fn a_tone_sliders_band_is_the_band_its_own_response_weights_most() {
+    let (w, h) = (64usize, 64usize);
+    let target: Vec<[f32; 3]> = (0..w * h)
+        .map(|i| {
+            let v = 0.1 + 0.8 * (i / w) as f32 / (h - 1) as f32;
+            [v, v, v]
+        })
+        .collect();
+    let without: Vec<[f32; 3]> = target
+        .iter()
+        .enumerate()
+        .map(|(i, p)| if i / w < 6 { [p[0] + 0.03, p[1], p[2]] } else { *p })
+        .collect();
+    let with: Vec<[f32; 3]> = without
+        .iter()
+        .enumerate()
+        .map(|(i, p)| if i / w >= h - 6 { [(p[0] + 0.05).min(1.0), (p[1] + 0.05).min(1.0), (p[2] + 0.05).min(1.0)] } else { *p })
+        .collect();
+    let evidence = evidence_model(&without, &target);
+    let bands = look::luma_bands(&target, &evidence);
+    let lightness = |px: &[[f32; 3]]| px.iter().map(|p| cie_lab(p)[0]).collect::<Vec<_>>();
+    let readings = bands.paired_readings(&with, &target, &evidence);
+    assert_eq!(readings.len(), look::LUMA_BANDS, "every band reads: {readings:?}");
+    let acting = bands.acting_band(&lightness(&with), &lightness(&without));
+    assert_eq!(acting, Some(look::LUMA_BANDS - 1), "the move acts on the brightest band: {acting:?}");
+    let move_only = bands.paired_readings(&with, &without, &evidence);
+    assert!(
+        move_only[..look::LUMA_BANDS / 2].iter().all(|&b| b < 1e-6),
+        "the darker half does not read a move in the brightest rows: {move_only:?}"
+    );
+    assert_eq!(bands.acting_band(&lightness(&without), &lightness(&without)), None, "no move, no band");
+
+    // THE VERDICT on readings that separate the two laws: the frame does not
+    // earn (J* equal), the move's own band (the brightest) gains nothing, and
+    // the darkest band — which the move does not touch — reads 3 FIT_QUANT
+    // better with it. "The band a global control earns on is the band its own
+    // curve acts on": the whites do not ship; the darkest band's gain belongs
+    // to no tone slider that does not act there. With its own band earning,
+    // the whites ship; the contrast (frame only) does not, even then.
+    // MUTATION: the band read as the one the removal costs most (the refused
+    // argmax over twenty) -> the first verdict ships.
+    let mut without_bands = vec![0.01f32; look::LUMA_BANDS];
+    without_bands[0] += 3.0 * FIT_QUANT;
+    let solved_reading: BandReading = (0.05, vec![0.01; look::LUMA_BANDS], lightness(&with));
+    let without_reading: BandReading = (0.05, without_bands.clone(), lightness(&without));
+    assert!(
+        !earns_on_its_band(Control::Whites, &bands, &solved_reading, &without_reading),
+        "a gain on a band the whites do not act on is not the whites' gain"
+    );
+    without_bands[look::LUMA_BANDS - 1] += 2.0 * FIT_QUANT;
+    let without_reading: BandReading = (0.05, without_bands, lightness(&without));
+    assert!(
+        earns_on_its_band(Control::Whites, &bands, &solved_reading, &without_reading),
+        "the whites earn on the band they act on"
+    );
+    assert!(
+        !earns_on_its_band(Control::Contrast, &bands, &solved_reading, &without_reading),
+        "the contrast acts on the frame and reads the frame alone"
+    );
+}
+
 /// R15: `E_dist` is in `E_paired`'s units. Two flat frames differ by one
 /// colour, so every pixel's local-mean dE76 is the same d, and every
 /// quantile of L*, a* and b* is offset by that channel's share of d: the

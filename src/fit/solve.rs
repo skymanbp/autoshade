@@ -1441,8 +1441,32 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         withdraw_curves_for_delivered_fan(&s_img, &sp, &evidence, &mut recipe, &mut end_px);
     let cast_withdrawn = matches!(delivered_fan, Some((_, _, None)));
     // R8, once more on the finished global recipe: every control the solve
-    // set must earn FIT_QUANT of J* against its own absence.
-    let finished_dropped = eliminate_unearned(&mut recipe, base, &global_controls(), finished_err);
+    // set must earn FIT_QUANT of J* against its own absence — R22 (a): "the
+    // band a global control earns on is the band its own curve acts on". The
+    // four tone sliders act on a luminance band by construction (whites and
+    // highlights the top of the L* range, blacks and shadows the bottom), and
+    // read on the frame alone their gain is divided by that band's share: on
+    // p38 whites +19.4 took the brightest tenth 6.04 -> 5.09 dE and read
+    // ~0.001 of frame J* (rel1180 msg9 R18). Each earns FIT_QUANT of
+    // `E_paired` (J* units) on the ONE band its own response weights most
+    // ([`look::LumaBands::acting_band`], fixed before any error is read), the
+    // frame's J* a guard only — R19's local ship law. Contrast, exposure and
+    // the tone curve act on the frame and read the frame alone; saturation,
+    // the mixer and the per-band controls act on hue / chroma bands, which
+    // H_ab already reads on the colour side: no L* band. A control that earns
+    // on the frame ships as it always did. No new number.
+    let target_bands = look::luma_bands(&tp, &evidence);
+    let banded = |candidate: &EditRecipe| {
+        let px = pixels_of(&render::develop_preview(&s_img, candidate));
+        let lightness = px.iter().map(|p| cie_lab(p)[0]).collect::<Vec<_>>();
+        let reading: BandReading =
+            (look_err_with_evidence(&px, &tp, &evidence), target_bands.paired_readings(&px, &tp, &evidence), lightness);
+        reading
+    };
+    let band_earns =
+        |c: Control, solved: &BandReading, without: &BandReading| earns_on_its_band(c, &target_bands, solved, without);
+    let finished_dropped =
+        eliminate_unearned_by(&mut recipe, base, &global_controls(), banded, |r| r.0, band_earns);
     if !finished_dropped.is_empty() {
         end_px = pixels_of(&render::develop_preview(&s_img, &recipe));
     }
