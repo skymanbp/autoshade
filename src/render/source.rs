@@ -204,7 +204,7 @@ pub(super) fn render_frame(
         strength,
         crate::denoise::mosaic_args_for(&rawimage).is_ok(),
         grain_weights,
-        || develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), (colour_nr, reading.as_ref()), calibration, working, profile_stage.as_ref())
+        || develop_raw_buffer(&rawimage, &dev, geometry_cfa.as_ref(), (colour_nr, reading.as_ref(), max_edge), calibration, working, profile_stage.as_ref())
             .map(|(rgb, _, _)| rgb),
     )?;
     // --- AI denoise on the MOSAIC (opt-in), BEFORE demosaic (2026-09-15).
@@ -230,7 +230,7 @@ pub(super) fn render_frame(
 
     // The develop in its two halves with the mosaic dropped between them
     // (`develop_raw_buffer` is the same two halves back to back).
-    let (data, w, h, linear_colour) = develop_raw_linear(&rawimage, &dev, geometry_cfa.as_ref(), (colour_nr, reading.as_ref()))?;
+    let (data, w, h, linear_colour) = develop_raw_linear(&rawimage, &dev, geometry_cfa.as_ref(), (colour_nr, reading.as_ref(), max_edge))?;
     // The clean RGB owns the remaining work. Drop the mosaic before returning
     // grain; the original RGB already died when capture_original kept only Y.
     drop(rawimage);
@@ -547,10 +547,12 @@ pub(super) fn settle_camera_buffer(
     data
 }
 
-/// The colour stage's strength (0 is off) and the exposure's reading it runs
+/// The colour stage's strength (0 is off), the exposure's reading it runs
 /// on (`None`: read off the mosaic the develop holds, which is then the
-/// sensor's).
-pub(super) type ColourNr<'a> = (f32, Option<&'a crate::denoise::linear_chroma::SourceReading>);
+/// sensor's) and the long edge the develop is capped at (`None`: full size),
+/// whose pixels the stage's pass reads its scale from
+/// (`linear_chroma::preview_level`).
+pub(super) type ColourNr<'a> = (f32, Option<&'a crate::denoise::linear_chroma::SourceReading>, Option<u32>);
 
 /// The mosaic normalised and SIGNED: rawler's rescale `(v − black) / (white −
 /// black)` per 2×2 site in its pairing of lines, no clamp
@@ -622,7 +624,7 @@ fn read_sensor(raw: &rawler::RawImage) -> Option<crate::denoise::linear_chroma::
 /// per-pixel nonlinear stage has read it yet. The flag beside the frame
 /// reports whether it ran (the mosaic is one the stage reads,
 /// `linear_chroma::reads`).
-fn develop_cfa_signed(raw: &rawler::RawImage, dev: &RawDevelop, (colour_nr, reading): ColourNr<'_>) -> Option<(Intermediate, bool)> {
+fn develop_cfa_signed(raw: &rawler::RawImage, dev: &RawDevelop, (colour_nr, reading, max_edge): ColourNr<'_>) -> Option<(Intermediate, bool)> {
     use rawler::imgop::sensor::bayer::{ppg::PPGDemosaic, Demosaic};
     use rawler::pixarray::PixF32;
     use rawler::rawimage::RawPhotometricInterpretation as Photo;
@@ -638,7 +640,7 @@ fn develop_cfa_signed(raw: &rawler::RawImage, dev: &RawDevelop, (colour_nr, read
     let mut cell_chroma = None;
     if let Some(scale) = stage {
         let rho = |k| crate::denoise::linear_chroma::window(colour_nr, k);
-        cell_chroma = crate::denoise::linear_chroma::filter_mosaic(&mut v, width, raw.height, &config.cfa, stage_wb(raw), scale, rho, reading)
+        cell_chroma = crate::denoise::linear_chroma::filter_mosaic(&mut v, width, raw.height, &config.cfa, stage_wb(raw), scale, rho, reading, crate::denoise::linear_chroma::preview_level(raw.width, raw.height, max_edge))
             .map(|(_, _, chroma)| chroma);
     }
     let pixels = PixF32::new_with(v, raw.width, raw.height);

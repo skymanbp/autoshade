@@ -75,7 +75,7 @@ fn rggb() -> rawler::cfa::CFA {
 fn the_stage_takes_the_colour_noise_and_leaves_the_greens_and_the_mean() {
     let before = mosaic(0.01, 0.0);
     let mut after = before.clone();
-    let (SourceReading { model, .. }, _, _) = filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, |_| 3, None).expect("a Bayer mosaic with noise fits a model");
+    let (SourceReading { model, .. }, _, _) = filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, |_| 3, None, 0).expect("a Bayer mosaic with noise fits a model");
     // The greens are never written.
     for y in 0..H {
         for x in 0..W {
@@ -104,7 +104,7 @@ fn a_colour_edge_the_noise_cannot_make_is_kept() {
     let step = 12.0 * cell_sd;
     let before = mosaic(level, step);
     let mut after = before.clone();
-    filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, |_| 3, None).expect("model");
+    filter_mosaic(&mut after, W, H, &rggb(), WB, 1.0, |_| 3, None, 0).expect("model");
     let (m0, m1) = (column_dr(&before), column_dr(&after));
     let side = |m: &[f64], cols: std::ops::Range<usize>| cols.clone().map(|c| m[c]).sum::<f64>() / cols.len() as f64;
     let e = W / 4; // the edge, in cells
@@ -138,7 +138,7 @@ fn where_k_is_unbounded_the_slider_weakens_the_stage_through_its_window() {
     let before = mosaic(0.01, 0.0);
     let at = |nr: f32| {
         let mut m = before.clone();
-        let (_, k, _) = filter_mosaic(&mut m, W, H, &rggb(), WB, scale_of(nr).unwrap(), |k| window(nr, k), None).expect("a model");
+        let (_, k, _) = filter_mosaic(&mut m, W, H, &rggb(), WB, scale_of(nr).unwrap(), |k| window(nr, k), None, 0).expect("a model");
         (k, var_dr(&m, 0..W / 2))
     };
     assert_eq!((window(10.0, f64::INFINITY), window(25.0, f64::INFINITY), window(100.0, f64::INFINITY)), (1, 7, 23), "the display pass's sample count in cells");
@@ -280,7 +280,7 @@ fn a_pattern_that_is_not_a_two_by_two_bayer_is_left_alone() {
     let before = mosaic(0.01, 0.0);
     let mut after = before.clone();
     let xtrans = rawler::cfa::CFA::new("GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG");
-    assert!(filter_mosaic(&mut after, W, H, &xtrans, WB, 1.0, |_| 3, None).is_none());
+    assert!(filter_mosaic(&mut after, W, H, &xtrans, WB, 1.0, |_| 3, None, 0).is_none());
     assert!(before.iter().zip(&after).all(|(a, b)| a.to_bits() == b.to_bits()));
 }
 
@@ -471,9 +471,61 @@ fn the_stage_runs_at_the_exposures_reading_not_at_a_fit_of_the_mosaic_it_is_give
         .collect();
     let refit = read_source(&denoised, W, H, &rggb(), WB).expect("a model");
     assert_ne!(refit.model, reading.model, "the denoised mosaic must read another model for this test to say anything");
-    let (ran, k, _) = filter_mosaic(&mut denoised, W, H, &rggb(), WB, 1.0, |_| 3, Some(&reading)).expect("the stage runs");
+    let (ran, k, _) = filter_mosaic(&mut denoised, W, H, &rggb(), WB, 1.0, |_| 3, Some(&reading), 0).expect("the stage runs");
     assert_eq!(ran, reading, "the stage ran at {ran:?}, the exposure's reading is {reading:?}");
     assert!(k == reading.k, "k {k}, the exposure's {}", reading.k);
+}
+
+/// A preview reads the stage's pass at its own scale: white noise averages
+/// the same at any scale, so a pyramid level's cells are their blocks' means
+/// and their sd is the model's `σ/2^level` — on a flat noisy frame the
+/// level's colour differences spread as that sd says (the mean of their
+/// squared deviation over the stated variance within 3 standard errors of
+/// 1), at levels 1 and 2. The level a preview reads is the largest whose cell
+/// is no larger than one of its pixels: at a long edge of 1280 a 9600-wide
+/// sensor (7.5 sensor pixels a preview pixel) reads level 1 (cells of 4
+/// pixels), a full-size develop level 0.
+///
+/// MUTATION: the level's sd left at the base's `σ` (not divided).
+#[test]
+fn a_preview_reads_the_pass_at_the_level_whose_cells_match_its_pixels() {
+    assert_eq!(preview_level(9600, 6376, Some(1280)), 1);
+    assert_eq!(preview_level(9600, 6376, None), 0);
+    assert_eq!(preview_level(9600, 6376, Some(4800)), 0);
+    let m = mosaic(0.02, 0.0);
+    let sites = bayer_sites(&rggb()).expect("Bayer");
+    let pts = patches(&m, W, H, sites, WB);
+    let model = NoiseModel::fit(&pts, W, H).expect("a model");
+    let cells = Cells::of(&m, W, H, sites, WB, &model, &pts).expect("cells");
+    // The cells' squared deviation over the variance their level states:
+    // its mean and standard error, per colour difference.
+    let spread = |l: &Cells, j: usize| {
+        let n = (l.cw * l.ch) as f64;
+        let mean = l.d.iter().map(|q| f64::from(q[j])).sum::<f64>() / n;
+        let z: Vec<f64> = (0..l.cw * l.ch)
+            .map(|i| {
+                let (cx, cy) = (i % l.cw, i / l.cw);
+                let sd = f64::from(l.sd[(cy / PATCH).min(l.ph - 1) * l.pw + (cx / PATCH).min(l.pw - 1)][j]) / 2f64.sqrt();
+                (f64::from(l.d[i][j]) - mean).powi(2) / (sd * sd)
+            })
+            .collect();
+        let zm = z.iter().sum::<f64>() / n;
+        (zm, (z.iter().map(|v| (v - zm).powi(2)).sum::<f64>() / (n - 1.0) / n).sqrt())
+    };
+    for level in [1u32, 2] {
+        let l = cells.level(level);
+        for j in 0..2 {
+            // Against the base's own reading of the same model, so the model's
+            // own error on the colour differences cancels.
+            let ((z0, s0), (z, s)) = (spread(&cells, j), spread(&l, j));
+            let tol = 3.0 * ((s / z0).powi(2) + (z * s0 / (z0 * z0)).powi(2)).sqrt();
+            assert!(
+                (z / z0 - 1.0).abs() <= tol,
+                "level {level}, colour difference {j}: the cells spread {:.4} times the variance the level states, relative to the base (3 se {tol:.4})",
+                z / z0
+            );
+        }
+    }
 }
 
 /// The reading behind `photo_k` on a real RAW (`E3_PROBE=<raw path>`): the

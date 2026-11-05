@@ -109,7 +109,17 @@
 //! pass's own, for the sources it still runs on. `k` itself is read over the
 //! plain mean's window at the default strength ([`DEFAULT_AMOUNT`]) — the one
 //! window that does not depend on the reading — so it is one reading per
-//! photo.
+//! photo. That reading and the noise model are the exposure's: read ONCE,
+//! off the sensor's own mosaic ([`SourceReading`]), and kept with the source,
+//! so a develop runs the pass alone; a mosaic another process has denoised (a
+//! master's AI denoise) is filtered at the sensor's model, an upper bound of
+//! the noise left in it.
+//!
+//! **A preview** ([`preview_level`]): white noise averages the same at any
+//! scale, so the wide window is taken where it is cheap — a develop capped at
+//! a preview's long edge runs the pass on the cell pyramid's level whose cell
+//! is no larger than one of its pixels (`σ/2^L` there, the base window);
+//! an export and a master's bake run it at sensor scale.
 //!
 //! **The slider.** "Colour noise reduction" scales `k` linearly and sets the
 //! window as above: 0 is off, the default strength (Lightroom's own 25) is the
@@ -253,6 +263,20 @@ pub(crate) fn read_source(mosaic: &[f32], width: usize, height: usize, cfa: &raw
     Some(SourceReading { model, k })
 }
 
+/// The pyramid level a develop capped at `max_edge` (its long edge) reads
+/// the stage's pass at, for a mosaic `width × height`: the largest whose cell
+/// (`2^(level + 1)` sensor pixels a side) is no larger than one of its pixels
+/// (`max(width, height) / max_edge` sensor pixels) — white noise averages the
+/// same at any scale, so the wide window is taken where it is cheap, and a
+/// preview pays for no detail it cannot show. 0 — the sensor's own cells —
+/// for a develop that is not capped: an export and a master's bake always
+/// run at sensor scale.
+pub(crate) fn preview_level(width: usize, height: usize, max_edge: Option<u32>) -> u32 {
+    let Some(edge) = max_edge.filter(|e| *e > 0) else { return 0 };
+    let pixels = width.max(height) as f64 / f64::from(edge);
+    (pixels / 2.0).log2().floor().max(0.0) as u32
+}
+
 /// Run the stage on the normalised signed `mosaic` (`width × height`, sites
 /// of `cfa`), white-balanced by `wb` (any scale; green is divided out), at
 /// `scale` times the photo's own `k` over a window of half side `rho(k)`
@@ -263,7 +287,9 @@ pub(crate) fn read_source(mosaic: &[f32], width: usize, height: usize, cfa: &raw
 /// and the filtered cell chroma the demosaiced pixels are rebuilt on
 /// ([`CellChroma::rebuild`]), or `None` — and the mosaic untouched — when the
 /// pattern is not a 2×2 RGB Bayer or the frame has too few usable patches for
-/// a model.
+/// a model. At `level` > 0 ([`preview_level`]) the pass runs on that level of
+/// the cell pyramid ([`Cells::level`], the base window there) and each cell
+/// takes the level's filtered chroma read bilinearly at its centre.
 #[allow(clippy::too_many_arguments)] // the mosaic's frame plus the stage's strength, window and the exposure's reading
 pub(crate) fn filter_mosaic(
     mosaic: &mut [f32],
@@ -274,6 +300,7 @@ pub(crate) fn filter_mosaic(
     scale: f64,
     rho: impl Fn(f64) -> usize,
     source: Option<&SourceReading>,
+    level: u32,
 ) -> Option<(SourceReading, f64, CellChroma)> {
     let sites = bayer_sites(cfa)?;
     if mosaic.len() != width * height || wb[1].is_nan() || wb[1] <= 0.0 || scale.is_nan() || scale <= 0.0 {
@@ -293,8 +320,22 @@ pub(crate) fn filter_mosaic(
     let reading = SourceReading { model, k };
     let k = k * scale;
     let rho = rho(k);
-    let filtered: Vec<[f32; 2]> =
-        (0..cells.cw * cells.ch).into_par_iter().map_init(Scratch::default, |s, i| cells.filtered_in(i, k, rho, s).0).collect();
+    let filtered: Vec<[f32; 2]> = if level == 0 {
+        (0..cells.cw * cells.ch).into_par_iter().map_init(Scratch::default, |s, i| cells.filtered_in(i, k, rho, s).0).collect()
+    } else {
+        let coarse = cells.level(level);
+        let f: Vec<[f32; 2]> =
+            (0..coarse.cw * coarse.ch).into_par_iter().map_init(Scratch::default, |s, i| coarse.filtered_in(i, k, rho, s).0).collect();
+        let planes = [0, 1].map(|j| f.iter().map(|q| q[j]).collect::<Vec<f32>>());
+        let s = (1u32 << level) as f32;
+        (0..cells.cw * cells.ch)
+            .into_par_iter()
+            .map(|i| {
+                let (u, v) = (((i % cells.cw) as f32 + 0.5) / s - 0.5, ((i / cells.cw) as f32 + 0.5) / s - 0.5);
+                [0, 1].map(|j| crate::render::bilinear_plane(&planes[j], coarse.cw, coarse.ch, u, v))
+            })
+            .collect()
+    };
     cells.write(mosaic, width, sites, wb, &filtered);
     let chroma = cells.chroma(&filtered, &model, wb, rho);
     Some((reading, k, chroma))
@@ -527,6 +568,56 @@ impl Cells {
             .collect();
         let sd = pts.iter().map(|p| model.chroma_var(p, wb).map(|v| (2.0 * v).sqrt() as f32)).collect();
         Some(Self { cw, ch, pw, ph, d, sd })
+    }
+
+    /// These cells at pyramid level `level` (`level ≥ 1`): each the mean of a
+    /// `2^level × 2^level` block of them (an edge block averaging what it
+    /// holds), its sd per colour difference its blocks' patches' sd over
+    /// `2^level`. White noise averages the same at any scale: a mean of
+    /// `4^level` independent cells has `σ/2^level`, the model's own `σ` at that
+    /// scale, no new number. A level patch is [`PATCH`] level cells, as at the
+    /// base.
+    fn level(&self, level: u32) -> Self {
+        let s = 1usize << level;
+        let (cw, ch) = (self.cw.div_ceil(s), self.ch.div_ceil(s));
+        let d: Vec<[f32; 3]> = (0..cw * ch)
+            .into_par_iter()
+            .map(|i| {
+                let (x0, y0) = ((i % cw) * s, (i / cw) * s);
+                let (x1, y1) = ((x0 + s).min(self.cw), (y0 + s).min(self.ch));
+                let mut acc = [0.0f64; 3];
+                for y in y0..y1 {
+                    for q in &self.d[y * self.cw + x0..y * self.cw + x1] {
+                        for c in 0..3 {
+                            acc[c] += f64::from(q[c]);
+                        }
+                    }
+                }
+                let n = ((x1 - x0) * (y1 - y0)) as f64;
+                acc.map(|a| (a / n) as f32)
+            })
+            .collect();
+        let (pw, ph) = (cw.div_ceil(PATCH).max(1), ch.div_ceil(PATCH).max(1));
+        // The base patches under level patch `(px, py)`: `s` of them a side.
+        let span = |p: usize, n: usize| {
+            let lo = (p * s).min(n - 1);
+            lo..(p * s + s).min(n).max(lo + 1)
+        };
+        let sd = (0..pw * ph)
+            .map(|p| {
+                let (mut v, mut n) = ([0.0f64; 2], 0.0);
+                for by in span(p / pw, self.ph) {
+                    for bx in span(p % pw, self.pw) {
+                        let q = self.sd[by * self.pw + bx];
+                        v[0] += f64::from(q[0]).powi(2);
+                        v[1] += f64::from(q[1]).powi(2);
+                        n += 1.0;
+                    }
+                }
+                v.map(|v| ((v / n).sqrt() / s as f64) as f32)
+            })
+            .collect();
+        Self { cw, ch, pw, ph, d, sd }
     }
 
     /// Cell `i`'s two colour differences through the sigma filter at `k`:
