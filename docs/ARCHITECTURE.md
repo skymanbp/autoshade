@@ -4216,7 +4216,9 @@ an unknown recipe field — is disclosed and the crs reading stands alone.
 
 Why W is the record (v1.17.1): a merge keeps every key of its base this
 writer does not own — the camera profile, the creative Look and the
-lens-profile switch of the Lightroom sidecar beside the RAW — and the bare
+lens-profile switch of the Lightroom sidecar beside the RAW (since v1.18.0
+the writer states `LensProfileEnable` itself whenever the develop carries a
+lens profile, `EditRecipe::lightroom_lens_profile_enable`) — and the bare
 projection never had them, so on AutoShade's own unedited sidecar every
 base-carried key read as a Lightroom edit and replaced the develop's value,
 and the re-import rendered through the base's Look. A record that does not
@@ -4828,15 +4830,20 @@ each cell's gap that the mover's own residual at the inside foot explains,
 `|clamp(a, min(0, g), max(0, g))|` (`cell_charged_gaps`): a mover on its
 target is charged nothing beside a neighbour that is still off, an overshoot
 its overshoot, and a mover beside a correct neighbour the whole gap as
-before. A cell may move away from the target by no more than the family's
+before. Since v1.13.0 the set is held on average only: over the contour's
+occupied evidence cells no component of either ruler may get farther from
+the target by more than the one-code floor (`boundary_does_not_regress`,
+`mean_regression`), because a visible seam is the boundary gate's to
+catch and what is left to ask is whether the boundary as a whole ended up
+closer to the target. Until then a cell also could not move away from the
+target by more than the family's
 own seam ceiling in luma or the widest channel — the largest step the
 boundary gate lets any one crossing introduce, so a fidelity ruler that
 refused less would refuse what the gate had just accepted as a seam — and
 by no more than one just noticeable difference in chroma (2.3 ΔE*ab; Mahy,
-Van Eycken & Oosterlinck 1994); and on average over the occupied cells no
-component may get worse by more than the one-code floor, so a drift every
-cell can hide cannot add up (`boundary_does_not_regress`, `mean_regression`,
-`CHROMA_JND`). Until R37 both readings were per-crossing 90th-percentile
+Van Eycken & Oosterlinck 1994); on a night pair that per-cell veto refused
+every sky band set the boundary gate had passed, for a few hundredths of
+chroma in one or two contour cells while the contour's mean improved. Until R37 both readings were per-crossing 90th-percentile
 ranks, which on a re-synthesised target rank its texture: on the reference
 pair at 0.85 they read 24 codes of noise, and a band set that improved the
 sky's deltaE 30.4 → 25.4 and every worst seam and target step was refused
@@ -4847,10 +4854,9 @@ Pareto demand on 288 entries per rim: it refused the same set (deltaE 30.1
 horizon-band cell and 1.2 codes of luma in one contour cell, read through
 the verdict's own disclosure (`worst cell regression band
 +0.01332@rim0/cell46/chroma, contour +0.00481@rim0/cell55/luma`,
-2026-09-11), which now prints each ruler's mean beside its worst cell. A
-reduction in the worst rim still cannot hide another cell getting worse
-past those tolerances; only the compact disclosure takes the maximum, and
-the negative cross-rim pin catches that false admission.
+2026-09-11), which now prints each ruler's mean beside its worst cell. The
+compact disclosure still prints the worst cell, but since v1.13.0 the
+verdict reads the mean (`the_boundary_is_judged_on_its_mean_not_its_worst_cell`).
 `a_target_referenced_cell_gap_reads_the_band_shape_not_the_texture` pins
 that a three-code checkerboard twin of the target reads under a code while a
 four-code band reads at least three. Rejected trials restore the recipe and
@@ -5143,7 +5149,7 @@ threshold. Four sites consume it:
     `fit_field::cell_vertex_spans`), every other cell keeps pass A's, and a field that admits no cell
     is the pre-R34 field byte for byte. Two do-no-harm checks follow, the
     frame's and a per-ZONE one read off the attached zone masks through
-    `render::mask_coverage`, because a field that pays for the sky out of the
+    `render::preview_mask_coverage`, because a field that pays for the sky out of the
     land wins on the frame and loses the picture. Since 2026-09-24 both checks
     measure the ROUNDED field the render will apply
     (`render::apply_colour_field`), not the unrounded solve, and the per-zone
@@ -5243,7 +5249,7 @@ inferred from the sentences they print:
 
 `FitBudget` gains `field_gain` for the third of those: default point 0.35, the
 analyzer's own `BOUNDS_HIGH` gain, so the default recipe — which ships no field
-at all — is unchanged, rising to 0.80 at Strength 1. The ladder is calibrated
+at all — is unchanged (since 2026-09-22 the default ships a field too, at this 0.35 bound), rising to 0.80 at Strength 1. The ladder is calibrated
 against a measured demand, not chosen: after the whole zone ladder has run, the
 reference sky still wants R x1.465 / G x1.07 / B x0.78 in linear mean gain.
 
@@ -6050,7 +6056,7 @@ already had (`field.rs`, `range.rs`, `spatial.rs`, `semantic.rs`, `subzones.rs`,
 (no `fit_zoned::` path changed), and the code sits where its stage sits:
 `limits.rs` (the layer options, the zone share and pixel floors, the per-zone
 budgets, the boundary maxima, the acceptance ratios), `zone_fit.rs` (fitting one
-zone: modes and acceptance arms, moments and dials, the saturation step, gain
+zone: modes, moments and dials, the saturation step, gain
 shrinking, local quality, the shrink of a zone's corrections, the zone error and
 luma CDF), `boundary.rs` (the boundary ruler: readings, crossing samples and
 step frames, the line walks, cell sums and shares, the rims and the steps a
@@ -6435,15 +6441,15 @@ unchanged and was never what was wrong.
 For the step family a reading of ZERO measured crossings is a refusal, never
 a pass — until 2026-08-30 the rim ruler returned `0.000` from an empty
 transition band for every hard raster ever gated, and the gate read that as
-comfortably inside budget. A zone then ships on ONE law (v1.18.0, RULING-1180-int-r5):
-`fit::ships_local` — it earns `FIT_QUANT` of J* on its own present pixels, and the
+comfortably inside budget. A zone then ships on ONE law (v1.18.0):
+`fit::ships_local` — it earns `FIT_QUANT` of the objective on its own present pixels, and the
 frame is a guard that may rise by at most `FIT_QUANT`; an Atmosphere zone also
 may not leave its own pixels worse. The kept zone says so with
 `ZONE_SHIPPED_ON_OWN_PIXELS` (own before / after, frame before / after). The
 four moments arms it replaced (halve the zone error, land at the 0.02 matched
 floor, be strictly better by 0.012 with a still frame, land the luma
 distribution) were the display objective's readings ANDed with that law; on the
-night pair's land they refused a band whose own J* gained 11.7 `FIT_QUANT` while
+night pair's land they refused a band whose own reading gained 11.7 `FIT_QUANT` while
 the frame improved. The texture gate (`ZONE_TEXTURE_MIN`) stays: it is a
 structure do-no-harm, not an objective. A zone already inside the
 observed matched DOMAIN (≤0.012, same EV companion) is left alone with an
@@ -6458,10 +6464,11 @@ evidence bins. After the global render it joins contiguous signed residuals at
 `0.03`, keeps at most four evidence-supported runs, and discloses every merge
 or per-band abstention. Each accepted band is fitted once, in ascending-luma
 order, through the same robust weighted estimator, correspondence composition,
-share/mismatch/already-matched/local-quality gates, and parameterized frame
-gate as a semantic zone. Semantic zones retain their measured `0.02` drift
-insurance; a range band has zero drift tolerance and survives only when the
-composed evidence-weighted frame is neutral or better. Source weights are
+share/mismatch/already-matched/local-quality gates, and frame guard
+as a semantic zone: since v1.18.0 both ship on `fit::ships_local`, earning
+`FIT_QUANT` on their own pixels while the composed frame may rise by at most
+`FIT_QUANT` (until then semantic zones carried a `0.02` drift insurance and a
+range band zero drift tolerance). Source weights are
 re-derived from the current rendered stack before each fit; overlapping
 estimator ramps are normalized to sum to at most one, while the correction's
 movement coverage remains its own raw, pre-normalization range ramp. Ramps span
@@ -6498,7 +6505,7 @@ that ball can reach neutral, and emitted as `RangeMask::Color` against the same
 `RANGE_HOST` sentinel: `Type="1"` with `crs:ColorAmount` and a `PointModels`
 sample in the sidecar, a grammar the reader and writer already carried. The
 four-band cap, the ranking (residual weighted by two-sided share), the rim
-budget, the zero frame-regression tolerance and every disclosure channel are
+budget, the composed-frame guard (`FIT_QUANT`, since v1.18.0) and every disclosure channel are
 the luminance family's.
 
 **Each family is a stage of its own, and that is measured rather than tidy.**
@@ -6532,9 +6539,11 @@ against a leave-one-out baseline: the residual its acceptance read, on the
 shipped render, may not exceed the same residual on the shipped set rendered
 WITHOUT that correction — the frame before the tile on the sequential tile and
 free-mask routes, a fresh analysis render minus the zone's own mask on the
-shared semantic and range routes (`refuse_shrunk_zones`) — and the frame must
-stay within the attachment's own drift tolerance. The `k = 1` arms are
-deliberately NOT re-run: they ask for a gain, which the shrink trades away on
+shared semantic and range routes (`refuse_shrunk_zones`) — and the frame may
+rise by at most `FIT_QUANT` (since v1.18.0 the guard of `fit::ships_local`;
+until then the attachment's own drift tolerance). The `k = 1` gain test
+(`fit::ships_local`'s gain half; the moments arms until v1.18.0) is
+deliberately NOT re-run: it asks for a gain, which the shrink trades away on
 purpose; the first cut of this predicate re-ran them and refused the
 inverted-raster fixture's sky at `k = 0.088` for improving its zone 0.040 ->
 0.038. A refused zone leaves with `ZONE_SHRUNK_REFUSED` (its residual with and
@@ -6968,9 +6977,10 @@ boundary stays under 2/255, are capped at `RANGE_MAX_BANDS`, and must carry
 `RANGE_MIN_EVIDENCE_SHARE` on both sides of the pair, both shares measured on
 the same 3-tap guide luma. Shape is read off the remainder with every sum
 weighted by the solve's own per-pixel fit weight (`LocalField.weight`: frozen
-evidence x local support x `fit_field::testifies`), so a pixel whose vertices hold the
-occupancy-floor policy zero — a missing measurement, not a measured zero —
-cannot pose as spatial structure: `R2(4x4)` against the weighted 4x4 tile
+evidence x local support x `fit_field::testifies`), so a pixel the solve gave no weight
+cannot pose as spatial structure (until v1.18.0 this also kept out the policy
+zero the occupancy floor wrote into an unmeasured vertex; since v1.18.0 such a
+vertex carries the solve's own value): `R2(4x4)` against the weighted 4x4 tile
 means, `R2(linear)` against the weighted least-squares plane solved in f64.
 Once the plane earns `LINEAR_SHAPE_MIN = 0.6` the tile figure becomes its
 INCREMENTAL share over the plane's residual — otherwise a smooth ramp, most of
@@ -7074,8 +7084,10 @@ v1.2.4 also applies to spatial tiles) are refused before any render,
 each must clear the shared 3% source/target evidence gate and
 `structure_divergence < DIVERGENCE_ZONE`, with the two-proposal cap disclosing
 all capped or otherwise refused components. Accepted components use the tile
-upsample/refinement arguments and the exact shared frame/boundary gate (`0.0`
-frame regression, `0.012` cross-boundary step). The B3 battery covers proposal, attachment,
+upsample/refinement arguments and the exact shared frame/boundary gate (`0.012` cross-boundary step; since
+v1.18.0 the frame gate is `fit::ships_local`, the component's own pixels earning
+`FIT_QUANT` with the frame a guard, and the `0.0` frame-regression field it is
+still handed is read by no gate). The B3 battery covers proposal, attachment,
 disclosure, connectivity, cap, layer-off identity, ceiling stop, determinism,
 bitmap recipe/XMP losslessness, neutral corpus disclosure, and p36 honest-
 refusal checks. No live arm attached a free mask: downstream candidates were
@@ -7177,7 +7189,10 @@ curve through the base LUT; statistics are measured against the base
 render, so `err_before` means "calibration look vs target". The reported
 residual equals a recompute of the canvas's DEVELOP pass to 1e-6
 (unit-pinned; the GUI's later lens-geometry resample sits outside the
-fit's model — pre-existing, second-order), which retired v0.24.0's
+fit's model — pre-existing; since v1.18.0 measured above `FIT_QUANT`,
+0.0032–0.0214 on the corpus's finished recipes, so the app and the CLI
+replace a RAW fit's reported residual with the full-size re-read of
+`pipeline::reread_at_full_size`), which retired v0.24.0's
 two-pass seed and its `scale_chroma` clamp-order gap (measured up to
 ~18.7/255 mean on saturated fixtures). The CLI `match` composes the
 same way on every source (`match_source`): a RAW through
