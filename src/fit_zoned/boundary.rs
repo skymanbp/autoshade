@@ -552,8 +552,33 @@ const CONTENT_REACH: usize = 6;
 /// the two local levels are within one code ([`BOUNDARY_STEP_FLOOR`]) — haze,
 /// where the content cannot be told apart and the pixel is read as sky, the
 /// rule as it stood — fully at two codes.
+///
+/// What is stored is the sky content's share of the pixel's LIGHT, per
+/// channel and for luminance (R21 (2)): the owed treatment is "each content's
+/// light through its own multiplier", `owed = a·S·m_sky + (1 − a)·L·m_land`
+/// with `a` the AREA share read above and `S`, `L` the settled sky's and
+/// settled land's own levels in reach. Carried on the pixel's own light `v`
+/// that is `v · (b·m_sky + (1 − b)·m_land)` with `b = a·S / (a·S + (1 − a)·L)`
+/// — the ruling's form exactly where `v` is the mixture `a·S + (1 − a)·L`, and
+/// `v·m_sky` at `a = 1`, the rule as it stood. The area share applied to the
+/// whole light (the form this replaces) agrees with it only where sky and land
+/// have one level: on a night horizon (ref red 39, sky 47, land 11 codes,
+/// a = 0.64, a land gain of x14.5) it owed 97 codes where the light form owes
+/// 53, and the rendered pixel read 47.
 struct ContentShare {
+    /// The luminance light share `b_Y`, trust-blended (`1 − c·(1 − b)`).
     share: Vec<f32>,
+    /// The same per channel, `b_c` from each channel's own settled levels.
+    channel_share: Vec<[f32; 3]>,
+}
+
+/// The sky content's share of a pixel's light, `a·S / (a·S + (1 − a)·L)`,
+/// trusted by `c` (1 at a trusted mixture, 0 where the content cannot be told
+/// apart): R21 (2)'s light form ([`ContentShare`]).
+fn light_share(area: f32, sky_level: f32, land_level: f32, trust: f32) -> f32 {
+    let (s, l) = (area * sky_level.max(0.0), (1.0 - area) * land_level.max(0.0));
+    let light = if s + l > f32::EPSILON { s / (s + l) } else { area };
+    1.0 - trust * (1.0 - light)
 }
 
 impl ContentShare {
@@ -575,11 +600,14 @@ impl ContentShare {
                     .collect::<Vec<_>>();
                 box_sum(&product, width, height, CONTENT_REACH)
             };
-            (box_sum(&member, width, height, CONTENT_REACH), weighted(&luma), weighted(&linear))
+            let channels: [Vec<f32>; 3] =
+                std::array::from_fn(|c| weighted(&|p: &[f32; 3]| render::srgb_to_linear(p[c])));
+            (box_sum(&member, width, height, CONTENT_REACH), weighted(&luma), weighted(&linear), channels)
         };
-        let (sky_n, sky_luma, sky_linear) = side(&|a| a >= ZONE_BOUNDARY_HIGH);
-        let (land_n, land_luma, land_linear) = side(&|a| a <= ZONE_BOUNDARY_LOW);
+        let (sky_n, sky_luma, sky_linear, sky_channels) = side(&|a| a >= ZONE_BOUNDARY_HIGH);
+        let (land_n, land_luma, land_linear, land_channels) = side(&|a| a <= ZONE_BOUNDARY_LOW);
         let mut share = vec![1.0f32; width * height];
+        let mut channel_share = vec![[1.0f32; 3]; width * height];
         for i in 0..n {
             if sky_n[i] <= 0.0 || land_n[i] <= 0.0 {
                 continue;
@@ -591,9 +619,12 @@ impl ContentShare {
                 continue;
             }
             let mix = ((linear(&reference[i]) - y_land) / (y_sky - y_land)).clamp(0.0, 1.0);
-            share[i] = 1.0 - c * (1.0 - mix);
+            share[i] = light_share(mix, y_sky, y_land, c);
+            channel_share[i] = std::array::from_fn(|k| {
+                light_share(mix, sky_channels[k][i] / sky_n[i], land_channels[k][i] / land_n[i], c)
+            });
         }
-        Self { share }
+        Self { share, channel_share }
     }
 }
 
@@ -771,9 +802,12 @@ fn boundary_line_rims(
     // share of it that is sky, the settled land's on the rest (`owed`). A
     // pixel that is all sky — every pixel of a boundary drawn through haze —
     // is owed exactly the settled sky's treatment, the rule as it stood.
-    let treat = |side: &SideMultipliers, sky_share: f32, channel: Option<usize>, v: f32| -> f32 {
+    // R21 (2): `at` is the pixel, so the share read is the sky content's
+    // share of THAT channel's light ([`ContentShare`]), not its area share.
+    let treat = |side: &SideMultipliers, at: usize, channel: Option<usize>, v: f32| -> f32 {
         let pick = |m: &Multipliers| channel.map_or(m.luma, |c| m.channels[c]);
         let (sky, land) = (pick(&side.sky), pick(&side.land));
+        let sky_share = channel.map_or(content.share[at], |c| content.channel_share[at][c]);
         if sky_share >= 1.0 || sky == land {
             transport(sky, v)
         } else {
@@ -851,7 +885,6 @@ fn boundary_line_rims(
         // crossings charged past the ceiling at full strength, all on the
         // blue channel, all in the two cell rows on the horizon, and the sky
         // shipped at k=0.066. In haze the share is 1, the rule as it stood.
-        let owed = |i: usize| -> f32 { content.share[i] };
         // Each argmax remembers WHERE it was read, so the target's own
         // shortfall is read at that same pixel and nowhere else.
         let mut introduced: Option<(f32, usize)> = None;
@@ -863,14 +896,13 @@ fn boundary_line_rims(
             if weights[i] < ZONE_BOUNDARY_MID {
                 continue;
             }
-            let share = owed(i);
-            let here = luma(&rendered[i]) - treat(&rendered_side, share, None, luma(&reference[i]));
+            let here = luma(&rendered[i]) - treat(&rendered_side, i, None, luma(&reference[i]));
             introduced = Some(match introduced {
                 Some((v, at)) if v.abs() >= here.abs() => (v, at),
                 _ => (here, i),
             });
             let transported: [f32; 3] =
-                std::array::from_fn(|c| treat(&rendered_side, share, Some(c), reference[i][c]));
+                std::array::from_fn(|c| treat(&rendered_side, i, Some(c), reference[i][c]));
             for c in 0..3 {
                 let moved = rendered[i][c] - transported[c];
                 coloured = Some(match coloured {
@@ -882,10 +914,10 @@ fn boundary_line_rims(
             // through ITS settled treatment, in its own cell.
             let shortfall = |side: &SideMultipliers, frame: &[[f32; 3]]| -> [f32; 4] {
                 [
-                    luma(&frame[i]) - treat(side, share, None, luma(&reference[i])),
-                    frame[i][0] - treat(side, share, Some(0), reference[i][0]),
-                    frame[i][1] - treat(side, share, Some(1), reference[i][1]),
-                    frame[i][2] - treat(side, share, Some(2), reference[i][2]),
+                    luma(&frame[i]) - treat(side, i, None, luma(&reference[i])),
+                    frame[i][0] - treat(side, i, Some(0), reference[i][0]),
+                    frame[i][1] - treat(side, i, Some(1), reference[i][1]),
+                    frame[i][2] - treat(side, i, Some(2), reference[i][2]),
                 ]
             };
             let (own, moved) = (lab(&rendered[i]), lab(&transported));
@@ -948,10 +980,10 @@ fn boundary_line_rims(
         // The frozen candidate's own shortfall at the same pixels, through
         // ITS settled sky's transport (R37): what the cell's share is of.
         let luma_frozen =
-            luma(&frozen[at]) - treat(&frozen_side, owed(at), None, luma(&reference[at]));
+            luma(&frozen[at]) - treat(&frozen_side, at, None, luma(&reference[at]));
         let colour_frozen = std::array::from_fn(|c| {
             frozen[colour_at][c]
-                - treat(&frozen_side, owed(colour_at), Some(c), reference[colour_at][c])
+                - treat(&frozen_side, colour_at, Some(c), reference[colour_at][c])
         });
         let cell = cell_of(at, grid);
         cells[cell].crossings += 1;
@@ -995,6 +1027,31 @@ pub(super) fn boundary_rim(
     height: u32,
 ) -> BoundaryReading {
     boundary_rim_toward(None, reference, rendered, frozen, weights, width, height, None)
+}
+
+#[cfg(test)]
+mod owed_light_tests {
+    use super::*;
+
+    /// R21 (2): the owed treatment is each content's LIGHT through its own
+    /// multiplier. At the measured night-horizon pixel (reference red 39,
+    /// settled sky 47, settled land 11 codes, area share a = 0.64, the land
+    /// zone's red gain x14.5, the sky's x1) the light form owes ~53 codes;
+    /// the area share applied to the whole light owed 97, which no pixel of
+    /// the frame asked for (the rendered pixel read 47). MUTATION: make
+    /// `light_share` return the area share — the light form then reads 97.
+    #[test]
+    fn the_owed_treatment_carries_each_contents_light_through_its_own_multiplier() {
+        let lin = |code: f32| render::srgb_to_linear(code / 255.0);
+        let (v, sky, land, a, m_sky, m_land) = (39.0, 47.0, 11.0, 0.64f32, 1.0f32, 14.5f32);
+        let owe = |share: f32| render::linear_to_srgb((share * m_sky + (1.0 - share) * m_land) * lin(v)) * 255.0;
+        let light = owe(light_share(a, lin(sky), lin(land), 1.0));
+        let area = owe(a);
+        assert!((light - 53.0).abs() <= 1.5, "the light form owes ~53 codes, read {light:.1}");
+        assert!((area - 97.0).abs() <= 1.0, "the area form it replaces owed 97, read {area:.1}");
+        assert_eq!(light_share(1.0, lin(sky), lin(land), 1.0), 1.0, "an all-sky pixel is owed the sky's treatment");
+        assert_eq!(light_share(a, lin(sky), lin(land), 0.0), 1.0, "an untrusted mixture is read as sky, as before");
+    }
 }
 
 /// [`boundary_rim`] read toward a paired `target` at the same geometry (R37):
