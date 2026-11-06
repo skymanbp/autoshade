@@ -75,7 +75,7 @@ fn rggb() -> rawler::cfa::CFA {
 fn the_stage_takes_the_colour_noise_and_leaves_the_greens_and_the_mean() {
     let before = mosaic(0.01, 0.0);
     let mut after = before.clone();
-    let (SourceReading { model, .. }, _) = filter_mosaic(&mut after, W, H, &rggb(), WB, at25(), lv25(), None, 0, true).expect("a Bayer mosaic with noise fits a model");
+    let (SourceReading { model, .. }, _) = filter_mosaic(&mut after, W, H, &rggb(), WB, at25(), lv25(), None, 0, true, None).expect("a Bayer mosaic with noise fits a model");
     // The greens are never written.
     for y in 0..H {
         for x in 0..W {
@@ -155,7 +155,7 @@ fn a_pattern_that_is_not_a_two_by_two_bayer_is_left_alone() {
     let before = mosaic(0.01, 0.0);
     let mut after = before.clone();
     let xtrans = rawler::cfa::CFA::new("GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG");
-    assert!(filter_mosaic(&mut after, W, H, &xtrans, WB, at25(), lv25(), None, 0, true).is_none());
+    assert!(filter_mosaic(&mut after, W, H, &xtrans, WB, at25(), lv25(), None, 0, true, None).is_none());
     assert!(before.iter().zip(&after).all(|(a, b)| a.to_bits() == b.to_bits()));
 }
 
@@ -173,8 +173,8 @@ fn a_pattern_that_is_not_a_two_by_two_bayer_is_left_alone() {
 fn a_demosaicing_develop_reads_the_sensors_own_mosaic() {
     let before = mosaic(0.01, 0.0);
     let (mut kept, mut written) = (before.clone(), before.clone());
-    let (_, c0) = filter_mosaic(&mut kept, W, H, &rggb(), WB, at25(), lv25(), None, 0, false).expect("a model");
-    let (_, c1) = filter_mosaic(&mut written, W, H, &rggb(), WB, at25(), lv25(), None, 0, true).expect("a model");
+    let (_, c0) = filter_mosaic(&mut kept, W, H, &rggb(), WB, at25(), lv25(), None, 0, false, None).expect("a model");
+    let (_, c1) = filter_mosaic(&mut written, W, H, &rggb(), WB, at25(), lv25(), None, 0, true, None).expect("a model");
     assert!(kept.iter().zip(&before).all(|(a, b)| a.to_bits() == b.to_bits()), "the mosaic a demosaic reads was written");
     assert!(written.iter().zip(&before).any(|(a, b)| a != b), "the writing stage left its mosaic as it was");
     for j in 0..2 {
@@ -219,7 +219,7 @@ fn the_rebuild_keeps_the_demosaics_luma() {
     ];
     let flat = || vec![0.0f32; cw * ch];
     let ones = || vec![1.0f32; cw * ch];
-    let chroma = CellChroma { cw, ch, wb: [wr, wb], origin: [(0, 0), (1, 1)], planes, measured: [ones(), ones()], green: flat(), slopes: [flat(), flat()], site_var: Vec::new(), k: 0.0 };
+    let chroma = CellChroma { cw, ch, wb: [wr, wb], origin: [(0, 0), (1, 1)], planes, measured: [ones(), ones()], green: flat(), slopes: [flat(), flat()], site_var: Vec::new(), k: 0.0, abstain: Vec::new() };
     // Rows 0..16 the night's signed noise about 0, rows 16..47 a lit sky,
     // row 47 at the white level (the green a hair under it).
     let before: Vec<[f32; 3]> = (0..w * h)
@@ -292,7 +292,7 @@ fn the_pixels_chroma_is_the_cells_chroma_read_at_the_pixel() {
     let flat = || vec![0.0f32; cw * ch];
     let ones = || vec![1.0f32; cw * ch];
     let origin = [(0, 0), (1, 1)];
-    let chroma = CellChroma { cw, ch, wb: [WB[0] as f32, WB[2] as f32], origin, planes, measured: [ones(), ones()], green: flat(), slopes: [flat(), flat()], site_var: Vec::new(), k: 0.0 };
+    let chroma = CellChroma { cw, ch, wb: [WB[0] as f32, WB[2] as f32], origin, planes, measured: [ones(), ones()], green: flat(), slopes: [flat(), flat()], site_var: Vec::new(), k: 0.0, abstain: Vec::new() };
     let before: Vec<[f32; 3]> =
         (0..w * h).map(|i| [0, 1, 2].map(|c| (0.2 + 0.05 * normal(11 + c as u64, i as u64)) as f32)).collect();
     let mut after = before.clone();
@@ -536,7 +536,7 @@ fn the_stage_runs_at_the_exposures_reading_not_at_a_fit_of_the_mosaic_it_is_give
         .collect();
     let refit = read_source(&denoised, W, H, &rggb(), WB).expect("a model");
     assert_ne!(refit.model, reading.model, "the denoised mosaic must read another model for this test to say anything");
-    let (ran, _) = filter_mosaic(&mut denoised, W, H, &rggb(), WB, at25(), lv25(), Some(&reading), 0, true).expect("the stage runs");
+    let (ran, _) = filter_mosaic(&mut denoised, W, H, &rggb(), WB, at25(), lv25(), Some(&reading), 0, true, None).expect("the stage runs");
     assert_eq!(ran, reading, "the stage ran at {ran:?}, the exposure's reading is {reading:?}");
 }
 
@@ -3090,4 +3090,132 @@ fn plane_read_field(cells: &Cells, j: usize, rho: usize) -> Vec<f64> {
             (wbox(&read[0], x0, y0, x1, y1) + x as f64 * wbox(&read[1], x0, y0, x1, y1) + y as f64 * wbox(&read[2], x0, y0, x1, y1)) / k
         })
         .collect()
+}
+
+/// A master's noise is its own, and a level it has no reading of is not a
+/// measurement (rel1180 RULING r46 (e), r53). A master mosaic: the sensor's
+/// scene with a fixture's master noise, 1/25 of the sensor model's variance
+/// at every level (`ρ`); the sensor's own mosaic of the same scene at the
+/// model, whose flat patches the master's noise is measured on
+/// ([`sensor_flat`], [`MasterNoise`]). The sky's light runs 0.02 … 0.08
+/// across the frame, its colour on one line (R − G = 0.2·G).
+/// Trail A, inside the measured range: one green site of each of 60 cells on
+/// a diagonal lifted by 4 sensor sds at its level — a departure of the
+/// pixel's green from its cell's of ~2.9 sensor sds, ~14 of the master's.
+/// Asserted: under the master's measured variance every trail pixel's
+/// departure is evidence (`|G − G_cell| > k_P·σ`, [`CellChroma::departure_var`]);
+/// under the sensor's model (the stage run with no master table) at most a
+/// tenth is. Trail B, above the range: two rows of cells at light 0.3, their
+/// colour 2 sensor sds off the sky's line. Asserted: every pixel whose
+/// departure reads a trail cell keeps its own colour bit for bit through the
+/// rebuild; the measured cells within six rows of the trail read their own
+/// noiseless colour within `k_F` of their own (the master's) sd, and their
+/// mean within 3 standard errors. Printed: the measured range, the trail's
+/// pass counts both ways, the neighbours' worst and mean error in their sds.
+///
+/// MUTATION: the sensor's model substituted for the master's measured
+/// variance (`Cells::on_master` scaling nothing) — trail A's pixels fail
+/// (red). Not a mutation: the above-range cells left in the neighbours' fits
+/// at an invented weight. Leaving them in is unobservable here and on the
+/// frame (rel1180 msg-e3 rounds 54–55): at the sensor's model the neighbours'
+/// worst error is 0.37 own sd (0.14 without; p42m's trail crop moves by a mean
+/// dab 0.06), at the nearest measured variance (the top decile's) 0.38 (the
+/// crop by a mean dab 0.08, max 4.49; the same by eye): at either weight an
+/// above-range cell is too light beside its neighbours' measured noise to pull
+/// a fit, or far enough off their line for the windows' own test to refuse
+/// it. The exclusion stands because a level with no reading has no
+/// defined weight (rel1180 RULING r53, r54), and no red is claimed for it.
+#[test]
+fn a_master_is_read_at_its_own_noise_and_not_outside_its_measured_range() {
+    let rho = 1.0 / 25.0;
+    let (cw, ch) = (W / 2, H / 2);
+    let sky = |cx: usize| 0.02 + 0.06 * cx as f64 / (cw - 1) as f64;
+    let line = |l: f64| 0.2 * l;
+    let trail_b = |cy: usize, cx: usize| (200..202).contains(&cy) && (300..420).contains(&cx);
+    let site_sd = |l: f64| (A * l + B).sqrt();
+    let b_off = 2.0 * cell_var(0.3, A).sqrt();
+    let light = |cx: usize, cy: usize| if trail_b(cy, cx) { 0.3 } else { sky(cx) };
+    let colour = |cx: usize, cy: usize| if trail_b(cy, cx) { line(0.3) + b_off } else { line(sky(cx)) };
+    let trail_a: Vec<(usize, usize)> = (0..60).map(|t| (60 + t, 60 + t)).collect();
+    // Trail A: the first green site (RGGB: (0, 1)) of each cell lifted.
+    let lift = |m: &mut Vec<f32>| {
+        for &(cx, cy) in &trail_a {
+            m[2 * cy * W + 2 * cx + 1] += (4.0 * site_sd(sky(cx))) as f32;
+        }
+    };
+    let mut sensor = scene_xy(light, colour, A, B, 541);
+    lift(&mut sensor);
+    let mut master = scene_xy(light, colour, rho * A, rho * B, 542);
+    lift(&mut master);
+    let reading = read_source(&sensor, W, H, &rggb(), WB).expect("the sensor's mosaic has a model");
+    let flat = sensor_flat(&sensor, W, H, &rggb(), WB, &reading).expect("a Bayer mosaic");
+    let sites = bayer_sites(&rggb()).expect("Bayer");
+    let table = MasterNoise::measure(&flat, &patches(&master, W, H, sites, WB), &reading.model, WB).expect("the master's noise is measured");
+    let (lo, hi, n) = table.range();
+    println!("measured on {n} patches flat on the sensor: levels {lo:.4} .. {hi:.4}; trail A's cells at {:.4} .. {:.4}, trail B's at 0.3", sky(60), sky(119));
+    assert!(lo < sky(60) && sky(119) + 2.0 * site_sd(sky(119)) < hi && hi < 0.3, "the fixture's trails must sit inside and above the range for this test to say anything");
+    let run = |master_table: bool| {
+        let mut m = master.clone();
+        filter_mosaic(&mut m, W, H, &rggb(), WB, at25(), lv25(), Some(&reading), 0, false, master_table.then_some(flat.as_slice())).expect("the stage runs").1
+    };
+    let (on_master, on_sensor) = (run(true), run(false));
+
+    // Trail A: the pixel's departure at its lifted green site.
+    let passes = |c: &CellChroma| {
+        trail_a
+            .iter()
+            .filter(|&&(cx, cy)| {
+                let (sx, sy) = (2 * cx + 1, 2 * cy);
+                let dg = f64::from(master[sy * W + sx] - crate::render::upsample_at(&c.green, cw, ch, 2, sx, sy));
+                dg * dg > c.k * c.k * c.departure_var(sx, sy)
+            })
+            .count()
+    };
+    let (pm, ps) = (passes(&on_master), passes(&on_sensor));
+    println!("trail A (inside the range): {pm} of {} departures are evidence under the master's variance, {ps} under the sensor's model", trail_a.len());
+    assert_eq!(pm, trail_a.len(), "under the master's own variance every trail pixel's departure is evidence");
+    assert!(ps * 10 <= trail_a.len(), "under the sensor's model the trail's departures must fail for this test to say anything ({ps})");
+
+    // Trail B: the pixels whose departure reads a trail cell keep their colour.
+    let before: Vec<[f32; 3]> = (0..W * H)
+        .map(|i| {
+            let (x, y) = (i % W, i / W);
+            let (cx, cy) = (x / 2, y / 2);
+            let l = light(cx, cy) as f32;
+            [(l + colour(cx, cy) as f32) / WB[0] as f32, l, l / WB[2] as f32]
+        })
+        .collect();
+    let mut after = before.clone();
+    on_master.rebuild(&mut after, W, 0, 0, GREEN_LUMA);
+    let (mut kept, mut held) = (0usize, 0usize);
+    for (i, (b, a)) in before.iter().zip(&after).enumerate() {
+        let (cells, _) = on_master.read_cells(i % W, i / W);
+        if cells.iter().any(|&c| trail_b(c / cw, c % cw)) {
+            held += 1;
+            kept += usize::from(b.map(f32::to_bits) == a.map(f32::to_bits));
+        }
+    }
+    println!("trail B (above the range): {kept} of {held} pixels reading a trail cell keep their own colour");
+    assert!(held > 0 && kept == held, "every pixel whose departure reads an above-range cell keeps its own colour");
+
+    // Trail B's neighbours read the sky's line: their own noiseless colour.
+    let truth = cells_of(&scene_xy(light, colour, 0.0, 0.0, 0), Some(reading.model));
+    let k = fair_k((cw * ch) as f64);
+    let (mut worst, mut errs) = (0.0f64, Vec::new());
+    for cy in (194..200).chain(202..208) {
+        for cx in 300..420 {
+            let i = cy * cw + cx;
+            if on_master.measured[0][i] == 0.0 {
+                continue;
+            }
+            let sd = (rho * cell_var(sky(cx), A)).sqrt();
+            let e = (f64::from(on_master.planes[0][i]) - f64::from(truth.d[i][0])) / sd;
+            worst = worst.max(e.abs());
+            errs.push(e);
+        }
+    }
+    let (mean, se) = mean_se(&errs);
+    println!("trail B's neighbours: {} measured cells, R - G error worst {worst:.2} own sd, mean {mean:+.3} (se {se:.3})", errs.len());
+    assert!(!errs.is_empty() && worst <= k, "a cell beside the trail reads {worst:.2} of its own sds off its colour (k_F {k:.2})");
+    assert!(mean.abs() <= 3.0 * se, "the cells beside the trail read {mean:+.3} sd off their colour on the mean (se {se:.3})");
 }

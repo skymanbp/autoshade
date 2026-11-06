@@ -517,7 +517,7 @@ fn the_black_is_subtracted_signed_through_the_demosaic() {
     };
     let mut dev = RawDevelop::default();
     dev.steps.retain(|s| !matches!(s, ProcessingStep::WhiteBalance | ProcessingStep::Calibrate | ProcessingStep::SRgb));
-    let develop = |raw: &rawler::RawImage| source::develop_raw_buffer(raw, &dev, None, (0.0, None, None), None, ExportColorSpace::Srgb, None).unwrap().0;
+    let develop = |raw: &rawler::RawImage| source::develop_raw_buffer(raw, &dev, None, (0.0, None, None, None), None, ExportColorSpace::Srgb, None).unwrap().0;
     let mean = |px: &[[f32; 3]]| px.iter().map(|p| f64::from(p[0] + p[1] + p[2]) / 3.0).sum::<f64>() / px.len() as f64;
     // Black ± 40 DN in a checkerboard of 2×2 cells: every channel sees both signs.
     let noisy: Vec<u16> = (0..w * h).map(|i| if ((i % w) / 2 + (i / w) / 2) % 2 == 0 { 552 } else { 472 }).collect();
@@ -590,7 +590,7 @@ fn a_raw_develop_takes_its_colour_noise_on_the_linear_mosaic() {
     );
     let mut dev = RawDevelop::default();
     dev.steps.retain(|s| !matches!(s, ProcessingStep::WhiteBalance | ProcessingStep::Calibrate | ProcessingStep::SRgb));
-    let develop = |nr: f32| source::develop_raw_buffer(&raw, &dev, None, (nr, None, None), None, ExportColorSpace::Srgb, None).unwrap().0;
+    let develop = |nr: f32| source::develop_raw_buffer(&raw, &dev, None, (nr, None, None, None), None, ExportColorSpace::Srgb, None).unwrap().0;
     let stats = |px: &[[f32; 3]]| {
         let d: Vec<f64> = px.iter().map(|p| f64::from(p[0] - p[1])).collect();
         let m = d.iter().sum::<f64>() / d.len() as f64;
@@ -644,14 +644,14 @@ fn only_a_mosaic_the_linear_stage_reads_runs_it_and_the_develop_says_which() {
     assert!(crate::denoise::linear_chroma::reads(&bayer) && !crate::denoise::linear_chroma::reads(&xtrans));
     let mut dev = RawDevelop::default();
     dev.steps.retain(|s| !matches!(s, ProcessingStep::WhiteBalance | ProcessingStep::Calibrate | ProcessingStep::SRgb));
-    let report = |raw: &rawler::RawImage, nr: f32| source::develop_raw_linear(raw, &dev, None, (nr, None, None)).unwrap().3;
+    let report = |raw: &rawler::RawImage, nr: f32| source::develop_raw_linear(raw, &dev, None, (nr, None, None, None)).unwrap().3;
     assert!(report(&bayer, 25.0), "a Bayer mosaic at Colour 25 runs the linear stage");
     assert!(!report(&bayer, 0.0), "at 0 nothing runs");
     // The engine develops a non-Bayer CFA by rescale alone, then over the
     // array's own geometry (`render_frame`'s `geometry_cfa`).
     let cfa = CFA::new("GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG");
     let rescale = RawDevelop { steps: vec![ProcessingStep::Rescale] };
-    let (_, _, _, ran) = source::develop_raw_linear(&xtrans, &rescale, Some(&cfa), (25.0, None, None)).unwrap();
+    let (_, _, _, ran) = source::develop_raw_linear(&xtrans, &rescale, Some(&cfa), (25.0, None, None, None)).unwrap();
     assert!(!ran, "an X-Trans mosaic: the linear stage does not run, and the develop says so");
     // The export's display-pass switch and the master's mark read that report.
     let src = crate::render::engine_source().replace("\r\n", "\n");
@@ -668,7 +668,10 @@ fn only_a_mosaic_the_linear_stage_reads_runs_it_and_the_develop_says_which() {
 /// hot-site map, before the AI denoise replaces that mosaic with one whose
 /// noise is not the sensor's — and handed to both develops of the frame (the
 /// grain's original and the cleaned one), so the master's stage runs at the
-/// sensor's model and never at a fit of the denoised mosaic.
+/// sensor's model and never at a fit of the denoised mosaic. The sensor's
+/// flat patches, which the master's own noise is measured on (rel1180 RULING
+/// r46 (e)), are read off the same sensor mosaic before the AI denoise and
+/// handed only to the cleaned develop, the master's.
 ///
 /// MUTATION: the reading taken after the AI denoise.
 #[test]
@@ -680,7 +683,10 @@ fn the_colour_stage_reads_the_exposure_off_the_sensors_mosaic_before_the_ai_deno
     assert_eq!(body.matches("read_sensor(").count(), 1, "one reading per develop");
     assert!(body.find("hot_pixels::map_for(&mut rawimage)").unwrap() < read, "the reading sees the hot-site map");
     assert!(read < body.find("crate::denoise::denoise_mosaic(").unwrap(), "the reading is the sensor's, before the AI denoise");
-    assert_eq!(body.matches("(colour_nr, reading.as_ref(), max_edge)").count(), 2, "both develops run at the exposure's reading");
+    assert_eq!(body.matches("(colour_nr, reading.as_ref(), max_edge, ").count(), 2, "both develops run at the exposure's reading");
+    assert!(body.find("sensor_flat(&rawimage, r)").expect("the sensor's flat patches") < body.find("crate::denoise::denoise_mosaic(").unwrap(), "the flat patches are the sensor's, before the AI denoise");
+    assert_eq!(body.matches("(colour_nr, reading.as_ref(), max_edge, None)").count(), 1, "the original's develop is the sensor's mosaic");
+    assert_eq!(body.matches("(colour_nr, reading.as_ref(), max_edge, master.as_deref())").count(), 1, "the cleaned develop carries the master's flag");
 }
 
 /// The exposure's reading is kept with the source (round 11, T1): read once

@@ -259,9 +259,13 @@
 //! error (rel1180 RULING r20's (b)). The noise model is the
 //! exposure's: read ONCE, off the sensor's own mosaic ([`SourceReading`], with
 //! the frame's shared green that sets the window), and kept with the source,
-//! so a develop runs the pass alone; a mosaic another
-//! process has denoised (a master's AI denoise) is read at the sensor's
-//! model, an upper bound of the noise left in it.
+//! so a develop runs the pass alone. A mosaic another process has denoised
+//! (a master's AI denoise) does not carry the sensor's noise: there the
+//! stage reads the master's own, measured per level on its patches flat on
+//! the sensor ([`MasterNoise`], rel1180 RULING r46 (e), r53); a level outside
+//! the measured range has no reading and is not a measurement — it enters no
+//! window's fit, casts no vote, no window's hypothesis is read at it, and a
+//! pixel whose departure reads such a cell keeps its own colour.
 //!
 //! **Cost.** The light's read: per level three separable variance passes and
 //! the detail read, then `(L+1)(L+2)/2` separable passes for its residual;
@@ -496,8 +500,8 @@ pub(crate) fn fair_k(n: f64) -> f64 {
 /// alone. The model is the sensor's: a mosaic another process has
 /// already denoised (a master's AI denoise) does not carry the sensor's
 /// Poisson noise, so `var = g·a·m + g²·b` is not its law and a model fitted
-/// on it is not a measurement. Run over such a mosaic, the stage's test reads
-/// the sensor's `σ` as an UPPER bound of the noise left in it.
+/// on it is not a measurement. Over such a mosaic the stage reads the
+/// master's own noise ([`MasterNoise`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SourceReading {
     pub(crate) model: NoiseModel,
@@ -531,6 +535,91 @@ pub(crate) fn read_source(mosaic: &[f32], width: usize, height: usize, cfa: &raw
     Some(SourceReading::of(NoiseModel::fit(&pts, width, height)?, &pts, wb))
 }
 
+/// A master's own noise (rel1180 RULING r46 (e), r53): a mosaic another
+/// process has denoised does not carry the sensor's noise, and the sensor's
+/// model overstates it 6–300× (rel1180 msg-e3 round 41). It is measured on
+/// the master's own patches where the sensor's were flat ([`sensor_flat`]:
+/// the sensor's model says what is noise there) and the master's are usable:
+/// per decile of the patches' level, the mean ratio of the master's green
+/// variance `var(G₁ − G₂)/2` and of its two colour-difference variances to
+/// what the sensor's model gives them ([`NoiseModel::chroma_var`]). A
+/// quantity of a cell at a level inside the measured range is the model's
+/// times its decile's ratio; a level outside it has no reading — neither the
+/// sensor's model (an overstatement) nor an extrapolation (a processed
+/// image's noise has no law beyond its measured levels) — and its cell is not
+/// a measurement ([`Cells::of_master`]).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MasterNoise {
+    /// The lowest measured level.
+    lo: f64,
+    /// Per decile, its highest level and the ratios `[green, R − G, B − G]`.
+    deciles: Vec<(f64, [f64; 3])>,
+    /// The patches measured.
+    patches: usize,
+}
+
+impl MasterNoise {
+    /// The measurement on the master's patches `pts` where `sensor_flat`
+    /// holds (the same patch grid), at the sensor's `model` and white balance
+    /// `wb` (green = 1). `None` when the two are not one grid or fewer
+    /// patches than deciles are measured: the master's noise has no reading.
+    pub(crate) fn measure(sensor_flat: &[bool], pts: &[Patch], model: &NoiseModel, wb: [f64; 3]) -> Option<Self> {
+        if sensor_flat.len() != pts.len() {
+            return None;
+        }
+        let mut rows: Vec<(f64, [f64; 3])> = pts
+            .iter()
+            .zip(sensor_flat)
+            .filter(|(p, flat)| **flat && p.usable)
+            .map(|(p, _)| {
+                let cv = model.chroma_var(p, wb);
+                (p.m, [p.v_g / model.var(p.m, p.r), p.v_dr / cv[0], p.v_db / cv[1]])
+            })
+            .collect();
+        let n = rows.len();
+        if n < 10 {
+            return None;
+        }
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let deciles = (0..10)
+            .map(|q| {
+                let d = &rows[q * n / 10..(q + 1) * n / 10];
+                let mean = std::array::from_fn(|k| d.iter().map(|r| r.1[k]).sum::<f64>() / d.len() as f64);
+                (d[d.len() - 1].0, mean)
+            })
+            .collect();
+        Some(Self { lo: rows[0].0, deciles, patches: n })
+    }
+
+    /// The ratios `[green, R − G, B − G]` at green level `level`: its decile's,
+    /// `None` outside the measured range (no reading).
+    pub(crate) fn ratio(&self, level: f64) -> Option<[f64; 3]> {
+        if level.is_nan() || level < self.lo {
+            return None;
+        }
+        self.deciles.iter().find(|d| level <= d.0).map(|d| d.1)
+    }
+
+    /// The measured range of levels and the patches it was measured on.
+    pub(crate) fn range(&self) -> (f64, f64, usize) {
+        (self.lo, self.deciles.last().map_or(self.lo, |d| d.0), self.patches)
+    }
+}
+
+/// Which of the sensor's patches are flat under the exposure's model
+/// ([`NoiseModel::is_flat`]): read off the sensor's own `mosaic` (as
+/// [`read_source`] reads it) before another process denoises it, the patches
+/// a master's own noise is measured on ([`MasterNoise`]). `None` when the
+/// pattern is not a 2×2 RGB Bayer.
+pub(crate) fn sensor_flat(mosaic: &[f32], width: usize, height: usize, cfa: &rawler::cfa::CFA, wb: [f64; 3], reading: &SourceReading) -> Option<Vec<bool>> {
+    let sites = bayer_sites(cfa)?;
+    if mosaic.len() != width * height || wb[1].is_nan() || wb[1] <= 0.0 {
+        return None;
+    }
+    let wb = [wb[0] / wb[1], 1.0, wb[2] / wb[1]];
+    Some(patches(mosaic, width, height, sites, wb).iter().map(|p| reading.model.is_flat(p, wb)).collect())
+}
+
 /// The pyramid level a develop capped at `max_edge` (its long edge) reads
 /// the stage's pass at, for a mosaic `width × height`: the largest whose cell
 /// (`2^(level + 1)` sensor pixels a side) is no larger than one of its pixels
@@ -558,8 +647,13 @@ pub(crate) fn preview_level(width: usize, height: usize, max_edge: Option<u32>) 
 /// own mosaic and takes its colour from the rebuild. At `level` > 0
 /// ([`preview_level`]) the pass runs on that level of
 /// the cell pyramid ([`Cells::level`], the same window) and each cell
-/// takes the level's filtered chroma read bilinearly at its centre.
-#[allow(clippy::too_many_arguments)] // the mosaic's frame plus the read's window and levels, the exposure's reading, the level and the write
+/// takes the level's filtered chroma read bilinearly at its centre. Where
+/// `mosaic` is a master (another process denoised it), `master` holds the
+/// sensor's flat patches ([`sensor_flat`]) and the stage reads the master's
+/// own noise ([`MasterNoise`], [`Cells::of_master`]); without a measurement
+/// of it (`None` from [`MasterNoise::measure`]) the stage has no reading and
+/// returns `None`.
+#[allow(clippy::too_many_arguments)] // the mosaic's frame plus the read's window and levels, the exposure's reading, the level, the write and the master's flat patches
 pub(crate) fn filter_mosaic(
     mosaic: &mut [f32],
     width: usize,
@@ -571,6 +665,7 @@ pub(crate) fn filter_mosaic(
     source: Option<&SourceReading>,
     level: u32,
     write: bool,
+    master: Option<&[bool]>,
 ) -> Option<(SourceReading, CellChroma)> {
     let sites = bayer_sites(cfa)?;
     if mosaic.len() != width * height || wb[1].is_nan() || wb[1] <= 0.0 {
@@ -583,7 +678,29 @@ pub(crate) fn filter_mosaic(
         None => SourceReading::of(NoiseModel::fit(&pts, width, height)?, &pts, wb),
     };
     let model = reading.model;
-    let cells = Cells::of(mosaic, width, height, sites, wb, &model, &pts)?;
+    let cells = match master {
+        None => {
+            println!("colour NR: the sensor's noise model (the mosaic is the sensor's; no master table)");
+            Cells::of(mosaic, width, height, sites, wb, &model, &pts)?
+        }
+        Some(flat) => {
+            let Some(table) = MasterNoise::measure(flat, &pts, &model, wb) else {
+                println!("colour NR: the master's noise has no measurement; the stage does not run");
+                return None;
+            };
+            let cells = Cells::of_master(mosaic, width, height, sites, wb, &model, &pts, table)?;
+            let (lo, hi, n) = cells.master.as_ref().map_or((0.0, 0.0, 0), MasterNoise::range);
+            let n_cells = cells.d.len() as f64;
+            let above = cells.d.iter().filter(|d| f64::from(d[2]) > hi).count() as f64 / n_cells;
+            let below = cells.d.iter().filter(|d| f64::from(d[2]).is_nan() || f64::from(d[2]) < lo).count() as f64 / n_cells;
+            println!(
+                "colour NR: the master's own noise, measured on {n} patches flat on the sensor over levels {lo:.5}..{hi:.5}; cells above {:.2} %, below {:.2} % (not measurements)",
+                100.0 * above,
+                100.0 * below
+            );
+            cells
+        }
+    };
     let filtered: Vec<[f32; 2]> = if level == 0 {
         cells.guided(rho, levels)
     } else {
@@ -635,6 +752,10 @@ pub(crate) struct CellChroma {
     /// ([`Self::departure_var`]).
     site_var: Vec<[f32; 4]>,
     k: f64,
+    /// Per cell on a master, its level has no reading of the master's noise
+    /// ([`MasterNoise::ratio`]); empty on the sensor's mosaic. A pixel whose
+    /// departure reads such a cell keeps its own colour (rel1180 RULING r53).
+    abstain: Vec<bool>,
 }
 
 impl CellChroma {
@@ -713,6 +834,11 @@ impl CellChroma {
                 let mut pulled = 0;
                 for (x, px) in row.iter_mut().enumerate() {
                     let (sx, sy) = (x + ox, y + oy);
+                    // A departure that reads a sample with no reading of its
+                    // noise is not a measurement (rel1180 RULING r53).
+                    if !self.abstain.is_empty() && self.read_cells(sx, sy).0.iter().any(|&c| self.abstain[c]) {
+                        continue;
+                    }
                     let own = px.map(f64::from);
                     let dg = px[1] - at(&self.green, sx, sy);
                     let slope = [0, 1].map(|j| at(&self.slopes[j], sx, sy));
@@ -778,14 +904,9 @@ impl CellChroma {
             let (x, y) = (x.clamp(0, w - 1) as usize, y.clamp(0, h - 1) as usize);
             (y / 2 * cw + x / 2, f64::from(self.site_var[y / 2 * cw + x / 2][2 * (y % 2) + x % 2]))
         };
-        // The bilinear read's cells and weights (`render::bilinear_plane`'s clamp).
-        let u = ((sx as f32 + 0.5) / 2.0 - 0.5).clamp(0.0, (cw - 1) as f32);
-        let t = ((sy as f32 + 0.5) / 2.0 - 0.5).clamp(0.0, (ch - 1) as f32);
-        let (x0, y0) = (u.floor() as usize, t.floor() as usize);
-        let (x1, y1) = ((x0 + 1).min(cw - 1), (y0 + 1).min(ch - 1));
-        let (fx, fy) = (f64::from(u - x0 as f32), f64::from(t - y0 as f32));
+        let (cells, weights) = self.read_cells(sx, sy);
         let mut taps: Vec<(usize, f64)> = Vec::with_capacity(4);
-        for (c, wc) in [(y0 * cw + x0, (1.0 - fx) * (1.0 - fy)), (y0 * cw + x1, fx * (1.0 - fy)), (y1 * cw + x0, (1.0 - fx) * fy), (y1 * cw + x1, fx * fy)] {
+        for (c, wc) in cells.into_iter().zip(weights) {
             match taps.iter_mut().find(|q| q.0 == c) {
                 Some(q) => q.1 += wc,
                 None => taps.push((c, wc)),
@@ -812,6 +933,19 @@ impl CellChroma {
                 g + cell_read - 2.0 * (weight(c1) * 3.0 * v1 + weight(cm) * vm) / 8.0
             })
             .fold(0.0, f64::max)
+    }
+
+    /// The cells the green read at mosaic site `(sx, sy)` reads and their
+    /// bilinear weights (`render::upsample_at` at 2×, `render::bilinear_plane`'s
+    /// clamp): the pixel's departure's footprint.
+    fn read_cells(&self, sx: usize, sy: usize) -> ([usize; 4], [f64; 4]) {
+        let (cw, ch) = (self.cw, self.ch);
+        let u = ((sx as f32 + 0.5) / 2.0 - 0.5).clamp(0.0, (cw - 1) as f32);
+        let t = ((sy as f32 + 0.5) / 2.0 - 0.5).clamp(0.0, (ch - 1) as f32);
+        let (x0, y0) = (u.floor() as usize, t.floor() as usize);
+        let (x1, y1) = ((x0 + 1).min(cw - 1), (y0 + 1).min(ch - 1));
+        let (fx, fy) = (f64::from(u - x0 as f32), f64::from(t - y0 as f32));
+        ([y0 * cw + x0, y0 * cw + x1, y1 * cw + x0, y1 * cw + x1], [(1.0 - fx) * (1.0 - fy), fx * (1.0 - fy), (1.0 - fx) * fy, fx * fy])
     }
 }
 
@@ -1272,6 +1406,12 @@ pub(crate) struct Cells {
     model: NoiseModel,
     wb: [f64; 3],
     side: usize,
+    /// On a master ([`Self::of_master`]), per cell the ratios
+    /// `[green, R − G, B − G]` of the master's noise to the model's at the
+    /// cell's level (`None` where the level has no reading), and the measurement;
+    /// empty and `None` on the sensor's mosaic.
+    ratio: Vec<Option<[f32; 3]>>,
+    master: Option<MasterNoise>,
 }
 
 impl Cells {
@@ -1285,6 +1425,45 @@ impl Cells {
         model: &NoiseModel,
         pts: &[Patch],
     ) -> Option<Self> {
+        Self::read(mosaic, width, height, sites, wb, model, pts, None)
+    }
+
+    /// The cells of a master mosaic, read at its own noise `table` (rel1180
+    /// RULING r46 (e), r53): every variance of a cell at its measured ratio
+    /// at the cell's level — its colour differences' at theirs, every green
+    /// term (the planarity test's, the shared covariance, the four samples'
+    /// the pixel's departure is tested against, the light's) at the green's.
+    /// A cell whose level has no reading is NOT A MEASUREMENT: neither
+    /// difference is measured, so it enters no window's fit, casts no vote and
+    /// no window's hypothesis is read at it (the rebuild keeps the develop's
+    /// own colour there); its light keeps its own green (variance 0: the
+    /// light's detail there is read whole).
+    #[allow(clippy::too_many_arguments)] // the mosaic's frame and sites, the white balance, the model, the patches and the master's table
+    pub(crate) fn of_master(
+        mosaic: &[f32],
+        width: usize,
+        height: usize,
+        sites: [(usize, usize); 4],
+        wb: [f64; 3],
+        model: &NoiseModel,
+        pts: &[Patch],
+        table: MasterNoise,
+    ) -> Option<Self> {
+        Self::read(mosaic, width, height, sites, wb, model, pts, Some(table))
+    }
+
+    /// [`Self::of`] and [`Self::of_master`].
+    #[allow(clippy::too_many_arguments)] // as of_master
+    fn read(
+        mosaic: &[f32],
+        width: usize,
+        height: usize,
+        sites: [(usize, usize); 4],
+        wb: [f64; 3],
+        model: &NoiseModel,
+        pts: &[Patch],
+        master: Option<MasterNoise>,
+    ) -> Option<Self> {
         let (cw, ch) = (width / 2, height / 2);
         let (pw, ph) = (cw / PATCH, ch / PATCH);
         if pw == 0 || ph == 0 || pts.len() != pw * ph {
@@ -1295,13 +1474,17 @@ impl Cells {
             f64::from(mosaic[(2 * cy + dy) * width + 2 * cx + dx])
         };
         let k = fair_k((cw * ch) as f64);
+        let ratio_of = |cx: usize, cy: usize| {
+            let g = (at(cx, cy, 1) + at(cx, cy, 2)) / 2.0;
+            master.as_ref().map_or(Some([1.0; 3]), |t| t.ratio(g))
+        };
         // Colour site `s` of cell `(cx, cy)`, its gain `w`, at radius `r`: its
         // difference against the green the demosaic reads there (the mean of
         // the site's four axis neighbours, all green on a Bayer pattern; those
         // inside the frame at its edge), the difference's variance and its
         // neighbour covariance summed per sample at each sample's own level,
         // and whether it is measured ([`Self::meas`]; planarity needs all four).
-        let site = |cx: usize, cy: usize, s: usize, w: f64, r: f64| {
+        let site = |cx: usize, cy: usize, s: usize, w: f64, r: f64, q: Option<[f64; 3]>| {
             let (dy, dx) = sites[s];
             let (x, y) = (2 * cx + dx, 2 * cy + dy);
             let own = f64::from(mosaic[y * width + x]);
@@ -1314,11 +1497,15 @@ impl Cells {
             let held: Vec<f64> = g.iter().copied().filter(|v| !v.is_nan()).collect();
             let n = held.len() as f64;
             let vg: f64 = held.iter().map(|&v| model.var(v, r) * wb[1] * wb[1]).sum();
-            let mut measured = own < 1.0 && held.iter().all(|&v| v < 1.0);
+            // A level with no reading is not a measurement; on a master each
+            // variance at its ratio (`[1, 1, 1]` on the sensor's mosaic).
+            let [qg, qr, qb] = q.unwrap_or([1.0; 3]);
+            let qd = if s == 0 { qr } else { qb };
+            let mut measured = q.is_some() && own < 1.0 && held.iter().all(|&v| v < 1.0);
             if held.len() == 4 {
-                measured &= ((g[0] + g[1]) - (g[2] + g[3])).abs() <= k * vg.max(0.0).sqrt();
+                measured &= ((g[0] + g[1]) - (g[2] + g[3])).abs() <= k * (vg * qg).max(0.0).sqrt();
             }
-            (w * own - held.iter().sum::<f64>() / n, w * w * model.var(own, r) + vg / (n * n), vg / n / 16.0, measured)
+            (w * own - held.iter().sum::<f64>() / n, (w * w * model.var(own, r) + vg / (n * n)) * qd, vg / n / 16.0 * qg, measured)
         };
         type Cell = ([f32; 3], [f32; 2], [f32; 4], [bool; 2]);
         let all: Vec<Cell> = (0..cw * ch)
@@ -1328,8 +1515,9 @@ impl Cells {
                 let rad = model.radius((cx as f64 + 0.5) * 2.0, (cy as f64 + 0.5) * 2.0);
                 let g = (at(cx, cy, 1) + at(cx, cy, 2)) / 2.0;
                 let (r, b) = (wb[0] * at(cx, cy, 0), wb[2] * at(cx, cy, 3));
-                let (dr, vr, cr, mr) = site(cx, cy, 0, wb[0], rad);
-                let (db, vb, cb, mb) = site(cx, cy, 3, wb[2], rad);
+                let q = ratio_of(cx, cy);
+                let (dr, vr, cr, mr) = site(cx, cy, 0, wb[0], rad, q);
+                let (db, vb, cb, mb) = site(cx, cy, 3, wb[2], rad, q);
                 ([dr as f32, db as f32, g as f32], [(r - g) as f32, (b - g) as f32], [vr as f32, vb as f32, cr as f32, cb as f32], [mr, mb])
             })
             .collect();
@@ -1342,7 +1530,8 @@ impl Cells {
             .map(|i| {
                 let (cx, cy) = (i % cw, i / cw);
                 let rad = model.radius((cx as f64 + 0.5) * 2.0, (cy as f64 + 0.5) * 2.0);
-                std::array::from_fn(|q| model.var(f64::from(mosaic[(2 * cy + q / 2) * width + 2 * cx + q % 2]), rad) as f32)
+                let qg = ratio_of(cx, cy).map_or(0.0, |q| q[0]);
+                std::array::from_fn(|q| (model.var(f64::from(mosaic[(2 * cy + q / 2) * width + 2 * cx + q % 2]), rad) * qg) as f32)
             })
             .collect();
         // One site's colour difference: its own sample and four greens,
@@ -1356,7 +1545,17 @@ impl Cells {
         };
         let sd = pts.iter().map(|p| site_var(p).0.map(|v| (2.0 * v).sqrt() as f32)).collect();
         let cov = pts.iter().map(|p| site_var(p).1 as f32).collect();
-        Some(Self { cw, ch, pw, ph, d, own, sd, cov, meas, var, origin: [sites[0], sites[3]], site_var: sample_var, model: *model, wb, side: 1 })
+        let ratio = match &master {
+            Some(_) => (0..cw * ch).map(|i| ratio_of(i % cw, i / cw).map(|q| q.map(|v| v as f32))).collect(),
+            None => Vec::new(),
+        };
+        Some(Self { cw, ch, pw, ph, d, own, sd, cov, meas, var, origin: [sites[0], sites[3]], site_var: sample_var, model: *model, wb, side: 1, ratio, master })
+    }
+
+    /// Cell `i`'s ratios of its noise to the model's (`[1, 1, 1]` on the
+    /// sensor's mosaic; [`Self::of_master`]).
+    fn noise_ratio(&self, i: usize) -> [f64; 3] {
+        self.ratio.get(i).map_or([1.0; 3], |r| r.map_or([0.0; 3], |q| q.map(f64::from)))
     }
 
     /// These cells at pyramid level `level` (`level ≥ 1`): each the mean of a
@@ -1431,7 +1630,12 @@ impl Cells {
                 (sd, (c / (sf * sf * sf)) as f32)
             })
             .unzip();
-        Self { cw, ch, pw, ph, d, own, sd, cov, meas, var, origin: self.origin, site_var: Vec::new(), model: self.model, wb: self.wb, side: self.side * s }
+        // A master's ratios at each level cell's own level.
+        let ratio = match &self.master {
+            Some(t) => all.iter().map(|c| t.ratio(f64::from(c.0[2])).map(|q| q.map(|v| v as f32))).collect(),
+            None => Vec::new(),
+        };
+        Self { cw, ch, pw, ph, d, own, sd, cov, meas, var, origin: self.origin, site_var: Vec::new(), model: self.model, wb: self.wb, side: self.side * s, ratio, master: self.master.clone() }
     }
 
     /// One cell's noise sd per colour difference at cell `i`'s OWN level —
@@ -1477,7 +1681,7 @@ impl Cells {
         let (cx, cy) = (i % self.cw, i / self.cw);
         let s = self.side as f64;
         let r = self.model.radius((cx as f64 + 0.5) * 2.0 * s, (cy as f64 + 0.5) * 2.0 * s);
-        let vg = self.model.var(f64::from(self.d[i][2]), r) * self.wb[1] * self.wb[1];
+        let vg = self.model.var(f64::from(self.d[i][2]), r) * self.wb[1] * self.wb[1] * self.noise_ratio(i)[0];
         [vg / (2.0 * s * s), -vg * (2.0 * s - 1.0) / (4.0 * s * s * s), -vg / (4.0 * s * s * s)]
     }
 
@@ -1489,7 +1693,7 @@ impl Cells {
         let (cx, cy) = (i % self.cw, i / self.cw);
         let s = self.side as f64;
         let r = self.model.radius((cx as f64 + 0.5) * 2.0 * s, (cy as f64 + 0.5) * 2.0 * s);
-        self.model.var(g, r) * self.wb[1] * self.wb[1] / (2.0 * s * s)
+        self.model.var(g, r) * self.wb[1] * self.wb[1] * self.noise_ratio(i)[0] / (2.0 * s * s)
     }
 
     /// The light read first on its own evidence (see the module): the cells'
@@ -1635,10 +1839,11 @@ impl Cells {
                 let r = self.model.radius((cx as f64 + 0.5) * 2.0 * s, (cy as f64 + 0.5) * 2.0 * s);
                 let g = f64::from(light.g[i]);
                 let vg = self.model.var(g / self.wb[1], r) * self.wb[1] * self.wb[1];
+                let q = self.noise_ratio(i);
                 let one = |j: usize| {
                     let w = [self.wb[0], self.wb[2]][j];
-                    let v = w * w * self.model.var((g + f64::from(read[i][j])) / w, r) + vg / 4.0;
-                    let c = vg / 16.0;
+                    let v = (w * w * self.model.var((g + f64::from(read[i][j])) / w, r) + vg / 4.0) * q[1 + j];
+                    let c = vg / 16.0 * q[0];
                     ((v + 4.0 * c * (1.0 - 1.0 / s)) / (s * s), c / (s * s * s))
                 };
                 let ((vr, cr), (vb, cb)) = (one(0), one(1));
@@ -2051,6 +2256,7 @@ impl Cells {
             site_var: self.site_var.clone(),
             // The per-pixel question is asked at the pixel count's fairness.
             k: fair_k((4 * self.cw * self.ch) as f64),
+            abstain: self.ratio.iter().map(Option::is_none).collect(),
         }
     }
 
@@ -2087,13 +2293,17 @@ impl Cells {
                 let (cx, cy) = (i % cw, i / cw);
                 let r = self.model.radius((cx as f64 + 0.5) * 2.0 * s, (cy as f64 + 0.5) * 2.0 * s);
                 let v = self.light_noise(i)[0];
+                let q = self.noise_ratio(i);
                 [0, 1].map(|j| {
                     if !self.meas[i][j] {
                         return [0.0; 7];
                     }
                     let o = f64::from(self.own[i][j]);
                     let w = self.wb[2 * j];
-                    [1.0, g, g * g, o, g * o, w * w * self.model.var((o + g) / w, r) / (s * s) + v, v]
+                    // On a master `v_o` is the model's at the colour
+                    // difference's ratio (the model's green term `v/q[0]`).
+                    let vo = if self.ratio.is_empty() { w * w * self.model.var((o + g) / w, r) / (s * s) + v } else { (w * w * self.model.var((o + g) / w, r) / (s * s) + v / q[0]) * q[1 + j] };
+                    [1.0, g, g * g, o, g * o, vo, v]
                 })
             })
             .collect();
