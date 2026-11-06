@@ -359,6 +359,60 @@ pub(crate) fn ships_local(own_with: f32, own_without: f32, frame_with: f32, fram
     ships(own_with, own_without) && frame_with - frame_without <= FIT_QUANT
 }
 
+/// R19's population on the HUE axis (rel1180 RULING-1180-sc-r1 Q-SC-3): the
+/// pixels the `moving` mixer bands reach on `px` — each pixel's partition
+/// weight in the moving bands ([`render::hsl_band_reach`], the engine's own
+/// reach), times its membership.
+pub(crate) fn mixer_reach(px: &[[f32; 3]], moving: &[bool; 8], membership: &[f32]) -> Vec<f32> {
+    px.iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let (h, _, _) = render::rgb_to_hsl(p[0], p[1], p[2]);
+            let within = match render::hsl_band_reach(h, render::chroma(p)) {
+                Some((b0, b1, w1, _)) => {
+                    (if moving[b0] { 1.0 - w1 } else { 0.0 }) + if moving[b1] { w1 } else { 0.0 }
+                }
+                None => 0.0,
+            };
+            within * membership.get(i).copied().unwrap_or(0.0).max(0.0)
+        })
+        .collect()
+}
+
+/// THE MIXER'S SHIP LAW (rel1180 RULING-1180-sc-r1 Q-SC-3, RULING-1180-sc-r4
+/// Q-SC-2b (2)): a mixer move ships when it earns [`FIT_QUANT`] on its OWN
+/// bands' population ([`mixer_reach`] of the `moving` bands on `without_px`,
+/// J* read on [`EvidenceModel::scoped`] to it), the frame a guard only —
+/// R19's local law ([`ships_local`]) on the hue axis. Both readings are a
+/// local correction's (S-mode, [`super::look::LookTerms::local`]): the
+/// structural term is the D threshold's, and read on the frame it moved by
+/// up to 0.0087 of J* for a band move whose own population halved its error
+/// (rel1180 msg-sc round 5, the engine HSL pair). No band reached, or no
+/// band moving: the frame's law.
+pub(crate) fn mixer_ships(
+    moving: &[bool; 8],
+    with_px: &[[f32; 3]],
+    without_px: &[[f32; 3]],
+    tp: &[[f32; 3]],
+    evidence: &EvidenceModel,
+) -> bool {
+    let (frame_with, frame_without) =
+        (look_err_with_evidence(with_px, tp, evidence), look_err_with_evidence(without_px, tp, evidence));
+    let reach = mixer_reach(without_px, moving, &evidence.source_membership);
+    if !moving.iter().any(|&m| m) || reach.iter().sum::<f32>() <= 0.0 {
+        return ships(frame_with, frame_without);
+    }
+    let mut own = evidence.scoped(tp, &reach, &reach);
+    own.local = true;
+    let frame_local = |px: &[[f32; 3]]| super::look::look_terms(px, tp, evidence).local();
+    ships_local(
+        look_err_with_evidence(with_px, tp, &own),
+        look_err_with_evidence(without_px, tp, &own),
+        frame_local(with_px),
+        frame_local(without_px),
+    )
+}
+
 /// One recipe's readings for R22 (a)'s verdict: frame J*, `E_paired` per
 /// luminance band (J* units, [`look::LumaBands::paired_readings`]), and the
 /// render's L* per pixel (for the control's own response).
@@ -535,7 +589,7 @@ impl Control {
         }
     }
 
-    fn reset(self, r: &mut EditRecipe, b: &EditRecipe) {
+    pub(super) fn reset(self, r: &mut EditRecipe, b: &EditRecipe) {
         let h = &b.color_grade;
         let g = &mut r.color_grade;
         match self {

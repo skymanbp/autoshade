@@ -969,16 +969,45 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // before the mixer — which is exactly why both colour stages measure
     // their demand on a re-render rather than on an algebraic composition.
     let hue_before_mixer = recipe.hsl.hue;
+    let before_mixer = recipe.clone();
+    let unearned_before_mixer = unearned.len();
     let mut hsl_facts =
         fit_hsl_stage(&s_img, &sp, &tp, &evidence, hue_vouch, cells.as_ref(), budget, &mut recipe);
     // R12: the mixer's bands are one joint solve; the cast curves fit on what stays.
     unearned.extend(eliminate_unearned(&mut recipe, base, &mixer_controls(), objective_of));
-    let hsl_fitted = recipe.hsl.clone();
+    // THE ATTRIBUTION LAW AT THE MIXER (rel1180 RULING-1180-sc-r1 Q-SC-2 (a)):
+    // a move confined to one band's hue range is that band's. The tone stage
+    // runs first and reads such a move as the frame's — an Orange-only −25
+    // luminance read as exposure −0.2 and saturation +6.6, and the mixer then
+    // solved on what tone left asked under FIT_QUANT per band (rel1180 msg-sc
+    // case 2). So the mixer is solved once more from the frame WITHOUT the
+    // frame-domain controls (the tone sliders and saturation at the base, the
+    // mixer from where the stage found it), R12 on it, and that recipe
+    // replaces the frame-domain one unless the frame-domain one earns
+    // FIT_QUANT over it: a tie goes to the smaller domain, the band's.
+    if TONE_SLIDERS.iter().chain(&[Control::Saturation]).any(|c| c.differs(&before_mixer, base)) {
+        let mut banded = before_mixer.clone();
+        for c in TONE_SLIDERS.iter().chain(&[Control::Saturation]) {
+            c.reset(&mut banded, base);
+        }
+        let banded_facts =
+            fit_hsl_stage(&s_img, &sp, &tp, &evidence, hue_vouch, cells.as_ref(), budget, &mut banded);
+        let banded_unearned = eliminate_unearned(&mut banded, base, &mixer_controls(), objective_of);
+        if !banded.hsl.is_neutral() && !ships(objective_of(&recipe), objective_of(&banded)) {
+            recipe = banded;
+            hsl_facts = banded_facts;
+            unearned.truncate(unearned_before_mixer);
+            unearned.extend(banded_unearned);
+        }
+    }
+    let mut hsl_fitted = recipe.hsl.clone();
     let mut cast_admission: Option<(f32, f32)> = None;
     // NOT cleared per call, unlike `cast_admission`: a hand-off moves the
     // white balance, and every later call re-fits the curves ON that white
     // balance, so the move it describes is still in the recipe after them.
-    let mut cast_handoff: Option<HandOffFacts> = None;
+    // A `Cell`: the frame-domain candidate below is a probe whose hand-off,
+    // when it does not ship, must not describe the recipe that does.
+    let cast_handoff: std::cell::Cell<Option<HandOffFacts>> = std::cell::Cell::new(None);
     // `rescue` = may a fan-convicted cast be PROJECTED into something
     // milder rather than thrown away (v1.2.3, `search_cast_projection`)?
     // Only the call that produces the recipe the user gets says yes; see the
@@ -1167,14 +1196,14 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
                     recipe.green_curve = green;
                     recipe.blue_curve = blue;
                     handed_now = true;
-                    cast_handoff = Some(HandOffFacts {
-                        from: cast_handoff.map_or(from, |prior| prior.from),
+                    cast_handoff.set(Some(HandOffFacts {
+                        from: cast_handoff.get().map_or(from, |prior| prior.from),
                         to: h.wb,
                         share,
                         fan_before,
                         fan_after: h.outcome.readings.and_then(|r| r.fan).unwrap_or(0.0),
                         vouch: h.vouch,
-                    });
+                    }));
                     out = h.outcome;
                     None
                 } else {
@@ -1273,6 +1302,36 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         out
     };
     fit_cast_stage(&mut recipe, CastRescue::Off);
+    // THE ATTRIBUTION LAW AT THE CAST (rel1180 RULING-1180-sc-r4 Q-SC-2b (1)):
+    // the cast curves and the white-balance walk they hand to are frame-domain
+    // controls, as the tone sliders and saturation are. Their conviction (the
+    // fan read) and their walk read the frame BEFORE the mixer's moves — the
+    // mixer at the stage's start for that read, the mirror of the reset
+    // above — and the mixer is then solved on what they leave (R12 on it, the
+    // curves re-fitted on its frame). That candidate replaces the mixer-first
+    // one only when it earns FIT_QUANT over it: a tie goes to the smaller
+    // domain, the band's. On the warm-strip pair the mixer-first frame spread
+    // a per-channel cast over four bands, its candidate then fanned 11.8°
+    // instead of 15.05°, the walk never ran and the stage end gave everything
+    // back (rel1180 msg-sc round 4).
+    {
+        let mut framed = before_mixer.clone();
+        let handoff_before = cast_handoff.get();
+        fit_cast_stage(&mut framed, CastRescue::ChaseSaturation);
+        let framed_facts =
+            fit_hsl_stage(&s_img, &sp, &tp, &evidence, hue_vouch, cells.as_ref(), budget, &mut framed);
+        let framed_unearned = eliminate_unearned(&mut framed, base, &mixer_controls(), objective_of);
+        fit_cast_stage(&mut framed, CastRescue::Off);
+        if ships(objective_of(&framed), objective_of(&recipe)) {
+            hsl_fitted = framed.hsl.clone();
+            recipe = framed;
+            hsl_facts = framed_facts;
+            unearned.truncate(unearned_before_mixer);
+            unearned.extend(framed_unearned);
+        } else {
+            cast_handoff.set(handoff_before);
+        }
+    }
 
     // --- 4a') the mixer must EARN its place against its own ABSENCE ----------
     // Stage 4a judged itself on a render the catch-all had not yet touched,
@@ -1687,7 +1746,7 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     // white balance did not survive to the finished recipe has nothing to
     // name.
     let shipped_wb = law.point_of(&report.recipe);
-    if let Some(h) = cast_handoff.filter(|h| !fit_regressed && shipped_wb != h.from) {
+    if let Some(h) = cast_handoff.get().filter(|h| !fit_regressed && shipped_wb != h.from) {
         let (converged, diverged, aligned) = h.vouch.shares();
         let mut args = vec![
             ("k_before", format!("{:.0}", h.from.0)),

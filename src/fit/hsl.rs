@@ -3,6 +3,7 @@
 use super::*;
 use super::evidence::{EVIDENCE_LUMA_BINS, evidence_luma_bin, wb_consensus, weighted_median};
 use super::grade::largest_vouched_share;
+use super::cast_outcome::mixer_ships;
 
 // --------------------------------------------------------------------------
 // per-band colour mixer (stage 4a)
@@ -110,11 +111,20 @@ pub(super) fn halved_hsl(hsl: &crate::recipe::Hsl) -> crate::recipe::Hsl {
 /// own rotation is testimony and the band a pixel belongs to is read off the
 /// source, never off the move.
 ///
-/// The chase is closed-loop through the real engine for the same reason the
-/// global chroma chase is: `apply_hsl` runs before saturation, the wheels and
-/// clarity, blends two bands per pixel through a partition of unity and fades
-/// itself out below chroma 0.22 — so the open-loop ratio is a first step, not
-/// an answer. Two iterations, then a do-no-harm that shrinks to zero.
+/// The amounts are solved JOINTLY, as the band hues are ([`fit_band_hues`],
+/// one solve form for the mixer's three axes): `apply_hsl` blends two bands
+/// per pixel through a partition of unity and fades itself out below chroma
+/// 0.22, so one band's amount moves the members of both bands its pixels
+/// belong to, and a band's population answers to its neighbour's amount too
+/// ([`band_population_reach`]). Read band by band, as a ratio chase, an
+/// Orange-only move of −25 luminance on a real RAW was split into Red −10.7
+/// and Orange −14.5, and the elimination then dropped Red and left Orange
+/// short (rel1180 msg-sc case 2). Every admitted band's population demand is
+/// one equation over the reach of its members, least squares over the
+/// admitted bands. The solve is closed-loop through the real engine for the
+/// same reason the global chroma chase is (`apply_hsl` runs before
+/// saturation, the wheels and clarity, so the linearised answer is a first
+/// step): two rounds, then a do-no-harm that shrinks to zero.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn fit_hsl_stage(
     s_img: &DynamicImage,
@@ -252,30 +262,38 @@ fn fit_band_populations(
         return (facts, admitted);
     }
 
-    // --- the chase, closed-loop through the real engine --------------------
+    // --- the joint solve, closed-loop through the real engine --------------
+    const B: usize = EVIDENCE_HUE_BANDS;
+    let mut given_back = false;
     for _ in 0..2 {
         let cur = pixels_of(&render::develop_preview(s_img, recipe));
         let (cs, _) = band_stats_weighted(&cur, &evidence.source_hue_weights);
+        let reach = band_population_reach(&cur, &evidence.source_hue_weights);
         let mut moved_any = false;
-        for band in 0..EVIDENCE_HUE_BANDS {
-            if !admitted[band] || cs[band].w <= 0.0 || sb[band].w <= 0.0 {
-                continue;
-            }
-            // The engine reads `new_s = s * (1 + sat/100)` and
-            // `new_l = l * (1 + 0.5 * lum/100)`, and chroma is proportional to
-            // `s` and luma to `l` at fixed hue, so a band's mean-chroma ratio
-            // IS the saturation demand and its mean-luma ratio is the
-            // luminance demand at half the sensitivity.
-            let axes = [
-                (cs[band].c / cs[band].w, sb[band].c / sb[band].w, 100.0f32),
-                (cs[band].y / cs[band].w, sb[band].y / sb[band].w, 200.0f32),
-            ];
-            for (axis, (now, want, scale)) in axes.into_iter().enumerate() {
+        for (axis, reach_axis) in reach.iter().enumerate() {
+            // A band's mean chroma (saturation) or mean luma (luminance), now
+            // and in the target, and its members' reach per unit amount of
+            // every band, relative to its own mean: the equation
+            // `Σ_c reach_c · x_c = want / now − 1`.
+            let mut equations: Vec<(f64, [f64; B], f64)> = Vec::new();
+            let mut free: Vec<usize> = Vec::new();
+            for band in 0..B {
+                if !admitted[band] || cs[band].w <= 0.0 || sb[band].w <= 0.0 {
+                    continue;
+                }
+                let (sum, want) = if axis == 0 { (cs[band].c, sb[band].c / sb[band].w) } else { (cs[band].y, sb[band].y / sb[band].w) };
+                let now = sum / cs[band].w;
                 if now < HSL_BAND_MIN_MEAN {
                     continue;
                 }
-                let step = (((want / now) - 1.0) as f32 * scale)
-                    .clamp(-HSL_BAND_STEP, HSL_BAND_STEP);
+                let row: [f64; B] = std::array::from_fn(|c| reach_axis[band][c] / sum);
+                equations.push((cs[band].w, row, want / now - 1.0));
+                free.push(band);
+            }
+            let total: f64 = equations.iter().map(|e| e.0).sum();
+            let Some(amount) = least_squares_over_bands(&equations, &free, total) else { continue };
+            for (&band, &x) in free.iter().zip(&amount) {
+                let step = (x as f32).clamp(-HSL_BAND_STEP, HSL_BAND_STEP);
                 if step.abs() < 1.0 {
                     continue;
                 }
@@ -291,12 +309,45 @@ fn fit_band_populations(
                 *slot = next;
             }
         }
+        // R1 at every round (rel1180 RULING-1180-sc-r4 Q-SC-2b (2)): each
+        // band's amount against its absence, on its OWN population, the frame
+        // a guard (`mixer_ships`); a band that does not earn there is set back
+        // in this round, not carried to the stage end. A band whose demand is
+        // only a neighbour's spill earns nothing on its own pixels.
+        let with_px = pixels_of(&render::develop_preview(s_img, recipe));
+        let mut unearned_bands = Vec::new();
+        for band in 0..B {
+            if recipe.hsl.saturation[band] == restore.saturation[band]
+                && recipe.hsl.luminance[band] == restore.luminance[band]
+            {
+                continue;
+            }
+            let mut without = recipe.clone();
+            without.hsl.saturation[band] = restore.saturation[band];
+            without.hsl.luminance[band] = restore.luminance[band];
+            let without_px = pixels_of(&render::develop_preview(s_img, &without));
+            let mut moving = [false; B];
+            moving[band] = true;
+            if !mixer_ships(&moving, &with_px, &without_px, tp, evidence) {
+                unearned_bands.push(band);
+            }
+        }
+        given_back |= !unearned_bands.is_empty();
+        for band in unearned_bands {
+            recipe.hsl.saturation[band] = restore.saturation[band];
+            recipe.hsl.luminance[band] = restore.luminance[band];
+        }
         if !moved_any {
             break;
         }
     }
     let fitted = recipe.hsl.clone();
     if fitted == restore {
+        // Every move the solve proposed was set back for not earning on its
+        // band: the same withdrawal the stage-end halving discloses.
+        if given_back {
+            facts.withdrawn = Some(HslWithdrawal::Error);
+        }
         return (facts, admitted);
     }
 
@@ -332,6 +383,86 @@ fn fit_band_populations(
         }
     }
     (facts, admitted)
+}
+
+/// The mixer's reach on each band's POPULATION, per unit amount of every
+/// band: `reach[axis][b][c]` is the change of band `b`'s summed chroma
+/// (axis 0, saturation) or summed luma (axis 1, luminance), in the band
+/// statistics' own membership weights ([`band_stats_weighted`]: the
+/// pixel's weight times its partition weight in `b`), per unit of band `c`'s
+/// amount — the engine's law ([`render::apply_hsl`]): a pixel's saturation
+/// scales by `1 + adj / 100` and its HSL lightness by `1 + 0.5 · adj / 100`,
+/// `adj` its two bracketing bands' amounts in its partition weights times
+/// the chroma gate's fade ([`render::hsl_band_reach`]); at fixed hue chroma
+/// is proportional to saturation and luma to lightness, linearised at the
+/// frame as it stands.
+fn band_population_reach(px: &[[f32; 3]], weights: &[f32]) -> [[[f64; EVIDENCE_HUE_BANDS]; EVIDENCE_HUE_BANDS]; 2] {
+    let mut reach = [[[0.0f64; EVIDENCE_HUE_BANDS]; EVIDENCE_HUE_BANDS]; 2];
+    for (i, p) in px.iter().enumerate() {
+        let weight = weights.get(i).copied().unwrap_or(0.0).max(0.0) as f64;
+        // The band statistics' own chroma gate.
+        if weight <= 0.0 || render::chroma(p) < 0.06 {
+            continue;
+        }
+        let (h, _, _) = render::rgb_to_hsl(p[0], p[1], p[2]);
+        let Some((b0, b1, w1, fade)) = render::hsl_band_reach(h, render::chroma(p)) else {
+            continue;
+        };
+        let (w1, fade) = (w1 as f64, fade as f64);
+        let quantity = [render::chroma(p) as f64 / 100.0, luma601(p) as f64 * 0.5 / 100.0];
+        for (member, m) in [(b0, 1.0 - w1), (b1, w1)] {
+            for (axis, q) in quantity.iter().enumerate() {
+                reach[axis][member][b0] += weight * m * q * fade * (1.0 - w1);
+                reach[axis][member][b1] += weight * m * q * fade * w1;
+            }
+        }
+    }
+    reach
+}
+
+/// The mixer's one solve form: the mass-weighted least-squares amounts of the
+/// `free` bands for `equations` (each `(mass, reach per unit of every band,
+/// what the equation asks)`), by Gaussian elimination with partial pivoting
+/// on the normal equations. `None` when a free band has no pivot — no
+/// equation reaches it, so the solve has no answer for it. `total` is the
+/// equations' mass, the scale of the pivot test.
+fn least_squares_over_bands(
+    equations: &[(f64, [f64; EVIDENCE_HUE_BANDS], f64)],
+    free: &[usize],
+    total: f64,
+) -> Option<Vec<f64>> {
+    let k = free.len();
+    if k == 0 {
+        return None;
+    }
+    let mut normal = vec![vec![0.0f64; k + 1]; k];
+    for (w, reach_r, want) in equations {
+        for (r, &cr) in free.iter().enumerate() {
+            for (c, &cc) in free.iter().enumerate() {
+                normal[r][c] += w * reach_r[cr] * reach_r[cc];
+            }
+            normal[r][k] += w * reach_r[cr] * want;
+        }
+    }
+    for col in 0..k {
+        let pivot = (col..k)
+            .max_by(|&a, &b| normal[a][col].abs().total_cmp(&normal[b][col].abs()))
+            .unwrap_or(col);
+        normal.swap(col, pivot);
+        if normal[col][col].abs() <= f64::EPSILON * total {
+            return None;
+        }
+        let pivot_row = normal[col].clone();
+        for (row, line) in normal.iter_mut().enumerate() {
+            if row != col {
+                let f = line[col] / pivot_row[col];
+                for (x, p) in line[col..].iter_mut().zip(&pivot_row[col..]) {
+                    *x -= f * p;
+                }
+            }
+        }
+    }
+    Some((0..k).map(|r| normal[r][k] / normal[r][r]).collect())
 }
 
 /// Solve `hsl.hue`, one band at a time, from the PAIRED pixels: the carrier
@@ -466,39 +597,12 @@ fn fit_band_hues(
     if free.is_empty() {
         return;
     }
-    let k = free.len();
-    let mut normal = vec![vec![0.0f64; k + 1]; k];
-    for (w, reach_r, want) in &equations {
-        for (r, &cr) in free.iter().enumerate() {
-            for (c, &cc) in free.iter().enumerate() {
-                normal[r][c] += w * reach_r[cr] * reach_r[cc];
-            }
-            normal[r][k] += w * reach_r[cr] * want;
-        }
-    }
-    // Gaussian elimination with partial pivoting; a band whose pixels the
-    // mixer cannot reach (no pivot) leaves the solve unanswerable.
-    for col in 0..k {
-        let pivot = (col..k)
-            .max_by(|&a, &b| normal[a][col].abs().total_cmp(&normal[b][col].abs()))
-            .unwrap_or(col);
-        normal.swap(col, pivot);
-        if normal[col][col].abs() <= f64::EPSILON * total {
-            return;
-        }
-        let pivot_row = normal[col].clone();
-        for (row, line) in normal.iter_mut().enumerate() {
-            if row != col {
-                let f = line[col] / pivot_row[col];
-                for (x, p) in line[col..].iter_mut().zip(&pivot_row[col..]) {
-                    *x -= f * p;
-                }
-            }
-        }
-    }
+    // A band whose pixels the mixer cannot reach (no pivot) leaves the solve
+    // unanswerable.
+    let Some(solved) = least_squares_over_bands(&equations, &free, total) else { return };
     let mut amount = [0.0f32; B];
-    for (r, &band) in free.iter().enumerate() {
-        amount[band] = round1(((normal[r][k] / normal[r][r]) as f32).clamp(-budget.hsl_band, budget.hsl_band));
+    for (&band, &x) in free.iter().zip(&solved) {
+        amount[band] = round1((x as f32).clamp(-budget.hsl_band, budget.hsl_band));
     }
     let left = |x: &[f32; B]| -> f64 {
         equations
