@@ -2862,8 +2862,9 @@ fn the_window_keeps_the_slider_on_a_frame_whose_shared_green_exceeds_the_bound()
 /// of its `N` cells; a coherent shift of `δ` cell sds over the window raises
 /// that mean by `δ²`, and the mean's own resolution is `√(2/N)`, so the
 /// smallest coherent shift a window can see is `δ = (2/N)^¼` — 0.24 cell sd at
-/// `N = 625`. The bias measured under it is 0.05–0.1 of a cell's sd (about
-/// 0.2 ΔE76), carried by a few patches far below their window's light plane
+/// `N = 625`. The bias measured under it is up to 0.15 of a cell's sd (p40,
+/// R − G, against the derived 0.24; about 0.2 ΔE76), carried by a few patches
+/// far below their window's light plane
 /// beside bright clouds, where the cloud/sky slope colours a one-material
 /// patch: a coherent misfit under every window's resolution, which no
 /// per-window test can see (rel1180 msg-e3 rounds 44–46). Recorded as the

@@ -1745,7 +1745,12 @@ impl Cells {
     /// whose leverage reaches one is the window's own parameter and is
     /// neither tested nor read there. The window stays voted for its other
     /// cells, an included cell reads the window's fit, and a cell no voting
-    /// window reads at `w` is read at the next width of the [`ladder`].
+    /// window reads at `w` is read at the next width of the [`ladder`]. A
+    /// window straddling two materials is rejected at a cell by the fairness
+    /// test and the cell is read from the narrower window that holds it, or
+    /// from the rejecting windows when none does; a window whose edge splits
+    /// a coherent run of misfit cells, or whose fit holds the run within its
+    /// fairness, reads it (rel1180 RULING r47, r49–r51).
     ///
     /// A narrower window's acceptance is a weaker test than a wider window's
     /// rejection: over 9–81 cells the fit carries its cells' noise, and an
