@@ -5093,8 +5093,8 @@ fn a_cast_the_fan_gate_alone_convicts_earns_the_projection_and_is_never_admitted
 /// conviction's witness here; its value pin lives in
 /// `a_convicted_cast_no_white_balance_takes_back_is_projected_by_value`.
 /// The legitimate cast is the hue-ramps pair under a 3500 K white balance,
-/// a per-channel gain; since RULING-1180-sc-r4 it is walked to 3850 K on the
-/// pre-mixer frame and the curves re-fitted there are admitted at +3.0°
+/// a per-channel gain; since RULING-1180-sc-r5 Q-SC-2c the finished
+/// comparison ships it as-shot with its curves admitted
 /// (`a_white_balance_cast_the_curves_carry_as_channel_gains_never_enters_the_hand_off`).
 /// Measured beside them, the pairs the other gates already refuse:
 /// canyon-gold 5.2°, hazy→vivid 2.7°.
@@ -5204,9 +5204,9 @@ fn the_fan_gate_convicts_a_fanning_cast_ships_its_projection_where_it_earns_and_
         .map(|(_, added, _)| added)
         .unwrap_or(0.0);
     assert!(shipped_fan < FAN_DEG, "…and the curves that ship fan {shipped_fan:.1}° on the shipped frame");
-    // The legitimate cast: its curves are admitted (since RULING-1180-sc-r4
-    // on the 3850 K the walk found, +3.0°), under the 0.6 margin the haze arm
-    // used to carry.
+    // The legitimate cast: its curves are admitted (since RULING-1180-sc-r5
+    // Q-SC-2c on the as-shot white balance), under the 0.6 margin the haze
+    // arm used to carry.
     let legit = fit_recipe(&hue_ramps(), &cooled_ramps(0));
     let legit_fan = projection_arg(&legit, crate::rationale::keys::FIT_NOTE_CAST_ADMITTED_FAN, "fan")
         .unwrap_or_else(|| panic!("the hue-ramps cast is admitted: {}", legit.recipe.rationale));
@@ -9255,20 +9255,20 @@ fn recipe_fnv(recipe: &EditRecipe) -> u64 {
 /// Until v1.18.0 this pair pinned the hand-off SHIPPING (5500 K / 0 -> 3900 K
 /// / +40.6, measured 2026-10-23). From R8 / R12 to RULING-1180-sc-r4 the
 /// cast was admitted as fitted and never walked (look error 0.0771 ->
-/// 0.0140, WB as-shot, fan +3.8 degrees): its curves were fitted on the frame
-/// the mixer had already moved (Orange saturation -14.7), where they did not
-/// fan.
+/// 0.0140, WB as-shot, fan +3.8 degrees).
 ///
-/// RE-READ (rel1180 RULING-1180-sc-r4 Q-SC-2b (1)): the cast curves and the
-/// walk are frame-domain controls, read on the frame before the mixer's
-/// moves. There the fitted curves fan 16.77 degrees, past [`FAN_DEG`]: the
-/// cast is convicted and walked to 3850 K / +15.1 (curves re-fitted there
-/// fan 3.05), J* 0.01012, against the mixer-first candidate's 0.01608 — it
-/// earns FIT_QUANT over it, and the frame-domain candidate ships. What
-/// ships: 3850 K / +15.1, the three curves admitted at +3.0 degrees, the
-/// mixer neutral, look error 0.0745 -> 0.0122. Measured 2026-11-06.
-/// MUTATION: the conviction read on the post-mixer frame (part 1 dropped)
-/// -> the walk is never entered and the white balance stays as-shot.
+/// RE-READ (rel1180 RULING-1180-sc-r5 Q-SC-2c (b)): the frame-domain
+/// candidate (the cast read on the frame before the mixer's moves) fans
+/// 16.77 degrees there, is convicted and walked to 3850 K / +15.1 — the walk
+/// is entered once, on that candidate. The two candidates are compared on
+/// their FINISHED recipes: the framed one finishes at J* 0.0122, mixer-first
+/// at 0.0052, so mixer-first ships and the walk is never what ships. What
+/// ships: the white balance as-shot, no hand-off note, the curves admitted,
+/// look error 0.0745 -> 0.0052. Measured 2026-11-07. (Read mid-pipeline, as
+/// 547a2b3 did, the framed candidate won 0.0101 against 0.0161 and shipped
+/// 3850 K at 0.0122.)
+/// MUTATION: the comparison read mid-pipeline (before 4a') -> 3850 K ships,
+/// red; part 1 dropped -> the walk is never entered (the first assertion).
 #[test]
 fn a_white_balance_cast_the_curves_carry_as_channel_gains_never_enters_the_hand_off() {
     use super::solve::route;
@@ -9276,32 +9276,41 @@ fn a_white_balance_cast_the_curves_carry_as_channel_gains_never_enters_the_hand_
     route::take();
     let rep = fit_recipe(&hue_ramps(), &cooled_ramps(0));
     let seen = route::take();
+    let fan = projection_arg(&rep, keys::FIT_NOTE_CAST_ADMITTED_FAN, "fan");
     eprintln!(
-        "WB_CAST shipped {:?} / {:+.1}, J* {:.4} -> {:.4}",
-        rep.recipe.temperature_k, rep.recipe.tint, rep.err_before, rep.err_after
+        "WB_CAST shipped {:?} / {:+.1}, J* {:.4} -> {:.4}, admitted fan {fan:?}, walk entered {}",
+        rep.recipe.temperature_k, rep.recipe.tint, rep.err_before, rep.err_after, seen.hand_off_entered
     );
-    assert_eq!(seen.hand_off_entered, 1, "the cast convicted on the pre-mixer frame is walked: {seen:?}");
-    let k = rep.recipe.temperature_k.expect("the walked white balance ships");
-    assert!((k - 3850.0).abs() < 1.0, "…to the 3850 K measured on 2026-11-06: {k}");
+    assert_eq!(seen.hand_off_entered, 1, "the frame-domain candidate's convicted cast is walked: {seen:?}");
+    assert_eq!(rep.recipe.temperature_k, None, "…and the finished comparison ships mixer-first, as-shot");
     assert!(
-        rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB),
-        "…and the note says the cast was handed to it: {}",
+        !rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB
+            || n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB_NO_CURVES
+            || n.key == keys::FIT_NOTE_CAST_PROJECTED),
+        "…so no note describes the probe's walk: {}",
         rep.recipe.rationale
     );
-    let fan = projection_arg(&rep, keys::FIT_NOTE_CAST_ADMITTED_FAN, "fan")
-        .expect("the curves re-fitted on the walked white balance are admitted and publish their fan");
+    assert!(
+        rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED),
+        "the curves go through the ordinary admission: {}",
+        rep.recipe.rationale
+    );
+    let fan = fan.expect("an admitted cast publishes the fan it passed on");
     assert!(fan < FAN_DEG, "the gains fan no class past the limit ({fan})");
     assert!(
         !rep.recipe.red_curve.is_empty() && !rep.recipe.blue_curve.is_empty(),
-        "the curves carry the rest of the cast: {}",
+        "the curves carry the cast: {}",
         rep.recipe.rationale
     );
+    // The mixer-first finished recipe: 0.0052 measured; the framed one's
+    // 0.0122 is past it by more than FIT_QUANT of the 0.0745 start.
     assert!(
         ships(rep.err_after, rep.err_before),
-        "the walked cast earns its place: {} -> {}",
+        "the admitted cast earns its place: {} -> {}",
         rep.err_before,
         rep.err_after
     );
+    assert!(rep.err_after < 0.0122, "…and lands under the framed candidate's finished 0.0122: {}", rep.err_after);
 }
 
 /// The same frame with eleven rows of its grey band warmed instead: a cool
