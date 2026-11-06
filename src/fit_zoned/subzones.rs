@@ -930,15 +930,18 @@ fn replace_zone_with(
         let reason = if !solved { values::BAND_ESTIMATOR }
             else if !boundary_passed { values::BOUNDARY_BUDGET }
             else if after >= before - ZONE_DELTA_E_MARGIN { values::DELTA_E_MARGIN }
-            // The zone do-no-harm reads the one objective on the zone's own
-            // pixels (RULING-1180-int-r6 (2)): the band set may cost its zone
-            // at most the objective's own rounding, FIT_QUANT. It read the
-            // display moments (`zone_err`) against ZONE_MATCHED_ERR before —
-            // a margin the frame tolerance's 0.02 carried, which the
-            // objective's change transferred to FIT_QUANT; the margin
-            // transfers the same way.
-            else if own_after > own_before + fit::FIT_QUANT { values::ZONE_DO_NO_HARM }
-            else if !fit::ships_local(own_after, own_before, frame_after, saved_error) { values::FRAME_DO_NO_HARM }
+            // ONE check (RULING-1180-int-r7 Q-int6-1): the band set ships on
+            // its own population, the frame a guard (`fit::ships_local`). A
+            // separate zone do-no-harm read the same own-pixel pair at
+            // FIT_QUANT of loss, which ships_local already refuses (it asks a
+            // FIT_QUANT gain), so no fixture could turn it red. The reason is
+            // read from ships_local's own numbers: "zone do-no-harm" where the
+            // zone's own pixels lost (own_after > own_before), "frame
+            // do-no-harm" where the bands gained too little on them or the
+            // frame guard refused.
+            else if !fit::ships_local(own_after, own_before, frame_after, saved_error) {
+                if own_after > own_before { values::ZONE_DO_NO_HARM } else { values::FRAME_DO_NO_HARM }
+            }
             else if !no_seam_regression { values::BOUNDARY_REGRESSION }
             else if !ramps_follow { values::RAMP_STEEPER } else { "accepted" };
         let complete = solved && boundary_passed;
