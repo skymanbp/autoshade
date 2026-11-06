@@ -1091,7 +1091,7 @@ fn a_ramp_under_a_flat_light_is_read_on_its_line() {
         let total = widths.iter().sum::<usize>() as f64;
         let light = cells.read_light(lv25(), fair_k((cw * cells.ch) as f64));
         let noise = cells.noise();
-        let lines = cells.lines(rho, lv25(), &light, &noise);
+        let lines = cells.lines(rho, lv25(), &light, &noise, false);
         let refused = (rows[0]..=*rows.last().expect("rows")).flat_map(|cy| (x0 + rho..=x1 - rho).map(move |cx| cy * cw + cx)).filter(|&i| lines[i][4] == 0.0).count();
         println!(
             "ramp {s} sd/cell, half side {rho}, reach {r}: noiseless worst {worst0:.3e} (f32 rounding {tol:.3e}); under the noise bias {bias:+.4} (se {bse:.4}) cell sds, noise kept {kept:.6} (se {kse:.6}) of a cell's variance, derived {want:.6} + false reads <= {false_reads:.2e}, display {display:.6}; widths then kept {:?}; windows on the ramp refused {refused}",
@@ -1602,7 +1602,7 @@ fn null_check(cells: &Cells, e: usize, label: &str) -> (Vec<String>, [f64; 2], [
     let (rho, levels) = (at25(), lv25());
     let light = cells.read_light(levels, fair_k((cells.cw * cells.ch) as f64));
     let noise = cells.noise();
-    let lines = cells.lines(rho, levels, &light, &noise);
+    let lines = cells.lines(rho, levels, &light, &noise, false);
     let k = fair_k((cells.cw * cells.ch) as f64);
     let n_w = 2 * rho + 1;
     let stats: Vec<[f64; 6]> = box_means((cells.cw, cells.ch), rho, |i| {
@@ -1702,7 +1702,7 @@ fn three_materials_across_an_edge_are_each_read_at_their_own_colour() {
     let light = cells.read_light(levels, k);
     let (out, used) = cells.read_widths(rho, levels, &light, );
     let noise = cells.noise();
-    let lines = cells.lines(rho, levels, &light, &noise);
+    let lines = cells.lines(rho, levels, &light, &noise, false);
     let (sw, sb) = (cell_sd_at(0.0066, 0.0025, a, b), cell_sd_at(0.0095, 0.072, a, b));
     println!("three materials: noise a {a:.3e} b {b:.3e}: wall light sd {:.5}, colour sd {sw:.5}; banner colour sd {sb:.5}; wall -> strip {:.1} light sds", ((a * 0.0066 + b) / 2.0).sqrt(), 0.0114 / ((a * 0.0066 + b) / 2.0).sqrt());
     let mut line = String::from("three materials: column from the strip: read - its colour (cell sds), voting windows with a read slope:");
@@ -1806,7 +1806,7 @@ fn a_window_over_a_dark_row_is_judged_at_each_sides_own_noise() {
     let k = fair_k((cells.cw * cells.ch) as f64);
     let light = cells.read_light(levels, k);
     let (out, used) = cells.read_widths(rho, levels, &light);
-    let lines = cells.lines(rho, levels, &light, &cells.noise());
+    let lines = cells.lines(rho, levels, &light, &cells.noise(), false);
     let (cw, ch) = (cells.cw, cells.ch);
     // Each material's own colour as its sites measure it (the four greens'
     // mean holds a neighbour's light): the mean of its measured differences.
@@ -1828,7 +1828,7 @@ fn a_window_over_a_dark_row_is_judged_at_each_sides_own_noise() {
     let per_width: Vec<String> = widths
         .iter()
         .map(|&w| {
-            let l = cells.lines(w, levels, &light, &cells.noise());
+            let l = cells.lines(w, levels, &light, &cells.noise(), false);
             let o: Vec<usize> = rows.iter().flat_map(|&r| (r + 1 - w..=r + w).flat_map(move |cy| (w..cw - w).map(move |cx| cy * cw + cx))).collect();
             format!("{w}: {} of {}", o.iter().filter(|&&i| l[i][4] == 1.0).count(), o.len())
         })

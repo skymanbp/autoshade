@@ -128,8 +128,11 @@
 //! `1/v_i`, `v_i` the model's variance of its colour difference at its own
 //! level — a sample's variance is the model's at the level the stage read
 //! for it, not at its own noisy value ([`Cells::read_widths`]: the read once
-//! at each sample's variance, then once more at the variance of what that
-//! read gave the cell; rel1180 RULING r38, r39: a window's hypothesis is
+//! pooled — every cell at weight 1 and the window held against its cells'
+//! mean variance; the level the stage reads for a sample is the pooled fit's,
+//! which carries no sample's own noise in its weight (rel1180 RULING r40) —
+//! then once more at the variance of what that read gave the cell; rel1180
+//! RULING r38, r39: a window's hypothesis is
 //! fitted and voted at each sample's own noise, read at the level the stage
 //! read for it; on a window of one level the weights are uniform and the fit
 //! is the plain one). The light's slope `a` is read
@@ -260,7 +263,8 @@
 //! the detail read, then `(L+1)(L+2)/2` separable passes for its residual;
 //! the colour's (read twice, [`Cells::read_widths`]): per width of the ladder two passes of box sums, O(cells)
 //! each — 22 quantities a difference for the fits over its measured cells
-//! (1, `x`, `y`, `Ĝ`, `d` and their products, the noise's terms), five per
+//! (1, `x`, `y`, `Ĝ`, `d` and their products, the noise's terms; the pooled
+//! first read keeps the sums of `v` and `v²` in the weights' places), five per
 //! difference for the read — and seven per difference for the rebuild's
 //! slope; the measurement's test, one pass over the sites.
 //!
@@ -1594,15 +1598,18 @@ impl Cells {
     /// sample's own noise and is anti-correlated with the value it weights
     /// (the weighted mean moved by `−w³·a·σ²/v`, 0.07–0.09 of a cell's sd on
     /// the fixtures: rel1180 msg-e3 round 39). So the read is taken twice:
-    /// first at each sample's own variance ([`Self::noise`]), then at the
-    /// model's variance at the light and the colour that first read gave the
-    /// cell ([`Self::read_noise`]). Once: the first read's own noise is a
+    /// first pooled ([`Self::lines`] `pooled`: every cell at weight 1, the
+    /// window held against its cells' mean variance at their own levels,
+    /// [`Self::noise`]) — the level the stage reads for a sample is the pooled
+    /// fit's, which carries no sample's own noise in its weight (rel1180
+    /// RULING r40) — then at the model's variance at the light and the colour
+    /// that first read gave the cell ([`Self::read_noise`]). Once: the first read's own noise is a
     /// window's worth of samples below a sample's, so a further re-weighting
     /// moves the weights by less than their noise (rel1180 RULING r39).
     fn read_widths(&self, rho: usize, levels: u32, light: &Light) -> (Vec<[f32; 2]>, Vec<[u8; 2]>) {
-        let first = self.read_widths_at(rho, levels, light, &self.noise()).0;
+        let first = self.read_widths_at(rho, levels, light, &self.noise(), true).0;
         let read = self.read_noise(light, &first);
-        self.read_widths_at(rho, levels, light, &read)
+        self.read_widths_at(rho, levels, light, &read, false)
     }
 
     /// Per cell, each colour difference's variance and the covariance it
@@ -1632,8 +1639,9 @@ impl Cells {
             .collect()
     }
 
-    /// One read of [`Self::read_widths`] at the cells' variances `noise`.
-    fn read_widths_at(&self, rho: usize, levels: u32, light: &Light, noise: &[[f32; 4]]) -> (Vec<[f32; 2]>, Vec<[u8; 2]>) {
+    /// One read of [`Self::read_widths`] at the cells' variances `noise`,
+    /// `pooled` or weighted ([`Self::lines`]).
+    fn read_widths_at(&self, rho: usize, levels: u32, light: &Light, noise: &[[f32; 4]], pooled: bool) -> (Vec<[f32; 2]>, Vec<[u8; 2]>) {
         let (cw, ch) = (self.cw, self.ch);
         let widths = ladder(rho, levels);
         let kept = widths.len() as u8;
@@ -1645,7 +1653,7 @@ impl Cells {
             if !used.iter().any(|u| u[0] == kept || u[1] == kept) {
                 break;
             }
-            let lines = self.lines(w, levels, light, noise);
+            let lines = self.lines(w, levels, light, noise, pooled);
             // A voting window `Ω` reads cell `i` on its plane:
             // `b_Ω + c_Ω·(x_i − x_Ω) + e_Ω·(y_i − y_Ω) + a_Ω·Ĝ_i`, so the sums over
             // the windows holding `i` are of `v·(b − c·x_Ω − e·y_Ω)`, `v·c`,
@@ -1705,8 +1713,11 @@ impl Cells {
     /// about the fit, each cell's over its own variance, fits its own null at
     /// the frame's fairness ([`votes`] per sample, `p` 4 or 3): a window's
     /// hypothesis is fitted and voted at each sample's own noise (rel1180
-    /// RULING r38).
-    fn lines(&self, rho: usize, levels: u32, light: &Light, noise: &[[f32; 4]]) -> Vec<[f32; 10]> {
+    /// RULING r38). `pooled` (the first read, [`Self::read_widths`]): every
+    /// cell at weight 1 and the residual held against the cells' mean variance
+    /// (`s`, `q`, `c` of [`votes`]), the read that carries no sample's own
+    /// noise in its weight (rel1180 RULING r40).
+    fn lines(&self, rho: usize, levels: u32, light: &Light, noise: &[[f32; 4]], pooled: bool) -> Vec<[f32; 10]> {
         let (cw, ch) = (self.cw, self.ch);
         let k = fair_k((cw * ch) as f64);
         let nu = window_dof(rho, levels).0;
@@ -1724,16 +1735,19 @@ impl Cells {
                     if !self.meas[i][j] || v <= 0.0 {
                         return [0.0; 22];
                     }
-                    let w = 1.0 / v;
+                    let w = if pooled { 1.0 } else { 1.0 / v };
                     let d = f64::from(self.d[i][j]);
                     let g = f64::from(light.g[i]);
                     let (x, y) = self.place(i);
                     let [t1, held, held_u] = self.shared_terms(light, i, levels, &mass, &mass_u);
                     let ww = w * w;
-                    [1.0, w, w * g, w * g * g, w * d, w * g * d, w * d * d, w * f64::from(light.r[i]), w * t1, ww * held, ww * held_u, ww, ww * c, w * x, w * y, w * x * x, w * y * y, w * x * y, w * x * g, w * y * g, w * x * d, w * y * d]
+                    // Pooled, the weights' sums are the measured cells' count:
+                    // their places carry the sums of `v` and `v²` for the null.
+                    let (sw, sww) = if pooled { (v, v * v) } else { (w, ww) };
+                    [1.0, sw, w * g, w * g * g, w * d, w * g * d, w * d * d, w * f64::from(light.r[i]), w * t1, ww * held, ww * held_u, sww, ww * c, w * x, w * y, w * x * x, w * y * y, w * x * y, w * x * g, w * y * g, w * x * d, w * y * d]
                 },
                 |i, m, n| {
-                    let (f, sw, sww) = (m[0], m[1], m[11]);
+                    let (f, sw, sww) = if pooled { (m[0], m[0], m[0]) } else { (m[0], m[1], m[11]) };
                     let mut out = [0.0f32; 5];
                     if f <= 0.0 || sw <= 0.0 {
                         return out;
@@ -1773,7 +1787,9 @@ impl Cells {
                     // squared residual over its own variance (`Σw·e²/Σw` times
                     // `Σw/N`), against the white null in those units. The axis
                     // pairs a window holds scale with its measured cells.
-                    out[4] = f32::from(u8::from(votes(resid * sw / f, 1.0, 1.0, c * cnt / n, cnt, fit, k)));
+                    // Pooled: the residual against the cells' mean variance.
+                    let vote = if pooled { votes(resid, m[1] / f, m[11] / f, c * cnt / n, cnt, fit, k) } else { votes(resid * sw / f, 1.0, 1.0, c * cnt / n, cnt, fit, k) };
+                    out[4] = f32::from(u8::from(vote));
                     out
                 },
             )
