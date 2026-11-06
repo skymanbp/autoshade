@@ -75,7 +75,7 @@ fn rggb() -> rawler::cfa::CFA {
 fn the_stage_takes_the_colour_noise_and_leaves_the_greens_and_the_mean() {
     let before = mosaic(0.01, 0.0);
     let mut after = before.clone();
-    let (SourceReading { model }, _) = filter_mosaic(&mut after, W, H, &rggb(), WB, at25(), lv25(), None, 0, true).expect("a Bayer mosaic with noise fits a model");
+    let (SourceReading { model, .. }, _) = filter_mosaic(&mut after, W, H, &rggb(), WB, at25(), lv25(), None, 0, true).expect("a Bayer mosaic with noise fits a model");
     // The greens are never written.
     for y in 0..H {
         for x in 0..W {
@@ -218,7 +218,8 @@ fn the_rebuild_keeps_the_demosaics_luma() {
         (0..cw * ch).map(|i| (-0.015 + 0.01 * normal(37, i as u64)) as f32).collect::<Vec<f32>>(),
     ];
     let flat = || vec![0.0f32; cw * ch];
-    let chroma = CellChroma { cw, ch, wb: [wr, wb], origin: [(0, 0), (1, 1)], planes, green: flat(), slopes: [flat(), flat()] };
+    let ones = || vec![1.0f32; cw * ch];
+    let chroma = CellChroma { cw, ch, wb: [wr, wb], origin: [(0, 0), (1, 1)], planes, measured: [ones(), ones()], green: flat(), slopes: [flat(), flat()] };
     // Rows 0..16 the night's signed noise about 0, rows 16..47 a lit sky,
     // row 47 at the white level (the green a hair under it).
     let before: Vec<[f32; 3]> = (0..w * h)
@@ -289,8 +290,9 @@ fn the_pixels_chroma_is_the_cells_chroma_read_at_the_pixel() {
     let planes =
         [0, 1].map(|j| (0..cw * ch).map(|i| ramp(j, (i % cw) as f64, (i / cw) as f64) as f32).collect::<Vec<f32>>());
     let flat = || vec![0.0f32; cw * ch];
+    let ones = || vec![1.0f32; cw * ch];
     let origin = [(0, 0), (1, 1)];
-    let chroma = CellChroma { cw, ch, wb: [WB[0] as f32, WB[2] as f32], origin, planes, green: flat(), slopes: [flat(), flat()] };
+    let chroma = CellChroma { cw, ch, wb: [WB[0] as f32, WB[2] as f32], origin, planes, measured: [ones(), ones()], green: flat(), slopes: [flat(), flat()] };
     let before: Vec<[f32; 3]> =
         (0..w * h).map(|i| [0, 1, 2].map(|c| (0.2 + 0.05 * normal(11 + c as u64, i as u64)) as f32)).collect();
     let mut after = before.clone();
@@ -376,7 +378,10 @@ fn a_pixels_colour_follows_its_light_where_the_green_varies_more_than_its_noise(
     let sites = bayer_sites(&rggb()).expect("Bayer");
     let pts = patches(&m, W, H, sites, WB);
     let model = NoiseModel::fit(&pts, W, H).expect("a Bayer mosaic with noise fits a model");
-    let cells = Cells::of(&m, W, H, sites, WB, &model, &pts).expect("cells");
+    let mut cells = Cells::of(&m, W, H, sites, WB, &model, &pts).expect("cells");
+    // The scene's chroma is given at every cell: the measurement (which sites
+    // are measured, rel1180 RULING r30) is the other tests'.
+    cells.meas.iter_mut().for_each(|q| *q = [true; 2]);
     let scene: Vec<[f32; 2]> = cells.d.iter().map(|d| RATIO.map(|r| ((r - 1.0) * f64::from(d[2])) as f32)).collect();
     let chroma = cells.chroma(&scene, WB, 3);
     let mut rgb: Vec<[f32; 3]> = (0..W * H).map(|i| [0.0, light(i % W, i / W) as f32, 0.0]).collect();
@@ -697,7 +702,7 @@ fn fit_sample_reading() {
 
 /// The window the stage runs at the default strength.
 fn at25() -> usize {
-    window(DEFAULT_AMOUNT).expect("on")
+    window(DEFAULT_AMOUNT, RHO_G_MAX).expect("on")
 }
 
 /// The light's levels the stage reads at the default strength.
@@ -782,7 +787,7 @@ fn the_slider_reads_the_window_the_display_pass_leaves() {
         println!("half side {rho}: plane share {:.9} (brute force {sq:.9}), tau {:.6} (brute force {:.6}), centre {:.6} (brute force {:.6}); box share {:.9}", p.share, p.tau, lag / 2.0 / sq, p.centre, w[&(0, 0)], box_share(rho));
         assert!((p.share - sq).abs() < 1e-12 && (p.tau - lag / 2.0 / sq).abs() < 1e-9 && (p.centre - w[&(0, 0)]).abs() < 1e-12 && (p.side - w[&(1, 0)]).abs() < 1e-12);
     }
-    assert_eq!(window(0.0), None, "0 is off");
+    assert_eq!(window(0.0, RHO_G_MAX), None, "0 is off");
     let level = 0.01;
     let site = A * level + B;
     let var = WB[0] * WB[0] * (A * level / WB[0] + B) + site / 4.0;
@@ -802,7 +807,7 @@ fn the_slider_reads_the_window_the_display_pass_leaves() {
     );
     let (k, _) = step_read_level(1, fair_k((W / 2 * H / 2) as f64));
     for nr in [1.0f32, 10.0, 20.0, 25.0, 50.0, 75.0, 100.0] {
-        let (rho, lv) = (window(nr).expect("on"), levels(nr).expect("on"));
+        let (rho, lv) = (window(nr, RHO_G_MAX).expect("on"), levels(nr).expect("on"));
         let display = 4.0 / display_samples(nr);
         let p = plane_read(rho);
         let bound = p.share * (1.0 + 4.0 * RHO_G_MAX * p.tau);
@@ -828,7 +833,7 @@ fn the_slider_reads_the_window_the_display_pass_leaves() {
         assert!(bound + window_null / ((2 * rho + 1) * (2 * rho + 1)) as f64 + lifted <= display || rho == 1, "colour NR {nr}: with the false reads {} > {display}", bound + lifted);
         assert!(rho == 1 || { let q = plane_read(rho - 1); q.share * (1.0 + 4.0 * RHO_G_MAX * q.tau) > display }, "colour NR {nr}: half side {rho} is not the least");
     }
-    assert_eq!(window(250.0), window(100.0));
+    assert_eq!(window(250.0, RHO_G_MAX), window(100.0, RHO_G_MAX));
 }
 
 /// The flat frame's reading: the module's grey at 0.01, read at the default
@@ -910,7 +915,7 @@ fn a_windows_light_variance_has_the_derived_degrees_of_freedom() {
         assert!((nu - direct).abs() < 1e-9 * nu && (mu - mean).abs() < 1e-12, "half side {rho}, levels {levels}");
     }
     for nr in [1.0f32, 10.0, 20.0, 25.0, 50.0, 75.0, 100.0] {
-        let (rho, lv) = (window(nr).expect("on"), levels(nr).expect("on"));
+        let (rho, lv) = (window(nr, RHO_G_MAX).expect("on"), levels(nr).expect("on"));
         let c = (W / 2 * H / 2) as f64;
         let (p, nu, mu, x) = false_window(rho, lv, c);
         println!("colour NR {nr}: half side {rho}, levels {lv}: nu {nu:.4}, mu {mu:.4}; read past {x:.3} x the null's mean; false window read <= {p:.3e} (C p {:.3e} at C {c})", c * p);
@@ -1085,7 +1090,7 @@ fn a_ramp_under_a_flat_light_is_read_on_its_line() {
         let (want, false_reads) = derived_flat(rho, lv25(), (cw, cells.ch), cell_var(level, A2), (A2 * level + B) / 16.0);
         let total = widths.iter().sum::<usize>() as f64;
         let light = cells.read_light(lv25(), fair_k((cw * cells.ch) as f64));
-        let noise: Vec<[f32; 3]> = (0..cw * cells.ch).map(|i| { let (sd, c) = cells.own_noise(i); [(sd[0] * sd[0]) as f32, (sd[1] * sd[1]) as f32, (c[0] * sd[0] * sd[0]) as f32] }).collect();
+        let noise = cells.noise();
         let lines = cells.lines(rho, lv25(), &light, &noise);
         let refused = (rows[0]..=*rows.last().expect("rows")).flat_map(|cy| (x0 + rho..=x1 - rho).map(move |cx| cy * cw + cx)).filter(|&i| lines[i][4] == 0.0).count();
         println!(
@@ -1249,7 +1254,16 @@ fn step_bleed(s: f64, level: f64, g: impl Fn(usize) -> f64 + Sync, seed: u64) ->
     let out = cells.guided_on(rho, lv25(), &light);
     let side = |cols: std::ops::Range<usize>| cols.clone().map(|cx| (0..cells.ch).map(|cy| f64::from(cells.d[cy * cells.cw + cx][0])).sum::<f64>() / cells.ch as f64).sum::<f64>() / cols.len() as f64;
     let (lo, hi) = (side(0..e - 40), side(e + 40..W / 2));
-    let bleed = (e - 6..e + 6).map(|cx| (cx, (colmean(&out, cx, 0) - if cx < e { lo } else { hi }) / step)).collect();
+    // The read where the stage reads: a site not measured keeps the develop's
+    // own colour, which the rebuild takes, not the read (rel1180 RULING r30).
+    let measured_mean = |cx: usize| {
+        let ids: Vec<usize> = (0..cells.ch).map(|cy| cy * cells.cw + cx).filter(|&i| cells.meas[i][0]).collect();
+        ids.iter().map(|&i| f64::from(out[i][0])).sum::<f64>() / ids.len() as f64
+    };
+    let bleed = (e - 6..e + 6)
+        .filter(|&cx| (0..cells.ch).any(|cy| cells.meas[cy * cells.cw + cx][0]))
+        .map(|cx| (cx, (measured_mean(cx) - if cx < e { lo } else { hi }) / step))
+        .collect();
     let cy = cells.ch / 2;
     let win: Vec<usize> = (cy - rho..=cy + rho).flat_map(|y| (e - 1 - rho..=e - 1 + rho).map(move |x| y * W / 2 + x)).collect();
     let n = win.len() as f64;
@@ -1407,7 +1421,7 @@ fn the_shared_noise_is_the_measured_covariance() {
     }
     let ((g, se), (d, dse)) = (mean_se(&got), mean_se(&want));
     println!("shared noise, half side {rho}, levels {levels}, {SEEDS} flat frames: measured {g:.4e} (se {se:.2e}), derived {d:.4e} (se {dse:.2e}); derived is {:.2} se from 0", d.abs() / se);
-    let (rho1, l1) = (window(1.0).expect("on"), super::levels(1.0).expect("on"));
+    let (rho1, l1) = (window(1.0, RHO_G_MAX).expect("on"), super::levels(1.0).expect("on"));
     let cells = cells_of(&scene(|_| 0.01, |_| 0.0, A, 100, true), None);
     let light = cells.read_light(l1, fair_k((cells.cw * cells.ch) as f64));
     let (m1, d1) = shared_read(&cells, &light, rho1, l1);
@@ -1587,18 +1601,13 @@ fn a_windows_residual_has_the_derived_null() {
 fn null_check(cells: &Cells, e: usize, label: &str) -> (Vec<String>, [f64; 2], [f64; 2]) {
     let (rho, levels) = (at25(), lv25());
     let light = cells.read_light(levels, fair_k((cells.cw * cells.ch) as f64));
-    let noise: Vec<[f32; 3]> = (0..cells.cw * cells.ch)
-        .map(|i| {
-            let (sd, corr) = cells.own_noise(i);
-            [(sd[0] * sd[0]) as f32, (sd[1] * sd[1]) as f32, (corr[0] * sd[0] * sd[0]) as f32]
-        })
-        .collect();
+    let noise = cells.noise();
     let lines = cells.lines(rho, levels, &light, &noise);
     let k = fair_k((cells.cw * cells.ch) as f64);
     let n_w = 2 * rho + 1;
     let stats: Vec<[f64; 6]> = box_means((cells.cw, cells.ch), rho, |i| {
         let [d0, d1, _] = cells.d[i].map(f64::from);
-        let [s0, s1, c] = noise[i].map(f64::from);
+        let [s0, s1, c, _] = noise[i].map(f64::from);
         let (x, y) = cells.place(i);
         [d0, d1, d0 * d0, d1 * d1, s0, s1, s0 * s0, s1 * s1, c, x, y, x * x, y * y, x * y, x * d0, y * d0, x * d1, y * d1]
     }, |i, [d0, d1, dd0, dd1, s0, s1, q0, q1, c, x, y, xx, yy, xy, xd0, yd0, xd1, yd1], n| {
@@ -1692,7 +1701,7 @@ fn three_materials_across_an_edge_are_each_read_at_their_own_colour() {
     let k = fair_k((cells.cw * cells.ch) as f64);
     let light = cells.read_light(levels, k);
     let (out, used) = cells.read_widths(rho, levels, &light, );
-    let noise: Vec<[f32; 3]> = (0..cells.cw * cells.ch).map(|i| { let (sd, c) = cells.own_noise(i); [(sd[0] * sd[0]) as f32, (sd[1] * sd[1]) as f32, (c[0] * sd[0] * sd[0]) as f32] }).collect();
+    let noise = cells.noise();
     let lines = cells.lines(rho, levels, &light, &noise);
     let (sw, sb) = (cell_sd_at(0.0066, 0.0025, a, b), cell_sd_at(0.0095, 0.072, a, b));
     println!("three materials: noise a {a:.3e} b {b:.3e}: wall light sd {:.5}, colour sd {sw:.5}; banner colour sd {sb:.5}; wall -> strip {:.1} light sds", ((a * 0.0066 + b) / 2.0).sqrt(), 0.0114 / ((a * 0.0066 + b) / 2.0).sqrt());
@@ -1969,4 +1978,302 @@ fn a_flat_cells_slope_is_nothing_and_adds_no_grain() {
         );
         assert!(added <= 3.0 * se, "colour difference {j}: the slope adds {added:.4e} of grain on a flat frame, over 3 se {:.4e}", 3.0 * se);
     }
+}
+
+/// The star row (rel1180 RULING r29 / r30 / r31): the trace's own profile
+/// through a big star (its cells' green: a flank falling ×1.3, ×2.25, ×4.24
+/// into a clipped core and out again; numbers only), neutral, on a frame of
+/// 96 × 64 cells under a known model, the light per pixel log-linear between
+/// the cells' green centres, every site the light over its gain clipped at
+/// the white.
+fn star_row(seed: u64, noise: bool) -> (Vec<f32>, usize, usize) {
+    const CLIP: f64 = 1.0687;
+    let (cw, ch) = (96usize, 64usize);
+    let (w, h) = (2 * cw, 2 * ch);
+    let left = [0.0346, 0.0455, 0.1025, 0.4345];
+    let right = [0.7363, 0.1845, 0.0738, 0.0368];
+    let c0 = 40usize;
+    let mut cell: Vec<(f64, f64)> = left.iter().enumerate().map(|(i, g)| ((c0 + i) as f64, (g / CLIP).ln())).collect();
+    cell.extend(right.iter().enumerate().map(|(i, g)| ((c0 + 10 + i) as f64, (g / CLIP).ln())));
+    let (xl, xr) = ((c0 + 3) as f64, (c0 + 10) as f64);
+    let (rl, rr) = (left[3] / left[2], right[0] / right[1]);
+    let light = |x: usize| {
+        let c = (x as f64 - 0.5) / 2.0;
+        if c > xl && c < xr {
+            return ((left[3] / CLIP) * rl.powf(c - xl)).min((right[0] / CLIP) * rr.powf(xr - c));
+        }
+        if c < cell[0].0 || c > cell[cell.len() - 1].0 {
+            return 0.0346 / CLIP;
+        }
+        let k = cell.windows(2).position(|p| c >= p[0].0 && c <= p[1].0).expect("between two cells");
+        let (a, b) = (cell[k], cell[k + 1]);
+        (a.1 + (b.1 - a.1) * (c - a.0) / (b.0 - a.0)).exp()
+    };
+    let gain = [STAR_WB[0], 1.0, STAR_WB[2]];
+    let mut m = vec![0.0f32; w * h];
+    m.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (x, v) in row.iter_mut().enumerate() {
+            let s = light(x) / gain[match (y % 2, x % 2) { (0, 0) => 0, (1, 1) => 2, _ => 1 }];
+            let n = if noise { (STAR_A * s + STAR_B).sqrt() * normal(seed, (y * w + x) as u64) } else { 0.0 };
+            *v = (s + n).min(1.0) as f32;
+        }
+    });
+    (m, w, h)
+}
+const STAR_WB: [f64; 3] = [2.87109375, 1.0, 1.44921875];
+const STAR_A: f64 = 7e-4;
+const STAR_B: f64 = 6e-6;
+
+fn star_cells(m: &[f32], w: usize, h: usize) -> Cells {
+    let sites = bayer_sites(&rggb()).expect("Bayer");
+    let pts = patches(m, w, h, sites, STAR_WB);
+    Cells::of(m, w, h, sites, STAR_WB, &NoiseModel::of_terms(STAR_A, STAR_B, w, h), &pts).expect("cells")
+}
+
+/// A colour site is measured only where its four greens lie on one plane; a
+/// clipped sample is not a measurement; where a site is not measured its
+/// colour stays the develop's own (rel1180 RULING r30 / r31), on the star row:
+/// (iii) every site not measured keeps the demosaic's colour difference
+/// exactly (form B, Q31-4); the sites whose four greens are off one plane by
+/// far more than their noise are not measured; (i) the first measured cells
+/// beside the ring read within `k_F` of the truth at their own per-sample sd;
+/// (ii) pooled over the frames the read is its measurement within 3 se, and
+/// the measurement's offset against the truth is its derivation, the
+/// four-green mean's residual curvature `r/4` (`r` the planarity residual; at
+/// planarity `z` it is `z·sd(r)/(4·sd(d))` of the site's sd, ≈ 0.38·z at a
+/// blue site and 0.28·z at a red on a neutral), printed per cell; and the
+/// noise model per sample: each flank cell's measured spread of `d` over its
+/// modelled sd within its se (Q31-2).
+#[test]
+fn a_stars_ring_is_not_measured_and_keeps_the_develops_colour() {
+    const FRAMES: u64 = 20;
+    let (m0, w, h) = star_row(0, false);
+    let clean = star_cells(&m0, w, h);
+    let (cw, ch) = (clean.cw, clean.ch);
+    let k = fair_k((cw * ch) as f64);
+    let (rho, lv) = (at25(), lv25());
+    let rows = 16..ch - 16;
+    let zone = 36..58usize;
+    // The noiseless planarity z per cell and difference (the row is constant along y).
+    let z_of = |m: &[f32], cx: usize, cy: usize, j: usize| {
+        let (dy, dx) = [(0usize, 0usize), (1, 1)][j];
+        let (x, y) = (2 * cx + dx, 2 * cy + dy);
+        let g = [(x, y - 1), (x, y + 1), (x + 1, y), (x - 1, y)].map(|(a, b)| f64::from(m[b * w + a]));
+        let v: f64 = g.iter().map(|&s| STAR_A * s.max(0.0) + STAR_B).sum();
+        let r = (g[0] + g[1]) - (g[2] + g[3]);
+        (r, v.sqrt())
+    };
+    let clipped = |m: &[f32], cx: usize, cy: usize, j: usize| {
+        let (dy, dx) = [(0usize, 0usize), (1, 1)][j];
+        let (x, y) = (2 * cx + dx, 2 * cy + dy);
+        [(x, y), (x, y - 1), (x, y + 1), (x + 1, y), (x - 1, y)].iter().any(|&(a, b)| m[b * w + a] >= 1.0)
+    };
+    let mut refused = vec![[0usize; 2]; cw];
+    let mut first: Vec<Vec<Vec<f64>>> = vec![vec![Vec::new(); cw]; 2]; // (f - d0)/sd per cell
+    let mut truth: Vec<Vec<Vec<f64>>> = vec![vec![Vec::new(); cw]; 2]; // f/sd per cell
+    let mut pooled = [Vec::new(), Vec::new()];
+    let mut spread: Vec<Vec<[Vec<f64>; 2]>> = vec![vec![[Vec::new(), Vec::new()]; cw]; 2];
+    let mut worst = [0.0f64; 2];
+    let mut site_err = 0.0f64;
+    for seed in 1..=FRAMES {
+        let (m, ..) = star_row(seed, true);
+        let cells = star_cells(&m, w, h);
+        let f = cells.guided(rho, lv);
+        let chroma = cells.chroma(&f, STAR_WB, rho);
+        // (iii): a stand-in demosaic (the noisy light per pixel at the scene's
+        // own colour) — at a site not measured the rebuild keeps it.
+        let mut rgb: Vec<[f32; 3]> = (0..w * h).map(|i| { let g = m[((i / w) * w + (i % w)) ^ 1].max(0.0); [g / STAR_WB[0] as f32, m[i], g / STAR_WB[2] as f32] }).collect();
+        let before = rgb.clone();
+        chroma.rebuild(&mut rgb, w, 0, 0, GREEN_LUMA);
+        let mut means = [Vec::new(), Vec::new()];
+        for cy in rows.clone() {
+            for j in 0..2 {
+                let (dy, dx) = [(0usize, 0usize), (1, 1)][j];
+                let un: Vec<usize> = zone.clone().filter(|&cx| !cells.meas[cy * cw + cx][j]).collect();
+                for &cx in &un {
+                    refused[cx][j] += 1;
+                    let p = (2 * cy + dy) * w + 2 * cx + dx;
+                    let c = |q: [f32; 3]| f64::from(if j == 0 { STAR_WB[0] as f32 * q[0] } else { STAR_WB[2] as f32 * q[2] } - q[1]);
+                    site_err = site_err.max((c(rgb[p]) - c(before[p])).abs());
+                }
+                for cx in zone.clone() {
+                    let i = cy * cw + cx;
+                    if cells.meas[i][j] {
+                        spread[j][cx][0].push(f64::from(cells.d[i][j]));
+                        spread[j][cx][1].push(cells.own_noise(i).0[j]);
+                    }
+                }
+                let (Some(&lo), Some(&hi)) = (un.first(), un.last()) else { continue };
+                let near = (lo.saturating_sub(2)..lo).rev().chain(hi + 1..hi + 3).filter(|&cx| cells.meas[cy * cw + cx][j]);
+                for cx in near {
+                    let i = cy * cw + cx;
+                    let sd = cells.own_noise(i).0[j];
+                    let e = f64::from(f[i][j]) / sd;
+                    // (i) reads the read against the cell's own measurement:
+                    // the measurement's offset from the truth is the derived
+                    // residual, asserted pooled below (rel1180 RULING r31 Q31-1;
+                    // a site whose noiseless planarity is past k_F is measured
+                    // on the rows its noise brings under it, carrying its whole
+                    // offset, -2.47 sd at the blue site of cell 50).
+                    let o = (f64::from(f[i][j]) - f64::from(clean.d[i][j])) / sd;
+                    worst[j] = worst[j].max(o.abs());
+                    first[j][cx].push(o);
+                    truth[j][cx].push(e);
+                    means[j].push(o);
+                }
+            }
+        }
+        for j in 0..2 {
+            pooled[j].push(means[j].iter().sum::<f64>() / means[j].len() as f64);
+        }
+    }
+    let n_rows = (rows.len() as u64 * FRAMES) as f64;
+    assert!(site_err <= 1e-5, "(iii): a site not measured is written {site_err:.2e} off the demosaic's colour");
+    for j in 0..2 {
+        let name = ["R-G", "B-G"][j];
+        // The noiseless ring: z, the predicted offset r/(4 sd) and its neutral
+        // approximation, the measured offset against the truth, the refused share.
+        let line: Vec<String> = zone
+            .clone()
+            .map(|cx| {
+                let i = 32 * cw + cx;
+                let (r, sdr) = z_of(&m0, cx, 32, j);
+                let sd = clean.own_noise(i).0[j];
+                let t = &truth[j][cx];
+                let mean = if t.is_empty() { f64::NAN } else { t.iter().sum::<f64>() / t.len() as f64 };
+                format!("{cx}: z {:+.1} pred {:+.3} (~{:+.2}) meas {mean:+.3} refused {:.2}", r / sdr, r / 4.0 / sd, [0.28, 0.38][j] * r / sdr, refused[cx][j] as f64 / n_rows)
+            })
+            .collect();
+        println!("star row {name}: {}", line.join(" | "));
+        // The sites far off one plane (noiseless |z| > k_F + 3) and not clipped are not measured.
+        for cx in zone.clone() {
+            let (r, sdr) = z_of(&m0, cx, 32, j);
+            if (r / sdr).abs() > k + 3.0 && !clipped(&m0, cx, 32, j) {
+                assert!(refused[cx][j] as f64 >= 0.99 * n_rows, "{name} cell {cx}: planarity z {:+.1} is measured on {} of {} rows", r / sdr, n_rows as usize - refused[cx][j], n_rows);
+            }
+        }
+        assert!(worst[j] <= k, "{name} (i): a first measured cell reads {:.3} of its sd off its measurement (k_F {k:.3})", worst[j]);
+        let p = &pooled[j];
+        let (mean, se) = mean_se(p);
+        println!("star row {name}: (ii) the first measured cells against their measurement, pooled over {FRAMES} frames: {mean:+.4} sd (se {se:.4}); (i) worst {:.3} (k_F {k:.3})", worst[j]);
+        assert!(mean.abs() <= 3.0 * se, "{name} (ii): the read is {mean:+.4} sd off its measurement (3 se {:.4})", 3.0 * se);
+        // The model per sample: measured spread over modelled, at cells measured on 90 % of rows.
+        for cx in zone.clone() {
+            let [d, sd] = &spread[j][cx];
+            if (d.len() as f64) < 0.9 * n_rows {
+                continue;
+            }
+            let n = d.len() as f64;
+            let mean_d = d.iter().sum::<f64>() / n;
+            let var = d.iter().map(|x| (x - mean_d).powi(2)).sum::<f64>() / (n - 1.0);
+            let model = (sd.iter().map(|s| s * s).sum::<f64>() / n).sqrt();
+            let ratio = var.sqrt() / model;
+            let se = (1.0 / (2.0 * (n - 1.0))).sqrt();
+            assert!((ratio - 1.0).abs() <= 3.0 * se, "{name} cell {cx}: the measured spread of d is {ratio:.3} of the modelled per-sample sd (3 se {:.3})", 3.0 * se);
+        }
+    }
+}
+
+/// A clipped sample is not a measurement (rel1180 RULING r29 / r30 Q30-3 /
+/// r31): on a flat frame with one red sample at the white in each of 35
+/// clusters 64 cells apart (a window's reach is `2ρ + 1`), the windows holding
+/// it fit and vote on their measured cells, so its eight neighbours keep the
+/// voting share, `plane share·(1 + 4·ρ_G·τ)` (admitted, the windows holding
+/// it are refused by their residual and the neighbours are read by the few
+/// windows that do not hold it: a larger share).
+#[test]
+fn a_clipped_sample_is_not_measured_and_its_neighbours_keep_the_voting_share() {
+    const LEVEL: f64 = 0.01;
+    let (cw, ch) = (W / 2, H / 2);
+    let rho = at25();
+    let cents: Vec<(usize, usize)> = (48..ch - 47).step_by(64).flat_map(|y| (48..cw - 47).step_by(64).map(move |x| (x, y))).collect();
+    let var = cell_var(LEVEL, A);
+    let mut kept = Vec::new();
+    for seed in 0..20u64 {
+        let mut m = scene(|_| LEVEL, |_| 0.0, A, 700 + seed, true);
+        for &(x, y) in &cents {
+            m[2 * y * W + 2 * x] = 1.0;
+        }
+        let cells = cells_of(&m, Some(NoiseModel::of_terms(A, B, W, H)));
+        let unmeasured = cents.iter().filter(|&&(x, y)| !cells.meas[y * cw + x][0]).count();
+        if seed == 0 {
+            println!("clipped cell: {unmeasured} of {} clipped sites not measured", cents.len());
+        }
+        let f = cells.guided(rho, lv25());
+        for &(x, y) in &cents {
+            let sq: f64 = (-1isize..=1).flat_map(|dy| (-1isize..=1).map(move |dx| (dx, dy))).filter(|&q| q != (0, 0)).map(|(dx, dy)| f64::from(f[(y as isize + dy) as usize * cw + (x as isize + dx) as usize][0]).powi(2)).sum();
+            kept.push(sq / 8.0 / var);
+        }
+    }
+    let (got, se) = mean_se(&kept);
+    let p = plane_read(rho);
+    let rho_g = (A * LEVEL + B) / 16.0 / var;
+    let derived = p.share * (1.0 + 4.0 * rho_g * p.tau);
+    println!("clipped cell: the neighbours keep {got:.5} (se {se:.5}) of a cell's variance against the derived voting share {derived:.6} (rho {rho}, rho_G {rho_g:.4})");
+    assert!((got - derived).abs() <= 3.0 * se, "the clipped cell's neighbours keep {got:.5} against the voting share {derived:.6} (3 se {:.5})", 3.0 * se);
+}
+
+/// The window keeps the slider's promise on the frame it is applied to
+/// (rel1180 RULING r27 Q27-4, r29 Q29-2): on a flat frame whose colour sites
+/// sit dark under a bright green the shared-green share `ρ_G` exceeds the
+/// neutral bound 1/20; the frame's own reading (the largest over its flat
+/// patches) sets the window, at which the derived flat-frame share is at or
+/// under the display pass's and the measured share is the derived.
+#[test]
+fn the_window_keeps_the_slider_on_a_frame_whose_shared_green_exceeds_the_bound() {
+    const G: f64 = 0.5;
+    const C: f64 = 0.002;
+    let mut m = vec![0.0f32; W * H];
+    m.par_chunks_mut(W).enumerate().for_each(|(y, row)| {
+        for (x, v) in row.iter_mut().enumerate() {
+            let s = match (y % 2, x % 2) { (0, 0) | (1, 1) => C, _ => G };
+            *v = (s + (A * s + B).sqrt() * normal(901, (y * W + x) as u64)) as f32;
+        }
+    });
+    // The fixture's own model (one green level: a fit could not separate its
+    // terms); the rule under test is the window's, not the fit's. Its flat
+    // patches are read in the fit's own band.
+    let pts = patches(&m, W, H, bayer_sites(&rggb()).expect("Bayer"), WB);
+    let mut model = NoiseModel::of_terms(A, B, W, H);
+    model.band = NoiseModel::fit(&pts, W, H).expect("a fit").band;
+    let reading = SourceReading::of(model, &pts, WB);
+    let display = 4.0 / display_samples(DEFAULT_AMOUNT);
+    let rho = window(DEFAULT_AMOUNT, reading.rho_g).expect("on");
+    let p = plane_read(rho);
+    // The fixture's own shared green per difference (its truth), the largest
+    // the window's.
+    let vg = A * G + B;
+    let truth = [WB[0], WB[2]].map(|w| vg / 16.0 / (w * w * (A * C + B) + vg / 4.0));
+    let derived = p.share * (1.0 + 4.0 * truth[0].max(truth[1]) * p.tau);
+    let derived_r = p.share * (1.0 + 4.0 * truth[0] * p.tau);
+    let cells = cells_of(&m, Some(reading.model));
+    let f = cells.guided(rho, lv25());
+    let (cw, ch) = (cells.cw, cells.ch);
+    let m_ = 3 * rho;
+    let ids: Vec<usize> = (m_..ch - m_).flat_map(|y| (m_..cw - m_).map(move |x| y * cw + x)).collect();
+    let mean = ids.iter().map(|&i| f64::from(f[i][0])).sum::<f64>() / ids.len() as f64;
+    let raw_mean = ids.iter().map(|&i| f64::from(cells.d[i][0])).sum::<f64>() / ids.len() as f64;
+    let vd = ids.iter().map(|&i| (f64::from(cells.d[i][0]) - raw_mean).powi(2)).sum::<f64>() / ids.len() as f64;
+    let share = ids.iter().map(|&i| (f64::from(f[i][0]) - mean).powi(2)).sum::<f64>() / ids.len() as f64 / vd;
+    let at_bound = window(DEFAULT_AMOUNT, RHO_G_MAX).expect("on");
+    let q = plane_read(at_bound);
+    println!(
+        "rho_G read off the frame {:.4} (median {:.4}; truth R {:.4} B {:.4}; bound {RHO_G_MAX}): window {rho}, derived share {derived:.6} (R {derived_r:.6}), measured R {share:.6}, display {display:.6}; at the bound's window {at_bound}: {:.6}",
+        reading.rho_g,
+        reading.rho_g_median,
+        truth[0],
+        truth[1],
+        q.share * (1.0 + 4.0 * truth[0].max(truth[1]) * q.tau)
+    );
+    assert!(truth[0].max(truth[1]) > RHO_G_MAX, "the fixture's shared green exceeds the neutral bound");
+    assert!(derived <= display, "the frame's window {rho} keeps {derived:.6} of a cell's noise, over the display pass's {display:.6}");
+    // The measured share's error: a box of the read is correlated over its
+    // reach; its se taken from the share over the frame's independent tiles.
+    let tile = 4 * rho + 4;
+    let tiles: Vec<f64> = (m_..ch - m_ - tile).step_by(tile).flat_map(|y| (m_..cw - m_ - tile).step_by(tile).map(move |x| (x, y))).map(|(x, y)| {
+        let t: Vec<usize> = (y..y + tile).flat_map(|yy| (x..x + tile).map(move |xx| yy * cw + xx)).collect();
+        t.iter().map(|&i| (f64::from(f[i][0]) - mean).powi(2)).sum::<f64>() / t.len() as f64 / vd
+    }).collect();
+    let (_, se) = mean_se(&tiles);
+    assert!((share - derived_r).abs() <= 3.0 * se, "the measured share {share:.6} against the derived {derived_r:.6} (3 se {:.6})", 3.0 * se);
 }

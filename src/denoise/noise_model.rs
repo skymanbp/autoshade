@@ -213,6 +213,13 @@ pub(crate) fn patches(mosaic: &[f32], width: usize, height: usize, sites: [(usiz
 }
 
 impl NoiseModel {
+    /// A model of known terms over a `width × height` mosaic, no gain and no
+    /// band: a fixture's truth.
+    #[cfg(test)]
+    pub(crate) fn of_terms(a: f64, b: f64, width: usize, height: usize) -> Self {
+        Self { a, b, c2: 0.0, c4: 0.0, band: 0.0, width, height }
+    }
+
     /// The gain at radius `r`.
     pub(crate) fn gain(&self, r: f64) -> f64 {
         1.0 + self.c2 * r * r + self.c4 * r.powi(4)

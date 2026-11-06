@@ -661,8 +661,17 @@ fn develop_cfa_signed(raw: &rawler::RawImage, dev: &RawDevelop, (colour_nr, read
     }
     let mut v = normalised_mosaic(raw);
     let width = raw.width;
-    let stage = crate::denoise::linear_chroma::window(colour_nr).zip(crate::denoise::linear_chroma::levels(colour_nr)).filter(|_| crate::denoise::linear_chroma::reads(raw));
-    let linear_colour = stage.is_some();
+    // The window keeps the slider's promise on the frame it is applied to: it
+    // follows the exposure's own shared-green share (rel1180 RULING r27 Q27-4),
+    // so the reading is taken first (off this mosaic, the sensor's, when the
+    // source carries none).
+    let on = colour_nr > 0.0 && crate::denoise::linear_chroma::reads(raw);
+    let own_reading = (on && reading.is_none()).then(|| crate::denoise::linear_chroma::read_source(&v, width, raw.height, &config.cfa, stage_wb(raw))).flatten();
+    let reading = reading.or(own_reading.as_ref());
+    let stage = reading
+        .filter(|_| on)
+        .and_then(|r| crate::denoise::linear_chroma::window(colour_nr, r.rho_g).zip(crate::denoise::linear_chroma::levels(colour_nr)));
+    let linear_colour = on;
     let mut cell_chroma = None;
     if let Some((rho, levels)) = stage {
         cell_chroma = crate::denoise::linear_chroma::filter_mosaic(&mut v, width, raw.height, &config.cfa, stage_wb(raw), rho, levels, reading, crate::denoise::linear_chroma::preview_level(raw.width, raw.height, max_edge), !demosaic)
