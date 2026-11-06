@@ -1587,7 +1587,8 @@ impl Cells {
     /// The colour read through `light`, per colour difference: at each width
     /// of [`ladder`] from the slider's `rho` down, the cell is read as the mean
     /// of the lines of the windows of that width that vote for it
-    /// ([`Self::lines`]: a window's line votes where it fits its own window);
+    /// ([`Self::lines`]: a window's line votes where it fits its own window)
+    /// and, at the second read, hold at it ([`Self::read_applicable`]);
     /// a cell no window of a width votes for is read at the next smaller width,
     /// and where none fits it keeps its own sample. Returns the read and, per
     /// cell and colour difference, the index into [`ladder`] it was read at
@@ -1653,31 +1654,38 @@ impl Cells {
             if !used.iter().any(|u| u[0] == kept || u[1] == kept) {
                 break;
             }
-            let lines = self.lines(w, levels, light, noise, pooled);
-            // A voting window `Ω` reads cell `i` on its plane:
-            // `b_Ω + c_Ω·(x_i − x_Ω) + e_Ω·(y_i − y_Ω) + a_Ω·Ĝ_i`, so the sums over
-            // the windows holding `i` are of `v·(b − c·x_Ω − e·y_Ω)`, `v·c`,
-            // `v·e`, `v·a` and `v`, finished at `i`'s place and light.
-            let read: Vec<[f32; 2]> = box_means(
-                (cw, ch),
-                w,
-                |j| {
-                    let (x, y) = self.place(j);
-                    let q = lines[j].map(f64::from);
-                    let one = |o: usize| {
-                        let [a, b, c, e, v] = [q[o], q[o + 1], q[o + 2], q[o + 3], q[o + 4]];
-                        [v * (b - c * x - e * y), v * c, v * e, v * a, v]
-                    };
-                    let (r, b) = (one(0), one(5));
-                    [r[0], r[1], r[2], r[3], r[4], b[0], b[1], b[2], b[3], b[4]]
-                },
-                |i, q, _| {
-                    let g = f64::from(light.g[i]);
-                    let (x, y) = self.place(i);
-                    let at = |o: usize| if q[o + 4] > 0.0 { ((q[o] + x * q[o + 1] + y * q[o + 2] + g * q[o + 3]) / q[o + 4]) as f32 } else { f32::NAN };
-                    [at(0), at(5)]
-                },
-            );
+            // Pooled (the first read), a voting window reads every cell it holds;
+            // weighted (the second), only where its hypothesis holds at the cell
+            // ([`Self::read_applicable`]).
+            let read: Vec<[f32; 2]> = if !pooled {
+                self.read_applicable(w, levels, light, noise, &used, kept)
+            } else {
+                let lines = self.lines(w, levels, light, noise, pooled);
+                // A voting window `Ω` reads cell `i` on its plane:
+                // `b_Ω + c_Ω·(x_i − x_Ω) + e_Ω·(y_i − y_Ω) + a_Ω·Ĝ_i`, so the sums over
+                // the windows holding `i` are of `v·(b − c·x_Ω − e·y_Ω)`, `v·c`,
+                // `v·e`, `v·a` and `v`, finished at `i`'s place and light.
+                box_means(
+                    (cw, ch),
+                    w,
+                    |j| {
+                        let (x, y) = self.place(j);
+                        let q = lines[j].map(f64::from);
+                        let one = |o: usize| {
+                            let [a, b, c, e, v] = [q[o], q[o + 1], q[o + 2], q[o + 3], q[o + 4]];
+                            [v * (b - c * x - e * y), v * c, v * e, v * a, v]
+                        };
+                        let (r, b) = (one(0), one(5));
+                        [r[0], r[1], r[2], r[3], r[4], b[0], b[1], b[2], b[3], b[4]]
+                    },
+                    |i, q, _| {
+                        let g = f64::from(light.g[i]);
+                        let (x, y) = self.place(i);
+                        let at = |o: usize| if q[o + 4] > 0.0 { ((q[o] + x * q[o + 1] + y * q[o + 2] + g * q[o + 3]) / q[o + 4]) as f32 } else { f32::NAN };
+                        [at(0), at(5)]
+                    },
+                )
+            };
             out.par_iter_mut().zip(used.par_iter_mut()).zip(&read).for_each(|((o, u), q)| {
                 for j in 0..2 {
                     // `u[j] == kept` only where the site is measured and not yet read.
@@ -1689,6 +1697,127 @@ impl Cells {
             });
         }
         (out, used)
+    }
+
+    /// The second read at width `w` ([`Self::read_widths`]): a voted window's
+    /// hypothesis is read at a cell only where it holds at that cell, within
+    /// the fairness of the cells tested, a coherent misfit pooled (rel1180
+    /// RULING r42, r43, r44, r46). The vote tests the window's hypothesis by
+    /// the mean of its cells' χ²: it holds for the window's population, not at
+    /// each cell — over `N` cells it notices one cell only past
+    /// `√(1 + k·√(2(N − p)))` of that cell's sds (13.8 at 625), so a material
+    /// one or two cells wide inside a window that fits (a rim: the sky's line
+    /// at the foliage's light) would be read on the window's line, 5–9 of its
+    /// own sds from its colour. At each cell `i` of a voting window the
+    /// hypothesis is tested with the cell out of it: the PRESS residual
+    /// `r_i/(1 − h_i)` at the cell's own variance, `z_i` (`h_i` its leverage
+    /// in the window's fit, [`Self::lines_of`]), pooled with the cell's
+    /// same-window measured 4-neighbours whose `z` shares its sign,
+    /// `z_pool = Σz/√m` (`m` the cells pooled): a coherent misfit is one event
+    /// of the hypothesis and its evidence pools, while a flat patch's lone
+    /// heavy-tailed cell does not. The window is not read at `i` where
+    /// `max(|z_i|, |z_pool|)` exceeds the fairness of a question asked at every
+    /// cell the stage reads, `k_F` of the frame's cell count at every width
+    /// (RULING r43, as the (a1) gate takes the frame's pixel count); a cell
+    /// whose leverage reaches one is the window's own parameter and is
+    /// neither tested nor read there. The window stays voted for its other
+    /// cells, an included cell reads the window's fit, and a cell no voting
+    /// window reads at `w` is read at the next width of the [`ladder`].
+    /// Returns per cell the mean of the fits that read it (NaN where none
+    /// does), for the cells `used` marks `kept` (measured, not yet read).
+    fn read_applicable(&self, w: usize, levels: u32, light: &Light, noise: &[[f32; 4]], used: &[[u8; 2]], kept: u8) -> Vec<[f32; 2]> {
+        const TILE: usize = 32;
+        const EXT: usize = TILE + 2;
+        let (cw, ch) = (self.cw, self.ch);
+        let k = fair_k((cw * ch) as f64);
+        let mut out = vec![[f32::NAN; 2]; cw * ch];
+        for j in 0..2 {
+            if !used.iter().any(|u| u[j] == kept) {
+                continue;
+            }
+            let rec = self.lines_of(j, w, levels, light, noise, false);
+            // Cell `(x, y)`'s `z` in the window centred at `(wx, wy)` whose record
+            // is `q`: NaN where not measured or not testable (leverage one).
+            let z_at = |x: usize, y: usize, wx: usize, wy: usize, q: &[f64; 15]| -> f64 {
+                let i = y * cw + x;
+                let v = f64::from(noise[i][j]);
+                if !self.meas[i][j] || v <= 0.0 {
+                    return f64::NAN;
+                }
+                let (dx, dy, g) = (x as f64 - wx as f64, y as f64 - wy as f64, f64::from(light.g[i]));
+                let r = f64::from(self.d[i][j]) - (q[1] + q[2] * dx + q[3] * dy + q[0] * g);
+                let (ux, uy) = (dx - q[5], dy - q[6]);
+                let ul = g - q[7] - q[11] * ux - q[12] * uy;
+                let h = q[14] / v * (1.0 + q[8] * ux * ux + 2.0 * q[9] * ux * uy + q[10] * uy * uy + q[13] * ul * ul);
+                if h < 1.0 {
+                    r / (1.0 - h) / v.sqrt()
+                } else {
+                    f64::NAN
+                }
+            };
+            let mut read = vec![f32::NAN; cw * ch];
+            read.par_chunks_mut(cw * TILE).enumerate().for_each(|(band, rows)| {
+                let (y0, y1) = (band * TILE, ((band + 1) * TILE).min(ch));
+                // The tile's `z` with a one-cell border, and its reads' sums.
+                let mut z = vec![f64::NAN; EXT * EXT];
+                let mut acc = vec![(0.0f64, 0u32); TILE * TILE];
+                for x0 in (0..cw).step_by(TILE) {
+                    let x1 = (x0 + TILE).min(cw);
+                    if !(y0..y1).any(|y| (x0..x1).any(|x| used[y * cw + x][j] == kept)) {
+                        continue;
+                    }
+                    acc.iter_mut().for_each(|a| *a = (0.0, 0));
+                    let at = |x: usize, y: usize| (y + 1 - y0) * EXT + (x + 1 - x0);
+                    for wy in y0.saturating_sub(w)..(y1 + w).min(ch) {
+                        for wx in x0.saturating_sub(w)..(x1 + w).min(cw) {
+                            if rec[wy * cw + wx][4] != 1.0 {
+                                continue;
+                            }
+                            let q = rec[wy * cw + wx].map(f64::from);
+                            let (bx0, bx1, by0, by1) = (wx.saturating_sub(w), (wx + w + 1).min(cw), wy.saturating_sub(w), (wy + w + 1).min(ch));
+                            let (zx0, zx1, zy0, zy1) = (bx0.max(x0.saturating_sub(1)), bx1.min(x1 + 1), by0.max(y0.saturating_sub(1)), by1.min(y1 + 1));
+                            for y in zy0..zy1 {
+                                for x in zx0..zx1 {
+                                    z[at(x, y)] = z_at(x, y, wx, wy, &q);
+                                }
+                            }
+                            for y in zy0.max(y0)..zy1.min(y1) {
+                                for x in zx0.max(x0)..zx1.min(x1) {
+                                    let zi = z[at(x, y)];
+                                    if used[y * cw + x][j] != kept || !zi.is_finite() {
+                                        continue;
+                                    }
+                                    let (mut tot, mut m) = (zi, 1.0f64);
+                                    let nb = [(x > bx0).then(|| (x - 1, y)), (x + 1 < bx1).then_some((x + 1, y)), (y > by0).then(|| (x, y - 1)), (y + 1 < by1).then_some((x, y + 1))];
+                                    for (nx, ny) in nb.into_iter().flatten() {
+                                        let zn = z[at(nx, ny)];
+                                        if zn.is_finite() && (zn > 0.0) == (zi > 0.0) {
+                                            (tot, m) = (tot + zn, m + 1.0);
+                                        }
+                                    }
+                                    if zi.abs().max((tot / m.sqrt()).abs()) <= k {
+                                        let g = f64::from(light.g[y * cw + x]);
+                                        let fit = q[1] + q[2] * (x as f64 - wx as f64) + q[3] * (y as f64 - wy as f64) + q[0] * g;
+                                        let a = &mut acc[(y - y0) * TILE + x - x0];
+                                        (a.0, a.1) = (a.0 + fit, a.1 + 1);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            let a = acc[(y - y0) * TILE + x - x0];
+                            if a.1 > 0 {
+                                rows[(y - y0) * cw + x] = (a.0 / f64::from(a.1)) as f32;
+                            }
+                        }
+                    }
+                }
+            });
+            out.iter_mut().zip(read).for_each(|(o, r)| o[j] = r);
+        }
+        out
     }
 
     /// Cell `i`'s place on the grid, about the frame's centre (the plane's
@@ -1718,6 +1847,22 @@ impl Cells {
     /// (`s`, `q`, `c` of [`votes`]), the read that carries no sample's own
     /// noise in its weight (rel1180 RULING r40).
     fn lines(&self, rho: usize, levels: u32, light: &Light, noise: &[[f32; 4]], pooled: bool) -> Vec<[f32; 10]> {
+        let five = |j: usize| -> Vec<[f32; 5]> { self.lines_of(j, rho, levels, light, noise, pooled).into_iter().map(|q| [q[0], q[1], q[2], q[3], q[4]]).collect() };
+        let (r, b) = (five(0), five(1));
+        r.iter().zip(&b).map(|(r, b)| [r[0], r[1], r[2], r[3], r[4], b[0], b[1], b[2], b[3], b[4]]).collect()
+    }
+
+    /// [`Self::lines`] for colour difference `j`, each window's record
+    /// `[a, b, c, e, vote]` followed by what a cell's leverage in the window's
+    /// fit needs ([`Self::read_applicable`]): `h_i = w_i/Σw·(1 + u_iᵀ·S⁻¹·u_i)`,
+    /// `u_i` the cell's place and light about the window's weighted means and
+    /// `S` their weighted covariance — the means' place about the window's
+    /// centre and their light, the plane's inverse position covariance
+    /// `[s_xx, s_xy, s_yy]`, and with the light's slope read the light's
+    /// regression on place `(g_x, g_y)` and `1/var⊥` (the light's part of
+    /// `S⁻¹`; 0 where no slope is read and the fit is the plane alone), then
+    /// `1/Σw`.
+    fn lines_of(&self, j: usize, rho: usize, levels: u32, light: &Light, noise: &[[f32; 4]], pooled: bool) -> Vec<[f32; 15]> {
         let (cw, ch) = (self.cw, self.ch);
         let k = fair_k((cw * ch) as f64);
         let nu = window_dof(rho, levels).0;
@@ -1726,7 +1871,7 @@ impl Cells {
         // cell at its own noise (RULING r38): every moment is weighted by the
         // cell's being measured and by `w = 1/v`, its own variance; the null
         // counts the measured cells.
-        let one = |j: usize| -> Vec<[f32; 5]> {
+        let one = |j: usize| -> Vec<[f32; 15]> {
             box_means(
                 (cw, ch),
                 rho,
@@ -1748,7 +1893,7 @@ impl Cells {
                 },
                 |i, m, n| {
                     let (f, sw, sww) = if pooled { (m[0], m[0], m[0]) } else { (m[0], m[1], m[11]) };
-                    let mut out = [0.0f32; 5];
+                    let mut out = [0.0f32; 15];
                     if f <= 0.0 || sw <= 0.0 {
                         return out;
                     }
@@ -1790,12 +1935,21 @@ impl Cells {
                     // Pooled: the residual against the cells' mean variance.
                     let vote = if pooled { votes(resid, m[1] / f, m[11] / f, c * cnt / n, cnt, fit, k) } else { votes(resid * sw / f, 1.0, 1.0, c * cnt / n, cnt, fit, k) };
                     out[4] = f32::from(u8::from(vote));
+                    out[5] = (x - xo) as f32;
+                    out[6] = (y - yo) as f32;
+                    out[7] = g as f32;
+                    out[8] = (syy / det) as f32;
+                    out[9] = (-sxy / det) as f32;
+                    out[10] = (sxx / det) as f32;
+                    if read {
+                        (out[11], out[12], out[13]) = (gx as f32, gy as f32, (1.0 / var) as f32);
+                    }
+                    out[14] = (1.0 / (sw * n)) as f32;
                     out
                 },
             )
         };
-        let (r, b) = (one(0), one(1));
-        r.iter().zip(&b).map(|(r, b)| [r[0], r[1], r[2], r[3], r[4], b[0], b[1], b[2], b[3], b[4]]).collect()
+        one(j)
     }
 
     /// Cell `i`'s two terms of the shared noise ([`shared_noise`]) under

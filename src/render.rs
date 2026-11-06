@@ -71,6 +71,9 @@ mod tone;
 mod wb;
 pub use detail::FilmScale;
 pub(crate) use detail::{chroma_nr_flat_noise_share, upsample_at};
+// The colour stage's law test reads the display pass's own form beside it.
+#[cfg(test)]
+pub(crate) use detail::{chroma_nr, ChromaNrParams};
 pub use finish::{frame_and_finish, CropPolicy};
 
 const LUT_N: usize = 4096;
