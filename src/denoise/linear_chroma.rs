@@ -63,8 +63,10 @@
 //! against the cell's (`c + a·(G − G_cell)`, [`Cells::slopes`]: the slope of
 //! the cells' measured differences on their green less the noise's own
 //! covariance, read where `|a| > k_F·σ_a`, `σ_a` its error under the model;
-//! the pixel's `G − G_cell` taken where `|G − G_cell| > k_F·σ`, `σ` its own
-//! under the model per sample, [`CellChroma::departure_var`], and 0 otherwise),
+//! the pixel's `G − G_cell` taken where `|G − G_cell| > k_P·σ`, `σ` its own
+//! under the model per sample, [`CellChroma::departure_var`], and 0 otherwise;
+//! `k_P` is [`fair_k`] of the frame's pixels, the question being asked once
+//! per pixel),
 //! all read at that pixel bilinearly in the cell grid (the coordinate of the
 //! display pass's own upsample, `render::upsample_at`); the share of the
 //! pixel's bilinear weight on sites not measured carries the pixel's own
@@ -602,7 +604,8 @@ pub(crate) struct CellChroma {
     /// ([`Cells::slopes`]).
     slopes: [Vec<f32>; 2],
     /// Per cell, its four samples' variances ([`Cells::site_var`]), and the
-    /// frame's fairness `k_F` ([`fair_k`] of its cells): a pixel's green
+    /// pixels' fairness `k_P` ([`fair_k`] of the frame's pixels, four per
+    /// cell: the question is asked once per pixel): a pixel's green
     /// departure from its cell carries the slope only where it is evidence
     /// ([`Self::departure_var`]).
     site_var: Vec<[f32; 4]>,
@@ -630,9 +633,11 @@ impl CellChroma {
     /// twig, the chroma follows it at the cell's own colour ratio. A pixel's
     /// own green enters its colour only where its departure from the cell is
     /// evidence (rel1180 RULING r34): `G − G_cell` is a reading of the pixel,
-    /// and the slope term is taken only where `|G − G_cell| > k_F·σ`, `σ²`
+    /// and the slope term is taken only where `|G − G_cell| > k_P·σ`, `σ²`
     /// its variance under the model at each sample's own level
-    /// ([`Self::departure_var`]), the law the light's detail is read by;
+    /// ([`Self::departure_var`]), the law the light's detail is read by,
+    /// asked at the pixel count's fairness (`k_P`, [`fair_k`] of the frame's
+    /// pixels: rel1180 RULING r35);
     /// elsewhere the pixel reads the cell's colour at its place, no slope term
     /// (a window that holds a red sign reads the sign's colour ratio as its
     /// slope, and on the grey field beside it that slope times each pixel's
@@ -1724,7 +1729,8 @@ impl Cells {
             green: self.d.iter().map(|d| d[2]).collect(),
             slopes: self.slopes(rho),
             site_var: self.site_var.clone(),
-            k: fair_k((self.cw * self.ch) as f64),
+            // The per-pixel question is asked at the pixel count's fairness.
+            k: fair_k((4 * self.cw * self.ch) as f64),
         }
     }
 
