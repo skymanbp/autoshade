@@ -219,7 +219,7 @@ fn the_rebuild_keeps_the_demosaics_luma() {
     ];
     let flat = || vec![0.0f32; cw * ch];
     let ones = || vec![1.0f32; cw * ch];
-    let chroma = CellChroma { cw, ch, wb: [wr, wb], origin: [(0, 0), (1, 1)], planes, measured: [ones(), ones()], green: flat(), slopes: [flat(), flat()] };
+    let chroma = CellChroma { cw, ch, wb: [wr, wb], origin: [(0, 0), (1, 1)], planes, measured: [ones(), ones()], green: flat(), slopes: [flat(), flat()], site_var: Vec::new(), k: 0.0 };
     // Rows 0..16 the night's signed noise about 0, rows 16..47 a lit sky,
     // row 47 at the white level (the green a hair under it).
     let before: Vec<[f32; 3]> = (0..w * h)
@@ -292,7 +292,7 @@ fn the_pixels_chroma_is_the_cells_chroma_read_at_the_pixel() {
     let flat = || vec![0.0f32; cw * ch];
     let ones = || vec![1.0f32; cw * ch];
     let origin = [(0, 0), (1, 1)];
-    let chroma = CellChroma { cw, ch, wb: [WB[0] as f32, WB[2] as f32], origin, planes, measured: [ones(), ones()], green: flat(), slopes: [flat(), flat()] };
+    let chroma = CellChroma { cw, ch, wb: [WB[0] as f32, WB[2] as f32], origin, planes, measured: [ones(), ones()], green: flat(), slopes: [flat(), flat()], site_var: Vec::new(), k: 0.0 };
     let before: Vec<[f32; 3]> =
         (0..w * h).map(|i| [0, 1, 2].map(|c| (0.2 + 0.05 * normal(11 + c as u64, i as u64)) as f32)).collect();
     let mut after = before.clone();
@@ -2177,6 +2177,127 @@ fn a_stars_ring_is_not_measured_and_keeps_the_develops_colour() {
             assert!((ratio - 1.0).abs() <= 3.0 * se, "{name} cell {cx}: the measured spread of d is {ratio:.3} of the modelled per-sample sd (3 se {:.3})", 3.0 * se);
         }
     }
+}
+
+/// A pixel's own green enters its colour only where its departure from the
+/// cell is evidence (rel1180 RULING r34), on the sign's case: a flat neutral
+/// field at the sign field's green (0.0225) holding a bright block whose
+/// colour difference rises with its green at the letters' slope (5.9, round
+/// 34), 16 cells square, inside the windows' reach of the field around it;
+/// the mosaic through PPG (the develop's demosaic) and the rebuild. On the
+/// field pixels the window reaches from the block (and 6 pixels clear of it)
+/// the colour differences' pixel-scale sd (each pixel less its 5 × 5 mean) is
+/// at most the demosaic's own on the same pixels; the block's edge pixels
+/// at green sites (the pixel each side of each straight edge) keep the slope
+/// term: their departure is over `k_F·σ`. Printed: both sds, the slope the
+/// field reads, the share of field pixels whose departure is taken, and the
+/// edge's colour sites (PPG's green there leans on the site's own bright
+/// colour sample and lands near the cell read).
+#[test]
+fn a_flat_fields_pixels_take_no_slope_beside_a_bright_block() {
+    use rawler::imgop::sensor::bayer::{ppg::PPGDemosaic, Demosaic};
+    const FIELD: f64 = 0.0225;
+    const BLOCK: f64 = 0.3;
+    const SLOPE: f64 = 5.9;
+    const N: usize = 256;
+    let (c0, c1) = (56usize, 72usize);
+    let model = NoiseModel::of_terms(A, B, N, N);
+    let sites = bayer_sites(&rggb()).expect("Bayer");
+    let rho = at25();
+    let inside = |x: usize, y: usize| (2 * c0..2 * c1).contains(&x) && (2 * c0..2 * c1).contains(&y);
+    let (mut before, mut after) = ([Vec::new(), Vec::new()], [Vec::new(), Vec::new()]);
+    let (mut taken, mut field_n, mut edge_open, mut edge_n) = (0usize, 0usize, 0usize, 0usize);
+    let (mut colour_open, mut colour_n, mut colour_z) = (0usize, 0usize, Vec::new());
+    let mut slopes = Vec::new();
+    for seed in 0..4u64 {
+        let mut m = vec![0.0f32; N * N];
+        m.par_chunks_mut(N).enumerate().for_each(|(y, row)| {
+            for (x, v) in row.iter_mut().enumerate() {
+                let g = if inside(x, y) { BLOCK } else { FIELD };
+                let s = match (y % 2, x % 2) {
+                    (0, 0) => (g + SLOPE * (g - FIELD)) / WB[0],
+                    (1, 1) => g / WB[2],
+                    _ => g,
+                };
+                *v = (s + (A * s + B).sqrt() * normal(900 + seed, (y * N + x) as u64)) as f32;
+            }
+        });
+        let pts = patches(&m, N, N, sites, WB);
+        let cells = Cells::of(&m, N, N, sites, WB, &model, &pts).expect("cells");
+        let f = cells.guided(rho, lv25());
+        let chroma = cells.chroma(&f, WB, rho);
+        let pixels = rawler::pixarray::PixF32::new_with(m.clone(), N, N);
+        let mut rgb = PPGDemosaic::new().demosaic(&pixels, &rggb(), &rawler::cfa::PlaneColor::default(), pixels.rect()).data;
+        let demosaic = rgb.clone();
+        chroma.rebuild(&mut rgb, N, 0, 0, GREEN_LUMA);
+        let diff = |q: &[[f32; 3]], j: usize| -> Vec<f64> { q.iter().map(|p| f64::from(if j == 0 { WB[0] as f32 * p[0] } else { WB[2] as f32 * p[2] } - p[1])).collect() };
+        let high = |c: &[f64], x: usize, y: usize| {
+            let mut s = 0.0;
+            for yy in y - 2..=y + 2 {
+                for xx in x - 2..=x + 2 {
+                    s += c[yy * N + xx];
+                }
+            }
+            c[y * N + x] - s / 25.0
+        };
+        let (reach, clear) = (2 * rho, 6usize);
+        for j in 0..2 {
+            let (cb, ca) = (diff(&demosaic, j), diff(&rgb, j));
+            for y in 2 * c0 - reach..2 * c1 + reach {
+                for x in 2 * c0 - reach..2 * c1 + reach {
+                    if (2 * c0 - clear..2 * c1 + clear).contains(&x) && (2 * c0 - clear..2 * c1 + clear).contains(&y) {
+                        continue;
+                    }
+                    before[j].push(high(&cb, x, y));
+                    after[j].push(high(&ca, x, y));
+                }
+            }
+        }
+        let gate = |x: usize, y: usize| {
+            let dg = demosaic[y * N + x][1] - crate::render::upsample_at(&chroma.green, chroma.cw, chroma.ch, 2, x, y);
+            f64::from(dg).powi(2) > chroma.k * chroma.k * chroma.departure_var(x, y)
+        };
+        for y in 2 * c0 - reach..2 * c1 + reach {
+            for x in 2 * c0 - reach..2 * c1 + reach {
+                if (2 * c0 - clear..2 * c1 + clear).contains(&x) && (2 * c0 - clear..2 * c1 + clear).contains(&y) {
+                    continue;
+                }
+                field_n += 1;
+                taken += usize::from(gate(x, y));
+                slopes.push(f64::from(crate::render::upsample_at(&chroma.slopes[0], chroma.cw, chroma.ch, 2, x, y)));
+            }
+        }
+        // The block's straight edges, 2 pixels clear of its corners: the pixel each side.
+        for t in 2 * c0 + 2..2 * c1 - 2 {
+            for (x, y) in [(2 * c0 - 1, t), (2 * c0, t), (2 * c1 - 1, t), (2 * c1, t), (t, 2 * c0 - 1), (t, 2 * c0), (t, 2 * c1 - 1), (t, 2 * c1)] {
+                // A green site's departure is its own sample's; PPG's green at
+                // a colour site leans on that site's bright colour sample
+                // (`X − X₂`) and lands near the cell read: printed.
+                if (x + y) % 2 == 1 {
+                    edge_n += 1;
+                    edge_open += usize::from(gate(x, y));
+                } else {
+                    colour_n += 1;
+                    colour_open += usize::from(gate(x, y));
+                    let dg = demosaic[y * N + x][1] - crate::render::upsample_at(&chroma.green, chroma.cw, chroma.ch, 2, x, y);
+                    colour_z.push(f64::from(dg).abs() / chroma.departure_var(x, y).sqrt());
+                }
+            }
+        }
+    }
+    slopes.sort_by(f64::total_cmp);
+    colour_z.sort_by(f64::total_cmp);
+    let sd = |v: &[f64]| (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64).sqrt();
+    println!(
+        "block beside a flat field: the field's slope R-G median {:.3}; field pixels whose departure is taken {taken} of {field_n}; the block's edge pixels at green sites {edge_open} of {edge_n}, at colour sites {colour_open} of {colour_n} (|departure| / sd median {:.2})",
+        slopes[slopes.len() / 2],
+        colour_z[colour_z.len() / 2]
+    );
+    for j in 0..2 {
+        println!("  {}: the field's pixel-scale sd {:.4e} (the demosaic's own {:.4e})", ["R-G", "B-G"][j], sd(&after[j]), sd(&before[j]));
+        assert!(sd(&after[j]) <= sd(&before[j]), "{}: the field's pixel-scale sd {:.4e} exceeds the demosaic's own {:.4e}", ["R-G", "B-G"][j], sd(&after[j]), sd(&before[j]));
+    }
+    assert_eq!(edge_open, edge_n, "the block's edge pixels at green sites: the departure is taken on {edge_open} of {edge_n}");
 }
 
 /// The planarity test's own witness (rel1180 RULING r33): the star row's

@@ -56,12 +56,15 @@
 //! per cell; pixel-scale chroma is the demosaic's, so the stage's cell chroma
 //! is the pixel's — and a pixel's colour follows its light: the cell's
 //! colour, carried along the cell's own slope against green, read where it
-//! is resolved beyond its own error and nothing otherwise. After the demosaic every
+//! is resolved beyond its own error and nothing otherwise; a pixel's own green enters
+//! its colour only where its departure from the cell is evidence. After the demosaic every
 //! pixel's red and blue are rebuilt on its green from the
 //! filtered cell chroma moved along the cell's slope by the pixel's green
 //! against the cell's (`c + a·(G − G_cell)`, [`Cells::slopes`]: the slope of
 //! the cells' measured differences on their green less the noise's own
-//! covariance, read where `|a| > k_F·σ_a`, `σ_a` its error under the model),
+//! covariance, read where `|a| > k_F·σ_a`, `σ_a` its error under the model;
+//! the pixel's `G − G_cell` taken where `|G − G_cell| > k_F·σ`, `σ` its own
+//! under the model per sample, [`CellChroma::departure_var`], and 0 otherwise),
 //! all read at that pixel bilinearly in the cell grid (the coordinate of the
 //! display pass's own upsample, `render::upsample_at`); the share of the
 //! pixel's bilinear weight on sites not measured carries the pixel's own
@@ -598,6 +601,12 @@ pub(crate) struct CellChroma {
     /// Per colour difference, the cell's slope of chroma against green
     /// ([`Cells::slopes`]).
     slopes: [Vec<f32>; 2],
+    /// Per cell, its four samples' variances ([`Cells::site_var`]), and the
+    /// frame's fairness `k_F` ([`fair_k`] of its cells): a pixel's green
+    /// departure from its cell carries the slope only where it is evidence
+    /// ([`Self::departure_var`]).
+    site_var: Vec<[f32; 4]>,
+    k: f64,
 }
 
 impl CellChroma {
@@ -618,7 +627,17 @@ impl CellChroma {
     /// (`render::upsample_at` at 2×, the display pass's own coordinate).
     /// Where `a` is 0 (a flat cell) the pixel's chroma is the cell's and the
     /// green's own noise stays luminance; where the green carries a star or a
-    /// twig, the chroma follows it at the cell's own colour ratio.
+    /// twig, the chroma follows it at the cell's own colour ratio. A pixel's
+    /// own green enters its colour only where its departure from the cell is
+    /// evidence (rel1180 RULING r34): `G − G_cell` is a reading of the pixel,
+    /// and the slope term is taken only where `|G − G_cell| > k_F·σ`, `σ²`
+    /// its variance under the model at each sample's own level
+    /// ([`Self::departure_var`]), the law the light's detail is read by;
+    /// elsewhere the pixel reads the cell's colour at its place, no slope term
+    /// (a window that holds a red sign reads the sign's colour ratio as its
+    /// slope, and on the grey field beside it that slope times each pixel's
+    /// green noise painted a teal / red speckle 1.7 times the develop's own
+    /// colour noise: rel1180 msg-e3 round 34).
     ///
     /// Colour noise has no content at a pixel's scale; the pixel's light has —
     /// the stage decides the colour, the demosaic's luma stays. `luma` is the
@@ -666,13 +685,17 @@ impl CellChroma {
                     let (sx, sy) = (x + ox, y + oy);
                     let own = px.map(f64::from);
                     let dg = px[1] - at(&self.green, sx, sy);
+                    let slope = [0, 1].map(|j| at(&self.slopes[j], sx, sy));
+                    // The departure is evidence or nothing (rel1180 RULING r34);
+                    // asked only where a slope would carry it.
+                    let dg = if slope != [0.0; 2] && f64::from(dg).powi(2) > self.k * self.k * self.departure_var(sx, sy) { dg } else { 0.0 };
                     // The measured share `m` of the pixel's bilinear weight
                     // carries the stage's colour; the rest, the share of sites
                     // not measured, carries the pixel's own demosaiced colour
                     // (rel1180 RULING r31 Q31-4).
                     let colour = |j: usize, w: f32, c: f32| {
                         let m = on_sites(&self.measured[j], j, sx, sy);
-                        on_sites(&self.planes[j], j, sx, sy) + m * at(&self.slopes[j], sx, sy) * dg + (1.0 - m) * (w * c - px[1])
+                        on_sites(&self.planes[j], j, sx, sy) + m * slope[j] * dg + (1.0 - m) * (w * c - px[1])
                     };
                     let (cr, cb) = (colour(0, wr, px[0]), colour(1, wbl, px[2]));
                     let v = [f64::from((px[1] + cr) / wr), own[1], f64::from((px[1] + cb) / wbl)];
@@ -701,6 +724,64 @@ impl CellChroma {
                 pulled
             })
             .sum()
+    }
+}
+
+impl CellChroma {
+    /// The variance under the model of a pixel's green departure from its
+    /// cell, `G − G_cell`, at mosaic site `(sx, sy)` (rel1180 RULING r34),
+    /// summed per sample at each sample's own level ([`Cells::site_var`]):
+    /// `G_cell` is the bilinear read of the cells' greens at the pixel
+    /// (`render::upsample_at` at 2×, weights `w_c`), each the mean of its two
+    /// green sites, `var = Σ w_c²·(v_a + v_b)/4`; `G` is the demosaic's — at a
+    /// green site its own sample, sharing `w_c·v/2` with the read of its own
+    /// cell; at a red or blue site PPG's `(3·G₁ + G₋₁ + X − X₂)/4` along the
+    /// direction its gradients pick, `(9·v₁ + v₋₁ + v_X + v_X₂)/16`, sharing
+    /// `w_c·(3·v₁ + v₋₁)/8` with the cells holding those greens. The direction
+    /// is the demosaic's and is not known here: the largest of the four, so a
+    /// departure is evidence whichever way the demosaic read it. Sites past the
+    /// frame's edge read the edge's.
+    fn departure_var(&self, sx: usize, sy: usize) -> f64 {
+        let (cw, ch) = (self.cw, self.ch);
+        let (w, h) = (2 * cw as isize, 2 * ch as isize);
+        let v = |x: isize, y: isize| {
+            let (x, y) = (x.clamp(0, w - 1) as usize, y.clamp(0, h - 1) as usize);
+            (y / 2 * cw + x / 2, f64::from(self.site_var[y / 2 * cw + x / 2][2 * (y % 2) + x % 2]))
+        };
+        // The bilinear read's cells and weights (`render::bilinear_plane`'s clamp).
+        let u = ((sx as f32 + 0.5) / 2.0 - 0.5).clamp(0.0, (cw - 1) as f32);
+        let t = ((sy as f32 + 0.5) / 2.0 - 0.5).clamp(0.0, (ch - 1) as f32);
+        let (x0, y0) = (u.floor() as usize, t.floor() as usize);
+        let (x1, y1) = ((x0 + 1).min(cw - 1), (y0 + 1).min(ch - 1));
+        let (fx, fy) = (f64::from(u - x0 as f32), f64::from(t - y0 as f32));
+        let mut taps: Vec<(usize, f64)> = Vec::with_capacity(4);
+        for (c, wc) in [(y0 * cw + x0, (1.0 - fx) * (1.0 - fy)), (y0 * cw + x1, fx * (1.0 - fy)), (y1 * cw + x0, (1.0 - fx) * fy), (y1 * cw + x1, fx * fy)] {
+            match taps.iter_mut().find(|q| q.0 == c) {
+                Some(q) => q.1 += wc,
+                None => taps.push((c, wc)),
+            }
+        }
+        let greens = |c: usize| {
+            let q = self.site_var[c];
+            let colour = self.origin.map(|(dy, dx)| 2 * dy + dx);
+            (0..4).filter(|i| !colour.contains(i)).map(|i| f64::from(q[i])).sum::<f64>() / 4.0
+        };
+        let cell_read: f64 = taps.iter().map(|&(c, wc)| wc * wc * greens(c)).sum();
+        let weight = |c: usize| taps.iter().find(|q| q.0 == c).map_or(0.0, |q| q.1);
+        let (x, y) = (sx as isize, sy as isize);
+        let (own_cell, own) = v(x, y);
+        let colour_site = self.origin.iter().any(|&(dy, dx)| sy % 2 == dy && sx % 2 == dx);
+        if !colour_site {
+            return own + cell_read - weight(own_cell) * own;
+        }
+        [(0isize, -1isize), (1, 0), (-1, 0), (0, 1)]
+            .into_iter()
+            .map(|(dx, dy)| {
+                let ((c1, v1), (cm, vm), (_, v2)) = (v(x + dx, y + dy), v(x - dx, y - dy), v(x + 2 * dx, y + 2 * dy));
+                let g = (9.0 * v1 + vm + own + v2) / 16.0;
+                g + cell_read - 2.0 * (weight(c1) * 3.0 * v1 + weight(cm) * vm) / 8.0
+            })
+            .fold(0.0, f64::max)
     }
 }
 
@@ -1148,6 +1229,11 @@ pub(crate) struct Cells {
     /// The red and the blue site of a cell, `(dy, dx)`: where each colour
     /// difference's grid sits.
     origin: [(usize, usize); 2],
+    /// Per cell, the model's variance of each of its four samples at the
+    /// sample's own level, in the mosaic's units, indexed `2·dy + dx`: what
+    /// the rebuild tests a pixel's green departure against
+    /// ([`CellChroma::departure_var`]). Base cells only (empty on a level).
+    site_var: Vec<[f32; 4]>,
     /// The noise model, the white balance (green = 1) and the side `s` in
     /// base cells of one of these cells (1 at the base, `2^level` on the
     /// pyramid): what states a cell's noise at its own level ([`Self::own_noise`]).
@@ -1219,6 +1305,14 @@ impl Cells {
         let own = all.iter().map(|c| c.1).collect();
         let var = all.iter().map(|c| c.2).collect();
         let meas = all.iter().map(|c| c.3).collect();
+        let sample_var = (0..cw * ch)
+            .into_par_iter()
+            .map(|i| {
+                let (cx, cy) = (i % cw, i / cw);
+                let rad = model.radius((cx as f64 + 0.5) * 2.0, (cy as f64 + 0.5) * 2.0);
+                std::array::from_fn(|q| model.var(f64::from(mosaic[(2 * cy + q / 2) * width + 2 * cx + q % 2]), rad) as f32)
+            })
+            .collect();
         // One site's colour difference: its own sample and four greens,
         // `wR²·var(R) + σ²_G/4`; two axis-neighbouring sites of one colour
         // share one of their greens, `cov = σ²_G/16` (the red's and the blue's
@@ -1230,7 +1324,7 @@ impl Cells {
         };
         let sd = pts.iter().map(|p| site_var(p).0.map(|v| (2.0 * v).sqrt() as f32)).collect();
         let cov = pts.iter().map(|p| site_var(p).1 as f32).collect();
-        Some(Self { cw, ch, pw, ph, d, own, sd, cov, meas, var, origin: [sites[0], sites[3]], model: *model, wb, side: 1 })
+        Some(Self { cw, ch, pw, ph, d, own, sd, cov, meas, var, origin: [sites[0], sites[3]], site_var: sample_var, model: *model, wb, side: 1 })
     }
 
     /// These cells at pyramid level `level` (`level ≥ 1`): each the mean of a
@@ -1305,7 +1399,7 @@ impl Cells {
                 (sd, (c / (sf * sf * sf)) as f32)
             })
             .unzip();
-        Self { cw, ch, pw, ph, d, own, sd, cov, meas, var, origin: self.origin, model: self.model, wb: self.wb, side: self.side * s }
+        Self { cw, ch, pw, ph, d, own, sd, cov, meas, var, origin: self.origin, site_var: Vec::new(), model: self.model, wb: self.wb, side: self.side * s }
     }
 
     /// One cell's noise sd per colour difference at cell `i`'s OWN level —
@@ -1629,6 +1723,8 @@ impl Cells {
             measured: [0, 1].map(|j| self.meas.iter().map(|m| f32::from(u8::from(m[j]))).collect()),
             green: self.d.iter().map(|d| d[2]).collect(),
             slopes: self.slopes(rho),
+            site_var: self.site_var.clone(),
+            k: fair_k((self.cw * self.ch) as f64),
         }
     }
 
