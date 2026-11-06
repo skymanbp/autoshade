@@ -265,7 +265,15 @@
 //! the sensor ([`MasterNoise`], rel1180 RULING r46 (e), r53); a level outside
 //! the measured range has no reading and is not a measurement — it enters no
 //! window's fit, casts no vote, no window's hypothesis is read at it, and a
-//! pixel whose departure reads such a cell keeps its own colour.
+//! pixel whose departure reads such a cell keeps its own colour. On a
+//! master the stage abstains above the noise levels it can measure; the
+//! colour of a star core on a master is the master's own (rel1180 RULING
+//! r53, r54; p42m core dC on the master: its own colour 10.44, v1.17.1
+//! 8.21 at the sensor's overstated variance, 60c288c 3.62, this stage
+//! 10.40). The halo an earlier read drew beside a star trail was
+//! that overstated variance, closed by the measured table; the exclusion
+//! from the fits stands on its own: a level with no reading has no
+//! defined weight.
 //!
 //! **Cost.** The light's read: per level three separable variance passes and
 //! the detail read, then `(L+1)(L+2)/2` separable passes for its residual;
