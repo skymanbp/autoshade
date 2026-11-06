@@ -1250,25 +1250,35 @@ pub(super) fn attach_one_zone_as(
         crate::rationale::push_note(
             &mut report.recipe.rationale,
             &mut report.notes,
-            crate::rationale::Note::new(
-                match mode {
-                    ZoneMode::Full => crate::rationale::keys::ZONE_DROPPED,
-                    ZoneMode::Atmosphere => crate::rationale::keys::ZONE_ATMOSPHERE_DROPPED,
-                },
-                vec![
-                    ("label", label.to_string()),
-                    // The zone's moments, a disclosure: with colour withheld
-                    // and tone kept the luma-only residual, as the accepted
-                    // zone records it.
-                    ("before", format!("{accepted_before:.3}")),
-                    ("after", format!("{accepted_after:.3}")),
-                    ("own_before", format!("{own_before:.5}")),
-                    ("own_after", format!("{own_after:.5}")),
-                    ("drift", format!("{:+.5}", zoned_err - *frame_err)),
-                    ("quant", format!("{:.4}", fit::FIT_QUANT)),
-                ],
+            zone_drop_note(
+                mode, label, accepted_before, accepted_after, own_before, own_after, zoned_err - *frame_err,
             ),
         );
         None
     }
+}
+
+/// The note a zone `ships_local` refused is dropped under, named by its mode
+/// and carrying the readings it was refused on: the zone's moments (a
+/// disclosure — with colour withheld and tone kept the luma-only residual,
+/// as the accepted zone records it), its own pixels' J* before and after,
+/// and the frame's drift.
+pub(super) fn zone_drop_note(
+    mode: ZoneMode, label: &str, before: f32, after: f32, own_before: f32, own_after: f32, drift: f32,
+) -> crate::rationale::Note {
+    crate::rationale::Note::new(
+        match mode {
+            ZoneMode::Full => crate::rationale::keys::ZONE_DROPPED,
+            ZoneMode::Atmosphere => crate::rationale::keys::ZONE_ATMOSPHERE_DROPPED,
+        },
+        vec![
+            ("label", label.to_string()),
+            ("before", format!("{before:.3}")),
+            ("after", format!("{after:.3}")),
+            ("own_before", format!("{own_before:.5}")),
+            ("own_after", format!("{own_after:.5}")),
+            ("drift", format!("{drift:+.5}")),
+            ("quant", format!("{:.4}", fit::FIT_QUANT)),
+        ],
+    )
 }

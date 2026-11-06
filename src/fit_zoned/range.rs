@@ -2592,6 +2592,7 @@ mod tests {
             true,
             None,
         );
+        super::super::entry::local_verdicts_unzoned(&source, &source, &crate::recipe::EditRecipe::default(), &mut deferred);
         attach_ranges(&source, &source, &mut deferred, &[]);
         assert_eq!(
             serde_json::to_vec(&deferred.recipe).unwrap(),

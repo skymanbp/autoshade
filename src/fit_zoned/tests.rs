@@ -839,6 +839,15 @@ fn pretend_full_support(evidence: &mut fit::EvidenceModel) {
     evidence.paired.fill(true);
 }
 
+/// The global fit as the pipeline hands it to the zone stage: its model
+/// switched local by the pipeline's own switch and its residuals re-read on
+/// it (`entry::local_verdicts`, the route that re-pairs nothing).
+pub(super) fn zone_stage_report(src: &DynamicImage, tgt: &DynamicImage) -> fit::FitReport {
+    let mut report = fit::fit_recipe(src, tgt);
+    super::entry::local_verdicts_unzoned(src, tgt, &crate::recipe::EditRecipe::default(), &mut report);
+    report
+}
+
 pub(super) fn neutral_report(src: &DynamicImage, tgt: &DynamicImage) -> fit::FitReport {
     let (s, t) = fit::analysis_pair(src, tgt);
     // The entry residual is read on the report's OWN evidence model, at the
@@ -853,12 +862,11 @@ pub(super) fn neutral_report(src: &DynamicImage, tgt: &DynamicImage) -> fit::Fit
         s.width(),
         s.height(),
     );
-    let err = fit::look_err_with_evidence(&fit::pixels_of(&s), &fit::pixels_of(&t), &evidence);
-    fit::FitReport {
+    let mut report = fit::FitReport {
         correspondence: None,
         recipe: crate::recipe::EditRecipe::default(),
-        err_before: err,
-        err_after: err,
+        err_before: 0.0,
+        err_after: 0.0,
         notes: Vec::new(),
         mode: fit::FitMode::Full,
         divergence: divergence(0.0),
@@ -867,7 +875,13 @@ pub(super) fn neutral_report(src: &DynamicImage, tgt: &DynamicImage) -> fit::Fit
         evidence,
         structural_evidence: None,
         atmosphere_reference: fit::AtmosphereReference::WholeFrame,
-    }
+    };
+    // The model the zone stage reads in the pipeline: switched local by the
+    // pipeline's own switch, and the entry residual read on it.
+    super::entry::read_locally(&mut report);
+    let err = fit::look_err_with_evidence(&fit::pixels_of(&s), &fit::pixels_of(&t), &report.evidence);
+    (report.err_before, report.err_after) = (err, err);
+    report
 }
 
 #[test]
@@ -2355,7 +2369,7 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
     let (src, tgt, sky_mask) = zoned_pair();
     let path = fixture_mask_path("zoned-boundary-calibration-sky");
     sky_mask.save(path.path()).unwrap();
-    let mut sky_report = fit::fit_recipe(&src, &tgt);
+    let mut sky_report = zone_stage_report(&src, &tgt);
     attach_zones(&src, &tgt, &mut sky_report, &sky_mask, &sky_mask, &path);
 
     let (w, h) = (16u32, 16u32);
@@ -2377,7 +2391,7 @@ fn every_accepted_fixture_zone_still_passes_the_boundary_gate() {
     let land_tgt = build([0.92, 0.72, 0.48], [0.58, 0.46, 0.37]);
     let land_path = fixture_mask_path("zoned-boundary-calibration-land");
     sky_mask.save(land_path.path()).unwrap();
-    let mut land_report = fit::fit_recipe(&land_src, &land_tgt);
+    let mut land_report = zone_stage_report(&land_src, &land_tgt);
     attach_zones(
         &land_src,
         &land_tgt,
@@ -3768,7 +3782,7 @@ fn local_quality_gate_passes_every_accepted_fixture_zone() {
     let (src, tgt, sky_mask) = zoned_pair();
     let mask_path = fixture_mask_path("zoned-quality-calibration");
     sky_mask.save(mask_path.path()).unwrap();
-    let mut report = fit::fit_recipe(&src, &tgt);
+    let mut report = zone_stage_report(&src, &tgt);
     attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, &mask_path);
     assert!(
         !report.recipe.masks.is_empty(),
@@ -3860,6 +3874,32 @@ fn strictly_better_fixture(sat: f32, ev: f32, warm: f32, target: bool) -> Dynami
     }))
 }
 
+/// RULING-1180-int-r9 Q-int6-2 (d): a pair whose Atmosphere trial moves the
+/// zone AWAY from its target. The upper half is the family's sky; in the
+/// lower half one 8-px square in eight (the "lamps") is orange in the target
+/// at its own luma (0.166 against the source square's 0.157, so the robust
+/// tone pairing, which rejects on luma, keeps it), and every other square is
+/// the source's own colour, byte for byte. The Atmosphere trial is the zone's
+/// MEAN moves (`fit_zone_dials`' per-channel mean gains, the saturation chase
+/// on mean chroma): the lamps' eighth of the mean warms and saturates the
+/// whole zone, a cast the seven squares in eight that already match the
+/// target do not have, so the zone's own pixels read worse.
+fn wrong_direction_fixture(target: bool) -> DynamicImage {
+    let (w, h) = (96u32, 96u32);
+    DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+        let p: [f32; 3] = if y < h / 2 {
+            let v = 0.30 + 0.30 * x as f32 / (w - 1) as f32;
+            [v, v, v]
+        } else if target && ((x / 8) + (y / 8)) % 8 == 0 {
+            [0.30, 0.12, 0.05]
+        } else {
+            let v = 0.16 + 0.10 * (((x / 8) + (y / 8)) % 2) as f32;
+            [v * 1.10, v * 0.95, v * 0.80]
+        };
+        image::Rgb(p.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8))
+    }))
+}
+
 /// Drive the lower half of one of those pairs through `attach_one_zone`
 /// and hand back the outcome plus the report it wrote.
 fn run_strictly_better_zone(
@@ -3869,9 +3909,20 @@ fn run_strictly_better_zone(
     warm: f32,
     atmosphere: bool,
 ) -> (Option<AcceptedZone>, fit::FitReport, f32, f32) {
-    let (w, h) = (96u32, 96u32);
     let src = strictly_better_fixture(sat, ev, warm, false);
     let tgt = strictly_better_fixture(sat, ev, warm, true);
+    run_lower_half_zone(name, &src, &tgt, atmosphere)
+}
+
+/// [`run_strictly_better_zone`] on any 96x96 pair: the lower half is the zone.
+fn run_lower_half_zone(
+    name: &str,
+    src: &DynamicImage,
+    tgt: &DynamicImage,
+    atmosphere: bool,
+) -> (Option<AcceptedZone>, fit::FitReport, f32, f32) {
+    let (src, tgt) = (src.clone(), tgt.clone());
+    let (w, h) = (src.width(), src.height());
     let mask =
         GrayImage::from_fn(w, h, |_, y| image::Luma([if y >= h / 2 { 255u8 } else { 0 }]));
     let path = fixture_mask_path(name);
@@ -3999,10 +4050,33 @@ fn a_colour_move_the_cells_do_not_vouch_leaves_the_tone_to_ship_alone() {
 /// harm — says so with the one note, and names the Atmosphere mode.
 /// RE-READ (RULING-1180-int-r6 (3)): the Atmosphere do-no-harm is no longer
 /// a condition of its own; it is `ships_local`'s gain on the same own
-/// pixels. The shipped zone's note is that gain, and on the (1, 1.25, 0.7)
-/// pair the same route REFUSES the Atmosphere zone on `ships_local` alone
-/// (its own pixels gain FIT_QUANT, the frame rising +0.00271 past
-/// the FIT_QUANT guard), under the Atmosphere drop note.
+/// pixels. The shipped zone's note is that gain.
+/// RE-READ (RULING-1180-int-r10 (1), w1): the refusal half is witnessed one
+/// level down, where the route cannot reach it. On the local harness every
+/// pair of the (sat, ev, warm) family ships (104 of 105; the 105th is the
+/// identity pair, nothing to correct), and no pair can be built whose
+/// Atmosphere trial, through `attach_one_zone`, moves its zone AWAY from the
+/// target by more than the resolution. DERIVATION: the zone's moments (and
+/// so its residual, its gains and the saturation chase) are read on the
+/// robust pairing's weights (`fit::paired_robust_tone`): every paired pixel's
+/// RGB transport residual is scored against its own class's scale, 1.4826 x
+/// the weighted median floored at `ROBUST_SCALE_FLOOR` (2/255), Tukey-cut at
+/// 4.685 x that scale. A MINORITY that disagrees beyond the cut is removed
+/// at weight 0 before the moments are read; a MAJORITY that disagrees is the
+/// robust bulk the gains and the chase are fitted to, so they move toward
+/// its target; what is left is disagreement inside the bulk's Tukey band,
+/// whose wrong-direction share is resolution-sized. That is the pairing
+/// doing its job, and [`wrong_direction_fixture`] stays as its witness: one
+/// square in eight orange only in the target (the "lamps", at their own
+/// luma so the luma rejection keeps them) is dropped by the pairing, and the
+/// route reads the zone as already matched. The refusal itself is then
+/// witnessed as [`a_shrunk_correction_is_held_to_do_no_harm_not_to_the_k1_law`]
+/// witnesses its "away" verdict: an Atmosphere zone the route shipped, and
+/// two hand-built trial renders of it that move its own pixels away (the zone
+/// hue-rotated 60 degrees; the zone saturated past the target), read by
+/// `own_reading`, read worse, `ships_local` refuses them, and the drop note
+/// the route would write ([`super::one_zone::zone_drop_note`]) is the
+/// Atmosphere drop with those readings.
 #[test]
 fn an_improving_atmosphere_zone_ships_on_its_own_pixels_and_names_its_mode() {
     let (accepted, report, _frame_before, _frame_after) =
@@ -4026,21 +4100,96 @@ fn an_improving_atmosphere_zone_ships_on_its_own_pixels_and_names_its_mode() {
         "the zone must say it was fitted as atmosphere: {}",
         report.recipe.rationale
     );
-    let (refused, report, frame_before, frame_after) =
-        run_strictly_better_zone("atmos-refused", 1.0, 1.25, 0.7, true);
-    assert!(refused.is_none(), "ships_local refuses this atmosphere zone: {}", report.recipe.rationale);
-    let drop = report
-        .notes
-        .iter()
-        .find(|n| n.key == crate::rationale::keys::ZONE_ATMOSPHERE_DROPPED)
-        .unwrap_or_else(|| panic!("the refusal is the Atmosphere drop: {}", report.recipe.rationale));
-    let (own_before, own_after, drift) =
-        (note_number(drop, "own_before"), note_number(drop, "own_after"), note_number(drop, "drift"));
-    assert!(
-        !fit::ships_local(own_after, own_before, frame_before + drift, frame_before),
-        "the drop is ships_local's verdict on its own readings: {drop:?}"
+    let (refused, report, frame_before, frame_after) = run_lower_half_zone(
+        "atmos-lamps",
+        &wrong_direction_fixture(false),
+        &wrong_direction_fixture(true),
+        true,
     );
-    assert_eq!(frame_after, frame_before, "a refused zone leaves the running frame where it was");
+    assert!(refused.is_none(), "the lamp zone attaches nothing: {}", report.recipe.rationale);
+    assert!(
+        report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_ALREADY_MATCHED),
+        "the route reads the lamps' zone as already matched — the robust pairing drops the lamps before the \
+         moments are read: {}",
+        report.recipe.rationale
+    );
+    assert_eq!(frame_after, frame_before, "a zone that attaches nothing leaves the running frame where it was");
+
+    // The refusal half, one level down: an Atmosphere zone the route shipped
+    // on the (1, 1.25, 0.7) pair, and two hand-built trials that move its own
+    // pixels AWAY from the target — the zone hue-rotated 60 degrees, and the
+    // zone saturated past the target (twice the target zone's mean chroma).
+    let (sat, ev, warm) = (1.0, 1.25, 0.7);
+    let (shipped, report, frame_before, _) = run_strictly_better_zone("atmos-away", sat, ev, warm, true);
+    let zone = shipped.unwrap_or_else(|| panic!("premise: the pair's Atmosphere zone ships: {}", report.recipe.rationale));
+    assert!(
+        report.notes.iter().any(|n| n.key == crate::rationale::keys::ZONE_MODE_ATMOSPHERE),
+        "premise: the zone was fitted as atmosphere: {}",
+        report.recipe.rationale
+    );
+    let (src, tgt) = (strictly_better_fixture(sat, ev, warm, false), strictly_better_fixture(sat, ev, warm, true));
+    let (s_img, t_img) = fit::analysis_pair(&src, &tgt);
+    let t_px = fit::pixels_of(&t_img);
+    let mut without = report.recipe.clone();
+    without.masks.truncate(zone.mask_index);
+    let cur_px = fit::pixels_of(&render::develop_preview(&s_img, &without));
+    let (sw, tw) = (&zone.own_weights.0, &zone.own_weights.1);
+    let own_without = super::accept::own_reading(&report, &cur_px, &t_px, sw, tw);
+    assert!(
+        (own_without - zone.judged_before).abs() <= 1e-6,
+        "premise: the trials start from the zone's own baseline: {own_without} vs {}",
+        zone.judged_before
+    );
+    let in_zone = |i: usize| zone.mask_weights[i] > 0.5;
+    let grey = |p: &[f32; 3]| (p[0] + p[1] + p[2]) / 3.0;
+    let chroma = |px: &[[f32; 3]]| {
+        let (mut sum, mut n) = (0.0f64, 0usize);
+        for p in px.iter().enumerate().filter(|(i, _)| in_zone(*i)).map(|(_, p)| p) {
+            sum += (p.iter().fold(0.0f32, |a, &b| a.max(b)) - p.iter().fold(1.0f32, |a, &b| a.min(b))) as f64;
+            n += 1;
+        }
+        (sum / n.max(1) as f64) as f32
+    };
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() / 255.0;
+    let trial = |move_one: &dyn Fn(&[f32; 3]) -> [f32; 3]| -> Vec<[f32; 3]> {
+        cur_px.iter().enumerate().map(|(i, p)| if in_zone(i) { move_one(p).map(byte) } else { *p }).collect()
+    };
+    let (cos, sin) = (60f32.to_radians().cos(), 60f32.to_radians().sin());
+    let rotated = trial(&|p| {
+        // Rodrigues about the grey axis: the channel mean is kept, the hue turns.
+        let g = grey(p);
+        let v = [p[0] - g, p[1] - g, p[2] - g];
+        let k = 1.0 / 3f32.sqrt();
+        let cross = [k * (v[2] - v[1]), k * (v[0] - v[2]), k * (v[1] - v[0])];
+        std::array::from_fn(|c| g + v[c] * cos + cross[c] * sin)
+    });
+    let past = 2.0 * chroma(&t_px) / chroma(&cur_px).max(1e-6);
+    let saturated = trial(&|p| {
+        let g = grey(p);
+        std::array::from_fn(|c| g + (p[c] - g) * past)
+    });
+    for (name, px) in [("hue-rotated 60 deg", &rotated), ("saturated past the target", &saturated)] {
+        let own_with = super::accept::own_reading(&report, px, &t_px, sw, tw);
+        let frame_with = fit::look_err_with_evidence(px, &t_px, &report.evidence);
+        println!("away trial {name}: own J* {own_without:.5} -> {own_with:.5}, frame {frame_before:.5} -> {frame_with:.5}");
+        assert!(own_with > own_without, "{name}: the trial moves the zone's own pixels away: {own_without} -> {own_with}");
+        assert!(
+            !fit::ships_local(own_with, own_without, frame_with, frame_before),
+            "{name}: ships_local refuses a trial that leaves its own pixels worse"
+        );
+        let note = super::one_zone::zone_drop_note(
+            ZoneMode::Atmosphere, &zone.label, zone.before, zone.after, own_without, own_with, frame_with - frame_before,
+        );
+        assert_eq!(note.key, crate::rationale::keys::ZONE_ATMOSPHERE_DROPPED, "{name}: the Atmosphere refusal's reason");
+        let (mut said, mut notes) = (String::new(), Vec::new());
+        crate::rationale::push_note(&mut said, &mut notes, note);
+        assert!(
+            said.contains("atmosphere correction dropped")
+                && said.contains(&format!("{own_without:.5}"))
+                && said.contains(&format!("{own_with:.5}")),
+            "{name}: the reason names the readings it was refused on: {said}"
+        );
+    }
 }
 
 /// R39. A SHRUNK correction is held to do-no-harm against the render
@@ -4218,7 +4367,7 @@ fn an_already_matched_zone_is_left_alone_and_says_so() {
     let (src, _tgt, sky_mask) = zoned_pair();
     let mask_path = fixture_mask_path("zoned-matched-mask");
     sky_mask.save(mask_path.path()).unwrap();
-    let mut report = fit::fit_recipe(&src, &src);
+    let mut report = zone_stage_report(&src, &src);
     attach_zones(&src, &src, &mut report, &sky_mask, &sky_mask, &mask_path);
     assert!(
         report.recipe.masks.is_empty(),
@@ -4256,7 +4405,7 @@ fn a_rescored_zoned_report_still_carries_every_note_its_producers_wrote() {
     let (src, tgt, sky_mask) = zoned_pair();
     let mask_path = fixture_mask_path("rescore-carry-mask");
     sky_mask.save(mask_path.path()).unwrap();
-    let mut report = fit::fit_recipe(&src, &tgt);
+    let mut report = zone_stage_report(&src, &tgt);
     let global_only: Vec<&'static str> = report.notes.iter().map(|n| n.key).collect();
     attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, &mask_path);
     let produced: Vec<&'static str> = report
@@ -4319,7 +4468,7 @@ fn zoned_orchestration_attaches_the_sky_mask_and_improves_the_zone() {
     let (src, tgt, sky_mask) = zoned_pair();
     let mask_path = fixture_mask_path("zoned-orch-mask");
     sky_mask.save(mask_path.path()).unwrap();
-    let mut report = fit::fit_recipe(&src, &tgt);
+    let mut report = zone_stage_report(&src, &tgt);
     let err_global = report.err_after;
     attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, &mask_path);
     // Until 2026-10-21 this pinned the sky's colour WITHHELD (one-sided hue
@@ -4486,7 +4635,7 @@ fn a_zone_survives_the_sidecar_round_trip_byte_for_byte() {
     let (src, tgt, sky_mask) = zoned_pair();
     let mask_path = fixture_mask_path("zoned-roundtrip-mask");
     sky_mask.save(mask_path.path()).unwrap();
-    let mut report = fit::fit_recipe(&src, &tgt);
+    let mut report = zone_stage_report(&src, &tgt);
     attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, &mask_path);
     // The fit's own masks, carrying one exactly-representable dial — see
     // the ÷100 note above.
@@ -4567,6 +4716,13 @@ fn a_zone_survives_the_sidecar_round_trip_byte_for_byte() {
 /// the same slow base ramp, a known affine contrast map, and an
 /// independent per-pixel hash on each side of the zone. The bottom half is
 /// byte-identical on both sides, so only the zone is under test.
+///
+/// RE-READ (RULING-1180-int-r8 Q-int6-2 (a)): the target's zone also carries
+/// a tone offset, [`RESYNTHESISED_TONE_OFFSET`]. Under the local objective a
+/// zone ships on its OWN gain, and the contrast map alone left that gain AT
+/// the law's resolution (Pixel scale 0.05178 -> 0.04948 = 0.00230 against
+/// FIT_QUANT 0.0023, refused) — the fixture's premise, "this zone visibly
+/// helps", no longer held under the law it is read by.
 fn resynthesised_zone(target: bool) -> DynamicImage {
     let (w, h) = (192u32, 128u32);
     let hash = |i: u32, seed: u32| {
@@ -4582,13 +4738,28 @@ fn resynthesised_zone(target: bool) -> DynamicImage {
             let base = 0.20 + 0.55 * (x as f32 / (w - 1) as f32)
                 + 0.60 * hash(y * w + x, seed);
             let base = base.clamp(0.0, 1.0);
-            if target { (0.5 + 1.35 * (base - 0.5)).clamp(0.0, 1.0) } else { base }
+            if target {
+                (0.5 + 1.35 * (base - 0.5) + RESYNTHESISED_TONE_OFFSET).clamp(0.0, 1.0)
+            } else {
+                base
+            }
         } else {
             0.45 + 0.10 * (x as f32 / (w - 1) as f32)
         };
         image::Rgb([(v * 255.0).round() as u8; 3])
     }))
 }
+
+/// The re-synthesised zone's tone offset (display units). Read on this
+/// fixture (RULING-1180-int-r8, print-only probe, both scales): offsets
+/// -0.02 .. -0.04 leave the zone "already matched" (the zone residual gate,
+/// nothing solved); from -0.045 the zone ships with an own gain of 4.0 to
+/// 5.3 FIT_QUANT at either scale. -0.05 is that range's middle: own J*
+/// 0.06006 -> 0.04952 (Pixel) / -> 0.04890 (Cell), 4.6 / 4.8 FIT_QUANT.
+/// The Cell arm's spread drifts with the offset (-5.0 % at 0, -5.76 % at
+/// -0.05, -6.04 % at -0.06, -6.2 % at -0.07), so the 6 % bar below is read
+/// inside the range where the premise holds, not at its far end.
+const RESYNTHESISED_TONE_OFFSET: f32 = -0.05;
 
 /// R34 §D5: MODE governs the control set, SCALE governs the estimator.
 ///
@@ -4617,6 +4788,17 @@ fn resynthesised_zone(target: bool) -> DynamicImage {
 /// 0.70 reads 0.50; at 0.35 and below the guard stays quiet but the
 /// Pixel-scale zone is dropped outright and renders the untouched source,
 /// so the comparison would no longer see a paired solve.
+/// RE-READ (RULING-1180-int-r8/r9 Q-int6-2 (a)): the premise "this zone
+/// visibly helps" is asserted (own gain >= 3 FIT_QUANT at both scales — the
+/// fixture's statement of "well above the resolution", not a law's number)
+/// by the target's tone offset [`RESYNTHESISED_TONE_OFFSET`] = -0.05. The
+/// scan -0.02 .. -0.06: -0.02 / -0.03 / -0.04 leave the zone already matched
+/// (nothing solved); -0.045 ships at 4.0 / 4.2 FIT_QUANT (Pixel / Cell),
+/// -0.05 at 4.58 / 4.85, -0.055 at 5.3 / 5.5, -0.06 at 6.0 / 6.2. The Cell
+/// scale's spread under-reach grows with the offset (-5.64 % at -0.045,
+/// -5.76 % at -0.05, -5.75 % at -0.055, -6.04 % at -0.06): a reading
+/// recorded, not a bar moved — the 6 % bar is read at -0.05, inside the
+/// range where the premise holds.
 #[test]
 fn a_full_zone_whose_pixels_do_not_pair_solves_its_tone_from_its_own_population() {
     let (src, tgt) = (resynthesised_zone(false), resynthesised_zone(true));
@@ -4646,6 +4828,9 @@ fn a_full_zone_whose_pixels_do_not_pair_solves_its_tone_from_its_own_population(
     };
     let wanted = spread(&t_px, &tw);
     // The rendered spread, and the dilution guard's squeeze ratio if it fired.
+    // PREMISE (RULING-1180-int-r8 Q-int6-2 (a)): the zone visibly helps — it
+    // ships on its own pixels with a gain of several FIT_QUANT (three asked;
+    // read 4.6 / 4.8), so the bar below reads a zone the law keeps.
     let solve = |d: f32| -> (f32, Option<f32>) {
         let mut report = neutral_report(&src, &tgt);
         let attachment = semantic_attachment(sw.clone(), tw.clone(), &path);
@@ -4658,6 +4843,17 @@ fn a_full_zone_whose_pixels_do_not_pair_solves_its_tone_from_its_own_population(
             &attachment,
             divergence(d),
             None,
+        );
+        let shipped = report
+            .notes
+            .iter()
+            .find(|n| n.key == crate::rationale::keys::ZONE_SHIPPED_ON_OWN_PIXELS)
+            .unwrap_or_else(|| panic!("premise: the zone ships at D={d}: {}", report.recipe.rationale));
+        let (own_before, own_after) = (note_number(shipped, "own_before"), note_number(shipped, "own_after"));
+        println!("D={d}: own J* {own_before:.5} -> {own_after:.5}, {:.2} FIT_QUANT", (own_before - own_after) / fit::FIT_QUANT);
+        assert!(
+            own_before - own_after >= 3.0 * fit::FIT_QUANT,
+            "premise: the zone's own gain is several FIT_QUANT at D={d}: {own_before:.5} -> {own_after:.5}"
         );
         let rendered = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
         let diluted = report
@@ -4956,7 +5152,7 @@ fn an_identity_or_abstaining_field_leaves_the_zone_verdicts_unchanged() {
     let run = |field: Option<crate::correspond::CorrespondenceField>| -> String {
         let mask_path = fixture_mask_path("corr-conserve");
         sky_mask.save(mask_path.path()).unwrap();
-        let mut report = fit::fit_recipe(&source, &target);
+        let mut report = zone_stage_report(&source, &target);
         if let Some(f) = field {
             let (s_img, t_img) = fit::analysis_pair(&source, &target);
             report.correspondence = Some(fit::correspondence_for_pair(
@@ -5367,7 +5563,7 @@ fn calibration_land_zone_withholds_the_mid_tones_its_own_structure_does_not_keep
         .to_luma8();
     let mask_path = fixture_mask_path("calibration-land-scratch");
     sky_mask.save(mask_path.path()).unwrap();
-    let mut report = fit::fit_recipe(&source, &target);
+    let mut report = zone_stage_report(&source, &target);
     assert_eq!(report.mode, fit::FitMode::Atmosphere);
     assert!(report.structural_evidence.is_some());
     attach_zones(&source, &target, &mut report, &sky_mask, &sky_mask, &mask_path);
@@ -5878,7 +6074,7 @@ fn a_zoned_fits_confidence_is_read_on_the_render_that_ships() {
     let sky_mask = image::open(root.join("sky-mask.png")).expect("calibration sky-mask.png").to_luma8();
     let mask_path = fixture_mask_path("calibration-confidence-scratch");
     sky_mask.save(mask_path.path()).unwrap();
-    let mut report = fit::fit_recipe(&source, &target);
+    let mut report = zone_stage_report(&source, &target);
     let global_confidence = report.recipe.confidence;
     attach_zones(&source, &target, &mut report, &sky_mask, &sky_mask, &mask_path);
     let position = |key: &str| report.notes.iter().position(|n| n.key == key);
@@ -5921,7 +6117,7 @@ fn calibration_sky_zone_survives_luminance_with_partial_chroma_refusal() {
         .to_luma8();
     let mask_path = fixture_mask_path("calibration-sky-scratch");
     sky_mask.save(mask_path.path()).unwrap();
-    let mut report = fit::fit_recipe(&source, &target);
+    let mut report = zone_stage_report(&source, &target);
     attach_zones(&source, &target, &mut report, &sky_mask, &sky_mask, &mask_path);
     // RE-PINNED for v1.3.0's fit (R36 residual banding, R37's target-referenced
     // seam ruler), measured with the corpus in reach for the first time since
@@ -6056,7 +6252,7 @@ fn a_zoned_fits_confidence_comes_from_the_zones_it_accepted() {
     let (src, tgt, sky_mask) = zoned_pair();
     let mask_path = fixture_mask_path("zoned-confidence-mask");
     sky_mask.save(mask_path.path()).unwrap();
-    let mut report = fit::fit_recipe(&src, &tgt);
+    let mut report = zone_stage_report(&src, &tgt);
     let global_conf = report.recipe.confidence;
     attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, &mask_path);
     assert!(
@@ -6142,7 +6338,7 @@ fn zoned_orchestration_corrects_the_land_beside_the_shrunk_sky() {
         GrayImage::from_fn(w, h, |_, y| image::Luma([if y >= 12 { 255u8 } else { 0 }]));
     let mask_path = fixture_mask_path("zoned-orch-land-mask");
     sky_mask.save(mask_path.path()).unwrap();
-    let mut report = fit::fit_recipe(&src, &tgt);
+    let mut report = zone_stage_report(&src, &tgt);
     let entry = report.err_after;
     attach_zones(&src, &tgt, &mut report, &sky_mask, &sky_mask, &mask_path);
     // REWRITTEN (v1.18.0, J*). v1.17.1 pinned that the finished-frame curves
@@ -6220,7 +6416,7 @@ fn zoned_fit_survives_a_composition_share_mismatch() {
     let (sm, tm) = (mask_of(2), mask_of(6));
     let mask_path = fixture_mask_path("zoned-orch-share-mask");
     sm.save(mask_path.path()).unwrap();
-    let mut report = fit::fit_recipe(&src, &tgt);
+    let mut report = zone_stage_report(&src, &tgt);
     attach_zones(&src, &tgt, &mut report, &sm, &tm, &mask_path);
     assert!(
         report.recipe.rationale.contains("compositions differ")
@@ -6253,7 +6449,7 @@ fn zoned_orchestration_skips_a_degenerate_sky() {
     let (src, tgt, _) = zoned_pair();
     let empty = GrayImage::from_pixel(16, 16, image::Luma([0u8]));
     let mask_path = fixture_mask_path("zoned-orch-empty-mask");
-    let mut report = fit::fit_recipe(&src, &tgt);
+    let mut report = zone_stage_report(&src, &tgt);
     attach_zones(&src, &tgt, &mut report, &empty, &empty, &mask_path);
     assert!(report.recipe.masks.is_empty(), "no mask on a degenerate partition");
     assert!(
@@ -6835,6 +7031,7 @@ fn unrepresented_note_is_derived_from_the_finished_zoned_render() {
         true,
         None,
     );
+    super::entry::local_verdicts_unzoned(&src, &tgt, &crate::recipe::EditRecipe::default(), &mut report);
     assert!(!report
         .notes
         .iter()
@@ -7084,8 +7281,16 @@ fn a_zone_whose_target_is_a_gains_recolour_does_not_read_as_a_tint() {
 
 /// The colour field's PINNED path, REWRITTEN for v1.18.0 (R1). A settled
 /// zone — its render already the target's — woven through the frame in 8-px
-/// stripes, finer than the field's 12-column grid, and 0.16 darker than its
-/// neighbours, close enough that the two share the field's luma vertices.
+/// stripes, finer than the field's 12-column grid, and 0.02 darker than its
+/// neighbours, so its luma (0.38 .. 0.41) overlaps theirs (0.40 .. 0.43, the
+/// fixture's 0.03 dither) and no luma coordinate of the field separates the
+/// two. RE-READ (RULING-1180-int-r8 Q-int6-2 (b)/(c)): the zone sat 0.16
+/// darker before, more than one of the field's luma bins (1/7) away; under
+/// the local objective the pinned re-solve then held the zone and IMPROVED
+/// it (0.006115 -> 0.002069), so the premise "the pinned field still costs
+/// the zone" no longer held. Read at -0.02 on the local harness: the zone
+/// 0.005899 -> 0.007474 under the pinned re-solve, given back; at -0.04 the
+/// pin held (0.005924 -> 0.004708, shipped).
 /// Every other pixel asks for +0.10 of light. A field solved for the frame
 /// cannot give the stripes a vertex of their own, so it lifts them with their
 /// neighbours; the zone is pinned (its own render as its target at full
@@ -7093,7 +7298,7 @@ fn a_zone_whose_target_is_a_gains_recolour_does_not_read_as_a_tint() {
 /// hold the zone within the 0.02 a zone could cost, and it did, so the field
 /// shipped. R1 made the per-zone half of the field's do-no-harm "a loss of
 /// any size refuses" (`field::zone_regressed`): the re-solve still lifts the
-/// stripes (the zone reads 0.0061 -> 0.0120 on it), so the field is given
+/// stripes (the zone reads 0.005899 -> 0.007474 on it), so the field is given
 /// back, says which zone it would have cost, and ships nothing.
 #[test]
 fn a_zone_the_pinned_field_still_regresses_takes_the_field_back() {
@@ -7104,8 +7309,9 @@ fn a_zone_the_pinned_field_still_regresses_takes_the_field_back() {
 /// pair's settled tile sat in content the evidence down-weights). The pin's
 /// full weight must reach the support-free pass B that most cells take, not
 /// pass A alone: the re-solve then hears the zone as it hears the
-/// full-evidence one, and the zone's cost on it reads alike (measured 0.00634
-/// against 0.00592 at full evidence) — and is given back by the same law.
+/// full-evidence one, and the zone's cost on it reads alike (measured
+/// 0.001618 against 0.001575 at full evidence, RULING-1180-int-r8) — and is
+/// given back by the same law.
 #[test]
 fn a_pinned_zone_is_heard_at_full_weight_by_both_field_solves() {
     let (low_before, low_after) = pinned_zone_fixture(Some(0.1), "field-pin-low");
@@ -7124,7 +7330,7 @@ fn pinned_zone_fixture(zone_evidence: Option<f32>, name: &str) -> (f32, f32) {
     let (w, h) = (96u32, 64u32);
     let in_zone = |x: u32| (32..64).contains(&x) && (x / 8).is_multiple_of(2);
     let grey = |x: u32, y: u32| {
-        0.40 + if in_zone(x) { -0.16 } else { 0.0 } + 0.03 * ((x * 7 + y * 13) % 5) as f32 / 4.0
+        0.40 + if in_zone(x) { -0.02 } else { 0.0 } + 0.03 * ((x * 7 + y * 13) % 5) as f32 / 4.0
     };
     let to8 = |p: [f32; 3]| image::Rgb(p.map(|c| (c * 255.0).round() as u8));
     let src = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| to8([grey(x, y); 3])));

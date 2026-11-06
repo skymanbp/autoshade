@@ -51,20 +51,12 @@ impl AcceptedZone {
     /// objective on the zone's own present pixels ([`own_reading`]), as
     /// `ships_local` read it at k = 1 (RULING-1180-int-r6 (2): every
     /// do-no-harm at a zone reads the one objective; until then this read
-    /// the display moments, luma-only where colour was withheld).
-    ///
-    /// S-MODE: a local correction's do-no-harm reads `E_paired + H_ab`
-    /// (`LookTerms::local`), so this reading is local whether or not the
-    /// caller's model was switched to its local form. The pipeline switches
-    /// it before any zone (`entry::local_verdicts`); a caller that drives the
-    /// zone stage on its own did not, and there the structural term — the D
-    /// threshold's and the seam rulers' question — decided the do-no-harm: a
-    /// shrunk land zone whose own E_paired + H_ab read 0.05311 -> 0.05053 was
-    /// refused on S 0.163 -> 0.192.
+    /// the display moments, luma-only where colour was withheld). It reads
+    /// the report's model as it is set: local (`E_paired + H_ab`) once
+    /// `entry::read_locally` switched it, which the pipeline does before any
+    /// zone and the test harness does the same way.
     pub(super) fn judged(&self, report: &FitReport, pixels: &[[f32; 3]], tgt_px: &[[f32; 3]]) -> f32 {
-        let mut own = report.evidence.scoped(tgt_px, &self.own_weights.0, &self.own_weights.1);
-        own.local = true;
-        fit::look_err_with_evidence(pixels, tgt_px, &own)
+        own_reading(report, pixels, tgt_px, &self.own_weights.0, &self.own_weights.1)
     }
 
     /// R39. Does the correction that SHIPS still do what it was admitted

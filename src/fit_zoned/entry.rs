@@ -745,6 +745,20 @@ fn sky_land_pairing(report: &FitReport, zones: &attach::ZoneDivergences, src_mas
     zone_pairing([(&zones.sky, sky), (&zones.land, land)])
 }
 
+/// S-MODE: from here on the report's verdicts are a local correction's —
+/// `E_paired + H_ab` (`LookTerms::local`) on its model and on its structural
+/// model. The one switch: the pipeline's routes take it in [`local_verdicts`]
+/// before any zone, and a test that drives a zone stage on a report it built
+/// takes it the same way (`tests::neutral_report`, `tests::zone_stage_report`),
+/// so a fixture reads the law the pipeline reads (RULING-1180-int-r7
+/// Q-int6-2).
+pub(super) fn read_locally(report: &mut FitReport) {
+    report.evidence.local = true;
+    if let Some(structural) = report.structural_evidence.as_mut() {
+        structural.local = true;
+    }
+}
+
 fn local_verdicts(
     src: &DynamicImage,
     target: &DynamicImage,
@@ -754,10 +768,9 @@ fn local_verdicts(
 ) {
     // R2: the Full zones' own model, read BEFORE either ruler is re-paired.
     let own = report.structural_evidence.as_ref().unwrap_or(&report.evidence).paired.clone();
-    report.evidence.local = true;
+    read_locally(report);
     pair_by_finest_mode(&mut report.evidence, &own, zones);
     if let Some(structural) = report.structural_evidence.as_mut() {
-        structural.local = true;
         pair_by_finest_mode(structural, &own, zones);
     }
     let (s_img, t_img) = fit::analysis_pair(src, target);
