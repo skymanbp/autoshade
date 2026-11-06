@@ -719,6 +719,71 @@ fn the_white_balance_takes_only_the_colour_change_every_tonal_region_shares() {
     assert_eq!(wb_common(&[]), 0.0);
 }
 
+/// rel1180 RULING-1180-sc-r2: the white balance takes only what every band
+/// shares (`wb_common_shared`). A region whose interval `ask ± se` contains
+/// zero cannot propose a move but BOUNDS it: the common ask is clipped into
+/// that interval. Its error carries one output code's quantisation at its
+/// level (`region_se`, `code_step_variance`), so a quantised 0.0 bounds
+/// nothing finer than a code.
+///
+/// * The gate's 4400 K readings (Kelvin): shadows 0.0 (median error
+///   0.00016, display level 0.185), midtones −0.0317, highlights −0.0109 — the
+///   shadows' interval is wider than a code and the −0.0109 passes whole.
+/// * A real pair's 8250 K readings: shadows +0.954, midtones +1.032,
+///   highlights −0.00086 with a median error of 0.00088 at display level 0.936 — a
+///   measured "stay": +0.954 is clipped into the highlights' interval.
+///
+/// MUTATIONS THIS KILLS: bounding dropped (a zero-containing region
+/// abstains) -> the 8250 K case passes +0.954 whole; the quantisation floor
+/// dropped -> 0.0 ± 0.00016 clips −0.0109 to −0.00016; the control-unit
+/// mapping dropped -> the 4350 K case clips −0.0148 to −0.00295 (the chase
+/// stalled there); a resolving sign split no longer vetoes.
+#[test]
+fn a_tonal_region_reading_zero_within_its_error_bounds_the_white_balance() {
+    use super::evidence::{WbAxes, median_se, region_se, wb_common_shared, wb_move_shared};
+    const SHADOW: f32 = 0.185;
+    const HIGH: f32 = 0.936;
+    let axes = |kelvin: &[(f32, f32)]| WbAxes {
+        kelvin: kelvin.iter().map(|&(k, _)| (k, 1.0)).collect(),
+        tint: kelvin.iter().map(|_| (0.0, 1.0)).collect(),
+        se: kelvin.iter().map(|&(_, se)| [se, 0.0]).collect(),
+        ..Default::default()
+    };
+    let mid = region_se(0.00014, 0.4);
+    let shadows = region_se(0.00016, SHADOW);
+    assert!(shadows > 0.0109, "the quantised 0.0 is wider than a code: {shadows}");
+    assert_eq!(wb_common_shared(&axes(&[(0.0, shadows), (-0.0317, mid), (-0.0109, region_se(0.00001, 0.8))]), 0), -0.0109);
+    let high = region_se(0.00088, HIGH);
+    let common = wb_common_shared(&axes(&[(0.954, region_se(0.0025, 0.2)), (1.032, mid), (-0.00086, high)]), 0);
+    assert!((common - (-0.00086 + high)).abs() < 1e-6 && common < 0.01, "bounded to {common}");
+    // Read where the control acts (RULING-1180-sc-r3): the gate's 4350 K
+    // readings, Kelvin, each region with its own response over the step
+    // 4550 -> 4350 K and its one-code log step. Shadows 0.0 (se 0.011316,
+    // code 0.03920, response 1.4856), midtones -0.014677 (se 0.005247,
+    // response 0.99305), highlights 0.0 (se 0.002952, code 0.010226,
+    // response 0.49628): neither zero can see a move of 0.0148 in gain
+    // (0.0264 / 0.0206 per code), so the midtones' ask passes whole in the
+    // control's unit; read in the ask's unit the highlights clip it to
+    // -0.00295 and the chase stalled at 4350 K.
+    let at_4350 = WbAxes {
+        kelvin: vec![(0.0, 58690.4), (-0.014677, 13902.1), (0.0, 16738.5)],
+        tint: vec![(0.0, 1.0); 3],
+        se: vec![[0.011316, 1.0], [0.005247, 1.0], [0.002952, 1.0]],
+        region: vec![0, 1, 2],
+        code: vec![0.03920, 0.018166, 0.010226],
+    };
+    let mapped = wb_move_shared(&at_4350, 0, &[Some(1.4856), Some(0.99305), Some(0.49628)]);
+    assert!((mapped - (-0.014677 / 0.99305)).abs() < 1e-6, "in the control's unit: {mapped}");
+    assert!((wb_common_shared(&at_4350, 0) - (-0.002952)).abs() < 1e-6, "in the ask's unit");
+    // A resolving sign split still vetoes; nothing resolving asks nothing.
+    assert_eq!(wb_common_shared(&axes(&[(0.5, 0.01), (-0.3, 0.01)]), 0), 0.0);
+    assert_eq!(wb_common_shared(&axes(&[(0.0, 0.01), (0.001, 0.01)]), 0), 0.0);
+    // The median's error: √(π/2) · 1.4826 · MAD / √n_eff.
+    let sample: Vec<(f32, f32)> = [-1.0f32, -0.5, 0.0, 0.5, 1.0].iter().map(|&v| (v, 1.0)).collect();
+    let se = median_se(&sample, 0.0);
+    assert!((se - (std::f32::consts::PI / 2.0).sqrt() * 1.482_602_2 * 0.5 / 5.0f32.sqrt()).abs() < 1e-5, "{se}");
+}
+
 /// A split-toned pair: the target warms the shadows, leaves the midtones
 /// and cools the highlights of a neutral ramp. No illuminant does that, so
 /// the white balance takes nothing (as shot), and the colour-grade wheels,

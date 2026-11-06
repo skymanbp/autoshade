@@ -144,9 +144,10 @@ fn gate(name: &str, base: &EditRecipe, rep: &FitReport, carried: f32, wanted: f3
 }
 
 /// The white balance's demand is read closed-loop through the engine and
-/// its chase continues its own last step where a re-read asks nothing
-/// (`paired_wb_closed_loop`): one open-loop reading asked 4800 K of this
-/// 4300 K render, the re-reads stopped at 4400 K on a shadow median of 0.0.
+/// a region reading a quantised zero bounds the common ask by an interval
+/// of at least one code (`paired_wb_closed_loop`, `wb_common_shared`): one
+/// open-loop reading asked 4800 K of this 4300 K render, the re-reads
+/// stopped at 4400 K where the shadows' 0.0 vetoed the other regions' ask.
 #[test]
 fn the_fit_recovers_a_white_balance_it_rendered() {
     let Some(raw) = corpus_raw("p39.arw") else { return };

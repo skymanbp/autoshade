@@ -3,7 +3,9 @@
 //! wheels.
 
 use super::*;
-use super::evidence::{EVIDENCE_MIN_SHARE, WB_CHROMA_FLOOR, wb_axes_by_region, wb_common, weighted_median};
+use super::evidence::{
+    EVIDENCE_MIN_SHARE, WB_CHROMA_FLOOR, wb_axes_by_region, wb_common, wb_common_shared, weighted_median,
+};
 
 /// Hue step of the wheel search, in degrees. The engine's wheel tints toward
 /// the fully saturated hue at the pixel's own luma, so two degrees moves a
@@ -264,10 +266,12 @@ pub(super) fn fit_grade_stage(
     // The part every tonal region asks alike, read on the frame the white
     // balance left: about zero where it shipped, the withheld part where it
     // gave it back. Never a wheel's.
+    // Read exactly as the white balance reads it (`wb_common_shared`).
     let shared = wb_axes_by_region(&before, tp, weights);
-    let common = common_part(
-        &shared.kelvin.iter().zip(&shared.tint).map(|(&(k, m), &(t, _))| (t + 0.5 * k, t - 0.5 * k, m)).collect::<Vec<_>>(),
-    );
+    let common = {
+        let (k, t) = (wb_common_shared(&shared, 0), wb_common_shared(&shared, 1));
+        [t + 0.5 * k, t - 0.5 * k]
+    };
     let mut solved = [(0.0f32, 0.0f32); 3];
     for (region, slot) in solved.iter_mut().enumerate() {
         *slot = solve_wheel(&modelled_px, tp, weights, &cg, region, common);
