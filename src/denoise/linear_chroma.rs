@@ -178,7 +178,11 @@
 //! light, `b + c·(x_i − x_Ω) + e·(y_i − y_Ω) + a·Ĝ_i`. A cell no window of
 //! the width votes for is read at the next width of [`ladder`] — the levels'
 //! holes, `ρ` then `2^l` down to 1 (at 25: 11, 4, 2, 1) — and where no width
-//! fits it keeps its own sample. Nothing in the read is a chosen number:
+//! fits it keeps its own sample. At the second read a cell the windows of a
+//! width hold but all reject is claimed by a narrower window only where what
+//! that window's other cells say at the cell is a different material, and a
+//! cell no window claims reads the windows that rejected it
+//! ([`Cells::read_applicable`]). Nothing in the read is a chosen number:
 //! `k_F` is the frame's, `r`, `κ`, `ν`, the null the model's and the taps',
 //! `ρ` and `L` the slider's (below).
 //!
@@ -1590,7 +1594,10 @@ impl Cells {
     /// ([`Self::lines`]: a window's line votes where it fits its own window)
     /// and, at the second read, hold at it ([`Self::read_applicable`]);
     /// a cell no window of a width votes for is read at the next smaller width,
-    /// and where none fits it keeps its own sample. Returns the read and, per
+    /// and where none fits it keeps its own sample; at the second read a cell
+    /// the windows of a width hold but all reject is noise about them unless a
+    /// narrower window shows it is another material ([`Self::read_applicable`]),
+    /// and is read from them where none does. Returns the read and, per
     /// cell and colour difference, the index into [`ladder`] it was read at
     /// (the ladder's length where it kept its own sample).
     ///
@@ -1650,6 +1657,12 @@ impl Cells {
         // A site not measured is not read (`kept + 1`): its colour stays the
         // develop's own ([`CellChroma::rebuild`]).
         let mut used: Vec<[u8; 2]> = self.meas.iter().map(|m| m.map(|v| if v { kept } else { kept + 1 })).collect();
+        // Per cell and colour difference, the windows of the first width that
+        // held the cell and all rejected it ([`Self::read_applicable`]): the
+        // mean of their fits at the cell, of their leave-one-out predictions
+        // there and of those predictions' variances, and the width's index (NaN
+        // where none has).
+        let mut held: Vec<[[f32; 4]; 2]> = vec![[[f32::NAN; 4]; 2]; cw * ch];
         for (wi, &w) in widths.iter().enumerate() {
             if !used.iter().any(|u| u[0] == kept || u[1] == kept) {
                 break;
@@ -1658,7 +1671,7 @@ impl Cells {
             // weighted (the second), only where its hypothesis holds at the cell
             // ([`Self::read_applicable`]).
             let read: Vec<[f32; 2]> = if !pooled {
-                self.read_applicable(w, levels, light, noise, &used, kept)
+                self.read_applicable(w, wi, levels, light, noise, &used, kept, &mut held)
             } else {
                 let lines = self.lines(w, levels, light, noise, pooled);
                 // A voting window `Ω` reads cell `i` on its plane:
@@ -1696,6 +1709,16 @@ impl Cells {
                 }
             });
         }
+        // A cell no window claims is noise about the widest windows that held
+        // it, and reads their line (rel1180 RULING r49).
+        out.par_iter_mut().zip(used.par_iter_mut()).zip(&held).for_each(|((o, u), h)| {
+            for j in 0..2 {
+                if u[j] == kept && !h[j][0].is_nan() {
+                    o[j] = h[j][0];
+                    u[j] = h[j][3] as u8;
+                }
+            }
+        });
         (out, used)
     }
 
@@ -1723,9 +1746,31 @@ impl Cells {
     /// neither tested nor read there. The window stays voted for its other
     /// cells, an included cell reads the window's fit, and a cell no voting
     /// window reads at `w` is read at the next width of the [`ladder`].
+    ///
+    /// A narrower window's acceptance is a weaker test than a wider window's
+    /// rejection: over 9–81 cells the fit carries its cells' noise, and an
+    /// outlier the widest windows reject slips under `k_F` in some narrow
+    /// window that then reads it on a line bent toward it (p40's specks: a
+    /// heavy-tailed read-noise sample 5–8 sds off, rel1180 msg-e3 rounds 48–51).
+    /// So once every voting window of a width (`W`, the first that held the
+    /// cell, its index `wi` in `held`) has rejected a cell, a narrower window
+    /// `V` that accepts it claims it only where what `V`'s other cells say at
+    /// the cell is a different material: `|ĥ_V − ĥ_W| > k·√(s²_V + s²_W)`, `ĥ`
+    /// a window's prediction at the cell fitted without it,
+    /// `d_i − r_i/(1 − h_i)`, and `s²` that prediction's variance,
+    /// `h_i·v_i/(1 − h_i)` (`W`'s the means over its windows) — a fit that
+    /// holds the cell is partly the cell (rel1180 RULING r50, r51). A rim cell
+    /// is claimed by its foliage's window (its other cells 7–23 errors from
+    /// the sky's line); a speck by none, and a cell no window claims is noise
+    /// about the windows that rejected it: [`Self::read_widths_at`] reads it
+    /// on their line (`held`'s mean of their fits, RULING r49), never on its
+    /// own sample. A width-1 window holds 9 cells and its vote needs more
+    /// than its parameters ([`votes`]): no window reads a cell from itself.
     /// Returns per cell the mean of the fits that read it (NaN where none
-    /// does), for the cells `used` marks `kept` (measured, not yet read).
-    fn read_applicable(&self, w: usize, levels: u32, light: &Light, noise: &[[f32; 4]], used: &[[u8; 2]], kept: u8) -> Vec<[f32; 2]> {
+    /// does), for the cells `used` marks `kept` (measured, not yet read), and
+    /// records in `held` each such cell this width's windows hold and all reject.
+    #[allow(clippy::too_many_arguments)]
+    fn read_applicable(&self, w: usize, wi: usize, levels: u32, light: &Light, noise: &[[f32; 4]], used: &[[u8; 2]], kept: u8, held: &mut [[[f32; 4]; 2]]) -> Vec<[f32; 2]> {
         const TILE: usize = 32;
         const EXT: usize = TILE + 2;
         let (cw, ch) = (self.cw, self.ch);
@@ -1736,37 +1781,47 @@ impl Cells {
                 continue;
             }
             let rec = self.lines_of(j, w, levels, light, noise, false);
-            // Cell `(x, y)`'s `z` in the window centred at `(wx, wy)` whose record
-            // is `q`: NaN where not measured or not testable (leverage one).
-            let z_at = |x: usize, y: usize, wx: usize, wy: usize, q: &[f64; 15]| -> f64 {
+            // Cell `(x, y)` in the window centred at `(wx, wy)` whose record is
+            // `q`: its PRESS `z`, the window's fit at it, its leave-one-out
+            // prediction and that prediction's variance, and the fit's own
+            // variance there, `h·v` (the mutation's); NaN where not measured
+            // or not testable (leverage one).
+            let press = |x: usize, y: usize, wx: usize, wy: usize, q: &[f64; 15]| -> [f64; 5] {
                 let i = y * cw + x;
                 let v = f64::from(noise[i][j]);
                 if !self.meas[i][j] || v <= 0.0 {
-                    return f64::NAN;
+                    return [f64::NAN; 5];
                 }
                 let (dx, dy, g) = (x as f64 - wx as f64, y as f64 - wy as f64, f64::from(light.g[i]));
-                let r = f64::from(self.d[i][j]) - (q[1] + q[2] * dx + q[3] * dy + q[0] * g);
+                let d = f64::from(self.d[i][j]);
+                let fit = q[1] + q[2] * dx + q[3] * dy + q[0] * g;
                 let (ux, uy) = (dx - q[5], dy - q[6]);
                 let ul = g - q[7] - q[11] * ux - q[12] * uy;
                 let h = q[14] / v * (1.0 + q[8] * ux * ux + 2.0 * q[9] * ux * uy + q[10] * uy * uy + q[13] * ul * ul);
                 if h < 1.0 {
-                    r / (1.0 - h) / v.sqrt()
+                    [(d - fit) / (1.0 - h) / v.sqrt(), fit, d - (d - fit) / (1.0 - h), h * v / (1.0 - h), h * v]
                 } else {
-                    f64::NAN
+                    [f64::NAN; 5]
                 }
             };
+            let prior: Vec<[f32; 4]> = held.iter().map(|h| h[j]).collect();
             let mut read = vec![f32::NAN; cw * ch];
-            read.par_chunks_mut(cw * TILE).enumerate().for_each(|(band, rows)| {
+            let mut rejected = vec![[f32::NAN; 4]; cw * ch];
+            read.par_chunks_mut(cw * TILE).zip(rejected.par_chunks_mut(cw * TILE)).enumerate().for_each(|(band, (rows, rej))| {
                 let (y0, y1) = (band * TILE, ((band + 1) * TILE).min(ch));
-                // The tile's `z` with a one-cell border, and its reads' sums.
+                // The tile's `z` with a one-cell border, its reads' sums, and the
+                // sums over every voting window holding a cell (fit,
+                // leave-one-out prediction, its variance, count).
                 let mut z = vec![f64::NAN; EXT * EXT];
                 let mut acc = vec![(0.0f64, 0u32); TILE * TILE];
+                let mut all = vec![[0.0f64; 4]; TILE * TILE];
                 for x0 in (0..cw).step_by(TILE) {
                     let x1 = (x0 + TILE).min(cw);
                     if !(y0..y1).any(|y| (x0..x1).any(|x| used[y * cw + x][j] == kept)) {
                         continue;
                     }
                     acc.iter_mut().for_each(|a| *a = (0.0, 0));
+                    all.iter_mut().for_each(|a| *a = [0.0; 4]);
                     let at = |x: usize, y: usize| (y + 1 - y0) * EXT + (x + 1 - x0);
                     for wy in y0.saturating_sub(w)..(y1 + w).min(ch) {
                         for wx in x0.saturating_sub(w)..(x1 + w).min(cw) {
@@ -1778,7 +1833,7 @@ impl Cells {
                             let (zx0, zx1, zy0, zy1) = (bx0.max(x0.saturating_sub(1)), bx1.min(x1 + 1), by0.max(y0.saturating_sub(1)), by1.min(y1 + 1));
                             for y in zy0..zy1 {
                                 for x in zx0..zx1 {
-                                    z[at(x, y)] = z_at(x, y, wx, wy, &q);
+                                    z[at(x, y)] = press(x, y, wx, wy, &q)[0];
                                 }
                             }
                             for y in zy0.max(y0)..zy1.min(y1) {
@@ -1795,9 +1850,14 @@ impl Cells {
                                             (tot, m) = (tot + zn, m + 1.0);
                                         }
                                     }
-                                    if zi.abs().max((tot / m.sqrt()).abs()) <= k {
-                                        let g = f64::from(light.g[y * cw + x]);
-                                        let fit = q[1] + q[2] * (x as f64 - wx as f64) + q[3] * (y as f64 - wy as f64) + q[0] * g;
+                                    let [_, fit, loo, s2, _] = press(x, y, wx, wy, &q);
+                                    let t = &mut all[(y - y0) * TILE + x - x0];
+                                    *t = [t[0] + fit, t[1] + loo, t[2] + s2, t[3] + 1.0];
+                                    // Rejected by a wider width's every window: claimed only
+                                    // where this window's other cells show another material.
+                                    let p = prior[y * cw + x];
+                                    let claims = p[0].is_nan() || (loo - f64::from(p[1])).abs() > k * (s2 + f64::from(p[2])).sqrt();
+                                    if zi.abs().max((tot / m.sqrt()).abs()) <= k && claims {
                                         let a = &mut acc[(y - y0) * TILE + x - x0];
                                         (a.0, a.1) = (a.0 + fit, a.1 + 1);
                                     }
@@ -1807,15 +1867,22 @@ impl Cells {
                     }
                     for y in y0..y1 {
                         for x in x0..x1 {
-                            let a = acc[(y - y0) * TILE + x - x0];
+                            let (a, t) = (acc[(y - y0) * TILE + x - x0], all[(y - y0) * TILE + x - x0]);
                             if a.1 > 0 {
                                 rows[(y - y0) * cw + x] = (a.0 / f64::from(a.1)) as f32;
+                            } else if t[3] > 0.0 && prior[y * cw + x][0].is_nan() {
+                                rej[(y - y0) * cw + x] = [(t[0] / t[3]) as f32, (t[1] / t[3]) as f32, (t[2] / t[3]) as f32, wi as f32];
                             }
                         }
                     }
                 }
             });
             out.iter_mut().zip(read).for_each(|(o, r)| o[j] = r);
+            held.iter_mut().zip(rejected).for_each(|(h, r)| {
+                if !r[0].is_nan() {
+                    h[j] = r;
+                }
+            });
         }
         out
     }

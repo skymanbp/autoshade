@@ -1886,177 +1886,181 @@ fn rim_noise_traced() -> (f64, f64, impl Fn(f64) -> f64) {
     (a, (vd - a * pd) / (WB[0] * WB[0] + 0.25), line)
 }
 
-/// Two dark cells inside a sky window, the rim's geometry as C38 measured it
-/// (rel1180 msg-e3 R42-2, RULING r42, r46): a 625-cell sky window on its
-/// colour line (`0.07 − 0.85·G`, traced) with the sky's light spread
-/// (0.2 … 0.33, smooth: two sinusoids, so its sites' greens lie on a plane),
-/// and two horizontally adjacent cells at light 0.02 whose colour is the
-/// foliage's, `off` of their own sds off the line's extension (the traced
-/// noise, [`rim_noise_traced`]). Only the two are measured among the dark
-/// greens: the greens their sites read are dark (theirs, the left cell's
-/// right green, the upper cells' lower greens) and every cell beside them reads
-/// a dark green with a sky one, not on one plane. Their own sites carry no
-/// noise: the offset is the geometry, not a draw (each cell's PRESS residual
-/// sits under `off`, the partner in the fit pulling the line toward it). One
-/// pair every 64 cells, 48 pairs a frame. A window's vote is the mean of its
-/// cells' χ²: over 625 cells two cells 6 sds off move it by 0.06, inside
-/// `k_F·√(2/N)` — the window votes, and read whole it would write the sky's
-/// line on the pair.
+/// A foliage region under a sky and a lone outlier on it, the rim's and the
+/// speck's geometry as measured (rel1180 msg-e3 rounds 42–51; RULING r42, r46,
+/// r49 re-read the fixture: a rim is the edge of a REGION that claims its
+/// cells at a narrower width, and a speck is one read-noise sample no window
+/// claims). The sky: its colour line (`0.07 − 0.85·G`, traced, the noise of
+/// [`rim_noise_traced`]) over its light spread (0.2 … 0.33, two sinusoids). In
+/// every 64-cell tile: a foliage block of 16 × 16 cells at light 0.02, its
+/// colour `off` = 6 of its own sds off the sky line's extension, filling the
+/// corner of the sky windows that reach it, wider than the narrower widths'
+/// windows (9 cells at width 4), so those windows sit inside it; and, 20 cells
+/// from the block (beyond the widest window's reach), ONE cell whose red site
+/// sits 8 of its own sds above the sky's line (its own sample noiseless, its
+/// greens the sky's), the measured speck: one sample. All other sites carry
+/// the traced noise.
 ///
-/// Asserted at 6 and at 4.8 own sds: every pair has a voting window of the
-/// widest width holding both cells (the vote alone does not see them); every
-/// pair cell reads within `k_F` of its own sd of its colour at the width that
-/// reads it; and the read is the rule's, window by window on the stage's own
-/// records — at the widest width the mean of the fits of the voting windows
-/// where `max(|z|, |z_pool|) ≤ k_F`, `z_pool` pooled with the partner when
-/// the window holds it, and no read there where none does. At 4.8 each cell
-/// alone sits under `k_F` (its PRESS `z` 4.3 in the centred window) and the
-/// pair pools over it (6.1). Where a window's edge splits the pair it holds one
-/// cell without its coherence and may read it (printed); off-centre windows
-/// see the pair through more of their plane's leverage. Printed: the pair
-/// cells' leverage, `z` and pooled `z` in the centred window; the centred
-/// windows voting; the widest windows reading a pair cell, holding both or
-/// one; the widths that read them; their error in own sds.
+/// Asserted: a voting window of the widest width holds the block's edge (the
+/// vote alone does not see it) — its cells there, the rim, are not read from
+/// it at that width; every measured foliage cell reads within `k_F` of its own
+/// sd of the foliage's colour, a rim cell from a narrower window that claims
+/// it (what that window's other cells say there is the foliage, beyond `k_F`
+/// of both predictions' errors: [`Cells::read_applicable`]); the lone cell is
+/// rejected by every window at every width that may claim it, is read at the
+/// widest width (the windows that rejected it) and within `k_F` of its own sd
+/// of the sky's colour. Printed: the rim cells, the widths that read them and
+/// their claim ratios; the lone cells' `z` in their centred widest window, the
+/// narrower windows accepting them and those windows' ratios, leave-one-out
+/// and with the full fit; the errors in own sds.
 ///
-/// MUTATIONS: the per-cell applicability removed (every cell of a voted window
-/// read from it) → the pairs read at width 12 on the sky's line, red; the
-/// coherence removed (each cell's own `z` alone) → at 4.8 own sds the pair
-/// cells stay in their width-12 windows, red.
+/// MUTATIONS: the fall-through to the cell's own sample (the lone cell keeps
+/// its 8 sds, red); the exclusion removed (every cell of a voted window read
+/// from it: the rim reads the sky's line, red); the full fit in place of the
+/// leave-one-out prediction in the claim (a narrower window bent toward the
+/// lone cell claims it, red).
 #[test]
-fn a_voted_windows_hypothesis_is_read_at_a_cell_only_where_it_holds_there() {
+fn a_rejected_cell_is_claimed_only_by_a_narrower_window_that_shows_another_material() {
     let (a, b, line) = rim_noise_traced();
     let (rho, levels) = (at25(), lv25());
     let (cw, ch) = (W / 2, H / 2);
-    let pairs: Vec<(usize, usize)> = (0..ch / 64).flat_map(|j| (0..cw / 64).map(move |i| (32 + 64 * i, 32 + 64 * j))).collect();
-    let pair = |cx: usize, cy: usize| pairs.iter().any(|&(px, py)| cy == py && (cx == px || cx == px + 1));
-    // The dark green sites: the pair's own, the left cell's right green and
-    // the upper cells' lower greens (the sites the pair's red sites read).
-    let dark_green = |x: usize, y: usize| {
-        let (cx, cy) = (x / 2, y / 2);
-        pair(cx, cy) && (x + y) % 2 == 1 || y.is_multiple_of(2) && x % 2 == 1 && pair(cx + 1, cy) || y % 2 == 1 && x.is_multiple_of(2) && pair(cx, cy + 1)
-    };
+    let widths = ladder(rho, levels);
+    let block = |cx: usize, cy: usize| (8..20).contains(&(cx % 64)) && (8..20).contains(&(cy % 64));
+    let lone = |cx: usize, cy: usize| matches!((cx % 64, cy % 64), (44, 44) | (44, 28) | (44, 12) | (28, 44) | (12, 44));
     let sky = |cx: usize, cy: usize| 0.265 + 0.0325 * ((cx as f64 * std::f64::consts::TAU / 24.0).sin() + (cy as f64 * std::f64::consts::TAU / 20.0 + 1.0).sin());
-    let mut failed = Vec::new();
-    for off in [6.0f64, 4.8] {
-        let dd = (0..30).fold(line(0.02), |d, _| line(0.02) - off * cell_sd_at(0.02, d, a, b));
-        let sd = cell_sd_at(0.02, dd, a, b);
-        let mut m = vec![0.0f32; W * H];
-        m.par_chunks_mut(W).enumerate().for_each(|(y, row)| {
-            for (x, v) in row.iter_mut().enumerate() {
-                let (cx, cy) = (x / 2, y / 2);
-                let (sv, quiet) = match (y % 2, x % 2) {
-                    (0, 0) if pair(cx, cy) => ((0.02 + dd) / WB[0], true),
-                    (0, 0) => ((sky(cx, cy) + line(sky(cx, cy))) / WB[0], false),
-                    (1, 1) => (sky(cx, cy) / WB[2], false),
-                    _ if dark_green(x, y) => (0.02, true),
-                    _ => (sky(cx, cy), false),
-                };
-                *v = (sv + if quiet { 0.0 } else { (a * sv + b).max(0.0).sqrt() * normal(47, (y * W + x) as u64) }) as f32;
-            }
-        });
-        let cells = cells_of(&m, Some(NoiseModel::known(a, b, W, H)));
-        let k = fair_k((cw * ch) as f64);
-        let light = cells.read_light(levels, k);
-        let (out, used) = cells.read_widths(rho, levels, &light);
-        let noise = {
-            let first = cells.read_widths_at(rho, levels, &light, &cells.noise(), true).0;
-            cells.read_noise(&light, &first)
-        };
-        let rec = cells.lines_of(0, rho, levels, &light, &noise, false);
-        let measured = (0..cw * ch).filter(|&i| cells.meas[i][0] && pair(i % cw, i / cw)).count();
-        // Cell `(cx, cy)`'s leverage and PRESS `z` in the window centred at
-        // `(wx, wy)` ([`Cells::read_applicable`]'s form, on the stage's record).
-        let z = |cx: usize, cy: usize, wx: usize, wy: usize| -> (f64, f64) {
-            let q = rec[wy * cw + wx].map(f64::from);
-            let i = cy * cw + cx;
-            let (v, g) = (f64::from(noise[i][0]), f64::from(light.g[i]));
-            let (dx, dy) = (cx as f64 - wx as f64, cy as f64 - wy as f64);
-            let r = f64::from(cells.d[i][0]) - (q[1] + q[2] * dx + q[3] * dy + q[0] * g);
-            let (ux, uy) = (dx - q[5], dy - q[6]);
-            let ul = g - q[7] - q[11] * ux - q[12] * uy;
-            let h = q[14] / v * (1.0 + q[8] * ux * ux + 2.0 * q[9] * ux * uy + q[10] * uy * uy + q[13] * ul * ul);
-            (h, r / (1.0 - h) / v.sqrt())
-        };
-        let (mut centred, mut held, mut split_reads, mut whole_reads) = (0, 0, 0, 0);
-        let mut at_width = vec![0usize; ladder(rho, levels).len() + 2];
-        let (mut worst, mut worst_ref, mut zs) = (0.0f64, 0.0f64, Vec::new());
-        for &(px, py) in &pairs {
-            centred += usize::from(rec[py * cw + px][4] == 1.0);
-            // A width-`rho` window holding both cells votes: the vote alone does not see them.
-            held += usize::from((py - rho..=py + rho).any(|wy| (px + 1 - rho..=px + rho).any(|wx| rec[wy * cw + wx][4] == 1.0)));
-            let (l, r) = (z(px, py, px, py), z(px + 1, py, px, py));
-            zs.push((l.0, l.1, r.1, (l.1 + r.1) / 2f64.sqrt()));
-            for (cx, other) in [(px, px + 1), (px + 1, px)] {
-                let i = py * cw + cx;
-                if !cells.meas[i][0] {
-                    continue;
-                }
-                at_width[usize::from(used[i][0])] += 1;
-                let e = (f64::from(out[i][0]) - dd) / sd;
-                worst = worst.max(e.abs());
-                if e.abs() > k {
-                    failed.push(format!("{off} sd: pair cell ({cx}, {py}) {e:+.2} own sds off its colour"));
-                }
-                // The rule window by window at the widest width: the windows that
-                // may read the cell, and the mean of their fits.
-                let (mut sum, mut cnt) = (0.0f64, 0usize);
-                for wy in py.saturating_sub(rho)..=(py + rho).min(ch - 1) {
-                    for wx in cx.saturating_sub(rho)..=(cx + rho).min(cw - 1) {
-                        if rec[wy * cw + wx][4] != 1.0 {
-                            continue;
-                        }
-                        let zi = z(cx, py, wx, wy).1;
-                        let both = wx.abs_diff(other) <= rho;
-                        let zo = if both { z(other, py, wx, wy).1 } else { f64::NAN };
-                        let pool = if zo.is_finite() && (zo > 0.0) == (zi > 0.0) { (zi + zo) / 2f64.sqrt() } else { zi };
-                        if zi.abs().max(pool.abs()) <= k {
-                            let q = rec[wy * cw + wx].map(f64::from);
-                            sum += q[1] + q[2] * (cx as f64 - wx as f64) + q[3] * (py as f64 - wy as f64) + q[0] * f64::from(light.g[i]);
-                            cnt += 1;
-                            if both {
-                                whole_reads += 1;
-                            } else {
-                                split_reads += 1;
-                            }
-                        }
-                    }
-                }
-                let want = if cnt > 0 { Some(sum / cnt as f64) } else { None };
-                match (used[i][0], want) {
-                    (0, Some(f)) => {
-                        let gap = (f64::from(out[i][0]) - f).abs() / sd;
-                        worst_ref = worst_ref.max(gap);
-                        if gap > 1e-3 {
-                            failed.push(format!("{off} sd: pair cell ({cx}, {py}) read {:+.5} by the widest windows, the rule gives {f:+.5} ({cnt} windows)", out[i][0]));
-                        }
-                    }
-                    (0, None) => failed.push(format!("{off} sd: pair cell ({cx}, {py}) read at the widest width, where the rule reads it from no window")),
-                    (_, Some(f)) => failed.push(format!("{off} sd: pair cell ({cx}, {py}) read below the widest width, where the rule reads it from {cnt} windows ({f:+.5})")),
-                    (_, None) => {}
-                }
-            }
+    // The foliage's own light spread (0.015 … 0.025 … 0.045, smooth), its
+    // colour one: a line through the sky and the foliage does not fit both.
+    let foliage = |cx: usize, cy: usize| 0.03 + 0.0075 * ((cx as f64 * std::f64::consts::TAU / 12.0).sin() + (cy as f64 * std::f64::consts::TAU / 10.0 + 2.0).sin());
+    let off = 6.0f64;
+    let dd = (0..30).fold(line(0.03), |d, _| line(0.03) - off * cell_sd_at(0.03, d, a, b));
+    let sdf = cell_sd_at(0.03, dd, a, b);
+    // The lone cell's colour: 8 of its own sds under the sky's line.
+    let down = |g: f64| (0..30).fold(line(g), |d, _| line(g) - 8.0 * cell_sd_at(g, d, a, b));
+    let light = |cx: usize, cy: usize| if block(cx, cy) { foliage(cx, cy) } else { sky(cx, cy) };
+    let mut m = vec![0.0f32; W * H];
+    m.par_chunks_mut(W).enumerate().for_each(|(y, row)| {
+        for (x, v) in row.iter_mut().enumerate() {
+            let (cx, cy) = (x / 2, y / 2);
+            let gl = light(cx, cy);
+            let (sv, quiet) = match (y % 2, x % 2) {
+                (0, 0) if block(cx, cy) => ((gl + dd) / WB[0], false),
+                (0, 0) if lone(cx, cy) => ((gl + down(gl)) / WB[0], true),
+                (0, 0) => ((gl + line(gl)) / WB[0], false),
+                (1, 1) => (gl / WB[2], false),
+                _ => (gl, false),
+            };
+            *v = (sv + if quiet { 0.0 } else { (a * sv + b).max(0.0).sqrt() * normal(49, (y * W + x) as u64) }) as f32;
         }
-        println!("pair {off} own sds: widest-width windows reading a pair cell: {whole_reads} holding both cells, {split_reads} holding one (the pair split by the window's edge, its coherence not in the window); stage vs the rule worst {worst_ref:.1e} own sds; pairs with a voting window holding both {held} of {}", pairs.len());
-        let n = zs.len() as f64;
-        let mean = |k: usize| zs.iter().map(|t| [t.0, t.1, t.2, t.3][k]).sum::<f64>() / n;
-        println!(
-            "pair {off} own sds off (colour {dd:+.5}, sd {sd:.5}; noise a {a:.3e} b {b:.3e}; k_F {k:.3}): {measured} of {} pair cells measured; centred window: h {:.3}, z {:+.2} / {:+.2}, pooled {:+.2} (min |pooled| {:.2}, max |z| {:.2}); centred windows voting {centred} of {}",
-            2 * pairs.len(),
-            mean(0),
-            mean(1),
-            mean(2),
-            mean(3),
-            zs.iter().map(|t| t.3.abs()).fold(f64::INFINITY, f64::min),
-            zs.iter().map(|t| t.1.abs().max(t.2.abs())).fold(0.0, f64::max),
-            pairs.len()
-        );
-        println!("pair {off} own sds: pair cells read per width {:?} (then own, not measured): {at_width:?}; worst error {worst:.2} own sds", ladder(rho, levels));
-        if measured != 2 * pairs.len() || held != pairs.len() {
-            failed.push(format!("{off} sd: {measured} pair cells measured, {held} pairs with a voting window holding both"));
+    });
+    let cells = cells_of(&m, Some(NoiseModel::known(a, b, W, H)));
+    let k = fair_k((cw * ch) as f64);
+    let lt = cells.read_light(levels, k);
+    let (out, used) = cells.read_widths(rho, levels, &lt);
+    let noise = {
+        let first = cells.read_widths_at(rho, levels, &lt, &cells.noise(), true).0;
+        cells.read_noise(&lt, &first)
+    };
+    let recs: Vec<Vec<[f32; 15]>> = widths.iter().map(|&w| cells.lines_of(0, w, levels, &lt, &noise, false)).collect();
+    // Cell `i` in the window centred at `wc` of width index `wi`: its PRESS `z`,
+    // the fit, the leave-one-out prediction and its variance, the fit's
+    // variance ([`Cells::read_applicable`]'s form, on the stage's record).
+    let press = |i: usize, wi: usize, wc: usize| -> [f64; 5] {
+        let q = recs[wi][wc].map(f64::from);
+        let (v, g, d) = (f64::from(noise[i][0]), f64::from(lt.g[i]), f64::from(cells.d[i][0]));
+        let (dx, dy) = ((i % cw) as f64 - (wc % cw) as f64, (i / cw) as f64 - (wc / cw) as f64);
+        let fit = q[1] + q[2] * dx + q[3] * dy + q[0] * g;
+        let (ux, uy) = (dx - q[5], dy - q[6]);
+        let ul = g - q[7] - q[11] * ux - q[12] * uy;
+        let h = q[14] / v * (1.0 + q[8] * ux * ux + 2.0 * q[9] * ux * uy + q[10] * uy * uy + q[13] * ul * ul);
+        [(d - fit) / (1.0 - h) / v.sqrt(), fit, d - (d - fit) / (1.0 - h), h * v / (1.0 - h), h * v]
+    };
+    // The voting windows of width index `wi` holding cell `i`.
+    let voting = |i: usize, wi: usize| -> Vec<usize> {
+        let (x, y, w) = (i % cw, i / cw, widths[wi]);
+        (y.saturating_sub(w)..=(y + w).min(ch - 1)).flat_map(|wy| (x.saturating_sub(w)..=(x + w).min(cw - 1)).map(move |wx| wy * cw + wx)).filter(|&c| recs[wi][c][4] == 1.0).collect()
+    };
+    // The windows of width index `wi` that accept cell `i` (its own `z`; the
+    // pooled arm only adds rejections) and their claim ratios against the
+    // widest width's windows, leave-one-out and with the full fit.
+    let ratios = |i: usize, wi: usize| -> Vec<(f64, f64, f64)> {
+        let wsx = voting(i, 0);
+        let n = wsx.len() as f64;
+        let (mut hl, mut sl, mut hf, mut sf) = (0.0, 0.0, 0.0, 0.0);
+        for &c in &wsx {
+            let p = press(i, 0, c);
+            (hl, sl, hf, sf) = (hl + p[2] / n, sl + p[3] / n, hf + p[1] / n, sf + p[4] / n);
+        }
+        voting(i, wi)
+            .into_iter()
+            .map(|c| press(i, wi, c))
+            .filter(|p| p[0].abs() <= k)
+            .map(|p| (p[0], (p[2] - hl).abs() / (p[3] + sl).sqrt(), (p[1] - hf).abs() / (p[4] + sf).sqrt()))
+            .collect()
+    };
+    let mut failed = Vec::new();
+    let (mut rim, mut rim_widths, mut rim_worst, mut rim_ratio_min, mut fol_worst, mut blocks_seen) = (0usize, vec![0usize; widths.len() + 2], 0.0f64, f64::INFINITY, 0.0f64, 0usize);
+    let mut blocks = std::collections::BTreeSet::new();
+    let pure = |cx: usize, cy: usize| block(cx, cy) && cx > 0 && cy > 0 && block(cx - 1, cy) && block(cx, cy - 1);
+    let mixed = (0..cw * ch).filter(|&i| cells.meas[i][0] && block(i % cw, i / cw) && !pure(i % cw, i / cw)).count();
+    for i in (0..cw * ch).filter(|&i| cells.meas[i][0] && pure(i % cw, i / cw)) {
+        let e = (f64::from(out[i][0]) - dd) / sdf;
+        fol_worst = fol_worst.max(e.abs());
+        if e.abs() > k {
+            failed.push(format!("foliage cell ({}, {}) {e:+.2} own sds off its colour (width index {})", i % cw, i / cw, used[i][0]));
+        }
+        if voting(i, 0).is_empty() {
+            continue;
+        }
+        rim += 1;
+        blocks.insert((i % cw / 64, i / cw / 64));
+        rim_widths[usize::from(used[i][0])] += 1;
+        rim_worst = rim_worst.max(e.abs());
+        let u = usize::from(used[i][0]);
+        if u > 0 && u < widths.len() {
+            let best = ratios(i, u).iter().map(|t| t.1).fold(0.0f64, f64::max);
+            rim_ratio_min = rim_ratio_min.min(best);
         }
     }
+    blocks_seen += blocks.len();
+    println!(
+        "region: foliage {off} own sds off the sky's line (colour {dd:+.5}, sd {sdf:.5}; noise a {a:.3e} b {b:.3e}; k_F {k:.3}, widths {widths:?}): worst foliage cell {fol_worst:.2} own sds ({mixed} measured block cells whose greens hold the sky's not checked); rim cells (held by a voting widest window) {rim} in {blocks_seen} of {} blocks, read per width (then own, not measured) {rim_widths:?}, worst {rim_worst:.2} own sds; the smallest over rim cells of the claiming window's leave-one-out ratio {rim_ratio_min:.2}",
+        (cw / 64) * (ch / 64)
+    );
+    if blocks_seen < (cw / 64) * (ch / 64) {
+        failed.push(format!("a voting widest window holds the rim of only {blocks_seen} blocks"));
+    }
+    let claimed: usize = rim_widths[1..widths.len()].iter().sum();
+    if claimed == 0 || rim_ratio_min <= k {
+        failed.push(format!("{claimed} rim cells claimed by a narrower window, the smallest claiming ratio {rim_ratio_min:.2} (k_F {k:.2})"));
+    }
+    let (mut lone_n, mut lone_worst, mut lone_widths, mut acc_n, mut max_loo, mut max_full, mut z0) = (0usize, 0.0f64, vec![0usize; widths.len() + 2], 0usize, 0.0f64, 0.0f64, Vec::new());
+    for i in (0..cw * ch).filter(|&i| lone(i % cw, i / cw)) {
+        if !cells.meas[i][0] {
+            failed.push(format!("lone cell ({}, {}) not measured", i % cw, i / cw));
+            continue;
+        }
+        lone_n += 1;
+        let s = sky(i % cw, i / cw);
+        let e = (f64::from(out[i][0]) - line(s)) / cell_sd_at(s, line(s), a, b);
+        lone_worst = lone_worst.max(e.abs());
+        lone_widths[usize::from(used[i][0])] += 1;
+        if recs[0][i][4] == 1.0 {
+            z0.push(press(i, 0, i)[0]);
+        }
+        for wi in 1..widths.len() {
+            for t in ratios(i, wi) {
+                acc_n += 1;
+                (max_loo, max_full) = (max_loo.max(t.1), max_full.max(t.2));
+            }
+        }
+        if used[i][0] != 0 || e.abs() > k {
+            failed.push(format!("lone cell ({}, {}) read at width index {} {e:+.2} own sds off the sky's colour", i % cw, i / cw, used[i][0]));
+        }
+    }
+    let zm = z0.iter().sum::<f64>() / z0.len().max(1) as f64;
+    println!("lone cell 8 own sds under the sky's line: {lone_n} cells; z in the centred widest window mean {zm:+.2} ({} voting); narrower windows accepting one {acc_n}, their ratio leave-one-out max {max_loo:.2}, with the full fit max {max_full:.2}; read per width (then own) {lone_widths:?}; worst {lone_worst:.2} own sds off the sky's colour", z0.len());
     failed.truncate(12);
-    assert!(failed.is_empty(), "a voted window's hypothesis is read at a cell it does not hold at: {failed:?}");
+    assert!(failed.is_empty(), "a rejected cell is read where no window shows its material, or a rim is lost: {failed:?}");
 }
 
 /// A stroke three cells wide of a third colour inside the banner (the
