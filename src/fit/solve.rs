@@ -371,1229 +371,28 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
         );
     }
 
-    let mut recipe = base.clone();
-    let budget = FitBudget::for_strength(options.strength);
-    // Full mode historically allowed +/-60 saturation. Scale that existing
-    // Full budget by the shared Atmosphere saturation axis so the shipped
-    // default remains unchanged while Strength 0 tightens and Strength 1
-    // permits the full freedom axis.
-    let full_sat_limit = 60.0 * budget.sat / ATMOSPHERE_SAT_LIMIT;
-    // Full residual curves historically projected to [0, 2]. Scale only the
-    // existing upper slope bound from the shared budget; at the shipped
-    // default this evaluates exactly to the pre-F1 cap.
-    let full_slope = (0.0, RESIDUAL_SLOPE_CAP * budget.slope.1 / ATMOSPHERE_CURVE_SLOPE_MAX);
-    // Aggregate look-error admission is its own budget dimension: a cast-curve
-    // error ratio is not a white-balance channel-gain ratio.
-    let full_cast_accept_ratio = budget.cast_ratio;
-
-    // --- 1) tone: exposure scan × linear solve on the engine's knot basis ----
-    // The MARGINAL arm's evidence comes from NEAR-NEUTRAL pixels: saturated
-    // pixels clip channels at the gamut ceiling under chroma scaling, so
-    // their luma lands short of the tone map and would bias a quantile map
-    // (measured: one polluted knot skews contrast by tens of points) — and
-    // `tone_cdf_pair_weighted` drops that gate itself where the two sides'
-    // neutral classes are not one population. The PAIRED arm below reads
-    // EVERY paired pixel (2026-10-21): it has each pixel's own counterpart
-    // and a robust fit to reject the inconsistent ones, so the gate was not
-    // identifying anything there — it was choosing a population. On the
-    // seaside street the near-neutral eighth of the frame is its shadow
-    // walls, which the target crushes (0.06–0.28 → 0.024), while the
-    // chromatic seven eighths at the same brightness go 0.06 → 0.058 and
-    // 0.25 → 0.156; the gated map solved contrast 100 and the lower-left
-    // shadows went black. The frame's map is the frame's.
-    let (s_cdf, t_cdf) = tone_cdf_pair_weighted(&sp, &tp, &evidence);
-    let robust_tone = paired_robust_tone(
-        &sp,
-        &tp,
-        &|i: usize| {
-            evidence
-                .source_weights
-                .get(i)
-                .copied()
-                .unwrap_or(0.0)
-                .min(evidence.target_weights.get(i).copied().unwrap_or(0.0))
-        },
-        false,
-    );
-    // The paired path is gated by the ROBUST FIT'S OWN diagnostics: enough
-    // populated bins to shape a map, and a majority-consistent pairing. The
-    // old hue-credibility veto guarded the pre-robust median pairing from
-    // re-hued populations; on a same-frame pair a systematic hue difference
-    // (another converter's colour science, a WB drift) is an EDIT for the
-    // colour stages to recover, not evidence the pairing is invalid — and
-    // vetoing the paired path for it sent the p36 calibration pair into the
-    // marginal arm, whose neutral-class asymmetry then pegged the solve. A
-    // locally re-hued sub-population is handled where it belongs: its RGB
-    // transport residual rejects it pixel-by-pixel, and a majority takeover
-    // fails the rejected-share gate here.
-    let correspondence = paired_correspondence(robust_tone.as_ref(), pairing);
-    let paired = correspondence.len() >= 6;
-    let robust_facts = paired
-        .then_some(robust_tone.as_ref())
-        .flatten()
-        .map(|r| (r.rejected_share, r.rejected_ranges.clone()));
-    // Composed weights for the COLOUR statistics: evidence ("measurable at
-    // all") × robust ("consistent with one global develop"), in that order —
-    // the evidence weight is a prior independent of the model being fitted,
-    // so composing it first cannot launder a divergent pixel back in. Only
-    // composed when the paired path actually engaged: on a marginal-path pair
-    // the index pairing is unvalidated and its verdicts would be noise.
-    let (rw_source, rw_target): (Vec<f32>, Vec<f32>) = match robust_tone.as_ref() {
-        Some(r) if paired => (
-            evidence.source_weights.iter().zip(&r.weights).map(|(a, b)| a * b).collect(),
-            evidence.target_weights.iter().zip(&r.weights).map(|(a, b)| a * b).collect(),
-        ),
-        _ => (evidence.source_weights.clone(), evidence.target_weights.clone()),
-    };
-    // Per-knot DATA support: a knot in a luma region with no measured
-    // testimony must not pull the spline — an unsupported knot chasing the
-    // map's extrapolation is exactly how the p36 pair pegged
-    // contrast/shadows/whites (the spline bends over the evidenced region on
-    // the way to the phantom knot). Support is a TESTIMONY-COUNT question,
-    // never a frame-share one: 1.4% of a frame is still hundreds of
-    // measured pixels (the share form of this gate silenced the roundtrip
-    // fixture's whole highlight region). Paired path: inside the span the
-    // robust map points actually cover; marginal path: at least
-    // [`SUPPORT_MIN_PIXELS`] source pixels in the knot's range. A
-    // populated-but-withheld range keeps its knot: its tone_map is pinned to
-    // identity and fitting that identity IS the refusal semantics.
-    let point_span = (correspondence.first().zip(correspondence.last()))
-        .map(|(first, last)| (first.0 - 1.0 / 32.0, last.0 + 1.0 / 32.0));
-    let n_pixels = sp.len().min(tp.len()) as f32;
-    let luma_supported = |user: f32| match point_span {
-        Some((lo, hi)) if paired => user >= lo && user <= hi,
-        _ => {
-            evidence.luma[evidence_luma_bin(user)].source_share * n_pixels
-                >= SUPPORT_MIN_PIXELS
-        }
-    };
-    let knot_support: [f32; 8] =
-        std::array::from_fn(|i| if luma_supported(render::TONE_KNOTS_X[i]) { 1.0 } else { 0.0 });
-    let estimated_tone_map = |x: f32| {
-        if correspondence.len() >= 6 {
-            sample_tone_points(&correspondence, x)
-        } else {
-            quantile(&t_cdf, cdf_at(&s_cdf, x).clamp(P_CLIP, 1.0 - P_CLIP))
-        }
-    };
-    let tone_range_withheld = |x: f32| {
-        let range = &evidence.luma[evidence_luma_bin(x)];
-        range.weight <= 0.0 && range.source_share >= EVIDENCE_MIN_SHARE
-    };
-    let tone_map = |x: f32| {
-        if tone_range_withheld(x) {
-            x
-        } else {
-            estimated_tone_map(x)
-        }
-    };
-    let mut previous = tone_map(0.0);
-    let tone_deliverable = (1..=256).all(|step| {
-        let current = tone_map(step as f32 / 256.0);
-        let monotone = current + 1e-4 >= previous;
-        previous = current;
-        monotone
-    });
-    let score_set: Vec<(f32, f32, f32)> = match robust_tone.as_ref() {
-        Some(r) if paired => r
-            .points
-            .iter()
-            .zip(&r.masses)
-            .map(|(&(x, y), &mass)| (x, y, mass))
-            .collect(),
-        _ => Vec::new(),
-    };
-    let (ev, sliders) = if !tone_deliverable {
-        (0.0, [0.0; 5])
-    } else {
-        fit_tone_sliders_supported(&tone_map, &knot_support, &score_set)
-    };
-    recipe.exposure_ev = round2(ev);
-    recipe.contrast = round1(sliders[0] * 100.0);
-    recipe.highlights = round1(sliders[1] * 100.0);
-    recipe.shadows = round1(sliders[2] * 100.0);
-    recipe.whites = round1(sliders[3] * 100.0);
-    recipe.blacks = round1(sliders[4] * 100.0);
-
-    let low_evidence = evidence.luma.iter().take(6).map(|r| r.weight).sum::<f32>();
-    let high_evidence = evidence.luma.iter().rev().take(6).map(|r| r.weight).sum::<f32>();
-    if low_evidence < EVIDENCE_MIN_SHARE {
-        recipe.shadows = 0.0;
-        recipe.blacks = 0.0;
-    }
-    if high_evidence < EVIDENCE_MIN_SHARE {
-        recipe.highlights = 0.0;
-        recipe.whites = 0.0;
-    }
-    if evidence.luma.iter().filter(|r| r.weight > 0.0).count() < 8 {
-        recipe.whites = 0.0;
-        recipe.blacks = 0.0;
-    }
-    // Do-no-harm, PER STAGE (2026-10-21). The terminal check below resets
-    // the WHOLE recipe to the base when the finished render lands farther
-    // from the target than the untouched source — and on the lantern street
-    // it was the tone stage alone that had put it there: the paired robust
-    // regression asked for +1.65 EV and contrast 7.5 against a target that
-    // is darker and warmer (a sixth of the pairs are content the two frames
-    // do not share, and the survivors still disagree with the population),
-    // the look error went 0.0595 → 0.0815 on the sliders alone, every later
-    // stage inherited the deficit, and the terminal threw away a white
-    // balance the cells had vouched along with the sliders that caused the
-    // harm. A stage that renders the frame farther from the target than it
-    // found it ships nothing; the stages after it solve from the frame as
-    // it was. The ruler is the TONAL term of the terminal's objective — the
-    // term the sliders control (`look::tonal_err_with_evidence`). Held to
-    // the whole objective, a correct luma move was charged for the
-    // colour-mean drift it brings to a muted frame whose target is vivid
-    // (the land-and-sky toy: whole objective 0.1233 → 0.1240 on the sliders
-    // alone, and the zones downstream lost the global move they were solved
-    // beside), drift the saturation, white-balance and cast stages exist to
-    // correct; the lantern street's sliders raised the tonal term itself,
-    // 0.0468 → 0.0748, and are refused on it alone.
-    let tonal_before = look::tonal_err_with_evidence(&sp, &tp, &evidence);
-    let mut tone_harm = None;
-    {
-        let toned = pixels_of(&render::develop_preview(&s_img, &recipe));
-        let err_toned = look::tonal_err_with_evidence(&toned, &tp, &evidence);
-        // R8: the sliders ship only on a T_L gain of FIT_QUANT over their
-        // absence (`ships`; T_L is J*'s tonal term, in J*'s units).
-        if !ships(err_toned, tonal_before) {
-            recipe.exposure_ev = base.exposure_ev;
-            recipe.contrast = base.contrast;
-            recipe.highlights = base.highlights;
-            recipe.shadows = base.shadows;
-            recipe.whites = base.whites;
-            recipe.blacks = base.blacks;
-            tone_harm = Some((tonal_before, err_toned));
-        }
-    }
-    // R8: the six sliders come out of one joint solve, so each must earn its
-    // own place on the stage's ruler; the stages after solve from what stays.
-    let tonal_of = |r: &EditRecipe| {
-        look::tonal_err_with_evidence(&pixels_of(&render::develop_preview(&s_img, r)), &tp, &evidence)
-    };
-    let mut unearned = if tone_harm.is_none() {
-        eliminate_unearned(&mut recipe, base, &TONE_SLIDERS, tonal_of)
-    } else {
-        Vec::new()
-    };
-
-    // --- 2) residual master curve (composed on top of the sliders) -----------
-    // Domain care (R16): the sliders solved in the USER domain (their input
-    // is the base curve's output — `tone_map` above maps base-render luma to
-    // target luma), but `residual_tone_curve` samples the recipe's FULL LUT,
-    // whose input is the NEUTRAL domain. Rebase the map through the base
-    // LUT: full(x) = user_map(base(x)). A base with no starting tone skips the rebase
-    // outright — build_tone_lut's sRGB↔linear round trip is only ~1e-7 from
-    // identity, but skipping keeps the default-base wrapper literally
-    // bit-for-bit the old fit (review R16 #3).
-    // The base's starting tone is the camera curve: a base rendition the
-    // sliders sit on, so it is rebased through.
-    let base_toned = !base.base_curve.is_empty();
-    let base_lut = render::build_tone_lut(base);
-    let full_map = |x: f32| {
-        if !base_toned { tone_map(x) } else { tone_map(render::sample_lut(&base_lut, x)) }
-    };
-    let mut withheld_samples = Vec::new();
-    for (bin, range) in evidence.luma.iter().enumerate() {
-        if range.weight > 0.0 || range.source_share < EVIDENCE_MIN_SHARE {
-            continue;
-        }
-        let lo = bin as f32 / EVIDENCE_LUMA_BINS as f32;
-        let hi = (bin + 1) as f32 / EVIDENCE_LUMA_BINS as f32;
-        for level in [lo, 0.5 * (lo + hi), hi] {
-            let raw = if !base_toned {
-                level
-            } else {
-                let index = base_lut.partition_point(|&value| value < level).min(base_lut.len() - 1);
-                index as f32 / (base_lut.len() - 1) as f32
-            };
-            withheld_samples.push(raw);
-        }
-    }
-    // A residual-curve point may only claim a level the SOURCE actually
-    // populates: outside the evidenced luma domain the estimated map is pure
-    // extrapolation, and a control point there bends the rendered curve over
-    // real pixels (including full-resolution speculars the thumbnail never
-    // sampled) toward invented values — the same p36 mechanism the knot
-    // support closes for the sliders.
-    let supported_x = |x: f32| {
-        let user =
-            if !base_toned { x } else { render::sample_lut(&base_lut, x) };
-        luma_supported(user)
-    };
-    recipe.tone_curve = if tone_deliverable {
-        residual_tone_curve_with_budget(
-            &recipe,
-            &full_map,
-            &withheld_samples,
-            &supported_x,
-            full_slope,
-        )
-    } else {
-        Vec::new()
-    };
-    let tone_after_px = pixels_of(&render::develop_preview(&s_img, &recipe));
-    let tone_veto_luma = moved_unsupported_luma_range_names(&sp, &tone_after_px, &evidence);
-    let tone_moves_unsupported = tone_veto_luma.is_some();
-    if tone_moves_unsupported
-        && budget.vetoes == VetoPolicy::Withhold
-    {
-        recipe.exposure_ev = base.exposure_ev;
-        recipe.contrast = base.contrast;
-        recipe.highlights = base.highlights;
-        recipe.shadows = base.shadows;
-        recipe.whites = base.whites;
-        recipe.blacks = base.blacks;
-        recipe.tone_curve = base.tone_curve.clone();
-    }
-    // The residual curve's own do-no-harm (2026-10-21), the same rule as the
-    // sliders': it fits the paired map more exactly than five sliders can,
-    // and where that map disagrees with the population the exactness is the
-    // harm — the seaside street's sliders took the frame 0.0746 → 0.0538 and
-    // the curve on top of them took it back to 0.0649 (its tonal term
-    // 0.0555 → 0.0745). Judged against the render WITHOUT it, so a curve on
-    // withheld sliders is judged against the base and not against a harm
-    // the sliders already undid; and on the tonal term, as the sliders are,
-    // for the same reason. Measured 2026-10-21 on four real pairs, the
-    // tonal term, the whole objective and the cells' vouch along luminance
-    // agreed on every curve they refused (the seaside street's cells read
-    // 0.174 converged / 0.509 diverged under its curve).
-    let mut curve_harm = None;
-    if recipe.tone_curve != base.tone_curve {
-        let with_curve = pixels_of(&render::develop_preview(&s_img, &recipe));
-        let err_with = look::tonal_err_with_evidence(&with_curve, &tp, &evidence);
-        let mut without = recipe.clone();
-        without.tone_curve = base.tone_curve.clone();
-        let err_without = look::tonal_err_with_evidence(
-            &pixels_of(&render::develop_preview(&s_img, &without)),
-            &tp,
-            &evidence,
-        );
-        // R8: the curve ships only on a T_L gain of FIT_QUANT over its
-        // absence, as the sliders above (`ships`).
-        if !ships(err_with, err_without) {
-            recipe.tone_curve = base.tone_curve.clone();
-            curve_harm = Some((err_without, err_with));
-        }
-    }
-
-    // --- 2b) white balance ---------------------------------------------------
-    // Full mode had no white-balance stage AT ALL until R33 — not a gate that
-    // could open, an absent stage — so the one control that says "the light
-    // was a different colour" existed only on the branch taken when the
-    // structure was judged unrecoverable. A same-frame regrade that turned a
-    // grey sky orange therefore had to express the whole cast through
-    // saturation, the per-band mixer and three channel curves, and the hue
-    // gates (correctly) refused most of it.
-    //
-    // It sits AFTER tone and BEFORE saturation for the reason stage 3 already
-    // gives about the cast curves: the chroma chase reads mean chroma, and
-    // reading it on a frame whose illuminant is still wrong asks saturation to
-    // pay for a white-balance error.
-    //
-    // ADMISSION, not estimation. The demand is solved from the population
-    // exactly as Atmosphere solves it; what decides whether it SHIPS is the
-    // target's own verdict on the render it produces — the paired cells over
-    // the whole frame. A cast the cells say took the frame AWAY from its
-    // target is returned to as-shot and named, because an edit may not create
-    // its own evidence.
-    let law = render::WbLaw::of(base);
-    let wb_weights: Vec<f32> = {
-        let n = sp.len().min(tp.len());
-        // At PIXEL scale a pixel's robust tone weight is a statement about its
-        // own pairing; at CELL scale it is not, and the cell's structural
-        // trust takes its place.
-        let robust = robust_tone
-            .as_ref()
-            .filter(|_| paired && pairing == PairingScale::Pixel);
-        (0..n)
-            .map(|i| {
-                let trust = match (&robust, &cells) {
-                    (Some(r), _) => r.weights.get(i).copied().unwrap_or(0.0),
-                    (None, Some(c)) => c.pixel_trust(i),
-                    (None, None) => 1.0,
-                };
-                evidence.source_weights[i].min(evidence.target_weights[i]).max(0.0) * trust
-            })
-            .collect()
-    };
-    // The demand is read from the frame AS THE STAGE FINDS IT (2026-10-21):
-    // the render after the tone stage, not the base. The tone sliders act on
-    // every channel, so a strong contrast move changes the three channel
-    // ratios between the base and the target on its own, and a demand read
-    // from the base charges that change to the light: the seaside street
-    // (contrast 100) read 40000 K / tint −24.2 from the base and 17400 K /
-    // +4.8 from the toned render against the same target. The chroma chase
-    // below has always read the current render for the same reason.
-    let before_wb = pixels_of(&render::develop_preview(&s_img, &recipe));
-    let (free_k, free_tint, _wanted) =
-        paired_wb_from_populations(&before_wb, &tp, &wb_weights, law);
-    // The demand closed-loop through the engine (`paired_wb_closed_loop`):
-    // the open-loop reading under-asks. No demand stays no demand.
-    let (free_k, free_tint) = if (free_k, free_tint) == ((law.as_shot().0 / 50.0).round() * 50.0, round1(law.as_shot().1)) {
-        (free_k, free_tint)
-    } else {
-        paired_wb_closed_loop(
-            (free_k, free_tint),
-            &tp,
-            &wb_weights,
-            law,
-            |wb| {
-                let mut probe = recipe.clone();
-                (probe.temperature_k, probe.tint) = (Some(wb.0), wb.1);
-                pixels_of(&render::develop_preview(&s_img, &probe))
-            },
-            |px| look_err_with_evidence(px, &tp, &evidence),
-        )
-    };
-    let wb_restore = (recipe.temperature_k, recipe.tint);
-    let wb_facts = solve_white_balance(
-        &s_img,
-        &tp,
-        &mut recipe,
-        base,
-        &evidence,
-        (free_k, free_tint),
-        law,
-        budget,
-        options.strength,
-    );
-    // The verdict is on what the stage DID, not on what it wanted — and it
-    // is asked along the axis the stage can move. A white balance moves
-    // chromaticity only, so its direction test reads chromaticity
-    // (`MoveAxis::Colour`), as a zone's colour probe has since 2026-10-19;
-    // put to the FULL direction it was refused wherever the target was also
-    // darker or brighter than the tone stage left the cell, because that
-    // direction is mostly luminance and no white balance can point along
-    // it. Measured 2026-10-21: the lantern street's warm target read 0.866
-    // converged / 0.065 diverged and still 0.502 aligned, the seaside
-    // street 0.847 / 0.117 / 0.546; both casts went back to as-shot.
-    let wb_moved = (recipe.temperature_k, recipe.tint) != wb_restore;
-    let vouch_wb = |recipe: &EditRecipe| {
-        cells.as_ref().map(|c| {
-            c.vouch_along(
-                crate::fit_cells::MoveAxis::Colour,
-                &before_wb,
-                &pixels_of(&render::develop_preview(&s_img, recipe)),
-                None,
-            )
-        })
-    };
-    let wb_cells = wb_moved.then(|| vouch_wb(&recipe)).flatten();
-    // R36 for the white balance (2026-10-21). A refusal on SIZE is not a
-    // refusal on DIRECTION: the seaside street's cast read 0.847 converged /
-    // 0.117 diverged / 0.954 aligned along chromaticity — nineteen cells in
-    // twenty asked for the move and a ninth of the mass was pushed PAST its
-    // own target, because the one white balance the population solved was
-    // too large for those cells, not wrong for them — and the stage returned
-    // the whole cast to as-shot. As the zone probes do (`vouched_share`), the
-    // largest share of the solved move whose RENDER the same voucher admits
-    // is searched for instead, along the as-shot-to-solved path the budget
-    // itself walks (`wb_path_between`: the log-gain segment, each point
-    // inverted for its own Kelvin, quantised as the solve quantises).
-    // Admission stays evidence — the white balance that ships is
-    // one the cells vouched — and the search is a budget on size. It is asked
-    // only where the direction agrees: a frame whose cells want opposite
-    // moves is not asking for less of one move and stays refused. And a
-    // share is accepted only on SIZE evidence (`WB_SHARE_SIZE_EVIDENCE`):
-    // the cells that diverged at the full move must mostly stop diverging at
-    // the share, or they were not pushed past their targets but away from
-    // them — the seaside street's sky, a tenth of the frame under a cast the
-    // other nine tenths asked for, kept diverging at 0.969 of the move and
-    // the threshold alone would have shipped it.
-    let mut wb_shipped_at = None;
-    if let Some(full) = wb_cells
-        && !full.vouched()
-        && full.direction_agrees()
-    {
-        let solved = law.point_of(&recipe);
-        let from = law.point(wb_restore.0, wb_restore.1);
-        let at = |share: f32| -> (Option<f32>, f32) {
-            let (k, tint) = wb_path_between(law, from, solved, share);
-            (Some(k), tint)
-        };
-        let (mut lo, mut hi, mut best) = (0.0f32, 1.0f32, None);
-        for _ in 0..WB_VOUCH_SHRINK_STEPS {
-            let mid = 0.5 * (lo + hi);
-            (recipe.temperature_k, recipe.tint) = at(mid);
-            match vouch_wb(&recipe) {
-                Some(v) if v.vouched() && v.diverged <= full.diverged * WB_SHARE_SIZE_EVIDENCE => {
-                    best = Some((mid, v));
-                    lo = mid;
-                }
-                _ => hi = mid,
-            }
-        }
-        if let Some((share, _)) = best {
-            (recipe.temperature_k, recipe.tint) = at(share);
-        }
-        wb_shipped_at = best;
-    }
-    // An ABSTENTION cannot admit a control either: where no cell resolved
-    // there is no verdict, and a stage that did not exist before does not get
-    // to ship on silence.
-    if wb_moved && !wb_cells.is_some_and(|v| v.vouched()) && wb_shipped_at.is_none() {
-        (recipe.temperature_k, recipe.tint) = wb_restore;
-    }
-    // R12: the white balance's two axes came out of one joint solve; each
-    // earns its place on the objective before the stages after build on it.
-    let objective_of = |r: &EditRecipe| {
-        look_err_with_evidence(&pixels_of(&render::develop_preview(&s_img, r)), &tp, &evidence)
-    };
-    unearned.extend(eliminate_unearned(&mut recipe, base, &WB_AXES, objective_of));
-    let wb_admitted = (recipe.temperature_k, recipe.tint) != wb_restore;
-    let wb_cells = wb_cells.map(|vouch| WbCellVerdict {
-        vouch,
-        admitted: wb_admitted,
-        shipped_at: wb_shipped_at.filter(|_| wb_admitted),
-    });
-    // The recipe as the white-balance stage left it, so the cast→WB hand-off
-    // (stage 4) can put a moved white balance to the SAME cell check this
-    // stage just ran — the same before, the same render of nothing but tone
-    // and white balance, the same colour axis — rather than to a second one.
-    let wb_stage = recipe.clone();
-
-    // --- 3) global saturation, secant-refined through the real engine --------
-    // Saturation stays BEFORE the cast curves: channel CDFs of a desaturated
-    // render differ from the target's even with zero cast (each channel's
-    // distribution is compressed toward luma), so fitting the cast first
-    // would express chroma expansion through per-channel curves — and
-    // per-channel curves rotate hue. Saturating first may amplify a latent
-    // cast, but stage 5 fits the cast residual CLOSED-LOOP on the saturated
-    // render, so it is measured and removed rather than compounded.
-    let t_chroma = weighted_mean_chroma(&tp, &rw_target).unwrap_or_else(|| mean_chroma(&tp));
-    // One closure, because the cast→WB hand-off (stage 4) moves the white
-    // balance this chase was read on and has to chase again on the frame it
-    // leaves — the ordering argument above, applied to the white balance it
-    // ships rather than to the one stage 2b shipped. Returns whether the
-    // chase hit the model cap.
-    let chase_saturation = |recipe: &mut EditRecipe| -> bool {
-        let mut pegged = false;
-        for _ in 0..2 {
-            let cur = pixels_of(&render::develop_preview(&s_img, recipe));
-            let c_chroma =
-                weighted_mean_chroma(&cur, &rw_source).unwrap_or_else(|| mean_chroma(&cur));
-            if c_chroma < 1e-4 {
-                break;
-            }
-            let step = ((t_chroma / c_chroma - 1.0) * 100.0).clamp(-40.0, 40.0);
-            if step.abs() < 1.0 {
-                break;
-            }
-            let want = recipe.saturation + step;
-            let clamped = want.clamp(-full_sat_limit, full_sat_limit);
-            // Hitting the model cap with demand to spare = the target's chroma
-            // is out of the global model's reach — flagged into the rationale
-            // so the user learns WHY the fit stays approximate.
-            if (want - clamped).abs() > 0.5 {
-                pegged = true;
-            }
-            recipe.saturation = round1(clamped);
-        }
-        pegged
-    };
-    let sat_pegged = chase_saturation(&mut recipe);
-    // --- 3b) colour grade: the white balance's brightness-dependent
-    // remainder, on the shadow / midtone / highlight wheels (`grade`).
-    let grade_held =
-        grade::fit_grade_stage(&s_img, &tp, &wb_weights, cells.as_ref(), budget.grade_wheel, &mut recipe);
-    // R12: the four wheels are one joint solve.
-    unearned.extend(eliminate_unearned(&mut recipe, base, &GRADE_WHEELS, objective_of));
-    // NOTE deliberately NO mid-pipeline hue veto here EITHER (it was tried
-    // in the evidence era and removed): the ordering comment above is the
-    // contract — saturation legitimately amplifies a latent cast and the
-    // cast stage then measures and removes it, so judging the SAT-ONLY
-    // render against the hue evidence vetoes exactly the amplification the
-    // next stage exists to fix (measured: the haze pair's +59 chase was
-    // reset by the blue-cast bands the cast stage went on to empty). The
-    // zero-evidence-band guard now rides the pipeline-END loop below, where
-    // the composed result is the thing being judged.
-    // NOTE deliberately NO validation here: a correct saturation legitimately
-    // makes every colour metric worse at THIS point in the pipeline (it
-    // amplifies a latent cast into the channel means and the hue bands; the
-    // curve stage then measures and removes it — see the ordering comment
-    // above). The only fair evaluation point is the finished recipe: the
-    // do-no-harm check after stage 4 shrinks saturation if the END result
-    // regressed. (A stage-local gate was tried first and it zeroed the haze
-    // regression's saturation, degrading the whole fit.)
-
-    // --- 4) per-channel colour-cast curves — the catch-all, LAST so its
-    // closed-loop residual sees every earlier stage's composed output
-    // (cast-before-saturation was tried and measured worse on the haze
-    // regression: chroma expansion leaks into the curves, which rotate hue).
-    //
-    // The curves model a GLOBAL cast (one monotone map per channel). That
-    // model is exactly right for uniform casts (haze tint, WB drift) and
-    // exactly wrong when the colour residual is CONTENT (a generative
-    // target's rocks simply ARE warmer than its sky): then the fitted map
-    // drags every region — measured on the real pair, the red lift that
-    // warmed the frame-dominant rocks turned the pale sky violet (and the
-    // neutral-only-evidence variant, also tried, cooled the warm distance
-    // haze instead). The two worlds are told apart by the shared evidence
-    // model plus validation: accept the curves only if they improve the
-    // hue-aware supported look error by a clear margin — a global map that truly
-    // explains the residual slashes the error (the haze regression), while
-    // a content mismatch yields a marginal "improvement" bought by regional
-    // hue damage the metric's hue term partially sees. Marginal gain does
-    // not earn regional risk: keep the recipe clean instead.
-    //
-    // Per-band HSL is fitted in stage 4a above: its SATURATION and LUMINANCE
-    // axes from each band's population, on bands the two-sided population
-    // gate can measure, and since 2026-11-02 its HUE axis from the paired
-    // pixels only (`fit_band_hues`). The 2026-07-07 failure this comment used
-    // to record was the hue axis read from POPULATIONS: a band's centroid hue
-    // delta conflates CONTENT difference with style, and an honest-looking
-    // 13° in-gate delta applied as a whole-band rotation turns brown rock
-    // olive and a pale sky lavender. That reading is still never made; the
-    // paired solve reads each pixel's own rotation, on pairs whose pixels are
-    // each other's counterparts, and ships only what the target's cells
-    // vouch.
-    let (detail, detail_supported) = fit_detail_stage(&s_img, &tp, &evidence, &mut recipe);
-    // The paired voucher every hue-damage guard consults (see
-    // converges_toward): robust per-pixel weights plus each pixel's own
-    // paired target, judged on the full display pixel because the mixer and
-    // the cast curves move brightness and colour together. None on
-    // marginal-path runs — strict doctrine.
-    let hue_vouch = robust_tone
-        .as_ref()
-        .filter(|_| paired)
-        .map(|r| (r.weights.as_slice(), tp.as_slice(), crate::fit_cells::MoveAxis::Full));
-
-    // --- 4a) per-band colour mixer, BEFORE the cast curves ------------------
-    // Ordering follows the stage-3 argument one level down: the mixer is the
-    // SPECIFIC colour move (one band at a time, from that band's own
-    // population), the channel curves are the catch-all, and the catch-all
-    // must close its loop on everything the specific stages already did. The
-    // engine agrees — it runs the mixer before saturation and the RGB curves
-    // before the mixer — which is exactly why both colour stages measure
-    // their demand on a re-render rather than on an algebraic composition.
-    let hue_before_mixer = recipe.hsl.hue;
-    let before_mixer = recipe.clone();
-    let unearned_before_mixer = unearned.len();
-    let mut hsl_facts =
-        fit_hsl_stage(&s_img, &sp, &tp, &evidence, hue_vouch, cells.as_ref(), budget, &mut recipe);
-    // R12: the mixer's bands are one joint solve; the cast curves fit on what stays.
-    unearned.extend(eliminate_unearned(&mut recipe, base, &mixer_controls(), objective_of));
-    // THE ATTRIBUTION LAW AT THE MIXER (rel1180 RULING-1180-sc-r1 Q-SC-2 (a)):
-    // a move confined to one band's hue range is that band's. The tone stage
-    // runs first and reads such a move as the frame's — an Orange-only −25
-    // luminance read as exposure −0.2 and saturation +6.6, and the mixer then
-    // solved on what tone left asked under FIT_QUANT per band (rel1180 msg-sc
-    // case 2). So the mixer is solved once more from the frame WITHOUT the
-    // frame-domain controls (the tone sliders and saturation at the base, the
-    // mixer from where the stage found it), R12 on it, and that recipe
-    // replaces the frame-domain one unless the frame-domain one earns
-    // FIT_QUANT over it: a tie goes to the smaller domain, the band's.
-    if TONE_SLIDERS.iter().chain(&[Control::Saturation]).any(|c| c.differs(&before_mixer, base)) {
-        let mut banded = before_mixer.clone();
-        for c in TONE_SLIDERS.iter().chain(&[Control::Saturation]) {
-            c.reset(&mut banded, base);
-        }
-        let banded_facts =
-            fit_hsl_stage(&s_img, &sp, &tp, &evidence, hue_vouch, cells.as_ref(), budget, &mut banded);
-        let banded_unearned = eliminate_unearned(&mut banded, base, &mixer_controls(), objective_of);
-        if !banded.hsl.is_neutral() && !ships(objective_of(&recipe), objective_of(&banded)) {
-            recipe = banded;
-            hsl_facts = banded_facts;
-            unearned.truncate(unearned_before_mixer);
-            unearned.extend(banded_unearned);
-        }
-    }
-    let hsl_fitted = recipe.hsl.clone();
-    // A `Cell`, as `cast_handoff` below: each finished candidate reads the
-    // admission its own last call left (rel1180 RULING-1180-sc-r5 Q-SC-2c).
-    let cast_admission: std::cell::Cell<Option<(f32, f32)>> = std::cell::Cell::new(None);
-    // NOT cleared per call, unlike `cast_admission`: a hand-off moves the
-    // white balance, and every later call re-fits the curves ON that white
-    // balance, so the move it describes is still in the recipe after them.
-    // A `Cell`: the frame-domain candidate below is a probe whose hand-off,
-    // when it does not ship, must not describe the recipe that does.
-    let cast_handoff: std::cell::Cell<Option<HandOffFacts>> = std::cell::Cell::new(None);
-    // `rescue` = may a fan-convicted cast be PROJECTED into something
-    // milder rather than thrown away (v1.2.3, `search_cast_projection`)?
-    // Only the call that produces the recipe the user gets says yes; see the
-    // ordering note at the 4a' loop below for why.
-    let fit_cast_stage = |recipe: &mut EditRecipe, rescue: CastRescue| -> CastOutcome {
-        // Cleared per call: the fact must describe the recipe this call
-        // produces, not a probe an earlier call admitted.
-        cast_admission.set(None);
-        let mut handed_now = false;
-        recipe.red_curve = Vec::new();
-        recipe.green_curve = Vec::new();
-        recipe.blue_curve = Vec::new();
-        let cur = pixels_of(&render::develop_preview(&s_img, recipe));
-        recipe.red_curve = residual_channel_curve_weighted(&cur, &tp, 0, &rw_source, &rw_target);
-        recipe.green_curve = residual_channel_curve_weighted(&cur, &tp, 1, &rw_source, &rw_target);
-        recipe.blue_curve = residual_channel_curve_weighted(&cur, &tp, 2, &rw_source, &rw_target);
-        let mut out = CastOutcome::default();
-        if !(recipe.red_curve.is_empty()
-            && recipe.green_curve.is_empty()
-            && recipe.blue_curve.is_empty())
-        {
-            let with_px = pixels_of(&render::develop_preview(&s_img, recipe));
-            // R34 §D3. The REGION arm of the hue-damage guard, recomputed for
-            // THIS candidate: a cell verdict is a statement about what an edit
-            // did, so it is as short-lived as the edit.
-            let with_cells = cells.as_ref().and_then(|c| c.region_arm(&cur, &with_px));
-            // FOUR gates, all must pass: the aggregate ratio (a marginal win
-            // does not earn regional risk), the foreign-hue veto (a large
-            // aggregate win does not earn a region painted in hues the target
-            // holds nowhere), the rotation budget (nor a region re-hued into
-            // hues it does hold — golden-sky case) and, since v1.2.3, the fan
-            // gate (nor a single-hued region sorted into a hue FAN by
-            // luminance — Cornwall, where all three of the others read clean).
-            // The vetoes only ever reject, never rescue.
-            out = cast_gate_outcome_with_ratio(
-                &cur,
-                &with_px,
-                &tp,
-                &evidence,
-                hue_vouch,
-                cells.as_ref().zip(with_cells.as_ref().map(|(_, v)| v.as_slice())),
-                full_cast_accept_ratio,
-            );
-            // v1.2.3 — the PROJECTION, and its ORDER is the whole of the
-            // byte-identity argument. A pair the pixel-aligned vetoes refuse
-            // is refused exactly as it was before this existed, unprojected,
-            // so its recipe and its rationale cannot move (the viaduct pair).
-            // Only a FAN-ONLY conviction earns a second chance — see
-            // `CastOutcome::earns_projection`, which is where that precedence
-            // lives and where its reasons are written. The milder candidate is
-            // then judged by all four gates from scratch: a projection that
-            // makes the ratio gate fail, or that trips a pixel veto the fitted
-            // cast happened to clear, is refused and says so.
-            if rescue.rescues()
-                && let Some((share, fan_before)) = out.earns_projection()
-            {
-                #[cfg(test)]
-                route::note(|r| r.hand_off_entered += 1);
-                let fitted = [
-                    recipe.red_curve.clone(),
-                    recipe.green_curve.clone(),
-                    recipe.blue_curve.clone(),
-                ];
-                // The cast→WB HAND-OFF (2026-10-23), asked BEFORE the
-                // projection: a fan the white balance can take back is a
-                // white-balance job the curves were handed (see
-                // `search_cast_hand_off`). A candidate ships only when the
-                // curves re-fitted on it pass all four gates with a MEASURED
-                // fan, when the white balance stays inside the strength
-                // budget the white-balance stage spends, and when the target's
-                // own cells vouch it exactly as they vouched the stage's own
-                // white balance (`vouch_wb` on the stage's recipe). Anything
-                // else falls through to the projection below with `recipe`
-                // untouched — every probe is a clone — so a pair the hand-off
-                // cannot help ships byte for byte what it shipped before.
-                let from = law.point_of(recipe);
-                let err_without = look_err_with_evidence(&cur, &tp, &evidence);
-                let probe_base = recipe.clone();
-                let handed = cast_wb_direction(&cur, &with_px, &wb_weights, law).and_then(|direction| {
-                    let in_budget = |wb: (f32, f32)| wb_gains_fit_budget(law.gains(wb), budget);
-                    search_cast_hand_off(law, from, direction, err_without, in_budget, |wb| {
-                        if !in_budget(wb) {
-                            return None;
-                        }
-                        // Above the default strength the white-balance stage
-                        // answers to two more gates than the budget — foreign
-                        // hue and re-hued share, read on ITS step, from
-                        // `before_wb` to the same recipe under the new white
-                        // balance — and a white balance that ships through the
-                        // hand-off answers to them too, read on the same step
-                        // (`wb_stage` differs from the recipe the stage
-                        // measured in nothing but the white balance). The
-                        // four cast gates below read the CURVE step and cannot
-                        // see it. A candidate the stage would have shrunk is
-                        // refused here rather than shrunk: the walk itself
-                        // tries the nearer white balances, each judged anew.
-                        if hand_off_wb_step_refused(
-                            &s_img,
-                            &wb_stage,
-                            wb,
-                            (&before_wb, &tp, &evidence),
-                            budget,
-                            options.strength,
-                        ) {
-                            #[cfg(test)]
-                            route::note(|r| r.wb_step_refusals += 1);
-                            return None;
-                        }
-                        let mut probe = probe_base.clone();
-                        (probe.temperature_k, probe.tint) = (Some(wb.0), wb.1);
-                        probe.red_curve = Vec::new();
-                        probe.green_curve = Vec::new();
-                        probe.blue_curve = Vec::new();
-                        // Saturation is chased again on the moved white
-                        // balance, from where stage 3 started and on the
-                        // frame stage 3 read (no mixer yet), because the
-                        // chase reads mean chroma and a warmer white balance
-                        // carries more of it: kept at the value read on the
-                        // old one, the neon street's 18.9 shipped over a
-                        // 13000 K white balance and left the building +3.1
-                        // a* past its target (measured 2026-10-23).
-                        // Except from the 4b do-no-harm loop: there the
-                        // saturation is the dial the loop is stepping DOWN,
-                        // and a chase from stage 3's start handed back the
-                        // value the loop had just halved — a round that
-                        // never descends (`CastRescue::KeepSaturation`).
-                        if let Some(start) = rescue.hand_off_chase_from(wb_stage.saturation) {
-                            probe.saturation = start;
-                            let mixer = std::mem::take(&mut probe.hsl);
-                            chase_saturation(&mut probe);
-                            probe.hsl = mixer;
-                        }
-                        let under = pixels_of(&render::develop_preview(&s_img, &probe));
-                        probe.red_curve =
-                            residual_channel_curve_weighted(&under, &tp, 0, &rw_source, &rw_target);
-                        probe.green_curve =
-                            residual_channel_curve_weighted(&under, &tp, 1, &rw_source, &rw_target);
-                        probe.blue_curve =
-                            residual_channel_curve_weighted(&under, &tp, 2, &rw_source, &rw_target);
-                        if probe.red_curve.is_empty()
-                            && probe.green_curve.is_empty()
-                            && probe.blue_curve.is_empty()
-                        {
-                            return None;
-                        }
-                        let px = pixels_of(&render::develop_preview(&s_img, &probe));
-                        let arm = cells.as_ref().and_then(|c| c.region_arm(&under, &px));
-                        let outcome = cast_gate_outcome_with_ratio(
-                            &under,
-                            &px,
-                            &tp,
-                            &evidence,
-                            hue_vouch,
-                            cells.as_ref().zip(arm.as_ref().map(|(_, v)| v.as_slice())),
-                            full_cast_accept_ratio,
-                        );
-                        if outcome.refused() || outcome.readings.and_then(|r| r.fan).is_none() {
-                            return None;
-                        }
-                        let mut wb_probe = wb_stage.clone();
-                        (wb_probe.temperature_k, wb_probe.tint) = (Some(wb.0), wb.1);
-                        let vouch = vouch_wb(&wb_probe).filter(|v| v.vouched())?;
-                        Some(CastHandOff {
-                            wb,
-                            saturation: probe.saturation,
-                            curves: [probe.red_curve, probe.green_curve, probe.blue_curve],
-                            outcome,
-                            vouch,
-                            err: look_err_with_evidence(&px, &tp, &evidence),
-                            pull: cast_wb_direction(&under, &px, &wb_weights, law).map_or(
-                                0.0,
-                                |d| d.iter().map(|v| v * v).sum::<f32>().sqrt(),
-                            ),
-                        })
-                    })
-                });
-                let won = if let Some(h) = handed {
-                    #[cfg(test)]
-                    if rescue == DO_NO_HARM_RESCUE {
-                        route::note(|r| r.descent_hand_offs += 1);
-                    }
-                    (recipe.temperature_k, recipe.tint) = (Some(h.wb.0), h.wb.1);
-                    recipe.saturation = h.saturation;
-                    let [red, green, blue] = h.curves;
-                    recipe.red_curve = red;
-                    recipe.green_curve = green;
-                    recipe.blue_curve = blue;
-                    handed_now = true;
-                    cast_handoff.set(Some(HandOffFacts {
-                        from: cast_handoff.get().map_or(from, |prior| prior.from),
-                        to: h.wb,
-                        share,
-                        fan_before,
-                        fan_after: h.outcome.readings.and_then(|r| r.fan).unwrap_or(0.0),
-                        vouch: h.vouch,
-                    }));
-                    out = h.outcome;
-                    None
-                } else {
-                    search_cast_projection(
-                        &s_img,
-                        recipe,
-                        [&fitted[0], &fitted[1], &fitted[2]],
-                        err_without,
-                        |px| {
-                            let arm = cells.as_ref().and_then(|c| c.region_arm(&cur, px));
-                            cast_gate_outcome_with_ratio(
-                                &cur,
-                                px,
-                                &tp,
-                                &evidence,
-                                hue_vouch,
-                                cells.as_ref().zip(arm.as_ref().map(|(_, v)| v.as_slice())),
-                                full_cast_accept_ratio,
-                            )
-                        },
-                    )
-                };
-                // `None`, or an outcome carrying no readings, leaves `out`
-                // holding the FITTED conviction — the refusal branch below
-                // empties whatever curves the search left in the recipe, and
-                // the fan note says the projection was tried.
-                if let Some((t, won)) = won
-                    && let Some(r) = won.readings
-                {
-                    out = CastOutcome {
-                        projected: Some(CastProjection {
-                            share,
-                            fan_before,
-                            t,
-                            fan_after: r.fan,
-                            ratio: r.ratio,
-                            bound: r.bound,
-                            rehued: r.rehued,
-                            foreign: r.foreign,
-                        }),
-                        ..won
-                    };
-                }
-            }
-            // v1.17.1: the curves are read off the finished frame's residual
-            // but applied before the mixer, the grade and saturation, so what
-            // they deliver on the finished frame is not the residual they were
-            // solved for. A cast the four gates ADMITTED as fitted (not
-            // projected, not handed off) has its loop closed on the finished
-            // frame (`refine_curves_on_finished_frame`), and the refined curves
-            // are put to the same four gates on the same frames; they ship only
-            // when those admit them too. Every verdict above is the fitted
-            // curve's, as before — the refinement changes no gate's decision,
-            // only what an admitted cast delivers.
-            if !out.refused() && out.projected.is_none() && !handed_now {
-                let mut refined = recipe.clone();
-                refine_curves_on_finished_frame(&s_img, &mut refined, &cur, &tp, &rw_source, &rw_target, &evidence);
-                let moved = refined.red_curve != recipe.red_curve
-                    || refined.green_curve != recipe.green_curve
-                    || refined.blue_curve != recipe.blue_curve;
-                if moved {
-                    let px = pixels_of(&render::develop_preview(&s_img, &refined));
-                    let arm = cells.as_ref().and_then(|c| c.region_arm(&cur, &px));
-                    let again = cast_gate_outcome_with_ratio(
-                        &cur,
-                        &px,
-                        &tp,
-                        &evidence,
-                        hue_vouch,
-                        cells.as_ref().zip(arm.as_ref().map(|(_, v)| v.as_slice())),
-                        full_cast_accept_ratio,
-                    );
-                    if !again.refused() {
-                        (recipe.red_curve, recipe.green_curve, recipe.blue_curve) =
-                            (refined.red_curve, refined.green_curve, refined.blue_curve);
-                        out = again;
-                    }
-                }
-            }
-            let measured_ratio = out.readings.map(|r| r.ratio).unwrap_or(0.0);
-            if !out.refused()
-                && cast_admitted_by_strength(
-                    measured_ratio,
-                    full_cast_accept_ratio,
-                    options.strength.get(),
-                )
-            {
-                cast_admission.set(Some((measured_ratio, full_cast_accept_ratio)));
-            }
-            if out.refused() {
-                recipe.red_curve = Vec::new();
-                recipe.green_curve = Vec::new();
-                recipe.blue_curve = Vec::new();
-            }
-        }
-        out
-    };
-    fit_cast_stage(&mut recipe, CastRescue::Off);
-    // THE ATTRIBUTION LAW AT THE CAST (rel1180 RULING-1180-sc-r4 Q-SC-2b (1)):
-    // the cast curves and the white-balance walk they hand to are frame-domain
-    // controls, as the tone sliders and saturation are. Their conviction (the
-    // fan read) and their walk read the frame BEFORE the mixer's moves — the
-    // mixer at the stage's start for that read, the mirror of the reset
-    // above — and the mixer is then solved on what they leave (R12 on it, the
-    // curves re-fitted on its frame). That candidate replaces the mixer-first
-    // one only when it earns FIT_QUANT over it: a tie goes to the smaller
-    // domain, the band's. On the warm-strip pair the mixer-first frame spread
-    // a per-channel cast over four bands, its candidate then fanned 11.8°
-    // instead of 15.05°, the walk never ran and the stage end gave everything
-    // back (rel1180 msg-sc round 4).
-    //
-    // The two candidates are compared on their FINISHED recipes (rel1180
-    // RULING-1180-sc-r5 Q-SC-2c (b), the v1.17.1 law: every stage is judged
-    // on the final render): each is carried through 4a', the final cast call,
-    // 4b, the terminal fan check and the finished R8 (`finish` below), and the
-    // framed one ships only when its finished J* earns FIT_QUANT over
-    // mixer-first's. Read mid-pipeline, the hue-ramps pair's framed candidate
-    // won 0.0101 against 0.0161 and finished at 0.0122, where mixer-first
-    // finishes at 0.0052 (rel1180 msg-sc round 5).
-    let handoff_before = cast_handoff.get();
-    let mut framed = before_mixer.clone();
-    fit_cast_stage(&mut framed, CastRescue::ChaseSaturation);
-    let framed_facts =
-        fit_hsl_stage(&s_img, &sp, &tp, &evidence, hue_vouch, cells.as_ref(), budget, &mut framed);
-    let mut framed_unearned = unearned[..unearned_before_mixer].to_vec();
-    framed_unearned.extend(eliminate_unearned(&mut framed, base, &mixer_controls(), objective_of));
-    fit_cast_stage(&mut framed, CastRescue::Off);
-    let framed_handoff = cast_handoff.get();
-    let framed_fitted = framed.hsl.clone();
-
-    let finish = |mut recipe: EditRecipe,
-                      mut hsl_facts: HslStageFacts,
-                      hsl_fitted: crate::recipe::Hsl,
-                      mut unearned: Vec<Control>,
-                      handoff: Option<HandOffFacts>|
-     -> Finished {
-        cast_handoff.set(handoff);
-        // --- 4a') the mixer must EARN its place against its own ABSENCE ----------
-        // Stage 4a judged itself on a render the catch-all had not yet touched,
-        // and "do no harm" is a promise about the FINISHED frame — so the verdict
-        // is taken again here, against the comparison a user would actually make:
-        // this recipe, versus the same recipe with the mixer given back and the
-        // channel curves refitted on THAT state. Measured on real renders, halved
-        // until the mixer stops costing the finished frame anything; withdrawal
-        // to neutral is always reachable, at zero or at the round bound. Judging 4a only where it is fitted was tried first
-        // and it shipped a ceiling-pegged three-band move on the viaduct pair
-        // that the cast stage could then no longer clean up (look 0.026 -> 0.035).
-        //
-        // The band hues answer the same question on their own first: they are a
-        // separate solve on separate evidence (`fit_band_hues`, paired pixels),
-        // so a rotation must not ride along on a saturation and luminance move
-        // that earns the place. Measured 2026-11-02 on the haze pair: the whole
-        // mixer beat no mixer, but the rotations it carried (Orange +9, Green -9,
-        // Aqua -3) left the finished frame at 0.0145 where the same mixer without
-        // them reached 0.0136 — the cast curves carry that pair's per-band hue
-        // change, which is a channel curve's, better than a rotation can.
-        let finished_err = |candidate: &EditRecipe| {
-            look_err_with_evidence(&pixels_of(&render::develop_preview(&s_img, candidate)), &tp, &evidence)
-        };
-        if recipe.hsl.hue != hue_before_mixer {
-            let mut unrotated = recipe.clone();
-            unrotated.hsl.hue = hue_before_mixer;
-            fit_cast_stage(&mut unrotated, CastRescue::Off);
-            let unrotated_err = finished_err(&unrotated);
-            for _ in 0..DO_NO_HARM_MAX_ROUNDS {
-                // R1: the rotation is kept once it gains FIT_QUANT over its absence.
-                if recipe.hsl.hue == hue_before_mixer || ships(finished_err(&recipe), unrotated_err) {
-                    break;
-                }
-                recipe.hsl.hue = super::hsl::hue_halved_toward(&recipe.hsl.hue, &hue_before_mixer);
-                fit_cast_stage(&mut recipe, CastRescue::Off);
-            }
-        }
-        if !recipe.hsl.is_neutral() {
-            let mut neutral = recipe.clone();
-            neutral.hsl = crate::recipe::Hsl::default();
-            // BOTH sides of this comparison are judged with the cast the gates
-            // MEASURED — `rescue: false`. The question here is whether the MIXER
-            // earns its place, and a projection exists only because the cast was
-            // convicted; letting an invented compromise out-vote a per-band solve
-            // the evidence supports is the tail wagging the dog. Measured with
-            // the rescue live in every call (2026-09-02): canyon-warm's mixer
-            // flipped from withdrawn to [Orange +18 +18, Blue -18 -2.6] and the
-            // two-family HSL pair's flipped from attached to withdrawn — four
-            // fixture verdicts moved, none of them this feature's business.
-            fit_cast_stage(&mut neutral, CastRescue::Off);
-            let neutral_err = finished_err(&neutral);
-            let withdrawn = halve_mixer_until_it_earns(
-                &mut recipe,
-                // R1: the mixer ships only on a gain of FIT_QUANT over its absence.
-                |candidate| !ships(finished_err(candidate), neutral_err),
-                |candidate| {
-                    fit_cast_stage(candidate, CastRescue::Off);
-                },
-            );
-            if withdrawn.is_err() {
-                hsl_facts.withdrawn = Some(HslWithdrawal::Error);
-            }
-        }
-        // Re-derive so `cast` and the strength-admission fact describe the recipe
-        // that SHIPS, never a probe taken along the way. This is the first of the
-        // TWO calls allowed to rescue a fan-convicted cast by projection; the
-        // other is the 4b do-no-harm loop's re-fit below, which REPLACES this
-        // recipe one saturation step down and so produces the recipe the user
-        // gets just as much as this one does. The rescue is confined to those two
-        // and to nothing else — the mixer's do-no-harm comparison above judges
-        // both of its branches unrescued. Both arms of the branch above reach
-        // this call, so a solve whose mixer stayed neutral is rescued on the same
-        // terms as one whose mixer attached.
-        //
-        // The 4b call's rescue is ENTERED and its success is UNREACHABLE from any
-        // state this tree can reach — the census at that loop has the numbers and
-        // the reason, which is a fact about how the two colour gates behave in a
-        // stepped-down state rather than a hole in the fixture set.
-        let mut cast = fit_cast_stage(&mut recipe, CastRescue::ChaseSaturation);
-        // R12: the three curves are one joint solve, and a cast→WB hand-off made
-        // the white balance part of it.
-        let mut cast_controls = CAST_CURVES.to_vec();
-        if (recipe.temperature_k, recipe.tint) != (wb_stage.temperature_k, wb_stage.tint) {
-            cast_controls.extend(WB_AXES);
-        }
-        unearned.extend(eliminate_unearned(&mut recipe, base, &cast_controls, objective_of));
-
-        // --- 4b) do-no-harm — the pipeline-END check ------------------------------
-        // Goal: don't hand back a recipe that renders FARTHER from the target
-        // than the untouched source. Saturation is the one dial fitted by
-        // heuristic (mean-chroma chase) rather than by a validated residual, and
-        // it cannot be judged mid-pipeline (see the stage-3 note), so when the
-        // finished recipe regresses, halve saturation — refitting the cast curves
-        // each step, they depend on the saturated state — until the end-to-end
-        // error stops objecting. Saturation is the only shrinkable dial here: if
-        // the regression persists at zero, it is reported honestly through
-        // err_after/confidence rather than hidden. NOTE the case that motivated
-        // this loop (golden-sky pair: a distorted tone map made the whole fit
-        // regress) was root-fixed by `tone_cdf_pair`, but the claim that stood
-        // here until 2026-09-02 — "no current fixture reaches the loop body" — is
-        // FALSE and was measured false. Instrumenting the body and running the
-        // whole library battery on this tree (2026-09-02, with the calibration
-        // corpus present) logs 186 entries: 107 on the error arm, 140 on the
-        // hue-guard arm, 62 on both.
-        //
-        // So the rescue at the `fit_cast_stage` call below is NOT dead code — it
-        // is entered with a conviction to answer: 9 of those 186 re-fits hand
-        // back a FAN-CONVICTED cast. What no fixture reaches is the rescue
-        // SUCCEEDING here, and the measurement says why. All 9 are ALSO
-        // rotation-blocked, so `earns_projection` returns `None` on every one of
-        // them and the projection is never even attempted — 0 of the 186
-        // earn it, 0 come back projected. The coupling belongs to the
-        // stepped-down states rather than to the gates: at the stage's own call
-        // site the same battery separates them on 67 of 545 stage runs (the
-        // census in `a_silently_rejected_colour_stage_now_says_so`).
-        //
-        // That is a measured dead end, not a postponement. About forty pairs were
-        // built for it — one-sided-band wedges to drive the hue-guard arm,
-        // split-chroma frames to drive the error arm — and every one reproduced
-        // the coupling. The projection arithmetic is pinned where it lives, at
-        // `search_cast_projection`
-        // (`the_search_takes_the_best_paying_admissible_shrink`); what has no
-        // end-to-end witness is the ROUTE through this loop, and the reason it
-        // has none is the census above.
-        let sat_fitted = recipe.saturation;
-        let mut end_px = pixels_of(&render::develop_preview(&s_img, &recipe));
-        let mut err_after = look_err_with_evidence(&end_px, &tp, &evidence);
-        // The zero-evidence hue guard is judged HERE, on the composed end state:
-        // saturation may amplify a latent cast mid-pipeline (the stage-3 note),
-        // but the FINISHED recipe must not move pixels blindly through hue bands
-        // no evidence covers — if it does, saturation is the shrinkable dial,
-        // with the cast curves refitted each step exactly like the error arm.
-        let mut end_cells = cells.as_ref().and_then(|c| c.region_arm(&sp, &end_px));
-        let mut end_moves_hue = moved_unsupported_hue_range_names_vouched(
-            &sp,
-            &end_px,
-            &evidence,
-            hue_vouch,
-            cells.as_ref().zip(end_cells.as_ref().map(|(_, v)| v.as_slice())),
-        )
-        .is_some();
-        // The per-band mixer joins global saturation as a shrinkable dial here:
-        // it is the second colour move judged only at the composed end state, and
-        // leaving it out would let the guard exhaust saturation at zero while the
-        // move that actually carried pixels through an unmeasured band rode out.
-        // Halving a neutral mixer is neutral, so a run where the stage attached
-        // nothing is byte-identical to the pre-4a loop.
-        let objects = |err_after: f32, end_moves_hue: bool| {
-            // R1: the end state ships only on a gain of FIT_QUANT over the start.
-            !ships(err_after, err_before) || (end_moves_hue && budget.vetoes == VetoPolicy::Withhold)
-        };
-        let descent = step_down_until_harmless(&mut recipe, objects(err_after, end_moves_hue), |recipe| {
-            #[cfg(test)]
-            route::note(|r| r.descent_rounds += 1);
-            cast = fit_cast_stage(recipe, DO_NO_HARM_RESCUE);
-            end_px = pixels_of(&render::develop_preview(&s_img, recipe));
-            err_after = look_err_with_evidence(&end_px, &tp, &evidence);
-            end_cells = cells.as_ref().and_then(|c| c.region_arm(&sp, &end_px));
-            end_moves_hue = moved_unsupported_hue_range_names_vouched(
-                &sp,
-                &end_px,
-                &evidence,
-                hue_vouch,
-                cells.as_ref().zip(end_cells.as_ref().map(|(_, v)| v.as_slice())),
-            )
-            .is_some();
-            objects(err_after, end_moves_hue)
-        });
-        // TERMINAL delivered-fan check — see `withdraw_curves_for_delivered_fan`
-        // for why a calibrated per-stage gate needs a structural re-read here.
-        // It runs on the Full path only, and that is a fact about the mode rather
-        // than a gap: `fit_atmosphere_from_parts` clears all three channel curves
-        // unconditionally before its own do-no-harm loop, so an Atmosphere recipe
-        // has no cast for a loop to walk around.
-        let delivered_fan =
-            withdraw_curves_for_delivered_fan(&s_img, &sp, &evidence, &mut recipe, &mut end_px);
-        let cast_withdrawn = matches!(delivered_fan, Some((_, _, None)));
-        // R8, once more on the finished global recipe: every control the solve
-        // set must earn FIT_QUANT of J* against its own absence — R22 (a): "the
-        // band a global control earns on is the band its own curve acts on". The
-        // four tone sliders act on a luminance band by construction (whites and
-        // highlights the top of the L* range, blacks and shadows the bottom), and
-        // read on the frame alone their gain is divided by that band's share: on
-        // p38 whites +19.4 took the brightest tenth 6.04 -> 5.09 dE and read
-        // ~0.001 of frame J* (rel1180 msg9 R18). Each earns FIT_QUANT of
-        // `E_paired` (J* units) on the ONE band its own response weights most
-        // ([`look::LumaBands::acting_band`], fixed before any error is read), the
-        // frame's J* a guard only — R19's local ship law. Contrast, exposure and
-        // the tone curve act on the frame and read the frame alone; saturation,
-        // the mixer and the per-band controls act on hue / chroma bands, which
-        // H_ab already reads on the colour side: no L* band. A control that earns
-        // on the frame ships as it always did. No new number.
-        let target_bands = look::luma_bands(&tp, &evidence);
-        let banded = |candidate: &EditRecipe| {
-            let px = pixels_of(&render::develop_preview(&s_img, candidate));
-            let lightness = px.iter().map(|p| cie_lab(p)[0]).collect::<Vec<_>>();
-            let reading: BandReading =
-                (look_err_with_evidence(&px, &tp, &evidence), target_bands.paired_readings(&px, &tp, &evidence), lightness);
-            reading
-        };
-        let band_earns =
-            |c: Control, solved: &BandReading, without: &BandReading| earns_on_its_band(c, &target_bands, solved, without);
-        let finished_dropped =
-            eliminate_unearned_by(&mut recipe, base, &global_controls(), banded, |r| r.0, band_earns);
-        if !finished_dropped.is_empty() {
-            end_px = pixels_of(&render::develop_preview(&s_img, &recipe));
-        }
-        unearned.extend(finished_dropped.iter().copied());
-        if cast_withdrawn || !finished_dropped.is_empty() {
-            err_after = look_err_with_evidence(&end_px, &tp, &evidence);
-            end_cells = cells.as_ref().and_then(|c| c.region_arm(&sp, &end_px));
-            end_moves_hue = moved_unsupported_hue_range_names_vouched(
-                &sp,
-                &end_px,
-                &evidence,
-                hue_vouch,
-                cells.as_ref().zip(end_cells.as_ref().map(|(_, v)| v.as_slice())),
-            )
-            .is_some();
-        }
-        let sat_reduced = recipe.saturation != sat_fitted;
-        // The end-state guard owns the withdrawal sentence when IT is the loop
-        // that zeroed the mixer; the stage's own do-no-harm keeps its verdict.
-        if !hsl_fitted.is_neutral() && recipe.hsl.is_neutral() && hsl_facts.withdrawn.is_none() {
-            hsl_facts.withdrawn = Some(if end_moves_hue {
-                HslWithdrawal::Blind
-            } else {
-                HslWithdrawal::Error
-            });
-        }
-        Finished {
-            recipe,
-            hsl_facts,
-            unearned,
-            cast,
-            end_px,
-            err_after,
-            end_cells,
-            sat_fitted,
-            sat_reduced,
-            delivered_fan,
-            descent,
-            admission: cast_admission.get(),
-            handoff: cast_handoff.get(),
-        }
-    };
-    let mixer_first = finish(recipe, hsl_facts, hsl_fitted, unearned, handoff_before);
-    let framed = finish(framed, framed_facts, framed_fitted, framed_unearned, framed_handoff);
-    // R1 between the two: a tie inside FIT_QUANT keeps mixer-first (the
-    // default needs no earning).
-    let finished =
-        if ships(objective_of(&framed.recipe), objective_of(&mixer_first.recipe)) { framed } else { mixer_first };
+    // The solve proper (rel1180 RULING-1180-sc-r7 Q-SC-5): a read-only
+    // context built once off the pair, and a state the stages carry, run
+    // in order from the first stage (`run_from`).
+    let ctx = SolveCtx::new(&s_img, &sp, &tp, &evidence, &cells, base, &options, pairing, err_before);
+    let state = run_from(&ctx, Stage::Tone, SolveState::at(base));
+    let SolveState {
+        tone_harm,
+        curve_harm,
+        wb_facts,
+        wb_cells,
+        wb_admitted,
+        sat_pegged,
+        grade_held,
+        detail,
+        detail_supported,
+        finished,
+        ..
+    } = state;
+    let finished = finished.expect("run_from runs the finish stage");
+    let (budget, law, paired) = (ctx.budget, ctx.law, ctx.paired);
+    let robust_facts = ctx.robust_facts.clone();
+    let hue_vouch = ctx.hue_vouch();
     let Finished {
         mut recipe,
         hsl_facts,
@@ -1862,9 +661,1602 @@ pub(crate) fn fit_recipe_from_promoted_with_disclosure_opts(
     report
 }
 
+/// The solve's stages, in the order [`run_from`] runs them (rel1180
+/// RULING-1180-sc-r7 Q-SC-5): a restart at a stage runs it and every stage
+/// after it on the state it is handed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Stage {
+    /// 1: the six tone sliders.
+    Tone,
+    /// 2: the residual master curve.
+    MasterCurve,
+    /// 2b: the white balance.
+    WhiteBalance,
+    /// 3: global saturation.
+    Saturation,
+    /// 3b: the colour-grade wheels.
+    Grade,
+    /// The detail controls.
+    Detail,
+    /// 4a: the per-band mixer, its two candidates with their cast calls.
+    Mixer,
+    /// 4a' through the finished R8, on both candidates, and the choice between them.
+    Finish,
+}
+
+impl Stage {
+    const ALL: [Stage; 8] = [
+        Stage::Tone,
+        Stage::MasterCurve,
+        Stage::WhiteBalance,
+        Stage::Saturation,
+        Stage::Grade,
+        Stage::Detail,
+        Stage::Mixer,
+        Stage::Finish,
+    ];
+
+    fn run(self, ctx: &SolveCtx<'_>, st: &mut SolveState) {
+        match self {
+            Stage::Tone => stage_tone(ctx, st),
+            Stage::MasterCurve => stage_master_curve(ctx, st),
+            Stage::WhiteBalance => stage_white_balance(ctx, st),
+            Stage::Saturation => stage_saturation(ctx, st),
+            Stage::Grade => stage_grade(ctx, st),
+            Stage::Detail => stage_detail(ctx, st),
+            Stage::Mixer => stage_mixer(ctx, st),
+            Stage::Finish => stage_finish(ctx, st),
+        }
+    }
+}
+
+/// Run the solve from `from` on `state`: that stage and every one after it,
+/// in order. From [`Stage::Tone`] on [`SolveState::at`] the base, this is
+/// the whole global solve.
+fn run_from(ctx: &SolveCtx<'_>, from: Stage, mut state: SolveState) -> SolveState {
+    for stage in Stage::ALL.into_iter().filter(|s| *s >= from) {
+        stage.run(ctx, &mut state);
+    }
+    state
+}
+
+/// What the stages carry from one to the next: the recipe as they leave it
+/// and the facts each one wrote for the report. Nothing here is a render: a
+/// stage that reads an earlier stage's frame renders it from `recipe`
+/// ([`SolveCtx::render_through_tone`], [`SolveCtx::through_white_balance`]),
+/// so a restart reads the state it restarted on and never one that no longer
+/// exists.
+#[derive(Clone, Default)]
+struct SolveState {
+    /// The recipe through the stages run so far. The mixer stage leaves it as
+    /// it found it (its two candidates are `candidates`).
+    recipe: EditRecipe,
+    unearned: Vec<Control>,
+    tone_harm: Option<(f32, f32)>,
+    curve_harm: Option<(f32, f32)>,
+    wb_facts: super::atmosphere::WbFacts,
+    wb_cells: Option<WbCellVerdict>,
+    wb_admitted: bool,
+    sat_pegged: bool,
+    grade_held: Option<(f32, f32)>,
+    detail: (f32, f32),
+    detail_supported: bool,
+    /// The mixer stage's two candidates: mixer-first, then framed.
+    candidates: Option<[Candidate; 2]>,
+    /// The finish stage's winner.
+    finished: Option<Finished>,
+}
+
+impl SolveState {
+    /// The state no stage has touched: the base recipe, no facts.
+    fn at(base: &EditRecipe) -> Self {
+        SolveState { recipe: base.clone(), ..SolveState::default() }
+    }
+}
+
+/// One mixer candidate as the mixer stage leaves it, for the finish stage.
+#[derive(Clone)]
+struct Candidate {
+    recipe: EditRecipe,
+    hsl_facts: HslStageFacts,
+    hsl_fitted: crate::recipe::Hsl,
+    unearned: Vec<Control>,
+    handoff: Option<HandOffFacts>,
+}
+
+/// The solve's read-only context: the pair, its evidence and cells, the
+/// budget, and every value the stages derive from the pair alone, computed
+/// once at the base.
+struct SolveCtx<'a> {
+    s_img: &'a DynamicImage,
+    sp: &'a [[f32; 3]],
+    tp: &'a [[f32; 3]],
+    evidence: &'a EvidenceModel,
+    cells: &'a Option<crate::fit_cells::PairedCells>,
+    base: &'a EditRecipe,
+    options: &'a FitOptions<'a>,
+    err_before: f32,
+    budget: FitBudget,
+    full_sat_limit: f32,
+    full_slope: (f32, f32),
+    full_cast_accept_ratio: f32,
+    s_cdf: Vec<f32>,
+    t_cdf: Vec<f32>,
+    robust_tone: Option<PairedRobustTone>,
+    correspondence: Vec<(f32, f32)>,
+    paired: bool,
+    robust_facts: Option<(f32, String)>,
+    rw_source: Vec<f32>,
+    rw_target: Vec<f32>,
+    point_span: Option<(f32, f32)>,
+    n_pixels: f32,
+    tone_deliverable: bool,
+    law: render::WbLaw,
+    wb_weights: Vec<f32>,
+    t_chroma: f32,
+}
+
+impl<'a> SolveCtx<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        s_img: &'a DynamicImage,
+        sp: &'a [[f32; 3]],
+        tp: &'a [[f32; 3]],
+        evidence: &'a EvidenceModel,
+        cells: &'a Option<crate::fit_cells::PairedCells>,
+        base: &'a EditRecipe,
+        options: &'a FitOptions<'a>,
+        pairing: PairingScale,
+        err_before: f32,
+    ) -> Self {
+        let budget = FitBudget::for_strength(options.strength);
+        // Full mode historically allowed +/-60 saturation. Scale that existing
+        // Full budget by the shared Atmosphere saturation axis so the shipped
+        // default remains unchanged while Strength 0 tightens and Strength 1
+        // permits the full freedom axis.
+        let full_sat_limit = 60.0 * budget.sat / ATMOSPHERE_SAT_LIMIT;
+        // Full residual curves historically projected to [0, 2]. Scale only the
+        // existing upper slope bound from the shared budget; at the shipped
+        // default this evaluates exactly to the pre-F1 cap.
+        let full_slope = (0.0, RESIDUAL_SLOPE_CAP * budget.slope.1 / ATMOSPHERE_CURVE_SLOPE_MAX);
+        // Aggregate look-error admission is its own budget dimension: a cast-curve
+        // error ratio is not a white-balance channel-gain ratio.
+        let full_cast_accept_ratio = budget.cast_ratio;
+        // The MARGINAL arm's evidence comes from NEAR-NEUTRAL pixels: saturated
+        // pixels clip channels at the gamut ceiling under chroma scaling, so
+        // their luma lands short of the tone map and would bias a quantile map
+        // (measured: one polluted knot skews contrast by tens of points) — and
+        // `tone_cdf_pair_weighted` drops that gate itself where the two sides'
+        // neutral classes are not one population. The PAIRED arm below reads
+        // EVERY paired pixel (2026-10-21): it has each pixel's own counterpart
+        // and a robust fit to reject the inconsistent ones, so the gate was not
+        // identifying anything there — it was choosing a population. On the
+        // seaside street the near-neutral eighth of the frame is its shadow
+        // walls, which the target crushes (0.06–0.28 → 0.024), while the
+        // chromatic seven eighths at the same brightness go 0.06 → 0.058 and
+        // 0.25 → 0.156; the gated map solved contrast 100 and the lower-left
+        // shadows went black. The frame's map is the frame's.
+        let (s_cdf, t_cdf) = tone_cdf_pair_weighted(sp, tp, evidence);
+        let robust_tone = paired_robust_tone(
+            sp,
+            tp,
+            &|i: usize| {
+                evidence
+                    .source_weights
+                    .get(i)
+                    .copied()
+                    .unwrap_or(0.0)
+                    .min(evidence.target_weights.get(i).copied().unwrap_or(0.0))
+            },
+            false,
+        );
+        // The paired path is gated by the ROBUST FIT'S OWN diagnostics: enough
+        // populated bins to shape a map, and a majority-consistent pairing. The
+        // old hue-credibility veto guarded the pre-robust median pairing from
+        // re-hued populations; on a same-frame pair a systematic hue difference
+        // (another converter's colour science, a WB drift) is an EDIT for the
+        // colour stages to recover, not evidence the pairing is invalid — and
+        // vetoing the paired path for it sent the p36 calibration pair into the
+        // marginal arm, whose neutral-class asymmetry then pegged the solve. A
+        // locally re-hued sub-population is handled where it belongs: its RGB
+        // transport residual rejects it pixel-by-pixel, and a majority takeover
+        // fails the rejected-share gate here.
+        let correspondence = paired_correspondence(robust_tone.as_ref(), pairing);
+        let paired = correspondence.len() >= 6;
+        let robust_facts = paired
+            .then_some(robust_tone.as_ref())
+            .flatten()
+            .map(|r| (r.rejected_share, r.rejected_ranges.clone()));
+        // Composed weights for the COLOUR statistics: evidence ("measurable at
+        // all") × robust ("consistent with one global develop"), in that order —
+        // the evidence weight is a prior independent of the model being fitted,
+        // so composing it first cannot launder a divergent pixel back in. Only
+        // composed when the paired path actually engaged: on a marginal-path pair
+        // the index pairing is unvalidated and its verdicts would be noise.
+        let (rw_source, rw_target): (Vec<f32>, Vec<f32>) = match robust_tone.as_ref() {
+            Some(r) if paired => (
+                evidence.source_weights.iter().zip(&r.weights).map(|(a, b)| a * b).collect(),
+                evidence.target_weights.iter().zip(&r.weights).map(|(a, b)| a * b).collect(),
+            ),
+            _ => (evidence.source_weights.clone(), evidence.target_weights.clone()),
+        };
+        // Per-knot DATA support: a knot in a luma region with no measured
+        // testimony must not pull the spline — an unsupported knot chasing the
+        // map's extrapolation is exactly how the p36 pair pegged
+        // contrast/shadows/whites (the spline bends over the evidenced region on
+        // the way to the phantom knot). Support is a TESTIMONY-COUNT question,
+        // never a frame-share one: 1.4% of a frame is still hundreds of
+        // measured pixels (the share form of this gate silenced the roundtrip
+        // fixture's whole highlight region). Paired path: inside the span the
+        // robust map points actually cover; marginal path: at least
+        // [`SUPPORT_MIN_PIXELS`] source pixels in the knot's range. A
+        // populated-but-withheld range keeps its knot: its tone_map is pinned to
+        // identity and fitting that identity IS the refusal semantics.
+        let point_span = (correspondence.first().zip(correspondence.last()))
+            .map(|(first, last)| (first.0 - 1.0 / 32.0, last.0 + 1.0 / 32.0));
+        let n_pixels = sp.len().min(tp.len()) as f32;
+        let law = render::WbLaw::of(base);
+        let wb_weights: Vec<f32> = {
+            let n = sp.len().min(tp.len());
+            // At PIXEL scale a pixel's robust tone weight is a statement about its
+            // own pairing; at CELL scale it is not, and the cell's structural
+            // trust takes its place.
+            let robust = robust_tone
+                .as_ref()
+                .filter(|_| paired && pairing == PairingScale::Pixel);
+            (0..n)
+                .map(|i| {
+                    let trust = match (&robust, &cells) {
+                        (Some(r), _) => r.weights.get(i).copied().unwrap_or(0.0),
+                        (None, Some(c)) => c.pixel_trust(i),
+                        (None, None) => 1.0,
+                    };
+                    evidence.source_weights[i].min(evidence.target_weights[i]).max(0.0) * trust
+                })
+                .collect()
+        };
+        let t_chroma = weighted_mean_chroma(tp, &rw_target).unwrap_or_else(|| mean_chroma(tp));
+        let mut ctx = SolveCtx {
+            s_img,
+            sp,
+            tp,
+            evidence,
+            cells,
+            base,
+            options,
+            err_before,
+            budget,
+            full_sat_limit,
+            full_slope,
+            full_cast_accept_ratio,
+            s_cdf,
+            t_cdf,
+            robust_tone,
+            correspondence,
+            paired,
+            robust_facts,
+            rw_source,
+            rw_target,
+            point_span,
+            n_pixels,
+            tone_deliverable: false,
+            law,
+            wb_weights,
+            t_chroma,
+        };
+        ctx.tone_deliverable = {
+            let tone_map = |x: f32| ctx.tone_map(x);
+            let mut previous = tone_map(0.0);
+            (1..=256).all(|step| {
+                let current = tone_map(step as f32 / 256.0);
+                let monotone = current + 1e-4 >= previous;
+                previous = current;
+                monotone
+            })
+        };
+        ctx
+    }
+
+    fn luma_supported(&self, user: f32) -> bool {
+        let (point_span, paired, evidence, n_pixels) = (self.point_span, self.paired, self.evidence, self.n_pixels);
+        match point_span {
+            Some((lo, hi)) if paired => user >= lo && user <= hi,
+            _ => {
+                evidence.luma[evidence_luma_bin(user)].source_share * n_pixels
+                    >= SUPPORT_MIN_PIXELS
+            }
+        }
+    }
+
+    fn estimated_tone_map(&self, x: f32) -> f32 {
+        let (correspondence, s_cdf, t_cdf) = (&self.correspondence, &self.s_cdf, &self.t_cdf);
+        if correspondence.len() >= 6 {
+            sample_tone_points(correspondence, x)
+        } else {
+            quantile(t_cdf, cdf_at(s_cdf, x).clamp(P_CLIP, 1.0 - P_CLIP))
+        }
+    }
+
+    fn tone_range_withheld(&self, x: f32) -> bool {
+        let evidence = self.evidence;
+        let range = &evidence.luma[evidence_luma_bin(x)];
+        range.weight <= 0.0 && range.source_share >= EVIDENCE_MIN_SHARE
+    }
+
+    fn tone_map(&self, x: f32) -> f32 {
+        let tone_range_withheld = |x: f32| self.tone_range_withheld(x);
+        let estimated_tone_map = |x: f32| self.estimated_tone_map(x);
+        if tone_range_withheld(x) {
+            x
+        } else {
+            estimated_tone_map(x)
+        }
+    }
+
+    fn objective_of(&self, r: &EditRecipe) -> f32 {
+        let (s_img, tp, evidence) = (self.s_img, self.tp, self.evidence);
+        look_err_with_evidence(&pixels_of(&render::develop_preview(s_img, r)), tp, evidence)
+    }
+
+    // One closure, because the cast→WB hand-off (stage 4) moves the white
+    // balance this chase was read on and has to chase again on the frame it
+    // leaves — the ordering argument above, applied to the white balance it
+    // ships rather than to the one stage 2b shipped. Returns whether the
+    // chase hit the model cap.
+    fn chase_saturation(&self, recipe: &mut EditRecipe) -> bool {
+        let (s_img, rw_source, t_chroma, full_sat_limit) = (self.s_img, &self.rw_source, self.t_chroma, self.full_sat_limit);
+        let mut pegged = false;
+        for _ in 0..2 {
+            let cur = pixels_of(&render::develop_preview(s_img, recipe));
+            let c_chroma =
+                weighted_mean_chroma(&cur, rw_source).unwrap_or_else(|| mean_chroma(&cur));
+            if c_chroma < 1e-4 {
+                break;
+            }
+            let step = ((t_chroma / c_chroma - 1.0) * 100.0).clamp(-40.0, 40.0);
+            if step.abs() < 1.0 {
+                break;
+            }
+            let want = recipe.saturation + step;
+            let clamped = want.clamp(-full_sat_limit, full_sat_limit);
+            // Hitting the model cap with demand to spare = the target's chroma
+            // is out of the global model's reach — flagged into the rationale
+            // so the user learns WHY the fit stays approximate.
+            if (want - clamped).abs() > 0.5 {
+                pegged = true;
+            }
+            recipe.saturation = round1(clamped);
+        }
+        pegged
+    }
+
+    /// The white-balance stage's cell verdict on `recipe`, read from `before_wb`.
+    fn vouch_wb(&self, before_wb: &[[f32; 3]], recipe: &EditRecipe) -> Option<crate::fit_cells::CellVouch> {
+        let (s_img, cells) = (self.s_img, self.cells);
+        cells.as_ref().map(|c| {
+            c.vouch_along(
+                crate::fit_cells::MoveAxis::Colour,
+                before_wb,
+                &pixels_of(&render::develop_preview(s_img, recipe)),
+                None,
+            )
+        })
+    }
+
+    // The paired voucher every hue-damage guard consults (see
+    // converges_toward): robust per-pixel weights plus each pixel's own
+    // paired target, judged on the full display pixel because the mixer and
+    // the cast curves move brightness and colour together. None on
+    // marginal-path runs — strict doctrine.
+    fn hue_vouch(&self) -> Option<PixelVouch<'_>> {
+        let (robust_tone, paired, tp) = (&self.robust_tone, self.paired, self.tp);
+        robust_tone
+            .as_ref()
+            .filter(|_| paired)
+            .map(|r| (r.weights.as_slice(), tp, crate::fit_cells::MoveAxis::Full))
+    }
+
+    /// The recipe as the tone stages leave it: `recipe`'s exposure, five tone
+    /// sliders and master curve on the base. The white-balance stage reads its
+    /// demand and its cells' verdict from this frame, and the cast hand-off
+    /// reads the same verdict from it, so it is derived from the state the
+    /// caller holds, never carried (rel1180 RULING-1180-sc-r7: a carried
+    /// render would read a state that no longer exists).
+    fn through_tone(&self, recipe: &EditRecipe) -> EditRecipe {
+        let mut toned = self.base.clone();
+        toned.exposure_ev = recipe.exposure_ev;
+        toned.contrast = recipe.contrast;
+        toned.highlights = recipe.highlights;
+        toned.shadows = recipe.shadows;
+        toned.whites = recipe.whites;
+        toned.blacks = recipe.blacks;
+        toned.tone_curve = recipe.tone_curve.clone();
+        toned
+    }
+
+    /// [`Self::through_tone`]'s render.
+    fn render_through_tone(&self, recipe: &EditRecipe) -> Vec<[f32; 3]> {
+        pixels_of(&render::develop_preview(self.s_img, &self.through_tone(recipe)))
+    }
+
+    /// The recipe as the white-balance stage leaves it: [`Self::through_tone`]
+    /// and `recipe`'s white balance.
+    // The recipe as the white-balance stage left it, so the cast→WB hand-off
+    // (stage 4) can put a moved white balance to the SAME cell check this
+    // stage just ran — the same before, the same render of nothing but tone
+    // and white balance, the same colour axis — rather than to a second one.
+    fn through_white_balance(&self, recipe: &EditRecipe) -> EditRecipe {
+        let mut balanced = self.through_tone(recipe);
+        (balanced.temperature_k, balanced.tint) = (recipe.temperature_k, recipe.tint);
+        balanced
+    }
+}
+
+/// Stage 1: the tone sliders, each earning its place on the tonal term.
+fn stage_tone(ctx: &SolveCtx<'_>, st: &mut SolveState) {
+    let (s_img, sp, tp, evidence, base) = (ctx.s_img, ctx.sp, ctx.tp, ctx.evidence, ctx.base);
+    let (robust_tone, paired, tone_deliverable) = (&ctx.robust_tone, ctx.paired, ctx.tone_deliverable);
+    let luma_supported = |user: f32| ctx.luma_supported(user);
+    let tone_map = |x: f32| ctx.tone_map(x);
+    let mut recipe = std::mem::take(&mut st.recipe);
+    // --- 1) tone: exposure scan × linear solve on the engine's knot basis ----
+    let knot_support: [f32; 8] =
+        std::array::from_fn(|i| if luma_supported(render::TONE_KNOTS_X[i]) { 1.0 } else { 0.0 });
+    let score_set: Vec<(f32, f32, f32)> = match robust_tone.as_ref() {
+        Some(r) if paired => r
+            .points
+            .iter()
+            .zip(&r.masses)
+            .map(|(&(x, y), &mass)| (x, y, mass))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let (ev, sliders) = if !tone_deliverable {
+        (0.0, [0.0; 5])
+    } else {
+        fit_tone_sliders_supported(&tone_map, &knot_support, &score_set)
+    };
+    recipe.exposure_ev = round2(ev);
+    recipe.contrast = round1(sliders[0] * 100.0);
+    recipe.highlights = round1(sliders[1] * 100.0);
+    recipe.shadows = round1(sliders[2] * 100.0);
+    recipe.whites = round1(sliders[3] * 100.0);
+    recipe.blacks = round1(sliders[4] * 100.0);
+
+    let low_evidence = evidence.luma.iter().take(6).map(|r| r.weight).sum::<f32>();
+    let high_evidence = evidence.luma.iter().rev().take(6).map(|r| r.weight).sum::<f32>();
+    if low_evidence < EVIDENCE_MIN_SHARE {
+        recipe.shadows = 0.0;
+        recipe.blacks = 0.0;
+    }
+    if high_evidence < EVIDENCE_MIN_SHARE {
+        recipe.highlights = 0.0;
+        recipe.whites = 0.0;
+    }
+    if evidence.luma.iter().filter(|r| r.weight > 0.0).count() < 8 {
+        recipe.whites = 0.0;
+        recipe.blacks = 0.0;
+    }
+    // Do-no-harm, PER STAGE (2026-10-21). The terminal check below resets
+    // the WHOLE recipe to the base when the finished render lands farther
+    // from the target than the untouched source — and on the lantern street
+    // it was the tone stage alone that had put it there: the paired robust
+    // regression asked for +1.65 EV and contrast 7.5 against a target that
+    // is darker and warmer (a sixth of the pairs are content the two frames
+    // do not share, and the survivors still disagree with the population),
+    // the look error went 0.0595 → 0.0815 on the sliders alone, every later
+    // stage inherited the deficit, and the terminal threw away a white
+    // balance the cells had vouched along with the sliders that caused the
+    // harm. A stage that renders the frame farther from the target than it
+    // found it ships nothing; the stages after it solve from the frame as
+    // it was. The ruler is the TONAL term of the terminal's objective — the
+    // term the sliders control (`look::tonal_err_with_evidence`). Held to
+    // the whole objective, a correct luma move was charged for the
+    // colour-mean drift it brings to a muted frame whose target is vivid
+    // (the land-and-sky toy: whole objective 0.1233 → 0.1240 on the sliders
+    // alone, and the zones downstream lost the global move they were solved
+    // beside), drift the saturation, white-balance and cast stages exist to
+    // correct; the lantern street's sliders raised the tonal term itself,
+    // 0.0468 → 0.0748, and are refused on it alone.
+    let tonal_before = look::tonal_err_with_evidence(sp, tp, evidence);
+    let mut tone_harm = None;
+    {
+        let toned = pixels_of(&render::develop_preview(s_img, &recipe));
+        let err_toned = look::tonal_err_with_evidence(&toned, tp, evidence);
+        // R8: the sliders ship only on a T_L gain of FIT_QUANT over their
+        // absence (`ships`; T_L is J*'s tonal term, in J*'s units).
+        if !ships(err_toned, tonal_before) {
+            recipe.exposure_ev = base.exposure_ev;
+            recipe.contrast = base.contrast;
+            recipe.highlights = base.highlights;
+            recipe.shadows = base.shadows;
+            recipe.whites = base.whites;
+            recipe.blacks = base.blacks;
+            tone_harm = Some((tonal_before, err_toned));
+        }
+    }
+    // R8: the six sliders come out of one joint solve, so each must earn its
+    // own place on the stage's ruler; the stages after solve from what stays.
+    let tonal_of = |r: &EditRecipe| {
+        look::tonal_err_with_evidence(&pixels_of(&render::develop_preview(s_img, r)), tp, evidence)
+    };
+    let unearned = if tone_harm.is_none() {
+        eliminate_unearned(&mut recipe, base, &TONE_SLIDERS, tonal_of)
+    } else {
+        Vec::new()
+    };
+    st.recipe = recipe;
+    st.tone_harm = tone_harm;
+    st.unearned = unearned;
+}
+
+/// Stage 2: the residual master curve, on its own do-no-harm.
+fn stage_master_curve(ctx: &SolveCtx<'_>, st: &mut SolveState) {
+    let (s_img, sp, tp, evidence, base, budget) = (ctx.s_img, ctx.sp, ctx.tp, ctx.evidence, ctx.base, ctx.budget);
+    let (full_slope, tone_deliverable) = (ctx.full_slope, ctx.tone_deliverable);
+    let luma_supported = |user: f32| ctx.luma_supported(user);
+    let tone_map = |x: f32| ctx.tone_map(x);
+    let mut recipe = std::mem::take(&mut st.recipe);
+    // --- 2) residual master curve (composed on top of the sliders) -----------
+    // Domain care (R16): the sliders solved in the USER domain (their input
+    // is the base curve's output — `tone_map` above maps base-render luma to
+    // target luma), but `residual_tone_curve` samples the recipe's FULL LUT,
+    // whose input is the NEUTRAL domain. Rebase the map through the base
+    // LUT: full(x) = user_map(base(x)). A base with no starting tone skips the rebase
+    // outright — build_tone_lut's sRGB↔linear round trip is only ~1e-7 from
+    // identity, but skipping keeps the default-base wrapper literally
+    // bit-for-bit the old fit (review R16 #3).
+    // The base's starting tone is the camera curve: a base rendition the
+    // sliders sit on, so it is rebased through.
+    let base_toned = !base.base_curve.is_empty();
+    let base_lut = render::build_tone_lut(base);
+    let full_map = |x: f32| {
+        if !base_toned { tone_map(x) } else { tone_map(render::sample_lut(&base_lut, x)) }
+    };
+    let mut withheld_samples = Vec::new();
+    for (bin, range) in evidence.luma.iter().enumerate() {
+        if range.weight > 0.0 || range.source_share < EVIDENCE_MIN_SHARE {
+            continue;
+        }
+        let lo = bin as f32 / EVIDENCE_LUMA_BINS as f32;
+        let hi = (bin + 1) as f32 / EVIDENCE_LUMA_BINS as f32;
+        for level in [lo, 0.5 * (lo + hi), hi] {
+            let raw = if !base_toned {
+                level
+            } else {
+                let index = base_lut.partition_point(|&value| value < level).min(base_lut.len() - 1);
+                index as f32 / (base_lut.len() - 1) as f32
+            };
+            withheld_samples.push(raw);
+        }
+    }
+    // A residual-curve point may only claim a level the SOURCE actually
+    // populates: outside the evidenced luma domain the estimated map is pure
+    // extrapolation, and a control point there bends the rendered curve over
+    // real pixels (including full-resolution speculars the thumbnail never
+    // sampled) toward invented values — the same p36 mechanism the knot
+    // support closes for the sliders.
+    let supported_x = |x: f32| {
+        let user =
+            if !base_toned { x } else { render::sample_lut(&base_lut, x) };
+        luma_supported(user)
+    };
+    recipe.tone_curve = if tone_deliverable {
+        residual_tone_curve_with_budget(
+            &recipe,
+            &full_map,
+            &withheld_samples,
+            &supported_x,
+            full_slope,
+        )
+    } else {
+        Vec::new()
+    };
+    let tone_after_px = pixels_of(&render::develop_preview(s_img, &recipe));
+    let tone_veto_luma = moved_unsupported_luma_range_names(sp, &tone_after_px, evidence);
+    let tone_moves_unsupported = tone_veto_luma.is_some();
+    if tone_moves_unsupported
+        && budget.vetoes == VetoPolicy::Withhold
+    {
+        recipe.exposure_ev = base.exposure_ev;
+        recipe.contrast = base.contrast;
+        recipe.highlights = base.highlights;
+        recipe.shadows = base.shadows;
+        recipe.whites = base.whites;
+        recipe.blacks = base.blacks;
+        recipe.tone_curve = base.tone_curve.clone();
+    }
+    // The residual curve's own do-no-harm (2026-10-21), the same rule as the
+    // sliders': it fits the paired map more exactly than five sliders can,
+    // and where that map disagrees with the population the exactness is the
+    // harm — the seaside street's sliders took the frame 0.0746 → 0.0538 and
+    // the curve on top of them took it back to 0.0649 (its tonal term
+    // 0.0555 → 0.0745). Judged against the render WITHOUT it, so a curve on
+    // withheld sliders is judged against the base and not against a harm
+    // the sliders already undid; and on the tonal term, as the sliders are,
+    // for the same reason. Measured 2026-10-21 on four real pairs, the
+    // tonal term, the whole objective and the cells' vouch along luminance
+    // agreed on every curve they refused (the seaside street's cells read
+    // 0.174 converged / 0.509 diverged under its curve).
+    let mut curve_harm = None;
+    if recipe.tone_curve != base.tone_curve {
+        let with_curve = pixels_of(&render::develop_preview(s_img, &recipe));
+        let err_with = look::tonal_err_with_evidence(&with_curve, tp, evidence);
+        let mut without = recipe.clone();
+        without.tone_curve = base.tone_curve.clone();
+        let err_without = look::tonal_err_with_evidence(
+            &pixels_of(&render::develop_preview(s_img, &without)),
+            tp,
+            evidence,
+        );
+        // R8: the curve ships only on a T_L gain of FIT_QUANT over its
+        // absence, as the sliders above (`ships`).
+        if !ships(err_with, err_without) {
+            recipe.tone_curve = base.tone_curve.clone();
+            curve_harm = Some((err_without, err_with));
+        }
+    }
+    st.recipe = recipe;
+    st.curve_harm = curve_harm;
+}
+
+/// Stage 2b: the white balance, admitted by the cells.
+fn stage_white_balance(ctx: &SolveCtx<'_>, st: &mut SolveState) {
+    let (s_img, tp, evidence, base, budget, options) = (ctx.s_img, ctx.tp, ctx.evidence, ctx.base, ctx.budget, ctx.options);
+    let (law, wb_weights) = (ctx.law, &ctx.wb_weights);
+    let mut recipe = std::mem::take(&mut st.recipe);
+    let mut unearned = std::mem::take(&mut st.unearned);
+    // --- 2b) white balance ---------------------------------------------------
+    // Full mode had no white-balance stage AT ALL until R33 — not a gate that
+    // could open, an absent stage — so the one control that says "the light
+    // was a different colour" existed only on the branch taken when the
+    // structure was judged unrecoverable. A same-frame regrade that turned a
+    // grey sky orange therefore had to express the whole cast through
+    // saturation, the per-band mixer and three channel curves, and the hue
+    // gates (correctly) refused most of it.
+    //
+    // It sits AFTER tone and BEFORE saturation for the reason stage 3 already
+    // gives about the cast curves: the chroma chase reads mean chroma, and
+    // reading it on a frame whose illuminant is still wrong asks saturation to
+    // pay for a white-balance error.
+    //
+    // ADMISSION, not estimation. The demand is solved from the population
+    // exactly as Atmosphere solves it; what decides whether it SHIPS is the
+    // target's own verdict on the render it produces — the paired cells over
+    // the whole frame. A cast the cells say took the frame AWAY from its
+    // target is returned to as-shot and named, because an edit may not create
+    // its own evidence.
+    // The demand is read from the frame AS THE STAGE FINDS IT (2026-10-21):
+    // the render after the tone stage, not the base. The tone sliders act on
+    // every channel, so a strong contrast move changes the three channel
+    // ratios between the base and the target on its own, and a demand read
+    // from the base charges that change to the light: the seaside street
+    // (contrast 100) read 40000 K / tint −24.2 from the base and 17400 K /
+    // +4.8 from the toned render against the same target. The chroma chase
+    // below has always read the current render for the same reason.
+    let before_wb = ctx.render_through_tone(&recipe);
+    let (free_k, free_tint, _wanted) =
+        paired_wb_from_populations(&before_wb, tp, wb_weights, law);
+    // The demand closed-loop through the engine (`paired_wb_closed_loop`):
+    // the open-loop reading under-asks. No demand stays no demand.
+    let (free_k, free_tint) = if (free_k, free_tint) == ((law.as_shot().0 / 50.0).round() * 50.0, round1(law.as_shot().1)) {
+        (free_k, free_tint)
+    } else {
+        paired_wb_closed_loop(
+            (free_k, free_tint),
+            tp,
+            wb_weights,
+            law,
+            |wb| {
+                let mut probe = recipe.clone();
+                (probe.temperature_k, probe.tint) = (Some(wb.0), wb.1);
+                pixels_of(&render::develop_preview(s_img, &probe))
+            },
+            |px| look_err_with_evidence(px, tp, evidence),
+        )
+    };
+    let wb_restore = (recipe.temperature_k, recipe.tint);
+    let wb_facts = solve_white_balance(
+        s_img,
+        tp,
+        &mut recipe,
+        base,
+        evidence,
+        (free_k, free_tint),
+        law,
+        budget,
+        options.strength,
+    );
+    // The verdict is on what the stage DID, not on what it wanted — and it
+    // is asked along the axis the stage can move. A white balance moves
+    // chromaticity only, so its direction test reads chromaticity
+    // (`MoveAxis::Colour`), as a zone's colour probe has since 2026-10-19;
+    // put to the FULL direction it was refused wherever the target was also
+    // darker or brighter than the tone stage left the cell, because that
+    // direction is mostly luminance and no white balance can point along
+    // it. Measured 2026-10-21: the lantern street's warm target read 0.866
+    // converged / 0.065 diverged and still 0.502 aligned, the seaside
+    // street 0.847 / 0.117 / 0.546; both casts went back to as-shot.
+    let wb_moved = (recipe.temperature_k, recipe.tint) != wb_restore;
+    let vouch_wb = |recipe: &EditRecipe| ctx.vouch_wb(&before_wb, recipe);
+    let wb_cells = wb_moved.then(|| vouch_wb(&recipe)).flatten();
+    // R36 for the white balance (2026-10-21). A refusal on SIZE is not a
+    // refusal on DIRECTION: the seaside street's cast read 0.847 converged /
+    // 0.117 diverged / 0.954 aligned along chromaticity — nineteen cells in
+    // twenty asked for the move and a ninth of the mass was pushed PAST its
+    // own target, because the one white balance the population solved was
+    // too large for those cells, not wrong for them — and the stage returned
+    // the whole cast to as-shot. As the zone probes do (`vouched_share`), the
+    // largest share of the solved move whose RENDER the same voucher admits
+    // is searched for instead, along the as-shot-to-solved path the budget
+    // itself walks (`wb_path_between`: the log-gain segment, each point
+    // inverted for its own Kelvin, quantised as the solve quantises).
+    // Admission stays evidence — the white balance that ships is
+    // one the cells vouched — and the search is a budget on size. It is asked
+    // only where the direction agrees: a frame whose cells want opposite
+    // moves is not asking for less of one move and stays refused. And a
+    // share is accepted only on SIZE evidence (`WB_SHARE_SIZE_EVIDENCE`):
+    // the cells that diverged at the full move must mostly stop diverging at
+    // the share, or they were not pushed past their targets but away from
+    // them — the seaside street's sky, a tenth of the frame under a cast the
+    // other nine tenths asked for, kept diverging at 0.969 of the move and
+    // the threshold alone would have shipped it.
+    let mut wb_shipped_at = None;
+    if let Some(full) = wb_cells
+        && !full.vouched()
+        && full.direction_agrees()
+    {
+        let solved = law.point_of(&recipe);
+        let from = law.point(wb_restore.0, wb_restore.1);
+        let at = |share: f32| -> (Option<f32>, f32) {
+            let (k, tint) = wb_path_between(law, from, solved, share);
+            (Some(k), tint)
+        };
+        let (mut lo, mut hi, mut best) = (0.0f32, 1.0f32, None);
+        for _ in 0..WB_VOUCH_SHRINK_STEPS {
+            let mid = 0.5 * (lo + hi);
+            (recipe.temperature_k, recipe.tint) = at(mid);
+            match vouch_wb(&recipe) {
+                Some(v) if v.vouched() && v.diverged <= full.diverged * WB_SHARE_SIZE_EVIDENCE => {
+                    best = Some((mid, v));
+                    lo = mid;
+                }
+                _ => hi = mid,
+            }
+        }
+        if let Some((share, _)) = best {
+            (recipe.temperature_k, recipe.tint) = at(share);
+        }
+        wb_shipped_at = best;
+    }
+    // An ABSTENTION cannot admit a control either: where no cell resolved
+    // there is no verdict, and a stage that did not exist before does not get
+    // to ship on silence.
+    if wb_moved && !wb_cells.is_some_and(|v| v.vouched()) && wb_shipped_at.is_none() {
+        (recipe.temperature_k, recipe.tint) = wb_restore;
+    }
+    // R12: the white balance's two axes came out of one joint solve; each
+    // earns its place on the objective before the stages after build on it.
+    let objective_of = |r: &EditRecipe| ctx.objective_of(r);
+    unearned.extend(eliminate_unearned(&mut recipe, base, &WB_AXES, objective_of));
+    let wb_admitted = (recipe.temperature_k, recipe.tint) != wb_restore;
+    let wb_cells = wb_cells.map(|vouch| WbCellVerdict {
+        vouch,
+        admitted: wb_admitted,
+        shipped_at: wb_shipped_at.filter(|_| wb_admitted),
+    });
+    st.recipe = recipe;
+    st.unearned = unearned;
+    st.wb_facts = wb_facts;
+    st.wb_cells = wb_cells;
+    st.wb_admitted = wb_admitted;
+}
+
+/// Stage 3: global saturation, chased on the frame the stages before left.
+fn stage_saturation(ctx: &SolveCtx<'_>, st: &mut SolveState) {
+    let chase_saturation = |recipe: &mut EditRecipe| ctx.chase_saturation(recipe);
+    let mut recipe = std::mem::take(&mut st.recipe);
+    // --- 3) global saturation, secant-refined through the real engine --------
+    // Saturation stays BEFORE the cast curves: channel CDFs of a desaturated
+    // render differ from the target's even with zero cast (each channel's
+    // distribution is compressed toward luma), so fitting the cast first
+    // would express chroma expansion through per-channel curves — and
+    // per-channel curves rotate hue. Saturating first may amplify a latent
+    // cast, but stage 5 fits the cast residual CLOSED-LOOP on the saturated
+    // render, so it is measured and removed rather than compounded.
+    let sat_pegged = chase_saturation(&mut recipe);
+    st.recipe = recipe;
+    st.sat_pegged = sat_pegged;
+}
+
+/// Stage 3b: the colour-grade wheels.
+fn stage_grade(ctx: &SolveCtx<'_>, st: &mut SolveState) {
+    let (s_img, tp, cells, base, budget, wb_weights) = (ctx.s_img, ctx.tp, ctx.cells, ctx.base, ctx.budget, &ctx.wb_weights);
+    let objective_of = |r: &EditRecipe| ctx.objective_of(r);
+    let mut recipe = std::mem::take(&mut st.recipe);
+    let mut unearned = std::mem::take(&mut st.unearned);
+    // --- 3b) colour grade: the white balance's brightness-dependent
+    // remainder, on the shadow / midtone / highlight wheels (`grade`).
+    let grade_held =
+        grade::fit_grade_stage(s_img, tp, wb_weights, cells.as_ref(), budget.grade_wheel, &mut recipe);
+    // R12: the four wheels are one joint solve.
+    unearned.extend(eliminate_unearned(&mut recipe, base, &GRADE_WHEELS, objective_of));
+    st.recipe = recipe;
+    st.unearned = unearned;
+    st.grade_held = grade_held;
+}
+
+/// The detail controls.
+fn stage_detail(ctx: &SolveCtx<'_>, st: &mut SolveState) {
+    let (s_img, tp, evidence) = (ctx.s_img, ctx.tp, ctx.evidence);
+    let mut recipe = std::mem::take(&mut st.recipe);
+    // NOTE deliberately NO mid-pipeline hue veto here EITHER (it was tried
+    // in the evidence era and removed): the ordering comment above is the
+    // contract — saturation legitimately amplifies a latent cast and the
+    // cast stage then measures and removes it, so judging the SAT-ONLY
+    // render against the hue evidence vetoes exactly the amplification the
+    // next stage exists to fix (measured: the haze pair's +59 chase was
+    // reset by the blue-cast bands the cast stage went on to empty). The
+    // zero-evidence-band guard now rides the pipeline-END loop below, where
+    // the composed result is the thing being judged.
+    // NOTE deliberately NO validation here: a correct saturation legitimately
+    // makes every colour metric worse at THIS point in the pipeline (it
+    // amplifies a latent cast into the channel means and the hue bands; the
+    // curve stage then measures and removes it — see the ordering comment
+    // above). The only fair evaluation point is the finished recipe: the
+    // do-no-harm check after stage 4 shrinks saturation if the END result
+    // regressed. (A stage-local gate was tried first and it zeroed the haze
+    // regression's saturation, degrading the whole fit.)
+
+    // --- 4) per-channel colour-cast curves — the catch-all, LAST so its
+    // closed-loop residual sees every earlier stage's composed output
+    // (cast-before-saturation was tried and measured worse on the haze
+    // regression: chroma expansion leaks into the curves, which rotate hue).
+    //
+    // The curves model a GLOBAL cast (one monotone map per channel). That
+    // model is exactly right for uniform casts (haze tint, WB drift) and
+    // exactly wrong when the colour residual is CONTENT (a generative
+    // target's rocks simply ARE warmer than its sky): then the fitted map
+    // drags every region — measured on the real pair, the red lift that
+    // warmed the frame-dominant rocks turned the pale sky violet (and the
+    // neutral-only-evidence variant, also tried, cooled the warm distance
+    // haze instead). The two worlds are told apart by the shared evidence
+    // model plus validation: accept the curves only if they improve the
+    // hue-aware supported look error by a clear margin — a global map that truly
+    // explains the residual slashes the error (the haze regression), while
+    // a content mismatch yields a marginal "improvement" bought by regional
+    // hue damage the metric's hue term partially sees. Marginal gain does
+    // not earn regional risk: keep the recipe clean instead.
+    //
+    // Per-band HSL is fitted in stage 4a above: its SATURATION and LUMINANCE
+    // axes from each band's population, on bands the two-sided population
+    // gate can measure, and since 2026-11-02 its HUE axis from the paired
+    // pixels only (`fit_band_hues`). The 2026-07-07 failure this comment used
+    // to record was the hue axis read from POPULATIONS: a band's centroid hue
+    // delta conflates CONTENT difference with style, and an honest-looking
+    // 13° in-gate delta applied as a whole-band rotation turns brown rock
+    // olive and a pale sky lavender. That reading is still never made; the
+    // paired solve reads each pixel's own rotation, on pairs whose pixels are
+    // each other's counterparts, and ships only what the target's cells
+    // vouch.
+    let (detail, detail_supported) = fit_detail_stage(s_img, tp, evidence, &mut recipe);
+    st.recipe = recipe;
+    st.detail = detail;
+    st.detail_supported = detail_supported;
+}
+
+/// Stage 4a: the per-band mixer and its two candidates, mixer-first and
+/// framed, each with the cast calls it makes; the state's recipe stays the
+/// one the stage found.
+fn stage_mixer(ctx: &SolveCtx<'_>, st: &mut SolveState) {
+    let (s_img, sp, tp, evidence, cells, base, budget) = (ctx.s_img, ctx.sp, ctx.tp, ctx.evidence, ctx.cells, ctx.base, ctx.budget);
+    let hue_vouch = ctx.hue_vouch();
+    let objective_of = |r: &EditRecipe| ctx.objective_of(r);
+    let mut recipe = st.recipe.clone();
+    let mut unearned = st.unearned.clone();
+    // --- 4a) per-band colour mixer, BEFORE the cast curves ------------------
+    // Ordering follows the stage-3 argument one level down: the mixer is the
+    // SPECIFIC colour move (one band at a time, from that band's own
+    // population), the channel curves are the catch-all, and the catch-all
+    // must close its loop on everything the specific stages already did. The
+    // engine agrees — it runs the mixer before saturation and the RGB curves
+    // before the mixer — which is exactly why both colour stages measure
+    // their demand on a re-render rather than on an algebraic composition.
+    let before_mixer = recipe.clone();
+    let unearned_before_mixer = unearned.len();
+    let mut hsl_facts =
+        fit_hsl_stage(s_img, sp, tp, evidence, hue_vouch, cells.as_ref(), budget, &mut recipe);
+    // R12: the mixer's bands are one joint solve; the cast curves fit on what stays.
+    unearned.extend(eliminate_unearned(&mut recipe, base, &mixer_controls(), objective_of));
+    // THE ATTRIBUTION LAW AT THE MIXER (rel1180 RULING-1180-sc-r1 Q-SC-2 (a)):
+    // a move confined to one band's hue range is that band's. The tone stage
+    // runs first and reads such a move as the frame's — an Orange-only −25
+    // luminance read as exposure −0.2 and saturation +6.6, and the mixer then
+    // solved on what tone left asked under FIT_QUANT per band (rel1180 msg-sc
+    // case 2). So the mixer is solved once more from the frame WITHOUT the
+    // frame-domain controls (the tone sliders and saturation at the base, the
+    // mixer from where the stage found it), R12 on it, and that recipe
+    // replaces the frame-domain one unless the frame-domain one earns
+    // FIT_QUANT over it: a tie goes to the smaller domain, the band's.
+    if TONE_SLIDERS.iter().chain(&[Control::Saturation]).any(|c| c.differs(&before_mixer, base)) {
+        let mut banded = before_mixer.clone();
+        for c in TONE_SLIDERS.iter().chain(&[Control::Saturation]) {
+            c.reset(&mut banded, base);
+        }
+        let banded_facts =
+            fit_hsl_stage(s_img, sp, tp, evidence, hue_vouch, cells.as_ref(), budget, &mut banded);
+        let banded_unearned = eliminate_unearned(&mut banded, base, &mixer_controls(), objective_of);
+        if !banded.hsl.is_neutral() && !ships(objective_of(&recipe), objective_of(&banded)) {
+            recipe = banded;
+            hsl_facts = banded_facts;
+            unearned.truncate(unearned_before_mixer);
+            unearned.extend(banded_unearned);
+        }
+    }
+    let hsl_fitted = recipe.hsl.clone();
+    let cast = CastStage::new(ctx, &st.recipe);
+    let cast_handoff = &cast.handoff;
+    let fit_cast_stage = |recipe: &mut EditRecipe, rescue: CastRescue| cast.fit(recipe, rescue);
+    fit_cast_stage(&mut recipe, CastRescue::Off);
+    // THE ATTRIBUTION LAW AT THE CAST (rel1180 RULING-1180-sc-r4 Q-SC-2b (1)):
+    // the cast curves and the white-balance walk they hand to are frame-domain
+    // controls, as the tone sliders and saturation are. Their conviction (the
+    // fan read) and their walk read the frame BEFORE the mixer's moves — the
+    // mixer at the stage's start for that read, the mirror of the reset
+    // above — and the mixer is then solved on what they leave (R12 on it, the
+    // curves re-fitted on its frame). That candidate replaces the mixer-first
+    // one only when it earns FIT_QUANT over it: a tie goes to the smaller
+    // domain, the band's. On the warm-strip pair the mixer-first frame spread
+    // a per-channel cast over four bands, its candidate then fanned 11.8°
+    // instead of 15.05°, the walk never ran and the stage end gave everything
+    // back (rel1180 msg-sc round 4).
+    //
+    // The two candidates are compared on their FINISHED recipes (rel1180
+    // RULING-1180-sc-r5 Q-SC-2c (b), the v1.17.1 law: every stage is judged
+    // on the final render): each is carried through 4a', the final cast call,
+    // 4b, the terminal fan check and the finished R8 (`finish` below), and the
+    // framed one ships only when its finished J* earns FIT_QUANT over
+    // mixer-first's. Read mid-pipeline, the hue-ramps pair's framed candidate
+    // won 0.0101 against 0.0161 and finished at 0.0122, where mixer-first
+    // finishes at 0.0052 (rel1180 msg-sc round 5).
+    let handoff_before = cast_handoff.get();
+    let mut framed = before_mixer.clone();
+    fit_cast_stage(&mut framed, CastRescue::ChaseSaturation);
+    let framed_facts =
+        fit_hsl_stage(s_img, sp, tp, evidence, hue_vouch, cells.as_ref(), budget, &mut framed);
+    let mut framed_unearned = unearned[..unearned_before_mixer].to_vec();
+    framed_unearned.extend(eliminate_unearned(&mut framed, base, &mixer_controls(), objective_of));
+    fit_cast_stage(&mut framed, CastRescue::Off);
+    let framed_handoff = cast_handoff.get();
+    let framed_fitted = framed.hsl.clone();
+    st.candidates = Some([
+        Candidate { recipe, hsl_facts, hsl_fitted, unearned, handoff: handoff_before },
+        Candidate {
+            recipe: framed,
+            hsl_facts: framed_facts,
+            hsl_fitted: framed_fitted,
+            unearned: framed_unearned,
+            handoff: framed_handoff,
+        },
+    ]);
+}
+
+/// 4a' through the finished R8 on both candidates (`CastStage::finish`), and
+/// the one that ships.
+fn stage_finish(ctx: &SolveCtx<'_>, st: &mut SolveState) {
+    let objective_of = |r: &EditRecipe| ctx.objective_of(r);
+    let hue_before_mixer = st.recipe.hsl.hue;
+    let [mixer_first, framed] = st.candidates.take().expect("the mixer stage ran");
+    let cast = CastStage::new(ctx, &st.recipe);
+    let finish = |candidate: Candidate| cast.finish(hue_before_mixer, candidate);
+    let mixer_first = finish(mixer_first);
+    let framed = finish(framed);
+    // R1 between the two: a tie inside FIT_QUANT keeps mixer-first (the
+    // default needs no earning).
+    let finished =
+        if ships(objective_of(&framed.recipe), objective_of(&mixer_first.recipe)) { framed } else { mixer_first };
+    st.finished = Some(finished);
+}
+
+/// The cast stage: the per-channel curves, their four gates, the cast→WB
+/// hand-off and the projection, as the mixer and finish stages call it.
+/// Built from the state's recipe (`trunk`, the recipe the mixer stage
+/// found): the frame the white-balance stage read and the recipe it left are
+/// derived from it, never carried.
+struct CastStage<'c, 'a> {
+    ctx: &'c SolveCtx<'a>,
+    /// [`SolveCtx::render_through_tone`] of the trunk.
+    before_wb: Vec<[f32; 3]>,
+    /// [`SolveCtx::through_white_balance`] of the trunk.
+    wb_stage: EditRecipe,
+    // A `Cell`, as `cast_handoff` below: each finished candidate reads the
+    // admission its own last call left (rel1180 RULING-1180-sc-r5 Q-SC-2c).
+    admission: std::cell::Cell<Option<(f32, f32)>>,
+    // NOT cleared per call, unlike `cast_admission`: a hand-off moves the
+    // white balance, and every later call re-fits the curves ON that white
+    // balance, so the move it describes is still in the recipe after them.
+    // A `Cell`: the frame-domain candidate below is a probe whose hand-off,
+    // when it does not ship, must not describe the recipe that does.
+    handoff: std::cell::Cell<Option<HandOffFacts>>,
+}
+
+impl<'c, 'a> CastStage<'c, 'a> {
+    fn new(ctx: &'c SolveCtx<'a>, trunk: &EditRecipe) -> Self {
+        CastStage {
+            ctx,
+            before_wb: ctx.render_through_tone(trunk),
+            wb_stage: ctx.through_white_balance(trunk),
+            admission: std::cell::Cell::new(None),
+            handoff: std::cell::Cell::new(None),
+        }
+    }
+
+    /// `rescue` = may a fan-convicted cast be PROJECTED into something
+    /// milder rather than thrown away (v1.2.3, `search_cast_projection`)?
+    /// Only the call that produces the recipe the user gets says yes; see the
+    /// ordering note at the 4a' loop below for why.
+    fn fit(&self, recipe: &mut EditRecipe, rescue: CastRescue) -> CastOutcome {
+        let ctx = self.ctx;
+        let (s_img, tp, evidence, cells, budget, options) = (ctx.s_img, ctx.tp, ctx.evidence, ctx.cells, ctx.budget, ctx.options);
+        let (law, wb_weights, rw_source, rw_target) = (ctx.law, &ctx.wb_weights, &ctx.rw_source, &ctx.rw_target);
+        let full_cast_accept_ratio = ctx.full_cast_accept_ratio;
+        let hue_vouch = ctx.hue_vouch();
+        let (before_wb, wb_stage) = (&self.before_wb, &self.wb_stage);
+        let (cast_admission, cast_handoff) = (&self.admission, &self.handoff);
+        let vouch_wb = |recipe: &EditRecipe| ctx.vouch_wb(before_wb, recipe);
+        let chase_saturation = |recipe: &mut EditRecipe| ctx.chase_saturation(recipe);
+        // Cleared per call: the fact must describe the recipe this call
+        // produces, not a probe an earlier call admitted.
+        cast_admission.set(None);
+        let mut handed_now = false;
+        recipe.red_curve = Vec::new();
+        recipe.green_curve = Vec::new();
+        recipe.blue_curve = Vec::new();
+        let cur = pixels_of(&render::develop_preview(s_img, recipe));
+        recipe.red_curve = residual_channel_curve_weighted(&cur, tp, 0, rw_source, rw_target);
+        recipe.green_curve = residual_channel_curve_weighted(&cur, tp, 1, rw_source, rw_target);
+        recipe.blue_curve = residual_channel_curve_weighted(&cur, tp, 2, rw_source, rw_target);
+        let mut out = CastOutcome::default();
+        if !(recipe.red_curve.is_empty()
+            && recipe.green_curve.is_empty()
+            && recipe.blue_curve.is_empty())
+        {
+            let with_px = pixels_of(&render::develop_preview(s_img, recipe));
+            // R34 §D3. The REGION arm of the hue-damage guard, recomputed for
+            // THIS candidate: a cell verdict is a statement about what an edit
+            // did, so it is as short-lived as the edit.
+            let with_cells = cells.as_ref().and_then(|c| c.region_arm(&cur, &with_px));
+            // FOUR gates, all must pass: the aggregate ratio (a marginal win
+            // does not earn regional risk), the foreign-hue veto (a large
+            // aggregate win does not earn a region painted in hues the target
+            // holds nowhere), the rotation budget (nor a region re-hued into
+            // hues it does hold — golden-sky case) and, since v1.2.3, the fan
+            // gate (nor a single-hued region sorted into a hue FAN by
+            // luminance — Cornwall, where all three of the others read clean).
+            // The vetoes only ever reject, never rescue.
+            out = cast_gate_outcome_with_ratio(
+                &cur,
+                &with_px,
+                tp,
+                evidence,
+                hue_vouch,
+                cells.as_ref().zip(with_cells.as_ref().map(|(_, v)| v.as_slice())),
+                full_cast_accept_ratio,
+            );
+            // v1.2.3 — the PROJECTION, and its ORDER is the whole of the
+            // byte-identity argument. A pair the pixel-aligned vetoes refuse
+            // is refused exactly as it was before this existed, unprojected,
+            // so its recipe and its rationale cannot move (the viaduct pair).
+            // Only a FAN-ONLY conviction earns a second chance — see
+            // `CastOutcome::earns_projection`, which is where that precedence
+            // lives and where its reasons are written. The milder candidate is
+            // then judged by all four gates from scratch: a projection that
+            // makes the ratio gate fail, or that trips a pixel veto the fitted
+            // cast happened to clear, is refused and says so.
+            if rescue.rescues()
+                && let Some((share, fan_before)) = out.earns_projection()
+            {
+                #[cfg(test)]
+                route::note(|r| r.hand_off_entered += 1);
+                let fitted = [
+                    recipe.red_curve.clone(),
+                    recipe.green_curve.clone(),
+                    recipe.blue_curve.clone(),
+                ];
+                // The cast→WB HAND-OFF (2026-10-23), asked BEFORE the
+                // projection: a fan the white balance can take back is a
+                // white-balance job the curves were handed (see
+                // `search_cast_hand_off`). A candidate ships only when the
+                // curves re-fitted on it pass all four gates with a MEASURED
+                // fan, when the white balance stays inside the strength
+                // budget the white-balance stage spends, and when the target's
+                // own cells vouch it exactly as they vouched the stage's own
+                // white balance (`vouch_wb` on the stage's recipe). Anything
+                // else falls through to the projection below with `recipe`
+                // untouched — every probe is a clone — so a pair the hand-off
+                // cannot help ships byte for byte what it shipped before.
+                let from = law.point_of(recipe);
+                let err_without = look_err_with_evidence(&cur, tp, evidence);
+                let probe_base = recipe.clone();
+                let handed = cast_wb_direction(&cur, &with_px, wb_weights, law).and_then(|direction| {
+                    let in_budget = |wb: (f32, f32)| wb_gains_fit_budget(law.gains(wb), budget);
+                    search_cast_hand_off(law, from, direction, err_without, in_budget, |wb| {
+                        if !in_budget(wb) {
+                            return None;
+                        }
+                        // Above the default strength the white-balance stage
+                        // answers to two more gates than the budget — foreign
+                        // hue and re-hued share, read on ITS step, from
+                        // `before_wb` to the same recipe under the new white
+                        // balance — and a white balance that ships through the
+                        // hand-off answers to them too, read on the same step
+                        // (`wb_stage` differs from the recipe the stage
+                        // measured in nothing but the white balance). The
+                        // four cast gates below read the CURVE step and cannot
+                        // see it. A candidate the stage would have shrunk is
+                        // refused here rather than shrunk: the walk itself
+                        // tries the nearer white balances, each judged anew.
+                        if hand_off_wb_step_refused(
+                            s_img,
+                            wb_stage,
+                            wb,
+                            (before_wb, tp, evidence),
+                            budget,
+                            options.strength,
+                        ) {
+                            #[cfg(test)]
+                            route::note(|r| r.wb_step_refusals += 1);
+                            return None;
+                        }
+                        let mut probe = probe_base.clone();
+                        (probe.temperature_k, probe.tint) = (Some(wb.0), wb.1);
+                        probe.red_curve = Vec::new();
+                        probe.green_curve = Vec::new();
+                        probe.blue_curve = Vec::new();
+                        // Saturation is chased again on the moved white
+                        // balance, from where stage 3 started and on the
+                        // frame stage 3 read (no mixer yet), because the
+                        // chase reads mean chroma and a warmer white balance
+                        // carries more of it: kept at the value read on the
+                        // old one, the neon street's 18.9 shipped over a
+                        // 13000 K white balance and left the building +3.1
+                        // a* past its target (measured 2026-10-23).
+                        // Except from the 4b do-no-harm loop: there the
+                        // saturation is the dial the loop is stepping DOWN,
+                        // and a chase from stage 3's start handed back the
+                        // value the loop had just halved — a round that
+                        // never descends (`CastRescue::KeepSaturation`).
+                        if let Some(start) = rescue.hand_off_chase_from(wb_stage.saturation) {
+                            probe.saturation = start;
+                            let mixer = std::mem::take(&mut probe.hsl);
+                            chase_saturation(&mut probe);
+                            probe.hsl = mixer;
+                        }
+                        let under = pixels_of(&render::develop_preview(s_img, &probe));
+                        probe.red_curve =
+                            residual_channel_curve_weighted(&under, tp, 0, rw_source, rw_target);
+                        probe.green_curve =
+                            residual_channel_curve_weighted(&under, tp, 1, rw_source, rw_target);
+                        probe.blue_curve =
+                            residual_channel_curve_weighted(&under, tp, 2, rw_source, rw_target);
+                        if probe.red_curve.is_empty()
+                            && probe.green_curve.is_empty()
+                            && probe.blue_curve.is_empty()
+                        {
+                            return None;
+                        }
+                        let px = pixels_of(&render::develop_preview(s_img, &probe));
+                        let arm = cells.as_ref().and_then(|c| c.region_arm(&under, &px));
+                        let outcome = cast_gate_outcome_with_ratio(
+                            &under,
+                            &px,
+                            tp,
+                            evidence,
+                            hue_vouch,
+                            cells.as_ref().zip(arm.as_ref().map(|(_, v)| v.as_slice())),
+                            full_cast_accept_ratio,
+                        );
+                        if outcome.refused() || outcome.readings.and_then(|r| r.fan).is_none() {
+                            return None;
+                        }
+                        let mut wb_probe = wb_stage.clone();
+                        (wb_probe.temperature_k, wb_probe.tint) = (Some(wb.0), wb.1);
+                        let vouch = vouch_wb(&wb_probe).filter(|v| v.vouched())?;
+                        Some(CastHandOff {
+                            wb,
+                            saturation: probe.saturation,
+                            curves: [probe.red_curve, probe.green_curve, probe.blue_curve],
+                            outcome,
+                            vouch,
+                            err: look_err_with_evidence(&px, tp, evidence),
+                            pull: cast_wb_direction(&under, &px, wb_weights, law).map_or(
+                                0.0,
+                                |d| d.iter().map(|v| v * v).sum::<f32>().sqrt(),
+                            ),
+                        })
+                    })
+                });
+                let won = if let Some(h) = handed {
+                    #[cfg(test)]
+                    if rescue == DO_NO_HARM_RESCUE {
+                        route::note(|r| r.descent_hand_offs += 1);
+                    }
+                    (recipe.temperature_k, recipe.tint) = (Some(h.wb.0), h.wb.1);
+                    recipe.saturation = h.saturation;
+                    let [red, green, blue] = h.curves;
+                    recipe.red_curve = red;
+                    recipe.green_curve = green;
+                    recipe.blue_curve = blue;
+                    handed_now = true;
+                    cast_handoff.set(Some(HandOffFacts {
+                        from: cast_handoff.get().map_or(from, |prior| prior.from),
+                        to: h.wb,
+                        share,
+                        fan_before,
+                        fan_after: h.outcome.readings.and_then(|r| r.fan).unwrap_or(0.0),
+                        vouch: h.vouch,
+                    }));
+                    out = h.outcome;
+                    None
+                } else {
+                    search_cast_projection(
+                        s_img,
+                        recipe,
+                        [&fitted[0], &fitted[1], &fitted[2]],
+                        err_without,
+                        |px| {
+                            let arm = cells.as_ref().and_then(|c| c.region_arm(&cur, px));
+                            cast_gate_outcome_with_ratio(
+                                &cur,
+                                px,
+                                tp,
+                                evidence,
+                                hue_vouch,
+                                cells.as_ref().zip(arm.as_ref().map(|(_, v)| v.as_slice())),
+                                full_cast_accept_ratio,
+                            )
+                        },
+                    )
+                };
+                // `None`, or an outcome carrying no readings, leaves `out`
+                // holding the FITTED conviction — the refusal branch below
+                // empties whatever curves the search left in the recipe, and
+                // the fan note says the projection was tried.
+                if let Some((t, won)) = won
+                    && let Some(r) = won.readings
+                {
+                    out = CastOutcome {
+                        projected: Some(CastProjection {
+                            share,
+                            fan_before,
+                            t,
+                            fan_after: r.fan,
+                            ratio: r.ratio,
+                            bound: r.bound,
+                            rehued: r.rehued,
+                            foreign: r.foreign,
+                        }),
+                        ..won
+                    };
+                }
+            }
+            // v1.17.1: the curves are read off the finished frame's residual
+            // but applied before the mixer, the grade and saturation, so what
+            // they deliver on the finished frame is not the residual they were
+            // solved for. A cast the four gates ADMITTED as fitted (not
+            // projected, not handed off) has its loop closed on the finished
+            // frame (`refine_curves_on_finished_frame`), and the refined curves
+            // are put to the same four gates on the same frames; they ship only
+            // when those admit them too. Every verdict above is the fitted
+            // curve's, as before — the refinement changes no gate's decision,
+            // only what an admitted cast delivers.
+            if !out.refused() && out.projected.is_none() && !handed_now {
+                let mut refined = recipe.clone();
+                refine_curves_on_finished_frame(s_img, &mut refined, &cur, tp, rw_source, rw_target, evidence);
+                let moved = refined.red_curve != recipe.red_curve
+                    || refined.green_curve != recipe.green_curve
+                    || refined.blue_curve != recipe.blue_curve;
+                if moved {
+                    let px = pixels_of(&render::develop_preview(s_img, &refined));
+                    let arm = cells.as_ref().and_then(|c| c.region_arm(&cur, &px));
+                    let again = cast_gate_outcome_with_ratio(
+                        &cur,
+                        &px,
+                        tp,
+                        evidence,
+                        hue_vouch,
+                        cells.as_ref().zip(arm.as_ref().map(|(_, v)| v.as_slice())),
+                        full_cast_accept_ratio,
+                    );
+                    if !again.refused() {
+                        (recipe.red_curve, recipe.green_curve, recipe.blue_curve) =
+                            (refined.red_curve, refined.green_curve, refined.blue_curve);
+                        out = again;
+                    }
+                }
+            }
+            let measured_ratio = out.readings.map(|r| r.ratio).unwrap_or(0.0);
+            if !out.refused()
+                && cast_admitted_by_strength(
+                    measured_ratio,
+                    full_cast_accept_ratio,
+                    options.strength.get(),
+                )
+            {
+                cast_admission.set(Some((measured_ratio, full_cast_accept_ratio)));
+            }
+            if out.refused() {
+                recipe.red_curve = Vec::new();
+                recipe.green_curve = Vec::new();
+                recipe.blue_curve = Vec::new();
+            }
+        }
+        out
+    }
+
+    /// One candidate carried from 4a' through the finished R8.
+    fn finish(&self, hue_before_mixer: [f32; 8], candidate: Candidate) -> Finished {
+        let ctx = self.ctx;
+        let (s_img, sp, tp, evidence, cells, base, budget) = (ctx.s_img, ctx.sp, ctx.tp, ctx.evidence, ctx.cells, ctx.base, ctx.budget);
+        let err_before = ctx.err_before;
+        let hue_vouch = ctx.hue_vouch();
+        let objective_of = |r: &EditRecipe| ctx.objective_of(r);
+        let wb_stage = &self.wb_stage;
+        let (cast_admission, cast_handoff) = (&self.admission, &self.handoff);
+        let fit_cast_stage = |recipe: &mut EditRecipe, rescue: CastRescue| self.fit(recipe, rescue);
+        let Candidate { mut recipe, mut hsl_facts, hsl_fitted, mut unearned, handoff } = candidate;
+        cast_handoff.set(handoff);
+        // --- 4a') the mixer must EARN its place against its own ABSENCE ----------
+        // Stage 4a judged itself on a render the catch-all had not yet touched,
+        // and "do no harm" is a promise about the FINISHED frame — so the verdict
+        // is taken again here, against the comparison a user would actually make:
+        // this recipe, versus the same recipe with the mixer given back and the
+        // channel curves refitted on THAT state. Measured on real renders, halved
+        // until the mixer stops costing the finished frame anything; withdrawal
+        // to neutral is always reachable, at zero or at the round bound. Judging 4a only where it is fitted was tried first
+        // and it shipped a ceiling-pegged three-band move on the viaduct pair
+        // that the cast stage could then no longer clean up (look 0.026 -> 0.035).
+        //
+        // The band hues answer the same question on their own first: they are a
+        // separate solve on separate evidence (`fit_band_hues`, paired pixels),
+        // so a rotation must not ride along on a saturation and luminance move
+        // that earns the place. Measured 2026-11-02 on the haze pair: the whole
+        // mixer beat no mixer, but the rotations it carried (Orange +9, Green -9,
+        // Aqua -3) left the finished frame at 0.0145 where the same mixer without
+        // them reached 0.0136 — the cast curves carry that pair's per-band hue
+        // change, which is a channel curve's, better than a rotation can.
+        let finished_err = |candidate: &EditRecipe| {
+            look_err_with_evidence(&pixels_of(&render::develop_preview(s_img, candidate)), tp, evidence)
+        };
+        if recipe.hsl.hue != hue_before_mixer {
+            let mut unrotated = recipe.clone();
+            unrotated.hsl.hue = hue_before_mixer;
+            fit_cast_stage(&mut unrotated, CastRescue::Off);
+            let unrotated_err = finished_err(&unrotated);
+            for _ in 0..DO_NO_HARM_MAX_ROUNDS {
+                // R1: the rotation is kept once it gains FIT_QUANT over its absence.
+                if recipe.hsl.hue == hue_before_mixer || ships(finished_err(&recipe), unrotated_err) {
+                    break;
+                }
+                recipe.hsl.hue = super::hsl::hue_halved_toward(&recipe.hsl.hue, &hue_before_mixer);
+                fit_cast_stage(&mut recipe, CastRescue::Off);
+            }
+        }
+        if !recipe.hsl.is_neutral() {
+            let mut neutral = recipe.clone();
+            neutral.hsl = crate::recipe::Hsl::default();
+            // BOTH sides of this comparison are judged with the cast the gates
+            // MEASURED — `rescue: false`. The question here is whether the MIXER
+            // earns its place, and a projection exists only because the cast was
+            // convicted; letting an invented compromise out-vote a per-band solve
+            // the evidence supports is the tail wagging the dog. Measured with
+            // the rescue live in every call (2026-09-02): canyon-warm's mixer
+            // flipped from withdrawn to [Orange +18 +18, Blue -18 -2.6] and the
+            // two-family HSL pair's flipped from attached to withdrawn — four
+            // fixture verdicts moved, none of them this feature's business.
+            fit_cast_stage(&mut neutral, CastRescue::Off);
+            let neutral_err = finished_err(&neutral);
+            let withdrawn = halve_mixer_until_it_earns(
+                &mut recipe,
+                // R1: the mixer ships only on a gain of FIT_QUANT over its absence.
+                |candidate| !ships(finished_err(candidate), neutral_err),
+                |candidate| {
+                    fit_cast_stage(candidate, CastRescue::Off);
+                },
+            );
+            if withdrawn.is_err() {
+                hsl_facts.withdrawn = Some(HslWithdrawal::Error);
+            }
+        }
+        // Re-derive so `cast` and the strength-admission fact describe the recipe
+        // that SHIPS, never a probe taken along the way. This is the first of the
+        // TWO calls allowed to rescue a fan-convicted cast by projection; the
+        // other is the 4b do-no-harm loop's re-fit below, which REPLACES this
+        // recipe one saturation step down and so produces the recipe the user
+        // gets just as much as this one does. The rescue is confined to those two
+        // and to nothing else — the mixer's do-no-harm comparison above judges
+        // both of its branches unrescued. Both arms of the branch above reach
+        // this call, so a solve whose mixer stayed neutral is rescued on the same
+        // terms as one whose mixer attached.
+        //
+        // The 4b call's rescue is ENTERED and its success is UNREACHABLE from any
+        // state this tree can reach — the census at that loop has the numbers and
+        // the reason, which is a fact about how the two colour gates behave in a
+        // stepped-down state rather than a hole in the fixture set.
+        let mut cast = fit_cast_stage(&mut recipe, CastRescue::ChaseSaturation);
+        // R12: the three curves are one joint solve, and a cast→WB hand-off made
+        // the white balance part of it.
+        let mut cast_controls = CAST_CURVES.to_vec();
+        if (recipe.temperature_k, recipe.tint) != (wb_stage.temperature_k, wb_stage.tint) {
+            cast_controls.extend(WB_AXES);
+        }
+        unearned.extend(eliminate_unearned(&mut recipe, base, &cast_controls, objective_of));
+
+        // --- 4b) do-no-harm — the pipeline-END check ------------------------------
+        // Goal: don't hand back a recipe that renders FARTHER from the target
+        // than the untouched source. Saturation is the one dial fitted by
+        // heuristic (mean-chroma chase) rather than by a validated residual, and
+        // it cannot be judged mid-pipeline (see the stage-3 note), so when the
+        // finished recipe regresses, halve saturation — refitting the cast curves
+        // each step, they depend on the saturated state — until the end-to-end
+        // error stops objecting. Saturation is the only shrinkable dial here: if
+        // the regression persists at zero, it is reported honestly through
+        // err_after/confidence rather than hidden. NOTE the case that motivated
+        // this loop (golden-sky pair: a distorted tone map made the whole fit
+        // regress) was root-fixed by `tone_cdf_pair`, but the claim that stood
+        // here until 2026-09-02 — "no current fixture reaches the loop body" — is
+        // FALSE and was measured false. Instrumenting the body and running the
+        // whole library battery on this tree (2026-09-02, with the calibration
+        // corpus present) logs 186 entries: 107 on the error arm, 140 on the
+        // hue-guard arm, 62 on both.
+        //
+        // So the rescue at the `fit_cast_stage` call below is NOT dead code — it
+        // is entered with a conviction to answer: 9 of those 186 re-fits hand
+        // back a FAN-CONVICTED cast. What no fixture reaches is the rescue
+        // SUCCEEDING here, and the measurement says why. All 9 are ALSO
+        // rotation-blocked, so `earns_projection` returns `None` on every one of
+        // them and the projection is never even attempted — 0 of the 186
+        // earn it, 0 come back projected. The coupling belongs to the
+        // stepped-down states rather than to the gates: at the stage's own call
+        // site the same battery separates them on 67 of 545 stage runs (the
+        // census in `a_silently_rejected_colour_stage_now_says_so`).
+        //
+        // That is a measured dead end, not a postponement. About forty pairs were
+        // built for it — one-sided-band wedges to drive the hue-guard arm,
+        // split-chroma frames to drive the error arm — and every one reproduced
+        // the coupling. The projection arithmetic is pinned where it lives, at
+        // `search_cast_projection`
+        // (`the_search_takes_the_best_paying_admissible_shrink`); what has no
+        // end-to-end witness is the ROUTE through this loop, and the reason it
+        // has none is the census above.
+        let sat_fitted = recipe.saturation;
+        let mut end_px = pixels_of(&render::develop_preview(s_img, &recipe));
+        let mut err_after = look_err_with_evidence(&end_px, tp, evidence);
+        // The zero-evidence hue guard is judged HERE, on the composed end state:
+        // saturation may amplify a latent cast mid-pipeline (the stage-3 note),
+        // but the FINISHED recipe must not move pixels blindly through hue bands
+        // no evidence covers — if it does, saturation is the shrinkable dial,
+        // with the cast curves refitted each step exactly like the error arm.
+        let mut end_cells = cells.as_ref().and_then(|c| c.region_arm(sp, &end_px));
+        let mut end_moves_hue = moved_unsupported_hue_range_names_vouched(
+            sp,
+            &end_px,
+            evidence,
+            hue_vouch,
+            cells.as_ref().zip(end_cells.as_ref().map(|(_, v)| v.as_slice())),
+        )
+        .is_some();
+        // The per-band mixer joins global saturation as a shrinkable dial here:
+        // it is the second colour move judged only at the composed end state, and
+        // leaving it out would let the guard exhaust saturation at zero while the
+        // move that actually carried pixels through an unmeasured band rode out.
+        // Halving a neutral mixer is neutral, so a run where the stage attached
+        // nothing is byte-identical to the pre-4a loop.
+        let objects = |err_after: f32, end_moves_hue: bool| {
+            // R1: the end state ships only on a gain of FIT_QUANT over the start.
+            !ships(err_after, err_before) || (end_moves_hue && budget.vetoes == VetoPolicy::Withhold)
+        };
+        let descent = step_down_until_harmless(&mut recipe, objects(err_after, end_moves_hue), |recipe| {
+            #[cfg(test)]
+            route::note(|r| r.descent_rounds += 1);
+            cast = fit_cast_stage(recipe, DO_NO_HARM_RESCUE);
+            end_px = pixels_of(&render::develop_preview(s_img, recipe));
+            err_after = look_err_with_evidence(&end_px, tp, evidence);
+            end_cells = cells.as_ref().and_then(|c| c.region_arm(sp, &end_px));
+            end_moves_hue = moved_unsupported_hue_range_names_vouched(
+                sp,
+                &end_px,
+                evidence,
+                hue_vouch,
+                cells.as_ref().zip(end_cells.as_ref().map(|(_, v)| v.as_slice())),
+            )
+            .is_some();
+            objects(err_after, end_moves_hue)
+        });
+        // TERMINAL delivered-fan check — see `withdraw_curves_for_delivered_fan`
+        // for why a calibrated per-stage gate needs a structural re-read here.
+        // It runs on the Full path only, and that is a fact about the mode rather
+        // than a gap: `fit_atmosphere_from_parts` clears all three channel curves
+        // unconditionally before its own do-no-harm loop, so an Atmosphere recipe
+        // has no cast for a loop to walk around.
+        let delivered_fan =
+            withdraw_curves_for_delivered_fan(s_img, sp, evidence, &mut recipe, &mut end_px);
+        let cast_withdrawn = matches!(delivered_fan, Some((_, _, None)));
+        // R8, once more on the finished global recipe: every control the solve
+        // set must earn FIT_QUANT of J* against its own absence — R22 (a): "the
+        // band a global control earns on is the band its own curve acts on". The
+        // four tone sliders act on a luminance band by construction (whites and
+        // highlights the top of the L* range, blacks and shadows the bottom), and
+        // read on the frame alone their gain is divided by that band's share: on
+        // p38 whites +19.4 took the brightest tenth 6.04 -> 5.09 dE and read
+        // ~0.001 of frame J* (rel1180 msg9 R18). Each earns FIT_QUANT of
+        // `E_paired` (J* units) on the ONE band its own response weights most
+        // ([`look::LumaBands::acting_band`], fixed before any error is read), the
+        // frame's J* a guard only — R19's local ship law. Contrast, exposure and
+        // the tone curve act on the frame and read the frame alone; saturation,
+        // the mixer and the per-band controls act on hue / chroma bands, which
+        // H_ab already reads on the colour side: no L* band. A control that earns
+        // on the frame ships as it always did. No new number.
+        let target_bands = look::luma_bands(tp, evidence);
+        let banded = |candidate: &EditRecipe| {
+            let px = pixels_of(&render::develop_preview(s_img, candidate));
+            let lightness = px.iter().map(|p| cie_lab(p)[0]).collect::<Vec<_>>();
+            let reading: BandReading =
+                (look_err_with_evidence(&px, tp, evidence), target_bands.paired_readings(&px, tp, evidence), lightness);
+            reading
+        };
+        let band_earns =
+            |c: Control, solved: &BandReading, without: &BandReading| earns_on_its_band(c, &target_bands, solved, without);
+        let finished_dropped =
+            eliminate_unearned_by(&mut recipe, base, &global_controls(), banded, |r| r.0, band_earns);
+        if !finished_dropped.is_empty() {
+            end_px = pixels_of(&render::develop_preview(s_img, &recipe));
+        }
+        unearned.extend(finished_dropped.iter().copied());
+        if cast_withdrawn || !finished_dropped.is_empty() {
+            err_after = look_err_with_evidence(&end_px, tp, evidence);
+            end_cells = cells.as_ref().and_then(|c| c.region_arm(sp, &end_px));
+            end_moves_hue = moved_unsupported_hue_range_names_vouched(
+                sp,
+                &end_px,
+                evidence,
+                hue_vouch,
+                cells.as_ref().zip(end_cells.as_ref().map(|(_, v)| v.as_slice())),
+            )
+            .is_some();
+        }
+        let sat_reduced = recipe.saturation != sat_fitted;
+        // The end-state guard owns the withdrawal sentence when IT is the loop
+        // that zeroed the mixer; the stage's own do-no-harm keeps its verdict.
+        if !hsl_fitted.is_neutral() && recipe.hsl.is_neutral() && hsl_facts.withdrawn.is_none() {
+            hsl_facts.withdrawn = Some(if end_moves_hue {
+                HslWithdrawal::Blind
+            } else {
+                HslWithdrawal::Error
+            });
+        }
+        Finished {
+            recipe,
+            hsl_facts,
+            unearned,
+            cast,
+            end_px,
+            err_after,
+            end_cells,
+            sat_fitted,
+            sat_reduced,
+            delivered_fan,
+            descent,
+            admission: cast_admission.get(),
+            handoff: cast_handoff.get(),
+        }
+    }
+}
+
 /// One mixer candidate carried to its finished recipe (rel1180
 /// RULING-1180-sc-r5 Q-SC-2c (b)): what the stages from 4a' to the finished
 /// R8 left, and the cast facts its own last call wrote.
+#[derive(Clone)]
 struct Finished {
     recipe: EditRecipe,
     hsl_facts: HslStageFacts,
