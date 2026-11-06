@@ -1987,6 +1987,11 @@ fn a_flat_cells_slope_is_nothing_and_adds_no_grain() {
 /// the cells' green centres, every site the light over its gain clipped at
 /// the white.
 fn star_row(seed: u64, noise: bool) -> (Vec<f32>, usize, usize) {
+    star_profile(seed, noise, 1.0)
+}
+
+/// The star row's light times `scale` ([`star_row`] at 1).
+fn star_profile(seed: u64, noise: bool, scale: f64) -> (Vec<f32>, usize, usize) {
     const CLIP: f64 = 1.0687;
     let (cw, ch) = (96usize, 64usize);
     let (w, h) = (2 * cw, 2 * ch);
@@ -2013,7 +2018,7 @@ fn star_row(seed: u64, noise: bool) -> (Vec<f32>, usize, usize) {
     let mut m = vec![0.0f32; w * h];
     m.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         for (x, v) in row.iter_mut().enumerate() {
-            let s = light(x) / gain[match (y % 2, x % 2) { (0, 0) => 0, (1, 1) => 2, _ => 1 }];
+            let s = scale * light(x) / gain[match (y % 2, x % 2) { (0, 0) => 0, (1, 1) => 2, _ => 1 }];
             let n = if noise { (STAR_A * s + STAR_B).sqrt() * normal(seed, (y * w + x) as u64) } else { 0.0 };
             *v = (s + n).min(1.0) as f32;
         }
@@ -2170,6 +2175,112 @@ fn a_stars_ring_is_not_measured_and_keeps_the_develops_colour() {
             let ratio = var.sqrt() / model;
             let se = (1.0 / (2.0 * (n - 1.0))).sqrt();
             assert!((ratio - 1.0).abs() <= 3.0 * se, "{name} cell {cx}: the measured spread of d is {ratio:.3} of the modelled per-sample sd (3 se {:.3})", 3.0 * se);
+        }
+    }
+}
+
+/// The planarity test's own witness (rel1180 RULING r33): the star row's
+/// anisotropic profile scaled so its noiseless peak is half the white, so no
+/// sample clips on any frame and every site the frame refuses is refused by
+/// its planarity alone. The sites whose noiseless four greens are off one
+/// plane by `|z| > k_F + 3` are not measured on 99 % of rows or more (the set
+/// is not empty: under the clip it is the core's kink, the red site of cell
+/// 47 at z +11.5; the exponential flank curves under `k_F + 3` at every
+/// scale), and (iii) each keeps the demosaic's colour difference exactly. Printed: the colour difference the rebuild leaves at those sites
+/// against the neutral truth, in their own sds and in 8-bit codes of the
+/// white (the ring a read there would paint).
+#[test]
+fn a_bright_points_flank_under_the_clip_is_refused_by_its_planarity() {
+    const FRAMES: u64 = 20;
+    // The profile's unclipped peak, read at a scale far under the clip; the
+    // row is then scaled to half the white.
+    let probe = 1e-3;
+    let (mp, w, h) = star_profile(0, false, probe);
+    let top = mp.iter().map(|&v| f64::from(v)).fold(0.0, f64::max) / probe;
+    let scale = 0.5 / top;
+    let (m0, ..) = star_profile(0, false, scale);
+    let clean = star_cells(&m0, w, h);
+    let (cw, ch) = (clean.cw, clean.ch);
+    let k = fair_k((cw * ch) as f64);
+    let (rho, lv) = (at25(), lv25());
+    let rows = 16..ch - 16;
+    let z_of = |m: &[f32], cx: usize, cy: usize, j: usize| {
+        let (dy, dx) = [(0usize, 0usize), (1, 1)][j];
+        let (x, y) = (2 * cx + dx, 2 * cy + dy);
+        let g = [(x, y - 1), (x, y + 1), (x + 1, y), (x - 1, y)].map(|(a, b)| f64::from(m[b * w + a]));
+        let v: f64 = g.iter().map(|&s| STAR_A * s.max(0.0) + STAR_B).sum();
+        ((g[0] + g[1]) - (g[2] + g[3])) / v.sqrt()
+    };
+    let set: [Vec<usize>; 2] = [0, 1].map(|j| (2..cw - 2).filter(|&cx| z_of(&m0, cx, 32, j).abs() > k + 3.0).collect());
+    println!("under the clip: scale {scale:.6} (peak 0.5 of the white), k_F {k:.3}");
+    for (j, name) in ["R-G", "B-G"].iter().enumerate() {
+        println!("  {name}: sites of |z| > k_F + 3: {:?}", set[j].iter().map(|&cx| format!("{cx} z {:+.1}", z_of(&m0, cx, 32, j))).collect::<Vec<_>>());
+    }
+    assert!(!set[0].is_empty() || !set[1].is_empty(), "no site of the scaled row is off one plane by k_F + 3");
+    let mut refused = vec![[0usize; 2]; cw];
+    let (mut site_err, mut clipped) = (0.0f64, 0usize);
+    let mut rim = [Vec::new(), Vec::new()];
+    for seed in 1..=FRAMES {
+        let (m, ..) = star_profile(seed, true, scale);
+        clipped += m.iter().filter(|&&v| v >= 1.0).count();
+        let cells = star_cells(&m, w, h);
+        let f = cells.guided(rho, lv);
+        let chroma = cells.chroma(&f, STAR_WB, rho);
+        // (iii): the star row's stand-in demosaic (the noisy light per pixel
+        // at the scene's own colour).
+        let mut rgb: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                let g = m[((i / w) * w + (i % w)) ^ 1].max(0.0);
+                [g / STAR_WB[0] as f32, m[i], g / STAR_WB[2] as f32]
+            })
+            .collect();
+        let before = rgb.clone();
+        chroma.rebuild(&mut rgb, w, 0, 0, GREEN_LUMA);
+        for cy in rows.clone() {
+            for j in 0..2 {
+                let (dy, dx) = [(0usize, 0usize), (1, 1)][j];
+                let c = |q: [f32; 3]| f64::from(if j == 0 { STAR_WB[0] as f32 * q[0] } else { STAR_WB[2] as f32 * q[2] } - q[1]);
+                for &cx in &set[j] {
+                    let i = cy * cw + cx;
+                    let p = (2 * cy + dy) * w + 2 * cx + dx;
+                    let sd = cells.own_noise(i).0[j];
+                    rim[j].push((c(rgb[p]) / sd, c(rgb[p]) * 255.0));
+                    if !cells.meas[i][j] {
+                        refused[cx][j] += 1;
+                        site_err = site_err.max((c(rgb[p]) - c(before[p])).abs());
+                    }
+                }
+            }
+        }
+    }
+    let n_rows = (rows.len() as u64 * FRAMES) as f64;
+    for (j, name) in ["R-G", "B-G"].iter().enumerate() {
+        let r = &rim[j];
+        if r.is_empty() {
+            continue;
+        }
+        let n = r.len() as f64;
+        let mean = |f: fn(&(f64, f64)) -> f64| r.iter().map(f).sum::<f64>() / n;
+        println!(
+            "  {name}: the rebuilt colour difference at the set against the neutral truth: mean {:+.2} sd ({:+.1} codes), mean |.| {:.2} sd ({:.1} codes); refused shares {:?}",
+            mean(|q| q.0),
+            mean(|q| q.1),
+            mean(|q| q.0.abs()),
+            mean(|q| q.1.abs()),
+            set[j].iter().map(|&cx| format!("{cx} {:.3}", refused[cx][j] as f64 / n_rows)).collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(clipped, 0, "a sample of the scaled row clips");
+    assert!(site_err <= 1e-5, "(iii): a site not measured is written {site_err:.2e} off the demosaic's colour");
+    for (j, name) in ["R-G", "B-G"].iter().enumerate() {
+        for &cx in &set[j] {
+            assert!(
+                refused[cx][j] as f64 >= 0.99 * n_rows,
+                "{name} cell {cx}: planarity z {:+.1} is measured on {} of {} rows",
+                z_of(&m0, cx, 32, j),
+                n_rows as usize - refused[cx][j],
+                n_rows
+            );
         }
     }
 }
