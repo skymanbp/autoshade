@@ -1725,6 +1725,151 @@ fn three_materials_across_an_edge_are_each_read_at_their_own_colour() {
     assert!(failed.is_empty(), "a material's cell reads beyond k_F of its colour noise: {failed:?}");
 }
 
+/// The photon and read terms at which the module's mosaic has p40's traced
+/// noise at the foliage edge under the sky (rel1180 msg-e3 R38-3: the darkest
+/// rim cells' colour variance 2.9e-6 at green 0.0101, the sky's 9.2e-5 at
+/// 0.33), for the colour differences `d_dark`, `d_sky` there: two linear
+/// equations in `a`, `b` ([`cell_sd_at`]).
+fn rim_noise(d_dark: f64, d_sky: f64) -> (f64, f64) {
+    let (gd, vd, gs, vs) = (0.0101, 2.9e-6, 0.33, 9.2e-5);
+    // v = a·(wR·(g + d) + g/4) + b·(wR² + 1/4).
+    let (pd, ps) = (WB[0] * (gd + d_dark) + gd / 4.0, WB[0] * (gs + d_sky) + gs / 4.0);
+    let a = (vs - vd) / (ps - pd);
+    (a, (vd - a * pd) / (WB[0] * WB[0] + 0.25))
+}
+
+/// An RGGB mosaic whose cell `(cx, cy)` has the light `g` (green) and the
+/// colour difference `d` (R − G, white-balanced), the blue grey, with photon
+/// `a` and read `b` noise.
+fn scene_xy(g: impl Fn(usize, usize) -> f64 + Sync, d: impl Fn(usize, usize) -> f64 + Sync, a: f64, b: f64, seed: u64) -> Vec<f32> {
+    let mut m = vec![0.0f32; W * H];
+    m.par_chunks_mut(W).enumerate().for_each(|(y, row)| {
+        for (x, v) in row.iter_mut().enumerate() {
+            let gl = g(x / 2, y / 2);
+            let sv = match (y % 2, x % 2) {
+                (0, 0) => (gl + d(x / 2, y / 2)) / WB[0],
+                (1, 1) => gl / WB[2],
+                _ => gl,
+            };
+            *v = (sv + (a * sv + b).max(0.0).sqrt() * normal(seed, (y * W + x) as u64)) as f32;
+        }
+    });
+    m
+}
+
+/// A dark row under a bright sky, the rim's own geometry (rel1180 msg-e3
+/// R38-1, RULING r39) at p40's traced rim noise ([`rim_noise`]): the sky's
+/// light carries a texture (0.32 / 0.34 a column apart) and its colour
+/// follows it on a line (R − G +0.25 at 0.33, +0.03 at the foliage's 0.0101);
+/// every 48 rows a
+/// dark row two cells deep, its light ~30 times lower (0.0101 / 0.0140 a
+/// column apart: the foliage's spread), its variance ~30 times lower, and the
+/// darkest cells' colour 20 of their own sds under the sky's line (the
+/// others on it) — a colour that is not linear in light, small in the sky's
+/// units. A window of the slider's width over the row holds two rows of 23
+/// dark cells among 529: judged at the window's mean variance, which the sky
+/// sets, the dark cells' misfit hides and the window's line reads them toward
+/// the sky's line (the purple rim); judged per sample, each residual over its
+/// own variance at the level the stage read for it, the window refuses.
+/// Asserted: no window over the row votes for R − G, and every measured cell
+/// of the rows beside it reads within `k_F` of its own noise of its own colour
+/// (its site difference's: the four greens' mean holds a neighbour's light).
+/// Printed: the windows over the row and how many vote, the dark row's error
+/// per light (cell sds, mean and worst), the share read at each width.
+///
+/// MUTATION: the vote's null pooled (8b608fc's form: the fit unweighted, the
+/// window's mean variance): windows over the row vote and its cells read
+/// toward the sky's line by many of their own sds (red).
+#[test]
+fn a_window_over_a_dark_row_is_judged_at_each_sides_own_noise() {
+    // The sky's line (R - G +0.25 at 0.33, +0.03 at the foliage's 0.0101);
+    // the darkest cells sit 20 of their OWN sds under it (round 38: the rim
+    // cell 17-33 own sds under the line, its colour near 0), the noise
+    // p40's traced variances at the colours the cells have.
+    let (d_sky, d_line) = (0.25, 0.03);
+    let slope = (d_sky - d_line) / (0.33 - 0.0101);
+    let line = move |g: f64| d_sky + slope * (g - 0.33);
+    let (off, (a, b)) = (0..30).fold((0.0, (0.0, 0.0)), |(off, _), _| {
+        let (a, b) = rim_noise(line(0.0101) + off, d_sky);
+        (-20.0 * cell_sd_at(0.0101, line(0.0101) + off, a, b), (a, b))
+    });
+    let dark = |cy: usize| cy % 48 == 24 || cy % 48 == 25;
+    let g = move |cx: usize, cy: usize| match (dark(cy), cx.is_multiple_of(2)) {
+        (true, true) => 0.0101,
+        (true, false) => 0.0140,
+        (false, true) => 0.32,
+        (false, false) => 0.34,
+    };
+    let d = move |cx: usize, cy: usize| line(g(cx, cy)) + if dark(cy) && cx.is_multiple_of(2) { off } else { 0.0 };
+    let cells = cells_of(&scene_xy(g, d, a, b, 99), Some(NoiseModel::known(a, b, W, H)));
+    let (rho, levels) = (at25(), lv25());
+    let k = fair_k((cells.cw * cells.ch) as f64);
+    let light = cells.read_light(levels, k);
+    let (out, used) = cells.read_widths(rho, levels, &light);
+    let lines = cells.lines(rho, levels, &light, &cells.noise());
+    let (cw, ch) = (cells.cw, cells.ch);
+    // Each material's own colour as its sites measure it (the four greens'
+    // mean holds a neighbour's light): the mean of its measured differences.
+    let class = move |cx: usize, cy: usize| usize::from(dark(cy)) * 2 + cx % 2;
+    let mut own = [(0.0f64, 0usize); 4];
+    for i in (0..cw * ch).filter(|&i| cells.meas[i][0]) {
+        let o = &mut own[class(i % cw, i / cw)];
+        (o.0, o.1) = (o.0 + f64::from(cells.d[i][0]), o.1 + 1);
+    }
+    let want = |cx: usize, cy: usize| {
+        let o = own[class(cx, cy)];
+        o.0 / o.1.max(1) as f64
+    };
+    let sd = |cx: usize, cy: usize| cell_sd_at(g(cx, cy), d(cx, cy), a, b);
+    let rows: Vec<usize> = (24..ch - 24).filter(|cy| cy % 48 == 24).collect();
+    let over: Vec<usize> = rows.iter().flat_map(|&r| (r + 1 - rho..=r + rho).flat_map(move |cy| (rho..cw - rho).map(move |cx| cy * cw + cx))).collect();
+    let voted = over.iter().filter(|&&i| lines[i][4] == 1.0).count();
+    let widths = ladder(rho, levels);
+    let per_width: Vec<String> = widths
+        .iter()
+        .map(|&w| {
+            let l = cells.lines(w, levels, &light, &cells.noise());
+            let o: Vec<usize> = rows.iter().flat_map(|&r| (r + 1 - w..=r + w).flat_map(move |cy| (w..cw - w).map(move |cx| cy * cw + cx))).collect();
+            format!("{w}: {} of {}", o.iter().filter(|&&i| l[i][4] == 1.0).count(), o.len())
+        })
+        .collect();
+    println!("dark row: noise a {a:.3e} b {b:.3e}; colour sd dark {:.5} / {:.5}, sky {:.5}; off {off:.4} ({:.1} sky sds); k_F {k:.3}, half side {rho}", sd(0, 24), sd(1, 24), sd(0, 0), off / sd(0, 0));
+    println!("dark row: windows over a dark row voting for R - G, per half side: {}", per_width.join(", "));
+    let mut failed = Vec::new();
+    if voted > 0 {
+        failed.push(format!("{voted} of {} windows over the dark row vote", over.len()));
+    }
+    let mut stats = [(0.0f64, 0.0f64, 0usize); 2];
+    let mut checked = 0;
+    for &r in &rows {
+        for cy in r - 4..r + 6 {
+            for cx in 1..cw - 1 {
+                let i = cy * cw + cx;
+                if !cells.meas[i][0] {
+                    continue;
+                }
+                checked += 1;
+                let z = (f64::from(out[i][0]) - want(cx, cy)) / sd(cx, cy);
+                if dark(cy) {
+                    let s = &mut stats[cx % 2];
+                    (s.0, s.1, s.2) = (s.0 + z, s.1.max(z.abs()), s.2 + 1);
+                }
+                if z.abs() > k {
+                    failed.push(format!("cell ({cx}, {cy}): {z:+.2} own sds"));
+                }
+            }
+        }
+    }
+    for (p, name) in [(0usize, "0.0101 (20 own sds under the line)"), (1, "0.0140 (on it)")] {
+        let (sum, worst, n) = stats[p];
+        println!("dark row: measured cells at light {name}: {n}, read - own colour mean {:+.2} worst {worst:.2} own sds", sum / n.max(1) as f64);
+    }
+    let near = rows.iter().flat_map(|&r| (r..r + 2).flat_map(move |cy| (0..cw).map(move |cx| cy * cw + cx))).collect::<Vec<_>>();
+    println!("dark row: {checked} measured cells checked beside the rows; ladder {widths:?}; the dark rows' share read at each width, then kept as sampled: {:?}", width_shares(&used, near.iter().copied(), widths.len(), 0).iter().map(|x| format!("{x:.4}")).collect::<Vec<_>>());
+    failed.truncate(12);
+    assert!(failed.is_empty(), "a window over the dark row reads it beyond k_F of its own noise: {failed:?}");
+}
+
 /// A stroke three cells wide of a third colour inside the banner (the
 /// letters): the banner (green 0.0095, R − G +0.072, the trace's noise) with
 /// a stroke at the banner's light 12 of its colour sds off it (the light does
