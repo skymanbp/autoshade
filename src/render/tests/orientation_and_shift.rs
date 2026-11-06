@@ -372,7 +372,7 @@ fn the_engine_renders_the_colour_field_after_the_masks_it_reads() {
             [0.10 * (bin as f32 / (fb - 1) as f32) - 0.05, 0.06 * x, 0.0, -0.06 * x, 0.02]
         })
         .collect();
-    let field = ColourField { x: fx, y: fy, b: fb, grid, amount: 1.0, enabled: true };
+    let field = ColourField { x: fx, y: fy, b: fb, grid, owners: Vec::new(), amount: 1.0, enabled: true };
 
     let with_mask = EditRecipe {
         masks: vec![LocalAdjustment {
@@ -387,7 +387,7 @@ fn the_engine_renders_the_colour_field_after_the_masks_it_reads() {
 
     let masked = pixels_of(&develop_preview(&img, &with_mask));
     let mut expected = masked.clone();
-    apply_colour_field(&mut expected, w as usize, h as usize, Some(&field));
+    apply_colour_field(&mut expected, w as usize, h as usize, Some(&field), None);
     let actual = pixels_of(&develop_preview(&img, &both));
     assert_ne!(actual, masked, "premise: this field is not the identity here");
     let worst = actual
@@ -420,6 +420,86 @@ fn the_engine_renders_the_colour_field_after_the_masks_it_reads() {
     }
 }
 
+/// v1.18.0. The ENGINE reads a field's zone owners on the recipe's sky zone
+/// mask geometry: a field whose sky-owned vertex row carries a lift and whose
+/// land-owned rows carry nothing leaves the land under the zone edge exactly
+/// as the masks left it, while the sky above it lifts; the same field with no
+/// zone mask to read has no partition and reads plain — the land lifts.
+#[test]
+fn the_engine_reads_a_zone_owned_field_on_the_sky_zones_geometry() {
+    use crate::fit::pixels_of;
+    use crate::recipe::{ColourField, LocalAdjustment, MaskGeometry, MaskRole};
+    let (w, h) = (96u32, 64u32);
+    let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(w, h, image::Rgb([90, 90, 90])));
+    // Three vertex rows at pixel rows 0, 31.5 and 63; the zone edge at row 40,
+    // so the middle row's population is mostly sky and the land rows 40..47
+    // read it.
+    let (fx, fy, fb) = (2usize, 3usize, 2usize);
+    let lifted = |v: usize| v / fb / fx < 2;
+    let grid: Vec<[f32; 5]> = (0..fx * fy * fb).map(|v| if lifted(v) { [0.5, 0.0, 0.0, 0.0, 0.0] } else { [0.0; 5] }).collect();
+    let owners = (0..fx * fy * fb)
+        .map(|v| if lifted(v) { ColourField::OWNER_SKY } else { ColourField::OWNER_LAND })
+        .collect();
+    let field = ColourField { x: fx, y: fy, b: fb, grid, owners, amount: 1.0, enabled: true };
+    let edge = 40.0 / h as f32;
+    let sky_zone = LocalAdjustment {
+        mask: MaskGeometry::Linear { zero_x: 0.5, zero_y: edge + 0.001, full_x: 0.5, full_y: edge - 0.001 },
+        role: MaskRole::ZoneSky,
+        ..Default::default()
+    };
+    let zoned = EditRecipe { masks: vec![sky_zone.clone()], colour_field: Some(field.clone()), ..Default::default() };
+    let before = pixels_of(&develop_preview(&img, &EditRecipe { masks: vec![sky_zone], ..Default::default() }));
+    let after = pixels_of(&develop_preview(&img, &zoned));
+    let row = |px: &[[f32; 3]], y: u32| px[(y * w + w / 2) as usize][1];
+    for y in 40..48 {
+        assert_eq!(row(&after, y), row(&before, y), "land row {y} reads only land-owned vertices");
+    }
+    assert!(row(&after, 36) > row(&before, 36), "the sky row above the edge keeps its lift");
+    let plain = pixels_of(&develop_preview(&img, &EditRecipe { colour_field: Some(field), ..Default::default() }));
+    assert!(row(&plain, 40) > row(&before, 40), "no zone mask, no partition: the land reads the lift");
+}
+
+/// v1.18.0. A zone with no controls of its own is still the zone: a land zone
+/// on a raster (the inverted sky) that moves no pixel — the develop's raster
+/// snapshot holds only masks that act — still partitions the frame for the
+/// field's zone-owned read, so the land under the edge reads no sky lift.
+#[test]
+fn a_zone_that_moves_no_pixel_still_partitions_the_fields_read() {
+    use crate::fit::pixels_of;
+    use crate::recipe::{ColourField, LocalAdjustment, MaskGeometry, MaskRole};
+    let (w, h) = (96u32, 64u32);
+    let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(w, h, image::Rgb([90, 90, 90])));
+    let dir = std::env::temp_dir().join(format!("autoshade-field-partition-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sky.png");
+    image::GrayImage::from_fn(w, h, |_, y| image::Luma([if y < 40 { 255 } else { 0 }])).save(&path).unwrap();
+    let (fx, fy, fb) = (2usize, 3usize, 2usize);
+    let lifted = |v: usize| v / fb / fx < 2;
+    let grid: Vec<[f32; 5]> = (0..fx * fy * fb).map(|v| if lifted(v) { [0.5, 0.0, 0.0, 0.0, 0.0] } else { [0.0; 5] }).collect();
+    let owners = (0..fx * fy * fb)
+        .map(|v| if lifted(v) { ColourField::OWNER_SKY } else { ColourField::OWNER_LAND })
+        .collect();
+    let field = ColourField { x: fx, y: fy, b: fb, grid, owners, amount: 1.0, enabled: true };
+    let land_zone = LocalAdjustment {
+        mask: MaskGeometry::Bitmap { path: path.to_string_lossy().into_owned() },
+        role: MaskRole::ZoneLand,
+        inverted: true,
+        ..Default::default()
+    };
+    assert!(!crate::render::engine_active(&land_zone), "premise: the zone moves no pixel");
+    let before = pixels_of(&develop_preview(&img, &EditRecipe::default()));
+    let after = pixels_of(&develop_preview(
+        &img,
+        &EditRecipe { masks: vec![land_zone], colour_field: Some(field), ..Default::default() },
+    ));
+    let row = |px: &[[f32; 3]], y: u32| px[(y * w + w / 2) as usize][1];
+    for y in 40..48 {
+        assert_eq!(row(&after, y), row(&before, y), "land row {y} reads only land-owned vertices");
+    }
+    assert!(row(&after, 36) > row(&before, 36), "the sky row above the edge keeps its lift");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// R33 §G. A quarter turn moves the field's cells with every other
 /// coordinate in the recipe, and swaps its two axis LENGTHS with them.
 ///
@@ -431,11 +511,15 @@ fn a_quarter_turn_transposes_the_colour_field_and_comes_back() {
     use crate::recipe::ColourField;
     let (fx, fy, fb) = (4usize, 3usize, 2usize);
     let seed = |i: usize| [i as f32, 0.0, 0.0, 0.0, 0.0];
+    // The zone owners (v1.18.0) are a per-vertex fact: each rides with its
+    // vertex, read back below off the value it was seeded beside.
+    let owner = |i: usize| (i % 3) as u8;
     let field = ColourField {
         x: fx,
         y: fy,
         b: fb,
         grid: (0..fx * fy * fb).map(seed).collect(),
+        owners: (0..fx * fy * fb).map(owner).collect(),
         amount: 1.0,
         enabled: true,
     };
@@ -455,6 +539,9 @@ fn a_quarter_turn_transposes_the_colour_field_and_comes_back() {
             "{there:?}: the axis lengths follow the frame"
         );
         assert_eq!(turned.grid.len(), fx * fy * fb, "no vertex was lost or invented");
+        for (vertex, &o) in turned.grid.iter().zip(&turned.owners) {
+            assert_eq!(o, owner(vertex[0] as usize), "{there:?}: an owner travels with its vertex");
+        }
         orient_recipe_coords(&mut r, back, None);
         assert_eq!(
             r.colour_field.as_ref().expect("still there"),
@@ -784,6 +871,7 @@ fn shift_recipe_coords_moves_every_carrier_and_round_trips() {
             y: 1,
             b: 1,
             grid: vec![[0.0; 5], [1.0; 5]],
+            owners: Vec::new(),
             amount: 1.0,
             enabled: true,
         }),

@@ -91,6 +91,7 @@
             y: 2,
             b: 2,
             grid: vec![[0.1, 0.0, 0.0, 0.0, 0.0]; 8],
+            owners: Vec::new(),
             amount: 1.0,
             enabled: true,
         });

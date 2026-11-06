@@ -472,7 +472,19 @@ pub(super) fn apply_develop_with_rasters(
     //    frame they produced. Its guide is the render's own smoothed luma at
     //    the render's own resolution, which is what makes it a pure function
     //    of the pixels in front of it at any size.
-    apply_colour_field_in(data, w, h, r.colour_field.as_ref(), corrected);
+    //    v1.18.0: a field that carries zone owners reads each pixel on its own
+    //    zone's vertices, the zone being the recipe's sky zone mask geometry in
+    //    THIS frame at THIS size (`masks::field_sky_coverage`, the coverage
+    //    machinery the mask pass above reads). Owners but no readable zone mask
+    //    (deleted, or its raster lost) read plain: with no partition there is no
+    //    "own zone" to read on, and the plain read is the field as it was before
+    //    the owners existed.
+    let sky = r
+        .colour_field
+        .as_ref()
+        .filter(|f| f.renderable() && !f.owners.is_empty())
+        .and_then(|_| masks::field_sky_coverage(r, rasters, frame, w, h));
+    apply_colour_field_in(data, w, h, r.colour_field.as_ref(), corrected, sky.as_deref());
     // 8) the SDR rendition (v1.5.0 F8), the last EDIT because that is what it is: not
     //    another edit but the mapping of the finished edit into the range this
     //    engine can publish. Lightroom derives it from the completed HDR
@@ -547,13 +559,46 @@ pub(super) fn apply_develop_with_rasters(
 /// far less than that except on hard edges, where the trilinear read blends
 /// the two bins anyway. It is measured rather than asserted — see the report
 /// for the 2048-vs-384 discrepancy on the reference pair.
+///
+/// v1.18.0: `sky` is the frame's sky / land partition, each pixel's coverage
+/// by the sky zone's geometry (`>= 0.5` is a sky pixel). With a field that
+/// carries [`owners`](crate::recipe::ColourField::owners), each pixel reads
+/// only the corners its own zone owns ([`field_own_corners`]); `None`, or a
+/// field with no owners, is the plain read, bit for bit.
 pub(crate) fn apply_colour_field(
     data: &mut [[f32; 3]],
     w: usize,
     h: usize,
     field: Option<&crate::recipe::ColourField>,
+    sky: Option<&[f32]>,
 ) {
-    apply_colour_field_in(data, w, h, field, None);
+    apply_colour_field_in(data, w, h, field, None, sky);
+}
+
+/// The zone a pixel reads the field on, from its coverage by the sky zone's
+/// geometry: sky at `>= 0.5` (the partition's own half-way, the same rule the
+/// fit's zone membership uses), land otherwise.
+pub(crate) fn field_pixel_zone(sky_coverage: f32) -> u8 {
+    if sky_coverage >= 0.5 {
+        crate::recipe::ColourField::OWNER_SKY
+    } else {
+        crate::recipe::ColourField::OWNER_LAND
+    }
+}
+
+/// "A zone's correction is read on its own pixels" (v1.18.0): of a pixel's
+/// eight trilinear `weights`, keep those whose corner's `owners` entry is the
+/// pixel's own `zone` and renormalise them to sum 1; a pixel whose zone owns
+/// none of its corners (no kept weight) keeps all eight as they were. ONE
+/// implementation, called by the engine's read and by the solve's splat
+/// (`fit_field`), so the field the fit solves is the field the export reads.
+pub(crate) fn field_own_corners(weights: &mut [f32; 8], owners: &[u8; 8], zone: u8) {
+    let kept: f32 = weights.iter().zip(owners).filter(|(_, o)| **o == zone).map(|(w, _)| *w).sum();
+    if kept > 0.0 {
+        for (w, o) in weights.iter_mut().zip(owners) {
+            *w = if *o == zone { *w / kept } else { 0.0 };
+        }
+    }
 }
 
 /// [`apply_colour_field`] on a frame `corrected` maps (`MaskFrame::Corrected`,
@@ -567,11 +612,13 @@ fn apply_colour_field_in(
     h: usize,
     field: Option<&crate::recipe::ColourField>,
     corrected: Option<&MaskUnwarp>,
+    sky: Option<&[f32]>,
 ) {
     let Some(field) = field.filter(|f| f.renderable()) else { return };
     if w == 0 || h == 0 || data.len() != w * h {
         return;
     }
+    let sky = sky.filter(|s| s.len() == data.len() && !field.owners.is_empty());
     let guide = field_guide_luma(data, w, h);
     let (xs, ys) = (field_axis(w, field.x), field_axis(h, field.y));
     // Pixel position `p` (continuous, `p = i` at a pixel centre) on the axis.
@@ -595,15 +642,22 @@ fn apply_colour_field_in(
             (low[axis], high[axis]) = (floor, (floor + 1).min(limit - 1));
             frac[axis] = coords[axis] - floor as f32;
         }
-        let mut p = [0.0f64; 5];
+        let (mut ids, mut weights) = ([0usize; 8], [0.0f32; 8]);
         for slot in 0..8 {
             let up = [slot >> 2 & 1, slot >> 1 & 1, slot & 1];
             let at = |a: usize| if up[a] == 1 { high[a] } else { low[a] };
             let mass = |a: usize| if up[a] == 1 { frac[a] } else { 1.0 - frac[a] };
-            let weight = (mass(0) * mass(1) * mass(2)) as f64;
-            let vertex = &field.grid[(at(1) * field.x + at(0)) * field.b + at(2)];
+            ids[slot] = (at(1) * field.x + at(0)) * field.b + at(2);
+            weights[slot] = mass(0) * mass(1) * mass(2);
+        }
+        if let Some(sky) = sky {
+            field_own_corners(&mut weights, &ids.map(|id| field.owners[id]), field_pixel_zone(sky[i]));
+        }
+        let mut p = [0.0f64; 5];
+        for (&id, &weight) in ids.iter().zip(&weights) {
+            let vertex = &field.grid[id];
             for (q, slot) in p.iter_mut().enumerate() {
-                *slot += weight * vertex[q] as f64;
+                *slot += weight as f64 * vertex[q] as f64;
             }
         }
         let g = guide[i];

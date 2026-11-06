@@ -382,7 +382,22 @@ pub(super) fn attach_colour_field(
     let current = fit::pixels_of(&render::develop_preview(&s_img, &report.recipe));
     let target_pixels = fit::pixels_of(&t_img);
     let (w, h) = (s_img.width(), s_img.height());
-    let Some(pass_a) = LocalField::solve(&current, &target_pixels, w, h, &report.evidence)
+    // v1.18.0, "a zone's correction is read on its own pixels": the field that
+    // ships reads each pixel on the vertices its own zone owns, the zone being
+    // the attached sky zone's geometry in the frame and at the size the
+    // develop of this preview reads its masks in. Every solve below — pass A,
+    // the pinned re-solve and pass B — is solved for that read, so the field
+    // carried is the field the read was solved for. No zone mask, no
+    // partition: the plain read, as before.
+    let sky = render::preview_field_sky_coverage(&s_img, &report.recipe);
+    let sky = sky.as_deref();
+    let solve_on = |target: &[[f32; 3]], evidence: &fit::EvidenceModel| {
+        LocalField::solve_zoned(
+            &current, target, w, h, evidence, crate::fit_field::TIKHONOV, crate::fit_field::SMOOTH,
+            crate::fit_field::ITERATIONS, FieldSolveOpts::default(), sky,
+        )
+    };
+    let Some(pass_a) = solve_on(&target_pixels, &report.evidence)
     else {
         note(report, crate::rationale::keys::FIELD_UNSOLVED, vec![("stage", "attach".into())]);
         return;
@@ -428,14 +443,14 @@ pub(super) fn attach_colour_field(
         let pass = if let Some(pass) = first.take() {
             pass
         } else {
-            let Some(pass) = LocalField::solve(&current, &solve_target, w, h, &evidence) else {
+            let Some(pass) = solve_on(&solve_target, &evidence) else {
                 note(report, crate::rationale::keys::FIELD_UNSOLVED, vec![("stage", "attach".into())]);
                 return;
             };
             pass
         };
         let (solved, admitted, read, paired) =
-            admit_cells(&current, &solve_target, w, h, &evidence, pass, budget.field_gain, layout);
+            admit_cells(&current, &solve_target, w, h, &evidence, pass, budget.field_gain, layout, sky);
         // Rendered from the field the recipe will CARRY — rounded the way
         // `ColourField::round` stores it — so the do-no-harm verdicts and
         // `FIELD_ATTACHED`'s numbers describe the render a reopen produces.
@@ -443,7 +458,7 @@ pub(super) fn attach_colour_field(
         field.round();
         let after = {
             let mut out = current.clone();
-            render::apply_colour_field(&mut out, w as usize, h as usize, Some(&field));
+            render::apply_colour_field(&mut out, w as usize, h as usize, Some(&field), sky);
             out
         };
         let err_with = fit::look_err_with_evidence(&after, &target_pixels, &report.evidence);
@@ -575,7 +590,7 @@ pub(super) fn attach_colour_field(
 #[allow(clippy::too_many_arguments)]
 fn admit_cells(
     current: &[[f32; 3]], target: &[[f32; 3]], width: u32, height: u32,
-    evidence: &fit::EvidenceModel, pass_a: LocalField, gain: f32, layout: &[f32],
+    evidence: &fit::EvidenceModel, pass_a: LocalField, gain: f32, layout: &[f32], sky: Option<&[f32]>,
 ) -> (LocalField, usize, usize, LayoutAdmission) {
     let Some(cells) = crate::fit_cells::PairedCells::build(target, width, height, evidence)
     else {
@@ -593,11 +608,14 @@ fn admit_cells(
         }
         (model, blind)
     });
-    let Some(pass_b) = LocalField::solve_with(
+    // Pass B is solved for the same zone-owned read as pass A (`sky`), on the
+    // same `current`, so the two count the same vertex owners and the merged
+    // field carries pass A's.
+    let Some(pass_b) = LocalField::solve_zoned(
         current, target, width, height,
         paired.as_ref().map_or(evidence, |(model, _)| model),
         crate::fit_field::TIKHONOV, crate::fit_field::SMOOTH, crate::fit_field::ITERATIONS,
-        FieldSolveOpts { gain, local_support: false },
+        FieldSolveOpts { gain, local_support: false }, sky,
     ) else {
         return (pass_a, 0, 0, LayoutAdmission::default());
     };

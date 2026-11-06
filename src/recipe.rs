@@ -792,6 +792,23 @@ pub struct ColourField {
     pub b: usize,
     /// `x * y * b` vertices, five parameters each, in splat order.
     pub grid: Vec<[f32; 5]>,
+    /// v1.18.0: the zone that OWNS each vertex, one entry per vertex in
+    /// `grid`'s order ([`Self::OWNER_SKY`], [`Self::OWNER_LAND`], or
+    /// [`Self::OWNER_NONE`]), or empty. "A zone's correction is read on its
+    /// own pixels": the fit owns a vertex to the zone that holds the strict
+    /// majority of its population (the trilinear splat mass of each zone's
+    /// pixels there; a tie or an empty vertex is owned by neither), and a
+    /// pixel reads only the corners its own zone owns, their weights
+    /// renormalised to sum 1 — all eight when its zone owns none of them
+    /// ([`crate::render::apply_colour_field`]). A pixel's zone is the
+    /// recipe's sky zone mask GEOMETRY at the render's own size and frame
+    /// (coverage >= 0.5 is sky). The owners are stored rather than re-derived
+    /// because the population they were counted on is the analysis frame
+    /// the field was solved on, which a reopen does not have. Empty is the
+    /// plain read, so every field written before this one renders byte for
+    /// byte as it did, and costs no bytes in the JSON.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub owners: Vec<u8>,
     /// How much of the field to apply, 0..=1. The slider the user gets.
     pub amount: f32,
     /// The user's on/off, kept separate from `amount` so a field parked at 0
@@ -801,11 +818,18 @@ pub struct ColourField {
 
 impl Default for ColourField {
     fn default() -> Self {
-        Self { x: 0, y: 0, b: 0, grid: Vec::new(), amount: 1.0, enabled: true }
+        Self { x: 0, y: 0, b: 0, grid: Vec::new(), owners: Vec::new(), amount: 1.0, enabled: true }
     }
 }
 
 impl ColourField {
+    /// [`Self::owners`]: a vertex neither zone holds the majority of.
+    pub const OWNER_NONE: u8 = 0;
+    /// [`Self::owners`]: a vertex the sky zone's pixels hold the majority of.
+    pub const OWNER_SKY: u8 = 1;
+    /// [`Self::owners`]: a vertex the land zone's pixels hold the majority of.
+    pub const OWNER_LAND: u8 = 2;
+
     /// Whether this field can be rendered at all: switched on, carrying some
     /// amount, and holding exactly the vertices its own shape declares.
     pub fn renderable(&self) -> bool {
@@ -815,6 +839,13 @@ impl ColourField {
             && self.y > 0
             && self.b > 0
             && self.grid_fits_shape()
+            && self.owners_fit_shape()
+    }
+
+    /// Whether [`Self::owners`] is either empty (the plain read) or one entry
+    /// per vertex — the read indexes it by the same vertex index as `grid`.
+    pub fn owners_fit_shape(&self) -> bool {
+        self.owners.is_empty() || self.owners.len() == self.grid.len()
     }
 
     /// Whether `grid` holds exactly the `x * y * b` vertices the shape
@@ -4167,7 +4198,10 @@ impl EditRecipe {
         // neutral; the amount is the slider it is.
         if let Some(f) = &mut self.colour_field {
             f.amount = c(f.amount, 0.0, 1.0);
-            if !f.grid_fits_shape() || f.grid.iter().flatten().any(|v| !v.is_finite()) {
+            if !f.grid_fits_shape()
+                || !f.owners_fit_shape()
+                || f.grid.iter().flatten().any(|v| !v.is_finite())
+            {
                 self.colour_field = None;
             }
         }
@@ -5616,6 +5650,7 @@ mod tests {
             y: 2,
             b: 2,
             grid: (0..8).map(|i| [i as f32 / 3.0, 0.0, 0.0, 0.0, 0.125]).collect(),
+            owners: Vec::new(),
             amount: 0.5,
             enabled: true,
         };
@@ -5653,6 +5688,41 @@ mod tests {
         }
     }
 
+    /// v1.18.0. A field's zone owners ride the JSON with it and an empty owner
+    /// list writes no key, so every field without owners keeps its bytes; an
+    /// owner list that is not one entry per vertex is not a field the read can
+    /// index, and neither renders nor survives clamp.
+    #[test]
+    fn a_colour_fields_zone_owners_round_trip_and_their_absence_costs_no_bytes() {
+        let plain = ColourField {
+            x: 2,
+            y: 2,
+            b: 2,
+            grid: (0..8).map(|i| [i as f32 / 8.0, 0.0, 0.0, 0.0, 0.0]).collect(),
+            owners: Vec::new(),
+            amount: 1.0,
+            enabled: true,
+        };
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("owners"), "no owners, no key: {json}");
+        let owned = ColourField {
+            owners: (0..8).map(|i| [ColourField::OWNER_SKY, ColourField::OWNER_LAND, ColourField::OWNER_NONE][i % 3]).collect(),
+            ..plain.clone()
+        };
+        let json = serde_json::to_string(&EditRecipe { colour_field: Some(owned.clone()), ..Default::default() }).unwrap();
+        let back: EditRecipe = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.colour_field.as_ref(), Some(&owned), "the owners round-trip");
+        let mut rounded = owned.clone();
+        rounded.round();
+        assert_eq!(rounded.owners, owned.owners, "rounding keeps the owners");
+        assert!(owned.renderable());
+        let short = ColourField { owners: vec![ColourField::OWNER_SKY; 7], ..plain.clone() };
+        assert!(!short.renderable(), "an owner list of the wrong length does not render");
+        let mut r = EditRecipe { colour_field: Some(short), ..Default::default() };
+        r.clamp();
+        assert!(r.colour_field.is_none(), "…nor survives clamp");
+    }
+
     /// F1 (2026-09-24 audit). `renderable` multiplied `x * y * b` unchecked,
     /// so a posted recipe whose shape overflowed to exactly 0 matched an
     /// EMPTY grid, and `render::apply_colour_field`'s first vertex read
@@ -5667,13 +5737,14 @@ mod tests {
             y: 2,
             b: 1,
             grid: Vec::new(),
+            owners: Vec::new(),
             amount: 1.0,
             enabled: true,
         };
         assert!(!wrapped.grid_fits_shape(), "an overflowing shape fits no grid");
         assert!(!wrapped.renderable(), "…so it is not renderable");
         let mut px = vec![[0.5f32; 3]; 4];
-        crate::render::apply_colour_field(&mut px, 2, 2, Some(&wrapped));
+        crate::render::apply_colour_field(&mut px, 2, 2, Some(&wrapped), None);
         assert!(px.iter().all(|p| *p == [0.5; 3]), "the render leaves the frame alone");
 
         let sound = ColourField {
@@ -5681,6 +5752,7 @@ mod tests {
             y: 2,
             b: 2,
             grid: vec![[0.1, 0.0, 0.05, -0.02, 0.0]; 8],
+            owners: Vec::new(),
             amount: 0.9,
             enabled: true,
         };

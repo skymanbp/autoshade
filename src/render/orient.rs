@@ -663,6 +663,9 @@ pub fn orient_recipe_coords(
         let swaps = crate::decode::orientation_transposes(o);
         let (nx, ny) = if swaps { (field.y, field.x) } else { (field.x, field.y) };
         let mut turned = vec![[0.0f32; 5]; nx * ny * field.b];
+        // The zone owners (v1.18.0) are a per-vertex fact like the values and
+        // take the same permutation; empty stays empty.
+        let mut owners = vec![crate::recipe::ColourField::OWNER_NONE; if field.owners.is_empty() { 0 } else { turned.len() }];
         for j in 0..field.y {
             for i in 0..field.x {
                 let (u, v) = (
@@ -675,10 +678,13 @@ pub fn orient_recipe_coords(
                 for b in 0..field.b {
                     turned[(tj * nx + ti) * field.b + b] =
                         field.grid[(j * field.x + i) * field.b + b];
+                    if let Some(slot) = owners.get_mut((tj * nx + ti) * field.b + b) {
+                        *slot = field.owners[(j * field.x + i) * field.b + b];
+                    }
                 }
             }
         }
-        (field.x, field.y, field.grid) = (nx, ny, turned);
+        (field.x, field.y, field.grid, field.owners) = (nx, ny, turned, owners);
     }
     true
 }
@@ -793,6 +799,10 @@ pub fn shift_recipe_coords(r: &mut EditRecipe, du: f32, dv: f32) -> bool {
             }
         }
         field.grid = moved;
+        // A resampled vertex has no single population to be owned by, and a
+        // recipe this migration applies to (coord era <= 1) predates the zone
+        // owners (v1.18.0) anyway: the moved field reads plain.
+        field.owners.clear();
     }
     true
 }

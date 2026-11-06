@@ -450,14 +450,95 @@ impl<'a> Cover<'a> {
     /// inversion. PIXEL CENTRES, `(x + 0.5)/w` — see `MASK_SAMPLE_CENTRE` for
     /// the measurement, the derivation, and the render-behaviour change.
     pub(super) fn at(&self, x: usize, y: usize) -> f32 {
+        self.geometry_at(x, y) * self.amount
+    }
+
+    /// The combined GEOMETRY coverage at pixel `(x, y)`, with inversion and
+    /// without the master amount: where the mask is, not how strongly it acts.
+    pub(super) fn geometry_at(&self, x: usize, y: usize) -> f32 {
         let (w, h) = (self.w as f32, self.h as f32);
         let (nx, ny) = ((x as f32 + MASK_SAMPLE_CENTRE) / w, (y as f32 + MASK_SAMPLE_CENTRE) / h);
-        let mut wgt = combined_mask_weight(self.m, nx, ny, self.bmp, &self.comp_bmps, self.unwarp, (w, h));
-        if self.m.inverted {
-            wgt = 1.0 - wgt;
-        }
-        wgt * self.amount
+        let wgt = combined_mask_weight(self.m, nx, ny, self.bmp, &self.comp_bmps, self.unwarp, (w, h));
+        if self.m.inverted { 1.0 - wgt } else { wgt }
     }
+}
+
+/// v1.18.0. The frame's sky / land partition the colour field's zone-owned
+/// read takes ([`crate::recipe::ColourField::owners`]): per pixel, the
+/// coverage of the recipe's sky zone mask GEOMETRY (its inversion included;
+/// not its amount, which says how strongly the zone's correction acts, nor
+/// its Range Mask, which reads pixel values), on a `w × h` frame in `frame` —
+/// the same [`Cover`] the mask pass weighs by, so the partition sits where the
+/// zone's own correction sits. The zone is the mask's BASE geometry, its
+/// components not read: a sky the fit split into luma bands ships one sky
+/// zone mask per band, each the parent's geometry composed with its band, and
+/// the partition is the parent's, not the first band's. With no sky zone mask
+/// the land zone's geometry is read, inverted: the land zone rides the
+/// inverted sky raster (a banded land's inversion moved into its base
+/// geometry, so the base is the land either way). A zone with no controls of
+/// its own is still the zone: its raster is loaded for the partition when the
+/// develop's snapshot (which holds only masks that act) does not hold it
+/// ([`MaskRasterSnapshot::of_geometry`]). `None` with no zone mask, or one
+/// whose raster cannot be loaded: no partition, so the field reads plain.
+pub(super) fn field_sky_coverage(
+    r: &EditRecipe,
+    rasters: &MaskRasterSnapshot,
+    frame: MaskFrame<'_>,
+    w: usize,
+    h: usize,
+) -> Option<Vec<f32>> {
+    use crate::recipe::MaskRole;
+    let (stored, land) = r
+        .masks
+        .iter()
+        .find(|m| m.role == MaskRole::ZoneSky)
+        .map(|m| (m, false))
+        .or_else(|| r.masks.iter().find(|m| m.role == MaskRole::ZoneLand).map(|m| (m, true)))?;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let dims = (w as f32, h as f32);
+    let unwarp = frame.unwarp(dims);
+    let base = crate::recipe::LocalAdjustment { components: Vec::new(), ..stored.clone() };
+    let framed = frame.prepare_linear_handles(&base, dims);
+    let m = framed.as_ref();
+    let brushes = Brushes::of(m, w, h);
+    let own;
+    let rasters = if is_raster_backed(&m.mask) && rasters.get(&m.mask).is_none() {
+        own = MaskRasterSnapshot::of_geometry(r, &m.mask);
+        &own
+    } else {
+        rasters
+    };
+    let cover = Cover::new(m, &brushes, rasters, unwarp.as_ref(), w, h)?;
+    Some(
+        (0..w * h)
+            .into_par_iter()
+            .map(|i| {
+                let c = cover.geometry_at(i % w, i / w);
+                if land { 1.0 - c } else { c }
+            })
+            .collect(),
+    )
+}
+
+/// [`field_sky_coverage`] over a preview the fit develops with
+/// [`develop_preview`]: the frame and the rasters that develop reads its masks
+/// in (the frame [`preview_mask_coverage`] reads them in), at the preview's
+/// size — the partition the SHIPPED colour field is solved on, so the fit
+/// solves the read the develop of this preview performs.
+pub(crate) fn preview_field_sky_coverage(reference: &DynamicImage, recipe: &EditRecipe) -> Option<Vec<f32>> {
+    let validated = crate::recipe::ValidatedRecipe::new(recipe);
+    let geom = geometry_profile(&validated);
+    let corrected = super::canvas::plate_corrected(reference);
+    let rasters = best_effort_mask_raster_snapshot(&validated, &crate::diag::dropped());
+    field_sky_coverage(
+        &validated,
+        &rasters,
+        MaskFrame::of_base(&geom, validated.lens_distortion, corrected),
+        reference.width() as usize,
+        reference.height() as usize,
+    )
 }
 
 /// WHERE a mask chain's output will be sampled — the value that keeps

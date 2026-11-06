@@ -122,6 +122,7 @@ fn zero_field(width: u32, height: u32) -> LocalField {
         solve: SolveInfo { iterations: 0, relative_residual: 0.0 },
         width,
         height,
+        zones: None,
     }
 }
 
@@ -1135,4 +1136,83 @@ fn compare_calibration_field_with_numpy() {
         (numpy_ceiling - NUMPY_FIELD_CEILING_CALIBRATION).abs() <= 0.002,
         "NUMPY_FIELD_CEILING_CALIBRATION is stale: measured {numpy_ceiling}",
     );
+}
+
+/// v1.18.0, "a zone's correction is read on its own pixels". A two-zone toy at
+/// analysis size: a sky over a land of the SAME luma (so the luma bins cannot
+/// separate them, as p42's dark horizon sky and dark ground do not), the sky
+/// asking +0.5 EV and the land asking nothing, the horizon placed 1.7 rows
+/// below vertex row 19 so that row's population is mostly sky while the land
+/// rows under it read it. Solved for the zone-owned read, the land pixels next
+/// to the horizon read only land-owned vertices — the field moves them by
+/// less than the display can show (their 8-bit codes are their input's) — and
+/// the sky foot keeps its lift. Read plain (every corner kept, the mutation),
+/// the land foot carries the sky's lift.
+#[test]
+fn a_zone_owned_field_keeps_the_skys_lift_off_the_land_under_the_horizon() {
+    let (w, h) = (384usize, 256usize);
+    let horizon = 158usize;
+    let spacing = (h - 1) as f32 / (FIELD_Y - 1) as f32;
+    assert!(
+        (horizon as f32 - 19.0 * spacing) > 0.5 && (horizon as f32 - 19.0 * spacing) < 0.5 * spacing,
+        "premise: vertex row 19 sits above the horizon, inside its lower half-spacing"
+    );
+    let mut lcg = Lcg(0x5eed_00b8);
+    let current: Vec<[f32; 3]> = (0..w * h)
+        .map(|i| {
+            let v = 0.30 + 0.02 * (lcg.unit() - 0.5);
+            if i / w < horizon { [byte_round(v * 0.9), byte_round(v), byte_round(v * 1.2)] }
+            else { [byte_round(v * 1.1), byte_round(v), byte_round(v * 0.85)] }
+        })
+        .collect();
+    let target = plant(&current, w, h, |i, _| if i / w < horizon { 0.5 } else { 0.0 });
+    let sky: Vec<f32> = (0..w * h).map(|i| if i / w < horizon { 1.0 } else { 0.0 }).collect();
+    let evidence = fit::evidence_model_for(&current, &target, w as u32, h as u32);
+    let solve = |sky: Option<&[f32]>| {
+        LocalField::solve_zoned(
+            &current, &target, w as u32, h as u32, &evidence, TIKHONOV, SMOOTH, ITERATIONS,
+            FieldSolveOpts::default(), sky,
+        )
+        .expect("the toy solves")
+    };
+    let owned = solve(Some(&sky));
+    let zones = owned.zones.as_ref().expect("a zoned solve carries its zones");
+    let row_owner = |vy: usize| zones.owners[(vy * FIELD_X + FIELD_X / 2) * FIELD_B + 2];
+    assert_eq!(row_owner(19), crate::recipe::ColourField::OWNER_SKY, "premise: the straddling row is the sky's");
+    assert_eq!(row_owner(20), crate::recipe::ColourField::OWNER_LAND, "premise: the row under it is the land's");
+    let plain = solve(None);
+    assert!(plain.zones.is_none() && plain.as_recipe_field().owners.is_empty(), "no partition, no owners");
+    let foot = |field: &LocalField, rows: std::ops::Range<usize>| {
+        let out = field.render(&current);
+        let (mut worst, mut lift, mut n) = (0u8, 0.0f64, 0usize);
+        for y in rows {
+            for x in 0..w {
+                let i = y * w + x;
+                for c in 0..3 {
+                    worst = worst.max(byte_of(out[i][c]).abs_diff(byte_of(current[i][c])));
+                    lift += (out[i][c] - current[i][c]) as f64;
+                    n += 1;
+                }
+            }
+        }
+        (worst, lift / n as f64 * 255.0)
+    };
+    let (land_owned, land_owned_mean) = foot(&owned, horizon..horizon + 4);
+    let (land_plain, land_plain_mean) = foot(&plain, horizon..horizon + 4);
+    let (_, sky_owned) = foot(&owned, horizon - 4..horizon);
+    let (_, sky_plain) = foot(&plain, horizon - 4..horizon);
+    let (_, sky_asked) = {
+        let mut lift = 0.0f64;
+        for i in (horizon - 4) * w..horizon * w {
+            for c in 0..3 { lift += (target[i][c] - current[i][c]) as f64; }
+        }
+        (0u8, lift / (4 * w * 3) as f64 * 255.0)
+    };
+    eprintln!(
+        "land foot: owned worst {land_owned} codes mean {land_owned_mean:+.3} | plain worst {land_plain} mean {land_plain_mean:+.3}; \
+         sky foot lift: asked {sky_asked:+.3} owned {sky_owned:+.3} plain {sky_plain:+.3}"
+    );
+    assert_eq!(land_owned, 0, "the land foot reads no sky lift: its codes are its input's");
+    assert!(land_plain > 0, "premise of the mutation: read plain, the land foot lifts");
+    assert!(sky_owned >= sky_plain, "the sky foot keeps its lift: {sky_owned:+.3} against the plain read's {sky_plain:+.3}");
 }

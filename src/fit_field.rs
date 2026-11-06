@@ -214,6 +214,39 @@ pub(crate) struct LocalField {
     pub solve: SolveInfo,
     pub width: u32,
     pub height: u32,
+    /// v1.18.0: the frame's sky / land partition the field was solved on, and
+    /// the vertex owners counted on it — `None` for the plain read (every
+    /// analysis solve). See [`Self::solve_zoned`].
+    pub zones: Option<FieldZones>,
+}
+
+/// The zone-owned read a SHIPPED field is solved for ([`LocalField::solve_zoned`]).
+#[derive(Clone, Debug)]
+pub(crate) struct FieldZones {
+    /// Per pixel, the sky zone geometry's coverage (`render::preview_field_sky_coverage`).
+    pub sky: Vec<f32>,
+    /// Per vertex, [`crate::recipe::ColourField::owners`].
+    pub owners: Vec<u8>,
+}
+
+/// The owner of every vertex: the zone holding the strict majority of its
+/// population, the plain trilinear splat mass of each zone's pixels (a pixel
+/// of sky coverage `c` puts `c` of its splat on the sky's mass and `1 − c` on
+/// the land's — the same weights the read uses); a tie, an empty vertex
+/// included, is owned by neither.
+fn vertex_owners(splat: &Splat, sky: &[f32]) -> Vec<u8> {
+    use crate::recipe::ColourField as F;
+    let (mut sky_mass, mut land_mass) = (vec![0.0f64; VERTICES], vec![0.0f64; VERTICES]);
+    for ((ids, tri), &c) in splat.ids.iter().zip(&splat.tri).zip(sky) {
+        let c = c.clamp(0.0, 1.0) as f64;
+        for (&id, &weight) in ids.iter().zip(tri) {
+            sky_mass[id as usize] += weight as f64 * c;
+            land_mass[id as usize] += weight as f64 * (1.0 - c);
+        }
+    }
+    sky_mass.iter().zip(&land_mass).map(|(s, l)| {
+        if s > l { F::OWNER_SKY } else if l > s { F::OWNER_LAND } else { F::OWNER_NONE }
+    }).collect()
 }
 
 impl LocalField {
@@ -240,6 +273,24 @@ impl LocalField {
         evidence: &fit::EvidenceModel, tikhonov: f32, smooth: [f32; 3], iterations: usize,
         opts: FieldSolveOpts,
     ) -> Option<LocalField> {
+        Self::solve_zoned(current, target, width, height, evidence, tikhonov, smooth, iterations, opts, None)
+    }
+
+    /// [`Self::solve_with`] for the read the SHIPPED field performs (v1.18.0,
+    /// "a zone's correction is read on its own pixels"): with `sky`, the
+    /// frame's sky zone geometry coverage per pixel, every vertex is owned by
+    /// the zone holding the majority of its plain-splat population
+    /// ([`vertex_owners`]) and every pixel's splat keeps only the corners its
+    /// own zone owns, renormalised ([`crate::render::field_own_corners`]) —
+    /// in the forward map and the adjoint alike, so the field is solved for
+    /// the read that ships. `None` (or a `sky` of the wrong length) is
+    /// [`Self::solve_with`] byte for byte.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn solve_zoned(
+        current: &[[f32; 3]], target: &[[f32; 3]], width: u32, height: u32,
+        evidence: &fit::EvidenceModel, tikhonov: f32, smooth: [f32; 3], iterations: usize,
+        opts: FieldSolveOpts, sky: Option<&[f32]>,
+    ) -> Option<LocalField> {
         let (w, h) = (width as usize, height as usize);
         let n = w.checked_mul(h)?;
         if n == 0 || current.len() != n || target.len() != n { return None; }
@@ -262,7 +313,19 @@ impl LocalField {
         }
         if !mass.is_finite() || mass <= 0.0 { return None; }
         let guide = smooth_3tap_luma(current, w, h);
-        let system = System::new(current, target, &guide, &fit_weight, w, h);
+        let mut splat = splat_table(&guide, w, h);
+        let zones = sky.filter(|s| s.len() == n).map(|sky| {
+            let owners = vertex_owners(&splat, sky);
+            for ((ids, tri), &c) in splat.ids.iter().zip(splat.tri.iter_mut()).zip(sky) {
+                crate::render::field_own_corners(
+                    tri, &ids.map(|id| owners[id as usize]), crate::render::field_pixel_zone(c),
+                );
+            }
+            FieldZones { sky: sky.to_vec(), owners }
+        });
+        let system = System::with_splat(
+            current, target, &guide, &fit_weight, splat, zones.as_ref().map(|z| z.owners.clone()),
+        );
         let (raw, solve, limited) = system.solve(tikhonov, smooth, iterations, |p| opts.bounds(p));
         if raw.iter().any(|value| !value.is_finite()) { return None; }
 
@@ -287,7 +350,7 @@ impl LocalField {
         let occupancy = system.occupancy.clone();
         Some(LocalField {
             grid, occupancy, ceiling, global, band_marginal, band_dispersion, remainder,
-            weight: fit_weight, saturated, solve, width, height,
+            weight: fit_weight, saturated, solve, width, height, zones,
         })
     }
 
@@ -304,6 +367,7 @@ impl LocalField {
             self.width as usize,
             self.height as usize,
             Some(&self.as_recipe_field()),
+            self.zones.as_ref().map(|z| z.sky.as_slice()),
         );
         out
     }
@@ -315,6 +379,7 @@ impl LocalField {
             y: FIELD_Y,
             b: FIELD_B,
             grid: self.grid.clone(),
+            owners: self.zones.as_ref().map(|z| z.owners.clone()).unwrap_or_default(),
             amount: 1.0,
             enabled: true,
         }
@@ -581,14 +646,45 @@ struct System<'a> {
     /// preconditioner together with the ridge and the smoother's diagonal
     /// ([`System::preconditioner`]).
     data_diagonal: Vec<f64>,
+    /// The zone owner of every vertex for a zone-owned solve, `None` plain:
+    /// the smoother couples no two vertices owned by different zones
+    /// ([`smoother_couples`]).
+    owners: Option<Vec<u8>>,
+}
+
+/// Whether the smoother couples vertices `a` and `b`. "A zone's correction is
+/// read on its own pixels" (v1.18.0): a vertex one zone owns is read only by
+/// that zone's pixels, so a smoothness edge between a sky-owned and a
+/// land-owned vertex would hand the land's vertex the sky's correction — read
+/// on the land's pixels through the regulariser, not the data (measured on the
+/// two-zone toy: the land-owned row under the horizon at +0.0133 EV with the
+/// edge, +0.0000 without it, the land foot +1.54 codes against 0). Every other
+/// edge — within a zone, or touching a vertex neither zone owns — is kept, so a
+/// plain solve (`owners` `None`) smooths exactly as before.
+fn smoother_couples(owners: Option<&[u8]>, a: usize, b: usize) -> bool {
+    use crate::recipe::ColourField as F;
+    owners.is_none_or(|o| o[a] == o[b] || o[a] == F::OWNER_NONE || o[b] == F::OWNER_NONE)
 }
 
 impl<'a> System<'a> {
+    #[cfg(test)]
     fn new(
         current: &'a [[f32; 3]], target: &[[f32; 3]], guide: &'a [f32], fit_weight: &'a [f32],
         width: usize, height: usize,
     ) -> Self {
-        let splat = splat_table(guide, width, height);
+        Self::with_splat(current, target, guide, fit_weight, splat_table(guide, width, height), None)
+    }
+
+    /// [`Self::new`] on a splat the caller built: the zone-owned one
+    /// ([`LocalField::solve_zoned`]) is the plain table with each pixel's
+    /// weights owned and renormalised, and every term below — the forward
+    /// map, its adjoint, the occupancy and the preconditioner's diagonal —
+    /// reads it; with its vertex `owners` the smoother is cut between zones
+    /// ([`smoother_couples`]).
+    fn with_splat(
+        current: &'a [[f32; 3]], target: &[[f32; 3]], guide: &'a [f32], fit_weight: &'a [f32],
+        splat: Splat, owners: Option<Vec<u8>>,
+    ) -> Self {
         let target_delta = current.iter().zip(target)
             .map(|(c, t)| [t[0] - c[0], t[1] - c[1], t[2] - c[2]]).collect();
         let mut mass = vec![0.0f64; VERTICES];
@@ -628,7 +724,7 @@ impl<'a> System<'a> {
                 for (p, d) in per.iter().enumerate() { data_diagonal[base + p] += w * weight * weight * d; }
             }
         }
-        Self { current, guide, fit_weight, target_delta, splat, occupancy, data_diagonal }
+        Self { current, guide, fit_weight, target_delta, splat, occupancy, data_diagonal, owners }
     }
 
     /// The inverse diagonal of the whole system `AᵀWA + λI + L`: the data
@@ -652,6 +748,7 @@ impl<'a> System<'a> {
             let (stride, count) = (strides[axis], counts[axis]);
             for i in 0..diagonal.len() {
                 if (i / stride) % count + 1 >= count { continue; }
+                if !smoother_couples(self.owners.as_deref(), i / PARAMS, (i + stride) / PARAMS) { continue; }
                 diagonal[i] += weight as f64;
                 diagonal[i + stride] += weight as f64;
             }
@@ -693,7 +790,7 @@ impl<'a> System<'a> {
         let mut out = self.adjoint(&self.weigh(&self.forward(v)));
         for (slot, &x) in out.iter_mut().zip(v) { *slot += tikhonov * x; }
         let mut lap = vec![0.0f32; v.len()];
-        laplacian(v, smooth, &mut lap);
+        laplacian(v, smooth, self.owners.as_deref(), &mut lap);
         for (slot, l) in out.iter_mut().zip(lap) { *slot += l; }
         out
     }
@@ -903,7 +1000,7 @@ fn limit_all(vector: &mut [f32], limits: &ChangeLimits) -> Vec<(bool, bool)> {
 /// `lap[second] += w*delta` and `lap[first] -= w*delta` — the gradient of
 /// `sum (v[i+1] - v[i])^2`.  Axis order/weights follow the `(SY, SX, SB, PARAMS)`
 /// reshape.
-fn laplacian(v: &[f32], smooth: [f32; 3], lap: &mut [f32]) {
+fn laplacian(v: &[f32], smooth: [f32; 3], owners: Option<&[u8]>, lap: &mut [f32]) {
     let strides = [FIELD_X * FIELD_B * PARAMS, FIELD_B * PARAMS, PARAMS];
     let counts = [FIELD_Y, FIELD_X, FIELD_B];
     for (axis, &weight) in [smooth[1], smooth[0], smooth[2]].iter().enumerate() {
@@ -911,6 +1008,7 @@ fn laplacian(v: &[f32], smooth: [f32; 3], lap: &mut [f32]) {
         let (stride, count) = (strides[axis], counts[axis]);
         for i in 0..v.len() {
             if (i / stride) % count + 1 >= count { continue; }
+            if !smoother_couples(owners, i / PARAMS, (i + stride) / PARAMS) { continue; }
             let step = weight * (v[i + stride] - v[i]);
             lap[i + stride] += step;
             lap[i] -= step;

@@ -221,6 +221,26 @@ pub(super) struct MaskRasterSnapshot {
 }
 
 impl MaskRasterSnapshot {
+    /// v1.18.0. The raster of ONE geometry, loaded whether or not its mask
+    /// moves any pixel: the colour field's zone partition
+    /// (`masks::field_sky_coverage`) reads a zone's geometry as where the zone
+    /// IS, and a zone with no controls of its own (a land zone whose tone was
+    /// refused, its detail not yet set) is still the zone — the develop's
+    /// snapshot ([`active_bitmap_rasters`]) loads only masks that act. The
+    /// same decode and the same frame check as the snapshot's; empty when the
+    /// geometry has no raster path or its raster cannot be read.
+    pub(super) fn of_geometry(recipe: &EditRecipe, geometry: &MaskGeometry) -> Self {
+        let mut snapshot = Self::default();
+        let Some(path) = geometry_raster_path(geometry) else { return snapshot };
+        let diag = crate::diag::dropped();
+        if let Some(bitmap) = load_mask_bitmap(geometry, &diag)
+            && super::baked::check_mask_frame(bitmap.frame.as_ref(), recipe, std::path::Path::new(path)).is_ok()
+        {
+            snapshot.images.insert(path.to_string(), bitmap);
+        }
+        snapshot
+    }
+
     pub(super) fn get(&self, geometry: &MaskGeometry) -> Option<Bmp<'_>> {
         self.images.get(geometry_raster_path(geometry)?).map(|b| b.bmp())
     }

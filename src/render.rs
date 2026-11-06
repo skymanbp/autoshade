@@ -110,7 +110,9 @@ pub use develop::{
     develop_preview, develop_preview_film, develop_preview_framed, develop_preview_with,
     retouch_spots,
 };
-pub(crate) use develop::{apply_colour_field, field_axis, field_guide_luma};
+pub(crate) use develop::{
+    apply_colour_field, field_axis, field_guide_luma, field_own_corners, field_pixel_zone,
+};
 use develop::{apply_develop_with_rasters, dehaze_airlight, dehaze_px, luma601};
 #[cfg(test)]
 use develop::{
@@ -192,7 +194,7 @@ use mask_weight::{Bmp, combined_mask_weight};
 #[cfg(test)]
 use mask_weight::{mask_weight, mask_weight_in};
 pub use masks::{MaskFrame, corrected_raster_to_sensor, engine_active, sensor_raster_to_corrected, sensor_rgba_to_corrected};
-pub(crate) use masks::{linear_to_oklab, tint_from_push, tint_luma, tint_window};
+pub(crate) use masks::{linear_to_oklab, preview_field_sky_coverage, tint_from_push, tint_luma, tint_window};
 #[cfg(test)]
 pub(crate) use masks::{TINT_WINDOW_CENTRE, oklab_to_linear, tint_push, tint_px};
 use masks::{MaskUnwarp, apply_masks};

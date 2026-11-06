@@ -59,6 +59,7 @@ fn rich(dir: &Path) -> EditRecipe {
         colour_field: Some(ColourField {
             x: 2, y: 2, b: 2,
             grid: vec![[0.1, 0.0, 0.05, -0.02, 0.0]; 8],
+            owners: Vec::new(),
             amount: 0.9,
             enabled: true,
         }),

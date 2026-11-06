@@ -44,6 +44,7 @@ fn field_from(region: &[bool], value: f32) -> LocalField {
         solve: crate::fit_field::SolveInfo { iterations: 0, relative_residual: 0.0 },
         width: EDGE,
         height: EDGE,
+        zones: None,
     }
 }
 

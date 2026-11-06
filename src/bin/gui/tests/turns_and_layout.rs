@@ -457,7 +457,7 @@
             ..Default::default()
         });
         app.recipe.colour_field =
-            Some(ColourField { x: 1, y: 1, b: 1, grid: vec![[0.0; 5]], amount: 0.5, enabled: true });
+            Some(ColourField { x: 1, y: 1, b: 1, owners: Vec::new(), grid: vec![[0.0; 5]], amount: 0.5, enabled: true });
         // 2026-10-13: a lens blur, so its section's rows are laid too.
         app.recipe.lens_blur =
             Some(autoshade::render::LensBlur { depth_map: "depth-buttons.png".into(), ..Default::default() });
