@@ -1216,3 +1216,149 @@ fn a_zone_owned_field_keeps_the_skys_lift_off_the_land_under_the_horizon() {
     assert!(land_plain > 0, "premise of the mutation: read plain, the land foot lifts");
     assert!(sky_owned >= sky_plain, "the sky foot keeps its lift: {sky_owned:+.3} against the plain read's {sky_plain:+.3}");
 }
+
+/// v1.18.0, "the field is read on the partition its owners were counted on"
+/// and "the field's read is the owner count transposed". A soft zone edge:
+/// the sky's coverage falls from 1 to 0 over 24 pixel rows that all lie
+/// between a sky-owned vertex row (lifted +0.5 EV) and a land-owned one (no
+/// move), so every pixel on the ramp has corners of both zones. With `a` the
+/// sky-owned row's trilinear weight, the count transposed gives that row
+/// `a·c` and the land-owned row `(1 − a)·(1 − c)`, renormalised once, so every
+/// row reads the full lift × `a·c / (a·c + (1 − a)·(1 − c))` — continuous in
+/// both `c` and `a`, and monotone along the ramp because both fall; read on a
+/// hard cut at one half (the mutation) the whole lift jumps between two rows
+/// — the iso-line drawn into the picture.
+/// The solve reads the same partition: on a soft-edged two-zone toy the
+/// analyzer's forward map over the zone-owned splat and the engine's render
+/// of the solved field are the same bytes.
+#[test]
+fn a_soft_zone_edge_reads_the_field_at_its_coverage_without_a_step() {
+    use crate::recipe::ColourField as F;
+    let (w, h) = (8usize, 64usize);
+    let (fx, fy, fb) = (2usize, 3usize, 2usize);
+    let lifted = |v: usize| v / fb / fx < 2;
+    let field = F {
+        x: fx, y: fy, b: fb,
+        grid: (0..fx * fy * fb).map(|v| if lifted(v) { [0.5, 0.0, 0.0, 0.0, 0.0] } else { [0.0; 5] }).collect(),
+        owners: (0..fx * fy * fb).map(|v| if lifted(v) { F::OWNER_SKY } else { F::OWNER_LAND }).collect(),
+        amount: 1.0, enabled: true,
+    };
+    // Vertex rows at pixel rows 0, 31.5 and 63: rows 32..=56 lie between the
+    // sky-owned row 1 and the land-owned row 2.
+    let (top, run) = (32usize, 24usize);
+    let coverage = |y: usize| ((top + run) as f32 - y as f32).clamp(0.0, run as f32) / run as f32;
+    let sky: Vec<f32> = (0..w * h).map(|i| coverage(i / w)).collect();
+    assert!((0..h).filter(|&y| coverage(y) > 0.0 && coverage(y) < 1.0).count() == run - 1, "premise: a 24-row ramp");
+    let input = vec![[0.35f32, 0.35, 0.35]; w * h];
+    let mut read = input.clone();
+    crate::render::apply_colour_field(&mut read, w, h, Some(&field), Some(&sky));
+    let row = |y: usize| read[y * w + w / 2][1];
+    let lift = row(top) - input[0][1];
+    assert!(lift > 0.05, "premise: the sky reads its lift above the ramp: {lift}");
+    assert_eq!(row(top + run), input[0][1], "premise: the land under the ramp reads no lift");
+    let step = lift / run as f32;
+    let mut widest = 0.0f32;
+    for y in top..top + run {
+        let fall = row(y) - row(y + 1);
+        assert!(fall >= -1e-7, "the read along the ramp is monotone: row {y} {} -> {}", row(y), row(y + 1));
+        widest = widest.max(fall);
+    }
+    // The count transposed, row by row: the sky-owned vertex row sits at
+    // grid row 1, pixel row y at grid row y·(fy − 1)/(h − 1).
+    let law = |y: usize| {
+        let a = 2.0 - y as f64 * (fy - 1) as f64 / (h - 1) as f64;
+        let c = coverage(y) as f64;
+        lift as f64 * a * c / (a * c + (1.0 - a) * (1.0 - c))
+    };
+    let mut widest_law = 0.0f64;
+    for y in top..=top + run {
+        let read = (row(y) - input[0][1]) as f64;
+        assert!(
+            (read - law(y)).abs() <= 1e-3 * step as f64,
+            "row {y} reads the count transposed: {read:.6} against {:.6}", law(y)
+        );
+        if y < top + run { widest_law = widest_law.max(law(y) - law(y + 1)); }
+    }
+    eprintln!(
+        "ramp: full lift {lift:.5}, one coverage step x lift {step:.5}, widest neighbour step {widest:.5} (the law's {widest_law:.5})"
+    );
+
+    // The solve's forward map reads the same partition as the engine.
+    let (w, h) = (192usize, 128usize);
+    let (top, run) = (74usize, 24usize);
+    let coverage = |y: usize| ((top + run) as f32 - y as f32).clamp(0.0, run as f32) / run as f32;
+    let sky: Vec<f32> = (0..w * h).map(|i| coverage(i / w)).collect();
+    let current = ramp(w, h, 0.25, 0.40, 0x5eed_0b1d);
+    let target = plant(&current, w, h, |i, _| 0.5 * coverage(i / w));
+    let evidence = fit::evidence_model_for(&current, &target, w as u32, h as u32);
+    let field = LocalField::solve_zoned(
+        &current, &target, w as u32, h as u32, &evidence, TIKHONOV, SMOOTH, ITERATIONS,
+        FieldSolveOpts::default(), Some(&sky),
+    )
+    .expect("the soft-edged toy solves");
+    let guide = smooth_3tap_luma(&current, w, h);
+    let mut splat = splat_table(&guide, w, h);
+    let zones = own_splat(&mut splat, &sky);
+    assert_eq!(Some(&zones.owners), field.zones.as_ref().map(|z| &z.owners), "one count of the owners");
+    let flat: Vec<f32> = field.grid.iter().flatten().copied().collect();
+    let analyzer = apply_flat(&current, &guide, &splat, &flat);
+    let engine = field.render(&current);
+    let soft_moved = (0..w * h)
+        .filter(|&i| sky[i] > 0.0 && sky[i] < 1.0 && engine[i] != current[i])
+        .count();
+    assert!(soft_moved > w * run / 2, "premise: the field moves the soft rows ({soft_moved} pixels)");
+    for (i, (a, b)) in analyzer.iter().zip(&engine).enumerate() {
+        for channel in 0..3 {
+            assert_eq!(a[channel].to_bits(), b[channel].to_bits(), "pixel {i} channel {channel}");
+        }
+    }
+}
+
+/// v1.18.0, "the field's read is the owner count transposed: each corner
+/// carries the pixel's share in that corner's zone, renormalised once". A
+/// pixel path at sky coverage one half runs along a row across the vertex
+/// plane between two cells: on its left every cell has a sky-owned corner
+/// column (lifted +0.5 EV) and a land-owned one (no move), on its right the
+/// cell's corners are all land-owned (lifted +0.25 EV), so the sky owns none
+/// of them. At `c = 1/2` the sky and land shares are equal, so on cells whose
+/// corners are all owned the transposed read is the plain trilinear read, and
+/// no two neighbouring pixels differ by more than one pixel's trilinear change
+/// (the plain read's own widest neighbour step) — continuous across the plane.
+/// A read renormalised per zone onto that zone's own corners (the mutation)
+/// holds the sky-owned column's lift across the whole mixed cell and drops to
+/// the land cell's plain read at the plane: a jump of half the lift's gap.
+#[test]
+fn a_half_covered_pixel_path_reads_the_field_continuously_across_a_vertex_plane() {
+    use crate::recipe::ColourField as F;
+    let (w, h) = (65usize, 4usize);
+    let (fx, fy, fb) = (3usize, 2usize, 2usize);
+    // Splat order: the luma bin fastest, then x, then y (`(y * fx + x) * fb + b`).
+    let column = |v: usize| v / fb % fx;
+    let field = F {
+        x: fx, y: fy, b: fb,
+        grid: (0..fx * fy * fb)
+            .map(|v| match column(v) { 0 => [0.5, 0.0, 0.0, 0.0, 0.0], 1 => [0.0; 5], _ => [0.25, 0.0, 0.0, 0.0, 0.0] })
+            .collect(),
+        owners: (0..fx * fy * fb).map(|v| if column(v) == 0 { F::OWNER_SKY } else { F::OWNER_LAND }).collect(),
+        amount: 1.0, enabled: true,
+    };
+    let sky = vec![0.5f32; w * h];
+    let input = vec![[0.35f32, 0.35, 0.35]; w * h];
+    let mut owned = input.clone();
+    crate::render::apply_colour_field(&mut owned, w, h, Some(&field), Some(&sky));
+    let mut plain = input.clone();
+    crate::render::apply_colour_field(&mut plain, w, h, Some(&field), None);
+    let y = h / 2;
+    let px = |img: &[[f32; 3]], x: usize| img[y * w + x][1];
+    let plane = (w - 1) / 2;
+    assert!(px(&plain, 0) > px(&plain, plane) && px(&plain, w - 1) > px(&plain, plane), "premise: the plane's column reads no move");
+    let trilinear_step = (0..w - 1).map(|x| (px(&plain, x + 1) - px(&plain, x)).abs()).fold(0.0f32, f32::max);
+    assert!(trilinear_step > 0.0, "premise: the plain read moves along the row");
+    let widest = (0..w - 1).map(|x| (px(&owned, x + 1) - px(&owned, x)).abs()).fold(0.0f32, f32::max);
+    let across = (px(&owned, plane + 1) - px(&owned, plane - 1)).abs();
+    eprintln!("cell plane at x {plane}: one pixel's trilinear change {trilinear_step:.5}, widest owned step {widest:.5}, across the plane {across:.5}");
+    assert!(
+        widest <= trilinear_step * (1.0 + 1e-3),
+        "no step beyond one pixel's trilinear change: {widest:.5} > {trilinear_step:.5}"
+    );
+}

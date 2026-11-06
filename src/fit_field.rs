@@ -232,8 +232,9 @@ pub(crate) struct FieldZones {
 /// The owner of every vertex: the zone holding the strict majority of its
 /// population, the plain trilinear splat mass of each zone's pixels (a pixel
 /// of sky coverage `c` puts `c` of its splat on the sky's mass and `1 − c` on
-/// the land's — the same weights the read uses); a tie, an empty vertex
-/// included, is owned by neither.
+/// the land's; the read is this count transposed,
+/// [`crate::render::field_owned_weights`]); a tie, an empty vertex included,
+/// is owned by neither.
 fn vertex_owners(splat: &Splat, sky: &[f32]) -> Vec<u8> {
     use crate::recipe::ColourField as F;
     let (mut sky_mass, mut land_mass) = (vec![0.0f64; VERTICES], vec![0.0f64; VERTICES]);
@@ -247,6 +248,18 @@ fn vertex_owners(splat: &Splat, sky: &[f32]) -> Vec<u8> {
     sky_mass.iter().zip(&land_mass).map(|(s, l)| {
         if s > l { F::OWNER_SKY } else if l > s { F::OWNER_LAND } else { F::OWNER_NONE }
     }).collect()
+}
+
+/// The plain `splat` made the zone-owned one: the owners counted on the sky
+/// coverage `sky` ([`vertex_owners`]), then every pixel's weights read as
+/// that count transposed, on the same coverage
+/// ([`crate::render::field_owned_weights`]).
+fn own_splat(splat: &mut Splat, sky: &[f32]) -> FieldZones {
+    let owners = vertex_owners(splat, sky);
+    for ((ids, tri), &c) in splat.ids.iter().zip(splat.tri.iter_mut()).zip(sky) {
+        crate::render::field_owned_weights(tri, &ids.map(|id| owners[id as usize]), c);
+    }
+    FieldZones { sky: sky.to_vec(), owners }
 }
 
 impl LocalField {
@@ -280,9 +293,10 @@ impl LocalField {
     /// "a zone's correction is read on its own pixels"): with `sky`, the
     /// frame's sky zone geometry coverage per pixel, every vertex is owned by
     /// the zone holding the majority of its plain-splat population
-    /// ([`vertex_owners`]) and every pixel's splat keeps only the corners its
-    /// own zone owns, renormalised ([`crate::render::field_own_corners`]) —
-    /// in the forward map and the adjoint alike, so the field is solved for
+    /// ([`vertex_owners`]) and every pixel's splat is that count transposed
+    /// on the same coverage — each corner carries the pixel's share in that
+    /// corner's zone, renormalised once ([`crate::render::field_owned_weights`])
+    /// — in the forward map and the adjoint alike, so the field is solved for
     /// the read that ships. `None` (or a `sky` of the wrong length) is
     /// [`Self::solve_with`] byte for byte.
     #[allow(clippy::too_many_arguments)]
@@ -314,15 +328,7 @@ impl LocalField {
         if !mass.is_finite() || mass <= 0.0 { return None; }
         let guide = smooth_3tap_luma(current, w, h);
         let mut splat = splat_table(&guide, w, h);
-        let zones = sky.filter(|s| s.len() == n).map(|sky| {
-            let owners = vertex_owners(&splat, sky);
-            for ((ids, tri), &c) in splat.ids.iter().zip(splat.tri.iter_mut()).zip(sky) {
-                crate::render::field_own_corners(
-                    tri, &ids.map(|id| owners[id as usize]), crate::render::field_pixel_zone(c),
-                );
-            }
-            FieldZones { sky: sky.to_vec(), owners }
-        });
+        let zones = sky.filter(|s| s.len() == n).map(|sky| own_splat(&mut splat, sky));
         let system = System::with_splat(
             current, target, &guide, &fit_weight, splat, zones.as_ref().map(|z| z.owners.clone()),
         );

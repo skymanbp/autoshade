@@ -798,11 +798,12 @@ pub struct ColourField {
     /// own pixels": the fit owns a vertex to the zone that holds the strict
     /// majority of its population (the trilinear splat mass of each zone's
     /// pixels there; a tie or an empty vertex is owned by neither), and a
-    /// pixel reads only the corners its own zone owns, their weights
-    /// renormalised to sum 1 — all eight when its zone owns none of them
-    /// ([`crate::render::apply_colour_field`]). A pixel's zone is the
-    /// recipe's sky zone mask GEOMETRY at the render's own size and frame
-    /// (coverage >= 0.5 is sky). The owners are stored rather than re-derived
+    /// pixel of coverage `c` by the recipe's sky zone mask GEOMETRY (at the
+    /// render's own size and frame) reads the count transposed: each corner
+    /// carries its trilinear weight × the pixel's share in that corner's
+    /// zone (`c` sky-owned, `1 − c` land-owned, `1` owned by neither),
+    /// renormalised once over the eight — the plain eight where that mass is
+    /// zero ([`crate::render::field_owned_weights`]). The owners are stored rather than re-derived
     /// because the population they were counted on is the analysis frame
     /// the field was solved on, which a reopen does not have. Empty is the
     /// plain read, so every field written before this one renders byte for

@@ -111,7 +111,7 @@ pub use develop::{
     retouch_spots,
 };
 pub(crate) use develop::{
-    apply_colour_field, field_axis, field_guide_luma, field_own_corners, field_pixel_zone,
+    apply_colour_field, field_axis, field_guide_luma, field_owned_weights,
 };
 use develop::{apply_develop_with_rasters, dehaze_airlight, dehaze_px, luma601};
 #[cfg(test)]

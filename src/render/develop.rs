@@ -561,10 +561,11 @@ pub(super) fn apply_develop_with_rasters(
 /// for the 2048-vs-384 discrepancy on the reference pair.
 ///
 /// v1.18.0: `sky` is the frame's sky / land partition, each pixel's coverage
-/// by the sky zone's geometry (`>= 0.5` is a sky pixel). With a field that
-/// carries [`owners`](crate::recipe::ColourField::owners), each pixel reads
-/// only the corners its own zone owns ([`field_own_corners`]); `None`, or a
-/// field with no owners, is the plain read, bit for bit.
+/// `c` by the sky zone's geometry. With a field that carries
+/// [`owners`](crate::recipe::ColourField::owners), each corner is read at
+/// the pixel's share in that corner's zone, the owner count transposed
+/// ([`field_owned_weights`]); `None`, or a field with no owners, is the plain
+/// read, bit for bit.
 pub(crate) fn apply_colour_field(
     data: &mut [[f32; 3]],
     w: usize,
@@ -575,28 +576,39 @@ pub(crate) fn apply_colour_field(
     apply_colour_field_in(data, w, h, field, None, sky);
 }
 
-/// The zone a pixel reads the field on, from its coverage by the sky zone's
-/// geometry: sky at `>= 0.5` (the partition's own half-way, the same rule the
-/// fit's zone membership uses), land otherwise.
-pub(crate) fn field_pixel_zone(sky_coverage: f32) -> u8 {
-    if sky_coverage >= 0.5 {
-        crate::recipe::ColourField::OWNER_SKY
-    } else {
-        crate::recipe::ColourField::OWNER_LAND
-    }
-}
-
-/// "A zone's correction is read on its own pixels" (v1.18.0): of a pixel's
-/// eight trilinear `weights`, keep those whose corner's `owners` entry is the
-/// pixel's own `zone` and renormalise them to sum 1; a pixel whose zone owns
-/// none of its corners (no kept weight) keeps all eight as they were. ONE
-/// implementation, called by the engine's read and by the solve's splat
-/// (`fit_field`), so the field the fit solves is the field the export reads.
-pub(crate) fn field_own_corners(weights: &mut [f32; 8], owners: &[u8; 8], zone: u8) {
-    let kept: f32 = weights.iter().zip(owners).filter(|(_, o)| **o == zone).map(|(w, _)| *w).sum();
-    if kept > 0.0 {
-        for (w, o) in weights.iter_mut().zip(owners) {
-            *w = if *o == zone { *w / kept } else { 0.0 };
+/// The field's read is the owner count transposed (v1.18.0, "a zone's
+/// correction is read on its own pixels"). The count (`fit_field`'s
+/// `vertex_owners`) gives vertex `k` a pixel's mass `tri_k × c` on the sky
+/// side and `tri_k × (1 − c)` on the land side, `c` its sky coverage. The read
+/// turns that around: corner `k` carries `tri_k` × the pixel's share in corner
+/// `k`'s zone — `c` for a sky-owned corner, `1 − c` for a land-owned one, `1`
+/// for a corner owned by neither — renormalised ONCE over the eight, so the
+/// result is still a convex combination of the pixel's corners and `weights`
+/// is rewritten in place. Each corner's weight vanishes on the plane its
+/// trilinear weight vanishes on, so the read is continuous across every
+/// vertex plane (a read renormalised per zone onto that zone's own corners
+/// holds the far plane's value across a cell and jumps at the next one — bars
+/// on the field's lattice), and continuous in `c` (a hard cut at one half
+/// draws the soft mask's half-way line into the picture — a staircase). At
+/// `c = 1` a sky pixel reads no land-owned corner and at `c = 0` a land pixel
+/// reads no sky-owned one. Where that mass is zero (a pixel whose every
+/// corner belongs to the zone it has no share in) the eight plain weights
+/// are kept: the only read available. ONE implementation, called by the
+/// engine's read and by the solve's splat (`fit_field`), so the field the fit
+/// solves — forward map and adjoint — is the field the export reads.
+pub(crate) fn field_owned_weights(weights: &mut [f32; 8], owners: &[u8; 8], sky_coverage: f32) {
+    use crate::recipe::ColourField as F;
+    let c = sky_coverage.clamp(0.0, 1.0);
+    let share = |owner: u8| match owner {
+        F::OWNER_SKY => c,
+        F::OWNER_LAND => 1.0 - c,
+        _ => 1.0,
+    };
+    let mass: [f32; 8] = std::array::from_fn(|k| weights[k] * share(owners[k]));
+    let total: f32 = mass.iter().sum();
+    if total > 0.0 {
+        for (w, m) in weights.iter_mut().zip(mass) {
+            *w = m / total;
         }
     }
 }
@@ -651,7 +663,7 @@ fn apply_colour_field_in(
             weights[slot] = mass(0) * mass(1) * mass(2);
         }
         if let Some(sky) = sky {
-            field_own_corners(&mut weights, &ids.map(|id| field.owners[id]), field_pixel_zone(sky[i]));
+            field_owned_weights(&mut weights, &ids.map(|id| field.owners[id]), sky[i]);
         }
         let mut p = [0.0f64; 5];
         for (&id, &weight) in ids.iter().zip(&weights) {
