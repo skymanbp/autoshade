@@ -262,6 +262,73 @@ fn a_channel_clipped_in_both_frames_testifies_and_keeps_its_colour() {
     assert!(kept >= 0.98, "the clipped-in-both red is kept where the target keeps it: {kept:.4}");
 }
 
+/// v1.18.0. A channel at the BLACK clip is a dark pixel, not a missing
+/// measurement ([`testifies`]). A night sky at the analysis raster's size:
+/// on its top 38 rows (of 256) the frame being moved carries red at 11 codes,
+/// green 20, blue 40, and its target is darker there with its red crushed to
+/// 0 (green ×0.7, blue ×0.8 — the shape a dark target sky's top rows were
+/// read with: red 0 against the render's 11-13 codes, green and blue
+/// unclipped); below them a ramp to a bright ground the target leaves as it
+/// is. Every top-row pixel's luma is inside its clip codes on both sides, so
+/// under the rule they testify and the field darkens those rows toward the
+/// target. The bar is one 8-bit code of mean luma: the quantum, the least
+/// move an 8-bit render can show.
+///
+/// MUTATION THIS KILLS: drop a pixel with any channel at or under 1/255 (the
+/// rule before v1.18.0) — the top vertex rows lose every witness (occupancy 0
+/// printed) and ship the smoother's continuation of the unchanged rows below:
+/// the rows do not darken.
+#[test]
+fn a_channel_at_the_black_clip_testifies_and_the_dark_rows_darken() {
+    let (w, h) = (384usize, 256usize);
+    let top = 38usize;
+    let mut lcg = Lcg(0x5eed_b1ac);
+    let (mut current, mut target) = (Vec::with_capacity(w * h), Vec::with_capacity(w * h));
+    for i in 0..w * h {
+        let y = i / w;
+        let t = 1.0 + 0.2 * (lcg.unit() - 0.5);
+        if y < top {
+            let c = [11.0 / 255.0 * t, 20.0 / 255.0 * t, 40.0 / 255.0 * t].map(byte_round);
+            current.push(c);
+            target.push([0.0, byte_round(c[1] * 0.7), byte_round(c[2] * 0.8)]);
+        } else {
+            let v = (0.08 + 0.85 * (y - top) as f32 / (h - top - 1) as f32) * t;
+            let c = [byte_round(v * 0.9), byte_round(v), byte_round(v * 1.1)];
+            current.push(c);
+            target.push(c);
+        }
+    }
+    let evidence = fit::evidence_model_for(&current, &target, w as u32, h as u32);
+    let field = LocalField::solve(&current, &target, w as u32, h as u32, &evidence).expect("solve");
+    // Per vertex row: the occupancy over the row, and the EV of the two dark
+    // bins (the bins the top rows' guide luma reads) unweighted over x.
+    let rows_of_top = (top * FIELD_Y).div_ceil(h) + 1;
+    for j in 0..rows_of_top.min(FIELD_Y) {
+        let occupancy: f32 = (0..FIELD_X * FIELD_B).map(|k| field.occupancy[j * FIELD_X * FIELD_B + k]).sum();
+        let mut ev = 0.0f32;
+        for x in 0..FIELD_X {
+            for b in 0..2 { ev += field.grid[(j * FIELD_X + x) * FIELD_B + b][0]; }
+        }
+        let ev = ev / (2 * FIELD_X) as f32;
+        println!("vertex row {j:2}: occupancy {occupancy:9.3}  EV bins 0-1 {ev:+.5}");
+    }
+    let render = field.render(&current);
+    let mean_luma = |px: &[[f32; 3]]| {
+        px[..top * w].iter().map(|p| fit::luma601(p) as f64).sum::<f64>() / (top * w) as f64
+    };
+    let (before, after, asked) = (mean_luma(&current), mean_luma(&render), mean_luma(&target));
+    println!("top rows mean luma, codes: current {:.3}  field {:.3}  target {:.3}", before * 255.0, after * 255.0, asked * 255.0);
+    assert!(
+        (before - after) * 255.0 > 1.0,
+        "the dark top rows darken toward their target by more than one code: {:.3} -> {:.3} (target {:.3})",
+        before * 255.0, after * 255.0, asked * 255.0,
+    );
+    assert!(
+        (0..top * w).all(|i| target[i][0] <= 1.0 / 255.0 && testifies(&current[i], &target[i])),
+        "premise: every top-row pixel has its target red at the black clip and testifies",
+    );
+}
+
 /// The property the analyzer's ceiling and the user's export rest on: the
 /// field the solver measured its ceiling on (`apply_flat` over its own splat
 /// table) and the field the engine renders from the recipe are the same

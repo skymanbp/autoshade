@@ -490,11 +490,30 @@ pub(crate) fn unclipped(p: &[f32; 3]) -> bool {
 }
 
 /// Whether a PAIR of pixels — the frame being moved and its target —
-/// testifies: no channel at or under 1/255 in either frame, and every channel
-/// either inside 254/255 in BOTH frames or at the clip in BOTH. A channel at
-/// the clip on both sides is known on both sides — the target keeps it there
-/// — and a pixel clipped on one side only is not (its true value on that
-/// side is unknown), so it stays out as before.
+/// testifies: the LUMA of each frame strictly inside its clip codes
+/// `(1/255, 254/255)`, and every channel either inside 254/255 in BOTH
+/// frames or at the white clip in BOTH. A channel at the white clip on both
+/// sides is known on both sides — the target keeps it there — and a pixel
+/// white-clipped on one side only is not (its true value on that side is
+/// unknown above the clip), so it stays out as before.
+///
+/// A channel at its BLACK clip (at or under 1/255) is not a missing
+/// measurement (v1.18.0). The data term reads the per-channel difference
+/// `target − current` ([`System::with_splat`]); a channel crushed to 0 is a
+/// channel whose true value is at or under the black code, so its difference
+/// is finite and points the right way (darker), and the pixel's luma is still
+/// carried by its other channels: it is a DARK pixel. Dropping it removes
+/// exactly the darkest pixels of a dark region, so what testifies there is
+/// selected on the target's own value: a night sky whose target red is 0 on
+/// its top rows had no witness at all on those vertex rows (occupancy 0, the
+/// vertices shipped the smoother's continuation of the rows below), and
+/// under them only the target's brighter pixels testified, biased toward
+/// "target brighter" — the top of the sky was lifted where its target asks
+/// for it darker. The white clip is not symmetric to it: above 254/255 the
+/// true value is unbounded, the difference is not a measurement of how far
+/// the frame is from its target, and that rule is unchanged. A pixel whose
+/// LUMA is at either clip has no channel left to carry it and stays out. The
+/// only numbers are the 8-bit clip codes the channel test already used.
 ///
 /// WHY (v1.17.1). Until then a pixel testified only when it was inside the
 /// clip in both frames, while the colour field it was excluded from was
@@ -508,8 +527,10 @@ pub(crate) fn unclipped(p: &[f32; 3]) -> bool {
 /// b* 28.1 against 17.1 / 28.1, the frame's 480-px distance 2.78 → 1.95
 /// (the seaside street 2.28 → 1.92), every other pair of the leg unchanged.
 pub(crate) fn testifies(current: &[f32; 3], target: &[f32; 3]) -> bool {
+    const LOW: f32 = 1.0 / 255.0;
     const HIGH: f32 = 254.0 / 255.0;
-    current.iter().chain(target).all(|&v| v > 1.0 / 255.0)
+    let measured = |p: &[f32; 3]| { let y = fit::luma601(p); y > LOW && y < HIGH };
+    measured(current) && measured(target)
         && (0..3).all(|c| (current[c] >= HIGH) == (target[c] >= HIGH))
 }
 
