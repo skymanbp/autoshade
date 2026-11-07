@@ -154,7 +154,7 @@ pub(crate) use evidence::{
 };
 use evidence::{
     DETAIL_EVIDENCE_MIN_IDENTIFIABILITY, EVIDENCE_HUE_BANDS, EVIDENCE_LUMA_BINS, EVIDENCE_MIN_SHARE,
-    EVIDENCE_RANGE_SURVIVAL_MIN, atmosphere_wb_from_populations, atmosphere_wb_pairing, paired_wb_from_populations,
+    EVIDENCE_RANGE_SURVIVAL_MIN, atmosphere_wb_from_populations, atmosphere_wb_pairing, paired_wb_closed_loop, paired_wb_from_populations,
     divergent_range_names, movement_identifiability, source_hue_is_withheld,
     source_luma_is_withheld, weighted_cdf, weighted_mean_chroma,
 };

@@ -719,6 +719,71 @@ fn the_white_balance_takes_only_the_colour_change_every_tonal_region_shares() {
     assert_eq!(wb_common(&[]), 0.0);
 }
 
+/// rel1180 RULING-1180-sc-r2: the white balance takes only what every band
+/// shares (`wb_common_shared`). A region whose interval `ask ± se` contains
+/// zero cannot propose a move but BOUNDS it: the common ask is clipped into
+/// that interval. Its error carries one output code's quantisation at its
+/// level (`region_se`, `code_step_variance`), so a quantised 0.0 bounds
+/// nothing finer than a code.
+///
+/// * The gate's 4400 K readings (Kelvin): shadows 0.0 (median error
+///   0.00016, display level 0.185), midtones −0.0317, highlights −0.0109 — the
+///   shadows' interval is wider than a code and the −0.0109 passes whole.
+/// * A real pair's 8250 K readings: shadows +0.954, midtones +1.032,
+///   highlights −0.00086 with a median error of 0.00088 at display level 0.936 — a
+///   measured "stay": +0.954 is clipped into the highlights' interval.
+///
+/// MUTATIONS THIS KILLS: bounding dropped (a zero-containing region
+/// abstains) -> the 8250 K case passes +0.954 whole; the quantisation floor
+/// dropped -> 0.0 ± 0.00016 clips −0.0109 to −0.00016; the control-unit
+/// mapping dropped -> the 4350 K case clips −0.0148 to −0.00295 (the chase
+/// stalled there); a resolving sign split no longer vetoes.
+#[test]
+fn a_tonal_region_reading_zero_within_its_error_bounds_the_white_balance() {
+    use super::evidence::{WbAxes, median_se, region_se, wb_common_shared, wb_move_shared};
+    const SHADOW: f32 = 0.185;
+    const HIGH: f32 = 0.936;
+    let axes = |kelvin: &[(f32, f32)]| WbAxes {
+        kelvin: kelvin.iter().map(|&(k, _)| (k, 1.0)).collect(),
+        tint: kelvin.iter().map(|_| (0.0, 1.0)).collect(),
+        se: kelvin.iter().map(|&(_, se)| [se, 0.0]).collect(),
+        ..Default::default()
+    };
+    let mid = region_se(0.00014, 0.4);
+    let shadows = region_se(0.00016, SHADOW);
+    assert!(shadows > 0.0109, "the quantised 0.0 is wider than a code: {shadows}");
+    assert_eq!(wb_common_shared(&axes(&[(0.0, shadows), (-0.0317, mid), (-0.0109, region_se(0.00001, 0.8))]), 0), -0.0109);
+    let high = region_se(0.00088, HIGH);
+    let common = wb_common_shared(&axes(&[(0.954, region_se(0.0025, 0.2)), (1.032, mid), (-0.00086, high)]), 0);
+    assert!((common - (-0.00086 + high)).abs() < 1e-6 && common < 0.01, "bounded to {common}");
+    // Read where the control acts (RULING-1180-sc-r3): the gate's 4350 K
+    // readings, Kelvin, each region with its own response over the step
+    // 4550 -> 4350 K and its one-code log step. Shadows 0.0 (se 0.011316,
+    // code 0.03920, response 1.4856), midtones -0.014677 (se 0.005247,
+    // response 0.99305), highlights 0.0 (se 0.002952, code 0.010226,
+    // response 0.49628): neither zero can see a move of 0.0148 in gain
+    // (0.0264 / 0.0206 per code), so the midtones' ask passes whole in the
+    // control's unit; read in the ask's unit the highlights clip it to
+    // -0.00295 and the chase stalled at 4350 K.
+    let at_4350 = WbAxes {
+        kelvin: vec![(0.0, 58690.4), (-0.014677, 13902.1), (0.0, 16738.5)],
+        tint: vec![(0.0, 1.0); 3],
+        se: vec![[0.011316, 1.0], [0.005247, 1.0], [0.002952, 1.0]],
+        region: vec![0, 1, 2],
+        code: vec![0.03920, 0.018166, 0.010226],
+    };
+    let mapped = wb_move_shared(&at_4350, 0, &[Some(1.4856), Some(0.99305), Some(0.49628)]);
+    assert!((mapped - (-0.014677 / 0.99305)).abs() < 1e-6, "in the control's unit: {mapped}");
+    assert!((wb_common_shared(&at_4350, 0) - (-0.002952)).abs() < 1e-6, "in the ask's unit");
+    // A resolving sign split still vetoes; nothing resolving asks nothing.
+    assert_eq!(wb_common_shared(&axes(&[(0.5, 0.01), (-0.3, 0.01)]), 0), 0.0);
+    assert_eq!(wb_common_shared(&axes(&[(0.0, 0.01), (0.001, 0.01)]), 0), 0.0);
+    // The median's error: √(π/2) · 1.4826 · MAD / √n_eff.
+    let sample: Vec<(f32, f32)> = [-1.0f32, -0.5, 0.0, 0.5, 1.0].iter().map(|&v| (v, 1.0)).collect();
+    let se = median_se(&sample, 0.0);
+    assert!((se - (std::f32::consts::PI / 2.0).sqrt() * 1.482_602_2 * 0.5 / 5.0f32.sqrt()).abs() < 1e-5, "{se}");
+}
+
 /// A split-toned pair: the target warms the shadows, leaves the midtones
 /// and cools the highlights of a neutral ramp. No illuminant does that, so
 /// the white balance takes nothing (as shot), and the colour-grade wheels,
@@ -4965,8 +5030,9 @@ fn the_search_takes_the_best_paying_admissible_shrink() {
 /// Since v1.18.0 (red from R11) its residual tone curve is withheld on the
 /// tonal reading (0.0286 -> 0.0278, a gain under FIT_QUANT) and the channel
 /// curves re-derived on the finished tone fan the widest class 22.6 degrees
-/// in this rebuild (23.0 in the stage's own weighted reading); the
-/// unconvicted side of the guard is pinned on the hue ramps
+/// in this rebuild (23.0 in the stage's own weighted reading). The hue
+/// ramps pinned the unconvicted side of the guard until RULING-1180-sc-r4
+/// read the cast before the mixer's moves; there it is convicted and walked
 /// (`a_white_balance_cast_the_curves_carry_as_channel_gains_never_enters_the_hand_off`).
 #[test]
 fn a_cast_the_fan_gate_alone_convicts_earns_the_projection_and_is_never_admitted() {
@@ -5027,8 +5093,9 @@ fn a_cast_the_fan_gate_alone_convicts_earns_the_projection_and_is_never_admitted
 /// conviction's witness here; its value pin lives in
 /// `a_convicted_cast_no_white_balance_takes_back_is_projected_by_value`.
 /// The legitimate cast is the hue-ramps pair under a 3500 K white balance,
-/// a per-channel gain the curves carry as fitted and the gate admits at
-/// +3.8° (`a_white_balance_cast_the_curves_carry_as_channel_gains_never_enters_the_hand_off`).
+/// a per-channel gain; since RULING-1180-sc-r5 Q-SC-2c the finished
+/// comparison ships it as-shot with its curves admitted
+/// (`a_white_balance_cast_the_curves_carry_as_channel_gains_never_enters_the_hand_off`).
 /// Measured beside them, the pairs the other gates already refuse:
 /// canyon-gold 5.2°, hazy→vivid 2.7°.
 ///
@@ -5087,6 +5154,14 @@ fn a_cast_the_fan_gate_alone_convicts_earns_the_projection_and_is_never_admitted
 /// The arm now witnesses the gate's verdict on a fanning cast: convicted at
 /// 30.6°, projected to t 0.080, a shipped fan of 2.01° and the colour
 /// delivered (mean ΔE76 17.42 -> 5.47).
+///
+/// RE-PINNED t (rel1180 RULING-1180-sc-r4 Q-SC-2b): the mixer's saturation
+/// and luminance are a joint solve, each band judged on its own population
+/// every round, and the cast's conviction reads the frame before the
+/// mixer's moves. Convicted at 30.6° as before; the projection now ships at
+/// t 0.058 beside Orange hue -18 / Blue saturation -18, delivering a fan of
+/// 1.36° and mean ΔE76 17.42 -> 5.51 (J* 0.1605 -> 0.0657), inside the bars
+/// this arm holds. Measured 2026-11-06.
 #[test]
 fn the_fan_gate_convicts_a_fanning_cast_ships_its_projection_where_it_earns_and_leaves_a_legitimate_cast_alone() {
     let clean = synth();
@@ -5129,9 +5204,9 @@ fn the_fan_gate_convicts_a_fanning_cast_ships_its_projection_where_it_earns_and_
         .map(|(_, added, _)| added)
         .unwrap_or(0.0);
     assert!(shipped_fan < FAN_DEG, "…and the curves that ship fan {shipped_fan:.1}° on the shipped frame");
-    // The legitimate cast, left alone: admitted as fitted, and the gate's own
-    // reading of it on the fit's own candidate is +3.8°, under the 0.6 margin
-    // the haze arm used to carry.
+    // The legitimate cast: its curves are admitted (since RULING-1180-sc-r5
+    // Q-SC-2c on the as-shot white balance), under the 0.6 margin the haze
+    // arm used to carry.
     let legit = fit_recipe(&hue_ramps(), &cooled_ramps(0));
     let legit_fan = projection_arg(&legit, crate::rationale::keys::FIT_NOTE_CAST_ADMITTED_FAN, "fan")
         .unwrap_or_else(|| panic!("the hue-ramps cast is admitted: {}", legit.recipe.rationale));
@@ -5177,7 +5252,7 @@ fn the_fan_gate_convicts_a_fanning_cast_ships_its_projection_where_it_earns_and_
         "canyon-warm's fitted cast is convicted at {convicted:.1}°, not the 30.6° measured on 2026-11-05"
     );
     let t = projection_arg(&warm, keys::FIT_NOTE_CAST_PROJECTED, "t").expect("the projection publishes its t");
-    assert!((t - 0.080).abs() < 0.005, "canyon-warm's projection ships at t {t:.3}, not the 0.080 measured on 2026-11-05");
+    assert!((t - 0.058).abs() < 0.005, "canyon-warm's projection ships at t {t:.3}, not the 0.058 measured on 2026-11-06");
     assert!(
         !warm.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED
             || n.key == keys::FIT_NOTE_REHUE_BLOCKED
@@ -6097,11 +6172,15 @@ fn joint_family_is_calibrated_on_the_fixture_set() {
         // v1.18.0 (iii): err_* are J* in perceptual units now, so the
         // landing is re-measured on it: 0.1545 -> 0.0692 at confidence 0.642,
         // joint reading 0.1858 -> 0.0371 (2026-11-04, rel1180). The band is
-        // FIT_QUANT wide, the objective's own resolution.
+        // FIT_QUANT wide, the objective's own resolution. RE-PINNED 2026-11-06
+        // (rel1180 RULING-1180-sc-r4 Q-SC-2b): the mixer's saturation and
+        // luminance solved jointly, each band on its own population every
+        // round, ship Blue saturation -18 beside the Orange rotation and the
+        // projected red curve: 0.1605 -> 0.0657 at 0.653.
         assert!(
-            (report.err_after - 0.0692).abs() < FIT_QUANT
-                && (report.recipe.confidence - 0.642).abs() < 0.02,
-            "canyon warm's landing moved off the measured 0.0692 / 0.642: {} -> {} at {}",
+            (report.err_after - 0.0657).abs() < FIT_QUANT
+                && (report.recipe.confidence - 0.653).abs() < 0.02,
+            "canyon warm's landing moved off the measured 0.0657 / 0.653: {} -> {} at {}",
             report.err_before, report.err_after, report.recipe.confidence
         );
         assert!(
@@ -9011,8 +9090,18 @@ fn no_shipped_fit_delivers_a_hue_fan_past_the_limit() {
 
 /// (f) The unrepresented-controls disclosure names `hsl` while the residual
 /// still has the shape of a per-band colour job, and stops once the fit has
-/// closed it — on one pair, separated only by the budget, and on a wider gap
-/// that the default budget cannot close.
+/// closed it: on a gap the default budget leaves open, and on a narrower one
+/// the full-strength fit closes.
+///
+/// Since the attribution law at the mixer (rel1180 RULING-1180-sc-r4
+/// Q-SC-2a) a move confined to two bands is theirs, and the default closes
+/// the ±50 two-band job through the mixer alone: Green saturation -18,
+/// Blue +18 / luminance -8, every tone slider and the saturation at zero,
+/// J* 0.213 -> 0.0448, the residual no longer colour-shaped (the same recipe
+/// with the mixer zeroed still is), so `hsl` is not named — the law's
+/// reading, measured 2026-11-06. The naming is witnessed on the ±80 job,
+/// which the default's per-band ceiling leaves open by the same law
+/// (Green -18, Blue +18 / -7.1, J* 0.346 -> 0.266, colour-shaped).
 ///
 /// Until v1.18.0 this test pinned the MIXER as what took the shape out: at
 /// the default it attached and half-closed the ±50 gap, and at strength 1
@@ -9025,7 +9114,8 @@ fn no_shipped_fit_delivers_a_hue_fan_past_the_limit() {
 /// disclosure names `hsl`. At strength 1 the mixer attaches and the finished
 /// residual is no longer colour-shaped — but neither is the same recipe with
 /// the mixer zeroed, so the closing is not attributable to the mixer alone,
-/// and that half is not asserted.
+/// and that half is not asserted. The ±50 default half described in this
+/// paragraph is the pre-law reading.
 #[test]
 fn a_per_band_residual_stays_named_until_the_full_strength_fit_closes_it() {
     let (src, tgt) = two_family_hsl_pair(50.0);
@@ -9043,20 +9133,16 @@ fn a_per_band_residual_stays_named_until_the_full_strength_fit_closes_it() {
         )
     };
 
-    // Default budget: the residual is still a per-band colour job, it is
-    // above the disclosure floor, and the disclosure says so.
+    // The default budget on the ±50 job: closed by the mixer (the law's
+    // reading, printed; see the doc).
     let partial = fit(0.65);
     let partial_px = pixels_of(&render::develop_preview(&s_img, &partial.recipe));
-    assert!(
+    eprintln!(
+        "PER_BAND default ±50: J* {:.4}, colour-shaped {}, names hsl {}",
+        partial.err_after,
         residual_is_colour_shaped(&partial_px, &tp, &evidence),
-        "the default fit leaves a per-band colour residual"
+        names_hsl(&partial)
     );
-    assert!(
-        partial.err_after > FIT_QUANT_CLEAN,
-        "…above the disclosure floor {FIT_QUANT_CLEAN}: {}",
-        partial.err_after
-    );
-    assert!(names_hsl(&partial), "…so the disclosure names it: {}", partial.recipe.rationale);
 
     // The wide gap: ±80 demanded. The mixer attaches, the residual is still a
     // per-band colour job well clear of the floor, and it is named.
@@ -9161,25 +9247,28 @@ fn recipe_fnv(recipe: &EditRecipe) -> u64 {
     json.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
 }
 
-/// A white-balance cast the curves carry as channel gains is admitted and
-/// never enters the hand-off. [`cooled_ramps`]`(0)` asks for a 3500 K white
-/// balance against the 5500 K anchor, out of the default budget, so the
-/// white-balance stage leaves as-shot and the three channel curves are asked
-/// for the whole cast.
+/// A white-balance cast the curves carry as channel gains: [`cooled_ramps`]`(0)`
+/// asks for a 3500 K white balance against the 5500 K anchor, out of the
+/// default budget, so the white-balance stage leaves as-shot and the three
+/// channel curves are asked for the whole cast.
 ///
 /// Until v1.18.0 this pair pinned the hand-off SHIPPING (5500 K / 0 -> 3900 K
-/// / +40.6, measured 2026-10-23): the curves were fitted on a frame the tone
-/// sliders had bent, fanned a hue class past [`FAN_DEG`], and the fan gate
-/// sent the cast to the white-balance walk. Since R8 / R12 every control that
-/// earns less than FIT_QUANT against its own absence is set back (here
-/// shadows, blacks, contrast, exposure, saturation and the mixer's values),
-/// so the curves are fitted on the untoned frame, where a white-balance move
-/// IS a per-channel gain: each hue ramp keeps its hue at every brightness,
-/// the curves fan the widest class +3.8 degrees, and the cast is admitted as
-/// fitted. A cast the fan gate does not convict never reaches the walk —
-/// the guard `CastOutcome::earns_projection` stands in front of both
-/// rescues. Measured 2026-11-04: look error 0.0771 -> 0.0140, WB as-shot,
-/// red and blue curves, walk entered 0 times.
+/// / +40.6, measured 2026-10-23). From R8 / R12 to RULING-1180-sc-r4 the
+/// cast was admitted as fitted and never walked (look error 0.0771 ->
+/// 0.0140, WB as-shot, fan +3.8 degrees).
+///
+/// RE-READ (rel1180 RULING-1180-sc-r5 Q-SC-2c (b)): the frame-domain
+/// candidate (the cast read on the frame before the mixer's moves) fans
+/// 16.77 degrees there, is convicted and walked to 3850 K / +15.1 — the walk
+/// is entered once, on that candidate. The two candidates are compared on
+/// their FINISHED recipes: the framed one finishes at J* 0.0122, mixer-first
+/// at 0.0052, so mixer-first ships and the walk is never what ships. What
+/// ships: the white balance as-shot, no hand-off note, the curves admitted,
+/// look error 0.0745 -> 0.0052. Measured 2026-11-07. (Read mid-pipeline, as
+/// 547a2b3 did, the framed candidate won 0.0101 against 0.0161 and shipped
+/// 3850 K at 0.0122.)
+/// MUTATION: the comparison read mid-pipeline (before 4a') -> 3850 K ships,
+/// red; part 1 dropped -> the walk is never entered (the first assertion).
 #[test]
 fn a_white_balance_cast_the_curves_carry_as_channel_gains_never_enters_the_hand_off() {
     use super::solve::route;
@@ -9187,12 +9276,18 @@ fn a_white_balance_cast_the_curves_carry_as_channel_gains_never_enters_the_hand_
     route::take();
     let rep = fit_recipe(&hue_ramps(), &cooled_ramps(0));
     let seen = route::take();
-    assert_eq!(seen.hand_off_entered, 0, "an unconvicted cast never enters the walk: {seen:?}");
+    let fan = projection_arg(&rep, keys::FIT_NOTE_CAST_ADMITTED_FAN, "fan");
+    eprintln!(
+        "WB_CAST shipped {:?} / {:+.1}, J* {:.4} -> {:.4}, admitted fan {fan:?}, walk entered {}",
+        rep.recipe.temperature_k, rep.recipe.tint, rep.err_before, rep.err_after, seen.hand_off_entered
+    );
+    assert_eq!(seen.hand_off_entered, 1, "the frame-domain candidate's convicted cast is walked: {seen:?}");
+    assert_eq!(rep.recipe.temperature_k, None, "…and the finished comparison ships mixer-first, as-shot");
     assert!(
         !rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB
-            || n.key == keys::FIT_NOTE_CAST_PROJECTED
-            || n.key == keys::FIT_NOTE_CAST_HUE_FANNED),
-        "…so it is neither handed, projected nor refused: {}",
+            || n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB_NO_CURVES
+            || n.key == keys::FIT_NOTE_CAST_PROJECTED),
+        "…so no note describes the probe's walk: {}",
         rep.recipe.rationale
     );
     assert!(
@@ -9200,50 +9295,47 @@ fn a_white_balance_cast_the_curves_carry_as_channel_gains_never_enters_the_hand_
         "the curves go through the ordinary admission: {}",
         rep.recipe.rationale
     );
-    let fan = projection_arg(&rep, keys::FIT_NOTE_CAST_ADMITTED_FAN, "fan")
-        .expect("an admitted cast publishes the fan it passed on");
+    let fan = fan.expect("an admitted cast publishes the fan it passed on");
     assert!(fan < FAN_DEG, "the gains fan no class past the limit ({fan})");
-    assert_eq!(rep.recipe.temperature_k, None, "the out-of-budget white balance stays as-shot");
     assert!(
         !rep.recipe.red_curve.is_empty() && !rep.recipe.blue_curve.is_empty(),
         "the curves carry the cast: {}",
         rep.recipe.rationale
     );
+    // The mixer-first finished recipe: 0.0052 measured; the framed one's
+    // 0.0122 is past it by more than FIT_QUANT of the 0.0745 start.
     assert!(
         ships(rep.err_after, rep.err_before),
         "the admitted cast earns its place: {} -> {}",
         rep.err_before,
         rep.err_after
     );
+    assert!(rep.err_after < 0.0122, "…and lands under the framed candidate's finished 0.0122: {}", rep.err_after);
 }
 
 /// The same frame with eleven rows of its grey band warmed instead: a cool
 /// cast with a warm strip, which a single white balance cannot take whole.
-/// Until 2026-10-29 this pair pinned the projection, and from then until
-/// v1.18.0 the hand-off shipping a nearer white balance the cells vouched
-/// (5500 K / 0 -> 4800 K / +15.5, fan 15.4 -> +4.5 degrees).
+/// Until 2026-10-29 this pair pinned the projection, from then until v1.18.0
+/// the hand-off shipping a nearer white balance the cells vouched, and under
+/// RULING-1180-int-r2 Q-FL2 the walk to 4950 K / tint 0 with no curves
+/// (0.0749 -> 0.0616).
 ///
-/// Since R8 / R12 the tone sliders and saturation that earn less than
-/// FIT_QUANT against their own absence are set back, the curves are fitted
-/// on the untoned frame, and the cool part of the cast is a per-channel gain
-/// there: the curves fan the widest class +6.3 degrees and are admitted as
-/// fitted, beside the mixer's Orange saturation -18. The fan gate did not
-/// convict, so the walk was never entered and the white balance stayed
-/// as-shot. Measured 2026-11-04: look error 0.0774 -> 0.0347.
-///
-/// RE-READ (RULING-1180-int-r2 Q-FL2). Under DEF-3's masked band blurs the
-/// candidate fans 15.0458 degrees, unclamped (no clamp or saturation in
-/// `hue_fan_weighted`), past FAN_DEG = 15 under `>=` and `>` alike: the gate
-/// convicts lawfully and the walk is entered. It moves the white balance to
-/// 4950 K / tint +7.1, the re-fitted curves deliver +17.4 degrees and the
-/// terminal delivered-fan check takes them out, and the finished-recipe
-/// elimination sets the tint back to 0: what ships is 4950 K / tint 0 and no
-/// curves (0.0749 -> 0.0616). The test now witnesses that walk, and "a note
-/// names what ships, not what the walk tried": the hand-off sentence names
-/// the finished recipe's white balance and does not say the curves ship.
-/// MUTATION: the note from the walk (its `to` and the ship-whole sentence) ->
-/// the note names 4950 K / +7.1 and curves that ship whole, and this test
-/// reads the misdescription.
+/// RE-READ (rel1180 RULING-1180-sc-r4 Q-SC-2b). The cast curves and the
+/// white-balance walk are frame-domain controls: their conviction reads the
+/// frame BEFORE the mixer's moves, and that candidate (the walk, then the
+/// mixer on its residual) answers to the attribution law against the
+/// mixer-first one. On the pre-mixer frame the candidate fans 15.0458
+/// degrees, past FAN_DEG = 15: convicted, walked to 4950 K / +7.1 (the
+/// curves re-fitted there fan 14.99), J* 0.03889. The mixer-first candidate
+/// — its bands each judged on their own population every round, so only
+/// Orange saturation -9 stays — with the curves admitted reads 0.03174: the
+/// frame-domain candidate does not earn FIT_QUANT over it, the smaller
+/// domain ships, and its probe hand-off is not reported. What ships is the
+/// admitted cast (fan +4.0, the Orange move set back by the finished R8),
+/// look error 0.0749 -> 0.0316. Measured 2026-11-06.
+/// MUTATION: the conviction read on the post-mixer frame (part 1 dropped) ->
+/// the candidate fans 11.8 degrees, the walk is never entered, and the first
+/// assertion reads it.
 #[test]
 fn a_warm_strip_cast_is_walked_to_a_nearer_white_balance_and_its_note_names_what_ships() {
     use super::solve::route;
@@ -9251,32 +9343,34 @@ fn a_warm_strip_cast_is_walked_to_a_nearer_white_balance_and_its_note_names_what
     route::take();
     let rep = fit_recipe(&hue_ramps(), &cooled_ramps(11));
     let seen = route::take();
-    assert_eq!(seen.hand_off_entered, 1, "the convicted cast is walked: {seen:?}");
-    assert!(
-        rep.recipe.red_curve.is_empty() && rep.recipe.green_curve.is_empty() && rep.recipe.blue_curve.is_empty(),
-        "premise: no cast curve reaches the finished recipe: {}",
-        rep.recipe.rationale
+    assert_eq!(seen.hand_off_entered, 1, "the cast convicted on the pre-mixer frame is walked: {seen:?}");
+    eprintln!(
+        "WARM_STRIP shipped {:?} / {:+.1}, J* {:.4} -> {:.4}",
+        rep.recipe.temperature_k, rep.recipe.tint, rep.err_before, rep.err_after
     );
-    let k = rep.recipe.temperature_k.expect("the walked white balance ships");
-    let note = rep
-        .notes
-        .iter()
-        .find(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB_NO_CURVES)
-        .unwrap_or_else(|| panic!("the hand-off says no curves ship: {}", rep.recipe.rationale));
-    let arg = |name: &str| note.args.iter().find(|(key, _)| *key == name).map(|(_, v)| v.clone());
-    eprintln!("WARM_STRIP shipped {k:.0} K / {:+.1}; note {:?} / {:?}", rep.recipe.tint, arg("k_after"), arg("tint_after"));
-    assert_eq!(arg("k_after"), Some(format!("{k:.0}")), "the note names the shipped temperature");
-    assert_eq!(arg("tint_after"), Some(format!("{:+.1}", rep.recipe.tint)), "…and the shipped tint");
+    assert_eq!(rep.recipe.temperature_k, None, "the walked candidate loses to the mixer-first one by the law");
     assert!(
         !rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB
-            || n.key == keys::FIT_NOTE_CAST_ADMITTED
+            || n.key == keys::FIT_NOTE_CAST_HANDED_TO_WB_NO_CURVES
             || n.key == keys::FIT_NOTE_CAST_PROJECTED),
-        "no sentence claims curves that do not ship: {}",
+        "no sentence describes the walk that did not ship: {}",
         rep.recipe.rationale
+    );
+    assert!(
+        rep.notes.iter().any(|n| n.key == keys::FIT_NOTE_CAST_ADMITTED)
+            && !(rep.recipe.red_curve.is_empty() && rep.recipe.blue_curve.is_empty()),
+        "the note names the admitted cast that ships: {}",
+        rep.recipe.rationale
+    );
+    assert!(
+        rep.err_after < 0.0616,
+        "what ships is better than the walk's 0.0616: {} -> {}",
+        rep.err_before,
+        rep.err_after
     );
     assert!(
         ships(rep.err_after, rep.err_before),
-        "the walked white balance earns its place: {} -> {}",
+        "the shipped cast earns its place: {} -> {}",
         rep.err_before,
         rep.err_after
     );

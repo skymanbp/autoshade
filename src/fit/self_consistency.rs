@@ -143,8 +143,12 @@ fn gate(name: &str, base: &EditRecipe, rep: &FitReport, carried: f32, wanted: f3
     assert!(failures.is_empty(), "{name}: {}\n{}", failures.join("; "), rep.recipe.rationale);
 }
 
+/// The white balance's demand is read closed-loop through the engine and
+/// a region reading a quantised zero bounds the common ask by an interval
+/// of at least one code (`paired_wb_closed_loop`, `wb_common_shared`): one
+/// open-loop reading asked 4800 K of this 4300 K render, the re-reads
+/// stopped at 4400 K where the shadows' 0.0 vetoed the other regions' ask.
 #[test]
-#[ignore = "self-consistency gate: fails at v1.18.0 start, a defect this version fixes (rel1180 msg2); run with --ignored"]
 fn the_fit_recovers_a_white_balance_it_rendered() {
     let Some(raw) = corpus_raw("p39.arw") else { return };
     let (base, rep) = round_trip(&raw, 0.85, |r| r.temperature_k = Some(4300.0));
@@ -176,8 +180,13 @@ fn the_fit_recovers_a_band_saturation_it_rendered() {
     gate("hsl saturation (blue)", &base, &rep, rep.recipe.hsl.saturation[5], 30.0, &["hsl.saturation"]);
 }
 
+/// The mixer's amounts are solved jointly on each band's population reach
+/// (`fit_band_populations`, `band_population_reach`) and attributed to the
+/// band before the frame-domain tone sliders and saturation (the attribution
+/// law at the mixer, `solve.rs` 4a): the tone stage read this Orange-only
+/// move as exposure −0.2 / saturation +6.6, and the ratio chase split what
+/// the mixer kept into Red −10.7 / Orange −14.5 (rel1180 msg-sc case 2).
 #[test]
-#[ignore = "self-consistency gate: fails at v1.18.0 start, a defect this version fixes (rel1180 msg2); run with --ignored"]
 fn the_fit_recovers_a_band_luminance_it_rendered() {
     let Some(raw) = corpus_raw("p40.arw") else { return };
     let (base, rep) = round_trip(&raw, 0.85, |r| r.hsl.luminance[1] = -25.0);

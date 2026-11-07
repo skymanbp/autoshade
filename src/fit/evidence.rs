@@ -1031,9 +1031,38 @@ pub(super) const WB_CHROMA_FLOOR: f32 = 0.04;
 /// blue (Kelvin) and green against the red/blue mean (tint) — each paired
 /// with the range's mass. Pixels under [`WB_CHROMA_FLOOR`] on either side do
 /// not testify.
+#[derive(Default)]
 pub(super) struct WbAxes {
     pub(super) kelvin: Vec<(f32, f32)>,
     pub(super) tint: Vec<(f32, f32)>,
+    /// Per testifying entry, the standard error of its `[kelvin, tint]`
+    /// ask ([`median_se`]); filled by [`wb_axes_by_region`], empty from
+    /// [`wb_axes_by_range`] (whose consensus reads no abstention).
+    pub(super) se: Vec<[f32; 2]>,
+    /// Per entry, the tonal region it reads (0 shadows, 1 midtones, 2
+    /// highlights) and one output code's log step at its level
+    /// ([`code_step_variance`]'s `q`); filled by [`wb_axes_by_region`].
+    pub(super) region: Vec<usize>,
+    pub(super) code: Vec<f32>,
+}
+
+/// `1 / Φ⁻¹(3/4)`: the median absolute deviation of a normal sample times
+/// this is its standard deviation.
+const MAD_TO_SIGMA: f64 = 1.482_602_2;
+
+/// The standard error of a weighted sample's median `ask`: the median's
+/// asymptotic spread `√(π/2) · σ / √n` (its efficiency against the mean
+/// under a normal), with σ read robustly as [`MAD_TO_SIGMA`] times the
+/// weighted median absolute deviation about `ask`, and `n` the sample's
+/// effective size `(Σw)² / Σw²`. Zero for an empty sample.
+pub(super) fn median_se(samples: &[(f32, f32)], ask: f32) -> f32 {
+    let (sw, sw2) = samples.iter().fold((0.0f64, 0.0f64), |(a, b), &(_, w)| (a + w as f64, b + (w as f64).powi(2)));
+    if sw <= 0.0 || sw2 <= 0.0 {
+        return 0.0;
+    }
+    let mut dev: Vec<(f32, f32)> = samples.iter().map(|&(v, w)| ((v - ask).abs(), w)).collect();
+    let mad = weighted_median(&mut dev) as f64;
+    ((std::f64::consts::PI / 2.0).sqrt() * MAD_TO_SIGMA * mad / (sw * sw / sw2).sqrt()) as f32
 }
 
 pub(super) fn wb_axes_by_range(sp: &[[f32; 3]], pair_tp: &[[f32; 3]], pair_w: &[f32]) -> WbAxes {
@@ -1063,7 +1092,7 @@ pub(super) fn wb_axes_by_range(sp: &[[f32; 3]], pair_tp: &[[f32; 3]], pair_w: &[
         mass[bin] += w as f64;
     }
     let total: f64 = mass.iter().sum();
-    let mut axes = WbAxes { kelvin: Vec::new(), tint: Vec::new() };
+    let mut axes = WbAxes::default();
     for bin in 0..EVIDENCE_LUMA_BINS {
         if total <= 0.0 || mass[bin] / total < EVIDENCE_MIN_SHARE as f64 {
             continue;
@@ -1108,13 +1137,18 @@ pub(super) fn wb_consensus(axis: &[(f32, f32)]) -> (f32, f32) {
 /// region holding under [`EVIDENCE_MIN_SHARE`] of the testifying mass does
 /// not testify. The regions are the partition the colour-grade stage
 /// (`grade::fit_grade_stage`) can carry a remainder on, so the white
-/// balance is read on the same one.
+/// balance is read on the same one. Each region's ask carries its own
+/// standard error on each axis ([`median_se`] of the per-pixel axis value,
+/// `ln r − ln b` for Kelvin and `(ln r + ln b)/2 − ln g` for tint, about
+/// the region's ask).
 pub(super) fn wb_axes_by_region(sp: &[[f32; 3]], pair_tp: &[[f32; 3]], pair_w: &[f32]) -> WbAxes {
     let n = sp.len().min(pair_tp.len());
     let split = crate::recipe::ColorGrade::default();
     let mut red: [Vec<(f32, f32)>; 3] = Default::default();
     let mut blue: [Vec<(f32, f32)>; 3] = Default::default();
+    let mut along: [[Vec<(f32, f32)>; 2]; 3] = Default::default();
     let mut mass = [0.0f64; 3];
+    let mut level = [0.0f64; 3];
     for i in 0..n {
         let w = pair_w.get(i).copied().unwrap_or(0.0).max(0.0);
         if w <= 0.0 {
@@ -1135,21 +1169,118 @@ pub(super) fn wb_axes_by_region(sp: &[[f32; 3]], pair_tp: &[[f32; 3]], pair_w: &
             if m > 0.0 {
                 red[r].push((d[0] - d[1], m));
                 blue[r].push((d[2] - d[1], m));
+                along[r][0].push((d[0] - d[2], m));
+                along[r][1].push((0.5 * (d[0] + d[2]) - d[1], m));
                 mass[r] += m as f64;
+                level[r] += (m * luma601(&sp[i])) as f64;
             }
         }
     }
     let total: f64 = mass.iter().sum();
-    let mut axes = WbAxes { kelvin: Vec::new(), tint: Vec::new() };
+    let mut axes = WbAxes::default();
     for r in 0..3 {
         if total <= 0.0 || mass[r] / total < EVIDENCE_MIN_SHARE as f64 {
             continue;
         }
         let (u, v) = (weighted_median(&mut red[r]), weighted_median(&mut blue[r]));
-        axes.kelvin.push((u - v, mass[r] as f32));
-        axes.tint.push((0.5 * (u + v), mass[r] as f32));
+        let (k, t) = (u - v, 0.5 * (u + v));
+        axes.kelvin.push((k, mass[r] as f32));
+        axes.tint.push((t, mass[r] as f32));
+        let level = (level[r] / mass[r]) as f32;
+        axes.se.push([region_se(median_se(&along[r][0], k), level), region_se(median_se(&along[r][1], t), level)]);
+        axes.region.push(r);
+        axes.code.push((12.0 * code_step_variance(level)).sqrt());
     }
     axes
+}
+
+/// The resolution of one region's reading: `q² / 12`, the variance of a
+/// uniform quantisation of one output code, with `q` that code's step in the
+/// axes' own unit — the log step `ln lin(v + 1/255) − ln lin(v)` of one 8-bit
+/// display code at the region's mean display level `v` (its pixels' luma,
+/// mass-weighted). Both axes are differences of such log steps per channel,
+/// so the Kelvin axis (`ln r − ln b`) and the tint axis read the same `q`.
+/// Added to the median's own variance ([`median_se`]): a region whose
+/// residual is under one code reads a median of exactly 0.0 with a tiny
+/// spread, and without the floor that 0.0 would read as a confident "stay"
+/// (rel1180 RULING-1180-sc-r2).
+pub(super) fn code_step_variance(level: f32) -> f32 {
+    let v = level.clamp(0.0, 1.0 - 1.0 / 255.0);
+    let lin = |x: f32| render::srgb_to_linear(x).max(1e-5);
+    let q = (lin(v + 1.0 / 255.0) / lin(v)).ln();
+    q * q / 12.0
+}
+
+/// One region's error on an axis: its median's own ([`median_se`]) and one
+/// output code's quantisation at its mean display level
+/// ([`code_step_variance`]), in quadrature.
+pub(super) fn region_se(median_se: f32, level: f32) -> f32 {
+    (median_se * median_se + code_step_variance(level)).sqrt()
+}
+
+
+/// The part of one axis's demand every tonal region SHARES (`axis` 0 is
+/// Kelvin, 1 tint), each region read with its own error (`se`, the median's
+/// plus one output code's quantisation, [`code_step_variance`]):
+/// * a region whose interval `ask ± se` excludes zero RESOLVES a move: the
+///   common ask is the smallest of the resolving asks when they share a
+///   sign ([`wb_common`]), nothing when they split;
+/// * a region whose interval contains zero cannot propose a move but BOUNDS
+///   it: the common ask is clipped into that interval, toward zero — a move
+///   the region's own reading rules out is not shared with it;
+/// * a region ABSTAINS only with no information (no mass, an undefined
+///   error).
+///
+/// The white balance takes only what every band shares (2026-11-01; rel1180
+/// RULING-1180-sc-r2): measured at 8250 K on a real pair, the highlights'
+/// −0.00086 ± 0.00088 is a measured "stay" and bounds the shadows' +0.954,
+/// where reading it as silence walked the frame to the 40000 K bound; on the
+/// self-consistency gate's 4400 K render the shadows' quantised 0.0 reads an
+/// interval of at least one code and leaves the highlights' −0.0109 whole.
+pub(super) fn wb_common_shared(axes: &WbAxes, axis: usize) -> f32 {
+    wb_move_shared(axes, axis, &[])
+}
+
+/// [`wb_common_shared`] read where the CONTROL acts (rel1180
+/// RULING-1180-sc-r3): `response[i]` is entry `i`'s own measured response on
+/// the axis — its reading's fall per unit of log gain over the chase's last
+/// step (the secant's device), `None` where none was measured (the first
+/// step, a step that did not move the axis, a reading that did not fall).
+/// A resolving region proposes its ask divided by its own response (its ask
+/// itself without one); the common move is the smallest proposal when they
+/// share a sign. A bounding region with a response bounds in the control's
+/// unit — its interval divided by its response — and has no opinion on a
+/// move smaller than one output code of its own reading carried the same
+/// way (a region on the tone curve's shoulder cannot see 50 K); without a
+/// response it bounds in the ask's unit. Measured on the self-consistency
+/// gate's 4300 K render: read in the ask's unit, the highlights' quantised
+/// 0.0 at 4350 K (± 0.0029) clipped the midtones' −0.0147 to a 28 K step
+/// that earned nothing, and the chase stalled 50 K short.
+pub(super) fn wb_move_shared(axes: &WbAxes, axis: usize, response: &[Option<f32>]) -> f32 {
+    let values = if axis == 0 { &axes.kelvin } else { &axes.tint };
+    let read: Vec<(f32, f32, f32, f32, Option<f32>)> = values
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &(v, m))| {
+            let se = axes.se.get(i)?[axis];
+            let code = axes.code.get(i).copied().unwrap_or(0.0);
+            (m > 0.0 && se.is_finite()).then(|| (v, m, se, code, response.get(i).copied().flatten()))
+        })
+        .collect();
+    let resolving: Vec<(f32, f32)> = read
+        .iter()
+        .filter(|&&(v, _, se, _, _)| v.abs() > se)
+        .map(|&(v, m, _, _, r)| (r.map_or(v, |r| v / r), m))
+        .collect();
+    let mut common = wb_common(&resolving);
+    for &(v, _, se, code, r) in read.iter().filter(|&&(v, _, se, _, _)| v.abs() <= se) {
+        common = match r {
+            Some(r) if code / r >= common.abs() => common,
+            Some(r) => common.clamp((v - se) / r, (v + se) / r),
+            None => common.clamp(v - se, v + se),
+        };
+    }
+    common
 }
 
 /// The part of one axis's demand EVERY testifying tonal region asks: the
@@ -1193,7 +1324,83 @@ pub(super) fn paired_wb_from_populations(
     law: render::WbLaw,
 ) -> (f32, f32, [f32; 3]) {
     let axes = wb_axes_by_region(sp, pair_tp, pair_w);
-    wb_demand(wb_common(&axes.kelvin), wb_common(&axes.tint), law)
+    wb_demand(wb_common_shared(&axes, 0), wb_common_shared(&axes, 1), law)
+}
+
+/// One tonal region's `[kelvin, tint]` asks, by region index.
+type RegionAsk = (usize, [f32; 2]);
+
+/// [`paired_wb_from_populations`] read CLOSED-LOOP through the engine: the
+/// demand is re-read on the render at the white balance it asked for, and
+/// what is still asked in common is composed onto it in the law's own log
+/// gains, until nothing is shared (no region resolves a move, the resolving
+/// regions split in sign, or a bounding region clips it to zero —
+/// [`wb_common_shared`]), the re-read lands where it
+/// stands (the solve's 50 K / 0.1 quantisation), or the step does not earn
+/// [`FIT_QUANT`] of `objective` over the white balance it would replace
+/// ([`ships`]). One reading is open-loop on the DISPLAY pixels, where the
+/// tone curve compresses a white balance's log-ratio change most at the
+/// ends of the range, and [`wb_common`] keeps the smallest region's: the
+/// read under-asks by construction. So from the second step on, each
+/// region's ask is read in the control's unit through its OWN response —
+/// the fall of its reading per unit of log gain over the chase's last step,
+/// a secant through the real engine as the saturation chase and the grade's
+/// strength are refined — and the regions' asks and bounds are combined
+/// there ([`wb_move_shared`]); a region with no measured response is read in
+/// the ask's unit. Measured on the self-consistency gate's 4300 K render (as
+/// shot 5400 K): one reading asked 4800 K and the re-reads stopped at 4400 K;
+/// with the common ask divided by its secant the chase reached 4350 K, where
+/// the highlights' quantised 0.0 read in the ask's unit clipped the
+/// midtones' −0.0147 to a 28 K step that earned nothing (rel1180 msg-sc
+/// rounds 2-3).
+/// `render_at` renders the stage's recipe at a white balance; `first` is
+/// the open-loop reading.
+pub(super) fn paired_wb_closed_loop(
+    first: (f32, f32),
+    pair_tp: &[[f32; 3]],
+    pair_w: &[f32],
+    law: render::WbLaw,
+    render_at: impl Fn((f32, f32)) -> Vec<[f32; 3]>,
+    objective: impl Fn(&[[f32; 3]]) -> f32,
+) -> (f32, f32) {
+    let mut at = first;
+    let mut px = render_at(at);
+    // The last step, in the two axes' log gains, and each region's asks it
+    // was read on: (moved, [(region, [kelvin, tint])]).
+    let mut last: Option<([f32; 2], Vec<RegionAsk>)> = None;
+    let axes_of = |g: [f32; 3]| [g[0] - g[2], 0.5 * (g[0] + g[2]) - g[1]];
+    loop {
+        let axes = wb_axes_by_region(&px, pair_tp, pair_w);
+        // Each region's own response per axis over the last step.
+        let response = |axis: usize| -> Vec<Option<f32>> {
+            (0..axes.region.len())
+                .map(|i| {
+                    let (moved, asked) = last.as_ref()?;
+                    let &(_, before) = asked.iter().find(|(r, _)| *r == axes.region[i])?;
+                    let now = if axis == 0 { axes.kelvin[i].0 } else { axes.tint[i].0 };
+                    let r = (before[axis] - now) / moved[axis];
+                    (moved[axis] != 0.0 && r > 0.0).then_some(r)
+                })
+                .collect()
+        };
+        let (a, m) = (wb_move_shared(&axes, 0, &response(0)), wb_move_shared(&axes, 1, &response(1)));
+        if a == 0.0 && m == 0.0 {
+            return at;
+        }
+        let from = law.log_gains(at);
+        let next = law.invert([from[0] + m + 0.5 * a, from[1], from[2] + m - 0.5 * a], WB_SEARCH_K);
+        if next == at {
+            return at;
+        }
+        let next_px = render_at(next);
+        if !ships(objective(&next_px), objective(&px)) {
+            return at;
+        }
+        let (g0, g1) = (axes_of(from), axes_of(law.log_gains(next)));
+        let asked = (0..axes.region.len()).map(|i| (axes.region[i], [axes.kelvin[i].0, axes.tint[i].0])).collect();
+        last = Some(([g1[0] - g0[0], g1[1] - g0[1]], asked));
+        (at, px) = (next, next_px);
+    }
 }
 
 /// One axis pair's demand onto the render's own law: the Kelvin axis `a`
