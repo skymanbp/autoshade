@@ -38,17 +38,21 @@ pub fn develop_preview(preview: &DynamicImage, recipe: &EditRecipe) -> DynamicIm
 /// the canvas shows (the GUI's Range-mask references and Point Color samples,
 /// the fill's picture of a card) passes the source's own edge so its pixels
 /// are the canvas's pixels;
-/// `None` treats the preview itself as the film. `raw_source` is
-/// [`develop_preview_film`]'s too: the kind of source these pixels came from.
+/// `None` treats the preview itself as the film. `source` is
+/// [`develop_preview_film`]'s too: the frame of the source these pixels came
+/// from — its kind (the Sharpening default) and whether its pixels already
+/// carry the one colour noise reduction (a RAW's base, a marked master;
+/// [`SourceFrame::colour_nr_in_pixels`]), so a surface that samples the
+/// canvas's pixels develops them exactly as the canvas does.
 pub fn develop_preview_framed(
     preview: &DynamicImage,
     recipe: &EditRecipe,
     diag: &crate::diag::Diag<'_>,
     frame: MaskFrame<'_>,
     film_short_edge: Option<u32>,
-    raw_source: bool,
+    source: &SourceFrame,
 ) -> DynamicImage {
-    develop_preview_inner(preview, recipe, diag, Some(frame), film_short_edge, raw_source, false)
+    develop_preview_inner(preview, recipe, diag, Some(frame), film_short_edge, source.is_raw(), false, source.colour_nr_in_pixels())
 }
 
 /// [`develop_preview_with`] for a VIEWING surface that knows how large the
@@ -76,7 +80,7 @@ pub fn develop_preview_film(
     source: &SourceFrame,
 ) -> DynamicImage {
     let corrected = source.corrected();
-    develop_preview_inner(preview, recipe, diag, None, film_short_edge, source.is_raw(), corrected)
+    develop_preview_inner(preview, recipe, diag, None, film_short_edge, source.is_raw(), corrected, source.colour_nr_in_pixels())
 }
 
 /// [`develop_preview`] with the caller's own diagnostics channel — the injected
@@ -87,12 +91,15 @@ pub fn develop_preview_with(
     recipe: &EditRecipe,
     diag: &crate::diag::Diag<'_>,
 ) -> DynamicImage {
-    develop_preview_inner(preview, recipe, diag, None, None, false, false)
+    develop_preview_inner(preview, recipe, diag, None, None, false, false, false)
 }
 
 /// The preview develop. `frame` is `None` for the two entry points that let the
 /// RECIPE answer "will geometry follow?" and `Some` for the caller that knows
-/// better — see [`develop_preview_framed`].
+/// better — see [`develop_preview_framed`]. `colour_nr_in_pixels`: the pixels
+/// already carry the develop's one colour noise reduction (a RAW's base, a
+/// marked master — `SourceFrame::colour_nr_in_pixels`).
+#[allow(clippy::too_many_arguments)] // the preview's frame plus the source's two facts
 fn develop_preview_inner(
     preview: &DynamicImage,
     recipe: &EditRecipe,
@@ -101,6 +108,7 @@ fn develop_preview_inner(
     film_short_edge: Option<u32>,
     raw_source: bool,
     corrected: bool,
+    colour_nr_in_pixels: bool,
 ) -> DynamicImage {
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
     // ValidatedRecipe token (arch item c) replaces four hand-rolled
@@ -140,7 +148,7 @@ fn develop_preview_inner(
     // (`SourceFrame::corrected`, decided by the caller).
     let frame = frame.unwrap_or_else(|| MaskFrame::of_base(&geom, recipe.lens_distortion, corrected));
     let film = FilmScale::of(film_short_edge, w as usize, h as usize);
-    apply_develop(&mut data, w as usize, h as usize, recipe, diag, frame, film, raw_source);
+    apply_develop(&mut data, w as usize, h as usize, recipe, diag, frame, film, raw_source, colour_nr_in_pixels);
     let mut buf = vec![0u8; (w * h * 3) as usize];
     buf.par_chunks_mut(3).zip(data.par_iter()).for_each(|(o, px)| {
         o[0] = to_u8(px[0]);
@@ -157,7 +165,8 @@ fn develop_preview_inner(
 ///
 /// `diag` is the caller's channel for the mask-raster loader's refusals — the
 /// only thing in here that can say anything. `raw_source` is the kind of the
-/// source (see [`develop_preview_film`]).
+/// source (see [`develop_preview_film`]); `colour_nr_in_pixels` whether its
+/// pixels already carry the develop's one colour noise reduction.
 #[allow(clippy::too_many_arguments)] // one value each of the develop's own frame: pixels, size, recipe, channel, mask frame, film scale, source kind
 fn apply_develop(
     data: &mut [[f32; 3]],
@@ -168,9 +177,10 @@ fn apply_develop(
     frame: MaskFrame<'_>,
     film: FilmScale,
     raw_source: bool,
+    colour_nr_in_pixels: bool,
 ) {
     let rasters = best_effort_mask_raster_snapshot(r, diag);
-    apply_develop_with_rasters(data, w, h, r, &rasters, frame, film, raw_source);
+    apply_develop_with_rasters(data, w, h, r, &rasters, frame, film, raw_source, colour_nr_in_pixels);
 }
 
 /// [`apply_develop`] on pixels with no owner and no caller to route to — the
@@ -182,7 +192,7 @@ pub(super) fn apply_develop_anon(data: &mut [[f32; 3]], w: usize, h: usize, r: &
     // `AsRendered`: these fixtures construct a raw pixel buffer and inspect it
     // directly — no geometry stage runs after them, so every mask belongs at
     // its stored coordinates (`MaskFrame`).
-    apply_develop(data, w, h, r, &crate::diag::pixels(), MaskFrame::AsRendered, FilmScale::NATIVE, false);
+    apply_develop(data, w, h, r, &crate::diag::pixels(), MaskFrame::AsRendered, FilmScale::NATIVE, false, false);
 }
 
 /// The recipe's retouch areas as heal spots for a `w`×`h` working frame
@@ -293,6 +303,7 @@ pub(super) fn apply_develop_with_rasters(
     frame: MaskFrame<'_>,
     film: FilmScale,
     raw_source: bool,
+    colour_nr_in_pixels: bool,
 ) {
     // 0-) spot removal (v1.5.0 F9) — Lightroom's `crs:RetouchAreas`, which
     //    this engine re-solves from the frame's own pixels. FIRST, for two
@@ -454,7 +465,12 @@ pub(super) fn apply_develop_with_rasters(
     //    `film`, which retires the V2 §4c/§4d rules (sharpening σ =
     //    clamp(0.0008·min(w,h), 0.7, 2.0), NR at a raster-pixel radius) under
     //    which one slider value meant two structures at preview and at export.
-    if let Some(p) = detail::ChromaNrParams::global(r) {
+    //    Colour noise has ONE stage per develop (E3 of v1.18.0): a RAW's runs
+    //    on its linear mosaic before the demosaic (`denoise::linear_chroma`,
+    //    in the base these pixels came from), and a master baked with it says
+    //    so in its file (`BakedColourNr`); here it runs only over pixels that
+    //    carry none — a JPEG, a TIFF, a phone picture, an older master.
+    if let Some(p) = detail::ChromaNrParams::global(r).filter(|_| !colour_nr_in_pixels) {
         detail::chroma_nr(data, w, h, &p, film);
     }
     if let Some(p) = detail::LumaNrParams::global(r) {

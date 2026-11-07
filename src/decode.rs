@@ -1557,6 +1557,22 @@ pub fn source_window(path: &Path) -> Result<SourceWindow> {
     Ok(SourceWindow { size: (d.w, d.h), exif: raw_orientation_of(&md), legacy_shift })
 }
 
+/// Does the RAW at `path` carry a mosaic the linear colour stage reads
+/// (`denoise::linear_chroma::reads`: one sample per site on a 2×2 RGB
+/// Bayer)? Metadata only, as [`source_window`]: the dummy decode declares the
+/// pattern and the samples per pixel without decompressing the sensor.
+pub fn linear_colour_stage_reads(path: &Path) -> Result<bool> {
+    guard_tiff_chain(path)?;
+    guard_raw_plane_extent(path)?;
+    let src = RawSource::new(path).with_context(|| format!("open RAW {}", path.display()))?;
+    let decoder = decoder_for(path, &src)?;
+    let params = RawDecodeParams { image_index: 0 };
+    let raw = guard_parser_panic(path, "mosaic pattern", || {
+        decoder.raw_image(&src, &params, true).map_err(|e| anyhow!("raw_image(dummy): {e}"))
+    })?;
+    Ok(crate::denoise::linear_chroma::reads(&raw))
+}
+
 /// [`source_window`]'s frame and turn alone, for the callers that need no
 /// more — one header walk either way.
 pub fn source_frame(path: &Path) -> Result<((usize, usize), rawler::Orientation)> {
@@ -3234,7 +3250,7 @@ mod tests {
     /// a fifth `raw_image` call site without one.
     #[test]
     fn every_raw_image_door_measures_the_plane_first() {
-        for (file, doors_expected) in [("src/decode.rs", 2usize), ("src/render.rs", 2usize)] {
+        for (file, doors_expected) in [("src/decode.rs", 3usize), ("src/render.rs", 2usize)] {
             // LF-normalised: this repo has MIXED line endings by design. The engine is
             // read as the one text `render.rs` was before it was split into files.
             let text = if file == "src/render.rs" {

@@ -340,10 +340,10 @@ fn deleting_a_raster_after_snapshot_construction_does_not_change_the_render() {
     let snapshot = load_mask_raster_snapshot(&recipe, &crate::diag::pixels()).unwrap();
     let untouched = vec![[0.25, 0.25, 0.25]; 4];
     let mut before_delete = untouched.clone();
-    apply_develop_with_rasters(&mut before_delete, 2, 2, &recipe, &snapshot, MaskFrame::AsRendered, FilmScale::NATIVE, false);
+    apply_develop_with_rasters(&mut before_delete, 2, 2, &recipe, &snapshot, MaskFrame::AsRendered, FilmScale::NATIVE, false, false);
     std::fs::remove_file(&mask).unwrap();
     let mut after_delete = untouched.clone();
-    apply_develop_with_rasters(&mut after_delete, 2, 2, &recipe, &snapshot, MaskFrame::AsRendered, FilmScale::NATIVE, false);
+    apply_develop_with_rasters(&mut after_delete, 2, 2, &recipe, &snapshot, MaskFrame::AsRendered, FilmScale::NATIVE, false, false);
     assert_eq!(after_delete, before_delete);
     assert_ne!(after_delete, untouched, "the retained white mask must still apply");
     let _ = std::fs::remove_dir_all(&dir);

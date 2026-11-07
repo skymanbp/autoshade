@@ -70,6 +70,10 @@ mod source;
 mod tone;
 mod wb;
 pub use detail::FilmScale;
+pub(crate) use detail::{chroma_nr_flat_noise_share, upsample_at};
+// The colour stage's law test reads the display pass's own form beside it.
+#[cfg(test)]
+pub(crate) use detail::{chroma_nr, ChromaNrParams};
 pub use finish::{frame_and_finish, CropPolicy};
 
 const LUT_N: usize = 4096;
@@ -218,9 +222,9 @@ pub use canvas::{
     Master, Plate,
 };
 pub use baked::{
-    carry_baked_geometry, fit_raster_frame, open_mask_raster, read_baked_geometry, save_mask_raster,
-    stamp_baked_geometry, stamp_mask_frame, BakedGeometry, MaskRaster, RasterFrame, SourceFrame,
-    BAKED_GEOMETRY_KEY, BAKED_GEOMETRY_TIFF_TAG,
+    carry_baked_geometry, fit_raster_frame, open_mask_raster, read_baked_geometry, read_colour_nr, save_mask_raster,
+    stamp_baked_geometry, stamp_colour_nr, stamp_mask_frame, BakedColourNr, BakedGeometry, MaskRaster, RasterFrame,
+    SourceFrame, BAKED_GEOMETRY_KEY, BAKED_GEOMETRY_TIFF_TAG, COLOUR_NR_KEY, COLOUR_NR_TIFF_TAG,
 };
 use source::{apply_crop, render_frame, rgb16_source};
 #[cfg(test)]

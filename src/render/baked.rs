@@ -41,6 +41,50 @@ pub const BAKED_GEOMETRY_TIFF_TAG: u16 = 65117;
 /// rather than read as something it may not mean.
 const VERSION: u32 = 1;
 
+/// The key the colour-NR marker is stored under ([`BakedColourNr`]).
+pub const COLOUR_NR_KEY: &str = "autoshade:colour-nr";
+
+/// The TIFF tag the colour-NR marker is stored in (ASCII), beside
+/// [`BAKED_GEOMETRY_TIFF_TAG`] in the private range.
+pub const COLOUR_NR_TIFF_TAG: u16 = 65118;
+
+/// One marker a file can carry: its name (the PNG `iTXt` keyword, and the
+/// JPEG comment's prefix before `=`) and its TIFF tag. Every codec below reads
+/// and writes one marker by its key and leaves the other untouched.
+#[derive(Clone, Copy)]
+struct Key {
+    name: &'static str,
+    tiff_tag: u16,
+}
+
+const GEOMETRY: Key = Key { name: BAKED_GEOMETRY_KEY, tiff_tag: BAKED_GEOMETRY_TIFF_TAG };
+const COLOUR_NR: Key = Key { name: COLOUR_NR_KEY, tiff_tag: COLOUR_NR_TIFF_TAG };
+
+/// The colour noise reduction a master's pixels carry (E3 of v1.18.0): a
+/// master baked from a RAW whose colour NR was on ran the RAW's one colour
+/// stage, on the linear mosaic (`denoise::linear_chroma`), and says so here,
+/// so that its card runs no second one. A master with no such marker — every
+/// master before v1.18.0, and one baked with colour NR off — keeps the
+/// display-frame pass, as any baked file does.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BakedColourNr {
+    /// The marker's format version ([`VERSION`]).
+    pub version: u32,
+    /// The stage that ran: `linear-mosaic`.
+    pub stage: String,
+    /// The Colour noise reduction slider it ran at.
+    pub strength: f32,
+}
+
+impl BakedColourNr {
+    /// The marker of a RAW master baked at colour NR `strength`; `None` when
+    /// it is off.
+    pub fn of(strength: f32) -> Option<Self> {
+        (strength > 0.0).then(|| Self { version: VERSION, stage: "linear-mosaic".to_string(), strength })
+    }
+}
+
 /// The lens geometry baked into a master's pixels. See the module docs.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -150,22 +194,26 @@ impl Fnv {
 /// [`SourceFrame::of`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum SourceFrame {
-    /// A camera RAW: its base develop is in the sensor frame.
-    Raw,
-    /// A baked file, with the geometry its marker says is in its pixels;
-    /// `None` = no marker, the sensor frame.
-    Baked(Option<BakedGeometry>),
+    /// A camera RAW: its base develop is in the sensor frame. `linear_stage`:
+    /// its mosaic is one the linear colour stage reads
+    /// (`denoise::linear_chroma::reads`, off a metadata-only decode), so its
+    /// develop carries the one colour noise reduction; `false` (X-Trans, a
+    /// linear DNG) leaves it to the display-frame pass.
+    Raw { linear_stage: bool },
+    /// A baked file, with the geometry its marker says is in its pixels
+    /// (`None` = no marker, the sensor frame) and the colour noise reduction
+    /// its pixels already carry (`None` = none: the display-frame pass runs).
+    Baked(Option<BakedGeometry>, Option<BakedColourNr>),
 }
 
 impl SourceFrame {
-    /// The frame of the file at `path`. A RAW is told by its kind; a baked
-    /// file by its marker, read once per (path, modification time, length)
+    /// The frame of the file at `path`. A RAW is told by its kind and its
+    /// mosaic (whether the linear colour stage reads it, a metadata-only
+    /// decode); a baked file by its marker; each read once per (path,
+    /// modification time, length)
     /// for the process. `Err` when the file cannot be read or its marker
     /// cannot be parsed — never a silent "sensor frame".
     pub fn of(path: &Path) -> Result<Self> {
-        if crate::decode::is_raw(path) {
-            return Ok(Self::Raw);
-        }
         type Slot = (std::path::PathBuf, Option<(Option<std::time::SystemTime>, u64)>, SourceFrame);
         static SEEN: std::sync::OnceLock<std::sync::Mutex<Vec<Slot>>> = std::sync::OnceLock::new();
         let ident = std::fs::metadata(path).ok().map(|m| (m.modified().ok(), m.len()));
@@ -178,7 +226,11 @@ impl SourceFrame {
         {
             return Ok(hit.2.clone());
         }
-        let frame = Self::Baked(read_baked_geometry(path)?);
+        let frame = if crate::decode::is_raw(path) {
+            Self::Raw { linear_stage: crate::decode::linear_colour_stage_reads(path)? }
+        } else {
+            Self::Baked(read_baked_geometry(path)?, read_colour_nr(path)?)
+        };
         let mut held = seen.lock().unwrap_or_else(|p| p.into_inner());
         held.retain(|(p, _, _)| p != path);
         if held.len() >= 32 {
@@ -188,16 +240,46 @@ impl SourceFrame {
         Ok(frame)
     }
 
+    /// The exposure's noise reading for the RAW at `path`
+    /// (`denoise::linear_chroma::SourceReading`: its noise model), kept
+    /// beside its frame. It is a property of the exposure, not of a develop
+    /// or a recipe, so it is read ONCE per (path,
+    /// modification time, length) for the process, by `read` off the
+    /// sensor's own mosaic, and every later develop of the source — a slider
+    /// change, a master's bake after its AI denoise — runs the colour
+    /// stage's pass alone over it. `None` when the mosaic has no model.
+    pub(crate) fn noise_reading(
+        path: &Path,
+        read: impl FnOnce() -> Option<crate::denoise::linear_chroma::SourceReading>,
+    ) -> Option<crate::denoise::linear_chroma::SourceReading> {
+        type Reading = Option<crate::denoise::linear_chroma::SourceReading>;
+        type Slot = (std::path::PathBuf, (Option<std::time::SystemTime>, u64), Reading);
+        static READ: std::sync::OnceLock<std::sync::Mutex<Vec<Slot>>> = std::sync::OnceLock::new();
+        let Some(ident) = std::fs::metadata(path).ok().map(|m| (m.modified().ok(), m.len())) else { return read() };
+        let held = READ.get_or_init(Default::default);
+        if let Some(hit) = held.lock().unwrap_or_else(|p| p.into_inner()).iter().find(|(p, i, _)| p == path && *i == ident) {
+            return hit.2;
+        }
+        let reading = read();
+        let mut held = held.lock().unwrap_or_else(|p| p.into_inner());
+        held.retain(|(p, _, _)| p != path);
+        if held.len() >= 32 {
+            held.remove(0);
+        }
+        held.push((path.to_path_buf(), ident, reading));
+        reading
+    }
+
     /// Is this a camera RAW?
     pub fn is_raw(&self) -> bool {
-        matches!(self, Self::Raw)
+        matches!(self, Self::Raw { .. })
     }
 
     /// The geometry a marked baked file carries.
     pub fn baked(&self) -> Option<&BakedGeometry> {
         match self {
-            Self::Baked(g) => g.as_ref(),
-            Self::Raw => None,
+            Self::Baked(g, _) => g.as_ref(),
+            Self::Raw { .. } => None,
         }
     }
 
@@ -207,8 +289,21 @@ impl SourceFrame {
     /// them).
     pub fn corrected(&self) -> bool {
         match self {
-            Self::Raw => false,
-            Self::Baked(g) => g.as_ref().is_some_and(BakedGeometry::corrects_frame),
+            Self::Raw { .. } => false,
+            Self::Baked(g, _) => g.as_ref().is_some_and(BakedGeometry::corrects_frame),
+        }
+    }
+
+    /// Do this source's pixels already carry the develop's one colour noise
+    /// reduction? A RAW's base does whenever its part asks for it and its
+    /// mosaic is one the stage reads (the stage runs inside its develop,
+    /// `canvas::BasePart`); a baked file does when its marker says so
+    /// ([`BakedColourNr`]). Either way the display-frame pass must not run
+    /// over them; otherwise it is the one stage.
+    pub fn colour_nr_in_pixels(&self) -> bool {
+        match self {
+            Self::Raw { linear_stage } => *linear_stage,
+            Self::Baked(_, nr) => nr.is_some(),
         }
     }
 
@@ -264,6 +359,54 @@ fn read_up_to(r: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
     Ok(n)
 }
 
+/// The text of the marker `key` in the file at `path`; `None` when it carries
+/// none (or is a format that cannot carry one).
+fn read_marker(path: &Path, key: Key) -> Result<Option<Vec<u8>>> {
+    let mut f = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    Ok(match sniff(&mut f)? {
+        Some(Kind::Png) => png_find(&mut f, key)?,
+        Some(Kind::Tiff { big_endian }) => tiff_find(&mut f, big_endian, key)?,
+        Some(Kind::Jpeg) => jpeg_find(&mut f, key)?,
+        None => None,
+    })
+}
+
+/// Write the marker `key` with `text` into the file at `path`, replacing the
+/// one it carries; `what` names it in the refusal for a format that cannot.
+fn stamp_marker(path: &Path, key: Key, text: &[u8], what: &str) -> Result<()> {
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    match sniff(&mut f)? {
+        Some(Kind::Tiff { big_endian }) => {
+            tiff_stamp(&mut f, big_endian, key, text).with_context(|| format!("mark {}", path.display()))
+        }
+        Some(kind) => {
+            drop(f);
+            rewrite_stamped(path, kind, key, text).with_context(|| format!("mark {}", path.display()))
+        }
+        None => bail!("{} is not PNG, TIFF or JPEG, so it cannot carry {what}", path.display()),
+    }
+}
+
+/// The colour noise reduction the file at `path` says its pixels carry.
+pub fn read_colour_nr(path: &Path) -> Result<Option<BakedColourNr>> {
+    let Some(text) = read_marker(path, COLOUR_NR)? else { return Ok(None) };
+    let m: BakedColourNr = serde_json::from_slice(&text)
+        .with_context(|| format!("{}: the {COLOUR_NR_KEY} marker does not parse", path.display()))?;
+    if m.version != VERSION {
+        bail!("{}: the {COLOUR_NR_KEY} marker is version {}, this build reads version {VERSION}", path.display(), m.version);
+    }
+    Ok(Some(m))
+}
+
+/// Write `m` into the file at `path` (a staged master, before it is published).
+pub fn stamp_colour_nr(path: &Path, m: &BakedColourNr) -> Result<()> {
+    stamp_marker(path, COLOUR_NR, &serde_json::to_vec(m)?, "the colour noise reduction baked into it")
+}
+
 fn parse(text: &[u8], path: &Path) -> Result<BakedGeometry> {
     let g: BakedGeometry = serde_json::from_slice(text)
         .with_context(|| format!("{}: the {BAKED_GEOMETRY_KEY} marker does not parse", path.display()))?;
@@ -280,14 +423,7 @@ fn parse(text: &[u8], path: &Path) -> Result<BakedGeometry> {
 /// The geometry the file at `path` says is baked into it; `None` when it
 /// carries no marker (or is a format that cannot carry one).
 pub fn read_baked_geometry(path: &Path) -> Result<Option<BakedGeometry>> {
-    let mut f = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let text = match sniff(&mut f)? {
-        Some(Kind::Png) => png_find(&mut f)?,
-        Some(Kind::Tiff { big_endian }) => tiff_find(&mut f, big_endian)?,
-        Some(Kind::Jpeg) => jpeg_find(&mut f)?,
-        None => None,
-    };
-    text.map(|t| parse(&t, path)).transpose()
+    read_marker(path, GEOMETRY)?.map(|t| parse(&t, path)).transpose()
 }
 
 /// Write `g` into the file at `path` (a staged master, before it is
@@ -295,31 +431,18 @@ pub fn read_baked_geometry(path: &Path) -> Result<Option<BakedGeometry>> {
 /// carry one; any other format is refused, since a lens-corrected master
 /// without its marker would be read in the sensor frame.
 pub fn stamp_baked_geometry(path: &Path, g: &BakedGeometry) -> Result<()> {
-    let text = serde_json::to_vec(g)?;
-    let mut f = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .with_context(|| format!("open {}", path.display()))?;
-    match sniff(&mut f)? {
-        Some(Kind::Tiff { big_endian }) => tiff_stamp(&mut f, big_endian, &text)
-            .with_context(|| format!("mark {}", path.display())),
-        Some(kind) => {
-            drop(f);
-            rewrite_stamped(path, kind, &text).with_context(|| format!("mark {}", path.display()))
-        }
-        None => bail!(
-            "{} is not PNG, TIFF or JPEG, so it cannot carry the lens geometry baked into it",
-            path.display()
-        ),
-    }
+    stamp_marker(path, GEOMETRY, &serde_json::to_vec(g)?, "the lens geometry baked into it")
 }
 
-/// Stamp `to` with the marker `from` carries, if any — for a product made from
-/// a master pixel for pixel (a denoise).
+/// Stamp `to` with the markers `from` carries, if any — for a product made
+/// from a master pixel for pixel (a denoise): its lens geometry and its
+/// colour noise reduction are in the product's pixels too.
 pub fn carry_baked_geometry(from: &Path, to: &Path) -> Result<()> {
-    match read_baked_geometry(from)? {
-        Some(g) => stamp_baked_geometry(to, &g),
+    if let Some(g) = read_baked_geometry(from)? {
+        stamp_baked_geometry(to, &g)?;
+    }
+    match read_colour_nr(from)? {
+        Some(m) => stamp_colour_nr(to, &m),
         None => Ok(()),
     }
 }
@@ -460,19 +583,19 @@ fn crc32(parts: &[&[u8]]) -> u32 {
     c ^ 0xFFFF_FFFF
 }
 
-fn itxt_payload(text: &[u8]) -> Vec<u8> {
+fn itxt_payload(key: Key, text: &[u8]) -> Vec<u8> {
     // keyword NUL, compression flag 0, method 0, empty language NUL, empty
     // translated keyword NUL, then the UTF-8 text.
-    let mut d = Vec::with_capacity(BAKED_GEOMETRY_KEY.len() + 5 + text.len());
-    d.extend_from_slice(BAKED_GEOMETRY_KEY.as_bytes());
+    let mut d = Vec::with_capacity(key.name.len() + 5 + text.len());
+    d.extend_from_slice(key.name.as_bytes());
     d.extend_from_slice(&[0, 0, 0, 0, 0]);
     d.extend_from_slice(text);
     d
 }
 
 /// The text of an `iTXt` chunk that is ours, or `None`.
-fn our_itxt(data: &[u8]) -> Option<Vec<u8>> {
-    let rest = data.strip_prefix(BAKED_GEOMETRY_KEY.as_bytes())?.strip_prefix(&[0, 0, 0])?;
+fn our_itxt(key: Key, data: &[u8]) -> Option<Vec<u8>> {
+    let rest = data.strip_prefix(key.name.as_bytes())?.strip_prefix(&[0, 0, 0])?;
     let lang_end = rest.iter().position(|b| *b == 0)?;
     let rest = &rest[lang_end + 1..];
     let tr_end = rest.iter().position(|b| *b == 0)?;
@@ -480,7 +603,7 @@ fn our_itxt(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Walk the chunks before the image data for our marker chunk's text.
-fn png_find(f: &mut std::fs::File) -> Result<Option<Vec<u8>>> {
+fn png_find(f: &mut std::fs::File, key: Key) -> Result<Option<Vec<u8>>> {
     f.seek(SeekFrom::Start(8))?;
     loop {
         let mut head = [0u8; 8];
@@ -495,7 +618,7 @@ fn png_find(f: &mut std::fs::File) -> Result<Option<Vec<u8>>> {
         if ty == b"iTXt" && (len as usize) < (1 << 20) {
             let mut data = vec![0u8; len as usize];
             f.read_exact(&mut data)?;
-            if let Some(text) = our_itxt(&data) {
+            if let Some(text) = our_itxt(key, &data) {
                 return Ok(Some(text));
             }
             f.seek(SeekFrom::Current(4))?;
@@ -509,14 +632,14 @@ fn png_find(f: &mut std::fs::File) -> Result<Option<Vec<u8>>> {
 
 /// Copy the file into a sibling with the marker inserted (and any old one
 /// dropped), then put the sibling in its place.
-fn rewrite_stamped(path: &Path, kind: Kind, text: &[u8]) -> Result<()> {
+fn rewrite_stamped(path: &Path, kind: Kind, key: Key, text: &[u8]) -> Result<()> {
     let tmp = path.with_extension(format!("mark.{}.{}", std::process::id(), crate::store::next_tmp_seq()));
     let res = (|| -> Result<()> {
         let mut src = std::io::BufReader::new(std::fs::File::open(path)?);
         let mut dst = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
         match kind {
-            Kind::Png => png_rewrite(&mut src, &mut dst, text)?,
-            Kind::Jpeg => jpeg_rewrite(&mut src, &mut dst, text)?,
+            Kind::Png => png_rewrite(&mut src, &mut dst, key, text)?,
+            Kind::Jpeg => jpeg_rewrite(&mut src, &mut dst, key, text)?,
             Kind::Tiff { .. } => unreachable!("a TIFF is marked in place"),
         }
         dst.flush()?;
@@ -530,7 +653,7 @@ fn rewrite_stamped(path: &Path, kind: Kind, text: &[u8]) -> Result<()> {
     res
 }
 
-fn png_rewrite(src: &mut impl Read, dst: &mut impl Write, text: &[u8]) -> Result<()> {
+fn png_rewrite(src: &mut impl Read, dst: &mut impl Write, key: Key, text: &[u8]) -> Result<()> {
     let mut sig = [0u8; 8];
     src.read_exact(&mut sig)?;
     dst.write_all(&sig)?;
@@ -551,7 +674,7 @@ fn png_rewrite(src: &mut impl Read, dst: &mut impl Write, text: &[u8]) -> Result
             src.read_exact(&mut data)?;
             let mut crc = [0u8; 4];
             src.read_exact(&mut crc)?;
-            if our_itxt(&data).is_some() {
+            if our_itxt(key, &data).is_some() {
                 true
             } else {
                 dst.write_all(&head)?;
@@ -570,7 +693,7 @@ fn png_rewrite(src: &mut impl Read, dst: &mut impl Write, text: &[u8]) -> Result
         // Right after the header chunk, before any image data: a reader
         // stops at the first IDAT ([`png_find`]).
         if !ours && !stamped && &ty == b"IHDR" {
-            let data = itxt_payload(text);
+            let data = itxt_payload(key, text);
             dst.write_all(&(data.len() as u32).to_be_bytes())?;
             dst.write_all(b"iTXt")?;
             dst.write_all(&data)?;
@@ -584,15 +707,19 @@ fn png_rewrite(src: &mut impl Read, dst: &mut impl Write, text: &[u8]) -> Result
     Ok(())
 }
 
-const JPEG_PREFIX: &str = "autoshade:baked-geometry=";
+/// The JPEG comment prefix of `key`: its name and `=`.
+fn jpeg_prefix(key: Key) -> Vec<u8> {
+    format!("{}=", key.name).into_bytes()
+}
 
-fn jpeg_rewrite(src: &mut impl Read, dst: &mut impl Write, text: &[u8]) -> Result<()> {
+fn jpeg_rewrite(src: &mut impl Read, dst: &mut impl Write, key: Key, text: &[u8]) -> Result<()> {
+    let prefix = jpeg_prefix(key);
     let mut soi = [0u8; 2];
     src.read_exact(&mut soi)?;
     dst.write_all(&soi)?;
     let mut stamped = false;
     let emit = |dst: &mut dyn Write| -> std::io::Result<()> {
-        let mut body = JPEG_PREFIX.as_bytes().to_vec();
+        let mut body = prefix.clone();
         body.extend_from_slice(text);
         dst.write_all(&[0xFF, 0xFE])?;
         dst.write_all(&((body.len() + 2) as u16).to_be_bytes())?;
@@ -624,7 +751,7 @@ fn jpeg_rewrite(src: &mut impl Read, dst: &mut impl Write, text: &[u8]) -> Resul
         }
         let mut body = vec![0u8; len - 2];
         src.read_exact(&mut body)?;
-        if marker == 0xFE && body.starts_with(JPEG_PREFIX.as_bytes()) {
+        if marker == 0xFE && body.starts_with(&prefix) {
             continue;
         }
         dst.write_all(&m)?;
@@ -633,7 +760,8 @@ fn jpeg_rewrite(src: &mut impl Read, dst: &mut impl Write, text: &[u8]) -> Resul
     }
 }
 
-fn jpeg_find(f: &mut std::fs::File) -> Result<Option<Vec<u8>>> {
+fn jpeg_find(f: &mut std::fs::File, key: Key) -> Result<Option<Vec<u8>>> {
+    let prefix = jpeg_prefix(key);
     let mut r = std::io::BufReader::new(&mut *f);
     r.seek(SeekFrom::Start(2))?;
     loop {
@@ -653,7 +781,7 @@ fn jpeg_find(f: &mut std::fs::File) -> Result<Option<Vec<u8>>> {
         if m[1] == 0xFE {
             let mut body = vec![0u8; len - 2];
             r.read_exact(&mut body)?;
-            if let Some(text) = body.strip_prefix(JPEG_PREFIX.as_bytes()) {
+            if let Some(text) = body.strip_prefix(prefix.as_slice()) {
                 return Ok(Some(text.to_vec()));
             }
         } else {
@@ -688,14 +816,14 @@ fn tiff_ifd0(f: &mut std::fs::File, be: bool) -> Result<(Vec<[u8; 12]>, u32)> {
     Ok((entries, tiff_u32(&raw[n * 12..], be)))
 }
 
-fn tiff_find(f: &mut std::fs::File, be: bool) -> Result<Option<Vec<u8>>> {
+fn tiff_find(f: &mut std::fs::File, be: bool, key: Key) -> Result<Option<Vec<u8>>> {
     let (entries, _) = tiff_ifd0(f, be)?;
-    let Some(e) = entries.iter().find(|e| tiff_u16(&e[0..2], be) == BAKED_GEOMETRY_TIFF_TAG) else {
+    let Some(e) = entries.iter().find(|e| tiff_u16(&e[0..2], be) == key.tiff_tag) else {
         return Ok(None);
     };
     let count = tiff_u32(&e[4..8], be) as usize;
     if count > (1 << 20) {
-        bail!("the {BAKED_GEOMETRY_KEY} tag is {count} bytes long");
+        bail!("the {} tag is {count} bytes long", key.name);
     }
     let mut v = vec![0u8; count];
     if count <= 4 {
@@ -715,9 +843,9 @@ fn tiff_find(f: &mut std::fs::File, be: bool) -> Result<Option<Vec<u8>>> {
 /// the end of the file and point the header at it. Every other entry is
 /// copied as it was, so its out-of-line values stay where they are; the old
 /// IFD is left in place, unreferenced.
-fn tiff_stamp(f: &mut std::fs::File, be: bool, text: &[u8]) -> Result<()> {
+fn tiff_stamp(f: &mut std::fs::File, be: bool, key: Key, text: &[u8]) -> Result<()> {
     let (mut entries, next) = tiff_ifd0(f, be)?;
-    entries.retain(|e| tiff_u16(&e[0..2], be) != BAKED_GEOMETRY_TIFF_TAG);
+    entries.retain(|e| tiff_u16(&e[0..2], be) != key.tiff_tag);
     let mut value = text.to_vec();
     value.push(0);
     let end = f.seek(SeekFrom::End(0))?;
@@ -729,7 +857,7 @@ fn tiff_stamp(f: &mut std::fs::File, be: bool, text: &[u8]) -> Result<()> {
     let w16 = |v: u16| if be { v.to_be_bytes() } else { v.to_le_bytes() };
     let w32 = |v: u32| if be { v.to_be_bytes() } else { v.to_le_bytes() };
     let mut ours = [0u8; 12];
-    ours[0..2].copy_from_slice(&w16(BAKED_GEOMETRY_TIFF_TAG));
+    ours[0..2].copy_from_slice(&w16(key.tiff_tag));
     ours[2..4].copy_from_slice(&w16(2)); // ASCII
     ours[4..8].copy_from_slice(&w32(value.len() as u32));
     ours[8..12].copy_from_slice(&w32(value_at as u32));

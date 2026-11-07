@@ -439,7 +439,7 @@ impl AutoShadeApp {
     pub(crate) fn source_frame(&self) -> anyhow::Result<autoshade::render::SourceFrame> {
         match self.active_source_path() {
             Some(p) => autoshade::render::SourceFrame::of(&p),
-            None => Ok(autoshade::render::SourceFrame::Baked(None)),
+            None => Ok(autoshade::render::SourceFrame::Baked(None, None)),
         }
     }
 

@@ -338,11 +338,16 @@ pub fn render_to_file(
     export: Option<&ExportOpts>,
     sink: &dyn crate::diag::Sink,
 ) -> Result<(u32, u32)> {
-    render_to_file_marked(src_path, recipe, out, denoise, export, sink, None)
+    render_to_file_marked(src_path, recipe, out, denoise, export, sink, None, BasePart::of(recipe).colour_nr(), None)
 }
 
 /// A MASTER of `raw` for `part`, rendered to `out` through
-/// [`BasePart::master_recipe`]: the full-resolution AI denoise's master.
+/// [`BasePart::master_recipe`]: the full-resolution AI denoise's master. Its
+/// develop runs the part's colour noise reduction ([`BasePart::colour_nr`]),
+/// the stage the export of the photo the part is taken from runs, and the
+/// master says so in its file ([`BakedColourNr`]) so that its card runs no
+/// second one — when, and only when, the develop reports that the stage ran
+/// (a mosaic it reads, [`render_to_file_marked`]).
 pub fn render_master_to_file(
     raw: &Path,
     part: &BasePart,
@@ -350,11 +355,18 @@ pub fn render_master_to_file(
     denoise: Option<&crate::denoise::DenoiseOpts>,
     sink: &dyn crate::diag::Sink,
 ) -> Result<(u32, u32)> {
-    render_to_file_marked(raw, &part.master_recipe(), out, denoise, None, sink, None)
+    let nr = BakedColourNr::of(part.colour_nr()).filter(|_| crate::decode::is_raw(raw));
+    render_to_file_marked(raw, &part.master_recipe(), out, denoise, None, sink, None, part.colour_nr(), nr.as_ref())
 }
 
 /// [`render_to_file`], stamping `marker` on the staged file before the
-/// publish when it is given.
+/// publish when it is given. A RAW develops at colour NR `colour_nr` (the
+/// part's, [`BasePart::colour_nr`]); `nr_mark` is stamped beside `marker`
+/// (a master of a RAW baked with colour NR on, [`render_master_to_file`])
+/// only when the develop reports that the linear colour stage ran: a RAW
+/// whose mosaic it cannot read took the display-frame pass, and its master
+/// must keep that pass on its card.
+#[allow(clippy::too_many_arguments)] // the export's frame plus the part's one switch
 fn render_to_file_marked(
     src_path: &Path,
     recipe: &EditRecipe,
@@ -363,6 +375,8 @@ fn render_to_file_marked(
     export: Option<&ExportOpts>,
     sink: &dyn crate::diag::Sink,
     marker: Option<&BakedGeometry>,
+    colour_nr: f32,
+    nr_mark: Option<&BakedColourNr>,
 ) -> Result<(u32, u32)> {
     let diag = crate::diag::Diag::about(sink, src_path);
     // Entry-point sanitisation: ONE construction, ONE disclosure — the
@@ -390,9 +404,9 @@ fn render_to_file_marked(
     // below a relabelling that can never ADD colour). A baked source IS
     // sRGB pixels — for it the conversion below is complete by construction.
     let native_wide = is_raw_src && space != ExportColorSpace::Srgb;
-    let mut img = if is_raw_src {
+    let (mut img, linear_colour) = if is_raw_src {
         let working = if native_wide { space } else { ExportColorSpace::Srgb };
-        render_to_image_in(src_path, recipe, denoise, None, working, sink)?
+        render_frame(src_path, recipe, denoise, None, working, sink, colour_nr)?
     } else {
         // The frame the file is in (v1.17.0): a master marked lens-corrected
         // takes no second resample, and a recipe that develops other lens
@@ -405,8 +419,9 @@ fn render_to_file_marked(
         // the finished pixels, which is not the same thing as developing at a
         // bounded working resolution and must not be quietly swapped for it —
         // the RAW arm above passes `None` for exactly the same reason.
-        render_baked_to_image(&src, recipe, denoise, None, frame.baked(), &diag)?
+        (render_baked_to_image(&src, recipe, denoise, None, frame.baked(), frame.colour_nr_in_pixels(), &diag)?, false)
     };
+    let nr_mark = nr_mark.filter(|_| linear_colour);
     if let Some(le) = opts.long_edge
         && le > 0
         && img.width().max(img.height()) > le
@@ -535,6 +550,7 @@ fn render_to_file_marked(
         Ok(())
     })();
     let encoded = encoded.and_then(|()| marker.map_or(Ok(()), |g| stamp_baked_geometry(&staged, g)));
+    let encoded = encoded.and_then(|()| nr_mark.map_or(Ok(()), |m| stamp_colour_nr(&staged, m)));
     publish_staged(out, &staged, encoded)?;
 
     Ok((w, h))
