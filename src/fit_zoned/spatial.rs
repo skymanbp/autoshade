@@ -726,11 +726,10 @@ pub(super) fn enforce_bitmap_boundary(
         report.recipe.masks.truncate(first_mask);
         return Err(BitmapBoundaryRefusal { why: BitmapBoundaryWhy::Inert, initial, negotiated: Some((k, reading)) });
     }
-    // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
-    // E_paired + H_ab (`report.evidence.local`): S is read where the question
-    // is structure, a local correction cannot change which pixels pair, its
-    // seams stay with the boundary / ramp rulers and its structural gate is
-    // the existing D threshold only.
+    // A LOCAL correction's do-no-harm reads the one objective as the frame
+    // does (2026-11-07: hue and structure are gates, not terms); its seams
+    // stay with the boundary / ramp rulers and its structural gate is the
+    // existing D threshold only.
     // R19: on the correction's own population (`fit::ships_local`).
     let own = super::accept::masks_coverage(s_img, report, &report.recipe.masks[first_mask..], tgt_px.len());
     let (own_with, own_without) = (
@@ -1110,27 +1109,12 @@ pub(super) fn attach_tiles(
             &zone_moments(&boundary.pixels, &attachment.source_weights),
             &target_moments,
         );
+        // The tile that ships is the SHRUNK one, judged where it ships by
+        // the one law (`enforce_bitmap_boundary`'s `ships_local` at the
+        // negotiated k, on the tile's coverage, against the render without
+        // it); nothing is read a second time here.
         let frame_after =
             fit::look_err_with_evidence(&boundary.pixels, &tgt_px, &report.evidence);
-        // R39. The tile that ships is the SHRUNK one, and it must still leave
-        // its cell no worse than the frame it was attached to
-        // (`AcceptedZone::still_accepted`; `judged_before` IS that frame's
-        // reading here, the tiles being sequential): a correction the
-        // boundary gate has negotiated down to a fraction of itself can fail
-        // to help its own cell while the frame reading drifts a hair the
-        // right way.
-        if !accepted.still_accepted(
-            report, &boundary.pixels, &tgt_px, accepted.judged_before, frame_before, frame_after,
-        ) {
-            let note = accepted.shrunk_refusal_note(
-                report, &boundary.pixels, &tgt_px, accepted.judged_before, boundary.k, frame_before, frame_after,
-            );
-            crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes, note);
-            report.recipe.masks.truncate(first_tile);
-            owned.remove();
-            refused.insert(reading.id);
-            continue;
-        }
         report.err_after = frame_after;
         crate::rationale::push_note(
             &mut report.recipe.rationale,

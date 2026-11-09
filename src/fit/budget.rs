@@ -119,9 +119,6 @@ pub struct FitBudget {
     pub sat: f32,
     pub wb_gain: (f32, f32),
     pub wb_ratio: f32,
-    /// Maximum weighted frame share that a WB correction may re-hue.
-    pub wb_rotation_share: f32,
-    pub cast_ratio: f32,
     pub slope: (f32, f32),
     pub confidence_cap: f32,
     /// Ceiling for ONE band of the per-band colour mixer, on the recipe's
@@ -171,23 +168,11 @@ impl FitBudget {
                 )
             }
         };
-        let wb_rotation_share = if s <= crate::recipe::GradeStrength::DEFAULT {
-            ROT_SHARE
-        } else {
-            lerp(
-                ROT_SHARE,
-                1.0,
-                (s - crate::recipe::GradeStrength::DEFAULT)
-                    / (1.0 - crate::recipe::GradeStrength::DEFAULT),
-            )
-        };
         Self {
             ev: between(0.5, ATMOSPHERE_EV_LIMIT, 2.5),
             sat: between(15.0, ATMOSPHERE_SAT_LIMIT, 60.0),
             wb_gain: (between(0.90, ATMOSPHERE_WB_GAIN_MIN, 0.50), between(1.12, ATMOSPHERE_WB_GAIN_MAX, 2.0)),
             wb_ratio: between(1.20, ATMOSPHERE_WB_GAIN_RATIO, 3.0),
-            wb_rotation_share,
-            cast_ratio: between(1.5, CAST_ACCEPT_RATIO, 3.0),
             slope: (between(0.7, ATMOSPHERE_CURVE_SLOPE_MIN, 0.25), between(1.3, ATMOSPHERE_CURVE_SLOPE_MAX, 3.0)),
             confidence_cap: between(0.50, ATMOSPHERE_CONFIDENCE_CAP, 0.35),
             hsl_band: between(HSL_BAND_LIMIT_MIN, HSL_BAND_LIMIT_DEFAULT, HSL_BAND_LIMIT_MAX),

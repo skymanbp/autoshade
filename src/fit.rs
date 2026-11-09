@@ -14,6 +14,11 @@
 //! hue bands then keep only population present on both sides. Every solve,
 //! gate, confidence value and disclosure consumes that same evidence model.
 //!
+//! The solve has two parts (v1.18.0, RULING-1180-joint-r1/r2). The STAGES
+//! estimate: each fits one statistic and writes its estimate into the
+//! recipe, and their identification knowledge (knot support, withheld
+//! ranges, band admission) shapes the start —
+//!
 //!   1. **Tone** — evidence-weighted luminance matching gives a monotone map `M`; sample it at
 //!      the engine's own tone knots ([`render::TONE_KNOTS_X`]) and least-squares
 //!      solve the sliders against the engine's OWN basis
@@ -26,48 +31,49 @@
 //!      slider semantics are ruined (real-photo failure, 2026-07-07). Whatever
 //!      shape the penalised sliders don't express goes into `tone_curve`
 //!      control points, which the engine composes exactly on top.
-//!   2. **Saturation** — evidence-weighted mean-chroma ratio, secant-refined through real
-//!      [`render::develop_preview`] renders (closed loop, not open-loop math).
-//!      Chroma matching against a non-aligned target is a heuristic, so the
-//!      pipeline ends with a DO-NO-HARM check: if the finished recipe renders
-//!      farther from the target than the untouched source, saturation is
-//!      halved (cast curves refit each step — they depend on the saturated
-//!      state) until the end-to-end error stops objecting (the 2026-07-09
-//!      golden-sky pair dragged the chroma chase to the cap and rendered
-//!      worse than doing nothing). Saturation cannot be judged mid-pipeline:
-//!      a correct value legitimately amplifies a latent cast that the curve
-//!      stage then removes.
-//!   3. **Colour cast** — per-channel CDF residuals → red/green/blue curves,
-//!      last as the catch-all (cast-before-saturation measured worse on the
-//!      haze regression — see the stage comments in [`fit_recipe`]). Accepted
-//!      only through evidence-weighted gates: the aggregate look-error ratio, the
-//!      foreign-hue veto (the curves must not paint a region of the frame in
-//!      hues the target holds nowhere — the 2026-07-09 violet-sky failure was
-//!      cross-band invisible to the aggregate) and the rotation budget (nor
-//!      re-hue a region into hues the target DOES hold — the golden-sky
-//!      failure passed both earlier gates; see the veto const blocks). A
-//!      global curve is also refused when it would materially move a luma or
-//!      hue population with no two-sided support.
+//!   2. **White balance** — the per-pixel chromaticity demand, closed-loop
+//!      through the engine's own law, inside the strength budget's gains.
+//!   3. **Saturation** — evidence-weighted mean-chroma ratio, secant-refined through real
+//!      [`render::develop_preview`] renders (closed loop, not open-loop math);
+//!      then the colour-grade wheels.
 //!   4. **Detail** — coarse and fine local-luma energy drive `clarity` and
 //!      `texture`, each capped at ±20 and enabled only when enough shared
-//!      structural and luma-range evidence survives.
-//!   5. **Per-band colour mixer** — `hsl.saturation` and `hsl.luminance`,
-//!      one ACR band at a time, from that band's OWN population statistics
-//!      (mean chroma and mean Rec.601 luma), admitted only by the same
-//!      two-sided population gate the rest of the module reads, budgeted by
-//!      strength, and required to earn its place against its own absence on
-//!      the finished frame. Fitted between the saturation chase and the
-//!      channel curves — stage "4a" in the code comments, listed last here
-//!      because it is the newest.
+//!      structural and luma-range evidence survives. Outside J* by
+//!      construction: the detail ruler is its own.
+//!   5. **Per-band colour mixer and the colour cast** — `hsl.saturation`,
+//!      `hsl.luminance` and the band hues from each ACR band's OWN population
+//!      statistics, admitted by the two-sided population gate the rest of the
+//!      module reads and budgeted by strength; the per-channel CDF residuals
+//!      as red/green/blue curves, whose SHAPE only the curve stage solves.
 //!
-//! `hsl.hue` is deliberately NEVER solved: rotating a band re-populates it,
-//! so its evidence is circular, and a plausible in-gate centroid delta
-//! applied as a whole-band rotation is what caused the 2026-07-07 purple-sky
-//! failure. A band's mean chroma and mean luma are ordinary marginal
-//! statistics of a sub-population and carry no such trap.
+//! Then the JOINT OBJECTIVE judges ([`joint`]): one function the global solve
+//! minimises, `F(x) = J*(render(x)) + FIT_QUANT · dof(x)`, over every
+//! coordinate the stages estimated, under constraints that only reject
+//! (`G`, read on every candidate render: the strength budget's white-balance
+//! gains, and the ONE control-validity law ([`validity`]) on each class
+//! between its own two frames in the stages' order — the tone, the white
+//! balance, the chroma dials, the channel curves — a class may leave no
+//! evidence cell worse on its own axes than it found it, and may not move a
+//! cell no evidence speaks for). A deterministic coordinate descent polishes the
+//! start; the self-consistency law is then read whole (a control's ABSENCE
+//! is the recipe with it at the base and pinned, re-polished; it is dropped
+//! when the absence is no worse on F — a control that does not buy its own
+//! rounding is no control); and the base recipe is itself a candidate with
+//! no degrees of freedom, which ships when the solve is no better on F.
+//! Nothing is judged twice on two rulers: no stage gives its estimate back,
+//! halves it, or holds it to do-no-harm on its own; the elimination and the
+//! base candidate are the only judgements, and they read F.
+//!
+//! `hsl.hue` is solved only where the target's own cells vouch the band
+//! (`fit_band_hues`): rotating a band re-populates it, so its pixel evidence
+//! is circular, and a plausible in-gate centroid delta applied as a
+//! whole-band rotation is what caused the 2026-07-07 purple-sky failure. A
+//! band's mean chroma and mean luma are ordinary marginal statistics of a
+//! sub-population and carry no such trap.
 //!
 //! Every stage fits the RESIDUAL against a fresh render of the current recipe,
-//! so stage interactions are absorbed instead of compounding; the report carries
+//! so stage interactions are absorbed instead of compounding, and the joint
+//! descent renders every candidate; the report carries
 //! the honest before/after evidence-weighted error (tonal + channel means +
 //! per-band hue + spatial divergence, so a permutation or hue disaster cannot
 //! hide behind matched luma quantiles). Local
@@ -91,6 +97,7 @@ mod gates;
 mod grade;
 mod hsl;
 mod hue_gates;
+mod joint;
 mod look;
 mod pairing;
 mod pixels;
@@ -98,47 +105,39 @@ mod report;
 mod solve;
 mod structure;
 mod tone;
+mod validity;
 
-use atmosphere::{
-    WB_SHARE_SIZE_EVIDENCE, WB_VOUCH_SHRINK_STEPS, WbCellVerdict, cast_admitted_by_strength,
-    fit_atmosphere_from_parts, project_curve_slopes, solve_white_balance,
-};
-#[cfg(test)]
-use atmosphere::{WbFacts, withhold_atmosphere_tone};
+use atmosphere::{fit_atmosphere_from_parts, project_curve_slopes, solve_white_balance};
 pub use budget::{DIVERGENCE_GLOBAL, FitBudget, FitOptions, GlobalCast, VetoPolicy};
 pub(crate) use budget::{ANALYZE_EDGE, DIVERGENCE_ZONE, DIVERGENT_COVER_PROMOTES};
 use budget::{
     ATMOSPHERE_CONFIDENCE_CAP, ATMOSPHERE_CURVE_SLOPE_MAX, ATMOSPHERE_SAT_LIMIT,
     COARSE_SIGMA_DIVISOR, HIST_BINS, MODE_MARGIN_DISCLOSED, RESIDUAL_SLOPE_CAP, WB_SEARCH_K,
-    budgeted_wb, detect_global_cast, mean_chroma_vector, wb_gain_ratio, wb_gains_fit_budget,
-    wb_path_between, wb_path_candidate,
+    budgeted_wb, detect_global_cast, mean_chroma_vector, wb_gains_fit_budget,
 };
 #[cfg(test)]
 use budget::{
     ATMOSPHERE_CURVE_SLOPE_MIN, ATMOSPHERE_EV_LIMIT, ATMOSPHERE_WB_GAIN_MAX, ATMOSPHERE_WB_GAIN_MIN,
     ATMOSPHERE_WB_GAIN_RATIO, HSL_BAND_LIMIT_DEFAULT, HSL_BAND_LIMIT_MAX, HSL_BAND_LIMIT_MIN,
+    wb_path_candidate,
 };
 pub(crate) use cast_outcome::{FIT_QUANT, carried_strength_from_notes, ships, ships_local};
 use cast_outcome::{
-    CastOutcome, CastProjection, CastReadings, cast_admission_notes,
-    cast_gate_outcome_with_ratio, cast_projection_notes, control_names, eliminate_unearned,
-    eliminate_unearned_by, earns_on_its_band, global_controls, BandReading,
-    mixer_controls, Control, CAST_CURVES, GRADE_WHEELS, WB_AXES,
-    terminal_harm, unrepresented_note, TONE_SLIDERS,
+    control_names, earns_on_its_band, global_controls, BandReading, Control, CAST_CURVES,
+    unrepresented_note,
 };
 #[cfg(test)]
 use cast_outcome::{
-    FIT_QUANT_CLEAN, TerminalHarm, UNREPRESENTED_CHROMATIC_ERR, UNREPRESENTED_CHROMATIC_LEAD,
-    UNREPRESENTED_HUE_DEG, cast_gate_outcome, residual_is_colour_shaped,
+    FIT_QUANT_CLEAN, UNREPRESENTED_CHROMATIC_ERR, UNREPRESENTED_CHROMATIC_LEAD,
+    UNREPRESENTED_HUE_DEG, residual_is_colour_shaped,
 };
 use curves::{
-    CastHandOff, HandOffFacts, band_stats_weighted, cast_wb_direction,
-    refine_curves_on_finished_frame, residual_channel_curve_weighted, search_cast_hand_off, search_cast_projection,
+    band_stats_weighted,
+    refine_curves_on_finished_frame, residual_channel_curve_weighted,
 };
 #[cfg(test)]
 use curves::{
-    band_stats, cast_curves_are_identity, pick_cast_hand_off, projected_cast_curves,
-    residual_channel_curve, search_cast_projection_t,
+    band_stats, residual_channel_curve,
 };
 use detail::{detail_regression_is_bounded, fit_detail_stage, only_detail_and_quantized_companions};
 #[cfg(test)]
@@ -164,37 +163,22 @@ pub(crate) use evidence::{evidence_model};
 use evidence::{SupportField, WB_OPPOSING_SHARE, aggregate_ranges, wb_axes_by_range, wb_axes_by_region, wb_common, wb_consensus};
 pub(crate) use gates::{P_CLIP, clamp_confidence};
 use gates::{
-    CAST_ACCEPT_RATIO, CONFIDENCE_CEIL, CONFIDENCE_FLOOR, FAN_DEG, FAN_HUE_CLASSES, FAN_PROJECT_DEG,
-    FAN_SHARE, FIT_FAR_ERR, NEUTRAL_SHARED_MIN, PROJECT_GRID, PROJECT_REFINE, ROT_DEG,
-    ROT_HUE_MEASURABLE_CHROMA, ROT_SHARE, UNSUPPORTED_MOVEMENT_CONFIDENCE_SLOPE, VETO_CREATED_SHARE,
-    VETO_FAR_BINS, VETO_MIN_TARGET_CHROMATIC, VETO_SUPPORT_BIN_MIN, VETO_SUPPORT_CHROMA,
-    VETO_TINT_CHROMA, confidence_from_look_err,
+    CONFIDENCE_CEIL, CONFIDENCE_FLOOR, FIT_FAR_ERR, NEUTRAL_SHARED_MIN, ROT_SHARE,
+    UNSUPPORTED_MOVEMENT_CONFIDENCE_SLOPE, confidence_from_look_err,
 };
 #[cfg(test)]
-use gates::{CONFIDENCE_SLOPE, NEUTRAL_MISPREDICTION_MAX, ROT_VISIBLE_AFTER, ROT_VISIBLE_BEFORE};
-use hsl::{HslStageFacts, HslWithdrawal, fit_hsl_stage, halved_hsl};
+use gates::{CONFIDENCE_SLOPE, NEUTRAL_MISPREDICTION_MAX};
+use hsl::{HslStageFacts, fit_hsl_stage};
 pub(crate) use hue_gates::{
-    CellArm, PixelVouch, cell_vouched_hue_band_names, moved_unsupported_hue_range_names,
-    moved_unsupported_hue_range_names_vouched, moved_unsupported_luma_range_names,
+    PixelVouch, moved_unsupported_hue_range_names_vouched, moved_unsupported_luma_range_names,
     moves_unsupported_range, vouched_hue_band_names,
 };
-use hue_gates::{
-    cast_paints_foreign_hues, cast_paints_foreign_hues_weighted, cast_rotates_a_region_weighted,
-    foreign_created_share_weighted, hue_fan_weighted, moves_unsupported_luma_range,
-    rehued_coverage_weighted, rehued_share_weighted, wb_moves_pixels_into_foreign_hues,
-    withdraw_curves_for_delivered_fan,
-};
 #[cfg(test)]
-use hue_gates::{
-    cast_rotates_a_region, delivered_fan_conviction, foreign_hue_bins, foreign_hue_bins_weighted,
-    foreign_share, rehued_share,
-};
-pub(crate) use look::{look_err_with_evidence};
-#[cfg(test)]
-pub(crate) use look::look_terms;
+pub(crate) use hue_gates::moved_unsupported_hue_range_names;
+pub(crate) use look::{look_err_with_evidence, look_terms};
 use look::{round1, round2};
 #[cfg(test)]
-pub(crate) use look::{calibration_corpus, calibration_recipe, look_err};
+pub(crate) use look::{calibration_corpus, calibration_recipe};
 pub use pairing::{
     CorrespondenceProvider, FitReport, same_frame_plausible, same_frame_plausible_dims,
 };
@@ -222,7 +206,6 @@ pub(crate) use solve::{fit_recipe_from_promoted_with_disclosure_opts};
 pub(crate) use solve::{fit_recipe_from_promoted, fit_recipe_from_promoted_with_disclosure};
 pub use structure::{DivergencePair, PairingScale, STRUCTURE_MIN_CORE_PX, structure_divergence};
 pub(crate) use structure::{divergence_pair_for, divergence_raster, structure_divergence_for, DivergenceRaster};
-use structure::low_pass_pixels;
 pub(crate) use tone::{
     PairedRobustTone, ROBUST_REJECT_DISCLOSE_MIN, SUPPORT_MIN_PIXELS, fit_tone_sliders_supported,
     knot_support_for, paired_robust_tone, refine_tone_sliders_on, sample_tone_points,
@@ -232,37 +215,6 @@ use tone::{converges_toward, paired_correspondence, residual_tone_curve_with_bud
 pub(crate) use tone::{fit_tone_sliders};
 #[cfg(test)]
 use tone::{TONE_PRIOR, residual_tone_curve};
-
-/// The reverse fit's source as ONE text, for the source-text gates that read what
-/// `fit.rs` alone held before it was split into files: the modules in their
-/// declaration order, the root last (so `source_before_tests` cuts at the root's
-/// own test modules and nowhere else). Test-only: nothing here is compiled into a
-/// shipped binary.
-#[cfg(test)]
-pub(crate) const SOURCE_FILES: [(&str, &str); 17] = [
-    ("src/fit/atmosphere.rs", include_str!("fit/atmosphere.rs")),
-    ("src/fit/budget.rs", include_str!("fit/budget.rs")),
-    ("src/fit/cast_outcome.rs", include_str!("fit/cast_outcome.rs")),
-    ("src/fit/curves.rs", include_str!("fit/curves.rs")),
-    ("src/fit/detail.rs", include_str!("fit/detail.rs")),
-    ("src/fit/evidence.rs", include_str!("fit/evidence.rs")),
-    ("src/fit/gates.rs", include_str!("fit/gates.rs")),
-    ("src/fit/hsl.rs", include_str!("fit/hsl.rs")),
-    ("src/fit/hue_gates.rs", include_str!("fit/hue_gates.rs")),
-    ("src/fit/look.rs", include_str!("fit/look.rs")),
-    ("src/fit/pairing.rs", include_str!("fit/pairing.rs")),
-    ("src/fit/pixels.rs", include_str!("fit/pixels.rs")),
-    ("src/fit/report.rs", include_str!("fit/report.rs")),
-    ("src/fit/solve.rs", include_str!("fit/solve.rs")),
-    ("src/fit/structure.rs", include_str!("fit/structure.rs")),
-    ("src/fit/tone.rs", include_str!("fit/tone.rs")),
-    ("src/fit.rs", include_str!("fit.rs")),
-];
-
-#[cfg(test)]
-pub(crate) fn source_text() -> String {
-    SOURCE_FILES.iter().map(|(_, text)| *text).collect()
-}
 
 #[cfg(test)]
 mod tests;

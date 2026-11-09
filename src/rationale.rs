@@ -77,10 +77,19 @@ impl Note {
 /// and forgotten by neither.
 pub mod values {
     /// [`keys::FIT_NOTE_VETO_DISCLOSED`]'s `kind`, when the withheld evidence
-    /// is tonal.
+    /// is tonal (the zoned solve's vetoes).
     pub const LUMA_RANGES: &str = "luma ranges";
     /// …and when it is chromatic.
     pub const HUE_BANDS: &str = "hue bands";
+    /// …and the global solve's reading under the one validity law (v1.18.0):
+    /// the evidence cells (brightness range × hue band) no evidence spoke for.
+    pub const EVIDENCE_CELLS: &str = "evidence cells";
+    /// [`keys::FIT_NOTE_SEED_SCALED`]'s `class`: the four control classes the
+    /// validity law reads (`fit::validity`).
+    pub const CLASS_TONE: &str = "tone controls";
+    pub const CLASS_WHITE_BALANCE: &str = "white balance";
+    pub const CLASS_CHROMA_DIALS: &str = "chroma dials";
+    pub const CLASS_CHANNEL_CURVES: &str = "channel curves";
 
     // Native-carrier and residual-band outcomes are values, not prose.
     pub const BITMAP_CARRIER: &str = "bitmap";
@@ -98,7 +107,8 @@ pub mod values {
 
     /// Every enumerated value, for the renderer and for the audit.
     pub const ALL: &[&str] = &[
-        LUMA_RANGES, HUE_BANDS, BITMAP_CARRIER, FOUR_GRADIENTS, UNMEASURED,
+        LUMA_RANGES, HUE_BANDS, EVIDENCE_CELLS, CLASS_TONE, CLASS_WHITE_BALANCE,
+        CLASS_CHROMA_DIALS, CLASS_CHANNEL_CURVES, BITMAP_CARRIER, FOUR_GRADIENTS, UNMEASURED,
         UNMEASURED_HARD_MASK, NATIVE_TRIAL_GATED, BAND_ESTIMATOR, BOUNDARY_BUDGET,
         DELTA_E_MARGIN, ZONE_DO_NO_HARM, FRAME_DO_NO_HARM, BOUNDARY_REGRESSION,
         RAMP_STEEPER,
@@ -143,6 +153,10 @@ pub mod keys {
     /// the paired cells refused it. NOT a capability veto (that is
     /// `FIT_NOTE_WB_WITHHELD_FOREIGN_HUE` / `_ROTATION`) and NOT "no cast was
     /// found" — a cast WAS found, and the target said it was the wrong one.
+    /// RETIRED PRODUCER (v1.18.0, the joint objective judges the white
+    /// balance with every other control; the cell verdict and the share
+    /// search went with the stage retreats): no solve files this note; the
+    /// key stays so a rescore of an older recipe drops it.
     pub const FIT_NOTE_WB_CELLS_REFUSED: &str =
         " A white balance was solved from the population and then rendered and checked \
          against the target's own 12x8 cell means: only {converged} of the frame moved \
@@ -150,6 +164,7 @@ pub mod keys {
          target asks for, so it was returned to as-shot rather than shipped on \
          population evidence alone.";
     /// …and the other half of the same sentence: it WAS vouched.
+    /// RETIRED PRODUCER (v1.18.0), as [`FIT_NOTE_WB_CELLS_REFUSED`].
     pub const FIT_NOTE_WB_CELLS_VOUCHED: &str =
         " The fitted white balance was checked against the target's own 12x8 cell means \
          before it shipped: {converged} of the frame moved closer to its target, \
@@ -161,6 +176,7 @@ pub mod keys {
     /// 0.117 diverged / 0.954 aligned along chromaticity), so the largest
     /// share of the move the same cells vouch is what ships, and the sentence
     /// prints both verdicts: the full move's and the shipped share's.
+    /// RETIRED PRODUCER (v1.18.0), as [`FIT_NOTE_WB_CELLS_REFUSED`].
     pub const FIT_NOTE_WB_CELLS_VOUCHED_AT_SHARE: &str =
         " The fitted white balance shipped at {share} of the solved move: the full move was \
          refused by the target's own 12x8 cell means ({full}), and at this share \
@@ -181,14 +197,39 @@ pub mod keys {
         " Atmosphere controls were read on population evidence; structural withholding \
          of luma ranges [{luma_ranges}] and hue bands [{hue_bands}] applies to the \
          residual, zone and detail fits, not to the bounded atmosphere controls.";
+    /// RETIRED PRODUCER (v1.18.0, the one validity law — rel1180
+    /// design-control-validity-1180 §2: the white-balance stage's re-hued
+    /// share census went with its gates; the strength budget's own scaling
+    /// is [`FIT_NOTE_WB_BUDGETED`]): no solve files this note; the key stays
+    /// so a rescore of an older recipe drops it.
     pub const FIT_NOTE_WB_CLAMPED: &str =
         " White balance was clamped into the strength budget (gain ratio {from} to {to}, rotated share {rotated_share} over {coverage} of the frame); the requested cast exceeded the honest range.";
+    /// RETIRED PRODUCER (v1.18.0), as [`FIT_NOTE_WB_CLAMPED`]: the foreign-hue
+    /// gate is an instance of the validity law, which refuses the white
+    /// balance between its own frames and scales the seed instead.
     pub const FIT_NOTE_WB_WITHHELD_FOREIGN_HUE: &str =
         " White balance withheld: it would paint hues the target does not contain.";
+    /// RETIRED PRODUCER (v1.18.0), as [`FIT_NOTE_WB_CLAMPED`].
     pub const FIT_NOTE_WB_WITHHELD_ROTATION: &str =
         " White balance withheld: rotated share {rotated_share} over {coverage} of the frame exceeded the strength budget.";
     pub const FIT_NOTE_WB_SEARCH_BOUND: &str =
         " White balance search reached the {k} K domain bound; the requested colour temperature may lie beyond the fitted range.";
+    /// v1.18.0: the strength budget's own reach on the white balance — the
+    /// free demand scaled into the gains budget along the gain-space path
+    /// (`budgeted_wb`). The budget is the user's dial, not evidence; what the
+    /// evidence allows is the validity law's (`fit::validity`).
+    pub const FIT_NOTE_WB_BUDGETED: &str =
+        " White balance was scaled into the strength budget (gain ratio {from} to {to}); the requested cast exceeded the honest range.";
+    /// v1.18.0: the joint solve's start. A class of controls the stages
+    /// proposed that moved an evidence cell against that cell's own ask (the
+    /// one validity law, `fit::validity`) entered the descent scaled toward
+    /// the base, at the largest fraction of the estimate the law admits
+    /// (`Joint::repair`). `class` is one of the four `values::CLASS_*`.
+    pub const FIT_NOTE_SEED_SCALED: &str =
+        " The {class} the stages proposed moved a value range against its own evidence, so they were re-estimated from the cells' own asks and entered the joint solve at {lambda} of that estimate.";
+    /// RETIRED PRODUCER (v1.18.0, the one validity law): the cast stage judges
+    /// nothing; the law reads the curves between their own frames in G. The
+    /// key stays so a rescore of an older recipe drops it.
     pub const FIT_NOTE_CAST_ADMITTED_BY_STRENGTH: &str =
         " Colour-cast curves were admitted by the strength budget (measured ratio {ratio}, budget {budget}).";
     /// v1.2.3: ORDINARY admission, silent until now. The stage disclosed
@@ -213,8 +254,10 @@ pub mod keys {
     /// made the aggregate look error worse and were still the honest answer),
     /// and "cut the error to 1.202" states the opposite of its own
     /// measurement. `bound` is the value the path actually used —
-    /// `budget.cast_ratio`, which the strength budget widens from 2.0 at the
+    /// `budget.cast_ratio`, which the strength budget widened from 2.0 at the
     /// shipped default up to 3.0 — not a fixed constant.
+    /// RETIRED PRODUCER (v1.18.0), as [`FIT_NOTE_CAST_ADMITTED_BY_STRENGTH`]
+    /// — with its four readings below.
     pub const FIT_NOTE_CAST_ADMITTED: &str =
         " Colour-cast curves were admitted: the look error with the curves is \
          {ratio} of the error without them (the strength budget's bound is \
@@ -251,18 +294,17 @@ pub mod keys {
     /// stage has tried shrinking the three curves toward the shape they share
     /// and been refused there too, so it says so: a refusal that does not
     /// mention the cheaper answer invites the reader to ask for it.
+    /// RETIRED PRODUCER (v1.18.0), as [`FIT_NOTE_CAST_ADMITTED_BY_STRENGTH`]:
+    /// a fan is a cell left worse than the law found it.
     pub const FIT_NOTE_CAST_HUE_FANNED: &str =
         " Colour-cast curves were withheld: they would have fanned one hue \
          class apart across luminance — that class holds {share} of the \
          frame's measurable colour, and the three channel curves would have \
          spread its dark and bright slices {fan} degrees apart (limit \
-         {limit}). Shrinking them — first toward the one shape all three \
-         channels share, then toward no curves at all — was tried first: \
-         either no point on that path cleared the limit, or the \
-         best-paying point that did bought less than the fit's own \
-         quantisation budget, so none shipped. A single-hued region sorted \
-         into a hue fan by brightness is not something any develop control \
-         can put back.";
+         {limit}). Every milder version of them the descent could reach \
+         either still fanned or bought less than the fit's own quantisation \
+         budget, so none shipped. A single-hued region sorted into a hue fan \
+         by brightness is not something any develop control can put back.";
     /// v1.2.3: the stage's THIRD outcome — the fan gate convicted the fitted
     /// curves and a PROJECTED, milder cast shipped instead of nothing.
     ///
@@ -279,6 +321,10 @@ pub mod keys {
     /// admitted one does: these are curves the fit INVENTED to answer a
     /// conviction rather than curves it measured off the pair, so the two
     /// pixel-aligned readings matter more here, not less.
+    /// RETIRED PRODUCER (v1.18.0, the joint objective reads the fan gate on
+    /// every candidate and keeps none that fans; the projection search went
+    /// with the stage retreats): no solve files this note; the key stays so
+    /// a rescore of an older recipe drops it.
     pub const FIT_NOTE_CAST_PROJECTED: &str =
         " Colour-cast curves were shrunk toward the shape all three channels \
          share: as fitted they would have opened a {fan_before} degree hue \
@@ -289,12 +335,14 @@ pub mod keys {
          error without them (the strength budget's bound is {bound}), and \
          they re-hued {rehued} of the frame past the rotation budget.";
     /// The projected curves' own fan reading, when the census has one.
+    /// RETIRED PRODUCER (v1.18.0), as [`FIT_NOTE_CAST_PROJECTED`].
     pub const FIT_NOTE_CAST_PROJECTED_FAN: &str =
         " The projected curves change that class's hue spread across \
          luminance by {fan_after} degrees, inside the {target} degree target \
          a projection has to reach.";
     /// …and when it does not. Not zero — undefined, exactly as for an
     /// admitted cast whose census abstains.
+    /// RETIRED PRODUCER (v1.18.0), as [`FIT_NOTE_CAST_PROJECTED`].
     pub const FIT_NOTE_CAST_PROJECTED_FAN_NA: &str =
         " The projected curves' hue fan was not measurable: no hue class \
          holds enough of the frame across two luma slices for a fan to have \
@@ -303,6 +351,9 @@ pub mod keys {
     /// stage's candidate; this reads the same census on the finished render
     /// against the untouched photo, so a do-no-harm loop cannot walk the
     /// recipe around the limit one admissible step at a time.
+    /// RETIRED PRODUCER (v1.18.0, the joint objective reads the fan gate on
+    /// every candidate): no solve files this note; the key stays so a rescore
+    /// of an older recipe drops it.
     pub const FIT_NOTE_DELIVERED_FAN: &str =
         " The finished recipe was read once more against the untouched photo: \
          it sorted one hue class apart across luminance — that class holds \
@@ -313,6 +364,7 @@ pub mod keys {
     /// …and the arm where the curves were NOT the cause: taking them out
     /// leaves the reading standing, so they go back — a fit must not pay look
     /// error for a fan it did not open — and the reading is disclosed.
+    /// RETIRED PRODUCER (v1.18.0), as [`FIT_NOTE_DELIVERED_FAN`].
     pub const FIT_NOTE_DELIVERED_FAN_UNCAUSED: &str =
         " The finished recipe was read once more against the untouched photo: \
          it sorted one hue class apart across luminance — that class holds \
@@ -326,6 +378,9 @@ pub mod keys {
     /// as-fitted curves, and a white balance moved along the direction they
     /// pull, vouched by the target's own cells, let the curves re-fitted on
     /// top of it ship whole instead of being projected.
+    /// RETIRED PRODUCER (v1.18.0, the joint objective solves the white
+    /// balance and the curves together): no solve files this note; the key
+    /// stays so a rescore of an older recipe drops it.
     pub const FIT_NOTE_CAST_HANDED_TO_WB: &str =
         " Colour cast handed to the white balance: as fitted on top of \
          {k_before} K / tint {tint_before} the channel curves would have opened \
@@ -340,6 +395,7 @@ pub mod keys {
     /// [`FIT_NOTE_CAST_HANDED_TO_WB`] when the finished recipe carries no
     /// cast curve: the white balance it names is the one that ships, and no
     /// curves ship with it (Q-FL2: a note names what ships).
+    /// RETIRED PRODUCER (v1.18.0), as [`FIT_NOTE_CAST_HANDED_TO_WB`].
     pub const FIT_NOTE_CAST_HANDED_TO_WB_NO_CURVES: &str =
         " Colour cast handed to the white balance: as fitted on top of \
          {k_before} K / tint {tint_before} the channel curves would have opened \
@@ -359,14 +415,21 @@ pub mod keys {
         " Reverse-fit strength {pct}% set how far weak evidence could move the sliders.";
     pub const FIT_DEGENERATE: &str = " Fit refused: the source or target frame has no tonal variation (blank or single-tone), so a statistical match would produce a constant tone map — no recipe was fitted.";
     /// Per-stage do-no-harm (2026-10-21). The terminal `FIT_NOTE_REGRESSED`
-    /// below resets the whole recipe; these two name the ONE stage that
+    /// below resets the whole recipe (since 2026-11-08 it is read only where
+    /// the solve's own render ended farther than the base by the objective's
+    /// resolution, `fit::ships`: a base that ships because no control earned
+    /// its quantum is `FIT_NOTE_UNEARNED`'s case, not a discard — the cloud
+    /// deck read "rendered farther" at 0.0748 → 0.0748); these two name the ONE stage that
     /// rendered the frame farther from the target and was withheld there,
     /// so the stages after it kept solving from the frame as it was.
+    /// RETIRED PRODUCER (v1.18.0, the joint objective): no solve files this
+    /// note; the key stays so a rescore of an older recipe drops it.
     pub const FIT_NOTE_TONE_WITHHELD_HARM: &str =
         " The tone sliders were withheld: rendered, they did not bring the frame's tones closer \
          to the target's than the untouched source's by the objective's own rounding (tonal \
          reading {before} → {after}), so the tone stage shipped nothing and the stages after it \
          solved from the untoned frame.";
+    /// RETIRED PRODUCER (v1.18.0), as [`FIT_NOTE_TONE_WITHHELD_HARM`].
     pub const FIT_NOTE_CURVE_WITHHELD_HARM: &str =
         " The residual tone curve was withheld: rendered on top of the sliders it did not bring \
          the frame's tones closer to the target's by the objective's own rounding (tonal \
@@ -381,10 +444,15 @@ pub mod keys {
          source at every saturation level — returning a NEUTRAL recipe \
          (do-no-harm terminal case); this look is outside the global \
          model's reach.";
+    /// RETIRED PRODUCER (v1.18.0): the saturation do-no-harm loop went with
+    /// the stage retreats; a saturation the joint objective set back is named
+    /// by [`FIT_NOTE_UNEARNED`]. Kept so an older recipe's note is dropped on
+    /// rescore rather than carried.
     pub const FIT_NOTE_SAT_REDUCED: &str =
         " Saturation was pulled back from the chroma-matched {sat_fitted} \
          to {sat_now} after the full-strength fit rendered farther from the \
          target than the untouched source (do-no-harm check).";
+    /// RETIRED PRODUCER (v1.18.0), as [`FIT_NOTE_CAST_ADMITTED_BY_STRENGTH`].
     pub const FIT_NOTE_REHUE_BLOCKED: &str =
         " Colour-cast curves were withheld: they would have re-hued a \
          region of the frame (pixel-aligned hue-damage gates).";
@@ -392,6 +460,9 @@ pub mod keys {
     /// empties all three channel curves and used to push no note at all, so
     /// "the colour stage produced nothing" — its commonest outcome — reached
     /// the user as an unexplained absence.
+    /// RETIRED PRODUCER (v1.18.0), as [`FIT_NOTE_CAST_ADMITTED_BY_STRENGTH`]:
+    /// the joint objective's elimination owns "the curves bought nothing"
+    /// ([`FIT_NOTE_UNEARNED`]).
     pub const FIT_NOTE_CAST_REJECTED: &str =
         " The colour stage produced NOTHING: the per-channel cast curves it \
          fitted did not improve the look by a clear enough margin to earn \
@@ -547,8 +618,15 @@ pub mod keys {
     /// The colour grade was held at the strength budget's wheel ceiling.
     pub const FIT_NOTE_COLOR_GRADE_HELD: &str =
         " The grade was held at this strength's ceiling, Saturation {ceiling} per wheel; the paired pixels asked for up to {asked}. A higher reverse-fit strength lets it move further.";
+    /// RETIRED PRODUCER (v1.18.0): the mixer's frame-ruler withdrawal went
+    /// with the stage retreats; bands the joint objective set back are named
+    /// by [`FIT_NOTE_UNEARNED`]. Kept for older recipes' rescore, which
+    /// drops the note.
     pub const FIT_NOTE_HSL_WITHDRAWN_ERROR: &str =
         " The per-band colour move was given back: applying it did not leave the frame closer to the target, so every band returned to neutral.";
+    /// RETIRED PRODUCER (v1.18.0), as [`FIT_NOTE_HSL_WITHDRAWN_ERROR`]: the
+    /// blind arm is the population gate's veto, disclosed by
+    /// [`FIT_NOTE_HSL_BANDS`]'s refused list.
     pub const FIT_NOTE_HSL_WITHDRAWN_BLIND: &str =
         " The per-band colour move was given back: it would have carried pixels through hue bands no two-sided evidence covers, and blind movement is vetoed rather than shipped.";
 
@@ -588,7 +666,9 @@ pub mod keys {
          left to be compared with (cross-image correspondence below {tau} on either side), \
          so both were dropped before the per-channel weighted medians were read. That left \
          {src}% of the source's evidence mass and {tgt}% of the target's, and the two \
-         distributions being paired now describe the same content.";
+         distributions being paired now describe the same content. The fit's look error and \
+         its validity cells were read on that same population against the corresponded \
+         target, so the invented content neither asked for a move nor scored one.";
     /// R30 R2: …and when the shared population is too small to be read as a
     /// population, the whole-frame sentence stands and this one says why it
     /// had to.
@@ -792,17 +872,18 @@ pub mod keys {
          {colour} charged {colour_charged}) over {transitions} measured \
          transitions. An inert attachment would occupy the correction budget \
          and disclose a change it did not make.";
-    /// R39. A correction was admitted at full strength, a boundary gate then
+    /// A correction was admitted at full strength, a boundary gate then
     /// shrank it to k, and the SHRUNK correction — the one that would ship —
-    /// no longer satisfies the acceptance that admitted it (its own residual
-    /// or the frame's). Distinct from every boundary note: the boundary was
-    /// fine; the correction stopped earning its place.
+    /// no longer earns its place by the law that admitted it (FIT_QUANT of
+    /// its own residual against the render without it, the frame a guard;
+    /// RULING-1180-joint-r2). Distinct from every boundary note: the boundary
+    /// was fine; the correction stopped earning its place.
     pub const ZONE_SHRUNK_REFUSED: &str =
         " {label} correction refused after its boundary shrink to k={k}: at that \
          strength its own residual reads {after} against {before} for the same \
          render without it, with the frame {frame_before} -> {frame_after}; a \
-         shrunk correction ships only while it leaves its zone no worse and the \
-         frame guard holds (the frame may rise at most {quant}).";
+         shrunk correction ships only while it still earns {quant} on its own \
+         pixels and the frame guard holds (the frame may rise at most {quant}).";
     pub const ZONE_BOUNDARY_DROPPED: &str =
         " Zoned corrections dropped by the boundary-continuity gate: candidate \
          rim {before} luma, and even shared shrink k=0 left {after} \
@@ -1352,6 +1433,7 @@ pub(crate) const GLOBAL_SOLVE_KEYS: &[&str] = &[
     keys::FIT_NOTE_ATMOSPHERE_CONFIDENCE, keys::FIT_NOTE_ATMOSPHERE_POPULATION_EVIDENCE,
     keys::FIT_NOTE_WB_CLAMPED, keys::FIT_NOTE_WB_WITHHELD_FOREIGN_HUE,
     keys::FIT_NOTE_WB_WITHHELD_ROTATION, keys::FIT_NOTE_WB_SEARCH_BOUND,
+    keys::FIT_NOTE_WB_BUDGETED, keys::FIT_NOTE_SEED_SCALED,
     keys::FIT_NOTE_CAST_ADMITTED_BY_STRENGTH, keys::FIT_NOTE_CAST_ADMITTED,
     keys::FIT_NOTE_CAST_ADMITTED_FOREIGN, keys::FIT_NOTE_CAST_ADMITTED_FOREIGN_NA,
     keys::FIT_NOTE_CAST_ADMITTED_FAN, keys::FIT_NOTE_CAST_ADMITTED_FAN_NA,

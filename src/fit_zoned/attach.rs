@@ -436,11 +436,10 @@ pub(super) fn attach_zones_with_divergence(
                 return finish_with_bands_only(&s_img, &tgt_px, report, zones, divergences, mask_path);
             }
         };
-        // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
-        // E_paired + H_ab (`report.evidence.local`): S is read where the question
-        // is structure, a local correction cannot change which pixels pair, its
-        // seams stay with the boundary / ramp rulers and its structural gate is
-        // the existing D threshold only.
+        // A LOCAL correction's do-no-harm reads the one objective as the frame
+        // does (2026-11-07: hue and structure are gates, not terms); its seams
+        // stay with the boundary / ramp rulers and its structural gate is the
+        // existing D threshold only.
         let frame_after = fit::look_err_with_evidence(&pixels, &tgt_px, &report.evidence);
         if !refuse_shrunk_zones(
             &s_img, report, &mut accepted, &mut originals, first_zone, &pixels, &tgt_px, k,

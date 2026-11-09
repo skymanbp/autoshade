@@ -2,8 +2,6 @@
 
 use super::*;
 use super::evidence::{EVIDENCE_LUMA_BINS, evidence_luma_bin, wb_consensus, weighted_median};
-use super::grade::largest_vouched_share;
-use super::cast_outcome::mixer_ships;
 
 // --------------------------------------------------------------------------
 // per-band colour mixer (stage 4a)
@@ -34,19 +32,11 @@ impl HslBandRefusal {
     }
 }
 
-/// The per-band stage gave back everything it fitted, and why.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum HslWithdrawal {
-    /// The composed frame did not end closer to the target.
-    Error,
-    /// It would have carried pixels through hue bands no evidence covers.
-    Blind,
-}
-
 /// What the per-band stage decided, for the disclosure. What it MOVED is not
 /// here on purpose: that is a property of the recipe [`compose_report`] is
-/// holding, so it is read off the recipe there and cannot go stale when a
-/// later do-no-harm loop shrinks the mixer (or resets the whole recipe).
+/// holding, so it is read off the recipe there and cannot go stale when the
+/// joint objective moves or zeroes the mixer (a proposed value it zeroed is
+/// named by `FIT_NOTE_UNEARNED`, with every other control it set back).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct HslStageFacts {
     /// Bands the frozen evidence called one-sided that the CURRENT render and
@@ -56,7 +46,6 @@ pub(super) struct HslStageFacts {
     pub(super) vouched: String,
     /// Bands the two-sided population gate refused, each with its reason.
     pub(super) refused: String,
-    pub(super) withdrawn: Option<HslWithdrawal>,
 }
 
 /// Largest single-iteration step of the per-band chase, mirroring the global
@@ -66,26 +55,6 @@ const HSL_BAND_STEP: f32 = 40.0;
 /// A band mean below this carries no usable ratio — dividing by it turns
 /// renderer rounding into a full-scale demand.
 const HSL_BAND_MIN_MEAN: f64 = 0.02;
-
-/// One shrink step of the mixer: halve every axis, and snap a band under one
-/// unit to neutral so the shrink always REACHES zero instead of approaching
-/// it (the same "below 4, go to zero" device the saturation loop uses).
-/// Hue is halved with the other two since the stage solves it
-/// ([`fit_band_hues`], 2026-11-02): a do-no-harm loop that could not shrink
-/// an axis the stage writes could only spin to its bound and withdraw.
-pub(super) fn halved_hsl(hsl: &crate::recipe::Hsl) -> crate::recipe::Hsl {
-    let axis = |values: &[f32; 8]| -> [f32; 8] {
-        std::array::from_fn(|i| {
-            let v = round1(values[i] * 0.5);
-            if v.abs() < 1.0 { 0.0 } else { v }
-        })
-    };
-    crate::recipe::Hsl {
-        hue: axis(&hsl.hue),
-        saturation: axis(&hsl.saturation),
-        luminance: axis(&hsl.luminance),
-    }
-}
 
 /// Solve `hsl.saturation` and `hsl.luminance` from POPULATION statistics, one
 /// ACR band at a time.
@@ -124,7 +93,8 @@ pub(super) fn halved_hsl(hsl: &crate::recipe::Hsl) -> crate::recipe::Hsl {
 /// admitted bands. The solve is closed-loop through the real engine for the
 /// same reason the global chroma chase is (`apply_hsl` runs before
 /// saturation, the wheels and clarity, so the linearised answer is a first
-/// step): two rounds, then a do-no-harm that shrinks to zero.
+/// step): two rounds. What ships is the joint objective's question
+/// (RULING-1180-joint-r1): the stage estimates, and judges nothing.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn fit_hsl_stage(
     s_img: &DynamicImage,
@@ -136,10 +106,10 @@ pub(super) fn fit_hsl_stage(
     budget: FitBudget,
     recipe: &mut EditRecipe,
 ) -> HslStageFacts {
-    let (facts, admitted) = fit_band_populations(s_img, sp, tp, evidence, vouch, cells, budget, recipe);
-    // The band hues are a paired measurement: no pairing, no cells, no hue.
-    if let (Some(vouch), Some(cells)) = (vouch, cells) {
-        fit_band_hues(s_img, sp, tp, evidence, vouch, cells, budget, &admitted, recipe);
+    let (facts, admitted) = fit_band_populations(s_img, sp, tp, evidence, cells, budget, recipe);
+    // The band hues are a paired measurement: no pairing, no hue.
+    if let Some(vouch) = vouch {
+        fit_band_hues(s_img, tp, vouch, budget, &admitted, recipe);
     }
     facts
 }
@@ -152,24 +122,12 @@ fn fit_band_populations(
     sp: &[[f32; 3]],
     tp: &[[f32; 3]],
     evidence: &EvidenceModel,
-    vouch: Option<PixelVouch<'_>>,
     cells: Option<&crate::fit_cells::PairedCells>,
     budget: FitBudget,
     recipe: &mut EditRecipe,
 ) -> (HslStageFacts, [bool; EVIDENCE_HUE_BANDS]) {
     let mut facts = HslStageFacts::default();
-    let restore = recipe.hsl.clone();
     let before_px = pixels_of(&render::develop_preview(s_img, recipe));
-    let err_before = look_err_with_evidence(&before_px, tp, evidence);
-    // Whether the recipe ALREADY moved pixels through unmeasured bands is not
-    // this stage's fault and not this stage's to fix (the pipeline-end loop
-    // owns that case); only movement this stage ADDS is its own.
-    let blind_before =
-        // R34 §D3 deliberately stops here: the mixer has its own cell
-        // admission (`one_sided_vouch` below), asked of the BAND's population
-        // rather than the frame's, and two cell verdicts on one stage would be
-        // two instruments answering one question.
-        moved_unsupported_hue_range_names_vouched(sp, &before_px, evidence, vouch, None).is_some();
 
     // --- admission --------------------------------------------------------
     let (sa, ta) = band_stats_weighted(&before_px, &evidence.source_hue_weights);
@@ -264,7 +222,6 @@ fn fit_band_populations(
 
     // --- the joint solve, closed-loop through the real engine --------------
     const B: usize = EVIDENCE_HUE_BANDS;
-    let mut given_back = false;
     for _ in 0..2 {
         let cur = pixels_of(&render::develop_preview(s_img, recipe));
         let (cs, _) = band_stats_weighted(&cur, &evidence.source_hue_weights);
@@ -309,77 +266,8 @@ fn fit_band_populations(
                 *slot = next;
             }
         }
-        // R1 at every round (rel1180 RULING-1180-sc-r4 Q-SC-2b (2)): each
-        // band's amount against its absence, on its OWN population, the frame
-        // a guard (`mixer_ships`); a band that does not earn there is set back
-        // in this round, not carried to the stage end. A band whose demand is
-        // only a neighbour's spill earns nothing on its own pixels.
-        let with_px = pixels_of(&render::develop_preview(s_img, recipe));
-        let mut unearned_bands = Vec::new();
-        for band in 0..B {
-            if recipe.hsl.saturation[band] == restore.saturation[band]
-                && recipe.hsl.luminance[band] == restore.luminance[band]
-            {
-                continue;
-            }
-            let mut without = recipe.clone();
-            without.hsl.saturation[band] = restore.saturation[band];
-            without.hsl.luminance[band] = restore.luminance[band];
-            let without_px = pixels_of(&render::develop_preview(s_img, &without));
-            let mut moving = [false; B];
-            moving[band] = true;
-            if !mixer_ships(&moving, &with_px, &without_px, tp, evidence) {
-                unearned_bands.push(band);
-            }
-        }
-        given_back |= !unearned_bands.is_empty();
-        for band in unearned_bands {
-            recipe.hsl.saturation[band] = restore.saturation[band];
-            recipe.hsl.luminance[band] = restore.luminance[band];
-        }
         if !moved_any {
             break;
-        }
-    }
-    let fitted = recipe.hsl.clone();
-    if fitted == restore {
-        // Every move the solve proposed was set back for not earning on its
-        // band: the same withdrawal the stage-end halving discloses.
-        if given_back {
-            facts.withdrawn = Some(HslWithdrawal::Error);
-        }
-        return (facts, admitted);
-    }
-
-    // --- do-no-harm, the stage's own --------------------------------------
-    // The same err_before/err_after discipline the saturation pull-back
-    // answers to, applied where the move is generated instead of three stages
-    // later: halve the whole vector until the frame's look error stops
-    // objecting AND the finished render stops carrying pixels through hue
-    // bands this stage's own gate never measured. Withdrawal is always
-    // reachable: at neutral, or at the round bound.
-    let verdict = halve_mixer_until_harmless(fitted, |candidate| {
-        recipe.hsl = candidate.clone();
-        let px = pixels_of(&render::develop_preview(s_img, recipe));
-        // R1: ships only on a gain of at least FIT_QUANT over its absence (`ships`).
-        let regressed = !ships(look_err_with_evidence(&px, tp, evidence), err_before);
-        let blind_new = budget.vetoes == VetoPolicy::Withhold
-            && !blind_before
-            && moved_unsupported_hue_range_names_vouched(sp, &px, evidence, vouch, None)
-                .is_some();
-        if blind_new {
-            Some(HslWithdrawal::Blind)
-        } else if regressed {
-            Some(HslWithdrawal::Error)
-        } else {
-            None
-        }
-    });
-    match verdict {
-        Ok(kept) => recipe.hsl = kept,
-        Err(reason) => {
-            recipe.hsl = restore;
-            facts.withdrawn = Some(reason);
         }
     }
     (facts, admitted)
@@ -505,25 +393,15 @@ fn least_squares_over_bands(
 /// luminance chase obey) and kept only when they leave less of the demand
 /// than no rotation does.
 ///
-/// ADMISSION. The target's cells along the colour axis, read over the
-/// pixels the rotated bands reach (each pixel's membership, times its weight
-/// in the bands that move) — the band-population admission's own reading
-/// (`one_sided_vouch` asks the cells over the band's members), because a
-/// band rotation leaves every other pixel where it was and the cells there
-/// have nothing to converge on (measured on the one-band fixture: 0.233 of
-/// the frame's cells converged, every one aligned, none diverged). The whole
-/// move or the largest share they vouch ([`largest_vouched_share`], the
-/// colour grade's search); then the stage's own do-no-harm — halve until the
-/// frame's look error does not rise and no new pixel is carried through a
-/// hue band the evidence never measured.
+/// What ships of it is the joint objective's question (RULING-1180-joint-r1):
+/// the validity law reads the chroma dials on the cells they move (a blind
+/// cell withheld under `Withhold`), and the elimination judges each
+/// band against its absence on F.
 #[allow(clippy::too_many_arguments)]
 fn fit_band_hues(
     s_img: &DynamicImage,
-    sp: &[[f32; 3]],
     tp: &[[f32; 3]],
-    evidence: &EvidenceModel,
     vouch: PixelVouch<'_>,
-    cells: &crate::fit_cells::PairedCells,
     budget: FitBudget,
     admitted: &[bool; EVIDENCE_HUE_BANDS],
     recipe: &mut EditRecipe,
@@ -616,94 +494,5 @@ fn fit_band_hues(
     if left(&amount) >= left(&[0.0; B]) {
         return;
     }
-    let reached: Vec<f32> = before
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let (h, _, _) = render::rgb_to_hsl(p[0], p[1], p[2]);
-            let within = match render::hsl_band_reach(h, render::chroma(p)) {
-                Some((b0, b1, w1, _)) => {
-                    (if amount[b0] != 0.0 { 1.0 - w1 } else { 0.0 }) + if amount[b1] != 0.0 { w1 } else { 0.0 }
-                }
-                None => 0.0,
-            };
-            within * evidence.source_membership.get(i).copied().unwrap_or(0.0).max(0.0)
-        })
-        .collect();
-    let set = |recipe: &mut EditRecipe, share: f32| {
-        recipe.hsl.hue = std::array::from_fn(|b| round1((restore[b] + amount[b] * share).clamp(-100.0, 100.0)));
-    };
-    let vouch_at = |recipe: &mut EditRecipe, share: f32| {
-        set(recipe, share);
-        let px = pixels_of(&render::develop_preview(s_img, recipe));
-        Some(cells.vouch_along(crate::fit_cells::MoveAxis::Colour, &before, &px, Some(&reached)))
-    };
-    let full = vouch_at(recipe, 1.0);
-    let Some(share) = largest_vouched_share(full, |share| vouch_at(recipe, share)) else {
-        recipe.hsl.hue = restore;
-        return;
-    };
-    set(recipe, share);
-
-    // --- do-no-harm, the stage's own, on the hue it added ------------------
-    let err_before = look_err_with_evidence(&before, tp, evidence);
-    let blind_before =
-        moved_unsupported_hue_range_names_vouched(sp, &before, evidence, Some(vouch), None).is_some();
-    for _ in 0..super::solve::DO_NO_HARM_MAX_ROUNDS {
-        if recipe.hsl.hue == restore {
-            return;
-        }
-        let px = pixels_of(&render::develop_preview(s_img, recipe));
-        // R1: ships only on a gain of at least FIT_QUANT over its absence (`ships`).
-        let regressed = !ships(look_err_with_evidence(&px, tp, evidence), err_before);
-        let blind_new = budget.vetoes == VetoPolicy::Withhold
-            && !blind_before
-            && moved_unsupported_hue_range_names_vouched(sp, &px, evidence, Some(vouch), None).is_some();
-        if !regressed && !blind_new {
-            return;
-        }
-        recipe.hsl.hue = hue_halved_toward(&recipe.hsl.hue, &restore);
-    }
-    recipe.hsl.hue = restore;
-}
-
-/// One shrink step of the band hues toward `start` (the hue the stage found):
-/// halve each band's rotation and snap one under a unit to `start`, so the
-/// shrink REACHES it — [`halved_hsl`]'s device, on the one axis and toward
-/// the one state the band-hue judgements compare against.
-pub(super) fn hue_halved_toward(hue: &[f32; 8], start: &[f32; 8]) -> [f32; 8] {
-    std::array::from_fn(|b| {
-        let half = round1((hue[b] - start[b]) * 0.5);
-        if half.abs() < 1.0 { start[b] } else { start[b] + half }
-    })
-}
-
-/// The stage's do-no-harm control, separated from its measurements so its
-/// termination is testable: halve `fitted` while `objects` names a reason,
-/// and hand back the first candidate it does not object to. `Err` carries
-/// the last objection when the halving reaches neutral, or when
-/// [`super::solve::DO_NO_HARM_MAX_ROUNDS`] candidates have been judged —
-/// the 4b loop's bound, for the same reason: a band at the budget ceiling
-/// reaches neutral in eight halvings, so a mixer that needs more is not
-/// descending. Since `halved_hsl` halves hue too no mixer is a fixed point
-/// of the halving, and the bound is a guard. Either way the caller
-/// withdraws to the state the stage started from.
-pub(super) fn halve_mixer_until_harmless(
-    fitted: crate::recipe::Hsl,
-    mut objects: impl FnMut(&crate::recipe::Hsl) -> Option<HslWithdrawal>,
-) -> Result<crate::recipe::Hsl, HslWithdrawal> {
-    let mut reason: Option<HslWithdrawal> = None;
-    let mut candidate = fitted;
-    let mut rounds = 0;
-    loop {
-        if candidate.is_neutral() || rounds == super::solve::DO_NO_HARM_MAX_ROUNDS {
-            return Err(reason.unwrap_or(HslWithdrawal::Error));
-        }
-        rounds += 1;
-        match objects(&candidate) {
-            None => return Ok(candidate),
-            Some(why) => reason = Some(why),
-        }
-        candidate = halved_hsl(&candidate);
-    }
+    recipe.hsl.hue = std::array::from_fn(|b| round1((restore[b] + amount[b]).clamp(-100.0, 100.0)));
 }

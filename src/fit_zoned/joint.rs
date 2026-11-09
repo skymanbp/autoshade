@@ -82,8 +82,8 @@ pub(crate) const JOINT_LABELS: [&str; JOINT_BUCKETS] = [
 
 /// The chroma ramp's two ends — DEFINITIONS borrowed from the two chroma
 /// landmarks this codebase has already measured, not new thresholds: 0.03 is
-/// `fit`'s "a pale sky still testifies" level (`VETO_SUPPORT_CHROMA` /
-/// `ROT_HUE_MEASURABLE_CHROMA`) and 0.06 is the band-statistics gate
+/// `fit`'s "a pale sky still testifies" level (the retired hue gates' chroma
+/// floor, 2026-09) and 0.06 is the band-statistics gate
 /// (`fit::band_stats`) above which a pixel is treated as carrying hue. A RAMP
 /// rather than a step because a hard cut puts the whole near-grey population
 /// on a cliff that the fit's own saturation dial walks pixels across.
@@ -198,31 +198,23 @@ pub(crate) fn classify_joint_far(weighted: f32, evidence_refused: bool) -> Optio
 /// produced the incoherent report the tie exists to prevent — "treat this as
 /// a starting point, not a match" printed beside 0.70 confidence.
 pub(crate) const JOINT_CONFIDENCE_SLOPE: f32 = 7.5;
-/// Bounded-drift tolerance for the pipeline-end guard (role 3 above): how
-/// much WORSE the finished recipe's weighted reading may be than the
-/// untouched base's before the fit is declared to have done harm the
-/// look-error check could not see. Every fixture in the set IMPROVES this
-/// reading (0.180→0.045, 0.177→0.061, 0.243→0.093, 0.587→0.581, 0.059→0.004)
-/// except the identity pair, which regresses by 0.0009 of pure
-/// quantisation — so 0.05 is 56× the only observed non-improvement, and far
-/// under the smallest gap between fixtures. Deliberately loose: this guard
-/// exists to catch a disaster the scalar cannot see, not to referee taste.
-///
-/// UNCHANGED by the R24 real-pair round, and now measured rather than
-/// merely assumed: all six real pairs improve this reading by a wide margin
-/// (0.402→0.064, 0.332→0.064, 0.089→0.028, 0.082→0.060, 0.052→0.034,
-/// 0.050→0.014 — `pipeline::tests::r16_composed_fit_on_a_real_pair`), so
-/// no real pair has yet come within 0.05 of the guard from the wrong side.
+/// The monotonicity tolerance the fixture-set and real-pair tests hold the
+/// joint reading to (`fit::tests::joint_family_is_calibrated_on_the_fixture_set`,
+/// `pipeline::tests::r16_composed_fit_on_a_real_pair`): every pair's reading
+/// improves or holds within it. Until v1.18.0 it was the terminal
+/// do-no-harm's joint arm; the joint objective (RULING-1180-joint-r1) has one
+/// ruler, so the library no longer reads it.
+#[cfg(test)]
 pub(crate) const JOINT_DRIFT_TOL: f32 = 0.05;
 
 /// One bucket's mismatch: [`zone_err`]'s formula, read in the DISPLAY
 /// domain.
 ///
 /// `zone_err` compares linear-light channel means, and this module has
-/// already written down what that costs (see [`ZONE_MATCHED_EV`]: sRGB 0.12
-/// and 0.173 score the same 0.012 while sitting 0.9 EV apart). The sky/land
-/// zones answer that with an EV companion on a single absolute line, because
-/// there is one zone at one level. Here the buckets are DEFINED at different
+/// already written down what that costs (sRGB 0.12 and 0.173 score the
+/// same 0.012 while sitting 0.9 EV apart; the sky/land skip that answered it
+/// with an EV companion reads own-pixel J* since v1.18.0). Here the
+/// buckets are DEFINED at different
 /// brightness levels, so a linear-absolute error would hand "the worst
 /// bucket" to the highlights in every photograph ever taken, and dividing by
 /// the level instead (tried first, measured) hands it to the shadows just as

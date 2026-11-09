@@ -65,6 +65,10 @@ HISTORY = {
     "a_rim_that_cannot_be_shrunk_is_dropped_with_its_own_note": "ARCHITECTURE: a count clause records its rename",
     "legacy_autoshop_sidecar_": "ARCHITECTURE: a count clause records a renamed test prefix",
     "src/style.rs": "ARCHITECTURE: a count clause names where tests lived before v1.9.0 retired the style index",
+    "WbCellVerdict": "ARCHITECTURE: the white-balance passage stands as the record of the cell verdict v1.18.0 retired",
+    "shipped_at": "ARCHITECTURE: the same record (the share the cells vouched)",
+    "search_cast_projection": "ARCHITECTURE: the projection section stands as the record of the search v1.18.0 retired",
+    "read_wb_step": "ARCHITECTURE: the cast→WB hand-off passage stands as the record of the step reader v1.18.0 retired",
 }
 
 REPO_PATH = re.compile(

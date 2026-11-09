@@ -86,6 +86,13 @@ pub(super) fn detail_regression_is_bounded(
             < detail_residual(before, target, evidence)
 }
 
+/// Does `recipe` stand at `base` on every coordinate the joint objective
+/// solves, up to the quantised companions the detail stage carries (an
+/// exposure step, a white-balance gain, a tone-curve code)? The detail
+/// controls themselves are outside J* and are not read. Every coordinate of
+/// `Coord::all` is here: the four grade wheels and vibrance were not
+/// (review A P11), so a recipe that had moved only a wheel read as detail-only
+/// and escaped the base candidate on the detail ruler.
 pub(super) fn only_detail_and_quantized_companions(recipe: &EditRecipe, base: &EditRecipe) -> bool {
     let wb_gains_for = |r: &EditRecipe| {
         let law = render::WbLaw::of(r);
@@ -106,6 +113,8 @@ pub(super) fn only_detail_and_quantized_companions(recipe: &EditRecipe, base: &E
             .zip(base_wb)
             .all(|(&candidate, baseline)| (candidate - baseline).abs() < 1e-3)
         && recipe.saturation == base.saturation
+        && recipe.vibrance == base.vibrance
+        && recipe.color_grade == base.color_grade
         && recipe.hsl == base.hsl
         && recipe_tone
             .iter()

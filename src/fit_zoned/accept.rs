@@ -32,17 +32,10 @@ pub(super) struct AcceptedZone {
     /// The candidate render, retained so the boundary gate reuses the final
     /// analysis render instead of buying another full candidate render.
     pub(super) rendered: Vec<[f32; 3]>,
-    /// R39. What the acceptance judged, so the correction that SHIPS can be
-    /// held to do-no-harm after a boundary gate has shrunk it: the zone's
-    /// own-pixel J* ([`own_reading`]) that [`attach_one_zone`] read on the
-    /// frame this zone was attached to. On the sequential routes (tiles,
-    /// free masks) that frame is exactly the shipped set without this
-    /// correction, so `judged_before` is the leave-one-out baseline there;
-    /// the shared routes render their own (`refuse_shrunk_zones`).
-    pub(super) judged_before: f32,
     /// The zone's own present population, source and target — the pair
-    /// [`attach_one_zone`]'s `ships_local` read its own J* on, so every
-    /// later do-no-harm reads the same pixels by the same law.
+    /// [`attach_one_zone`]'s `ships_local` read its own J* on, so the
+    /// acceptance at the strength that ships reads the same pixels by the
+    /// same law.
     pub(super) own_weights: (Vec<f32>, Vec<f32>),
 }
 
@@ -51,40 +44,27 @@ impl AcceptedZone {
     /// objective on the zone's own present pixels ([`own_reading`]), as
     /// `ships_local` read it at k = 1 (RULING-1180-int-r6 (2): every
     /// do-no-harm at a zone reads the one objective; until then this read
-    /// the display moments, luma-only where colour was withheld). It reads
-    /// the report's model as it is set: local (`E_paired + H_ab`) once
-    /// `entry::read_locally` switched it, which the pipeline does before any
-    /// zone and the test harness does the same way.
+    /// the display moments, luma-only where colour was withheld).
     pub(super) fn judged(&self, report: &FitReport, pixels: &[[f32; 3]], tgt_px: &[[f32; 3]]) -> f32 {
         own_reading(report, pixels, tgt_px, &self.own_weights.0, &self.own_weights.1)
     }
 
-    /// R39. Does the correction that SHIPS still do what it was admitted
-    /// for? Every boundary gate shrinks a correction AFTER
-    /// [`attach_one_zone`] has judged it at k=1, and a shrunk correction is
-    /// a different correction: on the reference pair, spatial tile r1c0 was
-    /// admitted at full strength and shipped at k=0.134 with its own
-    /// colour-inclusive residual WORSE than the render without it (0.19166
-    /// -> 0.20101), bought by a frame reading that moved 0.0003 the right
-    /// way — a pale block in the sky that no gate had judged. (That tile
-    /// passes THIS predicate: what its acceptance read is luma only, the
-    /// colour arm withheld, and that improves; the block is the boundary
-    /// ruler's to refuse — R40, [`discontinuity_budget`].)
-    ///
-    /// The predicate is do-no-harm, not the k=1 law. That law
-    /// ([`attach_one_zone`]: FIT_QUANT on the zone's own pixels) asks for a real GAIN, which was established at full
-    /// strength and is what the shrink trades away on purpose: a sky
-    /// correction negotiated down to k=0.088 that still takes its zone from
-    /// 0.040 to 0.038 (the inverted-raster fixture) is the boundary gate
-    /// doing its job, not a correction to refuse — the first cut of this
-    /// predicate re-ran the arms and refused it. What a shrunk correction
-    /// may not do is leave its zone worse than the render WITHOUT it
-    /// (`without`, the caller's leave-one-out baseline) or carry the frame
-    /// past the drift its attachment was allowed.
-    ///
-    /// Both halves read the one objective (RULING-1180-int-r6 (2)): the zone
-    /// half is own-pixel J* no worse than without it, with no margin — the
-    /// moments form it replaces allowed none either (`judged <= without`).
+    /// ONE LAW AT THE STRENGTH THAT SHIPS (RULING-1180-joint-r2, 2026-11-06).
+    /// Every boundary gate shrinks a correction AFTER [`attach_one_zone`]
+    /// judged it at k = 1, and a shrunk correction is a different
+    /// correction: on the reference pair, spatial tile r1c0 was admitted at
+    /// full strength and shipped at k = 0.134 with its own residual WORSE
+    /// than the render without it (0.19166 -> 0.20101), bought by a frame
+    /// reading that moved 0.0003 the right way. So the correction that ships
+    /// is judged where it ships, by the law that admitted it and no other:
+    /// R19's [`fit::ships_local`] — FIT_QUANT of own-pixel J* earned against
+    /// the shipped set WITHOUT it (`without`, the caller's leave-one-out
+    /// baseline), the frame a guard of FIT_QUANT. Until v1.18.0 this read
+    /// do-no-harm instead (own no worse than without, no margin), which kept
+    /// a sky negotiated down to k = 0.088 that took its zone from 0.040 to
+    /// 0.038: a correction that buys less than the quantum is not worth a
+    /// control, and the k = 1 pass is the same law read before the shrink,
+    /// not a second one.
     pub(super) fn still_accepted(
         &self,
         report: &FitReport,
@@ -94,16 +74,14 @@ impl AcceptedZone {
         frame_before: f32,
         frame_after: f32,
     ) -> bool {
-        // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
-        // E_paired + H_ab (`report.evidence.local`): S is read where the question
-        // is structure, a local correction cannot change which pixels pair, its
-        // seams stay with the boundary / ramp rulers and its structural gate is
-        // the existing D threshold only.
+        // A LOCAL correction's do-no-harm reads the one objective as the frame
+        // does (2026-11-07: hue and structure are gates, not terms); its seams
+        // stay with the boundary / ramp rulers and its structural gate is the
+        // existing D threshold only.
         // R19: the frame is a GUARD for a local correction (`fit::ships_local`):
         // the shrunk correction may not raise it by more than FIT_QUANT; its
         // gain was decided at k = 1 on its own population.
-        frame_after - frame_before <= fit::FIT_QUANT
-            && self.judged(report, pixels, tgt_px) <= without
+        fit::ships_local(self.judged(report, pixels, tgt_px), without, frame_after, frame_before)
     }
 
     /// The refusal note a caller pushes when [`Self::still_accepted`] says
@@ -135,7 +113,7 @@ impl AcceptedZone {
     }
 }
 
-/// R39. After a SHARED boundary shrink (the semantic and range routes shrink
+/// After a SHARED boundary shrink (the semantic and range routes shrink
 /// a whole set of zones by one k), every zone in `accepted` is held to
 /// [`AcceptedZone::still_accepted`] on `pixels`, the render that would ship,
 /// against the same shipped set rendered WITHOUT that zone: `report.recipe`

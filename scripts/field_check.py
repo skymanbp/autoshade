@@ -9,9 +9,11 @@ iterations — `src/fit_field.rs`) on exactly those numbers, with production's
 bounded solve around the experiment's conjugate gradients (`System::solve`,
 v1.17.0: each vertex's colour change — EV and the three gains as one
 per-channel multiplier — limited along its own direction and held, then an
-active-set loop for the slopes alone) and its per-CELL occupancy floor, and
-writes the NumPy grid and render back for `compare_calibration_field_with_numpy`
-to score with the production objective.
+active-set loop for the slopes alone), every vertex shipping the solve's own
+value (b7630a5: the per-CELL occupancy floor excludes a vertex from the
+analyzer's statistics, not from the render), and writes the NumPy grid and
+render back for `compare_calibration_field_with_numpy` to score with the
+production objective.
 
     python scripts/field_check.py
 """
@@ -200,11 +202,11 @@ def main() -> None:
     guide_delta = float(np.max(np.abs(smooth_3tap(luma) - guide)))
 
     # 2. the fit weight must be evidence x local support x testifies
-    # (`fit_field::testifies`, v1.17.1): no channel at or under 1/255 in either
-    # frame, and every channel inside 254/255 in both frames or at the clip in
-    # both.
-    stacked = np.concatenate([current, target], axis=2)
-    above = stacked.min(axis=2) > LOW
+    # (`fit_field::testifies`, v1.18.0): the luma601 of both frames above 1/255
+    # (a channel at the black clip is a dark pixel, a pixel whose luma is at
+    # it has no channel left to carry it), and every channel inside 254/255 in
+    # both frames or at the white clip in both.
+    above = (luma > LOW) & ((target @ np.array([0.299, 0.587, 0.114], dtype=np.float32)) > LOW)
     same_clip = np.all((current >= HIGH) == (target >= HIGH), axis=2)
     testifies = (above & same_clip).astype(np.float32)
     fit_weight = evidence * support * testifies
@@ -219,7 +221,9 @@ def main() -> None:
     ids, tri = splat_table(guide)
     system = GridSystem(current, target, guide, ids, tri, fit_weight)
     grid, info = solve_bounded(system)
-    grid[~supported(system.occupancy)] = 0.0
+    # b7630a5: an unmeasured vertex ships the solve's own value (the smoother's
+    # continuation), not a policy zero; the floor is the analyzer's, not the
+    # render's.
     render = system.render(grid)
 
     grid.astype("<f4").tofile(PROBE / "numpy-grid.bin")

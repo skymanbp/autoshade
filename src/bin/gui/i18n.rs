@@ -180,6 +180,8 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" White balance was clamped into the strength budget (gain ratio {from} to {to}, rotated share {rotated_share} over {coverage} of the frame); the requested cast exceeded the honest range.", " 白平衡已限制在强度预算内（增益比 {from} 至 {to}，色相旋转份额 {rotated_share}，覆盖画面 {coverage}）；请求色偏超出范围。"),
     (" White balance withheld: rotated share {rotated_share} over {coverage} of the frame exceeded the strength budget.", " 白平衡已保留：色相旋转份额 {rotated_share}（覆盖画面 {coverage}）超出强度预算。"),
     (" White balance search reached the {k} K domain bound; the requested colour temperature may lie beyond the fitted range.", " 白平衡达到 {k} K 的域边界；请求的色温可能超出拟合范围。"),
+    (" White balance was scaled into the strength budget (gain ratio {from} to {to}); the requested cast exceeded the honest range.", " 白平衡已按强度预算缩放（增益比 {from} 至 {to}）；请求色偏超出范围。"),
+    (" The {class} the stages proposed moved a value range against its own evidence, so they were re-estimated from the cells' own asks and entered the joint solve at {lambda} of that estimate.", " 各环节提出的{class}把某个取值范围推向了与其自身证据相反的方向，因此按各格子自己的需求重新估计，并以该估计的 {lambda} 进入联合求解。"),
     (" Colour-cast curves were admitted by the strength budget (measured ratio {ratio}, budget {budget}).", " 色偏曲线已获强度预算准入（测得比值 {ratio}，预算 {budget}）。"),
     (" Colour-cast curves were admitted: the look error with the curves is \
       {ratio} of the error without them (the strength budget's bound is \
@@ -203,14 +205,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       class apart across luminance — that class holds {share} of the \
       frame's measurable colour, and the three channel curves would have \
       spread its dark and bright slices {fan} degrees apart (limit \
-      {limit}). Shrinking them — first toward the one shape all three \
-      channels share, then toward no curves at all — was tried first: \
-      either no point on that path cleared the limit, or the \
-      best-paying point that did bought less than the fit's own \
-      quantisation budget, so none shipped. A single-hued region sorted \
-      into a hue fan by brightness is not something any develop control \
-      can put back.",
-        " 色偏曲线已被扣留：它们会把同一个色相类沿亮度拉散——该色相类占画面可测色彩的 {share}，而三条通道曲线会把它的暗部与亮部切片拉开 {fan} 度（上限 {limit}）。先尝试过把它们收缩——先收向三个通道共有的那一个形状，再收向完全不加曲线：这条路上没有任何一点进入上限之内，或者进入上限之内改进最大的那一点带来的改进也不足拟合自身的量化预算，于是一条也没有采用。单一色相的区域被按明暗分选成多个色相，任何显影控件都无法还原。"),
+      {limit}). Every milder version of them the descent could reach \
+      either still fanned or bought less than the fit's own quantisation \
+      budget, so none shipped. A single-hued region sorted into a hue fan \
+      by brightness is not something any develop control can put back.",
+        " 色偏曲线已被扣留：它们会把同一个色相类沿亮度拉散——该色相类占画面可测色彩的 {share}，而三条通道曲线会把它的暗部与亮部切片拉开 {fan} 度（上限 {limit}）。下降过程能走到的每一个更温和的版本，要么仍然拉散色相，要么带来的改进不足拟合自身的量化预算，于是一条也没有采用。单一色相的区域被按明暗分选成多个色相，任何显影控件都无法还原。"),
     (" Colour-cast curves were shrunk toward the shape all three channels \
       share: as fitted they would have opened a {fan_before} degree hue \
       fan in a class holding {share} of the frame's measurable colour \
@@ -272,6 +271,11 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     // `tr_value`; the fit also carries native-mask and band outcomes here.
     ("luma ranges", "明度范围"),
     ("hue bands", "色相带"),
+    ("evidence cells", "证据格"),
+    ("tone controls", "影调控件"),
+    ("white balance", "白平衡"),
+    ("chroma dials", "色度控件"),
+    ("channel curves", "通道曲线"),
     ("bitmap", "位图"),
     ("four gradients", "4 条渐变"),
     ("unmeasured", "未测量"),
@@ -2664,9 +2668,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" {label} correction refused after its boundary shrink to k={k}: at that \
      strength its own residual reads {after} against {before} for the same render \
      without it, with the frame {frame_before} -> {frame_after}; a shrunk \
-     correction ships only while it leaves its zone no worse and the frame guard \
-     holds (the frame may rise at most {quant}).",
-     " {label} 校正在边界收缩到 k={k} 之后被拒绝：按该强度，其自身残差为 {after}，同一画面去掉它时为 {before}，画面 {frame_before} -> {frame_after}；收缩后的校正只有在不让自身区域变差、画面最多变差 {quant} 时才会发出。"),
+     correction ships only while it still earns {quant} on its own pixels and the \
+     frame guard holds (the frame may rise at most {quant}).",
+     " {label} 校正在边界收缩到 k={k} 之后被拒绝：按该强度，其自身残差为 {after}，同一画面去掉它时为 {before}，画面 {frame_before} -> {frame_after}；收缩后的校正只有在自身像素上仍能赚到 {quant}、且画面最多变差 {quant} 时才会发出。"),
     (" No zoned {label} correction attached: every control that survived \
       the evidence and quality gates solved to neutral, so the zone \
       residual {before} is left uncorrected.",
@@ -2820,12 +2824,15 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
       left to be compared with (cross-image correspondence below {tau} on either side), \
       so both were dropped before the per-channel weighted medians were read. That left \
       {src}% of the source's evidence mass and {tgt}% of the target's, and the two \
-      distributions being paired now describe the same content.",
+      distributions being paired now describe the same content. The fit's look error and \
+      its validity cells were read on that same population against the corresponded \
+      target, so the invented content neither asked for a move nor scored one.",
         " 氛围模式的白平衡与曝光解自两帧的「共有内容」人口，而非整帧：目标中没有任何可信源\
          像素为之作答的像素是生成内容，并非本帧的一种呈现；源中被目标替换掉的像素则已无物\
          可比（任一侧跨图对应低于 {tau}）——两者都在读取逐通道加权中位数之前被剔除。余下源\
          证据质量的 {src}% 与目标证据质量的 {tgt}%，被配对的这两个分布现在描述的是同一批\
-         内容。"),
+         内容。拟合的外观误差与有效性格子也在这同一批人口上、对着对应后的目标读取，所以被\
+         发明的内容既不提要求也不计分。"),
     (" The shared-content population that would have replaced it retains only {src}% of \
       the source's evidence mass and {tgt}% of the target's, under the {floor}% a \
       population must keep to be read as one — so the whole-frame medians above stand, \

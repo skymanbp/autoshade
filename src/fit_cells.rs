@@ -406,34 +406,6 @@ impl PairedCells {
         Self::cellwise(self.measure(before, after, region, MoveAxis::Full))
     }
 
-    /// R34 §D3. The per-cell verdicts for one edit — but ONLY when the region
-    /// as a whole vouches it — together with the verdict it was admitted on,
-    /// which its disclosure has to print.
-    ///
-    /// A cell's verdict is a LOCAL statement; a hue-band veto is a REGIONAL
-    /// one. Without this scope one converged cell inside a region the cells
-    /// overall REFUSE carries its own pixels through, and because the veto is
-    /// a SHARE of the moved population, a converged third can hold enough of
-    /// the moved pixels to drop the band under `fit::ROT_SHARE` and dissolve
-    /// the veto entirely. Measured, before this gate existed: a frame whose
-    /// cells read 0.337 converged / 0.663 diverged lifted a one-sided Blue
-    /// band's veto. The region's own verdict is not overruled by its minority.
-    ///
-    /// This is deliberately NOT how `fit_zoned::field` reads the same numbers:
-    /// there each cell keeps or replaces its OWN eight vertices and nothing
-    /// else, so a good cell beside a bad one is simply a good cell, and the
-    /// do-no-harm checks judge the result. Lifting a veto and choosing a
-    /// vertex are different acts and take different scopes.
-    pub(crate) fn region_arm(
-        &self,
-        before: &[[f32; 3]],
-        after: &[[f32; 3]],
-    ) -> Option<(CellVouch, Vec<Option<bool>>)> {
-        let readings = self.measure(before, after, None, MoveAxis::Full);
-        let vouch = Self::fold(&readings);
-        vouch.vouched().then(|| (vouch, Self::cellwise(readings)))
-    }
-
     fn fold(readings: &[Option<CellReading>]) -> CellVouch {
         let (mut total, mut converged, mut diverged, mut aligned, mut read) =
             (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0usize);

@@ -527,7 +527,7 @@ fn field_refuses_without_evidence() {
 /// tone field moves. J* = local + 0.10 S then reads 0.1895 -> 0.1207 (ratio 0.64)
 /// while the local part the field answers for reads 0.0895 -> 0.0207 (0.23);
 /// before DEF-5 the core held only the well-supported pixels and S stayed under
-/// the cap. So the test asserts S unmoved and the local part closed by half.  Also the occupancy floor's falsifier, rewritten in
+/// the cap. The structural term left the objective on 2026-11-07; the test asserts the local part closed by half.  Also the occupancy floor's falsifier, rewritten in
 /// v1.18.0 to the law that replaced the policy zero: an unmeasured vertex
 /// ships the solve's own value (the smoother's continuation of its measured
 /// neighbours), because a zero written there is rendered as a measured "no
@@ -546,16 +546,10 @@ fn field_recovers_a_planted_two_band_exposure() {
         "the terms read are the solve's own ceiling and global ({with:?} / {without:?})"
     );
     assert!(
-        (with.structural - without.structural).abs() < 1e-3,
-        "a tone field does not move the structural term ({} -> {})",
-        without.structural,
-        with.structural
-    );
-    assert!(
-        with.local() < 0.5 * without.local(),
+        with.total() < 0.5 * without.total(),
         "the field must close most of a representable edit: local {} vs global {} (J* {} vs {})",
-        with.local(),
-        without.local(),
+        with.total(),
+        without.total(),
         field.ceiling,
         field.global,
     );
@@ -996,6 +990,19 @@ fn calibration_local_support_is_not_constant() {
 /// better (ceiling 0.0577 → 0.0553) and removing the band the refinement
 /// exists for. Below, the earlier provenance as it stood.
 ///
+/// RE-MEASURED 2026-11-06 (v1.18.0, the joint objective) on NumPy 2.3.5 /
+/// Python 3.13.3 (Windows 11), by the three documented steps below, after
+/// `scripts/field_check.py` was ported to b7630a5 (an unmeasured vertex
+/// ships the solve's own value — the script had still zeroed it, and the two
+/// grids disagreed by 0.547 at 2320 vertices) and 1320ee9 (the luma gate at
+/// the black end): `max |grid_rust - grid_numpy| = 4.5e-7`,
+/// `weight_max_abs_delta = 0.0`, NumPy ceiling 0.127520 against the Rust
+/// port's 0.127521 on a global figure of 0.245557, 42 iterations. What moved
+/// from 0.087511 is the INPUT: the global solve is the joint objective
+/// (RULING-1180-joint-r1/r2) and ships a different recipe on this pair, and
+/// the field's ceiling is a function of that render. Below, the earlier
+/// provenance as it stood.
+///
 /// RE-MEASURED 2026-08-31 (step 9) on NumPy 2.3.5 / Python 3.13.3
 /// (Windows 11), by the same three documented steps:
 ///   `cargo test --release -- --ignored export_calibration_field_inputs_for_numpy`
@@ -1014,7 +1021,7 @@ fn calibration_local_support_is_not_constant() {
 /// 0.070_022_5 before that (2026-08-27, before the mixer). The recon's
 /// published grid figures are NOT reusable here: they were measured on the
 /// RAW-path renders, a different baseline.
-const NUMPY_FIELD_CEILING_CALIBRATION: f32 = 0.087_511_0;
+const NUMPY_FIELD_CEILING_CALIBRATION: f32 = 0.127_520_6;
 /// The largest per-parameter disagreement between the two solvers over all
 /// 3072 vertices: measured 1.0e-5 in the 2026-11-04 J* run, 1.5e-6 in the 2026-11-03 preconditioned run, 6.6e-6 in the 2026-11-03 run before it, 1.0e-5 in the 2026-10-29 run, 6.0e-7 in the 2026-10-21 run (1.50e-5 at the 8-row
 /// grid in 2026-08), bounded here at a legible 1e-4.

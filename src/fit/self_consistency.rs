@@ -25,6 +25,61 @@
 use super::*;
 use crate::recipe::{CurvePoint, GradeStrength};
 
+/// One case of the validity prototype (design-control-validity-1180.md §5),
+/// written under `dir/tag/` as f32 little-endian arrays (`scripts/field_check.py`'s
+/// layout) and a `meta.json`: the base render (`source.bin`), the target
+/// (`target.bin`), the recipe without each class and the recipe's render
+/// (`without_tone.bin`, `without_wb.bin`, `without_chroma.bin`,
+/// `without_curves.bin`, `full.bin`: `joint::without_class` + the recipe
+/// itself), and the
+/// evidence the law reads — `source_weights`, `target_weights`,
+/// `source_presence_weights`, `spatial_weights` and `paired` (0/1) — plus the
+/// recipe as JSON. Pixels are `w × h` rows, three channels interleaved.
+pub(crate) fn dump_validity_probe(
+    dir: &std::path::Path,
+    tag: &str,
+    s_img: &DynamicImage,
+    base: &EditRecipe,
+    recipe: &EditRecipe,
+    tp: &[[f32; 3]],
+    evidence: &EvidenceModel,
+) {
+    let out = dir.join(tag);
+    std::fs::create_dir_all(&out).expect("create the validity probe directory");
+    let write = |name: &str, values: &[f32]| {
+        let mut bytes = Vec::with_capacity(values.len() * 4);
+        for v in values {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        std::fs::write(out.join(name), bytes).unwrap_or_else(|e| panic!("write {name}: {e}"));
+    };
+    let flat = |px: &[[f32; 3]]| px.iter().flatten().copied().collect::<Vec<f32>>();
+    let frame = |r: &EditRecipe| pixels_of(&render::develop_preview(s_img, r));
+    write("source.bin", &flat(&frame(base)));
+    write("target.bin", &flat(tp));
+    for (class, name) in super::joint::CLASSES.iter().zip(["without_tone", "without_wb", "without_chroma", "without_curves"]) {
+        write(&format!("{name}.bin"), &flat(&frame(&super::joint::without_class(base, recipe, *class))));
+    }
+    write("full.bin", &flat(&frame(recipe)));
+    write("source_weights.bin", &evidence.source_weights);
+    write("target_weights.bin", &evidence.target_weights);
+    write("source_presence_weights.bin", &evidence.source_presence_weights);
+    write("spatial_weights.bin", &evidence.spatial_weights);
+    write("paired.bin", &evidence.paired.iter().map(|&p| if p { 1.0 } else { 0.0 }).collect::<Vec<f32>>());
+    std::fs::write(out.join("recipe.json"), serde_json::to_vec_pretty(recipe).expect("recipe json")).expect("write recipe");
+    let meta = serde_json::json!({
+        "tag": tag,
+        "width": s_img.width(),
+        "height": s_img.height(),
+        "identifiability": evidence.identifiability,
+        "paired_share": evidence.paired.iter().filter(|&&p| p).count() as f32 / evidence.paired.len().max(1) as f32,
+        "globally_same_content": evidence.globally_same_content,
+        "strength_default": crate::recipe::GradeStrength::DEFAULT,
+    });
+    std::fs::write(out.join("meta.json"), serde_json::to_vec_pretty(&meta).expect("meta")).expect("write meta");
+    eprintln!("VALIDITY_DUMP {tag}: {} pixels to {}", tp.len(), out.display());
+}
+
 fn corpus_raw(name: &str) -> Option<std::path::PathBuf> {
     let dir = std::path::PathBuf::from(crate::config::live_env_os("AUTOSHADE_FIT_CALIBRATION_DIR")?);
     let raw = dir.join(name);
@@ -108,7 +163,7 @@ fn round_trip(raw: &std::path::Path, strength: f32, set: impl Fn(&mut EditRecipe
         FitOptions { strength: GradeStrength::new(strength), provider: None },
     );
     let analysis = report.err_after;
-    crate::pipeline::reread_at_full_size(&mut report, Some(raw), &src, &target, &base);
+    crate::pipeline::reread_at_full_size(&mut report, Some(raw), &src, &target, &base, crate::diag::silent());
     eprintln!(
         "TERMINAL {}: full-size residual {:.5}; analysis-size residual {analysis:.5} (commutation {:+.5})",
         raw.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -346,8 +401,130 @@ fn the_preview_of_a_finished_recipe_against_its_resampled_export() {
         let evidence = evidence_model_paired(&sp, &tp, presence_of(&t_img).as_deref(), s_img.width(), s_img.height());
         let t = look::look_terms(&pixels_of(&render::develop_preview(&s_img, &finished)), &tp, &evidence);
         eprintln!(
-            "COMMUTE {tag}: J* {:.6} (E_paired {:.5}, E_dist {:.5}, p {:.3}, H_ab {:.5}, S {:.5}) FIT_QUANT {FIT_QUANT}",
-            t.total(), t.paired, t.dist, t.share, t.hue, t.structural
+            "COMMUTE {tag}: J* {:.6} (E_paired {:.5}, E_dist {:.5}, p {:.3}) FIT_QUANT {FIT_QUANT}",
+            t.total(), t.paired, t.dist, t.share
+        );
+    }
+}
+
+/// The joint objective's reading of finished GLOBAL recipes on one pair
+/// (RULING-1180-joint-r1, the pricing of a curve by its free knots). For each
+/// line `tag|raw|target|recipe.json` of `AUTOSHADE_JOINT_LIST`, the recipe's
+/// global controls (masks and the colour field stripped) are rendered on the
+/// fit's plate and read by J* against the fit target as the solve reads them;
+/// dof and F = J* + FIT_QUANT · dof follow. Two finished recipes of one pair
+/// read side by side say whether the one with the lower J* also has the
+/// lower F — whether the search or the price chose between them. With
+/// `AUTOSHADE_JOINT_KEEP_LOCAL` set the recipe is read whole (masks and the
+/// colour field kept, rasters resolved beside the recipe): the finished
+/// frame on the one ruler.
+#[test]
+#[ignore = "measurement: prints J*, dof and F of finished global recipes; run with --ignored"]
+fn the_joint_objective_of_finished_global_recipes() {
+    let Some(list) = crate::config::live_env_os("AUTOSHADE_JOINT_LIST") else { return };
+    let text = std::fs::read_to_string(std::path::PathBuf::from(list)).expect("the list");
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let mut parts = line.splitn(4, '|');
+        let (tag, raw, target_path, recipe_path) =
+            (parts.next().unwrap(), parts.next().unwrap(), parts.next().unwrap(), parts.next().unwrap());
+        let raw = std::path::Path::new(raw);
+        let mut global: EditRecipe =
+            serde_json::from_str(&std::fs::read_to_string(recipe_path).expect("recipe")).expect("recipe json");
+        let keep_local = crate::config::live_env_os("AUTOSHADE_JOINT_KEEP_LOCAL").is_some();
+        if keep_local {
+            let dir = std::path::Path::new(recipe_path).parent().expect("recipe dir");
+            for mask in &mut global.masks {
+                for path in mask.bitmap_paths_mut() {
+                    let local = dir.join(path.as_str());
+                    if local.is_file() {
+                        *path = local.to_string_lossy().into_owned();
+                    }
+                }
+            }
+        } else {
+            global.masks.clear();
+            global.colour_field = None;
+        }
+        let (mut src, mut base) = crate::pipeline::fit_source(raw).expect("the fit source develops");
+        let target_img = image::open(target_path).expect("the target");
+        let target = crate::pipeline::fit_target(&mut src, Some(raw), &target_img, &mut base).expect("frame").image;
+        let (s_img, t_img) = analysis_pair(&src, &target);
+        let (sp, tp) = (pixels_of(&s_img), pixels_of(&t_img));
+        let evidence = evidence_model_paired(&sp, &tp, presence_of(&t_img).as_deref(), s_img.width(), s_img.height());
+        let law = render::WbLaw::of(&base);
+        let dof = super::joint::dof_of(&global, &base, law);
+        let bp = pixels_of(&render::develop_preview(&s_img, &base));
+        let t = look::look_terms(&pixels_of(&render::develop_preview(&s_img, &global)), &tp, &evidence);
+        let base_t = look::look_terms(&bp, &tp, &evidence);
+        eprintln!(
+            "JOINT {tag}{}: J* {:.6} dof {dof} F {:.6} (E_paired {:.5}, E_dist {:.5}, p {:.3}; base J* {:.6}) FIT_QUANT {FIT_QUANT}",
+            if keep_local { " (whole)" } else { " (global)" },
+            t.total(), t.total() + FIT_QUANT * dof as f32, t.paired, t.dist, t.share, base_t.total()
+        );
+        // The same render on the plain rulers: CIE76 per pixel, uniform or
+        // presence-weighted, as rendered or pooled at the sigma 2 px the
+        // objective read until 2026-11-07, and by fifths.
+        let (w, h) = (s_img.width() as usize, s_img.height() as usize);
+        let rp = pixels_of(&render::develop_preview(&s_img, &global));
+        // The joint descent's G on this recipe, read on both models the solve
+        // can carry (the structural one in Full mode, the structure-blind one
+        // in Atmosphere mode) and, as `Joint::refusal` reads it since
+        // 2026-11-09, each class between the recipe WITHOUT it and the
+        // recipe's render under the one validity law (`fit::validity`,
+        // `joint::without_class`).
+        let frame = |r: &EditRecipe| pixels_of(&render::develop_preview(&s_img, r));
+        let fpx = frame(&global);
+        let withouts: Vec<(super::joint::Refusal, EditRecipe)> =
+            super::joint::CLASSES.iter().map(|&c| (c, super::joint::without_class(&base, &global, c))).collect();
+        let without_px: Vec<Option<Vec<[f32; 3]>>> =
+            withouts.iter().map(|(_, w)| (*w != global).then(|| frame(w))).collect();
+        for (model, name) in [(&evidence, "structural"), (&evidence.structure_blind(&tp), "blind")] {
+            use super::validity::Cells;
+            let cells = Cells::new(&bp, &tp, model);
+            let lines: Vec<String> = withouts
+                .iter()
+                .zip(&without_px)
+                .map(|((class, _), before)| match before {
+                    Some(before) => cells.describe(class.class(), &cells.judge(class.class(), before, &fpx)),
+                    None => format!("{class:?}: unmoved"),
+                })
+                .collect();
+            eprintln!("GATE {tag} ({name}, {} cells): {}", cells.count(), lines.join(" | "));
+        }
+        if let Some(dump) = crate::config::live_env_os("AUTOSHADE_VALIDITY_DUMP") {
+            dump_validity_probe(&std::path::PathBuf::from(dump), tag, &s_img, &base, &global, &tp, &evidence);
+        }
+        let de_of = |a: &[[f32; 3]], b: &[[f32; 3]]| -> Vec<f32> {
+            a.iter()
+                .zip(b)
+                .map(|(x, y)| {
+                    let (x, y) = (super::pixels::cie_lab(x), super::pixels::cie_lab(y));
+                    ((x[0] - y[0]).powi(2) + (x[1] - y[1]).powi(2) + (x[2] - y[2]).powi(2)).sqrt()
+                })
+                .collect()
+        };
+        let de = de_of(&rp, &tp);
+        let pooled = de_of(
+            &super::structure::low_pass_pixels(&rp, w, h, 2.0),
+            &super::structure::low_pass_pixels(&tp, w, h, 2.0),
+        );
+        let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len().max(1) as f32;
+        let wmean = |v: &[f32]| {
+            let (mut s, mut m) = (0.0f64, 0.0f64);
+            for (i, d) in v.iter().enumerate() {
+                let wi = evidence.source_presence_weights.get(i).copied().unwrap_or(0.0).max(0.0) as f64;
+                s += wi * *d as f64;
+                m += wi;
+            }
+            (s / m.max(1e-9)) as f32
+        };
+        let fifths: Vec<String> = (0..5)
+            .map(|k| format!("{:.2}", mean(&de[(h * k / 5) * w..(h * (k + 1) / 5) * w])))
+            .collect();
+        eprintln!(
+            "DE76 {tag}{}: uniform {:.3} weighted {:.3} pooled-uniform {:.3} pooled-weighted {:.3} fifths {} (plate {w}x{h})",
+            if keep_local { " (whole)" } else { " (global)" },
+            mean(&de), wmean(&de), mean(&pooled), wmean(&pooled), fifths.join("/")
         );
     }
 }

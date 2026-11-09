@@ -3770,6 +3770,10 @@ impl AutoShadeApp {
                     let mut fit_base = fit_base;
                     let fitted_target =
                         autoshade::pipeline::fit_target(&mut plate, raw_source, &target, &mut fit_base)?;
+                    // The file the terminal full-size reading renders: the
+                    // master when one was named, else the source, RAW or
+                    // baked alike (review D D-5).
+                    let reread_source = negative.as_deref().or(src_path.as_deref());
                     let base = plate.shared();
                     let fit_target = &fitted_target.image;
                     // ONE judge call site for both orderings (R23-6): the
@@ -3872,7 +3876,7 @@ impl AutoShadeApp {
                     // when it claimed nothing at all.
                     let (mut rep, _first_claim) = run_zoned(zoned)?;
                     autoshade::pipeline::note_target_geometry(&mut rep, fitted_target.geometry);
-                    autoshade::pipeline::reread_at_full_size(&mut rep, raw_source, &plate, fit_target, &fit_base);
+                    autoshade::pipeline::reread_at_full_size(&mut rep, reread_source, &plate, fit_target, &fit_base, autoshade::diag::silent());
                     // FACTS, not prose (L12#4): the landing renders these
                     // with the language live when the result LANDS — the old
                     // trf calls here used the language captured at spawn,
@@ -3928,7 +3932,7 @@ impl AutoShadeApp {
                                     // hand is already a valid result.
                                     FitAction::Zoned => run_zoned(true).ok().map(|(mut r, claim)| {
                                         autoshade::pipeline::note_target_geometry(&mut r, fitted_target.geometry);
-                                        autoshade::pipeline::reread_at_full_size(&mut r, raw_source, &plate, fit_target, &fit_base);
+                                        autoshade::pipeline::reread_at_full_size(&mut r, reread_source, &plate, fit_target, &fit_base, autoshade::diag::silent());
                                         (r, claim)
                                     }),
                                     FitAction::Saturation(d) => {
@@ -3948,17 +3952,18 @@ impl AutoShadeApp {
                                             // statement about the recipe, and
                                             // this recipe is not the one the
                                             // solver reported on.
-                                            (
-                                                autoshade::fit::rescore_report(
-                                                    &base,
-                                                    fit_target,
-                                                    &r,
-                                                    &fit_base,
-                                                    rep.err_before,
-                                                    &rep.notes,
-                                                ),
-                                                None,
-                                            )
+                                            let mut cand = autoshade::fit::rescore_report(
+                                                &base,
+                                                fit_target,
+                                                &r,
+                                                &fit_base,
+                                                rep.err_before,
+                                                &rep.notes,
+                                            );
+                                            // The same terminal reading the
+                                            // plain solve took (review D D-4).
+                                            autoshade::pipeline::reread_at_full_size(&mut cand, reread_source, &plate, fit_target, &fit_base, autoshade::diag::silent());
+                                            (cand, None)
                                         })
                                     }
                                     FitAction::None => None,
@@ -4046,8 +4051,12 @@ impl AutoShadeApp {
                     // R23-6 A-3: the terminal do-no-harm reset is "the
                     // reverse-fit did nothing", and a line inside a rationale
                     // block is not where a user finds that out.
-                    if rep.notes.iter().any(|n| n.key == autoshade::rationale::keys::FIT_NOTE_REGRESSED)
-                    {
+                    // …and the terminal full-size reading's reset is the same
+                    // outcome by another route (review D D-3).
+                    if rep.notes.iter().any(|n| {
+                        n.key == autoshade::rationale::keys::FIT_NOTE_REGRESSED
+                            || n.key == autoshade::rationale::keys::FIT_TERMINAL_FULL_SIZE_BASE
+                    }) {
                         status.push(FitNote::FitReset);
                     }
                     if rep

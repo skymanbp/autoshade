@@ -185,8 +185,7 @@ fn fit_recipe_zoned_inner_seeded(
                     true,
                     options,
                 );
-                let pairing = sky_land_pairing(&report, &zone_divergence, &src_mask);
-                local_verdicts(src, target, base, &mut report, &pairing);
+                local_verdicts(src, target, base, &mut report);
                 for (label, kept, reading) in readings {
                     crate::rationale::push_note(
                         &mut report.recipe.rationale,
@@ -242,8 +241,7 @@ fn fit_recipe_zoned_inner_seeded(
                 true,
                 options,
             );
-            let pairing = sky_land_pairing(&report, &zone_divergence, &src_mask);
-            local_verdicts(src, target, base, &mut report, &pairing);
+            local_verdicts(src, target, base, &mut report);
             let field = layers.field
                 .then(|| field::solve_local_field(src, target, &mut report)).flatten();
             let partitioned = attach_zones_with_divergence(
@@ -275,7 +273,7 @@ fn fit_recipe_zoned_inner_seeded(
                 true,
                 options,
             );
-            local_verdicts(src, target, base, &mut report, &ZonePairing::default());
+            local_verdicts(src, target, base, &mut report);
             crate::rationale::push_note(
                 &mut report.recipe.rationale,
                 &mut report.notes,
@@ -512,11 +510,7 @@ fn fit_recipe_zoned_multi_inner(
         let divergent_cover = divergences.iter().filter(|d| d.divergence.is_some_and(|r| r.d >= fit::DIVERGENCE_ZONE)).map(|d| d.share).sum::<f32>();
         let mut report = fit::fit_recipe_from_promoted_with_disclosure_opts(src, target, base,
             divergent_cover >= fit::DIVERGENT_COVER_PROMOTES, true, options);
-        let (aw, ah) = (report.evidence.width, report.evidence.height);
-        let pairing = zone_pairing(
-            divergences.iter().zip(regions.iter().map(|r| mask_weights(&r.source, aw, ah))),
-        );
-        local_verdicts(src, target, base, &mut report, &pairing);
+        local_verdicts(src, target, base, &mut report);
         // The same disclosure the sky/land route makes for ITS refinement.
         push_refinement_notes(&mut report, &refinements);
         push_matte_notes(&mut report, &mattes);
@@ -559,9 +553,10 @@ fn fit_recipe_zoned_multi_inner(
     };
     // One ruler for the comparison. Each report's `err_after` was measured
     // under ITS OWN evidence model, and the two global solves can land in
-    // different modes — a Full ruler is structural, an Atmosphere ruler
-    // structure-blind — so those numbers are not comparable across reports.
-    // Both finished renders are re-measured under the reference's ruler, and
+    // different modes — a Full model is structural, an Atmosphere model
+    // structure-blind in its estimation weights (the pairing is the same
+    // since 2026-11-07) — so the stated numbers come from one reading: both
+    // finished renders are re-measured under the reference's ruler, and
     // those are the numbers the refusal discloses.
     let multi_error = frame_err_under(src, target, &report, &two.evidence);
     let two_error = frame_err_under(src, target, &two, &two.evidence);
@@ -669,110 +664,24 @@ pub(super) fn release_unselected_rasters(
     }
 }
 
-/// S-MODE at the zoned fit's entry ([`fit::EvidenceModel::local`]): every
-/// verdict after the global solve judges a LOCAL correction (zone, tile,
-/// band, field, tint), and a local correction's do-no-harm reads
-/// `E_paired + H_ab` — the structural term is read where the question is
-/// structure (mode and evidence, the D thresholds, the comparisons of two
-/// different global solves), a local correction cannot change which pixels
-/// pair, its seams stay with the boundary / ramp rulers, and its structural
-/// gate is the existing D threshold only. The report's two numbers are
-/// re-read on that ruler here, so every comparison the local stages make is
-/// between two readings of ONE ruler, and the zoned report's `err_before` ->
-/// `err_after` is the local reading at both ends.
-///
-/// R2 (v1.18.0): pairing is decided by the FINEST mode that was read, BOTH
-/// ways. The frame ruler's paired population is the frame-paired pixels
-/// outside every Atmosphere zone, together with the pixels of every Full zone
-/// where that zone's own structural model pairs them: an Atmosphere zone's
-/// pixels never pair, even in a Full frame (Atmosphere is the claim that the
-/// zone's structure was replaced, so its pixels have no index counterpart and
-/// are read by `E_dist`), and a Full zone's pixels pair by its own model, even
-/// in an Atmosphere frame (the zone's own D says its structure held, so the
-/// frame-pooled distribution is not its referee). A zone's mode is its own
-/// D against [`fit::DIVERGENCE_ZONE`]; a zone whose D abstained made no claim
-/// and leaves its pixels to the frame. "Containing" is membership above one
-/// half — the pixel belongs more to the zone than to its complement (the
-/// free-mask carrier's half-alpha rule). Both frame rulers the local layers
-/// read (the report's and the structural one Full zones scope inside an
-/// Atmosphere frame) carry the same population and the S-mode flag.
-#[derive(Default)]
-struct ZonePairing {
-    /// SOURCE soft memberships, on the analysis raster, of the zones whose
-    /// own reading is Atmosphere.
-    atmosphere: Vec<Vec<f32>>,
-    /// The same for the zones whose own reading is Full.
-    full: Vec<Vec<f32>>,
-}
-
-fn zone_pairing<'a>(zones: impl IntoIterator<Item = (&'a ZoneDivergence, Vec<f32>)>) -> ZonePairing {
-    let mut pairing = ZonePairing::default();
-    for (zone, weights) in zones {
-        match zone.divergence {
-            Some(d) if d.d >= fit::DIVERGENCE_ZONE => pairing.atmosphere.push(weights),
-            Some(_) => pairing.full.push(weights),
-            None => {}
-        }
-    }
-    pairing
-}
-
-/// Apply [`ZonePairing`] to one ruler. `own` is what a Full zone's own
-/// structural model pairs: the structural model's pairing (the spatially
-/// supported pixels), which is the frame's own when the frame is Full.
-fn pair_by_finest_mode(evidence: &mut fit::EvidenceModel, own: &[bool], zones: &ZonePairing) {
-    for zone in &zones.full {
-        for ((pairs, member), own) in evidence.paired.iter_mut().zip(zone).zip(own) {
-            if *member > 0.5 {
-                *pairs = *own;
-            }
-        }
-    }
-    for zone in &zones.atmosphere {
-        for (pairs, member) in evidence.paired.iter_mut().zip(zone) {
-            if *member > 0.5 {
-                *pairs = false;
-            }
-        }
-    }
-}
-
-/// The sky and land zones' pairing: the sky's source mask and its
-/// complement, as [`measure_zone_divergence`] read them.
-fn sky_land_pairing(report: &FitReport, zones: &attach::ZoneDivergences, src_mask: &GrayImage) -> ZonePairing {
-    let sky = mask_weights(src_mask, report.evidence.width, report.evidence.height);
-    let land = sky.iter().map(|v| 1.0 - v).collect();
-    zone_pairing([(&zones.sky, sky), (&zones.land, land)])
-}
-
-/// S-MODE: from here on the report's verdicts are a local correction's —
-/// `E_paired + H_ab` (`LookTerms::local`) on its model and on its structural
-/// model. The one switch: the pipeline's routes take it in [`local_verdicts`]
-/// before any zone, and a test that drives a zone stage on a report it built
-/// takes it the same way (`tests::neutral_report`, `tests::zone_stage_report`),
-/// so a fixture reads the law the pipeline reads (RULING-1180-int-r7
-/// Q-int6-2).
-pub(super) fn read_locally(report: &mut FitReport) {
-    report.evidence.local = true;
-    if let Some(structural) = report.structural_evidence.as_mut() {
-        structural.local = true;
-    }
-}
-
+/// The report's two numbers re-read at the zoned fit's entry, on the one
+/// ruler every local verdict reads: `fit::look_err_with_evidence` on the
+/// report's evidence model, at the analysis geometry. A local correction
+/// cannot change which pixels pair — pairing is the evidence model's one
+/// reading (`fit::EvidenceModel::paired`: present and spatially supported),
+/// and since 2026-11-07 neither the frame's mode nor a zone's own mode
+/// overrides it (R2's re-pairing by the finest mode read is retired: an
+/// Atmosphere zone's pixels were emptied of pairing and scored as a
+/// distribution, which on p41 read the sky correction the per-pixel ruler
+/// wanted as harm and dropped it; the terminal re-read and the floor never
+/// read that ruler). Seams stay with the boundary / ramp rulers; the
+/// structural gate is the D threshold only.
 fn local_verdicts(
     src: &DynamicImage,
     target: &DynamicImage,
     base: &crate::recipe::EditRecipe,
     report: &mut FitReport,
-    zones: &ZonePairing,
 ) {
-    // R2: the Full zones' own model, read BEFORE either ruler is re-paired.
-    let own = report.structural_evidence.as_ref().unwrap_or(&report.evidence).paired.clone();
-    read_locally(report);
-    pair_by_finest_mode(&mut report.evidence, &own, zones);
-    if let Some(structural) = report.structural_evidence.as_mut() {
-        pair_by_finest_mode(structural, &own, zones);
-    }
     let (s_img, t_img) = fit::analysis_pair(src, target);
     let tgt_px = fit::pixels_of(&t_img);
     let read = |recipe: &crate::recipe::EditRecipe| {
@@ -783,22 +692,9 @@ fn local_verdicts(
     report.err_after = after;
 }
 
-/// Test-only: [`local_verdicts`] as the two-region route calls it, for a test
-/// that rebuilds that route (`layered_disabled_is_byte_identical_to_current_zoned_fit`).
-#[cfg(test)]
-pub(super) fn local_verdicts_sky_land(
-    src: &DynamicImage,
-    target: &DynamicImage,
-    base: &crate::recipe::EditRecipe,
-    report: &mut FitReport,
-    zones: &attach::ZoneDivergences,
-    src_mask: &GrayImage,
-) {
-    let pairing = sky_land_pairing(report, zones, src_mask);
-    local_verdicts(src, target, base, report, &pairing);
-}
-
-/// Test-only: [`local_verdicts`] as the segmentation-failed route calls it.
+/// Test-only: [`local_verdicts`] as every route calls it (the two-region
+/// route and the segmentation-failed one alike, since the entry re-pairs
+/// nothing), for the tests that rebuild those routes.
 #[cfg(test)]
 pub(super) fn local_verdicts_unzoned(
     src: &DynamicImage,
@@ -806,7 +702,7 @@ pub(super) fn local_verdicts_unzoned(
     base: &crate::recipe::EditRecipe,
     report: &mut FitReport,
 ) {
-    local_verdicts(src, target, base, report, &ZonePairing::default());
+    local_verdicts(src, target, base, report);
 }
 
 /// A report's finished render measured under a GIVEN evidence ruler — the

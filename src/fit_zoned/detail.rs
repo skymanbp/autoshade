@@ -595,11 +595,10 @@ pub(super) fn attach_zone_detail(
             // (`ZONE_GLOBAL_REGRESSION_TOL`, 0.02), which is twice a finished
             // frame's error: a zone's clarity could leave the fit worse than
             // its own start and still ship.
-            // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
-            // E_paired + H_ab (`report.evidence.local`): S is read where the question
-            // is structure, a local correction cannot change which pixels pair, its
-            // seams stay with the boundary / ramp rulers and its structural gate is
-            // the existing D threshold only.
+            // A LOCAL correction's do-no-harm reads the one objective as the frame
+            // does (2026-11-07: hue and structure are gates, not terms); its seams
+            // stay with the boundary / ramp rulers and its structural gate is the
+            // existing D threshold only.
             if frame_after > frame_before + fit::FIT_QUANT {
                 return Err(DetailRefusal::Frame);
             }

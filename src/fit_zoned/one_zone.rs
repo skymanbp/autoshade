@@ -298,20 +298,24 @@ pub(super) fn attach_one_zone_as(
         );
         return None;
     }
-    // Already-matched zone: attempting a fit would be dialling noise — the
-    // observed attempts regress (land 0.009 → 0.029 on the live pair), and
-    // the old outcome message ("dropped: needs ≤ 50%") read as a discarded
-    // improvement. Say what is true instead: there is nothing to correct.
-    // The EV companion keeps the linear-light skip line honest in dark
-    // zones (see [`ZONE_MATCHED_EV`]).
-    let ev_gap = (mt.luma_lin.max(1e-6) / ms.luma_lin.max(1e-6)).log2().abs();
-    if zone_skips(zone_before, ev_gap) {
+    // Already-matched zone, in the law's own unit (RULING-1180-joint-r2 §3):
+    // a correction ships when it earns FIT_QUANT on the zone's own pixels
+    // (`fit::ships_local`), so a zone whose own reading is already under the
+    // quantum has nothing a correction could earn, and attempting one would
+    // be dialling noise (the observed attempts regressed: land 0.009 → 0.029
+    // on the live pair, and the old outcome line "dropped: needs ≤ 50%" read
+    // as a discarded improvement). Say what is true instead: there is
+    // nothing to correct. Until v1.18.0 this read the linear-light moments
+    // against an observed matched domain (0.012 with a quarter-stop EV
+    // companion), a second ruler over the one that ships.
+    let own_before = super::accept::own_reading(report, &cur_px, tgt_px, sw, tw);
+    if own_before < fit::FIT_QUANT {
         crate::rationale::push_note(
             &mut report.recipe.rationale,
             &mut report.notes,
             crate::rationale::Note::new(
                 crate::rationale::keys::ZONE_ALREADY_MATCHED,
-                vec![("label", label.to_string()), ("before", format!("{zone_before:.3}"))],
+                vec![("label", label.to_string()), ("before", format!("{own_before:.5}"))],
             ),
         );
         return None;
@@ -440,7 +444,7 @@ pub(super) fn attach_one_zone_as(
             let spread = |cdf: &[f32]| fit::quantile(cdf, 0.9) - fit::quantile(cdf, 0.1);
             let population = (points.len() >= 6)
                 .then(|| (zone_luma_cdf(&rp, sw), zone_luma_cdf(tgt_eff, tw)));
-            let diluted = population
+            let spreads = population
                 .as_ref()
                 .map(|(_, t_pop)| {
                     let mapped: Vec<[f32; 3]> = rp
@@ -451,11 +455,35 @@ pub(super) fn attach_one_zone_as(
                         })
                         .collect();
                     (spread(&zone_luma_cdf(&mapped, sw)), spread(t_pop))
-                })
-                .filter(|&(mapped, target)| {
-                    mapped < super::limits::ZONE_PAIRED_SPREAD_FLOOR * target
                 });
+            let diluted = spreads.filter(|&(mapped, target)| {
+                mapped < super::limits::ZONE_PAIRED_SPREAD_FLOOR * target
+            });
             diluted_spread = diluted;
+            // ZONE DUMP (2026-11-08): what this guard read, for the NumPy
+            // prototype of the reliability-weighted ruler (RULING-1180-joint-r2,
+            // addendum 2026-11-08 22:30). Off unless `AUTOSHADE_ZONE_DUMP`
+            // names a directory.
+            if let Some(dir) = crate::config::live_env_os("AUTOSHADE_ZONE_DUMP") {
+                super::zone_dump::write(
+                    std::path::Path::new(&dir),
+                    &super::zone_dump::ZoneDump {
+                        label,
+                        d: divergence.map(|d| d.d),
+                        width: s_img.width(),
+                        height: s_img.height(),
+                        source: &rp,
+                        target: tgt_eff,
+                        sw,
+                        tw,
+                        zw_source: &zw_source,
+                        zw_target: &zw_target,
+                        refit: refit.as_ref(),
+                        spreads,
+                        fired: diluted.is_some(),
+                    },
+                );
+            }
             let points = if diluted.is_some() { Vec::new() } else { points };
             // Fired: the transport maps population onto population, and the
             // knots read their support there too — on the trimmed target the
@@ -1039,26 +1067,6 @@ pub(super) fn attach_one_zone_as(
         };
         crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes, note);
     }
-    // The skip line, re-asked of the class that can still move: with colour
-    // withheld the acceptance below judges the luma-only residual, so a zone
-    // already matched THERE is left alone with the honest note instead of
-    // being dialled for a hairline tone gain against a chroma gap it may not
-    // touch (the calibration land: luma 0.004, chroma-dominated 0.045).
-    if colour_withheld && !tone_withheld {
-        let luma_before = zone_luma_err(&ms, &mt);
-        if zone_skips(luma_before, ev_gap) {
-            report.recipe.masks.pop();
-            crate::rationale::push_note(
-                &mut report.recipe.rationale,
-                &mut report.notes,
-                crate::rationale::Note::new(
-                    crate::rationale::keys::ZONE_ALREADY_MATCHED,
-                    vec![("label", label.to_string()), ("before", format!("{luma_before:.3}"))],
-                ),
-            );
-            return None;
-        }
-    }
     if colour_withheld && !tone_withheld {
         let original = {
             let m = report.recipe.masks.last().expect("zone mask just pushed");
@@ -1192,15 +1200,22 @@ pub(super) fn attach_one_zone_as(
     // land the upper band's own J* read 0.15212 -> 0.12528 (11.7 FIT_QUANT)
     // with the frame improving, and the moments arm refused it (its tone-only
     // luma residual 0.024 -> 0.019 neither halved nor landed).
-    // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
-    // E_paired + H_ab (`report.evidence.local`): S is read where the question
-    // is structure, a local correction cannot change which pixels pair, its
-    // seams stay with the boundary / ramp rulers and its structural gate is
-    // the existing D threshold only.
+    // A LOCAL correction's do-no-harm reads the one objective as the frame
+    // does (2026-11-07: hue and structure are gates, not terms); its seams
+    // stay with the boundary / ramp rulers and its structural gate is the
+    // existing D threshold only.
     // R19: ON ITS OWN POPULATION (`fit::ships_local`): the zone ships when it
     // earns FIT_QUANT on its own present pixels; the frame is a guard.
     let own_before = super::accept::own_reading(report, &cur_px, tgt_px, sw, tw);
     let own_after = super::accept::own_reading(report, &zoned_px, tgt_px, sw, tw);
+    if crate::config::live_env_os("AUTOSHADE_FIT_TRACE").is_some() {
+        let scoped = report.evidence.scoped(tgt_px, sw, tw);
+        eprintln!(
+            "zone {label} own terms: before {:?} after {:?}; zone residual {zone_before:.5} -> {zone_after:.5}",
+            fit::look_terms(&cur_px, tgt_px, &scoped),
+            fit::look_terms(&zoned_px, tgt_px, &scoped)
+        );
+    }
     // An Atmosphere zone is the claim that the target's structure was
     // replaced: its colour and tone are judged without the structure, so the
     // one thing it may never do is leave its own pixels worse than it found
@@ -1242,7 +1257,6 @@ pub(super) fn attach_one_zone_as(
             before: zone_before,
             after: zone_after,
             rendered: zoned_px,
-            judged_before: own_before,
             own_weights: (sw.to_vec(), tw.to_vec()),
         })
     } else {

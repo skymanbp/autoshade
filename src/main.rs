@@ -1828,7 +1828,7 @@ fn match_cmd(
         })
         .map(|mut r| {
             pipeline::note_target_geometry(&mut r, fitted_target.geometry);
-            pipeline::reread_at_full_size(&mut r, decode::is_raw(raw).then_some(raw), &src, fit_tgt, &fit_base);
+            pipeline::reread_at_full_size(&mut r, Some(raw), &src, fit_tgt, &fit_base, autoshade::diag::stderr());
             r
         })
     };
@@ -1909,10 +1909,13 @@ fn match_cmd(
                         // GUI's deep block (R23 review MED-3): a cloned note
                         // set describes the settings the recipe had BEFORE the
                         // step, and this one is persisted into recipe.json.
-                        (r.saturation != rep.recipe.saturation)
-                            .then(|| {
-                                fit::rescore_report(&src, fit_tgt, &r, &fit_base, rep.err_before, &rep.notes)
-                            })
+                        (r.saturation != rep.recipe.saturation).then(|| {
+                            let mut cand = fit::rescore_report(&src, fit_tgt, &r, &fit_base, rep.err_before, &rep.notes);
+                            // The candidate takes the same terminal reading
+                            // the plain solve took (review D D-4).
+                            pipeline::reread_at_full_size(&mut cand, Some(raw), &src, fit_tgt, &fit_base, autoshade::diag::stderr());
+                            cand
+                        })
                     }
                     autoshade::advisor::FitAction::None => None,
                 };
@@ -1943,10 +1946,12 @@ fn match_cmd(
                                 "  deep: the retry re-scored {:.0}/100 (lower) — discarded",
                                 second.score
                             );
+                            pipeline::discard_rasters(&cand.recipe, &rep.recipe);
                             Some(Ok(first))
                         }
                         Err(e) => {
                             eprintln!("  ⚠ deep: the retry could not be re-judged ({e:#}) — discarded");
+                            pipeline::discard_rasters(&cand.recipe, &rep.recipe);
                             Some(Ok(first))
                         }
                     },

@@ -204,14 +204,15 @@ fn modelled(px: &[[f32; 3]], cg: &crate::recipe::ColorGrade) -> Vec<[f32; 3]> {
 /// 40000 K clamp and turned the sky yellow. That remainder is what the
 /// colour-grade wheels are for: one hue and one strength per tonal region.
 ///
-/// A SPLIT TONE IS NOT A FAN. The cast curves' fan gate ([`FAN_DEG`])
+/// A SPLIT TONE IS NOT A FAN. The one validity law (`fit::validity`)
 /// refuses a cast that sorts one hue class into a spread of hues by
-/// luminance, because a per-channel curve does that as an artefact of its
-/// own shape and no single control can take it back. A grade looks alike in
-/// kind — hue by luminance — and is admitted here on different evidence:
+/// luminance — each brightness range of that class is a cell left farther
+/// from its own ask — because a per-channel curve does that as an artefact
+/// of its own shape and no single control can take it back. A grade looks
+/// alike in kind — hue by luminance — and is admitted on different evidence:
 /// each wheel is solved from the paired pixels of ITS tonal region only, so
 /// it moves a region the way that region's own pixels testify, and it is
-/// one develop control per region a user can read and undo. The fan gate
+/// one develop control per region a user can read and undo. The law
 /// still judges the cast curves after this stage, on the frame this stage
 /// leaves.
 ///
@@ -237,15 +238,10 @@ fn modelled(px: &[[f32; 3]], cg: &crate::recipe::ColorGrade) -> Vec<[f32; 3]> {
 /// grade moved about as far at Strength 0 as at 1 (shadows 30.0 / 29.1,
 /// midtones 21.6 / 16.5 at 0 / 1; 2026-11-02).
 ///
-/// Judged the way the white balance is: the target's own cells must vouch
-/// the move along the colour axis (`vouch_along`,
-/// [`crate::fit_cells::MoveAxis::Colour`]; an abstention admits nothing),
-/// and a refusal on SIZE in a direction the cells agree with ships the
-/// largest share they vouch, by the white balance's own search
-/// ([`WB_VOUCH_SHRINK_STEPS`], [`WB_SHARE_SIZE_EVIDENCE`]); anything else is
-/// given back. The pipeline-end do-no-harm loop judges the whole
-/// recipe after it, as it judges every stage. The disclosure reads the
-/// shipped wheels off the recipe (`compose_report`); this returns
+/// What ships of it is the joint objective's question (RULING-1180-joint-r1):
+/// the validity law reads the chroma dials on the cells they move, and each
+/// wheel is judged against its absence on F. The
+/// disclosure reads the shipped wheels off the recipe (`compose_report`); this returns
 /// `Some((ceiling, asked))` when a wheel that shipped was held at the
 /// strength ceiling, `asked` being the largest Saturation the paired pixels
 /// asked for, so the report can say the dial restrained the stage.
@@ -253,7 +249,6 @@ pub(super) fn fit_grade_stage(
     s_img: &DynamicImage,
     tp: &[[f32; 3]],
     weights: &[f32],
-    cells: Option<&crate::fit_cells::PairedCells>,
     wheel_ceiling: f32,
     recipe: &mut EditRecipe,
 ) -> Option<(f32, f32)> {
@@ -317,58 +312,9 @@ pub(super) fn fit_grade_stage(
         slot.1 = slot.1.min(ceiling);
     }
     let held = (asked > 0.0).then_some((ceiling, asked));
-    let apply = |cg: &mut crate::recipe::ColorGrade, wheels: &[(f32, f32); 3], share: f32| {
-        (cg.shadow_hue, cg.shadow_sat) = (wheels[0].0, round1(wheels[0].1 * share));
-        (cg.midtone_hue, cg.midtone_sat) = (wheels[1].0, round1(wheels[1].1 * share));
-        (cg.highlight_hue, cg.highlight_sat) = (wheels[2].0, round1(wheels[2].1 * share));
-    };
-    let vouch_at = |recipe: &mut EditRecipe, share: f32| {
-        apply(&mut recipe.color_grade, &scaled, share);
-        let px = pixels_of(&render::develop_preview(s_img, recipe));
-        cells.map(|c| c.vouch_along(crate::fit_cells::MoveAxis::Colour, &before, &px, None))
-    };
-    let full = vouch_at(recipe, 1.0);
-    if let Some(share) = largest_vouched_share(full, |share| vouch_at(recipe, share)) {
-        apply(&mut recipe.color_grade, &scaled, share);
-        // Held only if a held wheel still ships AT the ceiling: a share the
-        // cells cut below it was restrained by the cells, not by the dial.
-        return held.filter(|&(c, _)| {
-            let cg = &recipe.color_grade;
-            [cg.shadow_sat, cg.midtone_sat, cg.highlight_sat].iter().any(|&s| s >= round1(c) - 0.05)
-        });
-    }
-    recipe.color_grade = restore;
-    None
-}
-
-/// The share of a colour move the target's cells vouch, given their verdict
-/// `full` on the whole move and `vouch_at`, which renders a share and asks
-/// them again: the whole move when they vouch it; otherwise the white
-/// balance's own R36 search — a refusal on SIZE in a direction the cells
-/// agree with ships the largest share they vouch, provided the cells that
-/// diverged at the full move mostly stop ([`WB_SHARE_SIZE_EVIDENCE`]);
-/// `None` when they refuse the direction, or no share earns it. One search,
-/// read by the colour grade and by the mixer's band hues.
-pub(super) fn largest_vouched_share(
-    full: Option<crate::fit_cells::CellVouch>,
-    mut vouch_at: impl FnMut(f32) -> Option<crate::fit_cells::CellVouch>,
-) -> Option<f32> {
-    match full {
-        Some(v) if v.vouched() => Some(1.0),
-        Some(v) if v.direction_agrees() => {
-            let (mut lo, mut hi, mut best) = (0.0f32, 1.0f32, None);
-            for _ in 0..WB_VOUCH_SHRINK_STEPS {
-                let mid = 0.5 * (lo + hi);
-                match vouch_at(mid) {
-                    Some(at) if at.vouched() && at.diverged <= v.diverged * WB_SHARE_SIZE_EVIDENCE => {
-                        best = Some(mid);
-                        lo = mid;
-                    }
-                    _ => hi = mid,
-                }
-            }
-            best
-        }
-        _ => None,
-    }
+    let cg = &mut recipe.color_grade;
+    (cg.shadow_hue, cg.shadow_sat) = (scaled[0].0, round1(scaled[0].1));
+    (cg.midtone_hue, cg.midtone_sat) = (scaled[1].0, round1(scaled[1].1));
+    (cg.highlight_hue, cg.highlight_sat) = (scaled[2].0, round1(scaled[2].1));
+    held
 }

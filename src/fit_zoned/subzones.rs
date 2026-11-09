@@ -921,11 +921,10 @@ fn replace_zone_with(
         // those pixels with the single zone (before) and with the bands (after).
         let own_before = super::accept::own_reading(report, &single_px, target, &parent.source_weights, &parent.target_weights);
         let own_after = super::accept::own_reading(report, &pixels, target, &parent.source_weights, &parent.target_weights);
-        // S-MODE (v1.18.0): this is a LOCAL correction's do-no-harm, so it reads
-        // E_paired + H_ab (`report.evidence.local`): S is read where the question
-        // is structure, a local correction cannot change which pixels pair, its
-        // seams stay with the boundary / ramp rulers and its structural gate is
-        // the existing D threshold only.
+        // A LOCAL correction's do-no-harm reads the one objective as the frame
+        // does (2026-11-07: hue and structure are gates, not terms); its seams
+        // stay with the boundary / ramp rulers and its structural gate is the
+        // existing D threshold only.
         let frame_after = fit::look_err_with_evidence(&pixels, target, &report.evidence);
         let reason = if !solved { values::BAND_ESTIMATOR }
             else if !boundary_passed { values::BOUNDARY_BUDGET }

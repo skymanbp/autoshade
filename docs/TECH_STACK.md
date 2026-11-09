@@ -396,21 +396,22 @@ look below included.
 The global reverse-fit derives one `FitBudget` from `GradeStrength` and
 interpolates linearly between these pinned points:
 
-| Strength | EV | Saturation | Per-band HSL | Grade wheel | WB gain | WB ratio | WB rotation share | Full cast ratio | Curve slope | Confidence cap | Veto |
-|---|---:|---:|---:|---:|---|---:|---:|---:|---|---:|---|
-| 0.00 | +/-0.5 | +/-15 | +/-6 | 6 | 0.90..1.12 | 1.20 | 0.05 | 1.50 | 0.7..1.3 | 0.50 | withhold |
-| 0.65 | +/-1.0 | +/-30 | +/-18 | 18 | 0.80..1.25 | 1.40 | 0.05 | 2.00 | 0.5..1.5 | 0.50 | withhold |
-| 0.85 | interpolated | interpolated | interpolated | interpolated | interpolated | interpolated | 0.593 | interpolated | interpolated | interpolated | disclose |
-| 1.00 | +/-2.5 | +/-60 | +/-45 | 45 | 0.50..2.00 | 3.00 | 1.00 | 3.00 | 0.25..3.0 | 0.35 | disclose |
+| Strength | EV | Saturation | Per-band HSL | Grade wheel | WB gain | WB ratio | Curve slope | Confidence cap | Veto |
+|---|---:|---:|---:|---:|---|---:|---|---:|---|
+| 0.00 | +/-0.5 | +/-15 | +/-6 | 6 | 0.90..1.12 | 1.20 | 0.7..1.3 | 0.50 | withhold |
+| 0.65 | +/-1.0 | +/-30 | +/-18 | 18 | 0.80..1.25 | 1.40 | 0.5..1.5 | 0.50 | withhold |
+| 0.85 | interpolated | interpolated | interpolated | interpolated | interpolated | interpolated | interpolated | interpolated | disclose |
+| 1.00 | +/-2.5 | +/-60 | +/-45 | 45 | 0.50..2.00 | 3.00 | 0.25..3.0 | 0.35 | disclose |
 
 The default-strength exception is deliberate: at or below 0.65 an out-of-budget
 WB request remains as-shot, byte-identical to the pre-F1 path. Above default,
 the request shrinks toward as-shot along the fitted move (log-space Kelvin,
 linear tint), rounds exactly once as a legal renderer WB, and is disclosed when
-clamped. Its pre/post renders pass the foreign-hue veto and the weighted
-rotation allowance; a failure returns the WB to as-shot with a typed note. WB
-gain ratio, WB rotation share, and Full cast look-error ratio are separate
-quantities; the latter retains its historical 2.0 default. The grade wheel
+clamped. What the white balance may do to a hue is no longer a budget column:
+since v1.18.0 the control-validity law (`fit::validity`) reads it, like every
+class of controls, on the cells it moves, and a start the law refuses is
+scaled toward as-shot (the WB rotation share and the Full cast ratio left
+with the gates that read them). The grade wheel
 column (v1.17.1, `FitBudget::grade_wheel`) is each colour-grade wheel's
 Saturation ceiling on its 0..100 axis: the per-band HSL ceiling read as a
 share of the band's ±100 and applied to the wheel's reach. A
@@ -728,9 +729,10 @@ target does not carry, the target's own step read as a cell mean (eight-crossing
 quorum; one-code floor; two standard errors from zero) as a share of the
 frozen candidate's. The unchanged colour-field producer runs on that stack.
 Since R39 the correction a gate SHIPS is judged once more at its shrunk
-strength — do-no-harm against the same render without it, plus the
-attachment's own frame-drift tolerance (`AcceptedZone::still_accepted`,
-`refuse_shrunk_zones`) — because a tile admitted at k = 1 had shipped at
+strength — since v1.18.0 by the ONE law, `fit::ships_local` at that strength
+against the shipped set rendered without it, the frame a guard of `FIT_QUANT`
+(`AcceptedZone::still_accepted`, `refuse_shrunk_zones`; until then do-no-harm
+with no margin) — because a tile admitted at k = 1 had shipped at
 k = 0.134 with its own cell's colour-inclusive residual worse than untouched
 (that tile itself passes R39, its luma-only acceptance residual improving;
 the block it left is R40's, the boundary ruler's, to refuse — the 2026-09-22
@@ -924,8 +926,10 @@ scoped over its geometry. The blind-move audit's region line is a share of the
 scoped population (`EvidenceModel::population`), not of the frame. Range
 discovery (`derive_luminance_bands`) and composed-frame arbitration use the
 frame model; each range attachment's movement vetoes use that band's raw-ramp
-coverage. With colour withheld, the skip line is asked of the luma-only
-residual, the same quantity the zone is then accepted on.
+coverage. A zone is left alone ("already matches") when its own-pixel J* is
+already under `FIT_QUANT` — the one law's own consequence, since v1.18.0; the
+linear-light skip line and its luma-only re-ask under withheld colour are
+gone.
 
 ### Parameters and measurements
 
@@ -936,9 +940,9 @@ residual, the same quantity the zone is then accepted on.
   half-withheld one never did.
 - Calibration pair, semantic path: the land zone's tone controls were withheld
   through the replaced sky's luma bins (`luma[0.18-0.41]`); scoped, no veto
-  fires. Its luma-only residual `0.0043` sits under `ZONE_SKIP_ERR = 0.012`
-  while its full residual is `0.0456` (chroma withheld by the one-sided Blue
-  band), so it is declared already matched instead of taking `+0.10 EV` for a
+  fires. Its luma-only residual `0.0043` sat under the 0.012 skip line of the
+  time while its full residual was `0.0456` (chroma withheld by the one-sided
+  Blue band), so it was declared already matched instead of taking `+0.10 EV` for a
   hairline gain that regressed the frame `0.0179 -> 0.0193`.
 - Live A/B, step-9 executable vs B1 (user-ratified 2026-08-27). GUI path
   (neutral development): old `sky -0.08 EV, land +0.08 EV (own residual
@@ -975,7 +979,7 @@ residual, the same quantity the zone is then accepted on.
 
 - `src/fit/evidence.rs` — `EvidenceModel::scoped`, `aggregate_ranges`, `population`.
 - `src/fit_zoned/attach.rs` — `ZoneAttachment.coverage`; `src/fit_zoned/one_zone.rs` — the
-  scoped zone evidence and its vetoes, the luma-only skip line (`accept.rs` carries the flag).
+  scoped zone evidence and its vetoes, the already-matched skip on own-pixel J*.
 - `src/fit_zoned/spatial.rs` — tile readings and coverage.
 
 ## Local-field analyzer
@@ -1164,11 +1168,12 @@ and `src/recipe.rs` for the module name.
   Phase A measured the same two sequentially at `6.59 s` and `6.39 s`; running
   the independent cell readings under `rayon` and scattering them in cell order
   is bit-identical by construction and the determinism test still passes.
-- `look_err_with_evidence`'s structural term abstains on this pair (its core is
+- `look_err_with_evidence`'s structural term abstained on this pair (its core is
   under 100 px, so `structure_divergence` returns `None` since v1.2.4 instead of
-  a manufactured match). It is a penalty term, so an abstention charges nothing
+  a manufactured match). It was a penalty term, so an abstention charged nothing
   and these numbers are unchanged; the ceiling and every realized share inherit
-  that.
+  that. Since 2026-11-07 the objective carries no structural term at all: J* is
+  the per-pixel colour distance, and structure is a gate (`fit::look`).
 
 ### Source
 
@@ -1209,8 +1214,9 @@ and `src/recipe.rs` for the module name.
   ceiling by evidence (`pushed_past_evidence`: a paired band may rise to the
   target's, an unpaired band not at all — the night sky's unpaired fine band
   rose 0.38 → 0.52 under clarity +53 and the frame's ΔE 5.22 → 8.05 before
-  it), frame do-no-harm ≤ `FIT_QUANT` (1.8e-3; the zones' 0.02
-  `ZONE_GLOBAL_REGRESSION_TOL` until v1.17.0, twice a finished frame's error).
+  it), and the frame may not lose on J* at all (`detail_regression_is_bounded`,
+  R8: the gain is the detail ruler's, which J* does not read; the zones' 0.02
+  `ZONE_GLOBAL_REGRESSION_TOL` until v1.17.0 was twice a finished frame's error).
   Solves texture and clarity only — capture
   sharpening's radius is in film pixels and is not a quantity a 768-px reading
   measures. Night pair, fine / mid band: sky r 0.03 / 0.65 at the target's
@@ -1872,28 +1878,35 @@ prompt, only the rationale.
 `match` is inverse rendering rather than pixel copying: it aligns luminance
 CDFs, searches exposure, solves a regularized basis of engine controls, adds a
 residual monotone tone curve, closes saturation in a render/measure loop, and
-fits channel-cast curves (since v1.17.1 an admitted cast is refined on the
-finished frame in a closed loop, one secant step per knot while the look error
-improves by 1e-4, because the curves render before the mixer, the grade and
-saturation, and ships only if the same gates admit the refined curves), which
-ship only through four vetoes — the look-error
-ratio against the strength budget's bound, `cast_paints_foreign_hues` (a visible
-colour family more than 45 degrees from every target family over at least 5% of
-the frame), `cast_rotates_a_region` (75 degrees over 5%), and since v1.2.3
-`hue_fan_weighted` (one hue class sorted more than 15 degrees apart across
-luminance); a cast only the fan gate convicts is projected along
-`C(t) = x + min(1, 2t)(L − x) + max(0, 2t − 1)(C − L)` toward the shared shape
-`L` and beyond it toward no curves, the largest `t` whose rendered candidate
-clears 7.5 degrees, all four gates and a `FIT_QUANT` gain bar shipping; terminal do-no-harm can shrink saturation or reset to
-the caller's base recipe, and since 2026-10-21 the tone sliders and the residual
-curve are each held to do no harm at their own stage, and a white balance the
-target's cells refuse only on size ships at the largest share they vouch.
+fits channel-cast curves (since v1.17.1 refined on the finished frame in a
+closed loop, one secant step per knot while the look error improves by 1e-4,
+because the curves render before the mixer, the grade and saturation). Until
+v1.18.0 a cast shipped only through four vetoes — a look-error ratio against
+the strength budget, a foreign-hue census (a visible colour family more than
+45 degrees from every target family over at least 5% of the frame), a
+rotation census (75 degrees over 5%) and, since v1.2.3, a hue-fan census (one
+hue class sorted more than 15 degrees apart across luminance), with a
+convicted cast projected toward its shared shape. Since v1.18.0 the stages
+only estimate and ONE objective judges (`fit::joint`): `F = J* + FIT_QUANT · dof` over every coordinate the stages
+wrote, under one constraint read on every candidate render, each class of controls on its own work (reject only): the
+control-validity law (`fit::validity`) — no class may leave an evidence cell (a source-luma bin × hue band) worse on
+the axes it moves than it found it, `|move − ask| ≤ |ask| + se` against the target's paired or quantile-matched ask;
+a cell no evidence speaks for that a class moves anyway is withheld below strength 0.85 and disclosed from it. The
+law replaces the four cast vetoes, the luma and hue unsupported-range vetoes and the white balance's foreign-hue,
+rotation and shared-component gates — each had been one consequence of it, read on one class with its own numbers. A
+descent along the finite-difference gradient of J* moves the free coordinates together at steps 8/4/2/1 and a
+coordinate polish follows at 2/1, each control is held against its re-polished absence on F, the base recipe is a
+candidate with no degrees of freedom that ships when the solve is no better, and a start the law refuses is
+re-estimated from the law's own asks and, where still refused, scaled toward the base until it is admitted (disclosed
+by class and fraction); no stage shrinks, halves or
+holds its own estimate, and the projection, the cast→WB hand-off walk, the stage and terminal do-no-harm are retired.
 
 Atmosphere mode is entered because structure diverges; its instruments are the
 budgets (EV ±1, WB gain [0.80, 1.25], saturation ±30, curve slope [0.5, 1.5])
 and the population facts, not structural survival. `EvidenceModel::structure_blind`
 keeps one-sided, sparse and minimum-share population vetoes while switching off
-structural survival and per-pixel withholding. One Atmosphere report uses that
+structural survival and per-pixel withholding; it keeps the pairing (2026-11-07),
+so the Atmosphere J* is the same per-pixel reading as everywhere else. One Atmosphere report uses that
 one ruler for frame error, harm, joint readings, confidence and disclosure; it
 carries the structural model separately only for Full zones and detail. A typed
 population-evidence note names the structurally withheld luma/hue ranges and
@@ -1956,8 +1969,11 @@ and zero-confidence fields are conservation-tested to change nothing.
   (may an analysis search the library) and `AUTOSHADE_STYLE_DESCRIBE` (may a
   build write look phrases). `--embed`/`--no-embed`, `--describe` and the GUI
   preferences travel on the request; nothing writes the process environment.
-- Foreign-hue veto: distance `>45 deg` (four 15° bins) and newly painted share `>=5%`
-  (**calibrated against known cast failures and haze controls**).
+- Control-validity law (`fit::validity`): a cell is a source-luma bin × hue band that
+  stands on `EVIDENCE_MIN_SHARE` of the evidence mass and `SUPPORT_MIN_PIXELS` pixels; a
+  class's move on a cell is admitted while `|move − ask| ≤ |ask| + se`; a cell with no ask on
+  the class's axes is blind once its displacement passes `UNSUPPORTED_RANGE_MOVE` (**the cell
+  floors are the evidence model's own; the law itself has no tuned threshold**).
 - Reimagine flexible-size budget: dimensions are multiples of 16, aspect ratio
   at most `3:1`, and at most `8,294,400` pixels (**current gpt-image-2 contract
   encoded in the client**).
@@ -2080,7 +2096,7 @@ and zero-confidence fields are conservation-tested to change nothing.
 - `src/fit/` (`structure.rs`, `atmosphere.rs`, `tone.rs`, `hue_gates.rs`,
   `cast_outcome.rs`) and `src/fit_zoned.rs` — structural-divergence modes,
   bounded atmosphere fitting, CDF/basis tone solves, per-zone quality gates,
-  cast vetoes, and do-no-harm.
+  cast vetoes, and the joint objective (`src/fit/joint.rs`).
 - `src/generative.rs` — gpt-image-2 sizing, streamed refusal attribution,
   staged publication, reimagine, and generative fill.
 - `src/retouch.rs` — deterministic heal, float-native since v1.5.0 F9 so the

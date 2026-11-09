@@ -236,28 +236,15 @@ pub(crate) const BOUNDARY_STEP_SHAPE: f32 = 3.0;
 /// no absolute yardstick, and that produced the R17-era complaint: a zone that was ALREADY matched (sky 0.012 on the
 /// murk-era pair) was "corrected", barely moved, and reported "dropped:
 /// needs ≤ 50%" — reading like a discarded improvement when there was
-/// nothing to improve. Two absolute yardsticks fix that, SPLIT on purpose
-/// (R19 — one shared number either skipped fixable zones or dialled
-/// matched ones): corrections that genuinely work LAND at 0.007–0.015
-/// (this pair's sky 0.076 → 0.007; golden-sky 0.507 → 0.015), so this
-/// figure is just above that landing range.
+/// nothing to improve. This yardstick is the SELECTION's (a range's or a
+/// sub-zone's own residual against it): corrections that genuinely work
+/// LAND at 0.007–0.015 (this pair's sky 0.076 → 0.007; golden-sky
+/// 0.507 → 0.015), so this figure is just above that landing range. The
+/// SKIP line that used to sit beside it (0.012 of linear mean with a
+/// quarter-stop EV companion, R19) is gone since v1.18.0: a zone is left
+/// alone when its own-pixel J* is already under `FIT_QUANT`, the one law's
+/// own consequence (`attach_one_zone`).
 pub(super) const ZONE_MATCHED_ERR: f32 = 0.02;
-/// …while the observed already-matched zones read 0.009–0.012 and every
-/// attempt at them regressed (land 0.009 → 0.029 on the live pair), so
-/// THIS figure — the ceiling of that observed matched domain — is the
-/// SKIP line: at/below it the zone is left alone with an honest "already
-/// matches" note. Zones above it are attempted and judged on their own
-/// pixels ([`attach_one_zone`]); nothing is declined untried above the
-/// matched domain.
-pub(super) const ZONE_SKIP_ERR: f32 = 0.012;
-/// `zone_err` lives in LINEAR light, so an absolute line alone means
-/// different things at different zone levels — 0.012 of linear mean is a
-/// hundredth of a stop on a bright sky but most of a stop in deep shadow
-/// (sRGB ≈ 0.12 vs 0.173 zones score zone_err ≈ 0.012 while sitting
-/// 0.9 EV apart; that zone must be FITTED, not declared matched). The skip
-/// line therefore carries this quarter-stop EV companion and refuses to
-/// declare such a zone matched.
-pub(super) const ZONE_MATCHED_EV: f32 = 0.25;
 /// A band set or a zone tint must lower its region's mean CIE76 deltaE
 /// ([`super::subzones::delta_e`], Lab's 100-unit scale) by more than this to
 /// count as better than the plain zone it competes with. It is 0.02 dE —

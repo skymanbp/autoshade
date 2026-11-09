@@ -2920,7 +2920,9 @@ pub const FIT_SOURCE_EDGE: u32 = 2048;
 /// the export develops (capture sharpening included) and the geometry warp and
 /// the analysis thumbnail average what the export averages. Before it, the
 /// identical pair (the export of the base against the fit's preview of it)
-/// read 0.00235 / 0.00285 on p39 / p40 against `fit::FIT_QUANT` 0.0018.
+/// read 0.00235 / 0.00285 on p39 / p40 against the `fit::FIT_QUANT` of the
+/// day, 0.0018 (1.9e-3 since v1.18.0 on the per-pixel ruler; 2.3e-3 under
+/// the pooled one, which the p39 gap cleared by 2 %).
 ///
 /// In the FRAME that base develop is in: the sensor frame for a RAW. The fit
 /// draws its zone rasters in its source's frame and they say so
@@ -3101,18 +3103,30 @@ pub fn fit_target(
 /// resampled as the fit resamples the target, and read by J* on the frame's
 /// own evidence model; the finished recipe ships only when it ships against
 /// the base on THAT reading (`fit::ships`), and the report carries it as its
-/// residual. One render per side, not a search. A source that is not a RAW,
-/// or an export whose frame does not match the plate's, is left as fitted.
+/// residual. One render per side, not a search. A baked source (a master, a
+/// bare raster) renders as its export does, in the frame its marker says
+/// (review D D-5: the ship criterion does not depend on the source kind); a
+/// source with no file behind it, or an export whose frame does not match
+/// the plate's, is left as fitted.
+///
+/// When the base ships, the report is composed again for the base
+/// (`fit::rescore_report`): a rationale written for the solved recipe does
+/// not describe a recipe that carries none of it (D-1), the discarded
+/// recipe's own rasters are deleted (D-6), and the reading that ships sets
+/// the confidence and the far-from-target note (D-2,
+/// [`crate::fit::FitReport::set_terminal_reading`]). The line goes to `sink`
+/// (D-7, R29-1).
 pub fn reread_at_full_size(
     report: &mut crate::fit::FitReport,
-    raw: Option<&Path>,
+    source: Option<&Path>,
     src: &image::DynamicImage,
     target: &image::DynamicImage,
     base: &EditRecipe,
+    sink: &dyn crate::diag::Sink,
 ) {
     use crate::rationale::{Note, keys};
     use image::GenericImageView;
-    let Some(raw) = raw else { return };
+    let Some(path) = source else { return };
     let started = std::time::Instant::now();
     let (s_img, t_img) = crate::fit::analysis_pair(src, target);
     let tp = crate::fit::pixels_of(&t_img);
@@ -3124,7 +3138,7 @@ pub fn reread_at_full_size(
         s_img.height(),
     );
     let read = |recipe: &EditRecipe| -> Option<f32> {
-        let export = crate::render::render_to_image(raw, recipe, None, Some(FIT_SOURCE_EDGE)).ok()?;
+        let export = export_read(path, recipe, FIT_SOURCE_EDGE, sink)?;
         if export.dimensions() != src.dimensions() {
             return None;
         }
@@ -3136,24 +3150,62 @@ pub fn reread_at_full_size(
     let three = |v: f32| format!("{v:.4}");
     let preview = report.err_after;
     let ships = crate::fit::ships(full, full_base);
-    println!(
-        "  terminal re-read at full size: J* {} (preview {}), base {} -> {} ({:.1} s)",
-        three(full),
-        three(preview),
-        three(full_base),
-        if ships { "ships" } else { "the base ships" },
-        started.elapsed().as_secs_f32()
+    crate::diag::Diag::about(sink, path).emit(
+        crate::diag::Mark::Bare,
+        format!(
+            "terminal re-read at full size: J* {} (preview {}), base {} -> {} ({:.1} s)",
+            three(full),
+            three(preview),
+            three(full_base),
+            if ships { "ships" } else { "the base ships" },
+            started.elapsed().as_secs_f32()
+        ),
     );
     let note = if ships {
-        report.err_after = full;
+        report.set_terminal_reading(full);
         Note::new(keys::FIT_TERMINAL_FULL_SIZE, vec![("full", three(full)), ("preview", three(preview)), ("base", three(full_base))])
     } else {
-        let rationale = std::mem::take(&mut report.recipe.rationale);
-        report.recipe = EditRecipe { rationale, ..base.clone() };
-        report.err_after = full_base;
+        discard_rasters(&report.recipe, base);
+        let notes = std::mem::take(&mut report.notes);
+        *report = crate::fit::rescore_report(src, target, base, base, report.err_before, &notes);
+        report.set_terminal_reading(full_base);
         Note::new(keys::FIT_TERMINAL_FULL_SIZE_BASE, vec![("full", three(full)), ("base", three(full_base))])
     };
     crate::rationale::push_note(&mut report.recipe.rationale, &mut report.notes, note);
+}
+
+/// The export read of a fit source at `edge`, for the terminal reading: a
+/// RAW develops as the export develops it; a baked file renders as its
+/// export does (`render::export`'s baked arm), in the frame its marker says.
+/// `None` when the file cannot be read that way — the fit is then left as
+/// fitted, which is what every refusal here means.
+fn export_read(path: &Path, recipe: &EditRecipe, edge: u32, sink: &dyn crate::diag::Sink) -> Option<image::DynamicImage> {
+    if decode::is_raw(path) {
+        return crate::render::render_to_image_in(path, recipe, None, Some(edge), crate::render::ExportColorSpace::Srgb, sink).ok();
+    }
+    let frame = crate::render::SourceFrame::of(path).ok()?;
+    frame.check(recipe).ok()?;
+    let img = decode::load_image_for_develop(path).ok()?;
+    let diag = crate::diag::Diag::about(sink, path);
+    crate::render::render_baked_to_image(&img, recipe, None, Some(edge), frame.baked(), frame.colour_nr_in_pixels(), &diag).ok()
+}
+
+/// The bitmap rasters a discarded fit candidate claimed and `kept` does not
+/// reference, deleted (review D D-6): a fit claims a fresh raster per run,
+/// so a candidate that does not ship leaves its raster referenced by
+/// nothing. Best effort: a failure leaves an inert greyscale PNG.
+pub fn discard_rasters(dropped: &EditRecipe, kept: &EditRecipe) {
+    use crate::recipe::MaskGeometry;
+    let referenced = |path: &str| {
+        kept.masks.iter().any(|m| matches!(&m.mask, MaskGeometry::Bitmap { path: p } if p == path))
+    };
+    for m in &dropped.masks {
+        if let MaskGeometry::Bitmap { path } = &m.mask
+            && !referenced(path)
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 pub fn note_target_geometry(report: &mut crate::fit::FitReport, geometry: TargetGeometry) {

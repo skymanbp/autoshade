@@ -416,7 +416,7 @@ autoshade apply "photo.ARW" "recipe.json" -o "developed.tif"</code></pre>
           <div class="tech-index" aria-hidden="true">07</div>
           <div>
             <h3><a href="https://github.com/skymanbp/autoshade/blob/main/docs/TECH_STACK.md#ai-advisor-and-reverse-fit">AI advisor and reverse fit</a></h3>
-            <p>Bounded proposals use <code>store:false</code> and a do-no-harm gate. A colour cast ships only through four vetoes, among them foreign hues <strong>≥45° over ≥5%</strong> of the frame.</p>
+            <p>Bounded proposals use <code>store:false</code> and a do-no-harm gate. A colour move ships only where the target itself asks for it: the picture is read in bands of <strong>brightness × hue</strong>, and a control that leaves any band farther from the target than it started is refused (or disclosed, at high strength).</p>
           </div>
         </article>
 

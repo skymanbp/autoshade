@@ -35,67 +35,29 @@ pub(super) struct SolveFacts {
     /// Panel strength used to derive the budget. Kept absent for historical
     /// rescoring and Full-mode reports so the shipped default remains stable.
     pub(super) strength: Option<f32>,
-    /// Unsupported movement retained as a high-strength disclosure.
-    pub(super) veto_luma: Option<String>,
-    pub(super) veto_hue: Option<String>,
-    pub(super) wb_clamped: Option<(f32, f32, f32, f32)>,
+    /// The evidence cells no evidence spoke for that the recipe moved,
+    /// retained as a high-strength disclosure (the validity law's blind
+    /// cells, `fit::validity`).
+    pub(super) veto_cells: Option<String>,
+    /// `(ratio_before, ratio_after)`: the white balance was scaled into the
+    /// strength budget's gains.
+    pub(super) wb_clamped: Option<(f32, f32)>,
     /// Free white-balance search landed on the finite Kelvin domain edge.
     pub(super) wb_search_bound: Option<f32>,
-    /// Coverage from the same WB rotation census used for its gate.
-    pub(super) wb_rotation_coverage: Option<f32>,
-    pub(super) wb_rotation_disclosure: Option<(f32, f32)>,
-    /// R33 §E: the white balance the population asked for was solved, RENDERED
-    /// and put to the target's own cells. A different claim from the two
-    /// around it: those are capability vetoes on what the edit would do to
-    /// hue, this is the target's verdict on whether it was the right edit.
-    /// `None` = no WB was solved, or no cell resolved to judge one.
-    pub(super) wb_cells: Option<WbCellVerdict>,
-    /// The fitted WB was returned to as-shot because it created target-foreign hues.
-    pub(super) wb_foreign_hue_withheld: bool,
-    /// The fitted WB was returned to as-shot because it exceeded the strength
-    /// budget's weighted region-rotation allowance.
-    pub(super) wb_rotation_withheld: bool,
+    /// The classes the joint solve's repair scaled the stages' estimate on
+    /// and the fraction each kept (`rationale::values`, translated).
+    pub(super) scaled: Vec<(&'static str, f32)>,
     /// The chroma chase hit this mode's model cap with demand to spare. The
     /// mode travels with the solve fact because `rescore_report` may classify
     /// an old adjusted recipe differently without changing what the original
     /// solve actually did.
     pub(super) sat_pegged: Option<FitMode>,
-    /// Which of the colour stage's gates (if either) refused the cast curves.
-    pub(super) cast: CastOutcome,
-    /// Accepted cast whose measured error ratio is above the shipped gate but
-    /// within a widened high-strength budget.
-    pub(super) cast_admitted_by_strength: Option<(f32, f32)>,
-    /// Every gate reading of a cast that was ADMITTED, so the shipped
-    /// curves disclose the numbers they passed on. `None` = no curves
-    /// shipped: a gate refused them, none were fitted at all, or a step
-    /// after the gates took them out — the cast-curve elimination, the
-    /// finished-recipe elimination, the terminal delivered-fan withdrawal,
-    /// the terminal reset to the calibration base. Those leave the gates'
-    /// own verdict at "admitted" while no curve ships, which is why the
-    /// construction site reads the finished recipe itself (DEF-1: "does any
-    /// cast curve ship?").
-    pub(super) cast_admitted: Option<CastReadings>,
-    /// v1.2.3: the cast was PROJECTED — the fan gate convicted the fitted
-    /// curves and a shrunk version of them shipped instead. Mutually
-    /// exclusive with `cast_admitted` (a projected cast was not admitted as
-    /// fitted) and carrying the same guard, for the same reason: every step
-    /// after the gates can leave their verdict at "projected" while no curve
-    /// ships.
-    pub(super) cast_projected: Option<CastProjection>,
     /// The existing evidence gates withheld a one-sided range. This is the
     /// cause carried into the FAR classifier; it is not a second refusal flag.
     pub(super) evidence_refused: bool,
-    /// `Some(sat_fitted)` when the do-no-harm loop shrank saturation away from
-    /// the chroma-matched value the chase produced.
-    pub(super) sat_fitted: Option<f32>,
     /// `Some(joint_arm_fired)` when the TERMINAL do-no-harm check reset the
     /// whole recipe to the calibration base.
     pub(super) regressed: Option<bool>,
-    /// Per-stage do-no-harm (2026-10-21): the tone sliders, or the residual
-    /// curve, rendered the frame farther from the target than it was without
-    /// them (`before` → `after`) and were withheld at their own stage.
-    pub(super) tone_harm: Option<(f32, f32)>,
-    pub(super) curve_harm: Option<(f32, f32)>,
     /// v1.18.0 R8: the controls `eliminate_unearned` set back, named.
     pub(super) unearned: Option<String>,
     pub(super) detail: (f32, f32),
@@ -110,15 +72,6 @@ pub(super) struct SolveFacts {
     /// summary must not claim the target is unaligned when the solve just
     /// used its alignment.
     pub(super) paired: bool,
-    /// One-sided hue bands that vouched convergence carried movement through
-    /// on the finished render — disclosed so the withheld-note's "vetoed
-    /// movement" claim is never silently contradicted.
-    pub(super) vouched_bands: Option<String>,
-    /// R34 §D3: one-sided hue bands the REGION's own cells carried movement
-    /// through, and the verdict they were carried on. A different claim from
-    /// `vouched_bands` and therefore a different field: those pixels were
-    /// never individually vouched, and saying they were would be false.
-    pub(super) cast_cells: Option<(String, crate::fit_cells::CellVouch)>,
     /// The per-band colour mixer's own verdicts: which bands it could not
     /// measure, and whether it gave back what it fitted.
     pub(super) hsl: HslStageFacts,
@@ -273,18 +226,6 @@ pub(super) fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: Sol
         };
         push_note(&mut rationale, &mut notes, Note::new(key, args));
     }
-    for (harm, key) in [
-        (solve.tone_harm, keys::FIT_NOTE_TONE_WITHHELD_HARM),
-        (solve.curve_harm, keys::FIT_NOTE_CURVE_WITHHELD_HARM),
-    ] {
-        if let Some((before, after)) = harm {
-            push_note(
-                &mut rationale,
-                &mut notes,
-                Note::new(key, vec![("before", format!("{before:.4}")), ("after", format!("{after:.4}"))]),
-            );
-        }
-    }
     if let Some(controls) = &solve.unearned {
         push_note(&mut rationale, &mut notes, Note::new(keys::FIT_NOTE_UNEARNED, vec![("controls", controls.clone())]));
     }
@@ -297,46 +238,9 @@ pub(super) fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: Sol
             push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_JOINT_REGRESSED));
             push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_EVIDENCE_CONTRADICTED));
         }
-    } else if let Some(sat_fitted) = solve.sat_fitted {
-        push_note(
-            &mut rationale,
-            &mut notes,
-            Note::new(
-                keys::FIT_NOTE_SAT_REDUCED,
-                vec![
-                    ("sat_fitted", format!("{sat_fitted:+.0}")),
-                    ("sat_now", format!("{:+.0}", recipe.saturation)),
-                ],
-            ),
-        );
     }
     if m.evidence.identifiability < 0.08 {
         push_note(&mut rationale, &mut notes, Note::plain(keys::FIT_NOTE_EVIDENCE_UNMEASURABLE));
-    }
-    if let Some(note) = solve.cast.note() {
-        push_note(&mut rationale, &mut notes, note);
-    }
-    // The stage's other outcome, silent until v1.2.3: the curves SHIPPED.
-    // Admission was disclosed only when the strength budget bought it
-    // (`FIT_NOTE_CAST_ADMITTED_BY_STRENGTH`, below), so an ordinary
-    // admission — the commonest result of the whole stage — reached the user
-    // as an unexplained presence, exactly the asymmetry R23-6 A-2 fixed on
-    // the rejection side. The four gates' own numbers ride THREE notes: the
-    // two that can abstain each get a measured and a not-measurable clause,
-    // so a census that never ran never reaches the user as 0.000.
-    // v1.2.3 — the stage's THIRD outcome: the fitted curves were convicted
-    // by the fan gate and a projected, milder cast shipped in their place.
-    // Exclusive with the admission note at the fact site, so one cast never
-    // reaches the user as two different accounts of itself.
-    if let Some(p) = solve.cast_projected {
-        for note in cast_projection_notes(p) {
-            push_note(&mut rationale, &mut notes, note);
-        }
-    }
-    if let Some(r) = solve.cast_admitted {
-        for note in cast_admission_notes(r) {
-            push_note(&mut rationale, &mut notes, note);
-        }
     }
     if let Some(cast) = m.evidence.global_cast {
         push_note(
@@ -363,85 +267,34 @@ pub(super) fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: Sol
             ),
         );
     }
-    if let Some((from, to, rotated_share, coverage)) = solve.wb_clamped {
+    if let Some((from, to)) = solve.wb_clamped {
         push_note(
             &mut rationale,
             &mut notes,
-            Note::new(
-                keys::FIT_NOTE_WB_CLAMPED,
-                vec![
-                    ("from", format!("{from:.2}")),
-                    ("to", format!("{to:.2}")),
-                    ("rotated_share", format!("{rotated_share:.3}")),
-                    ("coverage", format!("{coverage:.3}")),
-                ],
-            ),
-        );
-    }
-    // The cells' verdict on a rendered white balance: BOTH outcomes are said
-    // out loud. A silent admission would leave "the sky is finally the right
-    // colour" indistinguishable from a lucky population statistic, and a
-    // silent refusal would leave the commonest question about this stage — why
-    // is temperature still as-shot on a pair whose light obviously changed? —
-    // unanswered.
-    if let Some(verdict) = solve.wb_cells {
-        // The shares printed are the SHIPPED move's — the full move's where
-        // it shipped or was refused, the share's where a share did — and the
-        // share sentence prints the full move's refusal beside them.
-        let (converged, diverged, aligned) =
-            verdict.shipped_at.map_or(verdict.vouch, |(_, at_share)| at_share).shares();
-        let mut args = vec![("converged", converged), ("diverged", diverged), ("aligned", aligned)];
-        let key = match (verdict.admitted, verdict.shipped_at) {
-            (true, Some((share, _))) => {
-                let (full_converged, full_diverged, full_aligned) = verdict.vouch.shares();
-                args.push(("share", format!("{share:.3}")));
-                args.push((
-                    "full",
-                    format!(
-                        "{full_converged} converged, {full_diverged} diverged, {full_aligned} aligned"
-                    ),
-                ));
-                args.push(("full_converged", full_converged));
-                args.push(("full_diverged", full_diverged));
-                args.push(("full_aligned", full_aligned));
-                keys::FIT_NOTE_WB_CELLS_VOUCHED_AT_SHARE
-            }
-            (true, None) => keys::FIT_NOTE_WB_CELLS_VOUCHED,
-            (false, _) => keys::FIT_NOTE_WB_CELLS_REFUSED,
-        };
-        push_note(&mut rationale, &mut notes, Note::new(key, args));
-    }
-    if solve.wb_foreign_hue_withheld {
-        push_note(
-            &mut rationale,
-            &mut notes,
-            Note::plain(keys::FIT_NOTE_WB_WITHHELD_FOREIGN_HUE),
-        );
-    }
-    if solve.wb_rotation_withheld {
-        push_note(
-            &mut rationale,
-            &mut notes,
-            Note::new(
-                keys::FIT_NOTE_WB_WITHHELD_ROTATION,
-                vec![
-                    ("rotated_share", format!("{:.3}", solve.wb_rotation_disclosure.map(|v| v.0).unwrap_or(0.0))),
-                    ("coverage", format!("{:.3}", solve.wb_rotation_disclosure.map(|v| v.1).unwrap_or_else(|| solve.wb_rotation_coverage.unwrap_or(0.0)))),
-                ],
-            ),
+            Note::new(keys::FIT_NOTE_WB_BUDGETED, vec![("from", format!("{from:.2}")), ("to", format!("{to:.2}"))]),
         );
     }
     if let Some(k) = solve.wb_search_bound {
         push_note(&mut rationale, &mut notes, Note::new(keys::FIT_NOTE_WB_SEARCH_BOUND, vec![("k", format!("{k:.0}"))]));
     }
-    if let Some((ratio, budget)) = solve.cast_admitted_by_strength {
-        push_note(&mut rationale, &mut notes, Note::new(keys::FIT_NOTE_CAST_ADMITTED_BY_STRENGTH, vec![("ratio", format!("{ratio:.3}")), ("budget", format!("{budget:.3}"))]));
+    // The joint solve's start: a class the validity law refused as the stages
+    // proposed it entered the descent scaled toward the base, and says so.
+    for &(class, lambda) in &solve.scaled {
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(keys::FIT_NOTE_SEED_SCALED, vec![("class", class.into()), ("lambda", format!("{lambda:.2}"))]),
+        );
     }
-    if let Some(ranges) = &solve.veto_luma {
-        push_note(&mut rationale, &mut notes, Note::new(keys::FIT_NOTE_VETO_DISCLOSED, vec![("kind", crate::rationale::values::LUMA_RANGES.into()), ("ranges", ranges.clone())]));
-    }
-    if let Some(ranges) = &solve.veto_hue {
-        push_note(&mut rationale, &mut notes, Note::new(keys::FIT_NOTE_VETO_DISCLOSED, vec![("kind", crate::rationale::values::HUE_BANDS.into()), ("ranges", ranges.clone())]));
+    if let Some(cells) = &solve.veto_cells {
+        push_note(
+            &mut rationale,
+            &mut notes,
+            Note::new(
+                keys::FIT_NOTE_VETO_DISCLOSED,
+                vec![("kind", crate::rationale::values::EVIDENCE_CELLS.into()), ("ranges", cells.clone())],
+            ),
+        );
     }
     // Every Atmosphere `Measured` carries its structural model (the solve and
     // the rescore both build one); a breach is a programming error, and a
@@ -561,32 +414,6 @@ pub(super) fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: Sol
             ),
         );
     }
-    if let Some(bands) = &solve.vouched_bands {
-        push_note(
-            &mut rationale,
-            &mut notes,
-            Note::new(
-                keys::FIT_NOTE_VOUCHED_CONVERGENCE,
-                vec![("bands", bands.clone())],
-            ),
-        );
-    }
-    if let Some((bands, verdict)) = &solve.cast_cells {
-        let (converged, diverged, aligned) = verdict.shares();
-        push_note(
-            &mut rationale,
-            &mut notes,
-            Note::new(
-                keys::FIT_NOTE_CAST_CELLS_VOUCHED,
-                vec![
-                    ("bands", bands.clone()),
-                    ("converged", converged),
-                    ("diverged", diverged),
-                    ("aligned", aligned),
-                ],
-            ),
-        );
-    }
     if let Some((share, ranges)) = &solve.robust
         && *share >= ROBUST_REJECT_DISCLOSE_MIN
     {
@@ -701,16 +528,6 @@ pub(super) fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: Sol
             );
         }
     }
-    if let Some(withdrawal) = solve.hsl.withdrawn {
-        push_note(
-            &mut rationale,
-            &mut notes,
-            Note::plain(match withdrawal {
-                HslWithdrawal::Error => keys::FIT_NOTE_HSL_WITHDRAWN_ERROR,
-                HslWithdrawal::Blind => keys::FIT_NOTE_HSL_WITHDRAWN_BLIND,
-            }),
-        );
-    }
     // Which controls this target's look may need that the solver has no way
     // to reach — SPECIFIC to this pair, not the blanket sentence the summary
     // already carries (R23-6 A-5).
@@ -740,11 +557,9 @@ pub(super) fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: Sol
     // set this is what finally separates a fit that reproduces the look from
     // one that only scores well: the unreachable-repaint pair reads 0.52 by
     // look error and 0.25 here.
-    recipe.confidence = match m.joint_after {
-        Some(j) => confidence_from_look_err(err_after).min(clamp_confidence(
-            1.0 - j.weighted * crate::fit_zoned::JOINT_CONFIDENCE_SLOPE,
-        )),
-        None => confidence_from_look_err(err_after),
+    let mut cap = match m.joint_after {
+        Some(j) => clamp_confidence(1.0 - j.weighted * crate::fit_zoned::JOINT_CONFIDENCE_SLOPE),
+        None => 1.0,
     };
     // Identifiability is a cap, not a bonus: residuals from invented or
     // one-sided ranges cannot support a confident claim even when small.
@@ -759,7 +574,7 @@ pub(super) fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: Sol
         m.evidence.identifiability * movement * identified_gain.sqrt();
     let evidence_cap =
         CONFIDENCE_FLOOR + (CONFIDENCE_CEIL - CONFIDENCE_FLOOR) * effective_identifiability;
-    recipe.confidence = recipe.confidence.min(clamp_confidence(evidence_cap));
+    cap = cap.min(clamp_confidence(evidence_cap));
     // …and never more than a fit whose two sides are not the same rectangle
     // may claim (R24 batch 2). THIRD in the same one-directional chain, and
     // last because it is the only one of the three that no measurement of
@@ -768,24 +583,25 @@ pub(super) fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: Sol
     // rather than competing with it. `min`, not an assignment — a fit that is
     // ALSO far by its own residual keeps the lower claim.
     if !m.same_frame {
-        recipe.confidence = recipe.confidence.min(NOT_SAME_FRAME_CONFIDENCE_CAP);
+        cap = cap.min(NOT_SAME_FRAME_CONFIDENCE_CAP);
     }
     if m.mode == FitMode::Atmosphere {
-        recipe.confidence = recipe.confidence.min(
-            solve.budget.map(|b| b.confidence_cap).unwrap_or(ATMOSPHERE_CONFIDENCE_CAP),
-        );
+        cap = cap.min(solve.budget.map(|b| b.confidence_cap).unwrap_or(ATMOSPHERE_CONFIDENCE_CAP));
     }
     if let Some(budget) = solve.budget
         && budget.vetoes == VetoPolicy::Disclose
-        && (solve.veto_luma.is_some() || solve.veto_hue.is_some())
+        && solve.veto_cells.is_some()
     {
-        recipe.confidence = recipe.confidence.min(budget.confidence_cap);
+        cap = cap.min(budget.confidence_cap);
     }
+    // The look-error ladder, and never more than the caps allow.
+    recipe.confidence = confidence_from_look_err(err_after).min(cap);
     recipe.clamp();
     FitReport {
         recipe,
         err_before,
         err_after,
+        confidence_cap: cap,
         notes,
         mode: m.mode,
         divergence: m.divergence,
@@ -799,12 +615,21 @@ pub(super) fn compose_report(mut recipe: EditRecipe, m: Measured<'_>, solve: Sol
 }
 
 /// Add the pair-specific disclosure only after all zoned corrections have
-/// rendered.  This keeps the note's `after_px` contract truthful.
+/// rendered.  This keeps the note's `after_px` contract truthful. Every
+/// zoned producer calls it on its own finished render, so a later call
+/// SUPERSEDES the earlier reading: the sentence describes the frame that
+/// ships, and there is one of those (until 2026-11-07 the earlier sentence
+/// stayed, and a frame whose residual the global solve no longer lowers read
+/// it after the ranges and again after the tiles).
 pub(crate) fn append_finished_disclosure(
     report: &mut FitReport,
     after_px: &[[f32; 3]],
     tp: &[[f32; 3]],
 ) {
+    crate::rationale::withdraw_notes(&mut report.recipe.rationale, &mut report.notes, |n| {
+        n.key == crate::rationale::keys::FIT_NOTE_UNREPRESENTED
+            || n.key == crate::rationale::keys::FIT_NOTE_ATMOSPHERE_UNREPRESENTED
+    });
     if let Some(note) = unrepresented_note(
         &report.recipe,
         after_px,
@@ -840,7 +665,7 @@ pub(crate) fn append_finished_disclosure(
 /// reset the deep arm can adopt base ± 10, and the user was told nothing had
 /// been applied while ± 10 was persisted.
 ///
-/// `prior` is the solved report's notes, and three families cross over — all
+/// `prior` is the solved report's notes, and four families cross over — all
 /// statements about the SOLVE that the adjustment cannot falsify:
 ///   * `FIT_NOTE_SAT_PEGGED` — the chroma chase hit the ±60 model cap, a fact
 ///     about the target's chroma being out of the model's reach;
@@ -848,6 +673,10 @@ pub(crate) fn append_finished_disclosure(
 ///     the colour stage, and the adjustment does not refit those curves.
 ///   * `FIT_NOTE_VOUCHED_CONVERGENCE` — which one-sided bands the paired solve
 ///     individually vouched; adjusting the recipe does not rerun that solve.
+///   * `FIT_NOTE_SEED_SCALED` — at what fraction of the stages' estimate each
+///     class the validity law refused entered the joint solve; the adjustment
+///     does not rerun that solve either (carried since 2026-11-08, when the
+///     Full-mode round trip stopped being byte-identical without it).
 ///
 /// The three that are deliberately DROPPED rather than re-derived, because they
 /// report an action the solver took on a recipe this report no longer describes:
@@ -896,66 +725,6 @@ pub fn rescore_report(
             .map(|(_, value)| value.clone())
     };
     let carried_strength = carried_strength_from_notes(prior);
-    let carried_cast_admission = carried_arg(keys::FIT_NOTE_CAST_ADMITTED_BY_STRENGTH, "ratio")
-        .and_then(|ratio| ratio.parse::<f32>().ok())
-        .zip(carried_arg(keys::FIT_NOTE_CAST_ADMITTED_BY_STRENGTH, "budget").and_then(|budget| budget.parse::<f32>().ok()));
-    // The admission readings ride the note, like every other carried fact:
-    // a rescore re-renders and re-scores, it does not re-run the gates, so
-    // inventing fresh numbers here would report a measurement never taken.
-    let carried_reading = |arg: &str| {
-        carried_arg(keys::FIT_NOTE_CAST_ADMITTED, arg).and_then(|v| v.parse::<f32>().ok())
-    };
-    // The two ABSTAINING readings ride their own notes, so their ABSENCE is
-    // carried too: a missing arg re-renders as the not-measurable sentence,
-    // never as 0.000. The head's three are all-or-nothing — without them
-    // there is no admission to re-report, and defaulting any of them would
-    // be the same invention on the rescore side.
-    let carried_cast_admitted = match (
-        carried_reading("ratio"),
-        carried_reading("bound"),
-        carried_reading("rehued"),
-    ) {
-        (Some(ratio), Some(bound), Some(rehued)) => Some(CastReadings {
-            ratio,
-            bound,
-            foreign: carried_arg(keys::FIT_NOTE_CAST_ADMITTED_FOREIGN, "foreign")
-                .and_then(|value| value.parse::<f32>().ok()),
-            rehued,
-            fan: carried_arg(keys::FIT_NOTE_CAST_ADMITTED_FAN, "fan")
-                .and_then(|value| value.parse::<f32>().ok()),
-        }),
-        _ => None,
-    };
-    // The PROJECTION rides its notes the same way. `limit` and `target` are
-    // regenerated from the constants rather than carried: they are what the
-    // code believes NOW, and a rescore that re-rendered under a retuned gate
-    // must not quote the old one as if it had just measured it.
-    let carried_projected = (|| {
-        let head = |arg: &str| {
-            carried_arg(keys::FIT_NOTE_CAST_PROJECTED, arg).and_then(|v| v.parse::<f32>().ok())
-        };
-        Some(CastProjection {
-            share: head("share")?,
-            fan_before: head("fan_before")?,
-            t: head("t")?,
-            fan_after: carried_arg(keys::FIT_NOTE_CAST_PROJECTED_FAN, "fan_after")
-                .and_then(|v| v.parse::<f32>().ok()),
-            ratio: head("ratio")?,
-            bound: head("bound")?,
-            rehued: head("rehued")?,
-            // The foreign clause is the ADMISSION's key on both paths, so it
-            // rides back from the same place `carried_cast_admitted` reads it
-            // — and its ABSENCE rides too, re-rendering as the
-            // not-measurable sentence and never as a 0.000 nobody measured.
-            foreign: carried_arg(keys::FIT_NOTE_CAST_ADMITTED_FOREIGN, "foreign")
-                .and_then(|value| value.parse::<f32>().ok()),
-        })
-    })();
-    // The fan refusal's readings ride the same way; without them the rescore
-    // would re-emit the note with zeroes.
-    let carried_fan = carried_arg(keys::FIT_NOTE_CAST_HUE_FANNED, "share")
-        .and_then(|share| share.parse::<f32>().ok())
-        .zip(carried_arg(keys::FIT_NOTE_CAST_HUE_FANNED, "fan").and_then(|fan| fan.parse::<f32>().ok()));
     let readings = divergence_pair_for(src, target, base);
     let divergence = readings.fine;
     // Same stance as the solve path: an unread frame is not promoted.
@@ -981,28 +750,16 @@ pub fn rescore_report(
     );
     // The strength budget rides EVERY rescoring, not only an Atmosphere one.
     // At or below default its vetoes are withheld and nothing below fires, so
-    // the shipped path is untouched. From 0.85 the solve DISCLOSED unsupported
-    // movement and capped its claim; a rescoring re-derives that disclosure
-    // from the recipe it describes (the deep step moved the dial) — never
-    // cloned off the solve, and never dropped: dropping it let the rescored
-    // report claim the uncapped ladder for the same movement. The paired
-    // solve's evacuation voucher is not available here, so the strict doctrine
-    // applies: a disclosure this rescoring adds can only lower the claim.
+    // the shipped path is untouched. From 0.85 the solve DISCLOSED the cells
+    // no evidence spoke for and capped its claim; a rescoring re-derives that
+    // disclosure from the recipe it describes (the deep step moved the dial)
+    // on the pair's own cells — never cloned off the solve, and never
+    // dropped: dropping it let the rescored report claim the uncapped ladder
+    // for the same movement. A disclosure this rescoring adds can only lower
+    // the claim.
     let budget = FitBudget::for_strength(carried_strength);
-    let disclose = budget.vetoes == VetoPolicy::Disclose;
-    let veto_luma = disclose
-        .then(|| moved_unsupported_luma_range_names(&base_px, &after_px, evidence))
-        .flatten();
-    let veto_hue = disclose
-        .then(|| {
-            // A measured global cast is a consistent rotation, not an
-            // unsupported one — the same exemption the Atmosphere solve makes.
-            if mode == FitMode::Atmosphere && structural.global_cast.is_some() {
-                None
-            } else {
-                moved_unsupported_hue_range_names(&base_px, &after_px, evidence)
-            }
-        })
+    let veto_cells = (budget.vetoes == VetoPolicy::Disclose)
+        .then(|| super::validity::Cells::new(&base_px, &tp, evidence).blind_cell_names(&base_px, &after_px))
         .flatten();
     compose_report(
         recipe.clone(),
@@ -1024,46 +781,28 @@ pub fn rescore_report(
         SolveFacts {
             budget: Some(budget),
             strength: carried(keys::FIT_NOTE_STRENGTH).then_some(carried_strength.get()),
-            veto_luma,
-            veto_hue,
+            veto_cells,
             wb_clamped: None,
             wb_search_bound: None,
-            wb_rotation_coverage: None,
-            wb_rotation_disclosure: None,
-            // A refusal the CELLS made is a measurement of a render this
-            // rescore did not take, so it rides the carried note like every
-            // other gate verdict — the shares with it, or the abstention if
-            // the note carried none.
-            wb_cells: [
-                (keys::FIT_NOTE_WB_CELLS_REFUSED, false),
-                (keys::FIT_NOTE_WB_CELLS_VOUCHED, true),
-                (keys::FIT_NOTE_WB_CELLS_VOUCHED_AT_SHARE, true),
-            ]
-            .into_iter()
-            .find(|(key, _)| carried(key))
-            .map(|(key, admitted)| {
-                let read = |arg: &str| {
-                    carried_arg(key, arg).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0)
-                };
-                let vouch_of = |prefix: &str| crate::fit_cells::CellVouch {
-                    converged: read(&format!("{prefix}converged")),
-                    diverged: read(&format!("{prefix}diverged")),
-                    aligned: read(&format!("{prefix}aligned")),
-                    read: 1,
-                };
-                // The share sentence carries two verdicts: the full move's
-                // (its refusal) and the shipped share's.
-                let at_share = carried_arg(key, "share")
-                    .and_then(|v| v.parse::<f32>().ok())
-                    .map(|share| (share, vouch_of("")));
-                WbCellVerdict {
-                    vouch: if at_share.is_some() { vouch_of("full_") } else { vouch_of("") },
-                    admitted,
-                    shipped_at: at_share,
-                }
-            }),
-            wb_foreign_hue_withheld: carried(keys::FIT_NOTE_WB_WITHHELD_FOREIGN_HUE),
-            wb_rotation_withheld: carried(keys::FIT_NOTE_WB_WITHHELD_ROTATION),
+            // The seed's scaling is the solve's own act, a statement about the
+            // SOLVE the adjustment cannot falsify, so it crosses over from the
+            // solved report's notes (the class named by its reported value).
+            scaled: prior
+                .iter()
+                .filter(|n| n.key == keys::FIT_NOTE_SEED_SCALED)
+                .filter_map(|n| {
+                    let arg = |k: &str| n.args.iter().find(|(a, _)| *a == k).map(|(_, v)| v.as_str());
+                    use crate::rationale::values;
+                    let class = match arg("class")? {
+                        c if c == values::CLASS_TONE => values::CLASS_TONE,
+                        c if c == values::CLASS_WHITE_BALANCE => values::CLASS_WHITE_BALANCE,
+                        c if c == values::CLASS_CHROMA_DIALS => values::CLASS_CHROMA_DIALS,
+                        c if c == values::CLASS_CHANNEL_CURVES => values::CLASS_CHANNEL_CURVES,
+                        _ => return None,
+                    };
+                    Some((class, arg("lambda")?.parse::<f32>().ok()?))
+                })
+                .collect(),
             sat_pegged: if carried(keys::FIT_NOTE_ATMOSPHERE_SAT_PEGGED) {
                 Some(FitMode::Atmosphere)
             } else if carried(keys::FIT_NOTE_SAT_PEGGED) {
@@ -1071,56 +810,19 @@ pub fn rescore_report(
             } else {
                 None
             },
-            cast: CastOutcome {
-                rehue_blocked: carried(keys::FIT_NOTE_REHUE_BLOCKED),
-                ratio_rejected: carried(keys::FIT_NOTE_CAST_REJECTED),
-                hue_fanned: carried_fan,
-                // The gates are not re-run here — a rescore re-renders and
-                // re-scores, so the admission readings arrive through the
-                // `cast_admitted` field beside this one, off the carried note.
-                readings: None,
-                // …and the projection likewise, through `cast_projected`.
-                projected: None,
-            },
-            cast_admitted_by_strength: carried_cast_admission,
-            cast_admitted: carried_cast_admitted,
-            cast_projected: carried_projected,
             evidence_refused: carried(keys::FIT_NOTE_EVIDENCE_WITHHELD),
             // Dropped on purpose — see the doc above. Naming them here rather
             // than omitting them silently is the point: the abstention has to
             // be visible at the place that makes it.
-            sat_fitted: None,
             regressed: None,
-            tone_harm: None,
-            curve_harm: None,
             unearned: carried_arg(keys::FIT_NOTE_UNEARNED, "controls"),
             detail: (recipe.clarity, recipe.texture),
             detail_withheld: false,
             robust: None,
             paired: carried(keys::FIT_SUMMARY_WITH_CURVE_PAIRED)
                 || carried(keys::FIT_SUMMARY_NO_CURVE_PAIRED),
-            vouched_bands: carried_arg(keys::FIT_NOTE_VOUCHED_CONVERGENCE, "bands"),
-            // …and its region twin, recovered the way the WB cell verdict is:
-            // a rescore re-renders but never re-runs the cell instrument, so
-            // the measurement rides the note it was published in.
-            cast_cells: carried_arg(keys::FIT_NOTE_CAST_CELLS_VOUCHED, "bands").map(|bands| {
-                let read = |arg: &str| {
-                    carried_arg(keys::FIT_NOTE_CAST_CELLS_VOUCHED, arg)
-                        .and_then(|v| v.parse::<f32>().ok())
-                        .unwrap_or(0.0)
-                };
-                (
-                    bands,
-                    crate::fit_cells::CellVouch {
-                        converged: read("converged"),
-                        diverged: read("diverged"),
-                        aligned: read("aligned"),
-                        read: 1,
-                    },
-                )
-            }),
             // The mixer's evidence verdicts cross over for the same reason
-            // the cast gates do: the deep step moves global dials, it never
+            // the blind-cell disclosure does: the deep step moves global dials, it never
             // re-runs the per-band population gate. What the mixer MOVED is
             // deliberately NOT carried — `compose_report` reads that straight
             // off the recipe in front of it, which here is the adjusted one.
@@ -1130,13 +832,6 @@ pub fn rescore_report(
                     .unwrap_or_default(),
                 vouched: carried_arg(keys::FIT_NOTE_HSL_BANDS_VOUCHED, "bands")
                     .unwrap_or_default(),
-                withdrawn: if carried(keys::FIT_NOTE_HSL_WITHDRAWN_BLIND) {
-                    Some(HslWithdrawal::Blind)
-                } else if carried(keys::FIT_NOTE_HSL_WITHDRAWN_ERROR) {
-                    Some(HslWithdrawal::Error)
-                } else {
-                    None
-                },
             },
             // Carried like the mixer's verdicts: the deep step never re-runs
             // the grade stage, so whether the dial held it is the solve's.
@@ -1156,6 +851,26 @@ pub fn rescore_report(
 }
 
 impl FitReport {
+    /// A reading of J* taken after the report was composed — the terminal
+    /// full-size one — becomes the report's residual: the confidence is read
+    /// from it under the caps the report was composed with, and the
+    /// far-from-target note is keyed on it (review D D-2: until v1.18.0 the
+    /// report printed one J* and claimed a confidence derived from another).
+    pub fn set_terminal_reading(&mut self, err_after: f32) {
+        use crate::rationale::{Note, keys};
+        self.err_after = err_after;
+        self.recipe.confidence = confidence_from_look_err(err_after).min(self.confidence_cap);
+        self.recipe.clamp();
+        crate::rationale::withdraw_notes(&mut self.recipe.rationale, &mut self.notes, |n| n.key == keys::FIT_NOTE_FAR);
+        if err_after > FIT_FAR_ERR {
+            crate::rationale::push_note(
+                &mut self.recipe.rationale,
+                &mut self.notes,
+                Note::new(keys::FIT_NOTE_FAR, vec![("err_after", format!("{err_after:.2}"))]),
+            );
+        }
+    }
+
     /// R33 §H. [`rescore_report`] regenerates the GLOBAL solve's account from
     /// the recipe in front of it, field by field off [`SolveFacts`]. Every note
     /// a LOCAL PRODUCER wrote — zones, native ranges, spatial tiles, free

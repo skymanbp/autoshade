@@ -482,20 +482,30 @@ pub(crate) fn cell_vertex_spans(cell: usize) -> impl Iterator<Item = std::ops::R
     })
 }
 
-/// One frame's pixel strictly inside `(1/255, 254/255)` on all three
-/// channels — read on the TARGET alone by [`crate::fit_cells`] for its cell
-/// means (the field itself reads [`testifies`]).
+/// One frame's pixel with no channel at the white clip (`254/255`) — read
+/// on the TARGET alone by [`crate::fit_cells`] for its cell means (the field
+/// itself reads [`testifies`]). The same clip rule as the testimony's: a
+/// channel at the black clip is a value (the target shows it black), a
+/// channel at the white clip is not (its true value is unbounded above it),
+/// so only the latter keeps a pixel out of a mean. Until v1.18.0 this
+/// excluded the black end too, and the cells judging pass B of the field
+/// (`fit_zoned::field::admit_cells`) could not see the very pixels the
+/// field's data term had just been ruled to count (RULING-1180-int-r19).
 pub(crate) fn unclipped(p: &[f32; 3]) -> bool {
-    p[0].min(p[1]).min(p[2]) > 1.0 / 255.0 && p[0].max(p[1]).max(p[2]) < 254.0 / 255.0
+    p[0].max(p[1]).max(p[2]) < 254.0 / 255.0
 }
 
 /// Whether a PAIR of pixels — the frame being moved and its target —
-/// testifies: the LUMA of each frame strictly inside its clip codes
-/// `(1/255, 254/255)`, and every channel either inside 254/255 in BOTH
-/// frames or at the white clip in BOTH. A channel at the white clip on both
-/// sides is known on both sides — the target keeps it there — and a pixel
-/// white-clipped on one side only is not (its true value on that side is
-/// unknown above the clip), so it stays out as before.
+/// testifies: the LUMA of each frame above the black code `1/255`, and
+/// every channel either inside 254/255 in BOTH frames or at the white clip
+/// in BOTH. A channel at the white clip on both sides is known on both
+/// sides — the target keeps it there — and a pixel white-clipped on one
+/// side only is not (its true value on that side is unknown above the
+/// clip), so it stays out as before. A pixel white in every channel on both
+/// sides testifies too (its difference is 0 and known): the luma gate reads
+/// the black end only, because at the white end the per-channel rule
+/// already says everything there is to say, and a luma gate there kept the
+/// one pixel the v1.17.1 rule had been written to admit.
 ///
 /// A channel at its BLACK clip (at or under 1/255) is not a missing
 /// measurement (v1.18.0). The data term reads the per-channel difference
@@ -511,9 +521,10 @@ pub(crate) fn unclipped(p: &[f32; 3]) -> bool {
 /// "target brighter" — the top of the sky was lifted where its target asks
 /// for it darker. The white clip is not symmetric to it: above 254/255 the
 /// true value is unbounded, the difference is not a measurement of how far
-/// the frame is from its target, and that rule is unchanged. A pixel whose
-/// LUMA is at either clip has no channel left to carry it and stays out. The
-/// only numbers are the 8-bit clip codes the channel test already used.
+/// the frame is from its target, and that per-channel rule is unchanged. A
+/// pixel whose LUMA is at the black clip has no channel left to carry it
+/// and stays out. The only numbers are the 8-bit clip codes the channel
+/// test already used.
 ///
 /// WHY (v1.17.1). Until then a pixel testified only when it was inside the
 /// clip in both frames, while the colour field it was excluded from was
@@ -529,7 +540,7 @@ pub(crate) fn unclipped(p: &[f32; 3]) -> bool {
 pub(crate) fn testifies(current: &[f32; 3], target: &[f32; 3]) -> bool {
     const LOW: f32 = 1.0 / 255.0;
     const HIGH: f32 = 254.0 / 255.0;
-    let measured = |p: &[f32; 3]| { let y = fit::luma601(p); y > LOW && y < HIGH };
+    let measured = |p: &[f32; 3]| fit::luma601(p) > LOW;
     measured(current) && measured(target)
         && (0..3).all(|c| (current[c] >= HIGH) == (target[c] >= HIGH))
 }

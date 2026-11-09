@@ -1,8 +1,9 @@
 //! Zoned reverse-fit — the semantic-region extension of [`crate::fit`].
 //!
-//! The global fit is statistics over the WHOLE frame, and its gates refuse
-//! regional regrades by design (fit.rs rotation budget: "true regional
-//! regrades belong to the zoned fit"). This module supplies that fit: segment
+//! The global fit is statistics over the WHOLE frame, and its validity law
+//! refuses regional regrades by design (a global control that moves one
+//! region's cells against their ask is inadmissible; true regional regrades
+//! belong to the zoned fit). This module supplies that fit: segment
 //! the same semantic region (the sky) in BOTH the source and the target,
 //! compare the two zones' colour statistics, and emit the difference as a
 //! bitmap-masked [`LocalAdjustment`](crate::recipe::LocalAdjustment) driving
@@ -53,6 +54,7 @@ mod limits;
 mod one_zone;
 mod rasters;
 mod regions;
+mod zone_dump;
 mod zone_fit;
 
 use accept::{
@@ -82,9 +84,10 @@ use entry::{
     release_unselected_rasters,
 };
 pub use joint::{JointBucket, JointReading, joint_buckets, joint_reading};
+#[cfg(test)]
+pub(crate) use joint::JOINT_DRIFT_TOL;
 pub(crate) use joint::{
-    JOINT_CONFIDENCE_SLOPE, JOINT_DRIFT_TOL, classify_joint_far, joint_buckets_with_evidence,
-    joint_reading_with_evidence,
+    JOINT_CONFIDENCE_SLOPE, classify_joint_far, joint_buckets_with_evidence, joint_reading_with_evidence,
 };
 use joint::{zone_luma_err};
 #[cfg(test)]
@@ -98,8 +101,8 @@ pub(super) use limits::{
 use limits::{
     MASK_REFINE_EPSILON, MASK_REFINE_RADIUS, SHIPPED_LAYERS, ZONE_ATMOS_EV_LIMIT,
     ZONE_ATMOS_SAT_LIMIT, ZONE_CLIP_GROWTH, ZONE_EV_LIMIT,
-    ZONE_DELTA_E_MARGIN, ZONE_MATCHED_ERR, ZONE_MATCHED_EV,
-    ZONE_SAT_LIMIT, ZONE_SKIP_ERR, ZONE_TEXTURE_MAX, ZONE_TEXTURE_MIN,
+    ZONE_DELTA_E_MARGIN, ZONE_MATCHED_ERR,
+    ZONE_SAT_LIMIT, ZONE_TEXTURE_MAX, ZONE_TEXTURE_MIN,
     ZonedLayerOpts,
 };
 use one_zone::{ZONE_CONFIDENCE_SLOPE, attach_one_zone};
@@ -114,7 +117,6 @@ pub(crate) use zone_fit::{
 use zone_fit::{
     ZONE_VOUCH_SHRINK_STEPS, clamp_zone_sat, clamp_zone_sat_for_mode, local_quality,
     scale_zone_colour, scale_zone_tone, shrink_atmosphere_gains_in, shrink_zone_corrections,
-    zone_skips,
 };
 
 /// The zoned fit's source as ONE text, for the source-text gates that read what

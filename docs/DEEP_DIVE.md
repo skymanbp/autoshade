@@ -96,7 +96,9 @@ regression**:
   solved against its own slider basis under a ridge and a model-selection
   prior; saturation closes by mean-chroma ratio.
 - The per-channel CDF residual becomes RGB curves admitted only through four
-  vetoes and a projection, and since v1.17.1 an admitted cast closes its loop
+  vetoes, read on every candidate of the joint objective (v1.18.0: one
+  `F = J* + FIT_QUANT · dof` the solve minimises, each control held against its
+  own absence), and since v1.17.1 an admitted cast closes its loop
   on the finished frame (the curves render before the mixer, the grade and
   saturation, so its knots are refined where they land and re-put to the same
   vetoes): one refuses a cast painting a hue more than 45°
@@ -120,9 +122,9 @@ are in [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](TECH_STACK.md#ai-advisor-
   confidence capped at 0.50, no per-channel curves). At the shipped Strength
   0.65 the global controls, WB included, are byte-identical to the
   calibrated path's; above it an out-of-budget white balance is shrunk along
-  its fitted log-K/linear-tint manifold and must clear the foreign-hue veto
-  and a rotation budget (0.05 at default, 0.593 at 0.85, 1.0 at full) or it
-  is withheld ([docs/TECH_STACK.md#reverse-fit-freedom-budget](TECH_STACK.md#reverse-fit-freedom-budget)).
+  its fitted log-K/linear-tint manifold, and like every control it must leave
+  no evidence cell worse on its own axes than it found it (`fit::validity`) or
+  it is scaled back ([docs/TECH_STACK.md#reverse-fit-freedom-budget](TECH_STACK.md#reverse-fit-freedom-budget)).
 - **Where the content moved**, a DIFT correspondence field (Stable Diffusion
   2.1's UNet as a featurizer, `t = 261`, 768² inputs, an 8-draw ensemble, a
   48×48 grid) weights a zone's pixel pairs; its confidence is cyclic
@@ -506,7 +508,7 @@ recipes, keeps Responses at `store:false`, gives the verifier data rather than
 pixels and adopts a guided revision only when it does not lower the score;
 `src/library/` searches finished photos by standardised scene and Direction
 similarity and hands the three closest to the proposer; `src/fit.rs`
-runs the inverse stages behind the >45°/≥5% foreign-hue veto and consults
+runs the inverse stages under one control-validity law (`fit::validity`) and consults
 the DIFT field of `src/correspond.rs` on divergent pairs; `src/generative.rs`
 negotiates gpt-image-2 sizes, `src/image_endpoint.rs` fills a user-written
 template for a provider whose edit call is not OpenAI's, and `src/retouch.rs`

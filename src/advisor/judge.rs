@@ -85,8 +85,8 @@ pub enum FitAction {
     /// Segment the sky on both sides and correct sky↔sky separately. The
     /// answer when the judge describes the mismatch as belonging to a PART
     /// of the frame — the global solver is frame-wide statistics by
-    /// construction and cannot express a regional regrade at all (fit.rs's
-    /// rotation budget: "true regional regrades belong to the zoned fit").
+    /// construction and cannot express a regional regrade at all (the global
+    /// fit's doctrine: true regional regrades belong to the zoned fit).
     Zoned,
     /// Move the fitted global saturation by one fixed step. The chroma chase
     /// is the fit's one heuristic dial, and its own do-no-harm loop only

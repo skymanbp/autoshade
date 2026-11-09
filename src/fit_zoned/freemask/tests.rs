@@ -852,7 +852,7 @@ fn every_typed_free_mask_refusal_reaches_the_ledger_under_its_label() {
     use FreeMaskWhy::*;
     let every = [
         Share, Divergence, Footprint, Mass, Cap, StructureUnmeasured, RasterClaim,
-        RasterWrite, ZoneRefused, Frame, Rim, Unmeasured, Inert, Shrunk,
+        RasterWrite, ZoneRefused, Frame, Rim, Unmeasured, Inert,
     ];
     let source = textured_image();
     let mut report = super::super::tests::neutral_report(&source, &source);

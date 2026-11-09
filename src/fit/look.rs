@@ -1,40 +1,37 @@
 //! Look error, with and without evidence, and the calibration corpus and recipe the tests read.
 
 use super::*;
+use rayon::prelude::*;
+use std::cell::RefCell;
+use std::rc::Rc;
 
-
-/// Slice-only test helper for the production evidence-weighted objective.
-/// Production callers build the evidence model with the real analysis
-/// dimensions and keep it fixed for the whole fit.
-#[cfg(test)]
-pub(crate) fn look_err(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
-    let evidence = evidence_model(a, b);
-    look_err_with_evidence(a, b, &evidence)
-}
 
 /// THE look error every fit decision reads, J* (v1.18.0), in the units the
-/// eye uses: 1 dE76 of local-mean offset over the whole paired frame is 0.0075.
+/// eye uses: 1 dE76 over the whole paired frame is 0.0075.
 ///
-/// `J* = 0.75·[p·E_paired + (1 − p)·E_dist] + 0.15·H_ab·w + 0.10·S`
+/// `J* = 0.75·[p·E_paired + (1 − p)·E_dist]`
 ///
 /// * `E_paired` — where pixels PAIR (index i on one side is index i on the
-///   other: [`EvidenceModel::paired`]), the evidence-weighted mean CIE76
-///   distance between the two sides' LOCAL MEANS,
-///   `Σ w_i·ΔE76(Lab(G_2*a)_i, Lab(G_2*b)_i) / 100 / Σ w_i`, `w` the pixel's
-///   PRESENCE weight (its membership, DEF-5) and `G_2`
-///   the σ 2 px Gaussian the structural instrument pools its gradients at
-///   ([`PAIRED_POOL_SIGMA`]). Local means, not raw pixels: the eye reads a
-///   mean offset under texture (a 0.81 dE band is visible under 4 dE of star
-///   noise), and on the disagreement census the σ 2 reading kept the
-///   per-pixel sign on 39 of 41 verdicts, the two it flipped being star
-///   texture a tile did not make (rel1180 msg1 §b).
-///   Who pairs is decided by the finest mode that was read, both ways
-///   (v1.18.0 R2, `fit_zoned`'s entry): an Atmosphere zone's pixels never
-///   pair, even in a Full frame, and a Full zone's pixels pair by its own
-///   structural model, even in an Atmosphere frame; pixels in no zone that
-///   was read pair as the frame's mode says.
+///   other: [`EvidenceModel::paired`]), the presence-weighted mean CIE76
+///   distance between the two sides' pixels, read PER PIXEL:
+///   `Σ w_i·ΔE76(Lab(a_i), Lab(b_i)) / 100 / Σ w_i`, `w` the pixel's
+///   PRESENCE weight (its membership, DEF-5).
+///   Until 2026-11-07 the two sides were pooled at σ 2 px first (the
+///   structural instrument's scale) and read as local means. On the
+///   finished p39 and p36 frames that reading preferred the frame the
+///   per-pixel reading and the eye both put farther from the target (2.71
+///   vs 2.60 and 2.10 vs 1.97 dE76/px on the fit plate): a recipe can trade
+///   fine-scale deviation the pool cannot see for a lower pooled mean
+///   (RULING-1180-joint-r2, addendum 2026-11-07).
+///   Who pairs is the evidence model's one reading
+///   ([`EvidenceModel::paired`]: present and spatially supported), on every
+///   ruler. Until 2026-11-07 the finest mode read decided it (R2): an
+///   Atmosphere frame or zone emptied the pairing and was scored as two
+///   distributions, a ruler the terminal re-read and the floor never take —
+///   on p41 it read the sky correction the per-pixel ruler wanted as harm.
 /// * `E_dist = sqrt(T_L² + T_a² + T_b²) / 100` — where pixels do not pair
-///   (Atmosphere, a structure-blind model), the CIE76 distance between the
+///   (the pixels the structural reading left unsupported — a replaced
+///   sky), the CIE76 distance between the
 ///   two populations' quantile-matched Lab distributions: per channel the
 ///   mean absolute gap of the two weighted CDFs at the same 21 quantiles
 ///   ([`P_CLIP`]-clamped) `T_L` reads on L* ([`tonal_err_with_evidence`]),
@@ -46,43 +43,48 @@ pub(crate) fn look_err(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
 ///   where nothing pairs a white balance that moved 97 % of the frame 3-5
 ///   dE/px closer earned less than [`FIT_QUANT`] and was eliminated
 ///   (rel1180 msg7, R12's terms).
-/// * `p` — the paired share of the evidence mass: the two populations are
-///   read in one unit, so the 0.75 weighs their mass-weighted mean.
-/// * `H_ab` — the worst qualifying band's mean colour offset in units of its
-///   target chroma ([`band_colour_offset`]), times that range's evidence
-///   weight `w`.
-/// * `S` — the structural divergence D ([`structure_divergence`]) under its
-///   tie rule: two luma values within one output code are a tie; a tie is
-///   charged in proportion to the fraction of a code that separates them,
-///   never as a whole rank step. A PENALTY term: with no reading there is
-///   nothing to charge — that is what the abstention says, not that the
-///   structure survived.
+/// * `p` — the paired share of the evidence mass TIMES the pairing's
+///   RELIABILITY `r` (2026-11-08, RULING-1180-joint-r2 addendum 22:30): a
+///   paired pixel enters `E_paired` at `w·r` and `E_dist` at `w·(1 − r)`, an
+///   unpaired pixel at `w` in `E_dist`. `r` is one scalar per population —
+///   the presence-weighted Pearson ρ² of L* between the base and the target
+///   over the population's paired pixels, the share of the target's tonal
+///   spread the pairing explains ([`pairing_reliability`]). On a tight
+///   pairing r ≈ 1 and this is the per-pixel ruler; on a loosely paired
+///   population (the texture re-synthesised, the layout kept: 0 < D under
+///   the pairing line) the per-pixel optimum is the squeezed conditional
+///   mean (errors in variables: the toy zone's paired map held 0.58 of the
+///   target's spread at ρ² 0.30), so the ruler reads that population as
+///   partly unpaired and the distribution term carries the rest. The two
+///   populations are read in one unit, so the 0.75 weighs their
+///   mass-weighted mean.
+///
+/// The 0.75 is J*'s UNIT: it was the colour distance's weight while the
+/// objective also scored a band colour offset (0.15·H_ab) and a structural
+/// divergence (0.10·S), and every J*-denominated constant — [`FIT_QUANT`],
+/// the confidence family, the mode margins — was derived in it, so it stays
+/// as the scale and nothing else. HUE AND STRUCTURE ARE GATES, NOT TERMS
+/// (2026-11-07): on the finished p36 frames the two terms bought 0.0036 of
+/// J* while `E_paired` rose, and the eye sided with `E_paired`. Hue is
+/// judged by the validity law (`fit::validity`: G of the joint objective,
+/// each class of controls on the cells it moves), structure by the D thresholds (`DIVERGENCE_GLOBAL`
+/// / `DIVERGENCE_ZONE`) and the seam / ramp rulers; neither is scored, and a
+/// LOCAL correction's do-no-harm reads the same objective as the frame.
 ///
 /// WEIGHTS (v1.18.0, R11): the objective JUDGES every present pixel at its
 /// presence weight — its membership, 1 for a present frame pixel
 /// ([`EvidenceModel::source_presence_weights`]; DEF-5: presence is
-/// membership, spatial support only decides who pairs) — in every term: `E_paired`,
-/// `E_dist`'s `T_L`, `T_a` and `T_b`, `H_ab`'s band membership, offset and band
-/// weight, `S`, and the paired share `p`. The evidence model's per-range
-/// estimation weights only DRIVE (which ranges may move a control's
-/// estimate); a ship decision read at them is blind to whatever range the
-/// evidence withheld, and a tie there goes to absence however much the photo
-/// gained (rel1180 msg6: p41's cloud-edge band, +4-5.7 dE/px at evidence
-/// weight 0.000-0.21).
-///
-/// S-MODE: S is read where the question is structure — mode and evidence
-/// (`DIVERGENCE_GLOBAL` / `DIVERGENCE_ZONE`, `MODE_MARGIN`) and the
-/// comparisons of two different GLOBAL solves (terminal do-no-harm, the 4b
-/// step-down, base against fit). The do-no-harm of a LOCAL correction (zone,
-/// tile, band, field, tint) reads `E_paired + H_ab` ([`LookTerms::local`],
-/// on a model whose [`EvidenceModel::local`] is set); its seams stay with the
-/// boundary / ramp rulers; its structural gate is the existing D threshold
-/// only.
+/// membership, spatial support only decides who pairs) — in every term:
+/// `E_paired`, `E_dist`'s `T_L`, `T_a` and `T_b`, and the paired share `p`.
+/// The evidence model's per-range estimation weights only DRIVE (which
+/// ranges may move a control's estimate); a ship decision read at them is
+/// blind to whatever range the evidence withheld, and a tie there goes to
+/// absence however much the photo gained (rel1180 msg6: p41's cloud-edge
+/// band, +4-5.7 dE/px at evidence weight 0.000-0.21).
 ///
 /// LOCAL SHIP LAW (R19): a LOCAL correction ships when it earns FIT_QUANT on
 /// its OWN population — this objective read over the region's own present
-/// pixels and bands ([`EvidenceModel::scoped`]: `E_paired + H_ab`, the
-/// region's pairing, its own worst band) — and the frame reading is a guard
+/// pixels ([`EvidenceModel::scoped`]) — and the frame reading is a guard
 /// only: the correction may not raise the frame's J* by more than FIT_QUANT
 /// ([`crate::fit::ships_local`]). Read on the frame, a region's gain is its
 /// own gain times its share, and R1's FIT_QUANT then asked a 6 % tile for
@@ -112,15 +114,8 @@ pub(crate) fn look_err_with_evidence(
     if mass(&evidence.source_presence_weights) <= 0.0 || mass(&evidence.target_presence_weights) <= 0.0 {
         return 1.0;
     }
-    let terms = look_terms(a, b, evidence);
-    if evidence.local { terms.local() } else { terms.total() }
+    look_terms(a, b, evidence).total()
 }
-
-/// The σ of the local mean `E_paired` reads: the σ 2 px pool of the
-/// structural instrument's gradient maps ([`structure_divergence`]), the
-/// scale at which that instrument already decides two rasters show the same
-/// thing. No new number.
-pub(crate) const PAIRED_POOL_SIGMA: f32 = 2.0;
 
 /// The terms of [`look_err_with_evidence`] (J*), each in its own unit.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -130,86 +125,266 @@ pub(crate) struct LookTerms {
     /// `E_dist`, the Lab quantile-distribution dE76 / 100 over the unpaired
     /// population.
     pub dist: f32,
-    /// `p`, the paired share of the evidence mass.
+    /// `p`, the paired share of the evidence mass times the pairing's
+    /// reliability.
     pub share: f32,
-    /// `H_ab·w`, already weighted by the qualifying bands' range evidence.
-    pub hue: f32,
-    /// `S`, the structural divergence capped at 1.
-    pub structural: f32,
+    /// `r`, the pairing's reliability (Pearson ρ² of L* over the paired
+    /// pixels; 1 where the target has no tonal spread to explain).
+    pub reliability: f32,
 }
 
 impl LookTerms {
     /// J*.
     pub(crate) fn total(&self) -> f32 {
-        self.local() + 0.10 * self.structural
-    }
-
-    /// J* as a LOCAL correction's do-no-harm reads it (S-mode,
-    /// [`EvidenceModel::local`]): `E_paired + H_ab` in J*'s own weights, the
-    /// structural term left to the D threshold and the seam / ramp rulers.
-    pub(crate) fn local(&self) -> f32 {
-        0.75 * (self.share * self.paired + (1.0 - self.share) * self.dist) + 0.15 * self.hue
+        0.75 * (self.share * self.paired + (1.0 - self.share) * self.dist)
     }
 }
 
 /// [`look_err_with_evidence`]'s terms, read once.
 pub(crate) fn look_terms(a: &[[f32; 3]], b: &[[f32; 3]], evidence: &EvidenceModel) -> LookTerms {
     let n = a.len().min(b.len());
+    let target = TargetLook::prepared(b, n, evidence);
     let weight = |i: usize| evidence.source_presence_weights.get(i).copied().unwrap_or(0.0).max(0.0);
     let pairs = |i: usize| evidence.paired.get(i).copied().unwrap_or(false);
-    let (mut mass, mut paired_mass) = (0.0f64, 0.0f64);
-    for i in 0..n {
-        mass += weight(i) as f64;
-        if pairs(i) {
-            paired_mass += weight(i) as f64;
-        }
-    }
-    let share = if mass > 0.0 { (paired_mass / mass) as f32 } else { 0.0 };
-    let paired = if paired_mass > 0.0 {
-        let (w, h) = (evidence.width as usize, evidence.height as usize);
-        let local = |px: &[[f32; 3]]| -> Vec<[f32; 3]> {
-            if w * h == px.len() {
-                low_pass_pixels(px, w, h, PAIRED_POOL_SIGMA)
-            } else {
-                px.to_vec()
-            }
-        };
-        let (la, lb) = (local(&a[..n]), local(&b[..n]));
+    let share = target.share;
+    let reliability = target.reliability;
+    let la = lab_of(&a[..n]);
+    let paired = if target.paired_mass > 0.0 {
         let mut sum = 0.0f64;
         for i in (0..n).filter(|&i| pairs(i)) {
             let wi = weight(i) as f64;
             if wi <= 0.0 {
                 continue;
             }
-            let (x, y) = (cie_lab(&la[i]), cie_lab(&lb[i]));
+            let (x, y) = (la[i], target.lab[i]);
             let de = ((x[0] - y[0]).powi(2) + (x[1] - y[1]).powi(2) + (x[2] - y[2]).powi(2)).sqrt();
             sum += wi * de as f64;
         }
-        (sum / paired_mass / 100.0) as f32
+        (sum / target.paired_mass / 100.0) as f32
     } else {
         0.0
     };
     let dist = if share < 1.0 {
-        let unpaired = |weights: &[f32]| -> Vec<f32> {
-            (0..n).map(|i| if pairs(i) { 0.0 } else { weights.get(i).copied().unwrap_or(0.0) }).collect()
-        };
-        let (sw, tw) = (unpaired(&evidence.source_presence_weights), unpaired(&evidence.target_presence_weights));
-        let (la, lb): (Vec<[f32; 3]>, Vec<[f32; 3]>) =
-            (a[..n].iter().map(cie_lab).collect(), b[..n].iter().map(cie_lab).collect());
-        let tonal = lightness_cdf_gap(&la, &sw, &lb, &tw);
-        let (ta, tb) = (opponent_cdf_gap(&la, &sw, &lb, &tw, 1), opponent_cdf_gap(&la, &sw, &lb, &tw, 2));
+        let sw = dist_weights(&evidence.source_presence_weights, n, evidence, reliability);
+        let tonal = cdf_gap(&weighted_cdf(&la, &sw, |p| p[0] / 100.0), &target.cdf_l);
+        let (ta, tb) = (target.opponent_cdf_gap(&la, &sw, 1), target.opponent_cdf_gap(&la, &sw, 2));
         (tonal * tonal + ta * ta + tb * tb).sqrt()
     } else {
         0.0
     };
-    let (hue, hue_weight) = band_colour_offset(a, b, evidence);
-    let (w, h) = (evidence.width, evidence.height);
-    let structural = if !evidence.local && w > 0 && h > 0 && evidence.source_presence_weights.len() == a.len() {
-        structure_divergence(a, b, w, h, &evidence.source_presence_weights).map_or(0.0, |r| r.d)
-    } else {
-        0.0
-    };
-    LookTerms { paired, dist, share, hue: hue * hue_weight.min(1.0), structural: structural.min(1.0) }
+    LookTerms { paired, dist, share, reliability }
+}
+
+/// CIE Lab of every pixel, converted in parallel (each pixel on its own, so
+/// the same values as one after the other).
+pub(super) fn lab_of(px: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    px.par_iter().map(cie_lab).collect()
+}
+
+/// A side's presence weights as the population `E_dist` reads: a paired
+/// pixel at `w·(1 − r)`, an unpaired one at `w`.
+fn dist_weights(weights: &[f32], n: usize, evidence: &EvidenceModel, reliability: f32) -> Vec<f32> {
+    (0..n)
+        .map(|i| {
+            let w = weights.get(i).copied().unwrap_or(0.0);
+            if evidence.paired.get(i).copied().unwrap_or(false) { w * (1.0 - reliability) } else { w }
+        })
+        .collect()
+}
+
+/// The pairing's RELIABILITY `r`: the presence-weighted Pearson ρ² of L*
+/// between the base (`sp`, the evidence model's own source pixels) and the
+/// target over the population's paired pixels — the share of the target's
+/// tonal spread the pairing explains. A target with no spread over those
+/// pixels leaves nothing to explain (r = 1); a flat base explains none of a
+/// spread target (r = 0); no paired mass reads 0 (p is 0 there anyway).
+pub(super) fn pairing_reliability(
+    sp: &[[f32; 3]],
+    target_lab: &[[f32; 3]],
+    n: usize,
+    weight: &dyn Fn(usize) -> f32,
+    pairs: &dyn Fn(usize) -> bool,
+) -> f32 {
+    let mut samples: Vec<(f64, f64, f64)> = Vec::new();
+    let (mut m, mut sx, mut sy) = (0.0f64, 0.0f64, 0.0f64);
+    for (i, (p, t)) in sp.iter().zip(target_lab).enumerate().take(n) {
+        if !pairs(i) {
+            continue;
+        }
+        let w = weight(i) as f64;
+        if w <= 0.0 {
+            continue;
+        }
+        let (x, y) = (cie_lab(p)[0] as f64, t[0] as f64);
+        samples.push((x, y, w));
+        m += w;
+        sx += w * x;
+        sy += w * y;
+    }
+    if m <= 0.0 {
+        return 0.0;
+    }
+    let (mx, my) = (sx / m, sy / m);
+    let (mut vx, mut vy, mut cov) = (0.0f64, 0.0f64, 0.0f64);
+    for (x, y, w) in samples {
+        vx += w * (x - mx) * (x - mx);
+        vy += w * (y - my) * (y - my);
+        cov += w * (x - mx) * (y - my);
+    }
+    if vy <= 0.0 {
+        return 1.0;
+    }
+    if vx <= 0.0 {
+        return 0.0;
+    }
+    ((cov * cov) / (vx * vy)).clamp(0.0, 1.0) as f32
+}
+
+/// The mean absolute gap between two CDFs at 21 quantiles (each clamped to
+/// [`P_CLIP`]).
+fn cdf_gap(ca: &[f32], cb: &[f32]) -> f32 {
+    let mut gap = 0.0f32;
+    for i in 0..=20 {
+        let q = (i as f32 / 20.0).clamp(P_CLIP, 1.0 - P_CLIP);
+        gap += (quantile(ca, q) - quantile(cb, q)).abs();
+    }
+    gap / 21.0
+}
+
+/// The TARGET's side of [`look_terms`], prepared once per (target, evidence)
+/// and re-read from a thread-local slot. A solve reads one target against
+/// thousands of renders; every quantity here depends on the target raster and
+/// the evidence alone and is computed exactly as the one-pass form computed
+/// it, so a prepared read is the unprepared read bit for bit.
+struct TargetLook {
+    key: (usize, u64),
+    /// `p`, the paired share of the evidence mass times the pairing's
+    /// reliability `r`; the paired mass; and `r` itself.
+    share: f32,
+    paired_mass: f64,
+    reliability: f32,
+    /// Lab of the target as it is; its distribution weights (a paired pixel
+    /// at `w·(1 − r)`, an unpaired one at `w`) and its L*/100 CDF over them
+    /// (empty while everything pairs at r = 1).
+    lab: Vec<[f32; 3]>,
+    unpaired: Vec<f32>,
+    cdf_l: Vec<f32>,
+    /// Per Lab channel, the target's extremes over its distribution-weighted
+    /// present pixels (`(INFINITY, NEG_INFINITY)` where none is present).
+    extremes: [(f32, f32); 3],
+    /// Per channel, the target's opponent CDF at the span it was last read
+    /// on: the span is set by both sides, so the CDF is re-cut when it moves.
+    opponent: RefCell<[Option<OpponentCdf>; 3]>,
+}
+
+struct OpponentCdf {
+    span: (f32, f32),
+    cdf: Vec<f32>,
+}
+
+thread_local! {
+    static TARGET_LOOKS: RefCell<Vec<Rc<TargetLook>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Prepared target sides kept per thread: the frame's read and a band
+/// reading of the same frame alternate, and nothing else does.
+const TARGET_LOOK_SLOTS: usize = 2;
+
+impl TargetLook {
+    fn prepared(b: &[[f32; 3]], n: usize, evidence: &EvidenceModel) -> Rc<Self> {
+        let words = b[..n]
+            .iter()
+            .flatten()
+            .map(|v| v.to_bits())
+            .chain(evidence.source_pixels.iter().flatten().map(|v| v.to_bits()))
+            .chain(evidence.source_presence_weights.iter().map(|v| v.to_bits()))
+            .chain(evidence.target_presence_weights.iter().map(|v| v.to_bits()))
+            .chain(evidence.paired.iter().map(|&p| p as u32))
+            .chain([evidence.width, evidence.height]);
+        let key = (n, structure::fingerprint(words));
+        if let Some(hit) = TARGET_LOOKS.with(|slots| slots.borrow().iter().find(|t| t.key == key).cloned()) {
+            return hit;
+        }
+        let built = Rc::new(Self::build(b, n, evidence, key));
+        TARGET_LOOKS.with(|slots| {
+            let mut slots = slots.borrow_mut();
+            slots.insert(0, built.clone());
+            slots.truncate(TARGET_LOOK_SLOTS);
+        });
+        built
+    }
+
+    fn build(b: &[[f32; 3]], n: usize, evidence: &EvidenceModel, key: (usize, u64)) -> Self {
+        let weight = |i: usize| evidence.source_presence_weights.get(i).copied().unwrap_or(0.0).max(0.0);
+        let pairs = |i: usize| evidence.paired.get(i).copied().unwrap_or(false);
+        let (mut mass, mut paired_mass) = (0.0f64, 0.0f64);
+        for i in 0..n {
+            mass += weight(i) as f64;
+            if pairs(i) {
+                paired_mass += weight(i) as f64;
+            }
+        }
+        let lab = lab_of(&b[..n]);
+        let reliability = pairing_reliability(&evidence.source_pixels, &lab, n, &weight, &pairs);
+        let share = if mass > 0.0 { (paired_mass / mass) as f32 * reliability } else { 0.0 };
+        let (unpaired, cdf_l, extremes) = if share < 1.0 {
+            let unpaired = dist_weights(&evidence.target_presence_weights, n, evidence, reliability);
+            let cdf_l = weighted_cdf(&lab, &unpaired, |p| p[0] / 100.0);
+            let mut extremes = [(f32::INFINITY, f32::NEG_INFINITY); 3];
+            for (p, &wi) in lab.iter().zip(&unpaired) {
+                if wi > 0.0 {
+                    for (ch, (lo, hi)) in extremes.iter_mut().enumerate() {
+                        *lo = lo.min(p[ch]);
+                        *hi = hi.max(p[ch]);
+                    }
+                }
+            }
+            (unpaired, cdf_l, extremes)
+        } else {
+            (Vec::new(), Vec::new(), [(f32::INFINITY, f32::NEG_INFINITY); 3])
+        };
+        TargetLook {
+            key,
+            share,
+            paired_mass,
+            reliability,
+            lab,
+            unpaired,
+            cdf_l,
+            extremes,
+            opponent: RefCell::new([None, None, None]),
+        }
+    }
+
+    /// The 21-quantile gap of the opponent channel `ch` (1 = a*, 2 = b*) over
+    /// 100, as `cdf_gap` reads L*. a* and b* are signed, so the channel is
+    /// mapped onto the CDF's [0, 1] by the span both populations' present
+    /// pixels occupy and the gap is carried back by that span: the mapping is
+    /// exact, it sets only the bins' width, and it adds no number.
+    fn opponent_cdf_gap(&self, la: &[[f32; 3]], wa: &[f32], ch: usize) -> f32 {
+        let (mut lo, mut hi) = self.extremes[ch];
+        for (p, &wi) in la.iter().zip(wa) {
+            if wi > 0.0 {
+                lo = lo.min(p[ch]);
+                hi = hi.max(p[ch]);
+            }
+        }
+        let span = hi - lo;
+        if !span.is_finite() || span <= 1e-6 {
+            return 0.0;
+        }
+        let value = |p: &[f32; 3]| (p[ch] - lo) / span;
+        let ca = weighted_cdf(la, wa, value);
+        let mut slot = self.opponent.borrow_mut();
+        let cut = match &slot[ch] {
+            Some(c) if c.span == (lo, hi) => c,
+            _ => {
+                slot[ch] = Some(OpponentCdf { span: (lo, hi), cdf: weighted_cdf(&self.lab, &self.unpaired, value) });
+                slot[ch].as_ref().expect("just cut")
+            }
+        };
+        cdf_gap(&ca, &cut.cdf) * span / 100.0
+    }
 }
 
 /// The number of luminance bands a tone slider's own population is read on
@@ -255,22 +430,19 @@ impl LumaBands {
         if self.band[..n].iter().all(Option::is_none) {
             return Vec::new();
         }
-        let (w, h) = (evidence.width as usize, evidence.height as usize);
-        let local = |px: &[[f32; 3]]| -> Vec<[f32; 3]> {
-            if w * h == px.len() { low_pass_pixels(px, w, h, PAIRED_POOL_SIGMA) } else { px.to_vec() }
-        };
-        let (la, lb) = (local(&a[..n]), local(&b[..n]));
+        let target = TargetLook::prepared(b, n, evidence);
+        let la = lab_of(&a[..n]);
+        let lb = &target.lab;
         let (mut sum, mut mass) = (vec![0.0f64; LUMA_BANDS], vec![0.0f64; LUMA_BANDS]);
         for i in 0..n {
             let Some(k) = self.band[i] else { continue };
-            let (x, y) = (cie_lab(&la[i]), cie_lab(&lb[i]));
+            let (x, y) = (la[i], lb[i]);
             let de = ((x[0] - y[0]).powi(2) + (x[1] - y[1]).powi(2) + (x[2] - y[2]).powi(2)).sqrt();
             sum[k] += self.weight[i] * de as f64;
             mass[k] += self.weight[i];
         }
         (0..LUMA_BANDS).map(|k| if mass[k] > 0.0 { (0.75 * sum[k] / mass[k] / 100.0) as f32 } else { 0.0 }).collect()
     }
-
     /// R22 (a): the band a tone slider ACTS on, set by its own response before
     /// any error is read — the band whose members its move shifts most in L*
     /// (presence-weighted mean |ΔL*| between the render with it and the render
@@ -289,152 +461,6 @@ impl LumaBands {
         let best = (0..LUMA_BANDS).max_by(|a, b| response[*a].total_cmp(&response[*b]))?;
         (response[best] > 0.0).then_some(best)
     }
-}
-
-/// `T_L`: the mean absolute gap between two weighted L*/100 CDFs at 21
-/// quantiles (each clamped to [`P_CLIP`]), over CIE Lab pixels.
-fn lightness_cdf_gap(la: &[[f32; 3]], wa: &[f32], lb: &[[f32; 3]], wb: &[f32]) -> f32 {
-    let lightness = |p: &[f32; 3]| p[0] / 100.0;
-    let (ca, cb) = (weighted_cdf(la, wa, lightness), weighted_cdf(lb, wb, lightness));
-    let mut gap = 0.0f32;
-    for i in 0..=20 {
-        let q = (i as f32 / 20.0).clamp(P_CLIP, 1.0 - P_CLIP);
-        gap += (quantile(&ca, q) - quantile(&cb, q)).abs();
-    }
-    gap / 21.0
-}
-
-/// The 21-quantile gap of the opponent channel `ch` (1 = a*, 2 = b*) over
-/// 100, as [`lightness_cdf_gap`] reads L*. a* and b* are signed, so the
-/// channel is mapped onto the CDF's [0, 1] by the span both populations'
-/// present pixels occupy and the gap is carried back by that span: the
-/// mapping is exact, it sets only the bins' width, and it adds no number.
-fn opponent_cdf_gap(la: &[[f32; 3]], wa: &[f32], lb: &[[f32; 3]], wb: &[f32], ch: usize) -> f32 {
-    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-    for (px, w) in [(la, wa), (lb, wb)] {
-        for (p, &wi) in px.iter().zip(w) {
-            if wi > 0.0 {
-                lo = lo.min(p[ch]);
-                hi = hi.max(p[ch]);
-            }
-        }
-    }
-    let span = hi - lo;
-    if !span.is_finite() || span <= 1e-6 {
-        return 0.0;
-    }
-    let value = |p: &[f32; 3]| (p[ch] - lo) / span;
-    let (ca, cb) = (weighted_cdf(la, wa, value), weighted_cdf(lb, wb, value));
-    let mut gap = 0.0f32;
-    for i in 0..=20 {
-        let q = (i as f32 / 20.0).clamp(P_CLIP, 1.0 - P_CLIP);
-        gap += (quantile(&ca, q) - quantile(&cb, q)).abs();
-    }
-    gap / 21.0 * span / 100.0
-}
-
-/// The TONAL ruler a tone stage is held to: `T_L`, the 21-quantile gap of the
-/// two frames' evidence-weighted L*/100 CDFs — the tonal half of `E_dist`
-/// (v1.18.0; display luma601 before, the same mechanism in CIE units). It is
-/// the term a tone stage controls, and so the ruler a tone stage is held to
-/// (2026-10-21): the sliders and the residual curve each ship only where they
-/// leave this reading no worse than they found it. Judging them on the whole
-/// objective charged a correct luma move for the colour-mean drift that
-/// brightening a muted frame toward a vivid target necessarily brings —
-/// drift the stages after it exist to correct — while the lantern street's
-/// wrong +1.65 EV raised the display form of this term 0.0468 → 0.0748 on
-/// its own and needs no other term to be refused. A ruler JUDGES, so it reads
-/// the presence weights as J* does (R11), never the estimation weights. The
-/// tone stages keep this ruler; `E_dist` reads it with the two opponent
-/// channels' gaps beside it (R15).
-pub(crate) fn tonal_err_with_evidence(
-    a: &[[f32; 3]],
-    b: &[[f32; 3]],
-    evidence: &EvidenceModel,
-) -> f32 {
-    let (la, lb): (Vec<[f32; 3]>, Vec<[f32; 3]>) = (a.iter().map(cie_lab).collect(), b.iter().map(cie_lab).collect());
-    lightness_cdf_gap(&la, &evidence.source_presence_weights, &lb, &evidence.target_presence_weights)
-}
-
-/// H_ab, the colour term's WORST band (v1.18.0): per qualifying HSL band,
-/// the distance between the two sides' mean CIE a*, b* over the band's
-/// members, in units of the TARGET band's own chroma — `min(|Δ(mean a*,
-/// mean b*)| / C*_target, 1)` with `C*_target = |(mean a*, mean b*)|` of the
-/// target's members — and the worst such band, not a weighted mean: one
-/// region with wrecked colour ruins a photo no matter how small its area
-/// share (a lavender sky over perfect rocks), and an area-weighted mean lets
-/// exactly that hide (measured: the violet-sky curves slipped through the
-/// cast-acceptance gate on the mean variant).
-///
-/// The reading it replaces took the band's centroid HUE ANGLE alone,
-/// saturating at 60°, so a band whose chroma overshot the target at the
-/// right angle read as matched (rel1180 msg1: a land tile's a* went -3.8 ->
-/// +4.4 and was admitted because its centroid angle moved closer). The 60°
-/// saturation transfers exactly: a rotation of 60° at chroma C is a chord of
-/// length C, so a band rotated by the old saturation reads 1 here as it did
-/// there, and an offset in chroma now counts as an offset in angle does.
-///
-/// Membership is the display-HSL band partition and its chroma gate
-/// (`band_stats_weighted`) and the [`EVIDENCE_MIN_SHARE`] floor on both
-/// sides, every pixel at its PRESENCE weight (R11); a band's weight is its
-/// two-sided presence share (`two_sided_share`: the range's evidence weight
-/// before the estimation verdict withholds it). A band the evidence withholds
-/// from estimation is still judged. Returns (the worst band's offset, the
-/// largest qualifying band's two-sided presence share).
-fn band_colour_offset(a: &[[f32; 3]], b: &[[f32; 3]], evidence: &EvidenceModel) -> (f32, f32) {
-    let (sa, ta) = band_ab_weighted(a, &evidence.source_presence_weights);
-    let (sb, tb) = band_ab_weighted(b, &evidence.target_presence_weights);
-    let (mut worst, mut weight) = (0.0f32, 0.0f32);
-    if ta < 1.0 || tb < 1.0 {
-        return (worst, weight);
-    }
-    for i in 0..8 {
-        let (x, y) = (&sa[i], &sb[i]);
-        let range_weight = evidence.hue.get(i).map(|r| r.two_sided_share).unwrap_or(0.0);
-        if range_weight <= 0.0 || x[0] / ta < EVIDENCE_MIN_SHARE as f64 || y[0] / tb < EVIDENCE_MIN_SHARE as f64 {
-            continue;
-        }
-        let mean = |s: &[f64; 3]| (s[1] / s[0], s[2] / s[0]);
-        let ((xa, xb), (ya, yb)) = (mean(x), mean(y));
-        let chroma = ya.hypot(yb);
-        let offset = (ya - xa).hypot(yb - xb);
-        // A band whose target mean sits at the neutral axis has no chroma to
-        // measure in; any offset there is a whole band's worth of wrong colour.
-        let read = if chroma > 1e-6 { (offset / chroma).min(1.0) } else if offset > 1e-6 { 1.0 } else { 0.0 };
-        worst = worst.max(read as f32);
-        weight = weight.max(range_weight);
-    }
-    (worst, weight)
-}
-
-/// Per-band [weight, Σ weight·a*, Σ weight·b*] over the display-HSL band
-/// partition `band_stats_weighted` uses (the same chroma gate, the same
-/// two-band bracketing), and the total weight of the pixels that entered.
-fn band_ab_weighted(px: &[[f32; 3]], weights: &[f32]) -> ([[f64; 3]; 8], f64) {
-    let mut bands = [[0.0f64; 3]; 8];
-    let mut total = 0.0f64;
-    for (i, p) in px.iter().enumerate() {
-        let weight = weights.get(i).copied().unwrap_or(0.0).max(0.0) as f64;
-        if weight <= 0.0 {
-            continue;
-        }
-        let chroma = p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]);
-        if chroma < 0.06 {
-            continue;
-        }
-        let (h, _, _) = render::rgb_to_hsl(p[0], p[1], p[2]);
-        let (b0, b1, w1) = render::bracket_bands(h * 360.0, &render::HSL_CENTERS);
-        let lab = cie_lab(p);
-        for (bi, w) in [(b0, 1.0 - w1 as f64), (b1, w1 as f64)] {
-            let w = w * weight;
-            let band = &mut bands[bi];
-            band[0] += w;
-            band[1] += w * lab[1] as f64;
-            band[2] += w * lab[2] as f64;
-        }
-        total += weight;
-    }
-    (bands, total)
 }
 
 pub(super) fn round1(v: f32) -> f32 {

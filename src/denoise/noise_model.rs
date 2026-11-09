@@ -41,8 +41,6 @@
 //! Units: the normalised signed mosaic the develop demosaics
 //! (`(v − black) / (white − black)`), so `a` is in full-scale units and `b`
 //! in full-scale².
-#![cfg_attr(not(test), allow(dead_code))] // the colour stage that reads it lands next (E3 commit b)
-
 use rayon::prelude::*;
 
 /// Cells per patch side (a patch is `2·PATCH` pixels square): the smallest

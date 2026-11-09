@@ -692,10 +692,10 @@ Reverse-fit uses its own **Reverse-fit strength** dial in the Reverse-fit fold
 Strength above it does not reach the fit. At or below the shipped 65% setting the historical path is
 byte-identical, including white balance: a demand outside its budget remains
 as-shot. Above 65%, WB demands outside the widened budget shrink along the
-requested Kelvin/tint direction and are disclosed. The pre/post WB renders must
-also pass the foreign-hue veto and a weighted rotation allowance, pinned at
-0.05 through 65%, about 0.593 at 85%, and 1.0 at full strength. If no legal WB
-remains, it is withheld and the recipe stays as-shot with a typed explanation.
+requested Kelvin/tint direction and are disclosed. Like every control, the white
+balance must also leave no brightness-and-hue band of the photo farther from
+the target than it found it; where it would, it is scaled back toward as-shot
+(to as-shot if nothing less is admitted) and the report says by how much.
 
 Since v1.3.0, the full solve has a white balance too, not only the Atmosphere
 path. It is solved from the same population estimator — since v1.17.0 only the

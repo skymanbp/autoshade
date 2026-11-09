@@ -166,6 +166,11 @@ pub struct FitReport {
     pub recipe: EditRecipe,
     pub err_before: f32,
     pub err_after: f32,
+    /// The cap the recipe's confidence is read under (the joint, evidence,
+    /// same-frame, Atmosphere and veto caps, `compose_report`), so a reading
+    /// taken later — the terminal full-size one — re-derives the confidence
+    /// from the J* that ships instead of quoting one read on the preview.
+    pub(crate) confidence_cap: f32,
     /// Global solve policy selected before any CDF fitting.
     pub mode: FitMode,
     /// Structural reading that selected `mode` (promotion may select
@@ -395,13 +400,6 @@ pub(crate) enum AtmosphereReference {
 pub(crate) struct SharedPopulation {
     pub(super) source: Vec<f32>,
     pub(super) target: Vec<f32>,
-    /// MEMBERSHIP of the shared content, 1 / 0 per pixel (DEF-2): the source
-    /// pixels a confident cell maps from, the target pixels a cell answers
-    /// for. The weights above are the estimation's; these are the population
-    /// a control solved from them is judged on (presence is membership,
-    /// DEF-5).
-    pub(super) source_member: Vec<f32>,
-    pub(super) target_member: Vec<f32>,
     pub(super) source_retained: f32,
     pub(super) target_retained: f32,
 }
@@ -465,8 +463,6 @@ pub(super) fn shared_content_population(
         .min(c.target_answered.len());
     let mut source = vec![0.0f32; n];
     let mut target = vec![0.0f32; n];
-    let mut source_member = vec![0.0f32; n];
-    let mut target_member = vec![0.0f32; n];
     let (mut kept_s, mut kept_t) = (0.0f64, 0.0f64);
     let (mut all_s, mut all_t) = (0.0f64, 0.0f64);
     for i in 0..n {
@@ -476,20 +472,16 @@ pub(super) fn shared_content_population(
         all_t += wt as f64;
         if c.conf[i] >= CONFIDENT_MATCH {
             source[i] = evidence.source_weights[i];
-            source_member[i] = 1.0;
             kept_s += ws as f64;
         }
         if c.target_answered[i] > 0.0 {
             target[i] = evidence.target_weights[i];
-            target_member[i] = 1.0;
             kept_t += wt as f64;
         }
     }
     (all_s > 0.0 && all_t > 0.0).then(|| SharedPopulation {
         source,
         target,
-        source_member,
-        target_member,
         source_retained: (kept_s / all_s) as f32,
         target_retained: (kept_t / all_t) as f32,
     })

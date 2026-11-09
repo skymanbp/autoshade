@@ -1,6 +1,9 @@
 //! Structural divergence between the two renditions: the per-mode measure, its coarse form, the divergence pair and the pairing scale.
 
 use super::*;
+use rayon::prelude::*;
+use std::cell::RefCell;
+use std::sync::Arc;
 
 /// The smallest eroded core [`structure_divergence`] will read. The
 /// translation search inside it already refuses any shift supported by fewer
@@ -43,221 +46,45 @@ pub fn structure_divergence(
     if n == 0 || src_px.len() != n || tgt_px.len() != n || weights.len() != n {
         return None;
     }
-
-    let rank_equalized = |px: &[[f32; 3]]| -> Vec<f32> {
-        let mut hist = [0.0f64; HIST_BINS];
-        let mut bins = Vec::with_capacity(n);
-        for (p, &weight) in px.iter().zip(weights) {
-            let bin = (luma601(p).clamp(0.0, 1.0) * (HIST_BINS - 1) as f32).round() as usize;
-            bins.push(bin);
-            hist[bin] += weight.max(0.0) as f64;
-        }
-        let total = hist.iter().sum::<f64>();
-        if total <= 1e-12 {
-            return vec![0.0; n];
-        }
-        // THE TIE RULE (v1.18.0): two luma values within one output code are
-        // a tie; a tie is charged in proportion to the fraction of a code
-        // that separates them, never as a whole rank step. The render's
-        // quantum is one 8-bit code, `CODE` = 1023/255 = 4.012 of the
-        // histogram's bins, and below it two values are not told apart by
-        // anything the fit ships. The rank of a bin is therefore its
-        // MID-RANK (the mass below it plus half its own) averaged over a box
-        // exactly one code wide centred on it — the expected rank of a value
-        // known to one code. A flat block whose render varies by a fraction
-        // of a code (a clipped sky, a crushed shadow, a posterised or
-        // generated target) keeps one rank up to that fraction, where the
-        // plain cumulative CDF split it by bin into ranks a whole block's
-        // mass apart; continuous luma keeps a continuous rank, where giving
-        // every value of a code ONE rank posterises the rank image into
-        // code-wide contours the low-passed reading then sees as structure
-        // (rel1171 msg10 §1: that form read the coarse Cornwall panel 0.183
-        // against this form's 0.108).
-        let mut below = 0.0f64;
-        let mut mid = [0.0f64; HIST_BINS];
-        for (m, &mass) in mid.iter_mut().zip(&hist) {
-            *m = (below + 0.5 * mass) / total;
-            below += mass;
-        }
-        const CODE: f64 = (HIST_BINS - 1) as f64 / 255.0;
-        let reach = (CODE / 2.0).floor() as isize;
-        // The two end taps carry what is left of the code's width, so the
-        // box is exactly CODE bins wide and its taps sum to CODE.
-        let edge = (CODE - (2 * reach - 1) as f64) / 2.0;
-        let rank: Vec<f64> = (0..HIST_BINS as isize)
-            .map(|b| {
-                (-reach..=reach)
-                    .map(|k| {
-                        let tap = if k.abs() == reach { edge } else { 1.0 };
-                        tap * mid[(b + k).clamp(0, HIST_BINS as isize - 1) as usize]
-                    })
-                    .sum::<f64>()
-                    / CODE
-            })
-            .collect();
-        bins.into_iter().map(|i| rank[i] as f32).collect()
-    };
-
-    let mut core: Vec<bool> = weights.iter().map(|&v| v > 0.8).collect();
+    let target = TargetSide::prepared(tgt_px, w, h, weights)?;
+    let src_rank = rank_equalized(src_px, weights);
+    let (src_gradient, src_energy) = target.signature(&src_rank);
     let (wu, hu) = (w as usize, h as usize);
-    for _ in 0..3 {
-        let mut next = core.clone();
-        for y in 0..hu {
-            for x in 0..wu {
-                let i = y * wu + x;
-                next[i] = x > 0
-                    && x + 1 < wu
-                    && y > 0
-                    && y + 1 < hu
-                    && core[i]
-                    && core[i - 1]
-                    && core[i + 1]
-                    && core[i - wu]
-                    && core[i + wu];
-            }
-        }
-        core = next;
-    }
-    if core.iter().filter(|&&v| v).count() < STRUCTURE_MIN_CORE_PX {
-        return None;
-    }
 
-    let gaussian_blur = |input: &[f32], sigma: f32| -> Vec<f32> {
-        let kernel = band_kernel(sigma);
-        let radius = (kernel.len() / 2) as isize;
-        let mut tmp = vec![0.0f32; n];
-        let mut out = vec![0.0f32; n];
-        for y in 0..hu {
-            for x in 0..wu {
-                let mut v = 0.0f32;
-                for (ki, &kv) in kernel.iter().enumerate() {
-                    let sx = x as isize + ki as isize - radius;
-                    if (0..wu as isize).contains(&sx) {
-                        v += input[y * wu + sx as usize] * kv;
-                    }
-                }
-                tmp[y * wu + x] = v;
-            }
-        }
-        for y in 0..hu {
-            for x in 0..wu {
-                let mut v = 0.0f32;
-                for (ki, &kv) in kernel.iter().enumerate() {
-                    let sy = y as isize + ki as isize - radius;
-                    if (0..hu as isize).contains(&sy) {
-                        v += tmp[sy as usize * wu + x] * kv;
-                    }
-                }
-                out[y * wu + x] = v;
-            }
-        }
-        out
-    };
-
-    // DEF-3: the bands read inside the mask. A truncated blur of the whole
-    // rank image fed the core's coarse bands from up to 48 px past the mask
-    // (a cell fully inside the kept two thirds of a frame read energy_error
-    // 0.9589 from the replaced third beside it, 0.0000 without it); the
-    // normalised masked blur weighs each tap by the mask, so outside pixels
-    // contribute nothing and the image border needs no rule of its own.
-    let mask: Vec<f32> = weights.iter().map(|v| v.max(0.0)).collect();
-    let mask_blur: Vec<Vec<f32>> = BAND_SIGMAS.iter().map(|&s| gaussian_blur(&mask, s)).collect();
-    let masked_blur = |input: &[f32], band: usize, sigma: f32| -> Vec<f32> {
-        let weighted: Vec<f32> = input.iter().zip(&mask).map(|(v, m)| v * m).collect();
-        gaussian_blur(&weighted, sigma)
-            .into_iter()
-            .zip(&mask_blur[band])
-            .map(|(v, m)| if *m > 1e-12 { v / m } else { 0.0 })
-            .collect()
-    };
-    let signature = |rank: &[f32]| -> (Vec<f32>, [f32; 5]) {
-        let blurred: Vec<Vec<f32>> = BAND_SIGMAS
-            .iter()
-            .enumerate()
-            .map(|(band, &s)| masked_blur(rank, band, s))
-            .collect();
-        let mut energy = [0.0f32; 5];
-        let count = core.iter().filter(|&&v| v).count() as f64;
-        for band in 0..5 {
-            let mut sum = 0.0f64;
-            for i in 0..n {
-                if !core[i] {
-                    continue;
-                }
-                let v = if band == 0 {
-                    rank[i] - blurred[0][i]
-                } else {
-                    blurred[band - 1][i] - blurred[band][i]
-                };
-                sum += (v * v) as f64;
-            }
-            energy[band] = (sum / count).sqrt() as f32;
-        }
-        let mut gradient = vec![0.0f32; n];
-        for y in 1..hu.saturating_sub(1) {
-            for x in 1..wu.saturating_sub(1) {
-                let i = y * wu + x;
-                let dx = 0.5 * (rank[i + 1] - rank[i - 1]);
-                let dy = 0.5 * (rank[i + wu] - rank[i - wu]);
-                gradient[i] = (dx * dx + dy * dy).sqrt();
-            }
-        }
-        (gaussian_blur(&gradient, 2.0), energy)
-    };
-
-    let src_rank = rank_equalized(src_px);
-    let tgt_rank = rank_equalized(tgt_px);
-    let (src_gradient, src_energy) = signature(&src_rank);
-    let (tgt_gradient, tgt_energy) = signature(&tgt_rank);
-
-    let mut best = -1.0f64;
-    for dy in -6isize..=6 {
-        for dx in -6isize..=6 {
-            let mut count = 0usize;
-            let (mut sx_sum, mut ty_sum) = (0.0f64, 0.0f64);
-            for y in 0..hu {
-                for x in 0..wu {
-                    let i = y * wu + x;
-                    let sy = y as isize - dy;
-                    let sx = x as isize - dx;
-                    if core[i]
-                        && (0..hu as isize).contains(&sy)
-                        && (0..wu as isize).contains(&sx)
-                    {
-                        sx_sum += src_gradient[sy as usize * wu + sx as usize] as f64;
-                        ty_sum += tgt_gradient[i] as f64;
-                        count += 1;
-                    }
+    // The translation search, one shift per task. Each shift's sums run over
+    // the core in row-major order, exactly as one loop over the frame that
+    // skips the pixels outside the core did, so every sum is the same sum in
+    // the same order; the target's own sums of a shift (its count, its mean,
+    // its variance) are read from the prepared side.
+    let best = (0..SHIFTS * SHIFTS)
+        .into_par_iter()
+        .map(|k| {
+            let dy = (k / SHIFTS) as isize - SHIFT_REACH;
+            let dx = (k % SHIFTS) as isize - SHIFT_REACH;
+            let (count, ty_mean, sb) = target.shifts[k]?;
+            let mut sx_sum = 0.0f64;
+            for &(x, y) in &target.core_xy {
+                let (sy, sx) = (y as isize - dy, x as isize - dx);
+                if (0..hu as isize).contains(&sy) && (0..wu as isize).contains(&sx) {
+                    sx_sum += src_gradient[sy as usize * wu + sx as usize] as f64;
                 }
             }
-            if count < STRUCTURE_MIN_CORE_PX {
-                continue;
-            }
-            let (sx_mean, ty_mean) = (sx_sum / count as f64, ty_sum / count as f64);
-            let (mut cross, mut sa, mut sb) = (0.0f64, 0.0f64, 0.0f64);
-            for y in 0..hu {
-                for x in 0..wu {
-                    let i = y * wu + x;
-                    let sy = y as isize - dy;
-                    let sx = x as isize - dx;
-                    if core[i]
-                        && (0..hu as isize).contains(&sy)
-                        && (0..wu as isize).contains(&sx)
-                    {
-                        let a = src_gradient[sy as usize * wu + sx as usize] as f64 - sx_mean;
-                        let b = tgt_gradient[i] as f64 - ty_mean;
-                        cross += a * b;
-                        sa += a * a;
-                        sb += b * b;
-                    }
+            let sx_mean = sx_sum / count as f64;
+            let (mut cross, mut sa) = (0.0f64, 0.0f64);
+            for &(x, y) in &target.core_xy {
+                let (sy, sx) = (y as isize - dy, x as isize - dx);
+                if (0..hu as isize).contains(&sy) && (0..wu as isize).contains(&sx) {
+                    let a = src_gradient[sy as usize * wu + sx as usize] as f64 - sx_mean;
+                    let b = target.gradient[y as usize * wu + x as usize] as f64 - ty_mean;
+                    cross += a * b;
+                    sa += a * a;
                 }
             }
             let den = (sa * sb).sqrt();
-            if den > 0.0 {
-                best = best.max(cross / den);
-            }
-        }
-    }
+            (den > 0.0).then(|| cross / den)
+        })
+        .fold(|| -1.0f64, |best, v| v.map_or(best, |v| best.max(v)))
+        .reduce(|| -1.0f64, f64::max);
     // No translation offered gradient variance on BOTH sides (one side, or
     // both, flat inside the core): the correlation term is not a
     // measurement and contributes NOTHING to D — 1.0 is the value that
@@ -271,10 +98,294 @@ pub fn structure_divergence(
     // an abstention refuses the uniform tile and, through `is_some_and`,
     // lets a flattened target through the mode gate as "not divergent".
     let correlation = if best > -1.0 { best as f32 } else { 1.0 };
-    let core_count = core.iter().filter(|&&v| v).count();
-    let energy_error = band_energy_error(&src_energy, &tgt_energy, &band_energy_floors(core_count));
+    let energy_error = band_energy_error(&src_energy, &target.energy, &target.floors);
     let d = ((1.0 - correlation).powi(2) + energy_error.powi(2)).sqrt();
     Some(Divergence { correlation, energy_error, d })
+}
+
+/// The translation search's reach, ±6 px, and its width in shifts.
+const SHIFT_REACH: isize = 6;
+const SHIFTS: usize = 2 * SHIFT_REACH as usize + 1;
+
+/// Luma rank-equalised through a mask-weighted [`HIST_BINS`]-bin CDF under
+/// the one-code tie rule.
+fn rank_equalized(px: &[[f32; 3]], weights: &[f32]) -> Vec<f32> {
+    let n = px.len();
+    let mut hist = [0.0f64; HIST_BINS];
+    let mut bins = Vec::with_capacity(n);
+    for (p, &weight) in px.iter().zip(weights) {
+        let bin = (luma601(p).clamp(0.0, 1.0) * (HIST_BINS - 1) as f32).round() as usize;
+        bins.push(bin);
+        hist[bin] += weight.max(0.0) as f64;
+    }
+    let total = hist.iter().sum::<f64>();
+    if total <= 1e-12 {
+        return vec![0.0; n];
+    }
+    // THE TIE RULE (v1.18.0): two luma values within one output code are
+    // a tie; a tie is charged in proportion to the fraction of a code
+    // that separates them, never as a whole rank step. The render's
+    // quantum is one 8-bit code, `CODE` = 1023/255 = 4.012 of the
+    // histogram's bins, and below it two values are not told apart by
+    // anything the fit ships. The rank of a bin is therefore its
+    // MID-RANK (the mass below it plus half its own) averaged over a box
+    // exactly one code wide centred on it — the expected rank of a value
+    // known to one code. A flat block whose render varies by a fraction
+    // of a code (a clipped sky, a crushed shadow, a posterised or
+    // generated target) keeps one rank up to that fraction, where the
+    // plain cumulative CDF split it by bin into ranks a whole block's
+    // mass apart; continuous luma keeps a continuous rank, where giving
+    // every value of a code ONE rank posterises the rank image into
+    // code-wide contours the low-passed reading then sees as structure
+    // (rel1171 msg10 §1: that form read the coarse Cornwall panel 0.183
+    // against this form's 0.108).
+    let mut below = 0.0f64;
+    let mut mid = [0.0f64; HIST_BINS];
+    for (m, &mass) in mid.iter_mut().zip(&hist) {
+        *m = (below + 0.5 * mass) / total;
+        below += mass;
+    }
+    const CODE: f64 = (HIST_BINS - 1) as f64 / 255.0;
+    let reach = (CODE / 2.0).floor() as isize;
+    // The two end taps carry what is left of the code's width, so the
+    // box is exactly CODE bins wide and its taps sum to CODE.
+    let edge = (CODE - (2 * reach - 1) as f64) / 2.0;
+    let rank: Vec<f64> = (0..HIST_BINS as isize)
+        .map(|b| {
+            (-reach..=reach)
+                .map(|k| {
+                    let tap = if k.abs() == reach { edge } else { 1.0 };
+                    tap * mid[(b + k).clamp(0, HIST_BINS as isize - 1) as usize]
+                })
+                .sum::<f64>()
+                / CODE
+        })
+        .collect();
+    bins.into_iter().map(|i| rank[i] as f32).collect()
+}
+
+/// A separable Gaussian blur with the kernel's taps as given (no border
+/// renormalisation). Every output value is its in-frame taps' contributions
+/// added in tap order from zero — exactly what a per-pixel loop over the
+/// kernel adds, in the order it adds them — so this row-at-a-time form, which
+/// the compiler vectorises along a row and rayon spreads over rows, is that
+/// loop bit for bit.
+fn gaussian_blur(input: &[f32], w: usize, h: usize, kernel: &[f32]) -> Vec<f32> {
+    let n = w * h;
+    if n == 0 {
+        return Vec::new();
+    }
+    let radius = (kernel.len() / 2) as isize;
+    let mut tmp = vec![0.0f32; n];
+    tmp.par_chunks_mut(w).zip(input[..n].par_chunks(w)).for_each(|(out, row)| {
+        for (ki, &kv) in kernel.iter().enumerate() {
+            let off = ki as isize - radius;
+            let x0 = (-off).max(0) as usize;
+            let x1 = (w as isize - off).clamp(0, w as isize) as usize;
+            for x in x0..x1 {
+                out[x] += row[(x as isize + off) as usize] * kv;
+            }
+        }
+    });
+    let mut out = vec![0.0f32; n];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (ki, &kv) in kernel.iter().enumerate() {
+            let sy = y as isize + ki as isize - radius;
+            if (0..h as isize).contains(&sy) {
+                let src = &tmp[sy as usize * w..(sy as usize + 1) * w];
+                for (o, &s) in row.iter_mut().zip(src) {
+                    *o += s * kv;
+                }
+            }
+        }
+    });
+    out
+}
+
+/// The TARGET's side of [`structure_divergence`], prepared once per (target
+/// raster, geometry, weights) and re-read from a thread-local slot: its
+/// eroded core, the mask's five band blurs, its rank signature, and the
+/// translation search's target-only sums per shift. A solve reads one target
+/// against thousands of renders; every quantity here depends on the target
+/// and the weights alone, and each is computed exactly as the one-pass form
+/// computed it, so a prepared read is the unprepared read bit for bit.
+struct TargetSide {
+    key: (u32, u32, u64, u64),
+    w: usize,
+    h: usize,
+    /// The eroded core's pixels, row-major.
+    core_xy: Vec<(u32, u32)>,
+    mask: Vec<f32>,
+    mask_blur: Vec<Vec<f32>>,
+    gradient: Vec<f32>,
+    energy: [f32; 5],
+    floors: [f32; 5],
+    /// Per shift (dy outer, dx inner): the core pixels the shift keeps in
+    /// frame, their target-gradient mean and its sum of squares; `None`
+    /// where fewer than [`STRUCTURE_MIN_CORE_PX`] remain.
+    shifts: Vec<Option<(usize, f64, f64)>>,
+}
+
+thread_local! {
+    static TARGET_SIDES: RefCell<Vec<Arc<TargetSide>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Prepared target sides kept per thread: the fine and the coarse reading of
+/// one pair alternate, and nothing else does.
+const TARGET_SIDE_SLOTS: usize = 2;
+
+impl TargetSide {
+    fn prepared(tgt_px: &[[f32; 3]], w: u32, h: u32, weights: &[f32]) -> Option<Arc<Self>> {
+        let key = (
+            w,
+            h,
+            fingerprint(weights.iter().map(|v| v.to_bits())),
+            fingerprint(tgt_px.iter().flatten().map(|v| v.to_bits())),
+        );
+        if let Some(hit) = TARGET_SIDES.with(|slots| slots.borrow().iter().find(|t| t.key == key).cloned()) {
+            return Some(hit);
+        }
+        let built = Arc::new(Self::build(tgt_px, w, h, weights, key)?);
+        TARGET_SIDES.with(|slots| {
+            let mut slots = slots.borrow_mut();
+            slots.insert(0, built.clone());
+            slots.truncate(TARGET_SIDE_SLOTS);
+        });
+        Some(built)
+    }
+
+    fn build(tgt_px: &[[f32; 3]], w: u32, h: u32, weights: &[f32], key: (u32, u32, u64, u64)) -> Option<Self> {
+        let (wu, hu) = (w as usize, h as usize);
+        let n = wu * hu;
+        let mut core: Vec<bool> = weights.iter().map(|&v| v > 0.8).collect();
+        for _ in 0..3 {
+            let mut next = core.clone();
+            for y in 0..hu {
+                for x in 0..wu {
+                    let i = y * wu + x;
+                    next[i] = x > 0
+                        && x + 1 < wu
+                        && y > 0
+                        && y + 1 < hu
+                        && core[i]
+                        && core[i - 1]
+                        && core[i + 1]
+                        && core[i - wu]
+                        && core[i + wu];
+                }
+            }
+            core = next;
+        }
+        let core_xy: Vec<(u32, u32)> =
+            (0..n).filter(|&i| core[i]).map(|i| ((i % wu) as u32, (i / wu) as u32)).collect();
+        if core_xy.len() < STRUCTURE_MIN_CORE_PX {
+            return None;
+        }
+        // DEF-3: the bands read inside the mask. A truncated blur of the whole
+        // rank image fed the core's coarse bands from up to 48 px past the mask
+        // (a cell fully inside the kept two thirds of a frame read energy_error
+        // 0.9589 from the replaced third beside it, 0.0000 without it); the
+        // normalised masked blur weighs each tap by the mask, so outside pixels
+        // contribute nothing and the image border needs no rule of its own.
+        let mask: Vec<f32> = weights.iter().map(|v| v.max(0.0)).collect();
+        let mask_blur: Vec<Vec<f32>> =
+            BAND_SIGMAS.iter().map(|&s| gaussian_blur(&mask, wu, hu, &band_kernel(s))).collect();
+        let floors = band_energy_floors(core_xy.len());
+        let mut this = TargetSide {
+            key,
+            w: wu,
+            h: hu,
+            core_xy,
+            mask,
+            mask_blur,
+            gradient: Vec::new(),
+            energy: [0.0; 5],
+            floors,
+            shifts: Vec::new(),
+        };
+        let (gradient, energy) = this.signature(&rank_equalized(tgt_px, weights));
+        this.gradient = gradient;
+        this.energy = energy;
+        this.shifts = (0..SHIFTS * SHIFTS)
+            .into_par_iter()
+            .map(|k| {
+                let dy = (k / SHIFTS) as isize - SHIFT_REACH;
+                let dx = (k % SHIFTS) as isize - SHIFT_REACH;
+                let in_frame = |x: u32, y: u32| {
+                    (0..hu as isize).contains(&(y as isize - dy)) && (0..wu as isize).contains(&(x as isize - dx))
+                };
+                let (mut count, mut ty_sum) = (0usize, 0.0f64);
+                for &(x, y) in &this.core_xy {
+                    if in_frame(x, y) {
+                        ty_sum += this.gradient[y as usize * wu + x as usize] as f64;
+                        count += 1;
+                    }
+                }
+                if count < STRUCTURE_MIN_CORE_PX {
+                    return None;
+                }
+                let ty_mean = ty_sum / count as f64;
+                let mut sb = 0.0f64;
+                for &(x, y) in &this.core_xy {
+                    if in_frame(x, y) {
+                        let b = this.gradient[y as usize * wu + x as usize] as f64 - ty_mean;
+                        sb += b * b;
+                    }
+                }
+                Some((count, ty_mean, sb))
+            })
+            .collect();
+        Some(this)
+    }
+
+    /// A rank image's signature on this side's mask and core: its pooled
+    /// gradient map and its five band energies.
+    fn signature(&self, rank: &[f32]) -> (Vec<f32>, [f32; 5]) {
+        let (w, h) = (self.w, self.h);
+        let n = w * h;
+        let masked_blur = |band: usize| -> Vec<f32> {
+            let weighted: Vec<f32> = rank.iter().zip(&self.mask).map(|(v, m)| v * m).collect();
+            gaussian_blur(&weighted, w, h, &band_kernel(BAND_SIGMAS[band]))
+                .into_iter()
+                .zip(&self.mask_blur[band])
+                .map(|(v, m)| if *m > 1e-12 { v / m } else { 0.0 })
+                .collect()
+        };
+        let blurred: Vec<Vec<f32>> = (0..BAND_SIGMAS.len()).map(masked_blur).collect();
+        let mut energy = [0.0f32; 5];
+        let count = self.core_xy.len() as f64;
+        for (band, e) in energy.iter_mut().enumerate() {
+            let mut sum = 0.0f64;
+            for &(x, y) in &self.core_xy {
+                let i = y as usize * w + x as usize;
+                let v = if band == 0 { rank[i] - blurred[0][i] } else { blurred[band - 1][i] - blurred[band][i] };
+                sum += (v * v) as f64;
+            }
+            *e = (sum / count).sqrt() as f32;
+        }
+        let mut gradient = vec![0.0f32; n];
+        for y in 1..h.saturating_sub(1) {
+            for x in 1..w.saturating_sub(1) {
+                let i = y * w + x;
+                let dx = 0.5 * (rank[i + 1] - rank[i - 1]);
+                let dy = 0.5 * (rank[i + w] - rank[i - w]);
+                gradient[i] = (dx * dx + dy * dy).sqrt();
+            }
+        }
+        (gaussian_blur(&gradient, w, h, &band_kernel(2.0)), energy)
+    }
+}
+
+/// A 64-bit fingerprint of a word sequence (FNV-1a over the words, the count
+/// folded in), the key a prepared side is looked up by.
+pub(super) fn fingerprint(words: impl Iterator<Item = u32>) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut count = 0u64;
+    for word in words {
+        hash = (hash ^ word as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        count += 1;
+    }
+    (hash ^ count).wrapping_mul(0x0000_0100_0000_01b3)
 }
 
 /// The five band sigmas of [`structure_divergence`].
@@ -394,44 +505,68 @@ pub(crate) fn band_energy_floors(core: usize) -> [f32; 5] {
 /// fact at all.
 pub(super) fn low_pass_pixels(px: &[[f32; 3]], w: usize, h: usize, sigma: f32) -> Vec<[f32; 3]> {
     let n = w * h;
+    if n == 0 {
+        return Vec::new();
+    }
+    let px = &px[..n];
     let radius = (3.0 * sigma).ceil().max(1.0) as isize;
     let kernel: Vec<f32> = (-radius..=radius)
         .map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp())
         .collect();
+    // The in-frame tap mass at each position along an axis, the taps added
+    // in kernel order as the per-pixel loop added them.
+    let in_frame_mass = |len: usize| -> Vec<f32> {
+        (0..len)
+            .map(|at| {
+                let mut mass = 0.0f32;
+                for (ki, &kv) in kernel.iter().enumerate() {
+                    if (0..len as isize).contains(&(at as isize + ki as isize - radius)) {
+                        mass += kv;
+                    }
+                }
+                mass
+            })
+            .collect()
+    };
+    let (mass_x, mass_y) = (in_frame_mass(w), in_frame_mass(h));
+    // Row-at-a-time, as `gaussian_blur` above: each output adds its in-frame
+    // taps in kernel order from zero, so the form is the per-pixel loop bit
+    // for bit.
     let mut tmp = vec![[0.0f32; 3]; n];
+    tmp.par_chunks_mut(w).zip(px.par_chunks(w)).for_each(|(out, row)| {
+        for (ki, &kv) in kernel.iter().enumerate() {
+            let off = ki as isize - radius;
+            let x0 = (-off).max(0) as usize;
+            let x1 = (w as isize - off).clamp(0, w as isize) as usize;
+            for x in x0..x1 {
+                let p = row[(x as isize + off) as usize];
+                for (slot, v) in out[x].iter_mut().zip(p) {
+                    *slot += v * kv;
+                }
+            }
+        }
+        for (o, &mass) in out.iter_mut().zip(&mass_x) {
+            *o = o.map(|v| v / mass.max(1e-12));
+        }
+    });
     let mut out = vec![[0.0f32; 3]; n];
-    for y in 0..h {
-        for x in 0..w {
-            let (mut acc, mut mass) = ([0.0f32; 3], 0.0f32);
-            for (ki, &kv) in kernel.iter().enumerate() {
-                let sx = x as isize + ki as isize - radius;
-                if (0..w as isize).contains(&sx) {
-                    let p = px[y * w + sx as usize];
-                    for (slot, v) in acc.iter_mut().zip(p) {
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (ki, &kv) in kernel.iter().enumerate() {
+            let sy = y as isize + ki as isize - radius;
+            if (0..h as isize).contains(&sy) {
+                let src = &tmp[sy as usize * w..(sy as usize + 1) * w];
+                for (o, s) in row.iter_mut().zip(src) {
+                    for (slot, v) in o.iter_mut().zip(s) {
                         *slot += v * kv;
                     }
-                    mass += kv;
                 }
             }
-            tmp[y * w + x] = acc.map(|v| v / mass.max(1e-12));
         }
-    }
-    for y in 0..h {
-        for x in 0..w {
-            let (mut acc, mut mass) = ([0.0f32; 3], 0.0f32);
-            for (ki, &kv) in kernel.iter().enumerate() {
-                let sy = y as isize + ki as isize - radius;
-                if (0..h as isize).contains(&sy) {
-                    let p = tmp[sy as usize * w + x];
-                    for (slot, v) in acc.iter_mut().zip(p) {
-                        *slot += v * kv;
-                    }
-                    mass += kv;
-                }
-            }
-            out[y * w + x] = acc.map(|v| v / mass.max(1e-12));
+        let mass = mass_y[y];
+        for o in row.iter_mut() {
+            *o = o.map(|v| v / mass.max(1e-12));
         }
-    }
+    });
     out
 }
 

@@ -51,24 +51,12 @@ pub struct EvidenceModel {
     /// Does pixel `i` PAIR — is index `i` on one side the same scene point as
     /// index `i` on the other? The population the objective's `E_paired`
     /// reads (`look_err_with_evidence`): the present, spatially supported
-    /// pixels of a model built on an aligned pair, and none of a
-    /// structure-blind one ([`Self::structure_blind`]: Atmosphere is the claim
-    /// that the structure was replaced, so no pixel pairs with its index).
+    /// pixels of a model built on an aligned pair. ONE reading for every
+    /// ruler (2026-11-07): the structure-blind re-aggregation keeps it
+    /// ([`Self::structure_blind`]) and the zoned entry re-pairs nothing by
+    /// mode, so an Atmosphere frame or zone scores the pixels the structural
+    /// reading pairs per pixel, like every other reading of the frame.
     pub paired: Vec<bool>,
-    /// S-MODE (v1.18.0): does this model judge a LOCAL correction? The
-    /// structural term S is read where the question is structure — mode and
-    /// evidence (`DIVERGENCE_GLOBAL` / `DIVERGENCE_ZONE`) and the comparisons
-    /// of two different GLOBAL solves (terminal do-no-harm, the 4b
-    /// step-down, base against fit). The do-no-harm of a LOCAL correction
-    /// (zone, tile, band, field, tint) reads `E_paired + H_ab` only: a local
-    /// correction cannot change which pixels pair, its seams stay with the
-    /// boundary / ramp rulers, and its structural gate is the existing D
-    /// threshold only. On the disagreement census S's sign under zone, tile
-    /// and field moves was unrelated to Lab's (rel1180 msg1: 13 of class A
-    /// and all 10 of class B were S-driven). Set once, where the zoned fit
-    /// takes the global solve's report ([`crate::fit_zoned`]'s entry), and
-    /// carried by every scoped view of the model.
-    pub local: bool,
     pub source_weights: Vec<f32>,
     pub target_weights: Vec<f32>,
     pub source_hue_weights: Vec<f32>,
@@ -167,7 +155,6 @@ impl EvidenceModel {
             height: self.height,
             spatial_supported: self.spatial_supported.clone(),
             paired: self.paired.clone(),
-            local: self.local,
             source_weights: ranges.source_weights,
             target_weights: ranges.target_weights,
             source_hue_weights: ranges.source_hue_weights,
@@ -197,11 +184,17 @@ impl EvidenceModel {
     ///
     /// On a model that is already blind — every spatial weight 1.0, every
     /// pixel supported, `globally_same_content` true, as an identical pair
-    /// produces — this is byte-equal to `scoped(tp, ones, ones)` but for
-    /// [`Self::paired`], which a blind model empties (nothing pairs where the
-    /// structure was replaced), and the unit test pins that. Anywhere else the two differ by design: `scoped` reads
+    /// produces — this is byte-equal to `scoped(tp, ones, ones)`, and the
+    /// unit test pins that. Anywhere else the two differ by design: `scoped` reads
     /// the model's own structural weights and support, and replacing those is
-    /// this function's whole job.
+    /// this function's whole job. The pairing ([`Self::paired`]) is kept:
+    /// blindness is the estimation weights and support, not the score. Until
+    /// 2026-11-07 a blind model emptied it, so every Atmosphere reading — the
+    /// joint descent, the zones' acceptance, the rescore — scored the frame
+    /// as two distributions while the terminal re-read and the floor read it
+    /// per pixel; on p41 the zoned sky correction the per-pixel ruler wanted
+    /// (horizon fifth 9.5 against 4.5 dE76/px) read as harm on the
+    /// distribution and was dropped.
     pub fn structure_blind(&self, tp: &[[f32; 3]]) -> EvidenceModel {
         let n = self.source_pixels.len().min(tp.len());
         let ones = vec![1.0; n];
@@ -209,7 +202,6 @@ impl EvidenceModel {
         blind.spatial_weights = ones.clone();
         blind.spatial_supported = vec![true; n];
         blind.globally_same_content = true;
-        blind.paired = vec![false; n];
         blind.scoped(tp, &ones, &ones)
     }
 }
@@ -690,7 +682,6 @@ pub fn evidence_model_paired(
         width: w,
         height: h,
         paired: spatial_supported.clone(),
-        local: false,
         spatial_supported,
         source_weights: ranges.source_weights,
         target_weights: ranges.target_weights,

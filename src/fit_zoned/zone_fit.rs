@@ -10,13 +10,6 @@ pub enum ZoneMode {
     Atmosphere,
 }
 
-/// The skip decision, pure so it is unit-testable without an end-to-end
-/// fit: a zone at/below the observed matched domain — brightness included —
-/// is left alone with the honest note instead of being dialled.
-pub(super) fn zone_skips(zone_before: f32, ev_gap: f32) -> bool {
-    zone_before <= ZONE_SKIP_ERR && ev_gap <= ZONE_MATCHED_EV
-}
-
 /// Mask-weighted first moments of one zone.
 pub(crate) struct ZoneMoments {
     /// Weighted mean Rec.601 luma of the LINEAR-light channels (EV math needs
