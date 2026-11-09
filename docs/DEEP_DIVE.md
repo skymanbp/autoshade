@@ -89,12 +89,20 @@ known gap. Every control and every number in
 
 `match` recovers an editable recipe from any finished rendition of the same
 frame ([`src/fit.rs`](../src/fit.rs)). A generated target is not pixel-aligned
-with its source, so the solve is **distribution-level, not per-pixel
-regression**:
+with its source, so the solve is **distribution-level** — and since v1.18.0
+the judging is per pixel exactly where the two frames do correspond, as a
+colour difference on lightly smoothed neighbourhoods, and by Lab
+distribution where they do not, in the same units:
 
 - Luminance CDFs are matched at the engine's own tone knots and least-squares
   solved against its own slider basis under a ridge and a model-selection
   prior; saturation closes by mean-chroma ratio.
+- A stage or a control ships only if it brings the frame closer by more than
+  the fit's own rounding (measured on an identical pair); ties go to the
+  simpler recipe, so controls that earned nothing come back at zero, a local
+  correction is judged on its own pixels with the whole frame as a guard, and
+  the finished recipe is read once more at full size as the export renders
+  it.
 - The per-channel CDF residual becomes RGB curves admitted only through four
   vetoes, read on every candidate of the joint objective (v1.18.0: one
   `F = J* + FIT_QUANT · dof` the solve minimises, each control held against its
@@ -157,7 +165,7 @@ are in [docs/TECH_STACK.md#ai-advisor-and-reverse-fit](TECH_STACK.md#ai-advisor-
 - **A bilateral-grid local field prices every producer first**: a read-only
   12×32×8 grid (x, y, luma; the 12×8 evidence cells with every row refined
   four times) of five develop parameters solved by conjugate gradients in
-  f64 (a Tikhonov term and a Laplacian smoother calibrated at 12×8×8,
+  f64, preconditioned by the system's own diagonal (a Tikhonov term and a Laplacian smoother calibrated at 12×8×8,
   ≤ 90 iterations),
   whose residual is the **ceiling** any spatially varying develop could
   reach — the calibration pair's reading is under

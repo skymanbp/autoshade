@@ -69,6 +69,8 @@ HISTORY = {
     "shipped_at": "ARCHITECTURE: the same record (the share the cells vouched)",
     "search_cast_projection": "ARCHITECTURE: the projection section stands as the record of the search v1.18.0 retired",
     "read_wb_step": "ARCHITECTURE: the cast→WB hand-off passage stands as the record of the step reader v1.18.0 retired",
+    "field_stop_rule_skips_the_tile_producer_and_names_it": "ARCHITECTURE: a count clause records its v1.18.0 rename",
+    "the_fan_gate_costs_a_real_two_temperature_pair_nothing": "ARCHITECTURE: a dated measurement records its v1.18.0 rename",
 }
 
 REPO_PATH = re.compile(
