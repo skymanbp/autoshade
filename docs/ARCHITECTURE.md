@@ -4635,7 +4635,10 @@ still selects the global policy before any CDF solve.
 a loss of any size refuses, so the stages' allowances cannot add up.
 `FIT_QUANT` is measured, not chosen: an identical pair with every stored
 control displaced by half its storage step, read through the fit's own
-preview, worst of four corpus pairs 0.002250, hence 2.3e-3; the nine bare
+preview on the per-pixel ruler, worst of four corpus pairs 0.001832, hence
+1.9e-3 (2.3e-3 from 0.002250 while J* pooled the pixels at σ 2 and scored a
+hue and a structural term beside the distance; 1.8e-3 from 0.001786 on the
+estimation weights); the nine bare
 1e-4 margins, the tone rulers', the bands' end state and the zones' frame
 allowance all read it. A LOCAL correction (zone, tile, free mask, band set,
 range set, zone tint) ships when it earns `FIT_QUANT` on its own population —
@@ -5627,8 +5630,8 @@ experiment shipped a 19° cast that left 20.6° of delivered fan) while the
 widest fan the gate passes on its own merits is the haze correction's 7.8°: a
 cast the fit CHOOSES to keep must be no worse than one it already accepts.
 And it must buy more than `FIT_QUANT` of absolute look error — the fit's own
-quantisation budget, the same constant the terminal do-no-harm check uses
-and, since v1.18.0, every stage-vs-absence decision (`fit::ships`), measured
+quantisation budget, the same constant the terminal do-no-harm check used
+until v1.18.0 and, since v1.18.0, every stage-vs-absence decision (`fit::ships`), measured
 rather than chosen (above) —
 because the gates decide whether a MEASURED cast may ship, not whether an
 INVENTED milder one is worth shipping, and marginal gain does not earn
@@ -7246,8 +7249,9 @@ is a Lab distance over the paired pixels or over the whole distribution, and
 its band term reads only the worst qualifying band (`H_ab`; until v1.18.0
 three *unconditional* channel means and a hue angle that skipped everything
 under 0.06 chroma) — and it has exactly three jobs: report; cap the reported confidence
-(downward only, never raise); and act as ONE additional bounded-drift veto at
-the pipeline END (`fit::terminal_harm`), fail-open, in
+(downward only, never raise); and, until v1.18.0, act as ONE additional bounded-drift veto at
+the pipeline END (`fit::terminal_harm`, retired with the terminal do-no-harm when the joint
+objective took the question), fail-open, in
 `ZONE_GLOBAL_REGRESSION_TOL`'s shape — with its JOINT hue/chroma readings
 since 2026-09-24 (both terminal sites handed it `None, None` for them until
 then, so the joint veto the function carried was unreachable). It is
