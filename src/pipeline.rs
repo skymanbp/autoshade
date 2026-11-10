@@ -3185,6 +3185,7 @@ fn export_read(path: &Path, recipe: &EditRecipe, edge: u32, sink: &dyn crate::di
     }
     let frame = crate::render::SourceFrame::of(path).ok()?;
     frame.check(recipe).ok()?;
+    // baked-by-construction: `is_raw` returned above, so this path is a baked file.
     let img = decode::load_image_for_develop(path).ok()?;
     let diag = crate::diag::Diag::about(sink, path);
     crate::render::render_baked_to_image(&img, recipe, None, Some(edge), frame.baked(), frame.colour_nr_in_pixels(), &diag).ok()
