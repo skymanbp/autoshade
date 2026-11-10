@@ -1,96 +1,97 @@
-# AutoShade v1.18.0 — the fit judges what the eye sees
+# AutoShade v1.18.0 — one objective, one law
 
-Everything merged into `main` since v1.17.1 ships here. This release changes
-how the reverse fit decides whether a correction made the photo closer to its
-target. Until now every decision read a distance measured in screen code
-values, in which the brightness of a dark sky weighed many times more than
-its colour; a correction that the eye reads as better could be scored as
-worse and refused. The fit now measures in the colour space the eye's
-judgement is modelled on, pixel by pixel wherever the two pictures show the
-same thing, and every stage and every control has to earn its place by more
-than the fit's own rounding before it ships.
+Everything merged into `main` since v1.17.1 ships here. This release replaces
+the reverse fit's chain of per-stage decisions with one objective and one
+rule. Until now each stage of the fit (tone, white balance, colour mixer,
+grade wheels, cast curves) estimated its own correction and defended it with
+its own gates — a look-error ratio here, a hue census there, a do-no-harm
+check at the end — and the only thing that minimised the distance to the
+target was the order they happened to run in. Now the stages only propose a
+starting point; a single solver moves every control together to make the
+finished photo as close to its target as the controls allow, charging each
+control it keeps the price of the fit's own rounding, and one rule decides
+what a control may not do: leave any part of the picture further from what
+that part's own evidence asks than it found it.
 
 The design, the rulings and this document are the maintainer's. The code of
 this release was written with an AI coding assistant working under the
 maintainer's direction, and every change passed the project's own test
 battery and reference-pair gate before it shipped.
 
-## The reverse fit: how a result is judged
+## The reverse fit: one objective
 
-- **Distances are colour distances, measured where they mean something.**
-  Where the photo and its target show the same scene in the same place, the
-  fit compares them pixel by pixel, on lightly smoothed neighbourhoods so that
-  grain and sharpening do not count, as a perceptual colour difference.
-  Where they do not correspond — a sky the target repainted, a texture a
-  generator invented — it compares the two pictures' distributions of
-  lightness and of the two colour axes instead, in the same units, so one
-  step of colour costs the same in both readings. The old measure weighed a
-  night sky's brightness far above its colour, which is why a correction
-  that brought the colour of the sky above the night horizon closer was
+- **One number is minimised, and every control pays for its place.** The fit
+  minimises the perceptual colour distance between the finished photo and
+  its target plus a fixed price per control that is off its neutral value.
+  That price is the smallest difference the fit can produce by rounding its
+  own controls — measured on the corpus, not chosen — so a control that does
+  not buy its own rounding is dropped. The report names the controls set
+  back to zero.
+- **The stages propose, the solver decides.** The tone sliders, the master
+  curve, the white balance, the colour mixer, the grade wheels and the cast
+  curves are estimated as before and enter the solve as a starting point.
+  From there the solver moves all of them together down the objective's
+  slope, reading each control's effect at the resolution the objective can
+  resolve, then polishes one control at a time, then holds every control
+  against the photo without it and keeps only what earns its price.
+- **The distance is read where it means something.** Where the photo and its
+  target show the same scene, the fit compares them pixel by pixel as a
+  perceptual colour difference on lightly smoothed neighbourhoods. Where
+  they do not correspond — a sky the target repainted, a texture a generator
+  invented — it compares the distributions of lightness and colour instead,
+  in the same units. How much the pixel pairing is trusted is measured on
+  the picture itself (how well the source's tones predict the target's over
+  the paired pixels), and that trust weights the two readings. The old
+  measure weighed a night sky's brightness far above its colour, which is
+  why a correction that brought the night horizon's colour closer was
   refused in v1.17.1.
-- **A region's mode decides how its pixels are read.** When the fit decides
-  that one region of the target was repainted rather than re-graded, that
-  region is read by its distribution even if the rest of the frame
-  corresponds; a region that does correspond inside a repainted frame is read
-  pixel by pixel. A correction of the land under a replaced sky is no longer
-  charged as a loss because the sky's pixels moved.
-- **Every pixel in the picture is counted when a result is judged.** The
-  ranges of brightness the fit trusts to estimate a control are a narrower
-  set than the picture itself, and the verdicts used to read only those
-  ranges: a gain in bright clouds or in a dark foreground could be invisible
-  to the decision that admitted it. The estimate still comes from the trusted
-  ranges; the verdict now counts every pixel that is present, each the same,
-  including those in a region the target replaced.
-- **A hue band is judged by how far its colour moved, not only its hue.** The
-  term that guards the worst colour band now reads the band's average colour
-  offset against the target's own colourfulness there, so a correction that
-  turns a muted band garish is charged for it, and a small hue error on a
-  nearly grey band is not inflated.
-- **Flat areas are no longer read as scrambled.** A clipped sky, a crushed
-  shadow or a posterised target holds large areas of one code value. The
-  structural comparison ranked those pixels by their position in the picture,
-  so two such areas a fraction of a code apart could swap order and read as
-  total disorder. Values within one code are now a tie, charged by the
-  fraction of a code that separates them.
-- **A region's structure is read from that region alone.** The structural
-  comparison of a masked region blurred the whole picture at its coarse
-  scales, so a region could read as rearranged because of pixels outside it;
-  each scale now reads only the region's own pixels, and a detail finer than
-  the comparison can resolve reads as absent rather than as a difference.
-- **Structure is asked only where the question is structure.** The structural
-  comparison still decides how a pair is fitted and compares two whole-frame
-  solutions; a local correction (a zone, a band, a tile, the colour field, a
-  mask's colour) is judged on colour and tone, and its edges by the seam
-  checks that exist for them.
+- **The reported confidence is re-derived.** The confidence a fit reports is
+  set so that the one calibration pair whose target is a different photograph
+  — which no recipe can match — sits on the confidence floor.
 
-## The reverse fit: what ships
+## The reverse fit: one law
 
-- **A stage ships only if it earns more than the fit's own rounding.** Every
-  stage that can be left out — the mixer, the cast curves, the hand-off to the
-  white balance, the zones, bands, tiles, masks and the colour field — now
-  ships only when the photo with it is closer to the target than the photo
-  without it by more than the smallest difference the fit can produce by
-  rounding its own controls. A smaller gain is no difference, and no
-  difference goes to the simpler recipe; a loss of any size refuses. The
-  separate allowances each stage used to carry are gone, so they can no
-  longer add up. That rounding is measured, not chosen: an identical pair is
-  rendered with every control displaced by half its storage step and read the
-  way the fit reads.
+- **A control may not move any part of the picture against that part's own
+  evidence.** The source is partitioned into cells by brightness and hue,
+  merged along the axis a control cannot tell apart (the tone sliders see
+  brightness only, the white balance hue only, the colour mixer and the grade
+  wheels both). For each cell the target's evidence asks for a move — read
+  from the paired pixels where the pairing is trusted, from the matched
+  distributions where it is not — and a control class is admitted only if
+  its move in every cell stays within that cell's ask, to the cell's own
+  measurement error. Each class is judged on its own axes (brightness, the
+  colour vector, the white-balance axes) against the photo with every other
+  class in place and itself at its neutral value, so a class answers only for
+  what it adds.
+- **This one rule replaces the gates it used to take several to state.** The
+  four cast-curve vetoes, the unsupported-range vetoes for tone and hue, the
+  white balance's foreign-hue, rotation and shared-component checks, the
+  stage and terminal do-no-harm checks and the cast-to-white-balance hand-off
+  walk are gone; each had been one consequence of the rule, read on one
+  class with its own numbers.
+- **A proposal the law refuses is repaired, not thrown away.** A class the
+  rule refuses is re-estimated from the cells' own asks under the rule, and
+  where no single control can be moved on its own it is scaled toward
+  neutral as a whole until the rule admits it. The report says which class
+  was re-estimated or scaled and by how much.
+- **The curve's freedom follows the evidence.** Where the pixels pair, every
+  knot of a tone curve is a free coordinate of the solve, so the solver can
+  shape a curve the stages did not propose. Where only the distributions can
+  be read, the curve keeps the shape the stage proposed and the solver sets
+  its strength alone — a distribution cannot say which pixel goes where, and
+  letting the knots move freely on such evidence produced a cliff in the
+  master curve on the night pair. On such a pair the proposed curve also
+  keeps the brightness ranges the fit cannot trust at their identity.
 - **A local correction is judged on its own pixels.** A zone, a band, a tile
-  or a mask ships when it brings its own region closer by that margin; the
-  rest of the frame is only a check that it got no worse by more than the
-  same margin. Judged on the whole frame, a tile covering a few percent of the
-  picture had to be many times better on its own pixels than a whole-frame
-  change to count. A zone is now accepted by this one test, in place of four
-  older ones that read the earlier measure.
-- **Controls that earn nothing are set back to zero.** After each joint solve
-  (white balance, tone sliders, curves, mixer bands, grade wheels, cast
-  curves) and once more on the finished recipe, each control is set back to
-  its neutral value in turn, smallest first, and stays there when the result
-  without it is no worse beyond the same rounding. A tone slider that acts on
-  one end of the tonal range may earn on that end alone. A target that
-  differs from the straight conversion by exposure alone now comes back as
-  exposure alone. The report names the controls set back.
+  or a mask ships when it brings its own region closer by the fit's rounding;
+  the rest of the frame is only a check that it got no worse by more than the
+  same margin. A region's structure is read from that region alone, and
+  structure is asked only where the question is structure: a local
+  correction is judged on colour and tone, and its edges by the seam checks
+  that exist for them.
+
+## The reverse fit: what else changed
+
 - **A white balance solved on the shared part of a repainted pair is judged
   there.** When the target replaced part of the scene, the fit solves the
   white balance and the exposure from the part both pictures share; it now
@@ -103,61 +104,52 @@ battery and reference-pair gate before it shipped.
   the calibration-only starting point; it ships only if it is closer there
   too, and the report gives both readings. This adds one full-size render to
   a fit.
-- **A band too small to be a zone joins its neighbour.** When the fit splits a
-  region into brightness bands and one band is smaller than a zone may be, it
-  used to refuse the whole split; that band is now merged into the
-  neighbouring band and the merged split is tried.
-- **A seam is charged to the side that is off.** At the edge between two
-  corrected regions, a region that lands on its target is no longer refused
-  because the region beside it is still short of its own.
-- **The colour field's stop rule compares like with like.** The field's
-  ceiling was solved before the zones and compared with the frame after them,
-  and it could skip the tiles. The field is now read again on the frame the
-  later layers start from, and its ceiling only limits the field and the
-  masks carved from it.
-- **The report says what ships.** The sentences about a colour cast, its
-  hand-off to the white balance and a zone's colour are now derived from the
-  finished recipe, so a note never describes a curve or a tint that a later
-  step took back, and a refusal prints the reading the decision was made on.
+- **The fit starts from the picture the export would make.** The starting
+  picture is developed exactly as the export develops it, resized only after
+  the base's per-pixel steps; an untouched recipe now reads as identical to
+  its own export. A JPEG or PNG is read on its own pixels when it is the
+  photo being fitted.
+- **A band too small to be a zone joins its neighbour**, and a seam is charged
+  to the side that is off: a region that lands on its target is no longer
+  refused because the region beside it is still short of its own.
+- **The colour field's stop rule compares like with like**, its solve reaches
+  its tolerance (the iterative solver is scaled by the system's own
+  diagonal), a cell with too few pixels to measure carries the smooth
+  continuation of its neighbours instead of "no change", and a pixel that is
+  part sky and part land owes each part's light through that part's own
+  correction.
 - **A hidden contrast rule is removed.** The tone solve forced contrast to a
   fixed small value whenever the frame was not yet close and the solved
   contrast was near zero. The rule had no recorded reason and no test; the
   solved value now stands.
-- **The reported confidence is re-derived.** The confidence a fit reports is
-  set so that the one calibration pair whose target is a different photograph
-  — which no recipe can match — sits on the confidence floor.
+- **The report says what ships.** Every sentence about a control is derived
+  from the finished recipe, so a note never describes a curve or a tint that
+  the solve took back, and a refusal prints the cells and the readings the
+  decision was made on.
 
-## The reverse fit: the starting point
+## Colour noise reduction
 
-- **The fit starts from the picture the export would make.** The fit used to
-  reduce the photo to its working size first and apply the camera base curve
-  to the averages, without the capture sharpening the export applies, so a
-  photo compared with the app's own export of the same untouched recipe read
-  as different and the fit corrected a gap that was not in the picture. The
-  starting picture is now developed exactly as the export develops it,
-  resized only after the base's per-pixel steps; an untouched recipe now
-  reads as identical to its own export.
-- **A JPEG or PNG is read on its own pixels when it is the photo being
-  fitted**, the rule the command line already applied to baked files, so the
-  calibration's neutral reference can be read through the same entry as
-  everything else.
-- **The colour field's solve reaches its tolerance.** Its iterative solver is
-  now scaled by the system's own diagonal, so on difficult frames it
-  converges within the existing step budget instead of stopping on it.
-  Renders move by at most one code value.
-
-## Fixed
-
-- **A bright block at a clipped horizon.** Where the global develop clipped
-  most of a colour-field cell, the field wrote "no change" into that cell
-  beside neighbours that darkened the glow, and the horizon rendered a
-  rectangular over-bright block. A cell with too few pixels to measure now
-  carries the smooth continuation of its measured neighbours.
-- **Light where sky and land meet.** A pixel that is part sky and part land
-  now owes each part's light through that part's own correction, instead of
-  one blend of the two corrections applied to all of its light.
-- **A spacing slip in the colour field's stop note**: the note printed two
-  runs of spaces in the middle of its sentence.
+- **Colour noise is taken out of the RAW in the camera's own linear light**,
+  on the mosaic, before the demosaic and before every nonlinear step of the
+  develop. A render's dark colour is biased by its own chroma noise: the black
+  clip, the transfer encode and saturation each read a noisy dark pixel's
+  colour, and the mean of a nonlinear function of a noisy value is not the
+  function of its mean (on the night pair the dark tenths sat 2.4–6.0 colour
+  steps off their binned version, mostly too blue). Before those steps the
+  noise can be taken away before anything rectifies it.
+- **The threshold is the photograph's own noise, measured, not a dial.** The
+  two green sites of one Bayer cell see the same scene one pixel apart, so
+  their difference measures the green noise at every brightness with no
+  scene in it; a photon-plus-read-noise model with the camera's radial gain
+  is fitted to those readings, and only the patches the model says are noise
+  alone enter the fit. A colour edge is kept where it rises above the
+  window's own noise; a structure narrower than the smallest window keeps its
+  own sample; a colour site whose four greens do not lie on one plane is not
+  measured and keeps the develop's own colour.
+- **On a processed master the stage reads the master's own noise**, measured
+  on the master, and abstains above the levels it could measure: a level
+  with no reading is not a measurement — no weight, no vote, no read — so a
+  star core on a master keeps the master's own colour.
 
 ## The Lightroom sidecar
 
@@ -180,21 +172,6 @@ battery and reference-pair gate before it shipped.
   reproduces this app's starting tone exactly, so it is named rather than
   approximated.
 
-## Colour noise reduction
-
-待填_PENDING_E3 — the colour noise reduction work (the demosaic grain, a
-known limit of v1.17.1) is not final in this tree. When it lands, one bullet
-for the mechanism and its known limit. Draft known-limit sentences carried
-from the current rulings, to be confirmed or replaced by the committed form:
-
-- (draft, pending) "Colour is averaged with its neighbours only where the
-  neighbours are shown to share it: a colour edge is kept where it rises
-  above the window's colour noise, and a structure narrower than the smallest
-  window keeps its own sample."
-- (draft, pending) "At the cell beside a colour edge, a step under about
-  待填_S_EDGE colour standard deviations is partly averaged into its
-  neighbour; above it the edge is kept."
-
 ## How this release was checked
 
 - **Every control the fit can solve has a self-consistency test.** For each
@@ -202,49 +179,60 @@ from the current rulings, to be confirmed or replaced by the committed form:
   the grade wheels, the cast curves, a mask's colour — a calibration photo is
   rendered with that control alone set to a known value, the render becomes
   the target, and the fit is asked to find it again from the straight
-  conversion: the control must come back with its sign and at least half its
-  size, nothing else may move, and the finished frame must land within the
-  fit's own rounding. The same test checks that an untouched recipe reads as
-  identical to its own export, and that exposure alone comes back as
-  exposure alone with the sky clipped and just under the clip.
-- The hand-off from the cast curves to the white balance has an end-to-end
-  sample that reaches both of its white-balance checks through the public
-  entry.
+  conversion. 待填_SELF_CONSISTENCY
+- **Nine real pairs against v1.17.1**, each fitted by the released v1.17.1
+  command line and by this build at the strength of record and compared
+  against its target region by region: every pair reads at or under the
+  v1.17.1 distance with the same or fewer controls. The night pair's whole
+  frame reads 4.66 against 5.14 and its master curve carries no cliff; the
+  pair with the most controls in v1.17.1 (35) now ships 11 and reads 0.11
+  further, less than the fit's own rounding amounts to on a frame.
+- **Every mechanism in the law has a toy that reads it**, each pinned to the
+  reading on this tree with the attribution written beside the number: the
+  withheld-sky toy keeps its untrusted range at identity, the calibration
+  sky ships the colour its cells vouch, the refused canyon casts land as the
+  law admits them.
 
 ## Known limits
 
-- 待填_SELF_CONSISTENCY — read off the self-consistency test on the final
-  tree. At this tree seven cases still fail and are skipped as open defects:
-  the white balance, a colour band's hue, saturation and luminance, a cast
-  curve, a grade wheel, and a mask's colour. Each is either fixed before the
-  release or written here as "a control set alone on a photo is not always
-  recovered alone: the fit finds <what it ships instead>".
+- **The night horizon band.** On the night pair the brightness ripple across
+  the sky's foot reads 1.11 against v1.17.1's 0.73 and the line of 0.63 the
+  pair is held to; the whole frame and the sky itself are closer than
+  v1.17.1's. The ripple is the population evidence's: where the sky's pixels
+  do not pair, the fit reads the sky's distribution, and the distribution
+  does not say where in the sky each tone belongs.
+- **A withheld brightness range can hold a global tone back.** Where a region
+  of the picture is read by its distribution and its lower and upper halves
+  ask opposite moves, no exposure or slider serves the rest of the frame
+  without moving that region against half of its ask; the fit then ships the
+  tone the law admits, which on the constructed case is none. The stage's
+  proposed curve keeps such a range at identity, but a range near white that
+  the proposed exposure pushes into clipping cannot be held there inside the
+  curve's slope budget.
 - **The white balance and exposure judged on the shared part of a repainted
   pair** apply on no calibration pair: on every pair that reaches that path
   the shared part is too small to be used, and the whole frame is read as
   before. The rule is tested on a constructed pair only.
-- **One calibration pair is a hair further from its target.** On the lantern
-  street the finished frame sits 0.10 ΔE76 further from its target than the
-  reading this release is held to, less than the 0.31 ΔE76 the fit's own
-  rounding amounts to; its brightest tenth reads 5.94 against that reading's 4.23.
-  待填_FINAL_GATE (confirm on the final gate).
 - **The sidecar's starting tone is declared, not carried** (above): opened in
   Lightroom, a photo whose recipe starts on the camera base curve renders on
   Lightroom's own starting tone.
-- 待填_PENDING_SKY — the night horizon (a known limit of v1.17.1): the sky's
-  foot at the horizon stays darker and colder than the target's warm haze on
-  the night pair, and the land under it a stop under; the work that
-  traces which stage owns the glow is not final in this tree. Final reading
-  and sentence from the final gate.
+- **The brightest star on a processed night master** reads cyan-cored with a
+  yellow tail with the colour-noise stage off and in v1.17.1 alike: it is not
+  this stage's and is reported as an observation.
 
 ## Known changes
 
 - **Recipes differ from v1.17.1's** on most pairs: the fit judges and admits
-  every stage by a different measure, so a fit may now ship fewer controls
-  (those that earned nothing are at zero) and different strengths.
-- **The report carries new lines**: the controls set back to zero, the
-  readings a zone shipped on, and the full-size re-reading of the finished
-  recipe beside the preview's and the starting point's.
+  every control by a different measure, so a fit ships fewer controls (those
+  that earned nothing are at zero) and different strengths.
+- **The report carries new lines**: the controls set back to zero, the class
+  that was re-estimated or scaled and by how much, the readings a zone
+  shipped on, and the full-size re-reading of the finished recipe beside the
+  preview's and the starting point's.
+- **A fit takes longer.** The solver renders the candidate many hundreds of
+  times; a real pair takes from a quarter of an hour to three quarters on
+  the maintainer's machine where v1.17.1 took minutes. Processing time is a
+  reading, not a gate, in this project.
 - **A fit takes one more full-size render** for the final check.
 
 ## Compatibility
