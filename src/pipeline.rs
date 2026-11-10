@@ -705,7 +705,28 @@ pub fn produce_recipe(
         let who = if cfg.analysis_is_api() { "OpenAI-API" } else { "Claude (OAuth)" };
         println!("verifier : {who} ({})", cfg.analysis_model);
     }
-    let mut verdict = verifier.verify(&recipe, meta, hist, &intent)?;
+    // A verifier that cannot answer the FIRST round does not throw the paid
+    // proposal away (it used to: `?` here failed the whole analysis). The
+    // proposal stays, unverified, under a non-Accept verdict — so no surface
+    // auto-saves or auto-accepts it — with no revision hint, so the verifier
+    // loop below does not run; the judge, which sees pixels, still may. The
+    // rationale says why, as the later rounds' failures already do.
+    let mut verdict = match verifier.verify(&recipe, meta, hist, &intent) {
+        Ok(v) => v,
+        Err(e) => {
+            let e = crate::rationale::error_line(&anyhow::Error::new(e));
+            crate::rationale::push_note(
+                &mut recipe.rationale,
+                &mut det_notes,
+                crate::rationale::Note::new(crate::rationale::keys::VERIFY_FAILED, vec![("e", e.clone())]),
+            );
+            Verdict {
+                decision: Decision::Revise,
+                reasons: vec![format!("the verifier could not check this proposal ({e})")],
+                revised_hint: None,
+            }
+        }
+    };
 
     // Bounded verify→revise loop (only if GPT actually produced the recipe). With
     // the now-symmetric verifier — which pushes a too-flat edit to commit AND a
@@ -726,8 +747,7 @@ pub fn produce_recipe(
         // Keep that (recipe, verdict) pair — they stay consistent, so the
         // returned verdict still describes the returned recipe — and record why
         // the loop stopped in the rationale, the one channel all three surfaces
-        // show (the windowed GUI has no console for the CLI's stderr). A
-        // FIRST-round failure still errors: there is no good pair to keep.
+        // show (the windowed GUI has no console for the CLI's stderr).
         let mut revised = match revise(&recipe, opinions, &hint) {
             Ok(r) => r,
             Err(e) => {
@@ -744,6 +764,22 @@ pub fn produce_recipe(
         };
         cut_ai_masks(&mut revised.recipe, &mut revised.notes);
         match verifier.verify(&revised.recipe, meta, hist, &intent) {
+            // DO NO HARM: the verifier never sees an image, so its revision
+            // replaces the held recipe only when the new verdict ranks
+            // STRICTLY higher (Accept > Revise > Reject). On an equal or lower
+            // rank the held pair stands and this loop ends — the visual judge
+            // below, which looks at pixels, takes over from here.
+            Ok(v) if advise::verdict_rank(&v.decision) <= advise::verdict_rank(&verdict.decision) => {
+                crate::rationale::push_note(
+                    &mut recipe.rationale,
+                    &mut det_notes,
+                    crate::rationale::Note::new(
+                        crate::rationale::keys::REVISION_NOT_BETTER,
+                        vec![("round", round.to_string())],
+                    ),
+                );
+                break;
+            }
             Ok(v) => {
                 recipe = revised.recipe;
                 // Fresh model prose — the notes described the DISCARDED

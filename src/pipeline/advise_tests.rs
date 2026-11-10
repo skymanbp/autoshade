@@ -220,3 +220,93 @@ fn only_absent_schema_keys_are_filled_from_the_held_answer() {
     assert!(reply.get("rationale").is_none(), "the held prose is not the revision's");
     assert!(reply.get("colour_field").is_none(), "an engine-only field is not the schema's");
 }
+
+/// The verifier's verdicts are RANKED, Accept above Revise above Reject.
+#[test]
+fn the_verdict_ranking_is_accept_over_revise_over_reject() {
+    use crate::advisor::Decision;
+    assert!(verdict_rank(&Decision::Accept) > verdict_rank(&Decision::Revise));
+    assert!(verdict_rank(&Decision::Revise) > verdict_rank(&Decision::Reject));
+}
+
+/// A verifier-driven revision whose verdict ranks only EQUAL to the held
+/// recipe's does not replace it, and the verifier loop ends there (one
+/// round, not the two the cap allows): the verifier never sees an image, so
+/// a re-roll it rates no better is no evidence of an improvement.
+///
+/// MUTATION: make the do-no-harm guard `<` instead of `<=` and the recipe
+/// comes back as the revision's, with a second round paid for (the stub's
+/// script, sized for one round, then fails the run).
+#[test]
+fn an_equally_rated_verifier_revision_keeps_the_held_recipe_and_ends_the_loop() {
+    let (url, seen, handle) = stub_endpoint(vec![
+        (200, "application/json", propose_reply(serde_json::json!({ "exposure_ev": 0.3, "rationale": "first" }))),
+        (200, "application/json", verdict_reply("revise", Some("more contrast"))),
+        (200, "application/json", propose_reply(serde_json::json!({ "exposure_ev": 0.9, "rationale": "second" }))),
+        (200, "application/json", verdict_reply("revise", Some("still flat"))),
+    ]);
+    let (dir, png) = fixture_png("c2-equal");
+    let (recipe, verdict) = analyze(&png, &url);
+    join_stub(handle);
+    assert_eq!(seen.lock().unwrap().len(), 4, "one revision round, then the loop ends");
+    assert_eq!(recipe.exposure_ev, 0.3, "the held recipe stands");
+    assert_eq!(verdict.decision, crate::advisor::Decision::Revise);
+    assert_eq!(verdict.revised_hint.as_deref(), Some("more contrast"), "the held recipe's own verdict");
+    assert!(
+        recipe.rationale.contains(crate::rationale::keys::REVISION_NOT_BETTER.replace("{round}", "1").as_str()),
+        "the kept round is disclosed: {}",
+        recipe.rationale
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A revision that ranks HIGHER is adopted (Reject → Revise here), and the
+/// loop goes on from it; a second revision that ranks only equal to the
+/// adopted one is then discarded in its turn.
+///
+/// MUTATION: drop the rank guard (adopt unconditionally, the old rule) and
+/// the second round's re-roll replaces the first revision.
+#[test]
+fn a_higher_rated_verifier_revision_is_adopted_and_a_lateral_one_is_not() {
+    let (url, seen, handle) = stub_endpoint(vec![
+        (200, "application/json", propose_reply(serde_json::json!({ "exposure_ev": 0.3, "rationale": "first" }))),
+        (200, "application/json", verdict_reply("reject", Some("far too dark"))),
+        (200, "application/json", propose_reply(serde_json::json!({ "exposure_ev": 0.8, "rationale": "second" }))),
+        (200, "application/json", verdict_reply("revise", Some("a touch more"))),
+        (200, "application/json", propose_reply(serde_json::json!({ "exposure_ev": 1.4, "rationale": "third" }))),
+        (200, "application/json", verdict_reply("revise", Some("too far now"))),
+    ]);
+    let (dir, png) = fixture_png("c2-higher");
+    let (recipe, verdict) = analyze(&png, &url);
+    join_stub(handle);
+    assert_eq!(seen.lock().unwrap().len(), 6, "two revision rounds");
+    assert_eq!(recipe.exposure_ev, 0.8, "the round-1 revision ranked higher and was adopted; round 2's did not");
+    assert_eq!(verdict.revised_hint.as_deref(), Some("a touch more"), "the verdict describes the kept recipe");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A FIRST-round verifier failure keeps the paid proposal under a non-Accept
+/// verdict (nothing auto-saves it) and says why in the rationale, instead of
+/// failing the whole analysis.
+///
+/// MUTATION: restore `verifier.verify(...)?` and `analyze` panics on the Err.
+#[test]
+fn a_first_round_verifier_failure_keeps_the_proposal_unaccepted() {
+    let refused = serde_json::json!({
+        "choices": [{ "finish_reason": "stop", "message": { "content": null, "refusal": "no" } }]
+    })
+    .to_string();
+    let (url, seen, handle) = stub_endpoint(vec![
+        (200, "application/json", propose_reply(serde_json::json!({ "exposure_ev": 0.3, "rationale": "first" }))),
+        (200, "application/json", refused),
+    ]);
+    let (dir, png) = fixture_png("c2-fail");
+    let (recipe, verdict) = analyze(&png, &url);
+    join_stub(handle);
+    assert_eq!(seen.lock().unwrap().len(), 2, "no revision round without a verdict to follow");
+    assert_eq!(recipe.exposure_ev, 0.3, "the paid proposal is kept");
+    assert_ne!(verdict.decision, crate::advisor::Decision::Accept, "an unverified recipe is never accepted");
+    assert!(verdict.revised_hint.is_none());
+    assert!(recipe.rationale.contains("the verifier could not check this proposal"), "{}", recipe.rationale);
+    let _ = std::fs::remove_dir_all(dir);
+}

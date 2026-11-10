@@ -2135,8 +2135,15 @@ never reads the stored OAuth login ("OAuth and keychain are never read"), which
 is exactly the v0.11.2 auth failure — see `src/advisor/claude.rs`; or
 **API** — an OpenAI-compatible chat endpoint (`OpenAiVerifier`, `/chat/completions`)
 sharing the same data-only prompt. Either returns a `Verdict` (accept / revise /
-reject + reasons). A rejected recipe can trigger one revision round with the
-vision advisor.
+reject + reasons). A non-Accept verdict that carries a revision hint buys up to
+two revision rounds with the vision advisor. A revision round shows the model
+its own previous answer rendered, with that recipe's JSON and the render's
+histogram beside the source's, and asks it to edit that answer (a key it leaves
+out, or answers null, keeps the previous value). The revision replaces the held
+recipe only when its verdict ranks strictly higher (accept > revise > reject);
+otherwise the held recipe stands and the visual judge, which sees pixels, takes
+over. A verifier that cannot answer at all keeps the proposal, unverified, under
+a non-Accept verdict, so it is never saved automatically.
 
 ### 4.4 Render engine (M2)
 

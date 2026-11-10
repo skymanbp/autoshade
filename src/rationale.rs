@@ -1304,6 +1304,12 @@ pub mod keys {
     pub const REVISION_VERIFY_FAILED: &str =
         " [verification of revision round {round} failed ({e}) — keeping the previous \
          verified proposal]";
+    pub const REVISION_NOT_BETTER: &str =
+        " [the verifier did not rate revision round {round} above the proposal it revised — \
+         keeping that proposal]";
+    pub const VERIFY_FAILED: &str =
+        " [the verifier could not check this proposal ({e}) — it is kept unverified and is not \
+         accepted automatically]";
     pub const STYLE_UNAVAILABLE: &str =
         " [reference library unavailable ({e}) — the Style slider had no effect on this \
          develop]";
@@ -1853,6 +1859,7 @@ ValueError: boom at C:\Users\alice\x.py"#
             keys::ZONED_UNAVAILABLE,
             keys::REVISION_FAILED,
             keys::REVISION_VERIFY_FAILED,
+            keys::VERIFY_FAILED,
             keys::STYLE_UNAVAILABLE,
             keys::STYLE_REF_IMAGE_FAILED,
             keys::JUDGE_ROUND_FAILED,

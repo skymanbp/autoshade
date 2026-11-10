@@ -83,6 +83,19 @@ pub(crate) fn inherit_held_opinions(
     }
 }
 
+/// The verifier's verdicts, RANKED: Accept above Revise above Reject. A
+/// verifier-driven revision replaces the held recipe only when its verdict
+/// ranks strictly higher (`produce_recipe`'s do-no-harm rule for a reviewer
+/// that never sees an image).
+pub(crate) fn verdict_rank(d: &crate::advisor::Decision) -> u8 {
+    use crate::advisor::Decision;
+    match d {
+        Decision::Reject => 0,
+        Decision::Revise => 1,
+        Decision::Accept => 2,
+    }
+}
+
 #[cfg(test)]
 #[path = "advise_tests.rs"]
 mod tests;

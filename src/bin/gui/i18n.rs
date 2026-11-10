@@ -2527,6 +2527,12 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" [verification of revision round {round} failed ({e}) — keeping the previous \
       verified proposal]",
         " [第 {round} 轮修订的验证失败（{e}）——保留上一轮已验证的提案]"),
+    (" [the verifier did not rate revision round {round} above the proposal it revised — \
+      keeping that proposal]",
+        " [验证器认为第 {round} 轮修订并不比上一轮的提案更好——保留上一轮的提案]"),
+    (" [the verifier could not check this proposal ({e}) — it is kept unverified and is not \
+      accepted automatically]",
+        " [验证器无法检查这个提案（{e}）——保留但未经验证，不会自动接受]"),
     // ── R23-1: the vision proposer's own HSL-length repair (openai.rs) ───────
     (" [the proposal's 8-band colour mixer arrived with the wrong number of values \
       ({axes}) — the missing bands were read as neutral 0 and any extra ones dropped, \
