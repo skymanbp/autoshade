@@ -16,6 +16,10 @@ use crate::decode;
 use crate::recipe::{DirectionAdherence, EditRecipe, GradeStrength, StrengthTier};
 use crate::xmp;
 
+// What a revision round of the analysis chain shows the proposer, and how its
+// reply is read against the answer it revises.
+mod advise;
+
 /// The TASTE dials one develop is asked for — the two independent axes plus the
 /// reference library's opt-in images.
 ///
@@ -466,6 +470,27 @@ pub fn produce_recipe(
         }
         None => Preview { jpeg: preview.jpeg.clone() },
     };
+    // A held recipe as every reviewer of it sees it rendered: an ADJUST's
+    // un-returnable state carried from its base (its bitmap masks are part of
+    // the look under review — without them the judge once saw the user's sky
+    // mask missing and bought a revision to fix what was already fixed, review
+    // R20-S1 — and the lens opinion rides for the same reason since R23-1b),
+    // the baked start stripped (the analysis frame already CONTAINS the base
+    // look and the lens corrections, so base_curve stays empty and the lens
+    // profile default: the refine-strip rule) and the hoisted WB anchor the
+    // deliverable will carry. ONE closure for its two consumers, which must
+    // agree: the visual judge's render, and the frame a revision round shows
+    // the proposer of its own previous answer.
+    let held_view = |r: &EditRecipe, opinions: Opinions| -> EditRecipe {
+        let mut v = r.clone();
+        if let Some(b) = base {
+            carry_over_unrepresentable(&mut v, b, opinions, None);
+        }
+        v.strip_baked_start();
+        v.as_shot_k = anchor_k;
+        v.as_shot_tint = anchor_tint;
+        v
+    };
     // The `ai` masks a proposal asks for are cut HERE, by the local
     // segmenter, before the verifier, the judge or the deliverable read the
     // recipe: the judge renders the recipe, and an AI mask without its alpha
@@ -541,6 +566,52 @@ pub fn produce_recipe(
         // different questions, exactly like the reference image above.
         think: req.think,
         adherence: req.adherence,
+        // Only a revision round reads its reply against a held answer.
+        held: None,
+    };
+    // ONE revision round's proposal, for both revision loops below: the
+    // proposer edits its OWN answer while looking at it. IMAGE 1 is the held
+    // recipe rendered on the analysis frame (the judge's render, `held_view`),
+    // the envelope spells that recipe and carries the render's histogram
+    // beside the source's, and the reviewer's note rides `hint`, fenced as
+    // always. The protocol is the ADJUST envelope with the held recipe in the
+    // place of the photographer's edit (`advise::revision_envelope`).
+    //
+    // The reply is read against the held answer, never against an ADJUST's
+    // base: an absent key keeps the held value (`ProposeContext::held`), a null
+    // keeps the held value where the held answer stated one
+    // (`advise::inherit_held_opinions`), and a mask name echoed from the
+    // rendered view keeps its bytes (the view is the projection's base). The
+    // held answer is deliberately NOT a `carry_over_unrepresentable` base: it
+    // holds nothing the schema cannot say except masks the model itself chose,
+    // and that function's wholesale mask revert would forbid the revision from
+    // dropping its own mask. An ADJUST's real base still carries over once, at
+    // the end, onto whichever recipe survives.
+    let revise = |held: &EditRecipe,
+                  held_opinions: Opinions,
+                  hint: &str|
+     -> Result<crate::advisor::Proposal, crate::advisor::AdvisorError> {
+        let view = held_view(held, held_opinions);
+        let rendered = crate::render::develop_preview(&preview_img, &view);
+        let render_hist = crate::advisor::hist_summary(&decode::histogram_of(&rendered));
+        let mut jpeg = Vec::new();
+        rendered.write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg).map_err(|e| {
+            crate::advisor::AdvisorError::Io(std::io::Error::other(format!("encode the revision render JPEG: {e}")))
+        })?;
+        let envelope = advise::revision_envelope(
+            &serde_json::to_string(&view).unwrap_or_default(),
+            user_direction,
+            &render_hist,
+        );
+        let ctx = crate::advisor::ProposeContext {
+            guidance: Some(&envelope),
+            hint: Some(hint),
+            held: Some(held),
+            ..propose_ctx
+        };
+        let mut p = openai.propose_planned_with_base(&Preview { jpeg }, meta, hist, &ctx, Some(&view))?;
+        p.opinions = advise::inherit_held_opinions(&mut p.recipe, p.opinions, held, held_opinions);
+        Ok(p)
     };
     let mut det_notes: Vec<crate::rationale::Note> = Vec::new();
     // The working of the proposal that SURVIVES (R23-4). Every arm that
@@ -657,13 +728,7 @@ pub fn produce_recipe(
         // the loop stopped in the rationale, the one channel all three surfaces
         // show (the windowed GUI has no console for the CLI's stderr). A
         // FIRST-round failure still errors: there is no good pair to keep.
-        let mut revised = match openai.propose_planned_with_base(
-            &proposer_preview,
-            meta,
-            hist,
-            &crate::advisor::ProposeContext { hint: Some(&hint), ..propose_ctx },
-            base,
-        ) {
+        let mut revised = match revise(&recipe, opinions, &hint) {
             Ok(r) => r,
             Err(e) => {
                 crate::rationale::push_note(
@@ -704,10 +769,11 @@ pub fn produce_recipe(
         }
     }
 
-    // R20: the visual CLOSED LOOP — the first eye ever laid on the result.
-    // The proposer emits numbers blind (it never sees what they render to)
+    // R20: the visual CLOSED LOOP — the first eye laid on the result as a
+    // whole. The first proposal's numbers are emitted before any render of
+    // them exists (only a revision round shows the proposer its own render)
     // and the verifier judges data-only by contract, so a plausible-but-off
-    // develop sailed through both. Render the verified proposal and put it
+    // develop could sail through both. Render the verified proposal and put it
     // in front of the vision model as a JUDGE; on a revise verdict run ONE
     // guided round, adopted only when the re-judge scores at least as high
     // (do-no-harm — the fit's own rule applied here). Every branch discloses
@@ -746,29 +812,14 @@ pub fn produce_recipe(
     // thinking at a committed strength (10 with images, 14 frames) — the
     // numbers the GUI tooltip and `--deep`'s help quote.
     if judge && can_revise {
-        let judge_view = |r: &EditRecipe, opinions: Opinions| -> EditRecipe {
-            let mut v = r.clone();
-            if let Some(b) = base {
-                // A refine's bitmap masks are part of the look under
-                // judgement (the response schema cannot return them; the
-                // deliverable gets them re-attached below) — without this
-                // the judge saw the user's sky mask missing and bought a
-                // revision to fix what was already fixed (review R20-S1).
-                // The lens opinion rides along for the same reason: the judge
-                // must score the frame the deliverable will BE, and since
-                // R23-1b those two differ whenever the model stated a lens
-                // value (it would otherwise be judged with the base's).
-                carry_over_unrepresentable(&mut v, b, opinions, None);
-            }
-            v.strip_baked_start();
-            v.as_shot_k = anchor_k;
-            v.as_shot_tint = anchor_tint;
-            v
-        };
+        // The judge scores the frame the deliverable will BE (`held_view`: an
+        // ADJUST's bitmap masks and lens opinion included, the baked start
+        // stripped, the real WB anchor) — the same render a revision round
+        // shows the proposer.
         let judge_of = |r: &EditRecipe,
                         opinions: Opinions|
          -> Result<crate::advisor::Judgement, crate::advisor::AdvisorError> {
-            let rendered = crate::render::develop_preview(&preview_img, &judge_view(r, opinions));
+            let rendered = crate::render::develop_preview(&preview_img, &held_view(r, opinions));
             let mut jpeg = Vec::new();
             rendered
                 .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
@@ -861,16 +912,7 @@ pub fn produce_recipe(
                         &h,
                         &recipe,
                         |h| {
-                            let p = openai.propose_planned_with_base(
-                                &proposer_preview,
-                                meta,
-                                hist,
-                                &crate::advisor::ProposeContext {
-                                    hint: Some(h),
-                                    ..propose_ctx
-                                },
-                                base,
-                            )?;
+                            let p = revise(&recipe, opinions, h)?;
                             candidate_thinking = p.thinking;
                             candidate_opinions.set(p.opinions);
                             candidate_notes = p.notes;

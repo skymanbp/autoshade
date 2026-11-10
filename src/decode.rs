@@ -2511,6 +2511,14 @@ pub fn embedded_preview_turned(path: &Path, quarter_turns: u8) -> Result<Option<
     camera_rendition(path, quarter_turns)
 }
 
+/// The histogram a decode would report for `img` — the same downscale-only
+/// working copy and the same counts — for pixels that did not come from a
+/// decode (the analysis chain's render of a recipe, which a revision round
+/// shows the proposer beside the source's numbers).
+pub(crate) fn histogram_of(img: &DynamicImage) -> Histogram {
+    compute_histogram(&hist_copy(img))
+}
+
 fn compute_histogram(img: &DynamicImage) -> Histogram {
     let rgb = img.to_rgb8();
     let (mut r, mut g, mut b, mut luma) = (vec![0u32; 256], vec![0u32; 256], vec![0u32; 256], vec![0u32; 256]);

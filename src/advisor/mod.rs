@@ -328,6 +328,39 @@ pub struct ProposeContext<'a> {
     pub think: bool,
     /// Direction-following tier. Defaults to the historical direct wording.
     pub adherence: DirectionAdherence,
+    /// A REVISION round's held recipe — the model's own previous answer, which
+    /// the round shows it rendered and spelled (`pipeline::produce_recipe`).
+    /// The reply is read as an edit of it: a schema key the reply leaves out
+    /// keeps the held value ([`fill_absent_from_held`]) instead of falling to
+    /// the engine's neutral. `None` (every first proposal, every ADJUST call)
+    /// reads the reply as the whole answer, as before.
+    pub held: Option<&'a EditRecipe>,
+}
+
+/// A revision reply's ABSENT schema keys, taken from the recipe it revises.
+///
+/// The strict schema makes every key required, so a schema-honouring endpoint
+/// never leaves one out; an endpoint that ignores the schema can, and
+/// `EditRecipe`'s container default would then reset that control to neutral —
+/// a revision asked to "lift the shadows" silently zeroing the contrast it did
+/// not mention. Only the schema's own properties are filled, and not the
+/// nullable ones (an absent nullable is "no opinion", settled by the caller
+/// against the held answer's opinions), nor the prose: a held `rationale`
+/// carries the previous round's disclosures, which would then be told twice.
+pub(crate) fn fill_absent_from_held(v: &mut serde_json::Value, held: &EditRecipe) {
+    let Some(obj) = v.as_object_mut() else { return };
+    let Ok(serde_json::Value::Object(from)) = serde_json::to_value(held) else { return };
+    let schema = catalogue::edit_recipe_schema();
+    let Some(props) = schema.get("properties").and_then(serde_json::Value::as_object) else { return };
+    let nullable = catalogue::nullable_controls();
+    for key in props.keys() {
+        if key == "rationale" || nullable.contains(&key.as_str()) || obj.contains_key(key) {
+            continue;
+        }
+        if let Some(value) = from.get(key) {
+            obj.insert(key.clone(), value.clone());
+        }
+    }
 }
 
 /// The proposer's structured WORKING for one call — R23-4's answer to "make it
@@ -2331,7 +2364,7 @@ pub(crate) fn parse_verdict(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// G2/G3: the verifier's CHECKLIST names colour and curve monotonicity.
@@ -3071,7 +3104,7 @@ Final answer: {"decision":"accept","reasons":[]}"#;
     /// exhausted — an unexpected extra POST fails its connection loudly
     /// instead of hanging. Bind failure panics with the OS error: a sandbox
     /// that forbids loopback must fail these tests, never skip them.
-    pub(in crate::advisor) fn stub_endpoint(
+    pub(crate) fn stub_endpoint(
         script: Vec<(u16, &'static str, String)>,
     ) -> (
         String,
@@ -3110,7 +3143,7 @@ Final answer: {"decision":"accept","reasons":[]}"#;
     /// The script must be fully CONSUMED — fewer POSTs than scripted is as
     /// wrong as more. Bounded (the join_bounded philosophy): a stub thread
     /// still parked in recv() fails the test, never hangs the suite.
-    pub(in crate::advisor) fn join_stub(handle: std::thread::JoinHandle<()>) {
+    pub(crate) fn join_stub(handle: std::thread::JoinHandle<()>) {
         let grace = std::time::Instant::now();
         while !handle.is_finished() && grace.elapsed() < std::time::Duration::from_secs(2) {
             std::thread::sleep(std::time::Duration::from_millis(20));

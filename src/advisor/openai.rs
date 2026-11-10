@@ -720,6 +720,12 @@ impl OpenAiProvider {
         // pipeline can tell "leave the photographer's value alone" from
         // "zero it".
         let opinions = take_opinions(&mut parsed);
+        // A REVISION reply is an edit of the held answer: a key it leaves out
+        // keeps the held value rather than falling to neutral (after the
+        // opinions are read, so an absent nullable stays "no opinion").
+        if let Some(held) = ctx.held {
+            super::fill_absent_from_held(&mut parsed, held);
+        }
         let repaired = repair_hsl_axis_lengths(&mut parsed);
         // The `ai` masks the model asked for, spelled as the engine's own
         // geometry with no alpha yet (the pipeline cuts it locally). An
