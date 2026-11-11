@@ -1718,11 +1718,6 @@ fn match_source(raw: &Path, negative: Option<&Path>) -> Result<(render::Plate, E
     pipeline::fit_source(raw)
 }
 
-/// Reverse-fit: solve for the EditRecipe that maps `raw`'s look onto `target`'s
-/// (the same frame, differently developed — e.g. the reimagine output). The
-/// deliverables are parametric (recipe JSON + XMP + optional full-res render),
-/// so the low-res generative experiment becomes a real, adjustable develop.
-#[allow(clippy::too_many_arguments)] // one flag per CLI switch; a struct would just rename them
 /// The five values `match` fits with: a `--level` step's row of
 /// [`fit::FitLevel::settings`], else the individual flags (clap refuses the
 /// two together).
@@ -1754,6 +1749,11 @@ fn match_knobs(
     }
 }
 
+/// Reverse-fit: solve for the EditRecipe that maps `raw`'s look onto `target`'s
+/// (the same frame, differently developed — e.g. the reimagine output). The
+/// deliverables are parametric (recipe JSON + XMP + optional full-res render),
+/// so the low-res generative experiment becomes a real, adjustable develop.
+#[allow(clippy::too_many_arguments)] // one flag per CLI switch; a struct would just rename them
 fn match_cmd(
     raw: &Path,
     target: &Path,
