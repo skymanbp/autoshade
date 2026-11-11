@@ -466,9 +466,13 @@ blue+aqua luminance to deepen a sky; lift/shift orange for skin). For `color_gra
     instruction.push_str(
         "Use the `masks` array PROACTIVELY to dodge and burn like a darkroom print: even with NO explicit \
 user request, add 1-2 local masks to lift the subject, hold back a hot sky, or deepen distracting \
-corners when it makes the photo read better. Masks are tonal/colour adjustments through gradient \
-masks — never painting, generating, or adding content. Prefer a linear gradient for \
-skies/horizons/foregrounds; radial for subjects/vignettes. \
+corners when it makes the photo read better. Masks are tonal/colour adjustments — never \
+painting, generating, or adding content. A sky or a subject is best selected by CONTENT with a \
+kind=ai mask, cut by a local segmenter after you answer: what=sky, what=subject (the main \
+subject), or what=object under the point ref_x/ref_y (0..1 frame coordinates, origin top-left), \
+and for people what=face, what=eyes or what=background (everything but the person), found on the \
+photo itself without a point. Use linear and radial masks for smooth falloff — a graduated \
+horizon, a foreground worked from below, a vignette. \
 When the USER DIRECTION names a SPECIFIC AREA (e.g. 'that corner', 'the sky', 'the subject', \
 'top-left', 'this part is too noisy', 'brighten her face') translate it into a mask placed over \
 THAT area and set the relevant local sliders — including local `noise_reduction` for a noisy \
@@ -1579,7 +1583,12 @@ mod tests {
             );
             // The rest of the shipped mask paragraph is untouched.
             assert!(text.contains("dodge and burn like a darkroom print"), "{name}");
-            assert!(text.contains("Prefer a linear gradient for skies/horizons/foregrounds"), "{name}");
+            // A sky or a subject goes to the segmenter; gradients are for
+            // falloff (MUTATION: restore "Prefer a linear gradient for
+            // skies/horizons/foregrounds" and these fail).
+            assert!(text.contains("A sky or a subject is best selected by CONTENT with a kind=ai mask"), "{name}");
+            assert!(text.contains("Use linear and radial masks for smooth falloff"), "{name}");
+            assert!(!text.contains("Prefer a linear gradient for"), "{name}");
             assert!(text.contains("keep each existing mask's `name` EXACTLY as given"), "{name}");
         }
         // The references are finished photos, not masks: neither prompt may
