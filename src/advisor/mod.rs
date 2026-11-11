@@ -2113,10 +2113,18 @@ Contrast slider AND a strong tone_curve S (double contrast — pick one), {FAULT
 is committed but RESTRAINED, not maximal — at this TARGET STRENGTH, when in doubt, err toward \
 restraint;\n"
         ),
+        // The DEFAULT strength lives here, so this arm says what the proposer's
+        // own Balanced arm asks for (`openai::strength_clause`: a CONFIDENT
+        // finished look, colour and clarity used purposefully rather than
+        // sparingly, never all three stacked). A verifier that told the default
+        // develop to stay "RESTRAINED, not maximal" revised the proposer back
+        // toward the cautious baseline the dial had moved past.
         StrengthTier::Balanced => format!(
             "- SYMMETRICALLY, REVISE a recipe that is OVER-COOKED: contrast applied BOTH as a high \
-Contrast slider AND a strong tone_curve S (double contrast — pick one), {FAULTS}. A finished grade \
-is committed but RESTRAINED, not maximal;\n"
+Contrast slider AND a strong tone_curve S (double contrast — pick one), {FAULTS}. At this TARGET \
+STRENGTH a finished grade is CONFIDENT — committed, with vibrance, saturation and clarity used \
+purposefully rather than sparingly: revise it for the faults above, never merely for being \
+confident;\n"
         ),
         StrengthTier::Committed => format!(
             "- SYMMETRICALLY, REVISE a recipe that is OVER-COOKED — but at this TARGET STRENGTH \
@@ -2715,7 +2723,13 @@ pub(crate) mod tests {
 
         // (2) the OVER-COOKED band relaxes — and the measured faults never move.
         assert!(timid.contains("err toward restraint"), "{timid}");
-        assert!(calib.contains("committed but RESTRAINED, not maximal"), "{calib}");
+        // The default band speaks the proposer's Balanced words, not restraint
+        // (MUTATION: restore "committed but RESTRAINED, not maximal" to the
+        // Balanced arm and both asserts fail).
+        assert!(calib.contains("a finished grade is CONFIDENT"), "{calib}");
+        assert!(calib.contains("purposefully rather than sparingly"), "{calib}");
+        assert!(!calib.contains("RESTRAINED, not maximal"), "{calib}");
+        assert!(!at(0.65, None).contains("RESTRAINED, not maximal"), "the shipped default");
         assert!(bold.contains("over-cooked means BROKEN, not strong"), "{bold}");
         assert!(
             !bold.contains("committed but RESTRAINED, not maximal"),
