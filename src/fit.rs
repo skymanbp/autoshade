@@ -100,6 +100,7 @@ mod grade;
 mod hsl;
 mod hue_gates;
 mod joint;
+mod level;
 mod look;
 mod pairing;
 mod pixels;
@@ -110,6 +111,7 @@ mod tone;
 mod validity;
 
 use atmosphere::{fit_atmosphere_from_parts, project_curve_slopes, solve_white_balance};
+pub use level::{FULL_STRENGTH, FitLevel, FitLevelSettings, STRONG_STRENGTH};
 pub use budget::{DIVERGENCE_GLOBAL, FitBudget, FitOptions, GlobalCast, VetoPolicy};
 pub(crate) use budget::{ANALYZE_EDGE, DIVERGENCE_ZONE, DIVERGENT_COVER_PROMOTES};
 use budget::{
