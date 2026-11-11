@@ -2533,6 +2533,9 @@ static ZH_ENTRIES: &[(&str, &str)] = &[
     (" [the verifier could not check this proposal ({e}) — it is kept unverified and is not \
       accepted automatically]",
         " [验证器无法检查这个提案（{e}）——保留但未经验证，不会自动接受]"),
+    (" [this analysis looked at the camera's embedded preview because the RAW's neutral \
+      develop could not be made ({e})]",
+        " [这次分析看的是相机内嵌预览，因为无法生成 RAW 的中性显影（{e}）]"),
     // ── R23-1: the vision proposer's own HSL-length repair (openai.rs) ───────
     (" [the proposal's 8-band colour mixer arrived with the wrong number of values \
       ({axes}) — the missing bands were read as neutral 0 and any extra ones dropped, \

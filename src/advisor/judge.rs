@@ -316,7 +316,8 @@ pub(super) fn task_instruction(task: JudgeTask, intent: Option<GradeIntent<'_>>)
     let base = match task {
         JudgeTask::Develop => {
             "You are a master photo colourist acting as an impartial JUDGE. IMAGE 1 is the \
-             untouched camera preview; IMAGE 2 is the SAME frame developed by a proposed recipe \
+             untouched starting frame (the camera's preview, or the RAW's neutral develop with \
+             its calibration); IMAGE 2 is the SAME frame developed by a proposed recipe \
              (the recipe JSON is attached below as data). Judge IMAGE 2 as a finished \
              photograph: exposure and tonal anchor (committed but not slammed), highlight and \
              shadow integrity (no greyed-out speculars, no crushed or milky blacks), colour \

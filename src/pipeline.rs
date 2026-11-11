@@ -310,7 +310,35 @@ pub fn produce_recipe(
     });
     let guidance = refine_owned.as_deref().or(guidance);
 
-    let preview_img = decoded.preview_resized(ADVISOR_PREVIEW_EDGE);
+    // THE ANALYSIS FRAME. The deliverable is the RAW's neutral develop with
+    // the photo's calibration composed under the recipe (stamped at the end of
+    // this function), so a fresh analysis of a RAW looks at exactly that
+    // picture: the proposer is shown it, its histogram is read off it, and the
+    // judge renders the recipe on it. It is built with the reverse fit's rule
+    // (`fit_source`): the calibration-only recipe (`calibration_recipe`) of
+    // the photo's saved-first calibration — the one the stamp below writes —
+    // developed by the export's own path at the advisor's edge, at the as-shot
+    // white balance the anchor quotes. Baked sources, an ADJUST and AI pixels
+    // keep the frame they had; a develop that fails falls back to the
+    // camera's embedded preview, exactly as before, and the rationale says
+    // so. (The prompt's calibrated magnitude bands were measured on the
+    // embedded preview; they are not re-derived here.)
+    let (preview_img, frame_source) = advise::analysis_frame(
+        decoded.preview_resized(ADVISOR_PREVIEW_EDGE),
+        pixels.is_none() && base.is_none() && decode::is_raw(raw),
+        || {
+            let _permit = decode::DecodePermit::acquire();
+            crate::render::render_to_image_in(
+                raw,
+                &calibration_recipe(photo_calibration(raw)),
+                None,
+                Some(ADVISOR_PREVIEW_EDGE),
+                crate::render::ExportColorSpace::Srgb,
+                sink,
+            )
+        },
+    );
+    let calibrated_frame = frame_source == advise::FrameSource::CalibratedDevelop;
     let mut jpeg = Vec::new();
     preview_img
         .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
@@ -366,6 +394,8 @@ pub fn produce_recipe(
     // minutes. Keeping `decoded` whole pinned hundreds of MB of 61MP pixels
     // for that entire window.
     let decode::Decoded { meta, histogram, .. } = decoded;
+    // The numbers describe the picture the model is shown.
+    let histogram = if calibrated_frame { decode::histogram_of(&preview_img) } else { histogram };
     let hits: Vec<crate::library::Hit> = match (&library, &query) {
         (Some(lib), Some(q)) => lib.search(
             &crate::library::Query { image: q, exclude: Some(raw) },
@@ -452,11 +482,11 @@ pub fn produce_recipe(
         }
     };
     // What the PROPOSER sees in adjust mode: the current edit RENDERED — the
-    // same render the judge scores (`judge_view` strips the same two fields
+    // same render the judge scores (`held_view` strips the same two fields
     // and carries the same anchor) — so the request is answered against the
     // picture the photographer is looking at, not against the straight
     // preview plus a JSON to imagine. A fresh analysis sees the straight
-    // preview, as before; the judge's reference stays the straight preview.
+    // analysis frame; the judge's reference stays that straight frame.
     let proposer_preview = match &stripped_base {
         Some(stripped) => {
             let mut shown = stripped.clone();
@@ -568,6 +598,8 @@ pub fn produce_recipe(
         adherence: req.adherence,
         // Only a revision round reads its reply against a held answer.
         held: None,
+        // The prompt names the picture IMAGE 1 is.
+        calibrated_frame,
     };
     // ONE revision round's proposal, for both revision loops below: the
     // proposer edits its OWN answer while looking at it. IMAGE 1 is the held
@@ -1181,11 +1213,21 @@ pub fn produce_recipe(
     if let Some(note) = style_gap_note(req.library_style(), ref_str, library_gap.as_deref()) {
         crate::rationale::push_note(&mut recipe.rationale, &mut det_notes, note);
     }
+    // Which picture this analysis looked at, when it is not the one the
+    // deliverable starts from because the develop failed.
+    if let advise::FrameSource::FellBack(e) = &frame_source {
+        crate::rationale::push_note(
+            &mut recipe.rationale,
+            &mut det_notes,
+            crate::rationale::Note::new(crate::rationale::keys::ANALYSIS_FRAME_FELL_BACK, vec![("e", e.clone())]),
+        );
+    }
 
     // Base look, stamped in ONE place for every surface: the proposal and the
-    // verification above both ran over the camera's embedded preview — the
-    // very base the curve approximates — so the AI's JSON round-trip never
-    // decides it. A saved recipe.json owns its curve verbatim (a legacy save
+    // verification above both ran over a frame that already CONTAINS the
+    // start — the calibrated neutral develop of a RAW, or the camera's
+    // embedded preview whose look the curve approximates — so the AI's JSON
+    // round-trip never decides it. A saved recipe.json owns its curve verbatim (a legacy save
     // must keep rendering as it was tuned); otherwise a fresh estimate.
     // Without this, a CLI-written analyze recipe carried an empty curve and
     // the open-time "recipe.json keeps its saved curve" rule then pinned the
@@ -1239,7 +1281,13 @@ pub fn produce_recipe(
     // the user actually had — and, for the three manual lens fields the schema
     // DOES carry since R23-1b, keep the photographer's value only where this
     // proposal said nothing about them.
-    carry_over_then_note_domain(&mut recipe, base, opinions, &mut det_notes);
+    //
+    // On the calibrated analysis frame (a fresh analysis of a RAW, so there is
+    // no base to carry from) the judge already read the calibration in the
+    // pixels: nothing was read before it existed, and the note is not owed.
+    if !calibrated_frame {
+        carry_over_then_note_domain(&mut recipe, base, opinions, &mut det_notes);
+    }
     Ok((recipe, verdict, det_notes))
 }
 

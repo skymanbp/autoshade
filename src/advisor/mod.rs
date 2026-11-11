@@ -335,6 +335,11 @@ pub struct ProposeContext<'a> {
     /// the engine's neutral. `None` (every first proposal, every ADJUST call)
     /// reads the reply as the whole answer, as before.
     pub held: Option<&'a EditRecipe>,
+    /// IMAGE 1 is the RAW's neutral develop with the photo's calibration
+    /// composed — the picture the deliverable starts from — rather than the
+    /// camera's embedded preview (`pipeline::produce_recipe`'s analysis frame).
+    /// Only the prompt's sentence naming the frame reads it.
+    pub calibrated_frame: bool,
 }
 
 /// A revision reply's ABSENT schema keys, taken from the recipe it revises.

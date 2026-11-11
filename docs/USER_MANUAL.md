@@ -1329,7 +1329,13 @@ develop** (Analysis, Adjust the selected variant, Reference library).
   The vision advisor proposes bounded sliders and masks, a data-only verifier
   checks the proposal, and normal visual review may attempt one revision;
   `--deep` permits additional bounded rounds. Accepted output remains a normal
-  recipe and XMP. The model may set every develop control it can judge from
+  recipe and XMP. For a RAW, the model, the histogram it is given and the
+  visual review all look at the RAW's neutral develop with the photo's
+  calibration applied (camera-matched base curve, saved profile or Look, lens
+  corrections) — the picture the result is applied to — not at the camera's
+  embedded JPEG; if that develop cannot be made, the embedded preview is used
+  and the rationale says so. A revision round shows the model its own previous
+  answer rendered, and asks it to edit that answer. The model may set every develop control it can judge from
   the preview — tone, white balance, presence, the colour mixer, colour
   grading, the curves, sharpening and noise amounts, the manual lens trio,
   crop and straighten, local masks, and (since 2026-10-21) the post-crop

@@ -96,6 +96,41 @@ pub(crate) fn verdict_rank(d: &crate::advisor::Decision) -> u8 {
     }
 }
 
+/// Which picture the analysis chain looked at ([`analysis_frame`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FrameSource {
+    /// The camera's embedded preview: a baked source, an ADJUST, AI pixels —
+    /// or a RAW whose analysis never asked for the develop.
+    CameraPreview,
+    /// The RAW's neutral develop with the photo's calibration composed: the
+    /// picture the deliverable starts from.
+    CalibratedDevelop,
+    /// The develop was asked for and failed (the reason, for the rationale);
+    /// the embedded preview stood in, exactly as before.
+    FellBack(String),
+}
+
+/// THE frame a fresh analysis of a RAW shows the proposer, reads its
+/// histogram off, and has the judge render on: the RAW's neutral develop with
+/// the photo's calibration composed (`develop`), so every reviewer looks at
+/// the picture the deliverable starts from rather than at the camera's own
+/// rendering of it. `wants_develop` is false for every source that keeps the
+/// embedded preview (a baked file, an ADJUST, AI pixels); a develop that fails
+/// falls back to that preview and says why.
+pub(crate) fn analysis_frame(
+    embedded: image::DynamicImage,
+    wants_develop: bool,
+    develop: impl FnOnce() -> anyhow::Result<image::DynamicImage>,
+) -> (image::DynamicImage, FrameSource) {
+    if !wants_develop {
+        return (embedded, FrameSource::CameraPreview);
+    }
+    match develop() {
+        Ok(img) => (img, FrameSource::CalibratedDevelop),
+        Err(e) => (embedded, FrameSource::FellBack(crate::rationale::error_line(&e))),
+    }
+}
+
 #[cfg(test)]
 #[path = "advise_tests.rs"]
 mod tests;

@@ -349,6 +349,28 @@ mod direction_adherence_tests {
         assert!(brief.contains("reference looks are subordinate") && brief.contains("each clause"));
         assert!(direct.contains("THIS DIRECTION OVERRIDES"));
     }
+
+    /// The proposer is told which picture IMAGE 1 is: the calibrated develop
+    /// by name on that frame, the RAW preview otherwise (byte-identical to
+    /// before).
+    ///
+    /// MUTATION: drop the `calibrated_frame` branch and the first assertion
+    /// fails.
+    #[test]
+    fn the_prompt_names_the_calibrated_frame() {
+        let calibrated = ProposeContext { calibrated_frame: true, ..Default::default() };
+        let text = propose_instruction("{}", "hist", &calibrated);
+        assert!(text.contains("NEUTRAL DEVELOP from the RAW with the photo's calibration"), "{text}");
+        assert!(!text.contains("Look at this RAW preview"), "{text}");
+        let plain = propose_instruction("{}", "hist", &ProposeContext::default());
+        assert!(
+            plain.starts_with(
+                "You are a master photo-edit colourist. Look at this RAW preview and its \
+                 metadata/histogram and return an EditRecipe"
+            ),
+            "{plain}"
+        );
+    }
 }
 
 /// Assemble the proposer prompt. A named function, not inline text, because
@@ -372,9 +394,19 @@ pub(super) fn propose_instruction(meta_json: &str, hist: &str, ctx: &ProposeCont
     // target shape — and `gentle` is an adjective where every other guardrail
     // in this paragraph is a number.
     let curve = curve_guardrail(ctx.strength);
+    // What IMAGE 1 is. The calibrated frame is the RAW's neutral develop with
+    // the photo's calibration already in it, and the recipe applies on top of
+    // exactly that picture — so it is named as such, not as a camera preview.
+    let frame = if ctx.calibrated_frame {
+        "this photograph — IMAGE 1 is its NEUTRAL DEVELOP from the RAW with the photo's calibration \
+already applied (the camera-matched base curve, any saved profile or Look, the lens corrections) at \
+the as-shot white balance, i.e. the exact picture your recipe is applied on top of — and its \
+metadata/histogram (read off that same picture)"
+    } else {
+        "this RAW preview and its metadata/histogram"
+    };
     let mut instruction = format!(
-        "You are a master photo-edit colourist. Look at this RAW preview and its \
-metadata/histogram and return an EditRecipe that develops it into a FINISHED \
+        "You are a master photo-edit colourist. Look at {frame} and return an EditRecipe that develops it into a FINISHED \
 photograph — a 成片 — not a flat, 'safe' tweak, but also NOT an over-cooked one. A finished \
 develop COMMITS to a clear look: set ONE primary tonal anchor — EITHER a moderate Contrast slider \
 OR a {cp_lo}-{cp_hi} point `tone_curve` forming an S (placed black point, bright shoulder) whose \

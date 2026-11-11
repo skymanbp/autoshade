@@ -310,3 +310,29 @@ fn a_first_round_verifier_failure_keeps_the_proposal_unaccepted() {
     assert!(recipe.rationale.contains("the verifier could not check this proposal"), "{}", recipe.rationale);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A fresh analysis of a RAW looks at the calibrated develop; every other
+/// source keeps the embedded preview without even attempting the develop; a
+/// develop that fails falls back to the preview and carries the reason.
+///
+/// MUTATION: ignore `wants_develop` and the baked arm pays for (and panics
+/// in) the develop; return the develop's error instead of falling back and
+/// the failure arm loses its frame.
+#[test]
+fn the_analysis_frame_is_the_calibrated_develop_for_a_fresh_raw_analysis_only() {
+    let embedded = image::DynamicImage::new_rgb8(4, 3);
+    let developed = image::DynamicImage::new_rgb8(8, 6);
+    let (img, src) = analysis_frame(embedded.clone(), true, || Ok(developed.clone()));
+    assert_eq!(src, FrameSource::CalibratedDevelop);
+    assert_eq!(img.width(), 8, "the develop is the frame");
+    let (img, src) = analysis_frame(embedded.clone(), false, || panic!("a baked source never develops"));
+    assert_eq!(src, FrameSource::CameraPreview);
+    assert_eq!(img.width(), 4);
+    let (img, src) = analysis_frame(embedded, true, || Err(anyhow::anyhow!("decoder said no")));
+    assert_eq!(img.width(), 4, "the embedded preview stands in");
+    match src {
+        FrameSource::FellBack(e) => assert!(e.contains("decoder said no"), "{e}"),
+        other => panic!("a failed develop must be disclosed, got {other:?}"),
+    }
+}
+
