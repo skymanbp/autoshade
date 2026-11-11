@@ -35,7 +35,7 @@ library stay as they are.
 | Mode | What the workspace shows |
 |---|---|
 | **Landscape** | Everything — the workspace as it was before modes existed. |
-| **Portraits** | Everything, with a **Portraits** panel of its own at the top of the side panel — the people, the skin, the eyes and the background; see [Portraits mode](#portraits-mode). The reverse-fit's local-area switches sit in a fold of their own, closed until you open it. |
+| **Portraits** | Everything, with a **Portraits** panel of its own at the top of the side panel — the people, the skin, the eyes and the background; see [Portraits mode](#portraits-mode). |
 | **Normal** | A short panel of its own for phone and jpg photos — one-click looks, four sliders, a noise switch and saving as jpg; see [Normal mode](#normal-mode). The Open dialog lists jpg and other rendered images before RAWs. |
 
 A mode changes only which controls are drawn. Recipes do not record it, every
@@ -709,8 +709,27 @@ Look the photo starts from.
 **Adjust generated image** is GUI-only: the browser and CLI retain region
 retouch and have no whole-image adjust entry.
 
-Reverse-fit uses its own **Reverse-fit strength** dial in the Reverse-fit fold
-(or `match --strength 0..1`) as its honesty budget; the Analysis fold's
+Reverse-fit uses its own **Reverse-fit strength** control in the Reverse-fit
+fold. It has five steps; each keeps everything the step before turns on, and
+the line under it says what the selected step does:
+
+| Step | Strength | Local areas | Semantic regions | AI review |
+|---|---|---|---|---|
+| 1 · Light | 65% | off | — | off |
+| 2 · Standard (default) | 65% | on | 2 | off |
+| 3 · Strong | 85% | on | 2 | off |
+| 4 · Full | 100% | on | up to 4 | off |
+| 5 · Full + AI review | 100% | on | up to 4 | on, may retry once (paid API: up to two vision calls) |
+
+On the command line `match --level 1..5` (or `light`, `standard`, `strong`,
+`full`, `reviewed`) picks the same rows; the separate `--strength 0..1`,
+`--zoned`, `--regions`, `--ai-judge` and `--deep` flags remain for any other
+combination. A settings file from before the stepped control opens on the step
+its old switches stand for: the AI review on gives 5; otherwise four regions
+give 4, local areas off give 1, and a strength of 92.5% or more gives 4, of
+75% or more 3, and anything lower 2.
+
+The strength is the fit's honesty budget; the Analysis fold's
 Strength above it does not reach the fit. At or below the shipped 65% setting the historical path is
 byte-identical, including white balance: a demand outside its budget remains
 as-shot. Above 65%, WB demands outside the widened budget shrink along the
@@ -911,16 +930,15 @@ of texture do not answer for the area around them.
 The field is then dropped whole if it makes the frame worse, or if it improved
 the frame by making the sky or the land zone worse.
 
-With **Fit local areas too** enabled, reverse-fit always solves the global recipe
+With local areas on (steps 2 to 5, or `match --zoned`), reverse-fit always solves the global recipe
 first. Successful segmentation adds up to four disjoint semantic class bitmap
 corrections; each region selects Full or Atmosphere independently. If
 segmentation is disabled or unavailable, the same entry automatically tries
 evidence-gated native luminance ranges and then colour ranges instead, and if
 no band is accepted the global recipe is kept. A range band is retained only when its composed
 evidence-weighted frame is no worse than the running global/banded result.
-The historical two-region route is the default. Enable **Up to four semantic
-regions** in the GUI, or pass `--regions 4` on the CLI, to opt in to the
-expanded route. It performs one OneFormer inference per frame and may take
+The historical two-region route is the default. Steps 4 and 5 in the GUI, or
+`--regions 4` on the CLI, opt in to the expanded route. It performs one OneFormer inference per frame and may take
 longer. The default two-region path keeps its single corrections unless
 residual-earned bands pass every gate. A zone whose dials did not move gets
 one typed `ZONE_ALREADY_MATCHED` note.
@@ -1018,7 +1036,7 @@ autoshade eval <dir> [--xmp-dir DIR] [--limit N] [--jobs N] [--fresh] [--state F
 autoshade library-build <dir> [--describe] [--raw-root DIR]
 autoshade library-search <photo> [--style 0..1]
 autoshade reimagine <src> --prompt TEXT [--fidelity high|low] [--quality low|medium|high|auto] [--fidelity-retry] [-o|--out FILE]
-autoshade match <src> <target> [--render] [--zoned] [--regions 2..4] [--strength 0..1] [--style-prompt] [--ai-judge] [--deep] [--negative RAW] [-o|--out FILE]
+autoshade match <src> <target> [--render] [--zoned] [--regions 2..4] [--strength 0..1] [--level 1-5|light|standard|strong|full|reviewed] [--style-prompt] [--ai-judge] [--deep] [--negative RAW] [-o|--out FILE]
 autoshade correspond <source> <target> [-o|--out FILE]
 autoshade retouch <src> --mask FILE [--prompt TEXT] [--quality low|medium|high|auto] [--full-res] [-o|--out FILE]
 autoshade heal <src> [--mask FILE] [--no-auto] [--full-res] [-o|--out FILE]
@@ -1151,7 +1169,8 @@ Three environment overrides steer the reference library, each read in exactly on
 | `AUTOSHADE_SEND_REFERENCE_IMAGE` | `1`/`0` — also send the reference photos themselves (not just their phrases) with `analyze`/`auto` proposals; `--reference-image` turns it on per run. Destination-trust: only your own environment or user-level settings can set it — a downloaded photo pack's `.env` cannot, because it decides whether your photograph goes on the wire. `batch` never sends one. |
 
 `match` itself is local inverse rendering and needs no key. Its optional
-`--ai-judge` and `--deep` review paths do; `--deep` permits one guided retry.
+`--ai-judge` and `--deep` review paths do (and so does `--level reviewed`);
+`--deep` permits one guided retry.
 `heal` can use a supplied mask offline, while its automatic detector uses the
 vision role.
 
@@ -1385,11 +1404,11 @@ develop** (Analysis, Adjust the selected variant, Reference library).
   dialog says what the fit does, repeats the result's **D** reading, and has a
   **From:** menu with the same cards as the reverse-fit fold's menu. It starts
   on the **▣ Original** card; **Automatic** is still in the list. A line names
-  the strength and the switches the fit will use; you change those in the fold.
+  the reverse-fit strength step the fit will use; you change it in the fold.
   **Reverse-fit** (Enter) starts the same fit as the fold's button, and **Not
   now** (Esc) changes nothing. Tick **Don't ask again after generating** to stop
-  the question; **Ask after each AI generation** in the reverse-fit fold turns
-  it back on. An Adjust or a fill does not ask, and neither does Normal mode,
+  the question; **Ask after each AI generation** at the foot of the
+  **Generate whole image** fold turns it back on. An Adjust or a fill does not ask, and neither does Normal mode,
   which has no reverse-fit.
 
 - **Adjust generated image · paid API:** the fold directly after Reimagine
