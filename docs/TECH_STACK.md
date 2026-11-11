@@ -2115,8 +2115,8 @@ and zero-confidence fields are conservation-tested to change nothing.
 - `src/library/` (`build.rs`, `search.rs`, `settings.rs`, `voice.rs`) and
   `src/embed.rs` — the reference library: build, search, RAW settings, the
   prompt block, and SigLIP vectors.
-- `src/fit/` (`structure.rs`, `atmosphere.rs`, `tone.rs`, `hue_gates.rs`,
-  `cast_outcome.rs`) and `src/fit_zoned.rs` — structural-divergence modes,
+- `src/fit/` (`structure.rs`, `atmosphere.rs`, `asks_curve.rs`, `tone.rs`,
+  `hue_gates.rs`, `cast_outcome.rs`) and `src/fit_zoned.rs` — structural-divergence modes,
   bounded atmosphere fitting, CDF/basis tone solves, per-zone quality gates,
   cast vetoes, and the joint objective (`src/fit/joint.rs`).
 - `src/generative.rs` — gpt-image-2 sizing, streamed refusal attribution,

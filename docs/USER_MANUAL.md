@@ -1056,10 +1056,13 @@ on the base develop of its sensor frame — the camera profile and Look the
 photo starts from (v1.17.0) — with the photo's calibration (that start, lens
 profile, as-shot white balance) composed into the solve. The target's own geometry is read before any pixel is compared
 (v1.16.0): a target you exported from Lightroom with the lens profile on is
-brought into that sensor frame first, one exported without it is paired as it
+paired as it stands, with the photo moved into that corrected frame
+(v1.17.0), one exported without it is paired as it
 stands and the recipe's distortion and chromatic-aberration corrections are
 switched off so the render keeps the geometry the target has, and when neither
-reading wins clearly the fit says so and behaves as before. A master `denoise`
+reading wins clearly the fit says so, leaves the lens profile as it was and
+compares the target with the photo as that profile renders it (v1.18.0), so
+what it judges is the frame you will export. A master `denoise`
 or `stack` wrote is a baked image that carries no
 calibration of its own, so name the RAW it was made from (for a stack, the
 first frame) with `--negative`: the calibration then composes on top of the

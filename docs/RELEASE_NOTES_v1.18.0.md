@@ -15,18 +15,20 @@ that part's own evidence asks than it found it.
 
 The design, the rulings and this document are the maintainer's. The code of
 this release was written with an AI coding assistant working under the
-maintainer's direction, and every change passed the project's own test
-battery and reference-pair gate before it shipped.
+maintainer's direction, and every change passed the project's own tests
+and reference-pair gate before it shipped.
 
 ## The reverse fit: one objective
 
 - **One number is minimised, and every control pays for its place.** The fit
   minimises the perceptual colour distance between the finished photo and
-  its target plus a fixed price per control that is off its neutral value.
-  That price is the smallest difference the fit can produce by rounding its
-  own controls — measured on the corpus, not chosen — so a control that does
-  not buy its own rounding is dropped. The report names the controls set
-  back to zero.
+  its target plus a price for every control that is off its neutral value.
+  The price is the smallest difference the fit can produce by rounding its
+  own controls — measured on the corpus, not chosen — taken on the part of
+  the picture the control acts on: a control that moves the whole frame pays
+  it in full, and one colour band of the mixer or one grading wheel pays the
+  share of the frame it reaches. A control that does not buy its own
+  rounding is dropped, and the report names the controls set back to zero.
 - **The stages propose, the solver decides.** The tone sliders, the master
   curve, the white balance, the colour mixer, the grade wheels and the cast
   curves are estimated as before and enter the solve as a starting point.
@@ -80,8 +82,21 @@ battery and reference-pair gate before it shipped.
   be read, the curve keeps the shape the stage proposed and the solver sets
   its strength alone — a distribution cannot say which pixel goes where, and
   letting the knots move freely on such evidence produced a cliff in the
-  master curve on the night pair. On such a pair the proposed curve also
-  keeps the brightness ranges the fit cannot trust at their identity.
+  master curve on the night pair. Where part of the frame pairs and part
+  does not, the proposed curve also keeps the brightness ranges the pairing
+  cannot vouch for at their identity.
+- **Where only the distributions can be read, the fit also proposes the curve
+  the rule itself asks for.** Beside the exposure with a three-point curve,
+  and that curve on its own, there is now a third proposal: one point for
+  each brightness range, placed where that range's evidence asks it to go,
+  with no range moved further than it asks or against it, inside the
+  strength dial's limits on how steep or flat a curve may be. Each proposal
+  is solved on its own and the closest finished one ships. A reference that
+  is a different photograph — a bright sky over a dark ground, say — now
+  takes the photo's ground down and leaves its sky where it is; before, the
+  two older proposals could only move the frame together, the rule refused
+  them for what they did to the sky, and such a pair came back nearly
+  unchanged.
 - **A local correction is judged on its own pixels.** A zone, a band, a tile
   or a mask ships when it brings its own region closer by the fit's rounding;
   the rest of the frame is only a check that it got no worse by more than the
@@ -102,8 +117,12 @@ battery and reference-pair gate before it shipped.
   resizes, and the two do not agree exactly on a strongly corrected frame.
   Before the recipe ships it is rendered once more the export's way, beside
   the calibration-only starting point; it ships only if it is closer there
-  too, and the report gives both readings. This adds one full-size render to
-  a fit.
+  too, and the report gives both readings. A control that acts on a small
+  part of the frame (one colour band of the mixer, one of the three grading
+  wheels) is cheap to keep, so it is checked there as well: the export is
+  read with it and without it, and a control the export is no better for is
+  set back to zero and named in the report. This adds a few full-size
+  renders to a fit.
 - **The fit starts from the picture the export would make.** The starting
   picture is developed exactly as the export develops it, resized only after
   the base's per-pixel steps; an untouched recipe now reads as identical to
@@ -118,6 +137,23 @@ battery and reference-pair gate before it shipped.
   continuation of its neighbours instead of "no change", and a pixel that is
   part sky and part land owes each part's light through that part's own
   correction.
+- **The colour field is solved only from pixels that are the same place in
+  both pictures.** A pixel that is sky in the photo and land in its target —
+  a ridge line that moved, a region the target repainted — no longer counts,
+  and a pair that shares no place at all, a different photograph used as the
+  reference, gets no colour field. Before, such pixels were fitted like any
+  others and the field could draw the reference's layout onto the photo: a
+  dark smudge of sky beside a ridge, or the outline of the reference's
+  buildings over another scene.
+- **A mask's colour is read before the zone's tone, and the seam check reads
+  it exactly.** A sky or a land zone whose target was tinted through a
+  mask's colour control used to come back with part of the tint. The zone's
+  tone was solved first and took the tint's brightness as exposure and
+  contrast; and the check on the seam between the two zones modelled each
+  side's correction as a brightness multiplier, read a colour tint's
+  mismatch with that model as a bright edge, and turned the colour down. The
+  tint is now read first and once more after the tone, and the seam check
+  renders each side's correction as it is.
 - **A hidden contrast rule is removed.** The tone solve forced contrast to a
   fixed small value whenever the frame was not yet close and the solved
   contrast was near zero. The rule had no recorded reason and no test; the
@@ -179,36 +215,29 @@ battery and reference-pair gate before it shipped.
   the grade wheels, the cast curves, a mask's colour — a calibration photo is
   rendered with that control alone set to a known value, the render becomes
   the target, and the fit is asked to find it again from the straight
-  conversion. 待填_SELF_CONSISTENCY
-- **Nine real pairs against v1.17.1**, each fitted by the released v1.17.1
-  command line and by this build at the strength of record and compared
-  against its target region by region: every pair reads at or under the
-  v1.17.1 distance with the same or fewer controls. The night pair's whole
-  frame reads 4.66 against 5.14 and its master curve carries no cliff; the
-  pair with the most controls in v1.17.1 (35) now ships 11 and reads 0.11
-  further, less than the fit's own rounding amounts to on a frame.
+  conversion. There are twelve: ten on the whole-frame fit and two on a
+  zone's mask colour.
+- **Nine real pairs against v1.17.1** — eleven fits, with the reference pair
+  at three strengths and the night pair from its RAW and from its processed
+  master — each fitted by the released v1.17.1 command line and by this
+  build and compared against its target: every one reads closer to its
+  target over the whole frame than v1.17.1's, and every finished photo was
+  looked at beside its target and v1.17.1's.
 - **Every mechanism in the law has a toy that reads it**, each pinned to the
   reading on this tree with the attribution written beside the number: the
   withheld-sky toy keeps its untrusted range at identity, the calibration
   sky ships the colour its cells vouch, the refused canyon casts land as the
-  law admits them.
+  law admits them, and two different photographs get no colour field and
+  take their tone from the law's own asks.
 
 ## Known limits
 
-- **The night horizon band.** On the night pair the brightness ripple across
-  the sky's foot reads 1.11 against v1.17.1's 0.73 and the line of 0.63 the
-  pair is held to; the whole frame and the sky itself are closer than
-  v1.17.1's. The ripple is the population evidence's: where the sky's pixels
-  do not pair, the fit reads the sky's distribution, and the distribution
-  does not say where in the sky each tone belongs.
-- **A withheld brightness range can hold a global tone back.** Where a region
-  of the picture is read by its distribution and its lower and upper halves
-  ask opposite moves, no exposure or slider serves the rest of the frame
-  without moving that region against half of its ask; the fit then ships the
-  tone the law admits, which on the constructed case is none. The stage's
-  proposed curve keeps such a range at identity, but a range near white that
-  the proposed exposure pushes into clipping cannot be held there inside the
-  curve's slope budget.
+- **A target repainted over its whole frame gets no colour field.** The
+  colour field needs some part of the two pictures to be the same place. A
+  target that shows the same scene but was re-synthesised everywhere is
+  matched by the whole-frame and zone controls alone; and a different
+  photograph in which one part happens to read as the same place is still
+  given a field there.
 - **The white balance and exposure judged on the shared part of a repainted
   pair** apply on no calibration pair: on every pair that reaches that path
   the shared part is too small to be used, and the whole frame is read as
@@ -229,17 +258,21 @@ battery and reference-pair gate before it shipped.
   that was re-estimated or scaled and by how much, the readings a zone
   shipped on, and the full-size re-reading of the finished recipe beside the
   preview's and the starting point's.
-- **A fit takes longer.** The solver renders the candidate many hundreds of
-  times; a real pair takes from a quarter of an hour to three quarters on
-  the maintainer's machine where v1.17.1 took minutes. Processing time is a
-  reading, not a gate, in this project.
-- **A fit takes one more full-size render** for the final check.
+- **A fit takes longer.** The solver renders the candidate many thousands of
+  times; in the last check a real pair took from ten minutes to nearly an
+  hour and a half, four fits running at once on half of the maintainer's
+  processors, where v1.17.1 took minutes. Processing time is a reading, not
+  a gate, in this project.
+- **A fit takes a few more full-size renders** for the final check.
 
 ## Compatibility
 
-Recipes and sidecars written by earlier versions open. No new recipe field.
-A sidecar AutoShade writes now always states crs:LensProfileEnable when its
-recipe carries a lens profile.
+Recipes and sidecars written by earlier versions open and render as they
+did. One new recipe field: a colour field fitted over a sky and a land zone
+records which of the two each of its points belongs to. v1.17.1 and earlier
+refuse a recipe that carries it, by the field's name; a recipe without it is
+unchanged. A sidecar AutoShade writes now always states
+crs:LensProfileEnable when its recipe carries a lens profile.
 
 ## Gates
 

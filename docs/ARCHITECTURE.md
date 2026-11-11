@@ -222,7 +222,10 @@
 > library a second time with `AUTOSHADE_FIT_CALIBRATION_DIR` at the p36-p39
 > corpus and `--nocapture`, which is the only way a skipped test's own line
 > reaches the transcript at all), each in its own target and data directory
-> and all three in parallel. Both library lanes run the suite as ONE PROCESS
+> and all three in parallel — or one after another under `BATTERY_SERIAL=1`,
+> for a card that cannot hold two lanes' models at once (a process keeps one
+> model resident at a time, `with_model_slot`; the lanes are separate
+> processes). Both library lanes run the suite as ONE PROCESS
 > PER TOP-LEVEL MODULE (`lib_by_module`): an endpoint-security sensor on the
 > release machine (CrowdStrike Falcon) terminates a single process that runs
 > the whole suite — its own event channel says so, ID 9 "terminated because
@@ -4420,7 +4423,8 @@ per-class judge, the blind cells), `pairing.rs` (same-frame plausibility, the an
 type, correspondence, the shared population), `solve.rs` (the `fit_recipe` entry
 points and the promoted solve), `joint.rs` (the joint objective: the
 coordinate descent, the elimination, the base candidate), `atmosphere.rs`
-(white balance and the atmosphere fit), `hsl.rs` (the HSL stage), `report.rs` (the measured facts, the
+(white balance and the atmosphere fit), `asks_curve.rs` (the law's brightness
+asks as one master curve, v1.18.0), `hsl.rs` (the HSL stage), `report.rs` (the measured facts, the
 composed report, re-scoring), `cast_outcome.rs` (the ship law and the control
 catalogue), `tone.rs` (the paired robust tone solve, the
 tone sliders, the residual tone curve), `curves.rs` (band statistics, residual
@@ -4437,11 +4441,16 @@ has two parts. The stages ESTIMATE — the tone solve, the master curve, the
 white balance, the saturation chase, the grade wheels, the detail, the mixer
 and the cast curves each write their estimate, and their identification
 knowledge (knot support, withheld ranges, band admission) shapes the start —
-and ONE objective JUDGES: `F(x) = J*(render(x)) + FIT_QUANT · dof(x)` over
-every coordinate the stages estimated (`fit::joint`, `Coord::all`), under
+and ONE objective JUDGES: `F(x) = J*(render(x)) + FIT_QUANT · price(x)` over
+every coordinate the stages estimated (`fit::joint`, `Coord::all`; `price` is
+the controls off the base, each weighed by the share of the frame it reaches
+— *The price is a control's reach* below), under
 ONE constraint that only rejects (`Joint::admissible`, read on every candidate
 render, each class of controls between its own two frames in the order the
-stages compose them, 2026-11-07): the control-validity law of
+stages compose them, 2026-11-07; since 2026-11-11 the class that refused the
+last candidate is asked first of the next and a class's frame without it is
+kept by the recipe it renders — the same verdict at less than its cost): the
+control-validity law of
 `fit::validity`. A class of controls may not leave any evidence cell worse,
 on the axes it moves, than it found it. A cell is a source-luma bin × hue
 band (17 × 8, plus a neutral band under chroma 0.06) that holds at least
@@ -4520,6 +4529,111 @@ target's side prepared once per solve (`look::TargetLook`,
 is the unprepared read bit for bit, and the solve's trace line prints its
 render count and where the seconds went.
 
+**The price is a control's reach, and a class is also heard alone (v1.18.0,
+2026-11-10).** `FIT_QUANT` is the rounding of a per-pixel mean over the frame,
+so a control that reaches a share `s` of the frame can round — and can earn —
+only on that share: read on the frame its quantum is `s · FIT_QUANT`
+(`joint::Reach`, read once per solve on the base render: a mixer band's reach
+is the engine's own partition weight times the chroma gate's fade,
+`render::hsl_band_reach`; a wheel's is its grade region's weight; a
+population under `EVIDENCE_MIN_SHARE` is priced at that share, so no control
+is free; the frame-wide controls reach the whole frame and cost one quantum
+as before; `dof` stays a reading). At one whole quantum a band that reaches
+4 % of the frame could never buy its place — a +20 band hue the fit itself
+had rendered read 0.0008 at the base and shipped nothing — and for the same
+reason the "already matched" early return reads every priced population on
+its own pixels (`solve::priced_populations_matched`) and the terminal
+full-size re-read charges the finished recipe its global controls' price by
+reach, capped at one quantum (`joint::terminal_price`), and asks each
+reach-priced control again of the frame that ships
+(`joint::confirm_at_export`). The stages run in
+sequence, each on the frame the ones before it left, so a target that ONE
+class explains reaches the joint solve as a start every earlier stage has
+already spent on (a white balance the fit itself had rendered entered at 17
+controls, and the solve kept the wheels and band dials that rationalised
+them and dropped the temperature). `solve::alone_check` therefore proposes
+each class ALONE from the base and repairs it into the law; a start that
+already reads a lower F, or a lower J*, than the whole solve FINISHED on is a
+basin the sequence never visited, the solve is run again from the best such
+start with every coordinate free, and the lower finished F ships. The zoned
+pass asks the same of its zones (`fit_zoned::entry::zone_alone_check`): the
+two semantic zones attached alone on the base — no bands, field, tiles, free
+masks or detail — and only where that already reads a lower frame J* than
+the finished recipe is the zoned fit run again in full with the global
+controls held at the base, shipping when the frame reads no worse (a tie
+goes to the smaller domain; note `ZONE_ALONE_SHIPPED`). Three mechanics of
+the solver were set right beside it. An ABSENCE is read inside the law
+(`Joint::absence`): the rest of a point was solved with the control, so the
+point without it can be one the law refuses, and the elimination used to
+read such an absence as it stood and could ship it. It is scaled into the
+law first — each refused class toward the base, to the largest fraction its
+own verdict admits, with no re-estimation — and priced there as it stands;
+one that is kept is settled at the quantum before the next control is read
+against it. (Re-estimating every refused absence as a start is re-estimated
+cost one solve per control off the base: a pair entering the elimination
+with 21 controls did not end its fit.) A class's repair
+bisects on the class's OWN verdict (`Joint::refused_on`; `Joint::refusal`
+names the first refused class in the stages' order, and read by another
+class's bisection it made the tone and the white balance walk each other
+down to the base on the night RAW pair, whose global solve shipped nothing),
+and a start still refused when the rounds end is scaled WHOLE toward the base
+to the largest fraction the law admits. And the Atmosphere stage's tone has
+three carriers, each solved from its own start with the lower FINISHED F
+shipping (`fit::atmosphere`, the alone check's law): the exposure with the
+stage's quantile knots; the knots alone, no exposure, offered wherever the
+stage's exposure is off the base — an exposure that pushes a withheld range
+near white into clipping cannot be undone by any knot inside the slope
+budget; and the law's own asks as a curve (J142, below). On a
+shared-content population the evidence model is built on the
+correspondence-remapped pair by the frame model's own construction and
+scoped by membership (`evidence::shared_content_pairing`): one model judges
+J*, the law's cells, the white balance's pair weight and the report, and
+under an identity field it is the frame's model field for field — a
+restriction that drops nothing moves nothing
+(`a_field_that_drops_nothing_moves_nothing`, which read a saturation of 27.6
+against 29.9 while the estimation weights were multiplied in twice).
+
+**The tone's third carrier is the law's own asks; a frame nothing pairs on
+has no withheld range (J142, v1.18.0).** With the colour field off the pair
+whose target is a different photograph (J141), what was left was its global
+fit, and it had barely moved: the stage proposed an exposure with three
+quantile knots, or the knots alone, and neither shape can say what that pair
+asks — its ground far down, its brightest ranges nothing. A bounded point
+only scales its shape, so each was scaled back until the one range it
+overran was admitted (finished J* 0.15871 and 0.12427 from a start at
+0.16549). The law was not the cause: its asks, laid as knots, are admitted
+on every cell. `fit::asks_curve::asks_tone_curve` builds that curve — the
+tone class's asks read as G reads them on the frame the other classes leave
+(`Cells::luma_asks`), one knot per brightness range at the range's display
+level, moved by its ask in linear light, then projected by the ranges'
+masses onto the curves that move no range past its ask or against it and
+keep every slope, the end segments' included, inside the strength dial's
+budget (a convex set that holds the identity; Dykstra's alternating
+projections, stopped only when the iterate AND its correction steps are
+still, then one forward pass through the knots' exact intervals so the two
+promises do not rest on the sweeps having settled). Knots the line through
+their neighbours passes within half a code of are dropped — the curve is
+straight between knots, so they carry price and no shape — and the rest are
+rounded to the nearest code. It is a START like the other two: repaired,
+solved where its repair reads a lower F or J* than the best finished solve,
+shipped on a lower finished F. And `withheld_identity_pins` makes no pin
+where the structural model pairs no population
+(`EvidenceModel::pairs_a_population`): a pin says "the paired reading of
+this range is not trusted", and on such a frame the law itself reads every
+range on the population's asks. Read on the round after it: the
+different-photo pair finishes at J* 0.05961 on the asks' curve (whole-frame
+ΔE 32.12; the last release 32.75, the round before 38.60), its ground at
+dusk and its sky and sun where they were; on the six other fits that solve
+in this mode the start is offered, repaired and not taken, and their
+renders are byte-identical to the round before. No tuned constant is new:
+half a code is the rounding's own resolution, and the sweep bound and its
+settling threshold read no photograph. Pinned by
+`the_asks_curve_is_the_model_s` (against a numpy model of the same
+projection), the 200-case property test
+`no_range_is_moved_past_its_ask_or_against_it_and_every_slope_is_in_the_budget`,
+`a_frame_nothing_pairs_on_has_no_withheld_range` and
+`two_photographs_tone_is_carried_by_the_asks`.
+
 **One inversion bit, one composition, and the zone picks one home.** This
 engine spells a mask's polarity twice — `LocalAdjustment::inverted` (the GUI's
 Invert checkbox, applied by the weight loop) and the geometry's own bit (a
@@ -4577,8 +4691,9 @@ mechanism: the evidence model's frame membership, every zone's pair weights, the
 structure readers, the seam samplers and the segmentation vote. An uncorrected
 target (`TargetGeometry::AsShot`) is paired as it stands and the recipe's
 distortion and CA switches go off, so the render keeps the geometry the target
-was exported with; an undecided reading keeps today's behaviour and says so
-(`TARGET_GEOMETRY_*` rationale notes). Masks and recipes stay in the sensor frame;
+was exported with; an undecided reading leaves the profile as it was and says so
+(`TARGET_GEOMETRY_*` rationale notes) — since v1.18.0 with the source in the
+frame that profile renders, below. Masks and recipes stay in the sensor frame;
 only the comparison moved. Both entry points call `fit_target` after `fit_source`,
 and `apply <raw> <sidecar.xmp>` stamps the same `fresh_lens_profile_for_sidecar`
 the desktop app stamps, so one sidecar renders one geometry everywhere. On the
@@ -4595,6 +4710,19 @@ absent ring. The fit's zone rasters are drawn in the source's frame and
 marked (above), so neither the target nor a mask is mapped from one frame
 into the other on the way; `render::corrected_to_sensor_frame` is left to the
 GUI's segmentation, depth and face helpers, which draw on the sensor frame.
+
+**…and an undecided target is paired in the frame the recipe ships
+(v1.18.0).** Until then `TargetGeometry::Ambiguous` paired the target with
+the source as it stood while the recipe went on drawing the profile, so
+every candidate was read in one frame and exported in the other. On the
+night pair from its master — nothing in its repainted sky aligns either way,
+0.02 against 0.03 — the export's sky rows sat half an analysis pixel off the
+rows the solve had matched, and the horizon glow, up to 0.85 L\* a row
+there, read 0.3–0.8 L\* dark against a target the solve's own frame matched.
+The profile is still left as it was (which frame the target is really in
+stays unknown, and the note says so); the source is moved into the frame
+that profile renders by the engine's own geometry stage, as for a corrected
+target, so the fit judges the frame it ships.
 
 The objective reads **per pixel where the two frames correspond and by
 distribution where they do not** (v1.18.0, `fit::look_err_with_evidence`).
@@ -4662,7 +4790,20 @@ recipe ships only when it ships against the base there
 clamped where the export clamps and clamp-then-average differs from
 average-then-clamp wherever a window holds clipped and unclipped pixels —
 0.0032 to 0.0214 of look error on the corpus's finished recipes, past
-`FIT_QUANT`. A note describes what ships: the cast, hand-off and zone
+`FIT_QUANT`. A control priced by its reach is confirmed on that frame too
+(v1.18.0, `joint::confirm_at_export`, note `FIT_TERMINAL_UNEARNED`): the
+search keeps it for less than `FIT_QUANT` of the frame's J*, which is inside
+the distance between the preview and the export, so each mixer band and
+regional grade wheel off its base is read against its own absence as the
+export renders both — on F at the control's price, the smallest absence
+first, every other control read again after a drop — and one that does not
+earn its price there is set back, the report's mixer and grade sentences
+restated from the recipe that ships. On the gate's exposure case (−0.4 EV
+on a corpus RAW) the solve finished on the exposure with Aqua saturation
++0.7, 0.00618 on the preview with the band priced at 0.042 of a quantum;
+the export of that recipe read 0.00005 and the exposure alone reads 0.00000
+there, so the band is set back and the exposure ships alone. A note
+describes what ships: the cast, hand-off and zone
 sentences are derived from the finished recipe, and a shrunk zone's
 vouched-colour notes are withdrawn when the shrink refuses it. The
 self-consistency gate ([`src/fit/self_consistency.rs`](../src/fit/self_consistency.rs),
@@ -4672,8 +4813,8 @@ as the target and asks the fit to find it again from the straight
 conversion: the control must come back with its sign and at least half its
 size, nothing else may move, and the finished frame must land within
 `FIT_QUANT`; the same file checks that an untouched recipe reads as identical
-to its own export, and the cases that still fail are `#[ignore]`d as the
-open defects they are.
+to its own export. No case is `#[ignore]`d at v1.18.0; an `#[ignore]` on one
+is the record of an open defect.
 
 **Two scales, both read, both disclosed** (R33 §B). `divergence_pair_for`
 builds the 384×256 raster once and takes two readings off it: the existing
@@ -4783,11 +4924,13 @@ at the engine's own tone knots and least-squares solved against the engine's own
 slider basis, with a ridge + penalised model-selection prior so numerically
 equivalent but semantically ruinous slider combos lose); then saturation by
 mean-chroma ratio, secant-refined through real renders and closed with a
-do-no-harm check; then the per-band colour mixer — `hsl.saturation` and
-`hsl.luminance` solved one ACR band at a time from that band's own population
-statistics (weighted mean chroma, weighted mean Rec.601 luma, never paired
-pixels), admitted by the same two-sided population gate the rest of the module
-reads, with refusals typed and named; since v1.17.0 `hsl.hue` is solved too,
+do-no-harm check; then the per-band colour mixer, on the ACR bands admitted
+by the same two-sided population gate the rest of the module reads, with
+refusals typed and named. Where the pixels do not pair (Atmosphere mode)
+`hsl.saturation` and `hsl.luminance` are solved from each band's own
+population statistics (weighted mean chroma, weighted mean Rec.601 luma) and
+no hue is solved; where they pair, the two amounts read the pairs too
+(v1.18.0, *The mixer reads the pairs* below); since v1.17.0 `hsl.hue` is solved
 on the paired pixels after the colour grade — each band's mass-weighted
 median hue change read by brightness range, nothing where the band's ranges
 ask opposite rotations,
@@ -4811,6 +4954,39 @@ improves by the finished-frame arbitration's own margin (1e-4) and at most
 `DO_NO_HARM_MAX_ROUNDS`, the best round kept. Since v1.18.0 the refined
 curves are the estimate the joint solve starts from, judged by the law on the
 finished render like every other candidate.
+
+**The mixer reads the pairs (v1.18.0).** Until then the mixer's saturation
+and luminance were solved from each band's POPULATION even on a paired
+frame, with a reach linearised on the finished frame (`1 + adj / 100` on
+every member). A population answers for more than its band's amount: a hue
+rotation re-populates the bands it moves pixels between, and members at the
+top of the engine's saturation scale do not answer an increase at all. On
+the self-consistency gate's seaside frame — a sky between the Aqua and the
+Blue centres, seven tenths of it at full HSL saturation — a target made by
+Blue hue +20 ALONE was proposed Aqua −33.4 / Blue +33.4 on saturation and
+again on luminance beside the right rotation; the validity law set the
+proposal aside, and the rotation went with it.
+`fit::hsl::fit_band_amounts` solves the two amounts in the form the hue is
+solved in. DEMAND: each paired pixel's own change of the quantity the axis
+scales (chroma for saturation, HSL lightness for luminance), weighted by its
+trust and by the weight the engine gives its hue in each of the two bands
+that bracket it, binned by luma range, a range testifying its weighted
+median. MOVE: a band's reach on a range is that range's weighted median of
+what THE ENGINE does to those pixels when the band's amount moves — one
+probe render per asking band — so pixels the control cannot move say nothing
+about its amount. CONSENSUS: a band whose movable ranges ask opposite amounts
+in force asks nothing (`wb_consensus`, the white balance's own rule). SOLVE:
+the mass-weighted least squares over the combinations of bands the frame
+MEASURES (`measured_least_squares`): two bands that share a population reach
+its ranges in near proportion, so the equations fix one combination of the
+two and say nothing of the other, and a combination that, taken to the
+strength's whole band budget, moves the heard mass by less than half an
+output code (`FRAME_ROUNDING`; every frame the fit reads is 8-bit) is left
+where it stands — the minimum-norm answer, which the elimination then holds
+against each band's absence. Solved as if it were measured, that combination
+is fitted to the readings' rounding and comes out as the fan. Two
+closed-loop rounds. The population solve (`fit_band_populations`) is
+unchanged and is Atmosphere mode's only.
 
 **The tone estimator follows the pairing scale** (R33 §D). `paired_correspondence`
 returns the robust map's points only at `PairingScale::Pixel`; at cell scale
@@ -4960,6 +5136,21 @@ and the persisted rationale together, so neither claims a correction the
 recipe no longer carries and the quality gate counts no verdict for a mask
 that does not ship; the bands' notes carry their band labels and every other
 zone keeps its own.
+
+**A band is read against the zone's correction on its own pixels
+(v1.18.0).** A band that REPLACES part of a zone competes with the zone's own
+correction there: that correction is the band's absence, not "no
+correction". A band that does not bring its own pixels closer by `FIT_QUANT`
+than the zone's correction leaves them keeps the zone's controls — the
+geometry stays, the difference goes (`ZONE_BAND_KEEPS_PARENT`) — and the set
+ships on the bands that do earn; the zone's whole population and the frame
+are guards, and neither may rise by more than `FIT_QUANT`
+(`fit_zoned::subzones::replace_zone_with`). Until then the set was read as
+one on the parent's whole population: on the night pair the sky's upper band
+(0.72 of the frame) solved a colour of its own that read 0.061 on its pixels
+against the zone's 0.058, the foot band (0.08) gained 0.009 on its own, and
+the whole-sky distribution reading — which cannot say where in the sky a
+tone belongs — refused all seven trials.
 
 Replacement shrink uses the same boundary gate and bisection, but its zero
 baseline retains the accepted parent's controls on each band's geometry.
@@ -5134,16 +5325,24 @@ from a zone's mean push a blue sky one way and its neutral clouds another, and
 the per-pixel voucher rightly refused that badly shaped move. Each semantic
 zone that is Full at pixel scale is therefore solved three times: the plain
 solve as before, and two trials that read ONE tint from all the zone's paired
-pixels, neutral and coloured alike, after the tone solve. The read regresses
+pixels, neutral and coloured alike. The read regresses
 the Oklab (a, b) gaps target − candidate on the render's own ramp (the tint
 window at the candidate's luma × the mask's coverage) under the zone's robust
 pairing weights, Huber-reweighted three times, which gives the direction and
 the vector in closed form; `render::tint_from_push` takes it back to
 Lightroom's hue and amount through the measured wheel. The two trials differ
-in what the zone-mean gains are asked. Tint-first reads the tint on the zone
-as its tone left it and then solves the gains and the saturation on the
-TINTED candidate — right for a gap that is a tint and nothing else. On-gains
-keeps the plain solve's gains and reads the tint on what they leave — right
+in when the tint is read and in what the zone-mean gains are asked. Tint-first
+reads the tint BEFORE the zone's tone, lets the tone answer what the tint
+leaves, reads once more on the toned zone for what it still asks
+(`tint::read_zone_tint_over`), and then solves the gains and the saturation on
+the TINTED candidate — right for a gap that is a tint and nothing else. Until
+v1.18.0 it read after the tone: a Color tint holds Oklab lightness and still
+moves the Rec.601 luma the zone's tone solve pairs, so on the app's own render
+of a sky tint of 30 at hue 200 the tone took exposure −0.05, contrast +2.6 and
+highlights +1.7 for the tint's own luma and the zone's paired reading stopped
+at 0.0058, where the read-first order solves the tone to nothing and reaches
+0.0008. On-gains
+keeps the plain solve's gains and reads the tint after the tone on what they leave — right
 for a cast plus a tint, which is what the seaside street turned out to be: the
 fit's own global stage leaves its sky 35 b* warmer than the target, read first
 the tint swallowed that cast and stopped at Lightroom's end stop (1.00) with
@@ -5452,6 +5651,35 @@ sentence (`FIELD_LAYOUT_ADMITTED`), printed only when such cells exist;
 every pair without them is byte-identical. Pinned by
 `a_cell_the_pixel_evidence_cannot_read_is_read_on_its_region_pairing` and
 `the_layout_reading_raises_weight_only_inside_the_pairing_and_only_upward`.
+
+**A pixel pair testifies for the colour field only as a pair (J141,
+v1.18.0).** The eyes at the final gate again found what the numbers had not.
+With every pair of the round past the last release's readings, the reference
+pair carried a grey smudge of sky beside each butte, and the pair whose target
+is a different photograph had the target's buildings drawn across it — its
+whole-frame ΔE "improved" from 32.75 to 11.43. The field's data term is per
+pixel; the frame objective reads the pixels that do not pair as a distribution,
+and structure had become a gate instead of a term of it (2026-11-04 and 07) —
+but the field had no such gate. A pixel that is sky in the source and rock at
+the same index of the target testified like any other, the field drew the
+target's layout, and the distribution read closer for it. Every solve of the
+field (both passes, the re-solve after the stop rule, the layout cells of R42)
+now reads `field::field_testimony`: a pixel's evidence weight times one minus
+its `split` — the total variation between the two frames' class memberships at
+that pixel, a new plane of `paired_layout` — and no weight at all on a frame
+whose paired share is not a population (`EvidenceModel::pairs_a_population`):
+two photographs get no field, through the solver's existing `FIELD_UNSOLVED`.
+No constant is new and the objective did not move. Read on the round after
+it: the reference pair at 0.85 at 4.05 whole-frame (the last release 4.46),
+the strip of sky beside the left butte −5.53 L* against the open sky (the
+last release −4.90, the build before the rule −13.43); the night pair from its
+master 4.44 with ripple 0.60 (5.14 and 0.73). What the rule gives up: a
+different photograph with one cell that happens to read as the same place is
+still solved, and a same-scene pair so re-synthesised that no cell pairs loses
+its field. Pinned by `the_layout_reads_a_displaced_contour_as_split`,
+`a_pair_split_across_the_two_frames_zones_does_not_testify`,
+`two_photographs_get_no_colour_field` and
+`a_frame_that_pairs_somewhere_testifies_as_it_did`.
 
 **The feather widener's smoothness reading follows its guide** (R34 §D8). The
 one-code rule in `mask_refine::widen_smooth_feather` is an absolute statement
@@ -6331,6 +6559,37 @@ dip is the mask stage's question (`mask_refine`'s confidence-hole filling);
 the hard ruler still reads tile contours, and the ceiling, the 90th
 percentile, the luma floor and the `cell_share` rules are untouched.
 
+**The soft ruler's owed treatment is the correction's own law where the gate
+can render it (2026-11-10).** The transport above — the settled side's median
+multiplier in linear light — is exact for a dial that is one multiplier and
+for no other, and the mask Color tint is not one: its move is set by each
+pixel's own level through the lightness window. On the app's own render of a
+sky tint of 30 at hue 200 and nothing else, refitted with the same sky raster,
+the candidate matched the target to 0.0001 of a channel over the settled sky
+and the frame read 0.0008, and the multiplier form read red steps of up to
+0.075 inside the feather, either sign from one pixel to the next; pooled as
+cell means the target's own step came out under one code, the R37 allowance
+bought nothing on 155 of the 193 crossings charged past the ceiling (of 544),
+and the gate shipped the tint's colour dials at 0.38 — a tint of 11 for the 30
+that was set, the frame at 0.0155. The semantic sky/land gate therefore hands
+the ruler the EXACT treatment (`boundary::Owed`, `accept::semantic_full_sides`):
+the same recipe rendered with one side's zones at full weight over the whole
+frame and the other side's absent, two more analysis renders a candidate,
+mixed by each band pixel's content share in linear light exactly as the
+multipliers were. The paired target has no recipe to render, so its own step
+is read against the candidate's exact treatment re-levelled by the gap between
+the two frames' settled multipliers: a target that carries the candidate's law
+reads the candidate's step, bit for bit where the two frames are one. For
+exposure and the colour gains the two forms agree to the renders' rounding;
+the band gate, whose corrections name no two sides, and the no-target fixtures
+keep the multiplier transport. The ceiling, the dead band, the cell quorum,
+the two-sigma line and the bisection are unchanged. After the change the same
+frame keeps the tint whole (30 at 200 at `k = 1`, the frame 0.0008; the colour
+charge's 90th percentile 0.0114 against the 0.012 ceiling), pinned without a
+global solve by `the_zones_alone_on_the_base_carry_a_mask_colour_tint_whole`
+and, on a law no multiplier describes, by
+`the_soft_rim_reads_a_law_that_is_no_multiplier_through_its_own_full_treatment`.
+
 **Both rulers also read COLOUR, charged identically.** The same difference in
 differences is taken per channel — for the step ruler on R, G and B directly,
 for the rim ruler through a per-channel transport `M_c` — and the crossing
@@ -6629,6 +6888,21 @@ family the byte-identity refusal the semantic family has had since step 9: a
 bisection that lands on `k = 0` renders the reference back and is refused as
 `RANGE_BOUNDARY_INERT`, instead of shipping a mask with every dial at zero.
 
+**…and each AXIS is released on its own (v1.18.0).** The gate reads two rims
+— the luma step and the colour step, each charged for the part the target's
+own boundary does not ask — and the corrections move on two axes, the tone
+dials and the colour dials. One scalar over both let a seam on one axis take
+the other with it: on the night pair the sky's foot band solved +1.14 EV,
+the target's own boundary asked a luma step of 0.290 and none of it was
+charged, the COLOUR rim read 0.025 against the ceiling 0.012, and the one
+scalar took the whole band to k 0.205 — the lift to +0.20 EV — leaving the
+colour field to deliver the rest past its own bound. After the shared
+bisection each axis is tried back at the full solved move, the axis the
+shared shrink did not bind on first, and bisected between the shared k and 1
+where the full move does not pass (`enforce_boundary_gates_with_shrink`,
+note `ZONE_BOUNDARY_AXES`); the verdict on every candidate is the same gate,
+so nothing ships that the shared form would have refused on a rim.
+
 **What ships is judged, not only what was admitted (R39, v1.6.0).** Every
 route judges a candidate at `k = 1` (`attach_one_zone`) and the boundary gate
 then shrinks it; until v1.6.0 nothing judged the shrunk correction, and on the
@@ -6862,6 +7136,45 @@ taken on the cells, unchanged. The recipe grows with the grid: 3072
 vertices where there were 768 (`ColourField.y = 32`; a stored `y = 8` field
 still renders, the engine reads the shape the recipe declares). Nothing was
 measured along x and nothing changed there.
+
+**The solve is refined once, and it is solved in the frame it is read in
+(v1.18.0).** The ridge and the smoothers are constants on multiplicative
+parameters; the data term is in display units and evidence-weighted, a
+vertex's curvature `Σ w·tri²·c²`. Wherever that is small against the
+constants — dark pixels, weakly evidenced ones, a vertex few pixels reach —
+one regularised solve leaves a FRACTION of whatever it is handed, so what
+the field left followed what the zones before it left: on the night pair
+from its master the zones handed the horizon rows 12–15 L\* and the field
+left 0.5–1.9 of them. The shipped solve therefore solves the same system
+once more with its regulariser centred on the first answer,
+`(AᵀWA + R)·v = AᵀWδ + R·v₁` — the first answer plus the same smooth of its
+own residual, a linear smoother's twicing (`fit_field`'s `System::solve`,
+`refine`). ONE refinement, not a loop: each further solve gives the weakly
+measured vertices back to the data, the regulariser removed by repetition.
+The bounds are applied once, to the refined answer. And the field is solved
+where it is read: a stored grid spans the original frame, the engine has
+read each pixel of a lens-corrected frame at the original-frame point it
+shows since v1.17.0, and the fit solved at each analysis pixel's own place,
+so on a corrected plate the grid was solved on one frame's coordinates and
+read on the other's by every develop of the recipe. `render::FieldFrame` is
+the one statement of the frame both sides read: the fit builds it for its
+analysis plate (`FieldFrame::of_preview`) and solves, renders and judges the
+field through it, and
+`a_field_solved_on_a_corrected_plate_is_the_field_its_develop_renders` holds
+the solve's render to the develop's, code for code.
+
+**An estimated colour correction scales measured pixels only (v1.18.0).** A
+pixel that reaches a mask's colour gains or the colour field with EVERY
+channel at the white clip (`render::WHITE_CLIP`, the number the reverse fit's
+tone evidence already reads) carries no ratio between its channels, and the
+estimate was never read from it: it leaves the stage neutral, at the
+brightest of the values the stage gave it (`render::wb::keep_blown_white`).
+A pixel with one or two channels at the clip is rendered as before, bit for
+bit. The white balance and a mask's own Temp and Tint are the photographer's
+instruction and colour a blown pixel like any other; the curves, the wheels
+and the mixer map the rendered value itself. Until then the night pair's
+brightest star cores, white in the base, rendered (0.73, 1.00, 1.00) under
+the sky zone's gains — cyan cores the correction had never been read from.
 
 A quarter turn permutes the field's cells with every other coordinate in
 `orient_recipe_coords` and swaps its two axis lengths (a 12×8 grid over a
